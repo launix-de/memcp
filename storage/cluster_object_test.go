@@ -184,11 +184,14 @@ func TestClusterCallbackRejectsCallsAfterExportingQueryEnds(t *testing.T) {
 	bindings := (&scm.SerializationContext{Invocation: scm.NewAny(tx)}).WithExport(func(object scm.ClusterObject, view scm.Scmer) (scm.ClusterReference, error) {
 		return owner.exportObject(source, object, view)
 	})
+	bindings = owner.handleBindings(bindings, source)
 	data, err := scm.MarshalProcedure(proc, bindings)
 	if err != nil {
 		t.Fatal(err)
 	}
-	remote, err := scm.UnmarshalProcedure(data, scm.ProcedureDecode{Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	remote, err := scm.UnmarshalProcedure(data, scm.ProcedureDecode{ResolveHandle: client.handleResolver(ctx), Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) {
 		return client.importObject(context.Background(), peer, ref)
 	}})
 	if err != nil {
@@ -198,6 +201,12 @@ func TestClusterCallbackRejectsCallsAfterExportingQueryEnds(t *testing.T) {
 		t.Fatal("live callback did not execute")
 	}
 	tx.endQuery(7)
+	remaining := 0
+	owner.handles.Range(func(_, _ any) bool { remaining++; return true })
+	if remaining != 0 {
+		t.Fatalf("finished query retained %d handle slots", remaining)
+	}
+	cancel()
 	var failure any
 	func() {
 		defer func() { failure = recover() }()

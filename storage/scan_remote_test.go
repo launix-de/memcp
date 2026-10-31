@@ -1282,3 +1282,140 @@ func TestRemoteScanResolvesNativeShardBeforeFirstPayloadPublication(t *testing.T
 		t.Fatalf("native topology lost its unpublished payload binding: %+v, %v", response, err)
 	}
 }
+
+func TestHandleWireContainsOnlySlotAndPayload(t *testing.T) {
+	payload, err := freezeScanValue(scm.NewInt(7))
+	if err != nil {
+		t.Fatal(err)
+	}
+	frame, err := encodeMosiMessage(mosiMessage{Slot: 19, Payload: payload})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(frame[9:], &fields); err != nil {
+		t.Fatal(err)
+	}
+	if len(fields) != 2 || string(fields["slot"]) != "19" || string(fields["payload"]) != `"7"` {
+		t.Fatalf("unexpected handle envelope: %s", frame[9:])
+	}
+	decoded, err := decodeMosiMessage(frame)
+	if err != nil || decoded.Slot != 19 || decoded.ID != 0 || decoded.Method != "" {
+		t.Fatal("handle frame lost fire-and-forget semantics", decoded, err)
+	}
+}
+
+func TestRemoteScanCapturesNativeClosureWithoutWrappingBuiltins(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "tremote_native_closure", 4)
+	peer, service, _ := setupRemoteScanConnection(t)
+	var parts []remoteScanShard
+	if err := service.control(context.Background(), peer, "scan.describe", remoteScanDescribe{scanWireVersion, tbl.schema.Name, tbl.Name}, &parts, true); err != nil {
+		t.Fatal(err)
+	}
+	var calls atomic.Int64
+	captured := scm.NewFunc(func(args ...scm.Scmer) scm.Scmer { calls.Add(1); return scm.NewInt(args[0].Int() + 7) })
+	env := &scm.Env{Vars: scm.Vars{scm.Symbol("captured"): captured}, Outer: &scm.Globalenv}
+	mapper := scm.Eval(scm.Read(t.Name(), `(lambda (acc id) (+ acc (captured id)))`), env)
+	stub := &storageShard{uuid: tbl.ActiveShards()[0].uuid, t: tbl}
+	target := &shardScanTarget{resource: parts[0].Resource, executor: &peerScanExecutor{peer: peer, ctx: context.Background(), prepared: parts[0]}}
+	stub.scanTarget.Store(target)
+	result := (shardScanInvocation{mapReduce: mapper, callbackCols: []string{"id"}, neutral: scm.NewInt(0)}).delegate(stub, shardReadDelegation{target})
+	if result.err.r != nil || result.res.Int() != 38 || calls.Load() != 4 {
+		t.Fatal("native closure capture failed", result.err.r, result.res, calls.Load())
+	}
+	builtin, err := scm.MarshalProcedure(scm.Eval(scm.Read(t.Name(), `(lambda (a b) (+ a b))`), &scm.Globalenv))
+	if err != nil || strings.Contains(string(builtin), "remote_closure") {
+		t.Fatal("builtin was exported as a remote closure", string(builtin), err)
+	}
+	remaining := 0
+	service.handles.Range(func(_, _ any) bool { remaining++; return true })
+	if remaining != 0 {
+		t.Fatalf("completed scan retained %d closure slots", remaining)
+	}
+}
+
+func TestRemoteScanCapturedOuterUpdateReturnsToItsShard(t *testing.T) {
+	outer, _ := createDurabilityTestTable(t, "tremote_outer_update", 1)
+	inner, _ := createDurabilityTestTable(t, "tremote_inner_update", 1)
+	peer, service, _ := setupRemoteScanConnection(t)
+	var parts []remoteScanShard
+	if err := service.control(context.Background(), peer, "scan.describe", remoteScanDescribe{scanWireVersion, inner.schema.Name, inner.Name}, &parts, true); err != nil {
+		t.Fatal(err)
+	}
+	update := scm.NewFunc(outer.ActiveShards()[0].UpdateFunction(0, false, false, nil))
+	env := &scm.Env{Vars: scm.Vars{scm.Symbol("outer_update"): update}, Outer: &scm.Globalenv}
+	mapper := scm.Eval(scm.Read(t.Name(), `(lambda (acc update) (begin (outer_update (list "payload" "outer")) (update (list "payload" "inner")) (+ acc 1)))`), env)
+	stub := &storageShard{uuid: inner.ActiveShards()[0].uuid, t: inner}
+	target := &shardScanTarget{resource: parts[0].Resource, executor: &peerScanExecutor{peer: peer, ctx: context.Background(), prepared: parts[0]}}
+	stub.scanTarget.Store(target)
+	result := (shardScanInvocation{mapReduce: mapper, callbackCols: []string{"$update"}, neutral: scm.NewInt(0)}).delegate(stub, shardReadDelegation{target})
+	if result.err.r != nil || result.res.Int() != 1 {
+		t.Fatal("nested update failed", result.err.r, result.res)
+	}
+	for _, item := range []struct {
+		tbl  *table
+		want string
+	}{{outer, "outer"}, {inner, "inner"}} {
+		values := []string{}
+		item.tbl.scan(nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, nil, scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewBool(true) }), []string{"payload"}, scm.NewFunc(func(args ...scm.Scmer) scm.Scmer { values = append(values, args[1].String()); return args[0] }), scm.NewNil(), scm.NewNil(), false)
+		if len(values) != 1 || values[0] != item.want {
+			t.Fatalf("%s update reached wrong shard: %v", item.want, values)
+		}
+	}
+}
+
+func TestHandleDeliveryIsIndependentAndCleanupJoinsRunningHandler(t *testing.T) {
+	_, client, _ := setupRemoteScanConnection(t)
+	owner := nodeScans.Load()
+	source := objectOwnerPeer(t, owner, client)
+	tx := NewTxContext(TxCursorStability)
+	tx.beginQuery(nil, 1, "handle owner")
+	entered, release, progress := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	defer func() { once.Do(func() { close(release) }); tx.endQuery(1) }()
+	bindings := owner.handleBindings(&scm.SerializationContext{Invocation: scm.NewAny(tx)}, source)
+	export := func(handler scm.Handle) scm.Handle {
+		expression, err := bindings.HandleExpression(handler)
+		if err != nil {
+			t.Fatal(err)
+		}
+		args := expression.Slice()
+		handle, err := client.handleResolver(context.Background())(args[1].String(), args[2].String(), uint64(args[3].Int()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return handle
+	}
+	first := export(scm.HandleFunc(func(scm.Scmer) { close(entered); <-release }))
+	second := export(scm.HandleFunc(func(scm.Scmer) { close(progress) }))
+	first.Handle(scm.NewInt(1))
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("fire-and-forget handler did not start")
+	}
+	second.Handle(scm.NewInt(2))
+	select {
+	case <-progress:
+	case <-time.After(time.Second):
+		t.Fatal("blocked handler serialized an independent delivery")
+	}
+	finished := make(chan struct{})
+	go func() { tx.endQuery(1); close(finished) }()
+	select {
+	case <-finished:
+		t.Fatal("query cleanup did not join its running native handler")
+	case <-time.After(50 * time.Millisecond):
+	}
+	once.Do(func() { close(release) })
+	select {
+	case <-finished:
+	case <-time.After(time.Second):
+		t.Fatal("completed handler stranded query cleanup")
+	}
+	remaining := 0
+	owner.handles.Range(func(_, _ any) bool { remaining++; return true })
+	if remaining != 0 {
+		t.Fatalf("finished query retained %d slots", remaining)
+	}
+}

@@ -5,7 +5,6 @@ SPDX-License-Identifier: GPL-3.0-or-later
 package scm
 
 import "fmt"
-import "sync"
 import "errors"
 import "context"
 
@@ -13,11 +12,9 @@ import "context"
 // Scheme callers keep their normal local ABI; a captured callback addresses
 // that state through its native owner endpoint instead of moving Go pointers.
 type clusterCallback struct {
-	source      *clusterCallback
-	lifetime    *callbackLifetime
 	call        func(...Scmer) Scmer
 	ctx         context.Context
-	handle      *ClusterHandle
+	endpoint    Handle
 	batchResult *Scmer
 }
 
@@ -36,52 +33,47 @@ func NewClusterCallback(ctx context.Context, call func(...Scmer) Scmer, batchRes
 
 func (*clusterCallback) ClusterObjectType() string { return "callback" }
 func (callback *clusterCallback) Serialize(ctx *SerializationContext) (Scmer, error) {
-	object, err := ctx.BindInvocationObject(callback, func(scope Scmer) (ClusterObject, error) {
-		owner, ok := scope.Any().(interface{ RetainQueryWork(func()) bool })
-		if !ok {
-			return nil, fmt.Errorf("callback export requires a native invocation owner")
+	if callback.endpoint != nil {
+		expression, err := ctx.HandleExpression(callback.endpoint)
+		if err != nil {
+			return NewNil(), err
 		}
-		lifetime := new(callbackLifetime)
-		if !owner.RetainQueryWork(lifetime.close) {
-			return nil, fmt.Errorf("callback invocation has already finished")
+		return callback.expression(expression), nil
+	}
+	endpoint := ClosureHandle(callback.ctx, func(args ...Scmer) Scmer {
+		method := "call"
+		if callback.batchResult != nil {
+			method = "batch"
+			args = args[0].Slice()
 		}
-		return &clusterCallback{source: callback, lifetime: lifetime}, nil
+		value, err := ClusterObjectValue(callback, callback.ctx, ClusterRequest{Method: method, Arguments: args})
+		if err != nil {
+			panic(err)
+		}
+		return value
 	})
+	expression, err := ctx.HandleExpression(endpoint)
 	if err != nil {
 		return NewNil(), err
 	}
-	return ctx.ReferenceExpression(object)
+	return callback.expression(expression), nil
 }
-
-// Admission and joining belong to the native callback endpoint, independently
-// of the connection carrying its calls. Disconnect cannot release query state
-// while a locally running invocation still borrows it.
-type callbackLifetime struct {
-	mu     sync.Mutex
-	closed bool
-	calls  sync.WaitGroup
+func (callback *clusterCallback) expression(handle Scmer) Scmer {
+	view := NewNil()
+	if callback.batchResult != nil {
+		view = NewSlice([]Scmer{NewSymbol("list"), *callback.batchResult})
+	}
+	return NewSlice([]Scmer{NewSymbol("remote_closure"), NewNil(), handle, view})
 }
-
-func (lifetime *callbackLifetime) close() {
-	lifetime.mu.Lock()
-	lifetime.closed = true
-	lifetime.mu.Unlock()
-	lifetime.calls.Wait()
+func (callback *clusterCallback) value() Scmer {
+	call := callback.call
+	if callback.endpoint != nil {
+		call = func(args ...Scmer) Scmer { return callClosure(callback.ctx, callback.endpoint, args) }
+	}
+	return NewClusterFunc(call, callback, clusterCallbackType)
 }
 
 func (callback *clusterCallback) HandleClusterRequest(ctx context.Context, request ClusterRequest) (any, error) {
-	if callback.lifetime != nil {
-		lifetime := callback.lifetime
-		lifetime.mu.Lock()
-		if lifetime.closed {
-			lifetime.mu.Unlock()
-			return NewNil(), context.Canceled
-		}
-		lifetime.calls.Add(1)
-		lifetime.mu.Unlock()
-		defer lifetime.calls.Done()
-		return callback.source.HandleClusterRequest(ctx, request)
-	}
 	if err := ctx.Err(); err != nil {
 		return NewNil(), err
 	}
@@ -89,9 +81,6 @@ func (callback *clusterCallback) HandleClusterRequest(ctx context.Context, reque
 		return NewNil(), err
 	}
 	if request.Method == "view" {
-		if callback.handle != nil {
-			return callback.handle.View, nil
-		}
 		if callback.batchResult != nil {
 			return NewSlice([]Scmer{*callback.batchResult}), nil
 		}
@@ -99,9 +88,6 @@ func (callback *clusterCallback) HandleClusterRequest(ctx context.Context, reque
 	}
 	if request.Method != "call" && request.Method != "batch" {
 		return NewNil(), fmt.Errorf("unsupported callback request %q", request.Method)
-	}
-	if callback.handle != nil {
-		return callback.handle.Call(ctx, request)
 	}
 	if request.Method == "batch" {
 		if callback.batchResult == nil {
@@ -116,18 +102,22 @@ func (callback *clusterCallback) HandleClusterRequest(ctx context.Context, reque
 }
 
 func (callback *clusterCallback) BindClusterInvocation(scope Scmer) (Scmer, error) {
-	if callback.handle == nil {
-		return NewClusterFunc(callback.call, callback, clusterCallbackType), nil
+	if callback.endpoint == nil {
+		return callback.value(), nil
 	}
-	ctx := executionContextFrom(scope)
-	if callback.handle.View.IsSlice() && len(callback.handle.View.Slice()) == 1 {
+	bound := *callback
+	bound.ctx = executionContextFrom(scope)
+	if endpoint, ok := bound.endpoint.(interface{ WithContext(context.Context) Handle }); ok {
+		bound.endpoint = endpoint.WithContext(bound.ctx)
+	}
+	if bound.batchResult != nil {
 		owner, ok := scope.Any().(interface{ RetainQueryWork(func()) bool })
 		if !ok {
 			return NewNil(), fmt.Errorf("output batches require a native invocation owner")
 		}
-		return callback.bindOutput(ctx, owner)
+		return bound.bindOutput(bound.ctx, owner)
 	}
-	return newRemoteClusterCallback(*callback.handle, ctx), nil
+	return bound.value(), nil
 }
 
 // One invocation owns a bounded output queue and its sender. Producers only
@@ -144,7 +134,19 @@ func (callback *clusterCallback) bindOutput(ctx context.Context, owner interface
 		batch := make([]Scmer, 0, batchSize)
 		var send func([]Scmer)
 		send = func(values []Scmer) {
-			_, err := callback.handle.Call(ctx, ClusterRequest{Method: "batch", Arguments: values})
+			var err error
+			func() {
+				defer func() {
+					if failure := recover(); failure != nil {
+						if e, ok := failure.(error); ok {
+							err = e
+						} else {
+							panic(failure)
+						}
+					}
+				}()
+				callClosure(ctx, callback.endpoint, []Scmer{NewSlice(values)})
+			}()
 			if errors.Is(err, ErrClusterRequestTooLarge) && len(values) > 1 {
 				middle := len(values) / 2
 				send(values[:middle])
@@ -192,7 +194,7 @@ func (callback *clusterCallback) bindOutput(ctx context.Context, owner interface
 		finish()
 		return NewNil(), fmt.Errorf("output invocation has already finished")
 	}
-	result := callback.handle.View.Slice()[0]
+	result := *callback.batchResult
 	call := func(args ...Scmer) Scmer {
 		value := NewSlice(append([]Scmer(nil), args...))
 		select {
@@ -205,23 +207,5 @@ func (callback *clusterCallback) bindOutput(ctx context.Context, owner interface
 			panic("output invocation has finished")
 		}
 	}
-	return NewClusterFunc(call, &clusterCallback{handle: callback.handle, ctx: ctx}, clusterCallbackType), nil
-}
-
-func newRemoteClusterCallback(handle ClusterHandle, ctx context.Context) Scmer {
-	callback := &clusterCallback{handle: &handle, ctx: ctx}
-	call := func(args ...Scmer) Scmer {
-		value, err := handle.Call(ctx, ClusterRequest{Method: "call", Arguments: args})
-		if err != nil {
-			panic(err)
-		}
-		return value
-	}
-	return NewClusterFunc(call, callback, clusterCallbackType)
-}
-
-func init() {
-	RegisterClusterObjectType("callback", func(handle ClusterHandle) Scmer {
-		return newRemoteClusterCallback(handle, context.Background())
-	})
+	return NewClusterFunc(call, &clusterCallback{endpoint: callback.endpoint, ctx: ctx, batchResult: callback.batchResult}, clusterCallbackType), nil
 }

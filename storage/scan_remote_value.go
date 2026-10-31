@@ -70,7 +70,7 @@ func (value schemeValue) reconstruct(decode ...scm.ProcedureDecode) (result scm.
 			return scm.NewNil(), err
 		}
 	}
-	expression, err = scm.ResolveSerializedObjects(expression, option.Resolve)
+	expression, err = scm.ResolveSerializedObjects(expression, option.Resolve, option.ResolveHandle)
 	if err != nil {
 		return scm.NewNil(), err
 	}

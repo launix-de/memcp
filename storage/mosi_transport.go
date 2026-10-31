@@ -91,6 +91,7 @@ type mosiPeer struct {
 	next            atomic.Uint64
 	done            chan struct{}
 	once            sync.Once
+	handleValue     func(uint64, schemeValue) error
 	handle          func(context.Context, string, json.RawMessage) (any, error)
 	packet          func(*mosiPacket) error
 	ctx             context.Context
@@ -116,8 +117,10 @@ func (p *mosiPeer) recovered() bool {
 }
 
 type mosiMessage struct {
+	Slot    uint64          `json:"slot,omitempty"`
+	Payload schemeValue     `json:"payload,omitempty"`
 	encoded []byte          // immutable local frame; never part of wire metadata
-	ID      uint64          `json:"id"`
+	ID      uint64          `json:"id,omitempty"`
 	Method  string          `json:"method,omitempty"`
 	Data    json.RawMessage `json:"data,omitempty"`
 	Error   string          `json:"error,omitempty"`
@@ -310,7 +313,7 @@ func (p *mosiPeer) read() {
 			}
 			continue
 		}
-		if m.Method == "" && (p.receiveIO == nil || p.receiveIO.latency == 0) {
+		if m.Slot == 0 && m.Method == "" && (p.receiveIO == nil || p.receiveIO.latency == 0) {
 			p.deliverReply(m)
 			continue
 		}
@@ -323,6 +326,17 @@ func (p *mosiPeer) read() {
 			defer p.workers.Done()
 			defer p.packetBytes.Add(-int64(size))
 			if !p.waitDispatch(readyAt) {
+				return
+			}
+			if m.Slot != 0 {
+				defer func() {
+					if recover() != nil {
+						p.close()
+					}
+				}()
+				if p.handleValue == nil || p.handleValue(m.Slot, m.Payload) != nil {
+					p.close()
+				}
 				return
 			}
 			if m.Method == "" {

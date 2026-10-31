@@ -33,7 +33,7 @@ func MarshalProcedure(value Scmer, bindings ...*SerializationContext) (data []by
 		}
 	}()
 	if !value.IsProc() && value.IsNativeFunc() {
-		if _, ok := ClusterObjectOf(value); ok {
+		if _, ok := ClusterObjectOf(value); ok || len(bindings) > 0 && bindings[0] != nil && bindings[0].ExportHandle != nil && DeclarationForValue(value) == nil {
 			// Runtime callables keep their native local ABI. The normal serializer
 			// reconstructs their portable value/peer handle once, before invocation.
 			value = Eval(NewSlice([]Scmer{NewSymbol("lambda"), NewSymbol("args"), NewSlice([]Scmer{NewSymbol("apply"), value, NewSymbol("args")})}), &Globalenv)
@@ -131,10 +131,12 @@ func UnmarshalProcedure(data []byte, options ...ProcedureDecode) (value Scmer, e
 	// owner's reservations. One invocation owns the reconstructed lambda/scope;
 	// row loops neither resolve URIs nor register/deregister references.
 	var resolve func(ClusterReference) (Scmer, error)
+	var resolveHandle func(string, string, uint64) (Handle, error)
 	if len(options) > 0 {
 		resolve = options[0].Resolve
+		resolveHandle = options[0].ResolveHandle
 	}
-	expression, err = ResolveSerializedObjects(expression, resolve)
+	expression, err = ResolveSerializedObjects(expression, resolve, resolveHandle)
 	if err != nil {
 		return NewNil(), err
 	}
@@ -199,7 +201,12 @@ func validateProcedureWire(value Scmer, bound map[Symbol]struct{}, origin *Env, 
 		closed := CloseProcedure(value)
 		proc := closed.Proc()
 		return validateProcedureWire(proc.Body, procedureWireBindings(proc.Params, proc.Body, nil), value.Proc().En, false, depth+1, bindings...)
-	case tagFunc, tagSpecialForm:
+	case tagFunc:
+		if DeclarationForValue(value) == nil && len(bindings) > 0 && bindings[0] != nil && bindings[0].ExportHandle != nil {
+			return nil
+		}
+		fallthrough
+	case tagSpecialForm:
 		if literal || DeclarationForValue(value) == nil {
 			return fmt.Errorf("procedure contains a process-local callable")
 		}

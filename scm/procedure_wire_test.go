@@ -42,12 +42,12 @@ func TestClusterCallbackOwnerCancellationAndInvocationBinding(t *testing.T) {
 	seq := ss.BeginQuery("Cluster", "callback binding")
 	ss.SetQueryContext(seq, ctx)
 	defer ss.FinishQueryExecution(seq)
-	remote := newRemoteClusterCallback(ClusterHandle{Call: func(got context.Context, request ClusterRequest) (Scmer, error) {
-		if got != ctx || request.Method != "call" {
+	remote := (&clusterCallback{endpoint: &testContextHandle{call: func(got context.Context, payload Scmer) {
+		if got != ctx {
 			t.Error("callback did not inherit its invocation context")
 		}
-		return NewInt(11), got.Err()
-	}}, context.Background())
+		ClosureHandle(got, func(...Scmer) Scmer { return NewInt(11) }).Handle(payload)
+	}}, ctx: context.Background()}).value()
 	bound, err := BindClusterInvocation(remote, NewAny(&mutexTestTransaction{ss: ss, seq: seq}))
 	if err != nil || Apply(bound, NewInt(1)).Int() != 11 {
 		t.Fatal("bound callback failed", err)
@@ -467,5 +467,97 @@ func TestProcedureWireDictionaryConstructorMaterializesBeforeInvocation(t *testi
 	}
 	if strings.Contains(SerializeToString(restored.Proc().Body, &Globalenv), "serialized_value") {
 		t.Fatal("unmaterialized capture retained")
+	}
+}
+
+func TestHandleClosureReturnsRawValuesAndReceiverReleasesOnce(t *testing.T) {
+	receiver := NewResultReceiver()
+	released := 0
+	receiver.RetainHandleRelease(func() { released++ })
+	value := NewSlice([]Scmer{NewString("raw"), NewInt(17)})
+	handle := ClosureHandle(context.Background(), func(args ...Scmer) Scmer {
+		if len(args) != 1 || args[0].Int() != 3 {
+			t.Fatal("closure lost parameters")
+		}
+		return value
+	})
+	handle.Handle(NewSlice([]Scmer{NewSlice([]Scmer{NewInt(3)}), NewAny(receiver)}))
+	if got := receiver.Wait(); !Equal(got, value) {
+		t.Fatal("return channel wrapped its result", got)
+	}
+	receiver.Handle(NewInt(999))
+	receiver.Close()
+	if released != 1 || !Equal(receiver.Wait(), value) {
+		t.Fatal("receiver reused its slot or result", released)
+	}
+}
+
+func TestHandleClosureFireAndForgetAndFailure(t *testing.T) {
+	calls := 0
+	handle := ClosureHandle(context.Background(), func(args ...Scmer) Scmer { calls++; return NewInt(7) })
+	handle.Handle(NewSlice([]Scmer{NewSlice(nil), NewNil()}))
+	if calls != 1 {
+		t.Fatal("fire-and-forget closure did not execute")
+	}
+	receiver := NewResultReceiver()
+	ClosureHandle(context.Background(), func(...Scmer) Scmer { panic("closure failed") }).Handle(NewSlice([]Scmer{NewSlice(nil), NewAny(receiver)}))
+	defer func() {
+		if failure := recover(); fmt.Sprint(failure) != "closure failed" {
+			t.Fatal("lost closure failure", failure)
+		}
+	}()
+	receiver.Wait()
+}
+
+func TestResultReceiverCancellationReleasesSlot(t *testing.T) {
+	receiver := NewResultReceiver()
+	released := false
+	receiver.RetainHandleRelease(func() { released = true })
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	defer func() {
+		if failure := recover(); failure != context.Canceled || !released {
+			t.Fatal("cancelled receiver retained its slot", failure, released)
+		}
+	}()
+	receiver.WaitContext(ctx)
+}
+
+// Context binding remains local; it adds no fields to handle messages.
+type testContextHandle struct {
+	ctx  context.Context
+	call func(context.Context, Scmer)
+}
+
+func (handle *testContextHandle) Handle(value Scmer) { handle.call(handle.ctx, value) }
+func (handle *testContextHandle) WithContext(ctx context.Context) Handle {
+	bound := *handle
+	bound.ctx = ctx
+	return &bound
+}
+
+//go:noinline
+func capturedHandleTestFunction(value int64) func(...Scmer) Scmer {
+	return func(...Scmer) Scmer { return NewInt(value) }
+}
+func TestNativeClosureDoesNotAliasBuiltinWithSameCode(t *testing.T) {
+	Declare(&Globalenv, &Declaration{Name: "test_handle_same_code", Fn: capturedHandleTestFunction(7), Type: &TypeDescriptor{Kind: "func", Return: &TypeDescriptor{Kind: "int"}}})
+	env := &Env{Vars: Vars{Symbol("captured"): NewFunc(capturedHandleTestFunction(19))}, Outer: &Globalenv}
+	proc := Eval(Read(t.Name(), `(lambda () (captured))`), env)
+	var exported Handle
+	bindings := (&SerializationContext{}).WithHandleExport(func(handle Handle) (Scmer, error) {
+		exported = handle
+		return NewSlice([]Scmer{NewSymbol("cluster_handle"), NewString("owner"), NewString("boot"), NewInt(1)}), nil
+	})
+	data, err := MarshalProcedure(proc, bindings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exported == nil {
+		t.Fatal("captured closure was mistaken for the builtin")
+	}
+	restored, err := UnmarshalProcedure(data, ProcedureDecode{ResolveHandle: func(string, string, uint64) (Handle, error) { return exported, nil }})
+	if err != nil || Apply(restored).Int() != 19 {
+		t.Fatal("closure context was lost", err)
 	}
 }

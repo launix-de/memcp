@@ -454,6 +454,13 @@ func registerTransactionState(state *transactionState) *transactionState {
 
 func init() {
 	scm.ClusterObjectResolver = resolveRuntimeClusterObject
+	scm.HandleResolver = func(owner, boot string, slot uint64) (scm.Handle, error) {
+		service := nodeScans.Load()
+		if service == nil {
+			return nil, fmt.Errorf("cluster protocol is disabled")
+		}
+		return service.handleResolver(context.Background())(owner, boot, slot)
+	}
 	scm.RegisterClusterObjectType("tx-shard", func(handle scm.ClusterHandle) scm.Scmer {
 		view := handle.View.Slice()
 		if len(view) != 4 {
