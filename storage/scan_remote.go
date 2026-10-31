@@ -382,7 +382,11 @@ func withRemoteScanShard(expected *remoteScanShard, tx *TxContext, mutation bool
 		var selected *storageShard
 		if sourceCell != nil {
 			selected = sourceCell.publishedShard()
-		} else {
+		}
+		// A newly declared native shard can already have a routing/permission
+		// cell before its first payload publication. Its topology remains the
+		// owner of that existing physical generation.
+		if selected == nil {
 			selected = findScanShard(tbl, expected.Resource)
 		}
 		if selected == nil {

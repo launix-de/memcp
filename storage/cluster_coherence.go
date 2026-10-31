@@ -24,7 +24,7 @@ var errClusterReadBusy = fmt.Errorf("cluster read acquisition would wait for a w
 // instead of publishing a shared value from an unprotected source.
 func (cluster *nodeCluster) tryRead(ctx context.Context, resource mosiResource) bool {
 	c := cluster.manager.resourceCell(resource).resolved()
-	if c.ownstate.Phase().Readable() {
+	if c.ownstate.ReadReady() {
 		return true
 	}
 	restoreCommits := !c.ownstate.Initialized()
@@ -293,7 +293,7 @@ func (cluster *nodeCluster) locate(ctx context.Context, resource mosiResource) (
 func (cluster *nodeCluster) obtain(parent context.Context, resource mosiResource, wanted mosi.Phase) *replicaCell {
 	r := cluster.manager
 	c := r.resourceCell(resource)
-	if phase := c.ownstate.Phase(); phase == mosi.M || wanted != mosi.M && phase.Readable() {
+	if c.ownstate.ReadReady() && (wanted != mosi.M || c.ownstate.Phase() == mosi.M) {
 		return c
 	}
 	restoreCommits := !c.ownstate.Initialized()

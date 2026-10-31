@@ -199,7 +199,7 @@ func (r *replicationManager) proof(user, database string) (string, replicaAuth, 
 func (r *replicationManager) obtain(resource mosiResource, wanted mosi.Phase, user string, tx *TxContext) *replicaCell {
 	if r.cluster != nil {
 		cell := r.resourceCell(resource)
-		if phase := cell.ownstate.Phase(); phase == mosi.M || wanted != mosi.M && phase.Readable() {
+		if cell.ownstate.ReadReady() && (wanted != mosi.M || cell.ownstate.Phase() == mosi.M) {
 			return cell
 		}
 		return r.cluster.obtain(scanQueryContext(tx, r.cluster.ctx), resource, wanted)
@@ -208,8 +208,7 @@ func (r *replicationManager) obtain(resource mosiResource, wanted mosi.Phase, us
 		panic("replica retired by administrator")
 	}
 	c := r.resourceCell(resource)
-	phase := c.ownstate.Phase()
-	if phase == mosi.M || wanted != mosi.M && phase.Readable() {
+	if c.ownstate.ReadReady() && (wanted != mosi.M || c.ownstate.Phase() == mosi.M) {
 		return c
 	}
 	if r.config != nil && ((!r.master && !r.ready.Load()) || !r.resourceKnown(resource)) {

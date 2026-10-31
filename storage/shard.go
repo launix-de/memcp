@@ -1113,6 +1113,13 @@ func shardCleanup(ptr any, freedByType *[numEvictableTypes]int64) bool {
 		s.mu.Unlock()
 		return false // preparation/scan owns columns even outside its row lock
 	}
+	// An empty writable generation has no main payload to unload. Its live
+	// descriptor is the native INSERT capability, including between routing
+	// batches; turning it COLD would require RAM admission to recreate nothing.
+	if s.state() == WRITE && s.main_count == 0 && len(s.deltaRows()) == 0 {
+		s.mu.Unlock()
+		return false
+	}
 	// Sloppy/Logged shards with pending deltas must be flushed to disk before eviction.
 	// If there are deltas, we can't evict now — a rebuild is needed first.
 	if len(s.deltaRows()) > 0 || s.deletions.Count() > 0 {
@@ -1149,6 +1156,9 @@ func (s *storageShard) evictionOffer(currentSize int64) evictionOffer {
 	}
 	defer s.mu.RUnlock()
 	if s.cacheReaders.Load() != 0 {
+		return evictionOffer{}
+	}
+	if s.state() == WRITE && s.main_count == 0 && len(s.deltaRows()) == 0 {
 		return evictionOffer{}
 	}
 	if s.t != nil && (s.t.PersistencyMode == Memory ||
@@ -1536,7 +1546,10 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 					return pCols, pRow
 				}
 				// now d2 contains the old row values
-				oldDeltaRow := append(dataset{}, d2...)
+				var oldDeltaRow dataset
+				if len(t.t.Triggers) > 0 {
+					oldDeltaRow = append(dataset{}, d2...)
+				}
 				// copy slice for triggers before modifying (scheme values are immutable, but Go slice is modified)
 				if withTrigger && len(t.t.Triggers) > 0 {
 					triggerOldRow = schemaRowFromDelta(d2)
