@@ -1669,15 +1669,18 @@ func TestReplicationSchemaAdmissionPreservesSQLSource(t *testing.T) {
 
 func TestReplicationSchemaAdmissionRejectsExecutableFields(t *testing.T) {
 	for name, fragment := range map[string]string{
-		"scheme-source":      `"Triggers":[{"name":"evil","timing":"before_insert","source":"(shutdown)","language":"scheme"}]`,
-		"unknown-source":     `"Triggers":[{"name":"evil","timing":"before_insert","source":"code","language":"unknown"}]`,
-		"compiled-sql":       `"Triggers":[{"name":"evil","timing":"before_insert","source":"SET NEW.id=1","language":"sql","func":[{"symbol":"lambda"},[],true]}]`,
-		"oninit":             `"oninit":[{"symbol":"lambda"},[],true]`,
-		"column-default":     `"Columns":[{"Name":"id","Default":[{"symbol":"lambda"},[],true]}]`,
-		"column-update":      `"Columns":[{"Name":"id","OnUpdate":[{"symbol":"lambda"},[],true]}]`,
-		"custom-runtime":     `"Columns":[{"Name":"id","Default":{"scmer_custom":1,"value":[]}}]`,
-		"optimized-variable": `"Columns":[{"Name":"id","Default":{"var":0}}]`,
-		"mixed-case":         `"tRiGgErS":[{"name":"evil","timing":"before_insert","source":"(shutdown)","language":"scheme"}]`,
+		"scheme-source":            `"Triggers":[{"name":"evil","timing":"before_insert","source":"(shutdown)","language":"scheme"}]`,
+		"unknown-source":           `"Triggers":[{"name":"evil","timing":"before_insert","source":"code","language":"unknown"}]`,
+		"compiled-sql":             `"Triggers":[{"name":"evil","timing":"before_insert","source":"SET NEW.id=1","language":"sql","func":[{"symbol":"lambda"},[],true]}]`,
+		"oninit":                   `"oninit":[{"symbol":"lambda"},[],true]`,
+		"column-default":           `"Columns":[{"Name":"id","Default":[{"symbol":"lambda"},[],true]}]`,
+		"column-update":            `"Columns":[{"Name":"id","OnUpdate":[{"symbol":"lambda"},[],true]}]`,
+		"custom-runtime":           `"Columns":[{"Name":"id","Default":{"scmer_custom":1,"value":[]}}]`,
+		"optimized-variable":       `"Columns":[{"Name":"id","Default":{"var":0}}]`,
+		"reserved-manifest-column": `"Columns":[{"Name":".blobrefs-v2","Typ":"INT"}]`,
+		"column-path":              `"Columns":[{"Name":"x/../../system/schema.json","Typ":"INT"}]`,
+		"null-column":              `"Columns":[null]`,
+		"mixed-case":               `"tRiGgErS":[{"name":"evil","timing":"before_insert","source":"(shutdown)","language":"scheme"}]`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			data := []byte(`{"name":"memcp-tests","tables":{"items":{"Name":"items",` + fragment + `}}}`)
@@ -1782,5 +1785,15 @@ func TestReplicationColumnTransferRejectsComputeStorage(t *testing.T) {
 	header.Kind, header.Payload = "chunk", data.Bytes()
 	if err := transfer.packet(header); err == nil {
 		t.Fatal("client compute column reached persistence finalization")
+	}
+
+	// An ordinary locally created schema must not make the manifest exemption
+	// usable as a computed-column upload, either.
+	table.CreateColumn(blobManifestColumn, "INT", nil, nil)
+	header.Kind, header.Payload, header.Object = "object", nil, blobManifestColumn
+	other := &replicaImport{header: header, engine: engine, untrusted: true}
+	defer other.abort()
+	if err := other.packet(header); err == nil {
+		t.Fatal("manifest bypassed declared-column admission")
 	}
 }

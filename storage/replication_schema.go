@@ -72,6 +72,13 @@ func validateReplicaSchema(data []byte) ([]byte, error) {
 		if initializer := table.OnInit.Load(); initializer != nil && !initializer.IsNil() {
 			return nil, fmt.Errorf("replication slave cannot supply oninit code")
 		}
+		for _, column := range table.Columns {
+			// The manifest has its own non-column wire format. It must never
+			// double as a user column that bypasses column-format admission.
+			if column == nil || column.Name == blobManifestColumn || strings.ContainsAny(column.Name, "/\\\x00") {
+				return nil, fmt.Errorf("invalid replicated column name")
+			}
+		}
 		for i := range table.Triggers {
 			trigger := &table.Triggers[i]
 			// FK callbacks are rebuilt from native foreign-key declarations by

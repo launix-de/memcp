@@ -609,6 +609,13 @@ func (transfer *replicaImport) packet(packet mosiPacket) error {
 			if table == nil {
 				return fmt.Errorf("unknown column table")
 			}
+			if transfer.untrusted && packet.Object == blobManifestColumn {
+				for _, column := range table.columnDeclarations() {
+					if column.Name == blobManifestColumn {
+						return fmt.Errorf("blob manifest conflicts with a declared column")
+					}
+				}
+			}
 			if packet.Object != blobManifestColumn {
 				found := false
 				for _, column := range table.columnDeclarations() {
