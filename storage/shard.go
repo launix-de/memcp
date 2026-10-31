@@ -4420,7 +4420,7 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 		// Eagerly rebuild indexes with sufficient Savings so the first
 		// query after rebuild does not pay a cold-start full-scan penalty.
 		for _, idx := range result.Indexes {
-			if idx.loadSavings() >= 2.0 && !idx.baseState.active {
+			if idx.loadSavings() >= 2.0 && (idx.baseState == nil || !idx.baseState.active) {
 				// Verify all required columns exist before building the index.
 				// A column may be absent from this shard if it was added after
 				// the shard was created (e.g. ALTER TABLE ADD COLUMN).
@@ -4448,7 +4448,7 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 					func() {
 						getters := idx.buildGetters(nil, nil)
 						defer releaseIndexGetters(getters)
-						idx.buildIndex(&idx.baseState, getters, nil)
+						idx.buildIndex(getters, nil)
 					}()
 					GlobalCache.AddItem(idx, int64(idx.ComputeSize()), TypeIndex, indexCleanup, indexLastUsed, indexGetScore)
 				}

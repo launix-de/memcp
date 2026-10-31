@@ -1281,19 +1281,26 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension, maint
 			}
 			// Shift delta btree indexes
 			for _, index := range s.Indexes {
-				if index.baseState.deltaBtree != nil {
-					// Rebuild with shifted recids
-					items := make([]indexPair, 0)
-					index.baseState.deltaBtree.Ascend(func(item indexPair) bool {
+				func() {
+					index.mu.Lock()
+					defer index.mu.Unlock()
+					state := index.baseState
+					if state == nil || state.deltaBtree == nil {
+						return
+					}
+					// This staging shard is still unpublished. Shift its delta
+					// IDs while retaining one state across concurrent eviction.
+					items := make([]indexPair, 0, state.deltaBtree.Len())
+					state.deltaBtree.Ascend(func(item indexPair) bool {
 						item.itemid += int(mainN)
 						items = append(items, item)
 						return true
 					})
-					index.baseState.deltaBtree.Clear(false)
+					state.deltaBtree.Clear(false)
 					for _, item := range items {
-						index.baseState.deltaBtree.ReplaceOrInsert(item)
+						state.deltaBtree.ReplaceOrInsert(item)
 					}
-				}
+				}()
 			}
 		}
 		// Staging inserts were assigned recids while main_count was still zero.

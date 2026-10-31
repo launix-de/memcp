@@ -2177,7 +2177,7 @@ func TestRepartitionInheritsWeightedIndexesFromEverySource(t *testing.T) {
 		t.Fatalf("union has %d definitions instead of 2", len(snapshot))
 	}
 	for _, index := range snapshot {
-		if index.t != nil || index.Native || index.baseState.active {
+		if index.t != nil || index.Native || (index.baseState != nil && index.baseState.active) {
 			t.Fatal("definition snapshot retained source runtime state")
 		}
 		if index.Cols[0] == "id" && index.loadSavings() != 45 {
@@ -2198,7 +2198,7 @@ func TestRepartitionInheritsWeightedIndexesFromEverySource(t *testing.T) {
 				t.Fatalf("target inherited %d definitions", len(shard.Indexes))
 			}
 			for _, index := range shard.Indexes {
-				if index.t != shard || index.Native || !index.baseState.active {
+				if index.t != shard || index.Native || index.baseState == nil || !index.baseState.active {
 					t.Fatal("target index not independently active/non-Native")
 				}
 				if index.Cols[0] == "id" && index.loadSavings() != 45 {
@@ -2275,7 +2275,7 @@ func TestRepartitionIndexWarmBudgetAndThreshold(t *testing.T) {
 				if index.Native {
 					t.Fatal("warm permutation incorrectly claimed physical ordering")
 				}
-				if index.baseState.active {
+				if index.baseState != nil && index.baseState.active {
 					warmed++
 				}
 			}
@@ -2832,7 +2832,7 @@ func TestIndexComputedReadersRespectHeldShardLock(t *testing.T) {
 				getters := index.buildGetters(nil, nil)
 				// Sorting must keep the same lock capability while preparing its
 				// operator-specific reader and immutable boundary values.
-				index.buildIndex(&index.baseState, getters, nil)
+				index.buildIndex(getters, nil)
 				done <- getters
 			}()
 			var getters []colGetter

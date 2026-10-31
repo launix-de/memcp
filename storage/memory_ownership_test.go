@@ -196,6 +196,7 @@ func TestShardMemoryExcludesSeparatelyOwnedIndex(t *testing.T) {
 	shard.setState(SHARED)
 	before := shard.exclusiveSize()
 	idx := &StorageIndex{}
+	idx.baseState = new(storageIndexState)
 	idx.baseState.mainIndexes.initValuesUInt32(1024, 0, 1023)
 	shard.Indexes[0] = idx
 	after := shard.exclusiveSize()
@@ -244,6 +245,7 @@ func TestShardInclusiveSizeAndBusyChildEviction(t *testing.T) {
 	shard := &storageShard{columns: make(map[string]ColumnStorage)}
 	shard.setState(SHARED)
 	index := &StorageIndex{}
+	index.baseState = new(storageIndexState)
 	index.baseState.mainIndexes.initValuesUInt32(1024, 0, 1023)
 	shard.Indexes = []*StorageIndex{index}
 	if got, want := shard.ComputeSize(), shard.exclusiveSize()+index.ComputeSize(); got != want {
@@ -269,6 +271,7 @@ func TestShardFullOfferAndReleaseCountChildrenExactlyOnce(t *testing.T) {
 	shard := &storageShard{columns: make(map[string]ColumnStorage)}
 	shard.setState(SHARED)
 	index := &StorageIndex{}
+	index.baseState = new(storageIndexState)
 	index.baseState.mainIndexes.initValuesUInt32(1024, 0, 1023)
 	shard.Indexes = []*StorageIndex{index}
 	GlobalCache.AddItem(index, int64(index.ComputeSize()), TypeIndex, indexCleanup, indexLastUsed, indexGetScore)

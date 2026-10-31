@@ -32,7 +32,7 @@ func TestStorageIndexSavingsAccumulateConcurrently(t *testing.T) {
 		go func() {
 			defer done.Done()
 			for range additions {
-				idx.addSavings(nil, 1)
+				idx.addSavings(1)
 			}
 		}()
 	}
@@ -76,7 +76,7 @@ func TestPlannerIndexProbeDoesNotIncreaseIndexSavings(t *testing.T) {
 	if got := shard.Indexes[0].String(); got != "id" {
 		t.Fatalf("sorted index description = %q, want %q", got, "id")
 	}
-	if shard.Indexes[0].baseState.active {
+	if shard.Indexes[0].baseState != nil && shard.Indexes[0].baseState.active {
 		t.Fatal("estimate must not materialize a cold auto-index before real usage")
 	}
 
@@ -97,7 +97,8 @@ func TestPlannerIndexProbeDoesNotIncreaseIndexSavings(t *testing.T) {
 
 func TestStorageIndexComputeSizeCountsDeltaBtreeAndHooks(t *testing.T) {
 	idx := &StorageIndex{}
-	state := &idx.baseState
+	idx.baseState = new(storageIndexState)
+	state := idx.baseState
 	state.deltaBtree = btree.NewG[indexPair](8, func(a, b indexPair) bool {
 		return a.itemid < b.itemid
 	})
@@ -164,7 +165,7 @@ func TestComputedDeltaIndexPreparesEachKeyOnceAndRetainsDuplicates(t *testing.T)
 	defer shard.mu.RUnlock()
 	getters := index.buildGetters(nil, nil)
 	defer releaseIndexGetters(getters)
-	index.buildIndex(&index.baseState, getters, nil)
+	index.buildIndex(getters, nil)
 	if calls != len(rows) || index.baseState.deltaBtree.Len() != len(rows) {
 		t.Fatalf("computed %d keys and retained %d rows; want %d of each", calls, index.baseState.deltaBtree.Len(), len(rows))
 	}
@@ -188,6 +189,7 @@ func TestComputedDeltaIndexPreparesEachKeyOnceAndRetainsDuplicates(t *testing.T)
 // The comparator stands in for an ORC reader that scans its own source shard.
 func TestComputedIndexDeltaDoesNotInvokeComparator(t *testing.T) {
 	index := &StorageIndex{}
+	index.baseState = new(storageIndexState)
 	index.baseState.active = true
 	index.baseState.deltaBtree = btree.NewG[indexPair](8, func(a, b indexPair) bool {
 		t.Fatal("delta maintenance invoked a computed-key comparator")
@@ -197,7 +199,7 @@ func TestComputedIndexDeltaDoesNotInvokeComparator(t *testing.T) {
 	if charged := index.insertDelta(1, []scm.Scmer{scm.NewInt(7)}); charged != 0 {
 		t.Fatalf("invalidated index charged delta allocation: %d", charged)
 	}
-	if index.baseState.active || index.baseState.deltaBtree != nil {
+	if index.baseState != nil {
 		t.Fatal("computed index remained usable after its source delta changed")
 	}
 }
@@ -240,4 +242,27 @@ func TestIndexInvocationRetainsOrderingAfterOwnerEviction(t *testing.T) {
 		t.Fatalf("eviction changed the invocation's main/delta multiset: count=%d sum=%d", count, sum)
 	}
 	GlobalCache.Remove(selectedIndex)
+}
+
+func TestIndexInsertRetainsStateAndEvictionOnlyDetaches(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "t_index_state_pointer", 4)
+	shard := tbl.ActiveShards()[0]
+	index := &StorageIndex{t: shard, Cols: []string{"id"}}
+	shard.mu.RLock()
+	getters := index.buildGetters(nil, nil)
+	index.buildIndex(getters, nil)
+	releaseIndexGetters(getters)
+	shard.mu.RUnlock()
+	state := index.baseState
+	before := state.deltaBtree.Len()
+	index.insertDelta(100, []scm.Scmer{scm.NewInt(100)})
+	if index.baseState != state || state.deltaBtree.Len() != before+1 {
+		t.Fatal("insert replaced or copied the index state")
+	}
+	if !indexCleanup(index, nil) || index.baseState != nil {
+		t.Fatal("eviction did not detach the owner")
+	}
+	if !state.active || state.deltaBtree.Len() != before+1 {
+		t.Fatal("eviction cleared a retained index state")
+	}
 }
