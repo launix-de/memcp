@@ -22,6 +22,7 @@ import (
 // An invocation owns its session, transaction and result callbacks separately.
 type ProcedureDescription struct {
 	Name       string    `json:"name"`
+	SchemaOnly bool      `json:"schema_only,omitempty"`
 	Source     string    `json:"source"`
 	Language   string    `json:"language"`
 	Parameters scm.Scmer `json:"parameters"`
@@ -55,6 +56,7 @@ func (p *ProcedureDescription) callable(schema string) scm.Scmer {
 		context.Set(scm.NewString("schema"), scm.NewString(schema), nil)
 		context.Set(scm.NewString("name"), scm.NewString(p.Name), nil)
 		context.Set(scm.NewString("parameters"), scm.CloneOptimizerExpression(p.Parameters), nil)
+		context.Set(scm.NewString("schema_only"), scm.NewBool(p.SchemaOnly), nil)
 		fn := scm.Apply(compiler, scm.NewString(p.Source), scm.NewFastDict(context))
 		if !fn.IsNativeFunc() && !fn.IsProc() && !fn.IsJIT() {
 			panic("procedure source compiler must return a callable")
