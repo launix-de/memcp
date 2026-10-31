@@ -54,7 +54,6 @@ const (
 )
 
 type shardScanInvocation struct {
-	project       bool // no combiner: retain the serial/side-effect callback at its coordinator
 	order         *shardOrderInvocation
 	operator      shardScanOperator
 	tx            *TxContext
@@ -75,6 +74,15 @@ type shardScanInvocation struct {
 // contract. The wire adapter serializes that ordinary Scmer result.
 type shardScanExecutor interface {
 	ExecuteShardScan(mosiResource, shardScanInvocation) scanResult
+}
+
+func scanMutates(columns []string) bool {
+	for _, name := range columns {
+		if name == "$update" || strings.HasPrefix(name, "$increment:") {
+			return true
+		}
+	}
+	return false
 }
 
 func (invocation shardScanInvocation) delegate(shard *storageShard, failure shardReadDelegation) (result scanResult) {
@@ -102,32 +110,11 @@ func (invocation shardScanInvocation) delegate(shard *storageShard, failure shar
 	if invocation.source != nil {
 		panic("remote shard scan requires a portable physical source set")
 	}
-	for _, name := range invocation.callbackCols {
-		if name == "$update" || strings.HasPrefix(name, "$increment:") {
-			panic("remote shard scan mutations require a transaction participant protocol")
-		}
-	}
+
 	if ss := SessionStateFromTx(invocation.tx); ss != nil && ss.IsKilledSeq(querySeqFromTx(invocation.tx)) {
 		panic("query killed")
 	}
-	if invocation.project && invocation.operator == shardReduce && invocation.stride == 0 {
-		// No combiner means the callback's effects belong to this invocation, not
-		// a worker partial. Ship only filter/projection work; receive bounded values
-		// and invoke the existing callback here without serializing a result sink.
-		spec := scanOrderTableSpec{conditionCols: invocation.conditionCols, condition: invocation.condition, callbackCols: invocation.callbackCols, callback: invocation.mapReduce}
-		queue := delegateOrderedQueue(invocation.tx, shard, invocation.access, &spec, nil, 0, 0, -1, failure)
-		defer queue.closeReaders()
-		value := scm.ApplyOnce(invocation.neutral, nil)
-		for len(queue.items) > 0 {
-			var broke bool
-			value, broke = queue.remote.stream(&spec, queue, value, queue.items)
-			if broke {
-				break
-			}
-			queue.consumeOrdered(len(queue.items), false)
-		}
-		return scanResult{res: value, outCount: int64(queue.remote.total), inputCount: int64(queue.universe), candidateCount: queue.candidateCount}
-	}
+
 	result = target.executor.ExecuteShardScan(target.resource, invocation)
 	if result.err.r == nil && (result.outCount < 0 || result.inputCount < 0 || result.candidateCount < 0) {
 		panic(fmt.Errorf("invalid remote shard scan counts"))

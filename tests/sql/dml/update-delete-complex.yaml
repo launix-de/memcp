@@ -307,7 +307,62 @@ test_cases:
           member_id: 30
 
 
+  # Historical ACID rows remain physically present after rollback. A later
+  # cursor-stability scan must visit each current row once, without searching
+  # the full shard for every tombstone or every replacement publication.
+  - name: bulk-update-rollback-history-create
+    sql: CREATE TABLE ud_rollback_history(id INT PRIMARY KEY, val INT)
+    setup:
+      - sql: DROP TABLE IF EXISTS ud_rollback_history
+  - name: bulk-update-rollback-history-fill
+    scm: |
+      (begin
+        (insert (table "memcp-tests" false "ud_rollback_history" false) '("id" "val")
+          (map (produceN 60000) (lambda (i) (list i i))))
+        (rebuild (table "memcp-tests" false "ud_rollback_history" false) true false)
+        true)
+  - name: bulk-update-rollback-history-begin
+    session_id: ud-rollback-history
+    sql: START ACID TRANSACTION
+  - name: bulk-update-rollback-history-stage
+    session_id: ud-rollback-history
+    sql: UPDATE ud_rollback_history SET val=-id-1 WHERE id<1000
+    expect:
+      affected_rows: 1000
+  - name: bulk-update-rollback-history-rollback
+    session_id: ud-rollback-history
+    sql: ROLLBACK
+  - name: bulk-update-after-rollback-normal-sql
+    sql: UPDATE ud_rollback_history SET val=-val-1 WHERE id<1000
+    expect:
+      affected_rows: 1000
+  - name: bulk-update-after-rollback-exact-values
+    sql: SELECT COUNT(*) AS n,SUM(id) AS ids FROM ud_rollback_history WHERE val=-id-1
+    expect:
+      data: [{n: 1000, ids: 499500}]
+  - name: bulk-update-after-rollback-remains-linear
+    scm: |
+      (begin
+        (define session (newsession))
+        (session "username" "root")
+        (session "schema" "memcp-tests")
+        (define query "UPDATE ud_rollback_history SET val=-val-1 WHERE id<1000")
+        (with_autocommit session nil 0 query (lambda (tx)
+          (sql_execute_formula session tx
+            (cached_parse sql_queryplan_cache (list parse_sql) "memcp-tests" query
+              (lambda (_schema _table _write) true) "root" session true tx)
+            (lambda (_row) true) (lambda (_fields) true)))))
+    threshold_ms: 1000
+    performance_rows: 1000
+    warmup: 0
+    timing_samples: 11
+    timing_aggregation: total
+    expect:
+      data: [1000]
+
+
 cleanup:
+  - sql: DROP TABLE IF EXISTS ud_rollback_history
   - sql: "DROP TABLE IF EXISTS ud_membership"
   - sql: "DROP TABLE IF EXISTS ud_child"
   - sql: "DROP TABLE IF EXISTS ud_parent"

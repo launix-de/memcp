@@ -77,7 +77,7 @@ func TestColdShardLoadWaitObservesQueryCancellation(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			ss.SetQueryContext(seq, ctx)
-			tx := &TxContext{}
+			tx := NewTxContext(TxCursorStability)
 			tx.beginQuery(ss, seq, "cold scan waiting for disk load")
 			defer tx.endQuery(seq)
 			defer ss.EndQuery(seq, "Sleep", "")
@@ -258,7 +258,7 @@ func TestColdColumnLoadCancellationKeepsMutationAtomic(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	ss.SetQueryContext(seq, ctx)
-	tx := &TxContext{}
+	tx := NewTxContext(TxCursorStability)
 	tx.beginQuery(ss, seq, "cancelled cold-column preflight")
 	defer tx.endQuery(seq)
 	defer ss.EndQuery(seq, "Sleep", "")
@@ -3132,5 +3132,49 @@ func TestPartitionUniqueKeepsUnrelatedShardsCold(t *testing.T) {
 		if shard.cacheReaders.Load() != 0 {
 			t.Fatalf("unique probe leaked a read lease on shard %d", i)
 		}
+	}
+}
+
+func TestInsertReservationRetainsItsPreparedGeneration(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "t_insert_reservation_lifetime", 2)
+	RebuildTable(tbl, true, false)
+	shard := tbl.ActiveShards()[0]
+	release, ok := reserveInsertRows(shard, 1, 10, false, -1)
+	if !ok {
+		t.Fatal("writer reservation failed")
+	}
+	GlobalCache.Stop()
+	defer resumeOwnershipTestCache()
+	var freed [numEvictableTypes]int64
+	if shardCleanup(shard, &freed) {
+		t.Fatal("cache eviction detached the reserved writer before its insert")
+	}
+	release()
+	if shard.pendingInsertRows.Load() != 0 || shard.cacheReaders.Load() != 0 {
+		t.Fatal("insert reservation retained its row budget or payload after release")
+	}
+	if !shardCleanup(shard, &freed) {
+		t.Fatal("completed writer reservation prevented ordinary eviction")
+	}
+	lease := shard.GetRead(nil, false)
+	defer lease.Release()
+	if got := shard.ColumnReaderTx(nil, "id", false, ReadCompressed).GetValue(1).Int(); got != 2 {
+		t.Fatalf("reserved generation lost its persisted contents: %d", got)
+	}
+}
+
+func TestEmptyWritableShardRetainsItsInsertDescriptor(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "t_empty_writer_descriptor", 0)
+	shard := tbl.ActiveShards()[0]
+	GlobalCache.Stop()
+	defer resumeOwnershipTestCache()
+	var freed [numEvictableTypes]int64
+	if shardCleanup(shard, &freed) || shard.state() == COLD {
+		t.Fatal("empty writer descriptor was treated as a reloadable main payload")
+	}
+	if got := tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{
+		{scm.NewInt(7), scm.NewString("first batch")},
+	}, nil, scm.NewNil(), false, nil); got != 1 {
+		t.Fatalf("first insert lost its native writer: %d", got)
 	}
 }

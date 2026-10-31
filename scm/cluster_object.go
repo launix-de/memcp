@@ -6,9 +6,14 @@ package scm
 
 import "fmt"
 import "sync"
+import "errors"
 import "context"
 import "unsafe"
 import "encoding/json"
+
+// A local encoding failure before dispatch. It is safe to split an unsent
+// output batch; a remote error or ambiguous completion must never be replayed.
+var ErrClusterRequestTooLarge = errors.New("oversized MOSI message")
 
 // ClusterRequestHandler is the routing contract for native owner endpoints.
 // Implementations own request policy; transport only resolves and dispatches.
@@ -29,9 +34,13 @@ type ClusterObject interface {
 }
 
 type ClusterRequest struct {
-	Method    string
-	Arguments []Scmer
-	Payload   any `json:"-"` // private decoded protocol payload, never runtime serialization
+	// A borrowed delivery may cancel its local waiter while the native owner
+	// retains and joins the remote invocation through its independent Close.
+	// This local policy is never serialized and never releases the owner's state.
+	CancelWithoutJoin bool `json:"-"`
+	Method            string
+	Arguments         []Scmer
+	Payload           any `json:"-"` // private decoded protocol payload, never runtime serialization
 }
 
 // ClusterReference names an incarnation-bound owner endpoint. On the wire Token
@@ -112,11 +121,59 @@ func ClusterObjectOf(value Scmer) (ClusterObject, bool) {
 // callback captures, for every object type alike. Objects produce their own
 // immutable view once; each target peer gets a distinct registered handle.
 type SerializationContext struct {
-	Export  func(ClusterObject, Scmer) (ClusterReference, error)
-	root    *SerializationContext
-	mu      sync.Mutex
-	views   map[ClusterObject]*clusterViewCapture
-	demands map[ClusterObject]map[Scmer]struct{}
+	Invocation   Scmer // native owner of invocation-scoped exported callbacks
+	boundObjects map[ClusterObject]*clusterInvocationCapture
+	Export       func(ClusterObject, Scmer) (ClusterReference, error)
+	root         *SerializationContext
+	mu           sync.Mutex
+	views        map[ClusterObject]*clusterViewCapture
+	demands      map[ClusterObject]map[Scmer]struct{}
+}
+
+type clusterInvocationCapture struct {
+	done   chan struct{}
+	object ClusterObject
+	err    error
+}
+
+// BindInvocationObject captures one native endpoint per source invocation.
+// Object code owns its lifetime policy; serialization shares the binding across
+// sibling shard dispatches without inspecting the object's concrete type.
+func (bindings *SerializationContext) BindInvocationObject(object ClusterObject, bind func(Scmer) (ClusterObject, error)) (ClusterObject, error) {
+	if bindings == nil {
+		return object, nil
+	}
+	if bindings.root != nil {
+		bindings = bindings.root
+	}
+	if bindings.Invocation.IsNil() {
+		return object, nil
+	}
+	bindings.mu.Lock()
+	if bindings.boundObjects == nil {
+		bindings.boundObjects = make(map[ClusterObject]*clusterInvocationCapture)
+	}
+	capture, exists := bindings.boundObjects[object]
+	if !exists {
+		capture = &clusterInvocationCapture{done: make(chan struct{})}
+		bindings.boundObjects[object] = capture
+	}
+	bindings.mu.Unlock()
+	if !exists {
+		func() {
+			defer close(capture.done)
+			defer func() {
+				if failure := recover(); failure != nil {
+					capture.err = fmt.Errorf("cluster invocation binding: %v", failure)
+					panic(failure)
+				}
+			}()
+			capture.object, capture.err = bind(bindings.Invocation)
+		}()
+	} else {
+		<-capture.done
+	}
+	return capture.object, capture.err
 }
 
 type clusterViewCapture struct {

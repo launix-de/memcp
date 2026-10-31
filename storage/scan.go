@@ -1551,14 +1551,14 @@ func (t *table) scanWithBatch(currentTx *TxContext, accessSchema scm.Scmer, acce
 	return t.scanWithBatchFrom(currentTx, nil, accessSchema, accessValues, scanAccess{}, conditionCols, condition, callbackCols, mapReduce, neutral, combine, isOuter, stride, batchdata)
 }
 
-func runDirectSingleShardScan(currentTx *TxContext, topology *tableShardTopology, shard *storageShard, access scanAccess, conditionCols []string, condition scm.Scmer, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, stride int, batchdata []scm.Scmer, source *recSet, project bool, ss *scm.SessionState, querySeq uint64) (result scanResult) {
+func runDirectSingleShardScan(currentTx *TxContext, topology *tableShardTopology, shard *storageShard, access scanAccess, conditionCols []string, condition scm.Scmer, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, stride int, batchdata []scm.Scmer, source *recSet, ss *scm.SessionState, querySeq uint64) (result scanResult) {
 	acquiring := true
 	defer topology.releaseOperation()
 	defer shard.activeScanners.Add(-1)
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			if delegation, ok := recovered.(shardReadDelegation); acquiring && ok {
-				invocation := shardScanInvocation{tx: currentTx, access: access, conditionCols: conditionCols, condition: condition, callbackCols: callbackCols, mapReduce: mapReduce, neutral: neutral, stride: stride, batchdata: batchdata, source: source, project: project}
+				invocation := shardScanInvocation{tx: currentTx, access: access, conditionCols: conditionCols, condition: condition, callbackCols: callbackCols, mapReduce: mapReduce, neutral: neutral, stride: stride, batchdata: batchdata, source: source}
 				result = invocation.delegate(shard, delegation)
 			} else {
 				result = scanResult{err: scanError{recovered, string(debug.Stack())}}
@@ -1676,7 +1676,7 @@ func (t *table) scanWithBatchFrom(currentTx *TxContext, source *recSet, accessSc
 	hadValue := false
 	var scanErr scanError
 	if topology, shard, single := t.pinSingleShardForScan(executionAccess); single {
-		msg := runDirectSingleShardScan(currentTx, topology, shard, executionAccess, conditionCols, condition, callbackCols, mapReduce, neutral, stride, batchdata, source, combine.IsNil(), ss, querySeq)
+		msg := runDirectSingleShardScan(currentTx, topology, shard, executionAccess, conditionCols, condition, callbackCols, mapReduce, neutral, stride, batchdata, source, ss, querySeq)
 		if msg.err.r != nil {
 			scanErr = msg.err
 		} else {
@@ -1700,7 +1700,7 @@ func (t *table) scanWithBatchFrom(currentTx *TxContext, source *recSet, accessSc
 				}
 			}()
 			if delegation, ok := acquisitionFailure.(shardReadDelegation); ok {
-				invocation := shardScanInvocation{tx: currentTx, access: executionAccess, conditionCols: conditionCols, condition: condition, callbackCols: callbackCols, mapReduce: mapReduce, neutral: neutral, stride: stride, batchdata: batchdata, source: source, project: combine.IsNil()}
+				invocation := shardScanInvocation{tx: currentTx, access: executionAccess, conditionCols: conditionCols, condition: condition, callbackCols: callbackCols, mapReduce: mapReduce, neutral: neutral, stride: stride, batchdata: batchdata, source: source}
 				values.send(solo, invocation.delegate(s, delegation))
 				return
 			}
@@ -1796,12 +1796,12 @@ func (t *storageShard) filterVisibleScanBatch(batch []uint32, visibleUpper uint3
 			continue
 		}
 		if hasMutationCallback && (currentTx == nil || currentTx.Mode != TxACID) {
+			// Candidate collection holds the shard mutation lock. A visible
+			// replacement has its own candidate ID; historical tombstones must
+			// not trigger a second search of the shard. The callback mapper still
+			// follows versions changed after collection (for example by a trigger).
 			if t.deletions.Get(uint(effectiveIdx)) {
-				if followIdx, ok := t.resolveVisiblePrimaryRecidLocked(effectiveIdx); ok {
-					effectiveIdx = followIdx
-				} else {
-					continue
-				}
+				continue
 			}
 			if _, ok := mutationSeen[effectiveIdx]; ok {
 				continue
@@ -2014,12 +2014,12 @@ func (t *storageShard) filterVisibleBatchedScanBatch(batch []uint32, batchIDs []
 			continue
 		}
 		if hasMutationCallback && (currentTx == nil || currentTx.Mode != TxACID) {
+			// Candidate collection holds the shard mutation lock. A visible
+			// replacement has its own candidate ID; historical tombstones must
+			// not trigger a second search of the shard. The callback mapper still
+			// follows versions changed after collection (for example by a trigger).
 			if t.deletions.Get(uint(effectiveIdx)) {
-				if followIdx, ok := t.resolveVisiblePrimaryRecidLocked(effectiveIdx); ok {
-					effectiveIdx = followIdx
-				} else {
-					continue
-				}
+				continue
 			}
 			key := uint64(batchID)<<32 | uint64(effectiveIdx)
 			if _, ok := mutationSeen[key]; ok {
@@ -2204,13 +2204,10 @@ func (t *storageShard) scanFirstRecord(access scanAccess, conditionCols []string
 }
 
 func (t *storageShard) scan(access scanAccess, conditionCols []string, condition scm.Scmer, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, stride int, batchdata []scm.Scmer, currentTx *TxContext, ss *scm.SessionState) (scm.Scmer, int64, int64) {
-	for _, name := range callbackCols {
-		if name == "$update" || strings.HasPrefix(name, "$increment:") {
-			writeAccess := t.GetWrite(currentTx)
-			defer writeAccess.Release()
-			t = writeAccess.shard
-			break
-		}
+	if scanMutates(callbackCols) {
+		writeAccess := t.GetWrite(currentTx)
+		defer writeAccess.Release()
+		t = writeAccess.shard
 	}
 
 	if stride > 0 {

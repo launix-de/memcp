@@ -40,7 +40,7 @@ func orderedPrefixMergeFixture(t testing.TB, streams int, native bool) func() {
 	buf := make([]uint32, 32)
 	return func() {
 		count := 0
-		index.iteratePrefixMerge(nil, prefix, cols, main, nil, native, 0, buf, func(ids []uint32) bool {
+		index.iteratePrefixMerge(false, prefix, cols, main, nil, native, 0, buf, func(ids []uint32) bool {
 			for _, id := range ids {
 				want := uint32(count%streams*perKey + count/streams)
 				if !native {

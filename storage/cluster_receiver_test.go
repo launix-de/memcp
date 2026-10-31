@@ -418,7 +418,7 @@ func TestClusterReceiverImportedCloseCancelsBlockedSend(t *testing.T) {
 		Reference: scm.ClusterReference{Type: "receiver"},
 		Call: func(ctx context.Context, _ scm.ClusterRequest) (scm.Scmer, error) {
 			close(entered)
-			return scm.NewNil(), service.control(ctx, peer, "object.call", nil, nil)
+			return scm.NewNil(), service.control(ctx, peer, "object.call", nil, nil, true)
 		},
 	})
 	if err != nil {

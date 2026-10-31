@@ -6836,10 +6836,11 @@ scalar comparison work rather than an uncalibrated multiplier. */
 				(if (direct_base_group_plan_preferred? group_stage)
 					(lower_direct_base_group_stage group_stage fields (qb_order block) (qb_offset block) (qb_limit block))
 					(if (direct_base_group_plan_eligible? group_stage)
-						(list (quote if)
-							(list (quote tx_requires_query_local_cache) (physical_query_tx_symbol))
-							(lower_query_local_base_group_stage group_stage fields (qb_order block) (qb_offset block) (qb_limit block))
-							(lower_group_stage group_stage))
+						(list (quote with_cache_sources) (physical_query_tx_symbol)
+							(list (quote list) (source_table_expr src))
+							(list (quote lambda) '() (lower_group_stage group_stage))
+							(list (quote lambda) '()
+								(lower_query_local_base_group_stage group_stage fields (qb_order block) (qb_offset block) (qb_limit block))))
 						(lower_group_stage group_stage))))
 			(begin
 				(define alias (source_alias src))
@@ -14143,13 +14144,10 @@ protocol callback receives only the calibration row. */
 					(reduce tail (lambda (total item)
 						(+ total (plan_count item target))) 0))
 				_ 0)))
-		(define tree_count (lambda (node)
-			(match node
-				(cons head tail) (+ 1
-					(tree_count head)
-					(reduce tail (lambda (total item)
-						(+ total (tree_count item))) 0))
-				_ 1)))
+		/* Count diagnostic trees with the runtime's existing structural walker.
+		These values remain exact, including repeated/shared subtrees, without
+		interpreting one Scheme callback per AST node after the timed phases. */
+		(define tree_count tree_node_count)
 		(define scan_access_head? (lambda (head)
 			(or (equal? head (quote scan))
 				(or (or (equal? head (quote scan_order)) (equal? head (quote scan_order_keys)))
@@ -14563,13 +14561,15 @@ without freezing a statistics-dependent decision in the SQL plan cache. */
 							nil))
 					direct_plan))
 				(if (not (nil? forced)) (if (equal? chosen "projected_recset") direct_plan warm_plan)
-					(list (quote if) (list (quote tx_requires_query_local_cache) (physical_query_tx_symbol)) direct_plan
-						(list (quote if)
+					(list (quote with_cache_sources) (physical_query_tx_symbol)
+						(list (quote list) (source_table_expr driver) (source_table_expr lookup))
+						(list (quote lambda) '() (list (quote if)
 							(list (quote and) (if count_mode (list (quote not) (list (quote nil?) ready))
 								(list (quote not) (list (quote nil?) ready)))
 								(list (quote semijoin_cache_wins?) (source_table_expr driver) (source_table_expr lookup)
 									(if count_mode (source_table_expr driver) ready) count_mode))
-							warm_plan cold_plan))))))))
+							warm_plan cold_plan))
+						(list (quote lambda) '() direct_plan))))))))
 
 (define semijoin_count_output (lambda (block fields value)
 	(list (quote if)

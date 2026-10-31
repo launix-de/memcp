@@ -116,11 +116,12 @@ func (p *mosiPeer) recovered() bool {
 }
 
 type mosiMessage struct {
-	ID     uint64          `json:"id"`
-	Method string          `json:"method,omitempty"`
-	Data   json.RawMessage `json:"data,omitempty"`
-	Error  string          `json:"error,omitempty"`
-	Packet *mosiPacket     `json:"packet,omitempty"`
+	encoded []byte          // immutable local frame; never part of wire metadata
+	ID      uint64          `json:"id"`
+	Method  string          `json:"method,omitempty"`
+	Data    json.RawMessage `json:"data,omitempty"`
+	Error   string          `json:"error,omitempty"`
+	Packet  *mosiPacket     `json:"packet,omitempty"`
 }
 
 type mosiRemoteError string
@@ -221,9 +222,13 @@ func (p *mosiPeer) writeMessage(m mosiMessage) error {
 	if err := p.conn.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
 		return err
 	}
-	frame, err := encodeMosiMessage(m)
-	if err != nil {
-		return err
+	frame := m.encoded
+	if frame == nil {
+		var err error
+		frame, err = encodeMosiMessage(m)
+		if err != nil {
+			return err
+		}
 	}
 	return p.conn.WriteMessage(websocket.BinaryMessage, frame)
 }

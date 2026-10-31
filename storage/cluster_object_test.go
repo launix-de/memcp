@@ -13,6 +13,7 @@ import "strings"
 import "runtime"
 import "testing"
 import "encoding/json"
+import "sync/atomic"
 import "github.com/google/uuid"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/memcp/storage/mosi"
@@ -147,7 +148,7 @@ func TestClusterObjectHistoricalScanRebuildAndPeerGC(t *testing.T) {
 	}
 	task.Input = &remote.Any().(*remoteShardObject).handle.Reference
 	var reduced remoteScanResult
-	if err := client.control(context.Background(), peer, "scan.execute", task, &reduced); err != nil {
+	if err := client.control(context.Background(), peer, "scan.execute", task, &reduced, true); err != nil {
 		t.Fatal(err)
 	}
 	value, err := schemeValue(reduced.Value).reconstruct()
@@ -163,6 +164,49 @@ func TestClusterObjectHistoricalScanRebuildAndPeerGC(t *testing.T) {
 	if table.ActiveShards()[0].uuid.String() == task.Shard.Resource.Shard {
 		t.Fatal("release restored old topology")
 	}
+}
+
+func TestClusterCallbackRejectsCallsAfterExportingQueryEnds(t *testing.T) {
+	createDurabilityTestTable(t, "t_cluster_callback_query", 1)
+	peer, client, _ := setupRemoteScanConnection(t)
+	owner := nodeScans.Load()
+	source := objectOwnerPeer(t, owner, client)
+	tx := NewTxContext(TxCursorStability)
+	tx.beginQuery(nil, 7, "callback owner")
+	defer tx.endQuery(7)
+	var calls atomic.Int32
+	callback := scm.NewClusterCallback(context.Background(), func(...scm.Scmer) scm.Scmer {
+		calls.Add(1)
+		return scm.NewBool(true)
+	}, nil)
+	env := &scm.Env{Vars: scm.Vars{scm.Symbol("output"): callback}, Outer: &scm.Globalenv}
+	proc := scm.Eval(scm.Read(t.Name(), `(lambda () (output))`), env)
+	bindings := (&scm.SerializationContext{Invocation: scm.NewAny(tx)}).WithExport(func(object scm.ClusterObject, view scm.Scmer) (scm.ClusterReference, error) {
+		return owner.exportObject(source, object, view)
+	})
+	data, err := scm.MarshalProcedure(proc, bindings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	remote, err := scm.UnmarshalProcedure(data, scm.ProcedureDecode{Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) {
+		return client.importObject(context.Background(), peer, ref)
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !scm.Apply(remote).Bool() || calls.Load() != 1 {
+		t.Fatal("live callback did not execute")
+	}
+	tx.endQuery(7)
+	var failure any
+	func() {
+		defer func() { failure = recover() }()
+		scm.Apply(remote)
+	}()
+	if failure == nil || calls.Load() != 1 {
+		t.Fatal("retained remote handle accessed completed query state")
+	}
+	runtime.KeepAlive(remote)
 }
 
 func TestClusterObjectSerializedSessionUsesOwnerEndpoint(t *testing.T) {
@@ -321,6 +365,106 @@ func TestClusterObjectNativeOverlayReferenceKeepsPhysicalIdentity(t *testing.T) 
 		t.Fatal("read overlay acquired coordinator mutation rights")
 	}
 	runtime.KeepAlive(value)
+}
+
+func TestClusterParticipantDecisionJoinsNativeInvocations(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "t_cluster_tx_join", 4)
+	worker := NewTxContext(TxACID)
+	worker.AddToDeleteMask(tbl.ActiveShards()[0], 1)
+	worker.mu.Lock()
+	participant := worker.shardTransactions()[tbl.ActiveShards()[0]]
+	participant.decisionToken = "test-decision"
+	worker.mu.Unlock()
+	invocation := worker.newInvocation()
+	invocation.remoteObject = &scm.ClusterHandle{}
+	invocation.beginQuery(nil, 8, "in-flight mutation")
+	defer invocation.endQuery(8)
+	finished := make(chan error, 1)
+	go func() {
+		_, err := participant.HandleClusterRequest(context.Background(), scm.ClusterRequest{Method: "rollback", Arguments: []scm.Scmer{scm.NewString(participant.decisionToken)}})
+		finished <- err
+	}()
+	select {
+	case err := <-finished:
+		t.Fatalf("decision returned before invocation finished: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	invocation.endQuery(8)
+	select {
+	case err := <-finished:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("native transaction decision did not finish after joining")
+	}
+	if worker.State != TxAborted || tbl.ActiveShards()[0].activeTransactions.Load() != 0 {
+		t.Fatal("joined rollback left a native transaction active")
+	}
+}
+
+func TestClusterFailedParticipantEnlistmentReleasesNativeGeneration(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "t_cluster_enlist_failure", 4)
+	shard := tbl.ActiveShards()[0]
+	tx := NewTxContext(TxACID)
+	defer tx.Rollback()
+	tx.coordinator = &scm.ClusterHandle{Call: func(context.Context, scm.ClusterRequest) (scm.Scmer, error) {
+		return scm.NewNil(), fmt.Errorf("enlistment cancelled before mutation")
+	}}
+	var failure any
+	func() {
+		defer func() { failure = recover() }()
+		shard.GetWrite(tx).Release()
+	}()
+	if fmt.Sprint(failure) != "enlistment cancelled before mutation" {
+		t.Fatalf("unexpected enlistment failure: %v", failure)
+	}
+	if len(tx.shardTransactions()) != 0 || shard.activeTransactions.Load() != 0 {
+		t.Fatal("failed participant retained native transaction authority")
+	}
+}
+
+// Savepoint recovery must address the peer's native state once, including shards
+// first touched after the savepoint, while preserving earlier statement effects.
+func TestClusterNativeParticipantSavepointPreservesEarlierMutations(t *testing.T) {
+	first, _ := createDurabilityTestTable(t, "t_cluster_sp_first", 4)
+	second, _ := createDurabilityTestTable(t, "t_cluster_sp_second", 4)
+	worker := NewTxContext(TxACID)
+	defer worker.Rollback()
+	coordinator := NewTxContext(TxACID)
+	defer coordinator.Rollback()
+	worker.AddToDeleteMask(first.ActiveShards()[0], 1)
+	worker.mu.Lock()
+	participant := worker.shardTransactions()[first.ActiveShards()[0]]
+	participant.decisionToken = "test-native-participant"
+	worker.mu.Unlock()
+	imported := &storageShardTransaction{shardUUID: participant.shardUUID, decisionToken: participant.decisionToken}
+	imported.remoteObject = &scm.ClusterHandle{
+		Reference: scm.ClusterReference{Owner: "worker"},
+		Call: func(ctx context.Context, request scm.ClusterRequest) (scm.Scmer, error) {
+			value, err := participant.HandleClusterRequest(ctx, request)
+			if err != nil {
+				return scm.NewNil(), err
+			}
+			return value.(scm.Scmer), nil
+		},
+	}
+	coordinator.participants = map[uuid.UUID]*storageShardTransaction{participant.shardUUID: imported}
+	sp := coordinator.CreateSavepoint()
+	worker.AddToDeleteMask(first.ActiveShards()[0], 2)
+	worker.AddToDeleteMask(second.ActiveShards()[0], 0)
+	coordinator.RollbackToSavepoint(sp)
+	if worker.IsVisible(first.ActiveShards()[0], 1) || !worker.IsVisible(first.ActiveShards()[0], 2) || !worker.IsVisible(second.ActiveShards()[0], 0) {
+		t.Fatal("remote savepoint lost earlier effects or retained later shard effects")
+	}
+	if worker.State != TxActive {
+		t.Fatal("savepoint rollback ended the native transaction")
+	}
+	// A newly enlisted owner rolls back to the empty native savepoint.
+	coordinator.RollbackToSavepoint(Savepoint{})
+	if !worker.IsVisible(first.ActiveShards()[0], 1) {
+		t.Fatal("new participant retained a mutation after savepoint recovery")
+	}
 }
 
 func TestClusterObjectCatalogNamesNeedNoRegistration(t *testing.T) {
@@ -818,7 +962,7 @@ func TestClusterCancellationQueuesMessageBeforeCollectorReturns(t *testing.T) {
 			finished := make(chan any, 1)
 			go func() {
 				if control {
-					finished <- service.control(ctx, peer, "fixture", nil, nil)
+					finished <- service.control(ctx, peer, "fixture", nil, nil, true)
 					return
 				}
 				defer func() { finished <- recover() }()
@@ -834,21 +978,33 @@ func TestClusterCancellationQueuesMessageBeforeCollectorReturns(t *testing.T) {
 			}
 			cancel()
 			select {
-			case result := <-finished:
-				if result != context.Canceled {
-					t.Fatal("wrong cancellation result", result)
-				}
-			case <-time.After(time.Second):
-				t.Fatal("operation did not unwind")
-			}
-			select {
 			case message := <-peer.outgoing:
 				var id string
 				if message.Method != "scan.cancel" || json.Unmarshal(message.Data, &id) != nil || id != envelope.Return {
 					t.Fatal("wrong remote cancellation", message)
 				}
+			case <-time.After(time.Second):
+				t.Fatal("collector did not send cancellation")
+			}
+			select {
+			case result := <-finished:
+				t.Fatal("collector returned before remote completion", result)
 			default:
-				t.Fatal("collector returned before enqueueing remote cancellation")
+			}
+			// The existing return channel is also the join acknowledgement. No
+			// cancelled invocation may release its captures before this delivery.
+			entry, ok := service.returns.Load(envelope.Return)
+			if !ok {
+				t.Fatal("cancelled invocation dropped its return channel")
+			}
+			deliverTestCompletion(t, entry, scanCompletion{Return: envelope.Return})
+			select {
+			case result := <-finished:
+				if result != context.Canceled {
+					t.Fatal("wrong cancellation result", result)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("operation did not unwind after remote completion")
 			}
 		})
 	}

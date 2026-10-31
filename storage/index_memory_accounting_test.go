@@ -148,6 +148,42 @@ func TestShardAccountingConcurrentIndexPublication(t *testing.T) {
 	}
 }
 
+func TestComputedDeltaIndexPreparesEachKeyOnceAndRetainsDuplicates(t *testing.T) {
+	tbl := setupScanParallelTestTable(t, "t_delta_computed_keys")
+	rows := make([][]scm.Scmer, 256)
+	for i := range rows {
+		rows[i] = []scm.Scmer{scm.NewInt(int64(i))}
+	}
+	tbl.Insert([]string{"id"}, rows, nil, scm.NewNil(), false, nil)
+	shard := tbl.ActiveShards()[0]
+	calls := 0
+	index := &StorageIndex{t: shard, Cols: []string{".mapped"}, ColMapCols: [][]string{{"id"}}, ColMapFn: []scm.Scmer{
+		scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { calls++; return scm.NewInt(values[0].Int() % 7) }),
+	}}
+	shard.mu.RLock()
+	defer shard.mu.RUnlock()
+	getters := index.buildGetters(nil, nil)
+	defer releaseIndexGetters(getters)
+	index.buildIndex(&index.baseState, getters, nil)
+	if calls != len(rows) || index.baseState.deltaBtree.Len() != len(rows) {
+		t.Fatalf("computed %d keys and retained %d rows; want %d of each", calls, index.baseState.deltaBtree.Len(), len(rows))
+	}
+	before := index.ComputeSize()
+	previousKey, previousID, count := int64(-1), -1, 0
+	index.baseState.deltaBtree.Ascend(func(pair indexPair) bool {
+		key := pair.data[0].Int()
+		if key < previousKey || key == previousKey && pair.itemid <= previousID {
+			t.Error("computed delta key ordering lost duplicate identity")
+		}
+		previousKey, previousID = key, pair.itemid
+		count++
+		return true
+	})
+	if count != len(rows) || calls != len(rows) || before <= uint(len(rows)*32) {
+		t.Fatal("delta traversal recalculated keys, lost rows or omitted owned key memory")
+	}
+}
+
 // A delta insertion must not enter callbacks with the shard write lock held.
 // The comparator stands in for an ORC reader that scans its own source shard.
 func TestComputedIndexDeltaDoesNotInvokeComparator(t *testing.T) {
@@ -164,4 +200,44 @@ func TestComputedIndexDeltaDoesNotInvokeComparator(t *testing.T) {
 	if index.baseState.active || index.baseState.deltaBtree != nil {
 		t.Fatal("computed index remained usable after its source delta changed")
 	}
+}
+
+func TestIndexInvocationRetainsOrderingAfterOwnerEviction(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "t_index_snapshot_eviction", 4)
+	RebuildTable(tbl, true, false)
+	tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{
+		{scm.NewInt(1000), scm.NewString("delta")},
+		{scm.NewInt(2), scm.NewString("duplicate")},
+	}, nil, scm.NewNil(), false, nil)
+	shard := tbl.ActiveShards()[0]
+	lease := shard.GetRead(nil, false)
+	defer lease.Release()
+	access := runtimeScanAccess(analyzedBoundaries{{col: "id", matcher: RangeMatcher,
+		lower: scm.NewInt(2), lowerInclusive: true, upper: scm.NewInt(1000), upperInclusive: true}})
+	shard.mu.RLock()
+	defer shard.mu.RUnlock()
+	var buffer [8]uint32
+	var selectedIndex *StorageIndex
+	count, sum := 0, int64(0)
+	shard.iterateIndexEx(nil, access, len(shard.deltaRows()), buffer[:], 1, true, nil, nil, nil,
+		func(index *StorageIndex, indexed bool) {
+			if !indexed || !indexCleanup(index, nil) {
+				t.Fatal("fixture did not evict the selected index after invocation setup")
+			}
+			selectedIndex = index
+		}, func(ids []uint32) bool {
+			for _, id := range ids {
+				if id < shard.main_count {
+					sum += shard.columns["id"].GetValue(id).Int()
+				} else {
+					sum += shard.getDelta(int(id-shard.main_count), "id").Int()
+				}
+				count++
+			}
+			return true
+		})
+	if selectedIndex == nil || count != 5 || sum != 1011 {
+		t.Fatalf("eviction changed the invocation's main/delta multiset: count=%d sum=%d", count, sum)
+	}
+	GlobalCache.Remove(selectedIndex)
 }

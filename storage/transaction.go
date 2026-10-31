@@ -66,10 +66,14 @@ type storageShardTransaction struct {
 	// Cluster endpoint identity belongs to this native TX/shard participant,
 	// initialized with the existing overlay allocation under tx.mu. It retains
 	// the physical generation, never a second write lock or row-loop counter.
-	clusterShard *storageShard // immutable physical lifetime owner, including after native commit
-	clusterTxID  uint64
-	shardUUID    uuid.UUID
-	remoteObject *scm.ClusterHandle
+	clusterShard  *storageShard // immutable physical lifetime owner, including after native commit
+	transaction   *transactionState
+	enlist        sync.Once
+	enlistError   error
+	decisionToken string
+	clusterTxID   string
+	shardUUID     uuid.UUID
+	remoteObject  *scm.ClusterHandle
 
 	// cursor-stability undo bitmaps
 	InsertMask  NonLockingReadMap.NonBlockingBitMap
@@ -101,6 +105,7 @@ type shardSavepoint struct {
 // Used for nested transactions (trigger recovery, savepoints).
 type Savepoint struct {
 	shardLens            map[*storageShard]shardSavepoint
+	remote               map[string]scm.Scmer
 	Depth                uint32
 	repartitionDeleteLen int
 }
@@ -120,22 +125,42 @@ var statementGenerationCounter atomic.Uint64
 // GlobalCommitEpoch is advanced on each ACID commit.
 var GlobalCommitEpoch uint64
 
-// TxContext holds the state for one transaction.
-//
-// All per-shard state lives in a single shards map, keyed by *storageShard.
-// The map is nil until the first write operation, so read-only transactions
-// (the common case with with_autocommit) allocate nothing beyond the
-// TxContext struct itself.
+// transactionState is the native transaction identity, overlays and decision
+// state. Invocations on one peer share it while keeping their query cancellation,
+// readers, callback cleanup and execution budgets private. The shard directory
+// remains nil until the first mutation.
+type transactionState struct {
+	clusterID             string
+	coordinator           *scm.ClusterHandle
+	decisionMu            sync.Mutex
+	remoteActive          int
+	remoteIdle            chan struct{}
+	remoteAdmissionClosed bool
+	sourceSessionID       uint64
+	ID                    uint64
+	Mode                  TxMode
+	State                 TxState
+	SnapshotEpoch         uint64 // ACID: snapshot boundary
+	Depth                 uint32 // nesting depth for savepoints / triggers
+	walTxID               atomic.Pointer[string]
+	shards                atomic.Pointer[sync.Map]
+	participants          map[uuid.UUID]*storageShardTransaction
+	touchedShards         sync.Map // map[*storageShard]bool
+	autoCommit            bool
+	writeHeld             map[*storageShard]uint32 // reentrant write-lock depth per shard
+	repartitionDeletes    []repartitionDeleteAction
+	invalidationDepth     uint32
+	invalidationVisited   map[string]bool
+	mu                    sync.Mutex
+}
+
+// TxContext binds a native transaction to one invocation's execution resources.
 type TxContext struct {
+	*transactionState
 	// Replication bindings are session-executor-owned, never shared by readers.
 	// Native shard transaction generations supply the ownership-transfer drain.
 	replicationActive   bool
 	replicationWriting  bool
-	ID                  uint64
-	Mode                TxMode
-	State               TxState
-	SnapshotEpoch       uint64 // ACID: snapshot boundary
-	Depth               uint32 // nesting depth for savepoints / triggers
 	Session             scm.Scmer
 	SessionState        *scm.SessionState // owning connection; retained while the transaction object is parked
 	querySeq            atomic.Uint64     // active request cancellation identity; zero while parked
@@ -144,29 +169,17 @@ type TxContext struct {
 	queryActive         atomic.Bool
 	queryMu             sync.Mutex         // serializes statements which reuse this transaction object
 	queryColumns        map[*column]*table // statement cache leases, protected by mu
+	queryWorkReleases   []func()           // joins precede every reader/column release
 	queryReaderReleases []func()           // reader and cache-carrier leases, protected by mu
 	// remoteBindings freezes session inputs once per statement, only on cold
 	// remote dispatch. endStatement drops it after all shard workers finish.
-	remoteBindings atomic.Pointer[scm.SerializationContext]
-	remoteObject   *scm.ClusterHandle // invocation-owned registered coordinator reference
-	walTxID        atomic.Pointer[string]
+	remoteBindings   atomic.Pointer[scm.SerializationContext]
+	remoteObject     *scm.ClusterHandle // imported endpoint; private to this execution binding
+	remoteInvocation bool               // owned by this executor between beginQuery and endQuery
 	// fanoutLimit/fanoutInUse bound only additional multi-shard workers. A
 	// single relevant shard never reads or writes this cache line.
 	fanoutLimit atomic.Int32
 	fanoutInUse atomic.Int32
-
-	// Per-shard state, nil until first write (zero-alloc for read-only transactions).
-	shards map[*storageShard]*storageShardTransaction
-
-	// Deferred sync: shards with pending log writes that need fsync at commit.
-	touchedShards       sync.Map // map[*storageShard]bool
-	autoCommit          bool
-	writeHeld           map[*storageShard]uint32 // reentrant write-lock depth per shard
-	repartitionDeletes  []repartitionDeleteAction
-	invalidationDepth   uint32
-	invalidationVisited map[string]bool
-
-	mu sync.Mutex
 }
 
 // NewTxContext creates a new active transaction context with the given mode.
@@ -176,10 +189,19 @@ func NewTxContext(mode TxMode) *TxContext {
 	return tx
 }
 
+// newInvocation binds the same native transaction to a separate execution
+// scope. It does not copy visibility masks or create a new transaction ID.
+func (tx *TxContext) newInvocation() *TxContext {
+	invocation := &TxContext{transactionState: tx.transactionState, Session: tx.Session, remoteObject: tx.remoteObject}
+	invocation.fanoutLimit.Store(int32(runtime.GOMAXPROCS(0)))
+	return invocation
+}
+
 // reset starts another transaction in the same allocation. Commit and
 // Rollback leave the object parked in its Scheme session so the next statement
 // can reuse it without retaining any state from the completed transaction.
 func (tx *TxContext) reset(mode TxMode) {
+	tx.transactionState = new(transactionState)
 	tx.ID = atomic.AddUint64(&txIDCounter, 1)
 	tx.Mode = mode
 	tx.State = TxActive
@@ -193,7 +215,7 @@ func (tx *TxContext) reset(mode TxMode) {
 	tx.walTxID.Store(nil)
 	tx.remoteBindings.Store(nil)
 	tx.remoteObject = nil
-	tx.shards = nil
+	tx.shards.Store(nil)
 	tx.touchedShards = sync.Map{}
 	tx.autoCommit = false
 	tx.writeHeld = nil
@@ -213,6 +235,10 @@ func (tx *TxContext) durableID() string {
 	if tx == nil {
 		return ""
 	}
+	return tx.transactionState.durableID()
+}
+
+func (tx *transactionState) durableID() string {
 	if txID := tx.walTxID.Load(); txID != nil {
 		return *txID
 	}
@@ -271,8 +297,28 @@ func (tx *TxContext) QuerySessionState() (*scm.SessionState, uint64) {
 }
 
 func (tx *TxContext) beginQuery(ss *scm.SessionState, seq uint64, info string) {
+	if tx.remoteObject != nil {
+		tx.mu.Lock()
+		if tx.remoteAdmissionClosed || tx.State != TxActive {
+			tx.mu.Unlock()
+			panic("native transaction participant is finishing")
+		}
+		if tx.remoteActive == 0 {
+			tx.remoteIdle = make(chan struct{})
+		}
+		tx.remoteActive++
+		tx.remoteInvocation = true
+		tx.mu.Unlock()
+	}
 	tx.statementGeneration.Store(statementGenerationCounter.Add(1))
 	tx.SessionState = ss
+	if ss != nil && ss.ID != 0 {
+		tx.mu.Lock()
+		if tx.sourceSessionID == 0 {
+			tx.sourceSessionID = ss.ID
+		}
+		tx.mu.Unlock()
+	}
 	tx.querySeq.Store(seq)
 	infoPtr := &info
 	tx.queryInfo.Store(infoPtr)
@@ -323,6 +369,7 @@ func (tx *TxContext) retainQueryTable(t *table) bool {
 	return true
 }
 
+// retainQueryReader registers a physical lease released after invocation work.
 func (tx *TxContext) retainQueryReader(release func()) bool {
 	tx.mu.Lock()
 	defer tx.mu.Unlock()
@@ -333,8 +380,19 @@ func (tx *TxContext) retainQueryReader(release func()) bool {
 	return true
 }
 
-// endStatement releases only physical query-local ownership. Request
-// cancellation and process-list identity survive until endQuery below.
+// RetainQueryWork registers work that must join before query state is released.
+func (tx *TxContext) RetainQueryWork(join func()) bool {
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	if !tx.queryActive.Load() {
+		return false
+	}
+	tx.queryWorkReleases = append(tx.queryWorkReleases, join)
+	return true
+}
+
+// endStatement joins invocation-owned output and releases physical readers.
+// Request cancellation and process-list identity survive until endQuery below.
 func (tx *TxContext) endStatement() {
 	tx.remoteBindings.Store(nil)
 	tx.mu.Lock()
@@ -342,23 +400,53 @@ func (tx *TxContext) endStatement() {
 	tx.statementGeneration.Store(0)
 	columns := tx.queryColumns
 	tx.queryColumns = nil
+	work := tx.queryWorkReleases
+	tx.queryWorkReleases = nil
 	readers := tx.queryReaderReleases
 	tx.queryReaderReleases = nil
 	tx.mu.Unlock()
-	for _, release := range readers {
+	var failure any
+	releaseOwned := func(release func()) {
+		defer func() {
+			if recovered := recover(); recovered != nil && failure == nil {
+				failure = recovered
+			}
+		}()
 		release()
+	}
+	for _, join := range work {
+		releaseOwned(join)
+	}
+	for _, release := range readers {
+		releaseOwned(release)
 	}
 	for c, t := range columns {
 		t.releaseColumnCacheUse(c)
 	}
+	if failure != nil {
+		panic(failure)
+	}
 }
 func (tx *TxContext) endQuery(seq uint64) {
 	if tx.querySeq.CompareAndSwap(seq, 0) {
+		defer func() {
+			if tx.remoteInvocation {
+				tx.mu.Lock()
+				tx.remoteInvocation = false
+				tx.remoteActive--
+				if tx.remoteActive == 0 {
+					close(tx.remoteIdle)
+				}
+				tx.mu.Unlock()
+			}
+		}()
+		defer func() {
+			tx.queryInfo.Store(nil)
+			if tx.SessionState != nil {
+				tx.SessionState.FinishQueryExecution(seq)
+			}
+		}()
 		tx.endStatement()
-		tx.queryInfo.Store(nil)
-		if tx.SessionState != nil {
-			tx.SessionState.FinishQueryExecution(seq)
-		}
 	}
 }
 
@@ -380,26 +468,61 @@ func txContextScmer(tx *TxContext) scm.Scmer {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-// getOrCreateShardTxLocked returns the storageShardTransaction for a shard,
-// creating it if it does not exist. Must be called with tx.mu held.
+// The native directory uses sync.Map's published hash-trie nodes. Initialize it
+// on first mutation, before exposing it to readers; visibility loads never take
+// a mutex or perform lazy initialization. Coarse transaction decisions enumerate
+// a private directory snapshot under the existing native transaction lock.
+func (state *transactionState) shardTransactions() map[*storageShard]*storageShardTransaction {
+	directory := state.shards.Load()
+	if directory == nil {
+		return nil
+	}
+	result := make(map[*storageShard]*storageShardTransaction)
+	directory.Range(func(key, value any) bool {
+		result[key.(*storageShard)] = value.(*storageShardTransaction)
+		return true
+	})
+	return result
+}
+
+// getOrCreateShardTxLocked returns the shard overlay with tx.mu held. The first
+// publication includes complete identity and generation ownership.
 func (tx *TxContext) getOrCreateShardTxLocked(shard *storageShard) *storageShardTransaction {
-	if tx.shards == nil {
-		tx.shards = make(map[*storageShard]*storageShardTransaction)
-	}
-	st := tx.shards[shard]
-	if st == nil {
-		st = new(storageShardTransaction)
-		st.clusterShard = shard
-		st.clusterTxID = tx.ID
-		st.shardUUID = shard.uuid
-		st.generation = shard.generation.Load()
-		if st.generation != nil {
-			st.generation.pinTransaction()
+	directory := tx.shards.Load()
+	if directory != nil {
+		if participant, found := directory.Load(shard); found {
+			return participant.(*storageShardTransaction)
 		}
-		tx.shards[shard] = st
-		shard.beginTransactionUse()
+	} else {
+		directory = new(sync.Map)
 	}
+	st := &storageShardTransaction{clusterShard: shard, transaction: tx.transactionState,
+		clusterTxID: tx.ClusterObjectID(), shardUUID: shard.uuid, generation: shard.generation.Load()}
+	if st.generation != nil {
+		st.generation.pinTransaction()
+	}
+	shard.beginTransactionUse()
+	directory.Store(shard, st)
+	tx.shards.Store(directory)
 	return st
+}
+
+// Failed enlistment has no mutation effects. Remove its empty overlay through
+// the same publication owner before releasing its native generation pin.
+func (state *transactionState) discardUnenlistedShardLocked(shard *storageShard, participant *storageShardTransaction) {
+	directory := state.shards.Load()
+	if directory == nil {
+		return
+	}
+	current, found := directory.Load(shard)
+	if !found || current != participant {
+		return
+	}
+	directory.Delete(shard)
+	shard.endTransactionUse()
+	if participant.generation != nil {
+		participant.generation.releaseTransaction()
+	}
 }
 
 func (tx *TxContext) addRepartitionDelete(table *table, shard *storageShard, oldRecid uint32) {
@@ -425,7 +548,7 @@ func (tx *TxContext) finishRepartitionActions(commit bool) {
 }
 
 func (tx *TxContext) releaseActiveTransactionsLocked() {
-	for shard, st := range tx.shards {
+	for shard, st := range tx.shardTransactions() {
 		shard.endTransactionUse()
 		if st.generation != nil {
 			st.generation.releaseTransaction()
@@ -435,10 +558,12 @@ func (tx *TxContext) releaseActiveTransactionsLocked() {
 
 // getShardTx returns the storageShardTransaction for a shard, or nil if none exists.
 func (tx *TxContext) getShardTx(shard *storageShard) *storageShardTransaction {
-	tx.mu.Lock()
-	st := tx.shards[shard] // nil map returns nil safely
-	tx.mu.Unlock()
-	return st
+	if directory := tx.shards.Load(); directory != nil {
+		if participant, found := directory.Load(shard); found {
+			return participant.(*storageShardTransaction)
+		}
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -662,14 +787,16 @@ func (tx *TxContext) releasedUniqueReservation(shard *storageShard, recid uint32
 
 // CreateSavepoint captures the current transaction state for later rollback.
 func (tx *TxContext) CreateSavepoint() Savepoint {
+	remote := tx.captureRemoteSavepoints()
 	tx.mu.Lock()
 	defer tx.mu.Unlock()
-	sp := Savepoint{Depth: tx.Depth}
+	sp := Savepoint{Depth: tx.Depth, remote: remote}
 	sp.repartitionDeleteLen = len(tx.repartitionDeletes)
 	tx.Depth++
-	if len(tx.shards) > 0 {
-		sp.shardLens = make(map[*storageShard]shardSavepoint, len(tx.shards))
-		for s, st := range tx.shards {
+	directory := tx.shardTransactions()
+	if len(directory) > 0 {
+		sp.shardLens = make(map[*storageShard]shardSavepoint, len(directory))
+		for s, st := range directory {
 			st.mu.Lock()
 			sp.shardLens[s] = shardSavepoint{
 				InsertLen:   len(st.InsertRecids),
@@ -686,8 +813,8 @@ func (tx *TxContext) CreateSavepoint() Savepoint {
 // trackedShardSetLocked returns the rebuild generations whose transaction
 // masks are applied independently. Caller must hold tx.mu.
 func (tx *TxContext) trackedShardSetLocked() map[*storageShard]struct{} {
-	tracked := make(map[*storageShard]struct{}, len(tx.shards))
-	for shard := range tx.shards {
+	tracked := make(map[*storageShard]struct{}, len(tx.shardTransactions()))
+	for shard := range tx.shardTransactions() {
 		tracked[shard] = struct{}{}
 	}
 	return tracked
@@ -695,6 +822,7 @@ func (tx *TxContext) trackedShardSetLocked() map[*storageShard]struct{} {
 
 // RollbackToSavepoint undoes all changes made since the savepoint was created.
 func (tx *TxContext) RollbackToSavepoint(sp Savepoint) {
+	tx.rollbackRemoteSavepoints(sp)
 	for _, table := range tx.contributionMutationTables() {
 		defer table.endContributionMutation()
 	}
@@ -705,7 +833,7 @@ func (tx *TxContext) RollbackToSavepoint(sp Savepoint) {
 		tx.repartitionDeletes = tx.repartitionDeletes[:sp.repartitionDeleteLen]
 	}
 	trackedShards := tx.trackedShardSetLocked()
-	for shard, st := range tx.shards {
+	for shard, st := range tx.shardTransactions() {
 		lens := sp.shardLens[shard] // zero value (all zeros) if shard is new since savepoint
 		st.mu.Lock()
 		switch tx.Mode {
@@ -772,6 +900,9 @@ func (tx *TxContext) RollbackToSavepoint(sp Savepoint) {
 
 // Commit finalizes the transaction.
 func (tx *TxContext) Commit() error {
+	if err := tx.finishRemoteParticipants("commit"); err != nil {
+		return err
+	}
 	tables := tx.contributionMutationTables()
 	for _, table := range tables {
 		defer table.endContributionMutation()
@@ -791,7 +922,7 @@ func (tx *TxContext) Commit() error {
 		tx.mu.Lock()
 		trackedShards := tx.trackedShardSetLocked()
 		var propagationErr error
-		for shard, st := range tx.shards {
+		for shard, st := range tx.shardTransactions() {
 			st.mu.Lock()
 			shard.mu.Lock()
 			propagationErr = persistenceCall(func() {
@@ -832,9 +963,10 @@ func (tx *TxContext) Commit() error {
 // and applies overlay masks to global state.
 func (tx *TxContext) commitACID() error {
 	tx.mu.Lock()
-	shards := make([]*storageShard, 0, len(tx.shards))
-	trackedShards := make(map[*storageShard]struct{}, len(tx.shards))
-	for s := range tx.shards {
+	directory := tx.shardTransactions()
+	shards := make([]*storageShard, 0, len(directory))
+	trackedShards := make(map[*storageShard]struct{}, len(directory))
+	for s := range directory {
 		shards = append(shards, s)
 		trackedShards[s] = struct{}{}
 	}
@@ -851,14 +983,14 @@ func (tx *TxContext) commitACID() error {
 	// Validate: for each recid in DeleteMask, check it hasn't already been
 	// globally deleted by another committed tx (write-write conflict → abort).
 	for _, shard := range shards {
-		st := tx.shards[shard]
+		st := directory[shard]
 		for _, recid := range st.DeleteRecids {
 			if !st.DeleteMask.Get(uint(recid)) {
 				continue // bit was rolled back via savepoint
 			}
 			if shard.deletions.Get(uint(recid)) {
 				for _, s := range shards {
-					for _, staged := range tx.shards[s].UndeleteRecids {
+					for _, staged := range directory[s].UndeleteRecids {
 						s.rollbackProtected.Set(uint(staged), false)
 						s.syncNextVisibilityLocked(staged, trackedShards, tx, false)
 					}
@@ -868,7 +1000,7 @@ func (tx *TxContext) commitACID() error {
 				tx.mu.Lock()
 				tx.releaseActiveTransactionsLocked()
 				tx.State = TxAborted
-				tx.shards = nil
+				tx.shards.Store(nil)
 				tx.mu.Unlock()
 				tx.touchedShards = sync.Map{}
 				return fmt.Errorf("ACID commit conflict: row %d already deleted", recid)
@@ -887,7 +1019,7 @@ func (tx *TxContext) commitACID() error {
 		}
 		// Apply DeleteMask → set global deletions + write log.
 		for _, shard := range shards {
-			st := tx.shards[shard]
+			st := directory[shard]
 			// Direct native collision callbacks can stage UPDATEs without a
 			// scan reducer's Close or a physical INSERT batch. The commit owner
 			// already has their complete shard directory; register WAL durability
@@ -908,7 +1040,7 @@ func (tx *TxContext) commitACID() error {
 		}
 		// Apply UndeleteMask → clear global deletions (make staged rows visible).
 		for _, shard := range shards {
-			st := tx.shards[shard]
+			st := directory[shard]
 			for _, recid := range st.UndeleteRecids {
 				shard.rollbackProtected.Set(uint(recid), false)
 				if !st.UndeleteMask.Get(uint(recid)) {
@@ -939,7 +1071,7 @@ func (tx *TxContext) commitACID() error {
 			tx.mu.Lock()
 			tx.releaseActiveTransactionsLocked()
 			tx.State = TxCommitted
-			tx.shards = nil
+			tx.shards.Store(nil)
 			tx.mu.Unlock()
 			return err
 		}
@@ -956,7 +1088,7 @@ func (tx *TxContext) commitACID() error {
 	tx.mu.Lock()
 	tx.releaseActiveTransactionsLocked()
 	tx.State = TxCommitted
-	tx.shards = nil
+	tx.shards.Store(nil)
 	tx.mu.Unlock()
 
 	return nil
@@ -965,8 +1097,9 @@ func (tx *TxContext) commitACID() error {
 // abortACIDCommit restores visibility after a definite pre-authority failure.
 // Every shard in shards must be write-locked by the caller.
 func (tx *TxContext) abortACIDCommit(shards []*storageShard, trackedShards map[*storageShard]struct{}) {
+	directory := tx.shardTransactions()
 	for _, shard := range shards {
-		st := tx.shards[shard]
+		st := directory[shard]
 		for _, recid := range st.DeleteRecids {
 			if st.DeleteMask.Get(uint(recid)) {
 				shard.deletions.Set(uint(recid), false)
@@ -988,7 +1121,7 @@ func (tx *TxContext) abortACIDCommit(shards []*storageShard, trackedShards map[*
 	tx.mu.Lock()
 	tx.releaseActiveTransactionsLocked()
 	tx.State = TxAborted
-	tx.shards = nil
+	tx.shards.Store(nil)
 	tx.mu.Unlock()
 	tx.touchedShards = sync.Map{}
 }
@@ -998,7 +1131,7 @@ func (tx *TxContext) finishCursorStabilityCommit() {
 	tx.mu.Lock()
 	tx.releaseActiveTransactionsLocked()
 	tx.State = TxCommitted
-	tx.shards = nil
+	tx.shards.Store(nil)
 	tx.mu.Unlock()
 }
 
@@ -1008,6 +1141,12 @@ func (tx *TxContext) finishCursorStabilityCommit() {
 
 // Rollback undoes the transaction.
 func (tx *TxContext) Rollback() {
+	remoteError := tx.finishRemoteParticipants("rollback")
+	defer func() {
+		if remoteError != nil {
+			panic(remoteError)
+		}
+	}()
 	for _, table := range tx.contributionMutationTables() {
 		defer table.endContributionMutation()
 	}
@@ -1023,7 +1162,7 @@ func (tx *TxContext) Rollback() {
 func (tx *TxContext) rollbackCursorStability(persist bool) {
 	tx.mu.Lock()
 	trackedShards := tx.trackedShardSetLocked()
-	for shard, st := range tx.shards {
+	for shard, st := range tx.shardTransactions() {
 		st.mu.Lock()
 		// Undo inserts (reverse order): mark as globally deleted
 		for i := len(st.InsertRecids) - 1; i >= 0; i-- {
@@ -1056,7 +1195,7 @@ func (tx *TxContext) rollbackCursorStability(persist bool) {
 	tx.repartitionDeletes = nil
 	tx.releaseActiveTransactionsLocked()
 	tx.State = TxAborted
-	tx.shards = nil
+	tx.shards.Store(nil)
 	tx.touchedShards = sync.Map{}
 	tx.mu.Unlock()
 }
@@ -1066,7 +1205,7 @@ func (tx *TxContext) rollbackCursorStability(persist bool) {
 func (tx *TxContext) rollbackACID() {
 	tx.mu.Lock()
 	trackedShards := tx.trackedShardSetLocked()
-	for shard, st := range tx.shards {
+	for shard, st := range tx.shardTransactions() {
 		st.mu.Lock()
 		shard.mu.Lock()
 		for _, recid := range st.UndeleteRecids {
@@ -1079,7 +1218,7 @@ func (tx *TxContext) rollbackACID() {
 	tx.repartitionDeletes = nil
 	tx.releaseActiveTransactionsLocked()
 	tx.State = TxAborted
-	tx.shards = nil
+	tx.shards.Store(nil)
 	tx.mu.Unlock()
 	tx.touchedShards = sync.Map{}
 }
@@ -1118,7 +1257,9 @@ func transactionForSession(session scm.Scmer) *TxContext {
 			return tx
 		}
 	}
-	tx := &TxContext{Session: session, State: TxCommitted}
+	tx := NewTxContext(TxCursorStability)
+	tx.Session = session
+	tx.State = TxCommitted
 	sessionFn(scm.NewString("__memcp_tx"), scm.NewAny(tx))
 	return tx
 }
@@ -1452,7 +1593,7 @@ func (tx *TxContext) contributionMutationTables() []*table {
 	defer tx.mu.Unlock()
 	seen := make(map[*table]bool)
 	var tables []*table
-	for shard := range tx.shards {
+	for shard := range tx.shardTransactions() {
 		if !seen[shard.t] {
 			seen[shard.t] = true
 			shard.t.beginContributionMutation()

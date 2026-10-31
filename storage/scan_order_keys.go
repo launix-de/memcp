@@ -227,7 +227,13 @@ type orderedPrefixCursor struct {
 	loaded        int
 }
 
-func (s *StorageIndex) iteratePrefixMerge(tx *TxContext, prefix *orderedPrefixAccess, cols []colGetter, main StorageInt, delta *btree.BTreeG[indexPair], native bool, maxInsert int, buf []uint32, callback func([]uint32) bool) {
+func (s *StorageIndex) iteratePrefixMerge(precomputedDelta bool, prefix *orderedPrefixAccess, cols []colGetter, main StorageInt, delta *btree.BTreeG[indexPair], native bool, maxInsert int, buf []uint32, callback func([]uint32) bool) {
+	deltaValue := func(pair indexPair, col int) scm.Scmer {
+		if precomputedDelta {
+			return pair.data[col]
+		}
+		return cols[col].deltaValue(uint32(pair.itemid), pair.data)
+	}
 	recid := func(position int) uint32 {
 		if native {
 			return uint32(position)
@@ -256,7 +262,7 @@ func (s *StorageIndex) iteratePrefixMerge(tx *TxContext, prefix *orderedPrefixAc
 					return true
 				}
 				id := uint32(pair.itemid)
-				if s.compareAt(0, s.getDeltaColValueTx(tx, id, pair.data, 0), c.key) != 0 {
+				if s.compareAt(0, deltaValue(pair, 0), c.key) != 0 {
 					c.exhausted = true
 					return false
 				}
@@ -299,7 +305,7 @@ func (s *StorageIndex) iteratePrefixMerge(tx *TxContext, prefix *orderedPrefixAc
 		for c.loaded <= orderCol {
 			slot := orderSlots[c.loaded]
 			if c.delta {
-				c.head[c.loaded] = s.getDeltaColValueTx(tx, c.id, c.page[c.next-1].data, slot)
+				c.head[c.loaded] = deltaValue(c.page[c.next-1], slot)
 			} else {
 				c.head[c.loaded] = cols[slot].get(c.id)
 			}

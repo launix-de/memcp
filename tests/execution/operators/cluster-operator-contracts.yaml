@@ -23,6 +23,13 @@ metadata:
     storage_bandwidth_mbps: 1000
     storage_latency_ms: 5
 test_cases:
+- name: unordered-output
+  sql: SELECT id,v0 FROM big_items WHERE id<16
+  expect:
+    cluster:
+      min_remote_shards: 1
+      plan_contains:
+      - scan
 - name: order-top-n-offset
   sql: SELECT id,v0 FROM big_items ORDER BY v0 DESC,id ASC LIMIT 9 OFFSET 5
   expect:
@@ -143,5 +150,166 @@ test_cases:
 - name: typed-output-contracts
   sql: SELECT SUM(CAST(v0 AS DECIMAL(18,2))) AS total, MIN(CASE WHEN id%17=0 THEN DATE('2024-10-26') ELSE DATE('2024-10-27') END) AS first_day FROM big_items
   expect:
+    cluster:
+      min_remote_shards: 1
+
+# Output volume must exercise batching across many worker shards, rather than
+# only the single-shard, sixteen-row smoke case.
+- name: unordered-output-sixty-four-rows
+  sql: SELECT id FROM big_items WHERE id%5000<1
+  compare_reference_order: false
+  timing_samples: 11
+  timing_aggregation: total
+  warmup: 0
+  expect:
+    rows: 64
+    cluster:
+      min_remote_shards: 2
+      min_remote_nodes: 2
+- name: unordered-output-five-hundred-twelve-rows
+  sql: SELECT id FROM big_items WHERE id%5000<8
+  compare_reference_order: false
+  timing_samples: 11
+  timing_aggregation: total
+  warmup: 0
+  expect:
+    rows: 512
+    cluster:
+      min_remote_shards: 2
+      min_remote_nodes: 2
+- name: unordered-output-four-thousand-ninety-six-rows
+  sql: SELECT id FROM big_items WHERE id%5000<64
+  compare_reference_order: false
+  timing_samples: 11
+  timing_aggregation: total
+  warmup: 0
+  expect:
+    rows: 4096
+    cluster:
+      min_remote_shards: 2
+      min_remote_nodes: 2
+- name: unordered-output-duplicate-multiplicity
+  sql: SELECT id%5000 AS id FROM big_items WHERE id%5000<64
+  compare_reference_order: false
+  expect:
+    rows: 4096
+    cluster:
+      min_remote_shards: 2
+      min_remote_nodes: 2
+- name: unordered-output-many-shards
+  sql: SELECT id,v0,v1,v2,v3,v4,v5,v6,v7 FROM big_items WHERE id%5000<64
+  compare_reference_order: false
+  timing_samples: 11
+  timing_aggregation: total
+  warmup: 0
+  expect:
+    rows: 4096
+    cluster:
+      min_remote_shards: 2
+      min_remote_nodes: 2
+      data_exceeds_node_ram: true
+
+# Oracle and cluster start with independent copies of the committed fixture.
+# These require native remote mutations; an unsupported-operation error must
+# fail, never satisfy the test.
+- name: bulk-update-begin
+  session_id: cluster-bulk-update
+  sql: START ACID TRANSACTION
+- name: bulk-update-many-shards
+  session_id: cluster-bulk-update
+  sql: UPDATE big_items SET v7=-id-1 WHERE id%5000<500
+  timeout: 60
+  expect:
+    affected_rows: 32000
+    cluster:
+      min_remote_shards: 2
+      min_remote_nodes: 2
+      data_exceeds_node_ram: true
+- name: bulk-update-own-visibility
+  session_id: cluster-bulk-update
+  sql: SELECT COUNT(*) AS n FROM big_items WHERE id%5000<500 AND v7=-id-1
+  expect:
+    data: [{n: 32000}]
+- name: bulk-update-uncommitted-isolation
+  sql: SELECT COUNT(*) AS n FROM big_items WHERE v7<0
+  expect:
+    data: [{n: 0}]
+- name: bulk-update-rollback
+  session_id: cluster-bulk-update
+  sql: ROLLBACK
+- name: bulk-update-restored
+  sql: SELECT COUNT(*) AS n FROM big_items WHERE v7<0
+  expect:
+    data: [{n: 0}]
+- name: bulk-update-restored-full-signature
+  sql: SELECT COUNT(*) AS n,SUM(id) AS ids,SUM(v7) AS vals FROM big_items
+  expect:
+    data: [{n: 320000, ids: 51199840000, vals: 687845503431224}]
+
+- name: bulk-delete-begin
+  session_id: cluster-bulk-delete
+  sql: START ACID TRANSACTION
+- name: bulk-delete-many-shards
+  session_id: cluster-bulk-delete
+  sql: DELETE FROM big_items WHERE id%5000<500
+  timeout: 60
+  expect:
+    affected_rows: 32000
+    cluster:
+      min_remote_shards: 2
+      min_remote_nodes: 2
+      data_exceeds_node_ram: true
+- name: bulk-delete-own-visibility
+  session_id: cluster-bulk-delete
+  sql: SELECT COUNT(*) AS n,SUM(id) AS ids FROM big_items
+  expect:
+    data: [{n: 288000, ids: 46151856000}]
+- name: bulk-delete-uncommitted-isolation
+  sql: SELECT COUNT(*) AS n FROM big_items
+  expect:
+    data: [{n: 320000}]
+- name: bulk-delete-rollback
+  session_id: cluster-bulk-delete
+  sql: ROLLBACK
+- name: bulk-delete-restored
+  sql: SELECT COUNT(*) AS n FROM big_items
+  expect:
+    data: [{n: 320000}]
+
+# Autocommit must publish the same durable logical result as local DML.
+# The runner preserves an independent pre-oracle fixture for the cluster.
+- name: bulk-delete-restored-full-signature
+  sql: SELECT COUNT(*) AS n,SUM(id) AS ids,SUM(v7) AS vals FROM big_items
+  expect:
+    data: [{n: 320000, ids: 51199840000, vals: 687845503431224}]
+
+- name: bulk-update-autocommit
+  sql: UPDATE big_items SET v7=-id-1 WHERE id%5000<500
+  timeout: 60
+  expect:
+    affected_rows: 32000
+    cluster:
+      min_remote_shards: 2
+      min_remote_nodes: 2
+      data_exceeds_node_ram: true
+- name: bulk-update-committed-visibility
+  sql: SELECT COUNT(*) AS n FROM big_items WHERE id%5000<500 AND v7=-id-1
+  expect:
+    data: [{n: 32000}]
+    cluster:
+      min_remote_shards: 1
+- name: bulk-delete-autocommit
+  sql: DELETE FROM big_items WHERE id%5000<500
+  timeout: 60
+  expect:
+    affected_rows: 32000
+    cluster:
+      min_remote_shards: 2
+      min_remote_nodes: 2
+      data_exceeds_node_ram: true
+- name: bulk-delete-committed-visibility
+  sql: SELECT COUNT(*) AS n,SUM(id) AS ids FROM big_items
+  expect:
+    data: [{n: 288000, ids: 46151856000}]
     cluster:
       min_remote_shards: 1

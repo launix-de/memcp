@@ -153,7 +153,7 @@ func TestClusterMountDoesNotSubscribeThroughReplication(t *testing.T) {
 	if activeReplication(&database{Name: "separate_replica_tenant"}) != manager {
 		t.Fatal("unrelated replication namespace was disabled")
 	}
-	tx := &TxContext{}
+	tx := NewTxContext(TxCursorStability)
 	session := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return scm.NewString(table.schema.Name) })
 	replicationEnter(tx, session)
 	if tx.replicationActive || len(manager.directory.Records) != 0 {
@@ -318,7 +318,8 @@ func TestClusterGrantedSchemaReadDoesNotConsultSession(t *testing.T) {
 	defer sharedClusterMounts.Store(oldMounts)
 	oldService := nodeScans.Swap(&nodeScanService{cluster: cluster})
 	defer nodeScans.Store(oldService)
-	tx := &TxContext{Session: scm.NewFunc(func(...scm.Scmer) scm.Scmer { panic("granted schema read consulted user session") })}
+	tx := NewTxContext(TxCursorStability)
+	tx.Session = scm.NewFunc(func(...scm.Scmer) scm.Scmer { panic("granted schema read consulted user session") })
 	tbl.schema.GetRead(tx).Release()
 }
 
@@ -963,5 +964,115 @@ func TestClusterShardRestartRecoveryUsesLiveReports(t *testing.T) {
 				t.Fatal("live read proof did not restore its owner directory")
 			}
 		})
+	}
+}
+
+func TestClusterCacheTryReadDeclinesActiveNativeTransaction(t *testing.T) {
+	for _, mode := range []TxMode{TxCursorStability, TxACID} {
+		t.Run(fmt.Sprint(mode), func(t *testing.T) {
+			tbl, _ := createDurabilityTestTable(t, "t_cache_try_read", 3)
+			self := clusterMember{ID: "memcp://" + uuid.NewString(), Boot: uuid.NewString()}
+			reader := clusterMember{ID: "memcp://" + uuid.NewString(), Boot: uuid.NewString()}
+			cluster := &nodeCluster{self: self}
+			cluster.view.Store(&clusterView{members: []clusterMember{self, reader}})
+			cluster.initializeManager()
+			r := cluster.manager
+			shard := tbl.ActiveShards()[0]
+			cell := r.declareShard(shard, self.ID, true)
+			tx := NewTxContext(mode)
+			tx.mu.Lock()
+			tx.getOrCreateShardTxLocked(shard)
+			tx.mu.Unlock()
+			defer tx.Rollback()
+			packet := mosiPacket{Kind: "read", Resource: *cell.resource.Load(),
+				ID: uuid.NewString(), Sequence: 1, Boot: reader.Boot, TryRead: true}
+			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			defer cancel()
+			if err := r.coordinate(ctx, reader.ID, packet); err != errClusterReadBusy {
+				t.Fatalf("opportunistic read waited for the transaction or changed authority: %v", err)
+			}
+			if cell.ownstate.Phase() != mosi.M || cell.ownstate.ClosingWrites() || cell.writesDrained() {
+				t.Fatal("declined cache admission changed native transaction ownership")
+			}
+			tx.Rollback()
+			packet.Sequence++
+			if err := r.coordinate(ctx, reader.ID, packet); err != errClusterReadBusy {
+				t.Fatalf("cache admission compacted a modified payload instead of delegating its task: %v", err)
+			}
+			if cell.ownstate.Phase() != mosi.M || cell.ownstate.ClosingWrites() || !cell.writesDrained() {
+				t.Fatal("declined preparation changed the completed transaction's authority")
+			}
+			cell.directory.Lock()
+			err := r.coordinate(ctx, reader.ID, packet)
+			cell.directory.Unlock()
+			if err != errClusterReadBusy {
+				t.Fatalf("opportunistic read waited for directory ownership: %v", err)
+			}
+		})
+	}
+}
+
+func TestClusterCacheTryReadLeavesExistingAcquisitionAlone(t *testing.T) {
+	cluster := &nodeCluster{self: clusterMember{ID: "memcp://" + uuid.NewString()}, ctx: context.Background()}
+	cluster.initializeManager()
+	owner := "memcp://" + uuid.NewString()
+	peer := &mosiPeer{done: make(chan struct{}), outgoing: make(chan mosiMessage, 1)}
+	cluster.view.Store(&clusterView{links: []*clusterLink{{member: clusterMember{ID: owner}, peer: peer}}})
+	resource := mosiResource{Database: "cache_try_existing"}
+	cluster.manager.updateRecord(resource, func(record *replicaRecord) bool {
+		record.Owner, record.Epoch = owner, 1
+		return true
+	})
+	cell := cluster.manager.resourceCell(resource)
+	request, _ := cell.ownstate.Request(mosi.S)
+	if cluster.tryRead(context.Background(), resource) {
+		t.Fatal("a pending acquisition certified cache reuse")
+	}
+	if cell.ownstate.Phase() != mosi.SR || request.Flight().Err() != nil || len(peer.outgoing) != 0 {
+		t.Fatal("cache admission cancelled or duplicated the existing acquisition")
+	}
+}
+
+func TestClusterCacheTryReadUsesGrantedBackendWithoutOwnerLookup(t *testing.T) {
+	cluster := &nodeCluster{}
+	cluster.initializeManager()
+	resource := mosiResource{Database: "cache_backend_read", Table: "items", Shard: uuid.NewString()}
+	cell := cluster.manager.resourceCell(resource)
+	cell.ownstate.Initialize(mosi.S)
+	cell.ownstate.BackendOnly()
+	// There is no network, roster or contact peer. Eviction retained a valid
+	// S grant; authorizing another read must consume that existing proof.
+	if !cluster.tryRead(context.Background(), resource) || cell.ownstate.Phase() != mosi.S {
+		t.Fatal("an existing backend read permission required owner discovery")
+	}
+}
+
+func TestClusterRemoteMutationRedirectsBeforeRecallingParticipant(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "t_remote_mutation_redirect", 4)
+	shard := tbl.ActiveShards()[0]
+	cluster := &nodeCluster{self: clusterMember{ID: "former-owner"}, ctx: context.Background(), databases: map[string]bool{tbl.schema.Name: true}}
+	cluster.initializeManager()
+	cluster.view.Store(&clusterView{})
+	schema := cluster.manager.resourceCell(mosiResource{Database: tbl.schema.Name})
+	schema.ownstate.Initialize(mosi.M)
+	schema.clusterstate.Initialize(mosi.M)
+	cell := cluster.declareShard(shard, false)
+	cell.ownstate.Initialize(mosi.IO)
+	cell.clusterstate.Initialize(mosi.IO)
+	resource := *cell.resource.Load()
+	cluster.manager.updateRecord(resource, func(record *replicaRecord) bool {
+		record.Owner, record.Epoch = "transaction-participant", 4
+		return true
+	})
+	oldMounts := sharedClusterMounts.Swap(&map[string]bool{tbl.schema.Name: true})
+	defer sharedClusterMounts.Store(oldMounts)
+	oldService := nodeScans.Swap(&nodeScanService{cluster: cluster})
+	defer nodeScans.Store(oldService)
+	executed := false
+	err := withRemoteScanShard(&remoteScanShard{Schema: tbl.filterSchemaFingerprint(), Resource: resource}, nil, true, "coordinator", "",
+		func(*storageShard) error { executed = true; return nil })
+	redirect, ok := err.(clusterScanRedirect)
+	if !ok || redirect.owner != "transaction-participant" || executed || cell.ownstate.Phase() != mosi.IO {
+		t.Fatalf("stale task recalled participant rights or executed callbacks: %v, executed=%v", err, executed)
 	}
 }

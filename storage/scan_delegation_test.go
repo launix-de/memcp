@@ -134,7 +134,31 @@ func TestScanDelegationOnlyConsumesAcquisitionPanic(t *testing.T) {
 	}
 }
 
-func TestScanDelegationRejectsUnsupportedAndStaleTasks(t *testing.T) {
+func TestScanDelegationPreservesNativeMutationInvocation(t *testing.T) {
+	for _, column := range []string{"$update", "$increment:id"} {
+		t.Run(column, func(t *testing.T) {
+			tbl := setupScanParallelTestTable(t, "tscandelegationmutation")
+			shard := tbl.ActiveShards()[0]
+			tx := NewTxContext(TxACID)
+			defer tx.Rollback()
+			calls := 0
+			setTestScanTarget(shard, func(_ mosiResource, invocation shardScanInvocation) scanResult {
+				calls++
+				if invocation.tx != tx || len(invocation.callbackCols) != 1 || invocation.callbackCols[0] != column {
+					t.Fatal("delegation lost the native transaction or mutation callback")
+				}
+				return scanResult{res: scm.NewInt(4), outCount: 4, inputCount: 4, candidateCount: 4}
+			})
+			combine := scm.NewFunc(func(args ...scm.Scmer) scm.Scmer { return scm.NewInt(args[0].Int() + args[1].Int()) })
+			got := tbl.scanWithBatch(tx, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, nil, scm.NewNil(), []string{column}, scm.NewNil(), scm.NewInt(0), combine, false, 0, nil)
+			if got.Int() != 4 || calls != 1 {
+				t.Fatalf("result=%v delegation count=%d", got, calls)
+			}
+		})
+	}
+}
+
+func TestScanDelegationRejectsStaleTasks(t *testing.T) {
 	tbl := setupScanParallelTestTable(t, "tscandelegationunsupported")
 	shard := tbl.ActiveShards()[0]
 	calls := 0
@@ -142,23 +166,6 @@ func TestScanDelegationRejectsUnsupportedAndStaleTasks(t *testing.T) {
 		calls++
 		return scanResult{}
 	})
-	for _, test := range []struct {
-		stride  int
-		columns []string
-		want    string
-	}{
-		{columns: []string{"$update"}, want: "remote shard scan mutations require a transaction participant protocol"},
-		{columns: []string{"$increment:id"}, want: "remote shard scan mutations require a transaction participant protocol"},
-	} {
-		var failure any
-		func() {
-			defer func() { failure = recover() }()
-			tbl.scanWithBatch(nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, nil, scm.NewNil(), test.columns, scm.NewNil(), scm.NewInt(0), scm.NewNil(), false, test.stride, nil)
-		}()
-		if fmt.Sprint(failure) != test.want {
-			t.Fatalf("unsupported scan failure = %v, want %s", failure, test.want)
-		}
-	}
 	stale := *shard.scanTarget.Load()
 	stale.resource.Shard = uuid.NewString()
 	shard.scanTarget.Store(&stale)

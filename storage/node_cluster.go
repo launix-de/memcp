@@ -148,6 +148,8 @@ func (cluster *nodeCluster) handle(session *scanRPCSession, ctx context.Context,
 		return nil, err
 	}
 	switch method {
+	case "cluster.try_read":
+		return cluster.handleTryRead(ctx, source, data)
 	case "cluster.location", "cluster.location_update", "cluster.schema_locations":
 		return cluster.handleLocations(ctx, source, method, data)
 	case "cluster.reserve_ids":
@@ -178,7 +180,7 @@ func (cluster *nodeCluster) exchange(link *clusterLink) error {
 	ctx, cancel := context.WithTimeout(cluster.ctx, 3*time.Second)
 	defer cancel()
 	var hello clusterHello
-	if err := cluster.service.control(ctx, link.peer, "cluster.hello", cluster.hello(), &hello); err != nil {
+	if err := cluster.service.control(ctx, link.peer, "cluster.hello", cluster.hello(), &hello, true); err != nil {
 		return err
 	}
 	return cluster.remember(link.member.ID, hello)

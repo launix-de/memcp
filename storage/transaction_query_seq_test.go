@@ -20,9 +20,57 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/launix-de/memcp/scm"
 )
+
+func TestTransactionVisibilityDoesNotWaitForDirectoryWriter(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "t_tx_visibility_directory", 4)
+	shard := tbl.ActiveShards()[0]
+	tx := NewTxContext(TxACID)
+	defer tx.Rollback()
+	tx.AddToDeleteMask(shard, 1)
+	tx.mu.Lock()
+	visible := make(chan bool, 1)
+	go func() { visible <- tx.IsVisible(shard, 1) }()
+	blocked := false
+	select {
+	case value := <-visible:
+		if value {
+			t.Error("transaction's own deletion became visible")
+		}
+	case <-time.After(time.Second):
+		blocked = true
+		t.Error("row visibility waited for the transaction directory writer")
+	}
+	tx.mu.Unlock()
+	if blocked {
+		<-visible
+	}
+}
+
+func TestQueryCleanupJoinsAllWorkBeforeReleasingReaders(t *testing.T) {
+	tx := NewTxContext(TxCursorStability)
+	tx.beginQuery(nil, 1, "cleanup ordering")
+	joined := 0
+	tx.retainQueryReader(func() {
+		if joined != 2 {
+			t.Error("physical reader released before all work joined")
+		}
+		joined++
+	})
+	tx.RetainQueryWork(func() { joined++; panic("output failed") })
+	tx.RetainQueryWork(func() { joined++ })
+	var failure any
+	func() {
+		defer func() { failure = recover() }()
+		tx.endQuery(1)
+	}()
+	if fmt.Sprint(failure) != "output failed" || joined != 3 || tx.queryActive.Load() {
+		t.Fatalf("incomplete cleanup: failure=%v joined=%d active=%v", failure, joined, tx.queryActive.Load())
+	}
+}
 
 func TestQuerySeqFromTxUsesExplicitTransactionStatement(t *testing.T) {
 	const cachedSeq uint64 = 17
@@ -43,6 +91,44 @@ func TestSessionStateFromTxUsesOnlyExplicitTransaction(t *testing.T) {
 	}
 	if got := SessionStateFromTx(tx); got != ss {
 		t.Fatalf("transaction lost explicit query session: got %p, want %p", got, ss)
+	}
+}
+
+func TestTransactionInvocationsShareMutationsAndKeepIndependentCleanup(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "tnative_invocation_state", 4)
+	shard := tbl.ActiveShards()[0]
+	tx := NewTxContext(TxACID)
+	defer tx.Rollback()
+	first, second := tx.newInvocation(), tx.newInvocation()
+	firstSession, secondSession := &scm.SessionState{}, &scm.SessionState{}
+	firstSeq := firstSession.BeginQuery("Cluster", "first native invocation")
+	secondSeq := secondSession.BeginQuery("Cluster", "second native invocation")
+	first.beginQuery(firstSession, firstSeq, "first native invocation")
+	second.beginQuery(secondSession, secondSeq, "second native invocation")
+	defer second.endQuery(secondSeq)
+	var cleaned bool
+	first.RetainQueryWork(func() { cleaned = true })
+	firstWrite := shard.UpdateFunction(0, false, false, first)
+	firstWrite(scm.NewSlice([]scm.Scmer{scm.NewString("payload"), scm.NewString("changed")}))
+	other := NewTxContext(TxACID)
+	if tx.IsVisible(shard, 0) || second.IsVisible(shard, 0) || !other.IsVisible(shard, 0) {
+		t.Fatal("native invocations lost their shared delete overlay or leaked it")
+	}
+	first.endQuery(firstSeq)
+	if !cleaned || !second.queryActive.Load() || second.queryInfo.Load() == nil || tx.State != TxActive {
+		t.Fatal("one invocation cleaned up another invocation or its transaction")
+	}
+	if first.ID != second.ID || first.durableID() != tx.durableID() {
+		t.Fatal("native invocation created a new transaction identity")
+	}
+	tx.Rollback()
+	if !other.IsVisible(shard, 0) || first.State != TxAborted || shard.activeTransactions.Load() != 0 {
+		t.Fatal("rollback did not cover the invocation's native mutation")
+	}
+	oldID := first.ID
+	tx.reset(TxCursorStability)
+	if first.ID != oldID || first.State != TxAborted || tx.ID == oldID {
+		t.Fatal("session reuse changed a previous invocation's transaction identity")
 	}
 }
 

@@ -122,7 +122,7 @@ func replicationOpenDatabase(user, database string) (err error) {
 	if replication.Load() == nil || !validReplicaDatabase(database) || sharedClusterDatabase(database) {
 		return nil
 	}
-	tx := &TxContext{}
+	tx := NewTxContext(TxCursorStability)
 	defer func() {
 		if tx.replicationActive {
 			replicationLeave(tx)

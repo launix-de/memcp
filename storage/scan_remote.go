@@ -18,8 +18,8 @@ import "encoding/json"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/memcp/storage/mosi"
 
-// Version 10 combines authenticated Scheme operations with adaptive ordered windows.
-const scanWireVersion = 10
+// Version 12 adds opportunistic MOSI read acquisition for shared cache scopes.
+const scanWireVersion = 13
 
 type remoteScanShard struct {
 	Schema   uint64       `json:"schema"`
@@ -49,6 +49,7 @@ type remoteScanDescribe struct {
 }
 
 type remoteScanTask struct {
+	AcquireFrom   string                `json:"acquire_from,omitempty"` // owner explicitly refused capacity before execution
 	Order         *remoteScanOrder      `json:"order,omitempty"`
 	Operator      shardScanOperator     `json:"operator"`
 	Stride        int                   `json:"stride,omitempty"`
@@ -65,7 +66,8 @@ type remoteScanTask struct {
 	Neutral       json.RawMessage       `json:"neutral"`
 }
 type remoteScanResult struct {
-	Rejected       bool            `json:"rejected,omitempty"` // capacity refusal before executing scan callbacks
+	RedirectTo     string          `json:"redirect_to,omitempty"` // routing refusal before acquiring payload or executing callbacks
+	Rejected       bool            `json:"rejected,omitempty"`    // capacity refusal before executing scan callbacks
 	Version        int             `json:"version"`
 	Shard          remoteScanShard `json:"shard"`
 	Value          json.RawMessage `json:"value"`
@@ -155,7 +157,7 @@ func (database *database) executeScanTask(ctx context.Context, s *scanRPCSession
 			if slot, batch := parseBatchPseudoColName(col); batch && slot >= request.Stride {
 				return nil, fmt.Errorf("batch column outside its input row")
 			}
-			if strings.HasPrefix(col, "$") {
+			if strings.HasPrefix(col, "$") && !(request.Access.Mutation && (col == "$update" || strings.HasPrefix(col, "$increment:"))) {
 				return nil, fmt.Errorf("remote scan rejects query-local or mutation columns")
 			}
 		}
@@ -170,8 +172,7 @@ func (database *database) executeScanTask(ctx context.Context, s *scanRPCSession
 	ss := &scm.SessionState{}
 	seq := ss.BeginQuery("Cluster", "remote shard reduction")
 	ss.SetQueryContext(seq, ctx)
-	tx := NewTxContext(TxCursorStability)
-	tx.autoCommit = true
+	var tx *TxContext
 	if request.Transaction != nil {
 		value, err := s.service.importObject(ctx, s.peer, *request.Transaction)
 		if err != nil {
@@ -184,26 +185,44 @@ func (database *database) executeScanTask(ctx context.Context, s *scanRPCSession
 		// The peer endpoint is shared, never its mutable executor. Even if two
 		// subscans import the same serialized capture, beginQuery/endQuery must
 		// belong to distinct native participants with independent cancellation.
-		if _, err := origin.BindClusterInvocation(scm.NewAny(tx)); err != nil {
-			return nil, err
-		}
+		tx = origin.newInvocation()
+	} else {
+		tx = NewTxContext(TxCursorStability)
+		tx.autoCommit = true
 	}
+	ss.ID = tx.sourceSessionID
 	tx.beginQuery(ss, seq, "remote shard reduction")
+	if request.Transaction == nil {
+		// A native scan without a supplied transaction still owns any worker
+		// mutations. Finalize them here rather than leaving anonymous overlays
+		// and generation pins after returning the RPC result.
+		defer func() {
+			if tx.State == TxActive {
+				tx.Rollback()
+			}
+		}()
+	}
 	defer tx.endQuery(seq)
 	stop := context.AfterFunc(ctx, func() { ss.KillQuery(seq) })
 	defer stop()
 	s.service.executions.Store(id, tx)
 	defer s.service.executions.Delete(id)
 	binding := scm.NewSlice([]scm.Scmer{scm.NewSymbol("node_query_context"), scm.NewString(id)})
-	filter, err := scm.UnmarshalProcedure(request.Filter, scm.ProcedureDecode{Prepare: prepareScanProcedure(binding), Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) { return s.service.importObject(ctx, s.peer, ref) }})
+	decode := scm.ProcedureDecode{Prepare: prepareScanProcedure(binding), Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) {
+		value, err := s.service.importObject(ctx, s.peer, ref)
+		if err != nil {
+			return scm.NewNil(), err
+		}
+		return scm.BindClusterInvocation(value, scm.NewAny(tx))
+	}}
+	filter, err := scm.UnmarshalProcedure(request.Filter, decode)
 	if err != nil {
 		return nil, err
 	}
-	reducer, err := scm.UnmarshalProcedure(request.MapReducer, scm.ProcedureDecode{Prepare: prepareScanProcedure(binding), Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) { return s.service.importObject(ctx, s.peer, ref) }})
+	reducer, err := scm.UnmarshalProcedure(request.MapReducer, decode)
 	if err != nil {
 		return nil, err
 	}
-	decode := scm.ProcedureDecode{Prepare: prepareScanProcedure(binding), Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) { return s.service.importObject(ctx, s.peer, ref) }}
 	var order *shardOrderInvocation
 	if request.Order != nil {
 		order, err = request.Order.bind(decode)
@@ -214,7 +233,7 @@ func (database *database) executeScanTask(ctx context.Context, s *scanRPCSession
 	batch := make([]scm.Scmer, len(request.Batch))
 	for i, item := range request.Batch {
 		var err error
-		batch[i], err = item.reconstruct(scm.ProcedureDecode{Prepare: prepareScanProcedure(binding), Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) { return s.service.importObject(ctx, s.peer, ref) }})
+		batch[i], err = item.reconstruct(decode)
 		if err != nil {
 			return nil, err
 		}
@@ -224,7 +243,9 @@ func (database *database) executeScanTask(ctx context.Context, s *scanRPCSession
 		return nil, err
 	}
 	var output remoteScanResult
-	withInput := func(execute func(*storageShard) error) error { return withRemoteScanShard(&request.Shard, tx, execute) }
+	withInput := func(execute func(*storageShard) error) error {
+		return withRemoteScanShard(&request.Shard, tx, request.Access.Mutation, s.peer.objectPeer.ID, request.AcquireFrom, execute)
+	}
 	if input != nil {
 		withInput = func(execute func(*storageShard) error) error {
 			shard := input
@@ -240,7 +261,7 @@ func (database *database) executeScanTask(ctx context.Context, s *scanRPCSession
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		access, err := request.Access.bind(scm.ProcedureDecode{Prepare: prepareScanProcedure(binding), Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) { return s.service.importObject(ctx, s.peer, ref) }})
+		access, err := request.Access.bind(decode)
 		if err != nil {
 			return err
 		}
@@ -278,10 +299,20 @@ func (database *database) executeScanTask(ctx context.Context, s *scanRPCSession
 	if _, capacity := err.(clusterCapacityRejection); capacity {
 		return remoteScanResult{Rejected: true}, nil
 	}
+	if redirect, ok := err.(clusterScanRedirect); ok {
+		return remoteScanResult{RedirectTo: redirect.owner}, nil
+	}
 	if err != nil {
 		return nil, err
 	}
 	reply, err := boundedScanReply(output)
+	if err == nil && request.Transaction == nil {
+		tx.endStatement()
+		err = ctx.Err()
+		if err == nil {
+			err = tx.Commit()
+		}
+	}
 	if err != nil {
 		s.service.cancelObjectOffers(s.peer, output.ClusterObjectOffers())
 	}
@@ -316,8 +347,9 @@ func boundedScanReply(value any) (any, error) {
 }
 
 // Acquire through the same schema/shard MOSI and generation lifetime boundaries
-// as a local scan. A changed physical generation aborts rather than rebinding IDs.
-func withRemoteScanShard(expected *remoteScanShard, tx *TxContext, execute func(*storageShard) error) (err error) {
+// as a local scan. Routing hints follow its current generation; physical input
+// IDs are retained only by the explicit native object path.
+func withRemoteScanShard(expected *remoteScanShard, tx *TxContext, mutation bool, sender, acquireFrom string, execute func(*storageShard) error) (err error) {
 	// A shared-backend worker either admits this generation once or refuses
 	// before scan callbacks. Capacity refusal alone permits choosing another peer.
 	shared := sharedClusterDatabase(expected.Resource.Database)
@@ -338,10 +370,45 @@ func withRemoteScanShard(expected *remoteScanShard, tx *TxContext, execute func(
 	if expected.Schema == 0 || tbl.filterSchemaFingerprint() != expected.Schema {
 		return fmt.Errorf("remote scan schema changed")
 	}
+	// Resolve the logical resource before looking for a physical generation.
+	// A cold candidate may know only the old UUID; its ordinary MOSI acquisition
+	// installs the current content and forwarding route from the actual owner.
+	var sourceCell *replicaCell
+	if r := activeReplication(tbl.schema); r != nil && (shared || r.lookupCell(expected.Resource) != nil) {
+		if shared {
+			// A task can arrive through a stale owner hint. Follow the native
+			// forwarding route before acquiring rights: recalling a shard from
+			// this transaction's own participant would wait for its own end.
+			r.restoreResourceRoutes(expected.Resource)
+			record := r.cluster.report(expected.Resource)
+			phase := mosi.ParsePhase(record.State)
+			local := phase.Readable()
+			// The sender can deliberately delegate its own cold payload because
+			// it cannot admit that shard. That path still uses native acquisition;
+			// a third-party owner is a stale task route to follow first.
+			if !local && record.Owner != "" && record.Owner != r.id && record.Owner != sender && record.Owner != acquireFrom {
+				return clusterScanRedirect{owner: record.Owner}
+			}
+		}
+		wanted := mosi.S
+		if mutation {
+			wanted = mosi.M
+		}
+		sourceCell = r.obtain(expected.Resource, wanted, replicationUser(tx), tx)
+	}
 	declarations := tbl.columnNamesSnapshot.Load()
 	for {
 		topology := tbl.activeTopology()
-		selected := findScanShard(tbl, expected.Resource)
+		var selected *storageShard
+		if sourceCell != nil {
+			selected = sourceCell.publishedShard()
+		}
+		// A newly declared native shard can already have a routing/permission
+		// cell before its first payload publication. Its topology remains the
+		// owner of that existing physical generation.
+		if selected == nil {
+			selected = findScanShard(tbl, expected.Resource)
+		}
 		if selected == nil {
 			return fmt.Errorf("remote shard disappeared")
 		}
@@ -357,16 +424,10 @@ func withRemoteScanShard(expected *remoteScanShard, tx *TxContext, execute func(
 		return func() error {
 			defer topology.releaseOperation()
 			defer selected.activeScanners.Add(-1)
-			// Acquire current coherence rights, but retain the requested shard's
-			// physical IDs and captured extent through native snapshot access.
-			if r := activeReplication(tbl.schema); r != nil {
-				cell := r.shardCell(selected)
-				if shared {
-					acquireClusterRead(ctx, *cell.resource.Load())
-				} else {
-					r.obtain(*cell.resource.Load(), mosi.S, "", tx)
-				}
-			}
+			// Ordinary tasks acquire the current native generation. Acquiring
+			// MOSI rights can install a replacement even for the same UUID; a
+			// snapshot read of selected would then consume its revoked payload.
+			// Only an explicit input object above retains historical physical IDs.
 			var lease ReadAccess
 			var capacity bool
 			func() {
@@ -379,16 +440,18 @@ func withRemoteScanShard(expected *remoteScanShard, tx *TxContext, execute func(
 						}
 					}
 				}()
-				lease = selected.getRead(tx, true, false)
+				if mutation {
+					write := selected.GetWrite(tx)
+					lease = ReadAccess{shard: write.shard, mutation: &write}
+				} else {
+					lease = selected.GetRead(tx, false)
+				}
 			}()
 			if capacity {
 				return clusterCapacityRejection{}
 			}
 			defer lease.Release()
 			shard := lease.shard
-			if shard.uuid.String() != expected.Resource.Shard {
-				return fmt.Errorf("remote scan shard changed")
-			}
 			if err := execute(shard); err != nil {
 				return err
 			}
@@ -401,11 +464,12 @@ func withRemoteScanShard(expected *remoteScanShard, tx *TxContext, execute func(
 }
 
 type peerScanExecutor struct {
-	input      *scm.ClusterReference
-	inputLease scm.Scmer // keeps the imported old-generation handle until its query is unreachable
-	peer       *mosiPeer
-	ctx        context.Context
-	prepared   remoteScanShard
+	acquireFrom string
+	input       *scm.ClusterReference
+	inputLease  scm.Scmer // keeps the imported old-generation handle until its query is unreachable
+	peer        *mosiPeer
+	ctx         context.Context
+	prepared    remoteScanShard
 }
 
 func (origin *peerScanExecutor) ExecuteShardScan(resource mosiResource, invocation shardScanInvocation) scanResult {
@@ -416,8 +480,14 @@ func (origin *peerScanExecutor) ExecuteShardScan(resource mosiResource, invocati
 	if condition.IsNil() {
 		condition = scm.Eval(scm.Read("remote unconditional filter", "(lambda args true)"), &scm.Globalenv)
 	}
-	bindings := new(scm.SerializationContext)
-	if tx := invocation.tx; tx != nil {
+	owner := invocation.tx
+	if owner == nil || !owner.queryActive.Load() {
+		owner = NewTxContext(TxCursorStability)
+		owner.beginQuery(nil, 0, "remote operator")
+		defer owner.endQuery(0)
+	}
+	bindings := &scm.SerializationContext{Invocation: scm.NewAny(owner)}
+	if tx := invocation.tx; tx != nil && tx.queryActive.Load() {
 		if existing := tx.remoteBindings.Load(); existing != nil {
 			bindings = existing
 		} else if !tx.remoteBindings.CompareAndSwap(nil, bindings) {
@@ -449,7 +519,7 @@ func (origin *peerScanExecutor) ExecuteShardScan(resource mosiResource, invocati
 	if err != nil {
 		panic(err)
 	}
-	task := remoteScanTask{Operator: invocation.operator, Stride: invocation.stride, Input: executor.input, Version: scanWireVersion, Shard: executor.prepared, FilterColumns: invocation.conditionCols, Filter: filter, MapColumns: invocation.callbackCols, MapReducer: reducer, Neutral: json.RawMessage(neutral)}
+	task := remoteScanTask{AcquireFrom: executor.acquireFrom, Operator: invocation.operator, Stride: invocation.stride, Input: executor.input, Version: scanWireVersion, Shard: executor.prepared, FilterColumns: invocation.conditionCols, Filter: filter, MapColumns: invocation.callbackCols, MapReducer: reducer, Neutral: json.RawMessage(neutral)}
 	if invocation.order != nil {
 		task.Order, err = freezeScanOrder(invocation.order, bindings)
 		if err != nil {
@@ -467,6 +537,7 @@ func (origin *peerScanExecutor) ExecuteShardScan(resource mosiResource, invocati
 	if err != nil {
 		panic(err)
 	}
+	task.Access.Mutation = task.Access.Mutation || scanMutates(invocation.callbackCols)
 	if invocation.tx != nil {
 		// Export only unmodified remote inputs. A modified generation is kept
 		// resident by native TX pins and must execute at its participant; a cold
@@ -478,11 +549,11 @@ func (origin *peerScanExecutor) ExecuteShardScan(resource mosiResource, invocati
 				}
 			}
 		}
-		view, err := scm.ClusterObjectValue(invocation.tx, executor.ctx, scm.ClusterRequest{Method: "view"})
+		view, err := scm.ClusterObjectValue(invocation.tx.transactionState, executor.ctx, scm.ClusterRequest{Method: "view"})
 		if err != nil {
 			panic(err)
 		}
-		ref, err := executor.peer.scanService.exportObject(executor.peer, invocation.tx, view)
+		ref, err := executor.peer.scanService.exportObject(executor.peer, invocation.tx.transactionState, view)
 		if err != nil {
 			panic(err)
 		}

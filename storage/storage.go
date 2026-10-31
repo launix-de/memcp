@@ -1067,6 +1067,9 @@ func Init(en scm.Env) {
 			tables := make([]*table, len(sources))
 			for i, source := range sources {
 				tables[i] = TableFromScmer(source)
+				if !tables[i].acquireCacheSourceRights(currentTx) {
+					return scm.Apply(a[3])
+				}
 			}
 			sort.Slice(tables, func(i, j int) bool {
 				return tables[i].schema.Name+"\x00"+tables[i].Name < tables[j].schema.Name+"\x00"+tables[j].Name
