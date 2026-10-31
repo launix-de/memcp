@@ -208,7 +208,7 @@ func (database *database) executeScanTask(ctx context.Context, s *scanRPCSession
 	s.service.executions.Store(id, tx)
 	defer s.service.executions.Delete(id)
 	binding := scm.NewSlice([]scm.Scmer{scm.NewSymbol("node_query_context"), scm.NewString(id)})
-	decode := scm.ProcedureDecode{ResolveHandle: s.service.handleResolver(ctx), Prepare: prepareScanProcedure(binding), Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) {
+	decode := scm.ProcedureDecode{ResolveHandle: s.service.handleResolver(ctx, scm.NewAny(tx)), Prepare: prepareScanProcedure(binding), Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) {
 		value, err := s.service.importObject(ctx, s.peer, ref)
 		if err != nil {
 			return scm.NewNil(), err
@@ -569,7 +569,7 @@ func (origin *peerScanExecutor) ExecuteShardScan(resource mosiResource, invocati
 		panic("mismatched remote scan response")
 	}
 	defer executor.peer.scanService.discardObjectOffers(executor.peer, response.ClusterObjectOffers())
-	value, err := schemeValue(response.Value).reconstruct(scm.ProcedureDecode{ResolveHandle: executor.peer.scanService.handleResolver(executor.ctx), Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) {
+	value, err := schemeValue(response.Value).reconstruct(scm.ProcedureDecode{ResolveHandle: executor.peer.scanService.handleResolver(executor.ctx, scm.NewAny(owner)), Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) {
 		return executor.peer.scanService.importObject(executor.ctx, executor.peer, ref)
 	}})
 	if err != nil {

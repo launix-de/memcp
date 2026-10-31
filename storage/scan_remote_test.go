@@ -1380,7 +1380,7 @@ func TestHandleDeliveryIsIndependentAndCleanupJoinsRunningHandler(t *testing.T) 
 			t.Fatal(err)
 		}
 		args := expression.Slice()
-		handle, err := client.handleResolver(context.Background())(args[1].String(), args[2].String(), uint64(args[3].Int()))
+		handle, err := client.handleResolver(context.Background(), scm.NewNil())(args[1].String(), args[2].String(), uint64(args[3].Int()))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1417,5 +1417,60 @@ func TestHandleDeliveryIsIndependentAndCleanupJoinsRunningHandler(t *testing.T) 
 	owner.handles.Range(func(_, _ any) bool { remaining++; return true })
 	if remaining != 0 {
 		t.Fatalf("finished query retained %d slots", remaining)
+	}
+}
+
+func TestRemoteNativeClosureCanReturnAnotherClosure(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "tremote_returned_closure", 4)
+	peer, service, _ := setupRemoteScanConnection(t)
+	var parts []remoteScanShard
+	if err := service.control(context.Background(), peer, "scan.describe", remoteScanDescribe{scanWireVersion, tbl.schema.Name, tbl.Name}, &parts, true); err != nil {
+		t.Fatal(err)
+	}
+	makeOffset := scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+		id := args[0].Int()
+		return scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return scm.NewInt(id + values[0].Int()) })
+	})
+	env := &scm.Env{Vars: scm.Vars{scm.Symbol("make_offset"): makeOffset}, Outer: &scm.Globalenv}
+	mapper := scm.Eval(scm.Read(t.Name(), `(lambda (acc id) (+ acc ((make_offset id) 7)))`), env)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	stub := &storageShard{uuid: tbl.ActiveShards()[0].uuid, t: tbl}
+	target := &shardScanTarget{resource: parts[0].Resource, executor: &peerScanExecutor{peer: peer, ctx: ctx, prepared: parts[0]}}
+	stub.scanTarget.Store(target)
+	result := (shardScanInvocation{mapReduce: mapper, callbackCols: []string{"id"}, neutral: scm.NewInt(0)}).delegate(stub, shardReadDelegation{target})
+	if result.err.r != nil || result.res.Int() != 38 {
+		t.Fatal("returned native closure lost its owner", result.err.r, result.res)
+	}
+	for _, node := range []*nodeScanService{service, nodeScans.Load()} {
+		remaining := 0
+		node.handles.Range(func(_, _ any) bool { remaining++; return true })
+		if remaining != 0 {
+			t.Fatalf("returned closure retained %d slots after its query", remaining)
+		}
+	}
+}
+
+func TestRemoteNativeClosureCanInvokeOutputArgument(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "tremote_output_argument", 4)
+	peer, service, _ := setupRemoteScanConnection(t)
+	var parts []remoteScanShard
+	if err := service.control(context.Background(), peer, "scan.describe", remoteScanDescribe{scanWireVersion, tbl.schema.Name, tbl.Name}, &parts, true); err != nil {
+		t.Fatal(err)
+	}
+	var sum atomic.Int64
+	constant := scm.NewBool(true)
+	output := scm.NewClusterCallback(context.Background(), func(args ...scm.Scmer) scm.Scmer { sum.Add(args[0].Int()); return constant }, &constant)
+	apply := scm.NewFunc(func(args ...scm.Scmer) scm.Scmer { return scm.Apply(args[0], args[1]) })
+	env := &scm.Env{Vars: scm.Vars{scm.Symbol("apply_output"): apply, scm.Symbol("output"): output}, Outer: &scm.Globalenv}
+	mapper := scm.Eval(scm.Read(t.Name(), `(lambda (acc id) (begin (if (not (apply_output output id)) (error "output result lost")) (+ acc 1)))`), env)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	stub := &storageShard{uuid: tbl.ActiveShards()[0].uuid, t: tbl}
+	target := &shardScanTarget{resource: parts[0].Resource, executor: &peerScanExecutor{peer: peer, ctx: ctx, prepared: parts[0]}}
+	stub.scanTarget.Store(target)
+	result := (shardScanInvocation{mapReduce: mapper, callbackCols: []string{"id"}, neutral: scm.NewInt(0)}).delegate(stub, shardReadDelegation{target})
+	if result.err.r != nil || result.res.Int() != 4 || sum.Load() != 10 {
+		t.Fatal("output argument lost its ABI or owner", result.err.r, result.res, sum.Load())
 	}
 }

@@ -191,7 +191,7 @@ func TestClusterCallbackRejectsCallsAfterExportingQueryEnds(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	remote, err := scm.UnmarshalProcedure(data, scm.ProcedureDecode{ResolveHandle: client.handleResolver(ctx), Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) {
+	remote, err := scm.UnmarshalProcedure(data, scm.ProcedureDecode{ResolveHandle: client.handleResolver(ctx, scm.NewNil()), Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) {
 		return client.importObject(context.Background(), peer, ref)
 	}})
 	if err != nil {

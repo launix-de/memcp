@@ -68,7 +68,15 @@ func (callback *clusterCallback) expression(handle Scmer) Scmer {
 func (callback *clusterCallback) value() Scmer {
 	call := callback.call
 	if callback.endpoint != nil {
-		call = func(args ...Scmer) Scmer { return callClosure(callback.ctx, callback.endpoint, args) }
+		call = func(args ...Scmer) Scmer {
+			if callback.batchResult != nil {
+				// A closure passed as a value may have no streaming invocation.
+				// Keep its normal call ABI while addressing the batched endpoint.
+				callClosure(callback.ctx, callback.endpoint, []Scmer{NewSlice([]Scmer{NewSlice(args)})})
+				return *callback.batchResult
+			}
+			return callClosure(callback.ctx, callback.endpoint, args)
+		}
 	}
 	return NewClusterFunc(call, callback, clusterCallbackType)
 }
@@ -107,8 +115,10 @@ func (callback *clusterCallback) BindClusterInvocation(scope Scmer) (Scmer, erro
 	}
 	bound := *callback
 	bound.ctx = executionContextFrom(scope)
-	if endpoint, ok := bound.endpoint.(interface{ WithContext(context.Context) Handle }); ok {
-		bound.endpoint = endpoint.WithContext(bound.ctx)
+	if endpoint, ok := bound.endpoint.(interface {
+		WithInvocation(Scmer, context.Context) Handle
+	}); ok {
+		bound.endpoint = endpoint.WithInvocation(scope, bound.ctx)
 	}
 	if bound.batchResult != nil {
 		owner, ok := scope.Any().(interface{ RetainQueryWork(func()) bool })

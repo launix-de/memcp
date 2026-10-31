@@ -530,7 +530,7 @@ type testContextHandle struct {
 }
 
 func (handle *testContextHandle) Handle(value Scmer) { handle.call(handle.ctx, value) }
-func (handle *testContextHandle) WithContext(ctx context.Context) Handle {
+func (handle *testContextHandle) WithInvocation(_ Scmer, ctx context.Context) Handle {
 	bound := *handle
 	bound.ctx = ctx
 	return &bound

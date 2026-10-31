@@ -459,7 +459,7 @@ func init() {
 		if service == nil {
 			return nil, fmt.Errorf("cluster protocol is disabled")
 		}
-		return service.handleResolver(context.Background())(owner, boot, slot)
+		return service.handleResolver(context.Background(), scm.NewNil())(owner, boot, slot)
 	}
 	scm.RegisterClusterObjectType("tx-shard", func(handle scm.ClusterHandle) scm.Scmer {
 		view := handle.View.Slice()

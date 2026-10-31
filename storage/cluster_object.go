@@ -354,7 +354,7 @@ func (service *nodeScanService) importObject(ctx context.Context, peer *mosiPeer
 	if err := json.Unmarshal(reference.View, &frozen); err != nil {
 		return scm.NewNil(), err
 	}
-	decodedView, err := frozen.reconstruct(scm.ProcedureDecode{ResolveHandle: service.handleResolver(ctx), Resolve: func(child scm.ClusterReference) (scm.Scmer, error) { return service.importObject(ctx, peer, child) }})
+	decodedView, err := frozen.reconstruct(scm.ProcedureDecode{ResolveHandle: service.handleResolver(ctx, scm.NewNil()), Resolve: func(child scm.ClusterReference) (scm.Scmer, error) { return service.importObject(ctx, peer, child) }})
 	if err != nil {
 		return scm.NewNil(), err
 	}
@@ -398,7 +398,7 @@ func (service *nodeScanService) importObject(ctx context.Context, peer *mosiPeer
 			return scm.NewNil(), err
 		}
 		defer service.discardObjectOffers(target, result.Offers)
-		return result.Value.reconstruct(scm.ProcedureDecode{ResolveHandle: service.handleResolver(callCtx), Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) { return service.importObject(callCtx, target, ref) }})
+		return result.Value.reconstruct(scm.ProcedureDecode{ResolveHandle: service.handleResolver(callCtx, scm.NewNil()), Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) { return service.importObject(callCtx, target, ref) }})
 	}}
 	value, failure := scm.ReconstructClusterObject(handle)
 	if failure == nil {
@@ -511,7 +511,7 @@ func (s *scanRPCSession) requestObject(ctx context.Context, call clusterObjectCa
 	ctx = context.WithValue(ctx, clusterObjectQueryKey{}, tx)
 	binding := scm.NewSlice([]scm.Scmer{scm.NewSymbol("node_query_context"), scm.NewString(id)})
 	args := make([]scm.Scmer, len(call.Arguments))
-	decode := scm.ProcedureDecode{ResolveHandle: s.service.handleResolver(ctx), Prepare: prepareScanProcedure(binding), Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) {
+	decode := scm.ProcedureDecode{ResolveHandle: s.service.handleResolver(ctx, scm.NewAny(tx)), Prepare: prepareScanProcedure(binding), Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) {
 		value, err := s.service.importObject(ctx, s.peer, ref)
 		if err != nil {
 			return scm.NewNil(), err

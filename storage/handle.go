@@ -14,6 +14,7 @@ import "github.com/launix-de/memcp/scm"
 type handleSlot struct {
 	peer    clusterObjectPeer
 	handler scm.Handle
+	owner   scm.Scmer // local invocation lifetime; never part of a message
 	mu      sync.Mutex
 	closed  bool
 	calls   sync.WaitGroup
@@ -40,12 +41,14 @@ type remoteHandle struct {
 	peer    clusterObjectPeer
 	slot    uint64
 	ctx     context.Context
+	owner   scm.Scmer
 }
 
 func (handle *remoteHandle) Context() context.Context { return handle.ctx }
-func (handle *remoteHandle) WithContext(ctx context.Context) scm.Handle {
+func (handle *remoteHandle) WithInvocation(owner scm.Scmer, ctx context.Context) scm.Handle {
 	bound := *handle
 	bound.ctx = ctx
+	bound.owner = owner
 	return &bound
 }
 func (handle *remoteHandle) SerializeHandle(bindings *scm.SerializationContext) (scm.Scmer, error) {
@@ -61,7 +64,7 @@ func (handle *remoteHandle) Handle(value scm.Scmer) {
 	if peer == nil {
 		panic("handle peer is disconnected")
 	}
-	bindings := handle.service.handleBindings(&scm.SerializationContext{}, peer)
+	bindings := handle.service.handleBindings(&scm.SerializationContext{Invocation: handle.owner}, peer)
 	payload, err := freezeScanValue(value, bindings)
 	if err != nil {
 		panic(err)
@@ -75,20 +78,20 @@ func (handle *remoteHandle) Handle(value scm.Scmer) {
 		panic(err)
 	}
 }
-func (service *nodeScanService) handleResolver(ctx context.Context) func(string, string, uint64) (scm.Handle, error) {
+func (service *nodeScanService) handleResolver(ctx context.Context, scope scm.Scmer) func(string, string, uint64) (scm.Handle, error) {
 	return func(owner, boot string, slot uint64) (scm.Handle, error) {
 		identity := clusterObjectPeer{owner, boot}
 		if slot == 0 || service.objectConnection(identity) == nil {
 			return nil, fmt.Errorf("unknown handle peer or slot")
 		}
-		return &remoteHandle{service, identity, slot, ctx}, nil
+		return &remoteHandle{service: service, peer: identity, slot: slot, ctx: scanQueryContext(scmerToTxContext(scope), ctx), owner: scope}, nil
 	}
 }
 func (service *nodeScanService) handleBindings(bindings *scm.SerializationContext, peer *mosiPeer) *scm.SerializationContext {
 	owner := bindings.InvocationScope()
 	return bindings.WithHandleExport(func(handler scm.Handle) (scm.Scmer, error) {
 		slot := service.nextHandle.Add(1)
-		entry := &handleSlot{peer: peer.objectPeer, handler: handler}
+		entry := &handleSlot{peer: peer.objectPeer, handler: handler, owner: owner}
 		service.handles.Store(slot, entry)
 		release := func() { service.handles.Delete(slot) }
 		if receiver, ok := handler.(interface{ RetainHandleRelease(func()) }); ok {
@@ -113,7 +116,7 @@ func (s *scanRPCSession) handleValue(slot uint64, payload schemeValue) error {
 		return nil
 	}
 	defer target.calls.Done()
-	value, err := payload.reconstruct(scm.ProcedureDecode{ResolveHandle: s.service.handleResolver(s.peer.ctx), Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) {
+	value, err := payload.reconstruct(scm.ProcedureDecode{ResolveHandle: s.service.handleResolver(s.peer.ctx, target.owner), Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) {
 		return s.service.importObject(s.peer.ctx, s.peer, ref)
 	}})
 	if err != nil {
