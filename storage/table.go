@@ -3159,7 +3159,7 @@ func (col *column) evict(_ evictionMode, currentSize int64, freedByType *[numEvi
 			}
 			storage := shard.columns[col.Name]
 			ok := evictColumnCaches(storage, freedByType)
-			if ok && computed {
+			if ok && computed && storage != nil {
 				// Detach the cached value object. Existing readers retain their
 				// proxy and its payload through ordinary Go references.
 				proxy := &StorageComputeProxy{delta: make(map[uint32]scm.Scmer),
