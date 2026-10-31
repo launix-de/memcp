@@ -1046,3 +1046,33 @@ func TestClusterCacheTryReadUsesGrantedBackendWithoutOwnerLookup(t *testing.T) {
 		t.Fatal("an existing backend read permission required owner discovery")
 	}
 }
+
+func TestClusterRemoteMutationRedirectsBeforeRecallingParticipant(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "t_remote_mutation_redirect", 4)
+	shard := tbl.ActiveShards()[0]
+	cluster := &nodeCluster{self: clusterMember{ID: "former-owner"}, ctx: context.Background(), databases: map[string]bool{tbl.schema.Name: true}}
+	cluster.initializeManager()
+	cluster.view.Store(&clusterView{})
+	schema := cluster.manager.resourceCell(mosiResource{Database: tbl.schema.Name})
+	schema.ownstate.Initialize(mosi.M)
+	schema.clusterstate.Initialize(mosi.M)
+	cell := cluster.declareShard(shard, false)
+	cell.ownstate.Initialize(mosi.IO)
+	cell.clusterstate.Initialize(mosi.IO)
+	resource := *cell.resource.Load()
+	cluster.manager.updateRecord(resource, func(record *replicaRecord) bool {
+		record.Owner, record.Epoch = "transaction-participant", 4
+		return true
+	})
+	oldMounts := sharedClusterMounts.Swap(&map[string]bool{tbl.schema.Name: true})
+	defer sharedClusterMounts.Store(oldMounts)
+	oldService := nodeScans.Swap(&nodeScanService{cluster: cluster})
+	defer nodeScans.Store(oldService)
+	executed := false
+	err := withRemoteScanShard(&remoteScanShard{Schema: tbl.filterSchemaFingerprint(), Resource: resource}, nil, true, "coordinator", "",
+		func(*storageShard) error { executed = true; return nil })
+	redirect, ok := err.(clusterScanRedirect)
+	if !ok || redirect.owner != "transaction-participant" || executed || cell.ownstate.Phase() != mosi.IO {
+		t.Fatalf("stale task recalled participant rights or executed callbacks: %v, executed=%v", err, executed)
+	}
+}

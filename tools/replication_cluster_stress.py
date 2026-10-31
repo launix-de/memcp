@@ -1615,6 +1615,23 @@ def run_cluster_sql_contexts(nodes, reference, journal, report_path, status=None
         delete_id = 0 if distributed else 2
         completed = False
         try:
+            if status and not distributed and outcome == "COMMIT":
+                # This case checks the native node-local ACID commit boundary.
+                # Earlier delegated rollback cases can leave its shards at a
+                # different warm owner. Establish the documented local fixture
+                # through ordinary schema M/write acquisition before BEGIN.
+                host.client.scm(
+                    f'(createcolumn (table "{DATABASE}" false "context_items" false) "n" "INT" (list) (list))')
+                ownership = json.loads(host.client.scm("(cluster_status true)"))
+                if isinstance(ownership, str):
+                    ownership = json.loads(ownership)
+                local_id = ownership["state"]["self"]["id"]
+                owned = [record for record in ownership["resources"]["records"].values()
+                         if record.get("resource", {}).get("table") == "context_items"
+                         and record.get("resource", {}).get("shard")]
+                expect(len(owned) >= 4 and all(record.get("owner") == local_id
+                       and record.get("state") == "M" for record in owned), True,
+                       "node-local ACID commit fixture holds every shard in M")
             sql(host, begin, session)
             sql(host, f"UPDATE {table} SET {'v0' if distributed else 'n'}="
                 f"{'v0' if distributed else 'n'}+5 WHERE id={target}", session)

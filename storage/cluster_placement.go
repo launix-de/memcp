@@ -11,12 +11,19 @@ warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See
 package storage
 
 import "time"
+import "fmt"
 import "context"
 import "hash/fnv"
 
 type clusterCapacityRejection struct{}
 
 func (clusterCapacityRejection) Error() string { return "cluster shard RAM capacity unavailable" }
+
+type clusterScanRedirect struct{ owner string }
+
+func (redirect clusterScanRedirect) Error() string {
+	return "cluster scan owner changed to " + redirect.owner
+}
 
 // scanQueryContext is used only when scheduling/acquiring a cold shard. The
 // already-authorized read path must not consult SessionState's context mutex.
@@ -112,27 +119,59 @@ func (executor *clusterScanExecutor) ExecuteShardScan(resource mosiResource, inv
 	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	for _, link := range executor.candidates() {
+	candidates := executor.candidates()
+	attempted := make(map[string]bool)
+	acquireFrom := ""
+	for len(candidates) > 0 {
+		link := candidates[0]
+		candidates = candidates[1:]
+		if attempted[link.member.ID] {
+			continue
+		}
+		attempted[link.member.ID] = true
 		select {
 		case <-link.peer.done:
 			continue
 		default:
 		}
 		rejected := false
+		redirectTo := ""
 		var result scanResult
 		func() {
 			defer func() {
 				if failure := recover(); failure != nil {
-					if _, ok := failure.(clusterCapacityRejection); ok {
+					if redirect, ok := failure.(clusterScanRedirect); ok {
+						redirectTo = redirect.owner
+					} else if _, ok := failure.(clusterCapacityRejection); ok {
 						rejected = true
 					} else {
 						panic(failure)
 					}
 				}
 			}()
-			remote := peerScanExecutor{peer: link.peer, ctx: ctx, prepared: executor.expected}
+			remote := peerScanExecutor{peer: link.peer, ctx: ctx, prepared: executor.expected, acquireFrom: acquireFrom}
 			result = remote.ExecuteShardScan(resource, invocation)
 		}()
+		if redirectTo != "" {
+			if attempted[redirectTo] {
+				panic("cluster scan ownership route cycled")
+			}
+			var target *clusterLink
+			for _, candidate := range executor.cluster.view.Load().links {
+				if candidate.member.ID == redirectTo {
+					target = candidate
+					break
+				}
+			}
+			if target == nil {
+				panic(fmt.Errorf("cluster scan owner %s is unavailable", redirectTo))
+			}
+			candidates = append([]*clusterLink{target}, candidates...)
+			continue
+		}
+		if rejected {
+			acquireFrom = link.member.ID
+		}
 		if !rejected {
 			executor.cluster.delegated.Add(1)
 			return result
