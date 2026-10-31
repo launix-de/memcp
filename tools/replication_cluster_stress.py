@@ -600,7 +600,50 @@ class Cluster:
         self.slave.start()
 
 
+def run_replication_source_security(master, slave):
+    """Imported triggers retain SQL source but never acquire cross-schema rights."""
+    m, s = master.client, slave.client
+    s.sql("CREATE TABLE replica_source_security(id INT PRIMARY KEY, value INT)")
+    s.sql("CREATE TRIGGER replica_source_sql BEFORE INSERT ON replica_source_security "
+          "FOR EACH ROW SET NEW.value = NEW.value + 7")
+    # The master must import the slave-owned catalog before executing the trigger.
+    expect(m.number("SELECT COUNT(*) AS n FROM replica_source_security"), 0,
+           "source-only slave schema transfer")
+    m.sql("INSERT INTO replica_source_security VALUES(1,10)")
+    expect(m.number("SELECT value AS n FROM replica_source_security WHERE id=1"), 17,
+           "SQL trigger regenerated on master")
+    stored = json.loads((master.data_dir / master.database / "schema.json").read_text())
+    trigger = stored["tables"]["replica_source_security"]["Triggers"][0]
+    expect((trigger["language"], trigger.get("schema_only")), ("sql", True),
+           "receiver-owned trigger restriction persisted")
+    master.kill()
+    master.start()
+    eventually(master.connected, "source-security slave did not reconnect")
+    m.sql("INSERT INTO replica_source_security VALUES(2,20)")
+    expect(m.number("SELECT value AS n FROM replica_source_security WHERE id=2"), 27,
+           "imported SQL trigger survives master restart")
+    # A local administrator can create this source on the slave. Its upload
+    # still cannot grant that code the master's system-database privileges.
+    s.sql("CREATE TABLE replica_source_denied(id INT)")
+    s.sql("CREATE TRIGGER replica_source_cross_schema AFTER INSERT ON replica_source_denied "
+          "FOR EACH ROW INSERT INTO replica_source_security(id,value) "
+          "SELECT NEW.id,1 FROM system.user WHERE username='root'")
+    expect(m.number("SELECT COUNT(*) AS n FROM replica_source_denied"), 0,
+           "restricted source schema imported")
+    m.reject("INSERT INTO replica_source_denied VALUES(3)", contains="own schema")
+    expect(m.number("SELECT COUNT(*) AS n FROM replica_source_denied"), 0,
+           "denied imported trigger rolls back source row")
+    m.sql("DROP TABLE replica_source_denied")
+    m.sql("DROP TABLE replica_source_security")
+    slave.reclaim()
+
+
 def run_regressions(args, artifacts, journal):
+    print("SCENARIO: source-only replication security", flush=True)
+    with Cluster(args, artifacts, "source-security") as security:
+        security.initialize(["CREATE TABLE items(id INT PRIMARY KEY, value INT)"])
+        run_replication_source_security(security.master, security.slave)
+    journal.append({"scenario": "source-only-security", "master_restart": True})
     print("SCENARIO: alternating crashes, authentication, DDL, sharing and retirement", flush=True)
     with Cluster(args, artifacts, "regressions") as cluster:
         master, slave = cluster.master, cluster.slave

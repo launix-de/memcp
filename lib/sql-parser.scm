@@ -2314,9 +2314,12 @@ different frontend (for example RDF) is used. */
 		(sql_trigger_quote_identifier (context "table")) " FOR EACH ROW " source))
 	(define compile_session (newsession))
 	(compile_session "__compile_trigger_source" true)
-	(define plan (parse_sql (context "schema") sql (lambda (schema read write) true) compile_session nil))
+	(define source_policy (lambda (schema table write)
+		(if (or (not (context "schema_only")) (equal? schema (context "schema"))) true
+			(error "replicated trigger may only access its own schema"))))
+	(define plan (parse_sql (context "schema") sql source_policy compile_session nil))
 	(nth plan 6))))
-(registertriggerlanguage "sql" sql_trigger_source_compile)
+(registertriggerlanguage "sql" sql_trigger_source_compile true)
 
 (define load_sql (lambda (schema stream) (begin
 	(set state (newsession))

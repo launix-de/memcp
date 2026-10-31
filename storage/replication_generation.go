@@ -31,8 +31,10 @@ import "github.com/launix-de/memcp/storage/mosi"
 // memory is bounded by the connection queue; schema JSON uses the existing
 // byte-slice persistence API, while column/blob bytes go directly to writers.
 type replicaImport struct {
-	header mosiPacket
-	engine PersistenceEngine
+	untrusted       bool
+	columnAdmission *replicaColumnAdmission
+	header          mosiPacket
+	engine          PersistenceEngine
 	// Set at unpublished construction from completed local data placement.
 	// Duplicate immutable columns are consumed without reopening their files.
 	knownContent bool
@@ -475,6 +477,9 @@ func (r *replicationManager) sendResource(peer *mosiPeer, header mosiPacket, tra
 		shard := transfer.shard
 		volatile := transfer.volatile
 		for _, column := range transfer.columns {
+			if !r.master && column.IsTemp {
+				continue
+			}
 			if column.Computor.IsNil() {
 				var reader io.ReadCloser
 				if volatile {
@@ -646,6 +651,9 @@ func (transfer *replicaImport) packet(packet mosiPacket) error {
 				}
 			}
 			transfer.writer = transfer.engine.WriteColumn(packet.Content, packet.Object)
+			if transfer.untrusted && packet.Object != blobManifestColumn {
+				transfer.columnAdmission = &replicaColumnAdmission{}
+			}
 		case "blob":
 			if !validBlobHash(packet.Object) {
 				return fmt.Errorf("invalid blob hash")
@@ -661,6 +669,11 @@ func (transfer *replicaImport) packet(packet mosiPacket) error {
 		data, err := decodeMosiChunk(packet)
 		if err != nil {
 			return err
+		}
+		if transfer.columnAdmission != nil {
+			if err := transfer.columnAdmission.write(data); err != nil {
+				return err
+			}
 		}
 		if transfer.objectKind == "routes" {
 			_, err = transfer.routes.Write(data)
@@ -678,6 +691,12 @@ func (transfer *replicaImport) packet(packet mosiPacket) error {
 		}
 		if transfer.objectKind == "" {
 			return fmt.Errorf("object end without object")
+		}
+		if transfer.columnAdmission != nil {
+			if !transfer.columnAdmission.done {
+				return fmt.Errorf("incomplete replicated column header")
+			}
+			transfer.columnAdmission = nil
 		}
 		if transfer.writer != nil {
 			finishColumnWrite(transfer.writer, true)
@@ -799,6 +818,16 @@ func (r *replicationManager) finishImport(source string, transfer *replicaImport
 }
 
 func (r *replicationManager) installSchema(source, name string, engine PersistenceEngine, data []byte) error {
+	// Cluster peers and the upstream master are trusted code authorities. A
+	// replication slave is not: validate before decoding any runtime values or
+	// publishing schema bytes, including after a solicited ownership recall.
+	if r.master && r.cluster == nil && source != r.id {
+		var err error
+		data, err = validateReplicaSchema(data)
+		if err != nil {
+			return err
+		}
+	}
 	replacement := newDatabase()
 	if err := json.Unmarshal(data, replacement); err != nil {
 		return err
