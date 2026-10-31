@@ -469,11 +469,20 @@ func TestJITArenaParentWaitsForInterleavedDeferredStackMaps(t *testing.T) {
 }
 
 func TestJITParentWaitsForDeferredChildAcrossArenas(t *testing.T) {
-	parentPtr, parentArena, parentReservation := globalJITPool.Alloc(jitArenaSize)
+	// A previous large compilation may leave a trimmed arena larger than the
+	// default arena size. Exercise that state independently of test order.
+	_, previousArena, previousReservation := globalJITPool.Alloc(2 * jitArenaSize)
+	defer globalJITPool.Free(previousArena)
+	globalJITPool.Trim(previousArena, previousReservation, 16)
+	previousArena.complete(previousReservation, nil, nil)
+	// Reserve a whole arena so the blocked child must use a different one.
+	parentPtr, parentArena, parentReservation := globalJITPool.Alloc(previousArena.size)
 	defer globalJITPool.Free(parentArena)
 	_, childArena, blocker := globalJITPool.Alloc(16 * 1024)
 	defer globalJITPool.Free(childArena)
 	defer childArena.complete(blocker, nil, nil)
+	// Unblock teardown even if a fixture assertion fails before compilation.
+	defer parentArena.completeDeferred(parentReservation, nil, nil, nil)
 	if parentArena == childArena {
 		t.Fatal("fixture did not cross an arena boundary")
 	}
