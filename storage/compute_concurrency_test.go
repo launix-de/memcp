@@ -1033,3 +1033,44 @@ func TestFilteredPreparationPanicLeavesValuesLazy(t *testing.T) {
 		t.Fatalf("read after failed preparation = %d, want 1", got)
 	}
 }
+
+func TestComputedColumnEvictionRetainsRecipeAndReader(t *testing.T) {
+	input := &StorageSCMER{values: []scm.Scmer{scm.NewInt(10), scm.NewInt(20)}}
+	cached := &StorageSCMER{values: []scm.Scmer{scm.NewInt(11), scm.NewInt(21)}}
+	var calls atomic.Int64
+	compute := scm.NewFunc(func(args ...scm.Scmer) scm.Scmer { calls.Add(1); return scm.NewInt(args[0].Int() + 1) })
+	tbl := &table{schema: &database{}, Name: "cache_recipe", PersistencyMode: Memory}
+	col := &column{Name: "computed", Typ: "BIGINT", IsTemp: true, Computor: compute, ComputorInputCols: []string{"id"}, cacheOwner: tbl}
+	tbl.Columns = []*column{{Name: "id", Typ: "BIGINT"}, col}
+	shard := &storageShard{t: tbl, main_count: 2, columns: map[string]ColumnStorage{"id": input}, tempColumnBytes: make(map[*column]int64)}
+	shard.setState(WRITE)
+	tbl.Shards = []*storageShard{shard}
+	old := &StorageComputeProxy{shard: shard, colName: col.Name, count: 2, main: cached, compressed: true, delta: make(map[uint32]scm.Scmer), computor: compute, inputCols: []string{"id"}}
+	old.mainBytes = ownedColumnMemory(cached)
+	shard.columns[col.Name] = old
+	before := int64(ownedColumnMemory(old))
+	shard.tempColumnBytes[col] = before
+	result := col.evict(evictFull, before, nil)
+	if !result.success || result.fullyEvicted || result.freedBytes <= 0 {
+		t.Fatal("computed payload was not evicted independently", result)
+	}
+	if len(tbl.Columns) != 2 || tbl.Columns[1] != col || col.cacheUsers != 0 {
+		t.Fatal("eviction removed or sealed the logical column")
+	}
+	if old.main != cached || !old.compressed || old.GetValue(0).Int() != 11 {
+		t.Fatal("eviction changed a retained reader")
+	}
+	next, ok := shard.columns[col.Name].(*StorageComputeProxy)
+	if !ok || next == old || next.main != nil {
+		t.Fatal("eviction did not replace the cached value object")
+	}
+	if offer := col.evictionOffer(before - result.freedBytes); offer.fullBytes != 0 || offer.partialBytes != 0 {
+		t.Fatal("empty payload remains an eviction candidate")
+	}
+	if next.GetValue(0).Int() != 11 || next.GetValue(1).Int() != 21 || calls.Load() != 2 {
+		t.Fatal("evicted values did not repair through the original recipe", calls.Load())
+	}
+	if next.GetValue(0).Int() != 11 || calls.Load() != 2 {
+		t.Fatal("repaired value was not cached")
+	}
+}

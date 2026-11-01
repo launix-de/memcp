@@ -113,6 +113,24 @@ func (state *State) Snapshot() *Publication {
 
 func (state *State) Phase() Phase { return state.Snapshot().phase }
 
+// ReadReady consumes an existing local/backend read proof without creating a
+// request. Evicting a payload must not make its next read contact an unavailable
+// owner when this node still holds valid S/O/M permission.
+func (state *State) ReadReady() bool {
+	for {
+		current := state.Snapshot()
+		if current.phase != IS {
+			return current.phase.Readable()
+		}
+		if !current.backend.Readable() {
+			panic("IS without current backend authority")
+		}
+		if state.value.CompareAndSwap(current, permissionPublication(current.backend, current)) {
+			return true
+		}
+	}
+}
+
 // Initialize is restricted to unpublished construction and recovery from a live peer.
 // A requested state is never a recoverable authority after a process restart.
 func (state *State) Initialize(phase Phase) {
@@ -186,14 +204,9 @@ func (state *State) Request(wanted Phase) (*Publication, Action) {
 			current = &stable[IO]
 		}
 		if current.phase == IS {
-			if !current.backend.Readable() {
-				panic("IS without current backend authority")
-			}
 			// This only restores an already established permission. Actual payload
 			// loading uses the existing local COLD lifecycle after acquisition.
-			if !state.value.CompareAndSwap(old, permissionPublication(current.backend, current)) {
-				continue
-			}
+			state.ReadReady()
 			continue
 		}
 		if current.phase == M || (wanted != M && current.phase.Readable()) {

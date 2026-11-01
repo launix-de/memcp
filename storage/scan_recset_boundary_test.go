@@ -136,8 +136,11 @@ func TestRepeatedUnorderedRecSetScanDoesNotBuildMembershipIndex(t *testing.T) {
 			continue
 		}
 		index.mu.Lock()
-		active := index.baseState.active
-		storedRows := index.baseState.mainIndexes.count
+		active := index.baseState != nil && index.baseState.active
+		var storedRows uint64
+		if index.baseState != nil {
+			storedRows = index.baseState.mainIndexes.count
+		}
 		index.mu.Unlock()
 		if active || storedRows != 0 {
 			t.Fatalf("repeated exact RecSet scan built a membership index: active=%t rows=%d", active, storedRows)
@@ -152,7 +155,10 @@ func TestSparseOrderedRecSetBuildsCompressedInversePositions(t *testing.T) {
 	source := recSetForIDs(tbl, map[int64]bool{0: true, 1: true, rows - 1: true})
 	for _, index := range tbl.ActiveShards()[0].Indexes {
 		index.mu.Lock()
-		inverseCount := index.baseState.mainIndexPositions.count
+		var inverseCount uint64
+		if index.baseState != nil {
+			inverseCount = index.baseState.mainIndexPositions.count
+		}
 		index.mu.Unlock()
 		if inverseCount != 0 {
 			t.Fatalf("building the forward index eagerly built %d inverse positions", inverseCount)
@@ -167,8 +173,14 @@ func TestSparseOrderedRecSetBuildsCompressedInversePositions(t *testing.T) {
 	foundCompressedInverse := false
 	for _, index := range shard.Indexes {
 		index.mu.Lock()
-		inverseCount := index.baseState.mainIndexPositions.count
-		inverseBytes := index.baseState.mainIndexPositions.ComputeSize()
+		var inverseCount uint64
+		if index.baseState != nil {
+			inverseCount = index.baseState.mainIndexPositions.count
+		}
+		var inverseBytes uint
+		if index.baseState != nil {
+			inverseBytes = index.baseState.mainIndexPositions.ComputeSize()
+		}
 		index.mu.Unlock()
 		if inverseCount > 0 {
 			foundCompressedInverse = true
@@ -218,8 +230,14 @@ func TestDenseOrderedRecSetKeepsIndexDrivenTraversal(t *testing.T) {
 
 	for _, index := range tbl.ActiveShards()[0].Indexes {
 		index.mu.Lock()
-		inverseCount := index.baseState.mainIndexPositions.count
-		inverseBytes := index.baseState.mainIndexPositions.ComputeSize()
+		var inverseCount uint64
+		if index.baseState != nil {
+			inverseCount = index.baseState.mainIndexPositions.count
+		}
+		var inverseBytes uint
+		if index.baseState != nil {
+			inverseBytes = index.baseState.mainIndexPositions.ComputeSize()
+		}
 		index.mu.Unlock()
 		if inverseCount > 0 {
 			t.Fatalf("dense ordered RecSet unexpectedly built %d-byte inverse index", inverseBytes)
@@ -267,7 +285,7 @@ func TestOrderedRecSetSwitchesAfterResidualFilterRejectsPrefix(t *testing.T) {
 	foundInverse := false
 	for _, index := range tbl.ActiveShards()[0].Indexes {
 		index.mu.Lock()
-		foundInverse = foundInverse || index.baseState.mainIndexPositions.count > 0
+		foundInverse = foundInverse || index.baseState != nil && index.baseState.mainIndexPositions.count > 0
 		index.mu.Unlock()
 	}
 	if !foundInverse {

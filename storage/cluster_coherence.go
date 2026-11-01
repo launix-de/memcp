@@ -16,6 +16,98 @@ import "context"
 import "encoding/json"
 import "github.com/launix-de/memcp/storage/mosi"
 
+var errClusterReadBusy = fmt.Errorf("cluster read acquisition would wait for a writer")
+
+// tryRead acquires ordinary MOSI S without materializing a payload. A cache
+// needs these rights even when its producer delegates all shard work. If a
+// writer cannot relinquish M, the existing cache scope uses its direct producer
+// instead of publishing a shared value from an unprotected source.
+func (cluster *nodeCluster) tryRead(ctx context.Context, resource mosiResource) bool {
+	c := cluster.manager.resourceCell(resource).resolved()
+	if c.ownstate.ReadReady() {
+		return true
+	}
+	restoreCommits := !c.ownstate.Initialized()
+	owner, err := cluster.locate(ctx, resource)
+	if err != nil {
+		panic(err)
+	}
+	c = c.resolved()
+	resource = *c.resource.Load()
+	publication, action := c.ownstate.Request(mosi.S)
+	if action == mosi.Ready {
+		if restoreCommits && resource.Shard != "" {
+			db := GetDatabase(resource.Database)
+			if db == nil {
+				panic(mosi.NetworkError)
+			}
+			if err := db.importClusterCommits(owner); err != nil {
+				panic(err)
+			}
+		}
+		return true
+	}
+	if action != mosi.Send {
+		return false // another acquisition owns this flight; never wait for it
+	}
+	packet := mosiPacket{Kind: "read", Resource: resource, From: cluster.self.ID,
+		To: owner, ID: publication.Flight().ID(), Sequence: cluster.manager.requestSequence(publication.Flight()),
+		Boot: cluster.self.Boot, TryRead: true}
+	granted := false
+	if owner == cluster.self.ID {
+		err = cluster.coordinate(ctx, cluster.self.ID, packet)
+		granted = err == nil
+		if err == errClusterReadBusy {
+			err = nil
+		}
+	} else if peer := cluster.peer(owner); peer != nil {
+		err = cluster.service.control(ctx, peer, "cluster.try_read", packet, &granted, true)
+	} else {
+		err = fmt.Errorf(mosi.NetworkError)
+	}
+	if err != nil {
+		c.ownstate.Fail(packet.ID, err, mosi.S)
+		panic(err)
+	}
+	if !granted || !c.resolved().ownstate.Phase().Readable() {
+		c.ownstate.Fail(packet.ID, errClusterReadBusy, mosi.S)
+		return false
+	}
+	return true
+}
+
+func (cluster *nodeCluster) handleTryRead(ctx context.Context, source string, data json.RawMessage) (any, error) {
+	if err := cluster.requireMember(source); err != nil {
+		return nil, err
+	}
+	var packet mosiPacket
+	if err := json.Unmarshal(data, &packet); err != nil {
+		return nil, err
+	}
+	if !packet.Resource.valid() || !cluster.databases[packet.Resource.Database] || packet.Kind != "read" ||
+		!packet.TryRead || packet.ID == "" || !cluster.requestIncarnation(packet.From, packet.Boot) {
+		return nil, fmt.Errorf("invalid opportunistic cluster read")
+	}
+	owner, err := cluster.locate(ctx, packet.Resource)
+	if err != nil {
+		return nil, err
+	}
+	if owner != cluster.self.ID {
+		peer := cluster.peer(owner)
+		if peer == nil {
+			return nil, fmt.Errorf(mosi.NetworkError)
+		}
+		var granted bool
+		err := cluster.service.control(ctx, peer, "cluster.try_read", packet, &granted, true)
+		return granted, err
+	}
+	err = cluster.coordinate(ctx, packet.From, packet)
+	if err == errClusterReadBusy {
+		return false, nil
+	}
+	return err == nil, err
+}
+
 // Owner routing, not a permanent database directory: only an O/M holder
 // coordinates its shard and keeps the S-reader set. Other nodes retain a URI
 // hint only for resources they actually touched. A stale hint forwards a request
@@ -87,7 +179,7 @@ func (cluster *nodeCluster) locate(ctx context.Context, resource mosiResource) (
 	for _, link := range view.links {
 		var answer replicaRecord
 		probe, cancel := context.WithTimeout(ctx, 2*time.Second)
-		err := cluster.service.control(probe, link.peer, "cluster.report", resource, &answer)
+		err := cluster.service.control(probe, link.peer, "cluster.report", resource, &answer, true)
 		cancel()
 		if err != nil {
 			complete = false
@@ -201,7 +293,7 @@ func (cluster *nodeCluster) locate(ctx context.Context, resource mosiResource) (
 func (cluster *nodeCluster) obtain(parent context.Context, resource mosiResource, wanted mosi.Phase) *replicaCell {
 	r := cluster.manager
 	c := r.resourceCell(resource)
-	if phase := c.ownstate.Phase(); phase == mosi.M || wanted != mosi.M && phase.Readable() {
+	if c.ownstate.ReadReady() && (wanted != mosi.M || c.ownstate.Phase() == mosi.M) {
 		return c
 	}
 	restoreCommits := !c.ownstate.Initialized()
@@ -272,6 +364,9 @@ func (cluster *nodeCluster) obtain(parent context.Context, resource mosiResource
 				continue
 			}
 			if publication.Flight().Err() != nil {
+				if publication.Flight().Err() == errClusterReadBusy {
+					continue // a cache's declined try-read cannot fail a normal waiter
+				}
 				fmt.Println("cluster acquisition failed:", resource.key(), publication.Flight().Err())
 				panic(mosi.NetworkError)
 			}

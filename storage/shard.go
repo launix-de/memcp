@@ -25,6 +25,7 @@ import "slices"
 import "strings"
 import "reflect"
 import "runtime"
+import "context"
 import "sync/atomic"
 import "encoding/json"
 import "encoding/binary"
@@ -974,11 +975,6 @@ func (s *storageShard) getRead(currentTx *TxContext, snapshot, mayDelegate bool)
 	if target := s.scanTarget.Load(); target != nil {
 		panic(shardReadDelegation{target})
 	}
-	if !snapshot && s.t != nil {
-		if r := activeReplication(s.t.schema); r != nil && validReplicaDatabase(s.t.schema.Name) && !s.t.isEphemeralQueryTable() {
-			s = r.readShard(s, currentTx)
-		}
-	}
 	if mayDelegate && !snapshot && sharedClusterSource(s.t) && s.state() == COLD {
 		cluster := activeNodeCluster()
 		if cluster == nil {
@@ -986,6 +982,12 @@ func (s *storageShard) getRead(currentTx *TxContext, snapshot, mayDelegate bool)
 		}
 		cluster.prepareLocalScan(s, currentTx, origin)
 	}
+	if !snapshot && s.t != nil {
+		if r := activeReplication(s.t.schema); r != nil && validReplicaDatabase(s.t.schema.Name) && !s.t.isEphemeralQueryTable() {
+			s = r.readShard(s, currentTx)
+		}
+	}
+
 	s.retainCacheRead()
 	ready := false
 	defer func() {
@@ -1031,6 +1033,14 @@ func (s *storageShard) GetWrite(currentTx *TxContext) WriteAccess {
 		panic(activeNodeCluster().shardRAMUnavailable(s, origin))
 	}
 	s.ensureLoaded()
+	if currentTx != nil && currentTx.coordinator != nil {
+		currentTx.mu.Lock()
+		participant := currentTx.getOrCreateShardTxLocked(s)
+		currentTx.mu.Unlock()
+		if err := participant.registerParticipant(scanQueryContext(currentTx, context.Background())); err != nil {
+			panic(err)
+		}
+	}
 	s.setState(WRITE)
 	atomic.StoreUint64(&s.lastAccessed, uint64(time.Now().UnixNano()))
 	ready = true
@@ -1103,6 +1113,13 @@ func shardCleanup(ptr any, freedByType *[numEvictableTypes]int64) bool {
 		s.mu.Unlock()
 		return false // preparation/scan owns columns even outside its row lock
 	}
+	// An empty writable generation has no main payload to unload. Its live
+	// descriptor is the native INSERT capability, including between routing
+	// batches; turning it COLD would require RAM admission to recreate nothing.
+	if s.state() == WRITE && s.main_count == 0 && len(s.deltaRows()) == 0 {
+		s.mu.Unlock()
+		return false
+	}
 	// Sloppy/Logged shards with pending deltas must be flushed to disk before eviction.
 	// If there are deltas, we can't evict now — a rebuild is needed first.
 	if len(s.deltaRows()) > 0 || s.deletions.Count() > 0 {
@@ -1139,6 +1156,9 @@ func (s *storageShard) evictionOffer(currentSize int64) evictionOffer {
 	}
 	defer s.mu.RUnlock()
 	if s.cacheReaders.Load() != 0 {
+		return evictionOffer{}
+	}
+	if s.state() == WRITE && s.main_count == 0 && len(s.deltaRows()) == 0 {
 		return evictionOffer{}
 	}
 	if s.t != nil && (s.t.PersistencyMode == Memory ||
@@ -1421,7 +1441,6 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 		targetIdx := idx
 		var maintenanceNext *storageShard
 		var maintenanceUpdateChanges []scm.Scmer
-		var maintenanceExtraDeletes []uint32
 		if len(a) > 0 {
 			// update command
 			var triggerOldRow, triggerNewRow dataset // for AFTER UPDATE triggers
@@ -1527,7 +1546,10 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 					return pCols, pRow
 				}
 				// now d2 contains the old row values
-				oldDeltaRow := append(dataset{}, d2...)
+				var oldDeltaRow dataset
+				if len(t.t.Triggers) > 0 {
+					oldDeltaRow = append(dataset{}, d2...)
+				}
 				// copy slice for triggers before modifying (scheme values are immutable, but Go slice is modified)
 				if withTrigger && len(t.t.Triggers) > 0 {
 					triggerOldRow = schemaRowFromDelta(d2)
@@ -1659,46 +1681,9 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 					t.deletions.Set(uint(newRecid), true)
 					t.deletions.Set(uint(targetIdx), true)
 					t.deletions.Set(uint(newRecid), false)
-					// Maintain the non-ACID invariant: at most one visible row per
-					// PRIMARY key. Under heavy concurrent UPDATE chains, stale targets
-					// can leave older versions visible; collapse them here.
-					var primaryCols []string
-					for _, uk := range t.t.Unique {
-						if uk.Id == "PRIMARY" {
-							primaryCols = uk.Cols
-							break
-						}
-					}
-					if len(primaryCols) > 0 {
-						pkVals := make([]scm.Scmer, len(primaryCols))
-						for i, col := range primaryCols {
-							if pos, ok := t.deltaColumns[col]; ok && pos < len(d2) {
-								pkVals[i] = d2[pos]
-							} else {
-								pkVals[i] = scm.NewNil()
-							}
-						}
-						limit := t.main_count + uint32(len(t.deltaRows()))
-						for recid := uint32(0); recid < limit; recid++ {
-							if recid == newRecid || t.deletions.Get(uint(recid)) {
-								continue
-							}
-							match := true
-							for i, col := range primaryCols {
-								if !scm.Equal(t.rowValueByRecidLocked(recid, col), pkVals[i]) {
-									match = false
-									break
-								}
-							}
-							if match {
-								t.deletions.Set(uint(recid), true)
-								if next := t.nextForMaintenanceLocked(&recid); next != nil {
-									maintenanceNext = next
-									maintenanceExtraDeletes = append(maintenanceExtraDeletes, recid)
-								}
-							}
-						}
-					}
+					// The shard write lock serializes replacement of the current
+					// visible version. Stale callbacks resolve their target above;
+					// this publication preserves PRIMARY-key uniqueness directly.
 				}
 				// Capture for dual-write forwarding (cols/d2 are closure-local).
 				// Use repartitionDualWriteActive (set after Phase B snapshot)
@@ -1901,9 +1886,6 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 					t.propagateUpdateToNext(maintenanceNext, targetIdx, currentTx, scm.NewSlice(maintenanceUpdateChanges))
 				} else {
 					t.propagateDeleteToNext(maintenanceNext, idx, currentTx)
-				}
-				for _, deletedRecid := range maintenanceExtraDeletes {
-					t.propagateDeleteToNext(maintenanceNext, deletedRecid, nil)
 				}
 			}
 		}
@@ -4438,7 +4420,7 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 		// Eagerly rebuild indexes with sufficient Savings so the first
 		// query after rebuild does not pay a cold-start full-scan penalty.
 		for _, idx := range result.Indexes {
-			if idx.loadSavings() >= 2.0 && !idx.baseState.active {
+			if idx.loadSavings() >= 2.0 && (idx.baseState == nil || !idx.baseState.active) {
 				// Verify all required columns exist before building the index.
 				// A column may be absent from this shard if it was added after
 				// the shard was created (e.g. ALTER TABLE ADD COLUMN).
@@ -4466,7 +4448,7 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 					func() {
 						getters := idx.buildGetters(nil, nil)
 						defer releaseIndexGetters(getters)
-						idx.buildIndex(&idx.baseState, getters, nil)
+						idx.buildIndex(getters, nil)
 					}()
 					GlobalCache.AddItem(idx, int64(idx.ComputeSize()), TypeIndex, indexCleanup, indexLastUsed, indexGetScore)
 				}

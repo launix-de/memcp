@@ -20,6 +20,7 @@ package scm
 import "sort"
 import "sync"
 import "unsafe"
+import "context"
 import "container/heap"
 
 // streamTopK holds only the best OFFSET+LIMIT complete values. The producer
@@ -74,7 +75,9 @@ func streamWindowTopK(a []Scmer, offset, limit int) Scmer {
 	h := streamTopK{compare: PrepareSerialProc(a[5])}
 	var mu sync.Mutex
 	var sequence uint64
-	emit := NewFunc(func(values ...Scmer) Scmer {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	emit := NewClusterCallback(ctx, func(values ...Scmer) Scmer {
 		mu.Lock()
 		defer mu.Unlock()
 		if len(values) != 1 {
@@ -95,7 +98,7 @@ func streamWindowTopK(a []Scmer, offset, limit int) Scmer {
 			heap.Fix(&h, 0)
 		}
 		return NewNil()
-	})
+	}, nil)
 	producer := PrepareSerialProc(a[4])
 	producer.Call([]Scmer{emit})
 	sort.Slice(h.entries, func(i, j int) bool { return h.before(h.entries[i], h.entries[j]) })
@@ -328,7 +331,9 @@ func init_window() {
 			// stream boundary instead of forcing every producer to abandon parallel
 			// scans or making all prepared callbacks pay for synchronization.
 			var emitMu sync.Mutex
-			emit := NewFunc(func(values ...Scmer) Scmer {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			emit := NewClusterCallback(ctx, func(values ...Scmer) Scmer {
 				emitMu.Lock()
 				defer emitMu.Unlock()
 				if len(values) != 1 {
@@ -345,7 +350,7 @@ func init_window() {
 				result = reduceProgram.Call(reduceArgs[:])
 				emitted++
 				return result
-			})
+			}, nil)
 			producerArgs[0] = emit
 			producerProgram.Call(producerArgs[:])
 			return result
@@ -362,7 +367,7 @@ func init_window() {
 			},
 			Return: &TypeDescriptor{Kind: "any"},
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				// JITGen native call boundary: escaping or recursive Go closure.
+				// JITGen native call boundary: deferred call.
 				ctx.Coverage.NativeCalls++
 				declaration := declarations["stream_window_reduce"]
 				return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)

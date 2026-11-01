@@ -1000,6 +1000,7 @@ func recSetIntersectPairwise(parts []*recSetShard) recSetShard {
 
 func TestProjectJoinIndexPrefixConcurrentPublication(t *testing.T) {
 	index := &StorageIndex{Cols: []string{"key"}}
+	index.baseState = new(storageIndexState)
 	index.baseState.active = true
 	shard := &storageShard{Indexes: []*StorageIndex{index}}
 	start, done := make(chan struct{}), make(chan struct{})

@@ -30,6 +30,8 @@ import "github.com/launix-de/memcp/scm"
 var nodeScans atomic.Pointer[nodeScanService]
 
 type nodeScanService struct {
+	handles     sync.Map // fresh slot -> invocation-owned handle
+	nextHandle  atomic.Uint64
 	objects     clusterObjectRegistry
 	executions  sync.Map // invocation UUID -> worker TxContext, never persisted or serialized
 	returns     sync.Map // consumer-owned operation UUID -> *receiverRoute, removed on completion/error
@@ -244,6 +246,7 @@ func (service *nodeScanService) accept(w http.ResponseWriter, req *http.Request)
 	}
 	peer := newMosiPeer(conn, session.handle, packets, func(peer *mosiPeer) {
 		peer.scanService = service
+		peer.handleValue = session.handleValue
 		peer.operationPrefix = remote.OperationPrefix
 		peer.objectPeer = clusterObjectPeer{remote.Node, remote.Boot}
 		session.bindPeer(peer)
@@ -300,6 +303,7 @@ func (service *nodeScanService) connect(ctx context.Context, address string) (*m
 	peer := newMosiPeer(conn, session.handle, packets, func(peer *mosiPeer) {
 		peer.objectEndpoint = endpoint
 		peer.scanService = service
+		peer.handleValue = session.handleValue
 		peer.operationPrefix = remote.OperationPrefix
 		peer.objectPeer = clusterObjectPeer{remote.Node, remote.Boot}
 		session.bindPeer(peer)

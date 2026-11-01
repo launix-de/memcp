@@ -247,3 +247,20 @@ func BenchmarkSerialProcNumberedAdapter(b *testing.B) {
 		serialTestCallable(proc)
 	}
 }
+
+func TestBeginBindingsRetainTheirLexicalScope(t *testing.T) {
+	for _, optimized := range []bool{false, true} {
+		env := &Env{Vars: Vars{"value": NewInt(99)}, Outer: &Globalenv}
+		expr := Read("begin lexical scope", `(lambda (input)
+			(begin (define value input) (lambda () value)))`)
+		if optimized {
+			expr = Optimize(expr, env, nil)
+		}
+		factory := Eval(expr, env)
+		first := Apply(factory, NewInt(11))
+		second := Apply(factory, NewInt(22))
+		if Apply(first).Int() != 11 || Apply(second).Int() != 22 || env.Vars["value"].Int() != 99 {
+			t.Fatalf("optimized=%v: begin bindings leaked or shared an invocation scope", optimized)
+		}
+	}
+}

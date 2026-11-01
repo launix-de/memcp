@@ -59,6 +59,11 @@ GOMAXPROCS. Unknown properties and assertions fail instead of being ignored.
 standalone oracle first, comparing complete case results as well as ordinary
 expectations. Disable that comparison for fixtures with intentionally different
 valid results across independent runs. Remote execution remains mandatory.
+For a query without an ordering contract, `compare_reference_order: false` on
+the testcase compares the complete row multiset, preserving duplicate counts.
+The default retains exact row order. Shared analytics runs start the oracle and
+cluster from separate copies of the same committed fixture, so oracle mutations
+cannot change the cluster's starting data.
 
 Every cluster suite must demonstrate at least one delegated shard and one remote
 worker through changes in native execution counters. Membership alone, a correct

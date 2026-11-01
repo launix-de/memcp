@@ -502,7 +502,8 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 				}
 			}
 		}()
-		callbackFn := NewFunc(func(a ...Scmer) Scmer {
+		outputResult := NewBool(true)
+		callbackFn := NewClusterCallback(queryCtx, func(a ...Scmer) Scmer {
 			resultlock.Lock()
 			defer resultlock.Unlock()
 			// function resultrow(item)
@@ -535,8 +536,8 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 				emitPreparedRow(rowValues)
 			}
 			return NewBool(true)
-		})
-		fieldsFn := NewFunc(func(a ...Scmer) Scmer {
+		}, &outputResult)
+		fieldsFn := NewClusterCallback(queryCtx, func(a ...Scmer) Scmer {
 			resultlock.Lock()
 			defer resultlock.Unlock()
 			if schemaInitialized || fieldsPublished || len(a) != 1 {
@@ -546,7 +547,7 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 			schemaInitialized = true
 			resultSet = true
 			return NewBool(true)
-		})
+		}, nil)
 		return Apply(m.querycallback, NewString(session.Schema()), NewString(query), callbackFn, fieldsFn,
 			scmSessionScmer, NewAny(ss), NewInt(int64(querySeq)))
 	}()

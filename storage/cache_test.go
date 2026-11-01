@@ -558,3 +558,19 @@ func TestRangePreparationReusesOnlyUnchangedDomainProof(t *testing.T) {
 		t.Fatal("eviction reused stale proof")
 	}
 }
+
+func TestCacheAdmissionReclaimsPublishedOwnersWithoutIdleDelay(t *testing.T) {
+	var manager CacheManager
+	manager.Init(16, 16, 0)
+	defer manager.Stop()
+	pointer := new(int)
+	published := time.Now()
+	manager.AddItem(pointer, 32, TypeShard,
+		func(any, *[numEvictableTypes]int64) bool { return true },
+		func(any) time.Time { return published }, nil)
+	if usage := manager.Stat(); usage.CurrentMemory != 0 || !manager.canLoadClusterShard() {
+		// This object has no live lease. Recent use affects eviction ranking,
+		// but must not strand an over-budget payload until an idle timer passes.
+		t.Fatalf("published evictable payload prevented subsequent admission: %+v", usage)
+	}
+}

@@ -255,6 +255,9 @@ func (t *table) updateTempColumnMemory(col *column, shards []*storageShard) {
 			shard.tempColumnBytes = make(map[*column]int64)
 		}
 		delta := part - shard.tempColumnBytes[col]
+		if delta != 0 {
+			col.cachePayloadEmpty.Store(false)
+		}
 		shard.tempColumnBytes[col] = part
 		var ready, done chan struct{}
 		if delta != 0 && GlobalCache.opChan != nil && !GlobalCache.stopped.Load() {

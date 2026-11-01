@@ -575,7 +575,7 @@ func TestReplicationParallelReadsIgnoreControlLocks(t *testing.T) {
 				readers.Add(1)
 				go func() {
 					defer readers.Done()
-					tx := &TxContext{}
+					tx := NewTxContext(TxCursorStability)
 					for j := 0; j < 1000; j++ {
 						replicationEnter(tx, session)
 						replicationLeave(tx)
@@ -618,7 +618,7 @@ func BenchmarkReplicationReadAdmission(b *testing.B) {
 	replication.Store(r)
 	b.ReportAllocs()
 	b.RunParallel(func(pb *testing.PB) {
-		tx := &TxContext{}
+		tx := NewTxContext(TxCursorStability)
 		for pb.Next() {
 			replicationEnter(tx, session)
 			replicationLeave(tx)

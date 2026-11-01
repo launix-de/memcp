@@ -284,6 +284,8 @@ class ClusterSQLTestRunner(SQLTestRunner):
         previous = getattr(self._test_context, "cluster_case", None)
         self._test_context.cluster_case = current
         try:
+            if type(case.get("compare_reference_order", True)) is not bool:
+                raise DrillFailure("compare_reference_order must be boolean")
             checks = case.get("expect", {}).get("cluster", {})
             if not isinstance(checks, dict):
                 raise DrillFailure("expect.cluster must be a mapping")
@@ -308,7 +310,12 @@ class ClusterSQLTestRunner(SQLTestRunner):
                     expected = self.reference[key].popleft() if self.reference[key] else None
                 if expected is None or expected["status"] != "passed":
                     raise DrillFailure("missing successful standalone oracle case")
-                expect(current.get("rows"), expected.get("rows"), "standalone result comparison")
+                actual_rows, expected_rows = current.get("rows"), expected.get("rows")
+                if not case.get("compare_reference_order", True):
+                    row_key = lambda row: json.dumps(row, sort_keys=True)
+                    actual_rows = sorted(actual_rows, key=row_key)
+                    expected_rows = sorted(expected_rows, key=row_key)
+                expect(actual_rows, expected_rows, "standalone result comparison")
             current["status"] = "passed"
             return True
         except Exception as error:
@@ -1608,6 +1615,23 @@ def run_cluster_sql_contexts(nodes, reference, journal, report_path, status=None
         delete_id = 0 if distributed else 2
         completed = False
         try:
+            if status and not distributed and outcome == "COMMIT":
+                # This case checks the native node-local ACID commit boundary.
+                # Earlier delegated rollback cases can leave its shards at a
+                # different warm owner. Establish the documented local fixture
+                # through ordinary schema M/write acquisition before BEGIN.
+                host.client.scm(
+                    f'(createcolumn (table "{DATABASE}" false "context_items" false) "n" "INT" (list) (list))')
+                ownership = json.loads(host.client.scm("(cluster_status true)"))
+                if isinstance(ownership, str):
+                    ownership = json.loads(ownership)
+                local_id = ownership["state"]["self"]["id"]
+                owned = [record for record in ownership["resources"]["records"].values()
+                         if record.get("resource", {}).get("table") == "context_items"
+                         and record.get("resource", {}).get("shard")]
+                expect(len(owned) >= 4 and all(record.get("owner") == local_id
+                       and record.get("state") == "M" for record in owned), True,
+                       "node-local ACID commit fixture holds every shard in M")
             sql(host, begin, session)
             sql(host, f"UPDATE {table} SET {'v0' if distributed else 'n'}="
                 f"{'v0' if distributed else 'n'}+5 WHERE id={target}", session)
@@ -1956,15 +1980,23 @@ def run_cluster_placement(args, artifacts, journal):
             source.scm(f'(rebuild (table "{DATABASE}" false "context_items" false) true false)')
             source.scm(f'(rebuild (table "{DATABASE}" false "big_items" false) true false)')
         standalone_operators = []
+        operator_shared = None
         if args.cluster_operators_only:
             source.sql("CREATE TABLE operator_keys(id INT PRIMARY KEY) ENGINE=SAFE")
             source.sql("INSERT INTO operator_keys VALUES(42000),(90000),(175000),(245000)")
+            source.scm(f'(rebuild (table "{DATABASE}" false "operator_keys" false) true false)')
+            # Both executions must start from the same committed fixture.
+            # Rollback restores visibility, but not physical delta generations;
+            # copying after the oracle would also propagate committed changes.
+            builder.kill()
+            operator_shared = directory / "shared-operator-fixture"
+            shutil.copytree(builder.data_dir / DATABASE, operator_shared)
+            source = builder.start()
             standalone_operators = run_cluster_yaml_cases(
                 suite or OPERATOR_SUITE, builder, [builder], builder.data_dir / DATABASE,
                 journal, directory / "standalone-operators.json")
-            source.scm(f'(rebuild (table "{DATABASE}" false "operator_keys" false) true false)')
         builder.kill()
-        shared = builder.data_dir / DATABASE
+        shared = operator_shared or builder.data_dir / DATABASE
         catalog = json.loads((shared / "schema.json").read_text())["tables"]
         if args.cluster_context_only:
             context_schema = catalog["context_items"]
@@ -2156,6 +2188,19 @@ def run_cluster_placement(args, artifacts, journal):
         expect(nodes[2].client.number("SELECT SUM(n) AS total FROM contact_route_probe", "total"), 18,
                "reader acquired the contact's original ownership hint")
         nodes[1].client.sql("UPDATE contact_route_probe SET n=n+1 WHERE id=1")
+        # DML can now delegate to the warm owner. Explicitly cross the native
+        # DDL write boundary to move this table's M rights to the survivor;
+        # re-declaring the existing column leaves its logical shape unchanged.
+        nodes[1].client.scm(
+            f'(createcolumn (table "{DATABASE}" false "contact_route_probe" false) "n" "INT" (list) (list))')
+        handover = json.loads(nodes[1].client.scm("(cluster_status true)"))
+        if isinstance(handover, str):
+            handover = json.loads(handover)
+        survivor = handover["state"]["self"]["id"]
+        expect(any(record.get("resource", {}).get("table") == "contact_route_probe"
+                   and record.get("owner") == survivor and record.get("state") in ("M", "O")
+                   for record in handover["resources"]["records"].values()), True,
+               "contact-route fixture transferred data ownership to the survivor")
         # Move schema ownership away from the contact before it is killed. The
         # contact's already-granted S rights remain usable by the survivors.
         for node in nodes:

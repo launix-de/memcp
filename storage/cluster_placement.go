@@ -11,12 +11,19 @@ warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See
 package storage
 
 import "time"
+import "fmt"
 import "context"
 import "hash/fnv"
 
 type clusterCapacityRejection struct{}
 
 func (clusterCapacityRejection) Error() string { return "cluster shard RAM capacity unavailable" }
+
+type clusterScanRedirect struct{ owner string }
+
+func (redirect clusterScanRedirect) Error() string {
+	return "cluster scan owner changed to " + redirect.owner
+}
 
 // scanQueryContext is used only when scheduling/acquiring a cold shard. The
 // already-authorized read path must not consult SessionState's context mutex.
@@ -34,8 +41,8 @@ func clusterScanSupported(tx *TxContext) bool {
 		return true
 	}
 	// Mode and autocommit are statement-owned immutable admission metadata.
-	// A locally modified shard retains M and resident payload, so its own TX
-	// overlays cannot be delegated by the cold-shard placement path.
+	// Native transaction identity binds delegated statements to the existing
+	// participant overlays on their shard owner.
 	return tx.Mode == TxCursorStability || tx.Mode == TxACID
 }
 func (cluster *nodeCluster) prepareLocalScan(shard *storageShard, tx *TxContext, origins ...*storageShard) {
@@ -49,16 +56,17 @@ func (cluster *nodeCluster) prepareLocalScan(shard *storageShard, tx *TxContext,
 		origin = origins[0]
 	}
 	expected := remoteScanShard{Schema: shard.t.filterSchemaFingerprint(), Resource: mosiResource{shard.t.schema.Name, shard.t.Name, shard.uuid.String()}}
-	// Use the existing MOSI directory after acquisition. Only the owner knows
-	// its S readers; a local I/IO or backup filename cannot select a custodian.
-	cell := acquireClusterRead(scanQueryContext(tx, cluster.ctx), expected.Resource)
-	resource := *cell.resolved().resource.Load()
-	cluster.manager.mu.Lock()
-	record := cluster.manager.directory.Records[cluster.manager.resourceKey(resource)]
-	cluster.manager.mu.Unlock()
-	if record.Owner != "" && record.Owner != cluster.self.ID {
+	// Placement can delegate to an authorized owner without acquiring a local
+	// shared copy first. In particular a reader must not recall an active writer
+	// merely to send its ordinary scan back to that same native participant.
+	owner, err := cluster.locate(scanQueryContext(tx, cluster.ctx), expected.Resource)
+	if err != nil {
+		panic(err)
+	}
+
+	if owner != "" && owner != cluster.self.ID {
 		for _, link := range cluster.view.Load().links {
-			if link.member.ID == record.Owner {
+			if link.member.ID == owner {
 				cluster.locality.Add(1)
 				panic(shardReadDelegation{&shardScanTarget{resource: expected.Resource, executor: &clusterScanExecutor{cluster: cluster, expected: expected, preferred: link}, origin: origin}})
 			}
@@ -111,27 +119,59 @@ func (executor *clusterScanExecutor) ExecuteShardScan(resource mosiResource, inv
 	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	for _, link := range executor.candidates() {
+	candidates := executor.candidates()
+	attempted := make(map[string]bool)
+	acquireFrom := ""
+	for len(candidates) > 0 {
+		link := candidates[0]
+		candidates = candidates[1:]
+		if attempted[link.member.ID] {
+			continue
+		}
+		attempted[link.member.ID] = true
 		select {
 		case <-link.peer.done:
 			continue
 		default:
 		}
 		rejected := false
+		redirectTo := ""
 		var result scanResult
 		func() {
 			defer func() {
 				if failure := recover(); failure != nil {
-					if _, ok := failure.(clusterCapacityRejection); ok {
+					if redirect, ok := failure.(clusterScanRedirect); ok {
+						redirectTo = redirect.owner
+					} else if _, ok := failure.(clusterCapacityRejection); ok {
 						rejected = true
 					} else {
 						panic(failure)
 					}
 				}
 			}()
-			remote := peerScanExecutor{peer: link.peer, ctx: ctx, prepared: executor.expected}
+			remote := peerScanExecutor{peer: link.peer, ctx: ctx, prepared: executor.expected, acquireFrom: acquireFrom}
 			result = remote.ExecuteShardScan(resource, invocation)
 		}()
+		if redirectTo != "" {
+			if attempted[redirectTo] {
+				panic("cluster scan ownership route cycled")
+			}
+			var target *clusterLink
+			for _, candidate := range executor.cluster.view.Load().links {
+				if candidate.member.ID == redirectTo {
+					target = candidate
+					break
+				}
+			}
+			if target == nil {
+				panic(fmt.Errorf("cluster scan owner %s is unavailable", redirectTo))
+			}
+			candidates = append([]*clusterLink{target}, candidates...)
+			continue
+		}
+		if rejected {
+			acquireFrom = link.member.ID
+		}
 		if !rejected {
 			executor.cluster.delegated.Add(1)
 			return result

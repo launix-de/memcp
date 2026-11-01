@@ -1067,6 +1067,9 @@ func Init(en scm.Env) {
 			tables := make([]*table, len(sources))
 			for i, source := range sources {
 				tables[i] = TableFromScmer(source)
+				if !tables[i].acquireCacheSourceRights(currentTx) {
+					return scm.Apply(a[3])
+				}
 			}
 			sort.Slice(tables, func(i, j int) bool {
 				return tables[i].schema.Name+"\x00"+tables[i].Name < tables[j].schema.Name+"\x00"+tables[j].Name
@@ -4297,7 +4300,7 @@ func Init(en scm.Env) {
 							idxSlice = append(idxSlice, scm.NewSlice([]scm.Scmer{
 								scm.NewString("cols"), scm.NewString(ix.String()),
 								scm.NewString("orders"), scm.NewSlice(orders),
-								scm.NewString("active"), scm.NewBool(ix.baseState.active),
+								scm.NewString("active"), scm.NewBool(ix.baseState != nil && ix.baseState.active),
 								scm.NewString("native"), scm.NewBool(ix.Native),
 								scm.NewString("savings"), scm.NewFloat(ix.loadSavings()),
 								scm.NewString("size_bytes"), scm.NewInt(int64(ix.computeSizeLocked())),

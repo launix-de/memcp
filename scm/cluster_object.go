@@ -6,9 +6,14 @@ package scm
 
 import "fmt"
 import "sync"
+import "errors"
 import "context"
 import "unsafe"
 import "encoding/json"
+
+// A local encoding failure before dispatch. It is safe to split an unsent
+// output batch; a remote error or ambiguous completion must never be replayed.
+var ErrClusterRequestTooLarge = errors.New("oversized MOSI message")
 
 // ClusterRequestHandler is the routing contract for native owner endpoints.
 // Implementations own request policy; transport only resolves and dispatches.
@@ -29,9 +34,13 @@ type ClusterObject interface {
 }
 
 type ClusterRequest struct {
-	Method    string
-	Arguments []Scmer
-	Payload   any `json:"-"` // private decoded protocol payload, never runtime serialization
+	// A borrowed delivery may cancel its local waiter while the native owner
+	// retains and joins the remote invocation through its independent Close.
+	// This local policy is never serialized and never releases the owner's state.
+	CancelWithoutJoin bool `json:"-"`
+	Method            string
+	Arguments         []Scmer
+	Payload           any `json:"-"` // private decoded protocol payload, never runtime serialization
 }
 
 // ClusterReference names an incarnation-bound owner endpoint. On the wire Token
@@ -112,11 +121,13 @@ func ClusterObjectOf(value Scmer) (ClusterObject, bool) {
 // callback captures, for every object type alike. Objects produce their own
 // immutable view once; each target peer gets a distinct registered handle.
 type SerializationContext struct {
-	Export  func(ClusterObject, Scmer) (ClusterReference, error)
-	root    *SerializationContext
-	mu      sync.Mutex
-	views   map[ClusterObject]*clusterViewCapture
-	demands map[ClusterObject]map[Scmer]struct{}
+	ExportHandle func(Handle) (Scmer, error)
+	Invocation   Scmer // native owner of invocation-scoped exported callbacks
+	Export       func(ClusterObject, Scmer) (ClusterReference, error)
+	root         *SerializationContext
+	mu           sync.Mutex
+	views        map[ClusterObject]*clusterViewCapture
+	demands      map[ClusterObject]map[Scmer]struct{}
 }
 
 type clusterViewCapture struct {
@@ -198,6 +209,7 @@ func (bindings *SerializationContext) ReferenceExpression(object ClusterObject) 
 // ProcedureDecode is invocation-owned. Reconstruction is completed before
 // Optimize/Eval builds the callback, never lazily during its row execution.
 type ProcedureDecode struct {
+	ResolveHandle func(string, string, uint64) (Handle, error)
 	// Prepare is an optional embedding-owned transformation of the validated
 	// lambda. SCM knows neither the host's operators nor its execution context.
 	Prepare func(Scmer) (Scmer, error)
@@ -211,10 +223,11 @@ type ClusterReadProjection interface {
 }
 
 func (bindings *SerializationContext) WithExport(export func(ClusterObject, Scmer) (ClusterReference, error)) *SerializationContext {
+	handles := bindings.ExportHandle
 	if bindings.root != nil {
 		bindings = bindings.root
 	}
-	return &SerializationContext{Export: export, root: bindings}
+	return &SerializationContext{Export: export, ExportHandle: handles, root: bindings}
 }
 
 // Collect demands before Serialize exports the first object. Runtime lists and
@@ -272,9 +285,9 @@ func (bindings *SerializationContext) prepare(value Scmer, literal bool) {
 	}
 }
 
-func ResolveSerializedObjects(value Scmer, resolve func(ClusterReference) (Scmer, error)) (Scmer, error) {
+func ResolveSerializedObjects(value Scmer, resolve func(ClusterReference) (Scmer, error), resolveHandle func(string, string, uint64) (Handle, error)) (Scmer, error) {
 	values := make(map[string]Scmer)
-	return resolveProcedureObjectTree(value, make(map[int64]*serializedCapture), func(ref ClusterReference) (Scmer, error) {
+	return resolveProcedureObjectTree(value, make(map[int64]*serializedCapture), resolveHandle, func(ref ClusterReference) (Scmer, error) {
 		key := ref.URI + "/" + ref.Token
 		if value, exists := values[key]; exists {
 			return value, nil
@@ -306,7 +319,7 @@ func serializedValueLiteral(value Scmer) Scmer {
 	}
 	return value
 }
-func resolveProcedureObjectTree(value Scmer, captures map[int64]*serializedCapture, resolve func(ClusterReference) (Scmer, error)) (Scmer, error) {
+func resolveProcedureObjectTree(value Scmer, captures map[int64]*serializedCapture, resolveHandle func(string, string, uint64) (Handle, error), resolve func(ClusterReference) (Scmer, error)) (Scmer, error) {
 	plain := value.WithoutSourceInfo()
 	if !plain.IsSlice() {
 		return value, nil
@@ -325,13 +338,20 @@ func resolveProcedureObjectTree(value Scmer, captures map[int64]*serializedCaptu
 		}
 		capture := &serializedCapture{}
 		captures[id.Int()] = capture
-		expression, err := resolveProcedureObjectTree(items[2], captures, resolve)
+		expression, err := resolveProcedureObjectTree(items[2], captures, resolveHandle, resolve)
 		if err != nil {
 			return NewNil(), err
 		}
 		capture.value = Eval(expression, &Globalenv)
 		capture.ready = true
 		return serializedValueLiteral(capture.value), nil
+	}
+	if len(items) == 4 && scmerIsSymbol(items[0], "cluster_handle") {
+		if resolveHandle == nil {
+			return NewNil(), fmt.Errorf("handle requires a reconstruction context")
+		}
+		handle, err := resolveHandle(items[1].String(), items[2].String(), uint64(items[3].Int()))
+		return NewAny(handle), err
 	}
 	if len(items) == 2 && scmerIsSymbol(items[0], "cluster_object") {
 		if resolve == nil {
@@ -352,7 +372,7 @@ func resolveProcedureObjectTree(value Scmer, captures map[int64]*serializedCaptu
 	result := make([]Scmer, len(items))
 	for i, item := range items {
 		var err error
-		result[i], err = resolveProcedureObjectTree(item, captures, resolve)
+		result[i], err = resolveProcedureObjectTree(item, captures, resolveHandle, resolve)
 		if err != nil {
 			return NewNil(), err
 		}
@@ -361,6 +381,7 @@ func resolveProcedureObjectTree(value Scmer, captures map[int64]*serializedCaptu
 }
 
 func initClusterObjects() {
+	initHandles()
 	Declare(&Globalenv, &Declaration{Name: "serialized_date", Fn: func(a ...Scmer) Scmer {
 		return NewDateWithZone(a[0].Int(), int(a[1].Int()))
 	}, Type: &TypeDescriptor{Kind: "func", Const: true,

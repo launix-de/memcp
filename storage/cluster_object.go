@@ -347,14 +347,14 @@ func (service *nodeScanService) importObject(ctx context.Context, peer *mosiPeer
 	// MUST happen while the import holds its shared Go lease. The reservation
 	// becomes a lease atomically at the owner; even a never-called/empty-shard
 	// lambda then owns a materialized handle with a working GC callback.
-	if err := service.control(ctx, peer, "object.acquire", clusterObjectAcquisition{reference, lease.reference.Token}, nil); err != nil {
+	if err := service.control(ctx, peer, "object.acquire", clusterObjectAcquisition{reference, lease.reference.Token}, nil, true); err != nil {
 		return scm.NewNil(), err
 	}
 	var frozen schemeValue
 	if err := json.Unmarshal(reference.View, &frozen); err != nil {
 		return scm.NewNil(), err
 	}
-	decodedView, err := frozen.reconstruct(scm.ProcedureDecode{Resolve: func(child scm.ClusterReference) (scm.Scmer, error) { return service.importObject(ctx, peer, child) }})
+	decodedView, err := frozen.reconstruct(scm.ProcedureDecode{ResolveHandle: service.handleResolver(ctx, scm.NewNil()), Resolve: func(child scm.ClusterReference) (scm.Scmer, error) { return service.importObject(ctx, peer, child) }})
 	if err != nil {
 		return scm.NewNil(), err
 	}
@@ -393,12 +393,12 @@ func (service *nodeScanService) importObject(ctx context.Context, peer *mosiPeer
 				return scm.NewNil(), err
 			}
 		}
-		err := service.control(operation, target, "object.call", clusterObjectCall{handleReference, request.Method, args}, &result)
+		err := service.control(operation, target, "object.call", clusterObjectCall{handleReference, request.Method, args}, &result, !request.CancelWithoutJoin)
 		if err != nil {
 			return scm.NewNil(), err
 		}
 		defer service.discardObjectOffers(target, result.Offers)
-		return result.Value.reconstruct(scm.ProcedureDecode{Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) { return service.importObject(callCtx, target, ref) }})
+		return result.Value.reconstruct(scm.ProcedureDecode{ResolveHandle: service.handleResolver(callCtx, scm.NewNil()), Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) { return service.importObject(callCtx, target, ref) }})
 	}}
 	value, failure := scm.ReconstructClusterObject(handle)
 	if failure == nil {
@@ -511,7 +511,7 @@ func (s *scanRPCSession) requestObject(ctx context.Context, call clusterObjectCa
 	ctx = context.WithValue(ctx, clusterObjectQueryKey{}, tx)
 	binding := scm.NewSlice([]scm.Scmer{scm.NewSymbol("node_query_context"), scm.NewString(id)})
 	args := make([]scm.Scmer, len(call.Arguments))
-	decode := scm.ProcedureDecode{Prepare: prepareScanProcedure(binding), Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) {
+	decode := scm.ProcedureDecode{ResolveHandle: s.service.handleResolver(ctx, scm.NewAny(tx)), Prepare: prepareScanProcedure(binding), Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) {
 		value, err := s.service.importObject(ctx, s.peer, ref)
 		if err != nil {
 			return scm.NewNil(), err
@@ -727,7 +727,7 @@ func (service *nodeScanService) deliverObjectRelease(release clusterObjectReleas
 		peer = connected
 		defer service.forget(peer)
 	}
-	return service.control(ctx, peer, "object.release", release.reference, nil) == nil
+	return service.control(ctx, peer, "object.release", release.reference, nil, true) == nil
 }
 
 type clusterObjectQueryKey struct{}

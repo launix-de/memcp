@@ -79,7 +79,7 @@ func (cluster *nodeCluster) transferSchemaLocations(ctx context.Context, target 
 	for start := 0; start < len(entries); start += 64 {
 		end := min(start+64, len(entries))
 		request := clusterSchemaLocations{Header: header, Entries: entries[start:end]}
-		if err := cluster.service.control(ctx, peer, "cluster.schema_locations", request, nil); err != nil {
+		if err := cluster.service.control(ctx, peer, "cluster.schema_locations", request, nil, true); err != nil {
 			return err
 		}
 	}
@@ -95,7 +95,7 @@ func (cluster *nodeCluster) recoverSchemaLocations(ctx context.Context, database
 		request := clusterSchemaLocations{Header: mosiPacket{Resource: mosiResource{Database: database}}}
 		for {
 			var page clusterSchemaLocations
-			if err := cluster.service.control(ctx, link.peer, "cluster.schema_locations", request, &page); err != nil {
+			if err := cluster.service.control(ctx, link.peer, "cluster.schema_locations", request, &page, true); err != nil {
 				return err
 			}
 			if page.Header.Resource != request.Header.Resource || len(page.Entries) > 64 {
@@ -202,7 +202,7 @@ func (cluster *nodeCluster) locateViaSchema(ctx context.Context, resource mosiRe
 		if peer == nil {
 			return "", fmt.Errorf(mosi.NetworkError)
 		}
-		if err := cluster.service.control(ctx, peer, "cluster.location", resource, &record); err != nil {
+		if err := cluster.service.control(ctx, peer, "cluster.location", resource, &record, true); err != nil {
 			return "", err
 		}
 		if !record.Resource.valid() || record.Resource.Database != resource.Database || record.Resource.Table != resource.Table || record.Owner == "" {
@@ -237,7 +237,7 @@ func (cluster *nodeCluster) registerLocation(ctx context.Context, entry replicaR
 		if peer == nil {
 			return fmt.Errorf(mosi.NetworkError)
 		}
-		return cluster.service.control(ctx, peer, "cluster.location_update", locationRecord(entry), nil)
+		return cluster.service.control(ctx, peer, "cluster.location_update", locationRecord(entry), nil, true)
 	}
 	schema := cluster.manager.resourceCell(mosiResource{Database: entry.Resource.Database})
 	schema.directory.Lock()
@@ -314,7 +314,7 @@ func (cluster *nodeCluster) handleLocations(ctx context.Context, source, method 
 				return nil, fmt.Errorf(mosi.NetworkError)
 			}
 			var entry replicaRecord
-			err := cluster.service.control(ctx, peer, method, resource, &entry)
+			err := cluster.service.control(ctx, peer, method, resource, &entry, true)
 			return entry, err
 		}
 		cluster.bootstrapCell(resource)

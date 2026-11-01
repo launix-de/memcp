@@ -22,7 +22,6 @@ import "io"
 import "fmt"
 import "math"
 import "bytes"
-import "reflect"
 import "strconv"
 import "strings"
 
@@ -303,6 +302,20 @@ func serializeEx(b *schemeTextWriter, v Scmer, en *Env, glob *Env, p *Proc) {
 		serializeEx(b, v, en.Outer, glob, p)
 		b.WriteString(")")
 		return
+	}
+	if b.objects != nil && v.GetTag() == tagAny {
+		if handle, ok := v.Any().(Handle); ok {
+			expression, err := b.objects.HandleExpression(handle)
+			if err != nil {
+				panic(err)
+			}
+			serializeEx(b, expression, glob, glob, nil)
+			return
+		}
+		if failure, ok := v.Any().(*handleFailure); ok {
+			serializeEx(b, NewSlice([]Scmer{NewSymbol("handle_failure"), NewString(failure.message)}), glob, glob, nil)
+			return
+		}
 	}
 	// Ordinary scalar serialization performs no registry lookup. Object-backed
 	// callables, opaque values and embedding-owned tags use the same interface,
@@ -626,23 +639,28 @@ func serializeNativeFunc(b *schemeTextWriter, fn any, en *Env) {
 			return
 		}
 	}
-	fnPtr := reflect.ValueOf(fn).Pointer()
-	en2 := en
-	for en2 != nil {
-		for k, v := range en2.Vars {
-			if v.GetTag() == tagFunc {
-				fv := v.Func()
-				ov := reflect.ValueOf(fv)
-				if ov.Kind() == reflect.Func && ov.Pointer() == fnPtr {
-					b.WriteString(string(k))
+	if call, ok := fn.(func(...Scmer) Scmer); ok {
+		identity := FunctionIdentity(call)
+		for scope := en; scope != nil; scope = scope.Outer {
+			for name, value := range scope.Vars {
+				if value.GetTag() == tagFunc && FunctionIdentity(value.Func()) == identity {
+					b.WriteString(string(name))
 					return
 				}
 			}
 		}
-		en2 = en2.Outer
 	}
 	if b.objects != nil {
-		panic("native callable has no serialization contract")
+		call, ok := fn.(func(...Scmer) Scmer)
+		if !ok {
+			panic("native callable has no serialization contract")
+		}
+		expression, err := b.objects.HandleExpression(ClosureHandle(executionContextFrom(b.objects.InvocationScope()), call))
+		if err != nil {
+			panic(err)
+		}
+		serializeEx(b, NewSlice([]Scmer{NewSymbol("remote_closure"), NewNil(), expression, NewNil()}), &Globalenv, &Globalenv, nil)
+		return
 	}
 	b.WriteString("[unserializable native func]")
 }

@@ -424,6 +424,32 @@ class ClusterSuiteTests(unittest.TestCase):
 				self.assertEqual(runner.results[-1]["cluster"]["remote_shards"], int(remote_body), calls)
 				self.assertEqual(counter[0], 3 + int(remote_body))
 
+	def test_reference_comparison_can_preserve_bags_without_requiring_order(self):
+		import json
+		from types import SimpleNamespace
+		for option, actual, passed in (
+			(None, [{"n": 2}, {"n": 1}, {"n": 1}], False),
+			(False, [{"n": 2}, {"n": 1}, {"n": 1}], True),
+			(False, [{"n": 2}, {"n": 2}, {"n": 1}], False),
+			("false", [{"n": 2}, {"n": 1}, {"n": 1}], False),
+		):
+			with self.subTest(option=option, actual=actual), tempfile.TemporaryDirectory() as temp:
+				node = SimpleNamespace(port=1, password="admin", database="memcp-tests")
+				case = {"name": "bag", "sql": "SELECT n FROM items", "expect": {"rows": 3}}
+				if option is not None:
+					case["compare_reference_order"] = option
+				reference = [{"name": "bag", "sql": case["sql"], "scm": None,
+					"status": "passed", "rows": [{"n": 1}, {"n": 1}, {"n": 2}]}]
+				runner = replication.ClusterSQLTestRunner(node, [node], Path(temp), [],
+					Path(temp) / "report.json", reference=reference)
+				response = SimpleNamespace(status_code=200,
+					text="\n".join(json.dumps(row) for row in actual), headers={})
+				with mock.patch.object(replication, "io_stats", return_value={}), \
+						mock.patch.object(runner, "ensure_database"), \
+						mock.patch.object(runner, "execute_sql", return_value=response), \
+						mock.patch("builtins.print"):
+					self.assertEqual(runner.run_test_case(case, "memcp-tests"), passed)
+
 
 if __name__ == "__main__":
 	unittest.main()

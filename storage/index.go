@@ -76,11 +76,13 @@ type computedRevision struct {
 // For raw columns it reads directly from ColumnStorage; for computed columns
 // it evaluates the mapFn over the source column storages.
 type colGetter struct {
-	raw     ColumnReader    // non-nil for raw columns
-	source  ColumnStorage   // generation-owned source for operator-specific preparation
-	mapCols []ColumnReader  // non-nil for computed columns
-	mapFn   *scm.SerialProc // non-nil for computed columns; owned by this serial reader
-	mapArgs []scm.Scmer
+	raw        ColumnReader    // non-nil for raw columns
+	source     ColumnStorage   // generation-owned source for operator-specific preparation
+	mapCols    []ColumnReader  // non-nil for computed columns
+	mapFn      *scm.SerialProc // non-nil for computed columns; owned by this serial reader
+	mapArgs    []scm.Scmer
+	deltaSlots []int // raw delta offsets; -1 uses a computed reader, -2 is absent
+	deltaSlot  int
 }
 
 const inlineIndexGetters = 8
@@ -103,6 +105,42 @@ func (g colGetter) get(recid uint32) scm.Scmer {
 		return g.mapFn.Call(g.mapArgs)
 	}
 	return g.raw.GetValue(recid)
+}
+
+// deltaValue uses the same invocation-prepared scalar program and readers as
+// main keys. No function preparation or retained reader acquisition belongs in
+// a delta item loop or B-tree comparator.
+func (g colGetter) deltaValue(recid uint32, data []scm.Scmer) scm.Scmer {
+	if g.mapFn != nil {
+		for i, slot := range g.deltaSlots {
+			switch {
+			case slot == -1:
+				g.mapArgs[i] = g.mapCols[i].GetValue(recid)
+			case slot >= 0 && slot < len(data):
+				g.mapArgs[i] = data[slot]
+			default:
+				g.mapArgs[i] = scm.NewNil()
+			}
+		}
+		return g.mapFn.Call(g.mapArgs)
+	}
+	if g.deltaSlot == -1 {
+		return g.raw.GetValue(recid)
+	}
+	if g.deltaSlot >= 0 && g.deltaSlot < len(data) {
+		return data[g.deltaSlot]
+	}
+	return scm.NewNil()
+}
+
+func (s *StorageIndex) deltaReaderSlot(column string, storage ColumnStorage) int {
+	if _, computed := storage.(*StorageComputeProxy); computed {
+		return -1
+	}
+	if slot, found := s.t.deltaColumns[column]; found {
+		return slot
+	}
+	return -2
 }
 
 // Persistent index boundaries must not retain a view into an evictable decoded
@@ -146,7 +184,7 @@ type StorageIndex struct {
 	t            *storageShard
 	lastHit      atomic.Uint32 // last search position for sorted access pattern optimization
 	mu           sync.Mutex
-	baseState    storageIndexState
+	baseState    *storageIndexState
 }
 
 func orderRelationMeta(order func(...scm.Scmer) scm.Scmer) string {
@@ -350,25 +388,28 @@ func (s *StorageIndex) buildGetters(tx *TxContext, storage []colGetter) []colGet
 		if len(s.ColMapFn) > i && !s.ColMapFn[i].IsNil() {
 			// computed column: read mapCols and apply mapFn
 			mapColReaders := make([]ColumnReader, len(s.ColMapCols[i]))
+			deltaSlots := make([]int, len(mapColReaders))
 			getters[i].mapCols = mapColReaders
 			for j, mc := range s.ColMapCols[i] {
 				if isScanPseudoColName(mc) {
+					deltaSlots[j] = -2
 					mapColReaders[j] = ColumnReaderFunc(func(uint32) scm.Scmer { return scm.NewNil() })
 					continue
 				}
 				cs := s.t.getColumnStorageRLocked(mc)
+				deltaSlots[j] = s.deltaReaderSlot(mc, cs)
 				mapColReaders[j] = newCachedColumnReaderTx(cs, tx, true, ReadAuto|readOperatorOwned)
 			}
 			mapFn := s.ColMapFn[i]
 			fn := scm.PrepareSerialProc(mapFn)
-			getters[i] = colGetter{mapCols: mapColReaders, mapFn: &fn, mapArgs: make([]scm.Scmer, len(mapColReaders))}
+			getters[i] = colGetter{mapCols: mapColReaders, mapFn: &fn, mapArgs: make([]scm.Scmer, len(mapColReaders)), deltaSlots: deltaSlots}
 		} else {
 			cs := s.t.getColumnStorageRLocked(col)
 			hints := ReadAuto
 			if !s.columnIsSorted(i) {
 				hints = ReadCompressed
 			}
-			getters[i] = colGetter{raw: newCachedColumnReaderTx(cs, tx, true, hints|readOperatorOwned), source: cs}
+			getters[i] = colGetter{raw: newCachedColumnReaderTx(cs, tx, true, hints|readOperatorOwned), source: cs, deltaSlot: s.deltaReaderSlot(col, cs)}
 		}
 	}
 	complete = true
@@ -437,7 +478,7 @@ func (idx *StorageIndex) columnIsSorted(i int) bool {
 	return len(idx.ColMatchers) <= i || idx.ColMatchers[i] == nil || idx.ColMatchers[i].IsSorted()
 }
 
-func (idx *StorageIndex) addSavings(state *storageIndexState, usageWeight float64) float64 {
+func (idx *StorageIndex) addSavings(usageWeight float64) float64 {
 	if usageWeight <= 0 {
 		return idx.loadSavings()
 	}
@@ -468,7 +509,7 @@ func (idx *StorageIndex) ComputeSize() uint {
 // by bounds/revisions are borrowed, not recursively owned by the index. This
 // walk runs at publication and explicit diagnostics, never per matched row.
 func (idx *StorageIndex) computeSizeLocked() uint {
-	state := &idx.baseState
+	state := idx.baseState
 	sz := uint(unsafe.Sizeof(*idx))
 	sz += uint(cap(idx.Cols)+cap(idx.ColOrderMeta)) * uint(unsafe.Sizeof(""))
 	sz += uint(cap(idx.ColMapCols)) * uint(unsafe.Sizeof([]string{}))
@@ -478,6 +519,10 @@ func (idx *StorageIndex) computeSizeLocked() uint {
 	sz += uint(cap(idx.ColMapFn)) * uint(unsafe.Sizeof(scm.Scmer{}))
 	sz += uint(cap(idx.ColMatchers)) * uint(unsafe.Sizeof((*IndexAnalyzer)(nil))) * 2
 	sz += uint(cap(idx.ColOrder)) * uint(unsafe.Sizeof((func(scm.Scmer, scm.Scmer) bool)(nil)))
+	if state == nil {
+		return sz
+	}
+	sz += uint(unsafe.Sizeof(*state))
 	// StorageInt structs are embedded; only their backing allocations add RAM.
 	sz += state.mainIndexes.ComputeSize() - uint(unsafe.Sizeof(state.mainIndexes))
 	sz += state.mainIndexPositions.ComputeSize() - uint(unsafe.Sizeof(state.mainIndexPositions))
@@ -503,7 +548,7 @@ func (idx *StorageIndex) evict(mode evictionMode, currentSize int64, _ *[numEvic
 	if mode == evictPartial {
 		return evictionResult{}
 	}
-	idx.baseState = storageIndexState{}
+	idx.baseState = nil
 	return evictionResult{freedBytes: currentSize, fullyEvicted: true, success: true}
 }
 
@@ -513,8 +558,8 @@ func (idx *StorageIndex) computeDeltaBtreeSize(state *storageIndexState) uint {
 	}
 	// The B-tree owns nodes and indexPair values. For normal delta rows,
 	// indexPair.data points at shard inserts that are already counted by the
-	// shard; count only the slice header there. A future precomputed payload
-	// would have to be accounted separately.
+	// shard; count only the slice header there. Computed delta keys instead
+	// own their prepared tuples and are charged separately below.
 	var sz uint = 64 + uint(state.deltaBtree.Len())*64
 	state.deltaBtree.Ascend(func(item indexPair) bool {
 		if state.precomputedDelta {
@@ -561,44 +606,6 @@ func (s *StorageIndex) getDeltaValue(data []scm.Scmer, col string) scm.Scmer {
 		return data[colpos]
 	}
 	return scm.NewNil()
-}
-
-// getDeltaColValue returns the index-column value for a delta row at column index colIdx.
-// For computed columns it reads the source cols and applies the mapFn.
-func (s *StorageIndex) getDeltaColValue(recid uint32, data []scm.Scmer, colIdx int) scm.Scmer {
-	return s.getDeltaColValueTx(nil, recid, data, colIdx)
-}
-
-func (s *StorageIndex) getDeltaColValueTx(tx *TxContext, recid uint32, data []scm.Scmer, colIdx int) scm.Scmer {
-	if len(s.ColMapFn) > colIdx && !s.ColMapFn[colIdx].IsNil() {
-		fn := scm.PrepareSerialProc(s.ColMapFn[colIdx])
-		vals := make([]scm.Scmer, len(s.ColMapCols[colIdx]))
-		for i, mc := range s.ColMapCols[colIdx] {
-			if isScanPseudoColName(mc) {
-				vals[i] = scm.NewNil()
-				continue
-			}
-			cs := s.t.getColumnStorageRLocked(mc)
-			if proxy, ok := cs.(*StorageComputeProxy); ok {
-				if !proxy.isOrdered {
-					vals[i] = proxy.getValueRLocked(tx, recid)
-				} else {
-					vals[i] = s.t.ColumnReaderTx(tx, mc, true, ReadAuto).GetValue(recid)
-				}
-			} else {
-				vals[i] = s.getDeltaValue(data, mc)
-			}
-		}
-		return fn.Call(vals)
-	}
-	cs := s.t.getColumnStorageRLocked(s.Cols[colIdx])
-	if proxy, ok := cs.(*StorageComputeProxy); ok {
-		if !proxy.isOrdered {
-			return proxy.getValueRLocked(tx, recid)
-		}
-		return s.t.ColumnReaderTx(tx, s.Cols[colIdx], true, ReadAuto).GetValue(recid)
-	}
-	return s.getDeltaValue(data, s.Cols[colIdx])
 }
 
 // rowWithinBounds checks sorted (equal/range) columns using lower/upper directly.
@@ -716,7 +723,7 @@ func (s *StorageIndex) compareMainAndDelta(state *storageIndexState, mainRecid u
 		if state.precomputedDelta {
 			deltaVal = delta.data[i]
 		} else {
-			deltaVal = s.getDeltaColValue(uint32(delta.itemid), delta.data, i)
+			deltaVal = s.getDeltaValue(delta.data, s.Cols[i])
 		}
 		if s.lessAt(i, mainVal, deltaVal) {
 			return -1
@@ -756,7 +763,11 @@ func (s *StorageIndex) prepareCollationKeys(state *storageIndexState, pair index
 		}
 		var value scm.Scmer
 		if pair.itemid >= 0 {
-			value = s.getDeltaColValue(uint32(pair.itemid), pair.data, colIdx)
+			if state.precomputedDelta {
+				value = pair.data[colIdx]
+			} else {
+				value = s.getDeltaValue(pair.data, s.Cols[colIdx])
+			}
 		} else if pair.reference == nil {
 			value = pair.data[colIdx]
 		} else {
@@ -954,8 +965,8 @@ func (t *storageShard) iterateIndexEx(tx *TxContext, cols scanAccess, maxInsertI
 				index.ColMatchers[i] = cols.boundaryAnalyzer(i)
 			}
 		}
-		index.storeSavings(0.0)        // count how many cost we wasted so we decide when to build the index
-		index.baseState.active = false // tell the engine that index has to be built first
+		index.storeSavings(0.0) // count how many cost we wasted so we decide when to build the index
+		// An absent state is built on demand.
 		index.t = t
 		index.Native = true
 		for i := range index.Cols {
@@ -1046,7 +1057,6 @@ func snapshotIndexesForRebuild(indexes []*StorageIndex, usageDecay float64) []*S
 		clone.ColOrder = append([]func(scm.Scmer, scm.Scmer) bool(nil), idx.ColOrder...)
 		clone.ColOrderMeta = append([]string(nil), idx.ColOrderMeta...)
 		clone.storeSavings(idx.loadSavings() * usageDecay)
-		clone.baseState.active = false
 		candidates = append(candidates, clone)
 	}
 	return candidates
@@ -1145,7 +1155,7 @@ func rebuildRepartitionIndexes(candidates []*StorageIndex, shard *storageShard) 
 		func() {
 			getters := index.buildGetters(nil, nil)
 			defer releaseIndexGetters(getters)
-			index.buildIndex(&index.baseState, getters, nil)
+			index.buildIndex(getters, nil)
 		}()
 		warmed++
 	}
@@ -1244,7 +1254,7 @@ func rebuildIndexes(candidates []*StorageIndex, t2 *storageShard, allowNative bo
 				continue
 			}
 			if indexDefinitionPrefix(shorter, longer) {
-				longer.addSavings(nil, shorter.loadSavings())
+				longer.addSavings(shorter.loadSavings())
 				removed[j] = true
 			}
 		}
@@ -1306,23 +1316,10 @@ func (s *StorageIndex) fullScan(maxInsertIndex int, buf []uint32, matchers []Ind
 // buildIndex constructs the shared index data structures.
 // cols must contain value getters for each index column in order.
 // The caller must hold s.mu.Lock() or have exclusive access.
-func (s *StorageIndex) buildIndex(state *storageIndexState, cols []colGetter, tx *TxContext) {
-	// A reader, comparator or hook may panic (for example on a missing blob).
-	// Never publish or retain a partially constructed index as usable state.
-	// The caller owns mu throughout construction and failure cleanup.
-	complete := false
-	state.active = false
-	defer func() {
-		if !complete {
-			state.mainIndexes = StorageInt{}
-			state.mainIndexPositions = StorageInt{}
-			state.deltaBtree = nil
-			state.minVals, state.maxVals = nil, nil
-			state.indexHooks = nil
-			state.indexHookBytes.Store(0)
-			state.computedRevisions = nil
-		}
-	}()
+func (s *StorageIndex) buildIndex(cols []colGetter, tx *TxContext) {
+	state := new(storageIndexState)
+	// Build privately. A panic leaves the published state untouched; all
+	// unpublished allocations are reclaimed through ordinary Go ownership.
 	state.collationKeyFns = make([]scm.CollationKeyFunc, len(s.Cols))
 	state.collationKeyReverse = make([]bool, len(s.Cols))
 	for colIdx := range s.Cols {
@@ -1339,6 +1336,7 @@ func (s *StorageIndex) buildIndex(state *storageIndexState, cols []colGetter, tx
 	for _, col := range cols {
 		state.directDelta = state.directDelta && col.mapFn == nil
 	}
+	state.precomputedDelta = !state.directDelta
 
 	if !s.Native {
 		// main storage: build sort-order index
@@ -1529,8 +1527,10 @@ func (s *StorageIndex) buildIndex(state *storageIndexState, cols []colGetter, tx
 	// on each B-tree item so its O(log N) insertion comparisons do not recreate
 	// an allocating x/text collator frame for the same value. Seek probes receive
 	// keys from this same index state, so another collation can never be mixed in.
-	// Comparator uses getDeltaColValue so computed columns work; skip non-sorted
-	// matcher columns because they do not participate in sort order.
+	// Computed keys are prepared once per delta row; comparisons only read those
+	// immutable values. Unsorted matcher columns do not participate in ordering.
+	// The comparator retains this state object. Eviction detaches the owner
+	// pointer without changing the state retained by existing readers.
 	state.deltaBtree = btree.NewG[indexPair](8, func(a, b indexPair) bool {
 		compareCols := len(s.Cols)
 		if a.itemid == -1 && a.reference == nil && len(a.data) < compareCols {
@@ -1557,7 +1557,7 @@ func (s *StorageIndex) buildIndex(state *storageIndexState, cols []colGetter, tx
 			} else if state.precomputedDelta {
 				av = a.data[colIdx]
 			} else {
-				av = s.getDeltaColValue(uint32(a.itemid), a.data, colIdx)
+				av = s.getDeltaValue(a.data, s.Cols[colIdx])
 			}
 			if b.itemid == -1 {
 				if b.reference == nil {
@@ -1568,7 +1568,7 @@ func (s *StorageIndex) buildIndex(state *storageIndexState, cols []colGetter, tx
 			} else if state.precomputedDelta {
 				bv = b.data[colIdx]
 			} else {
-				bv = s.getDeltaColValue(uint32(b.itemid), b.data, colIdx)
+				bv = s.getDeltaValue(b.data, s.Cols[colIdx])
 			}
 			if colIdx < 64 && state.collationKeyFns[colIdx] != nil {
 				keyBit := uint64(1) << uint(colIdx)
@@ -1597,14 +1597,28 @@ func (s *StorageIndex) buildIndex(state *storageIndexState, cols []colGetter, tx
 	// fill deltaBtree with global record IDs
 	for i, data := range s.t.deltaRows() {
 		recid := s.t.main_count + uint32(i)
-		pair := s.prepareCollationKeys(state, indexPair{itemid: int(recid), data: data})
+		pair := indexPair{itemid: int(recid), data: data}
+		if state.precomputedDelta {
+			pair.data = make([]scm.Scmer, len(cols))
+			for col := range cols {
+				if !s.columnIsSorted(col) {
+					continue
+				}
+				value := cols[col].deltaValue(recid, data)
+				if value.IsString() {
+					value = scm.NewString(strings.Clone(value.String()))
+				}
+				pair.data[col] = value
+			}
+		}
+		pair = s.prepareCollationKeys(state, pair)
 		state.deltaBtree.ReplaceOrInsert(pair)
 	}
 
 	endRevisions := s.computedRevisionsRLocked()
 	state.computedRevisions = endRevisions
 	state.active = sameComputedRevisions(startRevisions, endRevisions)
-	complete = true
+	s.baseState = state
 }
 
 // CONTRACT: insertDelta maintains only keys derived from stored row values. The caller
@@ -1616,13 +1630,12 @@ func (s *StorageIndex) buildIndex(state *storageIndexState, cols []colGetter, tx
 func (s *StorageIndex) insertDelta(recid uint32, row []scm.Scmer) int64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	state := &s.baseState
-	if state.deltaBtree == nil {
+	state := s.baseState
+	if state == nil || state.deltaBtree == nil {
 		return 0
 	}
 	if !state.directDelta {
-		state.active = false
-		state.deltaBtree = nil
+		s.baseState = nil
 		return 0
 	}
 	pair := s.prepareCollationKeys(state, indexPair{itemid: int(recid), data: row})
@@ -1656,6 +1669,11 @@ func (s *StorageIndex) buildMainIndexPositionsLocked(state *storageIndexState) u
 			state.mainIndexPositions.buildValueUInt32(recid, base+uint32(offset))
 		}
 		base += chunkCount
+	}
+	// A retained reader may finish its inverse after eviction. Charge only
+	// allocations belonging to the currently published cache state.
+	if s.baseState != state {
+		return 0
 	}
 	return state.mainIndexPositions.ComputeSize() - uint(unsafe.Sizeof(state.mainIndexPositions))
 }
@@ -1774,7 +1792,7 @@ func (s *StorageIndex) iterateRecSetFirst(tx *TxContext, state *storageIndexStat
 			if recid < s.t.main_count {
 				return cols[col].get(recid)
 			}
-			return s.getDeltaColValueTx(tx, recid, s.t.deltaRows()[recid-s.t.main_count], col)
+			return cols[col].deltaValue(recid, s.t.deltaRows()[recid-s.t.main_count])
 		}
 		lessRecID := func(leftID, rightID uint32) bool {
 			for col := range s.Cols {
@@ -1837,7 +1855,7 @@ func (s *StorageIndex) iterateRecSetFirst(tx *TxContext, state *storageIndexStat
 			if recid < s.t.main_count {
 				return cols[col].get(recid)
 			}
-			return s.getDeltaColValueTx(tx, recid, s.t.deltaRows()[recid-s.t.main_count], col)
+			return cols[col].deltaValue(recid, s.t.deltaRows()[recid-s.t.main_count])
 		}
 		hybridsort.Slice(items, func(i, j int) bool {
 			for col := range s.Cols {
@@ -1965,7 +1983,7 @@ func (s *StorageIndex) bindColdRangeMatcher(tx *TxContext, bounds scanAccess, in
 				if recid < s.t.main_count {
 					return cols[col].get(recid)
 				}
-				return s.getDeltaColValueTx(tx, recid, s.t.deltaRows()[recid-s.t.main_count], col)
+				return cols[col].deltaValue(recid, s.t.deltaRows()[recid-s.t.main_count])
 			}
 			inRange, _ := s.rowWithinBounds(bounds, indexBounds, cmpCols, lastSorted, sortedMask, unboundedMask, lowerInclusive, upperInclusive, valueAt)
 			if inRange && !lowerInclusive {
@@ -1998,12 +2016,9 @@ func emitRowMatchers(matchers []IndexRowMatcher, ids []uint32, callback func([]u
 }
 
 func (s *StorageIndex) estimateHookCandidates(tx *TxContext, bounds scanAccess) (uint32, uint32, bool) {
-	state := &s.baseState
-	if state == nil {
-		return 0, 0, false
-	}
 	s.mu.Lock()
-	if !state.active {
+	state := s.baseState
+	if state == nil || !state.active {
 		s.mu.Unlock()
 		return 0, 0, false
 	}
@@ -2057,13 +2072,14 @@ func (s *StorageIndex) iterate(tx *TxContext, bounds scanAccess, indexBoundsValu
 		getterScratch.indexBounds = scanIndexBounds{}
 		indexGetterScratchPool.Put(getterScratch)
 	}()
-	state := &s.baseState
 	currentRevisions := s.computedRevisionsRLocked()
 	s.mu.Lock()
-	if state.active && !sameComputedRevisions(state.computedRevisions, currentRevisions) {
-		state.active = false
+	state := s.baseState
+	if state != nil && state.active && !sameComputedRevisions(state.computedRevisions, currentRevisions) {
+		s.baseState = nil
+		state = nil
 	}
-	stateActive := state.active
+	stateActive := state != nil && state.active
 	s.mu.Unlock()
 	// no collation-specific helpers in the current implementation
 	recsetPart, hasRecSetBoundary := smallestRecSetBoundary(bounds, s.t)
@@ -2106,7 +2122,7 @@ func (s *StorageIndex) iterate(tx *TxContext, bounds scanAccess, indexBoundsValu
 		return
 	}
 	savingsThreshold := 2.0 // building an index costs 1x the time as traversing the list
-	savings := s.addSavings(state, usageWeight)
+	savings := s.addSavings(usageWeight)
 	if !stateActive {
 		// index is not built yet
 		if savings < savingsThreshold && !forceBuild {
@@ -2142,7 +2158,7 @@ func (s *StorageIndex) iterate(tx *TxContext, bounds scanAccess, indexBoundsValu
 				}
 				return
 			}
-			if state.active {
+			if s.baseState != nil && s.baseState.active {
 				// someone has built it in the meantime
 				s.mu.Unlock()
 				goto start_scan
@@ -2151,7 +2167,7 @@ func (s *StorageIndex) iterate(tx *TxContext, bounds scanAccess, indexBoundsValu
 				// Error propagation must not strand the shared index mutex:
 				// every later scan snapshots state under this same lock.
 				defer s.mu.Unlock()
-				s.buildIndex(state, cols, tx)
+				s.buildIndex(cols, tx)
 			}()
 			// register with CacheManager
 			GlobalCache.AddItem(s, int64(s.ComputeSize()), TypeIndex, indexCleanup, indexLastUsed, indexGetScore)
@@ -2159,9 +2175,7 @@ func (s *StorageIndex) iterate(tx *TxContext, bounds scanAccess, indexBoundsValu
 	}
 start_scan:
 
-	// Snapshot index state under the lock to prevent a TOCTOU race with
-	// indexCleanup, which may set active=false / mainIndexes={} / deltaBtree=nil
-	// concurrently. The snapshot keeps the backing data alive via GC references.
+	// Retain the complete index state. Eviction only detaches the owner pointer.
 	if !s.mu.TryLock() {
 		if selected != nil {
 			selected(s, false)
@@ -2172,7 +2186,8 @@ start_scan:
 		}
 		return
 	}
-	if !state.active {
+	state = s.baseState
+	if state == nil || !state.active {
 		// Index was evicted between our initial check and here.
 		s.mu.Unlock()
 		if selected != nil {
@@ -2184,12 +2199,6 @@ start_scan:
 		}
 		return
 	}
-	snapMainIndexes := state.mainIndexes
-	// No clone needed: the shard's RLock (held by caller) prevents concurrent
-	// inserts from modifying deltaBtree. The index mutex protects against
-	// eviction only; the btree data is stable under RLock.
-	snapDeltaBtree := state.deltaBtree
-	snapIndexHooks := state.indexHooks
 	isNative := s.Native
 	s.mu.Unlock()
 	if bounds.runtime != nil && bounds.runtime.prefixMerge != nil {
@@ -2207,7 +2216,7 @@ start_scan:
 		if selected != nil {
 			selected(s, true)
 		}
-		s.iteratePrefixMerge(tx, bounds.runtime.prefixMerge, cols, snapMainIndexes, snapDeltaBtree, isNative, maxInsertIndex, buf, callback)
+		s.iteratePrefixMerge(state.precomputedDelta, bounds.runtime.prefixMerge, cols, state.mainIndexes, state.deltaBtree, isNative, maxInsertIndex, buf, callback)
 		return
 	}
 	if selected != nil {
@@ -2229,7 +2238,7 @@ start_scan:
 
 	// record-ID lookup: identity when data is physically sorted (Native), index dereference otherwise
 	getRecid := func(idx int) uint32 {
-		return uint32(int64(snapMainIndexes.GetValueUInt(uint32(idx))) + snapMainIndexes.offset)
+		return uint32(int64(state.mainIndexes.GetValueUInt(uint32(idx))) + state.mainIndexes.offset)
 	}
 	if isNative {
 		getRecid = func(idx int) uint32 { return uint32(idx) }
@@ -2354,7 +2363,7 @@ start_scan:
 	// Exact unordered candidate hooks may jump between index positions in the
 	// caller's original value order. Sorted scans keep their ordinary merge.
 	if options == nil && !hasRecSetBoundary {
-		for i, hook := range snapIndexHooks {
+		for i, hook := range state.indexHooks {
 			source, ok := hook.(IndexCandidateSource)
 			if !ok || i >= bounds.len() || i >= len(cols) ||
 				!indexMatcherCompatible(bounds.boundaryAnalyzer(i), s.ColMatchers[i]) {
@@ -2370,7 +2379,7 @@ start_scan:
 			// Probes bypass the ordinary interval iterator, so apply its complete
 			// bounds as well as every independent candidate hook to each batch.
 			matchers := s.bindColdRangeMatcher(tx, bounds, indexBounds, upperInclusive, cols)
-			matchers = append(matchers, s.bindRowMatchers(tx, bounds, indexBounds, upperInclusive, cols, snapIndexHooks, true, exactMain)...)
+			matchers = append(matchers, s.bindRowMatchers(tx, bounds, indexBounds, upperInclusive, cols, state.indexHooks, true, exactMain)...)
 			if candidateSpan != nil {
 				*candidateSpan = 0
 			}
@@ -2423,19 +2432,14 @@ start_scan:
 	runRecSetKernel := func(start, end int, target func([]uint32) bool) {
 		var inverseBytes uint
 		s.mu.Lock()
-		if state.active && options != nil {
+		if options != nil {
 			inverseBytes = s.buildMainIndexPositionsLocked(state)
-		}
-		sparseState := storageIndexState{
-			mainIndexes:        state.mainIndexes,
-			mainIndexPositions: state.mainIndexPositions,
-			indexHooks:         append([]IndexHook(nil), state.indexHooks...),
 		}
 		s.mu.Unlock()
 		if inverseBytes > 0 {
 			GlobalCache.UpdateSizeAsync(s, int64(inverseBytes))
 		}
-		s.iterateRecSetFirst(tx, &sparseState, recsetPart, bounds, indexBounds,
+		s.iterateRecSetFirst(tx, state, recsetPart, bounds, indexBounds,
 			upperInclusive, start, end, maxInsertIndex, buf, cols, true, options != nil, exactMain, target)
 	}
 	if preferRecSet {
@@ -2444,7 +2448,7 @@ start_scan:
 	}
 
 	rawCallback := callback
-	matchers := s.bindRowMatchers(tx, bounds, indexBounds, upperInclusive, cols, snapIndexHooks, true, exactMain)
+	matchers := s.bindRowMatchers(tx, bounds, indexBounds, upperInclusive, cols, state.indexHooks, true, exactMain)
 	// For one constrained sorted key, the two binary searches define the exact
 	// main-row interval. Non-sorted access hooks still run in emitRowMatchers.
 	// Complete non-NULL equality prefixes now have the same exact interval.
@@ -2515,7 +2519,7 @@ start_scan:
 
 	mainRecid, mainOk := nextMain()
 
-	if maxInsertIndex > 0 && snapDeltaBtree != nil {
+	if maxInsertIndex > 0 && state.deltaBtree != nil {
 		// iterFn handles each delta item in btree order.
 		iterFn := func(p indexPair) bool {
 			if stopped {
@@ -2532,7 +2536,7 @@ start_scan:
 				if state.precomputedDelta {
 					return p.data[i]
 				}
-				return s.getDeltaColValue(recid, p.data, i)
+				return s.getDeltaValue(p.data, s.Cols[i])
 			})
 			if !inRange {
 				return !beyond
@@ -2557,28 +2561,26 @@ start_scan:
 		// cannot participate in sort order. The reference comparator treats the
 		// omitted suffix as unbounded; rowWithinBounds still checks all bounds.
 		seekCols := 0
-		if !state.precomputedDelta {
-			for seekCols < cmpCols {
-				i := seekCols
-				if !scanAccessBoundaryHasLowerBound(bounds, i) || (len(s.ColMapFn) > i && !s.ColMapFn[i].IsNil()) || (bounds.len() > i && !bounds.boundaryAnalyzer(i).IsSorted()) {
-					break
-				}
-				seekCols++
+		for seekCols < cmpCols {
+			i := seekCols
+			if !scanAccessBoundaryHasLowerBound(bounds, i) || (!state.precomputedDelta && len(s.ColMapFn) > i && !s.ColMapFn[i].IsNil()) || (bounds.len() > i && !bounds.boundaryAnalyzer(i).IsSorted()) {
+				break
 			}
+			seekCols++
 		}
 		if seekCols == 0 {
-			snapDeltaBtree.Ascend(iterFn)
+			state.deltaBtree.Ascend(iterFn)
 		} else {
 			// Reference pairs are marked with itemid -1 and interpreted in
 			// index-column order by the comparator, so lower is directly
 			// seekable without a per-probe reordered copy.
 			if bounds.exactAdjacent && seekCols == 1 {
 				probe := s.prepareCollationKeys(state, indexPair{itemid: -1, data: bounds.values[:1]})
-				snapDeltaBtree.AscendGreaterOrEqual(probe, iterFn)
+				state.deltaBtree.AscendGreaterOrEqual(probe, iterFn)
 			} else {
 				getterScratch.indexBounds.compareCols = seekCols
 				probe := s.prepareCollationKeys(state, indexPair{itemid: -1, reference: &getterScratch.indexBounds})
-				snapDeltaBtree.AscendGreaterOrEqual(probe, iterFn)
+				state.deltaBtree.AscendGreaterOrEqual(probe, iterFn)
 			}
 		}
 	}

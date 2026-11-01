@@ -1272,6 +1272,7 @@ func TestEqualityPrefixRequiresActiveSortedIndex(t *testing.T) {
 	if shard.hasEqualityIndexPrefix(nil, []string{"a"}) {
 		t.Fatal("inactive sorted index must not select the sparse RecSet lookup path")
 	}
+	idx.baseState = new(storageIndexState)
 	idx.baseState.active = true
 	if !shard.hasEqualityIndexPrefix(nil, []string{"a"}) {
 		t.Fatal("active sorted compound index must cover its equality prefix")

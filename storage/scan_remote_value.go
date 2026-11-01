@@ -70,7 +70,7 @@ func (value schemeValue) reconstruct(decode ...scm.ProcedureDecode) (result scm.
 			return scm.NewNil(), err
 		}
 	}
-	expression, err = scm.ResolveSerializedObjects(expression, option.Resolve)
+	expression, err = scm.ResolveSerializedObjects(expression, option.Resolve, option.ResolveHandle)
 	if err != nil {
 		return scm.NewNil(), err
 	}
@@ -82,6 +82,7 @@ func (value schemeValue) reconstruct(decode ...scm.ProcedureDecode) (result scm.
 // the existing scan engine; no residual predicate or mandatory constraint is
 // discarded by delegation. Runtime physical source sets remain nonportable.
 type remoteScanAccess struct {
+	Mutation   bool              `json:"mutation,omitempty"`
 	Orders     []json.RawMessage `json:"orders,omitempty"`
 	Boundaries []scm.Scmer       `json:"boundaries,omitempty"`
 	Values     []schemeValue     `json:"values,omitempty"`
@@ -91,10 +92,10 @@ type remoteScanAccess struct {
 func freezeScanAccess(access scanAccess, bindings ...*scm.SerializationContext) (remoteScanAccess, error) {
 	// These carry physical invocation state beyond scalar filter operands.
 	// Reject rather than silently omit their execution/lifetime semantics.
-	if access.runtime != nil && (access.runtime.mutation || access.runtime.prefixMerge != nil) {
+	if access.runtime != nil && access.runtime.prefixMerge != nil {
 		return remoteScanAccess{}, fmt.Errorf("remote scan requires a portable read access contract")
 	}
-	out := remoteScanAccess{Covered: access.plannerFilterCovered || access.runtime != nil && access.runtime.filterCovered}
+	out := remoteScanAccess{Mutation: access.runtime != nil && access.runtime.mutation, Covered: access.plannerFilterCovered || access.runtime != nil && access.runtime.filterCovered}
 	for i := 0; i < access.len(); i++ {
 		original, operands := access.boundaryParts(i)
 		box := *original
@@ -202,7 +203,7 @@ func (access remoteScanAccess) bind(decode ...scm.ProcedureDecode) (scanAccess, 
 			return scanAccess{}, err
 		}
 	}
-	return scanAccess{runtime: &scanAccessRuntime{suffix: scanAccessSegment{items: access.Boundaries, values: values}, filterCovered: access.Covered}}, nil
+	return scanAccess{runtime: &scanAccessRuntime{mutation: access.Mutation, suffix: scanAccessSegment{items: access.Boundaries, values: values}, filterCovered: access.Covered}}, nil
 }
 
 // A cancelled or rejected completion must retire offers its receiver never

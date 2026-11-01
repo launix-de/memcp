@@ -212,7 +212,8 @@ restart:
 				}
 				return NewNil()
 			case specialFormBegin:
-				beginEnv := &Env{Vars: make(Vars), VarsNumbered: en.VarsNumbered, Outer: en, Nodefine: false}
+				// define allocates named bindings on demand; numbered scopes need none.
+				beginEnv := &Env{VarsNumbered: en.VarsNumbered, Outer: en, Nodefine: false}
 				for _, form := range operands[:len(operands)-1] {
 					Eval(form, beginEnv)
 				}
@@ -232,7 +233,7 @@ restart:
 					varsNumbered = make([]Scmer, len(en.VarsNumbered)+reserve)
 					copy(varsNumbered, en.VarsNumbered)
 				}
-				beginEnv := &Env{Vars: make(Vars), VarsNumbered: varsNumbered, Outer: en, Nodefine: false}
+				beginEnv := &Env{VarsNumbered: varsNumbered, Outer: en, Nodefine: false}
 				for _, form := range operands[1 : len(operands)-1] {
 					Eval(form, beginEnv)
 				}
@@ -3269,6 +3270,53 @@ func init() {
 				return result
 			},
 			JITInlineCost: 4,
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		Name: "tree_node_count",
+		Fn: func(a ...Scmer) Scmer {
+			return NewInt(int64(optimizerNodeCount(a[0])))
+		},
+		Type: &TypeDescriptor{Kind: "func", Description: "count list containers and scalar leaves by occurrence in an immutable value tree",
+			Params: []*TypeDescriptor{{Kind: "any", Label: "tree", NoEscape: true}},
+			Return: &TypeDescriptor{Kind: "int"}, Const: true,
+			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				declaration := declarations["tree_node_count"]
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
+					ctx.Coverage.NativeCalls++
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
+				}
+				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+				for i := range args {
+					ctx.StabilizeDescForControlFlow(&args[i])
+				}
+				d0 := args[0]
+				d0.ID = 0
+				d0 = JITPrepareScmerGoArg(ctx, d0)
+				ctx.SyncDesc(&d0)
+				d1 := ctx.EmitGoCallScalar(GoFuncAddr(optimizerNodeCount), []JITValueDesc{d0}, 1)
+				d1.NoHeapPointer = true
+				ctx.BindReg(d1.Reg, &d1)
+				ctx.FreeDesc(&d0)
+				ctx.EnsureDesc(&d1)
+				ctx.EnsureDesc(&d1)
+				ctx.EnsureDesc(&d1)
+				if result.Loc == LocAny {
+					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+					ctx.BindReg(result.Reg, &result)
+					ctx.BindReg(result.Reg2, &result)
+				}
+				if d1.Loc == LocImm {
+					ctx.EmitMakeInt(result, d1)
+				} else {
+					ctx.EmitMakeInt(result, d1)
+					ctx.FreeReg(d1.Reg)
+				}
+				result.Type = tagInt
+				return result
+				return result
+			},
+			JITInlineCost: 6,
 		},
 	})
 	Declare(&Globalenv, &Declaration{

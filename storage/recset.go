@@ -1152,8 +1152,8 @@ func (t *storageShard) hasEqualityIndexPrefix(currentTx *TxContext, cols []strin
 		if len(index.Cols) < len(cols) {
 			continue
 		}
-		state := &index.baseState
 		index.mu.Lock()
+		state := index.baseState
 		active := state != nil && state.active
 		index.mu.Unlock()
 		if !active {
