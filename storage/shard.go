@@ -4543,7 +4543,7 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 
 // A live shared snapshot opens an append handle only after acquiring native M.
 func (s *storageShard) ensureMutationLog() {
-	if s.logfile != nil || (s.t.PersistencyMode != Safe && s.t.PersistencyMode != Logged) {
+	if !sharedClusterSource(s.t) || s.logfile != nil || (s.t.PersistencyMode != Safe && s.t.PersistencyMode != Logged) {
 		return
 	}
 	s.mu.Lock()

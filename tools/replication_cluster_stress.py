@@ -1677,13 +1677,13 @@ def run_cluster_sql_contexts(nodes, reference, journal, report_path, status=None
             final = expected if completed and outcome == "COMMIT" else base
             scalar(coordinator, f"SELECT SUM({'v0' if distributed else 'n'}) AS total FROM {table}", final)
 
-    def migrating_overlay(outcome, stop_previous=False, single=False):
+    def migrating_overlay(outcome, stop_previous=False, single=False, begin="START ACID TRANSACTION"):
         if not status:
             return
         host = writer
         session = "cluster-live-mosi-overlay"
         host.client.scm(f'(createcolumn (table "{DATABASE}" false "context_items" false) "n" "INT" (list) (list))')
-        sql(host, "START ACID TRANSACTION", session)
+        sql(host, begin, session)
         stopped = None
         try:
             sql(host, "UPDATE context_items SET n=n+5 WHERE id=0", session)
@@ -1706,7 +1706,7 @@ def run_cluster_sql_contexts(nodes, reference, journal, report_path, status=None
                        and record.get("state") == "M" for record in owned), True,
                        "live handover moved all native shard rights to target")
                 scalar(host, "SELECT SUM(n) AS total FROM context_items", expected, session)
-                scalar(target, "SELECT SUM(n) AS total FROM context_items", 360,
+                scalar(target, "SELECT SUM(n) AS total FROM context_items", 360 if "ACID" in begin else expected,
                        session="cluster-live-observer")
             if stop_previous:
                 victim = nodes[3]
@@ -1733,10 +1733,6 @@ def run_cluster_sql_contexts(nodes, reference, journal, report_path, status=None
                     eventually(lambda: status(stopped)["state"]["connected"] >= len(nodes) - 1,
                                "former owner did not rejoin after decision", timeout=60)
 
-    case("acid-overlay-live-mosi-rollback", lambda: migrating_overlay("ROLLBACK"))
-    case("acid-overlay-live-mosi-commit", lambda: migrating_overlay("COMMIT"))
-    case("acid-commit-after-empty-owner-failure", lambda: migrating_overlay("COMMIT", True))
-    case("acid-single-shard-commit-after-mosi-handover", lambda: migrating_overlay("COMMIT", single=True))
     case("literal-capture", lambda: scalar(coordinator,
          "SELECT SUM(41 + v0) AS total FROM big_items", total + 41 * count, remote=True))
     case("named-session-plain-sum", lambda: scalar(coordinator,
@@ -1752,6 +1748,13 @@ def run_cluster_sql_contexts(nodes, reference, journal, report_path, status=None
     case("local-multishard-cs-rollback", lambda: overlay("START TRANSACTION", "ROLLBACK"))
     case("local-multishard-acid-rollback", lambda: overlay("START ACID TRANSACTION", "ROLLBACK"))
     case("distributed-acid-delete-overlay", lambda: overlay("START ACID TRANSACTION", "ROLLBACK", True))
+    if status:
+        case("acid-overlay-live-mosi-rollback", lambda: migrating_overlay("ROLLBACK"))
+        case("acid-overlay-live-mosi-commit", lambda: migrating_overlay("COMMIT"))
+        case("acid-commit-after-empty-owner-failure", lambda: migrating_overlay("COMMIT", True))
+        case("acid-single-shard-commit-after-mosi-handover", lambda: migrating_overlay("COMMIT", single=True))
+        case("cs-overlay-live-mosi-rollback", lambda: migrating_overlay("ROLLBACK", single=True, begin="START TRANSACTION"))
+        case("cs-commit-after-empty-owner-failure", lambda: migrating_overlay("COMMIT", True, begin="START TRANSACTION"))
     # Last: this intentionally commits a different oracle into context_items.
     case("acid-commit-cache-coherence", lambda: overlay("START ACID TRANSACTION", "COMMIT"))
     return results
