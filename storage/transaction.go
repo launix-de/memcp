@@ -130,6 +130,7 @@ var GlobalCommitEpoch uint64
 // remains nil until the first mutation.
 type transactionState struct {
 	clusterID             string
+	clusterNumber         atomic.Uint64
 	coordinator           *scm.ClusterHandle
 	decisionMu            sync.Mutex
 	prepared              *acidPreparation
@@ -204,11 +205,7 @@ func (tx *TxContext) newInvocation() *TxContext {
 // can reuse it without retaining any state from the completed transaction.
 func (tx *TxContext) reset(mode TxMode) {
 	tx.transactionState = new(transactionState)
-	if cluster := activeNodeCluster(); cluster != nil {
-		tx.ID = cluster.nextTransactionID()
-	} else {
-		tx.ID = atomic.AddUint64(&txIDCounter, 1)
-	}
+	tx.ID = atomic.AddUint64(&txIDCounter, 1)
 	tx.Mode = mode
 	tx.State = TxActive
 	tx.SnapshotEpoch = 0
@@ -249,7 +246,7 @@ func (tx *transactionState) durableID() string {
 		return *txID
 	}
 	candidate := nextDurableTxID()
-	if activeNodeCluster() != nil {
+	if tx.clusterNumber.Load() != 0 || tx.clusterID != "" {
 		candidate = "cluster/" + tx.ClusterObjectID()
 	}
 	if tx.walTxID.CompareAndSwap(nil, &candidate) {

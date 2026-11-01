@@ -11,6 +11,7 @@ import "time"
 import "weak"
 import "runtime"
 import "context"
+import "strconv"
 import "sync/atomic"
 import "github.com/google/uuid"
 import "github.com/launix-de/memcp/scm"
@@ -26,6 +27,9 @@ func (*transactionState) ClusterObjectType() string { return "transaction" }
 func (tx *transactionState) ClusterObjectID() string {
 	if tx.clusterID != "" {
 		return tx.clusterID
+	}
+	if number := tx.clusterNumber.Load(); number != 0 {
+		return strconv.FormatUint(number, 10)
 	}
 	return uuid.NewSHA1(uuid.NameSpaceOID, []byte(walBootID+fmt.Sprint(tx.ID))).String()
 }
@@ -59,6 +63,7 @@ func (tx *transactionState) HandleClusterRequest(ctx context.Context, r scm.Clus
 	if r.Method != "view" {
 		return scm.NewNil(), fmt.Errorf("unsupported native transaction request %q", r.Method)
 	}
+	(&TxContext{transactionState: tx}).ensureClusterIdentity()
 	if registerTransactionState(tx) != tx {
 		return scm.NewNil(), fmt.Errorf("conflicting native transaction identity")
 	}
@@ -186,6 +191,9 @@ func (st *storageShardTransaction) ClusterObjectID() string {
 func (st *storageShardTransaction) HandleClusterRequest(ctx context.Context, r scm.ClusterRequest) (any, error) {
 	if err := ctx.Err(); err != nil {
 		return scm.NewNil(), err
+	}
+	if r.Method == "view" && st.transaction != nil {
+		(&TxContext{transactionState: st.transaction}).ensureClusterIdentity()
 	}
 	if r.Method != "view" {
 		if st.remoteObject != nil {

@@ -9,6 +9,7 @@ import "maps"
 import "sort"
 import "context"
 import "math"
+import "strconv"
 import "encoding/json"
 import "crypto/sha256"
 import "github.com/launix-de/memcp/storage/mosi"
@@ -113,6 +114,32 @@ func (cluster *nodeCluster) nextTransactionID() uint64 {
 	id := cluster.nextID
 	cluster.nextID++
 	return id
+}
+
+// Peer-local registration stays usable for frontend/system work while a node
+// is joining or disconnected. The first shared storage access obtains a numeric
+// cluster identity from a reserved block; importing it never allocates another.
+func (tx *TxContext) ensureClusterIdentity() {
+	if tx.clusterID != "" || tx.clusterNumber.Load() != 0 {
+		return
+	}
+	cluster := activeNodeCluster()
+	if cluster == nil {
+		return
+	}
+	number := cluster.nextTransactionID()
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	if tx.clusterNumber.Load() != 0 {
+		return
+	}
+	identity := strconv.FormatUint(number, 10)
+	for _, st := range tx.shardTransactions() {
+		st.mu.Lock()
+		st.clusterTxID = identity
+		st.mu.Unlock()
+	}
+	tx.clusterNumber.Store(number)
 }
 
 func (cluster *nodeCluster) reserveIDBlock(ctx context.Context) {

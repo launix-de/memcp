@@ -453,7 +453,21 @@ func (cluster *nodeCluster) receive(source string, packet *mosiPacket, connectio
 		return cluster.installReference(source, *packet)
 	case "read", "write":
 		if packet.Boot == "" || !cluster.requestIncarnation(source, packet.Boot) {
-			return fmt.Errorf("stale cluster request incarnation")
+			// An owner hint may forward a new peer's first request before
+			// periodic gossip reaches this owner. Refresh contact hints from
+			// the authenticated forwarder, then authenticate the source itself.
+			if packet.Boot == "" || connection == nil || connection.objectPeer.ID == "" || source == connection.objectPeer.ID && packet.Boot != connection.objectPeer.Boot {
+				return fmt.Errorf("stale cluster request incarnation")
+			}
+			if err := cluster.exchange(&clusterLink{member: clusterMember{ID: connection.objectPeer.ID}, peer: connection}); err != nil {
+				return err
+			}
+			if _, err := cluster.ensurePeer(connection.ctx, source); err != nil {
+				return err
+			}
+			if !cluster.requestIncarnation(source, packet.Boot) {
+				return fmt.Errorf("stale cluster request incarnation")
+			}
 		}
 		copy := *packet
 		connection.workers.Add(1)

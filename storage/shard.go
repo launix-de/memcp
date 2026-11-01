@@ -972,6 +972,9 @@ func (s *storageShard) GetRead(currentTx *TxContext, mayDelegate bool) ReadAcces
 // Physical query-local IDs retain their original immutable generation. Rights
 // acquisition may install a successor, but must never reinterpret those IDs.
 func (s *storageShard) getRead(currentTx *TxContext, snapshot, mayDelegate bool) ReadAccess {
+	if currentTx != nil && sharedClusterSource(s.t) {
+		currentTx.ensureClusterIdentity()
+	}
 	origin := s
 	if target := s.scanTarget.Load(); target != nil {
 		panic(shardReadDelegation{target})
@@ -1011,6 +1014,9 @@ func (s *storageShard) getRead(currentTx *TxContext, snapshot, mayDelegate bool)
 }
 func (s *storageShard) GetWrite(currentTx *TxContext) WriteAccess {
 	origin := s
+	if currentTx != nil && sharedClusterSource(s.t) {
+		currentTx.ensureClusterIdentity()
+	}
 	for preparation := s.prepared.Load(); preparation != nil && (currentTx == nil || preparation.tx != currentTx.transactionState); preparation = s.prepared.Load() {
 		select {
 		case <-preparation.done:

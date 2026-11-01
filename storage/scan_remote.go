@@ -481,6 +481,9 @@ func (origin *peerScanExecutor) ExecuteShardScan(resource mosiResource, invocati
 		condition = scm.Eval(scm.Read("remote unconditional filter", "(lambda args true)"), &scm.Globalenv)
 	}
 	owner := invocation.tx
+	if owner != nil {
+		owner.ensureClusterIdentity()
+	}
 	if owner == nil || !owner.queryActive.Load() {
 		owner = NewTxContext(TxCursorStability)
 		owner.beginQuery(nil, 0, "remote operator")
