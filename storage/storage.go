@@ -4568,13 +4568,14 @@ func Init(en scm.Env) {
 		Name: "registertriggerlanguage",
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
-			registerTriggerLanguage(scm.String(a[0]), a[1])
+			registerTriggerLanguage(scm.String(a[0]), a[1], len(a) > 2 && scm.ToBool(a[2]))
 			return scm.NewBool(true)
 		},
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "registers or replaces a process-local compiler for persistent trigger source; compiler is called as (source context)", HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
 				{Kind: "string", Label: "language", Description: "persistent trigger language identifier"},
 				{Kind: "func", Label: "compiler", Description: "compile lambda accepting source and an assoc context"},
+				{Kind: "bool", Label: "replication_safe", Optional: true, Description: "accept untrusted source and honor schema_only context"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},

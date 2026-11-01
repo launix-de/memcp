@@ -149,6 +149,7 @@ func (r *replicationManager) applyResourcePacket(source string, packet *mosiPack
 		if err != nil {
 			return err
 		}
+		transfer.untrusted = r.master && r.cluster == nil && source != r.id
 		for _, route := range packet.Forwards {
 			r.forwardResource(route.From, route.To)
 		}
@@ -244,7 +245,12 @@ func (r *replicationManager) applyResourcePacket(source string, packet *mosiPack
 	}
 }
 
-func (r *replicationManager) authorizePacket(packet mosiPacket) error {
+func (r *replicationManager) authorizePacket(packet mosiPacket) (err error) {
+	defer func() {
+		if recover() != nil {
+			err = fmt.Errorf("replication access denied")
+		}
+	}()
 	auth, err := r.authenticate(packet.User, packet.Hash, nil, nil, packet.Resource.Database)
 	if err != nil {
 		return err
@@ -267,6 +273,23 @@ func (r *replicationManager) authorizePacket(packet mosiPacket) error {
 func (r *replicationManager) receivePacket(source string, packet *mosiPacket) error {
 	if !packet.Resource.valid() || packet.ID == "" {
 		return fmt.Errorf("invalid resource packet")
+	}
+	// Client packets must not create permanent coherence cells before admission.
+	// Follow-up packets can only address resources already admitted by an
+	// authenticated request or a locally initiated handover.
+	if r.master && r.cluster == nil && source != r.id {
+		switch packet.Kind {
+		case "read", "write":
+			if err := r.authorizePacket(*packet); err != nil {
+				return err
+			}
+		case "begin", "object", "chunk", "object_end", "end", "failure", "ack":
+			if r.lookupCell(packet.Resource) == nil {
+				return fmt.Errorf("unknown replication resource")
+			}
+		default:
+			return fmt.Errorf("invalid slave packet kind")
+		}
 	}
 	object := r.resourceCell(packet.Resource)
 	_, err := object.HandleClusterRequest(context.Background(), scm.ClusterRequest{Method: "packet", Payload: replicaPacketInvocation{source, packet}})

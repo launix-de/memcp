@@ -1558,3 +1558,242 @@ func TestReplicationAccessRetainsPublishedShardUntilNativeSwap(t *testing.T) {
 		t.Fatal("drained transaction or retained old reader was lost")
 	}
 }
+
+func TestReplicationRejectsSlaveSchemaCode(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "memcp-tests", 0)
+	r := replicaRecoveryFixture()
+	id := uuid.NewString()
+	r.peers = map[string]*mosiPeer{id: {done: make(chan struct{}), outgoing: make(chan mosiMessage, 8)}}
+	r.password = scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewString("test-password-hash") })
+	r.policy = scm.NewFunc(func(...scm.Scmer) scm.Scmer {
+		return scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
+			if a[0].String() != "memcp-tests" {
+				panic("denied")
+			}
+			return scm.NewBool(true)
+		})
+	})
+	resource := mosiResource{Database: "memcp-tests"}
+	r.resourceCell(resource)
+	r.directory.Records[resource.key()] = replicaRecord{Resource: resource, Owner: id, Epoch: 1}
+	called := false
+	scm.Declare(&scm.Globalenv, &scm.Declaration{Name: "security_audit_marker", Type: &scm.TypeDescriptor{Kind: "func", HasSideEffects: true, Return: &scm.TypeDescriptor{Kind: "bool"}}, Fn: func(...scm.Scmer) scm.Scmer { called = true; return scm.NewBool(true) }})
+	proc := scm.Eval(scm.Read(t.Name(), "(lambda args (security_audit_marker))"), &scm.Globalenv)
+	tbl.Triggers = []TriggerDescription{{Name: "slave_code", Timing: BeforeInsert, Func: proc}}
+	data, err := json.Marshal(tbl.schema)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tbl.Triggers = nil
+	header := mosiPacket{Kind: "begin", ID: uuid.NewString(), Resource: resource, Epoch: 1, Content: "schema-audit", User: "tenant-user", Hash: base64.StdEncoding.EncodeToString([]byte("test-password-hash"))}
+	send := func(p mosiPacket) {
+		t.Helper()
+		if err := r.receivePacket(id, &p); err != nil {
+			t.Fatalf("%s: %v", p.Kind, err)
+		}
+	}
+	send(header)
+	header.Kind, header.ObjectKind = "object", "schema"
+	send(header)
+	var packed bytes.Buffer
+	zw := gzip.NewWriter(&packed)
+	zw.Write(data)
+	zw.Close()
+	header.Kind, header.Payload = "chunk", packed.Bytes()
+	send(header)
+	header.Kind, header.Payload = "object_end", nil
+	send(header)
+	header.Kind = "end"
+	if err := r.receivePacket(id, &header); err == nil {
+		t.Fatal("master accepted slave-supplied Scheme trigger")
+	}
+	imported := GetDatabase("memcp-tests").GetTable("items")
+	imported.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(1), scm.NewString("x")}}, nil, scm.NewNil(), false, nil)
+	if called {
+		t.Fatal("slave-supplied trigger executed")
+	}
+	// The same native codec remains available to local/trusted code authorities.
+	if err := r.installSchema(r.id, resource.Database, tbl.schema.persistence, data); err != nil {
+		t.Fatal(err)
+	}
+	trusted := GetDatabase("memcp-tests").GetTable("items")
+	trusted.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(2), scm.NewString("trusted")}}, nil, scm.NewNil(), false, nil)
+	if !called {
+		t.Fatal("trusted local Scheme trigger was blocked")
+	}
+
+}
+
+func TestReplicationUnauthenticatedPacketsDoNotAllocate(t *testing.T) {
+	r := replicaRecoveryFixture()
+	for _, kind := range []string{"read", "write", "begin", "object", "chunk", "end", "failure", "ack", "unknown"} {
+		for i := 0; i < 10; i++ {
+			p := mosiPacket{ID: uuid.NewString(), Kind: kind, Resource: mosiResource{Database: fmt.Sprintf("audit-%s-%d", kind, i)}}
+			if err := r.receivePacket("unauthenticated", &p); err == nil {
+				t.Fatal("unauthenticated packet accepted")
+			}
+		}
+	}
+	if len(r.cells) != 0 {
+		t.Fatalf("unauthenticated packets allocated %d cells", len(r.cells))
+	}
+}
+
+func TestReplicationSchemaAdmissionPreservesSQLSource(t *testing.T) {
+	const language = "replica-source-test"
+	registerTriggerLanguage(language, scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
+		if !scm.Apply(a[1], scm.NewString("schema_only")).Bool() {
+			t.Error("source compiler lost schema restriction")
+		}
+		return scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewBool(true) })
+	}), true)
+	data := []byte(`{"name":"memcp-tests","tables":{"items":{"Name":"items","Columns":[{"Name":"id","Typ":"INT","Default":7}],"Shards":["37e77ee7-bf85-4eca-a910-8c101386dcd0"],"Triggers":[{"name":"source","timing":"before_insert","source":"SET NEW.id = 7","language":"replica-source-test"}]}}}`)
+	safe, err := validateReplicaSchema(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var db database
+	if err := json.Unmarshal(safe, &db); err != nil {
+		t.Fatal(err)
+	}
+	tbl := db.tables.Get("items")
+	if len(tbl.Shards) != 1 || tbl.Shards[0].uuid.String() != "37e77ee7-bf85-4eca-a910-8c101386dcd0" || !tbl.Columns[0].Default.IsInt() {
+		t.Fatal("schema admission lost data declarations")
+	}
+	tr := tbl.Triggers[0]
+	if !tr.SchemaOnly || tr.Source != "SET NEW.id = 7" || !tr.Func.IsNil() {
+		t.Fatal("source restriction was not persisted")
+	}
+	compileTriggerForUse(db.Name, tbl.Name, &tr)
+}
+
+func TestReplicationSchemaAdmissionRejectsExecutableFields(t *testing.T) {
+	for name, fragment := range map[string]string{
+		"scheme-source":            `"Triggers":[{"name":"evil","timing":"before_insert","source":"(shutdown)","language":"scheme"}]`,
+		"unknown-source":           `"Triggers":[{"name":"evil","timing":"before_insert","source":"code","language":"unknown"}]`,
+		"compiled-sql":             `"Triggers":[{"name":"evil","timing":"before_insert","source":"SET NEW.id=1","language":"sql","func":[{"symbol":"lambda"},[],true]}]`,
+		"oninit":                   `"oninit":[{"symbol":"lambda"},[],true]`,
+		"column-default":           `"Columns":[{"Name":"id","Default":[{"symbol":"lambda"},[],true]}]`,
+		"column-update":            `"Columns":[{"Name":"id","OnUpdate":[{"symbol":"lambda"},[],true]}]`,
+		"custom-runtime":           `"Columns":[{"Name":"id","Default":{"scmer_custom":1,"value":[]}}]`,
+		"optimized-variable":       `"Columns":[{"Name":"id","Default":{"var":0}}]`,
+		"reserved-manifest-column": `"Columns":[{"Name":".blobrefs-v2","Typ":"INT"}]`,
+		"column-path":              `"Columns":[{"Name":"x/../../system/schema.json","Typ":"INT"}]`,
+		"null-column":              `"Columns":[null]`,
+		"mixed-case":               `"tRiGgErS":[{"name":"evil","timing":"before_insert","source":"(shutdown)","language":"scheme"}]`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			data := []byte(`{"name":"memcp-tests","tables":{"items":{"Name":"items",` + fragment + `}}}`)
+			if _, err := validateReplicaSchema(data); err == nil {
+				t.Fatal("executable slave schema accepted")
+			}
+		})
+	}
+	if _, err := validateReplicaSchema([]byte(`{"name":"memcp-tests","tables":{},"procedures":[{"name":"evil","language":"scheme","source":"(shutdown)"}]}`)); err == nil {
+		t.Fatal("Scheme procedure accepted")
+	}
+}
+
+func TestReplicationColumnAdmissionRejectsWrappedComputeCode(t *testing.T) {
+	// A blob wrapper can contain legacy inline bytes before its nested storage.
+	var wrapped bytes.Buffer
+	wrapped.WriteByte(31)
+	wrapped.Write(make([]byte, 7))
+	binary.Write(&wrapped, binary.LittleEndian, uint64(1))
+	wrapped.Write(make([]byte, 32))
+	binary.Write(&wrapped, binary.LittleEndian, uint64(3))
+	wrapped.WriteString("abc")
+	prefix := append([]byte(nil), wrapped.Bytes()...)
+	for _, magic := range []byte{50, 10} {
+		for _, prefix := range [][]byte{nil, prefix} {
+			for _, chunk := range []int{1, 7, 65536} {
+				data := append(append([]byte(nil), prefix...), magic)
+				check := &replicaColumnAdmission{}
+				var err error
+				for len(data) > 0 && err == nil {
+					n := min(chunk, len(data))
+					err = check.write(data[:n])
+					data = data[n:]
+				}
+				if magic == 50 && err == nil {
+					t.Fatal("executable computed storage accepted")
+				}
+				if magic == 10 && (err != nil || !check.done) {
+					t.Fatalf("plain storage rejected: %v", err)
+				}
+			}
+		}
+	}
+}
+
+func TestReplicationDeniedTableProofDoesNotPanicOrAllocate(t *testing.T) {
+	r := replicaRecoveryFixture()
+	r.password = scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewString("hash") })
+	r.policy = scm.NewFunc(func(...scm.Scmer) scm.Scmer {
+		return scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
+			if a[0].String() == "memcp-tests" && a[1].IsString() && a[1].String() == "*" {
+				return scm.NewBool(true)
+			}
+			panic("table access denied")
+		})
+	})
+	packet := mosiPacket{Kind: "read", ID: uuid.NewString(), User: "alice", Hash: base64.StdEncoding.EncodeToString([]byte("hash")), Resource: mosiResource{Database: "memcp-tests", Table: "denied", Shard: uuid.NewString()}}
+	if err := r.receivePacket("client", &packet); err == nil {
+		t.Fatal("denied table request accepted")
+	}
+	if len(r.cells) != 0 {
+		t.Fatal("denied table allocated coherence state")
+	}
+}
+
+func TestReplicationSchemaAdmissionDiscardsLocalCaches(t *testing.T) {
+	data := []byte(`{"name":"memcp-tests","tables":{
+  ".blobs":{"Name":".blobs","PersistencyMode":"safe","Columns":[]},
+  ".grp:items":{"Name":".grp:items","PersistencyMode":"cache","oninit":[{"symbol":"lambda"},[],true]},
+  "items":{"Name":"items","Columns":[{"Name":"id","Typ":"INT"},{"Name":"cached","IsTemp":true,"OnUpdate":[{"symbol":"lambda"},[],true]}],"Triggers":[{"name":".cache:items","func":[{"symbol":"lambda"},[],true]}]}
+ }}`)
+	safe, err := validateReplicaSchema(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var db database
+	if err := json.Unmarshal(safe, &db); err != nil {
+		t.Fatal(err)
+	}
+	if db.tables.Get(".grp:items") != nil || db.tables.Get(".blobs") == nil {
+		t.Fatal("cache filtering removed durable internal data or retained executable cache")
+	}
+	source := db.tables.Get("items")
+	if len(source.Columns) != 1 || source.Columns[0].Name != "id" || len(source.Triggers) != 0 {
+		t.Fatal("generated column/trigger survived schema admission")
+	}
+}
+
+func TestReplicationColumnTransferRejectsComputeStorage(t *testing.T) {
+	table, engine := createDurabilityTestTable(t, "memcp-tests", 0)
+	header := mosiPacket{Resource: mosiResource{Database: "memcp-tests", Table: "items", Shard: table.ActiveShards()[0].uuid.String()}, Content: uuid.NewString(), ObjectKind: "column", Object: "id"}
+	transfer := &replicaImport{header: header, engine: engine, untrusted: true}
+	defer transfer.abort()
+	header.Kind = "object"
+	if err := transfer.packet(header); err != nil {
+		t.Fatal(err)
+	}
+	var data bytes.Buffer
+	zw := gzip.NewWriter(&data)
+	zw.Write([]byte{50, 0})
+	zw.Close()
+	header.Kind, header.Payload = "chunk", data.Bytes()
+	if err := transfer.packet(header); err == nil {
+		t.Fatal("client compute column reached persistence finalization")
+	}
+
+	// An ordinary locally created schema must not make the manifest exemption
+	// usable as a computed-column upload, either.
+	table.CreateColumn(blobManifestColumn, "INT", nil, nil)
+	header.Kind, header.Payload, header.Object = "object", nil, blobManifestColumn
+	other := &replicaImport{header: header, engine: engine, untrusted: true}
+	defer other.abort()
+	if err := other.packet(header); err == nil {
+		t.Fatal("manifest bypassed declared-column admission")
+	}
+}
