@@ -114,9 +114,23 @@ func (cluster *nodeCluster) handleTryRead(ctx context.Context, source string, da
 // to the new owner; discovery broadcasts only when no hint exists. Small meshes
 // route directly; From/To URIs preserve the contract for future neighbour hops.
 func (cluster *nodeCluster) peer(id string) *mosiPeer {
-	for _, link := range cluster.view.Load().links {
+	view := cluster.view.Load()
+	for _, link := range view.links {
 		if link.member.ID == id {
-			return link.peer
+			select {
+			case <-link.peer.done:
+			default:
+				return link.peer
+			}
+		}
+	}
+	// A joining peer can already issue authenticated requests on its inbound
+	// connection before our discovery loop has opened the opposite link.
+	if cluster.service != nil {
+		for _, member := range view.members {
+			if member.ID == id {
+				return cluster.service.objectConnection(clusterObjectPeer{member.ID, member.Boot})
+			}
 		}
 	}
 	return nil
@@ -246,7 +260,7 @@ func (cluster *nodeCluster) locate(ctx context.Context, resource mosiResource) (
 		if len(readers) > 0 {
 			state = mosi.O
 		}
-		if resource.Shard == "" {
+		if resource.Shard == "" && resource != globalResource {
 			if err := cluster.recoverSchemaLocations(ctx, resource.Database, view.links); err != nil {
 				return "", err
 			}
@@ -303,6 +317,11 @@ func (cluster *nodeCluster) obtain(parent context.Context, resource mosiResource
 	if err != nil {
 		fmt.Println("cluster owner lookup failed:", resource.key(), err)
 		panic(mosi.NetworkError)
+	}
+	if owner != r.id {
+		if _, err := cluster.ensurePeer(ctx, owner); err != nil {
+			panic(err)
+		}
 	}
 	for {
 		c = c.resolved()
@@ -415,7 +434,7 @@ func (cluster *nodeCluster) report(resource mosiResource) replicaRecord {
 }
 
 func (cluster *nodeCluster) receive(source string, packet *mosiPacket, connection *mosiPeer) error {
-	if !cluster.databases[packet.Resource.Database] {
+	if packet.Resource != globalResource && !cluster.databases[packet.Resource.Database] {
 		return fmt.Errorf("resource outside cluster domain")
 	}
 	if packet.From != "" {
@@ -574,11 +593,15 @@ func (cluster *nodeCluster) installReference(source string, packet mosiPacket) e
 		return fmt.Errorf(mosi.NetworkError)
 	}
 	db := GetDatabase(packet.Resource.Database)
-	if db == nil {
+	if db == nil && packet.Resource != globalResource {
 		return fmt.Errorf("missing shared database")
 	}
 	var data []byte
-	if packet.Resource.Shard == "" {
+	if packet.Resource == globalResource {
+		if err := cluster.installGlobal(c, packet); err != nil {
+			return err
+		}
+	} else if packet.Resource.Shard == "" {
 		data = db.persistence.ReadSchema()
 		content, err := r.schemaDigest(data)
 		if err != nil || content != packet.Content {
@@ -611,7 +634,9 @@ func (cluster *nodeCluster) installReference(source string, packet mosiPacket) e
 	for _, route := range packet.Forwards {
 		r.forwardResource(route.From, route.To)
 	}
-	if packet.Resource.Shard == "" {
+	if packet.Resource == globalResource {
+		// The immutable native payload was installed before granting rights.
+	} else if packet.Resource.Shard == "" {
 		if err := r.installSchema(source, db.Name, db.persistence, data); err != nil {
 			return err
 		}
@@ -655,6 +680,7 @@ func (cluster *nodeCluster) prepareBootstrap(fresh bool) error {
 	if !fresh || cluster.seed != "" {
 		return nil
 	}
+	cluster.bootstrapResources[globalResource.key()] = globalResource
 	for name := range cluster.databases {
 		db := GetDatabase(name)
 		if db == nil {

@@ -16,7 +16,6 @@ Copyright (C) 2023-2026  Carl-Philip Hänsch
 */
 package storage
 
-import "fmt"
 import "context"
 
 import "sync"
@@ -133,6 +132,9 @@ type transactionState struct {
 	clusterID             string
 	coordinator           *scm.ClusterHandle
 	decisionMu            sync.Mutex
+	prepared              *acidPreparation
+	decisionStarted       bool
+	commitDecided         bool
 	remoteActive          int
 	remoteIdle            chan struct{}
 	remoteAdmissionClosed bool
@@ -202,7 +204,11 @@ func (tx *TxContext) newInvocation() *TxContext {
 // can reuse it without retaining any state from the completed transaction.
 func (tx *TxContext) reset(mode TxMode) {
 	tx.transactionState = new(transactionState)
-	tx.ID = atomic.AddUint64(&txIDCounter, 1)
+	if cluster := activeNodeCluster(); cluster != nil {
+		tx.ID = cluster.nextTransactionID()
+	} else {
+		tx.ID = atomic.AddUint64(&txIDCounter, 1)
+	}
 	tx.Mode = mode
 	tx.State = TxActive
 	tx.SnapshotEpoch = 0
@@ -243,6 +249,9 @@ func (tx *transactionState) durableID() string {
 		return *txID
 	}
 	candidate := nextDurableTxID()
+	if activeNodeCluster() != nil {
+		candidate = "cluster/" + tx.ClusterObjectID()
+	}
 	if tx.walTxID.CompareAndSwap(nil, &candidate) {
 		return candidate
 	}
@@ -900,6 +909,9 @@ func (tx *TxContext) RollbackToSavepoint(sp Savepoint) {
 
 // Commit finalizes the transaction.
 func (tx *TxContext) Commit() error {
+	if tx.Mode == TxACID && len(tx.remoteParticipantOwners()) != 0 {
+		return tx.commitDistributedACID()
+	}
 	if err := tx.finishRemoteParticipants("commit"); err != nil {
 		return err
 	}
@@ -980,35 +992,21 @@ func (tx *TxContext) commitACID() error {
 		s.mu.Lock()
 	}
 
-	// Validate: for each recid in DeleteMask, check it hasn't already been
-	// globally deleted by another committed tx (write-write conflict → abort).
-	for _, shard := range shards {
-		st := directory[shard]
-		for _, recid := range st.DeleteRecids {
-			if !st.DeleteMask.Get(uint(recid)) {
-				continue // bit was rolled back via savepoint
+	// Local and distributed preparation share the same OCC validator.
+	if tx.prepared == nil {
+		if err := validateACID(shards, directory, nil); err != nil {
+			for _, shard := range shards {
+				shard.mu.Unlock()
 			}
-			if shard.deletions.Get(uint(recid)) {
-				for _, s := range shards {
-					for _, staged := range directory[s].UndeleteRecids {
-						s.rollbackProtected.Set(uint(staged), false)
-						s.syncNextVisibilityLocked(staged, trackedShards, tx, false)
-					}
-					s.mu.Unlock()
-				}
-				tx.finishRepartitionActions(false)
-				tx.mu.Lock()
-				tx.releaseActiveTransactionsLocked()
-				tx.State = TxAborted
-				tx.shards.Store(nil)
-				tx.mu.Unlock()
-				tx.touchedShards = sync.Map{}
-				return fmt.Errorf("ACID commit conflict: row %d already deleted", recid)
-			}
+			tx.rollbackACID()
+			return err
 		}
 	}
 
 	applyErr := persistenceCall(func() {
+		if tx.prepared == nil {
+			tx.writeACIDIntents(shards, directory)
+		}
 		// Native mutation callbacks (including INSERT's duplicate-key UPDATE)
 		// need not construct a ShardMapReducer. Its Close is therefore not a
 		// commit dependency: every ACID overlay participating in this commit
@@ -1032,9 +1030,6 @@ func (tx *TxContext) commitACID() error {
 					continue
 				}
 				shard.deletions.Set(uint(recid), true)
-				if shard.logfile != nil {
-					shard.logfile.Write(LogEntryDelete{idx: recid, txID: tx.durableID()})
-				}
 				shard.syncNextVisibilityLocked(recid, trackedShards, tx, true)
 			}
 		}
@@ -1048,12 +1043,17 @@ func (tx *TxContext) commitACID() error {
 					continue // un-staged (row overwritten/deleted in same tx)
 				}
 				shard.deletions.Set(uint(recid), false)
-				shard.logVisibilityChangeLocked(recid, false, tx.durableID())
 				shard.syncNextVisibilityLocked(recid, trackedShards, tx, true)
 			}
 		}
 	})
 	if applyErr != nil {
+		if tx.commitDecided {
+			for _, shard := range shards {
+				shard.mu.Unlock()
+			}
+			return markCommitOutcomeUnknown(applyErr)
+		}
 		tx.abortACIDCommit(shards, trackedShards)
 		return applyErr
 	}
@@ -1062,7 +1062,7 @@ func (tx *TxContext) commitACID() error {
 	// Readers can therefore observe neither a pre-sync transaction nor a state
 	// that crash recovery would still discard.
 	if err := tx.SyncTouchedShards(); err != nil {
-		if commitOutcomeUnknown(err) {
+		if commitOutcomeUnknown(err) || tx.commitDecided {
 			atomic.AddUint64(&GlobalCommitEpoch, 1)
 			for _, shard := range shards {
 				shard.mu.Unlock()
@@ -1073,7 +1073,8 @@ func (tx *TxContext) commitACID() error {
 			tx.State = TxCommitted
 			tx.shards.Store(nil)
 			tx.mu.Unlock()
-			return err
+			tx.releasePreparation()
+			return markCommitOutcomeUnknown(err)
 		}
 		tx.abortACIDCommit(shards, trackedShards)
 		return err
@@ -1091,6 +1092,7 @@ func (tx *TxContext) commitACID() error {
 	tx.shards.Store(nil)
 	tx.mu.Unlock()
 
+	tx.releasePreparation()
 	return nil
 }
 
@@ -1141,6 +1143,10 @@ func (tx *TxContext) finishCursorStabilityCommit() {
 
 // Rollback undoes the transaction.
 func (tx *TxContext) Rollback() {
+	if tx.decisionStarted {
+		panic("transaction commit outcome is unknown; retry COMMIT")
+	}
+	defer tx.releasePreparation()
 	remoteError := tx.finishRemoteParticipants("rollback")
 	defer func() {
 		if remoteError != nil {
@@ -1315,7 +1321,7 @@ func runAutocommitStatement(tx *TxContext, session scm.Scmer, recovery bool, fn 
 	}()
 
 	if panicVal != nil {
-		if tx.State == TxActive {
+		if tx.State == TxActive && !tx.decisionStarted {
 			if _, persistenceFailure := panicVal.(*PersistenceFailure); persistenceFailure {
 				if tx.Mode == TxCursorStability {
 					tx.rollbackCursorStability(false)
@@ -1507,7 +1513,9 @@ func initTransaction(en scm.Env) {
 			if !existingTx.IsNil() {
 				if tx, ok := existingTx.Any().(*TxContext); ok && tx.State == TxActive {
 					if err := tx.Commit(); err != nil {
-						sessionFn(scm.NewString("transaction"), scm.NewNil())
+						if !tx.decisionStarted || tx.State != TxActive {
+							sessionFn(scm.NewString("transaction"), scm.NewNil())
+						}
 						panic("COMMIT failed: " + err.Error())
 					}
 				}

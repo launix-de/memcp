@@ -53,6 +53,7 @@ type replicaCell struct {
 	ownstate          mosi.State
 	resource          atomic.Pointer[mosiResource]
 	current           atomic.Pointer[storageShard]
+	global            atomic.Pointer[clusterGlobalData]
 	bootstrap         sync.Mutex
 	initialized       atomic.Bool
 	bootstrapStarted  bool

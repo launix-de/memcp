@@ -19,7 +19,7 @@ import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/memcp/storage/mosi"
 
 // Version 12 adds opportunistic MOSI read acquisition for shared cache scopes.
-const scanWireVersion = 14
+const scanWireVersion = 15
 
 type remoteScanShard struct {
 	Schema   uint64       `json:"schema"`

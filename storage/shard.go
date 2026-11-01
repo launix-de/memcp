@@ -112,6 +112,7 @@ type storageShard struct {
 	// the immutable topology owning this shard and changes only on publication.
 	activeScanners     atomic.Int32
 	activeTransactions atomic.Int32
+	prepared           atomic.Pointer[acidPreparation]
 	generation         atomic.Pointer[tableShardTopology]
 
 	// guards RemoveFromDisk against double execution (finalizer + explicit cleanup)
@@ -1010,6 +1011,13 @@ func (s *storageShard) getRead(currentTx *TxContext, snapshot, mayDelegate bool)
 }
 func (s *storageShard) GetWrite(currentTx *TxContext) WriteAccess {
 	origin := s
+	for preparation := s.prepared.Load(); preparation != nil && (currentTx == nil || preparation.tx != currentTx.transactionState); preparation = s.prepared.Load() {
+		select {
+		case <-preparation.done:
+		case <-scanQueryContext(currentTx, context.Background()).Done():
+			panic(scanQueryContext(currentTx, context.Background()).Err())
+		}
+	}
 	if s.scanTarget.Load() != nil {
 		panic("remote shard writes require a transaction participant protocol")
 	}

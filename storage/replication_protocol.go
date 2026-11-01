@@ -34,6 +34,9 @@ func (r *replicationManager) applyResourcePacket(source string, packet *mosiPack
 	if !packet.Resource.valid() || packet.ID == "" {
 		return fmt.Errorf("invalid resource packet")
 	}
+	if packet.Resource == globalResource && r.cluster == nil {
+		return fmt.Errorf("global resource requires an authenticated cluster peer")
+	}
 	if r.master {
 		r.mu.Lock()
 		retired := r.directory.Retired[source]

@@ -13,6 +13,7 @@ package storage
 
 import "fmt"
 import "context"
+import "encoding/json"
 import "github.com/google/uuid"
 import "github.com/launix-de/memcp/storage/mosi"
 
@@ -188,6 +189,13 @@ func (r *replicationManager) offerResource(ctx context.Context, source string, p
 		authorityLocked = false
 		releasePersistence()
 		packet.Kind, packet.From, packet.To = "reference", r.id, source
+		if packet.Resource == globalResource {
+			data, err := json.Marshal(c.global.Load())
+			if err != nil {
+				return err
+			}
+			packet.Object = string(data)
+		}
 		if packet.Resource.Shard != "" {
 			packet.Forwards = r.shardRoutes(packet.Resource)
 		}

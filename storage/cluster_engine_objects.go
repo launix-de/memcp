@@ -155,7 +155,7 @@ func (object *remoteShardObject) prepareSource(ctx context.Context, peer *mosiPe
 	if err != nil {
 		return err
 	}
-	resource := mosiResource{view[0].String(), view[1].String(), id.String()}
+	resource := mosiResource{Database: view[0].String(), Table: view[1].String(), Shard: id.String()}
 	tbl := &table{Name: resource.Table, schema: &database{Name: resource.Database}}
 	shard := &storageShard{t: tbl, uuid: id}
 	ref := object.handle.Reference
@@ -197,7 +197,7 @@ func (st *storageShardTransaction) HandleClusterRequest(ctx context.Context, r s
 		tx := &TxContext{transactionState: st.transaction}
 		tx.decisionMu.Lock()
 		defer tx.decisionMu.Unlock()
-		if r.Method == "commit" || r.Method == "rollback" {
+		if r.Method == "prepare" || r.Method == "commit" || r.Method == "rollback" {
 			// A broken connection cancels the task, but its bounded shard loop
 			// may still be finishing. Stop admission and join that native work
 			// before publishing or undoing any of its transaction overlays.
@@ -215,6 +215,14 @@ func (st *storageShardTransaction) HandleClusterRequest(ctx context.Context, r s
 			}
 		}
 		switch r.Method {
+		case "prepare":
+			if tx.State != TxActive || tx.Mode != TxACID {
+				return scm.NewNil(), fmt.Errorf("participant cannot prepare this transaction")
+			}
+			if err := tx.prepareACID(ctx); err != nil {
+				return scm.NewNil(), err
+			}
+			return scm.NewBool(true), nil
 		case "savepoint":
 			sp := tx.CreateSavepoint()
 			rows := make([]scm.Scmer, 0, len(sp.shardLens))
@@ -256,6 +264,13 @@ func (st *storageShardTransaction) HandleClusterRequest(ctx context.Context, r s
 			}
 			if tx.State != TxActive {
 				return scm.NewNil(), fmt.Errorf("participant transaction is not active")
+			}
+			if tx.prepared != nil {
+				engine := sharedCommitBackend()
+				if engine == nil || !readDistributedDecision(engine, tx.durableID()) {
+					return scm.NewNil(), fmt.Errorf("participant has no shared commit decision")
+				}
+				tx.decisionStarted, tx.commitDecided = true, true
 			}
 			if err := tx.Commit(); err != nil {
 				return scm.NewNil(), err

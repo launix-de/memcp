@@ -82,12 +82,16 @@ func decodeMosiMessage(frame []byte) (mosiMessage, error) {
 }
 
 type mosiResource struct {
+	Object   string `json:"object,omitempty"`
 	Database string `json:"database"`
 	Table    string `json:"table,omitempty"`
 	Shard    string `json:"shard,omitempty"`
 }
 
 func (resource mosiResource) key() string {
+	if resource.Object != "" {
+		return "@" + resource.Object
+	}
 	if resource.Shard == "" {
 		return resource.Database
 	}
@@ -95,6 +99,9 @@ func (resource mosiResource) key() string {
 }
 
 func (resource mosiResource) valid() bool {
+	if resource.Object != "" {
+		return resource == globalResource
+	}
 	if !validReplicaDatabase(resource.Database) {
 		return false
 	}

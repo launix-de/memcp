@@ -309,6 +309,7 @@ func TestClusterColdHandoverRetainsEarlierOwnersCommitAuthority(t *testing.T) {
 
 func TestClusterGrantedSchemaReadDoesNotConsultSession(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "t_cluster_granted_schema", 1)
+	tx := NewTxContext(TxCursorStability)
 	cluster := &nodeCluster{databases: map[string]bool{tbl.schema.Name: true}}
 	cluster.initializeManager()
 	cell := cluster.manager.resourceCell(mosiResource{Database: tbl.schema.Name})
@@ -318,7 +319,6 @@ func TestClusterGrantedSchemaReadDoesNotConsultSession(t *testing.T) {
 	defer sharedClusterMounts.Store(oldMounts)
 	oldService := nodeScans.Swap(&nodeScanService{cluster: cluster})
 	defer nodeScans.Store(oldService)
-	tx := NewTxContext(TxCursorStability)
 	tx.Session = scm.NewFunc(func(...scm.Scmer) scm.Scmer { panic("granted schema read consulted user session") })
 	tbl.schema.GetRead(tx).Release()
 }

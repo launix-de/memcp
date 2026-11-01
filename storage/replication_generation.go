@@ -238,6 +238,9 @@ func (r *replicationManager) prepareResource(resource mosiResource) (content str
 			err = fmt.Errorf("replication prepare: %v", failure)
 		}
 	}()
+	if resource == globalResource && r.cluster != nil {
+		return r.cluster.prepareGlobal()
+	}
 	db := databases.Get(resource.Database)
 	if db == nil {
 		return "", fmt.Errorf("database does not exist")
@@ -1013,7 +1016,17 @@ func (r *replicationManager) step(ctx context.Context, peerID string, packet mos
 
 func (r *replicationManager) transmitResource(ctx context.Context, peerID string, header mosiPacket) error {
 	if r.cluster != nil {
-		if header.Resource.Shard == "" {
+		if header.Resource == globalResource {
+			data := r.resourceCell(globalResource).global.Load()
+			if data == nil {
+				return fmt.Errorf("missing global payload")
+			}
+			encoded, err := json.Marshal(data)
+			if err != nil {
+				return err
+			}
+			header.Object = string(encoded)
+		} else if header.Resource.Shard == "" {
 			if err := r.cluster.transferSchemaLocations(ctx, peerID, header); err != nil {
 				return err
 			}

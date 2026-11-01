@@ -169,6 +169,11 @@ func (db *database) transactionCommitted(txID string) bool {
 	db.transactionMu.RLock()
 	_, committed := db.committedTx[txID]
 	db.transactionMu.RUnlock()
+	if !committed && isDistributedTxID(txID) {
+		if engine := sharedCommitBackend(); engine != nil {
+			return readDistributedDecision(engine, txID)
+		}
+	}
 	return committed
 }
 
