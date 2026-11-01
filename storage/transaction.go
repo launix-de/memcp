@@ -541,7 +541,7 @@ func (tx *TxContext) getOrCreateShardTxLocked(shard *storageShard) *storageShard
 	}
 	st := &storageShardTransaction{clusterShard: shard, transaction: tx.transactionState,
 		clusterTxID: tx.ClusterObjectID(), shardUUID: shard.uuid, generation: shard.generation.Load()}
-	tx.bindShardEndpointLocked(st)
+	// Endpoint identities are needed only once an overlay is exported.
 	if st.generation != nil {
 		st.generation.pinTransaction()
 	}

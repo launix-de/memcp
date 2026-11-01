@@ -321,7 +321,7 @@ func (cluster *nodeCluster) obtain(parent context.Context, resource mosiResource
 	}
 	if owner != r.id {
 		if _, err := cluster.ensurePeer(ctx, owner); err != nil {
-			panic(err)
+			panic(fmt.Errorf("%s: %w", mosi.NetworkError, err))
 		}
 	}
 	for {

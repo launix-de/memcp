@@ -128,3 +128,30 @@ func TestClusterFailedLiveCaptureReleasesMaintenanceAndTransactionAdmission(t *t
 		t.Fatal("failed capture leaked migration admission, a transfer, or ownership")
 	}
 }
+
+func TestClusterCaptureRetainsOverlayWhenHelperBecomesPersistent(t *testing.T) {
+	fixture, _ := createDurabilityTestTable(t, "t_handover_helper_engine", 1)
+	tbl, _ := CreateTable(fixture.schema.Name, ".helper", Cache, false)
+	tbl.CreateColumn("id", "INT", nil, nil)
+	tbl.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(1)}}, nil, scm.NewNil(), false, nil)
+	shard := tbl.ActiveShards()[0]
+	tx := NewTxContext(TxACID)
+	tx.AddToDeleteMask(shard, 0)
+	defer tx.Rollback()
+	// Engine changes can make a previously query-local descriptor eligible for
+	// MOSI. Its already-open native overlay must remain discoverable for capture.
+	tbl.PersistencyMode = Safe
+	cluster := globalTestCluster(t, tbl.schema.Name)
+	cell := cluster.manager.shardCell(shard)
+	cell.current.Store(shard)
+	cell.ownstate.Initialize(mosi.M)
+	cell.clusterstate.Initialize(mosi.M)
+	capture, err := cluster.manager.captureLiveShard(cell, shard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer capture.release()
+	if len(capture.overlays) != 1 || capture.overlays[0].transaction != tx.transactionState || !capture.overlays[0].DeleteMask.Get(0) {
+		t.Fatal("engine change hid an active private overlay from MOSI handover")
+	}
+}

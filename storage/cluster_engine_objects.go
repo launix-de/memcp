@@ -231,7 +231,11 @@ func (st *storageShardTransaction) HandleClusterRequest(ctx context.Context, r s
 		return scm.NewNil(), err
 	}
 	if r.Method == "view" && st.transaction != nil {
-		(&TxContext{transactionState: st.transaction}).ensureClusterIdentity()
+		tx := &TxContext{transactionState: st.transaction}
+		tx.ensureClusterIdentity()
+		tx.mu.Lock()
+		tx.bindShardEndpointLocked(st)
+		tx.mu.Unlock()
 	}
 	if r.Method != "view" {
 		if st.remoteObject != nil {
