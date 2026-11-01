@@ -366,7 +366,7 @@ func TestPartialFilesystemWALWriteLeavesNoTornFrame(t *testing.T) {
 	logfile.Write(LogEntryDelete{idx: 3})
 	logfile.Close()
 
-	_, entries, replayLog := raw.ReplayLog("shard")
+	_, entries, replayLog := raw.ReplayLog("shard", false)
 	var recids []uint32
 	for entry := range entries {
 		if deletion, ok := entry.(LogEntryDelete); ok {

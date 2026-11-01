@@ -462,7 +462,7 @@ func (s *CephStorage) SwapLog(shard string, entries []interface{}, durable bool)
 	}
 }
 
-func (s *CephStorage) ReplayLog(shard string) (map[string]struct{}, chan interface{}, PersistenceLogfile) {
+func (s *CephStorage) ReplayLog(shard string, readOnly bool) (map[string]struct{}, chan interface{}, PersistenceLogfile) {
 	s.ensureOpen()
 
 	out := make(chan interface{}, 64)
@@ -483,6 +483,10 @@ func (s *CephStorage) ReplayLog(shard string) (map[string]struct{}, chan interfa
 			decodeLogStream(s.readLogSegment(seg), out)
 		}
 	}()
+
+	if readOnly {
+		return committed, out, nil
+	}
 
 	// Return an appendable logfile as second return, like FileStorage does.
 	lf, err := openOrCreateCephLogfile(s, shard)

@@ -71,8 +71,11 @@ func ReclaimReplicationDatabases() []string {
 // shards. It never promotes an unavailable owner's backup. This is a point-in-
 // time check, not a reservation against subsequent remote queries.
 func (r *replicationManager) reclaimDatabase(name string) bool {
-	if r.master || !validReplicaDatabase(name) {
+	if r.master && r.cluster == nil || !validReplicaDatabase(name) {
 		panic("database reclaim requires a replication slave and a user database")
+	}
+	if r.cluster != nil {
+		r.obtain(globalResource, mosi.M, "", nil)
 	}
 	schema := r.obtain(mosiResource{Database: name}, mosi.M, "", nil)
 	db := databases.Get(name)
@@ -80,7 +83,9 @@ func (r *replicationManager) reclaimDatabase(name string) bool {
 		panic("missing reclaimed database")
 	}
 	db.ensureLoaded()
-	r.schemaShards(db, r.id, true)
+	if r.cluster == nil {
+		r.schemaShards(db, r.id, true)
+	}
 	for _, table := range db.tables.GetAll() {
 		if table.isEphemeralQueryTable() {
 			continue
@@ -414,7 +419,7 @@ func initReplicationAdmin(en *scm.Env) {
 		return scm.NewAny(http.HandlerFunc(serveMosiHTTP))
 	}, Type: &scm.TypeDescriptor{Kind: "func", Description: "returns the shared node HTTP handler for explicit http_route/serve composition; role selection grants no permissions", Return: &scm.TypeDescriptor{Kind: "any"}}})
 	scm.Declare(en, &scm.Declaration{Name: "replication_reclaim", Fn: func(a ...scm.Scmer) scm.Scmer {
-		r := replication.Load()
+		r := activeReplication(GetDatabase(a[0].String()))
 		if r == nil {
 			panic("replication is not enabled")
 		}

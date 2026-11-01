@@ -55,7 +55,7 @@ func (cluster *nodeCluster) prepareLocalScan(shard *storageShard, tx *TxContext,
 	if len(origins) > 0 {
 		origin = origins[0]
 	}
-	expected := remoteScanShard{Schema: shard.t.filterSchemaFingerprint(), Resource: mosiResource{shard.t.schema.Name, shard.t.Name, shard.uuid.String()}}
+	expected := remoteScanShard{Schema: shard.t.filterSchemaFingerprint(), Resource: mosiResource{Database: shard.t.schema.Name, Table: shard.t.Name, Shard: shard.uuid.String()}}
 	// Placement can delegate to an authorized owner without acquiring a local
 	// shared copy first. In particular a reader must not recall an active writer
 	// merely to send its ordinary scan back to that same native participant.
@@ -184,6 +184,6 @@ func (executor *clusterScanExecutor) ExecuteShardScan(resource mosiResource, inv
 // Only an outer operator/reducer may translate it into a delegated task.
 func (cluster *nodeCluster) shardRAMUnavailable(shard, origin *storageShard) shardReadDelegation {
 	cluster.capacity.Add(1)
-	expected := remoteScanShard{Schema: shard.t.filterSchemaFingerprint(), Resource: mosiResource{shard.t.schema.Name, shard.t.Name, shard.uuid.String()}}
+	expected := remoteScanShard{Schema: shard.t.filterSchemaFingerprint(), Resource: mosiResource{Database: shard.t.schema.Name, Table: shard.t.Name, Shard: shard.uuid.String()}}
 	return shardReadDelegation{&shardScanTarget{resource: expected.Resource, origin: origin, executor: &clusterScanExecutor{cluster: cluster, expected: expected}}}
 }

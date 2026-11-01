@@ -69,9 +69,11 @@ type PersistenceEngine interface {
 	// or the complete replacement.
 	SwapLog(shard string, entries []interface{}, durable bool) PersistenceLogfile
 	// ReplayLog returns the transaction IDs committed in this WAL before it
-	// streams entries. This keeps recovery memory proportional to commit count,
+	// streams entries. readOnly neither creates a missing log nor returns an
+	// append handle; its reader closes when replay finishes. This keeps recovery
+	// memory proportional to commit count,
 	// rather than retaining every row mutation until the final marker is known.
-	ReplayLog(shard string) (map[string]struct{}, chan interface{}, PersistenceLogfile)
+	ReplayLog(shard string, readOnly bool) (map[string]struct{}, chan interface{}, PersistenceLogfile)
 	RemoveLog(shard string)
 	// WalkShardFiles calls fn for every shard-related file (column files, log files)
 	// stored on disk, one at a time. The name passed to fn is exactly the value

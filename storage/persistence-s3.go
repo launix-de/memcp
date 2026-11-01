@@ -509,7 +509,7 @@ func (s *S3Storage) SwapLog(shard string, entries []interface{}, durable bool) P
 	}
 }
 
-func (s *S3Storage) ReplayLog(shard string) (map[string]struct{}, chan interface{}, PersistenceLogfile) {
+func (s *S3Storage) ReplayLog(shard string, readOnly bool) (map[string]struct{}, chan interface{}, PersistenceLogfile) {
 	s.ensureOpen()
 
 	out := make(chan interface{}, 64)
@@ -529,6 +529,10 @@ func (s *S3Storage) ReplayLog(shard string) (map[string]struct{}, chan interface
 			decodeS3LogStream(s.readLogSegment(seg), out)
 		}
 	}()
+
+	if readOnly {
+		return committed, out, nil
+	}
 
 	lf, err := openOrCreateS3Logfile(s, shard)
 	if err != nil {

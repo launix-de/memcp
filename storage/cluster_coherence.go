@@ -11,6 +11,7 @@ warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See
 package storage
 
 import "fmt"
+import "errors"
 import "time"
 import "context"
 import "encoding/json"
@@ -114,9 +115,23 @@ func (cluster *nodeCluster) handleTryRead(ctx context.Context, source string, da
 // to the new owner; discovery broadcasts only when no hint exists. Small meshes
 // route directly; From/To URIs preserve the contract for future neighbour hops.
 func (cluster *nodeCluster) peer(id string) *mosiPeer {
-	for _, link := range cluster.view.Load().links {
+	view := cluster.view.Load()
+	for _, link := range view.links {
 		if link.member.ID == id {
-			return link.peer
+			select {
+			case <-link.peer.done:
+			default:
+				return link.peer
+			}
+		}
+	}
+	// A joining peer can already issue authenticated requests on its inbound
+	// connection before our discovery loop has opened the opposite link.
+	if cluster.service != nil {
+		for _, member := range view.members {
+			if member.ID == id {
+				return cluster.service.objectConnection(clusterObjectPeer{member.ID, member.Boot})
+			}
 		}
 	}
 	return nil
@@ -246,7 +261,7 @@ func (cluster *nodeCluster) locate(ctx context.Context, resource mosiResource) (
 		if len(readers) > 0 {
 			state = mosi.O
 		}
-		if resource.Shard == "" {
+		if resource.Shard == "" && resource != globalResource {
 			if err := cluster.recoverSchemaLocations(ctx, resource.Database, view.links); err != nil {
 				return "", err
 			}
@@ -303,6 +318,11 @@ func (cluster *nodeCluster) obtain(parent context.Context, resource mosiResource
 	if err != nil {
 		fmt.Println("cluster owner lookup failed:", resource.key(), err)
 		panic(mosi.NetworkError)
+	}
+	if owner != r.id {
+		if _, err := cluster.ensurePeer(ctx, owner); err != nil {
+			panic(fmt.Errorf("%s: %w", mosi.NetworkError, err))
+		}
 	}
 	for {
 		c = c.resolved()
@@ -415,7 +435,7 @@ func (cluster *nodeCluster) report(resource mosiResource) replicaRecord {
 }
 
 func (cluster *nodeCluster) receive(source string, packet *mosiPacket, connection *mosiPeer) error {
-	if !cluster.databases[packet.Resource.Database] {
+	if packet.Resource != globalResource && !cluster.databases[packet.Resource.Database] {
 		return fmt.Errorf("resource outside cluster domain")
 	}
 	if packet.From != "" {
@@ -434,7 +454,21 @@ func (cluster *nodeCluster) receive(source string, packet *mosiPacket, connectio
 		return cluster.installReference(source, *packet)
 	case "read", "write":
 		if packet.Boot == "" || !cluster.requestIncarnation(source, packet.Boot) {
-			return fmt.Errorf("stale cluster request incarnation")
+			// An owner hint may forward a new peer's first request before
+			// periodic gossip reaches this owner. Refresh contact hints from
+			// the authenticated forwarder, then authenticate the source itself.
+			if packet.Boot == "" || connection == nil || connection.objectPeer.ID == "" || source == connection.objectPeer.ID && packet.Boot != connection.objectPeer.Boot {
+				return fmt.Errorf("stale cluster request incarnation")
+			}
+			if err := cluster.exchange(&clusterLink{member: clusterMember{ID: connection.objectPeer.ID}, peer: connection}); err != nil {
+				return err
+			}
+			if _, err := cluster.ensurePeer(connection.ctx, source); err != nil {
+				return err
+			}
+			if !cluster.requestIncarnation(source, packet.Boot) {
+				return fmt.Errorf("stale cluster request incarnation")
+			}
 		}
 		copy := *packet
 		connection.workers.Add(1)
@@ -476,7 +510,12 @@ func (cluster *nodeCluster) receive(source string, packet *mosiPacket, connectio
 					state = "M"
 				}
 				if peer := cluster.peer(source); peer != nil {
-					_ = peer.post(mosiPacket{Kind: "failure", ID: copy.ID, Resource: copy.Resource, State: state, Error: err.Error()})
+					_ = peer.post(mosiPacket{Kind: "failure", ID: copy.ID, Resource: copy.Resource, State: state, Error: func() string {
+						if errors.Is(err, errClusterReadBusy) {
+							return errClusterReadBusy.Error()
+						}
+						return err.Error()
+					}()})
 				}
 			}
 		}()
@@ -574,11 +613,20 @@ func (cluster *nodeCluster) installReference(source string, packet mosiPacket) e
 		return fmt.Errorf(mosi.NetworkError)
 	}
 	db := GetDatabase(packet.Resource.Database)
-	if db == nil {
+	if db == nil && packet.Resource != globalResource {
 		return fmt.Errorf("missing shared database")
 	}
 	var data []byte
-	if packet.Resource.Shard == "" {
+	if packet.Capture != nil {
+		if err := cluster.installLiveShard(c, packet); err != nil {
+			return err
+		}
+	}
+	if packet.Resource == globalResource {
+		if err := cluster.installGlobal(c, packet); err != nil {
+			return err
+		}
+	} else if packet.Resource.Shard == "" {
 		data = db.persistence.ReadSchema()
 		content, err := r.schemaDigest(data)
 		if err != nil || content != packet.Content {
@@ -611,11 +659,13 @@ func (cluster *nodeCluster) installReference(source string, packet mosiPacket) e
 	for _, route := range packet.Forwards {
 		r.forwardResource(route.From, route.To)
 	}
-	if packet.Resource.Shard == "" {
+	if packet.Resource == globalResource {
+		// The immutable native payload was installed before granting rights.
+	} else if packet.Resource.Shard == "" {
 		if err := r.installSchema(source, db.Name, db.persistence, data); err != nil {
 			return err
 		}
-	} else {
+	} else if packet.Capture == nil {
 		if err := r.finishImport(source, &replicaImport{header: packet, engine: db.persistence}); err != nil {
 			return err
 		}
@@ -638,7 +688,9 @@ func (cluster *nodeCluster) installReference(source string, packet mosiPacket) e
 	locked = false
 	if expected != nil {
 		expected.finish(nil)
-		return nil
+		if packet.Capture == nil {
+			return nil
+		}
 	}
 	peer := r.peer(source)
 	if peer == nil {
@@ -655,6 +707,7 @@ func (cluster *nodeCluster) prepareBootstrap(fresh bool) error {
 	if !fresh || cluster.seed != "" {
 		return nil
 	}
+	cluster.bootstrapResources[globalResource.key()] = globalResource
 	for name := range cluster.databases {
 		db := GetDatabase(name)
 		if db == nil {

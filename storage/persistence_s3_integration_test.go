@@ -282,7 +282,7 @@ func TestS3PersistenceStress(t *testing.T) {
 	logfile.Close()
 
 	reopened := factory.CreateDatabase("stress")
-	committed, entries, appendLog := reopened.ReplayLog("shard")
+	committed, entries, appendLog := reopened.ReplayLog("shard", false)
 	if _, ok := committed["tx-a"]; !ok {
 		t.Fatal("replayed S3 WAL lost commit marker")
 	}
@@ -299,7 +299,7 @@ func TestS3PersistenceStress(t *testing.T) {
 		LogEntryDelete{idx: 999, txID: "tx-b"}, LogEntryCommit{txID: "tx-b"},
 	}, true)
 	replacement.Close()
-	committed, entries, appendLog = reopened.ReplayLog("shard")
+	committed, entries, appendLog = reopened.ReplayLog("shard", false)
 	if _, ok := committed["tx-b"]; !ok || len(committed) != 1 {
 		t.Fatalf("commits after S3 WAL swap = %v", committed)
 	}
@@ -316,7 +316,7 @@ func TestS3PersistenceStress(t *testing.T) {
 	emptyLog := reopened.OpenLog("shard")
 	emptyLog.Close()
 	reopened = factory.CreateDatabase("stress")
-	committed, entries, appendLog = reopened.ReplayLog("shard")
+	committed, entries, appendLog = reopened.ReplayLog("shard", false)
 	for range entries {
 		t.Fatal("removed S3 WAL replayed an entry")
 	}

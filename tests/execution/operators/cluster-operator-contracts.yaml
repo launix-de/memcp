@@ -376,3 +376,54 @@ test_cases:
     data: [{n: 288000, ids: 46151856000}]
     cluster:
       min_remote_shards: 1
+
+- name: distributed-acid-update-begin
+  session_id: cluster-acid-commit
+  sql: START ACID TRANSACTION
+- name: distributed-acid-update
+  session_id: cluster-acid-commit
+  sql: UPDATE big_items SET v7=-id-1 WHERE id%5000>=500 AND id%5000<1000
+  timeout: 60
+  expect:
+    affected_rows: 32000
+    cluster:
+      min_remote_shards: 2
+      min_remote_nodes: 2
+- name: distributed-acid-update-isolation
+  sql: SELECT COUNT(*) AS n FROM big_items WHERE v7<0
+  expect:
+    data: [{n: 0}]
+- name: distributed-acid-update-commit
+  session_id: cluster-acid-commit
+  sql: COMMIT
+- name: distributed-acid-update-published
+  sql: SELECT COUNT(*) AS n FROM big_items WHERE id%5000>=500 AND id%5000<1000 AND v7=-id-1
+  expect:
+    data: [{n: 32000}]
+    cluster:
+      min_remote_shards: 1
+- name: distributed-acid-delete-begin
+  session_id: cluster-acid-commit
+  sql: START ACID TRANSACTION
+- name: distributed-acid-delete
+  session_id: cluster-acid-commit
+  sql: DELETE FROM big_items WHERE id%5000>=500 AND id%5000<1000
+  timeout: 60
+  expect:
+    affected_rows: 32000
+    cluster:
+      min_remote_shards: 2
+      min_remote_nodes: 2
+- name: distributed-acid-delete-isolation
+  sql: SELECT COUNT(*) AS n FROM big_items
+  expect:
+    data: [{n: 288000}]
+- name: distributed-acid-delete-commit
+  session_id: cluster-acid-commit
+  sql: COMMIT
+- name: distributed-acid-delete-published
+  sql: SELECT COUNT(*) AS n,SUM(id) AS ids FROM big_items
+  expect:
+    data: [{n: 256000, ids: 41087872000}]
+    cluster:
+      min_remote_shards: 1

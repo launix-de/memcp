@@ -5,12 +5,15 @@ SPDX-License-Identifier: GPL-3.0-or-later
 package storage
 
 import "fmt"
+import "strings"
+import "encoding/json"
 import "sync"
 import "sort"
 import "time"
 import "weak"
 import "runtime"
 import "context"
+import "strconv"
 import "sync/atomic"
 import "github.com/google/uuid"
 import "github.com/launix-de/memcp/scm"
@@ -27,6 +30,9 @@ func (tx *transactionState) ClusterObjectID() string {
 	if tx.clusterID != "" {
 		return tx.clusterID
 	}
+	if number := tx.clusterNumber.Load(); number != 0 {
+		return strconv.FormatUint(number, 10)
+	}
 	return uuid.NewSHA1(uuid.NameSpaceOID, []byte(walBootID+fmt.Sprint(tx.ID))).String()
 }
 func (tx *transactionState) HandleClusterRequest(ctx context.Context, r scm.ClusterRequest) (any, error) {
@@ -35,13 +41,29 @@ func (tx *transactionState) HandleClusterRequest(ctx context.Context, r scm.Clus
 	}
 	if r.Method == "enlist" {
 		if tx.coordinator != nil {
+			if len(r.Arguments) == 2 {
+				if st, ok := r.Arguments[0].Any().(*storageShardTransaction); ok {
+					tx.mu.Lock()
+					if service := nodeScans.Load(); service != nil && st.ownerURI() == service.authNodeID() {
+						if native := (&TxContext{transactionState: tx}).ownedShardLocked(st.shardUUID); native != nil {
+							st = native
+						}
+					}
+					proxy := (&TxContext{transactionState: tx}).bindShardEndpointLocked(st)
+					if proxy != st {
+						proxy.forwarded.Store(st)
+					}
+					tx.mu.Unlock()
+					r.Arguments[0] = scm.NewAny(proxy)
+				}
+			}
 			return tx.coordinator.Call(ctx, r)
 		}
 		if len(r.Arguments) != 2 {
 			return scm.NewNil(), fmt.Errorf("transaction enlist expects one native shard participant")
 		}
 		participant, ok := r.Arguments[0].Any().(*storageShardTransaction)
-		if !ok || participant.clusterTxID != tx.ClusterObjectID() || participant.remoteObject == nil {
+		if !ok || participant.clusterTxID != tx.ClusterObjectID() {
 			return scm.NewNil(), fmt.Errorf("participant belongs to another transaction")
 		}
 		tx.mu.Lock()
@@ -53,12 +75,30 @@ func (tx *transactionState) HandleClusterRequest(ctx context.Context, r scm.Clus
 			tx.participants = make(map[uuid.UUID]*storageShardTransaction)
 		}
 		participant.decisionToken = r.Arguments[1].String()
-		tx.participants[participant.shardUUID] = participant
+		local := false
+		if cluster := activeNodeCluster(); cluster != nil && participant.ownerURI() == cluster.self.ID {
+			if directory := tx.shards.Load(); directory != nil {
+				directory.Range(func(key, value any) bool {
+					if key.(*storageShard).uuid == participant.shardUUID {
+						local = true
+						return false
+					}
+					return true
+				})
+			}
+		}
+		if local {
+			delete(tx.participants, participant.shardUUID)
+		} else {
+			tx.participants[participant.shardUUID] = participant
+		}
+		tx.participantEpoch++
 		return scm.NewBool(true), nil
 	}
 	if r.Method != "view" {
 		return scm.NewNil(), fmt.Errorf("unsupported native transaction request %q", r.Method)
 	}
+	(&TxContext{transactionState: tx}).ensureClusterIdentity()
 	if registerTransactionState(tx) != tx {
 		return scm.NewNil(), fmt.Errorf("conflicting native transaction identity")
 	}
@@ -155,7 +195,7 @@ func (object *remoteShardObject) prepareSource(ctx context.Context, peer *mosiPe
 	if err != nil {
 		return err
 	}
-	resource := mosiResource{view[0].String(), view[1].String(), id.String()}
+	resource := mosiResource{Database: view[0].String(), Table: view[1].String(), Shard: id.String()}
 	tbl := &table{Name: resource.Table, schema: &database{Name: resource.Database}}
 	shard := &storageShard{t: tbl, uuid: id}
 	ref := object.handle.Reference
@@ -184,20 +224,49 @@ func (st *storageShardTransaction) ClusterObjectID() string {
 	return uuid.NewSHA1(uuid.NameSpaceOID, []byte(st.clusterTxID+"/"+st.shardUUID.String())).String()
 }
 func (st *storageShardTransaction) HandleClusterRequest(ctx context.Context, r scm.ClusterRequest) (any, error) {
+	if next := st.forwarded.Load(); next != nil {
+		return next.HandleClusterRequest(ctx, r)
+	}
 	if err := ctx.Err(); err != nil {
 		return scm.NewNil(), err
+	}
+	if r.Method == "view" && st.transaction != nil {
+		tx := &TxContext{transactionState: st.transaction}
+		tx.ensureClusterIdentity()
+		tx.mu.Lock()
+		tx.bindShardEndpointLocked(st)
+		tx.mu.Unlock()
 	}
 	if r.Method != "view" {
 		if st.remoteObject != nil {
 			return st.remoteObject.Call(ctx, r)
 		}
+		if err := st.waitAuthority(ctx); err != nil {
+			return nil, err
+		}
+
 		if len(r.Arguments) < 1 || st.decisionToken == "" || r.Arguments[0].String() != st.decisionToken {
 			return scm.NewNil(), fmt.Errorf("transaction decision requires the enlisted participant capability")
 		}
+		if st.transaction.coordinator == nil && ctx.Value(clusterObjectSessionKey{}) != nil {
+			// A stale participant reference can reach a generation now owned by
+			// its coordinator. Its frontend already owns the decision; admitting a
+			// second decision here would recursively wait for that same operation.
+			// waitAuthority above joins the handover/enlistment before acknowledging.
+			switch r.Method {
+			case "prepare", "commit", "rollback", "rollback-savepoint":
+				return scm.NewBool(true), nil
+			case "savepoint":
+				st.transaction.mu.Lock()
+				depth := st.transaction.Depth
+				st.transaction.mu.Unlock()
+				return (Savepoint{Depth: depth}).clusterView(), nil
+			}
+		}
 		tx := &TxContext{transactionState: st.transaction}
-		tx.decisionMu.Lock()
-		defer tx.decisionMu.Unlock()
-		if r.Method == "commit" || r.Method == "rollback" {
+		release := tx.lockDecision(ctx)
+		defer release()
+		if r.Method == "prepare" || r.Method == "commit" || r.Method == "rollback" {
 			// A broken connection cancels the task, but its bounded shard loop
 			// may still be finishing. Stop admission and join that native work
 			// before publishing or undoing any of its transaction overlays.
@@ -215,40 +284,42 @@ func (st *storageShardTransaction) HandleClusterRequest(ctx context.Context, r s
 			}
 		}
 		switch r.Method {
-		case "savepoint":
-			sp := tx.CreateSavepoint()
-			rows := make([]scm.Scmer, 0, len(sp.shardLens))
-			for shard, lens := range sp.shardLens {
-				rows = append(rows, scm.NewSlice([]scm.Scmer{scm.NewString(shard.uuid.String()),
-					scm.NewInt(int64(lens.InsertLen)), scm.NewInt(int64(lens.DeletedLen)),
-					scm.NewInt(int64(lens.DeleteLen)), scm.NewInt(int64(lens.UndeleteLen))}))
+		case "prepare":
+			if tx.State != TxActive || tx.Mode != TxACID {
+				return scm.NewNil(), fmt.Errorf("participant cannot prepare this transaction")
 			}
-			return scm.NewSlice([]scm.Scmer{scm.NewInt(int64(sp.Depth)), scm.NewInt(int64(sp.repartitionDeleteLen)), scm.NewSlice(rows)}), nil
+			if err := tx.prepareACID(ctx); err != nil {
+				return scm.NewNil(), err
+			}
+			return scm.NewBool(true), nil
+		case "savepoint":
+			sp := tx.createSavepointLocked()
+			return sp.clusterView(), nil
 		case "rollback-savepoint":
 			if len(r.Arguments) != 2 {
 				return scm.NewNil(), fmt.Errorf("participant rollback requires a native savepoint")
 			}
 			view := r.Arguments[1].Slice()
-			if len(view) != 3 {
+			if len(view) != 2 {
 				return scm.NewNil(), fmt.Errorf("invalid native savepoint")
 			}
-			sp := Savepoint{Depth: uint32(view[0].Int()), repartitionDeleteLen: int(view[1].Int()), shardLens: make(map[*storageShard]shardSavepoint)}
+			sp := Savepoint{Depth: uint32(view[0].Int()), shardLens: make(map[*storageShard]shardSavepoint)}
 			tx.mu.Lock()
-			for _, row := range view[2].Slice() {
+			for _, row := range view[1].Slice() {
 				parts := row.Slice()
-				if len(parts) != 5 {
+				if len(parts) != 6 {
 					tx.mu.Unlock()
 					return scm.NewNil(), fmt.Errorf("invalid native shard savepoint")
 				}
 				for shard := range tx.shardTransactions() {
 					if shard.uuid.String() == parts[0].String() {
-						sp.shardLens[shard] = shardSavepoint{int(parts[1].Int()), int(parts[2].Int()), int(parts[3].Int()), int(parts[4].Int())}
+						sp.shardLens[shard] = shardSavepoint{int(parts[1].Int()), int(parts[2].Int()), int(parts[3].Int()), int(parts[4].Int()), int(parts[5].Int())}
 						break
 					}
 				}
 			}
 			tx.mu.Unlock()
-			tx.RollbackToSavepoint(sp)
+			tx.rollbackToSavepointLocked(sp)
 			return scm.NewBool(true), nil
 		case "commit":
 			if tx.State == TxCommitted {
@@ -257,46 +328,46 @@ func (st *storageShardTransaction) HandleClusterRequest(ctx context.Context, r s
 			if tx.State != TxActive {
 				return scm.NewNil(), fmt.Errorf("participant transaction is not active")
 			}
-			if err := tx.Commit(); err != nil {
+			if tx.prepared != nil {
+				engine := sharedCommitBackend()
+				if engine == nil || !readDistributedDecision(engine, tx.durableID()) {
+					return scm.NewNil(), fmt.Errorf("participant has no shared commit decision")
+				}
+				tx.decisionStarted, tx.commitDecided = true, true
+			}
+			if err := tx.commitLocked(); err != nil {
 				return scm.NewNil(), err
 			}
 			return scm.NewBool(true), nil
 		case "rollback":
 			if tx.State == TxActive {
-				tx.Rollback()
+				tx.rollbackLocked()
 			}
 			return scm.NewBool(true), nil
 		}
 		return scm.NewNil(), fmt.Errorf("unsupported native shard participant request %q", r.Method)
 	}
-	st.mu.Lock()
-	defer st.mu.Unlock()
-	deletes, undeletes := make([]scm.Scmer, 0, len(st.DeleteRecids)), make([]scm.Scmer, 0, len(st.UndeleteRecids))
-	for _, id := range st.DeleteRecids {
-		if st.DeleteMask.Get(uint(id)) {
-			deletes = append(deletes, scm.NewInt(int64(id)))
-		}
-	}
-	for _, id := range st.UndeleteRecids {
-		if st.UndeleteMask.Get(uint(id)) {
-			undeletes = append(undeletes, scm.NewInt(int64(id)))
-		}
-	}
-	return scm.NewSlice([]scm.Scmer{scm.NewString(st.shardUUID.String()), scm.NewSlice(deletes), scm.NewSlice(undeletes), scm.NewString(st.clusterTxID)}), nil
+	// Native routing references carry identity only. Private masks and complete
+	// journals move with the physical shard through its MOSI snapshot.
+	return scm.NewSlice([]scm.Scmer{scm.NewString(st.shardUUID.String()), scm.NewString(st.clusterTxID), scm.NewString(st.ownerURI())}), nil
 }
 
 // One endpoint per owner drives the peer's existing native transaction. Multiple
 // shard participants on that peer retain their individual physical generations.
-func (tx *TxContext) remoteParticipantOwners() map[string]*storageShardTransaction {
+func (tx *TxContext) remoteParticipantSnapshot() (map[string]*storageShardTransaction, uint64) {
 	tx.mu.Lock()
 	defer tx.mu.Unlock()
 	if len(tx.participants) == 0 {
-		return nil
+		return nil, tx.participantEpoch
 	}
-	owners := make(map[string]*storageShardTransaction)
+	owners := make(map[string]*storageShardTransaction, len(tx.participants))
 	for _, participant := range tx.participants {
-		owners[participant.remoteObject.Reference.Owner] = participant
+		owners[participant.ownerURI()] = participant
 	}
+	return owners, tx.participantEpoch
+}
+func (tx *TxContext) remoteParticipantOwners() map[string]*storageShardTransaction {
+	owners, _ := tx.remoteParticipantSnapshot()
 	return owners
 }
 
@@ -308,11 +379,11 @@ func (tx *TxContext) captureRemoteSavepoints() map[string]scm.Scmer {
 	ctx := scanQueryContext(tx, context.Background())
 	views := make(map[string]scm.Scmer, len(owners))
 	for owner, participant := range owners {
-		value, err := participant.remoteObject.Call(ctx, scm.ClusterRequest{Method: "savepoint", Arguments: []scm.Scmer{scm.NewString(participant.decisionToken)}})
+		raw, err := participant.HandleClusterRequest(ctx, scm.ClusterRequest{Method: "savepoint", Arguments: []scm.Scmer{scm.NewString(participant.decisionToken)}})
 		if err != nil {
 			panic(err)
 		}
-		views[owner] = value
+		views[owner] = raw.(scm.Scmer)
 	}
 	return views
 }
@@ -325,13 +396,9 @@ func (tx *TxContext) rollbackRemoteSavepoints(sp Savepoint) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
 	var failure error
-	for owner, participant := range owners {
-		view, found := sp.remote[owner]
-		if !found {
-			// An owner first enlisted after this savepoint has no earlier effects.
-			view = scm.NewSlice([]scm.Scmer{scm.NewInt(int64(sp.Depth)), scm.NewInt(0), scm.NewSlice(nil)})
-		}
-		_, err := participant.remoteObject.Call(ctx, scm.ClusterRequest{Method: "rollback-savepoint", Arguments: []scm.Scmer{scm.NewString(participant.decisionToken), view}})
+	view := sp.clusterView()
+	for _, participant := range owners {
+		_, err := participant.HandleClusterRequest(ctx, scm.ClusterRequest{Method: "rollback-savepoint", Arguments: []scm.Scmer{scm.NewString(participant.decisionToken), view}})
 		if err != nil && failure == nil {
 			failure = err
 		}
@@ -353,11 +420,11 @@ func (tx *TxContext) finishRemoteParticipants(method string) error {
 	if len(participants) == 0 {
 		return nil
 	}
-	if method == "commit" && tx.Mode == TxACID {
-		return fmt.Errorf("distributed ACID commit requires a shared prepare/publication decision")
+	if method == "commit" && tx.Mode == TxACID && !tx.commitDecided {
+		return fmt.Errorf("ACID participant has no shared commit decision")
 	}
 	sort.Slice(participants, func(i, j int) bool {
-		return participants[i].remoteObject.Reference.Owner < participants[j].remoteObject.Reference.Owner
+		return participants[i].ownerURI() < participants[j].ownerURI()
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
@@ -424,7 +491,7 @@ func importTransactionState(handle scm.ClusterHandle) scm.Scmer {
 	if len(view) != 7 {
 		panic("invalid native transaction view")
 	}
-	state := &transactionState{ID: uint64(view[2].Int()), Mode: TxMode(view[0].Int()), State: TxActive,
+	state := &transactionState{ID: atomic.AddUint64(&txIDCounter, 1), Mode: TxMode(view[0].Int()), State: TxActive,
 		autoCommit: view[1].Bool(), SnapshotEpoch: uint64(view[4].Int()), sourceSessionID: uint64(view[5].Int()),
 		clusterID: view[6].String(), coordinator: &handle}
 	durableID := view[3].String()
@@ -463,24 +530,14 @@ func init() {
 	}
 	scm.RegisterClusterObjectType("tx-shard", func(handle scm.ClusterHandle) scm.Scmer {
 		view := handle.View.Slice()
-		if len(view) != 4 {
+		if len(view) != 3 {
 			panic("invalid TX shard view")
 		}
 		id, err := uuid.Parse(view[0].String())
 		if err != nil {
 			panic(err)
 		}
-		st := &storageShardTransaction{shardUUID: id, clusterTxID: view[3].String(), remoteObject: &handle}
-		for _, value := range view[1].Slice() {
-			recid := uint32(value.Int())
-			st.DeleteMask.Set(uint(recid), true)
-			st.DeleteRecids = append(st.DeleteRecids, recid)
-		}
-		for _, value := range view[2].Slice() {
-			recid := uint32(value.Int())
-			st.UndeleteMask.Set(uint(recid), true)
-			st.UndeleteRecids = append(st.UndeleteRecids, recid)
-		}
+		st := &storageShardTransaction{shardUUID: id, clusterTxID: view[1].String(), participantOwner: view[2].String(), readOnly: true, remoteObject: &handle}
 		return scm.NewAny(st)
 	})
 	scm.RegisterClusterObjectType("transaction", importTransactionState)
@@ -492,12 +549,11 @@ func (origin *TxContext) BindClusterInvocation(value scm.Scmer) (scm.Scmer, erro
 	if !ok {
 		return scm.NewNil(), fmt.Errorf("missing native invocation transaction")
 	}
-	if origin.remoteObject == nil {
-		return scm.NewNil(), fmt.Errorf("transaction is not an imported coordinator reference")
-	}
 	if target.remoteObject != nil && target.ClusterObjectID() != origin.ClusterObjectID() {
 		return scm.NewNil(), fmt.Errorf("one invocation cannot mix independent transaction coordinators")
 	}
+	// A nested delegated task can return to its original coordinator, where the
+	// reference resolves to the native root instead of an imported proxy.
 	// Preparation owns target exclusively; callbacks have not started. Statement
 	// identity/cancellation and native reader cleanup remain with that executor.
 	target.transactionState = origin.transactionState
@@ -509,11 +565,74 @@ func (origin *TxContext) BindClusterInvocation(value scm.Scmer) (scm.Scmer, erro
 }
 
 func (tx *TxContext) Serialize(ctx *scm.SerializationContext) (scm.Scmer, error) {
-	return ctx.ReferenceExpression(tx.transactionState)
+	return tx.transactionState.Serialize(ctx)
 }
 
 func (tx *transactionState) Serialize(ctx *scm.SerializationContext) (scm.Scmer, error) {
+	if tx.coordinator != nil {
+		data, err := json.Marshal(tx.coordinator.Reference)
+		return scm.NewSlice([]scm.Scmer{scm.NewSymbol("cluster_object"), scm.NewString(string(data))}), err
+	}
 	return ctx.ReferenceExpression(tx)
+}
+
+// The originating session owns this routing endpoint. Shard references retain
+// the physical inputs; foreign actors must always address the original root.
+func (tx *transactionState) ClusterObjectPath() string {
+	return "transactions/" + tx.ClusterObjectID()
+}
+
+func resolveTransactionRoot(ref scm.ClusterReference) (*transactionState, error) {
+	index := strings.LastIndex(ref.URI, "/transactions/")
+	if index < 0 {
+		return nil, fmt.Errorf("invalid transaction root URI")
+	}
+	entry, ok := importedTransactions.Load(ref.URI[index+len("/transactions/"):])
+	if ok {
+		if state := entry.(weak.Pointer[transactionState]).Value(); state != nil && state.coordinator == nil {
+			return state, nil
+		}
+	}
+	return nil, fmt.Errorf("expired transaction root")
+}
+
+func (service *nodeScanService) importTransactionRoot(ctx context.Context, peer *mosiPeer, ref scm.ClusterReference) (scm.Scmer, error) {
+	if ref.Incarnation == "" || ref.Owner == "" {
+		return scm.NewNil(), fmt.Errorf("invalid transaction root")
+	}
+	if ref.Owner == service.authNodeID() {
+		if ref.Incarnation != service.id {
+			return scm.NewNil(), fmt.Errorf("expired transaction root incarnation")
+		}
+		state, err := resolveTransactionRoot(ref)
+		if err != nil {
+			return scm.NewNil(), err
+		}
+		return scm.NewAny(&TxContext{transactionState: state}), nil
+	}
+	if ref.Owner != peer.objectPeer.ID {
+		index := strings.LastIndex(ref.URI, "/transactions/")
+		if index < 0 {
+			return scm.NewNil(), fmt.Errorf("invalid transaction root URI")
+		}
+		var err error
+		peer, err = service.objectEndpoint(ctx, ref.URI[:index])
+		if err != nil {
+			return scm.NewNil(), err
+		}
+	}
+	if peer.objectPeer.ID != ref.Owner || peer.objectPeer.Boot != ref.Incarnation {
+		return scm.NewNil(), fmt.Errorf("foreign transaction root")
+	}
+	var frozen schemeValue
+	if err := json.Unmarshal(ref.View, &frozen); err != nil {
+		return scm.NewNil(), err
+	}
+	view, err := frozen.reconstruct(scm.ProcedureDecode{})
+	if err != nil {
+		return scm.NewNil(), err
+	}
+	return scm.ReconstructClusterObject(scm.ClusterHandle{Reference: ref, View: view, Call: service.objectCaller(peer, ref, nil)})
 }
 
 func (s *storageShard) Serialize(ctx *scm.SerializationContext) (scm.Scmer, error) {

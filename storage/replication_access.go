@@ -53,6 +53,9 @@ type replicaCell struct {
 	ownstate          mosi.State
 	resource          atomic.Pointer[mosiResource]
 	current           atomic.Pointer[storageShard]
+	global            atomic.Pointer[clusterGlobalData]
+	liveTransfer      atomic.Pointer[liveShardTransfer]
+	liveCopy          atomic.Pointer[liveShardCopy]
 	bootstrap         sync.Mutex
 	initialized       atomic.Bool
 	bootstrapStarted  bool
@@ -438,6 +441,11 @@ func (c *replicaCell) writesDrained() bool {
 // generations stay reachable while waiting; continuation batches can finish
 // normally without registering another MOSI transaction lifetime.
 func (c *replicaCell) drainWrites(ctx context.Context) error {
+	if c.engine != nil && c.engine.cluster != nil && c.resource.Load().Shard != "" {
+		// BeginHandover already drained native writer batches. Parked overlays
+		// are transferred with their generations instead of waiting for COMMIT.
+		return nil
+	}
 	groups := make(map[*table][]*storageShard)
 	add := func(shard *storageShard) {
 		if shard != nil {

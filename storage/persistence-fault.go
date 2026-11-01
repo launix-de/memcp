@@ -220,10 +220,13 @@ func (p *faultPersistence) SwapLog(shard string, entries []interface{}, durable 
 	return &faultLogfile{PersistenceLogfile: result, owner: p}
 }
 
-func (p *faultPersistence) ReplayLog(shard string) (committed map[string]struct{}, entries chan interface{}, result PersistenceLogfile) {
+func (p *faultPersistence) ReplayLog(shard string, readOnly bool) (committed map[string]struct{}, entries chan interface{}, result PersistenceLogfile) {
 	p.around("log.replay", func() {
-		committed, entries, result = p.PersistenceEngine.ReplayLog(shard)
+		committed, entries, result = p.PersistenceEngine.ReplayLog(shard, readOnly)
 	})
+	if result == nil {
+		return committed, entries, nil
+	}
 	return committed, entries, &faultLogfile{PersistenceLogfile: result, owner: p}
 }
 

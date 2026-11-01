@@ -488,11 +488,22 @@ func (s *FileStorage) SwapLog(shard string, entries []interface{}, durable bool)
 	return FileLogfile{w: tmp}
 }
 
-func (s *FileStorage) ReplayLog(shard string) (map[string]struct{}, chan interface{}, PersistenceLogfile) {
-	if err := os.MkdirAll(s.path, 0750); err != nil {
-		raisePersistenceFailure(s.BackendName(), s.path, "log.replay", err)
+func (s *FileStorage) ReplayLog(shard string, readOnly bool) (map[string]struct{}, chan interface{}, PersistenceLogfile) {
+	var f *os.File
+	var err error
+	if readOnly {
+		f, err = os.Open(s.path + shard + ".log")
+		if os.IsNotExist(err) {
+			replay := make(chan interface{})
+			close(replay)
+			return map[string]struct{}{}, replay, nil
+		}
+	} else {
+		if err := os.MkdirAll(s.path, 0750); err != nil {
+			raisePersistenceFailure(s.BackendName(), s.path, "log.replay", err)
+		}
+		f, err = os.OpenFile(s.path+shard+".log", os.O_RDWR|os.O_CREATE, 0750)
 	}
-	f, err := os.OpenFile(s.path+shard+".log", os.O_RDWR|os.O_CREATE, 0750)
 	if err != nil {
 		raisePersistenceFailure(s.BackendName(), s.path, "log.replay", err)
 	}
@@ -509,6 +520,9 @@ func (s *FileStorage) ReplayLog(shard string) (map[string]struct{}, chan interfa
 	}
 	if fi.Size() > 0 {
 		go func() {
+			if readOnly {
+				defer f.Close()
+			}
 			defer close(replay)
 			reader := bufio.NewReaderSize(f, 256*1024)
 			for {
@@ -580,7 +594,13 @@ func (s *FileStorage) ReplayLog(shard string) (map[string]struct{}, chan interfa
 			}
 		}()
 	} else {
+		if readOnly {
+			f.Close()
+		}
 		close(replay)
+	}
+	if readOnly {
+		return committed, replay, nil
 	}
 	return committed, replay, FileLogfile{w: f}
 }

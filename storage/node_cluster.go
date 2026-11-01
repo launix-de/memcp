@@ -72,6 +72,9 @@ type nodeCluster struct {
 	members   map[string]clusterMember
 	links     map[string]*clusterLink
 	view      atomic.Pointer[clusterView]
+	idsMu     sync.Mutex
+	nextID    uint64
+	limitID   uint64
 	received  atomic.Uint64
 	delegated atomic.Uint64
 	locality  atomic.Uint64
@@ -159,7 +162,7 @@ func (cluster *nodeCluster) handle(session *scanRPCSession, ctx context.Context,
 		if err := json.Unmarshal(data, &resource); err != nil {
 			return nil, err
 		}
-		if !resource.valid() || !cluster.databases[resource.Database] {
+		if !resource.valid() || resource != globalResource && !cluster.databases[resource.Database] {
 			return nil, fmt.Errorf("invalid cluster report")
 		}
 		return cluster.report(resource), nil
@@ -184,6 +187,62 @@ func (cluster *nodeCluster) exchange(link *clusterLink) error {
 		return err
 	}
 	return cluster.remember(link.member.ID, hello)
+}
+
+// Publish one authenticated connection without closing a concurrently published
+// live link underneath MOSI transfers. Discovery and demand acquisition share
+// this publication owner.
+func (cluster *nodeCluster) installLink(link *clusterLink) *mosiPeer {
+	cluster.mu.Lock()
+	prior := cluster.links[link.member.ID]
+	if prior != nil {
+		select {
+		case <-prior.peer.done:
+			prior = nil
+		default:
+		}
+	}
+	if prior == nil {
+		link.member = cluster.members[link.member.ID]
+		cluster.links[link.member.ID] = link
+		cluster.publishLocked()
+	}
+	cluster.mu.Unlock()
+	if prior != nil {
+		cluster.service.forget(link.peer)
+		return prior.peer
+	}
+	return link.peer
+}
+
+func (cluster *nodeCluster) ensurePeer(ctx context.Context, id string) (*mosiPeer, error) {
+	if peer := cluster.peer(id); peer != nil {
+		return peer, nil
+	}
+	var member clusterMember
+	for _, candidate := range cluster.view.Load().members {
+		if candidate.ID == id {
+			member = candidate
+			break
+		}
+	}
+	if member.ID == "" {
+		return nil, fmt.Errorf("unknown cluster peer %s", id)
+	}
+	peer, identity, err := cluster.service.connect(ctx, member.Address)
+	if err != nil {
+		return nil, err
+	}
+	if identity != id {
+		cluster.service.forget(peer)
+		return nil, fmt.Errorf("cluster contact identity changed")
+	}
+	link := &clusterLink{member: member, peer: peer}
+	if err := cluster.exchange(link); err != nil {
+		cluster.service.forget(peer)
+		return nil, err
+	}
+	return cluster.installLink(link), nil
 }
 func (cluster *nodeCluster) loop() {
 	defer cluster.workers.Done()
@@ -240,15 +299,7 @@ func (cluster *nodeCluster) loop() {
 				cluster.service.forget(peer)
 				continue
 			}
-			cluster.mu.Lock()
-			link.member = cluster.members[id]
-			prior := cluster.links[id]
-			cluster.links[id] = link
-			cluster.publishLocked()
-			cluster.mu.Unlock()
-			if prior != nil {
-				cluster.service.forget(prior.peer)
-			}
+			cluster.installLink(link)
 		}
 		select {
 		case <-cluster.ctx.Done():
@@ -307,6 +358,10 @@ func startNodeCluster(secretFile, address, seed, databases string, bootstrap boo
 	}
 	cluster.initializeManager()
 	if err := cluster.prepareBootstrap(fresh || bootstrap); err != nil {
+		cancel()
+		return err
+	}
+	if err := cluster.restoreGlobalContacts(); err != nil {
 		cancel()
 		return err
 	}

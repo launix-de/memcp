@@ -254,6 +254,11 @@ func (cluster *nodeCluster) registerLocation(ctx context.Context, entry replicaR
 }
 
 func (cluster *nodeCluster) coordinate(ctx context.Context, source string, packet mosiPacket) error {
+	if source != cluster.self.ID {
+		if _, err := cluster.ensurePeer(ctx, source); err != nil {
+			return err
+		}
+	}
 	if err := cluster.manager.coordinate(ctx, source, packet); err != nil {
 		return err
 	}
