@@ -161,6 +161,9 @@ func (r *replicationManager) offerResource(ctx context.Context, source string, p
 		return fmt.Errorf("stale recall")
 	}
 	content, err := r.prepareResource(packet.Resource)
+	if capture := c.liveTransfer.Load(); capture != nil {
+		defer func() { c.liveTransfer.CompareAndSwap(capture, nil); capture.release() }()
+	}
 	if err != nil {
 		return err
 	}
@@ -199,14 +202,7 @@ func (r *replicationManager) offerResource(ctx context.Context, source string, p
 		if packet.Resource.Shard != "" {
 			packet.Forwards = r.shardRoutes(packet.Resource)
 		}
-		if current := c.current.Load(); current != nil && packet.Resource.Shard != "" {
-
-		}
-		peer := r.peer(source)
-		if peer == nil {
-			return fmt.Errorf(mosi.NetworkError)
-		}
-		return peer.post(packet)
+		return r.transmitResource(ctx, source, packet)
 	}
 	transfer, err := r.captureResource(packet.Resource, content)
 	if err != nil {
@@ -372,7 +368,16 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 			if err != nil {
 				return err
 			}
+			handoverHeld := true
+			defer func() {
+				if handoverHeld {
+					handover.Release()
+				}
+			}()
 			content, err := r.prepareResource(packet.Resource)
+			if capture := c.liveTransfer.Load(); capture != nil {
+				defer func() { c.liveTransfer.CompareAndSwap(capture, nil); capture.release() }()
+			}
 			if err == nil && requester != r.id && r.cluster == nil {
 				err = r.saveBackup(packet.Resource, content)
 			}
@@ -393,6 +398,7 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 				record.Content = content
 			}
 			handover.Release()
+			handoverHeld = false
 			releasePersistence()
 			if err != nil {
 				return err

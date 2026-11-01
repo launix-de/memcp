@@ -48,7 +48,7 @@ func TestFileTransactionalWALRoundTrip(t *testing.T) {
 	logfile.Flush(true)
 	logfile.Close()
 
-	committed, entries, replayLog := engine.ReplayLog("roundtrip")
+	committed, entries, replayLog := engine.ReplayLog("roundtrip", false)
 	defer replayLog.Close()
 	if _, ok := committed[txID]; !ok {
 		t.Fatal("transaction commit was not discovered before replay")
@@ -89,7 +89,7 @@ func TestFileWALIgnoresTornFinalCommit(t *testing.T) {
 	}
 
 	engine := &FileStorage{path: dir + "/"}
-	_, entries, logfile := engine.ReplayLog(transactionLogName)
+	_, entries, logfile := engine.ReplayLog(transactionLogName, false)
 	defer logfile.Close()
 	var restored []interface{}
 	for entry := range entries {
@@ -141,7 +141,7 @@ func TestFileSwapLogPublishesCompleteReplacement(t *testing.T) {
 	replacement.Flush(true)
 	replacement.Close()
 
-	committed, entries, logfile := engine.ReplayLog(transactionLogName)
+	committed, entries, logfile := engine.ReplayLog(transactionLogName, false)
 	defer logfile.Close()
 	for range entries {
 	}
@@ -263,5 +263,30 @@ func TestNativeACIDUpdatesSurviveRestart(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestFileReadOnlyReplayDoesNotCreateOrExposeAppendHandle(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "not-created")
+	engine := &FileStorage{path: root + "/"}
+	committed, entries, writer := engine.ReplayLog("missing-decision", true)
+	for range entries {
+		t.Fatal("missing log yielded an entry")
+	}
+	if len(committed) != 0 || writer != nil {
+		t.Fatal("read-only absence created commit authority or an append handle")
+	}
+	if _, err := os.Stat(root); !os.IsNotExist(err) {
+		t.Fatalf("read-only absence modified the backend: %v", err)
+	}
+	log := engine.SwapLog("recorded-decision", []interface{}{LogEntryCommit{txID: "committed"}}, true)
+	log.Close()
+	committed, entries, writer = engine.ReplayLog("recorded-decision", true)
+	count := 0
+	for range entries {
+		count++
+	}
+	if _, found := committed["committed"]; !found || count != 1 || writer != nil {
+		t.Fatal("read-only replay lost a decision or exposed a writer")
 	}
 }

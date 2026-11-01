@@ -113,6 +113,7 @@ type storageShard struct {
 	activeScanners     atomic.Int32
 	activeTransactions atomic.Int32
 	prepared           atomic.Pointer[acidPreparation]
+	overlays           sync.Map // native transaction owners, one entry on first mutation
 	generation         atomic.Pointer[tableShardTopology]
 
 	// guards RemoveFromDisk against double execution (finalizer + explicit cleanup)
@@ -566,8 +567,9 @@ func (u *storageShard) load() {
 	if t.PersistencyMode == Safe || t.PersistencyMode == Logged {
 		// Replaying the log mutates inserts/deletions; caller holds u.mu.Lock
 		var log chan interface{}
-		localCommitted, log, logfile := u.t.schema.persistence.ReplayLog(u.uuid.String())
+		localCommitted, log, logfile := u.t.schema.persistence.ReplayLog(u.uuid.String(), false)
 		u.logfile = logfile
+		decisions := make(map[string]bool)
 		isCommitted := func(txID string) bool {
 			if txID == "" {
 				return true
@@ -575,7 +577,12 @@ func (u *storageShard) load() {
 			if _, exists := localCommitted[txID]; exists {
 				return true
 			}
-			return u.t.schema.transactionCommitted(txID)
+			if committed, exists := decisions[txID]; exists {
+				return committed
+			}
+			committed := u.t.schema.transactionCommitted(txID)
+			decisions[txID] = committed
+			return committed
 		}
 		entryCount := 0
 		for logentry := range log {
@@ -973,6 +980,9 @@ func (s *storageShard) GetRead(currentTx *TxContext, mayDelegate bool) ReadAcces
 // acquisition may install a successor, but must never reinterpret those IDs.
 func (s *storageShard) getRead(currentTx *TxContext, snapshot, mayDelegate bool) ReadAccess {
 	if currentTx != nil && sharedClusterSource(s.t) {
+		if currentTx.decisionStarted {
+			panic("transaction commit outcome is unknown; retry COMMIT")
+		}
 		currentTx.ensureClusterIdentity()
 	}
 	origin := s
@@ -1015,6 +1025,9 @@ func (s *storageShard) getRead(currentTx *TxContext, snapshot, mayDelegate bool)
 func (s *storageShard) GetWrite(currentTx *TxContext) WriteAccess {
 	origin := s
 	if currentTx != nil && sharedClusterSource(s.t) {
+		if currentTx.decisionStarted {
+			panic("transaction commit outcome is unknown; retry COMMIT")
+		}
 		currentTx.ensureClusterIdentity()
 	}
 	for preparation := s.prepared.Load(); preparation != nil && (currentTx == nil || preparation.tx != currentTx.transactionState); preparation = s.prepared.Load() {
@@ -1047,6 +1060,7 @@ func (s *storageShard) GetWrite(currentTx *TxContext) WriteAccess {
 		panic(activeNodeCluster().shardRAMUnavailable(s, origin))
 	}
 	s.ensureLoaded()
+	s.ensureMutationLog()
 	if currentTx != nil && currentTx.coordinator != nil {
 		currentTx.mu.Lock()
 		participant := currentTx.getOrCreateShardTxLocked(s)
@@ -1086,6 +1100,10 @@ func (s *storageShard) ensureLoaded() {
 	}
 	s.mu.Unlock()
 	atomic.StoreUint64(&s.lastAccessed, uint64(time.Now().UnixNano()))
+	s.registerLoadedShard()
+}
+
+func (s *storageShard) registerLoadedShard() {
 	// register with CacheManager (skip Memory-engine shards and temp tables)
 	if s.t.PersistencyMode == Cache && !s.t.isEphemeralQueryTable() {
 		GlobalCache.AddItem(s, int64(s.exclusiveSize()), TypeCacheEntry, cacheShardCleanup, shardLastUsed, nil)
@@ -4067,6 +4085,9 @@ func replayRebuiltRows(reader ColumnReader, mainRecids []uint32, mainMask []bool
 
 // rebuild main storage from main+delta
 func (t *storageShard) rebuild(all bool) *storageShard {
+	if cell := t.coherence.Load(); cell != nil && cell.engine != nil && cell.engine.cluster != nil && cell.resolved().ownstate.Phase() != mosi.M {
+		return t
+	}
 	// An unchanged cold shard already is a complete persistent generation:
 	// its UUID references both the column files and any unreplayed WAL. Keep it
 	// byte-for-byte instead of loading it merely for a periodic rebuild or
@@ -4485,15 +4506,26 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 		// Writers never wait for result.mu while the expensive generation is
 		// built. Briefly stop source mutations, replay only the delta suffix and
 		// buffered deletes, then switch subsequent mutations to direct forwarding.
-		t.mu.Lock()
-		t.catchUpRebuildLocked(result, maxInsertIndex)
-		// Transfer ownership while both generations are locked, BEFORE enabling
-		// source -> successor commit forwarding. Reacquiring the source mutex
-		// afterwards while holding result.mu would reverse that lock order.
-		result.tempColumnBytes = t.tempColumnBytes
-		t.tempColumnBytes = nil
-		t.nextReady.Store(true)
-		t.mu.Unlock()
+		var inherited *acidPreparation
+		for {
+			t.mu.Lock()
+			preparation := t.prepared.Load()
+			if preparation != nil && preparation != inherited {
+				intents := preparation.projectLocked(t, result)
+				t.mu.Unlock()
+				// result remains private. Source readers/writers retain their
+				// ordinary generation while the prepared WAL barrier is flushed.
+				preparation.persistProjected(result, intents)
+				inherited = preparation
+				continue
+			}
+			t.catchUpRebuildLocked(result, maxInsertIndex)
+			result.tempColumnBytes = t.tempColumnBytes
+			t.tempColumnBytes = nil
+			t.nextReady.Store(true)
+			t.mu.Unlock()
+			break
+		}
 	}
 	writeBlobManifest(result)
 	// Unlock result before registration (ComputeSize needs RLock)
@@ -4507,4 +4539,16 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 		GlobalCache.AddItem(result, int64(result.exclusiveSize()), TypeShard, shardCleanup, shardLastUsed, nil)
 	}
 	return result
+}
+
+// A live shared snapshot opens an append handle only after acquiring native M.
+func (s *storageShard) ensureMutationLog() {
+	if s.logfile != nil || (s.t.PersistencyMode != Safe && s.t.PersistencyMode != Logged) {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.logfile == nil {
+		s.logfile = s.t.schema.persistence.OpenLog(s.uuid.String())
+	}
 }

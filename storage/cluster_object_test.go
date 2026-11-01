@@ -367,8 +367,11 @@ func TestClusterObjectNativeOverlayReferenceKeepsPhysicalIdentity(t *testing.T) 
 		t.Fatal(err)
 	}
 	imported := value.Any().(*storageShardTransaction)
-	if imported.shardUUID != shard.uuid || !imported.DeleteMask.Get(1) || imported.DeleteMask.Get(2) {
-		t.Fatal("overlay did not preserve native UUID/visibility")
+	if imported.shardUUID != shard.uuid || imported.clusterTxID != overlay.clusterTxID || imported.MOSIState() != mosi.S {
+		t.Fatal("reference lost physical identity or acquired write authority")
+	}
+	if imported.DeleteMask.Count() != 0 || !overlay.DeleteMask.Get(1) {
+		t.Fatal("routing view duplicated private state instead of retaining it on its native shard")
 	}
 	if _, err := scm.ClusterObjectValue(imported, context.Background(), scm.ClusterRequest{Method: "commit"}); err == nil {
 		t.Fatal("read overlay acquired coordinator mutation rights")

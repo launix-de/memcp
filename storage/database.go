@@ -138,7 +138,7 @@ func (db *database) initializeTransactionLog() {
 		if sharedClusterDatabase(db.Name) {
 			// A standalone database may enter the cluster with a valid native
 			// WAL. Preserve its existing commit authority without rewriting it.
-			_, legacy, handle := db.persistence.ReplayLog(transactionLogName)
+			_, legacy, handle := db.persistence.ReplayLog(transactionLogName, false)
 			for entry := range legacy {
 				if commit, ok := entry.(LogEntryCommit); ok && commit.txID != "" {
 					committed[commit.txID] = 0
@@ -146,7 +146,7 @@ func (db *database) initializeTransactionLog() {
 			}
 			handle.Close()
 		}
-		_, entries, logfile := db.persistence.ReplayLog(db.transactionLogKey())
+		_, entries, logfile := db.persistence.ReplayLog(db.transactionLogKey(), false)
 		for entry := range entries {
 			commit, ok := entry.(LogEntryCommit)
 			if !ok || commit.txID == "" {
@@ -1965,7 +1965,7 @@ func abortStorageMoveGenerations(generations []storageMoveGeneration) {
 }
 
 func replayPersistenceLog(engine PersistenceEngine, name string) []interface{} {
-	_, input, logfile := engine.ReplayLog(name)
+	_, input, logfile := engine.ReplayLog(name, false)
 	entries := make([]interface{}, 0)
 	for entry := range input {
 		entries = append(entries, entry)
@@ -2612,7 +2612,7 @@ func (db *database) importClusterCommits(owner string) error {
 			return err
 		}
 		id := strings.TrimPrefix(owner, "memcp://")
-		_, entries, handle := db.persistence.ReplayLog(transactionLogName + "." + id)
+		_, entries, handle := db.persistence.ReplayLog(transactionLogName+"."+id, false)
 		for entry := range entries {
 			commit, ok := entry.(LogEntryCommit)
 			if !ok || commit.txID == "" {

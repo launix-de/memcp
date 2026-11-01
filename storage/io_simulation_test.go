@@ -175,7 +175,7 @@ func TestFakeRemoteDurabilityStreamingAndAbort(t *testing.T) {
 	log.Write(LogEntryInsert{cols: []string{"id"}, values: [][]scm.Scmer{{scm.NewInt(7)}}})
 	log.Flush(true)
 	log.Close()
-	_, entries, reopened := engine.ReplayLog("rows")
+	_, entries, reopened := engine.ReplayLog("rows", false)
 	count := 0
 	for range entries {
 		count++

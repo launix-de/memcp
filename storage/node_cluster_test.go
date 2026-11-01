@@ -292,7 +292,7 @@ func TestClusterColdHandoverRetainsEarlierOwnersCommitAuthority(t *testing.T) {
 	old := nodeScans.Swap(&nodeScanService{cluster: cluster})
 	defer nodeScans.Store(old)
 	for _, owner := range []string{first, sender} {
-		_, entries, log := db.persistence.ReplayLog(transactionLogName + "." + strings.TrimPrefix(owner, "memcp://"))
+		_, entries, log := db.persistence.ReplayLog(transactionLogName+"."+strings.TrimPrefix(owner, "memcp://"), false)
 		for range entries {
 		}
 		log.Write(LogEntryCommit{txID: owner})

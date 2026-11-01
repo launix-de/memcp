@@ -361,6 +361,10 @@ func startNodeCluster(secretFile, address, seed, databases string, bootstrap boo
 		cancel()
 		return err
 	}
+	if err := cluster.restoreGlobalContacts(); err != nil {
+		cancel()
+		return err
+	}
 	cluster.members[cluster.self.ID] = cluster.self
 	cluster.publishLocked()
 	service.cluster = cluster // immutable before the HTTP role becomes reachable

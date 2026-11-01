@@ -104,7 +104,11 @@ func (r *replicationManager) applyResourcePacket(source string, packet *mosiPack
 			if packet.State == "S" {
 				requested = mosi.S
 			}
-			rights.Fail(packet.ID, fmt.Errorf(mosi.NetworkError), requested)
+			failure := error(fmt.Errorf(mosi.NetworkError))
+			if packet.Error == errClusterReadBusy.Error() {
+				failure = errClusterReadBusy
+			}
+			rights.Fail(packet.ID, failure, requested)
 		}
 		return nil
 	case "grant":

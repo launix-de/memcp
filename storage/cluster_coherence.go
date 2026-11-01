@@ -11,6 +11,7 @@ warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See
 package storage
 
 import "fmt"
+import "errors"
 import "time"
 import "context"
 import "encoding/json"
@@ -509,7 +510,12 @@ func (cluster *nodeCluster) receive(source string, packet *mosiPacket, connectio
 					state = "M"
 				}
 				if peer := cluster.peer(source); peer != nil {
-					_ = peer.post(mosiPacket{Kind: "failure", ID: copy.ID, Resource: copy.Resource, State: state, Error: err.Error()})
+					_ = peer.post(mosiPacket{Kind: "failure", ID: copy.ID, Resource: copy.Resource, State: state, Error: func() string {
+						if errors.Is(err, errClusterReadBusy) {
+							return errClusterReadBusy.Error()
+						}
+						return err.Error()
+					}()})
 				}
 			}
 		}()
@@ -611,6 +617,11 @@ func (cluster *nodeCluster) installReference(source string, packet mosiPacket) e
 		return fmt.Errorf("missing shared database")
 	}
 	var data []byte
+	if packet.Capture != nil {
+		if err := cluster.installLiveShard(c, packet); err != nil {
+			return err
+		}
+	}
 	if packet.Resource == globalResource {
 		if err := cluster.installGlobal(c, packet); err != nil {
 			return err
@@ -654,7 +665,7 @@ func (cluster *nodeCluster) installReference(source string, packet mosiPacket) e
 		if err := r.installSchema(source, db.Name, db.persistence, data); err != nil {
 			return err
 		}
-	} else {
+	} else if packet.Capture == nil {
 		if err := r.finishImport(source, &replicaImport{header: packet, engine: db.persistence}); err != nil {
 			return err
 		}
@@ -677,7 +688,9 @@ func (cluster *nodeCluster) installReference(source string, packet mosiPacket) e
 	locked = false
 	if expected != nil {
 		expected.finish(nil)
-		return nil
+		if packet.Capture == nil {
+			return nil
+		}
 	}
 	peer := r.peer(source)
 	if peer == nil {

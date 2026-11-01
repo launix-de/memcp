@@ -88,6 +88,23 @@ func (step *replicaStep) finish(err error) { step.once.Do(func() { step.err = er
 // wire adapter must explicitly publish an outer revocation AFTER this call.
 func (r *replicationManager) publishLocal(resource mosiResource, phase mosi.Phase) {
 	c := r.resourceCell(resource)
+	if phase != mosi.M {
+		if capture := c.liveTransfer.Load(); capture != nil {
+			for _, shard := range capture.shards {
+				shard.mu.Lock()
+				if shard.logfile != nil {
+					shard.logfile.Close()
+					shard.logfile = nil
+				}
+				shard.mu.Unlock()
+			}
+		}
+	}
+	if phase == mosi.IO {
+		if copy := c.liveCopy.Swap(nil); copy != nil {
+			copy.release()
+		}
+	}
 	if phase == mosi.IO && resource.Shard != "" {
 		// Cached analytic results must stop being reusable before a remote
 		// writer changes this source. This is publication work, not a scan/read
@@ -97,6 +114,9 @@ func (r *replicationManager) publishLocal(resource mosiResource, phase mosi.Phas
 		}
 	}
 	c.ownstate.Publish(phase)
+	if capture := c.liveTransfer.Load(); capture != nil {
+		capture.releaseMaintenance()
+	}
 }
 
 func (r *replicationManager) localRecord(resource mosiResource, phase mosi.Phase, content string) {
@@ -265,6 +285,25 @@ func (r *replicationManager) prepareResource(resource mosiResource) (content str
 	if r.cluster != nil {
 		c.current.CompareAndSwap(nil, shard)
 		shard.coherence.CompareAndSwap(nil, c)
+	}
+	if r.cluster != nil && (!c.writesDrained() || ((table.PersistencyMode == Memory || table.PersistencyMode == Cache || table.PersistencyMode == Sloppy) && shard.state() != COLD)) {
+		table.maintenanceMu.Lock()
+		transferred := false
+		defer func() {
+			if !transferred {
+				table.maintenanceMu.Unlock()
+			}
+		}()
+		capture, err := r.captureLiveShard(c, shard)
+		if err != nil {
+			return "", err
+		}
+		capture.maintenanceRelease = table.maintenanceMu.Unlock
+		transferred = true
+		if previous := c.liveTransfer.Swap(capture); previous != nil {
+			previous.release()
+		}
+		return shard.uuid.String(), nil
 	}
 	if r.cluster != nil && shard.state() == COLD {
 		// Backend-only authority is current by invariant. There are no local
@@ -1016,6 +1055,20 @@ func (r *replicationManager) step(ctx context.Context, peerID string, packet mos
 
 func (r *replicationManager) transmitResource(ctx context.Context, peerID string, header mosiPacket) error {
 	if r.cluster != nil {
+		cell := r.resourceCell(header.Resource)
+		capture := cell.liveTransfer.Load()
+		if capture != nil {
+			defer func() { cell.liveTransfer.CompareAndSwap(capture, nil); capture.release() }()
+			peer := r.peer(peerID)
+			if peer == nil {
+				return fmt.Errorf(mosi.NetworkError)
+			}
+			ref, err := capture.export(peer)
+			if err != nil {
+				return err
+			}
+			header.Capture = &ref
+		}
 		if header.Resource == globalResource {
 			data := r.resourceCell(globalResource).global.Load()
 			if data == nil {

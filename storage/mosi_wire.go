@@ -117,26 +117,27 @@ func (resource mosiResource) valid() bool {
 // grant/failure/ack complete a state transition. A chunk is independently gzip
 // compressed and bounded, so queues never retain a whole shard or column.
 type mosiPacket struct {
-	From       string          `json:"from,omitempty"` // logical source URI, preserved across neighbour hops
-	To         string          `json:"to,omitempty"`   // logical destination URI, independent of a connection
-	Forwards   []shardForward  `json:"forwards,omitempty"`
-	Kind       string          `json:"kind"`
-	ID         string          `json:"id"`
-	Resource   mosiResource    `json:"resource"`
-	Epoch      uint64          `json:"epoch,omitempty"`
-	State      string          `json:"state,omitempty"`
-	Content    string          `json:"content,omitempty"`
-	Object     string          `json:"object,omitempty"`
-	ObjectKind string          `json:"object_kind,omitempty"`
-	User       string          `json:"user,omitempty"`
-	Hash       string          `json:"hash,omitempty"`
-	Payload    []byte          `json:"payload,omitempty"`
-	Error      string          `json:"error,omitempty"`
-	Owner      string          `json:"owner,omitempty"`
-	Readers    map[string]bool `json:"readers,omitempty"`
-	Sequence   uint64          `json:"sequence,omitempty"`
-	Boot       string          `json:"boot,omitempty"`     // immutable originating cluster incarnation
-	TryRead    bool            `json:"try_read,omitempty"` // decline read acquisition instead of draining an active writer
+	Capture    *scm.ClusterReference `json:"capture,omitempty"`
+	From       string                `json:"from,omitempty"` // logical source URI, preserved across neighbour hops
+	To         string                `json:"to,omitempty"`   // logical destination URI, independent of a connection
+	Forwards   []shardForward        `json:"forwards,omitempty"`
+	Kind       string                `json:"kind"`
+	ID         string                `json:"id"`
+	Resource   mosiResource          `json:"resource"`
+	Epoch      uint64                `json:"epoch,omitempty"`
+	State      string                `json:"state,omitempty"`
+	Content    string                `json:"content,omitempty"`
+	Object     string                `json:"object,omitempty"`
+	ObjectKind string                `json:"object_kind,omitempty"`
+	User       string                `json:"user,omitempty"`
+	Hash       string                `json:"hash,omitempty"`
+	Payload    []byte                `json:"payload,omitempty"`
+	Error      string                `json:"error,omitempty"`
+	Owner      string                `json:"owner,omitempty"`
+	Readers    map[string]bool       `json:"readers,omitempty"`
+	Sequence   uint64                `json:"sequence,omitempty"`
+	Boot       string                `json:"boot,omitempty"`     // immutable originating cluster incarnation
+	TryRead    bool                  `json:"try_read,omitempty"` // decline read acquisition instead of draining an active writer
 }
 
 func (peer *mosiPeer) post(packet mosiPacket) error {

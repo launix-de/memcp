@@ -153,3 +153,90 @@ func TestClusterACIDRecoveryUsesCommonDecisionWithoutOwnerPublication(t *testing
 		t.Fatal("recovery discarded the common committed decision")
 	}
 }
+
+func TestClusterACIDPreparedRebuildRecoversFromCommonDecision(t *testing.T) {
+	for _, rebuildBeforePrepare := range []bool{false, true} {
+		t.Run(fmt.Sprint(rebuildBeforePrepare), func(t *testing.T) {
+			tx, _, source, _ := distributedCommitFixture(t)
+			defer func() { tx.releasePreparation(); tx.rollbackACID() }()
+			var successor *storageShard
+			if rebuildBeforePrepare {
+				successor = source.rebuild(true)
+			}
+			if err := tx.prepareACID(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if !rebuildBeforePrepare {
+				successor = source.rebuild(true)
+			}
+			if successor == source {
+				t.Fatal("fixture did not publish a new physical generation")
+			}
+			recid, exists := source.translateNextRecid(0)
+			if !exists {
+				t.Fatal("private deletion lost its native successor RecID")
+			}
+			if successor.deletions.Get(uint(recid)) {
+				t.Fatal("prepare exposed a deletion before the common decision")
+			}
+			engine := source.t.schema.persistence
+			log := engine.SwapLog(distributedDecisionLog(tx.durableID()), []any{LogEntryCommit{txID: tx.durableID()}}, true)
+			log.Close()
+			// Simulate reopening the newly published UUID without sending the
+			// participant's COMMIT. Its ordinary WAL must carry the prepared intent.
+			recovered := &storageShard{uuid: successor.uuid, t: source.t, columns: make(map[string]ColumnStorage), deltaColumns: make(map[string]int)}
+			recovered.mu.Lock()
+			recovered.load()
+			recovered.mu.Unlock()
+			defer recovered.logfile.Close()
+			if !recovered.deletions.Get(uint(recid)) {
+				t.Fatal("rebuild lost a prepared committed deletion during crash recovery")
+			}
+		})
+	}
+}
+
+func TestClusterPreparedOwnerFinishesRecordedDecisionWithoutCoordinatorCall(t *testing.T) {
+	tx, worker, left, right := distributedCommitFixture(t)
+	if err := worker.prepareACID(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { tx.releasePreparation(); tx.rollbackACID() }()
+	engine := left.t.schema.persistence
+	log := engine.SwapLog(distributedDecisionLog(tx.durableID()), []any{LogEntryCommit{txID: tx.durableID()}}, true)
+	log.Close()
+	complete, err := worker.prepared.completeRecordedDecision(context.Background())
+	if err != nil || !complete {
+		t.Fatalf("recorded owner recovery failed: complete=%v err=%v", complete, err)
+	}
+	if worker.State != TxCommitted || !right.deletions.Get(0) || right.prepared.Load() != nil {
+		t.Fatal("owner retained an unresolved prepared transaction despite the durable commit decision")
+	}
+}
+
+func TestClusterRecordedDecisionRecoveryClearsFrontendRecoveryMarker(t *testing.T) {
+	tx, _, left, right := distributedCommitFixture(t)
+	tx.Session = scm.NewSession()
+	tx.Session.Func()(scm.NewString("transaction"), scm.NewBool(true))
+	remote := tx.participants[right.uuid].remoteObject
+	call := remote.Call
+	failed := false
+	remote.Call = func(ctx context.Context, request scm.ClusterRequest) (scm.Scmer, error) {
+		value, err := call(ctx, request)
+		if request.Method == "commit" && err == nil && !failed {
+			failed = true
+			return scm.NewNil(), fmt.Errorf("lost commit reply")
+		}
+		return value, err
+	}
+	if err := tx.Commit(); !commitOutcomeUnknown(err) {
+		t.Fatalf("fixture did not lose its commit reply: %v", err)
+	}
+	complete, err := tx.prepared.completeRecordedDecision(context.Background())
+	if err != nil || !complete || tx.State != TxCommitted || !left.deletions.Get(0) {
+		t.Fatalf("native coordinator recovery did not finish: %v", err)
+	}
+	if !tx.Session.Func()(scm.NewString("transaction")).IsNil() {
+		t.Fatal("finished durable decision left the frontend stuck in recovery")
+	}
+}

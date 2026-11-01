@@ -13,6 +13,7 @@ import "strconv"
 import "encoding/json"
 import "crypto/sha256"
 import "github.com/launix-de/memcp/storage/mosi"
+import "github.com/google/uuid"
 
 var globalResource = mosiResource{Object: "global"}
 
@@ -22,9 +23,10 @@ const clusterGlobalLog = ".cluster-global-v1"
 // This is ordinary persistent data, not saved MOSI authority. The same native
 // cell/writer/handover implementation used by shards protects this object.
 type clusterGlobalData struct {
-	Version int                      `json:"version"`
-	NextID  uint64                   `json:"next_id"`
-	Peers   map[string]clusterMember `json:"peers"`
+	Version   int                      `json:"version"`
+	Namespace string                   `json:"namespace"`
+	NextID    uint64                   `json:"next_id"`
+	Peers     map[string]clusterMember `json:"peers"`
 }
 
 func (cluster *nodeCluster) globalBackend() PersistenceEngine {
@@ -46,7 +48,7 @@ func decodeGlobal(data []byte) (*clusterGlobalData, error) {
 	if err := json.Unmarshal(data, &value); err != nil {
 		return nil, err
 	}
-	if value.Version != 1 || value.NextID == 0 || len(value.Peers) > clusterRosterLimit {
+	if value.Version != 1 || value.Namespace == "" || value.NextID == 0 || len(value.Peers) > clusterRosterLimit {
 		return nil, fmt.Errorf("invalid global object")
 	}
 	for id, member := range value.Peers {
@@ -63,10 +65,10 @@ func (cluster *nodeCluster) prepareGlobal() (string, error) {
 	cell := cluster.manager.resourceCell(globalResource)
 	value := cell.global.Load()
 	if value == nil {
-		_, entries, log := cluster.globalBackend().ReplayLog(clusterGlobalLog)
-		defer log.Close()
-		value = &clusterGlobalData{Version: 1, NextID: 1, Peers: map[string]clusterMember{}}
+		_, entries, _ := cluster.globalBackend().ReplayLog(clusterGlobalLog, true)
+		value = &clusterGlobalData{Version: 1, Namespace: uuid.NewString(), NextID: 1, Peers: map[string]clusterMember{}}
 		var failure error
+		fresh := true
 		for entry := range entries {
 			commit, ok := entry.(LogEntryCommit)
 			if !ok {
@@ -79,9 +81,18 @@ func (cluster *nodeCluster) prepareGlobal() (string, error) {
 				continue
 			}
 			value = next
+			fresh = false
 		}
 		if failure != nil {
 			return "", failure
+		}
+		if fresh {
+			data, err := json.Marshal(value)
+			if err != nil {
+				return "", err
+			}
+			initialized := cluster.globalBackend().SwapLog(clusterGlobalLog, []any{LogEntryCommit{txID: string(data)}}, true)
+			initialized.Close()
 		}
 		cell.global.CompareAndSwap(nil, value)
 		value = cell.global.Load()
@@ -99,7 +110,75 @@ func (cluster *nodeCluster) installGlobal(cell *replicaCell, packet mosiPacket) 
 	if err != nil {
 		return err
 	}
+	namespace, err := cluster.persistedGlobalNamespace()
+	if err != nil {
+		return err
+	}
+	if value.Namespace != namespace {
+		return fmt.Errorf("global object belongs to a different shared namespace")
+	}
 	cell.global.Store(value)
+	return nil
+}
+
+// Shared filesystems may be mounted under different paths on different peers.
+// Verify the object's durable random namespace, never a peer-local mount path.
+func (cluster *nodeCluster) persistedGlobalNamespace() (string, error) {
+	_, entries, _ := cluster.globalBackend().ReplayLog(clusterGlobalLog, true)
+	var namespace string
+	var failure error
+	for entry := range entries {
+		commit, ok := entry.(LogEntryCommit)
+		if !ok {
+			failure = fmt.Errorf("invalid global namespace entry")
+			continue
+		}
+		value, err := decodeGlobal([]byte(commit.txID))
+		if err != nil {
+			failure = err
+			continue
+		}
+		namespace = value.Namespace
+	}
+	if failure != nil {
+		return "", failure
+	}
+	if namespace == "" {
+		return "", fmt.Errorf("shared backend has no global namespace")
+	}
+	return namespace, nil
+}
+
+// Saved membership supplies contact hints only. Neither a peer incarnation nor
+// any MOSI right survives reboot without fresh authenticated protocol evidence.
+func (cluster *nodeCluster) restoreGlobalContacts() error {
+	_, entries, _ := cluster.globalBackend().ReplayLog(clusterGlobalLog, true)
+	var value *clusterGlobalData
+	var failure error
+	for entry := range entries {
+		commit, ok := entry.(LogEntryCommit)
+		if !ok {
+			failure = fmt.Errorf("invalid global contact entry")
+			continue
+		}
+		next, err := decodeGlobal([]byte(commit.txID))
+		if err != nil {
+			failure = err
+			continue
+		}
+		value = next
+	}
+	if failure != nil {
+		return failure
+	}
+	if value == nil {
+		return nil
+	}
+	for id, member := range value.Peers {
+		if id != cluster.self.ID {
+			cluster.members[id] = member
+		}
+	}
 	return nil
 }
 

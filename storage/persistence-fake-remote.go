@@ -242,12 +242,15 @@ func (s *FakeRemote) SwapLog(shard string, entries []interface{}, durable bool) 
 	s.simulation.transfer(context.Background(), s.logSize(shard), started)
 	return s.log(log)
 }
-func (s *FakeRemote) ReplayLog(shard string) (map[string]struct{}, chan interface{}, PersistenceLogfile) {
+func (s *FakeRemote) ReplayLog(shard string, readOnly bool) (map[string]struct{}, chan interface{}, PersistenceLogfile) {
 	s.simulation.request()
 	// Model one object GET before native bounded replay, retaining its commit
 	// discovery and torn-frame recovery rules without a second log encoding.
 	s.simulation.transfer(context.Background(), s.logSize(shard), time.Now())
-	committed, entries, log := s.FileStorage.ReplayLog(shard)
+	committed, entries, log := s.FileStorage.ReplayLog(shard, readOnly)
+	if log == nil {
+		return committed, entries, nil
+	}
 	return committed, entries, s.log(log)
 }
 

@@ -65,14 +65,18 @@ type storageShardTransaction struct {
 	// Cluster endpoint identity belongs to this native TX/shard participant,
 	// initialized with the existing overlay allocation under tx.mu. It retains
 	// the physical generation, never a second write lock or row-loop counter.
-	clusterShard  *storageShard // immutable physical lifetime owner, including after native commit
-	transaction   *transactionState
-	enlist        sync.Once
-	enlistError   error
-	decisionToken string
-	clusterTxID   string
-	shardUUID     uuid.UUID
-	remoteObject  *scm.ClusterHandle
+	clusterShard     *storageShard // immutable physical lifetime owner, including after native commit
+	transaction      *transactionState
+	enlist           sync.Once
+	enlistError      error
+	decisionToken    string
+	clusterTxID      string
+	shardUUID        uuid.UUID
+	remoteObject     *scm.ClusterHandle
+	readOnly         bool
+	participantOwner string                   // routing hint, never an ownership grant
+	endpoint         *storageShardTransaction // stable native endpoint across physical handover
+	forwarded        atomic.Pointer[storageShardTransaction]
 
 	// cursor-stability undo bitmaps
 	InsertMask  NonLockingReadMap.NonBlockingBitMap
@@ -94,19 +98,47 @@ type storageShardTransaction struct {
 
 // shardSavepoint records the Recids slice lengths for one shard at a savepoint.
 type shardSavepoint struct {
-	InsertLen   int
-	DeletedLen  int
-	DeleteLen   int
-	UndeleteLen int
+	InsertLen      int
+	DeletedLen     int
+	DeleteLen      int
+	UndeleteLen    int
+	RepartitionLen int
 }
 
 // Savepoint captures the state of a transaction at a point in time.
 // Used for nested transactions (trigger recovery, savepoints).
 type Savepoint struct {
-	shardLens            map[*storageShard]shardSavepoint
-	remote               map[string]scm.Scmer
-	Depth                uint32
-	repartitionDeleteLen int
+	shardLens map[*storageShard]shardSavepoint
+	remote    map[string]scm.Scmer
+	Depth     uint32
+}
+
+// Savepoint boundaries follow physical generation identity when a native shard
+// moves between peers. The union contains no executable/physical planner data.
+func (sp Savepoint) physicalLens() map[uuid.UUID]shardSavepoint {
+	result := make(map[uuid.UUID]shardSavepoint)
+	for shard, lens := range sp.shardLens {
+		result[shard.uuid] = lens
+	}
+	for _, view := range sp.remote {
+		for _, row := range view.Slice()[1].Slice() {
+			parts := row.Slice()
+			id, err := uuid.Parse(parts[0].String())
+			if err != nil {
+				panic(err)
+			}
+			result[id] = shardSavepoint{int(parts[1].Int()), int(parts[2].Int()), int(parts[3].Int()), int(parts[4].Int()), int(parts[5].Int())}
+		}
+	}
+	return result
+}
+
+func (sp Savepoint) clusterView() scm.Scmer {
+	rows := make([]scm.Scmer, 0)
+	for id, lens := range sp.physicalLens() {
+		rows = append(rows, scm.NewSlice([]scm.Scmer{scm.NewString(id.String()), scm.NewInt(int64(lens.InsertLen)), scm.NewInt(int64(lens.DeletedLen)), scm.NewInt(int64(lens.DeleteLen)), scm.NewInt(int64(lens.UndeleteLen)), scm.NewInt(int64(lens.RepartitionLen))}))
+	}
+	return scm.NewSlice([]scm.Scmer{scm.NewInt(int64(sp.Depth)), scm.NewSlice(rows)})
 }
 
 type repartitionDeleteAction struct {
@@ -133,6 +165,8 @@ type transactionState struct {
 	clusterNumber         atomic.Uint64
 	coordinator           *scm.ClusterHandle
 	decisionMu            sync.Mutex
+	migrations            int
+	migrationDone         chan struct{}
 	prepared              *acidPreparation
 	decisionStarted       bool
 	commitDecided         bool
@@ -147,7 +181,10 @@ type transactionState struct {
 	Depth                 uint32 // nesting depth for savepoints / triggers
 	walTxID               atomic.Pointer[string]
 	shards                atomic.Pointer[sync.Map]
+	readViews             atomic.Pointer[map[*storageShard]*storageShardTransaction] // immutable S copies
 	participants          map[uuid.UUID]*storageShardTransaction
+	participantEpoch      uint64
+	endpoints             map[uuid.UUID]*storageShardTransaction
 	touchedShards         sync.Map // map[*storageShard]bool
 	autoCommit            bool
 	writeHeld             map[*storageShard]uint32 // reentrant write-lock depth per shard
@@ -504,10 +541,12 @@ func (tx *TxContext) getOrCreateShardTxLocked(shard *storageShard) *storageShard
 	}
 	st := &storageShardTransaction{clusterShard: shard, transaction: tx.transactionState,
 		clusterTxID: tx.ClusterObjectID(), shardUUID: shard.uuid, generation: shard.generation.Load()}
+	tx.bindShardEndpointLocked(st)
 	if st.generation != nil {
 		st.generation.pinTransaction()
 	}
 	shard.beginTransactionUse()
+	shard.overlays.Store(tx.transactionState, st)
 	directory.Store(shard, st)
 	tx.shards.Store(directory)
 	return st
@@ -525,6 +564,7 @@ func (state *transactionState) discardUnenlistedShardLocked(shard *storageShard,
 		return
 	}
 	directory.Delete(shard)
+	shard.overlays.Delete(state)
 	shard.endTransactionUse()
 	if participant.generation != nil {
 		participant.generation.releaseTransaction()
@@ -554,7 +594,15 @@ func (tx *TxContext) finishRepartitionActions(commit bool) {
 }
 
 func (tx *TxContext) releaseActiveTransactionsLocked() {
+	// Break outgoing forwarding leases once every invocation has joined. Native
+	// peer GC can then collect an entire handover chain, including empty actors.
+	for _, endpoint := range tx.endpoints {
+		endpoint.forwarded.Store(nil)
+	}
+	tx.endpoints = nil
+	tx.readViews.Store(nil)
 	for shard, st := range tx.shardTransactions() {
+		shard.overlays.Delete(tx.transactionState)
 		shard.endTransactionUse()
 		if st.generation != nil {
 			st.generation.releaseTransaction()
@@ -568,6 +616,9 @@ func (tx *TxContext) getShardTx(shard *storageShard) *storageShardTransaction {
 		if participant, found := directory.Load(shard); found {
 			return participant.(*storageShardTransaction)
 		}
+	}
+	if views := tx.readViews.Load(); views != nil {
+		return (*views)[shard]
 	}
 	return nil
 }
@@ -793,11 +844,15 @@ func (tx *TxContext) releasedUniqueReservation(shard *storageShard, recid uint32
 
 // CreateSavepoint captures the current transaction state for later rollback.
 func (tx *TxContext) CreateSavepoint() Savepoint {
+	release := tx.lockDecision(context.Background())
+	defer release()
+	return tx.createSavepointLocked()
+}
+func (tx *TxContext) createSavepointLocked() Savepoint {
 	remote := tx.captureRemoteSavepoints()
 	tx.mu.Lock()
 	defer tx.mu.Unlock()
 	sp := Savepoint{Depth: tx.Depth, remote: remote}
-	sp.repartitionDeleteLen = len(tx.repartitionDeletes)
 	tx.Depth++
 	directory := tx.shardTransactions()
 	if len(directory) > 0 {
@@ -812,6 +867,11 @@ func (tx *TxContext) CreateSavepoint() Savepoint {
 			}
 			st.mu.Unlock()
 		}
+	}
+	for _, action := range tx.repartitionDeletes {
+		lens := sp.shardLens[action.shard]
+		lens.RepartitionLen++
+		sp.shardLens[action.shard] = lens
 	}
 	return sp
 }
@@ -828,6 +888,11 @@ func (tx *TxContext) trackedShardSetLocked() map[*storageShard]struct{} {
 
 // RollbackToSavepoint undoes all changes made since the savepoint was created.
 func (tx *TxContext) RollbackToSavepoint(sp Savepoint) {
+	release := tx.lockDecision(context.Background())
+	defer release()
+	tx.rollbackToSavepointLocked(sp)
+}
+func (tx *TxContext) rollbackToSavepointLocked(sp Savepoint) {
 	tx.rollbackRemoteSavepoints(sp)
 	for _, table := range tx.contributionMutationTables() {
 		defer table.endContributionMutation()
@@ -835,12 +900,19 @@ func (tx *TxContext) RollbackToSavepoint(sp Savepoint) {
 	tx.mu.Lock()
 	defer tx.mu.Unlock()
 	tx.Depth = sp.Depth
-	if sp.repartitionDeleteLen < len(tx.repartitionDeletes) {
-		tx.repartitionDeletes = tx.repartitionDeletes[:sp.repartitionDeleteLen]
+	saved := sp.physicalLens()
+	counts := make(map[uuid.UUID]int)
+	kept := tx.repartitionDeletes[:0]
+	for _, action := range tx.repartitionDeletes {
+		counts[action.shard.uuid]++
+		if counts[action.shard.uuid] <= saved[action.shard.uuid].RepartitionLen {
+			kept = append(kept, action)
+		}
 	}
+	tx.repartitionDeletes = kept
 	trackedShards := tx.trackedShardSetLocked()
 	for shard, st := range tx.shardTransactions() {
-		lens := sp.shardLens[shard] // zero value (all zeros) if shard is new since savepoint
+		lens := saved[shard.uuid] // New physical generations have an empty journal boundary.
 		st.mu.Lock()
 		switch tx.Mode {
 		case TxCursorStability:
@@ -906,11 +978,13 @@ func (tx *TxContext) RollbackToSavepoint(sp Savepoint) {
 
 // Commit finalizes the transaction.
 func (tx *TxContext) Commit() error {
-	if tx.Mode == TxACID && len(tx.remoteParticipantOwners()) != 0 {
-		return tx.commitDistributedACID()
-	}
-	if err := tx.finishRemoteParticipants("commit"); err != nil {
-		return err
+	release := tx.lockDecision(context.Background())
+	defer release()
+	return tx.commitLocked()
+}
+func (tx *TxContext) commitLocked() error {
+	if tx.State == TxCommitted {
+		return nil
 	}
 	tables := tx.contributionMutationTables()
 	for _, table := range tables {
@@ -926,6 +1000,16 @@ func (tx *TxContext) Commit() error {
 			}
 		}
 	}()
+	if tx.Mode == TxACID && len(tx.remoteParticipantOwners()) != 0 {
+		if tx.coordinator == nil {
+			return tx.commitDistributedACID()
+		}
+	}
+	if err := tx.finishRemoteParticipants("commit"); err != nil {
+		return err
+	}
+	releaseRights := tx.claimDecisionRights()
+	defer releaseRights()
 	switch tx.Mode {
 	case TxCursorStability:
 		tx.mu.Lock()
@@ -1140,16 +1224,21 @@ func (tx *TxContext) finishCursorStabilityCommit() {
 
 // Rollback undoes the transaction.
 func (tx *TxContext) Rollback() {
+	release := tx.lockDecision(context.Background())
+	defer release()
+	tx.rollbackLocked()
+}
+func (tx *TxContext) rollbackLocked() {
 	if tx.decisionStarted {
 		panic("transaction commit outcome is unknown; retry COMMIT")
 	}
 	defer tx.releasePreparation()
-	remoteError := tx.finishRemoteParticipants("rollback")
-	defer func() {
-		if remoteError != nil {
-			panic(remoteError)
-		}
-	}()
+	tx.releasePreparation()
+	if err := tx.finishRemoteParticipants("rollback"); err != nil {
+		panic(err)
+	}
+	releaseRights := tx.claimDecisionRights()
+	defer releaseRights()
 	for _, table := range tx.contributionMutationTables() {
 		defer table.endContributionMutation()
 	}
@@ -1340,6 +1429,9 @@ func runAutocommitStatement(tx *TxContext, session scm.Scmer, recovery bool, fn 
 	}
 
 	if err := tx.Commit(); err != nil {
+		if tx.decisionStarted && tx.State == TxActive {
+			sessionFn(scm.NewString("transaction"), scm.NewBool(true))
+		}
 		panic("autocommit failed: " + err.Error())
 	}
 	return result

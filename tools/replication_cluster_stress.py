@@ -1677,6 +1677,66 @@ def run_cluster_sql_contexts(nodes, reference, journal, report_path, status=None
             final = expected if completed and outcome == "COMMIT" else base
             scalar(coordinator, f"SELECT SUM({'v0' if distributed else 'n'}) AS total FROM {table}", final)
 
+    def migrating_overlay(outcome, stop_previous=False, single=False):
+        if not status:
+            return
+        host = writer
+        session = "cluster-live-mosi-overlay"
+        host.client.scm(f'(createcolumn (table "{DATABASE}" false "context_items" false) "n" "INT" (list) (list))')
+        sql(host, "START ACID TRANSACTION", session)
+        stopped = None
+        try:
+            sql(host, "UPDATE context_items SET n=n+5 WHERE id=0", session)
+            if not single:
+                sql(host, "DELETE FROM context_items WHERE id=2", session)
+                sql(host, "INSERT INTO context_items VALUES(8,90)", session)
+            expected = 365 if single else 425
+            scalar(host, "SELECT SUM(n) AS total FROM context_items", expected, session)
+            targets = [nodes[0], nodes[3], nodes[2]] if stop_previous or single else [node for node in nodes if node is not host] + [host]
+            for target in targets:
+                target.client.scm(f'(replication_reclaim "{DATABASE}")')
+                ownership = json.loads(target.client.scm("(cluster_status true)"))
+                if isinstance(ownership, str):
+                    ownership = json.loads(ownership)
+                local_id = ownership["state"]["self"]["id"]
+                owned = [record for record in ownership["resources"]["records"].values()
+                         if record.get("resource", {}).get("table") == "context_items"
+                         and record.get("resource", {}).get("shard")]
+                expect(len(owned) >= 4 and all(record.get("owner") == local_id
+                       and record.get("state") == "M" for record in owned), True,
+                       "live handover moved all native shard rights to target")
+                scalar(host, "SELECT SUM(n) AS total FROM context_items", expected, session)
+                scalar(target, "SELECT SUM(n) AS total FROM context_items", 360,
+                       session="cluster-live-observer")
+            if stop_previous:
+                victim = nodes[3]
+                ownership = json.loads(victim.client.scm("(cluster_status true)"))
+                if isinstance(ownership, str):
+                    ownership = json.loads(ownership)
+                current["former_owner_resources"] = ownership["resources"]
+                expect(any(record.get("state") in ("M", "O", "S")
+                           for record in ownership["resources"]["records"].values()), False,
+                       "failed former owner holds no remaining MOSI permission")
+                victim.kill()
+                stopped = victim
+            sql(host, outcome, session)
+            scalar(host, "SELECT SUM(n) AS total FROM context_items", expected if outcome == "COMMIT" else 360)
+            if outcome == "COMMIT":
+                sql(host, "DELETE FROM context_items")
+                sql(host, "INSERT INTO context_items VALUES(0,10),(1,20),(2,30),(3,40),(4,50),(5,60),(6,70),(7,80)")
+        finally:
+            try:
+                sql(host, "ROLLBACK", session)
+            finally:
+                if stopped is not None:
+                    stopped.start()
+                    eventually(lambda: status(stopped)["state"]["connected"] >= len(nodes) - 1,
+                               "former owner did not rejoin after decision", timeout=60)
+
+    case("acid-overlay-live-mosi-rollback", lambda: migrating_overlay("ROLLBACK"))
+    case("acid-overlay-live-mosi-commit", lambda: migrating_overlay("COMMIT"))
+    case("acid-commit-after-empty-owner-failure", lambda: migrating_overlay("COMMIT", True))
+    case("acid-single-shard-commit-after-mosi-handover", lambda: migrating_overlay("COMMIT", single=True))
     case("literal-capture", lambda: scalar(coordinator,
          "SELECT SUM(41 + v0) AS total FROM big_items", total + 41 * count, remote=True))
     case("named-session-plain-sum", lambda: scalar(coordinator,
