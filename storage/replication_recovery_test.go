@@ -589,6 +589,23 @@ func TestReplicationAcknowledgementMatchesHandover(t *testing.T) {
 	}
 }
 
+func TestReplicationRecallTransferRequiresUserProof(t *testing.T) {
+	// Knowing a recalled replica's identity must not replace authentication.
+	r := replicaRecoveryFixture()
+	resource := mosiResource{Database: "tenant"}
+	peer := &mosiPeer{outgoing: make(chan mosiMessage, 8), done: make(chan struct{})}
+	r.peers = map[string]*mosiPeer{"slave": peer}
+	step := &replicaStep{peer: "slave", resource: resource, epoch: 9, content: "current", done: make(chan struct{})}
+	r.steps.Store("handover", step)
+	packet := mosiPacket{Kind: "begin", ID: "handover", Resource: resource, Epoch: 9, Content: "current"}
+	if err := r.receivePacket("slave", &packet); err == nil {
+		t.Fatal("unauthenticated recall transfer accepted")
+	}
+	if _, exists := r.imports.Load("slave/handover"); exists {
+		t.Fatal("unauthenticated recall transfer started an import")
+	}
+}
+
 func TestReplicationStaleGrantFailsPendingFlight(t *testing.T) {
 	r := replicaRecoveryFixture()
 	resource := mosiResource{Database: "tenant"}

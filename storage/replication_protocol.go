@@ -283,15 +283,17 @@ func (r *replicationManager) receivePacket(source string, packet *mosiPacket) er
 	}
 	// Client packets must not create permanent coherence cells before admission.
 	// Follow-up packets can only address resources already admitted by an
-	// authenticated request or a locally initiated handover.
+	// authenticated request or a locally initiated handover. A transfer is a
+	// write: the replica identity alone proves no access right, even when it
+	// answers a recall.
 	if r.master && r.cluster == nil && source != r.id {
 		switch packet.Kind {
-		case "read", "write":
+		case "read", "write", "begin":
 			if err := r.authorizePacket(*packet); err != nil {
 				return err
 			}
-		case "begin", "object", "chunk", "object_end", "end", "failure", "ack":
-			if r.lookupCell(packet.Resource) == nil {
+		case "object", "chunk", "object_end", "end", "failure", "ack":
+			if r.lookupCell(packet.Resource) == nil && !r.expectedStep(source, *packet) {
 				return fmt.Errorf("unknown replication resource")
 			}
 		default:
@@ -301,6 +303,11 @@ func (r *replicationManager) receivePacket(source string, packet *mosiPacket) er
 	object := r.resourceCell(packet.Resource)
 	_, err := object.HandleClusterRequest(context.Background(), scm.ClusterRequest{Method: "packet", Payload: replicaPacketInvocation{source, packet}})
 	return err
+}
+
+func (r *replicationManager) expectedStep(source string, packet mosiPacket) bool {
+	value, exists := r.steps.Load(packet.ID)
+	return exists && value.(*replicaStep).matches(source, packet)
 }
 
 type replicaPacketInvocation struct {

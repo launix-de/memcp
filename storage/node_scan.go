@@ -184,16 +184,6 @@ func (service *nodeScanService) forget(peer *mosiPeer) {
 	service.mu.Unlock()
 }
 func (service *nodeScanService) accept(w http.ResponseWriter, req *http.Request) {
-	registry := service.objectRegistry()
-	registry.mu.Lock()
-	if registry.endpoint == "" {
-		scheme := "http"
-		if req.TLS != nil {
-			scheme = "https"
-		}
-		registry.endpoint = scheme + "://" + req.Host + req.URL.Path
-	}
-	registry.mu.Unlock()
 	if !service.beginConnection() {
 		http.Error(w, "node stopping", http.StatusServiceUnavailable)
 		return
@@ -234,6 +224,18 @@ func (service *nodeScanService) accept(w http.ResponseWriter, req *http.Request)
 		conn.Close()
 		return
 	}
+	// Only an authenticated peer may name this node's object endpoint; an
+	// arbitrary Host header would redirect peers into a relayable handshake.
+	registry := service.objectRegistry()
+	registry.mu.Lock()
+	if registry.endpoint == "" {
+		scheme := "http"
+		if req.TLS != nil {
+			scheme = "https"
+		}
+		registry.endpoint = scheme + "://" + req.Host + req.URL.Path
+	}
+	registry.mu.Unlock()
 	remoteID := remote.Node
 	session := newScanRPCSession()
 	session.service, session.remoteID = service, remoteID
