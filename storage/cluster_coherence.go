@@ -207,7 +207,15 @@ func (cluster *nodeCluster) locate(ctx context.Context, resource mosiResource) (
 		actual := answer.State == "M" || answer.State == "O"
 		if actual {
 			if authoritative && owner != link.member.ID {
-				return "", fmt.Errorf("conflicting cluster owners")
+				// Replies are sampled sequentially. A handover can advance the
+				// owner between samples; the larger epoch supplies the current
+				// route. Two owners at one epoch remain a protocol conflict.
+				if answer.Epoch == epoch {
+					return "", fmt.Errorf("conflicting cluster owners")
+				}
+				if answer.Epoch < epoch {
+					continue
+				}
 			}
 			owner, epoch, authoritative = link.member.ID, answer.Epoch, true
 		} else if !authoritative && answer.Owner != "" && answer.Epoch >= epoch {

@@ -1076,3 +1076,62 @@ func TestClusterRemoteMutationRedirectsBeforeRecallingParticipant(t *testing.T) 
 		t.Fatalf("stale task recalled participant rights or executed callbacks: %v, executed=%v", err, executed)
 	}
 }
+
+// Discovery is a sequence of live samples, not one distributed snapshot. A
+// handover between replies may legitimately expose both owners at successive
+// epochs; only two distinct owners at the same epoch conflict.
+func TestClusterDiscoveryFollowsOwnerEpochAcrossReplies(t *testing.T) {
+	for _, epochs := range [][2]uint64{{7, 8}, {8, 7}, {8, 8}} {
+		t.Run(fmt.Sprint(epochs), func(t *testing.T) {
+			cluster := &nodeCluster{self: clusterMember{ID: "memcp://" + uuid.NewString()}, service: &nodeScanService{}}
+			cluster.initializeManager()
+			resource := mosiResource{Database: "discovery_epoch"}
+			cell := cluster.manager.resourceCell(resource)
+			cell.ownstate.Initialize(mosi.IO)
+			members := []clusterMember{cluster.self}
+			var links []*clusterLink
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			for _, epoch := range epochs {
+				member := clusterMember{ID: "memcp://" + uuid.NewString()}
+				peer := &mosiPeer{done: make(chan struct{}), outgoing: make(chan mosiMessage, 1)}
+				members = append(members, member)
+				links = append(links, &clusterLink{member: member, peer: peer})
+				go func(epoch uint64) {
+					select {
+					case message := <-peer.outgoing:
+						var request struct {
+							Return string `json:"return"`
+						}
+						if err := json.Unmarshal(message.Data, &request); err != nil {
+							return
+						}
+						answer := replicaRecord{Resource: resource, State: "M", Owner: member.ID, Epoch: epoch}
+						if value, ok := cluster.service.returns.Load(request.Return); ok {
+							deliverTestCompletion(t, value, scanCompletion{Data: mustScanJSON(answer)})
+						}
+					case <-ctx.Done():
+					}
+				}(epoch)
+			}
+			cluster.view.Store(&clusterView{members: members, links: links})
+			owner, err := cluster.locate(ctx, resource)
+			if epochs[0] == epochs[1] {
+				if err == nil {
+					t.Fatal("accepted conflicting owners at one epoch")
+				}
+			} else {
+				want := members[1].ID
+				if epochs[1] > epochs[0] {
+					want = members[2].ID
+				}
+				if err != nil || owner != want {
+					t.Fatalf("owner=%s error=%v, want %s", owner, err, want)
+				}
+			}
+			if cell.ownstate.Phase() != mosi.IO {
+				t.Fatal("discovery granted local rights")
+			}
+		})
+	}
+}
