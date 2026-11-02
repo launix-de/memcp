@@ -16,10 +16,11 @@ Copyright (C) 2026  Carl-Philip Hänsch
 */
 package storage
 
-import "encoding/json"
 import "fmt"
-import "strings"
 import "unsafe"
+import "context"
+import "strings"
+import "encoding/json"
 
 import "github.com/launix-de/memcp/scm"
 
@@ -111,6 +112,36 @@ func (b *scanBoundaryBox) MapColumns() []string                { return b.mapCol
 func (b *scanBoundaryBox) Order() func(...scm.Scmer) scm.Scmer { return b.order }
 func (b *scanBoundaryBox) OrderMetadata() string               { return b.orderMetadata }
 func (b *scanBoundaryBox) Mandatory() bool                     { return b.mandatory }
+
+func (*scanBoundaryBox) ClusterObjectType() string { return "scan-boundary" }
+func (*scanBoundaryBox) HandleClusterRequest(context.Context, scm.ClusterRequest) (any, error) {
+	return nil, fmt.Errorf("immutable scan boundaries use portable constructors")
+}
+
+// Boundaries are immutable plan values. Reconstruct them once on the worker;
+// adjacent invocation values and native reader/transaction rights stay separate.
+func (boundary *scanBoundaryBox) Serialize(*scm.SerializationContext) (scm.Scmer, error) {
+	order := scm.NewNil()
+	if boundary.order != nil {
+		var err error
+		order, err = scanDirectionExpression(boundary.order)
+		if err != nil {
+			return scm.NewNil(), err
+		}
+	}
+	columns := make([]scm.Scmer, len(boundary.mapColumns))
+	for i, column := range boundary.mapColumns {
+		columns[i] = scm.NewString(column)
+	}
+	return scm.NewSlice([]scm.Scmer{scm.NewSymbol("scan_boundary"),
+		scm.NewString(boundary.analyzer.Kind()), scm.NewString(boundary.column),
+		scm.NewInt(int64(boundary.lowerSlot)), scm.NewInt(int64(boundary.upperSlot)),
+		scm.NewBool(boundary.lowerInclusive), scm.NewBool(boundary.upperInclusive),
+		scm.NewString(boundary.collation), scm.NewBool(boundary.nullSafe),
+		scm.NewInt(int64(boundary.mapperSlot)), scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), scm.NewSlice(columns)}),
+		order, scm.NewString(boundary.orderMetadata), scm.NewBool(boundary.mandatory),
+	}), nil
+}
 
 func NewScanBoundaryScmer(boundary ScanBoundary) scm.Scmer {
 	if boundary == nil || boundary.Analyzer() == nil {
@@ -274,6 +305,9 @@ func scanBoundaryJSONDecode(value any) unsafe.Pointer {
 }
 
 func registerScanBoundaryFormats() {
+	scm.RegisterClusterValueExtractor(TagScanBoundary, func(value scm.Scmer) scm.ClusterObject {
+		return (*scanBoundaryBox)(value.Custom(TagScanBoundary))
+	})
 	scm.CustomStringer[TagScanBoundary] = scanBoundaryString
 	scm.CustomJSONCodecs[TagScanBoundary] = scm.CustomJSONCodec{
 		Encode: scanBoundaryJSONEncode,

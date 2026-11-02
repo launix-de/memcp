@@ -166,6 +166,63 @@ func TestScanBoundarySurvivesPersistedProcedureRoundTrip(t *testing.T) {
 	}
 }
 
+func TestScanBoundaryProcedureWireRoundTrip(t *testing.T) {
+	Init(scm.Globalenv)
+	for _, name := range []string{"unordered", "collation", "declared"} {
+		t.Run(name, func(t *testing.T) {
+			var order func(...scm.Scmer) scm.Scmer
+			metadata := ""
+			switch name {
+			case "collation":
+				order = serialTestCallable(scm.Apply(scm.Globalenv.Vars[scm.Symbol("collate")], scm.NewString("utf8mb4"), scm.NewBool(true)))
+				metadata = "utf8mb4:desc"
+			case "declared":
+				order = scanJoinKeyLess
+				metadata = orderRelationMeta(order)
+			}
+			boundary := newScanBoundarySpec("tenant", RangeMatcher, -2, -3, false, true,
+				"utf8mb4_general_ci", true, 2, []string{"document", "tenant"}, order, metadata, true)
+			proc := scm.NewProcStruct(scm.Proc{Params: scm.NewSlice(nil), En: &scm.Globalenv,
+				Body: scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), scm.NewSlice([]scm.Scmer{boundary, boundary})})})
+			encoded, err := scm.MarshalProcedure(proc)
+			if err != nil {
+				t.Fatal(err)
+			}
+			restored, err := scm.UnmarshalProcedure(encoded)
+			if err != nil {
+				t.Fatalf("%v; wire=%s", err, encoded)
+			}
+			values := scm.Apply(restored).Slice()
+			if len(values) != 2 || !values[0].IsCustom(TagScanBoundary) || values[0].Custom(TagScanBoundary) != values[1].Custom(TagScanBoundary) {
+				t.Fatal("boundary type or capture alias lost", values)
+			}
+			got := ScanBoundaryFromScmer(values[0])
+			if got.Analyzer() != RangeMatcher || got.ColumnName() != "tenant" || got.LowerSlot() != -2 || got.UpperSlot() != -3 ||
+				got.LowerInclusive() || !got.UpperInclusive() || got.Collation() != "utf8mb4_general_ci" || !got.NullSafe() ||
+				got.MapperSlot() != 2 || fmt.Sprint(got.MapColumns()) != "[document tenant]" || !got.Mandatory() || got.OrderMetadata() != metadata {
+				t.Fatalf("boundary properties changed: %#v", got)
+			}
+			if (got.Order() == nil) != (order == nil) {
+				t.Fatal("order relation presence changed")
+			}
+			if order != nil && got.Order()(scm.NewString("a"), scm.NewString("b")).Bool() != order(scm.NewString("a"), scm.NewString("b")).Bool() {
+				t.Fatal("order relation changed")
+			}
+		})
+	}
+}
+
+func TestScanBoundaryProcedureWireRejectsNonportableOrder(t *testing.T) {
+	Init(scm.Globalenv)
+	offset := int64(1)
+	order := func(values ...scm.Scmer) scm.Scmer { return scm.NewBool(values[0].Int()+offset < values[1].Int()) }
+	boundary := newScanBoundarySpec("id", EqualMatcher, 0, 0, true, true, "", false, -1, nil, order, "private order", false)
+	proc := scm.NewProcStruct(scm.Proc{Params: scm.NewSlice(nil), En: &scm.Globalenv, Body: boundary})
+	if _, err := scm.MarshalProcedure(proc); err == nil {
+		t.Fatal("process-local order relation crossed the wire")
+	}
+}
+
 func TestScanAccessValuesExprCachesConstantsAndBindsDynamicValues(t *testing.T) {
 	static := scanAccessValuesExpr([]scm.Scmer{scm.NewString("ready"), scm.NewInt(7)})
 	staticItems, ok := scmerSlice(static)

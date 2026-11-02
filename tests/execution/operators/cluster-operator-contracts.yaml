@@ -153,6 +153,28 @@ test_cases:
     cluster:
       min_remote_shards: 1
 
+# The worker's outer MapReducer contains the inner scan's cached access schema.
+# Those immutable boundaries must reconstruct through the ordinary serializer.
+- name: correlated-sum-remote-inner
+  sql: SELECT k.id,(SELECT SUM(b.v0) FROM big_items b WHERE b.id=k.id) AS value FROM operator_keys k
+  compare_reference_order: false
+  timing_samples: 11
+  timing_aggregation: total
+  warmup: 0
+  expect:
+    rows: 4
+    cluster:
+      min_remote_shards: 1
+      plan_contains: [scan]
+- name: correlated-sum-empty-inner
+  sql: SELECT k.id,(SELECT SUM(b.v0) FROM big_items b WHERE b.id=k.id AND b.id<0) AS value FROM operator_keys k
+  compare_reference_order: false
+  expect:
+    rows: 4
+    data: [{value: null}, {value: null}, {value: null}, {value: null}]
+    cluster:
+      min_remote_shards: 1
+
 - name: prepare-first-remote-lookup
   # The carrier is created by this coordinator. The immutable fixture's
   # operator_keys may itself be placed remotely, where createcolumn and UPDATE

@@ -933,17 +933,28 @@ func Init(en scm.Env) {
 	scm.Declare(&en, &scm.Declaration{
 		Name: "scan_boundary",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
-			if len(a) != 8 && len(a) != 10 {
-				panic("scan_boundary expects kind, column, lower slot, upper slot, inclusiveness, collation, and null-safety")
+			// Stored Scheme definitions retain the eight/ten-field constructors.
+			// Network captures use all fields, including ordering and mandatory.
+			if len(a) != 8 && len(a) != 10 && len(a) != 13 {
+				panic("scan_boundary expects 8, 10 or 13 fields")
 			}
 			mapperSlot := -1
 			var mapColumns []string
-			if len(a) == 10 {
+			if len(a) >= 10 {
 				mapperSlot = scm.ToInt(a[8])
 				mapColumns = scmerSliceToStrings(a[9].Slice())
 			}
+			var order func(...scm.Scmer) scm.Scmer
+			metadata := ""
+			mandatory := false
+			if len(a) == 13 {
+				if !a[10].IsNil() {
+					order = a[10].Func()
+				}
+				metadata, mandatory = a[11].String(), a[12].Bool()
+			}
 			return newScanBoundarySpec(scm.String(a[1]), scanBoundaryAnalyzer(scm.String(a[0])), scm.ToInt(a[2]), scm.ToInt(a[3]),
-				a[4].Bool(), a[5].Bool(), scm.String(a[6]), a[7].Bool(), mapperSlot, mapColumns, nil, "", false)
+				a[4].Bool(), a[5].Bool(), scm.String(a[6]), a[7].Bool(), mapperSlot, mapColumns, order, metadata, mandatory)
 		},
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "construct an immutable physical scan boundary for a cached access schema",
 			Params: []*scm.TypeDescriptor{
@@ -952,6 +963,8 @@ func Init(en scm.Env) {
 				{Kind: "bool", Label: "lower_inclusive"}, {Kind: "bool", Label: "upper_inclusive"},
 				{Kind: "string", Label: "collation"}, {Kind: "bool", Label: "null_safe"},
 				{Kind: "number", Label: "mapper_slot", Optional: true}, {Kind: "list", Label: "map_columns", Optional: true},
+				{Kind: "func", Label: "order", Optional: true}, {Kind: "string", Label: "order_metadata", Optional: true},
+				{Kind: "bool", Label: "mandatory", Optional: true},
 			}, Return: &scm.TypeDescriptor{Kind: "any", Label: "boundary"}},
 	})
 
