@@ -39,7 +39,8 @@ jobs:
     name: jit-performance-ab (${{ matrix.shard }}/7)
     needs: changes
     if: ${{ needs.changes.outputs.relevant == 'true' }}
-    runs-on: ubuntu-latest
+    # setup-php requires the packaged CLI IMAP extension available on Noble.
+    runs-on: ubuntu-24.04
     # Complete seven-pair verification repeats fixture setup and startup. The
     # job also owns the build prelude and up to ten minutes of diagnosis;
     # neither allowance changes a query limit or a performance verdict.

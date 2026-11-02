@@ -100,7 +100,8 @@ jobs:
   packaging:
     needs: [changes, test]
     if: ${{ needs.changes.outputs.relevant == 'true' }}
-    runs-on: ubuntu-latest
+    # setup-php requires the packaged CLI IMAP extension available on Noble.
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Check out source
