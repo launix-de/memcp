@@ -33,6 +33,7 @@ func (tx *TxContext) lockDecision(ctx context.Context, write bool) func() {
 	for {
 		var releaseRights func()
 		var protected map[*storageShard]*storageShardTransaction
+		complete := true
 		if write {
 			tx.mu.Lock()
 			protected = tx.shardTransactions()
@@ -41,7 +42,7 @@ func (tx *TxContext) lockDecision(ctx context.Context, write bool) func() {
 			for shard := range protected {
 				shards = append(shards, shard)
 			}
-			releaseRights = tx.claimDecisionRights(shards)
+			releaseRights, complete = tx.claimDecisionRights(shards)
 		}
 		tx.decisionMu.Lock()
 		if tx.migrations != 0 {
@@ -62,7 +63,6 @@ func (tx *TxContext) lockDecision(ctx context.Context, write bool) func() {
 		// decision lock, rather than acquiring a late M under that lock.
 		if write {
 			tx.mu.Lock()
-			complete := true
 			for shard, overlay := range tx.shardTransactions() {
 				complete = complete && protected[shard] == overlay
 			}
@@ -180,7 +180,7 @@ func (st *storageShardTransaction) waitAuthority(ctx context.Context) error {
 }
 
 // Decision publication and undo acquire native write rights once per shard.
-func (tx *TxContext) claimDecisionRights(shards []*storageShard) func() {
+func (tx *TxContext) claimDecisionRights(shards []*storageShard) (func(), bool) {
 	sort.Slice(shards, func(i, j int) bool { return shards[i].uuid.String() < shards[j].uuid.String() })
 	var releases []func()
 	complete := false
@@ -197,11 +197,26 @@ func (tx *TxContext) claimDecisionRights(shards []*storageShard) func() {
 	for _, shard := range shards {
 		if r := activeReplication(shard.t.schema); r != nil && validReplicaDatabase(shard.t.schema.Name) && !shard.t.isEphemeralQueryTable() {
 			cell := r.shardCell(shard)
-			_, done := r.writeResource(*cell.resource.Load(), tx)
-			releases = append(releases, done)
+			if r.cluster != nil {
+				writer, _ := cell.ownstate.TryWrite(tx.transactionState, cell.transactionContinues(tx))
+				if writer == nil {
+					// Never wait for another shard while retaining a partial set of
+					// writers. Native UUIDs can change during a handover/rebuild;
+					// sorting a stale generation directory cannot prevent that cycle.
+					release()
+					releases = nil
+					_, done := r.writeResource(*cell.resource.Load(), tx)
+					done()
+					return func() {}, false
+				}
+				releases = append(releases, writer.Release)
+			} else {
+				_, done := r.writeResource(*cell.resource.Load(), tx)
+				releases = append(releases, done)
+			}
 		}
 		shard.ensureMutationLog()
 	}
 	complete = true
-	return release
+	return release, true
 }

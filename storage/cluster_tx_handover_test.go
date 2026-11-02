@@ -170,7 +170,15 @@ func TestClusterDecisionAcquiresWriteBeforeClosingMigration(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			tbl, _ := createDurabilityTestTable(t, "t_decision_acquisition", 2)
 			shard := tbl.ActiveShards()[0]
+			earlier := NewShard(tbl)
+			access := earlier.GetWrite(nil)
+			earlier.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(42)}}, false, nil, nil, false, nil)
+			access.Release()
+			if earlier.uuid.String() > shard.uuid.String() {
+				earlier, shard = shard, earlier
+			}
 			tx := NewTxContext(TxACID)
+			tx.AddToDeleteMask(earlier, 0)
 			tx.AddToDeleteMask(shard, 0)
 			cluster := globalTestCluster(t, tbl.schema.Name)
 			ctx, cancel := context.WithCancel(context.Background())
@@ -186,6 +194,9 @@ func TestClusterDecisionAcquiresWriteBeforeClosingMigration(t *testing.T) {
 			defer nodeScans.Store(previousService)
 			r := cluster.manager
 			r.resourceCell(mosiResource{Database: tbl.schema.Name}).ownstate.Initialize(mosi.M)
+			first := r.shardCell(earlier)
+			first.current.Store(earlier)
+			first.ownstate.Initialize(mosi.M)
 			cell := r.shardCell(shard)
 			cell.current.Store(shard)
 			cell.ownstate.Initialize(mosi.S)
@@ -207,6 +218,9 @@ func TestClusterDecisionAcquiresWriteBeforeClosingMigration(t *testing.T) {
 			case <-peer.outgoing:
 			case <-time.After(5 * time.Second):
 				t.Fatal("decision did not request native M")
+			}
+			if first.ownstate.Writing() {
+				t.Error("decision retained an earlier writer while waiting for a remote M")
 			}
 			releaseMigration, migrationErr := tx.beginMigration()
 			pending := cell.ownstate.Snapshot().Flight()
@@ -235,7 +249,7 @@ func TestClusterDecisionAcquiresWriteBeforeClosingMigration(t *testing.T) {
 			case <-time.After(5 * time.Second):
 				t.Fatal("decision did not finish after M grant and migration")
 			}
-			if shard.deletions.Get(0) != commit {
+			if shard.deletions.Get(0) != commit || earlier.deletions.Get(0) != commit {
 				t.Fatal("decision lost the native transaction effect")
 			}
 		})
