@@ -25,16 +25,16 @@ func TestClusterShardRAMUsesMeasuredLedgerAndFraction(t *testing.T) {
 	cache.Init(10<<20, 10<<20, 0)
 	defer cache.Stop()
 	cache.SetShardRAMPercent(50)
-	if !cache.canLoadClusterShard() {
+	if !cache.canLoadClusterShard(nil) {
 		t.Fatal("empty ledger rejected")
 	}
 	// A pinned native object cannot be evicted to manufacture admission.
 	cache.AddItem(new(int), 5<<20, TypeShard, func(any, *[numEvictableTypes]int64) bool { return false }, func(any) time.Time { return time.Now() }, nil)
-	if cache.canLoadClusterShard() {
+	if cache.canLoadClusterShard(nil) {
 		t.Fatal("admitted a cold shard at the 50% boundary")
 	}
 	cache.SetShardRAMPercent(60)
-	if !cache.canLoadClusterShard() {
+	if !cache.canLoadClusterShard(nil) {
 		t.Fatal("runtime fraction change was ignored")
 	}
 	stat := cache.Stat()
@@ -47,6 +47,60 @@ func TestClusterWarmScanDoesNotReadBackendOrReserveRAM(t *testing.T) {
 	shard.setState(SHARED)
 	// No table/backend, peers or budget actor exist. A warm decision needs none.
 	(&nodeCluster{}).prepareLocalScan(shard, nil)
+}
+
+func TestClusterColdSubscanUsesLocalCapacityBeforeOwnerRouting(t *testing.T) {
+	previous := GlobalCache.shardCapacity.Swap(&shardRAMSnapshot{Allowed: true})
+	defer GlobalCache.shardCapacity.Store(previous)
+	shard := &storageShard{t: &table{}}
+	shard.setState(COLD)
+	// No owner directory, schema or connection exists. A cold subscan with
+	// available RAM must proceed to native local acquisition without routing.
+	(&nodeCluster{}).prepareLocalScan(shard, nil)
+}
+
+func TestClusterTableShardRAMLeavesRoomForInnerScans(t *testing.T) {
+	var cache CacheManager
+	cache.Init(30<<20, 30<<20, 0)
+	defer cache.Stop()
+	tables := []*table{{}, {}, {}}
+	for _, tbl := range tables {
+		item := newSoftItem(new(int), 5<<20, TypeShard,
+			func(any, *[numEvictableTypes]int64) bool { return false }, func(any) time.Time { return time.Now() }, nil, 0, 0)
+		item.shardTable = tbl
+		cache.opChan <- cacheOp{add: item}
+		cache.Stat()
+		if cache.canLoadClusterShard(tbl) {
+			t.Fatal("table exceeded one third of the shard budget")
+		}
+		for _, other := range tables {
+			if other != tbl && !other.shardRAMFull.Load() && !cache.canLoadClusterShard(other) && cache.Stat().ShardMemory < 15<<20 {
+				t.Fatal("outer table consumed the inner table's admission share")
+			}
+		}
+	}
+	if cache.canLoadClusterShard(nil) {
+		t.Fatal("three pinned tables exceeded the total shard budget")
+	}
+}
+
+func TestClusterAdmissionPublicationIgnoresCacheAllocations(t *testing.T) {
+	var cache CacheManager
+	cache.Init(30<<20, 30<<20, 0)
+	defer cache.Stop()
+	before := cache.shardCapacity.Load()
+	pointer := new(int)
+	cache.AddItem(pointer, 1<<20, TypeIndex,
+		func(any, *[numEvictableTypes]int64) bool { return false }, func(any) time.Time { return time.Now() }, nil)
+	cache.UpdateSize(pointer, 1<<20)
+	if cache.shardCapacity.Load() != before {
+		t.Fatal("index allocation invalidated the published shard admission cache line")
+	}
+	cache.AddItem(new(int), 1<<20, TypeShard,
+		func(any, *[numEvictableTypes]int64) bool { return false }, func(any) time.Time { return time.Now() }, nil)
+	if cache.shardCapacity.Load() != before {
+		t.Fatal("payload allocation below the threshold republished unchanged admission")
+	}
 }
 
 func TestClusterColdPlacementUsesAllPeersAndKeepsWarmPreference(t *testing.T) {
@@ -805,6 +859,10 @@ func TestClusterGetReadDelegationIsAnExplicitCallerCapability(t *testing.T) {
 	defer sharedClusterMounts.Store(oldMounts)
 	oldService := nodeScans.Swap(&nodeScanService{cluster: cluster})
 	defer nodeScans.Store(oldService)
+	// Ownership alone no longer delegates: this explicit operator capability
+	// is exercised only when local shard admission refuses the job.
+	previousAdmission := GlobalCache.shardCapacity.Swap(&shardRAMSnapshot{Allowed: false})
+	defer GlobalCache.shardCapacity.Store(previousAdmission)
 	delegated := false
 	func() {
 		defer func() {
@@ -822,6 +880,7 @@ func TestClusterGetReadDelegationIsAnExplicitCallerCapability(t *testing.T) {
 	if !delegated || shard.state() != COLD || shard.cacheReaders.Load() != 0 {
 		t.Fatal("operator read did not delegate before local payload acquisition")
 	}
+	GlobalCache.shardCapacity.Store(previousAdmission)
 	access := shard.GetRead(nil, false)
 	defer access.Release()
 	if access.shard != shard || shard.state() == COLD || shard.main_count != 4 {

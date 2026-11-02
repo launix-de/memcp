@@ -124,13 +124,13 @@ func TestEvictionHonorsOnlyExplicitMinimumLifetime(t *testing.T) {
 	}
 
 	withoutMinimum, unpinned := newManager(0)
-	withoutMinimum.evict(1, 0, 0, nil)
+	withoutMinimum.evict(1, 0, 0, nil, nil)
 	if _, ok := withoutMinimum.itemMap[unpinned]; ok {
 		t.Fatal("zero minimum lifetime prevented immediate pressure eviction")
 	}
 
 	withMinimum, pinned := newManager(time.Minute)
-	withMinimum.evict(1, 0, 0, nil)
+	withMinimum.evict(1, 0, 0, nil, nil)
 	if _, ok := withMinimum.itemMap[pinned]; !ok {
 		t.Fatal("explicit minimum lifetime did not protect the item")
 	}
@@ -157,7 +157,7 @@ func TestEvictionUsesPartialOfferBeforeFullRemoval(t *testing.T) {
 	}
 	heap.Push(&cm.h, item)
 
-	cm.evict(100, 60, 0, nil)
+	cm.evict(100, 60, 0, nil, nil)
 	if len(pointer.modes) != 1 || pointer.modes[0] != evictPartial {
 		t.Fatalf("eviction modes = %v, want one partial action", pointer.modes)
 	}
@@ -190,7 +190,7 @@ func TestEvictionFallsBackToFullAfterPartialOffer(t *testing.T) {
 	}
 	heap.Push(&cm.h, item)
 
-	cm.evict(100, 10, 0, nil)
+	cm.evict(100, 10, 0, nil, nil)
 	if len(pointer.modes) != 2 || pointer.modes[0] != evictPartial || pointer.modes[1] != evictFull {
 		t.Fatalf("eviction modes = %v, want partial then full", pointer.modes)
 	}
@@ -255,7 +255,7 @@ func TestEvictionExpandsTopKAfterRejectedOffer(t *testing.T) {
 	heap.Push(&cm.h, first)
 	heap.Push(&cm.h, second)
 
-	cm.evict(300, 200, 0, nil)
+	cm.evict(300, 200, 0, nil, nil)
 	if _, ok := cm.itemMap[rejected]; !ok {
 		t.Fatal("rejected top-k object was removed")
 	}
@@ -435,23 +435,23 @@ func TestMinimumMemoryEvictionFloor(t *testing.T) {
 			switch cause {
 			case "total":
 				cm.memoryBudget = 1 // minimum wins even over a smaller maximum
-				cm.runEvictionChecks(0)
+				cm.runEvictionChecks(0, nil)
 			case "persisted":
 				cm.persistedBudget = 1
-				cm.runEvictionChecks(0)
+				cm.runEvictionChecks(0, nil)
 			case "system":
 				// Zero available system RAM can reduce the effective budget to zero.
-				cm.evict(cm.currentMemory, 0, 0, nil)
+				cm.evict(cm.currentMemory, 0, 0, nil, nil)
 			case "allocation":
 				cm.memoryBudget = 150
-				cm.runEvictionChecks(1000)
+				cm.runEvictionChecks(1000, nil)
 			case "expiry":
 				cm.evictExpired()
 			}
 			if cm.currentMemory != 100 {
 				t.Fatalf("retained %d, want floor 100", cm.currentMemory)
 			}
-			cm.evict(cm.currentMemory, 0, 1000, nil)
+			cm.evict(cm.currentMemory, 0, 1000, nil, nil)
 			cm.evictExpired()
 			if cm.currentMemory != 100 {
 				t.Fatalf("subsequent eviction crossed floor: %d", cm.currentMemory)
@@ -465,12 +465,12 @@ func TestMinimumMemorySkipsOversizedOffers(t *testing.T) {
 	object := &testPartialCacheObject{partialBytes: 30}
 	item := newSoftItem(object, 140, TypeShard, nil, func(any) time.Time { return time.Time{} }, nil, 0, 0)
 	cm.addInternal(item)
-	cm.evict(cm.currentMemory, 0, 0, nil)
+	cm.evict(cm.currentMemory, 0, 0, nil, nil)
 	if cm.currentMemory != 110 || len(object.modes) != 1 || object.modes[0] != evictPartial {
 		t.Fatalf("expected partial eviction only: memory=%d modes=%v", cm.currentMemory, object.modes)
 	}
 	cm.minimumMemory = 0
-	cm.evict(cm.currentMemory, 0, 0, nil)
+	cm.evict(cm.currentMemory, 0, 0, nil, nil)
 	if cm.currentMemory != 0 {
 		t.Fatalf("disabled floor retained %d bytes", cm.currentMemory)
 	}
@@ -568,9 +568,63 @@ func TestCacheAdmissionReclaimsPublishedOwnersWithoutIdleDelay(t *testing.T) {
 	manager.AddItem(pointer, 32, TypeShard,
 		func(any, *[numEvictableTypes]int64) bool { return true },
 		func(any) time.Time { return published }, nil)
-	if usage := manager.Stat(); usage.CurrentMemory != 0 || !manager.canLoadClusterShard() {
+	if usage := manager.Stat(); usage.CurrentMemory != 0 || !manager.canLoadClusterShard(nil) {
 		// This object has no live lease. Recent use affects eviction ranking,
 		// but must not strand an over-budget payload until an idle timer passes.
 		t.Fatalf("published evictable payload prevented subsequent admission: %+v", usage)
+	}
+}
+
+func TestCachePressureDoesNotDisplaceShardPayload(t *testing.T) {
+	var manager CacheManager
+	manager.Init(1000, 700, 0)
+	defer manager.Stop()
+	var payloadEvicted, cacheEvicted atomic.Bool
+	published := time.Now()
+	manager.AddItem(new(int), 600, TypeShard,
+		func(any, *[numEvictableTypes]int64) bool { payloadEvicted.Store(true); return true },
+		func(any) time.Time { return time.Now().Add(-time.Hour) }, nil)
+	manager.AddItem(new(int), 800, TypeCacheEntry,
+		func(any, *[numEvictableTypes]int64) bool { cacheEvicted.Store(true); return true },
+		func(any) time.Time { return published }, nil)
+	manager.Stat()
+	if payloadEvicted.Load() || !cacheEvicted.Load() {
+		t.Fatalf("cache growth: payload evicted=%v cache evicted=%v stat=%+v", payloadEvicted.Load(), cacheEvicted.Load(), manager.Stat())
+	}
+	manager.CheckPressure(1000)
+	if payloadEvicted.Load() {
+		t.Fatal("a pending cache allocation displaced native shard storage")
+	}
+	manager.AddItem(new(int), 200, TypeShard,
+		func(any, *[numEvictableTypes]int64) bool { return true }, func(any) time.Time { return time.Now() }, nil)
+	manager.Stat()
+	if !payloadEvicted.Load() {
+		t.Fatal("new shard storage failed to displace older shard storage")
+	}
+}
+
+func TestClusterTableQuotaReclaimsOnlyThatTablesPayload(t *testing.T) {
+	previous := sharedClusterMounts.Swap(&map[string]bool{})
+	defer sharedClusterMounts.Store(previous)
+	var manager CacheManager
+	manager.Init(6000, 6000, 0)
+	defer manager.Stop()
+	outer, inner := &table{}, &table{}
+	var outerEvicted, innerEvicted atomic.Bool
+	add := func(tbl *table, size int64, evicted *atomic.Bool, used time.Time) {
+		item := newSoftItem(new(int), size, TypeShard,
+			func(any, *[numEvictableTypes]int64) bool { evicted.Store(true); return true }, func(any) time.Time { return used }, nil, 0, 0)
+		item.shardTable = tbl
+		manager.opChan <- cacheOp{add: item}
+		manager.Stat()
+	}
+	add(inner, 600, &innerEvicted, time.Now().Add(-2*time.Hour))
+	add(outer, 600, &outerEvicted, time.Now().Add(-time.Hour))
+	add(outer, 600, new(atomic.Bool), time.Now())
+	if !outerEvicted.Load() || innerEvicted.Load() {
+		t.Fatal("outer table displaced the inner table's reserved payload")
+	}
+	if !manager.canLoadClusterShard(outer) || !manager.canLoadClusterShard(inner) {
+		t.Fatal("evicted payload left admission closed")
 	}
 }

@@ -971,7 +971,11 @@ func (s *storageShard) retainCacheRead() {
 	}
 }
 
-func (s *storageShard) releaseCacheRead() { s.cacheReaders.Add(-1) }
+func (s *storageShard) releaseCacheRead() {
+	if s.cacheReaders.Add(-1) == 0 && sharedClusterSource(s.t) && !GlobalCache.canLoadClusterShard(s.t) {
+		GlobalCache.reclaimShardRAM(s.t)
+	}
+}
 
 // mayDelegate describes the caller's ability to consume a shard-local result.
 // Native catalog/uniqueness/maintenance readers need local payload; physical
@@ -1000,6 +1004,9 @@ func (s *storageShard) getRead(currentTx *TxContext, snapshot, mayDelegate bool)
 		}
 		cluster.prepareLocalScan(s, currentTx, origin)
 	}
+	if sharedClusterSource(s.t) && s.state() == COLD && !GlobalCache.canLoadClusterShard(s.t) {
+		panic(activeNodeCluster().shardRAMUnavailable(s, origin))
+	}
 	if !snapshot && s.t != nil {
 		if r := activeReplication(s.t.schema); r != nil && validReplicaDatabase(s.t.schema.Name) && !s.t.isEphemeralQueryTable() {
 			s = r.readShard(s, currentTx)
@@ -1013,7 +1020,7 @@ func (s *storageShard) getRead(currentTx *TxContext, snapshot, mayDelegate bool)
 			s.releaseCacheRead()
 		}
 	}()
-	if sharedClusterSource(s.t) && s.state() == COLD && !GlobalCache.canLoadClusterShard() {
+	if sharedClusterSource(s.t) && s.state() == COLD && !GlobalCache.canLoadClusterShard(s.t) {
 		panic(activeNodeCluster().shardRAMUnavailable(s, origin))
 	}
 	s.ensureLoaded()
@@ -1075,7 +1082,7 @@ func (s *storageShard) getWrite(currentTx *TxContext, blocking bool) (WriteAcces
 			}
 		}
 	}
-	if sharedClusterSource(s.t) && s.state() == COLD && !GlobalCache.canLoadClusterShard() {
+	if sharedClusterSource(s.t) && s.state() == COLD && !GlobalCache.canLoadClusterShard(s.t) {
 		panic(activeNodeCluster().shardRAMUnavailable(s, origin))
 	}
 	s.ensureLoaded()

@@ -51,6 +51,11 @@ func (cluster *nodeCluster) prepareLocalScan(shard *storageShard, tx *TxContext,
 	if shard.state() != COLD || !clusterScanSupported(tx) {
 		return
 	}
+	// A job executes its subscans here while this node has room. Native GetRead
+	// acquires S/O as necessary; another owner is not a reason to ship the job.
+	if GlobalCache.canLoadClusterShard(shard.t) {
+		return
+	}
 	origin := shard
 	if len(origins) > 0 {
 		origin = origins[0]

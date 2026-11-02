@@ -609,6 +609,8 @@ func (initializer *atomicTableInitializer) UnmarshalJSON(data []byte) error {
 }
 
 type table struct {
+	// Published only when this table crosses its share of the node's shard RAM.
+	shardRAMFull atomic.Bool
 	// Query-local contribution reuse checks these atomics outside row loops.
 	// Writers bracket complete DML/visibility/topology batches. Identity is
 	// assigned once; revision and active-writer count need no catalog locks.
