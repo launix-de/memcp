@@ -127,6 +127,15 @@ func (r *replicationManager) offerResource(ctx context.Context, source string, p
 	if r.cluster == nil && (r.master || source != "") {
 		return fmt.Errorf("recall from non-master")
 	}
+	if r.cluster == nil {
+		// The master authorizes recalled content like any slave write. Resolve
+		// the proof before ownership changes so a missing user fails the recall.
+		user, auth, err := r.proof("", packet.Resource.Database)
+		if err != nil {
+			return err
+		}
+		packet.User, packet.Hash = user, auth.Hash
+	}
 	c := r.resourceCell(packet.Resource)
 	// Older safety-copy packets must be enqueued before this ownership offer.
 	// Waiting for a sender never closes local write admission.

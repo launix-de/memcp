@@ -148,19 +148,20 @@ func (tt *TriggerTiming) UnmarshalJSON(data []byte) error {
 
 // TriggerDescription holds all information about a trigger
 type TriggerDescription struct {
-	Name       string                `json:"name"`                // Trigger name (user-defined or auto-generated)
-	Timing     TriggerTiming         `json:"timing"`              // BEFORE/AFTER INSERT/UPDATE/DELETE
-	Func       scm.Scmer             `json:"func"`                // The compiled trigger procedure; omitted when source is authoritative
-	FuncPlan   scm.Scmer             `json:"-"`                   // Unevaluated lambda AST, compiled lazily on first use
-	Source     string                `json:"source,omitempty"`    // Authoritative source code for persistent language-defined triggers
-	Language   string                `json:"language,omitempty"`  // Name resolved through the process-local trigger compiler registry
-	IsSystem   bool                  `json:"is_system,omitempty"` // True for Go-internal triggers (FK etc.) — not persisted via createtrigger
-	Hidden     bool                  `json:"hidden,omitempty"`    // True for Scheme-internal triggers — persisted but hidden from SHOW TRIGGERS
-	Priority   int                   `json:"priority,omitempty"`  // Execution order (lower = earlier)
-	Async      bool                  `json:"async,omitempty"`     // Run trigger in background goroutine (fire-and-forget, no transaction context)
-	VectorFunc scm.Scmer             `json:"-"`                   // Vectorized trigger: (lambda (OLD_batch NEW_batch) ...) for batch execution
-	Acquire    func(*TxContext) bool `json:"-"`                   // Optional lock-free pin for an ephemeral trigger target
-	Release    func()                `json:"-"`                   // Releases a successful Acquire
+	Name       string                `json:"name"`                  // Trigger name (user-defined or auto-generated)
+	Timing     TriggerTiming         `json:"timing"`                // BEFORE/AFTER INSERT/UPDATE/DELETE
+	Func       scm.Scmer             `json:"func"`                  // The compiled trigger procedure; omitted when source is authoritative
+	FuncPlan   scm.Scmer             `json:"-"`                     // Unevaluated lambda AST, compiled lazily on first use
+	Source     string                `json:"source,omitempty"`      // Authoritative source code for persistent language-defined triggers
+	SchemaOnly bool                  `json:"schema_only,omitempty"` // Imported source may access only its owning database
+	Language   string                `json:"language,omitempty"`    // Name resolved through the process-local trigger compiler registry
+	IsSystem   bool                  `json:"is_system,omitempty"`   // True for Go-internal triggers (FK etc.) — not persisted via createtrigger
+	Hidden     bool                  `json:"hidden,omitempty"`      // True for Scheme-internal triggers — persisted but hidden from SHOW TRIGGERS
+	Priority   int                   `json:"priority,omitempty"`    // Execution order (lower = earlier)
+	Async      bool                  `json:"async,omitempty"`       // Run trigger in background goroutine (fire-and-forget, no transaction context)
+	VectorFunc scm.Scmer             `json:"-"`                     // Vectorized trigger: (lambda (OLD_batch NEW_batch) ...) for batch execution
+	Acquire    func(*TxContext) bool `json:"-"`                     // Optional lock-free pin for an ephemeral trigger target
+	Release    func()                `json:"-"`                     // Releases a successful Acquire
 	// Guarded by table.mu after publication. Generated dependency code restored
 	// from a previous binary must be regenerated before its target is rebound.
 	cacheTarget       *table // runtime identity, protected by the source table mutex
@@ -252,6 +253,7 @@ type persistedTriggerDescription struct {
 	Func            *scm.Scmer    `json:"func,omitempty"`
 	Source          string        `json:"source,omitempty"`
 	Language        string        `json:"language,omitempty"`
+	SchemaOnly      bool          `json:"schema_only,omitempty"`
 	LegacySourceSQL string        `json:"source_sql,omitempty"`
 	IsSystem        bool          `json:"is_system,omitempty"`
 	Hidden          bool          `json:"hidden,omitempty"`
@@ -266,6 +268,7 @@ func (tr TriggerDescription) MarshalJSON() ([]byte, error) {
 		Timing:         tr.Timing,
 		Source:         tr.Source,
 		Language:       tr.Language,
+		SchemaOnly:     tr.SchemaOnly,
 		IsSystem:       tr.IsSystem,
 		Hidden:         tr.Hidden,
 		Priority:       tr.Priority,
@@ -292,6 +295,7 @@ func (tr *TriggerDescription) UnmarshalJSON(data []byte) error {
 	tr.Timing = persist.Timing
 	tr.Source = persist.Source
 	tr.Language = persist.Language
+	tr.SchemaOnly = persist.SchemaOnly
 	// Schemas written before trigger-language registration stored SQL source in
 	// source_sql. Import it into the generic representation; new saves emit only
 	// source and language.
@@ -338,10 +342,11 @@ func triggerScmerMissing(v scm.Scmer) bool {
 
 var triggerLanguageCompilers = struct {
 	sync.RWMutex
-	byName map[string]scm.Scmer
-}{byName: make(map[string]scm.Scmer)}
+	byName          map[string]scm.Scmer
+	replicationSafe map[string]bool
+}{byName: make(map[string]scm.Scmer), replicationSafe: make(map[string]bool)}
 
-func registerTriggerLanguage(language string, compiler scm.Scmer) {
+func registerTriggerLanguage(language string, compiler scm.Scmer, replicationSafe ...bool) {
 	if language == "" {
 		panic("trigger language must not be empty")
 	}
@@ -350,7 +355,16 @@ func registerTriggerLanguage(language string, compiler scm.Scmer) {
 	}
 	triggerLanguageCompilers.Lock()
 	triggerLanguageCompilers.byName[language] = compiler
+	triggerLanguageCompilers.replicationSafe[language] = len(replicationSafe) > 0 && replicationSafe[0]
 	triggerLanguageCompilers.Unlock()
+}
+
+// Only trusted startup code may opt a source compiler into slave uploads.
+// Such compilers must honor the schema_only context on imported definitions.
+func replicationSafeLanguage(language string) bool {
+	triggerLanguageCompilers.RLock()
+	defer triggerLanguageCompilers.RUnlock()
+	return triggerLanguageCompilers.replicationSafe[language]
 }
 
 func triggerLanguageCompiler(language string) (scm.Scmer, bool) {
@@ -361,12 +375,13 @@ func triggerLanguageCompiler(language string) (scm.Scmer, bool) {
 }
 
 func triggerCompilerContext(schemaName, tableName string, trigger *TriggerDescription) scm.Scmer {
-	context := scm.NewFastDictValue(5)
+	context := scm.NewFastDictValue(6)
 	context.Set(scm.NewString("schema"), scm.NewString(schemaName), nil)
 	context.Set(scm.NewString("table"), scm.NewString(tableName), nil)
 	context.Set(scm.NewString("name"), scm.NewString(trigger.Name), nil)
 	context.Set(scm.NewString("timing"), scm.NewString(trigger.Timing.sourceName()), nil)
 	context.Set(scm.NewString("hidden"), scm.NewBool(trigger.Hidden), nil)
+	context.Set(scm.NewString("schema_only"), scm.NewBool(trigger.SchemaOnly), nil)
 	return scm.NewFastDict(context)
 }
 
