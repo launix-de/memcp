@@ -1002,7 +1002,7 @@ func (s *storageShard) getRead(currentTx *TxContext, snapshot, mayDelegate bool)
 		if cluster == nil {
 			panic("cluster is not initialized")
 		}
-		cluster.prepareLocalScan(s, currentTx, origin)
+		cluster.prepareLocalScan(s, currentTx, false, origin)
 	}
 	if sharedClusterSource(s.t) && s.state() == COLD && !GlobalCache.canLoadClusterShard(s.t) {
 		panic(activeNodeCluster().shardRAMUnavailable(s, origin))
@@ -1043,6 +1043,12 @@ func (s *storageShard) GetWrite(currentTx *TxContext) WriteAccess {
 // wait; callers must release any earlier writers before trying the blocking path.
 func (s *storageShard) getWrite(currentTx *TxContext, blocking bool) (WriteAccess, bool) {
 	origin := s
+	// A write retains its generation until the transaction releases it. Such
+	// pins may consume the node-wide shard budget; the per-table read reserve
+	// must not make an otherwise fitting multi-shard transaction impossible.
+	if sharedClusterSource(s.t) && s.state() == COLD && !GlobalCache.canLoadClusterShard(nil) {
+		panic(activeNodeCluster().shardRAMUnavailable(s, origin))
+	}
 	if currentTx != nil && sharedClusterSource(s.t) {
 		if currentTx.decisionStarted {
 			panic("transaction commit outcome is unknown; retry COMMIT")
@@ -1082,7 +1088,7 @@ func (s *storageShard) getWrite(currentTx *TxContext, blocking bool) (WriteAcces
 			}
 		}
 	}
-	if sharedClusterSource(s.t) && s.state() == COLD && !GlobalCache.canLoadClusterShard(s.t) {
+	if sharedClusterSource(s.t) && s.state() == COLD && !GlobalCache.canLoadClusterShard(nil) {
 		panic(activeNodeCluster().shardRAMUnavailable(s, origin))
 	}
 	s.ensureLoaded()

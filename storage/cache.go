@@ -185,11 +185,6 @@ func (h *softItemHeap) Pop() any {
 	return item
 }
 
-// isPersistedType returns true for types representing persisted (disk-reloadable) data.
-func isPersistedType(t EvictableType) bool {
-	return t == TypeShard || t == TypeIndex
-}
-
 // systemFreeThreshold is the minimum fraction of total RAM that must remain free
 // system-wide before the cache triggers eviction (regardless of our own budget).
 const systemFreeThreshold = 10 // percent
@@ -235,7 +230,10 @@ func systemMemInfo() (free, total int64) {
 type CacheManager struct {
 	// Published by the actor from its existing O(1) per-type ledger. Warm scans
 	// never enter the actor or reserve guessed payload/scratch memory.
-	shardCapacity    atomic.Pointer[shardRAMSnapshot]
+	shardCapacity atomic.Pointer[shardRAMSnapshot]
+	// Keep actor-owned allocation counters off the cold-admission cache lines.
+	// The padding covers both 64- and 128-byte cache lines.
+	_                [128]byte
 	shardPercent     int
 	tableShardMemory map[*table]int64 // actor-owned payload ledger, using the existing registrations
 	// All metadata below is owned by run(). Query workers only publish lifecycle

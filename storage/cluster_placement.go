@@ -45,7 +45,7 @@ func clusterScanSupported(tx *TxContext) bool {
 	// participant overlays on their shard owner.
 	return tx.Mode == TxCursorStability || tx.Mode == TxACID
 }
-func (cluster *nodeCluster) prepareLocalScan(shard *storageShard, tx *TxContext, origins ...*storageShard) {
+func (cluster *nodeCluster) prepareLocalScan(shard *storageShard, tx *TxContext, mutation bool, origins ...*storageShard) {
 	// Existing local snapshots retain all native transaction modes. Only a
 	// genuinely remote task needs a supported remote visibility contract.
 	if shard.state() != COLD || !clusterScanSupported(tx) {
@@ -53,14 +53,20 @@ func (cluster *nodeCluster) prepareLocalScan(shard *storageShard, tx *TxContext,
 	}
 	// A job executes its subscans here while this node has room. Native GetRead
 	// acquires S/O as necessary; another owner is not a reason to ship the job.
-	if GlobalCache.canLoadClusterShard(shard.t) {
-		return
+	tbl := shard.t
+	if mutation {
+		// Modified generations retain native TX pins. Their allocation is bounded
+		// by the node's shard budget, rather than an evictable read-working-set share.
+		tbl = nil
 	}
 	origin := shard
 	if len(origins) > 0 {
 		origin = origins[0]
 	}
 	expected := remoteScanShard{Schema: shard.t.filterSchemaFingerprint(), Resource: mosiResource{Database: shard.t.schema.Name, Table: shard.t.Name, Shard: shard.uuid.String()}}
+	if GlobalCache.canLoadClusterShard(tbl) && (mutation || cluster.tryRead(scanQueryContext(tx, cluster.ctx), expected.Resource)) {
+		return
+	}
 	// Placement can delegate to an authorized owner without acquiring a local
 	// shared copy first. In particular a reader must not recall an active writer
 	// merely to send its ordinary scan back to that same native participant.

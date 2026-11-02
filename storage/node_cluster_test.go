@@ -46,17 +46,37 @@ func TestClusterWarmScanDoesNotReadBackendOrReserveRAM(t *testing.T) {
 	shard := &storageShard{}
 	shard.setState(SHARED)
 	// No table/backend, peers or budget actor exist. A warm decision needs none.
-	(&nodeCluster{}).prepareLocalScan(shard, nil)
+	(&nodeCluster{}).prepareLocalScan(shard, nil, false)
 }
 
 func TestClusterColdSubscanUsesLocalCapacityBeforeOwnerRouting(t *testing.T) {
 	previous := GlobalCache.shardCapacity.Swap(&shardRAMSnapshot{Allowed: true})
 	defer GlobalCache.shardCapacity.Store(previous)
-	shard := &storageShard{t: &table{}}
+	shard := &storageShard{t: &table{schema: &database{Name: "local_subscan"}, Name: "items"}, uuid: uuid.New()}
 	shard.setState(COLD)
-	// No owner directory, schema or connection exists. A cold subscan with
-	// available RAM must proceed to native local acquisition without routing.
-	(&nodeCluster{}).prepareLocalScan(shard, nil)
+	cluster := &nodeCluster{}
+	cluster.initializeManager()
+	resource := mosiResource{Database: shard.t.schema.Name, Table: shard.t.Name, Shard: shard.uuid.String()}
+	cluster.manager.resourceCell(resource).ownstate.Initialize(mosi.S)
+	// Granted S plus available RAM needs no owner lookup or connection, even
+	// when the physical columns have been evicted and must be loaded again.
+	cluster.prepareLocalScan(shard, nil, false)
+}
+
+func TestClusterMutationUsesNodeBudgetBeyondReadWorkingSetShare(t *testing.T) {
+	previous := GlobalCache.shardCapacity.Swap(&shardRAMSnapshot{Allowed: true})
+	defer GlobalCache.shardCapacity.Store(previous)
+	tbl := &table{}
+	tbl.shardRAMFull.Store(true)
+	if GlobalCache.canLoadClusterShard(tbl) {
+		t.Fatal("read admission exceeded its per-table share")
+	}
+	tbl.schema, tbl.Name = &database{Name: "local_write"}, "items"
+	shard := &storageShard{t: tbl, uuid: uuid.New()}
+	shard.setState(COLD)
+	// A multi-shard transaction cannot evict its modified generations. It may
+	// use the remaining node shard budget without routing a fitting write away.
+	(&nodeCluster{}).prepareLocalScan(shard, nil, true)
 }
 
 func TestClusterTableShardRAMLeavesRoomForInnerScans(t *testing.T) {

@@ -55,6 +55,12 @@ These are the defaults for `cluster: true`; nodes may range from 2 to 10. RAM
 limits are native `MaxRamBytes`/`MaxPersistBytes` cache budgets in bytes, not OS
 process-RSS limits. Fractions are 1–100 percent, and concurrency is node-local
 GOMAXPROCS. Unknown properties and assertions fail instead of being ignored.
+The shard fraction reserves native payload RAM independently of caches and
+indexes. Each table may use one third of that shard budget, leaving room for
+secondary and tertiary scans on the same worker. These are admission thresholds;
+active readers retain their payload until release, when reclamation retries.
+Modified transaction generations retain their native pins and may use the
+remaining node-wide shard budget beyond that per-table read-working-set share.
 `compare_standalone` defaults to true and runs the same YAML on an independent
 standalone oracle first, comparing complete case results as well as ordinary
 expectations. Disable that comparison for fixtures with intentionally different

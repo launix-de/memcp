@@ -21,11 +21,11 @@ func (cm *CacheManager) shardBudget() int64 {
 
 func (cm *CacheManager) publishShardRAM() {
 	limit := cm.shardBudget()
-	next := shardRAMSnapshot{limit > 0 && cm.sizeByType[TypeShard] < limit}
-	if old := cm.shardCapacity.Load(); old != nil && *old == next {
+	allowed := limit > 0 && cm.sizeByType[TypeShard] < limit
+	if old := cm.shardCapacity.Load(); old != nil && old.Allowed == allowed {
 		return
 	}
-	cm.shardCapacity.Store(&next)
+	cm.shardCapacity.Store(&shardRAMSnapshot{Allowed: allowed})
 }
 func (cm *CacheManager) canLoadClusterShard(tbl *table) bool {
 	snapshot := cm.shardCapacity.Load()
