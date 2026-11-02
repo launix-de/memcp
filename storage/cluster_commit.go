@@ -269,7 +269,7 @@ func (preparation *acidPreparation) completeRecordedDecision(ctx context.Context
 			tx.Session.Func()(scm.NewString("transaction"), scm.NewNil())
 		}
 	}()
-	release := tx.lockDecision(ctx)
+	release := tx.lockDecision(ctx, true)
 	defer release()
 	if tx.State != TxActive {
 		return true, nil
@@ -394,9 +394,7 @@ func (tx *TxContext) commitDistributedACID() error {
 					return fmt.Errorf("prepare failed: %v; rollback: %w", failure, err)
 				}
 			}
-			release := tx.claimDecisionRights()
 			tx.rollbackACID()
-			release()
 			return failure
 		}
 		tx.decisionStarted = true

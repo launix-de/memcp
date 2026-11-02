@@ -5,10 +5,12 @@ SPDX-License-Identifier: GPL-3.0-or-later
 package storage
 
 import "time"
+import "context"
 import "sync"
 import "testing"
 import "github.com/launix-de/memcp/storage/mosi"
 import "github.com/launix-de/memcp/scm"
+import "github.com/google/uuid"
 
 func TestClusterSavepointFollowsPhysicalShardAcrossHandover(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "t_handover_savepoint", 3)
@@ -153,5 +155,89 @@ func TestClusterCaptureRetainsOverlayWhenHelperBecomesPersistent(t *testing.T) {
 	defer capture.release()
 	if len(capture.overlays) != 1 || capture.overlays[0].transaction != tx.transactionState || !capture.overlays[0].DeleteMask.Get(0) {
 		t.Fatal("engine change hid an active private overlay from MOSI handover")
+	}
+}
+
+// The outbound M request proves the decision is waiting for physical ownership.
+// Its transaction must remain migratable: the owner may need to transfer that
+// same transaction's overlay to satisfy this request.
+func TestClusterDecisionAcquiresWriteBeforeClosingMigration(t *testing.T) {
+	for _, commit := range []bool{true, false} {
+		name := "rollback"
+		if commit {
+			name = "commit"
+		}
+		t.Run(name, func(t *testing.T) {
+			tbl, _ := createDurabilityTestTable(t, "t_decision_acquisition", 2)
+			shard := tbl.ActiveShards()[0]
+			tx := NewTxContext(TxACID)
+			tx.AddToDeleteMask(shard, 0)
+			cluster := globalTestCluster(t, tbl.schema.Name)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			cluster.ctx = ctx
+			owner := clusterMember{ID: "memcp://" + uuid.NewString(), Boot: uuid.NewString()}
+			peer := &mosiPeer{ctx: ctx, done: make(chan struct{}), outgoing: make(chan mosiMessage, 1)}
+			cluster.view.Store(&clusterView{members: []clusterMember{cluster.self, owner}, links: []*clusterLink{{member: owner, peer: peer}}})
+			mounts := map[string]bool{tbl.schema.Name: true}
+			previousMounts := sharedClusterMounts.Swap(&mounts)
+			defer sharedClusterMounts.Store(previousMounts)
+			previousService := nodeScans.Swap(&nodeScanService{cluster: cluster})
+			defer nodeScans.Store(previousService)
+			r := cluster.manager
+			r.resourceCell(mosiResource{Database: tbl.schema.Name}).ownstate.Initialize(mosi.M)
+			cell := r.shardCell(shard)
+			cell.current.Store(shard)
+			cell.ownstate.Initialize(mosi.S)
+			resource := *cell.resource.Load()
+			r.updateRecord(resource, func(record *replicaRecord) bool {
+				record.Resource, record.Owner, record.State, record.Epoch = resource, owner.ID, "S", 1
+				return true
+			})
+			done := make(chan error, 1)
+			go func() {
+				if commit {
+					done <- tx.Commit()
+				} else {
+					tx.Rollback()
+					done <- nil
+				}
+			}()
+			select {
+			case <-peer.outgoing:
+			case <-time.After(5 * time.Second):
+				t.Fatal("decision did not request native M")
+			}
+			releaseMigration, migrationErr := tx.beginMigration()
+			pending := cell.ownstate.Snapshot().Flight()
+			if pending == nil {
+				t.Fatal("decision no longer has an acquisition flight")
+			}
+			if _, err := cell.ownstate.Grant(pending.ID(), mosi.M, func() error { return nil }); err != nil {
+				t.Fatal(err)
+			}
+			if migrationErr != nil {
+				<-done
+				t.Fatalf("decision waiting for M blocked its own handover: %v", migrationErr)
+			}
+			select {
+			case err := <-done:
+				releaseMigration()
+				t.Fatalf("decision passed an unfinished migration: %v", err)
+			case <-time.After(20 * time.Millisecond):
+			}
+			releaseMigration()
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("decision did not finish after M grant and migration")
+			}
+			if shard.deletions.Get(0) != commit {
+				t.Fatal("decision lost the native transaction effect")
+			}
+		})
 	}
 }

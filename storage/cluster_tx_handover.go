@@ -25,20 +25,59 @@ func (st *storageShardTransaction) MOSIState() mosi.Phase {
 	return mosi.M
 }
 
-// Migration closes decision admission without holding a Go mutex over network
-// I/O. Readers continue using their already acquired native generations.
-func (tx *TxContext) lockDecision(ctx context.Context) func() {
+// Acquire the native write admissions before closing transaction migration.
+// A handover needed to obtain M must still be able to move this transaction's
+// overlays. Once every current generation is pinned, the decision lock joins
+// already-running migrations and protects the journals through publication.
+func (tx *TxContext) lockDecision(ctx context.Context, write bool) func() {
 	for {
-		tx.decisionMu.Lock()
-		if tx.migrations == 0 {
-			return tx.decisionMu.Unlock
+		var releaseRights func()
+		var protected map[*storageShard]*storageShardTransaction
+		if write {
+			tx.mu.Lock()
+			protected = tx.shardTransactions()
+			tx.mu.Unlock()
+			shards := make([]*storageShard, 0, len(protected))
+			for shard := range protected {
+				shards = append(shards, shard)
+			}
+			releaseRights = tx.claimDecisionRights(shards)
 		}
-		done := tx.migrationDone
-		tx.decisionMu.Unlock()
-		select {
-		case <-done:
-		case <-ctx.Done():
-			panic(ctx.Err())
+		tx.decisionMu.Lock()
+		if tx.migrations != 0 {
+			done := tx.migrationDone
+			tx.decisionMu.Unlock()
+			if releaseRights != nil {
+				releaseRights()
+			}
+			select {
+			case <-done:
+			case <-ctx.Done():
+				panic(ctx.Err())
+			}
+			continue
+		}
+		// An incoming handover can add or replace native overlays during
+		// acquisition. Retry the whole directory in UUID order, outside the
+		// decision lock, rather than acquiring a late M under that lock.
+		if write {
+			tx.mu.Lock()
+			complete := true
+			for shard, overlay := range tx.shardTransactions() {
+				complete = complete && protected[shard] == overlay
+			}
+			tx.mu.Unlock()
+			if !complete {
+				tx.decisionMu.Unlock()
+				releaseRights()
+				continue
+			}
+		}
+		return func() {
+			if releaseRights != nil {
+				releaseRights()
+			}
+			tx.decisionMu.Unlock()
 		}
 	}
 }
@@ -141,13 +180,7 @@ func (st *storageShardTransaction) waitAuthority(ctx context.Context) error {
 }
 
 // Decision publication and undo acquire native write rights once per shard.
-func (tx *TxContext) claimDecisionRights() func() {
-	shards := make([]*storageShard, 0)
-	tx.mu.Lock()
-	for shard := range tx.shardTransactions() {
-		shards = append(shards, shard)
-	}
-	tx.mu.Unlock()
+func (tx *TxContext) claimDecisionRights(shards []*storageShard) func() {
 	sort.Slice(shards, func(i, j int) bool { return shards[i].uuid.String() < shards[j].uuid.String() })
 	var releases []func()
 	complete := false
