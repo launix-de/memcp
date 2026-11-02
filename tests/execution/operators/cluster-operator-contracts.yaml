@@ -377,15 +377,19 @@ test_cases:
     cluster:
       min_remote_shards: 1
 
+# Commit correctness needs transaction participants across all 64 shards, not
+# another 32k-row throughput run. Change 32 rows per shard here so the race +
+# FakeRemote scenario has headroom below the hard five-second correctness gate.
+# The preceding rollback and autocommit cases retain their 32k-row bulk workload.
 - name: distributed-acid-update-begin
   session_id: cluster-acid-commit
   sql: START ACID TRANSACTION
 - name: distributed-acid-update
   session_id: cluster-acid-commit
-  sql: UPDATE big_items SET v7=-id-1 WHERE id%5000>=500 AND id%5000<1000
+  sql: UPDATE big_items SET v7=-id-1 WHERE id%5000>=500 AND id%5000<532
   timeout: 60
   expect:
-    affected_rows: 32000
+    affected_rows: 2048
     cluster:
       min_remote_shards: 2
       min_remote_nodes: 2
@@ -397,9 +401,9 @@ test_cases:
   session_id: cluster-acid-commit
   sql: COMMIT
 - name: distributed-acid-update-published
-  sql: SELECT COUNT(*) AS n FROM big_items WHERE id%5000>=500 AND id%5000<1000 AND v7=-id-1
+  sql: SELECT COUNT(*) AS n FROM big_items WHERE id%5000>=500 AND id%5000<532 AND v7=-id-1
   expect:
-    data: [{n: 32000}]
+    data: [{n: 2048}]
     cluster:
       min_remote_shards: 1
 - name: distributed-acid-delete-begin
@@ -407,10 +411,10 @@ test_cases:
   sql: START ACID TRANSACTION
 - name: distributed-acid-delete
   session_id: cluster-acid-commit
-  sql: DELETE FROM big_items WHERE id%5000>=500 AND id%5000<1000
+  sql: DELETE FROM big_items WHERE id%5000>=500 AND id%5000<532
   timeout: 60
   expect:
-    affected_rows: 32000
+    affected_rows: 2048
     cluster:
       min_remote_shards: 2
       min_remote_nodes: 2
@@ -424,6 +428,6 @@ test_cases:
 - name: distributed-acid-delete-published
   sql: SELECT COUNT(*) AS n,SUM(id) AS ids FROM big_items
   expect:
-    data: [{n: 256000, ids: 41087872000}]
+    data: [{n: 285952, ids: 45828240256}]
     cluster:
       min_remote_shards: 1
