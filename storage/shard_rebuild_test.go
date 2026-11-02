@@ -3178,3 +3178,53 @@ func TestEmptyWritableShardRetainsItsInsertDescriptor(t *testing.T) {
 		t.Fatalf("first insert lost its native writer: %d", got)
 	}
 }
+
+func TestEnsureMainCountDoesNotRaceColdColumnLoad(t *testing.T) {
+	tbl, engine := createDurabilityTestTable(t, "tmaincountrace", 64)
+	if errs, _ := rebuildDatabaseAndCompact(tbl.schema, true, false, false); len(errs) != 0 {
+		t.Fatalf("fixture rebuild failed: %v", errs)
+	}
+	tbl.schema.closeTransactionLog()
+
+	db := newDatabase()
+	db.Name = "tmaincountrace"
+	db.persistence = engine
+	db.srState = COLD
+	db.ensureLoaded()
+	defer db.closeTransactionLog()
+	loaded := db.GetTable("items")
+	if loaded == nil {
+		t.Fatal("reloaded database has no items table")
+	}
+	shard := loaded.ActiveShards()[0]
+	shard.ensureLoaded()
+
+	// A rebuild materializes cold columns while an insert's uniqueness probe
+	// asks for main_count on the same shard; neither holds the other's lock.
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		<-start
+		for _, col := range []string{"payload", "id"} {
+			shard.ensureColumnLoaded(col, false, nil)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		<-start
+		for i := 0; i < 1000; i++ {
+			shard.ensureMainCount(false, nil)
+		}
+	}()
+	close(start)
+	wg.Wait()
+
+	shard.mu.RLock()
+	count := shard.main_count
+	shard.mu.RUnlock()
+	if count != 64 {
+		t.Fatalf("main_count = %d, want 64", count)
+	}
+}

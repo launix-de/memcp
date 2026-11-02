@@ -49,7 +49,8 @@ type storageShard struct {
 	// main storage
 	main_count uint32 // size of main storage
 	// plannerMainRows and plannerDeltaRows publish only row counts. They may be
-	// read without mu by the compiler. Writers update these counters under mu.
+	// read without mu by the compiler and by ensureMainCount. Writers update
+	// these counters under mu together with main_count.
 	plannerMainRows   atomic.Uint32
 	plannerDeltaRows  atomic.Uint64
 	pendingInsertRows atomic.Int64 // free-routing reservations, one charge/release per batch
@@ -906,8 +907,11 @@ func (u *storageShard) getColumnStorageOrPanic(colName string, alreadyLocked boo
 }
 
 // ensureMainCount guarantees main_count is initialized by loading one column if needed.
+// Unlocked callers race with cold loads and rebuilds that set main_count under
+// mu, so readiness is checked through plannerMainRows, which every writer
+// publishes together with main_count.
 func (u *storageShard) ensureMainCount(alreadyLocked bool, currentTx *TxContext) {
-	if u.main_count != 0 {
+	if u.plannerMainRows.Load() != 0 {
 		return
 	}
 	// Load the first column (if not yet loaded); Deserialize will set main_count.
@@ -929,7 +933,7 @@ func (u *storageShard) ensureMainCount(alreadyLocked bool, currentTx *TxContext)
 		u.mu.RUnlock()
 		if ok && cs == nil {
 			u.ensureColumnLoaded(c.Name, false, currentTx)
-			if u.main_count != 0 {
+			if u.plannerMainRows.Load() != 0 {
 				return
 			}
 		}
