@@ -1159,7 +1159,7 @@ func (db *database) GetWrite(tx *TxContext) WriteAccess {
 		}
 	}()
 	if r := activeReplication(db); r != nil && validReplicaDatabase(db.Name) {
-		_, release = r.writeResource(mosiResource{Database: db.Name}, tx)
+		_, release, _ = r.writeResource(mosiResource{Database: db.Name}, tx, true)
 	}
 	db.ensureLoaded()
 	ready = true

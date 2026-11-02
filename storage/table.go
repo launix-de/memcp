@@ -3947,8 +3947,8 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 		}
 		if sharedClusterSource(t) {
 			// Native transactions retain modified generations until commit.
-			// Stable partition order prevents two multi-bucket INSERT batches
-			// from each retaining a higher bucket needed by the other batch.
+			// Group rows by partition. The batch admission below releases partial
+			// writer sets before any wait, including on remote decisions.
 			values = append([][]scm.Scmer(nil), values...)
 			slices.SortStableFunc(values, func(a, b []scm.Scmer) int { return partitionForRow(a) - partitionForRow(b) })
 		}
@@ -3972,10 +3972,17 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 			defer releaseWrites()
 			insertRows := func(rows [][]scm.Scmer, validate func() bool) {
 				if writes == nil {
+					targets := make([]*storageShard, 0, min(len(rows), len(partitionShards)))
+					for i, need := range needed {
+						if need {
+							targets = append(targets, partitionShards[i])
+						}
+					}
+					acquired := getShardWrites(targets, currentTx)
 					writes = make([]WriteAccess, len(partitionShards))
 					for i, need := range needed {
 						if need {
-							writes[i] = partitionShards[i].GetWrite(currentTx)
+							writes[i], acquired = acquired[0], acquired[1:]
 						}
 					}
 				}

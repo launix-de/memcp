@@ -484,7 +484,7 @@ func (c *replicaCell) transactionContinues(tx *TxContext) bool {
 // transactions serialize; nested work may borrow its explicit transaction owner.
 // Only handover consults the existing native transaction lifetime. Reads do not
 // acquire a lease and network streaming never retains an active writer.
-func (r *replicationManager) writeResource(resource mosiResource, tx *TxContext) (*replicaCell, func()) {
+func (r *replicationManager) writeResource(resource mosiResource, tx *TxContext, blocking bool) (*replicaCell, func(), bool) {
 	c := r.resourceCell(resource)
 	if resource.Shard != "" && tx != nil {
 		schema := mosiResource{Database: resource.Database}
@@ -492,6 +492,9 @@ func (r *replicationManager) writeResource(resource mosiResource, tx *TxContext)
 		// native data transaction. Its continuation retains its old declarations
 		// and must finish before that DDL, rather than deadlock reacquiring S.
 		if !r.resourceCell(schema).ownstate.Phase().Readable() && !c.transactionContinues(tx) {
+			if !blocking {
+				return c, nil, false
+			}
 			r.obtain(schema, mosi.S, replicationUser(tx), tx)
 		}
 	}
@@ -502,12 +505,17 @@ func (r *replicationManager) writeResource(resource mosiResource, tx *TxContext)
 	for {
 		c = c.resolved()
 		resource = *c.resource.Load()
-		c = r.obtain(resource, mosi.M, replicationUser(tx), tx)
+		if blocking {
+			c = r.obtain(resource, mosi.M, replicationUser(tx), tx)
+		}
 		continuation := c.ownstate.ClosingWrites() && c.transactionContinues(tx)
 		writer, wait := c.ownstate.TryWrite(owner, continuation)
 		if writer != nil {
 
-			return c, writer.Release
+			return c, writer.Release, true
+		}
+		if !blocking {
+			return c, nil, false
 		}
 		if wait != nil {
 			select {

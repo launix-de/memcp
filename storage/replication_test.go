@@ -1185,7 +1185,7 @@ func TestReplicationNativeWriterContinuesWhileForeignDDLHasSchema(t *testing.T) 
 		t.Fatal("native transaction was not registered")
 	}
 	r.resourceCell(mosiResource{Database: table.schema.Name}).ownstate.Publish(mosi.IO)
-	_, release := r.writeResource(*cell.resource.Load(), tx)
+	_, release, _ := r.writeResource(*cell.resource.Load(), tx, true)
 	release()
 	if !cell.ownstate.Phase().Readable() {
 		t.Fatal("DDL wait revoked the existing data transaction")

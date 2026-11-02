@@ -198,20 +198,20 @@ func (tx *TxContext) claimDecisionRights(shards []*storageShard) (func(), bool) 
 		if r := activeReplication(shard.t.schema); r != nil && validReplicaDatabase(shard.t.schema.Name) && !shard.t.isEphemeralQueryTable() {
 			cell := r.shardCell(shard)
 			if r.cluster != nil {
-				writer, _ := cell.ownstate.TryWrite(tx.transactionState, cell.transactionContinues(tx))
-				if writer == nil {
+				_, done, admitted := r.writeResource(*cell.resource.Load(), tx, false)
+				if !admitted {
 					// Never wait for another shard while retaining a partial set of
 					// writers. Native UUIDs can change during a handover/rebuild;
 					// sorting a stale generation directory cannot prevent that cycle.
 					release()
 					releases = nil
-					_, done := r.writeResource(*cell.resource.Load(), tx)
+					_, done, _ := r.writeResource(*cell.resource.Load(), tx, true)
 					done()
 					return func() {}, false
 				}
-				releases = append(releases, writer.Release)
+				releases = append(releases, done)
 			} else {
-				_, done := r.writeResource(*cell.resource.Load(), tx)
+				_, done, _ := r.writeResource(*cell.resource.Load(), tx, true)
 				releases = append(releases, done)
 			}
 		}

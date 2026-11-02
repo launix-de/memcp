@@ -16,6 +16,10 @@ Copyright (C) 2025-2026  Carl-Philip Hänsch
 */
 package storage
 
+import "time"
+import "context"
+import "math/rand/v2"
+
 // Shared resource state used for lazy loaded objects.
 // COLD: not loaded yet; SHARED: loaded for read; WRITE: loaded and exclusively writable.
 type SharedState uint8
@@ -66,4 +70,54 @@ type SharedResource interface {
 	GetState() SharedState
 	GetRead(currentTx *TxContext) ReadAccess // cold-load waits observe this query
 	GetWrite(currentTx *TxContext) WriteAccess
+}
+
+// Retain a complete set of native writers without waiting while holding only
+// part of the set. This also works when handover/rebuild changes physical UUIDs.
+// Admission retries precede mutation; no row or statement is replayed.
+func getShardWrites(shards []*storageShard, tx *TxContext) []WriteAccess {
+	accesses := make([]WriteAccess, len(shards))
+	complete := false
+	release := func() {
+		for i := len(accesses) - 1; i >= 0; i-- {
+			accesses[i].Release()
+			accesses[i] = WriteAccess{}
+		}
+	}
+	defer func() {
+		if !complete {
+			release()
+		}
+	}()
+	var retries uint
+	for {
+		retry := false
+		for i, shard := range shards {
+			access, ready := shard.getWrite(tx, false)
+			if !ready {
+				release()
+				// Independent peers may otherwise recall the same M set in
+				// lockstep forever. Stagger only failed, side-effect-free
+				// admissions before the next request; normal batches never wait.
+				limit := min(10*time.Millisecond, (10*time.Microsecond)<<min(retries, 10))
+				retries++
+				timer := time.NewTimer(time.Duration(rand.Int64N(int64(limit))) + time.Microsecond)
+				select {
+				case <-timer.C:
+				case <-scanQueryContext(tx, context.Background()).Done():
+					timer.Stop()
+					panic(scanQueryContext(tx, context.Background()).Err())
+				}
+				probe := shard.GetWrite(tx)
+				probe.Release()
+				retry = true
+				break
+			}
+			accesses[i] = access
+		}
+		if !retry {
+			complete = true
+			return accesses
+		}
+	}
 }

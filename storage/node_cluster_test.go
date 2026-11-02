@@ -466,7 +466,7 @@ func TestClusterAccessCancellationKeepsCommonFlight(t *testing.T) {
 			go func() {
 				defer func() { done <- recover() }()
 				if write {
-					_, release := r.writeResource(resource, tx)
+					_, release, _ := r.writeResource(resource, tx, true)
 					release()
 				} else {
 					r.readShard(shard, tx)
