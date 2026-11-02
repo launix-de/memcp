@@ -731,9 +731,15 @@ func (db *database) save(counterOwner ...*replicaCell) {
 		if len(counterOwner) != 0 {
 			// The allocator holds this existing directory mutex through the
 			// checkpoint. O owns the unchanged declarations and may persist its
-			// runtime counter without recalling every S reader. Ordinary saves
-			// still require M; callers cannot use this for semantic DDL.
-			if counterOwner[0] != cell || phase != mosi.M && phase != mosi.O {
+			// runtime counter without recalling every S reader. A local M
+			// request can already have published MR while waiting for this
+			// directory boundary; that request does not transfer ownership.
+			// Validate the serialized directory owner, not request admission.
+			// Ordinary saves still require M; this cannot authorize DDL.
+			cluster.manager.mu.Lock()
+			owner := cluster.manager.directory.Records[cluster.manager.resourceKey(mosiResource{Database: db.Name})].Owner
+			cluster.manager.mu.Unlock()
+			if counterOwner[0] != cell || owner != cluster.self.ID {
 				panic("counter checkpoint lost its owner")
 			}
 		} else if phase != mosi.M {

@@ -517,6 +517,63 @@ func TestClusterCounterReservationKeepsSharedSchemaOwner(t *testing.T) {
 	}
 }
 
+// A local DDL request can publish MR before it acquires the allocator's
+// directory boundary. The counter checkpoint still belongs to the O owner;
+// acknowledging this range must make it durable without completing that DDL.
+func TestClusterCounterCheckpointDuringLocalSchemaUpgrade(t *testing.T) {
+	tbl, engine := createDurabilityTestTable(t, "tclustercounterupgrade", 0)
+	cluster := &nodeCluster{self: clusterMember{ID: "local"}, ctx: context.Background(), databases: map[string]bool{tbl.schema.Name: true}}
+	cluster.initializeManager()
+	r := cluster.manager
+	resource := mosiResource{Database: tbl.schema.Name}
+	cell := r.resourceCell(resource)
+	cell.ownstate.Initialize(mosi.O)
+	cell.clusterstate.Initialize(mosi.O)
+	r.updateRecord(resource, func(record *replicaRecord) bool {
+		record.Owner, record.Epoch, record.State = "local", 11, "O"
+		record.Readers = map[string]bool{"reader": true}
+		return true
+	})
+	mounts := sharedClusterMounts.Swap(&map[string]bool{tbl.schema.Name: true})
+	defer sharedClusterMounts.Store(mounts)
+	service := nodeScans.Swap(&nodeScanService{cluster: cluster})
+	defer nodeScans.Store(service)
+	cell.directory.Lock()
+	defer cell.directory.Unlock()
+	tbl.reserveLocalAutoIncrement(0, 8)
+	pending, action := cell.ownstate.Request(mosi.M)
+	if action != mosi.Send || pending.Retained() != mosi.O {
+		t.Fatal("fixture did not start an O-to-M upgrade")
+	}
+	tbl.schema.save(cell)
+	if cell.ownstate.Snapshot() != pending || !r.directory.Records[resource.key()].Readers["reader"] {
+		t.Fatal("counter checkpoint completed the upgrade or revoked a reader")
+	}
+	var saved struct {
+		Tables map[string]struct {
+			Counter uint64 `json:"Auto_increment"`
+		} `json:"tables"`
+	}
+	if err := json.Unmarshal(engine.ReadSchema(), &saved); err != nil {
+		t.Fatal(err)
+	}
+	if saved.Tables[tbl.Name].Counter != 8 {
+		t.Fatal("reserved range was not durable while the upgrade was pending")
+	}
+	// A directory which has actually handed ownership away must still refuse
+	// checkpoints, even if its local phase has not yet caught up.
+	r.updateRecord(resource, func(record *replicaRecord) bool {
+		record.Owner = "successor"
+		return true
+	})
+	defer func() {
+		if failure := recover(); failure != "counter checkpoint lost its owner" {
+			t.Errorf("non-owner checkpoint: expected ownership rejection, got %v", failure)
+		}
+	}()
+	tbl.schema.save(cell)
+}
+
 func TestClusterHandoverAckKeepsNewerInboundGrant(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "tclusterhandovernewgrant", 4)
 	RebuildTable(tbl, true, false)
