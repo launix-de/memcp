@@ -583,6 +583,12 @@ func TestClusterHandoverAckKeepsNewerInboundGrant(t *testing.T) {
 	shard := tbl.ActiveShards()[0]
 	cell := cluster.declareShard(shard, true)
 	resource := r.shardResource(shard)
+	previous := resource
+	previous.Shard = uuid.NewString()
+	oldest := resource
+	oldest.Shard = uuid.NewString()
+	r.forwardResource(previous, resource)
+	r.forwardResource(oldest, previous)
 	peer := &mosiPeer{outgoing: make(chan mosiMessage, 8), done: make(chan struct{})}
 	schemaPeer := &mosiPeer{outgoing: make(chan mosiMessage, 1), done: make(chan struct{})}
 	cluster.view.Store(&clusterView{links: []*clusterLink{{member: clusterMember{ID: "remote"}, peer: peer}, {member: clusterMember{ID: "schema-owner"}, peer: schemaPeer}}})
@@ -602,13 +608,37 @@ func TestClusterHandoverAckKeepsNewerInboundGrant(t *testing.T) {
 		var update struct {
 			Return string
 			Method string
-			Data   replicaRecord
+			Data   []replicaRecord
 		}
 		if err := json.Unmarshal(message.Data, &update); err != nil {
 			t.Fatal(err)
 		}
-		if update.Method != "cluster.location_update" || update.Data.Resource != r.canonicalResource(resource) || update.Data.Owner != "local" {
+		if update.Method != "cluster.location_update" {
 			t.Fatal("missing pre-reference generation route", update)
+		}
+		locations := make(map[string]replicaRecord)
+		for _, entry := range update.Data {
+			locations[entry.Resource.Shard] = entry
+		}
+		for _, wanted := range []mosiResource{r.canonicalResource(resource), previous, oldest} {
+			if entry := locations[wanted.Shard]; entry.Resource != wanted || entry.Owner != "local" {
+				t.Fatalf("missing historical UUID route before reference: %+v", wanted)
+			}
+		}
+		// A schema owner which never saw these rebuilds must route old
+		// schema/query UUIDs too, without gaining any shard permission.
+		catalog := &nodeCluster{self: clusterMember{ID: "schema-owner"}, databases: map[string]bool{tbl.schema.Name: true}}
+		catalog.initializeManager()
+		catalog.manager.resourceCell(schema).ownstate.Initialize(mosi.M)
+		catalog.manager.updateRecord(schema, func(record *replicaRecord) bool { record.Owner = "schema-owner"; return true })
+		if err := catalog.registerLocations(ctx, update.Data); err != nil {
+			t.Fatal(err)
+		}
+		for _, wanted := range []mosiResource{previous, oldest} {
+			entry, err := catalog.shardLocation(wanted)
+			if err != nil || entry.Owner != "local" || catalog.manager.resourceCell(wanted).ownstate.Phase() != mosi.IO {
+				t.Fatalf("historical lookup lost route or gained authority: %+v %v", entry, err)
+			}
 		}
 		if len(peer.outgoing) != 0 {
 			t.Fatal("reference preceded schema location acknowledgement")
@@ -919,5 +949,33 @@ func TestClusterPartitionInsertReleasesWritersBeforeRemoteAcquire(t *testing.T) 
 	}
 	if first.plannerDeltaRows.Load() != 1 || second.plannerDeltaRows.Load() != 1 {
 		t.Fatal("admission retry lost or duplicated an inserted row")
+	}
+}
+
+func TestClusterLocationBatchRejectsBeforePublishing(t *testing.T) {
+	cluster := &nodeCluster{self: clusterMember{ID: "local"}, databases: map[string]bool{"locations": true, "other": true}}
+	cluster.initializeManager()
+	cluster.view.Store(&clusterView{members: []clusterMember{cluster.self, {ID: "peer"}}})
+	valid := replicaRecord{Resource: mosiResource{Database: "locations", Table: "items", Shard: uuid.NewString()}, Owner: "owner", Epoch: 7}
+	foreign := valid
+	foreign.Resource.Database = "other"
+	for _, entries := range [][]replicaRecord{nil, {}, {valid, foreign}} {
+		payload, err := json.Marshal(entries)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := cluster.handleLocations(context.Background(), "peer", "cluster.location_update", payload); err == nil {
+			t.Fatal("accepted invalid location batch")
+		}
+		if cluster.manager.lookupCell(valid.Resource) != nil {
+			t.Fatal("invalid batch published its valid prefix")
+		}
+	}
+	payload, _ := json.Marshal([]replicaRecord{valid})
+	if _, err := cluster.handleLocations(context.Background(), "unintroduced", "cluster.location_update", payload); err == nil {
+		t.Fatal("unauthenticated member published a location")
+	}
+	if cluster.manager.lookupCell(valid.Resource) != nil {
+		t.Fatal("unauthenticated location publication")
 	}
 }
