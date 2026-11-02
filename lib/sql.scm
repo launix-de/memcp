@@ -980,7 +980,12 @@ statement inside the per-query transaction callback. */
 	(define resultrow resultrow_sql)
 	(try (lambda () (begin
 		(if (equal? (session "syntax") "scheme") (begin
-			/* scheme syntax mode */
+			/* Recheck the authenticated user's current privilege for every Scheme
+			statement, including sessions switched before an admin revocation. */
+			(if (not (scan_lookup nil (table "system" false "user" false)
+				(list 372734710317056 (scan_boundary "equal" "username" 0 0 true true "" false) "admin")
+				(list (session "username"))))
+				(error "Scheme execution requires administrator privileges"))
 			(set print (lambda args (resultrow '("result" (concat args)))))
 			(resultrow '("result" (eval (scheme sql))))
 		) (time (with_autocommit session session_state query_seq sql

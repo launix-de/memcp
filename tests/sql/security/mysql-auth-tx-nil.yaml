@@ -3,6 +3,7 @@
 # MySQL auth callback must stay readonly and work with tx=nil
 
 metadata:
+  requires_mysql: true
   isolated: true
   version: "1.0"
   description: "mysql_auth and direct system.user lookup work without __memcp_tx"
@@ -202,6 +203,60 @@ test_cases:
             nil)))
         (and (nil? (response "status")) (equal? ((response "row") "supplied") "8")))
     expect: {result: true}
+
+
+  - name: MySQL Scheme mode rejects non-admins before evaluating their code
+    mysql:
+      username: auth_scan_nil_repro
+      password: secret123
+      statements:
+        - sql: "SET @username='root'"
+        - sql: "SET @syntax='scheme'"
+        - sql: '(error "scheme_body_executed")'
+          expect:
+            error: true
+            contains: ["administrator privileges"]
+            not_contains: ["scheme_body_executed"]
+        - sql: "(+ 40 2)"
+          expect:
+            error: true
+            contains: ["administrator privileges"]
+
+  - name: MySQL Scheme mode remains available to admins
+    mysql:
+      statements:
+        - sql: "SET @syntax='scheme'"
+        - sql: "(+ 40 2)"
+          expect:
+            rows: 1
+            data: [{result: 42}]
+
+  - name: MySQL Scheme mode rechecks admin revocation on an existing connection
+    setup:
+      - sql: "INSERT INTO system.user(username,password,admin) VALUES ('auth_scan_nil_other',PASSWORD('secret123'),TRUE)"
+    mysql:
+      username: auth_scan_nil_other
+      password: secret123
+      statements:
+        - sql: "SET @syntax='scheme'"
+        - sql: "(+ 40 2)"
+          expect:
+            rows: 1
+            data: [{result: 42}]
+        - sql: |
+            (scan nil (table "system" false "user" false)
+              (list 369436175368192 (scan_boundary "equal" "username" 0 0 true true "" false))
+              '("auth_scan_nil_other") '() (lambda () true) '("$update")
+              (lambda (acc update) (begin (update '("admin" false)) (+ acc 1)))
+              0 +)
+          expect:
+            rows: 1
+            data: [{result: 1}]
+        - sql: '(error "scheme_body_executed_after_revoke")'
+          expect:
+            error: true
+            contains: ["administrator privileges"]
+            not_contains: ["scheme_body_executed_after_revoke"]
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS tsql_auth_identity"
