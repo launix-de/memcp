@@ -609,6 +609,8 @@ func (initializer *atomicTableInitializer) UnmarshalJSON(data []byte) error {
 }
 
 type table struct {
+	// Published only when this table crosses its share of the node's shard RAM.
+	shardRAMFull atomic.Bool
 	// Query-local contribution reuse checks these atomics outside row loops.
 	// Writers bracket complete DML/visibility/topology batches. Identity is
 	// assigned once; revision and active-writer count need no catalog locks.
@@ -1290,10 +1292,9 @@ func (t *table) collectStatisticsFromShards(shards []*storageShard) {
 }
 
 // collectRebuiltColumnPlannerStatistics reads freshly rebuilt shard generations.
-// A generation can already receive forwarded writes, or become live, before
-// statistics publication finishes. Lock each shard independently and never
-// call this helper while holding table.mu: mutation callbacks may need table
-// metadata while they own the shard lock.
+// GetRead retains each immutable main generation. Copy its column pointer under
+// the shard lock, then prepare and collect outside mutation locks. Only scalar
+// extrema escape the reader; they must not retain a decoded dictionary arena.
 func collectRebuiltColumnPlannerStatistics(shards []*storageShard, columnName string) *columnPlannerStatistics {
 	stats := &columnPlannerStatistics{
 		Confidence:  1,
@@ -1306,6 +1307,16 @@ func collectRebuiltColumnPlannerStatistics(shards []*storageShard, columnName st
 	var valueBytes uint64
 	var hasValue bool
 	var buf []scm.Scmer
+	var currentScratch, minScratch, maxScratch *scm.TextScratch
+	less := func(a, b scm.Scmer, left, right *scm.TextScratch) bool {
+		if a.IsString() && b.IsString() {
+			if a == b {
+				return false
+			}
+			return scm.CompareTextCursors(a, b, false, left, right) < 0
+		}
+		return scm.Less(a, b)
+	}
 	for _, shard := range shards {
 		if shard == nil {
 			continue
@@ -1315,17 +1326,20 @@ func collectRebuiltColumnPlannerStatistics(shards []*storageShard, columnName st
 			shard = done.shard
 			defer done.Release()
 			shard.mu.RLock()
-			defer shard.mu.RUnlock()
-			columnStorage := shard.columns[columnName]
+			columnStorage, rows := shard.columns[columnName], shard.main_count
+			shard.mu.RUnlock()
 			if columnStorage == nil {
 				return
 			}
-			if cap(buf) < int(shard.main_count) {
-				buf = make([]scm.Scmer, shard.main_count)
+			if cap(buf) < int(rows) {
+				buf = make([]scm.Scmer, rows)
 			}
-			buf = buf[:shard.main_count]
+			buf = buf[:rows]
+			// Keep values compressed. Reuse bounded cursor scratch for the
+			// current value and both extrema, never a whole decoded dictionary.
 			reader := columnStorage.GetCachedReader(ReadCompressed)
-			reader.GetValueRange(0, shard.main_count, buf, 1)
+			defer ReleaseColumnReader(reader)
+			reader.GetValueRange(0, rows, buf, 1)
 			for _, value := range buf {
 				frequencies.observe(value)
 				rowCount++
@@ -1333,7 +1347,12 @@ func collectRebuiltColumnPlannerStatistics(shards []*storageShard, columnName st
 					stats.NullCount++
 					continue
 				}
-				if value.IsString() || value.IsCString() || value.IsBString() {
+				if value.IsBufferString() {
+					valueBytes += uint64(scm.BufferStringLength(value))
+					if currentScratch == nil && scm.BufferStringRequiresScratch(value) {
+						currentScratch, minScratch, maxScratch = new(scm.TextScratch), new(scm.TextScratch), new(scm.TextScratch)
+					}
+				} else if value.IsString() {
 					valueBytes += uint64(len(value.String()))
 				}
 				if !hasValue {
@@ -1342,12 +1361,18 @@ func collectRebuiltColumnPlannerStatistics(shards []*storageShard, columnName st
 					hasValue = true
 					continue
 				}
-				if scm.Less(value, stats.MinEstimate) {
+				if less(value, stats.MinEstimate, currentScratch, minScratch) {
 					stats.MinEstimate = value
 				}
-				if scm.Less(stats.MaxEstimate, value) {
+				if less(stats.MaxEstimate, value, maxScratch, currentScratch) {
 					stats.MaxEstimate = value
 				}
+			}
+			if stats.MinEstimate.IsString() {
+				stats.MinEstimate = scm.NewString(strings.Clone(stats.MinEstimate.String()))
+			}
+			if stats.MaxEstimate.IsString() {
+				stats.MaxEstimate = scm.NewString(strings.Clone(stats.MaxEstimate.String()))
 			}
 		}()
 	}

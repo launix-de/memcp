@@ -2087,10 +2087,12 @@ def run_cluster_placement(args, artifacts, journal):
             source.scm(f'(rebuild (table "{DATABASE}" false "big_items" false) true false)')
         standalone_operators = []
         operator_shared = None
+        # The placement/co-location preflight also runs in the generic cluster
+        # and SQL-context scenarios, not just the operator YAML profile.
+        source.sql("CREATE TABLE operator_keys(id INT PRIMARY KEY) ENGINE=SAFE")
+        source.sql("INSERT INTO operator_keys VALUES(42000),(90000),(175000),(245000)")
+        source.scm(f'(rebuild (table "{DATABASE}" false "operator_keys" false) true false)')
         if args.cluster_operators_only:
-            source.sql("CREATE TABLE operator_keys(id INT PRIMARY KEY) ENGINE=SAFE")
-            source.sql("INSERT INTO operator_keys VALUES(42000),(90000),(175000),(245000)")
-            source.scm(f'(rebuild (table "{DATABASE}" false "operator_keys" false) true false)')
             # Both executions must start from the same committed fixture.
             # Rollback restores visibility, but not physical delta generations;
             # copying after the oracle would also propagate committed changes.
@@ -2188,8 +2190,25 @@ def run_cluster_placement(args, artifacts, journal):
             raise DrillFailure("ordinary SUM did not execute on another node")
         if states[0]["state"]["capacity"] == 0:
             raise DrillFailure("tight-RAM query did not exercise admission rejection/delegation")
-        if sum(item["state"]["locality"] for item in states) == 0:
-            raise DrillFailure("warm-holder query did not exercise locality delegation")
+        # An owner on another peer must not force delegation while this worker
+        # has RAM for secondary/tertiary inputs. Acquire the small table once,
+        # then retain native S/O locally across a four-way join and its repeat.
+        local = nodes[cold_worker]
+        previous_fraction = int(local.client.scm('(settings "ShardRamPercent")'))
+        try:
+            local.client.scm('(settings "ShardRamPercent" 100)')
+            before_local = status(local)["state"]["delegated"]
+            local_join = ("SELECT SUM(a.id) AS total FROM operator_keys a "
+                          "JOIN operator_keys b ON b.id=a.id "
+                          "JOIN operator_keys c ON c.id=b.id "
+                          "JOIN operator_keys d ON d.id=c.id")
+            for _ in range(2):
+                expect(local.client.number(local_join, "total"), 552000,
+                       "four-way local subscan result")
+            expect(status(local)["state"]["delegated"] - before_local, 0,
+                   "available worker RAM keeps nested joins local")
+        finally:
+            local.client.scm(f'(settings "ShardRamPercent" {previous_fraction})')
         if args.cluster_operators_only:
             operators = run_cluster_yaml_cases(
                 suite or OPERATOR_SUITE, nodes[0], nodes, shared, journal,

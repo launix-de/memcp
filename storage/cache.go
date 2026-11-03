@@ -84,6 +84,18 @@ type softItem struct {
 	maxIdleTime     int64                     // force-evict if idle for this many nanos (0 = no limit)
 }
 
+// shardTable derives payload ownership from the native registration. Keeping a
+// second table pointer on every cache/index entry would enlarge all softItems,
+// although only native shards participate in the per-table quota.
+func (item *softItem) shardTable() *table {
+	if item.evictType == TypeShard {
+		if shard, ok := item.pointer.(*storageShard); ok {
+			return shard.t
+		}
+	}
+	return nil
+}
+
 type evictionMode uint8
 
 const (
@@ -184,11 +196,6 @@ func (h *softItemHeap) Pop() any {
 	return item
 }
 
-// isPersistedType returns true for types representing persisted (disk-reloadable) data.
-func isPersistedType(t EvictableType) bool {
-	return t == TypeShard || t == TypeIndex
-}
-
 // systemFreeThreshold is the minimum fraction of total RAM that must remain free
 // system-wide before the cache triggers eviction (regardless of our own budget).
 const systemFreeThreshold = 10 // percent
@@ -235,7 +242,11 @@ type CacheManager struct {
 	// Published by the actor from its existing O(1) per-type ledger. Warm scans
 	// never enter the actor or reserve guessed payload/scratch memory.
 	shardCapacity atomic.Pointer[shardRAMSnapshot]
-	shardPercent  int
+	// Keep actor-owned allocation counters off the cold-admission cache lines.
+	// The padding covers both 64- and 128-byte cache lines.
+	_                [128]byte
+	shardPercent     int
+	tableShardMemory map[*table]int64 // actor-owned payload ledger, using the existing registrations
 	// All metadata below is owned by run(). Query workers only publish lifecycle
 	// messages; cache-object children never become global registrations.
 	minimumMemory   int64 // eviction floor; owned by run(), like the budgets
@@ -258,6 +269,7 @@ type CacheManager struct {
 }
 
 type cacheOp struct {
+	shardTable         *table          // a shard reader released a payload that may now be reclaimed
 	shardPercent       int             // nonzero: change the cold-load admission fraction
 	ready              <-chan struct{} // optional: owner released its lock after enqueueing
 	add                *softItem
@@ -479,20 +491,28 @@ func (cm *CacheManager) persistedMemory() int64 {
 }
 
 // runEvictionChecks checks both persisted and total budgets and evicts as needed.
-func (cm *CacheManager) runEvictionChecks(additionalSize int64) {
+func (cm *CacheManager) runEvictionChecks(additionalSize int64, tbl *table) {
 	if cm.minimumMemory > 0 && cm.currentMemory <= cm.minimumMemory {
 		return
 	}
-	// Tier 1: persisted budget (shards + indexes only)
+	// Payload competes with payload. Cache/index allocations never evict native
+	// shard storage; the separate shard budget reserves RAM for those caches.
 	persistedBudget := cm.persistedBudget
+	if cm.memoryBudget > 0 && (persistedBudget <= 0 || cm.memoryBudget < persistedBudget) {
+		persistedBudget = cm.memoryBudget
+	}
 	if sharedClusterMounts.Load() != nil {
-		limit := cm.memoryBudget * int64(cm.shardPercent) / 100
+		limit := cm.shardBudget()
 		if persistedBudget <= 0 || limit < persistedBudget {
 			persistedBudget = limit
 		}
+		if tbl != nil && limit >= 3 {
+			cm.evict(cm.tableShardMemory[tbl], limit/3-1, 0, func(kind EvictableType) bool { return kind == TypeShard }, tbl)
+		}
 	}
 	if persistedBudget > 0 {
-		cm.evict(cm.persistedMemory(), persistedBudget, additionalSize, isPersistedType)
+		cm.evict(cm.sizeByType[TypeShard], persistedBudget, 0, func(kind EvictableType) bool { return kind == TypeShard }, nil)
+		cm.evict(cm.sizeByType[TypeIndex], max(0, cm.persistedBudget-cm.sizeByType[TypeShard]), 0, func(kind EvictableType) bool { return kind == TypeIndex }, nil)
 	}
 
 	// Tier 2+3: total budget merged with system-pressure budget — single evict pass.
@@ -522,8 +542,92 @@ func (cm *CacheManager) runEvictionChecks(additionalSize int64) {
 	}
 
 	if effectiveBudget >= 0 {
-		cm.evict(cm.currentMemory, effectiveBudget, additionalSize, nil)
+		cm.evict(cm.currentMemory-cm.sizeByType[TypeShard], max(0, effectiveBudget-cm.sizeByType[TypeShard]), additionalSize,
+			func(kind EvictableType) bool { return kind != TypeShard }, nil)
 	}
+}
+
+// applyBatch accounts an already queued, bounded group before reclaiming. All
+// operations retain channel order; synchronous operations terminate the batch
+// and are acknowledged only after budget enforcement and admission publication.
+// This avoids retrying an unchanged pinned heap for every small async delta.
+func (cm *CacheManager) applyBatch(op cacheOp) (closed bool) {
+	tables := make(map[*table]struct{})
+	budgetChanged := false
+batch:
+	for applied := 0; ; applied++ {
+		if op.ready != nil {
+			<-op.ready
+		}
+		tbl := op.shardTable
+		if op.add != nil {
+			tbl = op.add.shardTable()
+		} else if item := cm.itemMap[op.updatePtr]; item != nil {
+			tbl = item.shardTable()
+		}
+		if tbl != nil {
+			tables[tbl] = struct{}{}
+		}
+		if op.shardPercent != 0 {
+			cm.shardPercent = op.shardPercent
+			budgetChanged = true
+		} else if op.add != nil {
+			cm.addInternal(op.add)
+		} else if op.del != nil {
+			cm.removeByPointer(op.del)
+		} else if op.updatePtr != nil {
+			if op.setSize {
+				cm.setSizeInternal(op.updatePtr, op.updateDelta)
+			} else {
+				cm.updateSizeInternal(op.updatePtr, op.updateDelta)
+			}
+		} else if op.budgetUpdate {
+			cm.memoryBudget = op.budgetVal
+			cm.persistedBudget = op.persistedBudgetVal
+			cm.minimumMemory = op.minimumMemoryVal
+			budgetChanged = true
+		}
+		// Close admission promptly even while queued accounting continues.
+		// Reopening still waits for the complete pressure pass below.
+		if cm.sizeByType[TypeShard] >= cm.shardBudget() {
+			cm.publishShardRAM()
+		}
+		if op.done != nil || op.statResult != nil || op.ready != nil || applied+1 >= cap(cm.opChan) {
+			break
+		}
+		select {
+		case next, ok := <-cm.opChan:
+			if !ok {
+				closed = true
+				break batch
+			}
+			op = next
+		default:
+			break batch
+		}
+	}
+	if budgetChanged {
+		for table, used := range cm.tableShardMemory {
+			cm.publishTableShardRAM(table, used)
+			tables[table] = struct{}{}
+		}
+	}
+	for table := range tables {
+		cm.runEvictionChecks(0, table)
+	}
+	cm.runEvictionChecks(op.pressureSize, nil)
+	cm.publishShardRAM()
+	if op.statResult != nil {
+		op.statResult <- CacheStat{ShardMemory: cm.sizeByType[TypeShard], ShardBudget: cm.shardBudget(),
+			SizeByType: cm.sizeByType, CountByType: cm.countByType, CurrentMemory: cm.currentMemory,
+			MemoryBudget: cm.memoryBudget, MinimumMemory: cm.minimumMemory,
+			PersistedBudget: cm.persistedBudget, PersistedMemory: cm.persistedMemory()}
+		close(op.statResult)
+	}
+	if op.done != nil {
+		close(op.done)
+	}
+	return closed
 }
 
 // run is the single-threaded goroutine handling all operations.
@@ -534,49 +638,9 @@ func (cm *CacheManager) run() {
 	for {
 		select {
 		case op, ok := <-cm.opChan:
-			if !ok {
+			if !ok || cm.applyBatch(op) {
 				return
 			}
-			if op.ready != nil {
-				<-op.ready
-			}
-			if op.shardPercent != 0 {
-				cm.shardPercent = op.shardPercent
-			} else if op.add != nil {
-				cm.addInternal(op.add)
-			} else if op.del != nil {
-				cm.removeByPointer(op.del)
-			} else if op.updatePtr != nil {
-				if op.setSize {
-					cm.setSizeInternal(op.updatePtr, op.updateDelta)
-				} else {
-					cm.updateSizeInternal(op.updatePtr, op.updateDelta)
-				}
-			} else if op.budgetUpdate {
-				cm.memoryBudget = op.budgetVal
-				cm.persistedBudget = op.persistedBudgetVal
-				cm.minimumMemory = op.minimumMemoryVal
-			} else if op.pressureSize > 0 {
-				cm.runEvictionChecks(op.pressureSize)
-			} else if op.statResult != nil {
-				op.statResult <- CacheStat{ShardMemory: cm.persistedMemory(), ShardBudget: cm.memoryBudget * int64(cm.shardPercent) / 100,
-					SizeByType:      cm.sizeByType,
-					CountByType:     cm.countByType,
-					CurrentMemory:   cm.currentMemory,
-					MemoryBudget:    cm.memoryBudget,
-					MinimumMemory:   cm.minimumMemory,
-					PersistedBudget: cm.persistedBudget,
-					PersistedMemory: cm.persistedMemory(),
-				}
-				close(op.statResult)
-			}
-			cm.publishShardRAM()
-			if op.done != nil {
-				close(op.done)
-			}
-			// check if we need cleanup after add or updateSize
-			cm.runEvictionChecks(0)
-			cm.publishShardRAM()
 		case <-expireTicker.C:
 			cm.evictExpired()
 			cm.publishShardRAM()
@@ -624,6 +688,12 @@ func (cm *CacheManager) evictExpired() {
 func (cm *CacheManager) addInternal(item *softItem) {
 	item.registeredAt = time.Now().UnixNano()
 	if old, ok := cm.itemMap[item.pointer]; ok {
+		if old.shardTable() == item.shardTable() {
+			cm.adjustTableShardMemory(item, item.size-old.size)
+		} else {
+			cm.adjustTableShardMemory(old, -old.size)
+			cm.adjustTableShardMemory(item, item.size)
+		}
 		// re-registration: update in place
 		delta := item.size - old.size
 		cm.currentMemory += delta
@@ -648,6 +718,7 @@ func (cm *CacheManager) addInternal(item *softItem) {
 		return
 	}
 	cm.itemMap[item.pointer] = item
+	cm.adjustTableShardMemory(item, item.size)
 	cm.currentMemory += item.size
 	cm.sizeByType[item.evictType] += item.size
 	cm.countByType[item.evictType]++
@@ -670,6 +741,7 @@ func (cm *CacheManager) removeInternal(pointer any, freedByType *[numEvictableTy
 		return
 	}
 	cm.currentMemory -= item.size
+	cm.adjustTableShardMemory(item, -item.size)
 	cm.sizeByType[item.evictType] -= item.size
 	cm.countByType[item.evictType]--
 	if freedByType != nil {
@@ -694,6 +766,7 @@ func (cm *CacheManager) updateSizeInternal(pointer any, delta int64) {
 		delta = -item.size
 	}
 	cm.currentMemory += delta
+	cm.adjustTableShardMemory(item, delta)
 	cm.sizeByType[item.evictType] += delta
 	item.size += delta
 	item.evictionScore = item.size * evictableWeights[item.evictType]
@@ -727,7 +800,10 @@ type evictionCandidate struct {
 	offer evictionOffer
 }
 
-func (cm *CacheManager) usage(typeFilter func(EvictableType) bool) int64 {
+func (cm *CacheManager) usage(typeFilter func(EvictableType) bool, tbl *table) int64 {
+	if tbl != nil {
+		return cm.tableShardMemory[tbl]
+	}
 	if typeFilter == nil {
 		return cm.currentMemory
 	}
@@ -785,6 +861,7 @@ func (cm *CacheManager) applyEviction(candidate evictionCandidate, mode eviction
 		return 0
 	}
 	cm.currentMemory -= freed
+	cm.adjustTableShardMemory(item, -freed)
 	cm.sizeByType[item.evictType] -= freed
 	freedByType[item.evictType] += freed
 	item.size -= freed
@@ -795,7 +872,7 @@ func (cm *CacheManager) applyEviction(candidate evictionCandidate, mode eviction
 // evict uses bounded candidate batches. Each batch first collects immutable
 // offers, then applies partial alternatives greedily before full alternatives.
 // If actual reclamation is smaller than proposed, another top-k batch is read.
-func (cm *CacheManager) evict(currentUsage, budget, additionalSize int64, typeFilter func(EvictableType) bool) {
+func (cm *CacheManager) evict(currentUsage, budget, additionalSize int64, typeFilter func(EvictableType) bool, tbl *table) {
 	if (cm.minimumMemory > 0 && cm.currentMemory <= cm.minimumMemory) || currentUsage+additionalSize <= budget {
 		return
 	}
@@ -808,8 +885,8 @@ func (cm *CacheManager) evict(currentUsage, budget, additionalSize int64, typeFi
 	var freedByType [numEvictableTypes]int64
 	var totalFreed int64
 
-	for cm.usage(typeFilter) > targetBudget && cm.h.Len() > 0 {
-		needToFree := cm.usage(typeFilter) - targetBudget
+	for cm.usage(typeFilter, tbl) > targetBudget && cm.h.Len() > 0 {
+		needToFree := cm.usage(typeFilter, tbl) - targetBudget
 		candidateTarget := needToFree * 2
 		if candidateTarget < 1 {
 			candidateTarget = 1
@@ -821,7 +898,7 @@ func (cm *CacheManager) evict(currentUsage, budget, additionalSize int64, typeFi
 		// to compare that warm owner with small, low-benefit probation caches.
 		for (candidateSum < candidateTarget || len(candidates) < 16) && cm.h.Len() > 0 {
 			item := heap.Pop(&cm.h).(*softItem)
-			if typeFilter != nil && !typeFilter(item.evictType) {
+			if (typeFilter != nil && !typeFilter(item.evictType)) || (tbl != nil && item.shardTable() != tbl) {
 				skipped = append(skipped, item)
 				continue
 			}
@@ -855,7 +932,7 @@ func (cm *CacheManager) evict(currentUsage, budget, additionalSize int64, typeFi
 		}
 		// Pass 1: prefer shedding object-owned caches while preserving parents.
 		for _, candidate := range candidates {
-			if cm.usage(typeFilter) <= targetBudget {
+			if cm.usage(typeFilter, tbl) <= targetBudget {
 				break
 			}
 			if candidate.offer.partialBytes <= 0 || !eligible(candidate.item) {
@@ -865,7 +942,7 @@ func (cm *CacheManager) evict(currentUsage, budget, additionalSize int64, typeFi
 		}
 		// Pass 2: fully evict surviving parents if partial reclamation was insufficient.
 		for _, candidate := range candidates {
-			if cm.usage(typeFilter) <= targetBudget {
+			if cm.usage(typeFilter, tbl) <= targetBudget {
 				break
 			}
 			if candidate.offer.fullBytes <= 0 || !eligible(candidate.item) {

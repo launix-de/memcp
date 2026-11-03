@@ -620,3 +620,28 @@ func TestReducerInitializerOptimizedAndJIT(t *testing.T) {
 		}
 	}
 }
+
+func TestNamedLookupPreservesPresenceAndShadowing(t *testing.T) {
+	outer := &Env{Vars: Vars{"shadow": NewInt(1), "nil_value": NewInt(2), "outer_only": NewInt(3)}}
+	inner := &Env{Vars: Vars{"shadow": NewInt(4), "nil_value": NewNil(), "false_value": NewBool(false)}, Outer: outer}
+	for _, tc := range []struct {
+		name  Symbol
+		value Scmer
+		found bool
+	}{
+		{"shadow", NewInt(4), true}, {"nil_value", NewNil(), true},
+		{"false_value", NewBool(false), true}, {"outer_only", NewInt(3), true},
+		{"missing", NewNil(), false},
+	} {
+		value, found := inner.Lookup(tc.name)
+		if found != tc.found || !Equal(value, tc.value) {
+			t.Fatalf("lookup %q = %v, %t; want %v, %t", tc.name, value, found, tc.value, tc.found)
+		}
+		if result := Eval(NewSymbol(string(tc.name)), inner); !Equal(result, tc.value) {
+			t.Fatalf("eval %q = %v; want %v", tc.name, result, tc.value)
+		}
+	}
+	if inner.FindRead("shadow") != inner || inner.FindRead("outer_only") != outer || inner.FindRead("missing") != outer {
+		t.Fatal("owning-frame lookup changed its existing scope semantics")
+	}
+}

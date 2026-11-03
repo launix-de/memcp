@@ -386,12 +386,8 @@ restart:
 	case tagSymbol:
 		// Fallback for names not folded to numbered vars/native funcs by the optimizer.
 		sym := mustSymbol(expression)
-		if scope := en.FindRead(sym); scope != nil {
-			if value, ok := scope.Vars[sym]; ok {
-				return value
-			}
-		}
-		return NewNil()
+		value, _ := en.Lookup(sym)
+		return value
 	case tagSourceInfo:
 		return evalWithSourceInfo(expression.SourceInfo(), en)
 	default:
@@ -1007,11 +1003,7 @@ func (e *Env) definitionTarget() *Env {
 }
 
 func (e *Env) optimizerProcHint(s Symbol) (TypeInfo, bool) {
-	binding := e.FindRead(s)
-	if binding == nil {
-		return tiZero, false
-	}
-	bound, exists := binding.Vars[s]
+	bound, exists := e.Lookup(s)
 	if !exists || bound.GetTag() != tagProc {
 		return tiZero, false
 	}
@@ -1022,14 +1014,30 @@ func (e *Env) optimizerProcHint(s Symbol) (TypeInfo, bool) {
 	return proc.OptimizerMeta.Return, true
 }
 
+// Lookup reads a named binding in one walk. A present nil still shadows outer
+// bindings; callers needing the owning frame use FindRead instead. Keep this
+// traversal shared rather than duplicating its loop in the large evaluator.
+//
+//go:noinline
+func (e *Env) Lookup(s Symbol) (Scmer, bool) {
+	for e != nil {
+		if value, ok := e.Vars[s]; ok {
+			return value, true
+		}
+		e = e.Outer
+	}
+	return NewNil(), false
+}
+
+// Keep frame traversal out of line, as with its former recursive implementation.
+//
+//go:noinline
 func (e *Env) FindRead(s Symbol) *Env {
-	if _, ok := e.Vars[s]; ok {
-		return e
-	} else {
-		if e.Outer == nil {
+	for {
+		if _, ok := e.Vars[s]; ok || e.Outer == nil {
 			return e
 		}
-		return e.Outer.FindRead(s)
+		e = e.Outer
 	}
 }
 

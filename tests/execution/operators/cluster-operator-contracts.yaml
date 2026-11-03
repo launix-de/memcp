@@ -108,6 +108,35 @@ test_cases:
   expect:
     cluster:
       min_remote_shards: 1
+- name: join-three-tables-local-subscans
+  sql: SELECT SUM(b.v0) AS total FROM operator_keys k JOIN big_items b ON b.id=k.id JOIN operator_keys k2 ON k2.id=b.id
+  timing_samples: 11
+  timing_aggregation: total
+  warmup: 0
+  expect:
+    rows: 1
+    data: [{total: 4832650806}]
+    cluster:
+      min_remote_shards: 1
+- name: join-four-tables-local-subscans
+  sql: SELECT SUM(b.v0) AS total FROM operator_keys k JOIN big_items b ON b.id=k.id JOIN operator_keys k2 ON k2.id=b.id JOIN operator_keys k3 ON k3.id=k2.id
+  timing_samples: 11
+  timing_aggregation: total
+  warmup: 0
+  expect:
+    rows: 1
+    data: [{total: 4832650806}]
+    cluster:
+      min_remote_shards: 1
+- name: join-four-tables-empty-inner
+  sql: SELECT COUNT(*) AS n FROM operator_keys k JOIN big_items b ON b.id=k.id JOIN operator_keys k2 ON k2.id=b.id JOIN operator_keys k3 ON k3.id=k2.id WHERE k3.id<0
+  expect:
+    rows: 1
+    data: [{n: 0}]
+- name: join-four-tables-unknown-column
+  sql: SELECT SUM(b.v0) AS total FROM operator_keys k JOIN big_items b ON b.id=k.id JOIN operator_keys k2 ON k2.id=b.id JOIN operator_keys k3 ON k3.missing=k2.id
+  expect:
+    error: true
 - name: membership-source
   sql: SELECT SUM(v0) AS total FROM big_items WHERE id IN (SELECT id FROM operator_keys)
   expect:

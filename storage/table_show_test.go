@@ -970,3 +970,123 @@ func TestShowPlannerSelectorsDoNotAcquireDiagnosticOwnership(t *testing.T) {
 		t.Fatal("planner show selector waited for diagnostic/table ownership")
 	}
 }
+
+func TestRebuiltStringStatisticsOwnTheirBoundsAndReleaseReaders(t *testing.T) {
+	for _, warm := range []bool{false, true} {
+		t.Run(fmt.Sprintf("decoded_cache_%t", warm), func(t *testing.T) {
+			const rows = 4096
+			values := make([]scm.Scmer, rows)
+			var bytes uint64
+			for i := range values {
+				values[i] = scm.NewString(fmt.Sprintf("item-%04d-repeated-compressible-payload-🍀", i))
+			}
+			values[1], values[2] = scm.NewNil(), scm.NewString("")
+			values[4] = values[3]
+			for _, value := range values {
+				if !value.IsNil() {
+					bytes += uint64(len(value.String()))
+				}
+			}
+			column := new(StorageString)
+			column.prepare()
+			for i, value := range values {
+				column.scan(uint32(i), value)
+			}
+			column.init(rows)
+			for i, value := range values {
+				column.build(uint32(i), value)
+			}
+			column.finish()
+			if !column.GetValue(0).IsBufferString() {
+				t.Fatal("fixture did not retain compressed string handles")
+			}
+			if warm {
+				reader := column.GetCachedReader(ReadDecoded)
+				ReleaseColumnReader(reader)
+			}
+			shard := &storageShard{main_count: rows, columns: map[string]ColumnStorage{"label": column}}
+			shard.setState(SHARED)
+			shard.plannerMainRows.Store(rows)
+			stats := collectRebuiltColumnPlannerStatistics([]*storageShard{shard}, "label")
+			if stats.MinEstimate.GetTag() != scm.TagString || stats.MaxEstimate.GetTag() != scm.TagString {
+				t.Fatal("published bounds retain compressed column handles")
+			}
+			if warm {
+				if cache := column.dictCache.Load(); cache == nil || cache.users != 0 {
+					t.Fatal("statistics did not release the decoded reader lease")
+				}
+				if column.EvictDictionary() == 0 {
+					t.Fatal("statistics prevented dictionary reclamation")
+				}
+			} else if column.dictCache.Load() != nil {
+				t.Fatal("cold statistics unnecessarily published a decoded dictionary")
+			}
+			if stats.MinEstimate.String() != "" || stats.MaxEstimate.String() != values[rows-1].String() {
+				t.Fatal("bounds changed after releasing the source reader")
+			}
+			if stats.NullCount != 1 || stats.NullFraction != 1.0/rows || stats.AverageValueBytes != float64(bytes)/rows || stats.KeyFrequency != nil {
+				t.Fatalf("incorrect text statistics: %+v", stats)
+			}
+		})
+	}
+}
+
+type pausedStatisticsStorage struct {
+	ColumnStorage
+	entered chan struct{}
+	resume  chan struct{}
+}
+
+func (s *pausedStatisticsStorage) GetCachedReader(hints ColumnReadHints) ColumnReader {
+	return &pausedStatisticsReader{ColumnReader: s.ColumnStorage.GetCachedReader(hints), owner: s}
+}
+
+type pausedStatisticsReader struct {
+	ColumnReader
+	owner *pausedStatisticsStorage
+}
+
+func (r *pausedStatisticsReader) GetValueRange(row, count uint32, target []scm.Scmer, stride int) {
+	close(r.owner.entered)
+	<-r.owner.resume
+	r.ColumnReader.GetValueRange(row, count, target, stride)
+}
+
+func (r *pausedStatisticsReader) release() { ReleaseColumnReader(r.ColumnReader) }
+
+func TestRebuiltStatisticsPreparationDoesNotHoldMutationLock(t *testing.T) {
+	column := &pausedStatisticsStorage{
+		ColumnStorage: buildStringColumn([]string{"first", "last"}),
+		entered:       make(chan struct{}), resume: make(chan struct{}),
+	}
+	shard := &storageShard{main_count: 2, columns: map[string]ColumnStorage{"label": column}}
+	shard.setState(SHARED)
+	shard.plannerMainRows.Store(2)
+	var once sync.Once
+	resume := func() { once.Do(func() { close(column.resume) }) }
+	defer resume()
+	finished := make(chan struct{})
+	go func() {
+		collectRebuiltColumnPlannerStatistics([]*storageShard{shard}, "label")
+		close(finished)
+	}()
+	select {
+	case <-column.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("statistics reader did not start")
+	}
+	writer := make(chan struct{})
+	go func() { shard.mu.Lock(); shard.mu.Unlock(); close(writer) }()
+	blocked := false
+	select {
+	case <-writer:
+	case <-time.After(time.Second):
+		blocked = true
+	}
+	resume()
+	<-finished
+	<-writer
+	if blocked {
+		t.Fatal("statistics preparation blocked the shard's mutation lock")
+	}
+}

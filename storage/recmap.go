@@ -399,7 +399,7 @@ func recMapCallClosure(shard *storageShard, currentTx *TxContext) *func(uint32, 
 // collects completed builders on its serial consumer; no row-loop lock is
 // needed, and the later mapper owns each builder on one fanout worker.
 type recMapBuildRows struct {
-	rows   []recMapSourceRow
+	rows   []recMapBuildRow
 	mapper *scm.SerialProc
 	width  int
 	// Private to this serial shard builder. Completed keys own their
@@ -565,7 +565,7 @@ func newRecMapEquiFirstOfMapper(currentTx *TxContext, target *table, targetKeyAl
 func newRecMapHashFirstOfMapper(currentTx *TxContext, target *table, targetCols []string,
 	targetKeyFn scm.Scmer, sourceKeyFn scm.Scmer) scm.Scmer {
 	var buildOnce sync.Once
-	var targetRows []recMapSourceRow
+	var targetRows []recMapBuildRow
 	var buildPanic any
 	var targetKeyWidth int
 	build := func() {
@@ -601,7 +601,7 @@ func newRecMapHashFirstOfMapper(currentTx *TxContext, target *table, targetCols 
 					} else if len(key) != rows.width {
 						panic("recmap hash target mapper returned unequal key widths")
 					}
-					rows.rows = append(rows.rows, recMapSourceRow{target: ref, key: append([]scm.Scmer(nil), key...)})
+					rows.rows = append(rows.rows, recMapBuildRow{record: ref, key: rows.copyKey(key)})
 				}
 			}
 			return scm.NewCustom(TagRecMapBuild, unsafe.Pointer(rows))
@@ -622,8 +622,8 @@ func newRecMapHashFirstOfMapper(currentTx *TxContext, target *table, targetCols 
 			} else if part.width != 0 && part.width != targetKeyWidth {
 				panic("recmap hash target mapper returned unequal key widths")
 			}
-			targetRows = append(targetRows, part.rows...)
 		}
+		targetRows = collectRecMapBuildRows(parts)
 		sort.SliceStable(targetRows, func(i, j int) bool {
 			return compareProjectKey(targetRows[i].key, targetRows[j].key) < 0
 		})
@@ -671,7 +671,7 @@ func newRecMapHashFirstOfMapper(currentTx *TxContext, target *table, targetCols 
 			})
 			for position < len(order) && compareProjectKey(keys[order[position]], row.key) == 0 {
 				if output[order[position]].IsNil() {
-					output[order[position]] = newRecordRef(row.target.shard, row.target.recid)
+					output[order[position]] = newRecordRef(row.record.shard, row.record.recid)
 				}
 				position++
 			}
@@ -696,7 +696,7 @@ func newRecMapRangeFirstMapper(currentTx *TxContext, target *table, targetPointC
 	strictUpper := relation == "<=" || relation == ">"
 	lowerSide := relation == "<=" || relation == "<"
 	var buildOnce sync.Once
-	var targetRows []recMapSourceRow
+	var targetRows []recMapBuildRow
 	var buildPanic any
 	build := func() {
 		defer func() { buildPanic = recover() }()
@@ -716,8 +716,8 @@ func newRecMapRangeFirstMapper(currentTx *TxContext, target *table, targetPointC
 			}
 			if !recMapKeyHasNull(args[2:]) {
 				key := rows.copyKey(args[2:])
-				rows.rows = append(rows.rows, recMapSourceRow{
-					target: recordRefFromScmer(args[1]), key: key,
+				rows.rows = append(rows.rows, recMapBuildRow{
+					record: recordRefFromScmer(args[1]), key: key,
 				})
 			}
 			return scm.NewCustom(TagRecMapBuild, unsafe.Pointer(rows))
@@ -732,9 +732,7 @@ func newRecMapRangeFirstMapper(currentTx *TxContext, target *table, targetPointC
 		target.scan(currentTx, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, nil,
 			scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewBool(true) }),
 			columns, reduce, scm.NewNil(), combine, false)
-		for _, part := range parts {
-			targetRows = append(targetRows, part.rows...)
-		}
+		targetRows = collectRecMapBuildRows(parts)
 		sort.SliceStable(targetRows, func(i, j int) bool {
 			return compareProjectKey(targetRows[i].key, targetRows[j].key) < 0
 		})
@@ -788,10 +786,34 @@ func newRecMapRangeFirstMapper(currentTx *TxContext, target *table, targetPointC
 				compareProjectKey(targetRows[best].key[:pointWidth], key[:pointWidth]) != 0 {
 				continue
 			}
-			output[i] = newRecordRef(targetRows[best].target.shard, targetRows[best].target.recid)
+			output[i] = newRecordRef(targetRows[best].record.shard, targetRows[best].record.recid)
 		}
 		return scm.NewSlice(output)
 	})
+}
+
+// A scan builder needs only one physical record and its copied key. Projected
+// payload and a second row identity belong to later mapping stages.
+type recMapBuildRow struct {
+	key    []scm.Scmer
+	record recMapTarget
+}
+
+// Builders are private until the scan joins. Reuse one completed image, or
+// allocate its exact combined size once while preserving shard/tie order.
+func collectRecMapBuildRows(parts []*recMapBuildRows) []recMapBuildRow {
+	if len(parts) == 1 {
+		return parts[0].rows
+	}
+	count := 0
+	for _, part := range parts {
+		count += len(part.rows)
+	}
+	rows := make([]recMapBuildRow, 0, count)
+	for _, part := range parts {
+		rows = append(rows, part.rows...)
+	}
+	return rows
 }
 
 type recMapSourceRow struct {
@@ -967,8 +989,7 @@ func scanRecMap(currentTx *TxContext, source scm.Scmer, accessSchema scm.Scmer, 
 			panic("scan_recmap received an invalid shard accumulator")
 		}
 		sourceRef := recordRefFromScmer(args[1])
-		build.rows = append(build.rows, recMapSourceRow{shard: sourceRef.shard, recid: sourceRef.recid,
-			key: build.copyKey(args[2:])})
+		build.rows = append(build.rows, recMapBuildRow{record: sourceRef, key: build.copyKey(args[2:])})
 		return scm.NewCustom(TagRecMapBuild, unsafe.Pointer(build))
 	})
 	combine := scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
@@ -1002,10 +1023,10 @@ func scanRecMap(currentTx *TxContext, source scm.Scmer, accessSchema scm.Scmer, 
 			}
 		}()
 		rows := parts[index].rows
-		sort.Slice(rows, func(i, j int) bool { return rows[i].recid < rows[j].recid })
-		part := recMapShard{sourceShard: rows[0].shard, sourceRecIDs: make([]uint32, len(rows)), targets: make([]recMapTarget, len(rows))}
+		sort.Slice(rows, func(i, j int) bool { return rows[i].record.recid < rows[j].record.recid })
+		part := recMapShard{sourceShard: rows[0].record.shard, sourceRecIDs: make([]uint32, len(rows)), targets: make([]recMapTarget, len(rows))}
 		for i := range rows {
-			part.sourceRecIDs[i] = rows[i].recid
+			part.sourceRecIDs[i] = rows[i].record.recid
 		}
 		for start := 0; start < len(rows); start += recMapMapperBatchSize {
 			end := start + recMapMapperBatchSize

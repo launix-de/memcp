@@ -22,15 +22,18 @@ func compareBufferText(a, b Scmer, fold bool) int {
 	if a.GetTag() == tagLZ4 || b.GetTag() == tagLZ4 {
 		return compareLZ4Text(a, b, fold)
 	}
-	return compareTextCursors(a, b, fold, nil, nil)
+	return CompareTextCursors(a, b, fold, nil, nil)
 }
 
 func compareLZ4Text(a, b Scmer, fold bool) int {
 	var left, right TextScratch
-	return compareTextCursors(a, b, fold, &left, &right)
+	return CompareTextCursors(a, b, fold, &left, &right)
 }
 
-func compareTextCursors(a, b Scmer, fold bool, left, right *TextScratch) int {
+// CompareTextCursors compares represented text using caller-owned decoder
+// scratch. Compressed operands require their own scratch; retaining it across
+// comparisons reuses decoded blocks without materializing a whole dictionary.
+func CompareTextCursors(a, b Scmer, fold bool, left, right *TextScratch) int {
 	var av, bv TextCursor
 	av.Reset(a)
 	bv.Reset(b)
@@ -153,7 +156,7 @@ func generalBufferLessScratch(a, b Scmer, reverse bool, x, y *TextScratch) bool 
 		}
 		return ak < bk
 	}
-	cmp := compareTextCursors(a, b, ac, x, y)
+	cmp := CompareTextCursors(a, b, ac, x, y)
 	if reverse {
 		return cmp > 0
 	}

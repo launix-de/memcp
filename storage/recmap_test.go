@@ -747,6 +747,46 @@ func TestRecMapRangeFirstMapperBoundsAndTies(t *testing.T) {
 	}
 }
 
+func TestRecMapRangeFirstMapperCombinesShardImages(t *testing.T) {
+	database := "trecmap_range_shards"
+	databases.Remove(database)
+	t.Cleanup(func() { databases.Remove(database) })
+	CreateDatabase(database, true)
+	target, _ := CreateTable(database, "target", Memory, true)
+	columns := []string{"parent", "at", "value"}
+	for _, column := range columns {
+		target.CreateColumn(column, "INT", nil, nil)
+	}
+	target.ShardMode = ShardModePartition
+	target.PDimensions = []shardDimension{{Column: "parent", NumPartitions: 4,
+		Pivots: []scm.Scmer{scm.NewInt(10), scm.NewInt(20), scm.NewInt(30)}}}
+	target.PShards = []*storageShard{NewShard(target), NewShard(target), NewShard(target), NewShard(target)}
+	target.publishTopologyLocked()
+	rows := make([][]scm.Scmer, 0)
+	for _, parent := range []int64{21, 1, 11} {
+		for _, at := range []int64{30, 10, 20} {
+			rows = append(rows, []scm.Scmer{scm.NewInt(parent), scm.NewInt(at), scm.NewInt(parent*100 + at)})
+		}
+	}
+	target.Insert(columns, rows, nil, scm.NewNil(), false, nil)
+	mapper := newRecMapRangeFirstMapper(nil, target, []string{"parent"}, "at", "<=", scm.NewNil())
+	for batch := 0; batch < 2; batch++ {
+		inputs := make([]scm.Scmer, 0)
+		for _, parent := range []int64{1, 11, 21, 31} {
+			inputs = append(inputs, scm.NewSlice([]scm.Scmer{scm.NewInt(parent), scm.NewInt(25)}))
+		}
+		got := scm.Apply(mapper, scm.NewSlice(inputs)).Slice()
+		if len(got) != 4 || !got[3].IsNil() {
+			t.Fatalf("batch %d: wrong result count or empty-shard match: %v", batch, got)
+		}
+		for i, parent := range []int64{1, 11, 21} {
+			if got[i].IsNil() || recMapTargetValue(recordRefFromScmer(got[i]), "value").Int() != parent*100+20 {
+				t.Fatalf("batch %d: wrong nearest row for parent %d", batch, parent)
+			}
+		}
+	}
+}
+
 func BenchmarkRecMapRangeFirstHistory(b *testing.B) {
 	for _, depth := range []int{2, 128, 1024} {
 		b.Run(fmt.Sprint(depth), func(b *testing.B) {
@@ -819,7 +859,7 @@ func TestRecMapTupleScratchOwnsFrames(t *testing.T) {
 		frame[0] = scm.NewInt(int64(i))
 		frame[1] = scm.NewInt(int64(i * 3))
 		keys[i] = builder.copyKey(frame)
-		builder.rows = append(builder.rows, recMapSourceRow{key: keys[i]})
+		builder.rows = append(builder.rows, recMapBuildRow{key: keys[i]})
 	}
 	for i, key := range keys {
 		if key[0].Int() != int64(i) || key[1].Int() != int64(i*3) {

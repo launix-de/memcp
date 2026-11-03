@@ -162,8 +162,20 @@ func TestStrLikeCollationASCIIFastPaths(t *testing.T) {
 		{"Alpha", "a%", true},
 		{"Alpha", "%HA", true},
 		{"Alpha", "ALPHA", true},
+		{"prefix-NEEDLE", "%needle%", true},
+		{"nex-needle", "%needle%", true},
+		{"nnneedle", "%needle%", true},
+		{"prefix-nee", "%needle%", false},
 		{"Straße", "%STRASSE%", false},
 		{"Straße", "%straße%", true},
+		{"k", "%K%", true},
+		{"K", "%K%", true},
+		{"k", "K%", true},
+		{"K", "%K", true},
+		{"K", "%k%", true},
+		{"[x]", "%[X]%", true},
+		{"{x}", "%[X]%", false},
+		{"@x", "%`X%", false},
 	}
 	for _, test := range tests {
 		if got := StrLikeCollation(test.value, test.pattern, "utf8mb4_general_ci"); got != test.want {
@@ -472,5 +484,21 @@ func TestJITGeneratedFNVHashPreservesLiveValues(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestStrLikeASCIIContainsMatchesLiteralOracle(t *testing.T) {
+	needles := []string{"", "a", "A", "ab", "[x]", "`x", ":", "%", "_", "\x00"}
+	for a := 0; a < 128; a++ {
+		for b := 0; b < 128; b++ {
+			value := string([]byte{byte(a), byte(b)})
+			for _, needle := range needles {
+				got, handled := asciiFoldContains(value, needle)
+				want := strings.Contains(strings.ToLower(value), strings.ToLower(needle))
+				if !handled || got != want {
+					t.Fatalf("ASCII contains %q in %q = %t, %t; want %t", needle, value, got, handled, want)
+				}
+			}
+		}
 	}
 }

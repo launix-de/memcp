@@ -469,7 +469,7 @@ func (s *storageShard) acquireReadForScan(currentTx *TxContext, policy *scanAcce
 	}
 	if sharedClusterSource(s.t) && policy != nil && policy.mutation {
 		if s.state() == COLD {
-			activeNodeCluster().prepareLocalScan(s, currentTx)
+			activeNodeCluster().prepareLocalScan(s, currentTx, true)
 		}
 		write := s.GetWrite(currentTx)
 		return ReadAccess{shard: write.shard, mutation: &write}
