@@ -157,7 +157,7 @@ func (s *keyFrequencyStatistics) keySetFraction(keys recSetProjectKeys, ndv uint
 		if !ok {
 			continue
 		}
-		if _, found := keys.numericValues[integer]; found {
+		if keys.containsInteger(integer) {
 			result += e.count/float64(s.rows) - tail
 		}
 	}

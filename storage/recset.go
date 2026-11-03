@@ -786,17 +786,22 @@ func (k *recSetProjectKeys) tuple(index int) []scm.Scmer {
 func (k *recSetProjectKeys) contains(key []scm.Scmer) bool {
 	if (k.numericValues != nil || k.numericSpan != 0) && len(key) == 1 {
 		if integer, ok := projectNumericInteger(key[0]); ok {
-			if k.numericSpan != 0 {
-				return uint64(integer)-uint64(k.numericStart) < k.numericSpan
-			}
-			_, found := k.numericValues[integer]
-			return found
+			return k.containsInteger(integer)
 		}
 	}
 	position := sort.Search(k.count(), func(i int) bool {
 		return compareProjectKey(k.tuple(i), key) >= 0
 	})
 	return position < k.count() && compareProjectKey(k.tuple(position), key) == 0
+}
+
+// Both execution and frequency costing use the same numeric membership.
+func (k *recSetProjectKeys) containsInteger(integer int64) bool {
+	if k.numericSpan != 0 {
+		return uint64(integer)-uint64(k.numericStart) < k.numericSpan
+	}
+	_, found := k.numericValues[integer]
+	return found
 }
 
 func projectNumericInteger(value scm.Scmer) (int64, bool) {

@@ -727,3 +727,38 @@ func TestNumericKeyFrequencyRetainedMemory(t *testing.T) {
 		t.Fatalf("retained frequency memory not charged or not compact: %d bytes", after-before)
 	}
 }
+
+// Frequency costing must use membership semantics for every numeric keyset
+// representation, including singleton/contiguous intervals and sparse maps.
+func TestNumericKeyFrequencySkewedKeySets(t *testing.T) {
+	var collector keyFrequencyCollector
+	for i := 0; i < 10000; i++ {
+		value := int64(0)
+		if i%20 == 19 {
+			value = 1 + int64(i/20%99)
+		}
+		collector.observe(scm.NewInt(value))
+	}
+	stats := collector.finish()
+	for _, values := range [][]int64{{0}, {1}, {0, 1}, {0, 2}, {-1, 0}, {999}} {
+		keys := recSetProjectKeys{width: 1}
+		for _, value := range values {
+			keys.values = append(keys.values, scm.NewInt(value))
+		}
+		if !keys.buildNumericLookup() {
+			t.Fatal("numeric keys rejected")
+		}
+		var want float64
+		for _, key := range keys.values {
+			rate, ok := stats.frequency(key, 100)
+			if !ok {
+				t.Fatal("numeric frequency rejected")
+			}
+			want += rate
+		}
+		got := stats.keySetFraction(keys, 100)
+		if math.Abs(got-want) > 1e-12 {
+			t.Errorf("keys %v: fraction %g, want %g", values, got, want)
+		}
+	}
+}
