@@ -1105,3 +1105,28 @@ func TestClusterUniquePreflightUsesMutationAdmissionAndKeepsNodeLimit(t *testing
 		t.Fatalf("mutation preflight exceeded node budget: %v", writeFailure)
 	}
 }
+
+func TestClusterInsertCapacityRefusalPrecedesInvocation(t *testing.T) {
+	previous := GlobalCache.shardCapacity.Swap(&shardRAMSnapshot{Allowed: false})
+	defer GlobalCache.shardCapacity.Store(previous)
+	db := &database{Name: "tenant"}
+	request := remoteInsertTask{Version: scanWireVersion, Database: db.Name, Table: "items", Transaction: &scm.ClusterReference{}}
+	// An unusable transaction reference and no invocation session prove that
+	// refusal happens before importing captures, evaluating defaults or IDs.
+	value, err := db.executeInsertTask(context.Background(), nil, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result, ok := value.(remoteInsertResult); !ok || !result.Rejected {
+		t.Fatalf("capacity refusal = %#v", value)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := db.executeInsertTask(ctx, nil, request); err != context.Canceled {
+		t.Fatalf("cancelled command admitted: %v", err)
+	}
+	request.Version = -1
+	if _, err := db.executeInsertTask(context.Background(), nil, request); err == nil {
+		t.Fatal("malformed command treated as a capacity refusal")
+	}
+}

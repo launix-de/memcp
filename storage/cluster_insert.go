@@ -169,8 +169,9 @@ type remoteInsertTask struct {
 	Transaction      *scm.ClusterReference `json:"transaction,omitempty"`
 }
 type remoteInsertResult struct {
-	Count   int    `json:"count"`
-	FirstID *int64 `json:"first_id,omitempty"`
+	Rejected bool   `json:"rejected,omitempty"`
+	Count    int    `json:"count"`
+	FirstID  *int64 `json:"first_id,omitempty"`
 }
 
 // A global UNIQUE check needs every partition, so use the current owner of
@@ -229,9 +230,43 @@ func (t *table) insertPeer(columns []string, rows [][]scm.Scmer) *mosiPeer {
 
 func (t *table) forwardInsert(columns []string, rows [][]scm.Scmer, collisionCols []string, collision scm.Scmer, mergeNull bool, firstID func(int64), tx *TxContext) (int, bool) {
 	peer := t.insertPeer(columns, rows)
-	if peer == nil {
+	if peer == nil && (!sharedClusterSource(t) || GlobalCache.canLoadClusterShard(nil)) {
 		return 0, false
 	}
+	cluster := activeNodeCluster()
+	// The current owner is the cheapest candidate. A capacity refusal occurs
+	// before invocation and effects, so only that explicit refusal permits
+	// choosing local acquisition or another peer. Execution errors never retry.
+	candidates := (&clusterScanExecutor{cluster: cluster, expected: remoteScanShard{Resource: mosiResource{Database: t.schema.Name, Table: t.Name}}}).candidates()
+	if peer != nil {
+		response := t.sendInsert(peer, columns, rows, collisionCols, collision, mergeNull, tx)
+		if !response.Rejected {
+			if firstID != nil && response.FirstID != nil {
+				firstID(*response.FirstID)
+			}
+			return response.Count, true
+		}
+		if GlobalCache.canLoadClusterShard(nil) {
+			return 0, false
+		}
+	}
+	for _, candidate := range candidates {
+		if candidate.peer == peer {
+			continue
+		}
+		response := t.sendInsert(candidate.peer, columns, rows, collisionCols, collision, mergeNull, tx)
+		if response.Rejected {
+			continue
+		}
+		if firstID != nil && response.FirstID != nil {
+			firstID(*response.FirstID)
+		}
+		return response.Count, true
+	}
+	panic("cluster has insufficient shard RAM capacity for INSERT")
+}
+
+func (t *table) sendInsert(peer *mosiPeer, columns []string, rows [][]scm.Scmer, collisionCols []string, collision scm.Scmer, mergeNull bool, tx *TxContext) remoteInsertResult {
 	ctx := scanQueryContext(tx, peer.ctx)
 	owner := tx
 	if owner == nil || !owner.queryActive.Load() {
@@ -280,15 +315,18 @@ func (t *table) forwardInsert(columns []string, rows [][]scm.Scmer, collisionCol
 	if err := service.control(ctx, peer, "insert.execute", request, &response, true); err != nil {
 		panicRemoteOperation(err)
 	}
-	if firstID != nil && response.FirstID != nil {
-		firstID(*response.FirstID)
-	}
-	return response.Count, true
+	return response
 }
 
 func (database *database) executeInsertTask(ctx context.Context, session *scanRPCSession, request remoteInsertTask) (any, error) {
 	if request.Version != scanWireVersion || request.Database != database.Name || request.Table == "" {
 		return nil, fmt.Errorf("invalid remote INSERT")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if !GlobalCache.canLoadClusterShard(nil) {
+		return remoteInsertResult{Rejected: true}, nil
 	}
 	invocation, err := session.beginInvocation(ctx, request.Transaction, "remote insert")
 	if err != nil {
