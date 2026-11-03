@@ -177,11 +177,8 @@ def check_runner(root: Path) -> None:
     ]
     if {node.name for node in calibration_nodes} != calibration_names:
         raise GuardFailure("run_sql_tests.py is missing protected calibration functions")
-    # Python 3.13+ omits empty optional fields by default. Keep the exact
-    # canonical form used by the protected digest on earlier Python versions.
-    dump_options = {"show_empty": True} if sys.version_info >= (3, 13) else {}
     calibration_ast = "\n".join(
-        ast.dump(node, annotate_fields=True, include_attributes=False, **dump_options)
+        ast.dump(node, annotate_fields=True, include_attributes=False)
         for node in calibration_nodes
     )
     calibration_digest = hashlib.sha256(calibration_ast.encode("utf-8")).hexdigest()
