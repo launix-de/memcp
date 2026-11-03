@@ -1307,6 +1307,16 @@ func collectRebuiltColumnPlannerStatistics(shards []*storageShard, columnName st
 	var valueBytes uint64
 	var hasValue bool
 	var buf []scm.Scmer
+	var currentScratch, minScratch, maxScratch *scm.TextScratch
+	less := func(a, b scm.Scmer, left, right *scm.TextScratch) bool {
+		if a.IsString() && b.IsString() {
+			if a == b {
+				return false
+			}
+			return scm.CompareTextCursors(a, b, false, left, right) < 0
+		}
+		return scm.Less(a, b)
+	}
 	for _, shard := range shards {
 		if shard == nil {
 			continue
@@ -1325,10 +1335,9 @@ func collectRebuiltColumnPlannerStatistics(shards []*storageShard, columnName st
 				buf = make([]scm.Scmer, rows)
 			}
 			buf = buf[:rows]
-			// This consumer visits the whole batch and compares values repeatedly.
-			// ReadAuto prepares owned text once rather than repeatedly decoding
-			// compressed handles in length/min/max operations.
-			reader := columnStorage.GetCachedReader(ReadAuto)
+			// Keep values compressed. Reuse bounded cursor scratch for the
+			// current value and both extrema, never a whole decoded dictionary.
+			reader := columnStorage.GetCachedReader(ReadCompressed)
 			defer ReleaseColumnReader(reader)
 			reader.GetValueRange(0, rows, buf, 1)
 			for _, value := range buf {
@@ -1338,7 +1347,12 @@ func collectRebuiltColumnPlannerStatistics(shards []*storageShard, columnName st
 					stats.NullCount++
 					continue
 				}
-				if value.IsString() || value.IsCString() || value.IsBString() {
+				if value.IsBufferString() {
+					valueBytes += uint64(scm.BufferStringLength(value))
+					if currentScratch == nil && scm.BufferStringRequiresScratch(value) {
+						currentScratch, minScratch, maxScratch = new(scm.TextScratch), new(scm.TextScratch), new(scm.TextScratch)
+					}
+				} else if value.IsString() {
 					valueBytes += uint64(len(value.String()))
 				}
 				if !hasValue {
@@ -1347,10 +1361,10 @@ func collectRebuiltColumnPlannerStatistics(shards []*storageShard, columnName st
 					hasValue = true
 					continue
 				}
-				if scm.Less(value, stats.MinEstimate) {
+				if less(value, stats.MinEstimate, currentScratch, minScratch) {
 					stats.MinEstimate = value
 				}
-				if scm.Less(stats.MaxEstimate, value) {
+				if less(stats.MaxEstimate, value, maxScratch, currentScratch) {
 					stats.MaxEstimate = value
 				}
 			}

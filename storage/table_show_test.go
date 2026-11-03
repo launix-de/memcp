@@ -981,6 +981,7 @@ func TestRebuiltStringStatisticsOwnTheirBoundsAndReleaseReaders(t *testing.T) {
 				values[i] = scm.NewString(fmt.Sprintf("item-%04d-repeated-compressible-payload-🍀", i))
 			}
 			values[1], values[2] = scm.NewNil(), scm.NewString("")
+			values[4] = values[3]
 			for _, value := range values {
 				if !value.IsNil() {
 					bytes += uint64(len(value.String()))
