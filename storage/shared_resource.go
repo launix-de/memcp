@@ -30,6 +30,15 @@ const (
 	WRITE  SharedState = 2
 )
 
+// Constraint reads are part of a mutation's admission, which may retain
+// multiple transaction-pinned shards up to the node-wide shard budget. Query
+// reads keep the per-table reserve for secondary and tertiary scan inputs.
+type shardReadOptions struct {
+	snapshot    bool
+	mayDelegate bool
+	mutation    bool
+}
+
 // ReadAccess delimits an acquired read capability without allocating a closure
 // for every local lookup. It can evolve into a cluster reference release.
 // It retains prepared payload against full shard eviction, not a query-wide

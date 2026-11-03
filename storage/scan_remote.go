@@ -215,7 +215,7 @@ func (database *database) executeScanTask(ctx context.Context, s *scanRPCSession
 			if shard.uuid.String() != request.Shard.Resource.Shard || shard.t.filterSchemaFingerprint() != request.Shard.Schema || shard.t.schema.Name != request.Shard.Resource.Database || shard.t.Name != request.Shard.Resource.Table {
 				return fmt.Errorf("retained input generation/schema mismatch")
 			}
-			lease := shard.getRead(tx, true, false)
+			lease := shard.getRead(tx, shardReadOptions{snapshot: true})
 			defer lease.Release()
 			return execute(shard)
 		}

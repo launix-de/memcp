@@ -1055,3 +1055,53 @@ func TestClusterUniqueCallbackReleasesMOnPanic(t *testing.T) {
 	}
 	access.Release()
 }
+
+func TestClusterUniquePreflightUsesMutationAdmissionAndKeepsNodeLimit(t *testing.T) {
+	tbl := setupScanParallelTestTable(t, "tuniquemutationbudget")
+	tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}}
+	tbl.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(42)}}, nil, scm.NewNil(), false, nil)
+	shard := tbl.ActiveShards()[0]
+	cluster := globalTestCluster(t, tbl.schema.Name)
+	mounts := sharedClusterMounts.Swap(&map[string]bool{tbl.schema.Name: true})
+	defer sharedClusterMounts.Store(mounts)
+	service := nodeScans.Swap(&nodeScanService{cluster: cluster})
+	defer nodeScans.Store(service)
+	cluster.manager.resourceCell(mosiResource{Database: tbl.schema.Name}).ownstate.Initialize(mosi.M)
+	cluster.declareShard(shard, true)
+	previous := GlobalCache.shardCapacity.Swap(&shardRAMSnapshot{Allowed: true})
+	defer GlobalCache.shardCapacity.Store(previous)
+	tbl.shardRAMFull.Store(true)
+	shard.setState(COLD)
+	var readFailure any
+	func() {
+		defer func() { readFailure = recover() }()
+		access := shard.GetRead(nil, false)
+		defer access.Release()
+	}()
+	if _, rejected := readFailure.(shardReadDelegation); !rejected {
+		t.Fatalf("ordinary read exceeded table reserve: %v", readFailure)
+	}
+	accepted := 0
+	tbl.ProcessUniqueCollision([]string{"id"}, [][]scm.Scmer{{scm.NewInt(43)}}, false,
+		func(rows [][]scm.Scmer, validate func() bool) {
+			if !validate() {
+				t.Fatal("mutation preflight lost native read proof")
+			}
+			accepted += len(rows)
+		}, nil,
+		func(string, []scm.Scmer) { t.Fatal("unrelated key collided") }, 0, nil)
+	if accepted != 1 {
+		t.Fatal("fitting mutation preflight was refused at the read reserve")
+	}
+	shard.setState(COLD)
+	GlobalCache.shardCapacity.Store(&shardRAMSnapshot{Allowed: false})
+	var writeFailure any
+	func() {
+		defer func() { writeFailure = recover() }()
+		access := shard.getRead(nil, shardReadOptions{mutation: true})
+		defer access.Release()
+	}()
+	if _, rejected := writeFailure.(shardReadDelegation); !rejected {
+		t.Fatalf("mutation preflight exceeded node budget: %v", writeFailure)
+	}
+}

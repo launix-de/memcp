@@ -482,7 +482,7 @@ func (s *storageShard) acquireSnapshotRead(currentTx *TxContext) ReadAccess {
 	if s.hasWriteOwnerForTx(currentTx) {
 		return ReadAccess{}
 	}
-	return s.getRead(currentTx, true, false)
+	return s.getRead(currentTx, shardReadOptions{snapshot: true})
 }
 
 func collectRelevantShards(schema []shardDimension, access scanAccess, shards []*storageShard) []*storageShard {

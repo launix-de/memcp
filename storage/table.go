@@ -4662,7 +4662,7 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 		for i, shard := range shardlist {
 			if needed[i] {
 				if sharedClusterSource(t) {
-					readAccesses[i] = shard.GetRead(currentTx, false)
+					readAccesses[i] = shard.getRead(currentTx, shardReadOptions{mutation: true})
 				} else {
 					readAccesses[i] = shard.acquireReadForScan(currentTx, nil)
 				}
