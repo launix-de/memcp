@@ -844,7 +844,7 @@ func (tx *TxContext) releasedUniqueReservation(shard *storageShard, recid uint32
 
 // CreateSavepoint captures the current transaction state for later rollback.
 func (tx *TxContext) CreateSavepoint() Savepoint {
-	release := tx.lockDecision(context.Background())
+	release := tx.lockDecision(context.Background(), false)
 	defer release()
 	return tx.createSavepointLocked()
 }
@@ -888,7 +888,7 @@ func (tx *TxContext) trackedShardSetLocked() map[*storageShard]struct{} {
 
 // RollbackToSavepoint undoes all changes made since the savepoint was created.
 func (tx *TxContext) RollbackToSavepoint(sp Savepoint) {
-	release := tx.lockDecision(context.Background())
+	release := tx.lockDecision(context.Background(), true)
 	defer release()
 	tx.rollbackToSavepointLocked(sp)
 }
@@ -978,7 +978,7 @@ func (tx *TxContext) rollbackToSavepointLocked(sp Savepoint) {
 
 // Commit finalizes the transaction.
 func (tx *TxContext) Commit() error {
-	release := tx.lockDecision(context.Background())
+	release := tx.lockDecision(context.Background(), true)
 	defer release()
 	return tx.commitLocked()
 }
@@ -1008,8 +1008,6 @@ func (tx *TxContext) commitLocked() error {
 	if err := tx.finishRemoteParticipants("commit"); err != nil {
 		return err
 	}
-	releaseRights := tx.claimDecisionRights()
-	defer releaseRights()
 	switch tx.Mode {
 	case TxCursorStability:
 		tx.mu.Lock()
@@ -1224,7 +1222,7 @@ func (tx *TxContext) finishCursorStabilityCommit() {
 
 // Rollback undoes the transaction.
 func (tx *TxContext) Rollback() {
-	release := tx.lockDecision(context.Background())
+	release := tx.lockDecision(context.Background(), true)
 	defer release()
 	tx.rollbackLocked()
 }
@@ -1237,8 +1235,6 @@ func (tx *TxContext) rollbackLocked() {
 	if err := tx.finishRemoteParticipants("rollback"); err != nil {
 		panic(err)
 	}
-	releaseRights := tx.claimDecisionRights()
-	defer releaseRights()
 	for _, table := range tx.contributionMutationTables() {
 		defer table.endContributionMutation()
 	}

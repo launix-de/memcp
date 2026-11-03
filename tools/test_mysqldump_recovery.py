@@ -359,8 +359,12 @@ def run_with_stdin_file(command: list[str], path: Path) -> None:
 
 
 def client_auth_file(path: Path, *, host: str | None, port: int | None,
-                     socket_path: str | None, user: str, password: str) -> None:
+                     socket_path: str | None, user: str, password: str, tls: bool) -> None:
     lines = ["[client]", f"user={user}"]
+    if not tls:
+        # These disposable MemCP endpoints do not advertise TLS. Recent
+        # MariaDB clients require it by default; keep the fixture explicit.
+        lines.append("ssl=0")
     if password:
         lines.append(f"password={password}")
     if socket_path:
@@ -600,6 +604,7 @@ def main() -> int:
             socket_path=None,
             user="root",
             password="admin",
+            tls=False,
         )
         dump_username = f"recovery_dump_{run_id}"
         dump_password = secrets.token_urlsafe(18)
@@ -610,6 +615,7 @@ def main() -> int:
             socket_path=None,
             user=dump_username,
             password=dump_password,
+            tls=False,
         )
         client_auth_file(
             destination_auth,
@@ -618,6 +624,7 @@ def main() -> int:
             socket_path=args.mariadb_socket,
             user=args.mariadb_user,
             password=destination_password,
+            tls=True,
         )
         client_auth_file(
             restore_auth,
@@ -626,6 +633,7 @@ def main() -> int:
             socket_path=None,
             user="root",
             password="admin",
+            tls=False,
         )
 
         source_command = [

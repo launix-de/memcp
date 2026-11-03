@@ -26,7 +26,8 @@ jobs:
     name: jit-test
     needs: changes
     if: ${{ needs.changes.outputs.relevant == 'true' }}
-    runs-on: ubuntu-latest
+    # setup-php requires the packaged CLI IMAP extension available on Noble.
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
 
     services:
@@ -153,7 +154,8 @@ jobs:
     name: jit-cross-test (${{ matrix.arch }})
     needs: changes
     if: ${{ needs.changes.outputs.relevant == 'true' }}
-    runs-on: ubuntu-latest
+    # QEMU static emulator package is available on Noble.
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     strategy:
       fail-fast: false

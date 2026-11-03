@@ -517,6 +517,63 @@ func TestClusterCounterReservationKeepsSharedSchemaOwner(t *testing.T) {
 	}
 }
 
+// A local DDL request can publish MR before it acquires the allocator's
+// directory boundary. The counter checkpoint still belongs to the O owner;
+// acknowledging this range must make it durable without completing that DDL.
+func TestClusterCounterCheckpointDuringLocalSchemaUpgrade(t *testing.T) {
+	tbl, engine := createDurabilityTestTable(t, "tclustercounterupgrade", 0)
+	cluster := &nodeCluster{self: clusterMember{ID: "local"}, ctx: context.Background(), databases: map[string]bool{tbl.schema.Name: true}}
+	cluster.initializeManager()
+	r := cluster.manager
+	resource := mosiResource{Database: tbl.schema.Name}
+	cell := r.resourceCell(resource)
+	cell.ownstate.Initialize(mosi.O)
+	cell.clusterstate.Initialize(mosi.O)
+	r.updateRecord(resource, func(record *replicaRecord) bool {
+		record.Owner, record.Epoch, record.State = "local", 11, "O"
+		record.Readers = map[string]bool{"reader": true}
+		return true
+	})
+	mounts := sharedClusterMounts.Swap(&map[string]bool{tbl.schema.Name: true})
+	defer sharedClusterMounts.Store(mounts)
+	service := nodeScans.Swap(&nodeScanService{cluster: cluster})
+	defer nodeScans.Store(service)
+	cell.directory.Lock()
+	defer cell.directory.Unlock()
+	tbl.reserveLocalAutoIncrement(0, 8)
+	pending, action := cell.ownstate.Request(mosi.M)
+	if action != mosi.Send || pending.Retained() != mosi.O {
+		t.Fatal("fixture did not start an O-to-M upgrade")
+	}
+	tbl.schema.save(cell)
+	if cell.ownstate.Snapshot() != pending || !r.directory.Records[resource.key()].Readers["reader"] {
+		t.Fatal("counter checkpoint completed the upgrade or revoked a reader")
+	}
+	var saved struct {
+		Tables map[string]struct {
+			Counter uint64 `json:"Auto_increment"`
+		} `json:"tables"`
+	}
+	if err := json.Unmarshal(engine.ReadSchema(), &saved); err != nil {
+		t.Fatal(err)
+	}
+	if saved.Tables[tbl.Name].Counter != 8 {
+		t.Fatal("reserved range was not durable while the upgrade was pending")
+	}
+	// A directory which has actually handed ownership away must still refuse
+	// checkpoints, even if its local phase has not yet caught up.
+	r.updateRecord(resource, func(record *replicaRecord) bool {
+		record.Owner = "successor"
+		return true
+	})
+	defer func() {
+		if failure := recover(); failure != "counter checkpoint lost its owner" {
+			t.Errorf("non-owner checkpoint: expected ownership rejection, got %v", failure)
+		}
+	}()
+	tbl.schema.save(cell)
+}
+
 func TestClusterHandoverAckKeepsNewerInboundGrant(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "tclusterhandovernewgrant", 4)
 	RebuildTable(tbl, true, false)
@@ -526,6 +583,12 @@ func TestClusterHandoverAckKeepsNewerInboundGrant(t *testing.T) {
 	shard := tbl.ActiveShards()[0]
 	cell := cluster.declareShard(shard, true)
 	resource := r.shardResource(shard)
+	previous := resource
+	previous.Shard = uuid.NewString()
+	oldest := resource
+	oldest.Shard = uuid.NewString()
+	r.forwardResource(previous, resource)
+	r.forwardResource(oldest, previous)
 	peer := &mosiPeer{outgoing: make(chan mosiMessage, 8), done: make(chan struct{})}
 	schemaPeer := &mosiPeer{outgoing: make(chan mosiMessage, 1), done: make(chan struct{})}
 	cluster.view.Store(&clusterView{links: []*clusterLink{{member: clusterMember{ID: "remote"}, peer: peer}, {member: clusterMember{ID: "schema-owner"}, peer: schemaPeer}}})
@@ -545,13 +608,37 @@ func TestClusterHandoverAckKeepsNewerInboundGrant(t *testing.T) {
 		var update struct {
 			Return string
 			Method string
-			Data   replicaRecord
+			Data   []replicaRecord
 		}
 		if err := json.Unmarshal(message.Data, &update); err != nil {
 			t.Fatal(err)
 		}
-		if update.Method != "cluster.location_update" || update.Data.Resource != r.canonicalResource(resource) || update.Data.Owner != "local" {
+		if update.Method != "cluster.location_update" {
 			t.Fatal("missing pre-reference generation route", update)
+		}
+		locations := make(map[string]replicaRecord)
+		for _, entry := range update.Data {
+			locations[entry.Resource.Shard] = entry
+		}
+		for _, wanted := range []mosiResource{r.canonicalResource(resource), previous, oldest} {
+			if entry := locations[wanted.Shard]; entry.Resource != wanted || entry.Owner != "local" {
+				t.Fatalf("missing historical UUID route before reference: %+v", wanted)
+			}
+		}
+		// A schema owner which never saw these rebuilds must route old
+		// schema/query UUIDs too, without gaining any shard permission.
+		catalog := &nodeCluster{self: clusterMember{ID: "schema-owner"}, databases: map[string]bool{tbl.schema.Name: true}}
+		catalog.initializeManager()
+		catalog.manager.resourceCell(schema).ownstate.Initialize(mosi.M)
+		catalog.manager.updateRecord(schema, func(record *replicaRecord) bool { record.Owner = "schema-owner"; return true })
+		if err := catalog.registerLocations(ctx, update.Data); err != nil {
+			t.Fatal(err)
+		}
+		for _, wanted := range []mosiResource{previous, oldest} {
+			entry, err := catalog.shardLocation(wanted)
+			if err != nil || entry.Owner != "local" || catalog.manager.resourceCell(wanted).ownstate.Phase() != mosi.IO {
+				t.Fatalf("historical lookup lost route or gained authority: %+v %v", entry, err)
+			}
 		}
 		if len(peer.outgoing) != 0 {
 			t.Fatal("reference preceded schema location acknowledgement")
@@ -792,5 +879,103 @@ func TestClusterReportBeforeAuthorityInitialization(t *testing.T) {
 	check()
 	if cell.ownstate.Initialized() || cell.clusterstate.Initialized() {
 		t.Fatal("report established unknown authority")
+	}
+}
+
+// INSERT can wait for a shard whose current writer is finishing a remote
+// transaction. Retaining an earlier bucket's writer across that wait would
+// prevent the same transaction from completing on its coordinator.
+func TestClusterPartitionInsertReleasesWritersBeforeRemoteAcquire(t *testing.T) {
+	tbl := setupScanParallelTestTable(t, "tinsertpartialwriters")
+	tbl.ShardMode = ShardModePartition
+	tbl.PDimensions = []shardDimension{{Column: "id", NumPartitions: 2, Pivots: []scm.Scmer{scm.NewInt(10)}}}
+	first, second := NewShard(tbl), NewShard(tbl)
+	tbl.PShards = []*storageShard{first, second}
+	tbl.publishTopologyLocked()
+	tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}}
+	cluster := globalTestCluster(t, tbl.schema.Name)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cluster.ctx = ctx
+	owner := clusterMember{ID: "memcp://" + uuid.NewString(), Boot: uuid.NewString()}
+	peer := &mosiPeer{ctx: ctx, done: make(chan struct{}), outgoing: make(chan mosiMessage, 1)}
+	cluster.view.Store(&clusterView{members: []clusterMember{cluster.self, owner}, links: []*clusterLink{{member: owner, peer: peer}}})
+	mounts := sharedClusterMounts.Swap(&map[string]bool{tbl.schema.Name: true})
+	defer sharedClusterMounts.Store(mounts)
+	service := nodeScans.Swap(&nodeScanService{cluster: cluster})
+	defer nodeScans.Store(service)
+	r := cluster.manager
+	r.resourceCell(mosiResource{Database: tbl.schema.Name}).ownstate.Initialize(mosi.M)
+	left, right := r.shardCell(first), r.shardCell(second)
+	left.current.Store(first)
+	left.ownstate.Initialize(mosi.M)
+	right.current.Store(second)
+	right.ownstate.Initialize(mosi.S)
+	resource := *right.resource.Load()
+	r.updateRecord(resource, func(record *replicaRecord) bool {
+		record.Resource, record.Owner, record.State, record.Epoch = resource, owner.ID, "S", 1
+		return true
+	})
+	done := make(chan any, 1)
+	go func() {
+		defer func() { done <- recover() }()
+		tbl.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(1)}, {scm.NewInt(11)}}, nil, scm.NewNil(), false, nil)
+	}()
+	select {
+	case <-peer.outgoing:
+	case <-time.After(5 * time.Second):
+		t.Fatal("INSERT did not request its remote M")
+	}
+	if left.ownstate.Writing() {
+		t.Error("INSERT retained an earlier writer across the remote acquisition")
+	}
+	if first.plannerDeltaRows.Load() != 0 || second.plannerDeltaRows.Load() != 0 {
+		t.Error("INSERT mutated rows before admitting every target")
+	}
+	pending := right.ownstate.Snapshot().Flight()
+	if pending == nil {
+		t.Fatal("missing M flight")
+	}
+	if _, err := right.ownstate.Grant(pending.ID(), mosi.M, func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case failure := <-done:
+		if failure != nil {
+			t.Fatalf("INSERT: %v", failure)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("INSERT did not finish after granting M")
+	}
+	if first.plannerDeltaRows.Load() != 1 || second.plannerDeltaRows.Load() != 1 {
+		t.Fatal("admission retry lost or duplicated an inserted row")
+	}
+}
+
+func TestClusterLocationBatchRejectsBeforePublishing(t *testing.T) {
+	cluster := &nodeCluster{self: clusterMember{ID: "local"}, databases: map[string]bool{"locations": true, "other": true}}
+	cluster.initializeManager()
+	cluster.view.Store(&clusterView{members: []clusterMember{cluster.self, {ID: "peer"}}})
+	valid := replicaRecord{Resource: mosiResource{Database: "locations", Table: "items", Shard: uuid.NewString()}, Owner: "owner", Epoch: 7}
+	foreign := valid
+	foreign.Resource.Database = "other"
+	for _, entries := range [][]replicaRecord{nil, {}, {valid, foreign}} {
+		payload, err := json.Marshal(entries)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := cluster.handleLocations(context.Background(), "peer", "cluster.location_update", payload); err == nil {
+			t.Fatal("accepted invalid location batch")
+		}
+		if cluster.manager.lookupCell(valid.Resource) != nil {
+			t.Fatal("invalid batch published its valid prefix")
+		}
+	}
+	payload, _ := json.Marshal([]replicaRecord{valid})
+	if _, err := cluster.handleLocations(context.Background(), "unintroduced", "cluster.location_update", payload); err == nil {
+		t.Fatal("unauthenticated member published a location")
+	}
+	if cluster.manager.lookupCell(valid.Resource) != nil {
+		t.Fatal("unauthenticated location publication")
 	}
 }

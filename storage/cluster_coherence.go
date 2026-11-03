@@ -207,7 +207,15 @@ func (cluster *nodeCluster) locate(ctx context.Context, resource mosiResource) (
 		actual := answer.State == "M" || answer.State == "O"
 		if actual {
 			if authoritative && owner != link.member.ID {
-				return "", fmt.Errorf("conflicting cluster owners")
+				// Replies are sampled sequentially. A handover can advance the
+				// owner between samples; the larger epoch supplies the current
+				// route. Two owners at one epoch remain a protocol conflict.
+				if answer.Epoch == epoch {
+					return "", fmt.Errorf("conflicting cluster owners")
+				}
+				if answer.Epoch < epoch {
+					continue
+				}
 			}
 			owner, epoch, authoritative = link.member.ID, answer.Epoch, true
 		} else if !authoritative && answer.Owner != "" && answer.Epoch >= epoch {
@@ -314,19 +322,37 @@ func (cluster *nodeCluster) obtain(parent context.Context, resource mosiResource
 	restoreCommits := !c.ownstate.Initialized()
 	ctx, cancel := context.WithTimeout(parent, 30*time.Minute)
 	defer cancel()
-	owner, err := cluster.locate(ctx, resource)
-	if err != nil {
-		fmt.Println("cluster owner lookup failed:", resource.key(), err)
-		panic(mosi.NetworkError)
-	}
-	if owner != r.id {
-		if _, err := cluster.ensurePeer(ctx, owner); err != nil {
-			panic(fmt.Errorf("%s: %w", mosi.NetworkError, err))
-		}
-	}
+	owner := ""
+	var err error
 	for {
 		c = c.resolved()
 		resource = *c.resource.Load()
+		// Once granted, native S/M needs no new owner discovery. A missing
+		// contact hint cannot invalidate the permission just received.
+		if owner == "" || !c.ownstate.ReadReady() || wanted == mosi.M && c.ownstate.Phase() != mosi.M {
+			// Forwarding may wake an acquisition on a newer UUID with a different
+			// owner. Route that identity using its current native directory entry;
+			// an earlier owner need not know this successor at all.
+			owner, err = cluster.locate(ctx, resource)
+			if err != nil {
+				fmt.Println("cluster owner lookup failed:", resource.key(), err)
+				panic(mosi.NetworkError)
+			}
+			// A local outgoing handover can expose its new UUID before the
+			// destination installs the reference. Queue another local acquisition
+			// behind that native directory operation; it forwards after the ACK.
+			r.mu.Lock()
+			current := r.directory.Records[r.resourceKey(resource)]
+			if current.Owner == r.id && current.Handoff != "" {
+				owner = r.id
+			}
+			r.mu.Unlock()
+			if owner != r.id {
+				if _, err := cluster.ensurePeer(ctx, owner); err != nil {
+					panic(fmt.Errorf("%s: %w", mosi.NetworkError, err))
+				}
+			}
+		}
 		publication, action := c.ownstate.Request(wanted)
 		if action == mosi.Ready {
 			if restoreCommits && resource.Shard != "" {

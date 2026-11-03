@@ -224,11 +224,25 @@ func (cluster *nodeCluster) locateViaSchema(ctx context.Context, resource mosiRe
 	return record.Owner, nil
 }
 
+// A shared schema can still name any pre-rebuild UUID. Publish those routes
+// with the current UUID in one hint batch before waking the acquiring peer.
+// These are locations only: aliases here do not merge cells or grant rights.
+func (cluster *nodeCluster) locationUpdates(entry replicaRecord) []replicaRecord {
+	entries := []replicaRecord{locationRecord(entry)}
+	for _, route := range cluster.manager.shardRoutes(entry.Resource) {
+		alias := locationRecord(entry)
+		alias.Resource = route.From
+		entries = append(entries, alias)
+	}
+	return entries
+}
+
 // Called after native handover has released its directory lock. The schema
 // directory serializes registration against its own handover snapshot. A stale
 // schema route forwards to its successor rather than recording at a former owner.
-func (cluster *nodeCluster) registerLocation(ctx context.Context, entry replicaRecord) error {
-	owner, err := cluster.locate(ctx, mosiResource{Database: entry.Resource.Database})
+func (cluster *nodeCluster) registerLocations(ctx context.Context, entries []replicaRecord) error {
+	database := entries[0].Resource.Database
+	owner, err := cluster.locate(ctx, mosiResource{Database: database})
 	if err != nil {
 		return err
 	}
@@ -237,19 +251,21 @@ func (cluster *nodeCluster) registerLocation(ctx context.Context, entry replicaR
 		if peer == nil {
 			return fmt.Errorf(mosi.NetworkError)
 		}
-		return cluster.service.control(ctx, peer, "cluster.location_update", locationRecord(entry), nil, true)
+		return cluster.service.control(ctx, peer, "cluster.location_update", entries, nil, true)
 	}
-	schema := cluster.manager.resourceCell(mosiResource{Database: entry.Resource.Database})
+	schema := cluster.manager.resourceCell(mosiResource{Database: database})
 	schema.directory.Lock()
 	cluster.manager.mu.Lock()
-	currentOwner := cluster.manager.directory.Records[entry.Resource.Database].Owner
+	currentOwner := cluster.manager.directory.Records[database].Owner
 	cluster.manager.mu.Unlock()
 	if currentOwner != cluster.self.ID {
 		schema.directory.Unlock()
-		return cluster.registerLocation(ctx, entry)
+		return cluster.registerLocations(ctx, entries)
 	}
-	cluster.installLocationHint(entry)
-	schema.directory.Unlock()
+	defer schema.directory.Unlock()
+	for _, entry := range entries {
+		cluster.installLocationHint(entry)
+	}
 	return nil
 }
 
@@ -266,7 +282,7 @@ func (cluster *nodeCluster) coordinate(ctx context.Context, source string, packe
 		cluster.manager.mu.Lock()
 		entry := cluster.manager.directory.Records[cluster.manager.resourceKey(packet.Resource)]
 		cluster.manager.mu.Unlock()
-		return cluster.registerLocation(ctx, entry)
+		return cluster.registerLocations(ctx, cluster.locationUpdates(entry))
 	}
 	return nil
 }
@@ -291,14 +307,19 @@ func (cluster *nodeCluster) handleLocations(ctx context.Context, source, method 
 		}
 		return nil, cluster.installSchemaLocations(source, request)
 	case "cluster.location_update":
-		var entry replicaRecord
-		if err := json.Unmarshal(data, &entry); err != nil {
+		var entries []replicaRecord
+		if err := json.Unmarshal(data, &entries); err != nil {
 			return nil, err
 		}
-		if !entry.Resource.valid() || entry.Resource.Shard == "" || !cluster.databases[entry.Resource.Database] || entry.Owner == "" || entry.Epoch == 0 {
-			return nil, fmt.Errorf("invalid shard location update")
+		if len(entries) == 0 {
+			return nil, fmt.Errorf("empty shard location update")
 		}
-		return nil, cluster.registerLocation(ctx, entry)
+		for _, entry := range entries {
+			if !entry.Resource.valid() || entry.Resource.Shard == "" || !cluster.databases[entry.Resource.Database] || entry.Resource.Database != entries[0].Resource.Database || entry.Owner == "" || entry.Epoch == 0 {
+				return nil, fmt.Errorf("invalid shard location update")
+			}
+		}
+		return nil, cluster.registerLocations(ctx, entries)
 	case "cluster.location":
 		var resource mosiResource
 		if err := json.Unmarshal(data, &resource); err != nil {

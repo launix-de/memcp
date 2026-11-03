@@ -264,8 +264,6 @@ func (st *storageShardTransaction) HandleClusterRequest(ctx context.Context, r s
 			}
 		}
 		tx := &TxContext{transactionState: st.transaction}
-		release := tx.lockDecision(ctx)
-		defer release()
 		if r.Method == "prepare" || r.Method == "commit" || r.Method == "rollback" {
 			// A broken connection cancels the task, but its bounded shard loop
 			// may still be finishing. Stop admission and join that native work
@@ -283,6 +281,8 @@ func (st *storageShardTransaction) HandleClusterRequest(ctx context.Context, r s
 				}
 			}
 		}
+		release := tx.lockDecision(ctx, r.Method != "savepoint")
+		defer release()
 		switch r.Method {
 		case "prepare":
 			if tx.State != TxActive || tx.Mode != TxACID {
@@ -459,7 +459,11 @@ func (st *storageShardTransaction) registerParticipant(ctx context.Context) erro
 		return nil
 	}
 	st.enlist.Do(func() {
-		st.decisionToken = uuid.NewString()
+		// Live handover enlists the decoded overlay before publishing M.
+		// Keep that capability: existing endpoints already carry it.
+		if st.decisionToken == "" {
+			st.decisionToken = uuid.NewString()
+		}
 		_, st.enlistError = st.transaction.coordinator.Call(ctx, scm.ClusterRequest{
 			Method: "enlist", Arguments: []scm.Scmer{scm.NewAny(st), scm.NewString(st.decisionToken)},
 		})

@@ -1027,6 +1027,14 @@ func (s *storageShard) getRead(currentTx *TxContext, snapshot, mayDelegate bool)
 	return ReadAccess{shard: s}
 }
 func (s *storageShard) GetWrite(currentTx *TxContext) WriteAccess {
+	access, _ := s.getWrite(currentTx, true)
+	return access
+}
+
+// Both ordinary acquisition and multi-shard admission use this one native
+// loading/participant boundary. Nonblocking admission performs no acquisition
+// wait; callers must release any earlier writers before trying the blocking path.
+func (s *storageShard) getWrite(currentTx *TxContext, blocking bool) (WriteAccess, bool) {
 	origin := s
 	if currentTx != nil && sharedClusterSource(s.t) {
 		if currentTx.decisionStarted {
@@ -1035,6 +1043,9 @@ func (s *storageShard) GetWrite(currentTx *TxContext) WriteAccess {
 		currentTx.ensureClusterIdentity()
 	}
 	for preparation := s.prepared.Load(); preparation != nil && (currentTx == nil || preparation.tx != currentTx.transactionState); preparation = s.prepared.Load() {
+		if !blocking {
+			return WriteAccess{}, false
+		}
 		select {
 		case <-preparation.done:
 		case <-scanQueryContext(currentTx, context.Background()).Done():
@@ -1054,7 +1065,11 @@ func (s *storageShard) GetWrite(currentTx *TxContext) WriteAccess {
 	if s.t != nil {
 		if r := activeReplication(s.t.schema); r != nil && validReplicaDatabase(s.t.schema.Name) && !s.t.isEphemeralQueryTable() {
 			cell := r.shardCell(s)
-			cell, release = r.writeResource(*cell.resource.Load(), currentTx)
+			var admitted bool
+			cell, release, admitted = r.writeResource(*cell.resource.Load(), currentTx, blocking)
+			if !admitted {
+				return WriteAccess{}, false
+			}
 			if current := cell.publishedShard(); current != nil {
 				s = current
 			}
@@ -1076,7 +1091,7 @@ func (s *storageShard) GetWrite(currentTx *TxContext) WriteAccess {
 	s.setState(WRITE)
 	atomic.StoreUint64(&s.lastAccessed, uint64(time.Now().UnixNano()))
 	ready = true
-	return WriteAccess{shard: s, release: release}
+	return WriteAccess{shard: s, release: release}, true
 }
 
 func (s *storageShard) ensureLoaded() {

@@ -5,7 +5,8 @@ on:
   workflow_call:
 jobs:
   php:
-    runs-on: ubuntu-latest
+    # setup-php requires the packaged CLI IMAP extension available on Noble.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff

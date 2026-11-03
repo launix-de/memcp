@@ -435,8 +435,8 @@ func (capture *liveShardTransfer) write(writer io.Writer) error {
 				return err
 			}
 			capture.offers = append(capture.offers, ref)
-			meta := liveOverlayHeader{Tx: ref, Depth: tx.Depth}
 			tx.mu.Lock()
+			meta := liveOverlayHeader{Tx: ref, Depth: tx.Depth}
 			for _, action := range tx.repartitionDeletes {
 				if action.shard == shard {
 					meta.Repartition = append(meta.Repartition, action.oldRecid)

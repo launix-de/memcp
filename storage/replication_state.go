@@ -301,8 +301,12 @@ func (r *replicationManager) validateForwards(source string, packet mosiPacket) 
 			}
 		}
 		r.restoreResourceRoutes(packet.Resource)
-		allowed := false
 		r.mu.Lock()
+		// A receiver can know the current UUID without retaining every older
+		// alias. The current resource's owner/epoch is the same authority proof
+		// used for an ordinary transfer; historical routes are an alternative.
+		current := r.directory.Records[r.resourceKey(packet.Resource)]
+		allowed := current.Owner == source && current.Epoch == packet.Epoch
 		for _, route := range packet.Forwards {
 			record := r.directory.Records[r.resourceKey(route.From)]
 			if record.Owner == source && record.Epoch == packet.Epoch {

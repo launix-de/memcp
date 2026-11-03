@@ -27,7 +27,9 @@ API_PORT=${UPGRADE_API_PORT:-14521}
 MYSQL_PORT=${UPGRADE_MYSQL_PORT:-14522}
 MEMCP_PID=
 mkdir -p "$DATA_DIR" "$ORACLES" "$LOGS"
-mysql_args=(timeout --foreground --kill-after=5s 30 mysql --connect-timeout=5 -h 127.0.0.1 -P "$MYSQL_PORT" -u root -padmin)
+# Newer clients preserve leading fixture comments. Predecessor SQL parsers may
+# not support those comments; strip them on the client without changing SQL.
+mysql_args=(timeout --foreground --kill-after=5s 30 mysql --skip-comments --connect-timeout=5 -h 127.0.0.1 -P "$MYSQL_PORT" -u root -padmin)
 
 cleanup() {
   if [ -n "$MEMCP_PID" ]; then

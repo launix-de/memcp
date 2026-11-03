@@ -1172,3 +1172,36 @@ func TestClusterObjectDictionaryCallbacksPrepareCompleteSessionView(t *testing.T
 		t.Fatal("nested callback lost its session binding", callback)
 	}
 }
+
+// A transferred overlay is already enlisted before MOSI publishes its grant.
+// Its first local writer must retain the capability held by older endpoints.
+func TestClusterTransferredParticipantKeepsEnlistedCapability(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "t_cluster_enlisted_capability", 4)
+	worker := NewTxContext(TxACID)
+	defer worker.Rollback()
+	shard := tbl.ActiveShards()[0]
+	worker.AddToDeleteMask(shard, 1)
+	participant := worker.getShardTx(shard)
+	const capability = "already-enlisted-by-live-handover"
+	participant.decisionToken = capability
+	worker.coordinator = &scm.ClusterHandle{Call: func(_ context.Context, request scm.ClusterRequest) (scm.Scmer, error) {
+		if request.Method != "enlist" || request.Arguments[1].String() != capability {
+			t.Errorf("first writer replaced the transferred capability: %v", request.Method)
+		}
+		return scm.NewBool(true), nil
+	}}
+	if err := participant.registerParticipant(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	// A stale endpoint still carries the capability acknowledged at handover.
+	endpoint := &storageShardTransaction{}
+	endpoint.forwarded.Store(participant)
+	for _, invalid := range []string{"", "foreign-capability"} {
+		if _, err := endpoint.HandleClusterRequest(context.Background(), scm.ClusterRequest{Method: "savepoint", Arguments: []scm.Scmer{scm.NewString(invalid)}}); err == nil {
+			t.Fatal("forwarding admitted an unenlisted capability")
+		}
+	}
+	if _, err := endpoint.HandleClusterRequest(context.Background(), scm.ClusterRequest{Method: "savepoint", Arguments: []scm.Scmer{scm.NewString(capability)}}); err != nil {
+		t.Fatalf("first write invalidated the enlisted endpoint: %v", err)
+	}
+}

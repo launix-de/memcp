@@ -1126,7 +1126,7 @@ func (r *replicationManager) transmitResource(ctx context.Context, peerID string
 			r.mu.Lock()
 			entry := r.directory.Records[r.resourceKey(header.Resource)]
 			r.mu.Unlock()
-			if err := r.cluster.registerLocation(ctx, entry); err != nil {
+			if err := r.cluster.registerLocations(ctx, r.cluster.locationUpdates(entry)); err != nil {
 				return err
 			}
 		}

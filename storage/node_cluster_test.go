@@ -466,7 +466,7 @@ func TestClusterAccessCancellationKeepsCommonFlight(t *testing.T) {
 			go func() {
 				defer func() { done <- recover() }()
 				if write {
-					_, release := r.writeResource(resource, tx)
+					_, release, _ := r.writeResource(resource, tx, true)
 					release()
 				} else {
 					r.readShard(shard, tx)
@@ -1074,5 +1074,234 @@ func TestClusterRemoteMutationRedirectsBeforeRecallingParticipant(t *testing.T) 
 	redirect, ok := err.(clusterScanRedirect)
 	if !ok || redirect.owner != "transaction-participant" || executed || cell.ownstate.Phase() != mosi.IO {
 		t.Fatalf("stale task recalled participant rights or executed callbacks: %v, executed=%v", err, executed)
+	}
+}
+
+// Discovery is a sequence of live samples, not one distributed snapshot. A
+// handover between replies may legitimately expose both owners at successive
+// epochs; only two distinct owners at the same epoch conflict.
+func TestClusterDiscoveryFollowsOwnerEpochAcrossReplies(t *testing.T) {
+	for _, epochs := range [][2]uint64{{7, 8}, {8, 7}, {8, 8}} {
+		t.Run(fmt.Sprint(epochs), func(t *testing.T) {
+			cluster := &nodeCluster{self: clusterMember{ID: "memcp://" + uuid.NewString()}, service: &nodeScanService{}}
+			cluster.initializeManager()
+			resource := mosiResource{Database: "discovery_epoch"}
+			cell := cluster.manager.resourceCell(resource)
+			cell.ownstate.Initialize(mosi.IO)
+			members := []clusterMember{cluster.self}
+			var links []*clusterLink
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			for _, epoch := range epochs {
+				member := clusterMember{ID: "memcp://" + uuid.NewString()}
+				peer := &mosiPeer{done: make(chan struct{}), outgoing: make(chan mosiMessage, 1)}
+				members = append(members, member)
+				links = append(links, &clusterLink{member: member, peer: peer})
+				go func(epoch uint64) {
+					select {
+					case message := <-peer.outgoing:
+						var request struct {
+							Return string `json:"return"`
+						}
+						if err := json.Unmarshal(message.Data, &request); err != nil {
+							return
+						}
+						answer := replicaRecord{Resource: resource, State: "M", Owner: member.ID, Epoch: epoch}
+						if value, ok := cluster.service.returns.Load(request.Return); ok {
+							deliverTestCompletion(t, value, scanCompletion{Data: mustScanJSON(answer)})
+						}
+					case <-ctx.Done():
+					}
+				}(epoch)
+			}
+			cluster.view.Store(&clusterView{members: members, links: links})
+			owner, err := cluster.locate(ctx, resource)
+			if epochs[0] == epochs[1] {
+				if err == nil {
+					t.Fatal("accepted conflicting owners at one epoch")
+				}
+			} else {
+				want := members[1].ID
+				if epochs[1] > epochs[0] {
+					want = members[2].ID
+				}
+				if err != nil || owner != want {
+					t.Fatalf("owner=%s error=%v, want %s", owner, err, want)
+				}
+			}
+			if cell.ownstate.Phase() != mosi.IO {
+				t.Fatal("discovery granted local rights")
+			}
+		})
+	}
+}
+
+func TestClusterAcquisitionRefreshesOwnerAfterUUIDForward(t *testing.T) {
+	cluster := &nodeCluster{self: clusterMember{ID: "memcp://" + uuid.NewString()}, ctx: context.Background()}
+	cluster.initializeManager()
+	oldOwner, newOwner := "memcp://"+uuid.NewString(), "memcp://"+uuid.NewString()
+	oldPeer := &mosiPeer{done: make(chan struct{}), outgoing: make(chan mosiMessage, 2)}
+	newPeer := &mosiPeer{done: make(chan struct{}), outgoing: make(chan mosiMessage, 2)}
+	cluster.view.Store(&clusterView{links: []*clusterLink{{member: clusterMember{ID: oldOwner}, peer: oldPeer}, {member: clusterMember{ID: newOwner}, peer: newPeer}}})
+	r := cluster.manager
+	from := mosiResource{Database: "owner_refresh", Table: "items", Shard: uuid.NewString()}
+	to := from
+	to.Shard = uuid.NewString()
+	old := r.resourceCell(from)
+	old.ownstate.Initialize(mosi.IO)
+	r.updateRecord(from, func(record *replicaRecord) bool { record.Owner, record.Epoch = oldOwner, 1; return true })
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	done := make(chan any, 1)
+	go func() {
+		defer func() {
+			if failure := recover(); failure != nil {
+				done <- failure
+			}
+		}()
+		done <- cluster.obtain(ctx, from, mosi.M)
+	}()
+	select {
+	case <-oldPeer.outgoing:
+	case <-ctx.Done():
+		t.Fatal("initial acquisition missing")
+	}
+	target := r.resourceCell(to)
+	target.ownstate.Initialize(mosi.IO)
+	r.updateRecord(to, func(record *replicaRecord) bool { record.Owner, record.Epoch = newOwner, 2; return true })
+	// A newer inbound identity supersedes the old placeholder and wakes its waiters.
+	r.forwardResource(from, to)
+	select {
+	case message := <-oldPeer.outgoing:
+		t.Fatalf("successor request reused stale owner: %+v", message.Packet)
+	case message := <-newPeer.outgoing:
+		if message.Packet == nil || message.Packet.Resource != to {
+			t.Fatal("lost successor identity")
+		}
+		if _, err := target.ownstate.Grant(message.Packet.ID, mosi.M, func() error { return nil }); err != nil {
+			t.Fatal(err)
+		}
+	case result := <-done:
+		t.Fatalf("acquisition ended without requesting successor: %v", result)
+	case <-ctx.Done():
+		t.Fatal("successor acquisition missing")
+	}
+	select {
+	case result := <-done:
+		if result != target {
+			t.Fatalf("acquisition lost forwarded grant: %v", result)
+		}
+	case <-ctx.Done():
+		t.Fatal("forwarded acquisition did not finish")
+	}
+}
+
+func TestClusterAcquisitionQueuesBehindOutgoingHandover(t *testing.T) {
+	cluster := &nodeCluster{self: clusterMember{ID: "memcp://" + uuid.NewString()}, ctx: context.Background()}
+	cluster.initializeManager()
+	owner := "memcp://" + uuid.NewString()
+	peer := &mosiPeer{done: make(chan struct{}), outgoing: make(chan mosiMessage, 1)}
+	cluster.view.Store(&clusterView{links: []*clusterLink{{member: clusterMember{ID: owner}, peer: peer}}})
+	r := cluster.manager
+	resource := mosiResource{Database: "handover_queue", Table: "items", Shard: uuid.NewString()}
+	schema := mosiResource{Database: resource.Database}
+	r.resourceCell(schema).ownstate.Initialize(mosi.M)
+	r.updateRecord(schema, func(record *replicaRecord) bool { record.Owner, record.Epoch = r.id, 1; return true })
+	cell := r.resourceCell(resource)
+	cell.ownstate.Initialize(mosi.IO)
+	r.updateRecord(resource, func(record *replicaRecord) bool {
+		record.Owner, record.Handoff, record.Epoch = r.id, owner, 1
+		return true
+	})
+	cell.directory.Lock()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	done := make(chan any, 1)
+	go func() {
+		defer func() {
+			if failure := recover(); failure != nil {
+				done <- failure
+			}
+		}()
+		done <- cluster.obtain(ctx, resource, mosi.M)
+	}()
+	// Wait for native acquisition admission without allowing the old handover
+	// to complete. A fresh destination cannot route this UUID yet.
+	for !cell.ownstate.Phase().Requested() && ctx.Err() == nil {
+		time.Sleep(time.Millisecond)
+	}
+	select {
+	case <-peer.outgoing:
+		cell.directory.Unlock()
+		t.Fatal("request preceded the destination's reference installation")
+	case <-time.After(20 * time.Millisecond):
+	}
+	r.updateRecord(resource, func(record *replicaRecord) bool {
+		record.Owner, record.Handoff, record.Epoch = owner, "", 2
+		return true
+	})
+	cell.directory.Unlock()
+	select {
+	case message := <-peer.outgoing:
+		if message.Packet == nil || message.Packet.Resource != resource {
+			t.Fatal("handover lost request identity")
+		}
+		if _, err := cell.ownstate.Grant(message.Packet.ID, mosi.M, func() error { return nil }); err != nil {
+			t.Fatal(err)
+		}
+	case failure := <-done:
+		t.Fatalf("acquisition ended before the destination grant: %v", failure)
+	case <-ctx.Done():
+		t.Fatal("request did not follow the completed handover")
+	}
+	select {
+	case result := <-done:
+		if result != cell {
+			t.Fatalf("handover lost native grant: %v", result)
+		}
+	case <-ctx.Done():
+		t.Fatal("queued acquisition did not finish")
+	}
+}
+
+func TestClusterGrantedReadDoesNotRediscoverMissingOwner(t *testing.T) {
+	cluster := &nodeCluster{self: clusterMember{ID: "memcp://" + uuid.NewString()}, ctx: context.Background()}
+	cluster.initializeManager()
+	owner := "memcp://" + uuid.NewString()
+	peer := &mosiPeer{done: make(chan struct{}), outgoing: make(chan mosiMessage, 1)}
+	cluster.view.Store(&clusterView{members: []clusterMember{cluster.self, {ID: owner}}, links: []*clusterLink{{member: clusterMember{ID: owner}, peer: peer}}})
+	resource := mosiResource{Database: "granted_read"}
+	r := cluster.manager
+	cell := r.resourceCell(resource)
+	cell.ownstate.Initialize(mosi.IO)
+	r.updateRecord(resource, func(record *replicaRecord) bool { record.Owner, record.Epoch = owner, 1; return true })
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	done := make(chan any, 1)
+	go func() {
+		defer func() {
+			if failure := recover(); failure != nil {
+				done <- failure
+			}
+		}()
+		done <- cluster.obtain(ctx, resource, mosi.S)
+	}()
+	select {
+	case message := <-peer.outgoing:
+		// Losing a contact hint does not revoke an already issued S grant.
+		cluster.view.Store(&clusterView{members: []clusterMember{cluster.self}})
+		if _, err := cell.ownstate.Grant(message.Packet.ID, mosi.S, func() error { return nil }); err != nil {
+			t.Fatal(err)
+		}
+	case <-ctx.Done():
+		t.Fatal("read acquisition missing")
+	}
+	select {
+	case result := <-done:
+		if result != cell {
+			t.Fatalf("received S grant required fresh owner discovery: %v", result)
+		}
+	case <-ctx.Done():
+		t.Fatal("granted read did not finish")
 	}
 }
