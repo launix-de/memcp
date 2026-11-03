@@ -230,6 +230,7 @@ Each entry is (HEAD TYPE MODE):
 	(list and "BOOLEAN" "fixed")
 	(list (quote or) "BOOLEAN" "fixed")
 	(list or "BOOLEAN" "fixed")
+	(list sql_fulltext_boolean "DOUBLE" "fixed")
 	(list (quote sql_like_pattern) "VARCHAR" "first")
 	(list (quote strlike) "BOOLEAN" "fixed")
 	(list strlike "BOOLEAN" "fixed")

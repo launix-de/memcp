@@ -25,6 +25,7 @@ import (
 	"math/big"
 	"net"
 	"os"
+	"reflect"
 	"strings"
 
 	_ "github.com/go-sql-driver/mysql"
@@ -56,6 +57,7 @@ type expectation struct {
 	Error       bool             `json:"error"`
 	Contains    []string         `json:"contains"`
 	NotContains []string         `json:"not_contains"`
+	Columns     []string         `json:"columns"`
 	Rows        *int             `json:"rows"`
 	Data        []map[string]any `json:"data"`
 }
@@ -111,7 +113,7 @@ func runStatement(conn *sql.Conn, cfg probe, stmt statement) error {
 				return fmt.Errorf("parameter %d requires mysql_type when any parameter is typed", i+1)
 			}
 		}
-		if stmt.Expect.Error || stmt.Expect.Rows != nil || len(stmt.Expect.Data) != 0 {
+		if stmt.Expect.Error || stmt.Expect.Rows != nil || stmt.Expect.Columns != nil || len(stmt.Expect.Data) != 0 {
 			return fmt.Errorf("typed parameters currently support statements without result expectations")
 		}
 		return runTypedStatement(cfg, stmt, args)
@@ -139,6 +141,15 @@ func runStatement(conn *sql.Conn, cfg probe, stmt statement) error {
 		return err
 	}
 	defer rows.Close()
+	if stmt.Expect.Columns != nil {
+		columns, err := rows.Columns()
+		if err != nil {
+			return err
+		}
+		if !reflect.DeepEqual(columns, stmt.Expect.Columns) {
+			return fmt.Errorf("expected columns %v, got %v", stmt.Expect.Columns, columns)
+		}
+	}
 	got, err := collectRows(rows)
 	if err != nil {
 		return err

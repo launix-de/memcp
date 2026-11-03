@@ -128,3 +128,75 @@ test_cases:
   - name: Replaced control-Z retains its byte value
     sql: SELECT value=0x1a AS intact FROM mw_blob WHERE id=1
     expect: {data: [{intact: true}]}
+
+  - name: Boolean search fixtures include word boundaries and Unicode
+    sql: INSERT INTO mw_fulltext VALUES (1,'MemCP wiki database'),(2,'MemCP database database'),(3,'memcp handbook'),(4,'other wiki'),(5,'prefixmemcp'),(6,'Grüße 日本語'),(7,NULL)
+  - name: MediaWiki boolean search requires every plus term
+    sql: SELECT id FROM mw_fulltext WHERE MATCH(title) AGAINST('+memcp +database' IN BOOLEAN MODE) ORDER BY id
+    expect: {data: [{id: 1}, {id: 2}]}
+  - name: Boolean search optional terms use OR and whole words
+    sql: SELECT id FROM mw_fulltext WHERE MATCH(title) AGAINST('memcp wiki' IN BOOLEAN MODE) ORDER BY id
+    expect: {data: [{id: 1}, {id: 2}, {id: 3}, {id: 4}]}
+  - name: Boolean search exclusion removes matching documents
+    sql: SELECT id FROM mw_fulltext WHERE MATCH(title) AGAINST('+memcp -wiki' IN BOOLEAN MODE) ORDER BY id
+    expect: {data: [{id: 2}, {id: 3}]}
+  - name: Only negative terms do not select documents
+    sql: SELECT id FROM mw_fulltext WHERE MATCH(title) AGAINST('-wiki' IN BOOLEAN MODE)
+    expect: {rows: 0}
+  - name: Prefix search matches the beginning of a whole word
+    sql: SELECT id FROM mw_fulltext WHERE MATCH(title) AGAINST('+data*' IN BOOLEAN MODE) ORDER BY id
+    expect: {data: [{id: 1}, {id: 2}]}
+  - name: Phrase search preserves word order and adjacency
+    sql: SELECT id FROM mw_fulltext WHERE MATCH(title) AGAINST('+"memcp wiki"' IN BOOLEAN MODE)
+    expect: {data: [{id: 1}]}
+  - name: Phrase separators may differ from the indexed text
+    sql: SELECT MATCH('memcp, wiki') AGAINST('"memcp wiki"' IN BOOLEAN MODE)>0 AS matched
+    expect: {data: [{matched: true}]}
+  - name: Grouped alternatives and required groups
+    sql: SELECT id FROM mw_fulltext WHERE MATCH(title) AGAINST('+memcp +(wiki handbook)' IN BOOLEAN MODE) ORDER BY id
+    expect: {data: [{id: 1}, {id: 3}]}
+  - name: Nested excluded groups
+    sql: SELECT id FROM mw_fulltext WHERE MATCH(title) AGAINST('+memcp -(wiki (handbook))' IN BOOLEAN MODE)
+    expect: {data: [{id: 2}]}
+  - name: UTF8 fulltext words are case insensitive
+    sql: SELECT id FROM mw_fulltext WHERE MATCH(title) AGAINST('+GRÜßE +日本語' IN BOOLEAN MODE)
+    expect: {data: [{id: 6}]}
+  - name: Null query retains SQL null
+    sql: SELECT MATCH(title) AGAINST(NULL IN BOOLEAN MODE) AS score FROM mw_fulltext WHERE id=1
+    expect: {data: [{score: null}]}
+  - name: Empty query and null documents have zero score
+    sql: SELECT MATCH(title) AGAINST('' IN BOOLEAN MODE) AS empty_score, MATCH(title) AGAINST('wiki' IN BOOLEAN MODE) AS null_score FROM mw_fulltext WHERE id=7
+    expect: {data: [{empty_score: 0, null_score: 0}]}
+  - name: Required terms can occur in different MATCH columns
+    sql: SELECT MATCH('memcp','wiki') AGAINST('+memcp +wiki' IN BOOLEAN MODE)>0 AS matched
+    expect: {data: [{matched: true}]}
+  - name: Phrases cannot cross MATCH column boundaries
+    sql: SELECT MATCH('memcp','wiki') AGAINST('"memcp wiki"' IN BOOLEAN MODE) AS score
+    expect: {data: [{score: 0}]}
+  - name: Boolean relevance composes with ORDER BY and LIMIT
+    sql: SELECT id FROM mw_fulltext WHERE MATCH(title) AGAINST('+memcp +database' IN BOOLEAN MODE)>0 ORDER BY MATCH(title) AGAINST('+memcp +database' IN BOOLEAN MODE) DESC LIMIT 1
+    expect: {data: [{id: 2}]}
+  - name: Boolean term weights and soft negation contribute to relevance
+    sql: SELECT MATCH('memcp wiki') AGAINST('+memcp >wiki' IN BOOLEAN MODE) AS boosted, MATCH('memcp wiki') AGAINST('+memcp <wiki' IN BOOLEAN MODE) AS reduced, MATCH('memcp wiki') AGAINST('+memcp ~wiki' IN BOOLEAN MODE) AS penalized
+    expect: {data: [{boosted: 3, reduced: 1.5, penalized: 0}]}
+  - name: Boolean underscore is a word character rather than LIKE wildcard
+    sql: SELECT MATCH('memcpwiki') AGAINST('+memcp_*' IN BOOLEAN MODE) AS score
+    expect: {data: [{score: 0}]}
+  - name: Unterminated fulltext group is rejected
+    sql: SELECT MATCH('memcp') AGAINST('+(memcp' IN BOOLEAN MODE)
+    expect: {error: true}
+  - name: Unterminated fulltext phrase is rejected
+    sql: SELECT MATCH('memcp') AGAINST('"memcp' IN BOOLEAN MODE)
+    expect: {error: true}
+  - name: Repeated boolean modifiers are rejected
+    sql: SELECT MATCH('memcp') AGAINST('+-memcp' IN BOOLEAN MODE)
+    expect: {error: true}
+  - name: Unsupported proximity syntax is rejected explicitly
+    sql: SELECT MATCH('memcp wiki') AGAINST('"memcp wiki" @2' IN BOOLEAN MODE)
+    expect: {error: true}
+  - name: Unknown MATCH mode is rejected
+    sql: SELECT MATCH('memcp') AGAINST('memcp' IN BOGUS MODE)
+    expect: {error: true}
+  - name: Natural language MATCH still composes with comparisons
+    sql: SELECT MATCH('memcp') AGAINST('memcp' IN NATURAL LANGUAGE MODE)>0 AS matched
+    expect: {data: [{matched: true}]}

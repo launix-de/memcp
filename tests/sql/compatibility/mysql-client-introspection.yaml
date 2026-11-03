@@ -103,4 +103,17 @@ test_cases:
         - sql: "SELECT @@max_allowed_packet FROM"
           expect: {error: true}
 
+
+  - name: Empty SHOW VARIABLES retains its result columns over MySQL
+    mysql:
+      statements:
+        - sql: "SHOW GLOBAL VARIABLES LIKE 'ft\\_min\\_word\\_len'"
+          expect: {rows: 0, columns: [Variable_name, Value]}
+        - sql: "SHOW SESSION VARIABLES WHERE Variable_name='unknown_mediawiki_probe'"
+          expect: {rows: 0, columns: [Variable_name, Value]}
+        - sql: "SHOW VARIABLES WHERE Variable_name='max_allowed_packet'"
+          expect:
+            columns: [Variable_name, Value]
+            data: [{Variable_name: max_allowed_packet, Value: 41943040}]
+
 cleanup: []

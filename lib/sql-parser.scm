@@ -808,10 +808,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		dedicated correlated-subquery marker for NOT EXISTS. */
 		(parser '((atom "NOT" true) (atom "EXISTS" true) "(" (define sub sql_select) ")") (list (quote not) (list (quote inner_select_exists) sub)))
 		(parser '((atom "NOT" true) (define expr sql_expression2)) '('sql_not expr))
-		(parser '((atom "MATCH" true) "(" (define cols (+ sql_expression ",")) ")" (atom "AGAINST" true) "(" (define needle sql_expression) (? (atom "IN" true) (atom "NATURAL" true) (atom "LANGUAGE" true) (atom "MODE" true)) ")")
-			(begin
-				(define terms (map cols (lambda (col) '('strlike col '('concat "%" needle "%") "utf8mb4_general_ci"))))
-				(if (equal? (count terms) 1) (car terms) (cons (quote or) terms))))
+
 		(parser '((define value sql_expression3) (atom "MEMBER" true) (atom "OF" true) "(" (define array sql_expression) ")") '('json_member_of value array))
 		/* IN (SELECT ...) and NOT IN (SELECT ...) -> pseudo operator, planner will lower or reject */
 		(parser '((define a sql_expression3) (atom "IN" true) "(" (define sub sql_select) ")") '('inner_select_in a sub))
@@ -904,6 +901,18 @@ arithmetic; leave expressions containing columns or functions untouched. */
 	) (list (coalesce partition_by '()) (coalesce order_by '()))))
 
 	(define sql_expression6 (parser (or
+		/* MATCH is a scalar score, so it composes with arithmetic/comparisons. */
+		(parser '((atom "MATCH" true) "(" (define cols (+ sql_expression ",")) ")"
+			(atom "AGAINST" true) "(" (define needle sql_expression)
+			(define mode (or
+				(parser '((atom "IN" true) (atom "BOOLEAN" true) (atom "MODE" true)) "boolean")
+				(parser '((? (atom "IN" true) (atom "NATURAL" true) (atom "LANGUAGE" true) (atom "MODE" true))) "natural"))) ")")
+			(if (equal? mode "boolean")
+				(list sql_fulltext_boolean (cons (quote list) cols) needle)
+				(begin
+					(define terms (map cols (lambda (col) '('strlike col '('concat "%" needle "%") "utf8mb4_general_ci"))))
+					(if (equal? (count terms) 1) (car terms) (cons (quote or) terms)))))
+
 		/* Scalar subselect in expressions: (SELECT ...) */
 		(parser '("(" (define sub sql_select) ")") '('inner_select sub))
 		(parser '("(" (define a sql_expression) ")") a)
@@ -2170,10 +2179,10 @@ arithmetic; leave expressions containing columns or functions untouched. */
 					(cons head tail) (cons (transform_col head row_expr) (map tail (lambda (item) (transform_col item row_expr))))
 					expr
 				)))
-				(cons (quote !begin) (map all_rows (lambda (row) (begin
+				(cons (quote !begin) (cons (list (quote resultfields) (list (quote quote) '("Variable_name" "Value"))) (map all_rows (lambda (row) (begin
 					(define row_expr (list (quote list) "Variable_name" (nth row 0) "Value" (nth row 1)))
 					(list (quote if) (transform_col where row_expr) (list (quote resultrow) row_expr) nil)
-				))))
+				)))))
 			)
 		)
 		(parser '((atom "SHOW" true) (? (or (atom "GLOBAL" true) (atom "SESSION" true))) (atom "VARIABLES" true) (? (atom "LIKE" true) (define likepattern sql_expression)))
@@ -2181,9 +2190,9 @@ arithmetic; leave expressions containing columns or functions untouched. */
 				(define all_rows (sql_system_variable_rows))
 				(define pat (coalesce likepattern "%"))
 				(define filtered (filter all_rows (lambda (row) (strlike (nth row 0) pat "utf8mb4_general_ci"))))
-				(cons (quote !begin) (map filtered (lambda (row)
+				(cons (quote !begin) (cons (list (quote resultfields) (list (quote quote) '("Variable_name" "Value"))) (map filtered (lambda (row)
 					(list (quote resultrow) (list (quote list) "Variable_name" (nth row 0) "Value" (nth row 1)))
-				)))
+				))))
 			)
 		)
 		/* SHOW timezone — PostgreSQL syntax */
