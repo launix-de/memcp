@@ -28,7 +28,8 @@ jobs:
   test:
     needs: changes
     if: ${{ needs.changes.outputs.relevant == 'true' }}
-    runs-on: ubuntu-latest
+    # Preserve the Python 3.12 AST representation used by the unchanged guard.
+    runs-on: ubuntu-24.04
     timeout-minutes: 40
 
     services:
