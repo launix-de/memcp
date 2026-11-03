@@ -245,11 +245,7 @@ func serialProcResolveNative(proc *Proc, value Scmer) (Scmer, bool) {
 	if environment == nil {
 		environment = &Globalenv
 	}
-	binding := environment.FindRead(mustSymbol(value))
-	if binding == nil {
-		return NewNil(), false
-	}
-	resolved, ok := binding.Vars[mustSymbol(value)]
+	resolved, ok := environment.Lookup(mustSymbol(value))
 	return resolved, ok && resolved.GetTag() == tagFunc
 }
 
@@ -577,10 +573,6 @@ func (p *SerialProc) IsNative(name Symbol) bool {
 	if p.Kind != SerialProcNative {
 		return false
 	}
-	binding := Globalenv.FindRead(name)
-	if binding == nil {
-		return false
-	}
-	value, ok := binding.Vars[name]
+	value, ok := Globalenv.Lookup(name)
 	return ok && value.GetTag() == tagFunc && value.ptr == p.Value.ptr && value.aux == p.Value.aux
 }
