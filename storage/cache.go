@@ -541,6 +541,89 @@ func (cm *CacheManager) runEvictionChecks(additionalSize int64, tbl *table) {
 	}
 }
 
+// applyBatch accounts an already queued, bounded group before reclaiming. All
+// operations retain channel order; synchronous operations terminate the batch
+// and are acknowledged only after budget enforcement and admission publication.
+// This avoids retrying an unchanged pinned heap for every small async delta.
+func (cm *CacheManager) applyBatch(op cacheOp) (closed bool) {
+	tables := make(map[*table]struct{})
+	budgetChanged := false
+batch:
+	for applied := 0; ; applied++ {
+		if op.ready != nil {
+			<-op.ready
+		}
+		tbl := op.shardTable
+		if op.add != nil {
+			tbl = op.add.shardTable
+		} else if item := cm.itemMap[op.updatePtr]; item != nil {
+			tbl = item.shardTable
+		}
+		if tbl != nil {
+			tables[tbl] = struct{}{}
+		}
+		if op.shardPercent != 0 {
+			cm.shardPercent = op.shardPercent
+			budgetChanged = true
+		} else if op.add != nil {
+			cm.addInternal(op.add)
+		} else if op.del != nil {
+			cm.removeByPointer(op.del)
+		} else if op.updatePtr != nil {
+			if op.setSize {
+				cm.setSizeInternal(op.updatePtr, op.updateDelta)
+			} else {
+				cm.updateSizeInternal(op.updatePtr, op.updateDelta)
+			}
+		} else if op.budgetUpdate {
+			cm.memoryBudget = op.budgetVal
+			cm.persistedBudget = op.persistedBudgetVal
+			cm.minimumMemory = op.minimumMemoryVal
+			budgetChanged = true
+		}
+		// Close admission promptly even while queued accounting continues.
+		// Reopening still waits for the complete pressure pass below.
+		if cm.sizeByType[TypeShard] >= cm.shardBudget() {
+			cm.publishShardRAM()
+		}
+		if op.done != nil || op.statResult != nil || op.ready != nil || applied+1 >= cap(cm.opChan) {
+			break
+		}
+		select {
+		case next, ok := <-cm.opChan:
+			if !ok {
+				closed = true
+				break batch
+			}
+			op = next
+		default:
+			break batch
+		}
+	}
+	if budgetChanged {
+		for table, used := range cm.tableShardMemory {
+			cm.publishTableShardRAM(table, used)
+			tables[table] = struct{}{}
+		}
+	}
+	for table := range tables {
+		cm.runEvictionChecks(0, table)
+	}
+	cm.runEvictionChecks(op.pressureSize, nil)
+	cm.publishShardRAM()
+	if op.statResult != nil {
+		op.statResult <- CacheStat{ShardMemory: cm.sizeByType[TypeShard], ShardBudget: cm.shardBudget(),
+			SizeByType: cm.sizeByType, CountByType: cm.countByType, CurrentMemory: cm.currentMemory,
+			MemoryBudget: cm.memoryBudget, MinimumMemory: cm.minimumMemory,
+			PersistedBudget: cm.persistedBudget, PersistedMemory: cm.persistedMemory()}
+		close(op.statResult)
+	}
+	if op.done != nil {
+		close(op.done)
+	}
+	return closed
+}
+
 // run is the single-threaded goroutine handling all operations.
 func (cm *CacheManager) run() {
 	defer close(cm.runDone)
@@ -549,59 +632,8 @@ func (cm *CacheManager) run() {
 	for {
 		select {
 		case op, ok := <-cm.opChan:
-			if !ok {
+			if !ok || cm.applyBatch(op) {
 				return
-			}
-			if op.ready != nil {
-				<-op.ready
-			}
-			tbl := op.shardTable
-			if op.add != nil {
-				tbl = op.add.shardTable
-			} else if item := cm.itemMap[op.updatePtr]; item != nil {
-				tbl = item.shardTable
-			}
-			if op.shardPercent != 0 {
-				cm.shardPercent = op.shardPercent
-			} else if op.add != nil {
-				cm.addInternal(op.add)
-			} else if op.del != nil {
-				cm.removeByPointer(op.del)
-			} else if op.updatePtr != nil {
-				if op.setSize {
-					cm.setSizeInternal(op.updatePtr, op.updateDelta)
-				} else {
-					cm.updateSizeInternal(op.updatePtr, op.updateDelta)
-				}
-			} else if op.budgetUpdate {
-				cm.memoryBudget = op.budgetVal
-				cm.persistedBudget = op.persistedBudgetVal
-				cm.minimumMemory = op.minimumMemoryVal
-			} else if op.pressureSize > 0 {
-				cm.runEvictionChecks(op.pressureSize, nil)
-			} else if op.statResult != nil {
-				op.statResult <- CacheStat{ShardMemory: cm.sizeByType[TypeShard], ShardBudget: cm.shardBudget(),
-					SizeByType:      cm.sizeByType,
-					CountByType:     cm.countByType,
-					CurrentMemory:   cm.currentMemory,
-					MemoryBudget:    cm.memoryBudget,
-					MinimumMemory:   cm.minimumMemory,
-					PersistedBudget: cm.persistedBudget,
-					PersistedMemory: cm.persistedMemory(),
-				}
-				close(op.statResult)
-			}
-			if op.budgetUpdate || op.shardPercent != 0 {
-				for table, used := range cm.tableShardMemory {
-					cm.publishTableShardRAM(table, used)
-					cm.runEvictionChecks(0, table)
-				}
-			}
-			// check if we need cleanup after add or updateSize
-			cm.runEvictionChecks(0, tbl)
-			cm.publishShardRAM()
-			if op.done != nil {
-				close(op.done)
 			}
 		case <-expireTicker.C:
 			cm.evictExpired()

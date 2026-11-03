@@ -18,8 +18,9 @@ package storage
 
 import "sync"
 import "time"
-import "sync/atomic"
+import "runtime"
 import "testing"
+import "sync/atomic"
 import "container/heap"
 import "github.com/launix-de/memcp/scm"
 
@@ -630,5 +631,69 @@ func TestClusterTableQuotaReclaimsOnlyThatTablesPayload(t *testing.T) {
 	}
 	if !manager.canLoadClusterShard(outer) || !manager.canLoadClusterShard(inner) {
 		t.Fatal("evicted payload left admission closed")
+	}
+}
+
+// Queued allocation accounting must not repeatedly traverse the entire cache
+// while the same native payload remains pinned. A subsequent barrier still
+// observes every byte and closed admission; releasing the pin permits eviction.
+type testPinnedAccountingObject struct {
+	offers   atomic.Int64
+	released atomic.Bool
+}
+
+func (o *testPinnedAccountingObject) evictionOffer(size int64) evictionOffer {
+	o.offers.Add(1)
+	if o.released.Load() {
+		return evictionOffer{fullBytes: size}
+	}
+	return evictionOffer{}
+}
+
+func (o *testPinnedAccountingObject) evict(_ evictionMode, size int64, _ *[numEvictableTypes]int64) evictionResult {
+	if !o.released.Load() {
+		return evictionResult{}
+	}
+	return evictionResult{freedBytes: size, fullyEvicted: true, success: true}
+}
+
+func TestCacheQueuedAccountingPreservesAdmissionAndPins(t *testing.T) {
+	var manager CacheManager
+	manager.Init(128, 128, 0)
+	defer manager.Stop()
+	object := new(testPinnedAccountingObject)
+	published := time.Now()
+	manager.AddItem(object, 16, TypeShard, nil, func(any) time.Time { return published }, nil)
+	if !manager.canLoadClusterShard(nil) {
+		t.Fatal("fixture unexpectedly blocks admission")
+	}
+	gate := make(chan struct{})
+	manager.opChan <- cacheOp{ready: gate}
+	for i := 0; i < 100; i++ {
+		manager.UpdateSizeAsync(object, 2)
+	}
+	parked := make(chan struct{})
+	manager.opChan <- cacheOp{ready: parked}
+	close(gate)
+	deadline := time.Now().Add(time.Second)
+	for manager.canLoadClusterShard(nil) {
+		if time.Now().After(deadline) {
+			close(parked)
+			t.Fatal("queued growth left admission open while the next owner was still busy")
+		}
+		runtime.Gosched()
+	}
+	close(parked)
+	usage := manager.Stat()
+	if usage.ShardMemory != 216 || manager.canLoadClusterShard(nil) {
+		t.Fatalf("queued accounting lost bytes or admitted over budget: %+v", usage)
+	}
+	if offers := object.offers.Load(); offers > 2 {
+		t.Fatalf("one queued batch retried pinned eviction %d times", offers)
+	}
+	object.released.Store(true)
+	manager.SetSize(object, 216)
+	if usage := manager.Stat(); usage.ShardMemory != 0 || !manager.canLoadClusterShard(nil) {
+		t.Fatalf("released payload was not reclaimed before admission: %+v", usage)
 	}
 }
