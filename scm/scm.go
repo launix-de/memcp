@@ -27,6 +27,7 @@ package scm
 
 import (
 	"fmt"
+	"maps"
 	"reflect"
 	"runtime"
 	"strings"
@@ -964,6 +965,23 @@ func closeProcedureCaptures(expression Scmer, callFrame *Env, bound map[Symbol]s
 			switch string(head) {
 			case "outer":
 				return closedCaptureLiteral(Eval(expression, callFrame))
+			case "match", "match_mut":
+				closed := append([]Scmer(nil), items...)
+				if len(items) > 1 {
+					closed[1] = closeProcedureCaptures(items[1], callFrame, bound)
+				}
+				i := 2
+				for ; i+1 < len(items); i += 2 {
+					closed[i] = closeProcedurePattern(items[i], callFrame, bound)
+					branch := maps.Clone(bound)
+					procedurePatternBindings(items[i], branch)
+					collectProcedureBindings(items[i+1], branch)
+					closed[i+1] = closeProcedureCaptures(items[i+1], callFrame, branch)
+				}
+				if i < len(items) {
+					closed[i] = closeProcedureCaptures(items[i], callFrame, bound)
+				}
+				return NewSlice(closed)
 			case "lambda", "quote":
 				return expression
 			}

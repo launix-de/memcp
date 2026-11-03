@@ -526,6 +526,41 @@ func utf16Prefix(text string, limit int64) string {
 }
 
 func init_strings() {
+	// Compiled regex values reconstruct from their immutable pattern. No Go
+	// pointer or native closure is part of a serialized Scheme expression.
+	Declare(&Globalenv, &Declaration{
+		Name: "compiled_regex",
+		Fn: func(a ...Scmer) Scmer {
+			re, err := regexp.Compile(String(a[0]))
+			if err != nil {
+				panic(err)
+			}
+			return NewRegex(re)
+		},
+		Type: &TypeDescriptor{Kind: "func", Const: true,
+			Params: []*TypeDescriptor{{Kind: "string", Label: "pattern"}},
+			Return: &TypeDescriptor{Kind: "any"}},
+	})
+	Declare(&Globalenv, &Declaration{
+		Name: "regexp_replace_compiled",
+		Fn: func(a ...Scmer) Scmer {
+			if a[1].IsNil() {
+				return NewNil()
+			}
+			re := a[0].Regex()
+			if scmerCallable(a[2]) {
+				replacer := a[2]
+				return NewString(re.ReplaceAllStringFunc(String(a[1]), func(match string) string {
+					return String(Apply(replacer, NewString(match)))
+				}))
+			}
+			return NewString(re.ReplaceAllString(String(a[1]), String(a[2])))
+		},
+		Type: &TypeDescriptor{Kind: "func", Const: true,
+			Params: []*TypeDescriptor{{Kind: "any", Label: "pattern"}, {Kind: "string", Label: "value"}, {Kind: "any", Label: "replacement"}},
+			Return: &TypeDescriptor{Kind: "string"}},
+	})
+
 	init_uuid()
 	// Encode one scalar value independently of any frontend character type or
 	// collation. Frontends select their own ranges before calling this operator.
@@ -24941,23 +24976,9 @@ func optimizeRegexpReplace(v []Scmer, oc *OptimizerContext, useResult bool) (Scm
 			rv[1],
 		}), td
 	}
-	// Replace call with a precompiled closure. The replacement stays a runtime
-	// argument (arg 1 after the rewrite) so a string ($1 expansion) and a
-	// function (match) -> string are both still accepted.
-	compiled := NewFunc(func(a ...Scmer) Scmer {
-		if a[0].IsNil() {
-			return NewNil()
-		}
-		if scmerCallable(a[1]) {
-			replacer := a[1]
-			return NewString(re.ReplaceAllStringFunc(String(a[0]), func(match string) string {
-				return String(Apply(replacer, NewString(match)))
-			}))
-		}
-		return NewString(re.ReplaceAllString(String(a[0]), String(a[1])))
-	})
-	// Rewrite: (regexp_replace str pattern repl) -> (compiled_fn str repl)
-	return NewSlice([]Scmer{compiled, rv[1], rv[3]}), td
+	// Preserve a declared operator and immutable pattern in the AST. An opaque
+	// Go closure cannot be reconstructed by Scheme serialization.
+	return NewSlice([]Scmer{NewSymbol("regexp_replace_compiled"), NewRegex(re), rv[1], rv[3]}), td
 }
 
 // optimizeRegexpTest precompiles the regex when the pattern argument is a constant string.
