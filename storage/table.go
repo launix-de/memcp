@@ -1292,10 +1292,9 @@ func (t *table) collectStatisticsFromShards(shards []*storageShard) {
 }
 
 // collectRebuiltColumnPlannerStatistics reads freshly rebuilt shard generations.
-// A generation can already receive forwarded writes, or become live, before
-// statistics publication finishes. Lock each shard independently and never
-// call this helper while holding table.mu: mutation callbacks may need table
-// metadata while they own the shard lock.
+// GetRead retains each immutable main generation. Copy its column pointer under
+// the shard lock, then prepare and collect outside mutation locks. Only scalar
+// extrema escape the reader; they must not retain a decoded dictionary arena.
 func collectRebuiltColumnPlannerStatistics(shards []*storageShard, columnName string) *columnPlannerStatistics {
 	stats := &columnPlannerStatistics{
 		Confidence:  1,
@@ -1317,17 +1316,21 @@ func collectRebuiltColumnPlannerStatistics(shards []*storageShard, columnName st
 			shard = done.shard
 			defer done.Release()
 			shard.mu.RLock()
-			defer shard.mu.RUnlock()
-			columnStorage := shard.columns[columnName]
+			columnStorage, rows := shard.columns[columnName], shard.main_count
+			shard.mu.RUnlock()
 			if columnStorage == nil {
 				return
 			}
-			if cap(buf) < int(shard.main_count) {
-				buf = make([]scm.Scmer, shard.main_count)
+			if cap(buf) < int(rows) {
+				buf = make([]scm.Scmer, rows)
 			}
-			buf = buf[:shard.main_count]
-			reader := columnStorage.GetCachedReader(ReadCompressed)
-			reader.GetValueRange(0, shard.main_count, buf, 1)
+			buf = buf[:rows]
+			// This consumer visits the whole batch and compares values repeatedly.
+			// ReadAuto prepares owned text once rather than repeatedly decoding
+			// compressed handles in length/min/max operations.
+			reader := columnStorage.GetCachedReader(ReadAuto)
+			defer ReleaseColumnReader(reader)
+			reader.GetValueRange(0, rows, buf, 1)
 			for _, value := range buf {
 				frequencies.observe(value)
 				rowCount++
@@ -1350,6 +1353,12 @@ func collectRebuiltColumnPlannerStatistics(shards []*storageShard, columnName st
 				if scm.Less(stats.MaxEstimate, value) {
 					stats.MaxEstimate = value
 				}
+			}
+			if stats.MinEstimate.IsString() {
+				stats.MinEstimate = scm.NewString(strings.Clone(stats.MinEstimate.String()))
+			}
+			if stats.MaxEstimate.IsString() {
+				stats.MaxEstimate = scm.NewString(strings.Clone(stats.MaxEstimate.String()))
 			}
 		}()
 	}
