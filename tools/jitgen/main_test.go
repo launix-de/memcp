@@ -907,8 +907,8 @@ func TestTargetLayoutPreservesPointersAndTrailingEmptyFields(t *testing.T) {
 			if got := goCallWordCount(value); got != 3 {
 				t.Fatalf("trailing zero-size field: %d ABI words, want 3", got)
 			}
-			if got := goCallPointerMask(value); got != 2 {
-				t.Fatalf("pointer map: %03b, want 010", got)
+			if !goCallContainsPointers(value) {
+				t.Fatal("pointer-bearing aggregate lost its specialization property")
 			}
 		})
 	}
@@ -1130,8 +1130,8 @@ func TestGoCallStackArrayAdmissionPreservesMemoryLayout(t *testing.T) {
 	if got := goCallWordCount(array); got != 2 {
 		t.Fatalf("packed array width changed to %d, want 2", got)
 	}
-	if got := goCallPointerMask(array); got != 0 {
-		t.Fatalf("packed byte-array pointer mask changed to %d, want 0", got)
+	if goCallContainsPointers(array) {
+		t.Fatal("packed byte array must remain pointer-free")
 	}
 }
 
