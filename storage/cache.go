@@ -492,6 +492,9 @@ func (cm *CacheManager) runEvictionChecks(additionalSize int64, tbl *table) {
 	// Payload competes with payload. Cache/index allocations never evict native
 	// shard storage; the separate shard budget reserves RAM for those caches.
 	persistedBudget := cm.persistedBudget
+	if cm.memoryBudget > 0 && (persistedBudget <= 0 || cm.memoryBudget < persistedBudget) {
+		persistedBudget = cm.memoryBudget
+	}
 	if sharedClusterMounts.Load() != nil {
 		limit := cm.shardBudget()
 		if persistedBudget <= 0 || limit < persistedBudget {

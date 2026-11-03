@@ -596,10 +596,14 @@ func TestCachePressureDoesNotDisplaceShardPayload(t *testing.T) {
 		t.Fatal("a pending cache allocation displaced native shard storage")
 	}
 	manager.AddItem(new(int), 200, TypeShard,
-		func(any, *[numEvictableTypes]int64) bool { return true }, func(any) time.Time { return time.Now() }, nil)
+		func(any, *[numEvictableTypes]int64) bool { return true }, func(any) time.Time { return published }, nil)
 	manager.Stat()
 	if !payloadEvicted.Load() {
 		t.Fatal("new shard storage failed to displace older shard storage")
+	}
+	manager.UpdateBudget(100, 700, 0)
+	if manager.Stat().ShardMemory > 100 {
+		t.Fatal("an explicit total-budget reduction did not shrink the payload budget")
 	}
 }
 

@@ -2087,10 +2087,12 @@ def run_cluster_placement(args, artifacts, journal):
             source.scm(f'(rebuild (table "{DATABASE}" false "big_items" false) true false)')
         standalone_operators = []
         operator_shared = None
+        # The placement/co-location preflight also runs in the generic cluster
+        # and SQL-context scenarios, not just the operator YAML profile.
+        source.sql("CREATE TABLE operator_keys(id INT PRIMARY KEY) ENGINE=SAFE")
+        source.sql("INSERT INTO operator_keys VALUES(42000),(90000),(175000),(245000)")
+        source.scm(f'(rebuild (table "{DATABASE}" false "operator_keys" false) true false)')
         if args.cluster_operators_only:
-            source.sql("CREATE TABLE operator_keys(id INT PRIMARY KEY) ENGINE=SAFE")
-            source.sql("INSERT INTO operator_keys VALUES(42000),(90000),(175000),(245000)")
-            source.scm(f'(rebuild (table "{DATABASE}" false "operator_keys" false) true false)')
             # Both executions must start from the same committed fixture.
             # Rollback restores visibility, but not physical delta generations;
             # copying after the oracle would also propagate committed changes.
