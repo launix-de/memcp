@@ -794,6 +794,7 @@ func TestRemoteScanRetainsUUIDAcrossRebuild(t *testing.T) {
 }
 
 func TestProcedureWireNestedScanContextRebindSkipsQuotedData(t *testing.T) {
+	Init(scm.Globalenv)
 	input := scm.Read(t.Name(), `(lambda () (list (scan nil source) (scan (node_query_context "previous-hop") source) (quote (scan nil literal))))`)
 	binding := scm.Read(t.Name(), `(node_query_context "current-hop")`)
 	bound := scm.SerializeToString(bindProcedureScanContext(input, binding), nil)
