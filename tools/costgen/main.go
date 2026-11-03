@@ -124,6 +124,9 @@ type suite struct {
 
 type calibrationRow struct {
 	OrderedOrWork []float64 `json:"ordered_or_work"`
+	// Nested scans: full-scan invocations, visited rows, keyed probes, reducer rows.
+	JoinNestedWork    []float64 `json:"join_nested_work"`
+	JoinNestedFixedNS float64   `json:"join_nested_fixed_ns"`
 
 	CaseName                          string   `json:"case_name"`
 	Error                             string   `json:"error"`
@@ -180,7 +183,7 @@ type calibrationRow struct {
 	JoinOutputRows                    *float64 `json:"join_output_rows"`
 	JoinMapWidth                      *float64 `json:"join_map_width"`
 	JoinTableCount                    *float64 `json:"join_table_count"`
-	JoinLegacyProbeRows               *float64 `json:"join_legacy_probe_rows"`
+	JoinNestedProbeRows               *float64 `json:"join_nested_probe_rows"`
 	ProbeInvocations                  *float64 `json:"probe_invocations"`
 	InputRows                         *float64 `json:"input_rows"`
 	GroupRows                         *float64 `json:"group_rows"`
@@ -206,9 +209,11 @@ type observation struct {
 	cacheState      string
 	component       string
 	decision        string
+	decisionSite    string
 	plan            string
 	y               float64
 	currentEstimate float64
+	fixedNS         float64
 	holdout         bool
 	noiseNS         float64
 	censored        bool
@@ -331,6 +336,11 @@ func main() {
 		fatal(fmt.Errorf("ordered_or: %w", err))
 	}
 	if *validateOnly {
+		joinObservations := filterDecisionObservations(observations, "scan_join_order")
+		if err := validateDecisionOrdering(joinObservations, currentConstants); err != nil {
+			fatal(fmt.Errorf("scan_join_order: %w", err))
+		}
+		printDecisionOrdering(joinObservations, currentConstants)
 		fmt.Printf("Validated %d forced-plan observations across %d suites; coefficients unchanged.\n", len(observations), len(suites))
 		return
 	}
@@ -866,7 +876,9 @@ func runSuites(server *memcpServer, suites []suite) ([]observation, []calibratio
 				}
 				observations = append(observations, observation{
 					caseName: test.Name, decision: row.Decision, plan: row.Plan, y: row.WholeQueryExecutionNS,
-					cacheState: cacheState, component: test.CalibrationComponent,
+					decisionSite: row.DecisionSite,
+					fixedNS:      row.JoinNestedFixedNS,
+					cacheState:   cacheState, component: test.CalibrationComponent,
 					currentEstimate: *row.EstimatedNS, holdout: test.CalibrationHoldout,
 					noiseNS: medianAbsoluteDeviation(runs, row.Plan), censored: row.TimedOut, x: features,
 				})
@@ -1197,7 +1209,7 @@ func validateRaceWinner(row calibrationRow, decisionID, plan string) error {
 	} else if row.Decision == "scan_join_order" {
 		if row.JoinInputRows == nil || row.JoinProbeRows == nil || row.JoinEstimatedRows == nil ||
 			row.JoinOutputRows == nil || row.JoinMapWidth == nil || row.JoinTableCount == nil ||
-			row.JoinLegacyProbeRows == nil {
+			row.JoinNestedProbeRows == nil {
 			return fmt.Errorf("ordered join variant has incomplete measurements: %+v", row)
 		}
 	} else if row.Decision == "group_relation_input" {
@@ -1506,11 +1518,24 @@ func rowFeatures(row calibrationRow) ([]float64, error) {
 			features[22] = 1
 			features[23] = *row.JoinDriverRows
 			features[24] = *row.JoinDriverRows * (*row.JoinTableCount - 1)
-		} else if row.Plan == "legacy_join_tree" {
-			if row.JoinLegacyProbeRows == nil {
-				return nil, fmt.Errorf("ordered legacy join profile has nil probe rows: %+v", row)
+		} else if row.Plan == "nested_scan_tree" {
+			if row.DecisionSite == "unordered_join_reduce" {
+				if len(row.JoinNestedWork) != 4 {
+					return nil, fmt.Errorf("unordered nested join profile requires scan invocations, visited rows, keyed probes and reducer rows")
+				}
+				// Match join_optimizer_nested_scan_cost, including mapping each
+				// visited row. A selective probe must not inherit full-input work.
+				features[0] = row.JoinNestedWork[0]
+				features[1] = row.JoinNestedWork[1]
+				features[3] = row.JoinNestedWork[1]
+				features[4] = row.JoinNestedWork[3]
+				features[16] = row.JoinNestedWork[2]
+				return features, nil
 			}
-			features[18] = *row.JoinLegacyProbeRows
+			if row.JoinNestedProbeRows == nil {
+				return nil, fmt.Errorf("ordered nested join profile has nil probe rows: %+v", row)
+			}
+			features[18] = *row.JoinNestedProbeRows
 		} else {
 			return nil, fmt.Errorf("unsupported scan_join_order plan %q", row.Plan)
 		}
@@ -2185,10 +2210,9 @@ func estimatedNS(row observation, c constants) float64 {
 	if row.decision == "nested_scalar_recmap" && row.plan == "direct_scalar_chain" {
 		return row.currentEstimate
 	}
-	if row.decision == "scan_join_order" && row.plan == "legacy_join_tree" {
-		// The legacy alternative is an already costed composite join tree. Its
-		// planner-reported estimate is the authoritative baseline; rowFeatures
-		// only expands the new scan_join_order operator into generated work units.
+	if row.decision == "scan_join_order" && row.plan == "nested_scan_tree" && row.decisionSite != "unordered_join_reduce" {
+		// Ordered trees include delivery and projection costs outside the
+		// unordered nested work profile. Retain their planner-reported estimate.
 		return row.currentEstimate
 	}
 	beta := []float64{
@@ -2221,6 +2245,9 @@ func estimatedNS(row observation, c constants) float64 {
 		float64(c.recMapWorkRowNS),
 	}
 	total := 0.0
+	if row.decision == "scan_join_order" && row.plan == "nested_scan_tree" && row.decisionSite == "unordered_join_reduce" {
+		total = row.fixedNS
+	}
 	for i, value := range row.x {
 		total += value * beta[i]
 	}
@@ -2317,7 +2344,7 @@ func decisionAlternatives(rows []observation) (map[string]map[string]observation
 		switch row.plan {
 		case "candidate_keyset", "driver_order_membership_probe", "driver_filter_join_probe", "ordered_batch_accept", "prefiltered_candidate_keyset":
 			groups[row.caseName][row.plan] = row
-		case "legacy_join_tree", "scan_join_order", "scan_join_order_batched_probe":
+		case "nested_scan_tree", "scan_join_order", "scan_join_order_batched_probe":
 			if row.decision != "scan_join_order" {
 				return nil, fmt.Errorf("plan %q belongs to scan_join_order, got decision %q", row.plan, row.decision)
 			}
@@ -2375,7 +2402,7 @@ func decisionAlternatives(rows []observation) (map[string]map[string]observation
 			continue
 		}
 		if decisions[name] == "scan_join_order" {
-			if _, legacy := plans["legacy_join_tree"]; !legacy {
+			if _, nested := plans["nested_scan_tree"]; !nested {
 				return nil, fmt.Errorf("incomplete ordered join alternatives for %q", name)
 			}
 			if _, ordered := plans["scan_join_order"]; !ordered {

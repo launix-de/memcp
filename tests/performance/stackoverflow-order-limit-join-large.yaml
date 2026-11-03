@@ -62,7 +62,7 @@ test_cases:
     expect:
       rows: 1
       result_contains:
-        - "chosen legacy_join_tree"
+        - "chosen nested_scan_tree"
         - "ordered_batch_accept"
         - "projected_candidate_keyset"
         - "scan_join_order"

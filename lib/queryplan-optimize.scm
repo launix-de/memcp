@@ -2606,7 +2606,8 @@ Do not change the general join memo's cardinality or cap an unbound relation. */
 		_ false)))
 
 (define join_optimizer_streaming_order_work (lambda (stages sources default_alias graph planned planning_session)
-	(qassoc_get (join_optimizer_nested_scan_cost stages sources default_alias graph planned planning_session)
+	(qassoc_get (join_optimizer_nested_scan_cost stages sources default_alias
+		(join_optimizer_costed_predicates graph) planned planning_session)
 		(quote total_ns) 0)))
 
 (define join_optimizer_prefix_order_alternative (lambda (stages relation_units sources default_alias graph block planned planning_session)
@@ -5499,11 +5500,10 @@ a different preparation/materialization contract and must keep its own cost. */
 			(join_optimizer_nested_scan_tree? left))
 		_ false)))
 
-(define join_optimizer_nested_scan_cost (lambda (stages sources default_alias graph planned planning_session)
+(define join_optimizer_nested_scan_cost (lambda (stages sources default_alias predicates planned planning_session)
 	(begin
 		(define ordered (join_optimizer_sources_for_order sources
 			(join_optimizer_tree_aliases (qassoc_get planned (quote tree) nil))))
-		(define predicates (join_optimizer_costed_predicates graph))
 		(define condition (combine_where_terms (map predicates (lambda (entry)
 			(qassoc_get entry (quote predicate) true))) true))
 		(define state (reduce ordered (lambda (state src)
@@ -5550,16 +5550,24 @@ a different preparation/materialization contract and must keep its own cost. */
 				(define output (max 1 (* (if outer (max invocations matched) matched) post_selectivity)))
 				(list (append bound src) output
 					(+ (nth state 2) (if (empty_list? bound_keys)
-						(* invocations planner_membership_scan_invocation_ns) 0))
-					(+ (nth state 3) (* visited
-						(+ planner_membership_scan_row_ns planner_membership_map_column_row_ns)))
+						invocations 0))
+					(+ (nth state 3) visited)
 					(+ (nth state 4) (if (empty_list? bound_keys) 0
-						(* invocations planner_membership_direct_probe_row_ns))))))
-			(list '() 1 0 0 0)))
+						invocations))
+					(+ (nth state 5) output))))
+			(list '() 1 0 0 0 0)))
 		(define preparation (qassoc_get planned (quote cost_components) '()))
-		(planner_cost (nth state 2) (nth state 3) (nth state 4) 0 0
+		/* Retain coefficient-free work for EXPLAIN and costgen. Calibration must
+		be able to reprice this alternative, not trust its previous scalar cost. */
+		(merge (list (planner_cost
+			(* (nth state 2) planner_membership_scan_invocation_ns)
+			(* (nth state 3) (+ planner_membership_scan_row_ns planner_membership_map_column_row_ns))
+			(* (nth state 4) planner_membership_direct_probe_row_ns) 0 0
 			(qassoc_get preparation (quote build_ns) 0) 0
-			(qassoc_get preparation (quote compile_ns) 0) (nth state 1) 0.75))))
+			(qassoc_get preparation (quote compile_ns) 0) (nth state 1) 0.75)
+			(list
+				(list (quote nested_scan_work) (list (nth state 2) (nth state 3) (nth state 4)))
+				(list (quote nested_reduce_rows) (nth state 5))))))))
 
 (define join_optimizer_composite_lookup_rows (lambda (stage_catalog sources default_alias graph src planning_session)
 	(begin
@@ -5588,7 +5596,7 @@ even when the same stage is bound through more than one source alias. */
 		(if (not (join_optimizer_nested_scan_tree? tree)) prior
 			(join_optimizer_nested_scan_cost stages (qb_sources block)
 				(qassoc_get (qb_facts block) (quote default_alias) (source_alias (car (qb_sources block))))
-				(extract_join_hypergraph block)
+				(join_optimizer_costed_predicates (extract_join_hypergraph block))
 				(list (list (quote tree) tree)
 					(list (quote cost_components) prior)) planning_session)))))
 

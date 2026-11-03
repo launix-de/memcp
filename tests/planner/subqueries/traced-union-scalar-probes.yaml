@@ -212,7 +212,7 @@ test_cases:
         (define block (make_query_block "memcp-tests" (list src) '("id" 1)
           true '() nil '() nil nil '() '() '()))
         (define cost (join_optimizer_nested_scan_cost '() (list src) "a"
-          (extract_join_hypergraph block)
+          (join_optimizer_costed_predicates (extract_join_hypergraph block))
           (list (list 'tree (make_join_optimizer_leaf "a"))) nil))
         (and (equal? (qassoc_get cost 'startup_ns 0) planner_membership_scan_invocation_ns)
           (equal? (qassoc_get cost 'probe_ns 0) 0)

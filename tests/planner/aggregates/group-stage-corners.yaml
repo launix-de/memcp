@@ -712,7 +712,7 @@ test_cases:
       result_contains:
         - "unordered_join_reduce"
         - "chosen scan_join_order"
-        - "legacy_join_tree"
+        - "nested_scan_tree"
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS gs_star_facts"

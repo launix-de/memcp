@@ -130,7 +130,7 @@ func TestRowFeaturesModelsOrderedJoinAlternatives(t *testing.T) {
 		JoinDriverRows: value(10_000), JoinInnerRows: value(15_000),
 		JoinProbeRows: value(600), JoinMapWidth: value(3),
 		JoinEstimatedRows: value(4_000), JoinOutputRows: value(72),
-		JoinTableCount: value(2), JoinLegacyProbeRows: value(600),
+		JoinTableCount: value(2), JoinNestedProbeRows: value(600),
 	}
 	base.Plan = "scan_join_order"
 	scanFeatures, err := rowFeatures(base)
@@ -142,13 +142,48 @@ func TestRowFeaturesModelsOrderedJoinAlternatives(t *testing.T) {
 		scanFeatures[3] != 216 || scanFeatures[4] != 4_000 || scanFeatures[18] != 0 {
 		t.Fatalf("ordered join scan features = %v", scanFeatures)
 	}
-	base.Plan = "legacy_join_tree"
+	base.Plan = "nested_scan_tree"
 	legacyFeatures, err := rowFeatures(base)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if legacyFeatures[18] != 600 {
 		t.Fatalf("legacy ordered join probe work = %v, want 600", legacyFeatures[18])
+	}
+}
+
+func TestUnorderedNestedScanCalibrationUsesAccessedWork(t *testing.T) {
+	value := func(v float64) *float64 { return &v }
+	row := calibrationRow{
+		Decision: "scan_join_order", DecisionSite: "unordered_join_reduce", Plan: "nested_scan_tree",
+		JoinInputRows: value(360008), JoinProbeRows: value(8),
+		JoinEstimatedRows: value(4), JoinOutputRows: value(1),
+		JoinMapWidth: value(1), JoinTableCount: value(3),
+		JoinNestedWork: []float64{5, 24, 4, 12},
+	}
+	x, err := rowFeatures(row)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observation := observation{decision: row.Decision, decisionSite: row.DecisionSite,
+		plan: row.Plan, currentEstimate: 999999999, x: x}
+	c := constants{scanInvocationNS: 100, scanRowNS: 2, mapColumnRowNS: 3,
+		membershipDirectProbeRowNS: 10, expressionOperationNS: 5}
+	if got := estimatedNS(observation, c); got != 720 {
+		t.Fatalf("nested estimate = %v, want 5*100 + 24*(2+3) + 4*10 + 12*5", got)
+	}
+	// Repricing must use the new calibration, not the planner's old estimate.
+	c.membershipDirectProbeRowNS = 100
+	if got := estimatedNS(observation, c); got != 1080 {
+		t.Fatalf("recalibrated nested estimate = %v, want 1080", got)
+	}
+	observation.fixedNS = 100
+	if got := estimatedNS(observation, c); got != 1180 {
+		t.Fatalf("nested preparation cost lost: estimate = %v, want 1180", got)
+	}
+	row.JoinNestedWork = nil
+	if _, err := rowFeatures(row); err == nil {
+		t.Fatal("missing nested access profile accepted")
 	}
 }
 
@@ -515,7 +550,7 @@ func TestDecisionAlternativesAcceptsDirectFilterConsumer(t *testing.T) {
 
 func TestDecisionAlternativesAcceptsOrderedJoinFamily(t *testing.T) {
 	rows := []observation{
-		{caseName: "join", decision: "scan_join_order", plan: "legacy_join_tree"},
+		{caseName: "join", decision: "scan_join_order", plan: "nested_scan_tree"},
 		{caseName: "join", decision: "scan_join_order", plan: "scan_join_order"},
 		{caseName: "join", decision: "scan_join_order", plan: "scan_join_order_batched_probe"},
 	}
@@ -548,7 +583,7 @@ func TestOrderedJoinBatchedProbeCountsGrowingScanInvocations(t *testing.T) {
 func TestValidateDecisionOrderingUsesOrderedJoinCostBoundary(t *testing.T) {
 	legacy := func(name string, measured, estimated float64) observation {
 		return observation{
-			caseName: name, decision: "scan_join_order", plan: "legacy_join_tree",
+			caseName: name, decision: "scan_join_order", plan: "nested_scan_tree",
 			y: measured, currentEstimate: estimated, x: make([]float64, 25),
 		}
 	}
