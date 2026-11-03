@@ -767,6 +767,8 @@ type recSetProjectKeys struct {
 	width         int
 	values        []scm.Scmer
 	numericValues map[int64]struct{}
+	numericStart  int64
+	numericSpan   uint64 // nonzero for a complete integral interval
 }
 
 func (k *recSetProjectKeys) count() int {
@@ -782,8 +784,11 @@ func (k *recSetProjectKeys) tuple(index int) []scm.Scmer {
 }
 
 func (k *recSetProjectKeys) contains(key []scm.Scmer) bool {
-	if k.numericValues != nil && len(key) == 1 {
+	if (k.numericValues != nil || k.numericSpan != 0) && len(key) == 1 {
 		if integer, ok := projectNumericInteger(key[0]); ok {
+			if k.numericSpan != 0 {
+				return uint64(integer)-uint64(k.numericStart) < k.numericSpan
+			}
 			_, found := k.numericValues[integer]
 			return found
 		}
@@ -808,19 +813,33 @@ func projectNumericInteger(value scm.Scmer) (int64, bool) {
 }
 
 func (k *recSetProjectKeys) buildNumericLookup() bool {
+	k.numericValues, k.numericSpan = nil, 0
 	if k.width != 1 {
 		return false
 	}
 	values := make(map[int64]struct{}, k.count())
+	var minimum, maximum int64
 	for position := 0; position < k.count(); position++ {
 		value := k.tuple(position)[0]
 		integer, ok := projectNumericInteger(value)
 		if !ok {
 			return false
 		}
+		if len(values) == 0 {
+			minimum, maximum = integer, integer
+		} else {
+			minimum, maximum = min(minimum, integer), max(maximum, integer)
+		}
 		values[integer] = struct{}{}
 	}
-	k.numericValues = values
+	// Complete intervals need no hash lookup per target row. Unsigned distance
+	// also handles negative bounds and both int64 endpoints without overflow.
+	span := uint64(maximum) - uint64(minimum)
+	if len(values) != 0 && span == uint64(len(values)-1) {
+		k.numericStart, k.numericSpan = minimum, span+1
+	} else {
+		k.numericValues = values
+	}
 	return true
 }
 
