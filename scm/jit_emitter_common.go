@@ -66,6 +66,21 @@ func jitCapturedEnv(en *Env) *JITEnv {
 	return out
 }
 
+// Scheduling policy: SCM expression kernels are bounded and normally take only
+// a few microseconds. They do not contain unbounded language loops. A fused
+// storage kernel completes its shard without injected cooperative polls,
+// budgets, cancellation exits or Yield calls. Keep scheduling at the surrounding
+// Go/operator boundaries; do not add runtime.jit Preempt/Yield to row loops.
+// Ordinary Go helper calls retain their normal Go GC/scheduler semantics.
+// runtime.jit's optional preemption emitters are for clients which choose them.
+type jitClosureRegisters struct{ Data, Length, Capacity, Context, ResultPointer, ResultAux Reg }
+
+func jitLegacyClosureRegisters() jitClosureRegisters {
+	return jitClosureRegisters{RegRAX, RegRBX, RegRCX, RegRDX, RegRAX, RegRBX}
+}
+
+var jitScmerClosureABI = jitRuntimeScmerClosureABI()
+
 // Keep the unwind marker above the register-argument spill area used by Go
 // callees. MemCP's JIT call bridge supports at most sixteen ABI words.
 const jitGoSpillBytes = uintptr(128)
@@ -426,7 +441,7 @@ const (
 // ABIInternal has no callee-saved GPRs on RISC-V. The minimum caller frame also
 // supplies the link-register home required by Go stack arguments/spills.
 func jitEmitNativeCall(ctx *JITContext, addr uint64, setup func(int32), roots []int32) {
-	const callBytes = int32(jitGoSpillBytes + 16)
+	callBytes := jitRuntimeCallBytes(addr)
 	ctx.EmitReserveStackBytes(callBytes)
 	ctx.EmitStoreRegMem(ctx.FrameReg, ctx.StackReg, callBytes-8)
 	ctx.setStackPointer(jitStackRootCallSP, callBytes-8, true)
@@ -434,7 +449,7 @@ func jitEmitNativeCall(ctx *JITContext, addr uint64, setup func(int32), roots []
 		setup(callBytes)
 	}
 	if addr == 0 {
-		jitEmitRuntimeClosureCall(ctx, RegRDX)
+		jitEmitRuntimeClosureCall(ctx, jitScmerClosureABI.Context)
 	} else {
 		jitEmitRuntimeCall(ctx, addr, 0)
 	}

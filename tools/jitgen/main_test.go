@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"go/ast"
 	"go/constant"
+	"go/format"
 	"go/importer"
 	"go/parser"
 	"go/token"
@@ -1270,5 +1271,46 @@ func initializer(args ...Scmer) Scmer { return ApplyOnce(args[0], nil) }
 	}
 	if !strings.Contains(code, "jitEmitReducerInitializer(ctx,") {
 		t.Fatalf("initializer lost native lowering:\n%s", code)
+	}
+}
+
+func TestPreparedGoCallsAreClosedAndRegenerationIsStable(t *testing.T) {
+	source := []byte(`package example
+func helper(x int) int { return x }
+func emitter(captured int) {
+ _ = GoFuncAddr(helper)
+ _ = GoFuncAddr(func(arg0 int) *int { value := helper(arg0); return &value })
+ _ = GoFuncAddr(func(arg0 int) int { return captured + arg0 })
+}
+`)
+	first, err := format.Source(prepareGoCalls("fixture.go", source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := format.Source(prepareGoCalls("fixture.go", first))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(first, second) {
+		t.Fatalf("prepared entries changed on regeneration:\n%s\n%s", first, second)
+	}
+	if bytes.Contains(second, []byte("var value uint64")) {
+		t.Fatal("hoisted a helper-local assignment")
+	}
+	if !bytes.Contains(second, []byte("return captured + arg0")) {
+		t.Fatal("lost capturing call")
+	}
+	f, err := parser.ParseFile(token.NewFileSet(), "fixture.go", second, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, decl := range f.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Name.Name != "init" {
+			continue
+		}
+		if len(fn.Body.List) != 2 {
+			t.Fatalf("prepared %d functions, want two closed expressions", len(fn.Body.List))
+		}
 	}
 }

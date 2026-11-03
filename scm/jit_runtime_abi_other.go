@@ -32,6 +32,13 @@ func jitRuntimeFunctionContext[F any](fn F) unsafe.Pointer {
 func jitRuntimeLayoutGoCallArgs(_ uint64, words []goCallArgWord) ([]goCallArgLocation, int) {
 	return layoutGoCallWords(words)
 }
+func jitRuntimeCallBytes(uint64) int32               { return int32(jitGoSpillBytes + 16) }
+func jitRuntimeResultRegs(_ uint64, count int) []Reg { return GoABIIntRegs[:count] }
+
+func jitRuntimeGoResultShape(uint64) ([]uint8, []uint8) {
+	panic("jit: result layout requires the JIT toolchain")
+}
+
 func jitEmitRuntimeFrame(ctx *JITContext) jitRuntimeFrameFixup {
 	if jitPortableBackend {
 		jitArchEmitNative(ctx, jitNativeProlog, 0, 0, 0, 0)
@@ -90,3 +97,12 @@ func jitEmitRuntimeLeave(ctx *JITContext) {
 }
 
 func jitRuntimeFreeGPRegs() uint64 { return jitArchFreeGPRegs() }
+
+func jitRuntimeStoreScmer(address *Scmer, value Scmer) { *address = value }
+func jitRuntimeClearScmer(address *Scmer)              { *address = Scmer{} }
+func jitEmitRuntimeLoadFunctionContext(ctx *JITContext, target, slot Reg) {
+	ctx.EmitMovRegMem(target, slot, 0)
+}
+func jitEmitPointerFreeStoreBarrier(*JITContext, Reg, func()) {}
+
+func jitRuntimeScmerClosureABI() jitClosureRegisters { return jitLegacyClosureRegisters() }

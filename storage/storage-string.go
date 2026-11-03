@@ -1357,7 +1357,7 @@ func (s *StorageString) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resul
 	d1 := scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: r0}
 	ctx.BindReg(r0, &d1)
 	ctx.BindReg(r0, &d1)
-	d2 := ctx.EmitGoCallScalar(scm.GoFuncAddr(scm.JITAtomicAddUint64), []scm.JITValueDesc{d1, d0}, 1)
+	d2 := ctx.EmitGoCallScalar(jitGoABI_16086756e666e1f7, []scm.JITValueDesc{d1, d0}, 1)
 	_ = d2
 	if thisptr.Loc == scm.LocRegPair || thisptr.Loc == scm.LocStackPair || thisptr.Loc == scm.LocRegTriple || thisptr.Loc == scm.LocStackTriple {
 		panic("jit: generic call arg expects 1-word value")
@@ -1367,7 +1367,7 @@ func (s *StorageString) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resul
 	}
 	ctx.SyncDesc(&thisptr)
 	ctx.SyncDesc(&idxInt)
-	d3 := ctx.EmitGoCallScalar(scm.GoFuncAddr((*StorageString).readValue), []scm.JITValueDesc{thisptr, idxInt}, 2)
+	d3 := ctx.EmitGoCallScalar(jitGoABI_da3ef669844c9ef3, []scm.JITValueDesc{thisptr, idxInt}, 2)
 	d3.NoHeapPointer = false
 	ctx.BindReg(d3.Reg, &d3)
 	ctx.BindReg(d3.Reg2, &d3)
@@ -1410,4 +1410,13 @@ func base64Encoding(format StringFormat) *base64.Encoding {
 		return base64.RawURLEncoding
 	}
 	panic("not a Base64 format")
+}
+
+// BEGIN jitgen prepared Go ABI entries
+var jitGoABI_16086756e666e1f7 uint64
+var jitGoABI_da3ef669844c9ef3 uint64
+
+func init() {
+	jitGoABI_16086756e666e1f7 = scm.GoFuncAddr(scm.JITAtomicAddUint64)
+	jitGoABI_da3ef669844c9ef3 = scm.GoFuncAddr((*StorageString).readValue)
 }

@@ -16,7 +16,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  JIT_GO_REF: jit-abi-v0.1.0
+  JIT_GO_REF: jit-abi-v0.1.0-rc.1
 
 jobs:
   changes:
@@ -198,5 +198,5 @@ jobs:
           GOROOT="$PWD/.third_party/go-jit" GOEXPERIMENT=jit CGO_ENABLED=0 \
             GOOS=linux GOARCH='${{ matrix.arch }}' \
             .third_party/go-jit/bin/go test -exec "$emulator" \
-            -run 'Test(ABI|CallingConvention|CodeBuffer|Metadata|Emission)' \
+            -run 'Test(ABI|CallingConvention|CodeBuffer|MemoryLayout|Metadata|Emission)' \
             -count=1 runtime/jit

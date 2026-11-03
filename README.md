@@ -777,11 +777,11 @@ PHP-ZTS dependencies, configuration, driver coexistence, and tests.
 
 MemCP can compile Scheme expressions and query-planning code to native code. This
 integration needs the `runtime/jit` support from the
-[launix-de Go fork](https://github.com/launix-de/go/tree/jit-abi-v0.1.0):
+[launix-de Go fork](https://github.com/launix-de/go/tree/jit-abi-v0.1.0-rc.1):
 
 ```bash
 # Build the patched Go toolchain next to the MemCP checkout.
-git clone --branch jit-abi-v0.1.0 \
+git clone --branch jit-abi-v0.1.0-rc.1 \
   https://github.com/launix-de/go.git ../go-jit
 (cd ../go-jit/src && ./make.bash)
 
@@ -792,7 +792,7 @@ PATH="$(cd ../go-jit/bin && pwd):$PATH" GOEXPERIMENT=jit go build -o memcp
 PATH="$(cd ../go-jit/bin && pwd):$PATH" GOEXPERIMENT=jit go test ./scm
 ```
 
-The `jit-abi-v0.1.0` toolchain provides ABI location queries, frame/call/return
+The `jit-abi-v0.1.0-rc.1` toolchain provides ABI location queries, frame/call/return
 emitters, typed code-buffer exhaustion and closure-context helpers. MemCP's JIT
 build requires that API; an older patched compiler is insufficient. The compiler
 and generated code must belong to the same toolchain and architecture. Generated

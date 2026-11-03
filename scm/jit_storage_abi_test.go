@@ -39,6 +39,20 @@ func TestJITTypedInliningKeepsLargeNativeBoundaries(t *testing.T) {
 	}
 }
 
+func TestJITPreparedABILookupsDoNotAllocate(t *testing.T) {
+	address := GoFuncAddr(jitFourScalarResults)
+	words := []goCallArgWord{{loc: LocImm}}
+	if got := testing.AllocsPerRun(1000, func() {
+		jitRuntimeLayoutGoCallArgs(address, words)
+		jitRuntimeResultRegs(address, 4)
+		jitRuntimeGoResultShape(address)
+		jitRuntimeCallBytes(address)
+		jitRuntimeCallBytes(0) // The shared func(...Scmer) Scmer convention.
+	}); got != 0 {
+		t.Fatalf("prepared ABI lookups allocate %g times", got)
+	}
+}
+
 // Identical call shapes must not change admission when unrelated earlier
 // code has claimed registers. The allocator still handles actual emission.
 func TestJITInlineAdmissionDependsOnCallShape(t *testing.T) {
@@ -410,7 +424,7 @@ func TestJITStorageReadersSharePackedCodeLifetime(t *testing.T) {
 
 func TestJITGoCallFourScalarResults(t *testing.T) {
 	fn := CompileJITStorageGetValue(func(ctx *JITContext, seed, target JITValueDesc) JITValueDesc {
-		results := JITEmitGoCallResults(ctx, GoFuncAddr(jitFourScalarResults), []JITValueDesc{seed}, []uint8{1, 1, 1, 1}, []uint8{0, 0, 0, 0})
+		results := JITEmitGoCallResults(ctx, GoFuncAddr(jitFourScalarResults), []JITValueDesc{seed})
 		for index := range results {
 			ctx.EnsureDesc(&results[index])
 		}
@@ -457,6 +471,46 @@ func TestJITStoreCustomScmerKeepsSpilledAddress(t *testing.T) {
 		t.Fatalf("stored custom Scmer = %v, want tag %d at %p", got, value.GetTag(), value.ptr)
 	}
 	runtime.KeepAlive(payload)
+}
+
+func TestJITNumericStoreOverwritesPointersDuringGC(t *testing.T) {
+	fn := CompileJITStorageGetValueRange(func(ctx *JITContext, index, count, target, stride, result JITValueDesc) JITValueDesc {
+		value := JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(42), NoHeapPointer: true}
+		if !ctx.TryEmitStoreScmerSliceElement(&target, &index, &value, 16) {
+			panic("numeric store specialization unavailable")
+		}
+		return result
+	})
+	if fn == nil {
+		t.Fatal("numeric store with GC slow path did not compile")
+	}
+	stop, stopped := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(stopped)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				runtime.GC()
+			}
+		}
+	}()
+	defer func() { close(stop); <-stopped }()
+	values := make([]Scmer, 32)
+	for round := 0; round < 256; round++ {
+		for i := range values {
+			values[i] = NewString(fmt.Sprintf("old heap value %d/%d", round, i))
+		}
+		for i := range values {
+			fn(uint32(i), 1, values, 1)
+		}
+		for i, value := range values {
+			if !Equal(value, NewInt(42)) {
+				t.Fatalf("slot %d after numeric store: %v", i, value)
+			}
+		}
+	}
 }
 
 func TestJITLessHelperKnownLargeIntegers(t *testing.T) {
@@ -767,7 +821,7 @@ func TestJITClosureCaptureForwardingUnderRegisterPressure(t *testing.T) {
 		for index, pointers := range callRoots.bits {
 			for bit := 0; bit < 8; bit++ {
 				offset := callRoots.first + int32(index*64+bit*8)
-				if pointers&(1<<bit) != 0 && offset >= int32(jitGoSpillBytes+16) {
+				if pointers&(1<<bit) != 0 && offset >= jitRuntimeCallBytes(GoFuncAddr(runtime.GC)) {
 					integerSaveAreaHasPointers = true
 				}
 			}

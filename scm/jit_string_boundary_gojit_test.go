@@ -290,10 +290,10 @@ func TestJITReusedGoResultSlotDoesNotExposeDiscardedPointer(t *testing.T) {
 		Type: &TypeDescriptor{Kind: "func", Params: []*TypeDescriptor{}, Return: &TypeDescriptor{Kind: "string"},
 			JITEmit: func(ctx *JITContext, _ []Scmer, _ []JITValueDesc, result JITValueDesc) JITValueDesc {
 				state := ctx.SnapshotAllocState()
-				JITEmitGoCallResults(ctx, GoFuncAddr(jitTestDiscardedStringResult), nil, []uint8{2}, []uint8{1})
+				JITEmitGoCallResults(ctx, GoFuncAddr(jitTestDiscardedStringResult), nil)
 				ctx.RestoreAllocState(state)
 				ctx.EmitGoCallToFrame(GoFuncAddr(runtime.GC), nil, nil)
-				values := JITEmitGoCallResults(ctx, GoFuncAddr(jitTestCollectedStringResult), nil, []uint8{2}, []uint8{1})
+				values := JITEmitGoCallResults(ctx, GoFuncAddr(jitTestCollectedStringResult), nil)
 				values[0].Type = tagString
 				return jitPlaceScmerIntoTarget(ctx, values[0], result)
 			}},
@@ -320,7 +320,7 @@ func TestJITReusedVariadicResultSlotDoesNotExposeDiscardedPointer(t *testing.T) 
 		Type: &TypeDescriptor{Kind: "func", Params: []*TypeDescriptor{}, Return: &TypeDescriptor{Kind: "string"},
 			JITEmit: func(ctx *JITContext, _ []Scmer, _ []JITValueDesc, result JITValueDesc) JITValueDesc {
 				state := ctx.SnapshotAllocState()
-				JITEmitGoCallResults(ctx, GoFuncAddr(jitTestDiscardedStringResult), nil, []uint8{2}, []uint8{1})
+				JITEmitGoCallResults(ctx, GoFuncAddr(jitTestDiscardedStringResult), nil)
 				ctx.RestoreAllocState(state)
 				ctx.EmitGoCallToFrame(GoFuncAddr(runtime.GC), nil, nil)
 				value := ctx.EmitGoCallVariadic(jitTestCollectedVariadicResult, JITValueDesc{Loc: LocImm, Imm: NewNil()}, result)

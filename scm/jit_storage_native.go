@@ -73,6 +73,9 @@ func CompileJITStorageGetValue(emit JITStorageGetValueEmitter) JITStorageGetValu
 // into one densely packed code reservation. A storage owns these functions as
 // a unit, so separate 16-KiB reservations and cleanup leases only waste arena
 // and instruction-TLB capacity without providing useful lifetime granularity.
+// Readers, including fused shard loops, intentionally contain no cooperative
+// Preempt/Yield or budget checks: they complete their shard before returning to
+// the operator boundary. See the scheduling policy in jit.go.
 func CompileJITStorageReaders(getValue JITStorageGetValueEmitter, getValueRange JITStorageGetValueRangeEmitter, getValueMulti JITStorageGetValueMultiEmitter) (JITStorageGetValueFunc, JITStorageGetValueRangeFunc, JITStorageGetValueMultiFunc) {
 	requests := make([]jitStorageCompileRequest, 0, 3)
 	if getValue != nil {

@@ -124,8 +124,8 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 		StackReg:         RegRSP,
 		FrameReg:         RegRBP,
 		ScratchReg:       RegR11,
-		ResultPtrReg:     RegRAX,
-		ResultAuxReg:     RegRBX,
+		ResultPtrReg:     jitScmerClosureABI.ResultPointer,
+		ResultAuxReg:     jitScmerClosureABI.ResultAux,
 		LastIntReg:       jitLastGPReg,
 		HasFrame:         true,
 		InputArgCount:    inputArgCount,
@@ -173,7 +173,7 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 		ctx.MarkLabel(frameBodyLabel)
 	}
 
-	ctx.emitMovRegReg(RegR12, RegRAX) // save incoming args slice
+	ctx.emitMovRegReg(RegR12, jitScmerClosureABI.Data) // save incoming args slice
 	// Parser control flow can enter a shared block whose stack target was
 	// produced only on a sibling path. Clear parser frames so every root named
 	// by such a block starts as nil. Ordinary expressions initialize their
@@ -233,18 +233,18 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 	}
 	if proc != nil && (captureCount != 0 || ctx.UsesRuntimeEnv) {
 		ctx.ClosureFuncOff = ctx.AllocStack(8)
-		ctx.EmitStoreRegMem(RegRDX, RegRSP, ctx.ClosureFuncOff)
+		ctx.EmitStoreRegMem(jitScmerClosureABI.Context, RegRSP, ctx.ClosureFuncOff)
 		ctx.setStackPointer(jitStackRootFrameSP, ctx.ClosureFuncOff, true)
 		if ctx.UsesRuntimeEnv {
 			ctx.RuntimeEnvOff = ctx.AllocStack(8)
-			ctx.EmitMovRegMem(RegR11, RegRDX, int32(unsafe.Offsetof(Proc{}.En)))
+			ctx.EmitMovRegMem(RegR11, jitScmerClosureABI.Context, int32(unsafe.Offsetof(Proc{}.En)))
 			ctx.EmitStoreRegMem(RegR11, RegRSP, ctx.RuntimeEnvOff)
 			ctx.setStackPointer(jitStackRootFrameSP, ctx.RuntimeEnvOff, true)
 		}
 	}
 	if ctx.HasSelfLoop {
 		ctx.CurrentFuncOff = ctx.AllocStack(8)
-		ctx.EmitStoreRegMem(RegRDX, RegRSP, ctx.CurrentFuncOff)
+		ctx.EmitStoreRegMem(jitScmerClosureABI.Context, RegRSP, ctx.CurrentFuncOff)
 		ctx.setStackPointer(jitStackRootFrameSP, ctx.CurrentFuncOff, true)
 	}
 
@@ -311,7 +311,7 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 	}
 
 	// Compile body, place result into RAX+RBX (Scmer return registers)
-	result := JITValueDesc{Loc: LocRegPair, Reg: RegRAX, Reg2: RegRBX}
+	result := JITValueDesc{Loc: LocRegPair, Reg: jitScmerClosureABI.ResultPointer, Reg2: jitScmerClosureABI.ResultAux}
 	desc := jitCompileExpr(ctx, body, RegR12, result)
 
 	// If result came back as LocImm, materialize into RAX+RBX
@@ -327,7 +327,7 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 		case LocRegPair:
 			ctx.EmitMovPairToResult(&desc, &result)
 		case LocReg, LocFPReg:
-			ret := JITValueDesc{Loc: LocRegPair, Reg: RegRAX, Reg2: RegRBX}
+			ret := JITValueDesc{Loc: LocRegPair, Reg: jitScmerClosureABI.ResultPointer, Reg2: jitScmerClosureABI.ResultAux}
 			switch desc.Type {
 			case tagBool:
 				ctx.EmitMakeBool(ret, desc)
@@ -2320,17 +2320,18 @@ func (ctx *JITContext) emitCallIndirectWithSetup(addr uint64, setup func(callFra
 	if jitPortableBackend {
 		jitEmitNativeCall(ctx, addr, setup, roots)
 	} else {
+		callBytes := jitRuntimeCallBytes(addr)
 		ctx.EmitMovRegReg(RegR11, RegRBP)
 		ctx.EmitSubInt64(RegR11, RegRSP)
 		ctx.EmitPushReg(RegR11)
 		ctx.EmitPushReg(RegR11)
-		ctx.EmitSubRSP32(int32(jitGoSpillBytes))
+		ctx.EmitSubRSP32(callBytes - 16)
 		if setup != nil {
-			setup(int32(jitGoSpillBytes + 16))
+			setup(callBytes)
 		}
 		jitEmitRuntimeCall(ctx, addr, 0)
-		ctx.recordSafepoint(roots, int32(jitGoSpillBytes+16))
-		ctx.EmitAddRSP32(int32(jitGoSpillBytes + 16))
+		ctx.recordSafepoint(roots, callBytes)
+		ctx.EmitAddRSP32(callBytes)
 	}
 }
 
@@ -2479,7 +2480,7 @@ func (ctx *JITContext) finalizeStackMaps(frameSize int32, arenaOffset int) []jit
 // argslice must describe a pair (ptr,len). The backing array is expected to be
 // materialized and kept alive by caller-managed stack memory.
 func (ctx *JITContext) EmitGoCallVariadic(f func(...Scmer) Scmer, argslice JITValueDesc, result JITValueDesc) JITValueDesc {
-	fnData := *(*uintptr)(unsafe.Pointer(&f))
+	fnData := uintptr(jitRuntimeFunctionContext(f))
 	if fnData == 0 {
 		panic("jit: nil variadic function value")
 	}
@@ -2570,15 +2571,14 @@ func (ctx *JITContext) EmitGoCallVariadic(f func(...Scmer) Scmer, argslice JITVa
 		}
 	}
 
-	// Stage argslice into scratch regs, then set call registers.
-	if arg.Reg != RegRAX {
-		ctx.EmitMovRegReg(RegRAX, arg.Reg)
-	}
-	if arg.Reg2 != RegRBX {
-		ctx.EmitMovRegReg(RegRBX, arg.Reg2)
-	}
-	ctx.EmitMovRegReg(RegRCX, RegRBX) // cap = len
-	ctx.EmitMovRegImm64(RegRDX, uint64(fnData))
+	// Prepare argument lanes simultaneously; source registers may overlap targets.
+	var argMoves jitParallelRegMoveBatch
+	argMoves.add(jitScmerClosureABI.Data, arg.Reg)
+	argMoves.add(jitScmerClosureABI.Length, arg.Reg2)
+	ctx.emitParallelRegMoveBatch(&argMoves)
+	ctx.EmitMovRegReg(jitScmerClosureABI.Capacity, jitScmerClosureABI.Length)
+	ctx.EmitMovRegImm64(jitScmerClosureABI.Context, uint64(fnData))
+
 	if jitPortableBackend {
 		jitEmitNativeCall(ctx, 0, nil, transientRoots)
 	} else {
@@ -2586,13 +2586,14 @@ func (ctx *JITContext) EmitGoCallVariadic(f func(...Scmer) Scmer, argslice JITVa
 		ctx.EmitSubInt64(RegR13, RegRSP)
 		ctx.EmitPushReg(RegR13)
 		ctx.EmitPushReg(RegR13)
-		ctx.EmitSubRSP32(int32(jitGoSpillBytes))
-		jitEmitRuntimeClosureCall(ctx, RegRDX)
-		ctx.recordSafepoint(transientRoots, int32(jitGoSpillBytes+16))
-		ctx.EmitAddRSP32(int32(jitGoSpillBytes + 16))
+		callBytes := jitRuntimeCallBytes(0)
+		ctx.EmitSubRSP32(callBytes - 16)
+		jitEmitRuntimeClosureCall(ctx, jitScmerClosureABI.Context)
+		ctx.recordSafepoint(transientRoots, callBytes)
+		ctx.EmitAddRSP32(callBytes)
 	}
 
-	callResult := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: RegRAX, Reg2: RegRBX}
+	callResult := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: jitScmerClosureABI.ResultPointer, Reg2: jitScmerClosureABI.ResultAux}
 	base := ctx.StackReg
 	targetOff := target.StackOff
 	if target.StackOff < 0 {
@@ -2704,16 +2705,16 @@ func (ctx *JITContext) emitFuncValueCall(fn, argslice, result JITValueDesc, kind
 	// place the function value in RAX/RBX or either slice word in RDX; sequential
 	// moves would then destroy a source before its final consumer reads it.
 	var moves jitParallelRegMoveBatch
-	moves.add(RegRAX, argslice.Reg)
-	moves.add(RegRBX, argslice.Reg2)
-	moves.add(RegRDX, fn.Reg)
+	moves.add(jitScmerClosureABI.Data, argslice.Reg)
+	moves.add(jitScmerClosureABI.Length, argslice.Reg2)
+	moves.add(jitScmerClosureABI.Context, fn.Reg)
 	ctx.emitParallelRegMoveBatch(&moves)
-	ctx.EmitMovRegReg(RegRCX, RegRBX)
+	ctx.EmitMovRegReg(jitScmerClosureABI.Capacity, jitScmerClosureABI.Length)
 
 	if jitPortableBackend {
 		jitEmitNativeCall(ctx, 0, nil, transientRoots)
 	} else {
-		callAreaBytes := int32(jitGoSpillBytes)
+		callAreaBytes := jitRuntimeCallBytes(0) - 16
 		if kind == jitGoFuncCall {
 			ctx.EmitMovRegReg(RegR13, RegRBP)
 			ctx.EmitSubInt64(RegR13, RegRSP)
@@ -2724,14 +2725,14 @@ func (ctx *JITContext) emitFuncValueCall(fn, argslice, result JITValueDesc, kind
 		// Go callees own spill homes for register arguments in the caller's frame.
 		// A JIT callee uses these homes before runtime.morestack just like compiled
 		// Go code, so reserve the standard call area even on the compact path.
-		ctx.EmitSubRSP32(int32(jitGoSpillBytes))
-		jitEmitRuntimeClosureCall(ctx, RegRDX)
+		ctx.EmitSubRSP32(jitRuntimeCallBytes(0) - 16)
+		jitEmitRuntimeClosureCall(ctx, jitScmerClosureABI.Context)
 		ctx.recordSafepoint(transientRoots, callAreaBytes)
 		ctx.EmitAddRSP32(callAreaBytes)
 	}
 
-	ctx.EmitStoreRegMem(RegRAX, ctx.FrameReg, result.StackOff)
-	ctx.EmitStoreRegMem(RegRBX, ctx.FrameReg, result.StackOff+8)
+	ctx.EmitStoreRegMem(jitScmerClosureABI.ResultPointer, ctx.FrameReg, result.StackOff)
+	ctx.EmitStoreRegMem(jitScmerClosureABI.ResultAux, ctx.FrameReg, result.StackOff+8)
 	for index, reg := range liveRegs {
 		ctx.EmitMovRegMem(reg, ctx.StackReg, int32(index*8))
 	}

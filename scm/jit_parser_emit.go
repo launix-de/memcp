@@ -87,7 +87,7 @@ func jitEmitStaticParser(ctx *JITContext, parser *ScmParser, input JITValueDesc,
 	ctx.setStackPointer(jitStackRootFrameBP, resultOff, true)
 	parserResult := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: resultOff, Rooted: true}
 	programPair := jitCopyScmerToPair(ctx, JITValueDesc{Loc: LocImm, Type: tagAny, Imm: programValue})
-	state := JITEmitGoCallResults(ctx, GoFuncAddr(jitParserAcquireStateNative), []JITValueDesc{programPair, input}, []uint8{2}, []uint8{1})[0]
+	state := JITEmitGoCallResults(ctx, GoFuncAddr(jitParserAcquireStateNative), []JITValueDesc{programPair, input})[0]
 	state.Type = tagAny
 	state.Rooted = true
 	ctx.FreeDesc(&programPair)

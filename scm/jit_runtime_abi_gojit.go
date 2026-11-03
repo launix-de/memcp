@@ -24,15 +24,81 @@ type jitBufferFull = jit.CodeBufferFull
 type jitRuntimeFrameFixup = jit.FrameFixup
 type jitRuntimeStackFixup = jit.StackCheckFixup
 
-var jitGoConventions sync.Map // map[uint64]jit.CallingConvention
+// Prepared once per Go entry point. The emitter only reads these immutable
+// slices; it never rebuilds ABI layouts or allocates result-register arrays.
+type jitPreparedGoABI struct {
+	convention                jit.CallingConvention
+	arguments                 []goCallArgLocation
+	results                   []Reg
+	resultCounts, resultMasks []uint8
+	unsupportedResults        bool
+}
+
+var jitGoConventions sync.Map     // map[uint64]*jitPreparedGoABI
+var jitGoTypeConventions sync.Map // map[reflect.Type]*jit.CallingConvention
+var jitScmerClosureConvention = func() jit.CallingConvention {
+	if !jit.SupportedEmitters() {
+		return jit.CallingConvention{}
+	}
+	return *jitConventionForType(reflect.TypeFor[func(...Scmer) Scmer]())
+}()
 
 func jitRememberGoFunction(address uint64, fn any) {
 	if !jit.SupportedEmitters() {
 		return
 	}
-	if _, exists := jitGoConventions.Load(address); !exists {
-		jitGoConventions.LoadOrStore(address, jit.GetCallingConventionForFunc(fn))
+	if _, exists := jitGoConventions.Load(address); exists {
+		return
 	}
+	c := *jitConventionForType(reflect.TypeOf(fn))
+	p := &jitPreparedGoABI{convention: c}
+	for _, input := range c.Inputs {
+		for _, part := range input.Parts {
+			loc := goCallArgLocation{size: part.Size}
+			if part.Location.Kind == jit.InRegister {
+				loc.inReg, loc.reg = true, Reg(part.Location.Register.Number)
+				loc.fp = part.Location.Register.Class == jit.FloatRegister
+			} else {
+				loc.stackOff = int32(part.Location.StackOffset - c.Registers.StackArgumentOffset)
+			}
+			p.arguments = append(p.arguments, loc)
+		}
+	}
+	p.resultCounts, p.resultMasks = make([]uint8, len(c.Outputs)), make([]uint8, len(c.Outputs))
+	for i, output := range c.Outputs {
+		words := (output.Type.Size() + 7) / 8
+		if words < 1 || words > 3 {
+			p.unsupportedResults = true
+		}
+		p.resultCounts[i] = uint8(words)
+		for _, part := range output.Parts {
+			if part.Pointer {
+				p.resultMasks[i] |= 1 << uint(part.ValueOffset/8)
+			}
+			if part.Location.Kind != jit.InRegister || part.Location.Register.Class != jit.IntegerRegister {
+				p.unsupportedResults = true
+			}
+			p.results = append(p.results, Reg(part.Location.Register.Number))
+		}
+	}
+	jitGoConventions.LoadOrStore(address, p)
+}
+
+func jitConventionForType(signature reflect.Type) *jit.CallingConvention {
+	if c, ok := jitGoTypeConventions.Load(signature); ok {
+		return c.(*jit.CallingConvention)
+	}
+	c := jit.GetCallingConventionForType(signature)
+	actual, _ := jitGoTypeConventions.LoadOrStore(signature, &c)
+	return actual.(*jit.CallingConvention)
+}
+
+func jitPreparedABI(address uint64) *jitPreparedGoABI {
+	p, ok := jitGoConventions.Load(address)
+	if !ok {
+		panic("jit: Go helper has no prepared function signature")
+	}
+	return p.(*jitPreparedGoABI)
 }
 
 func jitABIIntRegs() []Reg {
@@ -54,31 +120,67 @@ func jitRuntimeFunction[F any](context unsafe.Pointer) F {
 func jitRuntimeFunctionContext[F any](fn F) unsafe.Pointer { return jit.FunctionContext(fn) }
 
 func jitRuntimeLayoutGoCallArgs(address uint64, words []goCallArgWord) ([]goCallArgLocation, int) {
-	value, exists := jitGoConventions.Load(address)
-	if !exists {
-		panic("jit: Go helper has no registered function signature")
+	p := jitPreparedABI(address)
+	if len(p.arguments) != len(words) {
+		panic("jit: Go arguments do not match signature")
 	}
-	c := value.(jit.CallingConvention)
-	locations := make([]goCallArgLocation, 0, len(words))
-	for _, input := range c.Inputs {
-		for _, part := range input.Parts {
-			if part.Location.Kind == jit.InRegister {
-				if part.Location.Register.Class != jit.IntegerRegister {
-					panic("jit: Go helper requires FP argument lowering")
-				}
-				locations = append(locations, goCallArgLocation{size: part.Size, inReg: true, reg: Reg(part.Location.Register.Number)})
-			} else {
-				locations = append(locations, goCallArgLocation{size: part.Size, stackOff: int32(part.Location.StackOffset - c.Registers.StackArgumentOffset)})
-			}
+	for _, loc := range p.arguments {
+		if loc.fp {
+			panic("jit: Go helper requires FP argument lowering")
 		}
 	}
-	if len(locations) != len(words) {
-		panic("jit: Go helper arguments do not match its function signature")
+	return p.arguments, int(p.convention.StackArgumentsSize / 8)
+}
+
+// The final sixteen bytes belong to the JIT bridge, outside all ABI homes.
+func jitRuntimeCallBytes(address uint64) int32 {
+	c := &jitScmerClosureConvention
+	if address != 0 {
+		c = &jitPreparedABI(address).convention
 	}
-	if c.CallFrameSize > jitGoSpillBytes {
-		panic("jit: Go helper exceeds reserved call area")
+	if c.CallFrameSize > 1<<30 {
+		panic("jit: Go call frame too large")
 	}
-	return locations, int(c.StackArgumentsSize / 8)
+	return int32(c.CallFrameSize) + 16
+}
+
+func jitRuntimeResultRegs(address uint64, count int) []Reg {
+	if count == 0 {
+		return nil
+	}
+	p := jitPreparedABI(address)
+	if p.unsupportedResults {
+		panic("jit: Go result requires stack or FP lowering")
+	}
+	if count > len(p.results) {
+		panic("jit: Go result count exceeds signature")
+	}
+	return p.results[:count]
+}
+
+func jitRuntimeGoResultShape(address uint64) ([]uint8, []uint8) {
+	p := jitPreparedABI(address)
+	if p.unsupportedResults {
+		panic("jit: unsupported Go result representation")
+	}
+	return p.resultCounts, p.resultMasks
+}
+
+func jitRuntimeScmerClosureABI() jitClosureRegisters {
+	if !jit.SupportedEmitters() {
+		return jitLegacyClosureRegisters()
+	}
+	c := &jitScmerClosureConvention
+	if len(c.Inputs) != 1 || len(c.Inputs[0].Parts) != 3 || len(c.Outputs) != 1 || len(c.Outputs[0].Parts) != 2 {
+		panic("jit: unsupported Scmer closure representation")
+	}
+	partReg := func(p jit.ValuePart) Reg {
+		if p.Location.Kind != jit.InRegister || p.Location.Register.Class != jit.IntegerRegister {
+			panic("jit: unsupported Scmer closure ABI location")
+		}
+		return Reg(p.Location.Register.Number)
+	}
+	return jitClosureRegisters{partReg(c.Inputs[0].Parts[0]), partReg(c.Inputs[0].Parts[1]), partReg(c.Inputs[0].Parts[2]), Reg(c.Registers.Closure.Number), partReg(c.Outputs[0].Parts[0]), partReg(c.Outputs[0].Parts[1])}
 }
 
 func jitEmitRuntimeFrame(ctx *JITContext) jitRuntimeFrameFixup {
@@ -118,7 +220,7 @@ func jitPatchRuntimeStackCheck(ctx *JITContext, f jitRuntimeStackFixup, size int
 // it is already final and must not be reinterpreted as the old caller-spill map.
 func jitEmitRuntimeStackGrow(ctx *JITContext, signature reflect.Type, retry JITLabel) {
 	ctx.FlushRegisterMoves()
-	m := jit.EmitStackGrow(ctx, jit.GetCallingConventionForType(signature), jit.PhysicalRegister{Class: jit.IntegerRegister, Number: uint8(ctx.FrameReg)}, int(ctx.Labels[retry]))
+	m := jit.EmitStackGrow(ctx, *jitConventionForType(signature), jit.PhysicalRegister{Class: jit.IntegerRegister, Number: uint8(ctx.FrameReg)}, int(ctx.Labels[retry]))
 	ctx.Safepoints = append(ctx.Safepoints, jitSafepoint{pcOffset: int32(m.PCOffset), entry: true, entryFrameWords: m.FrameWords, entryPointerMap: m.PointerMask, regularEntry: true})
 }
 
@@ -143,12 +245,14 @@ func jitEmitRuntimeLeave(ctx *JITContext) {
 	jit.EmitLeave(ctx, jit.PhysicalRegister{Class: jit.IntegerRegister, Number: uint8(ctx.FrameReg)})
 }
 
-func jitRuntimeFreeGPRegs() uint64 {
+var jitRuntimeAllocatableGP = func() uint64 {
 	if !jit.SupportedEmitters() {
 		return jitArchFreeGPRegs()
 	}
 	return jitArchFreeGPRegs() & jit.RegisterConfig().Allocatable[jit.IntegerRegister]
-}
+}()
+
+func jitRuntimeFreeGPRegs() uint64 { return jitRuntimeAllocatableGP }
 
 // Proc's SSA-visible code word is also its FunctionHeader prefix. Fail the
 // build if the runtime expands that prefix instead of silently reinterpreting
@@ -156,3 +260,32 @@ func jitRuntimeFreeGPRegs() uint64 {
 var _ [unsafe.Sizeof(jit.FunctionHeader{}) - unsafe.Sizeof(Proc{}.JITCode)]byte
 var _ [unsafe.Sizeof(Proc{}.JITCode) - unsafe.Sizeof(jit.FunctionHeader{})]byte
 var _ [0 - unsafe.Offsetof(Proc{}.JITCode)]byte
+
+func jitRuntimeStoreScmer(address *Scmer, value Scmer) { jit.Store(address, value) }
+func jitRuntimeClearScmer(address *Scmer)              { jit.Clear(address) }
+func jitEmitRuntimeLoadFunctionContext(ctx *JITContext, target, slot Reg) {
+	ctx.FlushRegisterMoves()
+	jit.EmitLoadFunctionContext(ctx, jit.PhysicalRegister{Class: jit.IntegerRegister, Number: uint8(target)}, jit.PhysicalRegister{Class: jit.IntegerRegister, Number: uint8(slot)})
+}
+
+// The slow path clears old pointer contents through Go's deletion barrier.
+// Its caller writes a proven non-heap-pointer value immediately afterwards.
+func jitEmitPointerFreeStoreBarrier(ctx *JITContext, address Reg, restore func()) {
+	ctx.FlushRegisterMoves()
+	check := jit.EmitWriteBarrierCheck(ctx, 0)
+	done := ctx.ReserveLabel()
+	ctx.EmitJmp(done)
+	jit.PatchWriteBarrierCheck(ctx, check, ctx.Offset())
+	// The call bridge may use its own scratch register before argument setup.
+	// Give the transient interior pointer a rooted, frame-relative home first.
+	off := ctx.AllocSpill(8)
+	ctx.EmitStoreRegMem(address, ctx.FrameReg, off)
+	ctx.setStackPointer(jitStackRootFrameBP, off, true)
+	var results [16]Reg
+	ctx.EmitGoCall(GoFuncAddr(jitRuntimeClearScmer), []goCallArgWord{{loc: LocStack, stackOff: off}}, 0, &results, nil)
+	ctx.setStackPointer(jitStackRootFrameBP, off, false)
+	if restore != nil {
+		restore()
+	}
+	ctx.MarkLabel(done)
+}

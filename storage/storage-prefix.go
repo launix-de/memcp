@@ -364,7 +364,7 @@ func (s *StoragePrefix) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resul
 		}
 		ctx.SyncDesc(&d0)
 		ctx.SyncDesc(&idxInt)
-		d1 = scm.JITEmitGoCallScmerToFrame(ctx, scm.GoFuncAddr((*StorageString).GetValue), []scm.JITValueDesc{d0, idxInt})
+		d1 = scm.JITEmitGoCallScmerToFrame(ctx, jitGoABI_ccddca87a3c07471, []scm.JITValueDesc{d0, idxInt})
 		d1.NoHeapPointer = false
 		ctx.StabilizeDescForControlFlow(&d1)
 		d3 = d1
@@ -553,7 +553,7 @@ func (s *StoragePrefix) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resul
 		if d27.Loc != scm.LocRegPair && d27.Loc != scm.LocStackPair && d27.Loc != scm.LocInputPair {
 			panic("jit: panic arg expects scm.Scmer pair")
 		}
-		ctx.EmitGoCallVoid(scm.GoFuncAddr(scm.JITPanic), []scm.JITValueDesc{d27})
+		ctx.EmitGoCallVoid(jitGoABI_fbe55e7faee4c736, []scm.JITValueDesc{d27})
 		ctx.FreeDesc(&d27)
 		return result
 	}
@@ -1222,7 +1222,7 @@ func (s *StoragePrefix) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resul
 		if d94.Loc != scm.LocRegPair && d94.Loc != scm.LocStackPair && d94.Loc != scm.LocInputPair {
 			panic("jit: panic arg expects scm.Scmer pair")
 		}
-		ctx.EmitGoCallVoid(scm.GoFuncAddr(scm.JITPanic), []scm.JITValueDesc{d94})
+		ctx.EmitGoCallVoid(jitGoABI_fbe55e7faee4c736, []scm.JITValueDesc{d94})
 		ctx.FreeDesc(&d94)
 		return result
 	}
@@ -1286,14 +1286,14 @@ func (s *StoragePrefix) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resul
 		if d99.Loc != scm.LocRegPair && d99.Loc != scm.LocStackPair && d99.Loc != scm.LocInputPair {
 			panic("jit: scm.Scmer.String receiver not materialized as pair")
 		}
-		d98 = ctx.EmitGoCallScalar(scm.GoFuncAddr(scm.Scmer.String), []scm.JITValueDesc{d99}, 2)
+		d98 = ctx.EmitGoCallScalar(jitGoABI_1953b22ad0d33cf8, []scm.JITValueDesc{d99}, 2)
 		ctx.EnsureDesc(&d96)
 		ctx.EnsureDesc(&d98)
-		d100 = ctx.EmitGoCallScalar(scm.GoFuncAddr(scm.ConcatStrings), []scm.JITValueDesc{d96, d98}, 2)
+		d100 = ctx.EmitGoCallScalar(jitGoABI_b8b4ff0d1ed56e73, []scm.JITValueDesc{d96, d98}, 2)
 		ctx.FreeDesc(&d96)
 		ctx.EnsureDesc(&d100)
 		d101 = result
-		d102 = ctx.EmitGoCallScalar(scm.GoFuncAddr(scm.NewString), []scm.JITValueDesc{d100}, 2)
+		d102 = ctx.EmitGoCallScalar(jitGoABI_de404181c9de6957, []scm.JITValueDesc{d100}, 2)
 		ctx.EmitMovPairToResult(&d102, &d101)
 		ctx.EmitJmp(lbl0)
 		return result
@@ -1509,3 +1509,18 @@ func (s *StoragePrefix) proposeCompression(i uint32) ColumnStorage {
 }
 
 func (s *StoragePrefix) DistinctCount() uint { return s.values.DistinctCount() }
+
+// BEGIN jitgen prepared Go ABI entries
+var jitGoABI_1953b22ad0d33cf8 uint64
+var jitGoABI_b8b4ff0d1ed56e73 uint64
+var jitGoABI_ccddca87a3c07471 uint64
+var jitGoABI_de404181c9de6957 uint64
+var jitGoABI_fbe55e7faee4c736 uint64
+
+func init() {
+	jitGoABI_1953b22ad0d33cf8 = scm.GoFuncAddr(scm.Scmer.String)
+	jitGoABI_b8b4ff0d1ed56e73 = scm.GoFuncAddr(scm.ConcatStrings)
+	jitGoABI_ccddca87a3c07471 = scm.GoFuncAddr((*StorageString).GetValue)
+	jitGoABI_de404181c9de6957 = scm.GoFuncAddr(scm.NewString)
+	jitGoABI_fbe55e7faee4c736 = scm.GoFuncAddr(scm.JITPanic)
+}

@@ -13,6 +13,9 @@ setup:
   - sql: "INSERT INTO jit_wide_userconfig VALUES (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128)"
   - sql: "CREATE TABLE jit_userconfig_lookup (id INT PRIMARY KEY, name TEXT) ENGINE=memory"
   - sql: "INSERT INTO jit_userconfig_lookup VALUES (1, 'match')"
+  - sql: "DROP TABLE IF EXISTS jit_abi_boundary"
+  - sql: "CREATE TABLE jit_abi_boundary (id INT, grp TEXT, value DOUBLE) ENGINE=memory"
+  - sql: "INSERT INTO jit_abi_boundary VALUES (1, 'a', 1.25), (2, 'a', 2.5), (3, 'b', 3.75), (4, 'b', 4.5)"
 test_cases:
   - name: "Query cache dispatcher compiles natively"
     scm: |
@@ -63,7 +66,18 @@ test_cases:
   - name: "Wide userconfig projection retains callback across three LEFT JOINs"
     sql: *wide_pressure_query
     expect: *wide_pressure_expected
+  - name: "ABI helpers preserve integer and floating-point projection results"
+    sql: "SELECT id, id * 3 + 1 AS n, value * 2.0 AS doubled FROM jit_abi_boundary WHERE id >= 2 ORDER BY id"
+    expect:
+      rows: 3
+      data: [{id: 2, n: 7, doubled: 5}, {id: 3, n: 10, doubled: 7.5}, {id: 4, n: 13, doubled: 9}]
+  - name: "ABI register configuration preserves dictionaries across join closures"
+    sql: "SELECT a.id, a.value + b.value AS total FROM jit_abi_boundary a JOIN jit_abi_boundary b ON a.id = b.id WHERE a.id <= 2 ORDER BY a.id"
+    expect:
+      rows: 2
+      data: [{id: 1, total: 2.5}, {id: 2, total: 5}]
 cleanup:
+  - sql: "DROP TABLE IF EXISTS jit_abi_boundary"
   - sql: "DROP TABLE IF EXISTS jit_wide_userconfig"
   - sql: "DROP TABLE IF EXISTS jit_userconfig_lookup"
   - sql: "DROP TABLE IF EXISTS jit_register_pressure"

@@ -235,13 +235,13 @@ func (s *StoragePrefix) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 		ctx.SyncDesc(&count)
 		ctx.SyncDesc(&target)
 		ctx.SyncDesc(&d1)
-		ctx.EmitGoCallVoid(scm.GoFuncAddr((*StorageString).GetValueRange), []scm.JITValueDesc{d17, recid, count, target, d1})
+		ctx.EmitGoCallVoid(jitGoABI_50e2ebfd1c3052a7, []scm.JITValueDesc{d17, recid, count, target, d1})
 		ctx.EnsureDesc(&count)
 		ctx.EnsureDesc(&count)
 		ctx.ReclaimUntrackedRegs()
 		ctx.EnsureDesc(&count)
 		ctx.EnsureDesc(&count)
-		callResults18 := scm.JITEmitGoCallResults(ctx, scm.GoFuncAddr(scm.JITMakeScmerSlice), []scm.JITValueDesc{count, count}, []uint8{3}, []uint8{1})
+		callResults18 := scm.JITEmitGoCallResults(ctx, jitGoABI_21f1e7b7eacf3829, []scm.JITValueDesc{count, count})
 		d19 = callResults18[0]
 		d19.Type = scm.TagSlice
 		ctx.TrackPointer(unsafe.Pointer((*StorageInt)(unsafe.Pointer(uintptr(unsafe.Pointer(s)) + uintptr(unsafe.Offsetof((*StoragePrefix)(nil).prefixes))))))
@@ -268,7 +268,7 @@ func (s *StoragePrefix) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 		ctx.SyncDesc(&count)
 		ctx.SyncDesc(&d19)
 		ctx.SyncDesc(&d21)
-		ctx.EmitGoCallVoid(scm.GoFuncAddr((*StorageInt).GetValueRange), []scm.JITValueDesc{d20, recid, count, d19, d21})
+		ctx.EmitGoCallVoid(jitGoABI_5394da09e8141436, []scm.JITValueDesc{d20, recid, count, d19, d21})
 		ctx.FreeDesc(&d21)
 		ctx.FreeDesc(&recid)
 		if thisptr.Loc == scm.LocRegPair || thisptr.Loc == scm.LocStackPair || thisptr.Loc == scm.LocRegTriple || thisptr.Loc == scm.LocStackTriple {
@@ -293,7 +293,7 @@ func (s *StoragePrefix) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 		ctx.SyncDesc(&d19)
 		ctx.SyncDesc(&count)
 		ctx.SyncDesc(&d1)
-		ctx.EmitGoCallVoid(scm.GoFuncAddr((*StoragePrefix).applyPrefixInPlace), []scm.JITValueDesc{thisptr, target, d19, count, d1})
+		ctx.EmitGoCallVoid(jitGoABI_303a31d09ad202ff, []scm.JITValueDesc{thisptr, target, d19, count, d1})
 		ctx.FreeDesc(&count)
 		ctx.FreeDesc(&d1)
 		ctx.EmitJmp(lbl0)
@@ -525,7 +525,7 @@ func (s *StoragePrefix) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 		ctx.SyncDesc(&recids)
 		ctx.SyncDesc(&target)
 		ctx.SyncDesc(&d1)
-		ctx.EmitGoCallVoid(scm.GoFuncAddr((*StorageString).GetValueMulti), []scm.JITValueDesc{d17, recids, target, d1})
+		ctx.EmitGoCallVoid(jitGoABI_106b220171db8ca7, []scm.JITValueDesc{d17, recids, target, d1})
 		if recids.SliceSizeKnown {
 			d18 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(int64(recids.KnownSliceLen))}
 		} else if recids.Loc == scm.LocImm {
@@ -548,7 +548,7 @@ func (s *StoragePrefix) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 		ctx.ReclaimUntrackedRegs()
 		ctx.EnsureDesc(&d18)
 		ctx.EnsureDesc(&d18)
-		callResults19 := scm.JITEmitGoCallResults(ctx, scm.GoFuncAddr(scm.JITMakeScmerSlice), []scm.JITValueDesc{d18, d18}, []uint8{3}, []uint8{1})
+		callResults19 := scm.JITEmitGoCallResults(ctx, jitGoABI_21f1e7b7eacf3829, []scm.JITValueDesc{d18, d18})
 		d20 = callResults19[0]
 		d20.Type = scm.TagSlice
 		ctx.FreeDesc(&d18)
@@ -573,7 +573,7 @@ func (s *StoragePrefix) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 		ctx.SyncDesc(&recids)
 		ctx.SyncDesc(&d20)
 		ctx.SyncDesc(&d22)
-		ctx.EmitGoCallVoid(scm.GoFuncAddr((*StorageInt).GetValueMulti), []scm.JITValueDesc{d21, recids, d20, d22})
+		ctx.EmitGoCallVoid(jitGoABI_74d5663c2bc8ceea, []scm.JITValueDesc{d21, recids, d20, d22})
 		ctx.FreeDesc(&d22)
 		if recids.SliceSizeKnown {
 			d23 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(int64(recids.KnownSliceLen))}
@@ -627,7 +627,7 @@ func (s *StoragePrefix) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 		ctx.SyncDesc(&d20)
 		ctx.SyncDesc(&d24)
 		ctx.SyncDesc(&d1)
-		ctx.EmitGoCallVoid(scm.GoFuncAddr((*StoragePrefix).applyPrefixInPlace), []scm.JITValueDesc{thisptr, target, d20, d24, d1})
+		ctx.EmitGoCallVoid(jitGoABI_303a31d09ad202ff, []scm.JITValueDesc{thisptr, target, d20, d24, d1})
 		ctx.FreeDesc(&d24)
 		ctx.FreeDesc(&d1)
 		ctx.EmitJmp(lbl0)
@@ -10628,7 +10628,7 @@ func (s *StorageString) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 		d53 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: r6}
 		ctx.BindReg(r6, &d53)
 		ctx.BindReg(r6, &d53)
-		d54 = ctx.EmitGoCallScalar(scm.GoFuncAddr(scm.JITAtomicAddUint64), []scm.JITValueDesc{d53, count}, 1)
+		d54 = ctx.EmitGoCallScalar(jitGoABI_444581dcbb1583bf, []scm.JITValueDesc{d53, count}, 1)
 		_ = d54
 		if phiHomeOK2 {
 			ctx.EmitMovToReg(r0, scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(0)})
@@ -10669,7 +10669,7 @@ func (s *StorageString) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 		ctx.ReclaimUntrackedRegs()
 		ctx.EnsureDesc(&count)
 		ctx.EnsureDesc(&count)
-		callResults55 := scm.JITEmitGoCallResults(ctx, scm.GoFuncAddr(scm.JITMakeUint32Slice), []scm.JITValueDesc{count, count}, []uint8{3}, []uint8{1})
+		callResults55 := scm.JITEmitGoCallResults(ctx, jitGoABI_5b8dad065e93bf94, []scm.JITValueDesc{count, count})
 		d56 = callResults55[0]
 		d56.Type = scm.TagSlice
 		ctx.StabilizeDescForControlFlow(&d56)
@@ -10941,7 +10941,7 @@ func (s *StorageString) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 		}
 		ctx.SyncDesc(&thisptr)
 		ctx.SyncDesc(&d81)
-		d82 = ctx.EmitGoCallScalar(scm.GoFuncAddr((*StorageString).compressedAt), []scm.JITValueDesc{thisptr, d81}, 2)
+		d82 = ctx.EmitGoCallScalar(jitGoABI_385c39854cb4f4b3, []scm.JITValueDesc{thisptr, d81}, 2)
 		d82.NoHeapPointer = false
 		ctx.BindReg(d82.Reg, &d82)
 		ctx.BindReg(d82.Reg2, &d82)
@@ -11406,7 +11406,7 @@ func (s *StorageString) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 		d131 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: r21}
 		ctx.BindReg(r21, &d131)
 		ctx.BindReg(r21, &d131)
-		d132 = ctx.EmitGoCallScalar(scm.GoFuncAddr(scm.JITAtomicAddUint64), []scm.JITValueDesc{d131, d130}, 1)
+		d132 = ctx.EmitGoCallScalar(jitGoABI_444581dcbb1583bf, []scm.JITValueDesc{d131, d130}, 1)
 		_ = d132
 		ctx.FreeDesc(&d130)
 		ctx.ReclaimUntrackedRegs()
@@ -11419,7 +11419,7 @@ func (s *StorageString) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 		}
 		ctx.SyncDesc(&thisptr)
 		ctx.SyncDesc(&d126)
-		callResults133 := scm.JITEmitGoCallResults(ctx, scm.GoFuncAddr((*StorageString).resolvePositions), []scm.JITValueDesc{thisptr, d126}, []uint8{3, 3, 3}, []uint8{1, 1, 1})
+		callResults133 := scm.JITEmitGoCallResults(ctx, jitGoABI_8a3ea2bbf808dd46, []scm.JITValueDesc{thisptr, d126})
 		d134 = callResults133[0]
 		_ = d134
 		d135 = callResults133[1]
@@ -11458,7 +11458,7 @@ func (s *StorageString) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 		ctx.SyncDesc(&d136)
 		ctx.SyncDesc(&d127)
 		ctx.SyncDesc(&d128)
-		ctx.EmitGoCallVoid(scm.GoFuncAddr((*StorageString).decodeBulk), []scm.JITValueDesc{thisptr, d134, d135, d136, d127, d128})
+		ctx.EmitGoCallVoid(jitGoABI_f781b078ae033da4, []scm.JITValueDesc{thisptr, d134, d135, d136, d127, d128})
 		ctx.ReclaimUntrackedRegs()
 		ctx.EmitJmp(lbl0)
 		return result
@@ -12012,7 +12012,7 @@ func (s *StorageString) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 		d51 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: r6}
 		ctx.BindReg(r6, &d51)
 		ctx.BindReg(r6, &d51)
-		d52 = ctx.EmitGoCallScalar(scm.GoFuncAddr(scm.JITAtomicAddUint64), []scm.JITValueDesc{d51, d50}, 1)
+		d52 = ctx.EmitGoCallScalar(jitGoABI_444581dcbb1583bf, []scm.JITValueDesc{d51, d50}, 1)
 		_ = d52
 		ctx.FreeDesc(&d50)
 		if recids.SliceSizeKnown {
@@ -12121,7 +12121,7 @@ func (s *StorageString) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 		d59 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: r8}
 		ctx.BindReg(r8, &d59)
 		ctx.BindReg(r8, &d59)
-		d60 = ctx.EmitGoCallScalar(scm.GoFuncAddr(scm.JITAtomicAddUint64), []scm.JITValueDesc{d59, d58}, 1)
+		d60 = ctx.EmitGoCallScalar(jitGoABI_444581dcbb1583bf, []scm.JITValueDesc{d59, d58}, 1)
 		_ = d60
 		ctx.FreeDesc(&d58)
 		ctx.ReclaimUntrackedRegs()
@@ -12134,7 +12134,7 @@ func (s *StorageString) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 		}
 		ctx.SyncDesc(&thisptr)
 		ctx.SyncDesc(&d54)
-		callResults61 := scm.JITEmitGoCallResults(ctx, scm.GoFuncAddr((*StorageString).resolvePositions), []scm.JITValueDesc{thisptr, d54}, []uint8{3, 3, 3}, []uint8{1, 1, 1})
+		callResults61 := scm.JITEmitGoCallResults(ctx, jitGoABI_8a3ea2bbf808dd46, []scm.JITValueDesc{thisptr, d54})
 		d62 = callResults61[0]
 		_ = d62
 		d63 = callResults61[1]
@@ -12173,7 +12173,7 @@ func (s *StorageString) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 		ctx.SyncDesc(&d64)
 		ctx.SyncDesc(&d55)
 		ctx.SyncDesc(&d56)
-		ctx.EmitGoCallVoid(scm.GoFuncAddr((*StorageString).decodeBulk), []scm.JITValueDesc{thisptr, d62, d63, d64, d55, d56})
+		ctx.EmitGoCallVoid(jitGoABI_f781b078ae033da4, []scm.JITValueDesc{thisptr, d62, d63, d64, d55, d56})
 		ctx.ReclaimUntrackedRegs()
 		ctx.EmitJmp(lbl0)
 		return result
@@ -12393,7 +12393,7 @@ func (s *StorageString) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 		}
 		ctx.SyncDesc(&thisptr)
 		ctx.SyncDesc(&d98)
-		d100 = ctx.EmitGoCallScalar(scm.GoFuncAddr((*StorageString).compressedAt), []scm.JITValueDesc{thisptr, d98}, 2)
+		d100 = ctx.EmitGoCallScalar(jitGoABI_385c39854cb4f4b3, []scm.JITValueDesc{thisptr, d98}, 2)
 		d100.NoHeapPointer = false
 		ctx.BindReg(d100.Reg, &d100)
 		ctx.BindReg(d100.Reg2, &d100)
@@ -12761,7 +12761,7 @@ func (s *StorageEnum) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, ta
 		stride = storageStrideHome
 		ctx.ReclaimUntrackedRegs()
 		ctx.StabilizeDescForControlFlow(&d4)
-		d26 = ctx.EmitGoCallScalar(scm.GoFuncAddr(func() *EnumDecodeCache { return new(EnumDecodeCache) }), nil, 1)
+		d26 = ctx.EmitGoCallScalar(jitGoABI_7c573aa197792b0c, nil, 1)
 		ctx.BindReg(d26.Reg, &d26)
 		ctx.StabilizeDescForControlFlow(&d26)
 		if phiHomeOK2 {
@@ -12967,7 +12967,7 @@ func (s *StorageEnum) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, ta
 		ctx.SyncDesc(&thisptr)
 		ctx.SyncDesc(&d40)
 		ctx.SyncDesc(&d26)
-		d41 = ctx.EmitGoCallScalar(scm.GoFuncAddr((*StorageEnum).GetValueCached), []scm.JITValueDesc{thisptr, d40, d26}, 2)
+		d41 = ctx.EmitGoCallScalar(jitGoABI_139109b20b3e87b3, []scm.JITValueDesc{thisptr, d40, d26}, 2)
 		d41.NoHeapPointer = false
 		ctx.BindReg(d41.Reg, &d41)
 		ctx.BindReg(d41.Reg2, &d41)
@@ -13441,7 +13441,7 @@ func (s *StorageEnum) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, 
 		stride = storageStrideHome
 		ctx.ReclaimUntrackedRegs()
 		ctx.StabilizeDescForControlFlow(&d4)
-		d26 = ctx.EmitGoCallScalar(scm.GoFuncAddr(func() *EnumDecodeCache { return new(EnumDecodeCache) }), nil, 1)
+		d26 = ctx.EmitGoCallScalar(jitGoABI_7c573aa197792b0c, nil, 1)
 		ctx.BindReg(d26.Reg, &d26)
 		ctx.StabilizeDescForControlFlow(&d26)
 		if recids.SliceSizeKnown {
@@ -13642,7 +13642,7 @@ func (s *StorageEnum) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, 
 		ctx.SyncDesc(&thisptr)
 		ctx.SyncDesc(&d44)
 		ctx.SyncDesc(&d26)
-		d45 = ctx.EmitGoCallScalar(scm.GoFuncAddr((*StorageEnum).GetValueCached), []scm.JITValueDesc{thisptr, d44, d26}, 2)
+		d45 = ctx.EmitGoCallScalar(jitGoABI_139109b20b3e87b3, []scm.JITValueDesc{thisptr, d44, d26}, 2)
 		d45.NoHeapPointer = false
 		ctx.BindReg(d45.Reg, &d45)
 		ctx.BindReg(d45.Reg2, &d45)
@@ -14751,7 +14751,7 @@ func (s *StorageSparse) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 		}
 		ctx.SyncDesc(&thisptr)
 		ctx.SyncDesc(&recid)
-		d86 = ctx.EmitGoCallScalar(scm.GoFuncAddr((*StorageSparse).sparseSeek), []scm.JITValueDesc{thisptr, recid}, 1)
+		d86 = ctx.EmitGoCallScalar(jitGoABI_8aec094a6c1753b2, []scm.JITValueDesc{thisptr, recid}, 1)
 		d86.NoHeapPointer = true
 		ctx.BindReg(d86.Reg, &d86)
 		ctx.StabilizeDescForControlFlow(&d86)
@@ -20231,7 +20231,7 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 		}
 		ctx.SyncDesc(&thisptr)
 		ctx.SyncDesc(&d238)
-		d239 = ctx.EmitGoCallScalar(scm.GoFuncAddr((*StorageSparse).sparseSeek), []scm.JITValueDesc{thisptr, d238}, 1)
+		d239 = ctx.EmitGoCallScalar(jitGoABI_8aec094a6c1753b2, []scm.JITValueDesc{thisptr, d238}, 1)
 		d239.NoHeapPointer = true
 		ctx.BindReg(d239.Reg, &d239)
 		ctx.StabilizeDescForControlFlow(&d239)
@@ -20640,7 +20640,7 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 		}
 		ctx.SyncDesc(&d294)
 		ctx.SyncDesc(&d293)
-		d295 = ctx.EmitGoCallScalar(scm.GoFuncAddr((*StorageSparse).GetValue), []scm.JITValueDesc{d294, d293}, 2)
+		d295 = ctx.EmitGoCallScalar(jitGoABI_3b78606eb9193b47, []scm.JITValueDesc{d294, d293}, 2)
 		d295.NoHeapPointer = false
 		ctx.BindReg(d295.Reg, &d295)
 		ctx.BindReg(d295.Reg2, &d295)
@@ -26628,7 +26628,7 @@ func (s *StorageSCMER) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, t
 		ctx.FreeDesc(&d44)
 		ctx.EnsureDesc(&d42)
 		ctx.EnsureDesc(&d48)
-		callResults49 := scm.JITEmitGoCallResults(ctx, scm.GoFuncAddr(scm.JITCopyScmerSlice), []scm.JITValueDesc{d42, d48}, []uint8{1}, []uint8{0})
+		callResults49 := scm.JITEmitGoCallResults(ctx, jitGoABI_f84dd11fc2199b37, []scm.JITValueDesc{d42, d48})
 		d50 = callResults49[0]
 		d50.Type = scm.TagInt
 		ctx.EmitJmp(lbl0)
@@ -28063,7 +28063,7 @@ func (s *StorageDecimal) JITEmitGetValueRange(ctx *scm.JITContext, recid, count,
 		ctx.SyncDesc(&count)
 		ctx.SyncDesc(&target)
 		ctx.SyncDesc(&d1)
-		ctx.EmitGoCallVoid(scm.GoFuncAddr((*StorageInt).GetValueRange), []scm.JITValueDesc{d17, recid, count, target, d1})
+		ctx.EmitGoCallVoid(jitGoABI_5394da09e8141436, []scm.JITValueDesc{d17, recid, count, target, d1})
 		ctx.FreeDesc(&recid)
 		if thisptr.Loc == scm.LocRegPair || thisptr.Loc == scm.LocStackPair || thisptr.Loc == scm.LocRegTriple || thisptr.Loc == scm.LocStackTriple {
 			panic("jit: generic call arg expects 1-word value")
@@ -28082,7 +28082,7 @@ func (s *StorageDecimal) JITEmitGetValueRange(ctx *scm.JITContext, recid, count,
 		ctx.SyncDesc(&target)
 		ctx.SyncDesc(&count)
 		ctx.SyncDesc(&d1)
-		ctx.EmitGoCallVoid(scm.GoFuncAddr((*StorageDecimal).rescaleInPlace), []scm.JITValueDesc{thisptr, target, count, d1})
+		ctx.EmitGoCallVoid(jitGoABI_38332a09dc8ca9e6, []scm.JITValueDesc{thisptr, target, count, d1})
 		ctx.FreeDesc(&count)
 		ctx.FreeDesc(&d1)
 		ctx.EmitJmp(lbl0)
@@ -28305,7 +28305,7 @@ func (s *StorageDecimal) JITEmitGetValueMulti(ctx *scm.JITContext, recids, targe
 		ctx.SyncDesc(&recids)
 		ctx.SyncDesc(&target)
 		ctx.SyncDesc(&d1)
-		ctx.EmitGoCallVoid(scm.GoFuncAddr((*StorageInt).GetValueMulti), []scm.JITValueDesc{d17, recids, target, d1})
+		ctx.EmitGoCallVoid(jitGoABI_74d5663c2bc8ceea, []scm.JITValueDesc{d17, recids, target, d1})
 		if recids.SliceSizeKnown {
 			d18 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(int64(recids.KnownSliceLen))}
 		} else if recids.Loc == scm.LocImm {
@@ -28353,7 +28353,7 @@ func (s *StorageDecimal) JITEmitGetValueMulti(ctx *scm.JITContext, recids, targe
 		ctx.SyncDesc(&target)
 		ctx.SyncDesc(&d19)
 		ctx.SyncDesc(&d1)
-		ctx.EmitGoCallVoid(scm.GoFuncAddr((*StorageDecimal).rescaleInPlace), []scm.JITValueDesc{thisptr, target, d19, d1})
+		ctx.EmitGoCallVoid(jitGoABI_38332a09dc8ca9e6, []scm.JITValueDesc{thisptr, target, d19, d1})
 		ctx.FreeDesc(&d19)
 		ctx.FreeDesc(&d1)
 		ctx.EmitJmp(lbl0)
@@ -29209,7 +29209,7 @@ func (s *StorageSeq) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 		}
 		ctx.SyncDesc(&thisptr)
 		ctx.SyncDesc(&recid)
-		d87 = ctx.EmitGoCallScalar(scm.GoFuncAddr((*StorageSeq).findSegment), []scm.JITValueDesc{thisptr, recid}, 1)
+		d87 = ctx.EmitGoCallScalar(jitGoABI_22e105714b6a3b4d, []scm.JITValueDesc{thisptr, recid}, 1)
 		d87.NoHeapPointer = true
 		ctx.BindReg(d87.Reg, &d87)
 		ctx.StabilizeDescForControlFlow(&d87)
@@ -29221,7 +29221,7 @@ func (s *StorageSeq) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 		}
 		ctx.SyncDesc(&thisptr)
 		ctx.SyncDesc(&d87)
-		callResults88 := scm.JITEmitGoCallResults(ctx, scm.GoFuncAddr((*StorageSeq).segmentAt), []scm.JITValueDesc{thisptr, d87}, []uint8{1, 1, 1, 1}, []uint8{0, 0, 0, 0})
+		callResults88 := scm.JITEmitGoCallResults(ctx, jitGoABI_07df515c12370df2, []scm.JITValueDesc{thisptr, d87})
 		d89 = callResults88[0]
 		_ = d89
 		d90 = callResults88[1]
@@ -29240,7 +29240,7 @@ func (s *StorageSeq) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 		}
 		ctx.SyncDesc(&thisptr)
 		ctx.SyncDesc(&d87)
-		d93 = ctx.EmitGoCallScalar(scm.GoFuncAddr((*StorageSeq).segmentEnd), []scm.JITValueDesc{thisptr, d87}, 1)
+		d93 = ctx.EmitGoCallScalar(jitGoABI_6926154baa6dbb3d, []scm.JITValueDesc{thisptr, d87}, 1)
 		d93.NoHeapPointer = true
 		ctx.BindReg(d93.Reg, &d93)
 		ctx.StabilizeDescForControlFlow(&d93)
@@ -30455,7 +30455,7 @@ func (s *StorageSeq) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 		}
 		ctx.SyncDesc(&thisptr)
 		ctx.SyncDesc(&d268)
-		callResults269 := scm.JITEmitGoCallResults(ctx, scm.GoFuncAddr((*StorageSeq).segmentAt), []scm.JITValueDesc{thisptr, d268}, []uint8{1, 1, 1, 1}, []uint8{0, 0, 0, 0})
+		callResults269 := scm.JITEmitGoCallResults(ctx, jitGoABI_07df515c12370df2, []scm.JITValueDesc{thisptr, d268})
 		d270 = callResults269[0]
 		_ = d270
 		d271 = callResults269[1]
@@ -30474,7 +30474,7 @@ func (s *StorageSeq) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 		}
 		ctx.SyncDesc(&thisptr)
 		ctx.SyncDesc(&d268)
-		d274 = ctx.EmitGoCallScalar(scm.GoFuncAddr((*StorageSeq).segmentEnd), []scm.JITValueDesc{thisptr, d268}, 1)
+		d274 = ctx.EmitGoCallScalar(jitGoABI_6926154baa6dbb3d, []scm.JITValueDesc{thisptr, d268}, 1)
 		d274.NoHeapPointer = true
 		ctx.BindReg(d274.Reg, &d274)
 		ctx.StabilizeDescForControlFlow(&d274)
@@ -33832,7 +33832,7 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 		}
 		ctx.SyncDesc(&thisptr)
 		ctx.SyncDesc(&d257)
-		d258 = ctx.EmitGoCallScalar(scm.GoFuncAddr((*StorageSeq).findSegment), []scm.JITValueDesc{thisptr, d257}, 1)
+		d258 = ctx.EmitGoCallScalar(jitGoABI_22e105714b6a3b4d, []scm.JITValueDesc{thisptr, d257}, 1)
 		d258.NoHeapPointer = true
 		ctx.BindReg(d258.Reg, &d258)
 		ctx.StabilizeDescForControlFlow(&d258)
@@ -33845,7 +33845,7 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 		}
 		ctx.SyncDesc(&thisptr)
 		ctx.SyncDesc(&d258)
-		callResults259 := scm.JITEmitGoCallResults(ctx, scm.GoFuncAddr((*StorageSeq).segmentAt), []scm.JITValueDesc{thisptr, d258}, []uint8{1, 1, 1, 1}, []uint8{0, 0, 0, 0})
+		callResults259 := scm.JITEmitGoCallResults(ctx, jitGoABI_07df515c12370df2, []scm.JITValueDesc{thisptr, d258})
 		d260 = callResults259[0]
 		_ = d260
 		d261 = callResults259[1]
@@ -33866,7 +33866,7 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 		}
 		ctx.SyncDesc(&thisptr)
 		ctx.SyncDesc(&d258)
-		d264 = ctx.EmitGoCallScalar(scm.GoFuncAddr((*StorageSeq).segmentEnd), []scm.JITValueDesc{thisptr, d258}, 1)
+		d264 = ctx.EmitGoCallScalar(jitGoABI_6926154baa6dbb3d, []scm.JITValueDesc{thisptr, d258}, 1)
 		d264.NoHeapPointer = true
 		ctx.BindReg(d264.Reg, &d264)
 		ctx.StabilizeDescForControlFlow(&d264)
@@ -34915,7 +34915,7 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 		}
 		ctx.SyncDesc(&thisptr)
 		ctx.SyncDesc(&d337)
-		callResults338 := scm.JITEmitGoCallResults(ctx, scm.GoFuncAddr((*StorageSeq).segmentAt), []scm.JITValueDesc{thisptr, d337}, []uint8{1, 1, 1, 1}, []uint8{0, 0, 0, 0})
+		callResults338 := scm.JITEmitGoCallResults(ctx, jitGoABI_07df515c12370df2, []scm.JITValueDesc{thisptr, d337})
 		d339 = callResults338[0]
 		_ = d339
 		d340 = callResults338[1]
@@ -34936,7 +34936,7 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 		}
 		ctx.SyncDesc(&thisptr)
 		ctx.SyncDesc(&d337)
-		d343 = ctx.EmitGoCallScalar(scm.GoFuncAddr((*StorageSeq).segmentEnd), []scm.JITValueDesc{thisptr, d337}, 1)
+		d343 = ctx.EmitGoCallScalar(jitGoABI_6926154baa6dbb3d, []scm.JITValueDesc{thisptr, d337}, 1)
 		d343.NoHeapPointer = true
 		ctx.BindReg(d343.Reg, &d343)
 		ctx.StabilizeDescForControlFlow(&d343)
@@ -36891,7 +36891,7 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 		}
 		ctx.SyncDesc(&thisptr)
 		ctx.SyncDesc(&d627)
-		d628 = ctx.EmitGoCallScalar(scm.GoFuncAddr((*StorageSeq).findSegment), []scm.JITValueDesc{thisptr, d627}, 1)
+		d628 = ctx.EmitGoCallScalar(jitGoABI_22e105714b6a3b4d, []scm.JITValueDesc{thisptr, d627}, 1)
 		d628.NoHeapPointer = true
 		ctx.BindReg(d628.Reg, &d628)
 		if thisptr.Loc == scm.LocRegPair || thisptr.Loc == scm.LocStackPair || thisptr.Loc == scm.LocRegTriple || thisptr.Loc == scm.LocStackTriple {
@@ -36902,7 +36902,7 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 		}
 		ctx.SyncDesc(&thisptr)
 		ctx.SyncDesc(&d628)
-		callResults629 := scm.JITEmitGoCallResults(ctx, scm.GoFuncAddr((*StorageSeq).segmentAt), []scm.JITValueDesc{thisptr, d628}, []uint8{1, 1, 1, 1}, []uint8{0, 0, 0, 0})
+		callResults629 := scm.JITEmitGoCallResults(ctx, jitGoABI_07df515c12370df2, []scm.JITValueDesc{thisptr, d628})
 		d630 = callResults629[0]
 		_ = d630
 		d631 = callResults629[1]
@@ -37867,7 +37867,7 @@ func (s *StorageComputeProxy) JITEmitGetValueRange(ctx *scm.JITContext, recid, c
 	/* TODO: unsupported call: (*sync.RWMutex).RLock(t5) */
 	ctx.TrackPointer(unsafe.Pointer(s))
 	thisptr := scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(int64(uintptr(unsafe.Pointer(s)))), NoHeapPointer: true}
-	ctx.EmitGoCallVoid(scm.GoFuncAddr((*StorageComputeProxy).GetValueRange), []scm.JITValueDesc{thisptr, recid, count, target, stride})
+	ctx.EmitGoCallVoid(jitGoABI_75f76ca43b5dcbe7, []scm.JITValueDesc{thisptr, recid, count, target, stride})
 	return result
 }
 func (s *StorageComputeProxy) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, stride, result scm.JITValueDesc) scm.JITValueDesc {
@@ -37875,7 +37875,7 @@ func (s *StorageComputeProxy) JITEmitGetValueMulti(ctx *scm.JITContext, recids, 
 	/* TODO: unsupported call: (*sync.RWMutex).RLock(t22) */
 	ctx.TrackPointer(unsafe.Pointer(s))
 	thisptr := scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(int64(uintptr(unsafe.Pointer(s)))), NoHeapPointer: true}
-	ctx.EmitGoCallVoid(scm.GoFuncAddr((*StorageComputeProxy).GetValueMulti), []scm.JITValueDesc{thisptr, recids, target, stride})
+	ctx.EmitGoCallVoid(jitGoABI_ff3f937093449c90, []scm.JITValueDesc{thisptr, recids, target, stride})
 	return result
 }
 func (s *OverlayBlob) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, target, stride, result scm.JITValueDesc) scm.JITValueDesc {
@@ -38088,9 +38088,7 @@ func (s *OverlayBlob) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, ta
 		ctx.EnsureDesc(&count)
 		ctx.EnsureDesc(&target)
 		ctx.EnsureDesc(&d1)
-		ctx.EmitGoCallVoid(scm.GoFuncAddr(func(receiver ColumnStorage, arg0 uint32, arg1 uint32, arg2 []scm.Scmer, arg3 int) {
-			receiver.GetValueRange(arg0, arg1, arg2, arg3)
-		}), []scm.JITValueDesc{d17, recid, count, target, d1})
+		ctx.EmitGoCallVoid(jitGoABI_62f287212b9ca8cb, []scm.JITValueDesc{d17, recid, count, target, d1})
 		ctx.FreeDesc(&recid)
 		ctx.EnsureDesc(&count)
 		ctx.EnsureDesc(&count)
@@ -38111,7 +38109,7 @@ func (s *OverlayBlob) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, ta
 		ctx.SyncDesc(&target)
 		ctx.SyncDesc(&count)
 		ctx.SyncDesc(&d1)
-		ctx.EmitGoCallVoid(scm.GoFuncAddr((*OverlayBlob).resolveBlobBatch), []scm.JITValueDesc{thisptr, target, count, d1})
+		ctx.EmitGoCallVoid(jitGoABI_923149e6d92b3194, []scm.JITValueDesc{thisptr, target, count, d1})
 		ctx.FreeDesc(&count)
 		ctx.FreeDesc(&d1)
 		ctx.EmitJmp(lbl0)
@@ -38335,9 +38333,7 @@ func (s *OverlayBlob) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, 
 		ctx.EnsureDesc(&recids)
 		ctx.EnsureDesc(&target)
 		ctx.EnsureDesc(&d1)
-		ctx.EmitGoCallVoid(scm.GoFuncAddr(func(receiver ColumnStorage, arg0 []uint32, arg1 []scm.Scmer, arg2 int) {
-			receiver.GetValueMulti(arg0, arg1, arg2)
-		}), []scm.JITValueDesc{d17, recids, target, d1})
+		ctx.EmitGoCallVoid(jitGoABI_10772a7a68e736ff, []scm.JITValueDesc{d17, recids, target, d1})
 		if recids.SliceSizeKnown {
 			d18 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(int64(recids.KnownSliceLen))}
 		} else if recids.Loc == scm.LocImm {
@@ -38372,7 +38368,7 @@ func (s *OverlayBlob) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, 
 		ctx.SyncDesc(&target)
 		ctx.SyncDesc(&d18)
 		ctx.SyncDesc(&d1)
-		ctx.EmitGoCallVoid(scm.GoFuncAddr((*OverlayBlob).resolveBlobBatch), []scm.JITValueDesc{thisptr, target, d18, d1})
+		ctx.EmitGoCallVoid(jitGoABI_923149e6d92b3194, []scm.JITValueDesc{thisptr, target, d18, d1})
 		ctx.FreeDesc(&d18)
 		ctx.FreeDesc(&d1)
 		ctx.EmitJmp(lbl0)
@@ -38409,3 +38405,62 @@ func emitMainStorageValue(ctx *scm.JITContext, col ColumnStorage, idx, result sc
 // emitProcInlineWithStackArgs materializes proc arguments as a contiguous
 // Scmer array on the stack and sets R12/ctx.SliceBase so legacy emitters that
 // iterate via ctx.SliceBase (e.g. variadic arithmetic) remain correct.
+
+// BEGIN jitgen prepared Go ABI entries
+var jitGoABI_07df515c12370df2 uint64
+var jitGoABI_106b220171db8ca7 uint64
+var jitGoABI_10772a7a68e736ff uint64
+var jitGoABI_139109b20b3e87b3 uint64
+var jitGoABI_21f1e7b7eacf3829 uint64
+var jitGoABI_22e105714b6a3b4d uint64
+var jitGoABI_303a31d09ad202ff uint64
+var jitGoABI_38332a09dc8ca9e6 uint64
+var jitGoABI_385c39854cb4f4b3 uint64
+var jitGoABI_3b78606eb9193b47 uint64
+var jitGoABI_444581dcbb1583bf uint64
+var jitGoABI_50e2ebfd1c3052a7 uint64
+var jitGoABI_5394da09e8141436 uint64
+var jitGoABI_5b8dad065e93bf94 uint64
+var jitGoABI_62f287212b9ca8cb uint64
+var jitGoABI_6926154baa6dbb3d uint64
+var jitGoABI_74d5663c2bc8ceea uint64
+var jitGoABI_75f76ca43b5dcbe7 uint64
+var jitGoABI_7c573aa197792b0c uint64
+var jitGoABI_8a3ea2bbf808dd46 uint64
+var jitGoABI_8aec094a6c1753b2 uint64
+var jitGoABI_923149e6d92b3194 uint64
+var jitGoABI_f781b078ae033da4 uint64
+var jitGoABI_f84dd11fc2199b37 uint64
+var jitGoABI_ff3f937093449c90 uint64
+
+func init() {
+	jitGoABI_07df515c12370df2 = scm.GoFuncAddr((*StorageSeq).segmentAt)
+	jitGoABI_106b220171db8ca7 = scm.GoFuncAddr((*StorageString).GetValueMulti)
+	jitGoABI_10772a7a68e736ff = scm.GoFuncAddr(func(receiver ColumnStorage, arg0 []uint32, arg1 []scm.Scmer, arg2 int) {
+		receiver.GetValueMulti(arg0, arg1, arg2)
+	})
+	jitGoABI_139109b20b3e87b3 = scm.GoFuncAddr((*StorageEnum).GetValueCached)
+	jitGoABI_21f1e7b7eacf3829 = scm.GoFuncAddr(scm.JITMakeScmerSlice)
+	jitGoABI_22e105714b6a3b4d = scm.GoFuncAddr((*StorageSeq).findSegment)
+	jitGoABI_303a31d09ad202ff = scm.GoFuncAddr((*StoragePrefix).applyPrefixInPlace)
+	jitGoABI_38332a09dc8ca9e6 = scm.GoFuncAddr((*StorageDecimal).rescaleInPlace)
+	jitGoABI_385c39854cb4f4b3 = scm.GoFuncAddr((*StorageString).compressedAt)
+	jitGoABI_3b78606eb9193b47 = scm.GoFuncAddr((*StorageSparse).GetValue)
+	jitGoABI_444581dcbb1583bf = scm.GoFuncAddr(scm.JITAtomicAddUint64)
+	jitGoABI_50e2ebfd1c3052a7 = scm.GoFuncAddr((*StorageString).GetValueRange)
+	jitGoABI_5394da09e8141436 = scm.GoFuncAddr((*StorageInt).GetValueRange)
+	jitGoABI_5b8dad065e93bf94 = scm.GoFuncAddr(scm.JITMakeUint32Slice)
+	jitGoABI_62f287212b9ca8cb = scm.GoFuncAddr(func(receiver ColumnStorage, arg0 uint32, arg1 uint32, arg2 []scm.Scmer, arg3 int) {
+		receiver.GetValueRange(arg0, arg1, arg2, arg3)
+	})
+	jitGoABI_6926154baa6dbb3d = scm.GoFuncAddr((*StorageSeq).segmentEnd)
+	jitGoABI_74d5663c2bc8ceea = scm.GoFuncAddr((*StorageInt).GetValueMulti)
+	jitGoABI_75f76ca43b5dcbe7 = scm.GoFuncAddr((*StorageComputeProxy).GetValueRange)
+	jitGoABI_7c573aa197792b0c = scm.GoFuncAddr(func() *EnumDecodeCache { return new(EnumDecodeCache) })
+	jitGoABI_8a3ea2bbf808dd46 = scm.GoFuncAddr((*StorageString).resolvePositions)
+	jitGoABI_8aec094a6c1753b2 = scm.GoFuncAddr((*StorageSparse).sparseSeek)
+	jitGoABI_923149e6d92b3194 = scm.GoFuncAddr((*OverlayBlob).resolveBlobBatch)
+	jitGoABI_f781b078ae033da4 = scm.GoFuncAddr((*StorageString).decodeBulk)
+	jitGoABI_f84dd11fc2199b37 = scm.GoFuncAddr(scm.JITCopyScmerSlice)
+	jitGoABI_ff3f937093449c90 = scm.GoFuncAddr((*StorageComputeProxy).GetValueMulti)
+}

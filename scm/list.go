@@ -2560,7 +2560,7 @@ func init_list() {
 						ctx.BindReg(d2.Reg, &d3)
 					} else {
 						boxed := JITPrepareScmerGoArg(ctx, d2)
-						d3 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{boxed}, 1)
+						d3 = ctx.EmitGoCallScalar(jitGoABI_3d60ae4ff2cc3076, []JITValueDesc{boxed}, 1)
 						d3.Type = tagInt
 						ctx.BindReg(d3.Reg, &d3)
 					}
@@ -2953,7 +2953,7 @@ func init_list() {
 						ctx.BindReg(d2.Reg, &d3)
 					} else {
 						boxed := JITPrepareScmerGoArg(ctx, d2)
-						d3 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{boxed}, 1)
+						d3 = ctx.EmitGoCallScalar(jitGoABI_3d60ae4ff2cc3076, []JITValueDesc{boxed}, 1)
 						d3.Type = tagInt
 						ctx.BindReg(d3.Reg, &d3)
 					}
@@ -3425,7 +3425,7 @@ func init_list() {
 						ctx.BindReg(d5.Reg, &d6)
 					} else {
 						boxed := JITPrepareScmerGoArg(ctx, d5)
-						d6 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{boxed}, 1)
+						d6 = ctx.EmitGoCallScalar(jitGoABI_3d60ae4ff2cc3076, []JITValueDesc{boxed}, 1)
 						d6.Type = tagInt
 						ctx.BindReg(d6.Reg, &d6)
 					}
@@ -3451,7 +3451,7 @@ func init_list() {
 						ctx.BindReg(d8.Reg, &d9)
 					} else {
 						boxed := JITPrepareScmerGoArg(ctx, d8)
-						d9 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{boxed}, 1)
+						d9 = ctx.EmitGoCallScalar(jitGoABI_3d60ae4ff2cc3076, []JITValueDesc{boxed}, 1)
 						d9.Type = tagInt
 						ctx.BindReg(d9.Reg, &d9)
 					}
@@ -4006,7 +4006,7 @@ func init_list() {
 					ctx.EmitLeaRegMem(d118.Reg, ctx.StackReg, int32(stackArray116))
 					ctx.EmitMovRegImm64(d118.Reg2, uint64(0))
 					ctx.EmitMovRegImm64(d118.Reg3, uint64(0))
-					callResults119 := JITEmitGoCallResults(ctx, GoFuncAddr(JITNewSliceCopy), []JITValueDesc{d118}, []uint8{2}, []uint8{1})
+					callResults119 := JITEmitGoCallResults(ctx, jitGoABI_5ab5b68a30746790, []JITValueDesc{d118})
 					d120 = callResults119[0]
 					ctx.SyncDesc(&d120)
 					if d120.Loc == LocRegPair || d120.Loc == LocStackPair || d120.Loc == LocInputPair {
@@ -4092,7 +4092,7 @@ func init_list() {
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d121)
 					ctx.EnsureDesc(&d121)
-					callResults122 := JITEmitGoCallResults(ctx, GoFuncAddr(jitMakeScmerSlice), []JITValueDesc{d121, d121}, []uint8{3}, []uint8{1})
+					callResults122 := JITEmitGoCallResults(ctx, jitGoABI_a7de20a8fb7c436d, []JITValueDesc{d121, d121})
 					d123 = callResults122[0]
 					d123.Type = tagSlice
 					ctx.FreeDesc(&d121)
@@ -4155,7 +4155,7 @@ func init_list() {
 					ctx.BindReg(r16, &d127)
 					ctx.EnsureDesc(&d123)
 					ctx.EnsureDesc(&d127)
-					callResults128 := JITEmitGoCallResults(ctx, GoFuncAddr(jitCopyScmerSlice), []JITValueDesc{d123, d127}, []uint8{1}, []uint8{0})
+					callResults128 := JITEmitGoCallResults(ctx, jitGoABI_99df67f97d47d8c2, []JITValueDesc{d123, d127})
 					d129 = callResults128[0]
 					d129.Type = tagInt
 					d130 = ctx.EmitNewSliceFromGoSlice(&d123)
@@ -4357,7 +4357,7 @@ func init_list() {
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d4)
 					ctx.EnsureDesc(&d4)
-					callResults5 := JITEmitGoCallResults(ctx, GoFuncAddr(jitMakeScmerSlice), []JITValueDesc{d4, d4}, []uint8{3}, []uint8{1})
+					callResults5 := JITEmitGoCallResults(ctx, jitGoABI_a7de20a8fb7c436d, []JITValueDesc{d4, d4})
 					d6 = callResults5[0]
 					d6.Type = tagSlice
 					ctx.StabilizeDescForControlFlow(&d6)
@@ -4671,12 +4671,12 @@ func init_list() {
 					ctx.BindReg(d3.Reg3, &d3)
 				}
 				ctx.FreeDesc(&d2)
-				callResults4 := JITEmitGoCallResults(ctx, GoFuncAddr(JITCloneScmerSlice), []JITValueDesc{d3}, []uint8{3}, []uint8{1})
+				callResults4 := JITEmitGoCallResults(ctx, jitGoABI_f99f3392c678151c, []JITValueDesc{d3})
 				d5 := callResults4[0]
 				virtualArgs6 = args[1:]
 				_ = virtualArgs6
 				d7 := jitMaterializeVirtualGoSlice(ctx, virtualArgs6)
-				callResults8 := JITEmitGoCallResults(ctx, GoFuncAddr(JITAppendScmerSlice), []JITValueDesc{d5, d7}, []uint8{3}, []uint8{1})
+				callResults8 := JITEmitGoCallResults(ctx, jitGoABI_f2c643d935ea4448, []JITValueDesc{d5, d7})
 				d9 := callResults8[0]
 				d10 := ctx.EmitNewSliceFromGoSlice(&d9)
 				if d10.Loc == LocImm {
@@ -4908,7 +4908,7 @@ func init_list() {
 						ctx.BindReg(d7.Reg3, &d7)
 					}
 					ctx.FreeDesc(&d6)
-					callResults8 := JITEmitGoCallResults(ctx, GoFuncAddr(JITCloneScmerSlice), []JITValueDesc{d7}, []uint8{3}, []uint8{1})
+					callResults8 := JITEmitGoCallResults(ctx, jitGoABI_f99f3392c678151c, []JITValueDesc{d7})
 					d9 = callResults8[0]
 					d10 = JITValueDesc{Loc: LocStackTriple, Type: tagSlice, StackOff: int32(bbs[1].PhiBase) + int32(0)}
 					ctx.EmitCopyDescWords(&d10, &d9, 3)
@@ -5304,7 +5304,7 @@ func init_list() {
 					d56 = JITPrepareScmerGoArg(ctx, d56)
 					ctx.SyncDesc(&d29)
 					ctx.SyncDesc(&d56)
-					d58 = ctx.EmitGoCallScalar(GoFuncAddr(Equal), []JITValueDesc{d29, d56}, 1)
+					d58 = ctx.EmitGoCallScalar(jitGoABI_073753bd1c913d53, []JITValueDesc{d29, d56}, 1)
 					d58.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d58.Reg, 1)
 					d58.Type = tagBool
@@ -5580,7 +5580,7 @@ func init_list() {
 					ctx.EmitLeaRegMem(d118.Reg, ctx.StackReg, int32(stackArray116))
 					ctx.EmitMovRegImm64(d118.Reg2, uint64(1))
 					ctx.EmitMovRegImm64(d118.Reg3, uint64(1))
-					callResults119 := JITEmitGoCallResults(ctx, GoFuncAddr(JITAppendScmerSlice), []JITValueDesc{d1, d118}, []uint8{3}, []uint8{1})
+					callResults119 := JITEmitGoCallResults(ctx, jitGoABI_f2c643d935ea4448, []JITValueDesc{d1, d118})
 					d120 = callResults119[0]
 					d121 = JITValueDesc{Loc: LocStackTriple, Type: tagSlice, StackOff: int32(bbs[1].PhiBase) + int32(0)}
 					ctx.EmitCopyDescWords(&d121, &d120, 3)
@@ -5831,7 +5831,7 @@ func init_list() {
 					ctx.EmitLeaRegMem(d17.Reg, ctx.StackReg, int32(stackArray13))
 					ctx.EmitMovRegImm64(d17.Reg2, uint64(1))
 					ctx.EmitMovRegImm64(d17.Reg3, uint64(1))
-					callResults18 := JITEmitGoCallResults(ctx, GoFuncAddr(JITAppendScmerSliceCopy), []JITValueDesc{d17, d16}, []uint8{3}, []uint8{1})
+					callResults18 := JITEmitGoCallResults(ctx, jitGoABI_41f8e3e95a211b4c, []JITValueDesc{d17, d16})
 					d19 = callResults18[0]
 					d20 = ctx.EmitNewSliceFromGoSlice(&d19)
 					ctx.SyncDesc(&d20)
@@ -5896,7 +5896,7 @@ func init_list() {
 					ctx.EmitLeaRegMem(d24.Reg, ctx.StackReg, int32(stackArray21))
 					ctx.EmitMovRegImm64(d24.Reg2, uint64(2))
 					ctx.EmitMovRegImm64(d24.Reg3, uint64(2))
-					callResults25 := JITEmitGoCallResults(ctx, GoFuncAddr(JITNewSliceCopy), []JITValueDesc{d24}, []uint8{2}, []uint8{1})
+					callResults25 := JITEmitGoCallResults(ctx, jitGoABI_5ab5b68a30746790, []JITValueDesc{d24})
 					d26 = callResults25[0]
 					ctx.SyncDesc(&d26)
 					if d26.Loc == LocRegPair || d26.Loc == LocStackPair || d26.Loc == LocInputPair {
@@ -6411,7 +6411,7 @@ func init_list() {
 					ctx.EmitLeaRegMem(d13.Reg, ctx.StackReg, int32(stackArray11))
 					ctx.EmitMovRegImm64(d13.Reg2, uint64(0))
 					ctx.EmitMovRegImm64(d13.Reg3, uint64(0))
-					callResults14 := JITEmitGoCallResults(ctx, GoFuncAddr(JITNewSliceCopy), []JITValueDesc{d13}, []uint8{2}, []uint8{1})
+					callResults14 := JITEmitGoCallResults(ctx, jitGoABI_5ab5b68a30746790, []JITValueDesc{d13})
 					d15 = callResults14[0]
 					ctx.SyncDesc(&d15)
 					if d15.Loc == LocRegPair || d15.Loc == LocStackPair || d15.Loc == LocInputPair {
@@ -7319,7 +7319,7 @@ func init_list() {
 					ctx.EmitLeaRegMem(d49.Reg, ctx.StackReg, int32(stackArray47))
 					ctx.EmitMovRegImm64(d49.Reg2, uint64(0))
 					ctx.EmitMovRegImm64(d49.Reg3, uint64(0))
-					callResults50 := JITEmitGoCallResults(ctx, GoFuncAddr(JITNewSliceCopy), []JITValueDesc{d49}, []uint8{2}, []uint8{1})
+					callResults50 := JITEmitGoCallResults(ctx, jitGoABI_5ab5b68a30746790, []JITValueDesc{d49})
 					d51 = callResults50[0]
 					ctx.SyncDesc(&d51)
 					if d51.Loc == LocRegPair || d51.Loc == LocStackPair || d51.Loc == LocInputPair {
@@ -7406,7 +7406,7 @@ func init_list() {
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d56)
 					ctx.EnsureDesc(&d56)
-					callResults57 := JITEmitGoCallResults(ctx, GoFuncAddr(jitMakeScmerSlice), []JITValueDesc{d56, d56}, []uint8{3}, []uint8{1})
+					callResults57 := JITEmitGoCallResults(ctx, jitGoABI_a7de20a8fb7c436d, []JITValueDesc{d56, d56})
 					d58 = callResults57[0]
 					d58.Type = tagSlice
 					ctx.StabilizeDescForControlFlow(&d58)
@@ -7571,7 +7571,7 @@ func init_list() {
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d87)
 					ctx.EnsureDesc(&d87)
-					callResults88 := JITEmitGoCallResults(ctx, GoFuncAddr(jitMakeScmerSlice), []JITValueDesc{d87, d87}, []uint8{3}, []uint8{1})
+					callResults88 := JITEmitGoCallResults(ctx, jitGoABI_a7de20a8fb7c436d, []JITValueDesc{d87, d87})
 					d89 = callResults88[0]
 					d89.Type = tagSlice
 					ctx.StabilizeDescForControlFlow(&d89)
@@ -8782,7 +8782,7 @@ func init_list() {
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d63)
 					ctx.EnsureDesc(&d2)
-					callResults64 := JITEmitGoCallResults(ctx, GoFuncAddr(jitMakeScmerSlice), []JITValueDesc{d63, d2}, []uint8{3}, []uint8{1})
+					callResults64 := JITEmitGoCallResults(ctx, jitGoABI_a7de20a8fb7c436d, []JITValueDesc{d63, d2})
 					d65 = callResults64[0]
 					d65.Type = tagSlice
 					d66 = JITValueDesc{Loc: LocStackTriple, Type: tagSlice, StackOff: int32(bbs[6].PhiBase) + int32(0)}
@@ -9000,7 +9000,7 @@ func init_list() {
 						ctx.BindReg(d104.Reg3, &d104)
 					}
 					ctx.FreeDesc(&d102)
-					callResults105 := JITEmitGoCallResults(ctx, GoFuncAddr(JITAppendScmerSlice), []JITValueDesc{d4, d104}, []uint8{3}, []uint8{1})
+					callResults105 := JITEmitGoCallResults(ctx, jitGoABI_f2c643d935ea4448, []JITValueDesc{d4, d104})
 					d106 = callResults105[0]
 					d107 = JITValueDesc{Loc: LocStackTriple, Type: tagSlice, StackOff: int32(bbs[6].PhiBase) + int32(0)}
 					ctx.EmitCopyDescWords(&d107, &d106, 3)
@@ -9898,7 +9898,7 @@ func init_list() {
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d79)
 					ctx.EnsureDesc(&d2)
-					callResults80 := JITEmitGoCallResults(ctx, GoFuncAddr(jitMakeScmerSlice), []JITValueDesc{d79, d2}, []uint8{3}, []uint8{1})
+					callResults80 := JITEmitGoCallResults(ctx, jitGoABI_a7de20a8fb7c436d, []JITValueDesc{d79, d2})
 					d81 = callResults80[0]
 					d81.Type = tagSlice
 					d82 = JITValueDesc{Loc: LocStackTriple, Type: tagSlice, StackOff: int32(bbs[6].PhiBase) + int32(0)}
@@ -11001,7 +11001,7 @@ func init_list() {
 					d343 = JITPrepareScmerGoArg(ctx, d343)
 					ctx.SyncDesc(&d229)
 					ctx.SyncDesc(&d343)
-					d345 = ctx.EmitGoCallScalar(GoFuncAddr(Equal), []JITValueDesc{d229, d343}, 1)
+					d345 = ctx.EmitGoCallScalar(jitGoABI_073753bd1c913d53, []JITValueDesc{d229, d343}, 1)
 					d345.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d345.Reg, 1)
 					d345.Type = tagBool
@@ -11709,7 +11709,7 @@ func init_list() {
 					ctx.EmitLeaRegMem(d598.Reg, ctx.StackReg, int32(stackArray596))
 					ctx.EmitMovRegImm64(d598.Reg2, uint64(1))
 					ctx.EmitMovRegImm64(d598.Reg3, uint64(1))
-					callResults599 := JITEmitGoCallResults(ctx, GoFuncAddr(JITAppendScmerSlice), []JITValueDesc{d6, d598}, []uint8{3}, []uint8{1})
+					callResults599 := JITEmitGoCallResults(ctx, jitGoABI_f2c643d935ea4448, []JITValueDesc{d6, d598})
 					d600 = callResults599[0]
 					d601 = JITValueDesc{Loc: LocStackTriple, Type: tagSlice, StackOff: int32(bbs[9].PhiBase) + int32(0)}
 					ctx.EmitCopyDescWords(&d601, &d600, 3)
@@ -12046,7 +12046,7 @@ func init_list() {
 					d16 = JITPrepareScmerGoArg(ctx, d16)
 					ctx.SyncDesc(&d18)
 					ctx.SyncDesc(&d16)
-					d19 = ctx.EmitGoCallScalar(GoFuncAddr(Equal), []JITValueDesc{d18, d16}, 1)
+					d19 = ctx.EmitGoCallScalar(jitGoABI_073753bd1c913d53, []JITValueDesc{d18, d16}, 1)
 					d19.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d19.Reg, 1)
 					d19.Type = tagBool
@@ -12454,7 +12454,7 @@ func init_list() {
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d6)
 					ctx.EnsureDesc(&d5)
-					callResults7 := JITEmitGoCallResults(ctx, GoFuncAddr(jitMakeScmerSlice), []JITValueDesc{d6, d5}, []uint8{3}, []uint8{1})
+					callResults7 := JITEmitGoCallResults(ctx, jitGoABI_a7de20a8fb7c436d, []JITValueDesc{d6, d5})
 					d8 = callResults7[0]
 					d8.Type = tagSlice
 					d9 = JITValueDesc{Loc: LocStackTriple, Type: tagSlice, StackOff: int32(bbs[1].PhiBase) + int32(0)}
@@ -12918,7 +12918,7 @@ func init_list() {
 					ctx.EmitLeaRegMem(d103.Reg, ctx.StackReg, int32(stackArray101))
 					ctx.EmitMovRegImm64(d103.Reg2, uint64(1))
 					ctx.EmitMovRegImm64(d103.Reg3, uint64(1))
-					callResults104 := JITEmitGoCallResults(ctx, GoFuncAddr(JITAppendScmerSlice), []JITValueDesc{d1, d103}, []uint8{3}, []uint8{1})
+					callResults104 := JITEmitGoCallResults(ctx, jitGoABI_f2c643d935ea4448, []JITValueDesc{d1, d103})
 					d105 = callResults104[0]
 					d106 = JITValueDesc{Loc: LocStackTriple, Type: tagSlice, StackOff: int32(bbs[1].PhiBase) + int32(0)}
 					ctx.EmitCopyDescWords(&d106, &d105, 3)
@@ -13957,7 +13957,7 @@ func init_list() {
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d4)
 					ctx.EnsureDesc(&d4)
-					callResults5 := JITEmitGoCallResults(ctx, GoFuncAddr(jitMakeScmerSlice), []JITValueDesc{d4, d4}, []uint8{3}, []uint8{1})
+					callResults5 := JITEmitGoCallResults(ctx, jitGoABI_a7de20a8fb7c436d, []JITValueDesc{d4, d4})
 					d6 = callResults5[0]
 					d6.Type = tagSlice
 					ctx.StabilizeDescForControlFlow(&d6)
@@ -14937,7 +14937,7 @@ func init_list() {
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d4)
 					ctx.EnsureDesc(&d4)
-					callResults5 := JITEmitGoCallResults(ctx, GoFuncAddr(jitMakeScmerSlice), []JITValueDesc{d4, d4}, []uint8{3}, []uint8{1})
+					callResults5 := JITEmitGoCallResults(ctx, jitGoABI_a7de20a8fb7c436d, []JITValueDesc{d4, d4})
 					d6 = callResults5[0]
 					d6.Type = tagSlice
 					ctx.StabilizeDescForControlFlow(&d6)
@@ -17218,7 +17218,7 @@ func init_list() {
 					ctx.EmitLeaRegMem(d49.Reg, ctx.StackReg, int32(stackArray47))
 					ctx.EmitMovRegImm64(d49.Reg2, uint64(1))
 					ctx.EmitMovRegImm64(d49.Reg3, uint64(1))
-					callResults50 := JITEmitGoCallResults(ctx, GoFuncAddr(JITAppendScmerSlice), []JITValueDesc{d1, d49}, []uint8{3}, []uint8{1})
+					callResults50 := JITEmitGoCallResults(ctx, jitGoABI_f2c643d935ea4448, []JITValueDesc{d1, d49})
 					d51 = callResults50[0]
 					d52 = JITValueDesc{Loc: LocStackTriple, Type: tagSlice, StackOff: int32(bbs[1].PhiBase) + int32(0)}
 					ctx.EmitCopyDescWords(&d52, &d51, 3)
@@ -17528,7 +17528,7 @@ func init_list() {
 						ctx.BindReg(d4.Reg, &d5)
 					} else {
 						boxed := JITPrepareScmerGoArg(ctx, d4)
-						d5 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{boxed}, 1)
+						d5 = ctx.EmitGoCallScalar(jitGoABI_3d60ae4ff2cc3076, []JITValueDesc{boxed}, 1)
 						d5.Type = tagInt
 						ctx.BindReg(d5.Reg, &d5)
 					}
@@ -17689,7 +17689,7 @@ func init_list() {
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d1)
 					ctx.EnsureDesc(&d1)
-					callResults32 := JITEmitGoCallResults(ctx, GoFuncAddr(jitMakeScmerSlice), []JITValueDesc{d1, d1}, []uint8{3}, []uint8{1})
+					callResults32 := JITEmitGoCallResults(ctx, jitGoABI_a7de20a8fb7c436d, []JITValueDesc{d1, d1})
 					d33 = callResults32[0]
 					d33.Type = tagSlice
 					ctx.StabilizeDescForControlFlow(&d33)
@@ -18708,7 +18708,7 @@ func init_list() {
 						ctx.BindReg(d4.Reg, &d5)
 					} else {
 						boxed := JITPrepareScmerGoArg(ctx, d4)
-						d5 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{boxed}, 1)
+						d5 = ctx.EmitGoCallScalar(jitGoABI_3d60ae4ff2cc3076, []JITValueDesc{boxed}, 1)
 						d5.Type = tagInt
 						ctx.BindReg(d5.Reg, &d5)
 					}
@@ -20446,7 +20446,7 @@ func init_list() {
 					d18 = JITPrepareScmerGoArg(ctx, d18)
 					ctx.SyncDesc(&d16)
 					ctx.SyncDesc(&d18)
-					d19 = ctx.EmitGoCallScalar(GoFuncAddr(Equal), []JITValueDesc{d16, d18}, 1)
+					d19 = ctx.EmitGoCallScalar(jitGoABI_073753bd1c913d53, []JITValueDesc{d16, d18}, 1)
 					d19.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d19.Reg, 1)
 					d19.Type = tagBool
@@ -21125,7 +21125,7 @@ func init_list() {
 					d39 = JITPrepareScmerGoArg(ctx, d39)
 					ctx.SyncDesc(&d37)
 					ctx.SyncDesc(&d39)
-					d40 = JITEmitGoCallScmerToFrame(ctx, GoFuncAddr(EqualSQL), []JITValueDesc{d37, d39})
+					d40 = JITEmitGoCallScmerToFrame(ctx, jitGoABI_93b2515ba525f5b8, []JITValueDesc{d37, d39})
 					d40.NoHeapPointer = false
 					ctx.StabilizeDescForControlFlow(&d40)
 					ctx.FreeDesc(&d37)
@@ -22086,7 +22086,7 @@ func init_list() {
 					}
 					ctx.SyncDesc(&d2)
 					ctx.SyncDesc(&d3)
-					callResults4 := JITEmitGoCallResults(ctx, GoFuncAddr(asAssoc), []JITValueDesc{d2, d3}, []uint8{3, 1}, []uint8{1, 1})
+					callResults4 := JITEmitGoCallResults(ctx, GoFuncAddr(asAssoc), []JITValueDesc{d2, d3})
 					ctx.FreeDesc(&d3)
 					d5 = callResults4[0]
 					_ = d5
@@ -22217,7 +22217,7 @@ func init_list() {
 					d19 = JITPrepareScmerGoArg(ctx, d19)
 					ctx.SyncDesc(&d6)
 					ctx.SyncDesc(&d19)
-					callResults20 := JITEmitGoCallResults(ctx, GoFuncAddr((*FastDict).Get), []JITValueDesc{d6, d19}, []uint8{2, 1}, []uint8{1, 0})
+					callResults20 := JITEmitGoCallResults(ctx, jitGoABI_c76a0d8bf95c4000, []JITValueDesc{d6, d19})
 					d21 = callResults20[0]
 					_ = d21
 					d22 = callResults20[1]
@@ -22423,7 +22423,7 @@ func init_list() {
 					d60 = JITPrepareScmerGoArg(ctx, d60)
 					ctx.SyncDesc(&d58)
 					ctx.SyncDesc(&d60)
-					d61 = ctx.EmitGoCallScalar(GoFuncAddr(Equal), []JITValueDesc{d58, d60}, 1)
+					d61 = ctx.EmitGoCallScalar(jitGoABI_073753bd1c913d53, []JITValueDesc{d58, d60}, 1)
 					d61.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d61.Reg, 1)
 					d61.Type = tagBool
@@ -22827,7 +22827,7 @@ func init_list() {
 					}
 					ctx.SyncDesc(&d2)
 					ctx.SyncDesc(&d3)
-					callResults4 := JITEmitGoCallResults(ctx, GoFuncAddr(asAssoc), []JITValueDesc{d2, d3}, []uint8{3, 1}, []uint8{1, 1})
+					callResults4 := JITEmitGoCallResults(ctx, GoFuncAddr(asAssoc), []JITValueDesc{d2, d3})
 					ctx.FreeDesc(&d3)
 					d5 = callResults4[0]
 					_ = d5
@@ -22999,7 +22999,7 @@ func init_list() {
 					d31 = JITPrepareScmerGoArg(ctx, d31)
 					ctx.SyncDesc(&d6)
 					ctx.SyncDesc(&d31)
-					callResults32 := JITEmitGoCallResults(ctx, GoFuncAddr((*FastDict).Get), []JITValueDesc{d6, d31}, []uint8{2, 1}, []uint8{1, 0})
+					callResults32 := JITEmitGoCallResults(ctx, jitGoABI_c76a0d8bf95c4000, []JITValueDesc{d6, d31})
 					d33 = callResults32[0]
 					_ = d33
 					d34 = callResults32[1]
@@ -23210,7 +23210,7 @@ func init_list() {
 					d74 = JITPrepareScmerGoArg(ctx, d74)
 					ctx.SyncDesc(&d72)
 					ctx.SyncDesc(&d74)
-					d75 = ctx.EmitGoCallScalar(GoFuncAddr(Equal), []JITValueDesc{d72, d74}, 1)
+					d75 = ctx.EmitGoCallScalar(jitGoABI_073753bd1c913d53, []JITValueDesc{d72, d74}, 1)
 					d75.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d75.Reg, 1)
 					d75.Type = tagBool
@@ -24380,7 +24380,7 @@ func init_list() {
 					d133 = JITPrepareScmerGoArg(ctx, d133)
 					ctx.SyncDesc(&d131)
 					ctx.SyncDesc(&d133)
-					d134 = ctx.EmitGoCallScalar(GoFuncAddr(Equal), []JITValueDesc{d131, d133}, 1)
+					d134 = ctx.EmitGoCallScalar(jitGoABI_073753bd1c913d53, []JITValueDesc{d131, d133}, 1)
 					d134.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d134.Reg, 1)
 					d134.Type = tagBool
@@ -25186,16 +25186,16 @@ func init_list() {
 						}
 						ctx.FreeDesc(&d31)
 						ctx.ReclaimUntrackedRegs()
-						d33 := ctx.EmitGoCallScalar(GoFuncAddr(func() *[1]int { return new([1]int) }), nil, 1)
+						d33 := ctx.EmitGoCallScalar(jitGoABI_1be5aabc5234fe9d, nil, 1)
 						ctx.ReclaimUntrackedRegs()
 						d34 := JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
 						_ = d34
 						ctx.ReclaimUntrackedRegs()
 						ctx.EnsureDesc(&d32)
-						ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[1]int, index int, value int) { dst[index] = value }), []JITValueDesc{d33, d34, d32})
+						ctx.EmitGoCallVoid(jitGoABI_c1212c76d8d02789, []JITValueDesc{d33, d34, d32})
 						ctx.FreeDesc(&d32)
 						ctx.ReclaimUntrackedRegs()
-						sliceResults35 := JITEmitGoCallResults(ctx, GoFuncAddr(func(value *[1]int) []int { return value[0:1:1] }), []JITValueDesc{d33}, []uint8{3}, []uint8{1})
+						sliceResults35 := JITEmitGoCallResults(ctx, jitGoABI_5511bba87a1eeff9, []JITValueDesc{d33})
 						d36 := sliceResults35[0]
 						_ = d36
 						ctx.ReclaimUntrackedRegs()
@@ -25323,7 +25323,7 @@ func init_list() {
 						}
 						ctx.SyncDesc(&d14)
 						ctx.SyncDesc(&d43)
-						callResults44 := JITEmitGoCallResults(ctx, GoFuncAddr(asAssoc), []JITValueDesc{d14, d43}, []uint8{3, 1}, []uint8{1, 1})
+						callResults44 := JITEmitGoCallResults(ctx, GoFuncAddr(asAssoc), []JITValueDesc{d14, d43})
 						ctx.FreeDesc(&d43)
 						d45 := callResults44[0]
 						_ = d45
@@ -25636,7 +25636,7 @@ func init_list() {
 						d25 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase16) + int32(144)}
 						ctx.ReclaimUntrackedRegs()
 						ctx.ReclaimUntrackedRegs()
-						callResults62 := JITEmitGoCallResults(ctx, GoFuncAddr(JITCloneScmerSlice), []JITValueDesc{d45}, []uint8{3}, []uint8{1})
+						callResults62 := JITEmitGoCallResults(ctx, jitGoABI_f99f3392c678151c, []JITValueDesc{d45})
 						d63 := callResults62[0]
 						ctx.StabilizeDescForControlFlow(&d63)
 						inlineHome64 := d63
@@ -25926,7 +25926,7 @@ func init_list() {
 							panic("jit: generic call arg expects 1-word value")
 						}
 						ctx.SyncDesc(&d46)
-						d75 := ctx.EmitGoCallScalar(GoFuncAddr((*FastDict).Copy), []JITValueDesc{d46}, 1)
+						d75 := ctx.EmitGoCallScalar(jitGoABI_e009edac130f0219, []JITValueDesc{d46}, 1)
 						d75.NoHeapPointer = false
 						ctx.BindReg(d75.Reg, &d75)
 						ctx.StabilizeDescForControlFlow(&d75)
@@ -26057,7 +26057,7 @@ func init_list() {
 						ctx.FreeDesc(&d80)
 						ctx.ReclaimUntrackedRegs()
 						ctx.EnsureDesc(&d81)
-						d82 := ctx.EmitGoCallScalar(GoFuncAddr(NewFastDictValue), []JITValueDesc{d81}, 1)
+						d82 := ctx.EmitGoCallScalar(jitGoABI_01d8510d5c9dcecc, []JITValueDesc{d81}, 1)
 						ctx.StabilizeDescForControlFlow(&d82)
 						inlineHome83 := d82
 						inlineHome83.ID = 0
@@ -26690,7 +26690,7 @@ func init_list() {
 						ctx.FreeDesc(&d107)
 						ctx.ReclaimUntrackedRegs()
 						ctx.EnsureDesc(&d108)
-						d109 := ctx.EmitGoCallScalar(GoFuncAddr(NewFastDictValue), []JITValueDesc{d108}, 1)
+						d109 := ctx.EmitGoCallScalar(jitGoABI_01d8510d5c9dcecc, []JITValueDesc{d108}, 1)
 						ctx.StabilizeDescForControlFlow(&d109)
 						inlineHome110 := d109
 						inlineHome110.ID = 0
@@ -27024,7 +27024,7 @@ func init_list() {
 						ctx.ReclaimUntrackedRegs()
 						d124 = JITPrepareScmerGoArg(ctx, d124)
 						ctx.SyncDesc(&d124)
-						d131 := ctx.EmitGoCallScalar(GoFuncAddr(HashKey), []JITValueDesc{d124}, 1)
+						d131 := ctx.EmitGoCallScalar(jitGoABI_36c50824007e4f26, []JITValueDesc{d124}, 1)
 						d131.NoHeapPointer = true
 						ctx.BindReg(d131.Reg, &d131)
 						ctx.StabilizeDescForControlFlow(&d131)
@@ -27041,7 +27041,7 @@ func init_list() {
 						ctx.SyncDesc(&d122)
 						ctx.SyncDesc(&d124)
 						ctx.SyncDesc(&d131)
-						callResults133 := JITEmitGoCallResults(ctx, GoFuncAddr((*FastDict).findPos), []JITValueDesc{d122, d124, d131}, []uint8{1, 1}, []uint8{0, 0})
+						callResults133 := JITEmitGoCallResults(ctx, jitGoABI_ce0fd1a73e8b05e5, []JITValueDesc{d122, d124, d131})
 						d134 := callResults133[0]
 						_ = d134
 						d135 := callResults133[1]
@@ -27099,7 +27099,7 @@ func init_list() {
 						ctx.SyncDesc(&d124)
 						ctx.SyncDesc(&d126)
 						ctx.SyncDesc(&d131)
-						ctx.EmitGoCallVoid(GoFuncAddr((*FastDict).insertHashed), []JITValueDesc{d122, d124, d126, d131})
+						ctx.EmitGoCallVoid(jitGoABI_0b5d6fb65a1da267, []JITValueDesc{d122, d124, d126, d131})
 						ctx.ReclaimUntrackedRegs()
 						ctx.EmitJmp(lbl66)
 						bbpos_3_1 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
@@ -27112,13 +27112,13 @@ func init_list() {
 						d134 = inlineHome136
 						ctx.ReclaimUntrackedRegs()
 						ctx.ReclaimUntrackedRegs()
-						d138 := ctx.EmitGoCallScalar(GoFuncAddr(func(size int) map[uint64]int { return make(map[uint64]int, size) }), []JITValueDesc{JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0), NoHeapPointer: true}}, 1)
+						d138 := ctx.EmitGoCallScalar(jitGoABI_cbd374e9665fd209, []JITValueDesc{JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0), NoHeapPointer: true}}, 1)
 						ctx.ReclaimUntrackedRegs()
 						ctx.ReclaimUntrackedRegs()
 						ctx.EnsureDesc(&d138)
 						ctx.EnsureDesc(&d122)
 						ctx.EnsureDesc(&d138)
-						ctx.EmitGoCallVoid(GoFuncAddr(func(base *FastDict, value map[uint64]int) { base.index = value }), []JITValueDesc{d122, d138})
+						ctx.EmitGoCallVoid(jitGoABI_a563344c0d9e7213, []JITValueDesc{d122, d138})
 						ctx.ReclaimUntrackedRegs()
 						ctx.EmitJmp(lbl69)
 						bbpos_3_3 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
@@ -27485,7 +27485,7 @@ func init_list() {
 						ctx.ReclaimUntrackedRegs()
 						d153 = JITPrepareScmerGoArg(ctx, d153)
 						ctx.SyncDesc(&d153)
-						d160 := ctx.EmitGoCallScalar(GoFuncAddr(HashKey), []JITValueDesc{d153}, 1)
+						d160 := ctx.EmitGoCallScalar(jitGoABI_36c50824007e4f26, []JITValueDesc{d153}, 1)
 						d160.NoHeapPointer = true
 						ctx.BindReg(d160.Reg, &d160)
 						ctx.StabilizeDescForControlFlow(&d160)
@@ -27502,7 +27502,7 @@ func init_list() {
 						ctx.SyncDesc(&d151)
 						ctx.SyncDesc(&d153)
 						ctx.SyncDesc(&d160)
-						callResults162 := JITEmitGoCallResults(ctx, GoFuncAddr((*FastDict).findPos), []JITValueDesc{d151, d153, d160}, []uint8{1, 1}, []uint8{0, 0})
+						callResults162 := JITEmitGoCallResults(ctx, jitGoABI_ce0fd1a73e8b05e5, []JITValueDesc{d151, d153, d160})
 						d163 := callResults162[0]
 						_ = d163
 						d164 := callResults162[1]
@@ -27560,7 +27560,7 @@ func init_list() {
 						ctx.SyncDesc(&d153)
 						ctx.SyncDesc(&d155)
 						ctx.SyncDesc(&d160)
-						ctx.EmitGoCallVoid(GoFuncAddr((*FastDict).insertHashed), []JITValueDesc{d151, d153, d155, d160})
+						ctx.EmitGoCallVoid(jitGoABI_0b5d6fb65a1da267, []JITValueDesc{d151, d153, d155, d160})
 						ctx.ReclaimUntrackedRegs()
 						ctx.EmitJmp(lbl82)
 						bbpos_4_1 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
@@ -27573,13 +27573,13 @@ func init_list() {
 						d163 = inlineHome165
 						ctx.ReclaimUntrackedRegs()
 						ctx.ReclaimUntrackedRegs()
-						d167 := ctx.EmitGoCallScalar(GoFuncAddr(func(size int) map[uint64]int { return make(map[uint64]int, size) }), []JITValueDesc{JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0), NoHeapPointer: true}}, 1)
+						d167 := ctx.EmitGoCallScalar(jitGoABI_cbd374e9665fd209, []JITValueDesc{JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0), NoHeapPointer: true}}, 1)
 						ctx.ReclaimUntrackedRegs()
 						ctx.ReclaimUntrackedRegs()
 						ctx.EnsureDesc(&d167)
 						ctx.EnsureDesc(&d151)
 						ctx.EnsureDesc(&d167)
-						ctx.EmitGoCallVoid(GoFuncAddr(func(base *FastDict, value map[uint64]int) { base.index = value }), []JITValueDesc{d151, d167})
+						ctx.EmitGoCallVoid(jitGoABI_a563344c0d9e7213, []JITValueDesc{d151, d167})
 						ctx.ReclaimUntrackedRegs()
 						ctx.EmitJmp(lbl85)
 						bbpos_4_3 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
@@ -27995,7 +27995,7 @@ func init_list() {
 						d197 = JITPrepareScmerGoArg(ctx, d197)
 						ctx.SyncDesc(&d195)
 						ctx.SyncDesc(&d197)
-						d199 := ctx.EmitGoCallScalar(GoFuncAddr(Equal), []JITValueDesc{d195, d197}, 1)
+						d199 := ctx.EmitGoCallScalar(jitGoABI_073753bd1c913d53, []JITValueDesc{d195, d197}, 1)
 						d199.NoHeapPointer = true
 						ctx.EmitAndRegImm32(d199.Reg, 1)
 						d199.Type = tagBool
@@ -28213,7 +28213,7 @@ func init_list() {
 						ctx.EmitLeaRegMem(d210.Reg, ctx.StackReg, int32(stackArray208))
 						ctx.EmitMovRegImm64(d210.Reg2, uint64(2))
 						ctx.EmitMovRegImm64(d210.Reg3, uint64(2))
-						callResults211 := JITEmitGoCallResults(ctx, GoFuncAddr(JITAppendScmerSlice), []JITValueDesc{d66, d210}, []uint8{3}, []uint8{1})
+						callResults211 := JITEmitGoCallResults(ctx, jitGoABI_f2c643d935ea4448, []JITValueDesc{d66, d210})
 						d212 := callResults211[0]
 						d213 := JITValueDesc{Loc: LocStackTriple, Type: tagSlice, StackOff: int32(phiBase16) + int32(120)}
 						ctx.EmitCopyDescWords(&d213, &d212, 3)
@@ -28416,7 +28416,7 @@ func init_list() {
 						ctx.ReclaimUntrackedRegs()
 						d223 = JITPrepareScmerGoArg(ctx, d223)
 						ctx.SyncDesc(&d223)
-						d230 := ctx.EmitGoCallScalar(GoFuncAddr(HashKey), []JITValueDesc{d223}, 1)
+						d230 := ctx.EmitGoCallScalar(jitGoABI_36c50824007e4f26, []JITValueDesc{d223}, 1)
 						d230.NoHeapPointer = true
 						ctx.BindReg(d230.Reg, &d230)
 						ctx.StabilizeDescForControlFlow(&d230)
@@ -28433,7 +28433,7 @@ func init_list() {
 						ctx.SyncDesc(&d221)
 						ctx.SyncDesc(&d223)
 						ctx.SyncDesc(&d230)
-						callResults232 := JITEmitGoCallResults(ctx, GoFuncAddr((*FastDict).findPos), []JITValueDesc{d221, d223, d230}, []uint8{1, 1}, []uint8{0, 0})
+						callResults232 := JITEmitGoCallResults(ctx, jitGoABI_ce0fd1a73e8b05e5, []JITValueDesc{d221, d223, d230})
 						d233 := callResults232[0]
 						_ = d233
 						d234 := callResults232[1]
@@ -28491,7 +28491,7 @@ func init_list() {
 						ctx.SyncDesc(&d223)
 						ctx.SyncDesc(&d225)
 						ctx.SyncDesc(&d230)
-						ctx.EmitGoCallVoid(GoFuncAddr((*FastDict).insertHashed), []JITValueDesc{d221, d223, d225, d230})
+						ctx.EmitGoCallVoid(jitGoABI_0b5d6fb65a1da267, []JITValueDesc{d221, d223, d225, d230})
 						ctx.ReclaimUntrackedRegs()
 						ctx.EmitJmp(lbl106)
 						bbpos_6_1 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
@@ -28504,13 +28504,13 @@ func init_list() {
 						d233 = inlineHome235
 						ctx.ReclaimUntrackedRegs()
 						ctx.ReclaimUntrackedRegs()
-						d237 := ctx.EmitGoCallScalar(GoFuncAddr(func(size int) map[uint64]int { return make(map[uint64]int, size) }), []JITValueDesc{JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0), NoHeapPointer: true}}, 1)
+						d237 := ctx.EmitGoCallScalar(jitGoABI_cbd374e9665fd209, []JITValueDesc{JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0), NoHeapPointer: true}}, 1)
 						ctx.ReclaimUntrackedRegs()
 						ctx.ReclaimUntrackedRegs()
 						ctx.EnsureDesc(&d237)
 						ctx.EnsureDesc(&d221)
 						ctx.EnsureDesc(&d237)
-						ctx.EmitGoCallVoid(GoFuncAddr(func(base *FastDict, value map[uint64]int) { base.index = value }), []JITValueDesc{d221, d237})
+						ctx.EmitGoCallVoid(jitGoABI_a563344c0d9e7213, []JITValueDesc{d221, d237})
 						ctx.ReclaimUntrackedRegs()
 						ctx.EmitJmp(lbl109)
 						bbpos_6_3 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
@@ -29339,7 +29339,7 @@ func init_list() {
 						}
 						ctx.SyncDesc(&d274)
 						ctx.SyncDesc(&d294)
-						callResults295 := JITEmitGoCallResults(ctx, GoFuncAddr(asAssoc), []JITValueDesc{d274, d294}, []uint8{3, 1}, []uint8{1, 1})
+						callResults295 := JITEmitGoCallResults(ctx, GoFuncAddr(asAssoc), []JITValueDesc{d274, d294})
 						ctx.FreeDesc(&d294)
 						d296 := callResults295[0]
 						_ = d296
@@ -29652,7 +29652,7 @@ func init_list() {
 						d285 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase276) + int32(144)}
 						ctx.ReclaimUntrackedRegs()
 						ctx.ReclaimUntrackedRegs()
-						callResults313 := JITEmitGoCallResults(ctx, GoFuncAddr(JITCloneScmerSlice), []JITValueDesc{d296}, []uint8{3}, []uint8{1})
+						callResults313 := JITEmitGoCallResults(ctx, jitGoABI_f99f3392c678151c, []JITValueDesc{d296})
 						d314 := callResults313[0]
 						ctx.StabilizeDescForControlFlow(&d314)
 						inlineHome315 := d314
@@ -29942,7 +29942,7 @@ func init_list() {
 							panic("jit: generic call arg expects 1-word value")
 						}
 						ctx.SyncDesc(&d297)
-						d326 := ctx.EmitGoCallScalar(GoFuncAddr((*FastDict).Copy), []JITValueDesc{d297}, 1)
+						d326 := ctx.EmitGoCallScalar(jitGoABI_e009edac130f0219, []JITValueDesc{d297}, 1)
 						d326.NoHeapPointer = false
 						ctx.BindReg(d326.Reg, &d326)
 						ctx.StabilizeDescForControlFlow(&d326)
@@ -30073,7 +30073,7 @@ func init_list() {
 						ctx.FreeDesc(&d331)
 						ctx.ReclaimUntrackedRegs()
 						ctx.EnsureDesc(&d332)
-						d333 := ctx.EmitGoCallScalar(GoFuncAddr(NewFastDictValue), []JITValueDesc{d332}, 1)
+						d333 := ctx.EmitGoCallScalar(jitGoABI_01d8510d5c9dcecc, []JITValueDesc{d332}, 1)
 						ctx.StabilizeDescForControlFlow(&d333)
 						inlineHome334 := d333
 						inlineHome334.ID = 0
@@ -30706,7 +30706,7 @@ func init_list() {
 						ctx.FreeDesc(&d358)
 						ctx.ReclaimUntrackedRegs()
 						ctx.EnsureDesc(&d359)
-						d360 := ctx.EmitGoCallScalar(GoFuncAddr(NewFastDictValue), []JITValueDesc{d359}, 1)
+						d360 := ctx.EmitGoCallScalar(jitGoABI_01d8510d5c9dcecc, []JITValueDesc{d359}, 1)
 						ctx.StabilizeDescForControlFlow(&d360)
 						inlineHome361 := d360
 						inlineHome361.ID = 0
@@ -31040,7 +31040,7 @@ func init_list() {
 						ctx.ReclaimUntrackedRegs()
 						d375 = JITPrepareScmerGoArg(ctx, d375)
 						ctx.SyncDesc(&d375)
-						d382 := ctx.EmitGoCallScalar(GoFuncAddr(HashKey), []JITValueDesc{d375}, 1)
+						d382 := ctx.EmitGoCallScalar(jitGoABI_36c50824007e4f26, []JITValueDesc{d375}, 1)
 						d382.NoHeapPointer = true
 						ctx.BindReg(d382.Reg, &d382)
 						ctx.StabilizeDescForControlFlow(&d382)
@@ -31057,7 +31057,7 @@ func init_list() {
 						ctx.SyncDesc(&d373)
 						ctx.SyncDesc(&d375)
 						ctx.SyncDesc(&d382)
-						callResults384 := JITEmitGoCallResults(ctx, GoFuncAddr((*FastDict).findPos), []JITValueDesc{d373, d375, d382}, []uint8{1, 1}, []uint8{0, 0})
+						callResults384 := JITEmitGoCallResults(ctx, jitGoABI_ce0fd1a73e8b05e5, []JITValueDesc{d373, d375, d382})
 						d385 := callResults384[0]
 						_ = d385
 						d386 := callResults384[1]
@@ -31115,7 +31115,7 @@ func init_list() {
 						ctx.SyncDesc(&d375)
 						ctx.SyncDesc(&d377)
 						ctx.SyncDesc(&d382)
-						ctx.EmitGoCallVoid(GoFuncAddr((*FastDict).insertHashed), []JITValueDesc{d373, d375, d377, d382})
+						ctx.EmitGoCallVoid(jitGoABI_0b5d6fb65a1da267, []JITValueDesc{d373, d375, d377, d382})
 						ctx.ReclaimUntrackedRegs()
 						ctx.EmitJmp(lbl186)
 						bbpos_9_1 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
@@ -31128,13 +31128,13 @@ func init_list() {
 						d385 = inlineHome387
 						ctx.ReclaimUntrackedRegs()
 						ctx.ReclaimUntrackedRegs()
-						d389 := ctx.EmitGoCallScalar(GoFuncAddr(func(size int) map[uint64]int { return make(map[uint64]int, size) }), []JITValueDesc{JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0), NoHeapPointer: true}}, 1)
+						d389 := ctx.EmitGoCallScalar(jitGoABI_cbd374e9665fd209, []JITValueDesc{JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0), NoHeapPointer: true}}, 1)
 						ctx.ReclaimUntrackedRegs()
 						ctx.ReclaimUntrackedRegs()
 						ctx.EnsureDesc(&d389)
 						ctx.EnsureDesc(&d373)
 						ctx.EnsureDesc(&d389)
-						ctx.EmitGoCallVoid(GoFuncAddr(func(base *FastDict, value map[uint64]int) { base.index = value }), []JITValueDesc{d373, d389})
+						ctx.EmitGoCallVoid(jitGoABI_a563344c0d9e7213, []JITValueDesc{d373, d389})
 						ctx.ReclaimUntrackedRegs()
 						ctx.EmitJmp(lbl189)
 						bbpos_9_3 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
@@ -31499,7 +31499,7 @@ func init_list() {
 						ctx.ReclaimUntrackedRegs()
 						d405 = JITPrepareScmerGoArg(ctx, d405)
 						ctx.SyncDesc(&d405)
-						d412 := ctx.EmitGoCallScalar(GoFuncAddr(HashKey), []JITValueDesc{d405}, 1)
+						d412 := ctx.EmitGoCallScalar(jitGoABI_36c50824007e4f26, []JITValueDesc{d405}, 1)
 						d412.NoHeapPointer = true
 						ctx.BindReg(d412.Reg, &d412)
 						ctx.StabilizeDescForControlFlow(&d412)
@@ -31516,7 +31516,7 @@ func init_list() {
 						ctx.SyncDesc(&d403)
 						ctx.SyncDesc(&d405)
 						ctx.SyncDesc(&d412)
-						callResults414 := JITEmitGoCallResults(ctx, GoFuncAddr((*FastDict).findPos), []JITValueDesc{d403, d405, d412}, []uint8{1, 1}, []uint8{0, 0})
+						callResults414 := JITEmitGoCallResults(ctx, jitGoABI_ce0fd1a73e8b05e5, []JITValueDesc{d403, d405, d412})
 						d415 := callResults414[0]
 						_ = d415
 						d416 := callResults414[1]
@@ -31574,7 +31574,7 @@ func init_list() {
 						ctx.SyncDesc(&d405)
 						ctx.SyncDesc(&d407)
 						ctx.SyncDesc(&d412)
-						ctx.EmitGoCallVoid(GoFuncAddr((*FastDict).insertHashed), []JITValueDesc{d403, d405, d407, d412})
+						ctx.EmitGoCallVoid(jitGoABI_0b5d6fb65a1da267, []JITValueDesc{d403, d405, d407, d412})
 						ctx.ReclaimUntrackedRegs()
 						ctx.EmitJmp(lbl202)
 						bbpos_10_1 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
@@ -31587,13 +31587,13 @@ func init_list() {
 						d415 = inlineHome417
 						ctx.ReclaimUntrackedRegs()
 						ctx.ReclaimUntrackedRegs()
-						d419 := ctx.EmitGoCallScalar(GoFuncAddr(func(size int) map[uint64]int { return make(map[uint64]int, size) }), []JITValueDesc{JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0), NoHeapPointer: true}}, 1)
+						d419 := ctx.EmitGoCallScalar(jitGoABI_cbd374e9665fd209, []JITValueDesc{JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0), NoHeapPointer: true}}, 1)
 						ctx.ReclaimUntrackedRegs()
 						ctx.ReclaimUntrackedRegs()
 						ctx.EnsureDesc(&d419)
 						ctx.EnsureDesc(&d403)
 						ctx.EnsureDesc(&d419)
-						ctx.EmitGoCallVoid(GoFuncAddr(func(base *FastDict, value map[uint64]int) { base.index = value }), []JITValueDesc{d403, d419})
+						ctx.EmitGoCallVoid(jitGoABI_a563344c0d9e7213, []JITValueDesc{d403, d419})
 						ctx.ReclaimUntrackedRegs()
 						ctx.EmitJmp(lbl205)
 						bbpos_10_3 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
@@ -31794,7 +31794,7 @@ func init_list() {
 						d429 = JITPrepareScmerGoArg(ctx, d429)
 						ctx.SyncDesc(&d427)
 						ctx.SyncDesc(&d429)
-						d431 := ctx.EmitGoCallScalar(GoFuncAddr(Equal), []JITValueDesc{d427, d429}, 1)
+						d431 := ctx.EmitGoCallScalar(jitGoABI_073753bd1c913d53, []JITValueDesc{d427, d429}, 1)
 						d431.NoHeapPointer = true
 						ctx.EmitAndRegImm32(d431.Reg, 1)
 						d431.Type = tagBool
@@ -32012,7 +32012,7 @@ func init_list() {
 						ctx.EmitLeaRegMem(d442.Reg, ctx.StackReg, int32(stackArray440))
 						ctx.EmitMovRegImm64(d442.Reg2, uint64(2))
 						ctx.EmitMovRegImm64(d442.Reg3, uint64(2))
-						callResults443 := JITEmitGoCallResults(ctx, GoFuncAddr(JITAppendScmerSlice), []JITValueDesc{d317, d442}, []uint8{3}, []uint8{1})
+						callResults443 := JITEmitGoCallResults(ctx, jitGoABI_f2c643d935ea4448, []JITValueDesc{d317, d442})
 						d444 := callResults443[0]
 						d445 := JITValueDesc{Loc: LocStackTriple, Type: tagSlice, StackOff: int32(phiBase276) + int32(120)}
 						ctx.EmitCopyDescWords(&d445, &d444, 3)
@@ -32215,7 +32215,7 @@ func init_list() {
 						ctx.ReclaimUntrackedRegs()
 						d455 = JITPrepareScmerGoArg(ctx, d455)
 						ctx.SyncDesc(&d455)
-						d462 := ctx.EmitGoCallScalar(GoFuncAddr(HashKey), []JITValueDesc{d455}, 1)
+						d462 := ctx.EmitGoCallScalar(jitGoABI_36c50824007e4f26, []JITValueDesc{d455}, 1)
 						d462.NoHeapPointer = true
 						ctx.BindReg(d462.Reg, &d462)
 						ctx.StabilizeDescForControlFlow(&d462)
@@ -32232,7 +32232,7 @@ func init_list() {
 						ctx.SyncDesc(&d453)
 						ctx.SyncDesc(&d455)
 						ctx.SyncDesc(&d462)
-						callResults464 := JITEmitGoCallResults(ctx, GoFuncAddr((*FastDict).findPos), []JITValueDesc{d453, d455, d462}, []uint8{1, 1}, []uint8{0, 0})
+						callResults464 := JITEmitGoCallResults(ctx, jitGoABI_ce0fd1a73e8b05e5, []JITValueDesc{d453, d455, d462})
 						d465 := callResults464[0]
 						_ = d465
 						d466 := callResults464[1]
@@ -32290,7 +32290,7 @@ func init_list() {
 						ctx.SyncDesc(&d455)
 						ctx.SyncDesc(&d457)
 						ctx.SyncDesc(&d462)
-						ctx.EmitGoCallVoid(GoFuncAddr((*FastDict).insertHashed), []JITValueDesc{d453, d455, d457, d462})
+						ctx.EmitGoCallVoid(jitGoABI_0b5d6fb65a1da267, []JITValueDesc{d453, d455, d457, d462})
 						ctx.ReclaimUntrackedRegs()
 						ctx.EmitJmp(lbl222)
 						bbpos_11_1 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
@@ -32303,13 +32303,13 @@ func init_list() {
 						d465 = inlineHome467
 						ctx.ReclaimUntrackedRegs()
 						ctx.ReclaimUntrackedRegs()
-						d469 := ctx.EmitGoCallScalar(GoFuncAddr(func(size int) map[uint64]int { return make(map[uint64]int, size) }), []JITValueDesc{JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0), NoHeapPointer: true}}, 1)
+						d469 := ctx.EmitGoCallScalar(jitGoABI_cbd374e9665fd209, []JITValueDesc{JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0), NoHeapPointer: true}}, 1)
 						ctx.ReclaimUntrackedRegs()
 						ctx.ReclaimUntrackedRegs()
 						ctx.EnsureDesc(&d469)
 						ctx.EnsureDesc(&d453)
 						ctx.EnsureDesc(&d469)
-						ctx.EmitGoCallVoid(GoFuncAddr(func(base *FastDict, value map[uint64]int) { base.index = value }), []JITValueDesc{d453, d469})
+						ctx.EmitGoCallVoid(jitGoABI_a563344c0d9e7213, []JITValueDesc{d453, d469})
 						ctx.ReclaimUntrackedRegs()
 						ctx.EmitJmp(lbl225)
 						bbpos_11_3 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
@@ -32982,7 +32982,7 @@ func init_list() {
 					}
 					ctx.SyncDesc(&d494)
 					ctx.SyncDesc(&d514)
-					callResults515 := JITEmitGoCallResults(ctx, GoFuncAddr(asAssoc), []JITValueDesc{d494, d514}, []uint8{3, 1}, []uint8{1, 1})
+					callResults515 := JITEmitGoCallResults(ctx, GoFuncAddr(asAssoc), []JITValueDesc{d494, d514})
 					ctx.FreeDesc(&d514)
 					d516 := callResults515[0]
 					_ = d516
@@ -33295,7 +33295,7 @@ func init_list() {
 					d505 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase496) + int32(144)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					callResults533 := JITEmitGoCallResults(ctx, GoFuncAddr(JITCloneScmerSlice), []JITValueDesc{d516}, []uint8{3}, []uint8{1})
+					callResults533 := JITEmitGoCallResults(ctx, jitGoABI_f99f3392c678151c, []JITValueDesc{d516})
 					d534 := callResults533[0]
 					ctx.StabilizeDescForControlFlow(&d534)
 					inlineHome535 := d534
@@ -33585,7 +33585,7 @@ func init_list() {
 						panic("jit: generic call arg expects 1-word value")
 					}
 					ctx.SyncDesc(&d517)
-					d546 := ctx.EmitGoCallScalar(GoFuncAddr((*FastDict).Copy), []JITValueDesc{d517}, 1)
+					d546 := ctx.EmitGoCallScalar(jitGoABI_e009edac130f0219, []JITValueDesc{d517}, 1)
 					d546.NoHeapPointer = false
 					ctx.BindReg(d546.Reg, &d546)
 					ctx.StabilizeDescForControlFlow(&d546)
@@ -33716,7 +33716,7 @@ func init_list() {
 					ctx.FreeDesc(&d551)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d552)
-					d553 := ctx.EmitGoCallScalar(GoFuncAddr(NewFastDictValue), []JITValueDesc{d552}, 1)
+					d553 := ctx.EmitGoCallScalar(jitGoABI_01d8510d5c9dcecc, []JITValueDesc{d552}, 1)
 					ctx.StabilizeDescForControlFlow(&d553)
 					inlineHome554 := d553
 					inlineHome554.ID = 0
@@ -34349,7 +34349,7 @@ func init_list() {
 					ctx.FreeDesc(&d578)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d579)
-					d580 := ctx.EmitGoCallScalar(GoFuncAddr(NewFastDictValue), []JITValueDesc{d579}, 1)
+					d580 := ctx.EmitGoCallScalar(jitGoABI_01d8510d5c9dcecc, []JITValueDesc{d579}, 1)
 					ctx.StabilizeDescForControlFlow(&d580)
 					inlineHome581 := d580
 					inlineHome581.ID = 0
@@ -34683,7 +34683,7 @@ func init_list() {
 					ctx.ReclaimUntrackedRegs()
 					d595 = JITPrepareScmerGoArg(ctx, d595)
 					ctx.SyncDesc(&d595)
-					d602 := ctx.EmitGoCallScalar(GoFuncAddr(HashKey), []JITValueDesc{d595}, 1)
+					d602 := ctx.EmitGoCallScalar(jitGoABI_36c50824007e4f26, []JITValueDesc{d595}, 1)
 					d602.NoHeapPointer = true
 					ctx.BindReg(d602.Reg, &d602)
 					ctx.StabilizeDescForControlFlow(&d602)
@@ -34700,7 +34700,7 @@ func init_list() {
 					ctx.SyncDesc(&d593)
 					ctx.SyncDesc(&d595)
 					ctx.SyncDesc(&d602)
-					callResults604 := JITEmitGoCallResults(ctx, GoFuncAddr((*FastDict).findPos), []JITValueDesc{d593, d595, d602}, []uint8{1, 1}, []uint8{0, 0})
+					callResults604 := JITEmitGoCallResults(ctx, jitGoABI_ce0fd1a73e8b05e5, []JITValueDesc{d593, d595, d602})
 					d605 := callResults604[0]
 					_ = d605
 					d606 := callResults604[1]
@@ -34758,7 +34758,7 @@ func init_list() {
 					ctx.SyncDesc(&d595)
 					ctx.SyncDesc(&d597)
 					ctx.SyncDesc(&d602)
-					ctx.EmitGoCallVoid(GoFuncAddr((*FastDict).insertHashed), []JITValueDesc{d593, d595, d597, d602})
+					ctx.EmitGoCallVoid(jitGoABI_0b5d6fb65a1da267, []JITValueDesc{d593, d595, d597, d602})
 					ctx.ReclaimUntrackedRegs()
 					ctx.EmitJmp(lbl300)
 					bbpos_14_1 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
@@ -34771,13 +34771,13 @@ func init_list() {
 					d605 = inlineHome607
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d609 := ctx.EmitGoCallScalar(GoFuncAddr(func(size int) map[uint64]int { return make(map[uint64]int, size) }), []JITValueDesc{JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0), NoHeapPointer: true}}, 1)
+					d609 := ctx.EmitGoCallScalar(jitGoABI_cbd374e9665fd209, []JITValueDesc{JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0), NoHeapPointer: true}}, 1)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d609)
 					ctx.EnsureDesc(&d593)
 					ctx.EnsureDesc(&d609)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(base *FastDict, value map[uint64]int) { base.index = value }), []JITValueDesc{d593, d609})
+					ctx.EmitGoCallVoid(jitGoABI_a563344c0d9e7213, []JITValueDesc{d593, d609})
 					ctx.ReclaimUntrackedRegs()
 					ctx.EmitJmp(lbl303)
 					bbpos_14_3 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
@@ -35142,7 +35142,7 @@ func init_list() {
 					ctx.ReclaimUntrackedRegs()
 					d625 = JITPrepareScmerGoArg(ctx, d625)
 					ctx.SyncDesc(&d625)
-					d632 := ctx.EmitGoCallScalar(GoFuncAddr(HashKey), []JITValueDesc{d625}, 1)
+					d632 := ctx.EmitGoCallScalar(jitGoABI_36c50824007e4f26, []JITValueDesc{d625}, 1)
 					d632.NoHeapPointer = true
 					ctx.BindReg(d632.Reg, &d632)
 					ctx.StabilizeDescForControlFlow(&d632)
@@ -35159,7 +35159,7 @@ func init_list() {
 					ctx.SyncDesc(&d623)
 					ctx.SyncDesc(&d625)
 					ctx.SyncDesc(&d632)
-					callResults634 := JITEmitGoCallResults(ctx, GoFuncAddr((*FastDict).findPos), []JITValueDesc{d623, d625, d632}, []uint8{1, 1}, []uint8{0, 0})
+					callResults634 := JITEmitGoCallResults(ctx, jitGoABI_ce0fd1a73e8b05e5, []JITValueDesc{d623, d625, d632})
 					d635 := callResults634[0]
 					_ = d635
 					d636 := callResults634[1]
@@ -35217,7 +35217,7 @@ func init_list() {
 					ctx.SyncDesc(&d625)
 					ctx.SyncDesc(&d627)
 					ctx.SyncDesc(&d632)
-					ctx.EmitGoCallVoid(GoFuncAddr((*FastDict).insertHashed), []JITValueDesc{d623, d625, d627, d632})
+					ctx.EmitGoCallVoid(jitGoABI_0b5d6fb65a1da267, []JITValueDesc{d623, d625, d627, d632})
 					ctx.ReclaimUntrackedRegs()
 					ctx.EmitJmp(lbl316)
 					bbpos_15_1 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
@@ -35230,13 +35230,13 @@ func init_list() {
 					d635 = inlineHome637
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d639 := ctx.EmitGoCallScalar(GoFuncAddr(func(size int) map[uint64]int { return make(map[uint64]int, size) }), []JITValueDesc{JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0), NoHeapPointer: true}}, 1)
+					d639 := ctx.EmitGoCallScalar(jitGoABI_cbd374e9665fd209, []JITValueDesc{JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0), NoHeapPointer: true}}, 1)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d639)
 					ctx.EnsureDesc(&d623)
 					ctx.EnsureDesc(&d639)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(base *FastDict, value map[uint64]int) { base.index = value }), []JITValueDesc{d623, d639})
+					ctx.EmitGoCallVoid(jitGoABI_a563344c0d9e7213, []JITValueDesc{d623, d639})
 					ctx.ReclaimUntrackedRegs()
 					ctx.EmitJmp(lbl319)
 					bbpos_15_3 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
@@ -35437,7 +35437,7 @@ func init_list() {
 					d649 = JITPrepareScmerGoArg(ctx, d649)
 					ctx.SyncDesc(&d647)
 					ctx.SyncDesc(&d649)
-					d651 := ctx.EmitGoCallScalar(GoFuncAddr(Equal), []JITValueDesc{d647, d649}, 1)
+					d651 := ctx.EmitGoCallScalar(jitGoABI_073753bd1c913d53, []JITValueDesc{d647, d649}, 1)
 					d651.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d651.Reg, 1)
 					d651.Type = tagBool
@@ -35655,7 +35655,7 @@ func init_list() {
 					ctx.EmitLeaRegMem(d662.Reg, ctx.StackReg, int32(stackArray660))
 					ctx.EmitMovRegImm64(d662.Reg2, uint64(2))
 					ctx.EmitMovRegImm64(d662.Reg3, uint64(2))
-					callResults663 := JITEmitGoCallResults(ctx, GoFuncAddr(JITAppendScmerSlice), []JITValueDesc{d537, d662}, []uint8{3}, []uint8{1})
+					callResults663 := JITEmitGoCallResults(ctx, jitGoABI_f2c643d935ea4448, []JITValueDesc{d537, d662})
 					d664 := callResults663[0]
 					d665 := JITValueDesc{Loc: LocStackTriple, Type: tagSlice, StackOff: int32(phiBase496) + int32(120)}
 					ctx.EmitCopyDescWords(&d665, &d664, 3)
@@ -35858,7 +35858,7 @@ func init_list() {
 					ctx.ReclaimUntrackedRegs()
 					d675 = JITPrepareScmerGoArg(ctx, d675)
 					ctx.SyncDesc(&d675)
-					d682 := ctx.EmitGoCallScalar(GoFuncAddr(HashKey), []JITValueDesc{d675}, 1)
+					d682 := ctx.EmitGoCallScalar(jitGoABI_36c50824007e4f26, []JITValueDesc{d675}, 1)
 					d682.NoHeapPointer = true
 					ctx.BindReg(d682.Reg, &d682)
 					ctx.StabilizeDescForControlFlow(&d682)
@@ -35875,7 +35875,7 @@ func init_list() {
 					ctx.SyncDesc(&d673)
 					ctx.SyncDesc(&d675)
 					ctx.SyncDesc(&d682)
-					callResults684 := JITEmitGoCallResults(ctx, GoFuncAddr((*FastDict).findPos), []JITValueDesc{d673, d675, d682}, []uint8{1, 1}, []uint8{0, 0})
+					callResults684 := JITEmitGoCallResults(ctx, jitGoABI_ce0fd1a73e8b05e5, []JITValueDesc{d673, d675, d682})
 					d685 := callResults684[0]
 					_ = d685
 					d686 := callResults684[1]
@@ -35933,7 +35933,7 @@ func init_list() {
 					ctx.SyncDesc(&d675)
 					ctx.SyncDesc(&d677)
 					ctx.SyncDesc(&d682)
-					ctx.EmitGoCallVoid(GoFuncAddr((*FastDict).insertHashed), []JITValueDesc{d673, d675, d677, d682})
+					ctx.EmitGoCallVoid(jitGoABI_0b5d6fb65a1da267, []JITValueDesc{d673, d675, d677, d682})
 					ctx.ReclaimUntrackedRegs()
 					ctx.EmitJmp(lbl336)
 					bbpos_16_1 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
@@ -35946,13 +35946,13 @@ func init_list() {
 					d685 = inlineHome687
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d689 := ctx.EmitGoCallScalar(GoFuncAddr(func(size int) map[uint64]int { return make(map[uint64]int, size) }), []JITValueDesc{JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0), NoHeapPointer: true}}, 1)
+					d689 := ctx.EmitGoCallScalar(jitGoABI_cbd374e9665fd209, []JITValueDesc{JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0), NoHeapPointer: true}}, 1)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d689)
 					ctx.EnsureDesc(&d673)
 					ctx.EnsureDesc(&d689)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(base *FastDict, value map[uint64]int) { base.index = value }), []JITValueDesc{d673, d689})
+					ctx.EmitGoCallVoid(jitGoABI_a563344c0d9e7213, []JITValueDesc{d673, d689})
 					ctx.ReclaimUntrackedRegs()
 					ctx.EmitJmp(lbl339)
 					bbpos_16_3 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
@@ -36362,7 +36362,7 @@ func init_list() {
 				ctx.SyncDesc(&d1)
 				ctx.SyncDesc(&d3)
 				ctx.SyncDesc(&d4)
-				d5 := ctx.EmitGoCallScalar(GoFuncAddr(mergeAssoc), []JITValueDesc{d0, d1, d3, d4}, 2)
+				d5 := ctx.EmitGoCallScalar(jitGoABI_d8453e760aaae097, []JITValueDesc{d0, d1, d3, d4}, 2)
 				d5.NoHeapPointer = false
 				ctx.BindReg(d5.Reg, &d5)
 				ctx.BindReg(d5.Reg2, &d5)
@@ -38658,7 +38658,7 @@ func init_list() {
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d14)
 					ctx.EnsureDesc(&d13)
-					callResults15 := JITEmitGoCallResults(ctx, GoFuncAddr(jitMakeScmerSlice), []JITValueDesc{d14, d13}, []uint8{3}, []uint8{1})
+					callResults15 := JITEmitGoCallResults(ctx, jitGoABI_a7de20a8fb7c436d, []JITValueDesc{d14, d13})
 					d16 = callResults15[0]
 					d16.Type = tagSlice
 					d17 = JITValueDesc{Loc: LocStackTriple, Type: tagSlice, StackOff: int32(bbs[1].PhiBase) + int32(0)}
@@ -39160,7 +39160,7 @@ func init_list() {
 					ctx.EmitLeaRegMem(d130.Reg, ctx.StackReg, int32(stackArray128))
 					ctx.EmitMovRegImm64(d130.Reg2, uint64(1))
 					ctx.EmitMovRegImm64(d130.Reg3, uint64(1))
-					callResults131 := JITEmitGoCallResults(ctx, GoFuncAddr(JITAppendScmerSlice), []JITValueDesc{d1, d130}, []uint8{3}, []uint8{1})
+					callResults131 := JITEmitGoCallResults(ctx, jitGoABI_f2c643d935ea4448, []JITValueDesc{d1, d130})
 					d132 = callResults131[0]
 					d133 = JITValueDesc{Loc: LocStackTriple, Type: tagSlice, StackOff: int32(bbs[1].PhiBase) + int32(0)}
 					ctx.EmitCopyDescWords(&d133, &d132, 3)
@@ -39428,7 +39428,7 @@ func init_list() {
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d10)
 					ctx.EnsureDesc(&d9)
-					callResults11 := JITEmitGoCallResults(ctx, GoFuncAddr(jitMakeScmerSlice), []JITValueDesc{d10, d9}, []uint8{3}, []uint8{1})
+					callResults11 := JITEmitGoCallResults(ctx, jitGoABI_a7de20a8fb7c436d, []JITValueDesc{d10, d9})
 					d12 = callResults11[0]
 					d12.Type = tagSlice
 					d13 = JITValueDesc{Loc: LocStackTriple, Type: tagSlice, StackOff: int32(bbs[1].PhiBase) + int32(0)}
@@ -39872,7 +39872,7 @@ func init_list() {
 					ctx.EmitLeaRegMem(d103.Reg, ctx.StackReg, int32(stackArray101))
 					ctx.EmitMovRegImm64(d103.Reg2, uint64(1))
 					ctx.EmitMovRegImm64(d103.Reg3, uint64(1))
-					callResults104 := JITEmitGoCallResults(ctx, GoFuncAddr(JITAppendScmerSlice), []JITValueDesc{d1, d103}, []uint8{3}, []uint8{1})
+					callResults104 := JITEmitGoCallResults(ctx, jitGoABI_f2c643d935ea4448, []JITValueDesc{d1, d103})
 					d105 = callResults104[0]
 					d106 = JITValueDesc{Loc: LocStackTriple, Type: tagSlice, StackOff: int32(bbs[1].PhiBase) + int32(0)}
 					ctx.EmitCopyDescWords(&d106, &d105, 3)
@@ -40779,7 +40779,7 @@ func init_list() {
 						ctx.BindReg(d1.Reg, &d134)
 					} else {
 						boxed := JITPrepareScmerGoArg(ctx, d1)
-						d134 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{boxed}, 1)
+						d134 = ctx.EmitGoCallScalar(jitGoABI_3d60ae4ff2cc3076, []JITValueDesc{boxed}, 1)
 						d134.Type = tagInt
 						ctx.BindReg(d134.Reg, &d134)
 					}
@@ -40799,7 +40799,7 @@ func init_list() {
 						ctx.BindReg(d33.Reg, &d135)
 					} else {
 						boxed := JITPrepareScmerGoArg(ctx, d33)
-						d135 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{boxed}, 1)
+						d135 = ctx.EmitGoCallScalar(jitGoABI_3d60ae4ff2cc3076, []JITValueDesc{boxed}, 1)
 						d135.Type = tagInt
 						ctx.BindReg(d135.Reg, &d135)
 					}
@@ -43504,7 +43504,7 @@ func init_list() {
 				d6 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase1) + int32(64)}
 				ctx.ReclaimUntrackedRegs()
 				ctx.ReclaimUntrackedRegs()
-				d24 := ctx.EmitGoCallScalar(GoFuncAddr(func() *orderedUniqueBuilder { return new(orderedUniqueBuilder) }), nil, 1)
+				d24 := ctx.EmitGoCallScalar(jitGoABI_3a03af637defe6b2, nil, 1)
 				ctx.BindReg(d24.Reg, &d24)
 				ctx.StabilizeDescForControlFlow(&d24)
 				inlineHome25 := d24
@@ -43536,7 +43536,7 @@ func init_list() {
 				ctx.ReclaimUntrackedRegs()
 				ctx.EnsureDesc(&d27)
 				ctx.EnsureDesc(&d26)
-				callResults28 := JITEmitGoCallResults(ctx, GoFuncAddr(jitMakeScmerSlice), []JITValueDesc{d27, d26}, []uint8{3}, []uint8{1})
+				callResults28 := JITEmitGoCallResults(ctx, jitGoABI_a7de20a8fb7c436d, []JITValueDesc{d27, d26})
 				d29 := callResults28[0]
 				d29.Type = tagSlice
 				ctx.FreeDesc(&d26)
@@ -43544,7 +43544,7 @@ func init_list() {
 				ctx.EnsureDesc(&d29)
 				ctx.EnsureDesc(&d24)
 				ctx.EnsureDesc(&d29)
-				ctx.EmitGoCallVoid(GoFuncAddr(func(base *orderedUniqueBuilder, value []Scmer) { base.linear = value }), []JITValueDesc{d24, d29})
+				ctx.EmitGoCallVoid(jitGoABI_3a9a9ff483d2f2ac, []JITValueDesc{d24, d29})
 				ctx.ReclaimUntrackedRegs()
 				var d30 JITValueDesc
 				if d14.SliceSizeKnown {
@@ -44038,7 +44038,7 @@ func init_list() {
 				d57 = JITPrepareScmerGoArg(ctx, d57)
 				ctx.SyncDesc(&d24)
 				ctx.SyncDesc(&d57)
-				ctx.EmitGoCallVoid(GoFuncAddr((*orderedUniqueBuilder).add), []JITValueDesc{d24, d57})
+				ctx.EmitGoCallVoid(jitGoABI_beae522ae19c2421, []JITValueDesc{d24, d57})
 				ctx.FreeDesc(&d57)
 				ctx.ReclaimUntrackedRegs()
 				ctx.SyncDesc(&d33)
@@ -44097,7 +44097,7 @@ func init_list() {
 				d60 = JITPrepareScmerGoArg(ctx, d60)
 				ctx.SyncDesc(&d24)
 				ctx.SyncDesc(&d60)
-				d62 := ctx.EmitGoCallScalar(GoFuncAddr((*orderedUniqueBuilder).contains), []JITValueDesc{d24, d60}, 1)
+				d62 := ctx.EmitGoCallScalar(jitGoABI_2c72aeba5047b216, []JITValueDesc{d24, d60}, 1)
 				d62.NoHeapPointer = true
 				ctx.EmitAndRegImm32(d62.Reg, 1)
 				d62.Type = tagBool
@@ -44539,7 +44539,7 @@ func init_list() {
 				d87 = JITPrepareScmerGoArg(ctx, d87)
 				ctx.SyncDesc(&d68)
 				ctx.SyncDesc(&d87)
-				d89 := ctx.EmitGoCallScalar(GoFuncAddr(Equal), []JITValueDesc{d68, d87}, 1)
+				d89 := ctx.EmitGoCallScalar(jitGoABI_073753bd1c913d53, []JITValueDesc{d68, d87}, 1)
 				d89.NoHeapPointer = true
 				ctx.EmitAndRegImm32(d89.Reg, 1)
 				d89.Type = tagBool
@@ -45134,7 +45134,7 @@ func init_list() {
 				d6 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase1) + int32(64)}
 				ctx.ReclaimUntrackedRegs()
 				ctx.ReclaimUntrackedRegs()
-				d24 := ctx.EmitGoCallScalar(GoFuncAddr(func() *orderedUniqueBuilder { return new(orderedUniqueBuilder) }), nil, 1)
+				d24 := ctx.EmitGoCallScalar(jitGoABI_3a03af637defe6b2, nil, 1)
 				ctx.BindReg(d24.Reg, &d24)
 				ctx.StabilizeDescForControlFlow(&d24)
 				inlineHome25 := d24
@@ -45166,7 +45166,7 @@ func init_list() {
 				ctx.ReclaimUntrackedRegs()
 				ctx.EnsureDesc(&d27)
 				ctx.EnsureDesc(&d26)
-				callResults28 := JITEmitGoCallResults(ctx, GoFuncAddr(jitMakeScmerSlice), []JITValueDesc{d27, d26}, []uint8{3}, []uint8{1})
+				callResults28 := JITEmitGoCallResults(ctx, jitGoABI_a7de20a8fb7c436d, []JITValueDesc{d27, d26})
 				d29 := callResults28[0]
 				d29.Type = tagSlice
 				ctx.FreeDesc(&d26)
@@ -45174,7 +45174,7 @@ func init_list() {
 				ctx.EnsureDesc(&d29)
 				ctx.EnsureDesc(&d24)
 				ctx.EnsureDesc(&d29)
-				ctx.EmitGoCallVoid(GoFuncAddr(func(base *orderedUniqueBuilder, value []Scmer) { base.linear = value }), []JITValueDesc{d24, d29})
+				ctx.EmitGoCallVoid(jitGoABI_3a9a9ff483d2f2ac, []JITValueDesc{d24, d29})
 				ctx.ReclaimUntrackedRegs()
 				var d30 JITValueDesc
 				if d14.SliceSizeKnown {
@@ -45668,7 +45668,7 @@ func init_list() {
 				d57 = JITPrepareScmerGoArg(ctx, d57)
 				ctx.SyncDesc(&d24)
 				ctx.SyncDesc(&d57)
-				ctx.EmitGoCallVoid(GoFuncAddr((*orderedUniqueBuilder).add), []JITValueDesc{d24, d57})
+				ctx.EmitGoCallVoid(jitGoABI_beae522ae19c2421, []JITValueDesc{d24, d57})
 				ctx.FreeDesc(&d57)
 				ctx.ReclaimUntrackedRegs()
 				ctx.SyncDesc(&d33)
@@ -45727,7 +45727,7 @@ func init_list() {
 				d60 = JITPrepareScmerGoArg(ctx, d60)
 				ctx.SyncDesc(&d24)
 				ctx.SyncDesc(&d60)
-				d62 := ctx.EmitGoCallScalar(GoFuncAddr((*orderedUniqueBuilder).contains), []JITValueDesc{d24, d60}, 1)
+				d62 := ctx.EmitGoCallScalar(jitGoABI_2c72aeba5047b216, []JITValueDesc{d24, d60}, 1)
 				d62.NoHeapPointer = true
 				ctx.EmitAndRegImm32(d62.Reg, 1)
 				d62.Type = tagBool
@@ -46169,7 +46169,7 @@ func init_list() {
 				d87 = JITPrepareScmerGoArg(ctx, d87)
 				ctx.SyncDesc(&d68)
 				ctx.SyncDesc(&d87)
-				d89 := ctx.EmitGoCallScalar(GoFuncAddr(Equal), []JITValueDesc{d68, d87}, 1)
+				d89 := ctx.EmitGoCallScalar(jitGoABI_073753bd1c913d53, []JITValueDesc{d68, d87}, 1)
 				d89.NoHeapPointer = true
 				ctx.EmitAndRegImm32(d89.Reg, 1)
 				d89.Type = tagBool
@@ -47364,7 +47364,7 @@ func init_list() {
 						ctx.BindReg(d6.Reg, &d7)
 					} else {
 						boxed := JITPrepareScmerGoArg(ctx, d6)
-						d7 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{boxed}, 1)
+						d7 = ctx.EmitGoCallScalar(jitGoABI_3d60ae4ff2cc3076, []JITValueDesc{boxed}, 1)
 						d7.Type = tagInt
 						ctx.BindReg(d7.Reg, &d7)
 					}
@@ -48771,7 +48771,7 @@ func init_list() {
 						ctx.BindReg(d7.Reg, &d8)
 					} else {
 						boxed := JITPrepareScmerGoArg(ctx, d7)
-						d8 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{boxed}, 1)
+						d8 = ctx.EmitGoCallScalar(jitGoABI_3d60ae4ff2cc3076, []JITValueDesc{boxed}, 1)
 						d8.Type = tagInt
 						ctx.BindReg(d8.Reg, &d8)
 					}
@@ -49278,7 +49278,7 @@ func init_list() {
 					d39 = inlineHome40
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d52 = ctx.EmitGoCallScalar(GoFuncAddr(func() map[string]*Declaration { return declarations }), nil, 1)
+					d52 = ctx.EmitGoCallScalar(jitGoABI_7087422959acdd9f, nil, 1)
 					ctx.ReclaimUntrackedRegs()
 					d54 = d36
 					ctx.SyncDesc(&d54)
@@ -49295,11 +49295,11 @@ func init_list() {
 					if d54.Loc != LocRegPair && d54.Loc != LocStackPair && d54.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d53 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d54}, 2)
+					d53 = ctx.EmitGoCallScalar(jitGoABI_bf0f793d04443ecf, []JITValueDesc{d54}, 2)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d52)
 					ctx.EnsureDesc(&d53)
-					lookupResults55 := JITEmitGoCallResults(ctx, GoFuncAddr(func(m map[string]*Declaration, k string) (*Declaration, bool) { value, ok := m[k]; return value, ok }), []JITValueDesc{d52, d53}, []uint8{1, 1}, []uint8{1, 0})
+					lookupResults55 := JITEmitGoCallResults(ctx, jitGoABI_6dc513406b5dca12, []JITValueDesc{d52, d53})
 					d56 = lookupResults55[0]
 					_ = d56
 					d57 = lookupResults55[1]
@@ -49344,7 +49344,7 @@ func init_list() {
 					d56 = inlineHome58
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d60 = ctx.EmitGoCallScalar(GoFuncAddr(func() map[string]*Declaration { return declarations }), nil, 1)
+					d60 = ctx.EmitGoCallScalar(jitGoABI_7087422959acdd9f, nil, 1)
 					ctx.ReclaimUntrackedRegs()
 					d62 = d36
 					ctx.SyncDesc(&d62)
@@ -49361,11 +49361,11 @@ func init_list() {
 					if d62.Loc != LocRegPair && d62.Loc != LocStackPair && d62.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d61 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d62}, 2)
+					d61 = ctx.EmitGoCallScalar(jitGoABI_bf0f793d04443ecf, []JITValueDesc{d62}, 2)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d60)
 					ctx.EnsureDesc(&d61)
-					lookupResults63 := JITEmitGoCallResults(ctx, GoFuncAddr(func(m map[string]*Declaration, k string) (*Declaration, bool) { value, ok := m[k]; return value, ok }), []JITValueDesc{d60, d61}, []uint8{1, 1}, []uint8{1, 0})
+					lookupResults63 := JITEmitGoCallResults(ctx, jitGoABI_6dc513406b5dca12, []JITValueDesc{d60, d61})
 					d64 = lookupResults63[0]
 					_ = d64
 					d65 = lookupResults63[1]
@@ -49411,11 +49411,11 @@ func init_list() {
 					d64 = inlineHome66
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d68 = ctx.EmitGoCallScalar(GoFuncAddr(func() map[uintptr]*Declaration { return declarationsByFunction }), nil, 1)
+					d68 = ctx.EmitGoCallScalar(jitGoABI_6ab4f61ee087bb17, nil, 1)
 					ctx.ReclaimUntrackedRegs()
 					d36 = JITPrepareScmerGoArg(ctx, d36)
 					ctx.SyncDesc(&d36)
-					d69 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).Func), []JITValueDesc{d36}, 1)
+					d69 = ctx.EmitGoCallScalar(jitGoABI_31c7b608bf932b8a, []JITValueDesc{d36}, 1)
 					d69.NoHeapPointer = false
 					ctx.BindReg(d69.Reg, &d69)
 					ctx.ReclaimUntrackedRegs()
@@ -49431,11 +49431,11 @@ func init_list() {
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d71 = ctx.EmitGoCallScalar(GoFuncAddr(func() *func(...Scmer) Scmer { return new(func(...Scmer) Scmer) }), nil, 1)
+					d71 = ctx.EmitGoCallScalar(jitGoABI_8efb7e1e7572d17e, nil, 1)
 					ctx.BindReg(d71.Reg, &d71)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d70)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *func(...Scmer) Scmer, value func(...Scmer) Scmer) { *dst = value }), []JITValueDesc{d71, d70})
+					ctx.EmitGoCallVoid(jitGoABI_4852b3954b985900, []JITValueDesc{d71, d70})
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d71)
 					ctx.EnsureDesc(&d71)
@@ -49443,13 +49443,13 @@ func init_list() {
 					ctx.EnsureDesc(&d71)
 					ctx.EnsureDesc(&d71)
 					ctx.ReclaimUntrackedRegs()
-					d74 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *uintptr) uintptr { return *value }), []JITValueDesc{d71}, 1)
+					d74 = ctx.EmitGoCallScalar(jitGoABI_0a9797646375cd07, []JITValueDesc{d71}, 1)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d74)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d68)
 					ctx.EnsureDesc(&d74)
-					lookupResults75 := JITEmitGoCallResults(ctx, GoFuncAddr(func(m map[uintptr]*Declaration, k uintptr) (*Declaration, bool) { value, ok := m[k]; return value, ok }), []JITValueDesc{d68, d74}, []uint8{1, 1}, []uint8{1, 0})
+					lookupResults75 := JITEmitGoCallResults(ctx, jitGoABI_b82bb4ba3f3c5f31, []JITValueDesc{d68, d74})
 					d76 = lookupResults75[0]
 					_ = d76
 					d77 = lookupResults75[1]
@@ -49497,7 +49497,7 @@ func init_list() {
 					d76 = inlineHome78
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d80 = ctx.EmitGoCallScalar(GoFuncAddr(func() map[string]*Declaration { return declarations }), nil, 1)
+					d80 = ctx.EmitGoCallScalar(jitGoABI_7087422959acdd9f, nil, 1)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d36)
 					d81 = d36
@@ -49573,7 +49573,7 @@ func init_list() {
 					ctx.ReclaimUntrackedRegs()
 					d81 = JITPrepareScmerGoArg(ctx, d81)
 					ctx.SyncDesc(&d81)
-					d89 = ctx.EmitGoCallScalar(GoFuncAddr(specialFormName), []JITValueDesc{d81}, 2)
+					d89 = ctx.EmitGoCallScalar(jitGoABI_895a504f5844844c, []JITValueDesc{d81}, 2)
 					d89.NoHeapPointer = false
 					ctx.BindReg(d89.Reg, &d89)
 					ctx.BindReg(d89.Reg2, &d89)
@@ -49591,7 +49591,7 @@ func init_list() {
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d80)
 					ctx.EnsureDesc(&d84)
-					lookupResults90 := JITEmitGoCallResults(ctx, GoFuncAddr(func(m map[string]*Declaration, k string) (*Declaration, bool) { value, ok := m[k]; return value, ok }), []JITValueDesc{d80, d84}, []uint8{1, 1}, []uint8{1, 0})
+					lookupResults90 := JITEmitGoCallResults(ctx, jitGoABI_6dc513406b5dca12, []JITValueDesc{d80, d84})
 					d91 = lookupResults90[0]
 					_ = d91
 					d92 = lookupResults90[1]
@@ -49641,13 +49641,13 @@ func init_list() {
 					ctx.ReclaimUntrackedRegs()
 					d36 = JITPrepareScmerGoArg(ctx, d36)
 					ctx.SyncDesc(&d36)
-					d95 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).Any), []JITValueDesc{d36}, 2)
+					d95 = ctx.EmitGoCallScalar(jitGoABI_bd193e78baed9872, []JITValueDesc{d36}, 2)
 					d95.NoHeapPointer = false
 					ctx.BindReg(d95.Reg, &d95)
 					ctx.BindReg(d95.Reg2, &d95)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d95)
-					callResults96 := JITEmitGoCallResults(ctx, GoFuncAddr(jitAssertString), []JITValueDesc{d95}, []uint8{2, 1}, []uint8{1, 0})
+					callResults96 := JITEmitGoCallResults(ctx, jitGoABI_7dbaf07f307c2362, []JITValueDesc{d95})
 					d97 = callResults96[0]
 					d98 = callResults96[1]
 					_ = d97
@@ -49700,13 +49700,13 @@ func init_list() {
 					ctx.ReclaimUntrackedRegs()
 					d36 = JITPrepareScmerGoArg(ctx, d36)
 					ctx.SyncDesc(&d36)
-					d101 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).Any), []JITValueDesc{d36}, 2)
+					d101 = ctx.EmitGoCallScalar(jitGoABI_bd193e78baed9872, []JITValueDesc{d36}, 2)
 					d101.NoHeapPointer = false
 					ctx.BindReg(d101.Reg, &d101)
 					ctx.BindReg(d101.Reg2, &d101)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d101)
-					callResults102 := JITEmitGoCallResults(ctx, GoFuncAddr(jitAssertString), []JITValueDesc{d101}, []uint8{2, 1}, []uint8{1, 0})
+					callResults102 := JITEmitGoCallResults(ctx, jitGoABI_7dbaf07f307c2362, []JITValueDesc{d101})
 					d103 = callResults102[0]
 					d104 = callResults102[1]
 					_ = d103
@@ -49760,13 +49760,13 @@ func init_list() {
 					ctx.ReclaimUntrackedRegs()
 					d36 = JITPrepareScmerGoArg(ctx, d36)
 					ctx.SyncDesc(&d36)
-					d107 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).Any), []JITValueDesc{d36}, 2)
+					d107 = ctx.EmitGoCallScalar(jitGoABI_bd193e78baed9872, []JITValueDesc{d36}, 2)
 					d107.NoHeapPointer = false
 					ctx.BindReg(d107.Reg, &d107)
 					ctx.BindReg(d107.Reg2, &d107)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d107)
-					callResults108 := JITEmitGoCallResults(ctx, GoFuncAddr(jitAssertScmerFunction), []JITValueDesc{d107}, []uint8{1, 1}, []uint8{1, 0})
+					callResults108 := JITEmitGoCallResults(ctx, jitGoABI_8eb5d1c7c37ba7be, []JITValueDesc{d107})
 					d109 = callResults108[0]
 					d110 = callResults108[1]
 					_ = d109
@@ -49907,11 +49907,11 @@ func init_list() {
 					d109 = inlineHome111
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d113 = ctx.EmitGoCallScalar(GoFuncAddr(func() map[string]*Declaration { return declarations }), nil, 1)
+					d113 = ctx.EmitGoCallScalar(jitGoABI_7087422959acdd9f, nil, 1)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d113)
 					ctx.EnsureDesc(&d97)
-					lookupResults114 := JITEmitGoCallResults(ctx, GoFuncAddr(func(m map[string]*Declaration, k string) (*Declaration, bool) { value, ok := m[k]; return value, ok }), []JITValueDesc{d113, d97}, []uint8{1, 1}, []uint8{1, 0})
+					lookupResults114 := JITEmitGoCallResults(ctx, jitGoABI_6dc513406b5dca12, []JITValueDesc{d113, d97})
 					d115 = lookupResults114[0]
 					_ = d115
 					d116 = lookupResults114[1]
@@ -49963,13 +49963,13 @@ func init_list() {
 					d115 = inlineHome117
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d119 = ctx.EmitGoCallScalar(GoFuncAddr(func() map[string]*Declaration { return declarations }), nil, 1)
+					d119 = ctx.EmitGoCallScalar(jitGoABI_7087422959acdd9f, nil, 1)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d103)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d119)
 					ctx.EnsureDesc(&d103)
-					lookupResults120 := JITEmitGoCallResults(ctx, GoFuncAddr(func(m map[string]*Declaration, k string) (*Declaration, bool) { value, ok := m[k]; return value, ok }), []JITValueDesc{d119, d103}, []uint8{1, 1}, []uint8{1, 0})
+					lookupResults120 := JITEmitGoCallResults(ctx, jitGoABI_6dc513406b5dca12, []JITValueDesc{d119, d103})
 					d121 = lookupResults120[0]
 					_ = d121
 					d122 = lookupResults120[1]
@@ -50022,7 +50022,7 @@ func init_list() {
 					d121 = inlineHome123
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d125 = ctx.EmitGoCallScalar(GoFuncAddr(func() map[uintptr]*Declaration { return declarationsByFunction }), nil, 1)
+					d125 = ctx.EmitGoCallScalar(jitGoABI_6ab4f61ee087bb17, nil, 1)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d109)
 					d126 = d109
@@ -50036,11 +50036,11 @@ func init_list() {
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d127 = ctx.EmitGoCallScalar(GoFuncAddr(func() *func(...Scmer) Scmer { return new(func(...Scmer) Scmer) }), nil, 1)
+					d127 = ctx.EmitGoCallScalar(jitGoABI_8efb7e1e7572d17e, nil, 1)
 					ctx.BindReg(d127.Reg, &d127)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d126)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *func(...Scmer) Scmer, value func(...Scmer) Scmer) { *dst = value }), []JITValueDesc{d127, d126})
+					ctx.EmitGoCallVoid(jitGoABI_4852b3954b985900, []JITValueDesc{d127, d126})
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d127)
 					ctx.EnsureDesc(&d127)
@@ -50048,13 +50048,13 @@ func init_list() {
 					ctx.EnsureDesc(&d127)
 					ctx.EnsureDesc(&d127)
 					ctx.ReclaimUntrackedRegs()
-					d130 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *uintptr) uintptr { return *value }), []JITValueDesc{d127}, 1)
+					d130 = ctx.EmitGoCallScalar(jitGoABI_0a9797646375cd07, []JITValueDesc{d127}, 1)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d130)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d125)
 					ctx.EnsureDesc(&d130)
-					lookupResults131 := JITEmitGoCallResults(ctx, GoFuncAddr(func(m map[uintptr]*Declaration, k uintptr) (*Declaration, bool) { value, ok := m[k]; return value, ok }), []JITValueDesc{d125, d130}, []uint8{1, 1}, []uint8{1, 0})
+					lookupResults131 := JITEmitGoCallResults(ctx, jitGoABI_b82bb4ba3f3c5f31, []JITValueDesc{d125, d130})
 					d132 = lookupResults131[0]
 					_ = d132
 					d133 = lookupResults131[1]
@@ -53200,7 +53200,7 @@ func init_list() {
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d14)
 					ctx.EnsureDesc(&d13)
-					callResults15 := JITEmitGoCallResults(ctx, GoFuncAddr(jitMakeScmerSlice), []JITValueDesc{d14, d13}, []uint8{3}, []uint8{1})
+					callResults15 := JITEmitGoCallResults(ctx, jitGoABI_a7de20a8fb7c436d, []JITValueDesc{d14, d13})
 					d16 = callResults15[0]
 					d16.Type = tagSlice
 					d17 = JITValueDesc{Loc: LocStackTriple, Type: tagSlice, StackOff: int32(bbs[1].PhiBase) + int32(0)}
@@ -53686,7 +53686,7 @@ func init_list() {
 					ctx.EmitLeaRegMem(d122.Reg, ctx.StackReg, int32(stackArray120))
 					ctx.EmitMovRegImm64(d122.Reg2, uint64(1))
 					ctx.EmitMovRegImm64(d122.Reg3, uint64(1))
-					callResults123 := JITEmitGoCallResults(ctx, GoFuncAddr(JITAppendScmerSlice), []JITValueDesc{d1, d122}, []uint8{3}, []uint8{1})
+					callResults123 := JITEmitGoCallResults(ctx, jitGoABI_f2c643d935ea4448, []JITValueDesc{d1, d122})
 					d124 = callResults123[0]
 					d125 = JITValueDesc{Loc: LocStackTriple, Type: tagSlice, StackOff: int32(bbs[1].PhiBase) + int32(0)}
 					ctx.EmitCopyDescWords(&d125, &d124, 3)
@@ -53962,7 +53962,7 @@ func init_list() {
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d12)
 					ctx.EnsureDesc(&d12)
-					callResults13 := JITEmitGoCallResults(ctx, GoFuncAddr(jitMakeScmerSlice), []JITValueDesc{d12, d12}, []uint8{3}, []uint8{1})
+					callResults13 := JITEmitGoCallResults(ctx, jitGoABI_a7de20a8fb7c436d, []JITValueDesc{d12, d12})
 					d14 = callResults13[0]
 					d14.Type = tagSlice
 					ctx.StabilizeDescForControlFlow(&d14)
@@ -54535,7 +54535,7 @@ func init_list() {
 					}
 					_ = d12
 					ctx.EnsureDesc(&d12)
-					d13 = ctx.EmitGoCallScalar(GoFuncAddr(NewFastDictValue), []JITValueDesc{d12}, 1)
+					d13 = ctx.EmitGoCallScalar(jitGoABI_01d8510d5c9dcecc, []JITValueDesc{d12}, 1)
 					ctx.StabilizeDescForControlFlow(&d13)
 					ctx.FreeDesc(&d12)
 					if d3.SliceSizeKnown {
@@ -54884,7 +54884,7 @@ func init_list() {
 					ctx.ReclaimUntrackedRegs()
 					d56 = JITPrepareScmerGoArg(ctx, d56)
 					ctx.SyncDesc(&d56)
-					d63 = ctx.EmitGoCallScalar(GoFuncAddr(HashKey), []JITValueDesc{d56}, 1)
+					d63 = ctx.EmitGoCallScalar(jitGoABI_36c50824007e4f26, []JITValueDesc{d56}, 1)
 					d63.NoHeapPointer = true
 					ctx.BindReg(d63.Reg, &d63)
 					ctx.StabilizeDescForControlFlow(&d63)
@@ -54901,7 +54901,7 @@ func init_list() {
 					ctx.SyncDesc(&d54)
 					ctx.SyncDesc(&d56)
 					ctx.SyncDesc(&d63)
-					callResults65 := JITEmitGoCallResults(ctx, GoFuncAddr((*FastDict).findPos), []JITValueDesc{d54, d56, d63}, []uint8{1, 1}, []uint8{0, 0})
+					callResults65 := JITEmitGoCallResults(ctx, jitGoABI_ce0fd1a73e8b05e5, []JITValueDesc{d54, d56, d63})
 					d66 = callResults65[0]
 					_ = d66
 					d67 = callResults65[1]
@@ -54959,7 +54959,7 @@ func init_list() {
 					ctx.SyncDesc(&d56)
 					ctx.SyncDesc(&d58)
 					ctx.SyncDesc(&d63)
-					ctx.EmitGoCallVoid(GoFuncAddr((*FastDict).insertHashed), []JITValueDesc{d54, d56, d58, d63})
+					ctx.EmitGoCallVoid(jitGoABI_0b5d6fb65a1da267, []JITValueDesc{d54, d56, d58, d63})
 					ctx.ReclaimUntrackedRegs()
 					ctx.EmitJmp(lbl5)
 					bbpos_1_1 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
@@ -54972,13 +54972,13 @@ func init_list() {
 					d66 = inlineHome68
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d70 = ctx.EmitGoCallScalar(GoFuncAddr(func(size int) map[uint64]int { return make(map[uint64]int, size) }), []JITValueDesc{JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0), NoHeapPointer: true}}, 1)
+					d70 = ctx.EmitGoCallScalar(jitGoABI_cbd374e9665fd209, []JITValueDesc{JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0), NoHeapPointer: true}}, 1)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d70)
 					ctx.EnsureDesc(&d54)
 					ctx.EnsureDesc(&d70)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(base *FastDict, value map[uint64]int) { base.index = value }), []JITValueDesc{d54, d70})
+					ctx.EmitGoCallVoid(jitGoABI_a563344c0d9e7213, []JITValueDesc{d54, d70})
 					ctx.ReclaimUntrackedRegs()
 					ctx.EmitJmp(lbl8)
 					bbpos_1_3 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
@@ -62791,7 +62791,7 @@ func init_list() {
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d13)
 					ctx.EnsureDesc(&d12)
-					callResults14 := JITEmitGoCallResults(ctx, GoFuncAddr(jitMakeScmerSlice), []JITValueDesc{d13, d12}, []uint8{3}, []uint8{1})
+					callResults14 := JITEmitGoCallResults(ctx, jitGoABI_a7de20a8fb7c436d, []JITValueDesc{d13, d12})
 					d15 = callResults14[0]
 					d15.Type = tagSlice
 					d16 = JITValueDesc{Loc: LocStackTriple, Type: tagSlice, StackOff: int32(bbs[1].PhiBase) + int32(0)}
@@ -63247,7 +63247,7 @@ func init_list() {
 					ctx.EmitLeaRegMem(d112.Reg, ctx.StackReg, int32(stackArray110))
 					ctx.EmitMovRegImm64(d112.Reg2, uint64(1))
 					ctx.EmitMovRegImm64(d112.Reg3, uint64(1))
-					callResults113 := JITEmitGoCallResults(ctx, GoFuncAddr(JITAppendScmerSlice), []JITValueDesc{d1, d112}, []uint8{3}, []uint8{1})
+					callResults113 := JITEmitGoCallResults(ctx, jitGoABI_f2c643d935ea4448, []JITValueDesc{d1, d112})
 					d114 = callResults113[0]
 					d115 = JITValueDesc{Loc: LocStackTriple, Type: tagSlice, StackOff: int32(bbs[1].PhiBase) + int32(0)}
 					ctx.EmitCopyDescWords(&d115, &d114, 3)
@@ -63840,7 +63840,7 @@ func init_list() {
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d5)
 					ctx.EnsureDesc(&d5)
-					callResults6 := JITEmitGoCallResults(ctx, GoFuncAddr(jitMakeScmerSlice), []JITValueDesc{d5, d5}, []uint8{3}, []uint8{1})
+					callResults6 := JITEmitGoCallResults(ctx, jitGoABI_a7de20a8fb7c436d, []JITValueDesc{d5, d5})
 					d7 = callResults6[0]
 					d7.Type = tagSlice
 					ctx.StabilizeDescForControlFlow(&d7)
@@ -64774,7 +64774,7 @@ func init_list() {
 						ctx.BindReg(d10.Reg, &d11)
 					} else {
 						boxed := JITPrepareScmerGoArg(ctx, d10)
-						d11 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{boxed}, 1)
+						d11 = ctx.EmitGoCallScalar(jitGoABI_3d60ae4ff2cc3076, []JITValueDesc{boxed}, 1)
 						d11.Type = tagInt
 						ctx.BindReg(d11.Reg, &d11)
 					}
@@ -64837,7 +64837,7 @@ func init_list() {
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d15)
 					ctx.EnsureDesc(&d14)
-					callResults16 := JITEmitGoCallResults(ctx, GoFuncAddr(jitMakeScmerSlice), []JITValueDesc{d15, d14}, []uint8{3}, []uint8{1})
+					callResults16 := JITEmitGoCallResults(ctx, jitGoABI_a7de20a8fb7c436d, []JITValueDesc{d15, d14})
 					d17 = callResults16[0]
 					d17.Type = tagSlice
 					d18 = JITValueDesc{Loc: LocStackTriple, Type: tagSlice, StackOff: int32(bbs[1].PhiBase) + int32(0)}
@@ -65057,7 +65057,7 @@ func init_list() {
 						ctx.BindReg(d54.Reg3, &d54)
 					}
 					ctx.FreeDesc(&d46)
-					callResults55 := JITEmitGoCallResults(ctx, GoFuncAddr(JITAppendScmerSlice), []JITValueDesc{d1, d54}, []uint8{3}, []uint8{1})
+					callResults55 := JITEmitGoCallResults(ctx, jitGoABI_f2c643d935ea4448, []JITValueDesc{d1, d54})
 					d56 = callResults55[0]
 					d57 = JITValueDesc{Loc: LocStackTriple, Type: tagSlice, StackOff: int32(bbs[1].PhiBase) + int32(0)}
 					ctx.EmitCopyDescWords(&d57, &d56, 3)
@@ -65350,7 +65350,7 @@ func init_list() {
 						ctx.BindReg(d5.Reg, &d6)
 					} else {
 						boxed := JITPrepareScmerGoArg(ctx, d5)
-						d6 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{boxed}, 1)
+						d6 = ctx.EmitGoCallScalar(jitGoABI_3d60ae4ff2cc3076, []JITValueDesc{boxed}, 1)
 						d6.Type = tagInt
 						ctx.BindReg(d6.Reg, &d6)
 					}
@@ -65561,7 +65561,7 @@ func init_list() {
 						ctx.BindReg(d39.Reg, &d40)
 					} else {
 						boxed := JITPrepareScmerGoArg(ctx, d39)
-						d40 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{boxed}, 1)
+						d40 = ctx.EmitGoCallScalar(jitGoABI_3d60ae4ff2cc3076, []JITValueDesc{boxed}, 1)
 						d40.Type = tagInt
 						ctx.BindReg(d40.Reg, &d40)
 					}
@@ -65610,7 +65610,7 @@ func init_list() {
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d43)
 					ctx.EnsureDesc(&d42)
-					callResults44 := JITEmitGoCallResults(ctx, GoFuncAddr(jitMakeScmerSlice), []JITValueDesc{d43, d42}, []uint8{3}, []uint8{1})
+					callResults44 := JITEmitGoCallResults(ctx, jitGoABI_a7de20a8fb7c436d, []JITValueDesc{d43, d42})
 					d45 = callResults44[0]
 					d45.Type = tagSlice
 					d46 = JITValueDesc{Loc: LocStackTriple, Type: tagSlice, StackOff: int32(bbs[3].PhiBase) + int32(0)}
@@ -65801,7 +65801,7 @@ func init_list() {
 						ctx.BindReg(d84.Reg3, &d84)
 					}
 					ctx.FreeDesc(&d76)
-					callResults85 := JITEmitGoCallResults(ctx, GoFuncAddr(JITAppendScmerSlice), []JITValueDesc{d2, d84}, []uint8{3}, []uint8{1})
+					callResults85 := JITEmitGoCallResults(ctx, jitGoABI_f2c643d935ea4448, []JITValueDesc{d2, d84})
 					d86 = callResults85[0]
 					d87 = JITValueDesc{Loc: LocStackTriple, Type: tagSlice, StackOff: int32(bbs[3].PhiBase) + int32(0)}
 					ctx.EmitCopyDescWords(&d87, &d86, 3)
@@ -66240,7 +66240,7 @@ func init_list() {
 					}
 					ctx.SyncDesc(&d3)
 					ctx.SyncDesc(&d4)
-					callResults5 := JITEmitGoCallResults(ctx, GoFuncAddr(asAssoc), []JITValueDesc{d3, d4}, []uint8{3, 1}, []uint8{1, 1})
+					callResults5 := JITEmitGoCallResults(ctx, GoFuncAddr(asAssoc), []JITValueDesc{d3, d4})
 					ctx.FreeDesc(&d4)
 					d6 = callResults5[0]
 					_ = d6
@@ -66297,7 +66297,7 @@ func init_list() {
 						ctx.BindReg(d12.Reg, &d13)
 					} else {
 						boxed := JITPrepareScmerGoArg(ctx, d12)
-						d13 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{boxed}, 1)
+						d13 = ctx.EmitGoCallScalar(jitGoABI_3d60ae4ff2cc3076, []JITValueDesc{boxed}, 1)
 						d13.Type = tagInt
 						ctx.BindReg(d13.Reg, &d13)
 					}
@@ -66615,7 +66615,7 @@ func init_list() {
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d62)
 					ctx.EnsureDesc(&d61)
-					callResults63 := JITEmitGoCallResults(ctx, GoFuncAddr(jitMakeScmerSlice), []JITValueDesc{d62, d61}, []uint8{3}, []uint8{1})
+					callResults63 := JITEmitGoCallResults(ctx, jitGoABI_a7de20a8fb7c436d, []JITValueDesc{d62, d61})
 					d64 = callResults63[0]
 					d64.Type = tagSlice
 					ctx.FreeDesc(&d61)
@@ -67133,7 +67133,7 @@ func init_list() {
 					}
 					ctx.FreeDesc(&d117)
 					ctx.ReclaimUntrackedRegs()
-					callResults126 := JITEmitGoCallResults(ctx, GoFuncAddr(JITAppendScmerSlice), []JITValueDesc{d115, d125}, []uint8{3}, []uint8{1})
+					callResults126 := JITEmitGoCallResults(ctx, jitGoABI_f2c643d935ea4448, []JITValueDesc{d115, d125})
 					d127 = callResults126[0]
 					ctx.ReclaimUntrackedRegs()
 					ctx.SyncDesc(&d127)
@@ -67529,7 +67529,7 @@ func init_list() {
 					}
 					ctx.FreeDesc(&d202)
 					ctx.ReclaimUntrackedRegs()
-					callResults211 := JITEmitGoCallResults(ctx, GoFuncAddr(JITAppendScmerSlice), []JITValueDesc{d200, d210}, []uint8{3}, []uint8{1})
+					callResults211 := JITEmitGoCallResults(ctx, jitGoABI_f2c643d935ea4448, []JITValueDesc{d200, d210})
 					d212 = callResults211[0]
 					ctx.ReclaimUntrackedRegs()
 					ctx.SyncDesc(&d212)
@@ -67778,7 +67778,7 @@ func init_list() {
 					ctx.StabilizeDescForControlFlow(&d6)
 					stackArray8 = ctx.AllocStack(int32(16))
 					_ = stackArray8
-					d9 = ctx.EmitGoCallScalar(GoFuncAddr(func() *orderedUniqueBuilder { return new(orderedUniqueBuilder) }), nil, 1)
+					d9 = ctx.EmitGoCallScalar(jitGoABI_3a03af637defe6b2, nil, 1)
 					ctx.BindReg(d9.Reg, &d9)
 					ctx.StabilizeDescForControlFlow(&d9)
 					if d4.SliceSizeKnown {
@@ -68014,7 +68014,7 @@ func init_list() {
 						panic("jit: generic call arg expects 1-word value")
 					}
 					ctx.SyncDesc(&d9)
-					d39 = ctx.EmitGoCallScalar(GoFuncAddr((*orderedUniqueBuilder).result), []JITValueDesc{d9}, 3)
+					d39 = ctx.EmitGoCallScalar(jitGoABI_ef7d7943f08acaa9, []JITValueDesc{d9}, 3)
 					d39.NoHeapPointer = false
 					ctx.BindReg(d39.Reg, &d39)
 					ctx.BindReg(d39.Reg2, &d39)
@@ -68303,7 +68303,7 @@ func init_list() {
 					d99 = JITPrepareScmerGoArg(ctx, d99)
 					ctx.SyncDesc(&d9)
 					ctx.SyncDesc(&d99)
-					ctx.EmitGoCallVoid(GoFuncAddr((*orderedUniqueBuilder).add), []JITValueDesc{d9, d99})
+					ctx.EmitGoCallVoid(jitGoABI_beae522ae19c2421, []JITValueDesc{d9, d99})
 					ctx.FreeDesc(&d99)
 					ctx.SyncDesc(&d41)
 					if d41.Loc == LocReg || d41.Loc == LocFPReg {
@@ -70863,16 +70863,16 @@ func init_list() {
 						}
 						ctx.FreeDesc(&d31)
 						ctx.ReclaimUntrackedRegs()
-						d33 := ctx.EmitGoCallScalar(GoFuncAddr(func() *[1]int { return new([1]int) }), nil, 1)
+						d33 := ctx.EmitGoCallScalar(jitGoABI_1be5aabc5234fe9d, nil, 1)
 						ctx.ReclaimUntrackedRegs()
 						d34 := JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
 						_ = d34
 						ctx.ReclaimUntrackedRegs()
 						ctx.EnsureDesc(&d32)
-						ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[1]int, index int, value int) { dst[index] = value }), []JITValueDesc{d33, d34, d32})
+						ctx.EmitGoCallVoid(jitGoABI_c1212c76d8d02789, []JITValueDesc{d33, d34, d32})
 						ctx.FreeDesc(&d32)
 						ctx.ReclaimUntrackedRegs()
-						sliceResults35 := JITEmitGoCallResults(ctx, GoFuncAddr(func(value *[1]int) []int { return value[0:1:1] }), []JITValueDesc{d33}, []uint8{3}, []uint8{1})
+						sliceResults35 := JITEmitGoCallResults(ctx, jitGoABI_5511bba87a1eeff9, []JITValueDesc{d33})
 						d36 := sliceResults35[0]
 						_ = d36
 						ctx.ReclaimUntrackedRegs()
@@ -71000,7 +71000,7 @@ func init_list() {
 						}
 						ctx.SyncDesc(&d14)
 						ctx.SyncDesc(&d43)
-						callResults44 := JITEmitGoCallResults(ctx, GoFuncAddr(asAssoc), []JITValueDesc{d14, d43}, []uint8{3, 1}, []uint8{1, 1})
+						callResults44 := JITEmitGoCallResults(ctx, GoFuncAddr(asAssoc), []JITValueDesc{d14, d43})
 						ctx.FreeDesc(&d43)
 						d45 := callResults44[0]
 						_ = d45
@@ -71674,7 +71674,7 @@ func init_list() {
 						ctx.FreeDesc(&d75)
 						ctx.ReclaimUntrackedRegs()
 						ctx.EnsureDesc(&d76)
-						d77 := ctx.EmitGoCallScalar(GoFuncAddr(NewFastDictValue), []JITValueDesc{d76}, 1)
+						d77 := ctx.EmitGoCallScalar(jitGoABI_01d8510d5c9dcecc, []JITValueDesc{d76}, 1)
 						ctx.StabilizeDescForControlFlow(&d77)
 						inlineHome78 := d77
 						inlineHome78.ID = 0
@@ -72289,7 +72289,7 @@ func init_list() {
 						ctx.FreeDesc(&d102)
 						ctx.ReclaimUntrackedRegs()
 						ctx.EnsureDesc(&d103)
-						d104 := ctx.EmitGoCallScalar(GoFuncAddr(NewFastDictValue), []JITValueDesc{d103}, 1)
+						d104 := ctx.EmitGoCallScalar(jitGoABI_01d8510d5c9dcecc, []JITValueDesc{d103}, 1)
 						ctx.StabilizeDescForControlFlow(&d104)
 						inlineHome105 := d104
 						inlineHome105.ID = 0
@@ -72617,7 +72617,7 @@ func init_list() {
 						ctx.ReclaimUntrackedRegs()
 						d119 = JITPrepareScmerGoArg(ctx, d119)
 						ctx.SyncDesc(&d119)
-						d126 := ctx.EmitGoCallScalar(GoFuncAddr(HashKey), []JITValueDesc{d119}, 1)
+						d126 := ctx.EmitGoCallScalar(jitGoABI_36c50824007e4f26, []JITValueDesc{d119}, 1)
 						d126.NoHeapPointer = true
 						ctx.BindReg(d126.Reg, &d126)
 						ctx.StabilizeDescForControlFlow(&d126)
@@ -72634,7 +72634,7 @@ func init_list() {
 						ctx.SyncDesc(&d117)
 						ctx.SyncDesc(&d119)
 						ctx.SyncDesc(&d126)
-						callResults128 := JITEmitGoCallResults(ctx, GoFuncAddr((*FastDict).findPos), []JITValueDesc{d117, d119, d126}, []uint8{1, 1}, []uint8{0, 0})
+						callResults128 := JITEmitGoCallResults(ctx, jitGoABI_ce0fd1a73e8b05e5, []JITValueDesc{d117, d119, d126})
 						d129 := callResults128[0]
 						_ = d129
 						d130 := callResults128[1]
@@ -72692,7 +72692,7 @@ func init_list() {
 						ctx.SyncDesc(&d119)
 						ctx.SyncDesc(&d121)
 						ctx.SyncDesc(&d126)
-						ctx.EmitGoCallVoid(GoFuncAddr((*FastDict).insertHashed), []JITValueDesc{d117, d119, d121, d126})
+						ctx.EmitGoCallVoid(jitGoABI_0b5d6fb65a1da267, []JITValueDesc{d117, d119, d121, d126})
 						ctx.ReclaimUntrackedRegs()
 						ctx.EmitJmp(lbl64)
 						bbpos_3_1 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
@@ -72705,13 +72705,13 @@ func init_list() {
 						d129 = inlineHome131
 						ctx.ReclaimUntrackedRegs()
 						ctx.ReclaimUntrackedRegs()
-						d133 := ctx.EmitGoCallScalar(GoFuncAddr(func(size int) map[uint64]int { return make(map[uint64]int, size) }), []JITValueDesc{JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0), NoHeapPointer: true}}, 1)
+						d133 := ctx.EmitGoCallScalar(jitGoABI_cbd374e9665fd209, []JITValueDesc{JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0), NoHeapPointer: true}}, 1)
 						ctx.ReclaimUntrackedRegs()
 						ctx.ReclaimUntrackedRegs()
 						ctx.EnsureDesc(&d133)
 						ctx.EnsureDesc(&d117)
 						ctx.EnsureDesc(&d133)
-						ctx.EmitGoCallVoid(GoFuncAddr(func(base *FastDict, value map[uint64]int) { base.index = value }), []JITValueDesc{d117, d133})
+						ctx.EmitGoCallVoid(jitGoABI_a563344c0d9e7213, []JITValueDesc{d117, d133})
 						ctx.ReclaimUntrackedRegs()
 						ctx.EmitJmp(lbl67)
 						bbpos_3_3 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
@@ -73076,7 +73076,7 @@ func init_list() {
 						ctx.ReclaimUntrackedRegs()
 						d148 = JITPrepareScmerGoArg(ctx, d148)
 						ctx.SyncDesc(&d148)
-						d155 := ctx.EmitGoCallScalar(GoFuncAddr(HashKey), []JITValueDesc{d148}, 1)
+						d155 := ctx.EmitGoCallScalar(jitGoABI_36c50824007e4f26, []JITValueDesc{d148}, 1)
 						d155.NoHeapPointer = true
 						ctx.BindReg(d155.Reg, &d155)
 						ctx.StabilizeDescForControlFlow(&d155)
@@ -73093,7 +73093,7 @@ func init_list() {
 						ctx.SyncDesc(&d146)
 						ctx.SyncDesc(&d148)
 						ctx.SyncDesc(&d155)
-						callResults157 := JITEmitGoCallResults(ctx, GoFuncAddr((*FastDict).findPos), []JITValueDesc{d146, d148, d155}, []uint8{1, 1}, []uint8{0, 0})
+						callResults157 := JITEmitGoCallResults(ctx, jitGoABI_ce0fd1a73e8b05e5, []JITValueDesc{d146, d148, d155})
 						d158 := callResults157[0]
 						_ = d158
 						d159 := callResults157[1]
@@ -73151,7 +73151,7 @@ func init_list() {
 						ctx.SyncDesc(&d148)
 						ctx.SyncDesc(&d150)
 						ctx.SyncDesc(&d155)
-						ctx.EmitGoCallVoid(GoFuncAddr((*FastDict).insertHashed), []JITValueDesc{d146, d148, d150, d155})
+						ctx.EmitGoCallVoid(jitGoABI_0b5d6fb65a1da267, []JITValueDesc{d146, d148, d150, d155})
 						ctx.ReclaimUntrackedRegs()
 						ctx.EmitJmp(lbl80)
 						bbpos_4_1 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
@@ -73164,13 +73164,13 @@ func init_list() {
 						d158 = inlineHome160
 						ctx.ReclaimUntrackedRegs()
 						ctx.ReclaimUntrackedRegs()
-						d162 := ctx.EmitGoCallScalar(GoFuncAddr(func(size int) map[uint64]int { return make(map[uint64]int, size) }), []JITValueDesc{JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0), NoHeapPointer: true}}, 1)
+						d162 := ctx.EmitGoCallScalar(jitGoABI_cbd374e9665fd209, []JITValueDesc{JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0), NoHeapPointer: true}}, 1)
 						ctx.ReclaimUntrackedRegs()
 						ctx.ReclaimUntrackedRegs()
 						ctx.EnsureDesc(&d162)
 						ctx.EnsureDesc(&d146)
 						ctx.EnsureDesc(&d162)
-						ctx.EmitGoCallVoid(GoFuncAddr(func(base *FastDict, value map[uint64]int) { base.index = value }), []JITValueDesc{d146, d162})
+						ctx.EmitGoCallVoid(jitGoABI_a563344c0d9e7213, []JITValueDesc{d146, d162})
 						ctx.ReclaimUntrackedRegs()
 						ctx.EmitJmp(lbl83)
 						bbpos_4_3 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
@@ -73584,7 +73584,7 @@ func init_list() {
 						d192 = JITPrepareScmerGoArg(ctx, d192)
 						ctx.SyncDesc(&d190)
 						ctx.SyncDesc(&d192)
-						d194 := ctx.EmitGoCallScalar(GoFuncAddr(Equal), []JITValueDesc{d190, d192}, 1)
+						d194 := ctx.EmitGoCallScalar(jitGoABI_073753bd1c913d53, []JITValueDesc{d190, d192}, 1)
 						d194.NoHeapPointer = true
 						ctx.EmitAndRegImm32(d194.Reg, 1)
 						d194.Type = tagBool
@@ -73798,7 +73798,7 @@ func init_list() {
 						ctx.EmitLeaRegMem(d205.Reg, ctx.StackReg, int32(stackArray203))
 						ctx.EmitMovRegImm64(d205.Reg2, uint64(2))
 						ctx.EmitMovRegImm64(d205.Reg3, uint64(2))
-						callResults206 := JITEmitGoCallResults(ctx, GoFuncAddr(JITAppendScmerSlice), []JITValueDesc{d63, d205}, []uint8{3}, []uint8{1})
+						callResults206 := JITEmitGoCallResults(ctx, jitGoABI_f2c643d935ea4448, []JITValueDesc{d63, d205})
 						d207 := callResults206[0]
 						d208 := JITValueDesc{Loc: LocStackTriple, Type: tagSlice, StackOff: int32(phiBase16) + int32(120)}
 						ctx.EmitCopyDescWords(&d208, &d207, 3)
@@ -73999,7 +73999,7 @@ func init_list() {
 						ctx.ReclaimUntrackedRegs()
 						d218 = JITPrepareScmerGoArg(ctx, d218)
 						ctx.SyncDesc(&d218)
-						d225 := ctx.EmitGoCallScalar(GoFuncAddr(HashKey), []JITValueDesc{d218}, 1)
+						d225 := ctx.EmitGoCallScalar(jitGoABI_36c50824007e4f26, []JITValueDesc{d218}, 1)
 						d225.NoHeapPointer = true
 						ctx.BindReg(d225.Reg, &d225)
 						ctx.StabilizeDescForControlFlow(&d225)
@@ -74016,7 +74016,7 @@ func init_list() {
 						ctx.SyncDesc(&d216)
 						ctx.SyncDesc(&d218)
 						ctx.SyncDesc(&d225)
-						callResults227 := JITEmitGoCallResults(ctx, GoFuncAddr((*FastDict).findPos), []JITValueDesc{d216, d218, d225}, []uint8{1, 1}, []uint8{0, 0})
+						callResults227 := JITEmitGoCallResults(ctx, jitGoABI_ce0fd1a73e8b05e5, []JITValueDesc{d216, d218, d225})
 						d228 := callResults227[0]
 						_ = d228
 						d229 := callResults227[1]
@@ -74074,7 +74074,7 @@ func init_list() {
 						ctx.SyncDesc(&d218)
 						ctx.SyncDesc(&d220)
 						ctx.SyncDesc(&d225)
-						ctx.EmitGoCallVoid(GoFuncAddr((*FastDict).insertHashed), []JITValueDesc{d216, d218, d220, d225})
+						ctx.EmitGoCallVoid(jitGoABI_0b5d6fb65a1da267, []JITValueDesc{d216, d218, d220, d225})
 						ctx.ReclaimUntrackedRegs()
 						ctx.EmitJmp(lbl104)
 						bbpos_6_1 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
@@ -74087,13 +74087,13 @@ func init_list() {
 						d228 = inlineHome230
 						ctx.ReclaimUntrackedRegs()
 						ctx.ReclaimUntrackedRegs()
-						d232 := ctx.EmitGoCallScalar(GoFuncAddr(func(size int) map[uint64]int { return make(map[uint64]int, size) }), []JITValueDesc{JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0), NoHeapPointer: true}}, 1)
+						d232 := ctx.EmitGoCallScalar(jitGoABI_cbd374e9665fd209, []JITValueDesc{JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0), NoHeapPointer: true}}, 1)
 						ctx.ReclaimUntrackedRegs()
 						ctx.ReclaimUntrackedRegs()
 						ctx.EnsureDesc(&d232)
 						ctx.EnsureDesc(&d216)
 						ctx.EnsureDesc(&d232)
-						ctx.EmitGoCallVoid(GoFuncAddr(func(base *FastDict, value map[uint64]int) { base.index = value }), []JITValueDesc{d216, d232})
+						ctx.EmitGoCallVoid(jitGoABI_a563344c0d9e7213, []JITValueDesc{d216, d232})
 						ctx.ReclaimUntrackedRegs()
 						ctx.EmitJmp(lbl107)
 						bbpos_6_3 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
@@ -74906,7 +74906,7 @@ func init_list() {
 						}
 						ctx.SyncDesc(&d269)
 						ctx.SyncDesc(&d289)
-						callResults290 := JITEmitGoCallResults(ctx, GoFuncAddr(asAssoc), []JITValueDesc{d269, d289}, []uint8{3, 1}, []uint8{1, 1})
+						callResults290 := JITEmitGoCallResults(ctx, GoFuncAddr(asAssoc), []JITValueDesc{d269, d289})
 						ctx.FreeDesc(&d289)
 						d291 := callResults290[0]
 						_ = d291
@@ -75580,7 +75580,7 @@ func init_list() {
 						ctx.FreeDesc(&d321)
 						ctx.ReclaimUntrackedRegs()
 						ctx.EnsureDesc(&d322)
-						d323 := ctx.EmitGoCallScalar(GoFuncAddr(NewFastDictValue), []JITValueDesc{d322}, 1)
+						d323 := ctx.EmitGoCallScalar(jitGoABI_01d8510d5c9dcecc, []JITValueDesc{d322}, 1)
 						ctx.StabilizeDescForControlFlow(&d323)
 						inlineHome324 := d323
 						inlineHome324.ID = 0
@@ -76195,7 +76195,7 @@ func init_list() {
 						ctx.FreeDesc(&d348)
 						ctx.ReclaimUntrackedRegs()
 						ctx.EnsureDesc(&d349)
-						d350 := ctx.EmitGoCallScalar(GoFuncAddr(NewFastDictValue), []JITValueDesc{d349}, 1)
+						d350 := ctx.EmitGoCallScalar(jitGoABI_01d8510d5c9dcecc, []JITValueDesc{d349}, 1)
 						ctx.StabilizeDescForControlFlow(&d350)
 						inlineHome351 := d350
 						inlineHome351.ID = 0
@@ -76523,7 +76523,7 @@ func init_list() {
 						ctx.ReclaimUntrackedRegs()
 						d365 = JITPrepareScmerGoArg(ctx, d365)
 						ctx.SyncDesc(&d365)
-						d372 := ctx.EmitGoCallScalar(GoFuncAddr(HashKey), []JITValueDesc{d365}, 1)
+						d372 := ctx.EmitGoCallScalar(jitGoABI_36c50824007e4f26, []JITValueDesc{d365}, 1)
 						d372.NoHeapPointer = true
 						ctx.BindReg(d372.Reg, &d372)
 						ctx.StabilizeDescForControlFlow(&d372)
@@ -76540,7 +76540,7 @@ func init_list() {
 						ctx.SyncDesc(&d363)
 						ctx.SyncDesc(&d365)
 						ctx.SyncDesc(&d372)
-						callResults374 := JITEmitGoCallResults(ctx, GoFuncAddr((*FastDict).findPos), []JITValueDesc{d363, d365, d372}, []uint8{1, 1}, []uint8{0, 0})
+						callResults374 := JITEmitGoCallResults(ctx, jitGoABI_ce0fd1a73e8b05e5, []JITValueDesc{d363, d365, d372})
 						d375 := callResults374[0]
 						_ = d375
 						d376 := callResults374[1]
@@ -76598,7 +76598,7 @@ func init_list() {
 						ctx.SyncDesc(&d365)
 						ctx.SyncDesc(&d367)
 						ctx.SyncDesc(&d372)
-						ctx.EmitGoCallVoid(GoFuncAddr((*FastDict).insertHashed), []JITValueDesc{d363, d365, d367, d372})
+						ctx.EmitGoCallVoid(jitGoABI_0b5d6fb65a1da267, []JITValueDesc{d363, d365, d367, d372})
 						ctx.ReclaimUntrackedRegs()
 						ctx.EmitJmp(lbl182)
 						bbpos_9_1 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
@@ -76611,13 +76611,13 @@ func init_list() {
 						d375 = inlineHome377
 						ctx.ReclaimUntrackedRegs()
 						ctx.ReclaimUntrackedRegs()
-						d379 := ctx.EmitGoCallScalar(GoFuncAddr(func(size int) map[uint64]int { return make(map[uint64]int, size) }), []JITValueDesc{JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0), NoHeapPointer: true}}, 1)
+						d379 := ctx.EmitGoCallScalar(jitGoABI_cbd374e9665fd209, []JITValueDesc{JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0), NoHeapPointer: true}}, 1)
 						ctx.ReclaimUntrackedRegs()
 						ctx.ReclaimUntrackedRegs()
 						ctx.EnsureDesc(&d379)
 						ctx.EnsureDesc(&d363)
 						ctx.EnsureDesc(&d379)
-						ctx.EmitGoCallVoid(GoFuncAddr(func(base *FastDict, value map[uint64]int) { base.index = value }), []JITValueDesc{d363, d379})
+						ctx.EmitGoCallVoid(jitGoABI_a563344c0d9e7213, []JITValueDesc{d363, d379})
 						ctx.ReclaimUntrackedRegs()
 						ctx.EmitJmp(lbl185)
 						bbpos_9_3 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
@@ -76980,7 +76980,7 @@ func init_list() {
 						ctx.ReclaimUntrackedRegs()
 						d395 = JITPrepareScmerGoArg(ctx, d395)
 						ctx.SyncDesc(&d395)
-						d402 := ctx.EmitGoCallScalar(GoFuncAddr(HashKey), []JITValueDesc{d395}, 1)
+						d402 := ctx.EmitGoCallScalar(jitGoABI_36c50824007e4f26, []JITValueDesc{d395}, 1)
 						d402.NoHeapPointer = true
 						ctx.BindReg(d402.Reg, &d402)
 						ctx.StabilizeDescForControlFlow(&d402)
@@ -76997,7 +76997,7 @@ func init_list() {
 						ctx.SyncDesc(&d393)
 						ctx.SyncDesc(&d395)
 						ctx.SyncDesc(&d402)
-						callResults404 := JITEmitGoCallResults(ctx, GoFuncAddr((*FastDict).findPos), []JITValueDesc{d393, d395, d402}, []uint8{1, 1}, []uint8{0, 0})
+						callResults404 := JITEmitGoCallResults(ctx, jitGoABI_ce0fd1a73e8b05e5, []JITValueDesc{d393, d395, d402})
 						d405 := callResults404[0]
 						_ = d405
 						d406 := callResults404[1]
@@ -77055,7 +77055,7 @@ func init_list() {
 						ctx.SyncDesc(&d395)
 						ctx.SyncDesc(&d397)
 						ctx.SyncDesc(&d402)
-						ctx.EmitGoCallVoid(GoFuncAddr((*FastDict).insertHashed), []JITValueDesc{d393, d395, d397, d402})
+						ctx.EmitGoCallVoid(jitGoABI_0b5d6fb65a1da267, []JITValueDesc{d393, d395, d397, d402})
 						ctx.ReclaimUntrackedRegs()
 						ctx.EmitJmp(lbl198)
 						bbpos_10_1 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
@@ -77068,13 +77068,13 @@ func init_list() {
 						d405 = inlineHome407
 						ctx.ReclaimUntrackedRegs()
 						ctx.ReclaimUntrackedRegs()
-						d409 := ctx.EmitGoCallScalar(GoFuncAddr(func(size int) map[uint64]int { return make(map[uint64]int, size) }), []JITValueDesc{JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0), NoHeapPointer: true}}, 1)
+						d409 := ctx.EmitGoCallScalar(jitGoABI_cbd374e9665fd209, []JITValueDesc{JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0), NoHeapPointer: true}}, 1)
 						ctx.ReclaimUntrackedRegs()
 						ctx.ReclaimUntrackedRegs()
 						ctx.EnsureDesc(&d409)
 						ctx.EnsureDesc(&d393)
 						ctx.EnsureDesc(&d409)
-						ctx.EmitGoCallVoid(GoFuncAddr(func(base *FastDict, value map[uint64]int) { base.index = value }), []JITValueDesc{d393, d409})
+						ctx.EmitGoCallVoid(jitGoABI_a563344c0d9e7213, []JITValueDesc{d393, d409})
 						ctx.ReclaimUntrackedRegs()
 						ctx.EmitJmp(lbl201)
 						bbpos_10_3 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
@@ -77273,7 +77273,7 @@ func init_list() {
 						d419 = JITPrepareScmerGoArg(ctx, d419)
 						ctx.SyncDesc(&d417)
 						ctx.SyncDesc(&d419)
-						d421 := ctx.EmitGoCallScalar(GoFuncAddr(Equal), []JITValueDesc{d417, d419}, 1)
+						d421 := ctx.EmitGoCallScalar(jitGoABI_073753bd1c913d53, []JITValueDesc{d417, d419}, 1)
 						d421.NoHeapPointer = true
 						ctx.EmitAndRegImm32(d421.Reg, 1)
 						d421.Type = tagBool
@@ -77487,7 +77487,7 @@ func init_list() {
 						ctx.EmitLeaRegMem(d432.Reg, ctx.StackReg, int32(stackArray430))
 						ctx.EmitMovRegImm64(d432.Reg2, uint64(2))
 						ctx.EmitMovRegImm64(d432.Reg3, uint64(2))
-						callResults433 := JITEmitGoCallResults(ctx, GoFuncAddr(JITAppendScmerSlice), []JITValueDesc{d309, d432}, []uint8{3}, []uint8{1})
+						callResults433 := JITEmitGoCallResults(ctx, jitGoABI_f2c643d935ea4448, []JITValueDesc{d309, d432})
 						d434 := callResults433[0]
 						d435 := JITValueDesc{Loc: LocStackTriple, Type: tagSlice, StackOff: int32(phiBase271) + int32(120)}
 						ctx.EmitCopyDescWords(&d435, &d434, 3)
@@ -77688,7 +77688,7 @@ func init_list() {
 						ctx.ReclaimUntrackedRegs()
 						d445 = JITPrepareScmerGoArg(ctx, d445)
 						ctx.SyncDesc(&d445)
-						d452 := ctx.EmitGoCallScalar(GoFuncAddr(HashKey), []JITValueDesc{d445}, 1)
+						d452 := ctx.EmitGoCallScalar(jitGoABI_36c50824007e4f26, []JITValueDesc{d445}, 1)
 						d452.NoHeapPointer = true
 						ctx.BindReg(d452.Reg, &d452)
 						ctx.StabilizeDescForControlFlow(&d452)
@@ -77705,7 +77705,7 @@ func init_list() {
 						ctx.SyncDesc(&d443)
 						ctx.SyncDesc(&d445)
 						ctx.SyncDesc(&d452)
-						callResults454 := JITEmitGoCallResults(ctx, GoFuncAddr((*FastDict).findPos), []JITValueDesc{d443, d445, d452}, []uint8{1, 1}, []uint8{0, 0})
+						callResults454 := JITEmitGoCallResults(ctx, jitGoABI_ce0fd1a73e8b05e5, []JITValueDesc{d443, d445, d452})
 						d455 := callResults454[0]
 						_ = d455
 						d456 := callResults454[1]
@@ -77763,7 +77763,7 @@ func init_list() {
 						ctx.SyncDesc(&d445)
 						ctx.SyncDesc(&d447)
 						ctx.SyncDesc(&d452)
-						ctx.EmitGoCallVoid(GoFuncAddr((*FastDict).insertHashed), []JITValueDesc{d443, d445, d447, d452})
+						ctx.EmitGoCallVoid(jitGoABI_0b5d6fb65a1da267, []JITValueDesc{d443, d445, d447, d452})
 						ctx.ReclaimUntrackedRegs()
 						ctx.EmitJmp(lbl218)
 						bbpos_11_1 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
@@ -77776,13 +77776,13 @@ func init_list() {
 						d455 = inlineHome457
 						ctx.ReclaimUntrackedRegs()
 						ctx.ReclaimUntrackedRegs()
-						d459 := ctx.EmitGoCallScalar(GoFuncAddr(func(size int) map[uint64]int { return make(map[uint64]int, size) }), []JITValueDesc{JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0), NoHeapPointer: true}}, 1)
+						d459 := ctx.EmitGoCallScalar(jitGoABI_cbd374e9665fd209, []JITValueDesc{JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0), NoHeapPointer: true}}, 1)
 						ctx.ReclaimUntrackedRegs()
 						ctx.ReclaimUntrackedRegs()
 						ctx.EnsureDesc(&d459)
 						ctx.EnsureDesc(&d443)
 						ctx.EnsureDesc(&d459)
-						ctx.EmitGoCallVoid(GoFuncAddr(func(base *FastDict, value map[uint64]int) { base.index = value }), []JITValueDesc{d443, d459})
+						ctx.EmitGoCallVoid(jitGoABI_a563344c0d9e7213, []JITValueDesc{d443, d459})
 						ctx.ReclaimUntrackedRegs()
 						ctx.EmitJmp(lbl221)
 						bbpos_11_3 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
@@ -78441,7 +78441,7 @@ func init_list() {
 					}
 					ctx.SyncDesc(&d484)
 					ctx.SyncDesc(&d504)
-					callResults505 := JITEmitGoCallResults(ctx, GoFuncAddr(asAssoc), []JITValueDesc{d484, d504}, []uint8{3, 1}, []uint8{1, 1})
+					callResults505 := JITEmitGoCallResults(ctx, GoFuncAddr(asAssoc), []JITValueDesc{d484, d504})
 					ctx.FreeDesc(&d504)
 					d506 := callResults505[0]
 					_ = d506
@@ -79115,7 +79115,7 @@ func init_list() {
 					ctx.FreeDesc(&d536)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d537)
-					d538 := ctx.EmitGoCallScalar(GoFuncAddr(NewFastDictValue), []JITValueDesc{d537}, 1)
+					d538 := ctx.EmitGoCallScalar(jitGoABI_01d8510d5c9dcecc, []JITValueDesc{d537}, 1)
 					ctx.StabilizeDescForControlFlow(&d538)
 					inlineHome539 := d538
 					inlineHome539.ID = 0
@@ -79730,7 +79730,7 @@ func init_list() {
 					ctx.FreeDesc(&d563)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d564)
-					d565 := ctx.EmitGoCallScalar(GoFuncAddr(NewFastDictValue), []JITValueDesc{d564}, 1)
+					d565 := ctx.EmitGoCallScalar(jitGoABI_01d8510d5c9dcecc, []JITValueDesc{d564}, 1)
 					ctx.StabilizeDescForControlFlow(&d565)
 					inlineHome566 := d565
 					inlineHome566.ID = 0
@@ -80058,7 +80058,7 @@ func init_list() {
 					ctx.ReclaimUntrackedRegs()
 					d580 = JITPrepareScmerGoArg(ctx, d580)
 					ctx.SyncDesc(&d580)
-					d587 := ctx.EmitGoCallScalar(GoFuncAddr(HashKey), []JITValueDesc{d580}, 1)
+					d587 := ctx.EmitGoCallScalar(jitGoABI_36c50824007e4f26, []JITValueDesc{d580}, 1)
 					d587.NoHeapPointer = true
 					ctx.BindReg(d587.Reg, &d587)
 					ctx.StabilizeDescForControlFlow(&d587)
@@ -80075,7 +80075,7 @@ func init_list() {
 					ctx.SyncDesc(&d578)
 					ctx.SyncDesc(&d580)
 					ctx.SyncDesc(&d587)
-					callResults589 := JITEmitGoCallResults(ctx, GoFuncAddr((*FastDict).findPos), []JITValueDesc{d578, d580, d587}, []uint8{1, 1}, []uint8{0, 0})
+					callResults589 := JITEmitGoCallResults(ctx, jitGoABI_ce0fd1a73e8b05e5, []JITValueDesc{d578, d580, d587})
 					d590 := callResults589[0]
 					_ = d590
 					d591 := callResults589[1]
@@ -80133,7 +80133,7 @@ func init_list() {
 					ctx.SyncDesc(&d580)
 					ctx.SyncDesc(&d582)
 					ctx.SyncDesc(&d587)
-					ctx.EmitGoCallVoid(GoFuncAddr((*FastDict).insertHashed), []JITValueDesc{d578, d580, d582, d587})
+					ctx.EmitGoCallVoid(jitGoABI_0b5d6fb65a1da267, []JITValueDesc{d578, d580, d582, d587})
 					ctx.ReclaimUntrackedRegs()
 					ctx.EmitJmp(lbl294)
 					bbpos_14_1 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
@@ -80146,13 +80146,13 @@ func init_list() {
 					d590 = inlineHome592
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d594 := ctx.EmitGoCallScalar(GoFuncAddr(func(size int) map[uint64]int { return make(map[uint64]int, size) }), []JITValueDesc{JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0), NoHeapPointer: true}}, 1)
+					d594 := ctx.EmitGoCallScalar(jitGoABI_cbd374e9665fd209, []JITValueDesc{JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0), NoHeapPointer: true}}, 1)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d594)
 					ctx.EnsureDesc(&d578)
 					ctx.EnsureDesc(&d594)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(base *FastDict, value map[uint64]int) { base.index = value }), []JITValueDesc{d578, d594})
+					ctx.EmitGoCallVoid(jitGoABI_a563344c0d9e7213, []JITValueDesc{d578, d594})
 					ctx.ReclaimUntrackedRegs()
 					ctx.EmitJmp(lbl297)
 					bbpos_14_3 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
@@ -80515,7 +80515,7 @@ func init_list() {
 					ctx.ReclaimUntrackedRegs()
 					d610 = JITPrepareScmerGoArg(ctx, d610)
 					ctx.SyncDesc(&d610)
-					d617 := ctx.EmitGoCallScalar(GoFuncAddr(HashKey), []JITValueDesc{d610}, 1)
+					d617 := ctx.EmitGoCallScalar(jitGoABI_36c50824007e4f26, []JITValueDesc{d610}, 1)
 					d617.NoHeapPointer = true
 					ctx.BindReg(d617.Reg, &d617)
 					ctx.StabilizeDescForControlFlow(&d617)
@@ -80532,7 +80532,7 @@ func init_list() {
 					ctx.SyncDesc(&d608)
 					ctx.SyncDesc(&d610)
 					ctx.SyncDesc(&d617)
-					callResults619 := JITEmitGoCallResults(ctx, GoFuncAddr((*FastDict).findPos), []JITValueDesc{d608, d610, d617}, []uint8{1, 1}, []uint8{0, 0})
+					callResults619 := JITEmitGoCallResults(ctx, jitGoABI_ce0fd1a73e8b05e5, []JITValueDesc{d608, d610, d617})
 					d620 := callResults619[0]
 					_ = d620
 					d621 := callResults619[1]
@@ -80590,7 +80590,7 @@ func init_list() {
 					ctx.SyncDesc(&d610)
 					ctx.SyncDesc(&d612)
 					ctx.SyncDesc(&d617)
-					ctx.EmitGoCallVoid(GoFuncAddr((*FastDict).insertHashed), []JITValueDesc{d608, d610, d612, d617})
+					ctx.EmitGoCallVoid(jitGoABI_0b5d6fb65a1da267, []JITValueDesc{d608, d610, d612, d617})
 					ctx.ReclaimUntrackedRegs()
 					ctx.EmitJmp(lbl310)
 					bbpos_15_1 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
@@ -80603,13 +80603,13 @@ func init_list() {
 					d620 = inlineHome622
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d624 := ctx.EmitGoCallScalar(GoFuncAddr(func(size int) map[uint64]int { return make(map[uint64]int, size) }), []JITValueDesc{JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0), NoHeapPointer: true}}, 1)
+					d624 := ctx.EmitGoCallScalar(jitGoABI_cbd374e9665fd209, []JITValueDesc{JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0), NoHeapPointer: true}}, 1)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d624)
 					ctx.EnsureDesc(&d608)
 					ctx.EnsureDesc(&d624)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(base *FastDict, value map[uint64]int) { base.index = value }), []JITValueDesc{d608, d624})
+					ctx.EmitGoCallVoid(jitGoABI_a563344c0d9e7213, []JITValueDesc{d608, d624})
 					ctx.ReclaimUntrackedRegs()
 					ctx.EmitJmp(lbl313)
 					bbpos_15_3 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
@@ -80808,7 +80808,7 @@ func init_list() {
 					d634 = JITPrepareScmerGoArg(ctx, d634)
 					ctx.SyncDesc(&d632)
 					ctx.SyncDesc(&d634)
-					d636 := ctx.EmitGoCallScalar(GoFuncAddr(Equal), []JITValueDesc{d632, d634}, 1)
+					d636 := ctx.EmitGoCallScalar(jitGoABI_073753bd1c913d53, []JITValueDesc{d632, d634}, 1)
 					d636.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d636.Reg, 1)
 					d636.Type = tagBool
@@ -81022,7 +81022,7 @@ func init_list() {
 					ctx.EmitLeaRegMem(d647.Reg, ctx.StackReg, int32(stackArray645))
 					ctx.EmitMovRegImm64(d647.Reg2, uint64(2))
 					ctx.EmitMovRegImm64(d647.Reg3, uint64(2))
-					callResults648 := JITEmitGoCallResults(ctx, GoFuncAddr(JITAppendScmerSlice), []JITValueDesc{d524, d647}, []uint8{3}, []uint8{1})
+					callResults648 := JITEmitGoCallResults(ctx, jitGoABI_f2c643d935ea4448, []JITValueDesc{d524, d647})
 					d649 := callResults648[0]
 					d650 := JITValueDesc{Loc: LocStackTriple, Type: tagSlice, StackOff: int32(phiBase486) + int32(120)}
 					ctx.EmitCopyDescWords(&d650, &d649, 3)
@@ -81223,7 +81223,7 @@ func init_list() {
 					ctx.ReclaimUntrackedRegs()
 					d660 = JITPrepareScmerGoArg(ctx, d660)
 					ctx.SyncDesc(&d660)
-					d667 := ctx.EmitGoCallScalar(GoFuncAddr(HashKey), []JITValueDesc{d660}, 1)
+					d667 := ctx.EmitGoCallScalar(jitGoABI_36c50824007e4f26, []JITValueDesc{d660}, 1)
 					d667.NoHeapPointer = true
 					ctx.BindReg(d667.Reg, &d667)
 					ctx.StabilizeDescForControlFlow(&d667)
@@ -81240,7 +81240,7 @@ func init_list() {
 					ctx.SyncDesc(&d658)
 					ctx.SyncDesc(&d660)
 					ctx.SyncDesc(&d667)
-					callResults669 := JITEmitGoCallResults(ctx, GoFuncAddr((*FastDict).findPos), []JITValueDesc{d658, d660, d667}, []uint8{1, 1}, []uint8{0, 0})
+					callResults669 := JITEmitGoCallResults(ctx, jitGoABI_ce0fd1a73e8b05e5, []JITValueDesc{d658, d660, d667})
 					d670 := callResults669[0]
 					_ = d670
 					d671 := callResults669[1]
@@ -81298,7 +81298,7 @@ func init_list() {
 					ctx.SyncDesc(&d660)
 					ctx.SyncDesc(&d662)
 					ctx.SyncDesc(&d667)
-					ctx.EmitGoCallVoid(GoFuncAddr((*FastDict).insertHashed), []JITValueDesc{d658, d660, d662, d667})
+					ctx.EmitGoCallVoid(jitGoABI_0b5d6fb65a1da267, []JITValueDesc{d658, d660, d662, d667})
 					ctx.ReclaimUntrackedRegs()
 					ctx.EmitJmp(lbl330)
 					bbpos_16_1 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
@@ -81311,13 +81311,13 @@ func init_list() {
 					d670 = inlineHome672
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d674 := ctx.EmitGoCallScalar(GoFuncAddr(func(size int) map[uint64]int { return make(map[uint64]int, size) }), []JITValueDesc{JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0), NoHeapPointer: true}}, 1)
+					d674 := ctx.EmitGoCallScalar(jitGoABI_cbd374e9665fd209, []JITValueDesc{JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0), NoHeapPointer: true}}, 1)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d674)
 					ctx.EnsureDesc(&d658)
 					ctx.EnsureDesc(&d674)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(base *FastDict, value map[uint64]int) { base.index = value }), []JITValueDesc{d658, d674})
+					ctx.EmitGoCallVoid(jitGoABI_a563344c0d9e7213, []JITValueDesc{d658, d674})
 					ctx.ReclaimUntrackedRegs()
 					ctx.EmitJmp(lbl333)
 					bbpos_16_3 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
@@ -81719,7 +81719,7 @@ func init_list() {
 				virtualArgs2 = args[1:]
 				_ = virtualArgs2
 				d3 := jitMaterializeVirtualGoSlice(ctx, virtualArgs2)
-				callResults4 := JITEmitGoCallResults(ctx, GoFuncAddr(JITAppendScmerSlice), []JITValueDesc{d1, d3}, []uint8{3}, []uint8{1})
+				callResults4 := JITEmitGoCallResults(ctx, jitGoABI_f2c643d935ea4448, []JITValueDesc{d1, d3})
 				d5 := callResults4[0]
 				d6 := ctx.EmitNewSliceFromGoSlice(&d5)
 				if d6.Loc == LocImm {
@@ -82350,7 +82350,7 @@ func init_list() {
 					d48 = JITPrepareScmerGoArg(ctx, d48)
 					ctx.SyncDesc(&d23)
 					ctx.SyncDesc(&d48)
-					d50 = ctx.EmitGoCallScalar(GoFuncAddr(Equal), []JITValueDesc{d23, d48}, 1)
+					d50 = ctx.EmitGoCallScalar(jitGoABI_073753bd1c913d53, []JITValueDesc{d23, d48}, 1)
 					d50.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d50.Reg, 1)
 					d50.Type = tagBool
@@ -82616,7 +82616,7 @@ func init_list() {
 					ctx.EmitLeaRegMem(d106.Reg, ctx.StackReg, int32(stackArray104))
 					ctx.EmitMovRegImm64(d106.Reg2, uint64(1))
 					ctx.EmitMovRegImm64(d106.Reg3, uint64(1))
-					callResults107 := JITEmitGoCallResults(ctx, GoFuncAddr(JITAppendScmerSlice), []JITValueDesc{d1, d106}, []uint8{3}, []uint8{1})
+					callResults107 := JITEmitGoCallResults(ctx, jitGoABI_f2c643d935ea4448, []JITValueDesc{d1, d106})
 					d108 = callResults107[0]
 					d109 = JITValueDesc{Loc: LocStackTriple, Type: tagSlice, StackOff: int32(bbs[1].PhiBase) + int32(0)}
 					ctx.EmitCopyDescWords(&d109, &d108, 3)
@@ -83339,7 +83339,7 @@ func init_list() {
 					_ = stackArray42
 					d43 = JITValueDesc{Loc: LocVirtualSlice, Type: tagSlice, KnownSliceLen: int32(0), KnownSliceCap: int32(0), SliceSizeKnown: true}
 					_ = d43
-					callResults44 := JITEmitGoCallResults(ctx, GoFuncAddr(JITCloneScmerSlice), []JITValueDesc{d41}, []uint8{3}, []uint8{1})
+					callResults44 := JITEmitGoCallResults(ctx, jitGoABI_f99f3392c678151c, []JITValueDesc{d41})
 					d45 = callResults44[0]
 					ctx.StabilizeDescForControlFlow(&d45)
 					d46 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
@@ -83494,7 +83494,7 @@ func init_list() {
 					_ = stackArray56
 					d57 = JITValueDesc{Loc: LocVirtualSlice, Type: tagSlice, KnownSliceLen: int32(0), KnownSliceCap: int32(0), SliceSizeKnown: true}
 					_ = d57
-					callResults58 := JITEmitGoCallResults(ctx, GoFuncAddr(JITCloneScmerSlice), []JITValueDesc{d55}, []uint8{3}, []uint8{1})
+					callResults58 := JITEmitGoCallResults(ctx, jitGoABI_f99f3392c678151c, []JITValueDesc{d55})
 					d59 = callResults58[0]
 					ctx.StabilizeDescForControlFlow(&d59)
 					d60 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
@@ -84846,7 +84846,7 @@ func init_list() {
 					d387 = JITPrepareScmerGoArg(ctx, d387)
 					ctx.SyncDesc(&d249)
 					ctx.SyncDesc(&d387)
-					d389 = ctx.EmitGoCallScalar(GoFuncAddr(Equal), []JITValueDesc{d249, d387}, 1)
+					d389 = ctx.EmitGoCallScalar(jitGoABI_073753bd1c913d53, []JITValueDesc{d249, d387}, 1)
 					d389.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d389.Reg, 1)
 					d389.Type = tagBool
@@ -85671,7 +85671,7 @@ func init_list() {
 					ctx.EmitLeaRegMem(d690.Reg, ctx.StackReg, int32(stackArray688))
 					ctx.EmitMovRegImm64(d690.Reg2, uint64(1))
 					ctx.EmitMovRegImm64(d690.Reg3, uint64(1))
-					callResults691 := JITEmitGoCallResults(ctx, GoFuncAddr(JITAppendScmerSlice), []JITValueDesc{d3, d690}, []uint8{3}, []uint8{1})
+					callResults691 := JITEmitGoCallResults(ctx, jitGoABI_f2c643d935ea4448, []JITValueDesc{d3, d690})
 					d692 = callResults691[0]
 					d693 = JITValueDesc{Loc: LocStackTriple, Type: tagSlice, StackOff: int32(bbs[6].PhiBase) + int32(0)}
 					ctx.EmitCopyDescWords(&d693, &d692, 3)
@@ -86593,7 +86593,7 @@ func init_list() {
 					d972 = JITPrepareScmerGoArg(ctx, d972)
 					ctx.SyncDesc(&d781)
 					ctx.SyncDesc(&d972)
-					d974 = ctx.EmitGoCallScalar(GoFuncAddr(Equal), []JITValueDesc{d781, d972}, 1)
+					d974 = ctx.EmitGoCallScalar(jitGoABI_073753bd1c913d53, []JITValueDesc{d781, d972}, 1)
 					d974.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d974.Reg, 1)
 					d974.Type = tagBool
@@ -87618,7 +87618,7 @@ func init_list() {
 					ctx.EmitLeaRegMem(d1375.Reg, ctx.StackReg, int32(stackArray1373))
 					ctx.EmitMovRegImm64(d1375.Reg2, uint64(1))
 					ctx.EmitMovRegImm64(d1375.Reg3, uint64(1))
-					callResults1376 := JITEmitGoCallResults(ctx, GoFuncAddr(JITAppendScmerSlice), []JITValueDesc{d7, d1375}, []uint8{3}, []uint8{1})
+					callResults1376 := JITEmitGoCallResults(ctx, jitGoABI_f2c643d935ea4448, []JITValueDesc{d7, d1375})
 					d1377 = callResults1376[0]
 					d1378 = JITValueDesc{Loc: LocStackTriple, Type: tagSlice, StackOff: int32(bbs[13].PhiBase) + int32(0)}
 					ctx.EmitCopyDescWords(&d1378, &d1377, 3)
@@ -89512,7 +89512,7 @@ func init_list() {
 					d2000 = JITPrepareScmerGoArg(ctx, d2000)
 					ctx.SyncDesc(&d1742)
 					ctx.SyncDesc(&d2000)
-					d2002 = ctx.EmitGoCallScalar(GoFuncAddr(Equal), []JITValueDesc{d1742, d2000}, 1)
+					d2002 = ctx.EmitGoCallScalar(jitGoABI_073753bd1c913d53, []JITValueDesc{d1742, d2000}, 1)
 					d2002.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d2002.Reg, 1)
 					d2002.Type = tagBool
@@ -90817,7 +90817,7 @@ func init_list() {
 					ctx.EmitLeaRegMem(d2543.Reg, ctx.StackReg, int32(stackArray2541))
 					ctx.EmitMovRegImm64(d2543.Reg2, uint64(1))
 					ctx.EmitMovRegImm64(d2543.Reg3, uint64(1))
-					callResults2544 := JITEmitGoCallResults(ctx, GoFuncAddr(JITAppendScmerSlice), []JITValueDesc{d13, d2543}, []uint8{3}, []uint8{1})
+					callResults2544 := JITEmitGoCallResults(ctx, jitGoABI_f2c643d935ea4448, []JITValueDesc{d13, d2543})
 					d2545 = callResults2544[0]
 					d2546 = JITValueDesc{Loc: LocStackTriple, Type: tagSlice, StackOff: int32(bbs[24].PhiBase) + int32(0)}
 					ctx.EmitCopyDescWords(&d2546, &d2545, 3)
@@ -91065,7 +91065,7 @@ func init_list() {
 					ctx.EmitLeaRegMem(d11.Reg, ctx.StackReg, int32(stackArray9))
 					ctx.EmitMovRegImm64(d11.Reg2, uint64(0))
 					ctx.EmitMovRegImm64(d11.Reg3, uint64(0))
-					callResults12 := JITEmitGoCallResults(ctx, GoFuncAddr(JITNewSliceCopy), []JITValueDesc{d11}, []uint8{2}, []uint8{1})
+					callResults12 := JITEmitGoCallResults(ctx, jitGoABI_5ab5b68a30746790, []JITValueDesc{d11})
 					d13 = callResults12[0]
 					ctx.SyncDesc(&d13)
 					if d13.Loc == LocRegPair || d13.Loc == LocStackPair || d13.Loc == LocInputPair {
@@ -91274,7 +91274,7 @@ func init_list() {
 				ctx.SyncDesc(&d1)
 				ctx.SyncDesc(&d3)
 				ctx.SyncDesc(&d4)
-				d5 := ctx.EmitGoCallScalar(GoFuncAddr(mergeAssoc), []JITValueDesc{d0, d1, d3, d4}, 2)
+				d5 := ctx.EmitGoCallScalar(jitGoABI_d8453e760aaae097, []JITValueDesc{d0, d1, d3, d4}, 2)
 				d5.NoHeapPointer = false
 				ctx.BindReg(d5.Reg, &d5)
 				ctx.BindReg(d5.Reg2, &d5)
@@ -91688,4 +91688,87 @@ func optimizeCons(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *Type
 		}
 	}
 	return result, td
+}
+
+// BEGIN jitgen prepared Go ABI entries
+var jitGoABI_01d8510d5c9dcecc uint64
+var jitGoABI_073753bd1c913d53 uint64
+var jitGoABI_0a9797646375cd07 uint64
+var jitGoABI_0b5d6fb65a1da267 uint64
+var jitGoABI_1be5aabc5234fe9d uint64
+var jitGoABI_2c72aeba5047b216 uint64
+var jitGoABI_31c7b608bf932b8a uint64
+var jitGoABI_36c50824007e4f26 uint64
+var jitGoABI_3a03af637defe6b2 uint64
+var jitGoABI_3a9a9ff483d2f2ac uint64
+var jitGoABI_3d60ae4ff2cc3076 uint64
+var jitGoABI_41f8e3e95a211b4c uint64
+var jitGoABI_4852b3954b985900 uint64
+var jitGoABI_5511bba87a1eeff9 uint64
+var jitGoABI_5ab5b68a30746790 uint64
+var jitGoABI_6ab4f61ee087bb17 uint64
+var jitGoABI_6dc513406b5dca12 uint64
+var jitGoABI_7087422959acdd9f uint64
+var jitGoABI_7dbaf07f307c2362 uint64
+var jitGoABI_895a504f5844844c uint64
+var jitGoABI_8eb5d1c7c37ba7be uint64
+var jitGoABI_8efb7e1e7572d17e uint64
+var jitGoABI_93b2515ba525f5b8 uint64
+var jitGoABI_99df67f97d47d8c2 uint64
+var jitGoABI_a563344c0d9e7213 uint64
+var jitGoABI_a7de20a8fb7c436d uint64
+var jitGoABI_b82bb4ba3f3c5f31 uint64
+var jitGoABI_bd193e78baed9872 uint64
+var jitGoABI_beae522ae19c2421 uint64
+var jitGoABI_bf0f793d04443ecf uint64
+var jitGoABI_c1212c76d8d02789 uint64
+var jitGoABI_c76a0d8bf95c4000 uint64
+var jitGoABI_cbd374e9665fd209 uint64
+var jitGoABI_ce0fd1a73e8b05e5 uint64
+var jitGoABI_d8453e760aaae097 uint64
+var jitGoABI_e009edac130f0219 uint64
+var jitGoABI_ef7d7943f08acaa9 uint64
+var jitGoABI_f2c643d935ea4448 uint64
+var jitGoABI_f99f3392c678151c uint64
+
+func init() {
+	jitGoABI_01d8510d5c9dcecc = GoFuncAddr(NewFastDictValue)
+	jitGoABI_073753bd1c913d53 = GoFuncAddr(Equal)
+	jitGoABI_0a9797646375cd07 = GoFuncAddr(func(value *uintptr) uintptr { return *value })
+	jitGoABI_0b5d6fb65a1da267 = GoFuncAddr((*FastDict).insertHashed)
+	jitGoABI_1be5aabc5234fe9d = GoFuncAddr(func() *[1]int { return new([1]int) })
+	jitGoABI_2c72aeba5047b216 = GoFuncAddr((*orderedUniqueBuilder).contains)
+	jitGoABI_31c7b608bf932b8a = GoFuncAddr((Scmer).Func)
+	jitGoABI_36c50824007e4f26 = GoFuncAddr(HashKey)
+	jitGoABI_3a03af637defe6b2 = GoFuncAddr(func() *orderedUniqueBuilder { return new(orderedUniqueBuilder) })
+	jitGoABI_3a9a9ff483d2f2ac = GoFuncAddr(func(base *orderedUniqueBuilder, value []Scmer) { base.linear = value })
+	jitGoABI_3d60ae4ff2cc3076 = GoFuncAddr(Scmer.Int)
+	jitGoABI_41f8e3e95a211b4c = GoFuncAddr(JITAppendScmerSliceCopy)
+	jitGoABI_4852b3954b985900 = GoFuncAddr(func(dst *func(...Scmer) Scmer, value func(...Scmer) Scmer) { *dst = value })
+	jitGoABI_5511bba87a1eeff9 = GoFuncAddr(func(value *[1]int) []int { return value[0:1:1] })
+	jitGoABI_5ab5b68a30746790 = GoFuncAddr(JITNewSliceCopy)
+	jitGoABI_6ab4f61ee087bb17 = GoFuncAddr(func() map[uintptr]*Declaration { return declarationsByFunction })
+	jitGoABI_6dc513406b5dca12 = GoFuncAddr(func(m map[string]*Declaration, k string) (*Declaration, bool) { value, ok := m[k]; return value, ok })
+	jitGoABI_7087422959acdd9f = GoFuncAddr(func() map[string]*Declaration { return declarations })
+	jitGoABI_7dbaf07f307c2362 = GoFuncAddr(jitAssertString)
+	jitGoABI_895a504f5844844c = GoFuncAddr(specialFormName)
+	jitGoABI_8eb5d1c7c37ba7be = GoFuncAddr(jitAssertScmerFunction)
+	jitGoABI_8efb7e1e7572d17e = GoFuncAddr(func() *func(...Scmer) Scmer { return new(func(...Scmer) Scmer) })
+	jitGoABI_93b2515ba525f5b8 = GoFuncAddr(EqualSQL)
+	jitGoABI_99df67f97d47d8c2 = GoFuncAddr(jitCopyScmerSlice)
+	jitGoABI_a563344c0d9e7213 = GoFuncAddr(func(base *FastDict, value map[uint64]int) { base.index = value })
+	jitGoABI_a7de20a8fb7c436d = GoFuncAddr(jitMakeScmerSlice)
+	jitGoABI_b82bb4ba3f3c5f31 = GoFuncAddr(func(m map[uintptr]*Declaration, k uintptr) (*Declaration, bool) { value, ok := m[k]; return value, ok })
+	jitGoABI_bd193e78baed9872 = GoFuncAddr((Scmer).Any)
+	jitGoABI_beae522ae19c2421 = GoFuncAddr((*orderedUniqueBuilder).add)
+	jitGoABI_bf0f793d04443ecf = GoFuncAddr(Scmer.String)
+	jitGoABI_c1212c76d8d02789 = GoFuncAddr(func(dst *[1]int, index int, value int) { dst[index] = value })
+	jitGoABI_c76a0d8bf95c4000 = GoFuncAddr((*FastDict).Get)
+	jitGoABI_cbd374e9665fd209 = GoFuncAddr(func(size int) map[uint64]int { return make(map[uint64]int, size) })
+	jitGoABI_ce0fd1a73e8b05e5 = GoFuncAddr((*FastDict).findPos)
+	jitGoABI_d8453e760aaae097 = GoFuncAddr(mergeAssoc)
+	jitGoABI_e009edac130f0219 = GoFuncAddr((*FastDict).Copy)
+	jitGoABI_ef7d7943f08acaa9 = GoFuncAddr((*orderedUniqueBuilder).result)
+	jitGoABI_f2c643d935ea4448 = GoFuncAddr(JITAppendScmerSlice)
+	jitGoABI_f99f3392c678151c = GoFuncAddr(JITCloneScmerSlice)
 }

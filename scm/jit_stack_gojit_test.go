@@ -1302,7 +1302,7 @@ func TestJITParserBindingDoesNotRootReusedResultBeforeReturn(t *testing.T) {
 	}
 	ctx.setStackPointer(jitStackRootFrameBP, emitter.generatorValueOff, true)
 	beforeDiscarded := ctx.SnapshotAllocState()
-	discarded := JITEmitGoCallResults(ctx, GoFuncAddr(jitTestDiscardedStringResult), nil, []uint8{2}, []uint8{1})[0]
+	discarded := JITEmitGoCallResults(ctx, GoFuncAddr(jitTestDiscardedStringResult), nil)[0]
 	ctx.RestoreAllocState(beforeDiscarded)
 	// An intervening collection call no longer roots the discarded value.
 	ctx.EmitGoCallToFrame(GoFuncAddr(runtime.GC), nil, nil)

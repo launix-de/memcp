@@ -1021,7 +1021,7 @@ func (s *StorageEnum) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result 
 		}
 		ctx.SyncDesc(&thisptr)
 		ctx.SyncDesc(&idxInt)
-		d26 = ctx.EmitGoCallScalar(scm.GoFuncAddr((*StorageEnum).findChunk), []scm.JITValueDesc{thisptr, idxInt}, 1)
+		d26 = ctx.EmitGoCallScalar(jitGoABI_31d345a15efc280f, []scm.JITValueDesc{thisptr, idxInt}, 1)
 		d26.NoHeapPointer = true
 		ctx.BindReg(d26.Reg, &d26)
 		ctx.StabilizeDescForControlFlow(&d26)
@@ -1396,7 +1396,7 @@ func (s *StorageEnum) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result 
 		}
 		ctx.SyncDesc(&thisptr)
 		ctx.SyncDesc(&d97)
-		d98 = ctx.EmitGoCallScalar(scm.GoFuncAddr((*StorageEnum).jumpCum), []scm.JITValueDesc{thisptr, d97}, 1)
+		d98 = ctx.EmitGoCallScalar(jitGoABI_44e3395ca3c4e2fc, []scm.JITValueDesc{thisptr, d97}, 1)
 		d98.NoHeapPointer = true
 		ctx.BindReg(d98.Reg, &d98)
 		ctx.StabilizeDescForControlFlow(&d98)
@@ -2254,7 +2254,7 @@ func (s *StorageEnum) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result 
 		}
 		ctx.SyncDesc(&thisptr)
 		ctx.SyncDesc(&d235)
-		d236 = ctx.EmitGoCallScalar(scm.GoFuncAddr((*StorageEnum).decodeSymbol), []scm.JITValueDesc{thisptr, d235}, 1)
+		d236 = ctx.EmitGoCallScalar(jitGoABI_b9f608515e3e6e84, []scm.JITValueDesc{thisptr, d235}, 1)
 		d236.NoHeapPointer = true
 		ctx.BindReg(d236.Reg, &d236)
 		ctx.ReclaimUntrackedRegs()
@@ -2396,7 +2396,7 @@ func (s *StorageEnum) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result 
 		}
 		ctx.SyncDesc(&thisptr)
 		ctx.SyncDesc(&d236)
-		d245 = ctx.EmitGoCallScalar(scm.GoFuncAddr((*StorageEnum).symbolLo), []scm.JITValueDesc{thisptr, d236}, 1)
+		d245 = ctx.EmitGoCallScalar(jitGoABI_5160def99e2771e9, []scm.JITValueDesc{thisptr, d236}, 1)
 		d245.NoHeapPointer = true
 		ctx.BindReg(d245.Reg, &d245)
 		ctx.FreeDesc(&d236)
@@ -2694,3 +2694,16 @@ func (s *StorageEnum) rebuildCodec() {
 }
 
 func (s *StorageEnum) DistinctCount() uint { return uint(s.k) }
+
+// BEGIN jitgen prepared Go ABI entries
+var jitGoABI_31d345a15efc280f uint64
+var jitGoABI_44e3395ca3c4e2fc uint64
+var jitGoABI_5160def99e2771e9 uint64
+var jitGoABI_b9f608515e3e6e84 uint64
+
+func init() {
+	jitGoABI_31d345a15efc280f = scm.GoFuncAddr((*StorageEnum).findChunk)
+	jitGoABI_44e3395ca3c4e2fc = scm.GoFuncAddr((*StorageEnum).jumpCum)
+	jitGoABI_5160def99e2771e9 = scm.GoFuncAddr((*StorageEnum).symbolLo)
+	jitGoABI_b9f608515e3e6e84 = scm.GoFuncAddr((*StorageEnum).decodeSymbol)
+}

@@ -118,7 +118,7 @@ func (s *OverlayBlob) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result 
 	}
 	ctx.EnsureDesc(&d0)
 	ctx.EnsureDesc(&idxInt)
-	d1 := ctx.EmitGoCallScalar(scm.GoFuncAddr(func(receiver ColumnStorage, arg0 uint32) scm.Scmer { return receiver.GetValue(arg0) }), []scm.JITValueDesc{d0, idxInt}, 2)
+	d1 := ctx.EmitGoCallScalar(jitGoABI_4fc08be5b47f7f1b, []scm.JITValueDesc{d0, idxInt}, 2)
 	ctx.FreeDesc(&idxInt)
 	if thisptr.Loc == scm.LocRegPair || thisptr.Loc == scm.LocStackPair || thisptr.Loc == scm.LocRegTriple || thisptr.Loc == scm.LocStackTriple {
 		panic("jit: generic call arg expects 1-word value")
@@ -126,7 +126,7 @@ func (s *OverlayBlob) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result 
 	d1 = scm.JITPrepareScmerGoArg(ctx, d1)
 	ctx.SyncDesc(&thisptr)
 	ctx.SyncDesc(&d1)
-	d2 := ctx.EmitGoCallScalar(scm.GoFuncAddr((*OverlayBlob).resolveBlob), []scm.JITValueDesc{thisptr, d1}, 2)
+	d2 := ctx.EmitGoCallScalar(jitGoABI_eba6891b3e8216ca, []scm.JITValueDesc{thisptr, d1}, 2)
 	d2.NoHeapPointer = false
 	ctx.BindReg(d2.Reg, &d2)
 	ctx.BindReg(d2.Reg2, &d2)
@@ -686,3 +686,12 @@ func (s *OverlayBlob) ReleaseBlobs(count uint) {
 }
 
 func (s *OverlayBlob) DistinctCount() uint { return s.Base.DistinctCount() }
+
+// BEGIN jitgen prepared Go ABI entries
+var jitGoABI_4fc08be5b47f7f1b uint64
+var jitGoABI_eba6891b3e8216ca uint64
+
+func init() {
+	jitGoABI_4fc08be5b47f7f1b = scm.GoFuncAddr(func(receiver ColumnStorage, arg0 uint32) scm.Scmer { return receiver.GetValue(arg0) })
+	jitGoABI_eba6891b3e8216ca = scm.GoFuncAddr((*OverlayBlob).resolveBlob)
+}

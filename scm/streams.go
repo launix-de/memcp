@@ -52,13 +52,13 @@ func init_streams() {
 				d0.ID = 0
 				d0 = JITPrepareScmerGoArg(ctx, d0)
 				ctx.SyncDesc(&d0)
-				d1 := ctx.EmitGoCallScalar(GoFuncAddr((Scmer).Stream), []JITValueDesc{d0}, 2)
+				d1 := ctx.EmitGoCallScalar(jitGoABI_c2607a7dbdbb7752, []JITValueDesc{d0}, 2)
 				d1.NoHeapPointer = false
 				ctx.BindReg(d1.Reg, &d1)
 				ctx.BindReg(d1.Reg2, &d1)
 				ctx.FreeDesc(&d0)
 				ctx.EnsureDesc(&d1)
-				d2 := ctx.EmitGoCallScalar(GoFuncAddr(jitReaderToAny), []JITValueDesc{d1}, 2)
+				d2 := ctx.EmitGoCallScalar(jitGoABI_407180d1868157cb, []JITValueDesc{d1}, 2)
 				ctx.FreeDesc(&d1)
 				ctx.EnsureDesc(&d2)
 				if d2.Loc == LocImm {
@@ -96,7 +96,7 @@ func init_streams() {
 					panic("jit: generic call arg expects 2-word value (NewAny arg0)")
 				}
 				ctx.SyncDesc(&d2)
-				d3 := ctx.EmitGoCallScalar(GoFuncAddr(NewAny), []JITValueDesc{d2}, 2)
+				d3 := ctx.EmitGoCallScalar(jitGoABI_04bf7165597d42e8, []JITValueDesc{d2}, 2)
 				d3.NoHeapPointer = false
 				ctx.BindReg(d3.Reg, &d3)
 				ctx.BindReg(d3.Reg2, &d3)
@@ -264,4 +264,15 @@ func init_streams() {
 			JITInlineCost:  65535,
 		},
 	})
+}
+
+// BEGIN jitgen prepared Go ABI entries
+var jitGoABI_04bf7165597d42e8 uint64
+var jitGoABI_407180d1868157cb uint64
+var jitGoABI_c2607a7dbdbb7752 uint64
+
+func init() {
+	jitGoABI_04bf7165597d42e8 = GoFuncAddr(NewAny)
+	jitGoABI_407180d1868157cb = GoFuncAddr(jitReaderToAny)
+	jitGoABI_c2607a7dbdbb7752 = GoFuncAddr((Scmer).Stream)
 }
