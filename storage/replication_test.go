@@ -1797,3 +1797,41 @@ func TestReplicationColumnTransferRejectsComputeStorage(t *testing.T) {
 		t.Fatal("manifest bypassed declared-column admission")
 	}
 }
+
+func TestReplicationForwardingAcceptsKnownCurrentOwner(t *testing.T) {
+	for _, owner := range []string{"source", "other"} {
+		t.Run(owner, func(t *testing.T) {
+			r := replicaRecoveryFixture()
+			current := mosiResource{Database: "example", Table: "items", Shard: uuid.NewString()}
+			historical := current
+			historical.Shard = uuid.NewString()
+			cell := r.resourceCell(current)
+			cell.ownstate.Initialize(mosi.IO)
+			r.updateRecord(current, func(record *replicaRecord) bool {
+				record.Owner, record.Epoch = owner, 7
+				return true
+			})
+			packet := mosiPacket{ID: "bound-recall", Resource: current, Epoch: 7, Content: current.Shard,
+				Forwards: []shardForward{{From: historical, To: current}}}
+			r.steps.Store(packet.ID, &replicaStep{peer: "source", resource: current, epoch: 7})
+			err := r.validateForwards("source", packet)
+			if owner == "source" && err != nil {
+				t.Fatalf("current owner's transfer rejected because historical UUID was unknown: %v", err)
+			}
+			if owner != "source" && err == nil {
+				t.Fatal("non-owner transfer was accepted")
+			}
+			if r.lookupCell(historical) != nil || cell.ownstate.Phase() != mosi.IO {
+				t.Fatal("validation introduced an alias or granted permission")
+			}
+			packet.Epoch++
+			if err := r.validateForwards("source", packet); err == nil {
+				t.Fatal("wrong recall epoch accepted")
+			}
+			packet.Epoch--
+			if err := r.validateForwards("foreign", packet); err == nil {
+				t.Fatal("foreign recall source accepted")
+			}
+		})
+	}
+}
