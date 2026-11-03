@@ -35,13 +35,13 @@ func (cm *CacheManager) canLoadClusterShard(tbl *table) bool {
 // Only the cache actor changes the ledger. Readers see an admission change only
 // when a quota is crossed, rather than a shared byte-counter write per allocation.
 func (cm *CacheManager) adjustTableShardMemory(item *softItem, delta int64) {
-	if item.shardTable == nil || delta == 0 {
+	if item.shardTable() == nil || delta == 0 {
 		return
 	}
 	if cm.tableShardMemory == nil {
 		cm.tableShardMemory = make(map[*table]int64)
 	}
-	tbl := item.shardTable
+	tbl := item.shardTable()
 	used := cm.tableShardMemory[tbl] + delta
 	if used == 0 {
 		delete(cm.tableShardMemory, tbl)

@@ -68,7 +68,6 @@ var evictableWeights = [numEvictableTypes]int64{20, 1, 20, 2, 20, 20}
 var evictableNames = [numEvictableTypes]string{"TempColumn", "Shard", "Index", "TempKeytable", "CacheEntry", "StringDict"}
 
 type softItem struct {
-	shardTable      *table // native payload owner; indexes and other caches have no shard quota
 	pointer         any
 	size            int64
 	evictType       EvictableType
@@ -83,6 +82,18 @@ type softItem struct {
 	registeredAt    int64                     // UnixNano; set once in addInternal as fallback for items whose lastAccessed starts at zero
 	minLifetime     int64                     // minimum idle nanos before eviction (0 = none)
 	maxIdleTime     int64                     // force-evict if idle for this many nanos (0 = no limit)
+}
+
+// shardTable derives payload ownership from the native registration. Keeping a
+// second table pointer on every cache/index entry would enlarge all softItems,
+// although only native shards participate in the per-table quota.
+func (item *softItem) shardTable() *table {
+	if item.evictType == TypeShard {
+		if shard, ok := item.pointer.(*storageShard); ok {
+			return shard.t
+		}
+	}
+	return nil
 }
 
 type evictionMode uint8
@@ -325,12 +336,7 @@ func newSoftItem(pointer any, size int64, evictType EvictableType, cleanup func(
 	if topLevel, ok := pointer.(cacheObject); ok {
 		object = topLevel
 	}
-	var shardTable *table
-	if shard, ok := pointer.(*storageShard); ok && evictType == TypeShard {
-		shardTable = shard.t
-	}
 	return &softItem{
-		shardTable:    shardTable,
 		pointer:       pointer,
 		size:          size,
 		evictType:     evictType,
@@ -555,9 +561,9 @@ batch:
 		}
 		tbl := op.shardTable
 		if op.add != nil {
-			tbl = op.add.shardTable
+			tbl = op.add.shardTable()
 		} else if item := cm.itemMap[op.updatePtr]; item != nil {
-			tbl = item.shardTable
+			tbl = item.shardTable()
 		}
 		if tbl != nil {
 			tables[tbl] = struct{}{}
@@ -682,7 +688,7 @@ func (cm *CacheManager) evictExpired() {
 func (cm *CacheManager) addInternal(item *softItem) {
 	item.registeredAt = time.Now().UnixNano()
 	if old, ok := cm.itemMap[item.pointer]; ok {
-		if old.shardTable == item.shardTable {
+		if old.shardTable() == item.shardTable() {
 			cm.adjustTableShardMemory(item, item.size-old.size)
 		} else {
 			cm.adjustTableShardMemory(old, -old.size)
@@ -892,7 +898,7 @@ func (cm *CacheManager) evict(currentUsage, budget, additionalSize int64, typeFi
 		// to compare that warm owner with small, low-benefit probation caches.
 		for (candidateSum < candidateTarget || len(candidates) < 16) && cm.h.Len() > 0 {
 			item := heap.Pop(&cm.h).(*softItem)
-			if (typeFilter != nil && !typeFilter(item.evictType)) || (tbl != nil && item.shardTable != tbl) {
+			if (typeFilter != nil && !typeFilter(item.evictType)) || (tbl != nil && item.shardTable() != tbl) {
 				skipped = append(skipped, item)
 				continue
 			}

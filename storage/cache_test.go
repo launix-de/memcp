@@ -617,9 +617,11 @@ func TestClusterTableQuotaReclaimsOnlyThatTablesPayload(t *testing.T) {
 	outer, inner := &table{}, &table{}
 	var outerEvicted, innerEvicted atomic.Bool
 	add := func(tbl *table, size int64, evicted *atomic.Bool, used time.Time) {
-		item := newSoftItem(new(int), size, TypeShard,
-			func(any, *[numEvictableTypes]int64) bool { evicted.Store(true); return true }, func(any) time.Time { return used }, nil, 0, 0)
-		item.shardTable = tbl
+		pointer := &storageShard{t: tbl}
+		cleanup := func(any, *[numEvictableTypes]int64) bool { evicted.Store(true); return true }
+		item := newSoftItem(pointer, size, TypeShard, cleanup, func(any) time.Time { return used }, nil, 0, 0)
+		// The fixture models reclaimable payload with the real native owner.
+		item.object = atomicCacheObject{pointer: pointer, cleanup: cleanup}
 		manager.opChan <- cacheOp{add: item}
 		manager.Stat()
 	}

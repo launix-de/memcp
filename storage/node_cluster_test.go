@@ -85,9 +85,10 @@ func TestClusterTableShardRAMLeavesRoomForInnerScans(t *testing.T) {
 	defer cache.Stop()
 	tables := []*table{{}, {}, {}}
 	for _, tbl := range tables {
-		item := newSoftItem(new(int), 5<<20, TypeShard,
-			func(any, *[numEvictableTypes]int64) bool { return false }, func(any) time.Time { return time.Now() }, nil, 0, 0)
-		item.shardTable = tbl
+		pointer := &storageShard{t: tbl}
+		cleanup := func(any, *[numEvictableTypes]int64) bool { return false }
+		item := newSoftItem(pointer, 5<<20, TypeShard, cleanup, func(any) time.Time { return time.Now() }, nil, 0, 0)
+		item.object = atomicCacheObject{pointer: pointer, cleanup: cleanup}
 		cache.opChan <- cacheOp{add: item}
 		cache.Stat()
 		if cache.canLoadClusterShard(tbl) {
