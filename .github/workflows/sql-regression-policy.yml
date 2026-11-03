@@ -15,6 +15,11 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Use the policy fingerprint interpreter
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
       # Policy code always comes from the trusted base revision.  Candidate
       # files are parsed as data and are never imported or executed.
       - name: Check out trusted policy
