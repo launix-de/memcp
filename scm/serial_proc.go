@@ -573,6 +573,6 @@ func (p *SerialProc) IsNative(name Symbol) bool {
 	if p.Kind != SerialProcNative {
 		return false
 	}
-	value, ok := Globalenv.Lookup(name)
+	value, ok := Globalenv.Vars[name]
 	return ok && value.GetTag() == tagFunc && value.ptr == p.Value.ptr && value.aux == p.Value.aux
 }

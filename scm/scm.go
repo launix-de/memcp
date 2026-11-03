@@ -1015,7 +1015,10 @@ func (e *Env) optimizerProcHint(s Symbol) (TypeInfo, bool) {
 }
 
 // Lookup reads a named binding in one walk. A present nil still shadows outer
-// bindings; callers needing the owning frame use FindRead instead.
+// bindings; callers needing the owning frame use FindRead instead. Keep this
+// traversal shared rather than duplicating its loop in the large evaluator.
+//
+//go:noinline
 func (e *Env) Lookup(s Symbol) (Scmer, bool) {
 	for e != nil {
 		if value, ok := e.Vars[s]; ok {
@@ -1026,6 +1029,9 @@ func (e *Env) Lookup(s Symbol) (Scmer, bool) {
 	return NewNil(), false
 }
 
+// Keep frame traversal out of line, as with its former recursive implementation.
+//
+//go:noinline
 func (e *Env) FindRead(s Symbol) *Env {
 	for {
 		if _, ok := e.Vars[s]; ok || e.Outer == nil {
