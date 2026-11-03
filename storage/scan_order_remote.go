@@ -95,16 +95,23 @@ func freezeScanOrder(input *shardOrderInvocation, bindings *scm.SerializationCon
 	return result, nil
 }
 
-func freezeScanDirection(direction func(...scm.Scmer) scm.Scmer, bindings *scm.SerializationContext) (json.RawMessage, error) {
-	var expression scm.Scmer
+// Both captured boundaries and ordinary ordered scans use the same relation
+// constructor. A native comparator must never become a per-item owner call.
+func scanDirectionExpression(direction func(...scm.Scmer) scm.Scmer) (scm.Scmer, error) {
 	if name, reverse, ok := scm.LookupCollate(direction); ok {
-		expression = scm.NewSlice([]scm.Scmer{scm.NewSymbol("collate"), scm.NewString(name), scm.NewBool(reverse)})
-	} else if declaration := scm.DeclarationForValue(scm.NewFunc(direction)); declaration != nil {
-		expression = scm.NewSymbol(declaration.Name)
-	} else {
-		return nil, fmt.Errorf("ordered comparison has no portable constructor")
+		return scm.NewSlice([]scm.Scmer{scm.NewSymbol("collate"), scm.NewString(name), scm.NewBool(reverse)}), nil
 	}
+	if declaration := scm.DeclarationForValue(scm.NewFunc(direction)); declaration != nil {
+		return scm.NewSymbol(declaration.Name), nil
+	}
+	return scm.NewNil(), fmt.Errorf("ordered comparison has no portable constructor")
+}
 
+func freezeScanDirection(direction func(...scm.Scmer) scm.Scmer, bindings *scm.SerializationContext) (json.RawMessage, error) {
+	expression, err := scanDirectionExpression(direction)
+	if err != nil {
+		return nil, err
+	}
 	// Construct the native collation once on the worker, preserving its identity
 	// and index-order metadata as well as its value/NULL comparison semantics.
 	proc := scm.Eval(scm.NewSlice([]scm.Scmer{scm.NewSymbol("lambda"), scm.NewSlice(nil), expression}), &scm.Globalenv)

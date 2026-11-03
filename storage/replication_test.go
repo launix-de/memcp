@@ -1835,3 +1835,43 @@ func TestReplicationForwardingAcceptsKnownCurrentOwner(t *testing.T) {
 		})
 	}
 }
+
+// Race the decision against native admission closure. An enlisted transaction
+// must finish while a handover drains it, including when closure wins just
+// before TryWrite; no wire rights or deadlines may be bypassed.
+func TestReplicationCommitRacesHandoverAdmission(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "tadmissionrace", 3)
+	r := &replicationManager{cells: make(map[string]*replicaCell), directory: replicaDirectory{Records: make(map[string]replicaRecord)}}
+	r.resourceCell(mosiResource{Database: tbl.schema.Name}).ownstate.Initialize(mosi.M)
+	shard := tbl.ActiveShards()[0]
+	cell := r.shardCell(shard)
+	cell.ownstate.Initialize(mosi.M)
+	previous := replication.Swap(r)
+	defer replication.Store(previous)
+	for i := 0; i < 1024; i++ {
+		tx := NewTxContext(TxACID)
+		tx.mu.Lock()
+		tx.getOrCreateShardTxLocked(shard)
+		tx.mu.Unlock()
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		start := make(chan struct{})
+		handoff := make(chan error, 1)
+		committed := make(chan error, 1)
+		go func() {
+			<-start
+			h, err := cell.ownstate.BeginHandover(ctx, cell.drainWrites)
+			if err == nil {
+				h.Release()
+			}
+			handoff <- err
+		}()
+		go func() { <-start; committed <- tx.Commit() }()
+		close(start)
+		err := <-handoff
+		cancel()
+		commitErr := <-committed
+		if err != nil || commitErr != nil {
+			t.Fatalf("iteration %d handover=%v commit=%v", i, err, commitErr)
+		}
+	}
+}

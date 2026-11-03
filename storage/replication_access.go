@@ -508,10 +508,14 @@ func (r *replicationManager) writeResource(resource mosiResource, tx *TxContext,
 		if blocking {
 			c = r.obtain(resource, mosi.M, replicationUser(tx), tx)
 		}
-		continuation := c.ownstate.ClosingWrites() && c.transactionContinues(tx)
-		writer, wait := c.ownstate.TryWrite(owner, continuation)
+		writer, wait := c.ownstate.TryWrite(owner, false)
+		if writer == nil && c.ownstate.ClosingWrites() && c.transactionContinues(tx) {
+			// Handover may begin between a preflight check and TryWrite. Prove
+			// continuation after admission refuses us, before waiting on the
+			// handover which itself waits for this transaction to finish.
+			writer, wait = c.ownstate.TryWrite(owner, true)
+		}
 		if writer != nil {
-
 			return c, writer.Release, true
 		}
 		if !blocking {

@@ -16,12 +16,10 @@ Copyright (C) 2026  Carl-Philip Hänsch
 */
 package storage
 
-import (
-	"math/rand"
-	"testing"
-
-	"github.com/launix-de/memcp/scm"
-)
+import "math"
+import "testing"
+import "math/rand"
+import "github.com/launix-de/memcp/scm"
 
 func TestProjectJoinNumericLookupMatchesIntegralStorageRepresentations(t *testing.T) {
 	keys := recSetProjectKeys{
@@ -1021,4 +1019,42 @@ func TestProjectJoinIndexPrefixConcurrentPublication(t *testing.T) {
 		}
 	}
 	<-done
+}
+
+func TestProjectJoinNumericMembershipPreservesBoundsAndHoles(t *testing.T) {
+	for _, values := range [][]int64{
+		nil, {7}, {-2, -1, 0, 1, 2}, {1, 2, 4}, {2, 1, 1, 3},
+		{math.MinInt64, math.MinInt64 + 1}, {math.MaxInt64 - 1, math.MaxInt64},
+		{math.MinInt64, math.MaxInt64},
+	} {
+		keys := recSetProjectKeys{width: 1}
+		want := make(map[int64]bool)
+		for _, value := range values {
+			keys.values = append(keys.values, scm.NewInt(value))
+			want[value] = true
+		}
+		keys.sortAndDeduplicate()
+		if !keys.buildNumericLookup() {
+			t.Fatal("integral keyset rejected")
+		}
+		probes := append([]int64{math.MinInt64, math.MinInt64 + 1, math.MinInt64 + 2, math.MaxInt64 - 2, math.MaxInt64 - 1, math.MaxInt64}, values...)
+		for value := int64(-4); value <= 9; value++ {
+			probes = append(probes, value)
+		}
+		for _, value := range probes {
+			if got := keys.contains([]scm.Scmer{scm.NewInt(value)}); got != want[value] {
+				t.Fatalf("keys %v: membership(%d)=%t, want %t", values, value, got, want[value])
+			}
+			if value > -(1<<53) && value < 1<<53 {
+				if got := keys.contains([]scm.Scmer{scm.NewFloat(float64(value))}); got != want[value] {
+					t.Fatalf("keys %v: integral float membership(%d)=%t, want %t", values, value, got, want[value])
+				}
+			}
+		}
+		for _, value := range []scm.Scmer{scm.NewNil(), scm.NewFloat(1.5), scm.NewFloat(math.NaN()), scm.NewFloat(math.Inf(1))} {
+			if keys.contains([]scm.Scmer{value}) {
+				t.Fatalf("keys %v admitted a non-integral key", values)
+			}
+		}
+	}
 }
