@@ -111,10 +111,10 @@ func TestCStringCollationAndLike(t *testing.T) {
 					for _, coll := range []string{"bin", "utf8mb4_general_ci"} {
 						got := scm.Apply(like, v, scm.NewString(pattern), scm.NewString(coll)).Bool()
 						cs := scm.Globalenv.Vars[scm.Symbol("strlike_cs")]
-						if scm.Apply(cs, v, scm.NewString(pattern), scm.NewString(coll)).Bool() != scm.StrLike(text, pattern) {
+						if scm.Apply(cs, v, scm.NewString(pattern), scm.NewString(coll)).Bool() != scm.StrLike(text, pattern, "\\") {
 							t.Fatal("strlike_cs changed case semantics")
 						}
-						if want := scm.StrLikeCollation(text, pattern, coll); got != want {
+						if want := scm.StrLikeCollation(text, pattern, coll, "\\"); got != want {
 							t.Fatalf("LIKE %q %q %s got %v want %v", text, pattern, coll, got, want)
 						}
 					}

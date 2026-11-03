@@ -580,6 +580,9 @@ func TestProcedureWireRegexpOperators(t *testing.T) {
 			if err != nil {
 				t.Fatalf("%s optimize=%v: %v", test.source, optimize, err)
 			}
+			if strings.Contains(string(data), "compiled_regex") || strings.Contains(string(data), "jit-constant-regexp") {
+				t.Fatalf("optimized implementation leaked onto wire: %s", data)
+			}
 			restored, err := UnmarshalProcedure(data)
 			if err != nil {
 				t.Fatal(err)

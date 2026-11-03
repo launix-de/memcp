@@ -741,9 +741,81 @@ test_cases:
     sql: "SELECT 1 AS ok"
     expect: { rows: 1 }
 
+  - name: Prepare persistent text search columns
+    setup:
+      - sql: DROP TABLE IF EXISTS ft_boolean
+      - sql: CREATE TABLE ft_boolean (id INT PRIMARY KEY, title TEXT, body TEXT) ENGINE=sloppy
+      - scm: |
+          (begin
+            (insert (table "memcp-tests" false "ft_boolean" false) '("id" "title" "body")
+              (map (produceN 512) (lambda (i)
+                (list i (match i 3 "alpha" 7 "alpha needle" 11 "alpha manual manual manual" 15 "alpha_beta" _ "ordinary text")
+                  (if (equal? i 3) "needle" (equal? i 7) "manual" "other text")))))
+            (rebuild (table "memcp-tests" false "ft_boolean" false) true false))
+    sql: SELECT COUNT(*) AS n FROM ft_boolean
+    expect: {data: [{n: 512}]}
+  - name: Required words may occur in different indexed columns
+    sql: SELECT id FROM ft_boolean WHERE MATCH(title,body) AGAINST('+alpha +needle' IN BOOLEAN MODE)>0 ORDER BY id
+    expect: {data: [{id: 3}, {id: 7}]}
+  - name: Repeated multi-column search retains candidates
+    sql: SELECT id FROM ft_boolean WHERE MATCH(title,body) AGAINST('+alpha +needle' IN BOOLEAN MODE)>0 ORDER BY id
+    expect: {data: [{id: 3}, {id: 7}]}
+  - name: Warm multi-column search retains candidates
+    sql: SELECT id FROM ft_boolean WHERE MATCH(title,body) AGAINST('+alpha +needle' IN BOOLEAN MODE)>0 ORDER BY id
+    expect: {data: [{id: 3}, {id: 7}]}
+  - name: Indexed search reduces physical candidate rows
+    setup:
+      - scm: '(sleep 0.2)'
+    sql: |
+      SELECT CASE WHEN MIN(candidateCount)>0 AND MIN(candidateCount)<512 THEN 'ok' ELSE 'FAIL' END AS result
+      FROM system_statistic.scans WHERE `table`='ft_boolean' AND outputCount=2
+    expect: {data: [{result: 'ok'}]}
+    on_fail:
+      - sql: SELECT index_cols,inputCount,candidateCount,outputCount FROM system_statistic.scans WHERE `table`='ft_boolean'
+  - name: Indexed soft negation preserves negative-score truth
+    sql: SELECT id FROM ft_boolean WHERE MATCH(title,body) AGAINST('+alpha ~manual' IN BOOLEAN MODE) ORDER BY id
+    expect: {data: [{id: 3}, {id: 11}]}
+  - name: Positive-score filter rejects negative relevance
+    sql: SELECT id FROM ft_boolean WHERE MATCH(title,body) AGAINST('+alpha ~manual' IN BOOLEAN MODE)>0 ORDER BY id
+    expect: {data: [{id: 3}]}
+  - name: Zero-admitting score filter retains nonmatching documents
+    sql: SELECT COUNT(*) AS n FROM ft_boolean WHERE MATCH(title,body) AGAINST('+alpha ~manual' IN BOOLEAN MODE)>=0
+    expect: {data: [{n: 511}]}
+  - name: Score projection retains nonmatching documents
+    sql: SELECT id,MATCH(title,body) AGAINST('+alpha +needle' IN BOOLEAN MODE) AS score FROM ft_boolean WHERE id=0
+    expect: {data: [{id: 0, score: 0}]}
+  - name: Negative score comparison keeps penalized documents
+    sql: SELECT id FROM ft_boolean WHERE MATCH(title,body) AGAINST('+alpha ~manual' IN BOOLEAN MODE)<0
+    expect: {data: [{id: 11}]}
+  - name: Custom LIKE escape reaches persistent bigram candidates
+    sql: SELECT id FROM ft_boolean WHERE title LIKE '%alpha!_beta%' ESCAPE '!'
+    expect: {data: [{id: 15}]}
+  - name: Escaped binary prefix retains literal underscore
+    sql: SELECT id FROM ft_boolean WHERE title COLLATE utf8mb4_bin LIKE 'alpha!_%' ESCAPE '!'
+    expect: {data: [{id: 15}]}
+  - name: Indexed search leaves inserted delta rows for residual evaluation
+    setup:
+      - sql: INSERT INTO ft_boolean VALUES(512,'alpha','needle')
+    sql: SELECT id FROM ft_boolean WHERE MATCH(title,body) AGAINST('+alpha +needle' IN BOOLEAN MODE)>0 ORDER BY id
+    expect: {data: [{id: 3}, {id: 7}, {id: 512}]}
+  - name: Deleted text rows are not resurrected by cached postings
+    setup:
+      - sql: DELETE FROM ft_boolean WHERE id=3
+    sql: SELECT id FROM ft_boolean WHERE MATCH(title,body) AGAINST('+alpha +needle' IN BOOLEAN MODE)>0 ORDER BY id
+    expect: {data: [{id: 7}, {id: 512}]}
+  - name: Rebuilt text rows retain search semantics
+    setup:
+      - scm: '(rebuild (table "memcp-tests" false "ft_boolean" false) true false)'
+    sql: SELECT id FROM ft_boolean WHERE MATCH(title,body) AGAINST('+alpha +needle' IN BOOLEAN MODE)>0 ORDER BY id
+    expect: {data: [{id: 7}, {id: 512}]}
+  - name: Row-dependent search programs are explicitly rejected
+    sql: SELECT id FROM ft_boolean WHERE MATCH(title) AGAINST(body IN BOOLEAN MODE)>0
+    expect: {error: true}
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS `ft_customers`"
   - sql: "DROP TABLE IF EXISTS `ft_large`"
   - sql: "DROP TABLE IF EXISTS `ft_alternating`"
   - sql: "DROP TABLE IF EXISTS `ft_matchset`"
   - sql: "DROP TABLE IF EXISTS `ft_multishard`"
+  - sql: DROP TABLE IF EXISTS ft_boolean

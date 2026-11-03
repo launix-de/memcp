@@ -343,11 +343,34 @@ serialization still see the complete plan. */
 			(list (quote !begin) (list (quote replication_write) (quote tx)) formula))
 		formula)))
 
+/* Search programs depend on statement inputs, never on the scanned row. Bind
+identical programs once outside row closures, including parameterized plans. */
+(define sql_queryplan_prepare_search (lambda (formula) (begin
+	(define bindings (newsession))
+	(define rewrite (lambda (expr) (match expr
+		(cons head tail) (if (equal? head (quote quote)) expr
+			(equal? head sql_text_search_prepare) (begin
+				(define key (json_encode tail))
+				(define entry (bindings key))
+				(if entry (car entry) (begin
+					(define name (symbol (concat "search_program_" (sha256 key))))
+					(bindings key (list name expr))
+					name)))
+			(cons head (map tail rewrite)))
+		_ expr)))
+	(define rewritten (rewrite formula))
+	(cons (quote !begin)
+		(merge (list
+			(map (bindings) (lambda (key)
+				(list (quote define) (car (bindings key)) (cadr (bindings key)))))
+			(list rewritten))))
+)))
+
 (define sql_queryplan_compile_formula (lambda (compile_tx formula)
 	(jit (close_procedure (eval (optimize (list
 		(quote lambda)
 		(list (quote session) (quote tx) (quote resultrow) (quote resultfields))
-		(source "SQL Query" 1 1 formula))))) compile_tx)))
+		(source "SQL Query" 1 1 (sql_queryplan_prepare_search formula)))))) compile_tx)))
 
 (define sql_compile_queryplan_variant (lambda (parse_fn schema parse_query policy source_session tx)
 	(begin

@@ -200,3 +200,18 @@ test_cases:
   - name: Natural language MATCH still composes with comparisons
     sql: SELECT MATCH('alpha') AGAINST('alpha' IN NATURAL LANGUAGE MODE)>0 AS matched
     expect: {data: [{matched: true}]}
+  - name: Prepared search observes the current statement input
+    session_id: weighted-search-parameters
+    setup:
+      - sql: SET @weighted_search='+alpha'
+    sql: SELECT MATCH('alpha manual') AGAINST(@weighted_search IN BOOLEAN MODE) AS score
+    expect: {data: [{score: 1}]}
+  - name: Cached search plan does not retain previous query terms
+    session_id: weighted-search-parameters
+    setup:
+      - sql: SET @weighted_search='+missing'
+    sql: SELECT MATCH('alpha manual') AGAINST(@weighted_search IN BOOLEAN MODE) AS score
+    expect: {data: [{score: 0}]}
+  - name: Empty required groups are rejected
+    sql: SELECT MATCH('alpha') AGAINST('+()' IN BOOLEAN MODE)
+    expect: {error: true}

@@ -220,6 +220,9 @@ func closeProcedurePattern(pattern Scmer, callFrame *Env, bound map[Symbol]struc
 }
 
 func validateProcedurePattern(pattern Scmer, bound map[Symbol]struct{}, origin *Env, depth int, bindings ...*SerializationContext) error {
+	if pattern.WithoutSourceInfo().IsRegex() {
+		return nil
+	}
 	if depth > 128 {
 		return fmt.Errorf("procedure pattern exceeds wire nesting limit")
 	}
@@ -248,7 +251,7 @@ func validateProcedureWire(value Scmer, bound map[Symbol]struct{}, origin *Env, 
 		return nil
 	}
 	switch value.GetTag() {
-	case tagNil, tagBool, tagInt, tagFloat, tagDate, tagString, tagCString, tagBString, tagLZ4, tagRegex, tagNthLocalVar:
+	case tagNil, tagBool, tagInt, tagFloat, tagDate, tagString, tagCString, tagBString, tagLZ4, tagNthLocalVar:
 		return nil
 	case tagSymbol:
 		if !literal {
@@ -294,6 +297,15 @@ func validateProcedureWire(value Scmer, bound map[Symbol]struct{}, origin *Env, 
 		return nil
 	case tagSlice:
 		items := value.Slice()
+		if !literal && len(items) > 0 {
+			if declaration := DeclarationForValue(items[0]); declaration != nil && declaration.SerializeCall != nil {
+				source, err := declaration.SerializeCall(items[1:])
+				if err != nil {
+					return err
+				}
+				return validateProcedureWire(source, bound, origin, false, depth+1, bindings...)
+			}
+		}
 		if !literal {
 			items = lambdaSyntaxOperands(items)
 		}

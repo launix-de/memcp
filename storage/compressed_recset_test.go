@@ -271,7 +271,7 @@ func TestLikeBigramIndexCandidatesAreSafeSuperset(t *testing.T) {
 
 	check := func(pattern string, want []uint32) {
 		t.Helper()
-		candidate, constrained := index.candidatesPattern(pattern)
+		candidate, constrained := index.candidatesPattern(pattern, "\\")
 		if !constrained {
 			t.Fatalf("%q did not produce a candidate constraint", pattern)
 		}
@@ -298,7 +298,7 @@ func TestLikeBigramIndexCandidatesAreSafeSuperset(t *testing.T) {
 	if candidates, universe, ok := index.EstimateCandidates(scm.NewString("%missing%")); !ok || candidates != 0 || universe != uint32(len(values)) {
 		t.Fatalf("missing estimate = (%d, %d, %v), want (0, %d, true)", candidates, universe, ok, len(values))
 	}
-	if _, constrained := index.candidatesPattern("%x%"); constrained {
+	if _, constrained := index.candidatesPattern("%x%", "\\"); constrained {
 		t.Fatal("single-rune pattern unexpectedly produced a bigram constraint")
 	}
 	if _, _, ok := index.EstimateCandidates(scm.NewString("%x%")); ok {
@@ -436,5 +436,81 @@ func TestLikeIndexSmallShardUsesSharedNoopHook(t *testing.T) {
 	}
 	if matcher := first.Bind(scm.NewString("%casino%")); matcher != nil {
 		t.Fatal("small-shard hook unexpectedly installed a row matcher")
+	}
+}
+
+func TestTextSearchBigramCandidates(t *testing.T) {
+	const rows = 512
+	left := ColumnReaderFunc(func(id uint32) scm.Scmer {
+		if id == 3 {
+			return scm.NewString("alpha")
+		}
+		if id == 7 {
+			return scm.NewString("alpha needle")
+		}
+		return scm.NewString("ordinary text")
+	})
+	right := ColumnReaderFunc(func(id uint32) scm.Scmer {
+		if id == 3 {
+			return scm.NewString("needle")
+		}
+		return scm.NewString("other text")
+	})
+	a, b := buildBigramIndex(rows, left), buildBigramIndex(rows, right)
+	term := func(word string, required bool) scm.Scmer {
+		return scm.NewSlice([]scm.Scmer{scm.NewInt(1), scm.NewBool(required), scm.NewBool(false), scm.NewString("word"), scm.NewString(word), scm.NewBool(false)})
+	}
+	for _, tc := range []struct {
+		indexes []*bigramIndex
+		terms   []scm.Scmer
+		want    []uint32
+	}{
+		{[]*bigramIndex{a}, []scm.Scmer{term("alpha", true), term("needle", true)}, []uint32{7, rows}},
+		{[]*bigramIndex{a, b}, []scm.Scmer{term("alpha", true), term("needle", true)}, []uint32{3, 7, rows}},
+		{[]*bigramIndex{a, b}, []scm.Scmer{term("missing", false), term("needle", false)}, []uint32{3, 7, rows}},
+		{[]*bigramIndex{a, b}, []scm.Scmer{term("missing", true)}, []uint32{rows}},
+		{[]*bigramIndex{a, b}, []scm.Scmer{term("a", true), term("needle", true)}, []uint32{3, 7, rows}},
+	} {
+		set, constrained := textSearchCandidates(tc.indexes, scm.NewSlice(tc.terms))
+		if !constrained {
+			t.Fatal("selective search did not constrain candidates")
+		}
+		ids := make([]uint32, rows+1)
+		for i := range ids {
+			ids[i] = uint32(i)
+		}
+		got := textSearchRowMatcher(set, rows)(ids)
+		if !reflect.DeepEqual(got, tc.want) {
+			t.Fatalf("got %v, want %v", got, tc.want)
+		}
+	}
+}
+
+func TestLikeIndexCustomEscapeCandidates(t *testing.T) {
+	values := []string{"alpha_beta", "alphaxbeta", "alpha%beta", "alpha!beta"}
+	hook := buildBigramIndex(uint32(len(values)), ColumnReaderFunc(func(id uint32) scm.Scmer { return scm.NewString(values[id]) }))
+	binding := scm.NewSlice([]scm.Scmer{scm.NewString(":like"), scm.NewString("%alpha!_beta%"), scm.NewString("!")})
+	if got := hook.Bind(binding)([]uint32{0, 1, 2, 3, 4}); !reflect.DeepEqual(got, []uint32{0, 4}) {
+		t.Fatalf("escaped literal candidate filtering = %v", got)
+	}
+}
+
+func TestTextSearchAndLikeShareGenerationPostings(t *testing.T) {
+	shard := &storageShard{}
+	a := &StorageConst{value: scm.NewString("alpha"), count: 512}
+	b := &StorageConst{value: scm.NewString("needle"), count: 512}
+	first := LikeMatcher.Deploy(IndexDeployContext{MainCount: 512, Column: a, sources: []ColumnStorage{a}, readers: []ColumnReader{a}, shard: shard}, true).(*bigramIndex)
+	second := LikeMatcher.Deploy(IndexDeployContext{MainCount: 512, sources: []ColumnStorage{a, b}, readers: []ColumnReader{a, b}, shard: shard}, true).(*textSearchIndex)
+	if second.indexes[0] != first {
+		t.Fatal("multi-column search rebuilt existing LIKE postings")
+	}
+	third := LikeMatcher.Deploy(IndexDeployContext{MainCount: 512, Column: b, sources: []ColumnStorage{b}, readers: []ColumnReader{b}, shard: shard}, true).(*bigramIndex)
+	if second.indexes[1] != third {
+		t.Fatal("LIKE rebuilt existing multi-column search postings")
+	}
+	// A rebuilt generation must not consume its predecessor's physical RecIDs.
+	next := LikeMatcher.Deploy(IndexDeployContext{MainCount: 512, Column: a, sources: []ColumnStorage{a}, readers: []ColumnReader{a}, shard: &storageShard{}}, true).(*bigramIndex)
+	if next == first {
+		t.Fatal("posting cache crossed generation ownership")
 	}
 }

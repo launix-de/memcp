@@ -570,6 +570,7 @@ func (emitter *jitParserEmitter) emitGoRegexTerminal(node *jitParserNode, succes
 	lenDesc := ctx.EmitGoCallScalar(GoFuncAddr(jitParserGoRegexpMatchLenNative), []JITValueDesc{reArg, input}, 1)
 	lenDesc.Type = tagInt
 	ctx.FreeDesc(&reArg)
+	ctx.FreeDesc(&input)
 	lenOff := ctx.AllocStack(8)
 	ctx.EmitStoreRegMem(lenDesc.Reg, ctx.StackReg, lenOff)
 	ctx.EmitCmpRegImm32(lenDesc.Reg, 0)

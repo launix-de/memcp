@@ -82,7 +82,7 @@ func jitRegexpReplaceHelperCall(entryValue, s Scmer) Scmer {
 }
 
 // jitEmitConstantRegexpReplaceViaHelper is the JITEmit for
-// jit-constant-regexp-replace-func: compile the scan once, emit a call.
+// jit-constant-regexp-replace: compile the scan once, emit a call.
 func jitEmitConstantRegexpReplaceViaHelper(ctx *JITContext, pattern *regexp.Regexp, replacement Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 	replacement = replacement.WithoutSourceInfo()
 	if !scmerCallable(replacement) {
@@ -144,7 +144,7 @@ func jitApply1(procedure, arg Scmer) Scmer {
 }
 
 // jitEmitConstantRegexpReplaceFunc lowers the hidden
-// jit-constant-regexp-replace-func declaration - `(regexp_replace s "<const>"
+// jit-constant-regexp-replace declaration - `(regexp_replace s "<const>"
 // f)` with a constant pattern and a function replacement.
 //
 // It drives the existing regex JIT (jitEmitRegexScanReplace / emitMatchAt) over

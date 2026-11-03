@@ -193,6 +193,19 @@ test_cases:
     sql: SELECT '\Z'=0x1a AS z, '\b'=0x08 AS b, '\t'=0x09 AS t
     expect: {data: [{z: true, b: true, t: true}]}
 
+  - name: Unicode escape is recognized before case folding
+    sql: SELECT 'a_b' LIKE 'aÄ_b' ESCAPE 'Ä' AS matched
+    expect: {data: [{matched: true}]}
+  - name: Percent itself may be the escape character
+    sql: SELECT 'a%b' LIKE 'a%%b' ESCAPE '%' AS matched
+    expect: {data: [{matched: true}]}
+  - name: Empty escape leaves backslash literal
+    sql: SELECT 'a\\xb' LIKE 'a\\_b' ESCAPE '' AS matched
+    expect: {data: [{matched: true}]}
+  - name: Multicharacter LIKE escape is rejected
+    sql: SELECT 'abc' LIKE 'abc' ESCAPE 'ab'
+    expect: {error: true}
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS like_qualified"
   - sql: "DROP TABLE IF EXISTS notlike_test"

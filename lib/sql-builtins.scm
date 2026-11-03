@@ -47,97 +47,55 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(atom "NEWID" true))) "(" ")") (toUpper name))
 )))
 
-/* Normalize a SQL LIKE pattern to the runtime's backslash escape syntax.
-The input and work are bounded by the scalar pattern, never table row count. */
-(define sql_like_pattern (lambda (pattern escape) (begin
-	(if (or (nil? pattern) (nil? escape)) nil (begin
-		(if (> (count (split escape "")) 1) (error "LIKE ESCAPE must be empty or one character"))
-		(define literal (lambda (c) (if (has? '("%" "_" "\\") c) (concat "\\" c) c)))
-		(define translate (lambda (chars) (match chars
-			'() ""
-			(cons c rest) (if (and (not (equal? escape "")) (equal? c escape))
-				(match rest
-					(cons escaped tail) (concat (literal escaped) (translate tail))
-					'() (literal c))
-				(concat (if (equal? c "\\") "\\\\" c) (translate rest))))))
-		(translate (split pattern ""))
-)))))
+/* Parse SQL search syntax once per execution. The runtime receives immutable
+weighted terms; it does not interpret SQL syntax. */
+(define sql_fulltext_words (lambda (text)
+	(filter (split (regexp_replace (toLower (coalesceNil text "")) "[^\\p{L}\\p{N}_']+" " ") " ")
+		(lambda (word) (not (equal? word ""))))))
 
-/* Boolean full-text predicates are scalar frontend semantics. Tokenization and
-query evaluation are pure, so the same closure runs on local and delegated rows.
-Relevance is a weighted term-frequency score; it does not require corpus scans. */
-(define sql_fulltext_boolean (lambda (values needle) (begin
-	(define sql_fulltext_words (lambda (text)
-		(filter (split (regexp_replace (toLower (coalesceNil text "")) "[^\\p{L}\\p{N}_']+" " ") " ")
-			(lambda (word) (not (equal? word ""))))))
-
-	/* Keep the query grammar as immutable tokens and terms. Parser-combinator
-	objects are compile-time values, while this scalar can run in any executor. */
-	(define sql_fulltext_query (lambda (text) (begin
-		(define parse_body (lambda (tokens) (match tokens
-			'() (error "missing fulltext term")
-			(cons "(" rest) (begin
-				(define parsed (parse_terms rest true))
-				(if (nil? (car parsed)) (error "empty fulltext group"))
-				(list (list "group" (car parsed)) (cadr parsed)))
-			(cons token rest) (list
-				(if (regexp_test token "^\"[^\"]*\"$")
-					(list "phrase" (sql_fulltext_words (substr token 1 (- (strlen token) 2))))
-					(regexp_test token "^[\\p{L}\\p{N}_']+\\*?$")
-					(begin
-						(define prefix (equal? (substr token (- (strlen token) 1)) "*"))
-						(list "word" (toLower (if prefix (substr token 0 (- (strlen token) 1)) token)) prefix))
-					(error "unsupported fulltext term: " token)) rest))))
-		(define parse_term (lambda (tokens) (begin
+/* Keep the query grammar as immutable tokens and terms. Parser-combinator
+objects are compile-time values, while this scalar can run in any executor. */
+(define sql_fulltext_query (lambda (text) (begin
+	(define parse_terms (lambda (tokens nested) (match tokens
+		'() (if nested (error "unclosed fulltext group") (list '() '()))
+		(cons ")" rest) (if nested (list '() rest) (error "unexpected fulltext group end"))
+		_ (begin
 			(define modifier (if (has? '("+" "-" "~" ">" "<") (car tokens)) (car tokens) ""))
-			(define parsed (parse_body (if (equal? modifier "") tokens (cdr tokens))))
-			(list (list modifier (car parsed)) (cadr parsed)))))
-		(define parse_terms (lambda (tokens nested) (match tokens
-			'() (if nested (error "unclosed fulltext group") (list '() '()))
-			(cons ")" rest) (if nested (list '() rest) (error "unexpected fulltext group end"))
-			_ (begin
-				(define parsed (parse_term tokens))
-				(define tail (parse_terms (cadr parsed) nested))
-				(list (cons (car parsed) (car tail)) (cadr tail))))))
-		(define normalized (regexp_replace text "[\\r\\n\\t]+" " "))
-		(define tokens (filter (split (regexp_replace normalized
-			"(\"[^\"]*\"|[+~<>()-]|[\\p{L}\\p{N}_']+\\*?)" "\n$1\n") "\n")
-			(lambda (token) (not (regexp_test token "^ *$")))))
-		(car (parse_terms tokens false))
-	)))
-
-	(define sql_fulltext_phrase_count (lambda (words phrase)
-		(if (or (nil? phrase) (> (count phrase) (count words))) 0
-			(+ (if (reduce (produceN (count phrase)) (lambda (ok i)
-				(and ok (equal_collate (nth words i) (nth phrase i) "utf8mb4_general_ci"))) true) 1 0)
-				(sql_fulltext_phrase_count (cdr words) phrase)))))
-
-	(define sql_fulltext_group_score (lambda (columns terms) (begin
-		(define scored (map terms (lambda (term) (begin
-			(define score (match (cadr term)
-				'("group" children) (sql_fulltext_group_score columns children)
-				'("phrase" phrase) (reduce columns (lambda (score words)
-					(+ score (sql_fulltext_phrase_count words phrase))) 0)
-				'("word" needle prefix) (reduce columns (lambda (score words)
-					(+ score (count (filter words (lambda (word)
-						(if prefix
-							(strlike word (concat (replace needle "_" "\\_") "%") "utf8mb4_general_ci")
-							(equal_collate word needle "utf8mb4_general_ci"))))))) 0)))
-			(list (car term) score)))))
-		(define required (filter scored (lambda (term) (equal? (car term) "+"))))
-		(define positive (filter scored (lambda (term) (not (has? '("-" "~") (car term))))))
-		(if (or
-			(reduce scored (lambda (bad term) (or bad (and (equal? (car term) "-") (> (cadr term) 0)))) false)
-			(reduce required (lambda (bad term) (or bad (<= (cadr term) 0))) false)
-			(not (reduce positive (lambda (found term) (or found (> (cadr term) 0))) false)))
-			0
-			(reduce scored (lambda (score term)
-				(+ score (* (cadr term) (match (car term) "-" 0 "~" -1 ">" 2 "<" 0.5 _ 1)))) 0))
-	)))
-
-	(if (nil? needle) nil
-		(sql_fulltext_group_score (map values sql_fulltext_words) (sql_fulltext_query needle)))
+			(define remaining (if (equal? modifier "") tokens (cdr tokens)))
+			(define parsed (match remaining
+				(cons "(" rest) (begin
+					(define group (parse_terms rest true))
+					(if (equal? (count (car group)) 0) (error "empty fulltext group"))
+					(list (list "group" (car group)) (cadr group)))
+				(cons token rest) (list
+					(if (regexp_test token "^\"[^\"]*\"$")
+						(list "phrase" (sql_fulltext_words (substr token 1 (- (strlen token) 2))))
+						(regexp_test token "^[\\p{L}\\p{N}_']+\\*?$")
+						(begin
+							(define prefix (equal? (substr token (- (strlen token) 1)) "*"))
+							(list "word" (toLower (if prefix (substr token 0 (- (strlen token) 1)) token)) prefix))
+						(error "unsupported fulltext term: " token)) rest)
+				_ (error "missing fulltext term")))
+			(define tail (parse_terms (cadr parsed) nested))
+			(list (cons (list modifier (car parsed)) (car tail)) (cadr tail))))))
+	(define normalized (regexp_replace text "[\\r\\n\\t]+" " "))
+	(define tokens (filter (split (regexp_replace normalized
+		"(\"[^\"]*\"|[+~<>()-]|[\\p{L}\\p{N}_']+\\*?)" "\n$1\n") "\n")
+		(lambda (token) (not (regexp_test token "^ *$")))))
+	(car (parse_terms tokens false))
 )))
+
+(define sql_text_search_prepare (lambda (needle)
+	(if (nil? needle) nil (begin
+		(define lower_terms (lambda (terms) (map terms (lambda (term) (begin
+			(define modifier (car term))
+			(define body (cadr term))
+			(list (match modifier "-" 0 "~" -1 ">" 2 "<" 0.5 _ 1)
+				(equal? modifier "+") (equal? modifier "-")
+				(car body)
+				(if (equal? (car body) "group") (lower_terms (cadr body)) (cadr body))
+				(if (equal? (car body) "word") (nth body 2) false)))))))
+		(lower_terms (sql_fulltext_query needle))))))
 
 /* time */
 (sql_builtins "UNIX_TIMESTAMP" unix_timestamp)

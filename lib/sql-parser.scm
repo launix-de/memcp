@@ -828,10 +828,10 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			(parser "<" "lt")
 			(parser ">" "gt")
 		)) (define b sql_expression2)) (sql_comparison_expr op a b))
-		(parser '((define a sql_expression3) (atom "COLLATE" true) (define collation sql_identifier) (atom "LIKE" true) (define b sql_expression2) (define escape (? (parser '((atom "ESCAPE" true) (define value sql_expression3)) (list value))))) '('strlike a (if escape '('sql_like_pattern b (car escape)) b) collation))
+		(parser '((define a sql_expression3) (atom "COLLATE" true) (define collation sql_identifier) (atom "LIKE" true) (define b sql_expression2) (define escape (? (parser '((atom "ESCAPE" true) (define value sql_expression3)) (list value))))) '('strlike a b collation (if escape (car escape) "\\")))
 		/* MySQL default collation is case-insensitive in this project (utf8mb4_general_ci). */
-		(parser '((define a sql_expression3) (atom "LIKE" true) (define b sql_expression2) (define escape (? (parser '((atom "ESCAPE" true) (define value sql_expression3)) (list value))))) '('strlike a (if escape '('sql_like_pattern b (car escape)) b) "utf8mb4_general_ci"))
-		(parser '((define a sql_expression3) (atom "NOT" true) (atom "LIKE" true) (define b sql_expression2) (define escape (? (parser '((atom "ESCAPE" true) (define value sql_expression3)) (list value))))) '('sql_not '('strlike a (if escape '('sql_like_pattern b (car escape)) b) "utf8mb4_general_ci")))
+		(parser '((define a sql_expression3) (atom "LIKE" true) (define b sql_expression2) (define escape (? (parser '((atom "ESCAPE" true) (define value sql_expression3)) (list value))))) '('strlike a b "utf8mb4_general_ci" (if escape (car escape) "\\")))
+		(parser '((define a sql_expression3) (atom "NOT" true) (atom "LIKE" true) (define b sql_expression2) (define escape (? (parser '((atom "ESCAPE" true) (define value sql_expression3)) (list value))))) '('sql_not '('strlike a b "utf8mb4_general_ci" (if escape (car escape) "\\"))))
 		/* REGEXP/RLIKE operator: expr REGEXP 'pattern' -> regexp_test(expr, pattern) */
 		(parser '((define a sql_expression3) (atom "REGEXP" true) (define b sql_expression2)) '('regexp_test a b))
 		(parser '((define a sql_expression3) (atom "RLIKE" true) (define b sql_expression2)) '('regexp_test a b))
@@ -908,7 +908,10 @@ arithmetic; leave expressions containing columns or functions untouched. */
 				(parser '((atom "IN" true) (atom "BOOLEAN" true) (atom "MODE" true)) "boolean")
 				(parser '((? (atom "IN" true) (atom "NATURAL" true) (atom "LANGUAGE" true) (atom "MODE" true))) "natural"))) ")")
 			(if (equal? mode "boolean")
-				(list sql_fulltext_boolean (cons (quote list) cols) needle)
+				(if (equal? (count (extract_stupid needle)) 0)
+					(list (quote text_search_score) (cons (quote list) cols)
+						(list sql_text_search_prepare needle))
+					(error "AGAINST requires a row-independent search expression"))
 				(begin
 					(define terms (map cols (lambda (col) '('strlike col '('concat "%" needle "%") "utf8mb4_general_ci"))))
 					(if (equal? (count terms) 1) (car terms) (cons (quote or) terms)))))

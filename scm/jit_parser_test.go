@@ -18,6 +18,7 @@ Copyright (C) 2026  Carl-Philip Hänsch
 package scm
 
 import (
+	"fmt"
 	"runtime"
 	"strings"
 	"testing"
@@ -449,5 +450,37 @@ func TestJITParserRecursiveRightBranchKeepsOptionalBindings(t *testing.T) {
 	})
 	if !Equal(got, want) {
 		t.Fatalf("recursive parser returned %s, want %s", String(got), String(want))
+	}
+}
+
+func TestJITParserUnicodeClass(t *testing.T) {
+	if !jitEnabled {
+		t.Skip("requires GOEXPERIMENT=jit")
+	}
+	environment := &Env{Vars: make(Vars), Outer: &Globalenv}
+	parserValue := Eval(Read(t.Name(), `(parser (regex "[\\p{L}]+" false false))`), environment)
+	environment.Vars[Symbol("unicode_parser")] = parserValue
+	jitCompileEnvironmentParsers(environment)
+	if got := parserValue.Parser().Execute("Grüße", environment); got.String() != "Grüße" {
+		t.Fatalf("Unicode terminal: %v", got)
+	}
+}
+
+func TestJITParserManyUnicodeTerminalsReleaseInput(t *testing.T) {
+	if !jitEnabled {
+		t.Skip("requires GOEXPERIMENT=jit")
+	}
+	environment := &Env{Vars: make(Vars), Outer: &Globalenv}
+	for i := 1; i <= 32; i++ {
+		source := fmt.Sprintf(`(parser (regex "[\\p{L}]{%d}" false false))`, i)
+		environment.Vars[Symbol(fmt.Sprintf("unicode_%d", i))] = Eval(Read(t.Name(), source), environment)
+	}
+	jitCompileEnvironmentParsers(environment)
+	for i := 1; i <= 32; i++ {
+		value := strings.Repeat("é", i)
+		parser := environment.Vars[Symbol(fmt.Sprintf("unicode_%d", i))].Parser()
+		if got := parser.Execute(value, environment); got.String() != value {
+			t.Fatalf("Unicode terminal %d: %v", i, got)
+		}
 	}
 }

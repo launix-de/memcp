@@ -37,6 +37,9 @@ import "github.com/launix-de/memcp/storage/mosi"
 import "github.com/launix-de/go-mysqlstack/sqldb"
 
 type storageShard struct {
+	// Weak lookup only: index hooks own and account for retained posting memory.
+	// Keys are generation-owned source columns; rebuilds start a fresh registry.
+	bigramIndexes sync.Map // weak source identity -> weak.Pointer[bigramIndex]
 	// Immutable feedback cells; only whole-shard completions publish via CAS.
 	filterFeedback filterFeedbackCache
 	t              *table

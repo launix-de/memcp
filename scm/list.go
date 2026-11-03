@@ -122,11 +122,17 @@ func materializeCodeLiteral(expr Scmer) (Scmer, bool) {
 // optimization, so treating a native `list` head as list data adds the call
 // head itself to the inferred length.
 func listExpressionCallName(head Scmer) (string, bool) {
+	head = head.WithoutSourceInfo()
 	if sym, ok := scmerSymbol(head); ok {
 		return string(sym), true
 	}
 	if decl := DeclarationForValue(head); decl != nil {
 		return decl.Name, true
+	}
+	// Anonymous and dynamically resolved calls have no declaration name. Their
+	// AST arity says nothing about the returned list's cardinality.
+	if scmerCallable(head) || head.IsNthLocalVar() || head.IsSlice() {
+		return "", true
 	}
 	return "", false
 }
