@@ -39,7 +39,7 @@ class ReliabilityDrillTests(unittest.TestCase):
 				raise RuntimeError("scenario failed")
 			except RuntimeError:
 				replication.Node.cleanup(node)
-			node.process.send_signal.assert_called_once_with(replication.signal.SIGQUIT)
+			node.process.send_signal.assert_called_once_with(replication.signal.SIGABRT)
 			node.process.wait.assert_called_once_with(timeout=2)
 			self.assertEqual(cleanup.call_count, 2)
 
