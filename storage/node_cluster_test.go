@@ -1263,3 +1263,45 @@ func TestClusterAcquisitionQueuesBehindOutgoingHandover(t *testing.T) {
 		t.Fatal("queued acquisition did not finish")
 	}
 }
+
+func TestClusterGrantedReadDoesNotRediscoverMissingOwner(t *testing.T) {
+	cluster := &nodeCluster{self: clusterMember{ID: "memcp://" + uuid.NewString()}, ctx: context.Background()}
+	cluster.initializeManager()
+	owner := "memcp://" + uuid.NewString()
+	peer := &mosiPeer{done: make(chan struct{}), outgoing: make(chan mosiMessage, 1)}
+	cluster.view.Store(&clusterView{members: []clusterMember{cluster.self, {ID: owner}}, links: []*clusterLink{{member: clusterMember{ID: owner}, peer: peer}}})
+	resource := mosiResource{Database: "granted_read"}
+	r := cluster.manager
+	cell := r.resourceCell(resource)
+	cell.ownstate.Initialize(mosi.IO)
+	r.updateRecord(resource, func(record *replicaRecord) bool { record.Owner, record.Epoch = owner, 1; return true })
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	done := make(chan any, 1)
+	go func() {
+		defer func() {
+			if failure := recover(); failure != nil {
+				done <- failure
+			}
+		}()
+		done <- cluster.obtain(ctx, resource, mosi.S)
+	}()
+	select {
+	case message := <-peer.outgoing:
+		// Losing a contact hint does not revoke an already issued S grant.
+		cluster.view.Store(&clusterView{members: []clusterMember{cluster.self}})
+		if _, err := cell.ownstate.Grant(message.Packet.ID, mosi.S, func() error { return nil }); err != nil {
+			t.Fatal(err)
+		}
+	case <-ctx.Done():
+		t.Fatal("read acquisition missing")
+	}
+	select {
+	case result := <-done:
+		if result != cell {
+			t.Fatalf("received S grant required fresh owner discovery: %v", result)
+		}
+	case <-ctx.Done():
+		t.Fatal("granted read did not finish")
+	}
+}
