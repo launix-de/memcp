@@ -28,8 +28,6 @@ import (
 // implementations. ARM64 and RISC-V64 implement the shared lowering through
 // fixed-width native encoders; amd64 retains its compact byte encodings.
 
-var jitCodeOverflowPanic = &struct{}{}
-
 // jitNativeRegisterBank maps architecture-independent register colors to backend registers.
 // Registers with fixed roles in shifts, division and the Go ABI are deliberately
 // last so persistent loop values do not force avoidable shuffles.
@@ -75,7 +73,7 @@ func jitCompileProcNative(proc *Proc, buf *execBuf, recursiveLambdas bool) (int,
 // goroutine ptr "g"). Shared with tests that need a JITContext representative
 // of a real compile's register state.
 func jitDefaultFreeGPRegs() uint64 {
-	return jitArchFreeGPRegs()
+	return jitRuntimeFreeGPRegs()
 }
 
 // jitCompileExprBodyToExec compiles a Scheme expression body into a writable
@@ -83,7 +81,7 @@ func jitDefaultFreeGPRegs() uint64 {
 func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf, recursiveLambdas bool) (codeLen int, roots []unsafe.Pointer, dependencies []*JITEntryPoint, overflow bool, hiddenArgs []JITHiddenArg, needsStableArgs bool, coverage JITCoverage) {
 	defer func() {
 		if r := recover(); r != nil {
-			if r == jitCodeOverflowPanic {
+			if jitIsCodeOverflow(r) {
 				overflow = true
 			}
 			if JITLog {
@@ -152,39 +150,17 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 	ctx.TrackImm(ctx.RuntimeEnv)
 	ctx.W = ctx // self-reference for backward-compat ctx.W.Emit calls
 
-	guardOffset, stackSmall, moreStackPC := jitRuntimeStackCheck()
-	var stackCheckFrameFixup unsafe.Pointer
+	_, _, moreStackPC := jitRuntimeStackCheck()
+	var stackCheckFrameFixup jitRuntimeStackFixup
 	var stackRetryLabel, stackGrowLabel JITLabel
 	hasStackCheck := moreStackPC != 0 && inputArgCount >= 0
 	if hasStackCheck {
 		stackRetryLabel = ctx.ReserveLabel()
 		stackGrowLabel = ctx.ReserveLabel()
 		ctx.MarkLabel(stackRetryLabel)
-		if jitPortableBackend {
-			stackCheckFrameFixup = jitEmitStackCheck(ctx, int32(guardOffset), stackGrowLabel)
-		} else {
-			ctx.emitMovRegReg(RegR11, RegRSP)
-			ctx.emitBytes(0x49, 0x81, 0xEB) // sub r11, frameSize-StackSmall
-			ctx.emitU32(0)
-			stackCheckFrameFixup = unsafe.Add(ctx.Ptr, -4)
-			ctx.EmitJcc(CondUnsignedBelow, stackGrowLabel)
-			// cmp r11, [r14+stackguard0]
-			ctx.emitBytes(0x4D, 0x3B, 0x9E)
-			ctx.emitU32(uint32(guardOffset))
-			ctx.EmitJcc(CondUnsignedBelowOrEqual, stackGrowLabel)
-		}
+		stackCheckFrameFixup = jitEmitRuntimeStackCheck(ctx)
 	}
-
-	// Unified frame: push rbp; mov rbp, rsp; sub rsp, <fixup>
-	// All frame access via [RSP + offset]. MaxBPOffset patched at the end.
-	// Epilog: leave; ret.
-	if jitPortableBackend {
-		jitArchEmitNative(ctx, jitNativeProlog, 0, 0, 0, 0)
-	} else {
-		ctx.emitByte(0x55)
-		ctx.emitBytes(0x48, 0x89, 0xE5)
-	}
-	frameFixup := ctx.EmitSubRSP32Fixup() // sub rsp, <patched>
+	frameFixup := jitEmitRuntimeFrame(ctx)
 	var frameInitLabel, frameBodyLabel JITLabel
 	if !ctx.StackPhiTargets {
 		// Ordinary expressions use precise root-slot initialization instead of
@@ -370,34 +346,15 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 	frameSize := ctx.MaxBPOffset + ctx.MaxSpillOffset
 	frameSize = (frameSize + 15) &^ 15
 	buf.stackFrameSize = frameSize
-	ctx.PatchInt32(frameFixup, frameSize)
+	jitPatchRuntimeFrame(ctx, frameFixup, frameSize)
 	if frameWordsFixup != nil {
 		ctx.PatchInt32(frameWordsFixup, frameSize/8)
-	}
-	if hasStackCheck {
-		// Account for the frame record and the deepest temporary call area below
-		// the fixed frame. Like Go's outgoing-argument area, DynamicSP is part of
-		// the maximum stack demand even though it is reserved only at call sites.
-		recordBytes := int32(8)
-		if jitPortableBackend {
-			recordBytes = 16
-		}
-		checkedFrame := frameSize + ctx.MaxDynamicSP + recordBytes - int32(stackSmall)
-		if checkedFrame < 0 {
-			checkedFrame = 0
-		}
-		ctx.PatchInt32(stackCheckFrameFixup, checkedFrame)
 	}
 	arenaOffset := 0
 	if buf.reservation != nil {
 		arenaOffset = buf.reservation.offset
 	}
-	if jitPortableBackend {
-		jitArchEmitNative(ctx, jitNativeEpilog, 0, 0, 0, 0)
-	} else {
-		ctx.emitByte(0xC9)
-		ctx.emitByte(0xC3)
-	}
+	jitEmitRuntimeReturn(ctx)
 	if !ctx.StackPhiTargets {
 		ctx.MarkLabel(frameInitLabel)
 		roots := jitSortedFrameRoots(ctx.FrameRoots)
@@ -415,25 +372,12 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 	}
 	if hasStackCheck {
 		ctx.MarkLabel(stackGrowLabel)
+		recordBytes := int32(8)
 		if jitPortableBackend {
-			jitEmitStackGrow(ctx, moreStackPC)
-		} else {
-			// Match Go's regabi prolog: public slice arguments use their caller-owned
-			// spill homes, while runtime.morestack preserves DX as closure context.
-			ctx.EmitStoreRegMem(RegRAX, RegRSP, 8)
-			ctx.EmitStoreRegMem(RegRBX, RegRSP, 16)
-			ctx.EmitStoreRegMem(RegRCX, RegRSP, 24)
-			ctx.EmitMovRegImm64(RegR11, uint64(moreStackPC))
-			ctx.emitBytes(0x41, 0xFF, 0xD3) // call r11
-			ctx.Safepoints = append(ctx.Safepoints, jitSafepoint{
-				pcOffset: int32(uintptr(ctx.Ptr) - uintptr(ctx.Start)),
-				entry:    true,
-			})
-			ctx.EmitMovRegMem(RegRAX, RegRSP, 8)
-			ctx.EmitMovRegMem(RegRBX, RegRSP, 16)
-			ctx.EmitMovRegMem(RegRCX, RegRSP, 24)
+			recordBytes = 16
 		}
-		ctx.EmitJmp(stackRetryLabel)
+		jitPatchRuntimeStackCheck(ctx, stackCheckFrameFixup, frameSize+ctx.MaxDynamicSP+recordBytes, stackGrowLabel)
+		jitEmitRuntimeStackGrow(ctx, jitRuntimeSignature[func(...Scmer) Scmer](), stackRetryLabel)
 	}
 	if jitTestPostEmitHook != nil {
 		jitTestPostEmitHook(ctx)
@@ -2374,7 +2318,7 @@ func (ctx *JITContext) EmitCallIndirect(addr uint64) {
 
 func (ctx *JITContext) emitCallIndirectWithSetup(addr uint64, setup func(callFrameBytes int32), roots []int32) {
 	if jitPortableBackend {
-		jitEmitNativeCall(ctx, 0, addr, setup, roots)
+		jitEmitNativeCall(ctx, addr, setup, roots)
 	} else {
 		ctx.EmitMovRegReg(RegR11, RegRBP)
 		ctx.EmitSubInt64(RegR11, RegRSP)
@@ -2384,8 +2328,7 @@ func (ctx *JITContext) emitCallIndirectWithSetup(addr uint64, setup func(callFra
 		if setup != nil {
 			setup(int32(jitGoSpillBytes + 16))
 		}
-		ctx.EmitMovRegImm64(RegR12, addr)
-		ctx.emitBytes(0x41, 0xFF, 0xD4) // CALL R12
+		jitEmitRuntimeCall(ctx, addr, 0)
 		ctx.recordSafepoint(roots, int32(jitGoSpillBytes+16))
 		ctx.EmitAddRSP32(int32(jitGoSpillBytes + 16))
 	}
@@ -2520,6 +2463,7 @@ func (ctx *JITContext) finalizeStackMaps(frameSize int32, arenaOffset int) []jit
 			entry:           safepoint.entry,
 			entryFrameWords: safepoint.entryFrameWords,
 			entryPointerMap: safepoint.entryPointerMap,
+			regularEntry:    safepoint.regularEntry,
 		}
 	}
 	return maps
@@ -2635,16 +2579,15 @@ func (ctx *JITContext) EmitGoCallVariadic(f func(...Scmer) Scmer, argslice JITVa
 	}
 	ctx.EmitMovRegReg(RegRCX, RegRBX) // cap = len
 	ctx.EmitMovRegImm64(RegRDX, uint64(fnData))
-	ctx.EmitMovRegMem(RegR11, RegRDX, 0) // fnptr := [funcval]
 	if jitPortableBackend {
-		jitEmitNativeCall(ctx, RegR11, 0, nil, transientRoots)
+		jitEmitNativeCall(ctx, 0, nil, transientRoots)
 	} else {
 		ctx.EmitMovRegReg(RegR13, RegRBP)
 		ctx.EmitSubInt64(RegR13, RegRSP)
 		ctx.EmitPushReg(RegR13)
 		ctx.EmitPushReg(RegR13)
 		ctx.EmitSubRSP32(int32(jitGoSpillBytes))
-		ctx.emitBytes(0x41, 0xFF, 0xD3) // CALL R11
+		jitEmitRuntimeClosureCall(ctx, RegRDX)
 		ctx.recordSafepoint(transientRoots, int32(jitGoSpillBytes+16))
 		ctx.EmitAddRSP32(int32(jitGoSpillBytes + 16))
 	}
@@ -2766,10 +2709,9 @@ func (ctx *JITContext) emitFuncValueCall(fn, argslice, result JITValueDesc, kind
 	moves.add(RegRDX, fn.Reg)
 	ctx.emitParallelRegMoveBatch(&moves)
 	ctx.EmitMovRegReg(RegRCX, RegRBX)
-	ctx.EmitMovRegMem(RegR11, RegRDX, 0)
 
 	if jitPortableBackend {
-		jitEmitNativeCall(ctx, RegR11, 0, nil, transientRoots)
+		jitEmitNativeCall(ctx, 0, nil, transientRoots)
 	} else {
 		callAreaBytes := int32(jitGoSpillBytes)
 		if kind == jitGoFuncCall {
@@ -2783,7 +2725,7 @@ func (ctx *JITContext) emitFuncValueCall(fn, argslice, result JITValueDesc, kind
 		// A JIT callee uses these homes before runtime.morestack just like compiled
 		// Go code, so reserve the standard call area even on the compact path.
 		ctx.EmitSubRSP32(int32(jitGoSpillBytes))
-		ctx.emitBytes(0x41, 0xFF, 0xD3) // CALL R11
+		jitEmitRuntimeClosureCall(ctx, RegRDX)
 		ctx.recordSafepoint(transientRoots, callAreaBytes)
 		ctx.EmitAddRSP32(callAreaBytes)
 	}
@@ -2950,7 +2892,7 @@ func (ctx *JITContext) EmitSubRSP32Fixup() unsafe.Pointer {
 // nested in a normal JIT procedure uses its own machine stack frame.
 type JITStandaloneFrame struct {
 	active                bool
-	fixup                 unsafe.Pointer
+	fixup                 jitRuntimeFrameFixup
 	bpOffset, maxBPOffset int32
 	spillOffset, maxSpill int32
 	stackReg, frameReg    Reg
@@ -2974,16 +2916,10 @@ func (ctx *JITContext) BeginStandaloneFrame() JITStandaloneFrame {
 		frameReg:    ctx.FrameReg,
 		scratchReg:  ctx.ScratchReg,
 	}
-	if jitPortableBackend {
-		jitArchEmitNative(ctx, jitNativeProlog, 0, 0, 0, 0)
-	} else {
-		ctx.emitByte(0x55)
-		ctx.emitBytes(0x48, 0x89, 0xE5)
-	}
-	state.fixup = ctx.EmitSubRSP32Fixup()
 	ctx.StackReg = RegRSP
 	ctx.FrameReg = RegRBP
 	ctx.ScratchReg = RegR11
+	state.fixup = jitEmitRuntimeFrame(ctx)
 	ctx.HasFrame = true
 	ctx.BPOffset = 0
 	ctx.MaxBPOffset = 0
@@ -2999,12 +2935,8 @@ func (ctx *JITContext) EndStandaloneFrame(state JITStandaloneFrame) {
 		return
 	}
 	frameSize := (ctx.MaxBPOffset + ctx.MaxSpillOffset + 15) &^ 15
-	ctx.PatchInt32(state.fixup, frameSize)
-	if jitPortableBackend {
-		jitArchEmitNative(ctx, jitNativeLeave, 0, 0, 0, 0)
-	} else {
-		ctx.emitByte(0xC9)
-	}
+	jitPatchRuntimeFrame(ctx, state.fixup, frameSize)
+	jitEmitRuntimeLeave(ctx)
 	ctx.BPOffset = state.bpOffset
 	ctx.MaxBPOffset = state.maxBPOffset
 	ctx.SpillOffset = state.spillOffset

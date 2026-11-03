@@ -85,7 +85,7 @@ PACKAGE_DIR  ?= .build/packages
 SOURCE_DATE_EPOCH ?= $(shell git log -1 --format=%ct)
 JIT_GOROOT   ?= $(CURDIR)/.third_party/go-jit
 JIT_GO_REPOSITORY ?= https://github.com/launix-de/go.git
-JIT_GO_REF   ?= jit-foreign-frames-go1.27.0
+JIT_GO_REF   ?= jit-abi-v0.1.0
 export SOURCE_DATE_EPOCH
 
 all: check-php $(PHP_RUNTIME)
@@ -176,22 +176,23 @@ test-php: php
 		go test -tags=$(PHP_TAGS) -run 'TestPHP|TestResultBuffer|TestCatalog|TestIMAP' -count=1 -v . ./phpbridge
 
 # Keep the experimental compiler outside the tracked source tree. Clean
-# checkouts fast-forward on every invocation, while a checkout with local
-# tracked changes is left untouched so compiler work is never discarded.
+# checkouts select the pinned release on every invocation, while a checkout
+# with tracked changes is left untouched so compiler work is never discarded.
 jit-toolchain:
 	@set -eu; \
 	if [ ! -e "$(JIT_GOROOT)" ]; then \
 		mkdir -p "$(dir $(JIT_GOROOT))"; \
 		git clone --depth 1 --branch "$(JIT_GO_REF)" "$(JIT_GO_REPOSITORY)" "$(JIT_GOROOT)"; \
 	else \
-		test -d "$(JIT_GOROOT)/.git" || { echo "$(JIT_GOROOT) is not a Go git checkout" >&2; exit 1; }; \
+		test -e "$(JIT_GOROOT)/.git" || { echo "$(JIT_GOROOT) is not a Go git checkout" >&2; exit 1; }; \
 		if git -C "$(JIT_GOROOT)" diff --quiet && git -C "$(JIT_GOROOT)" diff --cached --quiet; then \
-			git -C "$(JIT_GOROOT)" pull --ff-only origin "$(JIT_GO_REF)"; \
+			git -C "$(JIT_GOROOT)" fetch --depth 1 origin "$(JIT_GO_REF)"; \
+			git -C "$(JIT_GOROOT)" checkout --detach FETCH_HEAD; \
 		else \
 			echo "warning: $(JIT_GOROOT) has local changes; skipping compiler update" >&2; \
 		fi; \
 	fi; \
-	test -d "$(JIT_GOROOT)/.git" || { echo "$(JIT_GOROOT) is not a Go git checkout" >&2; exit 1; }; \
+	test -e "$(JIT_GOROOT)/.git" || { echo "$(JIT_GOROOT) is not a Go git checkout" >&2; exit 1; }; \
 	revision=$$(git -C "$(JIT_GOROOT)" rev-parse HEAD); \
 	built_revision=$$(cat "$(JIT_GOROOT)/.memcp-built-revision" 2>/dev/null || true); \
 	if [ ! -x "$(JIT_GOROOT)/bin/go" ] || [ "$$built_revision" != "$$revision" ]; then \

@@ -162,9 +162,6 @@ func jitArchEmitNative(ctx *JITContext, op jitNativeOp, a, b, c Reg, imm int64) 
 		riscvAddress(ctx, RegRSP, RegRSP, int32(imm))
 	case jitNativeCall:
 		emitRISCV64(ctx, riscvI(0x67, 0, 1, a, 0))
-	case jitNativeMoreStackCall:
-		jitArchEmitLoad64(ctx, 1, RegRBP, 8)
-		emitRISCV64(ctx, riscvI(0x67, 0, 5, a, 0)) // morestack returns through T0, preserving RA.
 	case jitNativeAddress:
 		riscvAddress(ctx, a, b, int32(imm))
 	case jitNativeAtomicLoad64:

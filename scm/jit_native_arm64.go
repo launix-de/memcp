@@ -239,9 +239,6 @@ func jitArchEmitNative(ctx *JITContext, op jitNativeOp, a, b, c Reg, imm int64) 
 		arm64Address(ctx, RegRSP, RegRSP, int32(imm))
 	case jitNativeCall:
 		emitARM64(ctx, 0xD63F0000|rd<<5)
-	case jitNativeMoreStackCall:
-		jitArchEmitLoad64(ctx, 3, RegRBP, 8)
-		emitARM64(ctx, 0xD63F0000|rd<<5)
 	case jitNativeAddress:
 		arm64Address(ctx, a, b, int32(imm))
 	case jitNativeAtomicLoad64, jitNativeAtomicStore64:

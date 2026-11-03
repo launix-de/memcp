@@ -396,10 +396,10 @@ func TestJITStorageReadersSharePackedCodeLifetime(t *testing.T) {
 	if len(scalarHolder.owner.entries) != 3 {
 		t.Fatalf("shared code owner has %d entries, want 3", len(scalarHolder.owner.entries))
 	}
-	if gap := rangeHolder.code - scalarHolder.code; gap == 0 || gap >= 16*1024 {
+	if gap := rangeHolder.code.Entry() - scalarHolder.code.Entry(); gap == 0 || gap >= 16*1024 {
 		t.Fatalf("scalar-to-range code gap = %d, want densely packed functions", gap)
 	}
-	if gap := multiHolder.code - rangeHolder.code; gap == 0 || gap >= 16*1024 {
+	if gap := multiHolder.code.Entry() - rangeHolder.code.Entry(); gap == 0 || gap >= 16*1024 {
 		t.Fatalf("range-to-multi code gap = %d, want densely packed functions", gap)
 	}
 	runtime.GC()

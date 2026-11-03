@@ -306,7 +306,7 @@ func attachProcJIT(proc *Proc, entry *JITEntryPoint) {
 func initializeProcJIT(proc *Proc, entry *JITEntryPoint) {
 	// Construct the Go funcval without publishing the code word on proc yet.
 	valuePointer := unsafe.Pointer(proc)
-	entry.Native = *(*func(...Scmer) Scmer)(unsafe.Pointer(&valuePointer))
+	entry.Native = jitRuntimeFunction[func(...Scmer) Scmer](valuePointer)
 	entry.FuncValue = proc
 	entry.JITArity = 0
 	entry.JITDirect = 0
@@ -355,7 +355,7 @@ func (proc *Proc) jitFunction() func(...Scmer) Scmer {
 		return nil
 	}
 	valuePointer := unsafe.Pointer(proc)
-	return *(*func(...Scmer) Scmer)(unsafe.Pointer(&valuePointer))
+	return jitRuntimeFunction[func(...Scmer) Scmer](valuePointer)
 }
 
 func jitAllocateProcContext(proc *Proc, captureCount int) *Proc {
@@ -391,7 +391,7 @@ func JITProcForFunction(function func(...Scmer) Scmer) *Proc {
 	if function == nil {
 		return nil
 	}
-	valuePointer := *(*unsafe.Pointer)(unsafe.Pointer(&function))
+	valuePointer := jitRuntimeFunctionContext(function)
 	if valuePointer == nil {
 		return nil
 	}
@@ -725,6 +725,7 @@ type jitSafepoint struct {
 	entry           bool
 	entryFrameWords uintptr
 	entryPointerMap []byte
+	regularEntry    bool
 }
 
 // jitSortedFrameRoots returns the permanent frame words registered by the
@@ -758,6 +759,7 @@ type jitStackMap struct {
 	// runtime adapter.
 	entryFrameWords uintptr
 	entryPointerMap []byte
+	regularEntry    bool
 }
 
 // JITStorageGetValueFunc is the native scalar column-reader ABI.
@@ -3528,7 +3530,9 @@ func jitParallelSpecial(thunks ...Scmer) Scmer {
 
 // GoFuncAddr returns the entry point address of a Go function value.
 func GoFuncAddr(fn interface{}) uint64 {
-	return uint64(reflect.ValueOf(fn).Pointer())
+	address := uint64(reflect.ValueOf(fn).Pointer())
+	jitRememberGoFunction(address, fn)
+	return address
 }
 
 // ConcatStrings concatenates two Go strings. Used as a JIT helper for string + string.
@@ -3587,7 +3591,7 @@ func JITPanic(v Scmer) {
 // GoABIIntRegs lists integer argument/result registers in the target's
 // ABIInternal order. The architecture backend supplies this bank separately
 // from the allocator's persistent register homes.
-var GoABIIntRegs = jitGoABIIntRegs()
+var GoABIIntRegs = jitABIIntRegs()
 
 type goCallArgWord struct {
 	loc      JITLoc
@@ -3601,12 +3605,13 @@ type goCallArgWord struct {
 }
 
 type goCallArgLocation struct {
+	size     uintptr
 	inReg    bool
 	reg      Reg
 	stackOff int32
 }
 
-func layoutGoCallArgs(words []goCallArgWord) ([]goCallArgLocation, int) {
+func layoutGoCallWords(words []goCallArgWord) ([]goCallArgLocation, int) {
 	locations := make([]goCallArgLocation, len(words))
 	regIndex, stackIndex := 0, 0
 	for index := 0; index < len(words); {
@@ -4128,7 +4133,7 @@ func (ctx *JITContext) emitGoCall(funcAddr uint64, argWords []goCallArgWord, num
 	if numResultWords > len(GoABIIntRegs) {
 		panic("jit: too many result words for Go ABI")
 	}
-	argLocations, stackArgWords := layoutGoCallArgs(argWords)
+	argLocations, stackArgWords := jitRuntimeLayoutGoCallArgs(funcAddr, argWords)
 	if len(argWords)*8 > int(jitGoSpillBytes) || stackArgWords*8 > int(jitGoSpillBytes) {
 		panic("jit: Go call arguments exceed reserved spill area")
 	}
@@ -4188,20 +4193,20 @@ func (ctx *JITContext) emitGoCall(funcAddr uint64, argWords []goCallArgWord, num
 			dstOff := argLocations[i].stackOff + jitGoStackArgOffset
 			switch argWords[i].loc {
 			case LocReg:
-				ctx.EmitStoreRegMem(argWords[i].reg, RegRSP, dstOff)
+				ctx.emitStoreABIWord(argWords[i].reg, RegRSP, dstOff, argLocations[i].size)
 			case LocImm:
 				ctx.EmitMovRegImm64(RegR11, argWords[i].imm)
-				ctx.EmitStoreRegMem(RegR11, RegRSP, dstOff)
+				ctx.emitStoreABIWord(RegR11, RegRSP, dstOff, argLocations[i].size)
 			case LocStack:
 				if argWords[i].stackOff < 0 {
 					ctx.EmitMovRegMem(RegR11, RegRBP, argWords[i].stackOff)
 				} else {
 					ctx.EmitMovRegMem(RegR11, RegRSP, stackArgBaseDisp+entryDynamicSP+argWords[i].stackOff)
 				}
-				ctx.EmitStoreRegMem(RegR11, RegRSP, dstOff)
+				ctx.emitStoreABIWord(RegR11, RegRSP, dstOff, argLocations[i].size)
 			case LocInputPair:
 				ctx.EmitMovRegMem(RegR11, ctx.SliceBase, argWords[i].stackOff)
-				ctx.EmitStoreRegMem(RegR11, RegRSP, dstOff)
+				ctx.emitStoreABIWord(RegR11, RegRSP, dstOff, argLocations[i].size)
 			default:
 				panic("jit: unsupported Go-call stack arg location")
 			}
@@ -7270,4 +7275,21 @@ func maybeLogJITImportCandidate(name Symbol, entry *JITEntryPoint, selected bool
 	fmt.Printf("jitdump: import=%s selected=%t expressions=%d dynamic-calls=%d direct-procs=%d native-calls=%d inlined-calls=%d\n",
 		name, selected, entry.Coverage.Expressions, entry.Coverage.DynamicCalls,
 		entry.Coverage.DirectProcs, entry.Coverage.NativeCalls, entry.Coverage.InlinedCalls)
+}
+
+// ABI stack slots may pack small scalar arguments more tightly than MemCP's
+// internal word descriptors. Never overwrite a neighboring argument's bytes.
+func (ctx *JITContext) emitStoreABIWord(src, base Reg, offset int32, size uintptr) {
+	switch size {
+	case 1:
+		ctx.EmitStoreRegMemB(src, base, offset)
+	case 2:
+		ctx.EmitStoreRegMemW(src, base, offset)
+	case 4:
+		ctx.EmitStoreRegMemL(src, base, offset)
+	case 0, 8:
+		ctx.EmitStoreRegMem(src, base, offset)
+	default:
+		panic("jit: unsupported ABI word size")
+	}
 }

@@ -94,8 +94,9 @@ func jitCompileProcWithRoots(proc *Proc) ([]byte, []unsafe.Pointer) {
 }
 
 func (ctx *JITContext) ensureSpace(n uintptr) {
-	if uintptr(ctx.Ptr)+n > uintptr(ctx.End) {
-		panic(jitCodeOverflowPanic)
+	available := uintptr(ctx.End) - uintptr(ctx.Ptr)
+	if uintptr(ctx.Ptr) > uintptr(ctx.End) || n > available {
+		panic(jitBufferFull{Offset: ctx.Offset(), Required: int(n), Available: int(available)})
 	}
 }
 
@@ -416,7 +417,6 @@ const (
 	jitNativeIntToFloat
 	jitNativeFloatToInt
 	jitNativeFZero
-	jitNativeMoreStackCall
 	jitNativeCall
 	jitNativeAtomicLoad64
 	jitNativeAtomicStore64
@@ -425,7 +425,7 @@ const (
 // jitEmitNativeCall saves the frame base in a relocatable stack slot. Go's
 // ABIInternal has no callee-saved GPRs on RISC-V. The minimum caller frame also
 // supplies the link-register home required by Go stack arguments/spills.
-func jitEmitNativeCall(ctx *JITContext, target Reg, addr uint64, setup func(int32), roots []int32) {
+func jitEmitNativeCall(ctx *JITContext, addr uint64, setup func(int32), roots []int32) {
 	const callBytes = int32(jitGoSpillBytes + 16)
 	ctx.EmitReserveStackBytes(callBytes)
 	ctx.EmitStoreRegMem(ctx.FrameReg, ctx.StackReg, callBytes-8)
@@ -433,11 +433,11 @@ func jitEmitNativeCall(ctx *JITContext, target Reg, addr uint64, setup func(int3
 	if setup != nil {
 		setup(callBytes)
 	}
-	if addr != 0 {
-		ctx.EmitMovRegImm64(jitNativeTemp, addr)
-		target = jitNativeTemp
+	if addr == 0 {
+		jitEmitRuntimeClosureCall(ctx, RegRDX)
+	} else {
+		jitEmitRuntimeCall(ctx, addr, 0)
 	}
-	jitArchEmitNative(ctx, jitNativeCall, target, 0, 0, 0)
 	ctx.recordSafepoint(roots, callBytes)
 	ctx.EmitMovRegMem(ctx.FrameReg, ctx.StackReg, callBytes-8)
 	ctx.setStackPointer(jitStackRootCallSP, callBytes-8, false)
@@ -458,41 +458,6 @@ func jitEmitClearFrame(ctx *JITContext) unsafe.Pointer {
 	ctx.EmitJmp(loop)
 	ctx.MarkLabel(done)
 	return fixup
-}
-
-func jitEmitStackCheck(ctx *JITContext, guardOffset int32, grow JITLabel) unsafe.Pointer {
-	fixup := jitArchEmitImmediateFixup(ctx, jitNativeTemp)
-	ctx.emitMovRegReg(RegR11, RegRSP)
-	ctx.EmitCmpInt64(RegR11, jitNativeTemp)
-	ctx.EmitJcc(CcB, grow)
-	ctx.EmitSubInt64(RegR11, jitNativeTemp)
-	jitArchEmitLoad64(ctx, jitNativeTemp, RegR14, guardOffset)
-	ctx.EmitCmpInt64(RegR11, jitNativeTemp)
-	ctx.EmitJcc(CcBE, grow)
-	return fixup
-}
-
-func jitEmitStackGrow(ctx *JITContext, moreStackPC uintptr) {
-	// A small, fully described frame exists before morestack. Saving the link
-	// register in this record allows the runtime to unwind an entry safepoint
-	// with the same declarative recipe as an ordinary JIT frame.
-	jitArchEmitNative(ctx, jitNativeProlog, 0, 0, 0, 0)
-	jitArchEmitNative(ctx, jitNativeStackAdjust, 0, 0, 0, -32)
-	ctx.EmitStoreRegMem(RegRAX, RegRSP, 0)
-	ctx.EmitStoreRegMem(RegRBX, RegRSP, 8)
-	ctx.EmitStoreRegMem(RegRCX, RegRSP, 16)
-	ctx.EmitMovRegImm64(jitNativeTemp, uint64(moreStackPC))
-	jitArchEmitNative(ctx, jitNativeMoreStackCall, jitNativeTemp, 0, 0, 0)
-	ctx.Safepoints = append(ctx.Safepoints, jitSafepoint{
-		pcOffset: int32(uintptr(ctx.Ptr) - uintptr(ctx.Start)), entry: true,
-		entryFrameWords: 5, entryPointerMap: []byte{1},
-	})
-	jitArchEmitNative(ctx, jitNativeAddress, RegRBP, RegRSP, 0, 32)
-	ctx.EmitMovRegMem(RegRAX, RegRSP, 0)
-	ctx.EmitMovRegMem(RegRBX, RegRSP, 8)
-	ctx.EmitMovRegMem(RegRCX, RegRSP, 16)
-	jitArchEmitNative(ctx, jitNativeStackAdjust, 0, 0, 0, 32)
-	jitArchEmitNative(ctx, jitNativeLeave, 0, 0, 0, 0)
 }
 
 // EmitShiftLeft and EmitShiftRight describe a uint64 shift independently of
@@ -530,3 +495,20 @@ func (ctx *JITContext) emitShift64(dst, count Reg, left, bounded bool) {
 func (ctx *JITContext) EmitInt64ToFloatBits(reg Reg) {
 	ctx.EmitCvtInt64ToFloat64(RegX0, reg)
 }
+
+// Offset, Write and Patch adapt the fixed arena reservation to runtime/jit's
+// CodeBuffer. ABI adapters flush deferred moves/flags before handing it over;
+// raw buffer writes must not independently alter allocator state.
+func (ctx *JITContext) Offset() int { return int(uintptr(ctx.Ptr) - uintptr(ctx.Start)) }
+func (ctx *JITContext) Write(code []byte) {
+	ctx.ensureSpace(uintptr(len(code)))
+	copy(unsafe.Slice((*byte)(ctx.Ptr), len(code)), code)
+	ctx.Ptr = unsafe.Add(ctx.Ptr, len(code))
+}
+func (ctx *JITContext) Patch(offset int, code []byte) {
+	if offset < 0 || offset > ctx.Offset() || len(code) > ctx.Offset()-offset {
+		panic("jit: patch outside written code")
+	}
+	copy(unsafe.Slice((*byte)(unsafe.Add(ctx.Start, offset)), len(code)), code)
+}
+func jitIsCodeOverflow(v any) bool { _, ok := v.(jitBufferFull); return ok }

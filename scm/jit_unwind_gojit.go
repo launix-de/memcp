@@ -90,7 +90,7 @@ func publishJITStackMaps(a *jitArena, maps []jitStackMap) {
 		if maps[i].frameWords == 0 {
 			panic("jit: invalid empty unwind frame")
 		}
-		if maps[i].entry && !jitPortableBackend {
+		if maps[i].entry && !maps[i].regularEntry && !jitPortableBackend {
 			frameWords := maps[i].entryFrameWords
 			pointerMap := maps[i].entryPointerMap
 			if frameWords == 0 {
@@ -117,20 +117,7 @@ func publishJITStackMaps(a *jitArena, maps []jitStackMap) {
 		if maps[i].entry {
 			frameWords, pointerMap = maps[i].entryFrameWords, maps[i].entryPointerMap
 		}
-		frameBaseOffset := (frameWords - 1) * unsafe.Sizeof(uintptr(0))
-		runtimeMaps[i] = jit.StackMap{
-			PCOffset:    maps[i].pcOffset,
-			FrameWords:  frameWords,
-			PointerMask: pointerMap,
-			HasUnwind:   true,
-			// Each safepoint already carries its final static plus dynamic frame
-			// size. Address the saved frame pointer directly instead of depending
-			// on transient delta words in the outgoing Go-call spill area.
-			UnwindBaseOffset: frameBaseOffset,
-			CallerPCOffset:   8,
-			CallerSPOffset:   16,
-			CallerBPOffset:   0,
-		}
+		runtimeMaps[i] = jit.FrameStackMap(maps[i].pcOffset, (frameWords-1)*unsafe.Sizeof(uintptr(0)), pointerMap)
 	}
 	handle.AddStackMaps(runtimeMaps...)
 }
