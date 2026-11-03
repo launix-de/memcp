@@ -356,17 +356,33 @@ func asciiFoldEqual(left, right string) bool {
 }
 
 func asciiFoldContains(value, needle string) (bool, bool) {
+	// strLikeASCIIFold already validated this invariant ASCII needle.
 	if len(needle) > len(value) {
 		return false, true
 	}
+	if len(needle) == 0 {
+		return true, true
+	}
+	first := asciiFoldByte(needle[0])
+	mask := byte(0)
+	if first >= 'a' && first <= 'z' {
+		mask = 'a' - 'A'
+	}
 	for offset := 0; offset <= len(value)-len(needle); offset++ {
+		left := value[offset]
+		if left >= utf8.RuneSelf {
+			return false, false
+		}
+		if left|mask != first {
+			continue
+		}
 		matched := true
-		for index := 0; index < len(needle); index++ {
-			left, right := value[offset+index], needle[index]
-			if left >= utf8.RuneSelf || right >= utf8.RuneSelf {
+		for index := 1; index < len(needle); index++ {
+			left = value[offset+index]
+			if left >= utf8.RuneSelf {
 				return false, false
 			}
-			if asciiFoldByte(left) != asciiFoldByte(right) {
+			if asciiFoldByte(left) != asciiFoldByte(needle[index]) {
 				matched = false
 				break
 			}
@@ -386,16 +402,18 @@ func strLikeASCIIFold(value, pattern string) (bool, bool) {
 	if strings.ContainsAny(pattern, "_\\\\") {
 		return false, false
 	}
+	// Unicode case folding can shorten the UTF-8 spelling. Reject it from the
+	// ASCII shortcut before any prefix/suffix/contains byte-length checks.
+	for index := 0; index < len(pattern); index++ {
+		if pattern[index] >= utf8.RuneSelf {
+			return false, false
+		}
+	}
 	wildcards := strings.Count(pattern, "%")
 	switch {
 	case wildcards == 0:
 		for index := 0; index < len(value); index++ {
 			if value[index] >= utf8.RuneSelf {
-				return false, false
-			}
-		}
-		for index := 0; index < len(pattern); index++ {
-			if pattern[index] >= utf8.RuneSelf {
 				return false, false
 			}
 		}
