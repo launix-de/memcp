@@ -638,6 +638,11 @@ user table merely to discard a newly constructed policy closure. */
 							(cadr cached_entry))))))
 			formula)))))
 
+/* Frontends supply parsed recovery admission to the generic request executor. */
+(define sql_with_statement (lambda (session state sequence text body)
+	(with_query_request session state sequence text (lambda (statement)
+		(statement text (sql_recovery_statement? text) body)))))
+
 (define sql_execute_formula (lambda (session tx formula resultrow resultfields)
 	(formula session tx resultrow resultfields)))
 
@@ -793,7 +798,7 @@ without them repeated grants create duplicate accounts and ambiguous authenticat
 					(define resultrow (lambda (row) (begin
 						(set resultrow_called true)
 						(original_resultrow row))))
-					(set query_result (with_autocommit session session_state query_seq query
+					(set query_result (sql_with_statement session session_state query_seq query
 						(lambda (tx) (begin
 							(define formula (cached_parse sql_queryplan_cache (list parse_sql) schema query
 								(list (quote sql-policy-for) (req "username")) (req "username") session true tx))
@@ -850,7 +855,7 @@ without them repeated grants create duplicate accounts and ambiguous authenticat
 						(regex "FROM\\s+pg_indexes" _) true
 						(regex "FROM\\s+pg_constraint" _) true
 						false))
-					(define query_result (with_autocommit session session_state query_seq query
+					(define query_result (sql_with_statement session session_state query_seq query
 						(lambda (tx) (if handled nil (begin
 							/* Bind URL query params (v1=, v2=, ...) as prepared-statement args into the session
 							before parse/build so session-sensitive planner rewrites see the right values. */
@@ -988,7 +993,7 @@ statement inside the per-query transaction callback. */
 				(error "Scheme execution requires administrator privileges"))
 			(set print (lambda args (resultrow '("result" (concat args)))))
 			(resultrow '("result" (eval (scheme sql))))
-		) (time (with_autocommit session session_state query_seq sql
+		) (time (sql_with_statement session session_state query_seq sql
 				(lambda (tx) (mysql_run_sql_statement tx schema sql session resultrow resultfields_sql))) sql))
 	)) (lambda (e) (begin
 			(error_log (concat e) schema (coalesce (session "username") "root") sql)

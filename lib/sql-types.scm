@@ -94,7 +94,7 @@ unicode alias. Returns nil or a (NAME COERCIBILITY) pair. */
 (define sql_merge_info (lambda (a b)
 	(begin
 		(define type (sql_merge_type (sql_info_type a) (sql_info_type b)))
-	(sql_info nil
+		(sql_info nil
 			(if (has? '("DECIMAL" "NUMERIC") type)
 				(sql_decimal_result_datatype type (list a b)) type)
 			(sql_merge_collation (sql_info_collation a) (sql_info_collation b))))))
@@ -230,6 +230,7 @@ Each entry is (HEAD TYPE MODE):
 	(list and "BOOLEAN" "fixed")
 	(list (quote or) "BOOLEAN" "fixed")
 	(list or "BOOLEAN" "fixed")
+	(list (quote sql_like_pattern) "VARCHAR" "first")
 	(list (quote strlike) "BOOLEAN" "fixed")
 	(list strlike "BOOLEAN" "fixed")
 	(list (quote equal_collate) "BOOLEAN" "fixed")
@@ -342,9 +343,9 @@ This resolves metadata only; the logical planner still owns projection rewrite. 
 				'(_title info) info _ nil)
 			(get_assoc (coalesceNil declared '()) col nil)))
 		(define info (if (not (nil? contract)) contract (begin
-		(define titles (queryplan_result_titles relation))
-		(define index (find (produceN (count titles)) (lambda (index)
-			(if col_ignorecase (equal?? (nth titles index) col) (equal? (nth titles index) col))) nil))
+			(define titles (queryplan_result_titles relation))
+			(define index (find (produceN (count titles)) (lambda (index)
+				(if col_ignorecase (equal?? (nth titles index) col) (equal? (nth titles index) col))) nil))
 			(if (nil? index) (sql_info nil "any" nil) (sql_projection_info_at relation index outer_sources)))))
 		(sql_info original (sql_info_datatype info) (sql_info_collation info)))))
 
@@ -367,8 +368,10 @@ keeps its existing (ignorecase-flagged) resolution for them. */
 					(define collname (if (nil? meta) nil (meta "Collation")))
 					(sql_info
 						(list (quote get_column) (source_alias src) false canonical false)
-						(if (and (has? '("DECIMAL" "NUMERIC") type) (not (nil? meta)))
-							(list type (coalesceNil (meta "Dimensions") '())) type)
+						(if (and (equal? type "ENUM") (not (nil? meta)))
+							(list type (meta "EnumValues"))
+							(if (and (has? '("DECIMAL" "NUMERIC") type) (not (nil? meta)))
+								(list type (coalesceNil (meta "Dimensions") '())) type))
 						(if (and (sql_text_type? type) (string? collname) (not (equal? collname "")))
 							(list collname 2) nil))))))))
 
@@ -549,8 +552,8 @@ operand contract. Unknown registered reducers retain an explicit any contract. *
 		Resolve the operand normally; only its executable formula survives. */
 		((symbol sql_type_expr) formula type collation)
 		(if (and (sql_text_type? (sql_datatype_name type)) (nil? collation))
-		(begin
-			(define info (sql_expr_info sources formula))
+			(begin
+				(define info (sql_expr_info sources formula))
 				(sql_info (sql_info_formula info) type (sql_info_collation info)))
 			/* The producer already resolved this contract. Remove nested frontend
 			annotations without deriving every plain operand's type again. */
@@ -619,13 +622,22 @@ contracts select their comparator once, outside executable row loops. */
 			(define order_dir (eval order_dir))
 			(define info (sql_expr_info sources order_expr))
 			(define coll (sql_info_collation info))
-			(if (and (or (equal? order_dir <) (equal? order_dir >))
-				(or (not (sql_column_ref? (sql_info_formula info)))
-					(and (not (nil? coll)) (equal? (cadr coll) 0)))
-				(sql_text_type? (sql_info_type info))
-				(not (nil? coll)))
-				(list (sql_info_formula info) (collate (car coll) (equal? order_dir >)))
-				(list (sql_info_formula info) order_dir)))
+			(if (and (equal? (sql_info_type info) "ENUM")
+				(or (equal? order_dir <) (equal? order_dir >)))
+				(begin
+					(define labels (sql_info_dimensions info))
+					(define ranks (merge (map (produceN (count labels)) (lambda (index)
+						(list (nth labels index) (+ index 1))))))
+					(list (sql_info_formula info) (lambda (a b)
+						(order_dir (if (nil? a) nil (get_assoc ranks a))
+							(if (nil? b) nil (get_assoc ranks b))))))
+				(if (and (or (equal? order_dir <) (equal? order_dir >))
+					(or (not (sql_column_ref? (sql_info_formula info)))
+						(and (not (nil? coll)) (equal? (cadr coll) 0)))
+					(sql_text_type? (sql_info_type info))
+					(not (nil? coll)))
+					(list (sql_info_formula info) (collate (car coll) (equal? order_dir >)))
+					(list (sql_info_formula info) order_dir))))
 		_ item)))
 
 /* A mutation proof consumes these frontend contracts after executable
@@ -738,7 +750,7 @@ O(k) for the k declared keys and never reads shard data or automatic indexes. */
 				compiler annotations removed, not another projection type walk. */
 				(if (not (nil? (qassoc_get (qb_facts block) (quote result-types) nil)))
 					(sql_type_lower_annotations (qb_fields block))
-				(map_assoc (qb_fields block)
+					(map_assoc (qb_fields block)
 						(lambda (field_title field_expr) (sql_type_field_formula all_sources field_expr))))
 				(sql_type_formula all_sources (qb_where block))
 				(map (coalesceNil (qb_group block) '())
@@ -807,29 +819,29 @@ fields and ordering retain their executable formulas and declared contracts. */
 			(not (nil? (qassoc_get (qb_facts raw_block) (quote result-types) nil))))
 			raw_block
 			(begin
-		/* Preserve primary-key functional dependencies before expanding stars
-		into the external typed projection. */
-		(define block (if (query_block? raw_block) (expand_grouped_query_block raw_block) raw_block))
-		(if (query_block? block) (begin
-			/* Publish each derived producer's descriptor once before its parent
-			reads it. Presentation formatting belongs only to external outputs. */
-			(define sources (map (qb_sources block) (lambda (src)
-				(if (or (query_block? (source_relation src)) (union_block? (source_relation src)))
-					(source_with_relation src (sql_annotate_query_outputs (source_relation src) false)) src))))
-			(define infos (map_assoc (expand_query_block_fields sources (qb_fields block))
-				(lambda (_title expr) (sql_expr_info sources expr))))
-			(make_query_block (qb_schema block) sources
-				(if external_output
-				(map_assoc infos (lambda (_title info) (sql_output_formula info)))
-					(qb_fields block))
-				(qb_where block) (qb_group block) (qb_having block) (qb_order block)
-				(qb_limit block) (qb_offset block) (qb_hidden block) (qb_stages block)
-				(qassoc_set (qb_facts block) (quote result-types)
-					(map_assoc infos (lambda (_title info)
-						(sql_info nil (sql_info_datatype info) (sql_info_collation info)))))))
-			(union_block? block)
-			(make_union_block (union_mode block) (map (union_branches block) (lambda (branch) (sql_annotate_query_outputs branch external_output)))
-				(union_order block) (union_limit block) (union_offset block) (union_facts block))
+				/* Preserve primary-key functional dependencies before expanding stars
+				into the external typed projection. */
+				(define block (if (query_block? raw_block) (expand_grouped_query_block raw_block) raw_block))
+				(if (query_block? block) (begin
+					/* Publish each derived producer's descriptor once before its parent
+					reads it. Presentation formatting belongs only to external outputs. */
+					(define sources (map (qb_sources block) (lambda (src)
+						(if (or (query_block? (source_relation src)) (union_block? (source_relation src)))
+							(source_with_relation src (sql_annotate_query_outputs (source_relation src) false)) src))))
+					(define infos (map_assoc (expand_query_block_fields sources (qb_fields block))
+						(lambda (_title expr) (sql_expr_info sources expr))))
+					(make_query_block (qb_schema block) sources
+						(if external_output
+							(map_assoc infos (lambda (_title info) (sql_output_formula info)))
+							(qb_fields block))
+						(qb_where block) (qb_group block) (qb_having block) (qb_order block)
+						(qb_limit block) (qb_offset block) (qb_hidden block) (qb_stages block)
+						(qassoc_set (qb_facts block) (quote result-types)
+							(map_assoc infos (lambda (_title info)
+								(sql_info nil (sql_info_datatype info) (sql_info_collation info)))))))
+					(union_block? block)
+					(make_union_block (union_mode block) (map (union_branches block) (lambda (branch) (sql_annotate_query_outputs branch external_output)))
+						(union_order block) (union_limit block) (union_offset block) (union_facts block))
 					block))))))
 
 (define annotate_sql_outputs (lambda (query)

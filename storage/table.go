@@ -108,8 +108,10 @@ func (estimate *atomicPlannerRowEstimate) UnmarshalJSON(data []byte) error {
 }
 
 type column struct {
-	Name              string
-	Typ               string
+	Name string
+	Typ  string
+	// EnumValues is immutable declaration metadata; existing JSON schemas omit it.
+	EnumValues        []string  `json:",omitempty"`
 	Typdimensions     []int     // type dimensions for DECIMAL(10,3) and VARCHAR(5)
 	Computor          scm.Scmer `json:"-"`          // TODO: marshaljson -> serialize
 	ComputorInputCols []string  `json:",omitempty"` // input cols for computor (persisted in schema)
@@ -1878,6 +1880,10 @@ func (t *table) metadataMemory() uint {
 	for _, c := range t.Columns {
 		size += uint(unsafe.Sizeof(*c)) + uint(len(c.Name)+len(c.Typ)+len(c.Collation)+len(c.Comment)+len(c.DefaultExpression)+len(c.DefaultName))
 		size += uint(cap(c.Typdimensions)) * uint(unsafe.Sizeof(int(0)))
+		size += uint(cap(c.EnumValues)) * uint(unsafe.Sizeof(""))
+		for _, label := range c.EnumValues {
+			size += uint(len(label))
+		}
 		// As with shard bookkeeping, map entry/bucket overhead is an estimate.
 		size += 64 * uint(len(c.InitialValues))
 		for uuid := range c.InitialValues {
@@ -2168,6 +2174,9 @@ func (t *table) buildShowColumnsSnapshot(rowEstimate uint, columnNames *tableCol
 			filterSchema = plannerFingerprintMix(filterSchema, uint64(dimension))
 		}
 		filterSchema = plannerFingerprintMix(filterSchema, uint64(len(c.Typdimensions)))
+		for _, label := range c.EnumValues {
+			filterSchema = plannerFingerprintString(filterSchema, label)
+		}
 		keyType := ""
 		for _, uk := range t.Unique {
 			for _, col := range uk.Cols {
@@ -2508,6 +2517,13 @@ func (c *column) show(keyType string, distinctEstimate uint64, rowEstimate uint,
 		b.WriteByte(')')
 		typ = b.String()
 	}
+	if strings.EqualFold(c.Typ, "ENUM") && len(c.EnumValues) != 0 {
+		labels := make([]string, len(c.EnumValues))
+		for i, label := range c.EnumValues {
+			labels[i] = "'" + strings.ReplaceAll(strings.ReplaceAll(label, "\\", "\\\\"), "'", "''") + "'"
+		}
+		typ = c.Typ + "(" + strings.Join(labels, ",") + ")"
+	}
 	extra := ""
 	if c.AutoIncrement {
 		extra = "auto_increment"
@@ -2556,6 +2572,7 @@ func (c *column) show(keyType string, distinctEstimate uint64, rowEstimate uint,
 		scm.NewString("MinEstimate"), minEstimate,
 		scm.NewString("MaxEstimate"), maxEstimate,
 		scm.NewString("AverageValueBytes"), averageValueBytes,
+		scm.NewString("EnumValues"), showStringSlice(c.EnumValues),
 	})
 }
 
@@ -2722,6 +2739,43 @@ func (c *column) UpdateSanitizer() {
 			}
 			return scm.NewDate(v.Int())
 		}
+	case "ENUM":
+		if len(c.EnumValues) == 0 || len(c.EnumValues) > 65535 {
+			panic("ENUM requires between 1 and 65535 labels for column " + name)
+		}
+		labels := append([]string(nil), c.EnumValues...)
+		ci := strings.Contains(c.Collation, "_ci")
+		canonical := func(value string) string {
+			value = strings.TrimRight(value, " ")
+			if ci {
+				return foldIdentifier(value)
+			}
+			return value
+		}
+		members := make(map[string]string, len(labels))
+		for _, label := range labels {
+			key := canonical(label)
+			if _, exists := members[key]; exists {
+				panic("duplicate ENUM label for column " + name + ": " + label)
+			}
+			members[key] = label
+		}
+		inner = func(v scm.Scmer) scm.Scmer {
+			if v.IsString() || v.IsSymbol() || v.IsBufferString() {
+				if label, exists := members[canonical(scm.String(v))]; exists {
+					return scm.NewString(label)
+				}
+				if index, err := strconv.ParseInt(scm.String(v), 10, 64); err == nil && index > 0 && index <= int64(len(labels)) {
+					return scm.NewString(labels[index-1])
+				}
+			} else if v.IsInt() || v.IsFloat() {
+				index := v.Float()
+				if index >= 1 && index <= float64(len(labels)) && math.Trunc(index) == index {
+					return scm.NewString(labels[int(index)-1])
+				}
+			}
+			panic("invalid ENUM value for column " + name + ": " + scm.String(v))
+		}
 	case "VARCHAR", "CHAR":
 		dims := c.Typdimensions
 		if len(dims) >= 1 && dims[0] > 0 {
@@ -2821,6 +2875,7 @@ func (c *column) Alter(key string, val scm.Scmer) scm.Scmer {
 		return scm.NewBool(c.IsTemp)
 	case "collation":
 		c.Collation = scm.String(val)
+		c.UpdateSanitizer()
 		return scm.NewString(c.Collation)
 	case "comment":
 		c.Comment = scm.String(val)
@@ -3030,6 +3085,7 @@ func (t *table) createColumnLocked(name string, typ string, typdimensions []int,
 	constraintName := ""
 	nullsNotDistinct := false
 	fillExisting := true
+	hasDefault := false
 	c.Name = name
 	c.Typ = typ
 	c.Typdimensions = typdimensions
@@ -3057,6 +3113,7 @@ func (t *table) createColumnLocked(name string, typ string, typdimensions []int,
 		case "null":
 			c.AllowNull = scm.ToBool(extrainfo[i+1])
 		case "default":
+			hasDefault = true
 			c.Default = extrainfo[i+1]
 		case "default_expression":
 			c.DefaultExpression = scm.String(extrainfo[i+1])
@@ -3064,6 +3121,11 @@ func (t *table) createColumnLocked(name string, typ string, typdimensions []int,
 			c.DefaultName = scm.String(extrainfo[i+1])
 		case "update":
 			c.OnUpdate = extrainfo[i+1]
+		case "enum_values":
+			c.EnumValues = scmerSliceToStrings(mustScmerSlice(extrainfo[i+1], "enum_values"))
+			for i, label := range c.EnumValues {
+				c.EnumValues[i] = strings.TrimRight(label, " ")
+			}
 		case "comment":
 			c.Comment = scm.String(extrainfo[i+1])
 		case "collate":
@@ -3098,6 +3160,9 @@ func (t *table) createColumnLocked(name string, typ string, typdimensions []int,
 		if conflict {
 			panic("declaration name already exists: " + c.DefaultName)
 		}
+	}
+	if strings.EqualFold(c.Typ, "ENUM") && !c.AllowNull && !hasDefault && len(c.EnumValues) > 0 {
+		c.Default = scm.NewString(c.EnumValues[0])
 	}
 	c.UpdateSanitizer()
 	if !initializeExisting && !c.IsTemp && c.hasDefault() {
@@ -3350,6 +3415,7 @@ func (t *table) CreateColumn(name string, typ string, typdimensions []int, extra
 func cloneStoredColumnDeclaration(current *column) *column {
 	replacement := &column{
 		Name: current.Name, Typ: current.Typ, Typdimensions: append([]int(nil), current.Typdimensions...),
+		EnumValues:        append([]string(nil), current.EnumValues...),
 		PartitioningScore: current.PartitioningScore,
 		AutoIncrement:     current.AutoIncrement, Default: current.Default,
 		DefaultExpression: current.DefaultExpression,

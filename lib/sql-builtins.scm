@@ -47,6 +47,22 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(atom "NEWID" true))) "(" ")") (toUpper name))
 )))
 
+/* Normalize a SQL LIKE pattern to the runtime's backslash escape syntax.
+The input and work are bounded by the scalar pattern, never table row count. */
+(define sql_like_pattern (lambda (pattern escape) (begin
+	(if (or (nil? pattern) (nil? escape)) nil (begin
+		(if (> (count (split escape "")) 1) (error "LIKE ESCAPE must be empty or one character"))
+		(define literal (lambda (c) (if (has? '("%" "_" "\\") c) (concat "\\" c) c)))
+		(define translate (lambda (chars) (match chars
+			'() ""
+			(cons c rest) (if (and (not (equal? escape "")) (equal? c escape))
+				(match rest
+					(cons escaped tail) (concat (literal escaped) (translate tail))
+					'() (literal c))
+				(concat (if (equal? c "\\") "\\\\" c) (translate rest))))))
+		(translate (split pattern ""))
+)))))
+
 /* time */
 (sql_builtins "UNIX_TIMESTAMP" unix_timestamp)
 (sql_builtins "CURRENT_TIMESTAMP" now)

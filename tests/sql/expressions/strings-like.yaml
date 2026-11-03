@@ -165,6 +165,34 @@ test_cases:
           and_result: false
           or_result: true
 
+  - name: Custom LIKE escape protects wildcard characters
+    sql: SELECT 'a%b' LIKE 'a!%b' ESCAPE '!' AS r
+    expect: {data: [{r: true}]}
+  - name: Custom NOT LIKE escape preserves ordinary wildcard matching
+    sql: SELECT 'a_b' NOT LIKE 'a!_b' ESCAPE '!' AS r
+    expect: {data: [{r: false}]}
+  - name: Custom LIKE escape preserves a literal backslash
+    sql: SELECT 'a\\b' LIKE 'a\\b' ESCAPE '!' AS r
+    expect: {data: [{r: true}]}
+  - name: Empty LIKE escape leaves percent as a wildcard
+    sql: SELECT 'abcdef' LIKE 'a%f' ESCAPE '' AS r
+    expect: {data: [{r: true}]}
+  - name: Unicode LIKE escape is one character
+    sql: SELECT 'a%b' LIKE 'aö%b' ESCAPE 'ö' AS r
+    expect: {data: [{r: true}]}
+  - name: NULL LIKE pattern propagates NULL
+    sql: SELECT 'a' LIKE NULL ESCAPE '!' AS r
+    expect: {data: [{r: null}]}
+  - name: NULL LIKE escape propagates NULL
+    sql: SELECT 'a' LIKE 'a' ESCAPE NULL AS r
+    expect: {data: [{r: null}]}
+  - name: LIKE escape with multiple characters is rejected
+    sql: SELECT 'a' LIKE 'a' ESCAPE '!!' AS r
+    expect: {error: true}
+  - name: MySQL control escapes decode before literal parameterization
+    sql: SELECT '\Z'=0x1a AS z, '\b'=0x08 AS b, '\t'=0x09 AS t
+    expect: {data: [{z: true, b: true, t: true}]}
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS like_qualified"
   - sql: "DROP TABLE IF EXISTS notlike_test"

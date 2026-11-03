@@ -1,0 +1,33 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  description: ENUM labels, defaults and validation survive persisted schema reload
+  isolated: true
+setup:
+  - sql: DROP TABLE IF EXISTS enum_recovery
+cleanup:
+  - sql: DROP TABLE IF EXISTS enum_recovery
+test_cases:
+  - name: Create persisted ENUM declarations
+    sql: CREATE TABLE enum_recovery (id INT PRIMARY KEY, kind ENUM('z','a','m') NOT NULL, optional ENUM('yes','no') DEFAULT NULL) ENGINE=SAFE
+  - name: Insert enum labels and numeric ordinals
+    sql: INSERT INTO enum_recovery (id,kind) VALUES (1,'m'),(2,2)
+  - name: Restart with the persisted label domain
+    action: restart
+  - name: Enum declaration order survives restart
+    sql: SELECT id,kind FROM enum_recovery ORDER BY kind
+    expect: {data: [{id: 2, kind: a}, {id: 1, kind: m}]}
+  - name: Enum default survives restart
+    sql: INSERT INTO enum_recovery (id) VALUES (3)
+  - name: Enum default remains the first label
+    sql: SELECT kind,optional FROM enum_recovery WHERE id=3
+    expect: {data: [{kind: z, optional: null}]}
+  - name: Recovered enum still rejects unknown labels
+    sql: INSERT INTO enum_recovery VALUES (4,'invalid',NULL)
+    expect: {error: true}
+  - name: Recovered enum still accepts numeric ordinals
+    sql: INSERT INTO enum_recovery VALUES (4,3,'yes')
+  - name: Recovered ordinal returns its label
+    sql: SELECT kind,optional FROM enum_recovery WHERE id=4
+    expect: {data: [{kind: m, optional: 'yes'}]}
