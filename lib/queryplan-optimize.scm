@@ -664,6 +664,15 @@ cost-reordered around the complete relation unit. */
 /* Neumann/Radke join ordering lives in the SQL planner. None of these values
 are runtime relations: they are compile-time graph sets, cost records and
 logical trees consumed before physical scan lowering. */
+
+/* Costs intentionally compare work without a shard/NUMA/cluster parallel
+speedup factor. For alternatives with comparable execution independence, the
+common speedup largely cancels when ranking plans; dividing costs by worker,
+shard or node counts would add topology assumptions without improving that
+comparison. Storage operators own parallel execution and placement.
+Model differences in actual work (rows, probes, builds and invocations) here.
+A parallelism adjustment needs evidence of a plan-dependent tipping point;
+no such adjustment is currently justified by our measurements. */
 (define planner_cost (lambda (startup_ns row_ns probe_ns batch_startup_ns batch_row_ns
 	build_ns memory_bytes compile_ns expected_rows confidence)
 	(begin
@@ -719,7 +728,9 @@ exact bounded fallback may prefer it while those intervals overlap. */
 			(qassoc_get current (quote total_ns) 0)))))
 
 /* Calibrated generic storage facts. They are deliberately free of SQL
-semantics; SCM combines them according to the candidate being evaluated. */
+semantics; SCM combines them according to the candidate being evaluated.
+Estimate rows actually accessed, rather than granting a parallelism discount
+to a full scan or charging a selective probe for the entire input table. */
 (define planner_scan_cost (lambda (rows confidence)
 	(planner_cost 4000 (* rows 54.0) 0 0 0 0 0 0 rows confidence)))
 
