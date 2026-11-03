@@ -34,7 +34,7 @@ test_cases:
     expect: {error: true}
   - name: Commented rollback recovers an aborted transaction
     session_id: tx_commented_rollback
-    sql: ROLLBACK /* MediaWiki installer */
+    sql: ROLLBACK /* statement annotation */
   - name: Commented rollback leaves the session usable
     session_id: tx_commented_rollback
     sql: SELECT 1 AS healthy

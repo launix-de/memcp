@@ -109,7 +109,7 @@ test_cases:
       statements:
         - sql: "SHOW GLOBAL VARIABLES LIKE 'ft\\_min\\_word\\_len'"
           expect: {rows: 0, columns: [Variable_name, Value]}
-        - sql: "SHOW SESSION VARIABLES WHERE Variable_name='unknown_mediawiki_probe'"
+        - sql: "SHOW SESSION VARIABLES WHERE Variable_name='unknown_variable_probe'"
           expect: {rows: 0, columns: [Variable_name, Value]}
         - sql: "SHOW VARIABLES WHERE Variable_name='max_allowed_packet'"
           expect:

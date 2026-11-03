@@ -26,10 +26,10 @@ test_cases:
 # Search probes use the original fixture, before the bulk DELETE cases below.
 - name: boolean-fulltext-filter-and-score
   sql: >-
-    SELECT id,MATCH(CONCAT('memcp ',id))
-    AGAINST('+memcp +2*' IN BOOLEAN MODE) AS score FROM big_items
-    WHERE id<4 AND MATCH(CONCAT('memcp ',id))
-    AGAINST('+memcp +2*' IN BOOLEAN MODE)>0 ORDER BY id
+    SELECT id,MATCH(CONCAT('alpha ',id))
+    AGAINST('+alpha +2*' IN BOOLEAN MODE) AS score FROM big_items
+    WHERE id<4 AND MATCH(CONCAT('alpha ',id))
+    AGAINST('+alpha +2*' IN BOOLEAN MODE)>0 ORDER BY id
   expect:
     data: [{id: 2, score: 2}]
     cluster:
@@ -37,10 +37,10 @@ test_cases:
 - name: boolean-fulltext-captured-session-query
   session_id: cluster-fulltext-query
   setup:
-  - sql: SET @fulltext_query='+memcp +(wiki handbook) -obsolete'
+  - sql: SET @fulltext_query='+alpha +(manual handbook) -obsolete'
   sql: >-
     SELECT id FROM big_items WHERE id<3 AND
-    MATCH(CONCAT('MemCP ',CASE WHEN id=1 THEN 'obsolete wiki' ELSE 'handbook' END))
+    MATCH(CONCAT('Alpha ',CASE WHEN id=1 THEN 'obsolete manual' ELSE 'handbook' END))
     AGAINST(@fulltext_query IN BOOLEAN MODE)>0 ORDER BY id
   expect:
     data: [{id: 0}, {id: 2}]

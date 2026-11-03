@@ -165,7 +165,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 	(parser (define col sql_identifier_unquoted) '((quote get_column) nil true col true))
 )))
 
-/* Recovery admission uses the SQL grammar, including application comments.
+/* Recovery admission uses the SQL grammar, including SQL comments.
 Only a complete transaction rollback may execute after a statement abort. */
 (define sql_recovery_statement? (parser (define recovery (or
 	(parser '((atom "ROLLBACK" true) (? (atom "WORK" true)) (? ";") (regex "$")) true)
