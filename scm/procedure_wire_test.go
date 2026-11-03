@@ -698,3 +698,44 @@ func TestProcedureWireKeepsInvocationScopesWhileClosingNestedCaptures(t *testing
 		}
 	}
 }
+
+func TestClosedProcedurePreservesNestedLambdaBindingProofs(t *testing.T) {
+	source := `(lambda (external) (lambda (row)
+		(list ((lambda (value) (+ value row)) external)
+			(lambda (other) (+ other external)))))`
+	factory := Eval(Optimize(Read(t.Name(), source), &Globalenv, nil), &Globalenv)
+	closed := CloseProcedure(Apply(factory, NewInt(7)))
+	checked := 0
+	var visit func(Scmer)
+	visit = func(value Scmer) {
+		value = value.WithoutSourceInfo()
+		if !value.IsSlice() {
+			return
+		}
+		items := value.Slice()
+		if len(items) == 0 || items[0].SymbolEquals("quote") {
+			return
+		}
+		if items[0].SymbolEquals("lambda") && len(items) >= 4 && ToInt(items[3]) > 0 {
+			if len(items) != 5 {
+				t.Fatalf("closed lambda lost prepared binding proof: %s", String(value))
+			}
+			proof, ok := items[4].Any().(lambdaBindingProof)
+			if !ok || proof.body != items[2] || proof.params != items[1].WithoutSourceInfo() {
+				t.Fatal("closed lambda retained a stale binding proof")
+			}
+			checked++
+		}
+		for _, item := range items {
+			visit(item)
+		}
+	}
+	visit(closed.Proc().Body)
+	if checked < 2 {
+		t.Fatalf("checked %d nested lambda proofs, want both unchanged and closed captures", checked)
+	}
+	result := Apply(closed, NewInt(3)).Slice()
+	if result[0].Int() != 10 || Apply(result[1], NewInt(2)).Int() != 9 {
+		t.Fatal("closed lambda values changed")
+	}
+}
