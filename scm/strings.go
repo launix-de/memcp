@@ -538,8 +538,269 @@ func init_strings() {
 			return NewRegex(re)
 		},
 		Type: &TypeDescriptor{Kind: "func", Const: true,
-			Params: []*TypeDescriptor{{Kind: "string", Label: "pattern"}},
-			Return: &TypeDescriptor{Kind: "any"}},
+			Params:        []*TypeDescriptor{{Kind: "string", Label: "pattern"}},
+			Return:        &TypeDescriptor{Kind: "any"},
+			JITInlineCost: 12,
+			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				declaration := declarations["compiled_regex"]
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
+					ctx.Coverage.NativeCalls++
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
+				}
+				var d0 JITValueDesc
+				_ = d0
+				var d1 JITValueDesc
+				_ = d1
+				var d2 JITValueDesc
+				_ = d2
+				var d4 JITValueDesc
+				_ = d4
+				var d5 JITValueDesc
+				_ = d5
+				var d6 JITValueDesc
+				_ = d6
+				var d7 JITValueDesc
+				_ = d7
+				var d16 JITValueDesc
+				_ = d16
+				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+				branchSerial := ctx.branchSerial
+				_ = branchSerial
+				returnType := uint8(JITTypeUnknown)
+				returnTypeSeen := false
+				mergeReturnType := func(t uint8) {
+					if !returnTypeSeen {
+						returnType, returnTypeSeen = t, true
+					} else if returnType != t {
+						returnType = JITTypeUnknown
+					}
+				}
+				var bbs [3]BBDescriptor
+				for i := range args {
+					ctx.StabilizeDescForControlFlow(&args[i])
+				}
+				if result.Loc == LocAny {
+					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+					ctx.BindReg(result.Reg, &result)
+					ctx.BindReg(result.Reg2, &result)
+				}
+				resultRegsProtected := result.Loc == LocRegPair
+				if resultRegsProtected {
+					ctx.ProtectReg(result.Reg)
+					ctx.ProtectReg(result.Reg2)
+				}
+				lbl0 := ctx.ReserveLabel()
+				bbpos_0_0 := int32(-1)
+				_ = bbpos_0_0
+				lbl1 := ctx.ReserveLabel()
+				_ = lbl1
+				bbpos_0_1 := int32(-1)
+				_ = bbpos_0_1
+				lbl2 := ctx.ReserveLabel()
+				_ = lbl2
+				bbpos_0_2 := int32(-1)
+				_ = bbpos_0_2
+				lbl3 := ctx.ReserveLabel()
+				_ = lbl3
+				bbs[0].Render = func() JITValueDesc {
+					if bbs[0].Rendered {
+						ctx.EmitJmp(lbl1)
+						return result
+					}
+					bbs[0].Rendered = true
+					ctx.FlushRegisterMoves()
+					bbpos_0_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
+					ctx.MarkLabel(lbl1)
+					ctx.ResolveFixups()
+					ctx.ReclaimUntrackedRegs()
+					d0 = args[0]
+					d0.ID = 0
+					d2 = d0
+					ctx.SyncDesc(&d2)
+					if d2.Loc == LocMem {
+						tmpScalar := JITValueDesc{Loc: LocReg, Type: d2.Type, Reg: ctx.AllocReg()}
+						scratch := ctx.AllocRegExcept(tmpScalar.Reg)
+						ctx.EmitMovRegImm64(scratch, uint64(d2.MemPtr))
+						ctx.EmitMovRegMem(tmpScalar.Reg, scratch, 0)
+						ctx.FreeReg(scratch)
+						ctx.BindReg(tmpScalar.Reg, &tmpScalar)
+						d2 = tmpScalar
+					}
+					d2 = JITPrepareScmerGoArg(ctx, d2)
+					if d2.Loc != LocRegPair && d2.Loc != LocStackPair && d2.Loc != LocInputPair {
+						panic("jit: Scmer.String receiver not materialized as pair")
+					}
+					d1 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d2}, 2)
+					ctx.FreeDesc(&d0)
+					ctx.EnsureDesc(&d1)
+					if d1.Loc == LocImm {
+						tmpPair := JITValueDesc{Loc: LocRegPair, Type: d1.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+						ctx.TrackImm(d1.Imm)
+						ptrWord, _ := d1.Imm.RawWords()
+						ctx.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
+						ctx.EmitMovRegImm64(tmpPair.Reg2, uint64(len(d1.Imm.String())))
+						d1 = tmpPair
+					} else if d1.Loc == LocReg {
+						tmpPair := JITValueDesc{Loc: LocRegPair, Type: d1.Type, Reg: ctx.AllocRegExcept(d1.Reg), Reg2: ctx.AllocRegExcept(d1.Reg)}
+						switch d1.Type {
+						case tagBool:
+							ctx.EmitMakeBool(tmpPair, d1)
+						case tagInt:
+							ctx.EmitMakeInt(tmpPair, d1)
+						case tagFloat:
+							ctx.EmitMakeFloat(tmpPair, d1)
+						default:
+							panic("jit: generic call arg scalar type unknown for 2-word value")
+						}
+						ctx.FreeDesc(&d1)
+						d1 = tmpPair
+					}
+					if d1.Loc != LocRegPair && d1.Loc != LocStackPair && d1.Loc != LocInputPair {
+						panic("jit: generic call arg expects 2-word value (regexp.Compile arg0)")
+					}
+					ctx.SyncDesc(&d1)
+					callResults3 := JITEmitGoCallResults(ctx, GoFuncAddr(regexp.Compile), []JITValueDesc{d1}, []uint8{1, 2}, []uint8{1, 3})
+					d4 = callResults3[0]
+					_ = d4
+					d5 = callResults3[1]
+					_ = d5
+					ctx.StabilizeDescForControlFlow(&d4)
+					ctx.StabilizeDescForControlFlow(&d5)
+					ctx.EnsureDesc(&d5)
+					if d5.Loc == LocImm {
+						d6 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d5.Imm.IsNil() != true)}
+					} else {
+						ctx.EnsureDesc(&d5)
+						if d5.Loc != LocReg && d5.Loc != LocRegPair && d5.Loc != LocRegTriple {
+							panic("jit: nil comparison requires a register value")
+						}
+						r0 := ctx.AllocRegExcept(d5.Reg)
+						ctx.EmitCmpRegImm32(d5.Reg, 0)
+						d6 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r0, Condition: CondNotEqual}
+						ctx.BindReg(r0, &d6)
+					}
+					d7 = d6
+					ctx.SyncDesc(&d7)
+					if d7.Loc != LocImm && d7.Loc != LocFlags {
+						panic("jit: fused If condition is neither LocImm nor LocFlags")
+					}
+					if d7.Loc == LocImm {
+						if d7.Imm.Bool() {
+							return bbs[1].Render()
+						}
+						return bbs[2].Render()
+					}
+					ctx.EmitJump(d7.Condition, lbl2)
+					if bbs[2].Rendered {
+						ctx.EmitJmp(lbl3)
+					}
+					ctx.FreeDesc(&d6)
+					ctx.FlushRegisterMoves()
+					if !bbs[2].Rendered {
+						snap8 := d0
+						snap9 := d1
+						snap10 := d2
+						snap11 := d4
+						snap12 := d5
+						snap13 := d6
+						snap14 := d7
+						alloc15 := ctx.SnapshotAllocState()
+						bbs[2].Render()
+						ctx.RestoreAllocState(alloc15)
+						d0 = snap8
+						d1 = snap9
+						d2 = snap10
+						d4 = snap11
+						d5 = snap12
+						d6 = snap13
+						d7 = snap14
+					}
+					if !bbs[1].Rendered {
+						return bbs[1].Render()
+					}
+					return result
+					return result
+				}
+				bbs[1].Render = func() JITValueDesc {
+					if bbs[1].Rendered {
+						ctx.EmitJmp(lbl2)
+						return result
+					}
+					bbs[1].Rendered = true
+					ctx.FlushRegisterMoves()
+					bbpos_0_1 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
+					ctx.MarkLabel(lbl2)
+					ctx.ResolveFixups()
+					ctx.ReclaimUntrackedRegs()
+					_ = jitEmitGoVariadicCallFromDescs(ctx, declarations["compiled_regex"].Fn, args, result)
+					ctx.EmitGoPanic("jit: builtin panic boundary unexpectedly returned")
+					return result
+				}
+				bbs[2].Render = func() JITValueDesc {
+					if bbs[2].Rendered {
+						ctx.EmitJmp(lbl3)
+						return result
+					}
+					bbs[2].Rendered = true
+					ctx.FlushRegisterMoves()
+					bbpos_0_2 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
+					ctx.MarkLabel(lbl3)
+					ctx.ResolveFixups()
+					ctx.ReclaimUntrackedRegs()
+					if d4.Loc == LocRegPair || d4.Loc == LocStackPair || d4.Loc == LocRegTriple || d4.Loc == LocStackTriple {
+						panic("jit: generic call arg expects 1-word value")
+					}
+					ctx.SyncDesc(&d4)
+					d16 = ctx.EmitGoCallScalar(GoFuncAddr(NewRegex), []JITValueDesc{d4}, 2)
+					d16.NoHeapPointer = false
+					ctx.BindReg(d16.Reg, &d16)
+					ctx.BindReg(d16.Reg2, &d16)
+					ctx.SyncDesc(&d16)
+					if d16.Loc == LocRegPair || d16.Loc == LocStackPair || d16.Loc == LocInputPair {
+						ctx.EmitMovPairToResult(&d16, &result)
+						result.Type = d16.Type
+					} else {
+						switch d16.Type {
+						case tagBool:
+							ctx.EmitMakeBool(result, d16)
+							result.Type = tagBool
+						case tagInt:
+							ctx.EmitMakeInt(result, d16)
+							result.Type = tagInt
+						case tagFloat:
+							ctx.EmitMakeFloat(result, d16)
+							result.Type = tagFloat
+						case tagNil:
+							ctx.EmitMakeNil(result)
+							result.Type = tagNil
+						default:
+							ctx.EmitMovPairToResult(&d16, &result)
+							result.Type = d16.Type
+						}
+					}
+					mergeReturnType(result.Type)
+					ctx.EmitJmp(lbl0)
+					return result
+				}
+				returned := bbs[0].Render()
+				if ctx.hasBooleanFlags(returned) {
+					if resultRegsProtected {
+						ctx.UnprotectReg(result.Reg2)
+						ctx.UnprotectReg(result.Reg)
+					}
+					return returned
+				}
+				ctx.MarkLabel(lbl0)
+				ctx.ResolveFixups()
+				if resultRegsProtected {
+					ctx.UnprotectReg(result.Reg2)
+					ctx.UnprotectReg(result.Reg)
+				}
+				result.Type = returnType
+				result.ReturnTypeMerged = returnTypeSeen
+				return result
+			},
+		},
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "regexp_replace_compiled",
@@ -557,8 +818,17 @@ func init_strings() {
 			return NewString(re.ReplaceAllString(String(a[1]), String(a[2])))
 		},
 		Type: &TypeDescriptor{Kind: "func", Const: true,
-			Params: []*TypeDescriptor{{Kind: "any", Label: "pattern"}, {Kind: "string", Label: "value"}, {Kind: "any", Label: "replacement"}},
-			Return: &TypeDescriptor{Kind: "string"}},
+			Params:        []*TypeDescriptor{{Kind: "any", Label: "pattern"}, {Kind: "string", Label: "value"}, {Kind: "any", Label: "replacement"}},
+			Return:        &TypeDescriptor{Kind: "string"},
+			JITInlineCost: 65535,
+			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				// JITGen native call boundary: escaping or recursive Go closure.
+				ctx.Coverage.NativeCalls++
+				declaration := declarations["regexp_replace_compiled"]
+				return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
+			},
+			JITVirtualArgs: true,
+		},
 	})
 
 	init_uuid()
