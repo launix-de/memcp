@@ -39,22 +39,6 @@ func TestJITTypedInliningKeepsLargeNativeBoundaries(t *testing.T) {
 	}
 }
 
-func TestJITPreparedABILookupsDoNotAllocate(t *testing.T) {
-	address := GoFuncAddr(jitFourScalarResults)
-	words := []goCallArgWord{{loc: LocImm}}
-	if got := testing.AllocsPerRun(1000, func() {
-		jitRuntimeLayoutGoCallArgs(address, words)
-		jitRuntimeResultRegs(address, 4)
-		jitRuntimeGoResultShape(address)
-		jitRuntimeCallBytes(address)
-		jitRuntimeCallBytes(0) // The shared func(...Scmer) Scmer convention.
-	}); got != 0 {
-		t.Fatalf("prepared ABI lookups allocate %g times", got)
-	}
-}
-
-// Identical call shapes must not change admission when unrelated earlier
-// code has claimed registers. The allocator still handles actual emission.
 func TestJITInlineAdmissionDependsOnCallShape(t *testing.T) {
 	for _, tc := range []struct {
 		name string

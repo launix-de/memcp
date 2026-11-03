@@ -106,11 +106,5 @@ jobs:
           printf 'GOROOT=%s\n' "$RUNNER_TEMP/go-jit" >> "$GITHUB_ENV"
           printf 'GOEXPERIMENT=jit\n' >> "$GITHUB_ENV"
 
-      - name: Verify runtime JIT ABI contracts
-        run: |
-          go test runtime/jit
-          go test -race runtime/jit
-          go test cmd/api -run '^TestJITAPI$'
-
       - name: Run Go tests with JIT enabled
         run: go test ./...

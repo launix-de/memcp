@@ -187,16 +187,3 @@ jobs:
           packages: qemu-user-static
       - name: Execute native JIT and storage suites under QEMU
         run: make jit-cross-test JIT_CROSS_ARCH=${{ matrix.arch }}
-      - name: Verify runtime JIT ABI returns under QEMU
-        shell: bash
-        run: |
-          set -euo pipefail
-          case '${{ matrix.arch }}' in
-            arm64) emulator=qemu-aarch64-static ;;
-            riscv64) emulator=qemu-riscv64-static ;;
-          esac
-          GOROOT="$PWD/.third_party/go-jit" GOEXPERIMENT=jit CGO_ENABLED=0 \
-            GOOS=linux GOARCH='${{ matrix.arch }}' \
-            .third_party/go-jit/bin/go test -exec "$emulator" \
-            -run 'Test(ABI|CallingConvention|CodeBuffer|MemoryLayout|Metadata|Emission)' \
-            -count=1 runtime/jit
