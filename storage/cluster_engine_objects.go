@@ -459,7 +459,11 @@ func (st *storageShardTransaction) registerParticipant(ctx context.Context) erro
 		return nil
 	}
 	st.enlist.Do(func() {
-		st.decisionToken = uuid.NewString()
+		// Live handover enlists the decoded overlay before publishing M.
+		// Keep that capability: existing endpoints already carry it.
+		if st.decisionToken == "" {
+			st.decisionToken = uuid.NewString()
+		}
 		_, st.enlistError = st.transaction.coordinator.Call(ctx, scm.ClusterRequest{
 			Method: "enlist", Arguments: []scm.Scmer{scm.NewAny(st), scm.NewString(st.decisionToken)},
 		})
