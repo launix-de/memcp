@@ -867,8 +867,8 @@ func closedCaptureLiteral(value Scmer) Scmer {
 // CloseProcedure snapshots explicit captures of a procedure without retaining
 // its request-local environment. The optimizer represents a capture from the
 // procedure's creation frame as (outer depth expr). Resolve only those forms in the
-// current procedure body; nested lambdas keep their own outer references,
-// which bind to frames created when the closed procedure runs.
+// current and nested bodies. References to invocation-local scopes stay intact;
+// references beyond them snapshot the source environment before it is released.
 func CloseProcedure(value Scmer) Scmer {
 	if value.GetTag() != tagProc {
 		return value
@@ -940,9 +940,18 @@ func collectProcedureBindings(expression Scmer, bound map[Symbol]struct{}) {
 }
 
 func closeProcedureCaptures(expression Scmer, callFrame *Env, bound map[Symbol]struct{}) Scmer {
+	return closeProcedureScopeCaptures(expression, callFrame, []map[Symbol]struct{}{bound})
+}
+
+// depth counts frames created when this body runs. Only references beyond
+// those future frames capture the source environment; inner references must
+// keep binding to each invocation's own parameters, begin and match scopes.
+func closeProcedureScopeCaptures(expression Scmer, callFrame *Env, scopes []map[Symbol]struct{}) Scmer {
+	depth := len(scopes) - 1
+	bound := scopes[depth]
 	if expression.IsSourceInfo() {
 		source := *expression.SourceInfo()
-		source.value = closeProcedureCaptures(source.value, callFrame, bound)
+		source.value = closeProcedureScopeCaptures(source.value, callFrame, scopes)
 		return NewSourceInfo(source)
 	}
 	if expression.IsSymbol() {
@@ -959,37 +968,58 @@ func closeProcedureCaptures(expression Scmer, callFrame *Env, bound map[Symbol]s
 	if !expression.IsSlice() {
 		return expression
 	}
-	items := expression.Slice()
-	if len(items) > 0 {
-		if head, ok := scmerSymbol(items[0]); ok {
-			switch string(head) {
-			case "outer":
-				return closedCaptureLiteral(Eval(expression, callFrame))
-			case "match", "match_mut":
-				closed := append([]Scmer(nil), items...)
-				if len(items) > 1 {
-					closed[1] = closeProcedureCaptures(items[1], callFrame, bound)
-				}
-				i := 2
-				for ; i+1 < len(items); i += 2 {
-					closed[i] = closeProcedurePattern(items[i], callFrame, bound)
-					branch := maps.Clone(bound)
-					procedurePatternBindings(items[i], branch)
-					collectProcedureBindings(items[i+1], branch)
-					closed[i+1] = closeProcedureCaptures(items[i+1], callFrame, branch)
-				}
-				if i < len(items) {
-					closed[i] = closeProcedureCaptures(items[i], callFrame, bound)
-				}
-				return NewSlice(closed)
-			case "lambda", "quote":
-				return expression
-			}
-		}
+	items := lambdaSyntaxOperands(expression.Slice())
+	if len(items) == 0 {
+		return expression
 	}
-	closed := make([]Scmer, len(items))
-	for i, item := range items {
-		closed[i] = closeProcedureCaptures(item, callFrame, bound)
+	head, _ := scmerSymbol(items[0])
+	if head == "quote" {
+		return expression
+	}
+	if head == "outer" && len(items) == 3 {
+		outerDepth, valid := outerDepthLiteral(items[1])
+		if !valid {
+			return expression
+		}
+		if outerDepth > int64(depth) {
+			capture := NewSlice([]Scmer{items[0], NewInt(outerDepth - int64(depth)), items[2]})
+			return closedCaptureLiteral(Eval(capture, callFrame))
+		}
+		return NewSlice([]Scmer{items[0], items[1], closeProcedureScopeCaptures(items[2], callFrame, scopes[:len(scopes)-int(outerDepth)])})
+	}
+	closed := append([]Scmer(nil), items...)
+	switch head {
+	case "lambda":
+		if len(items) >= 3 {
+			locals := procedureWireBindings(items[1], items[2], bound)
+			closed[2] = closeProcedureScopeCaptures(items[2], callFrame, append(scopes, locals))
+		}
+	case "begin", "begin_mut":
+		first := 1
+		if head == "begin_mut" && len(items) > 1 {
+			closed[1] = closeProcedureScopeCaptures(items[1], callFrame, scopes)
+			first = 2
+		}
+		for i := first; i < len(items); i++ {
+			closed[i] = closeProcedureScopeCaptures(items[i], callFrame, append(scopes, bound))
+		}
+	case "match", "match_mut":
+		if len(items) > 1 {
+			closed[1] = closeProcedureScopeCaptures(items[1], callFrame, scopes)
+		}
+		for i := 3; i < len(items); i += 2 {
+			closed[i-1] = closeProcedurePattern(items[i-1], callFrame, scopes)
+			locals := procedureWireBindings(NewSlice(nil), items[i], bound)
+			procedurePatternBindings(items[i-1], locals)
+			closed[i] = closeProcedureScopeCaptures(items[i], callFrame, append(scopes, locals))
+		}
+		if len(items)%2 == 1 {
+			closed[len(items)-1] = closeProcedureScopeCaptures(items[len(items)-1], callFrame, scopes)
+		}
+	default:
+		for i, item := range items {
+			closed[i] = closeProcedureScopeCaptures(item, callFrame, scopes)
+		}
 	}
 	return NewSlice(closed)
 }

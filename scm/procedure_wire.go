@@ -203,17 +203,17 @@ func procedurePatternBindings(pattern Scmer, bound map[Symbol]struct{}) {
 	}
 }
 
-func closeProcedurePattern(pattern Scmer, callFrame *Env, bound map[Symbol]struct{}) Scmer {
+func closeProcedurePattern(pattern Scmer, callFrame *Env, scopes []map[Symbol]struct{}) Scmer {
 	value := pattern.WithoutSourceInfo()
 	if !value.IsSlice() {
 		return pattern
 	}
 	items := append([]Scmer(nil), value.Slice()...)
 	if len(items) == 2 && scmerIsSymbol(items[0], "eval") {
-		items[1] = closeProcedureCaptures(items[1], callFrame, bound)
+		items[1] = closeProcedureScopeCaptures(items[1], callFrame, scopes)
 	} else {
 		for i, item := range items {
-			items[i] = closeProcedurePattern(item, callFrame, bound)
+			items[i] = closeProcedurePattern(item, callFrame, scopes)
 		}
 	}
 	return NewSlice(items)

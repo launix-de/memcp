@@ -142,7 +142,7 @@ func TestProcedureWirePreservesFloatingCaptures(t *testing.T) {
 	}
 }
 
-func TestProcedureWireRejectsRuntimeCapturesAndUnclosedNestedBindings(t *testing.T) {
+func TestProcedureWireRejectsRuntimeCapturesAndSnapshotsNestedBindings(t *testing.T) {
 	for name, captured := range map[string]Scmer{
 		"native closure": NewFunc(func(args ...Scmer) Scmer { return args[0] }),
 		"session":        NewSession(),
@@ -156,12 +156,20 @@ func TestProcedureWireRejectsRuntimeCapturesAndUnclosedNestedBindings(t *testing
 			}
 		})
 	}
-	// CloseProcedure intentionally leaves nested lambda scopes intact. A
-	// source-only wire encoding must reject a remaining external binding.
+	// Nested named captures now snapshot the source just like numbered ones.
 	env := &Env{Vars: Vars{Symbol("wire_nested_capture"): NewInt(7)}, Outer: &Globalenv}
 	value := Eval(Read(t.Name(), `(lambda (row) (lambda () (+ row wire_nested_capture)))`), env)
-	if _, err := MarshalProcedure(value); err == nil || !strings.Contains(err.Error(), "unclosed lexical capture") {
-		t.Fatalf("unclosed nested capture: %v", err)
+	data, err := MarshalProcedure(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env.Vars[Symbol("wire_nested_capture")] = NewInt(900)
+	restored, err := UnmarshalProcedure(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := Apply(Apply(restored, NewInt(3))); got.Int() != 10 {
+		t.Fatalf("nested capture changed: %s", String(got))
 	}
 }
 
@@ -627,6 +635,66 @@ func TestProcedureWireMatchBranchBindings(t *testing.T) {
 	} {
 		if _, err := MarshalProcedure(Eval(Read(t.Name(), source), &Globalenv)); err == nil {
 			t.Fatalf("accepted unbound lexical read: %s", source)
+		}
+	}
+}
+
+func TestProcedureWireClosesCaptureUsedByNestedLambda(t *testing.T) {
+	source := `(lambda (key) (lambda (acc row)
+		((lambda (a b) (list a b)) acc
+			((lambda (nested) (+ key row nested)) 3))))`
+	factory := Eval(Optimize(Read(t.Name(), source), &Globalenv, nil), &Globalenv)
+	callback := Apply(factory, NewInt(7))
+	want := NewSlice([]Scmer{NewNil(), NewInt(12)})
+	if got := Apply(callback, NewNil(), NewInt(2)); !Equal(got, want) {
+		t.Fatalf("source: %s", String(got))
+	}
+	data, err := MarshalProcedure(callback)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored, err := UnmarshalProcedure(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := Apply(restored, NewNil(), NewInt(2)); !Equal(got, want) {
+		t.Fatalf("restored: %s, wire=%s", String(got), data)
+	}
+}
+
+func TestProcedureWireKeepsInvocationScopesWhileClosingNestedCaptures(t *testing.T) {
+	for _, test := range []struct {
+		name, source string
+		want         int64
+	}{
+		{"begin", `(lambda (external) (lambda (row) (begin (set local 2) (lambda (other) (+ external row local other)))))`, 14},
+		{"match", `(lambda (external) (lambda (row) (match (list row) (cons item _) (lambda (other) (+ external item other)) nil)))`, 12},
+		{"shadow", `(lambda (external) (lambda (row) (lambda (external) (+ row external))))`, 5},
+	} {
+		for _, optimized := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/optimized=%v", test.name, optimized), func(t *testing.T) {
+				expression := Read(t.Name(), test.source)
+				if optimized {
+					expression = Optimize(expression, &Globalenv, nil)
+				}
+				callback := Apply(Eval(expression, &Globalenv), NewInt(7))
+				if got := Apply(Apply(callback, NewInt(3)), NewInt(2)); got.Int() != test.want {
+					t.Fatalf("source: %s", String(got))
+				}
+				data, err := MarshalProcedure(callback)
+				if err != nil {
+					t.Fatal(err)
+				}
+				restored, err := UnmarshalProcedure(data)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, row := range []int64{3, 9} {
+					if got := Apply(Apply(restored, NewInt(row)), NewInt(2)); got.Int() != test.want+row-3 {
+						t.Fatalf("row %d: got %s, wire=%s", row, String(got), data)
+					}
+				}
+			})
 		}
 	}
 }
