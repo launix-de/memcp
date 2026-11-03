@@ -61,7 +61,7 @@ setup:
         (rebuild true false)
         true)
 test_cases:
-  # Freeze 101 requests including cold preparation before comparing revisions.
+  # Sparse probes need 101 requests; the slower dense controls use 11.
   # A/B gates the complete workload, so index startup cannot be hidden by warmup.
   - name: 'Perf: sparse three-table keyed reduction'
     physical_calibration: true
@@ -81,9 +81,9 @@ test_cases:
     calibration_decision: scan_join_order
     race: true
     performance_rows: 360000
-    threshold_ms: 180000
+    threshold_ms: 19600
     warmup: 0
-    timing_samples: 101
+    timing_samples: 11
     timing_aggregation: total
     sql: |-
       SELECT SUM(b.value) AS total FROM ja_probe_fact a
@@ -94,9 +94,9 @@ test_cases:
     physical_calibration: true
     calibration_decision: scan_join_order
     performance_rows: 360000
-    threshold_ms: 60000
+    threshold_ms: 6500
     warmup: 0
-    timing_samples: 101
+    timing_samples: 11
     timing_aggregation: total
     sql: |-
       SELECT SUM(b.value) AS total FROM ja_probe_keys k

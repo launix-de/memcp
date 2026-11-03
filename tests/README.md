@@ -264,8 +264,9 @@ and 20% group gates remain unchanged; no collection or first query is removed.
 - `performance/jit-scan-kernel-compile.yaml`: Full column scans including per-invocation filter and reducer compilation; one cold request plus 1000 SQL or 100 SCM repetitions.
 - `performance/joined-aggregate-driver.yaml`: Selective keyed reductions and dense
   unique/nonunique joins over 360,000 rows at the default shard size. Each new
-  reduction workload totals 101 requests, including cold compilation and lazy
-  preparation. The same cases feed `go run ./tools/costgen --validate-only
+  sparse reduction totals 101 requests; each slower dense control totals 11.
+  All include cold compilation and lazy preparation. The same cases feed
+  `go run ./tools/costgen --validate-only
   --suite joined-aggregate-driver`, which checks forced-plan results and the
   measured ranking of nested scans against `scan_join_order`.
 
