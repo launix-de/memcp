@@ -303,9 +303,9 @@ func (r *replicationManager) recoverPeer(ctx context.Context, id string, req rep
 		r.mu.Unlock()
 		for _, resource := range resources {
 			cell := r.resourceCell(resource)
-			cell.directory.Lock()
+			releaseCoordination := cell.coordinate(ctx)
 			r.updateRecord(resource, func(record *replicaRecord) bool { delete(record.Requests, id); return true })
-			cell.directory.Unlock()
+			releaseCoordination()
 		}
 	}
 	for _, reported := range req.Resources {
@@ -332,8 +332,8 @@ func (r *replicationManager) recoverResource(ctx context.Context, id string, rep
 	resource := r.canonicalResource(reported.Resource)
 	reported.Resource = resource
 	cell := r.resourceCell(resource)
-	cell.directory.Lock()
-	defer cell.directory.Unlock()
+	releaseCoordination := cell.coordinate(ctx)
+	defer releaseCoordination()
 	cell.acquire.Lock()
 	defer cell.acquire.Unlock()
 	if ctx.Err() != nil {

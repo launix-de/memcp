@@ -123,6 +123,16 @@ func (s *scanRPCSession) handle(ctx context.Context, method string, data json.Ra
 			return nil, fmt.Errorf("unknown remote database")
 		}
 		return object.HandleClusterRequest(context.WithValue(ctx, clusterObjectSessionKey{}, s), scm.ClusterRequest{Method: method, Payload: request})
+	case "insert.execute":
+		var request remoteInsertTask
+		if err := json.Unmarshal(data, &request); err != nil {
+			return nil, err
+		}
+		object := GetDatabase(request.Database)
+		if object == nil {
+			return nil, fmt.Errorf("unknown remote database")
+		}
+		return object.HandleClusterRequest(context.WithValue(ctx, clusterObjectSessionKey{}, s), scm.ClusterRequest{Method: method, Payload: request})
 	case "scan.execute":
 		var request remoteScanTask
 		if err := json.Unmarshal(data, &request); err != nil {
@@ -162,59 +172,12 @@ func (database *database) executeScanTask(ctx context.Context, s *scanRPCSession
 			}
 		}
 	}
-	// Request ownership is created once outside shard item loops. Existing
-	// scheduling-boundary checks observe cancellation; nested scans inherit this
-	// context and forward cancellation to their own remote return channels.
-	id, _ := ctx.Value(remoteScanContextKey{}).(string)
-	if id == "" {
-		return nil, fmt.Errorf("remote execution requires an operation envelope")
+	invocation, err := s.beginInvocation(ctx, request.Transaction, "remote shard reduction")
+	if err != nil {
+		return nil, err
 	}
-	ss := &scm.SessionState{}
-	seq := ss.BeginQuery("Cluster", "remote shard reduction")
-	ss.SetQueryContext(seq, ctx)
-	var tx *TxContext
-	if request.Transaction != nil {
-		value, err := s.service.importObject(ctx, s.peer, *request.Transaction)
-		if err != nil {
-			return nil, err
-		}
-		origin, ok := value.Any().(*TxContext)
-		if !ok || (origin.Mode != TxCursorStability && origin.Mode != TxACID) {
-			return nil, fmt.Errorf("invalid transaction object")
-		}
-		// The peer endpoint is shared, never its mutable executor. Even if two
-		// subscans import the same serialized capture, beginQuery/endQuery must
-		// belong to distinct native participants with independent cancellation.
-		tx = origin.newInvocation()
-	} else {
-		tx = NewTxContext(TxCursorStability)
-		tx.autoCommit = true
-	}
-	ss.ID = tx.sourceSessionID
-	tx.beginQuery(ss, seq, "remote shard reduction")
-	if request.Transaction == nil {
-		// A native scan without a supplied transaction still owns any worker
-		// mutations. Finalize them here rather than leaving anonymous overlays
-		// and generation pins after returning the RPC result.
-		defer func() {
-			if tx.State == TxActive {
-				tx.Rollback()
-			}
-		}()
-	}
-	defer tx.endQuery(seq)
-	stop := context.AfterFunc(ctx, func() { ss.KillQuery(seq) })
-	defer stop()
-	s.service.executions.Store(id, tx)
-	defer s.service.executions.Delete(id)
-	binding := scm.NewSlice([]scm.Scmer{scm.NewSymbol("node_query_context"), scm.NewString(id)})
-	decode := scm.ProcedureDecode{ResolveHandle: s.service.handleResolver(ctx, scm.NewAny(tx)), Prepare: prepareScanProcedure(binding), Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) {
-		value, err := s.service.importObject(ctx, s.peer, ref)
-		if err != nil {
-			return scm.NewNil(), err
-		}
-		return scm.BindClusterInvocation(value, scm.NewAny(tx))
-	}}
+	defer invocation.close()
+	tx, decode := invocation.tx, invocation.decode
 	filter, err := scm.UnmarshalProcedure(request.Filter, decode)
 	if err != nil {
 		return nil, err
@@ -306,12 +269,8 @@ func (database *database) executeScanTask(ctx context.Context, s *scanRPCSession
 		return nil, err
 	}
 	reply, err := boundedScanReply(output)
-	if err == nil && request.Transaction == nil {
-		tx.endStatement()
-		err = ctx.Err()
-		if err == nil {
-			err = tx.Commit()
-		}
+	if err == nil {
+		err = invocation.commit(ctx)
 	}
 	if err != nil {
 		s.service.cancelObjectOffers(s.peer, output.ClusterObjectOffers())
@@ -658,4 +617,75 @@ func prepareScanProcedure(binding scm.Scmer) func(scm.Scmer) (scm.Scmer, error) 
 	return func(expression scm.Scmer) (scm.Scmer, error) {
 		return bindProcedureScanContext(expression, binding), nil
 	}
+}
+
+// Shared execution scope for native remote operators. The imported transaction
+// owns effects; this invocation owns cancellation and releases its executor.
+type remoteInvocation struct {
+	tx        *TxContext
+	decode    scm.ProcedureDecode
+	anonymous bool
+	close     func()
+}
+
+func (inv *remoteInvocation) commit(ctx context.Context) error {
+	if !inv.anonymous {
+		return ctx.Err()
+	}
+	inv.tx.endStatement()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return inv.tx.Commit()
+}
+func (s *scanRPCSession) beginInvocation(ctx context.Context, transaction *scm.ClusterReference, description string) (*remoteInvocation, error) {
+	id, _ := ctx.Value(remoteScanContextKey{}).(string)
+	if id == "" {
+		return nil, fmt.Errorf("remote execution requires an operation envelope")
+	}
+	ss := &scm.SessionState{}
+	seq := ss.BeginQuery("Cluster", description)
+	ss.SetQueryContext(seq, ctx)
+	var tx *TxContext
+	if transaction != nil {
+		value, err := s.service.importObject(ctx, s.peer, *transaction)
+		if err != nil {
+			return nil, err
+		}
+		origin, ok := value.Any().(*TxContext)
+		if !ok || (origin.Mode != TxCursorStability && origin.Mode != TxACID) {
+			return nil, fmt.Errorf("invalid transaction object")
+		}
+		// The peer endpoint is shared, never its mutable executor. Even if two
+		// subscans import the same serialized capture, beginQuery/endQuery must
+		// belong to distinct native participants with independent cancellation.
+		tx = origin.newInvocation()
+	} else {
+		tx = NewTxContext(TxCursorStability)
+		tx.autoCommit = true
+	}
+	ss.ID = tx.sourceSessionID
+	tx.beginQuery(ss, seq, description)
+
+	stop := context.AfterFunc(ctx, func() { ss.KillQuery(seq) })
+
+	s.service.executions.Store(id, tx)
+
+	binding := scm.NewSlice([]scm.Scmer{scm.NewSymbol("node_query_context"), scm.NewString(id)})
+	decode := scm.ProcedureDecode{ResolveHandle: s.service.handleResolver(ctx, scm.NewAny(tx)), Prepare: prepareScanProcedure(binding), Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) {
+		value, err := s.service.importObject(ctx, s.peer, ref)
+		if err != nil {
+			return scm.NewNil(), err
+		}
+		return scm.BindClusterInvocation(value, scm.NewAny(tx))
+	}}
+
+	return &remoteInvocation{tx: tx, decode: decode, anonymous: transaction == nil, close: func() {
+		stop()
+		s.service.executions.Delete(id)
+		if transaction == nil && tx.State == TxActive {
+			tx.Rollback()
+		}
+		tx.endQuery(seq)
+	}}, nil
 }

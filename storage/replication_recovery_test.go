@@ -953,7 +953,7 @@ func TestReplicationOwnReadsIgnoreOutwardHandover(t *testing.T) {
 	// as well as completion, rather than merely checking the resulting phase.
 	r.mu.Lock()
 	c.acquire.Lock()
-	c.directory.Lock()
+	releaseCoordination := c.coordinate(context.Background())
 	done := make(chan struct{})
 	go func() {
 		for range 10000 {
@@ -966,7 +966,7 @@ func TestReplicationOwnReadsIgnoreOutwardHandover(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Error("local readers waited for outward/control ownership")
 	}
-	c.directory.Unlock()
+	releaseCoordination()
 	c.acquire.Unlock()
 	r.mu.Unlock()
 	<-done

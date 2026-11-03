@@ -564,7 +564,7 @@ func TestReplicationParallelReadsIgnoreControlLocks(t *testing.T) {
 			t.Fatal("unexpected active write")
 		}
 		c.acquire.Lock()
-		c.directory.Lock()
+		releaseCoordination := c.coordinate(context.Background())
 		c.checkpoint.Lock()
 		c.sendMu.Lock()
 		c.importPublication.Lock()
@@ -594,7 +594,7 @@ func TestReplicationParallelReadsIgnoreControlLocks(t *testing.T) {
 		c.importPublication.Unlock()
 		c.sendMu.Unlock()
 		c.checkpoint.Unlock()
-		c.directory.Unlock()
+		releaseCoordination()
 		c.acquire.Unlock()
 		handover.Release()
 		r.mu.Unlock()

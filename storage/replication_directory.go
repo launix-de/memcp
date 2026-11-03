@@ -247,14 +247,20 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 		return fmt.Errorf("%s: unknown authority for %s", mosi.NetworkError, packet.Resource.key())
 	}
 	c := r.resourceCell(packet.Resource)
+	var coordination *mosi.Coordination
 	for {
 		c = c.resolved()
 		if packet.TryRead {
-			if !c.directory.TryLock() {
+			coordination = c.clusterstate.TryCoordinate()
+			if coordination == nil {
 				return errClusterReadBusy
 			}
 		} else {
-			c.directory.Lock()
+			var err error
+			coordination, err = c.clusterstate.Coordinate(ctx)
+			if err != nil {
+				return err
+			}
 		}
 		r.mu.Lock()
 		owner := r.directory.Records[r.resourceKey(packet.Resource)].Owner
@@ -266,7 +272,7 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 		// A connected owner has not necessarily installed its hello reply yet.
 		// Let native recovery finish before capturing a recall's authority epoch.
 		// Recovery owns this same directory, so release it while waiting.
-		c.directory.Unlock()
+		coordination.Release()
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -275,7 +281,7 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 		case <-peer.recoveryDone:
 		}
 	}
-	defer c.directory.Unlock()
+	defer coordination.Release()
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}

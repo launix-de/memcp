@@ -438,24 +438,7 @@ func (executor *peerScanExecutor) dispatch(task remoteScanTask) remoteScanResult
 	}
 	var result remoteScanResult
 	if err := service.control(executor.ctx, executor.peer, "scan.execute", task, &result, true); err != nil {
-		// Preserve the original SQL error/value and remote stack through the same
-		// collector used by every object request. No scan-specific send handle.
-		if failure, ok := err.(*scanPanic); ok {
-			if failure.SQL != nil {
-				panic(scanError{failure.SQL, failure.Stack})
-			}
-			if len(failure.Value) > 0 {
-				value, err := schemeValue(failure.Value).reconstruct()
-				if err == nil {
-					if value.IsString() {
-						panic(scanError{value.String(), failure.Stack})
-					}
-					panic(scanError{value, failure.Stack})
-				}
-			}
-			panic(*failure)
-		}
-		panic(err)
+		panicRemoteOperation(err)
 	}
 	if result.Rejected {
 		panic(clusterCapacityRejection{})
@@ -565,4 +548,25 @@ func init() {
 		receiver.Seal()
 		return scm.NewAny(receiver)
 	})
+}
+
+func panicRemoteOperation(err error) {
+	// Preserve the original SQL error/value and remote stack through the same
+	// collector used by every object request. No scan-specific send handle.
+	if failure, ok := err.(*scanPanic); ok {
+		if failure.SQL != nil {
+			panic(scanError{failure.SQL, failure.Stack})
+		}
+		if len(failure.Value) > 0 {
+			value, err := schemeValue(failure.Value).reconstruct()
+			if err == nil {
+				if value.IsString() {
+					panic(scanError{value.String(), failure.Stack})
+				}
+				panic(scanError{value, failure.Stack})
+			}
+		}
+		panic(*failure)
+	}
+	panic(err)
 }

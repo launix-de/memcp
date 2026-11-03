@@ -101,7 +101,57 @@ var stable = [...]Publication{{phase: IO}, {phase: M}, {phase: O}, {phase: S}, {
 // State is embedded in each independently coherent schema or shard.
 // Authorized reads perform one atomic load, without registration or CAS.
 type State struct {
-	value atomic.Pointer[Publication]
+	value        atomic.Pointer[Publication]
+	coordination atomic.Pointer[Coordination]
+}
+
+// Coordination orders owner-side protocol transitions of this item. It grants
+// no data permission: the ordinary published MOSI state remains authoritative.
+// A queued owner operation cannot be overtaken, including by a local request.
+// This is part of the item state, not a mutex wrapped around its admission.
+type Coordination struct {
+	state    *State
+	done     chan struct{}
+	released atomic.Bool
+}
+
+func (state *State) TryCoordinate() *Coordination {
+	claim := &Coordination{state: state, done: make(chan struct{})}
+	if state.coordination.CompareAndSwap(nil, claim) {
+		return claim
+	}
+	return nil
+}
+
+func (state *State) Coordinate(ctx context.Context) (*Coordination, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	claim := &Coordination{state: state, done: make(chan struct{})}
+	previous := state.coordination.Swap(claim)
+	if previous != nil {
+		select {
+		case <-previous.done:
+		case <-ctx.Done():
+			// Keep the queue connected. Only the cancelled request's turn is
+			// discarded, after its predecessor has actually completed.
+			go func() { <-previous.done; claim.Release() }()
+			return nil, ctx.Err()
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		claim.Release()
+		return nil, err
+	}
+	return claim, nil
+}
+
+func (claim *Coordination) Release() {
+	if claim.released.Swap(true) {
+		panic("MOSI coordination released twice")
+	}
+	claim.state.coordination.CompareAndSwap(claim, nil)
+	close(claim.done)
 }
 
 func (state *State) Snapshot() *Publication {
