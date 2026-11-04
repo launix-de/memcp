@@ -216,6 +216,9 @@ func jitRegexTermsEmittable(terms []jitRegexTerm) bool {
 			}
 			return false
 		case syntax.OpCharClass:
+			if _, small := jitRegexSmallWideRunes(node); small {
+				continue
+			}
 			// A byte class can represent ASCII and its complete Unicode
 			// complement, but not Unicode category ranges or partial wide sets.
 			// Those retain the compiled Go regexp operation.
@@ -246,7 +249,6 @@ func jitCompileRegexProgram(pattern *regexp.Regexp) *jitRegexProgram {
 	if err != nil {
 		panic("jit: parse precompiled regex: " + err.Error())
 	}
-	root = jitRegexLowerSmallWideClasses(root)
 	if root.MaxCap() != pattern.NumSubexp() {
 		panic("jit: regex capture inventory changed while lowering")
 	}
@@ -258,44 +260,24 @@ func jitCompileRegexProgram(pattern *regexp.Regexp) *jitRegexProgram {
 	}
 }
 
-// Small Unicode classes (including the Kelvin sign and long s introduced by
-// ASCII case folding) lower to UTF-8 literal alternatives. Large categories
-// stay on the compiled regexp operation rather than a lossy byte class.
-func jitRegexLowerSmallWideClasses(node *syntax.Regexp) *syntax.Regexp {
-	for i, child := range node.Sub {
-		node.Sub[i] = jitRegexLowerSmallWideClasses(child)
-	}
-	if node.Op != syntax.OpCharClass {
-		return node
-	}
-	var ascii []rune
+// Small Unicode classes include the Kelvin sign and long s introduced by
+// ASCII case folding. Keep them atomic: ordinary regex alternation duplicates
+// the continuation for each branch and can expand nested repeats exponentially.
+func jitRegexSmallWideRunes(node *syntax.Regexp) ([]rune, bool) {
 	var wide []rune
 	for i := 0; i+1 < len(node.Rune); i += 2 {
-		lo, hi := node.Rune[i], node.Rune[i+1]
-		if lo < 128 {
-			ascii = append(ascii, lo, min(hi, 127))
+		lo, hi := max(node.Rune[i], 128), node.Rune[i+1]
+		if hi < lo {
+			continue
 		}
-		if hi >= 128 {
-			lo = max(lo, 128)
-			if hi-lo+1 > 8-rune(len(wide)) {
-				return node
-			}
-			for r := lo; r <= hi; r++ {
-				wide = append(wide, r)
-			}
+		if hi-lo+1 > 8-rune(len(wide)) {
+			return nil, false
+		}
+		for r := lo; r <= hi; r++ {
+			wide = append(wide, r)
 		}
 	}
-	if len(wide) == 0 {
-		return node
-	}
-	var alternatives []*syntax.Regexp
-	if len(ascii) != 0 {
-		alternatives = append(alternatives, &syntax.Regexp{Op: syntax.OpCharClass, Rune: ascii})
-	}
-	for _, r := range wide {
-		alternatives = append(alternatives, &syntax.Regexp{Op: syntax.OpLiteral, Rune: []rune{r}})
-	}
-	return &syntax.Regexp{Op: syntax.OpAlternate, Sub: alternatives}
+	return wide, true
 }
 
 func jitRegexBeginsAtText(node *syntax.Regexp) bool {
@@ -743,7 +725,12 @@ func jitRegexSimpleWidth(node *syntax.Regexp) (int, bool) {
 	switch node.Op {
 	case syntax.OpLiteral:
 		return len(string(node.Rune)), len(node.Rune) != 0
-	case syntax.OpCharClass, syntax.OpAnyCharNotNL, syntax.OpAnyChar:
+	case syntax.OpCharClass:
+		if wide, small := jitRegexSmallWideRunes(node); small && len(wide) != 0 {
+			return 0, false
+		}
+		return 1, true
+	case syntax.OpAnyCharNotNL, syntax.OpAnyChar:
 		return 1, true
 	case syntax.OpConcat:
 		width := 0
@@ -1008,6 +995,13 @@ func jitRegexCanStartWith(node *syntax.Regexp, b byte) bool {
 		}
 		return node.Rune[0] == rune(b)
 	case syntax.OpCharClass:
+		if wide, small := jitRegexSmallWideRunes(node); small {
+			for _, r := range wide {
+				if string(r)[0] == b {
+					return true
+				}
+			}
+		}
 		for i := 0; i+1 < len(node.Rune); i += 2 {
 			if rune(b) >= node.Rune[i] && rune(b) <= node.Rune[i+1] {
 				return true
@@ -1255,7 +1249,38 @@ func jitRegexByteRanges(node *syntax.Regexp) [][2]byte {
 	return ranges
 }
 
+func (emitter *jitRegexEmitter) emitSmallWideClass(node *syntax.Regexp, wide []rune, failLabel JITLabel) {
+	emitter.emitBounds(1, failLabel)
+	unicodePath, done := emitter.ctx.ReserveLabel(), emitter.ctx.ReserveLabel()
+	char := emitter.ctx.AllocRegExcept(emitter.cursor, emitter.end, emitter.scan)
+	emitter.ctx.EmitMovRegMemB(char, emitter.cursor, 0)
+	emitter.ctx.EmitCmpRegImm32(char, 128)
+	emitter.ctx.FreeReg(char)
+	emitter.ctx.EmitJump(CondUnsignedAboveOrEqual, unicodePath)
+	ascii := &syntax.Regexp{Op: syntax.OpCharClass}
+	for i := 0; i+1 < len(node.Rune); i += 2 {
+		if node.Rune[i] < 128 {
+			ascii.Rune = append(ascii.Rune, node.Rune[i], min(node.Rune[i+1], 127))
+		}
+	}
+	emitter.emitByteClass(ascii, failLabel)
+	emitter.ctx.EmitJmp(done)
+	emitter.ctx.MarkLabel(unicodePath)
+	for _, r := range wide {
+		next := emitter.ctx.ReserveLabel()
+		emitter.emitLiteral(&syntax.Regexp{Op: syntax.OpLiteral, Rune: []rune{r}}, next)
+		emitter.ctx.EmitJmp(done)
+		emitter.ctx.MarkLabel(next)
+	}
+	emitter.ctx.EmitJmp(failLabel)
+	emitter.ctx.MarkLabel(done)
+}
+
 func (emitter *jitRegexEmitter) emitByteClass(node *syntax.Regexp, failLabel JITLabel) {
+	if wide, small := jitRegexSmallWideRunes(node); small && len(wide) != 0 {
+		emitter.emitSmallWideClass(node, wide, failLabel)
+		return
+	}
 	emitter.emitBounds(1, failLabel)
 	char := emitter.ctx.AllocRegExcept(emitter.cursor, emitter.end, emitter.scan)
 	emitter.ctx.EmitMovRegMemB(char, emitter.cursor, 0)

@@ -318,6 +318,13 @@ and barrier ownership come from the pre-normalization query block. */
 			(if (number? prior)
 				(planner_estimate prior 0.25 (quote text_pattern_prior) true)
 				(planner_unknown_selectivity_estimate)))
+		((symbol strlike) _value pattern _collation _escape)
+		(begin
+			(define prior (text_pattern_selectivity_prior
+				(planner_string_expr_value pattern)))
+			(if (number? prior)
+				(planner_estimate prior 0.25 (quote text_pattern_prior) true)
+				(planner_unknown_selectivity_estimate)))
 		((symbol strlike) _value pattern _collation)
 		(begin
 			(define prior (text_pattern_selectivity_prior
@@ -331,6 +338,9 @@ and barrier ownership come from the pre-normalization query block. */
 		((quote strlike) value pattern collation)
 		(join_optimizer_expr_selectivity_estimate sources default_alias
 			(list (symbol "strlike") value pattern collation) planning_session)
+		((quote strlike) value pattern collation escape)
+		(join_optimizer_expr_selectivity_estimate sources default_alias
+			(list (symbol "strlike") value pattern collation escape) planning_session)
 		_ (planner_unknown_selectivity_estimate))))
 
 /* Feedback keys describe the complete table-local logical predicate, before
@@ -387,7 +397,7 @@ bounded scalar metadata; this lookup never scans, loads columns or builds indexe
 								(lower_column_expr_for_alias src expr)))
 							(define access (eval (compile_scan_access cols
 								(planner_bind_session_values callback planning_session) true)))
-							(define values (map (nth access 1) (lambda (value) (eval value))))
+							(define values (nth access 1))
 							(planner_record_filter_feedback_guard src cols callback planning_session)
 							(scan_selectivity_estimate nil (table (source_schema src) false (source_relation src) false)
 								(nth access 0) values
@@ -2968,7 +2978,11 @@ floor avoids pretending that an unseen word is impossible. */
 
 (define expr_text_selectivity_prior (lambda (expr)
 	(match expr
+		((symbol strlike) _value pattern _collation _escape)
+		(text_pattern_selectivity_prior (planner_string_expr_value pattern))
 		((symbol strlike) _value pattern _collation)
+		(text_pattern_selectivity_prior (planner_string_expr_value pattern))
+		((quote strlike) _value pattern _collation _escape)
 		(text_pattern_selectivity_prior (planner_string_expr_value pattern))
 		((quote strlike) _value pattern _collation)
 		(text_pattern_selectivity_prior (planner_string_expr_value pattern))
@@ -2979,7 +2993,9 @@ floor avoids pretending that an unseen word is impossible. */
 
 (define expr_text_pattern_expr (lambda (expr)
 	(match expr
+		((symbol strlike) _value pattern _collation _escape) pattern
 		((symbol strlike) _value pattern _collation) pattern
+		((quote strlike) _value pattern _collation _escape) pattern
 		((quote strlike) _value pattern _collation) pattern
 		(cons head tail) (reduce tail (lambda (found item)
 			(if (nil? found) (expr_text_pattern_expr item) found))
@@ -3003,8 +3019,12 @@ floor avoids pretending that an unseen word is impossible. */
 
 (define expr_contains_broad_text_match? (lambda (expr planning_session)
 	(match expr
+		((symbol strlike) _value pattern _collation _escape)
+		(planner_broad_like_expr? pattern planning_session)
 		((symbol strlike) _value pattern _collation)
 		(planner_broad_like_expr? pattern planning_session)
+		((quote strlike) _value pattern _collation _escape)
+		(expr_contains_broad_text_match? (list (quote strlike) _value pattern _collation _escape) planning_session)
 		((quote strlike) _value pattern _collation)
 		(expr_contains_broad_text_match? (list (quote strlike) _value pattern _collation) planning_session)
 		(cons head tail)
@@ -3015,7 +3035,9 @@ floor avoids pretending that an unseen word is impossible. */
 
 (define expr_contains_text_match? (lambda (expr)
 	(match expr
+		((symbol strlike) _value _pattern _collation _escape) true
 		((symbol strlike) _value _pattern _collation) true
+		((quote strlike) _value _pattern _collation _escape) true
 		((quote strlike) _value _pattern _collation) true
 		_ false)))
 
@@ -3075,7 +3097,7 @@ floor avoids pretending that an unseen word is impossible. */
 							(lower_column_expr_for_alias src condition) planning_session)))
 					(define access (eval (compile_scan_access filtercols filter_source)))
 					(define filter_expr (optimize filter_source))
-					(define values (map (nth access 1) (lambda (value_expr) (eval value_expr))))
+					(define values (nth access 1))
 					(planner_record_session_value_guards condition planning_session)
 					(planner_record_filter_feedback_guard src filtercols
 						(list (quote lambda)
@@ -3644,9 +3666,13 @@ each alternative plan. This walker visits the already canonical expression
 once; get_column is a leaf because column reads are costed independently. */
 (define physical_text_scan_operation? (lambda (expr)
 	(match expr
+		((symbol strlike) _value _pattern _collation _escape) true
 		((symbol strlike) _value _pattern _collation) true
+		((quote strlike) _value _pattern _collation _escape) true
 		((quote strlike) _value _pattern _collation) true
+		((symbol strlike_cs) _value _pattern _collation _escape) true
 		((symbol strlike_cs) _value _pattern _collation) true
+		((quote strlike_cs) _value _pattern _collation _escape) true
 		((quote strlike_cs) _value _pattern _collation) true
 		_ false)))
 
