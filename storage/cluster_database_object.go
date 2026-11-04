@@ -17,6 +17,18 @@ func (database *database) HandleClusterRequest(ctx context.Context, call scm.Clu
 		return nil, fmt.Errorf("missing authenticated scan invocation")
 	}
 	switch request := call.Payload.(type) {
+	case remoteInsertTask:
+		if call.Method != "insert.execute" || request.Database != database.Name {
+			return nil, fmt.Errorf("mismatched insert database")
+		}
+		if s.service.cluster == nil || !sharedClusterDatabase(database.Name) {
+			return nil, fmt.Errorf("insert requires shared cluster database")
+		}
+		if err := s.service.cluster.requireMember(s.remoteID); err != nil {
+			return nil, err
+		}
+		return database.executeInsertTask(ctx, s, request)
+
 	case remoteScanDescribe:
 		if call.Method != "scan.describe" || request.Database != database.Name {
 			return nil, fmt.Errorf("mismatched database request")

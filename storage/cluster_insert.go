@@ -9,6 +9,7 @@ import "bytes"
 import "context"
 import "sync/atomic"
 import "encoding/json"
+import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/memcp/storage/mosi"
 
 // The current schema owner reserves the existing native table counter. There
@@ -70,13 +71,13 @@ func (cluster *nodeCluster) reserveIDs(ctx context.Context, request clusterIDReq
 	// cannot copy the old counter between reservation and its durable checkpoint.
 	// This never upgrades an O owner to schema M or invalidates its readers.
 	cell := cluster.manager.resourceCell(mosiResource{Database: request.Database})
-	cell.directory.Lock()
+	releaseCoordination := cell.coordinate(ctx)
 	phase := cell.ownstate.Phase()
 	if phase != mosi.M && phase != mosi.O {
-		cell.directory.Unlock()
+		releaseCoordination()
 		return cluster.reserveIDs(ctx, request) // routing changed; nothing was reserved
 	}
-	defer cell.directory.Unlock()
+	defer releaseCoordination()
 	t := db.tables.Get(request.Table)
 	if t == nil {
 		return reply, fmt.Errorf("ID reservation table disappeared")
@@ -151,4 +152,225 @@ func (r *replicationManager) mergeClusterInsertTopology(previous, incoming *tabl
 	previous.publishSchemaTopology(ShardModeFree, previous.Shards, previous.PDimensions)
 	previous.publishTopologyLocked()
 	return true, nil
+}
+
+// An INSERT is one operation, not a dispatch acknowledgement followed by a
+// replay. Defaults, ID reservation, UNIQUE checking and callbacks run together.
+type remoteInsertTask struct {
+	Version          int                   `json:"version"`
+	Database         string                `json:"database"`
+	Table            string                `json:"table"`
+	Schema           uint64                `json:"schema"`
+	Columns          []string              `json:"columns"`
+	Rows             schemeValue           `json:"rows"`
+	CollisionColumns []string              `json:"collision_columns"`
+	Collision        json.RawMessage       `json:"collision"`
+	MergeNull        bool                  `json:"merge_null"`
+	Transaction      *scm.ClusterReference `json:"transaction,omitempty"`
+}
+type remoteInsertResult struct {
+	Rejected bool   `json:"rejected,omitempty"`
+	Count    int    `json:"count"`
+	FirstID  *int64 `json:"first_id,omitempty"`
+}
+
+// A global UNIQUE check needs every partition, so use the current owner of
+// its first native input. This is neither the contact node nor a schema leader:
+// placement follows the existing shard ownership. Partition-local constraints
+// can instead choose the first destination of this batch.
+func (t *table) insertPeer(columns []string, rows [][]scm.Scmer) *mosiPeer {
+	if !sharedClusterSource(t) || len(t.Unique) == 0 || len(rows) == 0 {
+		return nil
+	}
+	cluster := activeNodeCluster()
+	if cluster == nil {
+		return nil
+	}
+	topology := t.activeTopology()
+	if topology.mode == ShardModeFree || len(topology.shards) == 0 {
+		return nil
+	}
+	index := 0
+	localKeys := true
+	for _, key := range t.Unique {
+		for _, dimension := range topology.dimensions {
+			found := false
+			for _, name := range key.Cols {
+				found = found || name == dimension.Column
+			}
+			localKeys = localKeys && found
+		}
+	}
+	if localKeys {
+		key := make([]scm.Scmer, len(topology.dimensions))
+		for i, dimension := range topology.dimensions {
+			for j, column := range columns {
+				if column == dimension.Column && j < len(rows[0]) {
+					key[i] = rows[0][j]
+				}
+			}
+		}
+		index = computeShardIndex(topology.dimensions, key)
+	}
+	shard := topology.shards[index]
+	cell := cluster.manager.shardCell(shard).resolved()
+	if cell.ownstate.Phase() == mosi.M {
+		return nil
+	}
+	// Owner hints are already known MOSI state; never query a peer for them.
+	r := cluster.manager
+	r.mu.Lock()
+	owner := r.directory.Records[r.resourceKey(*cell.resource.Load())].Owner
+	r.mu.Unlock()
+	if owner == "" || owner == cluster.self.ID {
+		return nil
+	}
+	return cluster.peer(owner)
+}
+
+func (t *table) forwardInsert(columns []string, rows [][]scm.Scmer, collisionCols []string, collision scm.Scmer, mergeNull bool, firstID func(int64), tx *TxContext) (int, bool) {
+	peer := t.insertPeer(columns, rows)
+	if peer == nil {
+		// Cold admission is decided by the native access boundary. A warm
+		// local writer needs no cold payload and must not move just because
+		// the node has no room for another shard.
+		return 0, false
+	}
+	cluster := activeNodeCluster()
+	// The current owner is the cheapest candidate. A capacity refusal occurs
+	// before invocation and effects, so only that explicit refusal permits
+	// choosing local acquisition or another peer. Execution errors never retry.
+	candidates := (&clusterScanExecutor{cluster: cluster, expected: remoteScanShard{Resource: mosiResource{Database: t.schema.Name, Table: t.Name}}}).candidates()
+	if peer != nil {
+		response := t.sendInsert(peer, columns, rows, collisionCols, collision, mergeNull, tx)
+		if !response.Rejected {
+			if firstID != nil && response.FirstID != nil {
+				firstID(*response.FirstID)
+			}
+			return response.Count, true
+		}
+		if GlobalCache.canLoadClusterShard(nil) {
+			return 0, false
+		}
+	}
+	for _, candidate := range candidates {
+		if candidate.peer == peer {
+			continue
+		}
+		response := t.sendInsert(candidate.peer, columns, rows, collisionCols, collision, mergeNull, tx)
+		if response.Rejected {
+			continue
+		}
+		if firstID != nil && response.FirstID != nil {
+			firstID(*response.FirstID)
+		}
+		return response.Count, true
+	}
+	panic("cluster has insufficient shard RAM capacity for INSERT")
+}
+
+func (t *table) sendInsert(peer *mosiPeer, columns []string, rows [][]scm.Scmer, collisionCols []string, collision scm.Scmer, mergeNull bool, tx *TxContext) remoteInsertResult {
+	ctx := scanQueryContext(tx, peer.ctx)
+	owner := tx
+	if owner == nil || !owner.queryActive.Load() {
+		owner = NewTxContext(TxCursorStability)
+		owner.beginQuery(nil, 0, "remote insert")
+		defer owner.endQuery(0)
+	}
+	service := peer.scanService
+	var offers []scm.ClusterReference
+	defer func() { service.cancelObjectOffers(peer, offers) }()
+	bindings := (&scm.SerializationContext{Invocation: scm.NewAny(owner)}).WithExport(func(object scm.ClusterObject, view scm.Scmer) (scm.ClusterReference, error) {
+		ref, err := service.exportObject(peer, object, view)
+		if err == nil {
+			offers = append(offers, ref)
+		}
+		return ref, err
+	})
+	bindings = service.handleBindings(bindings, peer)
+	input := make([]scm.Scmer, len(rows))
+	for i, row := range rows {
+		input[i] = scm.NewSlice(row)
+	}
+	encoded, err := freezeScanValue(scm.NewSlice(input), bindings)
+	if err != nil {
+		panic(err)
+	}
+	callback, err := freezeScanValue(collision, bindings)
+	if err != nil {
+		panic(err)
+	}
+	request := remoteInsertTask{Version: scanWireVersion, Database: t.schema.Name, Table: t.Name, Schema: t.filterSchemaFingerprint(), Columns: columns, Rows: schemeValue(encoded), CollisionColumns: collisionCols, Collision: json.RawMessage(callback), MergeNull: mergeNull}
+	if tx != nil {
+		view, err := scm.ClusterObjectValue(tx.transactionState, ctx, scm.ClusterRequest{Method: "view"})
+		if err != nil {
+			panic(err)
+		}
+		ref, err := service.exportObject(peer, tx.transactionState, view)
+		if err != nil {
+			panic(err)
+		}
+		offers = append(offers, ref)
+		request.Transaction = &ref
+	}
+	activeNodeCluster().delegated.Add(1)
+	var response remoteInsertResult
+	if err := service.control(ctx, peer, "insert.execute", request, &response, true); err != nil {
+		panicRemoteOperation(err)
+	}
+	return response
+}
+
+func (database *database) executeInsertTask(ctx context.Context, session *scanRPCSession, request remoteInsertTask) (any, error) {
+	if request.Version != scanWireVersion || request.Database != database.Name || request.Table == "" {
+		return nil, fmt.Errorf("invalid remote INSERT")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if !GlobalCache.canLoadClusterShard(nil) {
+		return remoteInsertResult{Rejected: true}, nil
+	}
+	invocation, err := session.beginInvocation(ctx, request.Transaction, "remote insert")
+	if err != nil {
+		return nil, err
+	}
+	defer invocation.close()
+	lease := database.GetRead(invocation.tx)
+	defer lease.Release()
+	table := database.GetTable(request.Table)
+	if table == nil || table.filterSchemaFingerprint() != request.Schema {
+		return nil, fmt.Errorf("remote INSERT schema changed")
+	}
+	input, err := request.Rows.reconstruct(invocation.decode)
+	if err != nil {
+		return nil, err
+	}
+	if !input.IsSlice() {
+		return nil, fmt.Errorf("invalid INSERT rows")
+	}
+	rows := make([][]scm.Scmer, len(input.Slice()))
+	for i, row := range input.Slice() {
+		if !row.IsSlice() || len(row.Slice()) != len(request.Columns) {
+			return nil, fmt.Errorf("invalid INSERT row")
+		}
+		rows[i] = row.Slice()
+	}
+	callback, err := schemeValue(request.Collision).reconstruct(invocation.decode)
+	if err != nil {
+		return nil, err
+	}
+	var result remoteInsertResult
+	// Ownership can change after dispatch. Native GetWrite/UNIQUE validation
+	// resolve that race; this already-started command must never be redispatched.
+	result.Count = table.insertLocal(request.Columns, rows, request.CollisionColumns, callback, request.MergeNull, func(id int64) {
+		if result.FirstID == nil {
+			result.FirstID = &id
+		}
+	}, invocation.tx)
+	if err := invocation.commit(ctx); err != nil {
+		return nil, err
+	}
+	session.service.cluster.received.Add(1)
+	return result, nil
 }

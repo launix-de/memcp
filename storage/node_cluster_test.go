@@ -1082,9 +1082,9 @@ func TestClusterCacheTryReadDeclinesActiveNativeTransaction(t *testing.T) {
 			if cell.ownstate.Phase() != mosi.M || cell.ownstate.ClosingWrites() || !cell.writesDrained() {
 				t.Fatal("declined preparation changed the completed transaction's authority")
 			}
-			cell.directory.Lock()
+			releaseCoordination := cell.coordinate(context.Background())
 			err := r.coordinate(ctx, reader.ID, packet)
-			cell.directory.Unlock()
+			releaseCoordination()
 			if err != errClusterReadBusy {
 				t.Fatalf("opportunistic read waited for directory ownership: %v", err)
 			}
@@ -1293,7 +1293,7 @@ func TestClusterAcquisitionQueuesBehindOutgoingHandover(t *testing.T) {
 		record.Owner, record.Handoff, record.Epoch = r.id, owner, 1
 		return true
 	})
-	cell.directory.Lock()
+	releaseCoordination := cell.coordinate(context.Background())
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	done := make(chan any, 1)
@@ -1312,7 +1312,7 @@ func TestClusterAcquisitionQueuesBehindOutgoingHandover(t *testing.T) {
 	}
 	select {
 	case <-peer.outgoing:
-		cell.directory.Unlock()
+		releaseCoordination()
 		t.Fatal("request preceded the destination's reference installation")
 	case <-time.After(20 * time.Millisecond):
 	}
@@ -1320,7 +1320,7 @@ func TestClusterAcquisitionQueuesBehindOutgoingHandover(t *testing.T) {
 		record.Owner, record.Handoff, record.Epoch = owner, "", 2
 		return true
 	})
-	cell.directory.Unlock()
+	releaseCoordination()
 	select {
 	case message := <-peer.outgoing:
 		if message.Packet == nil || message.Packet.Resource != resource {

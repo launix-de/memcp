@@ -538,8 +538,8 @@ func TestClusterCounterCheckpointDuringLocalSchemaUpgrade(t *testing.T) {
 	defer sharedClusterMounts.Store(mounts)
 	service := nodeScans.Swap(&nodeScanService{cluster: cluster})
 	defer nodeScans.Store(service)
-	cell.directory.Lock()
-	defer cell.directory.Unlock()
+	releaseCoordination := cell.coordinate(context.Background())
+	defer releaseCoordination()
 	tbl.reserveLocalAutoIncrement(0, 8)
 	pending, action := cell.ownstate.Request(mosi.M)
 	if action != mosi.Send || pending.Retained() != mosi.O {
@@ -977,5 +977,183 @@ func TestClusterLocationBatchRejectsBeforePublishing(t *testing.T) {
 	}
 	if cluster.manager.lookupCell(valid.Resource) != nil {
 		t.Fatal("unauthenticated location publication")
+	}
+}
+
+func TestClusterInsertSelectsUniqueDomainOwnerWithoutClaiming(t *testing.T) {
+	tbl := setupScanParallelTestTable(t, "tinsertforwardplacement")
+	tbl.ShardMode = ShardModePartition
+	tbl.PDimensions = []shardDimension{{Column: "id", NumPartitions: 2, Pivots: []scm.Scmer{scm.NewInt(10)}}}
+	left, right := NewShard(tbl), NewShard(tbl)
+	tbl.PShards = []*storageShard{left, right}
+	tbl.publishTopologyLocked()
+	cluster := globalTestCluster(t, tbl.schema.Name)
+	peer := &mosiPeer{ctx: context.Background(), done: make(chan struct{}), outgoing: make(chan mosiMessage, 1)}
+	cluster.view.Store(&clusterView{links: []*clusterLink{{member: clusterMember{ID: "owner"}, peer: peer}}})
+	mounts := sharedClusterMounts.Swap(&map[string]bool{tbl.schema.Name: true})
+	defer sharedClusterMounts.Store(mounts)
+	service := nodeScans.Swap(&nodeScanService{cluster: cluster})
+	defer nodeScans.Store(service)
+	for _, shard := range []*storageShard{left, right} {
+		cell := cluster.manager.shardCell(shard)
+		cell.ownstate.Initialize(mosi.S)
+		cluster.manager.updateRecord(*cell.resource.Load(), func(record *replicaRecord) bool { record.Owner = "owner"; return true })
+	}
+	tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}}
+	columns, rows := []string{"id"}, [][]scm.Scmer{{scm.NewInt(11)}}
+	if tbl.insertPeer(columns, rows) != peer {
+		t.Fatal("partition-local INSERT did not choose destination owner")
+	}
+	cluster.manager.shardCell(right).ownstate.Publish(mosi.M)
+	if tbl.insertPeer(columns, rows) != nil {
+		t.Fatal("already-local M was unnecessarily delegated")
+	}
+	tbl.Unique = append(tbl.Unique, uniqueKey{Id: "global", Cols: []string{"writer", "value"}})
+	if tbl.insertPeer(columns, rows) != peer {
+		t.Fatal("global UNIQUE ignored the common input owner")
+	}
+	select {
+	case <-peer.outgoing:
+		t.Fatal("placement queried or claimed known MOSI state")
+	default:
+	}
+	if cluster.manager.shardCell(left).ownstate.Phase() != mosi.S {
+		t.Fatal("placement changed data authority")
+	}
+}
+
+func TestClusterUniqueCallbackReleasesMOnPanic(t *testing.T) {
+	tbl := setupScanParallelTestTable(t, "tuniquepanicrelease")
+	tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}}
+	tbl.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(42)}}, nil, scm.NewNil(), false, nil)
+	shard := tbl.ActiveShards()[0]
+	cluster := globalTestCluster(t, tbl.schema.Name)
+	mounts := sharedClusterMounts.Swap(&map[string]bool{tbl.schema.Name: true})
+	defer sharedClusterMounts.Store(mounts)
+	service := nodeScans.Swap(&nodeScanService{cluster: cluster})
+	defer nodeScans.Store(service)
+	cluster.manager.resourceCell(mosiResource{Database: tbl.schema.Name}).ownstate.Initialize(mosi.M)
+	cell := cluster.declareShard(shard, true)
+	var failure any
+	func() {
+		defer func() { failure = recover() }()
+		tbl.ProcessUniqueCollision([]string{"id"}, [][]scm.Scmer{{scm.NewInt(42)}}, false,
+			func([][]scm.Scmer, func() bool) { t.Fatal("duplicate row accepted") }, []string{"$update"},
+			func(string, []scm.Scmer) {
+				if !cell.ownstate.Writing() {
+					t.Fatal("callback executed without active M")
+				}
+				panic("callback failure")
+			}, 0, nil)
+	}()
+	if failure != "callback failure" || cell.ownstate.Writing() {
+		t.Fatalf("callback failure=%v retained writer=%v", failure, cell.ownstate.Writing())
+	}
+	access, ready := shard.getWrite(nil, false)
+	if !ready {
+		t.Fatal("failed callback stranded later writer")
+	}
+	access.Release()
+}
+
+func TestClusterUniquePreflightUsesMutationAdmissionAndKeepsNodeLimit(t *testing.T) {
+	tbl := setupScanParallelTestTable(t, "tuniquemutationbudget")
+	tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}}
+	tbl.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(42)}}, nil, scm.NewNil(), false, nil)
+	shard := tbl.ActiveShards()[0]
+	cluster := globalTestCluster(t, tbl.schema.Name)
+	mounts := sharedClusterMounts.Swap(&map[string]bool{tbl.schema.Name: true})
+	defer sharedClusterMounts.Store(mounts)
+	service := nodeScans.Swap(&nodeScanService{cluster: cluster})
+	defer nodeScans.Store(service)
+	cluster.manager.resourceCell(mosiResource{Database: tbl.schema.Name}).ownstate.Initialize(mosi.M)
+	cluster.declareShard(shard, true)
+	previous := GlobalCache.shardCapacity.Swap(&shardRAMSnapshot{Allowed: true})
+	defer GlobalCache.shardCapacity.Store(previous)
+	tbl.shardRAMFull.Store(true)
+	shard.setState(COLD)
+	var readFailure any
+	func() {
+		defer func() { readFailure = recover() }()
+		access := shard.GetRead(nil, false)
+		defer access.Release()
+	}()
+	if _, rejected := readFailure.(shardReadDelegation); !rejected {
+		t.Fatalf("ordinary read exceeded table reserve: %v", readFailure)
+	}
+	accepted := 0
+	tbl.ProcessUniqueCollision([]string{"id"}, [][]scm.Scmer{{scm.NewInt(43)}}, false,
+		func(rows [][]scm.Scmer, validate func() bool) {
+			if !validate() {
+				t.Fatal("mutation preflight lost native read proof")
+			}
+			accepted += len(rows)
+		}, nil,
+		func(string, []scm.Scmer) { t.Fatal("unrelated key collided") }, 0, nil)
+	if accepted != 1 {
+		t.Fatal("fitting mutation preflight was refused at the read reserve")
+	}
+	shard.setState(COLD)
+	GlobalCache.shardCapacity.Store(&shardRAMSnapshot{Allowed: false})
+	var writeFailure any
+	func() {
+		defer func() { writeFailure = recover() }()
+		access := shard.getRead(nil, shardReadOptions{mutation: true})
+		defer access.Release()
+	}()
+	if _, rejected := writeFailure.(shardReadDelegation); !rejected {
+		t.Fatalf("mutation preflight exceeded node budget: %v", writeFailure)
+	}
+}
+
+func TestClusterInsertCapacityRefusalPrecedesInvocation(t *testing.T) {
+	previous := GlobalCache.shardCapacity.Swap(&shardRAMSnapshot{Allowed: false})
+	defer GlobalCache.shardCapacity.Store(previous)
+	db := &database{Name: "tenant"}
+	request := remoteInsertTask{Version: scanWireVersion, Database: db.Name, Table: "items", Transaction: &scm.ClusterReference{}}
+	// An unusable transaction reference and no invocation session prove that
+	// refusal happens before importing captures, evaluating defaults or IDs.
+	value, err := db.executeInsertTask(context.Background(), nil, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result, ok := value.(remoteInsertResult); !ok || !result.Rejected {
+		t.Fatalf("capacity refusal = %#v", value)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := db.executeInsertTask(ctx, nil, request); err != context.Canceled {
+		t.Fatalf("cancelled command admitted: %v", err)
+	}
+	request.Version = -1
+	if _, err := db.executeInsertTask(context.Background(), nil, request); err == nil {
+		t.Fatal("malformed command treated as a capacity refusal")
+	}
+}
+
+func TestClusterWarmInsertStaysLocalAtColdAdmissionLimit(t *testing.T) {
+	tbl := setupScanParallelTestTable(t, "twarminsertadmission")
+	tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}}
+	shard := tbl.ActiveShards()[0]
+	cluster := globalTestCluster(t, tbl.schema.Name)
+	cluster.view.Store(&clusterView{members: []clusterMember{cluster.self}})
+	mounts := sharedClusterMounts.Swap(&map[string]bool{tbl.schema.Name: true})
+	defer sharedClusterMounts.Store(mounts)
+	service := nodeScans.Swap(&nodeScanService{cluster: cluster})
+	defer nodeScans.Store(service)
+	cluster.manager.resourceCell(mosiResource{Database: tbl.schema.Name}).ownstate.Initialize(mosi.M)
+	cell := cluster.declareShard(shard, true)
+	previous := GlobalCache.shardCapacity.Swap(&shardRAMSnapshot{Allowed: false})
+	defer GlobalCache.shardCapacity.Store(previous)
+	tbl.shardRAMFull.Store(true)
+	if shard.state() == COLD {
+		t.Fatal("fixture must already own warm payload")
+	}
+	count := tbl.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(42)}}, nil, scm.NewNil(), false, nil)
+	if count != 1 || shard.plannerDeltaRows.Load() != 1 {
+		t.Fatal("warm INSERT did not use its local generation")
+	}
+	if cell.ownstate.Writing() || cluster.delegated.Load() != 0 {
+		t.Fatal("warm INSERT retained M or delegated despite existing local access")
 	}
 }

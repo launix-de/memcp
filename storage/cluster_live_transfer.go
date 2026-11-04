@@ -110,7 +110,7 @@ func (r *replicationManager) captureLiveShard(cell *replicaCell, current *storag
 		capture.migrations = append(capture.migrations, release)
 	}
 	for _, shard := range capture.shards {
-		capture.accesses = append(capture.accesses, shard.getRead(nil, true, false))
+		capture.accesses = append(capture.accesses, shard.getRead(nil, shardReadOptions{snapshot: true}))
 		shard.overlays.Range(func(_, value any) bool {
 			capture.overlays = append(capture.overlays, value.(*storageShardTransaction))
 			return true
@@ -735,7 +735,7 @@ func (cluster *nodeCluster) installLiveShard(cell *replicaCell, packet mosiPacke
 		}
 		shard.registerLoadedShard()
 		if !owned {
-			copy.accesses = append(copy.accesses, shard.getRead(nil, true, false))
+			copy.accesses = append(copy.accesses, shard.getRead(nil, shardReadOptions{snapshot: true}))
 		}
 	}
 	if old := cell.liveCopy.Swap(copy); old != nil {

@@ -984,12 +984,16 @@ func (s *storageShard) releaseCacheRead() {
 // Native catalog/uniqueness/maintenance readers need local payload; physical
 // operator consumers can catch delegation and ship their complete invocation.
 func (s *storageShard) GetRead(currentTx *TxContext, mayDelegate bool) ReadAccess {
-	return s.getRead(currentTx, false, mayDelegate)
+	return s.getRead(currentTx, shardReadOptions{mayDelegate: mayDelegate})
 }
 
 // Physical query-local IDs retain their original immutable generation. Rights
 // acquisition may install a successor, but must never reinterpret those IDs.
-func (s *storageShard) getRead(currentTx *TxContext, snapshot, mayDelegate bool) ReadAccess {
+func (s *storageShard) getRead(currentTx *TxContext, options shardReadOptions) ReadAccess {
+	admissionTable := s.t
+	if options.mutation {
+		admissionTable = nil
+	}
 	if currentTx != nil && sharedClusterSource(s.t) {
 		if currentTx.decisionStarted {
 			panic("transaction commit outcome is unknown; retry COMMIT")
@@ -1000,17 +1004,17 @@ func (s *storageShard) getRead(currentTx *TxContext, snapshot, mayDelegate bool)
 	if target := s.scanTarget.Load(); target != nil {
 		panic(shardReadDelegation{target})
 	}
-	if mayDelegate && !snapshot && sharedClusterSource(s.t) && s.state() == COLD {
+	if options.mayDelegate && !options.snapshot && sharedClusterSource(s.t) && s.state() == COLD {
 		cluster := activeNodeCluster()
 		if cluster == nil {
 			panic("cluster is not initialized")
 		}
 		cluster.prepareLocalScan(s, currentTx, false, origin)
 	}
-	if sharedClusterSource(s.t) && s.state() == COLD && !GlobalCache.canLoadClusterShard(s.t) {
+	if sharedClusterSource(s.t) && s.state() == COLD && !GlobalCache.canLoadClusterShard(admissionTable) {
 		panic(activeNodeCluster().shardRAMUnavailable(s, origin))
 	}
-	if !snapshot && s.t != nil {
+	if !options.snapshot && s.t != nil {
 		if r := activeReplication(s.t.schema); r != nil && validReplicaDatabase(s.t.schema.Name) && !s.t.isEphemeralQueryTable() {
 			s = r.readShard(s, currentTx)
 		}
@@ -1023,7 +1027,7 @@ func (s *storageShard) getRead(currentTx *TxContext, snapshot, mayDelegate bool)
 			s.releaseCacheRead()
 		}
 	}()
-	if sharedClusterSource(s.t) && s.state() == COLD && !GlobalCache.canLoadClusterShard(s.t) {
+	if sharedClusterSource(s.t) && s.state() == COLD && !GlobalCache.canLoadClusterShard(admissionTable) {
 		panic(activeNodeCluster().shardRAMUnavailable(s, origin))
 	}
 	s.ensureLoaded()

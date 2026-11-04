@@ -254,15 +254,15 @@ func (cluster *nodeCluster) registerLocations(ctx context.Context, entries []rep
 		return cluster.service.control(ctx, peer, "cluster.location_update", entries, nil, true)
 	}
 	schema := cluster.manager.resourceCell(mosiResource{Database: database})
-	schema.directory.Lock()
+	releaseCoordination := schema.coordinate(ctx)
 	cluster.manager.mu.Lock()
 	currentOwner := cluster.manager.directory.Records[database].Owner
 	cluster.manager.mu.Unlock()
 	if currentOwner != cluster.self.ID {
-		schema.directory.Unlock()
+		releaseCoordination()
 		return cluster.registerLocations(ctx, entries)
 	}
-	defer schema.directory.Unlock()
+	defer releaseCoordination()
 	for _, entry := range entries {
 		cluster.installLocationHint(entry)
 	}

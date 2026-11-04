@@ -1886,6 +1886,7 @@ def run_cluster_inserts(args, artifacts, journal, hash_partitioned=False):
                 values = ','.join(f"({node_index},{batch * 8 + row})" for row in range(8))
                 client.sql(f"INSERT INTO {table}(writer,value) VALUES {values}")
         for table in ("uuid_items", "integer_items"):
+            before_insert = [status(node)["state"] for node in nodes]
             started = time.monotonic()
             barrier = threading.Barrier(len(nodes))
             with concurrent.futures.ThreadPoolExecutor(max_workers=len(nodes)) as threads:
@@ -1906,6 +1907,13 @@ def run_cluster_inserts(args, artifacts, journal, hash_partitioned=False):
                             except subprocess.TimeoutExpired:
                                 pass
                     raise
+            after_insert = [status(node)["state"] for node in nodes]
+            forwarded = sum(after["delegated"] - before["delegated"]
+                            for before, after in zip(before_insert, after_insert))
+            received = sum(after["received"] - before["received"]
+                           for before, after in zip(before_insert, after_insert))
+            if hash_partitioned and (forwarded < 1 or received < 1):
+                raise DrillFailure(f"{table}: concurrent INSERTs did not exercise native command forwarding")
             expected = len(nodes) * 32 + (table == "integer_items")
             for node in nodes:
                 result = node.client.sql(f"SELECT COUNT(*) AS n,COUNT(DISTINCT id) AS ids FROM {table}")
@@ -1944,7 +1952,8 @@ def run_cluster_inserts(args, artifacts, journal, hash_partitioned=False):
                     expect(node.client.number("SELECT COUNT(*) AS n FROM integer_items WHERE writer>=0 AND id<=10000"), 0,
                            "explicit integer high-water mark retained across peers")
             journal.append({"scenario": "cluster-inserts", "layout": layout, "table": table,
-                            "rows": expected, "seconds": time.monotonic() - started})
+                            "rows": expected, "seconds": time.monotonic() - started,
+                            "forwarded": forwarded, "received": received})
         # All peers race for one explicit key. Exactly one physical INSERT
         # succeeds; retries and arbitrary network errors cannot satisfy this.
         for table, key in (("uuid_items", "'550e8400-e29b-41d4-a716-446655440000'"),
@@ -1984,6 +1993,28 @@ def run_cluster_inserts(args, artifacts, journal, hash_partitioned=False):
             for node in nodes:
                 expect(node.client.number(f"SELECT COUNT(*) AS n FROM {table} WHERE writer=50 AND value=7777"), 1,
                        "secondary race stored one row across primary-key buckets")
+            # The serialized collision callback receives its existing $update
+            # handle on the executing peer. Every ingress node must modify the
+            # same row exactly once, rather than re-inserting or claiming it.
+            for node in nodes:
+                node.client.sql(f"INSERT INTO {table}(id,writer,value) VALUES({key},99,777) "
+                                "ON DUPLICATE KEY UPDATE value=value+1")
+            for node in nodes:
+                expect(node.client.number(f"SELECT value AS n FROM {table} WHERE id={key}"), 780,
+                       "forwarded UPSERT keeps native update handles and exactly-once effects")
+            upsert_session = "forwarded-upsert-rollback-" + table
+            nodes[2].client.sql("START ACID TRANSACTION", session=upsert_session)
+            try:
+                nodes[2].client.sql(f"INSERT INTO {table}(id,writer,value) VALUES({key},99,777) "
+                                    "ON DUPLICATE KEY UPDATE value=9999", session=upsert_session)
+                expect(nodes[2].client.sql(f"SELECT value AS n FROM {table} WHERE id={key}",
+                                           session=upsert_session)[0]["n"], 9999,
+                       "forwarded UPSERT sees its transaction overlay")
+            finally:
+                nodes[2].client.sql("ROLLBACK", session=upsert_session)
+            for node in nodes:
+                expect(node.client.number(f"SELECT value AS n FROM {table} WHERE id={key}"), 780,
+                       "forwarded UPSERT rollback releases native M and restores visibility")
             # A node-local native transaction still uses the shared allocator.
             session = "uuid-insert-rollback-" + table
             def schema_epoch():

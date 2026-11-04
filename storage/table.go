@@ -3834,7 +3834,21 @@ func (t *table) reserveLocalAutoIncrement(explicit, generated uint64) uint64 {
 	}
 }
 
+// Insert chooses the native execution site before evaluating defaults, allocating
+// IDs or taking UNIQUE guards. A delegated command is never replayed after send.
 func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols []string, onCollision scm.Scmer, mergeNull bool, onFirstInsertId func(int64), currentTxArgs ...*TxContext) int {
+	var tx *TxContext
+	if len(currentTxArgs) != 0 {
+		tx = currentTxArgs[0]
+	}
+	replicationCheckWriteTable(t, tx)
+	if count, delegated := t.forwardInsert(columns, values, onCollisionCols, onCollision, mergeNull, onFirstInsertId, tx); delegated {
+		return count
+	}
+	return t.insertLocal(columns, values, onCollisionCols, onCollision, mergeNull, onFirstInsertId, tx)
+}
+
+func (t *table) insertLocal(columns []string, values [][]scm.Scmer, onCollisionCols []string, onCollision scm.Scmer, mergeNull bool, onFirstInsertId func(int64), currentTxArgs ...*TxContext) int {
 	var currentTx *TxContext
 	if len(currentTxArgs) > 0 {
 		currentTx = currentTxArgs[0]
@@ -4282,9 +4296,11 @@ func (t *table) dualWriteInsertFromOld(oldShard *storageShard, firstOldRecid uin
 		if lastShard == nil || end <= lastI {
 			return
 		}
-		rel := lastShard.GetWrite(nil).Release
-		firstNewRecid := lastShard.insertReplica(columns, values[lastI:end], false, currentTx)
-		rel()
+		firstNewRecid := func() uint32 {
+			access := lastShard.GetWrite(currentTx)
+			defer access.Release()
+			return access.shard.insertReplica(columns, values[lastI:end], false, currentTx)
+		}()
 		for i := lastI; i < end; i++ {
 			t.recordRepartitionTranslation(oldShard, firstOldRecid+uint32(i), translatedRecid{
 				pshardIdx: lastPSI,
@@ -4646,7 +4662,7 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 		for i, shard := range shardlist {
 			if needed[i] {
 				if sharedClusterSource(t) {
-					readAccesses[i] = shard.GetRead(currentTx, false)
+					readAccesses[i] = shard.getRead(currentTx, shardReadOptions{mutation: true})
 				} else {
 					readAccesses[i] = shard.acquireReadForScan(currentTx, nil)
 				}
@@ -4713,41 +4729,52 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 					last_j = j + 1
 					clear(pending.heads)
 					guard.unlock()
-					params := make([]scm.Scmer, len(onCollisionCols))
-					for i, p := range onCollisionCols {
-						if p == "$update" {
-							params[i] = scm.NewFunc(s.UpdateFunction(uid, true, false, currentTx))
-						} else if len(p) > 5 && p[:5] == "$set:" {
-							// Match the physical scan mapper's $set pseudo-column. Compute
-							// proxies need a point write because they are not row payload;
-							// ordinary cache columns retain normal UPDATE semantics.
-							cacheColName := p[5:]
-							column := s.getColumnStorageOrPanic(cacheColName, false, currentTx)
-							proxy, computed := column.(*StorageComputeProxy)
-							update := s.UpdateFunction(uid, true, false, currentTx)
-							params[i] = scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
-								if len(args) > 0 {
-									if computed {
-										proxy.SetValue(uid, args[0])
-									} else {
-										update(scm.NewSlice([]scm.Scmer{scm.NewString(cacheColName), args[0]}))
+					func() {
+						defer guard.lock()
+						// A collision callback is a native mutation just like a scan
+						// mapper. Its $update must never write a shared read copy.
+						if scanMutates(onCollisionCols) || slices.ContainsFunc(onCollisionCols, func(name string) bool { return strings.HasPrefix(name, "$set:") }) {
+							access := s.GetWrite(currentTx)
+							defer access.Release()
+							if access.shard != s || !guard.validReads() {
+								panic(uniqueReadRetry{})
+							}
+						}
+						params := make([]scm.Scmer, len(onCollisionCols))
+						for i, p := range onCollisionCols {
+							if p == "$update" {
+								params[i] = scm.NewFunc(s.UpdateFunction(uid, true, false, currentTx))
+							} else if len(p) > 5 && p[:5] == "$set:" {
+								// Match the physical scan mapper's $set pseudo-column. Compute
+								// proxies need a point write because they are not row payload;
+								// ordinary cache columns retain normal UPDATE semantics.
+								cacheColName := p[5:]
+								column := s.getColumnStorageOrPanic(cacheColName, false, currentTx)
+								proxy, computed := column.(*StorageComputeProxy)
+								update := s.UpdateFunction(uid, true, false, currentTx)
+								params[i] = scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+									if len(args) > 0 {
+										if computed {
+											proxy.SetValue(uid, args[0])
+										} else {
+											update(scm.NewSlice([]scm.Scmer{scm.NewString(cacheColName), args[0]}))
+										}
+									}
+									return scm.NewBool(true)
+								})
+							} else if len(p) >= 4 && p[:4] == "NEW." {
+								for j, c := range columns {
+									if p[4:] == c {
+										params[i] = row[j]
 									}
 								}
-								return scm.NewBool(true)
-							})
-						} else if len(p) >= 4 && p[:4] == "NEW." {
-							for j, c := range columns {
-								if p[4:] == c {
-									params[i] = row[j]
-								}
+							} else {
+								params[i] = s.ColumnReaderTx(currentTx, p, false, ReadAuto).GetValue(uid)
 							}
-						} else {
-							params[i] = s.ColumnReaderTx(currentTx, p, false, ReadAuto).GetValue(uid)
 						}
-					}
-					guard.wrote = true       // a collision callback may publish effects; never replay it
-					failure(uniq.Id, params) // notify about failure while unlocked
-					guard.lock()
+						guard.wrote = true       // a collision callback may publish effects; never replay it
+						failure(uniq.Id, params) // notify about failure while unlocked
+					}()
 					goto nextrow
 				}
 			}

@@ -59,12 +59,21 @@ type replicaCell struct {
 	bootstrap         sync.Mutex
 	initialized       atomic.Bool
 	bootstrapStarted  bool
-	directory         sync.Mutex
 	checkpoint        sync.Mutex // database backup order; never acquired by local readers/writers
 	sendMu            sync.Mutex // source content streams for this resource only
 	importPublication sync.Mutex // schema cell: import registration/publication versus GC
 	acquire           sync.Mutex
 	retiredShards     atomic.Pointer[[]weak.Pointer[storageShard]]
+}
+
+// Protocol ownership is queued by the resource's outward MOSI state. There is
+// no second resource mutex, and cancelled requests do not overtake queued work.
+func (c *replicaCell) coordinate(ctx context.Context) func() {
+	claim, err := c.clusterstate.Coordinate(ctx)
+	if err != nil {
+		panic(err)
+	}
+	return claim.Release
 }
 
 func (c *replicaCell) resolved() *replicaCell {

@@ -200,10 +200,10 @@ func (r *replicationManager) retire(id string) error {
 	r.mu.Unlock()
 	for _, resource := range resources {
 		c := r.resourceCell(resource)
-		c.directory.Lock()
+		releaseCoordination := c.coordinate(context.Background())
 		handover, err := c.ownstate.BeginHandover(context.Background(), c.drainWrites)
 		if err != nil {
-			c.directory.Unlock()
+			releaseCoordination()
 			return err
 		}
 		r.mu.Lock()
@@ -212,7 +212,7 @@ func (r *replicationManager) retire(id string) error {
 		if record.Owner == id {
 			if err := r.restoreBackup(record); err != nil {
 				handover.Release()
-				c.directory.Unlock()
+				releaseCoordination()
 				return err
 			}
 		}
@@ -244,7 +244,7 @@ func (r *replicationManager) retire(id string) error {
 			c.ownstate.Publish(mosi.ParsePhase(record.State))
 		}
 		handover.Release()
-		c.directory.Unlock()
+		releaseCoordination()
 		if err != nil {
 			return err
 		}

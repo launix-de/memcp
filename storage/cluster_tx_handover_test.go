@@ -66,7 +66,7 @@ func TestClusterDecisionWaitsForMigrationWhileReadersContinue(t *testing.T) {
 		t.Fatalf("commit passed an unfinished migration: %v", err)
 	case <-time.After(20 * time.Millisecond):
 	}
-	access := shard.getRead(nil, true, false)
+	access := shard.getRead(nil, shardReadOptions{snapshot: true})
 	if access.shard.deletions.Get(0) {
 		t.Fatal("migration published a private deletion")
 	}
