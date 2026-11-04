@@ -47,6 +47,56 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(atom "NEWID" true))) "(" ")") (toUpper name))
 )))
 
+/* Parse SQL search syntax once per execution. The runtime receives immutable
+weighted terms; it does not interpret SQL syntax. */
+(define sql_fulltext_words (lambda (text)
+	(filter (split (regexp_replace (toLower (coalesceNil text "")) "[^\\p{L}\\p{N}_']+" " ") " ")
+		(lambda (word) (not (equal? word ""))))))
+
+/* Keep the query grammar as immutable tokens and terms. Parser-combinator
+objects are compile-time values, while this scalar can run in any executor. */
+(define sql_fulltext_query (lambda (text) (begin
+	(define parse_terms (lambda (tokens nested) (match tokens
+		'() (if nested (error "unclosed fulltext group") (list '() '()))
+		(cons ")" rest) (if nested (list '() rest) (error "unexpected fulltext group end"))
+		_ (begin
+			(define modifier (if (has? '("+" "-" "~" ">" "<") (car tokens)) (car tokens) ""))
+			(define remaining (if (equal? modifier "") tokens (cdr tokens)))
+			(define parsed (match remaining
+				(cons "(" rest) (begin
+					(define group (parse_terms rest true))
+					(if (equal? (count (car group)) 0) (error "empty fulltext group"))
+					(list (list "group" (car group)) (cadr group)))
+				(cons token rest) (list
+					(if (regexp_test token "^\"[^\"]*\"$")
+						(list "phrase" (sql_fulltext_words (substr token 1 (- (strlen token) 2))))
+						(regexp_test token "^[\\p{L}\\p{N}_']+\\*?$")
+						(begin
+							(define prefix (equal? (substr token (- (strlen token) 1)) "*"))
+							(list "word" (toLower (if prefix (substr token 0 (- (strlen token) 1)) token)) prefix))
+						(error "unsupported fulltext term: " token)) rest)
+				_ (error "missing fulltext term")))
+			(define tail (parse_terms (cadr parsed) nested))
+			(list (cons (list modifier (car parsed)) (car tail)) (cadr tail))))))
+	(define normalized (regexp_replace text "[\\r\\n\\t]+" " "))
+	(define tokens (filter (split (regexp_replace normalized
+		"(\"[^\"]*\"|[+~<>()-]|[\\p{L}\\p{N}_']+\\*?)" "\n$1\n") "\n")
+		(lambda (token) (not (regexp_test token "^ *$")))))
+	(car (parse_terms tokens false))
+)))
+
+(define sql_text_search_prepare (lambda (needle)
+	(if (nil? needle) nil (begin
+		(define lower_terms (lambda (terms) (map terms (lambda (term) (begin
+			(define modifier (car term))
+			(define body (cadr term))
+			(list (match modifier "-" 0 "~" -1 ">" 2 "<" 0.5 _ 1)
+				(equal? modifier "+") (equal? modifier "-")
+				(car body)
+				(if (equal? (car body) "group") (lower_terms (cadr body)) (cadr body))
+				(if (equal? (car body) "word") (nth body 2) false)))))))
+		(lower_terms (sql_fulltext_query needle))))))
+
 /* time */
 (sql_builtins "UNIX_TIMESTAMP" unix_timestamp)
 (sql_builtins "CURRENT_TIMESTAMP" now)

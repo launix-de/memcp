@@ -232,7 +232,7 @@ sessions and token buffers belong to this one lexical compilation only. */
 												(begin
 													(define forced (and (not (nil? scope)) (> (scope "depth") 0) (has? '("LIKE" "AGAINST") previous_word)))
 													(if (and (not (has? '("AS" "DATE") previous_word)) (or forced (sql_parameter_scope_allows scope)))
-														(begin (candidates candidate_count (list piece_count scope forced (regexp_replace (substr token 1 (- (strlen token) 2)) "\\\\[\\\\'\"nr0]" sql_string_unescape))) (begin (pieces piece_count token) (list (+ idx 1) depth type_depth previous_word "literal" scopes false (+ candidate_count 1) (+ piece_count 1))))
+														(begin (candidates candidate_count (list piece_count scope forced (regexp_replace (substr token 1 (- (strlen token) 2)) "\\\\[\\\\'\"nr0Zbt]" sql_string_unescape))) (begin (pieces piece_count token) (list (+ idx 1) depth type_depth previous_word "literal" scopes false (+ candidate_count 1) (+ piece_count 1))))
 														(begin (pieces piece_count token) (list (+ idx 1) depth type_depth previous_word "literal" scopes false candidate_count (+ piece_count 1))))))
 											(if (regexp_test token "^`")
 												(begin (pieces piece_count token) (list (+ idx 1) depth type_depth previous_word "identifier" scopes (equal? (strlen token) 1) candidate_count (+ piece_count 1)))

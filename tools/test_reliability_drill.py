@@ -27,6 +27,22 @@ SPEC.loader.exec_module(drill)
 
 
 class ReliabilityDrillTests(unittest.TestCase):
+	def test_replication_cleanup_dumps_only_the_failed_owned_process(self):
+		node = object.__new__(replication.Node)
+		node.name = "owned-node"
+		node.process = mock.Mock()
+		node.process.poll.return_value = None
+		with mock.patch.object(replication.OwnedServer, "cleanup") as cleanup:
+			replication.Node.cleanup(node)
+			node.process.send_signal.assert_not_called()
+			try:
+				raise RuntimeError("scenario failed")
+			except RuntimeError:
+				replication.Node.cleanup(node)
+			node.process.send_signal.assert_called_once_with(replication.signal.SIGABRT)
+			node.process.wait.assert_called_once_with(timeout=2)
+			self.assertEqual(cleanup.call_count, 2)
+
 	def test_ports_remain_distinct_before_nodes_start_listening(self) -> None:
 		with mock.patch.object(drill, "_allocated_ports", set()), mock.patch.object(drill.socket, "socket") as factory:
 			probe = factory.return_value.__enter__.return_value

@@ -613,6 +613,23 @@ test_cases:
         - 'candidate_input_rows 2048'
         - 'broad_text_match_bytes'
 
+  - name: "Escape-aware text estimate retains its exact RecSet carrier"
+    sql: |
+      EXPLAIN PHYSICAL
+      SELECT f.id, d.label
+      FROM selective_text_driver f
+      LEFT JOIN selective_text_dim d ON d.id = f.dim_id
+      WHERE f.search LIKE '%asset!-needle-%' ESCAPE '!'
+      ORDER BY f.id
+      LIMIT 4
+    expect:
+      rows: 1
+      result_contains:
+        - 'scan_access_path'
+        - 'chosen scan_recset'
+        - 'candidate_rows 8'
+        - 'candidate_input_rows 2048'
+
   - name: "Selective text carrier exposes both calibrated physical variants"
     sql: |
       EXPLAIN PHYSICAL CALIBRATE

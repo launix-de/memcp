@@ -343,11 +343,34 @@ serialization still see the complete plan. */
 			(list (quote !begin) (list (quote replication_write) (quote tx)) formula))
 		formula)))
 
+/* Search programs depend on statement inputs, never on the scanned row. Bind
+identical programs once outside row closures, including parameterized plans. */
+(define sql_queryplan_prepare_search (lambda (formula) (begin
+	(define bindings (newsession))
+	(define rewrite (lambda (expr) (match expr
+		(cons head tail) (if (equal? head (quote quote)) expr
+			(equal? head sql_text_search_prepare) (begin
+				(define key (json_encode tail))
+				(define entry (bindings key))
+				(if entry (car entry) (begin
+					(define name (symbol (concat "search_program_" (sha256 key))))
+					(bindings key (list name expr))
+					name)))
+			(cons head (map tail rewrite)))
+		_ expr)))
+	(define rewritten (rewrite formula))
+	(cons (quote !begin)
+		(merge (list
+			(map (bindings) (lambda (key)
+				(list (quote define) (car (bindings key)) (cadr (bindings key)))))
+			(list rewritten))))
+)))
+
 (define sql_queryplan_compile_formula (lambda (compile_tx formula)
 	(jit (close_procedure (eval (optimize (list
 		(quote lambda)
 		(list (quote session) (quote tx) (quote resultrow) (quote resultfields))
-		(source "SQL Query" 1 1 formula))))) compile_tx)))
+		(source "SQL Query" 1 1 (sql_queryplan_prepare_search formula)))))) compile_tx)))
 
 (define sql_compile_queryplan_variant (lambda (parse_fn schema parse_query policy source_session tx)
 	(begin
@@ -638,6 +661,11 @@ user table merely to discard a newly constructed policy closure. */
 							(cadr cached_entry))))))
 			formula)))))
 
+/* Frontends supply parsed recovery admission to the generic request executor. */
+(define sql_with_statement (lambda (session state sequence text body)
+	(with_query_request session state sequence text (lambda (statement)
+		(statement text (sql_recovery_statement? text) body)))))
+
 (define sql_execute_formula (lambda (session tx formula resultrow resultfields)
 	(formula session tx resultrow resultfields)))
 
@@ -793,7 +821,7 @@ without them repeated grants create duplicate accounts and ambiguous authenticat
 					(define resultrow (lambda (row) (begin
 						(set resultrow_called true)
 						(original_resultrow row))))
-					(set query_result (with_autocommit session session_state query_seq query
+					(set query_result (sql_with_statement session session_state query_seq query
 						(lambda (tx) (begin
 							(define formula (cached_parse sql_queryplan_cache (list parse_sql) schema query
 								(list (quote sql-policy-for) (req "username")) (req "username") session true tx))
@@ -850,7 +878,7 @@ without them repeated grants create duplicate accounts and ambiguous authenticat
 						(regex "FROM\\s+pg_indexes" _) true
 						(regex "FROM\\s+pg_constraint" _) true
 						false))
-					(define query_result (with_autocommit session session_state query_seq query
+					(define query_result (sql_with_statement session session_state query_seq query
 						(lambda (tx) (if handled nil (begin
 							/* Bind URL query params (v1=, v2=, ...) as prepared-statement args into the session
 							before parse/build so session-sensitive planner rewrites see the right values. */
@@ -988,7 +1016,7 @@ statement inside the per-query transaction callback. */
 				(error "Scheme execution requires administrator privileges"))
 			(set print (lambda args (resultrow '("result" (concat args)))))
 			(resultrow '("result" (eval (scheme sql))))
-		) (time (with_autocommit session session_state query_seq sql
+		) (time (sql_with_statement session session_state query_seq sql
 				(lambda (tx) (mysql_run_sql_statement tx schema sql session resultrow resultfields_sql))) sql))
 	)) (lambda (e) (begin
 			(error_log (concat e) schema (coalesce (session "username") "root") sql)

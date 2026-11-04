@@ -1,0 +1,217 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  description: MySQL index declarations, table options, ENUM, hints, typed upserts, binary escapes and fulltext search
+setup:
+  - sql: DROP TABLE IF EXISTS sql_feature_site_identifiers
+  - sql: DROP TABLE IF EXISTS sql_feature_content_models
+  - sql: DROP TABLE IF EXISTS sql_feature_charset_options
+  - sql: DROP TABLE IF EXISTS sql_feature_enum
+  - sql: DROP TABLE IF EXISTS sql_feature_fulltext
+  - sql: DROP TABLE IF EXISTS sql_feature_blob
+  - sql: DROP TABLE IF EXISTS sql_feature_upsert
+  - sql: DROP TABLE IF EXISTS sql_feature_bad_declaration
+cleanup:
+  - sql: DROP TABLE IF EXISTS sql_feature_site_identifiers
+  - sql: DROP TABLE IF EXISTS sql_feature_content_models
+  - sql: DROP TABLE IF EXISTS sql_feature_charset_options
+  - sql: DROP TABLE IF EXISTS sql_feature_enum
+  - sql: DROP TABLE IF EXISTS sql_feature_fulltext
+  - sql: DROP TABLE IF EXISTS sql_feature_blob
+  - sql: DROP TABLE IF EXISTS sql_feature_upsert
+  - sql: DROP TABLE IF EXISTS sql_feature_bad_declaration
+test_cases:
+  - name: Index declarations and comma-separated table options
+    sql: |
+      CREATE /* index declaration */ TABLE sql_feature_site_identifiers (
+        si_type VARBINARY(32) NOT NULL,
+        si_key VARBINARY(32) NOT NULL,
+        si_site INT UNSIGNED NOT NULL,
+        INDEX si_site (si_site),
+        INDEX si_key (si_key),
+        PRIMARY KEY(si_type, si_key)
+      ) ENGINE=InnoDB, DEFAULT CHARSET=binary
+  - name: Insert a site identifier
+    sql: INSERT INTO sql_feature_site_identifiers VALUES ('test', 'main', 1)
+  - name: Read the site identifier
+    sql: SELECT si_type, si_key, si_site FROM sql_feature_site_identifiers
+    expect:
+      rows: 1
+      data: [{si_type: test, si_key: main, si_site: 1}]
+  - name: Unique index declaration
+    sql: CREATE TABLE sql_feature_content_models (model_id INT NOT NULL, model_name VARBINARY(64) NOT NULL, UNIQUE INDEX model_name (model_name), PRIMARY KEY(model_id)) ENGINE=InnoDB, DEFAULT CHARSET=binary
+  - name: Insert a unique content model
+    sql: INSERT INTO sql_feature_content_models VALUES (1, 'plain_text')
+  - name: Unique index rejects duplicate content model names
+    sql: INSERT INTO sql_feature_content_models VALUES (2, 'plain_text')
+    expect: {error: true}
+  - name: CHARSET without DEFAULT is case insensitive
+    sql: CREATE TABLE sql_feature_charset_options (id INT, KEY id (id)) engine=InnoDB, charset=utf8mb4 COLLATE=utf8mb4_bin
+  - name: Prefix indexes also accept INDEX spelling
+    sql: CREATE TABLE sql_feature_bad_declaration (title VARCHAR(255), INDEX title (title(191)))
+  - name: Drop the valid prefix index fixture
+    sql: DROP TABLE sql_feature_bad_declaration
+  - name: Malformed index prefix is rejected
+    sql: CREATE TABLE sql_feature_bad_declaration (title VARCHAR(255), INDEX title (title(foo)))
+    expect: {error: true}
+  - name: Repeated option separators are rejected
+    sql: CREATE TABLE sql_feature_bad_declaration (id INT) ENGINE=InnoDB,, DEFAULT CHARSET=binary
+    expect: {error: true}
+  - name: Trailing option separator is rejected
+    sql: CREATE TABLE sql_feature_bad_declaration (id INT) ENGINE=InnoDB,
+    expect: {error: true}
+
+  - name: Fulltext index declarations
+    sql: CREATE TABLE sql_feature_fulltext (id INT PRIMARY KEY, title TEXT, FULLTEXT INDEX title (title)) ENGINE=MyISAM
+  - name: ENUM retains its ordered label domain and defaults
+    sql: CREATE TABLE sql_feature_enum (id INT PRIMARY KEY, kind ENUM('z','a','m') NOT NULL, optional ENUM('yes','no') DEFAULT NULL)
+  - name: ENUM supports labels and numeric indexes
+    sql: INSERT INTO sql_feature_enum (id,kind) VALUES (1,'m'),(2,'z'),(3,2)
+  - name: ENUM order follows declaration order
+    sql: SELECT id,kind FROM sql_feature_enum ORDER BY kind
+    expect: {data: [{id: 2, kind: z}, {id: 3, kind: a}, {id: 1, kind: m}]}
+  - name: ENUM descending order follows declaration order
+    sql: SELECT kind FROM sql_feature_enum ORDER BY kind DESC
+    expect: {data: [{kind: m}, {kind: a}, {kind: z}]}
+  - name: ENUM omitted non-null value defaults to the first label
+    sql: INSERT INTO sql_feature_enum (id) VALUES (4)
+  - name: ENUM implicit and nullable defaults remain distinct
+    sql: SELECT kind,optional FROM sql_feature_enum WHERE id=4
+    expect: {data: [{kind: z, optional: null}]}
+  - name: ENUM rejects unknown labels
+    sql: INSERT INTO sql_feature_enum VALUES (5,'invalid',NULL)
+    expect: {error: true}
+  - name: ENUM rejects numeric indexes outside its domain
+    sql: INSERT INTO sql_feature_enum (id,kind) VALUES (5,4)
+    expect: {error: true}
+  - name: ENUM enforces non-null declarations
+    sql: INSERT INTO sql_feature_enum (id,kind) VALUES (5,NULL)
+    expect: {error: true}
+  - name: ENUM rejects empty domains
+    sql: CREATE TABLE sql_feature_bad_declaration (kind ENUM())
+    expect: {error: true}
+  - name: ENUM rejects repeated labels
+    sql: CREATE TABLE sql_feature_bad_declaration (kind ENUM('a','a'))
+    expect: {error: true}
+  - name: FORCE INDEX is accepted without becoming an alias
+    sql: SELECT id FROM sql_feature_enum FORCE INDEX (PRIMARY) WHERE id=1
+    expect: {data: [{id: 1}]}
+  - name: IGNORE INDEX preserves joined relation aliases
+    sql: SELECT a.id FROM sql_feature_enum a IGNORE INDEX (PRIMARY) JOIN sql_feature_enum b USE KEY (PRIMARY) ON a.id=b.id WHERE a.id=1
+    expect: {data: [{id: 1}]}
+  - name: Index hints accept an ORDER BY scope
+    sql: SELECT id FROM sql_feature_enum FORCE INDEX FOR ORDER BY (PRIMARY) ORDER BY id LIMIT 1
+    expect: {data: [{id: 1}]}
+  - name: Invalid index hints remain rejected
+    sql: SELECT id FROM sql_feature_enum FORCE INDEX
+    expect: {error: true}
+  - name: CREATE for typed upsert expressions
+    sql: CREATE TABLE sql_feature_upsert (id INT PRIMARY KEY, value VARCHAR(32))
+  - name: Initial upsert fixture
+    sql: INSERT INTO sql_feature_upsert VALUES (1,'3')
+  - name: Upsert casts lower through the expression type compiler
+    sql: INSERT INTO sql_feature_upsert VALUES (1,'ignored') ON DUPLICATE KEY UPDATE value=CAST(value AS SIGNED)+1
+  - name: Upsert applied the cast and increment
+    sql: SELECT value FROM sql_feature_upsert WHERE id=1
+    expect: {data: [{value: '4'}]}
+
+  - name: Create the binary session value fixture
+    sql: CREATE TABLE sql_feature_blob (id INT PRIMARY KEY, value BLOB)
+  - name: Escaped control-Z survives literal INSERT parameterization
+    sql: INSERT INTO sql_feature_blob VALUES (1,'\Z')
+  - name: Inserted control-Z retains its byte value
+    sql: SELECT value=0x1a AS intact FROM sql_feature_blob WHERE id=1
+    expect: {data: [{intact: true}]}
+  - name: Escaped control-Z survives REPLACE parsing
+    sql: REPLACE INTO sql_feature_blob VALUES (1,'\Z')
+  - name: Replaced control-Z retains its byte value
+    sql: SELECT value=0x1a AS intact FROM sql_feature_blob WHERE id=1
+    expect: {data: [{intact: true}]}
+
+  - name: Boolean search fixtures include word boundaries and Unicode
+    sql: INSERT INTO sql_feature_fulltext VALUES (1,'Alpha manual database'),(2,'Alpha database database'),(3,'alpha handbook'),(4,'other manual'),(5,'prefixalpha'),(6,'Grüße 日本語'),(7,NULL)
+  - name: Boolean search requires every plus term
+    sql: SELECT id FROM sql_feature_fulltext WHERE MATCH(title) AGAINST('+alpha +database' IN BOOLEAN MODE) ORDER BY id
+    expect: {data: [{id: 1}, {id: 2}]}
+  - name: Boolean search optional terms use OR and whole words
+    sql: SELECT id FROM sql_feature_fulltext WHERE MATCH(title) AGAINST('alpha manual' IN BOOLEAN MODE) ORDER BY id
+    expect: {data: [{id: 1}, {id: 2}, {id: 3}, {id: 4}]}
+  - name: Boolean search exclusion removes matching documents
+    sql: SELECT id FROM sql_feature_fulltext WHERE MATCH(title) AGAINST('+alpha -manual' IN BOOLEAN MODE) ORDER BY id
+    expect: {data: [{id: 2}, {id: 3}]}
+  - name: Only negative terms do not select documents
+    sql: SELECT id FROM sql_feature_fulltext WHERE MATCH(title) AGAINST('-manual' IN BOOLEAN MODE)
+    expect: {rows: 0}
+  - name: Prefix search matches the beginning of a whole word
+    sql: SELECT id FROM sql_feature_fulltext WHERE MATCH(title) AGAINST('+data*' IN BOOLEAN MODE) ORDER BY id
+    expect: {data: [{id: 1}, {id: 2}]}
+  - name: Phrase search preserves word order and adjacency
+    sql: SELECT id FROM sql_feature_fulltext WHERE MATCH(title) AGAINST('+"alpha manual"' IN BOOLEAN MODE)
+    expect: {data: [{id: 1}]}
+  - name: Phrase separators may differ from the indexed text
+    sql: SELECT MATCH('alpha, manual') AGAINST('"alpha manual"' IN BOOLEAN MODE)>0 AS matched
+    expect: {data: [{matched: true}]}
+  - name: Grouped alternatives and required groups
+    sql: SELECT id FROM sql_feature_fulltext WHERE MATCH(title) AGAINST('+alpha +(manual handbook)' IN BOOLEAN MODE) ORDER BY id
+    expect: {data: [{id: 1}, {id: 3}]}
+  - name: Nested excluded groups
+    sql: SELECT id FROM sql_feature_fulltext WHERE MATCH(title) AGAINST('+alpha -(manual (handbook))' IN BOOLEAN MODE)
+    expect: {data: [{id: 2}]}
+  - name: UTF8 fulltext words are case insensitive
+    sql: SELECT id FROM sql_feature_fulltext WHERE MATCH(title) AGAINST('+GRÜßE +日本語' IN BOOLEAN MODE)
+    expect: {data: [{id: 6}]}
+  - name: Null query retains SQL null
+    sql: SELECT MATCH(title) AGAINST(NULL IN BOOLEAN MODE) AS score FROM sql_feature_fulltext WHERE id=1
+    expect: {data: [{score: null}]}
+  - name: Empty query and null documents have zero score
+    sql: SELECT MATCH(title) AGAINST('' IN BOOLEAN MODE) AS empty_score, MATCH(title) AGAINST('manual' IN BOOLEAN MODE) AS null_score FROM sql_feature_fulltext WHERE id=7
+    expect: {data: [{empty_score: 0, null_score: 0}]}
+  - name: Required terms can occur in different MATCH columns
+    sql: SELECT MATCH('alpha','manual') AGAINST('+alpha +manual' IN BOOLEAN MODE)>0 AS matched
+    expect: {data: [{matched: true}]}
+  - name: Phrases cannot cross MATCH column boundaries
+    sql: SELECT MATCH('alpha','manual') AGAINST('"alpha manual"' IN BOOLEAN MODE) AS score
+    expect: {data: [{score: 0}]}
+  - name: Boolean relevance composes with ORDER BY and LIMIT
+    sql: SELECT id FROM sql_feature_fulltext WHERE MATCH(title) AGAINST('+alpha +database' IN BOOLEAN MODE)>0 ORDER BY MATCH(title) AGAINST('+alpha +database' IN BOOLEAN MODE) DESC LIMIT 1
+    expect: {data: [{id: 2}]}
+  - name: Boolean term weights and soft negation contribute to relevance
+    sql: SELECT MATCH('alpha manual') AGAINST('+alpha >manual' IN BOOLEAN MODE) AS boosted, MATCH('alpha manual') AGAINST('+alpha <manual' IN BOOLEAN MODE) AS reduced, MATCH('alpha manual') AGAINST('+alpha ~manual' IN BOOLEAN MODE) AS penalized
+    expect: {data: [{boosted: 3, reduced: 1.5, penalized: 0}]}
+  - name: Boolean underscore is a word character rather than LIKE wildcard
+    sql: SELECT MATCH('alphamanual') AGAINST('+alpha_*' IN BOOLEAN MODE) AS score
+    expect: {data: [{score: 0}]}
+  - name: Unterminated fulltext group is rejected
+    sql: SELECT MATCH('alpha') AGAINST('+(alpha' IN BOOLEAN MODE)
+    expect: {error: true}
+  - name: Unterminated fulltext phrase is rejected
+    sql: SELECT MATCH('alpha') AGAINST('"alpha' IN BOOLEAN MODE)
+    expect: {error: true}
+  - name: Repeated boolean modifiers are rejected
+    sql: SELECT MATCH('alpha') AGAINST('+-alpha' IN BOOLEAN MODE)
+    expect: {error: true}
+  - name: Unsupported proximity syntax is rejected explicitly
+    sql: SELECT MATCH('alpha manual') AGAINST('"alpha manual" @2' IN BOOLEAN MODE)
+    expect: {error: true}
+  - name: Unknown MATCH mode is rejected
+    sql: SELECT MATCH('alpha') AGAINST('alpha' IN BOGUS MODE)
+    expect: {error: true}
+  - name: Natural language MATCH still composes with comparisons
+    sql: SELECT MATCH('alpha') AGAINST('alpha' IN NATURAL LANGUAGE MODE)>0 AS matched
+    expect: {data: [{matched: true}]}
+  - name: Prepared search observes the current statement input
+    session_id: weighted-search-parameters
+    setup:
+      - sql: SET @weighted_search='+alpha'
+    sql: SELECT MATCH('alpha manual') AGAINST(@weighted_search IN BOOLEAN MODE) AS score
+    expect: {data: [{score: 1}]}
+  - name: Cached search plan does not retain previous query terms
+    session_id: weighted-search-parameters
+    setup:
+      - sql: SET @weighted_search='+missing'
+    sql: SELECT MATCH('alpha manual') AGAINST(@weighted_search IN BOOLEAN MODE) AS score
+    expect: {data: [{score: 0}]}
+  - name: Empty required groups are rejected
+    sql: SELECT MATCH('alpha') AGAINST('+()' IN BOOLEAN MODE)
+    expect: {error: true}

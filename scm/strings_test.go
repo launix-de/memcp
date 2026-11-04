@@ -140,13 +140,13 @@ func TestLikePatternNeedsCaseFold(t *testing.T) {
 }
 
 func TestStrLikeCollationUncasedPattern(t *testing.T) {
-	if !StrLikeCollation("ABC 123 xyz", "%123%", "utf8mb4_general_ci") {
+	if !StrLikeCollation("ABC 123 xyz", "%123%", "utf8mb4_general_ci", "\\") {
 		t.Fatal("numeric pattern should match mixed-case text")
 	}
-	if StrLikeCollation("ABC 124 xyz", "%123%", "utf8mb4_general_ci") {
+	if StrLikeCollation("ABC 124 xyz", "%123%", "utf8mb4_general_ci", "\\") {
 		t.Fatal("numeric pattern should preserve non-matches")
 	}
-	if !StrLikeCollation("Straße 123", "%straße%", "utf8mb4_general_ci") {
+	if !StrLikeCollation("Straße 123", "%straße%", "utf8mb4_general_ci", "\\") {
 		t.Fatal("cased pattern should retain case-insensitive matching")
 	}
 }
@@ -178,7 +178,7 @@ func TestStrLikeCollationASCIIFastPaths(t *testing.T) {
 		{"@x", "%`X%", false},
 	}
 	for _, test := range tests {
-		if got := StrLikeCollation(test.value, test.pattern, "utf8mb4_general_ci"); got != test.want {
+		if got := StrLikeCollation(test.value, test.pattern, "utf8mb4_general_ci", "\\"); got != test.want {
 			t.Errorf("StrLikeCollation(%q, %q) = %v, want %v", test.value, test.pattern, got, test.want)
 		}
 	}
@@ -186,7 +186,7 @@ func TestStrLikeCollationASCIIFastPaths(t *testing.T) {
 
 func TestStrLikeCollationASCIIFastPathAllocations(t *testing.T) {
 	allocations := testing.AllocsPerRun(1000, func() {
-		if !StrLikeCollation("A,C", "%a%", "utf8mb4_general_ci") {
+		if !StrLikeCollation("A,C", "%a%", "utf8mb4_general_ci", "\\") {
 			t.Fatal("ASCII contains pattern should match")
 		}
 	})
@@ -198,7 +198,7 @@ func TestStrLikeCollationASCIIFastPathAllocations(t *testing.T) {
 func BenchmarkStrLikeCollationDynamicCategory(b *testing.B) {
 	b.ReportAllocs()
 	for index := 0; index < b.N; index++ {
-		if !StrLikeCollation("A,C", "%a%", "utf8mb4_general_ci") {
+		if !StrLikeCollation("A,C", "%a%", "utf8mb4_general_ci", "\\") {
 			b.Fatal("ASCII contains pattern should match")
 		}
 	}
@@ -207,20 +207,20 @@ func BenchmarkStrLikeCollationDynamicCategory(b *testing.B) {
 func BenchmarkStrLikeCollationDynamicCategoryLegacy(b *testing.B) {
 	b.ReportAllocs()
 	for index := 0; index < b.N; index++ {
-		if !StrLikeFold("A,C", "%a%") {
+		if !StrLikeFold("A,C", "%a%", "\\") {
 			b.Fatal("ASCII contains pattern should match")
 		}
 	}
 }
 
 func TestStrLikeEscapedWildcards(t *testing.T) {
-	if !StrLike("_transient_sample", `\_transient\_%`) {
+	if !StrLike("_transient_sample", `\_transient\_%`, "\\") {
 		t.Fatal("escaped underscores should match literal underscores")
 	}
-	if StrLike("xtransient_sample", `\_transient\_%`) {
+	if StrLike("xtransient_sample", `\_transient\_%`, "\\") {
 		t.Fatal("escaped leading underscore must not act as a wildcard")
 	}
-	if !StrLike("discount%", `discount\%`) {
+	if !StrLike("discount%", `discount\%`, "\\") {
 		t.Fatal("escaped percent should match a literal percent")
 	}
 }
@@ -501,4 +501,35 @@ func TestStrLikeASCIIContainsMatchesLiteralOracle(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestStrLikeCustomEscape(t *testing.T) {
+	for _, tc := range []struct {
+		value, pattern, escape string
+		want                   bool
+	}{
+		{"a_b", "a!_b", "!", true},
+		{"a%b", "a!%b", "!", true},
+		{"a!b", "a!!b", "!", true},
+		{"a_b", "aÄ_b", "Ä", true},
+		{"ab", "aÄ_b", "Ä", false},
+		{"a!b", "a!_b", "", false},
+		{"a\\xb", "a\\_b", "", true},
+		{"a%b", "a%%b", "%", true},
+		{"a_b", "a__b", "_", true},
+		{"a!", "a!", "!", true},
+		{"日本語", "_本%", "", true},
+	} {
+		for _, collation := range []string{"binary", "utf8mb4_general_ci"} {
+			if got := StrLikeCollation(tc.value, tc.pattern, collation, tc.escape); got != tc.want {
+				t.Errorf("%q LIKE %q ESCAPE %q (%s) = %v", tc.value, tc.pattern, tc.escape, collation, got)
+			}
+		}
+	}
+	defer func() {
+		if recover() == nil {
+			t.Fatal("multi-character escape accepted")
+		}
+	}()
+	StrLike("abc", "abc", "ab")
 }

@@ -76,8 +76,9 @@ type computedRevision struct {
 // For raw columns it reads directly from ColumnStorage; for computed columns
 // it evaluates the mapFn over the source column storages.
 type colGetter struct {
-	raw        ColumnReader    // non-nil for raw columns
-	source     ColumnStorage   // generation-owned source for operator-specific preparation
+	raw        ColumnReader  // non-nil for raw columns
+	source     ColumnStorage // generation-owned source for operator-specific preparation
+	mapSources []ColumnStorage
 	mapCols    []ColumnReader  // non-nil for computed columns
 	mapFn      *scm.SerialProc // non-nil for computed columns; owned by this serial reader
 	mapArgs    []scm.Scmer
@@ -388,6 +389,7 @@ func (s *StorageIndex) buildGetters(tx *TxContext, storage []colGetter) []colGet
 		if len(s.ColMapFn) > i && !s.ColMapFn[i].IsNil() {
 			// computed column: read mapCols and apply mapFn
 			mapColReaders := make([]ColumnReader, len(s.ColMapCols[i]))
+			mapSources := make([]ColumnStorage, len(mapColReaders))
 			deltaSlots := make([]int, len(mapColReaders))
 			getters[i].mapCols = mapColReaders
 			for j, mc := range s.ColMapCols[i] {
@@ -397,12 +399,13 @@ func (s *StorageIndex) buildGetters(tx *TxContext, storage []colGetter) []colGet
 					continue
 				}
 				cs := s.t.getColumnStorageRLocked(mc)
+				mapSources[j] = cs
 				deltaSlots[j] = s.deltaReaderSlot(mc, cs)
 				mapColReaders[j] = newCachedColumnReaderTx(cs, tx, true, ReadAuto|readOperatorOwned)
 			}
 			mapFn := s.ColMapFn[i]
 			fn := scm.PrepareSerialProc(mapFn)
-			getters[i] = colGetter{mapCols: mapColReaders, mapFn: &fn, mapArgs: make([]scm.Scmer, len(mapColReaders)), deltaSlots: deltaSlots}
+			getters[i] = colGetter{mapSources: mapSources, mapCols: mapColReaders, mapFn: &fn, mapArgs: make([]scm.Scmer, len(mapColReaders)), deltaSlots: deltaSlots}
 		} else {
 			cs := s.t.getColumnStorageRLocked(col)
 			hints := ReadAuto
@@ -1510,7 +1513,14 @@ func (s *StorageIndex) buildIndex(cols []colGetter, tx *TxContext) {
 		if colIdx < len(cols) {
 			reader = cols[colIdx].raw
 		}
+		sources := []ColumnStorage{cols[colIdx].source}
+		readers := []ColumnReader{reader}
+		if len(cols[colIdx].mapSources) > 0 {
+			sources, readers = cols[colIdx].mapSources, cols[colIdx].mapCols
+		}
 		hook := analyzer.Deploy(IndexDeployContext{
+			sources:   sources,
+			readers:   readers,
 			MainCount: s.t.main_count,
 			Column:    reader,
 			shard:     s.t,

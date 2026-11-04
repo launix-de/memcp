@@ -892,6 +892,7 @@ func Init(en scm.Env) {
 		Description: "column properties and computed-column configuration as an alternating key/value list",
 		Keys: map[string]*scm.TypeDescriptor{
 			"auto_increment":     {Kind: "bool", Label: "auto_increment", Description: "assign increasing values automatically"},
+			"enum_values":        {Kind: "list", Description: "ordered permitted labels for an ENUM declaration", Element: &scm.TypeDescriptor{Kind: "string"}},
 			"collate":            {Kind: "string", Label: "collate", Description: "collation used for this column"},
 			"comment":            {Kind: "string", Label: "comment", Description: "user-visible column comment"},
 			"default":            {Kind: "any", Label: "default", Description: "literal value used when an insert omits the column"},

@@ -18,7 +18,6 @@ package scm
 
 import "unsafe"
 import "strings"
-import "unicode"
 import "unicode/utf8"
 
 // CString's aux layout is private, transient RAM state, never a disk layout.
@@ -544,7 +543,19 @@ func generalCStringLess(a, b Scmer, reverse bool) (bool, bool) {
 // strLikeCString consumes ASCII compressed text directly. Random access makes
 // suffixes and wildcard backtracking possible without a decoded copy. For
 // literal contains, decode overlapping stack chunks to use strings.Contains.
-func strLikeCString(value Scmer, pattern, collation string) (bool, bool) {
+func strLikeCString(value Scmer, pattern, collation, escape string) (bool, bool) {
+	if escape != "\\" {
+		tokens := DecodeLikePattern(pattern, escape)
+		fold := strings.Contains(strings.ToLower(collation), "_ci")
+		if value.IsBufferString() {
+			return bufferLikeTokens(value, tokens, fold), true
+		}
+		v, ok := makeOperatorView(value)
+		if !ok || (v.format == 0 && v.base64 == "") {
+			return false, false
+		}
+		return MatchLikeTokens(tokens, fold, v.n, func(pos int) (rune, int) { return rune(v.at(pos)), 1 }), true
+	}
 	if value.IsBufferString() {
 		return bufferLike(value, pattern, strings.Contains(strings.ToLower(collation), "_ci")), true
 	}
@@ -612,45 +623,6 @@ func strLikeCString(value Scmer, pattern, collation string) (bool, bool) {
 			return false, true
 		}
 	}
-	// Greedy SQL wildcard matcher. A remembered '%' spans arbitrary lengths;
-	// carrying that position is essential for patterns such as a%b%c.
-	i, p, star, retry := 0, 0, -1, 0
-	for i < v.n {
-		if p < len(pattern) && pattern[p] == '%' {
-			star = p
-			p++
-			retry = i
-			continue
-		}
-		if p < len(pattern) {
-			r, size := utf8.DecodeRuneInString(pattern[p:])
-			wildcard := r == '_'
-			if r == '\\' && p+size < len(pattern) {
-				r, size = utf8.DecodeRuneInString(pattern[p+1:])
-				size++
-			}
-			c := v.at(i)
-			if fold {
-				c = asciiFoldByte(c)
-			}
-			if fold {
-				r = unicode.ToLower(r)
-			}
-			if wildcard || rune(c) == r {
-				i++
-				p += size
-				continue
-			}
-		}
-		if star < 0 {
-			return false, true
-		}
-		retry++
-		i = retry
-		p = star + 1
-	}
-	for p < len(pattern) && pattern[p] == '%' {
-		p++
-	}
-	return p == len(pattern), true
+	return MatchLikeTokens(DecodeLikePattern(pattern, escape), fold, v.n,
+		func(pos int) (rune, int) { return rune(v.at(pos)), 1 }), true
 }

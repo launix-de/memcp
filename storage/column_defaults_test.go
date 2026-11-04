@@ -548,3 +548,45 @@ func TestNamedDefaultUsesPublishedColumnDeclaration(t *testing.T) {
 	}
 	assertInitializedColumn(t, restored, "flag", scm.NewInt(0), 1)
 }
+
+// ENUM labels are schema data and must survive JSON schema persistence and cloning.
+func TestEnumColumnSchemaRoundtrip(t *testing.T) {
+	original := &column{Name: "kind", Typ: "ENUM", EnumValues: []string{"z", "a", "m"}, AllowNull: true, Collation: "utf8mb4_bin"}
+	data, err := json.Marshal(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var restored column
+	if err := json.Unmarshal(data, &restored); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []*column{original, &restored, cloneStoredColumnDeclaration(&restored)} {
+		c.UpdateSanitizer()
+		if got := c.sanitizer(scm.NewInt(2)); got.String() != "a" {
+			t.Fatalf("numeric enum index = %s", got.String())
+		}
+		if got := c.sanitizer(scm.NewString("m")); got.String() != "m" {
+			t.Fatalf("enum label = %s", got.String())
+		}
+		if !c.sanitizer(scm.NewNil()).IsNil() {
+			t.Fatal("nullable enum lost NULL")
+		}
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Error("invalid enum label accepted")
+				}
+			}()
+			c.sanitizer(scm.NewString("invalid"))
+		}()
+	}
+}
+
+func TestEnumCollationRebuildsSanitizer(t *testing.T) {
+	c := &column{Name: "kind", Typ: "ENUM", EnumValues: []string{"z", "a"}, AllowNull: true, Collation: "utf8mb4_bin"}
+	c.UpdateSanitizer()
+	c.Alter("collation", scm.NewString("utf8mb4_general_ci"))
+	if got := c.sanitizer(scm.NewString("Z")); got.String() != "z" {
+		t.Fatalf("case-insensitive enum = %s", got.String())
+	}
+}

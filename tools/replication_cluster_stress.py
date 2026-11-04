@@ -483,6 +483,18 @@ class Node(OwnedServer):
         finally:
             self.client = client
 
+    def cleanup(self):
+        # Capture native wait stacks before failure cleanup destroys the owned
+        # Go process. Normal crash/restart scenarios retain their SIGKILL path.
+        if sys.exc_info()[0] is not None and self.process is not None and self.process.poll() is None:
+            try:
+                print(f"  {self.name}: capture goroutines pid={self.process.pid}", flush=True)
+                self.process.send_signal(signal.SIGABRT)
+                self.process.wait(timeout=2)
+            except (OSError, subprocess.TimeoutExpired) as error:
+                print(f"  {self.name}: goroutine capture incomplete: {error}", flush=True)
+        super().cleanup()
+
     def snapshot(self):
         # Inspect live RAM state; disk contents cannot grant MOSI rights.
         result = self.client.scm("(replication_status)").strip()
@@ -1886,7 +1898,7 @@ def run_cluster_inserts(args, artifacts, journal, hash_partitioned=False):
                     # kills these disposable children. Never retry an INSERT.
                     for node in nodes:
                         if node.process is not None and node.process.poll() is None:
-                            node.process.send_signal(signal.SIGQUIT)
+                            node.process.send_signal(signal.SIGABRT)
                     for node in nodes:
                         if node.process is not None:
                             try:

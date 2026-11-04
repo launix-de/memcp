@@ -133,6 +133,33 @@ callbacks. Local operator optimizer hooks may subsequently transform the plan. *
 			nil)
 		_ nil)))
 
+/* A zero-rejecting score predicate can use approximate positive candidates.
+Keep its residual: exclusions, word boundaries and relevance are not gram facts. */
+(define scan_plan_text_search (lambda (expr params columns) (begin
+	(define search (match expr
+		'((quote >) score threshold) (if (scan_plan_uses threshold params) (list nil false)
+			(list score (list (quote >=) (scan_plan_lift threshold) 0)))
+		'((quote >=) score threshold) (if (scan_plan_uses threshold params) (list nil false)
+			(list score (list (quote >) (scan_plan_lift threshold) 0)))
+		_ (list expr true)))
+	(define score (car search))
+	(match score
+		'((quote text_search_score) values terms)
+		(begin
+			(define inputs (scan_plan_list values))
+			(if (or (nil? inputs) (equal? inputs '()) (scan_plan_uses terms params)
+				(not (reduce inputs (lambda (direct input)
+					(and direct (not (nil? (scan_plan_param_column input params columns))))) true))) nil
+				(begin
+					(define names (map inputs (lambda (input) (scan_plan_param_column input params columns))))
+					(define column (if (equal? (count inputs) 1) (list (car names) '() nil)
+						(list (concat "." (expression_name values inputs names)) names
+							(list (quote lambda) inputs values))))
+					(define binding (list (quote list) ":search" (scan_plan_lift terms) (cadr search)))
+					(scan_plan_boundary "like" column binding binding true true true true "utf8mb4_general_ci" false))))
+		_ nil)
+)))
+
 (define scan_plan_special (lambda (expr params columns)
 	(match expr
 		((quote nil?) value)
@@ -148,13 +175,19 @@ callbacks. Local operator optimizer hooks may subsequently transform the plan. *
 					(scan_plan_lift values) (scan_plan_lift values) true true true true "" false))
 			_ nil)
 		(cons (quote strlike) args)
-		(if (or (equal? (count args) 2) (and (equal? (count args) 3) (string? (nth args 2))))
+		(if (and (>= (count args) 2) (<= (count args) 4)
+			(or (equal? (count args) 2) (string? (nth args 2))))
 			(match (scan_expression_column (car args) params columns)
 				'(column map_columns mapper)
-				(if (or (not (nil? mapper)) (scan_plan_uses (cadr args) params)) nil
-					(scan_plan_boundary "like" (list column map_columns mapper)
-						(scan_plan_lift (cadr args)) (scan_plan_lift (cadr args)) true true true true
-						(if (equal? (count args) 3) (toLower (nth args 2)) "utf8mb4_general_ci") false))
+				(if (or (not (nil? mapper)) (scan_plan_uses (cadr args) params)
+					(and (equal? (count args) 4) (scan_plan_uses (nth args 3) params))) nil
+					(begin
+						(define binding (if (equal? (count args) 4)
+							(list (quote list) ":like" (scan_plan_lift (cadr args)) (scan_plan_lift (nth args 3)))
+							(scan_plan_lift (cadr args))))
+						(scan_plan_boundary "like" (list column map_columns mapper)
+							binding binding true true true true
+							(if (>= (count args) 3) (toLower (nth args 2)) "utf8mb4_general_ci") false)))
 				_ nil) nil)
 		'(callee value)
 		(match (scan_expression_column callee params columns)
@@ -168,7 +201,7 @@ callbacks. Local operator optimizer hooks may subsequently transform the plan. *
 	(if (nil? boundary) bounds
 		(begin
 			(define existing (filter bounds (lambda (item) (equal? (item "column") (boundary "column")))))
-			(if (or (equal? existing '()) (equal? (boundary "kind") "in")) (merge bounds (list boundary))
+			(if (or (equal? existing '()) (has? '("in" "like" "recset") (boundary "kind"))) (merge bounds (list boundary))
 				(begin
 					(define have (car existing))
 					(if (and (equal? (have "kind") "range") (equal? (boundary "kind") "range"))
@@ -188,7 +221,8 @@ callbacks. Local operator optimizer hooks may subsequently transform the plan. *
 			(cons (quote and) children)
 			(reduce children (lambda (result child) (scan_plan_collect child params columns result)) bounds)
 			_ (scan_plan_merge_boundary bounds
-				(coalesceNil (scan_plan_comparison expr params columns) (scan_plan_special expr params columns)))))))
+				(coalesceNil (scan_plan_text_search expr params columns)
+					(scan_plan_special expr params columns) (scan_plan_comparison expr params columns)))))))
 
 (define scan_plan_boundary_rank (lambda (boundary)
 	(match (boundary "kind") "equal" 0 "range" 1 _ 2)))
@@ -294,18 +328,20 @@ one compilation result. All consumers share the same boundary/coverage proof. */
 			(begin
 				(define like_info (match body
 					(cons (quote strlike) args)
-					(if (and (>= (count args) 2) (<= (count args) 3)
-						(or (equal? (count args) 2) (string? (nth args 2))))
+					(if (and (>= (count args) 2) (<= (count args) 4)
+						(or (equal? (count args) 2) (string? (nth args 2)))
+						(or (< (count args) 4) (string? (nth args 3))))
 						(begin
 							(define column (scan_plan_param_column (car args) params columns))
-							(if (nil? column) nil (list column (if (equal? (count args) 2) "" (nth args 2))))) nil)
+							(if (nil? column) nil (list column (if (equal? (count args) 2) "" (nth args 2))
+								(if (equal? (count args) 4) (nth args 3) "\\")))) nil)
 					_ nil))
 				(define slots (filter parts (lambda (part) (int? part))))
 				(define prior (match body
 					'(head _ _) (if (has? (list (quote <) (quote <=) (quote >) (quote >=)) head) (/ 1 3) 0.1)
 					_ 0.1))
 				(define spec (list parts (if (or (nil? like_info) (equal? slots '())) -1 (car slots))
-					(if (nil? like_info) "" (concat (json_encode (car like_info)) ":" (json_encode (cadr like_info)))) prior))
+					(if (nil? like_info) "" (concat (json_encode (car like_info)) ":" (json_encode (cadr like_info)) ":" (json_encode (nth like_info 2)))) prior))
 				(list (scan_feedback_key spec bindings) bindings))
 			_ (list nil values)))))
 

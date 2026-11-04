@@ -17,6 +17,7 @@ Copyright (C) 2026  Carl-Philip Hänsch
 package storage
 
 import "sort"
+import "weak"
 import "unsafe"
 import "strings"
 import "unicode"
@@ -39,6 +40,9 @@ func (m *likeMatcher) IsSorted() bool    { return false }
 func (m *likeMatcher) IsPointLike() bool { return true }
 
 func (m *likeMatcher) Analyze(ctx IndexAnalyzeContext, node scm.Scmer) (IndexBoundary, bool) {
+	if bound, found := analyzeTextSearch(ctx, node, m); found {
+		return bound, true
+	}
 	v, ok := scmerSlice(node)
 	if !ok || len(v) < 3 || !ctx.FunctionIs(v[0], "strlike") {
 		return IndexBoundary{}, false
@@ -59,27 +63,104 @@ func (m *likeMatcher) Analyze(ctx IndexAnalyzeContext, node scm.Scmer) (IndexBou
 		}
 		collation = strings.ToLower(value.String())
 	}
-	pattern := patternValue.String()
-	if wildcard := strings.IndexAny(pattern, "%_"); wildcard > 0 && !strings.Contains(collation, "_ci") {
-		prefix := pattern[:wildcard]
-		upper := []byte(prefix)
-		upper[len(upper)-1]++
-		return analyzedBoundary{
-			col: col, matcher: RangeMatcher, lower: scm.NewString(prefix), upper: scm.NewString(string(upper)),
-			lowerInclusive: true, upperInclusive: false,
-		}, true
+	escape := "\\"
+	if len(v) >= 5 {
+		value, constant := ctx.ExtractConstant(v[4])
+		if !constant || !value.IsString() {
+			return IndexBoundary{}, false
+		}
+		escape = value.String()
 	}
-	return NewIndexBoundary(col, m, patternValue, collation), true
+	pattern := patternValue.String()
+	tokens := scm.DecodeLikePattern(pattern, escape)
+	var prefix strings.Builder
+	wildcard := false
+	for _, token := range tokens {
+		if token.Kind != scm.LikeLiteral {
+			wildcard = true
+			break
+		}
+		prefix.WriteRune(token.Rune)
+	}
+	if wildcard && prefix.Len() > 0 && (strings.HasSuffix(collation, "_bin") || collation == "bin" || collation == "binary") {
+		upper := []byte(prefix.String())
+		for i := len(upper) - 1; i >= 0; i-- {
+			if upper[i] != 255 {
+				upper[i]++
+				upper = upper[:i+1]
+				return analyzedBoundary{col: col, matcher: RangeMatcher, lower: scm.NewString(prefix.String()), upper: scm.NewString(string(upper)), lowerInclusive: true, collation: collation}, true
+			}
+		}
+	}
+	binding := patternValue
+	if escape != "\\" {
+		binding = scm.NewSlice([]scm.Scmer{scm.NewString(":like"), patternValue, scm.NewString(escape)})
+	}
+	return NewIndexBoundary(col, m, binding, collation), true
 }
 
 func (m *likeMatcher) Deploy(ctx IndexDeployContext, persistent bool) IndexHook {
-	if !persistent || ctx.MainCount == 0 || ctx.Column == nil {
+	if !persistent || ctx.MainCount == 0 {
 		return nil
 	}
 	if ctx.MainCount < minimumBigramIndexRows {
 		return sharedNoopIndexHook
 	}
-	return buildBigramIndex(ctx.MainCount, ctx.Column)
+	if len(ctx.readers) == 0 {
+		if ctx.Column == nil {
+			return nil
+		}
+		return buildBigramIndex(ctx.MainCount, ctx.Column)
+	}
+	indexes := make([]*bigramIndex, len(ctx.readers))
+	for i, reader := range ctx.readers {
+		source := ctx.sources[i]
+		if source == nil {
+			return nil
+		}
+		// Computed definitions can change within the same main generation.
+		// Their index revision owns invalidation; do not reuse its old postings.
+		if _, computed := source.(*StorageComputeProxy); computed {
+			indexes[i] = buildBigramIndex(ctx.MainCount, reader)
+			continue
+		}
+		identity := source.(interface {
+			bigramCacheIdentity() weak.Pointer[storageJITFunctions]
+		}).bigramCacheIdentity()
+		if cached, ok := ctx.shard.bigramIndexes.Load(identity); ok {
+			indexes[i] = cached.(weak.Pointer[bigramIndex]).Value()
+		}
+		if indexes[i] != nil {
+			continue
+		}
+		// Retired/reloaded source columns must not accumulate weak registry keys.
+		ctx.shard.bigramIndexes.Range(func(key, _ any) bool {
+			if key.(weak.Pointer[storageJITFunctions]).Value() == nil {
+				ctx.shard.bigramIndexes.Delete(key)
+			}
+			return true
+		})
+		built := buildBigramIndex(ctx.MainCount, reader)
+		for {
+			old, loaded := ctx.shard.bigramIndexes.LoadOrStore(identity, weak.Make(built))
+			if !loaded {
+				indexes[i] = built
+				break
+			}
+			if existing := old.(weak.Pointer[bigramIndex]).Value(); existing != nil {
+				indexes[i] = existing
+				break
+			}
+			if ctx.shard.bigramIndexes.CompareAndSwap(identity, old, weak.Make(built)) {
+				indexes[i] = built
+				break
+			}
+		}
+	}
+	if len(indexes) == 1 {
+		return indexes[0]
+	}
+	return &textSearchIndex{indexes: indexes}
 }
 
 type bigramIndex struct {
@@ -132,7 +213,19 @@ func (s *bigramIndex) ComputeSize() uint {
 }
 
 func (s *bigramIndex) Bind(lower scm.Scmer) IndexRowMatcher {
-	candidates, constrained := s.candidatesPattern(lower.String())
+	var candidates recSetShard
+	var constrained bool
+	if terms, search := textSearchBinding(lower); search {
+		if terms.IsNil() {
+			return nil
+		}
+		candidates, constrained = textSearchCandidates([]*bigramIndex{s}, terms)
+	} else {
+		if !validLikeBinding(lower) {
+			return nil
+		}
+		candidates, constrained = s.candidatesPattern(likeBinding(lower))
+	}
 	if !constrained {
 		return nil
 	}
@@ -152,30 +245,45 @@ func (s *bigramIndex) Bind(lower scm.Scmer) IndexRowMatcher {
 }
 
 func (s *bigramIndex) EstimateCandidates(lower scm.Scmer) (uint32, uint32, bool) {
+	if _, search := textSearchBinding(lower); search {
+		return s.universe, s.universe, false
+	}
+	if !validLikeBinding(lower) {
+		return s.universe, s.universe, false
+	}
+	pattern, escape := likeBinding(lower)
 	minimum := s.universe
 	constrained := false
-	var previous rune
-	havePrevious := false
-	for _, current := range lower.String() {
-		if current == '%' || current == '_' {
-			havePrevious = false
-			continue
-		}
-		current = normalizeBigramRune(current)
-		if havePrevious {
-			position := s.grams.find(normalizedBigramKey(previous, current))
-			if position < 0 {
-				return 0, s.universe, true
+	for _, run := range scm.LikeLiteralRuns(scm.DecodeLikePattern(pattern, escape)) {
+		var previous rune
+		havePrevious := false
+		for _, current := range run {
+			current = normalizeBigramRune(current)
+			if havePrevious {
+				position := s.grams.find(normalizedBigramKey(previous, current))
+				if position < 0 {
+					return 0, s.universe, true
+				}
+				constrained = true
+				if count := s.grams.counts[position]; count < minimum {
+					minimum = count
+				}
 			}
-			constrained = true
-			if count := s.grams.counts[position]; count < minimum {
-				minimum = count
-			}
+			previous = current
+			havePrevious = true
 		}
-		previous = current
-		havePrevious = true
 	}
 	return minimum, s.universe, constrained
+}
+
+func likeBinding(value scm.Scmer) (string, string) {
+	if value.IsSlice() {
+		v := value.Slice()
+		if len(v) == 3 && v[0].String() == ":like" {
+			return v[1].String(), v[2].String()
+		}
+	}
+	return value.String(), "\\"
 }
 
 func normalizedBigramKey(left, right rune) uint64 {
@@ -337,37 +445,40 @@ func buildBigramIndex(count uint32, reader ColumnReader) *bigramIndex {
 
 // candidatesPattern fuses pattern decoding, case normalization and immutable
 // index lookup. No intermediate []uint64 is produced in the query path.
-func (s *bigramIndex) candidatesPattern(pattern string) (recSetShard, bool) {
+func (s *bigramIndex) candidatesPattern(pattern, escape string) (recSetShard, bool) {
+	return s.candidatesLiterals(scm.LikeLiteralRuns(scm.DecodeLikePattern(pattern, escape)))
+}
+
+func (s *bigramIndex) candidatesLiterals(runs []string) (recSetShard, bool) {
 	var setScratch [32]queryBigramPosting
 	sets := setScratch[:0]
 	var previous rune
 	havePrevious := false
-	for _, current := range pattern {
-		if current == '%' || current == '_' {
-			havePrevious = false
-			continue
-		}
-		current = normalizeBigramRune(current)
-		if havePrevious {
-			position := s.grams.find(normalizedBigramKey(previous, current))
-			if position < 0 {
-				return recSetShard{kind: recSetRanges, universe: s.universe}, true
-			}
-			duplicate := false
-			for _, existing := range sets {
-				if existing.position == position {
-					duplicate = true
-					break
+	for _, run := range runs {
+		havePrevious = false
+		for _, current := range run {
+			current = normalizeBigramRune(current)
+			if havePrevious {
+				position := s.grams.find(normalizedBigramKey(previous, current))
+				if position < 0 {
+					return recSetShard{kind: recSetRanges, universe: s.universe}, true
+				}
+				duplicate := false
+				for _, existing := range sets {
+					if existing.position == position {
+						duplicate = true
+						break
+					}
+				}
+				if !duplicate {
+					sets = append(sets, queryBigramPosting{
+						set: s.grams.sets[position], count: s.grams.counts[position], position: position,
+					})
 				}
 			}
-			if !duplicate {
-				sets = append(sets, queryBigramPosting{
-					set: s.grams.sets[position], count: s.grams.counts[position], position: position,
-				})
-			}
+			previous = current
+			havePrevious = true
 		}
-		previous = current
-		havePrevious = true
 	}
 	if len(sets) == 0 {
 		return recSetShard{}, false
@@ -411,4 +522,20 @@ func (s *bigramIndex) intersectCandidates(sets []queryBigramPosting) recSetShard
 		}
 	}
 	return result
+}
+
+// Weak identities preserve object identity across GC/address reuse without
+// retaining evicted column payloads. This method is promoted by every storage.
+func (s *storageJITFunctions) bigramCacheIdentity() weak.Pointer[storageJITFunctions] {
+	return weak.Make(s)
+}
+
+func validLikeBinding(value scm.Scmer) bool {
+	if value.IsSlice() {
+		v := value.Slice()
+		if len(v) == 3 && v[0].String() == ":like" {
+			return !v[1].IsNil() && !v[2].IsNil()
+		}
+	}
+	return !value.IsNil()
 }

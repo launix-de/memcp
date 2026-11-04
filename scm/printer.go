@@ -421,6 +421,22 @@ func serializeEx(b *schemeTextWriter, v Scmer, en *Env, glob *Env, p *Proc) {
 		}
 	case tagSlice:
 		slice := lambdaSyntaxOperands(v.Slice())
+		if len(slice) > 0 {
+			if declaration := DeclarationForValue(slice[0]); declaration != nil && declaration.SerializeCall != nil {
+				source, err := declaration.SerializeCall(slice[1:])
+				if err != nil {
+					panic(err)
+				}
+				serializeEx(b, source, en, glob, p)
+				return
+			}
+		}
+		// A match pattern's regex slot is syntax, not an evaluated operand.
+		// Restore its source string so the receiving optimizer compiles it again.
+		if len(slice) > 1 && scmerIsSymbol(slice[0], "regex") && slice[1].IsRegex() {
+			slice = append([]Scmer(nil), slice...)
+			slice[1] = NewString(slice[1].Regex().String())
+		}
 		if b.objects != nil && len(slice) == 2 && scmerIsSymbol(slice[0], "quote") {
 			serializeClusterLiteral(b, slice[1], glob)
 			return
@@ -510,6 +526,9 @@ func serializeEx(b *schemeTextWriter, v Scmer, en *Env, glob *Env, p *Proc) {
 	case tagSourceInfo:
 		serializeEx(b, v.SourceInfo().value, en, glob, p)
 	case tagRegex:
+		if b.objects != nil {
+			panic("regex value requires its owning operation for serialization")
+		}
 		b.WriteString(v.Regex().String())
 	case tagNthLocalVar:
 		idx := v.NthLocalVar()

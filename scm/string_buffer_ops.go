@@ -190,54 +190,7 @@ func bufferLikeScratch(s Scmer, pattern string, fold bool, scratch *TextScratch)
 			return bufferLiteralLike(s, literal, fold, mode, scratch)
 		}
 	}
-	var cursor, star TextCursor
-	cursor.Reset(s)
-	pos, starPattern := 0, -1
-	for {
-		if pos < len(pattern) && pattern[pos] == '%' {
-			for pos < len(pattern) && pattern[pos] == '%' {
-				pos++
-			}
-			star, starPattern = cursor, pos
-			if pos == len(pattern) {
-				return true
-			}
-			continue
-		}
-		before := cursor
-		r, _, ok := cursor.NextRune(scratch)
-		if !ok {
-			for pos < len(pattern) && pattern[pos] == '%' {
-				pos++
-			}
-			return pos == len(pattern)
-		}
-		if pos < len(pattern) {
-			p, size := utf8.DecodeRuneInString(pattern[pos:])
-			wild := p == '_'
-			if p == '\\' && pos+size < len(pattern) {
-				q, n := utf8.DecodeRuneInString(pattern[pos+size:])
-				p = q
-				size += n
-				wild = false
-			}
-			if fold {
-				r, p = unicode.ToLower(r), unicode.ToLower(p)
-			}
-			if wild || r == p {
-				pos += size
-				continue
-			}
-		}
-		if starPattern < 0 {
-			return false
-		}
-		cursor = before
-		if _, _, ok := star.NextRune(scratch); !ok {
-			return false
-		}
-		cursor, pos = star, starPattern
-	}
+	return bufferLikeTokens(s, DecodeLikePattern(pattern, "\\"), fold)
 }
 
 // mode bits: 1 permits a leading arbitrary prefix; 2 permits a trailing suffix.
@@ -685,4 +638,51 @@ func bufferTrimScratch(s Scmer, direction int, scratch *TextScratch) Scmer {
 		end = start
 	}
 	return bufferSubstring(s, start, end)
+}
+
+// bufferLikeTokens keeps a rewindable compressed cursor for custom escapes.
+func bufferLikeTokens(value Scmer, tokens []LikeToken, fold bool) bool {
+	var cursor, star TextCursor
+	var scratch TextScratch
+	cursor.Reset(value)
+	p, starPattern := 0, -1
+	for {
+		if p < len(tokens) && tokens[p].Kind == LikeMany {
+			p++
+			star, starPattern = cursor, p
+			if p == len(tokens) {
+				return true
+			}
+			continue
+		}
+		before := cursor
+		r, _, ok := cursor.NextRune(&scratch)
+		if !ok {
+			for p < len(tokens) && tokens[p].Kind == LikeMany {
+				p++
+			}
+			return p == len(tokens)
+		}
+		if p < len(tokens) {
+			token := tokens[p]
+			literal := token.Rune
+			if fold {
+				r = unicode.ToLower(r)
+				literal = unicode.ToLower(literal)
+			}
+			if token.Kind == LikeAny || token.Kind == LikeLiteral && r == literal {
+				p++
+				continue
+			}
+		}
+		if starPattern < 0 {
+			return false
+		}
+		cursor = before
+		if _, _, ok := star.NextRune(&scratch); !ok {
+			return false
+		}
+		cursor = star
+		p = starPattern
+	}
 }

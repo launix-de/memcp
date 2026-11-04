@@ -64,7 +64,10 @@ type IndexCandidateEstimator interface {
 type IndexDeployContext struct {
 	MainCount uint32
 	Column    ColumnReader
-	shard     *storageShard
+	// Generation-owned sources and invocation readers for candidate caches.
+	sources []ColumnStorage
+	readers []ColumnReader
+	shard   *storageShard
 }
 
 // IndexAnalyzeContext exposes the existing lambda resolver to registered

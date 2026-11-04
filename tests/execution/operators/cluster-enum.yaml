@@ -1,0 +1,31 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  description: ENUM declaration values and order callbacks across delegated joins
+  cluster:
+    fixture: shared_analytics
+    rows_per_shard: 5000
+    shards: 64
+    columns: 8
+    nodes: 4
+    ram_limit_bytes: 8388608
+    coordinator_ram_limit_bytes: 131072
+    shard_ram_percent: 50
+    coordinator_shard_ram_percent: 1
+setup:
+  - sql: DROP TABLE IF EXISTS enum_labels
+  - sql: CREATE TABLE enum_labels (id INT PRIMARY KEY, kind ENUM('z','a','m') NOT NULL)
+  - sql: INSERT INTO enum_labels VALUES (0,'z'),(1,'a'),(2,'m')
+cleanup:
+  - sql: DROP TABLE IF EXISTS enum_labels
+test_cases:
+  - name: ENUM projection and declaration order survive a distributed join
+    sql: SELECT e.kind,b.id FROM big_items b JOIN enum_labels e ON b.id%3=e.id WHERE b.id<3 ORDER BY e.kind
+    expect:
+      data: [{kind: z, id: 0}, {kind: a, id: 1}, {kind: m, id: 2}]
+      cluster:
+        min_remote_shards: 1
+  - name: Enum domain validation remains active with a shared schema
+    sql: INSERT INTO enum_labels VALUES (3,'invalid')
+    expect: {error: true}

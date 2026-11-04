@@ -157,10 +157,10 @@ func compileFilterFeedback(params, columns []scm.Scmer, body scm.Scmer, bindings
 		if name == "<" || name == "<=" || name == ">" || name == ">=" {
 			spec.prior = 1.0 / 3
 		}
-		if name == "strlike" && len(items) <= 4 {
+		if name == "strlike" && len(items) <= 5 {
 			if column, ok := scanParamColumn(items[1], params, columns); ok {
 				collation := ""
-				if len(items) == 4 {
+				if len(items) >= 4 {
 					if !items[3].IsString() {
 						return staticFilterFeedbackKey(spec.value(), *bindings)
 					}
@@ -173,7 +173,14 @@ func compileFilterFeedback(params, columns []scm.Scmer, body scm.Scmer, bindings
 						break
 					}
 				}
-				spec.family = strconv.Quote(column) + ":" + strconv.Quote(collation)
+				escape := "\\"
+				if len(items) == 5 {
+					if !items[4].IsString() {
+						return staticFilterFeedbackKey(spec.value(), *bindings)
+					}
+					escape = items[4].String()
+				}
+				spec.family = strconv.Quote(column) + ":" + strconv.Quote(collation) + ":" + strconv.Quote(escape)
 			}
 		}
 	}

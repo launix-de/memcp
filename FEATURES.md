@@ -56,7 +56,7 @@ for executable examples and deliberately rejected cases.
 | Aggregation | `GROUP BY`, `HAVING`, `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, `GROUP_CONCAT`, grouped expressions and empty-input semantics. |
 | Window functions | Ranking (`ROW_NUMBER`, `RANK`, `DENSE_RANK`), offsets (`LAG`, `LEAD`), value functions (`FIRST_VALUE`, `LAST_VALUE`) and window aggregate cases, with partition/order handling. Supported frames and grouped/window combinations are defined by the tests, not full SQL-standard window coverage. |
 | Expressions | SQL NULL/three-valued logic, `CASE`, `COALESCE`, `NULLIF`, `IF`, arithmetic/bitwise operators, comparisons, `BETWEEN`, literal membership and type conversions. |
-| Strings and search | String manipulation, `LIKE`/`ILIKE` dialect cases, regular expressions, collations and `MATCH … AGAINST` compatibility. Accepted full-text syntax does not promise MySQL-identical index or relevance semantics. |
+| Strings and search | String functions, `LIKE`/`ILIKE`, regular expressions, collations and [`MATCH … AGAINST`](tests/sql/compatibility/mysql-ddl-dml-fulltext.yaml): boolean search with term-frequency scoring; natural-language substring matching. |
 | Numbers, dates and JSON | Numeric functions, date/time arithmetic and formatting, timezone handling, JSON extraction/construction and PostgreSQL JSON expression cases. See the [builtin definitions](lib/sql-builtins.scm) and [expression tests](tests/sql/expressions/). |
 | INSERT | Single/multiple rows, `INSERT … SELECT`, MySQL `INSERT … SET`, ignore/upsert forms and dialect-specific conflict handling. |
 | UPDATE and DELETE | Filtered mutations, qualified targets, self-references and supported multi-table/subquery forms. |

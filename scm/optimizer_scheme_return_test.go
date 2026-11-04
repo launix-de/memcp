@@ -855,3 +855,23 @@ func TestDynamicProducerCardinalityRemainsRuntimeOwned(t *testing.T) {
 		t.Fatalf("literal producer cardinality = %d, want 3", got)
 	}
 }
+
+func TestCountProcedureCallUsesResultLength(t *testing.T) {
+	env := newOptimizerTestEnv()
+	for _, source := range []string{`(lambda (input) (list))`, `(lambda (input) (list input input input))`} {
+		callee := Eval(optimizeTestSource(t, env, source), env)
+		call := NewSlice([]Scmer{callee, NewSymbol("input")})
+		body := NewSlice([]Scmer{NewSymbol("count"), call})
+		expr := NewSlice([]Scmer{NewSymbol("lambda"), NewSlice([]Scmer{NewSymbol("input")}), body})
+		want := int64(len(Apply(callee, NewString("value")).Slice()))
+		for _, optimized := range []bool{false, true} {
+			candidate := CloneOptimizerExpression(expr)
+			if optimized {
+				candidate = Optimize(candidate, env, nil)
+			}
+			if got := Apply(Eval(candidate, env), NewString("value")); got.Int() != want {
+				t.Fatalf("%s optimized=%v: count=%v, want %d", source, optimized, got, want)
+			}
+		}
+	}
+}

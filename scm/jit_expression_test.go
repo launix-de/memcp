@@ -19,6 +19,7 @@ package scm
 import (
 	"fmt"
 	"reflect"
+	"regexp"
 	"runtime"
 	"slices"
 	"strings"
@@ -2097,5 +2098,60 @@ func TestJITFloatRepresentationConversion(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestJITExpressionStrLikeCustomEscape(t *testing.T) {
+	compiled := compileJITExpressionTestProc(t,
+		`(lambda (value pattern escape) (strlike value pattern "utf8mb4_general_ci" escape))`)
+	if got := Apply(compiled, NewString("Alpha_beta"), NewString("alphaÄ_%"), NewString("Ä")); !Equal(got, NewBool(true)) {
+		t.Fatalf("custom Unicode escape: %v", got)
+	}
+	if got := Apply(compiled, NewString("AlphaXbeta"), NewString("alphaÄ_%"), NewString("Ä")); !Equal(got, NewBool(false)) {
+		t.Fatalf("escaped underscore became wildcard: %v", got)
+	}
+	if got := Apply(compiled, NewString("alpha"), NewString("%"), NewNil()); !got.IsNil() {
+		t.Fatalf("NULL escape: %v", got)
+	}
+}
+
+func TestJITExpressionPortableRegexpReplace(t *testing.T) {
+	compiled := compileJITExpressionTestProc(t,
+		`(lambda (value) (regexp_replace value "([a-z]+)" "[$1]"))`)
+	data, err := MarshalProcedure(compiled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored, err := UnmarshalProcedure(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored = jitCompile(restored)
+	if got := Apply(restored, NewString("alpha 12 beta")); String(got) != "[alpha] 12 [beta]" {
+		t.Fatalf("recompiled string replacement: %v", got)
+	}
+	if got := Apply(restored, NewNil()); !got.IsNil() {
+		t.Fatalf("NULL replacement input: %v", got)
+	}
+}
+
+func TestJITExpressionUnicodeRegexpClass(t *testing.T) {
+	compiled := compileJITExpressionTestProc(t, `(lambda (value) (regexp_test value "^[\\p{L}\\p{N}_']+\\*?$"))`)
+	for _, value := range []string{"GRÜßE", "日本語", "alpha*", "bad input"} {
+		want := regexp.MustCompile(`^[\p{L}\p{N}_']+\*?$`).MatchString(value)
+		if got := Apply(compiled, NewString(value)); got.Bool() != want {
+			t.Fatalf("Unicode regex %q = %v, want %v", value, got, want)
+		}
+	}
+	folded := compileJITExpressionTestProc(t, `(lambda (value) (regexp_test value "(?i)^[a-z]+$"))`)
+	requireNoDynamicJITCalls(t, folded)
+	if calls := folded.Proc().Compiled.Coverage.NativeCalls; calls != 0 {
+		t.Fatalf("small Unicode class emitted %d native calls", calls)
+	}
+	for _, value := range []string{"ſK", "ASK", "日本語"} {
+		want := regexp.MustCompile(`(?i)^[a-z]+$`).MatchString(value)
+		if got := Apply(folded, NewString(value)); got.Bool() != want {
+			t.Fatalf("folded Unicode regex %q = %v, want %v", value, got, want)
+		}
 	}
 }

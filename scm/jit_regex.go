@@ -26,7 +26,7 @@ const (
 	jitConstantRegexpTestName          = "jit-constant-regexp-test"
 	jitConstantRegexpPredicateName     = "jit-constant-regexp-predicate"
 	jitConstantRegexpMatchesName       = "jit-constant-regexp-matches"
-	jitConstantRegexpReplaceFuncName   = "jit-constant-regexp-replace-func"
+	jitConstantRegexpReplaceName       = "jit-constant-regexp-replace"
 	jitConstantRegexpReplaceInlineName = "jit-constant-regexp-replace-inline"
 )
 
@@ -112,6 +112,9 @@ func jitRegexBacktrackPop(handle Scmer) int64 {
 func jitConstantRegexpReplaceFunc(pattern, replacement, value Scmer) Scmer {
 	if value.IsNil() {
 		return NewNil()
+	}
+	if !scmerCallable(replacement) {
+		return NewString(pattern.Regex().ReplaceAllString(String(value), String(replacement)))
 	}
 	return NewString(pattern.Regex().ReplaceAllStringFunc(String(value), func(match string) string {
 		return String(Apply(replacement, NewString(match)))
@@ -212,6 +215,18 @@ func jitRegexTermsEmittable(terms []jitRegexTerm) bool {
 				return jitRegexTermsEmittable(rest)
 			}
 			return false
+		case syntax.OpCharClass:
+			if _, small := jitRegexSmallWideRunes(node); small {
+				continue
+			}
+			// A byte class can represent ASCII and its complete Unicode
+			// complement, but not Unicode category ranges or partial wide sets.
+			// Those retain the compiled Go regexp operation.
+			for i := 0; i+1 < len(node.Rune); i += 2 {
+				if node.Rune[i+1] > 127 && (node.Rune[i] > 128 || node.Rune[i+1] != 0x10ffff) {
+					return false
+				}
+			}
 		case syntax.OpLiteral:
 			if node.Flags&syntax.FoldCase != 0 {
 				for _, r := range node.Rune {
@@ -243,6 +258,26 @@ func jitCompileRegexProgram(pattern *regexp.Regexp) *jitRegexProgram {
 		beginText: jitRegexBeginsAtText(root),
 		pattern:   source,
 	}
+}
+
+// Small Unicode classes include the Kelvin sign and long s introduced by
+// ASCII case folding. Keep them atomic: ordinary regex alternation duplicates
+// the continuation for each branch and can expand nested repeats exponentially.
+func jitRegexSmallWideRunes(node *syntax.Regexp) ([]rune, bool) {
+	var wide []rune
+	for i := 0; i+1 < len(node.Rune); i += 2 {
+		lo, hi := max(node.Rune[i], 128), node.Rune[i+1]
+		if hi < lo {
+			continue
+		}
+		if hi-lo+1 > 8-rune(len(wide)) {
+			return nil, false
+		}
+		for r := lo; r <= hi; r++ {
+			wide = append(wide, r)
+		}
+	}
+	return wide, true
 }
 
 func jitRegexBeginsAtText(node *syntax.Regexp) bool {
@@ -690,7 +725,12 @@ func jitRegexSimpleWidth(node *syntax.Regexp) (int, bool) {
 	switch node.Op {
 	case syntax.OpLiteral:
 		return len(string(node.Rune)), len(node.Rune) != 0
-	case syntax.OpCharClass, syntax.OpAnyCharNotNL, syntax.OpAnyChar:
+	case syntax.OpCharClass:
+		if wide, small := jitRegexSmallWideRunes(node); small && len(wide) != 0 {
+			return 0, false
+		}
+		return 1, true
+	case syntax.OpAnyCharNotNL, syntax.OpAnyChar:
 		return 1, true
 	case syntax.OpConcat:
 		width := 0
@@ -955,6 +995,13 @@ func jitRegexCanStartWith(node *syntax.Regexp, b byte) bool {
 		}
 		return node.Rune[0] == rune(b)
 	case syntax.OpCharClass:
+		if wide, small := jitRegexSmallWideRunes(node); small {
+			for _, r := range wide {
+				if string(r)[0] == b {
+					return true
+				}
+			}
+		}
 		for i := 0; i+1 < len(node.Rune); i += 2 {
 			if rune(b) >= node.Rune[i] && rune(b) <= node.Rune[i+1] {
 				return true
@@ -1202,7 +1249,38 @@ func jitRegexByteRanges(node *syntax.Regexp) [][2]byte {
 	return ranges
 }
 
+func (emitter *jitRegexEmitter) emitSmallWideClass(node *syntax.Regexp, wide []rune, failLabel JITLabel) {
+	emitter.emitBounds(1, failLabel)
+	unicodePath, done := emitter.ctx.ReserveLabel(), emitter.ctx.ReserveLabel()
+	char := emitter.ctx.AllocRegExcept(emitter.cursor, emitter.end, emitter.scan)
+	emitter.ctx.EmitMovRegMemB(char, emitter.cursor, 0)
+	emitter.ctx.EmitCmpRegImm32(char, 128)
+	emitter.ctx.FreeReg(char)
+	emitter.ctx.EmitJump(CondUnsignedAboveOrEqual, unicodePath)
+	ascii := &syntax.Regexp{Op: syntax.OpCharClass}
+	for i := 0; i+1 < len(node.Rune); i += 2 {
+		if node.Rune[i] < 128 {
+			ascii.Rune = append(ascii.Rune, node.Rune[i], min(node.Rune[i+1], 127))
+		}
+	}
+	emitter.emitByteClass(ascii, failLabel)
+	emitter.ctx.EmitJmp(done)
+	emitter.ctx.MarkLabel(unicodePath)
+	for _, r := range wide {
+		next := emitter.ctx.ReserveLabel()
+		emitter.emitLiteral(&syntax.Regexp{Op: syntax.OpLiteral, Rune: []rune{r}}, next)
+		emitter.ctx.EmitJmp(done)
+		emitter.ctx.MarkLabel(next)
+	}
+	emitter.ctx.EmitJmp(failLabel)
+	emitter.ctx.MarkLabel(done)
+}
+
 func (emitter *jitRegexEmitter) emitByteClass(node *syntax.Regexp, failLabel JITLabel) {
+	if wide, small := jitRegexSmallWideRunes(node); small && len(wide) != 0 {
+		emitter.emitSmallWideClass(node, wide, failLabel)
+		return
+	}
 	emitter.emitBounds(1, failLabel)
 	char := emitter.ctx.AllocRegExcept(emitter.cursor, emitter.end, emitter.scan)
 	emitter.ctx.EmitMovRegMemB(char, emitter.cursor, 0)
@@ -1356,7 +1434,18 @@ func jitEmitConstantRegexpTest(ctx *JITContext, pattern *regexp.Regexp, value JI
 		out := jitConstantRegexpTest(NewRegex(pattern), value.Imm)
 		return jitPlaceScmerIntoTarget(ctx, JITValueDesc{Loc: LocImm, Type: out.GetTag(), Imm: out}, result)
 	}
-	program := jitCompileRegexProgram(pattern)
+	program, goRegex := jitCompileRegexProgramOrGo(pattern)
+	if program == nil {
+		ctx.Coverage.NativeCalls++
+		ctx.TrackImm(NewRegex(goRegex))
+		reArg := jitCopyScmerToPair(ctx, JITValueDesc{Loc: LocImm, Type: tagRegex, Imm: NewRegex(goRegex)})
+		src := value
+		ctx.EnsureDesc(&src)
+		out := ctx.EmitGoCallScalar(GoFuncAddr(jitConstantRegexpTest), []JITValueDesc{reArg, src}, 2)
+		ctx.FreeDesc(&reArg)
+		out.Type, out.Rooted = JITTypeUnknown, true
+		return jitPlaceScmerIntoTarget(ctx, out, result)
+	}
 	value = ctx.stabilizeForNested(value)
 	// Regex state competes with enclosing branch results and planned homes.
 	// Commit bool/nil to a pointer-free slot before restoring those registers.
@@ -1526,7 +1615,8 @@ func jitEmitConstantRegexpMatches(ctx *JITContext, pattern *regexp.Regexp, value
 
 func registerJITRegexBuiltins() {
 	Declare(&Globalenv, &Declaration{
-		Name: jitConstantRegexpMatchesName,
+		Name:          jitConstantRegexpMatchesName,
+		SerializeCall: serializeRegexCall("regexp_matches", 2),
 		Fn: func(arguments ...Scmer) Scmer {
 			if len(arguments) != 2 || !arguments[0].IsRegex() {
 				panic("jit constant regexp matches expects a precompiled regex and a value")
@@ -1556,7 +1646,8 @@ func registerJITRegexBuiltins() {
 		},
 	})
 	Declare(&Globalenv, &Declaration{
-		Name: jitConstantRegexpTestName,
+		Name:          jitConstantRegexpTestName,
+		SerializeCall: serializeRegexCall("regexp_test", 2),
 		Fn: func(arguments ...Scmer) Scmer {
 			if len(arguments) != 2 || !arguments[0].IsRegex() {
 				panic("jit constant regexp test expects a precompiled regex and a value")
@@ -1586,7 +1677,8 @@ func registerJITRegexBuiltins() {
 		},
 	})
 	Declare(&Globalenv, &Declaration{
-		Name: jitConstantRegexpPredicateName,
+		Name:          jitConstantRegexpPredicateName,
+		SerializeCall: serializeRegexPredicate,
 		Fn: func(arguments ...Scmer) Scmer {
 			if len(arguments) != 2 || !arguments[0].IsRegex() {
 				panic("jit constant regexp predicate expects a precompiled regex and a value")
@@ -1621,10 +1713,11 @@ func registerJITRegexBuiltins() {
 		},
 	})
 	Declare(&Globalenv, &Declaration{
-		Name: jitConstantRegexpReplaceFuncName,
+		Name:          jitConstantRegexpReplaceName,
+		SerializeCall: serializeRegexCall("regexp_replace", 3),
 		Fn: func(arguments ...Scmer) Scmer {
 			if len(arguments) != 3 || !arguments[0].IsRegex() {
-				panic("jit constant regexp replace expects a precompiled regex, a function and a value")
+				panic("jit constant regexp replace expects a precompiled regex, a replacement and a value")
 			}
 			return jitConstantRegexpReplaceFunc(arguments[0], arguments[1], arguments[2])
 		},
@@ -1652,10 +1745,11 @@ func registerJITRegexBuiltins() {
 		},
 	})
 	Declare(&Globalenv, &Declaration{
-		Name: jitConstantRegexpReplaceInlineName,
+		Name:          jitConstantRegexpReplaceInlineName,
+		SerializeCall: serializeRegexCall("regexp_replace", 3),
 		Fn: func(arguments ...Scmer) Scmer {
 			if len(arguments) != 3 || !arguments[0].IsRegex() {
-				panic("jit constant regexp replace (inline) expects a precompiled regex, a function and a value")
+				panic("jit constant regexp replace (inline) expects a precompiled regex, a replacement and a value")
 			}
 			return jitConstantRegexpReplaceFunc(arguments[0], arguments[1], arguments[2])
 		},
@@ -1682,4 +1776,27 @@ func registerJITRegexBuiltins() {
 			},
 		},
 	})
+}
+
+// The wire carries the original operation, never native regex/JIT pointers.
+func serializeRegexCall(name string, arity int) func([]Scmer) (Scmer, error) {
+	return func(args []Scmer) (Scmer, error) {
+		if len(args) != arity || !args[0].IsRegex() {
+			return NewNil(), fmt.Errorf("invalid optimized regex call")
+		}
+		result := []Scmer{NewSymbol(name), args[len(args)-1], NewString(args[0].Regex().String())}
+		if arity == 3 {
+			result = append(result, args[1])
+		}
+		return NewSlice(result), nil
+	}
+}
+func serializeRegexPredicate(args []Scmer) (Scmer, error) {
+	if len(args) != 2 || !args[0].IsRegex() {
+		return NewNil(), fmt.Errorf("invalid optimized regex predicate")
+	}
+	// Reconstruct match syntax to preserve its exact string acceptance and
+	// failure semantics, and evaluate the input once. The receiver optimizes it.
+	pattern := NewSlice([]Scmer{NewSymbol("regex"), NewString(args[0].Regex().String()), NewSymbol("_")})
+	return NewSlice([]Scmer{NewSymbol("match"), args[1], pattern, NewBool(true), NewSymbol("_"), NewBool(false)}), nil
 }

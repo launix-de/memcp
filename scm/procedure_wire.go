@@ -165,6 +165,83 @@ func procedureWireBindings(params, body Scmer, parent map[Symbol]struct{}) map[S
 	return bound
 }
 
+// procedurePatternBindings records only captures. Pattern operators and symbol
+// literals are not lexical reads; eval is the sole executable pattern operand.
+func procedurePatternBindings(pattern Scmer, bound map[Symbol]struct{}) {
+	pattern = pattern.WithoutSourceInfo()
+	if pattern.IsSymbol() {
+		switch pattern.Symbol() {
+		case "_", "nil", "true", "false":
+			return
+		}
+		bound[pattern.Symbol()] = struct{}{}
+		return
+	}
+	if !pattern.IsSlice() {
+		return
+	}
+	items := pattern.Slice()
+	if len(items) == 0 {
+		return
+	}
+	start := 0
+	if head, ok := symbolName(items[0]); ok {
+		switch head {
+		case "quote", "symbol", "eval", "var":
+			return
+		case "regex":
+			if len(items) < 2 {
+				return
+			}
+			start = 2
+		default:
+			start = 1
+		}
+	}
+	for _, item := range items[start:] {
+		procedurePatternBindings(item, bound)
+	}
+}
+
+func closeProcedurePattern(pattern Scmer, callFrame *Env, bound map[Symbol]struct{}) Scmer {
+	value := pattern.WithoutSourceInfo()
+	if !value.IsSlice() {
+		return pattern
+	}
+	items := append([]Scmer(nil), value.Slice()...)
+	if len(items) == 2 && scmerIsSymbol(items[0], "eval") {
+		items[1] = closeProcedureCaptures(items[1], callFrame, bound)
+	} else {
+		for i, item := range items {
+			items[i] = closeProcedurePattern(item, callFrame, bound)
+		}
+	}
+	return NewSlice(items)
+}
+
+func validateProcedurePattern(pattern Scmer, bound map[Symbol]struct{}, origin *Env, depth int, bindings ...*SerializationContext) error {
+	if pattern.WithoutSourceInfo().IsRegex() {
+		return nil
+	}
+	if depth > 128 {
+		return fmt.Errorf("procedure pattern exceeds wire nesting limit")
+	}
+	value := pattern.WithoutSourceInfo()
+	if value.IsSlice() {
+		items := value.Slice()
+		if len(items) == 2 && scmerIsSymbol(items[0], "eval") {
+			return validateProcedureWire(items[1], bound, origin, false, depth+1, bindings...)
+		}
+		for _, item := range items {
+			if err := validateProcedurePattern(item, bound, origin, depth+1, bindings...); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	return validateProcedureWire(value, bound, origin, true, depth+1, bindings...)
+}
+
 func validateProcedureWire(value Scmer, bound map[Symbol]struct{}, origin *Env, literal bool, depth int, bindings ...*SerializationContext) error {
 	if depth > 128 {
 		return fmt.Errorf("procedure exceeds wire nesting limit")
@@ -220,6 +297,15 @@ func validateProcedureWire(value Scmer, bound map[Symbol]struct{}, origin *Env, 
 		return nil
 	case tagSlice:
 		items := value.Slice()
+		if !literal && len(items) > 0 {
+			if declaration := DeclarationForValue(items[0]); declaration != nil && declaration.SerializeCall != nil {
+				source, err := declaration.SerializeCall(items[1:])
+				if err != nil {
+					return err
+				}
+				return validateProcedureWire(source, bound, origin, false, depth+1, bindings...)
+			}
+		}
 		if !literal {
 			items = lambdaSyntaxOperands(items)
 		}
@@ -231,6 +317,29 @@ func validateProcedureWire(value Scmer, bound map[Symbol]struct{}, origin *Env, 
 					return fmt.Errorf("invalid quoted procedure value")
 				}
 				return validateProcedureWire(items[1], bound, origin, true, depth+1, bindings...)
+			case "match", "match_mut":
+				if len(items) < 2 {
+					return fmt.Errorf("invalid match procedure value")
+				}
+				if err := validateProcedureWire(items[1], bound, origin, false, depth+1, bindings...); err != nil {
+					return err
+				}
+				i := 2
+				for ; i+1 < len(items); i += 2 {
+					if err := validateProcedurePattern(items[i], bound, origin, depth+1, bindings...); err != nil {
+						return err
+					}
+					branch := maps.Clone(bound)
+					procedurePatternBindings(items[i], branch)
+					collectProcedureBindings(items[i+1], branch)
+					if err := validateProcedureWire(items[i+1], branch, origin, false, depth+1, bindings...); err != nil {
+						return err
+					}
+				}
+				if i < len(items) {
+					return validateProcedureWire(items[i], bound, origin, false, depth+1, bindings...)
+				}
+				return nil
 			case "lambda":
 				if len(items) != 3 && len(items) != 4 {
 					return fmt.Errorf("invalid nested procedure")

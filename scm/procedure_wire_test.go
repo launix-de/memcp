@@ -561,3 +561,72 @@ func TestNativeClosureDoesNotAliasBuiltinWithSameCode(t *testing.T) {
 		t.Fatal("closure context was lost", err)
 	}
 }
+
+func TestProcedureWireRegexpOperators(t *testing.T) {
+	for _, test := range []struct{ source, want string }{
+		{`(lambda (s) (regexp_replace s "([a-z]+)" "[$1]"))`, "[abc] 12"},
+		{`(lambda (s) (regexp_replace s "[a-z]+" (lambda (word) (toUpper word))))`, "ABC 12"},
+		{`(lambda (s) (regexp_test s "^[a-z]+"))`, "true"},
+		{`(lambda (s) (match s (regex "([a-z]+)" _ word) word _ ""))`, "abc"},
+		{`(lambda (s) (regexp_matches s "[a-z]+"))`, "(abc)"},
+	} {
+		for _, optimize := range []bool{false, true} {
+			expression := Read(t.Name(), test.source)
+			if optimize {
+				expression = Optimize(expression, &Globalenv, nil)
+			}
+			original := Eval(expression, &Globalenv)
+			data, err := MarshalProcedure(original)
+			if err != nil {
+				t.Fatalf("%s optimize=%v: %v", test.source, optimize, err)
+			}
+			if strings.Contains(string(data), "compiled_regex") || strings.Contains(string(data), "jit-constant-regexp") {
+				t.Fatalf("optimized implementation leaked onto wire: %s", data)
+			}
+			restored, err := UnmarshalProcedure(data)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := Apply(restored, NewString("abc 12"))
+			if String(got) != test.want {
+				t.Fatalf("%s: got %s, want %s", test.source, String(got), test.want)
+			}
+			if !strings.Contains(test.source, "(match ") && !strings.Contains(test.source, "regexp_matches") && !Apply(restored, NewNil()).IsNil() {
+				t.Fatal("regex operator lost NULL propagation")
+			}
+		}
+	}
+}
+
+func TestProcedureWireMatchBranchBindings(t *testing.T) {
+	for _, optimize := range []bool{false, true} {
+		env := &Env{Vars: Vars{Symbol("head"): NewInt(99), Symbol("bonus"): NewInt(4)}, Outer: &Globalenv}
+		expression := Read(t.Name(), `(lambda (row) (match row (cons head tail) (+ head (count tail) bonus) _ bonus))`)
+		if optimize {
+			expression = Optimize(expression, env, nil)
+		}
+		data, err := MarshalProcedure(Eval(expression, env))
+		if err != nil {
+			t.Fatalf("optimize=%v: %v", optimize, err)
+		}
+		restored, err := UnmarshalProcedure(data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := Apply(restored, NewSlice([]Scmer{NewInt(7), NewInt(1)})); got.Int() != 12 {
+			t.Fatalf("branch capture shadowing: %v", got)
+		}
+		if got := Apply(restored, NewNil()); got.Int() != 4 {
+			t.Fatalf("fallback: %v", got)
+		}
+	}
+	for _, source := range []string{
+		`(lambda (row) (match row (cons head tail) head _ missing_wire_binding))`,
+		`(lambda (row) (match row (eval missing_wire_binding) true _ false))`,
+		`(lambda (row) (begin (match row (cons head tail) head _ 0) tail))`,
+	} {
+		if _, err := MarshalProcedure(Eval(Read(t.Name(), source), &Globalenv)); err == nil {
+			t.Fatalf("accepted unbound lexical read: %s", source)
+		}
+	}
+}

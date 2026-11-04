@@ -23,6 +23,57 @@ metadata:
     storage_bandwidth_mbps: 1000
     storage_latency_ms: 5
 test_cases:
+# Search probes use the original fixture, before the bulk DELETE cases below.
+- name: boolean-fulltext-filter-and-score
+  sql: >-
+    SELECT id,MATCH(CONCAT('alpha ',id))
+    AGAINST('+alpha +2*' IN BOOLEAN MODE) AS score FROM big_items
+    WHERE id<4 AND MATCH(CONCAT('alpha ',id))
+    AGAINST('+alpha +2*' IN BOOLEAN MODE)>0 ORDER BY id
+  expect:
+    data: [{id: 2, score: 2}]
+    cluster:
+      min_remote_shards: 1
+- name: boolean-fulltext-captured-session-query
+  session_id: cluster-fulltext-query
+  setup:
+  - sql: SET @fulltext_query='+alpha +(manual handbook) -obsolete'
+  sql: >-
+    SELECT id FROM big_items WHERE id<3 AND
+    MATCH(CONCAT('Alpha ',CASE WHEN id=1 THEN 'obsolete manual' ELSE 'handbook' END))
+    AGAINST(@fulltext_query IN BOOLEAN MODE)>0 ORDER BY id
+  expect:
+    data: [{id: 0}, {id: 2}]
+    cluster:
+      min_remote_shards: 1
+- name: boolean-fulltext-zero-scores-remain-visible
+  sql: >-
+    SELECT id,MATCH(CONCAT('alpha ',id)) AGAINST('missing' IN BOOLEAN MODE) AS score
+    FROM big_items WHERE id<3 ORDER BY id
+  expect:
+    data: [{id: 0, score: 0}, {id: 1, score: 0}, {id: 2, score: 0}]
+    cluster: {min_remote_shards: 1}
+- name: boolean-fulltext-negative-score-truth
+  sql: >-
+    SELECT id FROM big_items WHERE id<3 AND
+    MATCH(CONCAT('alpha ',CASE WHEN id=1 THEN 'manual manual' ELSE 'other' END))
+    AGAINST('+alpha ~manual' IN BOOLEAN MODE) ORDER BY id
+  expect:
+    data: [{id: 0}, {id: 1}, {id: 2}]
+    cluster: {min_remote_shards: 1}
+- name: regexp-replace-source-is-portable
+  sql: >-
+    SELECT id,REGEXP_REPLACE(CONCAT('alpha ',id),'([a-z]+)','[$1]') AS replaced
+    FROM big_items WHERE id<3 ORDER BY id
+  expect:
+    data: [{id: 0, replaced: '[alpha] 0'}, {id: 1, replaced: '[alpha] 1'}, {id: 2, replaced: '[alpha] 2'}]
+    cluster: {min_remote_shards: 1}
+- name: like-custom-unicode-escape-is-portable
+  sql: >-
+    SELECT id FROM big_items WHERE id<3 AND CONCAT('alpha_',id) LIKE 'alphaÄ_%' ESCAPE 'Ä' ORDER BY id
+  expect:
+    data: [{id: 0}, {id: 1}, {id: 2}]
+    cluster: {min_remote_shards: 1}
 - name: unordered-output
   sql: SELECT id,v0 FROM big_items WHERE id<16
   expect:

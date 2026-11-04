@@ -56,7 +56,7 @@ func TestStringBufferOperators(t *testing.T) {
 				if fold {
 					collation = "utf8mb4_general_ci"
 				}
-				if got, want := bufferLike(v, pattern, fold), StrLikeCollation(texts[i], pattern, collation); got != want {
+				if got, want := bufferLike(v, pattern, fold), StrLikeCollation(texts[i], pattern, collation, "\\"); got != want {
 					t.Fatalf("LIKE codec=%d row=%d pattern=%q fold=%t got=%t want=%t", codec, i, pattern, fold, got, want)
 				}
 			}
@@ -186,6 +186,25 @@ func TestStringBufferLiteralCursorNeedsNoScratch(t *testing.T) {
 		output := make([]byte, span.length)
 		if cursor.Read(output, scratch) != span.length || string(output) != input[span.start:span.start+span.length] {
 			t.Fatal("cursor changed a literal or mixed-block value")
+		}
+	}
+}
+
+func TestStringBufferLikeCustomEscape(t *testing.T) {
+	texts := []string{"alpha_beta", "a%b", "a\\xb", "日本語", "Ä_b"}
+	buffer, offsets := BuildCompressedStringBuffer(texts)
+	for i, text := range texts {
+		compressed := NewBufferString(buffer, offsets[i], len(text))
+		for _, pattern := range []string{"%alpha!_%", "a!%b", "a\\_b", "_本%", "Ä!_b"} {
+			for _, escape := range []string{"!", "", "Ä", "%"} {
+				for _, collation := range []string{"binary", "utf8mb4_general_ci"} {
+					want := StrLikeCollation(text, pattern, collation, escape)
+					got := Apply(Globalenv.Vars[Symbol("strlike")], compressed, NewString(pattern), NewString(collation), NewString(escape))
+					if got.Bool() != want {
+						t.Fatalf("compressed %q LIKE %q ESCAPE %q (%s) = %v, want %v", text, pattern, escape, collation, got, want)
+					}
+				}
+			}
 		}
 	}
 }

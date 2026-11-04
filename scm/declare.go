@@ -61,6 +61,9 @@ type Declaration struct {
 	// it instead of the default argument optimization and post-processing path.
 	Optimize                 func(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor)
 	OptimizeFirstArgTransfer bool // the optimizer hook can consume ownership of its first argument
+	// SerializeCall returns equivalent source for an optimized call. The operator
+	// owns its portable representation; receivers optimize the source normally.
+	SerializeCall func([]Scmer) (Scmer, error)
 }
 
 // MinParams returns the minimum number of required parameters.
