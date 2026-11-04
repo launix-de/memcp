@@ -230,7 +230,10 @@ func (t *table) insertPeer(columns []string, rows [][]scm.Scmer) *mosiPeer {
 
 func (t *table) forwardInsert(columns []string, rows [][]scm.Scmer, collisionCols []string, collision scm.Scmer, mergeNull bool, firstID func(int64), tx *TxContext) (int, bool) {
 	peer := t.insertPeer(columns, rows)
-	if peer == nil && (!sharedClusterSource(t) || GlobalCache.canLoadClusterShard(nil)) {
+	if peer == nil {
+		// Cold admission is decided by the native access boundary. A warm
+		// local writer needs no cold payload and must not move just because
+		// the node has no room for another shard.
 		return 0, false
 	}
 	cluster := activeNodeCluster()

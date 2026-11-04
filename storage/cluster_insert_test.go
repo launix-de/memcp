@@ -1130,3 +1130,30 @@ func TestClusterInsertCapacityRefusalPrecedesInvocation(t *testing.T) {
 		t.Fatal("malformed command treated as a capacity refusal")
 	}
 }
+
+func TestClusterWarmInsertStaysLocalAtColdAdmissionLimit(t *testing.T) {
+	tbl := setupScanParallelTestTable(t, "twarminsertadmission")
+	tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}}
+	shard := tbl.ActiveShards()[0]
+	cluster := globalTestCluster(t, tbl.schema.Name)
+	cluster.view.Store(&clusterView{members: []clusterMember{cluster.self}})
+	mounts := sharedClusterMounts.Swap(&map[string]bool{tbl.schema.Name: true})
+	defer sharedClusterMounts.Store(mounts)
+	service := nodeScans.Swap(&nodeScanService{cluster: cluster})
+	defer nodeScans.Store(service)
+	cluster.manager.resourceCell(mosiResource{Database: tbl.schema.Name}).ownstate.Initialize(mosi.M)
+	cell := cluster.declareShard(shard, true)
+	previous := GlobalCache.shardCapacity.Swap(&shardRAMSnapshot{Allowed: false})
+	defer GlobalCache.shardCapacity.Store(previous)
+	tbl.shardRAMFull.Store(true)
+	if shard.state() == COLD {
+		t.Fatal("fixture must already own warm payload")
+	}
+	count := tbl.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(42)}}, nil, scm.NewNil(), false, nil)
+	if count != 1 || shard.plannerDeltaRows.Load() != 1 {
+		t.Fatal("warm INSERT did not use its local generation")
+	}
+	if cell.ownstate.Writing() || cluster.delegated.Load() != 0 {
+		t.Fatal("warm INSERT retained M or delegated despite existing local access")
+	}
+}
