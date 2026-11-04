@@ -1136,6 +1136,19 @@ func TestClusterUniqueChannelSerializesNativeCollisionUpdates(t *testing.T) {
 	if !found || reader.GetValue(id).Int() != workers*repetitions {
 		t.Fatalf("native collision lost increments: found=%v value=%v", found, reader.GetValue(id))
 	}
+	if n := tbl.Insert([]string{"id", "value"}, [][]scm.Scmer{{scm.NewInt(42), scm.NewInt(0)}}, []string{"value", "$set:value"},
+		scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
+			return scm.Apply(values[1], scm.NewInt(values[0].Int()+1))
+		}), false, nil); n != 2 {
+		t.Fatalf("reserved column setter affected %d rows", n)
+	}
+	id, found = shard.GetRecordidForUnique(exactScanAccess(newExactScanAccessSchema([]string{"id"}), []scm.Scmer{scm.NewInt(42)}), nil, true)
+	updated := shard.ColumnReaderTx(nil, "value", false, ReadAuto)
+	defer ReleaseColumnReader(updated)
+	if !found || updated.GetValue(id).Int() != workers*repetitions+1 {
+		t.Fatal("reserved column setter lost its native effect")
+	}
+
 }
 
 func TestClusterNativeUniqueUpdateReleasesBorrowedReservation(t *testing.T) {

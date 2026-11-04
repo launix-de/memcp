@@ -83,6 +83,9 @@ Examples and boundaries: [joins](tests/planner/joins/),
 - Transactional mutations, rollback, multi-shard commit/recovery and trigger
   effects have dedicated tests. Conflicts and statement failures are explicit
   error paths.
+- UNIQUE collision callbacks support atomic read-modify-write; text keys use
+  their declared collation. [Distributed checks](tests/storage/indexes/cluster-unique-checks.yaml)
+  run on shard peers without importing the whole table.
 - `LOCK TABLES`, process/session tracking and query cancellation support
   application coordination and operations.
 - Shards permit parallel scans; mutation, rebuild and repartition paths have

@@ -241,7 +241,7 @@ func (set *uniqueReservationSet) probe(shard *storageShard, columns []string, ke
 		values := make([]scm.Scmer, len(projection))
 		if found {
 			for i, column := range projection {
-				if column == "$update" || len(column) > 4 && column[:4] == "NEW." {
+				if column == "$update" || strings.HasPrefix(column, "$set:") || strings.HasPrefix(column, "NEW.") {
 					continue
 				}
 				reader := part.shard.ColumnReaderTx(part.tx, column, false, ReadAuto)
@@ -266,6 +266,24 @@ func (set *uniqueReservationSet) update(shard *storageShard, id uint32, changes 
 		return update(changes)
 	}
 	return set.call(shard, "update", scm.NewInt(int64(id)), changes)
+}
+
+func (set *uniqueReservationSet) setValue(shard *storageShard, id uint32, column string, value scm.Scmer) scm.Scmer {
+	set.updates.Lock()
+	defer set.updates.Unlock()
+	if part := set.local[shard.uuid.String()]; part != nil {
+		return part.shard.setCollisionValue(id, column, value, part.tx, part.guard)
+	}
+	return set.call(shard, "set", scm.NewInt(int64(id)), scm.NewString(column), value)
+}
+
+func (s *storageShard) setCollisionValue(id uint32, column string, value scm.Scmer, tx *TxContext, guard *uniqueWriteGuard) scm.Scmer {
+	if proxy, computed := s.getColumnStorageOrPanic(column, false, tx).(*StorageComputeProxy); computed {
+		proxy.SetValue(id, value)
+	} else {
+		s.UpdateFunction(id, true, false, tx, guard)(scm.NewSlice([]scm.Scmer{scm.NewString(column), value}))
+	}
+	return scm.NewBool(true)
 }
 
 func (set *uniqueReservationSet) insert(shard *storageShard, columns []string, rows [][]scm.Scmer, firstID func(int64)) {
@@ -636,7 +654,7 @@ func (s *storageShard) serveUniqueScan(ctx context.Context, input shardScanInvoc
 			values := make([]scm.Scmer, len(projection))
 			if found {
 				for i, column := range projection {
-					if column == "$update" || len(column) > 4 && column[:4] == "NEW." {
+					if column == "$update" || strings.HasPrefix(column, "$set:") || strings.HasPrefix(column, "NEW.") {
 						continue // invocation-owned inputs/handles are bound by the caller
 					}
 					reader := s.ColumnReaderTx(tx, column, false, ReadAuto)
@@ -645,6 +663,14 @@ func (s *storageShard) serveUniqueScan(ctx context.Context, input shardScanInvoc
 				}
 			}
 			return scm.NewSlice([]scm.Scmer{scm.NewBool(found), scm.NewInt(int64(id)), scm.NewSlice(values)}), nil
+		case "set":
+			if len(command) != 4 || !command[1].IsInt() || !command[2].IsString() {
+				return scm.NewNil(), fmt.Errorf("invalid UNIQUE column-set command")
+			}
+			if command[1].Int() < 0 || uint64(command[1].Int()) >= uint64(s.main_count)+uint64(len(s.deltaRows())) {
+				return scm.NewNil(), fmt.Errorf("UNIQUE record outside its retained generation")
+			}
+			return s.setCollisionValue(uint32(command[1].Int()), command[2].String(), command[3], tx, guardPointer), nil
 		case "update":
 			if len(command) != 3 || !command[1].IsInt() || (!command[2].IsSlice() && !command[2].IsNil()) {
 				return scm.NewNil(), fmt.Errorf("invalid UNIQUE update command")

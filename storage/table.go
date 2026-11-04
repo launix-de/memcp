@@ -4756,6 +4756,13 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 									}
 									return guard.reservations.update(s, uid, changes)
 								})
+							} else if strings.HasPrefix(column, "$set:") {
+								reservedValues[i] = scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+									if len(args) == 0 {
+										return scm.NewBool(true)
+									}
+									return guard.reservations.setValue(s, uid, column[5:], args[0])
+								})
 							} else if strings.HasPrefix(column, "NEW.") {
 								for j, name := range columns {
 									if column[4:] == name {
@@ -4799,8 +4806,6 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 							}
 							access := s.GetWrite(currentTx)
 							defer access.Release()
-							if sharedClusterSource(t) {
-							}
 							if access.shard != s || !guard.validReads() {
 								panic(uniqueReadRetry{})
 							}
@@ -4826,7 +4831,9 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 									}
 									row := make([]scm.Scmer, len(cols))
 									for i, name := range cols {
-										row[i] = s.ColumnReaderTx(currentTx, name, false, ReadAuto).GetValue(uid)
+										reader := s.ColumnReaderTx(currentTx, name, false, ReadAuto)
+										row[i] = reader.GetValue(uid)
+										ReleaseColumnReader(reader)
 									}
 									needed := t.guardUniqueWrites(cols, [][]scm.Scmer{row}, mergeNull, 0)
 									if needed.mask&^guard.mask == 0 {
@@ -4851,20 +4858,10 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 							if p == "$update" {
 								params[i] = scm.NewFunc(s.UpdateFunction(uid, true, false, currentTx, callbackGuard))
 							} else if len(p) > 5 && p[:5] == "$set:" {
-								// Match the physical scan mapper's $set pseudo-column. Compute
-								// proxies need a point write because they are not row payload;
-								// ordinary cache columns retain normal UPDATE semantics.
 								cacheColName := p[5:]
-								column := s.getColumnStorageOrPanic(cacheColName, false, currentTx)
-								proxy, computed := column.(*StorageComputeProxy)
-								update := s.UpdateFunction(uid, true, false, currentTx, callbackGuard)
 								params[i] = scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
 									if len(args) > 0 {
-										if computed {
-											proxy.SetValue(uid, args[0])
-										} else {
-											update(scm.NewSlice([]scm.Scmer{scm.NewString(cacheColName), args[0]}))
-										}
+										return s.setCollisionValue(uid, cacheColName, args[0], currentTx, callbackGuard)
 									}
 									return scm.NewBool(true)
 								})

@@ -952,7 +952,9 @@ func TestRemoteScanNativeLookupKinds(t *testing.T) {
 
 func TestRemoteUniqueChannelRetainsGuardThroughUpdateAndFinish(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "t_remote_unique_channel", 4)
-	tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}}
+	tbl.CreateColumn("label", "VARCHAR", []int{40}, []scm.Scmer{scm.NewString("collate"), scm.NewString("utf8mb4_general_ci")})
+	tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}, {Id: "label", Cols: []string{"label"}}}
+	tbl.Insert([]string{"id", "label"}, [][]scm.Scmer{{scm.NewInt(5), scm.NewString("ſail")}}, nil, scm.NewNil(), false, nil)
 	peer, _, _ := setupRemoteScanConnection(t)
 	shard := tbl.ActiveShards()[0]
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1003,6 +1005,11 @@ func TestRemoteUniqueChannelRetainsGuardThroughUpdateAndFinish(t *testing.T) {
 			t.Fatal("remote worker released its UNIQUE guard after ready")
 		}
 	}
+	collated, err := callUniqueChannel(ctx, commands, scm.NewString("probe"), scm.NewString(shard.uuid.String()),
+		uniqueStringArray([]string{"label"}), scm.NewSlice([]scm.Scmer{scm.NewString("sail")}), uniqueStringArray([]string{"id"}))
+	if err != nil || !collated.Slice()[0].Bool() || collated.Slice()[2].Slice()[0].Int() != 5 {
+		t.Fatalf("remote collated UNIQUE lookup: %v %v", collated, err)
+	}
 	projection := scm.NewSlice([]scm.Scmer{scm.NewString("payload")})
 	value, err := callUniqueChannel(ctx, commands, scm.NewString("probe"), scm.NewString(shard.uuid.String()), columns, rows.Slice()[0], projection)
 	if err != nil || !value.Slice()[0].Bool() {
@@ -1018,6 +1025,16 @@ func TestRemoteUniqueChannelRetainsGuardThroughUpdateAndFinish(t *testing.T) {
 	if err != nil || value.Slice()[2].Slice()[0].String() != "changed under reservation" {
 		t.Fatalf("updated value: %v %v", value, err)
 	}
+	id = value.Slice()[1]
+	if changed, err := callUniqueChannel(ctx, commands, scm.NewString("set"), scm.NewString(shard.uuid.String()), id,
+		scm.NewString("payload"), scm.NewString("set under reservation")); err != nil || !changed.Bool() {
+		t.Fatalf("reserved column set: %v %v", changed, err)
+	}
+	value, err = callUniqueChannel(ctx, commands, scm.NewString("probe"), scm.NewString(shard.uuid.String()), columns, rows.Slice()[0], projection)
+	if err != nil || value.Slice()[2].Slice()[0].String() != "set under reservation" {
+		t.Fatalf("column-set value: %v %v", value, err)
+	}
+
 	if _, err := callUniqueChannel(ctx, commands, scm.NewString("finish")); err != nil {
 		t.Fatal(err)
 	}
