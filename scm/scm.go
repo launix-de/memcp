@@ -950,7 +950,11 @@ func closeProcedureScopeCaptures(expression Scmer, callFrame *Env, scopes []map[
 	bound := scopes[depth]
 	if expression.IsSourceInfo() {
 		source := *expression.SourceInfo()
-		source.value = closeProcedureScopeCaptures(source.value, callFrame, scopes)
+		closed := closeProcedureScopeCaptures(source.value, callFrame, scopes)
+		if closed == source.value {
+			return expression
+		}
+		source.value = closed
 		return NewSourceInfo(source)
 	}
 	if expression.IsSymbol() {
@@ -990,45 +994,52 @@ func closeProcedureScopeCaptures(expression Scmer, callFrame *Env, scopes []map[
 		}
 		return NewSlice([]Scmer{items[0], items[1], operand})
 	}
-	closed := append([]Scmer(nil), items...)
+	// Most operands already refer to invocation-local or global bindings.
+	// Copy only when closing a capture actually changes an operand.
+	var closed []Scmer
+	replace := func(index int, value Scmer) {
+		if value == items[index] {
+			return
+		}
+		if closed == nil {
+			closed = append([]Scmer(nil), items...)
+		}
+		closed[index] = value
+	}
 	switch head {
 	case "lambda":
 		if len(items) >= 3 {
 			locals := procedureWireBindings(items[1], items[2], bound)
-			closed[2] = closeProcedureScopeCaptures(items[2], callFrame, append(scopes, locals))
+			replace(2, closeProcedureScopeCaptures(items[2], callFrame, append(scopes, locals)))
 		}
 	case "begin", "begin_mut":
 		first := 1
 		if head == "begin_mut" && len(items) > 1 {
-			closed[1] = closeProcedureScopeCaptures(items[1], callFrame, scopes)
+			replace(1, closeProcedureScopeCaptures(items[1], callFrame, scopes))
 			first = 2
 		}
 		for i := first; i < len(items); i++ {
-			closed[i] = closeProcedureScopeCaptures(items[i], callFrame, append(scopes, bound))
+			replace(i, closeProcedureScopeCaptures(items[i], callFrame, append(scopes, bound)))
 		}
 	case "match", "match_mut":
 		if len(items) > 1 {
-			closed[1] = closeProcedureScopeCaptures(items[1], callFrame, scopes)
+			replace(1, closeProcedureScopeCaptures(items[1], callFrame, scopes))
 		}
 		for i := 3; i < len(items); i += 2 {
-			closed[i-1] = closeProcedurePattern(items[i-1], callFrame, scopes)
+			replace(i-1, closeProcedurePattern(items[i-1], callFrame, scopes))
 			locals := procedureWireBindings(NewSlice(nil), items[i], bound)
 			procedurePatternBindings(items[i-1], locals)
-			closed[i] = closeProcedureScopeCaptures(items[i], callFrame, append(scopes, locals))
+			replace(i, closeProcedureScopeCaptures(items[i], callFrame, append(scopes, locals)))
 		}
 		if len(items)%2 == 1 {
-			closed[len(items)-1] = closeProcedureScopeCaptures(items[len(items)-1], callFrame, scopes)
+			replace(len(items)-1, closeProcedureScopeCaptures(items[len(items)-1], callFrame, scopes))
 		}
 	default:
 		for i, item := range items {
-			closed[i] = closeProcedureScopeCaptures(item, callFrame, scopes)
+			replace(i, closeProcedureScopeCaptures(item, callFrame, scopes))
 		}
 	}
-	unchanged := true
-	for i, item := range closed {
-		unchanged = unchanged && item == items[i]
-	}
-	if unchanged {
+	if closed == nil {
 		return expression
 	}
 	if head == "lambda" {

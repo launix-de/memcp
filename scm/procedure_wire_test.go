@@ -740,3 +740,23 @@ func TestClosedProcedurePreservesNestedLambdaBindingProofs(t *testing.T) {
 		t.Fatal("closed lambda values changed")
 	}
 }
+
+func TestClosedProcedureKeepsUnchangedMatchBody(t *testing.T) {
+	for _, optimized := range []bool{false, true} {
+		t.Run(fmt.Sprintf("optimized=%v", optimized), func(t *testing.T) {
+			env := &Env{Vars: make(Vars), Outer: &Globalenv}
+			expression := Read(t.Name(), `(lambda (row) (match row (cons head tail) head _ 0))`)
+			if optimized {
+				expression = Optimize(expression, env, nil)
+			}
+			original := Eval(expression, env)
+			closed := CloseProcedure(original)
+			if closed.Proc().Body != original.Proc().Body {
+				t.Fatal("closing an unchanged match discarded AST identity and binding proofs")
+			}
+			if got := Apply(closed, NewSlice([]Scmer{NewInt(7)})); got.Int() != 7 {
+				t.Fatalf("closed match returned %s", String(got))
+			}
+		})
+	}
+}
