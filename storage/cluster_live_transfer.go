@@ -12,7 +12,6 @@ import "sync"
 import "bufio"
 import "reflect"
 import "context"
-import "encoding/json"
 import "encoding/base64"
 import "encoding/binary"
 import "github.com/google/uuid"
@@ -347,20 +346,46 @@ func readLiveJournal(reader io.Reader, mask *NonLockingReadMap.NonBlockingBitMap
 	}
 	return ids, nil
 }
-func readLiveJSON(reader *bufio.Reader, value any) error {
-	data, err := reader.ReadBytes('\n')
+
+// Live handover records share the binary metadata codec. Column frames and
+// native journals below keep their storage encoding; this is a network version.
+func readLiveRecord(reader *bufio.Reader, value any) error {
+	size, err := binary.ReadUvarint(reader)
 	if err != nil {
 		return err
 	}
-	return json.Unmarshal(data, value)
+	if size > maxNodeRecordBytes {
+		return fmt.Errorf("oversized live record")
+	}
+	data := make([]byte, int(size))
+	if _, err := io.ReadFull(reader, data); err != nil {
+		return err
+	}
+	return unmarshalNode(data, value)
+}
+
+type liveRecordWriter struct{ io.Writer }
+
+func (writer liveRecordWriter) Encode(value any) error {
+	data, err := marshalNode(value)
+	if err != nil {
+		return err
+	}
+	var header [binary.MaxVarintLen64]byte
+	n := binary.PutUvarint(header[:], uint64(len(data)))
+	if _, err := writer.Write(header[:n]); err != nil {
+		return err
+	}
+	_, err = writer.Write(data)
+	return err
 }
 
 func (capture *liveShardTransfer) write(writer io.Writer) error {
-	encode := json.NewEncoder(writer)
+	encode := liveRecordWriter{writer}
 	if err := encode.Encode(struct {
 		Version     int
 		Generations int
-	}{1, len(capture.shards)}); err != nil {
+	}{2, len(capture.shards)}); err != nil {
 		return err
 	}
 	for _, shard := range capture.shards {
@@ -526,10 +551,10 @@ func (cluster *nodeCluster) installLiveShard(cell *replicaCell, packet mosiPacke
 		Version     int
 		Generations int
 	}
-	if err := readLiveJSON(reader, &stream); err != nil {
+	if err := readLiveRecord(reader, &stream); err != nil {
 		return err
 	}
-	if stream.Version != 1 || stream.Generations < 1 {
+	if stream.Version != 2 || stream.Generations < 1 {
 		return fmt.Errorf("invalid live shard header")
 	}
 	db := databases.Get(packet.Resource.Database)
@@ -571,7 +596,7 @@ func (cluster *nodeCluster) installLiveShard(cell *replicaCell, packet mosiPacke
 	}()
 	for range stream.Generations {
 		var header liveGrainHeader
-		if err := readLiveJSON(reader, &header); err != nil {
+		if err := readLiveRecord(reader, &header); err != nil {
 			return err
 		}
 		id, err := uuid.Parse(header.ID)
@@ -609,7 +634,7 @@ func (cluster *nodeCluster) installLiveShard(cell *replicaCell, packet mosiPacke
 		rows := make([][]scm.Scmer, 0)
 		for range header.DeltaRows {
 			var raw schemeValue
-			if err := readLiveJSON(reader, &raw); err != nil {
+			if err := readLiveRecord(reader, &raw); err != nil {
 				return err
 			}
 			row, err := raw.reconstruct(scm.ProcedureDecode{})
@@ -637,7 +662,7 @@ func (cluster *nodeCluster) installLiveShard(cell *replicaCell, packet mosiPacke
 		staged = append(staged, shard)
 		for range header.Overlays {
 			var meta liveOverlayHeader
-			if err := readLiveJSON(reader, &meta); err != nil {
+			if err := readLiveRecord(reader, &meta); err != nil {
 				return err
 			}
 			value, err := cluster.service.importObject(peer.ctx, peer, meta.Tx)
@@ -714,7 +739,7 @@ func (cluster *nodeCluster) installLiveShard(cell *replicaCell, packet mosiPacke
 			if err != nil {
 				return err
 			}
-			encoded, err := json.Marshal(ref)
+			encoded, err := marshalNode(ref)
 			if err != nil {
 				return err
 			}
@@ -756,7 +781,7 @@ func (capture *liveShardTransfer) enlist(ctx context.Context, request scm.Cluste
 		return nil, fmt.Errorf("foreign live participant")
 	}
 	var ref scm.ClusterReference
-	if err := json.Unmarshal([]byte(request.Arguments[0].String()), &ref); err != nil {
+	if err := unmarshalNode([]byte(request.Arguments[0].String()), &ref); err != nil {
 		return nil, err
 	}
 	value, err := capture.manager.cluster.service.importObject(ctx, session.peer, ref)

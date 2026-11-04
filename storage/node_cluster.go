@@ -146,7 +146,7 @@ func (cluster *nodeCluster) remember(source string, hello clusterHello) error {
 func (cluster *nodeCluster) hello() clusterHello {
 	return clusterHello{scanWireVersion, cluster.self, cluster.view.Load().members}
 }
-func (cluster *nodeCluster) handle(session *scanRPCSession, ctx context.Context, source, method string, data json.RawMessage) (any, error) {
+func (cluster *nodeCluster) handle(session *scanRPCSession, ctx context.Context, source, method string, data []byte) (any, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -159,7 +159,7 @@ func (cluster *nodeCluster) handle(session *scanRPCSession, ctx context.Context,
 		return cluster.handleIDReservation(ctx, data)
 	case "cluster.report":
 		var resource mosiResource
-		if err := json.Unmarshal(data, &resource); err != nil {
+		if err := unmarshalNode(data, &resource); err != nil {
 			return nil, err
 		}
 		if !resource.valid() || resource != globalResource && !cluster.databases[resource.Database] {
@@ -168,7 +168,7 @@ func (cluster *nodeCluster) handle(session *scanRPCSession, ctx context.Context,
 		return cluster.report(resource), nil
 	case "cluster.hello":
 		var hello clusterHello
-		if err := json.Unmarshal(data, &hello); err != nil {
+		if err := unmarshalNode(data, &hello); err != nil {
 			return nil, err
 		}
 		if err := cluster.remember(source, hello); err != nil {
@@ -430,7 +430,7 @@ func validateClusterURI(id string) error {
 // Membership/admission policy belongs to the node object, not the socket reader.
 func (cluster *nodeCluster) HandleClusterRequest(ctx context.Context, request scm.ClusterRequest) (any, error) {
 	session, _ := ctx.Value(clusterObjectSessionKey{}).(*scanRPCSession)
-	data, ok := request.Payload.(json.RawMessage)
+	data, ok := request.Payload.([]byte)
 	if session == nil || !ok {
 		return nil, fmt.Errorf("invalid native node request")
 	}

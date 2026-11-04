@@ -12,8 +12,7 @@ import "strings"
 import "context"
 import "runtime"
 import "net/url"
-import "encoding/json"
-import "github.com/google/uuid"
+import "strconv"
 import "github.com/launix-de/memcp/scm"
 
 // ClusterObject is shared with the runtime, avoiding a storage dependency in scm.
@@ -45,6 +44,7 @@ type clusterObjectRelease struct {
 // not touched by ordinary local readers. Historical shard registration therefore
 // pins the Go generation without adding a read counter to its element loop.
 type clusterObjectRegistry struct {
+	next          uint64 // guarded by mu; incarnation/peer bindings give the namespace
 	mu            sync.Mutex
 	once          sync.Once
 	endpoint      string
@@ -57,6 +57,15 @@ type clusterObjectRegistry struct {
 	imported      map[string]weak.Pointer[clusterObjectImport] // weak import identity; never roots peer values
 	remoteObjects map[string]weak.Pointer[clusterObjectLease]
 	retired       []weak.Pointer[storageShard] // local in-flight owners survive last peer release
+}
+
+// The caller holds mu. Addresses never repeat in this process incarnation.
+func (r *clusterObjectRegistry) nextID() string {
+	r.next++
+	if r.next == 0 {
+		panic("cluster registry address exhausted")
+	}
+	return strconv.FormatUint(r.next, 10)
 }
 
 func (service *nodeScanService) objectRegistry() *clusterObjectRegistry {
@@ -147,10 +156,7 @@ func (service *nodeScanService) exportObject(peer *mosiPeer, object ClusterObjec
 	if err != nil {
 		return scm.ClusterReference{}, err
 	}
-	payload, err := json.Marshal(encoded)
-	if err != nil {
-		return scm.ClusterReference{}, err
-	}
+	payload := []byte(encoded)
 	r := service.objectRegistry()
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -177,7 +183,7 @@ func (service *nodeScanService) exportObject(peer *mosiPeer, object ClusterObjec
 		uri = ""
 	}
 	if uri == "" {
-		id := uuid.NewString()
+		id := r.nextID()
 		if identity, ok := object.(interface{ ClusterObjectID() string }); ok {
 			id = identity.ClusterObjectID()
 		}
@@ -195,7 +201,7 @@ func (service *nodeScanService) exportObject(peer *mosiPeer, object ClusterObjec
 		r.entries[uri] = &clusterObjectEntry{identity: identity, object: object, uri: uri, tokens: make(map[string]clusterObjectPeer), leases: make(map[string]clusterObjectPeer), offers: make(map[string]*mosiPeer)}
 		r.identities[object] = uri
 	}
-	token := uuid.NewString()
+	token := r.nextID()
 	r.entries[uri].tokens[token] = peer.objectPeer
 	r.entries[uri].offers[token] = peer
 	complete = true
@@ -257,7 +263,17 @@ func (r *clusterObjectRegistry) dropObjectTokenLocked(reference scm.ClusterRefer
 // One shared endpoint per owner/incarnation/URI. This is weakly indexed on the
 // peer; ordinary Go reachability joins every concurrent subscan and snapshot.
 // Only the last Go reference triggers the network release, outside the GC.
-type clusterObjectLease struct{ reference scm.ClusterReference }
+type clusterObjectLease struct {
+	reference scm.ClusterReference
+	literalMu sync.Mutex
+	literal   weak.Pointer[scm.FastDict]
+	loading   *clusterLiteralLoad
+}
+type clusterLiteralLoad struct {
+	ready chan struct{}
+	value scm.Scmer
+	err   error
+}
 
 // Views and TX participants remain invocation-local: deduplicating endpoint
 // identity must NOT share mutable query state or overwrite a frozen session
@@ -363,7 +379,7 @@ func (service *nodeScanService) importObject(ctx context.Context, peer *mosiPeer
 	fresh := lease == nil
 	if fresh {
 		ref := reference
-		ref.Token, ref.View = uuid.NewString(), nil
+		ref.Token, ref.View = service.id+":"+registry.nextID(), nil
 		lease = &clusterObjectLease{reference: ref}
 		registry.remoteObjects[identity] = weak.Make(lease)
 	}
@@ -374,9 +390,20 @@ func (service *nodeScanService) importObject(ctx context.Context, peer *mosiPeer
 		runtime.AddCleanup(lease, finalizeClusterObject, clusterObjectCleanup{registry, peer.objectPeer, lease.reference, identity})
 	}
 	runtime.AddCleanup(imported, cleanupClusterImport, clusterObjectImportCleanup{registry, key, weak.Make(imported)})
+	var literalLoad *clusterLiteralLoad
 	defer func() {
 		if failure := recover(); failure != nil {
 			result, err = scm.NewNil(), fmt.Errorf("cluster object reconstruction: %v", failure)
+		}
+		if literalLoad != nil {
+			lease.literalMu.Lock()
+			if err == nil && result.IsFastDict() {
+				lease.literal = weak.Make(result.FastDict())
+			}
+			literalLoad.value, literalLoad.err = result, err
+			lease.loading = nil // never retain the strong result through its own cleanup lease
+			close(literalLoad.ready)
+			lease.literalMu.Unlock()
 		}
 		imported.value, imported.err = result, err
 		close(imported.ready)
@@ -388,10 +415,27 @@ func (service *nodeScanService) importObject(ctx context.Context, peer *mosiPeer
 	if err := service.control(ctx, peer, "object.acquire", clusterObjectAcquisition{reference, lease.reference.Token}, nil, true); err != nil {
 		return scm.NewNil(), err
 	}
-	var frozen schemeValue
-	if err := json.Unmarshal(reference.View, &frozen); err != nil {
-		return scm.NewNil(), err
+	if reference.Type == "literal" {
+		lease.literalMu.Lock()
+		if value := lease.literal.Value(); value != nil {
+			lease.literalMu.Unlock()
+			return scm.NewFastDict(value), nil
+		}
+		if loading := lease.loading; loading != nil {
+			lease.literalMu.Unlock()
+			select {
+			case <-loading.ready:
+				return loading.value, loading.err
+			case <-ctx.Done():
+				return scm.NewNil(), ctx.Err()
+			}
+		}
+		literalLoad = &clusterLiteralLoad{ready: make(chan struct{})}
+		lease.loading = literalLoad
+		lease.literalMu.Unlock()
 	}
+
+	frozen := schemeValue(reference.View)
 	decodedView, err := frozen.reconstruct(scm.ProcedureDecode{ResolveHandle: service.handleResolver(ctx, scm.NewNil()), Resolve: func(child scm.ClusterReference) (scm.Scmer, error) { return service.importObject(ctx, peer, child) }})
 	if err != nil {
 		return scm.NewNil(), err
@@ -400,6 +444,15 @@ func (service *nodeScanService) importObject(ctx context.Context, peer *mosiPeer
 	handleReference.Token = lease.reference.Token
 	handle := scm.ClusterHandle{Reference: handleReference, View: decodedView, Call: service.objectCaller(peer, handleReference, imported)}
 	value, failure := scm.ReconstructClusterObject(handle)
+	if failure == nil && reference.Type == "literal" {
+		if !value.IsFastDict() {
+			return scm.NewNil(), fmt.Errorf("invalid immutable dictionary capture")
+		}
+		dict := value.FastDict()
+		// The cleanup argument retains only the lease, never dict/imported.
+		// This avoids rooting the value through its own cleanup argument.
+		runtime.AddCleanup(dict, func(retained *clusterObjectLease) { runtime.KeepAlive(retained) }, lease)
+	}
 	if failure == nil {
 		if source, ok := value.Any().(*remoteShardObject); ok {
 			failure = source.prepareSource(ctx, peer)
@@ -496,7 +549,7 @@ type clusterObjectCall struct {
 func (s *scanRPCSession) handleObject(ctx context.Context, method string, data []byte) (any, error) {
 	if method == "object.discard" {
 		var refs []scm.ClusterReference
-		if err := json.Unmarshal(data, &refs); err != nil {
+		if err := unmarshalNode(data, &refs); err != nil {
 			return nil, err
 		}
 		s.service.cancelObjectOffers(s.peer, refs)
@@ -504,7 +557,7 @@ func (s *scanRPCSession) handleObject(ctx context.Context, method string, data [
 	}
 	if method == "object.offer" {
 		var request clusterObjectOffer
-		if err := json.Unmarshal(data, &request); err != nil {
+		if err := unmarshalNode(data, &request); err != nil {
 			return nil, err
 		}
 		object, err := s.resolveObject(request.Reference)
@@ -554,12 +607,13 @@ func (s *scanRPCSession) handleObject(ctx context.Context, method string, data [
 	}
 	if method == "object.acquire" {
 		var request clusterObjectAcquisition
-		if err := json.Unmarshal(data, &request); err != nil {
+		if err := unmarshalNode(data, &request); err != nil {
 			return nil, err
 		}
 		ref := request.Reference
-		if _, err := uuid.Parse(request.Lease); err != nil {
-			return nil, err
+		boot, address, valid := strings.Cut(request.Lease, ":")
+		if _, err := strconv.ParseUint(address, 10, 64); !valid || boot != s.peer.objectPeer.Boot || err != nil || address == "0" {
+			return nil, fmt.Errorf("invalid cluster object lease address")
 		}
 		r := s.service.objectRegistry()
 		r.mu.Lock()
@@ -580,13 +634,13 @@ func (s *scanRPCSession) handleObject(ctx context.Context, method string, data [
 	}
 	if method == "object.release" {
 		var ref scm.ClusterReference
-		if err := json.Unmarshal(data, &ref); err != nil {
+		if err := unmarshalNode(data, &ref); err != nil {
 			return nil, err
 		}
 		return nil, s.service.releaseObject(s.peer, ref)
 	}
 	var call clusterObjectCall
-	if err := json.Unmarshal(data, &call); err != nil {
+	if err := unmarshalNode(data, &call); err != nil {
 		return nil, err
 	}
 	value, err := s.requestObject(ctx, call)

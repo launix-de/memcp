@@ -20,7 +20,6 @@ import "crypto/hmac"
 import "sync/atomic"
 import "encoding/hex"
 import "crypto/sha256"
-import "encoding/json"
 import "github.com/google/uuid"
 import "github.com/gorilla/websocket"
 import "github.com/launix-de/memcp/scm"
@@ -65,7 +64,7 @@ func scanAuthProof(secret []byte, role string, server, client scanChallenge) str
 }
 
 func scanAuthMessage(conn *websocket.Conn, method string, input any) error {
-	data, err := json.Marshal(input)
+	data, err := marshalNode(input)
 	if err != nil {
 		return err
 	}
@@ -98,7 +97,7 @@ func readScanAuth(conn *websocket.Conn, method string, output any) error {
 	if err != nil || message.Method != method || message.Packet != nil || message.ID != 0 {
 		return fmt.Errorf("invalid node authentication")
 	}
-	return json.Unmarshal(message.Data, output)
+	return unmarshalNode(message.Data, output)
 }
 
 func validScanChallenge(c scanChallenge) bool {

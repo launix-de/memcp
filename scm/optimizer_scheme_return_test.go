@@ -30,7 +30,7 @@ func newOptimizerTestEnv() *Env {
 
 func optimizeTestSource(t testing.TB, env *Env, source string) Scmer {
 	t.Helper()
-	return Optimize(Read("optimizer return test", source), env, nil)
+	return Optimize(Read("optimizer return test", source, true), env, nil)
 }
 
 func serializedTestExpr(t testing.TB, env *Env, expr Scmer) string {
@@ -54,7 +54,7 @@ func TestLargeReducerOwnership(t *testing.T) {
 			(if ` + condition + ` (merge_assoc acc value (lambda (a b) (+ a b))) ` + other + `))`
 		ome := newOptimizerMetainfo()
 		oc := OptimizerContext{Env: env, Ome: &ome}
-		optimized, _ := oc.OptimizeReducerCallback(Read("large reducer", source),
+		optimized, _ := oc.OptimizeReducerCallback(Read("large reducer", source, true),
 			&TypeDescriptor{Kind: "list", Length: 0, Transfer: true},
 			&TypeDescriptor{Kind: "any", Length: UnknownLength})
 		serialized := serializedTestExpr(t, env, optimized)
@@ -93,7 +93,7 @@ func TestLargeReducerAnalysisDoesNotRecurse(t *testing.T) {
 	oc := OptimizerContext{Env: env, Ome: &scope}
 	source := `(lambda (acc value) (if (and ` + strings.Repeat("(not (nil? value)) ", 90) +
 		`) (merge_assoc acc value) acc))`
-	optimized, _ := oc.OptimizeReducerCallback(Read("nested reducer analysis", source),
+	optimized, _ := oc.OptimizeReducerCallback(Read("nested reducer analysis", source, true),
 		&TypeDescriptor{Kind: "list", Length: 0, Transfer: true},
 		&TypeDescriptor{Kind: "any", Length: UnknownLength})
 	if ome.rewrite.callbackAnalyses != 0 || strings.Contains(serializedTestExpr(t, env, optimized), "merge_assoc_mut") {
@@ -709,7 +709,7 @@ func TestOptimizeKeepsRecursiveLeafProcCall(t *testing.T) {
 func TestOptimizeKeepsLeafProcWithDifferentCapturedBinding(t *testing.T) {
 	source := newOptimizerTestEnv()
 	EvalAll("leaf inline test", `(define captured_value 7)`, source)
-	proc := Eval(Optimize(Read("leaf inline test", `(lambda (value) (+ value captured_value))`), source, nil), source)
+	proc := Eval(Optimize(Read("leaf inline test", `(lambda (value) (+ value captured_value))`, true), source, nil), source)
 
 	target := newOptimizerTestEnv()
 	target.Vars[Symbol("captured_value")] = NewInt(9)
@@ -816,7 +816,7 @@ func TestClosedProcedurePreservesCapturedDataAndCallables(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			env := &Env{Vars: Vars{Symbol("captured"): captured}, Outer: &Globalenv}
 			for _, source := range []string{`(lambda () captured)`, `(lambda () (outer 1 captured))`} {
-				original := Eval(Read("closed captured data", source), env)
+				original := Eval(Read("closed captured data", source, true), env)
 				closed := CloseProcedure(original)
 				if got := Apply(closed); !Equal(got, captured) {
 					t.Fatalf("closed capture returned %s, want %s", SerializeToString(got, env), SerializeToString(captured, env))
@@ -825,7 +825,7 @@ func TestClosedProcedurePreservesCapturedDataAndCallables(t *testing.T) {
 		})
 	}
 	env := &Env{Vars: Vars{Symbol("captured"): NewSlice([]Scmer{NewString("id"), NewInt(7)})}, Outer: &Globalenv}
-	closed := CloseProcedure(Eval(Read("closed associative capture", `(lambda () (captured "id"))`), env))
+	closed := CloseProcedure(Eval(Read("closed associative capture", `(lambda () (captured "id"))`, true), env))
 	if got := Apply(closed).Int(); got != 7 {
 		t.Fatalf("closed associative callable returned %d", got)
 	}
@@ -847,11 +847,11 @@ func TestDynamicProducerCardinalityRemainsRuntimeOwned(t *testing.T) {
 		}
 	}
 	for _, source := range []string{`(produceN n)`, `(parallelN (+ n 1) f)`, `(!list p (+ n 1))`} {
-		if got := exactListLengthFromExpr(Read("unknown producer extent", source)); got != UnknownLength {
+		if got := exactListLengthFromExpr(Read("unknown producer extent", source, true)); got != UnknownLength {
 			t.Fatalf("expression %s received static cardinality %d", source, got)
 		}
 	}
-	if got := exactListLengthFromExpr(Read("literal producer extent", `(produceN 3)`)); got != 3 {
+	if got := exactListLengthFromExpr(Read("literal producer extent", `(produceN 3)`, true)); got != 3 {
 		t.Fatalf("literal producer cardinality = %d, want 3", got)
 	}
 }

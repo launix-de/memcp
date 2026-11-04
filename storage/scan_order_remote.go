@@ -10,7 +10,6 @@ import "time"
 import "context"
 import "strings"
 import "sync/atomic"
-import "encoding/json"
 import "github.com/google/uuid"
 import "github.com/launix-de/memcp/scm"
 
@@ -57,15 +56,15 @@ type shardOrderInvocation struct {
 }
 
 type remoteScanOrder struct {
-	BatchSize        int               `json:"batch_size"`
-	Columns          []schemeValue     `json:"columns"`
-	Directions       []json.RawMessage `json:"directions"`
-	AcceptColumns    []string          `json:"accept_columns,omitempty"`
-	Accept           json.RawMessage   `json:"accept,omitempty"`
-	Projected        []string          `json:"projected"`
-	PartitionColumns int               `json:"partition_columns"`
-	Offset           int               `json:"offset"`
-	Limit            int               `json:"limit"`
+	BatchSize        int           `json:"batch_size"`
+	Columns          []schemeValue `json:"columns"`
+	Directions       [][]byte      `json:"directions"`
+	AcceptColumns    []string      `json:"accept_columns,omitempty"`
+	Accept           []byte        `json:"accept,omitempty"`
+	Projected        []string      `json:"projected"`
+	PartitionColumns int           `json:"partition_columns"`
+	Offset           int           `json:"offset"`
+	Limit            int           `json:"limit"`
 }
 
 func freezeScanOrder(input *shardOrderInvocation, bindings *scm.SerializationContext) (*remoteScanOrder, error) {
@@ -107,7 +106,7 @@ func scanDirectionExpression(direction func(...scm.Scmer) scm.Scmer) (scm.Scmer,
 	return scm.NewNil(), fmt.Errorf("ordered comparison has no portable constructor")
 }
 
-func freezeScanDirection(direction func(...scm.Scmer) scm.Scmer, bindings *scm.SerializationContext) (json.RawMessage, error) {
+func freezeScanDirection(direction func(...scm.Scmer) scm.Scmer, bindings *scm.SerializationContext) ([]byte, error) {
 	expression, err := scanDirectionExpression(direction)
 	if err != nil {
 		return nil, err
@@ -260,7 +259,7 @@ func (run *orderedScanRun) page(start, count, budget int) (scm.Scmer, error) {
 		if err != nil {
 			return scm.NewNil(), err
 		}
-		data, err := json.Marshal(frozen)
+		data, err := marshalNode(frozen)
 		if err != nil {
 			return scm.NewNil(), err
 		}

@@ -151,7 +151,7 @@ const plannerTaggedAssocFoldSource = `(define planner_test_resolve_alias (lambda
 func TestOptimizeRecognizesRecursiveTaggedAssocFold(t *testing.T) {
 	env := newOptimizerTestEnv()
 	definitionOffset := strings.Index(plannerTaggedAssocFoldSource, "(define planner_test_tagged_assoc_fold")
-	definition, ok := scmerSlice(Read(t.Name(), plannerTaggedAssocFoldSource[definitionOffset:]))
+	definition, ok := scmerSlice(Read(t.Name(), plannerTaggedAssocFoldSource[definitionOffset:], true))
 	if !ok || len(definition) != 3 {
 		t.Fatal("could not parse recursive tagged assoc fold definition")
 	}

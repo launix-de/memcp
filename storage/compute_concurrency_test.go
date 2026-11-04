@@ -396,7 +396,7 @@ func TestComputeColumnCancellationKeepsSharedAcquisition(t *testing.T) {
 	cluster := &nodeCluster{self: clusterMember{ID: "memcp://" + uuid.NewString()}, ctx: context.Background()}
 	cluster.initializeManager()
 	owner := "memcp://" + uuid.NewString()
-	peer := &mosiPeer{done: make(chan struct{}), outgoing: make(chan mosiMessage, 1)}
+	peer := &mosiPeer{done: make(chan struct{}), outgoing: newMosiMailbox()}
 	cluster.view.Store(&clusterView{links: []*clusterLink{{member: clusterMember{ID: owner}, peer: peer}}})
 	shard := tbl.ActiveShards()[0]
 	resource := mosiResource{Database: tbl.schema.Name, Table: tbl.Name, Shard: shard.uuid.String()}
@@ -427,7 +427,7 @@ func TestComputeColumnCancellationKeepsSharedAcquisition(t *testing.T) {
 	if err, ok := failure.(scanError); !ok || err.r != context.Canceled {
 		t.Fatalf("preparation lost query cancellation: %v", failure)
 	}
-	if cell.ownstate.Phase() != mosi.SR || len(peer.outgoing) != 0 || shard.cacheReaders.Load() != 0 {
+	if cell.ownstate.Phase() != mosi.SR || peer.outgoing.len() != 0 || shard.cacheReaders.Load() != 0 {
 		t.Fatal("cancelled preparation changed the shared flight or retained payload")
 	}
 	select {
@@ -656,7 +656,7 @@ func TestOrderedComputeInvalidationReadsDeltaUnderShardLock(t *testing.T) {
 		{scm.NewInt(1), scm.NewInt(10)},
 	}, nil, scm.NewNil(), false, nil)
 
-	mapReduceFn := scm.Eval(scm.Read("test", "(lambda (acc $set v) (begin (define new_acc (+ acc v)) ($set new_acc) new_acc))"), &scm.Globalenv)
+	mapReduceFn := scm.Eval(scm.Read("test", "(lambda (acc $set v) (begin (define new_acc (+ acc v)) ($set new_acc) new_acc))", true), &scm.Globalenv)
 	options := scm.NewSlice([]scm.Scmer{
 		scm.NewString("sortcols"), scm.NewSlice([]scm.Scmer{scm.NewString("grp")}),
 		scm.NewString("sortdirs"), scm.NewSlice([]scm.Scmer{scm.NewBool(false)}),

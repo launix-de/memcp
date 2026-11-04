@@ -7008,7 +7008,7 @@ Patterns can be any of:
 			if len(a) > 1 {
 				filename = String(a[1])
 			}
-			return Read(filename, String(a[0]))
+			return Read(filename, String(a[0]), true)
 		},
 		Type: &TypeDescriptor{Kind: "func", Description: "parses a scheme expression into a list",
 			Params: []*TypeDescriptor{

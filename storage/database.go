@@ -1124,7 +1124,7 @@ func invalidatePersistedPlannerCodeAfterLoad(t *table) {
 		trigger := &t.Triggers[i]
 		trigger.Func = upgradePersistedTableCalls(trigger.Func)
 		if trigger.Language == "scheme" && trigger.Source != "" {
-			definition := scm.Read("stored trigger", trigger.Source)
+			definition := scm.Read("stored trigger", trigger.Source, true)
 			if restored := upgradePersistedTableCalls(definition); restored != definition {
 				trigger.Source = scm.SerializeToString(restored, &scm.Globalenv)
 			}

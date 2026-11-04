@@ -312,7 +312,7 @@ func TestJITEntryGrowsStackInPrologue(t *testing.T) {
 }
 
 func TestJITDeferredCompilationReturnsPrivateProc(t *testing.T) {
-	template := Eval(Read(t.Name(), `(lambda (value) value)`), &Globalenv)
+	template := Eval(Read(t.Name(), `(lambda (value) value)`, true), &Globalenv)
 	if !template.IsProc() || template.Proc() == nil {
 		t.Fatal("lambda did not produce a Proc template")
 	}
@@ -335,9 +335,9 @@ func TestJITDeferredCompilationReturnsPrivateProc(t *testing.T) {
 }
 
 func TestJITConcurrentSharedProcPublication(t *testing.T) {
-	dispatch := CompileJIT(Eval(Read(t.Name(), `(lambda (callback value) (callback value))`), &Globalenv), true)
+	dispatch := CompileJIT(Eval(Read(t.Name(), `(lambda (callback value) (callback value))`, true), &Globalenv), true)
 	for round := 0; round < 20; round++ {
-		template := Eval(Read(t.Name(), `(lambda (value) (list value value))`), &Globalenv)
+		template := Eval(Read(t.Name(), `(lambda (value) (list value value))`, true), &Globalenv)
 		start := make(chan struct{})
 		var workers sync.WaitGroup
 		for worker := 0; worker < 16; worker++ {
@@ -374,7 +374,7 @@ func TestJITConcurrentStackMapAppendAndGC(t *testing.T) {
 			defer workers.Done()
 			var retained []Scmer
 			for round := 0; round < 32; round++ {
-				template := Eval(Read(t.Name(), `(lambda (value) value)`), &Globalenv)
+				template := Eval(Read(t.Name(), `(lambda (value) value)`, true), &Globalenv)
 				template.Proc().Body = NewSlice([]Scmer{NewFunc(func(args ...Scmer) Scmer {
 					return jitPublicationTestGrowStack(32, args[0])
 				}), NewNthLocalVar(0)})
@@ -400,7 +400,7 @@ func TestJITCompileExistingProcWaitsForPublication(t *testing.T) {
 	_, arena, blocker := globalJITPool.Alloc(16 * 1024)
 	defer globalJITPool.Free(arena)
 	defer arena.complete(blocker, nil, nil)
-	template := Eval(Read(t.Name(), `(lambda (value) value)`), &Globalenv)
+	template := Eval(Read(t.Name(), `(lambda (value) value)`, true), &Globalenv)
 	compiled := jitCompileModeDeferred(true, template)
 	entry := compiled.Proc().Compiled
 	if entry == nil || entry.Arena != arena || entry.reservation.ready {
@@ -487,11 +487,11 @@ func TestJITParentWaitsForDeferredChildAcrossArenas(t *testing.T) {
 		t.Fatal("fixture did not cross an arena boundary")
 	}
 
-	child := Eval(Read(t.Name(), `(lambda (value) value)`), &Globalenv)
+	child := Eval(Read(t.Name(), `(lambda (value) value)`, true), &Globalenv)
 	child.Proc().Body = NewSlice([]Scmer{NewFunc(func(args ...Scmer) Scmer {
 		return jitPublicationTestGrowStack(64, args[0])
 	}), NewNthLocalVar(0)})
-	parent := Eval(Read(t.Name(), `(lambda (value) value)`), &Globalenv).Proc()
+	parent := Eval(Read(t.Name(), `(lambda (value) value)`, true), &Globalenv).Proc()
 	parent.Body = NewSlice([]Scmer{child, NewNthLocalVar(0)})
 	buf := &execBuf{ptr: parentPtr, n: jitArenaSize, arena: parentArena, reservation: parentReservation}
 	codeLen, roots, dependencies, overflow, hiddenArgs, needsStableArgs, coverage := jitCompileProcToExec(parent, buf, true)
@@ -900,7 +900,7 @@ func (c *jitCancelDuringCompile) Err() error {
 	return c.Context.Err()
 }
 func TestJITCompileCancellationReleasesProcedure(t *testing.T) {
-	expression := Optimize(Read(t.Name(), `(lambda (x) (list (+ x 1) (+ x 2) (+ x 3) (+ x 4) (+ x 5) (+ x 6)))`), &Globalenv, nil)
+	expression := Optimize(Read(t.Name(), `(lambda (x) (list (+ x 1) (+ x 2) (+ x 3) (+ x 4) (+ x 5) (+ x 6)))`, true), &Globalenv, nil)
 	proc := Eval(expression, &Globalenv)
 	base, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -942,7 +942,7 @@ func TestJITRecursiveCaptureAcrossLexicalScopes(t *testing.T) {
 							(define key (concat "local-" value))
 							(car (map (list (- value 1)) (lambda (child) (visit child)))))))))
 			(visit 3)))`
-	procedure := jitCompile(Eval(Optimize(Read(t.Name(), source), &Globalenv, nil), &Globalenv))
+	procedure := jitCompile(Eval(Optimize(Read(t.Name(), source, true), &Globalenv, nil), &Globalenv))
 	if procedure.Proc() == nil || procedure.Proc().JITCode == 0 {
 		t.Fatal("recursive closure did not compile natively")
 	}
@@ -1012,7 +1012,7 @@ func TestJITRecursiveCaptureDeepSourceMapping(t *testing.T) {
 	(if true
 		(visit query '())
 		query)))`
-	procedure := Eval(Optimize(Read(t.Name(), source), &Globalenv, nil), &Globalenv)
+	procedure := Eval(Optimize(Read(t.Name(), source, true), &Globalenv, nil), &Globalenv)
 	empty := NewSlice(nil)
 	input := NewSlice([]Scmer{NewSymbol("query-block"), NewString("s"), NewSlice([]Scmer{NewSlice([]Scmer{NewString("a"), NewString("s"), NewString("ref"), NewBool(false), NewBool(true)})}), empty, NewBool(true), empty, NewBool(true), empty, NewNil(), NewNil(), empty, empty, empty})
 	want := Apply(procedure, input, NewBool(false))

@@ -504,7 +504,7 @@ func TestReplicationSchemaTransferPreservesLocalPhysicalGeneration(t *testing.T)
 func TestReplicationDelayedInvalidationPreservesNewGrant(t *testing.T) {
 	r := replicaRecoveryFixture()
 	r.master = false
-	r.upstream = &mosiPeer{outgoing: make(chan mosiMessage, 8), done: make(chan struct{})}
+	r.upstream = &mosiPeer{outgoing: newMosiMailbox(), done: make(chan struct{})}
 	resource := mosiResource{Database: "tenant"}
 	c := r.resourceCell(resource)
 	c.ownstate.Initialize(mosi.M)
@@ -550,7 +550,7 @@ func TestReplicationAcknowledgementMatchesHandover(t *testing.T) {
 			t.Run(kind+"/"+mismatch, func(t *testing.T) {
 				r := replicaRecoveryFixture()
 				source := "slave"
-				peer := &mosiPeer{outgoing: make(chan mosiMessage, 8), done: make(chan struct{})}
+				peer := &mosiPeer{outgoing: newMosiMailbox(), done: make(chan struct{})}
 				r.peers = map[string]*mosiPeer{source: peer, "other": peer}
 				step := &replicaStep{peer: source, resource: resource, epoch: 9, content: "current", done: make(chan struct{})}
 				r.steps.Store("handover", step)
@@ -593,7 +593,7 @@ func TestReplicationRecallTransferRequiresUserProof(t *testing.T) {
 	// Knowing a recalled replica's identity must not replace authentication.
 	r := replicaRecoveryFixture()
 	resource := mosiResource{Database: "tenant"}
-	peer := &mosiPeer{outgoing: make(chan mosiMessage, 8), done: make(chan struct{})}
+	peer := &mosiPeer{outgoing: newMosiMailbox(), done: make(chan struct{})}
 	r.peers = map[string]*mosiPeer{"slave": peer}
 	step := &replicaStep{peer: "slave", resource: resource, epoch: 9, content: "current", done: make(chan struct{})}
 	r.steps.Store("handover", step)
@@ -662,7 +662,7 @@ func TestReplicationCompletedReadStillAllowsWriteUpgrade(t *testing.T) {
 func TestReplicationStaleTransferDoesNotOpenBackend(t *testing.T) {
 	r := replicaRecoveryFixture()
 	r.master = false
-	r.upstream = &mosiPeer{outgoing: make(chan mosiMessage, 8), done: make(chan struct{})}
+	r.upstream = &mosiPeer{outgoing: newMosiMailbox(), done: make(chan struct{})}
 	resource := mosiResource{Database: "tenant"}
 	r.directory.Records[r.resourceKey(resource)] = replicaRecord{Resource: resource, Epoch: 9}
 	if err := r.receivePacket("", &mosiPacket{Kind: "begin", ID: "old", Resource: resource, Epoch: 8}); err == nil {
@@ -687,7 +687,7 @@ func TestReplicationStaleTransferDoesNotOpenBackend(t *testing.T) {
 func TestReplicationReadFailureDoesNotCancelWriteUpgrade(t *testing.T) {
 	r := replicaRecoveryFixture()
 	r.master = false
-	r.upstream = &mosiPeer{outgoing: make(chan mosiMessage, 8), done: make(chan struct{})}
+	r.upstream = &mosiPeer{outgoing: newMosiMailbox(), done: make(chan struct{})}
 	resource := mosiResource{Database: "tenant"}
 	c := r.resourceCell(resource)
 	c.ownstate.Initialize(mosi.IO)
@@ -722,7 +722,7 @@ func TestReplicationReadFailureDoesNotCancelWriteUpgrade(t *testing.T) {
 func TestReplicationCurrentInvalidationAndFutureEpoch(t *testing.T) {
 	r := replicaRecoveryFixture()
 	r.master = false
-	r.upstream = &mosiPeer{outgoing: make(chan mosiMessage, 8), done: make(chan struct{})}
+	r.upstream = &mosiPeer{outgoing: newMosiMailbox(), done: make(chan struct{})}
 	resource := mosiResource{Database: "tenant"}
 	c := r.resourceCell(resource)
 	c.ownstate.Initialize(mosi.S)
@@ -739,7 +739,7 @@ func TestReplicationCurrentInvalidationAndFutureEpoch(t *testing.T) {
 		if c.ownstate.Phase() != mosi.IO {
 			t.Fatal("current invalidation retained read rights")
 		}
-		reply := <-r.upstream.outgoing
+		reply := takeMosi(r.upstream.outgoing)
 		if reply.Packet.Kind != "ack" || reply.Packet.Epoch != 9 || reply.Packet.ID != packet.ID {
 			t.Fatal("invalidation lost operation identity")
 		}
@@ -750,7 +750,7 @@ func TestReplicationInvalidationRacingNewGrant(t *testing.T) {
 	for range 100 {
 		r := replicaRecoveryFixture()
 		r.master = false
-		r.upstream = &mosiPeer{outgoing: make(chan mosiMessage, 8), done: make(chan struct{})}
+		r.upstream = &mosiPeer{outgoing: newMosiMailbox(), done: make(chan struct{})}
 		resource := mosiResource{Database: "tenant"}
 		c := r.resourceCell(resource)
 		c.ownstate.Initialize(mosi.S)
@@ -811,7 +811,7 @@ func TestReplicationReconnectPreservesCompletedRequestDomain(t *testing.T) {
 func TestReplicationRequestCompletionKeepsPublishedMapImmutable(t *testing.T) {
 	r := replicaRecoveryFixture()
 	resource := mosiResource{Database: "tenant"}
-	peer := &mosiPeer{outgoing: make(chan mosiMessage, 8), done: make(chan struct{})}
+	peer := &mosiPeer{outgoing: newMosiMailbox(), done: make(chan struct{})}
 	r.peers = map[string]*mosiPeer{"reader": peer}
 	c := r.resourceCell(resource)
 	c.ownstate.Initialize(mosi.O)
@@ -825,7 +825,8 @@ func TestReplicationRequestCompletionKeepsPublishedMapImmutable(t *testing.T) {
 	}()
 	var packet *mosiPacket
 	select {
-	case message := <-peer.outgoing:
+	case <-peer.outgoing.ready:
+		message := takeMosi(peer.outgoing)
 		packet = message.Packet
 	case <-ctx.Done():
 		t.Fatal("no invalidation sent")
@@ -863,7 +864,7 @@ func TestReplicationTransferAckBindsCapturedGeneration(t *testing.T) {
 	if _, err := r.prepareResource(resource); err != nil {
 		t.Fatal(err)
 	}
-	peer := &mosiPeer{outgoing: make(chan mosiMessage, 8), done: make(chan struct{})}
+	peer := &mosiPeer{outgoing: newMosiMailbox(), done: make(chan struct{})}
 	r.peers = map[string]*mosiPeer{"slave": peer}
 	defer close(peer.done)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -874,7 +875,8 @@ func TestReplicationTransferAckBindsCapturedGeneration(t *testing.T) {
 	}()
 	for {
 		select {
-		case message := <-peer.outgoing:
+		case <-peer.outgoing.ready:
+			message := takeMosi(peer.outgoing)
 			packet := message.Packet
 			if packet.Kind == "begin" {
 				value, exists := r.steps.Load(packet.ID)
@@ -978,7 +980,7 @@ func TestReplicationOwnReadsIgnoreOutwardHandover(t *testing.T) {
 func TestReplicationLeafGrantAndRevocationUpdateBothStates(t *testing.T) {
 	r := replicaRecoveryFixture()
 	r.master = false
-	r.upstream = &mosiPeer{outgoing: make(chan mosiMessage, 8), done: make(chan struct{})}
+	r.upstream = &mosiPeer{outgoing: newMosiMailbox(), done: make(chan struct{})}
 	resource := mosiResource{Database: "tenant"}
 	c := r.resourceCell(resource)
 	pending, _ := c.ownstate.Request(mosi.M)
@@ -1271,7 +1273,7 @@ func TestReplicationRecallWaitsForConnectionRecovery(t *testing.T) {
 			r := replicaRecoveryFixture()
 			resource := mosiResource{Database: tbl.schema.Name}
 			peerID := uuid.NewString()
-			peer := &mosiPeer{recoveryDone: make(chan struct{}), done: make(chan struct{}), outgoing: make(chan mosiMessage, 4)}
+			peer := &mosiPeer{recoveryDone: make(chan struct{}), done: make(chan struct{}), outgoing: newMosiMailbox()}
 			r.peers = map[string]*mosiPeer{peerID: peer}
 			r.restoring[resource.Database] = true
 			r.updateRecord(resource, func(record *replicaRecord) bool {
@@ -1288,7 +1290,8 @@ func TestReplicationRecallWaitsForConnectionRecovery(t *testing.T) {
 				finished <- r.coordinate(ctx, r.id, mosiPacket{Kind: "read", Resource: resource, ID: request.Flight().ID(), Sequence: 1})
 			}()
 			select {
-			case message := <-peer.outgoing:
+			case <-peer.outgoing.ready:
+				message := takeMosi(peer.outgoing)
 				cancel()
 				<-finished
 				t.Fatal("recall preceded installation of recovery reply", message.Packet)
@@ -1310,7 +1313,7 @@ func TestReplicationRecallWaitsForConnectionRecovery(t *testing.T) {
 				case <-time.After(time.Second):
 					t.Fatal("abandoned recovery did not finish")
 				}
-				if len(peer.outgoing) != 0 {
+				if peer.outgoing.len() != 0 {
 					t.Fatal("abandoned recovery sent a recall")
 				}
 				return
@@ -1335,7 +1338,8 @@ func TestReplicationRecallWaitsForConnectionRecovery(t *testing.T) {
 			}
 			close(peer.recoveryDone)
 			select {
-			case message := <-peer.outgoing:
+			case <-peer.outgoing.ready:
+				message := takeMosi(peer.outgoing)
 				if message.Packet == nil || message.Packet.Kind != "recall" || message.Packet.Epoch != 9 {
 					t.Fatal("recall captured an obsolete epoch", message.Packet)
 				}
@@ -1362,13 +1366,13 @@ func TestReplicationRecoveryReadyBelongsToConnection(t *testing.T) {
 	r.policy = scm.NewFunc(func(...scm.Scmer) scm.Scmer { return policy })
 	id, boot := uuid.NewString(), uuid.NewString()
 	old := &mosiPeer{recoveryDone: make(chan struct{})}
-	current := &mosiPeer{recoveryDone: make(chan struct{}), outgoing: make(chan mosiMessage, 1)}
+	current := &mosiPeer{recoveryDone: make(chan struct{}), outgoing: newMosiMailbox()}
 	r.peers, r.peersBoot = map[string]*mosiPeer{id: current}, map[string]string{id: boot}
-	if err := r.step(context.Background(), id, mosiPacket{Kind: "recall", ID: uuid.NewString()}); err == nil || len(current.outgoing) != 0 {
+	if err := r.step(context.Background(), id, mosiPacket{Kind: "recall", ID: uuid.NewString()}); err == nil || current.outgoing.len() != 0 {
 		t.Fatal("operation reached an unrecovered replacement connection", err)
 	}
 	request := replicaRequest{Boot: boot, User: "root", Hash: base64.StdEncoding.EncodeToString([]byte("test-password"))}
-	encoded, err := json.Marshal(request)
+	encoded, err := marshalNode(request)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1396,22 +1400,23 @@ func TestReplicationConnectionReadyAfterAllCachedBindings(t *testing.T) {
 	for incarnation := 0; incarnation < 2; incarnation++ {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
-		peer := &mosiPeer{ctx: ctx, done: make(chan struct{}), outgoing: make(chan mosiMessage, 4), pending: make(map[uint64]chan mosiMessage)}
+		peer := &mosiPeer{ctx: ctx, done: make(chan struct{}), outgoing: newMosiMailbox(), pending: make(map[uint64]chan mosiMessage)}
 		finished := make(chan error, 1)
 		reply := func(method, user string) {
 			t.Helper()
 			select {
-			case message := <-peer.outgoing:
+			case <-peer.outgoing.ready:
+				message := takeMosi(peer.outgoing)
 				var request replicaRequest
-				if err := json.Unmarshal(message.Data, &request); err != nil {
+				if err := unmarshalNode(message.Data, &request); err != nil {
 					t.Fatal(err)
 				}
 				if message.Method != method || request.User != user {
 					t.Fatal("unexpected recovery order", message.Method, request.User)
 				}
-				data, err := json.Marshal(replicaRecovery{Boot: masterBoot})
+				data, err := marshalNode(replicaRecovery{Boot: masterBoot})
 				if method == "hello_done" {
-					data, err = json.Marshal(true)
+					data, err = marshalNode(true)
 				}
 				if err != nil {
 					t.Fatal(err)
@@ -1431,7 +1436,8 @@ func TestReplicationConnectionReadyAfterAllCachedBindings(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-		case message := <-peer.outgoing:
+		case <-peer.outgoing.ready:
+			message := takeMosi(peer.outgoing)
 			t.Fatal("connection became ready before binding b", message.Method)
 		case <-ctx.Done():
 			t.Fatal("first binding did not complete")
@@ -1445,7 +1451,7 @@ func TestReplicationConnectionReadyAfterAllCachedBindings(t *testing.T) {
 		if err := r.recoverConnection(peer, "a", replicaAuth{}); err != nil {
 			t.Fatal(err)
 		}
-		if len(peer.outgoing) != 0 {
+		if peer.outgoing.len() != 0 {
 			t.Fatal("completed binding was sent again")
 		}
 	}

@@ -59,7 +59,7 @@ func TestJITPreservesAdjacentScanBoundaryResults(t *testing.T) {
 		(list 369436443803648
 			(jit_test_scan_boundary "equal" "database" 0 0 true true "" false)
 			(jit_test_scan_boundary "equal" "name" 1 1 true true "" false)))`
-	proc := scm.Eval(scm.Optimize(scm.Read(t.Name(), source), &env, nil), &env)
+	proc := scm.Eval(scm.Optimize(scm.Read(t.Name(), source, true), &env, nil), &env)
 	interpreted := scm.Apply(proc).Slice()
 	for index := 1; index < len(interpreted); index++ {
 		if !interpreted[index].IsCustom(TagScanBoundary) {
@@ -93,7 +93,7 @@ func TestJITPreservesAdjacentScanBoundaryResults(t *testing.T) {
 			(list 369436443803648
 				(jit_test_scan_boundary "equal" "database" 0 0 true true "" false)
 				(jit_test_scan_boundary "equal" "name" 1 1 true true "" false))))`
-	consumerOptimized := scm.Optimize(scm.Read(t.Name()+" consumer", consumerSource), &env, nil)
+	consumerOptimized := scm.Optimize(scm.Read(t.Name()+" consumer", consumerSource, true), &env, nil)
 	if serialized := scm.SerializeToString(consumerOptimized, &env); !strings.Contains(serialized, "(!list ") {
 		t.Fatalf("same-goroutine noescape list was not stack-lowered: %s", serialized)
 	}
@@ -128,7 +128,7 @@ func TestJITPreservesAdjacentScanBoundaryResults(t *testing.T) {
 			(list 369436443803648
 				(jit_test_scan_boundary "equal" "database" 0 0 true true "" false)
 				(jit_test_scan_boundary "equal" "name" 1 1 true true "" false))))`
-	parallelOptimized := scm.Optimize(scm.Read(t.Name()+" parallel", parallelSource), &env, nil)
+	parallelOptimized := scm.Optimize(scm.Read(t.Name()+" parallel", parallelSource, true), &env, nil)
 	if serialized := scm.SerializeToString(parallelOptimized, &env); strings.Contains(serialized, "(!list ") {
 		t.Fatalf("cross-goroutine noescape list was stack-lowered: %s", serialized)
 	}

@@ -6,6 +6,7 @@ package scm
 
 import "fmt"
 import "errors"
+import "sync"
 import "context"
 
 // A native callback retains process-local state, such as a connection writer.
@@ -16,6 +17,33 @@ type clusterCallback struct {
 	ctx         context.Context
 	endpoint    Handle
 	batchResult *Scmer
+	output      *callbackOutputQueue
+}
+
+// Serialize access to an imperative sink by admission, without executing the
+// callback or its I/O under a publication lock. Network queues stay independent.
+type callbackOutputQueue struct {
+	mu   sync.Mutex
+	tail chan struct{}
+}
+
+func (queue *callbackOutputQueue) enter() func() {
+	done := make(chan struct{})
+	queue.mu.Lock()
+	previous := queue.tail
+	queue.tail = done
+	queue.mu.Unlock()
+	if previous != nil {
+		<-previous
+	}
+	return func() {
+		close(done)
+		queue.mu.Lock()
+		if queue.tail == done {
+			queue.tail = nil
+		}
+		queue.mu.Unlock()
+	}
 }
 
 var clusterCallbackType = RegisterCallableType(&TypeDescriptor{
@@ -28,6 +56,9 @@ var clusterCallbackType = RegisterCallableType(&TypeDescriptor{
 // remote invocations may send bounded batches; nil retains synchronous calls.
 func NewClusterCallback(ctx context.Context, call func(...Scmer) Scmer, batchResult *Scmer) Scmer {
 	callback := &clusterCallback{call: call, ctx: ctx, batchResult: batchResult}
+	if batchResult != nil {
+		callback.output = new(callbackOutputQueue)
+	}
 	return NewClusterFunc(call, callback, clusterCallbackType)
 }
 
@@ -101,6 +132,14 @@ func (callback *clusterCallback) HandleClusterRequest(ctx context.Context, reque
 		if callback.batchResult == nil {
 			return NewNil(), fmt.Errorf("callback does not accept output batches")
 		}
+		release := callback.output.enter()
+		defer release()
+		if err := ctx.Err(); err != nil {
+			return NewNil(), err
+		}
+		if err := callback.ctx.Err(); err != nil {
+			return NewNil(), err
+		}
 		for _, args := range request.Arguments {
 			callback.call(args.Slice()...)
 		}
@@ -130,92 +169,134 @@ func (callback *clusterCallback) BindClusterInvocation(scope Scmer) (Scmer, erro
 	return bound.value(), nil
 }
 
-// One invocation owns a bounded output queue and its sender. Producers only
-// publish complete argument tuples; the sender owns batching and network I/O.
-// Query cleanup closes production and joins before releasing captured state.
+// Producers publish argument tuples; only producer admission may park at the
+// bounded credit window. A send never waits for its return handle. Completion
+// handlers return credits and wake workers; cleanup joins every accepted call.
 func (callback *clusterCallback) bindOutput(ctx context.Context, owner interface{ RetainQueryWork(func()) bool }) (Scmer, error) {
 	const batchSize = 64
-	queue := make(chan Scmer, batchSize)
-	done := make(chan struct{})
+	const window = 4
+	var mu sync.Mutex
+	batch := make([]Scmer, 0, batchSize)
+	pending := 0
+	closing := false
 	var failure any
-	go func() {
-		defer close(done)
-		defer func() { failure = recover() }()
-		batch := make([]Scmer, 0, batchSize)
-		var send func([]Scmer)
-		send = func(values []Scmer) {
-			var err error
-			func() {
-				defer func() {
-					if failure := recover(); failure != nil {
-						if e, ok := failure.(error); ok {
-							err = e
-						} else {
-							panic(failure)
-						}
+	wake := make(chan struct{})
+	// Broadcast credits: coalescing a single notification could strand parallel
+	// producers even when several credits became available together.
+	signal := func() { close(wake); wake = make(chan struct{}) }
+	var send func([]Scmer)
+	send = func(values []Scmer) {
+		for {
+			mu.Lock()
+			if failure != nil {
+				err := failure
+				mu.Unlock()
+				panic(err)
+			}
+			if pending < window {
+				pending++
+				mu.Unlock()
+				break
+			}
+			ready := wake
+			mu.Unlock()
+			select {
+			case <-ready:
+			case <-ctx.Done():
+				panic(ctx.Err())
+			}
+		}
+		receiver := NewResultReceiver()
+		receiver.onResult = func(value Scmer) {
+			mu.Lock()
+			pending--
+			if value.GetTag() == tagAny {
+				if err, ok := value.Any().(*handleFailure); ok && failure == nil {
+					failure = err
+				}
+			}
+			signal()
+			mu.Unlock()
+		}
+		var err error
+		func() {
+			defer func() {
+				if p := recover(); p != nil {
+					if e, ok := p.(error); ok {
+						err = e
+					} else {
+						err = fmt.Errorf("%v", p)
 					}
-				}()
-				callClosure(ctx, callback.endpoint, []Scmer{NewSlice(values)})
+				}
 			}()
+			callback.endpoint.Handle(NewSlice([]Scmer{NewSlice([]Scmer{NewSlice(values)}), NewAny(receiver)}))
+		}()
+		if err != nil {
+			receiver.Close()
 			if errors.Is(err, ErrClusterRequestTooLarge) && len(values) > 1 {
 				middle := len(values) / 2
 				send(values[:middle])
 				send(values[middle:])
 				return
 			}
-			if err != nil {
-				panic(err)
-			}
+			panic(err)
 		}
-		flush := func() {
-			if len(batch) == 0 {
+	}
+	finish := func() {
+		mu.Lock()
+		closing = true
+		tail := batch
+		batch = nil
+		mu.Unlock()
+		var sendFailure any
+		func() {
+			defer func() { sendFailure = recover() }()
+			if ctx.Err() == nil && len(tail) > 0 {
+				send(tail)
+			}
+		}()
+		for {
+			mu.Lock()
+			left, err, ready := pending, failure, wake
+			mu.Unlock()
+			if left == 0 {
+				if sendFailure != nil {
+					panic(sendFailure)
+				}
+				if err != nil {
+					panic(err)
+				}
 				return
 			}
-			send(batch)
-			clear(batch)
-			batch = batch[:0]
-		}
-		for {
-			select {
-			case args, ok := <-queue:
-				if !ok {
-					if ctx.Err() == nil {
-						flush()
-					}
-					return
-				}
-				batch = append(batch, args)
-				if len(batch) == batchSize {
-					flush()
-				}
-			case <-ctx.Done():
-				panic(ctx.Err())
-			}
-		}
-	}()
-	finish := func() {
-		close(queue)
-		<-done
-		if failure != nil {
-			panic(failure)
+			<-ready
 		}
 	}
 	if !owner.RetainQueryWork(finish) {
-		finish()
 		return NewNil(), fmt.Errorf("output invocation has already finished")
 	}
 	result := *callback.batchResult
 	call := func(args ...Scmer) Scmer {
-		value := NewSlice(append([]Scmer(nil), args...))
-		select {
-		case queue <- value:
-			return result
-		case <-done:
-			if failure != nil {
-				panic(failure)
+		tuple := NewSlice(append([]Scmer(nil), args...))
+		mu.Lock()
+		if closing || failure != nil {
+			err := failure
+			mu.Unlock()
+			if err != nil {
+				panic(err)
 			}
 			panic("output invocation has finished")
 		}
+		batch = append(batch, tuple)
+		var ready []Scmer
+		if len(batch) == batchSize {
+			ready = batch
+			batch = make([]Scmer, 0, batchSize)
+		}
+		mu.Unlock()
+		if ready != nil {
+			send(ready)
+		}
+		return result
 	}
 	return NewClusterFunc(call, &clusterCallback{endpoint: callback.endpoint, ctx: ctx, batchResult: callback.batchResult}, clusterCallbackType), nil
 }

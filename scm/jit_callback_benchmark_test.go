@@ -28,7 +28,7 @@ func compileJITCallbackBenchmark(b *testing.B, source string, inline bool) Scmer
 	old := declarations["map"].Type.JITInlineCallbacks
 	declarations["map"].Type.JITInlineCallbacks = inline
 	defer func() { declarations["map"].Type.JITInlineCallbacks = old }()
-	proc := Eval(Optimize(Read(b.Name(), source), &Globalenv, nil), &Globalenv)
+	proc := Eval(Optimize(Read(b.Name(), source, true), &Globalenv, nil), &Globalenv)
 	compiled := jitCompile(proc)
 	if compiled.GetTag() != tagProc || compiled.Proc().Compiled == nil {
 		b.Fatal("callback benchmark did not compile")
@@ -70,7 +70,7 @@ func compileJITRuntimeReduceBenchmark(tb testing.TB) Scmer {
 	previous := declaration.RetainsCallArgs
 	declaration.RetainsCallArgs = true
 	defer func() { declaration.RetainsCallArgs = previous }()
-	proc := Eval(Optimize(Read(tb.Name(), `(lambda (callback values) (reduce values callback 0))`), &Globalenv, nil), &Globalenv)
+	proc := Eval(Optimize(Read(tb.Name(), `(lambda (callback values) (reduce values callback 0))`, true), &Globalenv, nil), &Globalenv)
 	compiled := jitCompile(proc)
 	if compiled.GetTag() != tagProc || compiled.Proc().Compiled == nil {
 		tb.Fatal("runtime callback benchmark did not compile")
@@ -85,7 +85,7 @@ func TestJITRuntimeReduceCallbacksUseDirectBoundary(t *testing.T) {
 	}
 	values := NewSlice([]Scmer{NewInt(1), NewInt(2), NewInt(3), NewInt(4)})
 	callbacks := []Scmer{
-		jitCompile(Eval(Read(t.Name(), `(lambda (acc value) (+ acc value))`), &Globalenv)),
+		jitCompile(Eval(Read(t.Name(), `(lambda (acc value) (+ acc value))`, true), &Globalenv)),
 		NewFunc(func(args ...Scmer) Scmer {
 			runtime.GC()
 			_ = growJITCallbackStack(64)
@@ -103,14 +103,14 @@ func TestJITRuntimeReduceCallbacksPreserveLiveValues(t *testing.T) {
 	if !jitEnabled {
 		t.Skip("requires GOEXPERIMENT=jit")
 	}
-	proc := Eval(Optimize(Read(t.Name(), `(lambda (callback values a b c d e f) (+ a b c d e f (reduce values callback 0)))`), &Globalenv, nil), &Globalenv)
+	proc := Eval(Optimize(Read(t.Name(), `(lambda (callback values a b c d e f) (+ a b c d e f (reduce values callback 0)))`, true), &Globalenv, nil), &Globalenv)
 	compiled := jitCompile(proc)
 	if compiled.GetTag() != tagProc || compiled.Proc().Compiled == nil {
 		t.Fatal("runtime callback live-value test did not compile")
 	}
 	values := NewSlice([]Scmer{NewInt(1), NewInt(2), NewInt(3), NewInt(4)})
 	callbacks := []Scmer{
-		jitCompile(Eval(Read(t.Name(), `(lambda (acc value) (+ acc value))`), &Globalenv)),
+		jitCompile(Eval(Read(t.Name(), `(lambda (acc value) (+ acc value))`, true), &Globalenv)),
 		NewFunc(func(args ...Scmer) Scmer {
 			runtime.GC()
 			_ = growJITCallbackStack(64)
@@ -136,7 +136,7 @@ func BenchmarkJITRuntimeReduceCallback(b *testing.B) {
 		name  string
 		value Scmer
 	}{
-		{"jit_proc", jitCompile(Eval(Read(b.Name(), `(lambda (acc value) (+ acc value))`), &Globalenv))},
+		{"jit_proc", jitCompile(Eval(Read(b.Name(), `(lambda (acc value) (+ acc value))`, true), &Globalenv))},
 		{"go_func", NewFunc(func(args ...Scmer) Scmer { return NewInt(args[0].Int() + args[1].Int()) })},
 	}
 	for _, callback := range callbacks {
@@ -163,8 +163,8 @@ func BenchmarkJITLoopBuiltins(b *testing.B) {
 		valuesSlice[index] = NewInt(int64(index))
 	}
 	values := NewSlice(valuesSlice)
-	forCondition := jitCompile(Eval(Read(b.Name(), `(lambda (value) (< value 128))`), &Globalenv))
-	forStep := jitCompile(Eval(Read(b.Name(), `(lambda (value) (list (+ value 1)))`), &Globalenv))
+	forCondition := jitCompile(Eval(Read(b.Name(), `(lambda (value) (< value 128))`, true), &Globalenv))
+	forStep := jitCompile(Eval(Read(b.Name(), `(lambda (value) (list (+ value 1)))`, true), &Globalenv))
 	cases := []struct {
 		name   string
 		source string
@@ -179,7 +179,7 @@ func BenchmarkJITLoopBuiltins(b *testing.B) {
 	}
 	for _, benchmark := range cases {
 		b.Run(benchmark.name, func(b *testing.B) {
-			proc := Eval(Read(b.Name(), benchmark.source), &Globalenv)
+			proc := Eval(Read(b.Name(), benchmark.source, true), &Globalenv)
 			compiled := jitCompile(proc)
 			if compiled.GetTag() != tagProc || compiled.Proc().Compiled == nil {
 				b.Fatal("loop benchmark did not compile")

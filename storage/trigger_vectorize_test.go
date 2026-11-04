@@ -28,7 +28,7 @@ func TestEvaluateTriggerPlanPreservesCachedAST(t *testing.T) {
 		(define resultrow (lambda (row)
 			(promise "once" (nth row 1) "scalar subselect returned more than one row")))
 		(if NEW (resultrow (list 0 (get_assoc NEW "value"))) nil)
-		(promise "value")))`)
+		(promise "value")))`, true)
 	want := scm.String(plan)
 
 	first := evaluateTriggerPlan(plan)

@@ -42,7 +42,7 @@ func countOptimizerCalls(expression Scmer, name string) int {
 func optimizeCSETestProc(t *testing.T, source string) Scmer {
 	t.Helper()
 	environment := newOptimizerTestEnv()
-	return Eval(Optimize(Read(t.Name(), source), environment, nil), environment)
+	return Eval(Optimize(Read(t.Name(), source, true), environment, nil), environment)
 }
 
 func TestOptimizeSharesFoldableCallAcrossBeginExpressions(t *testing.T) {
@@ -155,7 +155,7 @@ func BenchmarkFoldableCSEUpperClassifiers(b *testing.B) {
 			(define direct (equal? (toUpper value) "SELECT * FROM ITEMS"))
 			(define guarded (and enabled (equal? (toUpper value) "SELECT * FROM ITEMS")))
 			(define diagnostic (equal? (toUpper value) "EXPLAIN COMPILE SELECT * FROM ITEMS"))
-			(list direct guarded diagnostic)))`), environment, nil), environment)
+			(list direct guarded diagnostic)))`, true), environment, nil), environment)
 	fn := serialTestCallable(proc)
 	value := NewString("select * from items")
 	enabled := NewBool(true)
@@ -169,7 +169,7 @@ func BenchmarkFoldableCSEUpperClassifiers(b *testing.B) {
 func BenchmarkOptimizedBooleanRegexMatch(b *testing.B) {
 	environment := newOptimizerTestEnv()
 	proc := Eval(Optimize(Read(b.Name(), `(lambda (value)
-		(match value (regex "^\\s*SELECT\\b" _) true _ false))`), environment, nil), environment)
+		(match value (regex "^\\s*SELECT\\b" _) true _ false))`, true), environment, nil), environment)
 	fn := serialTestCallable(proc)
 	value := NewString("SELECT * FROM items WHERE id = 42")
 	b.ReportAllocs()

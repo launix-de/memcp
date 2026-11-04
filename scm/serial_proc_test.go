@@ -28,7 +28,7 @@ func serialTestCallable(value Scmer) func(...Scmer) Scmer {
 
 func preparedTestProc(t testing.TB, source string) Scmer {
 	t.Helper()
-	return Eval(Optimize(Read("serial proc test", source), &Globalenv, nil), &Globalenv)
+	return Eval(Optimize(Read("serial proc test", source, true), &Globalenv, nil), &Globalenv)
 }
 
 func TestPrepareSerialProcShapes(t *testing.T) {
@@ -184,7 +184,7 @@ func benchmarkJITGoFrameBridge(native func(...Scmer) Scmer, args []Scmer) Scmer 
 
 func TestPrepareSerialProcNativeForwardMatchesInterpreterAdapter(t *testing.T) {
 	source := preparedTestProc(t, "(lambda (acc row) (append acc row))")
-	empty := Eval(Read("serial proc test", "'()"), &Globalenv)
+	empty := Eval(Read("serial proc test", "'()", true), &Globalenv)
 	row := NewSlice([]Scmer{NewInt(1)})
 	baseline := Apply(source, empty, row)
 	prepared := PrepareSerialProc(source)
@@ -251,8 +251,8 @@ func TestPrepareSerialProcTraversesExplicitOuterScope(t *testing.T) {
 }
 
 func TestEqualProceduresUsesIdentity(t *testing.T) {
-	first := Eval(Read("procedure equality test", "(lambda (x) x)"), &Globalenv)
-	second := Eval(Read("procedure equality test", "(lambda (x) (+ x 1))"), &Globalenv)
+	first := Eval(Read("procedure equality test", "(lambda (x) x)", true), &Globalenv)
+	second := Eval(Read("procedure equality test", "(lambda (x) (+ x 1))", true), &Globalenv)
 	if !Equal(first, first) {
 		t.Fatal("a procedure must equal itself")
 	}

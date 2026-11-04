@@ -8,7 +8,6 @@ import "fmt"
 import "bytes"
 import "context"
 import "sync/atomic"
-import "encoding/json"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/memcp/storage/mosi"
 
@@ -90,9 +89,9 @@ func (cluster *nodeCluster) reserveIDs(ctx context.Context, request clusterIDReq
 	return reply, nil
 }
 
-func (cluster *nodeCluster) handleIDReservation(ctx context.Context, data json.RawMessage) (any, error) {
+func (cluster *nodeCluster) handleIDReservation(ctx context.Context, data []byte) (any, error) {
 	var request clusterIDRequest
-	if err := json.Unmarshal(data, &request); err != nil {
+	if err := unmarshalNode(data, &request); err != nil {
 		return nil, err
 	}
 	return cluster.reserveIDs(ctx, request)
@@ -164,7 +163,7 @@ type remoteInsertTask struct {
 	Columns          []string              `json:"columns"`
 	Rows             schemeValue           `json:"rows"`
 	CollisionColumns []string              `json:"collision_columns"`
-	Collision        json.RawMessage       `json:"collision"`
+	Collision        []byte                `json:"collision"`
 	MergeNull        bool                  `json:"merge_null"`
 	Transaction      *scm.ClusterReference `json:"transaction,omitempty"`
 }
@@ -300,7 +299,7 @@ func (t *table) sendInsert(peer *mosiPeer, columns []string, rows [][]scm.Scmer,
 	if err != nil {
 		panic(err)
 	}
-	request := remoteInsertTask{Version: scanWireVersion, Database: t.schema.Name, Table: t.Name, Schema: t.filterSchemaFingerprint(), Columns: columns, Rows: schemeValue(encoded), CollisionColumns: collisionCols, Collision: json.RawMessage(callback), MergeNull: mergeNull}
+	request := remoteInsertTask{Version: scanWireVersion, Database: t.schema.Name, Table: t.Name, Schema: t.filterSchemaFingerprint(), Columns: columns, Rows: schemeValue(encoded), CollisionColumns: collisionCols, Collision: []byte(callback), MergeNull: mergeNull}
 	if tx != nil {
 		view, err := scm.ClusterObjectValue(tx.transactionState, ctx, scm.ClusterRequest{Method: "view"})
 		if err != nil {

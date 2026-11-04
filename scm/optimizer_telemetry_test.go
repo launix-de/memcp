@@ -32,14 +32,14 @@ func TestTreeNodeCountPreservesOccurrenceMetrics(t *testing.T) {
 		(match node
 			(cons head tail) (+ 1 (tree_node_count head)
 				(reduce tail (lambda (total item) (+ total (tree_node_count item))) 0))
-			_ 1))`), &Globalenv)
+			_ 1))`, true), &Globalenv)
 	if got := Apply(legacy, root); got.Int() != count.Int() {
 		t.Fatalf("native tree metric changed Scheme traversal semantics: %s != %s", String(count), String(got))
 	}
 }
 
 func TestOptimizeBuiltinHookFoldsQuotedCode(t *testing.T) {
-	expr := Read("optimize builtin hook", "(optimize '(+ 1 2))")
+	expr := Read("optimize builtin hook", "(optimize '(+ 1 2))", true)
 	optimized := Optimize(expr, &Globalenv, nil)
 	result := Eval(optimized, &Globalenv)
 	if ToInt(result) != 3 {
@@ -48,7 +48,7 @@ func TestOptimizeBuiltinHookFoldsQuotedCode(t *testing.T) {
 }
 
 func TestOptimizeTelemetryCallbackIsNotRunDuringOuterOptimization(t *testing.T) {
-	expr := Read("optimize telemetry hook", `(optimize '(+ 1 2) (lambda (stats) (error "premature telemetry")))`)
+	expr := Read("optimize telemetry hook", `(optimize '(+ 1 2) (lambda (stats) (error "premature telemetry")))`, true)
 	optimized := Optimize(expr, &Globalenv, nil)
 	if serialized := serializedTestExpr(t, &Globalenv, optimized); !strings.Contains(serialized, "(optimize ") {
 		t.Fatalf("telemetry call was folded before runtime: %s", serialized)
@@ -71,7 +71,7 @@ func TestTryFoldRawExpressions(t *testing.T) {
 	} {
 		t.Run(tc.code, func(t *testing.T) {
 			for _, optimize := range []bool{false, true} {
-				expr := Read("tryfold", "(tryfold (quote "+tc.code+"))")
+				expr := Read("tryfold", "(tryfold (quote "+tc.code+"))", true)
 				if optimize {
 					expr = Optimize(expr, &Globalenv, nil)
 				}
@@ -94,7 +94,7 @@ func TestTryFoldFailurePreservesAST(t *testing.T) {
 		"(begin (error \"must evaluate first\") 7)",
 	} {
 		t.Run(code, func(t *testing.T) {
-			expr := Read("tryfold failure", code)
+			expr := Read("tryfold failure", code, true)
 			before := serializedTestExpr(t, &Globalenv, expr)
 			func() {
 				defer func() {
@@ -107,7 +107,7 @@ func TestTryFoldFailurePreservesAST(t *testing.T) {
 			if after := serializedTestExpr(t, &Globalenv, expr); after != before {
 				t.Fatalf("failed folding changed AST: before %s, after %s", before, after)
 			}
-			fallback := Read("tryfold fallback", "(try (lambda () (tryfold (quote "+code+"))) (lambda (_error) \"original\"))")
+			fallback := Read("tryfold fallback", "(try (lambda () (tryfold (quote "+code+"))) (lambda (_error) \"original\"))", true)
 			if got := String(Eval(fallback, &Globalenv)); got != "original" {
 				t.Fatalf("try did not recover folding failure: %s", got)
 			}

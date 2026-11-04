@@ -134,7 +134,7 @@ func TestFilterFeedbackConcurrentPublication(t *testing.T) {
 
 func feedbackTestCompile(t testing.TB, body string) (scm.Scmer, []scm.Scmer, scm.Scmer) {
 	t.Helper()
-	filter := scm.Read("feedback-test", "(lambda (x) "+body+")")
+	filter := scm.Read("feedback-test", "(lambda (x) "+body+")", true)
 	schema, values, _ := compileScanAccess(scm.NewSlice([]scm.Scmer{scm.NewString("c0")}), filter)
 	if !scanFeedbackMetadata(schema.Slice()).IsNil() {
 		for i := range values {
@@ -238,12 +238,12 @@ func TestFilterFeedbackUniquePointRetainsPlanStatistics(t *testing.T) {
 
 func TestFilterFeedbackOnlyCompilationDoesNotEvaluateBoundaries(t *testing.T) {
 	for _, body := range []string{`(equal? x (print "must not run"))`, `(equal? x (outer 1 x))`} {
-		schema, bindings := feedbackTestAccess(scm.NewSlice([]scm.Scmer{scm.NewString("c0")}), scm.Read("feedback-test", "(lambda (x) "+body+")"))
+		schema, bindings := feedbackTestAccess(scm.NewSlice([]scm.Scmer{scm.NewString("c0")}), scm.Read("feedback-test", "(lambda (x) "+body+")", true))
 		if len(schema.Slice()) != 0 || len(bindings) != 0 {
 			t.Fatalf("unsafe statistical compilation: %s", body)
 		}
 	}
-	filter := scm.Read("feedback-test", `(lambda (different_alias) (strlike different_alias "%abc%" "utf8mb4_general_ci"))`)
+	filter := scm.Read("feedback-test", `(lambda (different_alias) (strlike different_alias "%abc%" "utf8mb4_general_ci"))`, true)
 	cols := scm.NewSlice([]scm.Scmer{scm.NewString("c0")})
 	schema, values := feedbackTestAccess(cols, filter)
 	physical, bound, _ := feedbackTestCompile(t, `(strlike x "%abc%" "utf8mb4_general_ci")`)
@@ -323,7 +323,7 @@ func TestCompleteRecSetFilterFeedback(t *testing.T) {
 func TestFilterFeedbackColdDatabaseRestart(t *testing.T) {
 	tbl, persistence := createDurabilityTestTable(t, "feedback_restart", 1000)
 	RebuildTable(tbl, true, false)
-	filter := scm.Read("feedback-restart", `(lambda (x) (< x 124))`)
+	filter := scm.Read("feedback-restart", `(lambda (x) (< x 124))`, true)
 	schema, values, _ := compileScanAccess(scm.NewSlice([]scm.Scmer{scm.NewString("id")}), filter)
 	for i := range values {
 		values[i] = scm.Eval(values[i], &scm.Globalenv)

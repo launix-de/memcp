@@ -170,7 +170,7 @@ func TestProcedureCatalogDDLCheckpointReloadAndReplace(t *testing.T) {
 
 func TestProcedureCompilerUsesOrdinarySchemeClosureAndJITBoundary(t *testing.T) {
 	registerTriggerLanguage("procedure-expression-test", scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
-		return scm.Eval(scm.Read("stored procedure source", a[0].String()), &scm.Globalenv)
+		return scm.Eval(scm.Read("stored procedure source", a[0].String(), true), &scm.Globalenv)
 	}))
 	definition := &ProcedureDescription{Name: "add", Source: "(lambda (value) (+ value 7))", Language: "procedure-expression-test"}
 	callable := definition.callable("generic")

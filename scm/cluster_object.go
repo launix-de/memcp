@@ -5,11 +5,11 @@ SPDX-License-Identifier: GPL-3.0-or-later
 package scm
 
 import "fmt"
+import "bytes"
 import "sync"
 import "errors"
 import "context"
 import "unsafe"
-import "encoding/json"
 
 // A local encoding failure before dispatch. It is safe to split an unsent
 // output batch; a remote error or ambiguous completion must never be replayed.
@@ -48,12 +48,12 @@ type ClusterRequest struct {
 // lease generation. A late old GC message cannot revoke a newer Go lifetime.
 // View is an immutable invocation view, not the shared endpoint's mutable state.
 type ClusterReference struct {
-	URI         string          `json:"uri"`
-	Owner       string          `json:"owner"`
-	Incarnation string          `json:"incarnation"`
-	Token       string          `json:"token"`
-	Type        string          `json:"type"`
-	View        json.RawMessage `json:"view"`
+	URI         string `json:"uri"`
+	Owner       string `json:"owner"`
+	Incarnation string `json:"incarnation"`
+	Token       string `json:"token"`
+	Type        string `json:"type"`
+	View        []byte `json:"view"`
 }
 
 // ClusterHandle is owned by the imported value, not by a transport registry.
@@ -127,6 +127,7 @@ type SerializationContext struct {
 	root         *SerializationContext
 	mu           sync.Mutex
 	views        map[ClusterObject]*clusterViewCapture
+	literals     map[Scmer]*clusterLiteralCapture
 	demands      map[ClusterObject]map[Scmer]struct{}
 }
 
@@ -199,11 +200,12 @@ func (bindings *SerializationContext) ReferenceExpression(object ClusterObject) 
 	if err != nil {
 		return NewNil(), err
 	}
-	data, err := json.Marshal(ref)
-	if err != nil {
-		return NewNil(), err
-	}
-	return NewSlice([]Scmer{NewSymbol("cluster_object"), NewString(string(data))}), nil
+	return ClusterReferenceExpression(ref), nil
+}
+
+// ClusterReferenceExpression reconstructs a previously registered reference.
+func ClusterReferenceExpression(ref ClusterReference) Scmer {
+	return NewSlice([]Scmer{NewSymbol("cluster_object"), NewString(ref.URI), NewString(ref.Owner), NewString(ref.Incarnation), NewString(ref.Token), NewString(ref.Type), NewString(string(ref.View))})
 }
 
 // ProcedureDecode is invocation-owned. Reconstruction is completed before
@@ -353,29 +355,31 @@ func resolveProcedureObjectTree(value Scmer, captures map[int64]*serializedCaptu
 		handle, err := resolveHandle(items[1].String(), items[2].String(), uint64(items[3].Int()))
 		return NewAny(handle), err
 	}
-	if len(items) == 2 && scmerIsSymbol(items[0], "cluster_object") {
+	if len(items) == 7 && scmerIsSymbol(items[0], "cluster_object") {
 		if resolve == nil {
 			return NewNil(), fmt.Errorf("cluster object requires a reconstruction context")
 		}
-		var reference ClusterReference
-		if !items[1].WithoutSourceInfo().IsString() {
-			return NewNil(), fmt.Errorf("invalid cluster object reference")
-		}
-		if err := json.Unmarshal([]byte(items[1].String()), &reference); err != nil {
-			return NewNil(), err
-		}
+		reference := ClusterReference{URI: items[1].String(), Owner: items[2].String(), Incarnation: items[3].String(), Token: items[4].String(), Type: items[5].String(), View: []byte(items[6].String())}
 		return resolve(reference)
 	}
 	if len(items) > 0 && scmerIsSymbol(items[0], "quote") {
 		return value, nil
 	}
-	result := make([]Scmer, len(items))
+	var result []Scmer
 	for i, item := range items {
-		var err error
-		result[i], err = resolveProcedureObjectTree(item, captures, resolveHandle, resolve)
+		resolved, err := resolveProcedureObjectTree(item, captures, resolveHandle, resolve)
 		if err != nil {
 			return NewNil(), err
 		}
+		if resolved != item && result == nil {
+			result = append([]Scmer(nil), items...)
+		}
+		if result != nil {
+			result[i] = resolved
+		}
+	}
+	if result == nil {
+		return value, nil
 	}
 	return NewSlice(result), nil
 }
@@ -395,16 +399,13 @@ func initClusterObjects() {
 		if ClusterObjectResolver == nil {
 			panic("cluster object resolver is unavailable")
 		}
-		var ref ClusterReference
-		if err := json.Unmarshal([]byte(a[0].String()), &ref); err != nil {
-			panic(err)
-		}
+		ref := ClusterReference{URI: a[0].String(), Owner: a[1].String(), Incarnation: a[2].String(), Token: a[3].String(), Type: a[4].String(), View: []byte(a[5].String())}
 		value, err := ClusterObjectResolver(ref)
 		if err != nil {
 			panic(err)
 		}
 		return value
-	}, Type: &TypeDescriptor{Kind: "func", Params: []*TypeDescriptor{{Kind: "string", Label: "reference"}}, Return: &TypeDescriptor{Kind: "any"}}})
+	}, Type: &TypeDescriptor{Kind: "func", Params: []*TypeDescriptor{{Kind: "string", Variadic: true}}, Return: &TypeDescriptor{Kind: "any"}}})
 
 }
 
@@ -413,13 +414,9 @@ func init() { RegisterClusterObjectType("session", newClusterSession) }
 // SerializedClusterReferences inspects the serializer's inert source envelope.
 // It never evaluates source and ignores ordinary quoted program data.
 func SerializedClusterReferences(data []byte) []ClusterReference {
-	var envelope struct {
-		Source string `json:"source"`
-	}
-	if json.Unmarshal(data, &envelope) != nil {
-		if json.Unmarshal(data, &envelope.Source) != nil {
-			return nil
-		}
+	source := string(data)
+	if len(data) > 0 && data[0] == procedureWireVersion {
+		source = string(data[1:])
 	}
 	var result []ClusterReference
 	var walk func(Scmer)
@@ -432,18 +429,15 @@ func SerializedClusterReferences(data []byte) []ClusterReference {
 		if len(items) > 0 && scmerIsSymbol(items[0], "quote") {
 			return
 		}
-		if len(items) == 2 && scmerIsSymbol(items[0], "cluster_object") && items[1].WithoutSourceInfo().IsString() {
-			var ref ClusterReference
-			if json.Unmarshal([]byte(items[1].String()), &ref) == nil {
-				result = append(result, ref)
-			}
+		if len(items) == 7 && scmerIsSymbol(items[0], "cluster_object") && items[1].WithoutSourceInfo().IsString() {
+			result = append(result, ClusterReference{URI: items[1].String(), Owner: items[2].String(), Incarnation: items[3].String(), Token: items[4].String(), Type: items[5].String(), View: []byte(items[6].String())})
 			return
 		}
 		for _, item := range items {
 			walk(item)
 		}
 	}
-	walk(Read("cluster reference manifest", envelope.Source))
+	walk(Read("cluster reference manifest", source, false))
 	return result
 }
 
@@ -476,4 +470,105 @@ func BindClusterInvocation(value, scope Scmer) (Scmer, error) {
 		}
 	}
 	return value, nil
+}
+
+// Large immutable dictionary captures use the ordinary object protocol. The
+// snapshot belongs to this serialization context; it never observes later
+// sender mutations. Runtime callables stay in their invocation-bound path.
+type clusterLiteral struct{ source string }
+type clusterLiteralCapture struct {
+	done   chan struct{}
+	object *clusterLiteral
+	err    error
+}
+
+func (*clusterLiteral) ClusterObjectType() string { return "literal" }
+func (v *clusterLiteral) Serialize(ctx *SerializationContext) (Scmer, error) {
+	return ctx.ReferenceExpression(v)
+}
+func (v *clusterLiteral) HandleClusterRequest(ctx context.Context, request ClusterRequest) (any, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	switch request.Method {
+	case "view":
+		return NewNil(), nil
+	case "source":
+		return NewString(v.source), nil
+	}
+	return nil, fmt.Errorf("unsupported immutable capture request")
+}
+func plainClusterLiteral(value Scmer, depth int) bool {
+	if depth > 64 {
+		return false
+	}
+	switch value.GetTag() {
+	case tagNil, tagBool, tagInt, tagFloat, tagDate, tagString, tagCString, tagBString, tagLZ4, tagSymbol:
+		return true
+	case tagSlice:
+		for _, item := range value.Slice() {
+			if !plainClusterLiteral(item, depth+1) {
+				return false
+			}
+		}
+		return true
+	case tagFastDict:
+		if dict := value.FastDict(); dict != nil {
+			for _, item := range dict.Pairs {
+				if !plainClusterLiteral(item, depth+1) {
+					return false
+				}
+			}
+		}
+		return true
+	}
+	return false
+}
+func (ctx *SerializationContext) literal(value Scmer) (*clusterLiteral, error) {
+	if ctx.root != nil {
+		ctx = ctx.root
+	}
+	ctx.mu.Lock()
+	if ctx.literals == nil {
+		ctx.literals = make(map[Scmer]*clusterLiteralCapture)
+	}
+	capture := ctx.literals[value]
+	first := capture == nil
+	if first {
+		capture = &clusterLiteralCapture{done: make(chan struct{})}
+		ctx.literals[value] = capture
+	}
+	ctx.mu.Unlock()
+	if first {
+		func() {
+			defer close(capture.done)
+			defer func() {
+				if failure := recover(); failure != nil {
+					capture.err = fmt.Errorf("immutable capture: %v", failure)
+				}
+			}()
+			if !plainClusterLiteral(value, 0) {
+				return
+			}
+			var source bytes.Buffer
+			Serialize(&source, value, &Globalenv)
+			// The source reply remains one bounded message even after textual
+			// string escaping in both the Scmer value and its result envelope.
+			if source.Len() <= 48*1024 {
+				capture.object = &clusterLiteral{source.String()}
+			}
+		}()
+	} else {
+		<-capture.done
+	}
+	return capture.object, capture.err
+}
+func init() {
+	RegisterClusterObjectType("literal", func(handle ClusterHandle) Scmer {
+		source, err := handle.Call(context.Background(), ClusterRequest{Method: "source"})
+		if err != nil {
+			panic(err)
+		}
+		return Eval(Optimize(Read("immutable cluster capture", source.String(), false), &Globalenv, nil), &Globalenv)
+	})
 }

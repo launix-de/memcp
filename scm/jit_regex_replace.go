@@ -86,11 +86,11 @@ func jitRegexpReplaceHelperCall(entryValue, s Scmer) Scmer {
 func jitEmitConstantRegexpReplaceViaHelper(ctx *JITContext, pattern *regexp.Regexp, replacement Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 	replacement = replacement.WithoutSourceInfo()
 	if !scmerCallable(replacement) {
-		return jitConstRegexpReplaceCall(ctx, pattern, replacement, args[2], result)
+		return jitConstRegexpReplaceCall(ctx, pattern, args[1], args[2], result)
 	}
 	entry := jitRegexpReplaceHelperFor(pattern, replacement)
 	if entry == nil {
-		return jitConstRegexpReplaceCall(ctx, pattern, replacement, args[2], result)
+		return jitConstRegexpReplaceCall(ctx, pattern, args[1], args[2], result)
 	}
 	entryValue := NewAny(entry)
 	ctx.TrackImm(entryValue)
@@ -155,7 +155,7 @@ func jitApply1(procedure, arg Scmer) Scmer {
 func jitEmitConstantRegexpReplaceFunc(ctx *JITContext, pattern *regexp.Regexp, replacement Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 	replacement = replacement.WithoutSourceInfo()
 	if !scmerCallable(replacement) {
-		return jitConstRegexpReplaceCall(ctx, pattern, replacement, args[2], result)
+		return jitConstRegexpReplaceCall(ctx, pattern, args[1], args[2], result)
 	}
 	program := jitCompileRegexProgram(pattern)
 
@@ -312,11 +312,12 @@ func jitEmitConstantRegexpReplaceFunc(ctx *JITContext, pattern *regexp.Regexp, r
 
 // jitConstRegexpReplaceCall is the whole-operation fallback: one native call
 // running the precompiled regex with the replacement over src.
-func jitConstRegexpReplaceCall(ctx *JITContext, pattern *regexp.Regexp, replacement Scmer, srcDesc, result JITValueDesc) JITValueDesc {
+func jitConstRegexpReplaceCall(ctx *JITContext, pattern *regexp.Regexp, replacement, srcDesc, result JITValueDesc) JITValueDesc {
 	reArg := jitCopyScmerToPair(ctx, JITValueDesc{Loc: LocImm, Type: tagRegex, Imm: NewRegex(pattern)})
 	ctx.TrackImm(NewRegex(pattern))
-	replArg := jitCopyScmerToPair(ctx, JITValueDesc{Loc: LocImm, Type: replacement.GetTag(), Imm: replacement})
-	ctx.TrackImm(replacement)
+	// sourceArgs can contain a lambda AST rather than its runtime closure.
+	// Use the emitted argument so captures and callable/string dispatch survive.
+	replArg := jitCopyScmerToPair(ctx, replacement)
 	value := srcDesc
 	ctx.EnsureDesc(&value)
 	out := ctx.EmitGoCallScalar(GoFuncAddr(jitConstantRegexpReplaceFunc), []JITValueDesc{reArg, replArg, value}, 2)

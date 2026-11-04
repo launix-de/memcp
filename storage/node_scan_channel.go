@@ -16,7 +16,6 @@ import "time"
 import "context"
 import "strings"
 import "sync/atomic"
-import "encoding/json"
 import "runtime/debug"
 import "github.com/google/uuid"
 import "github.com/launix-de/memcp/scm"
@@ -28,14 +27,14 @@ import "github.com/launix-de/go-mysqlstack/sqldb"
 // loop: it fences new shard tasks and is inherited by nested scan invocations.
 type scanCompletion struct {
 	Offers []scm.ClusterReference `json:"offers,omitempty"`
-	Data   json.RawMessage        `json:"data,omitempty"`
+	Data   []byte                 `json:"data,omitempty"`
 	Return string                 `json:"return"`
 	Panic  *scanPanic             `json:"panic,omitempty"`
 }
 type scanPanic struct {
 	SQL     *sqldb.SQLError `json:"sql,omitempty"`
 	Message string          `json:"message"`
-	Value   json.RawMessage `json:"value,omitempty"`
+	Value   []byte          `json:"value,omitempty"`
 	Stack   string          `json:"stack,omitempty"`
 }
 
@@ -58,10 +57,10 @@ func freezeScanPanic(value any) *scanPanic {
 		result.SQL = &copy
 	case scm.Scmer:
 		encoded, _ := freezeScanValue(v)
-		result.Value = json.RawMessage(encoded)
+		result.Value = []byte(encoded)
 	case string:
 		encoded, _ := freezeScanValue(scm.NewString(v))
-		result.Value = json.RawMessage(encoded)
+		result.Value = []byte(encoded)
 	}
 	return result
 }
@@ -312,7 +311,7 @@ func (r *scanTaskRegistry) cancelTask(id string) {
 	}
 }
 func postScanMessage(ctx context.Context, peer *mosiPeer, method string, value any) error {
-	data, err := json.Marshal(value)
+	data, err := marshalNode(value)
 	if err != nil {
 		return err
 	}
@@ -342,11 +341,11 @@ func (s *scanRPCSession) validOperation(id string) bool {
 	return err == nil && operation.Version() == 7
 }
 
-func (s *scanRPCSession) channelMessage(ctx context.Context, method string, data json.RawMessage) (any, error) {
+func (s *scanRPCSession) channelMessage(ctx context.Context, method string, data []byte) (any, error) {
 	switch method {
 	case "scan.result":
 		var result scanCompletion
-		if err := json.Unmarshal(data, &result); err != nil {
+		if err := unmarshalNode(data, &result); err != nil {
 			return nil, err
 		}
 		if entry, ok := s.service.returns.Load(result.Return); ok {
@@ -364,7 +363,7 @@ func (s *scanRPCSession) channelMessage(ctx context.Context, method string, data
 		return nil, nil
 	case "scan.cancel":
 		var id string
-		if err := json.Unmarshal(data, &id); err != nil {
+		if err := unmarshalNode(data, &id); err != nil {
 			return nil, err
 		}
 		if !s.validOperation(id) {
@@ -374,11 +373,11 @@ func (s *scanRPCSession) channelMessage(ctx context.Context, method string, data
 		return nil, nil
 	case "node.control":
 		var request struct {
-			Return string          `json:"return"`
-			Method string          `json:"method"`
-			Data   json.RawMessage `json:"data"`
+			Return string `json:"return"`
+			Method string `json:"method"`
+			Data   []byte `json:"data"`
 		}
-		if err := json.Unmarshal(data, &request); err != nil {
+		if err := unmarshalNode(data, &request); err != nil {
 			return nil, err
 		}
 		if !s.validOperation(request.Return) {
@@ -413,7 +412,7 @@ func (s *scanRPCSession) channelMessage(ctx context.Context, method string, data
 				completion.Data = encoded.data
 				return
 			}
-			completion.Data, err = json.Marshal(value)
+			completion.Data, err = marshalNode(value)
 			if err != nil {
 				panic(err)
 			}
@@ -423,8 +422,8 @@ func (s *scanRPCSession) channelMessage(ctx context.Context, method string, data
 	}
 	return nil, fmt.Errorf("unknown scan channel message")
 }
-func mustScanJSON(value any) json.RawMessage {
-	data, err := json.Marshal(value)
+func mustNodeMetadata(value any) []byte {
+	data, err := marshalNode(value)
 	if err != nil {
 		panic(err)
 	}
@@ -476,10 +475,10 @@ func (service *nodeScanService) control(ctx context.Context, peer *mosiPeer, met
 		}
 	}()
 	request := struct {
-		Return string          `json:"return"`
-		Method string          `json:"method"`
-		Data   json.RawMessage `json:"data"`
-	}{id, method, mustScanJSON(input)}
+		Return string `json:"return"`
+		Method string `json:"method"`
+		Data   []byte `json:"data"`
+	}{id, method, mustNodeMetadata(input)}
 	if err := postScanMessage(ctx, peer, "node.control", request); err != nil {
 		return err
 	}
@@ -526,7 +525,7 @@ func (service *nodeScanService) control(ctx context.Context, peer *mosiPeer, met
 			return result.Panic
 		}
 		if output != nil {
-			if err := json.Unmarshal(result.Data, output); err != nil {
+			if err := unmarshalNode(result.Data, output); err != nil {
 				service.discardObjectOffers(peer, result.Offers)
 				return err
 			}

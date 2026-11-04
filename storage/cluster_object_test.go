@@ -12,7 +12,6 @@ import "context"
 import "strings"
 import "runtime"
 import "testing"
-import "encoding/json"
 import "sync/atomic"
 import "github.com/google/uuid"
 import "github.com/launix-de/memcp/scm"
@@ -76,8 +75,8 @@ func TestClusterObjectIndependentHandlesAndIncarnation(t *testing.T) {
 	// is pending. They need generation IDs, not a boolean peer membership.
 	sessionRPC := &scanRPCSession{service: owner, peer: peer}
 	acquire := func(ref scm.ClusterReference) scm.ClusterReference {
-		lease := uuid.NewString()
-		data, _ := json.Marshal(clusterObjectAcquisition{ref, lease})
+		lease := peer.objectPeer.Boot + ":" + ref.Token
+		data, _ := marshalNode(clusterObjectAcquisition{ref, lease})
 		if _, err := sessionRPC.handleObject(context.Background(), "object.acquire", data); err != nil {
 			t.Fatal(err)
 		}
@@ -180,7 +179,7 @@ func TestClusterCallbackRejectsCallsAfterExportingQueryEnds(t *testing.T) {
 		return scm.NewBool(true)
 	}, nil)
 	env := &scm.Env{Vars: scm.Vars{scm.Symbol("output"): callback}, Outer: &scm.Globalenv}
-	proc := scm.Eval(scm.Read(t.Name(), `(lambda () (output))`), env)
+	proc := scm.Eval(scm.Read(t.Name(), `(lambda () (output))`, true), env)
 	bindings := (&scm.SerializationContext{Invocation: scm.NewAny(tx)}).WithExport(func(object scm.ClusterObject, view scm.Scmer) (scm.ClusterReference, error) {
 		return owner.exportObject(source, object, view)
 	})
@@ -228,7 +227,7 @@ func TestClusterObjectSerializedSessionUsesOwnerEndpoint(t *testing.T) {
 	session := scm.NewSession()
 	session.Func()(scm.NewString("x"), scm.NewInt(17))
 	environment := &scm.Env{Vars: scm.Vars{scm.Symbol("session"): session}, Outer: &scm.Globalenv}
-	proc := scm.Eval(scm.Read(t.Name(), `(lambda () (session "x"))`), environment)
+	proc := scm.Eval(scm.Read(t.Name(), `(lambda () (session "x"))`, true), environment)
 	bindings := (&scm.SerializationContext{}).WithExport(func(object scm.ClusterObject, view scm.Scmer) (scm.ClusterReference, error) {
 		return owner.exportObject(source, object, view)
 	})
@@ -317,7 +316,7 @@ func TestClusterObjectOwnerCacheMapFactoryAndNestedRuntimeCapture(t *testing.T) 
 	session := scm.NewSession()
 	session.Func()(scm.NewString("x"), scm.NewInt(7))
 	env := &scm.Env{Vars: scm.Vars{scm.Symbol("session"): session}, Outer: &scm.Globalenv}
-	factory := scm.Eval(scm.Read(t.Name(), `(lambda () (+ (session "x") 3))`), env)
+	factory := scm.Eval(scm.Read(t.Name(), `(lambda () (+ (session "x") 3))`, true), env)
 	value := scm.Apply(remote, scm.NewString("key"), scm.NewNil(), factory)
 	if value.Int() != 10 || scm.Apply(cache, scm.NewString("key")).Int() != 10 {
 		t.Fatal("factory did not execute at cache owner", value)
@@ -641,7 +640,7 @@ func TestClusterObjectAbandonedCompletionDiscardsOffers(t *testing.T) {
 	receiver.Seal()
 	client.returns.Store(id, &receiverRoute{peer, receiver})
 	defer client.returns.Delete(id)
-	completion, _ := json.Marshal(scanCompletion{Return: id, Offers: []scm.ClusterReference{ref}})
+	completion, _ := marshalNode(scanCompletion{Return: id, Offers: []scm.ClusterReference{ref}})
 	s := &scanRPCSession{service: client, peer: peer}
 	if _, err := s.channelMessage(context.Background(), "scan.result", completion); err != nil {
 		t.Fatal(err)
@@ -721,7 +720,7 @@ func TestClusterObjectRegisteredGenerationProtectsFilesAndBlobs(t *testing.T) {
 func TestClusterDiscoveryRefreshesRoutingAfterConcurrentHandover(t *testing.T) {
 	self := clusterMember{ID: "memcp://" + uuid.NewString()}
 	remote := clusterMember{ID: "memcp://" + uuid.NewString()}
-	peer := &mosiPeer{done: make(chan struct{}), outgoing: make(chan mosiMessage, 1)}
+	peer := &mosiPeer{done: make(chan struct{}), outgoing: newMosiMailbox()}
 	service := &nodeScanService{}
 	cluster := &nodeCluster{self: self, service: service}
 	cluster.initializeManager()
@@ -746,18 +745,18 @@ func TestClusterDiscoveryRefreshesRoutingAfterConcurrentHandover(t *testing.T) {
 	}()
 	// Discovery has sampled local IO and is awaiting another live peer. Publish
 	// the successor now; the peer's already captured answer still names us.
-	message := <-peer.outgoing
+	message := takeMosi(peer.outgoing)
 	var request struct {
 		Return string `json:"return"`
 	}
-	if err := json.Unmarshal(message.Data, &request); err != nil {
+	if err := unmarshalNode(message.Data, &request); err != nil {
 		t.Fatal(err)
 	}
 	cluster.manager.updateRecord(resource, func(record *replicaRecord) bool {
 		record.Handoff = remote.ID
 		return true
 	})
-	data, _ := json.Marshal(replicaRecord{Resource: resource, Owner: self.ID, Epoch: 9, State: "IO"})
+	data, _ := marshalNode(replicaRecord{Resource: resource, Owner: self.ID, Epoch: 9, State: "IO"})
 	entry, ok := service.returns.Load(request.Return)
 	if !ok {
 		t.Fatal("missing discovery return collector")
@@ -796,7 +795,7 @@ func TestClusterObjectScopedSessionForwardsInvocationCancellation(t *testing.T) 
 		<-ctx.Done()
 		panic(ctx.Err())
 	}, Type: &scm.TypeDescriptor{Kind: "func", HasSideEffects: true, Params: []*scm.TypeDescriptor{{Kind: "any"}}, Return: &scm.TypeDescriptor{Kind: "any"}}})
-	producer := scm.Eval(scm.Read(t.Name(), "(lambda (tx) ("+callback+" tx))"), &scm.Globalenv)
+	producer := scm.Eval(scm.Read(t.Name(), "(lambda (tx) ("+callback+" tx))", true), &scm.Globalenv)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	ss := &scm.SessionState{}
@@ -925,8 +924,8 @@ func TestClusterObjectPendingTransferSurvivesPriorLeaseRelease(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := &scanRPCSession{service: owner, peer: peer}
-	firstLease := uuid.NewString()
-	data, _ := json.Marshal(clusterObjectAcquisition{first, firstLease})
+	firstLease := peer.objectPeer.Boot + ":1"
+	data, _ := marshalNode(clusterObjectAcquisition{first, firstLease})
 	if _, err := s.handleObject(context.Background(), "object.acquire", data); err != nil {
 		t.Fatal(err)
 	}
@@ -942,8 +941,8 @@ func TestClusterObjectPendingTransferSurvivesPriorLeaseRelease(t *testing.T) {
 	if objectEntryCount(owner) != 1 {
 		t.Fatal("old GC release dropped the in-flight serialization reservation")
 	}
-	secondLease := uuid.NewString()
-	data, _ = json.Marshal(clusterObjectAcquisition{pending, secondLease})
+	secondLease := peer.objectPeer.Boot + ":2"
+	data, _ = marshalNode(clusterObjectAcquisition{pending, secondLease})
 	if _, err := s.handleObject(context.Background(), "object.acquire", data); err != nil {
 		t.Fatal(err)
 	}
@@ -970,7 +969,7 @@ func TestClusterCancellationQueuesMessageBeforeCollectorReturns(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			service := &nodeScanService{}
-			peer := &mosiPeer{scanService: service, done: make(chan struct{}), outgoing: make(chan mosiMessage, 4)}
+			peer := &mosiPeer{scanService: service, done: make(chan struct{}), outgoing: newMosiMailbox()}
 			finished := make(chan any, 1)
 			go func() {
 				if control {
@@ -981,18 +980,19 @@ func TestClusterCancellationQueuesMessageBeforeCollectorReturns(t *testing.T) {
 				executor := &peerScanExecutor{peer: peer, ctx: ctx}
 				executor.dispatch(remoteScanTask{})
 			}()
-			request := <-peer.outgoing
+			request := takeMosi(peer.outgoing)
 			var envelope struct {
 				Return string `json:"return"`
 			}
-			if err := json.Unmarshal(request.Data, &envelope); err != nil {
+			if err := unmarshalNode(request.Data, &envelope); err != nil {
 				t.Fatal(err)
 			}
 			cancel()
 			select {
-			case message := <-peer.outgoing:
+			case <-peer.outgoing.ready:
+				message := takeMosi(peer.outgoing)
 				var id string
-				if message.Method != "scan.cancel" || json.Unmarshal(message.Data, &id) != nil || id != envelope.Return {
+				if message.Method != "scan.cancel" || unmarshalNode(message.Data, &id) != nil || id != envelope.Return {
 					t.Fatal("wrong remote cancellation", message)
 				}
 			case <-time.After(time.Second):
@@ -1028,7 +1028,7 @@ func TestClusterObjectCatalogSerializationNeedsNoExportContext(t *testing.T) {
 	if source != tbl.String() {
 		t.Fatal("network reconstruction changed local catalog text/plan identity", source, tbl.String())
 	}
-	value := scm.Eval(scm.Read(t.Name(), source), &scm.Globalenv)
+	value := scm.Eval(scm.Read(t.Name(), source, true), &scm.Globalenv)
 	if TableFromScmer(value) != tbl {
 		t.Fatal("portable catalog constructor changed table identity", source)
 	}
@@ -1036,7 +1036,7 @@ func TestClusterObjectCatalogSerializationNeedsNoExportContext(t *testing.T) {
 
 func TestClusterObjectReleaseRetriesWithoutAnotherGCOrReconnect(t *testing.T) {
 	identity := clusterObjectPeer{ID: "memcp://" + uuid.NewString(), Boot: uuid.NewString()}
-	peer := &mosiPeer{objectPeer: identity, done: make(chan struct{}), outgoing: make(chan mosiMessage, 1)}
+	peer := &mosiPeer{objectPeer: identity, done: make(chan struct{}), outgoing: newMosiMailbox()}
 	service := &nodeScanService{peers: map[*mosiPeer]bool{peer: true}}
 	registry := service.objectRegistry()
 	defer service.stopObjects()
@@ -1046,12 +1046,13 @@ func TestClusterObjectReleaseRetriesWithoutAnotherGCOrReconnect(t *testing.T) {
 	registry.wake <- struct{}{}
 	for attempt := range 2 {
 		select {
-		case message := <-peer.outgoing:
+		case <-peer.outgoing.ready:
+			message := takeMosi(peer.outgoing)
 			var request struct {
 				Return string `json:"return"`
 				Method string `json:"method"`
 			}
-			if err := json.Unmarshal(message.Data, &request); err != nil || request.Method != "object.release" {
+			if err := unmarshalNode(message.Data, &request); err != nil || request.Method != "object.release" {
 				t.Fatalf("unexpected release request: %+v, %v", request, err)
 			}
 			entry, ok := service.returns.Load(request.Return)
@@ -1147,13 +1148,13 @@ func TestClusterObjectDictionaryCallbacksPrepareCompleteSessionView(t *testing.T
 	defer func() { owner.cancelObjectOffers(source, offers) }()
 	// An earlier callback demanded only a; the data dictionary also contains an
 	// alias of the session and a callback demanding b, before any receiver row.
-	first := scm.Eval(scm.Read(t.Name(), `(lambda () (session "a"))`), env)
+	first := scm.Eval(scm.Read(t.Name(), `(lambda () (session "a"))`, true), env)
 	if _, err := scm.MarshalProcedure(first, bindings); err != nil {
 		t.Fatal(err)
 	}
 	dict := scm.NewFastDictValue(64)
 	dict.Set(scm.NewString("session"), session, nil)
-	dict.Set(scm.NewString("callback"), scm.Eval(scm.Read(t.Name(), `(lambda () (session "b"))`), env), nil)
+	dict.Set(scm.NewString("callback"), scm.Eval(scm.Read(t.Name(), `(lambda () (session "b"))`, true), env), nil)
 	for i := 0; i < 64; i++ {
 		dict.Set(scm.NewInt(int64(i)), scm.NewNil(), nil)
 	}
@@ -1204,4 +1205,91 @@ func TestClusterTransferredParticipantKeepsEnlistedCapability(t *testing.T) {
 	if _, err := endpoint.HandleClusterRequest(context.Background(), scm.ClusterRequest{Method: "savepoint", Arguments: []scm.Scmer{scm.NewString(capability)}}); err != nil {
 		t.Fatalf("first write invalidated the enlisted endpoint: %v", err)
 	}
+}
+
+//go:noinline
+func prepareSharedLiteral(t *testing.T, owner, client *nodeScanService, peer *mosiPeer) weak.Pointer[scm.FastDict] {
+	t.Helper()
+	source := objectOwnerPeer(t, owner, client)
+	bindings := (&scm.SerializationContext{}).WithExport(func(object scm.ClusterObject, view scm.Scmer) (scm.ClusterReference, error) {
+		return owner.exportObject(source, object, view)
+	})
+	dict := scm.NewFastDictValue(512)
+	for i := 0; i < 512; i++ {
+		dict.Set(scm.NewInt(int64(i)), scm.NewInt(int64(i+7)), nil)
+	}
+	first, err := freezeScanValue(scm.NewFastDict(dict), bindings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := freezeScanValue(scm.NewFastDict(dict), bindings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first) > 1024 || len(second) > 1024 {
+		t.Fatal("dictionary was inlined per shard", len(first), len(second))
+	}
+	// Mutation after export must not change the frozen statement snapshot.
+	dict.Set(scm.NewInt(0), scm.NewInt(900), nil)
+	decode := scm.ProcedureDecode{Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) {
+		return client.importObject(context.Background(), peer, ref)
+	}}
+	type restored struct {
+		value scm.Scmer
+		err   error
+	}
+	results := make(chan restored, 16)
+	wires := []schemeValue{first, second}
+	for len(wires) < 16 {
+		wire, err := freezeScanValue(scm.NewFastDict(dict), bindings)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wires = append(wires, wire)
+	}
+	for _, wire := range wires {
+		go func(wire schemeValue) { value, err := wire.reconstruct(decode); results <- restored{value, err} }(wire)
+	}
+	values := make([]scm.Scmer, 0, len(wires))
+	for range wires {
+		got := <-results
+		if got.err != nil {
+			t.Fatal(got.err)
+		}
+		if len(values) > 0 && values[0].FastDict() != got.value.FastDict() {
+			t.Fatal("concurrent imports reconstructed independent dictionaries")
+		}
+		values = append(values, got.value)
+	}
+	a, b := values[0], values[1]
+	if a.FastDict() != b.FastDict() {
+		t.Fatal("same lease reconstructed the dictionary twice")
+	}
+	if !scm.Equal(a, b) {
+		t.Fatal("dictionary aliases changed")
+	}
+	env := &scm.Env{Vars: scm.Vars{scm.Symbol("captured"): a}, Outer: &scm.Globalenv}
+	proc := scm.Eval(scm.Optimize(scm.Read(t.Name(), `(lambda (v) (set_assoc captured 0 v))`, false), env, nil), env)
+	proc = scm.CompileJIT(proc, true)
+	left, right := scm.Apply(proc, scm.NewInt(11)), scm.Apply(proc, scm.NewInt(12))
+	original, _ := a.FastDict().Get(scm.NewInt(0))
+	one, _ := left.FastDict().Get(scm.NewInt(0))
+	two, _ := right.FastDict().Get(scm.NewInt(0))
+	if original.Int() != 7 || one.Int() != 11 || two.Int() != 12 {
+		t.Fatal("shared capture lost immutable update semantics", original, one, two)
+	}
+	// All keys and values must survive, including the pre-mutation value.
+	for i, item := range a.FastDict().Pairs {
+		if i%2 == 1 && item.Int() != a.FastDict().Pairs[i-1].Int()+7 {
+			t.Fatal("snapshot changed", i, item)
+		}
+	}
+	return weak.Make(a.FastDict())
+}
+
+func TestClusterImmutableCaptureSharesSnapshotAndReleasesWithGC(t *testing.T) {
+	peer, client, _ := setupRemoteScanConnection(t)
+	owner := nodeScans.Load()
+	value := prepareSharedLiteral(t, owner, client, peer)
+	waitObjectGC(t, func() bool { return value.Value() == nil && objectEntryCount(owner) == 0 })
 }

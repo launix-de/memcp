@@ -74,7 +74,7 @@ func (handle *remoteHandle) Handle(value scm.Scmer) {
 	if err != nil {
 		panic(err)
 	}
-	if err = peer.send(handle.ctx, message); err != nil {
+	if err = peer.send(context.Background(), message); err != nil {
 		panic(err)
 	}
 }
@@ -96,6 +96,10 @@ func (service *nodeScanService) handleBindings(bindings *scm.SerializationContex
 		release := func() { service.handles.Delete(slot) }
 		if receiver, ok := handler.(interface{ RetainHandleRelease(func()) }); ok {
 			receiver.RetainHandleRelease(release)
+			if result, ok := handler.(*scm.ResultReceiver); ok && peer.ctx != nil {
+				stop := context.AfterFunc(peer.ctx, func() { result.Fail(fmt.Errorf("handle peer disconnected")) })
+				result.RetainHandleRelease(func() { stop() })
+			}
 		} else if lifetime, ok := owner.Any().(interface{ RetainQueryWork(func()) bool }); !ok || !lifetime.RetainQueryWork(func() { release(); entry.close() }) {
 			release()
 			return scm.NewNil(), fmt.Errorf("exported handle requires a live invocation owner")

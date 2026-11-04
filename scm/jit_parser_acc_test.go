@@ -1,3 +1,7 @@
+/*
+Copyright (C) 2026 Carl-Philip Hänsch
+SPDX-License-Identifier: GPL-3.0-or-later
+*/
 package scm
 
 import "testing"
@@ -15,7 +19,7 @@ func TestJITParserAccumulateRepeat(t *testing.T) {
 		(atom "SELECT" true)
 		(define v (+ (regex "[a-z]+" false true) ","))
 		$
-	) v)`), env).Parser()
+	) v)`, true), env).Parser()
 	want := plain.Execute(" select alpha,beta,gamma ", env)
 
 	accParser := Eval(Read("acc", `(parser '(
@@ -25,7 +29,7 @@ func TestJITParserAccumulateRepeat(t *testing.T) {
 			(lambda (a x) (append_mut a x))
 			(lambda (a) a)))
 		$
-	) v)`), env)
+	) v)`, true), env)
 	env.Vars[Symbol("acc_parser")] = accParser
 	p := accParser.Parser()
 
@@ -66,7 +70,7 @@ func TestJITParserAccumulateSeeded(t *testing.T) {
 			(lambda (a x) (append_mut a x))
 			(lambda (a) a)))
 		$
-	) v)`), env)
+	) v)`, true), env)
 	env.Vars[Symbol("seeded_parser")] = seeded
 	sp := seeded.Parser()
 
@@ -76,7 +80,7 @@ func TestJITParserAccumulateSeeded(t *testing.T) {
 			(lambda (a x) (append_mut a x))
 			(lambda (a) (if (equal? (count a) 1) (nth a 0) (cons (quote op) a)))))
 		$
-	) b)`), env)
+	) b)`, true), env)
 	env.Vars[Symbol("cascade_parser")] = cascade
 	cp := cascade.Parser()
 

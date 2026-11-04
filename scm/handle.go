@@ -28,6 +28,7 @@ type ResultReceiver struct {
 	value    Scmer
 	closed   bool
 	releases []func()
+	onResult func(Scmer) // installed before publication; wakes an admitted worker
 }
 
 func NewResultReceiver() *ResultReceiver { return &ResultReceiver{done: make(chan struct{})} }
@@ -42,7 +43,12 @@ func (receiver *ResultReceiver) Handle(value Scmer) {
 	releases := receiver.releases
 	receiver.releases = nil
 	close(receiver.done)
+	notify := receiver.onResult
+	receiver.onResult = nil
 	receiver.mu.Unlock()
+	if notify != nil {
+		notify(value)
+	}
 	for _, release := range releases {
 		release()
 	}
@@ -57,8 +63,9 @@ func (receiver *ResultReceiver) RetainHandleRelease(release func()) {
 	receiver.mu.Unlock()
 	release()
 }
-func (receiver *ResultReceiver) Close()      { receiver.Handle(NewNil()) }
-func (receiver *ResultReceiver) Wait() Scmer { return receiver.WaitContext(context.Background()) }
+func (receiver *ResultReceiver) Fail(err error) { receiver.Handle(NewAny(&handleFailure{err.Error()})) }
+func (receiver *ResultReceiver) Close()         { receiver.Handle(NewNil()) }
+func (receiver *ResultReceiver) Wait() Scmer    { return receiver.WaitContext(context.Background()) }
 func (receiver *ResultReceiver) WaitContext(ctx context.Context) Scmer {
 	defer receiver.Close()
 	select {

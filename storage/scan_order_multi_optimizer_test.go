@@ -25,7 +25,7 @@ func optimizeScanOrderMultiTestSource(t *testing.T, reducers string) string {
 		nil nil 0 0 10
 		(list (list "key") (list "key")) ` + reducers + `
 		(list) false)`
-	optimized := scm.Optimize(scm.Read(t.Name(), source), &scm.Globalenv, nil)
+	optimized := scm.Optimize(scm.Read(t.Name(), source, true), &scm.Globalenv, nil)
 	return scm.SerializeToString(optimized, &scm.Globalenv)
 }
 
@@ -70,7 +70,7 @@ func TestScanOrderMultiTransfersDefaultResultToOuterReducer(t *testing.T) {
 			(lambda (acc key) (set_assoc acc key 2)))
 		(list) false)`
 	source := `(set_assoc ` + scan + ` "outer" true)`
-	optimized := scm.Optimize(scm.Read(t.Name(), source), &scm.Globalenv, nil)
+	optimized := scm.Optimize(scm.Read(t.Name(), source, true), &scm.Globalenv, nil)
 	serialized := scm.SerializeToString(optimized, &scm.Globalenv)
 	if count := strings.Count(serialized, "set_assoc_mut"); count != 3 {
 		t.Fatalf("nested multi-source result lost ownership; optimized %d of 3 updates: %s", count, serialized)
@@ -85,7 +85,7 @@ func optimizeNestedScanOrderTestSource(t *testing.T, notFound string) string {
 		0 0 10 (list "key")
 		(lambda (acc key) (set_assoc acc key 1))
 		(list) false` + notFound + `)`
-	optimized := scm.Optimize(scm.Read(t.Name(), `(set_assoc `+scan+` "outer" true)`), &scm.Globalenv, nil)
+	optimized := scm.Optimize(scm.Read(t.Name(), `(set_assoc `+scan+` "outer" true)`, true), &scm.Globalenv, nil)
 	return scm.SerializeToString(optimized, &scm.Globalenv)
 }
 
@@ -111,7 +111,7 @@ func optimizeNestedScanOrderBatchAcceptTestSource(t *testing.T, notFound string)
 		0 0 10 (list "key")
 		(lambda (acc key) (set_assoc acc key 1))
 		(list) false` + notFound + `)`
-	optimized := scm.Optimize(scm.Read(t.Name(), `(set_assoc `+scan+` "outer" true)`), &scm.Globalenv, nil)
+	optimized := scm.Optimize(scm.Read(t.Name(), `(set_assoc `+scan+` "outer" true)`, true), &scm.Globalenv, nil)
 	return scm.SerializeToString(optimized, &scm.Globalenv)
 }
 
@@ -139,7 +139,7 @@ func optimizeNestedScanJoinOrderTestSource(t *testing.T, suffix string) string {
 		0 0 10 (list (list 0 "key"))
 		(lambda (acc key) (set_assoc acc key 1))
 		(lambda () (list))` + suffix + `)`
-	optimized := scm.Optimize(scm.Read(t.Name(), `(set_assoc `+scan+` "outer" true)`), &scm.Globalenv, nil)
+	optimized := scm.Optimize(scm.Read(t.Name(), `(set_assoc `+scan+` "outer" true)`, true), &scm.Globalenv, nil)
 	return scm.SerializeToString(optimized, &scm.Globalenv)
 }
 

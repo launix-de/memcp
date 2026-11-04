@@ -142,7 +142,7 @@ func TestParallelScanOptimizerAvoidsFrameLocalAccessValues(t *testing.T) {
 	expr := scm.Read("parallel scan access lifetime test", `(lambda (table_value wanted_id)
 		(scan nil table_value '() (list wanted_id)
 			'("id" "#0") (lambda (id probe) (equal?? id probe))
-			'("id") (lambda (acc id) (+ acc id)) 0 nil false))`)
+			'("id") (lambda (acc id) (+ acc id)) 0 nil false))`, true)
 	optimized := scm.Optimize(expr, &scm.Globalenv, nil)
 	plan := scm.SerializeToString(optimized, &scm.Globalenv)
 	if strings.Contains(plan, "(!list ") {

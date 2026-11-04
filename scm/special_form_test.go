@@ -24,7 +24,7 @@ import (
 
 func TestOptimizeLowersAndSerializesSpecialForms(t *testing.T) {
 	environment := &Env{Vars: Vars{Symbol("condition"): NewBool(true)}, Outer: &Globalenv}
-	expression := Optimize(Read(t.Name(), "(and condition (quote yes))"), environment, nil)
+	expression := Optimize(Read(t.Name(), "(and condition (quote yes))", true), environment, nil)
 	items := expression.Slice()
 	if items[0].GetTag() != tagSpecialForm || items[0].SpecialFormName() != "and" {
 		t.Fatalf("and head was not lowered to a special form: %s", SerializeToString(expression, environment))
@@ -154,7 +154,7 @@ func TestEveryGlobalSpecialFormHasDeclarationJITHooks(t *testing.T) {
 }
 
 func TestEvalUnoptimizedSpecialForm(t *testing.T) {
-	if result := Eval(Read(t.Name(), "(if true 1 0)"), &Globalenv); result.Int() != 1 {
+	if result := Eval(Read(t.Name(), "(if true 1 0)", true), &Globalenv); result.Int() != 1 {
 		t.Fatalf("unoptimized special form returned %s", String(result))
 	}
 }
@@ -180,14 +180,14 @@ func TestSpecialFormDispatchFollowsSymbolResolution(t *testing.T) {
 	if result := Eval(NewSymbol("if"), environment); result != localIf {
 		t.Fatalf("special form shadowed lexical value: %s", String(result))
 	}
-	if result := Eval(Read(t.Name(), "(if true 1 0)"), environment); result.Int() != 7 {
+	if result := Eval(Read(t.Name(), "(if true 1 0)", true), environment); result.Int() != 7 {
 		t.Fatalf("call did not use resolved lexical value: %s", String(result))
 	}
 }
 
 func TestOptimizerLowersLambdaAndCompilerForms(t *testing.T) {
 	metadata := newOptimizerMetainfo()
-	expression, _ := OptimizeEx(Read(t.Name(), "(lambda (value) (outer 1 value))"), &Globalenv, &metadata, true)
+	expression, _ := OptimizeEx(Read(t.Name(), "(lambda (value) (outer 1 value))", true), &Globalenv, &metadata, true)
 	items := expression.Slice()
 	if items[0].GetTag() != tagSpecialForm || items[0].SpecialFormName() != "lambda" {
 		t.Fatalf("lambda declaration was not lowered: %s", SerializeToString(expression, &Globalenv))
@@ -201,7 +201,7 @@ func TestOptimizerLowersLambdaAndCompilerForms(t *testing.T) {
 func TestOptimizerCollapsesOuterScopeDepth(t *testing.T) {
 	metadata := newOptimizerMetainfo()
 	expression, _ := OptimizeEx(
-		Read(t.Name(), "(lambda (captured) (lambda (middle) (lambda (inner) (+ captured middle inner))))"),
+		Read(t.Name(), "(lambda (captured) (lambda (middle) (lambda (inner) (+ captured middle inner))))", true),
 		&Globalenv,
 		&metadata,
 		true,
@@ -221,7 +221,7 @@ func TestOptimizerCollapsesOuterScopeDepth(t *testing.T) {
 func TestOptimizerCollapsesExplicitAndCapturedOuterDepth(t *testing.T) {
 	metadata := newOptimizerMetainfo()
 	expression, _ := OptimizeEx(
-		Read(t.Name(), "(lambda (captured) (lambda (middle) (lambda (inner) (outer 1 captured))))"),
+		Read(t.Name(), "(lambda (captured) (lambda (middle) (lambda (inner) (outer 1 captured))))", true),
 		&Globalenv,
 		&metadata,
 		true,
@@ -237,7 +237,7 @@ func TestOptimizerCollapsesExplicitAndCapturedOuterDepth(t *testing.T) {
 
 func TestOptimizerRebasesExplicitOuterWhenRemovingBeginScope(t *testing.T) {
 	optimized := Optimize(
-		Read(t.Name(), "(lambda (captured) (begin (lambda (inner) (+ (outer 2 captured) inner))))"),
+		Read(t.Name(), "(lambda (captured) (begin (lambda (inner) (+ (outer 2 captured) inner))))", true),
 		&Globalenv,
 		nil,
 	)
@@ -257,7 +257,7 @@ func TestOptimizerRebasesExplicitOuterWhenRemovingBeginScope(t *testing.T) {
 
 func TestOptimizerKeepsReferencesInsideRemovedBeginSubtree(t *testing.T) {
 	optimized := Optimize(
-		Read(t.Name(), "(lambda (captured) (begin (lambda (middle) (lambda (inner) (+ (outer 1 middle) (outer 3 captured) inner)))))"),
+		Read(t.Name(), "(lambda (captured) (begin (lambda (middle) (lambda (inner) (+ (outer 1 middle) (outer 3 captured) inner)))))", true),
 		&Globalenv,
 		nil,
 	)
@@ -278,7 +278,7 @@ func TestOptimizerKeepsReferencesInsideRemovedBeginSubtree(t *testing.T) {
 
 func TestOptimizerDoesNotLowerConstructedSyntaxData(t *testing.T) {
 	environment := &Env{Vars: make(Vars), Outer: &Globalenv}
-	expression := Optimize(Read(t.Name(), "(list (quote if) true 1 0)"), environment, nil)
+	expression := Optimize(Read(t.Name(), "(list (quote if) true 1 0)", true), environment, nil)
 	value := Eval(expression, environment)
 	items := value.Slice()
 	if !items[0].IsSymbol() || !items[0].SymbolEquals("if") {

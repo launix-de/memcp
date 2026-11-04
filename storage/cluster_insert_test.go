@@ -58,7 +58,7 @@ func TestClusterUniqueProbeUsesAcquiredSuccessor(t *testing.T) {
 	cell := cluster.declareShard(source, false)
 	resource := r.shardResource(source)
 	r.updateRecord(resource, func(record *replicaRecord) bool { record.Owner = "remote"; return true })
-	peer := &mosiPeer{done: make(chan struct{}), outgoing: make(chan mosiMessage, 4)}
+	peer := &mosiPeer{done: make(chan struct{}), outgoing: newMosiMailbox()}
 	cluster.view.Store(&clusterView{links: []*clusterLink{{member: clusterMember{ID: "remote"}, peer: peer}}})
 	request, _ := cell.ownstate.Request(mosi.S)
 	oldMounts := sharedClusterMounts.Swap(&map[string]bool{tbl.schema.Name: true})
@@ -327,7 +327,7 @@ func TestClusterAppendImportFollowsNativeUUIDForwarding(t *testing.T) {
 func TestClusterRestartedInvalidPeerAcknowledgesRevocation(t *testing.T) {
 	cluster := &nodeCluster{self: clusterMember{ID: "local"}}
 	cluster.initializeManager()
-	peer := &mosiPeer{outgoing: make(chan mosiMessage, 4), done: make(chan struct{})}
+	peer := &mosiPeer{outgoing: newMosiMailbox(), done: make(chan struct{})}
 	cluster.view.Store(&clusterView{links: []*clusterLink{{member: clusterMember{ID: "owner"}, peer: peer}}})
 	resource := mosiResource{Database: "tenant"}
 	r := cluster.manager
@@ -410,7 +410,7 @@ func TestClusterRequestSequenceBelongsToProcessIncarnation(t *testing.T) {
 func TestClusterInvalidationFollowsRebuiltOwnerUUID(t *testing.T) {
 	cluster := &nodeCluster{self: clusterMember{ID: "local"}}
 	cluster.initializeManager()
-	peer := &mosiPeer{outgoing: make(chan mosiMessage, 4), done: make(chan struct{})}
+	peer := &mosiPeer{outgoing: newMosiMailbox(), done: make(chan struct{})}
 	cluster.view.Store(&clusterView{links: []*clusterLink{{member: clusterMember{ID: "owner"}, peer: peer}}})
 	r := cluster.manager
 	from := mosiResource{Database: "tenant", Table: "items", Shard: uuid.NewString()}
@@ -441,7 +441,7 @@ func TestClusterReferenceAcknowledgesInstalledGrant(t *testing.T) {
 	shard := tbl.ActiveShards()[0]
 	cluster := &nodeCluster{self: clusterMember{ID: "local"}}
 	cluster.initializeManager()
-	peer := &mosiPeer{outgoing: make(chan mosiMessage, 4), done: make(chan struct{})}
+	peer := &mosiPeer{outgoing: newMosiMailbox(), done: make(chan struct{})}
 	cluster.view.Store(&clusterView{links: []*clusterLink{{member: clusterMember{ID: "memcp://11111111-1111-4111-8111-111111111111"}, peer: peer}}})
 	r := cluster.manager
 	resource := r.shardResource(shard)
@@ -455,7 +455,7 @@ func TestClusterReferenceAcknowledgesInstalledGrant(t *testing.T) {
 	if err := cluster.installReference("memcp://11111111-1111-4111-8111-111111111111", packet); err != nil {
 		t.Fatal(err)
 	}
-	ack := <-peer.outgoing
+	ack := takeMosi(peer.outgoing)
 	if ack.Packet == nil || ack.Packet.Kind != "ack" || cell.ownstate.Phase() != mosi.S || cell.clusterstate.Phase() != mosi.S {
 		t.Fatal("reference acknowledged before publishing its installed grant")
 	}
@@ -589,8 +589,8 @@ func TestClusterHandoverAckKeepsNewerInboundGrant(t *testing.T) {
 	oldest.Shard = uuid.NewString()
 	r.forwardResource(previous, resource)
 	r.forwardResource(oldest, previous)
-	peer := &mosiPeer{outgoing: make(chan mosiMessage, 8), done: make(chan struct{})}
-	schemaPeer := &mosiPeer{outgoing: make(chan mosiMessage, 1), done: make(chan struct{})}
+	peer := &mosiPeer{outgoing: newMosiMailbox(), done: make(chan struct{})}
+	schemaPeer := &mosiPeer{outgoing: newMosiMailbox(), done: make(chan struct{})}
 	cluster.view.Store(&clusterView{links: []*clusterLink{{member: clusterMember{ID: "remote"}, peer: peer}, {member: clusterMember{ID: "schema-owner"}, peer: schemaPeer}}})
 	schema := mosiResource{Database: tbl.schema.Name}
 	r.resourceCell(schema).ownstate.Establish(mosi.S)
@@ -604,13 +604,14 @@ func TestClusterHandoverAckKeepsNewerInboundGrant(t *testing.T) {
 	// A generation route must be acknowledged before its reference can wake
 	// the next writer. It still names the source until the handover completes.
 	select {
-	case message := <-schemaPeer.outgoing:
+	case <-schemaPeer.outgoing.ready:
+		message := takeMosi(schemaPeer.outgoing)
 		var update struct {
 			Return string
 			Method string
 			Data   []replicaRecord
 		}
-		if err := json.Unmarshal(message.Data, &update); err != nil {
+		if err := unmarshalNode(message.Data, &update); err != nil {
 			t.Fatal(err)
 		}
 		if update.Method != "cluster.location_update" {
@@ -640,7 +641,7 @@ func TestClusterHandoverAckKeepsNewerInboundGrant(t *testing.T) {
 				t.Fatalf("historical lookup lost route or gained authority: %+v %v", entry, err)
 			}
 		}
-		if len(peer.outgoing) != 0 {
+		if peer.outgoing.len() != 0 {
 			t.Fatal("reference preceded schema location acknowledgement")
 		}
 		route, _ := cluster.service.returns.Load(update.Return)
@@ -650,7 +651,8 @@ func TestClusterHandoverAckKeepsNewerInboundGrant(t *testing.T) {
 	}
 	var header mosiPacket
 	select {
-	case message := <-peer.outgoing:
+	case <-peer.outgoing.ready:
+		message := takeMosi(peer.outgoing)
 		header = *message.Packet
 		if header.Kind != "reference" || header.State != "M" {
 			t.Fatalf("unexpected handover: %+v", header)
@@ -695,7 +697,7 @@ func TestClusterReferenceGrantSurvivesInvalidSuccessor(t *testing.T) {
 	remote := "memcp://11111111-1111-4111-8111-111111111111"
 	cluster := &nodeCluster{self: clusterMember{ID: "local"}}
 	cluster.initializeManager()
-	peer := &mosiPeer{outgoing: make(chan mosiMessage, 4), done: make(chan struct{})}
+	peer := &mosiPeer{outgoing: newMosiMailbox(), done: make(chan struct{})}
 	cluster.view.Store(&clusterView{links: []*clusterLink{{member: clusterMember{ID: remote}, peer: peer}}})
 	r := cluster.manager
 	target := r.shardResource(shard)
@@ -722,7 +724,7 @@ func TestClusterReferenceGrantSurvivesInvalidSuccessor(t *testing.T) {
 	if err := cluster.installReference(remote, packet); err != nil {
 		t.Fatal(err)
 	}
-	ack := <-peer.outgoing
+	ack := takeMosi(peer.outgoing)
 	current := r.resourceCell(target)
 	if ack.Packet == nil || ack.Packet.Kind != "ack" || current.ownstate.Phase() != mosi.M || current.clusterstate.Phase() != mosi.M {
 		t.Fatalf("reference ACK lost the pending writer: phase=%s", current.ownstate.Phase())
@@ -898,7 +900,7 @@ func TestClusterPartitionInsertReleasesWritersBeforeRemoteAcquire(t *testing.T) 
 	defer cancel()
 	cluster.ctx = ctx
 	owner := clusterMember{ID: "memcp://" + uuid.NewString(), Boot: uuid.NewString()}
-	peer := &mosiPeer{ctx: ctx, done: make(chan struct{}), outgoing: make(chan mosiMessage, 1)}
+	peer := &mosiPeer{ctx: ctx, done: make(chan struct{}), outgoing: newMosiMailbox()}
 	cluster.view.Store(&clusterView{members: []clusterMember{cluster.self, owner}, links: []*clusterLink{{member: owner, peer: peer}}})
 	mounts := sharedClusterMounts.Swap(&map[string]bool{tbl.schema.Name: true})
 	defer sharedClusterMounts.Store(mounts)
@@ -922,7 +924,8 @@ func TestClusterPartitionInsertReleasesWritersBeforeRemoteAcquire(t *testing.T) 
 		tbl.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(1)}, {scm.NewInt(11)}}, nil, scm.NewNil(), false, nil)
 	}()
 	select {
-	case <-peer.outgoing:
+	case <-peer.outgoing.ready:
+		takeMosi(peer.outgoing)
 	case <-time.After(5 * time.Second):
 		t.Fatal("INSERT did not request its remote M")
 	}
@@ -960,7 +963,7 @@ func TestClusterLocationBatchRejectsBeforePublishing(t *testing.T) {
 	foreign := valid
 	foreign.Resource.Database = "other"
 	for _, entries := range [][]replicaRecord{nil, {}, {valid, foreign}} {
-		payload, err := json.Marshal(entries)
+		payload, err := marshalNode(entries)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -971,7 +974,7 @@ func TestClusterLocationBatchRejectsBeforePublishing(t *testing.T) {
 			t.Fatal("invalid batch published its valid prefix")
 		}
 	}
-	payload, _ := json.Marshal([]replicaRecord{valid})
+	payload, _ := marshalNode([]replicaRecord{valid})
 	if _, err := cluster.handleLocations(context.Background(), "unintroduced", "cluster.location_update", payload); err == nil {
 		t.Fatal("unauthenticated member published a location")
 	}
@@ -988,7 +991,7 @@ func TestClusterInsertSelectsUniqueDomainOwnerWithoutClaiming(t *testing.T) {
 	tbl.PShards = []*storageShard{left, right}
 	tbl.publishTopologyLocked()
 	cluster := globalTestCluster(t, tbl.schema.Name)
-	peer := &mosiPeer{ctx: context.Background(), done: make(chan struct{}), outgoing: make(chan mosiMessage, 1)}
+	peer := &mosiPeer{ctx: context.Background(), done: make(chan struct{}), outgoing: newMosiMailbox()}
 	cluster.view.Store(&clusterView{links: []*clusterLink{{member: clusterMember{ID: "owner"}, peer: peer}}})
 	mounts := sharedClusterMounts.Swap(&map[string]bool{tbl.schema.Name: true})
 	defer sharedClusterMounts.Store(mounts)
@@ -1021,7 +1024,8 @@ func TestClusterInsertSelectsUniqueDomainOwnerWithoutClaiming(t *testing.T) {
 		t.Fatal("free-shard UNIQUE ignored the common input owner")
 	}
 	select {
-	case <-peer.outgoing:
+	case <-peer.outgoing.ready:
+		takeMosi(peer.outgoing)
 		t.Fatal("placement queried or claimed known MOSI state")
 	default:
 	}

@@ -131,7 +131,7 @@ func delegateShardLookup(tx *TxContext, shard *storageShard, access scanAccess, 
 		panic(failure)
 	}
 	invocation := shardScanInvocation{operator: operator, tx: tx, access: access, callbackCols: columns,
-		condition: scm.Eval(scm.Read("remote lookup", "(lambda () true)"), &scm.Globalenv)}
+		condition: scm.Eval(scm.Read("remote lookup", "(lambda () true)", true), &scm.Globalenv)}
 	result := invocation.delegate(shard, delegation)
 	if result.err.r != nil {
 		panic(result.err)

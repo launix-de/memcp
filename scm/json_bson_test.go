@@ -176,7 +176,7 @@ func TestBSONSchemeSerializationRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	serialized := SerializeToString(value, &Globalenv)
-	restored := Eval(Read("BSON serialization test", serialized), &Globalenv)
+	restored := Eval(Read("BSON serialization test", serialized, true), &Globalenv)
 	if !restored.IsBSON() || !Equal(value, restored) {
 		t.Fatalf("BSON Scheme roundtrip failed: source=%s serialized=%s restored=%s", value.String(), serialized, restored.String())
 	}

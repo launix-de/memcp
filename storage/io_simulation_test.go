@@ -93,7 +93,7 @@ func TestClusterReceiveThrottlesMessagesAndJoinsCancellation(t *testing.T) {
 		if err != nil {
 			return
 		}
-		serverPeer <- newMosiPeer(conn, func(context.Context, string, json.RawMessage) (any, error) { return true, nil }, nil)
+		serverPeer <- newMosiPeer(conn, func(context.Context, string, []byte) (any, error) { return true, nil }, nil)
 	}))
 	defer server.Close()
 	conn, _, err := websocket.DefaultDialer.Dial("ws"+server.URL[4:]+"/cluster", nil)

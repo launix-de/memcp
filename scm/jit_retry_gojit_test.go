@@ -106,7 +106,7 @@ func TestJITNestedBufferRetryCaptures(t *testing.T) {
 }
 
 func BenchmarkJITNestedBufferRetry(b *testing.B) {
-	expression := Optimize(Read("nested-retry", jitRetryNestedSource(3)), &Globalenv, nil)
+	expression := Optimize(Read("nested-retry", jitRetryNestedSource(3), true), &Globalenv, nil)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		compiled := jitCompile(Eval(expression, &Globalenv))

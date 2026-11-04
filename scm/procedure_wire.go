@@ -13,9 +13,8 @@ package scm
 import "fmt"
 import "maps"
 import "bytes"
-import "encoding/json"
 
-const procedureWireVersion = 2
+const procedureWireVersion = 3
 const maxProcedureWireBytes = 256 * 1024
 
 // MarshalProcedure closes explicit captures through the existing serializer.
@@ -50,18 +49,15 @@ func MarshalProcedure(value Scmer, bindings ...*SerializationContext) (data []by
 		bindings = []*SerializationContext{new(SerializationContext)}
 	}
 	closed := CloseProcedure(value)
-	bindings[0].prepare(closed, false)
 	proc := closed.Proc()
 	bound := procedureWireBindings(proc.Params, proc.Body, nil)
 	if err := validateProcedureWire(proc.Body, bound, value.Proc().En, false, 0, bindings...); err != nil {
 		return nil, err
 	}
 	var source bytes.Buffer
+	source.WriteByte(procedureWireVersion)
 	Serialize(&source, closed, &Globalenv, bindings...)
-	data, err = json.Marshal(struct {
-		Version int    `json:"version"`
-		Source  string `json:"source"`
-	}{procedureWireVersion, source.String()})
+	data = source.Bytes()
 	if len(data) > maxProcedureWireBytes {
 		return nil, fmt.Errorf("procedure exceeds wire size limit")
 	}
@@ -84,17 +80,11 @@ func UnmarshalProcedure(data []byte, options ...ProcedureDecode) (value Scmer, e
 	if len(data) > maxProcedureWireBytes {
 		return NewNil(), fmt.Errorf("procedure exceeds wire size limit")
 	}
-	var envelope struct {
-		Version int    `json:"version"`
-		Source  string `json:"source"`
-	}
-	if err := json.Unmarshal(data, &envelope); err != nil {
-		return NewNil(), err
-	}
-	if envelope.Version != procedureWireVersion {
+	if len(data) == 0 || data[0] != procedureWireVersion {
 		return NewNil(), fmt.Errorf("unsupported procedure envelope")
 	}
-	tokens := tokenize("remote procedure", envelope.Source)
+	source := string(data[1:])
+	tokens := tokenize("remote procedure", source, false)
 	expression := readFrom(&tokens)
 	items, ok := scmerAsSlice(expression)
 	if !ok || (len(items) != 3 && len(items) != 4) || !scmerIsSymbol(items[0], "lambda") || len(tokens) != 0 {
@@ -142,7 +132,7 @@ func UnmarshalProcedure(data []byte, options ...ProcedureDecode) (value Scmer, e
 	}
 	// Capture constructors have run exactly once; now build the callable and
 	// enclosed scope. Ordinary query code remains inert until invocation.
-	return Eval(Optimize(expression, &Globalenv, nil), &Globalenv), nil
+	return CompileJIT(Eval(Optimize(expression, &Globalenv, nil), &Globalenv), true), nil
 }
 
 func procedureWireBindings(params, body Scmer, parent map[Symbol]struct{}) map[Symbol]struct{} {

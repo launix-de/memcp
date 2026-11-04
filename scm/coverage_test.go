@@ -72,13 +72,13 @@ func TestSourceCoverageRegistrySupportsConcurrentCompilation(t *testing.T) {
 func TestSourceCoverageTracksInterpreterExecutionOnly(t *testing.T) {
 	env := newOptimizerTestEnv()
 	optimizedSource := "coverage-optimizer-only.scm"
-	Optimize(Read(optimizedSource, `(if true (+ 1 2) (+ 3 4))`), env, nil)
+	Optimize(Read(optimizedSource, `(if true (+ 1 2) (+ 3 4))`, true), env, nil)
 	if covered, total := sourceCoverageCounts(optimizedSource); total != 3 || covered != 0 {
 		t.Fatalf("optimizer marked source coverage: covered=%d total=%d", covered, total)
 	}
 
 	runtimeSource := "coverage-interpreter.scm"
-	Eval(Read(runtimeSource, `(if true (+ 1 2) (+ 3 4))`), env)
+	Eval(Read(runtimeSource, `(if true (+ 1 2) (+ 3 4))`, true), env)
 	if covered, total := sourceCoverageCounts(runtimeSource); total != 3 || covered != 2 {
 		t.Fatalf("interpreter coverage = %d/%d, want selected branch plus root = 2/3", covered, total)
 	}
@@ -87,7 +87,7 @@ func TestSourceCoverageTracksInterpreterExecutionOnly(t *testing.T) {
 	SettingsTrackSourceCoverage = true
 	defer func() { SettingsTrackSourceCoverage = previous }()
 	preservedSource := "coverage-optimized-runtime.scm"
-	optimized := Optimize(Read(preservedSource, `(lambda (x) (+ x 1))`), env, nil)
+	optimized := Optimize(Read(preservedSource, `(lambda (x) (+ x 1))`, true), env, nil)
 	if covered, total := sourceCoverageCounts(preservedSource); total != 3 || covered != 0 {
 		t.Fatalf("coverage-preserving optimizer marked source coverage: covered=%d total=%d", covered, total)
 	}

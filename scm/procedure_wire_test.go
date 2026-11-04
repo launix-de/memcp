@@ -12,6 +12,7 @@ package scm
 
 import "fmt"
 import "math"
+import "time"
 import "bytes"
 import "context"
 import "strings"
@@ -71,7 +72,7 @@ func TestProcedureWireSnapshotsCapturesAndRunsWithoutSourceEnvironment(t *testin
 			`(lambda (row) (lambda (other) (+ row other)))`,
 		} {
 			env := &Env{Vars: Vars{Symbol("captured"): NewInt(7)}, Outer: &Globalenv}
-			value := Read(t.Name(), source)
+			value := Read(t.Name(), source, true)
 			if optimize {
 				value = Optimize(value, env, nil)
 			}
@@ -86,8 +87,8 @@ func TestProcedureWireSnapshotsCapturesAndRunsWithoutSourceEnvironment(t *testin
 			if err != nil {
 				t.Fatal(err)
 			}
-			if restored.Proc().En != &Globalenv || restored.Proc().nativeCode() != 0 {
-				t.Fatal("receiver retained source environment or executable code")
+			if restored.Proc().En != &Globalenv {
+				t.Fatal("receiver retained source environment")
 			}
 			got := Apply(restored, NewInt(3))
 			if got.IsProc() {
@@ -103,7 +104,7 @@ func TestProcedureWireSnapshotsCapturesAndRunsWithoutSourceEnvironment(t *testin
 func TestProcedureWirePreservesNativeDateCaptures(t *testing.T) {
 	for _, captured := range []Scmer{NewDate(1729987200), NewDateWithZone(-12345, 2047)} {
 		env := &Env{Vars: Vars{Symbol("captured"): captured}, Outer: &Globalenv}
-		original := Eval(Read(t.Name(), `(lambda () captured)`), env)
+		original := Eval(Read(t.Name(), `(lambda () captured)`, true), env)
 		data, err := MarshalProcedure(original)
 		if err != nil {
 			t.Fatal(err)
@@ -122,7 +123,7 @@ func TestProcedureWirePreservesNativeDateCaptures(t *testing.T) {
 func TestProcedureWirePreservesFloatingCaptures(t *testing.T) {
 	for _, number := range []float64{1, -1, 0, math.Copysign(0, -1), 6.87951631854206e14, 1e-20, math.Inf(1), math.Inf(-1), math.NaN()} {
 		env := &Env{Vars: Vars{Symbol("captured"): NewFloat(number)}, Outer: &Globalenv}
-		original := Eval(Read(t.Name(), `(lambda () (list captured 37))`), env)
+		original := Eval(Read(t.Name(), `(lambda () (list captured 37))`, true), env)
 		data, err := MarshalProcedure(original)
 		if err != nil {
 			t.Fatal(err)
@@ -150,7 +151,7 @@ func TestProcedureWireRejectsRuntimeCapturesAndSnapshotsNestedBindings(t *testin
 	} {
 		t.Run(name, func(t *testing.T) {
 			env := &Env{Vars: Vars{Symbol("captured"): captured}, Outer: &Globalenv}
-			value := Eval(Read(t.Name(), `(lambda () captured)`), env)
+			value := Eval(Read(t.Name(), `(lambda () captured)`, true), env)
 			if _, err := MarshalProcedure(value); err == nil {
 				t.Fatal("process-local capture was accepted")
 			}
@@ -158,7 +159,7 @@ func TestProcedureWireRejectsRuntimeCapturesAndSnapshotsNestedBindings(t *testin
 	}
 	// Nested named captures now snapshot the source just like numbered ones.
 	env := &Env{Vars: Vars{Symbol("wire_nested_capture"): NewInt(7)}, Outer: &Globalenv}
-	value := Eval(Read(t.Name(), `(lambda (row) (lambda () (+ row wire_nested_capture)))`), env)
+	value := Eval(Read(t.Name(), `(lambda (row) (lambda () (+ row wire_nested_capture)))`, true), env)
 	data, err := MarshalProcedure(value)
 	if err != nil {
 		t.Fatal(err)
@@ -183,7 +184,7 @@ func TestProcedureWireRejectsInvalidEnvelopesAndBounds(t *testing.T) {
 		}
 	}
 	env := &Env{Vars: Vars{Symbol("large"): NewString(strings.Repeat("x", maxProcedureWireBytes))}, Outer: &Globalenv}
-	if _, err := MarshalProcedure(Eval(Read(t.Name(), `(lambda () large)`), env)); err == nil {
+	if _, err := MarshalProcedure(Eval(Read(t.Name(), `(lambda () large)`, true), env)); err == nil {
 		t.Fatal("oversized captured payload accepted")
 	}
 }
@@ -202,8 +203,8 @@ func TestProcedureWireJITCaptures(t *testing.T) {
 	if got := Apply(restored, NewInt(3)); got.Int() != 10 {
 		t.Fatalf("JIT capture roundtrip returned %v", got)
 	}
-	if restored.Proc().nativeCode() != 0 || restored.Proc().Compiled != nil {
-		t.Fatal("wire retained process-local JIT metadata")
+	if jitEnabled && restored.Proc().nativeCode() == 0 {
+		t.Fatal("receiver did not compile the transferred lambda")
 	}
 }
 
@@ -214,7 +215,7 @@ func TestProcedureWireCapturedData(t *testing.T) {
 		NewSlice([]Scmer{NewString("key"), NewSlice([]Scmer{NewInt(17)})}),
 	} {
 		env := &Env{Vars: Vars{Symbol("captured"): captured}, Outer: &Globalenv}
-		data, err := MarshalProcedure(Eval(Read(t.Name(), `(lambda () captured)`), env))
+		data, err := MarshalProcedure(Eval(Read(t.Name(), `(lambda () captured)`, true), env))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -228,21 +229,21 @@ func TestProcedureWireCapturedData(t *testing.T) {
 	}
 	Globalenv.Vars[Symbol("wire_test_global")] = NewInt(7)
 	defer delete(Globalenv.Vars, Symbol("wire_test_global"))
-	if _, err := MarshalProcedure(Eval(Read(t.Name(), `(lambda () wire_test_global)`), &Globalenv)); err == nil {
+	if _, err := MarshalProcedure(Eval(Read(t.Name(), `(lambda () wire_test_global)`, true), &Globalenv)); err == nil {
 		t.Fatal("mutable global was implicitly rebound at the receiver")
 	}
 }
 
 func TestProcedureWireUsesSchemeSerializeAndDoesNotEvaluateBody(t *testing.T) {
-	original := Eval(Read(t.Name(), `(lambda (row) (+ row 7))`), &Globalenv)
+	original := Eval(Read(t.Name(), `(lambda (row) (+ row 7))`, true), &Globalenv)
 	data, err := MarshalProcedure(original)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(data, []byte(`"source":"(lambda `)) || bytes.Contains(data, []byte(`"code"`)) {
+	if !bytes.HasPrefix(data, []byte{procedureWireVersion}) || !bytes.Contains(data, []byte(`(lambda `)) || bytes.Contains(data, []byte(`"code"`)) {
 		t.Fatalf("wire is not Scheme Serialize source: %s", data)
 	}
-	if _, err := UnmarshalProcedure([]byte(`{"version":2,"source":"(lambda () (error \"not during decoding\"))"}`)); err != nil {
+	if _, err := UnmarshalProcedure(append([]byte{procedureWireVersion}, `(lambda () (error "not during decoding"))`...)); err != nil {
 		t.Fatal(err)
 	}
 	for _, source := range []string{
@@ -250,7 +251,7 @@ func TestProcedureWireUsesSchemeSerializeAndDoesNotEvaluateBody(t *testing.T) {
 		`(lambda () 1) (error "trailing program")`,
 		`(lambda () 1 (error "frame is code"))`,
 	} {
-		data := []byte(fmt.Sprintf(`{"version":2,"source":%q}`, source))
+		data := append([]byte{procedureWireVersion}, source...)
 		if _, err := UnmarshalProcedure(data); err == nil {
 			t.Fatalf("accepted executable envelope: %s", source)
 		}
@@ -268,7 +269,7 @@ func TestProcedureWireStatementSessionBindingsAreFrozen(t *testing.T) {
 	}
 	bindings := &SerializationContext{Export: export}
 	run := func(key string, bindings *SerializationContext) Scmer {
-		proc := Eval(Read(t.Name(), `(lambda (x) (+ x (session "`+key+`")))`), env)
+		proc := Eval(Read(t.Name(), `(lambda (x) (+ x (session "`+key+`")))`, true), env)
 		data, err := MarshalProcedure(proc, bindings)
 		if err != nil {
 			t.Fatal(err)
@@ -304,7 +305,7 @@ func TestProcedureWireRuntimeReferencesInsideQuotedCapturesKeepIdentity(t *testi
 		return ClusterReference{URI: "http://owner/cluster/session", Token: "one", Type: object.ClusterObjectType(), View: data}, nil
 	}}
 	env := &Env{Vars: Vars{Symbol("captured"): NewSlice([]Scmer{NewSymbol("label"), session, session})}, Outer: &Globalenv}
-	data, err := MarshalProcedure(Eval(Read(t.Name(), `(lambda () captured)`), env), bindings)
+	data, err := MarshalProcedure(Eval(Read(t.Name(), `(lambda () captured)`, true), env), bindings)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -351,7 +352,7 @@ func TestProcedureWireStandaloneObjectOwnsSerialization(t *testing.T) {
 	object := &standaloneSerializableValue{}
 	var source bytes.Buffer
 	Serialize(&source, NewAny(object), &Globalenv)
-	value := Eval(Read(t.Name(), source.String()), &Globalenv)
+	value := Eval(Read(t.Name(), source.String(), true), &Globalenv)
 	if !Equal(value, NewSlice([]Scmer{NewString("portable"), NewInt(42)})) || object.calls != 1 {
 		t.Fatal("standalone serializer did not dispatch to its object's representation", source.String(), object.calls)
 	}
@@ -374,7 +375,7 @@ func TestProcedureWireStandaloneObjectOwnsSerialization(t *testing.T) {
 }
 
 func TestProcedureWireEmbeddingPreparesBeforeCompilation(t *testing.T) {
-	proc := Eval(Read(t.Name(), `(lambda (x) (+ x 1))`), &Globalenv)
+	proc := Eval(Read(t.Name(), `(lambda (x) (+ x 1))`, true), &Globalenv)
 	data, err := MarshalProcedure(proc)
 	if err != nil {
 		t.Fatal(err)
@@ -459,7 +460,7 @@ func TestProcedureWireDictionaryConstructorMaterializesBeforeInvocation(t *testi
 		dict.Set(NewInt(int64(i)), NewInt(int64(i+1)), nil)
 	}
 	env := &Env{Vars: Vars{Symbol("captured"): NewFastDict(dict)}, Outer: &Globalenv}
-	original := Eval(Read(t.Name(), `(lambda () captured)`), env)
+	original := Eval(Read(t.Name(), `(lambda () captured)`, true), env)
 	data, err := MarshalProcedure(original)
 	if err != nil {
 		t.Fatal(err)
@@ -551,7 +552,7 @@ func capturedHandleTestFunction(value int64) func(...Scmer) Scmer {
 func TestNativeClosureDoesNotAliasBuiltinWithSameCode(t *testing.T) {
 	Declare(&Globalenv, &Declaration{Name: "test_handle_same_code", Fn: capturedHandleTestFunction(7), Type: &TypeDescriptor{Kind: "func", Return: &TypeDescriptor{Kind: "int"}}})
 	env := &Env{Vars: Vars{Symbol("captured"): NewFunc(capturedHandleTestFunction(19))}, Outer: &Globalenv}
-	proc := Eval(Read(t.Name(), `(lambda () (captured))`), env)
+	proc := Eval(Read(t.Name(), `(lambda () (captured))`, true), env)
 	var exported Handle
 	bindings := (&SerializationContext{}).WithHandleExport(func(handle Handle) (Scmer, error) {
 		exported = handle
@@ -579,7 +580,7 @@ func TestProcedureWireRegexpOperators(t *testing.T) {
 		{`(lambda (s) (regexp_matches s "[a-z]+"))`, "(abc)"},
 	} {
 		for _, optimize := range []bool{false, true} {
-			expression := Read(t.Name(), test.source)
+			expression := Read(t.Name(), test.source, true)
 			if optimize {
 				expression = Optimize(expression, &Globalenv, nil)
 			}
@@ -609,7 +610,7 @@ func TestProcedureWireRegexpOperators(t *testing.T) {
 func TestProcedureWireMatchBranchBindings(t *testing.T) {
 	for _, optimize := range []bool{false, true} {
 		env := &Env{Vars: Vars{Symbol("head"): NewInt(99), Symbol("bonus"): NewInt(4)}, Outer: &Globalenv}
-		expression := Read(t.Name(), `(lambda (row) (match row (cons head tail) (+ head (count tail) bonus) _ bonus))`)
+		expression := Read(t.Name(), `(lambda (row) (match row (cons head tail) (+ head (count tail) bonus) _ bonus))`, true)
 		if optimize {
 			expression = Optimize(expression, env, nil)
 		}
@@ -633,7 +634,7 @@ func TestProcedureWireMatchBranchBindings(t *testing.T) {
 		`(lambda (row) (match row (eval missing_wire_binding) true _ false))`,
 		`(lambda (row) (begin (match row (cons head tail) head _ 0) tail))`,
 	} {
-		if _, err := MarshalProcedure(Eval(Read(t.Name(), source), &Globalenv)); err == nil {
+		if _, err := MarshalProcedure(Eval(Read(t.Name(), source, true), &Globalenv)); err == nil {
 			t.Fatalf("accepted unbound lexical read: %s", source)
 		}
 	}
@@ -643,7 +644,7 @@ func TestProcedureWireClosesCaptureUsedByNestedLambda(t *testing.T) {
 	source := `(lambda (key) (lambda (acc row)
 		((lambda (a b) (list a b)) acc
 			((lambda (nested) (+ key row nested)) 3))))`
-	factory := Eval(Optimize(Read(t.Name(), source), &Globalenv, nil), &Globalenv)
+	factory := Eval(Optimize(Read(t.Name(), source, true), &Globalenv, nil), &Globalenv)
 	callback := Apply(factory, NewInt(7))
 	want := NewSlice([]Scmer{NewNil(), NewInt(12)})
 	if got := Apply(callback, NewNil(), NewInt(2)); !Equal(got, want) {
@@ -674,7 +675,7 @@ func TestProcedureWireKeepsInvocationScopesWhileClosingNestedCaptures(t *testing
 	} {
 		for _, optimized := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/optimized=%v", test.name, optimized), func(t *testing.T) {
-				expression := Read(t.Name(), test.source)
+				expression := Read(t.Name(), test.source, true)
 				if optimized {
 					expression = Optimize(expression, &Globalenv, nil)
 				}
@@ -704,7 +705,7 @@ func TestClosedProcedurePreservesNestedLambdaBindingProofs(t *testing.T) {
 	source := `(lambda (external) (lambda (row)
 		(list ((lambda (value) (+ value row)) external)
 			(lambda (other) (+ other external)))))`
-	factory := Eval(Optimize(Read(t.Name(), source), &Globalenv, nil), &Globalenv)
+	factory := Eval(Optimize(Read(t.Name(), source, true), &Globalenv, nil), &Globalenv)
 	closed := CloseProcedure(Apply(factory, NewInt(7)))
 	checked := 0
 	var visit func(Scmer)
@@ -745,7 +746,7 @@ func TestClosedProcedureKeepsUnchangedMatchBody(t *testing.T) {
 	for _, optimized := range []bool{false, true} {
 		t.Run(fmt.Sprintf("optimized=%v", optimized), func(t *testing.T) {
 			env := &Env{Vars: make(Vars), Outer: &Globalenv}
-			expression := Read(t.Name(), `(lambda (row) (match row (cons head tail) head _ 0))`)
+			expression := Read(t.Name(), `(lambda (row) (match row (cons head tail) head _ 0))`, true)
 			if optimized {
 				expression = Optimize(expression, env, nil)
 			}
@@ -758,5 +759,62 @@ func TestClosedProcedureKeepsUnchangedMatchBody(t *testing.T) {
 				t.Fatalf("closed match returned %s", String(got))
 			}
 		})
+	}
+}
+
+type outputPipelineOwner struct{ finish func() }
+
+func (owner *outputPipelineOwner) RetainQueryWork(finish func()) bool {
+	owner.finish = finish
+	return true
+}
+
+func TestOutputHandlesPipelineBeforeAcknowledgement(t *testing.T) {
+	owner := &outputPipelineOwner{}
+	deliveries := make(chan Scmer, 4)
+	result := NewBool(true)
+	callback := &clusterCallback{batchResult: &result, endpoint: HandleFunc(func(value Scmer) { deliveries <- value })}
+	output, err := callback.bindOutput(context.Background(), owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	producer := make(chan struct{})
+	go func() {
+		defer close(producer)
+		for i := 0; i < 256; i++ {
+			Apply(output, NewInt(int64(i)))
+		}
+	}()
+	var replies []Handle
+	for i := 0; i < 4; i++ {
+		select {
+		case value := <-deliveries:
+			if len(value.Slice()[0].Slice()[0].Slice()) != 64 {
+				t.Fatal("incomplete batch")
+			}
+			replies = append(replies, value.Slice()[1].Any().(Handle))
+		case <-time.After(time.Second):
+			t.Fatal("sender waited for a previous callback")
+		}
+	}
+	select {
+	case <-producer:
+	case <-time.After(time.Second):
+		t.Fatal("four admitted batches blocked producer")
+	}
+	joined := make(chan struct{})
+	go func() { defer close(joined); owner.finish() }()
+	select {
+	case <-joined:
+		t.Fatal("cleanup omitted pending callbacks")
+	case <-time.After(10 * time.Millisecond):
+	}
+	for _, reply := range replies {
+		reply.Handle(NewNil())
+	}
+	select {
+	case <-joined:
+	case <-time.After(time.Second):
+		t.Fatal("return handles did not wake cleanup")
 	}
 }

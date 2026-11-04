@@ -33,7 +33,7 @@ func TestJITResolvedSpecialFormLiteral(t *testing.T) {
 		`(lambda (x) (list !begin x))`,
 		`(lambda (x) (lambda () (list !begin x)))`,
 	} {
-		expression := resolve(Optimize(Read(t.Name(), source), &Globalenv, nil))
+		expression := resolve(Optimize(Read(t.Name(), source, true), &Globalenv, nil))
 		proc := jitCompile(Eval(expression, &Globalenv))
 		if proc.Proc() == nil || proc.Proc().JITCode == 0 {
 			t.Fatalf("resolved literal did not compile: %s", source)

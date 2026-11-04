@@ -24,7 +24,7 @@ import (
 
 func optimizedScanProc(tb testing.TB, source string) scm.Scmer {
 	tb.Helper()
-	return scm.Eval(scm.Optimize(scm.Read("scan pipeline benchmark", source), &scm.Globalenv, nil), &scm.Globalenv)
+	return scm.Eval(scm.Optimize(scm.Read("scan pipeline benchmark", source, true), &scm.Globalenv, nil), &scm.Globalenv)
 }
 
 func TestScanPipelineSpecializationsPreserveMainAndDeltaResults(t *testing.T) {

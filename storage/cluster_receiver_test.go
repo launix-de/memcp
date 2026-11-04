@@ -410,15 +410,17 @@ func TestClusterReceiverFailureAdvancesFIFO(t *testing.T) {
 	}
 }
 
-func TestClusterReceiverImportedCloseCancelsBlockedSend(t *testing.T) {
+func TestClusterReceiverImportedCloseCancelsPendingReply(t *testing.T) {
 	service := &nodeScanService{}
-	peer := &mosiPeer{done: make(chan struct{}), outgoing: make(chan mosiMessage)}
+	peer := &mosiPeer{done: make(chan struct{}), outgoing: newMosiMailbox()}
 	entered := make(chan struct{})
 	value, err := scm.ReconstructClusterObject(scm.ClusterHandle{
 		Reference: scm.ClusterReference{Type: "receiver"},
 		Call: func(ctx context.Context, _ scm.ClusterRequest) (scm.Scmer, error) {
 			close(entered)
-			return scm.NewNil(), service.control(ctx, peer, "object.call", nil, nil, true)
+			// Imported receive forwards CancelWithoutJoin: Close cancels the
+			// reply wait even when an idle socket writer has not drained publication.
+			return scm.NewNil(), service.control(ctx, peer, "object.call", nil, nil, false)
 		},
 	})
 	if err != nil {

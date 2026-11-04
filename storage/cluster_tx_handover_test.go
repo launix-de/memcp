@@ -185,7 +185,7 @@ func TestClusterDecisionAcquiresWriteBeforeClosingMigration(t *testing.T) {
 			defer cancel()
 			cluster.ctx = ctx
 			owner := clusterMember{ID: "memcp://" + uuid.NewString(), Boot: uuid.NewString()}
-			peer := &mosiPeer{ctx: ctx, done: make(chan struct{}), outgoing: make(chan mosiMessage, 1)}
+			peer := &mosiPeer{ctx: ctx, done: make(chan struct{}), outgoing: newMosiMailbox()}
 			cluster.view.Store(&clusterView{members: []clusterMember{cluster.self, owner}, links: []*clusterLink{{member: owner, peer: peer}}})
 			mounts := map[string]bool{tbl.schema.Name: true}
 			previousMounts := sharedClusterMounts.Swap(&mounts)
@@ -215,7 +215,8 @@ func TestClusterDecisionAcquiresWriteBeforeClosingMigration(t *testing.T) {
 				}
 			}()
 			select {
-			case <-peer.outgoing:
+			case <-peer.outgoing.ready:
+				takeMosi(peer.outgoing)
 			case <-time.After(5 * time.Second):
 				t.Fatal("decision did not request native M")
 			}

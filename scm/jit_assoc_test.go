@@ -87,7 +87,7 @@ func BenchmarkAssocGeneratedVsNativeBoundary(b *testing.B) {
 			old := declaration.RetainsCallArgs
 			declaration.RetainsCallArgs = force
 			defer func() { declaration.RetainsCallArgs = old }()
-			proc := Eval(Optimize(Read("assoc codegen probe", `(lambda (input value) (set_assoc_mut input "key-0" value))`), &Globalenv, nil), &Globalenv)
+			proc := Eval(Optimize(Read("assoc codegen probe", `(lambda (input value) (set_assoc_mut input "key-0" value))`, true), &Globalenv, nil), &Globalenv)
 			if jitEnabled {
 				proc = jitCompile(proc)
 			}
@@ -114,7 +114,7 @@ func BenchmarkAssocCompilation(b *testing.B) {
 			old := declaration.RetainsCallArgs
 			declaration.RetainsCallArgs = force
 			defer func() { declaration.RetainsCallArgs = old }()
-			expression := Optimize(Read("assoc compile", `(lambda (input value) (set_assoc_mut input "key-0" value))`), &Globalenv, nil)
+			expression := Optimize(Read("assoc compile", `(lambda (input value) (set_assoc_mut input "key-0" value))`, true), &Globalenv, nil)
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
@@ -230,7 +230,7 @@ func TestJITExtractAssocIdentityValues(t *testing.T) {
 			fd.Set(NewString(fmt.Sprint(i)), NewSlice([]Scmer{NewInt(int64(i)), NewString("value")}), nil)
 		}
 		for _, input := range []Scmer{NewFastDict(fd), NewSlice(fd.Pairs)} {
-			native := Apply(Globalenv.Vars["extract_assoc"], input, Eval(Optimize(Read("callback", callback), &Globalenv, nil), &Globalenv))
+			native := Apply(Globalenv.Vars["extract_assoc"], input, Eval(Optimize(Read("callback", callback, true), &Globalenv, nil), &Globalenv))
 			got := Apply(proc, input)
 			if !Equal(got, native) {
 				t.Fatalf("%s input=%d got %s want %s", callback, input.GetTag(), String(got), String(native))

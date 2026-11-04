@@ -168,7 +168,7 @@ func TestJITScanShapedMaintenanceCallbacksCaptureOuterRow(t *testing.T) {
 		(jit_test_scan_shaped_maintenance_callbacks session nil (quote ("k0"))
 			(lambda (value) (equal? value (get_assoc OLD "id")))
 			(quote ("$invalidate:value"))
-			(lambda (acc update) (begin (update) acc)) nil nil false))`), &Globalenv)
+			(lambda (acc update) (begin (update) acc)) nil nil false))`, true), &Globalenv)
 	compiled := CompileJIT(raw, true)
 	if !compiled.IsProc() || compiled.Proc().Compiled == nil {
 		t.Fatal("raw maintenance procedure did not compile")
@@ -612,7 +612,7 @@ func compileJITExpressionTestProc(t testing.TB, source string) Scmer {
 	if !jitEnabled {
 		t.Skip("requires GOEXPERIMENT=jit")
 	}
-	expression := Optimize(Read(t.Name(), source), &Globalenv, nil)
+	expression := Optimize(Read(t.Name(), source, true), &Globalenv, nil)
 	proc := Eval(expression, &Globalenv)
 	compiled := jitCompile(proc)
 	if compiled.GetTag() != tagProc || compiled.Proc() == nil || compiled.Proc().Compiled == nil {
@@ -1029,7 +1029,7 @@ func TestJITExpressionKeepsQueryPlanColumnNames(t *testing.T) {
 				0 0 (session "v1") (list "ID" "post_status" "post_type")
 				(lambda (__scan_acc wp_posts.ID wp_posts.post_status wp_posts.post_type)
 					(resultrow (list "ID" wp_posts.ID "post_status" wp_posts.post_status "post_type" wp_posts.post_type)))
-				4 nil false)))`), testEnv, nil)
+				4 nil false)))`, true), testEnv, nil)
 	compiled := jitCompile(Eval(expression, testEnv))
 	if compiled.GetTag() != tagProc || compiled.Proc() == nil || compiled.Proc().Compiled == nil {
 		t.Fatal("query-plan expression did not compile")
@@ -1173,7 +1173,7 @@ func TestJITExpressionWithSessionRebindsRuntimeEnvironment(t *testing.T) {
 	first := NewFunc(func(...Scmer) Scmer { return NewInt(1) })
 	second := NewFunc(func(...Scmer) Scmer { return NewInt(2) })
 	env := &Env{Vars: Vars{Symbol("session"): first}, Outer: &Globalenv}
-	expression := Optimize(Read(t.Name(), `(lambda () (eval '(session)))`), env, nil)
+	expression := Optimize(Read(t.Name(), `(lambda () (eval '(session)))`, true), env, nil)
 	compiled := jitCompile(Eval(expression, env))
 	if compiled.Proc() == nil || compiled.Proc().Compiled == nil {
 		t.Fatal("runtime-environment closure did not compile")
@@ -1199,7 +1199,7 @@ func TestJITExpressionNestedRuntimeLambdaCapturesNamedEnvironment(t *testing.T) 
 	}
 	expression := Optimize(Read(t.Name(), `(lambda () (begin
 		(define inner (lambda () (begin (eval 'nil) (local_print))))
-		(inner)))`), env, nil)
+		(inner)))`, true), env, nil)
 	compiled := jitCompile(Eval(expression, env))
 	if compiled.Proc() == nil || compiled.Proc().Compiled == nil {
 		t.Fatal("outer runtime-environment closure did not compile")
@@ -1315,7 +1315,7 @@ func TestJITExpressionConsTailOfSingleElementList(t *testing.T) {
 		(match sources
 			(cons src rest) rest
 			_ 'not-a-list))`
-	expression := Optimize(Read(t.Name(), source), &Globalenv, nil)
+	expression := Optimize(Read(t.Name(), source, true), &Globalenv, nil)
 	interpreted := Eval(expression, &Globalenv)
 	proc := *interpreted.Proc()
 	proc.NumVars = 5
@@ -1945,7 +1945,7 @@ func TestJITOptimizedParameterRebindingInGeneratedSyntax(t *testing.T) {
 	} {
 		t.Run(body, func(t *testing.T) {
 			source := `(lambda (unit first last kind) ` + body + `)`
-			expression := Optimize(Read(t.Name(), source), &Globalenv, nil)
+			expression := Optimize(Read(t.Name(), source, true), &Globalenv, nil)
 			t.Log("optimized:", SerializeToString(expression, &Globalenv))
 			proc := Eval(expression, &Globalenv)
 			args := []Scmer{NewString("wk"), NewInt(1), NewInt(2), NewString("INT")}
@@ -2016,7 +2016,7 @@ func TestJITReadOnlyParametersKeepBorrowedFrame(t *testing.T) {
 	if !jitEnabled {
 		t.Skip("requires GOEXPERIMENT=jit")
 	}
-	proc := Eval(Optimize(Read(t.Name(), `(lambda (value) value)`), &Globalenv, nil), &Globalenv)
+	proc := Eval(Optimize(Read(t.Name(), `(lambda (value) value)`, true), &Globalenv, nil), &Globalenv)
 	private := *proc.Proc()
 	// One additional invocation local requires the existing owned-frame path.
 	private.NumVars++
@@ -2153,5 +2153,12 @@ func TestJITExpressionUnicodeRegexpClass(t *testing.T) {
 		if got := Apply(folded, NewString(value)); got.Bool() != want {
 			t.Fatalf("folded Unicode regex %q = %v, want %v", value, got, want)
 		}
+	}
+}
+
+func TestJITRegexpReplacementUsesRuntimeClosure(t *testing.T) {
+	compiled := compileJITExpressionTestProc(t, `(lambda (value suffix) (regexp_replace value "[a-z]+" (lambda (word) (concat (toUpper word) suffix))))`)
+	if got := Apply(compiled, NewString("abc 12 def"), NewString("!")); String(got) != "ABC! 12 DEF!" {
+		t.Fatal("replacement lost runtime closure", got)
 	}
 }
