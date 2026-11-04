@@ -13,6 +13,7 @@ import "context"
 import "runtime"
 import "net/url"
 import "strconv"
+import "sync/atomic"
 import "github.com/launix-de/memcp/scm"
 
 // ClusterObject is shared with the runtime, avoiding a storage dependency in scm.
@@ -265,14 +266,18 @@ func (r *clusterObjectRegistry) dropObjectTokenLocked(reference scm.ClusterRefer
 // Only the last Go reference triggers the network release, outside the GC.
 type clusterObjectLease struct {
 	reference scm.ClusterReference
-	literalMu sync.Mutex
-	literal   weak.Pointer[scm.FastDict]
-	loading   *clusterLiteralLoad
+	state     atomic.Pointer[any]
 }
-type clusterLiteralLoad struct {
-	ready chan struct{}
-	value scm.Scmer
-	err   error
+
+func (lease *clusterObjectLease) LocalState(create func() any) any {
+	if state := lease.state.Load(); state != nil {
+		return *state
+	}
+	candidate := create() // factories run outside registry/publication locks
+	if lease.state.CompareAndSwap(nil, &candidate) {
+		return candidate
+	}
+	return *lease.state.Load()
 }
 
 // Views and TX participants remain invocation-local: deduplicating endpoint
@@ -390,21 +395,11 @@ func (service *nodeScanService) importObject(ctx context.Context, peer *mosiPeer
 		runtime.AddCleanup(lease, finalizeClusterObject, clusterObjectCleanup{registry, peer.objectPeer, lease.reference, identity})
 	}
 	runtime.AddCleanup(imported, cleanupClusterImport, clusterObjectImportCleanup{registry, key, weak.Make(imported)})
-	var literalLoad *clusterLiteralLoad
 	defer func() {
 		if failure := recover(); failure != nil {
 			result, err = scm.NewNil(), fmt.Errorf("cluster object reconstruction: %v", failure)
 		}
-		if literalLoad != nil {
-			lease.literalMu.Lock()
-			if err == nil && result.IsFastDict() {
-				lease.literal = weak.Make(result.FastDict())
-			}
-			literalLoad.value, literalLoad.err = result, err
-			lease.loading = nil // never retain the strong result through its own cleanup lease
-			close(literalLoad.ready)
-			lease.literalMu.Unlock()
-		}
+
 		imported.value, imported.err = result, err
 		close(imported.ready)
 		runtime.KeepAlive(imported)
@@ -415,25 +410,6 @@ func (service *nodeScanService) importObject(ctx context.Context, peer *mosiPeer
 	if err := service.control(ctx, peer, "object.acquire", clusterObjectAcquisition{reference, lease.reference.Token}, nil, true); err != nil {
 		return scm.NewNil(), err
 	}
-	if reference.Type == "literal" {
-		lease.literalMu.Lock()
-		if value := lease.literal.Value(); value != nil {
-			lease.literalMu.Unlock()
-			return scm.NewFastDict(value), nil
-		}
-		if loading := lease.loading; loading != nil {
-			lease.literalMu.Unlock()
-			select {
-			case <-loading.ready:
-				return loading.value, loading.err
-			case <-ctx.Done():
-				return scm.NewNil(), ctx.Err()
-			}
-		}
-		literalLoad = &clusterLiteralLoad{ready: make(chan struct{})}
-		lease.loading = literalLoad
-		lease.literalMu.Unlock()
-	}
 
 	frozen := schemeValue(reference.View)
 	decodedView, err := frozen.reconstruct(scm.ProcedureDecode{ResolveHandle: service.handleResolver(ctx, peer, scm.NewNil()), Resolve: func(child scm.ClusterReference) (scm.Scmer, error) { return service.importObject(ctx, peer, child) }})
@@ -442,17 +418,9 @@ func (service *nodeScanService) importObject(ctx context.Context, peer *mosiPeer
 	}
 	handleReference := reference
 	handleReference.Token = lease.reference.Token
-	handle := scm.ClusterHandle{Reference: handleReference, View: decodedView, Call: service.objectCaller(peer, handleReference, imported)}
+	handle := scm.ClusterHandle{Lifetime: lease, Context: ctx, Reference: handleReference, View: decodedView, Call: service.objectCaller(peer, handleReference, imported)}
 	value, failure := scm.ReconstructClusterObject(handle)
-	if failure == nil && reference.Type == "literal" {
-		if !value.IsFastDict() {
-			return scm.NewNil(), fmt.Errorf("invalid immutable dictionary capture")
-		}
-		dict := value.FastDict()
-		// The cleanup argument retains only the lease, never dict/imported.
-		// This avoids rooting the value through its own cleanup argument.
-		runtime.AddCleanup(dict, func(retained *clusterObjectLease) { runtime.KeepAlive(retained) }, lease)
-	}
+
 	if failure == nil {
 		if source, ok := value.Any().(*remoteShardObject); ok {
 			failure = source.prepareSource(ctx, peer)

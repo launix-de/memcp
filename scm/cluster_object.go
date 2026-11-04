@@ -7,6 +7,8 @@ package scm
 import "fmt"
 import "bytes"
 import "sync"
+import "weak"
+import "runtime"
 import "errors"
 import "context"
 import "unsafe"
@@ -59,7 +61,13 @@ type ClusterReference struct {
 // ClusterHandle is owned by the imported value, not by a transport registry.
 // Keeping a callable/reader alive therefore keeps its remote reference alive.
 // The transport attaches GC cleanup to its private implementation of Call.
+// ClusterLifetime is opaque peer-local ownership. Native factories opt into
+// cache state; the registry never chooses a value's reconstruction/cache policy.
+type ClusterLifetime interface{ LocalState(func() any) any }
+
 type ClusterHandle struct {
+	Lifetime  ClusterLifetime
+	Context   context.Context
 	Reference ClusterReference
 	View      Scmer // decoded immutable owner view, reconstructed before execution
 	Call      func(context.Context, ClusterRequest) (Scmer, error)
@@ -567,12 +575,70 @@ func (ctx *SerializationContext) literal(value Scmer) (*clusterLiteral, error) {
 	}
 	return capture.object, capture.err
 }
-func init() {
-	RegisterClusterObjectType("literal", func(handle ClusterHandle) Scmer {
-		source, err := handle.Call(context.Background(), ClusterRequest{Method: "source"})
-		if err != nil {
-			panic(err)
-		}
-		return Eval(Optimize(Read("immutable cluster capture", source.String(), false), &Globalenv, nil), &Globalenv)
-	})
+
+type clusterLiteralImport struct {
+	mu      sync.Mutex
+	value   weak.Pointer[FastDict]
+	loading *clusterLiteralLoad
 }
+type clusterLiteralLoad struct {
+	ready   chan struct{}
+	value   Scmer
+	failure any
+}
+
+func importClusterLiteral(handle ClusterHandle) (value Scmer) {
+	if handle.Lifetime == nil {
+		panic("immutable capture requires a peer lifetime")
+	}
+	state := handle.Lifetime.LocalState(func() any { return new(clusterLiteralImport) }).(*clusterLiteralImport)
+	state.mu.Lock()
+	if dict := state.value.Value(); dict != nil {
+		state.mu.Unlock()
+		return NewFastDict(dict)
+	}
+	if loading := state.loading; loading != nil {
+		state.mu.Unlock()
+		ctx := handle.Context
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		select {
+		case <-loading.ready:
+			if loading.failure != nil {
+				panic(loading.failure)
+			}
+			return loading.value
+		case <-ctx.Done():
+			panic(ctx.Err())
+		}
+	}
+	loading := &clusterLiteralLoad{ready: make(chan struct{})}
+	state.loading = loading
+	state.mu.Unlock()
+	defer func() {
+		failure := recover()
+		state.mu.Lock()
+		if failure == nil {
+			state.value = weak.Make(value.FastDict())
+		}
+		loading.value, loading.failure = value, failure
+		state.loading = nil // no strong value reachable from its own cleanup argument
+		close(loading.ready)
+		state.mu.Unlock()
+		if failure != nil {
+			panic(failure)
+		}
+	}()
+	source, err := handle.Call(context.Background(), ClusterRequest{Method: "source"})
+	if err != nil {
+		panic(err)
+	}
+	value = Eval(Optimize(Read("immutable cluster capture", source.String(), false), &Globalenv, nil), &Globalenv)
+	if !value.IsFastDict() {
+		panic("invalid immutable dictionary capture")
+	}
+	runtime.AddCleanup(value.FastDict(), func(retained ClusterLifetime) { runtime.KeepAlive(retained) }, handle.Lifetime)
+	return value
+}
+func init() { RegisterClusterObjectType("literal", importClusterLiteral) }
