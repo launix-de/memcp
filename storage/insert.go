@@ -18,11 +18,14 @@ package storage
 
 import "math"
 import "sync"
+import "slices"
 import "unsafe"
 import "runtime"
+import "context"
 import "math/bits"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/memcp/storage/mosi"
+import "github.com/launix-de/go-mysqlstack/sqldb"
 
 // UNIQUE guards belong to the logical table, independently of physical shard
 // generations. Equal keys use the same stripe across rebuild/repartition; an
@@ -46,28 +49,93 @@ type uniqueReadProof struct {
 	table    *table
 	topology *tableShardTopology
 	shard    *storageShard
+	remote   *remoteShardObject
 }
 
 type uniqueReadRetry struct{}
 
+func (proof uniqueReadProof) valid() bool {
+	if proof.table != nil {
+		return proof.table.topology.Load().routing == proof.topology.routing && activeNodeCluster().manager.resourceCell(mosiResource{Database: proof.table.schema.Name}).ownstate.Phase().Readable()
+	}
+	if proof.remote != nil {
+		value, err := proof.remote.handle.Call(context.Background(), scm.ClusterRequest{Method: "unique-valid"})
+		if err != nil {
+			panic(err)
+		}
+		return value.Bool()
+	}
+	cell := proof.shard.coherence.Load()
+	if cell == nil {
+		return false
+	}
+	cell = cell.resolved()
+	return cell.ownstate.Phase().Readable() && cell.publishedShard() == proof.shard
+}
+
 func (g *uniqueWriteGuard) validReads() bool {
 	for _, proof := range g.readProofs {
-		if proof.table != nil {
-			if proof.table.topology.Load().routing != proof.topology.routing || !activeNodeCluster().manager.resourceCell(mosiResource{Database: proof.table.schema.Name}).ownstate.Phase().Readable() {
-				return false
-			}
-		} else {
-			cell := proof.shard.coherence.Load()
-			if cell == nil {
-				return false
-			}
-			cell = cell.resolved()
-			if !cell.ownstate.Phase().Readable() || cell.publishedShard() != proof.shard {
-				return false
-			}
+		if !proof.valid() {
+			return false
 		}
 	}
 	return true
+}
+
+// Acquiring the collision shard locally replaces its remote read proof. The
+// caller must re-probe the key under that newly acquired native access.
+func (g *uniqueWriteGuard) acquiredUniqueShard(shard *storageShard) {
+	for i := range g.readProofs {
+		if g.readProofs[i].shard == shard {
+			g.readProofs[i].remote = nil
+		}
+	}
+}
+
+// Forward UNIQUE existence checks before acquiring local shard payload. Warm
+// readable local shards keep the direct path; other owners run the same native
+// reservation/visibility kernel through the ordinary scan protocol.
+func (s *storageShard) probeUnique(access scanAccess, tx *TxContext, guard *uniqueWriteGuard) bool {
+	cluster := activeNodeCluster()
+	resource := mosiResource{Database: s.t.schema.Name, Table: s.t.Name, Shard: s.uuid.String()}
+	owner, err := cluster.locate(scanQueryContext(tx, cluster.ctx), resource)
+	if err != nil {
+		panic(err)
+	}
+	if owner == cluster.self.ID {
+		lease := s.getRead(tx, shardReadOptions{mutation: true})
+		defer lease.Release()
+		_, found := lease.shard.GetRecordidForUnique(access, tx, true)
+		guard.readProofs = append(guard.readProofs, uniqueReadProof{shard: lease.shard})
+		return found
+	}
+	var preferred *clusterLink
+	for _, link := range cluster.view.Load().links {
+		if link.member.ID == owner {
+			preferred = link
+			break
+		}
+	}
+	executor := clusterScanExecutor{cluster: cluster, preferred: preferred, expected: remoteScanShard{Schema: s.t.filterSchemaFingerprint(), Resource: resource}}
+	result := executor.ExecuteShardScan(resource, shardScanInvocation{operator: shardUniqueProbe, tx: tx, access: access})
+	if result.err.r != nil {
+		panic(result.err)
+	}
+	values := result.res.Slice()
+	if len(values) != 2 {
+		panic("invalid UNIQUE probe result")
+	}
+	proof := uniqueReadProof{shard: s}
+	switch source := values[1].Any().(type) {
+	case *remoteShardObject:
+		proof.remote = source
+	case *storageShard:
+		proof.shard = source
+	default:
+		panic("invalid UNIQUE probe generation")
+	}
+	guard.readProofs = append(guard.readProofs, proof)
+	return values[0].Bool()
 }
 
 func (g *uniqueWriteGuard) lock() {
@@ -88,6 +156,26 @@ func (g *uniqueWriteGuard) unlock() {
 	}
 	g.held = false
 	g.version++
+}
+
+// A collision update may change UNIQUE columns. Borrow the existing key
+// ownership and acquire any additional stripes without waiting: two callbacks
+// changing keys in opposite directions must fail explicitly, never deadlock.
+func (g *uniqueWriteGuard) extend(mask uint64) {
+	var acquired uint64
+	for remaining := mask &^ g.mask; remaining != 0; remaining &= remaining - 1 {
+		bit := uint64(1) << bits.TrailingZeros64(remaining)
+		if !g.locks[bits.TrailingZeros64(bit)].TryLock() {
+			for acquired != 0 {
+				i := bits.TrailingZeros64(acquired)
+				g.locks[i].Unlock()
+				acquired &^= uint64(1) << i
+			}
+			panic(sqldb.NewSQLError1(1213, "40001", "Concurrent UNIQUE key change; retry transaction"))
+		}
+		acquired |= bit
+	}
+	g.mask |= acquired
 }
 
 // Equal is deliberately coercing: ints can equal numeric strings/dates and
@@ -179,6 +267,62 @@ func (t *table) guardUniqueWrites(columns []string, values [][]scm.Scmer, mergeN
 		}
 	}
 	return uniqueWriteGuard{locks: locks, mask: mask}
+}
+
+// guardUniqueRow gives mutation mappers the same logical-key ownership as
+// collision callbacks. It is invocation-owned, never stored per record. Resolve
+// stale physical IDs and revalidate keys after waiting without holding shard.mu.
+func (s *storageShard) guardUniqueRow(id uint32, tx *TxContext) (*uniqueWriteGuard, uint32, bool) {
+	if len(s.t.Unique) == 0 || activeReplication(s.t.schema) != nil {
+		return nil, id, true
+	}
+	var columns []string
+	for _, constraint := range s.t.Unique {
+		for _, column := range constraint.Cols {
+			if !slices.Contains(columns, column) {
+				columns = append(columns, column)
+			}
+		}
+	}
+	for _, column := range columns {
+		s.getColumnStorageOrPanic(column, false, tx)
+	}
+	values := make([]scm.Scmer, len(columns))
+	read := func() bool {
+		if (tx == nil || tx.Mode != TxACID) && s.deletions.Get(uint(id)) {
+			var found bool
+			id, found = s.resolveVisiblePrimaryRecidLocked(id)
+			if !found {
+				return false
+			}
+		}
+		for i, column := range columns {
+			values[i] = s.rowValueByRecidLocked(id, column)
+		}
+		return true
+	}
+	for {
+		s.mu.RLock()
+		found := read()
+		s.mu.RUnlock()
+		if !found {
+			return nil, id, false
+		}
+		guard := s.t.guardUniqueWrites(columns, [][]scm.Scmer{values}, false, 0)
+		guard.lock()
+		s.mu.RLock()
+		found = read()
+		current := s.t.guardUniqueWrites(columns, [][]scm.Scmer{values}, false, 0)
+		s.mu.RUnlock()
+		if !found {
+			guard.unlock()
+			return nil, id, false
+		}
+		if current.mask&^guard.mask == 0 {
+			return &guard, id, true
+		}
+		guard.unlock()
+	}
 }
 
 // Reservations include queued/in-flight batches until they finish, not just

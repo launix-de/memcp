@@ -1336,7 +1336,7 @@ func TestRemoteScanCapturedOuterUpdateReturnsToItsShard(t *testing.T) {
 	if err := service.control(context.Background(), peer, "scan.describe", remoteScanDescribe{scanWireVersion, inner.schema.Name, inner.Name}, &parts, true); err != nil {
 		t.Fatal(err)
 	}
-	update := scm.NewFunc(outer.ActiveShards()[0].UpdateFunction(0, false, false, nil))
+	update := scm.NewFunc(outer.ActiveShards()[0].UpdateFunction(0, false, false, nil, nil))
 	env := &scm.Env{Vars: scm.Vars{scm.Symbol("outer_update"): update}, Outer: &scm.Globalenv}
 	mapper := scm.Eval(scm.Read(t.Name(), `(lambda (acc update) (begin (outer_update (list "payload" "outer")) (update (list "payload" "inner")) (+ acc 1)))`, true), env)
 	stub := &storageShard{uuid: inner.ActiveShards()[0].uuid, t: inner}

@@ -97,14 +97,14 @@ func TestInsertUniqueChecksAllowIndependentKeys(t *testing.T) {
 	entered, resume, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	go func() {
 		defer close(done)
-		tbl.ProcessUniqueCollision([]string{"id"}, first, false, func(_ [][]scm.Scmer, _ func() bool) { close(entered); <-resume }, nil, nil, 0, nil)
+		tbl.ProcessUniqueCollision([]string{"id"}, first, false, func(_ [][]scm.Scmer, _ func() bool) { close(entered); <-resume }, nil, nil, 0, nil, nil)
 	}()
 	<-entered
 	defer func() { close(resume); <-done }()
 	secondDone := make(chan struct{})
 	go func() {
 		defer close(secondDone)
-		tbl.ProcessUniqueCollision([]string{"id"}, second, false, func(_ [][]scm.Scmer, _ func() bool) {}, nil, nil, 0, nil)
+		tbl.ProcessUniqueCollision([]string{"id"}, second, false, func(_ [][]scm.Scmer, _ func() bool) {}, nil, nil, 0, nil, nil)
 	}()
 	select {
 	case <-secondDone:
@@ -162,6 +162,7 @@ func TestInsertConcurrentSameUniqueKey(t *testing.T) {
 // An extra partition dimension may place equal keys in different shards.
 func setupUniqueContentionTable(t *testing.T, layout string) *table {
 	t.Helper()
+	layout = strings.TrimSuffix(layout, "-main")
 	tbl := setupScanParallelTestTable(t, "tuniquecontention")
 	tbl.CreateColumn("bucket", "INT", nil, nil)
 	tbl.CreateColumn("val", "INT", nil, nil)
@@ -237,11 +238,23 @@ func TestInsertUniqueContention(t *testing.T) {
 func TestInsertCollisionReadModifyWriteContention(t *testing.T) {
 	previous := runtime.GOMAXPROCS(32)
 	defer runtime.GOMAXPROCS(previous)
-	for _, layout := range []string{"free", "unique", "extra", "unrelated"} {
+	for _, layout := range []string{"free", "unique", "extra", "unrelated", "free-main", "unique-main", "extra-main", "unrelated-main"} {
 		t.Run(layout, func(t *testing.T) {
 			tbl := setupUniqueContentionTable(t, layout)
 			columns := []string{"id", "bucket", "val"}
 			tbl.Insert(columns, [][]scm.Scmer{{scm.NewInt(7), scm.NewInt(0), scm.NewInt(0)}}, nil, scm.NewNil(), false, nil)
+			if strings.HasSuffix(layout, "-main") {
+				if result := RebuildTable(tbl, true, false); strings.Contains(result, "errors:") {
+					t.Fatal(result)
+				}
+				var mainRows uint32
+				for _, shard := range tbl.ActiveShards() {
+					mainRows += shard.main_count
+				}
+				if mainRows == 0 {
+					t.Fatal("fixture did not produce a main row")
+				}
+			}
 			const workers, repetitions = 64, 16
 			var calls, applied atomic.Int64
 			callback := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
@@ -293,6 +306,181 @@ func TestInsertCollisionReadModifyWriteContention(t *testing.T) {
 	}
 }
 
+func TestInsertCollisionDifferentUniqueKeysShareRow(t *testing.T) {
+	previous := runtime.GOMAXPROCS(32)
+	defer runtime.GOMAXPROCS(previous)
+	tbl := setupScanParallelTestTable(t, "tuniquecollisionaliases")
+	tbl.CreateColumn("name", "TEXT", nil, nil)
+	tbl.CreateColumn("code", "TEXT", nil, nil)
+	tbl.CreateColumn("val", "INT", nil, nil)
+	tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}, {Id: "name", Cols: []string{"name"}}, {Id: "code", Cols: []string{"code"}}}
+	columns := []string{"id", "name", "code", "val"}
+	tbl.Insert(columns, [][]scm.Scmer{{scm.NewInt(1), scm.NewString("same-name"), scm.NewString("same-code"), scm.NewInt(0)}}, nil, scm.NewNil(), false, nil)
+	const workers = 64
+	start := make(chan struct{})
+	var done sync.WaitGroup
+	var applied atomic.Int64
+	for worker := 0; worker < workers; worker++ {
+		done.Add(1)
+		go func(worker int) {
+			defer done.Done()
+			defer func() {
+				if failure := recover(); failure != nil {
+					t.Errorf("UPSERT: %v", failure)
+				}
+			}()
+			<-start
+			name, code := fmt.Sprint("name-", worker), fmt.Sprint("code-", worker)
+			if worker%2 == 0 {
+				name = "same-name"
+			} else {
+				code = "same-code"
+			}
+			tbl.Insert(columns, [][]scm.Scmer{{scm.NewInt(int64(worker + 2)), scm.NewString(name), scm.NewString(code), scm.NewInt(0)}}, []string{"val", "$update"}, scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+				runtime.Gosched()
+				result := scm.Apply(args[1], scm.NewSlice([]scm.Scmer{scm.NewString("val"), scm.NewInt(args[0].Int() + 1)}))
+				if result.Bool() {
+					applied.Add(1)
+				}
+				return result
+			}), false, nil)
+		}(worker)
+	}
+	close(start)
+	done.Wait()
+	shard := tbl.ActiveShards()[0]
+	reader := shard.ColumnReaderTx(nil, "val", false, ReadAuto)
+	var total int64
+	for id := uint32(0); id < shard.main_count+uint32(len(shard.deltaRows())); id++ {
+		if !shard.deletions.Get(uint(id)) {
+			total += reader.GetValue(id).Int()
+		}
+	}
+	if total != workers || applied.Load() != workers || tbl.CountExact() != 1 {
+		t.Fatalf("value=%d applied=%d rows=%d; want %d increments on one row", total, applied.Load(), tbl.CountExact(), workers)
+	}
+}
+
+func TestInsertCollisionMutationPanicReleasesKeys(t *testing.T) {
+	tbl := setupUniqueContentionTable(t, "free")
+	columns := []string{"id", "bucket", "val"}
+	row := [][]scm.Scmer{{scm.NewInt(7), scm.NewInt(0), scm.NewInt(0)}}
+	tbl.Insert(columns, row, nil, scm.NewNil(), false, nil)
+	var caught any
+	func() {
+		defer func() { caught = recover() }()
+		tbl.Insert(columns, row, []string{"val", "$update"}, scm.NewFunc(func(...scm.Scmer) scm.Scmer { panic("collision mutation failed") }), false, nil)
+	}()
+	if caught != "collision mutation failed" {
+		t.Fatalf("panic=%v", caught)
+	}
+	assertUniqueWriteLocksReleased(t, tbl)
+	if got := tbl.Insert(columns, row, []string{"val", "$update"}, scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
+		return scm.Apply(a[1], scm.NewSlice([]scm.Scmer{scm.NewString("val"), scm.NewInt(a[0].Int() + 1)}))
+	}), false, nil); got != 2 {
+		t.Fatalf("subsequent update=%d", got)
+	}
+}
+
+func TestInsertCollisionKeyChangeConflictRestoresRow(t *testing.T) {
+	tbl := setupScanParallelTestTable(t, "tuniquekeychangeconflict")
+	tbl.CreateColumn("name", "TEXT", nil, nil)
+	tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}, {Id: "name", Cols: []string{"name"}}}
+	columns := []string{"id", "name"}
+	row := [][]scm.Scmer{{scm.NewInt(7), scm.NewString("original")}}
+	tbl.Insert(columns, row, nil, scm.NewNil(), false, nil)
+	original := tbl.guardUniqueWrites(columns, row, false, 0)
+	var name string
+	var extra uniqueWriteGuard
+	for i := 0; i < 1000; i++ {
+		name = fmt.Sprint("replacement-", i)
+		needed := tbl.guardUniqueWrites(columns, [][]scm.Scmer{{scm.NewInt(7), scm.NewString(name)}}, false, 0)
+		if mask := needed.mask &^ original.mask; mask != 0 {
+			extra = uniqueWriteGuard{locks: original.locks, mask: mask}
+			break
+		}
+	}
+	if extra.mask == 0 {
+		t.Fatal("no independent key stripe")
+	}
+	extra.lock()
+	defer extra.unlock()
+	calls := 0
+	callback := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
+		calls++
+		return scm.Apply(a[0], scm.NewSlice([]scm.Scmer{scm.NewString("name"), scm.NewString(name)}))
+	})
+	var caught any
+	func() {
+		defer func() { caught = recover() }()
+		tbl.Insert(columns, row, []string{"$update"}, callback, false, nil)
+	}()
+	if caught == nil || !strings.Contains(fmt.Sprint(caught), "retry transaction") || calls != 1 {
+		t.Fatalf("failure=%v callbacks=%d", caught, calls)
+	}
+	extra.unlock()
+	assertUniqueWriteLocksReleased(t, tbl)
+	if tbl.CountExact() != 1 {
+		t.Fatal("failed key change hid the original row")
+	}
+	if got := tbl.Insert(columns, row, []string{"$update"}, callback, false, nil); got != 2 || calls != 2 || tbl.CountExact() != 1 {
+		t.Fatalf("retry affected=%d callbacks=%d rows=%d", got, calls, tbl.CountExact())
+	}
+}
+
+func TestInsertCollisionIndependentKeyProgress(t *testing.T) {
+	tbl := setupUniqueContentionTable(t, "free")
+	columns := []string{"id", "bucket", "val"}
+	firstRow := [][]scm.Scmer{{scm.NewInt(7), scm.NewInt(0), scm.NewInt(0)}}
+	firstMask := tbl.guardUniqueWrites(columns, firstRow, false, 0).mask
+	var secondRow [][]scm.Scmer
+	for id := int64(8); id < 1000; id++ {
+		row := [][]scm.Scmer{{scm.NewInt(id), scm.NewInt(0), scm.NewInt(0)}}
+		if tbl.guardUniqueWrites(columns, row, false, 0).mask&firstMask == 0 {
+			secondRow = row
+			break
+		}
+	}
+	if secondRow == nil {
+		t.Fatal("no independent key stripe")
+	}
+	tbl.Insert(columns, append(firstRow, secondRow...), nil, scm.NewNil(), false, nil)
+	entered, resume, firstDone := make(chan struct{}), make(chan struct{}), make(chan any, 1)
+	release := sync.OnceFunc(func() { close(resume) })
+	go func() {
+		defer func() { firstDone <- recover() }()
+		tbl.Insert(columns, firstRow, []string{"val", "$update"}, scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
+			close(entered)
+			<-resume
+			return scm.Apply(a[1], scm.NewSlice([]scm.Scmer{scm.NewString("val"), scm.NewInt(a[0].Int() + 1)}))
+		}), false, nil)
+	}()
+	<-entered
+	defer func() {
+		release()
+		if failure := <-firstDone; failure != nil {
+			t.Errorf("first callback: %v", failure)
+		}
+	}()
+	secondDone := make(chan any, 1)
+	go func() {
+		defer func() { secondDone <- recover() }()
+		tbl.Insert(columns, secondRow, []string{"val", "$update"}, scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
+			return scm.Apply(a[1], scm.NewSlice([]scm.Scmer{scm.NewString("val"), scm.NewInt(a[0].Int() + 1)}))
+		}), false, nil)
+	}()
+	select {
+	case failure := <-secondDone:
+		if failure != nil {
+			t.Fatal(failure)
+		}
+	case <-time.After(3 * time.Second):
+		release()
+		<-secondDone
+		t.Fatal("independent key waited for blocked collision callback")
+	}
+}
+
 func TestInsertCollisionCallbackRechecksEarlierKeys(t *testing.T) {
 	tbl := setupScanParallelTestTable(t, "tinsertcallbackrecheck")
 	tbl.CreateColumn("name", "TEXT", nil, nil)
@@ -307,7 +495,7 @@ func TestInsertCollisionCallbackRechecksEarlierKeys(t *testing.T) {
 			if key == "name" {
 				tbl.Insert(columns, [][]scm.Scmer{{scm.NewInt(3), scm.NewString("other")}}, nil, scm.NewNil(), false, nil)
 			}
-		}, 0, nil)
+		}, 0, nil, nil)
 	if fmt.Sprint(collisions) != "[name PRIMARY]" {
 		t.Fatalf("collisions=%v", collisions)
 	}
@@ -570,5 +758,55 @@ func TestInsertAutoIncrementWALReplayPreservesSignedIDs(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestInsertCollisionAndUpdateShareAtomicRow(t *testing.T) {
+	tbl := setupUniqueContentionTable(t, "free")
+	cols := []string{"id", "bucket", "val"}
+	row := [][]scm.Scmer{{scm.NewInt(7), scm.NewInt(0), scm.NewInt(0)}}
+	tbl.Insert(cols, row, nil, scm.NewNil(), false, nil)
+	cb := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
+		old := a[0].Int()
+		runtime.Gosched()
+		return scm.Apply(a[1], scm.NewSlice([]scm.Scmer{scm.NewString("val"), scm.NewInt(old + 1)}))
+	})
+	scanCb := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { scm.Apply(cb, a[1:]...); return a[0] })
+	trueFn := scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewBool(true) })
+	combine := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return a[0] })
+	var done sync.WaitGroup
+	start := make(chan struct{})
+	for worker := 0; worker < 2; worker++ {
+		done.Add(1)
+		go func(worker int) {
+			defer done.Done()
+			defer func() {
+				if err := recover(); err != nil {
+					t.Errorf("mutation: %v", err)
+				}
+			}()
+			<-start
+			for i := 0; i < 128; i++ {
+				if worker == 0 {
+					tbl.Insert(cols, row, []string{"val", "$update"}, cb, false, nil)
+				} else {
+					tbl.scan(nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, nil, trueFn, []string{"val", "$update"}, scanCb, scm.NewInt(0), combine, false)
+				}
+			}
+		}(worker)
+	}
+	close(start)
+	done.Wait()
+	var total int64
+	for _, s := range tbl.ActiveShards() {
+		r := s.ColumnReaderTx(nil, "val", false, ReadAuto)
+		for id := uint32(0); id < s.main_count+uint32(len(s.deltaRows())); id++ {
+			if !s.deletions.Get(uint(id)) {
+				total += r.GetValue(id).Int()
+			}
+		}
+	}
+	if total != 256 || tbl.CountExact() != 1 {
+		t.Fatalf("mixed increments=%d rows=%d; want 256 on one row", total, tbl.CountExact())
 	}
 }

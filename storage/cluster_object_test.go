@@ -668,7 +668,7 @@ func prepareRegisteredDiskGeneration(t *testing.T, owner *nodeScanService, peer 
 	}
 	// Drop one current row so the successor no longer owns its blob. The old
 	// physical generation's column and manifest still need that blob on disk.
-	old.UpdateFunction(0, false, false, nil)()
+	old.UpdateFunction(0, false, false, nil, nil)()
 	RebuildTable(tbl, true, false)
 	if tbl.ActiveShards()[0].uuid == old.uuid {
 		t.Fatal("rebuild kept old UUID")

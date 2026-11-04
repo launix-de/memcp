@@ -114,6 +114,9 @@ func (s *storageShard) HandleClusterRequest(ctx context.Context, r scm.ClusterRe
 	if r.Method == "view" {
 		return scm.NewSlice([]scm.Scmer{scm.NewString(s.t.schema.Name), scm.NewString(s.t.Name), scm.NewString(s.uuid.String()), scm.NewInt(int64(s.t.filterSchemaFingerprint()))}), nil
 	}
+	if r.Method == "unique-valid" {
+		return scm.NewBool(uniqueReadProof{shard: s}.valid()), nil
+	}
 	if r.Method == "scan" {
 		switch input := r.Payload.(type) {
 		case remoteScanTask:
@@ -143,6 +146,12 @@ func (s *storageShard) HandleClusterRequest(ctx context.Context, r scm.ClusterRe
 				}
 				return scanResult{res: scm.NewBool(found), outCount: count, inputCount: inputCount}, nil
 			}
+			if input.operator == shardUniqueProbe {
+				_, found := s.GetRecordidForUnique(input.access, input.tx, true)
+				// The ordinary shard handle retains this generation on its worker.
+				// It grants no write rights and transfers no column payload.
+				return scanResult{res: scm.NewSlice([]scm.Scmer{scm.NewBool(found), scm.NewAny(s)}), inputCount: inputCount}, nil
+			}
 			if input.operator >= shardLookupOne {
 				var value scm.Scmer
 				var count int
@@ -167,7 +176,7 @@ func (s *storageShard) HandleClusterRequest(ctx context.Context, r scm.ClusterRe
 				}
 				return scanResult{res: value, outCount: int64(count), inputCount: inputCount}, nil
 			}
-			value, count, candidates := s.scan(input.access, input.conditionCols, input.condition, input.callbackCols, input.mapReduce, input.neutral, input.stride, input.batchdata, input.tx, SessionStateFromTx(input.tx))
+			value, count, candidates := s.scan(input.access, input.conditionCols, input.condition, input.callbackCols, input.mapReduce, input.neutral, input.stride, input.batchdata, input.tx, SessionStateFromTx(input.tx), input.writeAcquired)
 			return scanResult{res: value, outCount: count, inputCount: inputCount, candidateCount: candidates}, nil
 		}
 		return nil, fmt.Errorf("missing typed scan invocation")

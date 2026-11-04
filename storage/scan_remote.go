@@ -17,8 +17,8 @@ import "strings"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/memcp/storage/mosi"
 
-// Version 16 uses binary node metadata and raw Scheme reconstruction text.
-const scanWireVersion = 18
+// Version 19 combines binary node metadata with retained UNIQUE receiver scopes.
+const scanWireVersion = 19
 
 type remoteScanShard struct {
 	Schema   uint64       `json:"schema"`
@@ -155,7 +155,7 @@ func (database *database) executeScanTask(ctx context.Context, s *scanRPCSession
 	if request.Version != scanWireVersion || !request.Shard.Resource.valid() || request.Shard.Resource.Shard == "" {
 		return nil, fmt.Errorf("invalid remote scan contract")
 	}
-	if request.Operator > shardOrdered || request.Stride < 0 || (request.Operator != shardReduce && request.Stride != 0) || (request.Stride == 0 && len(request.Batch) != 0) || (request.Stride > 0 && len(request.Batch)%request.Stride != 0) {
+	if request.Operator > shardUniqueProbe || request.Stride < 0 || (request.Operator != shardReduce && request.Stride != 0) || (request.Stride == 0 && len(request.Batch) != 0) || (request.Stride > 0 && len(request.Batch)%request.Stride != 0) {
 		return nil, fmt.Errorf("invalid remote scan invocation")
 	}
 	if (request.Operator == shardOrdered) != (request.Order != nil) {
@@ -237,7 +237,7 @@ func (database *database) executeScanTask(ctx context.Context, s *scanRPCSession
 		}
 		// Only the native shard handler executes the operator. The database owns
 		// resolution/acquisition; the transport knows neither placement nor scans.
-		value, err := shard.HandleClusterRequest(ctx, scm.ClusterRequest{Method: "scan", Payload: shardScanInvocation{order: order, operator: request.Operator, stride: request.Stride, batchdata: batch, tx: tx, access: access, conditionCols: request.FilterColumns, condition: filter, callbackCols: request.MapColumns, mapReduce: reducer, neutral: neutral}})
+		value, err := shard.HandleClusterRequest(ctx, scm.ClusterRequest{Method: "scan", Payload: shardScanInvocation{writeAcquired: request.Access.Mutation && input == nil, order: order, operator: request.Operator, stride: request.Stride, batchdata: batch, tx: tx, access: access, conditionCols: request.FilterColumns, condition: filter, callbackCols: request.MapColumns, mapReduce: reducer, neutral: neutral}})
 		if err != nil {
 			return err
 		}

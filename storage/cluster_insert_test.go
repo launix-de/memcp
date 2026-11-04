@@ -83,7 +83,7 @@ func TestClusterUniqueProbeUsesAcquiredSuccessor(t *testing.T) {
 		}()
 		tbl.ProcessUniqueCollision([]string{"id"}, [][]scm.Scmer{{scm.NewInt(42)}}, false,
 			func(rows [][]scm.Scmer, _ func() bool) { result.accepted += len(rows) }, nil,
-			func(string, []scm.Scmer) { result.collisions++ }, 0, nil)
+			func(string, []scm.Scmer) { result.collisions++ }, 0, nil, nil)
 	}()
 	deadline := time.Now().Add(time.Second)
 	for topology.operations.Load() == 0 {
@@ -1034,6 +1034,59 @@ func TestClusterInsertSelectsUniqueDomainOwnerWithoutClaiming(t *testing.T) {
 	}
 }
 
+func TestClusterMutationScanBorrowsAcquiredWriter(t *testing.T) {
+	tbl := setupScanParallelTestTable(t, "tmutationacquiredwriter")
+	tbl.CreateColumn("value", "INT", nil, nil)
+	tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}}
+	tbl.Insert([]string{"id", "value"}, [][]scm.Scmer{{scm.NewInt(42), scm.NewInt(0)}}, nil, scm.NewNil(), false, nil)
+	shard := tbl.ActiveShards()[0]
+	cluster := globalTestCluster(t, tbl.schema.Name)
+	mounts := sharedClusterMounts.Swap(&map[string]bool{tbl.schema.Name: true})
+	defer sharedClusterMounts.Store(mounts)
+	service := nodeScans.Swap(&nodeScanService{cluster: cluster})
+	defer nodeScans.Store(service)
+	cluster.manager.resourceCell(mosiResource{Database: tbl.schema.Name}).ownstate.Initialize(mosi.M)
+	cell := cluster.declareShard(shard, true)
+	owned := shard.GetWrite(nil)
+	release := sync.OnceFunc(owned.Release)
+	defer release()
+	done := make(chan any, 1)
+	go func() {
+		defer func() { done <- recover() }()
+		value, count, _ := shard.scan(scanAccess{}, nil, scm.NewBool(true), []string{"value", "$update"}, scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
+			if !cell.ownstate.Writing() {
+				panic("mutation callback lost M")
+			}
+			scm.Apply(a[2], scm.NewSlice([]scm.Scmer{scm.NewString("value"), scm.NewInt(a[1].Int() + 1)}))
+			return scm.NewInt(a[0].Int() + 1)
+		}), scm.NewInt(0), 0, nil, nil, nil, true)
+		if count != 1 || value.Int() != 1 {
+			panic("mutation scan did not update exactly one row")
+		}
+	}()
+	select {
+	case failure := <-done:
+		if failure != nil {
+			t.Fatal(failure)
+		}
+	case <-time.After(3 * time.Second):
+		release()
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			t.Fatal("mutation scan did not release its writer")
+		}
+		t.Fatal("nil-TX mutation scan re-entered its already-acquired M")
+	}
+	if !cell.ownstate.Writing() {
+		t.Fatal("scan released its caller's writer")
+	}
+	release()
+	if cell.ownstate.Writing() {
+		t.Fatal("scan leaked a writer scope")
+	}
+}
+
 func TestClusterUniqueCallbackReleasesMOnPanic(t *testing.T) {
 	tbl := setupScanParallelTestTable(t, "tuniquepanicrelease")
 	tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}}
@@ -1056,7 +1109,7 @@ func TestClusterUniqueCallbackReleasesMOnPanic(t *testing.T) {
 					t.Fatal("callback executed without active M")
 				}
 				panic("callback failure")
-			}, 0, nil)
+			}, 0, nil, nil)
 	}()
 	if failure != "callback failure" || cell.ownstate.Writing() {
 		t.Fatalf("callback failure=%v retained writer=%v", failure, cell.ownstate.Writing())
@@ -1101,7 +1154,7 @@ func TestClusterUniquePreflightUsesMutationAdmissionAndKeepsNodeLimit(t *testing
 			}
 			accepted += len(rows)
 		}, nil,
-		func(string, []scm.Scmer) { t.Fatal("unrelated key collided") }, 0, nil)
+		func(string, []scm.Scmer) { t.Fatal("unrelated key collided") }, 0, nil, nil)
 	if accepted != 1 {
 		t.Fatal("fitting mutation preflight was refused at the read reserve")
 	}

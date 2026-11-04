@@ -51,9 +51,11 @@ const (
 	shardLookupMapOne
 	shardLookupMapMany
 	shardOrdered
+	shardUniqueProbe
 )
 
 type shardScanInvocation struct {
+	writeAcquired bool // native acquisition owns M; never transmitted as authority
 	order         *shardOrderInvocation
 	operator      shardScanOperator
 	tx            *TxContext

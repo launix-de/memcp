@@ -517,7 +517,7 @@ func TestBeforeUpdateReleasesLocallyAcquiredShardLock(t *testing.T) {
 				shard.mu.Lock()
 				defer shard.mu.Unlock()
 			}
-			updated := shard.UpdateFunction(0, true, alreadyLocked, nil)(
+			updated := shard.UpdateFunction(0, true, alreadyLocked, nil, nil)(
 				scm.NewSlice([]scm.Scmer{scm.NewString("id"), scm.NewInt(2)}))
 			if !updated.Bool() || !called || !unlocked {
 				t.Fatalf("updated=%v, trigger called=%v, shard unlocked=%v", updated.Bool(), called, unlocked)
@@ -544,7 +544,7 @@ func TestBeforeUpdateForwardsTriggerValuesAfterRebuildCompletion(t *testing.T) {
 	})
 	release := shard.GetRead(nil, false)
 	defer release.Release()
-	updated := shard.UpdateFunction(0, true, false, nil)(
+	updated := shard.UpdateFunction(0, true, false, nil, nil)(
 		scm.NewSlice([]scm.Scmer{scm.NewString("id"), scm.NewInt(2)}))
 	if !updated.Bool() || rebuilt == nil {
 		t.Fatal("update did not finish across rebuild publication")

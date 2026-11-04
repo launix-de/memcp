@@ -1004,8 +1004,8 @@ func TestShardRebuildDeletePropagationUsesStableTranslation(t *testing.T) {
 		t.Fatal("rebuild returned nil shard")
 	}
 
-	shard.UpdateFunction(0, false, false, nil)()
-	shard.UpdateFunction(1, false, false, nil)()
+	shard.UpdateFunction(0, false, false, nil, nil)()
+	shard.UpdateFunction(1, false, false, nil, nil)()
 
 	rebuilt.mu.RLock()
 	firstDeleted := rebuilt.deletions.Get(0)
@@ -1045,8 +1045,8 @@ func TestShardRebuildUpdatePropagationUsesStableTranslation(t *testing.T) {
 		t.Fatal("rebuild returned nil shard")
 	}
 
-	shard.UpdateFunction(0, false, false, nil)()
-	shard.UpdateFunction(1, false, false, nil)(scm.NewSlice([]scm.Scmer{
+	shard.UpdateFunction(0, false, false, nil, nil)()
+	shard.UpdateFunction(1, false, false, nil, nil)(scm.NewSlice([]scm.Scmer{
 		scm.NewString("payload"), scm.NewString("two-updated"),
 	}))
 
@@ -1186,7 +1186,7 @@ func TestManualRepartitionInsertDeleteUsesTranslationMap(t *testing.T) {
 		scm.NewInt(30001),
 		scm.NewString("transient"),
 	}}, false, nil, nil, false, nil)
-	oldShard.UpdateFunction(oldRecid, false, false, nil)()
+	oldShard.UpdateFunction(oldRecid, false, false, nil, nil)()
 
 	<-done
 
@@ -2463,7 +2463,7 @@ func TestRepartitionConcurrentDeleteSurvivesReload(t *testing.T) {
 	waitForRepartitionDualWrite(t, tbl)
 
 	oldShard := tbl.repartitionSources.Load().shards[0]
-	if !scm.ToBool(oldShard.UpdateFunction(0, false, false, nil)()) {
+	if !scm.ToBool(oldShard.UpdateFunction(0, false, false, nil, nil)()) {
 		t.Fatal("concurrent delete did not change the source row")
 	}
 	close(blocking.release)
@@ -2518,7 +2518,7 @@ func TestRepartitionRolledBackACIDDeleteKeepsRow(t *testing.T) {
 
 	oldShard := tbl.repartitionSources.Load().shards[0]
 	tx := NewTxContext(TxACID)
-	if !scm.ToBool(oldShard.UpdateFunction(0, false, false, tx)()) {
+	if !scm.ToBool(oldShard.UpdateFunction(0, false, false, tx, nil)()) {
 		t.Fatal("transactional delete was not staged")
 	}
 	tx.Rollback()
@@ -2580,7 +2580,7 @@ func TestRepartitionPostFlipUpdateDoesNotDuplicateRow(t *testing.T) {
 	updateDone := make(chan bool, 1)
 	go func() {
 		changes := scm.NewSlice([]scm.Scmer{scm.NewString("payload"), scm.NewString("updated-after-flip")})
-		updateDone <- scm.ToBool(target.UpdateFunction(0, false, false, nil)(changes))
+		updateDone <- scm.ToBool(target.UpdateFunction(0, false, false, nil, nil)(changes))
 	}()
 	select {
 	case <-updateDone:
@@ -2786,7 +2786,7 @@ func TestCursorRollbackOfMainDeleteSurvivesRestart(t *testing.T) {
 		t.Fatalf("rebuilt main count = %d, want 1", shard.main_count)
 	}
 	tx := NewTxContext(TxCursorStability)
-	if !scm.ToBool(shard.UpdateFunction(0, false, false, tx)()) {
+	if !scm.ToBool(shard.UpdateFunction(0, false, false, tx, nil)()) {
 		t.Fatal("cursor-stability delete did not change the row")
 	}
 	tx.Rollback()
@@ -3084,7 +3084,7 @@ func TestNullDistinctUniqueSkipsColdShard(t *testing.T) {
 	accepted := 0
 	tbl.ProcessUniqueCollision([]string{"payload"}, [][]scm.Scmer{{scm.NewNil()}}, false,
 		func(rows [][]scm.Scmer, _ func() bool) { accepted += len(rows) }, nil,
-		func(key string, _ []scm.Scmer) { t.Fatalf("unexpected collision %s", key) }, 0, nil)
+		func(key string, _ []scm.Scmer) { t.Fatalf("unexpected collision %s", key) }, 0, nil, nil)
 	if accepted != 1 {
 		t.Fatalf("accepted=%d", accepted)
 	}
@@ -3121,7 +3121,7 @@ func TestPartitionUniqueKeepsUnrelatedShardsCold(t *testing.T) {
 	accepted := 0
 	tbl.ProcessUniqueCollision([]string{"id"}, [][]scm.Scmer{{id}}, false,
 		func(rows [][]scm.Scmer, _ func() bool) { accepted += len(rows) }, nil,
-		func(key string, _ []scm.Scmer) { t.Fatalf("unexpected collision %s", key) }, 0, nil)
+		func(key string, _ []scm.Scmer) { t.Fatalf("unexpected collision %s", key) }, 0, nil, nil)
 	if accepted != 1 || shards[target].state() == COLD {
 		t.Fatal("partition-local unique probe did not inspect its target")
 	}

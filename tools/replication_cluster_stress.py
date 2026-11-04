@@ -2034,6 +2034,44 @@ def run_cluster_inserts(args, artifacts, journal, hash_partitioned=False):
             for node in nodes:
                 expect(node.client.number(f"SELECT COUNT(*) AS n FROM {table} WHERE value=-99"), 0,
                        "rolled-back generated keys are not visible")
+        # Keep the added workload after the pre-existing schema-epoch checks:
+        # explicit integer-key reservations themselves legitimately move schema M.
+        for table, key in (("uuid_items", "'550e8400-e29b-41d4-a716-446655440000'"),
+                           ("integer_items", "50000")):
+            expected_counter = 780
+            # Exercise the native nil-TX primitive across ingress peers, as in
+            # the Go contention tests. SQL transaction reservation conflicts
+            # retain their separate 1213 contract; no query retry is hidden here.
+            for mixed in (False, True):
+                repetitions = 8
+                rmw_barrier = threading.Barrier(len(nodes))
+                def increment(index):
+                    rmw_barrier.wait(timeout=args.timeout)
+                    for _ in range(repetitions):
+                        native_key = json.dumps(key[1:-1]) if key.startswith("'") else key
+                        if mixed and index % 2:
+                            expression = (f'(scan nil (table "{DATABASE}" false "{table}" false) '
+                                          '(list) (list) (list "id") '
+                                          f'(lambda (id) (equal? id {native_key})) '
+                                          '(list "value" "$update") '
+                                          '(lambda (acc previous update) '
+                                          '(begin (update (list "value" (+ previous 1))) acc)) 0 +)')
+                        else:
+                            expression = (f'(insert (table "{DATABASE}" false "{table}" false) '
+                                          '(list "id" "writer" "value") '
+                                          f'(list (list {native_key} 99 777)) '
+                                          '(list "value" "$update") '
+                                          '(lambda (previous update) (update (list "value" (+ previous 1)))) '
+                                          'false nil nil)')
+                        nodes[index].client.scm(expression)
+                with concurrent.futures.ThreadPoolExecutor(max_workers=len(nodes)) as threads:
+                    list(threads.map(increment, range(len(nodes))))
+                expected_counter += len(nodes) * repetitions
+                for node in nodes:
+                    expect(node.client.sql(f"SELECT value AS n FROM {table} WHERE id={key}"),
+                           [{"n": expected_counter}], "concurrent collision/UPDATE RMW retains every increment")
+                journal.append({"scenario": "cluster-collision-rmw", "layout": layout,
+                                "table": table, "mixed_update": mixed, "increments": len(nodes) * repetitions})
         nodes[2].client.sql("INSERT INTO integer_items(writer,value) VALUES(2,888)")
         for node in nodes:
             row = node.client.sql("SELECT MIN(id) AS id,COUNT(*) AS n FROM integer_items WHERE value=888")

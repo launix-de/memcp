@@ -369,6 +369,50 @@ test_cases:
     expect:
       data: [{id: 7, val: 70, payload: "last"}]
 
+  - name: "Delta: UNIQUE uses the declared case-insensitive collation"
+    setup:
+      - sql: "DROP TABLE IF EXISTS uniq_collation"
+      - sql: "CREATE TABLE uniq_collation (id INT PRIMARY KEY, label VARCHAR(40) COLLATE utf8mb4_general_ci UNIQUE)"
+      - sql: "INSERT INTO uniq_collation VALUES (1, 'Alpha')"
+    sql: "INSERT INTO uniq_collation VALUES (2, 'ALPHA')"
+    expect:
+      error: true
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS uniq_collation"
+
+  - name: "Main: UNIQUE uses the declared case-insensitive collation"
+    setup:
+      - sql: "DROP TABLE IF EXISTS uniq_collation"
+      - sql: "CREATE TABLE uniq_collation (id INT PRIMARY KEY, label VARCHAR(40) COLLATE utf8mb4_general_ci UNIQUE)"
+      - sql: "INSERT INTO uniq_collation VALUES (1, 'Alpha')"
+      - scm: "(rebuild)"
+    sql: "INSERT INTO uniq_collation VALUES (2, 'ALPHA')"
+    expect:
+      error: true
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS uniq_collation"
+
+  - name: "UNIQUE preserves distinct numeric-looking VARCHAR values"
+    setup:
+      - sql: "DROP TABLE IF EXISTS uniq_collation"
+      - sql: "CREATE TABLE uniq_collation (label VARCHAR(40) COLLATE bin UNIQUE)"
+    sql: "INSERT INTO uniq_collation VALUES ('03'), ('3'), (4), ('5')"
+    expect:
+      affected_rows: 4
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS uniq_collation"
+
+  - name: "UNIQUE converts numeric input to its declared integer type"
+    setup:
+      - sql: "DROP TABLE IF EXISTS uniq_collation"
+      - sql: "CREATE TABLE uniq_collation (value INT UNIQUE)"
+      - sql: "INSERT INTO uniq_collation VALUES (3)"
+    sql: "INSERT INTO uniq_collation VALUES ('03')"
+    expect:
+      error: true
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS uniq_collation"
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS uniq_md"
   - sql: "DROP TABLE IF EXISTS uniq_batch"

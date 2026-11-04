@@ -3985,7 +3985,7 @@ func (t *table) insertLocal(columns []string, values [][]scm.Scmer, onCollisionC
 						} else {
 							panic(sqldb.NewSQLError1(1062, "23000", "Duplicate entry in table %s: %s", t.Name, errmsg))
 						}
-					}, 0, currentTx)
+					}, 0, currentTx, nil)
 				} else {
 					// physically insert (no unique constraints)
 					insertRows(chunk, nil)
@@ -4127,7 +4127,7 @@ func (t *table) insertLocal(columns []string, values [][]scm.Scmer, onCollisionC
 					default:
 						result++
 					}
-				}, 0, currentTx)
+				}, 0, currentTx, nil)
 			} else {
 				insertRows(values, nil)
 			}
@@ -4172,7 +4172,7 @@ func (t *table) insertLocal(columns []string, values [][]scm.Scmer, onCollisionC
 					} else {
 						panic(sqldb.NewSQLError1(1062, "23000", "Duplicate entry in table %s: %s", t.Name, errmsg))
 					}
-				}, 0, currentTx)
+				}, 0, currentTx, nil)
 			} else {
 				// physically insert (parallel)
 				s.Insert(columns, values, false, validatedSchema, onFirstInsertId, isIgnore, currentTx)
@@ -4495,8 +4495,13 @@ func (p *uniquePendingKeys) remember(rowIndex int, key []scm.Scmer) bool {
 	return false
 }
 
-func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, mergeNull bool, success func([][]scm.Scmer, func() bool), onCollisionCols []string, failure func(string, []scm.Scmer), idx int, currentTx *TxContext) {
+func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, mergeNull bool, success func([][]scm.Scmer, func() bool), onCollisionCols []string, failure func(string, []scm.Scmer), idx int, currentTx *TxContext, borrowed *uniqueWriteGuard) {
 	guard := t.guardUniqueWrites(columns, values, mergeNull, idx)
+	if borrowed != nil {
+		borrowed.extend(guard.mask)
+		t.processUniqueCollision(columns, values, mergeNull, success, onCollisionCols, failure, idx, currentTx, borrowed)
+		return
+	}
 	guard.lock()
 	defer guard.unlock()
 	if !sharedClusterSource(t) {
@@ -4660,12 +4665,8 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 		}()
 		resolvedShards := false
 		for i, shard := range shardlist {
-			if needed[i] {
-				if sharedClusterSource(t) {
-					readAccesses[i] = shard.getRead(currentTx, shardReadOptions{mutation: true})
-				} else {
-					readAccesses[i] = shard.acquireReadForScan(currentTx, nil)
-				}
+			if needed[i] && !sharedClusterSource(t) {
+				readAccesses[i] = shard.acquireReadForScan(currentTx, nil)
 				if current := readAccesses[i].shard; current != nil && current != shard {
 					// Acquisition may install a native successor while this check
 					// retains the preceding topology. Probe the generation actually
@@ -4716,7 +4717,13 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 				pending.remember(j, key)
 			}
 			for _, s := range shardlist2 {
-				uid, present := s.GetRecordidForUnique(exactScanAccess(accessSchema, key), currentTx, true)
+				var uid uint32
+				var present bool
+				if sharedClusterSource(t) {
+					present = s.probeUnique(exactScanAccess(accessSchema, key), currentTx, guard)
+				} else {
+					uid, present = s.GetRecordidForUnique(exactScanAccess(accessSchema, key), currentTx, true)
+				}
 				if present {
 					// found a unique collision
 					if j != last_j {
@@ -4728,22 +4735,90 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 					}
 					last_j = j + 1
 					clear(pending.heads)
-					guard.unlock()
 					func() {
-						defer guard.lock()
-						// A collision callback is a native mutation just like a scan
-						// mapper. Its $update must never write a shared read copy.
-						if scanMutates(onCollisionCols) || slices.ContainsFunc(onCollisionCols, func(name string) bool { return strings.HasPrefix(name, "$set:") }) {
+						mutating := scanMutates(onCollisionCols) || slices.ContainsFunc(onCollisionCols, func(name string) bool { return strings.HasPrefix(name, "$set:") })
+						if !mutating {
+							guard.unlock()
+							defer guard.lock()
+						}
+						callbackGuard := guard
+						if sharedClusterSource(t) && !mutating && len(onCollisionCols) != 0 {
+							// Only a callback that consumes stored values needs the
+							// collision shard here. IGNORE needs no local payload.
+							access := s.getRead(currentTx, shardReadOptions{mutation: true})
+							defer access.Release()
+							if access.shard != s {
+								panic(uniqueReadRetry{})
+							}
+							uid, present = s.GetRecordidForUnique(exactScanAccess(accessSchema, key), currentTx, true)
+							if !present {
+								panic(uniqueReadRetry{})
+							}
+							guard.acquiredUniqueShard(s)
+						}
+						if mutating {
+							// MOSI admission already serializes the native shard writer.
+							// Drop local key ownership before network acquisition and
+							// keep it dropped until that writer has been released.
+							if activeReplication(t.schema) != nil {
+								guard.unlock()
+								defer guard.lock()
+								callbackGuard = nil
+							}
 							access := s.GetWrite(currentTx)
 							defer access.Release()
+							if sharedClusterSource(t) {
+								guard.acquiredUniqueShard(s)
+							}
 							if access.shard != s || !guard.validReads() {
 								panic(uniqueReadRetry{})
+							}
+							if callbackGuard == nil {
+								var present bool
+								uid, present = s.GetRecordidForUnique(exactScanAccess(accessSchema, key), currentTx, true)
+								if !present {
+									panic(uniqueReadRetry{})
+								}
+							}
+							if callbackGuard != nil && len(t.Unique) > 1 {
+								// Different constraints can collide with the same stored
+								// row. Include that row's canonical keys before reading
+								// callback values, not just this INSERT's proposed keys.
+								for {
+									var cols []string
+									for _, constraint := range t.Unique {
+										for _, name := range constraint.Cols {
+											if !slices.Contains(cols, name) {
+												cols = append(cols, name)
+											}
+										}
+									}
+									row := make([]scm.Scmer, len(cols))
+									for i, name := range cols {
+										row[i] = s.ColumnReaderTx(currentTx, name, false, ReadAuto).GetValue(uid)
+									}
+									needed := t.guardUniqueWrites(cols, [][]scm.Scmer{row}, mergeNull, 0)
+									if needed.mask&^guard.mask == 0 {
+										break
+									}
+									// No callback has run: release before waiting for the
+									// complete ordered stripe set, then re-probe the key.
+									guard.unlock()
+									guard.mask |= needed.mask
+									guard.lock()
+									var present bool
+									uid, present = s.GetRecordidForUnique(exactScanAccess(accessSchema, key), currentTx, true)
+									if !present {
+										t.processUniqueCollision(columns, values[j:j+1], mergeNull, success, onCollisionCols, failure, 0, currentTx, guard)
+										return
+									}
+								}
 							}
 						}
 						params := make([]scm.Scmer, len(onCollisionCols))
 						for i, p := range onCollisionCols {
 							if p == "$update" {
-								params[i] = scm.NewFunc(s.UpdateFunction(uid, true, false, currentTx))
+								params[i] = scm.NewFunc(s.UpdateFunction(uid, true, false, currentTx, callbackGuard))
 							} else if len(p) > 5 && p[:5] == "$set:" {
 								// Match the physical scan mapper's $set pseudo-column. Compute
 								// proxies need a point write because they are not row payload;
@@ -4751,7 +4826,7 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 								cacheColName := p[5:]
 								column := s.getColumnStorageOrPanic(cacheColName, false, currentTx)
 								proxy, computed := column.(*StorageComputeProxy)
-								update := s.UpdateFunction(uid, true, false, currentTx)
+								update := s.UpdateFunction(uid, true, false, currentTx, callbackGuard)
 								params[i] = scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
 									if len(args) > 0 {
 										if computed {
@@ -4773,7 +4848,7 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 							}
 						}
 						guard.wrote = true       // a collision callback may publish effects; never replay it
-						failure(uniq.Id, params) // notify about failure while unlocked
+						failure(uniq.Id, params) // mutating callbacks retain their logical key ownership
 					}()
 					goto nextrow
 				}
