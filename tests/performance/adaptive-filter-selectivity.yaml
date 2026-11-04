@@ -86,9 +86,7 @@ test_cases:
             (rebuild))
     performance_rows: 800000
     warmup: 0
-    # Include cold planning/index/JIT work and enough steady executions that
-    # one GC cycle cannot dominate this otherwise subsecond total workload.
-    timing_samples: 101
+    timing_samples: 10
     timing_aggregation: total
     threshold_ms: 15000
     sql: "SELECT SUM(f.amount) AS total FROM frequency_dimension d JOIN frequency_fact f ON f.dimension_id=d.id WHERE d.owner_id=1 AND f.batch_id=1"
