@@ -158,6 +158,141 @@ func TestInsertConcurrentSameUniqueKey(t *testing.T) {
 	}
 }
 
+// Exercise logical UNIQUE identity independently of its physical partition.
+// An extra partition dimension may place equal keys in different shards.
+func setupUniqueContentionTable(t *testing.T, layout string) *table {
+	t.Helper()
+	tbl := setupScanParallelTestTable(t, "tuniquecontention")
+	tbl.CreateColumn("bucket", "INT", nil, nil)
+	tbl.CreateColumn("val", "INT", nil, nil)
+	tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}}
+	if layout != "free" {
+		tbl.ShardMode = ShardModePartition
+		switch layout {
+		case "unique":
+			tbl.PDimensions = []shardDimension{{Column: "id", NumPartitions: 2, Pivots: []scm.Scmer{scm.NewInt(10)}}}
+		case "extra":
+			tbl.PDimensions = []shardDimension{{Column: "id", NumPartitions: 2, Pivots: []scm.Scmer{scm.NewInt(10)}}, {Column: "bucket", NumPartitions: 2, Pivots: []scm.Scmer{scm.NewInt(1)}}}
+		case "unrelated":
+			tbl.PDimensions = []shardDimension{{Column: "bucket", NumPartitions: 2, Pivots: []scm.Scmer{scm.NewInt(1)}}}
+		}
+		count := 1
+		for _, dimension := range tbl.PDimensions {
+			count *= dimension.NumPartitions
+		}
+		tbl.PShards = make([]*storageShard, count)
+		for i := range tbl.PShards {
+			tbl.PShards[i] = NewShard(tbl)
+		}
+		tbl.publishTopologyLocked()
+	}
+	return tbl
+}
+
+func TestInsertUniqueContention(t *testing.T) {
+	previous := runtime.GOMAXPROCS(32)
+	defer runtime.GOMAXPROCS(previous)
+	for _, layout := range []string{"free", "unique", "extra", "unrelated"} {
+		t.Run(layout, func(t *testing.T) {
+			tbl := setupUniqueContentionTable(t, layout)
+			const workers, keys = 64, 8
+			var accepted [keys]atomic.Int64
+			var collisions atomic.Int64
+			start := make(chan struct{})
+			var done sync.WaitGroup
+			for worker := 0; worker < workers; worker++ {
+				done.Add(1)
+				go func(worker int) {
+					defer done.Done()
+					defer func() {
+						if failure := recover(); failure != nil {
+							t.Errorf("INSERT: %v", failure)
+						}
+					}()
+					<-start
+					for key := 0; key < keys; key++ {
+						inserted := tbl.Insert([]string{"id", "bucket", "val"}, [][]scm.Scmer{{scm.NewInt(int64(key + 1)), scm.NewInt(int64(worker % 2)), scm.NewInt(int64(worker))}}, nil,
+							scm.NewFunc(func(...scm.Scmer) scm.Scmer { collisions.Add(1); return scm.NewInt(0) }), false, nil)
+						accepted[key].Add(int64(inserted))
+					}
+				}(worker)
+			}
+			close(start)
+			done.Wait()
+			for key := range accepted {
+				if n := accepted[key].Load(); n != 1 {
+					t.Errorf("key %d: %d winners, want 1", key+1, n)
+				}
+			}
+			if n := collisions.Load(); n != (workers-1)*keys {
+				t.Errorf("collisions=%d, want %d", n, (workers-1)*keys)
+			}
+			if n := tbl.CountExact(); n != keys {
+				t.Errorf("rows=%d, want %d", n, keys)
+			}
+		})
+	}
+}
+
+func TestInsertCollisionReadModifyWriteContention(t *testing.T) {
+	previous := runtime.GOMAXPROCS(32)
+	defer runtime.GOMAXPROCS(previous)
+	for _, layout := range []string{"free", "unique", "extra", "unrelated"} {
+		t.Run(layout, func(t *testing.T) {
+			tbl := setupUniqueContentionTable(t, layout)
+			columns := []string{"id", "bucket", "val"}
+			tbl.Insert(columns, [][]scm.Scmer{{scm.NewInt(7), scm.NewInt(0), scm.NewInt(0)}}, nil, scm.NewNil(), false, nil)
+			const workers, repetitions = 64, 16
+			var calls, applied atomic.Int64
+			callback := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
+				calls.Add(1)
+				old := a[0].Int()
+				// Widen the read/write interleaving without relying on a timer.
+				runtime.Gosched()
+				result := scm.Apply(a[1], scm.NewSlice([]scm.Scmer{scm.NewString("val"), scm.NewInt(old + 1)}))
+				if result.Bool() {
+					applied.Add(1)
+				}
+				return result
+			})
+			start := make(chan struct{})
+			var done sync.WaitGroup
+			for worker := 0; worker < workers; worker++ {
+				done.Add(1)
+				go func(worker int) {
+					defer done.Done()
+					defer func() {
+						if failure := recover(); failure != nil {
+							t.Errorf("UPSERT: %v", failure)
+						}
+					}()
+					<-start
+					for i := 0; i < repetitions; i++ {
+						tbl.Insert(columns, [][]scm.Scmer{{scm.NewInt(7), scm.NewInt(int64(worker % 2)), scm.NewInt(0)}}, []string{"val", "$update"}, callback, false, nil)
+					}
+				}(worker)
+			}
+			close(start)
+			done.Wait()
+			var total int64
+			for _, shard := range tbl.ActiveShards() {
+				access := shard.GetRead(nil, false)
+				reader := access.shard.ColumnReaderTx(nil, "val", false, ReadAuto)
+				for id := uint32(0); id < access.shard.main_count+uint32(len(access.shard.deltaRows())); id++ {
+					if !access.shard.deletions.Get(uint(id)) {
+						total += reader.GetValue(id).Int()
+					}
+				}
+				access.Release()
+			}
+			const expected = workers * repetitions
+			if calls.Load() != expected || applied.Load() != expected || total != expected || tbl.CountExact() != 1 {
+				t.Fatalf("callbacks=%d updates=%d value=%d rows=%d; want %d increments on one row", calls.Load(), applied.Load(), total, tbl.CountExact(), expected)
+			}
+		})
+	}
+}
+
 func TestInsertCollisionCallbackRechecksEarlierKeys(t *testing.T) {
 	tbl := setupScanParallelTestTable(t, "tinsertcallbackrecheck")
 	tbl.CreateColumn("name", "TEXT", nil, nil)
