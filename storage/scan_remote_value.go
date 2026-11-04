@@ -77,12 +77,9 @@ func (value schemeValue) reconstruct(decode ...scm.ProcedureDecode) (result scm.
 	if err != nil {
 		return scm.NewNil(), err
 	}
-	// Atomic data/declared builtins have no syntax to normalize. Code and
-	// constructor expressions still go through the optimizer before JIT.
-	if !expression.IsSlice() && !expression.IsProc() {
-		return scm.Eval(expression, &scm.Globalenv).WithoutSourceInfo(), nil
-	}
-	result = scm.Eval(scm.Optimize(expression, &scm.Globalenv, nil), &scm.Globalenv).WithoutSourceInfo()
+	// Serialized data and capture constructors need evaluation, not another
+	// optimizer pass over the sender's already prepared code or quoted values.
+	result = scm.Eval(expression, &scm.Globalenv).WithoutSourceInfo()
 	if result.IsProc() {
 		result = scm.CompileJIT(result, true)
 	}

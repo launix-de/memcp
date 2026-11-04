@@ -189,6 +189,59 @@ func TestProcedureWireRejectsInvalidEnvelopesAndBounds(t *testing.T) {
 	}
 }
 
+// Wire reconstruction must preserve the sender's code, including the portable
+// symbolic form of numbered locals, rather than running optimization again.
+func TestProcedureWirePreservesSenderPlan(t *testing.T) {
+	for _, optimized := range []bool{false, true} {
+		expression := Read(t.Name(), `(lambda (x) (if (> x 0) (+ x 1) (- x 1)))`, false)
+		if optimized {
+			expression = Optimize(expression, &Globalenv, nil)
+		}
+		wire, err := MarshalProcedure(Eval(expression, &Globalenv))
+		if err != nil {
+			t.Fatal(err)
+		}
+		body := Read(t.Name(), string(wire[1:]), false).Slice()[2]
+		restored, err := UnmarshalProcedure(wire)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !Equal(restored.Proc().Body, body) {
+			t.Fatalf("optimized=%v: receiver rewrote sender plan", optimized)
+		}
+		if Apply(restored, NewInt(6)).Int() != 7 || Apply(restored, NewInt(-2)).Int() != -3 {
+			t.Fatalf("optimized=%v: reconstructed plan returned wrong results", optimized)
+		}
+		if jitEnabled && restored.Proc().nativeCode() == 0 {
+			t.Fatal("receiver did not compile the sender plan")
+		}
+	}
+}
+
+func TestProcedureWireVariadicSymbolicParameter(t *testing.T) {
+	proc := Eval(Read(t.Name(), `(lambda args (count args))`, false), &Globalenv)
+	wire, err := MarshalProcedure(proc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored, err := UnmarshalProcedure(wire)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for count := 0; count < 5; count++ {
+		args := make([]Scmer, count)
+		for i := range args {
+			args[i] = NewInt(int64(i + 1))
+		}
+		if got := Apply(restored, args...); got.Int() != int64(count) {
+			t.Fatalf("variadic binding lost arguments: got %v, want %d", got, count)
+		}
+	}
+	if jitEnabled && restored.Proc().nativeCode() == 0 {
+		t.Fatal("receiver did not compile symbolic variadic parameter")
+	}
+}
+
 func TestProcedureWireJITCaptures(t *testing.T) {
 	compiled := compileJITExpressionTestProc(t, `(lambda (captured) (lambda (row) (+ row captured)))`)
 	bound := Apply(compiled, NewInt(7))
@@ -212,6 +265,7 @@ func TestProcedureWireCapturedData(t *testing.T) {
 	for _, captured := range []Scmer{
 		NewNil(), NewSymbol("literal_symbol"), NewString("a\x00b"),
 		NewSlice([]Scmer{NewSymbol("lambda"), NewSlice(nil), NewInt(7)}),
+		NewSlice([]Scmer{NewSymbol("var"), NewInt(9)}),
 		NewSlice([]Scmer{NewString("key"), NewSlice([]Scmer{NewInt(17)})}),
 	} {
 		env := &Env{Vars: Vars{Symbol("captured"): captured}, Outer: &Globalenv}

@@ -58,7 +58,7 @@ explicitly until they have a portable execution/lifetime contract.
 
 **Reconstruct captured objects.** `Serialize` emits a `cluster_object` call with
 an owner URI, process incarnation, type and independent reference token. The
-receiver resolves these calls before Optimize/Eval, preserving repeated capture
+receiver resolves these calls before Eval, preserving repeated capture
 identity. `scm.ClusterObject.HandleClusterRequest` is the shared endpoint contract
 for sessions, cachemaps, transactions, transaction-shard visibility views,
 physical generations and catalog objects. Serialization does not switch on their
@@ -268,9 +268,11 @@ WAL and column formats are unchanged. Scheme values and lambda bodies remain
 text, not a new binary Scmer format. Incompatible protocol versions are rejected.
 
 Received procedures materialize their captures, bind the current worker's native
-execution scope, optimize and JIT locally before entering the shard loop. The
-optimizer remains necessary for the JIT's canonical forms; only atomic data
-values bypass that walk. Scan-context binding
+execution scope and JIT locally before entering the shard loop. The sender's
+plan is already optimized; received procedures, values and immutable capture
+sources are reconstructed without another optimizer pass. Textual `(var n)`
+operands are decoded to numbered locals alongside runtime references. The JIT
+also binds symbolic variadic parameters directly. Scan-context binding
 and capture resolution copy only changed AST ancestors; code, TX executors and
 query-bound closures are not globally cached or shared between invocations.
 Parsing network text omits source-location objects; normal module/error parsing

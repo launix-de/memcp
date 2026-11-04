@@ -276,7 +276,7 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 		}
 		putVar := func(sym Symbol, index int) {
 			if vars == nil {
-				vars = make(map[Symbol]JITValueDesc, inputArgCount)
+				vars = make(map[Symbol]JITValueDesc, max(1, inputArgCount))
 			}
 			desc := JITValueDesc{Loc: LocInputPair, Type: JITTypeUnknown, StackOff: int32(index)}
 			if index < len(numbered) {
@@ -298,9 +298,9 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 				putVar(param.Symbol(), i)
 			}
 		case tagSymbol:
-			if inputArgCount > 0 {
-				putVar(proc.Params.Symbol(), 0)
-			}
+			// Variadic Scheme calls pass one materialized list binding. This
+			// symbol also needs a slot when the body has not been renumbered.
+			putVar(proc.Params.Symbol(), 0)
 		}
 		if len(vars) > 0 || len(numbered) > 0 || captured != nil {
 			ctx.Env = &JITEnv{Vars: vars, Numbered: numbered, Outer: captured}

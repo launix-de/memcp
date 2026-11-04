@@ -216,7 +216,7 @@ func ClusterReferenceExpression(ref ClusterReference) Scmer {
 }
 
 // ProcedureDecode is invocation-owned. Reconstruction is completed before
-// Optimize/Eval builds the callback, never lazily during its row execution.
+// Eval builds the callback, never lazily during its row execution.
 type ProcedureDecode struct {
 	ResolveHandle func(uint64) (Handle, error)
 	// Prepare is an optional embedding-owned transformation of the validated
@@ -334,6 +334,15 @@ func resolveProcedureObjectTree(value Scmer, captures map[int64]*serializedCaptu
 		return value, nil
 	}
 	items := plain.Slice()
+	// Numbered locals have a textual wire spelling. Restore their native
+	// representation during decoding, without rerunning the optimizer.
+	if len(items) == 2 && scmerIsSymbol(items[0], "var") {
+		index := items[1].WithoutSourceInfo()
+		if !index.IsInt() || index.Int() < 0 || index.Int() >= 65536 {
+			return NewNil(), fmt.Errorf("invalid serialized local variable")
+		}
+		return NewNthLocalVar(NthLocalVar(index.Int())), nil
+	}
 	if len(items) == 3 && scmerIsSymbol(items[0], "serialized_value") {
 		id := items[1].WithoutSourceInfo()
 		if !id.IsInt() || id.Int() <= 0 {
@@ -627,7 +636,7 @@ func importClusterLiteral(handle ClusterHandle) (value Scmer) {
 	if err != nil {
 		panic(err)
 	}
-	value = Eval(Optimize(Read("immutable cluster capture", source.String(), false), &Globalenv, nil), &Globalenv)
+	value = Eval(Read("immutable cluster capture", source.String(), false), &Globalenv)
 	if !value.IsFastDict() {
 		panic("invalid immutable dictionary capture")
 	}

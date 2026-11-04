@@ -131,8 +131,9 @@ func UnmarshalProcedure(data []byte, options ...ProcedureDecode) (value Scmer, e
 		return NewNil(), err
 	}
 	// Capture constructors have run exactly once; now build the callable and
-	// enclosed scope. Ordinary query code remains inert until invocation.
-	return CompileJIT(Eval(Optimize(expression, &Globalenv, nil), &Globalenv), true), nil
+	// enclosed scope. The sender already optimized the plan; reconstruction
+	// must not optimize it again. Ordinary query code stays inert until invocation.
+	return CompileJIT(Eval(expression, &Globalenv), true), nil
 }
 
 func procedureWireBindings(params, body Scmer, parent map[Symbol]struct{}) map[Symbol]struct{} {
