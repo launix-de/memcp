@@ -690,18 +690,27 @@ func emitJITStorageFunction(buf *execBuf, abi jitStorageABI, emit jitStorageEmit
 	return codeLen, ctx.ConstRoots, false, false
 }
 
-func jitStorageABIInputRegisters(abi jitStorageABI) uint64 {
-	c := jit.GetCallingConventionForType(jitStorageSignature(abi))
-	var mask uint64
-	for _, input := range c.Inputs {
-		for _, part := range input.Parts {
-			if part.Location.Kind != jit.InRegister || part.Location.Register.Class != jit.IntegerRegister {
-				panic("jit: unsupported storage entry location")
+// Prepare the five entry conventions at initialization, including the type
+// cache used by stack-growth emission. Compilation only reads register masks;
+// repeated scalar/range/multi readers must not rebuild allocating ABI layouts.
+var jitStorageInputRegisters = func() [5]uint64 {
+	var masks [5]uint64
+	for abi := jitStorageGetValueABI; abi <= jitFilterBufferABI; abi++ {
+		c := jitConventionForType(jitStorageSignature(abi))
+		for _, input := range c.Inputs {
+			for _, part := range input.Parts {
+				if part.Location.Kind != jit.InRegister || part.Location.Register.Class != jit.IntegerRegister {
+					panic("jit: unsupported storage entry location")
+				}
+				masks[abi] |= 1 << part.Location.Register.Number
 			}
-			mask |= 1 << part.Location.Register.Number
 		}
 	}
-	return mask
+	return masks
+}()
+
+func jitStorageABIInputRegisters(abi jitStorageABI) uint64 {
+	return jitStorageInputRegisters[abi]
 }
 
 func (ctx *JITContext) emitStoreRegMem32(src, base Reg, disp int32) {
