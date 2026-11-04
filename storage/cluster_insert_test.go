@@ -5,6 +5,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 package storage
 
 import "sync"
+import "fmt"
 import "time"
 import "testing"
 import "runtime"
@@ -1303,5 +1304,86 @@ func TestClusterWarmInsertStaysLocalAtColdAdmissionLimit(t *testing.T) {
 	}
 	if cell.ownstate.Writing() || cluster.delegated.Load() != 0 {
 		t.Fatal("warm INSERT retained M or delegated despite existing local access")
+	}
+}
+
+func TestClusterUniqueReservationDeduplicatesSuccessorAliases(t *testing.T) {
+	tbl := setupScanParallelTestTable(t, "t_unique_reservation_alias")
+	tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}}
+	source := tbl.ActiveShards()[0]
+	successor := NewShard(tbl)
+	successor.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(42)}}, false, nil, nil, false, nil)
+	cluster := globalTestCluster(t, tbl.schema.Name)
+	mounts := sharedClusterMounts.Swap(&map[string]bool{tbl.schema.Name: true})
+	defer sharedClusterMounts.Store(mounts)
+	service := nodeScans.Swap(&nodeScanService{cluster: cluster})
+	defer nodeScans.Store(service)
+	cluster.manager.resourceCell(mosiResource{Database: tbl.schema.Name}).ownstate.Initialize(mosi.M)
+	cell := cluster.declareShard(source, true)
+	successor.coherence.Store(cell)
+	cluster.manager.forwardResource(cluster.manager.shardResource(source), cluster.manager.shardResource(successor))
+	cell.current.Store(successor)
+	tbl.mu.Lock()
+	tbl.Shards = []*storageShard{successor}
+	tbl.publishTopologyLocked()
+	tbl.mu.Unlock()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ready := make(chan *clusterReceiver, 1)
+	receiver := newClusterReceiver(1, func(_ context.Context, value scm.Scmer) (scm.Scmer, error) {
+		ready <- value.Any().(*clusterReceiver)
+		return scm.NewNil(), nil
+	})
+	receiver.Seal()
+	defer receiver.Close()
+	input := shardScanInvocation{neutral: scm.NewSlice([]scm.Scmer{
+		scm.NewAny(receiver), uniqueStringArray([]string{"id"}), uniqueRowArray([][]scm.Scmer{{scm.NewInt(42)}}),
+		scm.NewBool(false), scm.NewBool(true), uniqueStringArray([]string{source.uuid.String(), successor.uuid.String()}),
+	})}
+	done := make(chan error, 1)
+	go func() {
+		defer func() {
+			if value := recover(); value != nil {
+				done <- fmt.Errorf("reservation panic: %v", value)
+			}
+		}()
+		_, err := successor.serveUniqueScan(ctx, input)
+		done <- err
+	}()
+	joined := false
+	defer func() {
+		cancel()
+		if !joined {
+			select {
+			case <-done:
+			case <-time.After(3 * time.Second):
+				t.Error("reservation did not join after cancellation")
+			}
+		}
+	}()
+	select {
+	case commands := <-ready:
+		for _, id := range []string{source.uuid.String(), successor.uuid.String()} {
+			value, err := callUniqueChannel(ctx, commands, scm.NewString("probe"), scm.NewString(id), uniqueStringArray([]string{"id"}), scm.NewSlice([]scm.Scmer{scm.NewInt(42)}), uniqueStringArray(nil))
+			if err != nil || !value.Slice()[0].Bool() {
+				t.Fatalf("alias probe: %v %v", value, err)
+			}
+		}
+		if _, err := callUniqueChannel(ctx, commands, scm.NewString("finish")); err != nil {
+			t.Fatal(err)
+		}
+	case err := <-done:
+		joined = true
+		t.Fatalf("successor alias reacquired its own nil-TX writer: %v", err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("reservation blocked on its own successor")
+	}
+	err := <-done
+	joined = true
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cell.ownstate.Writing() {
+		t.Fatal("alias reservation retained its writer")
 	}
 }

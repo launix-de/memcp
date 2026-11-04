@@ -4048,6 +4048,12 @@ func (t *table) insertLocal(columns []string, values [][]scm.Scmer, onCollisionC
 			for _, row := range values {
 				needed[partitionForRow(row)] = true
 			}
+			var targets []*storageShard
+			for bucket, selected := range needed {
+				if selected {
+					targets = append(targets, partitionShards[bucket])
+				}
+			}
 			var writes []WriteAccess
 			releaseWrites := func() {
 				for i := len(writes) - 1; i >= 0; i-- {
@@ -4125,7 +4131,7 @@ func (t *table) insertLocal(columns []string, values [][]scm.Scmer, onCollisionC
 					default:
 						result++
 					}
-				}, 0, currentTx, nil, partitionShards)
+				}, 0, currentTx, nil, targets)
 			} else {
 				insertRows(values, nil)
 			}
@@ -4626,23 +4632,6 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 		if repartitioning {
 			shardlist = sources.shards
 		}
-		dimensions := topology.dimensions
-		allowPruning := topology.mode == ShardModePartition && !repartitioning
-		pruningMap := make([]int, len(dimensions))
-		pruningVals := make([]scm.Scmer, len(dimensions))
-		if allowPruning {
-			for j, dim := range dimensions {
-				found := false
-				for i, col := range uniq.Cols {
-					if dim.Column == col {
-						pruningMap[j] = i
-						found = true
-						break
-					}
-				}
-				allowPruning = allowPruning && found
-			}
-		}
 
 		// Compute the existing probe domain before loading any shard. NULLs
 		// skipped by this key need no read access, and partition-local keys
@@ -4667,21 +4656,18 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 			needed = make([]bool, len(shardlist))
 		}
 		needed = needed[:len(shardlist)]
+		neededShards := make(map[*storageShard]bool)
 		for _, row := range values {
-			if !prepareKey(row) {
-				continue
-			}
-			if !allowPruning {
-				for i, shard := range shardlist {
-					needed[i] = shard != nil
+			if prepareKey(row) {
+				for _, shard := range t.uniqueProbeShards(topology, uniq.Cols, key) {
+					neededShards[shard] = true
 				}
-				break
 			}
-			for j, xidx := range pruningMap {
-				pruningVals[j] = key[xidx]
-			}
-			needed[computeShardIndex(dimensions, pruningVals)] = true
 		}
+		for i, shard := range shardlist {
+			needed[i] = neededShards[shard]
+		}
+
 		// Retain each generation once for this unique-check batch, outside the
 		// row/key probe loops. Collision callbacks may panic or recursively scan;
 		// neither path may leak a lease or let eviction detach prepared columns.
@@ -4696,7 +4682,7 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 				access.Release()
 			}
 		}()
-		resolvedShards := false
+		resolvedShards := make(map[*storageShard]*storageShard)
 		for i, shard := range shardlist {
 			if needed[i] && !sharedClusterSource(t) {
 				readAccesses[i] = shard.acquireReadForScan(currentTx, nil)
@@ -4704,11 +4690,7 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 					// Acquisition may install a native successor while this check
 					// retains the preceding topology. Probe the generation actually
 					// acquired, rather than an old source missing newer keys.
-					if !resolvedShards {
-						shardlist = append([]*storageShard(nil), shardlist...)
-						resolvedShards = true
-					}
-					shardlist[i] = current
+					resolvedShards[shard] = current
 				}
 			}
 		}
@@ -4721,14 +4703,14 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 			if skipUniqueCheck {
 				goto nextrow
 			}
-			if guard.reservations != nil {
-				shardlist2 = t.uniqueProbeShards(topology, uniq.Cols, key)
-			} else if allowPruning {
-				for j, xidx := range pruningMap {
-					pruningVals[j] = key[xidx]
+			shardlist2 = t.uniqueProbeShards(topology, uniq.Cols, key)
+			if len(resolvedShards) != 0 {
+				shardlist2 = append([]*storageShard(nil), shardlist2...)
+				for i, shard := range shardlist2 {
+					if current := resolvedShards[shard]; current != nil {
+						shardlist2[i] = current
+					}
 				}
-				// only one shard to visit for unique check
-				shardlist2 = []*storageShard{shardlist[computeShardIndex(dimensions, pruningVals)]} // (TODO: array pruning)
 			}
 			if pending.remember(j, key) {
 				// Publish the unwritten prefix through every remaining constraint

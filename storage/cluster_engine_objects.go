@@ -150,7 +150,7 @@ func (s *storageShard) HandleClusterRequest(ctx context.Context, r scm.ClusterRe
 			if input.operator == shardUniqueReserve {
 				committed, err := s.serveUniqueScan(ctx, input)
 				if busy, ok := err.(uniqueReservationBusy); ok {
-					return scanResult{res: scm.NewSlice([]scm.Scmer{scm.NewString("busy"), scm.NewString(busy.shard.Resource.Shard)})}, nil
+					return scanResult{res: scm.NewSlice([]scm.Scmer{scm.NewString("busy"), scm.NewString(busy.shard.Resource.Shard), scm.NewBool(busy.capacity)})}, nil
 				}
 				if err != nil {
 					return nil, err
@@ -583,6 +583,10 @@ func (origin *TxContext) BindClusterInvocation(value scm.Scmer) (scm.Scmer, erro
 
 func (tx *TxContext) Serialize(ctx *scm.SerializationContext) (scm.Scmer, error) {
 	return tx.transactionState.Serialize(ctx)
+}
+
+func (tx *transactionState) ClusterForwardedHandle() *scm.ClusterHandle {
+	return tx.coordinator
 }
 
 func (tx *transactionState) Serialize(ctx *scm.SerializationContext) (scm.Scmer, error) {

@@ -363,9 +363,6 @@ func (a scanAccess) boundaryNullSafe(index int) bool {
 }
 
 func (a scanAccess) boundaryOrder(index int) (func(...scm.Scmer) scm.Scmer, string) {
-	if a.exactAdjacent {
-		return nil, ""
-	}
 	if a.runtime == nil {
 		box := a.compiledBoundary(index)
 		return box.order, box.orderMetadata

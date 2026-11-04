@@ -54,6 +54,38 @@ func TestRegexpMatches(t *testing.T) {
 	Apply(fn, NewString("abc"), NewString("["))
 }
 
+func TestCaseFoldIndexOrderMatchesEquality(t *testing.T) {
+	values := []string{"", "K", "k", "K", "ſail", "sail", "Σ", "σ", "ς", "I", "i", "İ", "ı", "03", "3"}
+	for _, name := range []string{"unicode-simple-fold", "unicode-string"} {
+		for _, reverse := range []bool{false, true} {
+			order := Apply(Globalenv.Vars[Symbol("collate")], NewString(name), NewBool(reverse))
+			metadata := name + ":asc"
+			if reverse {
+				metadata = name + ":desc"
+			}
+			key, _, ok := LookupCollationKey(metadata)
+			if !ok {
+				t.Fatal("missing equality index key", metadata)
+			}
+			for _, left := range values {
+				for _, right := range values {
+					want := left == right
+					if name == "unicode-simple-fold" {
+						want = strings.EqualFold(left, right)
+					}
+					a, b := NewString(left), NewString(right)
+					equal := !Apply(order, a, b).Bool() && !Apply(order, b, a).Bool()
+					ak, _ := key(a)
+					bk, _ := key(b)
+					if equal != want || (ak == bk) != want {
+						t.Errorf("%s: %q / %q: equality=%v key-equality=%v want=%v", metadata, left, right, equal, ak == bk, want)
+					}
+				}
+			}
+		}
+	}
+}
+
 func TestBinaryCollationBooleanTextOrder(t *testing.T) {
 	values := []Scmer{NewNil(), NewBool(false), NewBool(true),
 		NewString(""), NewString("0"), NewString("1"), NewString("3"),

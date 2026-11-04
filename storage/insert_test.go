@@ -518,6 +518,40 @@ func TestInsertUniqueGuardCoversCoercingEquality(t *testing.T) {
 	}
 }
 
+func TestUniqueTypedHashMatchesEquality(t *testing.T) {
+	for _, definition := range []struct{ typ, collation string }{
+		{"VARCHAR", "bin"}, {"VARCHAR", "utf8mb4_general_ci"}, {"VARCHAR", "utf8mb4_unicode_520_ci"},
+		{"INT", "bin"}, {"DOUBLE", "bin"},
+	} {
+		t.Run(definition.typ+"-"+definition.collation, func(t *testing.T) {
+			tbl := setupScanParallelTestTable(t, "t_unique_typed_hash")
+			tbl.CreateColumn("value", definition.typ, []int{40}, nil)
+			column := tbl.Columns[len(tbl.Columns)-1]
+			column.Collation = definition.collation
+			column.UpdateSanitizer()
+			values := []scm.Scmer{scm.NewNil(), scm.NewBool(false), scm.NewBool(true), scm.NewInt(0), scm.NewInt(3), scm.NewFloat(math.Copysign(0, -1)), scm.NewFloat(3), scm.NewString("03"), scm.NewString("3")}
+			if definition.typ == "VARCHAR" {
+				for _, value := range []string{"sail", "ſail", "K", "K", "Σ", "σ", "ς", "I", "i", "İ", "ı"} {
+					values = append(values, scm.NewString(value))
+				}
+			}
+			equal := tbl.uniqueColumnEqual("value")
+			for _, left := range values {
+				for _, right := range values {
+					if !equal(left, right) {
+						continue
+					}
+					a, ap := tbl.uniqueColumnHash("value", left)
+					b, bp := tbl.uniqueColumnHash("value", right)
+					if !ap || !bp || a != b {
+						t.Errorf("equal typed values %s / %s have hashes %x / %x (precise %v / %v)", scm.String(left), scm.String(right), a, b, ap, bp)
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestInsertRoutingReservationsDoNotOverbook(t *testing.T) {
 	shard := &storageShard{}
 	releases := make(chan func(), 32)
@@ -808,5 +842,64 @@ func TestInsertCollisionAndUpdateShareAtomicRow(t *testing.T) {
 	}
 	if total != 256 || tbl.CountExact() != 1 {
 		t.Fatalf("mixed increments=%d rows=%d; want 256 on one row", total, tbl.CountExact())
+	}
+}
+
+func TestUniqueCollatedIndexLookup(t *testing.T) {
+	for _, pair := range [][2]string{{"Alpha", "ALPHA"}, {"ſail", "sail"}, {"Key", "key"}} {
+		t.Run(pair[0], func(t *testing.T) {
+			tbl := setupScanParallelTestTable(t, "t_unique_collated_lookup")
+			tbl.CreateColumn("label", "VARCHAR", []int{40}, nil)
+			col := tbl.Columns[len(tbl.Columns)-1]
+			col.Collation = "utf8mb4_general_ci"
+			col.UpdateSanitizer()
+			tbl.Unique = []uniqueKey{{Id: "label", Cols: []string{"label"}}}
+			tbl.Insert([]string{"label"}, [][]scm.Scmer{{scm.NewString(pair[0])}}, nil, scm.NewNil(), false, nil)
+			for _, shard := range tbl.ActiveShards() {
+				access := exactScanAccess(newExactScanAccessSchema([]string{"label"}), []scm.Scmer{scm.NewString(pair[1])})
+				if _, found := shard.GetRecordidForUnique(access, nil, true); !found {
+					t.Fatal("collated key absent from UNIQUE index")
+				}
+			}
+		})
+	}
+}
+
+func TestUniqueProbePrunesKnownPartitionDimensions(t *testing.T) {
+	tbl := setupUniqueContentionTable(t, "extra")
+	topology := tbl.activeTopology()
+	for _, tc := range []struct {
+		columns []string
+		values  []scm.Scmer
+		indices []int
+	}{
+		{[]string{"id"}, []scm.Scmer{scm.NewInt(20)}, []int{2, 3}},
+		{[]string{"bucket"}, []scm.Scmer{scm.NewInt(0)}, []int{0, 2}},
+		{[]string{"id", "bucket"}, []scm.Scmer{scm.NewInt(20), scm.NewInt(0)}, []int{2}},
+		{[]string{"val"}, []scm.Scmer{scm.NewInt(20)}, []int{0, 1, 2, 3}},
+	} {
+		selected := tbl.uniqueProbeShards(topology, tc.columns, tc.values)
+		if len(selected) != len(tc.indices) {
+			t.Fatalf("%v selected %d shards, want %v", tc.columns, len(selected), tc.indices)
+		}
+		for i, index := range tc.indices {
+			if selected[i] != topology.shards[index] {
+				t.Fatalf("%v selected wrong shard at %d", tc.columns, i)
+			}
+		}
+	}
+}
+
+func TestUniqueCollatedPartitionProbePreservesOtherDimensions(t *testing.T) {
+	tbl := setupUniqueContentionTable(t, "extra")
+	tbl.CreateColumn("label", "VARCHAR", []int{40}, []scm.Scmer{scm.NewString("collate"), scm.NewString("utf8mb4_general_ci")})
+	active := tbl.activeTopology()
+	topology := tableShardTopology{mode: ShardModePartition, shards: active.shards, dimensions: []shardDimension{
+		{Column: "label", NumPartitions: 2, Pivots: []scm.Scmer{scm.NewString("M")}},
+		active.dimensions[1],
+	}}
+	selected := tbl.uniqueProbeShards(&topology, []string{"label", "bucket"}, []scm.Scmer{scm.NewString("sail"), scm.NewInt(0)})
+	if len(selected) != 2 || selected[0] != topology.shards[0] || selected[1] != topology.shards[2] {
+		t.Fatal("collated key used raw string partitioning or lost the independent dimension")
 	}
 }

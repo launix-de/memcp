@@ -83,7 +83,7 @@ func (s *storageShard) probeUnique(access scanAccess, tx *TxContext) bool {
 					}
 				}
 			}()
-			lease := s.getRead(tx, shardReadOptions{})
+			lease := s.getRead(tx, shardReadOptions{mutation: true})
 			defer lease.Release()
 			_, found = lease.shard.GetRecordidForUnique(access, tx, true)
 		}()

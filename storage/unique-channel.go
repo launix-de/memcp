@@ -8,6 +8,7 @@ import "fmt"
 import "context"
 import "sort"
 import "sync"
+import "slices"
 import "strings"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/go-mysqlstack/sqldb"
@@ -19,8 +20,9 @@ type uniqueNativeShard struct {
 }
 
 type uniqueReservationBusy struct {
-	shard remoteScanShard
-	owner string
+	shard    remoteScanShard
+	owner    string
+	capacity bool
 }
 
 func (uniqueReservationBusy) Error() string { return "UNIQUE writer admission is busy" }
@@ -34,14 +36,28 @@ func (t *table) admitUnique(busy uniqueReservationBusy, tx *TxContext) {
 	if owner != busy.owner {
 		return // regroup by the new owner; never recall data through a stale hint
 	}
-	if owner == cluster.self.ID {
+	if owner == cluster.self.ID && !busy.capacity {
 		shard := cluster.manager.findShard(busy.shard.Resource)
 		if shard == nil {
 			return
 		}
-		write := shard.GetWrite(tx)
-		write.Release()
-		return
+		loaded := false
+		func() {
+			defer func() {
+				if failure := recover(); failure != nil {
+					if _, capacity := failure.(shardReadDelegation); !capacity {
+						panic(failure)
+					}
+				}
+			}()
+			write := shard.GetWrite(tx)
+			write.Release()
+			loaded = true
+		}()
+		if loaded {
+			return
+		}
+		busy.capacity = true
 	}
 	var preferred *clusterLink
 	for _, link := range cluster.view.Load().links {
@@ -51,6 +67,10 @@ func (t *table) admitUnique(busy uniqueReservationBusy, tx *TxContext) {
 		}
 	}
 	executor := clusterScanExecutor{cluster: cluster, preferred: preferred, expected: busy.shard}
+	if busy.capacity {
+		executor.preferred = nil
+		executor.exclude = owner
+	}
 	result := executor.ExecuteShardScan(busy.shard.Resource, shardScanInvocation{operator: shardUniqueAdmit, tx: tx})
 	if result.err.r != nil {
 		panic(result.err)
@@ -328,6 +348,26 @@ func (t *table) reserveUniqueDomain(columns []string, rows [][]scm.Scmer, mergeN
 		owners = append(owners, owner)
 	}
 	sort.Strings(owners)
+	// Reservation setup needs key values only. Payload columns and collision
+	// closures stay with the coordinator until a probe finds an actual match.
+	var keyColumns []string
+	var keyPositions []int
+	for position, column := range columns {
+		for _, constraint := range t.Unique {
+			if slices.Contains(constraint.Cols, column) {
+				keyColumns = append(keyColumns, column)
+				keyPositions = append(keyPositions, position)
+				break
+			}
+		}
+	}
+	keyRows := make([][]scm.Scmer, len(rows))
+	for i, row := range rows {
+		keyRows[i] = make([]scm.Scmer, len(keyPositions))
+		for j, position := range keyPositions {
+			keyRows[i][j] = row[position]
+		}
+	}
 	for _, owner := range owners {
 		shards := groups[owner]
 		sort.Slice(shards, func(i, j int) bool { return shards[i].uuid.String() < shards[j].uuid.String() })
@@ -343,7 +383,7 @@ func (t *table) reserveUniqueDomain(columns []string, rows [][]scm.Scmer, mergeN
 		for i, shard := range shards {
 			ids[i] = shard.uuid.String()
 		}
-		client := t.startUniqueReservation(ctx, owner, shards[0], ids, columns, rows, mergeNull, tx, borrowed)
+		client := t.startUniqueReservation(ctx, owner, shards[0], ids, keyColumns, keyRows, mergeNull, tx, borrowed)
 		set.ordered = append(set.ordered, client)
 		for _, id := range ids {
 			set.clients[id] = client
@@ -366,7 +406,10 @@ func (t *table) startUniqueReservation(parent context.Context, owner string, fir
 	ctx, cancel := context.WithCancel(parent)
 	client := &uniqueReservationClient{ctx: ctx, cancel: cancel, done: make(chan scanResult, 1)}
 	ready := make(chan *clusterReceiver, 1)
-	receiver := newClusterReceiver(1, func(_ context.Context, value scm.Scmer) error { ready <- value.Any().(*clusterReceiver); return nil })
+	receiver := newClusterReceiver(1, func(_ context.Context, value scm.Scmer) (scm.Scmer, error) {
+		ready <- value.Any().(*clusterReceiver)
+		return scm.NewNil(), nil
+	})
 	receiver.Seal()
 	defer receiver.Close()
 	invocation := shardScanInvocation{operator: shardUniqueReserve, tx: tx, writeAcquired: true, neutral: scm.NewSlice([]scm.Scmer{
@@ -385,7 +428,7 @@ func (t *table) startUniqueReservation(parent context.Context, owner string, fir
 			}
 			committed, err := first.serveUniqueScan(ctx, invocation)
 			if busy, ok := err.(uniqueReservationBusy); ok {
-				client.done <- scanResult{res: scm.NewSlice([]scm.Scmer{scm.NewString("busy"), scm.NewString(busy.shard.Resource.Shard)})}
+				client.done <- scanResult{res: scm.NewSlice([]scm.Scmer{scm.NewString("busy"), scm.NewString(busy.shard.Resource.Shard), scm.NewBool(busy.capacity)})}
 				return
 			}
 			if err != nil {
@@ -413,8 +456,8 @@ func (t *table) startUniqueReservation(parent context.Context, owner string, fir
 		if result.err.r != nil {
 			panic(result.err)
 		}
-		if result.res.IsSlice() && len(result.res.Slice()) == 2 && scm.String(result.res.Slice()[0]) == "busy" {
-			panic(uniqueReservationBusy{shard: remoteScanShard{Schema: t.filterSchemaFingerprint(), Resource: mosiResource{Database: t.schema.Name, Table: t.Name, Shard: scm.String(result.res.Slice()[1])}}, owner: owner})
+		if result.res.IsSlice() && len(result.res.Slice()) == 3 && scm.String(result.res.Slice()[0]) == "busy" {
+			panic(uniqueReservationBusy{shard: remoteScanShard{Schema: t.filterSchemaFingerprint(), Resource: mosiResource{Database: t.schema.Name, Table: t.Name, Shard: scm.String(result.res.Slice()[1])}}, owner: owner, capacity: result.res.Slice()[2].Bool()})
 		}
 		panic("UNIQUE reservation ended before its channel was ready")
 	case <-ctx.Done():
@@ -454,7 +497,18 @@ func uniqueRows(value scm.Scmer, columns int) ([][]scm.Scmer, error) {
 
 // The prepared native shard invocation owns MOSI admission and transaction
 // decoding until its command channel is finished and all callbacks have joined.
-func (s *storageShard) serveUniqueScan(ctx context.Context, input shardScanInvocation) (bool, error) {
+func (s *storageShard) serveUniqueScan(ctx context.Context, input shardScanInvocation) (committed bool, err error) {
+	preparing := true
+	defer func() {
+		if value := recover(); value != nil {
+			if capacity, ok := value.(shardReadDelegation); ok && preparing {
+				committed = false
+				err = uniqueReservationBusy{shard: remoteScanShard{Schema: s.t.filterSchemaFingerprint(), Resource: capacity.target.resource}, capacity: true}
+			} else {
+				panic(value)
+			}
+		}
+	}()
 	if !input.neutral.IsSlice() || len(input.neutral.Slice()) != 6 {
 		return false, fmt.Errorf("invalid prepared UNIQUE reservation")
 	}
@@ -487,7 +541,7 @@ func (s *storageShard) serveUniqueScan(ctx context.Context, input shardScanInvoc
 		return false, fmt.Errorf("UNIQUE reservation requires its shard group")
 	}
 	if input.uniqueGuard == nil {
-		firstWrite, admitted := s.getWrite(input.tx, false)
+		firstWrite, admitted := s.getWrite(tx, false)
 		if !admitted {
 			return false, uniqueReservationBusy{shard: remoteScanShard{Resource: mosiResource{Database: s.t.schema.Name, Table: s.t.Name, Shard: ids[0]}}}
 		}
@@ -501,9 +555,28 @@ func (s *storageShard) serveUniqueScan(ctx context.Context, input shardScanInvoc
 		resource := mosiResource{Database: s.t.schema.Name, Table: s.t.Name, Shard: id}
 		part := findScanShard(s.t, resource)
 		if part == nil {
-			return false, fmt.Errorf("UNIQUE shard group changed")
+			// A retained UUID can already route to a rebuild successor. Resolve
+			// it through the same native directory used by writer admission.
+			part = activeNodeCluster().manager.findShard(resource)
 		}
-		access, admitted := part.getWrite(input.tx, false)
+		if part == nil {
+			return false, uniqueReservationBusy{shard: remoteScanShard{Resource: resource}}
+		}
+		// Several retained UUIDs may now address one successor. A native nil-TX
+		// writer cannot reacquire itself; retain one admission for that resource.
+		var existing *uniqueNativeShard
+		manager := activeNodeCluster().manager
+		for _, owned := range scope.local {
+			if manager.shardCell(owned.shard) == manager.shardCell(part) {
+				existing = owned
+				break
+			}
+		}
+		if existing != nil {
+			scope.local[id] = existing
+			continue
+		}
+		access, admitted := part.getWrite(tx, false)
 		if !admitted {
 			return false, uniqueReservationBusy{shard: remoteScanShard{Resource: resource}}
 		}
@@ -516,6 +589,7 @@ func (s *storageShard) serveUniqueScan(ctx context.Context, input shardScanInvoc
 		}
 		defer guardPointer.unlock()
 	}
+	preparing = false
 	return serveUniqueChannel(ctx, guardPointer, ready, func(_ context.Context, command []scm.Scmer) (scm.Scmer, error) {
 		if scm.String(command[0]) == "bind" {
 			if len(command) != 2 || !command[1].IsSlice() {
@@ -614,7 +688,7 @@ func serveUniqueChannel(ctx context.Context, guard *uniqueWriteGuard, ready *clu
 	}
 	done := make(chan struct{})
 	finished, commit := false, false // accessed only by the receiver's FIFO
-	commands := newClusterReceiver(-1, func(commandCtx context.Context, message scm.Scmer) (err error) {
+	commands := newClusterReceiver(-1, func(commandCtx context.Context, message scm.Scmer) (_ scm.Scmer, err error) {
 		defer func() {
 			if value := recover(); value != nil {
 				if !finished {
@@ -624,37 +698,28 @@ func serveUniqueChannel(ctx context.Context, guard *uniqueWriteGuard, ready *clu
 				panic(value)
 			}
 		}()
-		if finished || !message.IsSlice() || len(message.Slice()) < 2 {
-			return fmt.Errorf("closed or invalid UNIQUE reservation command")
+		if finished || !message.IsSlice() || len(message.Slice()) < 1 {
+			return scm.NewNil(), fmt.Errorf("closed or invalid UNIQUE reservation command")
 		}
 		parts := message.Slice()
-		reply, ok := parts[len(parts)-1].Any().(*clusterReceiver)
-		if !ok {
-			return fmt.Errorf("UNIQUE command requires a reply channel")
-		}
 		var value scm.Scmer
 		switch scm.String(parts[0]) {
 		case "finish", "abort":
-			if len(parts) != 2 {
-				return fmt.Errorf("invalid UNIQUE completion")
+			if len(parts) != 1 {
+				return scm.NewNil(), fmt.Errorf("invalid UNIQUE completion")
 			}
 			finished, commit = true, scm.String(parts[0]) == "finish"
 			defer close(done)
 			value = scm.NewBool(commit)
 		default:
-			value, err = dispatch(commandCtx, parts[:len(parts)-1])
+			value, err = dispatch(commandCtx, parts)
 			if err != nil {
 				finished = true
 				defer close(done)
-				return err
+				return scm.NewNil(), err
 			}
 		}
-		_, err = reply.HandleClusterRequest(commandCtx, scm.ClusterRequest{Method: "receive", Arguments: []scm.Scmer{value}})
-		if err != nil && !finished {
-			finished = true
-			close(done)
-		}
-		return err
+		return value, nil
 	})
 	commands.Seal()
 	defer commands.Close() // join commands before releasing the borrowed guard
@@ -672,21 +737,9 @@ func serveUniqueChannel(ctx context.Context, guard *uniqueWriteGuard, ready *clu
 }
 
 func callUniqueChannel(ctx context.Context, commands *clusterReceiver, parts ...scm.Scmer) (scm.Scmer, error) {
-	result := make(chan scm.Scmer, 1)
-	reply := newClusterReceiver(1, func(_ context.Context, value scm.Scmer) error {
-		result <- value
-		return nil
-	})
-	reply.Seal()
-	defer reply.Close()
-	message := append(append([]scm.Scmer(nil), parts...), scm.NewAny(reply))
-	if _, err := commands.HandleClusterRequest(ctx, scm.ClusterRequest{Method: "receive", Arguments: []scm.Scmer{scm.NewSlice(message)}}); err != nil {
+	value, err := commands.HandleClusterRequest(ctx, scm.ClusterRequest{Method: "receive", Arguments: []scm.Scmer{scm.NewSlice(parts)}})
+	if err != nil {
 		return scm.NewNil(), err
 	}
-	select {
-	case value := <-result:
-		return value, nil
-	case <-ctx.Done():
-		return scm.NewNil(), ctx.Err()
-	}
+	return value.(scm.Scmer), nil
 }

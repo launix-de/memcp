@@ -1437,3 +1437,33 @@ func TestClusterDuplicateResultPreservesAcceptedGrant(t *testing.T) {
 		t.Fatal("duplicate replaced the accepted result")
 	}
 }
+
+func TestClusterImportedTransactionExportRetainsRoot(t *testing.T) {
+	peer, client, _ := setupRemoteScanConnection(t)
+	owner := nodeScans.Load()
+	source := objectOwnerPeer(t, owner, client)
+	tx := NewTxContext(TxCursorStability)
+	view, err := scm.ClusterObjectValue(tx.transactionState, context.Background(), scm.ClusterRequest{Method: "view"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := owner.exportObject(source, tx.transactionState, view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Separate services share this test process's native identity directory.
+	// Construct the proxy held by a different process explicitly, so exporting
+	// it exercises forwarding rather than resolving back to the native root.
+	proxy := &transactionState{clusterID: tx.ClusterObjectID(), coordinator: &scm.ClusterHandle{Reference: root, View: view}}
+	forwarded, err := client.exportObject(peer, proxy, view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if forwarded.URI != root.URI || forwarded.Owner != root.Owner || forwarded.Incarnation != root.Incarnation {
+		t.Fatalf("imported transaction acquired a foreign root: %+v, want %+v", forwarded, root)
+	}
+	value, err := owner.importObject(context.Background(), source, forwarded)
+	if err != nil || value.Any().(*TxContext).transactionState != tx.transactionState {
+		t.Fatalf("returned root no longer resolves to its native transaction: %v", err)
+	}
+}

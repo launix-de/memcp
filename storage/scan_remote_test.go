@@ -958,9 +958,9 @@ func TestRemoteUniqueChannelRetainsGuardThroughUpdateAndFinish(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	ready := make(chan *clusterReceiver, 1)
-	receiver := newClusterReceiver(1, func(_ context.Context, value scm.Scmer) error {
+	receiver := newClusterReceiver(1, func(_ context.Context, value scm.Scmer) (scm.Scmer, error) {
 		ready <- value.Any().(*clusterReceiver)
-		return nil
+		return scm.NewNil(), nil
 	})
 	receiver.Seal()
 	defer receiver.Close()

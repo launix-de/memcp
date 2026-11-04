@@ -116,6 +116,7 @@ def cluster_suite_config(path):
                 "coordinator_shard_ram_percent": 1, "gomaxprocs": 16,
                 "fixture": None, "compare_standalone": True,
                 "rows_per_shard": 5000, "shards": 64, "columns": 8, "fixture_seed": 20261026,
+                "unique_columns": [],
                 "cluster_bandwidth_mbps": 0, "cluster_latency_ms": 0,
                 "storage_backend": "filesystem", "storage_bandwidth_mbps": 0, "storage_latency_ms": 0}
     unknown = set(values) - defaults.keys()
@@ -137,6 +138,11 @@ def cluster_suite_config(path):
         raise DrillFailure(f"{path}: fixture_seed must be an integer")
     if config["fixture"] == "shared_analytics" and not config["compare_standalone"]:
         raise DrillFailure(f"{path}: shared_analytics requires its complete standalone oracle")
+    if (not isinstance(config["unique_columns"], list)
+            or any(column not in ["id"] + [f"v{i}" for i in range(config["columns"])]
+                   for column in config["unique_columns"])
+            or len(set(config["unique_columns"])) != len(config["unique_columns"])):
+        raise DrillFailure(f"{path}: unique_columns must name distinct fixture columns")
     validate_io_config(config)
     return config
 
@@ -2155,6 +2161,10 @@ def run_cluster_placement(args, artifacts, journal):
                     reference["first_two_partition_sum"] += row[0]
                 values.append('(' + ','.join(map(str, [row_id] + row)) + ')')
             source.sql("INSERT INTO big_items VALUES" + ','.join(values), timeout=120)
+        if config["unique_columns"]:
+            unique_columns = " ".join(json.dumps(column) for column in config["unique_columns"])
+            source.scm(f'(createkey (table "{DATABASE}" false "big_items" false) '
+                       f'"fixture_unique" true (list {unique_columns}))', timeout=120)
         pivots = ' '.join(str(rows_per_shard * i) for i in range(1, shards))
         source.scm(f'(partitiontable (table "{DATABASE}" false "big_items" false) (list (list "id" (list {pivots}))))', timeout=120)
         source.scm(f'(rebuild (table "{DATABASE}" false "big_items" false) true false)', timeout=120)

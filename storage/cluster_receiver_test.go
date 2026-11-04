@@ -23,10 +23,10 @@ func receiveTestValue(receiver *clusterReceiver, ctx context.Context, value int6
 
 func TestClusterReceiverReservationDoesNotWaitForCallback(t *testing.T) {
 	entered, release := make(chan struct{}), make(chan struct{})
-	receiver := newClusterReceiver(1, func(context.Context, scm.Scmer) error {
+	receiver := newClusterReceiver(1, func(context.Context, scm.Scmer) (scm.Scmer, error) {
 		close(entered)
 		<-release
-		return nil
+		return scm.NewNil(), nil
 	})
 	delivered := make(chan error, 1)
 	go func() { delivered <- receiveTestValue(receiver, context.Background(), 1) }()
@@ -51,9 +51,9 @@ func TestUniqueChannelCancellationJoinsActiveCommandBeforeUnlock(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	ready := make(chan *clusterReceiver, 1)
-	receiver := newClusterReceiver(1, func(_ context.Context, value scm.Scmer) error {
+	receiver := newClusterReceiver(1, func(_ context.Context, value scm.Scmer) (scm.Scmer, error) {
 		ready <- value.Any().(*clusterReceiver)
-		return nil
+		return scm.NewNil(), nil
 	})
 	receiver.Seal()
 	defer receiver.Close()
@@ -102,7 +102,10 @@ func TestUniqueChannelCommandPanicReleasesReservation(t *testing.T) {
 	tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}}
 	guard := tbl.guardUniqueWrites([]string{"id"}, [][]scm.Scmer{{scm.NewInt(7)}}, false, 0)
 	ready := make(chan *clusterReceiver, 1)
-	receiver := newClusterReceiver(1, func(_ context.Context, value scm.Scmer) error { ready <- value.Any().(*clusterReceiver); return nil })
+	receiver := newClusterReceiver(1, func(_ context.Context, value scm.Scmer) (scm.Scmer, error) {
+		ready <- value.Any().(*clusterReceiver)
+		return scm.NewNil(), nil
+	})
 	receiver.Seal()
 	defer receiver.Close()
 	done := make(chan bool, 1)
@@ -134,7 +137,7 @@ func TestUniqueChannelCommandPanicReleasesReservation(t *testing.T) {
 }
 func TestClusterReceiverProductionAndParallelLimits(t *testing.T) {
 	var calls atomic.Int64
-	receiver := newClusterReceiver(1, func(context.Context, scm.Scmer) error { calls.Add(1); return nil })
+	receiver := newClusterReceiver(1, func(context.Context, scm.Scmer) (scm.Scmer, error) { calls.Add(1); return scm.NewNil(), nil })
 	defer receiver.Close()
 	if err := receiveTestValue(receiver, context.Background(), 1); err != nil {
 		t.Fatal(err)
@@ -170,7 +173,7 @@ func TestClusterReceiverProductionAndParallelLimits(t *testing.T) {
 func TestClusterReceiverSingleUnlimitedAndCleanup(t *testing.T) {
 	for _, limit := range []int64{1, -1} {
 		calls := 0
-		receiver := newClusterReceiver(limit, func(context.Context, scm.Scmer) error { calls++; return nil })
+		receiver := newClusterReceiver(limit, func(context.Context, scm.Scmer) (scm.Scmer, error) { calls++; return scm.NewNil(), nil })
 		receiver.Seal()
 		if err := receiveTestValue(receiver, context.Background(), 1); err != nil {
 			t.Fatal(err)
@@ -202,7 +205,11 @@ func TestClusterReceiverSingleUnlimitedAndCleanup(t *testing.T) {
 }
 func TestClusterReceiverCloseJoinsCallback(t *testing.T) {
 	entered, release, closed := make(chan struct{}), make(chan struct{}), make(chan struct{})
-	receiver := newClusterReceiver(-1, func(context.Context, scm.Scmer) error { close(entered); <-release; return nil })
+	receiver := newClusterReceiver(-1, func(context.Context, scm.Scmer) (scm.Scmer, error) {
+		close(entered)
+		<-release
+		return scm.NewNil(), nil
+	})
 	delivered := make(chan error, 1)
 	go func() { delivered <- receiveTestValue(receiver, context.Background(), 1) }()
 	<-entered
@@ -222,7 +229,10 @@ func TestClusterReceiverCloseJoinsCallback(t *testing.T) {
 	}
 }
 func TestClusterReceiverCancelledBeforeCallback(t *testing.T) {
-	receiver := newClusterReceiver(-1, func(context.Context, scm.Scmer) error { t.Fatal("cancelled callback ran"); return nil })
+	receiver := newClusterReceiver(-1, func(context.Context, scm.Scmer) (scm.Scmer, error) {
+		t.Fatal("cancelled callback ran")
+		return scm.NewNil(), nil
+	})
 	defer receiver.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -237,12 +247,12 @@ func TestClusterReceiverRemoteUnlimitedUsesObjectLifetime(t *testing.T) {
 	owner := nodeScans.Load()
 	source := objectOwnerPeer(t, owner, client)
 	calls := 0
-	receiver := newClusterReceiver(-1, func(_ context.Context, value scm.Scmer) error {
+	receiver := newClusterReceiver(-1, func(_ context.Context, value scm.Scmer) (scm.Scmer, error) {
 		if !value.IsSlice() || len(value.Slice()) != 2 {
 			t.Error("lost session call parameters", value)
 		}
 		calls++
-		return nil
+		return scm.NewNil(), nil
 	})
 	defer receiver.Close()
 	receiver.Seal()
@@ -272,13 +282,13 @@ func TestClusterReceiverRemoteUnlimitedUsesObjectLifetime(t *testing.T) {
 
 func TestClusterReceiverEachParallelValueIsProcessedOnce(t *testing.T) {
 	seen := make([]bool, 64)
-	receiver := newClusterReceiver(64, func(_ context.Context, value scm.Scmer) error {
+	receiver := newClusterReceiver(64, func(_ context.Context, value scm.Scmer) (scm.Scmer, error) {
 		index := int(value.Int())
 		if seen[index] {
 			t.Errorf("duplicate callback for %d", index)
 		}
 		seen[index] = true
-		return nil
+		return scm.NewNil(), nil
 	})
 	receiver.Seal()
 	defer receiver.Close()
@@ -320,13 +330,13 @@ func waitReceiverBudget(t *testing.T, receiver *clusterReceiver, remaining int64
 func TestClusterReceiverFIFOAndQueuedCancellation(t *testing.T) {
 	entered, release := make(chan struct{}), make(chan struct{})
 	var order []int64
-	receiver := newClusterReceiver(1, func(_ context.Context, value scm.Scmer) error {
+	receiver := newClusterReceiver(1, func(_ context.Context, value scm.Scmer) (scm.Scmer, error) {
 		if value.Int() == 0 {
 			close(entered)
 			<-release
 		}
 		order = append(order, value.Int())
-		return nil
+		return scm.NewNil(), nil
 	})
 	results := make([]chan error, 5)
 	for i := range results {
@@ -389,13 +399,13 @@ func TestClusterReceiverFIFOAndQueuedCancellation(t *testing.T) {
 func TestClusterReceiverCloseCancelsAndJoinsDeliveries(t *testing.T) {
 	entered, cancelled, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	var calls atomic.Int64
-	receiver := newClusterReceiver(3, func(ctx context.Context, _ scm.Scmer) error {
+	receiver := newClusterReceiver(3, func(ctx context.Context, _ scm.Scmer) (scm.Scmer, error) {
 		calls.Add(1)
 		close(entered)
 		<-ctx.Done()
 		close(cancelled)
 		<-release
-		return ctx.Err()
+		return scm.NewNil(), ctx.Err()
 	})
 	unblock := sync.OnceFunc(func() { close(release) })
 	defer receiver.Close()
@@ -451,7 +461,7 @@ func TestClusterReceiverFailureAdvancesFIFO(t *testing.T) {
 			unblock := sync.OnceFunc(func() { close(release) })
 			want := errors.New("callback failure")
 			var calls atomic.Int64
-			receiver := newClusterReceiver(2, func(_ context.Context, value scm.Scmer) error {
+			receiver := newClusterReceiver(2, func(_ context.Context, value scm.Scmer) (scm.Scmer, error) {
 				calls.Add(1)
 				if value.Int() == 0 {
 					close(entered)
@@ -459,9 +469,9 @@ func TestClusterReceiverFailureAdvancesFIFO(t *testing.T) {
 					if failure == "panic" {
 						panic(want)
 					}
-					return want
+					return scm.NewNil(), want
 				}
-				return nil
+				return scm.NewNil(), nil
 			})
 			defer receiver.Close()
 			defer unblock()
@@ -557,12 +567,12 @@ func TestClusterReceiverRemoteCancellationAndIndependentDelivery(t *testing.T) {
 	source := objectOwnerPeer(t, owner, client)
 	entered, cancelled, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	unblock := sync.OnceFunc(func() { close(release) })
-	blocked := newClusterReceiver(-1, func(ctx context.Context, _ scm.Scmer) error {
+	blocked := newClusterReceiver(-1, func(ctx context.Context, _ scm.Scmer) (scm.Scmer, error) {
 		close(entered)
 		<-ctx.Done()
 		close(cancelled)
 		<-release
-		return ctx.Err()
+		return scm.NewNil(), ctx.Err()
 	})
 	defer blocked.Close()
 	defer unblock()
@@ -588,7 +598,7 @@ func TestClusterReceiverRemoteCancellationAndIndependentDelivery(t *testing.T) {
 		t.Fatal("remote callback did not start")
 	}
 	var otherCalls atomic.Int64
-	other := newClusterReceiver(1, func(context.Context, scm.Scmer) error { otherCalls.Add(1); return nil })
+	other := newClusterReceiver(1, func(context.Context, scm.Scmer) (scm.Scmer, error) { otherCalls.Add(1); return scm.NewNil(), nil })
 	other.Seal()
 	defer other.Close()
 	independent := importReceiver(other)
@@ -625,11 +635,11 @@ func TestClusterReceiverRemoteDisconnectJoinsCallback(t *testing.T) {
 	owner := nodeScans.Load()
 	source := objectOwnerPeer(t, owner, client)
 	entered, cancelled := make(chan struct{}), make(chan struct{})
-	receiver := newClusterReceiver(-1, func(ctx context.Context, _ scm.Scmer) error {
+	receiver := newClusterReceiver(-1, func(ctx context.Context, _ scm.Scmer) (scm.Scmer, error) {
 		close(entered)
 		<-ctx.Done()
 		close(cancelled)
-		return ctx.Err()
+		return scm.NewNil(), ctx.Err()
 	})
 	defer receiver.Close()
 	ref, err := owner.exportObject(source, receiver, scm.NewNil())

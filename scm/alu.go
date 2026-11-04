@@ -23320,7 +23320,7 @@ func init_alu() {
 					ctx.SyncDesc(&d106)
 					ctx.SyncDesc(&d107)
 					ctx.SyncDesc(&d13)
-					d108 = ctx.EmitGoCallScalar(jitGoABI_b4f71add2da444a5, []JITValueDesc{d106, d107, d13}, 2)
+					d108 = ctx.EmitGoCallScalar(jitGoABI_892777a84f9c641c, []JITValueDesc{d106, d107, d13}, 2)
 					d108.NoHeapPointer = false
 					ctx.BindReg(d108.Reg, &d108)
 					ctx.BindReg(d108.Reg2, &d108)
@@ -29185,6 +29185,7 @@ var jitGoABI_77f51c4cdb015964 uint64
 var jitGoABI_793e0d1044c8e60a uint64
 var jitGoABI_799daf018738c056 uint64
 var jitGoABI_84528de3c907f6c5 uint64
+var jitGoABI_892777a84f9c641c uint64
 var jitGoABI_8d614d3d83356c16 uint64
 var jitGoABI_9875b136bd81d429 uint64
 var jitGoABI_a437b23a0052bf69 uint64
@@ -29192,7 +29193,6 @@ var jitGoABI_aa26cca3b9261015 uint64
 var jitGoABI_b0f6112005ee2468 uint64
 var jitGoABI_b1cf1bd87a9546df uint64
 var jitGoABI_b3a974384c15b610 uint64
-var jitGoABI_b4f71add2da444a5 uint64
 var jitGoABI_bca27948634527b7 uint64
 var jitGoABI_c780acf296c5bb52 uint64
 var jitGoABI_cb6dcb22666af3d5 uint64
@@ -29216,6 +29216,7 @@ func init() {
 	jitGoABI_793e0d1044c8e60a = GoFuncAddr(EqualSQL)
 	jitGoABI_799daf018738c056 = GoFuncAddr((*big.Rat).Sub)
 	jitGoABI_84528de3c907f6c5 = GoFuncAddr(Scmer.String)
+	jitGoABI_892777a84f9c641c = GoFuncAddr(EqualCollated)
 	jitGoABI_8d614d3d83356c16 = GoFuncAddr((Scmer).Func)
 	jitGoABI_9875b136bd81d429 = GoFuncAddr(strings.ToLower)
 	jitGoABI_a437b23a0052bf69 = GoFuncAddr(JITIntDiv)
@@ -29223,7 +29224,6 @@ func init() {
 	jitGoABI_b0f6112005ee2468 = GoFuncAddr(strings.EqualFold)
 	jitGoABI_b1cf1bd87a9546df = GoFuncAddr(Scmer.Int)
 	jitGoABI_b3a974384c15b610 = GoFuncAddr(JITCeilBits)
-	jitGoABI_b4f71add2da444a5 = GoFuncAddr(EqualCollated)
 	jitGoABI_bca27948634527b7 = GoFuncAddr(jitInvokeGoFunctionSlice)
 	jitGoABI_c780acf296c5bb52 = GoFuncAddr(JITStringEqual)
 	jitGoABI_cb6dcb22666af3d5 = GoFuncAddr((*big.Rat).Float64)

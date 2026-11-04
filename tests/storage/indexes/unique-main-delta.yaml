@@ -373,8 +373,8 @@ test_cases:
     setup:
       - sql: "DROP TABLE IF EXISTS uniq_collation"
       - sql: "CREATE TABLE uniq_collation (id INT PRIMARY KEY, label VARCHAR(40) COLLATE utf8mb4_general_ci UNIQUE)"
-      - sql: "INSERT INTO uniq_collation VALUES (1, 'Alpha')"
-    sql: "INSERT INTO uniq_collation VALUES (2, 'ALPHA')"
+      - sql: "INSERT INTO uniq_collation (id, label) VALUES (1, 'Alpha')"
+    sql: "INSERT INTO uniq_collation (id, label) VALUES (2, 'ALPHA')"
     expect:
       error: true
     cleanup:
@@ -384,9 +384,9 @@ test_cases:
     setup:
       - sql: "DROP TABLE IF EXISTS uniq_collation"
       - sql: "CREATE TABLE uniq_collation (id INT PRIMARY KEY, label VARCHAR(40) COLLATE utf8mb4_general_ci UNIQUE)"
-      - sql: "INSERT INTO uniq_collation VALUES (1, 'Alpha')"
+      - sql: "INSERT INTO uniq_collation (id, label) VALUES (1, 'Alpha')"
       - scm: "(rebuild)"
-    sql: "INSERT INTO uniq_collation VALUES (2, 'ALPHA')"
+    sql: "INSERT INTO uniq_collation (id, label) VALUES (2, 'ALPHA')"
     expect:
       error: true
     cleanup:
@@ -396,7 +396,7 @@ test_cases:
     setup:
       - sql: "DROP TABLE IF EXISTS uniq_collation"
       - sql: "CREATE TABLE uniq_collation (label VARCHAR(40) COLLATE bin UNIQUE)"
-    sql: "INSERT INTO uniq_collation VALUES ('03'), ('3'), (4), ('5')"
+    sql: "INSERT INTO uniq_collation (label) VALUES ('03'), ('3'), (4), ('5')"
     expect:
       affected_rows: 4
     cleanup:
@@ -406,8 +406,84 @@ test_cases:
     setup:
       - sql: "DROP TABLE IF EXISTS uniq_collation"
       - sql: "CREATE TABLE uniq_collation (value INT UNIQUE)"
-      - sql: "INSERT INTO uniq_collation VALUES (3)"
-    sql: "INSERT INTO uniq_collation VALUES ('03')"
+      - sql: "INSERT INTO uniq_collation (value) VALUES (3)"
+    sql: "INSERT INTO uniq_collation (value) VALUES ('03')"
+    expect:
+      error: true
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS uniq_collation"
+
+  - name: "Case-insensitive UNIQUE keeps numeric text spellings distinct"
+    setup:
+      - sql: "DROP TABLE IF EXISTS uniq_collation"
+      - sql: "CREATE TABLE uniq_collation (label VARCHAR(40) COLLATE utf8mb4_unicode_520_ci UNIQUE)"
+    sql: "INSERT INTO uniq_collation (label) VALUES ('03'), ('3')"
+    expect:
+      affected_rows: 2
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS uniq_collation"
+
+  - name: "Delta: UNIQUE recognizes Unicode simple-fold equivalents"
+    setup:
+      - sql: "DROP TABLE IF EXISTS uniq_collation"
+      - sql: "CREATE TABLE uniq_collation (label VARCHAR(40) COLLATE utf8mb4_general_ci UNIQUE)"
+      - sql: "INSERT INTO uniq_collation (label) VALUES ('ſail')"
+    sql: "INSERT INTO uniq_collation (label) VALUES ('sail')"
+    expect:
+      error: true
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS uniq_collation"
+
+  - name: "Main: UNIQUE recognizes Unicode simple-fold equivalents"
+    setup:
+      - sql: "DROP TABLE IF EXISTS uniq_collation"
+      - sql: "CREATE TABLE uniq_collation (label VARCHAR(40) COLLATE utf8mb4_general_ci UNIQUE)"
+      - sql: "INSERT INTO uniq_collation (label) VALUES ('Key')"
+      - scm: "(rebuild)"
+    sql: "INSERT INTO uniq_collation (label) VALUES ('key')"
+    expect:
+      error: true
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS uniq_collation"
+
+  - name: "Batch: UNIQUE rejects collated duplicates before publishing"
+    setup:
+      - sql: "DROP TABLE IF EXISTS uniq_collation"
+      - sql: "CREATE TABLE uniq_collation (label VARCHAR(40) COLLATE utf8mb4_general_ci UNIQUE)"
+    sql: "INSERT INTO uniq_collation (label) VALUES ('Alpha'), ('ALPHA')"
+    expect:
+      error: true
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS uniq_collation"
+
+  - name: "IGNORE uses collated UNIQUE equality"
+    setup:
+      - sql: "DROP TABLE IF EXISTS uniq_collation"
+      - sql: "CREATE TABLE uniq_collation (label VARCHAR(40) COLLATE utf8mb4_general_ci UNIQUE)"
+      - sql: "INSERT INTO uniq_collation (label) VALUES ('Alpha')"
+    sql: "INSERT IGNORE INTO uniq_collation (label) VALUES ('ALPHA')"
+    expect:
+      affected_rows: 0
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS uniq_collation"
+
+  - name: "UPSERT resolves a collated UNIQUE collision"
+    setup:
+      - sql: "DROP TABLE IF EXISTS uniq_collation"
+      - sql: "CREATE TABLE uniq_collation (label VARCHAR(40) COLLATE utf8mb4_general_ci UNIQUE, counter INT)"
+      - sql: "INSERT INTO uniq_collation (label, counter) VALUES ('Alpha', 1)"
+    sql: "INSERT INTO uniq_collation (label, counter) VALUES ('ALPHA', 99) ON DUPLICATE KEY UPDATE counter=counter+1"
+    expect:
+      affected_rows: 2
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS uniq_collation"
+
+  - name: "UPDATE rejects a collated UNIQUE collision"
+    setup:
+      - sql: "DROP TABLE IF EXISTS uniq_collation"
+      - sql: "CREATE TABLE uniq_collation (id INT PRIMARY KEY, label VARCHAR(40) COLLATE utf8mb4_general_ci UNIQUE)"
+      - sql: "INSERT INTO uniq_collation (id, label) VALUES (1, 'Alpha'), (2, 'Beta')"
+    sql: "UPDATE uniq_collation SET label='ALPHA' WHERE id=2"
     expect:
       error: true
     cleanup:

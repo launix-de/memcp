@@ -366,13 +366,19 @@ func (database *database) executeInsertTask(ctx context.Context, session *scanRP
 		return nil, err
 	}
 	var result remoteInsertResult
+	mutationTx := invocation.tx
+	if request.Transaction == nil {
+		// The invocation owns cancellation and decoding. Native inserts without
+		// a transaction retain immediate publication on the execution peer.
+		mutationTx = nil
+	}
 	// Ownership can change after dispatch. Native GetWrite/UNIQUE validation
 	// resolve that race; this already-started command must never be redispatched.
 	result.Count = table.insertLocal(request.Columns, rows, request.CollisionColumns, callback, request.MergeNull, func(id int64) {
 		if result.FirstID == nil {
 			result.FirstID = &id
 		}
-	}, invocation.tx)
+	}, mutationTx)
 	if err := invocation.commit(ctx); err != nil {
 		return nil, err
 	}

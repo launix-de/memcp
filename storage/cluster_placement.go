@@ -90,6 +90,7 @@ type clusterScanExecutor struct {
 	cluster   *nodeCluster
 	expected  remoteScanShard
 	preferred *clusterLink
+	exclude   string // an owner explicitly refused capacity for this invocation
 }
 
 // Equal-cost cold candidates follow shard affinity rather than roster order.
@@ -100,7 +101,7 @@ type clusterScanExecutor struct {
 func (executor *clusterScanExecutor) candidates() []*clusterLink {
 	links := executor.cluster.view.Load().links
 	candidates := make([]*clusterLink, 0, len(links))
-	if executor.preferred != nil {
+	if executor.preferred != nil && executor.preferred.member.ID != executor.exclude {
 		candidates = append(candidates, executor.preferred)
 	}
 	if len(links) == 0 {
@@ -111,7 +112,7 @@ func (executor *clusterScanExecutor) candidates() []*clusterLink {
 	first := int(hash.Sum64() % uint64(len(links)))
 	for i := range links {
 		link := links[(first+i)%len(links)]
-		if link != executor.preferred {
+		if link != executor.preferred && link.member.ID != executor.exclude {
 			candidates = append(candidates, link)
 		}
 	}

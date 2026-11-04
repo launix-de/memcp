@@ -80,7 +80,7 @@ type clusterReceiver struct {
 	cancel    context.CancelFunc
 	head      *receiverDelivery
 	tail      *receiverDelivery
-	callback  func(context.Context, scm.Scmer) error
+	callback  func(context.Context, scm.Scmer) (scm.Scmer, error)
 }
 
 // A delivery lives in its invoking handler, including while queued. Cancelling
@@ -91,7 +91,7 @@ type receiverDelivery struct {
 	ready          chan struct{}
 }
 
-func newClusterReceiver(limit int64, callback func(context.Context, scm.Scmer) error) *clusterReceiver {
+func newClusterReceiver(limit int64, callback func(context.Context, scm.Scmer) (scm.Scmer, error)) *clusterReceiver {
 	if limit < -1 {
 		panic("invalid receiver limit")
 	}
@@ -233,7 +233,7 @@ func (receiver *clusterReceiver) HandleClusterRequest(ctx context.Context, reque
 	if err := receiver.ctx.Err(); err != nil {
 		return nil, err
 	}
-	return scm.NewNil(), callback(callbackCtx, request.Arguments[0])
+	return callback(callbackCtx, request.Arguments[0])
 }
 
 type remoteScanContextKey struct{}
@@ -666,9 +666,8 @@ func (service *nodeScanService) control(ctx context.Context, peer *mosiPeer, met
 // the existing owner handle; its Go lifetime retains the ordinary peer lease.
 func init() {
 	scm.RegisterClusterObjectType("receiver", func(handle scm.ClusterHandle) scm.Scmer {
-		receiver := newClusterReceiver(-1, func(ctx context.Context, value scm.Scmer) error {
-			_, err := handle.Call(ctx, scm.ClusterRequest{Method: "receive", Arguments: []scm.Scmer{value}, CancelWithoutJoin: true})
-			return err
+		receiver := newClusterReceiver(-1, func(ctx context.Context, value scm.Scmer) (scm.Scmer, error) {
+			return handle.Call(ctx, scm.ClusterRequest{Method: "receive", Arguments: []scm.Scmer{value}, CancelWithoutJoin: true})
 		})
 		receiver.Seal()
 		return scm.NewAny(receiver)
