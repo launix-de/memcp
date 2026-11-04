@@ -556,7 +556,7 @@ func TestNativeClosureDoesNotAliasBuiltinWithSameCode(t *testing.T) {
 	var exported Handle
 	bindings := (&SerializationContext{}).WithHandleExport(func(handle Handle) (Scmer, error) {
 		exported = handle
-		return NewSlice([]Scmer{NewSymbol("cluster_handle"), NewString("owner"), NewString("boot"), NewInt(1)}), nil
+		return NewSlice([]Scmer{NewSymbol("cluster_handle"), NewInt(1)}), nil
 	})
 	data, err := MarshalProcedure(proc, bindings)
 	if err != nil {
@@ -565,7 +565,7 @@ func TestNativeClosureDoesNotAliasBuiltinWithSameCode(t *testing.T) {
 	if exported == nil {
 		t.Fatal("captured closure was mistaken for the builtin")
 	}
-	restored, err := UnmarshalProcedure(data, ProcedureDecode{ResolveHandle: func(string, string, uint64) (Handle, error) { return exported, nil }})
+	restored, err := UnmarshalProcedure(data, ProcedureDecode{ResolveHandle: func(uint64) (Handle, error) { return exported, nil }})
 	if err != nil || Apply(restored).Int() != 19 {
 		t.Fatal("closure context was lost", err)
 	}
@@ -816,5 +816,46 @@ func TestOutputHandlesPipelineBeforeAcknowledgement(t *testing.T) {
 	case <-joined:
 	case <-time.After(time.Second):
 		t.Fatal("return handles did not wake cleanup")
+	}
+}
+
+func TestForwardedClosurePublishesAndJoinsOneShotReply(t *testing.T) {
+	owner := &outputPipelineOwner{}
+	upstream := make(chan Scmer, 1)
+	callback := &clusterCallback{ctx: context.Background(), endpoint: HandleFunc(func(value Scmer) { upstream <- value })}
+	handle, err := callback.forwardClosure(&SerializationContext{Invocation: NewAny(owner)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reply := NewResultReceiver()
+	published := make(chan struct{})
+	go func() {
+		defer close(published)
+		handle.Handle(NewSlice([]Scmer{NewSlice([]Scmer{NewInt(3)}), NewAny(reply)}))
+	}()
+	select {
+	case <-published:
+	case <-time.After(time.Second):
+		t.Fatal("forwarder waited for upstream callback")
+	}
+	value := <-upstream
+	if value.Slice()[1].Any() == reply {
+		t.Fatal("forwarder re-exported the consumer receiver")
+	}
+	joined := make(chan struct{})
+	go func() { defer close(joined); owner.finish() }()
+	select {
+	case <-joined:
+		t.Fatal("forwarder released owner before upstream reply")
+	case <-time.After(10 * time.Millisecond):
+	}
+	value.Slice()[1].Any().(Handle).Handle(NewInt(7))
+	if reply.Wait().Int() != 7 {
+		t.Fatal("forwarder changed raw result")
+	}
+	select {
+	case <-joined:
+	case <-time.After(time.Second):
+		t.Fatal("forwarder did not join completed reply")
 	}
 }

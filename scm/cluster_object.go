@@ -211,7 +211,7 @@ func ClusterReferenceExpression(ref ClusterReference) Scmer {
 // ProcedureDecode is invocation-owned. Reconstruction is completed before
 // Optimize/Eval builds the callback, never lazily during its row execution.
 type ProcedureDecode struct {
-	ResolveHandle func(string, string, uint64) (Handle, error)
+	ResolveHandle func(uint64) (Handle, error)
 	// Prepare is an optional embedding-owned transformation of the validated
 	// lambda. SCM knows neither the host's operators nor its execution context.
 	Prepare func(Scmer) (Scmer, error)
@@ -287,7 +287,7 @@ func (bindings *SerializationContext) prepare(value Scmer, literal bool) {
 	}
 }
 
-func ResolveSerializedObjects(value Scmer, resolve func(ClusterReference) (Scmer, error), resolveHandle func(string, string, uint64) (Handle, error)) (Scmer, error) {
+func ResolveSerializedObjects(value Scmer, resolve func(ClusterReference) (Scmer, error), resolveHandle func(uint64) (Handle, error)) (Scmer, error) {
 	values := make(map[string]Scmer)
 	return resolveProcedureObjectTree(value, make(map[int64]*serializedCapture), resolveHandle, func(ref ClusterReference) (Scmer, error) {
 		key := ref.URI + "/" + ref.Token
@@ -321,7 +321,7 @@ func serializedValueLiteral(value Scmer) Scmer {
 	}
 	return value
 }
-func resolveProcedureObjectTree(value Scmer, captures map[int64]*serializedCapture, resolveHandle func(string, string, uint64) (Handle, error), resolve func(ClusterReference) (Scmer, error)) (Scmer, error) {
+func resolveProcedureObjectTree(value Scmer, captures map[int64]*serializedCapture, resolveHandle func(uint64) (Handle, error), resolve func(ClusterReference) (Scmer, error)) (Scmer, error) {
 	plain := value.WithoutSourceInfo()
 	if !plain.IsSlice() {
 		return value, nil
@@ -348,11 +348,15 @@ func resolveProcedureObjectTree(value Scmer, captures map[int64]*serializedCaptu
 		capture.ready = true
 		return serializedValueLiteral(capture.value), nil
 	}
-	if len(items) == 4 && scmerIsSymbol(items[0], "cluster_handle") {
+	if len(items) == 2 && scmerIsSymbol(items[0], "cluster_handle") {
 		if resolveHandle == nil {
 			return NewNil(), fmt.Errorf("handle requires a reconstruction context")
 		}
-		handle, err := resolveHandle(items[1].String(), items[2].String(), uint64(items[3].Int()))
+		address := items[1].WithoutSourceInfo()
+		if !address.IsInt() || address.Int() <= 0 {
+			return NewNil(), fmt.Errorf("invalid handle address")
+		}
+		handle, err := resolveHandle(uint64(address.Int()))
 		return NewAny(handle), err
 	}
 	if len(items) == 7 && scmerIsSymbol(items[0], "cluster_object") {

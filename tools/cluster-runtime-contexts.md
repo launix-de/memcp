@@ -7,7 +7,7 @@
 
 ```sh
 python3 tools/replication_cluster_stress.py --binary ./memcp \
-  --cluster-context-only --artifacts /tmp/cluster-contexts --seed 20261027
+  --cluster-context-only --artifacts .artifacts/cluster-contexts --seed 20261027
 ```
 
 The runner executes the same 14 SQL cases standalone and on four authenticated
@@ -171,7 +171,8 @@ copy deletion masks. Unbounded grouped-result streaming and specialized physical
 RecSet/merge-state transport are not implemented by this change and continue to
 fail explicitly.
 
-The message channel has one UUID collector protocol for calls and scan tasks.
+Administrative calls and scan tasks share the UUID collector/replay protocol;
+runtime callbacks use numeric fire-and-forget handle slots (see protocol 16 below).
 There is no separate scan-task envelope or cluster execution switch: the
 recipient resolves the database handler, which checks membership for shared
 sources, reconstructs the request once and acquires its generation once. The
@@ -250,3 +251,59 @@ claim a general wire contract for those runtime containers.
 None of these paths adds reader registration, row-loop cancellation probes,
 shared-memory admission writes or another reader/writer gate. INVARIANTS.md is
 unchanged.
+
+## Node codec and worker closures (protocol 16)
+
+The WebSocket subprotocol is `memcp.mosi.v3`. A frame addresses a numeric handle
+slot, a reserved endpoint, a reply slot, or MOSI, followed by that recipient's
+payload. Handle deliveries contain only the slot and raw Scheme reconstruction
+text after the version/address prefix. There is no JSON envelope, Scmer type,
+operation UUID, or per-call token around a callback. Handle constructors contain
+only the slot; the authenticated receiving connection supplies peer/incarnation
+identity. Re-exporting to a third peer registers an invocation-owned forwarding slot. The legacy RPC endpoint
+interprets its own binary payload containing a return slot, method and arguments.
+Control structs and live-handover metadata use binary integers/lengths/bytes;
+native column chunks keep their existing storage encoding. Persisted schemas,
+WAL and column formats are unchanged. Scheme values and lambda bodies remain
+text, not a new binary Scmer format. Incompatible protocol versions are rejected.
+
+Received procedures materialize their captures, bind the current worker's native
+execution scope, optimize and JIT locally before entering the shard loop. The
+optimizer remains necessary for the JIT's canonical forms; only atomic data
+values bypass that walk. Scan-context binding
+and capture resolution copy only changed AST ancestors; code, TX executors and
+query-bound closures are not globally cached or shared between invocations.
+Parsing network text omits source-location objects; normal module/error parsing
+retains them. Native builtin names come from `DeclarationForValue`. Arithmetic
+and other declared builtins execute locally without callback handles.
+
+Repeated captures within one message use constructor IDs instead of repeating
+their bodies. Large plain immutable dictionaries (at least 256 entries, with
+snapshot source no larger than 48 KiB) additionally use the existing registered
+object/peer-lease protocol. A statement freezes one source snapshot; concurrent
+imports share one reconstructed read-only dictionary per live peer lease.
+Other captures keep their ordinary reconstruction path. A weak cache and
+`runtime.AddCleanup` retain the lease exactly while the dictionary is reachable;
+the cleanup argument never points back to that dictionary. In-progress loads
+publish through a completion channel, with no registry/publication mutex held
+during reconstruction or network I/O. This is capture sharing, not permission
+to share a mutable transaction/query executor or grant a shard MOSI right.
+
+Output-only closures batch 64 argument tuples and admit up to four outstanding
+batches per invocation. Dispatch does not wait for a callback result. Closure relays substitute their
+own one-shot receivers and forward replies asynchronously, retiring return slots
+on each reply rather than retaining one forwarding slot per batch until EOF. A separate
+one-shot numeric return handle releases credits and wakes waiting producers;
+cleanup joins every accepted callback. Imperative sink calls serialize by FIFO
+admission outside publication locks. Cancellation stops further production;
+already accepted callbacks retain their owner until completion. Return delivery
+is independent of a cancelled query context; connection loss fails retained
+return receivers. The socket reader/writer queues never wait for those callbacks.
+Bulk transfer workers admit their own bytes before publishing, leaving control
+and completion capacity available. Network buffers and invocation windows remain
+bounded. Ordered-scan prefetch/refill and merge semantics are retained.
+
+Callback slots and object export addresses use counters, not new UUIDs. Lease
+addresses combine a counter with the existing peer incarnation to prevent
+cross-peer collisions. Control-task replay watermarks still use UUIDv7; shard,
+transaction and node identities retain their existing independent contracts.

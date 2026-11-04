@@ -147,19 +147,10 @@ func (bindings *SerializationContext) InvocationScope() Scmer {
 	return bindings.Invocation
 }
 
-var HandleResolver func(string, string, uint64) (Handle, error)
-
 func initHandles() {
-	Declare(&Globalenv, &Declaration{Name: "cluster_handle", Fn: func(args ...Scmer) Scmer {
-		if HandleResolver == nil {
-			panic("handle resolver is unavailable")
-		}
-		handle, err := HandleResolver(args[0].String(), args[1].String(), uint64(args[2].Int()))
-		if err != nil {
-			panic(err)
-		}
-		return NewAny(handle)
-	}, Type: &TypeDescriptor{Kind: "func", HasSideEffects: true, Params: []*TypeDescriptor{{Kind: "string"}, {Kind: "string"}, {Kind: "int"}}, Return: &TypeDescriptor{Kind: "any"}}})
+	Declare(&Globalenv, &Declaration{Name: "cluster_handle", Fn: func(...Scmer) Scmer {
+		panic("handle requires a peer reconstruction context")
+	}, Type: &TypeDescriptor{Kind: "func", HasSideEffects: true, Params: []*TypeDescriptor{{Kind: "int"}}, Return: &TypeDescriptor{Kind: "any"}}})
 	Declare(&Globalenv, &Declaration{Name: "handle_failure", Fn: func(args ...Scmer) Scmer { return NewAny(&handleFailure{args[0].String()}) }, Type: &TypeDescriptor{Kind: "func", Params: []*TypeDescriptor{{Kind: "string"}}, Return: &TypeDescriptor{Kind: "any"}}})
 	Declare(&Globalenv, &Declaration{Name: "remote_closure", Fn: func(args ...Scmer) Scmer {
 		callback := &clusterCallback{endpoint: args[1].Any().(Handle), ctx: context.Background()}

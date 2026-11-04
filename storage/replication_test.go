@@ -1961,3 +1961,19 @@ func FuzzNodeMetadata(f *testing.F) {
 	f.Add([]byte{nodeList, 255})
 	f.Fuzz(func(t *testing.T, data []byte) { var message mosiPacket; _ = unmarshalNode(data, &message) })
 }
+
+func TestNodeMetadataDoesNotExecuteUnknownOrUntypedScheme(t *testing.T) {
+	var executed int
+	scm.Declare(&scm.Globalenv, &scm.Declaration{Name: "test_untyped_node_metadata", Fn: func(...scm.Scmer) scm.Scmer { executed++; return scm.NewInt(7) }, Type: &scm.TypeDescriptor{Kind: "func", HasSideEffects: true, Return: &scm.TypeDescriptor{Kind: "any"}}})
+	payload := appendNodeBlob([]byte{nodeScheme}, []byte(`(test_untyped_node_metadata)`))
+	var untyped any
+	if err := unmarshalNode(payload, &untyped); err == nil || executed != 0 {
+		t.Fatal("untyped metadata executed Scheme", executed, err)
+	}
+	unknown := appendNodeBlob([]byte{nodeMap, 1}, []byte("unknown"))
+	unknown = append(unknown, payload...)
+	var empty struct{}
+	if err := unmarshalNode(unknown, &empty); err != nil || executed != 0 {
+		t.Fatal("unknown metadata executed Scheme", executed, err)
+	}
+}

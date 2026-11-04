@@ -121,7 +121,7 @@ func UnmarshalProcedure(data []byte, options ...ProcedureDecode) (value Scmer, e
 	// owner's reservations. One invocation owns the reconstructed lambda/scope;
 	// row loops neither resolve URIs nor register/deregister references.
 	var resolve func(ClusterReference) (Scmer, error)
-	var resolveHandle func(string, string, uint64) (Handle, error)
+	var resolveHandle func(uint64) (Handle, error)
 	if len(options) > 0 {
 		resolve = options[0].Resolve
 		resolveHandle = options[0].ResolveHandle

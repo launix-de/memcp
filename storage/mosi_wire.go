@@ -193,6 +193,7 @@ func metadataLayout(t reflect.Type) *nodeLayout {
 				name = f.Name
 			}
 			layout.fields = append(layout.fields, nodeField{name, index, strings.Contains(f.Tag.Get("json"), ",omitempty")})
+			layout.byName[name] = index
 			layout.byName[strings.ToLower(name)] = index
 		}
 	}
@@ -411,12 +412,7 @@ func (r *nodeReader) value(v reflect.Value, depth int) {
 				items[key] = item
 			}
 			decoded = items
-		case nodeScheme:
-			value, err := schemeValue(r.blob()).reconstruct()
-			if err != nil {
-				panic(err)
-			}
-			decoded = value
+
 		default:
 			panic("typed node destination required")
 		}
@@ -541,11 +537,17 @@ func (r *nodeReader) value(v reflect.Value, depth int) {
 			}
 		}
 		for i := uint64(0); i < n; i++ {
-			name := string(r.blob())
+			name := r.blob()
 			var field reflect.Value
 			if v.IsValid() {
 				if layout != nil {
-					if index, ok := layout.byName[strings.ToLower(name)]; ok {
+					// The common struct path looks up bytes without copying each
+					// field name. Only map keys need a retained string allocation.
+					index, ok := layout.byName[string(name)]
+					if !ok {
+						index, ok = layout.byName[strings.ToLower(string(name))]
+					}
+					if ok {
 						field = v.FieldByIndex(index)
 					}
 				} else {
@@ -555,10 +557,11 @@ func (r *nodeReader) value(v reflect.Value, depth int) {
 			r.value(field, depth+1)
 			if v.IsValid() && layout == nil {
 				key := reflect.New(v.Type().Key()).Elem()
-				key.SetString(name)
+				key.SetString(string(name))
 				v.SetMapIndex(key, field)
 			}
 		}
+
 	default:
 		panic("unknown node metadata tag")
 	}

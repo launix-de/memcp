@@ -436,7 +436,7 @@ func (service *nodeScanService) importObject(ctx context.Context, peer *mosiPeer
 	}
 
 	frozen := schemeValue(reference.View)
-	decodedView, err := frozen.reconstruct(scm.ProcedureDecode{ResolveHandle: service.handleResolver(ctx, scm.NewNil()), Resolve: func(child scm.ClusterReference) (scm.Scmer, error) { return service.importObject(ctx, peer, child) }})
+	decodedView, err := frozen.reconstruct(scm.ProcedureDecode{ResolveHandle: service.handleResolver(ctx, peer, scm.NewNil()), Resolve: func(child scm.ClusterReference) (scm.Scmer, error) { return service.importObject(ctx, peer, child) }})
 	if err != nil {
 		return scm.NewNil(), err
 	}
@@ -504,7 +504,7 @@ func (service *nodeScanService) objectCaller(peer *mosiPeer, reference scm.Clust
 			return scm.NewNil(), err
 		}
 		defer service.discardObjectOffers(target, result.Offers)
-		return result.Value.reconstruct(scm.ProcedureDecode{ResolveHandle: service.handleResolver(callCtx, scm.NewNil()), Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) { return service.importObject(callCtx, target, ref) }})
+		return result.Value.reconstruct(scm.ProcedureDecode{ResolveHandle: service.handleResolver(callCtx, target, scm.NewNil()), Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) { return service.importObject(callCtx, target, ref) }})
 	}
 }
 
@@ -688,7 +688,7 @@ func (s *scanRPCSession) requestObject(ctx context.Context, call clusterObjectCa
 	ctx = context.WithValue(ctx, clusterObjectQueryKey{}, tx)
 	binding := scm.NewSlice([]scm.Scmer{scm.NewSymbol("node_query_context"), scm.NewString(id)})
 	args := make([]scm.Scmer, len(call.Arguments))
-	decode := scm.ProcedureDecode{ResolveHandle: s.service.handleResolver(ctx, scm.NewAny(tx)), Prepare: prepareScanProcedure(binding), Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) {
+	decode := scm.ProcedureDecode{ResolveHandle: s.service.handleResolver(ctx, s.peer, scm.NewAny(tx)), Prepare: prepareScanProcedure(binding), Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) {
 		value, err := s.service.importObject(ctx, s.peer, ref)
 		if err != nil {
 			return scm.NewNil(), err

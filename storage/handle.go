@@ -78,9 +78,9 @@ func (handle *remoteHandle) Handle(value scm.Scmer) {
 		panic(err)
 	}
 }
-func (service *nodeScanService) handleResolver(ctx context.Context, scope scm.Scmer) func(string, string, uint64) (scm.Handle, error) {
-	return func(owner, boot string, slot uint64) (scm.Handle, error) {
-		identity := clusterObjectPeer{owner, boot}
+func (service *nodeScanService) handleResolver(ctx context.Context, peer *mosiPeer, scope scm.Scmer) func(uint64) (scm.Handle, error) {
+	return func(slot uint64) (scm.Handle, error) {
+		identity := peer.objectPeer
 		if slot == 0 || service.objectConnection(identity) == nil {
 			return nil, fmt.Errorf("unknown handle peer or slot")
 		}
@@ -104,7 +104,7 @@ func (service *nodeScanService) handleBindings(bindings *scm.SerializationContex
 			release()
 			return scm.NewNil(), fmt.Errorf("exported handle requires a live invocation owner")
 		}
-		return scm.NewSlice([]scm.Scmer{scm.NewSymbol("cluster_handle"), scm.NewString(service.authNodeID()), scm.NewString(service.id), scm.NewInt(int64(slot))}), nil
+		return scm.NewSlice([]scm.Scmer{scm.NewSymbol("cluster_handle"), scm.NewInt(int64(slot))}), nil
 	})
 }
 func (s *scanRPCSession) handleValue(slot uint64, payload schemeValue) error {
@@ -120,7 +120,7 @@ func (s *scanRPCSession) handleValue(slot uint64, payload schemeValue) error {
 		return nil
 	}
 	defer target.calls.Done()
-	value, err := payload.reconstruct(scm.ProcedureDecode{ResolveHandle: s.service.handleResolver(s.peer.ctx, target.owner), Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) {
+	value, err := payload.reconstruct(scm.ProcedureDecode{ResolveHandle: s.service.handleResolver(s.peer.ctx, s.peer, target.owner), Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) {
 		return s.service.importObject(s.peer.ctx, s.peer, ref)
 	}})
 	if err != nil {

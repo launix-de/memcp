@@ -65,7 +65,11 @@ func NewClusterCallback(ctx context.Context, call func(...Scmer) Scmer, batchRes
 func (*clusterCallback) ClusterObjectType() string { return "callback" }
 func (callback *clusterCallback) Serialize(ctx *SerializationContext) (Scmer, error) {
 	if callback.endpoint != nil {
-		expression, err := ctx.HandleExpression(callback.endpoint)
+		endpoint, err := callback.forwardClosure(ctx)
+		if err != nil {
+			return NewNil(), err
+		}
+		expression, err := ctx.HandleExpression(endpoint)
 		if err != nil {
 			return NewNil(), err
 		}
@@ -89,6 +93,82 @@ func (callback *clusterCallback) Serialize(ctx *SerializationContext) (Scmer, er
 	}
 	return callback.expression(expression), nil
 }
+
+// The callable owns the (arguments return-handle) protocol. Relaying a call
+// substitutes a local one-shot receiver, so its return slot is retired at the
+// reply instead of retaining one forwarding slot per output batch until EOF.
+// Publication never waits; the invocation owner joins all accepted replies.
+func (callback *clusterCallback) forwardClosure(bindings *SerializationContext) (Handle, error) {
+	owner, ok := bindings.InvocationScope().Any().(interface{ RetainQueryWork(func()) bool })
+	if !ok {
+		return nil, fmt.Errorf("forwarded closure requires an invocation owner")
+	}
+	var mu sync.Mutex
+	var pending sync.WaitGroup
+	closed := false
+	var failure any
+	finish := func() {
+		mu.Lock()
+		closed = true
+		mu.Unlock()
+		pending.Wait()
+		mu.Lock()
+		err := failure
+		mu.Unlock()
+		if err != nil {
+			panic(err)
+		}
+	}
+	if !owner.RetainQueryWork(finish) {
+		return nil, fmt.Errorf("forwarded closure owner has finished")
+	}
+	return HandleFunc(func(payload Scmer) {
+		values := payload.Slice()
+		if len(values) != 2 {
+			panic("closure payload requires parameters and return handle")
+		}
+		var reply Handle
+		if !values[1].IsNil() {
+			reply = values[1].Any().(Handle)
+		}
+		mu.Lock()
+		if closed {
+			mu.Unlock()
+			if reply != nil {
+				reply.Handle(NewAny(&handleFailure{"forwarded closure owner has finished"}))
+			}
+			return
+		}
+		pending.Add(1)
+		mu.Unlock()
+		receiver := NewResultReceiver()
+		receiver.onResult = func(value Scmer) {
+			defer pending.Done()
+			defer func() {
+				if err := recover(); err != nil {
+					mu.Lock()
+					if failure == nil {
+						failure = err
+					}
+					mu.Unlock()
+				}
+			}()
+			if reply != nil {
+				reply.Handle(value)
+			}
+		}
+		defer func() {
+			if err := recover(); err != nil {
+				receiver.Fail(fmt.Errorf("%v", err))
+			}
+		}()
+		if err := callback.ctx.Err(); err != nil {
+			panic(err)
+		}
+		callback.endpoint.Handle(NewSlice([]Scmer{values[0], NewAny(receiver)}))
+	}), nil
+}
+
 func (callback *clusterCallback) expression(handle Scmer) Scmer {
 	view := NewNil()
 	if callback.batchResult != nil {

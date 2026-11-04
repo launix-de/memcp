@@ -1363,7 +1363,7 @@ func TestRemoteScanCapturedOuterUpdateReturnsToItsShard(t *testing.T) {
 }
 
 func TestHandleDeliveryIsIndependentAndCleanupJoinsRunningHandler(t *testing.T) {
-	_, client, _ := setupRemoteScanConnection(t)
+	peer, client, _ := setupRemoteScanConnection(t)
 	owner := nodeScans.Load()
 	source := objectOwnerPeer(t, owner, client)
 	tx := NewTxContext(TxCursorStability)
@@ -1378,7 +1378,10 @@ func TestHandleDeliveryIsIndependentAndCleanupJoinsRunningHandler(t *testing.T) 
 			t.Fatal(err)
 		}
 		args := expression.Slice()
-		handle, err := client.handleResolver(context.Background(), scm.NewNil())(args[1].String(), args[2].String(), uint64(args[3].Int()))
+		if len(args) != 2 || !args[1].IsInt() {
+			t.Fatal("handle address repeated peer metadata", scm.String(expression))
+		}
+		handle, err := client.handleResolver(context.Background(), peer, scm.NewNil())(uint64(args[1].Int()))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1470,5 +1473,94 @@ func TestRemoteNativeClosureCanInvokeOutputArgument(t *testing.T) {
 	result := (shardScanInvocation{mapReduce: mapper, callbackCols: []string{"id"}, neutral: scm.NewInt(0)}).delegate(stub, shardReadDelegation{target})
 	if result.err.r != nil || result.res.Int() != 4 || sum.Load() != 10 {
 		t.Fatal("output argument lost its ABI or owner", result.err.r, result.res, sum.Load())
+	}
+}
+
+func TestRemoteValuePreservesEveryStringByte(t *testing.T) {
+	payload := make([]byte, 4096)
+	for i := range payload {
+		payload[i] = byte(i)
+	}
+	wire, err := freezeScanValue(scm.NewString(string(payload)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err := wire.reconstruct()
+	if err != nil || !bytes.Equal([]byte(value.String()), payload) {
+		t.Fatal("binary WebSocket text payload changed string bytes", err)
+	}
+}
+
+func TestClosureRelayUsesPeerRelativeOneShotSlots(t *testing.T) {
+	_, _, ownerURL := setupRemoteScanConnection(t)
+	owner := nodeScans.Load()
+	relay, err := newNodeScanService(testScanSecret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	toOwner, _, err := relay.connect(ctx, ownerURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(relay.accept))
+	consumer, err := newNodeScanService(testScanSecret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	toRelay, _, err := consumer.connect(ctx, server.URL+"/cluster")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		consumer.forget(toRelay)
+		consumer.stopObjects()
+		server.Close()
+		relay.forget(toOwner)
+		relay.stopObjects()
+	})
+	ownerTx, relayTx, consumerTx := NewTxContext(TxCursorStability), NewTxContext(TxCursorStability), NewTxContext(TxCursorStability)
+	for _, tx := range []*TxContext{ownerTx, relayTx, consumerTx} {
+		tx.beginQuery(nil, 1, "closure relay")
+		defer tx.endQuery(1)
+	}
+	fn := scm.NewClusterCallback(ctx, func(args ...scm.Scmer) scm.Scmer { return scm.NewInt(args[0].Int() + 7) }, nil)
+	env := &scm.Env{Vars: scm.Vars{scm.Symbol("host_fn"): fn}, Outer: &scm.Globalenv}
+	proc := scm.Eval(scm.Read(t.Name(), `(lambda (value) (host_fn value))`, false), env)
+	wire, err := scm.MarshalProcedure(proc, owner.handleBindings(&scm.SerializationContext{Invocation: scm.NewAny(ownerTx)}, objectOwnerPeer(t, owner, relay)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	imported, err := scm.UnmarshalProcedure(wire, scm.ProcedureDecode{ResolveHandle: relay.handleResolver(ctx, toOwner, scm.NewAny(relayTx))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire, err = scm.MarshalProcedure(imported, relay.handleBindings(&scm.SerializationContext{Invocation: scm.NewAny(relayTx)}, objectOwnerPeer(t, relay, consumer)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	remote, err := scm.UnmarshalProcedure(wire, scm.ProcedureDecode{ResolveHandle: consumer.handleResolver(ctx, toRelay, scm.NewAny(consumerTx))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := int64(0); i < 128; i++ {
+		if got := scm.Apply(remote, scm.NewInt(i)); got.Int() != i+7 {
+			t.Fatal("relay changed function result", i, got)
+		}
+	}
+	// Keep both query owners live: return slots must disappear on each reply,
+	// rather than merely being cleaned up at endQuery after all output.
+	deadline := time.Now().Add(time.Second)
+	for {
+		count := 0
+		relay.handles.Range(func(_, _ any) bool { count++; return true })
+		if count == 1 {
+			break
+		} // the one reusable callable forwarding slot
+		if time.Now().After(deadline) {
+			t.Fatalf("relay retained %d slots after completed calls", count)
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
