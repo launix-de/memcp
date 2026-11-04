@@ -13,6 +13,7 @@ package storage
 import "fmt"
 import "bytes"
 import "runtime"
+import "math/bits"
 import "sync"
 import "time"
 import "context"
@@ -946,6 +947,93 @@ func TestRemoteScanNativeLookupKinds(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+func TestRemoteUniqueChannelRetainsGuardThroughUpdateAndFinish(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "t_remote_unique_channel", 4)
+	tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}}
+	peer, _, _ := setupRemoteScanConnection(t)
+	shard := tbl.ActiveShards()[0]
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ready := make(chan *clusterReceiver, 1)
+	receiver := newClusterReceiver(1, func(_ context.Context, value scm.Scmer) error {
+		ready <- value.Any().(*clusterReceiver)
+		return nil
+	})
+	receiver.Seal()
+	defer receiver.Close()
+	columns := scm.NewSlice([]scm.Scmer{scm.NewString("id")})
+	rows := scm.NewSlice([]scm.Scmer{scm.NewSlice([]scm.Scmer{scm.NewInt(2)})})
+	invocation := shardScanInvocation{operator: shardUniqueReserve, neutral: scm.NewSlice([]scm.Scmer{
+		scm.NewAny(receiver), columns, rows, scm.NewBool(false), scm.NewBool(true), uniqueStringArray([]string{shard.uuid.String()}),
+	})}
+	executor := &peerScanExecutor{peer: peer, ctx: ctx, prepared: remoteScanShard{Schema: tbl.filterSchemaFingerprint(), Resource: mosiResource{Database: tbl.schema.Name, Table: tbl.Name, Shard: shard.uuid.String()}}}
+	done := make(chan scanResult, 1)
+	go func() {
+		defer func() {
+			if failure := recover(); failure != nil {
+				done <- scanResult{err: scanError{r: failure}}
+			}
+		}()
+		done <- executor.ExecuteShardScan(executor.prepared.Resource, invocation)
+	}()
+	var commands *clusterReceiver
+	select {
+	case commands = <-ready:
+	case result := <-done:
+		t.Fatalf("reservation ended before ready: %+v", result.err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("reservation did not publish its channel")
+	}
+	defer func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("reservation did not join after cancellation")
+		}
+	}()
+	guard := tbl.guardUniqueWrites([]string{"id"}, [][]scm.Scmer{{scm.NewInt(2)}}, false, 0)
+	for mask := guard.mask; mask != 0; mask &= mask - 1 {
+		i := bits.TrailingZeros64(mask)
+		if guard.locks[i].TryLock() {
+			guard.locks[i].Unlock()
+			t.Fatal("remote worker released its UNIQUE guard after ready")
+		}
+	}
+	projection := scm.NewSlice([]scm.Scmer{scm.NewString("payload")})
+	value, err := callUniqueChannel(ctx, commands, scm.NewString("probe"), scm.NewString(shard.uuid.String()), columns, rows.Slice()[0], projection)
+	if err != nil || !value.Slice()[0].Bool() {
+		t.Fatalf("reserved lookup: %v %v", value, err)
+	}
+	id := value.Slice()[1]
+	changed, err := callUniqueChannel(ctx, commands, scm.NewString("update"), scm.NewString(shard.uuid.String()), id,
+		scm.NewSlice([]scm.Scmer{scm.NewString("payload"), scm.NewString("changed under reservation")}))
+	if err != nil || !changed.Bool() {
+		t.Fatalf("reserved update: %v %v", changed, err)
+	}
+	value, err = callUniqueChannel(ctx, commands, scm.NewString("probe"), scm.NewString(shard.uuid.String()), columns, rows.Slice()[0], projection)
+	if err != nil || value.Slice()[2].Slice()[0].String() != "changed under reservation" {
+		t.Fatalf("updated value: %v %v", value, err)
+	}
+	if _, err := callUniqueChannel(ctx, commands, scm.NewString("finish")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case result := <-done:
+		if result.err.r != nil || !result.res.Bool() {
+			t.Fatalf("reservation finish: %+v", result.err)
+		}
+		done <- result // the cleanup also joins completion
+	case <-time.After(5 * time.Second):
+		t.Fatal("reservation did not finish")
+	}
+	guard.lock()
+	guard.unlock()
+	if _, err := callUniqueChannel(ctx, commands, scm.NewString("update"), scm.NewString(shard.uuid.String()), id, scm.NewSlice(nil)); err == nil {
+		t.Fatal("finished reservation accepted another mutation")
 	}
 }
 

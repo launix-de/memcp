@@ -416,7 +416,7 @@ func (d *databaseDirectory) Remove(name string) *database {
 func (d *databaseDirectory) publishNames() {
 	names := make(map[string]string)
 	for _, db := range d.GetAll() {
-		key := foldIdentifier(db.Name)
+		key := scm.CaseFoldKey(db.Name)
 		if _, exists := names[key]; exists {
 			names[key] = ""
 		} else {
@@ -884,7 +884,7 @@ func (db *database) publishTableNamesLocked() {
 		if t.isHiddenFromShowTables() {
 			continue
 		}
-		folded := foldIdentifier(t.Name)
+		folded := scm.CaseFoldKey(t.Name)
 		if _, exists := names[folded]; exists {
 			names[folded] = ""
 		} else {
@@ -1174,7 +1174,7 @@ func (db *database) GetTable(name string, ignoreCase ...bool) *table {
 		if names == nil {
 			return nil
 		}
-		canonical, exists := (*names)[foldIdentifier(name)]
+		canonical, exists := (*names)[scm.CaseFoldKey(name)]
 		if !exists {
 			return nil
 		}
@@ -1674,7 +1674,7 @@ func GetDatabase(schema string, ignoreCase ...bool) *database {
 		if names == nil {
 			return nil
 		}
-		canonical, exists := (*names)[foldIdentifier(schema)]
+		canonical, exists := (*names)[scm.CaseFoldKey(schema)]
 		if !exists {
 			return nil
 		}

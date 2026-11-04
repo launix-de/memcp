@@ -38,6 +38,35 @@ import "github.com/google/uuid"
 import "golang.org/x/text/collate"
 import "golang.org/x/text/language"
 
+// CaseFoldKey chooses one representative per Unicode SimpleFold class, matching
+// strings.EqualFold without locale-dependent lowercasing or numeric folding.
+func CaseFoldKey(name string) string {
+	for i := 0; i < len(name); i++ {
+		if name[i] >= utf8.RuneSelf {
+			var b strings.Builder
+			b.Grow(len(name))
+			for _, r := range name {
+				canonical := r
+				for folded := unicode.SimpleFold(r); folded != r; folded = unicode.SimpleFold(folded) {
+					if folded < canonical {
+						canonical = folded
+					}
+				}
+				// ASCII and non-ASCII members of one SimpleFold class must use
+				// the same representative (for example K and the Kelvin sign).
+				// Only normalize ASCII representatives: Unicode lowercasing can
+				// merge separate classes, such as dotted I and ASCII i.
+				if canonical >= 'A' && canonical <= 'Z' {
+					canonical += 'a' - 'A'
+				}
+				b.WriteRune(canonical)
+			}
+			return b.String()
+		}
+	}
+	return strings.ToLower(name)
+}
+
 // Collation metadata registry for stable serialization of comparator closures.
 // Keyed by function pointer.
 var collateRegistry sync.Map // map[uintptr]struct{Collation string; Reverse bool}
@@ -17426,6 +17455,39 @@ func init_strings() {
 			key := collateCacheKey{Collation: collationName, Reverse: reverse}
 			if cached, ok := collateCache.Load(key); ok {
 				return cached.(Scmer)
+			}
+			if collationName == "unicode-simple-fold" || collationName == "unicode-string" {
+				keyOf := func(value Scmer) string {
+					if collationName == "unicode-simple-fold" {
+						return CaseFoldKey(String(value))
+					}
+					return String(value)
+				}
+				less := func(left, right Scmer) bool {
+					if reverse {
+						left, right = right, left
+					}
+					if left.IsNil() || right.IsNil() {
+						return left.IsNil() && !right.IsNil()
+					}
+					return keyOf(left) < keyOf(right)
+				}
+				fn := func(args ...Scmer) Scmer { return NewBool(less(args[0], args[1])) }
+				result := NewFunc(fn)
+				collateRegistry.Store(FunctionIdentity(fn), struct {
+					Collation string
+					Reverse   bool
+				}{Collation: collationName, Reverse: reverse})
+				collateLessRegistry.Store(FunctionIdentity(fn), less)
+				canonical, _ := collateCache.LoadOrStore(key, result)
+				metadata := collationName + ":asc"
+				if reverse {
+					metadata = collationName + ":desc"
+				}
+				collateKeyRegistry.LoadOrStore(metadata, collationKeyDescriptor{Reverse: reverse, Key: func(value Scmer) (string, bool) {
+					return keyOf(value), true
+				}})
+				return canonical.(Scmer)
 			}
 			// Binary and bare-charset relations are the dominant index case. Keep
 			// their canonical callback to one function dispatch: binaryCollationLess owns

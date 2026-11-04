@@ -21,8 +21,10 @@ import "sync"
 import "slices"
 import "unsafe"
 import "runtime"
-import "context"
+import "strings"
 import "math/bits"
+import "encoding/binary"
+import "github.com/cespare/xxhash/v2"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/memcp/storage/mosi"
 import "github.com/launix-de/go-mysqlstack/sqldb"
@@ -34,80 +36,60 @@ import "github.com/launix-de/go-mysqlstack/sqldb"
 type uniqueWriteLocks [64]sync.Mutex
 
 type uniqueWriteGuard struct {
-	locks      *uniqueWriteLocks
-	mask       uint64
-	held       bool
-	readProofs []uniqueReadProof
-	wrote      bool
-	version    uint64 // advances when a collision callback temporarily releases guards
-}
-
-// Read validation adds no reader registration. The existing generation and MOSI
-// publication prove that another node has not invalidated a UNIQUE input. The
-// success callback validates only after acquiring its native destination writer.
-type uniqueReadProof struct {
-	table    *table
-	topology *tableShardTopology
-	shard    *storageShard
-	remote   *remoteShardObject
+	ownedShard   *storageShard // an UPDATE already owns this native MOSI writer
+	reservations *uniqueReservationSet
+	locks        *uniqueWriteLocks
+	mask         uint64
+	held         bool
+	wrote        bool
+	version      uint64 // advances when a collision callback temporarily releases guards
 }
 
 type uniqueReadRetry struct{}
 
-func (proof uniqueReadProof) valid() bool {
-	if proof.table != nil {
-		return proof.table.topology.Load().routing == proof.topology.routing && activeNodeCluster().manager.resourceCell(mosiResource{Database: proof.table.schema.Name}).ownstate.Phase().Readable()
-	}
-	if proof.remote != nil {
-		value, err := proof.remote.handle.Call(context.Background(), scm.ClusterRequest{Method: "unique-valid"})
-		if err != nil {
-			panic(err)
-		}
-		return value.Bool()
-	}
-	cell := proof.shard.coherence.Load()
-	if cell == nil {
-		return false
-	}
-	cell = cell.resolved()
-	return cell.ownstate.Phase().Readable() && cell.publishedShard() == proof.shard
-}
-
 func (g *uniqueWriteGuard) validReads() bool {
-	for _, proof := range g.readProofs {
-		if !proof.valid() {
-			return false
-		}
-	}
-	return true
-}
-
-// Acquiring the collision shard locally replaces its remote read proof. The
-// caller must re-probe the key under that newly acquired native access.
-func (g *uniqueWriteGuard) acquiredUniqueShard(shard *storageShard) {
-	for i := range g.readProofs {
-		if g.readProofs[i].shard == shard {
-			g.readProofs[i].remote = nil
-		}
-	}
+	return g.reservations == nil || g.reservations.valid()
 }
 
 // Forward UNIQUE existence checks before acquiring local shard payload. Warm
 // readable local shards keep the direct path; other owners run the same native
 // reservation/visibility kernel through the ordinary scan protocol.
-func (s *storageShard) probeUnique(access scanAccess, tx *TxContext, guard *uniqueWriteGuard) bool {
+func (s *storageShard) probeUnique(access scanAccess, tx *TxContext) bool {
 	cluster := activeNodeCluster()
 	resource := mosiResource{Database: s.t.schema.Name, Table: s.t.Name, Shard: s.uuid.String()}
-	owner, err := cluster.locate(scanQueryContext(tx, cluster.ctx), resource)
-	if err != nil {
-		panic(err)
+	local := false
+	if cell := s.coherence.Load(); cell != nil {
+		state := cell.resolved().ownstate.Snapshot()
+		local = state.Phase().Readable() && s.state() != COLD || state.Flight() != nil
 	}
-	if owner == cluster.self.ID {
-		lease := s.getRead(tx, shardReadOptions{mutation: true})
-		defer lease.Release()
-		_, found := lease.shard.GetRecordidForUnique(access, tx, true)
-		guard.readProofs = append(guard.readProofs, uniqueReadProof{shard: lease.shard})
-		return found
+	owner := cluster.self.ID
+	if !local {
+		var err error
+		owner, err = cluster.locate(scanQueryContext(tx, cluster.ctx), resource)
+		if err != nil {
+			panic(err)
+		}
+	}
+	if local || owner == cluster.self.ID {
+		delegated := false
+		found := false
+		func() {
+			defer func() {
+				if failure := recover(); failure != nil {
+					if _, capacity := failure.(shardReadDelegation); capacity {
+						delegated = true
+					} else {
+						panic(failure)
+					}
+				}
+			}()
+			lease := s.getRead(tx, shardReadOptions{})
+			defer lease.Release()
+			_, found = lease.shard.GetRecordidForUnique(access, tx, true)
+		}()
+		if !delegated {
+			return found
+		}
 	}
 	var preferred *clusterLink
 	for _, link := range cluster.view.Load().links {
@@ -121,21 +103,7 @@ func (s *storageShard) probeUnique(access scanAccess, tx *TxContext, guard *uniq
 	if result.err.r != nil {
 		panic(result.err)
 	}
-	values := result.res.Slice()
-	if len(values) != 2 {
-		panic("invalid UNIQUE probe result")
-	}
-	proof := uniqueReadProof{shard: s}
-	switch source := values[1].Any().(type) {
-	case *remoteShardObject:
-		proof.remote = source
-	case *storageShard:
-		proof.shard = source
-	default:
-		panic("invalid UNIQUE probe generation")
-	}
-	guard.readProofs = append(guard.readProofs, proof)
-	return values[0].Bool()
+	return result.res.Bool()
 }
 
 func (g *uniqueWriteGuard) lock() {
@@ -143,6 +111,24 @@ func (g *uniqueWriteGuard) lock() {
 		g.locks[bits.TrailingZeros64(mask)].Lock()
 	}
 	g.held = true
+}
+
+func (g *uniqueWriteGuard) tryLock() bool {
+	var acquired uint64
+	for remaining := g.mask; remaining != 0; remaining &= remaining - 1 {
+		i := bits.TrailingZeros64(remaining)
+		if !g.locks[i].TryLock() {
+			for acquired != 0 {
+				j := bits.TrailingZeros64(acquired)
+				g.locks[j].Unlock()
+				acquired &= acquired - 1
+			}
+			return false
+		}
+		acquired |= uint64(1) << i
+	}
+	g.held = true
+	return true
 }
 
 func (g *uniqueWriteGuard) unlock() {
@@ -193,7 +179,7 @@ func uniqueGuardHash(value scm.Scmer) (uint64, bool) {
 		// Use the runtime's numeric-prefix conversion ("12x" equals 12).
 		number = value.Float()
 		if number == 0 {
-			return scm.HashKey(scm.NewString(text)), true
+			return xxhash.Sum64String(text), true
 		}
 	default:
 		return 0, false
@@ -202,7 +188,134 @@ func uniqueGuardHash(value scm.Scmer) (uint64, bool) {
 	if number == 0 || math.IsNaN(number) || math.IsInf(number, 0) {
 		return 0, false
 	}
-	return scm.HashKey(scm.NewFloat(number)), true
+	var encoded [8]byte
+	binary.LittleEndian.PutUint64(encoded[:], math.Float64bits(number))
+	return xxhash.Sum64(encoded[:]), true
+}
+
+func uniqueColumnValue(declaration *column, value scm.Scmer) scm.Scmer {
+	if value.IsNil() {
+		return value
+	}
+	if declaration.sanitizer != nil {
+		return declaration.sanitizer(value)
+	}
+	switch strings.ToUpper(declaration.Typ) {
+	case "TEXT", "TINYTEXT", "MEDIUMTEXT", "LONGTEXT", "VARCHAR", "CHAR":
+		return scm.NewString(scm.String(value))
+	}
+	return value
+}
+
+// The column's index order owns text equivalence. Runtime representations
+// (plain, compressed and UUID strings) must not change that equivalence.
+func (t *table) uniqueColumnEqual(columnName string) func(scm.Scmer, scm.Scmer) bool {
+	var declaration *column
+	collation := "bin"
+	for _, candidate := range t.columnDeclarations() {
+		if candidate.Name == columnName {
+			declaration = candidate
+			collation = candidate.Collation
+			break
+		}
+	}
+	return func(a, b scm.Scmer) bool {
+		typed := declaration != nil && declaration.Typ != "" && !strings.EqualFold(declaration.Typ, "any")
+		if typed && (a.IsNil() || b.IsNil()) {
+			return a.IsNil() && b.IsNil()
+		}
+		if typed {
+			a, b = uniqueColumnValue(declaration, a), uniqueColumnValue(declaration, b)
+		}
+		if (a.IsString() || a.IsSymbol() || a.IsBufferString()) && (b.IsString() || b.IsSymbol() || b.IsBufferString()) {
+			return scm.EqualCollated(a, b, collation).Bool()
+		}
+		return scm.Equal(a, b)
+	}
+}
+
+func (t *table) uniqueColumnHash(column string, value scm.Scmer) (uint64, bool) {
+	for _, declaration := range t.columnDeclarations() {
+		if declaration.Name != column {
+			continue
+		}
+		if declaration.Typ == "" || strings.EqualFold(declaration.Typ, "any") {
+			if declaration.Collation == "" || declaration.Collation == "bin" || declaration.Collation == "binary" || declaration.Collation == "utf8" || declaration.Collation == "utf8mb4" || strings.HasSuffix(declaration.Collation, "_bin") {
+				return uniqueGuardHash(value)
+			}
+			return 0, false // coercing ANY plus collation has no narrow general key
+		}
+		value = uniqueColumnValue(declaration, value)
+		if value.IsNil() {
+			return xxhash.Sum64String("NULL"), true
+		}
+		if declaration.sanitizer != nil && (value.IsInt() || value.IsDate() || value.IsFloat()) {
+			var encoded [8]byte
+			bits := uint64(value.Int())
+			if value.IsFloat() {
+				number := value.Float()
+				if number == 0 {
+					number = 0 // normalize negative zero for floating equality
+				}
+				bits = math.Float64bits(number)
+			}
+			binary.LittleEndian.PutUint64(encoded[:], bits)
+			return xxhash.Sum64(encoded[:]), true
+		}
+		if !(value.IsString() || value.IsSymbol() || value.IsBufferString()) {
+			return uniqueGuardHash(value)
+		}
+		collation := declaration.Collation
+		if collation == "" || collation == "bin" || collation == "binary" || collation == "utf8" || collation == "utf8mb4" || strings.HasSuffix(collation, "_bin") {
+			// Untyped/native text can still compare with numbers through Equal.
+			// Preserve the conservative cross-type guard for those declarations.
+			if declaration.Typ == "" || strings.EqualFold(declaration.Typ, "any") {
+				return uniqueGuardHash(value)
+			}
+			return xxhash.Sum64String(scm.String(value)), true
+		}
+		if strings.Contains(collation, "_ci") {
+			return xxhash.Sum64String(scm.CaseFoldKey(scm.String(value))), true
+		}
+		return xxhash.Sum64String(scm.String(value)), true
+	}
+	return uniqueGuardHash(value)
+}
+
+// UNIQUE probes use equality-compatible index ordering. Natural/language sort
+// order can merge different numeric spellings or split Unicode fold classes;
+// its sort keys must not decide equality membership or the guard hash.
+func (t *table) uniqueAccess(access scanAccess) scanAccess {
+	var schema []scm.Scmer
+	for i := 0; i < access.len(); i++ {
+		for _, declaration := range t.columnDeclarations() {
+			if declaration.Name != access.boundaryColumn(i) {
+				continue
+			}
+			switch strings.ToUpper(declaration.Typ) {
+			case "TEXT", "TINYTEXT", "MEDIUMTEXT", "LONGTEXT", "VARCHAR", "CHAR", "ENUM":
+			default:
+				continue
+			}
+			if schema == nil {
+				schema = append([]scm.Scmer(nil), access.schema...)
+			}
+			box := *(*scanBoundaryBox)(schema[scanAccessSchemaHeaderSize+i].Custom(TagScanBoundary))
+			orderName := "unicode-string"
+			if strings.Contains(declaration.Collation, "_ci") {
+				orderName = "unicode-simple-fold"
+			}
+			order := scm.Apply(scm.Globalenv.Vars[scm.Symbol("collate")], scm.NewString(orderName), scm.NewBool(false))
+			box.order, box.orderMetadata = order.Func(), orderName+":asc"
+			schema[scanAccessSchemaHeaderSize+i] = NewScanBoundaryScmer(&box)
+			break
+		}
+	}
+	if schema != nil {
+		access.schema = schema
+		access.firstBoundary = (*scanBoundaryBox)(schema[scanAccessSchemaHeaderSize].Custom(TagScanBoundary))
+	}
+	return access
 }
 
 func (t *table) guardUniqueWrites(columns []string, values [][]scm.Scmer, mergeNull bool, first int) uniqueWriteGuard {
@@ -228,7 +341,7 @@ func (t *table) guardUniqueWrites(columns []string, values [][]scm.Scmer, mergeN
 		for _, row := range values {
 			hash := uint64(idx + 1)
 			skip, broad := false, false
-			for _, position := range positions {
+			for columnIndex, position := range positions {
 				value := scm.NewNil()
 				if position >= 0 && position < len(row) {
 					value = row[position]
@@ -237,7 +350,7 @@ func (t *table) guardUniqueWrites(columns []string, values [][]scm.Scmer, mergeN
 					skip = true
 					break
 				}
-				part, precise := uniqueGuardHash(value)
+				part, precise := t.uniqueColumnHash(key.Cols[columnIndex], value)
 				broad = broad || !precise
 				hash = (hash ^ part) * 1099511628211
 			}

@@ -1855,6 +1855,8 @@ def run_cluster_inserts(args, artifacts, journal, hash_partitioned=False):
                 source.sql(f"DELETE FROM {table} WHERE writer=-2")
         source.sql("CREATE UNIQUE INDEX writer_value ON uuid_items (writer,value)")
         source.sql("CREATE UNIQUE INDEX writer_value ON integer_items (writer,value)")
+        for table in ("uuid_items", "integer_items"):
+            source.sql(f"ALTER TABLE {table} ADD COLUMN counter INT DEFAULT 0")
         builder.kill()
         shared = builder.data_dir / DATABASE
         config = effective_io_config(args)
@@ -2043,6 +2045,9 @@ def run_cluster_inserts(args, artifacts, journal, hash_partitioned=False):
             # the Go contention tests. SQL transaction reservation conflicts
             # retain their separate 1213 contract; no query retry is hidden here.
             for mixed in (False, True):
+                counter_column = "counter" if mixed else "value"
+                if mixed:
+                    expected_counter = 0
                 repetitions = 8
                 rmw_barrier = threading.Barrier(len(nodes))
                 def increment(index):
@@ -2053,22 +2058,24 @@ def run_cluster_inserts(args, artifacts, journal, hash_partitioned=False):
                             expression = (f'(scan nil (table "{DATABASE}" false "{table}" false) '
                                           '(list) (list) (list "id") '
                                           f'(lambda (id) (equal? id {native_key})) '
-                                          '(list "value" "$update") '
+                                          f'(list "{counter_column}" "$update") '
                                           '(lambda (acc previous update) '
-                                          '(begin (update (list "value" (+ previous 1))) acc)) 0 +)')
+                                          f'(begin (update (list "{counter_column}" (+ previous 1))) acc)) 0 +)')
                         else:
                             expression = (f'(insert (table "{DATABASE}" false "{table}" false) '
                                           '(list "id" "writer" "value") '
                                           f'(list (list {native_key} 99 777)) '
-                                          '(list "value" "$update") '
-                                          '(lambda (previous update) (update (list "value" (+ previous 1)))) '
+                                          f'(list "{counter_column}" "$update") '
+                                          f'(lambda (previous update) (update (list "{counter_column}" (+ previous 1)))) '
                                           'false nil nil)')
-                        nodes[index].client.scm(expression)
+                        result = json.loads(nodes[index].client.scm(expression))
+                        expect(result, 0 if mixed and index % 2 else 2,
+                               "native mutation acknowledges exactly one collision/UPDATE")
                 with concurrent.futures.ThreadPoolExecutor(max_workers=len(nodes)) as threads:
                     list(threads.map(increment, range(len(nodes))))
                 expected_counter += len(nodes) * repetitions
                 for node in nodes:
-                    expect(node.client.sql(f"SELECT value AS n FROM {table} WHERE id={key}"),
+                    expect(node.client.sql(f"SELECT {counter_column} AS n FROM {table} WHERE id={key}"),
                            [{"n": expected_counter}], "concurrent collision/UPDATE RMW retains every increment")
                 journal.append({"scenario": "cluster-collision-rmw", "layout": layout,
                                 "table": table, "mixed_update": mixed, "increments": len(nodes) * repetitions})

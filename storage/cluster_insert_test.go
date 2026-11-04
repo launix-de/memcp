@@ -82,8 +82,8 @@ func TestClusterUniqueProbeUsesAcquiredSuccessor(t *testing.T) {
 			done <- result
 		}()
 		tbl.ProcessUniqueCollision([]string{"id"}, [][]scm.Scmer{{scm.NewInt(42)}}, false,
-			func(rows [][]scm.Scmer, _ func() bool) { result.accepted += len(rows) }, nil,
-			func(string, []scm.Scmer) { result.collisions++ }, 0, nil, nil)
+			func(rows [][]scm.Scmer, _ *uniqueWriteGuard) { result.accepted += len(rows) }, nil,
+			func(string, []scm.Scmer) { result.collisions++ }, 0, nil, nil, nil)
 	}()
 	deadline := time.Now().Add(time.Second)
 	for topology.operations.Load() == 0 {
@@ -1087,6 +1087,86 @@ func TestClusterMutationScanBorrowsAcquiredWriter(t *testing.T) {
 	}
 }
 
+func TestClusterUniqueChannelSerializesNativeCollisionUpdates(t *testing.T) {
+	tbl := setupScanParallelTestTable(t, "t_unique_channel_collision")
+	tbl.CreateColumn("value", "INT", nil, nil)
+	tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}}
+	tbl.Insert([]string{"id", "value"}, [][]scm.Scmer{{scm.NewInt(42), scm.NewInt(0)}}, nil, scm.NewNil(), false, nil)
+	cluster := globalTestCluster(t, tbl.schema.Name)
+	mounts := sharedClusterMounts.Swap(&map[string]bool{tbl.schema.Name: true})
+	defer sharedClusterMounts.Store(mounts)
+	service := nodeScans.Swap(&nodeScanService{cluster: cluster})
+	defer nodeScans.Store(service)
+	cluster.manager.resourceCell(mosiResource{Database: tbl.schema.Name}).ownstate.Initialize(mosi.M)
+	for _, shard := range tbl.ActiveShards() {
+		cluster.declareShard(shard, true)
+	}
+	const workers, repetitions = 8, 8
+	start := make(chan struct{})
+	failures := make(chan any, workers)
+	var running sync.WaitGroup
+	for range workers {
+		running.Go(func() {
+			defer func() { failures <- recover() }()
+			<-start
+			for range repetitions {
+				tbl.Insert([]string{"id", "value"}, [][]scm.Scmer{{scm.NewInt(42), scm.NewInt(0)}}, []string{"value", "$update"},
+					scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
+						runtime.Gosched()
+						return scm.Apply(values[1], scm.NewSlice([]scm.Scmer{scm.NewString("value"), scm.NewInt(values[0].Int() + 1)}))
+					}), false, nil)
+			}
+		})
+	}
+	close(start)
+	running.Wait()
+	close(failures)
+	for failure := range failures {
+		if failure != nil {
+			t.Fatalf("native collision: %v", failure)
+		}
+	}
+	shard := tbl.ActiveShards()[0]
+	lease := shard.GetRead(nil, false)
+	defer lease.Release()
+	id, found := shard.GetRecordidForUnique(exactScanAccess(newExactScanAccessSchema([]string{"id"}), []scm.Scmer{scm.NewInt(42)}), nil, true)
+	reader := shard.ColumnReaderTx(nil, "value", false, ReadAuto)
+	defer ReleaseColumnReader(reader)
+	if !found || reader.GetValue(id).Int() != workers*repetitions {
+		t.Fatalf("native collision lost increments: found=%v value=%v", found, reader.GetValue(id))
+	}
+}
+
+func TestClusterNativeUniqueUpdateReleasesBorrowedReservation(t *testing.T) {
+	tbl := setupScanParallelTestTable(t, "t_unique_update_borrowed")
+	tbl.CreateColumn("value", "INT", nil, nil)
+	tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}, {Id: "value", Cols: []string{"value"}}}
+	tbl.Insert([]string{"id", "value"}, [][]scm.Scmer{{scm.NewInt(42), scm.NewInt(1)}}, nil, scm.NewNil(), false, nil)
+	cluster := globalTestCluster(t, tbl.schema.Name)
+	mounts := sharedClusterMounts.Swap(&map[string]bool{tbl.schema.Name: true})
+	defer sharedClusterMounts.Store(mounts)
+	service := nodeScans.Swap(&nodeScanService{cluster: cluster})
+	defer nodeScans.Store(service)
+	cluster.manager.resourceCell(mosiResource{Database: tbl.schema.Name}).ownstate.Initialize(mosi.M)
+	shard := tbl.ActiveShards()[0]
+	cell := cluster.declareShard(shard, true)
+	for range 8 {
+		tbl.scan(nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, []string{"id"},
+			scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return scm.NewBool(a[0].Int() == 42) }),
+			[]string{"value", "$update"}, scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
+				return scm.Apply(a[2], scm.NewSlice([]scm.Scmer{scm.NewString("value"), scm.NewInt(a[1].Int() + 1)}))
+			}), scm.NewInt(0), scm.Globalenv.Vars[scm.Symbol("+")], false)
+		if cell.ownstate.Writing() {
+			t.Fatal("native UPDATE retained its MOSI writer")
+		}
+		guard := tbl.guardUniqueWrites([]string{"id", "value"}, [][]scm.Scmer{{scm.NewInt(42), scm.NewInt(0)}}, false, 0)
+		if !guard.tryLock() {
+			t.Fatal("native UPDATE retained a UNIQUE stripe after publishing")
+		}
+		guard.unlock()
+	}
+}
+
 func TestClusterUniqueCallbackReleasesMOnPanic(t *testing.T) {
 	tbl := setupScanParallelTestTable(t, "tuniquepanicrelease")
 	tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}}
@@ -1103,13 +1183,13 @@ func TestClusterUniqueCallbackReleasesMOnPanic(t *testing.T) {
 	func() {
 		defer func() { failure = recover() }()
 		tbl.ProcessUniqueCollision([]string{"id"}, [][]scm.Scmer{{scm.NewInt(42)}}, false,
-			func([][]scm.Scmer, func() bool) { t.Fatal("duplicate row accepted") }, []string{"$update"},
+			func([][]scm.Scmer, *uniqueWriteGuard) { t.Fatal("duplicate row accepted") }, []string{"$update"},
 			func(string, []scm.Scmer) {
 				if !cell.ownstate.Writing() {
 					t.Fatal("callback executed without active M")
 				}
 				panic("callback failure")
-			}, 0, nil, nil)
+			}, 0, nil, nil, nil)
 	}()
 	if failure != "callback failure" || cell.ownstate.Writing() {
 		t.Fatalf("callback failure=%v retained writer=%v", failure, cell.ownstate.Writing())
@@ -1148,13 +1228,13 @@ func TestClusterUniquePreflightUsesMutationAdmissionAndKeepsNodeLimit(t *testing
 	}
 	accepted := 0
 	tbl.ProcessUniqueCollision([]string{"id"}, [][]scm.Scmer{{scm.NewInt(43)}}, false,
-		func(rows [][]scm.Scmer, validate func() bool) {
-			if !validate() {
+		func(rows [][]scm.Scmer, validate *uniqueWriteGuard) {
+			if !validate.validReads() {
 				t.Fatal("mutation preflight lost native read proof")
 			}
 			accepted += len(rows)
 		}, nil,
-		func(string, []scm.Scmer) { t.Fatal("unrelated key collided") }, 0, nil, nil)
+		func(string, []scm.Scmer) { t.Fatal("unrelated key collided") }, 0, nil, nil, nil)
 	if accepted != 1 {
 		t.Fatal("fitting mutation preflight was refused at the read reserve")
 	}

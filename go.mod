@@ -11,6 +11,7 @@ require (
 	github.com/aws/smithy-go v1.24.2
 	github.com/carli2/hybridsort v0.1.0
 	github.com/ceph/go-ceph v0.37.0
+	github.com/cespare/xxhash/v2 v2.3.0
 	github.com/chzyer/readline v1.5.1
 	github.com/dc0d/onexit v1.1.0
 	github.com/denisenkom/go-mssqldb v0.12.3
@@ -58,7 +59,6 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/sts v1.41.6 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/bits-and-blooms/bitset v1.24.6 // indirect
-	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/dunglas/mercure v0.24.2 // indirect
 	github.com/dunglas/skipfilter v1.0.0 // indirect

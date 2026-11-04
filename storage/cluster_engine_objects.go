@@ -114,9 +114,6 @@ func (s *storageShard) HandleClusterRequest(ctx context.Context, r scm.ClusterRe
 	if r.Method == "view" {
 		return scm.NewSlice([]scm.Scmer{scm.NewString(s.t.schema.Name), scm.NewString(s.t.Name), scm.NewString(s.uuid.String()), scm.NewInt(int64(s.t.filterSchemaFingerprint()))}), nil
 	}
-	if r.Method == "unique-valid" {
-		return scm.NewBool(uniqueReadProof{shard: s}.valid()), nil
-	}
 	if r.Method == "scan" {
 		switch input := r.Payload.(type) {
 		case remoteScanTask:
@@ -148,9 +145,23 @@ func (s *storageShard) HandleClusterRequest(ctx context.Context, r scm.ClusterRe
 			}
 			if input.operator == shardUniqueProbe {
 				_, found := s.GetRecordidForUnique(input.access, input.tx, true)
-				// The ordinary shard handle retains this generation on its worker.
-				// It grants no write rights and transfers no column payload.
-				return scanResult{res: scm.NewSlice([]scm.Scmer{scm.NewBool(found), scm.NewAny(s)}), inputCount: inputCount}, nil
+				return scanResult{res: scm.NewBool(found), inputCount: inputCount}, nil
+			}
+			if input.operator == shardUniqueReserve {
+				committed, err := s.serveUniqueScan(ctx, input)
+				if busy, ok := err.(uniqueReservationBusy); ok {
+					return scanResult{res: scm.NewSlice([]scm.Scmer{scm.NewString("busy"), scm.NewString(busy.shard.Resource.Shard)})}, nil
+				}
+				if err != nil {
+					return nil, err
+				}
+				if !committed {
+					return nil, fmt.Errorf("UNIQUE reservation aborted")
+				}
+				return scanResult{res: scm.NewBool(true), inputCount: inputCount}, nil
+			}
+			if input.operator == shardUniqueAdmit {
+				return scanResult{res: scm.NewBool(true)}, nil
 			}
 			if input.operator >= shardLookupOne {
 				var value scm.Scmer

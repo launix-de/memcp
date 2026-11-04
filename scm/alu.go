@@ -22571,7 +22571,7 @@ func init_alu() {
 				}
 				return NewBool(as == bs)
 			}
-			return equalCollatedValues(a[0], a[1], coll)
+			return EqualCollated(a[0], a[1], coll)
 		},
 		Type: &TypeDescriptor{Kind: "func", Description: "performs SQL equality with a specified collation (e.g. *_ci case-insensitive, *_bin case-sensitive); returns nil if either arg is nil",
 			Params: []*TypeDescriptor{
@@ -23315,7 +23315,7 @@ func init_alu() {
 						d13 = tmpPair
 					}
 					if d13.Loc != LocRegPair && d13.Loc != LocStackPair && d13.Loc != LocInputPair {
-						panic("jit: generic call arg expects 2-word value (equalCollatedValues arg2)")
+						panic("jit: generic call arg expects 2-word value (EqualCollated arg2)")
 					}
 					ctx.SyncDesc(&d106)
 					ctx.SyncDesc(&d107)
@@ -29223,7 +29223,7 @@ func init() {
 	jitGoABI_b0f6112005ee2468 = GoFuncAddr(strings.EqualFold)
 	jitGoABI_b1cf1bd87a9546df = GoFuncAddr(Scmer.Int)
 	jitGoABI_b3a974384c15b610 = GoFuncAddr(JITCeilBits)
-	jitGoABI_b4f71add2da444a5 = GoFuncAddr(equalCollatedValues)
+	jitGoABI_b4f71add2da444a5 = GoFuncAddr(EqualCollated)
 	jitGoABI_bca27948634527b7 = GoFuncAddr(jitInvokeGoFunctionSlice)
 	jitGoABI_c780acf296c5bb52 = GoFuncAddr(JITStringEqual)
 	jitGoABI_cb6dcb22666af3d5 = GoFuncAddr((*big.Rat).Float64)

@@ -1513,8 +1513,20 @@ func isRuntimeComputedColumn(colDesc *column) bool {
 
 func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, alreadyLocked bool, batch *triggerBatch, deletedRows *uint64, currentTx *TxContext, uniqueGuard *uniqueWriteGuard) func(...scm.Scmer) scm.Scmer {
 	declarations := t.t.columnDeclarations() // one immutable declaration contract for this callback
+	initialUniqueGuard := uniqueGuard
 	// returns a callback with which you can delete or update an item
 	return func(a ...scm.Scmer) scm.Scmer {
+		uniqueGuard := initialUniqueGuard
+		var retainedUnique *uniqueWriteGuard
+		completed := false
+		defer func() {
+			if retainedUnique != nil {
+				defer retainedUnique.unlock()
+				if retainedUnique.reservations != nil {
+					retainedUnique.reservations.close(completed)
+				}
+			}
+		}()
 		//fmt.Println("update/delete", a)
 		// FK checks are enforced via auto-generated system triggers (see createforeignkey)
 
@@ -1740,13 +1752,22 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 							}
 						}()
 						defer t.mu.Lock()
-						t.t.ProcessUniqueCollision(payloadCols, [][]scm.Scmer{payloadRow}, false, func(values [][]scm.Scmer, validate func() bool) {
-							if !validate() {
+						if uniqueGuard == nil && sharedClusterSource(t.t) {
+							guard := t.t.guardUniqueWrites(payloadCols, [][]scm.Scmer{payloadRow}, false, 0)
+							if !guard.tryLock() {
+								panic(sqldb.NewSQLError1(1213, "40001", "Concurrent UNIQUE update key; retry transaction"))
+							}
+							guard.ownedShard = t
+							retainedUnique = &guard
+							uniqueGuard = &guard
+						}
+						t.t.ProcessUniqueCollision(payloadCols, [][]scm.Scmer{payloadRow}, false, func(values [][]scm.Scmer, validate *uniqueWriteGuard) {
+							if !validate.validReads() {
 								panic(uniqueReadRetry{})
 							}
 						}, nil, func(errmsg string, data []scm.Scmer) {
 							panic(sqldb.NewSQLError1(1062, "23000", "Duplicate entry in table %s: %s", t.t.Name, errmsg))
-						}, 0, currentTx, uniqueGuard)
+						}, 0, currentTx, uniqueGuard, nil)
 						checked = true
 					}()
 				} else {
@@ -1975,6 +1996,7 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 				}
 			}
 		}
+		completed = true
 		return scm.NewBool(result) // maybe instead return UpdateFunction for newly inserted item??
 	}
 }
@@ -3712,7 +3734,18 @@ func releaseUniqueLookupScratch(scratch *uniqueLookupScratch, columns int) {
 }
 
 func (t *storageShard) GetRecordidForUnique(access scanAccess, currentTx *TxContext, checkReservations bool) (result uint32, present bool) {
+	access = t.t.uniqueAccess(access)
 	columns := access.len()
+	var inlineEquals [8]func(scm.Scmer, scm.Scmer) bool
+	equals := inlineEquals[:]
+	if columns <= len(equals) {
+		equals = equals[:columns]
+	} else {
+		equals = make([]func(scm.Scmer, scm.Scmer) bool, columns)
+	}
+	for i := range equals {
+		equals[i] = t.t.uniqueColumnEqual(access.boundaryColumn(i))
+	}
 	scratch := acquireUniqueLookupScratch()
 	defer releaseUniqueLookupScratch(scratch, columns)
 	mcols := scratch.mcols[:]
@@ -3768,7 +3801,7 @@ func (t *storageShard) GetRecordidForUnique(access scanAccess, currentTx *TxCont
 				// Main storage: use ColumnStorage
 				for j := 0; j < columns; j++ {
 					v := access.boundValue(j, false)
-					if !scm.Equal(mcols[j].GetValue(idx), v) {
+					if !equals[j](mcols[j].GetValue(idx), v) {
 						matched = false
 						break
 					}
@@ -3776,7 +3809,7 @@ func (t *storageShard) GetRecordidForUnique(access scanAccess, currentTx *TxCont
 			} else {
 				// Delta storage: use getDelta
 				for j := 0; j < columns; j++ {
-					if !scm.Equal(t.getDelta(int(idx-mainCount), access.boundaryColumn(j)), access.boundValue(j, false)) {
+					if !equals[j](t.getDelta(int(idx-mainCount), access.boundaryColumn(j)), access.boundValue(j, false)) {
 						matched = false
 						break
 					}

@@ -43,6 +43,95 @@ func TestClusterReceiverReservationDoesNotWaitForCallback(t *testing.T) {
 		t.Fatal("callback blocked admission of independent work")
 	}
 }
+
+func TestUniqueChannelCancellationJoinsActiveCommandBeforeUnlock(t *testing.T) {
+	tbl := setupScanParallelTestTable(t, "t_unique_channel_cancel")
+	tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}}
+	guard := tbl.guardUniqueWrites([]string{"id"}, [][]scm.Scmer{{scm.NewInt(7)}}, false, 0)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ready := make(chan *clusterReceiver, 1)
+	receiver := newClusterReceiver(1, func(_ context.Context, value scm.Scmer) error {
+		ready <- value.Any().(*clusterReceiver)
+		return nil
+	})
+	receiver.Seal()
+	defer receiver.Close()
+	entered, left := make(chan struct{}), make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		_, err := serveUniqueChannel(ctx, &guard, receiver, func(commandCtx context.Context, _ []scm.Scmer) (scm.Scmer, error) {
+			close(entered)
+			<-commandCtx.Done()
+			defer close(left)
+			return scm.NewNil(), commandCtx.Err()
+		})
+		done <- err
+	}()
+	commands := <-ready
+	called := make(chan error, 1)
+	go func() {
+		_, err := callUniqueChannel(context.Background(), commands, scm.NewString("apply"))
+		called <- err
+	}()
+	<-entered
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("cancellation: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("reservation did not join its active command")
+	}
+	select {
+	case <-left:
+	default:
+		t.Fatal("reservation returned before its mutation callback")
+	}
+	if err := <-called; !errors.Is(err, context.Canceled) {
+		t.Fatalf("command cancellation: %v", err)
+	}
+	reacquired := tbl.guardUniqueWrites([]string{"id"}, [][]scm.Scmer{{scm.NewInt(7)}}, false, 0)
+	reacquired.lock()
+	reacquired.unlock()
+}
+
+func TestUniqueChannelCommandPanicReleasesReservation(t *testing.T) {
+	tbl := setupScanParallelTestTable(t, "t_unique_channel_panic")
+	tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}}
+	guard := tbl.guardUniqueWrites([]string{"id"}, [][]scm.Scmer{{scm.NewInt(7)}}, false, 0)
+	ready := make(chan *clusterReceiver, 1)
+	receiver := newClusterReceiver(1, func(_ context.Context, value scm.Scmer) error { ready <- value.Any().(*clusterReceiver); return nil })
+	receiver.Seal()
+	defer receiver.Close()
+	done := make(chan bool, 1)
+	go func() {
+		committed, _ := serveUniqueChannel(context.Background(), &guard, receiver, func(context.Context, []scm.Scmer) (scm.Scmer, error) {
+			panic("unique-command-panic")
+		})
+		done <- committed
+	}()
+	commands := <-ready
+	var failure any
+	func() {
+		defer func() { failure = recover() }()
+		_, _ = callUniqueChannel(context.Background(), commands, scm.NewString("apply"))
+	}()
+	if failure != "unique-command-panic" {
+		t.Fatalf("lost command panic: %v", failure)
+	}
+	select {
+	case committed := <-done:
+		if committed {
+			t.Fatal("failed command committed its reservation")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("failed command retained its reservation")
+	}
+	guard.lock()
+	guard.unlock()
+}
 func TestClusterReceiverProductionAndParallelLimits(t *testing.T) {
 	var calls atomic.Int64
 	receiver := newClusterReceiver(1, func(context.Context, scm.Scmer) error { calls.Add(1); return nil })

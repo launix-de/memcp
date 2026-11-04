@@ -155,7 +155,7 @@ func (database *database) executeScanTask(ctx context.Context, s *scanRPCSession
 	if request.Version != scanWireVersion || !request.Shard.Resource.valid() || request.Shard.Resource.Shard == "" {
 		return nil, fmt.Errorf("invalid remote scan contract")
 	}
-	if request.Operator > shardUniqueProbe || request.Stride < 0 || (request.Operator != shardReduce && request.Stride != 0) || (request.Stride == 0 && len(request.Batch) != 0) || (request.Stride > 0 && len(request.Batch)%request.Stride != 0) {
+	if request.Operator > shardUniqueAdmit || request.Stride < 0 || (request.Operator != shardReduce && request.Stride != 0) || (request.Stride == 0 && len(request.Batch) != 0) || (request.Stride > 0 && len(request.Batch)%request.Stride != 0) {
 		return nil, fmt.Errorf("invalid remote scan invocation")
 	}
 	if (request.Operator == shardOrdered) != (request.Order != nil) {
@@ -503,7 +503,7 @@ func (origin *peerScanExecutor) ExecuteShardScan(resource mosiResource, invocati
 	if err != nil {
 		panic(err)
 	}
-	task.Access.Mutation = task.Access.Mutation || scanMutates(invocation.callbackCols)
+	task.Access.Mutation = task.Access.Mutation || scanMutates(invocation.callbackCols) || invocation.operator == shardUniqueAdmit
 	if invocation.tx != nil {
 		// Export only unmodified remote inputs. A modified generation is kept
 		// resident by native TX pins and must execute at its participant; a cold
