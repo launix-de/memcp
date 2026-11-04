@@ -187,7 +187,7 @@ func (t *table) insertPeer(columns []string, rows [][]scm.Scmer) *mosiPeer {
 		return nil
 	}
 	topology := t.activeTopology()
-	if topology.mode == ShardModeFree || len(topology.shards) == 0 {
+	if len(topology.shards) == 0 {
 		return nil
 	}
 	index := 0
@@ -201,7 +201,7 @@ func (t *table) insertPeer(columns []string, rows [][]scm.Scmer) *mosiPeer {
 			localKeys = localKeys && found
 		}
 	}
-	if localKeys {
+	if localKeys && topology.mode != ShardModeFree {
 		key := make([]scm.Scmer, len(topology.dimensions))
 		for i, dimension := range topology.dimensions {
 			for j, column := range columns {
