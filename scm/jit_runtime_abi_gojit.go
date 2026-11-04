@@ -272,10 +272,32 @@ func jitEmitRuntimeLoadFunctionContext(ctx *JITContext, target, slot Reg) {
 // Its caller writes a proven non-heap-pointer value immediately afterwards.
 func jitEmitPointerFreeStoreBarrier(ctx *JITContext, address Reg, restore func()) {
 	ctx.FlushRegisterMoves()
+	// Scratch is not an allocator home, but MemCP may keep its borrowed input
+	// base there (R12 on amd64). Preserve that role on both branch paths, before
+	// the slow path's ordinary Go-call preservation observes the registers.
+	scratch := Reg(jitScmerClosureConvention.Registers.Scratch.Number)
+	savedBase := int32(0)
+	if ctx.SliceBase == scratch && !ctx.SliceBaseTracksRSP {
+		savedBase = ctx.AllocSpill(8)
+		ctx.EmitStoreRegMem(ctx.SliceBase, ctx.FrameReg, savedBase)
+		ctx.setStackPointer(jitStackRootFrameBP, savedBase, true)
+	}
+	restoreBase := func() {
+		if ctx.SliceBase != scratch {
+			return
+		}
+		if ctx.SliceBaseTracksRSP {
+			ctx.EmitLeaRegMem(ctx.SliceBase, ctx.StackReg, ctx.DynamicSP)
+		} else {
+			ctx.EmitMovRegMem(ctx.SliceBase, ctx.FrameReg, savedBase)
+		}
+	}
 	check := jit.EmitWriteBarrierCheck(ctx, 0)
+	restoreBase()
 	done := ctx.ReserveLabel()
 	ctx.EmitJmp(done)
 	jit.PatchWriteBarrierCheck(ctx, check, ctx.Offset())
+	restoreBase()
 	// The call bridge may use its own scratch register before argument setup.
 	// Give the transient interior pointer a rooted, frame-relative home first.
 	off := ctx.AllocSpill(8)
@@ -288,4 +310,7 @@ func jitEmitPointerFreeStoreBarrier(ctx *JITContext, address Reg, restore func()
 		restore()
 	}
 	ctx.MarkLabel(done)
+	if savedBase != 0 {
+		ctx.setStackPointer(jitStackRootFrameBP, savedBase, false)
+	}
 }

@@ -85,7 +85,7 @@ PACKAGE_DIR  ?= .build/packages
 SOURCE_DATE_EPOCH ?= $(shell git log -1 --format=%ct)
 JIT_GOROOT   ?= $(CURDIR)/.third_party/go-jit
 JIT_GO_REPOSITORY ?= https://github.com/launix-de/go.git
-JIT_GO_REF   ?= jit-abi-v0.1.0-rc.1
+JIT_GO_REF   ?= jit-abi-v0.1.0-rc.2
 export SOURCE_DATE_EPOCH
 
 all: check-php $(PHP_RUNTIME)

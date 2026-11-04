@@ -1207,8 +1207,11 @@ func TestGoCallOrdinaryMultiResultRemainsAdmissible(t *testing.T) {
 	if !generator.emitGenericStaticCall(call.Name(), call.Call.StaticCallee(), call.Call.Args) {
 		t.Fatal("ordinary text/error register results rejected")
 	}
-	if !strings.Contains(generator.w.String(), "[]uint8{2, 2}, []uint8{1, 3}") {
-		t.Fatal("ordinary text/error ABI width or pointer maps changed")
+	if !strings.Contains(generator.w.String(), "JITEmitGoCallResults(ctx, GoFuncAddr(text), []JITValueDesc{})") {
+		t.Fatalf("ordinary text/error results must use the runtime signature: %s", generator.w.String())
+	}
+	if strings.Contains(generator.w.String(), "[]uint8") {
+		t.Fatal("generator duplicated runtime-owned result widths or pointer maps")
 	}
 }
 
