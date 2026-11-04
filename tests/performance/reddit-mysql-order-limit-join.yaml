@@ -67,7 +67,7 @@ test_cases:
       result_contains:
         - "chosen scan_join_order"
         - "scan_join_order"
-        - "legacy_join_tree"
+        - "nested_scan_tree"
         - "lowest_total_ns"
 
   - name: "Reddit MySQL handwritten scan_join_order"

@@ -1002,7 +1002,7 @@ test_cases:
     expect:
       contains:
         - "scan_join_order"
-        - "legacy_join_tree"
+        - "nested_scan_tree"
 
   - name: "Ordered join retains an inner membership filter"
     sql: |
@@ -1104,7 +1104,7 @@ test_cases:
     expect:
       result_contains:
         - "chosen scan_join_order"
-        - "join_legacy_probe_rows 2000"
+        - "join_nested_probe_rows 2000"
     cleanup:
       - sql: "DROP TABLE IF EXISTS ord_join_order_driver"
       - sql: "DROP TABLE IF EXISTS ord_join_order_lookup"

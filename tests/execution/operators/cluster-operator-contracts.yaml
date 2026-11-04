@@ -152,7 +152,21 @@ test_cases:
     cluster:
       min_remote_shards: 1
       plan_contains:
-      - scan_join_order
+      - scan_boundary
+- name: selective-three-table-join-sum
+  sql: SELECT SUM(b.v0) AS total FROM operator_keys k JOIN big_items b ON b.id=k.id JOIN operator_keys k2 ON k2.id=b.id
+  expect:
+    cluster:
+      min_remote_shards: 1
+      plan_contains:
+      - scan_boundary
+- name: selective-four-table-join-sum
+  sql: SELECT SUM(b.v0) AS total FROM operator_keys k JOIN big_items b ON b.id=k.id JOIN operator_keys k2 ON k2.id=b.id JOIN operator_keys k3 ON k3.id=k2.id
+  expect:
+    cluster:
+      min_remote_shards: 1
+      plan_contains:
+      - scan_boundary
 - name: join-rows
   sql: SELECT k.id,b.v0 FROM operator_keys k JOIN big_items b ON b.id=k.id ORDER BY
     k.id

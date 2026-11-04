@@ -548,7 +548,7 @@ test_cases:
     expect:
       rows: 2
       contains:
-        - 'legacy_join_tree'
+        - 'nested_scan_tree'
         - 'scan_join_order'
         - 'result_equal'
 

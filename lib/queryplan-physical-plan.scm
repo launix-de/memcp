@@ -8439,7 +8439,7 @@ until the caller has selected this physical alternative. */
 					sources default_alias order_items stages final_condition))
 				(define materialized_choice (if (or (not legacy_order_supported)
 					(planner_cost_better? scan_cost legacy_cost))
-					"scan_join_order" "legacy_join_tree"))
+					"scan_join_order" "nested_scan_tree"))
 				(define materialized_cost (if (equal? materialized_choice "scan_join_order")
 					scan_cost legacy_cost))
 				(define normal_choice (if (and (not (nil? batched_probe_cost))
@@ -8448,7 +8448,7 @@ until the caller has selected this physical alternative. */
 				(define decision_id (concat "scan_join_order:"
 					(stable_structural_hash (join_optimizer_tree_aliases plan) true)))
 				(define alternatives (merge (list
-					(if legacy_order_supported (list "legacy_join_tree") '())
+					(if legacy_order_supported (list "nested_scan_tree") '())
 					(list "scan_join_order" "scan_join_order_batched_probe"))))
 				(define physical_planning_session
 					(qassoc_get facts (quote physical_planning_session) nil))
@@ -8474,11 +8474,11 @@ until the caller has selected this physical alternative. */
 						(list "join_output_rows" output_rows)
 						(list "join_map_width" (qassoc_get spec (quote map_width) 0))
 						(list "join_table_count" (qassoc_get spec (quote table_count) 0))
-						(list "join_legacy_probe_rows" legacy_probe_rows)
+						(list "join_nested_probe_rows" legacy_probe_rows)
 						(list "limit" (qassoc_get spec (quote limit) -1))
 						(list "offset" (qassoc_get spec (quote offset) 0))))
 					(list "alternatives" (list
-						(list (list "plan" "legacy_join_tree")
+						(list (list "plan" "nested_scan_tree")
 							(list "cost" (if legacy_order_supported (planner_cost_explain legacy_cost) nil)))
 						(list (list "plan" "scan_join_order")
 							(list "cost" (planner_cost_explain scan_cost)))
@@ -8499,35 +8499,49 @@ reducers: the first combines shard-tuple results locally and the second merges
 those local states globally. The physical choice deliberately shares the
 ordered operator's Costgen-owned scan, map and expression coefficients. */
 (define join_unordered_reduce_plan (lambda (all_sources plan default_alias consumer_exprs
-	final_condition stages facts value_builder reduce_expr neutral_expr shard_reduce_expr legacy_plan)
+	final_condition stages facts value_builder reduce_expr neutral_expr shard_reduce_expr nested_plan)
 	(begin
 		(define spec (scan_join_order_spec all_sources plan default_alias consumer_exprs
 			final_condition '() 0 -1 stages facts true))
 		(if (nil? spec)
-			legacy_plan
+			nested_plan
 			(begin
 				(define scan_cost (qassoc_get spec (quote cost) nil))
 				(define joined_rows (qassoc_get spec (quote joined_rows) 0))
-				(define estimated_legacy_cost (qassoc_get facts (quote join_cost) nil))
-				(define logical_legacy_cost (if (nil? estimated_legacy_cost)
+				(define estimated_nested_cost (qassoc_get facts (quote join_cost) nil))
+				(define logical_nested_cost (if (nil? estimated_nested_cost)
 					(planner_cost_add
 						(planner_scan_cost (qassoc_get spec (quote input_rows) 0) 0.5)
 						(planner_join_work_cost joined_rows 0.5)
 						joined_rows 0.5)
-					estimated_legacy_cost))
-				(define legacy_scan_invocations
+					estimated_nested_cost))
+				(define nested_scan_invocations
 					(physical_join_tree_scan_invocations plan all_sources 1))
-				(define legacy_cost (planner_cost_add logical_legacy_cost
-					(planner_cost
-						(* (max 0 (- (coalesceNil legacy_scan_invocations 1) 1))
-							planner_membership_scan_invocation_ns)
-						0 0 0 0 0 0 0 joined_rows 0.6)
-					joined_rows 0.6))
-				(define normal_choice (if (planner_cost_better? scan_cost legacy_cost)
-					"scan_join_order" "legacy_join_tree"))
+				/* The compatible tree is a nested pipeline. Cost its bound lookups,
+				not the DP memo's full-input work: a complete unique key visits at
+				most one row per binding. Keep the chosen tree and all predicates;
+				this is physical costing, not another join-order decision. */
+				(define predicates (map (scan_join_order_terms all_sources plan final_condition)
+					(lambda (term)
+						(make_join_hypergraph_predicate
+							(join_hypergraph_expr_aliases default_alias (source_aliases all_sources) term)
+							(quote where) nil term))))
+				(define nested_scan_cost (join_optimizer_nested_scan_cost stages all_sources default_alias
+					predicates (list (list (quote tree) plan)
+						(list (quote cost_components) logical_nested_cost))
+					(planner_context_session facts)))
+				/* Each nested scan combines its produced rows into the parent
+				accumulator. Price that work at every level, not just the final
+				aggregate cardinality, using Costgen's scalar-operation unit. */
+				(define nested_reduce_rows (qassoc_get nested_scan_cost (quote nested_reduce_rows) 0))
+				(define nested_cost (planner_cost_add nested_scan_cost
+					(planner_cost 0 (* nested_reduce_rows planner_membership_expression_operation_row_ns)
+						0 0 0 0 0 0 joined_rows 0.75) joined_rows 0.75))
+				(define normal_choice (if (planner_cost_better? scan_cost nested_cost)
+					"scan_join_order" "nested_scan_tree"))
 				(define decision_id (concat "scan_join_order:reduce:"
 					(stable_structural_hash (join_optimizer_tree_aliases plan) true)))
-				(define alternatives (list "legacy_join_tree" "scan_join_order"))
+				(define alternatives (list "nested_scan_tree" "scan_join_order"))
 				(define physical_planning_session
 					(qassoc_get facts (quote physical_planning_session) nil))
 				(define chosen (planner_physical_choice decision_id normal_choice alternatives
@@ -8548,20 +8562,24 @@ ordered operator's Costgen-owned scan, map and expression coefficients. */
 						(list "join_output_rows" (qassoc_get spec (quote output_rows) 0))
 						(list "join_map_width" (qassoc_get spec (quote map_width) 0))
 						(list "join_table_count" (qassoc_get spec (quote table_count) 0))
-						(list "join_legacy_probe_rows"
-							(coalesceNil legacy_scan_invocations joined_rows))
+						(list "join_nested_probe_rows"
+							(coalesceNil nested_scan_invocations joined_rows))
+						(list "join_nested_work" (append
+							(qassoc_get nested_scan_cost (quote nested_scan_work) '()) nested_reduce_rows))
+						(list "join_nested_fixed_ns" (+ (qassoc_get nested_cost (quote build_ns) 0)
+							(qassoc_get nested_cost (quote compile_ns) 0)))
 						(list "limit" -1)
 						(list "offset" 0)))
 					(list "alternatives" (list
-						(list (list "plan" "legacy_join_tree")
-							(list "cost" (planner_cost_explain legacy_cost)))
+						(list (list "plan" "nested_scan_tree")
+							(list "cost" (planner_cost_explain nested_cost)))
 						(list (list "plan" "scan_join_order")
 							(list "cost" (planner_cost_explain scan_cost))))))
 					physical_planning_session)
 				(if (equal? chosen "scan_join_order")
 					(scan_join_order_emit_plan spec default_alias value_builder
 						reduce_expr neutral_expr shard_reduce_expr stages false)
-					legacy_plan))))))
+					nested_plan))))))
 
 /* A partition-local window is semantic, not a cost alternative: replacing it
 with the legacy global LIMIT path changes the result. Its logical query-block
@@ -11506,7 +11524,7 @@ physical decision and preserve its runtime recompile gate. */
 						(define row_expr (cons row_mapper (map effective_field_exprs (lambda (expr)
 							(lower_column_expr_for_join_in_context
 								scan_sources first_alias expr projection_probe_work_rows)))))
-						(define legacy_reduce_plan (build_join_scan_reduce_using_recipe
+						(define nested_reduce_plan (build_join_scan_reduce_using_recipe
 							(qb_schema block)
 							scan_sources
 							scan_plan
@@ -11530,7 +11548,7 @@ physical decision and preserve its runtime recompile gate. */
 								(query_block_stage_catalog block) (qb_facts block)
 								(lambda (_probe_work_rows _scalar_probe) row_expr)
 								reduce_expr neutral_expr
-								(if (> partition_columns 0) nil (lambda () legacy_reduce_plan)))
+								(if (> partition_columns 0) nil (lambda () nested_reduce_plan)))
 							(begin
 								(if (and (empty_list? order_items)
 									(and (equal? (coalesceNil (qb_offset block) 0) 0)
@@ -11539,8 +11557,8 @@ physical decision and preserve its runtime recompile gate. */
 										scan_sources scan_plan first_alias effective_field_exprs
 										effective_condition (query_block_stage_catalog block) (qb_facts block)
 										(lambda (_probe_work_rows _scalar_probe) row_expr)
-										reduce_expr neutral_expr shard_reduce_expr legacy_reduce_plan)
-									legacy_reduce_plan))))
+										reduce_expr neutral_expr shard_reduce_expr nested_reduce_plan)
+									nested_reduce_plan))))
 					(if (qassoc_get (qb_facts block) (quote joined_limit_semantic) false)
 						(join_partitioned_order_reduce_plan
 							scan_sources scan_plan first_alias field_exprs final_condition
@@ -13735,13 +13753,13 @@ compile repeats Scheme closure optimization even when no domain was changed. */
 									chosen
 									(physical_membership_operator_family plan)))
 							(if (equal? kind "scan_join_order")
-								(if (equal? (qassoc_get decision "chosen" nil) "legacy_join_tree")
-									"legacy_join_tree"
+								(if (equal? (qassoc_get decision "chosen" nil) "nested_scan_tree")
+									"nested_scan_tree"
 									(if (physical_expr_has_head? plan (quote scan_join_order))
 										(if (equal? (qassoc_get decision "chosen" nil)
 											"scan_join_order_batched_probe")
 											"scan_join_order_batched_probe" "scan_join_order")
-										"legacy_join_tree"))
+										"nested_scan_tree"))
 								(if (equal? kind "direct_group_join")
 									(if (physical_expr_has_group_relation? plan)
 										"group_carrier" "direct_group_join")
@@ -13932,6 +13950,7 @@ protocol callback receives only the calibration row. */
 						(list (quote list)
 							"decision_id" decision_id
 							"decision" (qassoc_get decision "decision" "unknown")
+							"decision_site" (qassoc_get decision "decision_site" "unknown")
 							"consumer" (qassoc_get decision "consumer" "unknown")
 							"plan" variant
 							"operator_family" operator_family
@@ -13982,7 +14001,9 @@ protocol callback receives only the calibration row. */
 							"join_output_rows" (physical_calibration_input decision "join_output_rows")
 							"join_map_width" (physical_calibration_input decision "join_map_width")
 							"join_table_count" (physical_calibration_input decision "join_table_count")
-							"join_legacy_probe_rows" (physical_calibration_input decision "join_legacy_probe_rows")
+							"join_nested_probe_rows" (physical_calibration_input decision "join_nested_probe_rows")
+							"join_nested_work" (cons (quote list) (coalesceNil (physical_calibration_input decision "join_nested_work") '()))
+							"join_nested_fixed_ns" (physical_calibration_input decision "join_nested_fixed_ns")
 							"probe_invocations" (physical_calibration_input decision "probe_invocations")
 							"input_rows" (physical_calibration_input decision "input_rows")
 							"group_rows" (physical_calibration_input decision "group_rows")

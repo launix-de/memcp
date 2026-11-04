@@ -1012,6 +1012,14 @@ func TestClusterInsertSelectsUniqueDomainOwnerWithoutClaiming(t *testing.T) {
 	if tbl.insertPeer(columns, rows) != peer {
 		t.Fatal("global UNIQUE ignored the common input owner")
 	}
+	// Unpartitioned UNIQUE checks have the same shared input domain. Forward
+	// to its owner instead of manufacturing another lane and claiming schema M.
+	tbl.ShardMode = ShardModeFree
+	tbl.Shards = []*storageShard{left, right}
+	tbl.publishTopologyLocked()
+	if tbl.insertPeer(columns, rows) != peer {
+		t.Fatal("free-shard UNIQUE ignored the common input owner")
+	}
 	select {
 	case <-peer.outgoing:
 		t.Fatal("placement queried or claimed known MOSI state")
@@ -1068,8 +1076,8 @@ func TestClusterUniquePreflightUsesMutationAdmissionAndKeepsNodeLimit(t *testing
 	defer nodeScans.Store(service)
 	cluster.manager.resourceCell(mosiResource{Database: tbl.schema.Name}).ownstate.Initialize(mosi.M)
 	cluster.declareShard(shard, true)
-	previous := GlobalCache.shardCapacity.Swap(&shardRAMSnapshot{Allowed: true})
-	defer GlobalCache.shardCapacity.Store(previous)
+	budget := GlobalCache.Stat()
+	defer GlobalCache.UpdateBudget(budget.MemoryBudget, budget.PersistedBudget, budget.MinimumMemory)
 	tbl.shardRAMFull.Store(true)
 	shard.setState(COLD)
 	var readFailure any
@@ -1094,7 +1102,10 @@ func TestClusterUniquePreflightUsesMutationAdmissionAndKeepsNodeLimit(t *testing
 		t.Fatal("fitting mutation preflight was refused at the read reserve")
 	}
 	shard.setState(COLD)
-	GlobalCache.shardCapacity.Store(&shardRAMSnapshot{Allowed: false})
+	// Change admission through its owner. A direct snapshot override can be
+	// replaced by any cache-actor publication, including a pending size update.
+	GlobalCache.UpdateBudget(0, budget.PersistedBudget, budget.MinimumMemory)
+	GlobalCache.Stat()
 	var writeFailure any
 	func() {
 		defer func() { writeFailure = recover() }()

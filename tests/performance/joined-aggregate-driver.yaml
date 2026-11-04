@@ -8,7 +8,22 @@ metadata:
   isolated: true
   performance_rows: 8192
   max_regression_pct: 20
+  physical_calibration: true
+  cache_state: warm_operator_state
+  compile_state: cached_plan_execution_only
 setup:
+  - sql: DROP TABLE IF EXISTS ja_probe_fact
+  - sql: DROP TABLE IF EXISTS ja_probe_keys
+  - sql: CREATE TABLE ja_probe_fact (id INT PRIMARY KEY, bucket INT, value INT) ENGINE=memory
+  - sql: CREATE TABLE ja_probe_keys (id INT, bucket INT) ENGINE=memory
+  - sql: INSERT INTO ja_probe_keys VALUES (42000,0),(90000,0),(175000,0),(245000,0)
+  # Six production-size shards; do not change ShardSize for this fixture.
+  - scm: |-
+      (begin
+        (insert (table "memcp-tests" false "ja_probe_fact" false) '("id" "bucket" "value")
+          (map (produceN 360000) (lambda (i) (list i (mod i 4) (+ i 1)))))
+        (rebuild true false)
+        true)
   - sql: DROP TABLE IF EXISTS ja_lineitem
   - sql: DROP TABLE IF EXISTS ja_partsupp
   - sql: DROP TABLE IF EXISTS ja_orders
@@ -46,6 +61,48 @@ setup:
         (rebuild true false)
         true)
 test_cases:
+  # Sparse probes need 101 requests; the slower dense controls use 11.
+  # A/B gates the complete workload, so index startup cannot be hidden by warmup.
+  - name: 'Perf: sparse three-table keyed reduction'
+    physical_calibration: true
+    calibration_decision: scan_join_order
+    performance_rows: 360000
+    threshold_ms: 10000
+    warmup: 0
+    timing_samples: 101
+    timing_aggregation: total
+    sql: |-
+      SELECT SUM(b.value) AS total FROM ja_probe_keys k
+      JOIN ja_probe_fact b ON b.id=k.id
+      JOIN ja_probe_keys k2 ON k2.id=b.id
+    expect: {rows: 1, data: [{total: 552004}]}
+  - name: 'Perf: dense three-table unique reduction'
+    physical_calibration: true
+    calibration_decision: scan_join_order
+    race: true
+    performance_rows: 360000
+    threshold_ms: 19600
+    warmup: 0
+    timing_samples: 11
+    timing_aggregation: total
+    sql: |-
+      SELECT SUM(b.value) AS total FROM ja_probe_fact a
+      JOIN ja_probe_fact b ON b.id=a.id
+      JOIN ja_probe_fact c ON c.id=b.id
+    expect: {rows: 1, data: [{total: 64800180000}]}
+  - name: 'Perf: dense three-table nonunique reduction'
+    physical_calibration: true
+    calibration_decision: scan_join_order
+    performance_rows: 360000
+    threshold_ms: 6500
+    warmup: 0
+    timing_samples: 11
+    timing_aggregation: total
+    sql: |-
+      SELECT SUM(b.value) AS total FROM ja_probe_keys k
+      JOIN ja_probe_fact b ON b.bucket=k.bucket
+      JOIN ja_probe_keys k2 ON k2.id=k.id
+    expect: {rows: 1, data: [{total: 64799640000}]}
   - name: 'Perf: selective six-table profit grouping'
     threshold_ms: 60000
     timeout: 60
@@ -199,7 +256,47 @@ test_cases:
       ORDER BY n.n_name, o.o_year DESC
     expect:
       rows: 0
+  - name: Sparse reduction alternatives preserve the same result
+    sql: |-
+      EXPLAIN PHYSICAL CALIBRATE SELECT SUM(b.value) AS total FROM ja_probe_keys k
+      JOIN ja_probe_fact b ON b.id=k.id
+      JOIN ja_probe_keys k2 ON k2.id=b.id
+    expect:
+      rows: 2
+      data:
+        - {plan: nested_scan_tree, decision_site: unordered_join_reduce, result_equal: true}
+        - {plan: scan_join_order, decision_site: unordered_join_reduce, result_equal: true}
+  - name: Complete composite-key bindings preserve joined aggregate values
+    sql: |-
+      SELECT SUM(ps.ps_cost) AS total FROM ja_part p
+      JOIN ja_partsupp ps ON ps.ps_part=p.p_id
+      JOIN ja_supplier s ON s.s_id=ps.ps_supplier
+      WHERE p.p_id IN (1,2) AND s.s_id IN (1,8)
+    expect: {rows: 1, data: [{total: 6}]}
+  - name: Repeated bindings retain multiplicity and ignore NULL and missing keys
+    setup:
+      - sql: DELETE FROM ja_probe_keys
+      - sql: INSERT INTO ja_probe_keys VALUES (42000,0),(42000,0),(175000,0),(999999,0),(NULL,0)
+    sql: |-
+      SELECT SUM(b.value) AS total FROM ja_probe_keys k
+      JOIN ja_probe_fact b ON b.id=k.id
+      JOIN ja_probe_keys k2 ON k2.id=b.id
+    expect: {rows: 1, data: [{total: 343005}]}
+  - name: Selective access retains residual filters and empty SUM semantics
+    sql: |-
+      SELECT SUM(b.value) AS total FROM ja_probe_keys k
+      JOIN ja_probe_fact b ON b.id=k.id
+      JOIN ja_probe_keys k2 ON k2.id=b.id WHERE b.value<0
+    expect: {rows: 1, data: [{total: null}]}
+  - name: Selective join still rejects an unknown mapped column
+    sql: |-
+      SELECT SUM(b.missing_value) FROM ja_probe_keys k
+      JOIN ja_probe_fact b ON b.id=k.id
+      JOIN ja_probe_keys k2 ON k2.id=b.id
+    expect: {error: true}
 cleanup:
+  - sql: DROP TABLE IF EXISTS ja_probe_fact
+  - sql: DROP TABLE IF EXISTS ja_probe_keys
   - sql: DROP TABLE IF EXISTS ja_lineitem
   - sql: DROP TABLE IF EXISTS ja_partsupp
   - sql: DROP TABLE IF EXISTS ja_orders

@@ -145,7 +145,7 @@ test_cases:
     sql: "EXPLAIN PHYSICAL SELECT p.id FROM so_perf_plots p JOIN so_perf_plot_links l ON p.id = l.plot_id WHERE l.table_2_id = 'target' ORDER BY p.created_at DESC LIMIT 1"
     expect:
       rows: 1
-      result_contains: ["chosen scan_join_order", "legacy_join_tree", "lowest_total_ns"]
+      result_contains: ["chosen scan_join_order", "nested_scan_tree", "lowest_total_ns"]
 
   - name: "SO 50367835 handwritten scan_join_order"
     scm: |
@@ -175,7 +175,7 @@ test_cases:
     sql: "EXPLAIN PHYSICAL SELECT f.id FROM so_perf_foos f JOIN so_perf_bars b ON f.bar_id = b.id WHERE b.baz_id = 13266 ORDER BY f.id DESC LIMIT 5"
     expect:
       rows: 1
-      result_contains: ["scan_join_order", "legacy_join_tree", "lowest_total_ns"]
+      result_contains: ["scan_join_order", "nested_scan_tree", "lowest_total_ns"]
 
   - name: "SO 6037843 handwritten scan_join_order"
     scm: |

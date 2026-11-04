@@ -142,7 +142,7 @@ func TestProcedureWirePreservesFloatingCaptures(t *testing.T) {
 	}
 }
 
-func TestProcedureWireRejectsRuntimeCapturesAndUnclosedNestedBindings(t *testing.T) {
+func TestProcedureWireRejectsRuntimeCapturesAndSnapshotsNestedBindings(t *testing.T) {
 	for name, captured := range map[string]Scmer{
 		"native closure": NewFunc(func(args ...Scmer) Scmer { return args[0] }),
 		"session":        NewSession(),
@@ -156,12 +156,20 @@ func TestProcedureWireRejectsRuntimeCapturesAndUnclosedNestedBindings(t *testing
 			}
 		})
 	}
-	// CloseProcedure intentionally leaves nested lambda scopes intact. A
-	// source-only wire encoding must reject a remaining external binding.
+	// Nested named captures now snapshot the source just like numbered ones.
 	env := &Env{Vars: Vars{Symbol("wire_nested_capture"): NewInt(7)}, Outer: &Globalenv}
 	value := Eval(Read(t.Name(), `(lambda (row) (lambda () (+ row wire_nested_capture)))`), env)
-	if _, err := MarshalProcedure(value); err == nil || !strings.Contains(err.Error(), "unclosed lexical capture") {
-		t.Fatalf("unclosed nested capture: %v", err)
+	data, err := MarshalProcedure(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env.Vars[Symbol("wire_nested_capture")] = NewInt(900)
+	restored, err := UnmarshalProcedure(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := Apply(Apply(restored, NewInt(3))); got.Int() != 10 {
+		t.Fatalf("nested capture changed: %s", String(got))
 	}
 }
 
@@ -628,5 +636,127 @@ func TestProcedureWireMatchBranchBindings(t *testing.T) {
 		if _, err := MarshalProcedure(Eval(Read(t.Name(), source), &Globalenv)); err == nil {
 			t.Fatalf("accepted unbound lexical read: %s", source)
 		}
+	}
+}
+
+func TestProcedureWireClosesCaptureUsedByNestedLambda(t *testing.T) {
+	source := `(lambda (key) (lambda (acc row)
+		((lambda (a b) (list a b)) acc
+			((lambda (nested) (+ key row nested)) 3))))`
+	factory := Eval(Optimize(Read(t.Name(), source), &Globalenv, nil), &Globalenv)
+	callback := Apply(factory, NewInt(7))
+	want := NewSlice([]Scmer{NewNil(), NewInt(12)})
+	if got := Apply(callback, NewNil(), NewInt(2)); !Equal(got, want) {
+		t.Fatalf("source: %s", String(got))
+	}
+	data, err := MarshalProcedure(callback)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored, err := UnmarshalProcedure(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := Apply(restored, NewNil(), NewInt(2)); !Equal(got, want) {
+		t.Fatalf("restored: %s, wire=%s", String(got), data)
+	}
+}
+
+func TestProcedureWireKeepsInvocationScopesWhileClosingNestedCaptures(t *testing.T) {
+	for _, test := range []struct {
+		name, source string
+		want         int64
+	}{
+		{"begin", `(lambda (external) (lambda (row) (begin (set local 2) (lambda (other) (+ external row local other)))))`, 14},
+		{"match", `(lambda (external) (lambda (row) (match (list row) (cons item _) (lambda (other) (+ external item other)) nil)))`, 12},
+		{"pattern-eval", `(lambda (external) (lambda (row) (lambda (other) (match external (eval external) (+ external row other) _ 0))))`, 12},
+		{"shadow", `(lambda (external) (lambda (row) (lambda (external) (+ row external))))`, 5},
+	} {
+		for _, optimized := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/optimized=%v", test.name, optimized), func(t *testing.T) {
+				expression := Read(t.Name(), test.source)
+				if optimized {
+					expression = Optimize(expression, &Globalenv, nil)
+				}
+				callback := Apply(Eval(expression, &Globalenv), NewInt(7))
+				if got := Apply(Apply(callback, NewInt(3)), NewInt(2)); got.Int() != test.want {
+					t.Fatalf("source: %s", String(got))
+				}
+				data, err := MarshalProcedure(callback)
+				if err != nil {
+					t.Fatal(err)
+				}
+				restored, err := UnmarshalProcedure(data)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, row := range []int64{3, 9} {
+					if got := Apply(Apply(restored, NewInt(row)), NewInt(2)); got.Int() != test.want+row-3 {
+						t.Fatalf("row %d: got %s, wire=%s", row, String(got), data)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestClosedProcedurePreservesNestedLambdaBindingProofs(t *testing.T) {
+	source := `(lambda (external) (lambda (row)
+		(list ((lambda (value) (+ value row)) external)
+			(lambda (other) (+ other external)))))`
+	factory := Eval(Optimize(Read(t.Name(), source), &Globalenv, nil), &Globalenv)
+	closed := CloseProcedure(Apply(factory, NewInt(7)))
+	checked := 0
+	var visit func(Scmer)
+	visit = func(value Scmer) {
+		value = value.WithoutSourceInfo()
+		if !value.IsSlice() {
+			return
+		}
+		items := value.Slice()
+		if len(items) == 0 || items[0].SymbolEquals("quote") {
+			return
+		}
+		if items[0].SymbolEquals("lambda") && len(items) >= 4 && ToInt(items[3]) > 0 {
+			if len(items) != 5 {
+				t.Fatalf("closed lambda lost prepared binding proof: %s", String(value))
+			}
+			proof, ok := items[4].Any().(lambdaBindingProof)
+			if !ok || proof.body != items[2] || proof.params != items[1].WithoutSourceInfo() {
+				t.Fatal("closed lambda retained a stale binding proof")
+			}
+			checked++
+		}
+		for _, item := range items {
+			visit(item)
+		}
+	}
+	visit(closed.Proc().Body)
+	if checked < 2 {
+		t.Fatalf("checked %d nested lambda proofs, want both unchanged and closed captures", checked)
+	}
+	result := Apply(closed, NewInt(3)).Slice()
+	if result[0].Int() != 10 || Apply(result[1], NewInt(2)).Int() != 9 {
+		t.Fatal("closed lambda values changed")
+	}
+}
+
+func TestClosedProcedureKeepsUnchangedMatchBody(t *testing.T) {
+	for _, optimized := range []bool{false, true} {
+		t.Run(fmt.Sprintf("optimized=%v", optimized), func(t *testing.T) {
+			env := &Env{Vars: make(Vars), Outer: &Globalenv}
+			expression := Read(t.Name(), `(lambda (row) (match row (cons head tail) head _ 0))`)
+			if optimized {
+				expression = Optimize(expression, env, nil)
+			}
+			original := Eval(expression, env)
+			closed := CloseProcedure(original)
+			if closed.Proc().Body != original.Proc().Body {
+				t.Fatal("closing an unchanged match discarded AST identity and binding proofs")
+			}
+			if got := Apply(closed, NewSlice([]Scmer{NewInt(7)})); got.Int() != 7 {
+				t.Fatalf("closed match returned %s", String(got))
+			}
+		})
 	}
 }

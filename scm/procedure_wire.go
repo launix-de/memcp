@@ -203,20 +203,33 @@ func procedurePatternBindings(pattern Scmer, bound map[Symbol]struct{}) {
 	}
 }
 
-func closeProcedurePattern(pattern Scmer, callFrame *Env, bound map[Symbol]struct{}) Scmer {
+func closeProcedurePattern(pattern Scmer, callFrame *Env, scopes []map[Symbol]struct{}) Scmer {
 	value := pattern.WithoutSourceInfo()
 	if !value.IsSlice() {
 		return pattern
 	}
-	items := append([]Scmer(nil), value.Slice()...)
+	items := value.Slice()
+	var closed []Scmer
+	replace := func(index int, value Scmer) {
+		if value == items[index] {
+			return
+		}
+		if closed == nil {
+			closed = append([]Scmer(nil), items...)
+		}
+		closed[index] = value
+	}
 	if len(items) == 2 && scmerIsSymbol(items[0], "eval") {
-		items[1] = closeProcedureCaptures(items[1], callFrame, bound)
+		replace(1, closeProcedureScopeCaptures(items[1], callFrame, scopes))
 	} else {
 		for i, item := range items {
-			items[i] = closeProcedurePattern(item, callFrame, bound)
+			replace(i, closeProcedurePattern(item, callFrame, scopes))
 		}
 	}
-	return NewSlice(items)
+	if closed == nil {
+		return pattern
+	}
+	return NewSlice(closed)
 }
 
 func validateProcedurePattern(pattern Scmer, bound map[Symbol]struct{}, origin *Env, depth int, bindings ...*SerializationContext) error {
