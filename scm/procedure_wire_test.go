@@ -669,6 +669,7 @@ func TestProcedureWireKeepsInvocationScopesWhileClosingNestedCaptures(t *testing
 	}{
 		{"begin", `(lambda (external) (lambda (row) (begin (set local 2) (lambda (other) (+ external row local other)))))`, 14},
 		{"match", `(lambda (external) (lambda (row) (match (list row) (cons item _) (lambda (other) (+ external item other)) nil)))`, 12},
+		{"pattern-eval", `(lambda (external) (lambda (row) (lambda (other) (match external (eval external) (+ external row other) _ 0))))`, 12},
 		{"shadow", `(lambda (external) (lambda (row) (lambda (external) (+ row external))))`, 5},
 	} {
 		for _, optimized := range []bool{false, true} {
