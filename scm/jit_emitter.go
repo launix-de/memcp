@@ -300,7 +300,9 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 		case tagSymbol:
 			// Variadic Scheme calls pass one materialized list binding. This
 			// symbol also needs a slot when the body has not been renumbered.
-			putVar(proc.Params.Symbol(), 0)
+			if !proc.NumberedOnly {
+				putVar(proc.Params.Symbol(), 0)
+			}
 		}
 		if len(vars) > 0 || len(numbered) > 0 || captured != nil {
 			ctx.Env = &JITEnv{Vars: vars, Numbered: numbered, Outer: captured}
