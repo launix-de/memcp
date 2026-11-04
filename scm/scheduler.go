@@ -452,7 +452,7 @@ func init_scheduler() {
 						ctx.BindReg(d8.Reg, &d9)
 					} else {
 						boxed := JITPrepareScmerGoArg(ctx, d8)
-						d9 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{boxed}, 1)
+						d9 = ctx.EmitGoCallScalar(jitGoABI_ce1386387f73f96f, []JITValueDesc{boxed}, 1)
 						d9.Type = tagInt
 						ctx.BindReg(d9.Reg, &d9)
 					}
@@ -482,7 +482,7 @@ func init_scheduler() {
 					}
 					ctx.SyncDesc(&d12)
 					ctx.SyncDesc(&d11)
-					d13 = ctx.EmitGoCallScalar(GoFuncAddr((*Scheduler).Clear), []JITValueDesc{d12, d11}, 1)
+					d13 = ctx.EmitGoCallScalar(jitGoABI_15dd9bcd4c11ec25, []JITValueDesc{d12, d11}, 1)
 					d13.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d13.Reg, 1)
 					d13.Type = tagBool
@@ -559,4 +559,13 @@ func clearTimeout(a ...Scmer) Scmer {
 	}
 	id := uint64(ToInt(a[0]))
 	return NewBool(DefaultScheduler.Clear(id))
+}
+
+// BEGIN jitgen prepared Go ABI entries
+var jitGoABI_15dd9bcd4c11ec25 uint64
+var jitGoABI_ce1386387f73f96f uint64
+
+func init() {
+	jitGoABI_15dd9bcd4c11ec25 = GoFuncAddr((*Scheduler).Clear)
+	jitGoABI_ce1386387f73f96f = GoFuncAddr(Scmer.Int)
 }

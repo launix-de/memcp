@@ -1302,7 +1302,7 @@ func TestJITParserBindingDoesNotRootReusedResultBeforeReturn(t *testing.T) {
 	}
 	ctx.setStackPointer(jitStackRootFrameBP, emitter.generatorValueOff, true)
 	beforeDiscarded := ctx.SnapshotAllocState()
-	discarded := JITEmitGoCallResults(ctx, GoFuncAddr(jitTestDiscardedStringResult), nil, []uint8{2}, []uint8{1})[0]
+	discarded := JITEmitGoCallResults(ctx, GoFuncAddr(jitTestDiscardedStringResult), nil)[0]
 	ctx.RestoreAllocState(beforeDiscarded)
 	// An intervening collection call no longer roots the discarded value.
 	ctx.EmitGoCallToFrame(GoFuncAddr(runtime.GC), nil, nil)
@@ -1468,5 +1468,48 @@ func TestJITIfUsesReservedResultRegisters(t *testing.T) {
 		if got := Apply(compiled, NewBool(flag)); !Equal(got, NewInt(want)) {
 			t.Fatalf("flag %t: got %s, want %d", flag, String(got), want)
 		}
+	}
+}
+
+func TestJITPanicThroughTryPreservesPanicValue(t *testing.T) {
+	value := EvalAllJIT(t.Name(), `(begin
+ (define jit_will_panic (jit (lambda (x) (error "jit-boom"))))
+ (try (lambda () (jit_will_panic 42)) (lambda (e) e)))`, &Globalenv)
+	if !value.IsString() || value.String() != "jit-boom" {
+		t.Fatalf("panic value = %s, want jit-boom", String(value))
+	}
+}
+
+// The runtime helper's scratch register may also be a client-owned input base.
+// A barrier check must preserve that role even when its fast path calls no Go.
+func TestJITBarrierCheckPreservesBorrowedInputs(t *testing.T) {
+	values := make([]Scmer, 1)
+	declaration := &Declaration{Name: "jit_barrier_input_probe", Fn: func(a ...Scmer) Scmer { return a[1] }, Type: &TypeDescriptor{Kind: "func", JITVirtualArgs: true, Params: []*TypeDescriptor{{Kind: "any"}, {Kind: "any"}}, Return: &TypeDescriptor{Kind: "any"}, JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+		ctx.TrackPointer(unsafe.Pointer(&values[0]))
+		reg := ctx.AllocReg()
+		ctx.EmitMovRegImm64(reg, uint64(uintptr(unsafe.Pointer(&values[0]))))
+		slice := JITValueDesc{Loc: LocReg, Type: tagSlice, Reg: reg, GoArray: true, RelocatablePointer: true}
+		ctx.BindReg(reg, &slice)
+		index := JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
+		value := JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(42), NoHeapPointer: true}
+		if !ctx.TryEmitStoreScmerSliceElement(&slice, &index, &value, 16) {
+			panic("numeric store did not specialize")
+		}
+		ctx.FreeDesc(&slice)
+		return jitPlaceIntoPair(ctx, &args[1], result)
+	}}}
+	Declare(&Globalenv, declaration)
+	defer func() {
+		delete(Globalenv.Vars, Symbol(declaration.Name))
+		delete(declarations, declaration.Name)
+		delete(declarationsByFunction, FunctionIdentity(declaration.Fn))
+	}()
+	compiled := compileJITExpressionTestProc(t, `(lambda (first second) (jit_barrier_input_probe first second))`)
+	want := NewString("second input survives barrier scratch")
+	if got := Apply(compiled, NewInt(11), want); !Equal(got, want) {
+		t.Fatalf("second input = %s, want %s", String(got), String(want))
+	}
+	if !Equal(values[0], NewInt(42)) {
+		t.Fatalf("numeric store = %s", String(values[0]))
 	}
 }

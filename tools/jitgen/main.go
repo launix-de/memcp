@@ -27,6 +27,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"fmt"
 	"go/ast"
 	"go/constant"
@@ -177,6 +178,24 @@ func main() {
 			} else {
 				ssaFuncs[fn.Pos()] = fn
 			}
+		}
+	}
+
+	// Index declared functions and methods independently of call-graph reachability.
+	// Hoisting prepared Go entries must not determine which storage bodies can be
+	// regenerated after the old emitter bodies have been removed by the overlay.
+	for _, object := range pkg.TypesInfo.Defs {
+		function, ok := object.(*types.Func)
+		if !ok {
+			continue
+		}
+		fn := prog.FuncValue(function)
+		if fn == nil || fn.Synthetic != "" {
+			continue
+		}
+		ssaFuncs[fn.Pos()] = fn
+		if fn.Signature.Recv() == nil {
+			ssaFuncsByName[fn.Name()] = fn
 		}
 	}
 
@@ -1878,41 +1897,24 @@ func goCallSignatureNeedsArrayBoundary(signature *types.Signature) bool {
 	return false
 }
 
-func goCallPointerMask(t types.Type) uint8 {
+// This is a language-type property used for specialization, not a GC bitmap.
+// Actual result pointer locations come from runtime/jit at compilation time.
+func goCallContainsPointers(t types.Type) bool {
 	switch u := t.Underlying().(type) {
 	case *types.Basic:
-		if u.Kind() == types.String {
-			return 1
-		}
-		return 0
-	case *types.Pointer, *types.Signature, *types.Map, *types.Chan:
-		return 1
-	case *types.Interface:
-		return 3
-	case *types.Slice:
-		return 1
+		return u.Kind() == types.String || u.Kind() == types.UnsafePointer
+	case *types.Pointer, *types.Signature, *types.Map, *types.Chan, *types.Interface, *types.Slice:
+		return true
 	case *types.Struct:
-		sizes := targetSizes
-		offsets := sizes.Offsetsof(fieldVarsOf(u))
-		var mask uint8
 		for i := 0; i < u.NumFields(); i++ {
-			mask |= goCallPointerMask(u.Field(i).Type()) << (offsets[i] / 8)
+			if goCallContainsPointers(u.Field(i).Type()) {
+				return true
+			}
 		}
-		return mask
 	case *types.Array:
-		elemWords := goCallWordCount(u.Elem())
-		if elemWords < 1 {
-			return 0
-		}
-		elemMask := goCallPointerMask(u.Elem())
-		var mask uint8
-		for i := int64(0); i < u.Len(); i++ {
-			mask |= elemMask << uint(int(i)*elemWords)
-		}
-		return mask
-	default:
-		return 0
+		return u.Len() != 0 && goCallContainsPointers(u.Elem())
 	}
+	return false
 }
 
 func (g *codeGen) staticFuncExpr(callee *ssa.Function) (string, bool) {
@@ -2072,8 +2074,7 @@ func (g *codeGen) emitGenericStaticCall(name string, callee *ssa.Function, args 
 	if results.Len() == 1 && name == "" {
 		return false
 	}
-	resultWords := make([]int, results.Len())
-	resultPointerMasks := make([]uint8, results.Len())
+	resultHasPointers := make([]bool, results.Len())
 	for i := 0; i < results.Len(); i++ {
 		words := goCallWordCount(results.At(i).Type())
 		if results.Len() == 1 && words == 0 {
@@ -2086,11 +2087,10 @@ func (g *codeGen) emitGenericStaticCall(name string, callee *ssa.Function, args 
 		if words < 1 || words > 3 || retWords+words > 16 {
 			return false
 		}
-		resultWords[i] = words
 		if indirectResult {
-			resultPointerMasks[i] = 1
+			resultHasPointers[i] = true
 		} else {
-			resultPointerMasks[i] = goCallPointerMask(results.At(i).Type())
+			resultHasPointers[i] = goCallContainsPointers(results.At(i).Type())
 		}
 		retWords += words
 	}
@@ -2263,13 +2263,8 @@ func (g *codeGen) emitGenericStaticCall(name string, callee *ssa.Function, args 
 	}
 	if results.Len() > 1 {
 		dv := g.allocTemp("callResults")
-		wordLiterals := make([]string, len(resultWords))
-		maskLiterals := make([]string, len(resultPointerMasks))
-		for i := range resultWords {
-			wordLiterals[i] = strconv.Itoa(resultWords[i])
-			maskLiterals[i] = strconv.Itoa(int(resultPointerMasks[i]))
-		}
-		g.emit("%s := JITEmitGoCallResults(ctx, GoFuncAddr(%s), []JITValueDesc{%s}, []uint8{%s}, []uint8{%s})", dv, funcExpr, argList, strings.Join(wordLiterals, ", "), strings.Join(maskLiterals, ", "))
+
+		g.emit("%s := JITEmitGoCallResults(ctx, GoFuncAddr(%s), []JITValueDesc{%s})", dv, funcExpr, argList)
 		for i, isConstant := range constantArgs {
 			if isConstant {
 				g.emit("ctx.FreeDesc(&%s)", resolved[i].goVar)
@@ -2309,7 +2304,7 @@ func (g *codeGen) emitGenericStaticCall(name string, callee *ssa.Function, args 
 	} else {
 		g.emit("%s := ctx.EmitGoCallScalar(GoFuncAddr(%s), []JITValueDesc{%s}, %d)", dv, funcExpr, argList, retWords)
 	}
-	g.emit("%s.NoHeapPointer = %t", dv, resultPointerMasks[0] == 0)
+	g.emit("%s.NoHeapPointer = %t", dv, !resultHasPointers[0])
 	if basic, ok := retType.Underlying().(*types.Basic); ok && basic.Kind() == types.Bool {
 		// Go's internal ABI only defines the low byte of a bool result. Clear
 		// unspecified upper bits before generated CFG conditions consume it as
@@ -6050,7 +6045,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				results := g.allocTemp("lookupResults")
 				valueDesc := g.allocDesc()
 				okDesc := g.allocDesc()
-				g.emit("%s := JITEmitGoCallResults(ctx, GoFuncAddr(func(m %s, k %s) (%s, bool) { value, ok := m[k]; return value, ok }), []JITValueDesc{%s, %s}, []uint8{%d, 1}, []uint8{%d, 0})", results, mapExpr, keyExpr, valueExpr, container.goVar, keyValue.goVar, valueWords, goCallPointerMask(mapType.Elem()))
+				g.emit("%s := JITEmitGoCallResults(ctx, GoFuncAddr(func(m %s, k %s) (%s, bool) { value, ok := m[k]; return value, ok }), []JITValueDesc{%s, %s})", results, mapExpr, keyExpr, valueExpr, container.goVar, keyValue.goVar)
 				g.emit("%s := %s[0]", valueDesc, results)
 				g.emit("_ = %s", valueDesc)
 				g.emit("%s := %s[1]", okDesc, results)
@@ -7099,7 +7094,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 					callResults := g.allocTemp("callResults")
 					dv := g.allocDesc()
 					typeExpr := g.sourceTypeExpr(v.Call.Args[0].Type())
-					g.emit("%s := JITEmitGoCallResults(ctx, GoFuncAddr(func(dst, src %s) %s { return append(dst, src...) }), []JITValueDesc{%s, %s}, []uint8{3}, []uint8{1})", callResults, typeExpr, typeExpr, slice.goVar, elements.goVar)
+					g.emit("%s := JITEmitGoCallResults(ctx, GoFuncAddr(func(dst, src %s) %s { return append(dst, src...) }), []JITValueDesc{%s, %s})", callResults, typeExpr, typeExpr, slice.goVar, elements.goVar)
 					g.emit("%s := %s[0]", dv, callResults)
 					g.vals[name] = genVal{goVar: dv, isDesc: true, marker: "_slice", pinAcrossBlock: true}
 					break
@@ -7116,7 +7111,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 					}
 					callResults := g.allocTemp("callResults")
 					dv := g.allocDesc()
-					g.emit("%s := JITEmitGoCallResults(ctx, GoFuncAddr(JITAppendScmerSlice), []JITValueDesc{%s, %s}, []uint8{3}, []uint8{1})", callResults, slice.goVar, materialized)
+					g.emit("%s := JITEmitGoCallResults(ctx, GoFuncAddr(JITAppendScmerSlice), []JITValueDesc{%s, %s})", callResults, slice.goVar, materialized)
 					g.emit("%s := %s[0]", dv, callResults)
 					g.recordSliceResult(name, v, dv)
 					break
@@ -7128,7 +7123,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				if cloneWholeSlice {
 					callResults := g.allocTemp("callResults")
 					dv := g.allocDesc()
-					g.emit("%s := JITEmitGoCallResults(ctx, GoFuncAddr(JITCloneScmerSlice), []JITValueDesc{%s}, []uint8{3}, []uint8{1})", callResults, elements.goVar)
+					g.emit("%s := JITEmitGoCallResults(ctx, GoFuncAddr(JITCloneScmerSlice), []JITValueDesc{%s})", callResults, elements.goVar)
 					g.emit("%s := %s[0]", dv, callResults)
 					g.recordSliceResult(name, v, dv)
 					break
@@ -7136,7 +7131,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				if slice.marker == "_slice" && elements.marker == "_slice" {
 					callResults := g.allocTemp("callResults")
 					dv := g.allocDesc()
-					g.emit("%s := JITEmitGoCallResults(ctx, GoFuncAddr(JITAppendScmerSlice), []JITValueDesc{%s, %s}, []uint8{3}, []uint8{1})", callResults, slice.goVar, elements.goVar)
+					g.emit("%s := JITEmitGoCallResults(ctx, GoFuncAddr(JITAppendScmerSlice), []JITValueDesc{%s, %s})", callResults, slice.goVar, elements.goVar)
 					g.emit("%s := %s[0]", dv, callResults)
 					g.recordSliceResult(name, v, dv)
 					break
@@ -7155,7 +7150,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 					g.emit("ctx.EmitMovRegImm64(%s.Reg3, uint64(%d))", stackSlice, slice.stackLen)
 					callResults := g.allocTemp("callResults")
 					dv := g.allocDesc()
-					g.emit("%s := JITEmitGoCallResults(ctx, GoFuncAddr(JITAppendScmerSliceCopy), []JITValueDesc{%s, %s}, []uint8{3}, []uint8{1})", callResults, stackSlice, elements.goVar)
+					g.emit("%s := JITEmitGoCallResults(ctx, GoFuncAddr(JITAppendScmerSliceCopy), []JITValueDesc{%s, %s})", callResults, stackSlice, elements.goVar)
 					g.emit("%s := %s[0]", dv, callResults)
 					g.recordSliceResult(name, v, dv)
 					break
@@ -7179,7 +7174,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 					right := makeStackHeader(elements)
 					callResults := g.allocTemp("callResults")
 					dv := g.allocDesc()
-					g.emit("%s := JITEmitGoCallResults(ctx, GoFuncAddr(JITAppendScmerSliceCopy), []JITValueDesc{%s, %s}, []uint8{3}, []uint8{1})", callResults, left, right)
+					g.emit("%s := JITEmitGoCallResults(ctx, GoFuncAddr(JITAppendScmerSliceCopy), []JITValueDesc{%s, %s})", callResults, left, right)
 					g.emit("%s := %s[0]", dv, callResults)
 					g.recordSliceResult(name, v, dv)
 					break
@@ -7208,7 +7203,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 					g.emit("ctx.EmitMovRegImm64(%s.Reg3, uint64(%d))", added, elements.stackLen)
 					callResults := g.allocTemp("callResults")
 					dv := g.allocDesc()
-					g.emit("%s := JITEmitGoCallResults(ctx, GoFuncAddr(JITAppendScmerSlice), []JITValueDesc{%s, %s}, []uint8{3}, []uint8{1})", callResults, slice.goVar, added)
+					g.emit("%s := JITEmitGoCallResults(ctx, GoFuncAddr(JITAppendScmerSlice), []JITValueDesc{%s, %s})", callResults, slice.goVar, added)
 					g.emit("%s := %s[0]", dv, callResults)
 					g.recordSliceResult(name, v, dv)
 					break
@@ -7366,7 +7361,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				// six simultaneous registers for copy(dst, src).
 				callResults := g.allocTemp("callResults")
 				dv := g.allocDesc()
-				g.emit("%s := JITEmitGoCallResults(ctx, GoFuncAddr(%s), []JITValueDesc{%s, %s}, []uint8{1}, []uint8{0})", callResults, helper, dst.goVar, src.goVar)
+				g.emit("%s := JITEmitGoCallResults(ctx, GoFuncAddr(%s), []JITValueDesc{%s, %s})", callResults, helper, dst.goVar, src.goVar)
 				g.emit("%s := %s[0]", dv, callResults)
 				g.emit("%s.Type = tagInt", dv)
 				if name == "" {
@@ -7821,7 +7816,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				g.emit("ctx.EmitMovRegImm64(%s.Reg3, uint64(%d))", goSlice, arg.stackLen)
 				callResults := g.allocTemp("callResults")
 				dv := g.allocDesc()
-				g.emit("%s := JITEmitGoCallResults(ctx, GoFuncAddr(JITNewSliceCopy), []JITValueDesc{%s}, []uint8{2}, []uint8{1})", callResults, goSlice)
+				g.emit("%s := JITEmitGoCallResults(ctx, GoFuncAddr(JITNewSliceCopy), []JITValueDesc{%s})", callResults, goSlice)
 				g.emit("%s := %s[0]", dv, callResults)
 				g.vals[name] = genVal{goVar: dv, isDesc: true}
 				break
@@ -9488,14 +9483,14 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		} else if srcBasic != nil && srcBasic.Kind() == types.String && isByteSliceType(dstType) {
 			g.emit("ctx.EnsureDesc(&%s)", src.goVar)
 			callResults := g.allocTemp("callResults")
-			g.emit("%s := JITEmitGoCallResults(ctx, GoFuncAddr(jitStringToBytes), []JITValueDesc{%s}, []uint8{3}, []uint8{1})", callResults, src.goVar)
+			g.emit("%s := JITEmitGoCallResults(ctx, GoFuncAddr(jitStringToBytes), []JITValueDesc{%s})", callResults, src.goVar)
 			g.emit("%s := %s[0]", dv, callResults)
 			g.emit("%s.Type = tagSlice", dv)
 			g.vals[name] = genVal{goVar: dv, isDesc: true, marker: "_slice", pinAcrossBlock: true}
 		} else if isByteSliceType(srcType) && dstBasic != nil && dstBasic.Kind() == types.String {
 			g.emit("ctx.EnsureDesc(&%s)", src.goVar)
 			callResults := g.allocTemp("callResults")
-			g.emit("%s := JITEmitGoCallResults(ctx, GoFuncAddr(jitBytesToString), []JITValueDesc{%s}, []uint8{2}, []uint8{1})", callResults, src.goVar)
+			g.emit("%s := JITEmitGoCallResults(ctx, GoFuncAddr(jitBytesToString), []JITValueDesc{%s})", callResults, src.goVar)
 			g.emit("%s := %s[0]", dv, callResults)
 			g.vals[name] = genVal{goVar: dv, isDesc: true, marker: "_gostring"}
 		} else {
@@ -9847,26 +9842,19 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			break
 		}
 		helper := ""
-		resultWords := 0
-		resultPointerMask := 0
+
 		switch asserted := v.AssertedType.Underlying().(type) {
 		case *types.Basic:
 			if asserted.Kind() == types.String {
 				helper = "jitAssertString"
-				resultWords = 2
-				resultPointerMask = 1
 			}
 		case *types.Interface:
 			if types.TypeString(v.AssertedType, nil) == "io.Reader" {
 				helper = "jitAssertReader"
-				resultWords = 2
-				resultPointerMask = 3
 			}
 		case *types.Signature:
 			if g.sourceTypeExpr(v.AssertedType) == "func(...Scmer) Scmer" {
 				helper = "jitAssertScmerFunction"
-				resultWords = 1
-				resultPointerMask = 1
 			}
 		}
 		if helper == "" {
@@ -9875,7 +9863,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		callResults := g.allocTemp("callResults")
 		valueDesc := g.allocDesc()
 		okDesc := g.allocDesc()
-		g.emit("%s := JITEmitGoCallResults(ctx, GoFuncAddr(%s), []JITValueDesc{%s}, []uint8{%d, 1}, []uint8{%d, 0})", callResults, helper, src.goVar, resultWords, resultPointerMask)
+		g.emit("%s := JITEmitGoCallResults(ctx, GoFuncAddr(%s), []JITValueDesc{%s})", callResults, helper, src.goVar)
 		g.emit("%s := %s[0]", valueDesc, callResults)
 		g.emit("%s := %s[1]", okDesc, callResults)
 		g.emit("_ = %s", valueDesc)
@@ -10021,7 +10009,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			dv := g.allocDesc()
 			arrayExpr := g.sourceTypeExpr(v.X.Type().Underlying().(*types.Pointer).Elem())
 			elemExpr := g.sourceTypeExpr(array.Elem())
-			g.emit("%s := JITEmitGoCallResults(ctx, GoFuncAddr(func(value *%s) []%s { return value[%s:%s:%s] }), []JITValueDesc{%s}, []uint8{3}, []uint8{1})", result, arrayExpr, elemExpr, low, high, max, variadic.goVar)
+			g.emit("%s := JITEmitGoCallResults(ctx, GoFuncAddr(func(value *%s) []%s { return value[%s:%s:%s] }), []JITValueDesc{%s})", result, arrayExpr, elemExpr, low, high, max, variadic.goVar)
 			g.emit("%s := %s[0]", dv, result)
 			g.emit("_ = %s", dv)
 			g.vals[name] = genVal{goVar: dv, isDesc: true, marker: "_slice", pinAcrossBlock: true}
@@ -10259,7 +10247,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				helper = "scm.JITMakeScmerSlice"
 			}
 		}
-		g.emit("%s := JITEmitGoCallResults(ctx, GoFuncAddr(%s), []JITValueDesc{%s, %s}, []uint8{3}, []uint8{1})", callResults, helper, length.goVar, capacity.goVar)
+		g.emit("%s := JITEmitGoCallResults(ctx, GoFuncAddr(%s), []JITValueDesc{%s, %s})", callResults, helper, length.goVar, capacity.goVar)
 		g.emit("%s := %s[0]", dv, callResults)
 		g.emit("%s.Type = tagSlice", dv)
 		g.recordSliceResult(name, v, dv)
@@ -11300,10 +11288,141 @@ func applyPatches(path string, patches []patchEntry) {
 
 	// Auto-manage "unsafe" import based on whether generated code uses it
 	src = manageUnsafeImport(src)
+	src = prepareGoCalls(path, src)
 
 	if err := os.WriteFile(path, src, 0644); err != nil {
 		fmt.Fprintf(os.Stderr, "  error writing %s: %v\n", path, err)
 	}
+}
+
+// prepareGoCalls moves closed function expressions out of hot emitter bodies.
+// Initialize through init, rather than variable initializers, because a helper
+// may itself contain generated emitters referencing the prepared entry.
+func prepareGoCalls(path string, src []byte) []byte {
+	const marker = "// BEGIN jitgen prepared Go ABI entries\n"
+	records := map[string]string{}
+	if start := bytes.Index(src, []byte(marker)); start >= 0 {
+		old := src[start+len(marker):]
+		fs := token.NewFileSet()
+		f, err := parser.ParseFile(fs, "prepared.go", append([]byte("package prepared\n"), old...), 0)
+		if err != nil {
+			panic(err)
+		}
+		ast.Inspect(f, func(n ast.Node) bool {
+			a, ok := n.(*ast.AssignStmt)
+			if !ok || len(a.Lhs) != 1 || len(a.Rhs) != 1 {
+				return true
+			}
+			id, ok := a.Lhs[0].(*ast.Ident)
+			if !ok || !strings.HasPrefix(id.Name, "jitGoABI_") {
+				return true
+			}
+			begin, end := fs.Position(a.Rhs[0].Pos()).Offset-len("package prepared\n"), fs.Position(a.Rhs[0].End()).Offset-len("package prepared\n")
+			records[id.Name] = string(old[begin:end])
+			return false
+		})
+		src = src[:start]
+	}
+	fs := token.NewFileSet()
+	f, err := parser.ParseFile(fs, path, src, 0)
+	if err != nil {
+		panic(err)
+	}
+	type span struct{ start, end token.Pos }
+	var scopes []span
+	ast.Inspect(f, func(n ast.Node) bool {
+		switch fn := n.(type) {
+		case *ast.FuncDecl:
+			scopes = append(scopes, span{fn.Pos(), fn.End()})
+		case *ast.FuncLit:
+			scopes = append(scopes, span{fn.Pos(), fn.End()})
+		}
+		return true
+	})
+	var edits []patchEntry
+	ast.Inspect(f, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok || len(call.Args) != 1 {
+			return true
+		}
+		name := ""
+		switch fn := call.Fun.(type) {
+		case *ast.Ident:
+			name = fn.Name
+		case *ast.SelectorExpr:
+			name = fn.Sel.Name
+		}
+		if name != "GoFuncAddr" {
+			return true
+		}
+		arg := call.Args[0]
+		closed := true
+		ast.Inspect(arg, func(n ast.Node) bool {
+			id, ok := n.(*ast.Ident)
+			if !ok || id.Obj == nil {
+				return true
+			}
+			pos := id.Obj.Pos()
+			if pos >= arg.Pos() && pos < arg.End() {
+				return true
+			}
+			for _, scope := range scopes {
+				if pos >= scope.start && pos < scope.end {
+					closed = false
+					return false
+				}
+			}
+			return true
+		})
+		if !closed {
+			return true
+		}
+		begin, end := fs.Position(call.Pos()).Offset, fs.Position(call.End()).Offset
+		expression := string(src[begin:end])
+		hash := sha256.Sum256([]byte(filepath.Base(path) + "\n" + expression))
+		variable := fmt.Sprintf("jitGoABI_%x", hash[:8])
+		records[variable] = expression
+		edits = append(edits, patchEntry{startOff: begin, endOff: end, newText: variable})
+		return false
+	})
+	sort.Slice(edits, func(i, j int) bool { return edits[i].startOff > edits[j].startOff })
+	for _, e := range edits {
+		src = append(append(append([]byte{}, src[:e.startOff]...), []byte(e.newText)...), src[e.endOff:]...)
+	}
+	// Retain only entries still referenced after regeneration (also -only mode).
+	f, err = parser.ParseFile(token.NewFileSet(), path, src, 0)
+	if err != nil {
+		panic(err)
+	}
+	used := map[string]bool{}
+	ast.Inspect(f, func(n ast.Node) bool {
+		if id, ok := n.(*ast.Ident); ok {
+			if _, exists := records[id.Name]; exists {
+				used[id.Name] = true
+			}
+		}
+		return true
+	})
+	if len(used) == 0 {
+		return src
+	}
+	names := make([]string, 0, len(used))
+	for name := range used {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var out bytes.Buffer
+	out.Write(src)
+	out.WriteString("\n" + marker)
+	for _, name := range names {
+		fmt.Fprintf(&out, "var %s uint64\n", name)
+	}
+	out.WriteString("\nfunc init() {\n")
+	for _, name := range names {
+		fmt.Fprintf(&out, "\t%s = %s\n", name, records[name])
+	}
+	out.WriteString("}\n")
+	return out.Bytes()
 }
 
 // manageUnsafeImport adds or removes `import "unsafe"` based on whether the file uses `unsafe.`.

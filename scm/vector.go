@@ -444,7 +444,7 @@ func init_vector() {
 					if d16.Type == tagSlice {
 						d17 = jitKnownSliceHeader(ctx, &d16)
 					} else {
-						d17 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d16}, 3)
+						d17 = ctx.EmitGoCallScalar(jitGoABI_1b70fd0a498698d1, []JITValueDesc{d16}, 3)
 					}
 					if d17.Loc == LocRegTriple {
 						ctx.BindReg(d17.Reg, &d17)
@@ -458,7 +458,7 @@ func init_vector() {
 					if d18.Type == tagSlice {
 						d19 = jitKnownSliceHeader(ctx, &d18)
 					} else {
-						d19 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d18}, 3)
+						d19 = ctx.EmitGoCallScalar(jitGoABI_1b70fd0a498698d1, []JITValueDesc{d18}, 3)
 					}
 					if d19.Loc == LocRegTriple {
 						ctx.BindReg(d19.Reg, &d19)
@@ -631,7 +631,7 @@ func init_vector() {
 					if d57.Loc != LocRegPair && d57.Loc != LocStackPair && d57.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d56 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d57}, 2)
+					d56 = ctx.EmitGoCallScalar(jitGoABI_2b0e23b6be2673d2, []JITValueDesc{d57}, 2)
 					ctx.FreeDesc(&d55)
 					ctx.EnsureDesc(&d56)
 					if d56.Loc == LocImm {
@@ -660,7 +660,7 @@ func init_vector() {
 						panic("jit: generic call arg expects 2-word value (strings.ToUpper arg0)")
 					}
 					ctx.SyncDesc(&d56)
-					d58 = ctx.EmitGoCallScalar(GoFuncAddr(strings.ToUpper), []JITValueDesc{d56}, 2)
+					d58 = ctx.EmitGoCallScalar(jitGoABI_2873aa292bf66f5c, []JITValueDesc{d56}, 2)
 					d58.NoHeapPointer = false
 					ctx.BindReg(d58.Reg, &d58)
 					ctx.BindReg(d58.Reg2, &d58)
@@ -766,7 +766,7 @@ func init_vector() {
 					} else {
 						d62 = d61
 					}
-					d63 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d60, d62}, 1)
+					d63 = ctx.EmitGoCallScalar(jitGoABI_456c1b69a5337693, []JITValueDesc{d60, d62}, 1)
 					ctx.EmitAndRegImm32(d63.Reg, 1)
 					d63.Type = tagBool
 					ctx.BindReg(d63.Reg, &d63)
@@ -1508,7 +1508,7 @@ func init_vector() {
 							ctx.BindReg(d144.Reg, &d146)
 							ctx.BindReg(d144.Reg, &d146)
 						}
-						d145 = ctx.EmitGoCallScalar(GoFuncAddr(JITSqrtBits), []JITValueDesc{d146}, 1)
+						d145 = ctx.EmitGoCallScalar(jitGoABI_f6be1c66eea2d32c, []JITValueDesc{d146}, 1)
 						d145.Type = tagFloat
 						ctx.BindReg(d145.Reg, &d145)
 					}
@@ -2225,7 +2225,7 @@ func init_vector() {
 					} else {
 						d284 = d283
 					}
-					d285 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d282, d284}, 1)
+					d285 = ctx.EmitGoCallScalar(jitGoABI_456c1b69a5337693, []JITValueDesc{d282, d284}, 1)
 					ctx.EmitAndRegImm32(d285.Reg, 1)
 					d285.Type = tagBool
 					ctx.BindReg(d285.Reg, &d285)
@@ -2944,7 +2944,7 @@ func init_vector() {
 							ctx.BindReg(d14.Reg, &d532)
 							ctx.BindReg(d14.Reg, &d532)
 						}
-						d531 = ctx.EmitGoCallScalar(GoFuncAddr(JITSqrtBits), []JITValueDesc{d532}, 1)
+						d531 = ctx.EmitGoCallScalar(jitGoABI_f6be1c66eea2d32c, []JITValueDesc{d532}, 1)
 						d531.Type = tagFloat
 						ctx.BindReg(d531.Reg, &d531)
 					}
@@ -2993,4 +2993,19 @@ func init_vector() {
 			JITInlineCost:  80,
 		},
 	})
+}
+
+// BEGIN jitgen prepared Go ABI entries
+var jitGoABI_1b70fd0a498698d1 uint64
+var jitGoABI_2873aa292bf66f5c uint64
+var jitGoABI_2b0e23b6be2673d2 uint64
+var jitGoABI_456c1b69a5337693 uint64
+var jitGoABI_f6be1c66eea2d32c uint64
+
+func init() {
+	jitGoABI_1b70fd0a498698d1 = GoFuncAddr(jitAsSlice)
+	jitGoABI_2873aa292bf66f5c = GoFuncAddr(strings.ToUpper)
+	jitGoABI_2b0e23b6be2673d2 = GoFuncAddr(Scmer.String)
+	jitGoABI_456c1b69a5337693 = GoFuncAddr(JITStringEqual)
+	jitGoABI_f6be1c66eea2d32c = GoFuncAddr(JITSqrtBits)
 }

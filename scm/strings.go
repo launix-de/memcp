@@ -667,7 +667,7 @@ func init_strings() {
 					if d4.Loc != LocRegPair && d4.Loc != LocStackPair && d4.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d3 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d4}, 2)
+					d3 = ctx.EmitGoCallScalar(jitGoABI_ba6adff9102b8764, []JITValueDesc{d4}, 2)
 					ctx.FreeDesc(&d2)
 					ctx.EnsureDesc(&d3)
 					if d3.Loc == LocImm {
@@ -696,7 +696,7 @@ func init_strings() {
 						panic("jit: generic call arg expects 2-word value (regexp.Compile arg0)")
 					}
 					ctx.SyncDesc(&d3)
-					callResults5 := JITEmitGoCallResults(ctx, GoFuncAddr(regexp.Compile), []JITValueDesc{d3}, []uint8{1, 2}, []uint8{1, 3})
+					callResults5 := JITEmitGoCallResults(ctx, jitGoABI_6a4578489bf5cd90, []JITValueDesc{d3})
 					d6 = callResults5[0]
 					_ = d6
 					d7 = callResults5[1]
@@ -805,7 +805,7 @@ func init_strings() {
 					if d21.Loc != LocRegPair && d21.Loc != LocStackPair && d21.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d20 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d21}, 2)
+					d20 = ctx.EmitGoCallScalar(jitGoABI_ba6adff9102b8764, []JITValueDesc{d21}, 2)
 					ctx.FreeDesc(&d19)
 					if d6.Loc == LocRegPair || d6.Loc == LocStackPair || d6.Loc == LocRegTriple || d6.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
@@ -843,7 +843,7 @@ func init_strings() {
 					ctx.SyncDesc(&d6)
 					ctx.SyncDesc(&d20)
 					ctx.SyncDesc(&d22)
-					d23 = ctx.EmitGoCallScalar(GoFuncAddr((*regexp.Regexp).FindAllString), []JITValueDesc{d6, d20, d22}, 3)
+					d23 = ctx.EmitGoCallScalar(jitGoABI_c120f198eaf72e56, []JITValueDesc{d6, d20, d22}, 3)
 					d23.NoHeapPointer = false
 					ctx.BindReg(d23.Reg, &d23)
 					ctx.BindReg(d23.Reg2, &d23)
@@ -872,7 +872,7 @@ func init_strings() {
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d24)
 					ctx.EnsureDesc(&d24)
-					callResults25 := JITEmitGoCallResults(ctx, GoFuncAddr(jitMakeScmerSlice), []JITValueDesc{d24, d24}, []uint8{3}, []uint8{1})
+					callResults25 := JITEmitGoCallResults(ctx, jitGoABI_524016cedfb68745, []JITValueDesc{d24, d24})
 					d26 = callResults25[0]
 					d26.Type = tagSlice
 					ctx.StabilizeDescForControlFlow(&d26)
@@ -1313,13 +1313,13 @@ func init_strings() {
 					d11.ID = 0
 					d11 = JITPrepareScmerGoArg(ctx, d11)
 					ctx.SyncDesc(&d11)
-					d12 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).Any), []JITValueDesc{d11}, 2)
+					d12 = ctx.EmitGoCallScalar(jitGoABI_b7df89e1950501a9, []JITValueDesc{d11}, 2)
 					d12.NoHeapPointer = false
 					ctx.BindReg(d12.Reg, &d12)
 					ctx.BindReg(d12.Reg2, &d12)
 					ctx.FreeDesc(&d11)
 					ctx.EnsureDesc(&d12)
-					callResults13 := JITEmitGoCallResults(ctx, GoFuncAddr(jitAssertString), []JITValueDesc{d12}, []uint8{2, 1}, []uint8{1, 0})
+					callResults13 := JITEmitGoCallResults(ctx, jitGoABI_c91e204b95bbdb15, []JITValueDesc{d12})
 					d14 = callResults13[0]
 					d15 = callResults13[1]
 					_ = d14
@@ -1464,11 +1464,11 @@ func init_strings() {
 				d1 := JITValueDesc{Loc: LocImm, Type: globalLookup0.GetTag(), Imm: globalLookup0, Rooted: true}
 				d1 = JITPrepareScmerGoArg(ctx, d1)
 				ctx.SyncDesc(&d1)
-				d2 := ctx.EmitGoCallScalar(GoFuncAddr((Scmer).Func), []JITValueDesc{d1}, 1)
+				d2 := ctx.EmitGoCallScalar(jitGoABI_90a1eea90c9a9559, []JITValueDesc{d1}, 1)
 				d2.NoHeapPointer = false
 				ctx.BindReg(d2.Reg, &d2)
 				d3 := jitMaterializeVirtualGoSlice(ctx, args)
-				d4 := ctx.EmitGoCallScalar(GoFuncAddr(jitInvokeGoFunctionSlice), []JITValueDesc{d2, d3}, 2)
+				d4 := ctx.EmitGoCallScalar(jitGoABI_dc10c5a8cc306172, []JITValueDesc{d2, d3}, 2)
 				if d4.Loc == LocImm {
 					if result.Loc == LocAny {
 						return d4
@@ -1745,7 +1745,7 @@ func init_strings() {
 						ctx.BindReg(d3.Reg, &d4)
 					} else {
 						boxed := JITPrepareScmerGoArg(ctx, d3)
-						d4 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{boxed}, 1)
+						d4 = ctx.EmitGoCallScalar(jitGoABI_4e13f0e18efed408, []JITValueDesc{boxed}, 1)
 						d4.Type = tagInt
 						ctx.BindReg(d4.Reg, &d4)
 					}
@@ -2005,7 +2005,7 @@ func init_strings() {
 					d40.ID = 0
 					d40 = JITPrepareScmerGoArg(ctx, d40)
 					ctx.SyncDesc(&d40)
-					d41 = ctx.EmitGoCallScalar(GoFuncAddr(compressedTextLen), []JITValueDesc{d40}, 1)
+					d41 = ctx.EmitGoCallScalar(jitGoABI_b63c374daa21dd0b, []JITValueDesc{d40}, 1)
 					d41.NoHeapPointer = true
 					ctx.BindReg(d41.Reg, &d41)
 					ctx.StabilizeDescForControlFlow(&d41)
@@ -2213,7 +2213,7 @@ func init_strings() {
 					if d98.Loc != LocRegPair && d98.Loc != LocStackPair && d98.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d97 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d98}, 2)
+					d97 = ctx.EmitGoCallScalar(jitGoABI_ba6adff9102b8764, []JITValueDesc{d98}, 2)
 					ctx.StabilizeDescForControlFlow(&d97)
 					ctx.FreeDesc(&d96)
 					d99 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(len(args)))}
@@ -2358,7 +2358,7 @@ func init_strings() {
 						ctx.BindReg(d134.Reg, &d135)
 					} else {
 						boxed := JITPrepareScmerGoArg(ctx, d134)
-						d135 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{boxed}, 1)
+						d135 = ctx.EmitGoCallScalar(jitGoABI_4e13f0e18efed408, []JITValueDesc{boxed}, 1)
 						d135.Type = tagInt
 						ctx.BindReg(d135.Reg, &d135)
 					}
@@ -2442,7 +2442,7 @@ func init_strings() {
 					ctx.SyncDesc(&d138)
 					ctx.SyncDesc(&d4)
 					ctx.SyncDesc(&d1)
-					d139 = ctx.EmitGoCallScalar(GoFuncAddr(cstringSubstring), []JITValueDesc{d138, d4, d1}, 2)
+					d139 = ctx.EmitGoCallScalar(jitGoABI_c874f6f749f20852, []JITValueDesc{d138, d4, d1}, 2)
 					d139.NoHeapPointer = false
 					ctx.BindReg(d139.Reg, &d139)
 					ctx.BindReg(d139.Reg2, &d139)
@@ -2517,7 +2517,7 @@ func init_strings() {
 						ctx.BindReg(d141.Reg, &d142)
 					} else {
 						boxed := JITPrepareScmerGoArg(ctx, d141)
-						d142 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{boxed}, 1)
+						d142 = ctx.EmitGoCallScalar(jitGoABI_4e13f0e18efed408, []JITValueDesc{boxed}, 1)
 						d142.Type = tagInt
 						ctx.BindReg(d142.Reg, &d142)
 					}
@@ -2627,7 +2627,7 @@ func init_strings() {
 					ctx.BindReg(r13, &d148)
 					ctx.FreeDesc(&d144)
 					ctx.EnsureDesc(&d148)
-					d149 = ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d148}, 2)
+					d149 = ctx.EmitGoCallScalar(jitGoABI_4af03274ff62e461, []JITValueDesc{d148}, 2)
 					ctx.EmitMovPairToResult(&d149, &result)
 					result.Type = tagString
 					mergeReturnType(result.Type)
@@ -2707,7 +2707,7 @@ func init_strings() {
 					ctx.BindReg(r16, &d154)
 					ctx.BindReg(r17, &d154)
 					ctx.EnsureDesc(&d154)
-					d155 = ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d154}, 2)
+					d155 = ctx.EmitGoCallScalar(jitGoABI_4af03274ff62e461, []JITValueDesc{d154}, 2)
 					ctx.EmitMovPairToResult(&d155, &result)
 					result.Type = tagString
 					mergeReturnType(result.Type)
@@ -3491,7 +3491,7 @@ func init_strings() {
 					d57.ID = 0
 					d57 = JITPrepareScmerGoArg(ctx, d57)
 					ctx.SyncDesc(&d57)
-					d58 = ctx.EmitGoCallScalar(GoFuncAddr(compressedTextLen), []JITValueDesc{d57}, 1)
+					d58 = ctx.EmitGoCallScalar(jitGoABI_b63c374daa21dd0b, []JITValueDesc{d57}, 1)
 					d58.NoHeapPointer = true
 					ctx.BindReg(d58.Reg, &d58)
 					ctx.StabilizeDescForControlFlow(&d58)
@@ -3566,7 +3566,7 @@ func init_strings() {
 						ctx.BindReg(d61.Reg, &d62)
 					} else {
 						boxed := JITPrepareScmerGoArg(ctx, d61)
-						d62 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{boxed}, 1)
+						d62 = ctx.EmitGoCallScalar(jitGoABI_4e13f0e18efed408, []JITValueDesc{boxed}, 1)
 						d62.Type = tagInt
 						ctx.BindReg(d62.Reg, &d62)
 					}
@@ -3832,7 +3832,7 @@ func init_strings() {
 					if d138.Loc != LocRegPair && d138.Loc != LocStackPair && d138.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d137 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d138}, 2)
+					d137 = ctx.EmitGoCallScalar(jitGoABI_ba6adff9102b8764, []JITValueDesc{d138}, 2)
 					ctx.StabilizeDescForControlFlow(&d137)
 					ctx.FreeDesc(&d136)
 					if d137.SliceSizeKnown {
@@ -4095,7 +4095,7 @@ func init_strings() {
 					d4 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(48)}
 					ctx.ReclaimUntrackedRegs()
 					d186 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString("")}
-					d187 = ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d186}, 2)
+					d187 = ctx.EmitGoCallScalar(jitGoABI_4af03274ff62e461, []JITValueDesc{d186}, 2)
 					ctx.EmitMovPairToResult(&d187, &result)
 					result.Type = tagString
 					mergeReturnType(result.Type)
@@ -4294,7 +4294,7 @@ func init_strings() {
 						ctx.BindReg(d239.Reg, &d240)
 					} else {
 						boxed := JITPrepareScmerGoArg(ctx, d239)
-						d240 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{boxed}, 1)
+						d240 = ctx.EmitGoCallScalar(jitGoABI_4e13f0e18efed408, []JITValueDesc{boxed}, 1)
 						d240.Type = tagInt
 						ctx.BindReg(d240.Reg, &d240)
 					}
@@ -5279,7 +5279,7 @@ func init_strings() {
 					d4 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(48)}
 					ctx.ReclaimUntrackedRegs()
 					d516 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString("")}
-					d517 = ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d516}, 2)
+					d517 = ctx.EmitGoCallScalar(jitGoABI_4af03274ff62e461, []JITValueDesc{d516}, 2)
 					ctx.EmitMovPairToResult(&d517, &result)
 					result.Type = tagString
 					mergeReturnType(result.Type)
@@ -5738,7 +5738,7 @@ func init_strings() {
 					ctx.SyncDesc(&d619)
 					ctx.SyncDesc(&d3)
 					ctx.SyncDesc(&d620)
-					d621 = ctx.EmitGoCallScalar(GoFuncAddr(cstringSubstring), []JITValueDesc{d619, d3, d620}, 2)
+					d621 = ctx.EmitGoCallScalar(jitGoABI_c874f6f749f20852, []JITValueDesc{d619, d3, d620}, 2)
 					d621.NoHeapPointer = false
 					ctx.BindReg(d621.Reg, &d621)
 					ctx.BindReg(d621.Reg2, &d621)
@@ -5885,7 +5885,7 @@ func init_strings() {
 					ctx.BindReg(r32, &d626)
 					ctx.FreeDesc(&d622)
 					ctx.EnsureDesc(&d626)
-					d627 = ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d626}, 2)
+					d627 = ctx.EmitGoCallScalar(jitGoABI_4af03274ff62e461, []JITValueDesc{d626}, 2)
 					ctx.EmitMovPairToResult(&d627, &result)
 					result.Type = tagString
 					mergeReturnType(result.Type)
@@ -5919,7 +5919,7 @@ func init_strings() {
 					ctx.SyncDesc(&d628)
 					ctx.SyncDesc(&d3)
 					ctx.SyncDesc(&d2)
-					d629 = ctx.EmitGoCallScalar(GoFuncAddr(cstringSubstring), []JITValueDesc{d628, d3, d2}, 2)
+					d629 = ctx.EmitGoCallScalar(jitGoABI_c874f6f749f20852, []JITValueDesc{d628, d3, d2}, 2)
 					d629.NoHeapPointer = false
 					ctx.BindReg(d629.Reg, &d629)
 					ctx.BindReg(d629.Reg2, &d629)
@@ -6027,7 +6027,7 @@ func init_strings() {
 					ctx.BindReg(r35, &d634)
 					ctx.BindReg(r36, &d634)
 					ctx.EnsureDesc(&d634)
-					d635 = ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d634}, 2)
+					d635 = ctx.EmitGoCallScalar(jitGoABI_4af03274ff62e461, []JITValueDesc{d634}, 2)
 					ctx.EmitMovPairToResult(&d635, &result)
 					result.Type = tagString
 					mergeReturnType(result.Type)
@@ -6094,7 +6094,7 @@ func init_strings() {
 				if d2.Loc != LocRegPair && d2.Loc != LocStackPair && d2.Loc != LocInputPair {
 					panic("jit: Scmer.String receiver not materialized as pair")
 				}
-				d1 := ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d2}, 2)
+				d1 := ctx.EmitGoCallScalar(jitGoABI_ba6adff9102b8764, []JITValueDesc{d2}, 2)
 				ctx.FreeDesc(&d0)
 				ctx.EnsureDesc(&d1)
 				if d1.Loc == LocImm {
@@ -6123,7 +6123,7 @@ func init_strings() {
 					panic("jit: generic call arg expects 2-word value (Simplify arg0)")
 				}
 				ctx.SyncDesc(&d1)
-				d3 := ctx.EmitGoCallScalar(GoFuncAddr(Simplify), []JITValueDesc{d1}, 2)
+				d3 := ctx.EmitGoCallScalar(jitGoABI_bfdc704c04ad4b5c, []JITValueDesc{d1}, 2)
 				d3.NoHeapPointer = false
 				ctx.BindReg(d3.Reg, &d3)
 				ctx.BindReg(d3.Reg2, &d3)
@@ -6408,7 +6408,7 @@ func init_strings() {
 					d13.ID = 0
 					d13 = JITPrepareScmerGoArg(ctx, d13)
 					ctx.SyncDesc(&d13)
-					d14 = ctx.EmitGoCallScalar(GoFuncAddr(compressedTextLen), []JITValueDesc{d13}, 1)
+					d14 = ctx.EmitGoCallScalar(jitGoABI_b63c374daa21dd0b, []JITValueDesc{d13}, 1)
 					d14.NoHeapPointer = true
 					ctx.BindReg(d14.Reg, &d14)
 					ctx.FreeDesc(&d13)
@@ -6445,7 +6445,7 @@ func init_strings() {
 					d17.ID = 0
 					d17 = JITPrepareScmerGoArg(ctx, d17)
 					ctx.SyncDesc(&d17)
-					d18 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsCString), []JITValueDesc{d17}, 1)
+					d18 = ctx.EmitGoCallScalar(jitGoABI_c0e514e0367f96ae, []JITValueDesc{d17}, 1)
 					d18.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d18.Reg, 1)
 					d18.Type = tagBool
@@ -6617,7 +6617,7 @@ func init_strings() {
 					d41.ID = 0
 					d41 = JITPrepareScmerGoArg(ctx, d41)
 					ctx.SyncDesc(&d41)
-					d42 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsBString), []JITValueDesc{d41}, 1)
+					d42 = ctx.EmitGoCallScalar(jitGoABI_7e6fa575ff0fe45a, []JITValueDesc{d41}, 1)
 					d42.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d42.Reg, 1)
 					d42.Type = tagBool
@@ -6713,7 +6713,7 @@ func init_strings() {
 					d68.ID = 0
 					d68 = JITPrepareScmerGoArg(ctx, d68)
 					ctx.SyncDesc(&d68)
-					d69 = ctx.EmitGoCallScalar(GoFuncAddr(compressedTextLen), []JITValueDesc{d68}, 1)
+					d69 = ctx.EmitGoCallScalar(jitGoABI_b63c374daa21dd0b, []JITValueDesc{d68}, 1)
 					d69.NoHeapPointer = true
 					ctx.BindReg(d69.Reg, &d69)
 					ctx.FreeDesc(&d68)
@@ -6763,7 +6763,7 @@ func init_strings() {
 					if d74.Loc != LocRegPair && d74.Loc != LocStackPair && d74.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d73 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d74}, 2)
+					d73 = ctx.EmitGoCallScalar(jitGoABI_ba6adff9102b8764, []JITValueDesc{d74}, 2)
 					ctx.FreeDesc(&d72)
 					if d73.SliceSizeKnown {
 						d75 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d73.KnownSliceLen))}
@@ -7448,7 +7448,7 @@ func init_strings() {
 					if d84.Loc != LocRegPair && d84.Loc != LocStackPair && d84.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d83 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d84}, 2)
+					d83 = ctx.EmitGoCallScalar(jitGoABI_ba6adff9102b8764, []JITValueDesc{d84}, 2)
 					ctx.StabilizeDescForControlFlow(&d83)
 					ctx.FreeDesc(&d82)
 					d85 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(len(args)))}
@@ -7662,7 +7662,7 @@ func init_strings() {
 					if d141.Loc != LocRegPair && d141.Loc != LocStackPair && d141.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d140 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d141}, 2)
+					d140 = ctx.EmitGoCallScalar(jitGoABI_ba6adff9102b8764, []JITValueDesc{d141}, 2)
 					ctx.StabilizeDescForControlFlow(&d140)
 					ctx.FreeDesc(&d139)
 					ctx.SyncDesc(&d140)
@@ -7728,7 +7728,7 @@ func init_strings() {
 					if d145.Loc != LocRegPair && d145.Loc != LocStackPair && d145.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d144 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d145}, 2)
+					d144 = ctx.EmitGoCallScalar(jitGoABI_ba6adff9102b8764, []JITValueDesc{d145}, 2)
 					ctx.FreeDesc(&d143)
 					ctx.EnsureDesc(&d144)
 					if d144.Loc == LocImm {
@@ -7757,7 +7757,7 @@ func init_strings() {
 						panic("jit: generic call arg expects 2-word value (strings.ToLower arg0)")
 					}
 					ctx.SyncDesc(&d144)
-					d146 = ctx.EmitGoCallScalar(GoFuncAddr(strings.ToLower), []JITValueDesc{d144}, 2)
+					d146 = ctx.EmitGoCallScalar(jitGoABI_7081c62e9c27b5d7, []JITValueDesc{d144}, 2)
 					d146.NoHeapPointer = false
 					ctx.BindReg(d146.Reg, &d146)
 					ctx.BindReg(d146.Reg2, &d146)
@@ -8198,7 +8198,7 @@ func init_strings() {
 					ctx.SyncDesc(&d83)
 					ctx.SyncDesc(&d2)
 					ctx.SyncDesc(&d1)
-					callResults212 := JITEmitGoCallResults(ctx, GoFuncAddr(strLikeCString), []JITValueDesc{d211, d83, d2, d1}, []uint8{1, 1}, []uint8{0, 0})
+					callResults212 := JITEmitGoCallResults(ctx, jitGoABI_79c8c026d904766a, []JITValueDesc{d211, d83, d2, d1})
 					d213 = callResults212[0]
 					_ = d213
 					d214 = callResults212[1]
@@ -8364,7 +8364,7 @@ func init_strings() {
 					if d269.Loc != LocRegPair && d269.Loc != LocStackPair && d269.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d268 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d269}, 2)
+					d268 = ctx.EmitGoCallScalar(jitGoABI_ba6adff9102b8764, []JITValueDesc{d269}, 2)
 					ctx.FreeDesc(&d267)
 					ctx.EnsureDesc(&d268)
 					if d268.Loc == LocImm {
@@ -9273,7 +9273,7 @@ func init_strings() {
 					if d78.Loc != LocRegPair && d78.Loc != LocStackPair && d78.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d77 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d78}, 2)
+					d77 = ctx.EmitGoCallScalar(jitGoABI_ba6adff9102b8764, []JITValueDesc{d78}, 2)
 					ctx.StabilizeDescForControlFlow(&d77)
 					ctx.FreeDesc(&d76)
 					d79 = args[0]
@@ -9608,7 +9608,7 @@ func init_strings() {
 					if d131.Loc != LocRegPair && d131.Loc != LocStackPair && d131.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d130 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d131}, 2)
+					d130 = ctx.EmitGoCallScalar(jitGoABI_ba6adff9102b8764, []JITValueDesc{d131}, 2)
 					ctx.StabilizeDescForControlFlow(&d130)
 					ctx.FreeDesc(&d129)
 					ctx.SyncDesc(&d130)
@@ -9742,7 +9742,7 @@ func init_strings() {
 					ctx.SyncDesc(&d77)
 					ctx.SyncDesc(&d134)
 					ctx.SyncDesc(&d1)
-					callResults135 := JITEmitGoCallResults(ctx, GoFuncAddr(strLikeCString), []JITValueDesc{d133, d77, d134, d1}, []uint8{1, 1}, []uint8{0, 0})
+					callResults135 := JITEmitGoCallResults(ctx, jitGoABI_79c8c026d904766a, []JITValueDesc{d133, d77, d134, d1})
 					ctx.FreeDesc(&d134)
 					d136 = callResults135[0]
 					_ = d136
@@ -9892,7 +9892,7 @@ func init_strings() {
 					if d184.Loc != LocRegPair && d184.Loc != LocStackPair && d184.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d183 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d184}, 2)
+					d183 = ctx.EmitGoCallScalar(jitGoABI_ba6adff9102b8764, []JITValueDesc{d184}, 2)
 					ctx.FreeDesc(&d182)
 					ctx.EnsureDesc(&d183)
 					ctx.EnsureDesc(&d77)
@@ -10005,7 +10005,7 @@ func init_strings() {
 					} else {
 						d193 = d192
 					}
-					d194 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d191, d193}, 1)
+					d194 = ctx.EmitGoCallScalar(jitGoABI_72688b5e874688f5, []JITValueDesc{d191, d193}, 1)
 					ctx.EmitAndRegImm32(d194.Reg, 1)
 					ctx.EmitCmpRegImm32(d194.Reg, 0)
 					ctx.EmitSetcc(d194.Reg, CondEqual)
@@ -10100,7 +10100,7 @@ func init_strings() {
 					}
 					ctx.SyncDesc(&d187)
 					ctx.SyncDesc(&d196)
-					d197 = ctx.EmitGoCallScalar(GoFuncAddr(strings.ContainsAny), []JITValueDesc{d187, d196}, 1)
+					d197 = ctx.EmitGoCallScalar(jitGoABI_a59a20ffede8fc45, []JITValueDesc{d187, d196}, 1)
 					d197.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d197.Reg, 1)
 					d197.Type = tagBool
@@ -10142,7 +10142,7 @@ func init_strings() {
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d185)
 					ctx.EnsureDesc(&d187)
-					d199 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d185, d187}, 1)
+					d199 = ctx.EmitGoCallScalar(jitGoABI_72688b5e874688f5, []JITValueDesc{d185, d187}, 1)
 					ctx.EmitAndRegImm32(d199.Reg, 1)
 					d199.Type = tagBool
 					ctx.BindReg(d199.Reg, &d199)
@@ -10218,7 +10218,7 @@ func init_strings() {
 					}
 					ctx.SyncDesc(&d187)
 					ctx.SyncDesc(&d189)
-					d200 = ctx.EmitGoCallScalar(GoFuncAddr(DecodeLikePattern), []JITValueDesc{d187, d189}, 3)
+					d200 = ctx.EmitGoCallScalar(jitGoABI_1b7f0a93332b1c54, []JITValueDesc{d187, d189}, 3)
 					d200.NoHeapPointer = false
 					ctx.BindReg(d200.Reg, &d200)
 					ctx.BindReg(d200.Reg2, &d200)
@@ -10261,7 +10261,7 @@ func init_strings() {
 					ctx.SyncDesc(&d185)
 					ctx.SyncDesc(&d200)
 					ctx.SyncDesc(&d201)
-					d202 = ctx.EmitGoCallScalar(GoFuncAddr(matchLikeString), []JITValueDesc{d185, d200, d201}, 1)
+					d202 = ctx.EmitGoCallScalar(jitGoABI_b7c9470e6a805964, []JITValueDesc{d185, d200, d201}, 1)
 					d202.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d202.Reg, 1)
 					d202.Type = tagBool
@@ -10339,7 +10339,7 @@ func init_strings() {
 					}
 					ctx.SyncDesc(&d187)
 					ctx.SyncDesc(&d203)
-					d204 = ctx.EmitGoCallScalar(GoFuncAddr(strings.ContainsAny), []JITValueDesc{d187, d203}, 1)
+					d204 = ctx.EmitGoCallScalar(jitGoABI_a59a20ffede8fc45, []JITValueDesc{d187, d203}, 1)
 					d204.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d204.Reg, 1)
 					d204.Type = tagBool
@@ -10434,7 +10434,7 @@ func init_strings() {
 					}
 					ctx.SyncDesc(&d187)
 					ctx.SyncDesc(&d206)
-					d207 = ctx.EmitGoCallScalar(GoFuncAddr(strings.Count), []JITValueDesc{d187, d206}, 1)
+					d207 = ctx.EmitGoCallScalar(jitGoABI_7963edd7d6ab302b, []JITValueDesc{d187, d206}, 1)
 					d207.NoHeapPointer = true
 					ctx.BindReg(d207.Reg, &d207)
 					ctx.FreeDesc(&d206)
@@ -10582,7 +10582,7 @@ func init_strings() {
 					}
 					ctx.SyncDesc(&d187)
 					ctx.SyncDesc(&d189)
-					d213 = ctx.EmitGoCallScalar(GoFuncAddr(DecodeLikePattern), []JITValueDesc{d187, d189}, 3)
+					d213 = ctx.EmitGoCallScalar(jitGoABI_1b7f0a93332b1c54, []JITValueDesc{d187, d189}, 3)
 					d213.NoHeapPointer = false
 					ctx.BindReg(d213.Reg, &d213)
 					ctx.BindReg(d213.Reg2, &d213)
@@ -10625,7 +10625,7 @@ func init_strings() {
 					ctx.SyncDesc(&d185)
 					ctx.SyncDesc(&d213)
 					ctx.SyncDesc(&d214)
-					d215 = ctx.EmitGoCallScalar(GoFuncAddr(matchLikeString), []JITValueDesc{d185, d213, d214}, 1)
+					d215 = ctx.EmitGoCallScalar(jitGoABI_b7c9470e6a805964, []JITValueDesc{d185, d213, d214}, 1)
 					d215.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d215.Reg, 1)
 					d215.Type = tagBool
@@ -10970,7 +10970,7 @@ func init_strings() {
 					}
 					ctx.SyncDesc(&d185)
 					ctx.SyncDesc(&d237)
-					d238 = ctx.EmitGoCallScalar(GoFuncAddr(strings.HasSuffix), []JITValueDesc{d185, d237}, 1)
+					d238 = ctx.EmitGoCallScalar(jitGoABI_2d44ced5713434d0, []JITValueDesc{d185, d237}, 1)
 					d238.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d238.Reg, 1)
 					d238.Type = tagBool
@@ -11140,7 +11140,7 @@ func init_strings() {
 					}
 					ctx.SyncDesc(&d185)
 					ctx.SyncDesc(&d245)
-					d246 = ctx.EmitGoCallScalar(GoFuncAddr(strings.HasPrefix), []JITValueDesc{d185, d245}, 1)
+					d246 = ctx.EmitGoCallScalar(jitGoABI_8ec17b7cc2ad83fc, []JITValueDesc{d185, d245}, 1)
 					d246.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d246.Reg, 1)
 					d246.Type = tagBool
@@ -11404,7 +11404,7 @@ func init_strings() {
 					}
 					ctx.SyncDesc(&d185)
 					ctx.SyncDesc(&d259)
-					d260 = ctx.EmitGoCallScalar(GoFuncAddr(strings.Contains), []JITValueDesc{d185, d259}, 1)
+					d260 = ctx.EmitGoCallScalar(jitGoABI_40dc93a6e697e88d, []JITValueDesc{d185, d259}, 1)
 					d260.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d260.Reg, 1)
 					d260.Type = tagBool
@@ -11848,7 +11848,7 @@ func init_strings() {
 					}
 					ctx.SyncDesc(&d29)
 					ctx.SyncDesc(&d30)
-					d31 = ctx.EmitGoCallScalar(GoFuncAddr(compressedTextCase), []JITValueDesc{d29, d30}, 2)
+					d31 = ctx.EmitGoCallScalar(jitGoABI_096cf33aced69298, []JITValueDesc{d29, d30}, 2)
 					d31.NoHeapPointer = false
 					ctx.BindReg(d31.Reg, &d31)
 					ctx.BindReg(d31.Reg2, &d31)
@@ -11909,7 +11909,7 @@ func init_strings() {
 					if d34.Loc != LocRegPair && d34.Loc != LocStackPair && d34.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d33 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d34}, 2)
+					d33 = ctx.EmitGoCallScalar(jitGoABI_ba6adff9102b8764, []JITValueDesc{d34}, 2)
 					ctx.FreeDesc(&d32)
 					ctx.EnsureDesc(&d33)
 					if d33.Loc == LocImm {
@@ -11938,12 +11938,12 @@ func init_strings() {
 						panic("jit: generic call arg expects 2-word value (strings.ToLower arg0)")
 					}
 					ctx.SyncDesc(&d33)
-					d35 = ctx.EmitGoCallScalar(GoFuncAddr(strings.ToLower), []JITValueDesc{d33}, 2)
+					d35 = ctx.EmitGoCallScalar(jitGoABI_7081c62e9c27b5d7, []JITValueDesc{d33}, 2)
 					d35.NoHeapPointer = false
 					ctx.BindReg(d35.Reg, &d35)
 					ctx.BindReg(d35.Reg2, &d35)
 					ctx.EnsureDesc(&d35)
-					d36 = ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d35}, 2)
+					d36 = ctx.EmitGoCallScalar(jitGoABI_4af03274ff62e461, []JITValueDesc{d35}, 2)
 					ctx.EmitMovPairToResult(&d36, &result)
 					result.Type = tagString
 					mergeReturnType(result.Type)
@@ -12326,7 +12326,7 @@ func init_strings() {
 					}
 					ctx.SyncDesc(&d29)
 					ctx.SyncDesc(&d30)
-					d31 = ctx.EmitGoCallScalar(GoFuncAddr(compressedTextCase), []JITValueDesc{d29, d30}, 2)
+					d31 = ctx.EmitGoCallScalar(jitGoABI_096cf33aced69298, []JITValueDesc{d29, d30}, 2)
 					d31.NoHeapPointer = false
 					ctx.BindReg(d31.Reg, &d31)
 					ctx.BindReg(d31.Reg2, &d31)
@@ -12387,7 +12387,7 @@ func init_strings() {
 					if d34.Loc != LocRegPair && d34.Loc != LocStackPair && d34.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d33 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d34}, 2)
+					d33 = ctx.EmitGoCallScalar(jitGoABI_ba6adff9102b8764, []JITValueDesc{d34}, 2)
 					ctx.FreeDesc(&d32)
 					ctx.EnsureDesc(&d33)
 					if d33.Loc == LocImm {
@@ -12416,12 +12416,12 @@ func init_strings() {
 						panic("jit: generic call arg expects 2-word value (strings.ToUpper arg0)")
 					}
 					ctx.SyncDesc(&d33)
-					d35 = ctx.EmitGoCallScalar(GoFuncAddr(strings.ToUpper), []JITValueDesc{d33}, 2)
+					d35 = ctx.EmitGoCallScalar(jitGoABI_3658f77f4ea1a5ef, []JITValueDesc{d33}, 2)
 					d35.NoHeapPointer = false
 					ctx.BindReg(d35.Reg, &d35)
 					ctx.BindReg(d35.Reg2, &d35)
 					ctx.EnsureDesc(&d35)
-					d36 = ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d35}, 2)
+					d36 = ctx.EmitGoCallScalar(jitGoABI_4af03274ff62e461, []JITValueDesc{d35}, 2)
 					ctx.EmitMovPairToResult(&d36, &result)
 					result.Type = tagString
 					mergeReturnType(result.Type)
@@ -12669,7 +12669,7 @@ func init_strings() {
 					if d16.Loc != LocRegPair && d16.Loc != LocStackPair && d16.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d15 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d16}, 2)
+					d15 = ctx.EmitGoCallScalar(jitGoABI_ba6adff9102b8764, []JITValueDesc{d16}, 2)
 					ctx.FreeDesc(&d14)
 					d17 = args[2]
 					d17.ID = 0
@@ -12688,7 +12688,7 @@ func init_strings() {
 					if d19.Loc != LocRegPair && d19.Loc != LocStackPair && d19.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d18 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d19}, 2)
+					d18 = ctx.EmitGoCallScalar(jitGoABI_ba6adff9102b8764, []JITValueDesc{d19}, 2)
 					ctx.FreeDesc(&d17)
 					d13 = JITPrepareScmerGoArg(ctx, d13)
 					ctx.EnsureDesc(&d15)
@@ -12746,7 +12746,7 @@ func init_strings() {
 					ctx.SyncDesc(&d13)
 					ctx.SyncDesc(&d15)
 					ctx.SyncDesc(&d18)
-					d20 = ctx.EmitGoCallScalar(GoFuncAddr(bufferReplace), []JITValueDesc{d13, d15, d18}, 2)
+					d20 = ctx.EmitGoCallScalar(jitGoABI_65f2853b74c16107, []JITValueDesc{d13, d15, d18}, 2)
 					d20.NoHeapPointer = false
 					ctx.BindReg(d20.Reg, &d20)
 					ctx.BindReg(d20.Reg2, &d20)
@@ -12806,7 +12806,7 @@ func init_strings() {
 					if d23.Loc != LocRegPair && d23.Loc != LocStackPair && d23.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d22 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d23}, 2)
+					d22 = ctx.EmitGoCallScalar(jitGoABI_ba6adff9102b8764, []JITValueDesc{d23}, 2)
 					ctx.FreeDesc(&d21)
 					d24 = args[1]
 					d24.ID = 0
@@ -12825,7 +12825,7 @@ func init_strings() {
 					if d26.Loc != LocRegPair && d26.Loc != LocStackPair && d26.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d25 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d26}, 2)
+					d25 = ctx.EmitGoCallScalar(jitGoABI_ba6adff9102b8764, []JITValueDesc{d26}, 2)
 					ctx.FreeDesc(&d24)
 					d27 = args[2]
 					d27.ID = 0
@@ -12844,7 +12844,7 @@ func init_strings() {
 					if d29.Loc != LocRegPair && d29.Loc != LocStackPair && d29.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d28 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d29}, 2)
+					d28 = ctx.EmitGoCallScalar(jitGoABI_ba6adff9102b8764, []JITValueDesc{d29}, 2)
 					ctx.FreeDesc(&d27)
 					ctx.EnsureDesc(&d22)
 					if d22.Loc == LocImm {
@@ -12927,12 +12927,12 @@ func init_strings() {
 					ctx.SyncDesc(&d22)
 					ctx.SyncDesc(&d25)
 					ctx.SyncDesc(&d28)
-					d30 = ctx.EmitGoCallScalar(GoFuncAddr(strings.ReplaceAll), []JITValueDesc{d22, d25, d28}, 2)
+					d30 = ctx.EmitGoCallScalar(jitGoABI_334818bf4be01560, []JITValueDesc{d22, d25, d28}, 2)
 					d30.NoHeapPointer = false
 					ctx.BindReg(d30.Reg, &d30)
 					ctx.BindReg(d30.Reg2, &d30)
 					ctx.EnsureDesc(&d30)
-					d31 = ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d30}, 2)
+					d31 = ctx.EmitGoCallScalar(jitGoABI_4af03274ff62e461, []JITValueDesc{d30}, 2)
 					ctx.EmitMovPairToResult(&d31, &result)
 					result.Type = tagString
 					mergeReturnType(result.Type)
@@ -13315,7 +13315,7 @@ func init_strings() {
 					}
 					ctx.SyncDesc(&d29)
 					ctx.SyncDesc(&d30)
-					d31 = ctx.EmitGoCallScalar(GoFuncAddr(compressedTextTrim), []JITValueDesc{d29, d30}, 2)
+					d31 = ctx.EmitGoCallScalar(jitGoABI_13852dcc17c06846, []JITValueDesc{d29, d30}, 2)
 					d31.NoHeapPointer = false
 					ctx.BindReg(d31.Reg, &d31)
 					ctx.BindReg(d31.Reg2, &d31)
@@ -13376,7 +13376,7 @@ func init_strings() {
 					if d34.Loc != LocRegPair && d34.Loc != LocStackPair && d34.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d33 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d34}, 2)
+					d33 = ctx.EmitGoCallScalar(jitGoABI_ba6adff9102b8764, []JITValueDesc{d34}, 2)
 					ctx.FreeDesc(&d32)
 					ctx.EnsureDesc(&d33)
 					if d33.Loc == LocImm {
@@ -13405,12 +13405,12 @@ func init_strings() {
 						panic("jit: generic call arg expects 2-word value (strings.TrimSpace arg0)")
 					}
 					ctx.SyncDesc(&d33)
-					d35 = ctx.EmitGoCallScalar(GoFuncAddr(strings.TrimSpace), []JITValueDesc{d33}, 2)
+					d35 = ctx.EmitGoCallScalar(jitGoABI_a135c81275f64614, []JITValueDesc{d33}, 2)
 					d35.NoHeapPointer = false
 					ctx.BindReg(d35.Reg, &d35)
 					ctx.BindReg(d35.Reg2, &d35)
 					ctx.EnsureDesc(&d35)
-					d36 = ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d35}, 2)
+					d36 = ctx.EmitGoCallScalar(jitGoABI_4af03274ff62e461, []JITValueDesc{d35}, 2)
 					ctx.EmitMovPairToResult(&d36, &result)
 					result.Type = tagString
 					mergeReturnType(result.Type)
@@ -13795,7 +13795,7 @@ func init_strings() {
 					}
 					ctx.SyncDesc(&d29)
 					ctx.SyncDesc(&d30)
-					d31 = ctx.EmitGoCallScalar(GoFuncAddr(compressedTextTrim), []JITValueDesc{d29, d30}, 2)
+					d31 = ctx.EmitGoCallScalar(jitGoABI_13852dcc17c06846, []JITValueDesc{d29, d30}, 2)
 					d31.NoHeapPointer = false
 					ctx.BindReg(d31.Reg, &d31)
 					ctx.BindReg(d31.Reg2, &d31)
@@ -13856,7 +13856,7 @@ func init_strings() {
 					if d34.Loc != LocRegPair && d34.Loc != LocStackPair && d34.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d33 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d34}, 2)
+					d33 = ctx.EmitGoCallScalar(jitGoABI_ba6adff9102b8764, []JITValueDesc{d34}, 2)
 					ctx.FreeDesc(&d32)
 					ctx.EnsureDesc(&d33)
 					if d33.Loc == LocImm {
@@ -13913,13 +13913,13 @@ func init_strings() {
 					}
 					ctx.SyncDesc(&d33)
 					ctx.SyncDesc(&d35)
-					d36 = ctx.EmitGoCallScalar(GoFuncAddr(strings.TrimLeft), []JITValueDesc{d33, d35}, 2)
+					d36 = ctx.EmitGoCallScalar(jitGoABI_12f5dbe32c1462db, []JITValueDesc{d33, d35}, 2)
 					d36.NoHeapPointer = false
 					ctx.BindReg(d36.Reg, &d36)
 					ctx.BindReg(d36.Reg2, &d36)
 					ctx.FreeDesc(&d35)
 					ctx.EnsureDesc(&d36)
-					d37 = ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d36}, 2)
+					d37 = ctx.EmitGoCallScalar(jitGoABI_4af03274ff62e461, []JITValueDesc{d36}, 2)
 					ctx.EmitMovPairToResult(&d37, &result)
 					result.Type = tagString
 					mergeReturnType(result.Type)
@@ -14304,7 +14304,7 @@ func init_strings() {
 					}
 					ctx.SyncDesc(&d29)
 					ctx.SyncDesc(&d30)
-					d31 = ctx.EmitGoCallScalar(GoFuncAddr(compressedTextTrim), []JITValueDesc{d29, d30}, 2)
+					d31 = ctx.EmitGoCallScalar(jitGoABI_13852dcc17c06846, []JITValueDesc{d29, d30}, 2)
 					d31.NoHeapPointer = false
 					ctx.BindReg(d31.Reg, &d31)
 					ctx.BindReg(d31.Reg2, &d31)
@@ -14365,7 +14365,7 @@ func init_strings() {
 					if d34.Loc != LocRegPair && d34.Loc != LocStackPair && d34.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d33 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d34}, 2)
+					d33 = ctx.EmitGoCallScalar(jitGoABI_ba6adff9102b8764, []JITValueDesc{d34}, 2)
 					ctx.FreeDesc(&d32)
 					ctx.EnsureDesc(&d33)
 					if d33.Loc == LocImm {
@@ -14422,13 +14422,13 @@ func init_strings() {
 					}
 					ctx.SyncDesc(&d33)
 					ctx.SyncDesc(&d35)
-					d36 = ctx.EmitGoCallScalar(GoFuncAddr(strings.TrimRight), []JITValueDesc{d33, d35}, 2)
+					d36 = ctx.EmitGoCallScalar(jitGoABI_ea41ba4597ad2142, []JITValueDesc{d33, d35}, 2)
 					d36.NoHeapPointer = false
 					ctx.BindReg(d36.Reg, &d36)
 					ctx.BindReg(d36.Reg2, &d36)
 					ctx.FreeDesc(&d35)
 					ctx.EnsureDesc(&d36)
-					d37 = ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d36}, 2)
+					d37 = ctx.EmitGoCallScalar(jitGoABI_4af03274ff62e461, []JITValueDesc{d36}, 2)
 					ctx.EmitMovPairToResult(&d37, &result)
 					result.Type = tagString
 					mergeReturnType(result.Type)
@@ -14936,7 +14936,7 @@ func init_strings() {
 					}
 					ctx.SyncDesc(&d44)
 					ctx.SyncDesc(&d45)
-					d46 = ctx.EmitGoCallScalar(GoFuncAddr(compressedTextTrim), []JITValueDesc{d44, d45}, 2)
+					d46 = ctx.EmitGoCallScalar(jitGoABI_13852dcc17c06846, []JITValueDesc{d44, d45}, 2)
 					d46.NoHeapPointer = false
 					ctx.BindReg(d46.Reg, &d46)
 					ctx.BindReg(d46.Reg2, &d46)
@@ -14997,7 +14997,7 @@ func init_strings() {
 					if d49.Loc != LocRegPair && d49.Loc != LocStackPair && d49.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d48 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d49}, 2)
+					d48 = ctx.EmitGoCallScalar(jitGoABI_ba6adff9102b8764, []JITValueDesc{d49}, 2)
 					ctx.FreeDesc(&d47)
 					ctx.EnsureDesc(&d48)
 					if d48.Loc == LocImm {
@@ -15026,12 +15026,12 @@ func init_strings() {
 						panic("jit: generic call arg expects 2-word value (strings.TrimSpace arg0)")
 					}
 					ctx.SyncDesc(&d48)
-					d50 = ctx.EmitGoCallScalar(GoFuncAddr(strings.TrimSpace), []JITValueDesc{d48}, 2)
+					d50 = ctx.EmitGoCallScalar(jitGoABI_a135c81275f64614, []JITValueDesc{d48}, 2)
 					d50.NoHeapPointer = false
 					ctx.BindReg(d50.Reg, &d50)
 					ctx.BindReg(d50.Reg2, &d50)
 					ctx.EnsureDesc(&d50)
-					d51 = ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d50}, 2)
+					d51 = ctx.EmitGoCallScalar(jitGoABI_4af03274ff62e461, []JITValueDesc{d50}, 2)
 					ctx.EmitMovPairToResult(&d51, &result)
 					result.Type = tagString
 					mergeReturnType(result.Type)
@@ -15540,7 +15540,7 @@ func init_strings() {
 					}
 					ctx.SyncDesc(&d44)
 					ctx.SyncDesc(&d45)
-					d46 = ctx.EmitGoCallScalar(GoFuncAddr(compressedTextTrim), []JITValueDesc{d44, d45}, 2)
+					d46 = ctx.EmitGoCallScalar(jitGoABI_13852dcc17c06846, []JITValueDesc{d44, d45}, 2)
 					d46.NoHeapPointer = false
 					ctx.BindReg(d46.Reg, &d46)
 					ctx.BindReg(d46.Reg2, &d46)
@@ -15601,7 +15601,7 @@ func init_strings() {
 					if d49.Loc != LocRegPair && d49.Loc != LocStackPair && d49.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d48 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d49}, 2)
+					d48 = ctx.EmitGoCallScalar(jitGoABI_ba6adff9102b8764, []JITValueDesc{d49}, 2)
 					ctx.FreeDesc(&d47)
 					ctx.EnsureDesc(&d48)
 					if d48.Loc == LocImm {
@@ -15658,13 +15658,13 @@ func init_strings() {
 					}
 					ctx.SyncDesc(&d48)
 					ctx.SyncDesc(&d50)
-					d51 = ctx.EmitGoCallScalar(GoFuncAddr(strings.TrimLeft), []JITValueDesc{d48, d50}, 2)
+					d51 = ctx.EmitGoCallScalar(jitGoABI_12f5dbe32c1462db, []JITValueDesc{d48, d50}, 2)
 					d51.NoHeapPointer = false
 					ctx.BindReg(d51.Reg, &d51)
 					ctx.BindReg(d51.Reg2, &d51)
 					ctx.FreeDesc(&d50)
 					ctx.EnsureDesc(&d51)
-					d52 = ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d51}, 2)
+					d52 = ctx.EmitGoCallScalar(jitGoABI_4af03274ff62e461, []JITValueDesc{d51}, 2)
 					ctx.EmitMovPairToResult(&d52, &result)
 					result.Type = tagString
 					mergeReturnType(result.Type)
@@ -16173,7 +16173,7 @@ func init_strings() {
 					}
 					ctx.SyncDesc(&d44)
 					ctx.SyncDesc(&d45)
-					d46 = ctx.EmitGoCallScalar(GoFuncAddr(compressedTextTrim), []JITValueDesc{d44, d45}, 2)
+					d46 = ctx.EmitGoCallScalar(jitGoABI_13852dcc17c06846, []JITValueDesc{d44, d45}, 2)
 					d46.NoHeapPointer = false
 					ctx.BindReg(d46.Reg, &d46)
 					ctx.BindReg(d46.Reg2, &d46)
@@ -16234,7 +16234,7 @@ func init_strings() {
 					if d49.Loc != LocRegPair && d49.Loc != LocStackPair && d49.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d48 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d49}, 2)
+					d48 = ctx.EmitGoCallScalar(jitGoABI_ba6adff9102b8764, []JITValueDesc{d49}, 2)
 					ctx.FreeDesc(&d47)
 					ctx.EnsureDesc(&d48)
 					if d48.Loc == LocImm {
@@ -16291,13 +16291,13 @@ func init_strings() {
 					}
 					ctx.SyncDesc(&d48)
 					ctx.SyncDesc(&d50)
-					d51 = ctx.EmitGoCallScalar(GoFuncAddr(strings.TrimRight), []JITValueDesc{d48, d50}, 2)
+					d51 = ctx.EmitGoCallScalar(jitGoABI_ea41ba4597ad2142, []JITValueDesc{d48, d50}, 2)
 					d51.NoHeapPointer = false
 					ctx.BindReg(d51.Reg, &d51)
 					ctx.BindReg(d51.Reg2, &d51)
 					ctx.FreeDesc(&d50)
 					ctx.EnsureDesc(&d51)
-					d52 = ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d51}, 2)
+					d52 = ctx.EmitGoCallScalar(jitGoABI_4af03274ff62e461, []JITValueDesc{d51}, 2)
 					ctx.EmitMovPairToResult(&d52, &result)
 					result.Type = tagString
 					mergeReturnType(result.Type)
@@ -16563,7 +16563,7 @@ func init_strings() {
 					if d20.Loc != LocRegPair && d20.Loc != LocStackPair && d20.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d19 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d20}, 2)
+					d19 = ctx.EmitGoCallScalar(jitGoABI_ba6adff9102b8764, []JITValueDesc{d20}, 2)
 					ctx.StabilizeDescForControlFlow(&d19)
 					ctx.FreeDesc(&d18)
 					ctx.SyncDesc(&d19)
@@ -16629,7 +16629,7 @@ func init_strings() {
 					if d24.Loc != LocRegPair && d24.Loc != LocStackPair && d24.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d23 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d24}, 2)
+					d23 = ctx.EmitGoCallScalar(jitGoABI_ba6adff9102b8764, []JITValueDesc{d24}, 2)
 					ctx.FreeDesc(&d22)
 					ctx.EnsureDesc(&d23)
 					if d23.Loc == LocImm {
@@ -16685,7 +16685,7 @@ func init_strings() {
 					}
 					ctx.SyncDesc(&d23)
 					ctx.SyncDesc(&d1)
-					d25 = ctx.EmitGoCallScalar(GoFuncAddr(strings.Split), []JITValueDesc{d23, d1}, 3)
+					d25 = ctx.EmitGoCallScalar(jitGoABI_3fcf0ad4e358a3bd, []JITValueDesc{d23, d1}, 3)
 					d25.NoHeapPointer = false
 					ctx.BindReg(d25.Reg, &d25)
 					ctx.BindReg(d25.Reg2, &d25)
@@ -16714,7 +16714,7 @@ func init_strings() {
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d26)
 					ctx.EnsureDesc(&d26)
-					callResults27 := JITEmitGoCallResults(ctx, GoFuncAddr(jitMakeScmerSlice), []JITValueDesc{d26, d26}, []uint8{3}, []uint8{1})
+					callResults27 := JITEmitGoCallResults(ctx, jitGoABI_524016cedfb68745, []JITValueDesc{d26, d26})
 					d28 = callResults27[0]
 					d28.Type = tagSlice
 					ctx.StabilizeDescForControlFlow(&d28)
@@ -17231,7 +17231,7 @@ func init_strings() {
 						ctx.BindReg(d11.Reg, &d12)
 					} else {
 						boxed := JITPrepareScmerGoArg(ctx, d11)
-						d12 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{boxed}, 1)
+						d12 = ctx.EmitGoCallScalar(jitGoABI_4e13f0e18efed408, []JITValueDesc{boxed}, 1)
 						d12.Type = tagInt
 						ctx.BindReg(d12.Reg, &d12)
 					}
@@ -17313,7 +17313,7 @@ func init_strings() {
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					d28 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString("")}
-					d29 = ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d28}, 2)
+					d29 = ctx.EmitGoCallScalar(jitGoABI_4af03274ff62e461, []JITValueDesc{d28}, 2)
 					ctx.EmitMovPairToResult(&d29, &result)
 					result.Type = tagString
 					mergeReturnType(result.Type)
@@ -17348,7 +17348,7 @@ func init_strings() {
 					if d32.Loc != LocRegPair && d32.Loc != LocStackPair && d32.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d31 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d32}, 2)
+					d31 = ctx.EmitGoCallScalar(jitGoABI_ba6adff9102b8764, []JITValueDesc{d32}, 2)
 					ctx.FreeDesc(&d30)
 					ctx.EnsureDesc(&d31)
 					if d31.Loc == LocImm {
@@ -17381,12 +17381,12 @@ func init_strings() {
 					}
 					ctx.SyncDesc(&d31)
 					ctx.SyncDesc(&d12)
-					d33 = ctx.EmitGoCallScalar(GoFuncAddr(strings.Repeat), []JITValueDesc{d31, d12}, 2)
+					d33 = ctx.EmitGoCallScalar(jitGoABI_b62ecaeee92c4866, []JITValueDesc{d31, d12}, 2)
 					d33.NoHeapPointer = false
 					ctx.BindReg(d33.Reg, &d33)
 					ctx.BindReg(d33.Reg2, &d33)
 					ctx.EnsureDesc(&d33)
-					d34 = ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d33}, 2)
+					d34 = ctx.EmitGoCallScalar(jitGoABI_4af03274ff62e461, []JITValueDesc{d33}, 2)
 					ctx.EmitMovPairToResult(&d34, &result)
 					result.Type = tagString
 					mergeReturnType(result.Type)
@@ -17776,7 +17776,7 @@ func init_strings() {
 				if d2.Loc != LocRegPair && d2.Loc != LocStackPair && d2.Loc != LocInputPair {
 					panic("jit: Scmer.String receiver not materialized as pair")
 				}
-				d1 := ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d2}, 2)
+				d1 := ctx.EmitGoCallScalar(jitGoABI_ba6adff9102b8764, []JITValueDesc{d2}, 2)
 				ctx.FreeDesc(&d0)
 				ctx.EnsureDesc(&d1)
 				if d1.Loc == LocImm {
@@ -17805,12 +17805,12 @@ func init_strings() {
 					panic("jit: generic call arg expects 2-word value (html.EscapeString arg0)")
 				}
 				ctx.SyncDesc(&d1)
-				d3 := ctx.EmitGoCallScalar(GoFuncAddr(html.EscapeString), []JITValueDesc{d1}, 2)
+				d3 := ctx.EmitGoCallScalar(jitGoABI_c323a0ae852b5d03, []JITValueDesc{d1}, 2)
 				d3.NoHeapPointer = false
 				ctx.BindReg(d3.Reg, &d3)
 				ctx.BindReg(d3.Reg2, &d3)
 				ctx.EnsureDesc(&d3)
-				d4 := ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d3}, 2)
+				d4 := ctx.EmitGoCallScalar(jitGoABI_4af03274ff62e461, []JITValueDesc{d3}, 2)
 				if result.Loc == LocAny {
 					return d4
 				}
@@ -17860,7 +17860,7 @@ func init_strings() {
 				if d2.Loc != LocRegPair && d2.Loc != LocStackPair && d2.Loc != LocInputPair {
 					panic("jit: Scmer.String receiver not materialized as pair")
 				}
-				d1 := ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d2}, 2)
+				d1 := ctx.EmitGoCallScalar(jitGoABI_ba6adff9102b8764, []JITValueDesc{d2}, 2)
 				ctx.FreeDesc(&d0)
 				ctx.EnsureDesc(&d1)
 				if d1.Loc == LocImm {
@@ -17889,12 +17889,12 @@ func init_strings() {
 					panic("jit: generic call arg expects 2-word value (url.QueryEscape arg0)")
 				}
 				ctx.SyncDesc(&d1)
-				d3 := ctx.EmitGoCallScalar(GoFuncAddr(url.QueryEscape), []JITValueDesc{d1}, 2)
+				d3 := ctx.EmitGoCallScalar(jitGoABI_0afb65a56e20eb9a, []JITValueDesc{d1}, 2)
 				d3.NoHeapPointer = false
 				ctx.BindReg(d3.Reg, &d3)
 				ctx.BindReg(d3.Reg2, &d3)
 				ctx.EnsureDesc(&d3)
-				d4 := ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d3}, 2)
+				d4 := ctx.EmitGoCallScalar(jitGoABI_4af03274ff62e461, []JITValueDesc{d3}, 2)
 				if result.Loc == LocAny {
 					return d4
 				}
@@ -18010,7 +18010,7 @@ func init_strings() {
 					if d2.Loc != LocRegPair && d2.Loc != LocStackPair && d2.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d1 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d2}, 2)
+					d1 = ctx.EmitGoCallScalar(jitGoABI_ba6adff9102b8764, []JITValueDesc{d2}, 2)
 					ctx.FreeDesc(&d0)
 					ctx.EnsureDesc(&d1)
 					if d1.Loc == LocImm {
@@ -18039,7 +18039,7 @@ func init_strings() {
 						panic("jit: generic call arg expects 2-word value (url.QueryUnescape arg0)")
 					}
 					ctx.SyncDesc(&d1)
-					callResults3 := JITEmitGoCallResults(ctx, GoFuncAddr(url.QueryUnescape), []JITValueDesc{d1}, []uint8{2, 2}, []uint8{1, 3})
+					callResults3 := JITEmitGoCallResults(ctx, jitGoABI_ba97d45bf13e8e72, []JITValueDesc{d1})
 					d4 = callResults3[0]
 					_ = d4
 					d5 = callResults3[1]
@@ -18128,7 +18128,7 @@ func init_strings() {
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d4)
-					d16 = ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d4}, 2)
+					d16 = ctx.EmitGoCallScalar(jitGoABI_4af03274ff62e461, []JITValueDesc{d4}, 2)
 					ctx.EmitMovPairToResult(&d16, &result)
 					result.Type = tagString
 					mergeReturnType(result.Type)
@@ -18247,7 +18247,7 @@ func init_strings() {
 					d0 = args[0]
 					d0.ID = 0
 					ctx.EnsureDesc(&d0)
-					d1 = ctx.EmitGoCallScalar(GoFuncAddr(func(value Scmer) any { return value }), []JITValueDesc{d0}, 2)
+					d1 = ctx.EmitGoCallScalar(jitGoABI_00564e4e5f9ced6f, []JITValueDesc{d0}, 2)
 					ctx.FreeDesc(&d0)
 					ctx.EnsureDesc(&d1)
 					if d1.Loc == LocImm {
@@ -18285,7 +18285,7 @@ func init_strings() {
 						panic("jit: generic call arg expects 2-word value (json.Marshal arg0)")
 					}
 					ctx.SyncDesc(&d1)
-					callResults2 := JITEmitGoCallResults(ctx, GoFuncAddr(json.Marshal), []JITValueDesc{d1}, []uint8{3, 2}, []uint8{1, 3})
+					callResults2 := JITEmitGoCallResults(ctx, jitGoABI_a380a68045304092, []JITValueDesc{d1})
 					d3 = callResults2[0]
 					_ = d3
 					d4 = callResults2[1]
@@ -18374,10 +18374,10 @@ func init_strings() {
 					ctx.EnsureDesc(&d3)
 					ctx.EnsureDesc(&d3)
 					ctx.EnsureDesc(&d3)
-					callResults15 := JITEmitGoCallResults(ctx, GoFuncAddr(jitBytesToString), []JITValueDesc{d3}, []uint8{2}, []uint8{1})
+					callResults15 := JITEmitGoCallResults(ctx, jitGoABI_a6df313aaa7d4f5d, []JITValueDesc{d3})
 					d14 = callResults15[0]
 					ctx.EnsureDesc(&d14)
-					d16 = ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d14}, 2)
+					d16 = ctx.EmitGoCallScalar(jitGoABI_4af03274ff62e461, []JITValueDesc{d14}, 2)
 					ctx.EmitMovPairToResult(&d16, &result)
 					result.Type = tagString
 					mergeReturnType(result.Type)
@@ -18635,11 +18635,11 @@ func init_strings() {
 					ctx.MarkLabel(lbl3)
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
-					d10 = ctx.EmitGoCallScalar(GoFuncAddr(func() *bytes.Buffer { return new(bytes.Buffer) }), nil, 1)
+					d10 = ctx.EmitGoCallScalar(jitGoABI_01a63e27dbf3374b, nil, 1)
 					ctx.BindReg(d10.Reg, &d10)
 					ctx.StabilizeDescForControlFlow(&d10)
 					ctx.EnsureDesc(&d10)
-					d11 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *bytes.Buffer) io.Writer { return value }), []JITValueDesc{d10}, 2)
+					d11 = ctx.EmitGoCallScalar(jitGoABI_72553763cd1ef504, []JITValueDesc{d10}, 2)
 					ctx.EnsureDesc(&d11)
 					if d11.Loc == LocImm {
 						tmpPair := JITValueDesc{Loc: LocRegPair, Type: d11.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
@@ -18676,7 +18676,7 @@ func init_strings() {
 						panic("jit: generic call arg expects 2-word value (json.NewEncoder arg0)")
 					}
 					ctx.SyncDesc(&d11)
-					d12 = ctx.EmitGoCallScalar(GoFuncAddr(json.NewEncoder), []JITValueDesc{d11}, 1)
+					d12 = ctx.EmitGoCallScalar(jitGoABI_f14e05500d0387e3, []JITValueDesc{d11}, 1)
 					d12.NoHeapPointer = false
 					ctx.BindReg(d12.Reg, &d12)
 					if d12.Loc == LocRegPair || d12.Loc == LocStackPair || d12.Loc == LocRegTriple || d12.Loc == LocStackTriple {
@@ -18688,7 +18688,7 @@ func init_strings() {
 					}
 					ctx.SyncDesc(&d12)
 					ctx.SyncDesc(&d13)
-					ctx.EmitGoCallVoid(GoFuncAddr((*json.Encoder).SetEscapeHTML), []JITValueDesc{d12, d13})
+					ctx.EmitGoCallVoid(jitGoABI_a263308f01c427e1, []JITValueDesc{d12, d13})
 					ctx.FreeDesc(&d13)
 					d14 = args[0]
 					d14.ID = 0
@@ -18707,10 +18707,10 @@ func init_strings() {
 					if d16.Loc != LocRegPair && d16.Loc != LocStackPair && d16.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d15 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d16}, 2)
+					d15 = ctx.EmitGoCallScalar(jitGoABI_ba6adff9102b8764, []JITValueDesc{d16}, 2)
 					ctx.FreeDesc(&d14)
 					ctx.EnsureDesc(&d15)
-					d17 = ctx.EmitGoCallScalar(GoFuncAddr(func(value string) any { return value }), []JITValueDesc{d15}, 2)
+					d17 = ctx.EmitGoCallScalar(jitGoABI_79e8c953a8e7d840, []JITValueDesc{d15}, 2)
 					if d12.Loc == LocRegPair || d12.Loc == LocStackPair || d12.Loc == LocRegTriple || d12.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
 					}
@@ -18751,7 +18751,7 @@ func init_strings() {
 					}
 					ctx.SyncDesc(&d12)
 					ctx.SyncDesc(&d17)
-					d18 = ctx.EmitGoCallScalar(GoFuncAddr((*json.Encoder).Encode), []JITValueDesc{d12, d17}, 2)
+					d18 = ctx.EmitGoCallScalar(jitGoABI_9338a0bafb638cb8, []JITValueDesc{d12, d17}, 2)
 					d18.NoHeapPointer = false
 					ctx.BindReg(d18.Reg, &d18)
 					ctx.BindReg(d18.Reg2, &d18)
@@ -18947,7 +18947,7 @@ func init_strings() {
 						panic("jit: generic call arg expects 1-word value")
 					}
 					ctx.SyncDesc(&d10)
-					d63 = ctx.EmitGoCallScalar(GoFuncAddr((*bytes.Buffer).String), []JITValueDesc{d10}, 2)
+					d63 = ctx.EmitGoCallScalar(jitGoABI_a97b018d6ed987c4, []JITValueDesc{d10}, 2)
 					d63.NoHeapPointer = false
 					ctx.BindReg(d63.Reg, &d63)
 					ctx.BindReg(d63.Reg2, &d63)
@@ -19006,13 +19006,13 @@ func init_strings() {
 					}
 					ctx.SyncDesc(&d63)
 					ctx.SyncDesc(&d64)
-					d65 = ctx.EmitGoCallScalar(GoFuncAddr(strings.TrimSuffix), []JITValueDesc{d63, d64}, 2)
+					d65 = ctx.EmitGoCallScalar(jitGoABI_3468d5dad719fc59, []JITValueDesc{d63, d64}, 2)
 					d65.NoHeapPointer = false
 					ctx.BindReg(d65.Reg, &d65)
 					ctx.BindReg(d65.Reg2, &d65)
 					ctx.FreeDesc(&d64)
 					ctx.EnsureDesc(&d65)
-					d66 = ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d65}, 2)
+					d66 = ctx.EmitGoCallScalar(jitGoABI_4af03274ff62e461, []JITValueDesc{d65}, 2)
 					ctx.EmitMovPairToResult(&d66, &result)
 					result.Type = tagString
 					mergeReturnType(result.Type)
@@ -19187,7 +19187,7 @@ func init_strings() {
 					ctx.MarkLabel(lbl1)
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
-					d0 = ctx.EmitGoCallScalar(GoFuncAddr(func() *any { return new(any) }), nil, 1)
+					d0 = ctx.EmitGoCallScalar(jitGoABI_0bbd401a13f77370, nil, 1)
 					ctx.BindReg(d0.Reg, &d0)
 					ctx.StabilizeDescForControlFlow(&d0)
 					d1 = args[0]
@@ -19207,16 +19207,16 @@ func init_strings() {
 					if d3.Loc != LocRegPair && d3.Loc != LocStackPair && d3.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d2 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d3}, 2)
+					d2 = ctx.EmitGoCallScalar(jitGoABI_ba6adff9102b8764, []JITValueDesc{d3}, 2)
 					ctx.FreeDesc(&d1)
 					ctx.EnsureDesc(&d2)
 					ctx.EnsureDesc(&d2)
 					ctx.EnsureDesc(&d2)
-					callResults5 := JITEmitGoCallResults(ctx, GoFuncAddr(jitStringToBytes), []JITValueDesc{d2}, []uint8{3}, []uint8{1})
+					callResults5 := JITEmitGoCallResults(ctx, jitGoABI_01b45a9058be3e41, []JITValueDesc{d2})
 					d4 = callResults5[0]
 					d4.Type = tagSlice
 					ctx.EnsureDesc(&d0)
-					d6 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *any) any { return value }), []JITValueDesc{d0}, 2)
+					d6 = ctx.EmitGoCallScalar(jitGoABI_6dd6d55f6a78678a, []JITValueDesc{d0}, 2)
 					d4 = JITPrepareGoSliceArg(ctx, d4)
 					if d4.Loc != LocRegTriple && d4.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice (json.Unmarshal arg0)")
@@ -19258,7 +19258,7 @@ func init_strings() {
 					}
 					ctx.SyncDesc(&d4)
 					ctx.SyncDesc(&d6)
-					d7 = ctx.EmitGoCallScalar(GoFuncAddr(json.Unmarshal), []JITValueDesc{d4, d6}, 2)
+					d7 = ctx.EmitGoCallScalar(jitGoABI_c899bf4def76efba, []JITValueDesc{d4, d6}, 2)
 					d7.NoHeapPointer = false
 					ctx.BindReg(d7.Reg, &d7)
 					ctx.BindReg(d7.Reg2, &d7)
@@ -19349,7 +19349,7 @@ func init_strings() {
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.StabilizeDescForControlFlow(&d0)
-					d20 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *any) any { return *value }), []JITValueDesc{d0}, 2)
+					d20 = ctx.EmitGoCallScalar(jitGoABI_3f2e6df4d4fdaa2f, []JITValueDesc{d0}, 2)
 					ctx.EnsureDesc(&d20)
 					if d20.Loc == LocImm {
 						tmpPair := JITValueDesc{Loc: LocRegPair, Type: d20.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
@@ -19557,16 +19557,16 @@ func init_strings() {
 					if d3.Loc != LocRegPair && d3.Loc != LocStackPair && d3.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d2 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d3}, 2)
+					d2 = ctx.EmitGoCallScalar(jitGoABI_ba6adff9102b8764, []JITValueDesc{d3}, 2)
 					ctx.FreeDesc(&d1)
 					ctx.EnsureDesc(&d2)
 					ctx.EnsureDesc(&d2)
 					ctx.EnsureDesc(&d2)
-					callResults5 := JITEmitGoCallResults(ctx, GoFuncAddr(jitStringToBytes), []JITValueDesc{d2}, []uint8{3}, []uint8{1})
+					callResults5 := JITEmitGoCallResults(ctx, jitGoABI_01b45a9058be3e41, []JITValueDesc{d2})
 					d4 = callResults5[0]
 					d4.Type = tagSlice
 					ctx.EnsureDesc(&d0)
-					d6 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *Scmer) any { return value }), []JITValueDesc{d0}, 2)
+					d6 = ctx.EmitGoCallScalar(jitGoABI_a6ad7a751af5e1aa, []JITValueDesc{d0}, 2)
 					d4 = JITPrepareGoSliceArg(ctx, d4)
 					if d4.Loc != LocRegTriple && d4.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice (json.Unmarshal arg0)")
@@ -19608,7 +19608,7 @@ func init_strings() {
 					}
 					ctx.SyncDesc(&d4)
 					ctx.SyncDesc(&d6)
-					d7 = ctx.EmitGoCallScalar(GoFuncAddr(json.Unmarshal), []JITValueDesc{d4, d6}, 2)
+					d7 = ctx.EmitGoCallScalar(jitGoABI_c899bf4def76efba, []JITValueDesc{d4, d6}, 2)
 					d7.NoHeapPointer = false
 					ctx.BindReg(d7.Reg, &d7)
 					ctx.BindReg(d7.Reg2, &d7)
@@ -19873,7 +19873,7 @@ func init_strings() {
 				if d9.Loc != LocRegPair && d9.Loc != LocStackPair && d9.Loc != LocInputPair {
 					panic("jit: Scmer.String receiver not materialized as pair")
 				}
-				d8 := ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d9}, 2)
+				d8 := ctx.EmitGoCallScalar(jitGoABI_ba6adff9102b8764, []JITValueDesc{d9}, 2)
 				ctx.ReclaimUntrackedRegs()
 				ctx.EnsureDesc(&d8)
 				var d10 JITValueDesc
@@ -19931,7 +19931,7 @@ func init_strings() {
 				ctx.SyncDesc(&d11)
 				ctx.SyncDesc(&d12)
 				ctx.SyncDesc(&d13)
-				d14 := ctx.EmitGoCallScalar(GoFuncAddr(NewBString), []JITValueDesc{d10, d11, d12, d13}, 2)
+				d14 := ctx.EmitGoCallScalar(jitGoABI_b27b69f735c5670f, []JITValueDesc{d10, d11, d12, d13}, 2)
 				d14.NoHeapPointer = false
 				ctx.BindReg(d14.Reg, &d14)
 				ctx.BindReg(d14.Reg2, &d14)
@@ -19955,7 +19955,7 @@ func init_strings() {
 				ctx.ReclaimUntrackedRegs()
 				d1 = JITPrepareScmerGoArg(ctx, d1)
 				ctx.SyncDesc(&d1)
-				d16 := ctx.EmitGoCallScalar(GoFuncAddr(encodeBufferBase64), []JITValueDesc{d1}, 2)
+				d16 := ctx.EmitGoCallScalar(jitGoABI_d148205e02658696, []JITValueDesc{d1}, 2)
 				d16.NoHeapPointer = false
 				ctx.BindReg(d16.Reg, &d16)
 				ctx.BindReg(d16.Reg2, &d16)
@@ -20253,7 +20253,7 @@ func init_strings() {
 					d13.ID = 0
 					d13 = JITPrepareScmerGoArg(ctx, d13)
 					ctx.SyncDesc(&d13)
-					d14 = ctx.EmitGoCallScalar(GoFuncAddr(decodeBufferBase64), []JITValueDesc{d13}, 2)
+					d14 = ctx.EmitGoCallScalar(jitGoABI_1f822c238b99b1a9, []JITValueDesc{d13}, 2)
 					d14.NoHeapPointer = false
 					ctx.BindReg(d14.Reg, &d14)
 					ctx.BindReg(d14.Reg2, &d14)
@@ -20300,7 +20300,7 @@ func init_strings() {
 					d15.ID = 0
 					d15 = JITPrepareScmerGoArg(ctx, d15)
 					ctx.SyncDesc(&d15)
-					d16 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsBString), []JITValueDesc{d15}, 1)
+					d16 = ctx.EmitGoCallScalar(jitGoABI_7e6fa575ff0fe45a, []JITValueDesc{d15}, 1)
 					d16.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d16.Reg, 1)
 					d16.Type = tagBool
@@ -20372,7 +20372,7 @@ func init_strings() {
 					d30.ID = 0
 					d30 = JITPrepareScmerGoArg(ctx, d30)
 					ctx.SyncDesc(&d30)
-					d31 = ctx.EmitGoCallScalar(GoFuncAddr(bstringRawText), []JITValueDesc{d30}, 2)
+					d31 = ctx.EmitGoCallScalar(jitGoABI_da21fd4ce95109a3, []JITValueDesc{d30}, 2)
 					d31.NoHeapPointer = false
 					ctx.BindReg(d31.Reg, &d31)
 					ctx.BindReg(d31.Reg2, &d31)
@@ -20415,7 +20415,7 @@ func init_strings() {
 					ctx.MarkLabel(lbl5)
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
-					d32 = ctx.EmitGoCallScalar(GoFuncAddr(func() *base64.Encoding { return base64.StdEncoding }), nil, 1)
+					d32 = ctx.EmitGoCallScalar(jitGoABI_e9d13692c484fbae, nil, 1)
 					d33 = args[0]
 					d33.ID = 0
 					d35 = d33
@@ -20433,7 +20433,7 @@ func init_strings() {
 					if d35.Loc != LocRegPair && d35.Loc != LocStackPair && d35.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d34 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d35}, 2)
+					d34 = ctx.EmitGoCallScalar(jitGoABI_ba6adff9102b8764, []JITValueDesc{d35}, 2)
 					ctx.FreeDesc(&d33)
 					if d32.Loc == LocRegPair || d32.Loc == LocStackPair || d32.Loc == LocRegTriple || d32.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
@@ -20466,7 +20466,7 @@ func init_strings() {
 					}
 					ctx.SyncDesc(&d32)
 					ctx.SyncDesc(&d34)
-					callResults36 := JITEmitGoCallResults(ctx, GoFuncAddr((*base64.Encoding).DecodeString), []JITValueDesc{d32, d34}, []uint8{3, 2}, []uint8{1, 3})
+					callResults36 := JITEmitGoCallResults(ctx, jitGoABI_8570aaa2e99ae7e7, []JITValueDesc{d32, d34})
 					d37 = callResults36[0]
 					_ = d37
 					d38 = callResults36[1]
@@ -20748,10 +20748,10 @@ func init_strings() {
 					ctx.EnsureDesc(&d37)
 					ctx.EnsureDesc(&d37)
 					ctx.EnsureDesc(&d37)
-					callResults100 := JITEmitGoCallResults(ctx, GoFuncAddr(jitBytesToString), []JITValueDesc{d37}, []uint8{2}, []uint8{1})
+					callResults100 := JITEmitGoCallResults(ctx, jitGoABI_a6df313aaa7d4f5d, []JITValueDesc{d37})
 					d99 = callResults100[0]
 					ctx.EnsureDesc(&d99)
-					d101 = ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d99}, 2)
+					d101 = ctx.EmitGoCallScalar(jitGoABI_4af03274ff62e461, []JITValueDesc{d99}, 2)
 					ctx.EmitMovPairToResult(&d101, &result)
 					result.Type = tagString
 					mergeReturnType(result.Type)
@@ -21217,7 +21217,7 @@ func init_strings() {
 					d32.ID = 0
 					d32 = JITPrepareScmerGoArg(ctx, d32)
 					ctx.SyncDesc(&d32)
-					d33 = ctx.EmitGoCallScalar(GoFuncAddr(encodeTextHex), []JITValueDesc{d32}, 2)
+					d33 = ctx.EmitGoCallScalar(jitGoABI_574bd2d6f2d94300, []JITValueDesc{d32}, 2)
 					d33.NoHeapPointer = false
 					ctx.BindReg(d33.Reg, &d33)
 					ctx.BindReg(d33.Reg2, &d33)
@@ -21278,7 +21278,7 @@ func init_strings() {
 					if d36.Loc != LocRegPair && d36.Loc != LocStackPair && d36.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d35 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d36}, 2)
+					d35 = ctx.EmitGoCallScalar(jitGoABI_ba6adff9102b8764, []JITValueDesc{d36}, 2)
 					ctx.StabilizeDescForControlFlow(&d35)
 					ctx.FreeDesc(&d34)
 					if d35.SliceSizeKnown {
@@ -21335,7 +21335,7 @@ func init_strings() {
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d39)
 					ctx.EnsureDesc(&d39)
-					callResults40 := JITEmitGoCallResults(ctx, GoFuncAddr(jitMakeByteSlice), []JITValueDesc{d39, d39}, []uint8{3}, []uint8{1})
+					callResults40 := JITEmitGoCallResults(ctx, jitGoABI_9047b4d4115dbd48, []JITValueDesc{d39, d39})
 					d41 = callResults40[0]
 					d41.Type = tagSlice
 					ctx.StabilizeDescForControlFlow(&d41)
@@ -21718,10 +21718,10 @@ func init_strings() {
 					ctx.EnsureDesc(&d41)
 					ctx.EnsureDesc(&d41)
 					ctx.EnsureDesc(&d41)
-					callResults96 := JITEmitGoCallResults(ctx, GoFuncAddr(jitBytesToString), []JITValueDesc{d41}, []uint8{2}, []uint8{1})
+					callResults96 := JITEmitGoCallResults(ctx, jitGoABI_a6df313aaa7d4f5d, []JITValueDesc{d41})
 					d95 = callResults96[0]
 					ctx.EnsureDesc(&d95)
-					d97 = ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d95}, 2)
+					d97 = ctx.EmitGoCallScalar(jitGoABI_4af03274ff62e461, []JITValueDesc{d95}, 2)
 					ctx.EmitMovPairToResult(&d97, &result)
 					result.Type = tagString
 					mergeReturnType(result.Type)
@@ -22187,7 +22187,7 @@ func init_strings() {
 					d32.ID = 0
 					d32 = JITPrepareScmerGoArg(ctx, d32)
 					ctx.SyncDesc(&d32)
-					d33 = ctx.EmitGoCallScalar(GoFuncAddr(encodeTextHex), []JITValueDesc{d32}, 2)
+					d33 = ctx.EmitGoCallScalar(jitGoABI_574bd2d6f2d94300, []JITValueDesc{d32}, 2)
 					d33.NoHeapPointer = false
 					ctx.BindReg(d33.Reg, &d33)
 					ctx.BindReg(d33.Reg2, &d33)
@@ -22248,7 +22248,7 @@ func init_strings() {
 					if d36.Loc != LocRegPair && d36.Loc != LocStackPair && d36.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d35 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d36}, 2)
+					d35 = ctx.EmitGoCallScalar(jitGoABI_ba6adff9102b8764, []JITValueDesc{d36}, 2)
 					ctx.StabilizeDescForControlFlow(&d35)
 					ctx.FreeDesc(&d34)
 					if d35.SliceSizeKnown {
@@ -22305,7 +22305,7 @@ func init_strings() {
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d39)
 					ctx.EnsureDesc(&d39)
-					callResults40 := JITEmitGoCallResults(ctx, GoFuncAddr(jitMakeByteSlice), []JITValueDesc{d39, d39}, []uint8{3}, []uint8{1})
+					callResults40 := JITEmitGoCallResults(ctx, jitGoABI_9047b4d4115dbd48, []JITValueDesc{d39, d39})
 					d41 = callResults40[0]
 					d41.Type = tagSlice
 					ctx.StabilizeDescForControlFlow(&d41)
@@ -22688,10 +22688,10 @@ func init_strings() {
 					ctx.EnsureDesc(&d41)
 					ctx.EnsureDesc(&d41)
 					ctx.EnsureDesc(&d41)
-					callResults96 := JITEmitGoCallResults(ctx, GoFuncAddr(jitBytesToString), []JITValueDesc{d41}, []uint8{2}, []uint8{1})
+					callResults96 := JITEmitGoCallResults(ctx, jitGoABI_a6df313aaa7d4f5d, []JITValueDesc{d41})
 					d95 = callResults96[0]
 					ctx.EnsureDesc(&d95)
-					d97 = ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d95}, 2)
+					d97 = ctx.EmitGoCallScalar(jitGoABI_4af03274ff62e461, []JITValueDesc{d95}, 2)
 					ctx.EmitMovPairToResult(&d97, &result)
 					result.Type = tagString
 					mergeReturnType(result.Type)
@@ -22809,7 +22809,7 @@ func init_strings() {
 					d0.ID = 0
 					d0 = JITPrepareScmerGoArg(ctx, d0)
 					ctx.SyncDesc(&d0)
-					callResults1 := JITEmitGoCallResults(ctx, GoFuncAddr(decodeTextHex), []JITValueDesc{d0}, []uint8{3, 2}, []uint8{1, 3})
+					callResults1 := JITEmitGoCallResults(ctx, jitGoABI_38e833358955bf86, []JITValueDesc{d0})
 					d2 = callResults1[0]
 					_ = d2
 					d3 = callResults1[1]
@@ -22897,10 +22897,10 @@ func init_strings() {
 					ctx.EnsureDesc(&d2)
 					ctx.EnsureDesc(&d2)
 					ctx.EnsureDesc(&d2)
-					callResults13 := JITEmitGoCallResults(ctx, GoFuncAddr(jitBytesToString), []JITValueDesc{d2}, []uint8{2}, []uint8{1})
+					callResults13 := JITEmitGoCallResults(ctx, jitGoABI_a6df313aaa7d4f5d, []JITValueDesc{d2})
 					d12 = callResults13[0]
 					ctx.EnsureDesc(&d12)
-					d14 = ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d12}, 2)
+					d14 = ctx.EmitGoCallScalar(jitGoABI_4af03274ff62e461, []JITValueDesc{d12}, 2)
 					ctx.EmitMovPairToResult(&d14, &result)
 					result.Type = tagString
 					mergeReturnType(result.Type)
@@ -23104,7 +23104,7 @@ func init_strings() {
 						ctx.BindReg(d1.Reg, &d2)
 					} else {
 						boxed := JITPrepareScmerGoArg(ctx, d1)
-						d2 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{boxed}, 1)
+						d2 = ctx.EmitGoCallScalar(jitGoABI_4e13f0e18efed408, []JITValueDesc{boxed}, 1)
 						d2.Type = tagInt
 						ctx.BindReg(d2.Reg, &d2)
 					}
@@ -23195,7 +23195,7 @@ func init_strings() {
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d2)
 					ctx.EnsureDesc(&d2)
-					callResults13 := JITEmitGoCallResults(ctx, GoFuncAddr(jitMakeByteSlice), []JITValueDesc{d2, d2}, []uint8{3}, []uint8{1})
+					callResults13 := JITEmitGoCallResults(ctx, jitGoABI_9047b4d4115dbd48, []JITValueDesc{d2, d2})
 					d14 = callResults13[0]
 					d14.Type = tagSlice
 					ctx.StabilizeDescForControlFlow(&d14)
@@ -23271,7 +23271,7 @@ func init_strings() {
 						panic("jit: generic call arg expects 3-word Go slice (crand.Read arg0)")
 					}
 					ctx.SyncDesc(&d14)
-					callResults27 := JITEmitGoCallResults(ctx, GoFuncAddr(crand.Read), []JITValueDesc{d14}, []uint8{1, 2}, []uint8{0, 3})
+					callResults27 := JITEmitGoCallResults(ctx, jitGoABI_0f4a9cfb76694a01, []JITValueDesc{d14})
 					d28 = callResults27[0]
 					_ = d28
 					d29 = callResults27[1]
@@ -23359,10 +23359,10 @@ func init_strings() {
 					ctx.EnsureDesc(&d14)
 					ctx.EnsureDesc(&d14)
 					ctx.EnsureDesc(&d14)
-					callResults47 := JITEmitGoCallResults(ctx, GoFuncAddr(jitBytesToString), []JITValueDesc{d14}, []uint8{2}, []uint8{1})
+					callResults47 := JITEmitGoCallResults(ctx, jitGoABI_a6df313aaa7d4f5d, []JITValueDesc{d14})
 					d46 = callResults47[0]
 					ctx.EnsureDesc(&d46)
-					d48 = ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d46}, 2)
+					d48 = ctx.EmitGoCallScalar(jitGoABI_4af03274ff62e461, []JITValueDesc{d46}, 2)
 					ctx.EmitMovPairToResult(&d48, &result)
 					result.Type = tagString
 					mergeReturnType(result.Type)
@@ -23711,14 +23711,14 @@ func init_strings() {
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d13 = ctx.EmitGoCallScalar(GoFuncAddr(func() *schemeTextWriter { return new(schemeTextWriter) }), nil, 1)
+					d13 = ctx.EmitGoCallScalar(jitGoABI_6b9a96e5c180320c, nil, 1)
 					ctx.BindReg(d13.Reg, &d13)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					d14 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(-3750763034362895579)}
 					ctx.EnsureDesc(&d13)
 					ctx.EnsureDesc(&d14)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(base *schemeTextWriter, value uint64) { base.hash = value }), []JITValueDesc{d13, d14})
+					ctx.EmitGoCallVoid(jitGoABI_11cb4fdd862e9314, []JITValueDesc{d13, d14})
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d13)
 					d15 = args[0]
@@ -23729,7 +23729,7 @@ func init_strings() {
 					d15 = JITPrepareScmerGoArg(ctx, d15)
 					ctx.SyncDesc(&d13)
 					ctx.SyncDesc(&d15)
-					ctx.EmitGoCallVoid(GoFuncAddr((*schemeTextWriter).writeCompressedText), []JITValueDesc{d13, d15})
+					ctx.EmitGoCallVoid(jitGoABI_1174749da09c9533, []JITValueDesc{d13, d15})
 					ctx.FreeDesc(&d15)
 					ctx.EnsureDesc(&d13)
 					if d13.Loc == LocImm {
@@ -23756,7 +23756,7 @@ func init_strings() {
 					ctx.BindReg(d17.Reg2, &d17)
 					ctx.FreeDesc(&d16)
 					ctx.EnsureDesc(&d17)
-					d18 = ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d17}, 2)
+					d18 = ctx.EmitGoCallScalar(jitGoABI_4af03274ff62e461, []JITValueDesc{d17}, 2)
 					ctx.EmitMovPairToResult(&d18, &result)
 					result.Type = tagString
 					mergeReturnType(result.Type)
@@ -23791,7 +23791,7 @@ func init_strings() {
 					if d21.Loc != LocRegPair && d21.Loc != LocStackPair && d21.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d20 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d21}, 2)
+					d20 = ctx.EmitGoCallScalar(jitGoABI_ba6adff9102b8764, []JITValueDesc{d21}, 2)
 					ctx.FreeDesc(&d19)
 					ctx.EnsureDesc(&d20)
 					d22 = d20
@@ -24037,7 +24037,7 @@ func init_strings() {
 					ctx.EmitJmp(lbl10)
 					ctx.MarkLabel(lbl8)
 					ctx.EnsureDesc(&d28)
-					d41 = ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d28}, 2)
+					d41 = ctx.EmitGoCallScalar(jitGoABI_4af03274ff62e461, []JITValueDesc{d28}, 2)
 					ctx.EmitMovPairToResult(&d41, &result)
 					result.Type = tagString
 					mergeReturnType(result.Type)
@@ -24353,7 +24353,7 @@ func init_strings() {
 					d101.ID = 0
 					d101 = JITPrepareScmerGoArg(ctx, d101)
 					ctx.SyncDesc(&d101)
-					d102 = ctx.EmitGoCallScalar(GoFuncAddr(compressedTextLen), []JITValueDesc{d101}, 1)
+					d102 = ctx.EmitGoCallScalar(jitGoABI_b63c374daa21dd0b, []JITValueDesc{d101}, 1)
 					d102.NoHeapPointer = true
 					ctx.BindReg(d102.Reg, &d102)
 					ctx.FreeDesc(&d101)
@@ -24735,14 +24735,14 @@ func init_strings() {
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d7 = ctx.EmitGoCallScalar(GoFuncAddr(func() *schemeTextWriter { return new(schemeTextWriter) }), nil, 1)
+					d7 = ctx.EmitGoCallScalar(jitGoABI_6b9a96e5c180320c, nil, 1)
 					ctx.BindReg(d7.Reg, &d7)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					d8 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(-3750763034362895579)}
 					ctx.EnsureDesc(&d7)
 					ctx.EnsureDesc(&d8)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(base *schemeTextWriter, value uint64) { base.hash = value }), []JITValueDesc{d7, d8})
+					ctx.EmitGoCallVoid(jitGoABI_11cb4fdd862e9314, []JITValueDesc{d7, d8})
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d7)
 					ctx.StabilizeDescForControlFlow(&d7)
@@ -24910,7 +24910,7 @@ func init_strings() {
 					ctx.SyncDesc(&d37)
 					ctx.SyncDesc(&d38)
 					ctx.SyncDesc(&d39)
-					ctx.EmitGoCallVoid(GoFuncAddr(serializeEx), []JITValueDesc{d7, d36, d37, d38, d39})
+					ctx.EmitGoCallVoid(jitGoABI_f6aff333e9c5357d, []JITValueDesc{d7, d36, d37, d38, d39})
 					ctx.FreeDesc(&d39)
 					ctx.FreeDesc(&d36)
 					return bbs[5].Render()
@@ -24953,7 +24953,7 @@ func init_strings() {
 					ctx.BindReg(d41.Reg2, &d41)
 					ctx.FreeDesc(&d40)
 					ctx.EnsureDesc(&d41)
-					d42 = ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d41}, 2)
+					d42 = ctx.EmitGoCallScalar(jitGoABI_4af03274ff62e461, []JITValueDesc{d41}, 2)
 					ctx.EmitMovPairToResult(&d42, &result)
 					result.Type = tagString
 					mergeReturnType(result.Type)
@@ -24980,7 +24980,7 @@ func init_strings() {
 					d43 = JITPrepareScmerGoArg(ctx, d43)
 					ctx.SyncDesc(&d7)
 					ctx.SyncDesc(&d43)
-					ctx.EmitGoCallVoid(GoFuncAddr(WriteStringValue), []JITValueDesc{d7, d43})
+					ctx.EmitGoCallVoid(jitGoABI_d5649c48ce9a4eaf, []JITValueDesc{d7, d43})
 					ctx.FreeDesc(&d43)
 					return bbs[5].Render()
 					return result
@@ -25389,7 +25389,7 @@ func init_strings() {
 					}
 					ctx.SyncDesc(&d13)
 					ctx.SyncDesc(&d14)
-					d15 = ctx.EmitGoCallScalar(GoFuncAddr(compressedTextDigest), []JITValueDesc{d13, d14}, 2)
+					d15 = ctx.EmitGoCallScalar(jitGoABI_e77f44427da6cb59, []JITValueDesc{d13, d14}, 2)
 					d15.NoHeapPointer = false
 					ctx.BindReg(d15.Reg, &d15)
 					ctx.BindReg(d15.Reg2, &d15)
@@ -25433,7 +25433,7 @@ func init_strings() {
 					ctx.MarkLabel(lbl3)
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
-					d16 = ctx.EmitGoCallScalar(GoFuncAddr(func() *[32]byte { return new([32]byte) }), nil, 1)
+					d16 = ctx.EmitGoCallScalar(jitGoABI_6eea80aaeb0d9eea, nil, 1)
 					d17 = args[0]
 					d17.ID = 0
 					d19 = d17
@@ -25451,12 +25451,12 @@ func init_strings() {
 					if d19.Loc != LocRegPair && d19.Loc != LocStackPair && d19.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d18 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d19}, 2)
+					d18 = ctx.EmitGoCallScalar(jitGoABI_ba6adff9102b8764, []JITValueDesc{d19}, 2)
 					ctx.FreeDesc(&d17)
 					ctx.EnsureDesc(&d18)
 					ctx.EnsureDesc(&d18)
 					ctx.EnsureDesc(&d18)
-					callResults21 := JITEmitGoCallResults(ctx, GoFuncAddr(jitStringToBytes), []JITValueDesc{d18}, []uint8{3}, []uint8{1})
+					callResults21 := JITEmitGoCallResults(ctx, jitGoABI_01b45a9058be3e41, []JITValueDesc{d18})
 					d20 = callResults21[0]
 					d20.Type = tagSlice
 					d20 = JITPrepareGoSliceArg(ctx, d20)
@@ -25464,12 +25464,12 @@ func init_strings() {
 						panic("jit: generic call arg expects 3-word Go slice (sha256.Sum256 arg0)")
 					}
 					ctx.SyncDesc(&d20)
-					d22 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 []byte) *[32]byte { value := sha256.Sum256(arg0); return &value })), []JITValueDesc{d20}, 1)
+					d22 = ctx.EmitGoCallScalar(jitGoABI_d9347fa10faeae59, []JITValueDesc{d20}, 1)
 					d22.NoHeapPointer = false
 					ctx.BindReg(d22.Reg, &d22)
 					ctx.EnsureDesc(&d22)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst, src *[32]byte) { *dst = *src }), []JITValueDesc{d16, d22})
-					sliceResults23 := JITEmitGoCallResults(ctx, GoFuncAddr(func(value *[32]byte) []byte { return value[0:32:32] }), []JITValueDesc{d16}, []uint8{3}, []uint8{1})
+					ctx.EmitGoCallVoid(jitGoABI_b3c0b8b8197f1143, []JITValueDesc{d16, d22})
+					sliceResults23 := JITEmitGoCallResults(ctx, jitGoABI_73beafebc7150d26, []JITValueDesc{d16})
 					d24 = sliceResults23[0]
 					_ = d24
 					d24 = JITPrepareGoSliceArg(ctx, d24)
@@ -25477,12 +25477,12 @@ func init_strings() {
 						panic("jit: generic call arg expects 3-word Go slice (hex.EncodeToString arg0)")
 					}
 					ctx.SyncDesc(&d24)
-					d25 = ctx.EmitGoCallScalar(GoFuncAddr(hex.EncodeToString), []JITValueDesc{d24}, 2)
+					d25 = ctx.EmitGoCallScalar(jitGoABI_cc59d47caab52db9, []JITValueDesc{d24}, 2)
 					d25.NoHeapPointer = false
 					ctx.BindReg(d25.Reg, &d25)
 					ctx.BindReg(d25.Reg2, &d25)
 					ctx.EnsureDesc(&d25)
-					d26 = ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d25}, 2)
+					d26 = ctx.EmitGoCallScalar(jitGoABI_4af03274ff62e461, []JITValueDesc{d25}, 2)
 					ctx.EmitMovPairToResult(&d26, &result)
 					result.Type = tagString
 					mergeReturnType(result.Type)
@@ -25774,7 +25774,7 @@ func init_strings() {
 					d74.ID = 0
 					d74 = JITPrepareScmerGoArg(ctx, d74)
 					ctx.SyncDesc(&d74)
-					d75 = ctx.EmitGoCallScalar(GoFuncAddr(compressedTextLen), []JITValueDesc{d74}, 1)
+					d75 = ctx.EmitGoCallScalar(jitGoABI_b63c374daa21dd0b, []JITValueDesc{d74}, 1)
 					d75.NoHeapPointer = true
 					ctx.BindReg(d75.Reg, &d75)
 					ctx.FreeDesc(&d74)
@@ -26146,7 +26146,7 @@ func init_strings() {
 					if d12.Loc != LocRegPair && d12.Loc != LocStackPair && d12.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d11 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d12}, 2)
+					d11 = ctx.EmitGoCallScalar(jitGoABI_ba6adff9102b8764, []JITValueDesc{d12}, 2)
 					ctx.FreeDesc(&d10)
 					ctx.EnsureDesc(&d11)
 					if d11.Loc == LocImm {
@@ -26175,7 +26175,7 @@ func init_strings() {
 						panic("jit: generic call arg expects 2-word value (regexp.Compile arg0)")
 					}
 					ctx.SyncDesc(&d11)
-					callResults13 := JITEmitGoCallResults(ctx, GoFuncAddr(regexp.Compile), []JITValueDesc{d11}, []uint8{1, 2}, []uint8{1, 3})
+					callResults13 := JITEmitGoCallResults(ctx, jitGoABI_6a4578489bf5cd90, []JITValueDesc{d11})
 					d14 = callResults13[0]
 					_ = d14
 					d15 = callResults13[1]
@@ -26368,7 +26368,7 @@ func init_strings() {
 					if d54.Loc != LocRegPair && d54.Loc != LocStackPair && d54.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d53 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d54}, 2)
+					d53 = ctx.EmitGoCallScalar(jitGoABI_ba6adff9102b8764, []JITValueDesc{d54}, 2)
 					ctx.FreeDesc(&d52)
 					if d14.Loc == LocRegPair || d14.Loc == LocStackPair || d14.Loc == LocRegTriple || d14.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
@@ -26401,7 +26401,7 @@ func init_strings() {
 					}
 					ctx.SyncDesc(&d14)
 					ctx.SyncDesc(&d53)
-					d55 = ctx.EmitGoCallScalar(GoFuncAddr((*regexp.Regexp).MatchString), []JITValueDesc{d14, d53}, 1)
+					d55 = ctx.EmitGoCallScalar(jitGoABI_379d99abef8ab73a, []JITValueDesc{d14, d53}, 1)
 					d55.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d55.Reg, 1)
 					d55.Type = tagBool
@@ -26649,7 +26649,7 @@ func init_strings() {
 					if d12.Loc != LocRegPair && d12.Loc != LocStackPair && d12.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d11 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d12}, 2)
+					d11 = ctx.EmitGoCallScalar(jitGoABI_ba6adff9102b8764, []JITValueDesc{d12}, 2)
 					ctx.FreeDesc(&d10)
 					ctx.EnsureDesc(&d11)
 					if d11.Loc == LocImm {
@@ -27125,7 +27125,7 @@ func init_strings() {
 						ctx.BindReg(d42.Reg, &d43)
 					} else {
 						boxed := JITPrepareScmerGoArg(ctx, d42)
-						d43 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{boxed}, 1)
+						d43 = ctx.EmitGoCallScalar(jitGoABI_4e13f0e18efed408, []JITValueDesc{boxed}, 1)
 						d43.Type = tagInt
 						ctx.BindReg(d43.Reg, &d43)
 					}
@@ -27214,7 +27214,7 @@ func init_strings() {
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					d64 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString("")}
-					d65 = ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d64}, 2)
+					d65 = ctx.EmitGoCallScalar(jitGoABI_4af03274ff62e461, []JITValueDesc{d64}, 2)
 					ctx.EmitMovPairToResult(&d65, &result)
 					result.Type = tagString
 					mergeReturnType(result.Type)
@@ -27249,7 +27249,7 @@ func init_strings() {
 					if d68.Loc != LocRegPair && d68.Loc != LocStackPair && d68.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d67 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d68}, 2)
+					d67 = ctx.EmitGoCallScalar(jitGoABI_ba6adff9102b8764, []JITValueDesc{d68}, 2)
 					ctx.FreeDesc(&d66)
 					d69 = args[1]
 					d69.ID = 0
@@ -27269,7 +27269,7 @@ func init_strings() {
 						ctx.BindReg(d69.Reg, &d70)
 					} else {
 						boxed := JITPrepareScmerGoArg(ctx, d69)
-						d70 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{boxed}, 1)
+						d70 = ctx.EmitGoCallScalar(jitGoABI_4e13f0e18efed408, []JITValueDesc{boxed}, 1)
 						d70.Type = tagInt
 						ctx.BindReg(d70.Reg, &d70)
 					}
@@ -27311,7 +27311,7 @@ func init_strings() {
 					ctx.BindReg(d71.Reg2, &d71)
 					ctx.FreeDesc(&d70)
 					ctx.EnsureDesc(&d71)
-					d72 = ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d71}, 2)
+					d72 = ctx.EmitGoCallScalar(jitGoABI_4af03274ff62e461, []JITValueDesc{d71}, 2)
 					ctx.EmitMovPairToResult(&d72, &result)
 					result.Type = tagString
 					mergeReturnType(result.Type)
@@ -27428,4 +27428,163 @@ func optimizeRegexpTest(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer,
 		NewRegex(re),
 		rv[1],
 	}), td
+}
+
+// BEGIN jitgen prepared Go ABI entries
+var jitGoABI_00564e4e5f9ced6f uint64
+var jitGoABI_01a63e27dbf3374b uint64
+var jitGoABI_01b45a9058be3e41 uint64
+var jitGoABI_096cf33aced69298 uint64
+var jitGoABI_0afb65a56e20eb9a uint64
+var jitGoABI_0bbd401a13f77370 uint64
+var jitGoABI_0f4a9cfb76694a01 uint64
+var jitGoABI_1174749da09c9533 uint64
+var jitGoABI_11cb4fdd862e9314 uint64
+var jitGoABI_12f5dbe32c1462db uint64
+var jitGoABI_13852dcc17c06846 uint64
+var jitGoABI_1b7f0a93332b1c54 uint64
+var jitGoABI_1f822c238b99b1a9 uint64
+var jitGoABI_2d44ced5713434d0 uint64
+var jitGoABI_334818bf4be01560 uint64
+var jitGoABI_3468d5dad719fc59 uint64
+var jitGoABI_3658f77f4ea1a5ef uint64
+var jitGoABI_379d99abef8ab73a uint64
+var jitGoABI_38e833358955bf86 uint64
+var jitGoABI_3f2e6df4d4fdaa2f uint64
+var jitGoABI_3fcf0ad4e358a3bd uint64
+var jitGoABI_40dc93a6e697e88d uint64
+var jitGoABI_4af03274ff62e461 uint64
+var jitGoABI_4e13f0e18efed408 uint64
+var jitGoABI_524016cedfb68745 uint64
+var jitGoABI_574bd2d6f2d94300 uint64
+var jitGoABI_65f2853b74c16107 uint64
+var jitGoABI_6a4578489bf5cd90 uint64
+var jitGoABI_6b9a96e5c180320c uint64
+var jitGoABI_6dd6d55f6a78678a uint64
+var jitGoABI_6eea80aaeb0d9eea uint64
+var jitGoABI_7081c62e9c27b5d7 uint64
+var jitGoABI_72553763cd1ef504 uint64
+var jitGoABI_72688b5e874688f5 uint64
+var jitGoABI_73beafebc7150d26 uint64
+var jitGoABI_7963edd7d6ab302b uint64
+var jitGoABI_79c8c026d904766a uint64
+var jitGoABI_79e8c953a8e7d840 uint64
+var jitGoABI_7e6fa575ff0fe45a uint64
+var jitGoABI_8570aaa2e99ae7e7 uint64
+var jitGoABI_8ec17b7cc2ad83fc uint64
+var jitGoABI_9047b4d4115dbd48 uint64
+var jitGoABI_90a1eea90c9a9559 uint64
+var jitGoABI_9338a0bafb638cb8 uint64
+var jitGoABI_a135c81275f64614 uint64
+var jitGoABI_a263308f01c427e1 uint64
+var jitGoABI_a380a68045304092 uint64
+var jitGoABI_a59a20ffede8fc45 uint64
+var jitGoABI_a6ad7a751af5e1aa uint64
+var jitGoABI_a6df313aaa7d4f5d uint64
+var jitGoABI_a97b018d6ed987c4 uint64
+var jitGoABI_b27b69f735c5670f uint64
+var jitGoABI_b3c0b8b8197f1143 uint64
+var jitGoABI_b62ecaeee92c4866 uint64
+var jitGoABI_b63c374daa21dd0b uint64
+var jitGoABI_b7c9470e6a805964 uint64
+var jitGoABI_b7df89e1950501a9 uint64
+var jitGoABI_ba6adff9102b8764 uint64
+var jitGoABI_ba97d45bf13e8e72 uint64
+var jitGoABI_bfdc704c04ad4b5c uint64
+var jitGoABI_c0e514e0367f96ae uint64
+var jitGoABI_c120f198eaf72e56 uint64
+var jitGoABI_c323a0ae852b5d03 uint64
+var jitGoABI_c874f6f749f20852 uint64
+var jitGoABI_c899bf4def76efba uint64
+var jitGoABI_c91e204b95bbdb15 uint64
+var jitGoABI_cc59d47caab52db9 uint64
+var jitGoABI_d148205e02658696 uint64
+var jitGoABI_d5649c48ce9a4eaf uint64
+var jitGoABI_d9347fa10faeae59 uint64
+var jitGoABI_da21fd4ce95109a3 uint64
+var jitGoABI_dc10c5a8cc306172 uint64
+var jitGoABI_e77f44427da6cb59 uint64
+var jitGoABI_e9d13692c484fbae uint64
+var jitGoABI_ea41ba4597ad2142 uint64
+var jitGoABI_f14e05500d0387e3 uint64
+var jitGoABI_f6aff333e9c5357d uint64
+
+func init() {
+	jitGoABI_00564e4e5f9ced6f = GoFuncAddr(func(value Scmer) any { return value })
+	jitGoABI_01a63e27dbf3374b = GoFuncAddr(func() *bytes.Buffer { return new(bytes.Buffer) })
+	jitGoABI_01b45a9058be3e41 = GoFuncAddr(jitStringToBytes)
+	jitGoABI_096cf33aced69298 = GoFuncAddr(compressedTextCase)
+	jitGoABI_0afb65a56e20eb9a = GoFuncAddr(url.QueryEscape)
+	jitGoABI_0bbd401a13f77370 = GoFuncAddr(func() *any { return new(any) })
+	jitGoABI_0f4a9cfb76694a01 = GoFuncAddr(crand.Read)
+	jitGoABI_1174749da09c9533 = GoFuncAddr((*schemeTextWriter).writeCompressedText)
+	jitGoABI_11cb4fdd862e9314 = GoFuncAddr(func(base *schemeTextWriter, value uint64) { base.hash = value })
+	jitGoABI_12f5dbe32c1462db = GoFuncAddr(strings.TrimLeft)
+	jitGoABI_13852dcc17c06846 = GoFuncAddr(compressedTextTrim)
+	jitGoABI_1b7f0a93332b1c54 = GoFuncAddr(DecodeLikePattern)
+	jitGoABI_1f822c238b99b1a9 = GoFuncAddr(decodeBufferBase64)
+	jitGoABI_2d44ced5713434d0 = GoFuncAddr(strings.HasSuffix)
+	jitGoABI_334818bf4be01560 = GoFuncAddr(strings.ReplaceAll)
+	jitGoABI_3468d5dad719fc59 = GoFuncAddr(strings.TrimSuffix)
+	jitGoABI_3658f77f4ea1a5ef = GoFuncAddr(strings.ToUpper)
+	jitGoABI_379d99abef8ab73a = GoFuncAddr((*regexp.Regexp).MatchString)
+	jitGoABI_38e833358955bf86 = GoFuncAddr(decodeTextHex)
+	jitGoABI_3f2e6df4d4fdaa2f = GoFuncAddr(func(value *any) any { return *value })
+	jitGoABI_3fcf0ad4e358a3bd = GoFuncAddr(strings.Split)
+	jitGoABI_40dc93a6e697e88d = GoFuncAddr(strings.Contains)
+	jitGoABI_4af03274ff62e461 = GoFuncAddr(NewString)
+	jitGoABI_4e13f0e18efed408 = GoFuncAddr(Scmer.Int)
+	jitGoABI_524016cedfb68745 = GoFuncAddr(jitMakeScmerSlice)
+	jitGoABI_574bd2d6f2d94300 = GoFuncAddr(encodeTextHex)
+	jitGoABI_65f2853b74c16107 = GoFuncAddr(bufferReplace)
+	jitGoABI_6a4578489bf5cd90 = GoFuncAddr(regexp.Compile)
+	jitGoABI_6b9a96e5c180320c = GoFuncAddr(func() *schemeTextWriter { return new(schemeTextWriter) })
+	jitGoABI_6dd6d55f6a78678a = GoFuncAddr(func(value *any) any { return value })
+	jitGoABI_6eea80aaeb0d9eea = GoFuncAddr(func() *[32]byte { return new([32]byte) })
+	jitGoABI_7081c62e9c27b5d7 = GoFuncAddr(strings.ToLower)
+	jitGoABI_72553763cd1ef504 = GoFuncAddr(func(value *bytes.Buffer) io.Writer { return value })
+	jitGoABI_72688b5e874688f5 = GoFuncAddr(JITStringEqual)
+	jitGoABI_73beafebc7150d26 = GoFuncAddr(func(value *[32]byte) []byte { return value[0:32:32] })
+	jitGoABI_7963edd7d6ab302b = GoFuncAddr(strings.Count)
+	jitGoABI_79c8c026d904766a = GoFuncAddr(strLikeCString)
+	jitGoABI_79e8c953a8e7d840 = GoFuncAddr(func(value string) any { return value })
+	jitGoABI_7e6fa575ff0fe45a = GoFuncAddr((Scmer).IsBString)
+	jitGoABI_8570aaa2e99ae7e7 = GoFuncAddr((*base64.Encoding).DecodeString)
+	jitGoABI_8ec17b7cc2ad83fc = GoFuncAddr(strings.HasPrefix)
+	jitGoABI_9047b4d4115dbd48 = GoFuncAddr(jitMakeByteSlice)
+	jitGoABI_90a1eea90c9a9559 = GoFuncAddr((Scmer).Func)
+	jitGoABI_9338a0bafb638cb8 = GoFuncAddr((*json.Encoder).Encode)
+	jitGoABI_a135c81275f64614 = GoFuncAddr(strings.TrimSpace)
+	jitGoABI_a263308f01c427e1 = GoFuncAddr((*json.Encoder).SetEscapeHTML)
+	jitGoABI_a380a68045304092 = GoFuncAddr(json.Marshal)
+	jitGoABI_a59a20ffede8fc45 = GoFuncAddr(strings.ContainsAny)
+	jitGoABI_a6ad7a751af5e1aa = GoFuncAddr(func(value *Scmer) any { return value })
+	jitGoABI_a6df313aaa7d4f5d = GoFuncAddr(jitBytesToString)
+	jitGoABI_a97b018d6ed987c4 = GoFuncAddr((*bytes.Buffer).String)
+	jitGoABI_b27b69f735c5670f = GoFuncAddr(NewBString)
+	jitGoABI_b3c0b8b8197f1143 = GoFuncAddr(func(dst, src *[32]byte) { *dst = *src })
+	jitGoABI_b62ecaeee92c4866 = GoFuncAddr(strings.Repeat)
+	jitGoABI_b63c374daa21dd0b = GoFuncAddr(compressedTextLen)
+	jitGoABI_b7c9470e6a805964 = GoFuncAddr(matchLikeString)
+	jitGoABI_b7df89e1950501a9 = GoFuncAddr((Scmer).Any)
+	jitGoABI_ba6adff9102b8764 = GoFuncAddr(Scmer.String)
+	jitGoABI_ba97d45bf13e8e72 = GoFuncAddr(url.QueryUnescape)
+	jitGoABI_bfdc704c04ad4b5c = GoFuncAddr(Simplify)
+	jitGoABI_c0e514e0367f96ae = GoFuncAddr((Scmer).IsCString)
+	jitGoABI_c120f198eaf72e56 = GoFuncAddr((*regexp.Regexp).FindAllString)
+	jitGoABI_c323a0ae852b5d03 = GoFuncAddr(html.EscapeString)
+	jitGoABI_c874f6f749f20852 = GoFuncAddr(cstringSubstring)
+	jitGoABI_c899bf4def76efba = GoFuncAddr(json.Unmarshal)
+	jitGoABI_c91e204b95bbdb15 = GoFuncAddr(jitAssertString)
+	jitGoABI_cc59d47caab52db9 = GoFuncAddr(hex.EncodeToString)
+	jitGoABI_d148205e02658696 = GoFuncAddr(encodeBufferBase64)
+	jitGoABI_d5649c48ce9a4eaf = GoFuncAddr(WriteStringValue)
+	jitGoABI_d9347fa10faeae59 = GoFuncAddr((func(arg0 []byte) *[32]byte { value := sha256.Sum256(arg0); return &value }))
+	jitGoABI_da21fd4ce95109a3 = GoFuncAddr(bstringRawText)
+	jitGoABI_dc10c5a8cc306172 = GoFuncAddr(jitInvokeGoFunctionSlice)
+	jitGoABI_e77f44427da6cb59 = GoFuncAddr(compressedTextDigest)
+	jitGoABI_e9d13692c484fbae = GoFuncAddr(func() *base64.Encoding { return base64.StdEncoding })
+	jitGoABI_ea41ba4597ad2142 = GoFuncAddr(strings.TrimRight)
+	jitGoABI_f14e05500d0387e3 = GoFuncAddr(json.NewEncoder)
+	jitGoABI_f6aff333e9c5357d = GoFuncAddr(serializeEx)
 }

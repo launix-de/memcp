@@ -1363,7 +1363,7 @@ func (s *StorageComputeProxy) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc,
 	ctx.SyncDesc(&idxInt)
 	ctx.SyncDesc(&d1)
 	ctx.SyncDesc(&d2)
-	d3 := ctx.EmitGoCallScalar(scm.GoFuncAddr((*StorageComputeProxy).getValueTx), []scm.JITValueDesc{thisptr, d0, idxInt, d1, d2}, 2)
+	d3 := ctx.EmitGoCallScalar(jitGoABI_768605af24b9cde2, []scm.JITValueDesc{thisptr, d0, idxInt, d1, d2}, 2)
 	d3.NoHeapPointer = false
 	ctx.BindReg(d3.Reg, &d3)
 	ctx.BindReg(d3.Reg2, &d3)
@@ -1385,4 +1385,11 @@ func (s *StorageComputeProxy) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc,
 	result.Type = d3.Type
 	return result
 	return result
+}
+
+// BEGIN jitgen prepared Go ABI entries
+var jitGoABI_768605af24b9cde2 uint64
+
+func init() {
+	jitGoABI_768605af24b9cde2 = scm.GoFuncAddr((*StorageComputeProxy).getValueTx)
 }

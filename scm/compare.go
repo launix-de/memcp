@@ -1642,7 +1642,7 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 		if d152.Loc != LocRegPair && d152.Loc != LocStackPair && d152.Loc != LocInputPair {
 			panic("jit: Scmer.String receiver not materialized as pair")
 		}
-		d151 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d152}, 2)
+		d151 = ctx.EmitGoCallScalar(jitGoABI_0cbff6f55ee96f6d, []JITValueDesc{d152}, 2)
 		ctx.EnsureDesc(&d151)
 		if d151.Loc == LocImm {
 			tmpPair := JITValueDesc{Loc: LocRegPair, Type: d151.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
@@ -1670,7 +1670,7 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 			panic("jit: generic call arg expects 2-word value (ParseDateString arg0)")
 		}
 		ctx.SyncDesc(&d151)
-		callResults153 := JITEmitGoCallResults(ctx, GoFuncAddr(ParseDateString), []JITValueDesc{d151}, []uint8{1, 1}, []uint8{0, 0})
+		callResults153 := JITEmitGoCallResults(ctx, jitGoABI_3c7aea5ce0fcdece, []JITValueDesc{d151})
 		d154 = callResults153[0]
 		_ = d154
 		d155 = callResults153[1]
@@ -1786,7 +1786,7 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 			ctx.BindReg(args[0].Reg, &d186)
 		} else {
 			boxed := JITPrepareScmerGoArg(ctx, args[0])
-			d186 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{boxed}, 1)
+			d186 = ctx.EmitGoCallScalar(jitGoABI_5bd1d0f41a4e4914, []JITValueDesc{boxed}, 1)
 			d186.Type = tagInt
 			ctx.BindReg(d186.Reg, &d186)
 		}
@@ -2002,7 +2002,7 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 			ctx.BindReg(args[0].Reg, &d228)
 		} else {
 			boxed := JITPrepareScmerGoArg(ctx, args[0])
-			d228 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{boxed}, 1)
+			d228 = ctx.EmitGoCallScalar(jitGoABI_5bd1d0f41a4e4914, []JITValueDesc{boxed}, 1)
 			d228.Type = tagInt
 			ctx.BindReg(d228.Reg, &d228)
 		}
@@ -2271,7 +2271,7 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 			ctx.BindReg(args[0].Reg, &d279)
 		} else {
 			boxed := JITPrepareScmerGoArg(ctx, args[0])
-			d279 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{boxed}, 1)
+			d279 = ctx.EmitGoCallScalar(jitGoABI_5bd1d0f41a4e4914, []JITValueDesc{boxed}, 1)
 			d279.Type = tagInt
 			ctx.BindReg(d279.Reg, &d279)
 		}
@@ -2289,7 +2289,7 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 			ctx.BindReg(args[1].Reg, &d280)
 		} else {
 			boxed := JITPrepareScmerGoArg(ctx, args[1])
-			d280 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{boxed}, 1)
+			d280 = ctx.EmitGoCallScalar(jitGoABI_5bd1d0f41a4e4914, []JITValueDesc{boxed}, 1)
 			d280.Type = tagInt
 			ctx.BindReg(d280.Reg, &d280)
 		}
@@ -2359,7 +2359,7 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 			ctx.BindReg(args[0].Reg, &d283)
 		} else {
 			boxed := JITPrepareScmerGoArg(ctx, args[0])
-			d283 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{boxed}, 1)
+			d283 = ctx.EmitGoCallScalar(jitGoABI_5bd1d0f41a4e4914, []JITValueDesc{boxed}, 1)
 			d283.Type = tagInt
 			ctx.BindReg(d283.Reg, &d283)
 		}
@@ -2459,7 +2459,7 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 			ctx.BindReg(args[0].Reg, &d288)
 		} else {
 			boxed := JITPrepareScmerGoArg(ctx, args[0])
-			d288 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{boxed}, 1)
+			d288 = ctx.EmitGoCallScalar(jitGoABI_5bd1d0f41a4e4914, []JITValueDesc{boxed}, 1)
 			d288.Type = tagInt
 			ctx.BindReg(d288.Reg, &d288)
 		}
@@ -2477,7 +2477,7 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 			ctx.BindReg(args[1].Reg, &d289)
 		} else {
 			boxed := JITPrepareScmerGoArg(ctx, args[1])
-			d289 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{boxed}, 1)
+			d289 = ctx.EmitGoCallScalar(jitGoABI_5bd1d0f41a4e4914, []JITValueDesc{boxed}, 1)
 			d289.Type = tagInt
 			ctx.BindReg(d289.Reg, &d289)
 		}
@@ -2730,4 +2730,15 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 	}
 	return result
 
+}
+
+// BEGIN jitgen prepared Go ABI entries
+var jitGoABI_0cbff6f55ee96f6d uint64
+var jitGoABI_3c7aea5ce0fcdece uint64
+var jitGoABI_5bd1d0f41a4e4914 uint64
+
+func init() {
+	jitGoABI_0cbff6f55ee96f6d = GoFuncAddr(Scmer.String)
+	jitGoABI_3c7aea5ce0fcdece = GoFuncAddr(ParseDateString)
+	jitGoABI_5bd1d0f41a4e4914 = GoFuncAddr(Scmer.Int)
 }

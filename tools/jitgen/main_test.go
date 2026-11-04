@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"go/ast"
 	"go/constant"
+	"go/format"
 	"go/importer"
 	"go/parser"
 	"go/token"
@@ -906,8 +907,8 @@ func TestTargetLayoutPreservesPointersAndTrailingEmptyFields(t *testing.T) {
 			if got := goCallWordCount(value); got != 3 {
 				t.Fatalf("trailing zero-size field: %d ABI words, want 3", got)
 			}
-			if got := goCallPointerMask(value); got != 2 {
-				t.Fatalf("pointer map: %03b, want 010", got)
+			if !goCallContainsPointers(value) {
+				t.Fatal("pointer-bearing aggregate lost its specialization property")
 			}
 		})
 	}
@@ -1129,8 +1130,8 @@ func TestGoCallStackArrayAdmissionPreservesMemoryLayout(t *testing.T) {
 	if got := goCallWordCount(array); got != 2 {
 		t.Fatalf("packed array width changed to %d, want 2", got)
 	}
-	if got := goCallPointerMask(array); got != 0 {
-		t.Fatalf("packed byte-array pointer mask changed to %d, want 0", got)
+	if goCallContainsPointers(array) {
+		t.Fatal("packed byte array must remain pointer-free")
 	}
 }
 
@@ -1206,8 +1207,11 @@ func TestGoCallOrdinaryMultiResultRemainsAdmissible(t *testing.T) {
 	if !generator.emitGenericStaticCall(call.Name(), call.Call.StaticCallee(), call.Call.Args) {
 		t.Fatal("ordinary text/error register results rejected")
 	}
-	if !strings.Contains(generator.w.String(), "[]uint8{2, 2}, []uint8{1, 3}") {
-		t.Fatal("ordinary text/error ABI width or pointer maps changed")
+	if !strings.Contains(generator.w.String(), "JITEmitGoCallResults(ctx, GoFuncAddr(text), []JITValueDesc{})") {
+		t.Fatalf("ordinary text/error results must use the runtime signature: %s", generator.w.String())
+	}
+	if strings.Contains(generator.w.String(), "[]uint8") {
+		t.Fatal("generator duplicated runtime-owned result widths or pointer maps")
 	}
 }
 
@@ -1270,5 +1274,46 @@ func initializer(args ...Scmer) Scmer { return ApplyOnce(args[0], nil) }
 	}
 	if !strings.Contains(code, "jitEmitReducerInitializer(ctx,") {
 		t.Fatalf("initializer lost native lowering:\n%s", code)
+	}
+}
+
+func TestPreparedGoCallsAreClosedAndRegenerationIsStable(t *testing.T) {
+	source := []byte(`package example
+func helper(x int) int { return x }
+func emitter(captured int) {
+ _ = GoFuncAddr(helper)
+ _ = GoFuncAddr(func(arg0 int) *int { value := helper(arg0); return &value })
+ _ = GoFuncAddr(func(arg0 int) int { return captured + arg0 })
+}
+`)
+	first, err := format.Source(prepareGoCalls("fixture.go", source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := format.Source(prepareGoCalls("fixture.go", first))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(first, second) {
+		t.Fatalf("prepared entries changed on regeneration:\n%s\n%s", first, second)
+	}
+	if bytes.Contains(second, []byte("var value uint64")) {
+		t.Fatal("hoisted a helper-local assignment")
+	}
+	if !bytes.Contains(second, []byte("return captured + arg0")) {
+		t.Fatal("lost capturing call")
+	}
+	f, err := parser.ParseFile(token.NewFileSet(), "fixture.go", second, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, decl := range f.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Name.Name != "init" {
+			continue
+		}
+		if len(fn.Body.List) != 2 {
+			t.Fatalf("prepared %d functions, want two closed expressions", len(fn.Body.List))
+		}
 	}
 }

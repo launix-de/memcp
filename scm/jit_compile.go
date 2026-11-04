@@ -525,7 +525,7 @@ func jitMakeReservedList(capacityValue Scmer) Scmer {
 }
 
 func jitStoreScmerAt(address *Scmer, value Scmer) {
-	*address = value
+	jitRuntimeStoreScmer(address, value)
 }
 
 func jitResolveRuntimeSymbol(env *Env, symbol Scmer) Scmer {
@@ -1030,11 +1030,8 @@ func JITPrepareGoSliceArg(ctx *JITContext, value JITValueDesc) JITValueDesc {
 	}
 }
 
-// EmitStoreScmerAt stores a Scmer through an address produced by
-// EmitSliceElementAddress. Values whose descriptor proves that their ptr word
-// is nil or a static runtime sentinel need no GC write barrier and are emitted
-// as two plain stores. All other values retain Go's authoritative write barrier
-// through the generic trampoline.
+// EmitStoreScmerAt uses the running toolchain's typed write barrier. Even
+// replacing a heap pointer by a numeric Scmer may require a deletion barrier.
 func (ctx *JITContext) EmitStoreScmerAt(address, value *JITValueDesc) {
 	if address.Loc == LocStack {
 		stored := JITPrepareScmerGoArg(ctx, *value)
@@ -1048,53 +1045,6 @@ func (ctx *JITContext) EmitStoreScmerAt(address, value *JITValueDesc) {
 	if address.Loc != LocReg {
 		panic("jit: Scmer store requires an address register")
 	}
-	switch value.Type {
-	case tagNil, tagFloat, tagInt, tagBool, tagDate, tagNthLocalVar:
-		value.NoHeapPointer = true
-	}
-	if value.NoHeapPointer {
-		ctx.ProtectReg(address.Reg)
-		ctx.EnsureDesc(value)
-		ctx.UnprotectReg(address.Reg)
-		if value.Loc == LocImm {
-			ctx.EmitMovRegImm64(ctx.ScratchReg, uint64(uintptr(unsafe.Pointer(value.Imm.ptr))))
-			ctx.EmitStoreRegMem(ctx.ScratchReg, address.Reg, 0)
-			ctx.EmitMovRegImm64(ctx.ScratchReg, value.Imm.aux)
-			ctx.EmitStoreRegMem(ctx.ScratchReg, address.Reg, 8)
-			return
-		}
-		if value.Loc == LocRegPair {
-			ctx.EmitStoreRegMem(value.Reg, address.Reg, 0)
-			ctx.EmitStoreRegMem(value.Reg2, address.Reg, 8)
-			return
-		}
-		if value.Loc == LocReg || value.Loc == LocFPReg {
-			ctx.ProtectReg(address.Reg)
-			ctx.ProtectReg(value.Reg)
-			pair := jitAllocTrackedPair(ctx, value.Type)
-			switch value.Type {
-			case tagInt:
-				ctx.EmitMakeInt(pair, *value)
-			case tagFloat:
-				ctx.EmitMakeFloat(pair, *value)
-			case tagBool:
-				ctx.EmitMakeBool(pair, *value)
-			case tagNil:
-				ctx.EmitMakeNil(pair)
-			default:
-				ctx.UnprotectReg(value.Reg)
-				ctx.UnprotectReg(address.Reg)
-				ctx.FreeDesc(&pair)
-				panic("jit: unsupported unboxed Scmer slice store")
-			}
-			ctx.UnprotectReg(value.Reg)
-			ctx.UnprotectReg(address.Reg)
-			ctx.EmitStoreRegMem(pair.Reg, address.Reg, 0)
-			ctx.EmitStoreRegMem(pair.Reg2, address.Reg, 8)
-			ctx.FreeDesc(&pair)
-			return
-		}
-	}
 
 	ctx.SyncDesc(value)
 	stored := *value
@@ -1107,14 +1057,9 @@ func (ctx *JITContext) EmitStoreScmerAt(address, value *JITValueDesc) {
 	}
 }
 
-// EmitStoreScmerSliceElement fuses the SSA IndexAddr+Store pair. Numeric and
-// nil Scmers have a statically non-heap pointer word, so they can be written
-// without a write barrier. In that case the dedicated architecture scratch
-// register carries the transient address and never consumes an allocator slot.
-// This distinction matters inside generated bulk-reader loops: making the
-// address an ordinary descriptor can otherwise evict every live loop value.
-// Pointer-bearing values deliberately retain EmitStoreScmerAt's authoritative
-// Go write-barrier path.
+// EmitStoreScmerSliceElement fuses the SSA IndexAddr+Store pair. Numeric
+// stores retain a direct path when write barriers are disabled; during marking
+// a typed clear shades old pointers before the new pointer-free value is stored.
 func (ctx *JITContext) EmitStoreScmerSliceElement(slice, index, value *JITValueDesc, elementSize int32) {
 	if ctx.TryEmitStoreScmerSliceElement(slice, index, value, elementSize) {
 		return
@@ -1124,11 +1069,9 @@ func (ctx *JITContext) EmitStoreScmerSliceElement(slice, index, value *JITValueD
 	ctx.FreeDesc(&address)
 }
 
-// TryEmitStoreScmerSliceElement reports whether it emitted a safepoint-free
-// direct store. Callers which need a source value after the store can defer
-// rooting/spilling that value until this returns false, rather than charging
-// numeric bulk loops for a Go-call boundary which is not present in their
-// specialized machine code.
+// TryEmitStoreScmerSliceElement emits the specialized numeric store, including
+// its GC slow path. Numeric values remain in their producer registers; the
+// ordinary Go-call bridge preserves live values and roots on the slow path.
 func (ctx *JITContext) TryEmitStoreScmerSliceElement(slice, index, value *JITValueDesc, elementSize int32) bool {
 	switch value.Type {
 	case tagNil, tagFloat, tagInt, tagBool, tagDate, tagNthLocalVar:
@@ -1319,6 +1262,12 @@ func (ctx *JITContext) emitDirectScmerSliceElement(slice, index, value *JITValue
 		}
 		return false
 	}
+	jitEmitPointerFreeStoreBarrier(ctx, ctx.ScratchReg, func() {
+		if !emitAddress() {
+			panic("jit: numeric store address changed across barrier")
+		}
+	})
+
 	switch value.Loc {
 	case LocImm:
 		if immediateStore {
@@ -1915,10 +1864,11 @@ func jitRootScmer(ctx *JITContext, value JITValueDesc) JITValueDesc {
 }
 
 // JITEmitGoCallResults emits a static Go call with multiple return values and
-// immediately gives every result an invocation-local stack home. pointerMasks
-// describes the pointer-bearing ABI words of each result and therefore keeps
-// fresh strings, slices, interfaces, and pointers live across later safepoints.
-func JITEmitGoCallResults(ctx *JITContext, funcAddr uint64, args []JITValueDesc, wordCounts, pointerMasks []uint8) []JITValueDesc {
+// immediately gives every result an invocation-local stack home. The running
+// toolchain supplies result widths and pointer masks; generated callers do not
+// duplicate Go ABI or interface GC-layout assumptions.
+func JITEmitGoCallResults(ctx *JITContext, funcAddr uint64, args []JITValueDesc) []JITValueDesc {
+	wordCounts, pointerMasks := jitRuntimeGoResultShape(funcAddr)
 	if len(wordCounts) != len(pointerMasks) {
 		panic("jit: result word counts and pointer masks differ")
 	}
@@ -2198,7 +2148,7 @@ func jitMaterializeVirtualSlice(ctx *JITContext, virtual JITValueDesc, result JI
 // slice (for example append) instead of merely indexing the virtual arguments.
 func jitMaterializeVirtualGoSlice(ctx *JITContext, elements []JITValueDesc) JITValueDesc {
 	length := JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(len(elements))), NoHeapPointer: true}
-	results := JITEmitGoCallResults(ctx, GoFuncAddr(jitMakeScmerSlice), []JITValueDesc{length, length}, []uint8{3}, []uint8{1})
+	results := JITEmitGoCallResults(ctx, GoFuncAddr(jitMakeScmerSlice), []JITValueDesc{length, length})
 	header := results[0]
 	header.Type = tagSlice
 	for i := range elements {
@@ -3060,7 +3010,7 @@ func jitEmitDynamicCallableAt(ctx *JITContext, callable JITValueDesc, operandVal
 	// A tagFunc Scmer points at the Go variable holding the funcval pointer,
 	// whereas a compiled Proc is itself laid out as the funcval object.
 	fnReg = ctx.AllocRegExcept(nativeCallable.Reg, nativeCallable.Reg2)
-	ctx.EmitMovRegMem(fnReg, nativeCallable.Reg, 0)
+	jitEmitRuntimeLoadFunctionContext(ctx, fnReg, nativeCallable.Reg)
 	// Retaining native functions need the existing owned-argument boundary.
 	// Declarations populate this small identity set; the hot path remains a
 	// sequence of comparisons without a Go helper or a builtin-name policy.

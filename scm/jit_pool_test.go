@@ -17,7 +17,36 @@ Copyright (C) 2026  Carl-Philip Hänsch
 
 package scm
 
-import "testing"
+import (
+	"testing"
+	"unsafe"
+)
+
+func TestJITCodeBufferOverflowLeavesRetryBoundary(t *testing.T) {
+	code := make([]byte, 4)
+	ctx := &JITContext{Start: unsafe.Pointer(&code[0]), Ptr: unsafe.Pointer(&code[0]), End: unsafe.Add(unsafe.Pointer(&code[0]), len(code))}
+	ctx.Write([]byte{1, 2})
+	func() {
+		defer func() {
+			v := recover()
+			if !jitIsCodeOverflow(v) {
+				t.Fatalf("overflow lost its typed retry signal: %#v", v)
+			}
+			full := v.(jitBufferFull)
+			if full.Offset != 2 || full.Required != 3 || full.Available != 2 {
+				t.Fatalf("incorrect retry requirements: %+v", full)
+			}
+		}()
+		ctx.Write([]byte{3, 4, 5})
+	}()
+	if ctx.Offset() != 2 || code[2] != 0 || code[3] != 0 {
+		t.Fatal("failed write partially committed code")
+	}
+	ctx.Patch(0, []byte{9})
+	if ctx.Offset() != 2 || code[0] != 9 {
+		t.Fatal("patch changed the write position")
+	}
+}
 
 func TestJITPoolUnmapsSealedArenaAfterLastLease(t *testing.T) {
 	var pool jitPool

@@ -39,8 +39,6 @@ func TestJITTypedInliningKeepsLargeNativeBoundaries(t *testing.T) {
 	}
 }
 
-// Identical call shapes must not change admission when unrelated earlier
-// code has claimed registers. The allocator still handles actual emission.
 func TestJITInlineAdmissionDependsOnCallShape(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -396,10 +394,10 @@ func TestJITStorageReadersSharePackedCodeLifetime(t *testing.T) {
 	if len(scalarHolder.owner.entries) != 3 {
 		t.Fatalf("shared code owner has %d entries, want 3", len(scalarHolder.owner.entries))
 	}
-	if gap := rangeHolder.code - scalarHolder.code; gap == 0 || gap >= 16*1024 {
+	if gap := rangeHolder.code.Entry() - scalarHolder.code.Entry(); gap == 0 || gap >= 16*1024 {
 		t.Fatalf("scalar-to-range code gap = %d, want densely packed functions", gap)
 	}
-	if gap := multiHolder.code - rangeHolder.code; gap == 0 || gap >= 16*1024 {
+	if gap := multiHolder.code.Entry() - rangeHolder.code.Entry(); gap == 0 || gap >= 16*1024 {
 		t.Fatalf("range-to-multi code gap = %d, want densely packed functions", gap)
 	}
 	runtime.GC()
@@ -410,7 +408,7 @@ func TestJITStorageReadersSharePackedCodeLifetime(t *testing.T) {
 
 func TestJITGoCallFourScalarResults(t *testing.T) {
 	fn := CompileJITStorageGetValue(func(ctx *JITContext, seed, target JITValueDesc) JITValueDesc {
-		results := JITEmitGoCallResults(ctx, GoFuncAddr(jitFourScalarResults), []JITValueDesc{seed}, []uint8{1, 1, 1, 1}, []uint8{0, 0, 0, 0})
+		results := JITEmitGoCallResults(ctx, GoFuncAddr(jitFourScalarResults), []JITValueDesc{seed})
 		for index := range results {
 			ctx.EnsureDesc(&results[index])
 		}
@@ -457,6 +455,46 @@ func TestJITStoreCustomScmerKeepsSpilledAddress(t *testing.T) {
 		t.Fatalf("stored custom Scmer = %v, want tag %d at %p", got, value.GetTag(), value.ptr)
 	}
 	runtime.KeepAlive(payload)
+}
+
+func TestJITNumericStoreOverwritesPointersDuringGC(t *testing.T) {
+	fn := CompileJITStorageGetValueRange(func(ctx *JITContext, index, count, target, stride, result JITValueDesc) JITValueDesc {
+		value := JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(42), NoHeapPointer: true}
+		if !ctx.TryEmitStoreScmerSliceElement(&target, &index, &value, 16) {
+			panic("numeric store specialization unavailable")
+		}
+		return result
+	})
+	if fn == nil {
+		t.Fatal("numeric store with GC slow path did not compile")
+	}
+	stop, stopped := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(stopped)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				runtime.GC()
+			}
+		}
+	}()
+	defer func() { close(stop); <-stopped }()
+	values := make([]Scmer, 32)
+	for round := 0; round < 256; round++ {
+		for i := range values {
+			values[i] = NewString(fmt.Sprintf("old heap value %d/%d", round, i))
+		}
+		for i := range values {
+			fn(uint32(i), 1, values, 1)
+		}
+		for i, value := range values {
+			if !Equal(value, NewInt(42)) {
+				t.Fatalf("slot %d after numeric store: %v", i, value)
+			}
+		}
+	}
 }
 
 func TestJITLessHelperKnownLargeIntegers(t *testing.T) {
@@ -767,7 +805,7 @@ func TestJITClosureCaptureForwardingUnderRegisterPressure(t *testing.T) {
 		for index, pointers := range callRoots.bits {
 			for bit := 0; bit < 8; bit++ {
 				offset := callRoots.first + int32(index*64+bit*8)
-				if pointers&(1<<bit) != 0 && offset >= int32(jitGoSpillBytes+16) {
+				if pointers&(1<<bit) != 0 && offset >= jitRuntimeCallBytes(GoFuncAddr(runtime.GC)) {
 					integerSaveAreaHasPointers = true
 				}
 			}

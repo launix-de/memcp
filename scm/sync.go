@@ -1515,7 +1515,7 @@ func init_sync() {
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d7)
 					ctx.EnsureDesc(&d7)
-					callResults8 := JITEmitGoCallResults(ctx, GoFuncAddr(jitMakeScmerSlice), []JITValueDesc{d7, d7}, []uint8{3}, []uint8{1})
+					callResults8 := JITEmitGoCallResults(ctx, jitGoABI_d30c4eb1d5f37603, []JITValueDesc{d7, d7})
 					d9 = callResults8[0]
 					d9.Type = tagSlice
 					ctx.FreeDesc(&d7)
@@ -1609,7 +1609,7 @@ func init_sync() {
 					virtualArgs21 = args[1:]
 					_ = virtualArgs21
 					ctx.EnsureDesc(&d20)
-					callResults22 := JITEmitGoCallResults(ctx, GoFuncAddr(jitCopyScmerSlice), []JITValueDesc{d20}, []uint8{1}, []uint8{0})
+					callResults22 := JITEmitGoCallResults(ctx, jitGoABI_d5ee89b35de61302, []JITValueDesc{d20})
 					d23 = callResults22[0]
 					d23.Type = tagInt
 					d24 = args[0]
@@ -1641,7 +1641,7 @@ func init_sync() {
 					ctx.SyncDesc(&d25)
 					ctx.SyncDesc(&d26)
 					ctx.SyncDesc(&d27)
-					d28 = ctx.EmitGoCallScalar(GoFuncAddr(ApplyEx), []JITValueDesc{d25, d26, d27}, 2)
+					d28 = ctx.EmitGoCallScalar(jitGoABI_e30ce57da250e0e4, []JITValueDesc{d25, d26, d27}, 2)
 					d28.NoHeapPointer = false
 					ctx.BindReg(d28.Reg, &d28)
 					ctx.BindReg(d28.Reg2, &d28)
@@ -1946,7 +1946,7 @@ func init_sync() {
 				for i := range args {
 					ctx.StabilizeDescForControlFlow(&args[i])
 				}
-				d0 := ctx.EmitGoCallScalar(GoFuncAddr(runtime.NumCPU), []JITValueDesc{}, 1)
+				d0 := ctx.EmitGoCallScalar(jitGoABI_a366a79c0e7fe75e, []JITValueDesc{}, 1)
 				d0.NoHeapPointer = true
 				ctx.BindReg(d0.Reg, &d0)
 				ctx.EnsureDesc(&d0)
@@ -1997,16 +1997,16 @@ func init_sync() {
 				for i := range args {
 					ctx.StabilizeDescForControlFlow(&args[i])
 				}
-				d0 := ctx.EmitGoCallScalar(GoFuncAddr(func() *runtime.MemStats { return new(runtime.MemStats) }), nil, 1)
+				d0 := ctx.EmitGoCallScalar(jitGoABI_ea34c7cf033c26e7, nil, 1)
 				ctx.BindReg(d0.Reg, &d0)
 				d1 := ctx.EmitGoCallScalar(GoFuncAddr((func() *runtime.MemStats { value := CachedMemStats(); return &value })), []JITValueDesc{}, 1)
 				d1.NoHeapPointer = false
 				ctx.BindReg(d1.Reg, &d1)
 				ctx.EnsureDesc(&d1)
-				ctx.EmitGoCallVoid(GoFuncAddr(func(dst, src *runtime.MemStats) { *dst = *src }), []JITValueDesc{d0, d1})
+				ctx.EmitGoCallVoid(jitGoABI_8a5896e84b127484, []JITValueDesc{d0, d1})
 				d2 := JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(5)}
 				_ = d2
-				d3 := ctx.EmitGoCallScalar(GoFuncAddr(NewFastDictValue), []JITValueDesc{d2}, 1)
+				d3 := ctx.EmitGoCallScalar(jitGoABI_3ce53b486290ebc1, []JITValueDesc{d2}, 1)
 				d4 := JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString("alloc")}
 				_ = d4
 				var d5 JITValueDesc
@@ -2164,7 +2164,7 @@ func init_sync() {
 				ctx.ReclaimUntrackedRegs()
 				d10 = JITPrepareScmerGoArg(ctx, d10)
 				ctx.SyncDesc(&d10)
-				d17 := ctx.EmitGoCallScalar(GoFuncAddr(HashKey), []JITValueDesc{d10}, 1)
+				d17 := ctx.EmitGoCallScalar(jitGoABI_77620f08e5066020, []JITValueDesc{d10}, 1)
 				d17.NoHeapPointer = true
 				ctx.BindReg(d17.Reg, &d17)
 				ctx.StabilizeDescForControlFlow(&d17)
@@ -2181,7 +2181,7 @@ func init_sync() {
 				ctx.SyncDesc(&d8)
 				ctx.SyncDesc(&d10)
 				ctx.SyncDesc(&d17)
-				callResults19 := JITEmitGoCallResults(ctx, GoFuncAddr((*FastDict).findPos), []JITValueDesc{d8, d10, d17}, []uint8{1, 1}, []uint8{0, 0})
+				callResults19 := JITEmitGoCallResults(ctx, jitGoABI_0071b987980a2128, []JITValueDesc{d8, d10, d17})
 				d20 := callResults19[0]
 				_ = d20
 				d21 := callResults19[1]
@@ -2239,7 +2239,7 @@ func init_sync() {
 				ctx.SyncDesc(&d10)
 				ctx.SyncDesc(&d12)
 				ctx.SyncDesc(&d17)
-				ctx.EmitGoCallVoid(GoFuncAddr((*FastDict).insertHashed), []JITValueDesc{d8, d10, d12, d17})
+				ctx.EmitGoCallVoid(jitGoABI_d266719521865b6a, []JITValueDesc{d8, d10, d12, d17})
 				ctx.ReclaimUntrackedRegs()
 				ctx.EmitJmp(lbl0)
 				bbpos_1_1 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
@@ -2252,13 +2252,13 @@ func init_sync() {
 				d20 = inlineHome22
 				ctx.ReclaimUntrackedRegs()
 				ctx.ReclaimUntrackedRegs()
-				d24 := ctx.EmitGoCallScalar(GoFuncAddr(func(size int) map[uint64]int { return make(map[uint64]int, size) }), []JITValueDesc{JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0), NoHeapPointer: true}}, 1)
+				d24 := ctx.EmitGoCallScalar(jitGoABI_292e8a79533c8ab6, []JITValueDesc{JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0), NoHeapPointer: true}}, 1)
 				ctx.ReclaimUntrackedRegs()
 				ctx.ReclaimUntrackedRegs()
 				ctx.EnsureDesc(&d24)
 				ctx.EnsureDesc(&d8)
 				ctx.EnsureDesc(&d24)
-				ctx.EmitGoCallVoid(GoFuncAddr(func(base *FastDict, value map[uint64]int) { base.index = value }), []JITValueDesc{d8, d24})
+				ctx.EmitGoCallVoid(jitGoABI_2b328271f907f450, []JITValueDesc{d8, d24})
 				ctx.ReclaimUntrackedRegs()
 				ctx.EmitJmp(lbl3)
 				bbpos_1_3 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
@@ -2518,7 +2518,7 @@ func init_sync() {
 				ctx.ReclaimUntrackedRegs()
 				d36 = JITPrepareScmerGoArg(ctx, d36)
 				ctx.SyncDesc(&d36)
-				d43 := ctx.EmitGoCallScalar(GoFuncAddr(HashKey), []JITValueDesc{d36}, 1)
+				d43 := ctx.EmitGoCallScalar(jitGoABI_77620f08e5066020, []JITValueDesc{d36}, 1)
 				d43.NoHeapPointer = true
 				ctx.BindReg(d43.Reg, &d43)
 				ctx.StabilizeDescForControlFlow(&d43)
@@ -2535,7 +2535,7 @@ func init_sync() {
 				ctx.SyncDesc(&d34)
 				ctx.SyncDesc(&d36)
 				ctx.SyncDesc(&d43)
-				callResults45 := JITEmitGoCallResults(ctx, GoFuncAddr((*FastDict).findPos), []JITValueDesc{d34, d36, d43}, []uint8{1, 1}, []uint8{0, 0})
+				callResults45 := JITEmitGoCallResults(ctx, jitGoABI_0071b987980a2128, []JITValueDesc{d34, d36, d43})
 				d46 := callResults45[0]
 				_ = d46
 				d47 := callResults45[1]
@@ -2593,7 +2593,7 @@ func init_sync() {
 				ctx.SyncDesc(&d36)
 				ctx.SyncDesc(&d38)
 				ctx.SyncDesc(&d43)
-				ctx.EmitGoCallVoid(GoFuncAddr((*FastDict).insertHashed), []JITValueDesc{d34, d36, d38, d43})
+				ctx.EmitGoCallVoid(jitGoABI_d266719521865b6a, []JITValueDesc{d34, d36, d38, d43})
 				ctx.ReclaimUntrackedRegs()
 				ctx.EmitJmp(lbl12)
 				bbpos_2_1 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
@@ -2606,13 +2606,13 @@ func init_sync() {
 				d46 = inlineHome48
 				ctx.ReclaimUntrackedRegs()
 				ctx.ReclaimUntrackedRegs()
-				d50 := ctx.EmitGoCallScalar(GoFuncAddr(func(size int) map[uint64]int { return make(map[uint64]int, size) }), []JITValueDesc{JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0), NoHeapPointer: true}}, 1)
+				d50 := ctx.EmitGoCallScalar(jitGoABI_292e8a79533c8ab6, []JITValueDesc{JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0), NoHeapPointer: true}}, 1)
 				ctx.ReclaimUntrackedRegs()
 				ctx.ReclaimUntrackedRegs()
 				ctx.EnsureDesc(&d50)
 				ctx.EnsureDesc(&d34)
 				ctx.EnsureDesc(&d50)
-				ctx.EmitGoCallVoid(GoFuncAddr(func(base *FastDict, value map[uint64]int) { base.index = value }), []JITValueDesc{d34, d50})
+				ctx.EmitGoCallVoid(jitGoABI_2b328271f907f450, []JITValueDesc{d34, d50})
 				ctx.ReclaimUntrackedRegs()
 				ctx.EmitJmp(lbl15)
 				bbpos_2_3 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
@@ -2872,7 +2872,7 @@ func init_sync() {
 				ctx.ReclaimUntrackedRegs()
 				d62 = JITPrepareScmerGoArg(ctx, d62)
 				ctx.SyncDesc(&d62)
-				d69 := ctx.EmitGoCallScalar(GoFuncAddr(HashKey), []JITValueDesc{d62}, 1)
+				d69 := ctx.EmitGoCallScalar(jitGoABI_77620f08e5066020, []JITValueDesc{d62}, 1)
 				d69.NoHeapPointer = true
 				ctx.BindReg(d69.Reg, &d69)
 				ctx.StabilizeDescForControlFlow(&d69)
@@ -2889,7 +2889,7 @@ func init_sync() {
 				ctx.SyncDesc(&d60)
 				ctx.SyncDesc(&d62)
 				ctx.SyncDesc(&d69)
-				callResults71 := JITEmitGoCallResults(ctx, GoFuncAddr((*FastDict).findPos), []JITValueDesc{d60, d62, d69}, []uint8{1, 1}, []uint8{0, 0})
+				callResults71 := JITEmitGoCallResults(ctx, jitGoABI_0071b987980a2128, []JITValueDesc{d60, d62, d69})
 				d72 := callResults71[0]
 				_ = d72
 				d73 := callResults71[1]
@@ -2947,7 +2947,7 @@ func init_sync() {
 				ctx.SyncDesc(&d62)
 				ctx.SyncDesc(&d64)
 				ctx.SyncDesc(&d69)
-				ctx.EmitGoCallVoid(GoFuncAddr((*FastDict).insertHashed), []JITValueDesc{d60, d62, d64, d69})
+				ctx.EmitGoCallVoid(jitGoABI_d266719521865b6a, []JITValueDesc{d60, d62, d64, d69})
 				ctx.ReclaimUntrackedRegs()
 				ctx.EmitJmp(lbl24)
 				bbpos_3_1 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
@@ -2960,13 +2960,13 @@ func init_sync() {
 				d72 = inlineHome74
 				ctx.ReclaimUntrackedRegs()
 				ctx.ReclaimUntrackedRegs()
-				d76 := ctx.EmitGoCallScalar(GoFuncAddr(func(size int) map[uint64]int { return make(map[uint64]int, size) }), []JITValueDesc{JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0), NoHeapPointer: true}}, 1)
+				d76 := ctx.EmitGoCallScalar(jitGoABI_292e8a79533c8ab6, []JITValueDesc{JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0), NoHeapPointer: true}}, 1)
 				ctx.ReclaimUntrackedRegs()
 				ctx.ReclaimUntrackedRegs()
 				ctx.EnsureDesc(&d76)
 				ctx.EnsureDesc(&d60)
 				ctx.EnsureDesc(&d76)
-				ctx.EmitGoCallVoid(GoFuncAddr(func(base *FastDict, value map[uint64]int) { base.index = value }), []JITValueDesc{d60, d76})
+				ctx.EmitGoCallVoid(jitGoABI_2b328271f907f450, []JITValueDesc{d60, d76})
 				ctx.ReclaimUntrackedRegs()
 				ctx.EmitJmp(lbl27)
 				bbpos_3_3 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
@@ -3226,7 +3226,7 @@ func init_sync() {
 				ctx.ReclaimUntrackedRegs()
 				d88 = JITPrepareScmerGoArg(ctx, d88)
 				ctx.SyncDesc(&d88)
-				d95 := ctx.EmitGoCallScalar(GoFuncAddr(HashKey), []JITValueDesc{d88}, 1)
+				d95 := ctx.EmitGoCallScalar(jitGoABI_77620f08e5066020, []JITValueDesc{d88}, 1)
 				d95.NoHeapPointer = true
 				ctx.BindReg(d95.Reg, &d95)
 				ctx.StabilizeDescForControlFlow(&d95)
@@ -3243,7 +3243,7 @@ func init_sync() {
 				ctx.SyncDesc(&d86)
 				ctx.SyncDesc(&d88)
 				ctx.SyncDesc(&d95)
-				callResults97 := JITEmitGoCallResults(ctx, GoFuncAddr((*FastDict).findPos), []JITValueDesc{d86, d88, d95}, []uint8{1, 1}, []uint8{0, 0})
+				callResults97 := JITEmitGoCallResults(ctx, jitGoABI_0071b987980a2128, []JITValueDesc{d86, d88, d95})
 				d98 := callResults97[0]
 				_ = d98
 				d99 := callResults97[1]
@@ -3301,7 +3301,7 @@ func init_sync() {
 				ctx.SyncDesc(&d88)
 				ctx.SyncDesc(&d90)
 				ctx.SyncDesc(&d95)
-				ctx.EmitGoCallVoid(GoFuncAddr((*FastDict).insertHashed), []JITValueDesc{d86, d88, d90, d95})
+				ctx.EmitGoCallVoid(jitGoABI_d266719521865b6a, []JITValueDesc{d86, d88, d90, d95})
 				ctx.ReclaimUntrackedRegs()
 				ctx.EmitJmp(lbl36)
 				bbpos_4_1 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
@@ -3314,13 +3314,13 @@ func init_sync() {
 				d98 = inlineHome100
 				ctx.ReclaimUntrackedRegs()
 				ctx.ReclaimUntrackedRegs()
-				d102 := ctx.EmitGoCallScalar(GoFuncAddr(func(size int) map[uint64]int { return make(map[uint64]int, size) }), []JITValueDesc{JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0), NoHeapPointer: true}}, 1)
+				d102 := ctx.EmitGoCallScalar(jitGoABI_292e8a79533c8ab6, []JITValueDesc{JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0), NoHeapPointer: true}}, 1)
 				ctx.ReclaimUntrackedRegs()
 				ctx.ReclaimUntrackedRegs()
 				ctx.EnsureDesc(&d102)
 				ctx.EnsureDesc(&d86)
 				ctx.EnsureDesc(&d102)
-				ctx.EmitGoCallVoid(GoFuncAddr(func(base *FastDict, value map[uint64]int) { base.index = value }), []JITValueDesc{d86, d102})
+				ctx.EmitGoCallVoid(jitGoABI_2b328271f907f450, []JITValueDesc{d86, d102})
 				ctx.ReclaimUntrackedRegs()
 				ctx.EmitJmp(lbl39)
 				bbpos_4_3 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
@@ -3580,7 +3580,7 @@ func init_sync() {
 				ctx.ReclaimUntrackedRegs()
 				d114 = JITPrepareScmerGoArg(ctx, d114)
 				ctx.SyncDesc(&d114)
-				d121 := ctx.EmitGoCallScalar(GoFuncAddr(HashKey), []JITValueDesc{d114}, 1)
+				d121 := ctx.EmitGoCallScalar(jitGoABI_77620f08e5066020, []JITValueDesc{d114}, 1)
 				d121.NoHeapPointer = true
 				ctx.BindReg(d121.Reg, &d121)
 				ctx.StabilizeDescForControlFlow(&d121)
@@ -3597,7 +3597,7 @@ func init_sync() {
 				ctx.SyncDesc(&d112)
 				ctx.SyncDesc(&d114)
 				ctx.SyncDesc(&d121)
-				callResults123 := JITEmitGoCallResults(ctx, GoFuncAddr((*FastDict).findPos), []JITValueDesc{d112, d114, d121}, []uint8{1, 1}, []uint8{0, 0})
+				callResults123 := JITEmitGoCallResults(ctx, jitGoABI_0071b987980a2128, []JITValueDesc{d112, d114, d121})
 				d124 := callResults123[0]
 				_ = d124
 				d125 := callResults123[1]
@@ -3655,7 +3655,7 @@ func init_sync() {
 				ctx.SyncDesc(&d114)
 				ctx.SyncDesc(&d116)
 				ctx.SyncDesc(&d121)
-				ctx.EmitGoCallVoid(GoFuncAddr((*FastDict).insertHashed), []JITValueDesc{d112, d114, d116, d121})
+				ctx.EmitGoCallVoid(jitGoABI_d266719521865b6a, []JITValueDesc{d112, d114, d116, d121})
 				ctx.ReclaimUntrackedRegs()
 				ctx.EmitJmp(lbl48)
 				bbpos_5_1 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
@@ -3668,13 +3668,13 @@ func init_sync() {
 				d124 = inlineHome126
 				ctx.ReclaimUntrackedRegs()
 				ctx.ReclaimUntrackedRegs()
-				d128 := ctx.EmitGoCallScalar(GoFuncAddr(func(size int) map[uint64]int { return make(map[uint64]int, size) }), []JITValueDesc{JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0), NoHeapPointer: true}}, 1)
+				d128 := ctx.EmitGoCallScalar(jitGoABI_292e8a79533c8ab6, []JITValueDesc{JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0), NoHeapPointer: true}}, 1)
 				ctx.ReclaimUntrackedRegs()
 				ctx.ReclaimUntrackedRegs()
 				ctx.EnsureDesc(&d128)
 				ctx.EnsureDesc(&d112)
 				ctx.EnsureDesc(&d128)
-				ctx.EmitGoCallVoid(GoFuncAddr(func(base *FastDict, value map[uint64]int) { base.index = value }), []JITValueDesc{d112, d128})
+				ctx.EmitGoCallVoid(jitGoABI_2b328271f907f450, []JITValueDesc{d112, d128})
 				ctx.ReclaimUntrackedRegs()
 				ctx.EmitJmp(lbl51)
 				bbpos_5_3 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
@@ -3832,4 +3832,33 @@ func init_sync() {
 			JITInlineCost:  156,
 		},
 	})
+}
+
+// BEGIN jitgen prepared Go ABI entries
+var jitGoABI_0071b987980a2128 uint64
+var jitGoABI_292e8a79533c8ab6 uint64
+var jitGoABI_2b328271f907f450 uint64
+var jitGoABI_3ce53b486290ebc1 uint64
+var jitGoABI_77620f08e5066020 uint64
+var jitGoABI_8a5896e84b127484 uint64
+var jitGoABI_a366a79c0e7fe75e uint64
+var jitGoABI_d266719521865b6a uint64
+var jitGoABI_d30c4eb1d5f37603 uint64
+var jitGoABI_d5ee89b35de61302 uint64
+var jitGoABI_e30ce57da250e0e4 uint64
+var jitGoABI_ea34c7cf033c26e7 uint64
+
+func init() {
+	jitGoABI_0071b987980a2128 = GoFuncAddr((*FastDict).findPos)
+	jitGoABI_292e8a79533c8ab6 = GoFuncAddr(func(size int) map[uint64]int { return make(map[uint64]int, size) })
+	jitGoABI_2b328271f907f450 = GoFuncAddr(func(base *FastDict, value map[uint64]int) { base.index = value })
+	jitGoABI_3ce53b486290ebc1 = GoFuncAddr(NewFastDictValue)
+	jitGoABI_77620f08e5066020 = GoFuncAddr(HashKey)
+	jitGoABI_8a5896e84b127484 = GoFuncAddr(func(dst, src *runtime.MemStats) { *dst = *src })
+	jitGoABI_a366a79c0e7fe75e = GoFuncAddr(runtime.NumCPU)
+	jitGoABI_d266719521865b6a = GoFuncAddr((*FastDict).insertHashed)
+	jitGoABI_d30c4eb1d5f37603 = GoFuncAddr(jitMakeScmerSlice)
+	jitGoABI_d5ee89b35de61302 = GoFuncAddr(jitCopyScmerSlice)
+	jitGoABI_e30ce57da250e0e4 = GoFuncAddr(ApplyEx)
+	jitGoABI_ea34c7cf033c26e7 = GoFuncAddr(func() *runtime.MemStats { return new(runtime.MemStats) })
 }

@@ -17,7 +17,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  JIT_GO_REF: jit-foreign-frames-go1.27.0
+  JIT_GO_REF: jit-abi-v0.1.0-rc.2
 
 jobs:
   changes:

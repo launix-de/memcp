@@ -346,7 +346,7 @@ func init_timezone() {
 					ctx.MarkLabel(lbl2)
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
-					d7 = ctx.EmitGoCallScalar(GoFuncAddr(time.Now), []JITValueDesc{}, 3)
+					d7 = ctx.EmitGoCallScalar(jitGoABI_5212b4c926c63de8, []JITValueDesc{}, 3)
 					d7.NoHeapPointer = false
 					ctx.BindReg(d7.Reg, &d7)
 					ctx.BindReg(d7.Reg2, &d7)
@@ -356,7 +356,7 @@ func init_timezone() {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Unix arg0)")
 					}
 					ctx.SyncDesc(&d7)
-					d8 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Unix), []JITValueDesc{d7}, 1)
+					d8 = ctx.EmitGoCallScalar(jitGoABI_46e5a85a2272c07d, []JITValueDesc{d7}, 1)
 					d8.NoHeapPointer = true
 					ctx.BindReg(d8.Reg, &d8)
 					ctx.FreeDesc(&d7)
@@ -496,7 +496,7 @@ func init_timezone() {
 					d26.ID = 0
 					d26 = JITPrepareScmerGoArg(ctx, d26)
 					ctx.SyncDesc(&d26)
-					callResults27 := JITEmitGoCallResults(ctx, GoFuncAddr(toTime), []JITValueDesc{d26}, []uint8{3, 1}, []uint8{4, 0})
+					callResults27 := JITEmitGoCallResults(ctx, jitGoABI_bd4b59785e659476, []JITValueDesc{d26})
 					d28 = callResults27[0]
 					_ = d28
 					d29 = callResults27[1]
@@ -617,7 +617,7 @@ func init_timezone() {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Unix arg0)")
 					}
 					ctx.SyncDesc(&d28)
-					d48 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Unix), []JITValueDesc{d28}, 1)
+					d48 = ctx.EmitGoCallScalar(jitGoABI_46e5a85a2272c07d, []JITValueDesc{d28}, 1)
 					d48.NoHeapPointer = true
 					ctx.BindReg(d48.Reg, &d48)
 					ctx.EnsureDesc(&d48)
@@ -678,18 +678,18 @@ func init_timezone() {
 				for i := range args {
 					ctx.StabilizeDescForControlFlow(&args[i])
 				}
-				d0 := ctx.EmitGoCallScalar(GoFuncAddr(func() *time.Location { return time.Local }), nil, 1)
+				d0 := ctx.EmitGoCallScalar(jitGoABI_7b917b6886e5aaa5, nil, 1)
 				if d0.Loc == LocRegPair || d0.Loc == LocStackPair || d0.Loc == LocRegTriple || d0.Loc == LocStackTriple {
 					panic("jit: generic call arg expects 1-word value")
 				}
 				ctx.SyncDesc(&d0)
-				d1 := ctx.EmitGoCallScalar(GoFuncAddr((*time.Location).String), []JITValueDesc{d0}, 2)
+				d1 := ctx.EmitGoCallScalar(jitGoABI_cca2c55fdf304b85, []JITValueDesc{d0}, 2)
 				d1.NoHeapPointer = false
 				ctx.BindReg(d1.Reg, &d1)
 				ctx.BindReg(d1.Reg2, &d1)
 				ctx.FreeDesc(&d0)
 				ctx.EnsureDesc(&d1)
-				d2 := ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d1}, 2)
+				d2 := ctx.EmitGoCallScalar(jitGoABI_756b91ccb831f850, []JITValueDesc{d1}, 2)
 				if result.Loc == LocAny {
 					return d2
 				}
@@ -1101,7 +1101,7 @@ func init_timezone() {
 					if d15.Loc != LocRegPair && d15.Loc != LocStackPair && d15.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d14 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d15}, 2)
+					d14 = ctx.EmitGoCallScalar(jitGoABI_d400b81eac74af18, []JITValueDesc{d15}, 2)
 					ctx.FreeDesc(&d13)
 					ctx.EnsureDesc(&d14)
 					if d14.Loc == LocImm {
@@ -1130,7 +1130,7 @@ func init_timezone() {
 						panic("jit: generic call arg expects 2-word value (ResolveLocation arg0)")
 					}
 					ctx.SyncDesc(&d14)
-					callResults16 := JITEmitGoCallResults(ctx, GoFuncAddr(ResolveLocation), []JITValueDesc{d14}, []uint8{1, 2}, []uint8{1, 3})
+					callResults16 := JITEmitGoCallResults(ctx, GoFuncAddr(ResolveLocation), []JITValueDesc{d14})
 					d17 = callResults16[0]
 					_ = d17
 					d18 = callResults16[1]
@@ -1443,7 +1443,7 @@ func init_timezone() {
 					if d86.Loc != LocRegPair && d86.Loc != LocStackPair && d86.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d85 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d86}, 2)
+					d85 = ctx.EmitGoCallScalar(jitGoABI_d400b81eac74af18, []JITValueDesc{d86}, 2)
 					ctx.FreeDesc(&d84)
 					ctx.EnsureDesc(&d85)
 					if d85.Loc == LocImm {
@@ -1472,7 +1472,7 @@ func init_timezone() {
 						panic("jit: generic call arg expects 2-word value (ResolveLocation arg0)")
 					}
 					ctx.SyncDesc(&d85)
-					callResults87 := JITEmitGoCallResults(ctx, GoFuncAddr(ResolveLocation), []JITValueDesc{d85}, []uint8{1, 2}, []uint8{1, 3})
+					callResults87 := JITEmitGoCallResults(ctx, GoFuncAddr(ResolveLocation), []JITValueDesc{d85})
 					d88 = callResults87[0]
 					_ = d88
 					d89 = callResults87[1]
@@ -1765,7 +1765,7 @@ func init_timezone() {
 					}
 					ctx.SyncDesc(&d1)
 					ctx.SyncDesc(&d88)
-					d164 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).In), []JITValueDesc{d1, d88}, 3)
+					d164 = ctx.EmitGoCallScalar(jitGoABI_5a84bc0f84962a3a, []JITValueDesc{d1, d88}, 3)
 					d164.NoHeapPointer = false
 					ctx.BindReg(d164.Reg, &d164)
 					ctx.BindReg(d164.Reg2, &d164)
@@ -1776,7 +1776,7 @@ func init_timezone() {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Year arg0)")
 					}
 					ctx.SyncDesc(&d164)
-					d165 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Year), []JITValueDesc{d164}, 1)
+					d165 = ctx.EmitGoCallScalar(jitGoABI_273d23d4ad67d558, []JITValueDesc{d164}, 1)
 					d165.NoHeapPointer = true
 					ctx.BindReg(d165.Reg, &d165)
 					d164 = JITPrepareGoSliceArg(ctx, d164)
@@ -1784,7 +1784,7 @@ func init_timezone() {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Month arg0)")
 					}
 					ctx.SyncDesc(&d164)
-					d166 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Month), []JITValueDesc{d164}, 1)
+					d166 = ctx.EmitGoCallScalar(jitGoABI_3e536fa2e3d4a6ab, []JITValueDesc{d164}, 1)
 					d166.NoHeapPointer = true
 					ctx.BindReg(d166.Reg, &d166)
 					d164 = JITPrepareGoSliceArg(ctx, d164)
@@ -1792,7 +1792,7 @@ func init_timezone() {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Day arg0)")
 					}
 					ctx.SyncDesc(&d164)
-					d167 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Day), []JITValueDesc{d164}, 1)
+					d167 = ctx.EmitGoCallScalar(jitGoABI_5e7ac569abe17a10, []JITValueDesc{d164}, 1)
 					d167.NoHeapPointer = true
 					ctx.BindReg(d167.Reg, &d167)
 					d164 = JITPrepareGoSliceArg(ctx, d164)
@@ -1800,7 +1800,7 @@ func init_timezone() {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Hour arg0)")
 					}
 					ctx.SyncDesc(&d164)
-					d168 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Hour), []JITValueDesc{d164}, 1)
+					d168 = ctx.EmitGoCallScalar(jitGoABI_eabd2eda5fd23068, []JITValueDesc{d164}, 1)
 					d168.NoHeapPointer = true
 					ctx.BindReg(d168.Reg, &d168)
 					d164 = JITPrepareGoSliceArg(ctx, d164)
@@ -1808,7 +1808,7 @@ func init_timezone() {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Minute arg0)")
 					}
 					ctx.SyncDesc(&d164)
-					d169 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Minute), []JITValueDesc{d164}, 1)
+					d169 = ctx.EmitGoCallScalar(jitGoABI_3bb3331dffe39a8d, []JITValueDesc{d164}, 1)
 					d169.NoHeapPointer = true
 					ctx.BindReg(d169.Reg, &d169)
 					d164 = JITPrepareGoSliceArg(ctx, d164)
@@ -1816,11 +1816,11 @@ func init_timezone() {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Second arg0)")
 					}
 					ctx.SyncDesc(&d164)
-					d170 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Second), []JITValueDesc{d164}, 1)
+					d170 = ctx.EmitGoCallScalar(jitGoABI_8e16add5ec148136, []JITValueDesc{d164}, 1)
 					d170.NoHeapPointer = true
 					ctx.BindReg(d170.Reg, &d170)
 					ctx.FreeDesc(&d164)
-					d171 = ctx.EmitGoCallScalar(GoFuncAddr(func() *time.Location { return time.UTC }), nil, 1)
+					d171 = ctx.EmitGoCallScalar(jitGoABI_45588648311f853d, nil, 1)
 					if d165.Loc == LocRegPair || d165.Loc == LocStackPair || d165.Loc == LocRegTriple || d165.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
 					}
@@ -1854,7 +1854,7 @@ func init_timezone() {
 					ctx.SyncDesc(&d170)
 					ctx.SyncDesc(&d172)
 					ctx.SyncDesc(&d171)
-					d173 = ctx.EmitGoCallScalar(GoFuncAddr(time.Date), []JITValueDesc{d165, d166, d167, d168, d169, d170, d172, d171}, 3)
+					d173 = ctx.EmitGoCallScalar(jitGoABI_d8b03cdc66228eb3, []JITValueDesc{d165, d166, d167, d168, d169, d170, d172, d171}, 3)
 					d173.NoHeapPointer = false
 					ctx.BindReg(d173.Reg, &d173)
 					ctx.BindReg(d173.Reg2, &d173)
@@ -1872,7 +1872,7 @@ func init_timezone() {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Unix arg0)")
 					}
 					ctx.SyncDesc(&d173)
-					d174 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Unix), []JITValueDesc{d173}, 1)
+					d174 = ctx.EmitGoCallScalar(jitGoABI_46e5a85a2272c07d, []JITValueDesc{d173}, 1)
 					d174.NoHeapPointer = true
 					ctx.BindReg(d174.Reg, &d174)
 					ctx.FreeDesc(&d173)
@@ -1880,7 +1880,7 @@ func init_timezone() {
 						panic("jit: generic call arg expects 1-word value")
 					}
 					ctx.SyncDesc(&d174)
-					d175 = ctx.EmitGoCallScalar(GoFuncAddr(NewDate), []JITValueDesc{d174}, 2)
+					d175 = ctx.EmitGoCallScalar(jitGoABI_b64b6b0e01aa8957, []JITValueDesc{d174}, 2)
 					d175.NoHeapPointer = false
 					ctx.BindReg(d175.Reg, &d175)
 					ctx.BindReg(d175.Reg2, &d175)
@@ -1942,7 +1942,7 @@ func init_timezone() {
 						ctx.BindReg(d176.Reg, &d177)
 					} else {
 						boxed := JITPrepareScmerGoArg(ctx, d176)
-						d177 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{boxed}, 1)
+						d177 = ctx.EmitGoCallScalar(jitGoABI_293fe45d1cce7337, []JITValueDesc{boxed}, 1)
 						d177.Type = tagInt
 						ctx.BindReg(d177.Reg, &d177)
 					}
@@ -1956,7 +1956,7 @@ func init_timezone() {
 					}
 					ctx.SyncDesc(&d177)
 					ctx.SyncDesc(&d178)
-					d179 = ctx.EmitGoCallScalar(GoFuncAddr(time.Unix), []JITValueDesc{d177, d178}, 3)
+					d179 = ctx.EmitGoCallScalar(jitGoABI_29d4927b17fc7b87, []JITValueDesc{d177, d178}, 3)
 					d179.NoHeapPointer = false
 					ctx.BindReg(d179.Reg, &d179)
 					ctx.BindReg(d179.Reg2, &d179)
@@ -1968,7 +1968,7 @@ func init_timezone() {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).UTC arg0)")
 					}
 					ctx.SyncDesc(&d179)
-					d180 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).UTC), []JITValueDesc{d179}, 3)
+					d180 = ctx.EmitGoCallScalar(jitGoABI_67768eb689868c3a, []JITValueDesc{d179}, 3)
 					d180.NoHeapPointer = false
 					ctx.BindReg(d180.Reg, &d180)
 					ctx.BindReg(d180.Reg2, &d180)
@@ -1979,7 +1979,7 @@ func init_timezone() {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Year arg0)")
 					}
 					ctx.SyncDesc(&d180)
-					d181 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Year), []JITValueDesc{d180}, 1)
+					d181 = ctx.EmitGoCallScalar(jitGoABI_273d23d4ad67d558, []JITValueDesc{d180}, 1)
 					d181.NoHeapPointer = true
 					ctx.BindReg(d181.Reg, &d181)
 					d180 = JITPrepareGoSliceArg(ctx, d180)
@@ -1987,7 +1987,7 @@ func init_timezone() {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Month arg0)")
 					}
 					ctx.SyncDesc(&d180)
-					d182 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Month), []JITValueDesc{d180}, 1)
+					d182 = ctx.EmitGoCallScalar(jitGoABI_3e536fa2e3d4a6ab, []JITValueDesc{d180}, 1)
 					d182.NoHeapPointer = true
 					ctx.BindReg(d182.Reg, &d182)
 					d180 = JITPrepareGoSliceArg(ctx, d180)
@@ -1995,7 +1995,7 @@ func init_timezone() {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Day arg0)")
 					}
 					ctx.SyncDesc(&d180)
-					d183 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Day), []JITValueDesc{d180}, 1)
+					d183 = ctx.EmitGoCallScalar(jitGoABI_5e7ac569abe17a10, []JITValueDesc{d180}, 1)
 					d183.NoHeapPointer = true
 					ctx.BindReg(d183.Reg, &d183)
 					d180 = JITPrepareGoSliceArg(ctx, d180)
@@ -2003,7 +2003,7 @@ func init_timezone() {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Hour arg0)")
 					}
 					ctx.SyncDesc(&d180)
-					d184 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Hour), []JITValueDesc{d180}, 1)
+					d184 = ctx.EmitGoCallScalar(jitGoABI_eabd2eda5fd23068, []JITValueDesc{d180}, 1)
 					d184.NoHeapPointer = true
 					ctx.BindReg(d184.Reg, &d184)
 					d180 = JITPrepareGoSliceArg(ctx, d180)
@@ -2011,7 +2011,7 @@ func init_timezone() {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Minute arg0)")
 					}
 					ctx.SyncDesc(&d180)
-					d185 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Minute), []JITValueDesc{d180}, 1)
+					d185 = ctx.EmitGoCallScalar(jitGoABI_3bb3331dffe39a8d, []JITValueDesc{d180}, 1)
 					d185.NoHeapPointer = true
 					ctx.BindReg(d185.Reg, &d185)
 					d180 = JITPrepareGoSliceArg(ctx, d180)
@@ -2019,7 +2019,7 @@ func init_timezone() {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Second arg0)")
 					}
 					ctx.SyncDesc(&d180)
-					d186 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Second), []JITValueDesc{d180}, 1)
+					d186 = ctx.EmitGoCallScalar(jitGoABI_8e16add5ec148136, []JITValueDesc{d180}, 1)
 					d186.NoHeapPointer = true
 					ctx.BindReg(d186.Reg, &d186)
 					ctx.FreeDesc(&d180)
@@ -2056,7 +2056,7 @@ func init_timezone() {
 					ctx.SyncDesc(&d186)
 					ctx.SyncDesc(&d187)
 					ctx.SyncDesc(&d17)
-					d188 = ctx.EmitGoCallScalar(GoFuncAddr(time.Date), []JITValueDesc{d181, d182, d183, d184, d185, d186, d187, d17}, 3)
+					d188 = ctx.EmitGoCallScalar(jitGoABI_d8b03cdc66228eb3, []JITValueDesc{d181, d182, d183, d184, d185, d186, d187, d17}, 3)
 					d188.NoHeapPointer = false
 					ctx.BindReg(d188.Reg, &d188)
 					ctx.BindReg(d188.Reg2, &d188)
@@ -2131,7 +2131,7 @@ func init_timezone() {
 					if d192.Loc != LocRegPair && d192.Loc != LocStackPair && d192.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d191 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d192}, 2)
+					d191 = ctx.EmitGoCallScalar(jitGoABI_d400b81eac74af18, []JITValueDesc{d192}, 2)
 					ctx.FreeDesc(&d190)
 					ctx.EnsureDesc(&d191)
 					if d191.Loc == LocImm {
@@ -2164,7 +2164,7 @@ func init_timezone() {
 					}
 					ctx.SyncDesc(&d191)
 					ctx.SyncDesc(&d17)
-					callResults193 := JITEmitGoCallResults(ctx, GoFuncAddr(parseDateStringInLoc), []JITValueDesc{d191, d17}, []uint8{1, 1}, []uint8{0, 0})
+					callResults193 := JITEmitGoCallResults(ctx, GoFuncAddr(parseDateStringInLoc), []JITValueDesc{d191, d17})
 					d194 = callResults193[0]
 					_ = d194
 					d195 = callResults193[1]
@@ -2394,7 +2394,7 @@ func init_timezone() {
 					}
 					ctx.SyncDesc(&d194)
 					ctx.SyncDesc(&d266)
-					d267 = ctx.EmitGoCallScalar(GoFuncAddr(time.Unix), []JITValueDesc{d194, d266}, 3)
+					d267 = ctx.EmitGoCallScalar(jitGoABI_29d4927b17fc7b87, []JITValueDesc{d194, d266}, 3)
 					d267.NoHeapPointer = false
 					ctx.BindReg(d267.Reg, &d267)
 					ctx.BindReg(d267.Reg2, &d267)
@@ -2774,7 +2774,7 @@ func init_timezone() {
 						ctx.BindReg(d15.Reg, &d16)
 					} else {
 						boxed := JITPrepareScmerGoArg(ctx, d15)
-						d16 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{boxed}, 1)
+						d16 = ctx.EmitGoCallScalar(jitGoABI_293fe45d1cce7337, []JITValueDesc{boxed}, 1)
 						d16.Type = tagInt
 						ctx.BindReg(d16.Reg, &d16)
 					}
@@ -2902,7 +2902,7 @@ func init_timezone() {
 					if d48.Loc != LocRegPair && d48.Loc != LocStackPair && d48.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d47 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d48}, 2)
+					d47 = ctx.EmitGoCallScalar(jitGoABI_d400b81eac74af18, []JITValueDesc{d48}, 2)
 					ctx.StabilizeDescForControlFlow(&d47)
 					ctx.FreeDesc(&d46)
 					ctx.SyncDesc(&d47)
@@ -2978,7 +2978,7 @@ func init_timezone() {
 						panic("jit: generic call arg expects 2-word value (ResolveLocation arg0)")
 					}
 					ctx.SyncDesc(&d1)
-					callResults50 := JITEmitGoCallResults(ctx, GoFuncAddr(ResolveLocation), []JITValueDesc{d1}, []uint8{1, 2}, []uint8{1, 3})
+					callResults50 := JITEmitGoCallResults(ctx, GoFuncAddr(ResolveLocation), []JITValueDesc{d1})
 					d51 = callResults50[0]
 					_ = d51
 					d52 = callResults50[1]
@@ -3166,7 +3166,7 @@ func init_timezone() {
 					d1 = JITValueDesc{Loc: LocStackPair, Type: tagString, StackOff: int32(phiBase0) + int32(0)}
 					d2 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(16)}
 					ctx.ReclaimUntrackedRegs()
-					d102 = ctx.EmitGoCallScalar(GoFuncAddr(func() *time.Location { return time.UTC }), nil, 1)
+					d102 = ctx.EmitGoCallScalar(jitGoABI_45588648311f853d, nil, 1)
 					ctx.StabilizeDescForControlFlow(&d102)
 					ctx.SyncDesc(&d102)
 					if d102.Loc == LocReg || d102.Loc == LocFPReg {
@@ -3320,7 +3320,7 @@ func init_timezone() {
 					}
 					ctx.SyncDesc(&d16)
 					ctx.SyncDesc(&d135)
-					d136 = ctx.EmitGoCallScalar(GoFuncAddr(time.Unix), []JITValueDesc{d16, d135}, 3)
+					d136 = ctx.EmitGoCallScalar(jitGoABI_29d4927b17fc7b87, []JITValueDesc{d16, d135}, 3)
 					d136.NoHeapPointer = false
 					ctx.BindReg(d136.Reg, &d136)
 					ctx.BindReg(d136.Reg2, &d136)
@@ -3335,7 +3335,7 @@ func init_timezone() {
 					}
 					ctx.SyncDesc(&d136)
 					ctx.SyncDesc(&d2)
-					d137 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).In), []JITValueDesc{d136, d2}, 3)
+					d137 = ctx.EmitGoCallScalar(jitGoABI_5a84bc0f84962a3a, []JITValueDesc{d136, d2}, 3)
 					d137.NoHeapPointer = false
 					ctx.BindReg(d137.Reg, &d137)
 					ctx.BindReg(d137.Reg2, &d137)
@@ -3358,7 +3358,7 @@ func init_timezone() {
 					if d140.Loc != LocRegPair && d140.Loc != LocStackPair && d140.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d139 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d140}, 2)
+					d139 = ctx.EmitGoCallScalar(jitGoABI_d400b81eac74af18, []JITValueDesc{d140}, 2)
 					ctx.FreeDesc(&d138)
 					d137 = JITPrepareGoSliceArg(ctx, d137)
 					if d137.Loc != LocRegTriple && d137.Loc != LocStackTriple {
@@ -3398,7 +3398,7 @@ func init_timezone() {
 					ctx.BindReg(d141.Reg2, &d141)
 					ctx.FreeDesc(&d137)
 					ctx.EnsureDesc(&d141)
-					d142 = ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d141}, 2)
+					d142 = ctx.EmitGoCallScalar(jitGoABI_756b91ccb831f850, []JITValueDesc{d141}, 2)
 					ctx.EmitMovPairToResult(&d142, &result)
 					result.Type = tagString
 					mergeReturnType(result.Type)
@@ -3422,7 +3422,7 @@ func init_timezone() {
 						panic("jit: generic call arg expects 1-word value")
 					}
 					ctx.SyncDesc(&d16)
-					d143 = ctx.EmitGoCallScalar(GoFuncAddr(NewDate), []JITValueDesc{d16}, 2)
+					d143 = ctx.EmitGoCallScalar(jitGoABI_b64b6b0e01aa8957, []JITValueDesc{d16}, 2)
 					d143.NoHeapPointer = false
 					ctx.BindReg(d143.Reg, &d143)
 					ctx.BindReg(d143.Reg2, &d143)
@@ -3623,7 +3623,7 @@ func init_timezone() {
 				for i := range args {
 					ctx.StabilizeDescForControlFlow(&args[i])
 				}
-				d0 := ctx.EmitGoCallScalar(GoFuncAddr(time.Now), []JITValueDesc{}, 3)
+				d0 := ctx.EmitGoCallScalar(jitGoABI_5212b4c926c63de8, []JITValueDesc{}, 3)
 				d0.NoHeapPointer = false
 				ctx.BindReg(d0.Reg, &d0)
 				ctx.BindReg(d0.Reg2, &d0)
@@ -3633,7 +3633,7 @@ func init_timezone() {
 					panic("jit: generic call arg expects 3-word Go slice ((time.Time).UTC arg0)")
 				}
 				ctx.SyncDesc(&d0)
-				d1 := ctx.EmitGoCallScalar(GoFuncAddr((time.Time).UTC), []JITValueDesc{d0}, 3)
+				d1 := ctx.EmitGoCallScalar(jitGoABI_67768eb689868c3a, []JITValueDesc{d0}, 3)
 				d1.NoHeapPointer = false
 				ctx.BindReg(d1.Reg, &d1)
 				ctx.BindReg(d1.Reg2, &d1)
@@ -3644,7 +3644,7 @@ func init_timezone() {
 					panic("jit: generic call arg expects 3-word Go slice ((time.Time).Unix arg0)")
 				}
 				ctx.SyncDesc(&d1)
-				d2 := ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Unix), []JITValueDesc{d1}, 1)
+				d2 := ctx.EmitGoCallScalar(jitGoABI_46e5a85a2272c07d, []JITValueDesc{d1}, 1)
 				d2.NoHeapPointer = true
 				ctx.BindReg(d2.Reg, &d2)
 				ctx.FreeDesc(&d1)
@@ -3652,7 +3652,7 @@ func init_timezone() {
 					panic("jit: generic call arg expects 1-word value")
 				}
 				ctx.SyncDesc(&d2)
-				d3 := ctx.EmitGoCallScalar(GoFuncAddr(NewDate), []JITValueDesc{d2}, 2)
+				d3 := ctx.EmitGoCallScalar(jitGoABI_b64b6b0e01aa8957, []JITValueDesc{d2}, 2)
 				d3.NoHeapPointer = false
 				ctx.BindReg(d3.Reg, &d3)
 				ctx.BindReg(d3.Reg2, &d3)
@@ -3718,7 +3718,7 @@ func init_timezone() {
 				for i := range args {
 					ctx.StabilizeDescForControlFlow(&args[i])
 				}
-				d0 := ctx.EmitGoCallScalar(GoFuncAddr(time.Now), []JITValueDesc{}, 3)
+				d0 := ctx.EmitGoCallScalar(jitGoABI_5212b4c926c63de8, []JITValueDesc{}, 3)
 				d0.NoHeapPointer = false
 				ctx.BindReg(d0.Reg, &d0)
 				ctx.BindReg(d0.Reg2, &d0)
@@ -3728,7 +3728,7 @@ func init_timezone() {
 					panic("jit: generic call arg expects 3-word Go slice ((time.Time).UTC arg0)")
 				}
 				ctx.SyncDesc(&d0)
-				d1 := ctx.EmitGoCallScalar(GoFuncAddr((time.Time).UTC), []JITValueDesc{d0}, 3)
+				d1 := ctx.EmitGoCallScalar(jitGoABI_67768eb689868c3a, []JITValueDesc{d0}, 3)
 				d1.NoHeapPointer = false
 				ctx.BindReg(d1.Reg, &d1)
 				ctx.BindReg(d1.Reg2, &d1)
@@ -3739,7 +3739,7 @@ func init_timezone() {
 					panic("jit: generic call arg expects 3-word Go slice ((time.Time).Year arg0)")
 				}
 				ctx.SyncDesc(&d1)
-				d2 := ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Year), []JITValueDesc{d1}, 1)
+				d2 := ctx.EmitGoCallScalar(jitGoABI_273d23d4ad67d558, []JITValueDesc{d1}, 1)
 				d2.NoHeapPointer = true
 				ctx.BindReg(d2.Reg, &d2)
 				d1 = JITPrepareGoSliceArg(ctx, d1)
@@ -3747,7 +3747,7 @@ func init_timezone() {
 					panic("jit: generic call arg expects 3-word Go slice ((time.Time).Month arg0)")
 				}
 				ctx.SyncDesc(&d1)
-				d3 := ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Month), []JITValueDesc{d1}, 1)
+				d3 := ctx.EmitGoCallScalar(jitGoABI_3e536fa2e3d4a6ab, []JITValueDesc{d1}, 1)
 				d3.NoHeapPointer = true
 				ctx.BindReg(d3.Reg, &d3)
 				d1 = JITPrepareGoSliceArg(ctx, d1)
@@ -3755,11 +3755,11 @@ func init_timezone() {
 					panic("jit: generic call arg expects 3-word Go slice ((time.Time).Day arg0)")
 				}
 				ctx.SyncDesc(&d1)
-				d4 := ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Day), []JITValueDesc{d1}, 1)
+				d4 := ctx.EmitGoCallScalar(jitGoABI_5e7ac569abe17a10, []JITValueDesc{d1}, 1)
 				d4.NoHeapPointer = true
 				ctx.BindReg(d4.Reg, &d4)
 				ctx.FreeDesc(&d1)
-				d5 := ctx.EmitGoCallScalar(GoFuncAddr(func() *time.Location { return time.UTC }), nil, 1)
+				d5 := ctx.EmitGoCallScalar(jitGoABI_45588648311f853d, nil, 1)
 				if d2.Loc == LocRegPair || d2.Loc == LocStackPair || d2.Loc == LocRegTriple || d2.Loc == LocStackTriple {
 					panic("jit: generic call arg expects 1-word value")
 				}
@@ -3800,7 +3800,7 @@ func init_timezone() {
 				ctx.SyncDesc(&d8)
 				ctx.SyncDesc(&d9)
 				ctx.SyncDesc(&d5)
-				d10 := ctx.EmitGoCallScalar(GoFuncAddr(time.Date), []JITValueDesc{d2, d3, d4, d6, d7, d8, d9, d5}, 3)
+				d10 := ctx.EmitGoCallScalar(jitGoABI_d8b03cdc66228eb3, []JITValueDesc{d2, d3, d4, d6, d7, d8, d9, d5}, 3)
 				d10.NoHeapPointer = false
 				ctx.BindReg(d10.Reg, &d10)
 				ctx.BindReg(d10.Reg2, &d10)
@@ -3818,7 +3818,7 @@ func init_timezone() {
 					panic("jit: generic call arg expects 3-word Go slice ((time.Time).Unix arg0)")
 				}
 				ctx.SyncDesc(&d10)
-				d11 := ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Unix), []JITValueDesc{d10}, 1)
+				d11 := ctx.EmitGoCallScalar(jitGoABI_46e5a85a2272c07d, []JITValueDesc{d10}, 1)
 				d11.NoHeapPointer = true
 				ctx.BindReg(d11.Reg, &d11)
 				ctx.FreeDesc(&d10)
@@ -3826,7 +3826,7 @@ func init_timezone() {
 					panic("jit: generic call arg expects 1-word value")
 				}
 				ctx.SyncDesc(&d11)
-				d12 := ctx.EmitGoCallScalar(GoFuncAddr(NewDate), []JITValueDesc{d11}, 2)
+				d12 := ctx.EmitGoCallScalar(jitGoABI_b64b6b0e01aa8957, []JITValueDesc{d11}, 2)
 				d12.NoHeapPointer = false
 				ctx.BindReg(d12.Reg, &d12)
 				ctx.BindReg(d12.Reg2, &d12)
@@ -3893,7 +3893,7 @@ func init_timezone() {
 				for i := range args {
 					ctx.StabilizeDescForControlFlow(&args[i])
 				}
-				d0 := ctx.EmitGoCallScalar(GoFuncAddr(time.Now), []JITValueDesc{}, 3)
+				d0 := ctx.EmitGoCallScalar(jitGoABI_5212b4c926c63de8, []JITValueDesc{}, 3)
 				d0.NoHeapPointer = false
 				ctx.BindReg(d0.Reg, &d0)
 				ctx.BindReg(d0.Reg2, &d0)
@@ -3903,7 +3903,7 @@ func init_timezone() {
 					panic("jit: generic call arg expects 3-word Go slice ((time.Time).UTC arg0)")
 				}
 				ctx.SyncDesc(&d0)
-				d1 := ctx.EmitGoCallScalar(GoFuncAddr((time.Time).UTC), []JITValueDesc{d0}, 3)
+				d1 := ctx.EmitGoCallScalar(jitGoABI_67768eb689868c3a, []JITValueDesc{d0}, 3)
 				d1.NoHeapPointer = false
 				ctx.BindReg(d1.Reg, &d1)
 				ctx.BindReg(d1.Reg2, &d1)
@@ -3914,7 +3914,7 @@ func init_timezone() {
 					panic("jit: generic call arg expects 3-word Go slice ((time.Time).Hour arg0)")
 				}
 				ctx.SyncDesc(&d1)
-				d2 := ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Hour), []JITValueDesc{d1}, 1)
+				d2 := ctx.EmitGoCallScalar(jitGoABI_eabd2eda5fd23068, []JITValueDesc{d1}, 1)
 				d2.NoHeapPointer = true
 				ctx.BindReg(d2.Reg, &d2)
 				ctx.EnsureDesc(&d2)
@@ -3937,7 +3937,7 @@ func init_timezone() {
 					panic("jit: generic call arg expects 3-word Go slice ((time.Time).Minute arg0)")
 				}
 				ctx.SyncDesc(&d1)
-				d4 := ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Minute), []JITValueDesc{d1}, 1)
+				d4 := ctx.EmitGoCallScalar(jitGoABI_3bb3331dffe39a8d, []JITValueDesc{d1}, 1)
 				d4.NoHeapPointer = true
 				ctx.BindReg(d4.Reg, &d4)
 				ctx.EnsureDesc(&d4)
@@ -4006,7 +4006,7 @@ func init_timezone() {
 					panic("jit: generic call arg expects 3-word Go slice ((time.Time).Second arg0)")
 				}
 				ctx.SyncDesc(&d1)
-				d7 := ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Second), []JITValueDesc{d1}, 1)
+				d7 := ctx.EmitGoCallScalar(jitGoABI_8e16add5ec148136, []JITValueDesc{d1}, 1)
 				d7.NoHeapPointer = true
 				ctx.BindReg(d7.Reg, &d7)
 				ctx.FreeDesc(&d1)
@@ -4062,7 +4062,7 @@ func init_timezone() {
 					panic("jit: generic call arg expects 1-word value")
 				}
 				ctx.SyncDesc(&d8)
-				d10 := ctx.EmitGoCallScalar(GoFuncAddr(NewDate), []JITValueDesc{d8}, 2)
+				d10 := ctx.EmitGoCallScalar(jitGoABI_b64b6b0e01aa8957, []JITValueDesc{d8}, 2)
 				d10.NoHeapPointer = false
 				ctx.BindReg(d10.Reg, &d10)
 				ctx.BindReg(d10.Reg2, &d10)
@@ -4126,7 +4126,7 @@ func init_timezone() {
 				for i := range args {
 					ctx.StabilizeDescForControlFlow(&args[i])
 				}
-				d0 := ctx.EmitGoCallScalar(GoFuncAddr(time.Now), []JITValueDesc{}, 3)
+				d0 := ctx.EmitGoCallScalar(jitGoABI_5212b4c926c63de8, []JITValueDesc{}, 3)
 				d0.NoHeapPointer = false
 				ctx.BindReg(d0.Reg, &d0)
 				ctx.BindReg(d0.Reg2, &d0)
@@ -4136,7 +4136,7 @@ func init_timezone() {
 					panic("jit: generic call arg expects 3-word Go slice ((time.Time).Unix arg0)")
 				}
 				ctx.SyncDesc(&d0)
-				d1 := ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Unix), []JITValueDesc{d0}, 1)
+				d1 := ctx.EmitGoCallScalar(jitGoABI_46e5a85a2272c07d, []JITValueDesc{d0}, 1)
 				d1.NoHeapPointer = true
 				ctx.BindReg(d1.Reg, &d1)
 				ctx.FreeDesc(&d0)
@@ -4144,7 +4144,7 @@ func init_timezone() {
 					panic("jit: generic call arg expects 1-word value")
 				}
 				ctx.SyncDesc(&d1)
-				d2 := ctx.EmitGoCallScalar(GoFuncAddr(NewDate), []JITValueDesc{d1}, 2)
+				d2 := ctx.EmitGoCallScalar(jitGoABI_b64b6b0e01aa8957, []JITValueDesc{d1}, 2)
 				d2.NoHeapPointer = false
 				ctx.BindReg(d2.Reg, &d2)
 				ctx.BindReg(d2.Reg2, &d2)
@@ -4590,7 +4590,7 @@ func init_timezone() {
 					if d17.Loc != LocRegPair && d17.Loc != LocStackPair && d17.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d16 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d17}, 2)
+					d16 = ctx.EmitGoCallScalar(jitGoABI_d400b81eac74af18, []JITValueDesc{d17}, 2)
 					ctx.FreeDesc(&d15)
 					ctx.EnsureDesc(&d16)
 					if d16.Loc == LocImm {
@@ -4619,7 +4619,7 @@ func init_timezone() {
 						panic("jit: generic call arg expects 2-word value (ResolveLocation arg0)")
 					}
 					ctx.SyncDesc(&d16)
-					callResults18 := JITEmitGoCallResults(ctx, GoFuncAddr(ResolveLocation), []JITValueDesc{d16}, []uint8{1, 2}, []uint8{1, 3})
+					callResults18 := JITEmitGoCallResults(ctx, GoFuncAddr(ResolveLocation), []JITValueDesc{d16})
 					d19 = callResults18[0]
 					_ = d19
 					d20 = callResults18[1]
@@ -5367,7 +5367,7 @@ func init_timezone() {
 						ctx.BindReg(d159.Reg, &d160)
 					} else {
 						boxed := JITPrepareScmerGoArg(ctx, d159)
-						d160 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{boxed}, 1)
+						d160 = ctx.EmitGoCallScalar(jitGoABI_293fe45d1cce7337, []JITValueDesc{boxed}, 1)
 						d160.Type = tagInt
 						ctx.BindReg(d160.Reg, &d160)
 					}
@@ -5418,7 +5418,7 @@ func init_timezone() {
 					}
 					ctx.SyncDesc(&d1)
 					ctx.SyncDesc(&d162)
-					d163 = ctx.EmitGoCallScalar(GoFuncAddr(time.Unix), []JITValueDesc{d1, d162}, 3)
+					d163 = ctx.EmitGoCallScalar(jitGoABI_29d4927b17fc7b87, []JITValueDesc{d1, d162}, 3)
 					d163.NoHeapPointer = false
 					ctx.BindReg(d163.Reg, &d163)
 					ctx.BindReg(d163.Reg2, &d163)
@@ -5429,7 +5429,7 @@ func init_timezone() {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).UTC arg0)")
 					}
 					ctx.SyncDesc(&d163)
-					d164 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).UTC), []JITValueDesc{d163}, 3)
+					d164 = ctx.EmitGoCallScalar(jitGoABI_67768eb689868c3a, []JITValueDesc{d163}, 3)
 					d164.NoHeapPointer = false
 					ctx.BindReg(d164.Reg, &d164)
 					ctx.BindReg(d164.Reg2, &d164)
@@ -5440,7 +5440,7 @@ func init_timezone() {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Year arg0)")
 					}
 					ctx.SyncDesc(&d164)
-					d165 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Year), []JITValueDesc{d164}, 1)
+					d165 = ctx.EmitGoCallScalar(jitGoABI_273d23d4ad67d558, []JITValueDesc{d164}, 1)
 					d165.NoHeapPointer = true
 					ctx.BindReg(d165.Reg, &d165)
 					d164 = JITPrepareGoSliceArg(ctx, d164)
@@ -5448,7 +5448,7 @@ func init_timezone() {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Month arg0)")
 					}
 					ctx.SyncDesc(&d164)
-					d166 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Month), []JITValueDesc{d164}, 1)
+					d166 = ctx.EmitGoCallScalar(jitGoABI_3e536fa2e3d4a6ab, []JITValueDesc{d164}, 1)
 					d166.NoHeapPointer = true
 					ctx.BindReg(d166.Reg, &d166)
 					d164 = JITPrepareGoSliceArg(ctx, d164)
@@ -5456,7 +5456,7 @@ func init_timezone() {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Day arg0)")
 					}
 					ctx.SyncDesc(&d164)
-					d167 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Day), []JITValueDesc{d164}, 1)
+					d167 = ctx.EmitGoCallScalar(jitGoABI_5e7ac569abe17a10, []JITValueDesc{d164}, 1)
 					d167.NoHeapPointer = true
 					ctx.BindReg(d167.Reg, &d167)
 					d164 = JITPrepareGoSliceArg(ctx, d164)
@@ -5464,7 +5464,7 @@ func init_timezone() {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Hour arg0)")
 					}
 					ctx.SyncDesc(&d164)
-					d168 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Hour), []JITValueDesc{d164}, 1)
+					d168 = ctx.EmitGoCallScalar(jitGoABI_eabd2eda5fd23068, []JITValueDesc{d164}, 1)
 					d168.NoHeapPointer = true
 					ctx.BindReg(d168.Reg, &d168)
 					d164 = JITPrepareGoSliceArg(ctx, d164)
@@ -5472,7 +5472,7 @@ func init_timezone() {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Minute arg0)")
 					}
 					ctx.SyncDesc(&d164)
-					d169 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Minute), []JITValueDesc{d164}, 1)
+					d169 = ctx.EmitGoCallScalar(jitGoABI_3bb3331dffe39a8d, []JITValueDesc{d164}, 1)
 					d169.NoHeapPointer = true
 					ctx.BindReg(d169.Reg, &d169)
 					d164 = JITPrepareGoSliceArg(ctx, d164)
@@ -5480,7 +5480,7 @@ func init_timezone() {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Second arg0)")
 					}
 					ctx.SyncDesc(&d164)
-					d170 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Second), []JITValueDesc{d164}, 1)
+					d170 = ctx.EmitGoCallScalar(jitGoABI_8e16add5ec148136, []JITValueDesc{d164}, 1)
 					d170.NoHeapPointer = true
 					ctx.BindReg(d170.Reg, &d170)
 					ctx.FreeDesc(&d164)
@@ -5517,7 +5517,7 @@ func init_timezone() {
 					ctx.SyncDesc(&d170)
 					ctx.SyncDesc(&d171)
 					ctx.SyncDesc(&d19)
-					d172 = ctx.EmitGoCallScalar(GoFuncAddr(time.Date), []JITValueDesc{d165, d166, d167, d168, d169, d170, d171, d19}, 3)
+					d172 = ctx.EmitGoCallScalar(jitGoABI_d8b03cdc66228eb3, []JITValueDesc{d165, d166, d167, d168, d169, d170, d171, d19}, 3)
 					d172.NoHeapPointer = false
 					ctx.BindReg(d172.Reg, &d172)
 					ctx.BindReg(d172.Reg2, &d172)
@@ -5534,7 +5534,7 @@ func init_timezone() {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).UTC arg0)")
 					}
 					ctx.SyncDesc(&d172)
-					d173 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).UTC), []JITValueDesc{d172}, 3)
+					d173 = ctx.EmitGoCallScalar(jitGoABI_67768eb689868c3a, []JITValueDesc{d172}, 3)
 					d173.NoHeapPointer = false
 					ctx.BindReg(d173.Reg, &d173)
 					ctx.BindReg(d173.Reg2, &d173)
@@ -5545,7 +5545,7 @@ func init_timezone() {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Unix arg0)")
 					}
 					ctx.SyncDesc(&d173)
-					d174 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Unix), []JITValueDesc{d173}, 1)
+					d174 = ctx.EmitGoCallScalar(jitGoABI_46e5a85a2272c07d, []JITValueDesc{d173}, 1)
 					d174.NoHeapPointer = true
 					ctx.BindReg(d174.Reg, &d174)
 					ctx.FreeDesc(&d173)
@@ -5553,7 +5553,7 @@ func init_timezone() {
 						panic("jit: generic call arg expects 1-word value")
 					}
 					ctx.SyncDesc(&d174)
-					d175 = ctx.EmitGoCallScalar(GoFuncAddr(NewDate), []JITValueDesc{d174}, 2)
+					d175 = ctx.EmitGoCallScalar(jitGoABI_b64b6b0e01aa8957, []JITValueDesc{d174}, 2)
 					d175.NoHeapPointer = false
 					ctx.BindReg(d175.Reg, &d175)
 					ctx.BindReg(d175.Reg2, &d175)
@@ -5607,7 +5607,7 @@ func init_timezone() {
 					}
 					ctx.SyncDesc(&d1)
 					ctx.SyncDesc(&d176)
-					d177 = ctx.EmitGoCallScalar(GoFuncAddr(time.Unix), []JITValueDesc{d1, d176}, 3)
+					d177 = ctx.EmitGoCallScalar(jitGoABI_29d4927b17fc7b87, []JITValueDesc{d1, d176}, 3)
 					d177.NoHeapPointer = false
 					ctx.BindReg(d177.Reg, &d177)
 					ctx.BindReg(d177.Reg2, &d177)
@@ -5622,7 +5622,7 @@ func init_timezone() {
 					}
 					ctx.SyncDesc(&d177)
 					ctx.SyncDesc(&d19)
-					d178 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).In), []JITValueDesc{d177, d19}, 3)
+					d178 = ctx.EmitGoCallScalar(jitGoABI_5a84bc0f84962a3a, []JITValueDesc{d177, d19}, 3)
 					d178.NoHeapPointer = false
 					ctx.BindReg(d178.Reg, &d178)
 					ctx.BindReg(d178.Reg2, &d178)
@@ -5633,7 +5633,7 @@ func init_timezone() {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Year arg0)")
 					}
 					ctx.SyncDesc(&d178)
-					d179 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Year), []JITValueDesc{d178}, 1)
+					d179 = ctx.EmitGoCallScalar(jitGoABI_273d23d4ad67d558, []JITValueDesc{d178}, 1)
 					d179.NoHeapPointer = true
 					ctx.BindReg(d179.Reg, &d179)
 					d178 = JITPrepareGoSliceArg(ctx, d178)
@@ -5641,7 +5641,7 @@ func init_timezone() {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Month arg0)")
 					}
 					ctx.SyncDesc(&d178)
-					d180 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Month), []JITValueDesc{d178}, 1)
+					d180 = ctx.EmitGoCallScalar(jitGoABI_3e536fa2e3d4a6ab, []JITValueDesc{d178}, 1)
 					d180.NoHeapPointer = true
 					ctx.BindReg(d180.Reg, &d180)
 					d178 = JITPrepareGoSliceArg(ctx, d178)
@@ -5649,7 +5649,7 @@ func init_timezone() {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Day arg0)")
 					}
 					ctx.SyncDesc(&d178)
-					d181 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Day), []JITValueDesc{d178}, 1)
+					d181 = ctx.EmitGoCallScalar(jitGoABI_5e7ac569abe17a10, []JITValueDesc{d178}, 1)
 					d181.NoHeapPointer = true
 					ctx.BindReg(d181.Reg, &d181)
 					d178 = JITPrepareGoSliceArg(ctx, d178)
@@ -5657,7 +5657,7 @@ func init_timezone() {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Hour arg0)")
 					}
 					ctx.SyncDesc(&d178)
-					d182 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Hour), []JITValueDesc{d178}, 1)
+					d182 = ctx.EmitGoCallScalar(jitGoABI_eabd2eda5fd23068, []JITValueDesc{d178}, 1)
 					d182.NoHeapPointer = true
 					ctx.BindReg(d182.Reg, &d182)
 					d178 = JITPrepareGoSliceArg(ctx, d178)
@@ -5665,7 +5665,7 @@ func init_timezone() {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Minute arg0)")
 					}
 					ctx.SyncDesc(&d178)
-					d183 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Minute), []JITValueDesc{d178}, 1)
+					d183 = ctx.EmitGoCallScalar(jitGoABI_3bb3331dffe39a8d, []JITValueDesc{d178}, 1)
 					d183.NoHeapPointer = true
 					ctx.BindReg(d183.Reg, &d183)
 					d178 = JITPrepareGoSliceArg(ctx, d178)
@@ -5673,11 +5673,11 @@ func init_timezone() {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Second arg0)")
 					}
 					ctx.SyncDesc(&d178)
-					d184 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Second), []JITValueDesc{d178}, 1)
+					d184 = ctx.EmitGoCallScalar(jitGoABI_8e16add5ec148136, []JITValueDesc{d178}, 1)
 					d184.NoHeapPointer = true
 					ctx.BindReg(d184.Reg, &d184)
 					ctx.FreeDesc(&d178)
-					d185 = ctx.EmitGoCallScalar(GoFuncAddr(func() *time.Location { return time.UTC }), nil, 1)
+					d185 = ctx.EmitGoCallScalar(jitGoABI_45588648311f853d, nil, 1)
 					if d179.Loc == LocRegPair || d179.Loc == LocStackPair || d179.Loc == LocRegTriple || d179.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
 					}
@@ -5711,7 +5711,7 @@ func init_timezone() {
 					ctx.SyncDesc(&d184)
 					ctx.SyncDesc(&d186)
 					ctx.SyncDesc(&d185)
-					d187 = ctx.EmitGoCallScalar(GoFuncAddr(time.Date), []JITValueDesc{d179, d180, d181, d182, d183, d184, d186, d185}, 3)
+					d187 = ctx.EmitGoCallScalar(jitGoABI_d8b03cdc66228eb3, []JITValueDesc{d179, d180, d181, d182, d183, d184, d186, d185}, 3)
 					d187.NoHeapPointer = false
 					ctx.BindReg(d187.Reg, &d187)
 					ctx.BindReg(d187.Reg2, &d187)
@@ -5729,7 +5729,7 @@ func init_timezone() {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Unix arg0)")
 					}
 					ctx.SyncDesc(&d187)
-					d188 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Unix), []JITValueDesc{d187}, 1)
+					d188 = ctx.EmitGoCallScalar(jitGoABI_46e5a85a2272c07d, []JITValueDesc{d187}, 1)
 					d188.NoHeapPointer = true
 					ctx.BindReg(d188.Reg, &d188)
 					ctx.FreeDesc(&d187)
@@ -5737,7 +5737,7 @@ func init_timezone() {
 						panic("jit: generic call arg expects 1-word value")
 					}
 					ctx.SyncDesc(&d188)
-					d189 = ctx.EmitGoCallScalar(GoFuncAddr(NewDate), []JITValueDesc{d188}, 2)
+					d189 = ctx.EmitGoCallScalar(jitGoABI_b64b6b0e01aa8957, []JITValueDesc{d188}, 2)
 					d189.NoHeapPointer = false
 					ctx.BindReg(d189.Reg, &d189)
 					ctx.BindReg(d189.Reg2, &d189)
@@ -6239,7 +6239,7 @@ func init_timezone() {
 					d10.ID = 0
 					d10 = JITPrepareScmerGoArg(ctx, d10)
 					ctx.SyncDesc(&d10)
-					callResults11 := JITEmitGoCallResults(ctx, GoFuncAddr(toTime), []JITValueDesc{d10}, []uint8{3, 1}, []uint8{4, 0})
+					callResults11 := JITEmitGoCallResults(ctx, jitGoABI_bd4b59785e659476, []JITValueDesc{d10})
 					d12 = callResults11[0]
 					_ = d12
 					d13 = callResults11[1]
@@ -6250,7 +6250,7 @@ func init_timezone() {
 					d14.ID = 0
 					d14 = JITPrepareScmerGoArg(ctx, d14)
 					ctx.SyncDesc(&d14)
-					callResults15 := JITEmitGoCallResults(ctx, GoFuncAddr(toTime), []JITValueDesc{d14}, []uint8{3, 1}, []uint8{4, 0})
+					callResults15 := JITEmitGoCallResults(ctx, jitGoABI_bd4b59785e659476, []JITValueDesc{d14})
 					d16 = callResults15[0]
 					_ = d16
 					d17 = callResults15[1]
@@ -6456,7 +6456,7 @@ func init_timezone() {
 					if d56.Loc != LocRegPair && d56.Loc != LocStackPair && d56.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d55 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d56}, 2)
+					d55 = ctx.EmitGoCallScalar(jitGoABI_d400b81eac74af18, []JITValueDesc{d56}, 2)
 					ctx.FreeDesc(&d54)
 					ctx.EnsureDesc(&d55)
 					if d55.Loc == LocImm {
@@ -6485,7 +6485,7 @@ func init_timezone() {
 						panic("jit: generic call arg expects 2-word value (strings.ToUpper arg0)")
 					}
 					ctx.SyncDesc(&d55)
-					d57 = ctx.EmitGoCallScalar(GoFuncAddr(strings.ToUpper), []JITValueDesc{d55}, 2)
+					d57 = ctx.EmitGoCallScalar(jitGoABI_082ecf6ad5b4e783, []JITValueDesc{d55}, 2)
 					d57.NoHeapPointer = false
 					ctx.BindReg(d57.Reg, &d57)
 					ctx.BindReg(d57.Reg2, &d57)
@@ -6500,7 +6500,7 @@ func init_timezone() {
 					}
 					ctx.SyncDesc(&d16)
 					ctx.SyncDesc(&d12)
-					d58 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Sub), []JITValueDesc{d16, d12}, 1)
+					d58 = ctx.EmitGoCallScalar(jitGoABI_efa2f8f099a29de8, []JITValueDesc{d16, d12}, 1)
 					d58.NoHeapPointer = true
 					ctx.BindReg(d58.Reg, &d58)
 					ctx.StabilizeDescForControlFlow(&d58)
@@ -6517,7 +6517,7 @@ func init_timezone() {
 					} else {
 						d60 = d59
 					}
-					d61 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d57, d60}, 1)
+					d61 = ctx.EmitGoCallScalar(jitGoABI_c87bc59d96cab6e4, []JITValueDesc{d57, d60}, 1)
 					ctx.EmitAndRegImm32(d61.Reg, 1)
 					d61.Type = tagBool
 					ctx.BindReg(d61.Reg, &d61)
@@ -6710,7 +6710,7 @@ func init_timezone() {
 						panic("jit: generic call arg expects 1-word value")
 					}
 					ctx.SyncDesc(&d58)
-					d119 = ctx.EmitGoCallScalar(GoFuncAddr((time.Duration).Seconds), []JITValueDesc{d58}, 1)
+					d119 = ctx.EmitGoCallScalar(jitGoABI_16fe2e6c3fbb4a3e, []JITValueDesc{d58}, 1)
 					d119.NoHeapPointer = true
 					ctx.BindReg(d119.Reg, &d119)
 					ctx.EnsureDesc(&d119)
@@ -6755,7 +6755,7 @@ func init_timezone() {
 						panic("jit: generic call arg expects 1-word value")
 					}
 					ctx.SyncDesc(&d58)
-					d122 = ctx.EmitGoCallScalar(GoFuncAddr((time.Duration).Minutes), []JITValueDesc{d58}, 1)
+					d122 = ctx.EmitGoCallScalar(jitGoABI_a4e37f885ad7f8f7, []JITValueDesc{d58}, 1)
 					d122.NoHeapPointer = true
 					ctx.BindReg(d122.Reg, &d122)
 					ctx.EnsureDesc(&d122)
@@ -6809,7 +6809,7 @@ func init_timezone() {
 					} else {
 						d126 = d125
 					}
-					d127 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d57, d126}, 1)
+					d127 = ctx.EmitGoCallScalar(jitGoABI_c87bc59d96cab6e4, []JITValueDesc{d57, d126}, 1)
 					ctx.EmitAndRegImm32(d127.Reg, 1)
 					d127.Type = tagBool
 					ctx.BindReg(d127.Reg, &d127)
@@ -6931,7 +6931,7 @@ func init_timezone() {
 						panic("jit: generic call arg expects 1-word value")
 					}
 					ctx.SyncDesc(&d58)
-					d167 = ctx.EmitGoCallScalar(GoFuncAddr((time.Duration).Hours), []JITValueDesc{d58}, 1)
+					d167 = ctx.EmitGoCallScalar(jitGoABI_321306d0bea90d46, []JITValueDesc{d58}, 1)
 					d167.NoHeapPointer = true
 					ctx.BindReg(d167.Reg, &d167)
 					ctx.EnsureDesc(&d167)
@@ -6985,7 +6985,7 @@ func init_timezone() {
 					} else {
 						d171 = d170
 					}
-					d172 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d57, d171}, 1)
+					d172 = ctx.EmitGoCallScalar(jitGoABI_c87bc59d96cab6e4, []JITValueDesc{d57, d171}, 1)
 					ctx.EmitAndRegImm32(d172.Reg, 1)
 					d172.Type = tagBool
 					ctx.BindReg(d172.Reg, &d172)
@@ -7121,7 +7121,7 @@ func init_timezone() {
 						panic("jit: generic call arg expects 1-word value")
 					}
 					ctx.SyncDesc(&d58)
-					d219 = ctx.EmitGoCallScalar(GoFuncAddr((time.Duration).Hours), []JITValueDesc{d58}, 1)
+					d219 = ctx.EmitGoCallScalar(jitGoABI_321306d0bea90d46, []JITValueDesc{d58}, 1)
 					d219.NoHeapPointer = true
 					ctx.BindReg(d219.Reg, &d219)
 					ctx.EnsureDesc(&d219)
@@ -7189,7 +7189,7 @@ func init_timezone() {
 					} else {
 						d224 = d223
 					}
-					d225 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d57, d224}, 1)
+					d225 = ctx.EmitGoCallScalar(jitGoABI_c87bc59d96cab6e4, []JITValueDesc{d57, d224}, 1)
 					ctx.EmitAndRegImm32(d225.Reg, 1)
 					d225.Type = tagBool
 					ctx.BindReg(d225.Reg, &d225)
@@ -7341,7 +7341,7 @@ func init_timezone() {
 						panic("jit: generic call arg expects 1-word value")
 					}
 					ctx.SyncDesc(&d58)
-					d280 = ctx.EmitGoCallScalar(GoFuncAddr((time.Duration).Hours), []JITValueDesc{d58}, 1)
+					d280 = ctx.EmitGoCallScalar(jitGoABI_321306d0bea90d46, []JITValueDesc{d58}, 1)
 					d280.NoHeapPointer = true
 					ctx.BindReg(d280.Reg, &d280)
 					ctx.EnsureDesc(&d280)
@@ -7409,7 +7409,7 @@ func init_timezone() {
 					} else {
 						d285 = d284
 					}
-					d286 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d57, d285}, 1)
+					d286 = ctx.EmitGoCallScalar(jitGoABI_c87bc59d96cab6e4, []JITValueDesc{d57, d285}, 1)
 					ctx.EmitAndRegImm32(d286.Reg, 1)
 					d286.Type = tagBool
 					ctx.BindReg(d286.Reg, &d286)
@@ -7578,7 +7578,7 @@ func init_timezone() {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Date arg0)")
 					}
 					ctx.SyncDesc(&d12)
-					callResults349 := JITEmitGoCallResults(ctx, GoFuncAddr((time.Time).Date), []JITValueDesc{d12}, []uint8{1, 1, 1}, []uint8{0, 0, 0})
+					callResults349 := JITEmitGoCallResults(ctx, jitGoABI_ffa75da5067e75f7, []JITValueDesc{d12})
 					d350 = callResults349[0]
 					_ = d350
 					d351 = callResults349[1]
@@ -7590,7 +7590,7 @@ func init_timezone() {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Date arg0)")
 					}
 					ctx.SyncDesc(&d16)
-					callResults353 := JITEmitGoCallResults(ctx, GoFuncAddr((time.Time).Date), []JITValueDesc{d16}, []uint8{1, 1, 1}, []uint8{0, 0, 0})
+					callResults353 := JITEmitGoCallResults(ctx, jitGoABI_ffa75da5067e75f7, []JITValueDesc{d16})
 					d354 = callResults353[0]
 					_ = d354
 					d355 = callResults353[1]
@@ -7782,7 +7782,7 @@ func init_timezone() {
 					} else {
 						d364 = d363
 					}
-					d365 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d57, d364}, 1)
+					d365 = ctx.EmitGoCallScalar(jitGoABI_c87bc59d96cab6e4, []JITValueDesc{d57, d364}, 1)
 					ctx.EmitAndRegImm32(d365.Reg, 1)
 					d365.Type = tagBool
 					ctx.BindReg(d365.Reg, &d365)
@@ -7983,7 +7983,7 @@ func init_timezone() {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Date arg0)")
 					}
 					ctx.SyncDesc(&d12)
-					callResults444 := JITEmitGoCallResults(ctx, GoFuncAddr((time.Time).Date), []JITValueDesc{d12}, []uint8{1, 1, 1}, []uint8{0, 0, 0})
+					callResults444 := JITEmitGoCallResults(ctx, jitGoABI_ffa75da5067e75f7, []JITValueDesc{d12})
 					d445 = callResults444[0]
 					_ = d445
 					d446 = callResults444[1]
@@ -7995,7 +7995,7 @@ func init_timezone() {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Date arg0)")
 					}
 					ctx.SyncDesc(&d16)
-					callResults448 := JITEmitGoCallResults(ctx, GoFuncAddr((time.Time).Date), []JITValueDesc{d16}, []uint8{1, 1, 1}, []uint8{0, 0, 0})
+					callResults448 := JITEmitGoCallResults(ctx, jitGoABI_ffa75da5067e75f7, []JITValueDesc{d16})
 					d449 = callResults448[0]
 					_ = d449
 					d450 = callResults448[1]
@@ -8085,7 +8085,7 @@ func init_timezone() {
 					} else {
 						d456 = d455
 					}
-					d457 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d57, d456}, 1)
+					d457 = ctx.EmitGoCallScalar(jitGoABI_c87bc59d96cab6e4, []JITValueDesc{d57, d456}, 1)
 					ctx.EmitAndRegImm32(d457.Reg, 1)
 					d457.Type = tagBool
 					ctx.BindReg(d457.Reg, &d457)
@@ -8408,4 +8408,63 @@ func formatDateMySQL(t time.Time, format string) string {
 		}
 	}
 	return buf.String()
+}
+
+// BEGIN jitgen prepared Go ABI entries
+var jitGoABI_082ecf6ad5b4e783 uint64
+var jitGoABI_16fe2e6c3fbb4a3e uint64
+var jitGoABI_273d23d4ad67d558 uint64
+var jitGoABI_293fe45d1cce7337 uint64
+var jitGoABI_29d4927b17fc7b87 uint64
+var jitGoABI_321306d0bea90d46 uint64
+var jitGoABI_3bb3331dffe39a8d uint64
+var jitGoABI_3e536fa2e3d4a6ab uint64
+var jitGoABI_45588648311f853d uint64
+var jitGoABI_46e5a85a2272c07d uint64
+var jitGoABI_5212b4c926c63de8 uint64
+var jitGoABI_5a84bc0f84962a3a uint64
+var jitGoABI_5e7ac569abe17a10 uint64
+var jitGoABI_67768eb689868c3a uint64
+var jitGoABI_756b91ccb831f850 uint64
+var jitGoABI_7b917b6886e5aaa5 uint64
+var jitGoABI_8e16add5ec148136 uint64
+var jitGoABI_a4e37f885ad7f8f7 uint64
+var jitGoABI_b64b6b0e01aa8957 uint64
+var jitGoABI_bd4b59785e659476 uint64
+var jitGoABI_c87bc59d96cab6e4 uint64
+var jitGoABI_cca2c55fdf304b85 uint64
+var jitGoABI_d400b81eac74af18 uint64
+var jitGoABI_d8b03cdc66228eb3 uint64
+var jitGoABI_eabd2eda5fd23068 uint64
+var jitGoABI_efa2f8f099a29de8 uint64
+var jitGoABI_ffa75da5067e75f7 uint64
+
+func init() {
+	jitGoABI_082ecf6ad5b4e783 = GoFuncAddr(strings.ToUpper)
+	jitGoABI_16fe2e6c3fbb4a3e = GoFuncAddr((time.Duration).Seconds)
+	jitGoABI_273d23d4ad67d558 = GoFuncAddr((time.Time).Year)
+	jitGoABI_293fe45d1cce7337 = GoFuncAddr(Scmer.Int)
+	jitGoABI_29d4927b17fc7b87 = GoFuncAddr(time.Unix)
+	jitGoABI_321306d0bea90d46 = GoFuncAddr((time.Duration).Hours)
+	jitGoABI_3bb3331dffe39a8d = GoFuncAddr((time.Time).Minute)
+	jitGoABI_3e536fa2e3d4a6ab = GoFuncAddr((time.Time).Month)
+	jitGoABI_45588648311f853d = GoFuncAddr(func() *time.Location { return time.UTC })
+	jitGoABI_46e5a85a2272c07d = GoFuncAddr((time.Time).Unix)
+	jitGoABI_5212b4c926c63de8 = GoFuncAddr(time.Now)
+	jitGoABI_5a84bc0f84962a3a = GoFuncAddr((time.Time).In)
+	jitGoABI_5e7ac569abe17a10 = GoFuncAddr((time.Time).Day)
+	jitGoABI_67768eb689868c3a = GoFuncAddr((time.Time).UTC)
+	jitGoABI_756b91ccb831f850 = GoFuncAddr(NewString)
+	jitGoABI_7b917b6886e5aaa5 = GoFuncAddr(func() *time.Location { return time.Local })
+	jitGoABI_8e16add5ec148136 = GoFuncAddr((time.Time).Second)
+	jitGoABI_a4e37f885ad7f8f7 = GoFuncAddr((time.Duration).Minutes)
+	jitGoABI_b64b6b0e01aa8957 = GoFuncAddr(NewDate)
+	jitGoABI_bd4b59785e659476 = GoFuncAddr(toTime)
+	jitGoABI_c87bc59d96cab6e4 = GoFuncAddr(JITStringEqual)
+	jitGoABI_cca2c55fdf304b85 = GoFuncAddr((*time.Location).String)
+	jitGoABI_d400b81eac74af18 = GoFuncAddr(Scmer.String)
+	jitGoABI_d8b03cdc66228eb3 = GoFuncAddr(time.Date)
+	jitGoABI_eabd2eda5fd23068 = GoFuncAddr((time.Time).Hour)
+	jitGoABI_efa2f8f099a29de8 = GoFuncAddr((time.Time).Sub)
+	jitGoABI_ffa75da5067e75f7 = GoFuncAddr((time.Time).Date)
 }

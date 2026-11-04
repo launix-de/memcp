@@ -800,7 +800,7 @@ func init_processlist() {
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d26)
 					ctx.EnsureDesc(&d26)
-					callResults27 := JITEmitGoCallResults(ctx, GoFuncAddr(jitMakeScmerSlice), []JITValueDesc{d26, d26}, []uint8{3}, []uint8{1})
+					callResults27 := JITEmitGoCallResults(ctx, jitGoABI_c618dd5ca6a006ab, []JITValueDesc{d26, d26})
 					d28 = callResults27[0]
 					d28.Type = tagSlice
 					ctx.StabilizeDescForControlFlow(&d28)
@@ -1312,7 +1312,7 @@ func init_processlist() {
 						panic("jit: generic call arg expects 1-word value")
 					}
 					ctx.SyncDesc(&d51)
-					d109 = ctx.EmitGoCallScalar(GoFuncAddr((*SessionState).processListState), []JITValueDesc{d51}, 2)
+					d109 = ctx.EmitGoCallScalar(jitGoABI_3f5e95d194aa804b, []JITValueDesc{d51}, 2)
 					d109.NoHeapPointer = false
 					ctx.BindReg(d109.Reg, &d109)
 					ctx.BindReg(d109.Reg2, &d109)
@@ -1450,7 +1450,7 @@ func init_processlist() {
 						panic("jit: generic call arg expects 1-word value")
 					}
 					ctx.SyncDesc(&d51)
-					d123 = ctx.EmitGoCallScalar(GoFuncAddr((*SessionState).ElapsedSeconds), []JITValueDesc{d51}, 1)
+					d123 = ctx.EmitGoCallScalar(jitGoABI_50d348c432beacb1, []JITValueDesc{d51}, 1)
 					d123.NoHeapPointer = true
 					ctx.BindReg(d123.Reg, &d123)
 					ctx.EnsureDesc(&d123)
@@ -1484,7 +1484,7 @@ func init_processlist() {
 					ctx.EmitLeaRegMem(d127.Reg, ctx.StackReg, int32(stackArray110))
 					ctx.EmitMovRegImm64(d127.Reg2, uint64(16))
 					ctx.EmitMovRegImm64(d127.Reg3, uint64(16))
-					callResults128 := JITEmitGoCallResults(ctx, GoFuncAddr(JITNewSliceCopy), []JITValueDesc{d127}, []uint8{2}, []uint8{1})
+					callResults128 := JITEmitGoCallResults(ctx, jitGoABI_f6cb10d03866bb4a, []JITValueDesc{d127})
 					d129 = callResults128[0]
 					ctx.EnsureDesc(&d30)
 					ctx.SyncDesc(&d129)
@@ -2076,7 +2076,7 @@ func init_processlist() {
 					d7.ID = 0
 					d7 = JITPrepareScmerGoArg(ctx, d7)
 					ctx.SyncDesc(&d7)
-					callResults8 := JITEmitGoCallResults(ctx, GoFuncAddr(querySessionState), []JITValueDesc{d7}, []uint8{1, 1}, []uint8{1, 0})
+					callResults8 := JITEmitGoCallResults(ctx, GoFuncAddr(querySessionState), []JITValueDesc{d7})
 					d9 = callResults8[0]
 					_ = d9
 					d10 = callResults8[1]
@@ -2306,7 +2306,7 @@ func init_processlist() {
 					ctx.BindReg(d0.Reg, &d1)
 				} else {
 					boxed := JITPrepareScmerGoArg(ctx, d0)
-					d1 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{boxed}, 1)
+					d1 = ctx.EmitGoCallScalar(jitGoABI_cf0c48b82fe43704, []JITValueDesc{boxed}, 1)
 					d1.Type = tagInt
 					ctx.BindReg(d1.Reg, &d1)
 				}
@@ -2411,4 +2411,19 @@ func KillSession(id uint64) bool {
 		return false
 	}
 	return v.(*SessionState).Kill()
+}
+
+// BEGIN jitgen prepared Go ABI entries
+var jitGoABI_3f5e95d194aa804b uint64
+var jitGoABI_50d348c432beacb1 uint64
+var jitGoABI_c618dd5ca6a006ab uint64
+var jitGoABI_cf0c48b82fe43704 uint64
+var jitGoABI_f6cb10d03866bb4a uint64
+
+func init() {
+	jitGoABI_3f5e95d194aa804b = GoFuncAddr((*SessionState).processListState)
+	jitGoABI_50d348c432beacb1 = GoFuncAddr((*SessionState).ElapsedSeconds)
+	jitGoABI_c618dd5ca6a006ab = GoFuncAddr(jitMakeScmerSlice)
+	jitGoABI_cf0c48b82fe43704 = GoFuncAddr(Scmer.Int)
+	jitGoABI_f6cb10d03866bb4a = GoFuncAddr(JITNewSliceCopy)
 }

@@ -36,6 +36,13 @@ import (
 
 /*
 JIT Emitter Contract
+
+Scheduling policy: SCM expression kernels are bounded and normally execute in
+microseconds. They do not contain unbounded language loops. A fused shard kernel
+must finish its shard without injected cooperative preemption polls, Yield calls,
+budgets or cancellation exits. Scheduling policy belongs to the surrounding
+operator/Go boundary. Do not add polls merely because runtime.jit offers them.
+Ordinary Go helper calls keep their normal runtime GC/scheduler semantics.
 ====================
 
 Each Declaration may provide a JITEmit callback:
@@ -306,7 +313,7 @@ func attachProcJIT(proc *Proc, entry *JITEntryPoint) {
 func initializeProcJIT(proc *Proc, entry *JITEntryPoint) {
 	// Construct the Go funcval without publishing the code word on proc yet.
 	valuePointer := unsafe.Pointer(proc)
-	entry.Native = *(*func(...Scmer) Scmer)(unsafe.Pointer(&valuePointer))
+	entry.Native = jitRuntimeFunction[func(...Scmer) Scmer](valuePointer)
 	entry.FuncValue = proc
 	entry.JITArity = 0
 	entry.JITDirect = 0
@@ -355,7 +362,7 @@ func (proc *Proc) jitFunction() func(...Scmer) Scmer {
 		return nil
 	}
 	valuePointer := unsafe.Pointer(proc)
-	return *(*func(...Scmer) Scmer)(unsafe.Pointer(&valuePointer))
+	return jitRuntimeFunction[func(...Scmer) Scmer](valuePointer)
 }
 
 func jitAllocateProcContext(proc *Proc, captureCount int) *Proc {
@@ -391,7 +398,7 @@ func JITProcForFunction(function func(...Scmer) Scmer) *Proc {
 	if function == nil {
 		return nil
 	}
-	valuePointer := *(*unsafe.Pointer)(unsafe.Pointer(&function))
+	valuePointer := jitRuntimeFunctionContext(function)
 	if valuePointer == nil {
 		return nil
 	}
@@ -725,6 +732,7 @@ type jitSafepoint struct {
 	entry           bool
 	entryFrameWords uintptr
 	entryPointerMap []byte
+	regularEntry    bool
 }
 
 // jitSortedFrameRoots returns the permanent frame words registered by the
@@ -758,6 +766,7 @@ type jitStackMap struct {
 	// runtime adapter.
 	entryFrameWords uintptr
 	entryPointerMap []byte
+	regularEntry    bool
 }
 
 // JITStorageGetValueFunc is the native scalar column-reader ABI.
@@ -3528,7 +3537,9 @@ func jitParallelSpecial(thunks ...Scmer) Scmer {
 
 // GoFuncAddr returns the entry point address of a Go function value.
 func GoFuncAddr(fn interface{}) uint64 {
-	return uint64(reflect.ValueOf(fn).Pointer())
+	address := uint64(reflect.ValueOf(fn).Pointer())
+	jitRememberGoFunction(address, fn)
+	return address
 }
 
 // ConcatStrings concatenates two Go strings. Used as a JIT helper for string + string.
@@ -3587,7 +3598,7 @@ func JITPanic(v Scmer) {
 // GoABIIntRegs lists integer argument/result registers in the target's
 // ABIInternal order. The architecture backend supplies this bank separately
 // from the allocator's persistent register homes.
-var GoABIIntRegs = jitGoABIIntRegs()
+var GoABIIntRegs = jitABIIntRegs()
 
 type goCallArgWord struct {
 	loc      JITLoc
@@ -3601,12 +3612,14 @@ type goCallArgWord struct {
 }
 
 type goCallArgLocation struct {
+	fp       bool
+	size     uintptr
 	inReg    bool
 	reg      Reg
 	stackOff int32
 }
 
-func layoutGoCallArgs(words []goCallArgWord) ([]goCallArgLocation, int) {
+func layoutGoCallWords(words []goCallArgWord) ([]goCallArgLocation, int) {
 	locations := make([]goCallArgLocation, len(words))
 	regIndex, stackIndex := 0, 0
 	for index := 0; index < len(words); {
@@ -4128,10 +4141,8 @@ func (ctx *JITContext) emitGoCall(funcAddr uint64, argWords []goCallArgWord, num
 	if numResultWords > len(GoABIIntRegs) {
 		panic("jit: too many result words for Go ABI")
 	}
-	argLocations, stackArgWords := layoutGoCallArgs(argWords)
-	if len(argWords)*8 > int(jitGoSpillBytes) || stackArgWords*8 > int(jitGoSpillBytes) {
-		panic("jit: Go call arguments exceed reserved spill area")
-	}
+	argLocations, _ := jitRuntimeLayoutGoCallArgs(funcAddr, argWords)
+	resultRegs := jitRuntimeResultRegs(funcAddr, numResultWords)
 	// Owner-aware liveness with conservative fallback.
 	var liveRegsArr [16]Reg
 	liveRegs := ctx.collectLiveRegsForCall(&liveRegsArr)
@@ -4188,20 +4199,20 @@ func (ctx *JITContext) emitGoCall(funcAddr uint64, argWords []goCallArgWord, num
 			dstOff := argLocations[i].stackOff + jitGoStackArgOffset
 			switch argWords[i].loc {
 			case LocReg:
-				ctx.EmitStoreRegMem(argWords[i].reg, RegRSP, dstOff)
+				ctx.emitStoreABIWord(argWords[i].reg, RegRSP, dstOff, argLocations[i].size)
 			case LocImm:
 				ctx.EmitMovRegImm64(RegR11, argWords[i].imm)
-				ctx.EmitStoreRegMem(RegR11, RegRSP, dstOff)
+				ctx.emitStoreABIWord(RegR11, RegRSP, dstOff, argLocations[i].size)
 			case LocStack:
 				if argWords[i].stackOff < 0 {
 					ctx.EmitMovRegMem(RegR11, RegRBP, argWords[i].stackOff)
 				} else {
 					ctx.EmitMovRegMem(RegR11, RegRSP, stackArgBaseDisp+entryDynamicSP+argWords[i].stackOff)
 				}
-				ctx.EmitStoreRegMem(RegR11, RegRSP, dstOff)
+				ctx.emitStoreABIWord(RegR11, RegRSP, dstOff, argLocations[i].size)
 			case LocInputPair:
 				ctx.EmitMovRegMem(RegR11, ctx.SliceBase, argWords[i].stackOff)
-				ctx.EmitStoreRegMem(RegR11, RegRSP, dstOff)
+				ctx.emitStoreABIWord(RegR11, RegRSP, dstOff, argLocations[i].size)
 			default:
 				panic("jit: unsupported Go-call stack arg location")
 			}
@@ -4257,7 +4268,7 @@ func (ctx *JITContext) emitGoCall(funcAddr uint64, argWords []goCallArgWord, num
 				if resultSlotBase == ctx.StackReg {
 					off += entryDynamicSP
 				}
-				ctx.EmitStoreRegMem(GoABIIntRegs[i], resultSlotBase, off)
+				ctx.EmitStoreRegMem(resultRegs[i], resultSlotBase, off)
 			}
 			return nil
 		}
@@ -4271,10 +4282,10 @@ func (ctx *JITContext) emitGoCall(funcAddr uint64, argWords []goCallArgWord, num
 				// has been copied. In particular, a three-word slice returns its
 				// capacity in RCX; selecting RCX for the earlier data pointer would
 				// overwrite that capacity before it is read.
-				r = ctx.AllocRegExcept(GoABIIntRegs[:numResultWords]...)
+				r = ctx.AllocRegExcept(resultRegs...)
 			}
-			if r != GoABIIntRegs[i] {
-				moves.add(r, GoABIIntRegs[i])
+			if r != resultRegs[i] {
+				moves.add(r, resultRegs[i])
 			}
 			resultsBuf[i] = r
 		}
@@ -4330,7 +4341,7 @@ func (ctx *JITContext) emitGoCall(funcAddr uint64, argWords []goCallArgWord, num
 	}
 	for i := 0; i < numResultWords; i++ {
 		offset := int32(paddingSize + len(liveRegs)*8 + i*8)
-		ctx.EmitStoreRegMem(GoABIIntRegs[i], RegRSP, offset)
+		ctx.EmitStoreRegMem(resultRegs[i], RegRSP, offset)
 	}
 
 	// Restore (POP in reverse)
@@ -5483,7 +5494,7 @@ func init_jit() {
 					d56.ID = 0
 					d56 = JITPrepareScmerGoArg(ctx, d56)
 					ctx.SyncDesc(&d56)
-					d57 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).Proc), []JITValueDesc{d56}, 1)
+					d57 = ctx.EmitGoCallScalar(jitGoABI_cb67610ad8df95ab, []JITValueDesc{d56}, 1)
 					d57.NoHeapPointer = false
 					ctx.BindReg(d57.Reg, &d57)
 					ctx.FreeDesc(&d56)
@@ -5503,7 +5514,7 @@ func init_jit() {
 					if d58.Loc == LocRegPair || d58.Loc == LocStackPair || d58.Loc == LocRegTriple || d58.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
 					}
-					d59 = ctx.EmitGoCallScalar(GoFuncAddr(atomic.LoadUintptr), []JITValueDesc{d58}, 1)
+					d59 = ctx.EmitGoCallScalar(jitGoABI_e1a0b5996f9bd36d, []JITValueDesc{d58}, 1)
 					d59.NoHeapPointer = true
 					ctx.BindReg(d59.Reg, &d59)
 					ctx.ReclaimUntrackedRegs()
@@ -5579,7 +5590,7 @@ func init_jit() {
 					d62.ID = 0
 					d62 = JITPrepareScmerGoArg(ctx, d62)
 					ctx.SyncDesc(&d62)
-					d63 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).Proc), []JITValueDesc{d62}, 1)
+					d63 = ctx.EmitGoCallScalar(jitGoABI_cb67610ad8df95ab, []JITValueDesc{d62}, 1)
 					d63.NoHeapPointer = false
 					ctx.BindReg(d63.Reg, &d63)
 					ctx.FreeDesc(&d62)
@@ -6144,7 +6155,7 @@ func init_jit() {
 					d3 = JITValueDesc{Loc: LocStackPair, Type: tagString, StackOff: int32(phiBase0) + int32(32)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.StabilizeDescForControlFlow(&d1)
-					d57 = ctx.EmitGoCallScalar(GoFuncAddr(JITEnabled), []JITValueDesc{}, 1)
+					d57 = ctx.EmitGoCallScalar(jitGoABI_1d513c0ca4fea029, []JITValueDesc{}, 1)
 					d57.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d57.Reg, 1)
 					d57.Type = tagBool
@@ -6222,7 +6233,7 @@ func init_jit() {
 					ctx.ReclaimUntrackedRegs()
 					d4 = JITPrepareScmerGoArg(ctx, d4)
 					ctx.SyncDesc(&d4)
-					d74 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).Proc), []JITValueDesc{d4}, 1)
+					d74 = ctx.EmitGoCallScalar(jitGoABI_cb67610ad8df95ab, []JITValueDesc{d4}, 1)
 					d74.NoHeapPointer = false
 					ctx.BindReg(d74.Reg, &d74)
 					ctx.EnsureDesc(&d74)
@@ -6241,7 +6252,7 @@ func init_jit() {
 					if d75.Loc == LocRegPair || d75.Loc == LocStackPair || d75.Loc == LocRegTriple || d75.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
 					}
-					d76 = ctx.EmitGoCallScalar(GoFuncAddr(atomic.LoadUintptr), []JITValueDesc{d75}, 1)
+					d76 = ctx.EmitGoCallScalar(jitGoABI_e1a0b5996f9bd36d, []JITValueDesc{d75}, 1)
 					d76.NoHeapPointer = true
 					ctx.BindReg(d76.Reg, &d76)
 					ctx.ReclaimUntrackedRegs()
@@ -6317,7 +6328,7 @@ func init_jit() {
 					ctx.ReclaimUntrackedRegs()
 					d4 = JITPrepareScmerGoArg(ctx, d4)
 					ctx.SyncDesc(&d4)
-					d79 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).Proc), []JITValueDesc{d4}, 1)
+					d79 = ctx.EmitGoCallScalar(jitGoABI_cb67610ad8df95ab, []JITValueDesc{d4}, 1)
 					d79.NoHeapPointer = false
 					ctx.BindReg(d79.Reg, &d79)
 					ctx.EnsureDesc(&d79)
@@ -6475,7 +6486,7 @@ func init_jit() {
 					}
 					ctx.SyncDesc(&d4)
 					ctx.SyncDesc(&d128)
-					d129 = ctx.EmitGoCallScalar(GoFuncAddr(SerializeToString), []JITValueDesc{d4, d128}, 2)
+					d129 = ctx.EmitGoCallScalar(jitGoABI_8ebfaad02adc1169, []JITValueDesc{d4, d128}, 2)
 					d129.NoHeapPointer = false
 					ctx.BindReg(d129.Reg, &d129)
 					ctx.BindReg(d129.Reg2, &d129)
@@ -6870,7 +6881,7 @@ func init_jit() {
 					if d228.Loc != LocRegPair && d228.Loc != LocStackPair && d228.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d227 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d228}, 2)
+					d227 = ctx.EmitGoCallScalar(jitGoABI_52744aef219ef46b, []JITValueDesc{d228}, 2)
 					ctx.StabilizeDescForControlFlow(&d227)
 					ctx.FreeDesc(&d226)
 					ctx.SyncDesc(&d227)
@@ -6920,14 +6931,14 @@ func init_jit() {
 					d2 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(16)}
 					d3 = JITValueDesc{Loc: LocStackPair, Type: tagString, StackOff: int32(phiBase0) + int32(32)}
 					ctx.ReclaimUntrackedRegs()
-					d230 = ctx.EmitGoCallScalar(GoFuncAddr(func() *[1]any { return new([1]any) }), nil, 1)
+					d230 = ctx.EmitGoCallScalar(jitGoABI_cf124ce75a89fc72, nil, 1)
 					d231 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
 					ctx.EnsureDesc(&d3)
-					d232 = ctx.EmitGoCallScalar(GoFuncAddr(func(value string) any { return value }), []JITValueDesc{d3}, 2)
+					d232 = ctx.EmitGoCallScalar(jitGoABI_950a7239dd8bf0b2, []JITValueDesc{d3}, 2)
 					ctx.FreeDesc(&d3)
 					ctx.EnsureDesc(&d232)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[1]any, index int, value any) { dst[index] = value }), []JITValueDesc{d230, d231, d232})
-					sliceResults233 := JITEmitGoCallResults(ctx, GoFuncAddr(func(value *[1]any) []any { return value[0:1:1] }), []JITValueDesc{d230}, []uint8{3}, []uint8{1})
+					ctx.EmitGoCallVoid(jitGoABI_e6ae698921c9e542, []JITValueDesc{d230, d231, d232})
+					sliceResults233 := JITEmitGoCallResults(ctx, jitGoABI_7d8c0c1345cbef83, []JITValueDesc{d230})
 					d234 = sliceResults233[0]
 					_ = d234
 					d235 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString("warning: JIT fallback: %s\n")}
@@ -6963,7 +6974,7 @@ func init_jit() {
 					}
 					ctx.SyncDesc(&d235)
 					ctx.SyncDesc(&d234)
-					callResults236 := JITEmitGoCallResults(ctx, GoFuncAddr(fmt.Printf), []JITValueDesc{d235, d234}, []uint8{1, 2}, []uint8{0, 3})
+					callResults236 := JITEmitGoCallResults(ctx, jitGoABI_e1a05a452a13014e, []JITValueDesc{d235, d234})
 					ctx.FreeDesc(&d235)
 					d237 = callResults236[0]
 					_ = d237
@@ -7270,4 +7281,46 @@ func maybeLogJITImportCandidate(name Symbol, entry *JITEntryPoint, selected bool
 	fmt.Printf("jitdump: import=%s selected=%t expressions=%d dynamic-calls=%d direct-procs=%d native-calls=%d inlined-calls=%d\n",
 		name, selected, entry.Coverage.Expressions, entry.Coverage.DynamicCalls,
 		entry.Coverage.DirectProcs, entry.Coverage.NativeCalls, entry.Coverage.InlinedCalls)
+}
+
+// ABI stack slots may pack small scalar arguments more tightly than MemCP's
+// internal word descriptors. Never overwrite a neighboring argument's bytes.
+func (ctx *JITContext) emitStoreABIWord(src, base Reg, offset int32, size uintptr) {
+	switch size {
+	case 1:
+		ctx.EmitStoreRegMemB(src, base, offset)
+	case 2:
+		ctx.EmitStoreRegMemW(src, base, offset)
+	case 4:
+		ctx.EmitStoreRegMemL(src, base, offset)
+	case 0, 8:
+		ctx.EmitStoreRegMem(src, base, offset)
+	default:
+		panic("jit: unsupported ABI word size")
+	}
+}
+
+// BEGIN jitgen prepared Go ABI entries
+var jitGoABI_1d513c0ca4fea029 uint64
+var jitGoABI_52744aef219ef46b uint64
+var jitGoABI_7d8c0c1345cbef83 uint64
+var jitGoABI_8ebfaad02adc1169 uint64
+var jitGoABI_950a7239dd8bf0b2 uint64
+var jitGoABI_cb67610ad8df95ab uint64
+var jitGoABI_cf124ce75a89fc72 uint64
+var jitGoABI_e1a05a452a13014e uint64
+var jitGoABI_e1a0b5996f9bd36d uint64
+var jitGoABI_e6ae698921c9e542 uint64
+
+func init() {
+	jitGoABI_1d513c0ca4fea029 = GoFuncAddr(JITEnabled)
+	jitGoABI_52744aef219ef46b = GoFuncAddr(Scmer.String)
+	jitGoABI_7d8c0c1345cbef83 = GoFuncAddr(func(value *[1]any) []any { return value[0:1:1] })
+	jitGoABI_8ebfaad02adc1169 = GoFuncAddr(SerializeToString)
+	jitGoABI_950a7239dd8bf0b2 = GoFuncAddr(func(value string) any { return value })
+	jitGoABI_cb67610ad8df95ab = GoFuncAddr((Scmer).Proc)
+	jitGoABI_cf124ce75a89fc72 = GoFuncAddr(func() *[1]any { return new([1]any) })
+	jitGoABI_e1a05a452a13014e = GoFuncAddr(fmt.Printf)
+	jitGoABI_e1a0b5996f9bd36d = GoFuncAddr(atomic.LoadUintptr)
+	jitGoABI_e6ae698921c9e542 = GoFuncAddr(func(dst *[1]any, index int, value any) { dst[index] = value })
 }

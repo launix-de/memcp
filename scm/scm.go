@@ -1388,7 +1388,7 @@ func init() {
 				d5 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase3) + int32(16)}
 				ctx.ReclaimUntrackedRegs()
 				ctx.ReclaimUntrackedRegs()
-				d10 := ctx.EmitGoCallScalar(GoFuncAddr(func() *Proc { return new(Proc) }), nil, 1)
+				d10 := ctx.EmitGoCallScalar(jitGoABI_79b61201b9e57f9d, nil, 1)
 				ctx.BindReg(d10.Reg, &d10)
 				ctx.StabilizeDescForControlFlow(&d10)
 				inlineHome11 := d10
@@ -1396,7 +1396,7 @@ func init() {
 				ctx.ReclaimUntrackedRegs()
 				d1 = JITPrepareScmerGoArg(ctx, d1)
 				ctx.SyncDesc(&d1)
-				d12 := ctx.EmitGoCallScalar(GoFuncAddr((Scmer).Proc), []JITValueDesc{d1}, 1)
+				d12 := ctx.EmitGoCallScalar(jitGoABI_c3658a69a02c135c, []JITValueDesc{d1}, 1)
 				d12.NoHeapPointer = false
 				ctx.BindReg(d12.Reg, &d12)
 				ctx.ReclaimUntrackedRegs()
@@ -1404,13 +1404,13 @@ func init() {
 					panic("jit: generic call arg expects 1-word value")
 				}
 				ctx.SyncDesc(&d12)
-				d13 := ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *Proc) *Proc { value := (*Proc).snapshot(arg0); return &value })), []JITValueDesc{d12}, 1)
+				d13 := ctx.EmitGoCallScalar(jitGoABI_bd15746ee4fe9617, []JITValueDesc{d12}, 1)
 				d13.NoHeapPointer = false
 				ctx.BindReg(d13.Reg, &d13)
 				ctx.FreeDesc(&d12)
 				ctx.ReclaimUntrackedRegs()
 				ctx.EnsureDesc(&d13)
-				ctx.EmitGoCallVoid(GoFuncAddr(func(dst, src *Proc) { *dst = *src }), []JITValueDesc{d10, d13})
+				ctx.EmitGoCallVoid(jitGoABI_14cfa92b2b87ef7c, []JITValueDesc{d10, d13})
 				ctx.ReclaimUntrackedRegs()
 				ctx.EnsureDesc(&d10)
 				d14 := d10
@@ -1429,7 +1429,7 @@ func init() {
 				if d14.Loc == LocRegPair || d14.Loc == LocStackPair || d14.Loc == LocRegTriple || d14.Loc == LocStackTriple {
 					panic("jit: generic call arg expects 1-word value")
 				}
-				d15 := ctx.EmitGoCallScalar(GoFuncAddr(atomic.LoadUintptr), []JITValueDesc{d14}, 1)
+				d15 := ctx.EmitGoCallScalar(jitGoABI_751bf088537a5f21, []JITValueDesc{d14}, 1)
 				d15.NoHeapPointer = true
 				ctx.BindReg(d15.Reg, &d15)
 				ctx.ReclaimUntrackedRegs()
@@ -1666,7 +1666,7 @@ func init() {
 				d5 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase3) + int32(16)}
 				ctx.ReclaimUntrackedRegs()
 				ctx.ReclaimUntrackedRegs()
-				d27 := ctx.EmitGoCallScalar(GoFuncAddr(func() *Env { return new(Env) }), nil, 1)
+				d27 := ctx.EmitGoCallScalar(jitGoABI_3f45ec6607233365, nil, 1)
 				ctx.BindReg(d27.Reg, &d27)
 				ctx.StabilizeDescForControlFlow(&d27)
 				inlineHome28 := d27
@@ -1694,10 +1694,10 @@ func init() {
 				ctx.EnsureDesc(&d29)
 				ctx.EnsureDesc(&d27)
 				ctx.EnsureDesc(&d29)
-				ctx.EmitGoCallVoid(GoFuncAddr(func(base *Env, value *Env) { base.Outer = value }), []JITValueDesc{d27, d29})
+				ctx.EmitGoCallVoid(jitGoABI_18fd4c44c7a31da6, []JITValueDesc{d27, d29})
 				ctx.FreeDesc(&d29)
 				ctx.ReclaimUntrackedRegs()
-				d30 := ctx.EmitGoCallScalar(GoFuncAddr(func(size int) map[Symbol]struct{} { return make(map[Symbol]struct{}, size) }), []JITValueDesc{JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0), NoHeapPointer: true}}, 1)
+				d30 := ctx.EmitGoCallScalar(jitGoABI_9bd0890fbc57aa9f, []JITValueDesc{JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0), NoHeapPointer: true}}, 1)
 				ctx.StabilizeDescForControlFlow(&d30)
 				inlineHome31 := d30
 				inlineHome31.ID = 0
@@ -1793,7 +1793,7 @@ func init() {
 				ctx.ReclaimUntrackedRegs()
 				d36 = JITPrepareScmerGoArg(ctx, d36)
 				ctx.SyncDesc(&d36)
-				d37 := ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d36}, 1)
+				d37 := ctx.EmitGoCallScalar(jitGoABI_c94eb298f761efc9, []JITValueDesc{d36}, 1)
 				d37.NoHeapPointer = true
 				ctx.EmitAndRegImm32(d37.Reg, 1)
 				d37.Type = tagBool
@@ -1913,28 +1913,28 @@ func init() {
 				ctx.EnsureDesc(&d41)
 				ctx.EnsureDesc(&d10)
 				ctx.EnsureDesc(&d41)
-				ctx.EmitGoCallVoid(GoFuncAddr(func(base *Proc, value Scmer) { base.Body = value }), []JITValueDesc{d10, d41})
+				ctx.EmitGoCallVoid(jitGoABI_c8bd3fbb876619d4, []JITValueDesc{d10, d41})
 				ctx.FreeDesc(&d41)
 				ctx.ReclaimUntrackedRegs()
 				ctx.ReclaimUntrackedRegs()
 				d42 := JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(uintptr(unsafe.Pointer(&Globalenv)))), NoHeapPointer: true, Rooted: true}
 				ctx.EnsureDesc(&d10)
 				ctx.EnsureDesc(&d42)
-				ctx.EmitGoCallVoid(GoFuncAddr(func(base *Proc, value *Env) { base.En = value }), []JITValueDesc{d10, d42})
+				ctx.EmitGoCallVoid(jitGoABI_b7afa8aa7afec23f, []JITValueDesc{d10, d42})
 				ctx.ReclaimUntrackedRegs()
 				ctx.ReclaimUntrackedRegs()
 				d43 := JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
 				_ = d43
 				ctx.EnsureDesc(&d10)
 				ctx.EnsureDesc(&d43)
-				ctx.EmitGoCallVoid(GoFuncAddr(func(base *Proc, value uintptr) { base.JITCode = value }), []JITValueDesc{d10, d43})
+				ctx.EmitGoCallVoid(jitGoABI_b20afda8856e61ef, []JITValueDesc{d10, d43})
 				ctx.ReclaimUntrackedRegs()
 				ctx.ReclaimUntrackedRegs()
 				d44 := JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}
 				_ = d44
 				ctx.EnsureDesc(&d10)
 				ctx.EnsureDesc(&d44)
-				ctx.EmitGoCallVoid(GoFuncAddr(func(base *Proc, value *JITEntryPoint) { base.Compiled = value }), []JITValueDesc{d10, d44})
+				ctx.EmitGoCallVoid(jitGoABI_830596eef656ff9c, []JITValueDesc{d10, d44})
 				ctx.ReclaimUntrackedRegs()
 				ctx.ReclaimUntrackedRegs()
 				var d45 JITValueDesc
@@ -2018,17 +2018,17 @@ func init() {
 				ctx.ResolveFixups()
 				ctx.ReclaimUntrackedRegs()
 				ctx.ReclaimUntrackedRegs()
-				d49 := ctx.EmitGoCallScalar(GoFuncAddr(func() *Proc { return new(Proc) }), nil, 1)
+				d49 := ctx.EmitGoCallScalar(jitGoABI_79b61201b9e57f9d, nil, 1)
 				ctx.BindReg(d49.Reg, &d49)
 				ctx.ReclaimUntrackedRegs()
 				ctx.EnsureDesc(&d48)
-				ctx.EmitGoCallVoid(GoFuncAddr(func(dst, src *Proc) { *dst = *src }), []JITValueDesc{d49, d48})
+				ctx.EmitGoCallVoid(jitGoABI_14cfa92b2b87ef7c, []JITValueDesc{d49, d48})
 				ctx.ReclaimUntrackedRegs()
 				if d49.Loc == LocRegPair || d49.Loc == LocStackPair || d49.Loc == LocRegTriple || d49.Loc == LocStackTriple {
 					panic("jit: generic call arg expects 1-word value")
 				}
 				ctx.SyncDesc(&d49)
-				d50 := ctx.EmitGoCallScalar(GoFuncAddr(NewProc), []JITValueDesc{d49}, 2)
+				d50 := ctx.EmitGoCallScalar(jitGoABI_1b8412732af78364, []JITValueDesc{d49}, 2)
 				d50.NoHeapPointer = false
 				ctx.BindReg(d50.Reg, &d50)
 				ctx.BindReg(d50.Reg2, &d50)
@@ -2073,7 +2073,7 @@ func init() {
 					panic("jit: generic call arg expects 1-word value")
 				}
 				ctx.SyncDesc(&d10)
-				d53 := ctx.EmitGoCallScalar(GoFuncAddr((*Proc).compiled), []JITValueDesc{d10}, 1)
+				d53 := ctx.EmitGoCallScalar(jitGoABI_1e8379006790c0c3, []JITValueDesc{d10}, 1)
 				d53.NoHeapPointer = false
 				ctx.BindReg(d53.Reg, &d53)
 				ctx.ReclaimUntrackedRegs()
@@ -2132,7 +2132,7 @@ func init() {
 				ctx.ReclaimUntrackedRegs()
 				d1 = JITPrepareScmerGoArg(ctx, d1)
 				ctx.SyncDesc(&d1)
-				d56 := ctx.EmitGoCallScalar(GoFuncAddr((Scmer).Proc), []JITValueDesc{d1}, 1)
+				d56 := ctx.EmitGoCallScalar(jitGoABI_c3658a69a02c135c, []JITValueDesc{d1}, 1)
 				d56.NoHeapPointer = false
 				ctx.BindReg(d56.Reg, &d56)
 				ctx.ReclaimUntrackedRegs()
@@ -2140,14 +2140,14 @@ func init() {
 					panic("jit: generic call arg expects 1-word value")
 				}
 				ctx.SyncDesc(&d56)
-				d57 := ctx.EmitGoCallScalar(GoFuncAddr(jitProcCaptures), []JITValueDesc{d56}, 3)
+				d57 := ctx.EmitGoCallScalar(jitGoABI_93f1f83c9e505d62, []JITValueDesc{d56}, 3)
 				d57.NoHeapPointer = false
 				ctx.BindReg(d57.Reg, &d57)
 				ctx.BindReg(d57.Reg2, &d57)
 				ctx.BindReg(d57.Reg3, &d57)
 				ctx.FreeDesc(&d56)
 				ctx.ReclaimUntrackedRegs()
-				callResults58 := JITEmitGoCallResults(ctx, GoFuncAddr(JITCloneScmerSlice), []JITValueDesc{d57}, []uint8{3}, []uint8{1})
+				callResults58 := JITEmitGoCallResults(ctx, jitGoABI_caeccb0b1551362d, []JITValueDesc{d57})
 				d59 := callResults58[0]
 				ctx.ReclaimUntrackedRegs()
 				ctx.ReclaimUntrackedRegs()
@@ -2178,7 +2178,7 @@ func init() {
 					panic("jit: generic call arg expects 1-word value")
 				}
 				ctx.SyncDesc(&d10)
-				d61 := ctx.EmitGoCallScalar(GoFuncAddr((*Proc).compiled), []JITValueDesc{d10}, 1)
+				d61 := ctx.EmitGoCallScalar(jitGoABI_1e8379006790c0c3, []JITValueDesc{d10}, 1)
 				d61.NoHeapPointer = false
 				ctx.BindReg(d61.Reg, &d61)
 				ctx.ReclaimUntrackedRegs()
@@ -2218,7 +2218,7 @@ func init() {
 				ctx.SyncDesc(&d62)
 				ctx.SyncDesc(&d59)
 				ctx.SyncDesc(&d63)
-				d64 := ctx.EmitGoCallScalar(GoFuncAddr(closeJITProcedureCaptures), []JITValueDesc{d60, d62, d59, d63}, 2)
+				d64 := ctx.EmitGoCallScalar(jitGoABI_b3734367ba267d31, []JITValueDesc{d60, d62, d59, d63}, 2)
 				d64.NoHeapPointer = false
 				ctx.BindReg(d64.Reg, &d64)
 				ctx.BindReg(d64.Reg2, &d64)
@@ -2230,7 +2230,7 @@ func init() {
 				ctx.EnsureDesc(&d64)
 				ctx.EnsureDesc(&d10)
 				ctx.EnsureDesc(&d64)
-				ctx.EmitGoCallVoid(GoFuncAddr(func(base *Proc, value Scmer) { base.Body = value }), []JITValueDesc{d10, d64})
+				ctx.EmitGoCallVoid(jitGoABI_c8bd3fbb876619d4, []JITValueDesc{d10, d64})
 				ctx.FreeDesc(&d64)
 				ctx.ReclaimUntrackedRegs()
 				ctx.EmitJmp(lbl8)
@@ -2564,7 +2564,7 @@ func init() {
 				if d87.Loc != LocRegPair && d87.Loc != LocStackPair && d87.Loc != LocInputPair {
 					panic("jit: Scmer.String receiver not materialized as pair")
 				}
-				d86 := ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d87}, 2)
+				d86 := ctx.EmitGoCallScalar(jitGoABI_e1a33cf0a7aeca49, []JITValueDesc{d87}, 2)
 				ctx.ReclaimUntrackedRegs()
 				ctx.EnsureDesc(&d86)
 				ctx.ReclaimUntrackedRegs()
@@ -2584,7 +2584,7 @@ func init() {
 				ctx.EnsureDesc(&d81)
 				d88 := JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}
 				_ = d88
-				ctx.EmitGoCallVoid(GoFuncAddr(func(m map[Symbol]struct{}, key Symbol, value struct{}) { m[key] = value }), []JITValueDesc{d30, d81, d88})
+				ctx.EmitGoCallVoid(jitGoABI_446dee5074537592, []JITValueDesc{d30, d81, d88})
 				ctx.ReclaimUntrackedRegs()
 				ctx.EmitJmp(lbl15)
 				bbpos_1_20 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
@@ -2601,7 +2601,7 @@ func init() {
 				d72 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase3) + int32(16)}
 				ctx.ReclaimUntrackedRegs()
 				ctx.ReclaimUntrackedRegs()
-				d89 := ctx.EmitGoCallScalar(GoFuncAddr(func() *ProcOptimizerMeta { return new(ProcOptimizerMeta) }), nil, 1)
+				d89 := ctx.EmitGoCallScalar(jitGoABI_cd25371cee7f2008, nil, 1)
 				ctx.BindReg(d89.Reg, &d89)
 				ctx.ReclaimUntrackedRegs()
 				ctx.ReclaimUntrackedRegs()
@@ -2721,26 +2721,26 @@ func init() {
 				ctx.EnsureDesc(&d91)
 				ctx.EnsureDesc(&d89)
 				ctx.EnsureDesc(&d91)
-				ctx.EmitGoCallVoid(GoFuncAddr(func(base *ProcOptimizerMeta, value TypeInfo) { base.Return = value }), []JITValueDesc{d89, d91})
+				ctx.EmitGoCallVoid(jitGoABI_158fc888362fa531, []JITValueDesc{d89, d91})
 				ctx.FreeDesc(&d91)
 				ctx.ReclaimUntrackedRegs()
 				ctx.EnsureDesc(&d93)
 				ctx.EnsureDesc(&d89)
 				ctx.EnsureDesc(&d93)
-				ctx.EmitGoCallVoid(GoFuncAddr(func(base *ProcOptimizerMeta, value bool) { base.HasReturn = value }), []JITValueDesc{d89, d93})
+				ctx.EmitGoCallVoid(jitGoABI_f471bfc54f82491c, []JITValueDesc{d89, d93})
 				ctx.FreeDesc(&d93)
 				ctx.ReclaimUntrackedRegs()
 				ctx.EnsureDesc(&d95)
 				ctx.EnsureDesc(&d89)
 				ctx.EnsureDesc(&d95)
-				ctx.EmitGoCallVoid(GoFuncAddr(func(base *ProcOptimizerMeta, value procSequenceKind) { base.Sequence = value }), []JITValueDesc{d89, d95})
+				ctx.EmitGoCallVoid(jitGoABI_2aaf5b10787be869, []JITValueDesc{d89, d95})
 				ctx.FreeDesc(&d95)
 				ctx.ReclaimUntrackedRegs()
 				ctx.ReclaimUntrackedRegs()
 				ctx.EnsureDesc(&d89)
 				ctx.EnsureDesc(&d10)
 				ctx.EnsureDesc(&d89)
-				ctx.EmitGoCallVoid(GoFuncAddr(func(base *Proc, value *ProcOptimizerMeta) { base.OptimizerMeta = value }), []JITValueDesc{d10, d89})
+				ctx.EmitGoCallVoid(jitGoABI_c7963fc7464639ca, []JITValueDesc{d10, d89})
 				ctx.ReclaimUntrackedRegs()
 				ctx.EmitJmp(lbl22)
 				bbpos_1_3 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
@@ -2761,7 +2761,7 @@ func init() {
 					panic("jit: generic call arg expects 1-word value")
 				}
 				ctx.SyncDesc(&d10)
-				d96 := ctx.EmitGoCallScalar(GoFuncAddr((*Proc).compiled), []JITValueDesc{d10}, 1)
+				d96 := ctx.EmitGoCallScalar(jitGoABI_1e8379006790c0c3, []JITValueDesc{d10}, 1)
 				d96.NoHeapPointer = false
 				ctx.BindReg(d96.Reg, &d96)
 				ctx.ReclaimUntrackedRegs()
@@ -2823,14 +2823,14 @@ func init() {
 				_ = d100
 				ctx.EnsureDesc(&d10)
 				ctx.EnsureDesc(&d100)
-				ctx.EmitGoCallVoid(GoFuncAddr(func(base *Proc, value uintptr) { base.JITCode = value }), []JITValueDesc{d10, d100})
+				ctx.EmitGoCallVoid(jitGoABI_b20afda8856e61ef, []JITValueDesc{d10, d100})
 				ctx.ReclaimUntrackedRegs()
 				ctx.ReclaimUntrackedRegs()
 				d101 := JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}
 				_ = d101
 				ctx.EnsureDesc(&d10)
 				ctx.EnsureDesc(&d101)
-				ctx.EmitGoCallVoid(GoFuncAddr(func(base *Proc, value *JITEntryPoint) { base.Compiled = value }), []JITValueDesc{d10, d101})
+				ctx.EmitGoCallVoid(jitGoABI_830596eef656ff9c, []JITValueDesc{d10, d101})
 				ctx.ReclaimUntrackedRegs()
 				ctx.ReclaimUntrackedRegs()
 				ctx.EnsureDesc(&d10)
@@ -2845,17 +2845,17 @@ func init() {
 				ctx.ResolveFixups()
 				ctx.ReclaimUntrackedRegs()
 				ctx.ReclaimUntrackedRegs()
-				d103 := ctx.EmitGoCallScalar(GoFuncAddr(func() *Proc { return new(Proc) }), nil, 1)
+				d103 := ctx.EmitGoCallScalar(jitGoABI_79b61201b9e57f9d, nil, 1)
 				ctx.BindReg(d103.Reg, &d103)
 				ctx.ReclaimUntrackedRegs()
 				ctx.EnsureDesc(&d102)
-				ctx.EmitGoCallVoid(GoFuncAddr(func(dst, src *Proc) { *dst = *src }), []JITValueDesc{d103, d102})
+				ctx.EmitGoCallVoid(jitGoABI_14cfa92b2b87ef7c, []JITValueDesc{d103, d102})
 				ctx.ReclaimUntrackedRegs()
 				if d103.Loc == LocRegPair || d103.Loc == LocStackPair || d103.Loc == LocRegTriple || d103.Loc == LocStackTriple {
 					panic("jit: generic call arg expects 1-word value")
 				}
 				ctx.SyncDesc(&d103)
-				d104 := ctx.EmitGoCallScalar(GoFuncAddr(NewProc), []JITValueDesc{d103}, 2)
+				d104 := ctx.EmitGoCallScalar(jitGoABI_1b8412732af78364, []JITValueDesc{d103}, 2)
 				d104.NoHeapPointer = false
 				ctx.BindReg(d104.Reg, &d104)
 				ctx.BindReg(d104.Reg2, &d104)
@@ -2898,7 +2898,7 @@ func init() {
 				ctx.ReclaimUntrackedRegs()
 				d106 = JITPrepareScmerGoArg(ctx, d106)
 				ctx.SyncDesc(&d106)
-				d109 := ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d106}, 1)
+				d109 := ctx.EmitGoCallScalar(jitGoABI_c94eb298f761efc9, []JITValueDesc{d106}, 1)
 				d109.NoHeapPointer = true
 				ctx.EmitAndRegImm32(d109.Reg, 1)
 				d109.Type = tagBool
@@ -3072,7 +3072,7 @@ func init() {
 				if d122.Loc != LocRegPair && d122.Loc != LocStackPair && d122.Loc != LocInputPair {
 					panic("jit: Scmer.String receiver not materialized as pair")
 				}
-				d121 := ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d122}, 2)
+				d121 := ctx.EmitGoCallScalar(jitGoABI_e1a33cf0a7aeca49, []JITValueDesc{d122}, 2)
 				ctx.ReclaimUntrackedRegs()
 				ctx.EnsureDesc(&d121)
 				ctx.ReclaimUntrackedRegs()
@@ -3091,7 +3091,7 @@ func init() {
 				ctx.EnsureDesc(&d116)
 				d123 := JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}
 				_ = d123
-				ctx.EmitGoCallVoid(GoFuncAddr(func(m map[Symbol]struct{}, key Symbol, value struct{}) { m[key] = value }), []JITValueDesc{d30, d116, d123})
+				ctx.EmitGoCallVoid(jitGoABI_446dee5074537592, []JITValueDesc{d30, d116, d123})
 				ctx.ReclaimUntrackedRegs()
 				ctx.SyncDesc(&d73)
 				if d73.Loc == LocReg || d73.Loc == LocFPReg {
@@ -3184,7 +3184,7 @@ func init() {
 				d0.ID = 0
 				d0 = JITPrepareScmerGoArg(ctx, d0)
 				ctx.SyncDesc(&d0)
-				d1 := ctx.EmitGoCallScalar(GoFuncAddr(CloneOptimizerExpression), []JITValueDesc{d0}, 2)
+				d1 := ctx.EmitGoCallScalar(jitGoABI_e32fdcf449cd74a7, []JITValueDesc{d0}, 2)
 				d1.NoHeapPointer = false
 				ctx.BindReg(d1.Reg, &d1)
 				ctx.BindReg(d1.Reg2, &d1)
@@ -3255,7 +3255,7 @@ func init() {
 				}
 				ctx.SyncDesc(&d0)
 				ctx.SyncDesc(&d1)
-				d2 := ctx.EmitGoCallScalar(GoFuncAddr(TryFold), []JITValueDesc{d0, d1}, 2)
+				d2 := ctx.EmitGoCallScalar(jitGoABI_efe6a72bfb144025, []JITValueDesc{d0, d1}, 2)
 				d2.NoHeapPointer = false
 				ctx.BindReg(d2.Reg, &d2)
 				ctx.BindReg(d2.Reg2, &d2)
@@ -3320,7 +3320,7 @@ func init() {
 				d0.ID = 0
 				d0 = JITPrepareScmerGoArg(ctx, d0)
 				ctx.SyncDesc(&d0)
-				d1 := ctx.EmitGoCallScalar(GoFuncAddr(optimizerNodeCount), []JITValueDesc{d0}, 1)
+				d1 := ctx.EmitGoCallScalar(jitGoABI_45b2e9aa8d87590a, []JITValueDesc{d0}, 1)
 				d1.NoHeapPointer = true
 				ctx.BindReg(d1.Reg, &d1)
 				ctx.FreeDesc(&d0)
@@ -3533,7 +3533,7 @@ func init() {
 					d16.ID = 0
 					ctx.SyncDesc(&d16)
 					ctx.FreeDesc(&d16)
-					d17 = ctx.EmitGoCallScalar(GoFuncAddr(JITBuildScmerCallback), []JITValueDesc{d16}, 1)
+					d17 = ctx.EmitGoCallScalar(jitGoABI_428f6123a6539c5d, []JITValueDesc{d16}, 1)
 					ctx.StabilizeDescForControlFlow(&d17)
 					ctx.FreeDesc(&d16)
 					ctx.SyncDesc(&d17)
@@ -3584,7 +3584,7 @@ func init() {
 					ctx.SyncDesc(&d19)
 					ctx.SyncDesc(&d20)
 					ctx.SyncDesc(&d1)
-					d21 = ctx.EmitGoCallScalar(GoFuncAddr(Optimize), []JITValueDesc{d19, d20, d1}, 2)
+					d21 = ctx.EmitGoCallScalar(jitGoABI_4c692bc4c57a241a, []JITValueDesc{d19, d20, d1}, 2)
 					d21.NoHeapPointer = false
 					ctx.BindReg(d21.Reg, &d21)
 					ctx.BindReg(d21.Reg2, &d21)
@@ -3953,7 +3953,7 @@ func init() {
 					ctx.ResolveFixups()
 					d1 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(0)}
 					ctx.ReclaimUntrackedRegs()
-					d10 = ctx.EmitGoCallScalar(GoFuncAddr(func() *strings.Builder { return new(strings.Builder) }), nil, 1)
+					d10 = ctx.EmitGoCallScalar(jitGoABI_b90d43f641e38b20, nil, 1)
 					ctx.BindReg(d10.Reg, &d10)
 					ctx.StabilizeDescForControlFlow(&d10)
 					d11 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(len(args)))}
@@ -4125,7 +4125,7 @@ func init() {
 					if d28.Loc != LocRegPair && d28.Loc != LocStackPair && d28.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d27 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d28}, 2)
+					d27 = ctx.EmitGoCallScalar(jitGoABI_e1a33cf0a7aeca49, []JITValueDesc{d28}, 2)
 					if d10.Loc == LocRegPair || d10.Loc == LocStackPair || d10.Loc == LocRegTriple || d10.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
 					}
@@ -4157,7 +4157,7 @@ func init() {
 					}
 					ctx.SyncDesc(&d10)
 					ctx.SyncDesc(&d27)
-					callResults29 := JITEmitGoCallResults(ctx, GoFuncAddr((*strings.Builder).WriteString), []JITValueDesc{d10, d27}, []uint8{1, 2}, []uint8{0, 3})
+					callResults29 := JITEmitGoCallResults(ctx, jitGoABI_e80a79328f388f6b, []JITValueDesc{d10, d27})
 					d30 = callResults29[0]
 					_ = d30
 					d31 = callResults29[1]
@@ -4286,7 +4286,7 @@ func init() {
 				if d1.Type == tagSlice {
 					d2 = jitKnownSliceHeader(ctx, &d1)
 				} else {
-					d2 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d1}, 3)
+					d2 = ctx.EmitGoCallScalar(jitGoABI_8f95458a6432b52e, []JITValueDesc{d1}, 3)
 				}
 				if d2.Loc == LocRegTriple {
 					ctx.BindReg(d2.Reg, &d2)
@@ -4398,7 +4398,7 @@ func init() {
 				if d1.Type == tagSlice {
 					d2 = jitKnownSliceHeader(ctx, &d1)
 				} else {
-					d2 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d1}, 3)
+					d2 = ctx.EmitGoCallScalar(jitGoABI_8f95458a6432b52e, []JITValueDesc{d1}, 3)
 				}
 				if d2.Loc == LocRegTriple {
 					ctx.BindReg(d2.Reg, &d2)
@@ -4491,7 +4491,7 @@ func init() {
 				ctx.ReclaimUntrackedRegs()
 				d3 = JITPrepareScmerGoArg(ctx, d3)
 				ctx.SyncDesc(&d3)
-				d10 := ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsProc), []JITValueDesc{d3}, 1)
+				d10 := ctx.EmitGoCallScalar(jitGoABI_5077bb76faa6a775, []JITValueDesc{d3}, 1)
 				d10.NoHeapPointer = true
 				ctx.EmitAndRegImm32(d10.Reg, 1)
 				d10.Type = tagBool
@@ -4542,7 +4542,7 @@ func init() {
 				ctx.ReclaimUntrackedRegs()
 				d3 = JITPrepareScmerGoArg(ctx, d3)
 				ctx.SyncDesc(&d3)
-				d12 := ctx.EmitGoCallScalar(GoFuncAddr((Scmer).Proc), []JITValueDesc{d3}, 1)
+				d12 := ctx.EmitGoCallScalar(jitGoABI_c3658a69a02c135c, []JITValueDesc{d3}, 1)
 				d12.NoHeapPointer = false
 				ctx.BindReg(d12.Reg, &d12)
 				ctx.StabilizeDescForControlFlow(&d12)
@@ -4747,7 +4747,7 @@ func init() {
 				ctx.ReclaimUntrackedRegs()
 				ctx.EnsureDesc(&d24)
 				ctx.EnsureDesc(&d24)
-				callResults25 := JITEmitGoCallResults(ctx, GoFuncAddr(jitMakeScmerSlice), []JITValueDesc{d24, d24}, []uint8{3}, []uint8{1})
+				callResults25 := JITEmitGoCallResults(ctx, jitGoABI_7ebaa2856648e378, []JITValueDesc{d24, d24})
 				d26 := callResults25[0]
 				d26.Type = tagSlice
 				ctx.StabilizeDescForControlFlow(&d26)
@@ -5129,14 +5129,14 @@ func init() {
 				if d53.Loc != LocRegPair && d53.Loc != LocStackPair && d53.Loc != LocInputPair {
 					panic("jit: Scmer.String receiver not materialized as pair")
 				}
-				d52 := ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d53}, 2)
+				d52 := ctx.EmitGoCallScalar(jitGoABI_e1a33cf0a7aeca49, []JITValueDesc{d53}, 2)
 				ctx.FreeDesc(&d50)
 				ctx.ReclaimUntrackedRegs()
 				ctx.EnsureDesc(&d42)
 				ctx.ReclaimUntrackedRegs()
 				ctx.EnsureDesc(&d52)
 				ctx.EnsureDesc(&d42)
-				d54 := ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d52, d42}, 1)
+				d54 := ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d52, d42}, 1)
 				ctx.EmitAndRegImm32(d54.Reg, 1)
 				d54.Type = tagBool
 				ctx.BindReg(d54.Reg, &d54)
@@ -5352,7 +5352,7 @@ func init() {
 				if d2.Loc != LocRegPair && d2.Loc != LocStackPair && d2.Loc != LocInputPair {
 					panic("jit: Scmer.String receiver not materialized as pair")
 				}
-				d1 := ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d2}, 2)
+				d1 := ctx.EmitGoCallScalar(jitGoABI_e1a33cf0a7aeca49, []JITValueDesc{d2}, 2)
 				ctx.FreeDesc(&d0)
 				ctx.EnsureDesc(&d1)
 				if d1.Loc == LocImm {
@@ -5381,7 +5381,7 @@ func init() {
 					panic("jit: generic call arg expects 2-word value (NewSymbol arg0)")
 				}
 				ctx.SyncDesc(&d1)
-				d3 := ctx.EmitGoCallScalar(GoFuncAddr(NewSymbol), []JITValueDesc{d1}, 2)
+				d3 := ctx.EmitGoCallScalar(jitGoABI_678e55d324700337, []JITValueDesc{d1}, 2)
 				d3.NoHeapPointer = false
 				ctx.BindReg(d3.Reg, &d3)
 				ctx.BindReg(d3.Reg2, &d3)
@@ -5601,7 +5601,7 @@ func init() {
 					if d4.Type == tagSlice {
 						d5 = jitKnownSliceHeader(ctx, &d4)
 					} else {
-						d5 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d4}, 3)
+						d5 = ctx.EmitGoCallScalar(jitGoABI_8f95458a6432b52e, []JITValueDesc{d4}, 3)
 					}
 					if d5.Loc == LocRegTriple {
 						ctx.BindReg(d5.Reg, &d5)
@@ -5609,7 +5609,7 @@ func init() {
 						ctx.BindReg(d5.Reg3, &d5)
 					}
 					ctx.FreeDesc(&d4)
-					callResults6 := JITEmitGoCallResults(ctx, GoFuncAddr(JITCloneScmerSlice), []JITValueDesc{d5}, []uint8{3}, []uint8{1})
+					callResults6 := JITEmitGoCallResults(ctx, jitGoABI_caeccb0b1551362d, []JITValueDesc{d5})
 					d7 = callResults6[0]
 					d8 = JITValueDesc{Loc: LocStackTriple, Type: tagSlice, StackOff: int32(bbs[3].PhiBase) + int32(0)}
 					ctx.EmitCopyDescWords(&d8, &d7, 3)
@@ -5670,7 +5670,7 @@ func init() {
 					ctx.StabilizeDescForControlFlow(&d1)
 					ctx.StabilizeDescForControlFlow(&d13)
 					d15 = jitCopyScmerToPair(ctx, d13)
-					d16 = ctx.EmitGoCallScalar(GoFuncAddr(jitInvokeCallbackSlice), []JITValueDesc{d15, d1}, 2)
+					d16 = ctx.EmitGoCallScalar(jitGoABI_fbd8c70175770728, []JITValueDesc{d15, d1}, 2)
 					ctx.StabilizeDescForControlFlow(&d16)
 					d18 = d16
 					d18.ID = 0
@@ -5791,7 +5791,7 @@ func init() {
 					ctx.StabilizeDescForControlFlow(&d7)
 					ctx.StabilizeDescForControlFlow(&d1)
 					d37 = jitCopyScmerToPair(ctx, d10)
-					d38 = ctx.EmitGoCallScalar(GoFuncAddr(jitInvokeCallbackSlice), []JITValueDesc{d37, d1}, 2)
+					d38 = ctx.EmitGoCallScalar(jitGoABI_fbd8c70175770728, []JITValueDesc{d37, d1}, 2)
 					ctx.EnsureDesc(&d38)
 					d39 = d38
 					_ = d39
@@ -5950,14 +5950,14 @@ func init() {
 					if d16.Type == tagSlice {
 						d71 = jitKnownSliceHeader(ctx, &d16)
 					} else {
-						d71 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d16}, 3)
+						d71 = ctx.EmitGoCallScalar(jitGoABI_8f95458a6432b52e, []JITValueDesc{d16}, 3)
 					}
 					if d71.Loc == LocRegTriple {
 						ctx.BindReg(d71.Reg, &d71)
 						ctx.BindReg(d71.Reg2, &d71)
 						ctx.BindReg(d71.Reg3, &d71)
 					}
-					callResults72 := JITEmitGoCallResults(ctx, GoFuncAddr(JITCloneScmerSlice), []JITValueDesc{d71}, []uint8{3}, []uint8{1})
+					callResults72 := JITEmitGoCallResults(ctx, jitGoABI_caeccb0b1551362d, []JITValueDesc{d71})
 					d73 = callResults72[0]
 					d74 = JITValueDesc{Loc: LocStackTriple, Type: tagSlice, StackOff: int32(bbs[3].PhiBase) + int32(0)}
 					ctx.EmitCopyDescWords(&d74, &d73, 3)
@@ -6145,7 +6145,7 @@ func init() {
 					if d2.Type == tagSlice {
 						d3 = jitKnownSliceHeader(ctx, &d2)
 					} else {
-						d3 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d2}, 3)
+						d3 = ctx.EmitGoCallScalar(jitGoABI_8f95458a6432b52e, []JITValueDesc{d2}, 3)
 					}
 					if d3.Loc == LocRegTriple {
 						ctx.BindReg(d3.Reg, &d3)
@@ -6236,7 +6236,7 @@ func init() {
 					ctx.StabilizeDescForControlFlow(&d1)
 					ctx.StabilizeDescForControlFlow(&d8)
 					d11 = jitCopyScmerToPair(ctx, d8)
-					d12 = ctx.EmitGoCallScalar(GoFuncAddr(jitInvokeCallbackSlice), []JITValueDesc{d11, d1}, 2)
+					d12 = ctx.EmitGoCallScalar(jitGoABI_fbd8c70175770728, []JITValueDesc{d11, d1}, 2)
 					ctx.StabilizeDescForControlFlow(&d12)
 					d14 = d12
 					d14.ID = 0
@@ -6352,7 +6352,7 @@ func init() {
 					ctx.StabilizeDescForControlFlow(&d5)
 					ctx.StabilizeDescForControlFlow(&d1)
 					d31 = jitCopyScmerToPair(ctx, d5)
-					d32 = ctx.EmitGoCallScalar(GoFuncAddr(jitInvokeCallbackSlice), []JITValueDesc{d31, d1}, 2)
+					d32 = ctx.EmitGoCallScalar(jitGoABI_fbd8c70175770728, []JITValueDesc{d31, d1}, 2)
 					ctx.EnsureDesc(&d32)
 					d33 = d32
 					_ = d33
@@ -6503,7 +6503,7 @@ func init() {
 					if d12.Type == tagSlice {
 						d61 = jitKnownSliceHeader(ctx, &d12)
 					} else {
-						d61 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d12}, 3)
+						d61 = ctx.EmitGoCallScalar(jitGoABI_8f95458a6432b52e, []JITValueDesc{d12}, 3)
 					}
 					if d61.Loc == LocRegTriple {
 						ctx.BindReg(d61.Reg, &d61)
@@ -6605,10 +6605,10 @@ func init() {
 				if d2.Loc != LocRegPair && d2.Loc != LocStackPair && d2.Loc != LocInputPair {
 					panic("jit: Scmer.String receiver not materialized as pair")
 				}
-				d1 := ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d2}, 2)
+				d1 := ctx.EmitGoCallScalar(jitGoABI_e1a33cf0a7aeca49, []JITValueDesc{d2}, 2)
 				ctx.FreeDesc(&d0)
 				ctx.EnsureDesc(&d1)
-				d3 := ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d1}, 2)
+				d3 := ctx.EmitGoCallScalar(jitGoABI_44610dda2d2977b6, []JITValueDesc{d1}, 2)
 				if result.Loc == LocAny {
 					return d3
 				}
@@ -6723,7 +6723,7 @@ Patterns can be any of:
 				for i := range args {
 					ctx.StabilizeDescForControlFlow(&args[i])
 				}
-				d0 := ctx.EmitGoCallScalar(GoFuncAddr(func() *SourceInfo { return new(SourceInfo) }), nil, 1)
+				d0 := ctx.EmitGoCallScalar(jitGoABI_08ec8031d8f52ec0, nil, 1)
 				ctx.BindReg(d0.Reg, &d0)
 				d1 := args[0]
 				d1.ID = 0
@@ -6742,7 +6742,7 @@ Patterns can be any of:
 				if d3.Loc != LocRegPair && d3.Loc != LocStackPair && d3.Loc != LocInputPair {
 					panic("jit: Scmer.String receiver not materialized as pair")
 				}
-				d2 := ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d3}, 2)
+				d2 := ctx.EmitGoCallScalar(jitGoABI_e1a33cf0a7aeca49, []JITValueDesc{d3}, 2)
 				ctx.FreeDesc(&d1)
 				d4 := args[1]
 				d4.ID = 0
@@ -6775,7 +6775,7 @@ Patterns can be any of:
 					ctx.BindReg(d5.Reg, &d6)
 				} else {
 					boxed := JITPrepareScmerGoArg(ctx, d5)
-					d6 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{boxed}, 1)
+					d6 = ctx.EmitGoCallScalar(jitGoABI_724899b80b2780aa, []JITValueDesc{boxed}, 1)
 					d6.Type = tagInt
 					ctx.BindReg(d6.Reg, &d6)
 				}
@@ -6816,7 +6816,7 @@ Patterns can be any of:
 					ctx.BindReg(d9.Reg, &d10)
 				} else {
 					boxed := JITPrepareScmerGoArg(ctx, d9)
-					d10 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{boxed}, 1)
+					d10 = ctx.EmitGoCallScalar(jitGoABI_724899b80b2780aa, []JITValueDesc{boxed}, 1)
 					d10.Type = tagInt
 					ctx.BindReg(d10.Reg, &d10)
 				}
@@ -6831,24 +6831,24 @@ Patterns can be any of:
 				ctx.EnsureDesc(&d2)
 				ctx.EnsureDesc(&d0)
 				ctx.EnsureDesc(&d2)
-				ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value string) { base.source = value }), []JITValueDesc{d0, d2})
+				ctx.EmitGoCallVoid(jitGoABI_49dd75b49ffbdf4b, []JITValueDesc{d0, d2})
 				ctx.EnsureDesc(&d6)
 				ctx.EnsureDesc(&d0)
 				ctx.EnsureDesc(&d6)
-				ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value int) { base.line = value }), []JITValueDesc{d0, d6})
+				ctx.EmitGoCallVoid(jitGoABI_b740735df4418c48, []JITValueDesc{d0, d6})
 				ctx.FreeDesc(&d6)
 				ctx.EnsureDesc(&d10)
 				ctx.EnsureDesc(&d0)
 				ctx.EnsureDesc(&d10)
-				ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value int) { base.col = value }), []JITValueDesc{d0, d10})
+				ctx.EmitGoCallVoid(jitGoABI_b3ef7032d672b137, []JITValueDesc{d0, d10})
 				ctx.FreeDesc(&d10)
 				ctx.EnsureDesc(&d12)
 				ctx.EnsureDesc(&d0)
 				ctx.EnsureDesc(&d12)
-				ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d0, d12})
+				ctx.EmitGoCallVoid(jitGoABI_24128c7ae9d19e5b, []JITValueDesc{d0, d12})
 				ctx.FreeDesc(&d12)
 				ctx.SyncDesc(&d0)
-				d13 := ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d0}, 2)
+				d13 := ctx.EmitGoCallScalar(jitGoABI_11a997ee3b751875, []JITValueDesc{d0}, 2)
 				d13.NoHeapPointer = false
 				ctx.BindReg(d13.Reg, &d13)
 				ctx.BindReg(d13.Reg2, &d13)
@@ -11516,7 +11516,7 @@ Patterns can be any of:
 					if d17.Loc != LocRegPair && d17.Loc != LocStackPair && d17.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d16 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d17}, 2)
+					d16 = ctx.EmitGoCallScalar(jitGoABI_e1a33cf0a7aeca49, []JITValueDesc{d17}, 2)
 					ctx.StabilizeDescForControlFlow(&d16)
 					ctx.FreeDesc(&d15)
 					ctx.SyncDesc(&d16)
@@ -11581,7 +11581,7 @@ Patterns can be any of:
 					if d21.Loc != LocRegPair && d21.Loc != LocStackPair && d21.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d20 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d21}, 2)
+					d20 = ctx.EmitGoCallScalar(jitGoABI_e1a33cf0a7aeca49, []JITValueDesc{d21}, 2)
 					ctx.FreeDesc(&d19)
 					ctx.EnsureDesc(&d1)
 					ctx.EnsureDesc(&d20)
@@ -11598,7 +11598,7 @@ Patterns can be any of:
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d24 = ctx.EmitGoCallScalar(GoFuncAddr(func() *[]Scmer { return new([]Scmer) }), nil, 1)
+					d24 = ctx.EmitGoCallScalar(jitGoABI_eac8b3f188d1256d, nil, 1)
 					ctx.BindReg(d24.Reg, &d24)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d22)
@@ -11655,14 +11655,14 @@ Patterns can be any of:
 					}
 					ctx.SyncDesc(&d22)
 					ctx.SyncDesc(&d23)
-					d25 = ctx.EmitGoCallScalar(GoFuncAddr(tokenize), []JITValueDesc{d22, d23}, 3)
+					d25 = ctx.EmitGoCallScalar(jitGoABI_c3ed9901c7b0a8de, []JITValueDesc{d22, d23}, 3)
 					d25.NoHeapPointer = false
 					ctx.BindReg(d25.Reg, &d25)
 					ctx.BindReg(d25.Reg2, &d25)
 					ctx.BindReg(d25.Reg3, &d25)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d25)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[]Scmer, value []Scmer) { *dst = value }), []JITValueDesc{d24, d25})
+					ctx.EmitGoCallVoid(jitGoABI_3cfc76af02b619dc, []JITValueDesc{d24, d25})
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d24)
 					d26 = d24
@@ -11826,7 +11826,7 @@ Patterns can be any of:
 					d32 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase28) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d33 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d26}, 3)
+					d33 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d26}, 3)
 					ctx.ReclaimUntrackedRegs()
 					if d33.SliceSizeKnown {
 						d34 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d33.KnownSliceLen))}
@@ -11891,13 +11891,13 @@ Patterns can be any of:
 					d32 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase28) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d37 = ctx.EmitGoCallScalar(GoFuncAddr(func() *SourceInfo { return new(SourceInfo) }), nil, 1)
+					d37 = ctx.EmitGoCallScalar(jitGoABI_08ec8031d8f52ec0, nil, 1)
 					ctx.BindReg(d37.Reg, &d37)
 					ctx.StabilizeDescForControlFlow(&d37)
 					inlineHome38 := d37
 					inlineHome38.ID = 0
 					ctx.ReclaimUntrackedRegs()
-					d39 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d26}, 3)
+					d39 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d26}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d40 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
 					ctx.ReclaimUntrackedRegs()
@@ -11913,7 +11913,7 @@ Patterns can be any of:
 					inlineHome43 := d41
 					inlineHome43.ID = 0
 					ctx.ReclaimUntrackedRegs()
-					d44 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d26}, 3)
+					d44 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d26}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d45 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1)}
 					ctx.EnsureDesc(&d44)
@@ -11980,11 +11980,11 @@ Patterns can be any of:
 					ctx.BindReg(r7, &d50)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d50)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[]Scmer, value []Scmer) { *dst = value }), []JITValueDesc{d26, d50})
+					ctx.EmitGoCallVoid(jitGoABI_3cfc76af02b619dc, []JITValueDesc{d26, d50})
 					ctx.ReclaimUntrackedRegs()
 					d41 = JITPrepareScmerGoArg(ctx, d41)
 					ctx.SyncDesc(&d41)
-					d51 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSourceInfo), []JITValueDesc{d41}, 1)
+					d51 = ctx.EmitGoCallScalar(jitGoABI_f352d2b202a682fd, []JITValueDesc{d41}, 1)
 					d51.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d51.Reg, 1)
 					d51.Type = tagBool
@@ -12091,7 +12091,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d29 = JITPrepareScmerGoArg(ctx, d29)
 					ctx.SyncDesc(&d29)
-					d55 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d29}, 1)
+					d55 = ctx.EmitGoCallScalar(jitGoABI_c94eb298f761efc9, []JITValueDesc{d29}, 1)
 					d55.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d55.Reg, 1)
 					d55.Type = tagBool
@@ -12174,7 +12174,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d41 = JITPrepareScmerGoArg(ctx, d41)
 					ctx.SyncDesc(&d41)
-					d60 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).SourceInfo), []JITValueDesc{d41}, 1)
+					d60 = ctx.EmitGoCallScalar(jitGoABI_efc59dae573ac860, []JITValueDesc{d41}, 1)
 					d60.NoHeapPointer = false
 					ctx.BindReg(d60.Reg, &d60)
 					ctx.ReclaimUntrackedRegs()
@@ -12183,7 +12183,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d60)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d61)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *SourceInfo, value SourceInfo) { *dst = value }), []JITValueDesc{d37, d61})
+					ctx.EmitGoCallVoid(jitGoABI_711f67c681c46de9, []JITValueDesc{d37, d61})
 					ctx.FreeDesc(&d61)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
@@ -12271,7 +12271,7 @@ Patterns can be any of:
 					if d66.Loc != LocRegPair && d66.Loc != LocStackPair && d66.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d65 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d66}, 2)
+					d65 = ctx.EmitGoCallScalar(jitGoABI_e1a33cf0a7aeca49, []JITValueDesc{d66}, 2)
 					ctx.StabilizeDescForControlFlow(&d65)
 					inlineHome67 := d65
 					inlineHome67.ID = 0
@@ -12289,7 +12289,7 @@ Patterns can be any of:
 					} else {
 						d69 = d68
 					}
-					d70 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d65, d69}, 1)
+					d70 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d65, d69}, 1)
 					ctx.EmitAndRegImm32(d70.Reg, 1)
 					d70.Type = tagBool
 					ctx.BindReg(d70.Reg, &d70)
@@ -12346,7 +12346,7 @@ Patterns can be any of:
 					} else {
 						d73 = d72
 					}
-					d74 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d65, d73}, 1)
+					d74 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d65, d73}, 1)
 					ctx.EmitAndRegImm32(d74.Reg, 1)
 					d74.Type = tagBool
 					ctx.BindReg(d74.Reg, &d74)
@@ -12463,7 +12463,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.StabilizeDescForControlFlow(&d30)
 					ctx.ReclaimUntrackedRegs()
-					d81 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d26}, 3)
+					d81 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d26}, 3)
 					ctx.ReclaimUntrackedRegs()
 					if d81.SliceSizeKnown {
 						d82 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d81.KnownSliceLen))}
@@ -12533,7 +12533,7 @@ Patterns can be any of:
 					d32 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase28) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d85 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d26}, 3)
+					d85 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d26}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d86 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
 					ctx.ReclaimUntrackedRegs()
@@ -12551,7 +12551,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d87 = JITPrepareScmerGoArg(ctx, d87)
 					ctx.SyncDesc(&d87)
-					d90 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d87}, 1)
+					d90 = ctx.EmitGoCallScalar(jitGoABI_c94eb298f761efc9, []JITValueDesc{d87}, 1)
 					d90.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d90.Reg, 1)
 					d90.Type = tagBool
@@ -12761,7 +12761,7 @@ Patterns can be any of:
 					d98 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase94) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d99 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d92}, 3)
+					d99 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d92}, 3)
 					ctx.ReclaimUntrackedRegs()
 					if d99.SliceSizeKnown {
 						d100 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d99.KnownSliceLen))}
@@ -12826,13 +12826,13 @@ Patterns can be any of:
 					d98 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase94) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d103 = ctx.EmitGoCallScalar(GoFuncAddr(func() *SourceInfo { return new(SourceInfo) }), nil, 1)
+					d103 = ctx.EmitGoCallScalar(jitGoABI_08ec8031d8f52ec0, nil, 1)
 					ctx.BindReg(d103.Reg, &d103)
 					ctx.StabilizeDescForControlFlow(&d103)
 					inlineHome104 := d103
 					inlineHome104.ID = 0
 					ctx.ReclaimUntrackedRegs()
-					d105 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d92}, 3)
+					d105 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d92}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d106 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
 					ctx.ReclaimUntrackedRegs()
@@ -12848,7 +12848,7 @@ Patterns can be any of:
 					inlineHome109 := d107
 					inlineHome109.ID = 0
 					ctx.ReclaimUntrackedRegs()
-					d110 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d92}, 3)
+					d110 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d92}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d111 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1)}
 					ctx.EnsureDesc(&d110)
@@ -12915,11 +12915,11 @@ Patterns can be any of:
 					ctx.BindReg(r22, &d116)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d116)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[]Scmer, value []Scmer) { *dst = value }), []JITValueDesc{d92, d116})
+					ctx.EmitGoCallVoid(jitGoABI_3cfc76af02b619dc, []JITValueDesc{d92, d116})
 					ctx.ReclaimUntrackedRegs()
 					d107 = JITPrepareScmerGoArg(ctx, d107)
 					ctx.SyncDesc(&d107)
-					d117 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSourceInfo), []JITValueDesc{d107}, 1)
+					d117 = ctx.EmitGoCallScalar(jitGoABI_f352d2b202a682fd, []JITValueDesc{d107}, 1)
 					d117.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d117.Reg, 1)
 					d117.Type = tagBool
@@ -13026,7 +13026,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d95 = JITPrepareScmerGoArg(ctx, d95)
 					ctx.SyncDesc(&d95)
-					d121 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d95}, 1)
+					d121 = ctx.EmitGoCallScalar(jitGoABI_c94eb298f761efc9, []JITValueDesc{d95}, 1)
 					d121.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d121.Reg, 1)
 					d121.Type = tagBool
@@ -13109,7 +13109,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d107 = JITPrepareScmerGoArg(ctx, d107)
 					ctx.SyncDesc(&d107)
-					d126 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).SourceInfo), []JITValueDesc{d107}, 1)
+					d126 = ctx.EmitGoCallScalar(jitGoABI_efc59dae573ac860, []JITValueDesc{d107}, 1)
 					d126.NoHeapPointer = false
 					ctx.BindReg(d126.Reg, &d126)
 					ctx.ReclaimUntrackedRegs()
@@ -13118,7 +13118,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d126)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d127)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *SourceInfo, value SourceInfo) { *dst = value }), []JITValueDesc{d103, d127})
+					ctx.EmitGoCallVoid(jitGoABI_711f67c681c46de9, []JITValueDesc{d103, d127})
 					ctx.FreeDesc(&d127)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
@@ -13206,7 +13206,7 @@ Patterns can be any of:
 					if d132.Loc != LocRegPair && d132.Loc != LocStackPair && d132.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d131 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d132}, 2)
+					d131 = ctx.EmitGoCallScalar(jitGoABI_e1a33cf0a7aeca49, []JITValueDesc{d132}, 2)
 					ctx.StabilizeDescForControlFlow(&d131)
 					inlineHome133 := d131
 					inlineHome133.ID = 0
@@ -13224,7 +13224,7 @@ Patterns can be any of:
 					} else {
 						d135 = d134
 					}
-					d136 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d131, d135}, 1)
+					d136 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d131, d135}, 1)
 					ctx.EmitAndRegImm32(d136.Reg, 1)
 					d136.Type = tagBool
 					ctx.BindReg(d136.Reg, &d136)
@@ -13281,7 +13281,7 @@ Patterns can be any of:
 					} else {
 						d139 = d138
 					}
-					d140 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d131, d139}, 1)
+					d140 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d131, d139}, 1)
 					ctx.EmitAndRegImm32(d140.Reg, 1)
 					d140.Type = tagBool
 					ctx.BindReg(d140.Reg, &d140)
@@ -13398,7 +13398,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.StabilizeDescForControlFlow(&d96)
 					ctx.ReclaimUntrackedRegs()
-					d147 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d92}, 3)
+					d147 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d92}, 3)
 					ctx.ReclaimUntrackedRegs()
 					if d147.SliceSizeKnown {
 						d148 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d147.KnownSliceLen))}
@@ -13468,7 +13468,7 @@ Patterns can be any of:
 					d98 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase94) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d151 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d92}, 3)
+					d151 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d92}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d152 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
 					ctx.ReclaimUntrackedRegs()
@@ -13486,7 +13486,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d153 = JITPrepareScmerGoArg(ctx, d153)
 					ctx.SyncDesc(&d153)
-					d156 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d153}, 1)
+					d156 = ctx.EmitGoCallScalar(jitGoABI_c94eb298f761efc9, []JITValueDesc{d153}, 1)
 					d156.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d156.Reg, 1)
 					d156.Type = tagBool
@@ -13696,7 +13696,7 @@ Patterns can be any of:
 					d164 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase160) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d165 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d158}, 3)
+					d165 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d158}, 3)
 					ctx.ReclaimUntrackedRegs()
 					if d165.SliceSizeKnown {
 						d166 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d165.KnownSliceLen))}
@@ -13761,13 +13761,13 @@ Patterns can be any of:
 					d164 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase160) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d169 = ctx.EmitGoCallScalar(GoFuncAddr(func() *SourceInfo { return new(SourceInfo) }), nil, 1)
+					d169 = ctx.EmitGoCallScalar(jitGoABI_08ec8031d8f52ec0, nil, 1)
 					ctx.BindReg(d169.Reg, &d169)
 					ctx.StabilizeDescForControlFlow(&d169)
 					inlineHome170 := d169
 					inlineHome170.ID = 0
 					ctx.ReclaimUntrackedRegs()
-					d171 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d158}, 3)
+					d171 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d158}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d172 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
 					ctx.ReclaimUntrackedRegs()
@@ -13783,7 +13783,7 @@ Patterns can be any of:
 					inlineHome175 := d173
 					inlineHome175.ID = 0
 					ctx.ReclaimUntrackedRegs()
-					d176 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d158}, 3)
+					d176 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d158}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d177 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1)}
 					ctx.EnsureDesc(&d176)
@@ -13850,11 +13850,11 @@ Patterns can be any of:
 					ctx.BindReg(r37, &d182)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d182)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[]Scmer, value []Scmer) { *dst = value }), []JITValueDesc{d158, d182})
+					ctx.EmitGoCallVoid(jitGoABI_3cfc76af02b619dc, []JITValueDesc{d158, d182})
 					ctx.ReclaimUntrackedRegs()
 					d173 = JITPrepareScmerGoArg(ctx, d173)
 					ctx.SyncDesc(&d173)
-					d183 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSourceInfo), []JITValueDesc{d173}, 1)
+					d183 = ctx.EmitGoCallScalar(jitGoABI_f352d2b202a682fd, []JITValueDesc{d173}, 1)
 					d183.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d183.Reg, 1)
 					d183.Type = tagBool
@@ -13961,7 +13961,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d161 = JITPrepareScmerGoArg(ctx, d161)
 					ctx.SyncDesc(&d161)
-					d187 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d161}, 1)
+					d187 = ctx.EmitGoCallScalar(jitGoABI_c94eb298f761efc9, []JITValueDesc{d161}, 1)
 					d187.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d187.Reg, 1)
 					d187.Type = tagBool
@@ -14044,7 +14044,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d173 = JITPrepareScmerGoArg(ctx, d173)
 					ctx.SyncDesc(&d173)
-					d192 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).SourceInfo), []JITValueDesc{d173}, 1)
+					d192 = ctx.EmitGoCallScalar(jitGoABI_efc59dae573ac860, []JITValueDesc{d173}, 1)
 					d192.NoHeapPointer = false
 					ctx.BindReg(d192.Reg, &d192)
 					ctx.ReclaimUntrackedRegs()
@@ -14053,7 +14053,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d192)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d193)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *SourceInfo, value SourceInfo) { *dst = value }), []JITValueDesc{d169, d193})
+					ctx.EmitGoCallVoid(jitGoABI_711f67c681c46de9, []JITValueDesc{d169, d193})
 					ctx.FreeDesc(&d193)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
@@ -14141,7 +14141,7 @@ Patterns can be any of:
 					if d198.Loc != LocRegPair && d198.Loc != LocStackPair && d198.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d197 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d198}, 2)
+					d197 = ctx.EmitGoCallScalar(jitGoABI_e1a33cf0a7aeca49, []JITValueDesc{d198}, 2)
 					ctx.StabilizeDescForControlFlow(&d197)
 					inlineHome199 := d197
 					inlineHome199.ID = 0
@@ -14159,7 +14159,7 @@ Patterns can be any of:
 					} else {
 						d201 = d200
 					}
-					d202 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d197, d201}, 1)
+					d202 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d197, d201}, 1)
 					ctx.EmitAndRegImm32(d202.Reg, 1)
 					d202.Type = tagBool
 					ctx.BindReg(d202.Reg, &d202)
@@ -14216,7 +14216,7 @@ Patterns can be any of:
 					} else {
 						d205 = d204
 					}
-					d206 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d197, d205}, 1)
+					d206 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d197, d205}, 1)
 					ctx.EmitAndRegImm32(d206.Reg, 1)
 					d206.Type = tagBool
 					ctx.BindReg(d206.Reg, &d206)
@@ -14333,7 +14333,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.StabilizeDescForControlFlow(&d162)
 					ctx.ReclaimUntrackedRegs()
-					d213 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d158}, 3)
+					d213 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d158}, 3)
 					ctx.ReclaimUntrackedRegs()
 					if d213.SliceSizeKnown {
 						d214 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d213.KnownSliceLen))}
@@ -14403,7 +14403,7 @@ Patterns can be any of:
 					d164 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase160) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d217 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d158}, 3)
+					d217 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d158}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d218 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
 					ctx.ReclaimUntrackedRegs()
@@ -14421,7 +14421,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d219 = JITPrepareScmerGoArg(ctx, d219)
 					ctx.SyncDesc(&d219)
-					d222 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d219}, 1)
+					d222 = ctx.EmitGoCallScalar(jitGoABI_c94eb298f761efc9, []JITValueDesc{d219}, 1)
 					d222.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d222.Reg, 1)
 					d222.Type = tagBool
@@ -14631,7 +14631,7 @@ Patterns can be any of:
 					d230 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase226) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d231 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d224}, 3)
+					d231 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d224}, 3)
 					ctx.ReclaimUntrackedRegs()
 					if d231.SliceSizeKnown {
 						d232 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d231.KnownSliceLen))}
@@ -14696,13 +14696,13 @@ Patterns can be any of:
 					d230 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase226) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d235 = ctx.EmitGoCallScalar(GoFuncAddr(func() *SourceInfo { return new(SourceInfo) }), nil, 1)
+					d235 = ctx.EmitGoCallScalar(jitGoABI_08ec8031d8f52ec0, nil, 1)
 					ctx.BindReg(d235.Reg, &d235)
 					ctx.StabilizeDescForControlFlow(&d235)
 					inlineHome236 := d235
 					inlineHome236.ID = 0
 					ctx.ReclaimUntrackedRegs()
-					d237 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d224}, 3)
+					d237 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d224}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d238 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
 					ctx.ReclaimUntrackedRegs()
@@ -14718,7 +14718,7 @@ Patterns can be any of:
 					inlineHome241 := d239
 					inlineHome241.ID = 0
 					ctx.ReclaimUntrackedRegs()
-					d242 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d224}, 3)
+					d242 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d224}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d243 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1)}
 					ctx.EnsureDesc(&d242)
@@ -14785,11 +14785,11 @@ Patterns can be any of:
 					ctx.BindReg(r52, &d248)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d248)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[]Scmer, value []Scmer) { *dst = value }), []JITValueDesc{d224, d248})
+					ctx.EmitGoCallVoid(jitGoABI_3cfc76af02b619dc, []JITValueDesc{d224, d248})
 					ctx.ReclaimUntrackedRegs()
 					d239 = JITPrepareScmerGoArg(ctx, d239)
 					ctx.SyncDesc(&d239)
-					d249 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSourceInfo), []JITValueDesc{d239}, 1)
+					d249 = ctx.EmitGoCallScalar(jitGoABI_f352d2b202a682fd, []JITValueDesc{d239}, 1)
 					d249.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d249.Reg, 1)
 					d249.Type = tagBool
@@ -14896,7 +14896,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d227 = JITPrepareScmerGoArg(ctx, d227)
 					ctx.SyncDesc(&d227)
-					d253 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d227}, 1)
+					d253 = ctx.EmitGoCallScalar(jitGoABI_c94eb298f761efc9, []JITValueDesc{d227}, 1)
 					d253.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d253.Reg, 1)
 					d253.Type = tagBool
@@ -14979,7 +14979,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d239 = JITPrepareScmerGoArg(ctx, d239)
 					ctx.SyncDesc(&d239)
-					d258 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).SourceInfo), []JITValueDesc{d239}, 1)
+					d258 = ctx.EmitGoCallScalar(jitGoABI_efc59dae573ac860, []JITValueDesc{d239}, 1)
 					d258.NoHeapPointer = false
 					ctx.BindReg(d258.Reg, &d258)
 					ctx.ReclaimUntrackedRegs()
@@ -14988,7 +14988,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d258)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d259)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *SourceInfo, value SourceInfo) { *dst = value }), []JITValueDesc{d235, d259})
+					ctx.EmitGoCallVoid(jitGoABI_711f67c681c46de9, []JITValueDesc{d235, d259})
 					ctx.FreeDesc(&d259)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
@@ -15076,7 +15076,7 @@ Patterns can be any of:
 					if d264.Loc != LocRegPair && d264.Loc != LocStackPair && d264.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d263 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d264}, 2)
+					d263 = ctx.EmitGoCallScalar(jitGoABI_e1a33cf0a7aeca49, []JITValueDesc{d264}, 2)
 					ctx.StabilizeDescForControlFlow(&d263)
 					inlineHome265 := d263
 					inlineHome265.ID = 0
@@ -15094,7 +15094,7 @@ Patterns can be any of:
 					} else {
 						d267 = d266
 					}
-					d268 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d263, d267}, 1)
+					d268 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d263, d267}, 1)
 					ctx.EmitAndRegImm32(d268.Reg, 1)
 					d268.Type = tagBool
 					ctx.BindReg(d268.Reg, &d268)
@@ -15151,7 +15151,7 @@ Patterns can be any of:
 					} else {
 						d271 = d270
 					}
-					d272 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d263, d271}, 1)
+					d272 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d263, d271}, 1)
 					ctx.EmitAndRegImm32(d272.Reg, 1)
 					d272.Type = tagBool
 					ctx.BindReg(d272.Reg, &d272)
@@ -15268,7 +15268,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.StabilizeDescForControlFlow(&d228)
 					ctx.ReclaimUntrackedRegs()
-					d279 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d224}, 3)
+					d279 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d224}, 3)
 					ctx.ReclaimUntrackedRegs()
 					if d279.SliceSizeKnown {
 						d280 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d279.KnownSliceLen))}
@@ -15338,7 +15338,7 @@ Patterns can be any of:
 					d230 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase226) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d283 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d224}, 3)
+					d283 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d224}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d284 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
 					ctx.ReclaimUntrackedRegs()
@@ -15356,7 +15356,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d285 = JITPrepareScmerGoArg(ctx, d285)
 					ctx.SyncDesc(&d285)
-					d288 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d285}, 1)
+					d288 = ctx.EmitGoCallScalar(jitGoABI_c94eb298f761efc9, []JITValueDesc{d285}, 1)
 					d288.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d288.Reg, 1)
 					d288.Type = tagBool
@@ -15566,7 +15566,7 @@ Patterns can be any of:
 					d296 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase292) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d297 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d290}, 3)
+					d297 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d290}, 3)
 					ctx.ReclaimUntrackedRegs()
 					if d297.SliceSizeKnown {
 						d298 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d297.KnownSliceLen))}
@@ -15631,13 +15631,13 @@ Patterns can be any of:
 					d296 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase292) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d301 = ctx.EmitGoCallScalar(GoFuncAddr(func() *SourceInfo { return new(SourceInfo) }), nil, 1)
+					d301 = ctx.EmitGoCallScalar(jitGoABI_08ec8031d8f52ec0, nil, 1)
 					ctx.BindReg(d301.Reg, &d301)
 					ctx.StabilizeDescForControlFlow(&d301)
 					inlineHome302 := d301
 					inlineHome302.ID = 0
 					ctx.ReclaimUntrackedRegs()
-					d303 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d290}, 3)
+					d303 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d290}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d304 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
 					ctx.ReclaimUntrackedRegs()
@@ -15653,7 +15653,7 @@ Patterns can be any of:
 					inlineHome307 := d305
 					inlineHome307.ID = 0
 					ctx.ReclaimUntrackedRegs()
-					d308 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d290}, 3)
+					d308 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d290}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d309 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1)}
 					ctx.EnsureDesc(&d308)
@@ -15720,11 +15720,11 @@ Patterns can be any of:
 					ctx.BindReg(r67, &d314)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d314)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[]Scmer, value []Scmer) { *dst = value }), []JITValueDesc{d290, d314})
+					ctx.EmitGoCallVoid(jitGoABI_3cfc76af02b619dc, []JITValueDesc{d290, d314})
 					ctx.ReclaimUntrackedRegs()
 					d305 = JITPrepareScmerGoArg(ctx, d305)
 					ctx.SyncDesc(&d305)
-					d315 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSourceInfo), []JITValueDesc{d305}, 1)
+					d315 = ctx.EmitGoCallScalar(jitGoABI_f352d2b202a682fd, []JITValueDesc{d305}, 1)
 					d315.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d315.Reg, 1)
 					d315.Type = tagBool
@@ -15831,7 +15831,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d293 = JITPrepareScmerGoArg(ctx, d293)
 					ctx.SyncDesc(&d293)
-					d319 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d293}, 1)
+					d319 = ctx.EmitGoCallScalar(jitGoABI_c94eb298f761efc9, []JITValueDesc{d293}, 1)
 					d319.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d319.Reg, 1)
 					d319.Type = tagBool
@@ -15914,7 +15914,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d305 = JITPrepareScmerGoArg(ctx, d305)
 					ctx.SyncDesc(&d305)
-					d324 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).SourceInfo), []JITValueDesc{d305}, 1)
+					d324 = ctx.EmitGoCallScalar(jitGoABI_efc59dae573ac860, []JITValueDesc{d305}, 1)
 					d324.NoHeapPointer = false
 					ctx.BindReg(d324.Reg, &d324)
 					ctx.ReclaimUntrackedRegs()
@@ -15923,7 +15923,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d324)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d325)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *SourceInfo, value SourceInfo) { *dst = value }), []JITValueDesc{d301, d325})
+					ctx.EmitGoCallVoid(jitGoABI_711f67c681c46de9, []JITValueDesc{d301, d325})
 					ctx.FreeDesc(&d325)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
@@ -16011,7 +16011,7 @@ Patterns can be any of:
 					if d330.Loc != LocRegPair && d330.Loc != LocStackPair && d330.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d329 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d330}, 2)
+					d329 = ctx.EmitGoCallScalar(jitGoABI_e1a33cf0a7aeca49, []JITValueDesc{d330}, 2)
 					ctx.StabilizeDescForControlFlow(&d329)
 					inlineHome331 := d329
 					inlineHome331.ID = 0
@@ -16029,7 +16029,7 @@ Patterns can be any of:
 					} else {
 						d333 = d332
 					}
-					d334 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d329, d333}, 1)
+					d334 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d329, d333}, 1)
 					ctx.EmitAndRegImm32(d334.Reg, 1)
 					d334.Type = tagBool
 					ctx.BindReg(d334.Reg, &d334)
@@ -16086,7 +16086,7 @@ Patterns can be any of:
 					} else {
 						d337 = d336
 					}
-					d338 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d329, d337}, 1)
+					d338 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d329, d337}, 1)
 					ctx.EmitAndRegImm32(d338.Reg, 1)
 					d338.Type = tagBool
 					ctx.BindReg(d338.Reg, &d338)
@@ -16203,7 +16203,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.StabilizeDescForControlFlow(&d294)
 					ctx.ReclaimUntrackedRegs()
-					d345 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d290}, 3)
+					d345 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d290}, 3)
 					ctx.ReclaimUntrackedRegs()
 					if d345.SliceSizeKnown {
 						d346 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d345.KnownSliceLen))}
@@ -16273,7 +16273,7 @@ Patterns can be any of:
 					d296 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase292) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d349 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d290}, 3)
+					d349 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d290}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d350 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
 					ctx.ReclaimUntrackedRegs()
@@ -16291,7 +16291,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d351 = JITPrepareScmerGoArg(ctx, d351)
 					ctx.SyncDesc(&d351)
-					d354 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d351}, 1)
+					d354 = ctx.EmitGoCallScalar(jitGoABI_c94eb298f761efc9, []JITValueDesc{d351}, 1)
 					d354.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d354.Reg, 1)
 					d354.Type = tagBool
@@ -16501,7 +16501,7 @@ Patterns can be any of:
 					d362 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase358) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d363 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d356}, 3)
+					d363 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d356}, 3)
 					ctx.ReclaimUntrackedRegs()
 					if d363.SliceSizeKnown {
 						d364 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d363.KnownSliceLen))}
@@ -16566,13 +16566,13 @@ Patterns can be any of:
 					d362 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase358) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d367 = ctx.EmitGoCallScalar(GoFuncAddr(func() *SourceInfo { return new(SourceInfo) }), nil, 1)
+					d367 = ctx.EmitGoCallScalar(jitGoABI_08ec8031d8f52ec0, nil, 1)
 					ctx.BindReg(d367.Reg, &d367)
 					ctx.StabilizeDescForControlFlow(&d367)
 					inlineHome368 := d367
 					inlineHome368.ID = 0
 					ctx.ReclaimUntrackedRegs()
-					d369 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d356}, 3)
+					d369 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d356}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d370 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
 					ctx.ReclaimUntrackedRegs()
@@ -16588,7 +16588,7 @@ Patterns can be any of:
 					inlineHome373 := d371
 					inlineHome373.ID = 0
 					ctx.ReclaimUntrackedRegs()
-					d374 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d356}, 3)
+					d374 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d356}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d375 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1)}
 					ctx.EnsureDesc(&d374)
@@ -16655,11 +16655,11 @@ Patterns can be any of:
 					ctx.BindReg(r82, &d380)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d380)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[]Scmer, value []Scmer) { *dst = value }), []JITValueDesc{d356, d380})
+					ctx.EmitGoCallVoid(jitGoABI_3cfc76af02b619dc, []JITValueDesc{d356, d380})
 					ctx.ReclaimUntrackedRegs()
 					d371 = JITPrepareScmerGoArg(ctx, d371)
 					ctx.SyncDesc(&d371)
-					d381 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSourceInfo), []JITValueDesc{d371}, 1)
+					d381 = ctx.EmitGoCallScalar(jitGoABI_f352d2b202a682fd, []JITValueDesc{d371}, 1)
 					d381.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d381.Reg, 1)
 					d381.Type = tagBool
@@ -16766,7 +16766,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d359 = JITPrepareScmerGoArg(ctx, d359)
 					ctx.SyncDesc(&d359)
-					d385 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d359}, 1)
+					d385 = ctx.EmitGoCallScalar(jitGoABI_c94eb298f761efc9, []JITValueDesc{d359}, 1)
 					d385.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d385.Reg, 1)
 					d385.Type = tagBool
@@ -16849,7 +16849,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d371 = JITPrepareScmerGoArg(ctx, d371)
 					ctx.SyncDesc(&d371)
-					d390 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).SourceInfo), []JITValueDesc{d371}, 1)
+					d390 = ctx.EmitGoCallScalar(jitGoABI_efc59dae573ac860, []JITValueDesc{d371}, 1)
 					d390.NoHeapPointer = false
 					ctx.BindReg(d390.Reg, &d390)
 					ctx.ReclaimUntrackedRegs()
@@ -16858,7 +16858,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d390)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d391)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *SourceInfo, value SourceInfo) { *dst = value }), []JITValueDesc{d367, d391})
+					ctx.EmitGoCallVoid(jitGoABI_711f67c681c46de9, []JITValueDesc{d367, d391})
 					ctx.FreeDesc(&d391)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
@@ -16946,7 +16946,7 @@ Patterns can be any of:
 					if d396.Loc != LocRegPair && d396.Loc != LocStackPair && d396.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d395 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d396}, 2)
+					d395 = ctx.EmitGoCallScalar(jitGoABI_e1a33cf0a7aeca49, []JITValueDesc{d396}, 2)
 					ctx.StabilizeDescForControlFlow(&d395)
 					inlineHome397 := d395
 					inlineHome397.ID = 0
@@ -16964,7 +16964,7 @@ Patterns can be any of:
 					} else {
 						d399 = d398
 					}
-					d400 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d395, d399}, 1)
+					d400 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d395, d399}, 1)
 					ctx.EmitAndRegImm32(d400.Reg, 1)
 					d400.Type = tagBool
 					ctx.BindReg(d400.Reg, &d400)
@@ -17021,7 +17021,7 @@ Patterns can be any of:
 					} else {
 						d403 = d402
 					}
-					d404 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d395, d403}, 1)
+					d404 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d395, d403}, 1)
 					ctx.EmitAndRegImm32(d404.Reg, 1)
 					d404.Type = tagBool
 					ctx.BindReg(d404.Reg, &d404)
@@ -17138,7 +17138,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.StabilizeDescForControlFlow(&d360)
 					ctx.ReclaimUntrackedRegs()
-					d411 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d356}, 3)
+					d411 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d356}, 3)
 					ctx.ReclaimUntrackedRegs()
 					if d411.SliceSizeKnown {
 						d412 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d411.KnownSliceLen))}
@@ -17208,7 +17208,7 @@ Patterns can be any of:
 					d362 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase358) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d415 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d356}, 3)
+					d415 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d356}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d416 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
 					ctx.ReclaimUntrackedRegs()
@@ -17226,7 +17226,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d417 = JITPrepareScmerGoArg(ctx, d417)
 					ctx.SyncDesc(&d417)
-					d420 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d417}, 1)
+					d420 = ctx.EmitGoCallScalar(jitGoABI_c94eb298f761efc9, []JITValueDesc{d417}, 1)
 					d420.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d420.Reg, 1)
 					d420.Type = tagBool
@@ -17436,7 +17436,7 @@ Patterns can be any of:
 					d428 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase424) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d429 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d422}, 3)
+					d429 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d422}, 3)
 					ctx.ReclaimUntrackedRegs()
 					if d429.SliceSizeKnown {
 						d430 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d429.KnownSliceLen))}
@@ -17501,13 +17501,13 @@ Patterns can be any of:
 					d428 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase424) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d433 = ctx.EmitGoCallScalar(GoFuncAddr(func() *SourceInfo { return new(SourceInfo) }), nil, 1)
+					d433 = ctx.EmitGoCallScalar(jitGoABI_08ec8031d8f52ec0, nil, 1)
 					ctx.BindReg(d433.Reg, &d433)
 					ctx.StabilizeDescForControlFlow(&d433)
 					inlineHome434 := d433
 					inlineHome434.ID = 0
 					ctx.ReclaimUntrackedRegs()
-					d435 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d422}, 3)
+					d435 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d422}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d436 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
 					ctx.ReclaimUntrackedRegs()
@@ -17523,7 +17523,7 @@ Patterns can be any of:
 					inlineHome439 := d437
 					inlineHome439.ID = 0
 					ctx.ReclaimUntrackedRegs()
-					d440 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d422}, 3)
+					d440 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d422}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d441 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1)}
 					ctx.EnsureDesc(&d440)
@@ -17590,11 +17590,11 @@ Patterns can be any of:
 					ctx.BindReg(r97, &d446)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d446)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[]Scmer, value []Scmer) { *dst = value }), []JITValueDesc{d422, d446})
+					ctx.EmitGoCallVoid(jitGoABI_3cfc76af02b619dc, []JITValueDesc{d422, d446})
 					ctx.ReclaimUntrackedRegs()
 					d437 = JITPrepareScmerGoArg(ctx, d437)
 					ctx.SyncDesc(&d437)
-					d447 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSourceInfo), []JITValueDesc{d437}, 1)
+					d447 = ctx.EmitGoCallScalar(jitGoABI_f352d2b202a682fd, []JITValueDesc{d437}, 1)
 					d447.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d447.Reg, 1)
 					d447.Type = tagBool
@@ -17701,7 +17701,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d425 = JITPrepareScmerGoArg(ctx, d425)
 					ctx.SyncDesc(&d425)
-					d451 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d425}, 1)
+					d451 = ctx.EmitGoCallScalar(jitGoABI_c94eb298f761efc9, []JITValueDesc{d425}, 1)
 					d451.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d451.Reg, 1)
 					d451.Type = tagBool
@@ -17784,7 +17784,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d437 = JITPrepareScmerGoArg(ctx, d437)
 					ctx.SyncDesc(&d437)
-					d456 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).SourceInfo), []JITValueDesc{d437}, 1)
+					d456 = ctx.EmitGoCallScalar(jitGoABI_efc59dae573ac860, []JITValueDesc{d437}, 1)
 					d456.NoHeapPointer = false
 					ctx.BindReg(d456.Reg, &d456)
 					ctx.ReclaimUntrackedRegs()
@@ -17793,7 +17793,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d456)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d457)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *SourceInfo, value SourceInfo) { *dst = value }), []JITValueDesc{d433, d457})
+					ctx.EmitGoCallVoid(jitGoABI_711f67c681c46de9, []JITValueDesc{d433, d457})
 					ctx.FreeDesc(&d457)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
@@ -17881,7 +17881,7 @@ Patterns can be any of:
 					if d462.Loc != LocRegPair && d462.Loc != LocStackPair && d462.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d461 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d462}, 2)
+					d461 = ctx.EmitGoCallScalar(jitGoABI_e1a33cf0a7aeca49, []JITValueDesc{d462}, 2)
 					ctx.StabilizeDescForControlFlow(&d461)
 					inlineHome463 := d461
 					inlineHome463.ID = 0
@@ -17899,7 +17899,7 @@ Patterns can be any of:
 					} else {
 						d465 = d464
 					}
-					d466 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d461, d465}, 1)
+					d466 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d461, d465}, 1)
 					ctx.EmitAndRegImm32(d466.Reg, 1)
 					d466.Type = tagBool
 					ctx.BindReg(d466.Reg, &d466)
@@ -17956,7 +17956,7 @@ Patterns can be any of:
 					} else {
 						d469 = d468
 					}
-					d470 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d461, d469}, 1)
+					d470 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d461, d469}, 1)
 					ctx.EmitAndRegImm32(d470.Reg, 1)
 					d470.Type = tagBool
 					ctx.BindReg(d470.Reg, &d470)
@@ -18073,7 +18073,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.StabilizeDescForControlFlow(&d426)
 					ctx.ReclaimUntrackedRegs()
-					d477 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d422}, 3)
+					d477 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d422}, 3)
 					ctx.ReclaimUntrackedRegs()
 					if d477.SliceSizeKnown {
 						d478 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d477.KnownSliceLen))}
@@ -18143,7 +18143,7 @@ Patterns can be any of:
 					d428 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase424) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d481 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d422}, 3)
+					d481 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d422}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d482 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
 					ctx.ReclaimUntrackedRegs()
@@ -18161,7 +18161,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d483 = JITPrepareScmerGoArg(ctx, d483)
 					ctx.SyncDesc(&d483)
-					d486 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d483}, 1)
+					d486 = ctx.EmitGoCallScalar(jitGoABI_c94eb298f761efc9, []JITValueDesc{d483}, 1)
 					d486.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d486.Reg, 1)
 					d486.Type = tagBool
@@ -18371,7 +18371,7 @@ Patterns can be any of:
 					d494 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase490) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d495 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d488}, 3)
+					d495 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d488}, 3)
 					ctx.ReclaimUntrackedRegs()
 					if d495.SliceSizeKnown {
 						d496 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d495.KnownSliceLen))}
@@ -18436,13 +18436,13 @@ Patterns can be any of:
 					d494 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase490) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d499 = ctx.EmitGoCallScalar(GoFuncAddr(func() *SourceInfo { return new(SourceInfo) }), nil, 1)
+					d499 = ctx.EmitGoCallScalar(jitGoABI_08ec8031d8f52ec0, nil, 1)
 					ctx.BindReg(d499.Reg, &d499)
 					ctx.StabilizeDescForControlFlow(&d499)
 					inlineHome500 := d499
 					inlineHome500.ID = 0
 					ctx.ReclaimUntrackedRegs()
-					d501 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d488}, 3)
+					d501 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d488}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d502 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
 					ctx.ReclaimUntrackedRegs()
@@ -18458,7 +18458,7 @@ Patterns can be any of:
 					inlineHome505 := d503
 					inlineHome505.ID = 0
 					ctx.ReclaimUntrackedRegs()
-					d506 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d488}, 3)
+					d506 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d488}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d507 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1)}
 					ctx.EnsureDesc(&d506)
@@ -18525,11 +18525,11 @@ Patterns can be any of:
 					ctx.BindReg(r112, &d512)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d512)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[]Scmer, value []Scmer) { *dst = value }), []JITValueDesc{d488, d512})
+					ctx.EmitGoCallVoid(jitGoABI_3cfc76af02b619dc, []JITValueDesc{d488, d512})
 					ctx.ReclaimUntrackedRegs()
 					d503 = JITPrepareScmerGoArg(ctx, d503)
 					ctx.SyncDesc(&d503)
-					d513 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSourceInfo), []JITValueDesc{d503}, 1)
+					d513 = ctx.EmitGoCallScalar(jitGoABI_f352d2b202a682fd, []JITValueDesc{d503}, 1)
 					d513.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d513.Reg, 1)
 					d513.Type = tagBool
@@ -18636,7 +18636,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d491 = JITPrepareScmerGoArg(ctx, d491)
 					ctx.SyncDesc(&d491)
-					d517 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d491}, 1)
+					d517 = ctx.EmitGoCallScalar(jitGoABI_c94eb298f761efc9, []JITValueDesc{d491}, 1)
 					d517.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d517.Reg, 1)
 					d517.Type = tagBool
@@ -18719,7 +18719,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d503 = JITPrepareScmerGoArg(ctx, d503)
 					ctx.SyncDesc(&d503)
-					d522 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).SourceInfo), []JITValueDesc{d503}, 1)
+					d522 = ctx.EmitGoCallScalar(jitGoABI_efc59dae573ac860, []JITValueDesc{d503}, 1)
 					d522.NoHeapPointer = false
 					ctx.BindReg(d522.Reg, &d522)
 					ctx.ReclaimUntrackedRegs()
@@ -18728,7 +18728,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d522)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d523)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *SourceInfo, value SourceInfo) { *dst = value }), []JITValueDesc{d499, d523})
+					ctx.EmitGoCallVoid(jitGoABI_711f67c681c46de9, []JITValueDesc{d499, d523})
 					ctx.FreeDesc(&d523)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
@@ -18816,7 +18816,7 @@ Patterns can be any of:
 					if d528.Loc != LocRegPair && d528.Loc != LocStackPair && d528.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d527 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d528}, 2)
+					d527 = ctx.EmitGoCallScalar(jitGoABI_e1a33cf0a7aeca49, []JITValueDesc{d528}, 2)
 					ctx.StabilizeDescForControlFlow(&d527)
 					inlineHome529 := d527
 					inlineHome529.ID = 0
@@ -18834,7 +18834,7 @@ Patterns can be any of:
 					} else {
 						d531 = d530
 					}
-					d532 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d527, d531}, 1)
+					d532 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d527, d531}, 1)
 					ctx.EmitAndRegImm32(d532.Reg, 1)
 					d532.Type = tagBool
 					ctx.BindReg(d532.Reg, &d532)
@@ -18891,7 +18891,7 @@ Patterns can be any of:
 					} else {
 						d535 = d534
 					}
-					d536 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d527, d535}, 1)
+					d536 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d527, d535}, 1)
 					ctx.EmitAndRegImm32(d536.Reg, 1)
 					d536.Type = tagBool
 					ctx.BindReg(d536.Reg, &d536)
@@ -19008,7 +19008,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.StabilizeDescForControlFlow(&d492)
 					ctx.ReclaimUntrackedRegs()
-					d543 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d488}, 3)
+					d543 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d488}, 3)
 					ctx.ReclaimUntrackedRegs()
 					if d543.SliceSizeKnown {
 						d544 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d543.KnownSliceLen))}
@@ -19078,7 +19078,7 @@ Patterns can be any of:
 					d494 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase490) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d547 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d488}, 3)
+					d547 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d488}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d548 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
 					ctx.ReclaimUntrackedRegs()
@@ -19096,7 +19096,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d549 = JITPrepareScmerGoArg(ctx, d549)
 					ctx.SyncDesc(&d549)
-					d552 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d549}, 1)
+					d552 = ctx.EmitGoCallScalar(jitGoABI_c94eb298f761efc9, []JITValueDesc{d549}, 1)
 					d552.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d552.Reg, 1)
 					d552.Type = tagBool
@@ -19306,7 +19306,7 @@ Patterns can be any of:
 					d560 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase556) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d561 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d554}, 3)
+					d561 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d554}, 3)
 					ctx.ReclaimUntrackedRegs()
 					if d561.SliceSizeKnown {
 						d562 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d561.KnownSliceLen))}
@@ -19371,13 +19371,13 @@ Patterns can be any of:
 					d560 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase556) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d565 = ctx.EmitGoCallScalar(GoFuncAddr(func() *SourceInfo { return new(SourceInfo) }), nil, 1)
+					d565 = ctx.EmitGoCallScalar(jitGoABI_08ec8031d8f52ec0, nil, 1)
 					ctx.BindReg(d565.Reg, &d565)
 					ctx.StabilizeDescForControlFlow(&d565)
 					inlineHome566 := d565
 					inlineHome566.ID = 0
 					ctx.ReclaimUntrackedRegs()
-					d567 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d554}, 3)
+					d567 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d554}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d568 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
 					ctx.ReclaimUntrackedRegs()
@@ -19393,7 +19393,7 @@ Patterns can be any of:
 					inlineHome571 := d569
 					inlineHome571.ID = 0
 					ctx.ReclaimUntrackedRegs()
-					d572 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d554}, 3)
+					d572 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d554}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d573 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1)}
 					ctx.EnsureDesc(&d572)
@@ -19460,11 +19460,11 @@ Patterns can be any of:
 					ctx.BindReg(r127, &d578)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d578)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[]Scmer, value []Scmer) { *dst = value }), []JITValueDesc{d554, d578})
+					ctx.EmitGoCallVoid(jitGoABI_3cfc76af02b619dc, []JITValueDesc{d554, d578})
 					ctx.ReclaimUntrackedRegs()
 					d569 = JITPrepareScmerGoArg(ctx, d569)
 					ctx.SyncDesc(&d569)
-					d579 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSourceInfo), []JITValueDesc{d569}, 1)
+					d579 = ctx.EmitGoCallScalar(jitGoABI_f352d2b202a682fd, []JITValueDesc{d569}, 1)
 					d579.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d579.Reg, 1)
 					d579.Type = tagBool
@@ -19571,7 +19571,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d557 = JITPrepareScmerGoArg(ctx, d557)
 					ctx.SyncDesc(&d557)
-					d583 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d557}, 1)
+					d583 = ctx.EmitGoCallScalar(jitGoABI_c94eb298f761efc9, []JITValueDesc{d557}, 1)
 					d583.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d583.Reg, 1)
 					d583.Type = tagBool
@@ -19654,7 +19654,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d569 = JITPrepareScmerGoArg(ctx, d569)
 					ctx.SyncDesc(&d569)
-					d588 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).SourceInfo), []JITValueDesc{d569}, 1)
+					d588 = ctx.EmitGoCallScalar(jitGoABI_efc59dae573ac860, []JITValueDesc{d569}, 1)
 					d588.NoHeapPointer = false
 					ctx.BindReg(d588.Reg, &d588)
 					ctx.ReclaimUntrackedRegs()
@@ -19663,7 +19663,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d588)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d589)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *SourceInfo, value SourceInfo) { *dst = value }), []JITValueDesc{d565, d589})
+					ctx.EmitGoCallVoid(jitGoABI_711f67c681c46de9, []JITValueDesc{d565, d589})
 					ctx.FreeDesc(&d589)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
@@ -19751,7 +19751,7 @@ Patterns can be any of:
 					if d594.Loc != LocRegPair && d594.Loc != LocStackPair && d594.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d593 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d594}, 2)
+					d593 = ctx.EmitGoCallScalar(jitGoABI_e1a33cf0a7aeca49, []JITValueDesc{d594}, 2)
 					ctx.StabilizeDescForControlFlow(&d593)
 					inlineHome595 := d593
 					inlineHome595.ID = 0
@@ -19769,7 +19769,7 @@ Patterns can be any of:
 					} else {
 						d597 = d596
 					}
-					d598 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d593, d597}, 1)
+					d598 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d593, d597}, 1)
 					ctx.EmitAndRegImm32(d598.Reg, 1)
 					d598.Type = tagBool
 					ctx.BindReg(d598.Reg, &d598)
@@ -19826,7 +19826,7 @@ Patterns can be any of:
 					} else {
 						d601 = d600
 					}
-					d602 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d593, d601}, 1)
+					d602 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d593, d601}, 1)
 					ctx.EmitAndRegImm32(d602.Reg, 1)
 					d602.Type = tagBool
 					ctx.BindReg(d602.Reg, &d602)
@@ -19943,7 +19943,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.StabilizeDescForControlFlow(&d558)
 					ctx.ReclaimUntrackedRegs()
-					d609 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d554}, 3)
+					d609 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d554}, 3)
 					ctx.ReclaimUntrackedRegs()
 					if d609.SliceSizeKnown {
 						d610 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d609.KnownSliceLen))}
@@ -20013,7 +20013,7 @@ Patterns can be any of:
 					d560 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase556) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d613 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d554}, 3)
+					d613 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d554}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d614 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
 					ctx.ReclaimUntrackedRegs()
@@ -20031,7 +20031,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d615 = JITPrepareScmerGoArg(ctx, d615)
 					ctx.SyncDesc(&d615)
-					d618 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d615}, 1)
+					d618 = ctx.EmitGoCallScalar(jitGoABI_c94eb298f761efc9, []JITValueDesc{d615}, 1)
 					d618.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d618.Reg, 1)
 					d618.Type = tagBool
@@ -20241,7 +20241,7 @@ Patterns can be any of:
 					d626 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase622) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d627 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d620}, 3)
+					d627 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d620}, 3)
 					ctx.ReclaimUntrackedRegs()
 					if d627.SliceSizeKnown {
 						d628 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d627.KnownSliceLen))}
@@ -20306,13 +20306,13 @@ Patterns can be any of:
 					d626 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase622) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d631 = ctx.EmitGoCallScalar(GoFuncAddr(func() *SourceInfo { return new(SourceInfo) }), nil, 1)
+					d631 = ctx.EmitGoCallScalar(jitGoABI_08ec8031d8f52ec0, nil, 1)
 					ctx.BindReg(d631.Reg, &d631)
 					ctx.StabilizeDescForControlFlow(&d631)
 					inlineHome632 := d631
 					inlineHome632.ID = 0
 					ctx.ReclaimUntrackedRegs()
-					d633 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d620}, 3)
+					d633 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d620}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d634 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
 					ctx.ReclaimUntrackedRegs()
@@ -20328,7 +20328,7 @@ Patterns can be any of:
 					inlineHome637 := d635
 					inlineHome637.ID = 0
 					ctx.ReclaimUntrackedRegs()
-					d638 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d620}, 3)
+					d638 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d620}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d639 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1)}
 					ctx.EnsureDesc(&d638)
@@ -20395,11 +20395,11 @@ Patterns can be any of:
 					ctx.BindReg(r142, &d644)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d644)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[]Scmer, value []Scmer) { *dst = value }), []JITValueDesc{d620, d644})
+					ctx.EmitGoCallVoid(jitGoABI_3cfc76af02b619dc, []JITValueDesc{d620, d644})
 					ctx.ReclaimUntrackedRegs()
 					d635 = JITPrepareScmerGoArg(ctx, d635)
 					ctx.SyncDesc(&d635)
-					d645 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSourceInfo), []JITValueDesc{d635}, 1)
+					d645 = ctx.EmitGoCallScalar(jitGoABI_f352d2b202a682fd, []JITValueDesc{d635}, 1)
 					d645.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d645.Reg, 1)
 					d645.Type = tagBool
@@ -20506,7 +20506,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d623 = JITPrepareScmerGoArg(ctx, d623)
 					ctx.SyncDesc(&d623)
-					d649 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d623}, 1)
+					d649 = ctx.EmitGoCallScalar(jitGoABI_c94eb298f761efc9, []JITValueDesc{d623}, 1)
 					d649.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d649.Reg, 1)
 					d649.Type = tagBool
@@ -20589,7 +20589,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d635 = JITPrepareScmerGoArg(ctx, d635)
 					ctx.SyncDesc(&d635)
-					d654 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).SourceInfo), []JITValueDesc{d635}, 1)
+					d654 = ctx.EmitGoCallScalar(jitGoABI_efc59dae573ac860, []JITValueDesc{d635}, 1)
 					d654.NoHeapPointer = false
 					ctx.BindReg(d654.Reg, &d654)
 					ctx.ReclaimUntrackedRegs()
@@ -20598,7 +20598,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d654)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d655)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *SourceInfo, value SourceInfo) { *dst = value }), []JITValueDesc{d631, d655})
+					ctx.EmitGoCallVoid(jitGoABI_711f67c681c46de9, []JITValueDesc{d631, d655})
 					ctx.FreeDesc(&d655)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
@@ -20686,7 +20686,7 @@ Patterns can be any of:
 					if d660.Loc != LocRegPair && d660.Loc != LocStackPair && d660.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d659 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d660}, 2)
+					d659 = ctx.EmitGoCallScalar(jitGoABI_e1a33cf0a7aeca49, []JITValueDesc{d660}, 2)
 					ctx.StabilizeDescForControlFlow(&d659)
 					inlineHome661 := d659
 					inlineHome661.ID = 0
@@ -20704,7 +20704,7 @@ Patterns can be any of:
 					} else {
 						d663 = d662
 					}
-					d664 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d659, d663}, 1)
+					d664 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d659, d663}, 1)
 					ctx.EmitAndRegImm32(d664.Reg, 1)
 					d664.Type = tagBool
 					ctx.BindReg(d664.Reg, &d664)
@@ -20761,7 +20761,7 @@ Patterns can be any of:
 					} else {
 						d667 = d666
 					}
-					d668 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d659, d667}, 1)
+					d668 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d659, d667}, 1)
 					ctx.EmitAndRegImm32(d668.Reg, 1)
 					d668.Type = tagBool
 					ctx.BindReg(d668.Reg, &d668)
@@ -20878,7 +20878,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.StabilizeDescForControlFlow(&d624)
 					ctx.ReclaimUntrackedRegs()
-					d675 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d620}, 3)
+					d675 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d620}, 3)
 					ctx.ReclaimUntrackedRegs()
 					if d675.SliceSizeKnown {
 						d676 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d675.KnownSliceLen))}
@@ -20948,7 +20948,7 @@ Patterns can be any of:
 					d626 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase622) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d679 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d620}, 3)
+					d679 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d620}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d680 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
 					ctx.ReclaimUntrackedRegs()
@@ -20966,7 +20966,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d681 = JITPrepareScmerGoArg(ctx, d681)
 					ctx.SyncDesc(&d681)
-					d684 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d681}, 1)
+					d684 = ctx.EmitGoCallScalar(jitGoABI_c94eb298f761efc9, []JITValueDesc{d681}, 1)
 					d684.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d684.Reg, 1)
 					d684.Type = tagBool
@@ -21176,7 +21176,7 @@ Patterns can be any of:
 					d692 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d693 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d686}, 3)
+					d693 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d686}, 3)
 					ctx.ReclaimUntrackedRegs()
 					if d693.SliceSizeKnown {
 						d694 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d693.KnownSliceLen))}
@@ -21241,13 +21241,13 @@ Patterns can be any of:
 					d692 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d697 = ctx.EmitGoCallScalar(GoFuncAddr(func() *SourceInfo { return new(SourceInfo) }), nil, 1)
+					d697 = ctx.EmitGoCallScalar(jitGoABI_08ec8031d8f52ec0, nil, 1)
 					ctx.BindReg(d697.Reg, &d697)
 					ctx.StabilizeDescForControlFlow(&d697)
 					inlineHome698 := d697
 					inlineHome698.ID = 0
 					ctx.ReclaimUntrackedRegs()
-					d699 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d686}, 3)
+					d699 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d686}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d700 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
 					ctx.ReclaimUntrackedRegs()
@@ -21263,7 +21263,7 @@ Patterns can be any of:
 					inlineHome703 := d701
 					inlineHome703.ID = 0
 					ctx.ReclaimUntrackedRegs()
-					d704 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d686}, 3)
+					d704 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d686}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d705 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1)}
 					ctx.EnsureDesc(&d704)
@@ -21330,11 +21330,11 @@ Patterns can be any of:
 					ctx.BindReg(r157, &d710)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d710)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[]Scmer, value []Scmer) { *dst = value }), []JITValueDesc{d686, d710})
+					ctx.EmitGoCallVoid(jitGoABI_3cfc76af02b619dc, []JITValueDesc{d686, d710})
 					ctx.ReclaimUntrackedRegs()
 					d701 = JITPrepareScmerGoArg(ctx, d701)
 					ctx.SyncDesc(&d701)
-					d711 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSourceInfo), []JITValueDesc{d701}, 1)
+					d711 = ctx.EmitGoCallScalar(jitGoABI_f352d2b202a682fd, []JITValueDesc{d701}, 1)
 					d711.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d711.Reg, 1)
 					d711.Type = tagBool
@@ -21441,7 +21441,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d689 = JITPrepareScmerGoArg(ctx, d689)
 					ctx.SyncDesc(&d689)
-					d715 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d689}, 1)
+					d715 = ctx.EmitGoCallScalar(jitGoABI_c94eb298f761efc9, []JITValueDesc{d689}, 1)
 					d715.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d715.Reg, 1)
 					d715.Type = tagBool
@@ -21524,7 +21524,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d701 = JITPrepareScmerGoArg(ctx, d701)
 					ctx.SyncDesc(&d701)
-					d720 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).SourceInfo), []JITValueDesc{d701}, 1)
+					d720 = ctx.EmitGoCallScalar(jitGoABI_efc59dae573ac860, []JITValueDesc{d701}, 1)
 					d720.NoHeapPointer = false
 					ctx.BindReg(d720.Reg, &d720)
 					ctx.ReclaimUntrackedRegs()
@@ -21533,7 +21533,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d720)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d721)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *SourceInfo, value SourceInfo) { *dst = value }), []JITValueDesc{d697, d721})
+					ctx.EmitGoCallVoid(jitGoABI_711f67c681c46de9, []JITValueDesc{d697, d721})
 					ctx.FreeDesc(&d721)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
@@ -21621,7 +21621,7 @@ Patterns can be any of:
 					if d726.Loc != LocRegPair && d726.Loc != LocStackPair && d726.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d725 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d726}, 2)
+					d725 = ctx.EmitGoCallScalar(jitGoABI_e1a33cf0a7aeca49, []JITValueDesc{d726}, 2)
 					ctx.StabilizeDescForControlFlow(&d725)
 					inlineHome727 := d725
 					inlineHome727.ID = 0
@@ -21639,7 +21639,7 @@ Patterns can be any of:
 					} else {
 						d729 = d728
 					}
-					d730 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d725, d729}, 1)
+					d730 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d725, d729}, 1)
 					ctx.EmitAndRegImm32(d730.Reg, 1)
 					d730.Type = tagBool
 					ctx.BindReg(d730.Reg, &d730)
@@ -21696,7 +21696,7 @@ Patterns can be any of:
 					} else {
 						d733 = d732
 					}
-					d734 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d725, d733}, 1)
+					d734 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d725, d733}, 1)
 					ctx.EmitAndRegImm32(d734.Reg, 1)
 					d734.Type = tagBool
 					ctx.BindReg(d734.Reg, &d734)
@@ -21813,7 +21813,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.StabilizeDescForControlFlow(&d690)
 					ctx.ReclaimUntrackedRegs()
-					d741 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d686}, 3)
+					d741 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d686}, 3)
 					ctx.ReclaimUntrackedRegs()
 					if d741.SliceSizeKnown {
 						d742 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d741.KnownSliceLen))}
@@ -21883,7 +21883,7 @@ Patterns can be any of:
 					d692 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d745 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d686}, 3)
+					d745 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d686}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d746 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
 					ctx.ReclaimUntrackedRegs()
@@ -21901,7 +21901,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d747 = JITPrepareScmerGoArg(ctx, d747)
 					ctx.SyncDesc(&d747)
-					d750 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d747}, 1)
+					d750 = ctx.EmitGoCallScalar(jitGoABI_c94eb298f761efc9, []JITValueDesc{d747}, 1)
 					d750.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d750.Reg, 1)
 					d750.Type = tagBool
@@ -22111,7 +22111,7 @@ Patterns can be any of:
 					d758 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase754) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d759 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d752}, 3)
+					d759 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d752}, 3)
 					ctx.ReclaimUntrackedRegs()
 					if d759.SliceSizeKnown {
 						d760 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d759.KnownSliceLen))}
@@ -22176,13 +22176,13 @@ Patterns can be any of:
 					d758 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase754) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d763 = ctx.EmitGoCallScalar(GoFuncAddr(func() *SourceInfo { return new(SourceInfo) }), nil, 1)
+					d763 = ctx.EmitGoCallScalar(jitGoABI_08ec8031d8f52ec0, nil, 1)
 					ctx.BindReg(d763.Reg, &d763)
 					ctx.StabilizeDescForControlFlow(&d763)
 					inlineHome764 := d763
 					inlineHome764.ID = 0
 					ctx.ReclaimUntrackedRegs()
-					d765 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d752}, 3)
+					d765 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d752}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d766 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
 					ctx.ReclaimUntrackedRegs()
@@ -22198,7 +22198,7 @@ Patterns can be any of:
 					inlineHome769 := d767
 					inlineHome769.ID = 0
 					ctx.ReclaimUntrackedRegs()
-					d770 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d752}, 3)
+					d770 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d752}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d771 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1)}
 					ctx.EnsureDesc(&d770)
@@ -22265,11 +22265,11 @@ Patterns can be any of:
 					ctx.BindReg(r172, &d776)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d776)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[]Scmer, value []Scmer) { *dst = value }), []JITValueDesc{d752, d776})
+					ctx.EmitGoCallVoid(jitGoABI_3cfc76af02b619dc, []JITValueDesc{d752, d776})
 					ctx.ReclaimUntrackedRegs()
 					d767 = JITPrepareScmerGoArg(ctx, d767)
 					ctx.SyncDesc(&d767)
-					d777 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSourceInfo), []JITValueDesc{d767}, 1)
+					d777 = ctx.EmitGoCallScalar(jitGoABI_f352d2b202a682fd, []JITValueDesc{d767}, 1)
 					d777.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d777.Reg, 1)
 					d777.Type = tagBool
@@ -22376,7 +22376,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d755 = JITPrepareScmerGoArg(ctx, d755)
 					ctx.SyncDesc(&d755)
-					d781 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d755}, 1)
+					d781 = ctx.EmitGoCallScalar(jitGoABI_c94eb298f761efc9, []JITValueDesc{d755}, 1)
 					d781.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d781.Reg, 1)
 					d781.Type = tagBool
@@ -22459,7 +22459,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d767 = JITPrepareScmerGoArg(ctx, d767)
 					ctx.SyncDesc(&d767)
-					d786 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).SourceInfo), []JITValueDesc{d767}, 1)
+					d786 = ctx.EmitGoCallScalar(jitGoABI_efc59dae573ac860, []JITValueDesc{d767}, 1)
 					d786.NoHeapPointer = false
 					ctx.BindReg(d786.Reg, &d786)
 					ctx.ReclaimUntrackedRegs()
@@ -22468,7 +22468,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d786)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d787)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *SourceInfo, value SourceInfo) { *dst = value }), []JITValueDesc{d763, d787})
+					ctx.EmitGoCallVoid(jitGoABI_711f67c681c46de9, []JITValueDesc{d763, d787})
 					ctx.FreeDesc(&d787)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
@@ -22556,7 +22556,7 @@ Patterns can be any of:
 					if d792.Loc != LocRegPair && d792.Loc != LocStackPair && d792.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d791 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d792}, 2)
+					d791 = ctx.EmitGoCallScalar(jitGoABI_e1a33cf0a7aeca49, []JITValueDesc{d792}, 2)
 					ctx.StabilizeDescForControlFlow(&d791)
 					inlineHome793 := d791
 					inlineHome793.ID = 0
@@ -22574,7 +22574,7 @@ Patterns can be any of:
 					} else {
 						d795 = d794
 					}
-					d796 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d791, d795}, 1)
+					d796 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d791, d795}, 1)
 					ctx.EmitAndRegImm32(d796.Reg, 1)
 					d796.Type = tagBool
 					ctx.BindReg(d796.Reg, &d796)
@@ -22631,7 +22631,7 @@ Patterns can be any of:
 					} else {
 						d799 = d798
 					}
-					d800 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d791, d799}, 1)
+					d800 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d791, d799}, 1)
 					ctx.EmitAndRegImm32(d800.Reg, 1)
 					d800.Type = tagBool
 					ctx.BindReg(d800.Reg, &d800)
@@ -22748,7 +22748,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.StabilizeDescForControlFlow(&d756)
 					ctx.ReclaimUntrackedRegs()
-					d807 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d752}, 3)
+					d807 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d752}, 3)
 					ctx.ReclaimUntrackedRegs()
 					if d807.SliceSizeKnown {
 						d808 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d807.KnownSliceLen))}
@@ -22818,7 +22818,7 @@ Patterns can be any of:
 					d758 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase754) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d811 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d752}, 3)
+					d811 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d752}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d812 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
 					ctx.ReclaimUntrackedRegs()
@@ -22836,7 +22836,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d813 = JITPrepareScmerGoArg(ctx, d813)
 					ctx.SyncDesc(&d813)
-					d816 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d813}, 1)
+					d816 = ctx.EmitGoCallScalar(jitGoABI_c94eb298f761efc9, []JITValueDesc{d813}, 1)
 					d816.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d816.Reg, 1)
 					d816.Type = tagBool
@@ -23046,7 +23046,7 @@ Patterns can be any of:
 					d824 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase820) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d825 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d818}, 3)
+					d825 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d818}, 3)
 					ctx.ReclaimUntrackedRegs()
 					if d825.SliceSizeKnown {
 						d826 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d825.KnownSliceLen))}
@@ -23111,13 +23111,13 @@ Patterns can be any of:
 					d824 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase820) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d829 = ctx.EmitGoCallScalar(GoFuncAddr(func() *SourceInfo { return new(SourceInfo) }), nil, 1)
+					d829 = ctx.EmitGoCallScalar(jitGoABI_08ec8031d8f52ec0, nil, 1)
 					ctx.BindReg(d829.Reg, &d829)
 					ctx.StabilizeDescForControlFlow(&d829)
 					inlineHome830 := d829
 					inlineHome830.ID = 0
 					ctx.ReclaimUntrackedRegs()
-					d831 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d818}, 3)
+					d831 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d818}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d832 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
 					ctx.ReclaimUntrackedRegs()
@@ -23133,7 +23133,7 @@ Patterns can be any of:
 					inlineHome835 := d833
 					inlineHome835.ID = 0
 					ctx.ReclaimUntrackedRegs()
-					d836 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d818}, 3)
+					d836 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d818}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d837 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1)}
 					ctx.EnsureDesc(&d836)
@@ -23200,11 +23200,11 @@ Patterns can be any of:
 					ctx.BindReg(r187, &d842)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d842)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[]Scmer, value []Scmer) { *dst = value }), []JITValueDesc{d818, d842})
+					ctx.EmitGoCallVoid(jitGoABI_3cfc76af02b619dc, []JITValueDesc{d818, d842})
 					ctx.ReclaimUntrackedRegs()
 					d833 = JITPrepareScmerGoArg(ctx, d833)
 					ctx.SyncDesc(&d833)
-					d843 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSourceInfo), []JITValueDesc{d833}, 1)
+					d843 = ctx.EmitGoCallScalar(jitGoABI_f352d2b202a682fd, []JITValueDesc{d833}, 1)
 					d843.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d843.Reg, 1)
 					d843.Type = tagBool
@@ -23311,7 +23311,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d821 = JITPrepareScmerGoArg(ctx, d821)
 					ctx.SyncDesc(&d821)
-					d847 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d821}, 1)
+					d847 = ctx.EmitGoCallScalar(jitGoABI_c94eb298f761efc9, []JITValueDesc{d821}, 1)
 					d847.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d847.Reg, 1)
 					d847.Type = tagBool
@@ -23394,7 +23394,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d833 = JITPrepareScmerGoArg(ctx, d833)
 					ctx.SyncDesc(&d833)
-					d852 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).SourceInfo), []JITValueDesc{d833}, 1)
+					d852 = ctx.EmitGoCallScalar(jitGoABI_efc59dae573ac860, []JITValueDesc{d833}, 1)
 					d852.NoHeapPointer = false
 					ctx.BindReg(d852.Reg, &d852)
 					ctx.ReclaimUntrackedRegs()
@@ -23403,7 +23403,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d852)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d853)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *SourceInfo, value SourceInfo) { *dst = value }), []JITValueDesc{d829, d853})
+					ctx.EmitGoCallVoid(jitGoABI_711f67c681c46de9, []JITValueDesc{d829, d853})
 					ctx.FreeDesc(&d853)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
@@ -23491,7 +23491,7 @@ Patterns can be any of:
 					if d858.Loc != LocRegPair && d858.Loc != LocStackPair && d858.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d857 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d858}, 2)
+					d857 = ctx.EmitGoCallScalar(jitGoABI_e1a33cf0a7aeca49, []JITValueDesc{d858}, 2)
 					ctx.StabilizeDescForControlFlow(&d857)
 					inlineHome859 := d857
 					inlineHome859.ID = 0
@@ -23509,7 +23509,7 @@ Patterns can be any of:
 					} else {
 						d861 = d860
 					}
-					d862 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d857, d861}, 1)
+					d862 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d857, d861}, 1)
 					ctx.EmitAndRegImm32(d862.Reg, 1)
 					d862.Type = tagBool
 					ctx.BindReg(d862.Reg, &d862)
@@ -23566,7 +23566,7 @@ Patterns can be any of:
 					} else {
 						d865 = d864
 					}
-					d866 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d857, d865}, 1)
+					d866 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d857, d865}, 1)
 					ctx.EmitAndRegImm32(d866.Reg, 1)
 					d866.Type = tagBool
 					ctx.BindReg(d866.Reg, &d866)
@@ -23683,7 +23683,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.StabilizeDescForControlFlow(&d822)
 					ctx.ReclaimUntrackedRegs()
-					d873 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d818}, 3)
+					d873 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d818}, 3)
 					ctx.ReclaimUntrackedRegs()
 					if d873.SliceSizeKnown {
 						d874 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d873.KnownSliceLen))}
@@ -23753,7 +23753,7 @@ Patterns can be any of:
 					d824 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase820) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d877 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d818}, 3)
+					d877 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d818}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d878 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
 					ctx.ReclaimUntrackedRegs()
@@ -23771,7 +23771,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d879 = JITPrepareScmerGoArg(ctx, d879)
 					ctx.SyncDesc(&d879)
-					d882 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d879}, 1)
+					d882 = ctx.EmitGoCallScalar(jitGoABI_c94eb298f761efc9, []JITValueDesc{d879}, 1)
 					d882.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d882.Reg, 1)
 					d882.Type = tagBool
@@ -23822,7 +23822,7 @@ Patterns can be any of:
 						panic("jit: generic call arg expects 1-word value")
 					}
 					ctx.SyncDesc(&d818)
-					d884 = ctx.EmitGoCallScalar(GoFuncAddr(readFrom), []JITValueDesc{d818}, 2)
+					d884 = ctx.EmitGoCallScalar(jitGoABI_187293f04bb82372, []JITValueDesc{d818}, 2)
 					d884.NoHeapPointer = false
 					ctx.BindReg(d884.Reg, &d884)
 					ctx.BindReg(d884.Reg2, &d884)
@@ -23851,7 +23851,7 @@ Patterns can be any of:
 					ctx.EmitLeaRegMem(d887.Reg, ctx.StackReg, int32(stackArray885))
 					ctx.EmitMovRegImm64(d887.Reg2, uint64(1))
 					ctx.EmitMovRegImm64(d887.Reg3, uint64(1))
-					callResults888 := JITEmitGoCallResults(ctx, GoFuncAddr(JITAppendScmerSlice), []JITValueDesc{d822, d887}, []uint8{3}, []uint8{1})
+					callResults888 := JITEmitGoCallResults(ctx, jitGoABI_dbbe576f282120a9, []JITValueDesc{d822, d887})
 					d889 = callResults888[0]
 					d890 = JITValueDesc{Loc: LocStackTriple, Type: tagSlice, StackOff: int32(phiBase820) + int32(16)}
 					ctx.EmitCopyDescWords(&d890, &d889, 3)
@@ -23879,7 +23879,7 @@ Patterns can be any of:
 					d824 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase820) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d892 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d818}, 3)
+					d892 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d818}, 3)
 					ctx.ReclaimUntrackedRegs()
 					if d892.SliceSizeKnown {
 						d893 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d892.KnownSliceLen))}
@@ -23983,7 +23983,7 @@ Patterns can be any of:
 					if d897.Loc != LocRegPair && d897.Loc != LocStackPair && d897.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d896 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d897}, 2)
+					d896 = ctx.EmitGoCallScalar(jitGoABI_e1a33cf0a7aeca49, []JITValueDesc{d897}, 2)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d896)
 					d898 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString(")")}
@@ -23998,7 +23998,7 @@ Patterns can be any of:
 					} else {
 						d899 = d898
 					}
-					d900 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d896, d899}, 1)
+					d900 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d896, d899}, 1)
 					ctx.EmitAndRegImm32(d900.Reg, 1)
 					d900.Type = tagBool
 					ctx.BindReg(d900.Reg, &d900)
@@ -24045,7 +24045,7 @@ Patterns can be any of:
 					d824 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase820) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d902 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d818}, 3)
+					d902 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d818}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d903 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
 					ctx.ReclaimUntrackedRegs()
@@ -24063,7 +24063,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d904 = JITPrepareScmerGoArg(ctx, d904)
 					ctx.SyncDesc(&d904)
-					d907 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSourceInfo), []JITValueDesc{d904}, 1)
+					d907 = ctx.EmitGoCallScalar(jitGoABI_f352d2b202a682fd, []JITValueDesc{d904}, 1)
 					d907.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d907.Reg, 1)
 					d907.Type = tagBool
@@ -24176,7 +24176,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d823 = JITPrepareScmerGoArg(ctx, d823)
 					ctx.SyncDesc(&d823)
-					d911 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d823}, 1)
+					d911 = ctx.EmitGoCallScalar(jitGoABI_c94eb298f761efc9, []JITValueDesc{d823}, 1)
 					d911.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d911.Reg, 1)
 					d911.Type = tagBool
@@ -24229,7 +24229,7 @@ Patterns can be any of:
 						panic("jit: generic call arg expects 1-word value")
 					}
 					ctx.SyncDesc(&d818)
-					d913 = ctx.EmitGoCallScalar(GoFuncAddr(readFrom), []JITValueDesc{d818}, 2)
+					d913 = ctx.EmitGoCallScalar(jitGoABI_187293f04bb82372, []JITValueDesc{d818}, 2)
 					d913.NoHeapPointer = false
 					ctx.BindReg(d913.Reg, &d913)
 					ctx.BindReg(d913.Reg2, &d913)
@@ -24268,7 +24268,7 @@ Patterns can be any of:
 						panic("jit: generic call arg expects 2-word value (NewSymbol arg0)")
 					}
 					ctx.SyncDesc(&d916)
-					d917 = ctx.EmitGoCallScalar(GoFuncAddr(NewSymbol), []JITValueDesc{d916}, 2)
+					d917 = ctx.EmitGoCallScalar(jitGoABI_678e55d324700337, []JITValueDesc{d916}, 2)
 					d917.NoHeapPointer = false
 					ctx.BindReg(d917.Reg, &d917)
 					ctx.BindReg(d917.Reg2, &d917)
@@ -24297,7 +24297,7 @@ Patterns can be any of:
 					ctx.EmitLeaRegMem(d918.Reg, ctx.StackReg, int32(stackArray914))
 					ctx.EmitMovRegImm64(d918.Reg2, uint64(2))
 					ctx.EmitMovRegImm64(d918.Reg3, uint64(2))
-					callResults919 := JITEmitGoCallResults(ctx, GoFuncAddr(JITNewSliceCopy), []JITValueDesc{d918}, []uint8{2}, []uint8{1})
+					callResults919 := JITEmitGoCallResults(ctx, jitGoABI_de4d00b58c7c0d07, []JITValueDesc{d918})
 					d920 = callResults919[0]
 					ctx.StabilizeDescForControlFlow(&d920)
 					inlineHome921 := d920
@@ -24356,7 +24356,7 @@ Patterns can be any of:
 					} else {
 						d925 = d924
 					}
-					d926 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d923, d925}, 1)
+					d926 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d923, d925}, 1)
 					ctx.EmitAndRegImm32(d926.Reg, 1)
 					ctx.EmitCmpRegImm32(d926.Reg, 0)
 					ctx.EmitSetcc(d926.Reg, CondEqual)
@@ -24431,7 +24431,7 @@ Patterns can be any of:
 					d824 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase820) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d929 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d818}, 3)
+					d929 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d818}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d930 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1)}
 					ctx.EnsureDesc(&d929)
@@ -24498,7 +24498,7 @@ Patterns can be any of:
 					ctx.BindReg(r214, &d935)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d935)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[]Scmer, value []Scmer) { *dst = value }), []JITValueDesc{d818, d935})
+					ctx.EmitGoCallVoid(jitGoABI_3cfc76af02b619dc, []JITValueDesc{d818, d935})
 					ctx.ReclaimUntrackedRegs()
 					d936 = ctx.EmitNewSliceFromGoSlice(&d822)
 					ctx.ReclaimUntrackedRegs()
@@ -24506,12 +24506,12 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d936)
 					ctx.EnsureDesc(&d829)
 					ctx.EnsureDesc(&d936)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d829, d936})
+					ctx.EmitGoCallVoid(jitGoABI_24128c7ae9d19e5b, []JITValueDesc{d829, d936})
 					ctx.FreeDesc(&d936)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.SyncDesc(&d829)
-					d937 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d829}, 2)
+					d937 = ctx.EmitGoCallScalar(jitGoABI_11a997ee3b751875, []JITValueDesc{d829}, 2)
 					d937.NoHeapPointer = false
 					ctx.BindReg(d937.Reg, &d937)
 					ctx.BindReg(d937.Reg2, &d937)
@@ -24542,7 +24542,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d904 = JITPrepareScmerGoArg(ctx, d904)
 					ctx.SyncDesc(&d904)
-					d939 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).SourceInfo), []JITValueDesc{d904}, 1)
+					d939 = ctx.EmitGoCallScalar(jitGoABI_efc59dae573ac860, []JITValueDesc{d904}, 1)
 					d939.NoHeapPointer = false
 					ctx.BindReg(d939.Reg, &d939)
 					ctx.ReclaimUntrackedRegs()
@@ -24551,7 +24551,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d939)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d940)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *SourceInfo, value SourceInfo) { *dst = value }), []JITValueDesc{d829, d940})
+					ctx.EmitGoCallVoid(jitGoABI_711f67c681c46de9, []JITValueDesc{d829, d940})
 					ctx.FreeDesc(&d940)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
@@ -24646,7 +24646,7 @@ Patterns can be any of:
 					if d945.Loc != LocRegPair && d945.Loc != LocStackPair && d945.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d944 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d945}, 2)
+					d944 = ctx.EmitGoCallScalar(jitGoABI_e1a33cf0a7aeca49, []JITValueDesc{d945}, 2)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d944)
 					d946 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString("(")}
@@ -24661,7 +24661,7 @@ Patterns can be any of:
 					} else {
 						d947 = d946
 					}
-					d948 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d944, d947}, 1)
+					d948 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d944, d947}, 1)
 					ctx.EmitAndRegImm32(d948.Reg, 1)
 					d948.Type = tagBool
 					ctx.BindReg(d948.Reg, &d948)
@@ -24715,11 +24715,11 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d920)
 					ctx.EnsureDesc(&d829)
 					ctx.EnsureDesc(&d920)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d829, d920})
+					ctx.EmitGoCallVoid(jitGoABI_24128c7ae9d19e5b, []JITValueDesc{d829, d920})
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.SyncDesc(&d829)
-					d950 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d829}, 2)
+					d950 = ctx.EmitGoCallScalar(jitGoABI_11a997ee3b751875, []JITValueDesc{d829}, 2)
 					d950.NoHeapPointer = false
 					ctx.BindReg(d950.Reg, &d950)
 					ctx.BindReg(d950.Reg2, &d950)
@@ -24749,7 +24749,7 @@ Patterns can be any of:
 					d824 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase820) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d952 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d818}, 3)
+					d952 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d818}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d953 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1)}
 					ctx.EnsureDesc(&d952)
@@ -24816,7 +24816,7 @@ Patterns can be any of:
 					ctx.BindReg(r223, &d958)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d958)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[]Scmer, value []Scmer) { *dst = value }), []JITValueDesc{d818, d958})
+					ctx.EmitGoCallVoid(jitGoABI_3cfc76af02b619dc, []JITValueDesc{d818, d958})
 					ctx.ReclaimUntrackedRegs()
 					stackArray959 = ctx.AllocStack(int32(16))
 					_ = stackArray959
@@ -24855,7 +24855,7 @@ Patterns can be any of:
 						panic("jit: generic call arg expects 2-word value (NewSymbol arg0)")
 					}
 					ctx.SyncDesc(&d962)
-					d963 = ctx.EmitGoCallScalar(GoFuncAddr(NewSymbol), []JITValueDesc{d962}, 2)
+					d963 = ctx.EmitGoCallScalar(jitGoABI_678e55d324700337, []JITValueDesc{d962}, 2)
 					d963.NoHeapPointer = false
 					ctx.BindReg(d963.Reg, &d963)
 					ctx.BindReg(d963.Reg2, &d963)
@@ -24917,7 +24917,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.StabilizeDescForControlFlow(&d824)
 					ctx.ReclaimUntrackedRegs()
-					d965 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d818}, 3)
+					d965 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d818}, 3)
 					ctx.ReclaimUntrackedRegs()
 					if d965.SliceSizeKnown {
 						d966 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d965.KnownSliceLen))}
@@ -24993,7 +24993,7 @@ Patterns can be any of:
 					d824 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase820) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d969 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d818}, 3)
+					d969 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d818}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d970 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
 					ctx.ReclaimUntrackedRegs()
@@ -25011,7 +25011,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d971 = JITPrepareScmerGoArg(ctx, d971)
 					ctx.SyncDesc(&d971)
-					d974 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d971}, 1)
+					d974 = ctx.EmitGoCallScalar(jitGoABI_c94eb298f761efc9, []JITValueDesc{d971}, 1)
 					d974.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d974.Reg, 1)
 					d974.Type = tagBool
@@ -25068,7 +25068,7 @@ Patterns can be any of:
 						panic("jit: generic call arg expects 1-word value")
 					}
 					ctx.SyncDesc(&d818)
-					d976 = ctx.EmitGoCallScalar(GoFuncAddr(readFrom), []JITValueDesc{d818}, 2)
+					d976 = ctx.EmitGoCallScalar(jitGoABI_187293f04bb82372, []JITValueDesc{d818}, 2)
 					d976.NoHeapPointer = false
 					ctx.BindReg(d976.Reg, &d976)
 					ctx.BindReg(d976.Reg2, &d976)
@@ -25097,7 +25097,7 @@ Patterns can be any of:
 					ctx.EmitLeaRegMem(d979.Reg, ctx.StackReg, int32(stackArray977))
 					ctx.EmitMovRegImm64(d979.Reg2, uint64(1))
 					ctx.EmitMovRegImm64(d979.Reg3, uint64(1))
-					callResults980 := JITEmitGoCallResults(ctx, GoFuncAddr(JITAppendScmerSlice), []JITValueDesc{d824, d979}, []uint8{3}, []uint8{1})
+					callResults980 := JITEmitGoCallResults(ctx, jitGoABI_dbbe576f282120a9, []JITValueDesc{d824, d979})
 					d981 = callResults980[0]
 					d982 = JITValueDesc{Loc: LocStackTriple, Type: tagSlice, StackOff: int32(phiBase820) + int32(56)}
 					ctx.EmitCopyDescWords(&d982, &d981, 3)
@@ -25169,7 +25169,7 @@ Patterns can be any of:
 					if d985.Loc != LocRegPair && d985.Loc != LocStackPair && d985.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d984 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d985}, 2)
+					d984 = ctx.EmitGoCallScalar(jitGoABI_e1a33cf0a7aeca49, []JITValueDesc{d985}, 2)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d984)
 					d986 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString(")")}
@@ -25184,7 +25184,7 @@ Patterns can be any of:
 					} else {
 						d987 = d986
 					}
-					d988 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d984, d987}, 1)
+					d988 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d984, d987}, 1)
 					ctx.EmitAndRegImm32(d988.Reg, 1)
 					d988.Type = tagBool
 					ctx.BindReg(d988.Reg, &d988)
@@ -25237,7 +25237,7 @@ Patterns can be any of:
 					d824 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase820) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d990 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d818}, 3)
+					d990 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d818}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d991 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1)}
 					ctx.EnsureDesc(&d990)
@@ -25304,7 +25304,7 @@ Patterns can be any of:
 					ctx.BindReg(r233, &d996)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d996)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[]Scmer, value []Scmer) { *dst = value }), []JITValueDesc{d818, d996})
+					ctx.EmitGoCallVoid(jitGoABI_3cfc76af02b619dc, []JITValueDesc{d818, d996})
 					ctx.ReclaimUntrackedRegs()
 					d997 = ctx.EmitNewSliceFromGoSlice(&d824)
 					ctx.StabilizeDescForControlFlow(&d997)
@@ -25364,7 +25364,7 @@ Patterns can be any of:
 					} else {
 						d1002 = d1001
 					}
-					d1003 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d1000, d1002}, 1)
+					d1003 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d1000, d1002}, 1)
 					ctx.EmitAndRegImm32(d1003.Reg, 1)
 					ctx.EmitCmpRegImm32(d1003.Reg, 0)
 					ctx.EmitSetcc(d1003.Reg, CondEqual)
@@ -25453,11 +25453,11 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d997)
 					ctx.EnsureDesc(&d829)
 					ctx.EnsureDesc(&d997)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d829, d997})
+					ctx.EmitGoCallVoid(jitGoABI_24128c7ae9d19e5b, []JITValueDesc{d829, d997})
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.SyncDesc(&d829)
-					d1006 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d829}, 2)
+					d1006 = ctx.EmitGoCallScalar(jitGoABI_11a997ee3b751875, []JITValueDesc{d829}, 2)
 					d1006.NoHeapPointer = false
 					ctx.BindReg(d1006.Reg, &d1006)
 					ctx.BindReg(d1006.Reg2, &d1006)
@@ -25498,7 +25498,7 @@ Patterns can be any of:
 					ctx.EmitLeaRegMem(d1011.Reg, ctx.StackReg, int32(stackArray1009))
 					ctx.EmitMovRegImm64(d1011.Reg2, uint64(1))
 					ctx.EmitMovRegImm64(d1011.Reg3, uint64(1))
-					callResults1012 := JITEmitGoCallResults(ctx, GoFuncAddr(JITAppendScmerSlice), []JITValueDesc{d756, d1011}, []uint8{3}, []uint8{1})
+					callResults1012 := JITEmitGoCallResults(ctx, jitGoABI_dbbe576f282120a9, []JITValueDesc{d756, d1011})
 					d1013 = callResults1012[0]
 					d1014 = JITValueDesc{Loc: LocStackTriple, Type: tagSlice, StackOff: int32(phiBase754) + int32(16)}
 					ctx.EmitCopyDescWords(&d1014, &d1013, 3)
@@ -25526,7 +25526,7 @@ Patterns can be any of:
 					d758 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase754) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d1016 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d752}, 3)
+					d1016 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d752}, 3)
 					ctx.ReclaimUntrackedRegs()
 					if d1016.SliceSizeKnown {
 						d1017 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d1016.KnownSliceLen))}
@@ -25630,7 +25630,7 @@ Patterns can be any of:
 					if d1021.Loc != LocRegPair && d1021.Loc != LocStackPair && d1021.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d1020 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d1021}, 2)
+					d1020 = ctx.EmitGoCallScalar(jitGoABI_e1a33cf0a7aeca49, []JITValueDesc{d1021}, 2)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d1020)
 					d1022 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString(")")}
@@ -25645,7 +25645,7 @@ Patterns can be any of:
 					} else {
 						d1023 = d1022
 					}
-					d1024 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d1020, d1023}, 1)
+					d1024 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d1020, d1023}, 1)
 					ctx.EmitAndRegImm32(d1024.Reg, 1)
 					d1024.Type = tagBool
 					ctx.BindReg(d1024.Reg, &d1024)
@@ -25692,7 +25692,7 @@ Patterns can be any of:
 					d758 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase754) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d1026 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d752}, 3)
+					d1026 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d752}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d1027 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
 					ctx.ReclaimUntrackedRegs()
@@ -25710,7 +25710,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d1028 = JITPrepareScmerGoArg(ctx, d1028)
 					ctx.SyncDesc(&d1028)
-					d1031 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSourceInfo), []JITValueDesc{d1028}, 1)
+					d1031 = ctx.EmitGoCallScalar(jitGoABI_f352d2b202a682fd, []JITValueDesc{d1028}, 1)
 					d1031.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d1031.Reg, 1)
 					d1031.Type = tagBool
@@ -25823,7 +25823,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d757 = JITPrepareScmerGoArg(ctx, d757)
 					ctx.SyncDesc(&d757)
-					d1035 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d757}, 1)
+					d1035 = ctx.EmitGoCallScalar(jitGoABI_c94eb298f761efc9, []JITValueDesc{d757}, 1)
 					d1035.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d1035.Reg, 1)
 					d1035.Type = tagBool
@@ -25876,7 +25876,7 @@ Patterns can be any of:
 						panic("jit: generic call arg expects 1-word value")
 					}
 					ctx.SyncDesc(&d752)
-					d1037 = ctx.EmitGoCallScalar(GoFuncAddr(readFrom), []JITValueDesc{d752}, 2)
+					d1037 = ctx.EmitGoCallScalar(jitGoABI_187293f04bb82372, []JITValueDesc{d752}, 2)
 					d1037.NoHeapPointer = false
 					ctx.BindReg(d1037.Reg, &d1037)
 					ctx.BindReg(d1037.Reg2, &d1037)
@@ -25915,7 +25915,7 @@ Patterns can be any of:
 						panic("jit: generic call arg expects 2-word value (NewSymbol arg0)")
 					}
 					ctx.SyncDesc(&d1040)
-					d1041 = ctx.EmitGoCallScalar(GoFuncAddr(NewSymbol), []JITValueDesc{d1040}, 2)
+					d1041 = ctx.EmitGoCallScalar(jitGoABI_678e55d324700337, []JITValueDesc{d1040}, 2)
 					d1041.NoHeapPointer = false
 					ctx.BindReg(d1041.Reg, &d1041)
 					ctx.BindReg(d1041.Reg2, &d1041)
@@ -25944,7 +25944,7 @@ Patterns can be any of:
 					ctx.EmitLeaRegMem(d1042.Reg, ctx.StackReg, int32(stackArray1038))
 					ctx.EmitMovRegImm64(d1042.Reg2, uint64(2))
 					ctx.EmitMovRegImm64(d1042.Reg3, uint64(2))
-					callResults1043 := JITEmitGoCallResults(ctx, GoFuncAddr(JITNewSliceCopy), []JITValueDesc{d1042}, []uint8{2}, []uint8{1})
+					callResults1043 := JITEmitGoCallResults(ctx, jitGoABI_de4d00b58c7c0d07, []JITValueDesc{d1042})
 					d1044 = callResults1043[0]
 					ctx.StabilizeDescForControlFlow(&d1044)
 					inlineHome1045 := d1044
@@ -26003,7 +26003,7 @@ Patterns can be any of:
 					} else {
 						d1049 = d1048
 					}
-					d1050 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d1047, d1049}, 1)
+					d1050 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d1047, d1049}, 1)
 					ctx.EmitAndRegImm32(d1050.Reg, 1)
 					ctx.EmitCmpRegImm32(d1050.Reg, 0)
 					ctx.EmitSetcc(d1050.Reg, CondEqual)
@@ -26078,7 +26078,7 @@ Patterns can be any of:
 					d758 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase754) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d1053 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d752}, 3)
+					d1053 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d752}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d1054 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1)}
 					ctx.EnsureDesc(&d1053)
@@ -26145,7 +26145,7 @@ Patterns can be any of:
 					ctx.BindReg(r258, &d1059)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d1059)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[]Scmer, value []Scmer) { *dst = value }), []JITValueDesc{d752, d1059})
+					ctx.EmitGoCallVoid(jitGoABI_3cfc76af02b619dc, []JITValueDesc{d752, d1059})
 					ctx.ReclaimUntrackedRegs()
 					d1060 = ctx.EmitNewSliceFromGoSlice(&d756)
 					ctx.ReclaimUntrackedRegs()
@@ -26153,12 +26153,12 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d1060)
 					ctx.EnsureDesc(&d763)
 					ctx.EnsureDesc(&d1060)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d763, d1060})
+					ctx.EmitGoCallVoid(jitGoABI_24128c7ae9d19e5b, []JITValueDesc{d763, d1060})
 					ctx.FreeDesc(&d1060)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.SyncDesc(&d763)
-					d1061 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d763}, 2)
+					d1061 = ctx.EmitGoCallScalar(jitGoABI_11a997ee3b751875, []JITValueDesc{d763}, 2)
 					d1061.NoHeapPointer = false
 					ctx.BindReg(d1061.Reg, &d1061)
 					ctx.BindReg(d1061.Reg2, &d1061)
@@ -26189,7 +26189,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d1028 = JITPrepareScmerGoArg(ctx, d1028)
 					ctx.SyncDesc(&d1028)
-					d1063 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).SourceInfo), []JITValueDesc{d1028}, 1)
+					d1063 = ctx.EmitGoCallScalar(jitGoABI_efc59dae573ac860, []JITValueDesc{d1028}, 1)
 					d1063.NoHeapPointer = false
 					ctx.BindReg(d1063.Reg, &d1063)
 					ctx.ReclaimUntrackedRegs()
@@ -26198,7 +26198,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d1063)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d1064)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *SourceInfo, value SourceInfo) { *dst = value }), []JITValueDesc{d763, d1064})
+					ctx.EmitGoCallVoid(jitGoABI_711f67c681c46de9, []JITValueDesc{d763, d1064})
 					ctx.FreeDesc(&d1064)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
@@ -26293,7 +26293,7 @@ Patterns can be any of:
 					if d1069.Loc != LocRegPair && d1069.Loc != LocStackPair && d1069.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d1068 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d1069}, 2)
+					d1068 = ctx.EmitGoCallScalar(jitGoABI_e1a33cf0a7aeca49, []JITValueDesc{d1069}, 2)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d1068)
 					d1070 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString("(")}
@@ -26308,7 +26308,7 @@ Patterns can be any of:
 					} else {
 						d1071 = d1070
 					}
-					d1072 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d1068, d1071}, 1)
+					d1072 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d1068, d1071}, 1)
 					ctx.EmitAndRegImm32(d1072.Reg, 1)
 					d1072.Type = tagBool
 					ctx.BindReg(d1072.Reg, &d1072)
@@ -26362,11 +26362,11 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d1044)
 					ctx.EnsureDesc(&d763)
 					ctx.EnsureDesc(&d1044)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d763, d1044})
+					ctx.EmitGoCallVoid(jitGoABI_24128c7ae9d19e5b, []JITValueDesc{d763, d1044})
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.SyncDesc(&d763)
-					d1074 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d763}, 2)
+					d1074 = ctx.EmitGoCallScalar(jitGoABI_11a997ee3b751875, []JITValueDesc{d763}, 2)
 					d1074.NoHeapPointer = false
 					ctx.BindReg(d1074.Reg, &d1074)
 					ctx.BindReg(d1074.Reg2, &d1074)
@@ -26396,7 +26396,7 @@ Patterns can be any of:
 					d758 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase754) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d1076 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d752}, 3)
+					d1076 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d752}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d1077 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1)}
 					ctx.EnsureDesc(&d1076)
@@ -26463,7 +26463,7 @@ Patterns can be any of:
 					ctx.BindReg(r267, &d1082)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d1082)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[]Scmer, value []Scmer) { *dst = value }), []JITValueDesc{d752, d1082})
+					ctx.EmitGoCallVoid(jitGoABI_3cfc76af02b619dc, []JITValueDesc{d752, d1082})
 					ctx.ReclaimUntrackedRegs()
 					stackArray1083 = ctx.AllocStack(int32(16))
 					_ = stackArray1083
@@ -26502,7 +26502,7 @@ Patterns can be any of:
 						panic("jit: generic call arg expects 2-word value (NewSymbol arg0)")
 					}
 					ctx.SyncDesc(&d1086)
-					d1087 = ctx.EmitGoCallScalar(GoFuncAddr(NewSymbol), []JITValueDesc{d1086}, 2)
+					d1087 = ctx.EmitGoCallScalar(jitGoABI_678e55d324700337, []JITValueDesc{d1086}, 2)
 					d1087.NoHeapPointer = false
 					ctx.BindReg(d1087.Reg, &d1087)
 					ctx.BindReg(d1087.Reg2, &d1087)
@@ -26564,7 +26564,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.StabilizeDescForControlFlow(&d758)
 					ctx.ReclaimUntrackedRegs()
-					d1089 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d752}, 3)
+					d1089 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d752}, 3)
 					ctx.ReclaimUntrackedRegs()
 					if d1089.SliceSizeKnown {
 						d1090 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d1089.KnownSliceLen))}
@@ -26640,7 +26640,7 @@ Patterns can be any of:
 					d758 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase754) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d1093 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d752}, 3)
+					d1093 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d752}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d1094 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
 					ctx.ReclaimUntrackedRegs()
@@ -26658,7 +26658,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d1095 = JITPrepareScmerGoArg(ctx, d1095)
 					ctx.SyncDesc(&d1095)
-					d1098 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d1095}, 1)
+					d1098 = ctx.EmitGoCallScalar(jitGoABI_c94eb298f761efc9, []JITValueDesc{d1095}, 1)
 					d1098.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d1098.Reg, 1)
 					d1098.Type = tagBool
@@ -26715,7 +26715,7 @@ Patterns can be any of:
 						panic("jit: generic call arg expects 1-word value")
 					}
 					ctx.SyncDesc(&d752)
-					d1100 = ctx.EmitGoCallScalar(GoFuncAddr(readFrom), []JITValueDesc{d752}, 2)
+					d1100 = ctx.EmitGoCallScalar(jitGoABI_187293f04bb82372, []JITValueDesc{d752}, 2)
 					d1100.NoHeapPointer = false
 					ctx.BindReg(d1100.Reg, &d1100)
 					ctx.BindReg(d1100.Reg2, &d1100)
@@ -26744,7 +26744,7 @@ Patterns can be any of:
 					ctx.EmitLeaRegMem(d1103.Reg, ctx.StackReg, int32(stackArray1101))
 					ctx.EmitMovRegImm64(d1103.Reg2, uint64(1))
 					ctx.EmitMovRegImm64(d1103.Reg3, uint64(1))
-					callResults1104 := JITEmitGoCallResults(ctx, GoFuncAddr(JITAppendScmerSlice), []JITValueDesc{d758, d1103}, []uint8{3}, []uint8{1})
+					callResults1104 := JITEmitGoCallResults(ctx, jitGoABI_dbbe576f282120a9, []JITValueDesc{d758, d1103})
 					d1105 = callResults1104[0]
 					d1106 = JITValueDesc{Loc: LocStackTriple, Type: tagSlice, StackOff: int32(phiBase754) + int32(56)}
 					ctx.EmitCopyDescWords(&d1106, &d1105, 3)
@@ -26816,7 +26816,7 @@ Patterns can be any of:
 					if d1109.Loc != LocRegPair && d1109.Loc != LocStackPair && d1109.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d1108 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d1109}, 2)
+					d1108 = ctx.EmitGoCallScalar(jitGoABI_e1a33cf0a7aeca49, []JITValueDesc{d1109}, 2)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d1108)
 					d1110 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString(")")}
@@ -26831,7 +26831,7 @@ Patterns can be any of:
 					} else {
 						d1111 = d1110
 					}
-					d1112 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d1108, d1111}, 1)
+					d1112 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d1108, d1111}, 1)
 					ctx.EmitAndRegImm32(d1112.Reg, 1)
 					d1112.Type = tagBool
 					ctx.BindReg(d1112.Reg, &d1112)
@@ -26884,7 +26884,7 @@ Patterns can be any of:
 					d758 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase754) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d1114 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d752}, 3)
+					d1114 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d752}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d1115 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1)}
 					ctx.EnsureDesc(&d1114)
@@ -26951,7 +26951,7 @@ Patterns can be any of:
 					ctx.BindReg(r277, &d1120)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d1120)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[]Scmer, value []Scmer) { *dst = value }), []JITValueDesc{d752, d1120})
+					ctx.EmitGoCallVoid(jitGoABI_3cfc76af02b619dc, []JITValueDesc{d752, d1120})
 					ctx.ReclaimUntrackedRegs()
 					d1121 = ctx.EmitNewSliceFromGoSlice(&d758)
 					ctx.StabilizeDescForControlFlow(&d1121)
@@ -27011,7 +27011,7 @@ Patterns can be any of:
 					} else {
 						d1126 = d1125
 					}
-					d1127 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d1124, d1126}, 1)
+					d1127 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d1124, d1126}, 1)
 					ctx.EmitAndRegImm32(d1127.Reg, 1)
 					ctx.EmitCmpRegImm32(d1127.Reg, 0)
 					ctx.EmitSetcc(d1127.Reg, CondEqual)
@@ -27100,11 +27100,11 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d1121)
 					ctx.EnsureDesc(&d763)
 					ctx.EnsureDesc(&d1121)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d763, d1121})
+					ctx.EmitGoCallVoid(jitGoABI_24128c7ae9d19e5b, []JITValueDesc{d763, d1121})
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.SyncDesc(&d763)
-					d1130 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d763}, 2)
+					d1130 = ctx.EmitGoCallScalar(jitGoABI_11a997ee3b751875, []JITValueDesc{d763}, 2)
 					d1130.NoHeapPointer = false
 					ctx.BindReg(d1130.Reg, &d1130)
 					ctx.BindReg(d1130.Reg2, &d1130)
@@ -27145,7 +27145,7 @@ Patterns can be any of:
 					ctx.EmitLeaRegMem(d1135.Reg, ctx.StackReg, int32(stackArray1133))
 					ctx.EmitMovRegImm64(d1135.Reg2, uint64(1))
 					ctx.EmitMovRegImm64(d1135.Reg3, uint64(1))
-					callResults1136 := JITEmitGoCallResults(ctx, GoFuncAddr(JITAppendScmerSlice), []JITValueDesc{d690, d1135}, []uint8{3}, []uint8{1})
+					callResults1136 := JITEmitGoCallResults(ctx, jitGoABI_dbbe576f282120a9, []JITValueDesc{d690, d1135})
 					d1137 = callResults1136[0]
 					d1138 = JITValueDesc{Loc: LocStackTriple, Type: tagSlice, StackOff: int32(phiBase688) + int32(16)}
 					ctx.EmitCopyDescWords(&d1138, &d1137, 3)
@@ -27173,7 +27173,7 @@ Patterns can be any of:
 					d692 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d1140 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d686}, 3)
+					d1140 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d686}, 3)
 					ctx.ReclaimUntrackedRegs()
 					if d1140.SliceSizeKnown {
 						d1141 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d1140.KnownSliceLen))}
@@ -27277,7 +27277,7 @@ Patterns can be any of:
 					if d1145.Loc != LocRegPair && d1145.Loc != LocStackPair && d1145.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d1144 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d1145}, 2)
+					d1144 = ctx.EmitGoCallScalar(jitGoABI_e1a33cf0a7aeca49, []JITValueDesc{d1145}, 2)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d1144)
 					d1146 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString(")")}
@@ -27292,7 +27292,7 @@ Patterns can be any of:
 					} else {
 						d1147 = d1146
 					}
-					d1148 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d1144, d1147}, 1)
+					d1148 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d1144, d1147}, 1)
 					ctx.EmitAndRegImm32(d1148.Reg, 1)
 					d1148.Type = tagBool
 					ctx.BindReg(d1148.Reg, &d1148)
@@ -27339,7 +27339,7 @@ Patterns can be any of:
 					d692 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d1150 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d686}, 3)
+					d1150 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d686}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d1151 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
 					ctx.ReclaimUntrackedRegs()
@@ -27357,7 +27357,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d1152 = JITPrepareScmerGoArg(ctx, d1152)
 					ctx.SyncDesc(&d1152)
-					d1155 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSourceInfo), []JITValueDesc{d1152}, 1)
+					d1155 = ctx.EmitGoCallScalar(jitGoABI_f352d2b202a682fd, []JITValueDesc{d1152}, 1)
 					d1155.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d1155.Reg, 1)
 					d1155.Type = tagBool
@@ -27470,7 +27470,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d691 = JITPrepareScmerGoArg(ctx, d691)
 					ctx.SyncDesc(&d691)
-					d1159 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d691}, 1)
+					d1159 = ctx.EmitGoCallScalar(jitGoABI_c94eb298f761efc9, []JITValueDesc{d691}, 1)
 					d1159.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d1159.Reg, 1)
 					d1159.Type = tagBool
@@ -27523,7 +27523,7 @@ Patterns can be any of:
 						panic("jit: generic call arg expects 1-word value")
 					}
 					ctx.SyncDesc(&d686)
-					d1161 = ctx.EmitGoCallScalar(GoFuncAddr(readFrom), []JITValueDesc{d686}, 2)
+					d1161 = ctx.EmitGoCallScalar(jitGoABI_187293f04bb82372, []JITValueDesc{d686}, 2)
 					d1161.NoHeapPointer = false
 					ctx.BindReg(d1161.Reg, &d1161)
 					ctx.BindReg(d1161.Reg2, &d1161)
@@ -27562,7 +27562,7 @@ Patterns can be any of:
 						panic("jit: generic call arg expects 2-word value (NewSymbol arg0)")
 					}
 					ctx.SyncDesc(&d1164)
-					d1165 = ctx.EmitGoCallScalar(GoFuncAddr(NewSymbol), []JITValueDesc{d1164}, 2)
+					d1165 = ctx.EmitGoCallScalar(jitGoABI_678e55d324700337, []JITValueDesc{d1164}, 2)
 					d1165.NoHeapPointer = false
 					ctx.BindReg(d1165.Reg, &d1165)
 					ctx.BindReg(d1165.Reg2, &d1165)
@@ -27591,7 +27591,7 @@ Patterns can be any of:
 					ctx.EmitLeaRegMem(d1166.Reg, ctx.StackReg, int32(stackArray1162))
 					ctx.EmitMovRegImm64(d1166.Reg2, uint64(2))
 					ctx.EmitMovRegImm64(d1166.Reg3, uint64(2))
-					callResults1167 := JITEmitGoCallResults(ctx, GoFuncAddr(JITNewSliceCopy), []JITValueDesc{d1166}, []uint8{2}, []uint8{1})
+					callResults1167 := JITEmitGoCallResults(ctx, jitGoABI_de4d00b58c7c0d07, []JITValueDesc{d1166})
 					d1168 = callResults1167[0]
 					ctx.StabilizeDescForControlFlow(&d1168)
 					inlineHome1169 := d1168
@@ -27650,7 +27650,7 @@ Patterns can be any of:
 					} else {
 						d1173 = d1172
 					}
-					d1174 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d1171, d1173}, 1)
+					d1174 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d1171, d1173}, 1)
 					ctx.EmitAndRegImm32(d1174.Reg, 1)
 					ctx.EmitCmpRegImm32(d1174.Reg, 0)
 					ctx.EmitSetcc(d1174.Reg, CondEqual)
@@ -27725,7 +27725,7 @@ Patterns can be any of:
 					d692 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d1177 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d686}, 3)
+					d1177 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d686}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d1178 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1)}
 					ctx.EnsureDesc(&d1177)
@@ -27792,7 +27792,7 @@ Patterns can be any of:
 					ctx.BindReg(r302, &d1183)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d1183)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[]Scmer, value []Scmer) { *dst = value }), []JITValueDesc{d686, d1183})
+					ctx.EmitGoCallVoid(jitGoABI_3cfc76af02b619dc, []JITValueDesc{d686, d1183})
 					ctx.ReclaimUntrackedRegs()
 					d1184 = ctx.EmitNewSliceFromGoSlice(&d690)
 					ctx.ReclaimUntrackedRegs()
@@ -27800,12 +27800,12 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d1184)
 					ctx.EnsureDesc(&d697)
 					ctx.EnsureDesc(&d1184)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d697, d1184})
+					ctx.EmitGoCallVoid(jitGoABI_24128c7ae9d19e5b, []JITValueDesc{d697, d1184})
 					ctx.FreeDesc(&d1184)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.SyncDesc(&d697)
-					d1185 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d697}, 2)
+					d1185 = ctx.EmitGoCallScalar(jitGoABI_11a997ee3b751875, []JITValueDesc{d697}, 2)
 					d1185.NoHeapPointer = false
 					ctx.BindReg(d1185.Reg, &d1185)
 					ctx.BindReg(d1185.Reg2, &d1185)
@@ -27836,7 +27836,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d1152 = JITPrepareScmerGoArg(ctx, d1152)
 					ctx.SyncDesc(&d1152)
-					d1187 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).SourceInfo), []JITValueDesc{d1152}, 1)
+					d1187 = ctx.EmitGoCallScalar(jitGoABI_efc59dae573ac860, []JITValueDesc{d1152}, 1)
 					d1187.NoHeapPointer = false
 					ctx.BindReg(d1187.Reg, &d1187)
 					ctx.ReclaimUntrackedRegs()
@@ -27845,7 +27845,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d1187)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d1188)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *SourceInfo, value SourceInfo) { *dst = value }), []JITValueDesc{d697, d1188})
+					ctx.EmitGoCallVoid(jitGoABI_711f67c681c46de9, []JITValueDesc{d697, d1188})
 					ctx.FreeDesc(&d1188)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
@@ -27940,7 +27940,7 @@ Patterns can be any of:
 					if d1193.Loc != LocRegPair && d1193.Loc != LocStackPair && d1193.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d1192 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d1193}, 2)
+					d1192 = ctx.EmitGoCallScalar(jitGoABI_e1a33cf0a7aeca49, []JITValueDesc{d1193}, 2)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d1192)
 					d1194 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString("(")}
@@ -27955,7 +27955,7 @@ Patterns can be any of:
 					} else {
 						d1195 = d1194
 					}
-					d1196 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d1192, d1195}, 1)
+					d1196 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d1192, d1195}, 1)
 					ctx.EmitAndRegImm32(d1196.Reg, 1)
 					d1196.Type = tagBool
 					ctx.BindReg(d1196.Reg, &d1196)
@@ -28009,11 +28009,11 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d1168)
 					ctx.EnsureDesc(&d697)
 					ctx.EnsureDesc(&d1168)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d697, d1168})
+					ctx.EmitGoCallVoid(jitGoABI_24128c7ae9d19e5b, []JITValueDesc{d697, d1168})
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.SyncDesc(&d697)
-					d1198 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d697}, 2)
+					d1198 = ctx.EmitGoCallScalar(jitGoABI_11a997ee3b751875, []JITValueDesc{d697}, 2)
 					d1198.NoHeapPointer = false
 					ctx.BindReg(d1198.Reg, &d1198)
 					ctx.BindReg(d1198.Reg2, &d1198)
@@ -28043,7 +28043,7 @@ Patterns can be any of:
 					d692 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d1200 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d686}, 3)
+					d1200 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d686}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d1201 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1)}
 					ctx.EnsureDesc(&d1200)
@@ -28110,7 +28110,7 @@ Patterns can be any of:
 					ctx.BindReg(r311, &d1206)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d1206)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[]Scmer, value []Scmer) { *dst = value }), []JITValueDesc{d686, d1206})
+					ctx.EmitGoCallVoid(jitGoABI_3cfc76af02b619dc, []JITValueDesc{d686, d1206})
 					ctx.ReclaimUntrackedRegs()
 					stackArray1207 = ctx.AllocStack(int32(16))
 					_ = stackArray1207
@@ -28149,7 +28149,7 @@ Patterns can be any of:
 						panic("jit: generic call arg expects 2-word value (NewSymbol arg0)")
 					}
 					ctx.SyncDesc(&d1210)
-					d1211 = ctx.EmitGoCallScalar(GoFuncAddr(NewSymbol), []JITValueDesc{d1210}, 2)
+					d1211 = ctx.EmitGoCallScalar(jitGoABI_678e55d324700337, []JITValueDesc{d1210}, 2)
 					d1211.NoHeapPointer = false
 					ctx.BindReg(d1211.Reg, &d1211)
 					ctx.BindReg(d1211.Reg2, &d1211)
@@ -28211,7 +28211,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.StabilizeDescForControlFlow(&d692)
 					ctx.ReclaimUntrackedRegs()
-					d1213 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d686}, 3)
+					d1213 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d686}, 3)
 					ctx.ReclaimUntrackedRegs()
 					if d1213.SliceSizeKnown {
 						d1214 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d1213.KnownSliceLen))}
@@ -28287,7 +28287,7 @@ Patterns can be any of:
 					d692 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d1217 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d686}, 3)
+					d1217 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d686}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d1218 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
 					ctx.ReclaimUntrackedRegs()
@@ -28305,7 +28305,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d1219 = JITPrepareScmerGoArg(ctx, d1219)
 					ctx.SyncDesc(&d1219)
-					d1222 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d1219}, 1)
+					d1222 = ctx.EmitGoCallScalar(jitGoABI_c94eb298f761efc9, []JITValueDesc{d1219}, 1)
 					d1222.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d1222.Reg, 1)
 					d1222.Type = tagBool
@@ -28362,7 +28362,7 @@ Patterns can be any of:
 						panic("jit: generic call arg expects 1-word value")
 					}
 					ctx.SyncDesc(&d686)
-					d1224 = ctx.EmitGoCallScalar(GoFuncAddr(readFrom), []JITValueDesc{d686}, 2)
+					d1224 = ctx.EmitGoCallScalar(jitGoABI_187293f04bb82372, []JITValueDesc{d686}, 2)
 					d1224.NoHeapPointer = false
 					ctx.BindReg(d1224.Reg, &d1224)
 					ctx.BindReg(d1224.Reg2, &d1224)
@@ -28391,7 +28391,7 @@ Patterns can be any of:
 					ctx.EmitLeaRegMem(d1227.Reg, ctx.StackReg, int32(stackArray1225))
 					ctx.EmitMovRegImm64(d1227.Reg2, uint64(1))
 					ctx.EmitMovRegImm64(d1227.Reg3, uint64(1))
-					callResults1228 := JITEmitGoCallResults(ctx, GoFuncAddr(JITAppendScmerSlice), []JITValueDesc{d692, d1227}, []uint8{3}, []uint8{1})
+					callResults1228 := JITEmitGoCallResults(ctx, jitGoABI_dbbe576f282120a9, []JITValueDesc{d692, d1227})
 					d1229 = callResults1228[0]
 					d1230 = JITValueDesc{Loc: LocStackTriple, Type: tagSlice, StackOff: int32(phiBase688) + int32(56)}
 					ctx.EmitCopyDescWords(&d1230, &d1229, 3)
@@ -28463,7 +28463,7 @@ Patterns can be any of:
 					if d1233.Loc != LocRegPair && d1233.Loc != LocStackPair && d1233.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d1232 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d1233}, 2)
+					d1232 = ctx.EmitGoCallScalar(jitGoABI_e1a33cf0a7aeca49, []JITValueDesc{d1233}, 2)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d1232)
 					d1234 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString(")")}
@@ -28478,7 +28478,7 @@ Patterns can be any of:
 					} else {
 						d1235 = d1234
 					}
-					d1236 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d1232, d1235}, 1)
+					d1236 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d1232, d1235}, 1)
 					ctx.EmitAndRegImm32(d1236.Reg, 1)
 					d1236.Type = tagBool
 					ctx.BindReg(d1236.Reg, &d1236)
@@ -28531,7 +28531,7 @@ Patterns can be any of:
 					d692 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d1238 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d686}, 3)
+					d1238 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d686}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d1239 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1)}
 					ctx.EnsureDesc(&d1238)
@@ -28598,7 +28598,7 @@ Patterns can be any of:
 					ctx.BindReg(r321, &d1244)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d1244)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[]Scmer, value []Scmer) { *dst = value }), []JITValueDesc{d686, d1244})
+					ctx.EmitGoCallVoid(jitGoABI_3cfc76af02b619dc, []JITValueDesc{d686, d1244})
 					ctx.ReclaimUntrackedRegs()
 					d1245 = ctx.EmitNewSliceFromGoSlice(&d692)
 					ctx.StabilizeDescForControlFlow(&d1245)
@@ -28658,7 +28658,7 @@ Patterns can be any of:
 					} else {
 						d1250 = d1249
 					}
-					d1251 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d1248, d1250}, 1)
+					d1251 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d1248, d1250}, 1)
 					ctx.EmitAndRegImm32(d1251.Reg, 1)
 					ctx.EmitCmpRegImm32(d1251.Reg, 0)
 					ctx.EmitSetcc(d1251.Reg, CondEqual)
@@ -28747,11 +28747,11 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d1245)
 					ctx.EnsureDesc(&d697)
 					ctx.EnsureDesc(&d1245)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d697, d1245})
+					ctx.EmitGoCallVoid(jitGoABI_24128c7ae9d19e5b, []JITValueDesc{d697, d1245})
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.SyncDesc(&d697)
-					d1254 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d697}, 2)
+					d1254 = ctx.EmitGoCallScalar(jitGoABI_11a997ee3b751875, []JITValueDesc{d697}, 2)
 					d1254.NoHeapPointer = false
 					ctx.BindReg(d1254.Reg, &d1254)
 					ctx.BindReg(d1254.Reg2, &d1254)
@@ -28792,7 +28792,7 @@ Patterns can be any of:
 					ctx.EmitLeaRegMem(d1259.Reg, ctx.StackReg, int32(stackArray1257))
 					ctx.EmitMovRegImm64(d1259.Reg2, uint64(1))
 					ctx.EmitMovRegImm64(d1259.Reg3, uint64(1))
-					callResults1260 := JITEmitGoCallResults(ctx, GoFuncAddr(JITAppendScmerSlice), []JITValueDesc{d624, d1259}, []uint8{3}, []uint8{1})
+					callResults1260 := JITEmitGoCallResults(ctx, jitGoABI_dbbe576f282120a9, []JITValueDesc{d624, d1259})
 					d1261 = callResults1260[0]
 					d1262 = JITValueDesc{Loc: LocStackTriple, Type: tagSlice, StackOff: int32(phiBase622) + int32(16)}
 					ctx.EmitCopyDescWords(&d1262, &d1261, 3)
@@ -28820,7 +28820,7 @@ Patterns can be any of:
 					d626 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase622) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d1264 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d620}, 3)
+					d1264 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d620}, 3)
 					ctx.ReclaimUntrackedRegs()
 					if d1264.SliceSizeKnown {
 						d1265 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d1264.KnownSliceLen))}
@@ -28924,7 +28924,7 @@ Patterns can be any of:
 					if d1269.Loc != LocRegPair && d1269.Loc != LocStackPair && d1269.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d1268 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d1269}, 2)
+					d1268 = ctx.EmitGoCallScalar(jitGoABI_e1a33cf0a7aeca49, []JITValueDesc{d1269}, 2)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d1268)
 					d1270 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString(")")}
@@ -28939,7 +28939,7 @@ Patterns can be any of:
 					} else {
 						d1271 = d1270
 					}
-					d1272 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d1268, d1271}, 1)
+					d1272 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d1268, d1271}, 1)
 					ctx.EmitAndRegImm32(d1272.Reg, 1)
 					d1272.Type = tagBool
 					ctx.BindReg(d1272.Reg, &d1272)
@@ -28986,7 +28986,7 @@ Patterns can be any of:
 					d626 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase622) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d1274 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d620}, 3)
+					d1274 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d620}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d1275 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
 					ctx.ReclaimUntrackedRegs()
@@ -29004,7 +29004,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d1276 = JITPrepareScmerGoArg(ctx, d1276)
 					ctx.SyncDesc(&d1276)
-					d1279 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSourceInfo), []JITValueDesc{d1276}, 1)
+					d1279 = ctx.EmitGoCallScalar(jitGoABI_f352d2b202a682fd, []JITValueDesc{d1276}, 1)
 					d1279.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d1279.Reg, 1)
 					d1279.Type = tagBool
@@ -29117,7 +29117,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d625 = JITPrepareScmerGoArg(ctx, d625)
 					ctx.SyncDesc(&d625)
-					d1283 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d625}, 1)
+					d1283 = ctx.EmitGoCallScalar(jitGoABI_c94eb298f761efc9, []JITValueDesc{d625}, 1)
 					d1283.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d1283.Reg, 1)
 					d1283.Type = tagBool
@@ -29170,7 +29170,7 @@ Patterns can be any of:
 						panic("jit: generic call arg expects 1-word value")
 					}
 					ctx.SyncDesc(&d620)
-					d1285 = ctx.EmitGoCallScalar(GoFuncAddr(readFrom), []JITValueDesc{d620}, 2)
+					d1285 = ctx.EmitGoCallScalar(jitGoABI_187293f04bb82372, []JITValueDesc{d620}, 2)
 					d1285.NoHeapPointer = false
 					ctx.BindReg(d1285.Reg, &d1285)
 					ctx.BindReg(d1285.Reg2, &d1285)
@@ -29209,7 +29209,7 @@ Patterns can be any of:
 						panic("jit: generic call arg expects 2-word value (NewSymbol arg0)")
 					}
 					ctx.SyncDesc(&d1288)
-					d1289 = ctx.EmitGoCallScalar(GoFuncAddr(NewSymbol), []JITValueDesc{d1288}, 2)
+					d1289 = ctx.EmitGoCallScalar(jitGoABI_678e55d324700337, []JITValueDesc{d1288}, 2)
 					d1289.NoHeapPointer = false
 					ctx.BindReg(d1289.Reg, &d1289)
 					ctx.BindReg(d1289.Reg2, &d1289)
@@ -29238,7 +29238,7 @@ Patterns can be any of:
 					ctx.EmitLeaRegMem(d1290.Reg, ctx.StackReg, int32(stackArray1286))
 					ctx.EmitMovRegImm64(d1290.Reg2, uint64(2))
 					ctx.EmitMovRegImm64(d1290.Reg3, uint64(2))
-					callResults1291 := JITEmitGoCallResults(ctx, GoFuncAddr(JITNewSliceCopy), []JITValueDesc{d1290}, []uint8{2}, []uint8{1})
+					callResults1291 := JITEmitGoCallResults(ctx, jitGoABI_de4d00b58c7c0d07, []JITValueDesc{d1290})
 					d1292 = callResults1291[0]
 					ctx.StabilizeDescForControlFlow(&d1292)
 					inlineHome1293 := d1292
@@ -29297,7 +29297,7 @@ Patterns can be any of:
 					} else {
 						d1297 = d1296
 					}
-					d1298 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d1295, d1297}, 1)
+					d1298 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d1295, d1297}, 1)
 					ctx.EmitAndRegImm32(d1298.Reg, 1)
 					ctx.EmitCmpRegImm32(d1298.Reg, 0)
 					ctx.EmitSetcc(d1298.Reg, CondEqual)
@@ -29372,7 +29372,7 @@ Patterns can be any of:
 					d626 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase622) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d1301 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d620}, 3)
+					d1301 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d620}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d1302 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1)}
 					ctx.EnsureDesc(&d1301)
@@ -29439,7 +29439,7 @@ Patterns can be any of:
 					ctx.BindReg(r346, &d1307)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d1307)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[]Scmer, value []Scmer) { *dst = value }), []JITValueDesc{d620, d1307})
+					ctx.EmitGoCallVoid(jitGoABI_3cfc76af02b619dc, []JITValueDesc{d620, d1307})
 					ctx.ReclaimUntrackedRegs()
 					d1308 = ctx.EmitNewSliceFromGoSlice(&d624)
 					ctx.ReclaimUntrackedRegs()
@@ -29447,12 +29447,12 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d1308)
 					ctx.EnsureDesc(&d631)
 					ctx.EnsureDesc(&d1308)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d631, d1308})
+					ctx.EmitGoCallVoid(jitGoABI_24128c7ae9d19e5b, []JITValueDesc{d631, d1308})
 					ctx.FreeDesc(&d1308)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.SyncDesc(&d631)
-					d1309 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d631}, 2)
+					d1309 = ctx.EmitGoCallScalar(jitGoABI_11a997ee3b751875, []JITValueDesc{d631}, 2)
 					d1309.NoHeapPointer = false
 					ctx.BindReg(d1309.Reg, &d1309)
 					ctx.BindReg(d1309.Reg2, &d1309)
@@ -29483,7 +29483,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d1276 = JITPrepareScmerGoArg(ctx, d1276)
 					ctx.SyncDesc(&d1276)
-					d1311 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).SourceInfo), []JITValueDesc{d1276}, 1)
+					d1311 = ctx.EmitGoCallScalar(jitGoABI_efc59dae573ac860, []JITValueDesc{d1276}, 1)
 					d1311.NoHeapPointer = false
 					ctx.BindReg(d1311.Reg, &d1311)
 					ctx.ReclaimUntrackedRegs()
@@ -29492,7 +29492,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d1311)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d1312)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *SourceInfo, value SourceInfo) { *dst = value }), []JITValueDesc{d631, d1312})
+					ctx.EmitGoCallVoid(jitGoABI_711f67c681c46de9, []JITValueDesc{d631, d1312})
 					ctx.FreeDesc(&d1312)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
@@ -29587,7 +29587,7 @@ Patterns can be any of:
 					if d1317.Loc != LocRegPair && d1317.Loc != LocStackPair && d1317.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d1316 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d1317}, 2)
+					d1316 = ctx.EmitGoCallScalar(jitGoABI_e1a33cf0a7aeca49, []JITValueDesc{d1317}, 2)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d1316)
 					d1318 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString("(")}
@@ -29602,7 +29602,7 @@ Patterns can be any of:
 					} else {
 						d1319 = d1318
 					}
-					d1320 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d1316, d1319}, 1)
+					d1320 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d1316, d1319}, 1)
 					ctx.EmitAndRegImm32(d1320.Reg, 1)
 					d1320.Type = tagBool
 					ctx.BindReg(d1320.Reg, &d1320)
@@ -29656,11 +29656,11 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d1292)
 					ctx.EnsureDesc(&d631)
 					ctx.EnsureDesc(&d1292)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d631, d1292})
+					ctx.EmitGoCallVoid(jitGoABI_24128c7ae9d19e5b, []JITValueDesc{d631, d1292})
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.SyncDesc(&d631)
-					d1322 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d631}, 2)
+					d1322 = ctx.EmitGoCallScalar(jitGoABI_11a997ee3b751875, []JITValueDesc{d631}, 2)
 					d1322.NoHeapPointer = false
 					ctx.BindReg(d1322.Reg, &d1322)
 					ctx.BindReg(d1322.Reg2, &d1322)
@@ -29690,7 +29690,7 @@ Patterns can be any of:
 					d626 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase622) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d1324 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d620}, 3)
+					d1324 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d620}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d1325 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1)}
 					ctx.EnsureDesc(&d1324)
@@ -29757,7 +29757,7 @@ Patterns can be any of:
 					ctx.BindReg(r355, &d1330)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d1330)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[]Scmer, value []Scmer) { *dst = value }), []JITValueDesc{d620, d1330})
+					ctx.EmitGoCallVoid(jitGoABI_3cfc76af02b619dc, []JITValueDesc{d620, d1330})
 					ctx.ReclaimUntrackedRegs()
 					stackArray1331 = ctx.AllocStack(int32(16))
 					_ = stackArray1331
@@ -29796,7 +29796,7 @@ Patterns can be any of:
 						panic("jit: generic call arg expects 2-word value (NewSymbol arg0)")
 					}
 					ctx.SyncDesc(&d1334)
-					d1335 = ctx.EmitGoCallScalar(GoFuncAddr(NewSymbol), []JITValueDesc{d1334}, 2)
+					d1335 = ctx.EmitGoCallScalar(jitGoABI_678e55d324700337, []JITValueDesc{d1334}, 2)
 					d1335.NoHeapPointer = false
 					ctx.BindReg(d1335.Reg, &d1335)
 					ctx.BindReg(d1335.Reg2, &d1335)
@@ -29858,7 +29858,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.StabilizeDescForControlFlow(&d626)
 					ctx.ReclaimUntrackedRegs()
-					d1337 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d620}, 3)
+					d1337 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d620}, 3)
 					ctx.ReclaimUntrackedRegs()
 					if d1337.SliceSizeKnown {
 						d1338 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d1337.KnownSliceLen))}
@@ -29934,7 +29934,7 @@ Patterns can be any of:
 					d626 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase622) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d1341 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d620}, 3)
+					d1341 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d620}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d1342 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
 					ctx.ReclaimUntrackedRegs()
@@ -29952,7 +29952,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d1343 = JITPrepareScmerGoArg(ctx, d1343)
 					ctx.SyncDesc(&d1343)
-					d1346 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d1343}, 1)
+					d1346 = ctx.EmitGoCallScalar(jitGoABI_c94eb298f761efc9, []JITValueDesc{d1343}, 1)
 					d1346.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d1346.Reg, 1)
 					d1346.Type = tagBool
@@ -30009,7 +30009,7 @@ Patterns can be any of:
 						panic("jit: generic call arg expects 1-word value")
 					}
 					ctx.SyncDesc(&d620)
-					d1348 = ctx.EmitGoCallScalar(GoFuncAddr(readFrom), []JITValueDesc{d620}, 2)
+					d1348 = ctx.EmitGoCallScalar(jitGoABI_187293f04bb82372, []JITValueDesc{d620}, 2)
 					d1348.NoHeapPointer = false
 					ctx.BindReg(d1348.Reg, &d1348)
 					ctx.BindReg(d1348.Reg2, &d1348)
@@ -30038,7 +30038,7 @@ Patterns can be any of:
 					ctx.EmitLeaRegMem(d1351.Reg, ctx.StackReg, int32(stackArray1349))
 					ctx.EmitMovRegImm64(d1351.Reg2, uint64(1))
 					ctx.EmitMovRegImm64(d1351.Reg3, uint64(1))
-					callResults1352 := JITEmitGoCallResults(ctx, GoFuncAddr(JITAppendScmerSlice), []JITValueDesc{d626, d1351}, []uint8{3}, []uint8{1})
+					callResults1352 := JITEmitGoCallResults(ctx, jitGoABI_dbbe576f282120a9, []JITValueDesc{d626, d1351})
 					d1353 = callResults1352[0]
 					d1354 = JITValueDesc{Loc: LocStackTriple, Type: tagSlice, StackOff: int32(phiBase622) + int32(56)}
 					ctx.EmitCopyDescWords(&d1354, &d1353, 3)
@@ -30110,7 +30110,7 @@ Patterns can be any of:
 					if d1357.Loc != LocRegPair && d1357.Loc != LocStackPair && d1357.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d1356 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d1357}, 2)
+					d1356 = ctx.EmitGoCallScalar(jitGoABI_e1a33cf0a7aeca49, []JITValueDesc{d1357}, 2)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d1356)
 					d1358 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString(")")}
@@ -30125,7 +30125,7 @@ Patterns can be any of:
 					} else {
 						d1359 = d1358
 					}
-					d1360 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d1356, d1359}, 1)
+					d1360 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d1356, d1359}, 1)
 					ctx.EmitAndRegImm32(d1360.Reg, 1)
 					d1360.Type = tagBool
 					ctx.BindReg(d1360.Reg, &d1360)
@@ -30178,7 +30178,7 @@ Patterns can be any of:
 					d626 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase622) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d1362 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d620}, 3)
+					d1362 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d620}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d1363 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1)}
 					ctx.EnsureDesc(&d1362)
@@ -30245,7 +30245,7 @@ Patterns can be any of:
 					ctx.BindReg(r365, &d1368)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d1368)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[]Scmer, value []Scmer) { *dst = value }), []JITValueDesc{d620, d1368})
+					ctx.EmitGoCallVoid(jitGoABI_3cfc76af02b619dc, []JITValueDesc{d620, d1368})
 					ctx.ReclaimUntrackedRegs()
 					d1369 = ctx.EmitNewSliceFromGoSlice(&d626)
 					ctx.StabilizeDescForControlFlow(&d1369)
@@ -30305,7 +30305,7 @@ Patterns can be any of:
 					} else {
 						d1374 = d1373
 					}
-					d1375 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d1372, d1374}, 1)
+					d1375 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d1372, d1374}, 1)
 					ctx.EmitAndRegImm32(d1375.Reg, 1)
 					ctx.EmitCmpRegImm32(d1375.Reg, 0)
 					ctx.EmitSetcc(d1375.Reg, CondEqual)
@@ -30394,11 +30394,11 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d1369)
 					ctx.EnsureDesc(&d631)
 					ctx.EnsureDesc(&d1369)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d631, d1369})
+					ctx.EmitGoCallVoid(jitGoABI_24128c7ae9d19e5b, []JITValueDesc{d631, d1369})
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.SyncDesc(&d631)
-					d1378 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d631}, 2)
+					d1378 = ctx.EmitGoCallScalar(jitGoABI_11a997ee3b751875, []JITValueDesc{d631}, 2)
 					d1378.NoHeapPointer = false
 					ctx.BindReg(d1378.Reg, &d1378)
 					ctx.BindReg(d1378.Reg2, &d1378)
@@ -30439,7 +30439,7 @@ Patterns can be any of:
 					ctx.EmitLeaRegMem(d1383.Reg, ctx.StackReg, int32(stackArray1381))
 					ctx.EmitMovRegImm64(d1383.Reg2, uint64(1))
 					ctx.EmitMovRegImm64(d1383.Reg3, uint64(1))
-					callResults1384 := JITEmitGoCallResults(ctx, GoFuncAddr(JITAppendScmerSlice), []JITValueDesc{d558, d1383}, []uint8{3}, []uint8{1})
+					callResults1384 := JITEmitGoCallResults(ctx, jitGoABI_dbbe576f282120a9, []JITValueDesc{d558, d1383})
 					d1385 = callResults1384[0]
 					d1386 = JITValueDesc{Loc: LocStackTriple, Type: tagSlice, StackOff: int32(phiBase556) + int32(16)}
 					ctx.EmitCopyDescWords(&d1386, &d1385, 3)
@@ -30467,7 +30467,7 @@ Patterns can be any of:
 					d560 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase556) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d1388 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d554}, 3)
+					d1388 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d554}, 3)
 					ctx.ReclaimUntrackedRegs()
 					if d1388.SliceSizeKnown {
 						d1389 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d1388.KnownSliceLen))}
@@ -30571,7 +30571,7 @@ Patterns can be any of:
 					if d1393.Loc != LocRegPair && d1393.Loc != LocStackPair && d1393.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d1392 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d1393}, 2)
+					d1392 = ctx.EmitGoCallScalar(jitGoABI_e1a33cf0a7aeca49, []JITValueDesc{d1393}, 2)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d1392)
 					d1394 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString(")")}
@@ -30586,7 +30586,7 @@ Patterns can be any of:
 					} else {
 						d1395 = d1394
 					}
-					d1396 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d1392, d1395}, 1)
+					d1396 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d1392, d1395}, 1)
 					ctx.EmitAndRegImm32(d1396.Reg, 1)
 					d1396.Type = tagBool
 					ctx.BindReg(d1396.Reg, &d1396)
@@ -30633,7 +30633,7 @@ Patterns can be any of:
 					d560 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase556) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d1398 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d554}, 3)
+					d1398 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d554}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d1399 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
 					ctx.ReclaimUntrackedRegs()
@@ -30651,7 +30651,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d1400 = JITPrepareScmerGoArg(ctx, d1400)
 					ctx.SyncDesc(&d1400)
-					d1403 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSourceInfo), []JITValueDesc{d1400}, 1)
+					d1403 = ctx.EmitGoCallScalar(jitGoABI_f352d2b202a682fd, []JITValueDesc{d1400}, 1)
 					d1403.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d1403.Reg, 1)
 					d1403.Type = tagBool
@@ -30764,7 +30764,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d559 = JITPrepareScmerGoArg(ctx, d559)
 					ctx.SyncDesc(&d559)
-					d1407 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d559}, 1)
+					d1407 = ctx.EmitGoCallScalar(jitGoABI_c94eb298f761efc9, []JITValueDesc{d559}, 1)
 					d1407.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d1407.Reg, 1)
 					d1407.Type = tagBool
@@ -30817,7 +30817,7 @@ Patterns can be any of:
 						panic("jit: generic call arg expects 1-word value")
 					}
 					ctx.SyncDesc(&d554)
-					d1409 = ctx.EmitGoCallScalar(GoFuncAddr(readFrom), []JITValueDesc{d554}, 2)
+					d1409 = ctx.EmitGoCallScalar(jitGoABI_187293f04bb82372, []JITValueDesc{d554}, 2)
 					d1409.NoHeapPointer = false
 					ctx.BindReg(d1409.Reg, &d1409)
 					ctx.BindReg(d1409.Reg2, &d1409)
@@ -30856,7 +30856,7 @@ Patterns can be any of:
 						panic("jit: generic call arg expects 2-word value (NewSymbol arg0)")
 					}
 					ctx.SyncDesc(&d1412)
-					d1413 = ctx.EmitGoCallScalar(GoFuncAddr(NewSymbol), []JITValueDesc{d1412}, 2)
+					d1413 = ctx.EmitGoCallScalar(jitGoABI_678e55d324700337, []JITValueDesc{d1412}, 2)
 					d1413.NoHeapPointer = false
 					ctx.BindReg(d1413.Reg, &d1413)
 					ctx.BindReg(d1413.Reg2, &d1413)
@@ -30885,7 +30885,7 @@ Patterns can be any of:
 					ctx.EmitLeaRegMem(d1414.Reg, ctx.StackReg, int32(stackArray1410))
 					ctx.EmitMovRegImm64(d1414.Reg2, uint64(2))
 					ctx.EmitMovRegImm64(d1414.Reg3, uint64(2))
-					callResults1415 := JITEmitGoCallResults(ctx, GoFuncAddr(JITNewSliceCopy), []JITValueDesc{d1414}, []uint8{2}, []uint8{1})
+					callResults1415 := JITEmitGoCallResults(ctx, jitGoABI_de4d00b58c7c0d07, []JITValueDesc{d1414})
 					d1416 = callResults1415[0]
 					ctx.StabilizeDescForControlFlow(&d1416)
 					inlineHome1417 := d1416
@@ -30944,7 +30944,7 @@ Patterns can be any of:
 					} else {
 						d1421 = d1420
 					}
-					d1422 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d1419, d1421}, 1)
+					d1422 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d1419, d1421}, 1)
 					ctx.EmitAndRegImm32(d1422.Reg, 1)
 					ctx.EmitCmpRegImm32(d1422.Reg, 0)
 					ctx.EmitSetcc(d1422.Reg, CondEqual)
@@ -31019,7 +31019,7 @@ Patterns can be any of:
 					d560 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase556) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d1425 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d554}, 3)
+					d1425 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d554}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d1426 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1)}
 					ctx.EnsureDesc(&d1425)
@@ -31086,7 +31086,7 @@ Patterns can be any of:
 					ctx.BindReg(r390, &d1431)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d1431)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[]Scmer, value []Scmer) { *dst = value }), []JITValueDesc{d554, d1431})
+					ctx.EmitGoCallVoid(jitGoABI_3cfc76af02b619dc, []JITValueDesc{d554, d1431})
 					ctx.ReclaimUntrackedRegs()
 					d1432 = ctx.EmitNewSliceFromGoSlice(&d558)
 					ctx.ReclaimUntrackedRegs()
@@ -31094,12 +31094,12 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d1432)
 					ctx.EnsureDesc(&d565)
 					ctx.EnsureDesc(&d1432)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d565, d1432})
+					ctx.EmitGoCallVoid(jitGoABI_24128c7ae9d19e5b, []JITValueDesc{d565, d1432})
 					ctx.FreeDesc(&d1432)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.SyncDesc(&d565)
-					d1433 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d565}, 2)
+					d1433 = ctx.EmitGoCallScalar(jitGoABI_11a997ee3b751875, []JITValueDesc{d565}, 2)
 					d1433.NoHeapPointer = false
 					ctx.BindReg(d1433.Reg, &d1433)
 					ctx.BindReg(d1433.Reg2, &d1433)
@@ -31130,7 +31130,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d1400 = JITPrepareScmerGoArg(ctx, d1400)
 					ctx.SyncDesc(&d1400)
-					d1435 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).SourceInfo), []JITValueDesc{d1400}, 1)
+					d1435 = ctx.EmitGoCallScalar(jitGoABI_efc59dae573ac860, []JITValueDesc{d1400}, 1)
 					d1435.NoHeapPointer = false
 					ctx.BindReg(d1435.Reg, &d1435)
 					ctx.ReclaimUntrackedRegs()
@@ -31139,7 +31139,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d1435)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d1436)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *SourceInfo, value SourceInfo) { *dst = value }), []JITValueDesc{d565, d1436})
+					ctx.EmitGoCallVoid(jitGoABI_711f67c681c46de9, []JITValueDesc{d565, d1436})
 					ctx.FreeDesc(&d1436)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
@@ -31234,7 +31234,7 @@ Patterns can be any of:
 					if d1441.Loc != LocRegPair && d1441.Loc != LocStackPair && d1441.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d1440 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d1441}, 2)
+					d1440 = ctx.EmitGoCallScalar(jitGoABI_e1a33cf0a7aeca49, []JITValueDesc{d1441}, 2)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d1440)
 					d1442 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString("(")}
@@ -31249,7 +31249,7 @@ Patterns can be any of:
 					} else {
 						d1443 = d1442
 					}
-					d1444 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d1440, d1443}, 1)
+					d1444 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d1440, d1443}, 1)
 					ctx.EmitAndRegImm32(d1444.Reg, 1)
 					d1444.Type = tagBool
 					ctx.BindReg(d1444.Reg, &d1444)
@@ -31303,11 +31303,11 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d1416)
 					ctx.EnsureDesc(&d565)
 					ctx.EnsureDesc(&d1416)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d565, d1416})
+					ctx.EmitGoCallVoid(jitGoABI_24128c7ae9d19e5b, []JITValueDesc{d565, d1416})
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.SyncDesc(&d565)
-					d1446 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d565}, 2)
+					d1446 = ctx.EmitGoCallScalar(jitGoABI_11a997ee3b751875, []JITValueDesc{d565}, 2)
 					d1446.NoHeapPointer = false
 					ctx.BindReg(d1446.Reg, &d1446)
 					ctx.BindReg(d1446.Reg2, &d1446)
@@ -31337,7 +31337,7 @@ Patterns can be any of:
 					d560 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase556) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d1448 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d554}, 3)
+					d1448 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d554}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d1449 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1)}
 					ctx.EnsureDesc(&d1448)
@@ -31404,7 +31404,7 @@ Patterns can be any of:
 					ctx.BindReg(r399, &d1454)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d1454)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[]Scmer, value []Scmer) { *dst = value }), []JITValueDesc{d554, d1454})
+					ctx.EmitGoCallVoid(jitGoABI_3cfc76af02b619dc, []JITValueDesc{d554, d1454})
 					ctx.ReclaimUntrackedRegs()
 					stackArray1455 = ctx.AllocStack(int32(16))
 					_ = stackArray1455
@@ -31443,7 +31443,7 @@ Patterns can be any of:
 						panic("jit: generic call arg expects 2-word value (NewSymbol arg0)")
 					}
 					ctx.SyncDesc(&d1458)
-					d1459 = ctx.EmitGoCallScalar(GoFuncAddr(NewSymbol), []JITValueDesc{d1458}, 2)
+					d1459 = ctx.EmitGoCallScalar(jitGoABI_678e55d324700337, []JITValueDesc{d1458}, 2)
 					d1459.NoHeapPointer = false
 					ctx.BindReg(d1459.Reg, &d1459)
 					ctx.BindReg(d1459.Reg2, &d1459)
@@ -31505,7 +31505,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.StabilizeDescForControlFlow(&d560)
 					ctx.ReclaimUntrackedRegs()
-					d1461 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d554}, 3)
+					d1461 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d554}, 3)
 					ctx.ReclaimUntrackedRegs()
 					if d1461.SliceSizeKnown {
 						d1462 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d1461.KnownSliceLen))}
@@ -31581,7 +31581,7 @@ Patterns can be any of:
 					d560 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase556) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d1465 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d554}, 3)
+					d1465 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d554}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d1466 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
 					ctx.ReclaimUntrackedRegs()
@@ -31599,7 +31599,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d1467 = JITPrepareScmerGoArg(ctx, d1467)
 					ctx.SyncDesc(&d1467)
-					d1470 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d1467}, 1)
+					d1470 = ctx.EmitGoCallScalar(jitGoABI_c94eb298f761efc9, []JITValueDesc{d1467}, 1)
 					d1470.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d1470.Reg, 1)
 					d1470.Type = tagBool
@@ -31656,7 +31656,7 @@ Patterns can be any of:
 						panic("jit: generic call arg expects 1-word value")
 					}
 					ctx.SyncDesc(&d554)
-					d1472 = ctx.EmitGoCallScalar(GoFuncAddr(readFrom), []JITValueDesc{d554}, 2)
+					d1472 = ctx.EmitGoCallScalar(jitGoABI_187293f04bb82372, []JITValueDesc{d554}, 2)
 					d1472.NoHeapPointer = false
 					ctx.BindReg(d1472.Reg, &d1472)
 					ctx.BindReg(d1472.Reg2, &d1472)
@@ -31685,7 +31685,7 @@ Patterns can be any of:
 					ctx.EmitLeaRegMem(d1475.Reg, ctx.StackReg, int32(stackArray1473))
 					ctx.EmitMovRegImm64(d1475.Reg2, uint64(1))
 					ctx.EmitMovRegImm64(d1475.Reg3, uint64(1))
-					callResults1476 := JITEmitGoCallResults(ctx, GoFuncAddr(JITAppendScmerSlice), []JITValueDesc{d560, d1475}, []uint8{3}, []uint8{1})
+					callResults1476 := JITEmitGoCallResults(ctx, jitGoABI_dbbe576f282120a9, []JITValueDesc{d560, d1475})
 					d1477 = callResults1476[0]
 					d1478 = JITValueDesc{Loc: LocStackTriple, Type: tagSlice, StackOff: int32(phiBase556) + int32(56)}
 					ctx.EmitCopyDescWords(&d1478, &d1477, 3)
@@ -31757,7 +31757,7 @@ Patterns can be any of:
 					if d1481.Loc != LocRegPair && d1481.Loc != LocStackPair && d1481.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d1480 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d1481}, 2)
+					d1480 = ctx.EmitGoCallScalar(jitGoABI_e1a33cf0a7aeca49, []JITValueDesc{d1481}, 2)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d1480)
 					d1482 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString(")")}
@@ -31772,7 +31772,7 @@ Patterns can be any of:
 					} else {
 						d1483 = d1482
 					}
-					d1484 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d1480, d1483}, 1)
+					d1484 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d1480, d1483}, 1)
 					ctx.EmitAndRegImm32(d1484.Reg, 1)
 					d1484.Type = tagBool
 					ctx.BindReg(d1484.Reg, &d1484)
@@ -31825,7 +31825,7 @@ Patterns can be any of:
 					d560 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase556) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d1486 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d554}, 3)
+					d1486 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d554}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d1487 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1)}
 					ctx.EnsureDesc(&d1486)
@@ -31892,7 +31892,7 @@ Patterns can be any of:
 					ctx.BindReg(r409, &d1492)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d1492)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[]Scmer, value []Scmer) { *dst = value }), []JITValueDesc{d554, d1492})
+					ctx.EmitGoCallVoid(jitGoABI_3cfc76af02b619dc, []JITValueDesc{d554, d1492})
 					ctx.ReclaimUntrackedRegs()
 					d1493 = ctx.EmitNewSliceFromGoSlice(&d560)
 					ctx.StabilizeDescForControlFlow(&d1493)
@@ -31952,7 +31952,7 @@ Patterns can be any of:
 					} else {
 						d1498 = d1497
 					}
-					d1499 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d1496, d1498}, 1)
+					d1499 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d1496, d1498}, 1)
 					ctx.EmitAndRegImm32(d1499.Reg, 1)
 					ctx.EmitCmpRegImm32(d1499.Reg, 0)
 					ctx.EmitSetcc(d1499.Reg, CondEqual)
@@ -32041,11 +32041,11 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d1493)
 					ctx.EnsureDesc(&d565)
 					ctx.EnsureDesc(&d1493)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d565, d1493})
+					ctx.EmitGoCallVoid(jitGoABI_24128c7ae9d19e5b, []JITValueDesc{d565, d1493})
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.SyncDesc(&d565)
-					d1502 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d565}, 2)
+					d1502 = ctx.EmitGoCallScalar(jitGoABI_11a997ee3b751875, []JITValueDesc{d565}, 2)
 					d1502.NoHeapPointer = false
 					ctx.BindReg(d1502.Reg, &d1502)
 					ctx.BindReg(d1502.Reg2, &d1502)
@@ -32086,7 +32086,7 @@ Patterns can be any of:
 					ctx.EmitLeaRegMem(d1507.Reg, ctx.StackReg, int32(stackArray1505))
 					ctx.EmitMovRegImm64(d1507.Reg2, uint64(1))
 					ctx.EmitMovRegImm64(d1507.Reg3, uint64(1))
-					callResults1508 := JITEmitGoCallResults(ctx, GoFuncAddr(JITAppendScmerSlice), []JITValueDesc{d492, d1507}, []uint8{3}, []uint8{1})
+					callResults1508 := JITEmitGoCallResults(ctx, jitGoABI_dbbe576f282120a9, []JITValueDesc{d492, d1507})
 					d1509 = callResults1508[0]
 					d1510 = JITValueDesc{Loc: LocStackTriple, Type: tagSlice, StackOff: int32(phiBase490) + int32(16)}
 					ctx.EmitCopyDescWords(&d1510, &d1509, 3)
@@ -32114,7 +32114,7 @@ Patterns can be any of:
 					d494 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase490) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d1512 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d488}, 3)
+					d1512 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d488}, 3)
 					ctx.ReclaimUntrackedRegs()
 					if d1512.SliceSizeKnown {
 						d1513 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d1512.KnownSliceLen))}
@@ -32218,7 +32218,7 @@ Patterns can be any of:
 					if d1517.Loc != LocRegPair && d1517.Loc != LocStackPair && d1517.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d1516 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d1517}, 2)
+					d1516 = ctx.EmitGoCallScalar(jitGoABI_e1a33cf0a7aeca49, []JITValueDesc{d1517}, 2)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d1516)
 					d1518 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString(")")}
@@ -32233,7 +32233,7 @@ Patterns can be any of:
 					} else {
 						d1519 = d1518
 					}
-					d1520 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d1516, d1519}, 1)
+					d1520 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d1516, d1519}, 1)
 					ctx.EmitAndRegImm32(d1520.Reg, 1)
 					d1520.Type = tagBool
 					ctx.BindReg(d1520.Reg, &d1520)
@@ -32280,7 +32280,7 @@ Patterns can be any of:
 					d494 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase490) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d1522 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d488}, 3)
+					d1522 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d488}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d1523 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
 					ctx.ReclaimUntrackedRegs()
@@ -32298,7 +32298,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d1524 = JITPrepareScmerGoArg(ctx, d1524)
 					ctx.SyncDesc(&d1524)
-					d1527 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSourceInfo), []JITValueDesc{d1524}, 1)
+					d1527 = ctx.EmitGoCallScalar(jitGoABI_f352d2b202a682fd, []JITValueDesc{d1524}, 1)
 					d1527.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d1527.Reg, 1)
 					d1527.Type = tagBool
@@ -32411,7 +32411,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d493 = JITPrepareScmerGoArg(ctx, d493)
 					ctx.SyncDesc(&d493)
-					d1531 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d493}, 1)
+					d1531 = ctx.EmitGoCallScalar(jitGoABI_c94eb298f761efc9, []JITValueDesc{d493}, 1)
 					d1531.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d1531.Reg, 1)
 					d1531.Type = tagBool
@@ -32464,7 +32464,7 @@ Patterns can be any of:
 						panic("jit: generic call arg expects 1-word value")
 					}
 					ctx.SyncDesc(&d488)
-					d1533 = ctx.EmitGoCallScalar(GoFuncAddr(readFrom), []JITValueDesc{d488}, 2)
+					d1533 = ctx.EmitGoCallScalar(jitGoABI_187293f04bb82372, []JITValueDesc{d488}, 2)
 					d1533.NoHeapPointer = false
 					ctx.BindReg(d1533.Reg, &d1533)
 					ctx.BindReg(d1533.Reg2, &d1533)
@@ -32503,7 +32503,7 @@ Patterns can be any of:
 						panic("jit: generic call arg expects 2-word value (NewSymbol arg0)")
 					}
 					ctx.SyncDesc(&d1536)
-					d1537 = ctx.EmitGoCallScalar(GoFuncAddr(NewSymbol), []JITValueDesc{d1536}, 2)
+					d1537 = ctx.EmitGoCallScalar(jitGoABI_678e55d324700337, []JITValueDesc{d1536}, 2)
 					d1537.NoHeapPointer = false
 					ctx.BindReg(d1537.Reg, &d1537)
 					ctx.BindReg(d1537.Reg2, &d1537)
@@ -32532,7 +32532,7 @@ Patterns can be any of:
 					ctx.EmitLeaRegMem(d1538.Reg, ctx.StackReg, int32(stackArray1534))
 					ctx.EmitMovRegImm64(d1538.Reg2, uint64(2))
 					ctx.EmitMovRegImm64(d1538.Reg3, uint64(2))
-					callResults1539 := JITEmitGoCallResults(ctx, GoFuncAddr(JITNewSliceCopy), []JITValueDesc{d1538}, []uint8{2}, []uint8{1})
+					callResults1539 := JITEmitGoCallResults(ctx, jitGoABI_de4d00b58c7c0d07, []JITValueDesc{d1538})
 					d1540 = callResults1539[0]
 					ctx.StabilizeDescForControlFlow(&d1540)
 					inlineHome1541 := d1540
@@ -32591,7 +32591,7 @@ Patterns can be any of:
 					} else {
 						d1545 = d1544
 					}
-					d1546 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d1543, d1545}, 1)
+					d1546 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d1543, d1545}, 1)
 					ctx.EmitAndRegImm32(d1546.Reg, 1)
 					ctx.EmitCmpRegImm32(d1546.Reg, 0)
 					ctx.EmitSetcc(d1546.Reg, CondEqual)
@@ -32666,7 +32666,7 @@ Patterns can be any of:
 					d494 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase490) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d1549 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d488}, 3)
+					d1549 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d488}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d1550 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1)}
 					ctx.EnsureDesc(&d1549)
@@ -32733,7 +32733,7 @@ Patterns can be any of:
 					ctx.BindReg(r434, &d1555)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d1555)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[]Scmer, value []Scmer) { *dst = value }), []JITValueDesc{d488, d1555})
+					ctx.EmitGoCallVoid(jitGoABI_3cfc76af02b619dc, []JITValueDesc{d488, d1555})
 					ctx.ReclaimUntrackedRegs()
 					d1556 = ctx.EmitNewSliceFromGoSlice(&d492)
 					ctx.ReclaimUntrackedRegs()
@@ -32741,12 +32741,12 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d1556)
 					ctx.EnsureDesc(&d499)
 					ctx.EnsureDesc(&d1556)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d499, d1556})
+					ctx.EmitGoCallVoid(jitGoABI_24128c7ae9d19e5b, []JITValueDesc{d499, d1556})
 					ctx.FreeDesc(&d1556)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.SyncDesc(&d499)
-					d1557 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d499}, 2)
+					d1557 = ctx.EmitGoCallScalar(jitGoABI_11a997ee3b751875, []JITValueDesc{d499}, 2)
 					d1557.NoHeapPointer = false
 					ctx.BindReg(d1557.Reg, &d1557)
 					ctx.BindReg(d1557.Reg2, &d1557)
@@ -32777,7 +32777,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d1524 = JITPrepareScmerGoArg(ctx, d1524)
 					ctx.SyncDesc(&d1524)
-					d1559 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).SourceInfo), []JITValueDesc{d1524}, 1)
+					d1559 = ctx.EmitGoCallScalar(jitGoABI_efc59dae573ac860, []JITValueDesc{d1524}, 1)
 					d1559.NoHeapPointer = false
 					ctx.BindReg(d1559.Reg, &d1559)
 					ctx.ReclaimUntrackedRegs()
@@ -32786,7 +32786,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d1559)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d1560)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *SourceInfo, value SourceInfo) { *dst = value }), []JITValueDesc{d499, d1560})
+					ctx.EmitGoCallVoid(jitGoABI_711f67c681c46de9, []JITValueDesc{d499, d1560})
 					ctx.FreeDesc(&d1560)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
@@ -32881,7 +32881,7 @@ Patterns can be any of:
 					if d1565.Loc != LocRegPair && d1565.Loc != LocStackPair && d1565.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d1564 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d1565}, 2)
+					d1564 = ctx.EmitGoCallScalar(jitGoABI_e1a33cf0a7aeca49, []JITValueDesc{d1565}, 2)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d1564)
 					d1566 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString("(")}
@@ -32896,7 +32896,7 @@ Patterns can be any of:
 					} else {
 						d1567 = d1566
 					}
-					d1568 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d1564, d1567}, 1)
+					d1568 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d1564, d1567}, 1)
 					ctx.EmitAndRegImm32(d1568.Reg, 1)
 					d1568.Type = tagBool
 					ctx.BindReg(d1568.Reg, &d1568)
@@ -32950,11 +32950,11 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d1540)
 					ctx.EnsureDesc(&d499)
 					ctx.EnsureDesc(&d1540)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d499, d1540})
+					ctx.EmitGoCallVoid(jitGoABI_24128c7ae9d19e5b, []JITValueDesc{d499, d1540})
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.SyncDesc(&d499)
-					d1570 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d499}, 2)
+					d1570 = ctx.EmitGoCallScalar(jitGoABI_11a997ee3b751875, []JITValueDesc{d499}, 2)
 					d1570.NoHeapPointer = false
 					ctx.BindReg(d1570.Reg, &d1570)
 					ctx.BindReg(d1570.Reg2, &d1570)
@@ -32984,7 +32984,7 @@ Patterns can be any of:
 					d494 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase490) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d1572 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d488}, 3)
+					d1572 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d488}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d1573 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1)}
 					ctx.EnsureDesc(&d1572)
@@ -33051,7 +33051,7 @@ Patterns can be any of:
 					ctx.BindReg(r443, &d1578)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d1578)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[]Scmer, value []Scmer) { *dst = value }), []JITValueDesc{d488, d1578})
+					ctx.EmitGoCallVoid(jitGoABI_3cfc76af02b619dc, []JITValueDesc{d488, d1578})
 					ctx.ReclaimUntrackedRegs()
 					stackArray1579 = ctx.AllocStack(int32(16))
 					_ = stackArray1579
@@ -33090,7 +33090,7 @@ Patterns can be any of:
 						panic("jit: generic call arg expects 2-word value (NewSymbol arg0)")
 					}
 					ctx.SyncDesc(&d1582)
-					d1583 = ctx.EmitGoCallScalar(GoFuncAddr(NewSymbol), []JITValueDesc{d1582}, 2)
+					d1583 = ctx.EmitGoCallScalar(jitGoABI_678e55d324700337, []JITValueDesc{d1582}, 2)
 					d1583.NoHeapPointer = false
 					ctx.BindReg(d1583.Reg, &d1583)
 					ctx.BindReg(d1583.Reg2, &d1583)
@@ -33152,7 +33152,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.StabilizeDescForControlFlow(&d494)
 					ctx.ReclaimUntrackedRegs()
-					d1585 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d488}, 3)
+					d1585 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d488}, 3)
 					ctx.ReclaimUntrackedRegs()
 					if d1585.SliceSizeKnown {
 						d1586 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d1585.KnownSliceLen))}
@@ -33228,7 +33228,7 @@ Patterns can be any of:
 					d494 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase490) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d1589 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d488}, 3)
+					d1589 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d488}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d1590 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
 					ctx.ReclaimUntrackedRegs()
@@ -33246,7 +33246,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d1591 = JITPrepareScmerGoArg(ctx, d1591)
 					ctx.SyncDesc(&d1591)
-					d1594 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d1591}, 1)
+					d1594 = ctx.EmitGoCallScalar(jitGoABI_c94eb298f761efc9, []JITValueDesc{d1591}, 1)
 					d1594.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d1594.Reg, 1)
 					d1594.Type = tagBool
@@ -33303,7 +33303,7 @@ Patterns can be any of:
 						panic("jit: generic call arg expects 1-word value")
 					}
 					ctx.SyncDesc(&d488)
-					d1596 = ctx.EmitGoCallScalar(GoFuncAddr(readFrom), []JITValueDesc{d488}, 2)
+					d1596 = ctx.EmitGoCallScalar(jitGoABI_187293f04bb82372, []JITValueDesc{d488}, 2)
 					d1596.NoHeapPointer = false
 					ctx.BindReg(d1596.Reg, &d1596)
 					ctx.BindReg(d1596.Reg2, &d1596)
@@ -33332,7 +33332,7 @@ Patterns can be any of:
 					ctx.EmitLeaRegMem(d1599.Reg, ctx.StackReg, int32(stackArray1597))
 					ctx.EmitMovRegImm64(d1599.Reg2, uint64(1))
 					ctx.EmitMovRegImm64(d1599.Reg3, uint64(1))
-					callResults1600 := JITEmitGoCallResults(ctx, GoFuncAddr(JITAppendScmerSlice), []JITValueDesc{d494, d1599}, []uint8{3}, []uint8{1})
+					callResults1600 := JITEmitGoCallResults(ctx, jitGoABI_dbbe576f282120a9, []JITValueDesc{d494, d1599})
 					d1601 = callResults1600[0]
 					d1602 = JITValueDesc{Loc: LocStackTriple, Type: tagSlice, StackOff: int32(phiBase490) + int32(56)}
 					ctx.EmitCopyDescWords(&d1602, &d1601, 3)
@@ -33404,7 +33404,7 @@ Patterns can be any of:
 					if d1605.Loc != LocRegPair && d1605.Loc != LocStackPair && d1605.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d1604 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d1605}, 2)
+					d1604 = ctx.EmitGoCallScalar(jitGoABI_e1a33cf0a7aeca49, []JITValueDesc{d1605}, 2)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d1604)
 					d1606 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString(")")}
@@ -33419,7 +33419,7 @@ Patterns can be any of:
 					} else {
 						d1607 = d1606
 					}
-					d1608 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d1604, d1607}, 1)
+					d1608 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d1604, d1607}, 1)
 					ctx.EmitAndRegImm32(d1608.Reg, 1)
 					d1608.Type = tagBool
 					ctx.BindReg(d1608.Reg, &d1608)
@@ -33472,7 +33472,7 @@ Patterns can be any of:
 					d494 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase490) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d1610 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d488}, 3)
+					d1610 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d488}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d1611 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1)}
 					ctx.EnsureDesc(&d1610)
@@ -33539,7 +33539,7 @@ Patterns can be any of:
 					ctx.BindReg(r453, &d1616)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d1616)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[]Scmer, value []Scmer) { *dst = value }), []JITValueDesc{d488, d1616})
+					ctx.EmitGoCallVoid(jitGoABI_3cfc76af02b619dc, []JITValueDesc{d488, d1616})
 					ctx.ReclaimUntrackedRegs()
 					d1617 = ctx.EmitNewSliceFromGoSlice(&d494)
 					ctx.StabilizeDescForControlFlow(&d1617)
@@ -33599,7 +33599,7 @@ Patterns can be any of:
 					} else {
 						d1622 = d1621
 					}
-					d1623 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d1620, d1622}, 1)
+					d1623 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d1620, d1622}, 1)
 					ctx.EmitAndRegImm32(d1623.Reg, 1)
 					ctx.EmitCmpRegImm32(d1623.Reg, 0)
 					ctx.EmitSetcc(d1623.Reg, CondEqual)
@@ -33688,11 +33688,11 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d1617)
 					ctx.EnsureDesc(&d499)
 					ctx.EnsureDesc(&d1617)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d499, d1617})
+					ctx.EmitGoCallVoid(jitGoABI_24128c7ae9d19e5b, []JITValueDesc{d499, d1617})
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.SyncDesc(&d499)
-					d1626 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d499}, 2)
+					d1626 = ctx.EmitGoCallScalar(jitGoABI_11a997ee3b751875, []JITValueDesc{d499}, 2)
 					d1626.NoHeapPointer = false
 					ctx.BindReg(d1626.Reg, &d1626)
 					ctx.BindReg(d1626.Reg2, &d1626)
@@ -33733,7 +33733,7 @@ Patterns can be any of:
 					ctx.EmitLeaRegMem(d1631.Reg, ctx.StackReg, int32(stackArray1629))
 					ctx.EmitMovRegImm64(d1631.Reg2, uint64(1))
 					ctx.EmitMovRegImm64(d1631.Reg3, uint64(1))
-					callResults1632 := JITEmitGoCallResults(ctx, GoFuncAddr(JITAppendScmerSlice), []JITValueDesc{d426, d1631}, []uint8{3}, []uint8{1})
+					callResults1632 := JITEmitGoCallResults(ctx, jitGoABI_dbbe576f282120a9, []JITValueDesc{d426, d1631})
 					d1633 = callResults1632[0]
 					d1634 = JITValueDesc{Loc: LocStackTriple, Type: tagSlice, StackOff: int32(phiBase424) + int32(16)}
 					ctx.EmitCopyDescWords(&d1634, &d1633, 3)
@@ -33761,7 +33761,7 @@ Patterns can be any of:
 					d428 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase424) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d1636 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d422}, 3)
+					d1636 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d422}, 3)
 					ctx.ReclaimUntrackedRegs()
 					if d1636.SliceSizeKnown {
 						d1637 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d1636.KnownSliceLen))}
@@ -33865,7 +33865,7 @@ Patterns can be any of:
 					if d1641.Loc != LocRegPair && d1641.Loc != LocStackPair && d1641.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d1640 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d1641}, 2)
+					d1640 = ctx.EmitGoCallScalar(jitGoABI_e1a33cf0a7aeca49, []JITValueDesc{d1641}, 2)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d1640)
 					d1642 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString(")")}
@@ -33880,7 +33880,7 @@ Patterns can be any of:
 					} else {
 						d1643 = d1642
 					}
-					d1644 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d1640, d1643}, 1)
+					d1644 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d1640, d1643}, 1)
 					ctx.EmitAndRegImm32(d1644.Reg, 1)
 					d1644.Type = tagBool
 					ctx.BindReg(d1644.Reg, &d1644)
@@ -33927,7 +33927,7 @@ Patterns can be any of:
 					d428 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase424) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d1646 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d422}, 3)
+					d1646 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d422}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d1647 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
 					ctx.ReclaimUntrackedRegs()
@@ -33945,7 +33945,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d1648 = JITPrepareScmerGoArg(ctx, d1648)
 					ctx.SyncDesc(&d1648)
-					d1651 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSourceInfo), []JITValueDesc{d1648}, 1)
+					d1651 = ctx.EmitGoCallScalar(jitGoABI_f352d2b202a682fd, []JITValueDesc{d1648}, 1)
 					d1651.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d1651.Reg, 1)
 					d1651.Type = tagBool
@@ -34058,7 +34058,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d427 = JITPrepareScmerGoArg(ctx, d427)
 					ctx.SyncDesc(&d427)
-					d1655 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d427}, 1)
+					d1655 = ctx.EmitGoCallScalar(jitGoABI_c94eb298f761efc9, []JITValueDesc{d427}, 1)
 					d1655.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d1655.Reg, 1)
 					d1655.Type = tagBool
@@ -34111,7 +34111,7 @@ Patterns can be any of:
 						panic("jit: generic call arg expects 1-word value")
 					}
 					ctx.SyncDesc(&d422)
-					d1657 = ctx.EmitGoCallScalar(GoFuncAddr(readFrom), []JITValueDesc{d422}, 2)
+					d1657 = ctx.EmitGoCallScalar(jitGoABI_187293f04bb82372, []JITValueDesc{d422}, 2)
 					d1657.NoHeapPointer = false
 					ctx.BindReg(d1657.Reg, &d1657)
 					ctx.BindReg(d1657.Reg2, &d1657)
@@ -34150,7 +34150,7 @@ Patterns can be any of:
 						panic("jit: generic call arg expects 2-word value (NewSymbol arg0)")
 					}
 					ctx.SyncDesc(&d1660)
-					d1661 = ctx.EmitGoCallScalar(GoFuncAddr(NewSymbol), []JITValueDesc{d1660}, 2)
+					d1661 = ctx.EmitGoCallScalar(jitGoABI_678e55d324700337, []JITValueDesc{d1660}, 2)
 					d1661.NoHeapPointer = false
 					ctx.BindReg(d1661.Reg, &d1661)
 					ctx.BindReg(d1661.Reg2, &d1661)
@@ -34179,7 +34179,7 @@ Patterns can be any of:
 					ctx.EmitLeaRegMem(d1662.Reg, ctx.StackReg, int32(stackArray1658))
 					ctx.EmitMovRegImm64(d1662.Reg2, uint64(2))
 					ctx.EmitMovRegImm64(d1662.Reg3, uint64(2))
-					callResults1663 := JITEmitGoCallResults(ctx, GoFuncAddr(JITNewSliceCopy), []JITValueDesc{d1662}, []uint8{2}, []uint8{1})
+					callResults1663 := JITEmitGoCallResults(ctx, jitGoABI_de4d00b58c7c0d07, []JITValueDesc{d1662})
 					d1664 = callResults1663[0]
 					ctx.StabilizeDescForControlFlow(&d1664)
 					inlineHome1665 := d1664
@@ -34238,7 +34238,7 @@ Patterns can be any of:
 					} else {
 						d1669 = d1668
 					}
-					d1670 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d1667, d1669}, 1)
+					d1670 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d1667, d1669}, 1)
 					ctx.EmitAndRegImm32(d1670.Reg, 1)
 					ctx.EmitCmpRegImm32(d1670.Reg, 0)
 					ctx.EmitSetcc(d1670.Reg, CondEqual)
@@ -34313,7 +34313,7 @@ Patterns can be any of:
 					d428 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase424) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d1673 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d422}, 3)
+					d1673 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d422}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d1674 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1)}
 					ctx.EnsureDesc(&d1673)
@@ -34380,7 +34380,7 @@ Patterns can be any of:
 					ctx.BindReg(r478, &d1679)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d1679)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[]Scmer, value []Scmer) { *dst = value }), []JITValueDesc{d422, d1679})
+					ctx.EmitGoCallVoid(jitGoABI_3cfc76af02b619dc, []JITValueDesc{d422, d1679})
 					ctx.ReclaimUntrackedRegs()
 					d1680 = ctx.EmitNewSliceFromGoSlice(&d426)
 					ctx.ReclaimUntrackedRegs()
@@ -34388,12 +34388,12 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d1680)
 					ctx.EnsureDesc(&d433)
 					ctx.EnsureDesc(&d1680)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d433, d1680})
+					ctx.EmitGoCallVoid(jitGoABI_24128c7ae9d19e5b, []JITValueDesc{d433, d1680})
 					ctx.FreeDesc(&d1680)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.SyncDesc(&d433)
-					d1681 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d433}, 2)
+					d1681 = ctx.EmitGoCallScalar(jitGoABI_11a997ee3b751875, []JITValueDesc{d433}, 2)
 					d1681.NoHeapPointer = false
 					ctx.BindReg(d1681.Reg, &d1681)
 					ctx.BindReg(d1681.Reg2, &d1681)
@@ -34424,7 +34424,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d1648 = JITPrepareScmerGoArg(ctx, d1648)
 					ctx.SyncDesc(&d1648)
-					d1683 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).SourceInfo), []JITValueDesc{d1648}, 1)
+					d1683 = ctx.EmitGoCallScalar(jitGoABI_efc59dae573ac860, []JITValueDesc{d1648}, 1)
 					d1683.NoHeapPointer = false
 					ctx.BindReg(d1683.Reg, &d1683)
 					ctx.ReclaimUntrackedRegs()
@@ -34433,7 +34433,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d1683)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d1684)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *SourceInfo, value SourceInfo) { *dst = value }), []JITValueDesc{d433, d1684})
+					ctx.EmitGoCallVoid(jitGoABI_711f67c681c46de9, []JITValueDesc{d433, d1684})
 					ctx.FreeDesc(&d1684)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
@@ -34528,7 +34528,7 @@ Patterns can be any of:
 					if d1689.Loc != LocRegPair && d1689.Loc != LocStackPair && d1689.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d1688 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d1689}, 2)
+					d1688 = ctx.EmitGoCallScalar(jitGoABI_e1a33cf0a7aeca49, []JITValueDesc{d1689}, 2)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d1688)
 					d1690 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString("(")}
@@ -34543,7 +34543,7 @@ Patterns can be any of:
 					} else {
 						d1691 = d1690
 					}
-					d1692 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d1688, d1691}, 1)
+					d1692 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d1688, d1691}, 1)
 					ctx.EmitAndRegImm32(d1692.Reg, 1)
 					d1692.Type = tagBool
 					ctx.BindReg(d1692.Reg, &d1692)
@@ -34597,11 +34597,11 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d1664)
 					ctx.EnsureDesc(&d433)
 					ctx.EnsureDesc(&d1664)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d433, d1664})
+					ctx.EmitGoCallVoid(jitGoABI_24128c7ae9d19e5b, []JITValueDesc{d433, d1664})
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.SyncDesc(&d433)
-					d1694 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d433}, 2)
+					d1694 = ctx.EmitGoCallScalar(jitGoABI_11a997ee3b751875, []JITValueDesc{d433}, 2)
 					d1694.NoHeapPointer = false
 					ctx.BindReg(d1694.Reg, &d1694)
 					ctx.BindReg(d1694.Reg2, &d1694)
@@ -34631,7 +34631,7 @@ Patterns can be any of:
 					d428 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase424) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d1696 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d422}, 3)
+					d1696 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d422}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d1697 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1)}
 					ctx.EnsureDesc(&d1696)
@@ -34698,7 +34698,7 @@ Patterns can be any of:
 					ctx.BindReg(r487, &d1702)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d1702)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[]Scmer, value []Scmer) { *dst = value }), []JITValueDesc{d422, d1702})
+					ctx.EmitGoCallVoid(jitGoABI_3cfc76af02b619dc, []JITValueDesc{d422, d1702})
 					ctx.ReclaimUntrackedRegs()
 					stackArray1703 = ctx.AllocStack(int32(16))
 					_ = stackArray1703
@@ -34737,7 +34737,7 @@ Patterns can be any of:
 						panic("jit: generic call arg expects 2-word value (NewSymbol arg0)")
 					}
 					ctx.SyncDesc(&d1706)
-					d1707 = ctx.EmitGoCallScalar(GoFuncAddr(NewSymbol), []JITValueDesc{d1706}, 2)
+					d1707 = ctx.EmitGoCallScalar(jitGoABI_678e55d324700337, []JITValueDesc{d1706}, 2)
 					d1707.NoHeapPointer = false
 					ctx.BindReg(d1707.Reg, &d1707)
 					ctx.BindReg(d1707.Reg2, &d1707)
@@ -34799,7 +34799,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.StabilizeDescForControlFlow(&d428)
 					ctx.ReclaimUntrackedRegs()
-					d1709 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d422}, 3)
+					d1709 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d422}, 3)
 					ctx.ReclaimUntrackedRegs()
 					if d1709.SliceSizeKnown {
 						d1710 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d1709.KnownSliceLen))}
@@ -34875,7 +34875,7 @@ Patterns can be any of:
 					d428 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase424) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d1713 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d422}, 3)
+					d1713 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d422}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d1714 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
 					ctx.ReclaimUntrackedRegs()
@@ -34893,7 +34893,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d1715 = JITPrepareScmerGoArg(ctx, d1715)
 					ctx.SyncDesc(&d1715)
-					d1718 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d1715}, 1)
+					d1718 = ctx.EmitGoCallScalar(jitGoABI_c94eb298f761efc9, []JITValueDesc{d1715}, 1)
 					d1718.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d1718.Reg, 1)
 					d1718.Type = tagBool
@@ -34950,7 +34950,7 @@ Patterns can be any of:
 						panic("jit: generic call arg expects 1-word value")
 					}
 					ctx.SyncDesc(&d422)
-					d1720 = ctx.EmitGoCallScalar(GoFuncAddr(readFrom), []JITValueDesc{d422}, 2)
+					d1720 = ctx.EmitGoCallScalar(jitGoABI_187293f04bb82372, []JITValueDesc{d422}, 2)
 					d1720.NoHeapPointer = false
 					ctx.BindReg(d1720.Reg, &d1720)
 					ctx.BindReg(d1720.Reg2, &d1720)
@@ -34979,7 +34979,7 @@ Patterns can be any of:
 					ctx.EmitLeaRegMem(d1723.Reg, ctx.StackReg, int32(stackArray1721))
 					ctx.EmitMovRegImm64(d1723.Reg2, uint64(1))
 					ctx.EmitMovRegImm64(d1723.Reg3, uint64(1))
-					callResults1724 := JITEmitGoCallResults(ctx, GoFuncAddr(JITAppendScmerSlice), []JITValueDesc{d428, d1723}, []uint8{3}, []uint8{1})
+					callResults1724 := JITEmitGoCallResults(ctx, jitGoABI_dbbe576f282120a9, []JITValueDesc{d428, d1723})
 					d1725 = callResults1724[0]
 					d1726 = JITValueDesc{Loc: LocStackTriple, Type: tagSlice, StackOff: int32(phiBase424) + int32(56)}
 					ctx.EmitCopyDescWords(&d1726, &d1725, 3)
@@ -35051,7 +35051,7 @@ Patterns can be any of:
 					if d1729.Loc != LocRegPair && d1729.Loc != LocStackPair && d1729.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d1728 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d1729}, 2)
+					d1728 = ctx.EmitGoCallScalar(jitGoABI_e1a33cf0a7aeca49, []JITValueDesc{d1729}, 2)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d1728)
 					d1730 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString(")")}
@@ -35066,7 +35066,7 @@ Patterns can be any of:
 					} else {
 						d1731 = d1730
 					}
-					d1732 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d1728, d1731}, 1)
+					d1732 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d1728, d1731}, 1)
 					ctx.EmitAndRegImm32(d1732.Reg, 1)
 					d1732.Type = tagBool
 					ctx.BindReg(d1732.Reg, &d1732)
@@ -35119,7 +35119,7 @@ Patterns can be any of:
 					d428 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase424) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d1734 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d422}, 3)
+					d1734 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d422}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d1735 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1)}
 					ctx.EnsureDesc(&d1734)
@@ -35186,7 +35186,7 @@ Patterns can be any of:
 					ctx.BindReg(r497, &d1740)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d1740)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[]Scmer, value []Scmer) { *dst = value }), []JITValueDesc{d422, d1740})
+					ctx.EmitGoCallVoid(jitGoABI_3cfc76af02b619dc, []JITValueDesc{d422, d1740})
 					ctx.ReclaimUntrackedRegs()
 					d1741 = ctx.EmitNewSliceFromGoSlice(&d428)
 					ctx.StabilizeDescForControlFlow(&d1741)
@@ -35246,7 +35246,7 @@ Patterns can be any of:
 					} else {
 						d1746 = d1745
 					}
-					d1747 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d1744, d1746}, 1)
+					d1747 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d1744, d1746}, 1)
 					ctx.EmitAndRegImm32(d1747.Reg, 1)
 					ctx.EmitCmpRegImm32(d1747.Reg, 0)
 					ctx.EmitSetcc(d1747.Reg, CondEqual)
@@ -35335,11 +35335,11 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d1741)
 					ctx.EnsureDesc(&d433)
 					ctx.EnsureDesc(&d1741)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d433, d1741})
+					ctx.EmitGoCallVoid(jitGoABI_24128c7ae9d19e5b, []JITValueDesc{d433, d1741})
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.SyncDesc(&d433)
-					d1750 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d433}, 2)
+					d1750 = ctx.EmitGoCallScalar(jitGoABI_11a997ee3b751875, []JITValueDesc{d433}, 2)
 					d1750.NoHeapPointer = false
 					ctx.BindReg(d1750.Reg, &d1750)
 					ctx.BindReg(d1750.Reg2, &d1750)
@@ -35380,7 +35380,7 @@ Patterns can be any of:
 					ctx.EmitLeaRegMem(d1755.Reg, ctx.StackReg, int32(stackArray1753))
 					ctx.EmitMovRegImm64(d1755.Reg2, uint64(1))
 					ctx.EmitMovRegImm64(d1755.Reg3, uint64(1))
-					callResults1756 := JITEmitGoCallResults(ctx, GoFuncAddr(JITAppendScmerSlice), []JITValueDesc{d360, d1755}, []uint8{3}, []uint8{1})
+					callResults1756 := JITEmitGoCallResults(ctx, jitGoABI_dbbe576f282120a9, []JITValueDesc{d360, d1755})
 					d1757 = callResults1756[0]
 					d1758 = JITValueDesc{Loc: LocStackTriple, Type: tagSlice, StackOff: int32(phiBase358) + int32(16)}
 					ctx.EmitCopyDescWords(&d1758, &d1757, 3)
@@ -35408,7 +35408,7 @@ Patterns can be any of:
 					d362 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase358) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d1760 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d356}, 3)
+					d1760 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d356}, 3)
 					ctx.ReclaimUntrackedRegs()
 					if d1760.SliceSizeKnown {
 						d1761 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d1760.KnownSliceLen))}
@@ -35512,7 +35512,7 @@ Patterns can be any of:
 					if d1765.Loc != LocRegPair && d1765.Loc != LocStackPair && d1765.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d1764 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d1765}, 2)
+					d1764 = ctx.EmitGoCallScalar(jitGoABI_e1a33cf0a7aeca49, []JITValueDesc{d1765}, 2)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d1764)
 					d1766 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString(")")}
@@ -35527,7 +35527,7 @@ Patterns can be any of:
 					} else {
 						d1767 = d1766
 					}
-					d1768 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d1764, d1767}, 1)
+					d1768 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d1764, d1767}, 1)
 					ctx.EmitAndRegImm32(d1768.Reg, 1)
 					d1768.Type = tagBool
 					ctx.BindReg(d1768.Reg, &d1768)
@@ -35574,7 +35574,7 @@ Patterns can be any of:
 					d362 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase358) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d1770 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d356}, 3)
+					d1770 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d356}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d1771 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
 					ctx.ReclaimUntrackedRegs()
@@ -35592,7 +35592,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d1772 = JITPrepareScmerGoArg(ctx, d1772)
 					ctx.SyncDesc(&d1772)
-					d1775 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSourceInfo), []JITValueDesc{d1772}, 1)
+					d1775 = ctx.EmitGoCallScalar(jitGoABI_f352d2b202a682fd, []JITValueDesc{d1772}, 1)
 					d1775.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d1775.Reg, 1)
 					d1775.Type = tagBool
@@ -35705,7 +35705,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d361 = JITPrepareScmerGoArg(ctx, d361)
 					ctx.SyncDesc(&d361)
-					d1779 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d361}, 1)
+					d1779 = ctx.EmitGoCallScalar(jitGoABI_c94eb298f761efc9, []JITValueDesc{d361}, 1)
 					d1779.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d1779.Reg, 1)
 					d1779.Type = tagBool
@@ -35758,7 +35758,7 @@ Patterns can be any of:
 						panic("jit: generic call arg expects 1-word value")
 					}
 					ctx.SyncDesc(&d356)
-					d1781 = ctx.EmitGoCallScalar(GoFuncAddr(readFrom), []JITValueDesc{d356}, 2)
+					d1781 = ctx.EmitGoCallScalar(jitGoABI_187293f04bb82372, []JITValueDesc{d356}, 2)
 					d1781.NoHeapPointer = false
 					ctx.BindReg(d1781.Reg, &d1781)
 					ctx.BindReg(d1781.Reg2, &d1781)
@@ -35797,7 +35797,7 @@ Patterns can be any of:
 						panic("jit: generic call arg expects 2-word value (NewSymbol arg0)")
 					}
 					ctx.SyncDesc(&d1784)
-					d1785 = ctx.EmitGoCallScalar(GoFuncAddr(NewSymbol), []JITValueDesc{d1784}, 2)
+					d1785 = ctx.EmitGoCallScalar(jitGoABI_678e55d324700337, []JITValueDesc{d1784}, 2)
 					d1785.NoHeapPointer = false
 					ctx.BindReg(d1785.Reg, &d1785)
 					ctx.BindReg(d1785.Reg2, &d1785)
@@ -35826,7 +35826,7 @@ Patterns can be any of:
 					ctx.EmitLeaRegMem(d1786.Reg, ctx.StackReg, int32(stackArray1782))
 					ctx.EmitMovRegImm64(d1786.Reg2, uint64(2))
 					ctx.EmitMovRegImm64(d1786.Reg3, uint64(2))
-					callResults1787 := JITEmitGoCallResults(ctx, GoFuncAddr(JITNewSliceCopy), []JITValueDesc{d1786}, []uint8{2}, []uint8{1})
+					callResults1787 := JITEmitGoCallResults(ctx, jitGoABI_de4d00b58c7c0d07, []JITValueDesc{d1786})
 					d1788 = callResults1787[0]
 					ctx.StabilizeDescForControlFlow(&d1788)
 					inlineHome1789 := d1788
@@ -35885,7 +35885,7 @@ Patterns can be any of:
 					} else {
 						d1793 = d1792
 					}
-					d1794 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d1791, d1793}, 1)
+					d1794 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d1791, d1793}, 1)
 					ctx.EmitAndRegImm32(d1794.Reg, 1)
 					ctx.EmitCmpRegImm32(d1794.Reg, 0)
 					ctx.EmitSetcc(d1794.Reg, CondEqual)
@@ -35960,7 +35960,7 @@ Patterns can be any of:
 					d362 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase358) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d1797 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d356}, 3)
+					d1797 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d356}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d1798 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1)}
 					ctx.EnsureDesc(&d1797)
@@ -36027,7 +36027,7 @@ Patterns can be any of:
 					ctx.BindReg(r522, &d1803)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d1803)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[]Scmer, value []Scmer) { *dst = value }), []JITValueDesc{d356, d1803})
+					ctx.EmitGoCallVoid(jitGoABI_3cfc76af02b619dc, []JITValueDesc{d356, d1803})
 					ctx.ReclaimUntrackedRegs()
 					d1804 = ctx.EmitNewSliceFromGoSlice(&d360)
 					ctx.ReclaimUntrackedRegs()
@@ -36035,12 +36035,12 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d1804)
 					ctx.EnsureDesc(&d367)
 					ctx.EnsureDesc(&d1804)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d367, d1804})
+					ctx.EmitGoCallVoid(jitGoABI_24128c7ae9d19e5b, []JITValueDesc{d367, d1804})
 					ctx.FreeDesc(&d1804)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.SyncDesc(&d367)
-					d1805 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d367}, 2)
+					d1805 = ctx.EmitGoCallScalar(jitGoABI_11a997ee3b751875, []JITValueDesc{d367}, 2)
 					d1805.NoHeapPointer = false
 					ctx.BindReg(d1805.Reg, &d1805)
 					ctx.BindReg(d1805.Reg2, &d1805)
@@ -36071,7 +36071,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d1772 = JITPrepareScmerGoArg(ctx, d1772)
 					ctx.SyncDesc(&d1772)
-					d1807 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).SourceInfo), []JITValueDesc{d1772}, 1)
+					d1807 = ctx.EmitGoCallScalar(jitGoABI_efc59dae573ac860, []JITValueDesc{d1772}, 1)
 					d1807.NoHeapPointer = false
 					ctx.BindReg(d1807.Reg, &d1807)
 					ctx.ReclaimUntrackedRegs()
@@ -36080,7 +36080,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d1807)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d1808)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *SourceInfo, value SourceInfo) { *dst = value }), []JITValueDesc{d367, d1808})
+					ctx.EmitGoCallVoid(jitGoABI_711f67c681c46de9, []JITValueDesc{d367, d1808})
 					ctx.FreeDesc(&d1808)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
@@ -36175,7 +36175,7 @@ Patterns can be any of:
 					if d1813.Loc != LocRegPair && d1813.Loc != LocStackPair && d1813.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d1812 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d1813}, 2)
+					d1812 = ctx.EmitGoCallScalar(jitGoABI_e1a33cf0a7aeca49, []JITValueDesc{d1813}, 2)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d1812)
 					d1814 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString("(")}
@@ -36190,7 +36190,7 @@ Patterns can be any of:
 					} else {
 						d1815 = d1814
 					}
-					d1816 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d1812, d1815}, 1)
+					d1816 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d1812, d1815}, 1)
 					ctx.EmitAndRegImm32(d1816.Reg, 1)
 					d1816.Type = tagBool
 					ctx.BindReg(d1816.Reg, &d1816)
@@ -36244,11 +36244,11 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d1788)
 					ctx.EnsureDesc(&d367)
 					ctx.EnsureDesc(&d1788)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d367, d1788})
+					ctx.EmitGoCallVoid(jitGoABI_24128c7ae9d19e5b, []JITValueDesc{d367, d1788})
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.SyncDesc(&d367)
-					d1818 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d367}, 2)
+					d1818 = ctx.EmitGoCallScalar(jitGoABI_11a997ee3b751875, []JITValueDesc{d367}, 2)
 					d1818.NoHeapPointer = false
 					ctx.BindReg(d1818.Reg, &d1818)
 					ctx.BindReg(d1818.Reg2, &d1818)
@@ -36278,7 +36278,7 @@ Patterns can be any of:
 					d362 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase358) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d1820 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d356}, 3)
+					d1820 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d356}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d1821 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1)}
 					ctx.EnsureDesc(&d1820)
@@ -36345,7 +36345,7 @@ Patterns can be any of:
 					ctx.BindReg(r531, &d1826)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d1826)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[]Scmer, value []Scmer) { *dst = value }), []JITValueDesc{d356, d1826})
+					ctx.EmitGoCallVoid(jitGoABI_3cfc76af02b619dc, []JITValueDesc{d356, d1826})
 					ctx.ReclaimUntrackedRegs()
 					stackArray1827 = ctx.AllocStack(int32(16))
 					_ = stackArray1827
@@ -36384,7 +36384,7 @@ Patterns can be any of:
 						panic("jit: generic call arg expects 2-word value (NewSymbol arg0)")
 					}
 					ctx.SyncDesc(&d1830)
-					d1831 = ctx.EmitGoCallScalar(GoFuncAddr(NewSymbol), []JITValueDesc{d1830}, 2)
+					d1831 = ctx.EmitGoCallScalar(jitGoABI_678e55d324700337, []JITValueDesc{d1830}, 2)
 					d1831.NoHeapPointer = false
 					ctx.BindReg(d1831.Reg, &d1831)
 					ctx.BindReg(d1831.Reg2, &d1831)
@@ -36446,7 +36446,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.StabilizeDescForControlFlow(&d362)
 					ctx.ReclaimUntrackedRegs()
-					d1833 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d356}, 3)
+					d1833 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d356}, 3)
 					ctx.ReclaimUntrackedRegs()
 					if d1833.SliceSizeKnown {
 						d1834 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d1833.KnownSliceLen))}
@@ -36522,7 +36522,7 @@ Patterns can be any of:
 					d362 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase358) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d1837 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d356}, 3)
+					d1837 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d356}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d1838 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
 					ctx.ReclaimUntrackedRegs()
@@ -36540,7 +36540,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d1839 = JITPrepareScmerGoArg(ctx, d1839)
 					ctx.SyncDesc(&d1839)
-					d1842 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d1839}, 1)
+					d1842 = ctx.EmitGoCallScalar(jitGoABI_c94eb298f761efc9, []JITValueDesc{d1839}, 1)
 					d1842.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d1842.Reg, 1)
 					d1842.Type = tagBool
@@ -36597,7 +36597,7 @@ Patterns can be any of:
 						panic("jit: generic call arg expects 1-word value")
 					}
 					ctx.SyncDesc(&d356)
-					d1844 = ctx.EmitGoCallScalar(GoFuncAddr(readFrom), []JITValueDesc{d356}, 2)
+					d1844 = ctx.EmitGoCallScalar(jitGoABI_187293f04bb82372, []JITValueDesc{d356}, 2)
 					d1844.NoHeapPointer = false
 					ctx.BindReg(d1844.Reg, &d1844)
 					ctx.BindReg(d1844.Reg2, &d1844)
@@ -36626,7 +36626,7 @@ Patterns can be any of:
 					ctx.EmitLeaRegMem(d1847.Reg, ctx.StackReg, int32(stackArray1845))
 					ctx.EmitMovRegImm64(d1847.Reg2, uint64(1))
 					ctx.EmitMovRegImm64(d1847.Reg3, uint64(1))
-					callResults1848 := JITEmitGoCallResults(ctx, GoFuncAddr(JITAppendScmerSlice), []JITValueDesc{d362, d1847}, []uint8{3}, []uint8{1})
+					callResults1848 := JITEmitGoCallResults(ctx, jitGoABI_dbbe576f282120a9, []JITValueDesc{d362, d1847})
 					d1849 = callResults1848[0]
 					d1850 = JITValueDesc{Loc: LocStackTriple, Type: tagSlice, StackOff: int32(phiBase358) + int32(56)}
 					ctx.EmitCopyDescWords(&d1850, &d1849, 3)
@@ -36698,7 +36698,7 @@ Patterns can be any of:
 					if d1853.Loc != LocRegPair && d1853.Loc != LocStackPair && d1853.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d1852 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d1853}, 2)
+					d1852 = ctx.EmitGoCallScalar(jitGoABI_e1a33cf0a7aeca49, []JITValueDesc{d1853}, 2)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d1852)
 					d1854 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString(")")}
@@ -36713,7 +36713,7 @@ Patterns can be any of:
 					} else {
 						d1855 = d1854
 					}
-					d1856 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d1852, d1855}, 1)
+					d1856 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d1852, d1855}, 1)
 					ctx.EmitAndRegImm32(d1856.Reg, 1)
 					d1856.Type = tagBool
 					ctx.BindReg(d1856.Reg, &d1856)
@@ -36766,7 +36766,7 @@ Patterns can be any of:
 					d362 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase358) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d1858 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d356}, 3)
+					d1858 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d356}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d1859 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1)}
 					ctx.EnsureDesc(&d1858)
@@ -36833,7 +36833,7 @@ Patterns can be any of:
 					ctx.BindReg(r541, &d1864)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d1864)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[]Scmer, value []Scmer) { *dst = value }), []JITValueDesc{d356, d1864})
+					ctx.EmitGoCallVoid(jitGoABI_3cfc76af02b619dc, []JITValueDesc{d356, d1864})
 					ctx.ReclaimUntrackedRegs()
 					d1865 = ctx.EmitNewSliceFromGoSlice(&d362)
 					ctx.StabilizeDescForControlFlow(&d1865)
@@ -36893,7 +36893,7 @@ Patterns can be any of:
 					} else {
 						d1870 = d1869
 					}
-					d1871 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d1868, d1870}, 1)
+					d1871 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d1868, d1870}, 1)
 					ctx.EmitAndRegImm32(d1871.Reg, 1)
 					ctx.EmitCmpRegImm32(d1871.Reg, 0)
 					ctx.EmitSetcc(d1871.Reg, CondEqual)
@@ -36982,11 +36982,11 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d1865)
 					ctx.EnsureDesc(&d367)
 					ctx.EnsureDesc(&d1865)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d367, d1865})
+					ctx.EmitGoCallVoid(jitGoABI_24128c7ae9d19e5b, []JITValueDesc{d367, d1865})
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.SyncDesc(&d367)
-					d1874 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d367}, 2)
+					d1874 = ctx.EmitGoCallScalar(jitGoABI_11a997ee3b751875, []JITValueDesc{d367}, 2)
 					d1874.NoHeapPointer = false
 					ctx.BindReg(d1874.Reg, &d1874)
 					ctx.BindReg(d1874.Reg2, &d1874)
@@ -37027,7 +37027,7 @@ Patterns can be any of:
 					ctx.EmitLeaRegMem(d1879.Reg, ctx.StackReg, int32(stackArray1877))
 					ctx.EmitMovRegImm64(d1879.Reg2, uint64(1))
 					ctx.EmitMovRegImm64(d1879.Reg3, uint64(1))
-					callResults1880 := JITEmitGoCallResults(ctx, GoFuncAddr(JITAppendScmerSlice), []JITValueDesc{d294, d1879}, []uint8{3}, []uint8{1})
+					callResults1880 := JITEmitGoCallResults(ctx, jitGoABI_dbbe576f282120a9, []JITValueDesc{d294, d1879})
 					d1881 = callResults1880[0]
 					d1882 = JITValueDesc{Loc: LocStackTriple, Type: tagSlice, StackOff: int32(phiBase292) + int32(16)}
 					ctx.EmitCopyDescWords(&d1882, &d1881, 3)
@@ -37055,7 +37055,7 @@ Patterns can be any of:
 					d296 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase292) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d1884 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d290}, 3)
+					d1884 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d290}, 3)
 					ctx.ReclaimUntrackedRegs()
 					if d1884.SliceSizeKnown {
 						d1885 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d1884.KnownSliceLen))}
@@ -37159,7 +37159,7 @@ Patterns can be any of:
 					if d1889.Loc != LocRegPair && d1889.Loc != LocStackPair && d1889.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d1888 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d1889}, 2)
+					d1888 = ctx.EmitGoCallScalar(jitGoABI_e1a33cf0a7aeca49, []JITValueDesc{d1889}, 2)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d1888)
 					d1890 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString(")")}
@@ -37174,7 +37174,7 @@ Patterns can be any of:
 					} else {
 						d1891 = d1890
 					}
-					d1892 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d1888, d1891}, 1)
+					d1892 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d1888, d1891}, 1)
 					ctx.EmitAndRegImm32(d1892.Reg, 1)
 					d1892.Type = tagBool
 					ctx.BindReg(d1892.Reg, &d1892)
@@ -37221,7 +37221,7 @@ Patterns can be any of:
 					d296 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase292) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d1894 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d290}, 3)
+					d1894 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d290}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d1895 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
 					ctx.ReclaimUntrackedRegs()
@@ -37239,7 +37239,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d1896 = JITPrepareScmerGoArg(ctx, d1896)
 					ctx.SyncDesc(&d1896)
-					d1899 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSourceInfo), []JITValueDesc{d1896}, 1)
+					d1899 = ctx.EmitGoCallScalar(jitGoABI_f352d2b202a682fd, []JITValueDesc{d1896}, 1)
 					d1899.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d1899.Reg, 1)
 					d1899.Type = tagBool
@@ -37352,7 +37352,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d295 = JITPrepareScmerGoArg(ctx, d295)
 					ctx.SyncDesc(&d295)
-					d1903 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d295}, 1)
+					d1903 = ctx.EmitGoCallScalar(jitGoABI_c94eb298f761efc9, []JITValueDesc{d295}, 1)
 					d1903.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d1903.Reg, 1)
 					d1903.Type = tagBool
@@ -37405,7 +37405,7 @@ Patterns can be any of:
 						panic("jit: generic call arg expects 1-word value")
 					}
 					ctx.SyncDesc(&d290)
-					d1905 = ctx.EmitGoCallScalar(GoFuncAddr(readFrom), []JITValueDesc{d290}, 2)
+					d1905 = ctx.EmitGoCallScalar(jitGoABI_187293f04bb82372, []JITValueDesc{d290}, 2)
 					d1905.NoHeapPointer = false
 					ctx.BindReg(d1905.Reg, &d1905)
 					ctx.BindReg(d1905.Reg2, &d1905)
@@ -37444,7 +37444,7 @@ Patterns can be any of:
 						panic("jit: generic call arg expects 2-word value (NewSymbol arg0)")
 					}
 					ctx.SyncDesc(&d1908)
-					d1909 = ctx.EmitGoCallScalar(GoFuncAddr(NewSymbol), []JITValueDesc{d1908}, 2)
+					d1909 = ctx.EmitGoCallScalar(jitGoABI_678e55d324700337, []JITValueDesc{d1908}, 2)
 					d1909.NoHeapPointer = false
 					ctx.BindReg(d1909.Reg, &d1909)
 					ctx.BindReg(d1909.Reg2, &d1909)
@@ -37473,7 +37473,7 @@ Patterns can be any of:
 					ctx.EmitLeaRegMem(d1910.Reg, ctx.StackReg, int32(stackArray1906))
 					ctx.EmitMovRegImm64(d1910.Reg2, uint64(2))
 					ctx.EmitMovRegImm64(d1910.Reg3, uint64(2))
-					callResults1911 := JITEmitGoCallResults(ctx, GoFuncAddr(JITNewSliceCopy), []JITValueDesc{d1910}, []uint8{2}, []uint8{1})
+					callResults1911 := JITEmitGoCallResults(ctx, jitGoABI_de4d00b58c7c0d07, []JITValueDesc{d1910})
 					d1912 = callResults1911[0]
 					ctx.StabilizeDescForControlFlow(&d1912)
 					inlineHome1913 := d1912
@@ -37532,7 +37532,7 @@ Patterns can be any of:
 					} else {
 						d1917 = d1916
 					}
-					d1918 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d1915, d1917}, 1)
+					d1918 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d1915, d1917}, 1)
 					ctx.EmitAndRegImm32(d1918.Reg, 1)
 					ctx.EmitCmpRegImm32(d1918.Reg, 0)
 					ctx.EmitSetcc(d1918.Reg, CondEqual)
@@ -37607,7 +37607,7 @@ Patterns can be any of:
 					d296 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase292) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d1921 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d290}, 3)
+					d1921 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d290}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d1922 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1)}
 					ctx.EnsureDesc(&d1921)
@@ -37674,7 +37674,7 @@ Patterns can be any of:
 					ctx.BindReg(r566, &d1927)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d1927)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[]Scmer, value []Scmer) { *dst = value }), []JITValueDesc{d290, d1927})
+					ctx.EmitGoCallVoid(jitGoABI_3cfc76af02b619dc, []JITValueDesc{d290, d1927})
 					ctx.ReclaimUntrackedRegs()
 					d1928 = ctx.EmitNewSliceFromGoSlice(&d294)
 					ctx.ReclaimUntrackedRegs()
@@ -37682,12 +37682,12 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d1928)
 					ctx.EnsureDesc(&d301)
 					ctx.EnsureDesc(&d1928)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d301, d1928})
+					ctx.EmitGoCallVoid(jitGoABI_24128c7ae9d19e5b, []JITValueDesc{d301, d1928})
 					ctx.FreeDesc(&d1928)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.SyncDesc(&d301)
-					d1929 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d301}, 2)
+					d1929 = ctx.EmitGoCallScalar(jitGoABI_11a997ee3b751875, []JITValueDesc{d301}, 2)
 					d1929.NoHeapPointer = false
 					ctx.BindReg(d1929.Reg, &d1929)
 					ctx.BindReg(d1929.Reg2, &d1929)
@@ -37718,7 +37718,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d1896 = JITPrepareScmerGoArg(ctx, d1896)
 					ctx.SyncDesc(&d1896)
-					d1931 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).SourceInfo), []JITValueDesc{d1896}, 1)
+					d1931 = ctx.EmitGoCallScalar(jitGoABI_efc59dae573ac860, []JITValueDesc{d1896}, 1)
 					d1931.NoHeapPointer = false
 					ctx.BindReg(d1931.Reg, &d1931)
 					ctx.ReclaimUntrackedRegs()
@@ -37727,7 +37727,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d1931)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d1932)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *SourceInfo, value SourceInfo) { *dst = value }), []JITValueDesc{d301, d1932})
+					ctx.EmitGoCallVoid(jitGoABI_711f67c681c46de9, []JITValueDesc{d301, d1932})
 					ctx.FreeDesc(&d1932)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
@@ -37822,7 +37822,7 @@ Patterns can be any of:
 					if d1937.Loc != LocRegPair && d1937.Loc != LocStackPair && d1937.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d1936 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d1937}, 2)
+					d1936 = ctx.EmitGoCallScalar(jitGoABI_e1a33cf0a7aeca49, []JITValueDesc{d1937}, 2)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d1936)
 					d1938 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString("(")}
@@ -37837,7 +37837,7 @@ Patterns can be any of:
 					} else {
 						d1939 = d1938
 					}
-					d1940 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d1936, d1939}, 1)
+					d1940 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d1936, d1939}, 1)
 					ctx.EmitAndRegImm32(d1940.Reg, 1)
 					d1940.Type = tagBool
 					ctx.BindReg(d1940.Reg, &d1940)
@@ -37891,11 +37891,11 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d1912)
 					ctx.EnsureDesc(&d301)
 					ctx.EnsureDesc(&d1912)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d301, d1912})
+					ctx.EmitGoCallVoid(jitGoABI_24128c7ae9d19e5b, []JITValueDesc{d301, d1912})
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.SyncDesc(&d301)
-					d1942 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d301}, 2)
+					d1942 = ctx.EmitGoCallScalar(jitGoABI_11a997ee3b751875, []JITValueDesc{d301}, 2)
 					d1942.NoHeapPointer = false
 					ctx.BindReg(d1942.Reg, &d1942)
 					ctx.BindReg(d1942.Reg2, &d1942)
@@ -37925,7 +37925,7 @@ Patterns can be any of:
 					d296 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase292) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d1944 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d290}, 3)
+					d1944 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d290}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d1945 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1)}
 					ctx.EnsureDesc(&d1944)
@@ -37992,7 +37992,7 @@ Patterns can be any of:
 					ctx.BindReg(r575, &d1950)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d1950)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[]Scmer, value []Scmer) { *dst = value }), []JITValueDesc{d290, d1950})
+					ctx.EmitGoCallVoid(jitGoABI_3cfc76af02b619dc, []JITValueDesc{d290, d1950})
 					ctx.ReclaimUntrackedRegs()
 					stackArray1951 = ctx.AllocStack(int32(16))
 					_ = stackArray1951
@@ -38031,7 +38031,7 @@ Patterns can be any of:
 						panic("jit: generic call arg expects 2-word value (NewSymbol arg0)")
 					}
 					ctx.SyncDesc(&d1954)
-					d1955 = ctx.EmitGoCallScalar(GoFuncAddr(NewSymbol), []JITValueDesc{d1954}, 2)
+					d1955 = ctx.EmitGoCallScalar(jitGoABI_678e55d324700337, []JITValueDesc{d1954}, 2)
 					d1955.NoHeapPointer = false
 					ctx.BindReg(d1955.Reg, &d1955)
 					ctx.BindReg(d1955.Reg2, &d1955)
@@ -38093,7 +38093,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.StabilizeDescForControlFlow(&d296)
 					ctx.ReclaimUntrackedRegs()
-					d1957 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d290}, 3)
+					d1957 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d290}, 3)
 					ctx.ReclaimUntrackedRegs()
 					if d1957.SliceSizeKnown {
 						d1958 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d1957.KnownSliceLen))}
@@ -38169,7 +38169,7 @@ Patterns can be any of:
 					d296 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase292) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d1961 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d290}, 3)
+					d1961 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d290}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d1962 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
 					ctx.ReclaimUntrackedRegs()
@@ -38187,7 +38187,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d1963 = JITPrepareScmerGoArg(ctx, d1963)
 					ctx.SyncDesc(&d1963)
-					d1966 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d1963}, 1)
+					d1966 = ctx.EmitGoCallScalar(jitGoABI_c94eb298f761efc9, []JITValueDesc{d1963}, 1)
 					d1966.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d1966.Reg, 1)
 					d1966.Type = tagBool
@@ -38244,7 +38244,7 @@ Patterns can be any of:
 						panic("jit: generic call arg expects 1-word value")
 					}
 					ctx.SyncDesc(&d290)
-					d1968 = ctx.EmitGoCallScalar(GoFuncAddr(readFrom), []JITValueDesc{d290}, 2)
+					d1968 = ctx.EmitGoCallScalar(jitGoABI_187293f04bb82372, []JITValueDesc{d290}, 2)
 					d1968.NoHeapPointer = false
 					ctx.BindReg(d1968.Reg, &d1968)
 					ctx.BindReg(d1968.Reg2, &d1968)
@@ -38273,7 +38273,7 @@ Patterns can be any of:
 					ctx.EmitLeaRegMem(d1971.Reg, ctx.StackReg, int32(stackArray1969))
 					ctx.EmitMovRegImm64(d1971.Reg2, uint64(1))
 					ctx.EmitMovRegImm64(d1971.Reg3, uint64(1))
-					callResults1972 := JITEmitGoCallResults(ctx, GoFuncAddr(JITAppendScmerSlice), []JITValueDesc{d296, d1971}, []uint8{3}, []uint8{1})
+					callResults1972 := JITEmitGoCallResults(ctx, jitGoABI_dbbe576f282120a9, []JITValueDesc{d296, d1971})
 					d1973 = callResults1972[0]
 					d1974 = JITValueDesc{Loc: LocStackTriple, Type: tagSlice, StackOff: int32(phiBase292) + int32(56)}
 					ctx.EmitCopyDescWords(&d1974, &d1973, 3)
@@ -38345,7 +38345,7 @@ Patterns can be any of:
 					if d1977.Loc != LocRegPair && d1977.Loc != LocStackPair && d1977.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d1976 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d1977}, 2)
+					d1976 = ctx.EmitGoCallScalar(jitGoABI_e1a33cf0a7aeca49, []JITValueDesc{d1977}, 2)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d1976)
 					d1978 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString(")")}
@@ -38360,7 +38360,7 @@ Patterns can be any of:
 					} else {
 						d1979 = d1978
 					}
-					d1980 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d1976, d1979}, 1)
+					d1980 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d1976, d1979}, 1)
 					ctx.EmitAndRegImm32(d1980.Reg, 1)
 					d1980.Type = tagBool
 					ctx.BindReg(d1980.Reg, &d1980)
@@ -38413,7 +38413,7 @@ Patterns can be any of:
 					d296 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase292) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d1982 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d290}, 3)
+					d1982 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d290}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d1983 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1)}
 					ctx.EnsureDesc(&d1982)
@@ -38480,7 +38480,7 @@ Patterns can be any of:
 					ctx.BindReg(r585, &d1988)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d1988)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[]Scmer, value []Scmer) { *dst = value }), []JITValueDesc{d290, d1988})
+					ctx.EmitGoCallVoid(jitGoABI_3cfc76af02b619dc, []JITValueDesc{d290, d1988})
 					ctx.ReclaimUntrackedRegs()
 					d1989 = ctx.EmitNewSliceFromGoSlice(&d296)
 					ctx.StabilizeDescForControlFlow(&d1989)
@@ -38540,7 +38540,7 @@ Patterns can be any of:
 					} else {
 						d1994 = d1993
 					}
-					d1995 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d1992, d1994}, 1)
+					d1995 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d1992, d1994}, 1)
 					ctx.EmitAndRegImm32(d1995.Reg, 1)
 					ctx.EmitCmpRegImm32(d1995.Reg, 0)
 					ctx.EmitSetcc(d1995.Reg, CondEqual)
@@ -38629,11 +38629,11 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d1989)
 					ctx.EnsureDesc(&d301)
 					ctx.EnsureDesc(&d1989)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d301, d1989})
+					ctx.EmitGoCallVoid(jitGoABI_24128c7ae9d19e5b, []JITValueDesc{d301, d1989})
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.SyncDesc(&d301)
-					d1998 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d301}, 2)
+					d1998 = ctx.EmitGoCallScalar(jitGoABI_11a997ee3b751875, []JITValueDesc{d301}, 2)
 					d1998.NoHeapPointer = false
 					ctx.BindReg(d1998.Reg, &d1998)
 					ctx.BindReg(d1998.Reg2, &d1998)
@@ -38674,7 +38674,7 @@ Patterns can be any of:
 					ctx.EmitLeaRegMem(d2003.Reg, ctx.StackReg, int32(stackArray2001))
 					ctx.EmitMovRegImm64(d2003.Reg2, uint64(1))
 					ctx.EmitMovRegImm64(d2003.Reg3, uint64(1))
-					callResults2004 := JITEmitGoCallResults(ctx, GoFuncAddr(JITAppendScmerSlice), []JITValueDesc{d228, d2003}, []uint8{3}, []uint8{1})
+					callResults2004 := JITEmitGoCallResults(ctx, jitGoABI_dbbe576f282120a9, []JITValueDesc{d228, d2003})
 					d2005 = callResults2004[0]
 					d2006 = JITValueDesc{Loc: LocStackTriple, Type: tagSlice, StackOff: int32(phiBase226) + int32(16)}
 					ctx.EmitCopyDescWords(&d2006, &d2005, 3)
@@ -38702,7 +38702,7 @@ Patterns can be any of:
 					d230 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase226) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d2008 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d224}, 3)
+					d2008 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d224}, 3)
 					ctx.ReclaimUntrackedRegs()
 					if d2008.SliceSizeKnown {
 						d2009 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d2008.KnownSliceLen))}
@@ -38806,7 +38806,7 @@ Patterns can be any of:
 					if d2013.Loc != LocRegPair && d2013.Loc != LocStackPair && d2013.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d2012 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d2013}, 2)
+					d2012 = ctx.EmitGoCallScalar(jitGoABI_e1a33cf0a7aeca49, []JITValueDesc{d2013}, 2)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d2012)
 					d2014 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString(")")}
@@ -38821,7 +38821,7 @@ Patterns can be any of:
 					} else {
 						d2015 = d2014
 					}
-					d2016 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d2012, d2015}, 1)
+					d2016 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d2012, d2015}, 1)
 					ctx.EmitAndRegImm32(d2016.Reg, 1)
 					d2016.Type = tagBool
 					ctx.BindReg(d2016.Reg, &d2016)
@@ -38868,7 +38868,7 @@ Patterns can be any of:
 					d230 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase226) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d2018 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d224}, 3)
+					d2018 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d224}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d2019 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
 					ctx.ReclaimUntrackedRegs()
@@ -38886,7 +38886,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d2020 = JITPrepareScmerGoArg(ctx, d2020)
 					ctx.SyncDesc(&d2020)
-					d2023 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSourceInfo), []JITValueDesc{d2020}, 1)
+					d2023 = ctx.EmitGoCallScalar(jitGoABI_f352d2b202a682fd, []JITValueDesc{d2020}, 1)
 					d2023.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d2023.Reg, 1)
 					d2023.Type = tagBool
@@ -38999,7 +38999,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d229 = JITPrepareScmerGoArg(ctx, d229)
 					ctx.SyncDesc(&d229)
-					d2027 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d229}, 1)
+					d2027 = ctx.EmitGoCallScalar(jitGoABI_c94eb298f761efc9, []JITValueDesc{d229}, 1)
 					d2027.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d2027.Reg, 1)
 					d2027.Type = tagBool
@@ -39052,7 +39052,7 @@ Patterns can be any of:
 						panic("jit: generic call arg expects 1-word value")
 					}
 					ctx.SyncDesc(&d224)
-					d2029 = ctx.EmitGoCallScalar(GoFuncAddr(readFrom), []JITValueDesc{d224}, 2)
+					d2029 = ctx.EmitGoCallScalar(jitGoABI_187293f04bb82372, []JITValueDesc{d224}, 2)
 					d2029.NoHeapPointer = false
 					ctx.BindReg(d2029.Reg, &d2029)
 					ctx.BindReg(d2029.Reg2, &d2029)
@@ -39091,7 +39091,7 @@ Patterns can be any of:
 						panic("jit: generic call arg expects 2-word value (NewSymbol arg0)")
 					}
 					ctx.SyncDesc(&d2032)
-					d2033 = ctx.EmitGoCallScalar(GoFuncAddr(NewSymbol), []JITValueDesc{d2032}, 2)
+					d2033 = ctx.EmitGoCallScalar(jitGoABI_678e55d324700337, []JITValueDesc{d2032}, 2)
 					d2033.NoHeapPointer = false
 					ctx.BindReg(d2033.Reg, &d2033)
 					ctx.BindReg(d2033.Reg2, &d2033)
@@ -39120,7 +39120,7 @@ Patterns can be any of:
 					ctx.EmitLeaRegMem(d2034.Reg, ctx.StackReg, int32(stackArray2030))
 					ctx.EmitMovRegImm64(d2034.Reg2, uint64(2))
 					ctx.EmitMovRegImm64(d2034.Reg3, uint64(2))
-					callResults2035 := JITEmitGoCallResults(ctx, GoFuncAddr(JITNewSliceCopy), []JITValueDesc{d2034}, []uint8{2}, []uint8{1})
+					callResults2035 := JITEmitGoCallResults(ctx, jitGoABI_de4d00b58c7c0d07, []JITValueDesc{d2034})
 					d2036 = callResults2035[0]
 					ctx.StabilizeDescForControlFlow(&d2036)
 					inlineHome2037 := d2036
@@ -39179,7 +39179,7 @@ Patterns can be any of:
 					} else {
 						d2041 = d2040
 					}
-					d2042 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d2039, d2041}, 1)
+					d2042 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d2039, d2041}, 1)
 					ctx.EmitAndRegImm32(d2042.Reg, 1)
 					ctx.EmitCmpRegImm32(d2042.Reg, 0)
 					ctx.EmitSetcc(d2042.Reg, CondEqual)
@@ -39254,7 +39254,7 @@ Patterns can be any of:
 					d230 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase226) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d2045 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d224}, 3)
+					d2045 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d224}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d2046 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1)}
 					ctx.EnsureDesc(&d2045)
@@ -39321,7 +39321,7 @@ Patterns can be any of:
 					ctx.BindReg(r610, &d2051)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d2051)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[]Scmer, value []Scmer) { *dst = value }), []JITValueDesc{d224, d2051})
+					ctx.EmitGoCallVoid(jitGoABI_3cfc76af02b619dc, []JITValueDesc{d224, d2051})
 					ctx.ReclaimUntrackedRegs()
 					d2052 = ctx.EmitNewSliceFromGoSlice(&d228)
 					ctx.ReclaimUntrackedRegs()
@@ -39329,12 +39329,12 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d2052)
 					ctx.EnsureDesc(&d235)
 					ctx.EnsureDesc(&d2052)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d235, d2052})
+					ctx.EmitGoCallVoid(jitGoABI_24128c7ae9d19e5b, []JITValueDesc{d235, d2052})
 					ctx.FreeDesc(&d2052)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.SyncDesc(&d235)
-					d2053 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d235}, 2)
+					d2053 = ctx.EmitGoCallScalar(jitGoABI_11a997ee3b751875, []JITValueDesc{d235}, 2)
 					d2053.NoHeapPointer = false
 					ctx.BindReg(d2053.Reg, &d2053)
 					ctx.BindReg(d2053.Reg2, &d2053)
@@ -39365,7 +39365,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d2020 = JITPrepareScmerGoArg(ctx, d2020)
 					ctx.SyncDesc(&d2020)
-					d2055 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).SourceInfo), []JITValueDesc{d2020}, 1)
+					d2055 = ctx.EmitGoCallScalar(jitGoABI_efc59dae573ac860, []JITValueDesc{d2020}, 1)
 					d2055.NoHeapPointer = false
 					ctx.BindReg(d2055.Reg, &d2055)
 					ctx.ReclaimUntrackedRegs()
@@ -39374,7 +39374,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d2055)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d2056)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *SourceInfo, value SourceInfo) { *dst = value }), []JITValueDesc{d235, d2056})
+					ctx.EmitGoCallVoid(jitGoABI_711f67c681c46de9, []JITValueDesc{d235, d2056})
 					ctx.FreeDesc(&d2056)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
@@ -39469,7 +39469,7 @@ Patterns can be any of:
 					if d2061.Loc != LocRegPair && d2061.Loc != LocStackPair && d2061.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d2060 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d2061}, 2)
+					d2060 = ctx.EmitGoCallScalar(jitGoABI_e1a33cf0a7aeca49, []JITValueDesc{d2061}, 2)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d2060)
 					d2062 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString("(")}
@@ -39484,7 +39484,7 @@ Patterns can be any of:
 					} else {
 						d2063 = d2062
 					}
-					d2064 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d2060, d2063}, 1)
+					d2064 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d2060, d2063}, 1)
 					ctx.EmitAndRegImm32(d2064.Reg, 1)
 					d2064.Type = tagBool
 					ctx.BindReg(d2064.Reg, &d2064)
@@ -39538,11 +39538,11 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d2036)
 					ctx.EnsureDesc(&d235)
 					ctx.EnsureDesc(&d2036)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d235, d2036})
+					ctx.EmitGoCallVoid(jitGoABI_24128c7ae9d19e5b, []JITValueDesc{d235, d2036})
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.SyncDesc(&d235)
-					d2066 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d235}, 2)
+					d2066 = ctx.EmitGoCallScalar(jitGoABI_11a997ee3b751875, []JITValueDesc{d235}, 2)
 					d2066.NoHeapPointer = false
 					ctx.BindReg(d2066.Reg, &d2066)
 					ctx.BindReg(d2066.Reg2, &d2066)
@@ -39572,7 +39572,7 @@ Patterns can be any of:
 					d230 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase226) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d2068 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d224}, 3)
+					d2068 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d224}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d2069 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1)}
 					ctx.EnsureDesc(&d2068)
@@ -39639,7 +39639,7 @@ Patterns can be any of:
 					ctx.BindReg(r619, &d2074)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d2074)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[]Scmer, value []Scmer) { *dst = value }), []JITValueDesc{d224, d2074})
+					ctx.EmitGoCallVoid(jitGoABI_3cfc76af02b619dc, []JITValueDesc{d224, d2074})
 					ctx.ReclaimUntrackedRegs()
 					stackArray2075 = ctx.AllocStack(int32(16))
 					_ = stackArray2075
@@ -39678,7 +39678,7 @@ Patterns can be any of:
 						panic("jit: generic call arg expects 2-word value (NewSymbol arg0)")
 					}
 					ctx.SyncDesc(&d2078)
-					d2079 = ctx.EmitGoCallScalar(GoFuncAddr(NewSymbol), []JITValueDesc{d2078}, 2)
+					d2079 = ctx.EmitGoCallScalar(jitGoABI_678e55d324700337, []JITValueDesc{d2078}, 2)
 					d2079.NoHeapPointer = false
 					ctx.BindReg(d2079.Reg, &d2079)
 					ctx.BindReg(d2079.Reg2, &d2079)
@@ -39740,7 +39740,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.StabilizeDescForControlFlow(&d230)
 					ctx.ReclaimUntrackedRegs()
-					d2081 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d224}, 3)
+					d2081 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d224}, 3)
 					ctx.ReclaimUntrackedRegs()
 					if d2081.SliceSizeKnown {
 						d2082 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d2081.KnownSliceLen))}
@@ -39816,7 +39816,7 @@ Patterns can be any of:
 					d230 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase226) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d2085 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d224}, 3)
+					d2085 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d224}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d2086 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
 					ctx.ReclaimUntrackedRegs()
@@ -39834,7 +39834,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d2087 = JITPrepareScmerGoArg(ctx, d2087)
 					ctx.SyncDesc(&d2087)
-					d2090 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d2087}, 1)
+					d2090 = ctx.EmitGoCallScalar(jitGoABI_c94eb298f761efc9, []JITValueDesc{d2087}, 1)
 					d2090.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d2090.Reg, 1)
 					d2090.Type = tagBool
@@ -39891,7 +39891,7 @@ Patterns can be any of:
 						panic("jit: generic call arg expects 1-word value")
 					}
 					ctx.SyncDesc(&d224)
-					d2092 = ctx.EmitGoCallScalar(GoFuncAddr(readFrom), []JITValueDesc{d224}, 2)
+					d2092 = ctx.EmitGoCallScalar(jitGoABI_187293f04bb82372, []JITValueDesc{d224}, 2)
 					d2092.NoHeapPointer = false
 					ctx.BindReg(d2092.Reg, &d2092)
 					ctx.BindReg(d2092.Reg2, &d2092)
@@ -39920,7 +39920,7 @@ Patterns can be any of:
 					ctx.EmitLeaRegMem(d2095.Reg, ctx.StackReg, int32(stackArray2093))
 					ctx.EmitMovRegImm64(d2095.Reg2, uint64(1))
 					ctx.EmitMovRegImm64(d2095.Reg3, uint64(1))
-					callResults2096 := JITEmitGoCallResults(ctx, GoFuncAddr(JITAppendScmerSlice), []JITValueDesc{d230, d2095}, []uint8{3}, []uint8{1})
+					callResults2096 := JITEmitGoCallResults(ctx, jitGoABI_dbbe576f282120a9, []JITValueDesc{d230, d2095})
 					d2097 = callResults2096[0]
 					d2098 = JITValueDesc{Loc: LocStackTriple, Type: tagSlice, StackOff: int32(phiBase226) + int32(56)}
 					ctx.EmitCopyDescWords(&d2098, &d2097, 3)
@@ -39992,7 +39992,7 @@ Patterns can be any of:
 					if d2101.Loc != LocRegPair && d2101.Loc != LocStackPair && d2101.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d2100 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d2101}, 2)
+					d2100 = ctx.EmitGoCallScalar(jitGoABI_e1a33cf0a7aeca49, []JITValueDesc{d2101}, 2)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d2100)
 					d2102 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString(")")}
@@ -40007,7 +40007,7 @@ Patterns can be any of:
 					} else {
 						d2103 = d2102
 					}
-					d2104 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d2100, d2103}, 1)
+					d2104 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d2100, d2103}, 1)
 					ctx.EmitAndRegImm32(d2104.Reg, 1)
 					d2104.Type = tagBool
 					ctx.BindReg(d2104.Reg, &d2104)
@@ -40060,7 +40060,7 @@ Patterns can be any of:
 					d230 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase226) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d2106 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d224}, 3)
+					d2106 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d224}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d2107 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1)}
 					ctx.EnsureDesc(&d2106)
@@ -40127,7 +40127,7 @@ Patterns can be any of:
 					ctx.BindReg(r629, &d2112)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d2112)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[]Scmer, value []Scmer) { *dst = value }), []JITValueDesc{d224, d2112})
+					ctx.EmitGoCallVoid(jitGoABI_3cfc76af02b619dc, []JITValueDesc{d224, d2112})
 					ctx.ReclaimUntrackedRegs()
 					d2113 = ctx.EmitNewSliceFromGoSlice(&d230)
 					ctx.StabilizeDescForControlFlow(&d2113)
@@ -40187,7 +40187,7 @@ Patterns can be any of:
 					} else {
 						d2118 = d2117
 					}
-					d2119 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d2116, d2118}, 1)
+					d2119 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d2116, d2118}, 1)
 					ctx.EmitAndRegImm32(d2119.Reg, 1)
 					ctx.EmitCmpRegImm32(d2119.Reg, 0)
 					ctx.EmitSetcc(d2119.Reg, CondEqual)
@@ -40276,11 +40276,11 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d2113)
 					ctx.EnsureDesc(&d235)
 					ctx.EnsureDesc(&d2113)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d235, d2113})
+					ctx.EmitGoCallVoid(jitGoABI_24128c7ae9d19e5b, []JITValueDesc{d235, d2113})
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.SyncDesc(&d235)
-					d2122 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d235}, 2)
+					d2122 = ctx.EmitGoCallScalar(jitGoABI_11a997ee3b751875, []JITValueDesc{d235}, 2)
 					d2122.NoHeapPointer = false
 					ctx.BindReg(d2122.Reg, &d2122)
 					ctx.BindReg(d2122.Reg2, &d2122)
@@ -40321,7 +40321,7 @@ Patterns can be any of:
 					ctx.EmitLeaRegMem(d2127.Reg, ctx.StackReg, int32(stackArray2125))
 					ctx.EmitMovRegImm64(d2127.Reg2, uint64(1))
 					ctx.EmitMovRegImm64(d2127.Reg3, uint64(1))
-					callResults2128 := JITEmitGoCallResults(ctx, GoFuncAddr(JITAppendScmerSlice), []JITValueDesc{d162, d2127}, []uint8{3}, []uint8{1})
+					callResults2128 := JITEmitGoCallResults(ctx, jitGoABI_dbbe576f282120a9, []JITValueDesc{d162, d2127})
 					d2129 = callResults2128[0]
 					d2130 = JITValueDesc{Loc: LocStackTriple, Type: tagSlice, StackOff: int32(phiBase160) + int32(16)}
 					ctx.EmitCopyDescWords(&d2130, &d2129, 3)
@@ -40349,7 +40349,7 @@ Patterns can be any of:
 					d164 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase160) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d2132 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d158}, 3)
+					d2132 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d158}, 3)
 					ctx.ReclaimUntrackedRegs()
 					if d2132.SliceSizeKnown {
 						d2133 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d2132.KnownSliceLen))}
@@ -40453,7 +40453,7 @@ Patterns can be any of:
 					if d2137.Loc != LocRegPair && d2137.Loc != LocStackPair && d2137.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d2136 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d2137}, 2)
+					d2136 = ctx.EmitGoCallScalar(jitGoABI_e1a33cf0a7aeca49, []JITValueDesc{d2137}, 2)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d2136)
 					d2138 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString(")")}
@@ -40468,7 +40468,7 @@ Patterns can be any of:
 					} else {
 						d2139 = d2138
 					}
-					d2140 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d2136, d2139}, 1)
+					d2140 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d2136, d2139}, 1)
 					ctx.EmitAndRegImm32(d2140.Reg, 1)
 					d2140.Type = tagBool
 					ctx.BindReg(d2140.Reg, &d2140)
@@ -40515,7 +40515,7 @@ Patterns can be any of:
 					d164 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase160) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d2142 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d158}, 3)
+					d2142 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d158}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d2143 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
 					ctx.ReclaimUntrackedRegs()
@@ -40533,7 +40533,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d2144 = JITPrepareScmerGoArg(ctx, d2144)
 					ctx.SyncDesc(&d2144)
-					d2147 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSourceInfo), []JITValueDesc{d2144}, 1)
+					d2147 = ctx.EmitGoCallScalar(jitGoABI_f352d2b202a682fd, []JITValueDesc{d2144}, 1)
 					d2147.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d2147.Reg, 1)
 					d2147.Type = tagBool
@@ -40646,7 +40646,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d163 = JITPrepareScmerGoArg(ctx, d163)
 					ctx.SyncDesc(&d163)
-					d2151 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d163}, 1)
+					d2151 = ctx.EmitGoCallScalar(jitGoABI_c94eb298f761efc9, []JITValueDesc{d163}, 1)
 					d2151.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d2151.Reg, 1)
 					d2151.Type = tagBool
@@ -40699,7 +40699,7 @@ Patterns can be any of:
 						panic("jit: generic call arg expects 1-word value")
 					}
 					ctx.SyncDesc(&d158)
-					d2153 = ctx.EmitGoCallScalar(GoFuncAddr(readFrom), []JITValueDesc{d158}, 2)
+					d2153 = ctx.EmitGoCallScalar(jitGoABI_187293f04bb82372, []JITValueDesc{d158}, 2)
 					d2153.NoHeapPointer = false
 					ctx.BindReg(d2153.Reg, &d2153)
 					ctx.BindReg(d2153.Reg2, &d2153)
@@ -40738,7 +40738,7 @@ Patterns can be any of:
 						panic("jit: generic call arg expects 2-word value (NewSymbol arg0)")
 					}
 					ctx.SyncDesc(&d2156)
-					d2157 = ctx.EmitGoCallScalar(GoFuncAddr(NewSymbol), []JITValueDesc{d2156}, 2)
+					d2157 = ctx.EmitGoCallScalar(jitGoABI_678e55d324700337, []JITValueDesc{d2156}, 2)
 					d2157.NoHeapPointer = false
 					ctx.BindReg(d2157.Reg, &d2157)
 					ctx.BindReg(d2157.Reg2, &d2157)
@@ -40767,7 +40767,7 @@ Patterns can be any of:
 					ctx.EmitLeaRegMem(d2158.Reg, ctx.StackReg, int32(stackArray2154))
 					ctx.EmitMovRegImm64(d2158.Reg2, uint64(2))
 					ctx.EmitMovRegImm64(d2158.Reg3, uint64(2))
-					callResults2159 := JITEmitGoCallResults(ctx, GoFuncAddr(JITNewSliceCopy), []JITValueDesc{d2158}, []uint8{2}, []uint8{1})
+					callResults2159 := JITEmitGoCallResults(ctx, jitGoABI_de4d00b58c7c0d07, []JITValueDesc{d2158})
 					d2160 = callResults2159[0]
 					ctx.StabilizeDescForControlFlow(&d2160)
 					inlineHome2161 := d2160
@@ -40826,7 +40826,7 @@ Patterns can be any of:
 					} else {
 						d2165 = d2164
 					}
-					d2166 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d2163, d2165}, 1)
+					d2166 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d2163, d2165}, 1)
 					ctx.EmitAndRegImm32(d2166.Reg, 1)
 					ctx.EmitCmpRegImm32(d2166.Reg, 0)
 					ctx.EmitSetcc(d2166.Reg, CondEqual)
@@ -40901,7 +40901,7 @@ Patterns can be any of:
 					d164 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase160) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d2169 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d158}, 3)
+					d2169 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d158}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d2170 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1)}
 					ctx.EnsureDesc(&d2169)
@@ -40968,7 +40968,7 @@ Patterns can be any of:
 					ctx.BindReg(r654, &d2175)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d2175)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[]Scmer, value []Scmer) { *dst = value }), []JITValueDesc{d158, d2175})
+					ctx.EmitGoCallVoid(jitGoABI_3cfc76af02b619dc, []JITValueDesc{d158, d2175})
 					ctx.ReclaimUntrackedRegs()
 					d2176 = ctx.EmitNewSliceFromGoSlice(&d162)
 					ctx.ReclaimUntrackedRegs()
@@ -40976,12 +40976,12 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d2176)
 					ctx.EnsureDesc(&d169)
 					ctx.EnsureDesc(&d2176)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d169, d2176})
+					ctx.EmitGoCallVoid(jitGoABI_24128c7ae9d19e5b, []JITValueDesc{d169, d2176})
 					ctx.FreeDesc(&d2176)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.SyncDesc(&d169)
-					d2177 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d169}, 2)
+					d2177 = ctx.EmitGoCallScalar(jitGoABI_11a997ee3b751875, []JITValueDesc{d169}, 2)
 					d2177.NoHeapPointer = false
 					ctx.BindReg(d2177.Reg, &d2177)
 					ctx.BindReg(d2177.Reg2, &d2177)
@@ -41012,7 +41012,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d2144 = JITPrepareScmerGoArg(ctx, d2144)
 					ctx.SyncDesc(&d2144)
-					d2179 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).SourceInfo), []JITValueDesc{d2144}, 1)
+					d2179 = ctx.EmitGoCallScalar(jitGoABI_efc59dae573ac860, []JITValueDesc{d2144}, 1)
 					d2179.NoHeapPointer = false
 					ctx.BindReg(d2179.Reg, &d2179)
 					ctx.ReclaimUntrackedRegs()
@@ -41021,7 +41021,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d2179)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d2180)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *SourceInfo, value SourceInfo) { *dst = value }), []JITValueDesc{d169, d2180})
+					ctx.EmitGoCallVoid(jitGoABI_711f67c681c46de9, []JITValueDesc{d169, d2180})
 					ctx.FreeDesc(&d2180)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
@@ -41116,7 +41116,7 @@ Patterns can be any of:
 					if d2185.Loc != LocRegPair && d2185.Loc != LocStackPair && d2185.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d2184 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d2185}, 2)
+					d2184 = ctx.EmitGoCallScalar(jitGoABI_e1a33cf0a7aeca49, []JITValueDesc{d2185}, 2)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d2184)
 					d2186 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString("(")}
@@ -41131,7 +41131,7 @@ Patterns can be any of:
 					} else {
 						d2187 = d2186
 					}
-					d2188 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d2184, d2187}, 1)
+					d2188 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d2184, d2187}, 1)
 					ctx.EmitAndRegImm32(d2188.Reg, 1)
 					d2188.Type = tagBool
 					ctx.BindReg(d2188.Reg, &d2188)
@@ -41185,11 +41185,11 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d2160)
 					ctx.EnsureDesc(&d169)
 					ctx.EnsureDesc(&d2160)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d169, d2160})
+					ctx.EmitGoCallVoid(jitGoABI_24128c7ae9d19e5b, []JITValueDesc{d169, d2160})
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.SyncDesc(&d169)
-					d2190 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d169}, 2)
+					d2190 = ctx.EmitGoCallScalar(jitGoABI_11a997ee3b751875, []JITValueDesc{d169}, 2)
 					d2190.NoHeapPointer = false
 					ctx.BindReg(d2190.Reg, &d2190)
 					ctx.BindReg(d2190.Reg2, &d2190)
@@ -41219,7 +41219,7 @@ Patterns can be any of:
 					d164 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase160) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d2192 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d158}, 3)
+					d2192 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d158}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d2193 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1)}
 					ctx.EnsureDesc(&d2192)
@@ -41286,7 +41286,7 @@ Patterns can be any of:
 					ctx.BindReg(r663, &d2198)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d2198)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[]Scmer, value []Scmer) { *dst = value }), []JITValueDesc{d158, d2198})
+					ctx.EmitGoCallVoid(jitGoABI_3cfc76af02b619dc, []JITValueDesc{d158, d2198})
 					ctx.ReclaimUntrackedRegs()
 					stackArray2199 = ctx.AllocStack(int32(16))
 					_ = stackArray2199
@@ -41325,7 +41325,7 @@ Patterns can be any of:
 						panic("jit: generic call arg expects 2-word value (NewSymbol arg0)")
 					}
 					ctx.SyncDesc(&d2202)
-					d2203 = ctx.EmitGoCallScalar(GoFuncAddr(NewSymbol), []JITValueDesc{d2202}, 2)
+					d2203 = ctx.EmitGoCallScalar(jitGoABI_678e55d324700337, []JITValueDesc{d2202}, 2)
 					d2203.NoHeapPointer = false
 					ctx.BindReg(d2203.Reg, &d2203)
 					ctx.BindReg(d2203.Reg2, &d2203)
@@ -41387,7 +41387,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.StabilizeDescForControlFlow(&d164)
 					ctx.ReclaimUntrackedRegs()
-					d2205 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d158}, 3)
+					d2205 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d158}, 3)
 					ctx.ReclaimUntrackedRegs()
 					if d2205.SliceSizeKnown {
 						d2206 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d2205.KnownSliceLen))}
@@ -41463,7 +41463,7 @@ Patterns can be any of:
 					d164 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase160) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d2209 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d158}, 3)
+					d2209 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d158}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d2210 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
 					ctx.ReclaimUntrackedRegs()
@@ -41481,7 +41481,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d2211 = JITPrepareScmerGoArg(ctx, d2211)
 					ctx.SyncDesc(&d2211)
-					d2214 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d2211}, 1)
+					d2214 = ctx.EmitGoCallScalar(jitGoABI_c94eb298f761efc9, []JITValueDesc{d2211}, 1)
 					d2214.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d2214.Reg, 1)
 					d2214.Type = tagBool
@@ -41538,7 +41538,7 @@ Patterns can be any of:
 						panic("jit: generic call arg expects 1-word value")
 					}
 					ctx.SyncDesc(&d158)
-					d2216 = ctx.EmitGoCallScalar(GoFuncAddr(readFrom), []JITValueDesc{d158}, 2)
+					d2216 = ctx.EmitGoCallScalar(jitGoABI_187293f04bb82372, []JITValueDesc{d158}, 2)
 					d2216.NoHeapPointer = false
 					ctx.BindReg(d2216.Reg, &d2216)
 					ctx.BindReg(d2216.Reg2, &d2216)
@@ -41567,7 +41567,7 @@ Patterns can be any of:
 					ctx.EmitLeaRegMem(d2219.Reg, ctx.StackReg, int32(stackArray2217))
 					ctx.EmitMovRegImm64(d2219.Reg2, uint64(1))
 					ctx.EmitMovRegImm64(d2219.Reg3, uint64(1))
-					callResults2220 := JITEmitGoCallResults(ctx, GoFuncAddr(JITAppendScmerSlice), []JITValueDesc{d164, d2219}, []uint8{3}, []uint8{1})
+					callResults2220 := JITEmitGoCallResults(ctx, jitGoABI_dbbe576f282120a9, []JITValueDesc{d164, d2219})
 					d2221 = callResults2220[0]
 					d2222 = JITValueDesc{Loc: LocStackTriple, Type: tagSlice, StackOff: int32(phiBase160) + int32(56)}
 					ctx.EmitCopyDescWords(&d2222, &d2221, 3)
@@ -41639,7 +41639,7 @@ Patterns can be any of:
 					if d2225.Loc != LocRegPair && d2225.Loc != LocStackPair && d2225.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d2224 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d2225}, 2)
+					d2224 = ctx.EmitGoCallScalar(jitGoABI_e1a33cf0a7aeca49, []JITValueDesc{d2225}, 2)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d2224)
 					d2226 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString(")")}
@@ -41654,7 +41654,7 @@ Patterns can be any of:
 					} else {
 						d2227 = d2226
 					}
-					d2228 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d2224, d2227}, 1)
+					d2228 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d2224, d2227}, 1)
 					ctx.EmitAndRegImm32(d2228.Reg, 1)
 					d2228.Type = tagBool
 					ctx.BindReg(d2228.Reg, &d2228)
@@ -41707,7 +41707,7 @@ Patterns can be any of:
 					d164 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase160) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d2230 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d158}, 3)
+					d2230 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d158}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d2231 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1)}
 					ctx.EnsureDesc(&d2230)
@@ -41774,7 +41774,7 @@ Patterns can be any of:
 					ctx.BindReg(r673, &d2236)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d2236)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[]Scmer, value []Scmer) { *dst = value }), []JITValueDesc{d158, d2236})
+					ctx.EmitGoCallVoid(jitGoABI_3cfc76af02b619dc, []JITValueDesc{d158, d2236})
 					ctx.ReclaimUntrackedRegs()
 					d2237 = ctx.EmitNewSliceFromGoSlice(&d164)
 					ctx.StabilizeDescForControlFlow(&d2237)
@@ -41834,7 +41834,7 @@ Patterns can be any of:
 					} else {
 						d2242 = d2241
 					}
-					d2243 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d2240, d2242}, 1)
+					d2243 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d2240, d2242}, 1)
 					ctx.EmitAndRegImm32(d2243.Reg, 1)
 					ctx.EmitCmpRegImm32(d2243.Reg, 0)
 					ctx.EmitSetcc(d2243.Reg, CondEqual)
@@ -41923,11 +41923,11 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d2237)
 					ctx.EnsureDesc(&d169)
 					ctx.EnsureDesc(&d2237)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d169, d2237})
+					ctx.EmitGoCallVoid(jitGoABI_24128c7ae9d19e5b, []JITValueDesc{d169, d2237})
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.SyncDesc(&d169)
-					d2246 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d169}, 2)
+					d2246 = ctx.EmitGoCallScalar(jitGoABI_11a997ee3b751875, []JITValueDesc{d169}, 2)
 					d2246.NoHeapPointer = false
 					ctx.BindReg(d2246.Reg, &d2246)
 					ctx.BindReg(d2246.Reg2, &d2246)
@@ -41968,7 +41968,7 @@ Patterns can be any of:
 					ctx.EmitLeaRegMem(d2251.Reg, ctx.StackReg, int32(stackArray2249))
 					ctx.EmitMovRegImm64(d2251.Reg2, uint64(1))
 					ctx.EmitMovRegImm64(d2251.Reg3, uint64(1))
-					callResults2252 := JITEmitGoCallResults(ctx, GoFuncAddr(JITAppendScmerSlice), []JITValueDesc{d96, d2251}, []uint8{3}, []uint8{1})
+					callResults2252 := JITEmitGoCallResults(ctx, jitGoABI_dbbe576f282120a9, []JITValueDesc{d96, d2251})
 					d2253 = callResults2252[0]
 					d2254 = JITValueDesc{Loc: LocStackTriple, Type: tagSlice, StackOff: int32(phiBase94) + int32(16)}
 					ctx.EmitCopyDescWords(&d2254, &d2253, 3)
@@ -41996,7 +41996,7 @@ Patterns can be any of:
 					d98 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase94) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d2256 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d92}, 3)
+					d2256 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d92}, 3)
 					ctx.ReclaimUntrackedRegs()
 					if d2256.SliceSizeKnown {
 						d2257 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d2256.KnownSliceLen))}
@@ -42100,7 +42100,7 @@ Patterns can be any of:
 					if d2261.Loc != LocRegPair && d2261.Loc != LocStackPair && d2261.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d2260 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d2261}, 2)
+					d2260 = ctx.EmitGoCallScalar(jitGoABI_e1a33cf0a7aeca49, []JITValueDesc{d2261}, 2)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d2260)
 					d2262 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString(")")}
@@ -42115,7 +42115,7 @@ Patterns can be any of:
 					} else {
 						d2263 = d2262
 					}
-					d2264 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d2260, d2263}, 1)
+					d2264 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d2260, d2263}, 1)
 					ctx.EmitAndRegImm32(d2264.Reg, 1)
 					d2264.Type = tagBool
 					ctx.BindReg(d2264.Reg, &d2264)
@@ -42162,7 +42162,7 @@ Patterns can be any of:
 					d98 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase94) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d2266 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d92}, 3)
+					d2266 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d92}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d2267 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
 					ctx.ReclaimUntrackedRegs()
@@ -42180,7 +42180,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d2268 = JITPrepareScmerGoArg(ctx, d2268)
 					ctx.SyncDesc(&d2268)
-					d2271 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSourceInfo), []JITValueDesc{d2268}, 1)
+					d2271 = ctx.EmitGoCallScalar(jitGoABI_f352d2b202a682fd, []JITValueDesc{d2268}, 1)
 					d2271.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d2271.Reg, 1)
 					d2271.Type = tagBool
@@ -42293,7 +42293,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d97 = JITPrepareScmerGoArg(ctx, d97)
 					ctx.SyncDesc(&d97)
-					d2275 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d97}, 1)
+					d2275 = ctx.EmitGoCallScalar(jitGoABI_c94eb298f761efc9, []JITValueDesc{d97}, 1)
 					d2275.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d2275.Reg, 1)
 					d2275.Type = tagBool
@@ -42346,7 +42346,7 @@ Patterns can be any of:
 						panic("jit: generic call arg expects 1-word value")
 					}
 					ctx.SyncDesc(&d92)
-					d2277 = ctx.EmitGoCallScalar(GoFuncAddr(readFrom), []JITValueDesc{d92}, 2)
+					d2277 = ctx.EmitGoCallScalar(jitGoABI_187293f04bb82372, []JITValueDesc{d92}, 2)
 					d2277.NoHeapPointer = false
 					ctx.BindReg(d2277.Reg, &d2277)
 					ctx.BindReg(d2277.Reg2, &d2277)
@@ -42385,7 +42385,7 @@ Patterns can be any of:
 						panic("jit: generic call arg expects 2-word value (NewSymbol arg0)")
 					}
 					ctx.SyncDesc(&d2280)
-					d2281 = ctx.EmitGoCallScalar(GoFuncAddr(NewSymbol), []JITValueDesc{d2280}, 2)
+					d2281 = ctx.EmitGoCallScalar(jitGoABI_678e55d324700337, []JITValueDesc{d2280}, 2)
 					d2281.NoHeapPointer = false
 					ctx.BindReg(d2281.Reg, &d2281)
 					ctx.BindReg(d2281.Reg2, &d2281)
@@ -42414,7 +42414,7 @@ Patterns can be any of:
 					ctx.EmitLeaRegMem(d2282.Reg, ctx.StackReg, int32(stackArray2278))
 					ctx.EmitMovRegImm64(d2282.Reg2, uint64(2))
 					ctx.EmitMovRegImm64(d2282.Reg3, uint64(2))
-					callResults2283 := JITEmitGoCallResults(ctx, GoFuncAddr(JITNewSliceCopy), []JITValueDesc{d2282}, []uint8{2}, []uint8{1})
+					callResults2283 := JITEmitGoCallResults(ctx, jitGoABI_de4d00b58c7c0d07, []JITValueDesc{d2282})
 					d2284 = callResults2283[0]
 					ctx.StabilizeDescForControlFlow(&d2284)
 					inlineHome2285 := d2284
@@ -42473,7 +42473,7 @@ Patterns can be any of:
 					} else {
 						d2289 = d2288
 					}
-					d2290 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d2287, d2289}, 1)
+					d2290 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d2287, d2289}, 1)
 					ctx.EmitAndRegImm32(d2290.Reg, 1)
 					ctx.EmitCmpRegImm32(d2290.Reg, 0)
 					ctx.EmitSetcc(d2290.Reg, CondEqual)
@@ -42548,7 +42548,7 @@ Patterns can be any of:
 					d98 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase94) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d2293 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d92}, 3)
+					d2293 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d92}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d2294 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1)}
 					ctx.EnsureDesc(&d2293)
@@ -42615,7 +42615,7 @@ Patterns can be any of:
 					ctx.BindReg(r698, &d2299)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d2299)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[]Scmer, value []Scmer) { *dst = value }), []JITValueDesc{d92, d2299})
+					ctx.EmitGoCallVoid(jitGoABI_3cfc76af02b619dc, []JITValueDesc{d92, d2299})
 					ctx.ReclaimUntrackedRegs()
 					d2300 = ctx.EmitNewSliceFromGoSlice(&d96)
 					ctx.ReclaimUntrackedRegs()
@@ -42623,12 +42623,12 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d2300)
 					ctx.EnsureDesc(&d103)
 					ctx.EnsureDesc(&d2300)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d103, d2300})
+					ctx.EmitGoCallVoid(jitGoABI_24128c7ae9d19e5b, []JITValueDesc{d103, d2300})
 					ctx.FreeDesc(&d2300)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.SyncDesc(&d103)
-					d2301 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d103}, 2)
+					d2301 = ctx.EmitGoCallScalar(jitGoABI_11a997ee3b751875, []JITValueDesc{d103}, 2)
 					d2301.NoHeapPointer = false
 					ctx.BindReg(d2301.Reg, &d2301)
 					ctx.BindReg(d2301.Reg2, &d2301)
@@ -42659,7 +42659,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d2268 = JITPrepareScmerGoArg(ctx, d2268)
 					ctx.SyncDesc(&d2268)
-					d2303 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).SourceInfo), []JITValueDesc{d2268}, 1)
+					d2303 = ctx.EmitGoCallScalar(jitGoABI_efc59dae573ac860, []JITValueDesc{d2268}, 1)
 					d2303.NoHeapPointer = false
 					ctx.BindReg(d2303.Reg, &d2303)
 					ctx.ReclaimUntrackedRegs()
@@ -42668,7 +42668,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d2303)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d2304)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *SourceInfo, value SourceInfo) { *dst = value }), []JITValueDesc{d103, d2304})
+					ctx.EmitGoCallVoid(jitGoABI_711f67c681c46de9, []JITValueDesc{d103, d2304})
 					ctx.FreeDesc(&d2304)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
@@ -42763,7 +42763,7 @@ Patterns can be any of:
 					if d2309.Loc != LocRegPair && d2309.Loc != LocStackPair && d2309.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d2308 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d2309}, 2)
+					d2308 = ctx.EmitGoCallScalar(jitGoABI_e1a33cf0a7aeca49, []JITValueDesc{d2309}, 2)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d2308)
 					d2310 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString("(")}
@@ -42778,7 +42778,7 @@ Patterns can be any of:
 					} else {
 						d2311 = d2310
 					}
-					d2312 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d2308, d2311}, 1)
+					d2312 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d2308, d2311}, 1)
 					ctx.EmitAndRegImm32(d2312.Reg, 1)
 					d2312.Type = tagBool
 					ctx.BindReg(d2312.Reg, &d2312)
@@ -42832,11 +42832,11 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d2284)
 					ctx.EnsureDesc(&d103)
 					ctx.EnsureDesc(&d2284)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d103, d2284})
+					ctx.EmitGoCallVoid(jitGoABI_24128c7ae9d19e5b, []JITValueDesc{d103, d2284})
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.SyncDesc(&d103)
-					d2314 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d103}, 2)
+					d2314 = ctx.EmitGoCallScalar(jitGoABI_11a997ee3b751875, []JITValueDesc{d103}, 2)
 					d2314.NoHeapPointer = false
 					ctx.BindReg(d2314.Reg, &d2314)
 					ctx.BindReg(d2314.Reg2, &d2314)
@@ -42866,7 +42866,7 @@ Patterns can be any of:
 					d98 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase94) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d2316 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d92}, 3)
+					d2316 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d92}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d2317 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1)}
 					ctx.EnsureDesc(&d2316)
@@ -42933,7 +42933,7 @@ Patterns can be any of:
 					ctx.BindReg(r707, &d2322)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d2322)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[]Scmer, value []Scmer) { *dst = value }), []JITValueDesc{d92, d2322})
+					ctx.EmitGoCallVoid(jitGoABI_3cfc76af02b619dc, []JITValueDesc{d92, d2322})
 					ctx.ReclaimUntrackedRegs()
 					stackArray2323 = ctx.AllocStack(int32(16))
 					_ = stackArray2323
@@ -42972,7 +42972,7 @@ Patterns can be any of:
 						panic("jit: generic call arg expects 2-word value (NewSymbol arg0)")
 					}
 					ctx.SyncDesc(&d2326)
-					d2327 = ctx.EmitGoCallScalar(GoFuncAddr(NewSymbol), []JITValueDesc{d2326}, 2)
+					d2327 = ctx.EmitGoCallScalar(jitGoABI_678e55d324700337, []JITValueDesc{d2326}, 2)
 					d2327.NoHeapPointer = false
 					ctx.BindReg(d2327.Reg, &d2327)
 					ctx.BindReg(d2327.Reg2, &d2327)
@@ -43034,7 +43034,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.StabilizeDescForControlFlow(&d98)
 					ctx.ReclaimUntrackedRegs()
-					d2329 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d92}, 3)
+					d2329 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d92}, 3)
 					ctx.ReclaimUntrackedRegs()
 					if d2329.SliceSizeKnown {
 						d2330 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d2329.KnownSliceLen))}
@@ -43110,7 +43110,7 @@ Patterns can be any of:
 					d98 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase94) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d2333 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d92}, 3)
+					d2333 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d92}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d2334 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
 					ctx.ReclaimUntrackedRegs()
@@ -43128,7 +43128,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d2335 = JITPrepareScmerGoArg(ctx, d2335)
 					ctx.SyncDesc(&d2335)
-					d2338 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d2335}, 1)
+					d2338 = ctx.EmitGoCallScalar(jitGoABI_c94eb298f761efc9, []JITValueDesc{d2335}, 1)
 					d2338.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d2338.Reg, 1)
 					d2338.Type = tagBool
@@ -43185,7 +43185,7 @@ Patterns can be any of:
 						panic("jit: generic call arg expects 1-word value")
 					}
 					ctx.SyncDesc(&d92)
-					d2340 = ctx.EmitGoCallScalar(GoFuncAddr(readFrom), []JITValueDesc{d92}, 2)
+					d2340 = ctx.EmitGoCallScalar(jitGoABI_187293f04bb82372, []JITValueDesc{d92}, 2)
 					d2340.NoHeapPointer = false
 					ctx.BindReg(d2340.Reg, &d2340)
 					ctx.BindReg(d2340.Reg2, &d2340)
@@ -43214,7 +43214,7 @@ Patterns can be any of:
 					ctx.EmitLeaRegMem(d2343.Reg, ctx.StackReg, int32(stackArray2341))
 					ctx.EmitMovRegImm64(d2343.Reg2, uint64(1))
 					ctx.EmitMovRegImm64(d2343.Reg3, uint64(1))
-					callResults2344 := JITEmitGoCallResults(ctx, GoFuncAddr(JITAppendScmerSlice), []JITValueDesc{d98, d2343}, []uint8{3}, []uint8{1})
+					callResults2344 := JITEmitGoCallResults(ctx, jitGoABI_dbbe576f282120a9, []JITValueDesc{d98, d2343})
 					d2345 = callResults2344[0]
 					d2346 = JITValueDesc{Loc: LocStackTriple, Type: tagSlice, StackOff: int32(phiBase94) + int32(56)}
 					ctx.EmitCopyDescWords(&d2346, &d2345, 3)
@@ -43286,7 +43286,7 @@ Patterns can be any of:
 					if d2349.Loc != LocRegPair && d2349.Loc != LocStackPair && d2349.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d2348 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d2349}, 2)
+					d2348 = ctx.EmitGoCallScalar(jitGoABI_e1a33cf0a7aeca49, []JITValueDesc{d2349}, 2)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d2348)
 					d2350 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString(")")}
@@ -43301,7 +43301,7 @@ Patterns can be any of:
 					} else {
 						d2351 = d2350
 					}
-					d2352 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d2348, d2351}, 1)
+					d2352 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d2348, d2351}, 1)
 					ctx.EmitAndRegImm32(d2352.Reg, 1)
 					d2352.Type = tagBool
 					ctx.BindReg(d2352.Reg, &d2352)
@@ -43354,7 +43354,7 @@ Patterns can be any of:
 					d98 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase94) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d2354 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d92}, 3)
+					d2354 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d92}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d2355 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1)}
 					ctx.EnsureDesc(&d2354)
@@ -43421,7 +43421,7 @@ Patterns can be any of:
 					ctx.BindReg(r717, &d2360)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d2360)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[]Scmer, value []Scmer) { *dst = value }), []JITValueDesc{d92, d2360})
+					ctx.EmitGoCallVoid(jitGoABI_3cfc76af02b619dc, []JITValueDesc{d92, d2360})
 					ctx.ReclaimUntrackedRegs()
 					d2361 = ctx.EmitNewSliceFromGoSlice(&d98)
 					ctx.StabilizeDescForControlFlow(&d2361)
@@ -43481,7 +43481,7 @@ Patterns can be any of:
 					} else {
 						d2366 = d2365
 					}
-					d2367 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d2364, d2366}, 1)
+					d2367 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d2364, d2366}, 1)
 					ctx.EmitAndRegImm32(d2367.Reg, 1)
 					ctx.EmitCmpRegImm32(d2367.Reg, 0)
 					ctx.EmitSetcc(d2367.Reg, CondEqual)
@@ -43570,11 +43570,11 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d2361)
 					ctx.EnsureDesc(&d103)
 					ctx.EnsureDesc(&d2361)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d103, d2361})
+					ctx.EmitGoCallVoid(jitGoABI_24128c7ae9d19e5b, []JITValueDesc{d103, d2361})
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.SyncDesc(&d103)
-					d2370 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d103}, 2)
+					d2370 = ctx.EmitGoCallScalar(jitGoABI_11a997ee3b751875, []JITValueDesc{d103}, 2)
 					d2370.NoHeapPointer = false
 					ctx.BindReg(d2370.Reg, &d2370)
 					ctx.BindReg(d2370.Reg2, &d2370)
@@ -43615,7 +43615,7 @@ Patterns can be any of:
 					ctx.EmitLeaRegMem(d2375.Reg, ctx.StackReg, int32(stackArray2373))
 					ctx.EmitMovRegImm64(d2375.Reg2, uint64(1))
 					ctx.EmitMovRegImm64(d2375.Reg3, uint64(1))
-					callResults2376 := JITEmitGoCallResults(ctx, GoFuncAddr(JITAppendScmerSlice), []JITValueDesc{d30, d2375}, []uint8{3}, []uint8{1})
+					callResults2376 := JITEmitGoCallResults(ctx, jitGoABI_dbbe576f282120a9, []JITValueDesc{d30, d2375})
 					d2377 = callResults2376[0]
 					d2378 = JITValueDesc{Loc: LocStackTriple, Type: tagSlice, StackOff: int32(phiBase28) + int32(16)}
 					ctx.EmitCopyDescWords(&d2378, &d2377, 3)
@@ -43643,7 +43643,7 @@ Patterns can be any of:
 					d32 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase28) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d2380 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d26}, 3)
+					d2380 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d26}, 3)
 					ctx.ReclaimUntrackedRegs()
 					if d2380.SliceSizeKnown {
 						d2381 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d2380.KnownSliceLen))}
@@ -43747,7 +43747,7 @@ Patterns can be any of:
 					if d2385.Loc != LocRegPair && d2385.Loc != LocStackPair && d2385.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d2384 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d2385}, 2)
+					d2384 = ctx.EmitGoCallScalar(jitGoABI_e1a33cf0a7aeca49, []JITValueDesc{d2385}, 2)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d2384)
 					d2386 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString(")")}
@@ -43762,7 +43762,7 @@ Patterns can be any of:
 					} else {
 						d2387 = d2386
 					}
-					d2388 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d2384, d2387}, 1)
+					d2388 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d2384, d2387}, 1)
 					ctx.EmitAndRegImm32(d2388.Reg, 1)
 					d2388.Type = tagBool
 					ctx.BindReg(d2388.Reg, &d2388)
@@ -43809,7 +43809,7 @@ Patterns can be any of:
 					d32 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase28) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d2390 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d26}, 3)
+					d2390 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d26}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d2391 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
 					ctx.ReclaimUntrackedRegs()
@@ -43827,7 +43827,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d2392 = JITPrepareScmerGoArg(ctx, d2392)
 					ctx.SyncDesc(&d2392)
-					d2395 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSourceInfo), []JITValueDesc{d2392}, 1)
+					d2395 = ctx.EmitGoCallScalar(jitGoABI_f352d2b202a682fd, []JITValueDesc{d2392}, 1)
 					d2395.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d2395.Reg, 1)
 					d2395.Type = tagBool
@@ -43940,7 +43940,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d31 = JITPrepareScmerGoArg(ctx, d31)
 					ctx.SyncDesc(&d31)
-					d2399 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d31}, 1)
+					d2399 = ctx.EmitGoCallScalar(jitGoABI_c94eb298f761efc9, []JITValueDesc{d31}, 1)
 					d2399.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d2399.Reg, 1)
 					d2399.Type = tagBool
@@ -43993,7 +43993,7 @@ Patterns can be any of:
 						panic("jit: generic call arg expects 1-word value")
 					}
 					ctx.SyncDesc(&d26)
-					d2401 = ctx.EmitGoCallScalar(GoFuncAddr(readFrom), []JITValueDesc{d26}, 2)
+					d2401 = ctx.EmitGoCallScalar(jitGoABI_187293f04bb82372, []JITValueDesc{d26}, 2)
 					d2401.NoHeapPointer = false
 					ctx.BindReg(d2401.Reg, &d2401)
 					ctx.BindReg(d2401.Reg2, &d2401)
@@ -44032,7 +44032,7 @@ Patterns can be any of:
 						panic("jit: generic call arg expects 2-word value (NewSymbol arg0)")
 					}
 					ctx.SyncDesc(&d2404)
-					d2405 = ctx.EmitGoCallScalar(GoFuncAddr(NewSymbol), []JITValueDesc{d2404}, 2)
+					d2405 = ctx.EmitGoCallScalar(jitGoABI_678e55d324700337, []JITValueDesc{d2404}, 2)
 					d2405.NoHeapPointer = false
 					ctx.BindReg(d2405.Reg, &d2405)
 					ctx.BindReg(d2405.Reg2, &d2405)
@@ -44061,7 +44061,7 @@ Patterns can be any of:
 					ctx.EmitLeaRegMem(d2406.Reg, ctx.StackReg, int32(stackArray2402))
 					ctx.EmitMovRegImm64(d2406.Reg2, uint64(2))
 					ctx.EmitMovRegImm64(d2406.Reg3, uint64(2))
-					callResults2407 := JITEmitGoCallResults(ctx, GoFuncAddr(JITNewSliceCopy), []JITValueDesc{d2406}, []uint8{2}, []uint8{1})
+					callResults2407 := JITEmitGoCallResults(ctx, jitGoABI_de4d00b58c7c0d07, []JITValueDesc{d2406})
 					d2408 = callResults2407[0]
 					ctx.StabilizeDescForControlFlow(&d2408)
 					inlineHome2409 := d2408
@@ -44120,7 +44120,7 @@ Patterns can be any of:
 					} else {
 						d2413 = d2412
 					}
-					d2414 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d2411, d2413}, 1)
+					d2414 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d2411, d2413}, 1)
 					ctx.EmitAndRegImm32(d2414.Reg, 1)
 					ctx.EmitCmpRegImm32(d2414.Reg, 0)
 					ctx.EmitSetcc(d2414.Reg, CondEqual)
@@ -44195,7 +44195,7 @@ Patterns can be any of:
 					d32 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase28) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d2417 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d26}, 3)
+					d2417 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d26}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d2418 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1)}
 					ctx.EnsureDesc(&d2417)
@@ -44262,7 +44262,7 @@ Patterns can be any of:
 					ctx.BindReg(r742, &d2423)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d2423)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[]Scmer, value []Scmer) { *dst = value }), []JITValueDesc{d26, d2423})
+					ctx.EmitGoCallVoid(jitGoABI_3cfc76af02b619dc, []JITValueDesc{d26, d2423})
 					ctx.ReclaimUntrackedRegs()
 					d2424 = ctx.EmitNewSliceFromGoSlice(&d30)
 					ctx.ReclaimUntrackedRegs()
@@ -44270,12 +44270,12 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d2424)
 					ctx.EnsureDesc(&d37)
 					ctx.EnsureDesc(&d2424)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d37, d2424})
+					ctx.EmitGoCallVoid(jitGoABI_24128c7ae9d19e5b, []JITValueDesc{d37, d2424})
 					ctx.FreeDesc(&d2424)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.SyncDesc(&d37)
-					d2425 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d37}, 2)
+					d2425 = ctx.EmitGoCallScalar(jitGoABI_11a997ee3b751875, []JITValueDesc{d37}, 2)
 					d2425.NoHeapPointer = false
 					ctx.BindReg(d2425.Reg, &d2425)
 					ctx.BindReg(d2425.Reg2, &d2425)
@@ -44306,7 +44306,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d2392 = JITPrepareScmerGoArg(ctx, d2392)
 					ctx.SyncDesc(&d2392)
-					d2427 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).SourceInfo), []JITValueDesc{d2392}, 1)
+					d2427 = ctx.EmitGoCallScalar(jitGoABI_efc59dae573ac860, []JITValueDesc{d2392}, 1)
 					d2427.NoHeapPointer = false
 					ctx.BindReg(d2427.Reg, &d2427)
 					ctx.ReclaimUntrackedRegs()
@@ -44315,7 +44315,7 @@ Patterns can be any of:
 					ctx.FreeDesc(&d2427)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d2428)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *SourceInfo, value SourceInfo) { *dst = value }), []JITValueDesc{d37, d2428})
+					ctx.EmitGoCallVoid(jitGoABI_711f67c681c46de9, []JITValueDesc{d37, d2428})
 					ctx.FreeDesc(&d2428)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
@@ -44410,7 +44410,7 @@ Patterns can be any of:
 					if d2433.Loc != LocRegPair && d2433.Loc != LocStackPair && d2433.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d2432 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d2433}, 2)
+					d2432 = ctx.EmitGoCallScalar(jitGoABI_e1a33cf0a7aeca49, []JITValueDesc{d2433}, 2)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d2432)
 					d2434 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString("(")}
@@ -44425,7 +44425,7 @@ Patterns can be any of:
 					} else {
 						d2435 = d2434
 					}
-					d2436 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d2432, d2435}, 1)
+					d2436 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d2432, d2435}, 1)
 					ctx.EmitAndRegImm32(d2436.Reg, 1)
 					d2436.Type = tagBool
 					ctx.BindReg(d2436.Reg, &d2436)
@@ -44479,11 +44479,11 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d2408)
 					ctx.EnsureDesc(&d37)
 					ctx.EnsureDesc(&d2408)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d37, d2408})
+					ctx.EmitGoCallVoid(jitGoABI_24128c7ae9d19e5b, []JITValueDesc{d37, d2408})
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.SyncDesc(&d37)
-					d2438 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d37}, 2)
+					d2438 = ctx.EmitGoCallScalar(jitGoABI_11a997ee3b751875, []JITValueDesc{d37}, 2)
 					d2438.NoHeapPointer = false
 					ctx.BindReg(d2438.Reg, &d2438)
 					ctx.BindReg(d2438.Reg2, &d2438)
@@ -44513,7 +44513,7 @@ Patterns can be any of:
 					d32 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase28) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d2440 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d26}, 3)
+					d2440 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d26}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d2441 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1)}
 					ctx.EnsureDesc(&d2440)
@@ -44580,7 +44580,7 @@ Patterns can be any of:
 					ctx.BindReg(r751, &d2446)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d2446)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[]Scmer, value []Scmer) { *dst = value }), []JITValueDesc{d26, d2446})
+					ctx.EmitGoCallVoid(jitGoABI_3cfc76af02b619dc, []JITValueDesc{d26, d2446})
 					ctx.ReclaimUntrackedRegs()
 					stackArray2447 = ctx.AllocStack(int32(16))
 					_ = stackArray2447
@@ -44619,7 +44619,7 @@ Patterns can be any of:
 						panic("jit: generic call arg expects 2-word value (NewSymbol arg0)")
 					}
 					ctx.SyncDesc(&d2450)
-					d2451 = ctx.EmitGoCallScalar(GoFuncAddr(NewSymbol), []JITValueDesc{d2450}, 2)
+					d2451 = ctx.EmitGoCallScalar(jitGoABI_678e55d324700337, []JITValueDesc{d2450}, 2)
 					d2451.NoHeapPointer = false
 					ctx.BindReg(d2451.Reg, &d2451)
 					ctx.BindReg(d2451.Reg2, &d2451)
@@ -44681,7 +44681,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.StabilizeDescForControlFlow(&d32)
 					ctx.ReclaimUntrackedRegs()
-					d2453 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d26}, 3)
+					d2453 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d26}, 3)
 					ctx.ReclaimUntrackedRegs()
 					if d2453.SliceSizeKnown {
 						d2454 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d2453.KnownSliceLen))}
@@ -44757,7 +44757,7 @@ Patterns can be any of:
 					d32 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase28) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d2457 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d26}, 3)
+					d2457 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d26}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d2458 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
 					ctx.ReclaimUntrackedRegs()
@@ -44775,7 +44775,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d2459 = JITPrepareScmerGoArg(ctx, d2459)
 					ctx.SyncDesc(&d2459)
-					d2462 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d2459}, 1)
+					d2462 = ctx.EmitGoCallScalar(jitGoABI_c94eb298f761efc9, []JITValueDesc{d2459}, 1)
 					d2462.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d2462.Reg, 1)
 					d2462.Type = tagBool
@@ -44832,7 +44832,7 @@ Patterns can be any of:
 						panic("jit: generic call arg expects 1-word value")
 					}
 					ctx.SyncDesc(&d26)
-					d2464 = ctx.EmitGoCallScalar(GoFuncAddr(readFrom), []JITValueDesc{d26}, 2)
+					d2464 = ctx.EmitGoCallScalar(jitGoABI_187293f04bb82372, []JITValueDesc{d26}, 2)
 					d2464.NoHeapPointer = false
 					ctx.BindReg(d2464.Reg, &d2464)
 					ctx.BindReg(d2464.Reg2, &d2464)
@@ -44861,7 +44861,7 @@ Patterns can be any of:
 					ctx.EmitLeaRegMem(d2467.Reg, ctx.StackReg, int32(stackArray2465))
 					ctx.EmitMovRegImm64(d2467.Reg2, uint64(1))
 					ctx.EmitMovRegImm64(d2467.Reg3, uint64(1))
-					callResults2468 := JITEmitGoCallResults(ctx, GoFuncAddr(JITAppendScmerSlice), []JITValueDesc{d32, d2467}, []uint8{3}, []uint8{1})
+					callResults2468 := JITEmitGoCallResults(ctx, jitGoABI_dbbe576f282120a9, []JITValueDesc{d32, d2467})
 					d2469 = callResults2468[0]
 					d2470 = JITValueDesc{Loc: LocStackTriple, Type: tagSlice, StackOff: int32(phiBase28) + int32(56)}
 					ctx.EmitCopyDescWords(&d2470, &d2469, 3)
@@ -44933,7 +44933,7 @@ Patterns can be any of:
 					if d2473.Loc != LocRegPair && d2473.Loc != LocStackPair && d2473.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
-					d2472 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d2473}, 2)
+					d2472 = ctx.EmitGoCallScalar(jitGoABI_e1a33cf0a7aeca49, []JITValueDesc{d2473}, 2)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d2472)
 					d2474 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString(")")}
@@ -44948,7 +44948,7 @@ Patterns can be any of:
 					} else {
 						d2475 = d2474
 					}
-					d2476 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d2472, d2475}, 1)
+					d2476 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d2472, d2475}, 1)
 					ctx.EmitAndRegImm32(d2476.Reg, 1)
 					d2476.Type = tagBool
 					ctx.BindReg(d2476.Reg, &d2476)
@@ -45001,7 +45001,7 @@ Patterns can be any of:
 					d32 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase28) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					d2478 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *[]Scmer) []Scmer { return *value }), []JITValueDesc{d26}, 3)
+					d2478 = ctx.EmitGoCallScalar(jitGoABI_d1f455703f99de54, []JITValueDesc{d26}, 3)
 					ctx.ReclaimUntrackedRegs()
 					d2479 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1)}
 					ctx.EnsureDesc(&d2478)
@@ -45068,7 +45068,7 @@ Patterns can be any of:
 					ctx.BindReg(r761, &d2484)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d2484)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[]Scmer, value []Scmer) { *dst = value }), []JITValueDesc{d26, d2484})
+					ctx.EmitGoCallVoid(jitGoABI_3cfc76af02b619dc, []JITValueDesc{d26, d2484})
 					ctx.ReclaimUntrackedRegs()
 					d2485 = ctx.EmitNewSliceFromGoSlice(&d32)
 					ctx.StabilizeDescForControlFlow(&d2485)
@@ -45128,7 +45128,7 @@ Patterns can be any of:
 					} else {
 						d2490 = d2489
 					}
-					d2491 = ctx.EmitGoCallScalar(GoFuncAddr(JITStringEqual), []JITValueDesc{d2488, d2490}, 1)
+					d2491 = ctx.EmitGoCallScalar(jitGoABI_5130bc3ed31521d6, []JITValueDesc{d2488, d2490}, 1)
 					ctx.EmitAndRegImm32(d2491.Reg, 1)
 					ctx.EmitCmpRegImm32(d2491.Reg, 0)
 					ctx.EmitSetcc(d2491.Reg, CondEqual)
@@ -45217,11 +45217,11 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d2485)
 					ctx.EnsureDesc(&d37)
 					ctx.EnsureDesc(&d2485)
-					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d37, d2485})
+					ctx.EmitGoCallVoid(jitGoABI_24128c7ae9d19e5b, []JITValueDesc{d37, d2485})
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.SyncDesc(&d37)
-					d2494 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d37}, 2)
+					d2494 = ctx.EmitGoCallScalar(jitGoABI_11a997ee3b751875, []JITValueDesc{d37}, 2)
 					d2494.NoHeapPointer = false
 					ctx.BindReg(d2494.Reg, &d2494)
 					ctx.BindReg(d2494.Reg2, &d2494)
@@ -45319,13 +45319,13 @@ Patterns can be any of:
 				}
 				ctx.SyncDesc(&d0)
 				ctx.SyncDesc(&d1)
-				d2 := ctx.EmitGoCallScalar(GoFuncAddr(SerializeToString), []JITValueDesc{d0, d1}, 2)
+				d2 := ctx.EmitGoCallScalar(jitGoABI_e4e95af1c4f4c854, []JITValueDesc{d0, d1}, 2)
 				d2.NoHeapPointer = false
 				ctx.BindReg(d2.Reg, &d2)
 				ctx.BindReg(d2.Reg2, &d2)
 				ctx.FreeDesc(&d0)
 				ctx.EnsureDesc(&d2)
-				d3 := ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d2}, 2)
+				d3 := ctx.EmitGoCallScalar(jitGoABI_44610dda2d2977b6, []JITValueDesc{d2}, 2)
 				if result.Loc == LocAny {
 					return d3
 				}
@@ -45542,7 +45542,7 @@ Patterns can be any of:
 						ctx.BindReg(d16.Reg, &d17)
 					} else {
 						boxed := JITPrepareScmerGoArg(ctx, d16)
-						d17 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{boxed}, 1)
+						d17 = ctx.EmitGoCallScalar(jitGoABI_724899b80b2780aa, []JITValueDesc{boxed}, 1)
 						d17.Type = tagInt
 						ctx.BindReg(d17.Reg, &d17)
 					}
@@ -45600,14 +45600,14 @@ Patterns can be any of:
 					ctx.SyncDesc(&d20)
 					ctx.SyncDesc(&d21)
 					ctx.SyncDesc(&d1)
-					d22 = ctx.EmitGoCallScalar(GoFuncAddr(PrettyPrint), []JITValueDesc{d20, d21, d1}, 2)
+					d22 = ctx.EmitGoCallScalar(jitGoABI_90debfce13c931e5, []JITValueDesc{d20, d21, d1}, 2)
 					d22.NoHeapPointer = false
 					ctx.BindReg(d22.Reg, &d22)
 					ctx.BindReg(d22.Reg2, &d22)
 					ctx.FreeDesc(&d20)
 					ctx.FreeDesc(&d1)
 					ctx.EnsureDesc(&d22)
-					d23 = ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d22}, 2)
+					d23 = ctx.EmitGoCallScalar(jitGoABI_44610dda2d2977b6, []JITValueDesc{d22}, 2)
 					ctx.EmitMovPairToResult(&d23, &result)
 					result.Type = tagString
 					mergeReturnType(result.Type)
@@ -45960,4 +45960,125 @@ func align8(n uint) uint {
 		return n + (8 - r)
 	}
 	return n
+}
+
+// BEGIN jitgen prepared Go ABI entries
+var jitGoABI_08ec8031d8f52ec0 uint64
+var jitGoABI_11a997ee3b751875 uint64
+var jitGoABI_14cfa92b2b87ef7c uint64
+var jitGoABI_158fc888362fa531 uint64
+var jitGoABI_187293f04bb82372 uint64
+var jitGoABI_18fd4c44c7a31da6 uint64
+var jitGoABI_1b8412732af78364 uint64
+var jitGoABI_1e8379006790c0c3 uint64
+var jitGoABI_24128c7ae9d19e5b uint64
+var jitGoABI_2aaf5b10787be869 uint64
+var jitGoABI_3cfc76af02b619dc uint64
+var jitGoABI_3f45ec6607233365 uint64
+var jitGoABI_428f6123a6539c5d uint64
+var jitGoABI_44610dda2d2977b6 uint64
+var jitGoABI_446dee5074537592 uint64
+var jitGoABI_45b2e9aa8d87590a uint64
+var jitGoABI_49dd75b49ffbdf4b uint64
+var jitGoABI_4c692bc4c57a241a uint64
+var jitGoABI_5077bb76faa6a775 uint64
+var jitGoABI_5130bc3ed31521d6 uint64
+var jitGoABI_678e55d324700337 uint64
+var jitGoABI_711f67c681c46de9 uint64
+var jitGoABI_724899b80b2780aa uint64
+var jitGoABI_751bf088537a5f21 uint64
+var jitGoABI_79b61201b9e57f9d uint64
+var jitGoABI_7ebaa2856648e378 uint64
+var jitGoABI_830596eef656ff9c uint64
+var jitGoABI_8f95458a6432b52e uint64
+var jitGoABI_90debfce13c931e5 uint64
+var jitGoABI_93f1f83c9e505d62 uint64
+var jitGoABI_9bd0890fbc57aa9f uint64
+var jitGoABI_b20afda8856e61ef uint64
+var jitGoABI_b3734367ba267d31 uint64
+var jitGoABI_b3ef7032d672b137 uint64
+var jitGoABI_b740735df4418c48 uint64
+var jitGoABI_b7afa8aa7afec23f uint64
+var jitGoABI_b90d43f641e38b20 uint64
+var jitGoABI_bd15746ee4fe9617 uint64
+var jitGoABI_c3658a69a02c135c uint64
+var jitGoABI_c3ed9901c7b0a8de uint64
+var jitGoABI_c7963fc7464639ca uint64
+var jitGoABI_c8bd3fbb876619d4 uint64
+var jitGoABI_c94eb298f761efc9 uint64
+var jitGoABI_caeccb0b1551362d uint64
+var jitGoABI_cd25371cee7f2008 uint64
+var jitGoABI_d1f455703f99de54 uint64
+var jitGoABI_dbbe576f282120a9 uint64
+var jitGoABI_de4d00b58c7c0d07 uint64
+var jitGoABI_e1a33cf0a7aeca49 uint64
+var jitGoABI_e32fdcf449cd74a7 uint64
+var jitGoABI_e4e95af1c4f4c854 uint64
+var jitGoABI_e80a79328f388f6b uint64
+var jitGoABI_eac8b3f188d1256d uint64
+var jitGoABI_efc59dae573ac860 uint64
+var jitGoABI_efe6a72bfb144025 uint64
+var jitGoABI_f352d2b202a682fd uint64
+var jitGoABI_f471bfc54f82491c uint64
+var jitGoABI_fbd8c70175770728 uint64
+
+func init() {
+	jitGoABI_08ec8031d8f52ec0 = GoFuncAddr(func() *SourceInfo { return new(SourceInfo) })
+	jitGoABI_11a997ee3b751875 = GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) }))
+	jitGoABI_14cfa92b2b87ef7c = GoFuncAddr(func(dst, src *Proc) { *dst = *src })
+	jitGoABI_158fc888362fa531 = GoFuncAddr(func(base *ProcOptimizerMeta, value TypeInfo) { base.Return = value })
+	jitGoABI_187293f04bb82372 = GoFuncAddr(readFrom)
+	jitGoABI_18fd4c44c7a31da6 = GoFuncAddr(func(base *Env, value *Env) { base.Outer = value })
+	jitGoABI_1b8412732af78364 = GoFuncAddr(NewProc)
+	jitGoABI_1e8379006790c0c3 = GoFuncAddr((*Proc).compiled)
+	jitGoABI_24128c7ae9d19e5b = GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value })
+	jitGoABI_2aaf5b10787be869 = GoFuncAddr(func(base *ProcOptimizerMeta, value procSequenceKind) { base.Sequence = value })
+	jitGoABI_3cfc76af02b619dc = GoFuncAddr(func(dst *[]Scmer, value []Scmer) { *dst = value })
+	jitGoABI_3f45ec6607233365 = GoFuncAddr(func() *Env { return new(Env) })
+	jitGoABI_428f6123a6539c5d = GoFuncAddr(JITBuildScmerCallback)
+	jitGoABI_44610dda2d2977b6 = GoFuncAddr(NewString)
+	jitGoABI_446dee5074537592 = GoFuncAddr(func(m map[Symbol]struct{}, key Symbol, value struct{}) { m[key] = value })
+	jitGoABI_45b2e9aa8d87590a = GoFuncAddr(optimizerNodeCount)
+	jitGoABI_49dd75b49ffbdf4b = GoFuncAddr(func(base *SourceInfo, value string) { base.source = value })
+	jitGoABI_4c692bc4c57a241a = GoFuncAddr(Optimize)
+	jitGoABI_5077bb76faa6a775 = GoFuncAddr((Scmer).IsProc)
+	jitGoABI_5130bc3ed31521d6 = GoFuncAddr(JITStringEqual)
+	jitGoABI_678e55d324700337 = GoFuncAddr(NewSymbol)
+	jitGoABI_711f67c681c46de9 = GoFuncAddr(func(dst *SourceInfo, value SourceInfo) { *dst = value })
+	jitGoABI_724899b80b2780aa = GoFuncAddr(Scmer.Int)
+	jitGoABI_751bf088537a5f21 = GoFuncAddr(atomic.LoadUintptr)
+	jitGoABI_79b61201b9e57f9d = GoFuncAddr(func() *Proc { return new(Proc) })
+	jitGoABI_7ebaa2856648e378 = GoFuncAddr(jitMakeScmerSlice)
+	jitGoABI_830596eef656ff9c = GoFuncAddr(func(base *Proc, value *JITEntryPoint) { base.Compiled = value })
+	jitGoABI_8f95458a6432b52e = GoFuncAddr(jitAsSlice)
+	jitGoABI_90debfce13c931e5 = GoFuncAddr(PrettyPrint)
+	jitGoABI_93f1f83c9e505d62 = GoFuncAddr(jitProcCaptures)
+	jitGoABI_9bd0890fbc57aa9f = GoFuncAddr(func(size int) map[Symbol]struct{} { return make(map[Symbol]struct{}, size) })
+	jitGoABI_b20afda8856e61ef = GoFuncAddr(func(base *Proc, value uintptr) { base.JITCode = value })
+	jitGoABI_b3734367ba267d31 = GoFuncAddr(closeJITProcedureCaptures)
+	jitGoABI_b3ef7032d672b137 = GoFuncAddr(func(base *SourceInfo, value int) { base.col = value })
+	jitGoABI_b740735df4418c48 = GoFuncAddr(func(base *SourceInfo, value int) { base.line = value })
+	jitGoABI_b7afa8aa7afec23f = GoFuncAddr(func(base *Proc, value *Env) { base.En = value })
+	jitGoABI_b90d43f641e38b20 = GoFuncAddr(func() *strings.Builder { return new(strings.Builder) })
+	jitGoABI_bd15746ee4fe9617 = GoFuncAddr((func(arg0 *Proc) *Proc { value := (*Proc).snapshot(arg0); return &value }))
+	jitGoABI_c3658a69a02c135c = GoFuncAddr((Scmer).Proc)
+	jitGoABI_c3ed9901c7b0a8de = GoFuncAddr(tokenize)
+	jitGoABI_c7963fc7464639ca = GoFuncAddr(func(base *Proc, value *ProcOptimizerMeta) { base.OptimizerMeta = value })
+	jitGoABI_c8bd3fbb876619d4 = GoFuncAddr(func(base *Proc, value Scmer) { base.Body = value })
+	jitGoABI_c94eb298f761efc9 = GoFuncAddr((Scmer).IsSymbol)
+	jitGoABI_caeccb0b1551362d = GoFuncAddr(JITCloneScmerSlice)
+	jitGoABI_cd25371cee7f2008 = GoFuncAddr(func() *ProcOptimizerMeta { return new(ProcOptimizerMeta) })
+	jitGoABI_d1f455703f99de54 = GoFuncAddr(func(value *[]Scmer) []Scmer { return *value })
+	jitGoABI_dbbe576f282120a9 = GoFuncAddr(JITAppendScmerSlice)
+	jitGoABI_de4d00b58c7c0d07 = GoFuncAddr(JITNewSliceCopy)
+	jitGoABI_e1a33cf0a7aeca49 = GoFuncAddr(Scmer.String)
+	jitGoABI_e32fdcf449cd74a7 = GoFuncAddr(CloneOptimizerExpression)
+	jitGoABI_e4e95af1c4f4c854 = GoFuncAddr(SerializeToString)
+	jitGoABI_e80a79328f388f6b = GoFuncAddr((*strings.Builder).WriteString)
+	jitGoABI_eac8b3f188d1256d = GoFuncAddr(func() *[]Scmer { return new([]Scmer) })
+	jitGoABI_efc59dae573ac860 = GoFuncAddr((Scmer).SourceInfo)
+	jitGoABI_efe6a72bfb144025 = GoFuncAddr(TryFold)
+	jitGoABI_f352d2b202a682fd = GoFuncAddr((Scmer).IsSourceInfo)
+	jitGoABI_f471bfc54f82491c = GoFuncAddr(func(base *ProcOptimizerMeta, value bool) { base.HasReturn = value })
+	jitGoABI_fbd8c70175770728 = GoFuncAddr(jitInvokeCallbackSlice)
 }
