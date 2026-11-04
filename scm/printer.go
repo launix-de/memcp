@@ -556,7 +556,7 @@ func serializeEx(b *schemeTextWriter, v Scmer, en *Env, glob *Env, p *Proc) {
 		b.WriteString(v.Regex().String())
 	case tagNthLocalVar:
 		idx := v.NthLocalVar()
-		if p != nil && p.NumVars >= int(idx) && p.Params.GetTag() == tagSlice {
+		if b.objects == nil && p != nil && p.NumVars >= int(idx) && p.Params.GetTag() == tagSlice {
 			params := p.Params.Slice()
 			if int(idx) < len(params) && params[idx].IsSymbol() {
 				b.WriteString(params[idx].String())
@@ -572,7 +572,7 @@ func serializeEx(b *schemeTextWriter, v Scmer, en *Env, glob *Env, p *Proc) {
 			return
 		}
 		if idx, ok := v.Any().(NthLocalVar); ok {
-			if p != nil && p.NumVars >= int(idx) && p.Params.GetTag() == tagSlice {
+			if b.objects == nil && p != nil && p.NumVars >= int(idx) && p.Params.GetTag() == tagSlice {
 				params := p.Params.Slice()
 				if int(idx) < len(params) && params[idx].IsSymbol() {
 					b.WriteString(params[idx].String())

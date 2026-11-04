@@ -189,8 +189,8 @@ func TestProcedureWireRejectsInvalidEnvelopesAndBounds(t *testing.T) {
 	}
 }
 
-// Wire reconstruction must preserve the sender's code, including the portable
-// symbolic form of numbered locals, rather than running optimization again.
+// Wire reconstruction preserves the sender's code and numbered locals
+// without running optimization again.
 func TestProcedureWirePreservesSenderPlan(t *testing.T) {
 	for _, optimized := range []bool{false, true} {
 		expression := Read(t.Name(), `(lambda (x) (if (> x 0) (+ x 1) (- x 1)))`, false)
@@ -202,12 +202,19 @@ func TestProcedureWirePreservesSenderPlan(t *testing.T) {
 			t.Fatal(err)
 		}
 		body := Read(t.Name(), string(wire[1:]), false).Slice()[2]
+		body, err = ResolveSerializedObjects(body, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
 		restored, err := UnmarshalProcedure(wire)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if !Equal(restored.Proc().Body, body) {
 			t.Fatalf("optimized=%v: receiver rewrote sender plan", optimized)
+		}
+		if optimized && !restored.Proc().NumberedOnly {
+			t.Fatal("wire transport changed numbered parameter slots back to named bindings")
 		}
 		if Apply(restored, NewInt(6)).Int() != 7 || Apply(restored, NewInt(-2)).Int() != -3 {
 			t.Fatalf("optimized=%v: reconstructed plan returned wrong results", optimized)

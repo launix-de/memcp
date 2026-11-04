@@ -271,7 +271,8 @@ Received procedures materialize their captures, bind the current worker's native
 execution scope and JIT locally before entering the shard loop. The sender's
 plan is already optimized; received procedures, values and immutable capture
 sources are reconstructed without another optimizer pass. Textual `(var n)`
-operands are decoded to numbered locals alongside runtime references. The JIT
+operands retain the sender's numbered parameter slots and are decoded alongside
+runtime references; transport does not rename them back into symbol lookups. The JIT
 also binds symbolic variadic parameters directly. Scan-context binding
 and capture resolution copy only changed AST ancestors; code, TX executors and
 query-bound closures are not globally cached or shared between invocations.
