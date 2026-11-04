@@ -418,7 +418,7 @@ func (service *nodeScanService) importObject(ctx context.Context, peer *mosiPeer
 	}
 	handleReference := reference
 	handleReference.Token = lease.reference.Token
-	handle := scm.ClusterHandle{Lifetime: lease, Context: ctx, Reference: handleReference, View: decodedView, Call: service.objectCaller(peer, handleReference, imported)}
+	handle := scm.ClusterHandle{Lifetime: lease, Reference: handleReference, View: decodedView, Call: service.objectCaller(peer, handleReference, imported)}
 	value, failure := scm.ReconstructClusterObject(handle)
 
 	if failure == nil {

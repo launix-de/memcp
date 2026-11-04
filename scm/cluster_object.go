@@ -67,7 +67,6 @@ type ClusterLifetime interface{ LocalState(func() any) any }
 
 type ClusterHandle struct {
 	Lifetime  ClusterLifetime
-	Context   context.Context
 	Reference ClusterReference
 	View      Scmer // decoded immutable owner view, reconstructed before execution
 	Call      func(context.Context, ClusterRequest) (Scmer, error)
@@ -599,19 +598,13 @@ func importClusterLiteral(handle ClusterHandle) (value Scmer) {
 	}
 	if loading := state.loading; loading != nil {
 		state.mu.Unlock()
-		ctx := handle.Context
-		if ctx == nil {
-			ctx = context.Background()
+		// This lease owns the accepted materialization. Join it; a cancelled
+		// waiter must not abandon shared work needed by another invocation.
+		<-loading.ready
+		if loading.failure != nil {
+			panic(loading.failure)
 		}
-		select {
-		case <-loading.ready:
-			if loading.failure != nil {
-				panic(loading.failure)
-			}
-			return loading.value
-		case <-ctx.Done():
-			panic(ctx.Err())
-		}
+		return loading.value
 	}
 	loading := &clusterLiteralLoad{ready: make(chan struct{})}
 	state.loading = loading
