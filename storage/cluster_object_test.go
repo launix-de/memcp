@@ -1393,6 +1393,10 @@ func TestClusterCancelledReturnHandleDiscardsLateGrants(t *testing.T) {
 		t.Fatal(err)
 	}
 	slot := controlReturnSlot(envelope.Return)
+	previous, ok := service.channels.Load(handleChannel(slot))
+	if !ok {
+		t.Fatal("missing original receiver")
+	}
 	cancel()
 	if err := <-finished; err != context.Canceled {
 		t.Fatal("wrong wait cancellation", err)
@@ -1412,10 +1416,10 @@ func TestClusterCancelledReturnHandleDiscardsLateGrants(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	session := &scanRPCSession{service: service, peer: peer}
-	if err := session.handleValue(slot, schemeValue(payload)); err != nil {
-		t.Fatal(err)
-	}
+	// The reader may have fetched the old receiver before cancellation
+	// replaced it with the state-free disposer. Exercise that exact handoff.
+	previous.(scm.ClusterRequestHandler).HandleClusterRequest(&channelDelivery{Context: context.Background(), peer: peer}, payload)
+	peer.workers.Wait()
 	if _, ok := service.handles.Load(slot); ok {
 		t.Fatal("late result retained its cleanup slot")
 	}

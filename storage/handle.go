@@ -57,8 +57,9 @@ func (slot *handleSlot) stop() {
 func (slot *handleSlot) close() { slot.stop(); <-slot.drained }
 
 const (
-	handleValue byte = 0xf0
-	handleClose byte = 0xf1
+	handleValue      byte = 0xf0
+	handleClose      byte = 0xf1
+	handleFinalValue byte = 0xf2
 )
 
 // Each imported callback owns one local GC lease, shared by duplicate imports.
@@ -68,7 +69,11 @@ type remoteHandleKey struct {
 	peer clusterObjectPeer
 	slot uint64
 }
-type remoteHandleLease struct{ key remoteHandleKey }
+type remoteHandleLease struct {
+	key      remoteHandleKey
+	cleanup  runtime.Cleanup
+	finished atomic.Bool
+}
 type remoteHandleCleanup struct {
 	registry *clusterObjectRegistry
 	key      remoteHandleKey
@@ -103,10 +108,10 @@ func (service *nodeScanService) importHandleLease(peer clusterObjectPeer, slot u
 	if lease := r.remoteHandles[key].Value(); lease != nil {
 		return lease
 	}
-	lease := &remoteHandleLease{key}
+	lease := &remoteHandleLease{key: key}
 	identity := weak.Make(lease)
 	r.remoteHandles[key] = identity
-	runtime.AddCleanup(lease, cleanupRemoteHandle, remoteHandleCleanup{r, key, identity})
+	lease.cleanup = runtime.AddCleanup(lease, cleanupRemoteHandle, remoteHandleCleanup{r, key, identity})
 	return lease
 }
 
@@ -144,7 +149,12 @@ func (handle *remoteHandle) SerializeHandle(bindings *scm.SerializationContext) 
 	}
 	return bindings.ExportHandle(handle)
 }
-func (handle *remoteHandle) Handle(value scm.Scmer) {
+func (handle *remoteHandle) Handle(value scm.Scmer)       { handle.send(value, false) }
+func (handle *remoteHandle) HandleResult(value scm.Scmer) { handle.send(value, true) }
+func (handle *remoteHandle) send(value scm.Scmer, final bool) {
+	if handle.lease.finished.Load() {
+		panic("handle result already sent")
+	}
 	defer runtime.KeepAlive(handle)
 	peer := handle.service.objectConnection(handle.peer)
 	if peer == nil {
@@ -169,7 +179,11 @@ func (handle *remoteHandle) Handle(value scm.Scmer) {
 	if err != nil {
 		panic(err)
 	}
-	message := mosiMessage{Channel: handleChannel(handle.slot), Payload: append([]byte{handleValue}, payload...)}
+	kind := handleValue
+	if final {
+		kind = handleFinalValue
+	}
+	message := mosiMessage{Channel: handleChannel(handle.slot), Payload: append([]byte{kind}, payload...)}
 	message.encoded, err = encodeMosiMessage(message)
 	if err != nil {
 		panic(err)
@@ -179,6 +193,18 @@ func (handle *remoteHandle) Handle(value scm.Scmer) {
 		panic(err)
 	}
 	queued = true
+	if final {
+		// A final delivery itself relinquishes this return-channel reference. Stop
+		// its GC notification so it cannot send a redundant standalone Close.
+		handle.lease.finished.Store(true)
+		handle.lease.cleanup.Stop()
+		r := handle.service.objectRegistry()
+		r.mu.Lock()
+		if r.remoteHandles[handle.lease.key].Value() == handle.lease {
+			delete(r.remoteHandles, handle.lease.key)
+		}
+		r.mu.Unlock()
+	}
 }
 
 func handleChannel(slot uint64) string { return strconv.FormatUint(slot, 10) }
@@ -204,11 +230,25 @@ func (service *nodeScanService) storeHandle(slot uint64, entry *handleSlot) {
 		// Admission happens in stream order, before asynchronous execution. Close
 		// cannot discard an already accepted fire-and-forget invocation.
 		if !entry.enter() {
+			if current, exists := service.handles.Load(slot); exists && current != entry {
+				if replacement, exists := service.channels.Load(handleChannel(slot)); exists {
+					replacement.(scm.ClusterRequestHandler).HandleClusterRequest(ctx, payload)
+					return
+				}
+			}
+			// Admission can race cancellation after the reader looked up this
+			// receiver. Return any grants without reconstructing expired query data.
+			delivery.accepted = service.discardHandlePayload(delivery.peer, payload) == nil
 			return
 		}
 		work.HandleClusterRequest(ctx, payload)
 		if !delivery.accepted {
 			entry.leave()
+		} else if len(payload) > 0 && payload[0] == handleFinalValue {
+			entry.stop()
+			if service.handles.CompareAndDelete(slot, entry) {
+				service.channels.Delete(handleChannel(slot))
+			}
 		}
 	}))
 }
@@ -283,7 +323,7 @@ func (service *nodeScanService) discardHandlePayload(peer *mosiPeer, payload []b
 	if len(payload) > 0 && payload[0] == handleClose {
 		return nil
 	}
-	if len(payload) > 0 && payload[0] == handleValue {
+	if len(payload) > 0 && (payload[0] == handleValue || payload[0] == handleFinalValue) {
 		payload = payload[1:]
 	}
 	var refs []scm.ClusterReference
@@ -338,7 +378,7 @@ func (s *scanRPCSession) deliverHandle(target *handleSlot, payload []byte) error
 // Only this payload protocol knows that its tail is one serialized Scmer.
 func (service *nodeScanService) schemeHandleReceiver(handler scm.Handle, owner scm.Scmer) scm.ClusterRequestHandler {
 	return scm.ClusterRequestHandlerFunc(func(ctx context.Context, payload []byte) {
-		if len(payload) == 0 || payload[0] != handleValue {
+		if len(payload) == 0 || (payload[0] != handleValue && payload[0] != handleFinalValue) {
 			panic("invalid handle delivery")
 		}
 		peer := ctx.(*channelDelivery).peer

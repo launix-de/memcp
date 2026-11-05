@@ -138,7 +138,7 @@ func (callback *clusterCallback) forwardClosure(bindings *SerializationContext) 
 		if closed {
 			mu.Unlock()
 			if reply != nil {
-				reply.Handle(NewAny(&handleFailure{"forwarded closure owner has finished"}))
+				SendHandleResult(reply, NewAny(&handleFailure{"forwarded closure owner has finished"}))
 			}
 			return
 		}
@@ -161,7 +161,7 @@ func (callback *clusterCallback) forwardClosure(bindings *SerializationContext) 
 				}
 			}()
 			if reply != nil {
-				reply.Handle(value)
+				SendHandleResult(reply, value)
 			}
 		}
 		defer func() {

@@ -372,7 +372,9 @@ serialization is an independent concern. Object operation codes, ordered ACK
 counters and transaction capabilities use binary fields, followed by at most one
 serialized Scheme value for dynamic arguments.
 
-One-shot return channels deregister on completion or cancellation. Imported
+One-shot return channels deregister on completion or cancellation. A final
+result carries its release in the same delivery, avoiding a separate GC close.
+Imported
 callback handles and native object references own GC leases, weakly indexed on
 the importing peer. Go `AddCleanup` queues a close notification to the same
 channel used for calls. The owner then drops that remote registration; freeing

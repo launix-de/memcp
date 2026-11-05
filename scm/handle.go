@@ -112,6 +112,17 @@ type handleFailure struct{ message string }
 
 func (failure *handleFailure) Error() string { return failure.message }
 
+// SendHandleResult consumes the closure protocol's one-shot return handle.
+// Binary adapters can combine its final value and lifetime release in one
+// delivery. Ordinary Handle calls retain their multi-use semantics.
+func SendHandleResult(handle Handle, value Scmer) {
+	if result, ok := handle.(interface{ HandleResult(Scmer) }); ok {
+		result.HandleResult(value)
+	} else {
+		handle.Handle(value)
+	}
+}
+
 // ClosureHandle interprets (parameters return-handle). The result is sent raw;
 // error values have their own reconstruction constructor, not a transport field.
 func ClosureHandle(ctx context.Context, call func(...Scmer) Scmer) Handle {
@@ -129,7 +140,7 @@ func ClosureHandle(ctx context.Context, call func(...Scmer) Scmer) Handle {
 				if reply == nil {
 					panic(failure)
 				}
-				reply.Handle(NewAny(&handleFailure{fmt.Sprint(failure)}))
+				SendHandleResult(reply, NewAny(&handleFailure{fmt.Sprint(failure)}))
 			}
 		}()
 		if err := ctx.Err(); err != nil {
@@ -137,7 +148,7 @@ func ClosureHandle(ctx context.Context, call func(...Scmer) Scmer) Handle {
 		}
 		result := call(values[0].Slice()...)
 		if reply != nil {
-			reply.Handle(result)
+			SendHandleResult(reply, result)
 		}
 	})
 }

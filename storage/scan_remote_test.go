@@ -2011,3 +2011,30 @@ func TestHandleCloseKeepsPreviouslyAcceptedDeliveries(t *testing.T) {
 	}
 	waitObjectGC(t, func() bool { _, alive := owner.handles.Load(slot); return !alive })
 }
+
+func TestHandleFinalResultCombinesValueAndRelease(t *testing.T) {
+	peer := &mosiPeer{done: make(chan struct{}), outgoing: newMosiMailbox(), objectPeer: clusterObjectPeer{"owner", "boot"}}
+	service := &nodeScanService{peers: map[*mosiPeer]bool{peer: true}}
+	defer service.stopObjects()
+	imported, err := service.handleResolver(context.Background(), peer, scm.NewNil())(17)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scm.SendHandleResult(imported, scm.NewInt(42))
+	message := takeMosi(peer.outgoing)
+	if message.Channel != "17" || len(message.Payload) == 0 || message.Payload[0] != handleFinalValue {
+		t.Fatal("result did not carry its final release", message)
+	}
+	value, err := schemeValue(message.Payload[1:]).reconstruct()
+	if err != nil || value.Int() != 42 {
+		t.Fatal(value, err)
+	}
+	registry := service.objectRegistry()
+	registry.mu.Lock()
+	remaining := len(registry.remoteHandles)
+	releases := len(registry.releases)
+	registry.mu.Unlock()
+	if remaining != 0 || releases != 0 || peer.outgoing.count.Load() != 0 {
+		t.Fatal("single result retained an import or queued a second release", remaining, releases)
+	}
+}
