@@ -964,6 +964,63 @@ func TestClusterSchemaLocationCannotPromoteRevokedSelf(t *testing.T) {
 	}
 }
 
+func TestClusterSchemaLocationKeepsAcceptedOwnerAfterStaleSelfHint(t *testing.T) {
+	for _, hintEpoch := range []uint64{7, 8} {
+		t.Run(fmt.Sprint(hintEpoch), func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			service := &nodeScanService{}
+			cluster := &nodeCluster{self: clusterMember{ID: "local"}, service: service, ctx: ctx}
+			cluster.initializeManager()
+			service.cluster = cluster
+			peer := &mosiPeer{done: make(chan struct{}), outgoing: newMosiMailbox()}
+			cluster.view.Store(&clusterView{links: []*clusterLink{{member: clusterMember{ID: "schema-owner"}, peer: peer}}})
+			schemaResource := mosiResource{Database: "tenant"}
+			cluster.manager.resourceCell(schemaResource).ownstate.Initialize(mosi.S)
+			cluster.manager.updateRecord(schemaResource, func(record *replicaRecord) bool {
+				record.Owner, record.Epoch = "schema-owner", 1
+				return true
+			})
+			resource := mosiResource{Database: "tenant", Table: "items", Shard: uuid.NewString()}
+			cell := cluster.manager.resourceCell(resource)
+			cell.ownstate.Initialize(mosi.IO)
+			cluster.manager.updateRecord(resource, func(record *replicaRecord) bool {
+				record.Owner, record.Epoch = "actual-owner", 8
+				return true
+			})
+			finished := make(chan error, 1)
+			go func() {
+				owner, err := cluster.locateViaSchema(ctx, resource)
+				if err == nil && owner != "actual-owner" {
+					err = fmt.Errorf("returned rejected owner %s", owner)
+				}
+				finished <- err
+			}()
+			select {
+			case <-peer.outgoing.ready:
+				message := takeMosi(peer.outgoing)
+				var request struct{ Return, Method string }
+				if err := unmarshalNode(message.Data, &request); err != nil || request.Method != "cluster.location" {
+					t.Fatal("missing location request", request, err)
+				}
+				route, ok := service.handles.Load(controlReturnSlot(request.Return))
+				if !ok {
+					t.Fatal("location request omitted return handle")
+				}
+				deliverTestCompletion(t, route, scanCompletion{Data: mustNodeMetadata(replicaRecord{Resource: resource, Owner: "local", Epoch: hintEpoch})})
+			case <-ctx.Done():
+				t.Fatal("location request did not arrive")
+			}
+			if err := <-finished; err != nil {
+				t.Fatal(err)
+			}
+			if cell.ownstate.Phase() != mosi.IO || cluster.report(resource).Owner != "actual-owner" {
+				t.Fatal("stale hint changed native permission or accepted route")
+			}
+		})
+	}
+}
+
 func TestClusterReportJoinsUUIDDirectoryPublication(t *testing.T) {
 	cluster := &nodeCluster{}
 	cluster.initializeManager()
