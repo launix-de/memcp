@@ -171,6 +171,14 @@ func TestClusterRosterRequiresBoundIdentityAndRetainsSnapshot(t *testing.T) {
 	if cluster.view.Load() != before {
 		t.Fatal("rejected roster changed published view")
 	}
+	for _, version := range []int{18, scanWireVersion + 1} {
+		if err := cluster.remember(remote.ID, clusterHello{version, remote, []clusterMember{self}}); err == nil {
+			t.Fatalf("accepted incompatible wire version %d", version)
+		}
+		if cluster.view.Load() != before {
+			t.Fatal("incompatible peer changed published roster")
+		}
+	}
 	if err := cluster.remember(remote.ID, clusterHello{scanWireVersion, remote, []clusterMember{self}}); err != nil {
 		t.Fatal(err)
 	}
@@ -1444,7 +1452,7 @@ func TestClusterShardRecoveryRestoresCurrentContentFromOlderSchema(t *testing.T)
 	tbl.schema.tables.Set(tbl.Name, &restored)
 	self, reader := "memcp://"+uuid.NewString(), "memcp://"+uuid.NewString()
 	service := &nodeScanService{}
-	peer := &mosiPeer{done: make(chan struct{}), outgoing: make(chan mosiMessage, 1)}
+	peer := &mosiPeer{done: make(chan struct{}), outgoing: newMosiMailbox()}
 	cluster := &nodeCluster{self: clusterMember{ID: self}, service: service, ctx: context.Background()}
 	cluster.initializeManager()
 	service.cluster = cluster
@@ -1470,13 +1478,17 @@ func TestClusterShardRecoveryRestoresCurrentContentFromOlderSchema(t *testing.T)
 		finished <- err
 	}()
 	select {
-	case message := <-peer.outgoing:
+	case <-peer.outgoing.ready:
+		message := takeMosi(peer.outgoing)
 		var request struct{ Return, Method string }
-		if err := json.Unmarshal(message.Data, &request); err != nil || request.Method != "cluster.report" || cell.ownstate.Initialized() {
+		if err := unmarshalNode(message.Data, &request); err != nil || request.Method != "cluster.report" || cell.ownstate.Initialized() {
 			t.Fatal("recovery omitted live authority proof", request, err)
 		}
-		route, _ := service.returns.Load(request.Return)
-		deliverTestCompletion(t, route, scanCompletion{Data: mustScanJSON(replicaRecord{Resource: resource, Owner: self, State: "S", Epoch: 3, Content: content})})
+		route, ok := service.handles.Load(controlReturnSlot(request.Return))
+		if !ok {
+			t.Fatal("recovery omitted its return handle")
+		}
+		deliverTestCompletion(t, route, scanCompletion{Data: mustNodeMetadata(replicaRecord{Resource: resource, Owner: self, State: "S", Epoch: 3, Content: content})})
 	case <-ctx.Done():
 		t.Fatal("recovery did not request live proof")
 	}
