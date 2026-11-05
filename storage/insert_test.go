@@ -24,6 +24,7 @@ import "time"
 import "unsafe"
 import "os/exec"
 import "runtime"
+import "context"
 import "strconv"
 import "strings"
 import "testing"
@@ -1385,5 +1386,73 @@ func TestUniqueSnapshotDrainsAdmittedWriter(t *testing.T) {
 			cache.Insert(columns, candidate, nil, scm.NewNil(), false, nil)
 			break
 		}
+	}
+}
+
+// Cancellation after table-lock publication must remove the READ/WRITE grant
+// without waiting for the old writer. Cover adjacent snapshot owners as well.
+func TestUniqueSnapshotCancellation(t *testing.T) {
+	for _, kind := range []string{"read", "write", "adjacent"} {
+		t.Run(kind, func(t *testing.T) {
+			tbl := setupScanParallelTestTable(t, "tunique_snapshot_cancel_"+kind)
+			tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}}
+			guard := tbl.guardUniqueWrites([]string{"id"}, [][]scm.Scmer{{scm.NewInt(1)}}, false, 0, nil)
+			guard.lock()
+			defer guard.release()
+			waitState := func(expected int64) {
+				deadline := time.Now().Add(2 * time.Second)
+				for tbl.tableLockState.Load() != expected {
+					if time.Now().After(deadline) {
+						t.Fatal("lock was not published")
+					}
+					runtime.Gosched()
+				}
+			}
+			var first chan func()
+			if kind == "adjacent" {
+				first = make(chan func(), 1)
+				go func() { first <- acquireTableLock(tbl.schema.Name, tbl.Name, false, true, &scm.SessionState{}, 0) }()
+				waitState(1)
+			}
+			ss := &scm.SessionState{}
+			seq := ss.BeginQuery("Query", "cancel pending snapshot")
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			ss.SetQueryContext(seq, ctx)
+			done := make(chan any, 1)
+			go func() {
+				defer func() { done <- recover() }()
+				unlock := acquireTableLock(tbl.schema.Name, tbl.Name, kind == "write", true, ss, seq)
+				unlock()
+			}()
+			expected := int64(1)
+			if kind == "write" {
+				expected = -1
+			}
+			if first != nil {
+				expected = 2
+			}
+			waitState(expected)
+			cancel()
+			select {
+			case failure := <-done:
+				if fmt.Sprint(failure) != "query killed" {
+					t.Errorf("cancellation returned %v", failure)
+				}
+			case <-time.After(2 * time.Second):
+				t.Error("cancelled owner waited for the admitted writer")
+				guard.release()
+				<-done
+			}
+			guard.release()
+			if first != nil {
+				(<-first)()
+			}
+			if tbl.hasTableLock() {
+				t.Fatal("cancelled owner retained table ownership")
+			}
+			unlock := acquireTableLock(tbl.schema.Name, tbl.Name, false, true, &scm.SessionState{}, 0)
+			unlock()
+		})
 	}
 }

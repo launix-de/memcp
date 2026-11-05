@@ -599,6 +599,19 @@ func acquireTableLock(schema, name string, write bool, snapshotFollows bool, ss 
 	}
 	cond := t.getTableLockCond()
 	ctx := tableLockQueryContext(ss, querySeq)
+	waitWriters := func(unlock func()) func() {
+		t.tableLockMu.Lock()
+		for t.tableLockWriters.Load() != 0 && (ctx == nil || ctx.Err() == nil) {
+			cond.Wait()
+		}
+		cancelled := ctx != nil && ctx.Err() != nil
+		t.tableLockMu.Unlock()
+		if cancelled {
+			unlock()
+			panic("query killed")
+		}
+		return unlock
+	}
 	if ctx != nil {
 		stopWake := context.AfterFunc(ctx, func() {
 			t.tableLockMu.Lock()
@@ -638,11 +651,8 @@ func acquireTableLock(schema, name string, write bool, snapshotFollows bool, ss 
 		t.tableLockState.Add(1)
 		t.tableLockServe++
 		cond.Broadcast()
-		for t.tableLockWriters.Load() != 0 {
-			cond.Wait()
-		}
 		t.tableLockMu.Unlock()
-		return func() {
+		return waitWriters(func() {
 			t.tableLockMu.Lock()
 			if t.tableLockReadOwners[ss] == 1 {
 				delete(t.tableLockReadOwners, ss)
@@ -655,7 +665,7 @@ func acquireTableLock(schema, name string, write bool, snapshotFollows bool, ss 
 			}
 			cond.Broadcast()
 			t.tableLockMu.Unlock()
-		}
+		})
 	}
 	t.tableLockMu.Unlock()
 	// User locks drain incompatible shard users. Cache snapshot READ publication
@@ -693,16 +703,11 @@ func acquireTableLock(schema, name string, write bool, snapshotFollows bool, ss 
 	// Publication prevents new UNIQUE admissions. Existing writers must finish
 	// before this owner initializes a cache or executes protected work: that work
 	// can itself use the global stripe pool for a different table.
-	t.tableLockMu.Lock()
-	for t.tableLockWriters.Load() != 0 {
-		cond.Wait()
-	}
-	t.tableLockMu.Unlock()
 	acquired = true
 	if write {
-		return t.unlockTableWrite
+		return waitWriters(t.unlockTableWrite)
 	}
-	return func() {
+	return waitWriters(func() {
 		t.tableLockMu.Lock()
 		if t.tableLockReadOwners[ss] == 1 {
 			delete(t.tableLockReadOwners, ss)
@@ -715,7 +720,7 @@ func acquireTableLock(schema, name string, write bool, snapshotFollows bool, ss 
 		}
 		cond.Broadcast()
 		t.tableLockMu.Unlock()
-	}
+	})
 }
 
 func lockTable(schema, name string, write bool, ss *scm.SessionState, querySeq uint64) {
