@@ -1008,7 +1008,7 @@ func TestClusterSchemaLocationKeepsAcceptedOwnerAfterStaleSelfHint(t *testing.T)
 			case <-peer.outgoing.ready:
 				message := takeMosi(peer.outgoing)
 				var request struct{ Return, Method string }
-				if err := unmarshalNode(message.Data, &request); err != nil || request.Method != "cluster.location" {
+				if err := decodeTestInvocation(message.Channel, message.Payload, &request); err != nil || request.Method != "cluster.location" {
 					t.Fatal("missing location request", request, err)
 				}
 				route, ok := service.handles.Load(controlReturnSlot(request.Return))
@@ -1579,7 +1579,7 @@ func testClusterShardRecoveryContent(t *testing.T, variant string) {
 	case <-peer.outgoing.ready:
 		message := takeMosi(peer.outgoing)
 		var request struct{ Return, Method string }
-		if err := unmarshalNode(message.Data, &request); err != nil || request.Method != "cluster.report" || cell.ownstate.Initialized() {
+		if err := decodeTestInvocation(message.Channel, message.Payload, &request); err != nil || request.Method != "cluster.report" || cell.ownstate.Initialized() {
 			t.Fatal("recovery omitted live authority proof", request, err)
 		}
 		route, ok := service.handles.Load(controlReturnSlot(request.Return))

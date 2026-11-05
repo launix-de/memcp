@@ -107,7 +107,7 @@ func TestCollationRelationReconstructsLocally(t *testing.T) {
 				if !ok {
 					t.Fatal("collation has no object-owned serialization contract")
 				}
-				if _, err := object.HandleClusterRequest(context.Background(), ClusterRequest{Method: "call", Arguments: []Scmer{NewString("a"), NewString("b")}}); err == nil {
+				if _, remote := object.(ClusterRequestHandler); remote {
 					t.Fatal("collation exposed a remote comparison endpoint")
 				}
 				bindings := new(SerializationContext).WithExport(func(ClusterObject, Scmer) (ClusterReference, error) {

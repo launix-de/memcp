@@ -974,7 +974,7 @@ func TestRemoteAdmissionWhileLoadingColdExtent(t *testing.T) {
 		defer workers.Done()
 		<-start
 		for range 4096 {
-			result, err := cold.HandleClusterRequest(context.Background(), scm.ClusterRequest{Method: "scan", Payload: shardScanInvocation{operator: shardUniqueAdmit, tx: tx}})
+			result, err := cold.executeClusterRequest(context.Background(), scm.ClusterRequest{Method: "scan", Payload: shardScanInvocation{operator: shardUniqueAdmit, tx: tx}})
 			if err != nil || !result.(scanResult).res.Bool() {
 				t.Error("cold loading interrupted native admission", result, err)
 				return

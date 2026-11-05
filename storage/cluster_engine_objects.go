@@ -599,10 +599,6 @@ func (tx *TxContext) Serialize(ctx *scm.SerializationContext) (scm.Scmer, error)
 	return tx.transactionState.Serialize(ctx)
 }
 
-func (tx *transactionState) ClusterForwardedHandle() *scm.ClusterHandle {
-	return tx.coordinator
-}
-
 func (tx *transactionState) Serialize(ctx *scm.SerializationContext) (scm.Scmer, error) {
 	if tx.coordinator != nil {
 		return scm.ClusterReferenceExpression(tx.coordinator.Reference), nil

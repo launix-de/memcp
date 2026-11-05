@@ -894,7 +894,7 @@ func (s *storageShard) serveUniqueScan(ctx context.Context, input shardScanInvoc
 		events := guardPointer.afterTriggers
 		guardPointer.afterTriggers = nil
 		if len(events) != 0 {
-			_, deliveryError := ready.HandleClusterRequest(ctx, scm.ClusterRequest{Method: "receive", Arguments: []scm.Scmer{scm.NewSlice([]scm.Scmer{scm.NewString("after"), encodeUniqueAfterTriggers(events)})}})
+			_, deliveryError := ready.executeClusterRequest(ctx, scm.ClusterRequest{Method: "receive", Arguments: []scm.Scmer{scm.NewSlice([]scm.Scmer{scm.NewString("after"), encodeUniqueAfterTriggers(events)})}})
 			if deliveryError != nil && err == nil {
 				err = deliveryError
 			}
@@ -1114,7 +1114,7 @@ func serveUniqueChannel(ctx context.Context, guard *uniqueWriteGuard, ready *clu
 	})
 	commands.Seal()
 	defer commands.Close() // join commands before releasing the borrowed guard
-	if _, err := ready.HandleClusterRequest(ctx, scm.ClusterRequest{Method: "receive", Arguments: []scm.Scmer{scm.NewAny(commands)}}); err != nil {
+	if _, err := ready.executeClusterRequest(ctx, scm.ClusterRequest{Method: "receive", Arguments: []scm.Scmer{scm.NewAny(commands)}}); err != nil {
 		return false, err
 	}
 	select {
@@ -1167,7 +1167,7 @@ func decodeUniqueAfterTriggers(value scm.Scmer, tx *TxContext) []uniqueAfterTrig
 }
 
 func callUniqueChannel(ctx context.Context, commands *clusterReceiver, parts ...scm.Scmer) (scm.Scmer, error) {
-	value, err := commands.HandleClusterRequest(ctx, scm.ClusterRequest{Method: "receive", Arguments: []scm.Scmer{scm.NewSlice(parts)}})
+	value, err := commands.executeClusterRequest(ctx, scm.ClusterRequest{Method: "receive", Arguments: []scm.Scmer{scm.NewSlice(parts)}})
 	if err != nil {
 		return scm.NewNil(), err
 	}
