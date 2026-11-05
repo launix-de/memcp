@@ -253,8 +253,10 @@ func (service *nodeScanService) storeHandle(slot uint64, entry *handleSlot) {
 	}))
 }
 func (service *nodeScanService) deleteHandle(slot uint64) {
+	if entry, exists := service.handles.LoadAndDelete(slot); exists {
+		entry.(*handleSlot).stop()
+	}
 	service.channels.Delete(handleChannel(slot))
-	service.handles.Delete(slot)
 }
 
 func (service *nodeScanService) allocateHandleSlot() uint64 {
@@ -279,6 +281,7 @@ func (service *nodeScanService) handleBindings(bindings *scm.SerializationContex
 		slot := service.allocateHandleSlot()
 		entry := &handleSlot{peer: peer.objectPeer, owner: owner}
 		decodeHandler := handler
+		_, resultReceiver := handler.(*scm.ResultReceiver)
 		if receiver, ok := handler.(*scm.ResultReceiver); ok {
 			decodeHandler = weakResultHandle{weak.Make(receiver)}
 		}
@@ -296,21 +299,24 @@ func (service *nodeScanService) handleBindings(bindings *scm.SerializationContex
 				})
 				result.RetainHandleRelease(func() { stop() })
 			}
-		} else {
-			// Query cancellation joins admitted callbacks, but the cleanup hook must
-			// not retain an otherwise released callback until the query ends.
-			weakEntry := weak.Make(entry)
-			if lifetime, ok := owner.Any().(interface{ RetainQueryWork(func()) bool }); ok {
-				if !lifetime.RetainQueryWork(func() {
-					release()
-					if current := weakEntry.Value(); current != nil {
-						current.close()
-					}
-				}) {
-					release()
-					return scm.NewNil(), fmt.Errorf("exported handle requires a live invocation owner")
+		}
+		// Producers register their finish hook before exporting reply slots. Join
+		// admitted reply decoding after those producers, including canceled waits.
+		// The hook is weak so abandoning a callback can still release it early.
+		weakEntry := weak.Make(entry)
+		if lifetime, ok := owner.Any().(interface{ RetainQueryWork(func()) bool }); ok {
+			retained := lifetime.RetainQueryWork(func() {
+				release()
+				if current := weakEntry.Value(); current != nil {
+					current.close()
 				}
+			})
+			if !retained && !resultReceiver {
+				release()
+				return scm.NewNil(), fmt.Errorf("exported handle requires a live invocation owner")
 			}
+			// An already registered producer may flush its final batch while closing.
+			// It owns and joins those late one-shot replies itself.
 		}
 		return scm.NewSlice([]scm.Scmer{scm.NewSymbol("cluster_handle"), scm.NewInt(int64(slot))}), nil
 	})

@@ -2038,3 +2038,77 @@ func TestHandleFinalResultCombinesValueAndRelease(t *testing.T) {
 		t.Fatal("single result retained an import or queued a second release", remaining, releases)
 	}
 }
+
+func TestClosedReturnHandleDoesNotReconstructAlreadyLookedUpDelivery(t *testing.T) {
+	service := &nodeScanService{}
+	defer service.stopObjects()
+	peer := &mosiPeer{done: make(chan struct{}), outgoing: newMosiMailbox(), objectPeer: clusterObjectPeer{"sender", "boot"}}
+	receiver := scm.NewResultReceiver()
+	expression, err := service.handleBindings(&scm.SerializationContext{}, peer).HandleExpression(receiver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	slot := uint64(expression.Slice()[1].Int())
+	previous, exists := service.channels.Load(handleChannel(slot))
+	if !exists {
+		t.Fatal("missing return channel")
+	}
+	var reconstructed atomic.Int32
+	name := "test_expired_return_constructor"
+	scm.Declare(&scm.Globalenv, &scm.Declaration{Name: name, Fn: func(...scm.Scmer) scm.Scmer { reconstructed.Add(1); return scm.NewInt(42) }, Type: &scm.TypeDescriptor{Kind: "func", Return: &scm.TypeDescriptor{Kind: "any"}}})
+	// This is a valid portable-value constructor in a result tail. A reader
+	// which looked up the receiver before cancellation must not evaluate it
+	// after the consumer has closed that receiver.
+	payload := append([]byte{handleValue}, []byte("(serialized_value 1 ("+name+"))")...)
+	receiver.Close()
+	previous.(scm.ClusterRequestHandler).HandleClusterRequest(&channelDelivery{Context: context.Background(), peer: peer}, payload)
+	peer.workers.Wait()
+	if reconstructed.Load() != 0 {
+		t.Fatal("closed return channel reconstructed expired delivery")
+	}
+}
+
+func TestReturnHandleQueryCleanupJoinsAdmittedDecoding(t *testing.T) {
+	service := &nodeScanService{}
+	defer service.stopObjects()
+	peer := &mosiPeer{done: make(chan struct{}), outgoing: newMosiMailbox(), objectPeer: clusterObjectPeer{"sender", "boot"}}
+	tx := NewTxContext(TxCursorStability)
+	tx.beginQuery(nil, 1, "return decoder")
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	defer func() { once.Do(func() { close(release) }); tx.endQuery(1) }()
+	receiver := scm.NewResultReceiver()
+	defer runtime.KeepAlive(receiver)
+	expression, err := service.handleBindings(&scm.SerializationContext{Invocation: scm.NewAny(tx)}, peer).HandleExpression(receiver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	slot := uint64(expression.Slice()[1].Int())
+	name := "test_admitted_return_constructor"
+	scm.Declare(&scm.Globalenv, &scm.Declaration{Name: name, Fn: func(...scm.Scmer) scm.Scmer { close(entered); <-release; return scm.NewInt(42) }, Type: &scm.TypeDescriptor{Kind: "func", Return: &scm.TypeDescriptor{Kind: "any"}}})
+	payload := append([]byte{handleValue}, []byte("(serialized_value 1 ("+name+"))")...)
+	peer.channels = &service.channels
+	if !peer.dispatchMessage(mosiMessage{Channel: handleChannel(slot), Payload: payload}, len(payload), time.Time{}) {
+		t.Fatal("delivery refused")
+	}
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("result constructor did not start")
+	}
+	receiver.Close()
+	finished := make(chan struct{})
+	go func() { tx.endQuery(1); close(finished) }()
+	select {
+	case <-finished:
+		t.Fatal("query cleanup overtook an admitted result constructor")
+	case <-time.After(50 * time.Millisecond):
+	}
+	once.Do(func() { close(release) })
+	select {
+	case <-finished:
+	case <-time.After(time.Second):
+		t.Fatal("completed result constructor stranded cleanup")
+	}
+	peer.workers.Wait()
+}
