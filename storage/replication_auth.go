@@ -94,7 +94,7 @@ func (r *replicationManager) handleMaster(ctx context.Context, id string, peer *
 	default:
 	}
 	var req replicaRequest
-	if err := unmarshalNode(data, &req); err != nil {
+	if err := decodeReplicaParameters(method, data, &req); err != nil {
 		return nil, err
 	}
 	r.mu.Lock()

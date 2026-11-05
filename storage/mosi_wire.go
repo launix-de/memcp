@@ -26,7 +26,7 @@ import "github.com/launix-de/memcp/scm"
 const mosiPacketBytes = 64 * 1024
 
 const mosiHTTPPath = "/cluster"
-const mosiSubprotocol = "memcp.channels.v6"
+const mosiSubprotocol = "memcp.channels.v7"
 const mosiMaxMessageBytes = 256 * 1024
 const maxNodeRecordBytes = 32 * 1024 * 1024
 
@@ -53,18 +53,213 @@ func decodeMosiMessage(frame []byte) (mosiMessage, error) {
 	return mosiMessage{Channel: string(frame[1 : 1+n]), Payload: frame[1+n:]}, nil
 }
 
-// MOSI owns its binary payload format. The channel transport never decodes it.
-func encodeMosiPacket(packet mosiPacket) ([]byte, error) {
-	payload := packet.Payload
-	packet.Payload = nil
-	if len(payload) > 0 && (packet.Kind != "chunk" || len(payload) > mosiPacketBytes+1024) {
+// MOSI's action selects its exact parameter layout. No map keys, generic
+// metadata record or fields belonging to other actions cross the wire.
+var mosiActions = [...]string{"", "read", "write", "recall", "invalidate", "ack", "failure", "grant", "begin", "object", "chunk", "object_end", "end", "reference"}
+
+type mosiWriter struct{ data []byte }
+
+func (w *mosiWriter) text(s string)   { w.data = appendNodeBlob(w.data, []byte(s)) }
+func (w *mosiWriter) number(n uint64) { w.data = binary.AppendUvarint(w.data, n) }
+func (w *mosiWriter) resource(r mosiResource) {
+	switch {
+	case r.Object != "":
+		w.data = append(w.data, 2)
+		w.text(r.Object)
+	case r.Shard != "":
+		w.data = append(w.data, 1)
+		w.text(r.Database)
+		w.text(r.Table)
+		w.text(r.Shard)
+	default:
+		w.data = append(w.data, 0)
+		w.text(r.Database)
+	}
+}
+func (r *nodeReader) octet() byte {
+	if len(r.data) == 0 {
+		panic("truncated action")
+	}
+	v := r.data[0]
+	r.data = r.data[1:]
+	return v
+}
+func (r *nodeReader) resource() mosiResource {
+	switch r.octet() {
+	case 0:
+		return mosiResource{Database: string(r.blob())}
+	case 1:
+		return mosiResource{Database: string(r.blob()), Table: string(r.blob()), Shard: string(r.blob())}
+	case 2:
+		return mosiResource{Object: string(r.blob())}
+	default:
+		panic("invalid resource kind")
+	}
+}
+func (w *mosiWriter) routes(routes []shardForward) {
+	w.number(uint64(len(routes)))
+	for _, route := range routes {
+		w.resource(route.From)
+		w.resource(route.To)
+	}
+}
+func (r *nodeReader) routes() []shardForward {
+	n := r.uint()
+	if n > uint64(len(r.data))/4 {
+		panic("truncated routes")
+	}
+	if n == 0 {
+		return nil
+	}
+	routes := make([]shardForward, int(n))
+	for i := range routes {
+		routes[i] = shardForward{From: r.resource(), To: r.resource()}
+	}
+	return routes
+}
+func (w *mosiWriter) readers(readers map[string]bool) {
+	w.number(uint64(len(readers)))
+	for peer, live := range readers {
+		w.text(peer)
+		if live {
+			w.data = append(w.data, 1)
+		} else {
+			w.data = append(w.data, 0)
+		}
+	}
+}
+func (r *nodeReader) readers() map[string]bool {
+	n := r.uint()
+	if n > uint64(len(r.data))/2 {
+		panic("truncated readers")
+	}
+	if n == 0 {
+		return nil
+	}
+	readers := make(map[string]bool, int(n))
+	for range n {
+		peer := string(r.blob())
+		live := r.octet()
+		if live > 1 {
+			panic("invalid reader")
+		}
+		readers[peer] = live == 1
+	}
+	return readers
+}
+func encodeMosiPacket(p mosiPacket) (data []byte, err error) {
+	defer func() {
+		if failure := recover(); failure != nil {
+			data = nil
+			err = fmt.Errorf("invalid MOSI payload: %v", failure)
+		}
+	}()
+	if len(p.Payload) > 0 && (p.Kind != "chunk" || len(p.Payload) > mosiPacketBytes+1024) {
 		return nil, fmt.Errorf("invalid MOSI binary payload")
 	}
-	metadata, err := marshalNode(packet)
-	if err != nil {
-		return nil, err
+	action := 0
+	for i, name := range mosiActions {
+		if name == p.Kind {
+			action = i
+			break
+		}
 	}
-	return append(appendNodeBlob(nil, metadata), payload...), nil
+	if action == 0 {
+		return nil, fmt.Errorf("unknown MOSI action")
+	}
+	w := mosiWriter{data: make([]byte, 1, 256)}
+	w.data[0] = byte(action)
+	// These flags represent routing, not unrelated optional action parameters.
+	flags := byte(0)
+	if p.From != "" {
+		flags |= 1
+	}
+	if p.To != "" {
+		flags |= 2
+	}
+	w.data = append(w.data, flags)
+	if flags&1 != 0 {
+		w.text(p.From)
+	}
+	if flags&2 != 0 {
+		w.text(p.To)
+	}
+	w.text(p.ID)
+	w.resource(p.Resource)
+	switch p.Kind {
+	case "read", "write":
+		w.number(p.Sequence)
+		w.text(p.Boot)
+		w.text(p.User)
+		w.text(p.Hash)
+		if p.TryRead {
+			w.data = append(w.data, 1)
+		} else {
+			w.data = append(w.data, 0)
+		}
+		w.routes(p.Forwards)
+	case "recall":
+		w.number(p.Epoch)
+		w.text(p.State)
+		w.text(p.Owner)
+		w.readers(p.Readers)
+	case "invalidate":
+		w.number(p.Epoch)
+		w.routes(p.Forwards)
+	case "ack":
+		w.number(p.Epoch)
+		w.text(p.Content)
+	case "failure":
+		w.number(p.Epoch)
+		w.text(p.Content)
+		w.text(p.State)
+		w.text(p.Error)
+	case "grant":
+		w.number(p.Epoch)
+		w.text(p.State)
+		w.text(p.Content)
+		w.text(p.Owner)
+		w.readers(p.Readers)
+	case "begin":
+		w.number(p.Epoch)
+		w.text(p.Content)
+		w.text(p.User)
+		w.text(p.Hash)
+		w.routes(p.Forwards)
+	case "object":
+		w.number(p.Epoch)
+		w.text(p.Content)
+		w.text(p.ObjectKind)
+		w.text(p.Object)
+	case "chunk":
+		w.number(p.Epoch)
+		w.text(p.Content)
+		w.text(p.ObjectKind)
+		w.text(p.Object)
+		w.data = append(w.data, p.Payload...)
+	case "object_end":
+		w.number(p.Epoch)
+		w.text(p.Content)
+		w.text(p.ObjectKind)
+		w.text(p.Object)
+	case "end":
+		w.number(p.Epoch)
+		w.text(p.Content)
+	case "reference":
+		w.number(p.Epoch)
+		w.text(p.State)
+		w.text(p.Content)
+		w.text(p.Owner)
+		w.readers(p.Readers)
+		w.routes(p.Forwards)
+		w.text(p.Object)
+		if p.Capture == nil {
+			w.data = append(w.data, 0)
+		} else {
+			w.data = appendReferences(w.data, []scm.ClusterReference{*p.Capture})
+		}
+	}
+	return w.data, nil
 }
 func decodeMosiPacket(data []byte) (packet *mosiPacket, err error) {
 	defer func() {
@@ -74,20 +269,109 @@ func decodeMosiPacket(data []byte) (packet *mosiPacket, err error) {
 		}
 	}()
 	r := nodeReader{data}
-	packet = new(mosiPacket)
-	if err = unmarshalNode(r.blob(), packet); err != nil {
-		return nil, err
+	action := int(r.octet())
+	if action == 0 || action >= len(mosiActions) {
+		return nil, fmt.Errorf("unknown MOSI action")
 	}
-	if len(packet.Payload) != 0 {
-		return nil, fmt.Errorf("inline MOSI payload")
+	p := new(mosiPacket)
+	p.Kind = mosiActions[action]
+	flags := r.octet()
+	if flags&^3 != 0 {
+		return nil, fmt.Errorf("invalid MOSI route flags")
 	}
-	if len(r.data) > 0 {
-		if packet.Kind != "chunk" || len(r.data) > mosiPacketBytes+1024 {
-			return nil, fmt.Errorf("invalid MOSI binary payload")
+	if flags&1 != 0 {
+		p.From = string(r.blob())
+	}
+	if flags&2 != 0 {
+		p.To = string(r.blob())
+	}
+	p.ID = string(r.blob())
+	p.Resource = r.resource()
+	switch p.Kind {
+	case "read", "write":
+		p.Sequence = r.uint()
+		p.Boot = string(r.blob())
+		p.User = string(r.blob())
+		p.Hash = string(r.blob())
+		flag := r.octet()
+		if flag > 1 {
+			panic("invalid read flag")
 		}
-		packet.Payload = r.data
+		p.TryRead = flag == 1
+		p.Forwards = r.routes()
+	case "recall":
+		p.Epoch = r.uint()
+		p.State = string(r.blob())
+		p.Owner = string(r.blob())
+		p.Readers = r.readers()
+	case "invalidate":
+		p.Epoch = r.uint()
+		p.Forwards = r.routes()
+	case "ack":
+		p.Epoch = r.uint()
+		p.Content = string(r.blob())
+	case "failure":
+		p.Epoch = r.uint()
+		p.Content = string(r.blob())
+		p.State = string(r.blob())
+		p.Error = string(r.blob())
+	case "grant":
+		p.Epoch = r.uint()
+		p.State = string(r.blob())
+		p.Content = string(r.blob())
+		p.Owner = string(r.blob())
+		p.Readers = r.readers()
+	case "begin":
+		p.Epoch = r.uint()
+		p.Content = string(r.blob())
+		p.User = string(r.blob())
+		p.Hash = string(r.blob())
+		p.Forwards = r.routes()
+	case "object":
+		p.Epoch = r.uint()
+		p.Content = string(r.blob())
+		p.ObjectKind = string(r.blob())
+		p.Object = string(r.blob())
+	case "chunk":
+		p.Epoch = r.uint()
+		p.Content = string(r.blob())
+		p.ObjectKind = string(r.blob())
+		p.Object = string(r.blob())
+		if len(r.data) > mosiPacketBytes+1024 {
+			panic("oversized MOSI chunk")
+		}
+		if len(r.data) > 0 {
+			p.Payload = r.data
+		}
+		r.data = nil
+	case "object_end":
+		p.Epoch = r.uint()
+		p.Content = string(r.blob())
+		p.ObjectKind = string(r.blob())
+		p.Object = string(r.blob())
+	case "end":
+		p.Epoch = r.uint()
+		p.Content = string(r.blob())
+	case "reference":
+		p.Epoch = r.uint()
+		p.State = string(r.blob())
+		p.Content = string(r.blob())
+		p.Owner = string(r.blob())
+		p.Readers = r.readers()
+		p.Forwards = r.routes()
+		p.Object = string(r.blob())
+		refs := r.references()
+		if len(refs) > 1 {
+			panic("invalid transfer capture")
+		}
+		if len(refs) == 1 {
+			p.Capture = &refs[0]
+		}
 	}
-	return packet, nil
+	if len(r.data) != 0 {
+		return nil, fmt.Errorf("trailing MOSI parameters")
+	}
+	return p, nil
 }
 
 // Node control metadata uses a bounded binary value stream. Scheme values are
@@ -155,6 +439,165 @@ func metadataLayout(t reflect.Type) *nodeLayout {
 	return actual.(*nodeLayout)
 }
 func marshalNode(value any) (data []byte, err error) {
+	defer func() {
+		if failure := recover(); failure != nil {
+			data = nil
+			err = fmt.Errorf("invalid typed payload: %v", failure)
+		}
+		if err == nil && len(data) > maxNodeRecordBytes {
+			data = nil
+			err = scm.ErrClusterRequestTooLarge
+		}
+	}()
+	switch v := value.(type) {
+	case scm.ClusterReference:
+		return appendReferences(nil, []scm.ClusterReference{v}), nil
+	case []scm.ClusterReference:
+		return appendReferences(nil, v), nil
+	case replicaAdminResult:
+		return freezeScanValue(scm.NewSlice([]scm.Scmer{v.Value, scm.NewSlice(v.Rows), scm.NewSlice(v.Fields)}))
+
+	case replicaRecord:
+		w := mosiWriter{data: make([]byte, 0, 128)}
+		w.record(v)
+		return w.data, nil
+	case []replicaRecord:
+		w := mosiWriter{data: make([]byte, 0, 128)}
+		w.records(v)
+		return w.data, nil
+	case clusterSchemaLocations:
+		w := mosiWriter{data: make([]byte, 0, 128)}
+		w.locations(v)
+		return w.data, nil
+	case replicaRecovery:
+		w := mosiWriter{data: make([]byte, 0, 128)}
+		w.text(v.Boot)
+		w.records(v.Resources)
+		return w.data, nil
+	case replicaAuth:
+		w := mosiWriter{data: make([]byte, 0, 128)}
+		w.text(v.Hash)
+		if v.Admin {
+			w.data = append(w.data, 1)
+		} else {
+			w.data = append(w.data, 0)
+		}
+		w.readers(v.Databases)
+		return w.data, nil
+	case scanChallenge:
+		w := mosiWriter{data: make([]byte, 0, 128)}
+		w.number(uint64(v.Version))
+		flags := byte(0)
+		if v.Boot != "" {
+			flags |= 1
+		}
+		if v.Node != "" {
+			flags |= 2
+		}
+		if v.Nonce != "" {
+			flags |= 4
+		}
+		if v.Proof != "" {
+			flags |= 8
+		}
+		if v.Return != "" {
+			flags |= 16
+		}
+		w.data = append(w.data, flags)
+		if flags&1 != 0 {
+			w.text(v.Boot)
+		}
+		if flags&2 != 0 {
+			w.text(v.Node)
+		}
+		if flags&4 != 0 {
+			w.text(v.Nonce)
+		}
+		if flags&8 != 0 {
+			w.text(v.Proof)
+		}
+		if flags&16 != 0 {
+			w.text(v.Return)
+		}
+		return w.data, nil
+
+	case remoteScanDescription:
+		w := mosiWriter{data: make([]byte, 0, 128)}
+		w.description(v)
+		return w.data, nil
+	case remoteInsertTask:
+		w := mosiWriter{data: make([]byte, 0, 128)}
+		w.insert(v)
+		return w.data, nil
+	case remoteInsertResult:
+		w := mosiWriter{data: make([]byte, 0, 128)}
+		flags := byte(0)
+		if v.Rejected {
+			flags |= 1
+		}
+		if v.FirstID != nil {
+			flags |= 2
+		}
+		w.data = append(w.data, flags)
+		w.integer(int64(v.Count))
+		if v.FirstID != nil {
+			w.integer(*v.FirstID)
+		}
+		return w.data, nil
+	case mosiResource:
+		w := mosiWriter{data: make([]byte, 0, 128)}
+		w.resource(v)
+		return w.data, nil
+	case clusterHello:
+		w := mosiWriter{data: make([]byte, 0, 128)}
+		w.hello(v)
+		return w.data, nil
+	case clusterIDRequest:
+		w := mosiWriter{data: make([]byte, 0, 128)}
+		w.text(v.Database)
+		w.text(v.Table)
+		w.number(v.Explicit)
+		w.number(v.Count)
+		return w.data, nil
+	case clusterIDReply:
+		return binary.AppendUvarint(nil, v.Base), nil
+	case objectViewDeclaration:
+		w := mosiWriter{data: make([]byte, 0, 128)}
+		w.text(v.URI)
+		w.data = append(w.data, v.View...)
+		return w.data, nil
+
+	case remoteScanTask:
+		return encodeScanTask(v), nil
+	case remoteScanResult:
+		return encodeScanResult(v), nil
+	case remoteScanDescribe:
+		w := mosiWriter{data: make([]byte, 0, 128)}
+		w.number(uint64(v.Version))
+		w.text(v.Database)
+		w.text(v.Table)
+		return w.data, nil
+	case clusterObjectReply:
+		w := mosiWriter{data: make([]byte, 0, 128)}
+		if v.Raw != nil {
+			w.data = append(w.data, 1)
+		} else {
+			w.data = append(w.data, 0)
+		}
+		if v.Raw != nil {
+			w.data = append(w.data, v.Raw...)
+		} else {
+			w.data = append(w.data, v.Value...)
+		}
+		return w.data, nil
+	}
+
+	if completion, ok := value.(scanCompletion); ok {
+		return encodeScanCompletion(completion)
+	}
+	if packet, ok := value.(mosiPacket); ok {
+		return encodeMosiPacket(packet)
+	}
 	defer func() {
 		if failure := recover(); failure != nil {
 			data = nil
@@ -281,6 +724,142 @@ func (r *nodeReader) blob() []byte {
 	return v
 }
 func unmarshalNode(data []byte, target any) (err error) {
+	if len(data) > maxNodeRecordBytes {
+		return scm.ErrClusterRequestTooLarge
+	}
+	defer func() {
+		if failure := recover(); failure != nil {
+			err = fmt.Errorf("invalid typed payload: %v", failure)
+		}
+	}()
+	raw := nodeReader{data}
+	typed := true
+	switch p := target.(type) {
+	case *scm.ClusterReference:
+		refs := raw.references()
+		if len(refs) != 1 {
+			panic("expected one native reference")
+		}
+		*p = refs[0]
+	case *[]scm.ClusterReference:
+		*p = raw.references()
+	case *replicaAdminResult:
+		value, err := schemeValue(data).reconstruct()
+		if err != nil {
+			return err
+		}
+		if !value.IsSlice() || len(value.Slice()) != 3 {
+			return fmt.Errorf("invalid admin result")
+		}
+		items := value.Slice()
+		if !items[1].IsSlice() || !items[2].IsSlice() {
+			return fmt.Errorf("invalid admin rows")
+		}
+		*p = replicaAdminResult{Value: items[0], Rows: items[1].Slice(), Fields: items[2].Slice()}
+		raw.data = nil
+
+	case *replicaRecord:
+		*p = raw.record()
+	case *[]replicaRecord:
+		*p = raw.records()
+	case *clusterSchemaLocations:
+		*p = raw.locations()
+	case *replicaRecovery:
+		*p = replicaRecovery{Boot: string(raw.blob()), Resources: raw.records()}
+	case *replicaAuth:
+		p.Hash = string(raw.blob())
+		flag := raw.octet()
+		if flag > 1 {
+			panic("invalid administrator flag")
+		}
+		p.Admin = flag == 1
+		p.Databases = raw.readers()
+	case *scanChallenge:
+		*p = scanChallenge{Version: int(raw.uint())}
+		flags := raw.octet()
+		if flags&^31 != 0 {
+			panic("invalid authentication flags")
+		}
+		if flags&1 != 0 {
+			p.Boot = string(raw.blob())
+		}
+		if flags&2 != 0 {
+			p.Node = string(raw.blob())
+		}
+		if flags&4 != 0 {
+			p.Nonce = string(raw.blob())
+		}
+		if flags&8 != 0 {
+			p.Proof = string(raw.blob())
+		}
+		if flags&16 != 0 {
+			p.Return = string(raw.blob())
+		}
+
+	case *remoteScanDescription:
+		*p = raw.description()
+	case *remoteInsertTask:
+		*p = raw.insert()
+	case *remoteInsertResult:
+		flags := raw.octet()
+		if flags&^3 != 0 {
+			panic("invalid insert result")
+		}
+		*p = remoteInsertResult{Rejected: flags&1 != 0, Count: int(raw.integer())}
+		if flags&2 != 0 {
+			n := raw.integer()
+			p.FirstID = &n
+		}
+	case *mosiResource:
+		*p = raw.resource()
+	case *clusterHello:
+		*p = raw.hello()
+	case *clusterIDRequest:
+		*p = clusterIDRequest{Database: string(raw.blob()), Table: string(raw.blob()), Explicit: raw.uint(), Count: raw.uint()}
+	case *clusterIDReply:
+		*p = clusterIDReply{Base: raw.uint()}
+	case *objectViewDeclaration:
+		*p = objectViewDeclaration{URI: string(raw.blob()), View: raw.data}
+		raw.data = nil
+
+	case *remoteScanTask:
+		*p = raw.scanTask()
+	case *remoteScanResult:
+		*p = raw.scanResult()
+	case *remoteScanDescribe:
+		*p = remoteScanDescribe{Version: int(raw.uint()), Database: string(raw.blob()), Table: string(raw.blob())}
+	case *clusterObjectReply:
+		kind := raw.octet()
+		if kind > 1 {
+			panic("invalid object result")
+		}
+		*p = clusterObjectReply{}
+		if kind == 1 {
+			p.Raw = raw.data
+		} else {
+			p.Value = raw.data
+		}
+		raw.data = nil
+	default:
+		typed = false
+	}
+	if typed {
+		if len(raw.data) != 0 {
+			return fmt.Errorf("trailing typed parameters")
+		}
+		return nil
+	}
+
+	if completion, ok := target.(*scanCompletion); ok {
+		return decodeScanCompletion(data, completion)
+	}
+	if packet, ok := target.(*mosiPacket); ok {
+		decoded, err := decodeMosiPacket(data)
+		if err == nil {
+			*packet = *decoded
+		}
+		return err
+	}
 	defer func() {
 		if failure := recover(); failure != nil {
 			err = fmt.Errorf("node metadata decoding: %v", failure)
@@ -647,4 +1226,35 @@ func decodeMosiChunk(packet mosiPacket) ([]byte, error) {
 		return nil, fmt.Errorf("oversized replication payload")
 	}
 	return data, nil
+}
+
+// Capture manifests are part of the protocols which actually transfer native
+// references, not an envelope imposed on every channel. Views were already
+// declared on the stream; transferManifest removes their repeated bytes.
+func appendReferences(b []byte, refs []scm.ClusterReference) []byte {
+	b = binary.AppendUvarint(b, uint64(len(refs)))
+	for _, ref := range refs {
+		for _, value := range []string{ref.URI, ref.Owner, ref.Incarnation, ref.Token, ref.Type} {
+			b = appendNodeBlob(b, []byte(value))
+		}
+		b = appendNodeBlob(b, ref.View)
+	}
+	return b
+}
+func (r *nodeReader) references() []scm.ClusterReference {
+	n := r.uint()
+	if n > uint64(len(r.data))/6 {
+		panic("truncated capture manifest")
+	}
+	if n == 0 {
+		return nil
+	}
+	refs := make([]scm.ClusterReference, int(n))
+	for i := range refs {
+		refs[i] = scm.ClusterReference{URI: string(r.blob()), Owner: string(r.blob()), Incarnation: string(r.blob()), Token: string(r.blob()), Type: string(r.blob()), View: r.blob()}
+		if len(refs[i].View) == 0 {
+			refs[i].View = nil
+		}
+	}
+	return refs
 }

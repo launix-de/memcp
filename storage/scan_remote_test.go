@@ -14,6 +14,7 @@ import "fmt"
 import "sync"
 import "time"
 import "bytes"
+import "reflect"
 import "context"
 import "runtime"
 import "strings"
@@ -190,7 +191,7 @@ func TestRemoteOutputBatchesSplitBeforeDispatch(t *testing.T) {
 	}
 	tbl.Insert([]string{"id", "payload"}, values, nil, scm.NewNil(), false, nil)
 	peer, service, _ := setupRemoteScanConnection(t)
-	var parts []remoteScanShard
+	var parts remoteScanDescription
 	if err := service.control(context.Background(), peer, "scan.describe", remoteScanDescribe{scanWireVersion, tbl.schema.Name, tbl.Name}, &parts, true); err != nil {
 		t.Fatal(err)
 	}
@@ -203,7 +204,7 @@ func TestRemoteOutputBatchesSplitBeforeDispatch(t *testing.T) {
 	env := &scm.Env{Vars: scm.Vars{scm.Symbol("output"): output}, Outer: &scm.Globalenv}
 	mapReduce := scm.Eval(scm.Read(t.Name(), `(lambda (acc payload) (output payload))`, true), env)
 	stub := &storageShard{uuid: tbl.ActiveShards()[0].uuid, t: tbl}
-	target := &shardScanTarget{resource: parts[0].Resource, executor: &peerScanExecutor{peer: peer, ctx: context.Background(), prepared: parts[0]}}
+	target := &shardScanTarget{resource: parts[0].Resource, executor: &peerScanExecutor{peer: peer, ctx: context.Background(), prepared: parts[0].remoteScanShard}}
 	stub.scanTarget.Store(target)
 	invocation := shardScanInvocation{mapReduce: mapReduce, callbackCols: []string{"payload"}, neutral: scm.NewInt(0)}
 	response := invocation.delegate(stub, shardReadDelegation{target})
@@ -228,7 +229,7 @@ func TestRemoteOutputBatchesSplitBeforeDispatch(t *testing.T) {
 func TestRemoteScanWithoutCombinerExecutesCallbackAndSubscanOnWorker(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "tremote_callback_worker", 4)
 	peer, service, _ := setupRemoteScanConnection(t)
-	var parts []remoteScanShard
+	var parts remoteScanDescription
 	if err := service.control(context.Background(), peer, "scan.describe", remoteScanDescribe{scanWireVersion, tbl.schema.Name, tbl.Name}, &parts, true); err != nil {
 		t.Fatal(err)
 	}
@@ -255,7 +256,7 @@ func TestRemoteScanWithoutCombinerExecutesCallbackAndSubscanOnWorker(t *testing.
 	env := &scm.Env{Vars: scm.Vars{scm.Symbol("output"): output}, Outer: &scm.Globalenv}
 	mapReduce := scm.Eval(scm.Read(t.Name(), `(lambda (acc id) (output (test_remote_callback_subscan nil id)))`, true), env)
 	stub := &storageShard{uuid: tbl.ActiveShards()[0].uuid, t: tbl}
-	target := &shardScanTarget{resource: parts[0].Resource, executor: &peerScanExecutor{peer: peer, ctx: context.Background(), prepared: parts[0]}}
+	target := &shardScanTarget{resource: parts[0].Resource, executor: &peerScanExecutor{peer: peer, ctx: context.Background(), prepared: parts[0].remoteScanShard}}
 	stub.scanTarget.Store(target)
 	invocation := shardScanInvocation{mapReduce: mapReduce, callbackCols: []string{"id"}, neutral: scm.NewInt(0)}
 	result := invocation.delegate(stub, shardReadDelegation{target})
@@ -277,7 +278,7 @@ func TestRemoteMutationWithoutSourceTransactionFinalizesNativeState(t *testing.T
 		t.Run(fmt.Sprint("failure=", fail), func(t *testing.T) {
 			tbl, _ := createDurabilityTestTable(t, "tremote_no_tx", 4)
 			peer, service, _ := setupRemoteScanConnection(t)
-			var parts []remoteScanShard
+			var parts remoteScanDescription
 			if err := service.control(context.Background(), peer, "scan.describe", remoteScanDescribe{scanWireVersion, tbl.schema.Name, tbl.Name}, &parts, true); err != nil {
 				t.Fatal(err)
 			}
@@ -286,7 +287,7 @@ func TestRemoteMutationWithoutSourceTransactionFinalizesNativeState(t *testing.T
 				body = `(lambda (acc update) (begin (update) (error "remote mutation failure")))`
 			}
 			stub := &storageShard{uuid: tbl.ActiveShards()[0].uuid, t: tbl}
-			target := &shardScanTarget{resource: parts[0].Resource, executor: &peerScanExecutor{peer: peer, ctx: context.Background(), prepared: parts[0]}}
+			target := &shardScanTarget{resource: parts[0].Resource, executor: &peerScanExecutor{peer: peer, ctx: context.Background(), prepared: parts[0].remoteScanShard}}
 			stub.scanTarget.Store(target)
 			invocation := shardScanInvocation{mapReduce: scm.Eval(scm.Read(t.Name(), body, true), &scm.Globalenv), callbackCols: []string{"$update"}, neutral: scm.NewInt(0)}
 			result := invocation.delegate(stub, shardReadDelegation{target})
@@ -323,7 +324,7 @@ func TestRemoteCallbackCancellationJoinsOwnerInvocation(t *testing.T) {
 func testRemoteCallbackCancellationJoinsOwnerInvocation(t *testing.T, buffered, disconnect bool) {
 	tbl, _ := createDurabilityTestTable(t, "tremote_callback_join", 4)
 	peer, service, _ := setupRemoteScanConnection(t)
-	var parts []remoteScanShard
+	var parts remoteScanDescription
 	if err := service.control(context.Background(), peer, "scan.describe", remoteScanDescribe{scanWireVersion, tbl.schema.Name, tbl.Name}, &parts, true); err != nil {
 		t.Fatal(err)
 	}
@@ -344,7 +345,7 @@ func testRemoteCallbackCancellationJoinsOwnerInvocation(t *testing.T, buffered, 
 	env := &scm.Env{Vars: scm.Vars{scm.Symbol("output"): output}, Outer: &scm.Globalenv}
 	reducer := scm.Eval(scm.Read(t.Name(), `(lambda (acc id) (output id))`, true), env)
 	stub := &storageShard{uuid: tbl.ActiveShards()[0].uuid, t: tbl}
-	target := &shardScanTarget{resource: parts[0].Resource, executor: &peerScanExecutor{peer: peer, ctx: ctx, prepared: parts[0]}}
+	target := &shardScanTarget{resource: parts[0].Resource, executor: &peerScanExecutor{peer: peer, ctx: ctx, prepared: parts[0].remoteScanShard}}
 	stub.scanTarget.Store(target)
 	invocation := shardScanInvocation{mapReduce: reducer, callbackCols: []string{"id"}, neutral: scm.NewInt(0)}
 	done := make(chan struct{})
@@ -427,7 +428,7 @@ func TestRemoteScanRPCExecutesReductionWithNativeExtent(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "tremotescanrpc", 4)
 	RebuildTable(tbl, true, false)
 	peer, _, _ := setupRemoteScanConnection(t)
-	var parts []remoteScanShard
+	var parts remoteScanDescription
 	if err := peer.scanService.control(context.Background(), peer, "scan.describe", remoteScanDescribe{scanWireVersion, tbl.schema.Name, tbl.Name}, &parts, true); err != nil {
 		t.Fatal(err)
 	}
@@ -437,7 +438,7 @@ func TestRemoteScanRPCExecutesReductionWithNativeExtent(t *testing.T) {
 	// Describing a generation does not freeze its append-only delta. The native
 	// operator captures its input extent when execution starts.
 	tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(1000), scm.NewString("future")}}, nil, scm.NewNil(), false, nil)
-	task := makeRemoteScanTask(t, parts[0])
+	task := makeRemoteScanTask(t, parts[0].remoteScanShard)
 	var response remoteScanResult
 	if err := peer.scanService.control(context.Background(), peer, "scan.execute", task, &response, true); err != nil {
 		t.Fatal(err)
@@ -446,7 +447,7 @@ func TestRemoteScanRPCExecutesReductionWithNativeExtent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if value.Int() != 1009 || response.OutCount != 4 || response.Shard != parts[0] {
+	if value.Int() != 1009 || response.OutCount != 4 || response.Shard != parts[0].remoteScanShard {
 		t.Fatalf("wrong reduction or task identity: %+v", response)
 	}
 
@@ -470,13 +471,13 @@ func TestRemoteScanRPCExecutesReductionWithNativeExtent(t *testing.T) {
 func TestRemoteScanInitializerFactory(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "tremotescaninitializer", 4)
 	peer, _, _ := setupRemoteScanConnection(t)
-	var parts []remoteScanShard
+	var parts remoteScanDescription
 	if err := peer.scanService.control(context.Background(), peer, "scan.describe", remoteScanDescribe{scanWireVersion, tbl.schema.Name, tbl.Name}, &parts, true); err != nil {
 		t.Fatal(err)
 	}
 	factory := scm.Eval(scm.Read(t.Name(), `(begin (define initial 10) (lambda () initial))`, true), &scm.Globalenv)
 	for i := 0; i < 2; i++ {
-		task := makeRemoteScanTask(t, parts[0])
+		task := makeRemoteScanTask(t, parts[0].remoteScanShard)
 		var err error
 		encoded, failure := freezeScanValue(factory, new(scm.SerializationContext))
 		task.Neutral, err = []byte(encoded), failure
@@ -497,11 +498,11 @@ func TestRemoteScanInitializerFactory(t *testing.T) {
 func TestRemoteScanTransportsListsAndRejectsWrongSecret(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "tremotescanreject", 2)
 	peer, _, endpoint := setupRemoteScanConnection(t)
-	var parts []remoteScanShard
+	var parts remoteScanDescription
 	if err := peer.scanService.control(context.Background(), peer, "scan.describe", remoteScanDescribe{scanWireVersion, tbl.schema.Name, tbl.Name}, &parts, true); err != nil {
 		t.Fatal(err)
 	}
-	task := makeRemoteScanTask(t, parts[0])
+	task := makeRemoteScanTask(t, parts[0].remoteScanShard)
 	task.Neutral = []byte(`'()`)
 	data, err := scm.MarshalProcedure(scm.Eval(scm.Read(t.Name(), `(lambda (acc id) (append acc (list id)))`, true), &scm.Globalenv))
 	if err != nil {
@@ -602,17 +603,17 @@ func TestRemoteScanMessagesHaveNoRPCHandle(t *testing.T) {
 func TestRemoteScanReturnChannelDeliversResultsAndPanics(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "t_scan_return_channel", 4)
 	peer, service, _ := setupRemoteScanConnection(t)
-	var parts []remoteScanShard
+	var parts remoteScanDescription
 	if err := service.control(context.Background(), peer, "scan.describe", remoteScanDescribe{scanWireVersion, tbl.schema.Name, tbl.Name}, &parts, true); err != nil {
 		t.Fatal(err)
 	}
 	executor := &peerScanExecutor{peer: peer, ctx: context.Background()}
-	result := executor.dispatch(makeRemoteScanTask(t, parts[0]))
+	result := executor.dispatch(makeRemoteScanTask(t, parts[0].remoteScanShard))
 	value, err := schemeValue(result.Value).reconstruct()
 	if err != nil || value.Int() != 9 {
 		t.Fatalf("wrong return channel result: %v, %v", value, err)
 	}
-	task := makeRemoteScanTask(t, parts[0])
+	task := makeRemoteScanTask(t, parts[0].remoteScanShard)
 
 	task.MapReducer, err = scm.MarshalProcedure(scm.Eval(scm.Read(t.Name(), `(lambda (acc id) (error "worker panic"))`, true), &scm.Globalenv))
 	if err != nil {
@@ -803,7 +804,7 @@ func TestRemoteScanNativeExistsAndBatch(t *testing.T) {
 	table, _ := createDurabilityTestTable(t, "t_remote_operator_contract", 4)
 	RebuildTable(table, true, false)
 	peer, _, _ := setupRemoteScanConnection(t)
-	var parts []remoteScanShard
+	var parts remoteScanDescription
 	if err := peer.scanService.control(context.Background(), peer, "scan.describe", remoteScanDescribe{scanWireVersion, table.schema.Name, table.Name}, &parts, true); err != nil {
 		t.Fatal(err)
 	}
@@ -825,7 +826,7 @@ func TestRemoteScanNativeExistsAndBatch(t *testing.T) {
 		{`(lambda (id) (> id 100))`, true}, // newly appended delta row
 		{`(lambda (id) (> id 500))`, false},
 	} {
-		task := makeRemoteScanTask(t, parts[0])
+		task := makeRemoteScanTask(t, parts[0].remoteScanShard)
 
 		task.Operator = shardExists
 		task.Filter = procedure(test.filter)
@@ -838,7 +839,7 @@ func TestRemoteScanNativeExistsAndBatch(t *testing.T) {
 			t.Fatal("remote EXISTS lost native match/miss semantics", result, err)
 		}
 	}
-	task := makeRemoteScanTask(t, parts[0])
+	task := makeRemoteScanTask(t, parts[0].remoteScanShard)
 
 	task.Stride = 2
 	for _, value := range []int64{2, 10, 4, 20} {
@@ -897,14 +898,14 @@ func TestRemoteScanNativeLookupKinds(t *testing.T) {
 	table, _ := createDurabilityTestTable(t, "t_remote_lookup_contract", 4)
 	RebuildTable(table, true, false)
 	peer, _, _ := setupRemoteScanConnection(t)
-	var parts []remoteScanShard
+	var parts remoteScanDescription
 	if err := peer.scanService.control(context.Background(), peer, "scan.describe", remoteScanDescribe{scanWireVersion, table.schema.Name, table.Name}, &parts, true); err != nil {
 		t.Fatal(err)
 	}
 	table.ActiveShards()[0].Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(99), scm.NewString("before-dispatch")}}, false, nil, nil, false, nil, nil)
 	for _, operator := range []shardScanOperator{shardLookupOne, shardLookupMany, shardLookupMapOne, shardLookupMapMany} {
 		for _, key := range []int64{2, 99, 100} {
-			task := makeRemoteScanTask(t, parts[0])
+			task := makeRemoteScanTask(t, parts[0].remoteScanShard)
 			task.Operator = operator
 			task.MapColumns = []string{"id"}
 			var err error
@@ -1121,12 +1122,12 @@ func TestRemoteScanOrderedRunPagesAndNativeExtent(t *testing.T) {
 	RebuildTable(tbl, true, false)
 	source := tbl.ActiveShards()[0]
 	peer, _, _ := setupRemoteScanConnection(t)
-	var parts []remoteScanShard
+	var parts remoteScanDescription
 	if err := peer.scanService.control(context.Background(), peer, "scan.describe", remoteScanDescribe{scanWireVersion, tbl.schema.Name, tbl.Name}, &parts, true); err != nil {
 		t.Fatal(err)
 	}
 	source.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(9999), scm.NewString("future")}}, false, nil, nil, false, nil, nil)
-	executor := &peerScanExecutor{peer: peer, ctx: context.Background(), prepared: parts[0]}
+	executor := &peerScanExecutor{peer: peer, ctx: context.Background(), prepared: parts[0].remoteScanShard}
 	stub := &storageShard{uuid: source.uuid, t: tbl}
 	target := &shardScanTarget{resource: parts[0].Resource, executor: executor}
 	stub.scanTarget.Store(target)
@@ -1387,11 +1388,11 @@ func TestRemoteScanReconnectRejectsOldOperationIdentity(t *testing.T) {
 	if next.objectPeer != first.objectPeer || next.operationPrefix == first.operationPrefix {
 		t.Fatal("reconnect lost incarnation identity or reused an old operation domain")
 	}
-	request := struct {
-		Return, Method string
-		Data           []byte
-	}{oldID, "object.release", []byte(`{}`)}
-	if err := postScanMessage(context.Background(), next, "node.control", request); err != nil {
+	payload, err := encodeInvocation("scan.describe", oldID, nil, mustNodeMetadata(remoteScanDescribe{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := next.send(context.Background(), mosiMessage{Channel: "scan.describe", Payload: payload}); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -1481,7 +1482,7 @@ func TestHandleWireContainsOnlySlotAndPayload(t *testing.T) {
 func TestRemoteScanCapturesNativeClosureWithoutWrappingBuiltins(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "tremote_native_closure", 4)
 	peer, service, _ := setupRemoteScanConnection(t)
-	var parts []remoteScanShard
+	var parts remoteScanDescription
 	if err := service.control(context.Background(), peer, "scan.describe", remoteScanDescribe{scanWireVersion, tbl.schema.Name, tbl.Name}, &parts, true); err != nil {
 		t.Fatal(err)
 	}
@@ -1490,7 +1491,7 @@ func TestRemoteScanCapturesNativeClosureWithoutWrappingBuiltins(t *testing.T) {
 	env := &scm.Env{Vars: scm.Vars{scm.Symbol("captured"): captured}, Outer: &scm.Globalenv}
 	mapper := scm.Eval(scm.Read(t.Name(), `(lambda (acc id) (+ acc (captured id)))`, true), env)
 	stub := &storageShard{uuid: tbl.ActiveShards()[0].uuid, t: tbl}
-	target := &shardScanTarget{resource: parts[0].Resource, executor: &peerScanExecutor{peer: peer, ctx: context.Background(), prepared: parts[0]}}
+	target := &shardScanTarget{resource: parts[0].Resource, executor: &peerScanExecutor{peer: peer, ctx: context.Background(), prepared: parts[0].remoteScanShard}}
 	stub.scanTarget.Store(target)
 	result := (shardScanInvocation{mapReduce: mapper, callbackCols: []string{"id"}, neutral: scm.NewInt(0)}).delegate(stub, shardReadDelegation{target})
 	if result.err.r != nil || result.res.Int() != 38 || calls.Load() != 4 {
@@ -1511,7 +1512,7 @@ func TestRemoteScanCapturedOuterUpdateReturnsToItsShard(t *testing.T) {
 	outer, _ := createDurabilityTestTable(t, "tremote_outer_update", 1)
 	inner, _ := createDurabilityTestTable(t, "tremote_inner_update", 1)
 	peer, service, _ := setupRemoteScanConnection(t)
-	var parts []remoteScanShard
+	var parts remoteScanDescription
 	if err := service.control(context.Background(), peer, "scan.describe", remoteScanDescribe{scanWireVersion, inner.schema.Name, inner.Name}, &parts, true); err != nil {
 		t.Fatal(err)
 	}
@@ -1519,7 +1520,7 @@ func TestRemoteScanCapturedOuterUpdateReturnsToItsShard(t *testing.T) {
 	env := &scm.Env{Vars: scm.Vars{scm.Symbol("outer_update"): update}, Outer: &scm.Globalenv}
 	mapper := scm.Eval(scm.Read(t.Name(), `(lambda (acc update) (begin (outer_update (list "payload" "outer")) (update (list "payload" "inner")) (+ acc 1)))`, true), env)
 	stub := &storageShard{uuid: inner.ActiveShards()[0].uuid, t: inner}
-	target := &shardScanTarget{resource: parts[0].Resource, executor: &peerScanExecutor{peer: peer, ctx: context.Background(), prepared: parts[0]}}
+	target := &shardScanTarget{resource: parts[0].Resource, executor: &peerScanExecutor{peer: peer, ctx: context.Background(), prepared: parts[0].remoteScanShard}}
 	stub.scanTarget.Store(target)
 	result := (shardScanInvocation{mapReduce: mapper, callbackCols: []string{"$update"}, neutral: scm.NewInt(0)}).delegate(stub, shardReadDelegation{target})
 	if result.err.r != nil || result.res.Int() != 1 {
@@ -1599,7 +1600,7 @@ func TestHandleDeliveryIsIndependentAndCleanupJoinsRunningHandler(t *testing.T) 
 func TestRemoteNativeClosureCanReturnAnotherClosure(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "tremote_returned_closure", 4)
 	peer, service, _ := setupRemoteScanConnection(t)
-	var parts []remoteScanShard
+	var parts remoteScanDescription
 	if err := service.control(context.Background(), peer, "scan.describe", remoteScanDescribe{scanWireVersion, tbl.schema.Name, tbl.Name}, &parts, true); err != nil {
 		t.Fatal(err)
 	}
@@ -1612,7 +1613,7 @@ func TestRemoteNativeClosureCanReturnAnotherClosure(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	stub := &storageShard{uuid: tbl.ActiveShards()[0].uuid, t: tbl}
-	target := &shardScanTarget{resource: parts[0].Resource, executor: &peerScanExecutor{peer: peer, ctx: ctx, prepared: parts[0]}}
+	target := &shardScanTarget{resource: parts[0].Resource, executor: &peerScanExecutor{peer: peer, ctx: ctx, prepared: parts[0].remoteScanShard}}
 	stub.scanTarget.Store(target)
 	result := (shardScanInvocation{mapReduce: mapper, callbackCols: []string{"id"}, neutral: scm.NewInt(0)}).delegate(stub, shardReadDelegation{target})
 	if result.err.r != nil || result.res.Int() != 38 {
@@ -1630,7 +1631,7 @@ func TestRemoteNativeClosureCanReturnAnotherClosure(t *testing.T) {
 func TestRemoteNativeClosureCanInvokeOutputArgument(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "tremote_output_argument", 4)
 	peer, service, _ := setupRemoteScanConnection(t)
-	var parts []remoteScanShard
+	var parts remoteScanDescription
 	if err := service.control(context.Background(), peer, "scan.describe", remoteScanDescribe{scanWireVersion, tbl.schema.Name, tbl.Name}, &parts, true); err != nil {
 		t.Fatal(err)
 	}
@@ -1643,7 +1644,7 @@ func TestRemoteNativeClosureCanInvokeOutputArgument(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	stub := &storageShard{uuid: tbl.ActiveShards()[0].uuid, t: tbl}
-	target := &shardScanTarget{resource: parts[0].Resource, executor: &peerScanExecutor{peer: peer, ctx: ctx, prepared: parts[0]}}
+	target := &shardScanTarget{resource: parts[0].Resource, executor: &peerScanExecutor{peer: peer, ctx: ctx, prepared: parts[0].remoteScanShard}}
 	stub.scanTarget.Store(target)
 	result := (shardScanInvocation{mapReduce: mapper, callbackCols: []string{"id"}, neutral: scm.NewInt(0)}).delegate(stub, shardReadDelegation{target})
 	if result.err.r != nil || result.res.Int() != 4 || sum.Load() != 10 {
@@ -2111,4 +2112,56 @@ func TestReturnHandleQueryCleanupJoinsAdmittedDecoding(t *testing.T) {
 		t.Fatal("completed result constructor stranded cleanup")
 	}
 	peer.workers.Wait()
+}
+
+func TestRemoteScanSpecializedPayloadLayouts(t *testing.T) {
+	address := "0000000000000001"
+	parameters := []byte{7, 8, 9}
+	request, err := encodeInvocation("cluster.report", address, nil, parameters)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := append(appendNodeBlob(nil, []byte(address)), parameters...)
+	if !bytes.Equal(request, want) {
+		t.Fatal("report has fields beyond its return address and parameters")
+	}
+	got, refs, body, err := decodeInvocation("cluster.report", request)
+	if err != nil || got != address || len(refs) != 0 || !bytes.Equal(body, parameters) {
+		t.Fatal("report parameters changed", err)
+	}
+	if _, err := encodeInvocation("cluster.report", address, []scm.ClusterReference{{Token: "unused"}}, parameters); err == nil {
+		t.Fatal("unrelated capture grants accepted")
+	}
+	completion, err := encodeScanCompletion(scanCompletion{Data: parameters})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(completion, append([]byte{scanCompletionMarker, 0}, parameters...)) {
+		t.Fatal("success result has unrelated metadata")
+	}
+	if _, _, _, err := decodeInvocation("scan.execute", []byte{200}); err == nil {
+		t.Fatal("truncated invocation accepted")
+	}
+	if err := decodeScanCompletion([]byte{scanCompletionMarker, 128}, new(scanCompletion)); err == nil {
+		t.Fatal("unknown completion flags accepted")
+	}
+	task := remoteScanTask{Version: scanWireVersion, Operator: shardScanOperator(0), Shard: remoteScanShard{Schema: 3, Resource: mosiResource{Database: "memcp-tests", Table: "items", Shard: "11111111-1111-4111-8111-111111111111"}}, Filter: []byte("filter-code"), MapReducer: []byte("reducer-code"), Neutral: []byte("0")}
+	encoded, err := marshalNode(task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var restored remoteScanTask
+	if err := unmarshalNode(encoded, &restored); err != nil {
+		t.Fatal(err)
+	}
+	if restored.Shard != task.Shard || !bytes.Equal(restored.MapReducer, task.MapReducer) || !bytes.Equal(restored.Neutral, task.Neutral) {
+		t.Fatal("scan parameters changed")
+	}
+	old := appendNode(nil, reflect.ValueOf(task), 0)
+	t.Logf("scan task parameter payload: previous named record %d bytes, specialized %d bytes", len(old), len(encoded))
+	for _, name := range []string{"filter_columns", "mapreducer", "transaction", "operator", "schema"} {
+		if bytes.Contains(encoded, []byte(name)) {
+			t.Fatalf("field name %s on wire", name)
+		}
+	}
 }

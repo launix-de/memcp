@@ -323,7 +323,7 @@ func (service *nodeScanService) handleBindings(bindings *scm.SerializationContex
 }
 
 // The scan role owns both payload codecs. Serializer source never begins with
-// the binary nodeMap tag; control completions are binary records, not Scheme.
+// the binary scan-completion marker; control completions are binary records, not Scheme.
 // Inspect only inert manifests, never reconstruct a cancelled query's values.
 func (service *nodeScanService) discardHandlePayload(peer *mosiPeer, payload []byte) error {
 	if len(payload) > 0 && payload[0] == handleClose {
@@ -333,7 +333,7 @@ func (service *nodeScanService) discardHandlePayload(peer *mosiPeer, payload []b
 		payload = payload[1:]
 	}
 	var refs []scm.ClusterReference
-	if len(payload) > 0 && payload[0] == nodeMap {
+	if len(payload) > 0 && payload[0] == scanCompletionMarker {
 		var completion scanCompletion
 		if err := unmarshalNode(payload, &completion); err != nil {
 			return err

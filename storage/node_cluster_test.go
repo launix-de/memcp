@@ -13,6 +13,7 @@ package storage
 import "fmt"
 import "time"
 import "context"
+import "reflect"
 import "strings"
 import "testing"
 import "encoding/json"
@@ -253,7 +254,7 @@ func TestClusterControlDoesNotConsumeComputeSlots(t *testing.T) {
 	session.service = &nodeScanService{cluster: &nodeCluster{}}
 	// Control discovery has no compute semaphore. Its domain handler must be
 	// reachable independently of the UUID scopes of concurrently running scans.
-	_, err := session.handle(context.Background(), "cluster.report", mustNodeMetadata(map[string]string{"database": "unmounted"}))
+	_, err := session.handle(context.Background(), "cluster.report", mustNodeMetadata(mosiResource{Database: "unmounted"}))
 	if err == nil || err.Error() != "invalid cluster report" {
 		t.Fatalf("control message was blocked by compute admission: %v", err)
 	}
@@ -432,7 +433,7 @@ func TestClusterDiscoveryIgnoresUnavailableNonOwner(t *testing.T) {
 					var request struct {
 						Return string `json:"return"`
 					}
-					if unmarshalNode(message.Payload, &request) != nil {
+					if decodeTestInvocation(message.Channel, message.Payload, &request) != nil {
 						return
 					}
 					answer := replicaRecord{Resource: resource, State: "S", Owner: dead.ID, Epoch: 7}
@@ -716,7 +717,7 @@ func TestClusterShardLocationQueriesOnlySchemaOwner(t *testing.T) {
 		Return, Method string
 		Data           []byte
 	}
-	if err := unmarshalNode(message.Payload, &request); err != nil || request.Method != "cluster.location" {
+	if err := decodeTestInvocation(message.Channel, message.Payload, &request); err != nil || request.Method != "cluster.location" {
 		t.Fatal("per-shard discovery did not use schema owner", request, err)
 	}
 	route, _ := service.handles.Load(controlReturnSlot(request.Return))
@@ -756,7 +757,7 @@ func TestClusterSchemaLocationTransferUsesBoundedBatches(t *testing.T) {
 				Return string
 				Data   clusterSchemaLocations
 			}
-			if err := unmarshalNode(message.Payload, &request); err != nil {
+			if err := decodeTestInvocation(message.Channel, message.Payload, &request); err != nil {
 				t.Error(err)
 				return
 			}
@@ -840,7 +841,7 @@ func TestClusterSchemaRecoveryRestoresBoundedRoutesWithoutPermissions(t *testing
 				Return string
 				Data   []byte
 			}
-			if err := unmarshalNode(message.Payload, &request); err != nil {
+			if err := decodeTestInvocation(message.Channel, message.Payload, &request); err != nil {
 				t.Fatal(err)
 			}
 			value, err := owner.handleLocations(ctx, local.self.ID, "cluster.schema_locations", request.Data)
@@ -1107,7 +1108,7 @@ func TestClusterShardRestartRecoveryUsesLiveReports(t *testing.T) {
 			for _, method := range methods {
 				message := takeMosi(remote.outgoing)
 				var request struct{ Return, Method string }
-				if err := unmarshalNode(message.Payload, &request); err != nil || request.Method != method {
+				if err := decodeTestInvocation(message.Channel, message.Payload, &request); err != nil || request.Method != method {
 					t.Fatal("restart omitted native recovery", request, err)
 				}
 				if cell.ownstate.Initialized() {
@@ -1275,7 +1276,7 @@ func TestClusterDiscoveryFollowsOwnerEpochAcrossReplies(t *testing.T) {
 						var request struct {
 							Return string `json:"return"`
 						}
-						if err := unmarshalNode(message.Payload, &request); err != nil {
+						if err := decodeTestInvocation(message.Channel, message.Payload, &request); err != nil {
 							return
 						}
 						answer := replicaRecord{Resource: resource, State: "M", Owner: member.ID, Epoch: epoch}
@@ -2132,4 +2133,28 @@ func TestClusterLocationReplyRefreshesRequestedAlias(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Test adapters inspect the parameter layout selected by the actual channel.
+// This record is never serialized or used by production code.
+func decodeTestInvocation(channel string, payload []byte, destination any) error {
+	address, _, body, err := decodeInvocation(channel, payload)
+	if err != nil {
+		return err
+	}
+	v := reflect.ValueOf(destination).Elem()
+	if field := v.FieldByName("Return"); field.IsValid() {
+		field.SetString(address)
+	}
+	if field := v.FieldByName("Method"); field.IsValid() {
+		field.SetString(channel)
+	}
+	if field := v.FieldByName("Data"); field.IsValid() {
+		if field.Type() == reflect.TypeOf([]byte(nil)) {
+			field.SetBytes(body)
+		} else {
+			return unmarshalNode(body, field.Addr().Interface())
+		}
+	}
+	return nil
 }

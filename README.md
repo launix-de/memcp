@@ -355,12 +355,15 @@ and independent backend namespace, including separate buckets/prefixes for
 remote storage. The existing persistence backends are used without modification.
 `schema.json` remains the schema format. `SHUTDOWN` affects the addressed instance.
 
-Both listeners negotiate `memcp.channels.v6` and exchange bounded binary WebSocket
+Both listeners negotiate `memcp.channels.v7` and exchange bounded binary WebSocket
 messages. Every application frame contains exactly one byte giving the channel
 name's byte length (1–255), the channel name, then its opaque payload. There is no
 transport request ID, reply type, version prefix or JSON envelope. Registered
-channel handlers own their payload formats: MOSI uses binary metadata and raw
-compressed transfer bytes; runtime values and closures use the Scheme serializer.
+channel handlers own their payload formats: MOSI starts with a numeric action byte
+and encodes only that action’s parameters, followed by raw compressed bytes for
+chunks. Scan, INSERT, object, membership and replication operations use their own
+binary parameter layouts without field names or a generic method/data envelope.
+Runtime values and closures use the Scheme serializer.
 Commands that need a result include a return-channel URI in their own payload.
 The reply is another ordinary channel delivery, and the consumer chooses when to
 wait. Sending only publishes to a bounded queue without waiting for socket I/O,

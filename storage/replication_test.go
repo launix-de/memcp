@@ -453,7 +453,8 @@ func TestReplicationWebSocketUsesNormalHTTPRoute(t *testing.T) {
 	if conn.Subprotocol() != mosiSubprotocol {
 		t.Fatal("normal HTTP endpoint did not negotiate the node protocol")
 	}
-	frame, _ := encodeMosiMessage(mosiMessage{Channel: "login", Payload: mustNodeMetadata(nodeCommand{Return: "return/9", Data: mustNodeMetadata(replicaRequest{})})})
+	parameters, _ := encodeCommandParameters("login", replicaRequest{})
+	frame, _ := encodeMosiMessage(mosiMessage{Channel: "login", Payload: append(append([]byte{8}, "return/9"...), parameters...)})
 	if err := conn.WriteMessage(websocket.BinaryMessage, frame); err != nil {
 		t.Fatal(err)
 	}
@@ -463,8 +464,7 @@ func TestReplicationWebSocketUsesNormalHTTPRoute(t *testing.T) {
 		t.Fatalf("node reply was not binary: kind=%d err=%v", kind, err)
 	}
 	message, err := decodeMosiMessage(reply)
-	var result nodeCommandResult
-	if err != nil || message.Channel != "return/9" || unmarshalNode(message.Payload, &result) != nil || result.Error == "" {
+	if err != nil || message.Channel != "return/9" || len(message.Payload) < 2 || message.Payload[0] != 1 {
 		t.Fatalf("unexpected node reply: %+v, %v", message, err)
 	}
 	// Old JSON/text frames are rejected rather than silently downgraded.
@@ -2147,8 +2147,7 @@ func TestNodeCommandCanReplyBeforeConsumerWaits(t *testing.T) {
 		t.Fatal(err)
 	}
 	request := takeMosi(peer.outgoing)
-	var command nodeCommand
-	if request.Channel != "fixture" || unmarshalNode(request.Payload, &command) != nil {
+	if request.Channel != "fixture" || len(request.Payload) < 1 || int(request.Payload[0])+1 > len(request.Payload) {
 		t.Fatal("invalid command payload")
 	}
 	// The application reply URI occurs only in this command's opaque payload.
@@ -2156,10 +2155,10 @@ func TestNodeCommandCanReplyBeforeConsumerWaits(t *testing.T) {
 		t.Fatal("transport did not use the command channel")
 	}
 	var parameter int
-	if unmarshalNode(command.Data, &parameter) != nil || parameter != 42 {
+	if unmarshalNode(request.Payload[1+int(request.Payload[0]):], &parameter) != nil || parameter != 42 {
 		t.Fatal("parameter changed")
 	}
-	if !peer.dispatchMessage(mosiMessage{Channel: command.Return, Payload: []byte("answer")}, 6, time.Time{}) {
+	if !peer.dispatchMessage(mosiMessage{Channel: string(request.Payload[1 : 1+int(request.Payload[0])]), Payload: []byte("answer")}, 6, time.Time{}) {
 		t.Fatal("reply rejected")
 	}
 	peer.workers.Wait()
@@ -2171,10 +2170,10 @@ func TestNodeCommandCanReplyBeforeConsumerWaits(t *testing.T) {
 	if err != nil || string(payload) != "answer" {
 		t.Fatal("early reply lost", string(payload), err)
 	}
-	if _, exists := peer.channels.Load(command.Return); exists {
+	if _, exists := peer.channels.Load(string(request.Payload[1 : 1+int(request.Payload[0])])); exists {
 		t.Fatal("one-shot channel retained")
 	}
-	if !peer.dispatchMessage(mosiMessage{Channel: command.Return, Payload: []byte("late")}, 4, time.Time{}) {
+	if !peer.dispatchMessage(mosiMessage{Channel: string(request.Payload[1 : 1+int(request.Payload[0])]), Payload: []byte("late")}, 4, time.Time{}) {
 		t.Fatal("late reply was not inert")
 	}
 }
@@ -2273,5 +2272,104 @@ func TestMosiBulkAdmissionWakesAllProducersAfterDrain(t *testing.T) {
 		case <-time.After(time.Second):
 			t.Fatal("drained mailbox stranded bulk producer")
 		}
+	}
+}
+
+func TestMosiSpecializedActionLayouts(t *testing.T) {
+	resource := mosiResource{Database: "memcp-tests", Table: "items", Shard: "11111111-1111-4111-8111-111111111111"}
+	ref := scm.ClusterReference{URI: "http://peer/cluster/1", Owner: "peer", Incarnation: "boot", Token: "1", Type: "shard"}
+	packets := []mosiPacket{
+		{Kind: "read", Sequence: 4, Boot: "boot", User: "reader", Hash: "proof", TryRead: true},
+		{Kind: "write", Sequence: 5, Boot: "boot", Forwards: []shardForward{{From: resource, To: resource}}},
+		{Kind: "recall", Epoch: 9, State: "O", Owner: "owner", Readers: map[string]bool{"reader": true}},
+		{Kind: "invalidate", Epoch: 9, Forwards: []shardForward{{From: resource, To: resource}}},
+		{Kind: "ack", Epoch: 9, Content: "generation"},
+		{Kind: "failure", Epoch: 9, Content: "generation", State: "S", Error: "failed"},
+		{Kind: "grant", Epoch: 9, State: "M", Content: "generation", Owner: "owner", Readers: map[string]bool{"reader": true}},
+		{Kind: "begin", Epoch: 9, Content: "generation", User: "reader", Hash: "proof", Forwards: []shardForward{{From: resource, To: resource}}},
+		{Kind: "object", Epoch: 9, Content: "generation", ObjectKind: "column", Object: "id"},
+		{Kind: "chunk", Epoch: 9, Content: "generation", ObjectKind: "column", Object: "id", Payload: []byte{0, 1, 2, 255}},
+		{Kind: "object_end", Epoch: 9, Content: "generation", ObjectKind: "column", Object: "id"},
+		{Kind: "end", Epoch: 9, Content: "generation"},
+		{Kind: "reference", Epoch: 9, State: "M", Content: "generation", Owner: "owner", Capture: &ref, Object: "global-data", Readers: map[string]bool{"reader": true}, Forwards: []shardForward{{From: resource, To: resource}}},
+	}
+	for _, p := range packets {
+		t.Run(p.Kind, func(t *testing.T) {
+			p.ID = "request"
+			p.Resource = resource
+			p.From = "origin"
+			p.To = "target"
+			b, err := encodeMosiPacket(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := decodeMosiPacket(b)
+			if err != nil || !reflect.DeepEqual(p, *got) {
+				t.Fatalf("action parameters changed: %#v / %#v (%v)", p, got, err)
+			}
+			for _, name := range []string{"resource", "database", "object_kind", "payload", "epoch"} {
+				if bytes.Contains(b, []byte(name)) {
+					t.Fatalf("field name %s on wire", name)
+				}
+			}
+			// Every action requires a complete fixed header. An absent action,
+			// truncated identity or trailing data on non-stream operations is invalid.
+			for _, bad := range [][]byte{nil, b[:1], b[:2], b[:3]} {
+				if _, err := decodeMosiPacket(bad); err == nil {
+					t.Fatal("truncated action accepted")
+				}
+			}
+			if p.Kind != "chunk" {
+				if _, err := decodeMosiPacket(append(append([]byte(nil), b...), 0)); err == nil {
+					t.Fatal("trailing parameters accepted")
+				}
+			}
+		})
+	}
+	minimal, _ := encodeMosiPacket(mosiPacket{Kind: "ack"})
+	if !bytes.Equal(minimal, []byte{5, 0, 0, 0, 0, 0, 0}) {
+		t.Fatalf("unrelated fields added to minimal ack: %d bytes", len(minimal))
+	}
+	old := appendNode(nil, reflect.ValueOf(mosiPacket{Kind: "ack"}), 0)
+	t.Logf("minimal MOSI ack payload: previous named record %d bytes, specialized %d bytes", len(appendNodeBlob(nil, old)), len(minimal))
+}
+
+func TestNodeSpecializedReplicationParameters(t *testing.T) {
+	request := replicaRequest{Database: "tenant", User: "alice", Hash: "password-proof", SQL: "unused SQL sentinel", Boot: "unused boot sentinel", Salt: []byte{1, 2}, Scramble: []byte{3, 4}}
+	for _, method := range []string{"login", "hello", "hello_done", "admin"} {
+		t.Run(method, func(t *testing.T) {
+			data, err := encodeCommandParameters(method, request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got replicaRequest
+			if err := decodeReplicaParameters(method, data, &got); err != nil {
+				t.Fatal(err)
+			}
+			if got.Database != request.Database || got.User != request.User || got.Hash != request.Hash || !bytes.Equal(got.Salt, request.Salt) || !bytes.Equal(got.Scramble, request.Scramble) {
+				t.Fatal("authentication parameters changed")
+			}
+			if method != "admin" && (got.SQL != "" || bytes.Contains(data, []byte(request.SQL))) {
+				t.Fatal("non-SQL command carries SQL")
+			}
+			if method == "login" && (got.Boot != "" || bytes.Contains(data, []byte(request.Boot))) {
+				t.Fatal("login carries recovery identity")
+			}
+			if method == "admin" && (got.SQL != request.SQL || got.Boot != "") {
+				t.Fatal("admin parameters changed or carry recovery identity")
+			}
+			if err := decodeReplicaParameters(method, []byte{255}, new(replicaRequest)); err == nil {
+				t.Fatal("truncated request accepted")
+			}
+		})
+	}
+	record := replicaRecord{Resource: mosiResource{Database: "tenant"}, Epoch: 7, State: "O", Owner: "owner", Content: "content", Handoff: "target", InitialClaimed: true, Readers: map[string]bool{"reader": true}, Requests: map[string]replicaRequestMark{"peer": {Boot: "boot", Sequence: 42, Write: true, ID: "request", Completed: true}}}
+	data, err := marshalNode(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got replicaRecord
+	if err := unmarshalNode(data, &got); err != nil || !reflect.DeepEqual(record, got) {
+		t.Fatal("directory state changed", err, got)
 	}
 }

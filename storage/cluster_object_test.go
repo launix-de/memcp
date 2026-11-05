@@ -5,10 +5,10 @@ SPDX-License-Identifier: GPL-3.0-or-later
 package storage
 
 import "fmt"
-import "bytes"
 import "weak"
 import "time"
 import "sync"
+import "bytes"
 import "context"
 import "strings"
 import "runtime"
@@ -747,7 +747,7 @@ func TestClusterDiscoveryRefreshesRoutingAfterConcurrentHandover(t *testing.T) {
 	var request struct {
 		Return string `json:"return"`
 	}
-	if err := unmarshalNode(message.Payload, &request); err != nil {
+	if err := decodeTestInvocation(message.Channel, message.Payload, &request); err != nil {
 		t.Fatal(err)
 	}
 	cluster.manager.updateRecord(resource, func(record *replicaRecord) bool {
@@ -975,10 +975,8 @@ func TestClusterCancellationQueuesMessageBeforeCollectorReturns(t *testing.T) {
 				executor.dispatch(remoteScanTask{})
 			}()
 			request := takeMosi(peer.outgoing)
-			var envelope struct {
-				Return string `json:"return"`
-			}
-			if err := unmarshalNode(request.Payload, &envelope); err != nil {
+			address, _, _, err := decodeInvocation(request.Channel, request.Payload)
+			if err != nil {
 				t.Fatal(err)
 			}
 			cancel()
@@ -986,7 +984,7 @@ func TestClusterCancellationQueuesMessageBeforeCollectorReturns(t *testing.T) {
 			case <-peer.outgoing.ready:
 				message := takeMosi(peer.outgoing)
 				var id string
-				if message.Channel != "scan.cancel" || unmarshalNode(message.Payload, &id) != nil || id != envelope.Return {
+				if message.Channel != "scan.cancel" || unmarshalNode(message.Payload, &id) != nil || id != address {
 					t.Fatal("wrong remote cancellation", message)
 				}
 			case <-time.After(time.Second):
@@ -999,7 +997,7 @@ func TestClusterCancellationQueuesMessageBeforeCollectorReturns(t *testing.T) {
 			}
 			// The existing return channel is also the join acknowledgement. No
 			// cancelled invocation may release its captures before this delivery.
-			entry, ok := service.handles.Load(controlReturnSlot(envelope.Return))
+			entry, ok := service.handles.Load(controlReturnSlot(address))
 			if !ok {
 				t.Fatal("cancelled invocation dropped its return channel")
 			}
@@ -1389,11 +1387,11 @@ func TestClusterCancelledReturnHandleDiscardsLateGrants(t *testing.T) {
 	finished := make(chan error, 1)
 	go func() { finished <- service.control(ctx, peer, "fixture", nil, nil, false) }()
 	request := takeMosi(peer.outgoing)
-	var envelope struct{ Return string }
-	if err := unmarshalNode(request.Payload, &envelope); err != nil {
+	address, _, _, err := decodeInvocation(request.Channel, request.Payload)
+	if err != nil {
 		t.Fatal(err)
 	}
-	slot := controlReturnSlot(envelope.Return)
+	slot := controlReturnSlot(address)
 	previous, ok := service.channels.Load(handleChannel(slot))
 	if !ok {
 		t.Fatal("missing original receiver")
@@ -1715,7 +1713,7 @@ func TestClusterObjectCallUsesRegisteredAddressWithoutRepeatingReference(t *test
 		Return string
 		Data   []byte
 	}
-	if err := unmarshalNode(message.Payload[1:], &request); err != nil {
+	if err := decodeTestInvocation("object.call", message.Payload[1:], &request); err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(request.Data, payload) {

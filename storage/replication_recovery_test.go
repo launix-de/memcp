@@ -1372,7 +1372,7 @@ func TestReplicationRecoveryReadyBelongsToConnection(t *testing.T) {
 		t.Fatal("operation reached an unrecovered replacement connection", err)
 	}
 	request := replicaRequest{Boot: boot, User: "root", Hash: base64.StdEncoding.EncodeToString([]byte("test-password"))}
-	encoded, err := marshalNode(request)
+	encoded, err := encodeCommandParameters("hello_done", request)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1407,12 +1407,12 @@ func TestReplicationConnectionReadyAfterAllCachedBindings(t *testing.T) {
 			select {
 			case <-peer.outgoing.ready:
 				message := takeMosi(peer.outgoing)
-				var command nodeCommand
 				var request replicaRequest
-				if err := unmarshalNode(message.Payload, &command); err != nil {
-					t.Fatal(err)
+				if len(message.Payload) < 1 || int(message.Payload[0])+1 > len(message.Payload) {
+					t.Fatal("invalid recovery payload")
 				}
-				if err := unmarshalNode(command.Data, &request); err != nil {
+				returnChannel := string(message.Payload[1 : 1+int(message.Payload[0])])
+				if err := decodeReplicaParameters(method, message.Payload[1+int(message.Payload[0]):], &request); err != nil {
 					t.Fatal(err)
 				}
 				if message.Channel != method || request.User != user {
@@ -1425,7 +1425,7 @@ func TestReplicationConnectionReadyAfterAllCachedBindings(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if !peer.dispatchMessage(mosiMessage{Channel: command.Return, Payload: mustNodeMetadata(nodeCommandResult{Data: data})}, len(data), time.Time{}) {
+				if !peer.dispatchMessage(mosiMessage{Channel: returnChannel, Payload: append([]byte{0}, data...)}, len(data), time.Time{}) {
 					t.Fatal("return admission failed")
 				}
 			case <-ctx.Done():

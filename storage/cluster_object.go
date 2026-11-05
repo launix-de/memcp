@@ -579,7 +579,7 @@ func (s *scanRPCSession) requestObject(ctx context.Context, payload []byte) (scm
 	// Decoded nested scans borrow this cancellation/transaction context.
 	id, _ := ctx.Value(remoteScanContextKey{}).(string)
 	if id == "" {
-		return scm.NewNil(), fmt.Errorf("object execution requires an operation envelope")
+		return scm.NewNil(), fmt.Errorf("object execution requires an invocation scope")
 	}
 	ss := &scm.SessionState{}
 	seq := ss.BeginQuery("Cluster", "object request")
@@ -1056,7 +1056,7 @@ func (service *nodeScanService) registerObjectChannel(uri, kind string) {
 			// cancellation scope. The transport never creates a reply.
 			object, failure := service.channelObject(peer, uri, kind)
 			ctx := context.WithValue(peer.ctxOrBackground(), clusterObjectTargetKey{}, clusterObjectTarget{object, failure})
-			_, err := peer.scanSession.channelMessage(ctx, "node.control", payload[1:])
+			_, err := peer.scanSession.receiveInvocation(ctx, "object.call", payload[1:])
 			return err
 		default:
 			return fmt.Errorf("invalid object delivery")
