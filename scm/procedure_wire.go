@@ -132,6 +132,14 @@ func UnmarshalProcedure(data []byte, options ...ProcedureDecode) (value Scmer, e
 		if err := validateProcedureWire(items[2], procedureWireBindings(params, items[2], nil), &Globalenv, false, 0); err != nil {
 			return NewNil(), err
 		}
+	} else if scmerIsSymbol(items[0], "lambda_rebind") {
+		if len(items) < 2 {
+			return NewNil(), fmt.Errorf("invalid lambda rebinding")
+		}
+		code, ok := scmerAsSlice(items[1])
+		if !ok || len(code) != 2 || !scmerIsSymbol(code[0], "cluster_value") || !code[1].IsString() {
+			return NewNil(), fmt.Errorf("lambda rebinding requires a declared code reference")
+		}
 	} else if !scmerIsSymbol(items[0], "serialized_value") {
 		return NewNil(), fmt.Errorf("procedure envelope must construct a lambda")
 	}

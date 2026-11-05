@@ -264,6 +264,9 @@ func TestProcedureWireRejectsInvalidEnvelopesAndBounds(t *testing.T) {
 	for _, data := range [][]byte{
 		[]byte(`{"version":2,"code":null}`), []byte(`{"version":1,"code":17}`),
 		[]byte(`{"version":1`), bytes.Repeat([]byte(" "), maxProcedureWireBytes+1),
+		append([]byte{procedureWireVersion}, []byte(`(lambda_rebind)`)...),
+		append([]byte{procedureWireVersion}, []byte(`(lambda_rebind (+ 1 2))`)...),
+		append([]byte{procedureWireVersion}, []byte(`(lambda_rebind (cluster_value 17))`)...),
 	} {
 		if _, err := UnmarshalProcedure(data); err == nil {
 			t.Fatal("invalid envelope accepted")

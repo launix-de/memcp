@@ -285,6 +285,17 @@ func Serialize(b *bytes.Buffer, v Scmer, glob *Env, objects ...*SerializationCon
 		writer.objects = objects[0]
 		if writer.objects != nil {
 			writer.objects.prepare(v, true)
+			if writer.objects.Peer != nil && lambdaProcedure(v) != nil {
+				// The enclosing decoder already constructs a root callable once.
+				// Only nested captures need an envelope-local alias constructor.
+				expression, _, err := writer.objects.cachedValue(v)
+				if err != nil {
+					panic(err)
+				}
+				writer.cacheCaptures = true
+				serializeEx(writer, expression, glob, glob, nil)
+				return
+			}
 		}
 	}
 	serializeEx(writer, v, glob, glob, nil)

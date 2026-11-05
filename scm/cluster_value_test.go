@@ -64,6 +64,9 @@ func TestClusterValueLambdaContextsShareDeclaration(t *testing.T) {
 		if !bytes.Contains(data, []byte("lambda_rebind")) || !bytes.Contains(data, []byte("cluster_value")) {
 			t.Fatal("procedure was not substituted", string(data))
 		}
+		if !bytes.HasPrefix(data[1:], []byte("(lambda_rebind ")) {
+			t.Fatal("root callable has a redundant alias constructor", string(data))
+		}
 		closure, err := UnmarshalProcedure(data)
 		if err != nil {
 			t.Fatal(err, string(data))
