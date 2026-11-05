@@ -35,6 +35,11 @@ type ClusterObject interface {
 	ClusterObjectType() string
 }
 
+// ClusterImmutableView marks a constructor view which never changes for this
+// object identity. The sender may declare it once on an authenticated stream;
+// invocation-dependent views must not implement this contract.
+type ClusterImmutableView interface{ ClusterImmutableView() }
+
 type ClusterRequest struct {
 	// A borrowed delivery may cancel its local waiter while the native owner
 	// retains and joins the remote invocation through its independent Close.
@@ -46,8 +51,8 @@ type ClusterRequest struct {
 }
 
 // ClusterReference names an incarnation-bound owner endpoint. On the wire Token
-// is a pending-transfer reservation; import replaces it with the peer's shared
-// lease generation. A late old GC message cannot revoke a newer Go lifetime.
+// is an independent lifetime grant, established by the owner before sending.
+// Duplicate imports share that grant; late GC never revokes a newer grant.
 // View is an immutable invocation view, not the shared endpoint's mutable state.
 type ClusterReference struct {
 	URI         string `json:"uri"`
@@ -219,6 +224,9 @@ func ClusterReferenceExpression(ref ClusterReference) Scmer {
 // Eval builds the callback, never lazily during its row execution.
 type ProcedureDecode struct {
 	ResolveHandle func(uint64) (Handle, error)
+	// Cache owns only compiled code factories. Captures and invocation state
+	// are supplied anew on every reconstruction, never retained by the cache.
+	Cache func(string, func() Scmer) Scmer
 	// Prepare is an optional embedding-owned transformation of the validated
 	// lambda. SCM knows neither the host's operators nor its execution context.
 	Prepare func(Scmer) (Scmer, error)
@@ -503,6 +511,7 @@ type clusterLiteralCapture struct {
 }
 
 func (*clusterLiteral) ClusterObjectType() string { return "literal" }
+func (*clusterLiteral) ClusterImmutableView()     {}
 func (v *clusterLiteral) Serialize(ctx *SerializationContext) (Scmer, error) {
 	return ctx.ReferenceExpression(v)
 }
@@ -512,8 +521,6 @@ func (v *clusterLiteral) HandleClusterRequest(ctx context.Context, request Clust
 	}
 	switch request.Method {
 	case "view":
-		return NewNil(), nil
-	case "source":
 		return NewString(v.source), nil
 	}
 	return nil, fmt.Errorf("unsupported immutable capture request")
@@ -632,9 +639,9 @@ func importClusterLiteral(handle ClusterHandle) (value Scmer) {
 			panic(failure)
 		}
 	}()
-	source, err := handle.Call(context.Background(), ClusterRequest{Method: "source"})
-	if err != nil {
-		panic(err)
+	source := handle.View
+	if !source.IsString() {
+		panic("missing pushed immutable capture")
 	}
 	value = Eval(Read("immutable cluster capture", source.String(), false), &Globalenv)
 	if !value.IsFastDict() {

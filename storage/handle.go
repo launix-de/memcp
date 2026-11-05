@@ -64,7 +64,21 @@ func (handle *remoteHandle) Handle(value scm.Scmer) {
 	if peer == nil {
 		panic("handle peer is disconnected")
 	}
-	bindings := handle.service.handleBindings(&scm.SerializationContext{Invocation: handle.owner}, peer)
+	var offers []scm.ClusterReference
+	bindings := (&scm.SerializationContext{Invocation: handle.owner}).WithExport(func(object scm.ClusterObject, view scm.Scmer) (scm.ClusterReference, error) {
+		ref, err := handle.service.exportObject(peer, object, view)
+		if err == nil {
+			offers = append(offers, ref)
+		}
+		return ref, err
+	})
+	queued := false
+	defer func() {
+		if !queued {
+			handle.service.refuseObjectOffers(peer, offers)
+		}
+	}()
+	bindings = handle.service.handleBindings(bindings, peer)
 	payload, err := freezeScanValue(value, bindings)
 	if err != nil {
 		panic(err)
@@ -74,9 +88,19 @@ func (handle *remoteHandle) Handle(value scm.Scmer) {
 	if err != nil {
 		panic(err)
 	}
+	handle.service.commitObjectOffers(peer, offers)
 	if err = peer.send(context.Background(), message); err != nil {
 		panic(err)
 	}
+	queued = true
+}
+
+func (service *nodeScanService) allocateHandleSlot() uint64 {
+	slot := service.nextHandle.Add(1)
+	if slot == 0 || slot>>63 != 0 {
+		panic("handle address space exhausted")
+	}
+	return slot
 }
 func (service *nodeScanService) handleResolver(ctx context.Context, peer *mosiPeer, scope scm.Scmer) func(uint64) (scm.Handle, error) {
 	return func(slot uint64) (scm.Handle, error) {
@@ -90,7 +114,7 @@ func (service *nodeScanService) handleResolver(ctx context.Context, peer *mosiPe
 func (service *nodeScanService) handleBindings(bindings *scm.SerializationContext, peer *mosiPeer) *scm.SerializationContext {
 	owner := bindings.InvocationScope()
 	return bindings.WithHandleExport(func(handler scm.Handle) (scm.Scmer, error) {
-		slot := service.nextHandle.Add(1)
+		slot := service.allocateHandleSlot()
 		entry := &handleSlot{peer: peer.objectPeer, handler: handler, owner: owner}
 		service.handles.Store(slot, entry)
 		release := func() { service.handles.Delete(slot) }
@@ -110,6 +134,7 @@ func (service *nodeScanService) handleBindings(bindings *scm.SerializationContex
 func (s *scanRPCSession) handleValue(slot uint64, payload schemeValue) error {
 	entry, ok := s.service.handles.Load(slot)
 	if !ok {
+		s.service.discardObjectOffers(s.peer, serializedReferences(payload))
 		return nil
 	} // a late delivery to a completed invocation is inert
 	target := entry.(*handleSlot)
@@ -117,6 +142,11 @@ func (s *scanRPCSession) handleValue(slot uint64, payload schemeValue) error {
 		return fmt.Errorf("foreign handle slot")
 	}
 	if !target.enter() {
+		// A cancelled waiter can hand its result slot to a state-free cleanup
+		// handler. An already admitted delivery must follow that handoff.
+		if current, exists := s.service.handles.Load(slot); exists && current != entry {
+			return s.handleValue(slot, payload)
+		}
 		return nil
 	}
 	defer target.calls.Done()

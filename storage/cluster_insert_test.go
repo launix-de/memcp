@@ -644,7 +644,7 @@ func TestClusterHandoverAckKeepsNewerInboundGrant(t *testing.T) {
 		if peer.outgoing.len() != 0 {
 			t.Fatal("reference preceded schema location acknowledgement")
 		}
-		route, _ := cluster.service.returns.Load(update.Return)
+		route, _ := cluster.service.handles.Load(controlReturnSlot(update.Return))
 		deliverTestCompletion(t, route, scanCompletion{})
 	case <-ctx.Done():
 		t.Fatal("generation route missing", ctx.Err())

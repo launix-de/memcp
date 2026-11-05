@@ -72,7 +72,13 @@ func registerMosiRole(role string, handler http.Handler) (func(), error) {
 // Neither RPC handlers nor storage I/O run under its mutex.
 // A disconnected peer fails every outstanding call; no write is retried here.
 type mosiPeer struct {
-	receiveIO *ioSimulation // shared node ingress budget; receiver-only instrumentation
+	viewMu            sync.Mutex
+	declaredViews     map[string]int // sender knowledge, published only after enqueue
+	declaredViewBytes int
+	receivedViewBytes int
+	receivedViewSlots int
+	objectViews       sync.Map      // URI -> immutable constructor bytes received on this stream
+	receiveIO         *ioSimulation // shared node ingress budget; receiver-only instrumentation
 
 	operationPrefix string            // immutable authenticated connection binding for query operations
 	recoveryDone    chan struct{}     // replication hello installed; nil for roles without recovery
@@ -116,6 +122,7 @@ func (p *mosiPeer) recovered() bool {
 }
 
 type mosiMessage struct {
+	frames  [][]byte    // coalesced opaque records; never encoded as metadata
 	Slot    uint64      `json:"slot,omitempty"`
 	Payload schemeValue `json:"payload,omitempty"`
 	encoded []byte      // immutable local frame; never part of wire metadata
@@ -167,31 +174,38 @@ func (q *mosiMailbox) pushLocked(m mosiMessage) error {
 	}
 	return nil
 }
+
+// The caller owns q.mu. One pop wakes byte-admission waiters as before.
+func (q *mosiMailbox) popLocked() mosiMessage {
+	m := q.items[q.head]
+	q.items[q.head] = mosiMessage{}
+	q.head++
+	q.bytes -= len(m.encoded)
+	if q.space != nil {
+		close(q.space)
+		q.space = nil
+	}
+	if q.head == len(q.items) {
+		q.items = q.items[:0]
+		q.head = 0
+		select {
+		case <-q.ready:
+		default:
+		}
+	} else {
+		select {
+		case q.ready <- struct{}{}:
+		default:
+		}
+	}
+	return m
+}
+
 func (q *mosiMailbox) next(ctx context.Context) (mosiMessage, error) {
 	for {
 		q.mu.Lock()
 		if q.head < len(q.items) {
-			m := q.items[q.head]
-			q.items[q.head] = mosiMessage{}
-			q.head++
-			q.bytes -= len(m.encoded)
-			if q.space != nil {
-				close(q.space)
-				q.space = nil
-			}
-			if q.head == len(q.items) {
-				q.items = q.items[:0]
-				q.head = 0
-				select {
-				case <-q.ready:
-				default:
-				}
-			} else {
-				select {
-				case q.ready <- struct{}{}:
-				default:
-				}
-			}
+			m := q.popLocked()
 			q.mu.Unlock()
 			return m, nil
 		}
@@ -309,6 +323,22 @@ func (p *mosiPeer) send(ctx context.Context, m mosiMessage) error {
 
 // The bounded queue owns each message after send returns. Producers never
 // wait for a protocol reply here; the connection reader completes acquisitions.
+func (q *mosiMailbox) takeAvailable(dst []mosiMessage, bytes int) int {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	count := 0
+	for count < len(dst) && q.head < len(q.items) {
+		next := q.items[q.head]
+		if next.Packet != nil || len(next.encoded) == 0 || len(next.encoded) > mosiBatchRecordBytes || len(next.encoded)+10 > bytes {
+			break
+		}
+		dst[count] = q.popLocked()
+		bytes -= len(next.encoded) + 10
+		count++
+	}
+	return count
+}
+
 func (p *mosiPeer) write() {
 	defer close(p.writeDone)
 	defer p.close()
@@ -316,6 +346,20 @@ func (p *mosiPeer) write() {
 		m, err := p.outgoing.next(p.ctx)
 		if err != nil {
 			return
+		}
+		var records [mosiMaxBatchMessages]mosiMessage
+		records[0] = m
+		if m.Packet == nil && len(m.encoded) > 0 && len(m.encoded) <= mosiBatchRecordBytes {
+			// Large payloads keep their own frames, so an early small control
+			// result never waits behind bulk bytes merely for coalescing.
+			count := p.outgoing.takeAvailable(records[1:], mosiBatchBytes-len(m.encoded)-16)
+			if count > 0 {
+				frame, encodeErr := encodeMosiBatch(records[:count+1])
+				if encodeErr != nil {
+					return
+				}
+				m = mosiMessage{encoded: frame}
+			}
 		}
 		if err = p.writeMessage(m); err != nil {
 			return
@@ -413,74 +457,99 @@ func (p *mosiPeer) read() {
 		if err != nil {
 			return
 		}
-		if m.Packet != nil {
-			if p.packet == nil {
-				return
-			}
-			if !p.dispatchPacket(m.Packet, len(frame), readyAt) {
-				return
-			}
-			continue
-		}
-		if m.Slot == 0 && m.Method == "" && (p.receiveIO == nil || p.receiveIO.latency == 0) {
-			p.deliverReply(m)
-			continue
-		}
-		if p.packetBytes.Add(int64(len(frame))) > 32<<20 {
-			p.packetBytes.Add(-int64(len(frame)))
-			return
-		}
-		p.workers.Add(1)
-		go func(m mosiMessage, size int, readyAt time.Time) {
-			defer p.workers.Done()
-			defer p.packetBytes.Add(-int64(size))
-			if !p.waitDispatch(readyAt) {
-				return
-			}
-			if m.Slot != 0 {
-				defer func() {
-					if recover() != nil {
-						p.close()
-					}
-				}()
-				if p.handleValue == nil || p.handleValue(m.Slot, m.Payload) != nil {
-					p.close()
-				}
-				return
-			}
-			if m.Method == "" {
-				p.deliverReply(m)
-				return
-			}
-			reply := mosiMessage{ID: m.ID}
-			func() {
-				defer func() {
-					if r := recover(); r != nil {
-						reply.Error = fmt.Sprint(r)
-					}
-				}()
-				value, err := p.handle(p.ctx, m.Method, m.Data)
-				if err != nil {
-					reply.Error = err.Error()
+		if len(m.frames) > 0 {
+			for _, record := range m.frames {
+				message, decodeErr := decodeMosiBody(record)
+				if decodeErr != nil || !p.dispatchMessage(message, len(record)+5, readyAt) {
 					return
 				}
-				reply.Data, err = marshalNode(value)
-				if err != nil {
-					reply.Error = err.Error()
-				}
-			}()
-			if m.ID == 0 {
-				if reply.Error != "" {
-					fmt.Println("node message rejected:", m.Method, reply.Error)
+			}
+		} else if !p.dispatchMessage(m, len(frame), readyAt) {
+			return
+		}
+	}
+}
+
+func (p *mosiPeer) dispatchMessage(m mosiMessage, size int, readyAt time.Time) bool {
+	// A declaration is a bounded publication, never executable Scheme or a
+	// request. Install it before admitting a later task from this stream.
+	if m.ID == 0 && m.Slot == 0 && (m.Method == "object.declare" || m.Method == "object.forget") {
+		if p.scanService == nil {
+			return false
+		} // authenticated node role only
+		if err := p.publishObjectView(m.Method, m.Data); err != nil {
+			return false
+		}
+		return true
+	}
+	if m.Packet != nil {
+		if p.packet == nil {
+			return false
+		}
+		if !p.dispatchPacket(m.Packet, size, readyAt) {
+			return false
+		}
+		return true
+	}
+	if m.Slot == 0 && m.Method == "" && (p.receiveIO == nil || p.receiveIO.latency == 0) {
+		p.deliverReply(m)
+		return true
+	}
+	if p.packetBytes.Add(int64(size)) > 32<<20 {
+		p.packetBytes.Add(-int64(size))
+		return false
+	}
+	p.workers.Add(1)
+	go func(m mosiMessage, size int, readyAt time.Time) {
+		defer p.workers.Done()
+		defer p.packetBytes.Add(-int64(size))
+		if !p.waitDispatch(readyAt) {
+			return
+		}
+		if m.Slot != 0 {
+			defer func() {
+				if recover() != nil {
 					p.close()
 				}
-				return
-			} // fire-and-forget messages complete via their registered channel
-			if err := p.send(p.ctx, reply); err != nil {
+			}()
+			if p.handleValue == nil || p.handleValue(m.Slot, m.Payload) != nil {
 				p.close()
 			}
-		}(m, len(frame), readyAt)
-	}
+			return
+		}
+		if m.Method == "" {
+			p.deliverReply(m)
+			return
+		}
+		reply := mosiMessage{ID: m.ID}
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					reply.Error = fmt.Sprint(r)
+				}
+			}()
+			value, err := p.handle(p.ctx, m.Method, m.Data)
+			if err != nil {
+				reply.Error = err.Error()
+				return
+			}
+			reply.Data, err = marshalNode(value)
+			if err != nil {
+				reply.Error = err.Error()
+			}
+		}()
+		if m.ID == 0 {
+			if reply.Error != "" {
+				fmt.Println("node message rejected:", m.Method, reply.Error)
+				p.close()
+			}
+			return
+		} // fire-and-forget messages complete via their registered channel
+		if err := p.send(p.ctx, reply); err != nil {
+			p.close()
+		}
+	}(m, size, readyAt)
+	return true
 }
 
 // Delay delivery outside the reader so propagation latency overlaps independent

@@ -5,7 +5,6 @@ SPDX-License-Identifier: GPL-3.0-or-later
 package storage
 
 import "testing"
-import "strings"
 import "github.com/google/uuid"
 import "github.com/launix-de/memcp/scm"
 
@@ -42,7 +41,7 @@ func BenchmarkClusterCompletionEncoding(b *testing.B) {
 	}
 	reference := result(scm.NewNil())
 	reference.Value = []byte(encodedReference)
-	operationID := strings.Repeat("0", 64) + "/00000000-0000-7000-8000-000000000001"
+	operationID := uint64(37)
 	for name, value := range map[string]any{
 		"scalar":       result(scm.NewInt(42)),
 		"list":         result(scm.NewSlice(rows[:8])),
@@ -57,11 +56,11 @@ func BenchmarkClusterCompletionEncoding(b *testing.B) {
 				if err != nil {
 					b.Fatal(err)
 				}
-				envelope, err := marshalNode(scanCompletion{Return: operationID, Data: data, Offers: offers})
+				envelope, err := marshalNode(scanCompletion{Data: data, Offers: offers})
 				if err != nil {
 					b.Fatal(err)
 				}
-				frame, err := encodeMosiMessage(mosiMessage{Method: "scan.result", Data: envelope})
+				frame, err := encodeMosiMessage(mosiMessage{Slot: operationID, Payload: schemeValue(scm.SerializeToString(scm.NewString(string(envelope)), &scm.Globalenv))})
 				if err != nil {
 					b.Fatal(err)
 				}
@@ -83,7 +82,7 @@ func BenchmarkClusterCompletionEncoding(b *testing.B) {
 						b.Fatal(err)
 					}
 					var completion scanCompletion
-					if err := unmarshalNode(message.Data, &completion); err != nil {
+					if err := unmarshalNode([]byte(scm.Eval(scm.Read("completion", string(message.Payload), false), &scm.Globalenv).String()), &completion); err != nil {
 						b.Fatal(err)
 					}
 					var result remoteScanResult

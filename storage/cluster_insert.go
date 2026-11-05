@@ -278,7 +278,12 @@ func (t *table) sendInsert(peer *mosiPeer, columns []string, rows [][]scm.Scmer,
 	}
 	service := peer.scanService
 	var offers []scm.ClusterReference
-	defer func() { service.cancelObjectOffers(peer, offers) }()
+	submitted := false
+	defer func() {
+		if !submitted {
+			service.cancelObjectOffers(peer, offers)
+		}
+	}()
 	bindings := (&scm.SerializationContext{Invocation: scm.NewAny(owner)}).WithExport(func(object scm.ClusterObject, view scm.Scmer) (scm.ClusterReference, error) {
 		ref, err := service.exportObject(peer, object, view)
 		if err == nil {
@@ -314,7 +319,8 @@ func (t *table) sendInsert(peer *mosiPeer, columns []string, rows [][]scm.Scmer,
 	}
 	activeNodeCluster().delegated.Add(1)
 	var response remoteInsertResult
-	if err := service.control(ctx, peer, "insert.execute", request, &response, true); err != nil {
+	submitted = true
+	if err := service.control(ctx, peer, "insert.execute", request, &response, true, offers...); err != nil {
 		panicRemoteOperation(err)
 	}
 	return response

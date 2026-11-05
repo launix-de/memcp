@@ -74,16 +74,12 @@ func TestClusterObjectIndependentHandlesAndIncarnation(t *testing.T) {
 	// Two successive Go lifetimes of one peer may overlap while old GC delivery
 	// is pending. They need generation IDs, not a boolean peer membership.
 	sessionRPC := &scanRPCSession{service: owner, peer: peer}
-	acquire := func(ref scm.ClusterReference) scm.ClusterReference {
-		lease := peer.objectPeer.Boot + ":" + ref.Token
-		data, _ := marshalNode(clusterObjectAcquisition{ref, lease})
-		if _, err := sessionRPC.handleObject(context.Background(), "object.acquire", data); err != nil {
-			t.Fatal(err)
+	for _, ref := range []scm.ClusterReference{first, second} {
+		if _, err := sessionRPC.resolveObject(ref); err != nil {
+			t.Fatal("sender did not pregrant its reference", err)
 		}
-		ref.Token = lease
-		return ref
 	}
-	first, second = acquire(first), acquire(second)
+
 	if err := owner.releaseObject(peer, first); err != nil {
 		t.Fatal(err)
 	}
@@ -517,6 +513,7 @@ func TestClusterObjectOfferCancellationCannotDropAcquiredReader(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	owner.commitObjectOffers(source, []scm.ClusterReference{live})
 	value, err := client.importObject(context.Background(), peer, live)
 	if err != nil {
 		t.Fatal(err)
@@ -634,15 +631,15 @@ func TestClusterObjectAbandonedCompletionDiscardsOffers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id := uuid.NewString()
+	id := client.nextHandle.Add(1)
 	results := make(chan scanCompletion, 1)
 	receiver := newClusterReceiver(1, func(_ context.Context, v scm.Scmer) error { results <- v.Any().(scanCompletion); return nil })
 	receiver.Seal()
-	client.returns.Store(id, &receiverRoute{peer, receiver})
-	defer client.returns.Delete(id)
-	completion, _ := marshalNode(scanCompletion{Return: id, Offers: []scm.ClusterReference{ref}})
+	client.handles.Store(id, &handleSlot{peer: peer.objectPeer, handler: &controlResultHandle{client, peer, receiver}})
+	defer client.handles.Delete(id)
+	completion, _ := freezeScanValue(scm.NewString(string(mustNodeMetadata(scanCompletion{Offers: []scm.ClusterReference{ref}}))))
 	s := &scanRPCSession{service: client, peer: peer}
-	if _, err := s.channelMessage(context.Background(), "scan.result", completion); err != nil {
+	if err := s.handleValue(id, completion); err != nil {
 		t.Fatal(err)
 	}
 	// Cancellation after delivery but before collection must release the offer.
@@ -651,7 +648,7 @@ func TestClusterObjectAbandonedCompletionDiscardsOffers(t *testing.T) {
 	client.discardObjectOffers(peer, abandoned.Offers)
 	waitObjectGC(t, func() bool { return objectEntryCount(owner) == 0 })
 	// A late duplicate is harmless and cannot repopulate a closed collector.
-	if _, err := s.channelMessage(context.Background(), "scan.result", completion); err != nil {
+	if err := s.handleValue(id, completion); err != nil {
 		t.Fatal(err)
 	}
 	if len(results) != 0 {
@@ -757,11 +754,11 @@ func TestClusterDiscoveryRefreshesRoutingAfterConcurrentHandover(t *testing.T) {
 		return true
 	})
 	data, _ := marshalNode(replicaRecord{Resource: resource, Owner: self.ID, Epoch: 9, State: "IO"})
-	entry, ok := service.returns.Load(request.Return)
+	entry, ok := service.handles.Load(controlReturnSlot(request.Return))
 	if !ok {
 		t.Fatal("missing discovery return collector")
 	}
-	deliverTestCompletion(t, entry, scanCompletion{Return: request.Return, Data: data})
+	deliverTestCompletion(t, entry, scanCompletion{Data: data})
 	reply := <-finished
 	if reply.err != nil || reply.owner != remote.ID || cell.ownstate.Phase() != mosi.IO {
 		t.Fatal("live handover became a recovery failure or regained rights", reply, cell.ownstate.Phase())
@@ -886,7 +883,7 @@ func TestClusterObjectDeduplicatesOverlappingEmptySubscansAndGC(t *testing.T) {
 	session := scm.NewSession()
 	first := importNeverCalledSubscan(t, owner, client, source, peer, session)
 	second := importNeverCalledSubscan(t, owner, client, source, peer, session)
-	check := func() {
+	check := func(expected int) {
 		t.Helper()
 		r := owner.objectRegistry()
 		r.mu.Lock()
@@ -895,19 +892,28 @@ func TestClusterObjectDeduplicatesOverlappingEmptySubscansAndGC(t *testing.T) {
 			t.Fatal("expected one owner registration", len(r.entries))
 		}
 		for _, entry := range r.entries {
-			if len(entry.leases) != 1 || len(entry.tokens) != 0 {
-				t.Fatal("subscans did not join one materialized peer lease", len(entry.leases), len(entry.tokens))
+			if len(entry.leases) != expected {
+				t.Fatal("independent transfer grants did not match live subscans", len(entry.leases), len(entry.tokens))
 			}
 		}
 	}
 	// No callback has run: import MUST already own a real Go peer handle.
-	check()
+	check(2)
 	runtime.KeepAlive(first)
 	first = scm.NewNil()
 	for range 3 {
 		runtime.GC()
 	}
-	check()
+	waitObjectGC(t, func() bool {
+		r := owner.objectRegistry()
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		for _, entry := range r.entries {
+			return len(entry.leases) == 1
+		}
+		return false
+	})
+	check(1)
 	runtime.KeepAlive(second)
 	second = scm.NewNil()
 	waitObjectGC(t, func() bool { return objectEntryCount(owner) == 0 })
@@ -923,36 +929,26 @@ func TestClusterObjectPendingTransferSurvivesPriorLeaseRelease(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := &scanRPCSession{service: owner, peer: peer}
-	firstLease := peer.objectPeer.Boot + ":1"
-	data, _ := marshalNode(clusterObjectAcquisition{first, firstLease})
-	if _, err := s.handleObject(context.Background(), "object.acquire", data); err != nil {
-		t.Fatal(err)
-	}
+	owner.commitObjectOffers(peer, []scm.ClusterReference{first})
 	pending, err := owner.exportObject(peer, object, view)
 	if err != nil {
 		t.Fatal(err)
 	}
 	old := first
-	old.Token = firstLease
+	old.Token = first.Token
 	if err := owner.releaseObject(peer, old); err != nil {
 		t.Fatal(err)
 	}
 	if objectEntryCount(owner) != 1 {
 		t.Fatal("old GC release dropped the in-flight serialization reservation")
 	}
-	secondLease := peer.objectPeer.Boot + ":2"
-	data, _ = marshalNode(clusterObjectAcquisition{pending, secondLease})
-	if _, err := s.handleObject(context.Background(), "object.acquire", data); err != nil {
-		t.Fatal(err)
-	}
+	owner.commitObjectOffers(peer, []scm.ClusterReference{pending})
 	if err := owner.releaseObject(peer, old); err != nil {
 		t.Fatal(err)
 	}
 	if objectEntryCount(owner) != 1 {
 		t.Fatal("late old release revoked the new peer lifetime")
 	}
-	pending.Token = secondLease
 	if err := owner.releaseObject(peer, pending); err != nil {
 		t.Fatal(err)
 	}
@@ -1005,11 +1001,11 @@ func TestClusterCancellationQueuesMessageBeforeCollectorReturns(t *testing.T) {
 			}
 			// The existing return channel is also the join acknowledgement. No
 			// cancelled invocation may release its captures before this delivery.
-			entry, ok := service.returns.Load(envelope.Return)
+			entry, ok := service.handles.Load(controlReturnSlot(envelope.Return))
 			if !ok {
 				t.Fatal("cancelled invocation dropped its return channel")
 			}
-			deliverTestCompletion(t, entry, scanCompletion{Return: envelope.Return})
+			deliverTestCompletion(t, entry, scanCompletion{})
 			select {
 			case result := <-finished:
 				if result != context.Canceled {
@@ -1040,33 +1036,42 @@ func TestClusterObjectReleaseRetriesWithoutAnotherGCOrReconnect(t *testing.T) {
 	service := &nodeScanService{peers: map[*mosiPeer]bool{peer: true}}
 	registry := service.objectRegistry()
 	defer service.stopObjects()
+	wait := func(condition func() bool) {
+		t.Helper()
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			if condition() {
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+		t.Fatal("release worker did not progress")
+	}
+	// Hold the queue lock until the worker has taken ownership. The full
+	// window then rejects this attempt, without a fake remote result/ack.
+	peer.outgoing.mu.Lock()
+	peer.outgoing.bytes = 32 << 20
 	registry.mu.Lock()
 	registry.releases = append(registry.releases, clusterObjectRelease{peer: identity, reference: scm.ClusterReference{URI: "http://owner/cluster/" + uuid.NewString()}})
 	registry.mu.Unlock()
 	registry.wake <- struct{}{}
-	for attempt := range 2 {
-		select {
-		case <-peer.outgoing.ready:
-			message := takeMosi(peer.outgoing)
-			var request struct {
-				Return string `json:"return"`
-				Method string `json:"method"`
-			}
-			if err := unmarshalNode(message.Data, &request); err != nil || request.Method != "object.release" {
-				t.Fatalf("unexpected release request: %+v, %v", request, err)
-			}
-			entry, ok := service.returns.Load(request.Return)
-			if !ok {
-				t.Fatal("release has no completion collector")
-			}
-			completion := scanCompletion{}
-			if attempt == 0 {
-				completion.Panic = &scanPanic{Message: "temporary connection failure"}
-			}
-			deliverTestCompletion(t, entry, completion)
-		case <-time.After(3 * time.Second):
-			t.Fatal("release was not retried without another GC or reconnect", attempt)
+	wait(func() bool { registry.mu.Lock(); defer registry.mu.Unlock(); return len(registry.releases) == 0 })
+	peer.outgoing.mu.Unlock()
+	wait(func() bool { registry.mu.Lock(); defer registry.mu.Unlock(); return len(registry.releases) == 1 })
+	peer.outgoing.mu.Lock()
+	peer.outgoing.bytes = 0
+	peer.outgoing.mu.Unlock()
+	select {
+	case <-peer.outgoing.ready:
+		message := takeMosi(peer.outgoing)
+		if message.Method != "object.release" || message.ID != 0 {
+			t.Fatal("release is not fire-and-forget", message.Method, message.ID)
 		}
+		if _, exists := service.handles.Load(""); exists {
+			t.Fatal("release allocated a reply collector")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("release was not retried without another GC or reconnect")
 	}
 }
 
@@ -1292,4 +1297,115 @@ func TestClusterImmutableCaptureSharesSnapshotAndReleasesWithGC(t *testing.T) {
 	owner := nodeScans.Load()
 	value := prepareSharedLiteral(t, owner, client, peer)
 	waitObjectGC(t, func() bool { return value.Value() == nil && objectEntryCount(owner) == 0 })
+}
+
+func TestClusterPregrantedSnapshotImportsAfterDisconnect(t *testing.T) {
+	peer, client, _ := setupRemoteScanConnection(t)
+	owner := nodeScans.Load()
+	source := objectOwnerPeer(t, owner, client)
+	session := scm.NewSession()
+	scm.Apply(session, scm.NewString("key"), scm.NewInt(17))
+	object, _ := scm.ClusterObjectOf(session)
+	view, _ := scm.ClusterObjectValue(object, context.Background(), scm.ClusterRequest{Method: "view"})
+	ref, err := owner.exportObject(source, object, view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner.commitObjectOffers(source, []scm.ClusterReference{ref})
+	peer.close()
+	peer.wait()
+	value, err := client.importObject(context.Background(), peer, ref)
+	if err != nil {
+		t.Fatal("materialization waited for acquisition", err)
+	}
+	if got := scm.Apply(value, scm.NewString("key")); got.Int() != 17 {
+		t.Fatal("pushed snapshot changed", got)
+	}
+	if objectEntryCount(owner) != 1 {
+		t.Fatal("disconnect revoked the pregranted lifetime")
+	}
+	runtime.KeepAlive(value)
+}
+
+func TestClusterViewDeclarationsPublishOnceAndRespectBudget(t *testing.T) {
+	peer := &mosiPeer{done: make(chan struct{}), outgoing: newMosiMailbox()}
+	view := []byte(`"pushed constructor"`)
+	if !peer.declareObjectView("owner/1", view) || !peer.declareObjectView("owner/1", view) {
+		t.Fatal("declaration failed")
+	}
+	if peer.outgoing.len() != 1 {
+		t.Fatal("known view was sent twice")
+	}
+	message := takeMosi(peer.outgoing)
+	if message.ID != 0 || message.Method != "object.declare" {
+		t.Fatal("declaration allocated a result channel")
+	}
+	receiver := &mosiPeer{}
+	if err := receiver.publishObjectView(message.Method, message.Data); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := receiver.objectViews.Load("owner/1"); !ok || string(got.([]byte)) != string(view) {
+		t.Fatal("declaration was not published before task admission")
+	}
+	if peer.declareObjectView("too-large", make([]byte, objectViewBudget)) {
+		t.Fatal("declaration bypassed byte budget")
+	}
+	if peer.outgoing.len() != 0 {
+		t.Fatal("non-admitted view was partially queued")
+	}
+	peer.forgetObjectView("owner/1")
+	message = takeMosi(peer.outgoing)
+	if err := receiver.publishObjectView(message.Method, message.Data); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := receiver.objectViews.Load("owner/1"); ok {
+		t.Fatal("retired source remained cached")
+	}
+}
+
+func TestClusterCancelledReturnHandleDiscardsLateGrants(t *testing.T) {
+	service := &nodeScanService{}
+	defer service.stopObjects()
+	peer := &mosiPeer{done: make(chan struct{}), outgoing: newMosiMailbox(), objectPeer: clusterObjectPeer{"owner", "boot"}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	finished := make(chan error, 1)
+	go func() { finished <- service.control(ctx, peer, "fixture", nil, nil, false) }()
+	request := takeMosi(peer.outgoing)
+	var envelope struct{ Return string }
+	if err := unmarshalNode(request.Data, &envelope); err != nil {
+		t.Fatal(err)
+	}
+	slot := controlReturnSlot(envelope.Return)
+	cancel()
+	if err := <-finished; err != context.Canceled {
+		t.Fatal("wrong wait cancellation", err)
+	}
+	entry, ok := service.handles.Load(slot)
+	if !ok {
+		t.Fatal("cancelled waiter discarded its necessary result cleanup")
+	}
+	if _, ok := entry.(*handleSlot).handler.(*abandonedControlHandle); !ok {
+		t.Fatal("cancelled result retained query state")
+	}
+	if cancelMessage := takeMosi(peer.outgoing); cancelMessage.Method != "scan.cancel" {
+		t.Fatal("missing remote cancellation")
+	}
+	ref := scm.ClusterReference{URI: "http://owner/cluster/1", Owner: "owner", Incarnation: "boot", Token: "1", Type: "session"}
+	payload, err := freezeScanValue(scm.NewString(string(mustNodeMetadata(scanCompletion{Offers: []scm.ClusterReference{ref}}))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := &scanRPCSession{service: service, peer: peer}
+	if err := session.handleValue(slot, payload); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := service.handles.Load(slot); ok {
+		t.Fatal("late result retained its cleanup slot")
+	}
+	message := takeMosi(peer.outgoing)
+	var discarded []scm.ClusterReference
+	if message.Method != "object.discard" || unmarshalNode(message.Data, &discarded) != nil || len(discarded) != 1 || discarded[0].Token != ref.Token {
+		t.Fatal("abandoned result leaked its grant")
+	}
 }

@@ -17,18 +17,16 @@ import "context"
 import "strings"
 import "sync/atomic"
 import "runtime/debug"
-import "github.com/google/uuid"
+import "strconv"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/go-mysqlstack/sqldb"
 
-// These messages have no RPC response handle. The reducer registers a return
-// channel before enqueueing a task; the node reader delivers a completion (or
-// the original panic) by that UUID. Cancelling never interrupts a shard's item
+// Requests carry a registered return handle. Results and original panics are
+// delivered as slot + payload through the ordinary handle registry. Cancelling never interrupts a shard's item
 // loop: it fences new shard tasks and is inherited by nested scan invocations.
 type scanCompletion struct {
 	Offers []scm.ClusterReference `json:"offers,omitempty"`
 	Data   []byte                 `json:"data,omitempty"`
-	Return string                 `json:"return"`
 	Panic  *scanPanic             `json:"panic,omitempty"`
 }
 type scanPanic struct {
@@ -238,11 +236,6 @@ func (receiver *clusterReceiver) HandleClusterRequest(ctx context.Context, reque
 	return scm.NewNil(), callback(callbackCtx, request.Arguments[0])
 }
 
-type receiverRoute struct {
-	peer     *mosiPeer
-	receiver *clusterReceiver
-}
-
 type remoteScanContextKey struct{}
 
 type scanTaskScope struct {
@@ -337,30 +330,13 @@ func (s *scanRPCSession) validOperation(id string) bool {
 		}
 		id = operation
 	}
-	operation, err := uuid.Parse(id)
-	return err == nil && operation.Version() == 7
+	operation, err := strconv.ParseUint(id, 16, 64)
+	return len(id) == 16 && err == nil && operation != 0
 }
 
 func (s *scanRPCSession) channelMessage(ctx context.Context, method string, data []byte) (any, error) {
 	switch method {
-	case "scan.result":
-		var result scanCompletion
-		if err := unmarshalNode(data, &result); err != nil {
-			return nil, err
-		}
-		if entry, ok := s.service.returns.Load(result.Return); ok {
-			route := entry.(*receiverRoute)
-			if route.peer != s.peer {
-				return nil, fmt.Errorf("completion from wrong peer")
-			}
-			_, err := route.receiver.HandleClusterRequest(ctx, scm.ClusterRequest{Method: "receive", Arguments: []scm.Scmer{scm.NewAny(result)}})
-			if err != nil {
-				s.service.discardObjectOffers(s.peer, result.Offers)
-			}
-		} else {
-			s.service.discardObjectOffers(s.peer, result.Offers)
-		}
-		return nil, nil
+
 	case "scan.cancel":
 		var id string
 		if err := unmarshalNode(data, &id); err != nil {
@@ -373,28 +349,31 @@ func (s *scanRPCSession) channelMessage(ctx context.Context, method string, data
 		return nil, nil
 	case "node.control":
 		var request struct {
-			Return string `json:"return"`
-			Method string `json:"method"`
-			Data   []byte `json:"data"`
+			Offers []scm.ClusterReference `json:"offers,omitempty"`
+			Return string                 `json:"return"`
+			Method string                 `json:"method"`
+			Data   []byte                 `json:"data"`
 		}
 		if err := unmarshalNode(data, &request); err != nil {
 			return nil, err
 		}
-		if !s.validOperation(request.Return) {
+		id := request.Return
+		if request.Return == "" || !s.validOperation(id) {
 			return nil, fmt.Errorf("invalid operation identity")
 		}
-		completion := scanCompletion{Return: request.Return}
+		completion := scanCompletion{}
+		defer s.service.discardObjectOffers(s.peer, request.Offers)
 		func() {
 			defer func() {
 				if failure := recover(); failure != nil {
 					completion.Panic = freezeScanPanic(failure)
 				}
 			}()
-			scope, err := s.tasks.begin(ctx, request.Return)
+			scope, err := s.tasks.begin(ctx, id)
 			if err != nil {
 				panic(err)
 			}
-			defer s.tasks.finish(request.Return)
+			defer s.tasks.finish(id)
 			if request.Method == "node.control" || request.Method == "scan.result" || request.Method == "scan.cancel" {
 				panic("invalid nested control envelope")
 			}
@@ -403,7 +382,7 @@ func (s *scanRPCSession) channelMessage(ctx context.Context, method string, data
 				panic(err)
 			}
 			if exported, ok := value.(interface{ ClusterObjectOffers() []scm.ClusterReference }); ok {
-				completion.Offers = exported.ClusterObjectOffers()
+				completion.Offers = transferManifest(exported.ClusterObjectOffers())
 			}
 			// boundedScanReply already encoded and checked this response. Keep
 			// those immutable bytes through the collector; do not marshal even
@@ -417,7 +396,16 @@ func (s *scanRPCSession) channelMessage(ctx context.Context, method string, data
 				panic(err)
 			}
 		}()
-		return nil, postScanMessage(ctx, s.peer, "scan.result", completion)
+		s.service.commitObjectOffers(s.peer, completion.Offers)
+		payload, err := freezeScanValue(scm.NewString(string(mustNodeMetadata(completion))))
+		if err != nil {
+			return nil, err
+		}
+		if err := s.peer.send(ctx, mosiMessage{Slot: controlReturnSlot(request.Return), Payload: payload}); err != nil {
+			s.service.refuseObjectOffers(s.peer, completion.Offers)
+			return nil, err
+		}
+		return nil, nil
 
 	}
 	return nil, fmt.Errorf("unknown scan channel message")
@@ -430,13 +418,13 @@ func mustNodeMetadata(value any) []byte {
 	return data
 }
 
-func (executor *peerScanExecutor) dispatch(task remoteScanTask) remoteScanResult {
+func (executor *peerScanExecutor) dispatch(task remoteScanTask, offers ...scm.ClusterReference) remoteScanResult {
 	service := executor.peer.scanService
 	if service == nil {
 		panic("missing scan return-channel service")
 	}
 	var result remoteScanResult
-	if err := service.control(executor.ctx, executor.peer, "scan.execute", task, &result, true); err != nil {
+	if err := service.control(executor.ctx, executor.peer, "scan.execute", task, &result, true, offers...); err != nil {
 		panicRemoteOperation(err)
 	}
 	if result.Rejected {
@@ -448,40 +436,148 @@ func (executor *peerScanExecutor) dispatch(task remoteScanTask) remoteScanResult
 	return result
 }
 
-// Control requests use the same fire-and-forget transport and UUID delivery
+// The authenticated stream namespace belongs to the return address, not to
+// another operation identity. Only the numeric slot is sent on return delivery.
+func controlReturnSlot(address string) uint64 {
+	index := strings.LastIndexByte(address, '/')
+	slot, _ := strconv.ParseUint(address[index+1:], 16, 64)
+	return slot
+}
+
+func (s *scanRPCSession) operationID(slot uint64) string {
+	// The replay registry compares addresses lexicographically. Fixed-width
+	// big-endian slots preserve numeric order across 0xff/0x100 boundaries.
+	id := fmt.Sprintf("%016x", slot)
+	if s.peer.operationPrefix != "" {
+		id = s.peer.operationPrefix + "/" + id
+	}
+	return id
+}
+
+// Return delivery uses the ordinary handle registry. The handler owns its
+// payload format; transport sees only slot + payload and creates no RPC reply.
+type controlResultHandle struct {
+	service  *nodeScanService
+	peer     *mosiPeer
+	receiver *clusterReceiver
+}
+
+// Cancellation can end a local wait before a needed remote result arrives.
+// Keep only its payload disposer, without the query, waiter or callback state.
+type abandonedControlHandle struct {
+	service *nodeScanService
+	peer    *mosiPeer
+	slot    uint64
+	entry   *handleSlot
+	mu      sync.Mutex
+	retired bool
+	stop    func() bool
+}
+
+func (handle *abandonedControlHandle) retire() {
+	handle.mu.Lock()
+	handle.retired = true
+	stop := handle.stop
+	handle.stop = nil
+	handle.mu.Unlock()
+	if stop != nil {
+		stop()
+	}
+	handle.service.handles.CompareAndDelete(handle.slot, handle.entry)
+}
+func (handle *abandonedControlHandle) watch() {
+	if handle.peer.ctx == nil {
+		return
+	}
+	stop := context.AfterFunc(handle.peer.ctx, handle.retire)
+	handle.mu.Lock()
+	if handle.retired {
+		handle.mu.Unlock()
+		stop()
+		return
+	}
+	handle.stop = stop
+	handle.mu.Unlock()
+}
+func (handle *abandonedControlHandle) Handle(value scm.Scmer) {
+	defer handle.retire()
+	var result scanCompletion
+	if err := unmarshalNode([]byte(value.String()), &result); err != nil {
+		panic(err)
+	}
+	handle.service.discardObjectOffers(handle.peer, result.Offers)
+}
+
+func (handle *controlResultHandle) Handle(value scm.Scmer) {
+	var result scanCompletion
+	if err := unmarshalNode([]byte(value.String()), &result); err != nil {
+		panic(err)
+	}
+	_, err := handle.receiver.HandleClusterRequest(context.Background(), scm.ClusterRequest{Method: "receive", Arguments: []scm.Scmer{scm.NewAny(result)}})
+	if err != nil {
+		handle.service.discardObjectOffers(handle.peer, result.Offers)
+	}
+}
+
+// Operations use the same fire-and-forget transport and numeric handle
 // registry. Waiting belongs to the control operation's collector, never a held
 // send handle, native shard lock or long-lived per-call connection.
-func (service *nodeScanService) control(ctx context.Context, peer *mosiPeer, method string, input, output any, joinOnCancel bool) error {
-	operation, err := uuid.NewV7()
-	if err != nil {
-		return err
-	}
-	id := operation.String()
-	if peer.operationPrefix != "" {
-		id = peer.operationPrefix + "/" + id
-	}
+func (service *nodeScanService) control(ctx context.Context, peer *mosiPeer, method string, input, output any, joinOnCancel bool, offers ...scm.ClusterReference) error {
+	queued := false
+	defer func() {
+		if !queued {
+			service.refuseObjectOffers(peer, offers)
+		}
+	}()
+	slot := service.allocateHandleSlot()
+	id := (&scanRPCSession{peer: peer}).operationID(slot)
 	results := make(chan scanCompletion, 1)
 	receiver := newClusterReceiver(1, func(_ context.Context, value scm.Scmer) error { results <- value.Any().(scanCompletion); return nil })
 	receiver.Seal()
-	route := &receiverRoute{peer, receiver}
-	service.returns.Store(id, route)
+	entry := &handleSlot{peer: peer.objectPeer, handler: &controlResultHandle{service, peer, receiver}}
+	service.handles.Store(slot, entry)
+	received := false
 	defer func() {
+		var orphan *abandonedControlHandle
+		live := true
+		select {
+		case <-peer.done:
+			live = false
+		default:
+		}
+		if queued && !received && live {
+			orphan = &abandonedControlHandle{service: service, peer: peer, slot: slot}
+			orphan.entry = &handleSlot{peer: peer.objectPeer, handler: orphan}
+			service.handles.Store(slot, orphan.entry)
+		} else {
+			service.handles.Delete(slot)
+		}
+		entry.close()
 		receiver.Close()
-		service.returns.Delete(id)
 		select {
 		case abandoned := <-results:
 			service.discardObjectOffers(peer, abandoned.Offers)
+			if orphan != nil {
+				orphan.retire()
+			}
 		default:
 		}
+		if orphan != nil {
+			orphan.watch()
+		}
 	}()
+	offers = transferManifest(offers)
 	request := struct {
-		Return string `json:"return"`
-		Method string `json:"method"`
-		Data   []byte `json:"data"`
-	}{id, method, mustNodeMetadata(input)}
+		Offers []scm.ClusterReference `json:"offers,omitempty"`
+		Return string                 `json:"return"`
+		Method string                 `json:"method"`
+		Data   []byte                 `json:"data"`
+	}{offers, id, method, mustNodeMetadata(input)}
+	service.commitObjectOffers(peer, offers)
 	if err := postScanMessage(ctx, peer, "node.control", request); err != nil {
 		return err
 	}
+	queued = true
 	completed := false
 	defer func() {
 		if !completed {
@@ -510,6 +606,7 @@ func (service *nodeScanService) control(ctx context.Context, peer *mosiPeer, met
 		if joinOnCancel {
 			select {
 			case result := <-results:
+				received = true
 				service.discardObjectOffers(peer, result.Offers)
 			case <-peer.done:
 			}
@@ -519,6 +616,7 @@ func (service *nodeScanService) control(ctx context.Context, peer *mosiPeer, met
 	case <-peer.done:
 		return fmt.Errorf("Cluster network error")
 	case result := <-results:
+		received = true
 		completed = true
 		if result.Panic != nil {
 			service.discardObjectOffers(peer, result.Offers)

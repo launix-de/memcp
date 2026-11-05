@@ -24,9 +24,12 @@ import "github.com/google/uuid"
 import "github.com/launix-de/memcp/scm"
 
 const mosiPacketBytes = 64 * 1024
+const mosiMaxBatchMessages = 64
+const mosiBatchRecordBytes = 8 * 1024
+const mosiBatchBytes = 64 * 1024
 
 const mosiHTTPPath = "/cluster"
-const mosiSubprotocol = "memcp.mosi.v3"
+const mosiSubprotocol = "memcp.mosi.v4"
 const mosiMaxMessageBytes = 256 * 1024
 const maxNodeRecordBytes = 32 * 1024 * 1024
 
@@ -34,7 +37,7 @@ const maxNodeRecordBytes = 32 * 1024 * 1024
 // Its body is the endpoint payload. No JSON envelope or embedded field names
 // surround ordinary handle deliveries. Raw column chunks remain raw bytes.
 func encodeMosiMessage(m mosiMessage) ([]byte, error) {
-	b := append(make([]byte, 0, 256), "MOSI\x03"...)
+	b := append(make([]byte, 0, 256), "MOSI\x04"...)
 	switch {
 	case m.Packet != nil:
 		packet := *m.Packet
@@ -79,17 +82,24 @@ func encodeMosiMessage(m mosiMessage) ([]byte, error) {
 	return b, nil
 }
 func decodeMosiMessage(frame []byte) (m mosiMessage, err error) {
+	if len(frame) < 6 || len(frame) > mosiMaxMessageBytes || string(frame[:5]) != "MOSI\x04" {
+		return m, fmt.Errorf("invalid MOSI message version or size")
+	}
+	return decodeMosiBody(frame[5:])
+}
+
+func decodeMosiBody(body []byte) (m mosiMessage, err error) {
 	defer func() {
 		if failure := recover(); failure != nil {
 			m = mosiMessage{}
 			err = fmt.Errorf("invalid MOSI frame: %v", failure)
 		}
 	}()
-	if len(frame) < 6 || len(frame) > mosiMaxMessageBytes || string(frame[:5]) != "MOSI\x03" {
-		return m, fmt.Errorf("invalid MOSI message version or size")
+	if len(body) == 0 {
+		return m, fmt.Errorf("empty MOSI record")
 	}
-	r := nodeReader{frame[6:]}
-	switch frame[5] {
+	r := nodeReader{body[1:]}
+	switch body[0] {
 	case 0:
 		m.Slot = r.uint()
 		if m.Slot == 0 {
@@ -131,6 +141,21 @@ func decodeMosiMessage(frame []byte) (m mosiMessage, err error) {
 			}
 			m.Packet.Payload = r.data
 		}
+	case 4:
+		for len(r.data) > 0 {
+			if len(m.frames) >= mosiMaxBatchMessages {
+				return m, fmt.Errorf("excess coalesced records")
+			}
+			record := r.blob()
+			if len(record) == 0 || record[0] == 4 {
+				return m, fmt.Errorf("empty or nested coalesced record")
+			}
+			m.frames = append(m.frames, record)
+		}
+		if len(m.frames) < 2 {
+			return m, fmt.Errorf("coalesced frame needs multiple records")
+		}
+
 	default:
 		return m, fmt.Errorf("invalid recipient kind")
 	}
@@ -691,6 +716,31 @@ func decodeMosiChunk(packet mosiPacket) ([]byte, error) {
 	}
 	if len(data) > mosiPacketBytes {
 		return nil, fmt.Errorf("oversized replication payload")
+	}
+	return data, nil
+}
+
+// Coalesce already queued records without a timer or another acknowledgement.
+// Each record remains recipient + payload; only WebSocket/syscall overhead is
+// shared. The receiver preserves publication order before dispatching work.
+func encodeMosiBatch(messages []mosiMessage) ([]byte, error) {
+	if len(messages) < 2 || len(messages) > mosiMaxBatchMessages {
+		return nil, fmt.Errorf("invalid coalesced message count")
+	}
+	size := 6
+	for _, m := range messages {
+		size += len(m.encoded) + 10
+	}
+	data := append(make([]byte, 0, min(size, mosiMaxMessageBytes)), "MOSI\x04"...)
+	data = append(data, 4)
+	for _, m := range messages {
+		if len(m.encoded) < 6 || string(m.encoded[:5]) != "MOSI\x04" || m.encoded[5] == 4 {
+			return nil, fmt.Errorf("invalid coalesced record")
+		}
+		data = appendNodeBlob(data, m.encoded[5:])
+	}
+	if len(data) > mosiMaxMessageBytes {
+		return nil, scm.ErrClusterRequestTooLarge
 	}
 	return data, nil
 }

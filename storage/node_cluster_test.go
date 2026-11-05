@@ -434,7 +434,7 @@ func TestClusterDiscoveryIgnoresUnavailableNonOwner(t *testing.T) {
 					if scenario == "restart-with-missing-peer" {
 						answer.Owner = cluster.self.ID
 					}
-					if value, ok := cluster.service.returns.Load(request.Return); ok {
+					if value, ok := cluster.service.handles.Load(controlReturnSlot(request.Return)); ok {
 						deliverTestCompletion(t, value, scanCompletion{Data: mustNodeMetadata(answer)})
 					}
 				case <-ctx.Done():
@@ -711,7 +711,7 @@ func TestClusterShardLocationQueriesOnlySchemaOwner(t *testing.T) {
 	if err := unmarshalNode(message.Data, &request); err != nil || request.Method != "cluster.location" {
 		t.Fatal("per-shard discovery did not use schema owner", request, err)
 	}
-	route, _ := service.returns.Load(request.Return)
+	route, _ := service.handles.Load(controlReturnSlot(request.Return))
 	deliverTestCompletion(t, route, scanCompletion{Data: mustNodeMetadata(replicaRecord{Resource: resource, Owner: "schema-owner", Epoch: 3})})
 	if owner := <-finished; owner != "schema-owner" {
 		t.Fatal(owner)
@@ -758,7 +758,7 @@ func TestClusterSchemaLocationTransferUsesBoundedBatches(t *testing.T) {
 					t.Error("schema directory copied shard reader/operation ownership")
 				}
 			}
-			route, _ := service.returns.Load(request.Return)
+			route, _ := service.handles.Load(controlReturnSlot(request.Return))
 			deliverTestCompletion(t, route, scanCompletion{})
 		}
 		counts <- batches
@@ -843,7 +843,7 @@ func TestClusterSchemaRecoveryRestoresBoundedRoutesWithoutPermissions(t *testing
 			if len(page.Entries) != count {
 				t.Fatal("unbounded recovery batch", len(page.Entries))
 			}
-			route, _ := service.returns.Load(request.Return)
+			route, _ := service.handles.Load(controlReturnSlot(request.Return))
 			deliverTestCompletion(t, route, scanCompletion{Data: mustNodeMetadata(page)})
 		case <-ctx.Done():
 			t.Fatal(ctx.Err())
@@ -1037,7 +1037,7 @@ func TestClusterShardRestartRecoveryUsesLiveReports(t *testing.T) {
 				if cell.ownstate.Initialized() {
 					t.Fatal("schema hint granted authority before live recovery")
 				}
-				route, _ := service.returns.Load(request.Return)
+				route, _ := service.handles.Load(controlReturnSlot(request.Return))
 				deliverTestCompletion(t, route, scanCompletion{Data: mustNodeMetadata(replicaRecord{Resource: resource, Owner: "local", State: "S", Epoch: 3})})
 			}
 			if err := <-finished; err != nil {
@@ -1191,7 +1191,7 @@ func TestClusterDiscoveryFollowsOwnerEpochAcrossReplies(t *testing.T) {
 							return
 						}
 						answer := replicaRecord{Resource: resource, State: "M", Owner: member.ID, Epoch: epoch}
-						if value, ok := cluster.service.returns.Load(request.Return); ok {
+						if value, ok := cluster.service.handles.Load(controlReturnSlot(request.Return)); ok {
 							deliverTestCompletion(t, value, scanCompletion{Data: mustNodeMetadata(answer)})
 						}
 					case <-ctx.Done():

@@ -14,10 +14,7 @@ import "github.com/launix-de/memcp/scm"
 
 func deliverTestCompletion(t *testing.T, entry any, result scanCompletion) {
 	t.Helper()
-	_, err := entry.(*receiverRoute).receiver.HandleClusterRequest(context.Background(), scm.ClusterRequest{Method: "receive", Arguments: []scm.Scmer{scm.NewAny(result)}})
-	if err != nil {
-		t.Error(err)
-	}
+	entry.(*handleSlot).handler.Handle(scm.NewString(string(mustNodeMetadata(result))))
 }
 func receiveTestValue(receiver *clusterReceiver, ctx context.Context, value int64) error {
 	_, err := receiver.HandleClusterRequest(ctx, scm.ClusterRequest{Method: "receive", Arguments: []scm.Scmer{scm.NewInt(value)}})
@@ -442,7 +439,7 @@ func TestClusterReceiverImportedCloseCancelsPendingReply(t *testing.T) {
 	if err := <-delivered; err != context.Canceled {
 		t.Fatal("blocked send lost cancellation", err)
 	}
-	service.returns.Range(func(key, _ any) bool {
+	service.handles.Range(func(key, _ any) bool {
 		t.Error("cancelled send retained collector", key)
 		return true
 	})
@@ -562,7 +559,7 @@ func TestClusterReceiverRemoteDisconnectJoinsCallback(t *testing.T) {
 		t.Fatal("disconnect did not cancel remote callback state")
 	}
 	receiver.Close()
-	client.returns.Range(func(key, _ any) bool {
+	client.handles.Range(func(key, _ any) bool {
 		t.Error("disconnect retained collector", key)
 		return true
 	})

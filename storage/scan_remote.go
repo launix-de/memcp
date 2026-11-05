@@ -18,7 +18,7 @@ import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/memcp/storage/mosi"
 
 // Version 16 uses binary node metadata and raw Scheme reconstruction text.
-const scanWireVersion = 16
+const scanWireVersion = 17
 
 type remoteScanShard struct {
 	Schema   uint64       `json:"schema"`
@@ -455,7 +455,12 @@ func (origin *peerScanExecutor) ExecuteShardScan(resource mosiResource, invocati
 		}
 	}
 	var offers []scm.ClusterReference
-	defer func() { executor.peer.scanService.cancelObjectOffers(executor.peer, offers) }()
+	submitted := false
+	defer func() {
+		if !submitted {
+			executor.peer.scanService.cancelObjectOffers(executor.peer, offers)
+		}
+	}()
 	bindings = bindings.WithExport(func(object scm.ClusterObject, view scm.Scmer) (scm.ClusterReference, error) {
 		ref, err := executor.peer.scanService.exportObject(executor.peer, object, view)
 		if err == nil {
@@ -524,7 +529,8 @@ func (origin *peerScanExecutor) ExecuteShardScan(resource mosiResource, invocati
 	if resource != task.Shard.Resource {
 		panic("remote scan resource mismatch")
 	}
-	response := executor.dispatch(task)
+	submitted = true
+	response := executor.dispatch(task, offers...)
 	if response.Version != scanWireVersion || response.Shard != task.Shard {
 		panic("mismatched remote scan response")
 	}
@@ -604,6 +610,9 @@ func bindProcedureScanContext(value, queryContext scm.Scmer) scm.Scmer {
 			if label == "tx" || label == "transaction" {
 				arg := items[1].WithoutSourceInfo()
 				rebound := arg.IsSlice() && len(arg.Slice()) > 0 && storageProcedureSymbol(arg.Slice()[0], "node_query_context")
+				if _, native := arg.Any().(*TxContext); native {
+					rebound = true
+				}
 				if arg.IsNil() || storageProcedureSymbol(arg, "nil") || rebound {
 					if result == nil {
 						result = append([]scm.Scmer(nil), items...)
@@ -681,8 +690,8 @@ func (s *scanRPCSession) beginInvocation(ctx context.Context, transaction *scm.C
 
 	s.service.executions.Store(id, tx)
 
-	binding := scm.NewSlice([]scm.Scmer{scm.NewSymbol("node_query_context"), scm.NewString(id)})
-	decode := scm.ProcedureDecode{ResolveHandle: s.service.handleResolver(ctx, s.peer, scm.NewAny(tx)), Prepare: prepareScanProcedure(binding), Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) {
+	binding := scm.NewAny(tx)
+	decode := scm.ProcedureDecode{Cache: s.service.cachedProcedure, ResolveHandle: s.service.handleResolver(ctx, s.peer, scm.NewAny(tx)), Prepare: prepareScanProcedure(binding), Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) {
 		value, err := s.service.importObject(ctx, s.peer, ref)
 		if err != nil {
 			return scm.NewNil(), err
@@ -698,4 +707,9 @@ func (s *scanRPCSession) beginInvocation(ctx context.Context, transaction *scm.C
 		}
 		tx.endQuery(seq)
 	}}, nil
+}
+
+func (service *nodeScanService) cachedProcedure(key string, create func() scm.Scmer) scm.Scmer {
+	service.procedureCache.Do(func() { service.procedures = NewCacheMap() })
+	return scm.Apply(service.procedures, scm.NewString(key), scm.NewNil(), scm.NewFunc(func(...scm.Scmer) scm.Scmer { return create() }))
 }

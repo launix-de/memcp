@@ -627,7 +627,7 @@ func TestRemoteScanReturnChannelDeliversResultsAndPanics(t *testing.T) {
 		}()
 		executor.dispatch(task)
 	}()
-	service.returns.Range(func(key, value any) bool {
+	service.handles.Range(func(key, value any) bool {
 		t.Errorf("completed return channel retained: %v", key)
 		return true
 	})
@@ -1212,11 +1212,7 @@ func TestRemoteScanReconnectRejectsOldOperationIdentity(t *testing.T) {
 	if first.operationPrefix == "" {
 		t.Fatal("query connection lacks its authenticated binding")
 	}
-	operation, err := uuid.NewV7()
-	if err != nil {
-		t.Fatal(err)
-	}
-	oldID := first.operationPrefix + "/" + operation.String()
+	oldID := (&scanRPCSession{peer: first}).operationID(37)
 	first.close()
 	first.wait()
 	next, _, err := client.connect(context.Background(), endpoint)
@@ -1294,7 +1290,7 @@ func TestHandleWireContainsOnlySlotAndPayload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(frame, append([]byte("MOSI\x03\x00\x13"), payload...)) {
+	if !bytes.Equal(frame, append([]byte("MOSI\x04\x00\x13"), payload...)) {
 		t.Fatalf("handle frame contains more than recipient and payload: %q", frame)
 	}
 	decoded, err := decodeMosiMessage(frame)
@@ -1562,5 +1558,19 @@ func TestClosureRelayUsesPeerRelativeOneShotSlots(t *testing.T) {
 			t.Fatalf("relay retained %d slots after completed calls", count)
 		}
 		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestRemoteControlHandlesCrossReplayWindow(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "t_remote_control_replay", 1)
+	peer, client, _ := setupRemoteScanConnection(t)
+	client.nextHandle.Store(9800)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	for index := 0; index < 1100; index++ {
+		var parts remoteScanDescription
+		if err := client.control(ctx, peer, "scan.describe", remoteScanDescribe{scanWireVersion, tbl.schema.Name, tbl.Name}, &parts, true); err != nil {
+			t.Fatalf("control %d after handle boundary/replay pruning: %v", index, err)
+		}
 	}
 }

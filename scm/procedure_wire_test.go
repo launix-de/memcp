@@ -18,6 +18,56 @@ import "context"
 import "strings"
 import "testing"
 import "encoding/json"
+import "runtime"
+import "weak"
+
+func TestProcedureFactoryKeepsInvocationCapturesPrivate(t *testing.T) {
+	if !jitEnabled {
+		t.Skip("requires native factory compilation")
+	}
+	entries := make(map[string]Scmer)
+	compilations := 0
+	cache := func(key string, create func() Scmer) Scmer {
+		if value, exists := entries[key]; exists {
+			return value
+		}
+		compilations++
+		value := create()
+		entries[key] = value
+		return value
+	}
+	var callbacks []Scmer
+	for index := 0; index < 64; index++ {
+		offset := int64(index * 100)
+		callback := NewFunc(func(args ...Scmer) Scmer { return NewInt(offset + args[0].Int()) })
+		expression := Read(t.Name(), `(lambda (x) (list (callback x) ((lambda (y) (callback y)) (+ x 1)) '("literal" 7)))`, false)
+		// Stand in for an invocation-local reconstructed native callback.
+		var bind func(Scmer) Scmer
+		bind = func(value Scmer) Scmer {
+			if value.IsSymbol() && value.SymbolEquals("callback") {
+				return callback
+			}
+			if !value.IsSlice() {
+				return value
+			}
+			items := append([]Scmer(nil), value.Slice()...)
+			for i := range items {
+				items[i] = bind(items[i])
+			}
+			return NewSlice(items)
+		}
+		callbacks = append(callbacks, compileProcedureFactory(bind(expression), cache))
+	}
+	if compilations != 1 {
+		t.Fatalf("compiled %d factories for identical code", compilations)
+	}
+	for index, callback := range callbacks {
+		expected := NewSlice([]Scmer{NewInt(int64(index*100 + 3)), NewInt(int64(index*100 + 4)), NewSlice([]Scmer{NewString("literal"), NewInt(7)})})
+		if result := Apply(callback, NewInt(3)); !Equal(result, expected) {
+			t.Fatalf("invocation %d: %s, expected %s", index, String(result), String(expected))
+		}
+	}
+}
 
 func TestClusterCallbackOwnerCancellationAndInvocationBinding(t *testing.T) {
 	ownerContext, cancelOwner := context.WithCancel(context.Background())
@@ -919,4 +969,42 @@ func TestForwardedClosurePublishesAndJoinsOneShotReply(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("forwarder did not join completed reply")
 	}
+}
+
+type procedureFactoryMarker struct {
+	value   int
+	padding [128]byte
+}
+
+//go:noinline
+func collectableProcedureFactoryCapture(t *testing.T, cache func(string, func() Scmer) Scmer) weak.Pointer[procedureFactoryMarker] {
+	marker := &procedureFactoryMarker{value: 17}
+	expression := NewSlice([]Scmer{NewSymbol("lambda"), NewSlice(nil), NewAny(marker)})
+	bound := compileProcedureFactory(expression, cache)
+	if Apply(bound).Any().(*procedureFactoryMarker).value != 17 {
+		t.Fatal("factory changed its capture")
+	}
+	return weak.Make(marker)
+}
+
+func TestProcedureFactoryCacheDoesNotRetainInvocation(t *testing.T) {
+	entries := make(map[string]Scmer)
+	cache := func(key string, create func() Scmer) Scmer {
+		if value, ok := entries[key]; ok {
+			return value
+		}
+		value := create()
+		entries[key] = value
+		return value
+	}
+	marker := collectableProcedureFactoryCapture(t, cache)
+	deadline := time.Now().Add(3 * time.Second)
+	for marker.Value() != nil && time.Now().Before(deadline) {
+		runtime.GC()
+		time.Sleep(time.Millisecond)
+	}
+	if marker.Value() != nil {
+		t.Fatal("pure factory cache retained a completed invocation")
+	}
+	runtime.KeepAlive(entries)
 }
