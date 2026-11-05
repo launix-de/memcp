@@ -3814,7 +3814,7 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 		tx = currentTxArgs[0]
 	}
 	replicationCheckWriteTable(t, tx)
-	if count, delegated := t.forwardInsert(columns, values, onCollisionCols, onCollision, mergeNull, onFirstInsertId, tx); delegated {
+	if count, handled := t.placeInsert(columns, values, onCollisionCols, onCollision, mergeNull, onFirstInsertId, tx); handled {
 		return count
 	}
 	return t.insertLocal(columns, values, onCollisionCols, onCollision, mergeNull, onFirstInsertId, tx)

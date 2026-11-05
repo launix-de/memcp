@@ -5,6 +5,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 package storage
 
 import "fmt"
+import "time"
 import "bytes"
 import "context"
 import "sync/atomic"
@@ -177,17 +178,17 @@ type remoteInsertResult struct {
 // its first native input. This is neither the contact node nor a schema leader:
 // placement follows the existing shard ownership. Partition-local constraints
 // can instead choose the first destination of this batch.
-func (t *table) insertPeer(columns []string, rows [][]scm.Scmer) *mosiPeer {
+func (t *table) insertPeer(columns []string, rows [][]scm.Scmer) (*storageShard, *mosiPeer) {
 	if !sharedClusterSource(t) || len(t.Unique) == 0 || len(rows) == 0 {
-		return nil
+		return nil, nil
 	}
 	cluster := activeNodeCluster()
 	if cluster == nil {
-		return nil
+		return nil, nil
 	}
 	topology := t.activeTopology()
 	if len(topology.shards) == 0 {
-		return nil
+		return nil, nil
 	}
 	index := 0
 	localKeys := true
@@ -214,7 +215,7 @@ func (t *table) insertPeer(columns []string, rows [][]scm.Scmer) *mosiPeer {
 	shard := topology.shards[index]
 	cell := cluster.manager.shardCell(shard).resolved()
 	if cell.ownstate.Phase() == mosi.M {
-		return nil
+		return nil, nil
 	}
 	// Owner hints are already known MOSI state; never query a peer for them.
 	r := cluster.manager
@@ -222,13 +223,13 @@ func (t *table) insertPeer(columns []string, rows [][]scm.Scmer) *mosiPeer {
 	owner := r.directory.Records[r.resourceKey(*cell.resource.Load())].Owner
 	r.mu.Unlock()
 	if owner == "" || owner == cluster.self.ID {
-		return nil
+		return nil, nil
 	}
-	return cluster.peer(owner)
+	return shard, cluster.peer(owner)
 }
 
-func (t *table) forwardInsert(columns []string, rows [][]scm.Scmer, collisionCols []string, collision scm.Scmer, mergeNull bool, firstID func(int64), tx *TxContext) (int, bool) {
-	peer := t.insertPeer(columns, rows)
+func (t *table) placeInsert(columns []string, rows [][]scm.Scmer, collisionCols []string, collision scm.Scmer, mergeNull bool, firstID func(int64), tx *TxContext) (int, bool) {
+	shard, peer := t.insertPeer(columns, rows)
 	if peer == nil {
 		// Cold admission is decided by the native access boundary. A warm
 		// local writer needs no cold payload and must not move just because
@@ -236,13 +237,24 @@ func (t *table) forwardInsert(columns []string, rows [][]scm.Scmer, collisionCol
 		return 0, false
 	}
 	cluster := activeNodeCluster()
-	// The current owner is the cheapest candidate. A capacity refusal occurs
-	// before invocation and effects, so only that explicit refusal permits
-	// choosing local acquisition or another peer. Execution errors never retry.
+	feedback := cluster.insertPlacementSlot(shard)
+	prior := feedback.Load()
+	started := time.Now()
+	if t.shouldClaimInsert(shard, peer.objectPeer.ID, prior, started) && claimInsertShard(shard, tx) {
+		// Native ownership is acquired before any row effects. Once execution
+		// starts, errors propagate; they never replay a partially applied batch.
+		count := t.insertLocal(columns, rows, collisionCols, collision, mergeNull, firstID, tx)
+		recordInsertClaim(feedback, shard, peer.objectPeer.ID, prior, time.Since(started))
+		return count, true
+	}
+	// Only a capacity refusal before invocation and effects permits choosing
+	// another peer. Execution errors never retry.
 	candidates := (&clusterScanExecutor{cluster: cluster, expected: remoteScanShard{Resource: mosiResource{Database: t.schema.Name, Table: t.Name}}}).candidates()
 	if peer != nil {
+		started := time.Now()
 		response := t.sendInsert(peer, columns, rows, collisionCols, collision, mergeNull, tx)
 		if !response.Rejected {
+			recordInsertDelegation(feedback, shard, peer.objectPeer.ID, time.Now(), time.Since(started))
 			if firstID != nil && response.FirstID != nil {
 				firstID(*response.FirstID)
 			}

@@ -94,6 +94,28 @@ test_cases:
     warmup: false
     threshold_ms: 5000
 
+  - name: "Perf: Repeated UNIQUE collision updates"
+    # Fixed repetitions include the first lookup and every deleted version.
+    # Check every callback input and publication, not just the affected count.
+    performance_rows: 2000
+    setup:
+      - sql: "DROP TABLE IF EXISTS perf_collision_updates"
+      - sql: "CREATE TABLE perf_collision_updates (id INT PRIMARY KEY, val INT) ENGINE=memory"
+      - sql: "INSERT INTO perf_collision_updates(id,val) VALUES(7,0)"
+    scm: |
+      (begin
+        (define target (table "{database}" false "perf_collision_updates" false))
+        (reduce (produceN 2000) (lambda (count i)
+          (+ count (insert target '("id" "val") (list (list 7 0)) '("val" "$update")
+            (lambda (old update) (begin
+              (if (equal? old i) true (error "collision lost its previous update"))
+              (if (update (list "val" (+ old 1))) 1 (error "collision update was not applied"))))))) 0))
+    warmup: 0
+    timing_samples: 1
+    threshold_ms: 5000
+    expect:
+      data: [2000]
+
   - name: "Perf: Concurrent single-row UNIQUE INSERT"
     # One larger invocation amortizes incidental pauses without repeating the
     # same primary keys. Preserve four writers, SAFE commits and exact counts.
@@ -119,6 +141,7 @@ test_cases:
       data: [[true, true, true, true]]
 
 cleanup:
+  - sql: "DROP TABLE IF EXISTS perf_collision_updates"
   - sql: "DROP TABLE IF EXISTS perf_concurrent_insert"
   - sql: "DROP TABLE IF EXISTS perf_unique"
   - sql: "DROP TABLE IF EXISTS perf_source"

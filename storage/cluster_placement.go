@@ -13,7 +13,10 @@ package storage
 import "time"
 import "fmt"
 import "context"
+import "runtime"
 import "hash/fnv"
+import "sync/atomic"
+import "github.com/google/uuid"
 
 type clusterCapacityRejection struct{}
 
@@ -198,4 +201,109 @@ func (cluster *nodeCluster) shardRAMUnavailable(shard, origin *storageShard) sha
 	cluster.capacity.Add(1)
 	expected := remoteScanShard{Schema: shard.t.filterSchemaFingerprint(), Resource: mosiResource{Database: shard.t.schema.Name, Table: shard.t.Name, Shard: shard.uuid.String()}}
 	return shardReadDelegation{&shardScanTarget{resource: expected.Resource, origin: origin, executor: &clusterScanExecutor{cluster: cluster, expected: expected}}}
+}
+
+// Feedback is bounded per node, allocated only for genuinely remote INSERTs.
+// Colliding slots lose a prediction, never authority: native MOSI admission and
+// UNIQUE reservations remain the sole synchronization mechanism. Local M never
+// touches this cache. GOMAXPROCS observes the process's cgroup CPU allowance.
+type insertPlacementFeedback struct {
+	slots []atomic.Pointer[insertPlacementSample]
+}
+
+type insertPlacementSample struct {
+	shard  uuid.UUID
+	owner  string
+	last   time.Time
+	rent   time.Duration
+	remote time.Duration
+	claim  time.Duration
+}
+
+func (cluster *nodeCluster) insertPlacementSlot(shard *storageShard) *atomic.Pointer[insertPlacementSample] {
+	feedback := cluster.insertPlacement.Load()
+	if feedback == nil {
+		candidate := &insertPlacementFeedback{slots: make([]atomic.Pointer[insertPlacementSample], 4*runtime.GOMAXPROCS(0))}
+		cluster.insertPlacement.CompareAndSwap(nil, candidate)
+		feedback = cluster.insertPlacement.Load()
+	}
+	var hash uint64 = 14695981039346656037
+	for _, b := range shard.uuid {
+		hash = (hash ^ uint64(b)) * 1099511628211
+	}
+	return &feedback.slots[hash%uint64(len(feedback.slots))]
+}
+
+// Rent-or-buy: the first access delegates. Repeated delegation pays for a
+// transfer once accumulated remote work exceeds its estimated startup cost.
+// The cold prior covers two control exchanges and decoding/index construction
+// (500ns per estimated row); a completed claim replaces it with measured time.
+// This is advisory costing, not a deadline or a permission to steal ownership.
+func (t *table) shouldClaimInsert(shard *storageShard, owner string, sample *insertPlacementSample, now time.Time) bool {
+	if sample == nil || sample.shard != shard.uuid || sample.owner != owner {
+		return false
+	}
+	capacity := GlobalCache.shardCapacity.Load()
+	if capacity == nil || !capacity.Allowed {
+		return false
+	}
+	shards := max(1, len(t.activeTopology().shards))
+	rows := uint64(t.CountEstimate()) / uint64(shards)
+	statistics := t.statistics()
+	bytes := uint64(max(int64(0), statistics.sizeBytes)) / uint64(shards)
+	if bytes == 0 && rows == 0 {
+		return false // unknown size does not justify speculative payload admission
+	}
+	if bytes == 0 {
+		bytes = rows * uint64(max(1, len(t.columnDeclarations()))) * 32
+	}
+	// Avoid speculative acquisition of a generation comparable to the entire
+	// node budget. The actual load still passes native admission and may refuse.
+	if bytes > uint64(max(int64(0), capacity.Budget/4)) {
+		return false
+	}
+	buy := sample.claim
+	if buy == 0 {
+		buy = 2*sample.remote + time.Duration(rows)*500*time.Nanosecond
+	}
+	return now.Sub(sample.last) <= max(time.Second, 32*buy) && sample.rent >= buy
+}
+
+func recordInsertDelegation(slot *atomic.Pointer[insertPlacementSample], shard *storageShard, owner string, now time.Time, elapsed time.Duration) {
+	for {
+		previous := slot.Load()
+		next := &insertPlacementSample{shard: shard.uuid, owner: owner, last: now, rent: elapsed, remote: elapsed}
+		if previous != nil && previous.shard == shard.uuid && previous.owner == owner {
+			next.claim = previous.claim
+			next.remote = (previous.remote + elapsed) / 2
+			if now.Sub(previous.last) <= max(time.Second, 32*max(previous.claim, previous.remote)) {
+				next.rent += previous.rent
+			}
+		}
+		if slot.CompareAndSwap(previous, next) {
+			return
+		}
+	}
+}
+
+func recordInsertClaim(slot *atomic.Pointer[insertPlacementSample], shard *storageShard, owner string, previous *insertPlacementSample, elapsed time.Duration) {
+	next := &insertPlacementSample{shard: shard.uuid, owner: owner, last: time.Now(), claim: elapsed}
+	// A competing statement may have published fresher feedback; it is only
+	// a prediction and must never make the storage operation wait.
+	slot.CompareAndSwap(previous, next)
+}
+
+// Only native pre-effect capacity rejection can choose another placement.
+// Acquisition, cancellation and execution failures keep their normal semantics.
+func claimInsertShard(shard *storageShard, tx *TxContext) (acquired bool) {
+	defer func() {
+		if failure := recover(); failure != nil {
+			if _, capacity := failure.(shardReadDelegation); !capacity {
+				panic(failure)
+			}
+		}
+	}()
+	lease := shard.GetWrite(tx)
+	lease.Release()
+	return true
 }

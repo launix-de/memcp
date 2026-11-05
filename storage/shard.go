@@ -3802,6 +3802,16 @@ func (t *storageShard) GetRecordidForUnique(access scanAccess, currentTx *TxCont
 	// Small buffer for existence check: stop early after first match
 	t.iterateIndex(currentTx, access, len(t.deltaRows()), scratch.ids[:], 1, nil, func(batch []uint32) bool {
 		for _, idx := range batch {
+			visible := !t.deletions.Get(uint(idx))
+			if acidMode {
+				visible = currentTx.IsVisible(t, idx)
+			}
+			reserved := !visible && checkReservations && t.rollbackProtected.Get(uint(idx)) && !currentTx.releasedUniqueReservation(t, idx)
+			// Historical versions without an active reservation cannot collide. Avoid
+			// decoding their keys and repeating type/collation conversion on them.
+			if !visible && !reserved {
+				continue
+			}
 			// Verify all columns match (iterateIndex may return superset for range boundaries)
 			matched := true
 			if idx < mainCount {
@@ -3825,23 +3835,15 @@ func (t *storageShard) GetRecordidForUnique(access scanAccess, currentTx *TxCont
 			if !matched {
 				continue
 			}
-			// Check visibility
-			if acidMode {
-				if currentTx.IsVisible(t, idx) {
-					result = idx
-					present = true
-					return false
-				}
-			} else if !t.deletions.Get(uint(idx)) {
-				result = idx
-				present = true
+			if visible {
+				result, present = idx, true
 				return false
 			}
 			// Transaction-owned tombstones retain their keys until commit or
 			// rollback. Ordinary reads still hide them; DML must not admit a
 			// competing insert or let a collision callback modify another
 			// transaction's uncommitted row.
-			if checkReservations && t.rollbackProtected.Get(uint(idx)) && !currentTx.releasedUniqueReservation(t, idx) {
+			if reserved {
 				panic(sqldb.NewSQLError1(1213, "40001", "Concurrent UNIQUE reservation in table %s; retry transaction", t.t.Name))
 			}
 		}

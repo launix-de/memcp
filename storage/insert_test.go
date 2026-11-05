@@ -1045,3 +1045,31 @@ func TestUniqueProbeDomainRetainsOnlyDistinctShards(t *testing.T) {
 		t.Fatalf("UNIQUE domain allocated %d bytes for %d distinct shards", allocated, shardCount)
 	}
 }
+
+func TestUniqueCoercingCollationHashPreservesEquality(t *testing.T) {
+	tbl := setupScanParallelTestTable(t, "t_unique_coercing_collation_hash")
+	tbl.CreateColumn("value", "ANY", nil, nil)
+	declaration := tbl.uniqueColumnDeclaration("value")
+	declaration.Collation = "utf8mb4_general_ci"
+	values := []scm.Scmer{scm.NewNil(), scm.NewBool(false), scm.NewBool(true), scm.NewInt(0), scm.NewInt(3), scm.NewInt(1000), scm.NewInt(9007199254740993), scm.NewFloat(3), scm.NewFloat(3.5), scm.NewDate(1700000000)}
+	for _, text := range []string{"", "0", "3", "03", "3.5", "3X", "3x", "1E3", "1e3", "9007199254740993", "K", "K", "Σ", "σ", "ς", "I", "i", "İ", "ı", "sail", "ſail", "false", "NaN", "nan", "Inf", "inf"} {
+		values = append(values, scm.NewString(text), scm.NewSymbol(text))
+	}
+	for _, left := range values {
+		for _, right := range values {
+			if !uniqueColumnValuesEqual(declaration, left, right) && !uniqueColumnValuesEqual(declaration, right, left) {
+				continue
+			}
+			a, ap := tbl.uniqueColumnHash("value", left)
+			b, bp := tbl.uniqueColumnHash("value", right)
+			if ap && bp && a != b {
+				t.Errorf("equal coercing values %s / %s use disjoint guards", scm.String(left), scm.String(right))
+			}
+		}
+	}
+	for _, value := range []scm.Scmer{scm.NewInt(3), scm.NewString("K")} {
+		if _, precise := tbl.uniqueColumnHash("value", value); !precise {
+			t.Error("ordinary collated cache keys unnecessarily reserve every stripe")
+		}
+	}
+}

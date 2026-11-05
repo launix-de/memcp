@@ -1042,15 +1042,18 @@ func TestClusterInsertSelectsUniqueDomainOwnerWithoutClaiming(t *testing.T) {
 	}
 	tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}}
 	columns, rows := []string{"id"}, [][]scm.Scmer{{scm.NewInt(11)}}
-	if tbl.insertPeer(columns, rows) != peer {
+	if _, selected := tbl.insertPeer(columns, rows); selected != peer {
 		t.Fatal("partition-local INSERT did not choose destination owner")
 	}
 	cluster.manager.shardCell(right).ownstate.Publish(mosi.M)
-	if tbl.insertPeer(columns, rows) != nil {
+	if _, selected := tbl.insertPeer(columns, rows); selected != nil {
 		t.Fatal("already-local M was unnecessarily delegated")
 	}
+	if _, handled := tbl.placeInsert(columns, rows, nil, scm.NewNil(), false, nil, nil); handled || cluster.insertPlacement.Load() != nil {
+		t.Fatal("local M touched remote placement feedback")
+	}
 	tbl.Unique = append(tbl.Unique, uniqueKey{Id: "global", Cols: []string{"writer", "value"}})
-	if tbl.insertPeer(columns, rows) != peer {
+	if _, selected := tbl.insertPeer(columns, rows); selected != peer {
 		t.Fatal("global UNIQUE ignored the common input owner")
 	}
 	// Unpartitioned UNIQUE checks have the same shared input domain. Forward
@@ -1058,7 +1061,7 @@ func TestClusterInsertSelectsUniqueDomainOwnerWithoutClaiming(t *testing.T) {
 	tbl.ShardMode = ShardModeFree
 	tbl.Shards = []*storageShard{left, right}
 	tbl.publishTopologyLocked()
-	if tbl.insertPeer(columns, rows) != peer {
+	if _, selected := tbl.insertPeer(columns, rows); selected != peer {
 		t.Fatal("free-shard UNIQUE ignored the common input owner")
 	}
 	select {
@@ -1435,5 +1438,86 @@ func TestClusterUniqueReservationDeduplicatesSuccessorAliases(t *testing.T) {
 	}
 	if cell.ownstate.Writing() {
 		t.Fatal("alias reservation retained its writer")
+	}
+}
+
+func TestClusterInsertPlacementLearnsRepeatAccess(t *testing.T) {
+	tbl := setupScanParallelTestTable(t, "t_insert_placement_feedback")
+	shard := tbl.ActiveShards()[0]
+	cluster := globalTestCluster(t, tbl.schema.Name)
+	slot := cluster.insertPlacementSlot(shard)
+	now := time.Now()
+	if tbl.shouldClaimInsert(shard, "owner", slot.Load(), now) {
+		t.Fatal("one-off access speculatively acquired remote payload")
+	}
+	for range 16 {
+		recordInsertDelegation(slot, shard, "owner", now, time.Millisecond)
+	}
+	if tbl.shouldClaimInsert(shard, "owner", slot.Load(), now) {
+		t.Fatal("unknown generation size justified a speculative payload load")
+	}
+	tbl.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(7)}}, nil, scm.NewNil(), false, nil)
+	claimed := false
+	for i := range 16 {
+		recordInsertDelegation(slot, shard, "owner", now.Add(time.Duration(i)*time.Millisecond), time.Millisecond)
+		if tbl.shouldClaimInsert(shard, "owner", slot.Load(), now.Add(time.Duration(i)*time.Millisecond)) {
+			claimed = true
+			break
+		}
+	}
+	if !claimed {
+		t.Fatal("repeated remote work never paid for local ownership")
+	}
+	if tbl.shouldClaimInsert(shard, "replacement-owner", slot.Load(), now) {
+		t.Fatal("old owner feedback reused after ownership changed")
+	}
+	if tbl.shouldClaimInsert(shard, "owner", slot.Load(), now.Add(time.Hour)) {
+		t.Fatal("sporadic access reused an expired burst")
+	}
+	// A hot input can exceed this node's entire RAM. Frequency cannot override
+	// capacity; the native owner must retain its generation and execute remotely.
+	tbl.PlannerRowEstimate.value.Store(1 << 40)
+	if tbl.shouldClaimInsert(shard, "owner", slot.Load(), now) {
+		t.Fatal("frequent inserts chose a generation larger than node RAM")
+	}
+}
+
+func TestClusterLocalUniqueUpdaterCannotEscapeReservation(t *testing.T) {
+	tbl := setupScanParallelTestTable(t, "t_unique_local_escaped_updater")
+	tbl.CreateColumn("value", "INT", nil, nil)
+	tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}}
+	columns := []string{"id", "value"}
+	rows := [][]scm.Scmer{{scm.NewInt(42), scm.NewInt(0)}}
+	tbl.Insert(columns, rows, nil, scm.NewNil(), false, nil)
+	cluster := globalTestCluster(t, tbl.schema.Name)
+	mounts := sharedClusterMounts.Swap(&map[string]bool{tbl.schema.Name: true})
+	defer sharedClusterMounts.Store(mounts)
+	service := nodeScans.Swap(&nodeScanService{cluster: cluster})
+	defer nodeScans.Store(service)
+	cluster.manager.resourceCell(mosiResource{Database: tbl.schema.Name}).ownstate.Initialize(mosi.M)
+	for _, shard := range tbl.ActiveShards() {
+		cluster.declareShard(shard, true)
+	}
+	var update scm.Scmer
+	tbl.Insert(columns, rows, []string{"$update"}, scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
+		update = values[0]
+		return scm.NewBool(false)
+	}), false, nil)
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Error("escaped updater mutated after its native reservation ended")
+			}
+		}()
+		scm.Apply(update, scm.NewSlice([]scm.Scmer{scm.NewString("value"), scm.NewInt(99)}))
+	}()
+	shard := tbl.ActiveShards()[0]
+	lease := shard.GetRead(nil, false)
+	defer lease.Release()
+	id, found := shard.GetRecordidForUnique(exactScanAccess(newExactScanAccessSchema([]string{"id"}), []scm.Scmer{scm.NewInt(42)}), nil, true)
+	reader := shard.ColumnReaderTx(nil, "value", false, ReadAuto)
+	defer ReleaseColumnReader(reader)
+	if !found || reader.GetValue(id).Int() != 0 {
+		t.Fatal("expired updater changed visible data")
 	}
 }

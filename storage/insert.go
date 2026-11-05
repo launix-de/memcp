@@ -275,10 +275,13 @@ func (t *table) uniqueColumnHash(column string, value scm.Scmer) (uint64, bool) 
 			continue
 		}
 		if declaration.Typ == "" || strings.EqualFold(declaration.Typ, "any") {
-			if declaration.Collation == "" || declaration.Collation == "bin" || declaration.Collation == "binary" || declaration.Collation == "utf8" || declaration.Collation == "utf8mb4" || strings.HasSuffix(declaration.Collation, "_bin") {
-				return uniqueGuardHash(value)
+			// Fold text within the declared equality classes before the native
+			// coercion hash. Numeric prefixes still meet their numeric values;
+			// nil, booleans and opaque bridges retain the all-stripes fallback.
+			if strings.Contains(declaration.Collation, "_ci") && (value.IsString() || value.IsSymbol() || value.IsBufferString()) {
+				value = scm.NewString(scm.CaseFoldKey(scm.String(value)))
 			}
-			return 0, false // coercing ANY plus collation has no narrow general key
+			return uniqueGuardHash(value)
 		}
 		value = uniqueColumnValue(declaration, value)
 		if value.IsNil() {

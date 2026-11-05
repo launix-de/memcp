@@ -699,3 +699,15 @@ func TestCacheQueuedAccountingPreservesAdmissionAndPins(t *testing.T) {
 		t.Fatalf("released payload was not reclaimed before admission: %+v", usage)
 	}
 }
+
+func TestCachePublishesBudgetWithoutAdmissionTransition(t *testing.T) {
+	var manager CacheManager
+	manager.Init(1024, 1024, 0)
+	defer manager.Stop()
+	before := manager.shardCapacity.Load()
+	manager.SetShardRAMPercent(25)
+	after := manager.shardCapacity.Load()
+	if before == nil || after == nil || !before.Allowed || !after.Allowed || before.Budget != 512 || after.Budget != 256 {
+		t.Fatalf("cold placement did not observe the changed budget: before=%+v after=%+v", before, after)
+	}
+}
