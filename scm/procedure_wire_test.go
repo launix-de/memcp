@@ -98,6 +98,51 @@ func TestProcedureFactoryKeepsInvocationCapturesPrivate(t *testing.T) {
 	calls.Wait()
 }
 
+func TestCollationRelationReconstructsLocally(t *testing.T) {
+	for _, name := range []string{"bin", "unicode-string", "unicode-simple-fold", "utf8mb4_unicode_ci"} {
+		for _, reverse := range []bool{false, true} {
+			t.Run(fmt.Sprint(name, "/", reverse), func(t *testing.T) {
+				value := Collate(NewString(name), NewBool(reverse))
+				object, ok := ClusterObjectOf(value)
+				if !ok {
+					t.Fatal("collation has no object-owned serialization contract")
+				}
+				if _, err := object.HandleClusterRequest(context.Background(), ClusterRequest{Method: "call", Arguments: []Scmer{NewString("a"), NewString("b")}}); err == nil {
+					t.Fatal("collation exposed a remote comparison endpoint")
+				}
+				bindings := new(SerializationContext).WithExport(func(ClusterObject, Scmer) (ClusterReference, error) {
+					return ClusterReference{}, fmt.Errorf("collation attempted owner registration")
+				}).WithHandleExport(func(Handle) (Scmer, error) {
+					return NewNil(), fmt.Errorf("collation attempted remote invocation")
+				})
+				expression, err := object.Serialize(bindings)
+				if err != nil || !Equal(expression, NewSlice([]Scmer{NewSymbol("collate"), NewString(name), NewBool(reverse)})) {
+					t.Fatal("collation did not emit its local constructor", expression, err)
+				}
+				data, err := MarshalProcedure(value, bindings)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !strings.Contains(string(data), "serialized_value") || strings.Contains(string(data), "cluster_handle") || strings.Contains(string(data), "remote_closure") {
+					t.Fatal("collation was not reconstructed before invocation", string(data))
+				}
+				restored, err := UnmarshalProcedure(data)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, pair := range [][2]Scmer{
+					{NewNil(), NewString("a")}, {NewString("a"), NewString("b")},
+					{NewString("key"), NewString("Key")}, {NewString("a9"), NewString("a10")},
+				} {
+					if expected, actual := Apply(value, pair[:]...), Apply(restored, pair[:]...); !Equal(actual, expected) {
+						t.Fatal("reconstructed Less changed ordering", pair, actual, expected)
+					}
+				}
+			})
+		}
+	}
+}
+
 func TestClusterCallbackOwnerCancellationAndInvocationBinding(t *testing.T) {
 	ownerContext, cancelOwner := context.WithCancel(context.Background())
 	calls := 0

@@ -670,15 +670,10 @@ func serializeNativeFunc(b *schemeTextWriter, fn any, en *Env) {
 			return
 		}
 		if col, rev, ok := LookupCollate(f); ok {
-			b.WriteString("(collate \"")
-			b.WriteString(strings.ReplaceAll(col, "\"", "\\\""))
-			b.WriteString("\" ")
-			if rev {
-				b.WriteString("true")
-			} else {
-				b.WriteString("false")
-			}
-			b.WriteByte(')')
+			// Raw native values use the same object-owned reconstruction contract.
+			relation := &collationRelation{name: col, reverse: rev}
+			expression, _ := relation.Serialize(b.objects)
+			serializeEx(b, expression, &Globalenv, &Globalenv, nil)
 			return
 		}
 	}

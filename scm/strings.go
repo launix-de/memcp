@@ -23,6 +23,7 @@ import "sync"
 import "bytes"
 import "regexp"
 import "unsafe"
+import "context"
 import "net/url"
 import "strings"
 import "unicode"
@@ -221,6 +222,31 @@ func fnvHashString(value string) string {
 
 var collationPattern = regexp.MustCompile("^([^_]+_)?(.+?)$")
 
+type collationRelation struct {
+	name    string
+	reverse bool
+}
+
+var collationRelationType = RegisterCallableType(&TypeDescriptor{
+	Kind: "func", Params: []*TypeDescriptor{{Kind: "any"}, {Kind: "any"}},
+	Return: &TypeDescriptor{Kind: "bool"},
+})
+
+func (*collationRelation) ClusterObjectType() string { return "collation" }
+func (relation *collationRelation) Serialize(*SerializationContext) (Scmer, error) {
+	return NewSlice([]Scmer{NewSymbol("collate"), NewString(relation.name), NewBool(relation.reverse)}), nil
+}
+func (relation *collationRelation) HandleClusterRequest(_ context.Context, request ClusterRequest) (any, error) {
+	if request.Method == "view" {
+		return NewSlice([]Scmer{NewString(relation.name), NewBool(relation.reverse)}), nil
+	}
+	return NewNil(), fmt.Errorf("collation comparisons are reconstructed locally")
+}
+
+func newCollationRelation(call func(...Scmer) Scmer, name string, reverse bool) Scmer {
+	return NewClusterFunc(call, &collationRelation{name: name, reverse: reverse}, collationRelationType)
+}
+
 // Collate constructs the canonical order relation without consulting a mutable
 // Scheme environment. The builtin and engine metadata decoder share this cache.
 func Collate(a ...Scmer) Scmer {
@@ -247,7 +273,7 @@ func Collate(a ...Scmer) Scmer {
 			return keyOf(left) < keyOf(right)
 		}
 		fn := func(args ...Scmer) Scmer { return NewBool(less(args[0], args[1])) }
-		result := NewFunc(fn)
+		result := newCollationRelation(fn, collationName, reverse)
 		collateRegistry.Store(FunctionIdentity(fn), struct {
 			Collation string
 			Reverse   bool
@@ -278,7 +304,7 @@ func Collate(a ...Scmer) Scmer {
 		fn := func(args ...Scmer) Scmer {
 			return NewBool(less(args[0], args[1]))
 		}
-		result := NewFunc(fn)
+		result := newCollationRelation(fn, collationName, reverse)
 		collateRegistry.Store(FunctionIdentity(fn), struct {
 			Collation string
 			Reverse   bool
@@ -533,7 +559,7 @@ func Collate(a ...Scmer) Scmer {
 	fn := func(args ...Scmer) Scmer {
 		return NewBool(less(args[0], args[1]))
 	}
-	result := NewFunc(fn)
+	result := newCollationRelation(fn, collationName, reverse)
 	collateRegistry.Store(FunctionIdentity(fn), struct {
 		Collation string
 		Reverse   bool
