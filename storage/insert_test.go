@@ -1008,3 +1008,40 @@ func TestUniqueNativeAfterInsertCanUpdatePublishedKey(t *testing.T) {
 		t.Fatal("native INSERT returned before its AFTER trigger's update")
 	}
 }
+
+func TestUniqueProbeDomainRetainsOnlyDistinctShards(t *testing.T) {
+	const shardCount, rowCount = 128, 4096
+	tbl := &table{Name: "bounded_domain", Unique: []uniqueKey{{Id: "key", Cols: []string{"key"}}}}
+	shards := make([]*storageShard, shardCount)
+	for i := range shards {
+		shards[i] = &storageShard{t: tbl}
+		shards[i].uuid[0] = byte(i + 1)
+	}
+	topology := &tableShardTopology{mode: ShardModeFree, shards: shards}
+	rows := make([][]scm.Scmer, rowCount)
+	for i := range rows {
+		rows[i] = []scm.Scmer{scm.NewInt(int64(i))}
+	}
+	columns := []string{"key"}
+	targets := []*storageShard{shards[0], nil, shards[0]}
+	measurement := testing.Benchmark(func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			domain := tbl.uniqueProbeDomain(topology, columns, rows, false, targets)
+			if len(domain) != shardCount {
+				b.Fatalf("UNIQUE domain = %d, want %d", len(domain), shardCount)
+			}
+			for i, shard := range domain {
+				if shard != shards[i] {
+					b.Fatal("UNIQUE domain changed first-occurrence order")
+				}
+			}
+		}
+	})
+	// The old rows×shards intermediate exceeded 16 MiB for this fixture. Allow
+	// 256 KiB for the key tuples and the distinct routing set; fixture payload is
+	// allocated before measurement and the helper neither loads nor claims it.
+	t.Logf("%d rows over %d shards: %s, %d allocated bytes", rowCount, shardCount, measurement.String(), measurement.AllocedBytesPerOp())
+	if allocated := measurement.AllocedBytesPerOp(); allocated > 256*1024 {
+		t.Fatalf("UNIQUE domain allocated %d bytes for %d distinct shards", allocated, shardCount)
+	}
+}

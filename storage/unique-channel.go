@@ -5,11 +5,12 @@ SPDX-License-Identifier: GPL-3.0-or-later
 package storage
 
 import "fmt"
-import "context"
 import "sort"
 import "sync"
 import "slices"
+import "context"
 import "strings"
+import "github.com/google/uuid"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/go-mysqlstack/sqldb"
 
@@ -332,6 +333,31 @@ func (set *uniqueReservationSet) close(commit bool) {
 	}
 }
 
+// Deduplicate while building the domain. An unpartitioned batch can probe every
+// shard for every key, but its retained routing memory must grow only with the
+// number of distinct shards, never with rows multiplied by shards.
+func (t *table) uniqueProbeDomain(topology *tableShardTopology, columns []string, rows [][]scm.Scmer, mergeNull bool, targets []*storageShard) []*storageShard {
+	seen := make(map[uuid.UUID]bool)
+	var domain []*storageShard
+	add := func(shards []*storageShard) {
+		for _, shard := range shards {
+			if shard != nil && !seen[shard.uuid] {
+				seen[shard.uuid] = true
+				domain = append(domain, shard)
+			}
+		}
+	}
+	add(targets)
+	for index := t.nextUniqueConstraint(columns, 0); index < len(t.Unique); index = t.nextUniqueConstraint(columns, index+1) {
+		for _, row := range rows {
+			if key, comparable := uniqueKeyValues(columns, row, t.Unique[index], mergeNull); comparable {
+				add(t.uniqueProbeShards(topology, t.Unique[index].Cols, key))
+			}
+		}
+	}
+	return domain
+}
+
 // Reserve one channel per owner, in the same owner/shard order on every node.
 // Requests retain native worker scopes; the coordinator never imports payload.
 func (t *table) reserveUniqueDomain(columns []string, rows [][]scm.Scmer, mergeNull bool, tx *TxContext, targets []*storageShard, borrowed *uniqueWriteGuard) *uniqueReservationSet {
@@ -346,20 +372,7 @@ func (t *table) reserveUniqueDomain(columns []string, rows [][]scm.Scmer, mergeN
 		}
 	}()
 	groups := make(map[string][]*storageShard)
-	domain := append([]*storageShard(nil), targets...)
-	for index := t.nextUniqueConstraint(columns, 0); index < len(t.Unique); index = t.nextUniqueConstraint(columns, index+1) {
-		for _, row := range rows {
-			if key, comparable := uniqueKeyValues(columns, row, t.Unique[index], mergeNull); comparable {
-				domain = append(domain, t.uniqueProbeShards(topology, t.Unique[index].Cols, key)...)
-			}
-		}
-	}
-	seen := make(map[string]bool)
-	for _, shard := range domain {
-		if shard == nil || seen[shard.uuid.String()] {
-			continue
-		}
-		seen[shard.uuid.String()] = true
+	for _, shard := range t.uniqueProbeDomain(topology, columns, rows, mergeNull, targets) {
 		owner, err := cluster.locate(ctx, mosiResource{Database: t.schema.Name, Table: t.Name, Shard: shard.uuid.String()})
 		if err != nil {
 			panic(err)
