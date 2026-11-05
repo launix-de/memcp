@@ -181,7 +181,7 @@ func (r *replicationManager) recoverConnection(peer *mosiPeer, user string, auth
 				if requests[index].Resource.Database != "" {
 					req.Resources = []replicaRecord{requests[index]}
 				}
-				if err := peer.call(ctx, "hello", req, &replies[index]); err != nil {
+				if err := peer.request(ctx, "hello", req, &replies[index]); err != nil {
 					failureOnce.Do(func() { failure = err; cancel() })
 					return
 				}
@@ -255,7 +255,7 @@ func (r *replicationManager) recoverConnection(peer *mosiPeer, user string, auth
 	}
 	r.mu.Unlock()
 	if completeConnection {
-		if err := peer.call(ctx, "hello_done", replicaRequest{Boot: r.boot, User: user, Hash: auth.Hash}, nil); err != nil {
+		if err := peer.request(ctx, "hello_done", replicaRequest{Boot: r.boot, User: user, Hash: auth.Hash}, nil); err != nil {
 			delete(r.recoveredUsers, user)
 			return err
 		}

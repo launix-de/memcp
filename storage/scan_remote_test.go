@@ -590,11 +590,11 @@ func TestRemoteScanMessagesHaveNoRPCHandle(t *testing.T) {
 		t.Fatal(err)
 	}
 	message := takeMosi(peer.outgoing)
-	if message.ID != 0 || message.Method != "scan.cancel" || len(peer.pending) != 0 {
+	if message.Channel != "scan.cancel" {
 		t.Fatal("fire-and-forget message allocated an RPC handle")
 	}
 	var decoded string
-	if err := unmarshalNode(message.Data, &decoded); err != nil || decoded != id {
+	if err := unmarshalNode(message.Payload, &decoded); err != nil || decoded != id {
 		t.Fatal("return channel identity changed")
 	}
 }
@@ -631,11 +631,6 @@ func TestRemoteScanReturnChannelDeliversResultsAndPanics(t *testing.T) {
 		t.Errorf("completed return channel retained: %v", key)
 		return true
 	})
-	peer.mu.Lock()
-	defer peer.mu.Unlock()
-	if len(peer.pending) != 0 {
-		t.Fatal("remote computation retained an RPC handle")
-	}
 }
 
 func TestRemoteScanCancellationBeforeDispatchAndAfterCompletion(t *testing.T) {
@@ -1392,13 +1387,17 @@ func TestRemoteScanReconnectRejectsOldOperationIdentity(t *testing.T) {
 	if next.objectPeer != first.objectPeer || next.operationPrefix == first.operationPrefix {
 		t.Fatal("reconnect lost incarnation identity or reused an old operation domain")
 	}
-	var output any
 	request := struct {
 		Return, Method string
 		Data           []byte
 	}{oldID, "object.release", []byte(`{}`)}
-	if err := next.call(context.Background(), "node.control", request, &output); err == nil || !strings.Contains(err.Error(), "invalid operation identity") {
-		t.Fatal("old operation entered the new connection", err)
+	if err := postScanMessage(context.Background(), next, "node.control", request); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-next.done: // invalid one-way command closes its authenticated stream
+	case <-time.After(time.Second):
+		t.Fatal("old operation entered the new connection")
 	}
 }
 
@@ -1466,15 +1465,15 @@ func TestHandleWireContainsOnlySlotAndPayload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	frame, err := encodeMosiMessage(mosiMessage{Slot: 19, Payload: payload})
+	frame, err := encodeMosiMessage(mosiMessage{Channel: "19", Payload: payload})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(frame, append([]byte("MOSI\x05\x00\x13"), payload...)) {
+	if !bytes.Equal(frame, append([]byte("\x0219"), payload...)) {
 		t.Fatalf("handle frame contains more than recipient and payload: %q", frame)
 	}
 	decoded, err := decodeMosiMessage(frame)
-	if err != nil || decoded.Slot != 19 || decoded.ID != 0 || decoded.Method != "" {
+	if err != nil || decoded.Channel != "19" {
 		t.Fatal("handle frame lost fire-and-forget semantics", decoded, err)
 	}
 }

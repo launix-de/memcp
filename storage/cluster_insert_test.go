@@ -613,7 +613,7 @@ func TestClusterHandoverAckKeepsNewerInboundGrant(t *testing.T) {
 			Method string
 			Data   []replicaRecord
 		}
-		if err := unmarshalNode(message.Data, &update); err != nil {
+		if err := unmarshalNode(message.Payload, &update); err != nil {
 			t.Fatal(err)
 		}
 		if update.Method != "cluster.location_update" {

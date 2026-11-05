@@ -31,7 +31,9 @@ var nodeScans atomic.Pointer[nodeScanService]
 type nodeScanService struct {
 	procedureCache sync.Once
 	procedures     scm.Scmer // existing budgeted cachemap; contains pure code factories only
-	handles        sync.Map  // fresh slot -> invocation-owned handle
+	channelOnce    sync.Once
+	channels       sync.Map // shared registered channels survive peer reconnection
+	handles        sync.Map // fresh slot -> invocation-owned handle
 	nextHandle     atomic.Uint64
 	objects        clusterObjectRegistry
 	executions     sync.Map // invocation UUID -> worker TxContext, never persisted or serialized
@@ -69,7 +71,7 @@ func scanAuthMessage(conn *websocket.Conn, method string, input any) error {
 	if err != nil {
 		return err
 	}
-	frame, err := encodeMosiMessage(mosiMessage{Method: method, Data: data})
+	frame, err := encodeMosiMessage(mosiMessage{Channel: method, Payload: data})
 	if err != nil {
 		return err
 	}
@@ -95,10 +97,10 @@ func readScanAuth(conn *websocket.Conn, method string, output any) error {
 		}
 	}
 	message, err := decodeMosiMessage(frame)
-	if err != nil || message.Method != method || message.Packet != nil || message.ID != 0 {
+	if err != nil || message.Channel != method {
 		return fmt.Errorf("invalid node authentication")
 	}
-	return unmarshalNode(message.Data, output)
+	return unmarshalNode(message.Payload, output)
 }
 
 func validScanChallenge(c scanChallenge) bool {
@@ -245,9 +247,10 @@ func (service *nodeScanService) accept(w http.ResponseWriter, req *http.Request)
 			return service.cluster.receive(remoteID, packet, session.peer)
 		}
 	}
-	peer := newMosiPeer(conn, session.handle, packets, func(peer *mosiPeer) {
+	peer := newMosiPeer(conn, func(peer *mosiPeer) {
 		peer.scanService = service
-		peer.handleValue = session.handleValue
+		registerScanChannels(peer, session)
+		registerMosiChannel(peer, packets)
 		peer.operationPrefix = remote.OperationPrefix
 		peer.objectPeer = clusterObjectPeer{remote.Node, remote.Boot}
 		session.bindPeer(peer)
@@ -320,10 +323,11 @@ func (service *nodeScanService) connect(ctx context.Context, address string) (*m
 			return service.cluster.receive(remoteID, packet, session.peer)
 		}
 	}
-	peer := newMosiPeer(conn, session.handle, packets, func(peer *mosiPeer) {
+	peer := newMosiPeer(conn, func(peer *mosiPeer) {
 		peer.objectEndpoint = endpoint
 		peer.scanService = service
-		peer.handleValue = session.handleValue
+		registerScanChannels(peer, session)
+		registerMosiChannel(peer, packets)
 		peer.operationPrefix = remote.OperationPrefix
 		peer.objectPeer = clusterObjectPeer{remote.Node, remote.Boot}
 		session.bindPeer(peer)

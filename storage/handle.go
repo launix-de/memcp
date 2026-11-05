@@ -6,7 +6,9 @@ package storage
 
 import "fmt"
 import "sync"
+import "weak"
 import "context"
+import "strconv"
 import "github.com/launix-de/memcp/scm"
 
 // Slots are never reused within a service incarnation. Their handlers, not the
@@ -14,6 +16,7 @@ import "github.com/launix-de/memcp/scm"
 type handleSlot struct {
 	peer    clusterObjectPeer
 	handler scm.Handle
+	raw     func([]byte) error
 	owner   scm.Scmer // local invocation lifetime; never part of a message
 	mu      sync.Mutex
 	closed  bool
@@ -34,6 +37,16 @@ func (slot *handleSlot) close() {
 	slot.closed = true
 	slot.mu.Unlock()
 	slot.calls.Wait()
+}
+
+type weakResultHandle struct {
+	receiver weak.Pointer[scm.ResultReceiver]
+}
+
+func (handle weakResultHandle) Handle(value scm.Scmer) {
+	if receiver := handle.receiver.Value(); receiver != nil {
+		receiver.Handle(value)
+	}
 }
 
 type remoteHandle struct {
@@ -83,7 +96,7 @@ func (handle *remoteHandle) Handle(value scm.Scmer) {
 	if err != nil {
 		panic(err)
 	}
-	message := mosiMessage{Slot: handle.slot, Payload: payload}
+	message := mosiMessage{Channel: handleChannel(handle.slot), Payload: payload}
 	message.encoded, err = encodeMosiMessage(message)
 	if err != nil {
 		panic(err)
@@ -93,6 +106,18 @@ func (handle *remoteHandle) Handle(value scm.Scmer) {
 		panic(err)
 	}
 	queued = true
+}
+
+func handleChannel(slot uint64) string { return strconv.FormatUint(slot, 10) }
+func (service *nodeScanService) storeHandle(slot uint64, entry *handleSlot) {
+	service.handles.Store(slot, entry)
+	service.channels.Store(handleChannel(slot), workerChannel(func(peer *mosiPeer, payload []byte) error {
+		return (&scanRPCSession{service: service, peer: peer}).handleValue(slot, schemeValue(payload))
+	}))
+}
+func (service *nodeScanService) deleteHandle(slot uint64) {
+	service.channels.Delete(handleChannel(slot))
+	service.handles.Delete(slot)
 }
 
 func (service *nodeScanService) allocateHandleSlot() uint64 {
@@ -116,12 +141,20 @@ func (service *nodeScanService) handleBindings(bindings *scm.SerializationContex
 	return bindings.WithHandleExport(func(handler scm.Handle) (scm.Scmer, error) {
 		slot := service.allocateHandleSlot()
 		entry := &handleSlot{peer: peer.objectPeer, handler: handler, owner: owner}
-		service.handles.Store(slot, entry)
-		release := func() { service.handles.Delete(slot) }
+		if receiver, ok := handler.(*scm.ResultReceiver); ok {
+			entry.handler = weakResultHandle{weak.Make(receiver)}
+		}
+		service.storeHandle(slot, entry)
+		release := func() { service.deleteHandle(slot) }
 		if receiver, ok := handler.(interface{ RetainHandleRelease(func()) }); ok {
 			receiver.RetainHandleRelease(release)
 			if result, ok := handler.(*scm.ResultReceiver); ok && peer.ctx != nil {
-				stop := context.AfterFunc(peer.ctx, func() { result.Fail(fmt.Errorf("handle peer disconnected")) })
+				weakResult := weak.Make(result)
+				stop := context.AfterFunc(peer.ctx, func() {
+					if receiver := weakResult.Value(); receiver != nil {
+						receiver.Fail(fmt.Errorf("handle peer disconnected"))
+					}
+				})
 				result.RetainHandleRelease(func() { stop() })
 			}
 		} else if lifetime, ok := owner.Any().(interface{ RetainQueryWork(func()) bool }); !ok || !lifetime.RetainQueryWork(func() { release(); entry.close() }) {
@@ -150,6 +183,9 @@ func (s *scanRPCSession) handleValue(slot uint64, payload schemeValue) error {
 		return nil
 	}
 	defer target.calls.Done()
+	if target.raw != nil {
+		return target.raw(payload)
+	}
 	value, err := payload.reconstruct(scm.ProcedureDecode{ResolveHandle: s.service.handleResolver(s.peer.ctx, s.peer, target.owner), Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) {
 		return s.service.importObject(s.peer.ctx, s.peer, ref)
 	}})

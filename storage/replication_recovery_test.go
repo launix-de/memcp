@@ -1221,7 +1221,7 @@ func TestReplicationRetirementJoinsLateSchemaPlacement(t *testing.T) {
 	})
 	cell := r.resourceCell(resource)
 	cell.ownstate.Initialize(mosi.IO)
-	peer := &mosiPeer{done: make(chan struct{}), readDone: make(chan struct{}), pending: make(map[uint64]chan mosiMessage)}
+	peer := &mosiPeer{done: make(chan struct{}), readDone: make(chan struct{}), channels: &sync.Map{}}
 	peer.once.Do(func() { close(peer.done) })
 	close(peer.readDone)
 	// The administrator may itself run in this RPC worker. Joining all workers
@@ -1400,19 +1400,23 @@ func TestReplicationConnectionReadyAfterAllCachedBindings(t *testing.T) {
 	for incarnation := 0; incarnation < 2; incarnation++ {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
-		peer := &mosiPeer{ctx: ctx, done: make(chan struct{}), outgoing: newMosiMailbox(), pending: make(map[uint64]chan mosiMessage)}
+		peer := &mosiPeer{ctx: ctx, done: make(chan struct{}), outgoing: newMosiMailbox(), channels: &sync.Map{}}
 		finished := make(chan error, 1)
 		reply := func(method, user string) {
 			t.Helper()
 			select {
 			case <-peer.outgoing.ready:
 				message := takeMosi(peer.outgoing)
+				var command nodeCommand
 				var request replicaRequest
-				if err := unmarshalNode(message.Data, &request); err != nil {
+				if err := unmarshalNode(message.Payload, &command); err != nil {
 					t.Fatal(err)
 				}
-				if message.Method != method || request.User != user {
-					t.Fatal("unexpected recovery order", message.Method, request.User)
+				if err := unmarshalNode(command.Data, &request); err != nil {
+					t.Fatal(err)
+				}
+				if message.Channel != method || request.User != user {
+					t.Fatal("unexpected recovery order", message.Channel, request.User)
 				}
 				data, err := marshalNode(replicaRecovery{Boot: masterBoot})
 				if method == "hello_done" {
@@ -1421,10 +1425,9 @@ func TestReplicationConnectionReadyAfterAllCachedBindings(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				peer.mu.Lock()
-				response := peer.pending[message.ID]
-				peer.mu.Unlock()
-				response <- mosiMessage{ID: message.ID, Data: data}
+				if !peer.dispatchMessage(mosiMessage{Channel: command.Return, Payload: mustNodeMetadata(nodeCommandResult{Data: data})}, len(data), time.Time{}) {
+					t.Fatal("return admission failed")
+				}
 			case <-ctx.Done():
 				t.Fatal("recovery message missing", method)
 			}
@@ -1438,7 +1441,7 @@ func TestReplicationConnectionReadyAfterAllCachedBindings(t *testing.T) {
 			}
 		case <-peer.outgoing.ready:
 			message := takeMosi(peer.outgoing)
-			t.Fatal("connection became ready before binding b", message.Method)
+			t.Fatal("connection became ready before binding b", message.Channel)
 		case <-ctx.Done():
 			t.Fatal("first binding did not complete")
 		}

@@ -355,13 +355,25 @@ and independent backend namespace, including separate buckets/prefixes for
 remote storage. The existing persistence backends are used without modification.
 `schema.json` remains the schema format. `SHUTDOWN` affects the addressed instance.
 
-Both listeners negotiate `memcp.mosi.v2` and exchange bounded binary WebSocket
-messages. Each message contains a versioned envelope, JSON control metadata and
-raw compressed transfer bytes, without base64 expansion of shard chunks. Text
-messages, unsupported versions and oversized messages are rejected. Peers using
-older protocol versions must be upgraded together. SQL requests on the same HTTP port
-continue to use their ordinary authentication; `/cluster` owns its existing
-replication authentication and per-message authorization.
+Both listeners negotiate `memcp.channels.v6` and exchange bounded binary WebSocket
+messages. Every application frame contains exactly one byte giving the channel
+name's byte length (1–255), the channel name, then its opaque payload. There is no
+transport request ID, reply type, version prefix or JSON envelope. Registered
+channel handlers own their payload formats: MOSI uses binary metadata and raw
+compressed transfer bytes; runtime values and closures use the Scheme serializer.
+Commands that need a result include a return-channel URI in their own payload.
+The reply is another ordinary channel delivery, and the consumer chooses when to
+wait. Sending only publishes to a bounded queue without waiting for socket I/O,
+queue space or a response; exhaustion returns an immediate error. Bulk transfer
+producers separately admit their next chunk before publication.
+
+One-shot return channels deregister on completion or cancellation. Abandoned
+receivers use weak registry references and Go `AddCleanup`; invocation-owned
+callbacks instead remain alive until their work is joined at query cleanup.
+Text messages, unsupported versions and oversized messages are rejected. Peers
+using older protocol versions must be upgraded together. SQL requests on the same
+HTTP port continue to use their ordinary authentication; `/cluster` owns its
+existing replication authentication and per-message authorization.
 The shared route dispatches the explicit `X-MemCP-Role` to its enabled adapter;
 selecting a role grants no rights, and removing one adapter preserves others.
 

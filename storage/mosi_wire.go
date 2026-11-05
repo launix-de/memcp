@@ -13,12 +13,12 @@ package storage
 
 import "io"
 import "fmt"
-import "bytes"
-import "compress/gzip"
 import "math"
 import "sync"
+import "bytes"
 import "reflect"
 import "strings"
+import "compress/gzip"
 import "encoding/binary"
 import "github.com/google/uuid"
 import "github.com/launix-de/memcp/scm"
@@ -26,115 +26,68 @@ import "github.com/launix-de/memcp/scm"
 const mosiPacketBytes = 64 * 1024
 
 const mosiHTTPPath = "/cluster"
-const mosiSubprotocol = "memcp.mosi.v5"
+const mosiSubprotocol = "memcp.channels.v6"
 const mosiMaxMessageBytes = 256 * 1024
 const maxNodeRecordBytes = 32 * 1024 * 1024
 
-// A frame addresses a handle slot, a named endpoint, a reply slot or MOSI.
-// Its body is the endpoint payload. No JSON envelope or embedded field names
-// surround ordinary handle deliveries. Raw column chunks remain raw bytes.
+// Every application frame contains only a channel and its opaque payload.
+// Version negotiation belongs to the WebSocket subprotocol, not every message.
 func encodeMosiMessage(m mosiMessage) ([]byte, error) {
-	b := append(make([]byte, 0, 256), "MOSI\x05"...)
-	switch {
-	case m.Packet != nil:
-		packet := *m.Packet
-		payload := packet.Payload
-		packet.Payload = nil
-		if len(payload) > 0 && (packet.Kind != "chunk" || len(payload) > mosiPacketBytes+1024) {
-			return nil, fmt.Errorf("invalid MOSI binary payload")
-		}
-		metadata, err := marshalNode(packet)
-		if err != nil {
-			return nil, err
-		}
-		b = appendNodeBlob(append(b, 3), metadata)
-		b = append(b, payload...)
-	case m.Slot != 0:
-		b = binary.AppendUvarint(append(b, 0), m.Slot)
-		b = append(b, m.Payload...)
-	case m.Method != "":
-		endpoint := m.Method
-		if endpoint == "rpc" {
-			return nil, fmt.Errorf("reserved node endpoint")
-		}
-		if m.ID != 0 {
-			endpoint = "rpc"
-		}
-		b = appendNodeBlob(append(b, 1), []byte(endpoint))
-		if m.ID != 0 {
-			// The RPC endpoint's payload supplies a return slot and method.
-			// Ordinary one-way endpoints carry only their own payload.
-			b = binary.AppendUvarint(b, m.ID)
-			b = appendNodeBlob(b, []byte(m.Method))
-		}
-		b = append(b, m.Data...)
-	default:
-		b = binary.AppendUvarint(append(b, 2), m.ID)
-		b = appendNodeBlob(b, []byte(m.Error))
-		b = append(b, m.Data...)
+	if len(m.Channel) == 0 || len(m.Channel) > 255 {
+		return nil, fmt.Errorf("invalid node channel length")
 	}
-	if len(b) > mosiMaxMessageBytes {
+	if 1+len(m.Channel)+len(m.Payload) > mosiMaxMessageBytes {
 		return nil, scm.ErrClusterRequestTooLarge
 	}
+	b := make([]byte, 1+len(m.Channel)+len(m.Payload))
+	b[0] = byte(len(m.Channel))
+	copy(b[1:], m.Channel)
+	copy(b[1+len(m.Channel):], m.Payload)
 	return b, nil
 }
-func decodeMosiMessage(frame []byte) (m mosiMessage, err error) {
+func decodeMosiMessage(frame []byte) (mosiMessage, error) {
+	if len(frame) == 0 || len(frame) > mosiMaxMessageBytes || frame[0] == 0 || int(frame[0])+1 > len(frame) {
+		return mosiMessage{}, fmt.Errorf("invalid node channel frame")
+	}
+	n := int(frame[0])
+	return mosiMessage{Channel: string(frame[1 : 1+n]), Payload: frame[1+n:]}, nil
+}
+
+// MOSI owns its binary payload format. The channel transport never decodes it.
+func encodeMosiPacket(packet mosiPacket) ([]byte, error) {
+	payload := packet.Payload
+	packet.Payload = nil
+	if len(payload) > 0 && (packet.Kind != "chunk" || len(payload) > mosiPacketBytes+1024) {
+		return nil, fmt.Errorf("invalid MOSI binary payload")
+	}
+	metadata, err := marshalNode(packet)
+	if err != nil {
+		return nil, err
+	}
+	return append(appendNodeBlob(nil, metadata), payload...), nil
+}
+func decodeMosiPacket(data []byte) (packet *mosiPacket, err error) {
 	defer func() {
 		if failure := recover(); failure != nil {
-			m = mosiMessage{}
-			err = fmt.Errorf("invalid MOSI frame: %v", failure)
+			packet = nil
+			err = fmt.Errorf("invalid MOSI payload: %v", failure)
 		}
 	}()
-	if len(frame) < 6 || len(frame) > mosiMaxMessageBytes || string(frame[:5]) != "MOSI\x05" {
-		return m, fmt.Errorf("invalid MOSI message version or size")
+	r := nodeReader{data}
+	packet = new(mosiPacket)
+	if err = unmarshalNode(r.blob(), packet); err != nil {
+		return nil, err
 	}
-	r := nodeReader{frame[6:]}
-	switch frame[5] {
-	case 0:
-		m.Slot = r.uint()
-		if m.Slot == 0 {
-			return m, fmt.Errorf("invalid handle slot")
-		}
-		m.Payload = r.data
-	case 1:
-		m.Method = string(r.blob())
-		if m.Method == "rpc" {
-			m.ID = r.uint()
-			m.Method = string(r.blob())
-			if m.ID == 0 || m.Method == "rpc" {
-				return m, fmt.Errorf("invalid RPC endpoint payload")
-			}
-		}
-		if len(r.data) > 0 {
-			m.Data = r.data
-		}
-		if m.Method == "" {
-			return m, fmt.Errorf("empty endpoint")
-		}
-	case 2:
-		m.ID = r.uint()
-		m.Error = string(r.blob())
-		if len(r.data) > 0 {
-			m.Data = r.data
-		}
-	case 3:
-		m.Packet = new(mosiPacket)
-		if err = unmarshalNode(r.blob(), m.Packet); err != nil {
-			return m, err
-		}
-		if len(m.Packet.Payload) != 0 {
-			return m, fmt.Errorf("inline payload")
-		}
-		if len(r.data) > 0 {
-			if m.Packet.Kind != "chunk" || len(r.data) > mosiPacketBytes+1024 {
-				return m, fmt.Errorf("invalid binary payload")
-			}
-			m.Packet.Payload = r.data
-		}
-	default:
-		return m, fmt.Errorf("invalid recipient kind")
+	if len(packet.Payload) != 0 {
+		return nil, fmt.Errorf("inline MOSI payload")
 	}
-	return m, nil
+	if len(r.data) > 0 {
+		if packet.Kind != "chunk" || len(r.data) > mosiPacketBytes+1024 {
+			return nil, fmt.Errorf("invalid MOSI binary payload")
+		}
+		packet.Payload = r.data
+	}
+	return packet, nil
 }
 
 // Node control metadata uses a bounded binary value stream. Scheme values are
@@ -633,13 +586,11 @@ func (peer *mosiPeer) post(packet mosiPacket) error {
 		}
 	}
 
-	message := mosiMessage{Packet: &packet}
-	var err error
-	message.encoded, err = encodeMosiMessage(message)
+	payload, err := encodeMosiPacket(packet)
 	if err != nil {
 		return err
 	}
-	return peer.outgoing.publishPacket(peer.done, message)
+	return peer.send(peer.ctxOrBackground(), mosiMessage{Channel: "mosi", Payload: payload})
 }
 
 func (peer *mosiPeer) sendObject(header mosiPacket, kind, name string, reader io.ReadCloser) error {
@@ -650,6 +601,9 @@ func (peer *mosiPeer) sendObject(header mosiPacket, kind, name string, reader io
 	}
 	buffer := make([]byte, mosiPacketBytes)
 	for {
+		if err := peer.outgoing.admitBulk(peer.done); err != nil {
+			return err
+		}
 		n, err := reader.Read(buffer)
 		if n > 0 {
 			var packed bytes.Buffer

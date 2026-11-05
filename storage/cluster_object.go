@@ -126,11 +126,6 @@ func (service *nodeScanService) exportObject(peer *mosiPeer, object ClusterObjec
 	if endpoint, ok := object.(interface{ ClusterEndpoint() scm.ClusterObject }); ok {
 		object = endpoint.ClusterEndpoint()
 	}
-	if forwarded, ok := object.(interface{ ClusterForwardedHandle() *scm.ClusterHandle }); ok {
-		if handle := forwarded.ClusterForwardedHandle(); handle != nil {
-			return service.offerObject(context.Background(), handle.Reference, peer.objectPeer, clusterObjectPeer{service.authNodeID(), service.id})
-		}
-	}
 	if peer == nil || object == nil {
 		return scm.ClusterReference{}, fmt.Errorf("missing cluster object peer/owner")
 	}
@@ -513,33 +508,6 @@ func (service *nodeScanService) objectCaller(peer *mosiPeer, reference scm.Clust
 	}
 }
 
-type clusterObjectOffer struct {
-	Reference scm.ClusterReference
-	Target    clusterObjectPeer
-	Issuer    clusterObjectPeer
-}
-
-// Re-export an imported native endpoint at its real owner. The final receiver
-// acquires its own existing Go lease, so intermediate peers are not call relays.
-func (service *nodeScanService) offerObject(ctx context.Context, ref scm.ClusterReference, target, issuer clusterObjectPeer) (scm.ClusterReference, error) {
-	if ref.Owner == target.ID && ref.Incarnation == target.Boot {
-		return ref, nil
-	}
-	if service.cluster == nil {
-		return scm.ClusterReference{}, fmt.Errorf("forwarding native references requires cluster membership")
-	}
-	peer, err := service.cluster.ensurePeer(ctx, ref.Owner)
-	if err != nil {
-		return scm.ClusterReference{}, err
-	}
-	if peer.objectPeer.Boot != ref.Incarnation {
-		return scm.ClusterReference{}, fmt.Errorf("expired forwarding incarnation")
-	}
-	var result scm.ClusterReference
-	err = service.control(ctx, peer, "object.offer", clusterObjectOffer{ref, target, issuer}, &result, true)
-	return result, err
-}
-
 type clusterObjectCall struct {
 	Reference scm.ClusterReference `json:"reference"`
 	Method    string               `json:"method"`
@@ -554,56 +522,6 @@ func (s *scanRPCSession) handleObject(ctx context.Context, method string, data [
 		}
 		s.service.refuseObjectOffers(s.peer, refs)
 		return nil, nil
-	}
-	if method == "object.offer" {
-		var request clusterObjectOffer
-		if err := unmarshalNode(data, &request); err != nil {
-			return nil, err
-		}
-		object, err := s.resolveObject(request.Reference)
-		if err != nil {
-			return nil, err
-		}
-		cluster := s.service.cluster
-		if cluster == nil {
-			return nil, fmt.Errorf("reference forwarding requires cluster membership")
-		}
-		if forwarded, ok := object.(interface{ ClusterForwardedHandle() *scm.ClusterHandle }); ok {
-			if handle := forwarded.ClusterForwardedHandle(); handle != nil {
-				return s.service.offerObject(ctx, handle.Reference, request.Target, request.Issuer)
-			}
-		}
-		target, err := cluster.ensurePeer(ctx, request.Target.ID)
-		if err != nil {
-			return nil, err
-		}
-		issuer := target
-		if request.Issuer.ID != s.service.authNodeID() {
-			issuer, err = cluster.ensurePeer(ctx, request.Issuer.ID)
-			if err != nil {
-				return nil, err
-			}
-		} else if request.Issuer.Boot != s.service.id {
-			return nil, fmt.Errorf("expired forwarding source")
-		}
-		if target.objectPeer != request.Target || (request.Issuer.ID != s.service.authNodeID() && issuer.objectPeer != request.Issuer) {
-			return nil, fmt.Errorf("expired forwarded reference recipient")
-		}
-		view, err := scm.ClusterObjectValue(object, ctx, scm.ClusterRequest{Method: "view"})
-		if err != nil {
-			return nil, err
-		}
-		ref, err := s.service.exportObject(target, object, view)
-		if err != nil {
-			return nil, err
-		}
-		r := s.service.objectRegistry()
-		r.mu.Lock()
-		if entry := r.entries[ref.URI]; entry != nil {
-			entry.offers[ref.Token] = issuer
-		}
-		r.mu.Unlock()
-		return ref, nil
 	}
 
 	if method == "object.release" {

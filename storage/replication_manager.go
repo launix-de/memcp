@@ -233,12 +233,11 @@ func (r *replicationManager) accept(w http.ResponseWriter, req *http.Request) {
 		conn.Close()
 		return
 	}
-	var connection *mosiPeer
-	p := newMosiPeer(conn, func(ctx context.Context, method string, data []byte) (any, error) {
-		return r.handleMaster(ctx, id, connection, method, data)
-	}, func(packet *mosiPacket) error { return r.receivePacket(id, packet) }, func(peer *mosiPeer) {
-		connection = peer
+	p := newMosiPeer(conn, func(peer *mosiPeer) {
 		peer.recoveryDone = make(chan struct{})
+		registerReplicationChannels(peer, []string{"login", "hello", "hello_done", "admin"}, func(ctx context.Context, method string, data []byte) (any, error) {
+			return r.handleMaster(ctx, id, peer, method, data)
+		}, func(packet *mosiPacket) error { return r.receivePacket(id, packet) })
 	})
 	r.peers[id] = p
 	r.mu.Unlock()
@@ -281,7 +280,9 @@ func (r *replicationManager) connect() {
 				conn.Close()
 				return
 			}
-			p := newMosiPeer(conn, r.handleSlave, func(packet *mosiPacket) error { return r.receivePacket("", packet) })
+			p := newMosiPeer(conn, func(peer *mosiPeer) {
+				registerReplicationChannels(peer, []string{"retire"}, r.handleSlave, func(packet *mosiPacket) error { return r.receivePacket("", packet) })
+			})
 			r.upstream = p
 			r.mu.Unlock()
 			go r.recoverCached(p)

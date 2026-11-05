@@ -540,17 +540,17 @@ func TestClusterReceiverImportedCloseCancelsPendingReply(t *testing.T) {
 	}
 	service.handles.Range(func(key, value any) bool {
 		entry := value.(*handleSlot)
-		if _, cleanup := entry.handler.(*abandonedControlHandle); !cleanup || !entry.owner.IsNil() {
+		if entry.raw == nil || entry.handler != nil || !entry.owner.IsNil() {
 			t.Error("cancelled send retained a query collector", key)
 			return true
 		}
 		// A published request may still return. Only its state-free disposer
 		// survives cancellation, and that late completion must retire it.
-		payload, err := freezeScanValue(scm.NewString(string(mustNodeMetadata(scanCompletion{}))))
+		payload, err := marshalNode(scanCompletion{})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := (&scanRPCSession{service: service, peer: peer}).handleValue(key.(uint64), payload); err != nil {
+		if err := (&scanRPCSession{service: service, peer: peer}).handleValue(key.(uint64), schemeValue(payload)); err != nil {
 			t.Fatal(err)
 		}
 		return true

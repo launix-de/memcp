@@ -13,14 +13,14 @@ package scm
 import "fmt"
 import "math"
 import "time"
+import "weak"
+import "sync"
 import "bytes"
 import "context"
 import "strings"
 import "testing"
-import "encoding/json"
 import "runtime"
-import "weak"
-import "sync"
+import "encoding/json"
 
 func TestProcedureFactoryReusesCaptureFreeCode(t *testing.T) {
 	entries := make(map[string]Scmer)
@@ -1083,4 +1083,40 @@ func TestProcedureFactoryCacheDoesNotRetainInvocation(t *testing.T) {
 		t.Fatal("pure factory cache retained a completed invocation")
 	}
 	runtime.KeepAlive(entries)
+}
+
+func TestOutputAndForwardedRepliesSurviveGCWhileWorkIsPending(t *testing.T) {
+	for _, forwarded := range []bool{false, true} {
+		t.Run(fmt.Sprint(forwarded), func(t *testing.T) {
+			owner := &outputPipelineOwner{}
+			var pending weak.Pointer[ResultReceiver]
+			result := NewBool(true)
+			callback := &clusterCallback{ctx: context.Background(), batchResult: &result, endpoint: HandleFunc(func(value Scmer) {
+				pending = weak.Make(value.Slice()[1].Any().(*ResultReceiver))
+			})}
+			if forwarded {
+				handle, err := callback.forwardClosure(&SerializationContext{Invocation: NewAny(owner)})
+				if err != nil {
+					t.Fatal(err)
+				}
+				handle.Handle(NewSlice([]Scmer{NewSlice(nil), NewNil()}))
+			} else {
+				output, err := callback.bindOutput(context.Background(), owner)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for i := 0; i < 64; i++ {
+					Apply(output, NewInt(int64(i)))
+				}
+			}
+			runtime.GC()
+			receiver := pending.Value()
+			if receiver == nil {
+				t.Fatal("GC retired a return channel still needed by its invocation")
+			}
+			receiver.Handle(NewNil())
+			owner.finish()
+			runtime.KeepAlive(owner)
+		})
+	}
 }

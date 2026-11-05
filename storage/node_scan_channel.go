@@ -15,9 +15,9 @@ import "sync"
 import "time"
 import "context"
 import "strings"
+import "strconv"
 import "sync/atomic"
 import "runtime/debug"
-import "strconv"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/go-mysqlstack/sqldb"
 
@@ -308,7 +308,7 @@ func postScanMessage(ctx context.Context, peer *mosiPeer, method string, value a
 	if err != nil {
 		return err
 	}
-	message := mosiMessage{Method: method, Data: data}
+	message := mosiMessage{Channel: method, Payload: data}
 	message.encoded, err = encodeMosiMessage(message)
 	if err != nil {
 		return err
@@ -397,11 +397,11 @@ func (s *scanRPCSession) channelMessage(ctx context.Context, method string, data
 			}
 		}()
 		s.service.commitObjectOffers(s.peer, completion.Offers)
-		payload, err := freezeScanValue(scm.NewString(string(mustNodeMetadata(completion))))
+		payload, err := marshalNode(completion)
 		if err != nil {
 			return nil, err
 		}
-		if err := s.peer.send(ctx, mosiMessage{Slot: controlReturnSlot(request.Return), Payload: payload}); err != nil {
+		if err := s.peer.send(ctx, mosiMessage{Channel: handleChannel(controlReturnSlot(request.Return)), Payload: payload}); err != nil {
 			s.service.refuseObjectOffers(s.peer, completion.Offers)
 			return nil, err
 		}
@@ -485,7 +485,9 @@ func (handle *abandonedControlHandle) retire() {
 	if stop != nil {
 		stop()
 	}
-	handle.service.handles.CompareAndDelete(handle.slot, handle.entry)
+	if handle.service.handles.CompareAndDelete(handle.slot, handle.entry) {
+		handle.service.channels.Delete(handleChannel(handle.slot))
+	}
 }
 func (handle *abandonedControlHandle) watch() {
 	if handle.peer.ctx == nil {
@@ -501,18 +503,19 @@ func (handle *abandonedControlHandle) watch() {
 	handle.stop = stop
 	handle.mu.Unlock()
 }
-func (handle *abandonedControlHandle) Handle(value scm.Scmer) {
+func (handle *abandonedControlHandle) receive(payload []byte) error {
 	defer handle.retire()
 	var result scanCompletion
-	if err := unmarshalNode([]byte(value.String()), &result); err != nil {
+	if err := unmarshalNode(payload, &result); err != nil {
 		panic(err)
 	}
 	handle.service.discardObjectOffers(handle.peer, result.Offers)
+	return nil
 }
 
-func (handle *controlResultHandle) Handle(value scm.Scmer) {
+func (handle *controlResultHandle) receive(payload []byte) error {
 	var result scanCompletion
-	if err := unmarshalNode([]byte(value.String()), &result); err != nil {
+	if err := unmarshalNode(payload, &result); err != nil {
 		panic(err)
 	}
 	accepted := false
@@ -542,6 +545,7 @@ func (handle *controlResultHandle) Handle(value scm.Scmer) {
 		}
 		handle.service.discardObjectOffers(handle.peer, unused)
 	}
+	return nil
 }
 
 // Operations use the same fire-and-forget transport and numeric handle
@@ -557,8 +561,8 @@ func (service *nodeScanService) control(ctx context.Context, peer *mosiPeer, met
 	slot := service.allocateHandleSlot()
 	id := (&scanRPCSession{peer: peer}).operationID(slot)
 	receiver := scm.NewResultReceiver()
-	entry := &handleSlot{peer: peer.objectPeer, handler: &controlResultHandle{service: service, peer: peer, receiver: receiver}}
-	service.handles.Store(slot, entry)
+	entry := &handleSlot{peer: peer.objectPeer, raw: (&controlResultHandle{service: service, peer: peer, receiver: receiver}).receive}
+	service.storeHandle(slot, entry)
 	received := false
 	defer func() {
 		var orphan *abandonedControlHandle
@@ -570,10 +574,10 @@ func (service *nodeScanService) control(ctx context.Context, peer *mosiPeer, met
 		}
 		if queued && !received && live {
 			orphan = &abandonedControlHandle{service: service, peer: peer, slot: slot}
-			orphan.entry = &handleSlot{peer: peer.objectPeer, handler: orphan}
-			service.handles.Store(slot, orphan.entry)
+			orphan.entry = &handleSlot{peer: peer.objectPeer, raw: orphan.receive}
+			service.storeHandle(slot, orphan.entry)
 		} else {
-			service.handles.Delete(slot)
+			service.deleteHandle(slot)
 		}
 		entry.close()
 		if !received {

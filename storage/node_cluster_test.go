@@ -199,17 +199,17 @@ func TestClusterRetiredResidencyProbeIsRejected(t *testing.T) {
 func TestClusterMountCannotBypassAdmissionThroughExplicitScanRPC(t *testing.T) {
 	old := sharedClusterMounts.Swap(nil)
 	defer sharedClusterMounts.Store(old)
-	peer, _, _ := setupRemoteScanConnection(t)
+	peer, service, _ := setupRemoteScanConnection(t)
 	if err := prepareSharedClusterMounts("mounted_snapshot"); err != nil {
 		t.Fatal(err)
 	}
 	var reply any
-	err := peer.call(context.Background(), "scan.describe", remoteScanDescribe{scanWireVersion, "mounted_snapshot", "items"}, &reply)
+	err := service.control(context.Background(), peer, "scan.describe", remoteScanDescribe{scanWireVersion, "mounted_snapshot", "items"}, &reply, true)
 	if err == nil {
 		t.Fatal("unbudgeted describe opened a mounted snapshot")
 	}
 	task := remoteScanTask{Shard: remoteScanShard{Resource: mosiResource{Database: "mounted_snapshot", Table: "items", Shard: uuid.NewString()}}}
-	err = peer.call(context.Background(), "scan.execute", task, &reply)
+	err = service.control(context.Background(), peer, "scan.execute", task, &reply, true)
 	if err == nil {
 		t.Fatal("explicit scan RPC bypassed mandatory cluster admission")
 	}
@@ -432,7 +432,7 @@ func TestClusterDiscoveryIgnoresUnavailableNonOwner(t *testing.T) {
 					var request struct {
 						Return string `json:"return"`
 					}
-					if unmarshalNode(message.Data, &request) != nil {
+					if unmarshalNode(message.Payload, &request) != nil {
 						return
 					}
 					answer := replicaRecord{Resource: resource, State: "S", Owner: dead.ID, Epoch: 7}
@@ -716,7 +716,7 @@ func TestClusterShardLocationQueriesOnlySchemaOwner(t *testing.T) {
 		Return, Method string
 		Data           []byte
 	}
-	if err := unmarshalNode(message.Data, &request); err != nil || request.Method != "cluster.location" {
+	if err := unmarshalNode(message.Payload, &request); err != nil || request.Method != "cluster.location" {
 		t.Fatal("per-shard discovery did not use schema owner", request, err)
 	}
 	route, _ := service.handles.Load(controlReturnSlot(request.Return))
@@ -756,7 +756,7 @@ func TestClusterSchemaLocationTransferUsesBoundedBatches(t *testing.T) {
 				Return string
 				Data   clusterSchemaLocations
 			}
-			if err := unmarshalNode(message.Data, &request); err != nil {
+			if err := unmarshalNode(message.Payload, &request); err != nil {
 				t.Error(err)
 				return
 			}
@@ -840,7 +840,7 @@ func TestClusterSchemaRecoveryRestoresBoundedRoutesWithoutPermissions(t *testing
 				Return string
 				Data   []byte
 			}
-			if err := unmarshalNode(message.Data, &request); err != nil {
+			if err := unmarshalNode(message.Payload, &request); err != nil {
 				t.Fatal(err)
 			}
 			value, err := owner.handleLocations(ctx, local.self.ID, "cluster.schema_locations", request.Data)
@@ -1107,7 +1107,7 @@ func TestClusterShardRestartRecoveryUsesLiveReports(t *testing.T) {
 			for _, method := range methods {
 				message := takeMosi(remote.outgoing)
 				var request struct{ Return, Method string }
-				if err := unmarshalNode(message.Data, &request); err != nil || request.Method != method {
+				if err := unmarshalNode(message.Payload, &request); err != nil || request.Method != method {
 					t.Fatal("restart omitted native recovery", request, err)
 				}
 				if cell.ownstate.Initialized() {
@@ -1275,7 +1275,7 @@ func TestClusterDiscoveryFollowsOwnerEpochAcrossReplies(t *testing.T) {
 						var request struct {
 							Return string `json:"return"`
 						}
-						if err := unmarshalNode(message.Data, &request); err != nil {
+						if err := unmarshalNode(message.Payload, &request); err != nil {
 							return
 						}
 						answer := replicaRecord{Resource: resource, State: "M", Owner: member.ID, Epoch: epoch}

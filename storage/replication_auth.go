@@ -197,7 +197,7 @@ func replicationAuthentication(proof replicaRequest) bool {
 	var auth replicaAuth
 	if peer := r.peer(""); peer != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		err := peer.call(ctx, "login", proof, &auth)
+		err := peer.request(ctx, "login", proof, &auth)
 		cancel()
 		if err != nil {
 			if _, denied := err.(mosiRemoteError); denied {

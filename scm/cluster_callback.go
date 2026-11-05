@@ -5,9 +5,10 @@ SPDX-License-Identifier: GPL-3.0-or-later
 package scm
 
 import "fmt"
-import "errors"
 import "sync"
+import "errors"
 import "context"
+import "runtime"
 
 // A native callback retains process-local state, such as a connection writer.
 // Scheme callers keep their normal local ABI; a captured callback addresses
@@ -105,9 +106,11 @@ func (callback *clusterCallback) forwardClosure(bindings *SerializationContext) 
 	}
 	var mu sync.Mutex
 	var pending sync.WaitGroup
+	inflight := make(map[*ResultReceiver]struct{})
 	closed := false
 	var failure any
 	finish := func() {
+		defer runtime.KeepAlive(inflight)
 		mu.Lock()
 		closed = true
 		mu.Unlock()
@@ -142,8 +145,12 @@ func (callback *clusterCallback) forwardClosure(bindings *SerializationContext) 
 		pending.Add(1)
 		mu.Unlock()
 		receiver := NewResultReceiver()
+		mu.Lock()
+		inflight[receiver] = struct{}{}
+		mu.Unlock()
 		receiver.onResult = func(value Scmer) {
 			defer pending.Done()
+			defer func() { mu.Lock(); delete(inflight, receiver); mu.Unlock() }()
 			defer func() {
 				if err := recover(); err != nil {
 					mu.Lock()
@@ -258,6 +265,7 @@ func (callback *clusterCallback) bindOutput(ctx context.Context, owner interface
 	var mu sync.Mutex
 	batch := make([]Scmer, 0, batchSize)
 	pending := 0
+	inflight := make(map[*ResultReceiver]struct{})
 	closing := false
 	var failure any
 	wake := make(chan struct{})
@@ -287,8 +295,12 @@ func (callback *clusterCallback) bindOutput(ctx context.Context, owner interface
 			}
 		}
 		receiver := NewResultReceiver()
+		mu.Lock()
+		inflight[receiver] = struct{}{}
+		mu.Unlock()
 		receiver.onResult = func(value Scmer) {
 			mu.Lock()
+			delete(inflight, receiver)
 			pending--
 			if value.GetTag() == tagAny {
 				if err, ok := value.Any().(*handleFailure); ok && failure == nil {
@@ -323,6 +335,7 @@ func (callback *clusterCallback) bindOutput(ctx context.Context, owner interface
 		}
 	}
 	finish := func() {
+		defer runtime.KeepAlive(inflight)
 		mu.Lock()
 		closing = true
 		tail := batch

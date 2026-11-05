@@ -327,43 +327,51 @@ func TestReplicationOrderedRecSetKeepsHistoricalGeneration(t *testing.T) {
 
 func TestMosiBinaryEnvelopeRoundTripAndLimits(t *testing.T) {
 	for _, message := range []mosiMessage{
-		{ID: 7, Method: "authenticate", Data: []byte(`{"user":"alice"}`)},
-		{ID: 7, Error: "denied"},
-		{Packet: &mosiPacket{Kind: "grant", ID: "request", Epoch: 42, State: "M", Content: "content"}},
-		{Packet: &mosiPacket{Kind: "chunk", ID: "request", Payload: bytes.Repeat([]byte{0xff, 0, 1}, 20000)}},
+		{Channel: "authenticate", Payload: []byte{0, 255, 1}},
+		{Channel: "19", Payload: []byte("(list 1 2)")},
+		{Channel: "ä", Payload: nil},
+		{Channel: strings.Repeat("x", 255), Payload: []byte("raw")},
 	} {
 		frame, err := encodeMosiMessage(message)
 		if err != nil {
 			t.Fatal(err)
 		}
+		want := append([]byte{byte(len(message.Channel))}, []byte(message.Channel)...)
+		want = append(want, message.Payload...)
+		if !bytes.Equal(frame, want) {
+			t.Fatalf("unexpected transport metadata: %x", frame)
+		}
 		decoded, err := decodeMosiMessage(frame)
+		if err != nil || decoded.Channel != message.Channel || !bytes.Equal(decoded.Payload, message.Payload) {
+			t.Fatalf("changed delivery: %+v, %v", decoded, err)
+		}
+	}
+	for _, frame := range [][]byte{nil, {0}, {4, 'a'}, make([]byte, mosiMaxMessageBytes+1)} {
+		if _, err := decodeMosiMessage(frame); err == nil {
+			t.Fatal("invalid frame accepted")
+		}
+	}
+	for _, message := range []mosiMessage{{}, {Channel: strings.Repeat("x", 256)}, {Channel: "x", Payload: make([]byte, mosiMaxMessageBytes)}} {
+		if _, err := encodeMosiMessage(message); err == nil {
+			t.Fatal("invalid outgoing frame accepted")
+		}
+	}
+	for _, packet := range []mosiPacket{{Kind: "grant", ID: "request", Epoch: 42, State: "M"}, {Kind: "chunk", Payload: bytes.Repeat([]byte{255, 0, 1}, 20000)}} {
+		payload, err := encodeMosiPacket(packet)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !reflect.DeepEqual(message, decoded) {
-			t.Fatalf("binary round trip changed the message: %#v / %#v", message, decoded)
+		decoded, err := decodeMosiPacket(payload)
+		if err != nil || !reflect.DeepEqual(packet, *decoded) {
+			t.Fatalf("MOSI payload changed: %+v, %v", decoded, err)
 		}
-		if message.Packet != nil && message.Packet.Kind == "chunk" && len(frame) > len(message.Packet.Payload)+1024 {
-			t.Fatal("binary chunk was expanded rather than carried as raw bytes")
-		}
-	}
-	valid, _ := encodeMosiMessage(mosiMessage{ID: 1})
-	badVersion := bytes.Clone(valid)
-	badVersion[4] = 1
-	badLength := append([]byte("MOSI\x05\x01"), 0xff, 0xff)
-	inlinePayload := []byte("MOSI\x02")
-	for _, frame := range [][]byte{nil, valid[:6], badVersion, badLength, append([]byte("MOSI\x05"), 99), inlinePayload, make([]byte, mosiMaxMessageBytes+1)} {
-		if _, err := decodeMosiMessage(frame); err == nil {
-			t.Fatal("malformed or oversized binary envelope was accepted")
+		if packet.Kind == "chunk" && len(payload) > len(packet.Payload)+1024 {
+			t.Fatal("raw chunk expanded")
 		}
 	}
-	for _, message := range []mosiMessage{
-		{Data: []byte(`"` + strings.Repeat("x", mosiMaxMessageBytes) + `"`)},
-		{Packet: &mosiPacket{Kind: "grant", Payload: []byte{1}}},
-		{Packet: &mosiPacket{Kind: "chunk", Payload: make([]byte, mosiPacketBytes+1025)}},
-	} {
-		if _, err := encodeMosiMessage(message); err == nil {
-			t.Fatal("invalid outgoing binary envelope was accepted")
+	for _, packet := range []mosiPacket{{Kind: "grant", Payload: []byte{1}}, {Kind: "chunk", Payload: make([]byte, mosiPacketBytes+1025)}} {
+		if _, err := encodeMosiPacket(packet); err == nil {
+			t.Fatal("invalid MOSI payload accepted")
 		}
 	}
 }
@@ -445,7 +453,7 @@ func TestReplicationWebSocketUsesNormalHTTPRoute(t *testing.T) {
 	if conn.Subprotocol() != mosiSubprotocol {
 		t.Fatal("normal HTTP endpoint did not negotiate the node protocol")
 	}
-	frame, _ := encodeMosiMessage(mosiMessage{ID: 9, Method: "unsupported"})
+	frame, _ := encodeMosiMessage(mosiMessage{Channel: "login", Payload: mustNodeMetadata(nodeCommand{Return: "return/9", Data: mustNodeMetadata(replicaRequest{})})})
 	if err := conn.WriteMessage(websocket.BinaryMessage, frame); err != nil {
 		t.Fatal(err)
 	}
@@ -455,7 +463,8 @@ func TestReplicationWebSocketUsesNormalHTTPRoute(t *testing.T) {
 		t.Fatalf("node reply was not binary: kind=%d err=%v", kind, err)
 	}
 	message, err := decodeMosiMessage(reply)
-	if err != nil || message.ID != 9 || message.Error == "" {
+	var result nodeCommandResult
+	if err != nil || message.Channel != "return/9" || unmarshalNode(message.Payload, &result) != nil || result.Error == "" {
 		t.Fatalf("unexpected node reply: %+v, %v", message, err)
 	}
 	// Old JSON/text frames are rejected rather than silently downgraded.
@@ -710,14 +719,14 @@ func TestReplicationBidirectionalRPCAndDisconnect(t *testing.T) {
 		if err != nil {
 			return
 		}
-		accepted <- newMosiPeer(conn, echo, nil)
+		accepted <- newMosiPeer(conn, func(p *mosiPeer) { registerReplicationChannels(p, []string{"echo", "block"}, echo, nil) })
 	}))
 	defer server.Close()
 	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	client := newMosiPeer(conn, echo, nil)
+	client := newMosiPeer(conn, func(p *mosiPeer) { registerReplicationChannels(p, []string{"echo", "block"}, echo, nil) })
 	master := <-accepted
 	defer client.close()
 	defer master.close()
@@ -733,14 +742,14 @@ func TestReplicationBidirectionalRPCAndDisconnect(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 			defer cancel()
 			var output string
-			if err := p.call(ctx, "echo", i, &output); err != nil || output != fmt.Sprint(i) {
+			if err := p.request(ctx, "echo", i, &output); err != nil || output != fmt.Sprint(i) {
 				t.Errorf("RPC %d: %q %v", i, output, err)
 			}
 		}(i)
 	}
 	wg.Wait()
 	finished := make(chan error, 1)
-	go func() { finished <- client.call(context.Background(), "block", nil, nil) }()
+	go func() { finished <- client.request(context.Background(), "block", nil, nil) }()
 	client.close()
 	select {
 	case err := <-finished:
@@ -1953,12 +1962,24 @@ func TestReplicationCommitRacesHandoverAdmission(t *testing.T) {
 }
 
 // Blocking observation belongs to the test consumer, never to queue publication.
-func takeMosi(queue *mosiMailbox) mosiMessage {
+type observedNodeMessage struct {
+	mosiMessage
+	Packet *mosiPacket
+}
+
+func takeMosi(queue *mosiMailbox) observedNodeMessage {
 	value, err := queue.next(context.Background())
 	if err != nil {
 		panic(err)
 	}
-	return value
+	observed := observedNodeMessage{mosiMessage: value}
+	if value.Channel == "mosi" {
+		observed.Packet, err = decodeMosiPacket(value.Payload)
+		if err != nil {
+			panic(err)
+		}
+	}
+	return observed
 }
 
 func TestNodeMetadataValuesAndPartialMessages(t *testing.T) {
@@ -2001,7 +2022,7 @@ func TestMosiMailboxPublishesWithoutSocketProgress(t *testing.T) {
 	published := make(chan error, 1)
 	go func() {
 		for i := uint64(1); i <= 1024; i++ {
-			if err := queue.push(mosiMessage{Slot: i, encoded: []byte{1}}); err != nil {
+			if err := queue.push(mosiMessage{Channel: handleChannel(i), encoded: []byte{1}}); err != nil {
 				published <- err
 				return
 			}
@@ -2018,7 +2039,7 @@ func TestMosiMailboxPublishesWithoutSocketProgress(t *testing.T) {
 	}
 	for i := uint64(1); i <= 1024; i++ {
 		value, err := queue.next(context.Background())
-		if err != nil || value.Slot != i {
+		if err != nil || value.Channel != handleChannel(i) {
 			t.Fatal("mailbox changed delivery order", i, value, err)
 		}
 	}
@@ -2056,19 +2077,20 @@ func TestNodeMetadataDoesNotExecuteUnknownOrUntypedScheme(t *testing.T) {
 func TestMosiDeclarationOwnsItsBytesBeforeTask(t *testing.T) {
 	checked := make(chan bool, 1)
 	peer := &mosiPeer{scanService: &nodeScanService{}, ctx: context.Background()}
-	peer.handle = func(context.Context, string, []byte) (any, error) {
+	registerScanChannels(peer, &scanRPCSession{service: peer.scanService, peer: peer})
+	peer.registerChannel("inspect", workerChannel(func(_ *mosiPeer, _ []byte) error {
 		value, ok := peer.objectViews.Load("owner/1")
 		checked <- ok && string(value.([]byte)) == `"ready"`
-		return nil, nil
-	}
+		return nil
+	}))
 	data := mustNodeMetadata(objectViewDeclaration{"owner/1", []byte(`"ready"`)})
-	if !peer.dispatchMessage(mosiMessage{Method: "object.declare", Data: data}, len(data), time.Time{}) {
+	if !peer.dispatchMessage(mosiMessage{Channel: "object.declare", Payload: data}, len(data), time.Time{}) {
 		t.Fatal("declaration admission failed")
 	}
 	for i := range data {
 		data[i] = 0
 	}
-	if !peer.dispatchMessage(mosiMessage{Method: "inspect"}, 1, time.Time{}) {
+	if !peer.dispatchMessage(mosiMessage{Channel: "inspect"}, 1, time.Time{}) {
 		t.Fatal("task admission failed")
 	}
 	peer.workers.Wait()
@@ -2115,5 +2137,141 @@ func TestReplicationDeclarationIgnoresMaterializedColumnAddExtents(t *testing.T)
 	incoming.Columns[len(incoming.Columns)-1].Default = scm.NewInt(1)
 	if r.sameReplicaDeclaration(tbl, &incoming) {
 		t.Fatal("changed SQL default was mistaken for physical materialization")
+	}
+}
+
+func TestNodeCommandCanReplyBeforeConsumerWaits(t *testing.T) {
+	peer := &mosiPeer{ctx: context.Background(), done: make(chan struct{}), outgoing: newMosiMailbox()}
+	receiver, err := peer.startCommand(context.Background(), "fixture", 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := takeMosi(peer.outgoing)
+	var command nodeCommand
+	if request.Channel != "fixture" || unmarshalNode(request.Payload, &command) != nil {
+		t.Fatal("invalid command payload")
+	}
+	// The application reply URI occurs only in this command's opaque payload.
+	if string(request.encoded[1:1+int(request.encoded[0])]) != "fixture" {
+		t.Fatal("transport did not use the command channel")
+	}
+	var parameter int
+	if unmarshalNode(command.Data, &parameter) != nil || parameter != 42 {
+		t.Fatal("parameter changed")
+	}
+	if !peer.dispatchMessage(mosiMessage{Channel: command.Return, Payload: []byte("answer")}, 6, time.Time{}) {
+		t.Fatal("reply rejected")
+	}
+	peer.workers.Wait()
+	// Useful work, including another independent send, precedes Wait.
+	if err := peer.send(context.Background(), mosiMessage{Channel: "other", Payload: []byte("work")}); err != nil {
+		t.Fatal(err)
+	}
+	payload, err := receiver.wait(context.Background(), peer)
+	if err != nil || string(payload) != "answer" {
+		t.Fatal("early reply lost", string(payload), err)
+	}
+	if _, exists := peer.channels.Load(command.Return); exists {
+		t.Fatal("one-shot channel retained")
+	}
+	if !peer.dispatchMessage(mosiMessage{Channel: command.Return, Payload: []byte("late")}, 4, time.Time{}) {
+		t.Fatal("late reply was not inert")
+	}
+}
+
+func TestMosiSendReturnsWhenMailboxIsFull(t *testing.T) {
+	peer := &mosiPeer{done: make(chan struct{}), outgoing: newMosiMailbox()}
+	peer.outgoing.bytes.Store(32 << 20)
+	finished := make(chan error, 1)
+	go func() { finished <- peer.post(mosiPacket{Kind: "ack"}) }()
+	select {
+	case err := <-finished:
+		if err == nil {
+			t.Fatal("full mailbox accepted an unaccounted frame")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("native send waited for mailbox space")
+	}
+}
+
+func TestMosiMailboxConcurrentPublication(t *testing.T) {
+	const producers, each = 8, 512
+	queue := newMosiMailbox()
+	var workers sync.WaitGroup
+	for producer := 0; producer < producers; producer++ {
+		workers.Add(1)
+		go func(producer int) {
+			defer workers.Done()
+			for item := 0; item < each; item++ {
+				if err := queue.push(mosiMessage{Channel: fmt.Sprint(producer), Payload: []byte(fmt.Sprint(item)), encoded: []byte{1}}); err != nil {
+					t.Error(err)
+					return
+				}
+			}
+		}(producer)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	seen := make(map[string]int)
+	for i := 0; i < producers*each; i++ {
+		message, err := queue.next(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(message.Payload) != fmt.Sprint(seen[message.Channel]) {
+			t.Fatal("producer order or multiplicity changed", message)
+		}
+		seen[message.Channel]++
+	}
+	workers.Wait()
+	if queue.len() != 0 || queue.bytes.Load() != 0 || len(seen) != producers {
+		t.Fatal("lost queue accounting")
+	}
+}
+
+func TestNodeResultChannelGCAndCancellationDeregister(t *testing.T) {
+	peer := &mosiPeer{done: make(chan struct{}), outgoing: newMosiMailbox()}
+	abandon := func() string {
+		name, receiver := peer.createResultChannel()
+		runtime.KeepAlive(receiver)
+		return name
+	}
+	name := abandon()
+	waitObjectGC(t, func() bool { _, exists := peer.channels.Load(name); return !exists })
+	name, receiver := peer.createResultChannel()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := receiver.wait(ctx, peer); err != context.Canceled {
+		t.Fatal("cancellation was lost", err)
+	}
+	if _, exists := peer.channels.Load(name); exists {
+		t.Fatal("cancelled waiter retained channel")
+	}
+}
+
+func TestMosiBulkAdmissionWakesAllProducersAfterDrain(t *testing.T) {
+	queue := newMosiMailbox()
+	queue.bytes.Store(9 << 20)
+	done := make(chan struct{})
+	defer close(done)
+	const producers = 8
+	finished := make(chan error, producers)
+	for i := 0; i < producers; i++ {
+		go func() { finished <- queue.admitBulk(done) }()
+	}
+	queue.bytes.Store(0)
+	select {
+	case queue.space <- struct{}{}:
+	default:
+	}
+	for i := 0; i < producers; i++ {
+		select {
+		case err := <-finished:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("drained mailbox stranded bulk producer")
+		}
 	}
 }
