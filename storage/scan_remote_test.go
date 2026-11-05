@@ -564,7 +564,7 @@ func TestClusterAuthenticationRejectsReplayedProof(t *testing.T) {
 	if err := readScanAuth(first, "scan.challenge", &original); err != nil {
 		t.Fatal(err)
 	}
-	client := scanChallenge{Version: scanWireVersion, Node: uuid.NewString(), Nonce: uuid.NewString()}
+	client := scanChallenge{Version: scanWireVersion, Node: uuid.NewString(), Boot: uuid.NewString(), Nonce: uuid.NewString(), Return: "scan.accept"}
 	client.Proof = scanAuthProof([]byte(testScanSecret), "client", original, client)
 	first.Close()
 	second := dial()
@@ -1826,5 +1826,72 @@ func TestRemoteUniqueOperationsUseCurrentTransactionParticipant(t *testing.T) {
 	}()
 	if failure == nil || !strings.Contains(fmt.Sprint(failure), "modified input requires its transaction participant") {
 		t.Fatal("ordinary physical input bypassed generation validation", failure)
+	}
+}
+
+// Raw WebSocket helpers for unauthenticated/replay attack fixtures only.
+func scanAuthMessage(conn *websocket.Conn, method string, input any) error {
+	data, err := marshalNode(input)
+	if err != nil {
+		return err
+	}
+	frame, err := encodeMosiMessage(mosiMessage{Channel: method, Payload: data})
+	if err != nil {
+		return err
+	}
+	return conn.WriteMessage(websocket.BinaryMessage, frame)
+}
+
+func readScanAuth(conn *websocket.Conn, method string, output any) error {
+	started := time.Now()
+	kind, frame, err := conn.ReadMessage()
+	if err != nil {
+		return err
+	}
+	if kind != websocket.BinaryMessage {
+		return fmt.Errorf("binary node authentication required")
+	}
+	if profile := activeClusterReceiveIO(); profile != nil {
+		profile.stats.operations.Add(1)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		ready := time.Now().Add(profile.latency)
+		if !profile.transfer(ctx, len(frame), started) || !profile.wait(ctx, ready) {
+			return fmt.Errorf("node authentication throttle deadline")
+		}
+	}
+	message, err := decodeMosiMessage(frame)
+	if err != nil || message.Channel != method {
+		return fmt.Errorf("invalid node authentication")
+	}
+	return unmarshalNode(message.Payload, output)
+}
+
+func TestClusterAuthenticationBindsItsReturnChannel(t *testing.T) {
+	_, _, endpoint := setupRemoteScanConnection(t)
+	address, _ := mosiEndpointURL(endpoint)
+	dialer := *websocket.DefaultDialer
+	dialer.Subprotocols = []string{mosiSubprotocol}
+	conn, _, err := dialer.Dial(address, http.Header{"X-Memcp-Role": []string{"scan"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	var server scanChallenge
+	if err := readScanAuth(conn, "scan.challenge", &server); err != nil {
+		t.Fatal(err)
+	}
+	client := scanChallenge{Version: scanWireVersion, Node: uuid.NewString(), Boot: uuid.NewString(), Nonce: uuid.NewString(), Return: "my-result"}
+	if !validScanChallenge(client) {
+		t.Fatal("attack fixture is otherwise invalid")
+	}
+	client.Proof = scanAuthProof([]byte(testScanSecret), "client", server, client)
+	client.Return = "redirected-result"
+	if err := scanAuthMessage(conn, server.Return, client); err != nil {
+		t.Fatal(err)
+	}
+	conn.SetReadDeadline(time.Now().Add(time.Second))
+	if _, _, err := conn.ReadMessage(); err == nil {
+		t.Fatal("tampered return-channel URI was authenticated")
 	}
 }

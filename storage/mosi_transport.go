@@ -236,12 +236,27 @@ func newMosiPeer(conn *websocket.Conn, initialize ...func(*mosiPeer)) *mosiPeer 
 	conn.SetReadLimit(mosiMaxMessageBytes)
 	conn.SetReadDeadline(time.Now().Add(15 * time.Second))
 	conn.SetPongHandler(func(string) error { return conn.SetReadDeadline(time.Now().Add(15 * time.Second)) })
-	// Publish immutable role/identity bindings before either network goroutine.
+	go p.write()
+	initialized := false
+	defer func() {
+		if !initialized {
+			p.close()
+			close(p.readDone)
+		}
+	}()
+	// Initialization may wait on authentication return channels. Publish all
+	// role/identity bindings before the permanent application reader starts.
 	for _, initialize := range initialize {
 		initialize(p)
 	}
-	go p.read()
-	go p.write()
+	conn.SetReadDeadline(time.Now().Add(15 * time.Second))
+	initialized = true
+	select {
+	case <-p.done:
+		close(p.readDone)
+	default:
+		go p.read()
+	}
 	go func() {
 		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()

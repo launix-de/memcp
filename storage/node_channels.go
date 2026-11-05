@@ -11,6 +11,7 @@ import "weak"
 import "context"
 import "strconv"
 import "runtime"
+import "github.com/gorilla/websocket"
 
 // A channel receives opaque bytes. Its adapter owns decoding and scheduling;
 // the transport has no request, response, Scheme or MOSI message types.
@@ -237,4 +238,40 @@ func registerReplicationChannels(p *mosiPeer, names []string, execute func(conte
 		registerNodeCommand(p, name, func(ctx context.Context, payload []byte) (any, error) { return execute(ctx, name, payload) })
 	}
 	registerMosiChannel(p, packet)
+}
+
+// readAuth is a bootstrap consumer wait. Its scoped channel uses the same raw
+// dispatcher as application handlers; only the socket writer sends messages.
+// The permanent reader starts after authentication publishes immutable identity.
+func (p *mosiPeer) readAuth(channel string, output any) error {
+	received := false
+	var decodeErr error
+	release := p.registerChannel(channel, func(_ *mosiPeer, payload []byte, _ int, _ time.Time) bool {
+		decodeErr = unmarshalNode(payload, output)
+		received = true
+		return decodeErr == nil
+	})
+	defer release()
+	started := time.Now()
+	kind, frame, err := p.conn.ReadMessage()
+	if err != nil {
+		return err
+	}
+	if kind != websocket.BinaryMessage {
+		return fmt.Errorf("binary node authentication required")
+	}
+	if profile := p.receiveIO; profile != nil {
+		profile.stats.operations.Add(1)
+		ctx, cancel := context.WithTimeout(p.ctx, 5*time.Second)
+		defer cancel()
+		ready := time.Now().Add(profile.latency)
+		if !profile.transfer(ctx, len(frame), started) || !profile.wait(ctx, ready) {
+			return fmt.Errorf("node authentication throttle deadline")
+		}
+	}
+	message, err := decodeMosiMessage(frame)
+	if err != nil || !p.dispatchMessage(message, len(frame), time.Time{}) || !received {
+		return fmt.Errorf("invalid node authentication")
+	}
+	return decodeErr
 }
