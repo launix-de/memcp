@@ -29,23 +29,21 @@ import "github.com/launix-de/memcp/scm"
 var nodeScans atomic.Pointer[nodeScanService]
 
 type nodeScanService struct {
-	procedureCache sync.Once
-	procedures     scm.Scmer // existing budgeted cachemap; contains pure code factories only
-	channelOnce    sync.Once
-	channels       sync.Map // shared registered channels survive peer reconnection
-	handles        sync.Map // fresh slot -> invocation-owned handle
-	nextHandle     atomic.Uint64
-	objects        clusterObjectRegistry
-	executions     sync.Map // invocation UUID -> worker TxContext, never persisted or serialized
-	id             string
-	cluster        *nodeCluster // immutable startup-owned adapter; nil for standalone object endpoints
-	secret         []byte
-	release        func()
-	mu             sync.Mutex
-	peers          map[*mosiPeer]bool
-	stopping       bool
-	connections    sync.WaitGroup
-	slots          chan struct{}
+	channelOnce sync.Once
+	channels    sync.Map // shared registered channels survive peer reconnection
+	handles     sync.Map // fresh slot -> invocation-owned handle
+	nextHandle  atomic.Uint64
+	objects     clusterObjectRegistry
+	executions  sync.Map // invocation UUID -> worker TxContext, never persisted or serialized
+	id          string
+	cluster     *nodeCluster // immutable startup-owned adapter; nil for standalone object endpoints
+	secret      []byte
+	release     func()
+	mu          sync.Mutex
+	peers       map[*mosiPeer]bool
+	stopping    bool
+	connections sync.WaitGroup
+	slots       chan struct{}
 }
 
 type scanChallenge struct {

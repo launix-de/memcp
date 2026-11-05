@@ -22,67 +22,27 @@ import "testing"
 import "runtime"
 import "encoding/json"
 
-func TestProcedureFactoryReusesCaptureFreeCode(t *testing.T) {
-	entries := make(map[string]Scmer)
-	compilations := 0
-	cache := func(key string, create func() Scmer) Scmer {
-		if value, ok := entries[key]; ok {
-			return value
-		}
-		compilations++
-		value := create()
-		entries[key] = value
-		return value
+func TestLambdaRebindCaptureFreeCode(t *testing.T) {
+	old := Eval(Read(t.Name(), `(lambda (x) (+ x 7))`, false), &Globalenv)
+	left, right := LambdaRebind(old), LambdaRebind(old)
+	if left.Proc().Body != right.Proc().Body {
+		t.Fatal("copied code per binding")
 	}
-	left := compileProcedureFactory(Read(t.Name(), `(lambda (x) (+ x 7))`, false), cache)
-	right := compileProcedureFactory(Read(t.Name(), `(lambda (x) (+ x 7))`, false), cache)
-	if compilations != 1 || left != right {
-		t.Fatal("capture-free code rebuilt an invocation closure", compilations)
+	if jitEnabled && (left.Proc().nativeCode() == 0 || left.Proc().nativeCode() != right.Proc().nativeCode()) {
+		t.Fatal("compiled different code")
 	}
 	if Apply(left, NewInt(4)).Int() != 11 || Apply(right, NewInt(8)).Int() != 15 {
-		t.Fatal("shared code retained invocation arguments")
+		t.Fatal("context-free result changed")
 	}
 }
-
-func TestProcedureFactoryKeepsInvocationCapturesPrivate(t *testing.T) {
-	if !jitEnabled {
-		t.Skip("requires native factory compilation")
-	}
-	entries := make(map[string]Scmer)
-	compilations := 0
-	cache := func(key string, create func() Scmer) Scmer {
-		if value, exists := entries[key]; exists {
-			return value
-		}
-		compilations++
-		value := create()
-		entries[key] = value
-		return value
-	}
+func TestLambdaRebindNativeCapturesPrivate(t *testing.T) {
+	syntax := Read(t.Name(), `(lambda (x) (list (callback x) ((lambda (y) (callback y)) (+ x 1)) '("literal" 7)))`, false)
+	original := Eval(syntax, &Env{Vars: Vars{Symbol("callback"): NewFunc(func(args ...Scmer) Scmer { return args[0] })}, Outer: &Globalenv})
 	var callbacks []Scmer
-	for index := 0; index < 64; index++ {
-		offset := int64(index * 100)
+	for i := 0; i < 64; i++ {
+		offset := int64(i * 100)
 		callback := NewFunc(func(args ...Scmer) Scmer { return NewInt(offset + args[0].Int()) })
-		expression := Read(t.Name(), `(lambda (x) (list (callback x) ((lambda (y) (callback y)) (+ x 1)) '("literal" 7)))`, false)
-		// Stand in for an invocation-local reconstructed native callback.
-		var bind func(Scmer) Scmer
-		bind = func(value Scmer) Scmer {
-			if value.IsSymbol() && value.SymbolEquals("callback") {
-				return callback
-			}
-			if !value.IsSlice() {
-				return value
-			}
-			items := append([]Scmer(nil), value.Slice()...)
-			for i := range items {
-				items[i] = bind(items[i])
-			}
-			return NewSlice(items)
-		}
-		callbacks = append(callbacks, compileProcedureFactory(bind(expression), cache))
-	}
-	if compilations != 1 {
-		t.Fatalf("compiled %d factories for identical code", compilations)
+		callbacks = append(callbacks, LambdaRebind(original, callback))
 	}
 	var calls sync.WaitGroup
 	for index, callback := range callbacks {
@@ -91,7 +51,7 @@ func TestProcedureFactoryKeepsInvocationCapturesPrivate(t *testing.T) {
 		go func() {
 			defer calls.Done()
 			if result := Apply(callback, NewInt(3)); !Equal(result, expected) {
-				t.Errorf("invocation %d: %s, expected %s", index, String(result), String(expected))
+				t.Errorf("context %d: %s, want %s", index, String(result), String(expected))
 			}
 		}()
 	}
@@ -1047,36 +1007,36 @@ type procedureFactoryMarker struct {
 }
 
 //go:noinline
-func collectableProcedureFactoryCapture(t *testing.T, cache func(string, func() Scmer) Scmer) weak.Pointer[procedureFactoryMarker] {
+func collectableLambdaContext(t *testing.T, literal bool) (*lambdaPlan, weak.Pointer[procedureFactoryMarker]) {
 	marker := &procedureFactoryMarker{value: 17}
-	expression := NewSlice([]Scmer{NewSymbol("lambda"), NewSlice(nil), NewAny(marker)})
-	bound := compileProcedureFactory(expression, cache)
+	var source Scmer
+	if literal {
+		source = NewProcStruct(Proc{Params: NewSlice(nil), Body: NewAny(marker), En: &Globalenv})
+	} else {
+		source = Eval(Read(t.Name(), `(lambda () marker)`, false), &Env{Vars: Vars{Symbol("marker"): NewAny(marker)}, Outer: &Globalenv})
+	}
+	plan := procedureLambdaPlan(source.Proc())
+	bound := LambdaRebind(source, NewAny(marker))
 	if Apply(bound).Any().(*procedureFactoryMarker).value != 17 {
-		t.Fatal("factory changed its capture")
+		t.Fatal("context changed")
 	}
-	return weak.Make(marker)
+	return plan, weak.Make(marker)
 }
-
-func TestProcedureFactoryCacheDoesNotRetainInvocation(t *testing.T) {
-	entries := make(map[string]Scmer)
-	cache := func(key string, create func() Scmer) Scmer {
-		if value, ok := entries[key]; ok {
-			return value
-		}
-		value := create()
-		entries[key] = value
-		return value
+func TestLambdaPlanDoesNotRetainInvocation(t *testing.T) {
+	for _, literal := range []bool{false, true} {
+		t.Run(fmt.Sprint(literal), func(t *testing.T) {
+			plan, marker := collectableLambdaContext(t, literal)
+			deadline := time.Now().Add(3 * time.Second)
+			for marker.Value() != nil && time.Now().Before(deadline) {
+				runtime.GC()
+				time.Sleep(time.Millisecond)
+			}
+			if marker.Value() != nil {
+				t.Fatal("code plan retained an invocation capture")
+			}
+			runtime.KeepAlive(plan)
+		})
 	}
-	marker := collectableProcedureFactoryCapture(t, cache)
-	deadline := time.Now().Add(3 * time.Second)
-	for marker.Value() != nil && time.Now().Before(deadline) {
-		runtime.GC()
-		time.Sleep(time.Millisecond)
-	}
-	if marker.Value() != nil {
-		t.Fatal("pure factory cache retained a completed invocation")
-	}
-	runtime.KeepAlive(entries)
 }
 
 func TestOutputAndForwardedRepliesSurviveGCWhileWorkIsPending(t *testing.T) {

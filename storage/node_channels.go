@@ -62,8 +62,10 @@ func workerChannel(receive func(*mosiPeer, []byte) error, finished ...func()) sc
 			p.packetBytes.Add(-int64(size))
 			return false
 		}
+		epoch := p.holdReceivedValues()
 		p.workers.Add(1)
 		go func() {
+			defer epoch.leave()
 			for _, finish := range finished {
 				defer finish()
 			}
@@ -218,6 +220,7 @@ func registerScanChannels(p *mosiPeer, session *scanRPCSession) {
 	p.channels = &session.service.channels
 	p.scanSession = session
 	session.service.channelOnce.Do(func() {
+		registerValueChannels(p)
 		// No per-retired-channel tombstones: a state-free disposer returns
 		// unused native grants carried by late deliveries after deregistration.
 		p.channels.Store("", workerChannel(func(peer *mosiPeer, payload []byte) error {

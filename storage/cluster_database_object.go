@@ -68,7 +68,7 @@ func (database *database) executeClusterRequest(ctx context.Context, call scm.Cl
 				mu.Unlock()
 				return
 			}
-			ref, err := s.service.exportObject(s.peer, shard, view)
+			ref, err := s.service.exportObject(s.peer, shard, view, nil)
 			if err != nil {
 				mu.Lock()
 				scanErr = err

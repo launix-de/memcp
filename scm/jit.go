@@ -3160,15 +3160,18 @@ func (proc *Proc) JITCapturedLocals() (base int, captures []Scmer) {
 // independently of executable mappings, so their serialized body must not
 // depend on the process-local capture tail.
 func closeJITProcedureCaptures(expr Scmer, captureBase int, captures []Scmer, depth int) Scmer {
+	return transformJITCaptures(expr, captureBase, len(captures), depth, func(index int) Scmer { return closedCaptureLiteral(captures[index]) })
+}
+func transformJITCaptures(expr Scmer, captureBase, count, depth int, capture func(int) Scmer) Scmer {
 	if expr.IsSourceInfo() {
 		source := *expr.SourceInfo()
-		source.value = closeJITProcedureCaptures(source.value, captureBase, captures, depth)
+		source.value = transformJITCaptures(source.value, captureBase, count, depth, capture)
 		return NewSourceInfo(source)
 	}
 	if depth == 0 && expr.IsNthLocalVar() {
 		index := int(expr.NthLocalVar()) - captureBase
-		if index >= 0 && index < len(captures) {
-			return closedCaptureLiteral(captures[index])
+		if index >= 0 && index < count {
+			return capture(index)
 		}
 		return expr
 	}
@@ -3188,8 +3191,8 @@ func closeJITProcedureCaptures(expr Scmer, captureBase int, captures []Scmer, de
 		key := items[2].WithoutSourceInfo()
 		if validDepth && int(outerDepth) == depth && key.IsNthLocalVar() {
 			index := int(key.NthLocalVar()) - captureBase
-			if index >= 0 && index < len(captures) {
-				return closedCaptureLiteral(captures[index])
+			if index >= 0 && index < count {
+				return capture(index)
 			}
 		}
 	}
@@ -3198,34 +3201,34 @@ func closeJITProcedureCaptures(expr Scmer, captureBase int, captures []Scmer, de
 		switch head {
 		case Symbol("lambda"):
 			if len(items) >= 3 {
-				bound[2] = closeJITProcedureCaptures(items[2], captureBase, captures, depth+1)
+				bound[2] = transformJITCaptures(items[2], captureBase, count, depth+1, capture)
 			}
 			return NewSlice(bound)
 		case Symbol("begin"):
 			for index := 1; index < len(items); index++ {
-				bound[index] = closeJITProcedureCaptures(items[index], captureBase, captures, depth+1)
+				bound[index] = transformJITCaptures(items[index], captureBase, count, depth+1, capture)
 			}
 			return NewSlice(bound)
 		case Symbol("begin_mut"):
 			if len(items) > 1 {
-				bound[1] = closeJITProcedureCaptures(items[1], captureBase, captures, depth)
+				bound[1] = transformJITCaptures(items[1], captureBase, count, depth, capture)
 			}
 			for index := 2; index < len(items); index++ {
-				bound[index] = closeJITProcedureCaptures(items[index], captureBase, captures, depth+1)
+				bound[index] = transformJITCaptures(items[index], captureBase, count, depth+1, capture)
 			}
 			return NewSlice(bound)
 		case Symbol("match"), Symbol("match_mut"):
 			if len(items) > 1 {
-				bound[1] = closeJITProcedureCaptures(items[1], captureBase, captures, depth)
+				bound[1] = transformJITCaptures(items[1], captureBase, count, depth, capture)
 			}
 			for index := 3; index < len(items); index += 2 {
-				bound[index] = closeJITProcedureCaptures(items[index], captureBase, captures, depth+1)
+				bound[index] = transformJITCaptures(items[index], captureBase, count, depth+1, capture)
 			}
 			return NewSlice(bound)
 		}
 	}
 	for index, item := range items {
-		bound[index] = closeJITProcedureCaptures(item, captureBase, captures, depth)
+		bound[index] = transformJITCaptures(item, captureBase, count, depth, capture)
 	}
 	return NewSlice(bound)
 }

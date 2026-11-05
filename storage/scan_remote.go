@@ -49,6 +49,7 @@ type remoteScanDescribe struct {
 }
 
 type remoteScanTask struct {
+	bindings      *scm.SerializationContext
 	AcquireFrom   string                `json:"acquire_from,omitempty"` // owner explicitly refused capacity before execution
 	Order         *remoteScanOrder      `json:"order,omitempty"`
 	Operator      shardScanOperator     `json:"operator"`
@@ -66,6 +67,7 @@ type remoteScanTask struct {
 	Neutral       []byte                `json:"neutral"`
 }
 type remoteScanResult struct {
+	bindings *scm.SerializationContext
 	Redirect       *clusterScanRedirect `json:"redirect,omitempty"` // routing refusal before acquiring payload or executing callbacks
 	Rejected       bool                 `json:"rejected,omitempty"` // capacity refusal before executing scan callbacks
 	Version        int                  `json:"version"`
@@ -244,19 +246,21 @@ func (database *database) executeScanTask(ctx context.Context, s *scanRPCSession
 		}
 		result := value.(scanResult)
 		var offered []scm.ClusterReference
-		bindings := (&scm.SerializationContext{}).WithExport(func(object scm.ClusterObject, view scm.Scmer) (scm.ClusterReference, error) {
-			ref, err := s.service.exportObject(s.peer, object, view)
+		var bindings *scm.SerializationContext
+		bindings = (&scm.SerializationContext{}).WithExport(func(object scm.ClusterObject, view scm.Scmer) (scm.ClusterReference, error) {
+			ref, err := s.service.exportObject(s.peer, object, view, bindings)
 			if err == nil {
 				offered = append(offered, ref)
 			}
 			return ref, err
 		})
+		bindings = bindings.WithPeer(s.peer.valuePeer())
 		encoded, err := freezeScanValue(result.res, bindings)
 		if err != nil {
 			s.service.cancelObjectOffers(s.peer, offered)
 			return err
 		}
-		output = remoteScanResult{Version: scanWireVersion, Shard: request.Shard, Value: []byte(encoded), OutCount: result.outCount, InputCount: result.inputCount, CandidateCount: result.candidateCount}
+		output = remoteScanResult{bindings: bindings, Version: scanWireVersion, Shard: request.Shard, Value: []byte(encoded), OutCount: result.outCount, InputCount: result.inputCount, CandidateCount: result.candidateCount}
 		return nil
 	})
 	if busy, ok := err.(uniqueReservationBusy); ok {
@@ -292,8 +296,9 @@ func (database *database) executeScanTask(ctx context.Context, s *scanRPCSession
 // The measured faster path retains the first encoding. The frame encoder
 // still bounds the actual outer message, including headers, at send time.
 type encodedReply struct {
-	data   []byte
-	offers []scm.ClusterReference
+	bindings *scm.SerializationContext
+	data     []byte
+	offers   []scm.ClusterReference
 }
 
 func (reply encodedReply) ClusterObjectOffers() []scm.ClusterReference { return reply.offers }
@@ -309,7 +314,13 @@ func boundedScanReply(value any) (any, error) {
 	if source, ok := value.(interface{ ClusterObjectOffers() []scm.ClusterReference }); ok {
 		offers = source.ClusterObjectOffers()
 	}
-	return encodedReply{data, offers}, nil
+	var bindings *scm.SerializationContext
+	if source, ok := value.(interface {
+		serializationBindings() *scm.SerializationContext
+	}); ok {
+		bindings = source.serializationBindings()
+	}
+	return encodedReply{data: data, offers: offers, bindings: bindings}, nil
 }
 
 // Acquire through the same schema/shard MOSI and generation lifetime boundaries
@@ -501,7 +512,7 @@ func (origin *peerScanExecutor) ExecuteShardScan(resource mosiResource, invocati
 		}
 	}()
 	bindings = bindings.WithExport(func(object scm.ClusterObject, view scm.Scmer) (scm.ClusterReference, error) {
-		ref, err := executor.peer.scanService.exportObject(executor.peer, object, view)
+		ref, err := executor.peer.scanService.exportObject(executor.peer, object, view, bindings)
 		if err == nil {
 			offers = append(offers, ref)
 		}
@@ -524,7 +535,7 @@ func (origin *peerScanExecutor) ExecuteShardScan(resource mosiResource, invocati
 	if err != nil {
 		panic(err)
 	}
-	task := remoteScanTask{AcquireFrom: executor.acquireFrom, Operator: invocation.operator, Stride: invocation.stride, Input: executor.input, Version: scanWireVersion, Shard: executor.prepared, FilterColumns: invocation.conditionCols, Filter: filter, MapColumns: invocation.callbackCols, MapReducer: reducer, Neutral: []byte(neutral)}
+	task := remoteScanTask{bindings: bindings, AcquireFrom: executor.acquireFrom, Operator: invocation.operator, Stride: invocation.stride, Input: executor.input, Version: scanWireVersion, Shard: executor.prepared, FilterColumns: invocation.conditionCols, Filter: filter, MapColumns: invocation.callbackCols, MapReducer: reducer, Neutral: []byte(neutral)}
 	if invocation.order != nil {
 		task.Order, err = freezeScanOrder(invocation.order, bindings)
 		if err != nil {
@@ -560,7 +571,7 @@ func (origin *peerScanExecutor) ExecuteShardScan(resource mosiResource, invocati
 		if err != nil {
 			panic(err)
 		}
-		ref, err := executor.peer.scanService.exportObject(executor.peer, invocation.tx.transactionState, view)
+		ref, err := executor.peer.scanService.exportObject(executor.peer, invocation.tx.transactionState, view, bindings)
 		if err != nil {
 			panic(err)
 		}
@@ -631,6 +642,17 @@ func bindProcedureScanContext(value, queryContext scm.Scmer) scm.Scmer {
 	}
 	if storageProcedureSymbol(items[0], "quote") {
 		return value
+	}
+	if len(items) >= 2 && storageProcedureSymbol(items[0], "lambda_rebind") {
+		callee := items[1].WithoutSourceInfo()
+		if callee.IsSlice() && len(callee.Slice()) == 2 && storageProcedureSymbol(callee.Slice()[0], "cluster_value") {
+			result := make([]scm.Scmer, len(items)+1)
+			for i, item := range items {
+				result[i] = bindProcedureScanContext(item, queryContext)
+			}
+			result[len(items)] = queryContext
+			return scm.NewSlice(result)
+		}
 	}
 	var result []scm.Scmer
 	for i, item := range items {
@@ -732,7 +754,7 @@ func (s *scanRPCSession) beginInvocation(ctx context.Context, transaction *scm.C
 	s.service.executions.Store(id, tx)
 
 	binding := scm.NewAny(tx)
-	decode := scm.ProcedureDecode{Cache: s.service.cachedProcedure, ResolveHandle: s.service.handleResolver(ctx, s.peer, scm.NewAny(tx)), Prepare: prepareScanProcedure(binding), Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) {
+	decode := scm.ProcedureDecode{ResolveHandle: s.service.handleResolver(ctx, s.peer, scm.NewAny(tx)), Prepare: prepareScanProcedure(binding), Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) {
 		value, err := s.service.importObject(ctx, s.peer, ref)
 		if err != nil {
 			return scm.NewNil(), err
@@ -748,11 +770,6 @@ func (s *scanRPCSession) beginInvocation(ctx context.Context, transaction *scm.C
 		}
 		tx.endQuery(seq)
 	}}, nil
-}
-
-func (service *nodeScanService) cachedProcedure(key string, create func() scm.Scmer) scm.Scmer {
-	service.procedureCache.Do(func() { service.procedures = NewCacheMap() })
-	return scm.Apply(service.procedures, scm.NewString(key), scm.NewNil(), scm.NewFunc(func(...scm.Scmer) scm.Scmer { return create() }))
 }
 
 // Scan handlers encode their fixed parameters directly. Only expressions and
@@ -1083,3 +1100,10 @@ func (r *nodeReader) description() remoteScanDescription {
 	}
 	return parts
 }
+
+func (task remoteScanTask) serializationBindings() *scm.SerializationContext { return task.bindings }
+func (result remoteScanResult) serializationBindings() *scm.SerializationContext {
+	return result.bindings
+}
+
+func (value encodedReply) serializationBindings() *scm.SerializationContext { return value.bindings }

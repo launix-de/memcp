@@ -25,9 +25,10 @@ import "github.com/launix-de/go-mysqlstack/sqldb"
 // delivered as slot + payload through the ordinary handle registry. Cancelling never interrupts a shard's item
 // loop: it fences new shard tasks and is inherited by nested scan invocations.
 type scanCompletion struct {
-	Offers []scm.ClusterReference `json:"offers,omitempty"`
-	Data   []byte                 `json:"data,omitempty"`
-	Panic  *scanPanic             `json:"panic,omitempty"`
+	bindings *scm.SerializationContext
+	Offers   []scm.ClusterReference `json:"offers,omitempty"`
+	Data     []byte                 `json:"data,omitempty"`
+	Panic    *scanPanic             `json:"panic,omitempty"`
 }
 type scanPanic struct {
 	SQL     *sqldb.SQLError `json:"sql,omitempty"`
@@ -363,6 +364,7 @@ func (s *scanRPCSession) receiveInvocation(ctx context.Context, method string, p
 		return nil, fmt.Errorf("invalid operation identity")
 	}
 	completion := scanCompletion{}
+	defer func() { completion.bindings.Queued(); queuedValuePublications(completion.Offers) }()
 	defer s.service.discardObjectOffers(s.peer, offers)
 	func() {
 		defer func() {
@@ -378,6 +380,11 @@ func (s *scanRPCSession) receiveInvocation(ctx context.Context, method string, p
 		value, err := s.handle(scope.ctx, method, data)
 		if err != nil {
 			panic(err)
+		}
+		if source, ok := value.(interface {
+			serializationBindings() *scm.SerializationContext
+		}); ok {
+			completion.bindings = source.serializationBindings()
 		}
 		if exported, ok := value.(interface{ ClusterObjectOffers() []scm.ClusterReference }); ok {
 			completion.Offers = transferManifest(exported.ClusterObjectOffers())
@@ -549,6 +556,12 @@ func (handle *controlResultHandle) receive(payload []byte) error {
 // registry. Waiting belongs to the control operation's collector, never a held
 // send handle, native shard lock or long-lived per-call connection.
 func (service *nodeScanService) control(ctx context.Context, peer *mosiPeer, method string, input, output any, joinOnCancel bool, offers ...scm.ClusterReference) error {
+	defer queuedValuePublications(offers)
+	if source, ok := input.(interface {
+		serializationBindings() *scm.SerializationContext
+	}); ok {
+		defer source.serializationBindings().Queued()
+	}
 	queued := false
 	defer func() {
 		if !queued {

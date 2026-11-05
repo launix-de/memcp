@@ -73,6 +73,9 @@ func registerMosiRole(role string, handler http.Handler) (func(), error) {
 // Payload handlers and storage I/O never run under its registry/order mutex.
 // Consumers observe disconnect through done; no write is retried here.
 type mosiPeer struct {
+	valueOnce         sync.Once
+	values            atomic.Pointer[scm.SerializationPeer]
+	valueEpoch        atomic.Pointer[valueReceiveEpoch]
 	viewMu            sync.Mutex
 	declaredViews     map[string]int // sender knowledge, published only after enqueue
 	declaredViewBytes int
@@ -285,6 +288,9 @@ func (p *mosiPeer) wait() {
 	<-p.writeDone
 	p.packets.Wait()
 	p.workers.Wait()
+	if values := p.values.Load(); values != nil {
+		values.Close()
+	}
 }
 
 // Retirement can run inside an RPC worker on this peer. Join the reader and
@@ -449,8 +455,10 @@ func (p *mosiPeer) dispatchPacket(packet *mosiPacket, size int, readyAt time.Tim
 	}
 	p.packetOrder[key] = done
 	p.mu.Unlock()
+	epoch := p.holdReceivedValues()
 	p.packets.Add(1)
 	go func() {
+		defer epoch.leave()
 		defer p.packets.Done()
 		defer p.packetBytes.Add(-int64(size))
 		defer func() {

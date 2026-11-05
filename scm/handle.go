@@ -176,7 +176,7 @@ func (bindings *SerializationContext) WithHandleExport(export func(Handle) (Scme
 	if bindings.root != nil {
 		root = bindings.root
 	}
-	return &SerializationContext{Export: bindings.Export, ExportHandle: export, root: root}
+	return &SerializationContext{Peer: bindings.Peer, publication: bindings.publication, Export: bindings.Export, ExportHandle: export, root: root}
 }
 func (bindings *SerializationContext) InvocationScope() Scmer {
 	if bindings.root != nil {
@@ -186,6 +186,8 @@ func (bindings *SerializationContext) InvocationScope() Scmer {
 }
 
 func initHandles() {
+	initLambdaRebind()
+	initClusterValues()
 	Declare(&Globalenv, &Declaration{Name: "cluster_handle", Fn: func(...Scmer) Scmer {
 		panic("handle requires a peer reconstruction context")
 	}, Type: &TypeDescriptor{Kind: "func", HasSideEffects: true, Params: []*TypeDescriptor{{Kind: "int"}}, Return: &TypeDescriptor{Kind: "any"}}})

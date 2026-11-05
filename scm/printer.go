@@ -24,6 +24,7 @@ import "math"
 import "bytes"
 import "strconv"
 import "strings"
+import "unsafe"
 
 var schemeStringEscaper = strings.NewReplacer("\\", "\\\\", "\"", "\\\"", "\r", "\\r", "\n", "\\n")
 
@@ -309,6 +310,26 @@ func serializeEx(b *schemeTextWriter, v Scmer, en *Env, glob *Env, p *Proc) {
 		b.WriteString(")")
 		return
 	}
+	if b.objects != nil && b.objects.Peer != nil && lambdaProcedure(v) != nil {
+		if id := b.literals[v]; id != 0 {
+			serializeEx(b, NewSlice([]Scmer{NewSymbol("serialized_value"), NewInt(id), NewNil()}), glob, glob, nil)
+			return
+		}
+		if expression, ok, err := b.objects.cachedValue(v); err != nil {
+			panic(err)
+		} else if ok {
+			if b.literals == nil {
+				b.literals = make(map[Scmer]int64)
+			}
+			id := b.literals[v]
+			if id == 0 {
+				id = int64(len(b.literals) + len(b.references) + 1)
+				b.literals[v] = id
+			}
+			serializeEx(b, NewSlice([]Scmer{NewSymbol("serialized_value"), NewInt(id), expression}), glob, glob, nil)
+			return
+		}
+	}
 	if b.objects != nil && v.GetTag() == tagAny {
 		if handle, ok := v.Any().(Handle); ok {
 			expression, err := b.objects.HandleExpression(handle)
@@ -509,7 +530,15 @@ func serializeEx(b *schemeTextWriter, v Scmer, en *Env, glob *Env, p *Proc) {
 		}
 		serializeProcShallow(b, v.Proc().snapshot(), glob)
 	case tagFastDict:
-		if b.objects != nil && b.objects.Export != nil && v.FastDict() != nil && len(v.FastDict().Pairs) >= 512 {
+		if b.objects != nil && b.objects.Peer != nil {
+			if expression, ok, err := b.objects.cachedValue(v); err != nil {
+				panic(err)
+			} else if ok {
+				serializeEx(b, expression, glob, glob, nil)
+				return
+			}
+		}
+		if b.objects != nil && b.objects.Peer == nil && b.objects.Export != nil && v.FastDict() != nil && len(v.FastDict().Pairs) >= 512 {
 			literal, err := b.objects.literal(v)
 			if err != nil {
 				panic(err)
@@ -666,7 +695,8 @@ func serializeNativeFunc(b *schemeTextWriter, fn any, en *Env) {
 	switch f := fn.(type) {
 	case func(...Scmer) Scmer:
 		if proc := JITProcForFunction(f); proc != nil {
-			serializeProcShallow(b, *proc, &Globalenv)
+			closed := CloseProcedure(Scmer{(*byte)(unsafe.Pointer(proc)), makeAux(tagProc, 0)})
+			serializeProcShallow(b, closed.Proc().snapshot(), &Globalenv)
 			return
 		}
 		if col, rev, ok := LookupCollate(f); ok {
@@ -771,6 +801,14 @@ func prettyLines(v Scmer, glob *Env, width int, indent int) []string {
 // Ordinary quoted source remains inert, including literal cluster_object forms.
 func serializeClusterLiteral(b *schemeTextWriter, value Scmer, glob *Env) {
 	value = value.WithoutSourceInfo()
+	if b.objects != nil && b.objects.Peer != nil && (value.IsSlice() || value.IsFastDict() || value.IsString()) {
+		if expression, ok, err := b.objects.cachedValue(value); err != nil {
+			panic(err)
+		} else if ok {
+			serializeEx(b, expression, glob, glob, nil)
+			return
+		}
+	}
 	if value.IsSlice() {
 		b.WriteString("(list")
 		for _, item := range value.Slice() {

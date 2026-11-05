@@ -44,12 +44,13 @@ type ClusterRequest struct {
 // Duplicate imports share that grant; late GC never revokes a newer grant.
 // View is an immutable invocation view, not the shared endpoint's mutable state.
 type ClusterReference struct {
-	URI         string `json:"uri"`
-	Owner       string `json:"owner"`
-	Incarnation string `json:"incarnation"`
-	Token       string `json:"token"`
-	Type        string `json:"type"`
-	View        []byte `json:"view"`
+	Publication *SerializationContext `json:"-"`
+	URI         string                `json:"uri"`
+	Owner       string                `json:"owner"`
+	Incarnation string                `json:"incarnation"`
+	Token       string                `json:"token"`
+	Type        string                `json:"type"`
+	View        []byte                `json:"view"`
 }
 
 // ClusterHandle is owned by the imported value, not by a transport registry.
@@ -122,6 +123,8 @@ func ClusterObjectOf(value Scmer) (ClusterObject, bool) {
 // callback captures, for every object type alike. Objects produce their own
 // immutable view once; each target peer gets a distinct registered handle.
 type SerializationContext struct {
+	Peer         *SerializationPeer
+	publication  *serializationPublication
 	ExportHandle func(Handle) (Scmer, error)
 	Invocation   Scmer // native owner of invocation-scoped exported callbacks
 	Export       func(ClusterObject, Scmer) (ClusterReference, error)
@@ -213,9 +216,6 @@ func ClusterReferenceExpression(ref ClusterReference) Scmer {
 // Eval builds the callback, never lazily during its row execution.
 type ProcedureDecode struct {
 	ResolveHandle func(uint64) (Handle, error)
-	// Cache owns only compiled code factories. Captures and invocation state
-	// are supplied anew on every reconstruction, never retained by the cache.
-	Cache func(string, func() Scmer) Scmer
 	// Prepare is an optional embedding-owned transformation of the validated
 	// lambda. SCM knows neither the host's operators nor its execution context.
 	Prepare func(Scmer) (Scmer, error)
@@ -230,15 +230,28 @@ type ClusterReadProjection interface {
 
 func (bindings *SerializationContext) WithExport(export func(ClusterObject, Scmer) (ClusterReference, error)) *SerializationContext {
 	handles := bindings.ExportHandle
+	peer, publication := bindings.Peer, bindings.publication
 	if bindings.root != nil {
 		bindings = bindings.root
 	}
-	return &SerializationContext{Export: export, ExportHandle: handles, root: bindings}
+	return &SerializationContext{Peer: peer, publication: publication, Export: export, ExportHandle: handles, root: bindings}
 }
 
 // Collect demands before Serialize exports the first object. Runtime lists and
 // dictionaries contain values; their symbols are never interpreted as calls.
 func (bindings *SerializationContext) prepare(value Scmer, literal bool) {
+	if bindings.Peer != nil {
+		if proc := lambdaProcedure(value); proc != nil {
+			snapshot := bindings.lambdaContext(proc)
+			if !snapshot.prepared.CompareAndSwap(false, true) {
+				return
+			}
+			for _, capture := range snapshot.values {
+				bindings.prepare(capture, true)
+			}
+			return
+		}
+	}
 	if bindings.root != nil {
 		bindings = bindings.root
 	}

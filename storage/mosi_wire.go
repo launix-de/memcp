@@ -26,7 +26,7 @@ import "github.com/launix-de/memcp/scm"
 const mosiPacketBytes = 64 * 1024
 
 const mosiHTTPPath = "/cluster"
-const mosiSubprotocol = "memcp.channels.v7"
+const mosiSubprotocol = "memcp.channels.v8"
 const mosiMaxMessageBytes = 256 * 1024
 const maxNodeRecordBytes = 32 * 1024 * 1024
 
@@ -1159,6 +1159,9 @@ type mosiPacket struct {
 }
 
 func (peer *mosiPeer) post(packet mosiPacket) error {
+	if packet.Capture != nil {
+		defer packet.Capture.Publication.Queued()
+	}
 	if peer.scanService != nil && peer.scanService.cluster != nil {
 		if packet.From == "" {
 			packet.From = peer.scanService.cluster.self.ID

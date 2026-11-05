@@ -134,7 +134,7 @@ func (capture *liveShardTransfer) export(peer *mosiPeer) (scm.ClusterReference, 
 		return scm.ClusterReference{}, fmt.Errorf("live shard transfer has finished")
 	}
 	capture.peer = peer
-	return capture.manager.cluster.service.exportObject(peer, capture, scm.NewNil())
+	return capture.manager.cluster.service.exportObject(peer, capture, scm.NewNil(), nil)
 }
 
 func (capture *liveShardTransfer) executeClusterRequest(ctx context.Context, request scm.ClusterRequest) (any, error) {
@@ -454,7 +454,7 @@ func (capture *liveShardTransfer) write(writer io.Writer) error {
 			if tx.coordinator != nil {
 				ref = tx.coordinator.Reference
 			} else {
-				ref, err = capture.manager.cluster.service.exportObject(capture.peer, tx.transactionState, view)
+				ref, err = capture.manager.cluster.service.exportObject(capture.peer, tx.transactionState, view, nil)
 			}
 			if err != nil {
 				return err
@@ -743,7 +743,7 @@ func (cluster *nodeCluster) installLiveShard(cell *replicaCell, packet mosiPacke
 		complete = true
 		for _, st := range overlays {
 			view := scm.NewSlice([]scm.Scmer{scm.NewString(st.shardUUID.String()), scm.NewString(st.clusterTxID), scm.NewString(cluster.self.ID)})
-			ref, err := cluster.service.exportObject(peer, st, view)
+			ref, err := cluster.service.exportObject(peer, st, view, nil)
 			if err != nil {
 				return err
 			}

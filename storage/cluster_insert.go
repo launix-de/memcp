@@ -157,6 +157,7 @@ func (r *replicationManager) mergeClusterInsertTopology(previous, incoming *tabl
 // An INSERT is one operation, not a dispatch acknowledgement followed by a
 // replay. Defaults, ID reservation, UNIQUE checking and callbacks run together.
 type remoteInsertTask struct {
+	bindings         *scm.SerializationContext
 	Version          int                   `json:"version"`
 	Database         string                `json:"database"`
 	Table            string                `json:"table"`
@@ -296,8 +297,9 @@ func (t *table) sendInsert(peer *mosiPeer, columns []string, rows [][]scm.Scmer,
 			service.cancelObjectOffers(peer, offers)
 		}
 	}()
-	bindings := (&scm.SerializationContext{Invocation: scm.NewAny(owner)}).WithExport(func(object scm.ClusterObject, view scm.Scmer) (scm.ClusterReference, error) {
-		ref, err := service.exportObject(peer, object, view)
+	var bindings *scm.SerializationContext
+	bindings = (&scm.SerializationContext{Invocation: scm.NewAny(owner)}).WithExport(func(object scm.ClusterObject, view scm.Scmer) (scm.ClusterReference, error) {
+		ref, err := service.exportObject(peer, object, view, bindings)
 		if err == nil {
 			offers = append(offers, ref)
 		}
@@ -316,13 +318,13 @@ func (t *table) sendInsert(peer *mosiPeer, columns []string, rows [][]scm.Scmer,
 	if err != nil {
 		panic(err)
 	}
-	request := remoteInsertTask{Version: scanWireVersion, Database: t.schema.Name, Table: t.Name, Schema: t.filterSchemaFingerprint(), Columns: columns, Rows: schemeValue(encoded), CollisionColumns: collisionCols, Collision: []byte(callback), MergeNull: mergeNull}
+	request := remoteInsertTask{bindings: bindings, Version: scanWireVersion, Database: t.schema.Name, Table: t.Name, Schema: t.filterSchemaFingerprint(), Columns: columns, Rows: schemeValue(encoded), CollisionColumns: collisionCols, Collision: []byte(callback), MergeNull: mergeNull}
 	if tx != nil {
 		view, err := scm.ClusterObjectValue(tx.transactionState, ctx, scm.ClusterRequest{Method: "view"})
 		if err != nil {
 			panic(err)
 		}
-		ref, err := service.exportObject(peer, tx.transactionState, view)
+		ref, err := service.exportObject(peer, tx.transactionState, view, bindings)
 		if err != nil {
 			panic(err)
 		}
@@ -397,3 +399,5 @@ func (database *database) executeInsertTask(ctx context.Context, session *scanRP
 	session.service.cluster.received.Add(1)
 	return result, nil
 }
+
+func (task remoteInsertTask) serializationBindings() *scm.SerializationContext { return task.bindings }

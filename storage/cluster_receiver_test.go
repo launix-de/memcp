@@ -256,7 +256,7 @@ func TestClusterReceiverRemoteUnlimitedUsesObjectLifetime(t *testing.T) {
 	})
 	defer receiver.Close()
 	receiver.Seal()
-	ref, err := owner.exportObject(source, receiver, scm.NewNil())
+	ref, err := owner.exportObject(source, receiver, scm.NewNil(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -578,7 +578,7 @@ func TestClusterReceiverRemoteCancellationAndIndependentDelivery(t *testing.T) {
 	defer unblock()
 	importReceiver := func(receiver *clusterReceiver) *clusterReceiver {
 		t.Helper()
-		ref, err := owner.exportObject(source, receiver, scm.NewNil())
+		ref, err := owner.exportObject(source, receiver, scm.NewNil(), nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -642,7 +642,7 @@ func TestClusterReceiverRemoteDisconnectJoinsCallback(t *testing.T) {
 		return scm.NewNil(), ctx.Err()
 	})
 	defer receiver.Close()
-	ref, err := owner.exportObject(source, receiver, scm.NewNil())
+	ref, err := owner.exportObject(source, receiver, scm.NewNil(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

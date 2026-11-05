@@ -355,7 +355,7 @@ and independent backend namespace, including separate buckets/prefixes for
 remote storage. The existing persistence backends are used without modification.
 `schema.json` remains the schema format. `SHUTDOWN` affects the addressed instance.
 
-Both listeners negotiate `memcp.channels.v7` and exchange bounded binary WebSocket
+Both listeners negotiate `memcp.channels.v8` and exchange bounded binary WebSocket
 messages. Every application frame contains exactly one byte giving the channel
 name's byte length (1–255), the channel name, then its opaque payload. There is no
 transport request ID, reply type, version prefix or JSON envelope. Registered
@@ -364,6 +364,17 @@ and encodes only that action’s parameters, followed by raw compressed bytes fo
 chunks. Scan, INSERT, object, membership and replication operations use their own
 binary parameter layouts without field names or a generic method/data envelope.
 Runtime values and closures use the Scheme serializer.
+For a peer destination, the serializer declares immutable values and lambda code
+once using a UUID and the self-contained Scheme value. Later messages use
+`(cluster_value uuid)`; closures use `(lambda_rebind old_func context...)` to share
+compiled code with private bindings. Declarations are pushed ahead of their uses
+on the same FIFO; no receiver pull or synchronous acknowledgement is required.
+Each peer tracks its own declarations. Received values are weakly indexed, and
+Go `AddCleanup` notifies the sender when the last local owner disappears.
+Retirement also covers already prepared and admitted messages, so queued work
+keeps working without retaining values indefinitely. Serialization without a
+peer, including persisted schemas, remains self-contained.
+
 Commands that need a result include a return-channel URI in their own payload.
 The reply is another ordinary channel delivery, and the consumer chooses when to
 wait. Sending only publishes to a bounded queue without waiting for socket I/O,

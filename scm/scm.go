@@ -687,6 +687,10 @@ type Proc struct {
 	// jitCompiling breaks mutually recursive on-demand compilation without
 	// serializing unrelated procedures.
 	jitCompiling uint32
+	// Shared code identity and GC ownership are independent of invocation values.
+	rebindPlan    *lambdaPlan
+	codeOwner     *Proc
+	lambdaFactory bool
 }
 
 // ProcJIT describes the native closure ABI. Context is a flexible array member:
@@ -722,6 +726,7 @@ func (p *Proc) snapshot() Proc {
 	return Proc{
 		JITCode: code, Params: p.Params, Body: p.Body, En: p.En,
 		Compiled: entry, OptimizerMeta: p.OptimizerMeta,
+		rebindPlan: (*lambdaPlan)(atomic.LoadPointer((*unsafe.Pointer)(unsafe.Pointer(&p.rebindPlan)))), codeOwner: p.codeOwner, lambdaFactory: p.lambdaFactory,
 		NumVars: p.NumVars, NumberedOnly: p.NumberedOnly,
 	}
 }
@@ -876,6 +881,11 @@ func CloseProcedure(value Scmer) Scmer {
 	hadJITCaptures := proc.nativeCode() != 0 && proc.compiled() != nil && proc.compiled().CaptureCount != 0
 	if hadJITCaptures {
 		captures := append([]Scmer(nil), jitProcCaptures(value.Proc())...)
+		for i, symbol := range proc.compiled().CaptureSymbols {
+			if symbol == Symbol(lambdaScopeSymbol) && i < len(captures) {
+				captures[i] = NewNil()
+			}
+		}
 		proc.Body = closeJITProcedureCaptures(proc.Body, proc.compiled().CaptureBase, captures, 0)
 	}
 	if proc.En == nil || proc.En == &Globalenv {
@@ -946,11 +956,22 @@ func closeProcedureCaptures(expression Scmer, callFrame *Env, bound map[Symbol]s
 // those future frames capture the source environment; inner references must
 // keep binding to each invocation's own parameters, begin and match scopes.
 func closeProcedureScopeCaptures(expression Scmer, callFrame *Env, scopes []map[Symbol]struct{}) Scmer {
+	return transformProcedureCaptures(expression, callFrame, scopes, func(key Scmer) Scmer {
+		if scmerIsSymbol(key, lambdaScopeSymbol) {
+			return NewNil()
+		}
+		return closedCaptureLiteral(Eval(key, callFrame))
+	})
+}
+
+// transformProcedureCaptures owns lexical capture boundaries for both closing
+// a value and separating reusable code from invocation bindings.
+func transformProcedureCaptures(expression Scmer, callFrame *Env, scopes []map[Symbol]struct{}, capture func(Scmer) Scmer) Scmer {
 	depth := len(scopes) - 1
 	bound := scopes[depth]
 	if expression.IsSourceInfo() {
 		source := *expression.SourceInfo()
-		closed := closeProcedureScopeCaptures(source.value, callFrame, scopes)
+		closed := transformProcedureCaptures(source.value, callFrame, scopes, capture)
 		if closed == source.value {
 			return expression
 		}
@@ -961,8 +982,8 @@ func closeProcedureScopeCaptures(expression Scmer, callFrame *Env, scopes []map[
 		symbol := expression.Symbol()
 		if _, local := bound[symbol]; !local {
 			if binding := callFrame.Outer.FindRead(symbol); binding != nil && binding != &Globalenv {
-				if captured, ok := binding.Vars[symbol]; ok {
-					return closedCaptureLiteral(captured)
+				if _, ok := binding.Vars[symbol]; ok {
+					return capture(expression)
 				}
 			}
 		}
@@ -985,10 +1006,10 @@ func closeProcedureScopeCaptures(expression Scmer, callFrame *Env, scopes []map[
 			return expression
 		}
 		if outerDepth > int64(depth) {
-			capture := NewSlice([]Scmer{items[0], NewInt(outerDepth - int64(depth)), items[2]})
-			return closedCaptureLiteral(Eval(capture, callFrame))
+			outer := NewSlice([]Scmer{items[0], NewInt(outerDepth - int64(depth)), items[2]})
+			return capture(outer)
 		}
-		operand := closeProcedureScopeCaptures(items[2], callFrame, scopes[:len(scopes)-int(outerDepth)])
+		operand := transformProcedureCaptures(items[2], callFrame, scopes[:len(scopes)-int(outerDepth)], capture)
 		if operand == items[2] {
 			return expression
 		}
@@ -1010,33 +1031,33 @@ func closeProcedureScopeCaptures(expression Scmer, callFrame *Env, scopes []map[
 	case "lambda":
 		if len(items) >= 3 {
 			locals := procedureWireBindings(items[1], items[2], bound)
-			replace(2, closeProcedureScopeCaptures(items[2], callFrame, append(scopes, locals)))
+			replace(2, transformProcedureCaptures(items[2], callFrame, append(scopes, locals), capture))
 		}
 	case "begin", "begin_mut":
 		first := 1
 		if head == "begin_mut" && len(items) > 1 {
-			replace(1, closeProcedureScopeCaptures(items[1], callFrame, scopes))
+			replace(1, transformProcedureCaptures(items[1], callFrame, scopes, capture))
 			first = 2
 		}
 		for i := first; i < len(items); i++ {
-			replace(i, closeProcedureScopeCaptures(items[i], callFrame, append(scopes, bound)))
+			replace(i, transformProcedureCaptures(items[i], callFrame, append(scopes, bound), capture))
 		}
 	case "match", "match_mut":
 		if len(items) > 1 {
-			replace(1, closeProcedureScopeCaptures(items[1], callFrame, scopes))
+			replace(1, transformProcedureCaptures(items[1], callFrame, scopes, capture))
 		}
 		for i := 3; i < len(items); i += 2 {
-			replace(i-1, closeProcedurePattern(items[i-1], callFrame, scopes))
+			replace(i-1, transformProcedurePattern(items[i-1], callFrame, scopes, capture))
 			locals := procedureWireBindings(NewSlice(nil), items[i], bound)
 			procedurePatternBindings(items[i-1], locals)
-			replace(i, closeProcedureScopeCaptures(items[i], callFrame, append(scopes, locals)))
+			replace(i, transformProcedureCaptures(items[i], callFrame, append(scopes, locals), capture))
 		}
 		if len(items)%2 == 1 {
-			replace(len(items)-1, closeProcedureScopeCaptures(items[len(items)-1], callFrame, scopes))
+			replace(len(items)-1, transformProcedureCaptures(items[len(items)-1], callFrame, scopes, capture))
 		}
 	default:
 		for i, item := range items {
-			replace(i, closeProcedureScopeCaptures(item, callFrame, scopes))
+			replace(i, transformProcedureCaptures(item, callFrame, scopes, capture))
 		}
 	}
 	if closed == nil {

@@ -161,8 +161,9 @@ func (handle *remoteHandle) send(value scm.Scmer, final bool) {
 		panic("handle peer is disconnected")
 	}
 	var offers []scm.ClusterReference
-	bindings := (&scm.SerializationContext{Invocation: handle.owner}).WithExport(func(object scm.ClusterObject, view scm.Scmer) (scm.ClusterReference, error) {
-		ref, err := handle.service.exportObject(peer, object, view)
+	var bindings *scm.SerializationContext
+	bindings = (&scm.SerializationContext{Invocation: handle.owner}).WithExport(func(object scm.ClusterObject, view scm.Scmer) (scm.ClusterReference, error) {
+		ref, err := handle.service.exportObject(peer, object, view, bindings)
 		if err == nil {
 			offers = append(offers, ref)
 		}
@@ -175,6 +176,7 @@ func (handle *remoteHandle) send(value scm.Scmer, final bool) {
 		}
 	}()
 	bindings = handle.service.handleBindings(bindings, peer)
+	defer func() { bindings.Queued(); queuedValuePublications(offers) }()
 	payload, err := freezeScanValue(value, bindings)
 	if err != nil {
 		panic(err)
@@ -276,6 +278,9 @@ func (service *nodeScanService) handleResolver(ctx context.Context, peer *mosiPe
 	}
 }
 func (service *nodeScanService) handleBindings(bindings *scm.SerializationContext, peer *mosiPeer) *scm.SerializationContext {
+	if bindings.Peer == nil {
+		bindings = bindings.WithPeer(peer.valuePeer())
+	}
 	owner := bindings.InvocationScope()
 	return bindings.WithHandleExport(func(handler scm.Handle) (scm.Scmer, error) {
 		slot := service.allocateHandleSlot()
