@@ -903,3 +903,38 @@ func TestUniqueCollatedPartitionProbePreservesOtherDimensions(t *testing.T) {
 		t.Fatal("collated key used raw string partitioning or lost the independent dimension")
 	}
 }
+
+func TestUniqueNullRowAcquiresFirstConcreteKey(t *testing.T) {
+	for _, main := range []bool{false, true} {
+		t.Run(fmt.Sprint(main), func(t *testing.T) {
+			tbl := setupScanParallelTestTable(t, "t_unique_null_to_concrete")
+			tbl.CreateColumn("value", "INT", nil, nil)
+			tbl.Unique = []uniqueKey{{Id: "value", Cols: []string{"value"}}}
+			tbl.Insert([]string{"value"}, [][]scm.Scmer{{scm.NewNil()}}, nil, scm.NewNil(), false, nil)
+			if main {
+				if result := RebuildTable(tbl, true, false); strings.Contains(result, "errors:") {
+					t.Fatal(result)
+				}
+			}
+			tbl.scan(nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, nil,
+				scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewBool(true) }),
+				[]string{"$update"}, scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
+					scm.Apply(values[1], scm.NewSlice([]scm.Scmer{scm.NewString("value"), scm.NewInt(7)}))
+					return scm.NewInt(1)
+				}), scm.NewInt(0), scm.Globalenv.Vars[scm.Symbol("+")], false)
+			found := false
+			for _, shard := range tbl.ActiveShards() {
+				_, present := shard.GetRecordidForUnique(exactScanAccess(newExactScanAccessSchema([]string{"value"}), []scm.Scmer{scm.NewInt(7)}), nil, true)
+				found = found || present
+			}
+			if !found || tbl.CountExact() != 1 {
+				t.Fatal("NULL-to-key update did not publish exactly one replacement")
+			}
+			guard := tbl.guardUniqueWrites([]string{"value"}, [][]scm.Scmer{{scm.NewInt(7)}}, false, 0)
+			if !guard.tryLock() {
+				t.Fatal("NULL-to-key update retained its first stripe")
+			}
+			guard.unlock()
+		})
+	}
+}

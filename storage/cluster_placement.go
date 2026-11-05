@@ -101,7 +101,7 @@ type clusterScanExecutor struct {
 func (executor *clusterScanExecutor) candidates() []*clusterLink {
 	links := executor.cluster.view.Load().links
 	candidates := make([]*clusterLink, 0, len(links))
-	if executor.preferred != nil && executor.preferred.member.ID != executor.exclude {
+	if executor.preferred != nil && (executor.exclude == "" || executor.preferred.member.ID != executor.exclude) {
 		candidates = append(candidates, executor.preferred)
 	}
 	if len(links) == 0 {
@@ -112,7 +112,7 @@ func (executor *clusterScanExecutor) candidates() []*clusterLink {
 	first := int(hash.Sum64() % uint64(len(links)))
 	for i := range links {
 		link := links[(first+i)%len(links)]
-		if link != executor.preferred && link.member.ID != executor.exclude {
+		if link != executor.preferred && (executor.exclude == "" || link.member.ID != executor.exclude) {
 			candidates = append(candidates, link)
 		}
 	}

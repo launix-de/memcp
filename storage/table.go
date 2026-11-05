@@ -4512,6 +4512,11 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 			t.processClusterUniqueCollision(columns, values, mergeNull, success, onCollisionCols, failure, idx, currentTx, borrowed, []*storageShard{borrowed.ownedShard})
 			return
 		}
+		if borrowed.locks == nil {
+			// NULL-distinct keys need no stripe until an UPDATE supplies its
+			// first concrete key. Adopt that key's lazily allocated table pool.
+			borrowed.locks = guard.locks
+		}
 		borrowed.extend(guard.mask)
 		t.processUniqueCollision(columns, values, mergeNull, success, onCollisionCols, failure, idx, currentTx, borrowed)
 		return

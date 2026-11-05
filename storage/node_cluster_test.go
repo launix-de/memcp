@@ -1395,3 +1395,23 @@ func TestClusterGrantedReadDoesNotRediscoverMissingOwner(t *testing.T) {
 		t.Fatal("granted read did not finish")
 	}
 }
+
+func TestClusterColdPlacementExcludesRefusedOwner(t *testing.T) {
+	links := []*clusterLink{
+		{member: clusterMember{ID: "refused"}},
+		{member: clusterMember{ID: "available-a"}},
+		{member: clusterMember{ID: "available-b"}},
+	}
+	cluster := &nodeCluster{}
+	cluster.view.Store(&clusterView{links: links})
+	executor := clusterScanExecutor{cluster: cluster, preferred: links[0], exclude: "refused"}
+	candidates := executor.candidates()
+	if len(candidates) != 2 {
+		t.Fatalf("capacity retry retained %d peers, want 2", len(candidates))
+	}
+	for _, candidate := range candidates {
+		if candidate == links[0] {
+			t.Fatal("capacity retry kept the owner which refused admission")
+		}
+	}
+}
