@@ -1053,8 +1053,13 @@ func TestClusterObjectReleaseRetriesWithoutAnotherGCOrReconnect(t *testing.T) {
 	registry.releases = append(registry.releases, clusterObjectRelease{peer: identity, reference: scm.ClusterReference{URI: "http://owner/cluster/" + uuid.NewString()}})
 	registry.mu.Unlock()
 	registry.wake <- struct{}{}
-	wait(func() bool { registry.mu.Lock(); defer registry.mu.Unlock(); return len(registry.releases) == 0 })
-	wait(func() bool { registry.mu.Lock(); defer registry.mu.Unlock(); return len(registry.releases) == 1 })
+	// Observe a completed refusal, not the fleeting empty list between taking
+	// work and restoring it. Publication no longer has a mutex to pause there.
+	wait(func() bool {
+		registry.mu.Lock()
+		defer registry.mu.Unlock()
+		return peer.outgoing.rejected.Load() > 0 && len(registry.releases) == 1
+	})
 	peer.outgoing.bytes.Store(0)
 	select {
 	case <-peer.outgoing.ready:

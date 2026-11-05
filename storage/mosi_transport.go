@@ -134,12 +134,13 @@ type mosiMailItem struct {
 	message mosiMessage
 }
 type mosiMailbox struct {
-	head  *mosiMailItem // writer-owned dummy node
-	tail  atomic.Pointer[mosiMailItem]
-	bytes atomic.Int64
-	count atomic.Int64
-	ready chan struct{}
-	space chan struct{}
+	head     *mosiMailItem // writer-owned dummy node
+	tail     atomic.Pointer[mosiMailItem]
+	bytes    atomic.Int64
+	count    atomic.Int64
+	rejected atomic.Uint64 // observable capacity refusals; updated only on overload
+	ready    chan struct{}
+	space    chan struct{}
 }
 
 func newMosiMailbox() *mosiMailbox {
@@ -154,6 +155,7 @@ func (q *mosiMailbox) push(m mosiMessage) error {
 	for {
 		used := q.bytes.Load()
 		if used+n > 32<<20 {
+			q.rejected.Add(1)
 			return fmt.Errorf("node send window exhausted")
 		}
 		if q.bytes.CompareAndSwap(used, used+n) {
@@ -163,6 +165,7 @@ func (q *mosiMailbox) push(m mosiMessage) error {
 	if q.count.Add(1) > 65536 {
 		q.count.Add(-1)
 		q.bytes.Add(-n)
+		q.rejected.Add(1)
 		return fmt.Errorf("node send window exhausted")
 	}
 	item := &mosiMailItem{message: m}
