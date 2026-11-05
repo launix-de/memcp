@@ -78,13 +78,15 @@ func (t *table) admitUnique(busy uniqueReservationBusy, tx *TxContext) {
 }
 
 type uniqueReservationClient struct {
-	ctx      context.Context
-	cancel   context.CancelFunc
-	commands *clusterReceiver
-	done     chan scanResult
+	afterTriggers []uniqueAfterTrigger
+	ctx           context.Context
+	cancel        context.CancelFunc
+	commands      *clusterReceiver
+	done          chan scanResult
 }
 
 type uniqueReservationSet struct {
+	guard    *uniqueWriteGuard
 	ctx      context.Context
 	table    *table
 	topology *tableShardTopology
@@ -313,6 +315,9 @@ func (set *uniqueReservationSet) close(commit bool) {
 				client.cancel()
 			}
 			result := <-client.done
+			if set.guard != nil {
+				set.guard.afterTriggers = append(set.guard.afterTriggers, client.afterTriggers...)
+			}
 			if commit && result.err.r != nil {
 				panic(result.err)
 			}
@@ -333,7 +338,7 @@ func (t *table) reserveUniqueDomain(columns []string, rows [][]scm.Scmer, mergeN
 	cluster := activeNodeCluster()
 	ctx := scanQueryContext(tx, cluster.ctx)
 	topology := t.activeTopology()
-	set := &uniqueReservationSet{ctx: ctx, table: t, topology: topology, clients: make(map[string]*uniqueReservationClient)}
+	set := &uniqueReservationSet{ctx: ctx, table: t, topology: topology, guard: borrowed, clients: make(map[string]*uniqueReservationClient)}
 	complete := false
 	defer func() {
 		if !complete {
@@ -424,21 +429,31 @@ func (t *table) startUniqueReservation(parent context.Context, owner string, fir
 	ctx, cancel := context.WithCancel(parent)
 	client := &uniqueReservationClient{ctx: ctx, cancel: cancel, done: make(chan scanResult, 1)}
 	ready := make(chan *clusterReceiver, 1)
-	receiver := newClusterReceiver(1, func(_ context.Context, value scm.Scmer) (scm.Scmer, error) {
+	receiver := newClusterReceiver(-1, func(_ context.Context, value scm.Scmer) (scm.Scmer, error) {
+		if value.IsSlice() {
+			message := value.Slice()
+			if len(message) != 2 || scm.String(message[0]) != "after" || !message[1].IsSlice() {
+				return scm.NewNil(), fmt.Errorf("invalid UNIQUE completion events")
+			}
+			client.afterTriggers = append(client.afterTriggers, decodeUniqueAfterTriggers(message[1], tx)...)
+			return scm.NewNil(), nil
+		}
 		ready <- value.Any().(*clusterReceiver)
 		return scm.NewNil(), nil
 	})
 	receiver.Seal()
-	defer receiver.Close()
 	invocation := shardScanInvocation{operator: shardUniqueReserve, tx: tx, writeAcquired: true, neutral: scm.NewSlice([]scm.Scmer{
 		scm.NewAny(receiver), uniqueStringArray(columns), uniqueRowArray(rows), scm.NewBool(mergeNull), scm.NewBool(tx == nil), uniqueStringArray(ids),
 	})}
 	cluster := activeNodeCluster()
 	go func() {
+		var result scanResult
 		defer func() {
 			if failure := recover(); failure != nil {
-				client.done <- scanResult{err: scanError{r: failure}}
+				result = scanResult{err: scanError{r: failure}}
 			}
+			receiver.Close()
+			client.done <- result
 		}()
 		if owner == cluster.self.ID {
 			if borrowed.ownedShard == first {
@@ -446,13 +461,13 @@ func (t *table) startUniqueReservation(parent context.Context, owner string, fir
 			}
 			committed, err := first.serveUniqueScan(ctx, invocation)
 			if busy, ok := err.(uniqueReservationBusy); ok {
-				client.done <- scanResult{res: scm.NewSlice([]scm.Scmer{scm.NewString("busy"), scm.NewString(busy.shard.Resource.Shard), scm.NewBool(busy.capacity)})}
+				result = scanResult{res: scm.NewSlice([]scm.Scmer{scm.NewString("busy"), scm.NewString(busy.shard.Resource.Shard), scm.NewBool(busy.capacity)})}
 				return
 			}
 			if err != nil {
 				panic(err)
 			}
-			client.done <- scanResult{res: scm.NewBool(committed)}
+			result = scanResult{res: scm.NewBool(committed)}
 			return
 		}
 		var preferred *clusterLink
@@ -464,7 +479,7 @@ func (t *table) startUniqueReservation(parent context.Context, owner string, fir
 		}
 		resource := mosiResource{Database: t.schema.Name, Table: t.Name, Shard: first.uuid.String()}
 		executor := clusterScanExecutor{cluster: cluster, preferred: preferred, expected: remoteScanShard{Schema: t.filterSchemaFingerprint(), Resource: resource}}
-		client.done <- executor.ExecuteShardScan(resource, invocation)
+		result = executor.ExecuteShardScan(resource, invocation)
 	}()
 	select {
 	case client.commands = <-ready:
@@ -548,6 +563,16 @@ func (s *storageShard) serveUniqueScan(ctx context.Context, input shardScanInvoc
 	if input.uniqueGuard != nil {
 		guardPointer = input.uniqueGuard
 	}
+	defer func() {
+		events := guardPointer.afterTriggers
+		guardPointer.afterTriggers = nil
+		if len(events) != 0 {
+			_, deliveryError := ready.HandleClusterRequest(ctx, scm.ClusterRequest{Method: "receive", Arguments: []scm.Scmer{scm.NewSlice([]scm.Scmer{scm.NewString("after"), encodeUniqueAfterTriggers(events)})}})
+			if deliveryError != nil && err == nil {
+				err = deliveryError
+			}
+		}
+	}()
 	tx := input.tx
 	if parameters[4].Bool() {
 		// The invocation supplies cancellation and MOSI ownership, while a
@@ -696,7 +721,7 @@ func (s *storageShard) serveUniqueScan(ctx context.Context, input shardScanInvoc
 				return scm.NewNil(), err
 			}
 			firstID := scm.NewNil()
-			s.Insert(insertColumns, insertRows, false, nil, func(id int64) { firstID = scm.NewInt(id) }, false, tx)
+			s.Insert(insertColumns, insertRows, false, nil, func(id int64) { firstID = scm.NewInt(id) }, false, tx, guardPointer)
 			return firstID, nil
 		}
 		return scm.NewNil(), fmt.Errorf("unknown UNIQUE command")
@@ -760,6 +785,45 @@ func serveUniqueChannel(ctx context.Context, guard *uniqueWriteGuard, ready *clu
 		commands.Close()
 		return commit, nil
 	}
+}
+
+// Completion carries bounded mutation events back before releasing the native
+// worker. The coordinator executes them only after every owner's reservation
+// has joined, so trigger queries never wait on another retained peer stripe.
+func encodeUniqueAfterTriggers(events []uniqueAfterTrigger) scm.Scmer {
+	values := make([]scm.Scmer, len(events))
+	row := func(value dataset) scm.Scmer {
+		if value == nil {
+			return scm.NewNil()
+		}
+		return scm.NewSlice(value)
+	}
+	for i, event := range events {
+		values[i] = scm.NewSlice([]scm.Scmer{scm.NewString(event.table.schema.Name), scm.NewString(event.table.Name), scm.NewInt(int64(event.timing)), row(event.old), row(event.new), scm.NewBool(event.tx == nil)})
+	}
+	return scm.NewSlice(values)
+}
+
+func decodeUniqueAfterTriggers(value scm.Scmer, tx *TxContext) []uniqueAfterTrigger {
+	events := make([]uniqueAfterTrigger, 0, len(value.Slice()))
+	for _, item := range value.Slice() {
+		if !item.IsSlice() || len(item.Slice()) != 6 {
+			panic("invalid UNIQUE trigger event")
+		}
+		parts := item.Slice()
+		event := uniqueAfterTrigger{table: GetDatabase(parts[0].String()).GetTable(parts[1].String()), timing: TriggerTiming(parts[2].Int()), tx: tx}
+		if !parts[3].IsNil() {
+			event.old = dataset(parts[3].Slice())
+		}
+		if !parts[4].IsNil() {
+			event.new = dataset(parts[4].Slice())
+		}
+		if parts[5].Bool() {
+			event.tx = nil
+		}
+		events = append(events, event)
+	}
+	return events
 }
 
 func callUniqueChannel(ctx context.Context, commands *clusterReceiver, parts ...scm.Scmer) (scm.Scmer, error) {

@@ -1489,7 +1489,7 @@ func (t *storageShard) UpdateFunction(idx uint32, withTrigger bool, alreadyLocke
 				return scm.NewBool(false)
 			}
 			if guard != nil {
-				defer guard.unlock()
+				defer guard.release()
 				return t.UpdateFunctionBatch(current, withTrigger, alreadyLocked, nil, nil, currentTx, guard)(a...)
 			}
 		}
@@ -1521,7 +1521,13 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 		completed := false
 		defer func() {
 			if retainedUnique != nil {
-				defer retainedUnique.unlock()
+				defer func() {
+					if alreadyLocked && len(retainedUnique.afterTriggers) != 0 {
+						t.runWithWriteLockReleased(currentTx, retainedUnique.release)
+					} else {
+						retainedUnique.release()
+					}
+				}()
 				if retainedUnique.reservations != nil {
 					retainedUnique.reservations.close(completed)
 				}
@@ -1858,10 +1864,10 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 			if withTrigger && triggerOldRow != nil {
 				if alreadyLocked {
 					t.runWithWriteLockReleased(currentTx, func() {
-						t.t.ExecuteTriggers(AfterUpdate, triggerOldRow, triggerNewRow, currentTx)
+						uniqueGuard.after(uniqueAfterTrigger{table: t.t, timing: AfterUpdate, old: triggerOldRow, new: triggerNewRow, tx: currentTx})
 					})
 				} else {
-					t.t.ExecuteTriggers(AfterUpdate, triggerOldRow, triggerNewRow, currentTx)
+					uniqueGuard.after(uniqueAfterTrigger{table: t.t, timing: AfterUpdate, old: triggerOldRow, new: triggerNewRow, tx: currentTx})
 				}
 			}
 		} else {
@@ -1971,10 +1977,10 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 					batch.Add(triggerDeletedRow)
 				} else if alreadyLocked {
 					t.runWithWriteLockReleased(currentTx, func() {
-						t.t.ExecuteTriggers(AfterDelete, triggerDeletedRow, nil, currentTx)
+						uniqueGuard.after(uniqueAfterTrigger{table: t.t, timing: AfterDelete, old: triggerDeletedRow, tx: currentTx})
 					})
 				} else {
-					t.t.ExecuteTriggers(AfterDelete, triggerDeletedRow, nil, currentTx)
+					uniqueGuard.after(uniqueAfterTrigger{table: t.t, timing: AfterDelete, old: triggerDeletedRow, tx: currentTx})
 				}
 			}
 		}
@@ -1992,7 +1998,7 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 				if len(a) > 0 {
 					t.propagateUpdateToNext(maintenanceNext, targetIdx, currentTx, uniqueGuard, scm.NewSlice(maintenanceUpdateChanges))
 				} else {
-					t.propagateDeleteToNext(maintenanceNext, idx, currentTx)
+					t.propagateDeleteToNext(maintenanceNext, idx, currentTx, uniqueGuard)
 				}
 			}
 		}
@@ -2020,7 +2026,7 @@ func (t *storageShard) propagateUpdateToNext(next *storageShard, oldRecid uint32
 // propagateDeleteToNext uses the old→new recid translation built by rebuild()
 // and extended by mirrored delta inserts. This avoids the CountUntil bug during
 // batch deletes without falling back to an O(n) PK scan.
-func (t *storageShard) propagateDeleteToNext(next *storageShard, oldRecid uint32, currentTx *TxContext) {
+func (t *storageShard) propagateDeleteToNext(next *storageShard, oldRecid uint32, currentTx *TxContext, uniqueGuard *uniqueWriteGuard) {
 	targetRecid, ok := t.translateNextRecid(oldRecid)
 	if !ok {
 		next.mu.Lock()
@@ -2030,7 +2036,7 @@ func (t *storageShard) propagateDeleteToNext(next *storageShard, oldRecid uint32
 	if !ok {
 		return
 	}
-	next.UpdateFunction(targetRecid, false, false, currentTx, nil)()
+	next.UpdateFunction(targetRecid, false, false, currentTx, uniqueGuard)()
 }
 
 // shardColumnReader is invocation-owned. Its main reader retains the same
@@ -2322,7 +2328,7 @@ func (m *ShardMapReducer) beginUniqueRow(id uint32) (uint32, bool) {
 
 func (m *ShardMapReducer) endUniqueRow() {
 	if m.uniqueGuard != nil {
-		m.uniqueGuard.unlock()
+		m.uniqueGuard.release()
 		m.uniqueGuard = nil
 	}
 }
@@ -3285,7 +3291,7 @@ func (m *ShardMapReducer) FlushSideEffects() {
 	}
 }
 
-func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLocked bool, validatedSchema *tableColumnNamesSnapshot, onFirstInsertId func(int64), isIgnore bool, currentTx *TxContext) uint32 {
+func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLocked bool, validatedSchema *tableColumnNamesSnapshot, onFirstInsertId func(int64), isIgnore bool, currentTx *TxContext, uniqueGuard *uniqueWriteGuard) uint32 {
 	t.t.beginContributionMutation()
 	defer t.t.endContributionMutation()
 	ss := SessionStateFromTx(currentTx)
@@ -3321,7 +3327,7 @@ func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLoc
 		firstNewRecid := uint32(0)
 		firstInsertId := onFirstInsertId
 		for i, row := range preparedRows {
-			recid := t.insertPreparedLocked(preparedColumns[i], [][]scm.Scmer{row}, firstInsertId, true, true, validatedSchema, currentTx)
+			recid := t.insertPreparedLocked(preparedColumns[i], [][]scm.Scmer{row}, firstInsertId, true, true, validatedSchema, currentTx, uniqueGuard)
 			if i == 0 {
 				firstNewRecid = recid
 			}
@@ -3343,7 +3349,7 @@ func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLoc
 		t.lockForMutation(currentTx)
 		defer t.mu.Unlock()
 	}
-	firstNewRecid := t.insertPreparedLocked(columns, values, onFirstInsertId, true, true, validatedSchema, currentTx)
+	firstNewRecid := t.insertPreparedLocked(columns, values, onFirstInsertId, true, true, validatedSchema, currentTx, uniqueGuard)
 	return firstNewRecid
 }
 
@@ -3375,7 +3381,7 @@ func (t *storageShard) insertReplica(columns []string, values [][]scm.Scmer, alr
 		t.mu.Lock()
 	}
 	firstNewInsertIdx := len(t.deltaRows())
-	firstNewRecid := t.insertPreparedLocked(columns, values, nil, false, false, nil, currentTx)
+	firstNewRecid := t.insertPreparedLocked(columns, values, nil, false, false, nil, currentTx, nil)
 	if next := t.nextForMaintenanceLocked(nil); next != nil {
 		// A writer may still hold an older immutable table-topology snapshot
 		// after more than one rebuild generation has been published. Replica
@@ -3408,7 +3414,7 @@ func (t *storageShard) materializedInsertedRowsLocked(firstNewInsertIdx int) ([]
 	return idx2col, logVals
 }
 
-func (t *storageShard) insertPreparedLocked(columns []string, values [][]scm.Scmer, onFirstInsertId func(int64), fireTriggers bool, propagateMaintenance bool, validatedSchema *tableColumnNamesSnapshot, currentTx *TxContext) uint32 {
+func (t *storageShard) insertPreparedLocked(columns []string, values [][]scm.Scmer, onFirstInsertId func(int64), fireTriggers bool, propagateMaintenance bool, validatedSchema *tableColumnNamesSnapshot, currentTx *TxContext, uniqueGuard *uniqueWriteGuard) uint32 {
 	// capture starting row index for undo logging
 	firstNewRecid := t.main_count + uint32(len(t.deltaRows()))
 	firstNewInsertIdx := len(t.deltaRows()) // for capturing actual rows after insertDataset fills auto-increment
@@ -3490,7 +3496,7 @@ func (t *storageShard) insertPreparedLocked(columns []string, values [][]scm.Scm
 			t.mu.Unlock()
 			defer t.lockForMutation(currentTx)
 			for _, row := range triggerInsertRows {
-				t.t.ExecuteTriggers(AfterInsert, nil, row, currentTx)
+				uniqueGuard.after(uniqueAfterTrigger{table: t.t, timing: AfterInsert, new: row, tx: currentTx})
 			}
 		}()
 	}

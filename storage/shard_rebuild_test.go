@@ -48,7 +48,7 @@ func TestColdShardLoadWaitObservesQueryCancellation(t *testing.T) {
 				extra.Insert([]string{"id", "payload"}, [][]scm.Scmer{
 					{scm.NewInt(3), scm.NewString("row-00000003")},
 					{scm.NewInt(4), scm.NewString("row-00000004")},
-				}, false, nil, nil, false, nil)
+				}, false, nil, nil, false, nil, nil)
 				release()
 				tbl.mu.Lock()
 				tbl.Shards = append(tbl.Shards, extra)
@@ -940,7 +940,7 @@ func TestShardRebuildForwardsConcurrentInsertsViaNext(t *testing.T) {
 			scm.NewString(fmt.Sprintf("%032x", 20001+i)),
 		})
 	}
-	shard.Insert([]string{"id", "payload"}, extraRows, false, nil, nil, false, nil)
+	shard.Insert([]string{"id", "payload"}, extraRows, false, nil, nil, false, nil, nil)
 
 	rebuilt := <-rebuiltCh
 	if rebuilt == nil {
@@ -962,7 +962,7 @@ func TestShardRebuildForwardsInsertAcrossSuccessorChain(t *testing.T) {
 	firstSuccessor.storeNext(latestSuccessor)
 	firstSuccessor.nextReady.Store(true)
 
-	source.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(42)}}, false, nil, nil, false, nil)
+	source.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(42)}}, false, nil, nil, false, nil, nil)
 
 	if got := source.Count(); got != 1 {
 		t.Fatalf("source count = %d, want 1", got)
@@ -1185,7 +1185,7 @@ func TestManualRepartitionInsertDeleteUsesTranslationMap(t *testing.T) {
 	oldShard.Insert([]string{"id", "payload"}, [][]scm.Scmer{{
 		scm.NewInt(30001),
 		scm.NewString("transient"),
-	}}, false, nil, nil, false, nil)
+	}}, false, nil, nil, false, nil, nil)
 	oldShard.UpdateFunction(oldRecid, false, false, nil, nil)()
 
 	<-done

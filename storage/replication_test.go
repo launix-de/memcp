@@ -1259,7 +1259,7 @@ func TestReplicationRebuildForwardsUUIDAndRights(t *testing.T) {
 	if access.shard != original || findScanShard(table, resource) != original {
 		t.Fatal("rebuild rebound an existing reader's shard")
 	}
-	original.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(5), scm.NewString("forwarded")}}, false, nil, nil, false, nil)
+	original.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(5), scm.NewString("forwarded")}}, false, nil, nil, false, nil, nil)
 	if got := table.ActiveShards()[0].Count(); got != 5 {
 		t.Fatalf("write through old UUID reached %d rows, want 5", got)
 	}

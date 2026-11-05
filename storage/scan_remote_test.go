@@ -815,7 +815,7 @@ func TestRemoteScanNativeExistsAndBatch(t *testing.T) {
 	}
 	// Specialized kernels capture their extent at execution, just like native
 	// reduction; inserts before dispatch belong to that same generation.
-	table.ActiveShards()[0].Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(500), scm.NewString("before-dispatch")}}, false, nil, nil, false, nil)
+	table.ActiveShards()[0].Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(500), scm.NewString("before-dispatch")}}, false, nil, nil, false, nil, nil)
 	procedure := func(source string) []byte {
 		result, err := scm.MarshalProcedure(scm.Eval(scm.Read(t.Name(), source, true), &scm.Globalenv))
 		if err != nil {
@@ -907,7 +907,7 @@ func TestRemoteScanNativeLookupKinds(t *testing.T) {
 	if err := peer.scanService.control(context.Background(), peer, "scan.describe", remoteScanDescribe{scanWireVersion, table.schema.Name, table.Name}, &parts, true); err != nil {
 		t.Fatal(err)
 	}
-	table.ActiveShards()[0].Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(99), scm.NewString("before-dispatch")}}, false, nil, nil, false, nil)
+	table.ActiveShards()[0].Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(99), scm.NewString("before-dispatch")}}, false, nil, nil, false, nil, nil)
 	for _, operator := range []shardScanOperator{shardLookupOne, shardLookupMany, shardLookupMapOne, shardLookupMapMany} {
 		for _, key := range []int64{2, 99, 100} {
 			task := makeRemoteScanTask(t, parts[0])
@@ -955,12 +955,28 @@ func TestRemoteUniqueChannelRetainsGuardThroughUpdateAndFinish(t *testing.T) {
 	tbl.CreateColumn("label", "VARCHAR", []int{40}, []scm.Scmer{scm.NewString("collate"), scm.NewString("utf8mb4_general_ci")})
 	tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}, {Id: "label", Cols: []string{"label"}}}
 	tbl.Insert([]string{"id", "label"}, [][]scm.Scmer{{scm.NewInt(5), scm.NewString("ſail")}}, nil, scm.NewNil(), false, nil)
+	var triggerCalls atomic.Int32
+	tbl.AddTrigger(TriggerDescription{Name: "observe_unlocked_key", Timing: AfterUpdate, Func: scm.NewFunc(func(...scm.Scmer) scm.Scmer {
+		guard := tbl.guardUniqueWrites([]string{"id"}, [][]scm.Scmer{{scm.NewInt(2)}}, false, 0)
+		if !guard.tryLock() {
+			panic("AFTER trigger retained the UNIQUE stripe")
+		}
+		guard.unlock()
+		triggerCalls.Add(1)
+		return scm.NewNil()
+	})})
 	peer, _, _ := setupRemoteScanConnection(t)
 	shard := tbl.ActiveShards()[0]
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	ready := make(chan *clusterReceiver, 1)
-	receiver := newClusterReceiver(1, func(_ context.Context, value scm.Scmer) (scm.Scmer, error) {
+	var afterEvents []uniqueAfterTrigger
+	receiver := newClusterReceiver(-1, func(_ context.Context, value scm.Scmer) (scm.Scmer, error) {
+		if value.IsSlice() {
+			message := value.Slice()
+			afterEvents = append(afterEvents, decodeUniqueAfterTriggers(message[1], nil)...)
+			return scm.NewNil(), nil
+		}
 		ready <- value.Any().(*clusterReceiver)
 		return scm.NewNil(), nil
 	})
@@ -1047,8 +1063,17 @@ func TestRemoteUniqueChannelRetainsGuardThroughUpdateAndFinish(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("reservation did not finish")
 	}
+	if triggerCalls.Load() != 0 || len(afterEvents) != 2 {
+		t.Fatalf("completion lost or prematurely executed AFTER events: calls=%d events=%d", triggerCalls.Load(), len(afterEvents))
+	}
 	guard.lock()
 	guard.unlock()
+	for _, event := range afterEvents {
+		event.table.ExecuteTriggers(event.timing, event.old, event.new, event.tx)
+	}
+	if triggerCalls.Load() != 2 {
+		t.Fatalf("AFTER calls = %d, want 2", triggerCalls.Load())
+	}
 	if _, err := callUniqueChannel(ctx, commands, scm.NewString("update"), scm.NewString(shard.uuid.String()), id, scm.NewSlice(nil)); err == nil {
 		t.Fatal("finished reservation accepted another mutation")
 	}
@@ -1066,7 +1091,7 @@ func TestRemoteScanOrderedRunPagesAndNativeExtent(t *testing.T) {
 	if err := peer.scanService.control(context.Background(), peer, "scan.describe", remoteScanDescribe{scanWireVersion, tbl.schema.Name, tbl.Name}, &parts, true); err != nil {
 		t.Fatal(err)
 	}
-	source.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(9999), scm.NewString("future")}}, false, nil, nil, false, nil)
+	source.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(9999), scm.NewString("future")}}, false, nil, nil, false, nil, nil)
 	executor := &peerScanExecutor{peer: peer, ctx: context.Background(), prepared: parts[0]}
 	stub := &storageShard{uuid: source.uuid, t: tbl}
 	target := &shardScanTarget{resource: parts[0].Resource, executor: executor}

@@ -3933,7 +3933,7 @@ func (t *table) insertLocal(columns []string, values [][]scm.Scmer, onCollisionC
 					if validate != nil && !validate.validReads() {
 						panic(uniqueReadRetry{})
 					}
-					writeAccess.shard.Insert(columns, rows, false, validatedSchema, onFirstInsertId, isIgnore, currentTx)
+					writeAccess.shard.Insert(columns, rows, false, validatedSchema, onFirstInsertId, isIgnore, currentTx, validate)
 					result += len(rows)
 					inserted += len(rows)
 				}
@@ -4105,7 +4105,7 @@ func (t *table) insertLocal(columns []string, values [][]scm.Scmer, onCollisionC
 					for end < len(rows) && partitionForRow(rows[end]) == bucket {
 						end++
 					}
-					writes[bucket].shard.Insert(columns, rows[start:end], false, validatedSchema, onFirstInsertId, isIgnore, currentTx)
+					writes[bucket].shard.Insert(columns, rows[start:end], false, validatedSchema, onFirstInsertId, isIgnore, currentTx, validate)
 					result += end - start
 					inserted += end - start
 					start = end
@@ -4152,7 +4152,7 @@ func (t *table) insertLocal(columns []string, values [][]scm.Scmer, onCollisionC
 						panic(uniqueReadRetry{})
 					}
 					// physically insert
-					s.Insert(columns, values, false, validatedSchema, onFirstInsertId, isIgnore, currentTx)
+					s.Insert(columns, values, false, validatedSchema, onFirstInsertId, isIgnore, currentTx, validate)
 					result += len(values)
 					inserted += len(values)
 				}, onCollisionCols, func(errmsg string, data []scm.Scmer) {
@@ -4179,7 +4179,7 @@ func (t *table) insertLocal(columns []string, values [][]scm.Scmer, onCollisionC
 				}, 0, currentTx, nil, []*storageShard{s})
 			} else {
 				// physically insert (parallel)
-				s.Insert(columns, values, false, validatedSchema, onFirstInsertId, isIgnore, currentTx)
+				s.Insert(columns, values, false, validatedSchema, onFirstInsertId, isIgnore, currentTx, nil)
 				result += len(values)
 				inserted += len(values)
 			}
@@ -4521,6 +4521,7 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 		t.processUniqueCollision(columns, values, mergeNull, success, onCollisionCols, failure, idx, currentTx, borrowed)
 		return
 	}
+	defer guard.release()
 	if sharedClusterSource(t) {
 		if len(onCollisionCols) == 0 {
 			values = t.uniqueReadOnlyPrefix(columns, values, mergeNull, currentTx, failure)
@@ -4532,7 +4533,6 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 		return
 	}
 	guard.lock()
-	defer guard.unlock()
 	t.processUniqueCollision(columns, values, mergeNull, success, onCollisionCols, failure, idx, currentTx, &guard)
 }
 

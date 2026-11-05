@@ -599,7 +599,7 @@ func TestInsertBalancedShardsSurviveWALReplay(t *testing.T) {
 	}
 	for i, shard := range []*storageShard{first, second} {
 		release := shard.GetWrite(nil).Release
-		shard.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(int64(i + 1)), scm.NewString("durable")}}, false, nil, nil, false, nil)
+		shard.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(int64(i + 1)), scm.NewString("durable")}}, false, nil, nil, false, nil, nil)
 		release()
 	}
 	reloaded := reloadTableFromPersistence(t, "tinsertbalancedrecovery", persistence)
@@ -936,5 +936,75 @@ func TestUniqueNullRowAcquiresFirstConcreteKey(t *testing.T) {
 			}
 			guard.unlock()
 		})
+	}
+}
+
+func TestUniqueDeleteForwardsBorrowedGuardToRebuild(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "tuniquedeleteforward", 1)
+	tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}}
+	original := tbl.ActiveShards()[0]
+	successor := original.rebuild(true)
+	if successor == original {
+		t.Fatal("fixture did not create a successor")
+	}
+	target, ok := original.translateNextRecid(0)
+	if !ok {
+		t.Fatal("rebuild omitted recid translation")
+	}
+	guard := tbl.guardUniqueWrites([]string{"id"}, [][]scm.Scmer{{scm.NewInt(1)}}, false, 0)
+	guard.lock()
+	done := make(chan any, 1)
+	go func() {
+		defer func() { done <- recover() }()
+		original.UpdateFunction(0, false, false, nil, &guard)()
+	}()
+	select {
+	case failure := <-done:
+		guard.unlock()
+		if failure != nil {
+			t.Fatalf("DELETE forwarding: %v", failure)
+		}
+	case <-time.After(3 * time.Second):
+		guard.unlock()
+		<-done
+		t.Fatal("successor DELETE reacquired its caller's UNIQUE stripe")
+	}
+	if !original.deletions.Get(0) || !successor.deletions.Get(uint(target)) {
+		t.Fatal("DELETE did not reach both live generations")
+	}
+}
+
+func TestUniqueNativeAfterInsertCanUpdatePublishedKey(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "tuniqueafterinsert", 0)
+	tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}}
+	tbl.AddTrigger(TriggerDescription{Name: "update_inserted_key", Timing: AfterInsert, Func: scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+		if !args[3].IsNil() {
+			panic("native trigger acquired a synthetic transaction")
+		}
+		shard := tbl.ActiveShards()[0]
+		access := exactScanAccess(newExactScanAccessSchema([]string{"id"}), []scm.Scmer{scm.NewInt(1)})
+		id, found := shard.GetRecordidForUnique(access, nil, true)
+		if !found {
+			panic("AFTER trigger could not see the published row")
+		}
+		return shard.UpdateFunction(id, false, false, nil, nil)(scm.NewSlice([]scm.Scmer{scm.NewString("payload"), scm.NewString("after-insert")}))
+	})})
+	done := make(chan any, 1)
+	go func() {
+		defer func() { done <- recover() }()
+		tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(1), scm.NewString("before-trigger")}}, nil, scm.NewNil(), false, nil)
+	}()
+	select {
+	case failure := <-done:
+		if failure != nil {
+			t.Fatalf("native AFTER INSERT: %v", failure)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("AFTER INSERT waited for its own key guard")
+	}
+	shard := tbl.ActiveShards()[0]
+	id, found := shard.GetRecordidForUnique(exactScanAccess(newExactScanAccessSchema([]string{"id"}), []scm.Scmer{scm.NewInt(1)}), nil, true)
+	if !found || shard.rowValueByRecidLocked(id, "payload").String() != "after-insert" {
+		t.Fatal("native INSERT returned before its AFTER trigger's update")
 	}
 }

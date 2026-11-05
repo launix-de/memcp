@@ -36,13 +36,41 @@ import "github.com/launix-de/go-mysqlstack/sqldb"
 type uniqueWriteLocks [64]sync.Mutex
 
 type uniqueWriteGuard struct {
-	ownedShard   *storageShard // an UPDATE already owns this native MOSI writer
-	reservations *uniqueReservationSet
-	locks        *uniqueWriteLocks
-	mask         uint64
-	held         bool
-	wrote        bool
-	version      uint64 // advances when a collision callback temporarily releases guards
+	afterTriggers []uniqueAfterTrigger
+	ownedShard    *storageShard // an UPDATE already owns this native MOSI writer
+	reservations  *uniqueReservationSet
+	locks         *uniqueWriteLocks
+	mask          uint64
+	held          bool
+	wrote         bool
+	version       uint64 // advances when a collision callback temporarily releases guards
+}
+
+// AFTER triggers run after the mutation's key reservations are released. They
+// may issue ordinary queries against the same keys; retaining a key stripe
+// across that query would deadlock. The event owns row values, never recids.
+type uniqueAfterTrigger struct {
+	table    *table
+	timing   TriggerTiming
+	old, new dataset
+	tx       *TxContext
+}
+
+func (g *uniqueWriteGuard) after(event uniqueAfterTrigger) {
+	if g == nil {
+		event.table.ExecuteTriggers(event.timing, event.old, event.new, event.tx)
+		return
+	}
+	g.afterTriggers = append(g.afterTriggers, event)
+}
+
+func (g *uniqueWriteGuard) release() {
+	g.unlock()
+	events := g.afterTriggers
+	g.afterTriggers = nil
+	for _, event := range events {
+		event.table.ExecuteTriggers(event.timing, event.old, event.new, event.tx)
+	}
 }
 
 type uniqueReadRetry struct{}

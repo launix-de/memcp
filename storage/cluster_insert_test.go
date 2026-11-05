@@ -51,7 +51,7 @@ func TestClusterUniqueProbeUsesAcquiredSuccessor(t *testing.T) {
 	source := tbl.ActiveShards()[0]
 	successor := NewShard(tbl)
 	write := successor.GetWrite(nil)
-	successor.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(42)}}, false, nil, nil, false, nil)
+	successor.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(42)}}, false, nil, nil, false, nil, nil)
 	write.Release()
 	cluster := &nodeCluster{self: clusterMember{ID: "local"}, ctx: context.Background(), databases: map[string]bool{tbl.schema.Name: true}}
 	cluster.initializeManager()
@@ -1362,7 +1362,7 @@ func TestClusterUniqueReservationDeduplicatesSuccessorAliases(t *testing.T) {
 	tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}}
 	source := tbl.ActiveShards()[0]
 	successor := NewShard(tbl)
-	successor.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(42)}}, false, nil, nil, false, nil)
+	successor.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(42)}}, false, nil, nil, false, nil, nil)
 	cluster := globalTestCluster(t, tbl.schema.Name)
 	mounts := sharedClusterMounts.Swap(&map[string]bool{tbl.schema.Name: true})
 	defer sharedClusterMounts.Store(mounts)

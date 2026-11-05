@@ -372,7 +372,7 @@ func TestAddedDefaultSchemaDropsRetiredRecoveryExtents(t *testing.T) {
 		second.Insert([]string{"id", "payload"}, [][]scm.Scmer{
 			{scm.NewInt(3), scm.NewString("third")},
 			{scm.NewInt(4), scm.NewString("fourth")},
-		}, false, nil, nil, false, nil)
+		}, false, nil, nil, false, nil, nil)
 	}()
 	tbl.mu.Lock()
 	tbl.Shards = append(tbl.Shards, second)

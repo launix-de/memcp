@@ -250,7 +250,7 @@ func TestUniqueBatchCoercingAndNullKeys(t *testing.T) {
 			rows := [][]scm.Scmer{{scm.NewInt(1), tc.first}, {scm.NewInt(2), tc.second}}
 			accepted, rejected := 0, 0
 			tbl.ProcessUniqueCollision(cols, rows, false, func(rows [][]scm.Scmer, _ *uniqueWriteGuard) {
-				tbl.ActiveShards()[0].Insert(cols, rows, false, nil, nil, false, nil)
+				tbl.ActiveShards()[0].Insert(cols, rows, false, nil, nil, false, nil, nil)
 				accepted += len(rows)
 			}, nil, func(string, []scm.Scmer) { rejected++ }, 0, nil, nil, nil)
 			if accepted != tc.want || rejected != 2-tc.want || tbl.CountExact() != uint(tc.want) {
