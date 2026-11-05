@@ -78,6 +78,12 @@ func (t *table) admitUnique(busy uniqueReservationBusy, tx *TxContext) {
 	if result.err.r != nil {
 		panic(result.err)
 	}
+	// Admission can move only this shard from a stale owner group to a peer
+	// with capacity. Refresh its existing location hint before regrouping;
+	// otherwise a later batch repeatedly sends that old group to one worker.
+	if _, err := cluster.locateViaSchema(scanQueryContext(tx, cluster.ctx), busy.shard.Resource); err != nil {
+		panic(err)
+	}
 }
 
 type uniqueReservationClient struct {

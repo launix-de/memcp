@@ -29,12 +29,26 @@ test_cases:
     sql: INSERT INTO big_items(id,v0,v1) SELECT 400000,v0,v1 FROM big_items WHERE id=0
     expect: {error: true}
   - name: Reserve distributed absence before publishing a new key
-    sql: INSERT INTO big_items(id,v0,v1) VALUES(400000,-1,-1)
+    sql: INSERT INTO big_items(id,v0,v1,v2) VALUES(400000,-1,-1,0)
     expect: {affected_rows: 1}
   - name: Distributed insert remains visible
     sql: SELECT id,v0,v1 FROM big_items WHERE id=400000
     expect:
       data: [{id: 400000, v0: -1, v1: -1}]
+  - name: Repeated distributed collisions retain the exact previous value
+    timeout: 10
+    scm: |
+      (begin
+        (define target (table "{database}" false "big_items" false))
+        (list (reduce (produceN 32) (lambda (count i)
+          (+ count (insert target '("id" "v0" "v1" "v2") (list (list 400000 -1 -1 0)) '("v2" "$update")
+            (lambda (old update) (begin
+              (if (equal? old i) true (error "lost distributed increment"))
+              (update (list "v2" (+ old 1))) true))))) 0)))
+    expect: {data: [[64]]}
+  - name: Repeated distributed counter is visible
+    sql: SELECT v2 FROM big_items WHERE id=400000
+    expect: {data: [{v2: 32}]}
   - name: Another primary key still collides with the new secondary key
     sql: INSERT INTO big_items(id,v0,v1) VALUES(400001,-1,-1)
     expect: {error: true}
