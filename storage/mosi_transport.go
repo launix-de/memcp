@@ -122,7 +122,6 @@ func (p *mosiPeer) recovered() bool {
 }
 
 type mosiMessage struct {
-	frames  [][]byte    // coalesced opaque records; never encoded as metadata
 	Slot    uint64      `json:"slot,omitempty"`
 	Payload schemeValue `json:"payload,omitempty"`
 	encoded []byte      // immutable local frame; never part of wire metadata
@@ -321,24 +320,6 @@ func (p *mosiPeer) send(ctx context.Context, m mosiMessage) error {
 	return p.outgoing.push(m)
 }
 
-// The bounded queue owns each message after send returns. Producers never
-// wait for a protocol reply here; the connection reader completes acquisitions.
-func (q *mosiMailbox) takeAvailable(dst []mosiMessage, bytes int) int {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	count := 0
-	for count < len(dst) && q.head < len(q.items) {
-		next := q.items[q.head]
-		if next.Packet != nil || len(next.encoded) == 0 || len(next.encoded) > mosiBatchRecordBytes || len(next.encoded)+10 > bytes {
-			break
-		}
-		dst[count] = q.popLocked()
-		bytes -= len(next.encoded) + 10
-		count++
-	}
-	return count
-}
-
 func (p *mosiPeer) write() {
 	defer close(p.writeDone)
 	defer p.close()
@@ -346,20 +327,6 @@ func (p *mosiPeer) write() {
 		m, err := p.outgoing.next(p.ctx)
 		if err != nil {
 			return
-		}
-		var records [mosiMaxBatchMessages]mosiMessage
-		records[0] = m
-		if m.Packet == nil && len(m.encoded) > 0 && len(m.encoded) <= mosiBatchRecordBytes {
-			// Large payloads keep their own frames, so an early small control
-			// result never waits behind bulk bytes merely for coalescing.
-			count := p.outgoing.takeAvailable(records[1:], mosiBatchBytes-len(m.encoded)-16)
-			if count > 0 {
-				frame, encodeErr := encodeMosiBatch(records[:count+1])
-				if encodeErr != nil {
-					return
-				}
-				m = mosiMessage{encoded: frame}
-			}
 		}
 		if err = p.writeMessage(m); err != nil {
 			return
@@ -457,14 +424,7 @@ func (p *mosiPeer) read() {
 		if err != nil {
 			return
 		}
-		if len(m.frames) > 0 {
-			for _, record := range m.frames {
-				message, decodeErr := decodeMosiBody(record)
-				if decodeErr != nil || !p.dispatchMessage(message, len(record)+5, readyAt) {
-					return
-				}
-			}
-		} else if !p.dispatchMessage(m, len(frame), readyAt) {
+		if !p.dispatchMessage(m, len(frame), readyAt) {
 			return
 		}
 	}

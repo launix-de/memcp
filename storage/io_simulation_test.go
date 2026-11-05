@@ -14,6 +14,7 @@ import "time"
 import "bytes"
 import "context"
 import "testing"
+import "runtime"
 import "net/http"
 import "encoding/json"
 import "net/http/httptest"
@@ -259,5 +260,50 @@ func TestFakeRemoteColumnRoundTrip(t *testing.T) {
 				fixture.fresh().Deserialize(bytes.NewReader(encoded.Bytes()[1 : encoded.Len()-1]))
 			})
 		})
+	}
+}
+
+func TestIOSimulationSubMillisecondDeadlineAndCancellation(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("kernel timer path is Linux-specific; ordinary timers retain their fallback")
+	}
+	profile, _ := newIOSimulation(1000, 0.1, new(ioCounters))
+	for i := 0; i < 32; i++ {
+		deadline := time.Now().Add(100 * time.Microsecond)
+		if !profile.wait(context.Background(), deadline) || time.Now().Before(deadline) {
+			t.Fatal("precise wait bypassed its configured deadline")
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	started := make(chan struct{})
+	finished := make(chan bool, 1)
+	go func() {
+		close(started)
+		ready, supported := waitSubMillisecondIO(ctx, time.Now().Add(time.Hour))
+		finished <- !ready && supported
+	}()
+	<-started
+	// Exercise cancellation of an already parked kernel reader, rather than
+	// only the early ctx.Err check. The one-second join leaves ample CI margin.
+	time.Sleep(5 * time.Millisecond)
+	cancel()
+	select {
+	case cancelled := <-finished:
+		if !cancelled {
+			t.Fatal("kernel deadline wait ignored cancellation or was unavailable")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancellation did not wake the kernel deadline reader")
+	}
+}
+
+func BenchmarkIOSimulationSubMillisecondWait(b *testing.B) {
+	profile, _ := newIOSimulation(1000, 0.1, new(ioCounters))
+	b.ReportAllocs()
+	for b.Loop() {
+		if !profile.wait(context.Background(), time.Now().Add(100*time.Microsecond)) {
+			b.Fatal("wait failed")
+		}
 	}
 }

@@ -280,9 +280,9 @@ func TestMosiBinaryEnvelopeRoundTripAndLimits(t *testing.T) {
 	valid, _ := encodeMosiMessage(mosiMessage{ID: 1})
 	badVersion := bytes.Clone(valid)
 	badVersion[4] = 1
-	badLength := append([]byte("MOSI\x04\x01"), 0xff, 0xff)
+	badLength := append([]byte("MOSI\x05\x01"), 0xff, 0xff)
 	inlinePayload := []byte("MOSI\x02")
-	for _, frame := range [][]byte{nil, valid[:6], badVersion, badLength, append([]byte("MOSI\x04"), 99), inlinePayload, make([]byte, mosiMaxMessageBytes+1)} {
+	for _, frame := range [][]byte{nil, valid[:6], badVersion, badLength, append([]byte("MOSI\x05"), 99), inlinePayload, make([]byte, mosiMaxMessageBytes+1)} {
 		if _, err := decodeMosiMessage(frame); err == nil {
 			t.Fatal("malformed or oversized binary envelope was accepted")
 		}
@@ -1978,48 +1978,7 @@ func TestNodeMetadataDoesNotExecuteUnknownOrUntypedScheme(t *testing.T) {
 	}
 }
 
-func TestMosiCoalescedFramesPreserveRecords(t *testing.T) {
-	messages := []mosiMessage{
-		{Slot: 7, Payload: schemeValue(`(list 1 "x")`)},
-		{Method: "object.declare", Data: mustNodeMetadata(objectViewDeclaration{"owner/1", []byte(`"source"`)})},
-		{Packet: &mosiPacket{Kind: "chunk", ID: "transfer", Payload: []byte{0, 1, 2, 255}}},
-		{ID: 9, Data: []byte{3, 4}},
-	}
-	for i := range messages {
-		var err error
-		messages[i].encoded, err = encodeMosiMessage(messages[i])
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
-	frame, err := encodeMosiBatch(messages)
-	if err != nil {
-		t.Fatal(err)
-	}
-	decoded, err := decodeMosiMessage(frame)
-	if err != nil || len(decoded.frames) != len(messages) {
-		t.Fatal("lost coalesced records", err)
-	}
-	for i, body := range decoded.frames {
-		message, err := decodeMosiBody(body)
-		if err != nil {
-			t.Fatal(err)
-		}
-		encoded, err := encodeMosiMessage(message)
-		if err != nil || !bytes.Equal(encoded, messages[i].encoded) {
-			t.Fatal("coalescing changed record", i, err)
-		}
-	}
-	if _, err := encodeMosiBatch(messages[:1]); err == nil {
-		t.Fatal("unnecessary one-record batch accepted")
-	}
-	nested := append([]byte("MOSI\x04\x04"), appendNodeBlob(nil, []byte{4})...)
-	if _, err := decodeMosiMessage(nested); err == nil {
-		t.Fatal("nested batch accepted")
-	}
-}
-
-func TestMosiCoalescedDeclarationPublishesBeforeTask(t *testing.T) {
+func TestMosiDeclarationOwnsItsBytesBeforeTask(t *testing.T) {
 	checked := make(chan bool, 1)
 	peer := &mosiPeer{scanService: &nodeScanService{}, ctx: context.Background()}
 	peer.handle = func(context.Context, string, []byte) (any, error) {
@@ -2027,23 +1986,18 @@ func TestMosiCoalescedDeclarationPublishesBeforeTask(t *testing.T) {
 		checked <- ok && string(value.([]byte)) == `"ready"`
 		return nil, nil
 	}
-	messages := []mosiMessage{{Method: "object.declare", Data: mustNodeMetadata(objectViewDeclaration{"owner/1", []byte(`"ready"`)})}, {Method: "inspect"}}
-	for i := range messages {
-		messages[i].encoded, _ = encodeMosiMessage(messages[i])
+	data := mustNodeMetadata(objectViewDeclaration{"owner/1", []byte(`"ready"`)})
+	if !peer.dispatchMessage(mosiMessage{Method: "object.declare", Data: data}, len(data), time.Time{}) {
+		t.Fatal("declaration admission failed")
 	}
-	frame, _ := encodeMosiBatch(messages)
-	decoded, err := decodeMosiMessage(frame)
-	if err != nil {
-		t.Fatal(err)
+	for i := range data {
+		data[i] = 0
 	}
-	for _, body := range decoded.frames {
-		message, err := decodeMosiBody(body)
-		if err != nil || !peer.dispatchMessage(message, len(body), time.Time{}) {
-			t.Fatal("dispatch failed", err)
-		}
+	if !peer.dispatchMessage(mosiMessage{Method: "inspect"}, 1, time.Time{}) {
+		t.Fatal("task admission failed")
 	}
 	peer.workers.Wait()
 	if !<-checked {
-		t.Fatal("task overtook its declaration")
+		t.Fatal("task borrowed the old frame or overtook its declaration")
 	}
 }

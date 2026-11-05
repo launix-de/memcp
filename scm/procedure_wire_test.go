@@ -20,6 +20,7 @@ import "testing"
 import "encoding/json"
 import "runtime"
 import "weak"
+import "sync"
 
 func TestProcedureFactoryReusesCaptureFreeCode(t *testing.T) {
 	entries := make(map[string]Scmer)
@@ -83,12 +84,18 @@ func TestProcedureFactoryKeepsInvocationCapturesPrivate(t *testing.T) {
 	if compilations != 1 {
 		t.Fatalf("compiled %d factories for identical code", compilations)
 	}
+	var calls sync.WaitGroup
 	for index, callback := range callbacks {
 		expected := NewSlice([]Scmer{NewInt(int64(index*100 + 3)), NewInt(int64(index*100 + 4)), NewSlice([]Scmer{NewString("literal"), NewInt(7)})})
-		if result := Apply(callback, NewInt(3)); !Equal(result, expected) {
-			t.Fatalf("invocation %d: %s, expected %s", index, String(result), String(expected))
-		}
+		calls.Add(1)
+		go func() {
+			defer calls.Done()
+			if result := Apply(callback, NewInt(3)); !Equal(result, expected) {
+				t.Errorf("invocation %d: %s, expected %s", index, String(result), String(expected))
+			}
+		}()
 	}
+	calls.Wait()
 }
 
 func TestClusterCallbackOwnerCancellationAndInvocationBinding(t *testing.T) {

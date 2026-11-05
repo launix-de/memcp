@@ -255,11 +255,9 @@ unchanged.
 
 ## Node codec and worker closures (protocol 17)
 
-The WebSocket subprotocol is `memcp.mosi.v4`. A frame addresses a numeric handle
+The WebSocket subprotocol is `memcp.mosi.v5`. A frame addresses a numeric handle
 slot, a reserved endpoint, a reply slot, or MOSI, followed by that recipient's
-payload. Already queued small records may share one frame without a flush
-timer or acknowledgement; large records and raw column chunks remain separate.
-Handle deliveries contain only the slot and raw Scheme reconstruction
+payload. Handle deliveries contain only the slot and raw Scheme reconstruction
 text after the version/address prefix. There is no JSON envelope, Scmer type,
 operation UUID, or per-call token around a callback. Handle constructors contain
 only the slot; the authenticated receiving connection supplies peer/incarnation
@@ -330,9 +328,24 @@ a local wait, but a late-result disposer remains until completion/disconnect and
 retains no query state. Shard, transaction and node identities keep their own
 contracts.
 
-The WebSocket writer coalesces only already queued small records, without a
-flush timer or waiting for more. Records retain their individual recipient and
-payload, and declarations retain publication order before task admission.
-Raw column chunks and large values keep separate frames so small controls are
-not grouped behind bulk bytes. Frame, mailbox, bandwidth, latency and query-time
-limits are unchanged.
+## Performance diagnosis and simulation precision
+
+Incoming native scan code reuses compiled factories, and pure procedures reuse
+compiled callables directly. Join-key comparisons bind projected column positions
+once during physical operator preparation and compare existing values directly.
+The native joined-aggregate control suite has its own performance shard so its
+full seven fresh A/B fixture pairs fit the existing job deadline. Query counts,
+fixtures, assertions, warmup, timing aggregation and budgets are unchanged.
+
+Linux Go netpoll rounds idle sub-millisecond timers up to one millisecond. Faster
+workers consequently encountered longer simulated waits despite less CPU and
+traffic. Short configured I/O deadlines now use a monotonic kernel timer which
+wakes the Go poller without spinning. Cancellation closes the owned timer file;
+ordinary timers remain the fallback and serve longer deadlines. Bandwidth,
+latency, shared-node accounting and query time limits retain their values.
+Matched-model codec A/B measurements apply this same timing implementation to
+both binaries; unthrottled measurements diagnose actual execution costs.
+
+Opaque immutable declarations own their retained bytes, keeping their admission
+budget independent of receive-buffer size. Every socket frame contains one
+recipient and its payload. Scheme values and lambda bodies retain text encoding.

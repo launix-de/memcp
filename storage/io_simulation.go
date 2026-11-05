@@ -52,9 +52,14 @@ func (s *ioSimulation) wait(ctx context.Context, deadline time.Time) bool {
 		return ctx.Err() == nil
 	}
 	started := time.Now()
+	defer func() { s.stats.waitNS.Add(uint64(time.Since(started))) }()
+	if delay < time.Millisecond {
+		if ready, supported := waitSubMillisecondIO(ctx, deadline); supported {
+			return ready
+		}
+	}
 	timer := time.NewTimer(delay)
 	defer timer.Stop()
-	defer func() { s.stats.waitNS.Add(uint64(time.Since(started))) }()
 	select {
 	case <-ctx.Done():
 		return false

@@ -1003,7 +1003,7 @@ func (peer *mosiPeer) publishObjectView(method string, data []byte) error {
 	if peer.receivedViewBytes+len(declaration.URI)+len(declaration.View) > objectViewBudget || peer.receivedViewSlots >= objectViewSlots {
 		return fmt.Errorf("object declarations exceed byte budget")
 	}
-	peer.objectViews.Store(declaration.URI, declaration.View)
+	peer.objectViews.Store(declaration.URI, append([]byte(nil), declaration.View...))
 	peer.receivedViewBytes += len(declaration.URI) + len(declaration.View)
 	peer.receivedViewSlots++
 	return nil

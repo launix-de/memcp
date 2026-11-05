@@ -18,7 +18,7 @@ import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/memcp/storage/mosi"
 
 // Version 16 uses binary node metadata and raw Scheme reconstruction text.
-const scanWireVersion = 17
+const scanWireVersion = 18
 
 type remoteScanShard struct {
 	Schema   uint64       `json:"schema"`

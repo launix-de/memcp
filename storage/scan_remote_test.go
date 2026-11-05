@@ -1290,7 +1290,7 @@ func TestHandleWireContainsOnlySlotAndPayload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(frame, append([]byte("MOSI\x04\x00\x13"), payload...)) {
+	if !bytes.Equal(frame, append([]byte("MOSI\x05\x00\x13"), payload...)) {
 		t.Fatalf("handle frame contains more than recipient and payload: %q", frame)
 	}
 	decoded, err := decodeMosiMessage(frame)
