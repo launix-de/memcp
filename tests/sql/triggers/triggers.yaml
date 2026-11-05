@@ -2154,3 +2154,73 @@ test_cases:
   - name: "Clearing before delete leaves no child referencing deleted parent"
     sql: "SELECT COUNT(*) AS n FROM trigger_fk_final_child WHERE p=2"
     expect: {data: [{n: 0}]}
+
+  - name: BEFORE INSERT rejects a primary collision introduced by the trigger
+    setup:
+      - sql: DROP TABLE IF EXISTS trigger_unique_final
+      - sql: CREATE TABLE trigger_unique_final (id INT PRIMARY KEY, code INT UNIQUE) ENGINE=memory
+      - sql: INSERT INTO trigger_unique_final VALUES (20,20)
+      - sql: CREATE TRIGGER trigger_unique_final_bi BEFORE INSERT ON trigger_unique_final FOR EACH ROW SET NEW.id=20
+    sql: INSERT INTO trigger_unique_final VALUES (10,10)
+    expect: {error: true}
+    cleanup:
+      - sql: DROP TABLE IF EXISTS trigger_unique_final
+
+  - name: BEFORE INSERT rejects a secondary collision introduced by the trigger
+    setup:
+      - sql: DROP TABLE IF EXISTS trigger_unique_final
+      - sql: CREATE TABLE trigger_unique_final (id INT PRIMARY KEY, code INT UNIQUE) ENGINE=memory
+      - sql: INSERT INTO trigger_unique_final VALUES (20,20)
+      - sql: CREATE TRIGGER trigger_unique_final_bi BEFORE INSERT ON trigger_unique_final FOR EACH ROW SET NEW.code=20
+    sql: INSERT INTO trigger_unique_final VALUES (10,10)
+    expect: {error: true}
+    cleanup:
+      - sql: DROP TABLE IF EXISTS trigger_unique_final
+
+  - name: BEFORE INSERT can remove an original primary collision
+    setup:
+      - sql: DROP TABLE IF EXISTS trigger_unique_final
+      - sql: CREATE TABLE trigger_unique_final (id INT PRIMARY KEY, code INT UNIQUE) ENGINE=memory
+      - sql: INSERT INTO trigger_unique_final VALUES (20,20)
+      - sql: CREATE TRIGGER trigger_unique_final_bi BEFORE INSERT ON trigger_unique_final FOR EACH ROW SET NEW.id=30
+      - sql: INSERT INTO trigger_unique_final VALUES (20,30)
+    sql: SELECT id,code FROM trigger_unique_final ORDER BY id
+    expect: {data: [{id: 20, code: 20}, {id: 30, code: 30}]}
+    cleanup:
+      - sql: DROP TABLE IF EXISTS trigger_unique_final
+
+  - name: BEFORE INSERT generates an omitted primary key
+    setup:
+      - sql: DROP TABLE IF EXISTS trigger_unique_final
+      - sql: CREATE TABLE trigger_unique_final (id INT PRIMARY KEY, code INT UNIQUE) ENGINE=memory
+      - sql: CREATE TRIGGER trigger_unique_final_bi BEFORE INSERT ON trigger_unique_final FOR EACH ROW SET NEW.id=NEW.code+100
+      - sql: INSERT INTO trigger_unique_final(code) VALUES (7),(8)
+    sql: SELECT id,code FROM trigger_unique_final ORDER BY id
+    expect: {data: [{id: 107, code: 7}, {id: 108, code: 8}]}
+    cleanup:
+      - sql: DROP TABLE IF EXISTS trigger_unique_final
+
+  - name: BEFORE UPDATE checks the final unique key
+    setup:
+      - sql: DROP TABLE IF EXISTS trigger_unique_final
+      - sql: CREATE TABLE trigger_unique_final (id INT PRIMARY KEY, code INT UNIQUE) ENGINE=memory
+      - sql: INSERT INTO trigger_unique_final VALUES (10,10),(20,20)
+      - sql: CREATE TRIGGER trigger_unique_final_bu BEFORE UPDATE ON trigger_unique_final FOR EACH ROW SET NEW.code=20
+    sql: UPDATE trigger_unique_final SET code=30 WHERE id=10
+    expect: {error: true}
+    cleanup:
+      - sql: DROP TABLE IF EXISTS trigger_unique_final
+
+  - name: BEFORE INSERT performs a nested unique insert before reserving its own key
+    setup:
+      - sql: DROP TABLE IF EXISTS trigger_unique_source
+      - sql: DROP TABLE IF EXISTS trigger_unique_target
+      - sql: CREATE TABLE trigger_unique_source (id INT PRIMARY KEY, val INT) ENGINE=memory
+      - sql: CREATE TABLE trigger_unique_target (id INT PRIMARY KEY, val INT) ENGINE=memory
+      - sql: CREATE TRIGGER trigger_unique_nested BEFORE INSERT ON trigger_unique_source FOR EACH ROW BEGIN INSERT INTO trigger_unique_target(id,val) VALUES (NEW.id,NEW.val); END
+      - sql: INSERT INTO trigger_unique_source VALUES (1,7)
+    sql: SELECT id,val FROM trigger_unique_target
+    expect: {data: [{id: 1, val: 7}]}
+    cleanup:
+      - sql: DROP TABLE IF EXISTS trigger_unique_source
+      - sql: DROP TABLE IF EXISTS trigger_unique_target

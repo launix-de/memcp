@@ -1240,15 +1240,12 @@ func TestReserveIDsPersistedPrefixRecovery(t *testing.T) {
 
 func assertUniqueWriteLocksReleased(t *testing.T, tbl *table) {
 	t.Helper()
-	locks := tbl.uniqueWrites.Load()
-	if locks == nil {
-		return
-	}
-	for i := range locks {
-		if !locks[i].TryLock() {
+	for i := range nodeUniqueWriteLocks().stripes {
+		stripe := &nodeUniqueWriteLocks().stripes[i]
+		if !stripe.TryLock() {
 			t.Fatalf("unique stripe %d retained after callback panic", i)
 		}
-		locks[i].Unlock()
+		stripe.Unlock()
 	}
 }
 

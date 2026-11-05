@@ -17,8 +17,8 @@ Copyright (C) 2023-2026  Carl-Philip Hänsch
 package storage
 
 import "fmt"
-import "math"
 import "maps"
+import "math"
 import "sort"
 import "sync"
 import "time"
@@ -646,9 +646,8 @@ type table struct {
 	// t.mu protects table-local storage topology and long-lived maintenance
 	// state: ShardMode, Shards/PShards, maintenanceKind and the dual-write
 	// flags that coordinate table-level rebuild/repartition.
-	mu           sync.Mutex
-	uniqueWrites atomic.Pointer[uniqueWriteLocks] // logical-key guards, shared by all generations
-	insertRoute  atomic.Uint64                    // rotating free-shard writer selection; runtime-only
+	mu          sync.Mutex
+	insertRoute atomic.Uint64 // rotating free-shard writer selection; runtime-only
 	// LOCK TABLES: variable-based lock that is cheap for scans to check but
 	// expensive to acquire (drains shard readers first via waitTableLock).
 	// Software contract:
@@ -1864,9 +1863,6 @@ func (t *table) metadataMemory() uint {
 	if t.publishedName.Load() != nil {
 		// The published descriptor shares Name's string payload.
 		size += uint(unsafe.Sizeof(""))
-	}
-	if locks := t.uniqueWrites.Load(); locks != nil {
-		size += uint(unsafe.Sizeof(*locks))
 	}
 	for name := range t.DroppedColumns {
 		size += 64 + uint(len(name))
@@ -3842,12 +3838,15 @@ func (t *table) insertLocal(columns []string, values [][]scm.Scmer, onCollisionC
 	if validatedSchema == nil {
 		validatedSchema = t.buildColumnNamesSnapshot()
 	}
-	validateInsertColumns(columns, validatedSchema.declarations)
 
 	t.beginContributionMutation()
 	defer t.endContributionMutation()
 
 	columns, values = t.prepareInsertDefaults(columns, values)
+	if len(t.Triggers) != 0 {
+		columns, values = t.ExecuteBeforeInsertTriggers(columns, values, isIgnore, currentTx)
+	}
+	validateInsertColumns(columns, validatedSchema.declarations)
 	// sanitize values (per-row recovery for INSERT IGNORE)
 	values = t.sanitizeInsertRows(columns, values, isIgnore)
 	if len(values) == 0 {
@@ -4512,11 +4511,6 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 			t.processClusterUniqueCollision(columns, values, mergeNull, success, onCollisionCols, failure, idx, currentTx, borrowed, []*storageShard{borrowed.ownedShard})
 			return
 		}
-		if borrowed.locks == nil {
-			// NULL-distinct keys need no stripe until an UPDATE supplies its
-			// first concrete key. Adopt that key's lazily allocated table pool.
-			borrowed.locks = guard.locks
-		}
 		borrowed.extend(guard.mask)
 		t.processUniqueCollision(columns, values, mergeNull, success, onCollisionCols, failure, idx, currentTx, borrowed)
 		return
@@ -4801,6 +4795,27 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 							}
 						}
 						if mutating {
+							if activeReplication(t.schema) == nil && len(t.Triggers) != 0 && len(t.GetTriggers(BeforeUpdate)) != 0 {
+								batchMask := guard.mask
+								// Never wait for a native writer while retaining a stripe.
+								guard.releaseKeys()
+								mutation := s.mutationGuard(currentTx)
+								defer mutation.release()
+								defer func() {
+									guard.unlock()
+									guard.mask.include(batchMask)
+									guard.lock()
+								}()
+								uid, present = s.GetRecordidForUnique(exactScanAccess(accessSchema, key), currentTx, true)
+								if !present {
+									guard.mask.include(batchMask)
+									guard.lock()
+									// Recheck only this untouched row. Earlier collision
+									// callbacks in this batch must never be replayed.
+									t.processUniqueCollision(columns, values[j:j+1], mergeNull, success, onCollisionCols, failure, 0, currentTx, guard)
+									return
+								}
+							}
 							// MOSI admission already serializes the native shard writer.
 							// Drop local key ownership before network acquisition and
 							// keep it dropped until that writer has been released.
@@ -4821,7 +4836,7 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 									panic(uniqueReadRetry{})
 								}
 							}
-							if callbackGuard != nil && len(t.Unique) > 1 {
+							if callbackGuard != nil && len(t.Unique) > 1 && (len(t.Triggers) == 0 || len(t.GetTriggers(BeforeUpdate)) == 0) {
 								// Different constraints can collide with the same stored
 								// row. Include that row's canonical keys before reading
 								// callback values, not just this INSERT's proposed keys.
@@ -4841,13 +4856,13 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 										ReleaseColumnReader(reader)
 									}
 									needed := t.guardUniqueWrites(cols, [][]scm.Scmer{row}, mergeNull, 0)
-									if needed.mask&^guard.mask == 0 {
+									if guard.mask.contains(needed.mask) {
 										break
 									}
 									// No callback has run: release before waiting for the
 									// complete ordered stripe set, then re-probe the key.
 									guard.unlock()
-									guard.mask |= needed.mask
+									guard.mask.include(needed.mask)
 									guard.lock()
 									var present bool
 									uid, present = s.GetRecordidForUnique(exactScanAccess(accessSchema, key), currentTx, true)
@@ -4857,6 +4872,7 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 									}
 								}
 							}
+
 						}
 						params := make([]scm.Scmer, len(onCollisionCols))
 						for i, p := range onCollisionCols {

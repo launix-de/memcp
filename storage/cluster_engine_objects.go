@@ -5,14 +5,14 @@ SPDX-License-Identifier: GPL-3.0-or-later
 package storage
 
 import "fmt"
-import "strings"
-import "sync"
 import "sort"
+import "sync"
 import "time"
 import "weak"
-import "runtime"
 import "context"
+import "runtime"
 import "strconv"
+import "strings"
 import "sync/atomic"
 import "github.com/google/uuid"
 import "github.com/launix-de/memcp/scm"
@@ -150,7 +150,7 @@ func (s *storageShard) HandleClusterRequest(ctx context.Context, r scm.ClusterRe
 			if input.operator == shardUniqueReserve {
 				committed, err := s.serveUniqueScan(ctx, input)
 				if busy, ok := err.(uniqueReservationBusy); ok {
-					return scanResult{res: scm.NewSlice([]scm.Scmer{scm.NewString("busy"), scm.NewString(busy.shard.Resource.Shard), scm.NewBool(busy.capacity)})}, nil
+					return scanResult{res: scm.NewSlice([]scm.Scmer{scm.NewString("busy"), scm.NewString(busy.shard.Resource.Shard), scm.NewBool(busy.capacity), scm.NewBool(busy.retry)})}, nil
 				}
 				if err != nil {
 					return nil, err

@@ -98,3 +98,39 @@ func TestMinRamSetting(t *testing.T) {
 		t.Fatal("invalid minimum modified settings")
 	}
 }
+
+func TestUniqueScaleFactorSetting(t *testing.T) {
+	old := Settings.UniqueScaleFactor
+	defer ChangeSettings(scm.NewString("UniqueScaleFactor"), scm.NewInt(int64(old)))
+	pool := nodeUniqueWriteLocks()
+	for _, factor := range []int64{0, 1, 4, 8} {
+		ChangeSettings(scm.NewString("UniqueScaleFactor"), scm.NewInt(factor))
+		if got := ChangeSettings(scm.NewString("UniqueScaleFactor")).Int(); got != factor {
+			t.Fatalf("factor=%d, want %d", got, factor)
+		}
+		if nodeUniqueWriteLocks() != pool {
+			t.Fatal("setting replaced a live pool")
+		}
+		data, err := json.Marshal(Settings)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var restored SettingsT
+		if err = json.Unmarshal(data, &restored); err != nil || restored.UniqueScaleFactor != int(factor) {
+			t.Fatal("factor not preserved", err)
+		}
+	}
+	for _, value := range []scm.Scmer{scm.NewInt(-1), scm.NewFloat(1.5), scm.NewString("4")} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Errorf("accepted invalid factor %s", scm.String(value))
+				}
+			}()
+			ChangeSettings(scm.NewString("UniqueScaleFactor"), value)
+		}()
+	}
+	if got := ChangeSettings(scm.NewString("UniqueLockStripes")).Int(); got != int64(len(pool.stripes)) {
+		t.Fatal("incorrect effective pool size")
+	}
+}

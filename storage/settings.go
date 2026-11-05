@@ -21,6 +21,7 @@ import "fmt"
 import "sync"
 import "time"
 import "bufio"
+import "runtime"
 import "strconv"
 import "strings"
 import "encoding/json"
@@ -46,6 +47,7 @@ type SettingsT struct {
 	TracePrintMaxLength    int // max TracePrint record bytes before a visible marker (0 = unlimited)
 	PartitionMaxDimensions int
 	DefaultEngine          string
+	UniqueScaleFactor      int // Node-wide UNIQUE stripe pool; 0 = one stripe, otherwise CPU multiplier. Restart required.
 	ShardSize              uint
 	AnalyzeMinItems        int
 	IndexThreshold         int   // min shard rows before creating a new adaptive index (0 = default 5)
@@ -151,6 +153,7 @@ var Settings = SettingsT{
 	PartitionMaxDimensions: 10,
 	DefaultEngine:          "safe",
 	ShardSize:              60000,
+	UniqueScaleFactor:      4,
 	ShardRamPercent:        50,
 	AnalyzeMinItems:        50,
 	IndexThreshold:         5,
@@ -267,6 +270,10 @@ func saveSettings() error {
 }
 
 func InitSettings() {
+	if Settings.UniqueScaleFactor < 0 {
+		panic("UniqueScaleFactor must be non-negative")
+	}
+	uniquePoolStartupFactor.Store(int64(Settings.UniqueScaleFactor))
 	scm.SettingsHaveGoodBacktraces = Settings.Backtrace
 	scm.SetTrace(Settings.Trace)
 	scm.TracePrint = Settings.TracePrint
@@ -297,6 +304,8 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 			scm.NewString("PartitionMaxDimensions"), scm.NewInt(int64(Settings.PartitionMaxDimensions)),
 			scm.NewString("DefaultEngine"), scm.NewString(Settings.DefaultEngine),
 			scm.NewString("ShardSize"), scm.NewInt(int64(Settings.ShardSize)),
+			scm.NewString("UniqueScaleFactor"), scm.NewInt(int64(Settings.UniqueScaleFactor)),
+			scm.NewString("UniqueLockStripes"), scm.NewInt(int64(len(nodeUniqueWriteLocks().stripes))),
 			scm.NewString("AnalyzeMinItems"), scm.NewInt(int64(Settings.AnalyzeMinItems)),
 			scm.NewString("IndexThreshold"), scm.NewInt(int64(Settings.IndexThreshold)),
 			scm.NewString("ShardRamPercent"), scm.NewInt(int64(Settings.ShardRamPercent)),
@@ -347,6 +356,10 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 			return scm.NewInt(int64(Settings.PartitionMaxDimensions))
 		case "DefaultEngine":
 			return scm.NewString(Settings.DefaultEngine)
+		case "UniqueScaleFactor":
+			return scm.NewInt(int64(Settings.UniqueScaleFactor))
+		case "UniqueLockStripes":
+			return scm.NewInt(int64(len(nodeUniqueWriteLocks().stripes)))
 		case "ShardSize":
 			return scm.NewInt(int64(Settings.ShardSize))
 		case "AnalyzeMinItems":
@@ -432,6 +445,13 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 			Settings.PartitionMaxDimensions = scm.ToInt(a[1])
 		case "DefaultEngine":
 			Settings.DefaultEngine = scm.String(a[1])
+		case "UniqueScaleFactor":
+			if !a[1].IsInt() || a[1].Int() < 0 || a[1].Int() > int64(int(^uint(0)>>1)/runtime.GOMAXPROCS(0)/64) {
+				panic("UniqueScaleFactor requires a non-negative integer fitting the node's address space")
+			}
+			Settings.UniqueScaleFactor = int(a[1].Int())
+		case "UniqueLockStripes":
+			panic("UniqueLockStripes is read-only")
 		case "ShardSize":
 			Settings.ShardSize = uint(scm.ToInt(a[1]))
 		case "AnalyzeMinItems":

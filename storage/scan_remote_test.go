@@ -11,15 +11,14 @@ warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See
 package storage
 
 import "fmt"
-import "bytes"
 import "sync"
 import "time"
+import "bytes"
 import "context"
 import "runtime"
 import "strings"
 import "testing"
 import "net/http"
-import "math/bits"
 import "sync/atomic"
 import "encoding/json"
 import "net/http/httptest"
@@ -1057,12 +1056,9 @@ func TestRemoteUniqueChannelRetainsGuardThroughUpdateAndFinish(t *testing.T) {
 		}
 	}()
 	guard := tbl.guardUniqueWrites([]string{"id"}, [][]scm.Scmer{{scm.NewInt(2)}}, false, 0)
-	for mask := guard.mask; mask != 0; mask &= mask - 1 {
-		i := bits.TrailingZeros64(mask)
-		if guard.locks[i].TryLock() {
-			guard.locks[i].Unlock()
-			t.Fatal("remote worker released its UNIQUE guard after ready")
-		}
+	if guard.tryLock() {
+		guard.unlock()
+		t.Fatal("remote worker released its UNIQUE guard after ready")
 	}
 	collated, err := callUniqueChannel(ctx, commands, scm.NewString("probe"), scm.NewString(shard.uuid.String()),
 		uniqueStringArray([]string{"label"}), scm.NewSlice([]scm.Scmer{scm.NewString("sail")}), uniqueStringArray([]string{"id"}))

@@ -17,9 +17,9 @@ Copyright (C) 2023-2026  Carl-Philip Hänsch
 package storage
 
 import "fmt"
-import "time"
 import "sort"
 import "sync"
+import "time"
 import "strings"
 import "sync/atomic"
 import "runtime/debug"
@@ -2210,8 +2210,14 @@ func (t *storageShard) scan(access scanAccess, conditionCols []string, condition
 		t = writeAccess.shard
 	}
 
+	var mutationGuard *uniqueWriteGuard
+	if scanMutates(callbackCols) && activeReplication(t.t.schema) == nil && len(t.t.Triggers) != 0 && len(t.t.GetTriggers(BeforeUpdate)) != 0 {
+		mutationGuard = t.mutationGuard(currentTx)
+		defer mutationGuard.release()
+	}
+
 	if stride > 0 {
-		return t.scanBatch(access, conditionCols, condition, callbackCols, mapReduce, neutral, stride, batchdata, currentTx, ss)
+		return t.scanBatch(access, conditionCols, condition, callbackCols, mapReduce, neutral, stride, batchdata, currentTx, ss, mutationGuard)
 	}
 	akkumulator := scm.ApplyOnce(neutral, nil)
 	var outCount int64
@@ -2378,6 +2384,7 @@ func (t *storageShard) scan(access scanAccess, conditionCols []string, condition
 	} else {
 		mapper = t.OpenMapReducer(callbackCols, mapReduce, skipShardReadLock, 0, nil, currentTx)
 	}
+	mapper.uniqueGuard = mutationGuard
 	defer mapper.Close()
 	// Use a guarded lock that will always be released on panic to avoid leaked locks.
 	locked := false
@@ -2610,7 +2617,7 @@ func (t *storageShard) hasOrderedScanProxy(cols []string, currentTx *TxContext) 
 	return false
 }
 
-func (t *storageShard) scanBatch(access scanAccess, conditionCols []string, condition scm.Scmer, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, stride int, batchdata []scm.Scmer, currentTx *TxContext, ss *scm.SessionState) (scm.Scmer, int64, int64) {
+func (t *storageShard) scanBatch(access scanAccess, conditionCols []string, condition scm.Scmer, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, stride int, batchdata []scm.Scmer, currentTx *TxContext, ss *scm.SessionState, mutationGuard *uniqueWriteGuard) (scm.Scmer, int64, int64) {
 	akkumulator := scm.ApplyOnce(neutral, nil)
 	var outCount int64
 	var candidateCount int64
@@ -2700,6 +2707,7 @@ func (t *storageShard) scanBatch(access scanAccess, conditionCols []string, cond
 	} else {
 		mapper = t.OpenMapReducer(callbackCols, mapReduce, skipShardReadLock, stride, batchdata, currentTx)
 	}
+	mapper.uniqueGuard = mutationGuard
 	defer mapper.Close()
 
 	locked := false

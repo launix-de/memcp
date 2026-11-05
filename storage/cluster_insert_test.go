@@ -1654,3 +1654,54 @@ func TestClusterUniqueUnreservedReadNeedsHeldParticipant(t *testing.T) {
 	}()
 	set.probe(right, columns, []scm.Scmer{scm.NewInt(99)}, nil)
 }
+
+func TestClusterUniqueContentionDoesNotMoveOwnership(t *testing.T) {
+	for _, kind := range []string{"stripe", "writer"} {
+		t.Run(kind, func(t *testing.T) {
+			tbl := setupScanParallelTestTable(t, "tunique_local_contention")
+			tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}}
+			cluster := globalTestCluster(t, tbl.schema.Name)
+			mounts := sharedClusterMounts.Swap(&map[string]bool{tbl.schema.Name: true})
+			defer sharedClusterMounts.Store(mounts)
+			service := nodeScans.Swap(&nodeScanService{cluster: cluster})
+			defer nodeScans.Store(service)
+			cluster.manager.resourceCell(mosiResource{Database: tbl.schema.Name}).ownstate.Initialize(mosi.M)
+			shard := tbl.ActiveShards()[0]
+			cell := cluster.manager.shardCell(shard)
+			cell.current.Store(shard)
+			cell.ownstate.Initialize(mosi.M)
+			rows := [][]scm.Scmer{{scm.NewInt(7)}}
+			guard := tbl.guardUniqueWrites([]string{"id"}, rows, false, 0)
+			if kind == "stripe" {
+				guard.lock()
+				defer guard.unlock()
+			} else {
+				writer, _ := cell.ownstate.TryWrite(nil, false)
+				if writer == nil {
+					t.Fatal("fixture writer not admitted")
+				}
+				defer writer.Release()
+			}
+			ready := newClusterReceiver(1, func(context.Context, scm.Scmer) (scm.Scmer, error) {
+				return scm.NewNil(), fmt.Errorf("contended reservation became ready")
+			})
+			ready.Seal()
+			defer ready.Close()
+			_, err := shard.serveUniqueScan(context.Background(), shardScanInvocation{neutral: scm.NewSlice([]scm.Scmer{
+				scm.NewAny(ready), uniqueStringArray([]string{"id"}), uniqueRowArray(rows), scm.NewBool(false), scm.NewBool(true), uniqueStringArray([]string{shard.uuid.String()}),
+			})})
+			busy, ok := err.(uniqueReservationBusy)
+			if !ok || busy.retry != (kind == "stripe") || busy.capacity {
+				t.Fatalf("contention was classified as placement work: %v", err)
+			}
+			if kind == "stripe" && cell.ownstate.Writing() {
+				t.Fatal("contention retained its partial writer")
+			}
+			// This cluster fixture has no owner-discovery transport. Contention
+			// must return locally without asking it to claim or move this shard.
+			if kind == "stripe" {
+				tbl.admitUnique(busy, nil)
+			}
+		})
+	}
+}

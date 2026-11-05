@@ -26,11 +26,15 @@ type uniqueReservationBusy struct {
 	shard    remoteScanShard
 	owner    string
 	capacity bool
+	retry    bool // stripe contention, never an ownership or RAM request
 }
 
 func (uniqueReservationBusy) Error() string { return "UNIQUE writer admission is busy" }
 
 func (t *table) admitUnique(busy uniqueReservationBusy, tx *TxContext) {
+	if busy.retry {
+		return
+	}
 	cluster := activeNodeCluster()
 	owner, err := cluster.locate(scanQueryContext(tx, cluster.ctx), busy.shard.Resource)
 	if err != nil {
@@ -394,12 +398,47 @@ func (s *storageShard) setCollisionValue(id uint32, column string, value scm.Scm
 
 func (set *uniqueReservationSet) insert(shard *storageShard, columns []string, rows [][]scm.Scmer, firstID func(int64)) {
 	if part := set.nativeShard(shard); part != nil {
-		part.shard.Insert(columns, rows, false, nil, firstID, false, part.tx, part.guard)
+		part.shard.Insert(columns, rows, false, part.shard.t.columnNamesSnapshot.Load(), firstID, false, part.tx, part.guard)
 		return
 	}
 	value := set.call(shard, "insert", uniqueStringArray(columns), uniqueRowArray(rows))
 	if firstID != nil && !value.IsNil() {
 		firstID(value.Int())
+	}
+}
+
+func (set *uniqueReservationSet) releaseKeys() {
+	if set.singleSource != nil {
+		if set.singleNative.guard != nil {
+			set.singleNative.guard.unlock()
+			set.singleNative.guard.mask = uniqueWriteMask{}
+		}
+	}
+	for _, part := range set.local {
+		part.guard.unlock()
+		part.guard.mask = uniqueWriteMask{}
+	}
+	if len(set.clients) == 0 && len(set.ordered) == 0 {
+		return
+	}
+	seen := map[*clusterReceiver]bool{set.nativeCommands: true}
+	for _, client := range set.clients {
+		if seen[client.commands] {
+			continue
+		}
+		seen[client.commands] = true
+		if _, err := callUniqueChannel(client.ctx, client.commands, scm.NewString("release_keys")); err != nil {
+			panic(err)
+		}
+	}
+	for _, client := range set.ordered {
+		if seen[client.commands] {
+			continue
+		}
+		seen[client.commands] = true
+		if _, err := callUniqueChannel(client.ctx, client.commands, scm.NewString("release_keys")); err != nil {
+			panic(err)
+		}
 	}
 }
 
@@ -522,7 +561,7 @@ func (t *table) reserveUniqueDomain(columns []string, rows [][]scm.Scmer, mergeN
 				set.singleSource, set.singleNative = shard, uniqueNativeShard{shard: current, guard: borrowed, tx: tx}
 				if !borrowed.held {
 					if !borrowed.tryLock() {
-						panic(uniqueReservationBusy{shard: remoteScanShard{Resource: cluster.manager.shardResource(shard)}})
+						panic(uniqueReservationBusy{shard: remoteScanShard{Resource: cluster.manager.shardResource(shard)}, retry: true})
 					}
 					set.nativeGuardHeld = true
 				}
@@ -661,7 +700,7 @@ func (set *uniqueReservationSet) reserveLocalUniqueGroup(shards []*storageShard,
 	}
 	if !set.guard.held {
 		if !set.guard.tryLock() {
-			panic(uniqueReservationBusy{shard: remoteScanShard{Resource: cluster.manager.shardResource(shards[0])}, owner: cluster.self.ID})
+			panic(uniqueReservationBusy{shard: remoteScanShard{Resource: cluster.manager.shardResource(shards[0])}, owner: cluster.self.ID, retry: true})
 		}
 		set.nativeGuardHeld = true
 	}
@@ -703,7 +742,7 @@ func (t *table) startUniqueReservation(parent context.Context, owner string, fir
 			}
 			committed, err := first.serveUniqueScan(ctx, invocation)
 			if busy, ok := err.(uniqueReservationBusy); ok {
-				result = scanResult{res: scm.NewSlice([]scm.Scmer{scm.NewString("busy"), scm.NewString(busy.shard.Resource.Shard), scm.NewBool(busy.capacity)})}
+				result = scanResult{res: scm.NewSlice([]scm.Scmer{scm.NewString("busy"), scm.NewString(busy.shard.Resource.Shard), scm.NewBool(busy.capacity), scm.NewBool(busy.retry)})}
 				return
 			}
 			if err != nil {
@@ -731,8 +770,8 @@ func (t *table) startUniqueReservation(parent context.Context, owner string, fir
 		if result.err.r != nil {
 			panic(result.err)
 		}
-		if result.res.IsSlice() && len(result.res.Slice()) == 3 && scm.String(result.res.Slice()[0]) == "busy" {
-			panic(uniqueReservationBusy{shard: remoteScanShard{Schema: t.filterSchemaFingerprint(), Resource: mosiResource{Database: t.schema.Name, Table: t.Name, Shard: scm.String(result.res.Slice()[1])}}, owner: owner, capacity: result.res.Slice()[2].Bool()})
+		if result.res.IsSlice() && len(result.res.Slice()) == 4 && scm.String(result.res.Slice()[0]) == "busy" {
+			panic(uniqueReservationBusy{shard: remoteScanShard{Schema: t.filterSchemaFingerprint(), Resource: mosiResource{Database: t.schema.Name, Table: t.Name, Shard: scm.String(result.res.Slice()[1])}}, owner: owner, capacity: result.res.Slice()[2].Bool(), retry: result.res.Slice()[3].Bool()})
 		}
 		panic("UNIQUE reservation ended before its channel was ready")
 	case <-ctx.Done():
@@ -833,7 +872,7 @@ func (s *storageShard) serveUniqueScan(ctx context.Context, input shardScanInvoc
 		defer firstWrite.Release()
 		s = firstWrite.shard
 	}
-	scope := &uniqueReservationSet{ctx: ctx, table: s.t, topology: s.t.activeTopology(), local: make(map[string]*uniqueNativeShard), clients: make(map[string]*uniqueReservationClient)}
+	scope := &uniqueReservationSet{ctx: ctx, table: s.t, guard: guardPointer, topology: s.t.activeTopology(), local: make(map[string]*uniqueNativeShard), clients: make(map[string]*uniqueReservationClient)}
 	scope.bindNativeShard(ids[0], &uniqueNativeShard{shard: s, guard: guardPointer, tx: tx})
 	guardPointer.reservations = scope
 	for _, id := range ids[1:] {
@@ -870,7 +909,7 @@ func (s *storageShard) serveUniqueScan(ctx context.Context, input shardScanInvoc
 	}
 	if !guardPointer.held {
 		if !guardPointer.tryLock() {
-			return false, uniqueReservationBusy{shard: remoteScanShard{Resource: mosiResource{Database: s.t.schema.Name, Table: s.t.Name, Shard: ids[0]}}}
+			return false, uniqueReservationBusy{shard: remoteScanShard{Resource: mosiResource{Database: s.t.schema.Name, Table: s.t.Name, Shard: ids[0]}}, retry: true}
 		}
 		defer guardPointer.unlock()
 	}
@@ -879,6 +918,11 @@ func (s *storageShard) serveUniqueScan(ctx context.Context, input shardScanInvoc
 }
 
 func (set *uniqueReservationSet) dispatchUniqueCommand(_ context.Context, command []scm.Scmer) (scm.Scmer, error) {
+	if scm.String(command[0]) == "release_keys" {
+		set.guard.unlock()
+		set.guard.mask = uniqueWriteMask{}
+		return scm.NewBool(true), nil
+	}
 	if scm.String(command[0]) == "bind" {
 		if len(command) != 2 || !command[1].IsSlice() {
 			return scm.NewNil(), fmt.Errorf("invalid UNIQUE peer bindings")
@@ -966,7 +1010,7 @@ func (set *uniqueReservationSet) dispatchUniqueCommand(_ context.Context, comman
 			return scm.NewNil(), err
 		}
 		firstID := scm.NewNil()
-		s.Insert(insertColumns, insertRows, false, nil, func(id int64) { firstID = scm.NewInt(id) }, false, part.tx, part.guard)
+		s.Insert(insertColumns, insertRows, false, s.t.columnNamesSnapshot.Load(), func(id int64) { firstID = scm.NewInt(id) }, false, part.tx, part.guard)
 		return firstID, nil
 	}
 	return scm.NewNil(), fmt.Errorf("unknown UNIQUE command")

@@ -1832,8 +1832,10 @@ def run_cluster_inserts(args, artifacts, journal, hash_partitioned=False):
     with contextlib.ExitStack() as cleanup:
         cleanup.callback(lambda: secret_file.unlink(missing_ok=True))
         builder = Node(args, directory, "builder", "")
+        insert_settings = {"UniqueScaleFactor": 0}
         if hash_partitioned:
-            (builder.data_dir / "settings.json").write_text(json.dumps({"ShardSize": 16}))
+            insert_settings["ShardSize"] = 16
+        (builder.data_dir / "settings.json").write_text(json.dumps(insert_settings))
         cleanup.callback(lambda: builder.kill() if builder.process is not None else None)
         source = builder.start()
         source.sql(f"CREATE DATABASE {DATABASE}", "system")
@@ -1863,6 +1865,11 @@ def run_cluster_inserts(args, artifacts, journal, hash_partitioned=False):
         source.sql("CREATE UNIQUE INDEX writer_value ON integer_items (writer,value)")
         for table in ("uuid_items", "integer_items"):
             source.sql(f"ALTER TABLE {table} ADD COLUMN counter INT DEFAULT 0")
+            # Install before peers load the schema: this drill covers DML
+            # atomicity, including BEFORE execution without UNIQUE stripes.
+            source.sql(
+                f"CREATE TRIGGER atomic_before_{table} BEFORE UPDATE ON {table} FOR EACH ROW "
+                "BEGIN IF NEW.counter <> OLD.counter THEN SET NEW.counter=OLD.counter+1; END IF; END")
         builder.kill()
         shared = builder.data_dir / DATABASE
         config = effective_io_config(args)
@@ -1872,6 +1879,7 @@ def run_cluster_inserts(args, artifacts, journal, hash_partitioned=False):
             (node.data_dir / DATABASE).symlink_to(shared, target_is_directory=True)
             (node.data_dir / f"{DATABASE}.json").write_text(json.dumps({"backend": "filesystem"}))
             node.process_env["GOMAXPROCS"] = "2"
+            (node.data_dir / "settings.json").write_text(json.dumps({"UniqueScaleFactor": 0}))
             seed = "" if index == 0 else f"http://127.0.0.1:{nodes[0].port}/cluster"
             node.node_args = [f"--cluster-secret-file={secret_file}",
                               f"--cluster-address=http://127.0.0.1:{node.port}/cluster",
@@ -1880,6 +1888,8 @@ def run_cluster_inserts(args, artifacts, journal, hash_partitioned=False):
                 node.node_args.append("--cluster-bootstrap")
             configure_cluster_io(node, config, shared)
             node.start()
+            expect(json.loads(node.client.scm('(settings "UniqueLockStripes")')), 1,
+                   "concurrent INSERT/UPDATE uses the node-global one-stripe pool")
         def status(node):
             value = json.loads(node.client.scm("(cluster_status)"))
             return json.loads(value) if isinstance(value, str) else value

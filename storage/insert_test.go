@@ -16,11 +16,15 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 */
 package storage
 
+import "os"
 import "fmt"
 import "math"
 import "sync"
 import "time"
+import "unsafe"
+import "os/exec"
 import "runtime"
+import "strconv"
 import "strings"
 import "testing"
 import "sync/atomic"
@@ -86,7 +90,7 @@ func TestInsertUniqueChecksAllowIndependentKeys(t *testing.T) {
 	var second [][]scm.Scmer
 	for i := int64(101); i < 1000; i++ {
 		rows := [][]scm.Scmer{{scm.NewInt(i)}}
-		if tbl.guardUniqueWrites([]string{"id"}, rows, false, 0).mask&firstMask == 0 {
+		if !tbl.guardUniqueWrites([]string{"id"}, rows, false, 0).mask.intersects(firstMask) {
 			second = rows
 			break
 		}
@@ -235,7 +239,11 @@ func TestInsertUniqueContention(t *testing.T) {
 	}
 }
 
-func TestInsertCollisionReadModifyWriteContention(t *testing.T) {
+func TestInsertCollisionReadModifyWriteContention(t *testing.T) { testInsertCollisionRMW(t, false) }
+
+func TestInsertCollisionReadModifyWriteBeforeTrigger(t *testing.T) { testInsertCollisionRMW(t, true) }
+
+func testInsertCollisionRMW(t *testing.T, before bool) {
 	previous := runtime.GOMAXPROCS(32)
 	defer runtime.GOMAXPROCS(previous)
 	for _, layout := range []string{"free", "unique", "extra", "unrelated", "free-main", "unique-main", "extra-main", "unrelated-main"} {
@@ -254,6 +262,18 @@ func TestInsertCollisionReadModifyWriteContention(t *testing.T) {
 				if mainRows == 0 {
 					t.Fatal("fixture did not produce a main row")
 				}
+			}
+			var beforeCalls atomic.Int64
+			if before {
+				get, set := scm.Globalenv.Vars["get_assoc"], scm.Globalenv.Vars["set_assoc"]
+				tbl.AddTrigger(TriggerDescription{Name: "increment_before_update", Timing: BeforeUpdate, Func: scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+					if !args[3].IsNil() {
+						panic("native BEFORE acquired a synthetic transaction")
+					}
+					beforeCalls.Add(1)
+					old := scm.Apply(get, args[0], scm.NewString("val"))
+					return scm.Apply(set, args[1], scm.NewString("val"), scm.NewInt(old.Int()+1))
+				})})
 			}
 			const workers, repetitions = 64, 16
 			var calls, applied atomic.Int64
@@ -299,6 +319,9 @@ func TestInsertCollisionReadModifyWriteContention(t *testing.T) {
 				access.Release()
 			}
 			const expected = workers * repetitions
+			if before && beforeCalls.Load() != expected {
+				t.Fatalf("BEFORE executions=%d, want %d", beforeCalls.Load(), expected)
+			}
 			if calls.Load() != expected || applied.Load() != expected || total != expected || tbl.CountExact() != 1 {
 				t.Fatalf("callbacks=%d updates=%d value=%d rows=%d; want %d increments on one row", calls.Load(), applied.Load(), total, tbl.CountExact(), expected)
 			}
@@ -395,12 +418,16 @@ func TestInsertCollisionKeyChangeConflictRestoresRow(t *testing.T) {
 	for i := 0; i < 1000; i++ {
 		name = fmt.Sprint("replacement-", i)
 		needed := tbl.guardUniqueWrites(columns, [][]scm.Scmer{{scm.NewInt(7), scm.NewString(name)}}, false, 0)
-		if mask := needed.mask &^ original.mask; mask != 0 {
+		if !original.mask.contains(needed.mask) {
+			var mask uniqueWriteMask
+			for word := 0; word < len(needed.mask.words)+len(needed.mask.extra); word++ {
+				mask.addWord(word, needed.mask.word(word)&^original.mask.word(word))
+			}
 			extra = uniqueWriteGuard{locks: original.locks, mask: mask}
 			break
 		}
 	}
-	if extra.mask == 0 {
+	if extra.mask.empty() {
 		t.Fatal("no independent key stripe")
 	}
 	extra.lock()
@@ -436,7 +463,7 @@ func TestInsertCollisionIndependentKeyProgress(t *testing.T) {
 	var secondRow [][]scm.Scmer
 	for id := int64(8); id < 1000; id++ {
 		row := [][]scm.Scmer{{scm.NewInt(id), scm.NewInt(0), scm.NewInt(0)}}
-		if tbl.guardUniqueWrites(columns, row, false, 0).mask&firstMask == 0 {
+		if !tbl.guardUniqueWrites(columns, row, false, 0).mask.intersects(firstMask) {
 			secondRow = row
 			break
 		}
@@ -1101,5 +1128,186 @@ func TestUniqueCoercingCollationHashPreservesEquality(t *testing.T) {
 		if _, precise := tbl.uniqueColumnHash("value", value); !precise {
 			t.Error("ordinary collated cache keys unnecessarily reserve every stripe")
 		}
+	}
+}
+
+// Previously every touched table retained 64 mutexes for the rest of its life.
+// Sequentially touching many relations must leave no table-owned lock state.
+func TestUniqueNodePoolReleasesIdleTables(t *testing.T) {
+	pool := nodeUniqueWriteLocks()
+	for i := 0; i < 4096; i++ {
+		tbl := &table{Unique: []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}}}
+		guard := tbl.guardUniqueWrites([]string{"id"}, [][]scm.Scmer{{scm.NewInt(7)}}, false, 0)
+		if guard.locks != pool {
+			t.Fatal("table allocated a private lock pool")
+		}
+		guard.lock()
+		guard.release()
+	}
+	// The shared pool contains mutexes only; it cannot retain a table owner.
+	for i := range pool.stripes {
+		if !pool.stripes[i].TryLock() {
+			t.Fatalf("idle stripe %d retained", i)
+		}
+		pool.stripes[i].Unlock()
+	}
+	t.Logf("node pool: %d stripes, %d bytes of fixed synchronization state", len(pool.stripes), uintptr(len(pool.stripes))*unsafe.Sizeof(uniqueWriteStripe{})+unsafe.Sizeof(*pool))
+}
+
+// A global mutex held throughout a callback deadlocks this ordinary nested
+// write when the two tables happen to hash into the same stripe.
+func TestUniqueNodePoolNestedTriggerHashCollision(t *testing.T) {
+	outer := setupScanParallelTestTable(t, "tunique_node_trigger")
+	outer.CreateColumn("val", "INT", nil, nil)
+	outer.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}}
+	inner, _ := CreateTable(outer.schema.Name, "trigger_target", Memory, false)
+	inner.CreateColumn("id", "INT", nil, nil)
+	inner.CreateColumn("val", "INT", nil, nil)
+	inner.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}}
+	columns := []string{"id", "val"}
+	outerRow := [][]scm.Scmer{{scm.NewInt(7), scm.NewInt(0)}}
+	outerMask := outer.guardUniqueWrites(columns, outerRow, false, 0).mask
+	var innerRow [][]scm.Scmer
+	for id := int64(1); id <= int64(len(nodeUniqueWriteLocks().stripes))*64; id++ {
+		row := [][]scm.Scmer{{scm.NewInt(id), scm.NewInt(0)}}
+		if inner.guardUniqueWrites(columns, row, false, 0).mask.intersects(outerMask) {
+			innerRow = row
+			break
+		}
+	}
+	if innerRow == nil {
+		t.Fatal("no colliding test key")
+	}
+	outer.Insert(columns, outerRow, nil, scm.NewNil(), false, nil)
+	inner.Insert(columns, innerRow, nil, scm.NewNil(), false, nil)
+	increment := scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+		return scm.Apply(args[1], scm.NewSlice([]scm.Scmer{scm.NewString("val"), scm.NewInt(args[0].Int() + 1)}))
+	})
+	outer.AddTrigger(TriggerDescription{Name: "update_other_table", Timing: BeforeUpdate, Func: scm.NewFunc(func(...scm.Scmer) scm.Scmer {
+		inner.Insert(columns, innerRow, []string{"val", "$update"}, increment, false, nil)
+		return scm.NewNil()
+	})})
+	done := make(chan any, 1)
+	go func() {
+		defer func() { done <- recover() }()
+		outer.Insert(columns, outerRow, []string{"val", "$update"}, increment, false, nil)
+	}()
+	select {
+	case failure := <-done:
+		if failure != nil {
+			t.Fatal(failure)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("nested trigger waited on another table's node stripe")
+	}
+	for _, tbl := range []*table{outer, inner} {
+		shard := tbl.ActiveShards()[0]
+		var total int64
+		reader := shard.ColumnReaderTx(nil, "val", false, ReadAuto)
+		for id := uint32(0); id < shard.main_count+uint32(len(shard.deltaRows())); id++ {
+			if !shard.deletions.Get(uint(id)) {
+				total += reader.GetValue(id).Int()
+			}
+		}
+		ReleaseColumnReader(reader)
+		if total != 1 || tbl.CountExact() != 1 {
+			t.Fatalf("%s: value=%d rows=%d", tbl.Name, total, tbl.CountExact())
+		}
+		assertUniqueWriteLocksReleased(t, tbl)
+	}
+}
+
+func BenchmarkUniqueNodeThroughput(b *testing.B) {
+	for _, count := range []int{1, 64} {
+		b.Run(fmt.Sprintf("tables=%d", count), func(b *testing.B) {
+			previous := Basepath
+			Basepath = b.TempDir()
+			b.Cleanup(func() { Basepath = previous; databases.Remove("tunique_node_bench") })
+			Init(scm.Globalenv)
+			LoadDatabases()
+			CreateDatabase("tunique_node_bench", false)
+			tables := make([]*table, count)
+			columns := []string{"id", "val"}
+			for i := range tables {
+				tbl, _ := CreateTable("tunique_node_bench", fmt.Sprint("items_", i), Memory, false)
+				tbl.CreateColumn("id", "INT", nil, nil)
+				tbl.CreateColumn("val", "INT", nil, nil)
+				tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}}
+				rows := make([][]scm.Scmer, 64)
+				for key := range rows {
+					rows[key] = []scm.Scmer{scm.NewInt(int64(key + 1)), scm.NewInt(0)}
+				}
+				tbl.Insert(columns, rows, nil, scm.NewNil(), false, nil)
+				tables[i] = tbl
+			}
+			increment := scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+				return scm.Apply(args[1], scm.NewSlice([]scm.Scmer{scm.NewString("val"), scm.NewInt(args[0].Int() + 1)}))
+			})
+			var next atomic.Uint64
+			b.ReportAllocs()
+			b.ResetTimer()
+			b.RunParallel(func(pb *testing.PB) {
+				worker := int(next.Add(1) - 1)
+				tbl := tables[worker%len(tables)]
+				row := [][]scm.Scmer{{scm.NewInt(int64(worker%64 + 1)), scm.NewInt(0)}}
+				for pb.Next() {
+					tbl.Insert(columns, row, []string{"val", "$update"}, increment, false, nil)
+				}
+			})
+			b.StopTimer()
+			var total int64
+			for _, tbl := range tables {
+				for _, shard := range tbl.ActiveShards() {
+					reader := shard.ColumnReaderTx(nil, "val", false, ReadAuto)
+					for id := uint32(0); id < shard.main_count+uint32(len(shard.deltaRows())); id++ {
+						if !shard.deletions.Get(uint(id)) {
+							total += reader.GetValue(id).Int()
+						}
+					}
+					ReleaseColumnReader(reader)
+				}
+				if tbl.CountExact() != 64 {
+					b.Fatalf("rows=%d, expected 64", tbl.CountExact())
+				}
+			}
+			if total != int64(b.N) {
+				b.Fatalf("lost increments: %d, expected %d", total, b.N)
+			}
+		})
+	}
+}
+
+// Exercise complete real mutations with one stripe and a multiword pool in
+// separate processes: replacing a live pool in-process would invalidate guards.
+func TestUniqueNodePoolConfigured(t *testing.T) {
+	if value := os.Getenv("MEMCP_UNIQUE_POOL_CHILD"); value != "" {
+		factor, err := strconv.Atoi(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		Settings.UniqueScaleFactor = factor
+		InitSettings()
+		expected := 1
+		if factor != 0 {
+			expected = factor * runtime.GOMAXPROCS(0)
+		}
+		if len(nodeUniqueWriteLocks().stripes) != expected {
+			t.Fatal("CPU multiplier not applied")
+		}
+		t.Run("atomic collisions", TestInsertCollisionReadModifyWriteContention)
+		t.Run("atomic before collisions", TestInsertCollisionReadModifyWriteBeforeTrigger)
+		t.Run("aliases", TestInsertCollisionDifferentUniqueKeysShareRow)
+		t.Run("before nested update", TestUniqueNodePoolNestedTriggerHashCollision)
+		t.Run("no retained table pools", TestUniqueNodePoolReleasesIdleTables)
+		return
+	}
+	for _, config := range []struct{ factor, cpus string }{{"0", "3"}, {"8", "20"}} {
+		t.Run(config.factor, func(t *testing.T) {
+			command := exec.Command(os.Args[0], "-test.run=^TestUniqueNodePoolConfigured$", "-test.v", "-test.timeout=90s")
+			command.Env = append(os.Environ(), "MEMCP_UNIQUE_POOL_CHILD="+config.factor, "GOMAXPROCS="+config.cpus)
+			if output, err := command.CombinedOutput(); err != nil {
+				t.Fatalf("pool factor=%s: %v\n%s", config.factor, err, output)
+			}
+		})
 	}
 }

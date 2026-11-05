@@ -20,27 +20,115 @@ import "math"
 import "sync"
 import "slices"
 import "unsafe"
+import "context"
 import "runtime"
 import "strings"
 import "math/bits"
+import "sync/atomic"
 import "encoding/binary"
 import "github.com/cespare/xxhash/v2"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/memcp/storage/mosi"
 import "github.com/launix-de/go-mysqlstack/sqldb"
 
-// UNIQUE guards belong to the logical table, independently of physical shard
-// generations. Equal keys use the same stripe across rebuild/repartition; an
-// unrelated key does not hold a table-wide mutex during lookup, WAL or fsync.
-// Large batches acquire their stripe set in ascending order, once per batch.
-type uniqueWriteLocks [64]sync.Mutex
+// One node-wide pool bounds synchronization metadata independently of table and
+// row counts. GOMAXPROCS uses the runtime's container-aware CPU budget. Never
+// resize a live pool: existing reservations must keep the same stripe mapping.
+type UniqueLockPool struct {
+	stripes []uniqueWriteStripe
+}
+
+var uniquePoolStartupFactor atomic.Int64
+
+func init() { uniquePoolStartupFactor.Store(4) }
+
+var nodeUniqueWriteLocks = sync.OnceValue(func() *UniqueLockPool {
+	return &UniqueLockPool{stripes: make([]uniqueWriteStripe, uniqueWriteStripeCount(int(uniquePoolStartupFactor.Load())))}
+})
+
+// Padding separates unrelated contended mutexes onto separate cache lines.
+// This storage is node-global, never per table, constraint or record.
+type uniqueWriteStripe struct {
+	sync.Mutex
+	_ [64 - unsafe.Sizeof(sync.Mutex{})]byte
+}
+
+func uniqueWriteStripeCount(factor int) int {
+	if factor == 0 {
+		return 1
+	}
+	return factor * runtime.GOMAXPROCS(0)
+}
+
+// Keep ordinary CPU budgets allocation-free, while supporting pools larger
+// than 128 stripes. This mask belongs to an invocation, never to a table.
+type uniqueWriteMask struct {
+	words [2]uint64
+	extra []uint64
+}
+
+func (m uniqueWriteMask) word(i int) uint64 {
+	if i < len(m.words) {
+		return m.words[i]
+	}
+	if i -= len(m.words); i < len(m.extra) {
+		return m.extra[i]
+	}
+	return 0
+}
+
+func (m *uniqueWriteMask) addWord(i int, bits uint64) {
+	if bits == 0 {
+		return
+	}
+	if i < len(m.words) {
+		m.words[i] |= bits
+		return
+	}
+	i -= len(m.words)
+	if i >= len(m.extra) {
+		extra := make([]uint64, (len(nodeUniqueWriteLocks().stripes)+63)/64-len(m.words))
+		copy(extra, m.extra)
+		m.extra = extra
+	}
+	m.extra[i] |= bits
+}
+
+func (m *uniqueWriteMask) add(i int) { m.addWord(i/64, uint64(1)<<uint(i%64)) }
+
+func (m uniqueWriteMask) contains(other uniqueWriteMask) bool {
+	for i := 0; i < len(other.words)+len(other.extra); i++ {
+		if other.word(i)&^m.word(i) != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func (m uniqueWriteMask) empty() bool { return (uniqueWriteMask{}).contains(m) }
+
+func (m uniqueWriteMask) intersects(other uniqueWriteMask) bool {
+	for i := 0; i < len(m.words)+len(m.extra); i++ {
+		if m.word(i)&other.word(i) != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *uniqueWriteMask) include(other uniqueWriteMask) {
+	for i := 0; i < len(other.words)+len(other.extra); i++ {
+		m.addWord(i, other.word(i))
+	}
+}
 
 type uniqueWriteGuard struct {
 	afterTriggers []uniqueAfterTrigger
 	ownedShard    *storageShard // an UPDATE already owns this native MOSI writer
 	reservations  *uniqueReservationSet
-	locks         *uniqueWriteLocks
-	mask          uint64
+	mutation      *mosi.Writer
+	locks         *UniqueLockPool
+	mask          uniqueWriteMask
 	held          bool
 	wrote         bool
 	version       uint64 // advances when a collision callback temporarily releases guards
@@ -66,6 +154,10 @@ func (g *uniqueWriteGuard) after(event uniqueAfterTrigger) {
 
 func (g *uniqueWriteGuard) release() {
 	g.unlock()
+	if g.mutation != nil {
+		g.mutation.Release()
+		g.mutation = nil
+	}
 	events := g.afterTriggers
 	g.afterTriggers = nil
 	for _, event := range events {
@@ -135,38 +227,56 @@ func (s *storageShard) probeUnique(access scanAccess, tx *TxContext) bool {
 }
 
 func (g *uniqueWriteGuard) lock() {
-	for mask := g.mask; mask != 0; mask &= mask - 1 {
-		g.locks[bits.TrailingZeros64(mask)].Lock()
+	for word := 0; word < len(g.mask.words)+len(g.mask.extra); word++ {
+		for mask := g.mask.word(word); mask != 0; mask &= mask - 1 {
+			g.locks.stripes[word*64+bits.TrailingZeros64(mask)].Lock()
+		}
 	}
 	g.held = true
 }
 
-func (g *uniqueWriteGuard) tryLock() bool {
-	var acquired uint64
-	for remaining := g.mask; remaining != 0; remaining &= remaining - 1 {
-		i := bits.TrailingZeros64(remaining)
-		if !g.locks[i].TryLock() {
-			for acquired != 0 {
-				j := bits.TrailingZeros64(acquired)
-				g.locks[j].Unlock()
-				acquired &= acquired - 1
+// Try additional stripes in ascending order. On conflict, release only the
+// newly acquired prefix; existing ownership remains intact for error cleanup.
+func (g *uniqueWriteGuard) tryAdditional(needed uniqueWriteMask) bool {
+	for word := 0; word < len(needed.words)+len(needed.extra); word++ {
+		for mask := needed.word(word) &^ g.mask.word(word); mask != 0; mask &= mask - 1 {
+			i := word*64 + bits.TrailingZeros64(mask)
+			if !g.locks.stripes[i].TryLock() {
+				for previous := 0; previous <= word; previous++ {
+					for acquired := needed.word(previous) &^ g.mask.word(previous); acquired != 0; acquired &= acquired - 1 {
+						j := previous*64 + bits.TrailingZeros64(acquired)
+						if j >= i {
+							break
+						}
+						g.locks.stripes[j].Unlock()
+					}
+				}
+				return false
 			}
-			return false
 		}
-		acquired |= uint64(1) << i
 	}
-	g.held = true
 	return true
+}
+
+func (g *uniqueWriteGuard) tryLock() bool {
+	needed := g.mask
+	g.mask = uniqueWriteMask{}
+	ok := g.tryAdditional(needed)
+	g.mask = needed
+	g.held = ok
+	return ok
 }
 
 func (g *uniqueWriteGuard) unlock() {
 	if !g.held {
 		return
 	}
-	for mask := g.mask; mask != 0; {
-		i := bits.Len64(mask) - 1
-		g.locks[i].Unlock()
-		mask &^= uint64(1) << i
+	for word := len(g.mask.words) + len(g.mask.extra) - 1; word >= 0; word-- {
+		for mask := g.mask.word(word); mask != 0; {
+			i := bits.Len64(mask) - 1
+			g.locks.stripes[word*64+i].Unlock()
+			mask &^= uint64(1) << i
+		}
 	}
 	g.held = false
 	g.version++
@@ -175,21 +285,18 @@ func (g *uniqueWriteGuard) unlock() {
 // A collision update may change UNIQUE columns. Borrow the existing key
 // ownership and acquire any additional stripes without waiting: two callbacks
 // changing keys in opposite directions must fail explicitly, never deadlock.
-func (g *uniqueWriteGuard) extend(mask uint64) {
-	var acquired uint64
-	for remaining := mask &^ g.mask; remaining != 0; remaining &= remaining - 1 {
-		bit := uint64(1) << bits.TrailingZeros64(remaining)
-		if !g.locks[bits.TrailingZeros64(bit)].TryLock() {
-			for acquired != 0 {
-				i := bits.TrailingZeros64(acquired)
-				g.locks[i].Unlock()
-				acquired &^= uint64(1) << i
-			}
+func (g *uniqueWriteGuard) extend(mask uniqueWriteMask) {
+	if !g.held {
+		g.mask = mask
+		if !g.tryLock() {
 			panic(sqldb.NewSQLError1(1213, "40001", "Concurrent UNIQUE key change; retry transaction"))
 		}
-		acquired |= bit
+		return
 	}
-	g.mask |= acquired
+	if !g.tryAdditional(mask) {
+		panic(sqldb.NewSQLError1(1213, "40001", "Concurrent UNIQUE key change; retry transaction"))
+	}
+	g.mask.include(mask)
 }
 
 // Equal is deliberately coercing: ints can equal numeric strings/dates and
@@ -357,7 +464,11 @@ func (t *table) uniqueAccess(access scanAccess) scanAccess {
 }
 
 func (t *table) guardUniqueWrites(columns []string, values [][]scm.Scmer, mergeNull bool, first int) uniqueWriteGuard {
-	var mask uint64
+	locks := nodeUniqueWriteLocks()
+	var identity [8]byte
+	binary.LittleEndian.PutUint64(identity[:], uint64(uintptr(unsafe.Pointer(t))))
+	seed := xxhash.Sum64(identity[:])
+	var mask uniqueWriteMask
 	for idx := t.nextUniqueConstraint(columns, first); idx < len(t.Unique); idx = t.nextUniqueConstraint(columns, idx+1) {
 		key := t.Unique[idx]
 		var inlinePositions [8]int
@@ -377,7 +488,7 @@ func (t *table) guardUniqueWrites(columns []string, values [][]scm.Scmer, mergeN
 			}
 		}
 		for _, row := range values {
-			hash := uint64(idx + 1)
+			hash := (seed ^ uint64(idx+1)) * 1099511628211
 			skip, broad := false, false
 			for columnIndex, position := range positions {
 				value := scm.NewNil()
@@ -396,25 +507,12 @@ func (t *table) guardUniqueWrites(columns []string, values [][]scm.Scmer, mergeN
 				continue
 			}
 			if broad {
-				mask = ^uint64(0)
-				break
+				for stripe := range locks.stripes {
+					mask.add(stripe)
+				}
+				return uniqueWriteGuard{locks: locks, mask: mask}
 			}
-			mask |= uint64(1) << (hash & 63)
-			if mask == ^uint64(0) {
-				break
-			}
-		}
-		if mask == ^uint64(0) {
-			break
-		}
-	}
-	locks := t.uniqueWrites.Load()
-	if mask != 0 && locks == nil {
-		locks = new(uniqueWriteLocks)
-		if !t.uniqueWrites.CompareAndSwap(nil, locks) {
-			locks = t.uniqueWrites.Load()
-		} else if t.isEphemeralQueryTable() {
-			GlobalCache.UpdateSizeAsync(t, int64(unsafe.Sizeof(*locks)))
+			mask.add(int(hash % uint64(len(locks.stripes))))
 		}
 	}
 	return uniqueWriteGuard{locks: locks, mask: mask}
@@ -423,7 +521,59 @@ func (t *table) guardUniqueWrites(columns []string, values [][]scm.Scmer, mergeN
 // guardUniqueRow gives mutation mappers the same logical-key ownership as
 // collision callbacks. It is invocation-owned, never stored per record. Resolve
 // stale physical IDs and revalidate keys after waiting without holding shard.mu.
+// Native mutation admission protects the read/modify/write lifetime. UNIQUE
+// stripes protect key membership only; unchanged keys do not need them.
+func (s *storageShard) localMutationState() *mosi.State {
+	if current := s.localMutations.Load(); current != nil {
+		return current
+	}
+	state := new(mosi.State)
+	state.Initialize(mosi.M)
+	if s.localMutations.CompareAndSwap(nil, state) {
+		return state
+	}
+	return s.localMutations.Load()
+}
+
+func (s *storageShard) mutationGuard(tx *TxContext) *uniqueWriteGuard {
+	guard := &uniqueWriteGuard{locks: nodeUniqueWriteLocks(), ownedShard: s}
+	if activeReplication(s.t.schema) != nil {
+		return guard
+	}
+	state := s.localMutationState()
+	var owner any
+	if tx != nil {
+		owner = tx.transactionState
+	}
+	for {
+		writer, done := state.TryWrite(owner, false)
+		if writer != nil {
+			guard.mutation = writer
+			return guard
+		}
+		select {
+		case <-done:
+		case <-scanQueryContext(tx, context.Background()).Done():
+			panic(scanQueryContext(tx, context.Background()).Err())
+		}
+	}
+}
+
 func (s *storageShard) guardUniqueRow(id uint32, tx *TxContext) (*uniqueWriteGuard, uint32, bool) {
+	if activeReplication(s.t.schema) == nil && len(s.t.Triggers) != 0 && len(s.t.GetTriggers(BeforeUpdate)) != 0 {
+		guard := s.mutationGuard(tx)
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+		if (tx == nil || tx.Mode != TxACID) && s.deletions.Get(uint(id)) {
+			current, found := s.resolveVisiblePrimaryRecidLocked(id)
+			if !found {
+				guard.release()
+				return nil, id, false
+			}
+			id = current
+		}
+		return guard, id, true
+	}
 	if len(s.t.Unique) == 0 || activeReplication(s.t.schema) != nil {
 		return nil, id, true
 	}
@@ -469,10 +619,20 @@ func (s *storageShard) guardUniqueRow(id uint32, tx *TxContext) (*uniqueWriteGua
 			guard.unlock()
 			return nil, id, false
 		}
-		if current.mask&^guard.mask == 0 {
+		if guard.mask.contains(current.mask) {
 			return &guard, id, true
 		}
 		guard.unlock()
+	}
+}
+
+// A source's native writer stays reserved while BEFORE runs. Release key
+// stripes on every retained peer before executing arbitrary trigger code.
+func (g *uniqueWriteGuard) releaseKeys() {
+	g.unlock()
+	g.mask = uniqueWriteMask{}
+	if g.reservations != nil {
+		g.reservations.releaseKeys()
 	}
 }
 

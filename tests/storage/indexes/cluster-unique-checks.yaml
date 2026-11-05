@@ -16,8 +16,10 @@ metadata:
     coordinator_shard_ram_percent: 1
 setup: []
 cleanup:
+  - sql: DROP TRIGGER IF EXISTS unique_before_update
+  - sql: DROP TRIGGER IF EXISTS unique_before_insert
   - sql: DROP TRIGGER IF EXISTS unique_after_insert
-  - sql: DELETE FROM big_items WHERE id IN (400000,400002)
+  - sql: DELETE FROM big_items WHERE id IN (400000,400002,400004)
 
 test_cases:
   - name: Global secondary UNIQUE collision needs no writer
@@ -69,4 +71,47 @@ test_cases:
       cluster: {min_remote_shards: 1}
   - name: Remove distributed AFTER trigger
     sql: DROP TRIGGER unique_after_insert
+    expect: {rows: 0}
+
+  - name: BEFORE INSERT assigns the final distributed primary key
+    sql: CREATE TRIGGER unique_before_insert BEFORE INSERT ON big_items FOR EACH ROW SET NEW.id=400000
+    expect: {rows: 0}
+  - name: Distributed UNIQUE rejects a collision introduced by BEFORE INSERT
+    sql: INSERT INTO big_items(id,v0,v1) VALUES(400003,-3,-3)
+    expect: {error: true}
+  - name: Remove the distributed BEFORE INSERT trigger
+    sql: DROP TRIGGER unique_before_insert
+    expect: {rows: 0}
+
+  - name: BEFORE INSERT can repair an original distributed collision
+    sql: CREATE TRIGGER unique_before_insert BEFORE INSERT ON big_items FOR EACH ROW SET NEW.id=400004
+    expect: {rows: 0}
+  - name: Publish the final distributed key instead of rejecting the original key
+    sql: INSERT INTO big_items(id,v0,v1,v2) VALUES(400000,-4,-4,0)
+    expect: {affected_rows: 1}
+  - name: Trigger-generated distributed key is visible
+    sql: SELECT id,v0,v1 FROM big_items WHERE id=400004
+    expect: {data: [{id: 400004, v0: -4, v1: -4}]}
+  - name: Remove the key-repair trigger
+    sql: DROP TRIGGER unique_before_insert
+    expect: {rows: 0}
+  - name: BEFORE UPDATE uses the current distributed counter
+    sql: CREATE TRIGGER unique_before_update BEFORE UPDATE ON big_items FOR EACH ROW SET NEW.v2=OLD.v2+1
+    expect: {rows: 0}
+  - name: Collision updates remain atomic through BEFORE UPDATE
+    timeout: 10
+    scm: |
+      (begin
+        (define target (table "{database}" false "big_items" false))
+        (list (reduce (produceN 32) (lambda (count i)
+          (+ count (insert target '("id" "v0" "v1" "v2") (list (list 400004 -4 -4 0)) '("v2" "$update")
+            (lambda (old update) (begin
+              (if (equal? old i) true (error "BEFORE UPDATE lost distributed increment"))
+              (update (list "v2" (+ old 1))) true))))) 0)))
+    expect: {data: [[64]]}
+  - name: Counter after distributed BEFORE UPDATE is exact
+    sql: SELECT v2 FROM big_items WHERE id=400004
+    expect: {data: [{v2: 32}]}
+  - name: Remove the distributed BEFORE UPDATE trigger
+    sql: DROP TRIGGER unique_before_update
     expect: {rows: 0}

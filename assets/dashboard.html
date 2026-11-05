@@ -1513,6 +1513,8 @@ var settingsGroups=[
 {key:"MaxPersistBytes",label:"Data and index cache budget",desc:"Custom RAM budget for cached data and indexes. Eviction keeps disk data intact. 0 uses the percentage.",type:"bytes",min:0}
 ]},
 {group:"Storage",items:[
+{key:"UniqueScaleFactor",label:"Unique scale factor",desc:"One shared pool per node. Default 4 × the container-aware CPU budget; 0 selects one stripe. Changes require a restart.",type:"number",min:0},
+{key:"UniqueLockStripes",label:"Active UNIQUE lock stripes",desc:"Effective node-wide pool size. Shared by all tables.",type:"readonly"},
 {key:"ShardSize",label:"Target rows per shard",desc:"Max rows per shard before splitting",type:"number"},
 {key:"PartitionMaxDimensions",label:"Maximum partition dimensions",desc:"Max partition dimensions for table sharding",type:"number"},
 {key:"DefaultEngine",label:"Default storage engine",desc:"Default storage engine for new tables",type:"select",options:["safe","logged","sloppy","memory"]}
@@ -2233,6 +2235,8 @@ for(var j=0;j<s.options.length;j++){
 h+="<option value='"+esc(s.options[j])+"'"+(val===s.options[j]?" selected":"")+">"+esc(s.options[j])+"</option>";
 }
 h+="</select>";
+}else if(s.type==="readonly"){
+h+="<output>"+esc(String(val))+"</output>";
 }else if(s.type==="text"){
 h+="<input type='text' data-key='"+esc(s.key)+"' aria-label='"+esc(s.label||s.key)+"' value='"+esc(val||"")+"'>";
 }else if(s.type==="bytes"){
