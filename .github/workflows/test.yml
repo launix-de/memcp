@@ -25,7 +25,7 @@ jobs:
   changes:
     uses: ./.github/workflows/detect-changes.yml
 
-  test:
+  sql-test:
     needs: changes
     if: ${{ needs.changes.outputs.relevant == 'true' }}
     # Preserve the Python 3.12 AST representation used by the unchanged guard.
@@ -89,17 +89,17 @@ jobs:
           --mysqldump=mariadb-dump
 
   php:
-    needs: [changes, test]
+    needs: [changes, sql-test]
     if: ${{ needs.changes.outputs.php == 'true' }}
     uses: ./.github/workflows/php.yml
 
   rpm:
-    needs: [changes, test]
+    needs: [changes, sql-test]
     if: ${{ needs.changes.outputs.relevant == 'true' }}
     uses: ./.github/workflows/rpm.yml
 
   packaging:
-    needs: [changes, test]
+    needs: [changes, sql-test]
     if: ${{ needs.changes.outputs.relevant == 'true' }}
     # setup-php requires the packaged CLI IMAP extension available on Noble.
     runs-on: ubuntu-24.04
@@ -140,7 +140,7 @@ jobs:
         run: docker build --check .
 
   alternative-storage:
-    needs: [changes, test]
+    needs: [changes, sql-test]
     if: ${{ needs.changes.outputs.relevant == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -235,3 +235,36 @@ jobs:
             ${{ runner.temp }}/minio-version.txt
           if-no-files-found: warn
           retention-days: 7
+
+  # Keep the required status name stable and include conditional reusable jobs.
+  # Add every new test/build job in this workflow to this gate's dependencies.
+  test:
+    needs: [changes, sql-test, php, rpm, packaging, alternative-storage]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Require every selected test and build job
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PYTHON'
+          import json
+          import os
+
+          jobs = json.loads(os.environ["NEEDS_JSON"])
+          changes = jobs["changes"]
+          if changes["result"] != "success":
+              raise SystemExit("Change detection did not succeed")
+          flags = changes["outputs"]
+          for name in ("relevant", "php"):
+              if flags.get(name) not in ("true", "false"):
+                  raise SystemExit(f"Missing or invalid change classification: {name}")
+          for name, job in jobs.items():
+              if name == "changes":
+                  continue
+              selected = flags["php" if name == "php" else "relevant"] == "true"
+              expected = "success" if selected else "skipped"
+              if job["result"] != expected:
+                  raise SystemExit(f"{name}: {job['result']}; expected {expected}")
+          PYTHON
