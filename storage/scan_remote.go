@@ -108,7 +108,7 @@ func (s *scanRPCSession) handle(ctx context.Context, method string, data []byte)
 		if s.service == nil || s.service.cluster == nil {
 			return nil, fmt.Errorf("cluster membership is not enabled")
 		}
-		return s.service.cluster.HandleClusterRequest(context.WithValue(ctx, clusterObjectSessionKey{}, s), scm.ClusterRequest{Method: method, Payload: data})
+		return s.service.cluster.executeClusterRequest(context.WithValue(ctx, clusterObjectSessionKey{}, s), scm.ClusterRequest{Method: method, Payload: data})
 	}
 
 	switch method {
@@ -121,7 +121,7 @@ func (s *scanRPCSession) handle(ctx context.Context, method string, data []byte)
 		if object == nil {
 			return nil, fmt.Errorf("unknown remote database")
 		}
-		return object.HandleClusterRequest(context.WithValue(ctx, clusterObjectSessionKey{}, s), scm.ClusterRequest{Method: method, Payload: request})
+		return object.executeClusterRequest(context.WithValue(ctx, clusterObjectSessionKey{}, s), scm.ClusterRequest{Method: method, Payload: request})
 	case "insert.execute":
 		var request remoteInsertTask
 		if err := unmarshalNode(data, &request); err != nil {
@@ -131,7 +131,7 @@ func (s *scanRPCSession) handle(ctx context.Context, method string, data []byte)
 		if object == nil {
 			return nil, fmt.Errorf("unknown remote database")
 		}
-		return object.HandleClusterRequest(context.WithValue(ctx, clusterObjectSessionKey{}, s), scm.ClusterRequest{Method: method, Payload: request})
+		return object.executeClusterRequest(context.WithValue(ctx, clusterObjectSessionKey{}, s), scm.ClusterRequest{Method: method, Payload: request})
 	case "scan.execute":
 		var request remoteScanTask
 		if err := unmarshalNode(data, &request); err != nil {
@@ -141,7 +141,7 @@ func (s *scanRPCSession) handle(ctx context.Context, method string, data []byte)
 		if object == nil {
 			return nil, fmt.Errorf("unknown remote database")
 		}
-		return object.HandleClusterRequest(context.WithValue(ctx, clusterObjectSessionKey{}, s), scm.ClusterRequest{Method: method, Payload: request})
+		return object.executeClusterRequest(context.WithValue(ctx, clusterObjectSessionKey{}, s), scm.ClusterRequest{Method: method, Payload: request})
 	}
 	return nil, fmt.Errorf("unknown remote scan method")
 }
@@ -237,7 +237,7 @@ func (database *database) executeScanTask(ctx context.Context, s *scanRPCSession
 		}
 		// Only the native shard handler executes the operator. The database owns
 		// resolution/acquisition; the transport knows neither placement nor scans.
-		value, err := shard.HandleClusterRequest(ctx, scm.ClusterRequest{Method: "scan", Payload: shardScanInvocation{writeAcquired: request.Access.Mutation && input == nil, order: order, operator: request.Operator, stride: request.Stride, batchdata: batch, tx: tx, access: access, conditionCols: request.FilterColumns, condition: filter, callbackCols: request.MapColumns, mapReduce: reducer, neutral: neutral}})
+		value, err := shard.executeClusterRequest(ctx, scm.ClusterRequest{Method: "scan", Payload: shardScanInvocation{writeAcquired: request.Access.Mutation && input == nil, order: order, operator: request.Operator, stride: request.Stride, batchdata: batch, tx: tx, access: access, conditionCols: request.FilterColumns, condition: filter, callbackCols: request.MapColumns, mapReduce: reducer, neutral: neutral}})
 		if err != nil {
 			return err
 		}

@@ -5,38 +5,109 @@ SPDX-License-Identifier: GPL-3.0-or-later
 package storage
 
 import "fmt"
-import "sync"
 import "weak"
 import "context"
 import "strconv"
+import "runtime"
+import "sync/atomic"
 import "github.com/launix-de/memcp/scm"
 
 // Slots are never reused within a service incarnation. Their handlers, not the
 // transport, define payload semantics and any reply channel.
 type handleSlot struct {
-	peer    clusterObjectPeer
-	handler scm.Handle
-	raw     func([]byte) error
-	owner   scm.Scmer // local invocation lifetime; never part of a message
-	mu      sync.Mutex
-	closed  bool
-	calls   sync.WaitGroup
+	peer     clusterObjectPeer
+	receiver scm.ClusterRequestHandler
+	owner    scm.Scmer // local invocation lifetime; never part of a message
+	activity atomic.Uint64
+	drained  chan struct{}
 }
 
+const handleStopped uint64 = 1 << 63
+
 func (slot *handleSlot) enter() bool {
-	slot.mu.Lock()
-	defer slot.mu.Unlock()
-	if slot.closed {
-		return false
+	for {
+		state := slot.activity.Load()
+		if state&handleStopped != 0 {
+			return false
+		}
+		if slot.activity.CompareAndSwap(state, state+1) {
+			return true
+		}
 	}
-	slot.calls.Add(1)
-	return true
 }
-func (slot *handleSlot) close() {
-	slot.mu.Lock()
-	slot.closed = true
-	slot.mu.Unlock()
-	slot.calls.Wait()
+func (slot *handleSlot) leave() {
+	if slot.activity.Add(^uint64(0)) == handleStopped {
+		close(slot.drained)
+	}
+}
+func (slot *handleSlot) stop() {
+	for {
+		state := slot.activity.Load()
+		if state&handleStopped != 0 {
+			return
+		}
+		if slot.activity.CompareAndSwap(state, state|handleStopped) {
+			if state == 0 {
+				close(slot.drained)
+			}
+			return
+		}
+	}
+}
+func (slot *handleSlot) close() { slot.stop(); <-slot.drained }
+
+const (
+	handleValue byte = 0xf0
+	handleClose byte = 0xf1
+)
+
+// Each imported callback owns one local GC lease, shared by duplicate imports.
+// The registry contains weak pointers only. Cleanup arguments never root the
+// imported handle, its invocation, or its receiver.
+type remoteHandleKey struct {
+	peer clusterObjectPeer
+	slot uint64
+}
+type remoteHandleLease struct{ key remoteHandleKey }
+type remoteHandleCleanup struct {
+	registry *clusterObjectRegistry
+	key      remoteHandleKey
+	identity weak.Pointer[remoteHandleLease]
+}
+
+func cleanupRemoteHandle(cleanup remoteHandleCleanup) {
+	r := cleanup.registry
+	r.mu.Lock()
+	if current := r.remoteHandles[cleanup.key]; current != cleanup.identity && current.Value() != nil {
+		r.mu.Unlock()
+		return
+	}
+	delete(r.remoteHandles, cleanup.key)
+	if !r.stopped {
+		r.releases = append(r.releases, clusterObjectRelease{peer: cleanup.key.peer, slot: cleanup.key.slot})
+	}
+	r.mu.Unlock()
+	select {
+	case r.wake <- struct{}{}:
+	default:
+	}
+}
+func (service *nodeScanService) importHandleLease(peer clusterObjectPeer, slot uint64) *remoteHandleLease {
+	r := service.objectRegistry()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	key := remoteHandleKey{peer, slot}
+	if r.remoteHandles == nil {
+		r.remoteHandles = make(map[remoteHandleKey]weak.Pointer[remoteHandleLease])
+	}
+	if lease := r.remoteHandles[key].Value(); lease != nil {
+		return lease
+	}
+	lease := &remoteHandleLease{key}
+	identity := weak.Make(lease)
+	r.remoteHandles[key] = identity
+	runtime.AddCleanup(lease, cleanupRemoteHandle, remoteHandleCleanup{r, key, identity})
+	return lease
 }
 
 type weakResultHandle struct {
@@ -50,6 +121,7 @@ func (handle weakResultHandle) Handle(value scm.Scmer) {
 }
 
 type remoteHandle struct {
+	lease   *remoteHandleLease
 	service *nodeScanService
 	peer    clusterObjectPeer
 	slot    uint64
@@ -73,6 +145,7 @@ func (handle *remoteHandle) SerializeHandle(bindings *scm.SerializationContext) 
 	return bindings.ExportHandle(handle)
 }
 func (handle *remoteHandle) Handle(value scm.Scmer) {
+	defer runtime.KeepAlive(handle)
 	peer := handle.service.objectConnection(handle.peer)
 	if peer == nil {
 		panic("handle peer is disconnected")
@@ -96,7 +169,7 @@ func (handle *remoteHandle) Handle(value scm.Scmer) {
 	if err != nil {
 		panic(err)
 	}
-	message := mosiMessage{Channel: handleChannel(handle.slot), Payload: payload}
+	message := mosiMessage{Channel: handleChannel(handle.slot), Payload: append([]byte{handleValue}, payload...)}
 	message.encoded, err = encodeMosiMessage(message)
 	if err != nil {
 		panic(err)
@@ -110,9 +183,33 @@ func (handle *remoteHandle) Handle(value scm.Scmer) {
 
 func handleChannel(slot uint64) string { return strconv.FormatUint(slot, 10) }
 func (service *nodeScanService) storeHandle(slot uint64, entry *handleSlot) {
+	entry.drained = make(chan struct{})
 	service.handles.Store(slot, entry)
-	service.channels.Store(handleChannel(slot), workerChannel(func(peer *mosiPeer, payload []byte) error {
-		return (&scanRPCSession{service: service, peer: peer}).handleValue(slot, schemeValue(payload))
+	work := workerChannel(func(peer *mosiPeer, payload []byte) error {
+		return (&scanRPCSession{service: service, peer: peer}).deliverHandle(entry, payload)
+	}, entry.leave)
+	service.channels.Store(handleChannel(slot), scm.ClusterRequestHandlerFunc(func(ctx context.Context, payload []byte) {
+		delivery := ctx.(*channelDelivery)
+		if entry.peer != delivery.peer.objectPeer {
+			delivery.accepted = false
+			return
+		}
+		if len(payload) == 1 && payload[0] == handleClose {
+			entry.stop()
+			if service.handles.CompareAndDelete(slot, entry) {
+				service.channels.Delete(handleChannel(slot))
+			}
+			return
+		}
+		// Admission happens in stream order, before asynchronous execution. Close
+		// cannot discard an already accepted fire-and-forget invocation.
+		if !entry.enter() {
+			return
+		}
+		work.HandleClusterRequest(ctx, payload)
+		if !delivery.accepted {
+			entry.leave()
+		}
 	}))
 }
 func (service *nodeScanService) deleteHandle(slot uint64) {
@@ -133,17 +230,19 @@ func (service *nodeScanService) handleResolver(ctx context.Context, peer *mosiPe
 		if slot == 0 || service.objectConnection(identity) == nil {
 			return nil, fmt.Errorf("unknown handle peer or slot")
 		}
-		return &remoteHandle{service: service, peer: identity, slot: slot, ctx: scanQueryContext(scmerToTxContext(scope), ctx), owner: scope}, nil
+		return &remoteHandle{lease: service.importHandleLease(identity, slot), service: service, peer: identity, slot: slot, ctx: scanQueryContext(scmerToTxContext(scope), ctx), owner: scope}, nil
 	}
 }
 func (service *nodeScanService) handleBindings(bindings *scm.SerializationContext, peer *mosiPeer) *scm.SerializationContext {
 	owner := bindings.InvocationScope()
 	return bindings.WithHandleExport(func(handler scm.Handle) (scm.Scmer, error) {
 		slot := service.allocateHandleSlot()
-		entry := &handleSlot{peer: peer.objectPeer, handler: handler, owner: owner}
+		entry := &handleSlot{peer: peer.objectPeer, owner: owner}
+		decodeHandler := handler
 		if receiver, ok := handler.(*scm.ResultReceiver); ok {
-			entry.handler = weakResultHandle{weak.Make(receiver)}
+			decodeHandler = weakResultHandle{weak.Make(receiver)}
 		}
+		entry.receiver = service.schemeHandleReceiver(decodeHandler, owner)
 		service.storeHandle(slot, entry)
 		release := func() { service.deleteHandle(slot) }
 		if receiver, ok := handler.(interface{ RetainHandleRelease(func()) }); ok {
@@ -157,9 +256,21 @@ func (service *nodeScanService) handleBindings(bindings *scm.SerializationContex
 				})
 				result.RetainHandleRelease(func() { stop() })
 			}
-		} else if lifetime, ok := owner.Any().(interface{ RetainQueryWork(func()) bool }); !ok || !lifetime.RetainQueryWork(func() { release(); entry.close() }) {
-			release()
-			return scm.NewNil(), fmt.Errorf("exported handle requires a live invocation owner")
+		} else {
+			// Query cancellation joins admitted callbacks, but the cleanup hook must
+			// not retain an otherwise released callback until the query ends.
+			weakEntry := weak.Make(entry)
+			if lifetime, ok := owner.Any().(interface{ RetainQueryWork(func()) bool }); ok {
+				if !lifetime.RetainQueryWork(func() {
+					release()
+					if current := weakEntry.Value(); current != nil {
+						current.close()
+					}
+				}) {
+					release()
+					return scm.NewNil(), fmt.Errorf("exported handle requires a live invocation owner")
+				}
+			}
 		}
 		return scm.NewSlice([]scm.Scmer{scm.NewSymbol("cluster_handle"), scm.NewInt(int64(slot))}), nil
 	})
@@ -169,6 +280,12 @@ func (service *nodeScanService) handleBindings(bindings *scm.SerializationContex
 // the binary nodeMap tag; control completions are binary records, not Scheme.
 // Inspect only inert manifests, never reconstruct a cancelled query's values.
 func (service *nodeScanService) discardHandlePayload(peer *mosiPeer, payload []byte) error {
+	if len(payload) > 0 && payload[0] == handleClose {
+		return nil
+	}
+	if len(payload) > 0 && payload[0] == handleValue {
+		payload = payload[1:]
+	}
 	var refs []scm.ClusterReference
 	if len(payload) > 0 && payload[0] == nodeMap {
 		var completion scanCompletion
@@ -192,6 +309,14 @@ func (s *scanRPCSession) handleValue(slot uint64, payload schemeValue) error {
 	if target.peer != s.peer.objectPeer {
 		return fmt.Errorf("foreign handle slot")
 	}
+	if len(payload) == 1 && payload[0] == handleClose {
+		target.stop()
+		if s.service.handles.CompareAndDelete(slot, target) {
+			s.service.channels.Delete(handleChannel(slot))
+		}
+		return nil
+	}
+
 	if !target.enter() {
 		// A cancelled waiter can hand its result slot to a state-free cleanup
 		// handler. An already admitted delivery must follow that handoff.
@@ -200,16 +325,29 @@ func (s *scanRPCSession) handleValue(slot uint64, payload schemeValue) error {
 		}
 		return nil
 	}
-	defer target.calls.Done()
-	if target.raw != nil {
-		return target.raw(payload)
-	}
-	value, err := payload.reconstruct(scm.ProcedureDecode{ResolveHandle: s.service.handleResolver(s.peer.ctx, s.peer, target.owner), Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) {
-		return s.service.importObject(s.peer.ctx, s.peer, ref)
-	}})
-	if err != nil {
-		return err
-	}
-	target.handler.Handle(value)
+	defer target.leave()
+	return s.deliverHandle(target, payload)
+}
+
+func (s *scanRPCSession) deliverHandle(target *handleSlot, payload []byte) error {
+	target.receiver.HandleClusterRequest(&channelDelivery{Context: s.peer.ctxOrBackground(), peer: s.peer}, payload)
 	return nil
+}
+
+// A Scheme handle is a language-level adapter over the same raw receiver.
+// Only this payload protocol knows that its tail is one serialized Scmer.
+func (service *nodeScanService) schemeHandleReceiver(handler scm.Handle, owner scm.Scmer) scm.ClusterRequestHandler {
+	return scm.ClusterRequestHandlerFunc(func(ctx context.Context, payload []byte) {
+		if len(payload) == 0 || payload[0] != handleValue {
+			panic("invalid handle delivery")
+		}
+		peer := ctx.(*channelDelivery).peer
+		value, err := schemeValue(payload[1:]).reconstruct(scm.ProcedureDecode{ResolveHandle: service.handleResolver(peer.ctx, peer, owner), Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) {
+			return service.importObject(peer.ctx, peer, ref)
+		}})
+		if err != nil {
+			panic(err)
+		}
+		handler.Handle(value)
+	})
 }

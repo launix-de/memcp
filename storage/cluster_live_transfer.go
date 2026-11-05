@@ -12,7 +12,6 @@ import "sync"
 import "bufio"
 import "reflect"
 import "context"
-import "encoding/base64"
 import "encoding/binary"
 import "github.com/google/uuid"
 import "github.com/launix-de/memcp/scm"
@@ -138,7 +137,7 @@ func (capture *liveShardTransfer) export(peer *mosiPeer) (scm.ClusterReference, 
 	return capture.manager.cluster.service.exportObject(peer, capture, scm.NewNil())
 }
 
-func (capture *liveShardTransfer) HandleClusterRequest(ctx context.Context, request scm.ClusterRequest) (any, error) {
+func (capture *liveShardTransfer) executeClusterRequest(ctx context.Context, request scm.ClusterRequest) (any, error) {
 	if request.Method == "view" {
 		return scm.NewNil(), nil
 	}
@@ -186,7 +185,7 @@ func (capture *liveShardTransfer) HandleClusterRequest(ctx context.Context, requ
 	if n == 0 {
 		return scm.NewNil(), nil
 	}
-	return scm.NewString(base64.RawStdEncoding.EncodeToString(buffer[:n])), nil
+	return scm.NewAny(buffer[:n]), nil
 }
 
 func (capture *liveShardTransfer) clusterInputShards() []*storageShard {
@@ -501,7 +500,7 @@ func (*remoteLiveTransfer) ClusterObjectType() string { return "shard-transfer" 
 func (remote *remoteLiveTransfer) Serialize(bindings *scm.SerializationContext) (scm.Scmer, error) {
 	return bindings.ReferenceExpression(remote)
 }
-func (remote *remoteLiveTransfer) HandleClusterRequest(ctx context.Context, request scm.ClusterRequest) (any, error) {
+func (remote *remoteLiveTransfer) executeClusterRequest(ctx context.Context, request scm.ClusterRequest) (any, error) {
 	return remote.handle.Call(ctx, request)
 }
 
@@ -521,9 +520,10 @@ func (reader *liveTransferReader) Read(data []byte) (int, error) {
 		if value.IsNil() {
 			reader.ended = true
 		} else {
-			reader.buffer, err = base64.RawStdEncoding.DecodeString(value.String())
-			if err != nil {
-				return 0, err
+			var ok bool
+			reader.buffer, ok = value.Any().([]byte)
+			if !ok {
+				return 0, fmt.Errorf("live transfer omitted raw chunk")
 			}
 		}
 	}
@@ -852,4 +852,22 @@ func (tx *TxContext) publishReadViewLocked(shard *storageShard, st *storageShard
 	}
 	views[shard] = st
 	tx.readViews.Store(&views)
+}
+
+func (capture *liveShardTransfer) HandleClusterRequest(ctx context.Context, payload []byte) {
+	scm.ReceiveClusterValue(ctx, payload, func(request scm.ClusterRequest) (any, error) { return capture.executeClusterRequest(ctx, request) })
+}
+
+func (capture *liveShardTransfer) ClusterView(ctx context.Context) (scm.Scmer, error) {
+	value, err := capture.executeClusterRequest(ctx, scm.ClusterRequest{Method: "view"})
+	return scm.ClusterViewValue(value, err)
+}
+
+func (remote *remoteLiveTransfer) HandleClusterRequest(ctx context.Context, payload []byte) {
+	scm.ReceiveClusterValue(ctx, payload, func(request scm.ClusterRequest) (any, error) { return remote.executeClusterRequest(ctx, request) })
+}
+
+func (remote *remoteLiveTransfer) ClusterView(ctx context.Context) (scm.Scmer, error) {
+	value, err := remote.executeClusterRequest(ctx, scm.ClusterRequest{Method: "view"})
+	return scm.ClusterViewValue(value, err)
 }

@@ -82,7 +82,7 @@ func (callback *clusterCallback) Serialize(ctx *SerializationContext) (Scmer, er
 			method = "batch"
 			args = args[0].Slice()
 		}
-		value, err := ClusterObjectValue(callback, callback.ctx, ClusterRequest{Method: method, Arguments: args})
+		value, err := ClusterViewValue(callback.executeClusterRequest(callback.ctx, ClusterRequest{Method: method, Arguments: args}))
 		if err != nil {
 			panic(err)
 		}
@@ -199,7 +199,7 @@ func (callback *clusterCallback) value() Scmer {
 	return NewClusterFunc(call, callback, clusterCallbackType)
 }
 
-func (callback *clusterCallback) HandleClusterRequest(ctx context.Context, request ClusterRequest) (any, error) {
+func (callback *clusterCallback) executeClusterRequest(ctx context.Context, request ClusterRequest) (any, error) {
 	if err := ctx.Err(); err != nil {
 		return NewNil(), err
 	}
@@ -392,4 +392,13 @@ func (callback *clusterCallback) bindOutput(ctx context.Context, owner interface
 		return result
 	}
 	return NewClusterFunc(call, &clusterCallback{endpoint: callback.endpoint, ctx: ctx, batchResult: callback.batchResult}, clusterCallbackType), nil
+}
+
+func (callback *clusterCallback) HandleClusterRequest(ctx context.Context, payload []byte) {
+	ReceiveClusterValue(ctx, payload, func(request ClusterRequest) (any, error) { return callback.executeClusterRequest(ctx, request) })
+}
+
+func (callback *clusterCallback) ClusterView(ctx context.Context) (Scmer, error) {
+	value, err := callback.executeClusterRequest(ctx, ClusterRequest{Method: "view"})
+	return ClusterViewValue(value, err)
 }

@@ -19,6 +19,7 @@ import "context"
 import "net/http"
 import "sync/atomic"
 import "github.com/gorilla/websocket"
+import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/memcp/storage/mosi"
 
 // Roles share one HTTP endpoint and codec, while each adapter owns its own
@@ -406,7 +407,9 @@ func (p *mosiPeer) dispatchMessage(m mosiMessage, size int, readyAt time.Time) b
 			return true
 		}
 	}
-	return handler.(nodeChannel)(p, m.Payload, size, readyAt)
+	delivery := &channelDelivery{Context: p.ctxOrBackground(), peer: p, size: size, readyAt: readyAt, accepted: true}
+	handler.(scm.ClusterRequestHandler).HandleClusterRequest(delivery, m.Payload)
+	return delivery.accepted
 }
 
 // Delay delivery outside the reader so propagation latency overlaps independent

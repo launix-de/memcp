@@ -367,9 +367,21 @@ wait. Sending only publishes to a bounded queue without waiting for socket I/O,
 queue space or a response; exhaustion returns an immediate error. Bulk transfer
 producers separately admit their next chunk before publication.
 
-One-shot return channels deregister on completion or cancellation. Abandoned
-receivers use weak registry references and Go `AddCleanup`; invocation-owned
-callbacks instead remain alive until their work is joined at query cleanup.
+All channels implement the same raw-byte `ClusterRequestHandler`; capture
+serialization is an independent concern. Object operation codes, ordered ACK
+counters and transaction capabilities use binary fields, followed by at most one
+serialized Scheme value for dynamic arguments.
+
+One-shot return channels deregister on completion or cancellation. Imported
+callback handles and native object references own GC leases, weakly indexed on
+the importing peer. Go `AddCleanup` queues a close notification to the same
+channel used for calls. The owner then drops that remote registration; freeing
+forwarding callbacks can release further handles on other peers. Cleanup never
+waits for a peer response. Accepted callbacks retain their own Go references;
+query cleanup still joins their execution before releasing query resources.
+Query-owned hooks retain callback registrations weakly so they cannot prevent
+early GC-driven release. Query completion also explicitly breaks callback cycles;
+local GC and release notifications alone do not collect cross-peer cycles.
 Text messages, unsupported versions and oversized messages are rejected. Peers
 using older protocol versions must be upgraded together. SQL requests on the same
 HTTP port continue to use their ordinary authentication; `/cluster` owns its
@@ -505,7 +517,7 @@ writes retain their lifetime rules; this threshold is not a hard process RSS cap
 It reserves the remaining tracked budget for computation and query caches.
 
 Tasks and control messages are fire-and-forget; the receiver routes results and
-serialized panics to the reducer's UUID return channel. Cancellation propagates to
+serialized panics to the reducer's numeric return channel. Cancellation propagates to
 nested scans and remote descendants at shard scheduling boundaries, without checks
 inside item loops. `cluster_status` reports peer membership, placement counters
 and measured shard admission usage.

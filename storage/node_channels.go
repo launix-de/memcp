@@ -12,10 +12,26 @@ import "context"
 import "strconv"
 import "runtime"
 import "github.com/gorilla/websocket"
+import "github.com/launix-de/memcp/scm"
 
 // A channel receives opaque bytes. Its adapter owns decoding and scheduling;
 // the transport has no request, response, Scheme or MOSI message types.
-type nodeChannel func(*mosiPeer, []byte, int, time.Time) bool
+// channelDelivery contains peer-local scheduling information, never wire fields.
+type channelDelivery struct {
+	context.Context
+	peer     *mosiPeer
+	size     int
+	readyAt  time.Time
+	accepted bool
+}
+
+// channelHandler adapts scheduling to the sole raw receive interface.
+func channelHandler(receive func(*mosiPeer, []byte, int, time.Time) bool) scm.ClusterRequestHandler {
+	return scm.ClusterRequestHandlerFunc(func(ctx context.Context, payload []byte) {
+		delivery := ctx.(*channelDelivery)
+		delivery.accepted = receive(delivery.peer, payload, delivery.size, delivery.readyAt)
+	})
+}
 
 func (p *mosiPeer) ctxOrBackground() context.Context {
 	if p.ctx != nil {
@@ -23,7 +39,7 @@ func (p *mosiPeer) ctxOrBackground() context.Context {
 	}
 	return context.Background()
 }
-func (p *mosiPeer) registerChannel(name string, handler nodeChannel) func() {
+func (p *mosiPeer) registerChannel(name string, handler scm.ClusterRequestHandler) func() {
 	if len(name) == 0 || len(name) > 255 {
 		panic("invalid node channel")
 	}
@@ -40,14 +56,17 @@ func (p *mosiPeer) registerChannel(name string, handler nodeChannel) func() {
 }
 
 // Worker scheduling is an adapter, shared by binary and Scheme handlers.
-func workerChannel(receive func(*mosiPeer, []byte) error) nodeChannel {
-	return func(p *mosiPeer, payload []byte, size int, readyAt time.Time) bool {
+func workerChannel(receive func(*mosiPeer, []byte) error, finished ...func()) scm.ClusterRequestHandler {
+	return channelHandler(func(p *mosiPeer, payload []byte, size int, readyAt time.Time) bool {
 		if p.packetBytes.Add(int64(size)) > 32<<20 {
 			p.packetBytes.Add(-int64(size))
 			return false
 		}
 		p.workers.Add(1)
 		go func() {
+			for _, finish := range finished {
+				defer finish()
+			}
 			defer p.workers.Done()
 			defer p.packetBytes.Add(-int64(size))
 			defer func() {
@@ -62,14 +81,14 @@ func workerChannel(receive func(*mosiPeer, []byte) error) nodeChannel {
 			}
 		}()
 		return true
-	}
+	})
 }
 func registerMosiChannel(p *mosiPeer, receive func(*mosiPacket) error) {
 	if receive == nil {
 		return
 	}
 	p.packet = receive
-	p.channels.LoadOrStore("mosi", nodeChannel(func(peer *mosiPeer, payload []byte, size int, readyAt time.Time) bool {
+	p.channels.LoadOrStore("mosi", channelHandler(func(peer *mosiPeer, payload []byte, size int, readyAt time.Time) bool {
 		packet, err := decodeMosiPacket(payload)
 		return err == nil && peer.dispatchPacket(packet, size, readyAt)
 	}))
@@ -216,13 +235,13 @@ func registerScanChannels(p *mosiPeer, session *scanRPCSession) {
 		}))
 		for _, name := range []string{"object.declare", "object.forget"} {
 			name := name
-			p.registerChannel(name, func(peer *mosiPeer, payload []byte, _ int, _ time.Time) bool {
+			p.registerChannel(name, channelHandler(func(peer *mosiPeer, payload []byte, _ int, _ time.Time) bool {
 				// These immutable declarations must precede later tasks on this
 				// stream. They never evaluate Scheme or execute storage work.
 				return peer.publishObjectView(name, payload) == nil
-			})
+			}))
 		}
-		for _, name := range []string{"node.control", "scan.cancel", "object.release", "object.discard"} {
+		for _, name := range []string{"node.control", "scan.cancel", "object.discard"} {
 			name := name
 			p.registerChannel(name, workerChannel(func(peer *mosiPeer, payload []byte) error {
 				_, err := peer.scanSession.handle(peer.ctxOrBackground(), name, payload)
@@ -246,11 +265,11 @@ func registerReplicationChannels(p *mosiPeer, names []string, execute func(conte
 func (p *mosiPeer) readAuth(channel string, output any) error {
 	received := false
 	var decodeErr error
-	release := p.registerChannel(channel, func(_ *mosiPeer, payload []byte, _ int, _ time.Time) bool {
+	release := p.registerChannel(channel, channelHandler(func(_ *mosiPeer, payload []byte, _ int, _ time.Time) bool {
 		decodeErr = unmarshalNode(payload, output)
 		received = true
 		return decodeErr == nil
-	})
+	}))
 	defer release()
 	started := time.Now()
 	kind, frame, err := p.conn.ReadMessage()

@@ -11,7 +11,7 @@ import "github.com/launix-de/memcp/scm"
 
 // Database names resolve dynamically. This object owns source/schema policy;
 // transport only decodes the envelope and selects its target database.
-func (database *database) HandleClusterRequest(ctx context.Context, call scm.ClusterRequest) (any, error) {
+func (database *database) executeClusterRequest(ctx context.Context, call scm.ClusterRequest) (any, error) {
 	s, _ := ctx.Value(clusterObjectSessionKey{}).(*scanRPCSession)
 	if s == nil {
 		return nil, fmt.Errorf("missing authenticated scan invocation")
@@ -109,7 +109,11 @@ func (database *database) HandleClusterRequest(ctx context.Context, call scm.Clu
 			if err != nil {
 				return nil, err
 			}
-			return object.HandleClusterRequest(ctx, scm.ClusterRequest{Method: "scan", Payload: request})
+			shard, ok := object.(*storageShard)
+			if !ok {
+				return nil, fmt.Errorf("scan reference is not a native shard")
+			}
+			return shard.executeClusterRequest(ctx, scm.ClusterRequest{Method: "scan", Payload: request})
 		}
 		return database.executeScanTask(ctx, s, request, nil)
 	}

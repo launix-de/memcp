@@ -156,11 +156,11 @@ func TestClusterCallbackOwnerCancellationAndInvocationBinding(t *testing.T) {
 	if !ok || Apply(value, NewInt(7)).Int() != 7 {
 		t.Fatal("callback lost its native callable ABI")
 	}
-	if _, err := object.HandleClusterRequest(context.Background(), ClusterRequest{Method: "invalid"}); err == nil {
+	if _, err := ClusterObjectValue(object, context.Background(), ClusterRequest{Method: "invalid"}); err == nil {
 		t.Fatal("invalid callback method accepted")
 	}
 	cancelOwner()
-	if _, err := object.HandleClusterRequest(context.Background(), ClusterRequest{Method: "call", Arguments: []Scmer{NewInt(9)}}); err != context.Canceled || calls != 1 {
+	if _, err := ClusterObjectValue(object, context.Background(), ClusterRequest{Method: "call", Arguments: []Scmer{NewInt(9)}}); err != context.Canceled || calls != 1 {
 		t.Fatalf("expired owner admitted callback: err=%v calls=%d", err, calls)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -531,9 +531,6 @@ func (v *standaloneSerializableValue) Serialize(*SerializationContext) (Scmer, e
 	}
 	return NewSlice([]Scmer{NewSymbol("quote"), NewSlice([]Scmer{NewString("portable"), NewInt(42)})}), nil
 }
-func (*standaloneSerializableValue) HandleClusterRequest(context.Context, ClusterRequest) (any, error) {
-	return nil, fmt.Errorf("standalone value needs no cluster requests")
-}
 
 func TestProcedureWireStandaloneObjectOwnsSerialization(t *testing.T) {
 	object := &standaloneSerializableValue{}
@@ -591,9 +588,6 @@ type eagerWireTestValue struct{}
 func (*eagerWireTestValue) ClusterObjectType() string { return "eager-test-value" }
 func (*eagerWireTestValue) Serialize(*SerializationContext) (Scmer, error) {
 	return NewSlice([]Scmer{NewSymbol("wire_test_construct_capture_once")}), nil
-}
-func (*eagerWireTestValue) HandleClusterRequest(context.Context, ClusterRequest) (any, error) {
-	return nil, fmt.Errorf("constructor fixture has no remote requests")
 }
 func TestProcedureWireMaterializesCapturesBeforeAnyInvocation(t *testing.T) {
 	constructions := 0
@@ -1118,5 +1112,39 @@ func TestOutputAndForwardedRepliesSurviveGCWhileWorkIsPending(t *testing.T) {
 			owner.finish()
 			runtime.KeepAlive(owner)
 		})
+	}
+}
+
+func TestClusterRequestBinaryFixedFields(t *testing.T) {
+	payload, err := EncodeClusterRequest(ClusterRequest{Method: "ack", Arguments: []Scmer{NewInt(64), NewInt(128)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(payload) != 17 || payload[0] != 6 || payload[8] != 64 || payload[16] != 128 {
+		t.Fatalf("ACK contains more than its operation and two binary integers: %x", payload)
+	}
+	decoded, err := DecodeClusterRequest(payload, ProcedureDecode{})
+	if err != nil || decoded.Method != "ack" || decoded.Arguments[0].Int() != 64 || decoded.Arguments[1].Int() != 128 {
+		t.Fatal(decoded, err)
+	}
+	for _, malformed := range [][]byte{nil, {0}, {255}, payload[:16], append(append([]byte{}, payload...), 0), {8}, {8, 0, 4, 'x'}} {
+		if _, err := DecodeClusterRequest(malformed, ProcedureDecode{}); err == nil {
+			t.Fatalf("accepted malformed payload %x", malformed)
+		}
+	}
+	if _, err := DecodeClusterRequest(append([]byte{2}, []byte("'(1) '(2)")...), ProcedureDecode{}); err == nil {
+		t.Fatal("accepted multiple dynamic tail values")
+	}
+	request := ClusterRequest{Method: "rollback-savepoint", Arguments: []Scmer{NewString("private-capability"), NewSlice([]Scmer{NewInt(42), NewString("dynamic")})}}
+	payload, err = EncodeClusterRequest(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(payload[3:3+len("private-capability")], []byte("private-capability")) {
+		t.Fatal("capability was serialized as Scheme")
+	}
+	decoded, err = DecodeClusterRequest(payload, ProcedureDecode{})
+	if err != nil || !Equal(NewSlice(decoded.Arguments), NewSlice(request.Arguments)) {
+		t.Fatal(decoded, err)
 	}
 }

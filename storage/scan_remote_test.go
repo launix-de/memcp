@@ -1193,7 +1193,7 @@ func TestRemoteOrderedBatchFanoutAndCredit(t *testing.T) {
 	ack := func(consumed, start int) scm.ClusterRequest {
 		return scm.ClusterRequest{Method: "ack", Arguments: []scm.Scmer{scm.NewInt(int64(consumed)), scm.NewInt(int64(start))}}
 	}
-	if _, err := run.HandleClusterRequest(context.Background(), ack(7, 16)); err == nil {
+	if _, err := run.executeClusterRequest(context.Background(), ack(7, 16)); err == nil {
 		t.Fatal("job accepted credit before half the batch was consumed")
 	}
 	started := make(chan scm.ClusterRequest, 1)
@@ -1241,7 +1241,7 @@ func TestRemoteOrderedBatchFanoutAndCredit(t *testing.T) {
 	if len(queue.items) != 16 || queue.items[0] != 16 || remote.pending != nil {
 		t.Fatal("successor batch was not installed in order")
 	}
-	if _, err := run.HandleClusterRequest(ctx, ack(8, 16)); err == nil {
+	if _, err := run.executeClusterRequest(ctx, ack(8, 16)); err == nil {
 		t.Fatal("job accepted a repeated ACK")
 	}
 }
@@ -1284,7 +1284,7 @@ func TestRemoteOrderedLimitJoinsPendingBatch(t *testing.T) {
 	if !run.closed || run.rows != nil || remote.pending != nil || remote.rows != nil {
 		t.Fatal("finished job retained buffered answers")
 	}
-	if _, err := run.HandleClusterRequest(context.Background(), scm.ClusterRequest{Method: "view"}); err == nil {
+	if _, err := run.executeClusterRequest(context.Background(), scm.ClusterRequest{Method: "view"}); err == nil {
 		t.Fatal("finished shard job was reopened")
 	}
 	queue.closeReaders() // idempotent cleanup after nested error unwinding
@@ -1894,4 +1894,120 @@ func TestClusterAuthenticationBindsItsReturnChannel(t *testing.T) {
 	if _, _, err := conn.ReadMessage(); err == nil {
 		t.Fatal("tampered return-channel URI was authenticated")
 	}
+}
+
+func TestHandleGCReleasesCallbackBeforeQueryEnds(t *testing.T) {
+	peer, client, _ := setupRemoteScanConnection(t)
+	owner := nodeScans.Load()
+	source := objectOwnerPeer(t, owner, client)
+	tx := NewTxContext(TxCursorStability)
+	tx.beginQuery(nil, 1, "GC handle owner")
+	defer tx.endQuery(1)
+	called := make(chan struct{}, 1)
+	bindings := owner.handleBindings(&scm.SerializationContext{Invocation: scm.NewAny(tx)}, source)
+	expression, err := bindings.HandleExpression(scm.HandleFunc(func(scm.Scmer) { called <- struct{}{} }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	slot := uint64(expression.Slice()[1].Int())
+	first, err := client.handleResolver(context.Background(), peer, scm.NewNil())(slot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := client.handleResolver(context.Background(), peer, scm.NewNil())(slot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.(*remoteHandle).lease != second.(*remoteHandle).lease {
+		t.Fatal("duplicate import created separate lifetimes")
+	}
+	first = nil
+	runtime.GC()
+	second.Handle(scm.NewInt(1))
+	select {
+	case <-called:
+	case <-time.After(time.Second):
+		t.Fatal("live duplicate was revoked")
+	}
+	runtime.KeepAlive(second)
+	second = nil
+	waitObjectGC(t, func() bool { _, alive := owner.handles.Load(slot); return !alive })
+	if _, alive := owner.channels.Load(handleChannel(slot)); alive {
+		t.Fatal("GC retained the raw channel registration")
+	}
+}
+
+func TestHandleGCPropagatesThroughForwardingPeer(t *testing.T) {
+	peer, relay, _ := setupRemoteScanConnection(t)
+	owner := nodeScans.Load()
+	source := objectOwnerPeer(t, owner, relay)
+	bindings := owner.handleBindings(&scm.SerializationContext{}, source)
+	expression, err := bindings.HandleExpression(scm.HandleFunc(func(scm.Scmer) {}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalSlot := uint64(expression.Slice()[1].Int())
+	original, err := relay.handleResolver(context.Background(), peer, scm.NewNil())(originalSlot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Send the reference back through a relay registration. No receiver registry
+	// may strongly root its imported proxy, or this release chain would stop.
+	forward := relay.handleBindings(&scm.SerializationContext{}, peer)
+	expression, err = forward.HandleExpression(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forwardedSlot := uint64(expression.Slice()[1].Int())
+	final, err := owner.handleResolver(context.Background(), source, scm.NewNil())(forwardedSlot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original = nil
+	runtime.GC()
+	final.Handle(scm.NewNil())
+	runtime.KeepAlive(final)
+	final = nil
+	waitObjectGC(t, func() bool {
+		_, first := owner.handles.Load(originalSlot)
+		_, second := relay.handles.Load(forwardedSlot)
+		return !first && !second
+	})
+}
+
+func TestHandleCloseKeepsPreviouslyAcceptedDeliveries(t *testing.T) {
+	peer, client, _ := setupRemoteScanConnection(t)
+	owner := nodeScans.Load()
+	source := objectOwnerPeer(t, owner, client)
+	const count = 128
+	seen := make(chan int64, count)
+	expression, err := owner.handleBindings(&scm.SerializationContext{}, source).HandleExpression(scm.HandleFunc(func(value scm.Scmer) { seen <- value.Int() }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	slot := uint64(expression.Slice()[1].Int())
+	imported, err := client.handleResolver(context.Background(), peer, scm.NewNil())(slot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range count {
+		imported.Handle(scm.NewInt(int64(i)))
+	}
+	runtime.KeepAlive(imported)
+	imported = nil
+	runtime.GC()
+	values := make(map[int64]bool)
+	deadline := time.After(2 * time.Second)
+	for len(values) != count {
+		select {
+		case value := <-seen:
+			if value < 0 || value >= count || values[value] {
+				t.Fatal("invalid or duplicate delivery", value)
+			}
+			values[value] = true
+		case <-deadline:
+			t.Fatalf("Close dropped accepted callbacks: %d/%d", len(values), count)
+		}
+	}
+	waitObjectGC(t, func() bool { _, alive := owner.handles.Load(slot); return !alive })
 }

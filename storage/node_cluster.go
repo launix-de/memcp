@@ -429,7 +429,7 @@ func validateClusterURI(id string) error {
 }
 
 // Membership/admission policy belongs to the node object, not the socket reader.
-func (cluster *nodeCluster) HandleClusterRequest(ctx context.Context, request scm.ClusterRequest) (any, error) {
+func (cluster *nodeCluster) executeClusterRequest(ctx context.Context, request scm.ClusterRequest) (any, error) {
 	session, _ := ctx.Value(clusterObjectSessionKey{}).(*scanRPCSession)
 	data, ok := request.Payload.([]byte)
 	if session == nil || !ok {

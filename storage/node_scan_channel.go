@@ -174,7 +174,7 @@ func (*clusterReceiver) ClusterObjectType() string { return "receiver" }
 func (receiver *clusterReceiver) Serialize(ctx *scm.SerializationContext) (scm.Scmer, error) {
 	return ctx.ReferenceExpression(receiver)
 }
-func (receiver *clusterReceiver) HandleClusterRequest(ctx context.Context, request scm.ClusterRequest) (any, error) {
+func (receiver *clusterReceiver) executeClusterRequest(ctx context.Context, request scm.ClusterRequest) (any, error) {
 	if request.Method == "view" {
 		return scm.NewNil(), nil
 	}
@@ -561,7 +561,7 @@ func (service *nodeScanService) control(ctx context.Context, peer *mosiPeer, met
 	slot := service.allocateHandleSlot()
 	id := (&scanRPCSession{peer: peer}).operationID(slot)
 	receiver := scm.NewResultReceiver()
-	entry := &handleSlot{peer: peer.objectPeer, raw: (&controlResultHandle{service: service, peer: peer, receiver: receiver}).receive}
+	entry := &handleSlot{peer: peer.objectPeer, receiver: &controlResultHandle{service: service, peer: peer, receiver: receiver}}
 	service.storeHandle(slot, entry)
 	received := false
 	defer func() {
@@ -574,7 +574,7 @@ func (service *nodeScanService) control(ctx context.Context, peer *mosiPeer, met
 		}
 		if queued && !received && live {
 			orphan = &abandonedControlHandle{service: service, peer: peer, slot: slot}
-			orphan.entry = &handleSlot{peer: peer.objectPeer, raw: orphan.receive}
+			orphan.entry = &handleSlot{peer: peer.objectPeer, receiver: orphan}
 			service.storeHandle(slot, orphan.entry)
 		} else {
 			service.deleteHandle(slot)
@@ -604,8 +604,18 @@ func (service *nodeScanService) control(ctx context.Context, peer *mosiPeer, met
 		Data   []byte                 `json:"data"`
 	}{offers, id, method, mustNodeMetadata(input)}
 	service.commitObjectOffers(peer, offers)
-	if err := postScanMessage(ctx, peer, "node.control", request); err != nil {
-		return err
+	var sendErr error
+	if call, ok := input.(clusterObjectCall); ok && method == "object.call" {
+		payload, err := marshalNode(request)
+		if err != nil {
+			return err
+		}
+		sendErr = peer.send(ctx, mosiMessage{Channel: objectChannel(call.Reference.URI), Payload: append([]byte{handleValue}, payload...)})
+	} else {
+		sendErr = postScanMessage(ctx, peer, "node.control", request)
+	}
+	if sendErr != nil {
+		return sendErr
 	}
 	queued = true
 	completed := false
@@ -697,4 +707,24 @@ func panicRemoteOperation(err error) {
 		panic(*failure)
 	}
 	panic(err)
+}
+
+func (receiver *clusterReceiver) HandleClusterRequest(ctx context.Context, payload []byte) {
+	scm.ReceiveClusterValue(ctx, payload, func(request scm.ClusterRequest) (any, error) { return receiver.executeClusterRequest(ctx, request) })
+}
+
+func (receiver *clusterReceiver) ClusterView(ctx context.Context) (scm.Scmer, error) {
+	value, err := receiver.executeClusterRequest(ctx, scm.ClusterRequest{Method: "view"})
+	return scm.ClusterViewValue(value, err)
+}
+
+func (handle *controlResultHandle) HandleClusterRequest(_ context.Context, payload []byte) {
+	if err := handle.receive(payload); err != nil {
+		panic(err)
+	}
+}
+func (handle *abandonedControlHandle) HandleClusterRequest(_ context.Context, payload []byte) {
+	if err := handle.receive(payload); err != nil {
+		panic(err)
+	}
 }

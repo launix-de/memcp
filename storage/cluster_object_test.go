@@ -389,7 +389,7 @@ func TestClusterParticipantDecisionJoinsNativeInvocations(t *testing.T) {
 	defer invocation.endQuery(8)
 	finished := make(chan error, 1)
 	go func() {
-		_, err := participant.HandleClusterRequest(context.Background(), scm.ClusterRequest{Method: "rollback", Arguments: []scm.Scmer{scm.NewString(participant.decisionToken)}})
+		_, err := participant.executeClusterRequest(context.Background(), scm.ClusterRequest{Method: "rollback", Arguments: []scm.Scmer{scm.NewString(participant.decisionToken)}})
 		finished <- err
 	}()
 	select {
@@ -450,7 +450,7 @@ func TestClusterNativeParticipantSavepointPreservesEarlierMutations(t *testing.T
 	imported.remoteObject = &scm.ClusterHandle{
 		Reference: scm.ClusterReference{Owner: "worker"},
 		Call: func(ctx context.Context, request scm.ClusterRequest) (scm.Scmer, error) {
-			value, err := participant.HandleClusterRequest(ctx, request)
+			value, err := participant.executeClusterRequest(ctx, request)
 			if err != nil {
 				return scm.NewNil(), err
 			}
@@ -634,7 +634,7 @@ func TestClusterObjectAbandonedCompletionDiscardsOffers(t *testing.T) {
 	}
 	id := client.nextHandle.Add(1)
 	receiver := scm.NewResultReceiver()
-	client.handles.Store(id, &handleSlot{peer: peer.objectPeer, raw: (&controlResultHandle{service: client, peer: peer, receiver: receiver}).receive})
+	client.handles.Store(id, &handleSlot{peer: peer.objectPeer, receiver: &controlResultHandle{service: client, peer: peer, receiver: receiver}})
 	defer client.handles.Delete(id)
 	completion, _ := marshalNode(scanCompletion{Offers: []scm.ClusterReference{ref}})
 	s := &scanRPCSession{service: client, peer: peer}
@@ -839,9 +839,6 @@ type portableClusterTestValue struct{}
 func (*portableClusterTestValue) ClusterObjectType() string { return "portable-wire-test" }
 func (*portableClusterTestValue) Serialize(*scm.SerializationContext) (scm.Scmer, error) {
 	return scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), scm.NewSlice([]scm.Scmer{scm.NewString("portable"), scm.NewInt(42)})}), nil
-}
-func (*portableClusterTestValue) HandleClusterRequest(context.Context, scm.ClusterRequest) (any, error) {
-	return nil, fmt.Errorf("portable value has no remote owner")
 }
 func TestClusterObjectWireUsesMandatorySerializer(t *testing.T) {
 	encoded, err := freezeScanValue(scm.NewAny(&portableClusterTestValue{}), &scm.SerializationContext{})
@@ -1065,7 +1062,7 @@ func TestClusterObjectReleaseRetriesWithoutAnotherGCOrReconnect(t *testing.T) {
 	select {
 	case <-peer.outgoing.ready:
 		message := takeMosi(peer.outgoing)
-		if message.Channel != "object.release" {
+		if !strings.HasPrefix(message.Channel, "object/") {
 			t.Fatal("release is not fire-and-forget", message.Channel)
 		}
 		if _, exists := service.handles.Load(""); exists {
@@ -1204,11 +1201,11 @@ func TestClusterTransferredParticipantKeepsEnlistedCapability(t *testing.T) {
 	endpoint := &storageShardTransaction{}
 	endpoint.forwarded.Store(participant)
 	for _, invalid := range []string{"", "foreign-capability"} {
-		if _, err := endpoint.HandleClusterRequest(context.Background(), scm.ClusterRequest{Method: "savepoint", Arguments: []scm.Scmer{scm.NewString(invalid)}}); err == nil {
+		if _, err := endpoint.executeClusterRequest(context.Background(), scm.ClusterRequest{Method: "savepoint", Arguments: []scm.Scmer{scm.NewString(invalid)}}); err == nil {
 			t.Fatal("forwarding admitted an unenlisted capability")
 		}
 	}
-	if _, err := endpoint.HandleClusterRequest(context.Background(), scm.ClusterRequest{Method: "savepoint", Arguments: []scm.Scmer{scm.NewString(capability)}}); err != nil {
+	if _, err := endpoint.executeClusterRequest(context.Background(), scm.ClusterRequest{Method: "savepoint", Arguments: []scm.Scmer{scm.NewString(capability)}}); err != nil {
 		t.Fatalf("first write invalidated the enlisted endpoint: %v", err)
 	}
 }
@@ -1234,6 +1231,24 @@ func prepareSharedLiteral(t *testing.T, owner, client *nodeScanService, peer *mo
 	}
 	if len(first) > 1024 || len(second) > 1024 {
 		t.Fatal("dictionary was inlined per shard", len(first), len(second))
+	}
+	// This test reconstructs wire values directly, outside the socket reader.
+	// Wait for the preceding declaration to arrive; real tasks follow it on
+	// the same stream and therefore cannot overtake its inline publication.
+	for _, reference := range serializedReferences(first) {
+		if len(reference.View) != 0 {
+			continue
+		}
+		deadline := time.Now().Add(time.Second)
+		for {
+			if _, arrived := peer.objectViews.Load(reference.URI); arrived {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("immutable declaration did not arrive before direct reconstruction")
+			}
+			time.Sleep(time.Millisecond)
+		}
 	}
 	// Mutation after export must not change the frozen statement snapshot.
 	dict.Set(scm.NewInt(0), scm.NewInt(900), nil)
@@ -1386,7 +1401,7 @@ func TestClusterCancelledReturnHandleDiscardsLateGrants(t *testing.T) {
 	if !ok {
 		t.Fatal("cancelled waiter discarded its necessary result cleanup")
 	}
-	if entry.(*handleSlot).handler != nil || entry.(*handleSlot).raw == nil {
+	if _, abandoned := entry.(*handleSlot).receiver.(*abandonedControlHandle); !abandoned {
 		t.Fatal("cancelled result retained query state")
 	}
 	if cancelMessage := takeMosi(peer.outgoing); cancelMessage.Channel != "scan.cancel" {

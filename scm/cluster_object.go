@@ -17,20 +17,9 @@ import "unsafe"
 // output batch; a remote error or ambiguous completion must never be replayed.
 var ErrClusterRequestTooLarge = errors.New("oversized MOSI message")
 
-// ClusterRequestHandler is the routing contract for native owner endpoints.
-// Implementations own request policy; transport only resolves and dispatches.
-// All requests execute outside generated row loops.
-type ClusterRequestHandler interface {
-	HandleClusterRequest(context.Context, ClusterRequest) (any, error)
-}
-
-// ClusterObject adds the serialization contract only for runtime values which
-// may be captured by a closure. Nodes/databases are routing targets and require
-// only ClusterRequestHandler; they never implement deliberately failing serializers.
+// ClusterObject is solely the serialization contract for captured runtime
+// values. A raw channel handler need not be a serializable Scheme object.
 type ClusterObject interface {
-	ClusterRequestHandler
-	// Serialize returns reconstruction code, not an encoded Go representation.
-	// Each object owns its choice of a registered reference or portable value.
 	Serialize(*SerializationContext) (Scmer, error)
 	ClusterObjectType() string
 }
@@ -472,7 +461,33 @@ func SerializedClusterReferences(data []byte) []ClusterReference {
 // ClusterObjectValue is the checked runtime boundary. Native protocol objects
 // may return wire DTOs; Scheme callbacks can receive only explicit Scmer values.
 func ClusterObjectValue(object ClusterObject, ctx context.Context, request ClusterRequest) (Scmer, error) {
-	result, err := object.HandleClusterRequest(ctx, request)
+	if request.Method == "view" {
+		if view, ok := object.(interface {
+			ClusterView(context.Context) (Scmer, error)
+		}); ok {
+			return view.ClusterView(ctx)
+		}
+		return NewNil(), fmt.Errorf("runtime value has no reference view")
+	}
+	receiver, ok := object.(ClusterRequestHandler)
+	if !ok {
+		return NewNil(), fmt.Errorf("runtime value has no receiving channel")
+	}
+	payload, err := EncodeClusterRequest(request)
+	if err != nil {
+		return NewNil(), err
+	}
+	var result Scmer
+	replied := false
+	ctx = WithClusterValueDelivery(ctx, ProcedureDecode{}, func(value Scmer, failure error) { result, err, replied = value, failure, true })
+	receiver.HandleClusterRequest(ctx, payload)
+	if !replied {
+		return NewNil(), fmt.Errorf("local object operation did not complete")
+	}
+	return result, err
+}
+
+func ClusterViewValue(result any, err error) (Scmer, error) {
 	if err != nil {
 		return NewNil(), err
 	}
@@ -515,7 +530,7 @@ func (*clusterLiteral) ClusterImmutableView()     {}
 func (v *clusterLiteral) Serialize(ctx *SerializationContext) (Scmer, error) {
 	return ctx.ReferenceExpression(v)
 }
-func (v *clusterLiteral) HandleClusterRequest(ctx context.Context, request ClusterRequest) (any, error) {
+func (v *clusterLiteral) executeClusterRequest(ctx context.Context, request ClusterRequest) (any, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -651,3 +666,12 @@ func importClusterLiteral(handle ClusterHandle) (value Scmer) {
 	return value
 }
 func init() { RegisterClusterObjectType("literal", importClusterLiteral) }
+
+func (v *clusterLiteral) HandleClusterRequest(ctx context.Context, payload []byte) {
+	ReceiveClusterValue(ctx, payload, func(request ClusterRequest) (any, error) { return v.executeClusterRequest(ctx, request) })
+}
+
+func (v *clusterLiteral) ClusterView(ctx context.Context) (Scmer, error) {
+	value, err := v.executeClusterRequest(ctx, ClusterRequest{Method: "view"})
+	return ClusterViewValue(value, err)
+}

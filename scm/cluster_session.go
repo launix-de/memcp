@@ -9,7 +9,7 @@ import "context"
 import "sync/atomic"
 
 func (*session) ClusterObjectType() string { return "session" }
-func (s *session) HandleClusterRequest(ctx context.Context, request ClusterRequest) (any, error) {
+func (s *session) executeClusterRequest(ctx context.Context, request ClusterRequest) (any, error) {
 	if err := ctx.Err(); err != nil {
 		return NewNil(), err
 	}
@@ -123,7 +123,7 @@ func (s *clusterSession) publishValue(key string, value Scmer) {
 	}
 }
 func (s *clusterSession) ClusterObjectType() string { return s.handle.Reference.Type }
-func (s *clusterSession) HandleClusterRequest(ctx context.Context, r ClusterRequest) (any, error) {
+func (s *clusterSession) executeClusterRequest(ctx context.Context, r ClusterRequest) (any, error) {
 	if r.Method == "view" {
 		pairs := make([]Scmer, 0, len(*s.values.Load())*2)
 		for k, v := range *s.values.Load() {
@@ -143,4 +143,22 @@ func (s *session) Serialize(ctx *SerializationContext) (Scmer, error) {
 
 func (s *clusterSession) Serialize(ctx *SerializationContext) (Scmer, error) {
 	return ctx.ReferenceExpression(s)
+}
+
+func (s *session) HandleClusterRequest(ctx context.Context, payload []byte) {
+	ReceiveClusterValue(ctx, payload, func(request ClusterRequest) (any, error) { return s.executeClusterRequest(ctx, request) })
+}
+
+func (s *session) ClusterView(ctx context.Context) (Scmer, error) {
+	value, err := s.executeClusterRequest(ctx, ClusterRequest{Method: "view"})
+	return ClusterViewValue(value, err)
+}
+
+func (s *clusterSession) HandleClusterRequest(ctx context.Context, payload []byte) {
+	ReceiveClusterValue(ctx, payload, func(request ClusterRequest) (any, error) { return s.executeClusterRequest(ctx, request) })
+}
+
+func (s *clusterSession) ClusterView(ctx context.Context) (Scmer, error) {
+	value, err := s.executeClusterRequest(ctx, ClusterRequest{Method: "view"})
+	return ClusterViewValue(value, err)
 }
