@@ -889,70 +889,107 @@ func TestClusterReportBeforeAuthorityInitialization(t *testing.T) {
 // transaction. Retaining an earlier bucket's writer across that wait would
 // prevent the same transaction from completing on its coordinator.
 func TestClusterPartitionInsertReleasesWritersBeforeRemoteAcquire(t *testing.T) {
-	tbl := setupScanParallelTestTable(t, "tinsertpartialwriters")
-	tbl.ShardMode = ShardModePartition
-	tbl.PDimensions = []shardDimension{{Column: "id", NumPartitions: 2, Pivots: []scm.Scmer{scm.NewInt(10)}}}
-	first, second := NewShard(tbl), NewShard(tbl)
-	tbl.PShards = []*storageShard{first, second}
-	tbl.publishTopologyLocked()
-	tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}}
-	cluster := globalTestCluster(t, tbl.schema.Name)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	cluster.ctx = ctx
-	owner := clusterMember{ID: "memcp://" + uuid.NewString(), Boot: uuid.NewString()}
-	peer := &mosiPeer{ctx: ctx, done: make(chan struct{}), outgoing: newMosiMailbox()}
-	cluster.view.Store(&clusterView{members: []clusterMember{cluster.self, owner}, links: []*clusterLink{{member: owner, peer: peer}}})
-	mounts := sharedClusterMounts.Swap(&map[string]bool{tbl.schema.Name: true})
-	defer sharedClusterMounts.Store(mounts)
-	service := nodeScans.Swap(&nodeScanService{cluster: cluster})
-	defer nodeScans.Store(service)
-	r := cluster.manager
-	r.resourceCell(mosiResource{Database: tbl.schema.Name}).ownstate.Initialize(mosi.M)
-	left, right := r.shardCell(first), r.shardCell(second)
-	left.current.Store(first)
-	left.ownstate.Initialize(mosi.M)
-	right.current.Store(second)
-	right.ownstate.Initialize(mosi.S)
-	resource := *right.resource.Load()
-	r.updateRecord(resource, func(record *replicaRecord) bool {
-		record.Resource, record.Owner, record.State, record.Epoch = resource, owner.ID, "S", 1
-		return true
-	})
-	done := make(chan any, 1)
-	go func() {
-		defer func() { done <- recover() }()
-		tbl.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(1)}, {scm.NewInt(11)}}, nil, scm.NewNil(), false, nil)
-	}()
-	select {
-	case <-peer.outgoing.ready:
-		takeMosi(peer.outgoing)
-	case <-time.After(5 * time.Second):
-		t.Fatal("INSERT did not request its remote M")
-	}
-	if left.ownstate.Writing() {
-		t.Error("INSERT retained an earlier writer across the remote acquisition")
-	}
-	if first.plannerDeltaRows.Load() != 0 || second.plannerDeltaRows.Load() != 0 {
-		t.Error("INSERT mutated rows before admitting every target")
-	}
-	pending := right.ownstate.Snapshot().Flight()
-	if pending == nil {
-		t.Fatal("missing M flight")
-	}
-	if _, err := right.ownstate.Grant(pending.ID(), mosi.M, func() error { return nil }); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case failure := <-done:
-		if failure != nil {
-			t.Fatalf("INSERT: %v", failure)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("INSERT did not finish after granting M")
-	}
-	if first.plannerDeltaRows.Load() != 1 || second.plannerDeltaRows.Load() != 1 {
-		t.Fatal("admission retry lost or duplicated an inserted row")
+	for _, unique := range []bool{false, true} {
+		t.Run(fmt.Sprint(unique), func(t *testing.T) {
+			tbl := setupScanParallelTestTable(t, "tinsertpartialwriters")
+			tbl.ShardMode = ShardModePartition
+			tbl.PDimensions = []shardDimension{{Column: "id", NumPartitions: 2, Pivots: []scm.Scmer{scm.NewInt(10)}}}
+			first, second := NewShard(tbl), NewShard(tbl)
+			tbl.PShards = []*storageShard{first, second}
+			tbl.publishTopologyLocked()
+			if unique {
+				tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}}
+			}
+			cluster := globalTestCluster(t, tbl.schema.Name)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			cluster.ctx = ctx
+			owner := clusterMember{ID: "memcp://" + uuid.NewString(), Boot: uuid.NewString()}
+			peer := &mosiPeer{ctx: ctx, done: make(chan struct{}), outgoing: newMosiMailbox()}
+			cluster.view.Store(&clusterView{members: []clusterMember{cluster.self, owner}, links: []*clusterLink{{member: owner, peer: peer}}})
+			mounts := sharedClusterMounts.Swap(&map[string]bool{tbl.schema.Name: true})
+			defer sharedClusterMounts.Store(mounts)
+			service := nodeScans.Swap(&nodeScanService{cluster: cluster})
+			defer nodeScans.Store(service)
+			r := cluster.manager
+			r.resourceCell(mosiResource{Database: tbl.schema.Name}).ownstate.Initialize(mosi.M)
+			left, right := r.shardCell(first), r.shardCell(second)
+			left.current.Store(first)
+			left.ownstate.Initialize(mosi.M)
+			right.current.Store(second)
+			right.ownstate.Initialize(mosi.S)
+			resource := *right.resource.Load()
+			r.updateRecord(resource, func(record *replicaRecord) bool {
+				record.Resource, record.Owner, record.State, record.Epoch = resource, owner.ID, "S", 1
+				return true
+			})
+			if unique {
+				// Peer execution now owns UNIQUE reservation preparation. Exercise that
+				// same native admission boundary without pretending this mailbox-only
+				// MOSI fixture implements the receiver/RPC transport. Real peer-channel
+				// INSERT retries are covered by the distributed insertion scenarios.
+				ready := newClusterReceiver(1, func(context.Context, scm.Scmer) (scm.Scmer, error) {
+					return scm.NewNil(), fmt.Errorf("reservation became ready before all writers were admitted")
+				})
+				ready.Seal()
+				defer ready.Close()
+				_, err := first.serveUniqueScan(ctx, shardScanInvocation{neutral: scm.NewSlice([]scm.Scmer{
+					scm.NewAny(ready), uniqueStringArray([]string{"id"}), uniqueRowArray([][]scm.Scmer{{scm.NewInt(1)}, {scm.NewInt(11)}}),
+					scm.NewBool(false), scm.NewBool(true), uniqueStringArray([]string{first.uuid.String(), second.uuid.String()}),
+				})})
+				busy, ok := err.(uniqueReservationBusy)
+				if !ok || busy.shard.Resource.Shard != second.uuid.String() {
+					t.Fatalf("partial UNIQUE admission did not report the remote shard: %v", err)
+				}
+				if left.ownstate.Writing() {
+					t.Fatal("UNIQUE admission retained its partial writer")
+				}
+			}
+			done := make(chan any, 1)
+			go func() {
+				defer func() { done <- recover() }()
+				if unique {
+					// No partial reservation remains while native admission waits.
+					access := second.GetWrite(nil)
+					access.Release()
+					return
+				}
+				tbl.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(1)}, {scm.NewInt(11)}}, nil, scm.NewNil(), false, nil)
+			}()
+			select {
+			case <-peer.outgoing.ready:
+				takeMosi(peer.outgoing)
+			case <-time.After(5 * time.Second):
+				t.Fatal("INSERT did not request its remote M")
+			}
+			if left.ownstate.Writing() {
+				t.Error("INSERT retained an earlier writer across the remote acquisition")
+			}
+			if first.plannerDeltaRows.Load() != 0 || second.plannerDeltaRows.Load() != 0 {
+				t.Error("INSERT mutated rows before admitting every target")
+			}
+			pending := right.ownstate.Snapshot().Flight()
+			if pending == nil {
+				t.Fatal("missing M flight")
+			}
+			if _, err := right.ownstate.Grant(pending.ID(), mosi.M, func() error { return nil }); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case failure := <-done:
+				if failure != nil {
+					t.Fatalf("INSERT: %v", failure)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("INSERT did not finish after granting M")
+			}
+			if unique {
+				tbl.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(1)}, {scm.NewInt(11)}}, nil, scm.NewNil(), false, nil)
+			}
+			if first.plannerDeltaRows.Load() != 1 || second.plannerDeltaRows.Load() != 1 {
+				t.Fatal("admission retry lost or duplicated an inserted row")
+			}
+		})
 	}
 }
 

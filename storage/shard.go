@@ -3713,8 +3713,9 @@ func (t *storageShard) insertDatasetFromLog(columns []string, values [][]scm.Scm
 const uniqueLookupInlineColumns = 8
 
 type uniqueLookupScratch struct {
-	mcols [uniqueLookupInlineColumns]ColumnStorage
-	ids   [8]uint32
+	mcols        [uniqueLookupInlineColumns]ColumnStorage
+	declarations [uniqueLookupInlineColumns]*column
+	ids          [8]uint32
 }
 
 var uniqueLookupScratchPool = sync.Pool{
@@ -3730,24 +3731,24 @@ func releaseUniqueLookupScratch(scratch *uniqueLookupScratch, columns int) {
 		columns = uniqueLookupInlineColumns
 	}
 	clear(scratch.mcols[:columns])
+	clear(scratch.declarations[:columns])
 	uniqueLookupScratchPool.Put(scratch)
 }
 
 func (t *storageShard) GetRecordidForUnique(access scanAccess, currentTx *TxContext, checkReservations bool) (result uint32, present bool) {
 	access = t.t.uniqueAccess(access)
 	columns := access.len()
-	var inlineEquals [8]func(scm.Scmer, scm.Scmer) bool
-	equals := inlineEquals[:]
-	if columns <= len(equals) {
-		equals = equals[:columns]
-	} else {
-		equals = make([]func(scm.Scmer, scm.Scmer) bool, columns)
-	}
-	for i := range equals {
-		equals[i] = t.t.uniqueColumnEqual(access.boundaryColumn(i))
-	}
 	scratch := acquireUniqueLookupScratch()
 	defer releaseUniqueLookupScratch(scratch, columns)
+	declarations := scratch.declarations[:]
+	if columns <= len(declarations) {
+		declarations = declarations[:columns]
+	} else {
+		declarations = make([]*column, columns)
+	}
+	for i := range declarations {
+		declarations[i] = t.t.uniqueColumnDeclaration(access.boundaryColumn(i))
+	}
 	mcols := scratch.mcols[:]
 	if columns <= len(mcols) {
 		mcols = mcols[:columns]
@@ -3801,7 +3802,7 @@ func (t *storageShard) GetRecordidForUnique(access scanAccess, currentTx *TxCont
 				// Main storage: use ColumnStorage
 				for j := 0; j < columns; j++ {
 					v := access.boundValue(j, false)
-					if !equals[j](mcols[j].GetValue(idx), v) {
+					if !uniqueColumnValuesEqual(declarations[j], mcols[j].GetValue(idx), v) {
 						matched = false
 						break
 					}
@@ -3809,7 +3810,7 @@ func (t *storageShard) GetRecordidForUnique(access scanAccess, currentTx *TxCont
 			} else {
 				// Delta storage: use getDelta
 				for j := 0; j < columns; j++ {
-					if !equals[j](t.getDelta(int(idx-mainCount), access.boundaryColumn(j)), access.boundValue(j, false)) {
+					if !uniqueColumnValuesEqual(declarations[j], t.getDelta(int(idx-mainCount), access.boundaryColumn(j)), access.boundValue(j, false)) {
 						matched = false
 						break
 					}

@@ -207,31 +207,38 @@ func uniqueColumnValue(declaration *column, value scm.Scmer) scm.Scmer {
 	return value
 }
 
-// The column's index order owns text equivalence. Runtime representations
-// (plain, compressed and UUID strings) must not change that equivalence.
-func (t *table) uniqueColumnEqual(columnName string) func(scm.Scmer, scm.Scmer) bool {
-	var declaration *column
-	collation := "bin"
+// UNIQUE comparison and hashing share the declared type/collation contract,
+// independently of plain, compressed and UUID string representations.
+func (t *table) uniqueColumnDeclaration(columnName string) *column {
 	for _, candidate := range t.columnDeclarations() {
 		if candidate.Name == columnName {
-			declaration = candidate
-			collation = candidate.Collation
-			break
+			return candidate
 		}
 	}
-	return func(a, b scm.Scmer) bool {
-		typed := declaration != nil && declaration.Typ != "" && !strings.EqualFold(declaration.Typ, "any")
-		if typed && (a.IsNil() || b.IsNil()) {
-			return a.IsNil() && b.IsNil()
-		}
-		if typed {
-			a, b = uniqueColumnValue(declaration, a), uniqueColumnValue(declaration, b)
-		}
-		if (a.IsString() || a.IsSymbol() || a.IsBufferString()) && (b.IsString() || b.IsSymbol() || b.IsBufferString()) {
-			return scm.EqualCollated(a, b, collation).Bool()
-		}
-		return scm.Equal(a, b)
+	return nil
+}
+
+func (t *table) uniqueColumnEqual(columnName string) func(scm.Scmer, scm.Scmer) bool {
+	declaration := t.uniqueColumnDeclaration(columnName)
+	return func(a, b scm.Scmer) bool { return uniqueColumnValuesEqual(declaration, a, b) }
+}
+
+func uniqueColumnValuesEqual(declaration *column, a, b scm.Scmer) bool {
+	typed := declaration != nil && declaration.Typ != "" && !strings.EqualFold(declaration.Typ, "any")
+	if typed && (a.IsNil() || b.IsNil()) {
+		return a.IsNil() && b.IsNil()
 	}
+	if typed {
+		a, b = uniqueColumnValue(declaration, a), uniqueColumnValue(declaration, b)
+	}
+	if (a.IsString() || a.IsSymbol() || a.IsBufferString()) && (b.IsString() || b.IsSymbol() || b.IsBufferString()) {
+		collation := "bin"
+		if declaration != nil {
+			collation = declaration.Collation
+		}
+		return scm.EqualCollated(a, b, collation).Bool()
+	}
+	return scm.Equal(a, b)
 }
 
 func (t *table) uniqueColumnHash(column string, value scm.Scmer) (uint64, bool) {
