@@ -1214,7 +1214,7 @@ func TestClusterNativeUniqueUpdateReleasesBorrowedReservation(t *testing.T) {
 		if cell.ownstate.Writing() {
 			t.Fatal("native UPDATE retained its MOSI writer")
 		}
-		guard := tbl.guardUniqueWrites([]string{"id", "value"}, [][]scm.Scmer{{scm.NewInt(42), scm.NewInt(0)}}, false, 0)
+		guard := tbl.guardUniqueWrites([]string{"id", "value"}, [][]scm.Scmer{{scm.NewInt(42), scm.NewInt(0)}}, false, 0, nil)
 		if !guard.tryLock() {
 			t.Fatal("native UPDATE retained a UNIQUE stripe after publishing")
 		}
@@ -1538,7 +1538,7 @@ func TestClusterUniqueCoordinatorRetriesAfterLaneAppend(t *testing.T) {
 		cluster.declareShard(shard, true)
 	}
 	columns, rows := []string{"id"}, [][]scm.Scmer{{scm.NewInt(42)}}
-	guard := tbl.guardUniqueWrites(columns, rows, false, 0)
+	guard := tbl.guardUniqueWrites(columns, rows, false, 0, nil)
 	defer guard.release()
 	set := tbl.reserveUniqueDomain(columns, rows, false, nil, nil, &guard)
 	defer set.close(false)
@@ -1637,7 +1637,7 @@ func TestClusterUniqueUnreservedReadNeedsHeldParticipant(t *testing.T) {
 	cluster.declareShard(left, true)
 	cluster.declareShard(middle, true)
 	columns := []string{"id"}
-	guard := tbl.guardUniqueWrites(columns, [][]scm.Scmer{{scm.NewInt(7)}}, false, 0)
+	guard := tbl.guardUniqueWrites(columns, [][]scm.Scmer{{scm.NewInt(7)}}, false, 0, nil)
 	defer guard.release()
 	set := tbl.reserveUniqueDomain(columns, [][]scm.Scmer{{scm.NewInt(7)}}, false, nil, nil, &guard)
 	defer set.close(false)
@@ -1645,7 +1645,7 @@ func TestClusterUniqueUnreservedReadNeedsHeldParticipant(t *testing.T) {
 	tbl.ShardMode, tbl.PShards = ShardModePartition, []*storageShard{left, middle, right}
 	tbl.PDimensions = []shardDimension{{Column: "id", NumPartitions: 3, Pivots: []scm.Scmer{scm.NewInt(10), scm.NewInt(20)}}}
 	tbl.publishTopologyLocked()
-	additional := tbl.guardUniqueWrites(columns, [][]scm.Scmer{{scm.NewInt(99)}}, false, 0)
+	additional := tbl.guardUniqueWrites(columns, [][]scm.Scmer{{scm.NewInt(99)}}, false, 0, nil)
 	guard.extend(additional.mask)
 	defer func() {
 		if _, retry := recover().(uniqueReadRetry); !retry {
@@ -1671,7 +1671,7 @@ func TestClusterUniqueContentionDoesNotMoveOwnership(t *testing.T) {
 			cell.current.Store(shard)
 			cell.ownstate.Initialize(mosi.M)
 			rows := [][]scm.Scmer{{scm.NewInt(7)}}
-			guard := tbl.guardUniqueWrites([]string{"id"}, rows, false, 0)
+			guard := tbl.guardUniqueWrites([]string{"id"}, rows, false, 0, nil)
 			if kind == "stripe" {
 				guard.lock()
 				defer guard.unlock()

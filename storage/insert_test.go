@@ -86,11 +86,11 @@ func TestInsertUniqueChecksAllowIndependentKeys(t *testing.T) {
 	tbl := setupScanParallelTestTable(t, "tinsertparallelkeys")
 	tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}}
 	first := [][]scm.Scmer{{scm.NewInt(1)}}
-	firstMask := tbl.guardUniqueWrites([]string{"id"}, first, false, 0).mask
+	firstMask := tbl.guardUniqueWrites([]string{"id"}, first, false, 0, nil).mask
 	var second [][]scm.Scmer
 	for i := int64(101); i < 1000; i++ {
 		rows := [][]scm.Scmer{{scm.NewInt(i)}}
-		if !tbl.guardUniqueWrites([]string{"id"}, rows, false, 0).mask.intersects(firstMask) {
+		if !tbl.guardUniqueWrites([]string{"id"}, rows, false, 0, nil).mask.intersects(firstMask) {
 			second = rows
 			break
 		}
@@ -412,12 +412,12 @@ func TestInsertCollisionKeyChangeConflictRestoresRow(t *testing.T) {
 	columns := []string{"id", "name"}
 	row := [][]scm.Scmer{{scm.NewInt(7), scm.NewString("original")}}
 	tbl.Insert(columns, row, nil, scm.NewNil(), false, nil)
-	original := tbl.guardUniqueWrites(columns, row, false, 0)
+	original := tbl.guardUniqueWrites(columns, row, false, 0, nil)
 	var name string
 	var extra uniqueWriteGuard
 	for i := 0; i < 1000; i++ {
 		name = fmt.Sprint("replacement-", i)
-		needed := tbl.guardUniqueWrites(columns, [][]scm.Scmer{{scm.NewInt(7), scm.NewString(name)}}, false, 0)
+		needed := tbl.guardUniqueWrites(columns, [][]scm.Scmer{{scm.NewInt(7), scm.NewString(name)}}, false, 0, nil)
 		if !original.mask.contains(needed.mask) {
 			var mask uniqueWriteMask
 			for word := 0; word < len(needed.mask.words)+len(needed.mask.extra); word++ {
@@ -459,11 +459,11 @@ func TestInsertCollisionIndependentKeyProgress(t *testing.T) {
 	tbl := setupUniqueContentionTable(t, "free")
 	columns := []string{"id", "bucket", "val"}
 	firstRow := [][]scm.Scmer{{scm.NewInt(7), scm.NewInt(0), scm.NewInt(0)}}
-	firstMask := tbl.guardUniqueWrites(columns, firstRow, false, 0).mask
+	firstMask := tbl.guardUniqueWrites(columns, firstRow, false, 0, nil).mask
 	var secondRow [][]scm.Scmer
 	for id := int64(8); id < 1000; id++ {
 		row := [][]scm.Scmer{{scm.NewInt(id), scm.NewInt(0), scm.NewInt(0)}}
-		if !tbl.guardUniqueWrites(columns, row, false, 0).mask.intersects(firstMask) {
+		if !tbl.guardUniqueWrites(columns, row, false, 0, nil).mask.intersects(firstMask) {
 			secondRow = row
 			break
 		}
@@ -987,7 +987,7 @@ func TestUniqueNullRowAcquiresFirstConcreteKey(t *testing.T) {
 			if !found || tbl.CountExact() != 1 {
 				t.Fatal("NULL-to-key update did not publish exactly one replacement")
 			}
-			guard := tbl.guardUniqueWrites([]string{"value"}, [][]scm.Scmer{{scm.NewInt(7)}}, false, 0)
+			guard := tbl.guardUniqueWrites([]string{"value"}, [][]scm.Scmer{{scm.NewInt(7)}}, false, 0, nil)
 			if !guard.tryLock() {
 				t.Fatal("NULL-to-key update retained its first stripe")
 			}
@@ -1008,7 +1008,7 @@ func TestUniqueDeleteForwardsBorrowedGuardToRebuild(t *testing.T) {
 	if !ok {
 		t.Fatal("rebuild omitted recid translation")
 	}
-	guard := tbl.guardUniqueWrites([]string{"id"}, [][]scm.Scmer{{scm.NewInt(1)}}, false, 0)
+	guard := tbl.guardUniqueWrites([]string{"id"}, [][]scm.Scmer{{scm.NewInt(1)}}, false, 0, nil)
 	guard.lock()
 	done := make(chan any, 1)
 	go func() {
@@ -1137,7 +1137,7 @@ func TestUniqueNodePoolReleasesIdleTables(t *testing.T) {
 	pool := nodeUniqueWriteLocks()
 	for i := 0; i < 4096; i++ {
 		tbl := &table{Unique: []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}}}
-		guard := tbl.guardUniqueWrites([]string{"id"}, [][]scm.Scmer{{scm.NewInt(7)}}, false, 0)
+		guard := tbl.guardUniqueWrites([]string{"id"}, [][]scm.Scmer{{scm.NewInt(7)}}, false, 0, nil)
 		if guard.locks != pool {
 			t.Fatal("table allocated a private lock pool")
 		}
@@ -1166,11 +1166,11 @@ func TestUniqueNodePoolNestedTriggerHashCollision(t *testing.T) {
 	inner.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}}
 	columns := []string{"id", "val"}
 	outerRow := [][]scm.Scmer{{scm.NewInt(7), scm.NewInt(0)}}
-	outerMask := outer.guardUniqueWrites(columns, outerRow, false, 0).mask
+	outerMask := outer.guardUniqueWrites(columns, outerRow, false, 0, nil).mask
 	var innerRow [][]scm.Scmer
 	for id := int64(1); id <= int64(len(nodeUniqueWriteLocks().stripes))*64; id++ {
 		row := [][]scm.Scmer{{scm.NewInt(id), scm.NewInt(0)}}
-		if inner.guardUniqueWrites(columns, row, false, 0).mask.intersects(outerMask) {
+		if inner.guardUniqueWrites(columns, row, false, 0, nil).mask.intersects(outerMask) {
 			innerRow = row
 			break
 		}
@@ -1298,6 +1298,8 @@ func TestUniqueNodePoolConfigured(t *testing.T) {
 		t.Run("atomic before collisions", TestInsertCollisionReadModifyWriteBeforeTrigger)
 		t.Run("aliases", TestInsertCollisionDifferentUniqueKeysShareRow)
 		t.Run("before nested update", TestUniqueNodePoolNestedTriggerHashCollision)
+		t.Run("snapshot publication", TestUniqueSnapshotDrainsAdmittedWriter)
+		t.Run("MOSI configuration collision", TestReplicationUniqueAcquisitionAllowsCollidingConfigWrite)
 		t.Run("no retained table pools", TestUniqueNodePoolReleasesIdleTables)
 		return
 	}
@@ -1309,5 +1311,79 @@ func TestUniqueNodePoolConfigured(t *testing.T) {
 				t.Fatalf("pool factor=%s: %v\n%s", config.factor, err, output)
 			}
 		})
+	}
+}
+
+// READ publication must drain an admitted writer before a cache initializer
+// can borrow the global pool. Both the first reader and adjacent READ owners
+// must wait, while the admitted writer remains able to finish its INSERT.
+func TestUniqueSnapshotDrainsAdmittedWriter(t *testing.T) {
+	tbl := setupScanParallelTestTable(t, "tunique_snapshot_admission")
+	tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}}
+	columns := []string{"id"}
+	rows := [][]scm.Scmer{{scm.NewInt(7)}}
+	guard := tbl.guardUniqueWrites(columns, rows, false, 0, nil)
+	guard.lock()
+	defer guard.release()
+	readers := make(chan func(), 2)
+	for index := int64(1); index <= 2; index++ {
+		go func() {
+			readers <- acquireTableLock(tbl.schema.Name, tbl.Name, false, true, &scm.SessionState{}, 0)
+		}()
+		deadline := time.Now().Add(2 * time.Second)
+		for tbl.tableLockState.Load() != index {
+			if time.Now().After(deadline) {
+				t.Fatal("READ ownership was not published")
+			}
+			runtime.Gosched()
+		}
+		select {
+		case unlock := <-readers:
+			unlock()
+			t.Fatal("snapshot entered before the admitted writer finished")
+		default:
+		}
+	}
+	late := tbl.guardUniqueWrites(columns, rows, false, 0, nil)
+	late.mask = uniqueWriteMask{} // no stripe contention can explain a refusal
+	if late.tryLock() {
+		late.release()
+		t.Fatal("a new writer bypassed published READ ownership")
+	}
+	if tbl.tableLockWriters.Load() != 1 {
+		t.Fatal("refused admission leaked a writer")
+	}
+	done := make(chan struct{})
+	go func() {
+		tbl.ActiveShards()[0].Insert(columns, rows, false, tbl.columnNamesSnapshot.Load(), nil, false, nil, &guard)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("admitted INSERT waited for the pending snapshot")
+	}
+	guard.release()
+	for index := 0; index < 2; index++ {
+		select {
+		case unlock := <-readers:
+			defer unlock()
+		case <-time.After(2 * time.Second):
+			t.Fatal("snapshot did not resume after writer departure")
+		}
+	}
+	if tbl.CountExact() != 1 || tbl.tableLockWriters.Load() != 0 {
+		t.Fatal("snapshot missed the completed INSERT or retained admission")
+	}
+	// A cache is a different relation, but still uses the same mutex. It must
+	// make progress while these source READ locks remain held.
+	cache := setupScanParallelTestTable(t, "tunique_snapshot_cache")
+	cache.Unique = tbl.Unique
+	for key := int64(1); ; key++ {
+		candidate := [][]scm.Scmer{{scm.NewInt(key)}}
+		if cache.guardUniqueWrites(columns, candidate, false, 0, nil).mask.intersects(guard.mask) {
+			cache.Insert(columns, candidate, nil, scm.NewNil(), false, nil)
+			break
+		}
 	}
 }

@@ -2308,7 +2308,7 @@ func (t *storageShard) scan(access scanAccess, conditionCols []string, condition
 	if lockMutationExclusively {
 		for {
 			prepareOrdered()
-			t.lockForMutation(currentTx)
+			t.lockForMutation(currentTx, nil)
 			if orderedReadyLocked() {
 				writeLocked = true
 				break
@@ -2639,7 +2639,7 @@ func (t *storageShard) scanBatch(access scanAccess, conditionCols []string, cond
 	lockMutationExclusively := hasMutationCallback && !ownsWrite
 	writeLocked := false
 	if lockMutationExclusively {
-		t.lockForMutation(currentTx)
+		t.lockForMutation(currentTx, nil)
 		writeLocked = true
 		defer func() {
 			if writeLocked {

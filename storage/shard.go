@@ -1758,8 +1758,8 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 					for i, name := range payloadCols {
 						oldRow[i] = t.rowValueByRecidLocked(targetIdx, name)
 					}
-					needed := t.t.guardUniqueWrites(payloadCols, [][]scm.Scmer{payloadRow}, false, 0)
-					oldKeys := t.t.guardUniqueWrites(payloadCols, [][]scm.Scmer{oldRow}, false, 0)
+					needed := t.t.guardUniqueWrites(payloadCols, [][]scm.Scmer{payloadRow}, false, 0, currentTx)
+					oldKeys := t.t.guardUniqueWrites(payloadCols, [][]scm.Scmer{oldRow}, false, 0, currentTx)
 					needed.mask.include(oldKeys.mask)
 					if uniqueGuard == nil {
 						if !needed.tryLock() {
@@ -3317,10 +3317,9 @@ func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLoc
 	t.t.beginContributionMutation()
 	defer t.t.endContributionMutation()
 	ss := SessionStateFromTx(currentTx)
-	// Check table-level user lock (LOCK TABLES): writes block under any lock.
-	// Always call waitTableLock — it handles other-session blocking and
-	// owner-write-under-READ-lock error in one place.
-	if t.t.hasTableLock() {
+	// New writers wait for table-level locks. A UNIQUE batch admitted before
+	// publication finishes before the table-lock owner may use its snapshot.
+	if t.t.hasTableLock() && !uniqueGuard.admittedTo(t.t) {
 		t.t.waitTableLock(ss, querySeqFromTx(currentTx), true)
 	}
 	// A validated table-level INSERT already finalized BEFORE output before
@@ -3349,7 +3348,7 @@ func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLoc
 			return 0
 		}
 		if !alreadyLocked {
-			t.lockForMutation(currentTx)
+			t.lockForMutation(currentTx, uniqueGuard)
 			defer t.mu.Unlock()
 		}
 		firstNewRecid := uint32(0)
@@ -3374,7 +3373,7 @@ func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLoc
 	}
 
 	if !alreadyLocked {
-		t.lockForMutation(currentTx)
+		t.lockForMutation(currentTx, uniqueGuard)
 		defer t.mu.Unlock()
 	}
 	firstNewRecid := t.insertPreparedLocked(columns, values, onFirstInsertId, true, true, validatedSchema, currentTx, uniqueGuard)
@@ -3386,15 +3385,15 @@ func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLoc
 // recheck after t.mu is acquired. Never wait for that owner while retaining
 // t.mu: a cache initializer holding a READ table lock may need this shard to
 // finish its snapshot before it can release the table lock.
-func (t *storageShard) lockForMutation(currentTx *TxContext) {
+func (t *storageShard) lockForMutation(currentTx *TxContext, guard *uniqueWriteGuard) {
 	ss := SessionStateFromTx(currentTx)
 	for {
-		if t.t.hasTableLock() {
+		if t.t.hasTableLock() && !guard.admittedTo(t.t) {
 			t.t.waitTableLock(ss, querySeqFromTx(currentTx), true)
 		}
 		t.mu.Lock()
 		owner := t.t.tableLockOwner.Load()
-		if t.t.tableLockState.Load() == 0 || owner == ss {
+		if guard.admittedTo(t.t) || t.t.tableLockState.Load() == 0 || owner == ss {
 			return
 		}
 		t.mu.Unlock()
@@ -3522,7 +3521,7 @@ func (t *storageShard) insertPreparedLocked(columns []string, values [][]scm.Scm
 	if fireTriggers && len(t.t.Triggers) > 0 {
 		func() {
 			t.mu.Unlock()
-			defer t.lockForMutation(currentTx)
+			defer t.lockForMutation(currentTx, uniqueGuard)
 			for _, row := range triggerInsertRows {
 				uniqueGuard.after(uniqueAfterTrigger{table: t.t, timing: AfterInsert, new: row, tx: currentTx})
 			}

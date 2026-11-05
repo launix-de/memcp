@@ -312,7 +312,7 @@ func (set *uniqueReservationSet) nativeShard(shard *storageShard) *uniqueNativeS
 func (set *uniqueReservationSet) call(shard *storageShard, operation string, arguments ...scm.Scmer) scm.Scmer {
 	client := set.clients[shard.uuid.String()]
 	if client == nil {
-		if operation == "probe" && len(arguments) == 3 && len(arguments[2].Slice()) == 0 {
+		if sharedClusterSource(set.table) && operation == "probe" && len(arguments) == 3 && len(arguments[2].Slice()) == 0 {
 			columns, err := uniqueStrings(arguments[0])
 			if err != nil {
 				panic(err)
@@ -527,7 +527,11 @@ func (t *table) uniqueProbeDomain(topology *tableShardTopology, columns []string
 // Requests retain native worker scopes; the coordinator never imports payload.
 func (t *table) reserveUniqueDomain(columns []string, rows [][]scm.Scmer, mergeNull bool, tx *TxContext, targets []*storageShard, borrowed *uniqueWriteGuard) *uniqueReservationSet {
 	cluster := activeNodeCluster()
-	ctx := scanQueryContext(tx, cluster.ctx)
+	parent := context.Background()
+	if sharedClusterSource(t) {
+		parent = cluster.ctx
+	}
+	ctx := scanQueryContext(tx, parent)
 	topology := t.activeTopology()
 	set := &uniqueReservationSet{ctx: ctx, table: t, topology: topology, guard: borrowed}
 	complete := false
@@ -542,6 +546,35 @@ func (t *table) reserveUniqueDomain(columns []string, rows [][]scm.Scmer, mergeN
 			panic(failure)
 		}
 	}()
+	if !sharedClusterSource(t) {
+		// A replica acquires native participants through its ordinary MOSI
+		// boundary. Completion persists configuration via SQL and can use any
+		// global stripe, so neither cold reads nor writer acquisition may run
+		// while this batch owns key stripes.
+		borrowed.unlock()
+		domain := t.uniqueProbeDomain(topology, columns, rows, mergeNull, targets)
+		set.local = make(map[string]*uniqueNativeShard, len(domain))
+		pending := make([]*storageShard, 0, len(domain))
+		var owned *replicaCell
+		if borrowed.ownedShard != nil {
+			owned = activeReplication(t.schema).shardCell(borrowed.ownedShard)
+		}
+		for _, shard := range domain {
+			if owned != nil && activeReplication(t.schema).shardCell(shard) == owned {
+				set.bindNativeShard(shard.uuid.String(), &uniqueNativeShard{shard: borrowed.ownedShard, guard: borrowed, tx: tx})
+			} else {
+				pending = append(pending, shard)
+			}
+		}
+		set.nativeWrites = getShardWrites(pending, tx)
+		for index, access := range set.nativeWrites {
+			set.bindNativeShard(pending[index].uuid.String(), &uniqueNativeShard{shard: access.shard, guard: borrowed, tx: tx})
+		}
+		borrowed.lock()
+		set.nativeGuardHeld = true
+		complete = true
+		return set
+	}
 	if len(topology.shards) == 1 && !t.repartitionDualWriteActive.Load() && (len(targets) == 0 || (len(targets) == 1 && targets[0] == topology.shards[0])) {
 		shard := topology.shards[0]
 		cell := shard.coherence.Load()
@@ -839,7 +872,13 @@ func (s *storageShard) serveUniqueScan(ctx context.Context, input shardScanInvoc
 	if err != nil {
 		return false, err
 	}
-	guard := s.t.guardUniqueWrites(columns, rows, parameters[3].Bool(), 0)
+	tx := input.tx
+	if parameters[4].Bool() {
+		// The invocation supplies cancellation and MOSI ownership, while a
+		// native nil-TX mutation keeps its immediate publication semantics.
+		tx = nil
+	}
+	guard := s.t.guardUniqueWrites(columns, rows, parameters[3].Bool(), 0, tx)
 	guardPointer := &guard
 	if input.uniqueGuard != nil {
 		guardPointer = input.uniqueGuard
@@ -854,12 +893,6 @@ func (s *storageShard) serveUniqueScan(ctx context.Context, input shardScanInvoc
 			}
 		}
 	}()
-	tx := input.tx
-	if parameters[4].Bool() {
-		// The invocation supplies cancellation and MOSI ownership, while a
-		// native nil-TX mutation keeps its immediate publication semantics.
-		tx = nil
-	}
 	ids, err := uniqueStrings(parameters[5])
 	if err != nil || len(ids) == 0 {
 		return false, fmt.Errorf("UNIQUE reservation requires its shard group")

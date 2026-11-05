@@ -127,6 +127,9 @@ type uniqueWriteGuard struct {
 	ownedShard    *storageShard // an UPDATE already owns this native MOSI writer
 	reservations  *uniqueReservationSet
 	mutation      *mosi.Writer
+	table         *table // SQL table-lock admission; the stripe pool remains node-global
+	tx            *TxContext
+	admitted      bool
 	locks         *UniqueLockPool
 	mask          uniqueWriteMask
 	held          bool
@@ -175,6 +178,12 @@ func (g *uniqueWriteGuard) validReads() bool {
 // readable local shards keep the direct path; other owners run the same native
 // reservation/visibility kernel through the ordinary scan protocol.
 func (s *storageShard) probeUnique(access scanAccess, tx *TxContext) bool {
+	if !sharedClusterSource(s.t) {
+		lease := s.GetRead(tx, false)
+		defer lease.Release()
+		_, found := lease.shard.GetRecordidForUnique(access, tx, true)
+		return found
+	}
 	cluster := activeNodeCluster()
 	resource := mosiResource{Database: s.t.schema.Name, Table: s.t.Name, Shard: s.uuid.String()}
 	local := false
@@ -227,12 +236,48 @@ func (s *storageShard) probeUnique(access scanAccess, tx *TxContext) bool {
 }
 
 func (g *uniqueWriteGuard) lock() {
+	for !g.admit() {
+		g.table.waitTableLock(SessionStateFromTx(g.tx), querySeqFromTx(g.tx), true)
+	}
 	for word := 0; word < len(g.mask.words)+len(g.mask.extra); word++ {
 		for mask := g.mask.word(word); mask != 0; mask &= mask - 1 {
 			g.locks.stripes[word*64+bits.TrailingZeros64(mask)].Lock()
 		}
 	}
 	g.held = true
+}
+
+// A published table lock closes admission to new UNIQUE writers. Writers
+// admitted before publication may finish; the table-lock owner waits for them
+// before entering its snapshot/DDL. Never wait for that owner with stripes held.
+func (g *uniqueWriteGuard) admit() bool {
+	if g.table == nil || g.admitted {
+		return true
+	}
+	g.table.tableLockWriters.Add(1)
+	g.admitted = true
+	owner := g.table.tableLockOwner.Load()
+	if g.table.hasTableLock() && (owner == nil || owner != SessionStateFromTx(g.tx)) {
+		g.depart()
+		return false
+	}
+	return true
+}
+
+func (g *uniqueWriteGuard) depart() {
+	if !g.admitted {
+		return
+	}
+	g.admitted = false
+	if g.table.tableLockWriters.Add(-1) == 0 && g.table.hasTableLock() {
+		g.table.tableLockMu.Lock()
+		g.table.getTableLockCond().Broadcast()
+		g.table.tableLockMu.Unlock()
+	}
+}
+
+func (g *uniqueWriteGuard) admittedTo(t *table) bool {
+	return g != nil && g.admitted && g.table == t
 }
 
 // Try additional stripes in ascending order. On conflict, release only the
@@ -259,11 +304,17 @@ func (g *uniqueWriteGuard) tryAdditional(needed uniqueWriteMask) bool {
 }
 
 func (g *uniqueWriteGuard) tryLock() bool {
+	if !g.admit() {
+		return false
+	}
 	needed := g.mask
 	g.mask = uniqueWriteMask{}
 	ok := g.tryAdditional(needed)
 	g.mask = needed
 	g.held = ok
+	if !ok {
+		g.depart()
+	}
 	return ok
 }
 
@@ -280,6 +331,7 @@ func (g *uniqueWriteGuard) unlock() {
 	}
 	g.held = false
 	g.version++
+	g.depart()
 }
 
 // A collision update may change UNIQUE columns. Borrow the existing key
@@ -463,7 +515,7 @@ func (t *table) uniqueAccess(access scanAccess) scanAccess {
 	return access
 }
 
-func (t *table) guardUniqueWrites(columns []string, values [][]scm.Scmer, mergeNull bool, first int) uniqueWriteGuard {
+func (t *table) guardUniqueWrites(columns []string, values [][]scm.Scmer, mergeNull bool, first int, tx *TxContext) uniqueWriteGuard {
 	locks := nodeUniqueWriteLocks()
 	var identity [8]byte
 	binary.LittleEndian.PutUint64(identity[:], uint64(uintptr(unsafe.Pointer(t))))
@@ -510,12 +562,12 @@ func (t *table) guardUniqueWrites(columns []string, values [][]scm.Scmer, mergeN
 				for stripe := range locks.stripes {
 					mask.add(stripe)
 				}
-				return uniqueWriteGuard{locks: locks, mask: mask}
+				return uniqueWriteGuard{table: t, tx: tx, locks: locks, mask: mask}
 			}
 			mask.add(int(hash % uint64(len(locks.stripes))))
 		}
 	}
-	return uniqueWriteGuard{locks: locks, mask: mask}
+	return uniqueWriteGuard{table: t, tx: tx, locks: locks, mask: mask}
 }
 
 // guardUniqueRow gives mutation mappers the same logical-key ownership as
@@ -536,7 +588,7 @@ func (s *storageShard) localMutationState() *mosi.State {
 }
 
 func (s *storageShard) mutationGuard(tx *TxContext) *uniqueWriteGuard {
-	guard := &uniqueWriteGuard{locks: nodeUniqueWriteLocks(), ownedShard: s}
+	guard := &uniqueWriteGuard{table: s.t, tx: tx, locks: nodeUniqueWriteLocks(), ownedShard: s}
 	if activeReplication(s.t.schema) != nil {
 		return guard
 	}
@@ -609,11 +661,11 @@ func (s *storageShard) guardUniqueRow(id uint32, tx *TxContext) (*uniqueWriteGua
 		if !found {
 			return nil, id, false
 		}
-		guard := s.t.guardUniqueWrites(columns, [][]scm.Scmer{values}, false, 0)
+		guard := s.t.guardUniqueWrites(columns, [][]scm.Scmer{values}, false, 0, tx)
 		guard.lock()
 		s.mu.RLock()
 		found = read()
-		current := s.t.guardUniqueWrites(columns, [][]scm.Scmer{values}, false, 0)
+		current := s.t.guardUniqueWrites(columns, [][]scm.Scmer{values}, false, 0, tx)
 		s.mu.RUnlock()
 		if !found {
 			guard.unlock()

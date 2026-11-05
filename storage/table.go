@@ -646,8 +646,9 @@ type table struct {
 	// t.mu protects table-local storage topology and long-lived maintenance
 	// state: ShardMode, Shards/PShards, maintenanceKind and the dual-write
 	// flags that coordinate table-level rebuild/repartition.
-	mu          sync.Mutex
-	insertRoute atomic.Uint64 // rotating free-shard writer selection; runtime-only
+	mu               sync.Mutex
+	insertRoute      atomic.Uint64 // rotating free-shard writer selection; runtime-only
+	tableLockWriters atomic.Int64  // table-lock publication drains admitted UNIQUE batches
 	// LOCK TABLES: variable-based lock that is cheap for scans to check but
 	// expensive to acquire (drains shard readers first via waitTableLock).
 	// Software contract:
@@ -660,6 +661,8 @@ type table struct {
 	//   - Mutations wait for tableLockState before taking a shard lock and recheck
 	//     after taking it. They never wait for a table lock while holding a shard
 	//     lock; cache snapshots hold their table READ lock while entering shards.
+	//   - A UNIQUE batch admitted before publication finishes first. The lock
+	//     owner drains tableLockWriters before executing its protected work.
 	// tableLockState is read from every shard goroutine on
 	// every scan; isolate them on their own cache line to prevent false sharing
 	// with Auto_increment (written on every INSERT).
@@ -4504,11 +4507,17 @@ func (p *uniquePendingKeys) remember(rowIndex int, key []scm.Scmer) bool {
 	return false
 }
 
+// Ephemeral helpers and system configuration are local even while a node is
+// replicating user databases. Match the native shard GetWrite boundary.
+func (t *table) uniqueUsesMOSI() bool {
+	return activeReplication(t.schema) != nil && validReplicaDatabase(t.schema.Name) && !t.isEphemeralQueryTable()
+}
+
 func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, mergeNull bool, success func([][]scm.Scmer, *uniqueWriteGuard), onCollisionCols []string, failure func(string, []scm.Scmer), idx int, currentTx *TxContext, borrowed *uniqueWriteGuard, targets []*storageShard) {
-	guard := t.guardUniqueWrites(columns, values, mergeNull, idx)
+	guard := t.guardUniqueWrites(columns, values, mergeNull, idx, currentTx)
 	if borrowed != nil {
-		if sharedClusterSource(t) && borrowed.ownedShard != nil && borrowed.reservations == nil {
-			t.processClusterUniqueCollision(columns, values, mergeNull, success, onCollisionCols, failure, idx, currentTx, borrowed, []*storageShard{borrowed.ownedShard})
+		if t.uniqueUsesMOSI() && borrowed.ownedShard != nil && borrowed.reservations == nil {
+			t.processReservedUniqueCollision(columns, values, mergeNull, success, onCollisionCols, failure, idx, currentTx, borrowed, []*storageShard{borrowed.ownedShard})
 			return
 		}
 		borrowed.extend(guard.mask)
@@ -4516,23 +4525,23 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 		return
 	}
 	defer guard.release()
-	if sharedClusterSource(t) {
+	if t.uniqueUsesMOSI() {
 		if len(onCollisionCols) == 0 {
 			values = t.uniqueReadOnlyPrefix(columns, values, mergeNull, currentTx, failure)
 			if len(values) == 0 {
 				return
 			}
 		}
-		t.processClusterUniqueCollision(columns, values, mergeNull, success, onCollisionCols, failure, idx, currentTx, &guard, targets)
+		t.processReservedUniqueCollision(columns, values, mergeNull, success, onCollisionCols, failure, idx, currentTx, &guard, targets)
 		return
 	}
 	guard.lock()
 	t.processUniqueCollision(columns, values, mergeNull, success, onCollisionCols, failure, idx, currentTx, &guard)
 }
 
-// Retry state belongs only to shared-cluster batches. Keep ordinary native
-// INSERT/UPSERT on its direct constraint path without retry closures or recovery.
-func (t *table) processClusterUniqueCollision(columns []string, values [][]scm.Scmer, mergeNull bool, success func([][]scm.Scmer, *uniqueWriteGuard), onCollisionCols []string, failure func(string, []scm.Scmer), idx int, currentTx *TxContext, guard *uniqueWriteGuard, targets []*storageShard) {
+// Replicated and shared-cluster batches acquire their native MOSI participants
+// before taking key stripes. Ordinary standalone batches retain the direct path.
+func (t *table) processReservedUniqueCollision(columns []string, values [][]scm.Scmer, mergeNull bool, success func([][]scm.Scmer, *uniqueWriteGuard), onCollisionCols []string, failure func(string, []scm.Scmer), idx int, currentTx *TxContext, guard *uniqueWriteGuard, targets []*storageShard) {
 	var retries uint
 	for {
 		retry := false
@@ -4855,7 +4864,7 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 										row[i] = reader.GetValue(uid)
 										ReleaseColumnReader(reader)
 									}
-									needed := t.guardUniqueWrites(cols, [][]scm.Scmer{row}, mergeNull, 0)
+									needed := t.guardUniqueWrites(cols, [][]scm.Scmer{row}, mergeNull, 0, currentTx)
 									if guard.mask.contains(needed.mask) {
 										break
 									}

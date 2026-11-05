@@ -244,6 +244,30 @@ test_cases:
     sql: "SELECT SUM(value) AS total FROM aggregate_source WHERE nullable_key = NULL"
     expect: *empty_sum
 
+  - name: "Parallel unique inserts and cold aggregate snapshots finish without a stripe cycle"
+    setup:
+      - sql: DROP TABLE IF EXISTS snapshot_unique_source
+      - sql: CREATE TABLE snapshot_unique_source(id INT PRIMARY KEY,writer INT) ENGINE=memory
+    scm: |
+      (begin
+        (define execute (lambda (s sql) (begin
+          (define out (newsession))
+          (with_autocommit s nil nil sql (lambda (tx)
+            (sql_execute_formula s tx (sql_queryplan_compile_formula
+              tx (parse_sql "memcp-tests" sql nil s tx))
+              (lambda (row) (out "row" row)) (lambda fields true))))
+          (out "row"))))
+        (define results (parallelN 8 (lambda (writer) (begin
+          (define s (newsession))
+          (execute s (concat "INSERT INTO snapshot_unique_source VALUES (" (* writer 3) "," writer "),(" (+ (* writer 3) 1) "," writer "),(" (+ (* writer 3) 2) "," writer ")"))
+          (define own (execute s (concat "SELECT MIN(id) AS first,MAX(id) AS last,COUNT(*) AS n FROM snapshot_unique_source WHERE writer=" writer)))
+          (and (equal? (own "n") 3) (equal? (- (own "last") (own "first")) 2))))))
+        (and (reduce results (lambda (valid result) (and valid result)) true)
+          (equal? ((execute (newsession) "SELECT COUNT(*) AS n FROM snapshot_unique_source") "n") 24)))
+    expect: {result: true}
+    cleanup:
+      - sql: DROP TABLE IF EXISTS snapshot_unique_source
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS `.creation_barrier`"
   - sql: "DROP TABLE IF EXISTS `.transactionless_cache_init`"

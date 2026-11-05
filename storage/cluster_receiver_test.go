@@ -47,7 +47,7 @@ func TestClusterReceiverReservationDoesNotWaitForCallback(t *testing.T) {
 func TestUniqueChannelCancellationJoinsActiveCommandBeforeUnlock(t *testing.T) {
 	tbl := setupScanParallelTestTable(t, "t_unique_channel_cancel")
 	tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}}
-	guard := tbl.guardUniqueWrites([]string{"id"}, [][]scm.Scmer{{scm.NewInt(7)}}, false, 0)
+	guard := tbl.guardUniqueWrites([]string{"id"}, [][]scm.Scmer{{scm.NewInt(7)}}, false, 0, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	ready := make(chan *clusterReceiver, 1)
@@ -92,7 +92,7 @@ func TestUniqueChannelCancellationJoinsActiveCommandBeforeUnlock(t *testing.T) {
 	if err := <-called; !errors.Is(err, context.Canceled) {
 		t.Fatalf("command cancellation: %v", err)
 	}
-	reacquired := tbl.guardUniqueWrites([]string{"id"}, [][]scm.Scmer{{scm.NewInt(7)}}, false, 0)
+	reacquired := tbl.guardUniqueWrites([]string{"id"}, [][]scm.Scmer{{scm.NewInt(7)}}, false, 0, nil)
 	reacquired.lock()
 	reacquired.unlock()
 }
@@ -100,7 +100,7 @@ func TestUniqueChannelCancellationJoinsActiveCommandBeforeUnlock(t *testing.T) {
 func TestUniqueChannelCommandPanicReleasesReservation(t *testing.T) {
 	tbl := setupScanParallelTestTable(t, "t_unique_channel_panic")
 	tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}}
-	guard := tbl.guardUniqueWrites([]string{"id"}, [][]scm.Scmer{{scm.NewInt(7)}}, false, 0)
+	guard := tbl.guardUniqueWrites([]string{"id"}, [][]scm.Scmer{{scm.NewInt(7)}}, false, 0, nil)
 	ready := make(chan *clusterReceiver, 1)
 	receiver := newClusterReceiver(1, func(_ context.Context, value scm.Scmer) (scm.Scmer, error) {
 		ready <- value.Any().(*clusterReceiver)
