@@ -965,8 +965,12 @@ func TestClusterSchemaLocationCannotPromoteRevokedSelf(t *testing.T) {
 }
 
 func TestClusterSchemaLocationKeepsAcceptedOwnerAfterStaleSelfHint(t *testing.T) {
-	for _, hintEpoch := range []uint64{7, 8} {
-		t.Run(fmt.Sprint(hintEpoch), func(t *testing.T) {
+	for _, fixture := range []struct {
+		epoch   uint64
+		handoff bool
+	}{{7, false}, {8, false}, {7, true}, {8, true}} {
+		hintEpoch := fixture.epoch
+		t.Run(fmt.Sprint(hintEpoch, "/handoff=", fixture.handoff), func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 			defer cancel()
 			service := &nodeScanService{}
@@ -986,6 +990,9 @@ func TestClusterSchemaLocationKeepsAcceptedOwnerAfterStaleSelfHint(t *testing.T)
 			cell.ownstate.Initialize(mosi.IO)
 			cluster.manager.updateRecord(resource, func(record *replicaRecord) bool {
 				record.Owner, record.Epoch = "actual-owner", 8
+				if fixture.handoff {
+					record.Owner, record.Handoff = "local", "actual-owner"
+				}
 				return true
 			})
 			finished := make(chan error, 1)
@@ -1014,7 +1021,11 @@ func TestClusterSchemaLocationKeepsAcceptedOwnerAfterStaleSelfHint(t *testing.T)
 			if err := <-finished; err != nil {
 				t.Fatal(err)
 			}
-			if cell.ownstate.Phase() != mosi.IO || cluster.report(resource).Owner != "actual-owner" {
+			expectedOwner := "actual-owner"
+			if fixture.handoff {
+				expectedOwner = "local"
+			}
+			if cell.ownstate.Phase() != mosi.IO || cluster.report(resource).Owner != expectedOwner {
 				t.Fatal("stale hint changed native permission or accepted route")
 			}
 		})

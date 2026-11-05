@@ -215,6 +215,9 @@ func (cluster *nodeCluster) locateViaSchema(ctx context.Context, resource mosiRe
 	if record.State == "M" || record.State == "O" {
 		return cluster.self.ID, nil
 	}
+	if record.Handoff != "" {
+		return record.Handoff, nil
+	}
 	if record.Owner == cluster.self.ID {
 		cell := cluster.manager.resourceCell(record.Resource)
 		if cell.ownstate.Phase() == mosi.IO {
