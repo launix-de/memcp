@@ -1317,7 +1317,7 @@ func TestJITExpressionConsTailOfSingleElementList(t *testing.T) {
 			_ 'not-a-list))`
 	expression := Optimize(Read(t.Name(), source, true), &Globalenv, nil)
 	interpreted := Eval(expression, &Globalenv)
-	proc := *interpreted.Proc()
+	proc := interpreted.Proc().Snapshot()
 	proc.NumVars = 5
 	proc.NumberedOnly = false
 	compiled := jitCompile(NewProcStruct(proc))
@@ -2017,7 +2017,7 @@ func TestJITReadOnlyParametersKeepBorrowedFrame(t *testing.T) {
 		t.Skip("requires GOEXPERIMENT=jit")
 	}
 	proc := Eval(Optimize(Read(t.Name(), `(lambda (value) value)`, true), &Globalenv, nil), &Globalenv)
-	private := *proc.Proc()
+	private := proc.Proc().Snapshot()
 	// One additional invocation local requires the existing owned-frame path.
 	private.NumVars++
 	borrowed := jitCompile(proc)

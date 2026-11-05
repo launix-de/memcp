@@ -1333,7 +1333,7 @@ func buildProcSpecialization(proc *Proc, key procSpecializationKey, paramTypes [
 	if !ok || len(parts) < 3 || !scmerIsSymbol(parts[0], "lambda") {
 		return NewNil(), nestedUsed, rootMutationUsed
 	}
-	specialized := proc.snapshot()
+	specialized := proc.Snapshot()
 	specialized.Params = parts[1]
 	specialized.Body = parts[2]
 	if len(parts) > 3 {

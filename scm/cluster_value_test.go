@@ -401,6 +401,29 @@ func TestClusterValueOptimizedNumberedLocals(t *testing.T) {
 	}
 }
 
+func TestClusterValueDistinctNumberedOuterBindings(t *testing.T) {
+	sender, _, _ := valuePeerPair(t)
+	outer := func(index int) Scmer {
+		return NewSlice([]Scmer{NewSymbol("outer"), NewInt(1), NewNthLocalVar(NthLocalVar(index))})
+	}
+	original := NewProcStruct(Proc{Params: NewSlice(nil),
+		Body: NewSlice([]Scmer{NewSymbol("+"), outer(0), outer(1)}),
+		En:   &Env{VarsNumbered: []Scmer{NewInt(7), NewInt(9)}, Outer: &Globalenv}})
+	ctx := (&SerializationContext{}).WithPeer(sender)
+	wire, err := MarshalProcedure(original, ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := UnmarshalProcedure(wire)
+	ctx.Queued()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := Apply(decoded); got.Int() != 16 {
+		t.Fatal("distinct numbered captures were merged", got, string(wire))
+	}
+}
+
 func TestClusterValueNestedLambdaBindingProof(t *testing.T) {
 	sender, _, _ := valuePeerPair(t)
 	nested := prepareLambdaBindings([]Scmer{NewSymbol("lambda"), NewSlice([]Scmer{NewSymbol("y")}), NewNthLocalVar(0), NewInt(1)})
@@ -668,4 +691,97 @@ func TestClusterValueContainerSnapshotsDoNotReuseLaterBuilderState(t *testing.T)
 	second.Queued()
 	runtime.KeepAlive(frozen)
 	runtime.KeepAlive(latest)
+}
+
+func TestClusterValueDistinctRebindingsShareOnePublication(t *testing.T) {
+	sender, _, _ := valuePeerPair(t)
+	old := Eval(Read(t.Name(), `(lambda (x) (+ x captured))`, false), &Env{Vars: Vars{Symbol("captured"): NewInt(1)}, Outer: &Globalenv})
+	left, right := LambdaRebind(old, NewInt(7)), LambdaRebind(old, NewInt(9))
+	ctx := (&SerializationContext{}).WithPeer(sender)
+	a, err := MarshalProcedure(left, ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := MarshalProcedure(right, ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := UnmarshalProcedure(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := UnmarshalProcedure(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx.Queued()
+	if Apply(first, NewInt(4)).Int() != 11 || Apply(second, NewInt(4)).Int() != 13 {
+		t.Fatal("publication mixed private bindings")
+	}
+}
+
+func TestClusterValueCopiedClosuresKeepPrivateBindings(t *testing.T) {
+	sender, _, _ := valuePeerPair(t)
+	original := Eval(Read(t.Name(), `(lambda (x) (+ x captured))`, false), &Env{Vars: Vars{Symbol("captured"): NewInt(1)}, Outer: &Globalenv})
+	ctx := (&SerializationContext{}).WithPeer(sender)
+	if _, err := MarshalProcedure(original, ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, capture := range []int64{7, 9} {
+		copy := original.Proc().Snapshot()
+		copy.En = &Env{Vars: Vars{Symbol("captured"): NewInt(capture)}, Outer: &Globalenv}
+		wire, err := MarshalProcedure(NewProcStruct(copy), ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		decoded, err := UnmarshalProcedure(wire)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := Apply(decoded, NewInt(4)); got.Int() != capture+4 {
+			t.Fatal("copied procedure reused another closure's context", capture, got)
+		}
+	}
+	ctx.Queued()
+}
+
+type creationFrameMarker struct{ payload [32]byte }
+
+//go:noinline
+func prepareWithoutRetainingCreationFrame(t *testing.T, sender *SerializationPeer, done chan struct{}) (*SerializationContext, []byte) {
+	marker := new(creationFrameMarker)
+	runtime.AddCleanup(marker, func(signal chan struct{}) { close(signal) }, done)
+	original := Eval(Read(t.Name(), `(lambda (x) (+ x captured))`, false), &Env{Vars: Vars{Symbol("captured"): NewInt(9), Symbol("unused"): NewAny(marker)}, Outer: &Globalenv})
+	ctx := (&SerializationContext{}).WithPeer(sender)
+	wire, err := MarshalProcedure(original, ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ctx, wire
+}
+func TestClusterValuePublicationDoesNotRetainCreationFrame(t *testing.T) {
+	sender, _, _ := valuePeerPair(t)
+	done := make(chan struct{})
+	ctx, wire := prepareWithoutRetainingCreationFrame(t, sender, done)
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		runtime.GC()
+		select {
+		case <-done:
+			value, err := UnmarshalProcedure(wire)
+			ctx.Queued()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if Apply(value, NewInt(7)).Int() != 16 {
+				t.Fatal("capture expired with unused frame")
+			}
+			return
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("publication retained the unused creation frame")
+		}
+		time.Sleep(time.Millisecond)
+	}
 }

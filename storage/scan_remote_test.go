@@ -1667,6 +1667,41 @@ func TestRemoteValuePreservesEveryStringByte(t *testing.T) {
 	}
 }
 
+// Deliver test code through the real FIFO before decoding it. Returning Marshal
+// bytes directly to the other service bypasses proactive declaration delivery.
+func unmarshalTestProcedureDelivery(t *testing.T, sender, receiver *mosiPeer, wire []byte, bindings *scm.SerializationContext, decode scm.ProcedureDecode) scm.Scmer {
+	t.Helper()
+	type outcome struct {
+		value scm.Scmer
+		err   error
+	}
+	result := make(chan outcome, 1)
+	channel := "test.decode/" + uuid.NewString()
+	unregister := receiver.registerChannel(channel, workerChannel(func(_ *mosiPeer, payload []byte) error {
+		value, err := scm.UnmarshalProcedure(payload, decode)
+		result <- outcome{value, err}
+		return nil
+	}))
+	defer unregister()
+	offers := serializedReferences(schemeValue(wire))
+	sender.scanService.commitObjectOffers(sender, offers)
+	if err := sender.send(context.Background(), mosiMessage{Channel: channel, Payload: wire}); err != nil {
+		sender.scanService.cancelObjectOffers(sender, offers)
+		t.Fatal(err)
+	}
+	bindings.Queued()
+	select {
+	case got := <-result:
+		if got.err != nil {
+			t.Fatal(got.err)
+		}
+		return got.value
+	case <-time.After(time.Second):
+		t.Fatal("procedure delivery did not complete")
+		return scm.NewNil()
+	}
+}
+
 func TestClosureRelayUsesPeerRelativeOneShotSlots(t *testing.T) {
 	_, _, ownerURL := setupRemoteScanConnection(t)
 	owner := nodeScans.Load()
@@ -1702,22 +1737,20 @@ func TestClosureRelayUsesPeerRelativeOneShotSlots(t *testing.T) {
 	fn := scm.NewClusterCallback(ctx, func(args ...scm.Scmer) scm.Scmer { return scm.NewInt(args[0].Int() + 7) }, nil)
 	env := &scm.Env{Vars: scm.Vars{scm.Symbol("host_fn"): fn}, Outer: &scm.Globalenv}
 	proc := scm.Eval(scm.Read(t.Name(), `(lambda (value) (host_fn value))`, false), env)
-	wire, err := scm.MarshalProcedure(proc, owner.handleBindings(&scm.SerializationContext{Invocation: scm.NewAny(ownerTx)}, objectOwnerPeer(t, owner, relay)))
+	ownerPeer := objectOwnerPeer(t, owner, relay)
+	ownerBindings := owner.handleBindings(&scm.SerializationContext{Invocation: scm.NewAny(ownerTx)}, ownerPeer)
+	wire, err := scm.MarshalProcedure(proc, ownerBindings)
 	if err != nil {
 		t.Fatal(err)
 	}
-	imported, err := scm.UnmarshalProcedure(wire, scm.ProcedureDecode{ResolveHandle: relay.handleResolver(ctx, toOwner, scm.NewAny(relayTx))})
+	imported := unmarshalTestProcedureDelivery(t, ownerPeer, toOwner, wire, ownerBindings, scm.ProcedureDecode{ResolveHandle: relay.handleResolver(ctx, toOwner, scm.NewAny(relayTx))})
+	relayPeer := objectOwnerPeer(t, relay, consumer)
+	relayBindings := relay.handleBindings(&scm.SerializationContext{Invocation: scm.NewAny(relayTx)}, relayPeer)
+	wire, err = scm.MarshalProcedure(imported, relayBindings)
 	if err != nil {
 		t.Fatal(err)
 	}
-	wire, err = scm.MarshalProcedure(imported, relay.handleBindings(&scm.SerializationContext{Invocation: scm.NewAny(relayTx)}, objectOwnerPeer(t, relay, consumer)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	remote, err := scm.UnmarshalProcedure(wire, scm.ProcedureDecode{ResolveHandle: consumer.handleResolver(ctx, toRelay, scm.NewAny(consumerTx))})
-	if err != nil {
-		t.Fatal(err)
-	}
+	remote := unmarshalTestProcedureDelivery(t, relayPeer, toRelay, wire, relayBindings, scm.ProcedureDecode{ResolveHandle: consumer.handleResolver(ctx, toRelay, scm.NewAny(consumerTx))})
 	for i := int64(0); i < 128; i++ {
 		if got := scm.Apply(remote, scm.NewInt(i)); got.Int() != i+7 {
 			t.Fatal("relay changed function result", i, got)

@@ -42,7 +42,8 @@ type schemeTextWriter struct {
 	references    map[ClusterObject]Scmer
 	literals      map[Scmer]int64 // envelope-local constructor IDs; same capture namespace as objects
 	hash          uint64
-	cacheCaptures bool // immutable closure bindings, never one-use result buffers
+	cacheCaptures bool                      // immutable closure bindings, never one-use result buffers
+	procedures    map[*lambdaMetadata]int64 // no borrowed Proc headers in heap maps
 }
 
 func bufferTextWriter(buffer *bytes.Buffer) *schemeTextWriter {
@@ -125,7 +126,7 @@ func String(v Scmer) string {
 		// Pretty-print procedures as (lambda ...) expressions without
 		// serializing the captured environment to avoid recursion.
 		var b bytes.Buffer
-		serializeProcShallow(bufferTextWriter(&b), v.Proc().snapshot(), &Globalenv)
+		serializeProcShallow(bufferTextWriter(&b), v.Proc().Snapshot(), &Globalenv)
 		return b.String()
 	case tagJIT:
 		var b bytes.Buffer
@@ -217,7 +218,7 @@ func WriteStringValue(w *schemeTextWriter, v Scmer) {
 	case tagFunc:
 		w.WriteString("[native func]")
 	case tagProc:
-		serializeProcShallow(w, v.Proc().snapshot(), &Globalenv)
+		serializeProcShallow(w, v.Proc().Snapshot(), &Globalenv)
 	case tagJIT:
 		serializeProcShallow(w, v.JIT().Proc, &Globalenv)
 	case tagFastDict:
@@ -312,20 +313,21 @@ func serializeEx(b *schemeTextWriter, v Scmer, en *Env, glob *Env, p *Proc) {
 		return
 	}
 	if b.objects != nil && b.objects.Peer != nil && lambdaProcedure(v) != nil {
-		if id := b.literals[v]; id != 0 {
+		identity := lambdaProcedure(v).serializationMetadata()
+		if id := b.procedures[identity]; id != 0 {
 			serializeEx(b, NewSlice([]Scmer{NewSymbol("serialized_value"), NewInt(id), NewNil()}), glob, glob, nil)
 			return
 		}
 		if expression, ok, err := b.objects.cachedValue(v); err != nil {
 			panic(err)
 		} else if ok {
-			if b.literals == nil {
-				b.literals = make(map[Scmer]int64)
+			if b.procedures == nil {
+				b.procedures = make(map[*lambdaMetadata]int64)
 			}
-			id := b.literals[v]
+			id := b.procedures[identity]
 			if id == 0 {
-				id = int64(len(b.literals) + len(b.references) + 1)
-				b.literals[v] = id
+				id = int64(len(b.literals) + len(b.references) + len(b.procedures) + 1)
+				b.procedures[identity] = id
 			}
 			previous := b.cacheCaptures
 			b.cacheCaptures = true
@@ -369,7 +371,7 @@ func serializeEx(b *schemeTextWriter, v Scmer, en *Env, glob *Env, p *Proc) {
 				// this capture once before compiling any row callback, even for an
 				// empty shard. The envelope-local ID also preserves capture aliases.
 				if b.objects != nil {
-					expression = NewSlice([]Scmer{NewSymbol("serialized_value"), NewInt(int64(len(b.references) + len(b.literals) + 1)), expression})
+					expression = NewSlice([]Scmer{NewSymbol("serialized_value"), NewInt(int64(len(b.references) + len(b.literals) + len(b.procedures) + 1)), expression})
 				}
 				b.references[object] = expression
 			}
@@ -545,7 +547,7 @@ func serializeEx(b *schemeTextWriter, v Scmer, en *Env, glob *Env, p *Proc) {
 		if b.objects != nil {
 			v = CloseProcedure(v)
 		}
-		serializeProcShallow(b, v.Proc().snapshot(), glob)
+		serializeProcShallow(b, v.Proc().Snapshot(), glob)
 	case tagFastDict:
 		if b.cacheCaptures && b.objects != nil && b.objects.Peer != nil {
 			if expression, ok, err := b.objects.cachedValue(v); err != nil {
@@ -562,7 +564,7 @@ func serializeEx(b *schemeTextWriter, v Scmer, en *Env, glob *Env, p *Proc) {
 			}
 			id, exists := b.literals[v]
 			if !exists {
-				id = int64(len(b.references) + len(b.literals) + 1)
+				id = int64(len(b.references) + len(b.literals) + len(b.procedures) + 1)
 				b.literals[v] = id
 			}
 			b.WriteString("(serialized_value ")
@@ -704,7 +706,7 @@ func serializeNativeFunc(b *schemeTextWriter, fn any, en *Env) {
 	case func(...Scmer) Scmer:
 		if proc := JITProcForFunction(f); proc != nil {
 			closed := CloseProcedure(Scmer{(*byte)(unsafe.Pointer(proc)), makeAux(tagProc, 0)})
-			serializeProcShallow(b, closed.Proc().snapshot(), &Globalenv)
+			serializeProcShallow(b, closed.Proc().Snapshot(), &Globalenv)
 			return
 		}
 		if col, rev, ok := LookupCollate(f); ok {

@@ -63,6 +63,7 @@ type lambdaMetadata struct {
 	plan     atomic.Pointer[lambdaPlan]
 	owner    *Proc
 	template *lambdaTemplate
+	shared   bool
 }
 type lambdaTemplate struct {
 	parameters  []Symbol
@@ -82,6 +83,32 @@ func (proc *Proc) lambdaMetadata() *lambdaMetadata {
 	}
 	return (*lambdaMetadata)(atomic.LoadPointer(pointer))
 }
+
+// Metadata is heap-owned even when the callable header is borrowed from a JIT
+// frame. Publication snapshots must never retain that stack header or its Env.
+func (proc *Proc) serializationMetadata() *lambdaMetadata {
+	for {
+		old := proc.lambdaMetadata()
+		if !old.shared {
+			return old
+		}
+		owned := &lambdaMetadata{owner: old.owner, template: old.template}
+		owned.plan.Store(old.plan.Load())
+		if atomic.CompareAndSwapPointer((*unsafe.Pointer)(unsafe.Pointer(&proc.lambdaMeta)), unsafe.Pointer(old), unsafe.Pointer(owned)) {
+			return owned
+		}
+	}
+}
+func (proc *Proc) copyLambdaMetadata() *lambdaMetadata {
+	old := (*lambdaMetadata)(atomic.LoadPointer((*unsafe.Pointer)(unsafe.Pointer(&proc.lambdaMeta))))
+	if old == nil {
+		return nil
+	}
+	owned := &lambdaMetadata{owner: old.owner, template: old.template}
+	owned.plan.Store(old.plan.Load())
+	return owned
+}
+
 func procedureLambdaPlan(proc *Proc) *lambdaPlan {
 	state := proc.lambdaMetadata()
 	body, params := proc.Body.WithoutSourceInfo(), proc.Params.WithoutSourceInfo()
@@ -210,7 +237,7 @@ func buildLambdaPlan(proc *Proc) *lambdaPlan {
 			return expression
 		}
 		for i, previous := range plan.bindings {
-			if previous.inline < 0 && !previous.literal && Equal(previous.expression, expression) {
+			if previous.inline < 0 && !previous.literal && astStructuralEqual(previous.expression, expression) {
 				return params[i]
 			}
 		}
@@ -313,7 +340,7 @@ func compileLambdaTemplate(expression Scmer) Scmer {
 	if !value.IsProc() {
 		panic("lambda template must contain a lambda")
 	}
-	original := value.Proc().snapshot()
+	original := value.Proc().Snapshot()
 	if jitEnabled && !jitExpressionConsumesRuntimeEnv(original.Body) {
 		base := original.NumVars
 		if original.Params.IsSlice() && len(original.Params.Slice()) > base {
@@ -355,7 +382,7 @@ func compileLambdaTemplate(expression Scmer) Scmer {
 		value = CompileJIT(value, true)
 	}
 	p := value.Proc()
-	template.bound = &lambdaMetadata{owner: p}
+	template.bound = &lambdaMetadata{owner: p, shared: true}
 	p.lambdaMeta = &lambdaMetadata{template: template}
 	return value
 }
@@ -387,7 +414,7 @@ func LambdaRebind(old Scmer, context ...Scmer) Scmer {
 	if p.nativeCode() != 0 {
 		bound = jitAllocateProcContext(p, count)
 	} else {
-		copy := p.snapshot()
+		copy := p.Snapshot()
 		bound = &copy
 	}
 	if !template.environment {

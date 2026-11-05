@@ -368,7 +368,7 @@ func (proc *Proc) jitFunction() func(...Scmer) Scmer {
 func jitAllocateProcContext(proc *Proc, captureCount int) *Proc {
 	typ := jitProcContextAllocation(captureCount)
 	bound := (*Proc)(jitRuntimeAllocTyped(typ))
-	*bound = proc.snapshot()
+	*bound = proc.Snapshot()
 	return bound
 }
 
@@ -377,7 +377,8 @@ func jitAllocateProcContext(proc *Proc, captureCount int) *Proc {
 // white. Raw JIT stores would hide those edges from concurrent marking.
 func jitBindProcContext(prepared unsafe.Pointer, template *Proc, captures *Scmer, count int, bindSelf bool) *Proc {
 	bound := (*Proc)(jitRuntimeAllocTyped(prepared))
-	*bound = template.snapshot()
+	*bound = template.Snapshot()
+	bound.lambdaMeta = template.copyLambdaMetadata()
 	target := unsafe.Slice((*Scmer)(unsafe.Add(unsafe.Pointer(bound), unsafe.Offsetof(ProcJIT{}.Context))), count)
 	copyCount := count
 	if bindSelf && copyCount != 0 {
@@ -3129,6 +3130,7 @@ func jitRebindProcCapture(proc *Proc, env *Env, key, previous Scmer, hasPrevious
 	sourceCaptures := jitProcCaptures(proc)
 	boundProc := jitAllocateProcContext(proc, len(sourceCaptures))
 	boundProc.En = env
+	boundProc.lambdaMeta = proc.copyLambdaMetadata()
 	boundCaptures := jitProcCaptures(boundProc)
 	copy(boundCaptures, sourceCaptures)
 	if index >= 0 {
@@ -3475,7 +3477,7 @@ func jitOptimizerProcReturnSpecial(args ...Scmer) Scmer {
 	if !ok {
 		panic("optimizer_proc_return received invalid return metadata")
 	}
-	proc := value.Proc().snapshot()
+	proc := value.Proc().Snapshot()
 	proc.OptimizerMeta = &ProcOptimizerMeta{Return: metadata.Return, HasReturn: metadata.HasReturn, Sequence: metadata.Sequence}
 	return NewProcStruct(proc)
 }
@@ -7143,7 +7145,7 @@ func jitCompileModePublish(recursiveLambdas bool, waitForPublication, install bo
 					fmt.Printf("%X\n", code)
 				}
 				maybeDumpJITCode(ptr, code)
-				sourceProc := proc.snapshot()
+				sourceProc := proc.Snapshot()
 				sourceProc.JITCode = 0
 				sourceProc.Compiled = nil
 				sourceProc.jitCompiling = 0

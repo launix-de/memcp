@@ -8,7 +8,6 @@ import "fmt"
 import "sync"
 import "weak"
 import "bytes"
-import "unsafe"
 import "runtime"
 import "strings"
 import "sync/atomic"
@@ -87,14 +86,14 @@ type serializationPublication struct {
 	cleanup  runtime.Cleanup
 }
 type publicationLifetime struct {
-	contexts map[Scmer]*lambdaContextSnapshot
+	contexts map[*lambdaMetadata]*lambdaContextSnapshot
 	mu       sync.Mutex
 	closed   bool
 	values   map[*exportedClusterValue]struct{}
 }
 
 func newSerializationPublication() *serializationPublication {
-	p := &serializationPublication{lifetime: &publicationLifetime{values: make(map[*exportedClusterValue]struct{}), contexts: make(map[Scmer]*lambdaContextSnapshot)}}
+	p := &serializationPublication{lifetime: &publicationLifetime{values: make(map[*exportedClusterValue]struct{}), contexts: make(map[*lambdaMetadata]*lambdaContextSnapshot)}}
 	p.cleanup = runtime.AddCleanup(p, (*publicationLifetime).close, p.lifetime)
 	return p
 }
@@ -489,7 +488,7 @@ func (ctx *SerializationContext) lambdaContext(proc *Proc) *lambdaContextSnapsho
 		}
 		ctx.mu.Unlock()
 	}
-	key := Scmer{(*byte)(unsafe.Pointer(proc)), makeAux(tagProc, 0)}
+	key := proc.serializationMetadata()
 	state := ctx.publication.lifetime
 	state.mu.Lock()
 	if state.closed {

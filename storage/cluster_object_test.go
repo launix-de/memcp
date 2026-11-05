@@ -178,8 +178,9 @@ func TestClusterCallbackRejectsCallsAfterExportingQueryEnds(t *testing.T) {
 	}, nil)
 	env := &scm.Env{Vars: scm.Vars{scm.Symbol("output"): callback}, Outer: &scm.Globalenv}
 	proc := scm.Eval(scm.Read(t.Name(), `(lambda () (output))`, true), env)
-	bindings := (&scm.SerializationContext{Invocation: scm.NewAny(tx)}).WithExport(func(object scm.ClusterObject, view scm.Scmer) (scm.ClusterReference, error) {
-		return owner.exportObject(source, object, view, nil)
+	var bindings *scm.SerializationContext
+	bindings = (&scm.SerializationContext{Invocation: scm.NewAny(tx)}).WithExport(func(object scm.ClusterObject, view scm.Scmer) (scm.ClusterReference, error) {
+		return owner.exportObject(source, object, view, bindings)
 	})
 	bindings = owner.handleBindings(bindings, source)
 	data, err := scm.MarshalProcedure(proc, bindings)
@@ -188,12 +189,9 @@ func TestClusterCallbackRejectsCallsAfterExportingQueryEnds(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	remote, err := scm.UnmarshalProcedure(data, scm.ProcedureDecode{ResolveHandle: client.handleResolver(ctx, peer, scm.NewNil()), Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) {
+	remote := unmarshalTestProcedureDelivery(t, source, peer, data, bindings, scm.ProcedureDecode{ResolveHandle: client.handleResolver(ctx, peer, scm.NewNil()), Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) {
 		return client.importObject(context.Background(), peer, ref)
 	}})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if !scm.Apply(remote).Bool() || calls.Load() != 1 {
 		t.Fatal("live callback did not execute")
 	}
@@ -226,19 +224,18 @@ func TestClusterObjectSerializedSessionUsesOwnerEndpoint(t *testing.T) {
 	session.Func()(scm.NewString("x"), scm.NewInt(17))
 	environment := &scm.Env{Vars: scm.Vars{scm.Symbol("session"): session}, Outer: &scm.Globalenv}
 	proc := scm.Eval(scm.Read(t.Name(), `(lambda () (session "x"))`, true), environment)
-	bindings := (&scm.SerializationContext{}).WithExport(func(object scm.ClusterObject, view scm.Scmer) (scm.ClusterReference, error) {
-		return owner.exportObject(source, object, view, nil)
+	var bindings *scm.SerializationContext
+	bindings = (&scm.SerializationContext{}).WithExport(func(object scm.ClusterObject, view scm.Scmer) (scm.ClusterReference, error) {
+		return owner.exportObject(source, object, view, bindings)
 	})
+	bindings = bindings.WithPeer(source.valuePeer())
 	data, err := scm.MarshalProcedure(proc, bindings)
 	if err != nil {
 		t.Fatal(err)
 	}
-	restored, err := scm.UnmarshalProcedure(data, scm.ProcedureDecode{Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) {
+	restored := unmarshalTestProcedureDelivery(t, source, peer, data, bindings, scm.ProcedureDecode{Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) {
 		return client.importObject(context.Background(), peer, ref)
 	}})
-	if err != nil {
-		t.Fatal(err)
-	}
 	session.Func()(scm.NewString("x"), scm.NewInt(91))
 	if result := scm.Apply(restored); result.Int() != 17 {
 		t.Fatal("prepared session view changed during statement", result)
@@ -857,21 +854,20 @@ func TestClusterObjectWireUsesMandatorySerializer(t *testing.T) {
 
 //go:noinline
 func importNeverCalledSubscan(t *testing.T, owner, client *nodeScanService, source, peer *mosiPeer, session scm.Scmer) scm.Scmer {
-	bindings := (&scm.SerializationContext{}).WithExport(func(object scm.ClusterObject, view scm.Scmer) (scm.ClusterReference, error) {
-		return owner.exportObject(source, object, view, nil)
+	var bindings *scm.SerializationContext
+	bindings = (&scm.SerializationContext{}).WithExport(func(object scm.ClusterObject, view scm.Scmer) (scm.ClusterReference, error) {
+		return owner.exportObject(source, object, view, bindings)
 	})
 	body := scm.NewSlice([]scm.Scmer{scm.NewSymbol("if"), scm.NewSymbol("take"), session, scm.NewNil()})
 	proc := scm.Eval(scm.NewSlice([]scm.Scmer{scm.NewSymbol("lambda"), scm.NewSlice([]scm.Scmer{scm.NewSymbol("take")}), body}), &scm.Globalenv)
+	bindings = bindings.WithPeer(source.valuePeer())
 	data, err := scm.MarshalProcedure(proc, bindings)
 	if err != nil {
 		t.Fatal(err)
 	}
-	received, err := scm.UnmarshalProcedure(data, scm.ProcedureDecode{Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) {
+	received := unmarshalTestProcedureDelivery(t, source, peer, data, bindings, scm.ProcedureDecode{Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) {
 		return client.importObject(context.Background(), peer, ref)
 	}})
-	if err != nil {
-		t.Fatal(err)
-	}
 	return received
 }
 func TestClusterObjectDeduplicatesOverlappingEmptySubscansAndGC(t *testing.T) {

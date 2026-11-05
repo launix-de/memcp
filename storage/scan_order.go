@@ -742,7 +742,7 @@ func extendBoundariesWithSortCols(b analyzedBoundaries, sortcols []scm.Scmer, so
 		}
 		proc, ok := scol.Any().(scm.Proc)
 		if !ok && scol.IsProc() {
-			proc = *scol.Proc()
+			proc = scol.Proc().Snapshot()
 			ok = true
 		}
 		if !ok {
@@ -826,7 +826,7 @@ func extendScanAccessWithSortCols(access scanAccess, sortcols []scm.Scmer, sortd
 		}
 		proc, ok := sortcol.Any().(scm.Proc)
 		if !ok && sortcol.IsProc() {
-			proc, ok = *sortcol.Proc(), true
+			proc, ok = sortcol.Proc().Snapshot(), true
 		}
 		if !ok || !proc.Params.IsSlice() || len(proc.Params.Slice()) == 0 {
 			return access, false
@@ -916,7 +916,7 @@ func orderedScanIndexUsageWeight(bounds scanAccess, rows, kept int) float64 {
 func recSetBoundaryCallCount(conditionCols []string, condition scm.Scmer) int {
 	var p scm.Proc
 	if condition.IsProc() {
-		p = *condition.Proc()
+		p = condition.Proc().Snapshot()
 	} else if si, ok := condition.Any().(scm.Proc); ok {
 		p = si
 	} else {

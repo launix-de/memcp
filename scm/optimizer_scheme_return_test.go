@@ -218,7 +218,7 @@ func TestSchemeHelperReturnMetadataSurvivesReoptimizationAndProcCopies(t *testin
 
 func TestProcComputeSizeIncludesOptimizerMetadata(t *testing.T) {
 	plain := NewProcStruct(Proc{Params: NewSlice(nil), Body: NewNil()})
-	typed := *plain.Proc()
+	typed := plain.Proc().Snapshot()
 	typed.OptimizerMeta = &ProcOptimizerMeta{Return: TypeInfoFromTD(&TypeDescriptor{
 		Kind: "list",
 		Keys: map[string]*TypeDescriptor{"0": {Kind: "int"}},

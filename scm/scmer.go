@@ -378,7 +378,8 @@ func NewProc(p *Proc) Scmer {
 		return Scmer{nil, makeAux(tagProc, 0)}
 	}
 	ptr := new(Proc)
-	*ptr = p.snapshot()
+	*ptr = p.Snapshot()
+	ptr.lambdaMeta = p.copyLambdaMetadata()
 	return Scmer{(*byte)(unsafe.Pointer(ptr)), makeAux(tagProc, 0)}
 }
 
