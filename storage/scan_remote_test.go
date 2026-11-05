@@ -950,6 +950,49 @@ func TestRemoteScanNativeLookupKinds(t *testing.T) {
 	}
 }
 
+func TestRemoteAdmissionWhileLoadingColdExtent(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "t_admission_cold_extent", 4)
+	RebuildTable(tbl, true, false)
+	encoded, err := json.Marshal(tbl.ActiveShards()[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cold storageShard
+	if err := json.Unmarshal(encoded, &cold); err != nil {
+		t.Fatal(err)
+	}
+	cold.t = tbl
+	lease := cold.GetWrite(nil)
+	defer lease.Release()
+	tx := NewTxContext(TxCursorStability)
+	defer tx.Rollback()
+	start := make(chan struct{})
+	var workers sync.WaitGroup
+	workers.Add(2)
+	go func() {
+		defer workers.Done()
+		<-start
+		read := cold.GetRead(nil, false)
+		read.Release()
+	}()
+	go func() {
+		defer workers.Done()
+		<-start
+		for range 4096 {
+			result, err := cold.HandleClusterRequest(context.Background(), scm.ClusterRequest{Method: "scan", Payload: shardScanInvocation{operator: shardUniqueAdmit, tx: tx}})
+			if err != nil || !result.(scanResult).res.Bool() {
+				t.Error("cold loading interrupted native admission", result, err)
+				return
+			}
+		}
+	}()
+	close(start)
+	workers.Wait()
+	if cold.main_count != 4 || cold.plannerMainRows.Load() != 4 {
+		t.Fatal("cold load did not publish its durable extent")
+	}
+}
+
 func TestRemoteUniqueChannelRetainsGuardThroughUpdateAndFinish(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "t_remote_unique_channel", 4)
 	tbl.CreateColumn("label", "VARCHAR", []int{40}, []scm.Scmer{scm.NewString("collate"), scm.NewString("utf8mb4_general_ci")})

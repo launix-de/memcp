@@ -125,7 +125,7 @@ func (s *storageShard) HandleClusterRequest(ctx context.Context, r scm.ClusterRe
 		case shardScanInvocation:
 			// Advisory accounting follows the native generation, not a second
 			// wire snapshot. Each kernel owns its actual fixed input boundary.
-			inputCount := int64(s.main_count) + int64(s.plannerDeltaRows.Load())
+			inputCount := int64(s.plannerMainRows.Load()) + int64(s.plannerDeltaRows.Load())
 			// This is the sole native reduction entry. Preparation already owns
 			// the generation and TX scope; no second GetRead or decoder lives here.
 			if input.tx == nil {
