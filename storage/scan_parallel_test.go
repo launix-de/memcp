@@ -242,15 +242,17 @@ func TestUniqueBatchCoercingAndNullKeys(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			tbl := setupScanParallelTestTable(t, "tuniquebatchcoercion")
-			tbl.CreateColumn("value", "TEXT", nil, nil)
+			// Native ANY retains coercing Scheme equality. Declared SQL text
+			// keys use their text conversion and collation contract instead.
+			tbl.CreateColumn("value", "ANY", nil, nil)
 			tbl.Unique = []uniqueKey{{Id: "value", Cols: []string{"value"}, NullsNotDistinct: tc.nullsNotDistinct}}
 			cols := []string{"id", "value"}
 			rows := [][]scm.Scmer{{scm.NewInt(1), tc.first}, {scm.NewInt(2), tc.second}}
 			accepted, rejected := 0, 0
-			tbl.ProcessUniqueCollision(cols, rows, false, func(rows [][]scm.Scmer, _ func() bool) {
-				tbl.ActiveShards()[0].Insert(cols, rows, false, nil, nil, false, nil)
+			tbl.ProcessUniqueCollision(cols, rows, false, func(rows [][]scm.Scmer, _ *uniqueWriteGuard) {
+				tbl.ActiveShards()[0].Insert(cols, rows, false, nil, nil, false, nil, nil)
 				accepted += len(rows)
-			}, nil, func(string, []scm.Scmer) { rejected++ }, 0, nil)
+			}, nil, func(string, []scm.Scmer) { rejected++ }, 0, nil, nil, nil)
 			if accepted != tc.want || rejected != 2-tc.want || tbl.CountExact() != uint(tc.want) {
 				t.Fatalf("accepted=%d rejected=%d visible=%d, want %d", accepted, rejected, tbl.CountExact(), tc.want)
 			}
@@ -279,7 +281,7 @@ func TestGeneratedUniqueKeySkipReleasesOuterLockOnPanic(t *testing.T) {
 			func() {
 				defer func() { caught = recover() }()
 				tbl.ProcessUniqueCollision([]string{"name"}, [][]scm.Scmer{{scm.NewString("new")}}, false,
-					func(_ [][]scm.Scmer, _ func() bool) { panic("insert callback failed") }, nil, nil, 0, nil)
+					func(_ [][]scm.Scmer, _ *uniqueWriteGuard) { panic("insert callback failed") }, nil, nil, 0, nil, nil, nil)
 			}()
 			if caught != "insert callback failed" {
 				t.Fatalf("expected callback panic, got %v", caught)
@@ -301,7 +303,7 @@ func TestMultipleUniqueKeysReleaseOuterLockOnCallbackPanic(t *testing.T) {
 		defer func() { caught = recover() }()
 		tbl.ProcessUniqueCollision([]string{"id", "name"},
 			[][]scm.Scmer{{scm.NewInt(1), scm.NewString("new")}}, false,
-			func(_ [][]scm.Scmer, _ func() bool) { panic("insert callback failed") }, nil, nil, 0, nil)
+			func(_ [][]scm.Scmer, _ *uniqueWriteGuard) { panic("insert callback failed") }, nil, nil, 0, nil, nil, nil)
 	}()
 	if caught != "insert callback failed" {
 		t.Fatalf("expected callback panic, got %v", caught)
@@ -327,8 +329,8 @@ func TestMultipleUniqueKeysReleaseOuterLockOnCollisionPanic(t *testing.T) {
 		defer func() { caught = recover() }()
 		tbl.ProcessUniqueCollision([]string{"id", "name"},
 			[][]scm.Scmer{{scm.NewInt(2), scm.NewString("taken")}}, false,
-			func(_ [][]scm.Scmer, _ func() bool) { t.Fatal("duplicate row reached success callback") }, nil,
-			func(string, []scm.Scmer) { panic("collision callback failed") }, 0, nil)
+			func(_ [][]scm.Scmer, _ *uniqueWriteGuard) { t.Fatal("duplicate row reached success callback") }, nil,
+			func(string, []scm.Scmer) { panic("collision callback failed") }, 0, nil, nil, nil)
 	}()
 	if caught != "collision callback failed" {
 		t.Fatalf("expected collision callback panic, got %v", caught)
@@ -981,8 +983,8 @@ func TestUniqueChecksWithMorePartitionDimensionsThanKeyColumns(t *testing.T) {
 	tbl.mu.Unlock()
 	accepted := 0
 	tbl.ProcessUniqueCollision([]string{"id", "name"}, [][]scm.Scmer{{scm.NewInt(15), scm.NewString("new")}}, false,
-		func(rows [][]scm.Scmer, _ func() bool) { accepted += len(rows) }, nil,
-		func(key string, _ []scm.Scmer) { t.Fatalf("unexpected collision on %s", key) }, 0, nil)
+		func(rows [][]scm.Scmer, _ *uniqueWriteGuard) { accepted += len(rows) }, nil,
+		func(key string, _ []scm.Scmer) { t.Fatalf("unexpected collision on %s", key) }, 0, nil, nil, nil)
 	if accepted != 1 {
 		t.Fatalf("accepted %d rows, want 1", accepted)
 	}
@@ -1013,8 +1015,8 @@ func TestUniqueChecksRejectCollisionsOutsideInsertPartition(t *testing.T) {
 		t.Run(tc.key, func(t *testing.T) {
 			collision := ""
 			tbl.ProcessUniqueCollision(columns, [][]scm.Scmer{tc.row}, false,
-				func(_ [][]scm.Scmer, _ func() bool) { t.Error("accepted a duplicate from another partition") }, nil,
-				func(key string, _ []scm.Scmer) { collision = key }, 0, nil)
+				func(_ [][]scm.Scmer, _ *uniqueWriteGuard) { t.Error("accepted a duplicate from another partition") }, nil,
+				func(key string, _ []scm.Scmer) { collision = key }, 0, nil, nil, nil)
 			if collision != tc.key {
 				t.Fatalf("collision = %q, want %q", collision, tc.key)
 			}
@@ -1238,15 +1240,12 @@ func TestReserveIDsPersistedPrefixRecovery(t *testing.T) {
 
 func assertUniqueWriteLocksReleased(t *testing.T, tbl *table) {
 	t.Helper()
-	locks := tbl.uniqueWrites.Load()
-	if locks == nil {
-		return
-	}
-	for i := range locks {
-		if !locks[i].TryLock() {
+	for i := range nodeUniqueWriteLocks().stripes {
+		stripe := &nodeUniqueWriteLocks().stripes[i]
+		if !stripe.TryLock() {
 			t.Fatalf("unique stripe %d retained after callback panic", i)
 		}
-		locks[i].Unlock()
+		stripe.Unlock()
 	}
 }
 
@@ -1419,10 +1418,10 @@ func TestUniqueReservationCommitConflictReleasesStagedKey(t *testing.T) {
 			}
 		}
 	}()
-	if !scm.ToBool(shard.UpdateFunction(0, false, false, first)(scm.NewSlice([]scm.Scmer{scm.NewString("id"), scm.NewInt(2)}))) {
+	if !scm.ToBool(shard.UpdateFunction(0, false, false, first, nil)(scm.NewSlice([]scm.Scmer{scm.NewString("id"), scm.NewInt(2)}))) {
 		t.Fatal("first replacement was not staged")
 	}
-	if !scm.ToBool(shard.UpdateFunction(0, false, false, second)(scm.NewSlice([]scm.Scmer{scm.NewString("id"), scm.NewInt(3)}))) {
+	if !scm.ToBool(shard.UpdateFunction(0, false, false, second, nil)(scm.NewSlice([]scm.Scmer{scm.NewString("id"), scm.NewInt(3)}))) {
 		t.Fatal("second replacement was not staged")
 	}
 	if err := first.Commit(); err != nil {
@@ -1454,7 +1453,7 @@ func TestUniqueReservationOwnKeyReplacementCycle(t *testing.T) {
 			tx.Rollback()
 		}
 	}()
-	if !scm.ToBool(shard.UpdateFunction(0, false, false, tx)(scm.NewSlice([]scm.Scmer{scm.NewString("id"), scm.NewInt(8)}))) {
+	if !scm.ToBool(shard.UpdateFunction(0, false, false, tx, nil)(scm.NewSlice([]scm.Scmer{scm.NewString("id"), scm.NewInt(8)}))) {
 		t.Fatal("first replacement was not staged")
 	}
 	access := exactScanAccess(newExactScanAccessSchema(cols), []scm.Scmer{scm.NewInt(8)})
@@ -1462,7 +1461,7 @@ func TestUniqueReservationOwnKeyReplacementCycle(t *testing.T) {
 	if !present {
 		t.Fatal("own replacement is not visible")
 	}
-	if !scm.ToBool(shard.UpdateFunction(recid, false, false, tx)(scm.NewSlice([]scm.Scmer{scm.NewString("id"), scm.NewInt(7)}))) {
+	if !scm.ToBool(shard.UpdateFunction(recid, false, false, tx, nil)(scm.NewSlice([]scm.Scmer{scm.NewString("id"), scm.NewInt(7)}))) {
 		t.Fatal("replacement did not reuse its own hidden old key")
 	}
 	if _, present := shard.GetRecordidForUnique(access, tx, false); present {

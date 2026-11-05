@@ -13,8 +13,8 @@ package storage
 import "fmt"
 import "time"
 import "context"
-import "testing"
 import "strings"
+import "testing"
 import "encoding/json"
 import "github.com/google/uuid"
 import "github.com/launix-de/memcp/scm"
@@ -170,6 +170,14 @@ func TestClusterRosterRequiresBoundIdentityAndRetainsSnapshot(t *testing.T) {
 	}
 	if cluster.view.Load() != before {
 		t.Fatal("rejected roster changed published view")
+	}
+	for _, version := range []int{18, scanWireVersion + 1} {
+		if err := cluster.remember(remote.ID, clusterHello{version, remote, []clusterMember{self}}); err == nil {
+			t.Fatalf("accepted incompatible wire version %d", version)
+		}
+		if cluster.view.Load() != before {
+			t.Fatal("incompatible peer changed published roster")
+		}
 	}
 	if err := cluster.remember(remote.ID, clusterHello{scanWireVersion, remote, []clusterMember{self}}); err != nil {
 		t.Fatal(err)
@@ -956,6 +964,74 @@ func TestClusterSchemaLocationCannotPromoteRevokedSelf(t *testing.T) {
 	}
 }
 
+func TestClusterSchemaLocationKeepsAcceptedOwnerAfterStaleSelfHint(t *testing.T) {
+	for _, fixture := range []struct {
+		epoch   uint64
+		handoff bool
+	}{{7, false}, {8, false}, {7, true}, {8, true}} {
+		hintEpoch := fixture.epoch
+		t.Run(fmt.Sprint(hintEpoch, "/handoff=", fixture.handoff), func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			service := &nodeScanService{}
+			cluster := &nodeCluster{self: clusterMember{ID: "local"}, service: service, ctx: ctx}
+			cluster.initializeManager()
+			service.cluster = cluster
+			peer := &mosiPeer{done: make(chan struct{}), outgoing: newMosiMailbox()}
+			cluster.view.Store(&clusterView{links: []*clusterLink{{member: clusterMember{ID: "schema-owner"}, peer: peer}}})
+			schemaResource := mosiResource{Database: "tenant"}
+			cluster.manager.resourceCell(schemaResource).ownstate.Initialize(mosi.S)
+			cluster.manager.updateRecord(schemaResource, func(record *replicaRecord) bool {
+				record.Owner, record.Epoch = "schema-owner", 1
+				return true
+			})
+			resource := mosiResource{Database: "tenant", Table: "items", Shard: uuid.NewString()}
+			cell := cluster.manager.resourceCell(resource)
+			cell.ownstate.Initialize(mosi.IO)
+			cluster.manager.updateRecord(resource, func(record *replicaRecord) bool {
+				record.Owner, record.Epoch = "actual-owner", 8
+				if fixture.handoff {
+					record.Owner, record.Handoff = "local", "actual-owner"
+				}
+				return true
+			})
+			finished := make(chan error, 1)
+			go func() {
+				owner, err := cluster.locateViaSchema(ctx, resource)
+				if err == nil && owner != "actual-owner" {
+					err = fmt.Errorf("returned rejected owner %s", owner)
+				}
+				finished <- err
+			}()
+			select {
+			case <-peer.outgoing.ready:
+				message := takeMosi(peer.outgoing)
+				var request struct{ Return, Method string }
+				if err := unmarshalNode(message.Data, &request); err != nil || request.Method != "cluster.location" {
+					t.Fatal("missing location request", request, err)
+				}
+				route, ok := service.handles.Load(controlReturnSlot(request.Return))
+				if !ok {
+					t.Fatal("location request omitted return handle")
+				}
+				deliverTestCompletion(t, route, scanCompletion{Data: mustNodeMetadata(replicaRecord{Resource: resource, Owner: "local", Epoch: hintEpoch})})
+			case <-ctx.Done():
+				t.Fatal("location request did not arrive")
+			}
+			if err := <-finished; err != nil {
+				t.Fatal(err)
+			}
+			expectedOwner := "actual-owner"
+			if fixture.handoff {
+				expectedOwner = "local"
+			}
+			if cell.ownstate.Phase() != mosi.IO || cluster.report(resource).Owner != expectedOwner {
+				t.Fatal("stale hint changed native permission or accepted route")
+			}
+		})
+	}
+}
+
 func TestClusterReportJoinsUUIDDirectoryPublication(t *testing.T) {
 	cluster := &nodeCluster{}
 	cluster.initializeManager()
@@ -1393,5 +1469,108 @@ func TestClusterGrantedReadDoesNotRediscoverMissingOwner(t *testing.T) {
 		}
 	case <-ctx.Done():
 		t.Fatal("granted read did not finish")
+	}
+}
+
+func TestClusterColdPlacementExcludesRefusedOwner(t *testing.T) {
+	links := []*clusterLink{
+		{member: clusterMember{ID: "refused"}},
+		{member: clusterMember{ID: "available-a"}},
+		{member: clusterMember{ID: "available-b"}},
+	}
+	cluster := &nodeCluster{}
+	cluster.view.Store(&clusterView{links: links})
+	executor := clusterScanExecutor{cluster: cluster, preferred: links[0], exclude: "refused"}
+	candidates := executor.candidates()
+	if len(candidates) != 2 {
+		t.Fatalf("capacity retry retained %d peers, want 2", len(candidates))
+	}
+	for _, candidate := range candidates {
+		if candidate == links[0] {
+			t.Fatal("capacity retry kept the owner which refused admission")
+		}
+	}
+}
+
+func TestClusterShardRecoveryRestoresCurrentContentFromOlderSchema(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "t_cluster_recover_current_content", 4)
+	RebuildTable(tbl, true, false)
+	checkpoint, err := json.Marshal(tbl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldID := tbl.ActiveShards()[0].uuid
+	tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(99), scm.NewString("new content")}}, nil, scm.NewNil(), false, nil)
+	RebuildTable(tbl, true, false)
+	content := tbl.ActiveShards()[0].uuid.String()
+	if content == oldID.String() {
+		t.Fatal("fixture did not publish a successor")
+	}
+	// Restart from an older schema checkpoint. Data-resource coherence already
+	// knows the newer durable content; the schema holder need not own that data.
+	var restored table
+	if err := json.Unmarshal(checkpoint, &restored); err != nil {
+		t.Fatal(err)
+	}
+	restored.schema = tbl.schema
+	for _, shard := range restored.Shards {
+		shard.t = &restored
+	}
+	restored.publishTopologyLocked()
+	tbl.schema.tables.Set(tbl.Name, &restored)
+	self, reader := "memcp://"+uuid.NewString(), "memcp://"+uuid.NewString()
+	service := &nodeScanService{}
+	peer := &mosiPeer{done: make(chan struct{}), outgoing: newMosiMailbox()}
+	cluster := &nodeCluster{self: clusterMember{ID: self}, service: service, ctx: context.Background()}
+	cluster.initializeManager()
+	service.cluster = cluster
+	cluster.view.Store(&clusterView{members: []clusterMember{cluster.self, {ID: reader}}, links: []*clusterLink{{member: clusterMember{ID: reader}, peer: peer}}})
+	resource := mosiResource{Database: tbl.schema.Name, Table: tbl.Name, Shard: oldID.String()}
+	cell := cluster.manager.shardCell(restored.ActiveShards()[0])
+	cluster.manager.updateRecord(resource, func(record *replicaRecord) bool {
+		record.Owner, record.Epoch, record.Content = self, 3, oldID.String()
+		return true
+	})
+	mounts := sharedClusterMounts.Swap(&map[string]bool{tbl.schema.Name: true})
+	defer sharedClusterMounts.Store(mounts)
+	oldService := nodeScans.Swap(service)
+	defer nodeScans.Store(oldService)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	finished := make(chan error, 1)
+	go func() {
+		owner, err := cluster.locate(ctx, resource)
+		if err == nil && owner != self {
+			err = fmt.Errorf("wrong recovery owner %s", owner)
+		}
+		finished <- err
+	}()
+	select {
+	case <-peer.outgoing.ready:
+		message := takeMosi(peer.outgoing)
+		var request struct{ Return, Method string }
+		if err := unmarshalNode(message.Data, &request); err != nil || request.Method != "cluster.report" || cell.ownstate.Initialized() {
+			t.Fatal("recovery omitted live authority proof", request, err)
+		}
+		route, ok := service.handles.Load(controlReturnSlot(request.Return))
+		if !ok {
+			t.Fatal("recovery omitted its return handle")
+		}
+		deliverTestCompletion(t, route, scanCompletion{Data: mustNodeMetadata(replicaRecord{Resource: resource, Owner: self, State: "S", Epoch: 3, Content: content})})
+	case <-ctx.Done():
+		t.Fatal("recovery did not request live proof")
+	}
+	if err := <-finished; err != nil {
+		t.Fatal(err)
+	}
+	current := restored.ActiveShards()[0]
+	if current.uuid.String() != content || cluster.manager.resourceCell(resource).publishedShard() != current {
+		t.Fatal("recovered authority still addresses the older checkpoint")
+	}
+	if current.state() != COLD {
+		t.Fatal("authority recovery eagerly loaded the shard payload")
+	}
+	if restored.CountExact() != 5 {
+		t.Fatal("recovery lost the row absent from the older checkpoint")
 	}
 }

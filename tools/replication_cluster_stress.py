@@ -116,6 +116,7 @@ def cluster_suite_config(path):
                 "coordinator_shard_ram_percent": 1, "gomaxprocs": 16,
                 "fixture": None, "compare_standalone": True,
                 "rows_per_shard": 5000, "shards": 64, "columns": 8, "fixture_seed": 20261026,
+                "unique_columns": [],
                 "cluster_bandwidth_mbps": 0, "cluster_latency_ms": 0,
                 "storage_backend": "filesystem", "storage_bandwidth_mbps": 0, "storage_latency_ms": 0}
     unknown = set(values) - defaults.keys()
@@ -137,6 +138,11 @@ def cluster_suite_config(path):
         raise DrillFailure(f"{path}: fixture_seed must be an integer")
     if config["fixture"] == "shared_analytics" and not config["compare_standalone"]:
         raise DrillFailure(f"{path}: shared_analytics requires its complete standalone oracle")
+    if (not isinstance(config["unique_columns"], list)
+            or any(column not in ["id"] + [f"v{i}" for i in range(config["columns"])]
+                   for column in config["unique_columns"])
+            or len(set(config["unique_columns"])) != len(config["unique_columns"])):
+        raise DrillFailure(f"{path}: unique_columns must name distinct fixture columns")
     validate_io_config(config)
     return config
 
@@ -1826,8 +1832,10 @@ def run_cluster_inserts(args, artifacts, journal, hash_partitioned=False):
     with contextlib.ExitStack() as cleanup:
         cleanup.callback(lambda: secret_file.unlink(missing_ok=True))
         builder = Node(args, directory, "builder", "")
+        insert_settings = {"UniqueScaleFactor": 0}
         if hash_partitioned:
-            (builder.data_dir / "settings.json").write_text(json.dumps({"ShardSize": 16}))
+            insert_settings["ShardSize"] = 16
+        (builder.data_dir / "settings.json").write_text(json.dumps(insert_settings))
         cleanup.callback(lambda: builder.kill() if builder.process is not None else None)
         source = builder.start()
         source.sql(f"CREATE DATABASE {DATABASE}", "system")
@@ -1855,6 +1863,13 @@ def run_cluster_inserts(args, artifacts, journal, hash_partitioned=False):
                 source.sql(f"DELETE FROM {table} WHERE writer=-2")
         source.sql("CREATE UNIQUE INDEX writer_value ON uuid_items (writer,value)")
         source.sql("CREATE UNIQUE INDEX writer_value ON integer_items (writer,value)")
+        for table in ("uuid_items", "integer_items"):
+            source.sql(f"ALTER TABLE {table} ADD COLUMN counter INT DEFAULT 0")
+            # Install before peers load the schema: this drill covers DML
+            # atomicity, including BEFORE execution without UNIQUE stripes.
+            source.sql(
+                f"CREATE TRIGGER atomic_before_{table} BEFORE UPDATE ON {table} FOR EACH ROW "
+                "BEGIN IF NEW.counter <> OLD.counter THEN SET NEW.counter=OLD.counter+1; END IF; END")
         builder.kill()
         shared = builder.data_dir / DATABASE
         config = effective_io_config(args)
@@ -1864,6 +1879,7 @@ def run_cluster_inserts(args, artifacts, journal, hash_partitioned=False):
             (node.data_dir / DATABASE).symlink_to(shared, target_is_directory=True)
             (node.data_dir / f"{DATABASE}.json").write_text(json.dumps({"backend": "filesystem"}))
             node.process_env["GOMAXPROCS"] = "2"
+            (node.data_dir / "settings.json").write_text(json.dumps({"UniqueScaleFactor": 0}))
             seed = "" if index == 0 else f"http://127.0.0.1:{nodes[0].port}/cluster"
             node.node_args = [f"--cluster-secret-file={secret_file}",
                               f"--cluster-address=http://127.0.0.1:{node.port}/cluster",
@@ -1872,6 +1888,8 @@ def run_cluster_inserts(args, artifacts, journal, hash_partitioned=False):
                 node.node_args.append("--cluster-bootstrap")
             configure_cluster_io(node, config, shared)
             node.start()
+            expect(json.loads(node.client.scm('(settings "UniqueLockStripes")')), 1,
+                   "concurrent INSERT/UPDATE uses the node-global one-stripe pool")
         def status(node):
             value = json.loads(node.client.scm("(cluster_status)"))
             return json.loads(value) if isinstance(value, str) else value
@@ -2034,6 +2052,49 @@ def run_cluster_inserts(args, artifacts, journal, hash_partitioned=False):
             for node in nodes:
                 expect(node.client.number(f"SELECT COUNT(*) AS n FROM {table} WHERE value=-99"), 0,
                        "rolled-back generated keys are not visible")
+        # Keep the added workload after the pre-existing schema-epoch checks:
+        # explicit integer-key reservations themselves legitimately move schema M.
+        for table, key in (("uuid_items", "'550e8400-e29b-41d4-a716-446655440000'"),
+                           ("integer_items", "50000")):
+            expected_counter = 780
+            # Exercise the native nil-TX primitive across ingress peers, as in
+            # the Go contention tests. SQL transaction reservation conflicts
+            # retain their separate 1213 contract; no query retry is hidden here.
+            for mixed in (False, True):
+                counter_column = "counter" if mixed else "value"
+                if mixed:
+                    expected_counter = 0
+                repetitions = 8
+                rmw_barrier = threading.Barrier(len(nodes))
+                def increment(index):
+                    rmw_barrier.wait(timeout=args.timeout)
+                    for _ in range(repetitions):
+                        native_key = json.dumps(key[1:-1]) if key.startswith("'") else key
+                        if mixed and index % 2:
+                            expression = (f'(scan nil (table "{DATABASE}" false "{table}" false) '
+                                          '(list) (list) (list "id") '
+                                          f'(lambda (id) (equal? id {native_key})) '
+                                          f'(list "{counter_column}" "$update") '
+                                          '(lambda (acc previous update) '
+                                          f'(begin (update (list "{counter_column}" (+ previous 1))) acc)) 0 +)')
+                        else:
+                            expression = (f'(insert (table "{DATABASE}" false "{table}" false) '
+                                          '(list "id" "writer" "value") '
+                                          f'(list (list {native_key} 99 777)) '
+                                          f'(list "{counter_column}" "$update") '
+                                          f'(lambda (previous update) (update (list "{counter_column}" (+ previous 1)))) '
+                                          'false nil nil)')
+                        result = json.loads(nodes[index].client.scm(expression))
+                        expect(result, 0 if mixed and index % 2 else 2,
+                               "native mutation acknowledges exactly one collision/UPDATE")
+                with concurrent.futures.ThreadPoolExecutor(max_workers=len(nodes)) as threads:
+                    list(threads.map(increment, range(len(nodes))))
+                expected_counter += len(nodes) * repetitions
+                for node in nodes:
+                    expect(node.client.sql(f"SELECT {counter_column} AS n FROM {table} WHERE id={key}"),
+                           [{"n": expected_counter}], "concurrent collision/UPDATE RMW retains every increment")
+                journal.append({"scenario": "cluster-collision-rmw", "layout": layout,
+                                "table": table, "mixed_update": mixed, "increments": len(nodes) * repetitions})
         nodes[2].client.sql("INSERT INTO integer_items(writer,value) VALUES(2,888)")
         for node in nodes:
             row = node.client.sql("SELECT MIN(id) AS id,COUNT(*) AS n FROM integer_items WHERE value=888")
@@ -2110,6 +2171,10 @@ def run_cluster_placement(args, artifacts, journal):
                     reference["first_two_partition_sum"] += row[0]
                 values.append('(' + ','.join(map(str, [row_id] + row)) + ')')
             source.sql("INSERT INTO big_items VALUES" + ','.join(values), timeout=120)
+        if config["unique_columns"]:
+            unique_columns = " ".join(json.dumps(column) for column in config["unique_columns"])
+            source.scm(f'(createkey (table "{DATABASE}" false "big_items" false) '
+                       f'"fixture_unique" true (list {unique_columns}))', timeout=120)
         pivots = ' '.join(str(rows_per_shard * i) for i in range(1, shards))
         source.scm(f'(partitiontable (table "{DATABASE}" false "big_items" false) (list (list "id" (list {pivots}))))', timeout=120)
         source.scm(f'(rebuild (table "{DATABASE}" false "big_items" false) true false)', timeout=120)
@@ -2313,7 +2378,12 @@ def run_cluster_placement(args, artifacts, journal):
             upstream.client.sql("CREATE TABLE edge_items(id INT PRIMARY KEY,n INT) ENGINE=SAFE", database)
             edge = Node(args, directory, f"edge-{index}", f"http://127.0.0.1:{upstream.port}/cluster", database=database)
             cleanup.callback(lambda edge=edge: edge.kill() if edge.process is not None else None)
+            # User rows and MOSI configuration deliberately share one stripe.
+            # Data acquisition must complete before any UNIQUE reservation.
+            (edge.data_dir / "settings.json").write_text(json.dumps({"UniqueScaleFactor": 0}))
             edge.start()
+            expect(json.loads(edge.client.scm('(settings "UniqueLockStripes")')), 1,
+                   "tenant replication shares one global UNIQUE stripe")
             edge_nodes.append(edge)
 
         def edge_work(index):

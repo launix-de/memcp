@@ -546,8 +546,8 @@ func EqualSQL(a, b Scmer) Scmer {
 // existing plain-string arm stays small and eligible for JIT inlining.
 //
 //jitgen:noinline
-func equalCollatedValues(a, b Scmer, collation string) Scmer {
-	if (a.IsString() || a.IsSymbol()) && (b.IsString() || b.IsSymbol()) {
+func EqualCollated(a, b Scmer, collation string) Scmer {
+	if (a.IsString() || a.IsSymbol() || a.IsBufferString()) && (b.IsString() || b.IsSymbol() || b.IsBufferString()) {
 		return NewBool(equalStringValues(a, b, strings.Contains(collation, "_ci")))
 	}
 	return EqualSQL(a, b)

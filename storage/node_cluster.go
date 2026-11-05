@@ -58,6 +58,7 @@ type clusterView struct {
 // contact has no special role: every node retains the complete authenticated
 // roster and independently connects to discovered peers.
 type nodeCluster struct {
+	insertPlacement    atomic.Pointer[insertPlacementFeedback]
 	manager            *replicationManager     // shared MOSI engine adapter; no second state machine
 	bootstrapResources map[string]mosiResource // immutable initialization only
 

@@ -11,8 +11,8 @@ warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See
 package storage
 
 import "fmt"
-import "errors"
 import "time"
+import "errors"
 import "context"
 import "encoding/json"
 import "github.com/launix-de/memcp/storage/mosi"
@@ -265,6 +265,49 @@ func (cluster *nodeCluster) locate(ctx context.Context, resource mosiResource) (
 				readers[id] = true
 			}
 		}
+		// Recovery publishes one native object, just like reference installation.
+		// Concurrent cold waiters must not replace its payload after it became
+		// readable. Existing admitted readers/writers bypass this boundary.
+		c := r.resourceCell(resource)
+		var release func()
+		defer func() {
+			if release != nil {
+				release()
+			}
+		}()
+		if resource.Shard != "" {
+			c.acquire.Lock()
+			release = c.acquire.Unlock
+			if c.ownstate.Initialized() {
+				if phase := c.ownstate.Phase(); phase == mosi.M || phase == mosi.O {
+					return r.id, nil
+				}
+				return "", fmt.Errorf("cluster ownership changed during recovery")
+			}
+		}
+		content, contentEpoch, liveContent := own.Content, own.Epoch, false
+		for _, record := range reports {
+			if record.Owner == r.id && record.Content != "" && (content == "" || record.Epoch > contentEpoch || record.Epoch == contentEpoch && record.State == "S" && !liveContent) {
+				content, contentEpoch, liveContent = record.Content, record.Epoch, record.State == "S"
+			}
+		}
+		if resource.Shard != "" && content != "" && content != resource.Shard {
+			// The schema checkpoint may predate the owner's last rebuild. The
+			// completed live proof authorizes its current reference, not the old
+			// checkpoint. Install only the native cold binding before granting M/O;
+			// column loading and WAL replay still use ordinary GetRead/GetWrite.
+			db := GetDatabase(resource.Database)
+			if db == nil {
+				return "", fmt.Errorf("recovery schema disappeared")
+			}
+			if err := db.importClusterCommits(r.id); err != nil {
+				return "", err
+			}
+			if err := r.finishImport(r.id, &replicaImport{header: mosiPacket{Resource: resource, Content: content}, engine: db.persistence}); err != nil {
+				return "", err
+			}
+			resource = r.canonicalResource(resource)
+		}
 		state := mosi.M
 		if len(readers) > 0 {
 			state = mosi.O
@@ -274,14 +317,31 @@ func (cluster *nodeCluster) locate(ctx context.Context, resource mosiResource) (
 				return "", err
 			}
 		}
+		retry := false
 		r.updateRecord(resource, func(record *replicaRecord) bool {
-			record.Resource, record.Owner, record.State, record.Epoch = resource, r.id, state.String(), max(epoch, 1)
+			// Identity and permission publish under the same native directory
+			// boundary as forwarding. A newer cell/grant requires fresh discovery;
+			// the old cold waiter must not initialize an unlocked successor.
+			if c.resolved() != c || *c.resource.Load() != resource || c.ownstate.Initialized() || record.Owner != r.id && record.Epoch > epoch {
+				retry = true
+				return false
+			}
+			record.Resource, record.Owner, record.State, record.Epoch = resource, r.id, state.String(), max(record.Epoch, epoch, 1)
 			record.Readers = readers
+			if resource.Shard != "" && content != "" {
+				record.Content = content
+			}
+			c.clusterstate.Establish(state)
+			c.ownstate.Establish(state)
 			return true
 		})
-		c := r.resourceCell(resource)
-		c.clusterstate.Establish(state)
-		c.ownstate.Establish(state)
+		if retry {
+			if release != nil {
+				release()
+				release = nil
+			}
+			return cluster.locate(ctx, resource)
+		}
 	} else {
 		cell := r.resourceCell(resource)
 		r.updateRecord(resource, func(record *replicaRecord) bool {
@@ -352,6 +412,10 @@ func (cluster *nodeCluster) obtain(parent context.Context, resource mosiResource
 					panic(fmt.Errorf("%s: %w", mosi.NetworkError, err))
 				}
 			}
+		}
+		if current := c.resolved(); current != c || *current.resource.Load() != resource {
+			c, owner = current, ""
+			continue
 		}
 		publication, action := c.ownstate.Request(wanted)
 		if action == mosi.Ready {

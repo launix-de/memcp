@@ -11,14 +11,14 @@ warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See
 package storage
 
 import "fmt"
-import "runtime"
 import "context"
+import "runtime"
 import "strings"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/memcp/storage/mosi"
 
-// Version 16 uses binary node metadata and raw Scheme reconstruction text.
-const scanWireVersion = 18
+// Version 19 combines binary node metadata with retained UNIQUE receiver scopes.
+const scanWireVersion = 19
 
 type remoteScanShard struct {
 	Schema   uint64       `json:"schema"`
@@ -155,7 +155,7 @@ func (database *database) executeScanTask(ctx context.Context, s *scanRPCSession
 	if request.Version != scanWireVersion || !request.Shard.Resource.valid() || request.Shard.Resource.Shard == "" {
 		return nil, fmt.Errorf("invalid remote scan contract")
 	}
-	if request.Operator > shardOrdered || request.Stride < 0 || (request.Operator != shardReduce && request.Stride != 0) || (request.Stride == 0 && len(request.Batch) != 0) || (request.Stride > 0 && len(request.Batch)%request.Stride != 0) {
+	if request.Operator > shardUniqueAdmit || request.Stride < 0 || (request.Operator != shardReduce && request.Stride != 0) || (request.Stride == 0 && len(request.Batch) != 0) || (request.Stride > 0 && len(request.Batch)%request.Stride != 0) {
 		return nil, fmt.Errorf("invalid remote scan invocation")
 	}
 	if (request.Operator == shardOrdered) != (request.Order != nil) {
@@ -237,7 +237,7 @@ func (database *database) executeScanTask(ctx context.Context, s *scanRPCSession
 		}
 		// Only the native shard handler executes the operator. The database owns
 		// resolution/acquisition; the transport knows neither placement nor scans.
-		value, err := shard.HandleClusterRequest(ctx, scm.ClusterRequest{Method: "scan", Payload: shardScanInvocation{order: order, operator: request.Operator, stride: request.Stride, batchdata: batch, tx: tx, access: access, conditionCols: request.FilterColumns, condition: filter, callbackCols: request.MapColumns, mapReduce: reducer, neutral: neutral}})
+		value, err := shard.HandleClusterRequest(ctx, scm.ClusterRequest{Method: "scan", Payload: shardScanInvocation{writeAcquired: request.Access.Mutation && input == nil, order: order, operator: request.Operator, stride: request.Stride, batchdata: batch, tx: tx, access: access, conditionCols: request.FilterColumns, condition: filter, callbackCols: request.MapColumns, mapReduce: reducer, neutral: neutral}})
 		if err != nil {
 			return err
 		}
@@ -364,10 +364,16 @@ func withRemoteScanShard(expected *remoteScanShard, tx *TxContext, mutation bool
 		// cell before its first payload publication. Its topology remains the
 		// owner of that existing physical generation.
 		if selected == nil {
-			selected = findScanShard(tbl, expected.Resource)
-		}
-		if selected == nil {
-			return fmt.Errorf("remote shard disappeared")
+			resource := expected.Resource
+			if sourceCell != nil {
+				// Acquisition already resolved UUID forwarding. An unpublished
+				// payload binds to that native identity, not the sender's alias.
+				resource = *sourceCell.resolved().resource.Load()
+			}
+			selected = findScanShard(tbl, resource)
+			if selected == nil {
+				return fmt.Errorf("remote shard disappeared: requested %s, acquired %s, %d active shards", expected.Resource.key(), resource.key(), len(topology.shards))
+			}
 		}
 		if !topology.acquireOperation() {
 			continue
@@ -503,7 +509,7 @@ func (origin *peerScanExecutor) ExecuteShardScan(resource mosiResource, invocati
 	if err != nil {
 		panic(err)
 	}
-	task.Access.Mutation = task.Access.Mutation || scanMutates(invocation.callbackCols)
+	task.Access.Mutation = task.Access.Mutation || scanMutates(invocation.callbackCols) || invocation.operator == shardUniqueAdmit
 	if invocation.tx != nil {
 		// Export only unmodified remote inputs. A modified generation is kept
 		// resident by native TX pins and must execute at its participant; a cold

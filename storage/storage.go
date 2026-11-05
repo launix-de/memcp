@@ -583,8 +583,8 @@ func lockTablePublicationShards(shards []*storageShard, write bool, snapshotFoll
 // lockTable acquires a user-level read or write lock on the named table.
 // The session's State is updated while waiting, and the unlock callback is
 // registered with the session so that ReleaseAllLocks() can free it later.
-// A run of FIFO-adjacent READ requests shares the lock. The first reader, or an
-// exclusive writer, drains in-flight shard readers before publishing the lock.
+// FIFO-adjacent READ requests share the lock. Owners drain admitted UNIQUE
+// batches after publication; exclusive locks also drain incompatible shard users.
 func acquireTableLock(schema, name string, write bool, snapshotFollows bool, ss *scm.SessionState, querySeq uint64) func() {
 	if ss == nil {
 		panic("LOCK TABLES requires a query session")
@@ -599,6 +599,19 @@ func acquireTableLock(schema, name string, write bool, snapshotFollows bool, ss 
 	}
 	cond := t.getTableLockCond()
 	ctx := tableLockQueryContext(ss, querySeq)
+	waitWriters := func(unlock func()) func() {
+		t.tableLockMu.Lock()
+		for t.tableLockWriters.Load() != 0 && (ctx == nil || ctx.Err() == nil) {
+			cond.Wait()
+		}
+		cancelled := ctx != nil && ctx.Err() != nil
+		t.tableLockMu.Unlock()
+		if cancelled {
+			unlock()
+			panic("query killed")
+		}
+		return unlock
+	}
 	if ctx != nil {
 		stopWake := context.AfterFunc(ctx, func() {
 			t.tableLockMu.Lock()
@@ -639,7 +652,7 @@ func acquireTableLock(schema, name string, write bool, snapshotFollows bool, ss 
 		t.tableLockServe++
 		cond.Broadcast()
 		t.tableLockMu.Unlock()
-		return func() {
+		return waitWriters(func() {
 			t.tableLockMu.Lock()
 			if t.tableLockReadOwners[ss] == 1 {
 				delete(t.tableLockReadOwners, ss)
@@ -652,7 +665,7 @@ func acquireTableLock(schema, name string, write bool, snapshotFollows bool, ss 
 			}
 			cond.Broadcast()
 			t.tableLockMu.Unlock()
-		}
+		})
 	}
 	t.tableLockMu.Unlock()
 	// User locks drain incompatible shard users. Cache snapshot READ publication
@@ -687,11 +700,14 @@ func acquireTableLock(schema, name string, write bool, snapshotFollows bool, ss 
 		t.tableLockMu.Unlock()
 	}
 	unlockShards()
+	// Publication prevents new UNIQUE admissions. Existing writers must finish
+	// before this owner initializes a cache or executes protected work: that work
+	// can itself use the global stripe pool for a different table.
 	acquired = true
 	if write {
-		return t.unlockTableWrite
+		return waitWriters(t.unlockTableWrite)
 	}
-	return func() {
+	return waitWriters(func() {
 		t.tableLockMu.Lock()
 		if t.tableLockReadOwners[ss] == 1 {
 			delete(t.tableLockReadOwners, ss)
@@ -704,7 +720,7 @@ func acquireTableLock(schema, name string, write bool, snapshotFollows bool, ss 
 		}
 		cond.Broadcast()
 		t.tableLockMu.Unlock()
-	}
+	})
 }
 
 func lockTable(schema, name string, write bool, ss *scm.SessionState, querySeq uint64) {

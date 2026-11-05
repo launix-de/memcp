@@ -32,6 +32,76 @@ import "github.com/gorilla/websocket"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/memcp/storage/mosi"
 
+// Native MOSI completion persists its configuration using ordinary UNIQUE
+// inserts. Force that configuration key to share the user's stripe; a pending
+// acquisition must never retain that mutex while waiting for its own grant.
+func TestReplicationUniqueAcquisitionAllowsCollidingConfigWrite(t *testing.T) {
+	source := setupScanParallelTestTable(t, "treplica_unique_acquisition")
+	source.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}}
+	CreateDatabase("system_unique_acquisition", false)
+	t.Cleanup(func() { databases.Remove("system_unique_acquisition") })
+	config, _ := CreateTable("system_unique_acquisition", "config", Memory, false)
+	for _, name := range []string{"node", "key", "value"} {
+		config.CreateColumn(name, "TEXT", nil, nil)
+	}
+	config.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"node", "key"}}}
+	r := &replicationManager{id: "replica-test", master: true, config: config, cells: make(map[string]*replicaCell), directory: replicaDirectory{Records: make(map[string]replicaRecord)}}
+	r.ready.Store(true)
+	r.resourceCell(mosiResource{Database: source.schema.Name}).ownstate.Initialize(mosi.M)
+	cell := r.shardCell(source.ActiveShards()[0])
+	publication, action := cell.ownstate.Request(mosi.M)
+	if action != mosi.Send {
+		t.Fatal("fixture did not request M")
+	}
+	rows := [][]scm.Scmer{{scm.NewInt(7)}}
+	mask := source.guardUniqueWrites([]string{"id"}, rows, false, 0, nil).mask
+	var entry replicaConfigEntry
+	var configGuard uniqueWriteGuard
+	for key := 0; ; key++ {
+		entry = replicaConfigEntry{Kind: "backup", Name: fmt.Sprint(key)}
+		configGuard = config.guardUniqueWrites([]string{"node", "key"}, [][]scm.Scmer{{scm.NewString(r.id), scm.NewString(entry.Kind + "/" + entry.Name)}}, false, 0, nil)
+		if configGuard.mask.intersects(mask) {
+			break
+		}
+	}
+	previous := replication.Swap(r)
+	defer replication.Store(previous)
+	done := make(chan error, 1)
+	go func() {
+		var err error
+		defer func() {
+			if failure := recover(); failure != nil {
+				err = fmt.Errorf("%v", failure)
+			}
+			done <- err
+		}()
+		source.Insert([]string{"id"}, rows, nil, scm.NewNil(), false, nil)
+	}()
+	// Let the INSERT enter the pending native acquisition before its grant.
+	time.Sleep(20 * time.Millisecond)
+	accepted, err := cell.ownstate.Grant(publication.Flight().ID(), mosi.M, func() error {
+		if !configGuard.tryLock() {
+			return fmt.Errorf("pending MOSI acquisition retained the configuration stripe")
+		}
+		configGuard.release()
+		return r.writeConfig(entry)
+	})
+	if !accepted || err != nil {
+		t.Errorf("MOSI grant: accepted=%v, error=%v", accepted, err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("INSERT did not finish after its configuration-backed grant")
+	}
+	if source.CountExact() != 1 || config.CountExact() != 1 || cell.ownstate.Writing() {
+		t.Fatal("grant lost its native insert, configuration entry or writer release")
+	}
+}
+
 func TestReplicationOrderedScanRetainsColdPayloadThroughCallback(t *testing.T) {
 	for _, name := range []string{"direct", "first", "multi", "recset", "batch", "direct-panic", "first-panic", "multi-panic", "recset-panic", "batch-panic"} {
 		t.Run(name, func(t *testing.T) {
@@ -1259,7 +1329,7 @@ func TestReplicationRebuildForwardsUUIDAndRights(t *testing.T) {
 	if access.shard != original || findScanShard(table, resource) != original {
 		t.Fatal("rebuild rebound an existing reader's shard")
 	}
-	original.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(5), scm.NewString("forwarded")}}, false, nil, nil, false, nil)
+	original.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(5), scm.NewString("forwarded")}}, false, nil, nil, false, nil, nil)
 	if got := table.ActiveShards()[0].Count(); got != 5 {
 		t.Fatalf("write through old UUID reached %d rows, want 5", got)
 	}

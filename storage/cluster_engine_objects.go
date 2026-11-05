@@ -5,14 +5,14 @@ SPDX-License-Identifier: GPL-3.0-or-later
 package storage
 
 import "fmt"
-import "strings"
-import "sync"
 import "sort"
+import "sync"
 import "time"
 import "weak"
-import "runtime"
 import "context"
+import "runtime"
 import "strconv"
+import "strings"
 import "sync/atomic"
 import "github.com/google/uuid"
 import "github.com/launix-de/memcp/scm"
@@ -125,7 +125,7 @@ func (s *storageShard) HandleClusterRequest(ctx context.Context, r scm.ClusterRe
 		case shardScanInvocation:
 			// Advisory accounting follows the native generation, not a second
 			// wire snapshot. Each kernel owns its actual fixed input boundary.
-			inputCount := int64(s.main_count) + int64(s.plannerDeltaRows.Load())
+			inputCount := int64(s.plannerMainRows.Load()) + int64(s.plannerDeltaRows.Load())
 			// This is the sole native reduction entry. Preparation already owns
 			// the generation and TX scope; no second GetRead or decoder lives here.
 			if input.tx == nil {
@@ -142,6 +142,26 @@ func (s *storageShard) HandleClusterRequest(ctx context.Context, r scm.ClusterRe
 					count = 1
 				}
 				return scanResult{res: scm.NewBool(found), outCount: count, inputCount: inputCount}, nil
+			}
+			if input.operator == shardUniqueProbe {
+				_, found := s.GetRecordidForUnique(input.access, input.tx, true)
+				return scanResult{res: scm.NewBool(found), inputCount: inputCount}, nil
+			}
+			if input.operator == shardUniqueReserve {
+				committed, err := s.serveUniqueScan(ctx, input)
+				if busy, ok := err.(uniqueReservationBusy); ok {
+					return scanResult{res: scm.NewSlice([]scm.Scmer{scm.NewString("busy"), scm.NewString(busy.shard.Resource.Shard), scm.NewBool(busy.capacity), scm.NewBool(busy.retry)})}, nil
+				}
+				if err != nil {
+					return nil, err
+				}
+				if !committed {
+					return nil, fmt.Errorf("UNIQUE reservation aborted")
+				}
+				return scanResult{res: scm.NewBool(true), inputCount: inputCount}, nil
+			}
+			if input.operator == shardUniqueAdmit {
+				return scanResult{res: scm.NewBool(true)}, nil
 			}
 			if input.operator >= shardLookupOne {
 				var value scm.Scmer
@@ -167,7 +187,7 @@ func (s *storageShard) HandleClusterRequest(ctx context.Context, r scm.ClusterRe
 				}
 				return scanResult{res: value, outCount: int64(count), inputCount: inputCount}, nil
 			}
-			value, count, candidates := s.scan(input.access, input.conditionCols, input.condition, input.callbackCols, input.mapReduce, input.neutral, input.stride, input.batchdata, input.tx, SessionStateFromTx(input.tx))
+			value, count, candidates := s.scan(input.access, input.conditionCols, input.condition, input.callbackCols, input.mapReduce, input.neutral, input.stride, input.batchdata, input.tx, SessionStateFromTx(input.tx), input.writeAcquired)
 			return scanResult{res: value, outCount: count, inputCount: inputCount, candidateCount: candidates}, nil
 		}
 		return nil, fmt.Errorf("missing typed scan invocation")
@@ -563,6 +583,10 @@ func (origin *TxContext) BindClusterInvocation(value scm.Scmer) (scm.Scmer, erro
 
 func (tx *TxContext) Serialize(ctx *scm.SerializationContext) (scm.Scmer, error) {
 	return tx.transactionState.Serialize(ctx)
+}
+
+func (tx *transactionState) ClusterForwardedHandle() *scm.ClusterHandle {
+	return tx.coordinator
 }
 
 func (tx *transactionState) Serialize(ctx *scm.SerializationContext) (scm.Scmer, error) {

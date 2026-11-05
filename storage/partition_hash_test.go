@@ -200,7 +200,7 @@ func TestHashRepartitionConcurrentDeleteSurvivesReload(t *testing.T) {
 	<-blocking.entered
 	waitForRepartitionDualWrite(t, tbl)
 	old := tbl.repartitionSources.Load().shards[0]
-	if !scm.ToBool(old.UpdateFunction(0, false, false, nil)()) {
+	if !scm.ToBool(old.UpdateFunction(0, false, false, nil, nil)()) {
 		t.Fatal("delete failed")
 	}
 	close(blocking.release)

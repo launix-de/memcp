@@ -11,15 +11,15 @@ warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See
 package storage
 
 import "fmt"
-import "bytes"
-import "runtime"
 import "sync"
 import "time"
+import "bytes"
 import "context"
+import "runtime"
 import "strings"
 import "testing"
-import "sync/atomic"
 import "net/http"
+import "sync/atomic"
 import "encoding/json"
 import "net/http/httptest"
 import "github.com/google/uuid"
@@ -814,7 +814,7 @@ func TestRemoteScanNativeExistsAndBatch(t *testing.T) {
 	}
 	// Specialized kernels capture their extent at execution, just like native
 	// reduction; inserts before dispatch belong to that same generation.
-	table.ActiveShards()[0].Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(500), scm.NewString("before-dispatch")}}, false, nil, nil, false, nil)
+	table.ActiveShards()[0].Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(500), scm.NewString("before-dispatch")}}, false, nil, nil, false, nil, nil)
 	procedure := func(source string) []byte {
 		result, err := scm.MarshalProcedure(scm.Eval(scm.Read(t.Name(), source, true), &scm.Globalenv))
 		if err != nil {
@@ -906,7 +906,7 @@ func TestRemoteScanNativeLookupKinds(t *testing.T) {
 	if err := peer.scanService.control(context.Background(), peer, "scan.describe", remoteScanDescribe{scanWireVersion, table.schema.Name, table.Name}, &parts, true); err != nil {
 		t.Fatal(err)
 	}
-	table.ActiveShards()[0].Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(99), scm.NewString("before-dispatch")}}, false, nil, nil, false, nil)
+	table.ActiveShards()[0].Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(99), scm.NewString("before-dispatch")}}, false, nil, nil, false, nil, nil)
 	for _, operator := range []shardScanOperator{shardLookupOne, shardLookupMany, shardLookupMapOne, shardLookupMapMany} {
 		for _, key := range []int64{2, 99, 100} {
 			task := makeRemoteScanTask(t, parts[0])
@@ -949,6 +949,175 @@ func TestRemoteScanNativeLookupKinds(t *testing.T) {
 	}
 }
 
+func TestRemoteAdmissionWhileLoadingColdExtent(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "t_admission_cold_extent", 4)
+	RebuildTable(tbl, true, false)
+	encoded, err := json.Marshal(tbl.ActiveShards()[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cold storageShard
+	if err := json.Unmarshal(encoded, &cold); err != nil {
+		t.Fatal(err)
+	}
+	cold.t = tbl
+	lease := cold.GetWrite(nil)
+	defer lease.Release()
+	tx := NewTxContext(TxCursorStability)
+	defer tx.Rollback()
+	start := make(chan struct{})
+	var workers sync.WaitGroup
+	workers.Add(2)
+	go func() {
+		defer workers.Done()
+		<-start
+		read := cold.GetRead(nil, false)
+		read.Release()
+	}()
+	go func() {
+		defer workers.Done()
+		<-start
+		for range 4096 {
+			result, err := cold.HandleClusterRequest(context.Background(), scm.ClusterRequest{Method: "scan", Payload: shardScanInvocation{operator: shardUniqueAdmit, tx: tx}})
+			if err != nil || !result.(scanResult).res.Bool() {
+				t.Error("cold loading interrupted native admission", result, err)
+				return
+			}
+		}
+	}()
+	close(start)
+	workers.Wait()
+	if cold.main_count != 4 || cold.plannerMainRows.Load() != 4 {
+		t.Fatal("cold load did not publish its durable extent")
+	}
+}
+
+func TestRemoteUniqueChannelRetainsGuardThroughUpdateAndFinish(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "t_remote_unique_channel", 4)
+	tbl.CreateColumn("label", "VARCHAR", []int{40}, []scm.Scmer{scm.NewString("collate"), scm.NewString("utf8mb4_general_ci")})
+	tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}, {Id: "label", Cols: []string{"label"}}}
+	tbl.Insert([]string{"id", "label"}, [][]scm.Scmer{{scm.NewInt(5), scm.NewString("ſail")}}, nil, scm.NewNil(), false, nil)
+	var triggerCalls atomic.Int32
+	tbl.AddTrigger(TriggerDescription{Name: "observe_unlocked_key", Timing: AfterUpdate, Func: scm.NewFunc(func(...scm.Scmer) scm.Scmer {
+		guard := tbl.guardUniqueWrites([]string{"id"}, [][]scm.Scmer{{scm.NewInt(2)}}, false, 0, nil)
+		if !guard.tryLock() {
+			panic("AFTER trigger retained the UNIQUE stripe")
+		}
+		guard.unlock()
+		triggerCalls.Add(1)
+		return scm.NewNil()
+	})})
+	peer, _, _ := setupRemoteScanConnection(t)
+	shard := tbl.ActiveShards()[0]
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ready := make(chan *clusterReceiver, 1)
+	var afterEvents []uniqueAfterTrigger
+	receiver := newClusterReceiver(-1, func(_ context.Context, value scm.Scmer) (scm.Scmer, error) {
+		if value.IsSlice() {
+			message := value.Slice()
+			afterEvents = append(afterEvents, decodeUniqueAfterTriggers(message[1], nil)...)
+			return scm.NewNil(), nil
+		}
+		ready <- value.Any().(*clusterReceiver)
+		return scm.NewNil(), nil
+	})
+	receiver.Seal()
+	defer receiver.Close()
+	columns := scm.NewSlice([]scm.Scmer{scm.NewString("id")})
+	rows := scm.NewSlice([]scm.Scmer{scm.NewSlice([]scm.Scmer{scm.NewInt(2)})})
+	invocation := shardScanInvocation{operator: shardUniqueReserve, neutral: scm.NewSlice([]scm.Scmer{
+		scm.NewAny(receiver), columns, rows, scm.NewBool(false), scm.NewBool(true), uniqueStringArray([]string{shard.uuid.String()}),
+	})}
+	executor := &peerScanExecutor{peer: peer, ctx: ctx, prepared: remoteScanShard{Schema: tbl.filterSchemaFingerprint(), Resource: mosiResource{Database: tbl.schema.Name, Table: tbl.Name, Shard: shard.uuid.String()}}}
+	done := make(chan scanResult, 1)
+	go func() {
+		defer func() {
+			if failure := recover(); failure != nil {
+				done <- scanResult{err: scanError{r: failure}}
+			}
+		}()
+		done <- executor.ExecuteShardScan(executor.prepared.Resource, invocation)
+	}()
+	var commands *clusterReceiver
+	select {
+	case commands = <-ready:
+	case result := <-done:
+		t.Fatalf("reservation ended before ready: %+v", result.err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("reservation did not publish its channel")
+	}
+	defer func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("reservation did not join after cancellation")
+		}
+	}()
+	guard := tbl.guardUniqueWrites([]string{"id"}, [][]scm.Scmer{{scm.NewInt(2)}}, false, 0, nil)
+	if guard.tryLock() {
+		guard.unlock()
+		t.Fatal("remote worker released its UNIQUE guard after ready")
+	}
+	collated, err := callUniqueChannel(ctx, commands, scm.NewString("probe"), scm.NewString(shard.uuid.String()),
+		uniqueStringArray([]string{"label"}), scm.NewSlice([]scm.Scmer{scm.NewString("sail")}), uniqueStringArray([]string{"id"}))
+	if err != nil || !collated.Slice()[0].Bool() || collated.Slice()[2].Slice()[0].Int() != 5 {
+		t.Fatalf("remote collated UNIQUE lookup: %v %v", collated, err)
+	}
+	projection := scm.NewSlice([]scm.Scmer{scm.NewString("payload")})
+	value, err := callUniqueChannel(ctx, commands, scm.NewString("probe"), scm.NewString(shard.uuid.String()), columns, rows.Slice()[0], projection)
+	if err != nil || !value.Slice()[0].Bool() {
+		t.Fatalf("reserved lookup: %v %v", value, err)
+	}
+	id := value.Slice()[1]
+	changed, err := callUniqueChannel(ctx, commands, scm.NewString("update"), scm.NewString(shard.uuid.String()), id,
+		scm.NewSlice([]scm.Scmer{scm.NewString("payload"), scm.NewString("changed under reservation")}))
+	if err != nil || !changed.Bool() {
+		t.Fatalf("reserved update: %v %v", changed, err)
+	}
+	value, err = callUniqueChannel(ctx, commands, scm.NewString("probe"), scm.NewString(shard.uuid.String()), columns, rows.Slice()[0], projection)
+	if err != nil || value.Slice()[2].Slice()[0].String() != "changed under reservation" {
+		t.Fatalf("updated value: %v %v", value, err)
+	}
+	id = value.Slice()[1]
+	if changed, err := callUniqueChannel(ctx, commands, scm.NewString("set"), scm.NewString(shard.uuid.String()), id,
+		scm.NewString("payload"), scm.NewString("set under reservation")); err != nil || !changed.Bool() {
+		t.Fatalf("reserved column set: %v %v", changed, err)
+	}
+	value, err = callUniqueChannel(ctx, commands, scm.NewString("probe"), scm.NewString(shard.uuid.String()), columns, rows.Slice()[0], projection)
+	if err != nil || value.Slice()[2].Slice()[0].String() != "set under reservation" {
+		t.Fatalf("column-set value: %v %v", value, err)
+	}
+
+	if _, err := callUniqueChannel(ctx, commands, scm.NewString("finish")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case result := <-done:
+		if result.err.r != nil || !result.res.Bool() {
+			t.Fatalf("reservation finish: %+v", result.err)
+		}
+		done <- result // the cleanup also joins completion
+	case <-time.After(5 * time.Second):
+		t.Fatal("reservation did not finish")
+	}
+	if triggerCalls.Load() != 0 || len(afterEvents) != 2 {
+		t.Fatalf("completion lost or prematurely executed AFTER events: calls=%d events=%d", triggerCalls.Load(), len(afterEvents))
+	}
+	guard.lock()
+	guard.unlock()
+	for _, event := range afterEvents {
+		event.table.ExecuteTriggers(event.timing, event.old, event.new, event.tx)
+	}
+	if triggerCalls.Load() != 2 {
+		t.Fatalf("AFTER calls = %d, want 2", triggerCalls.Load())
+	}
+	if _, err := callUniqueChannel(ctx, commands, scm.NewString("update"), scm.NewString(shard.uuid.String()), id, scm.NewSlice(nil)); err == nil {
+		t.Fatal("finished reservation accepted another mutation")
+	}
+}
+
 // A remote ordered run uses the native sort, retains its captured physical IDs,
 // and feeds bounded pages into the same coordinator merge. Projection callbacks
 // execute only on selected rows; the worker releases its payload before paging.
@@ -961,7 +1130,7 @@ func TestRemoteScanOrderedRunPagesAndNativeExtent(t *testing.T) {
 	if err := peer.scanService.control(context.Background(), peer, "scan.describe", remoteScanDescribe{scanWireVersion, tbl.schema.Name, tbl.Name}, &parts, true); err != nil {
 		t.Fatal(err)
 	}
-	source.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(9999), scm.NewString("future")}}, false, nil, nil, false, nil)
+	source.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(9999), scm.NewString("future")}}, false, nil, nil, false, nil, nil)
 	executor := &peerScanExecutor{peer: peer, ctx: context.Background(), prepared: parts[0]}
 	stub := &storageShard{uuid: source.uuid, t: tbl}
 	target := &shardScanTarget{resource: parts[0].Resource, executor: executor}
@@ -1261,23 +1430,34 @@ func TestRemoteScanRoutesForwardedUUIDWithoutHistoricalPayload(t *testing.T) {
 }
 
 func TestRemoteScanResolvesNativeShardBeforeFirstPayloadPublication(t *testing.T) {
-	tbl, _ := createDurabilityTestTable(t, "t_remote_native_publication", 4)
-	RebuildTable(tbl, true, false)
-	r := replicaRecoveryFixture()
-	previous := replication.Swap(r)
-	defer replication.Store(previous)
-	current := tbl.ActiveShards()[0]
-	cell := r.declareShard(current, r.id, true)
-	cell.current.Store(nil)
-	peer, _, _ := setupRemoteScanConnection(t)
-	task := makeRemoteScanTask(t, remoteScanShard{Schema: tbl.filterSchemaFingerprint(), Resource: *cell.resource.Load()})
-	var response remoteScanResult
-	if err := peer.scanService.control(context.Background(), peer, "scan.execute", task, &response, true); err != nil {
-		t.Fatal(err)
-	}
-	value, err := schemeValue(response.Value).reconstruct()
-	if err != nil || value.Int() != 9 || response.OutCount != 3 {
-		t.Fatalf("native topology lost its unpublished payload binding: %+v, %v", response, err)
+	for _, forwarded := range []bool{false, true} {
+		t.Run(fmt.Sprint(forwarded), func(t *testing.T) {
+			tbl, _ := createDurabilityTestTable(t, "t_remote_native_publication", 4)
+			RebuildTable(tbl, true, false)
+			r := replicaRecoveryFixture()
+			previous := replication.Swap(r)
+			defer replication.Store(previous)
+			current := tbl.ActiveShards()[0]
+			cell := r.declareShard(current, r.id, true)
+			cell.current.Store(nil)
+			peer, _, _ := setupRemoteScanConnection(t)
+			resource := *cell.resource.Load()
+			if forwarded {
+				alias := resource
+				alias.Shard = uuid.NewString()
+				r.forwardResource(alias, resource)
+				resource = alias
+			}
+			task := makeRemoteScanTask(t, remoteScanShard{Schema: tbl.filterSchemaFingerprint(), Resource: resource})
+			var response remoteScanResult
+			if err := peer.scanService.control(context.Background(), peer, "scan.execute", task, &response, true); err != nil {
+				t.Fatal(err)
+			}
+			value, err := schemeValue(response.Value).reconstruct()
+			if err != nil || value.Int() != 9 || response.OutCount != 3 {
+				t.Fatalf("native topology lost its unpublished payload binding: %+v, %v", response, err)
+			}
+		})
 	}
 }
 
@@ -1336,7 +1516,7 @@ func TestRemoteScanCapturedOuterUpdateReturnsToItsShard(t *testing.T) {
 	if err := service.control(context.Background(), peer, "scan.describe", remoteScanDescribe{scanWireVersion, inner.schema.Name, inner.Name}, &parts, true); err != nil {
 		t.Fatal(err)
 	}
-	update := scm.NewFunc(outer.ActiveShards()[0].UpdateFunction(0, false, false, nil))
+	update := scm.NewFunc(outer.ActiveShards()[0].UpdateFunction(0, false, false, nil, nil))
 	env := &scm.Env{Vars: scm.Vars{scm.Symbol("outer_update"): update}, Outer: &scm.Globalenv}
 	mapper := scm.Eval(scm.Read(t.Name(), `(lambda (acc update) (begin (outer_update (list "payload" "outer")) (update (list "payload" "inner")) (+ acc 1)))`, true), env)
 	stub := &storageShard{uuid: inner.ActiveShards()[0].uuid, t: inner}

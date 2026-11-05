@@ -23,6 +23,7 @@ import "sync"
 import "bytes"
 import "regexp"
 import "unsafe"
+import "context"
 import "net/url"
 import "strings"
 import "unicode"
@@ -37,6 +38,35 @@ import "encoding/base64"
 import "github.com/google/uuid"
 import "golang.org/x/text/collate"
 import "golang.org/x/text/language"
+
+// CaseFoldKey chooses one representative per Unicode SimpleFold class, matching
+// strings.EqualFold without locale-dependent lowercasing or numeric folding.
+func CaseFoldKey(name string) string {
+	for i := 0; i < len(name); i++ {
+		if name[i] >= utf8.RuneSelf {
+			var b strings.Builder
+			b.Grow(len(name))
+			for _, r := range name {
+				canonical := r
+				for folded := unicode.SimpleFold(r); folded != r; folded = unicode.SimpleFold(folded) {
+					if folded < canonical {
+						canonical = folded
+					}
+				}
+				// ASCII and non-ASCII members of one SimpleFold class must use
+				// the same representative (for example K and the Kelvin sign).
+				// Only normalize ASCII representatives: Unicode lowercasing can
+				// merge separate classes, such as dotted I and ASCII i.
+				if canonical >= 'A' && canonical <= 'Z' {
+					canonical += 'a' - 'A'
+				}
+				b.WriteRune(canonical)
+			}
+			return b.String()
+		}
+	}
+	return strings.ToLower(name)
+}
 
 // Collation metadata registry for stable serialization of comparator closures.
 // Keyed by function pointer.
@@ -189,6 +219,364 @@ func fnvHashString(value string) string {
 }
 
 // (no additional globals needed)
+
+var collationPattern = regexp.MustCompile("^([^_]+_)?(.+?)$")
+
+type collationRelation struct {
+	name    string
+	reverse bool
+}
+
+var collationRelationType = RegisterCallableType(&TypeDescriptor{
+	Kind: "func", Params: []*TypeDescriptor{{Kind: "any"}, {Kind: "any"}},
+	Return: &TypeDescriptor{Kind: "bool"},
+})
+
+func (*collationRelation) ClusterObjectType() string { return "collation" }
+func (relation *collationRelation) Serialize(*SerializationContext) (Scmer, error) {
+	return NewSlice([]Scmer{NewSymbol("collate"), NewString(relation.name), NewBool(relation.reverse)}), nil
+}
+func (relation *collationRelation) HandleClusterRequest(_ context.Context, request ClusterRequest) (any, error) {
+	if request.Method == "view" {
+		return NewSlice([]Scmer{NewString(relation.name), NewBool(relation.reverse)}), nil
+	}
+	return NewNil(), fmt.Errorf("collation comparisons are reconstructed locally")
+}
+
+func newCollationRelation(call func(...Scmer) Scmer, name string, reverse bool) Scmer {
+	return NewClusterFunc(call, &collationRelation{name: name, reverse: reverse}, collationRelationType)
+}
+
+// Collate constructs the canonical order relation without consulting a mutable
+// Scheme environment. The builtin and engine metadata decoder share this cache.
+func Collate(a ...Scmer) Scmer {
+	collationName := String(a[0])
+	reverse := len(a) > 1 && ToBool(a[1])
+	key := collateCacheKey{Collation: collationName, Reverse: reverse}
+	if cached, ok := collateCache.Load(key); ok {
+		return cached.(Scmer)
+	}
+	if collationName == "unicode-simple-fold" || collationName == "unicode-string" {
+		keyOf := func(value Scmer) string {
+			if collationName == "unicode-simple-fold" {
+				return CaseFoldKey(String(value))
+			}
+			return String(value)
+		}
+		less := func(left, right Scmer) bool {
+			if reverse {
+				left, right = right, left
+			}
+			if left.IsNil() || right.IsNil() {
+				return left.IsNil() && !right.IsNil()
+			}
+			return keyOf(left) < keyOf(right)
+		}
+		fn := func(args ...Scmer) Scmer { return NewBool(less(args[0], args[1])) }
+		result := newCollationRelation(fn, collationName, reverse)
+		collateRegistry.Store(FunctionIdentity(fn), struct {
+			Collation string
+			Reverse   bool
+		}{Collation: collationName, Reverse: reverse})
+		collateLessRegistry.Store(FunctionIdentity(fn), less)
+		canonical, _ := collateCache.LoadOrStore(key, result)
+		metadata := collationName + ":asc"
+		if reverse {
+			metadata = collationName + ":desc"
+		}
+		collateKeyRegistry.LoadOrStore(metadata, collationKeyDescriptor{Reverse: reverse, Key: func(value Scmer) (string, bool) {
+			return keyOf(value), true
+		}})
+		return canonical.(Scmer)
+	}
+	// Binary and bare-charset relations are the dominant index case. Keep
+	// their canonical callback to one function dispatch: binaryCollationLess owns
+	// the required ASC NULL-first semantics, and swapping its operands owns
+	// DESC NULL-last semantics. A closure per metadata key keeps callback
+	// identity distinct even when two names have identical byte ordering.
+	if collationName == "bin" || collationName == "binary" || collationName == "utf8" || collationName == "utf8mb4" {
+		less := func(left, right Scmer) bool {
+			if reverse {
+				return binaryCollationLess(right, left)
+			}
+			return binaryCollationLess(left, right)
+		}
+		fn := func(args ...Scmer) Scmer {
+			return NewBool(less(args[0], args[1]))
+		}
+		result := newCollationRelation(fn, collationName, reverse)
+		collateRegistry.Store(FunctionIdentity(fn), struct {
+			Collation string
+			Reverse   bool
+		}{Collation: collationName, Reverse: reverse})
+		collateLessRegistry.Store(FunctionIdentity(fn), less)
+		canonical, _ := collateCache.LoadOrStore(key, result)
+		return canonical.(Scmer)
+	}
+	var collationKey CollationKeyFunc
+	raw := func() Scmer {
+		collation := String(a[0])
+		// Bare charset names carry no language/case ordering. SQL columns use
+		// them as their default metadata and historically sort bytewise.
+		if collation == "utf8" || collation == "utf8mb4" || collation == "binary" {
+			collation = "bin"
+		}
+		ci := false
+		if strings.HasSuffix(collation, "_ci") {
+			ci = true
+			collation = collation[:len(collation)-3]
+		} else if strings.HasSuffix(collation, "_cs") {
+			collation = collation[:len(collation)-3]
+		}
+		if m := collationPattern.FindStringSubmatch(collation); m != nil {
+			if m[2] == "bin" { // binary
+				// Return closures that compare raw UTF-8 byte order; register for serialization
+				if len(a) > 1 && ToBool(a[1]) {
+					f := func(a ...Scmer) Scmer { return NewBool(binaryCollationLess(a[1], a[0])) }
+					collateRegistry.Store(FunctionIdentity(f), struct {
+						Collation string
+						Reverse   bool
+					}{Collation: String(a[0]), Reverse: true})
+					return NewFunc(f)
+				}
+				f := func(a ...Scmer) Scmer { return NewBool(binaryCollationLess(a[0], a[1])) }
+				collateRegistry.Store(FunctionIdentity(f), struct {
+					Collation string
+					Reverse   bool
+				}{Collation: String(a[0]), Reverse: false})
+				return NewFunc(f)
+			}
+			base := m[2]
+			// Special-case MySQL-style "general" to simple case-insensitive first-letter ordering
+			if strings.Contains(base, "general") {
+				reverse := len(a) > 1 && ToBool(a[1])
+				// general_ci heuristic:
+				// - ASCII letters sort before non-ASCII always (both ASC and DESC).
+				// - Treat leading "aa" as non-ASCII class to place after ASCII group in ASC and after ASCII even in DESC.
+				// - Within ASCII, compare by lowercase first letter; tie-break by case-insensitive string compare.
+				classify := func(s string) (isASCII bool, key byte) {
+					if s == "" {
+						return true, 0
+					}
+					// map leading "aa" to non-ASCII class
+					if len(s) >= 2 && asciiFoldByte(s[0]) == 'a' && asciiFoldByte(s[1]) == 'a' {
+						return false, 0
+					}
+					b := asciiFoldByte(s[0])
+					// check ASCII letter
+					if b >= 'a' && b <= 'z' && (s[0] < 128) {
+						return true, b
+					}
+					return false, 0
+				}
+				if reverse {
+					f := func(a ...Scmer) Scmer {
+						if isCompressedText(a[0]) || isCompressedText(a[1]) {
+							if result, ok := generalCStringLess(a[0], a[1], reverse); ok {
+								return NewBool(result)
+							}
+						}
+						as := String(a[0])
+						bs := String(a[1])
+						aAsc, ak := classify(as)
+						bAsc, bk := classify(bs)
+						var res bool
+						if aAsc != bAsc {
+							// ASCII ranks above non-ASCII for DESC too
+							res = aAsc && !bAsc
+						} else if aAsc { // both ASCII letters: reverse letter order
+							if ak != bk {
+								res = ak > bk
+							} else {
+								res = generalCIFoldCompare(as, bs) > 0
+							}
+						} else {
+							// both non-ASCII: keep stable fallback
+							res = as > bs
+						}
+						return NewBool(res)
+					}
+					collateRegistry.Store(FunctionIdentity(f), struct {
+						Collation string
+						Reverse   bool
+					}{Collation: String(a[0]), Reverse: true})
+					return NewFunc(f)
+				}
+				f := func(a ...Scmer) Scmer {
+					if isCompressedText(a[0]) || isCompressedText(a[1]) {
+						if result, ok := generalCStringLess(a[0], a[1], reverse); ok {
+							return NewBool(result)
+						}
+					}
+					as := String(a[0])
+					bs := String(a[1])
+					aAsc, ak := classify(as)
+					bAsc, bk := classify(bs)
+					var res bool
+					if aAsc != bAsc {
+						// ASCII first for ASC
+						res = aAsc && !bAsc
+					} else if aAsc { // both ASCII letters
+						if ak != bk {
+							res = ak < bk
+						} else {
+							res = generalCIFoldCompare(as, bs) < 0
+						}
+					} else {
+						// both non-ASCII: leave at end
+						res = as < bs
+					}
+					return NewBool(res)
+				}
+				collateRegistry.Store(FunctionIdentity(f), struct {
+					Collation string
+					Reverse   bool
+				}{Collation: String(a[0]), Reverse: false})
+				return NewFunc(f)
+			}
+			tag, err := language.Parse(base) // treat as BCP 47
+			if err != nil {
+				// language not detected, try one of the aliases
+				switch m[2] {
+				case "danish":
+					tag = language.Danish
+				case "german1":
+					tag = language.German
+				case "german2":
+					tag = language.German
+				case "spanish":
+					tag = language.Spanish
+				case "swedish":
+					tag = language.Swedish
+				default:
+					tag = language.Danish // default to danish for general-like collations (aa -> å semantics)
+				}
+			}
+			newCollator := func() *collate.Collator {
+				if ci {
+					return collate.New(tag, collate.Numeric, collate.IgnoreCase)
+				}
+				return collate.New(tag, collate.Numeric)
+			}
+			var c *collate.Collator
+			// the following options are available:
+			// IgnoreCase -> when string ends with _ci
+			// IgnoreDiacritics -> o == ö
+			// IgnoreWidth: half width == width
+			// Numeric -> sort numbers correctly
+			c = newCollator()
+			type keyWorker struct {
+				collator *collate.Collator
+				buffer   collate.Buffer
+			}
+			var keyPool sync.Pool
+			keyPool.New = func() any { return &keyWorker{collator: newCollator()} }
+			collationKey = func(value Scmer) (string, bool) {
+				if value.IsNil() {
+					return "", true
+				}
+				// The relation stringifies every non-numeric pair before handing it
+				// to x/text. Do the same here, including source-info wrapped values
+				// emitted by query plans. Numeric pairs retain their native ordering
+				// and therefore stay on the comparator fallback.
+				if value.IsInt() || value.IsFloat() {
+					return "", false
+				}
+				worker := keyPool.Get().(*keyWorker)
+				worker.buffer.Reset()
+				key := string(worker.collator.KeyFromString(&worker.buffer, String(value)))
+				keyPool.Put(worker)
+				return key, true
+			}
+
+			// return a LESS function specialized to that language and register for serialization
+			reverse := len(a) > 1 && ToBool(a[1])
+			if reverse {
+				f := func(a ...Scmer) Scmer {
+					var res bool
+					// numeric fallback when both operands are numbers
+					if (a[0].IsInt() || a[0].IsFloat()) && (a[1].IsInt() || a[1].IsFloat()) {
+						res = ToFloat(a[0]) > ToFloat(a[1])
+					}
+					if !res {
+						res = c.CompareString(String(a[0]), String(a[1])) == 1
+					}
+					return NewBool(res)
+				}
+				collateRegistry.Store(FunctionIdentity(f), struct {
+					Collation string
+					Reverse   bool
+				}{Collation: String(a[0]), Reverse: true})
+				return NewFunc(f)
+			}
+			f := func(a ...Scmer) Scmer {
+				// numeric fallback when both operands are numbers
+				if (a[0].IsInt() || a[0].IsFloat()) && (a[1].IsInt() || a[1].IsFloat()) {
+					return NewBool(ToFloat(a[0]) < ToFloat(a[1]))
+				}
+				return NewBool(c.CompareString(String(a[0]), String(a[1])) == -1)
+			}
+			collateRegistry.Store(FunctionIdentity(f), struct {
+				Collation string
+				Reverse   bool
+			}{Collation: String(a[0]), Reverse: false})
+			return NewFunc(f)
+		} else {
+			if len(a) > 1 && ToBool(a[1]) {
+				return NewFunc(GreaterScm)
+			}
+			return NewFunc(LessScm)
+		}
+	}()
+	rawFn := raw.Func()
+	/* Calling a variadic Scheme callback with two scalar arguments makes
+	the argument array escape at every comparison. Index construction may
+	perform millions of comparisons, so retain one frame per concurrent
+	caller instead of feeding the garbage collector one tiny object each
+	time. The callback itself is immutable; only the argument frame needs
+	worker-local ownership. */
+	var rawArgsPool sync.Pool
+	rawArgsPool.New = func() any { return new([2]Scmer) }
+	less := func(left, right Scmer) bool {
+		leftNil := left.IsNil()
+		rightNil := right.IsNil()
+		if leftNil || rightNil {
+			if leftNil && rightNil {
+				return false
+			}
+			if reverse {
+				return !leftNil && rightNil
+			}
+			return leftNil && !rightNil
+		}
+		args := rawArgsPool.Get().(*[2]Scmer)
+		args[0], args[1] = left, right
+		result := ToBool(rawFn(args[:]...))
+		args[0], args[1] = NewNil(), NewNil()
+		rawArgsPool.Put(args)
+		return result
+	}
+	fn := func(args ...Scmer) Scmer {
+		return NewBool(less(args[0], args[1]))
+	}
+	result := newCollationRelation(fn, collationName, reverse)
+	collateRegistry.Store(FunctionIdentity(fn), struct {
+		Collation string
+		Reverse   bool
+	}{Collation: collationName, Reverse: reverse})
+	collateLessRegistry.Store(FunctionIdentity(fn), less)
+	canonical, _ := collateCache.LoadOrStore(key, result)
+	canonicalValue := canonical.(Scmer)
+	if collationKey != nil {
+		order := ":asc"
+		if reverse {
+			order = ":desc"
+		}
+		collateKeyRegistry.LoadOrStore(collationName+order,
+			collationKeyDescriptor{Key: collationKey, Reverse: reverse})
+	}
+	return canonicalValue
+}
 
 // LookupCollate returns (collation, reverse, ok) for a previously built collate closure.
 func LookupCollate(fn func(...Scmer) Scmer) (string, bool, bool) {
@@ -17416,305 +17804,10 @@ func init_strings() {
 	})
 
 	/* comparison */
-	collation_re := regexp.MustCompile("^([^_]+_)?(.+?)$") // caracterset_language_case
 	Declare(&Globalenv, &Declaration{
 		Name: "collate",
 
-		Fn: func(a ...Scmer) Scmer {
-			collationName := String(a[0])
-			reverse := len(a) > 1 && ToBool(a[1])
-			key := collateCacheKey{Collation: collationName, Reverse: reverse}
-			if cached, ok := collateCache.Load(key); ok {
-				return cached.(Scmer)
-			}
-			// Binary and bare-charset relations are the dominant index case. Keep
-			// their canonical callback to one function dispatch: binaryCollationLess owns
-			// the required ASC NULL-first semantics, and swapping its operands owns
-			// DESC NULL-last semantics. A closure per metadata key keeps callback
-			// identity distinct even when two names have identical byte ordering.
-			if collationName == "bin" || collationName == "binary" || collationName == "utf8" || collationName == "utf8mb4" {
-				less := func(left, right Scmer) bool {
-					if reverse {
-						return binaryCollationLess(right, left)
-					}
-					return binaryCollationLess(left, right)
-				}
-				fn := func(args ...Scmer) Scmer {
-					return NewBool(less(args[0], args[1]))
-				}
-				result := NewFunc(fn)
-				collateRegistry.Store(FunctionIdentity(fn), struct {
-					Collation string
-					Reverse   bool
-				}{Collation: collationName, Reverse: reverse})
-				collateLessRegistry.Store(FunctionIdentity(fn), less)
-				canonical, _ := collateCache.LoadOrStore(key, result)
-				return canonical.(Scmer)
-			}
-			var collationKey CollationKeyFunc
-			raw := func() Scmer {
-				collation := String(a[0])
-				// Bare charset names carry no language/case ordering. SQL columns use
-				// them as their default metadata and historically sort bytewise.
-				if collation == "utf8" || collation == "utf8mb4" || collation == "binary" {
-					collation = "bin"
-				}
-				ci := false
-				if strings.HasSuffix(collation, "_ci") {
-					ci = true
-					collation = collation[:len(collation)-3]
-				} else if strings.HasSuffix(collation, "_cs") {
-					collation = collation[:len(collation)-3]
-				}
-				if m := collation_re.FindStringSubmatch(collation); m != nil {
-					if m[2] == "bin" { // binary
-						// Return closures that compare raw UTF-8 byte order; register for serialization
-						if len(a) > 1 && ToBool(a[1]) {
-							f := func(a ...Scmer) Scmer { return NewBool(binaryCollationLess(a[1], a[0])) }
-							collateRegistry.Store(FunctionIdentity(f), struct {
-								Collation string
-								Reverse   bool
-							}{Collation: String(a[0]), Reverse: true})
-							return NewFunc(f)
-						}
-						f := func(a ...Scmer) Scmer { return NewBool(binaryCollationLess(a[0], a[1])) }
-						collateRegistry.Store(FunctionIdentity(f), struct {
-							Collation string
-							Reverse   bool
-						}{Collation: String(a[0]), Reverse: false})
-						return NewFunc(f)
-					}
-					base := m[2]
-					// Special-case MySQL-style "general" to simple case-insensitive first-letter ordering
-					if strings.Contains(base, "general") {
-						reverse := len(a) > 1 && ToBool(a[1])
-						// general_ci heuristic:
-						// - ASCII letters sort before non-ASCII always (both ASC and DESC).
-						// - Treat leading "aa" as non-ASCII class to place after ASCII group in ASC and after ASCII even in DESC.
-						// - Within ASCII, compare by lowercase first letter; tie-break by case-insensitive string compare.
-						classify := func(s string) (isASCII bool, key byte) {
-							if s == "" {
-								return true, 0
-							}
-							// map leading "aa" to non-ASCII class
-							if len(s) >= 2 && asciiFoldByte(s[0]) == 'a' && asciiFoldByte(s[1]) == 'a' {
-								return false, 0
-							}
-							b := asciiFoldByte(s[0])
-							// check ASCII letter
-							if b >= 'a' && b <= 'z' && (s[0] < 128) {
-								return true, b
-							}
-							return false, 0
-						}
-						if reverse {
-							f := func(a ...Scmer) Scmer {
-								if isCompressedText(a[0]) || isCompressedText(a[1]) {
-									if result, ok := generalCStringLess(a[0], a[1], reverse); ok {
-										return NewBool(result)
-									}
-								}
-								as := String(a[0])
-								bs := String(a[1])
-								aAsc, ak := classify(as)
-								bAsc, bk := classify(bs)
-								var res bool
-								if aAsc != bAsc {
-									// ASCII ranks above non-ASCII for DESC too
-									res = aAsc && !bAsc
-								} else if aAsc { // both ASCII letters: reverse letter order
-									if ak != bk {
-										res = ak > bk
-									} else {
-										res = generalCIFoldCompare(as, bs) > 0
-									}
-								} else {
-									// both non-ASCII: keep stable fallback
-									res = as > bs
-								}
-								return NewBool(res)
-							}
-							collateRegistry.Store(FunctionIdentity(f), struct {
-								Collation string
-								Reverse   bool
-							}{Collation: String(a[0]), Reverse: true})
-							return NewFunc(f)
-						}
-						f := func(a ...Scmer) Scmer {
-							if isCompressedText(a[0]) || isCompressedText(a[1]) {
-								if result, ok := generalCStringLess(a[0], a[1], reverse); ok {
-									return NewBool(result)
-								}
-							}
-							as := String(a[0])
-							bs := String(a[1])
-							aAsc, ak := classify(as)
-							bAsc, bk := classify(bs)
-							var res bool
-							if aAsc != bAsc {
-								// ASCII first for ASC
-								res = aAsc && !bAsc
-							} else if aAsc { // both ASCII letters
-								if ak != bk {
-									res = ak < bk
-								} else {
-									res = generalCIFoldCompare(as, bs) < 0
-								}
-							} else {
-								// both non-ASCII: leave at end
-								res = as < bs
-							}
-							return NewBool(res)
-						}
-						collateRegistry.Store(FunctionIdentity(f), struct {
-							Collation string
-							Reverse   bool
-						}{Collation: String(a[0]), Reverse: false})
-						return NewFunc(f)
-					}
-					tag, err := language.Parse(base) // treat as BCP 47
-					if err != nil {
-						// language not detected, try one of the aliases
-						switch m[2] {
-						case "danish":
-							tag = language.Danish
-						case "german1":
-							tag = language.German
-						case "german2":
-							tag = language.German
-						case "spanish":
-							tag = language.Spanish
-						case "swedish":
-							tag = language.Swedish
-						default:
-							tag = language.Danish // default to danish for general-like collations (aa -> å semantics)
-						}
-					}
-					newCollator := func() *collate.Collator {
-						if ci {
-							return collate.New(tag, collate.Numeric, collate.IgnoreCase)
-						}
-						return collate.New(tag, collate.Numeric)
-					}
-					var c *collate.Collator
-					// the following options are available:
-					// IgnoreCase -> when string ends with _ci
-					// IgnoreDiacritics -> o == ö
-					// IgnoreWidth: half width == width
-					// Numeric -> sort numbers correctly
-					c = newCollator()
-					type keyWorker struct {
-						collator *collate.Collator
-						buffer   collate.Buffer
-					}
-					var keyPool sync.Pool
-					keyPool.New = func() any { return &keyWorker{collator: newCollator()} }
-					collationKey = func(value Scmer) (string, bool) {
-						if value.IsNil() {
-							return "", true
-						}
-						// The relation stringifies every non-numeric pair before handing it
-						// to x/text. Do the same here, including source-info wrapped values
-						// emitted by query plans. Numeric pairs retain their native ordering
-						// and therefore stay on the comparator fallback.
-						if value.IsInt() || value.IsFloat() {
-							return "", false
-						}
-						worker := keyPool.Get().(*keyWorker)
-						worker.buffer.Reset()
-						key := string(worker.collator.KeyFromString(&worker.buffer, String(value)))
-						keyPool.Put(worker)
-						return key, true
-					}
-
-					// return a LESS function specialized to that language and register for serialization
-					reverse := len(a) > 1 && ToBool(a[1])
-					if reverse {
-						f := func(a ...Scmer) Scmer {
-							var res bool
-							// numeric fallback when both operands are numbers
-							if (a[0].IsInt() || a[0].IsFloat()) && (a[1].IsInt() || a[1].IsFloat()) {
-								res = ToFloat(a[0]) > ToFloat(a[1])
-							}
-							if !res {
-								res = c.CompareString(String(a[0]), String(a[1])) == 1
-							}
-							return NewBool(res)
-						}
-						collateRegistry.Store(FunctionIdentity(f), struct {
-							Collation string
-							Reverse   bool
-						}{Collation: String(a[0]), Reverse: true})
-						return NewFunc(f)
-					}
-					f := func(a ...Scmer) Scmer {
-						// numeric fallback when both operands are numbers
-						if (a[0].IsInt() || a[0].IsFloat()) && (a[1].IsInt() || a[1].IsFloat()) {
-							return NewBool(ToFloat(a[0]) < ToFloat(a[1]))
-						}
-						return NewBool(c.CompareString(String(a[0]), String(a[1])) == -1)
-					}
-					collateRegistry.Store(FunctionIdentity(f), struct {
-						Collation string
-						Reverse   bool
-					}{Collation: String(a[0]), Reverse: false})
-					return NewFunc(f)
-				} else {
-					if len(a) > 1 && ToBool(a[1]) {
-						return NewFunc(GreaterScm)
-					}
-					return NewFunc(LessScm)
-				}
-			}()
-			rawFn := raw.Func()
-			/* Calling a variadic Scheme callback with two scalar arguments makes
-			the argument array escape at every comparison. Index construction may
-			perform millions of comparisons, so retain one frame per concurrent
-			caller instead of feeding the garbage collector one tiny object each
-			time. The callback itself is immutable; only the argument frame needs
-			worker-local ownership. */
-			var rawArgsPool sync.Pool
-			rawArgsPool.New = func() any { return new([2]Scmer) }
-			less := func(left, right Scmer) bool {
-				leftNil := left.IsNil()
-				rightNil := right.IsNil()
-				if leftNil || rightNil {
-					if leftNil && rightNil {
-						return false
-					}
-					if reverse {
-						return !leftNil && rightNil
-					}
-					return leftNil && !rightNil
-				}
-				args := rawArgsPool.Get().(*[2]Scmer)
-				args[0], args[1] = left, right
-				result := ToBool(rawFn(args[:]...))
-				args[0], args[1] = NewNil(), NewNil()
-				rawArgsPool.Put(args)
-				return result
-			}
-			fn := func(args ...Scmer) Scmer {
-				return NewBool(less(args[0], args[1]))
-			}
-			result := NewFunc(fn)
-			collateRegistry.Store(FunctionIdentity(fn), struct {
-				Collation string
-				Reverse   bool
-			}{Collation: collationName, Reverse: reverse})
-			collateLessRegistry.Store(FunctionIdentity(fn), less)
-			canonical, _ := collateCache.LoadOrStore(key, result)
-			canonicalValue := canonical.(Scmer)
-			if collationKey != nil {
-				order := ":asc"
-				if reverse {
-					order = ":desc"
-				}
-				collateKeyRegistry.LoadOrStore(collationName+order,
-					collationKeyDescriptor{Key: collationKey, Reverse: reverse})
-			}
-			return canonicalValue
-		},
+		Fn: Collate,
 		Type: &TypeDescriptor{Kind: "func", Description: "returns a canonical order relation for a collation and direction. MemCP allows natural sorting of numeric literals.",
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", Label: "collation", Description: "collation string of the form LANG or LANG_cs or LANG_ci where LANG is a BCP 47 code, for compatibility to MySQL, a CHARSET_ prefix is allowed and ignored as well as the aliases bin, danish, general, german1, german2, spanish and swedish are allowed for language codes"}, &TypeDescriptor{Kind: "bool", Label: "reverse", Description: "whether to reverse the order like in ORDER BY DESC", Optional: true}},
 			Return: &TypeDescriptor{Kind: "func", Label: "relation", Description: "compares two values using the selected collation and direction",

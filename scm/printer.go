@@ -670,15 +670,15 @@ func serializeNativeFunc(b *schemeTextWriter, fn any, en *Env) {
 			return
 		}
 		if col, rev, ok := LookupCollate(f); ok {
-			b.WriteString("(collate \"")
-			b.WriteString(strings.ReplaceAll(col, "\"", "\\\""))
-			b.WriteString("\" ")
-			if rev {
-				b.WriteString("true")
-			} else {
-				b.WriteString("false")
+			// Native operator metadata can retain only the raw function. Restore
+			// its canonical value so network captures also reconstruct once.
+			if b.objects != nil {
+				serializeEx(b, Collate(NewString(col), NewBool(rev)), &Globalenv, &Globalenv, nil)
+				return
 			}
-			b.WriteByte(')')
+			relation := &collationRelation{name: col, reverse: rev}
+			expression, _ := relation.Serialize(b.objects)
+			serializeEx(b, expression, &Globalenv, &Globalenv, nil)
 			return
 		}
 	}

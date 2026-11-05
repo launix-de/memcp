@@ -18,51 +18,284 @@ package storage
 
 import "math"
 import "sync"
+import "slices"
 import "unsafe"
+import "context"
 import "runtime"
+import "strings"
 import "math/bits"
+import "sync/atomic"
+import "encoding/binary"
+import "github.com/cespare/xxhash/v2"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/memcp/storage/mosi"
+import "github.com/launix-de/go-mysqlstack/sqldb"
 
-// UNIQUE guards belong to the logical table, independently of physical shard
-// generations. Equal keys use the same stripe across rebuild/repartition; an
-// unrelated key does not hold a table-wide mutex during lookup, WAL or fsync.
-// Large batches acquire their stripe set in ascending order, once per batch.
-type uniqueWriteLocks [64]sync.Mutex
-
-type uniqueWriteGuard struct {
-	locks      *uniqueWriteLocks
-	mask       uint64
-	held       bool
-	readProofs []uniqueReadProof
-	wrote      bool
-	version    uint64 // advances when a collision callback temporarily releases guards
+// One node-wide pool bounds synchronization metadata independently of table and
+// row counts. GOMAXPROCS uses the runtime's container-aware CPU budget. Never
+// resize a live pool: existing reservations must keep the same stripe mapping.
+type UniqueLockPool struct {
+	stripes []uniqueWriteStripe
 }
 
-// Read validation adds no reader registration. The existing generation and MOSI
-// publication prove that another node has not invalidated a UNIQUE input. The
-// success callback validates only after acquiring its native destination writer.
-type uniqueReadProof struct {
+var uniquePoolStartupFactor atomic.Int64
+
+func init() { uniquePoolStartupFactor.Store(4) }
+
+var nodeUniqueWriteLocks = sync.OnceValue(func() *UniqueLockPool {
+	return &UniqueLockPool{stripes: make([]uniqueWriteStripe, uniqueWriteStripeCount(int(uniquePoolStartupFactor.Load())))}
+})
+
+// Padding separates unrelated contended mutexes onto separate cache lines.
+// This storage is node-global, never per table, constraint or record.
+type uniqueWriteStripe struct {
+	sync.Mutex
+	_ [64 - unsafe.Sizeof(sync.Mutex{})]byte
+}
+
+func uniqueWriteStripeCount(factor int) int {
+	if factor == 0 {
+		return 1
+	}
+	return factor * runtime.GOMAXPROCS(0)
+}
+
+// Keep ordinary CPU budgets allocation-free, while supporting pools larger
+// than 128 stripes. This mask belongs to an invocation, never to a table.
+type uniqueWriteMask struct {
+	words [2]uint64
+	extra []uint64
+}
+
+func (m uniqueWriteMask) word(i int) uint64 {
+	if i < len(m.words) {
+		return m.words[i]
+	}
+	if i -= len(m.words); i < len(m.extra) {
+		return m.extra[i]
+	}
+	return 0
+}
+
+func (m *uniqueWriteMask) addWord(i int, bits uint64) {
+	if bits == 0 {
+		return
+	}
+	if i < len(m.words) {
+		m.words[i] |= bits
+		return
+	}
+	i -= len(m.words)
+	if i >= len(m.extra) {
+		extra := make([]uint64, (len(nodeUniqueWriteLocks().stripes)+63)/64-len(m.words))
+		copy(extra, m.extra)
+		m.extra = extra
+	}
+	m.extra[i] |= bits
+}
+
+func (m *uniqueWriteMask) add(i int) { m.addWord(i/64, uint64(1)<<uint(i%64)) }
+
+func (m uniqueWriteMask) contains(other uniqueWriteMask) bool {
+	for i := 0; i < len(other.words)+len(other.extra); i++ {
+		if other.word(i)&^m.word(i) != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func (m uniqueWriteMask) empty() bool { return (uniqueWriteMask{}).contains(m) }
+
+func (m uniqueWriteMask) intersects(other uniqueWriteMask) bool {
+	for i := 0; i < len(m.words)+len(m.extra); i++ {
+		if m.word(i)&other.word(i) != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *uniqueWriteMask) include(other uniqueWriteMask) {
+	for i := 0; i < len(other.words)+len(other.extra); i++ {
+		m.addWord(i, other.word(i))
+	}
+}
+
+type uniqueWriteGuard struct {
+	afterTriggers []uniqueAfterTrigger
+	ownedShard    *storageShard // an UPDATE already owns this native MOSI writer
+	reservations  *uniqueReservationSet
+	mutation      *mosi.Writer
+	table         *table // SQL table-lock admission; the stripe pool remains node-global
+	tx            *TxContext
+	admitted      bool
+	locks         *UniqueLockPool
+	mask          uniqueWriteMask
+	held          bool
+	wrote         bool
+	version       uint64 // advances when a collision callback temporarily releases guards
+}
+
+// AFTER triggers run after the mutation's key reservations are released. They
+// may issue ordinary queries against the same keys; retaining a key stripe
+// across that query would deadlock. The event owns row values, never recids.
+type uniqueAfterTrigger struct {
 	table    *table
-	topology *tableShardTopology
-	shard    *storageShard
+	timing   TriggerTiming
+	old, new dataset
+	tx       *TxContext
+}
+
+func (g *uniqueWriteGuard) after(event uniqueAfterTrigger) {
+	if g == nil {
+		event.table.ExecuteTriggers(event.timing, event.old, event.new, event.tx)
+		return
+	}
+	g.afterTriggers = append(g.afterTriggers, event)
+}
+
+func (g *uniqueWriteGuard) release() {
+	g.unlock()
+	if g.mutation != nil {
+		g.mutation.Release()
+		g.mutation = nil
+	}
+	events := g.afterTriggers
+	g.afterTriggers = nil
+	for _, event := range events {
+		event.table.ExecuteTriggers(event.timing, event.old, event.new, event.tx)
+	}
 }
 
 type uniqueReadRetry struct{}
 
 func (g *uniqueWriteGuard) validReads() bool {
-	for _, proof := range g.readProofs {
-		if proof.table != nil {
-			if proof.table.topology.Load().routing != proof.topology.routing || !activeNodeCluster().manager.resourceCell(mosiResource{Database: proof.table.schema.Name}).ownstate.Phase().Readable() {
-				return false
-			}
-		} else {
-			cell := proof.shard.coherence.Load()
-			if cell == nil {
-				return false
-			}
-			cell = cell.resolved()
-			if !cell.ownstate.Phase().Readable() || cell.publishedShard() != proof.shard {
+	return g.reservations == nil || g.reservations.valid()
+}
+
+// Forward UNIQUE existence checks before acquiring local shard payload. Warm
+// readable local shards keep the direct path; other owners run the same native
+// reservation/visibility kernel through the ordinary scan protocol.
+func (s *storageShard) probeUnique(access scanAccess, tx *TxContext) bool {
+	if !sharedClusterSource(s.t) {
+		lease := s.GetRead(tx, false)
+		defer lease.Release()
+		_, found := lease.shard.GetRecordidForUnique(access, tx, true)
+		return found
+	}
+	cluster := activeNodeCluster()
+	resource := mosiResource{Database: s.t.schema.Name, Table: s.t.Name, Shard: s.uuid.String()}
+	local := false
+	if cell := s.coherence.Load(); cell != nil {
+		state := cell.resolved().ownstate.Snapshot()
+		local = state.Phase().Readable() && s.state() != COLD || state.Flight() != nil
+	}
+	owner := cluster.self.ID
+	if !local {
+		var err error
+		owner, err = cluster.locate(scanQueryContext(tx, cluster.ctx), resource)
+		if err != nil {
+			panic(err)
+		}
+	}
+	if local || owner == cluster.self.ID {
+		delegated := false
+		found := false
+		func() {
+			defer func() {
+				if failure := recover(); failure != nil {
+					if _, capacity := failure.(shardReadDelegation); capacity {
+						delegated = true
+					} else {
+						panic(failure)
+					}
+				}
+			}()
+			lease := s.getRead(tx, shardReadOptions{mutation: true})
+			defer lease.Release()
+			_, found = lease.shard.GetRecordidForUnique(access, tx, true)
+		}()
+		if !delegated {
+			return found
+		}
+	}
+	var preferred *clusterLink
+	for _, link := range cluster.view.Load().links {
+		if link.member.ID == owner {
+			preferred = link
+			break
+		}
+	}
+	executor := clusterScanExecutor{cluster: cluster, preferred: preferred, expected: remoteScanShard{Schema: s.t.filterSchemaFingerprint(), Resource: resource}}
+	result := executor.ExecuteShardScan(resource, shardScanInvocation{operator: shardUniqueProbe, tx: tx, access: access})
+	if result.err.r != nil {
+		panic(result.err)
+	}
+	return result.res.Bool()
+}
+
+func (g *uniqueWriteGuard) lock() {
+	for !g.admit() {
+		g.table.waitTableLock(SessionStateFromTx(g.tx), querySeqFromTx(g.tx), true)
+	}
+	for word := 0; word < len(g.mask.words)+len(g.mask.extra); word++ {
+		for mask := g.mask.word(word); mask != 0; mask &= mask - 1 {
+			g.locks.stripes[word*64+bits.TrailingZeros64(mask)].Lock()
+		}
+	}
+	g.held = true
+}
+
+// A published table lock closes admission to new UNIQUE writers. Writers
+// admitted before publication may finish; the table-lock owner waits for them
+// before entering its snapshot/DDL. Never wait for that owner with stripes held.
+func (g *uniqueWriteGuard) admit() bool {
+	if g.table == nil || g.admitted {
+		return true
+	}
+	g.table.tableLockWriters.Add(1)
+	g.admitted = true
+	owner := g.table.tableLockOwner.Load()
+	if g.table.hasTableLock() && (owner == nil || owner != SessionStateFromTx(g.tx)) {
+		g.depart()
+		return false
+	}
+	return true
+}
+
+func (g *uniqueWriteGuard) depart() {
+	if !g.admitted {
+		return
+	}
+	g.admitted = false
+	if g.table.tableLockWriters.Add(-1) == 0 && g.table.hasTableLock() {
+		g.table.tableLockMu.Lock()
+		g.table.getTableLockCond().Broadcast()
+		g.table.tableLockMu.Unlock()
+	}
+}
+
+func (g *uniqueWriteGuard) admittedTo(t *table) bool {
+	return g != nil && g.admitted && g.table == t
+}
+
+// Try additional stripes in ascending order. On conflict, release only the
+// newly acquired prefix; existing ownership remains intact for error cleanup.
+func (g *uniqueWriteGuard) tryAdditional(needed uniqueWriteMask) bool {
+	for word := 0; word < len(needed.words)+len(needed.extra); word++ {
+		for mask := needed.word(word) &^ g.mask.word(word); mask != 0; mask &= mask - 1 {
+			i := word*64 + bits.TrailingZeros64(mask)
+			if !g.locks.stripes[i].TryLock() {
+				for previous := 0; previous <= word; previous++ {
+					for acquired := needed.word(previous) &^ g.mask.word(previous); acquired != 0; acquired &= acquired - 1 {
+						j := previous*64 + bits.TrailingZeros64(acquired)
+						if j >= i {
+							break
+						}
+						g.locks.stripes[j].Unlock()
+					}
+				}
 				return false
 			}
 		}
@@ -70,24 +303,52 @@ func (g *uniqueWriteGuard) validReads() bool {
 	return true
 }
 
-func (g *uniqueWriteGuard) lock() {
-	for mask := g.mask; mask != 0; mask &= mask - 1 {
-		g.locks[bits.TrailingZeros64(mask)].Lock()
+func (g *uniqueWriteGuard) tryLock() bool {
+	if !g.admit() {
+		return false
 	}
-	g.held = true
+	needed := g.mask
+	g.mask = uniqueWriteMask{}
+	ok := g.tryAdditional(needed)
+	g.mask = needed
+	g.held = ok
+	if !ok {
+		g.depart()
+	}
+	return ok
 }
 
 func (g *uniqueWriteGuard) unlock() {
 	if !g.held {
 		return
 	}
-	for mask := g.mask; mask != 0; {
-		i := bits.Len64(mask) - 1
-		g.locks[i].Unlock()
-		mask &^= uint64(1) << i
+	for word := len(g.mask.words) + len(g.mask.extra) - 1; word >= 0; word-- {
+		for mask := g.mask.word(word); mask != 0; {
+			i := bits.Len64(mask) - 1
+			g.locks.stripes[word*64+i].Unlock()
+			mask &^= uint64(1) << i
+		}
 	}
 	g.held = false
 	g.version++
+	g.depart()
+}
+
+// A collision update may change UNIQUE columns. Borrow the existing key
+// ownership and acquire any additional stripes without waiting: two callbacks
+// changing keys in opposite directions must fail explicitly, never deadlock.
+func (g *uniqueWriteGuard) extend(mask uniqueWriteMask) {
+	if !g.held {
+		g.mask = mask
+		if !g.tryLock() {
+			panic(sqldb.NewSQLError1(1213, "40001", "Concurrent UNIQUE key change; retry transaction"))
+		}
+		return
+	}
+	if !g.tryAdditional(mask) {
+		panic(sqldb.NewSQLError1(1213, "40001", "Concurrent UNIQUE key change; retry transaction"))
+	}
+	g.mask.include(mask)
 }
 
 // Equal is deliberately coercing: ints can equal numeric strings/dates and
@@ -105,7 +366,7 @@ func uniqueGuardHash(value scm.Scmer) (uint64, bool) {
 		// Use the runtime's numeric-prefix conversion ("12x" equals 12).
 		number = value.Float()
 		if number == 0 {
-			return scm.HashKey(scm.NewString(text)), true
+			return xxhash.Sum64String(text), true
 		}
 	default:
 		return 0, false
@@ -114,11 +375,152 @@ func uniqueGuardHash(value scm.Scmer) (uint64, bool) {
 	if number == 0 || math.IsNaN(number) || math.IsInf(number, 0) {
 		return 0, false
 	}
-	return scm.HashKey(scm.NewFloat(number)), true
+	var encoded [8]byte
+	binary.LittleEndian.PutUint64(encoded[:], math.Float64bits(number))
+	return xxhash.Sum64(encoded[:]), true
 }
 
-func (t *table) guardUniqueWrites(columns []string, values [][]scm.Scmer, mergeNull bool, first int) uniqueWriteGuard {
-	var mask uint64
+func uniqueColumnValue(declaration *column, value scm.Scmer) scm.Scmer {
+	if value.IsNil() {
+		return value
+	}
+	if declaration.sanitizer != nil {
+		return declaration.sanitizer(value)
+	}
+	switch strings.ToUpper(declaration.Typ) {
+	case "TEXT", "TINYTEXT", "MEDIUMTEXT", "LONGTEXT", "VARCHAR", "CHAR":
+		return scm.NewString(scm.String(value))
+	}
+	return value
+}
+
+// UNIQUE comparison and hashing share the declared type/collation contract,
+// independently of plain, compressed and UUID string representations.
+func (t *table) uniqueColumnDeclaration(columnName string) *column {
+	for _, candidate := range t.columnDeclarations() {
+		if candidate.Name == columnName {
+			return candidate
+		}
+	}
+	return nil
+}
+
+func (t *table) uniqueColumnEqual(columnName string) func(scm.Scmer, scm.Scmer) bool {
+	declaration := t.uniqueColumnDeclaration(columnName)
+	return func(a, b scm.Scmer) bool { return uniqueColumnValuesEqual(declaration, a, b) }
+}
+
+func uniqueColumnValuesEqual(declaration *column, a, b scm.Scmer) bool {
+	typed := declaration != nil && declaration.Typ != "" && !strings.EqualFold(declaration.Typ, "any")
+	if typed && (a.IsNil() || b.IsNil()) {
+		return a.IsNil() && b.IsNil()
+	}
+	if typed {
+		a, b = uniqueColumnValue(declaration, a), uniqueColumnValue(declaration, b)
+	}
+	if (a.IsString() || a.IsSymbol() || a.IsBufferString()) && (b.IsString() || b.IsSymbol() || b.IsBufferString()) {
+		collation := "bin"
+		if declaration != nil {
+			collation = declaration.Collation
+		}
+		return scm.EqualCollated(a, b, collation).Bool()
+	}
+	return scm.Equal(a, b)
+}
+
+func (t *table) uniqueColumnHash(column string, value scm.Scmer) (uint64, bool) {
+	for _, declaration := range t.columnDeclarations() {
+		if declaration.Name != column {
+			continue
+		}
+		if declaration.Typ == "" || strings.EqualFold(declaration.Typ, "any") {
+			// Fold text within the declared equality classes before the native
+			// coercion hash. Numeric prefixes still meet their numeric values;
+			// nil, booleans and opaque bridges retain the all-stripes fallback.
+			if strings.Contains(declaration.Collation, "_ci") && (value.IsString() || value.IsSymbol() || value.IsBufferString()) {
+				value = scm.NewString(scm.CaseFoldKey(scm.String(value)))
+			}
+			return uniqueGuardHash(value)
+		}
+		value = uniqueColumnValue(declaration, value)
+		if value.IsNil() {
+			return xxhash.Sum64String("NULL"), true
+		}
+		if declaration.sanitizer != nil && (value.IsInt() || value.IsDate() || value.IsFloat()) {
+			var encoded [8]byte
+			bits := uint64(value.Int())
+			if value.IsFloat() {
+				number := value.Float()
+				if number == 0 {
+					number = 0 // normalize negative zero for floating equality
+				}
+				bits = math.Float64bits(number)
+			}
+			binary.LittleEndian.PutUint64(encoded[:], bits)
+			return xxhash.Sum64(encoded[:]), true
+		}
+		if !(value.IsString() || value.IsSymbol() || value.IsBufferString()) {
+			return uniqueGuardHash(value)
+		}
+		collation := declaration.Collation
+		if collation == "" || collation == "bin" || collation == "binary" || collation == "utf8" || collation == "utf8mb4" || strings.HasSuffix(collation, "_bin") {
+			// Untyped/native text can still compare with numbers through Equal.
+			// Preserve the conservative cross-type guard for those declarations.
+			if declaration.Typ == "" || strings.EqualFold(declaration.Typ, "any") {
+				return uniqueGuardHash(value)
+			}
+			return xxhash.Sum64String(scm.String(value)), true
+		}
+		if strings.Contains(collation, "_ci") {
+			return xxhash.Sum64String(scm.CaseFoldKey(scm.String(value))), true
+		}
+		return xxhash.Sum64String(scm.String(value)), true
+	}
+	return uniqueGuardHash(value)
+}
+
+// UNIQUE probes use equality-compatible index ordering. Natural/language sort
+// order can merge different numeric spellings or split Unicode fold classes;
+// its sort keys must not decide equality membership or the guard hash.
+func (t *table) uniqueAccess(access scanAccess) scanAccess {
+	var schema []scm.Scmer
+	for i := 0; i < access.len(); i++ {
+		for _, declaration := range t.columnDeclarations() {
+			if declaration.Name != access.boundaryColumn(i) {
+				continue
+			}
+			switch strings.ToUpper(declaration.Typ) {
+			case "TEXT", "TINYTEXT", "MEDIUMTEXT", "LONGTEXT", "VARCHAR", "CHAR", "ENUM":
+			default:
+				continue
+			}
+			if schema == nil {
+				schema = append([]scm.Scmer(nil), access.schema...)
+			}
+			box := *(*scanBoundaryBox)(schema[scanAccessSchemaHeaderSize+i].Custom(TagScanBoundary))
+			orderName := "unicode-string"
+			if strings.Contains(declaration.Collation, "_ci") {
+				orderName = "unicode-simple-fold"
+			}
+			order := scm.Collate(scm.NewString(orderName), scm.NewBool(false))
+			box.order, box.orderMetadata = order.Func(), orderName+":asc"
+			schema[scanAccessSchemaHeaderSize+i] = NewScanBoundaryScmer(&box)
+			break
+		}
+	}
+	if schema != nil {
+		access.schema = schema
+		access.firstBoundary = (*scanBoundaryBox)(schema[scanAccessSchemaHeaderSize].Custom(TagScanBoundary))
+	}
+	return access
+}
+
+func (t *table) guardUniqueWrites(columns []string, values [][]scm.Scmer, mergeNull bool, first int, tx *TxContext) uniqueWriteGuard {
+	locks := nodeUniqueWriteLocks()
+	var identity [8]byte
+	binary.LittleEndian.PutUint64(identity[:], uint64(uintptr(unsafe.Pointer(t))))
+	seed := xxhash.Sum64(identity[:])
+	var mask uniqueWriteMask
 	for idx := t.nextUniqueConstraint(columns, first); idx < len(t.Unique); idx = t.nextUniqueConstraint(columns, idx+1) {
 		key := t.Unique[idx]
 		var inlinePositions [8]int
@@ -138,9 +540,9 @@ func (t *table) guardUniqueWrites(columns []string, values [][]scm.Scmer, mergeN
 			}
 		}
 		for _, row := range values {
-			hash := uint64(idx + 1)
+			hash := (seed ^ uint64(idx+1)) * 1099511628211
 			skip, broad := false, false
-			for _, position := range positions {
+			for columnIndex, position := range positions {
 				value := scm.NewNil()
 				if position >= 0 && position < len(row) {
 					value = row[position]
@@ -149,7 +551,7 @@ func (t *table) guardUniqueWrites(columns []string, values [][]scm.Scmer, mergeN
 					skip = true
 					break
 				}
-				part, precise := uniqueGuardHash(value)
+				part, precise := t.uniqueColumnHash(key.Cols[columnIndex], value)
 				broad = broad || !precise
 				hash = (hash ^ part) * 1099511628211
 			}
@@ -157,28 +559,133 @@ func (t *table) guardUniqueWrites(columns []string, values [][]scm.Scmer, mergeN
 				continue
 			}
 			if broad {
-				mask = ^uint64(0)
-				break
+				for stripe := range locks.stripes {
+					mask.add(stripe)
+				}
+				return uniqueWriteGuard{table: t, tx: tx, locks: locks, mask: mask}
 			}
-			mask |= uint64(1) << (hash & 63)
-			if mask == ^uint64(0) {
-				break
-			}
-		}
-		if mask == ^uint64(0) {
-			break
+			mask.add(int(hash % uint64(len(locks.stripes))))
 		}
 	}
-	locks := t.uniqueWrites.Load()
-	if mask != 0 && locks == nil {
-		locks = new(uniqueWriteLocks)
-		if !t.uniqueWrites.CompareAndSwap(nil, locks) {
-			locks = t.uniqueWrites.Load()
-		} else if t.isEphemeralQueryTable() {
-			GlobalCache.UpdateSizeAsync(t, int64(unsafe.Sizeof(*locks)))
+	return uniqueWriteGuard{table: t, tx: tx, locks: locks, mask: mask}
+}
+
+// guardUniqueRow gives mutation mappers the same logical-key ownership as
+// collision callbacks. It is invocation-owned, never stored per record. Resolve
+// stale physical IDs and revalidate keys after waiting without holding shard.mu.
+// Native mutation admission protects the read/modify/write lifetime. UNIQUE
+// stripes protect key membership only; unchanged keys do not need them.
+func (s *storageShard) localMutationState() *mosi.State {
+	if current := s.localMutations.Load(); current != nil {
+		return current
+	}
+	state := new(mosi.State)
+	state.Initialize(mosi.M)
+	if s.localMutations.CompareAndSwap(nil, state) {
+		return state
+	}
+	return s.localMutations.Load()
+}
+
+func (s *storageShard) mutationGuard(tx *TxContext) *uniqueWriteGuard {
+	guard := &uniqueWriteGuard{table: s.t, tx: tx, locks: nodeUniqueWriteLocks(), ownedShard: s}
+	if activeReplication(s.t.schema) != nil {
+		return guard
+	}
+	state := s.localMutationState()
+	var owner any
+	if tx != nil {
+		owner = tx.transactionState
+	}
+	for {
+		writer, done := state.TryWrite(owner, false)
+		if writer != nil {
+			guard.mutation = writer
+			return guard
+		}
+		select {
+		case <-done:
+		case <-scanQueryContext(tx, context.Background()).Done():
+			panic(scanQueryContext(tx, context.Background()).Err())
 		}
 	}
-	return uniqueWriteGuard{locks: locks, mask: mask}
+}
+
+func (s *storageShard) guardUniqueRow(id uint32, tx *TxContext) (*uniqueWriteGuard, uint32, bool) {
+	if activeReplication(s.t.schema) == nil && len(s.t.Triggers) != 0 && len(s.t.GetTriggers(BeforeUpdate)) != 0 {
+		guard := s.mutationGuard(tx)
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+		if (tx == nil || tx.Mode != TxACID) && s.deletions.Get(uint(id)) {
+			current, found := s.resolveVisiblePrimaryRecidLocked(id)
+			if !found {
+				guard.release()
+				return nil, id, false
+			}
+			id = current
+		}
+		return guard, id, true
+	}
+	if len(s.t.Unique) == 0 || activeReplication(s.t.schema) != nil {
+		return nil, id, true
+	}
+	var columns []string
+	for _, constraint := range s.t.Unique {
+		for _, column := range constraint.Cols {
+			if !slices.Contains(columns, column) {
+				columns = append(columns, column)
+			}
+		}
+	}
+	for _, column := range columns {
+		s.getColumnStorageOrPanic(column, false, tx)
+	}
+	values := make([]scm.Scmer, len(columns))
+	read := func() bool {
+		if (tx == nil || tx.Mode != TxACID) && s.deletions.Get(uint(id)) {
+			var found bool
+			id, found = s.resolveVisiblePrimaryRecidLocked(id)
+			if !found {
+				return false
+			}
+		}
+		for i, column := range columns {
+			values[i] = s.rowValueByRecidLocked(id, column)
+		}
+		return true
+	}
+	for {
+		s.mu.RLock()
+		found := read()
+		s.mu.RUnlock()
+		if !found {
+			return nil, id, false
+		}
+		guard := s.t.guardUniqueWrites(columns, [][]scm.Scmer{values}, false, 0, tx)
+		guard.lock()
+		s.mu.RLock()
+		found = read()
+		current := s.t.guardUniqueWrites(columns, [][]scm.Scmer{values}, false, 0, tx)
+		s.mu.RUnlock()
+		if !found {
+			guard.unlock()
+			return nil, id, false
+		}
+		if guard.mask.contains(current.mask) {
+			return &guard, id, true
+		}
+		guard.unlock()
+	}
+}
+
+// A source's native writer stays reserved while BEFORE runs. Release key
+// stripes on every retained peer before executing arbitrary trigger code.
+func (g *uniqueWriteGuard) releaseKeys() {
+	g.unlock()
+	g.mask = uniqueWriteMask{}
+	if g.reservations != nil {
+		g.reservations.releaseKeys()
+	}
 }
 
 // Reservations include queued/in-flight batches until they finish, not just

@@ -172,7 +172,7 @@ func TestClusterDecisionAcquiresWriteBeforeClosingMigration(t *testing.T) {
 			shard := tbl.ActiveShards()[0]
 			earlier := NewShard(tbl)
 			access := earlier.GetWrite(nil)
-			earlier.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(42)}}, false, nil, nil, false, nil)
+			earlier.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(42)}}, false, nil, nil, false, nil, nil)
 			access.Release()
 			if earlier.uuid.String() > shard.uuid.String() {
 				earlier, shard = shard, earlier

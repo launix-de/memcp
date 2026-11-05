@@ -108,7 +108,7 @@ func TestTransactionInvocationsShareMutationsAndKeepIndependentCleanup(t *testin
 	defer second.endQuery(secondSeq)
 	var cleaned bool
 	first.RetainQueryWork(func() { cleaned = true })
-	firstWrite := shard.UpdateFunction(0, false, false, first)
+	firstWrite := shard.UpdateFunction(0, false, false, first, nil)
 	firstWrite(scm.NewSlice([]scm.Scmer{scm.NewString("payload"), scm.NewString("changed")}))
 	other := NewTxContext(TxACID)
 	if tx.IsVisible(shard, 0) || second.IsVisible(shard, 0) || !other.IsVisible(shard, 0) {

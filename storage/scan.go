@@ -17,9 +17,9 @@ Copyright (C) 2023-2026  Carl-Philip Hänsch
 package storage
 
 import "fmt"
-import "time"
 import "sort"
 import "sync"
+import "time"
 import "strings"
 import "sync/atomic"
 import "runtime/debug"
@@ -1575,10 +1575,10 @@ func runDirectSingleShardScan(currentTx *TxContext, topology *tableShardTopology
 		panic("query killed")
 	}
 	if scm.Trace == nil {
-		result.res, result.outCount, result.candidateCount = shard.scan(access, conditionCols, condition, callbackCols, mapReduce, neutral, stride, batchdata, currentTx, ss)
+		result.res, result.outCount, result.candidateCount = shard.scan(access, conditionCols, condition, callbackCols, mapReduce, neutral, stride, batchdata, currentTx, ss, release.mutation != nil)
 	} else {
 		scm.Trace.Duration(fmt.Sprintf("%p", shard), "shard", func() {
-			result.res, result.outCount, result.candidateCount = shard.scan(access, conditionCols, condition, callbackCols, mapReduce, neutral, stride, batchdata, currentTx, ss)
+			result.res, result.outCount, result.candidateCount = shard.scan(access, conditionCols, condition, callbackCols, mapReduce, neutral, stride, batchdata, currentTx, ss, release.mutation != nil)
 		})
 	}
 	result.inputCount = int64(shard.main_count) + int64(shard.plannerDeltaRows.Load())
@@ -1712,7 +1712,7 @@ func (t *table) scanWithBatchFrom(currentTx *TxContext, source *recSet, accessSc
 			if ss != nil && ss.IsKilledSeq(querySeq) {
 				panic("query killed")
 			}
-			res, shardOutCount, shardCandidateCount := s.scan(executionAccess, conditionCols, condition, callbackCols, mapReduce, neutral, stride, batchdata, currentTx, ss)
+			res, shardOutCount, shardCandidateCount := s.scan(executionAccess, conditionCols, condition, callbackCols, mapReduce, neutral, stride, batchdata, currentTx, ss, executionAccess.runtime != nil && executionAccess.runtime.mutation && sharedClusterSource(s.t))
 			inputCount := int64(s.main_count) + int64(s.plannerDeltaRows.Load())
 			values.send(solo, scanResult{res: res, outCount: shardOutCount, inputCount: inputCount, candidateCount: shardCandidateCount})
 		})
@@ -2203,15 +2203,21 @@ func (t *storageShard) scanFirstRecord(access scanAccess, conditionCols []string
 	return foundID, found
 }
 
-func (t *storageShard) scan(access scanAccess, conditionCols []string, condition scm.Scmer, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, stride int, batchdata []scm.Scmer, currentTx *TxContext, ss *scm.SessionState) (scm.Scmer, int64, int64) {
-	if scanMutates(callbackCols) {
+func (t *storageShard) scan(access scanAccess, conditionCols []string, condition scm.Scmer, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, stride int, batchdata []scm.Scmer, currentTx *TxContext, ss *scm.SessionState, writeAcquired bool) (scm.Scmer, int64, int64) {
+	if scanMutates(callbackCols) && !writeAcquired {
 		writeAccess := t.GetWrite(currentTx)
 		defer writeAccess.Release()
 		t = writeAccess.shard
 	}
 
+	var mutationGuard *uniqueWriteGuard
+	if scanMutates(callbackCols) && activeReplication(t.t.schema) == nil && len(t.t.Triggers) != 0 && len(t.t.GetTriggers(BeforeUpdate)) != 0 {
+		mutationGuard = t.mutationGuard(currentTx)
+		defer mutationGuard.release()
+	}
+
 	if stride > 0 {
-		return t.scanBatch(access, conditionCols, condition, callbackCols, mapReduce, neutral, stride, batchdata, currentTx, ss)
+		return t.scanBatch(access, conditionCols, condition, callbackCols, mapReduce, neutral, stride, batchdata, currentTx, ss, mutationGuard)
 	}
 	akkumulator := scm.ApplyOnce(neutral, nil)
 	var outCount int64
@@ -2302,7 +2308,7 @@ func (t *storageShard) scan(access scanAccess, conditionCols []string, condition
 	if lockMutationExclusively {
 		for {
 			prepareOrdered()
-			t.lockForMutation(currentTx)
+			t.lockForMutation(currentTx, nil)
 			if orderedReadyLocked() {
 				writeLocked = true
 				break
@@ -2378,6 +2384,7 @@ func (t *storageShard) scan(access scanAccess, conditionCols []string, condition
 	} else {
 		mapper = t.OpenMapReducer(callbackCols, mapReduce, skipShardReadLock, 0, nil, currentTx)
 	}
+	mapper.uniqueGuard = mutationGuard
 	defer mapper.Close()
 	// Use a guarded lock that will always be released on panic to avoid leaked locks.
 	locked := false
@@ -2610,7 +2617,7 @@ func (t *storageShard) hasOrderedScanProxy(cols []string, currentTx *TxContext) 
 	return false
 }
 
-func (t *storageShard) scanBatch(access scanAccess, conditionCols []string, condition scm.Scmer, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, stride int, batchdata []scm.Scmer, currentTx *TxContext, ss *scm.SessionState) (scm.Scmer, int64, int64) {
+func (t *storageShard) scanBatch(access scanAccess, conditionCols []string, condition scm.Scmer, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, stride int, batchdata []scm.Scmer, currentTx *TxContext, ss *scm.SessionState, mutationGuard *uniqueWriteGuard) (scm.Scmer, int64, int64) {
 	akkumulator := scm.ApplyOnce(neutral, nil)
 	var outCount int64
 	var candidateCount int64
@@ -2632,7 +2639,7 @@ func (t *storageShard) scanBatch(access scanAccess, conditionCols []string, cond
 	lockMutationExclusively := hasMutationCallback && !ownsWrite
 	writeLocked := false
 	if lockMutationExclusively {
-		t.lockForMutation(currentTx)
+		t.lockForMutation(currentTx, nil)
 		writeLocked = true
 		defer func() {
 			if writeLocked {
@@ -2700,6 +2707,7 @@ func (t *storageShard) scanBatch(access scanAccess, conditionCols []string, cond
 	} else {
 		mapper = t.OpenMapReducer(callbackCols, mapReduce, skipShardReadLock, stride, batchdata, currentTx)
 	}
+	mapper.uniqueGuard = mutationGuard
 	defer mapper.Close()
 
 	locked := false

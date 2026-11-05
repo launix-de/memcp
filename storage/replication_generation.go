@@ -17,10 +17,10 @@ import "io"
 import "fmt"
 import "sync"
 import "bytes"
-import "strings"
+import "context"
 import "reflect"
 import "runtime"
-import "context"
+import "strings"
 import "crypto/sha256"
 import "encoding/json"
 import "encoding/binary"
@@ -993,6 +993,10 @@ func (r *replicationManager) installSchema(source, name string, engine Persisten
 				continue
 			}
 
+			// TODO: a changed declaration (including CREATE/DROP TRIGGER)
+			// must retain the currently owned shard payload and its live deltas
+			// when publishing the new metadata. Replacing that payload from a
+			// schema checkpoint can expose stale rows to subsequent mutations.
 			table.schema = db
 			for _, shard := range table.ActiveShards() {
 				if shard == nil {

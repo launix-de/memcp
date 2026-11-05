@@ -183,11 +183,11 @@ func TestFoldIdentifierPreservesSimpleFoldClasses(t *testing.T) {
 		{"Identifierİ", "identifieri"},
 		{"IdentifierI", "identifierı"},
 	} {
-		if got, want := foldIdentifier(pair[0]) == foldIdentifier(pair[1]), strings.EqualFold(pair[0], pair[1]); got != want {
-			t.Errorf("foldIdentifier(%q) == foldIdentifier(%q) = %t, want %t", pair[0], pair[1], got, want)
+		if got, want := scm.CaseFoldKey(pair[0]) == scm.CaseFoldKey(pair[1]), strings.EqualFold(pair[0], pair[1]); got != want {
+			t.Errorf("scm.CaseFoldKey(%q) == scm.CaseFoldKey(%q) = %t, want %t", pair[0], pair[1], got, want)
 		}
 	}
-	if got := foldIdentifier("Key"); got != "key" {
+	if got := scm.CaseFoldKey("Key"); got != "key" {
 		t.Fatalf("ASCII folding convention changed for Kelvin class: %q", got)
 	}
 }

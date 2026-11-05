@@ -1,0 +1,117 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  description: Global UNIQUE probes and reservations with a working set exceeding one node
+  cluster:
+    fixture: shared_analytics
+    unique_columns: [v0, v1]
+    rows_per_shard: 5000
+    shards: 64
+    columns: 8
+    nodes: 4
+    ram_limit_bytes: 8388608
+    coordinator_ram_limit_bytes: 131072
+    shard_ram_percent: 50
+    coordinator_shard_ram_percent: 1
+setup: []
+cleanup:
+  - sql: DROP TRIGGER IF EXISTS unique_before_update
+  - sql: DROP TRIGGER IF EXISTS unique_before_insert
+  - sql: DROP TRIGGER IF EXISTS unique_after_insert
+  - sql: DELETE FROM big_items WHERE id IN (400000,400002,400004)
+
+test_cases:
+  - name: Global secondary UNIQUE collision needs no writer
+    sql: INSERT IGNORE INTO big_items(id,v0,v1) SELECT 400000,v0,v1 FROM big_items WHERE id=0
+    expect:
+      affected_rows: 0
+      cluster: {min_remote_shards: 1}
+  - name: Global secondary duplicate is rejected
+    sql: INSERT INTO big_items(id,v0,v1) SELECT 400000,v0,v1 FROM big_items WHERE id=0
+    expect: {error: true}
+  - name: Reserve distributed absence before publishing a new key
+    sql: INSERT INTO big_items(id,v0,v1,v2) VALUES(400000,-1,-1,0)
+    expect: {affected_rows: 1}
+  - name: Distributed insert remains visible
+    sql: SELECT id,v0,v1 FROM big_items WHERE id=400000
+    expect:
+      data: [{id: 400000, v0: -1, v1: -1}]
+  - name: Repeated distributed collisions retain the exact previous value
+    timeout: 10
+    scm: |
+      (begin
+        (define target (table "{database}" false "big_items" false))
+        (list (reduce (produceN 32) (lambda (count i)
+          (+ count (insert target '("id" "v0" "v1" "v2") (list (list 400000 -1 -1 0)) '("v2" "$update")
+            (lambda (old update) (begin
+              (if (equal? old i) true (error "lost distributed increment"))
+              (update (list "v2" (+ old 1))) true))))) 0)))
+    expect: {data: [[64]]}
+  - name: Repeated distributed counter is visible
+    sql: SELECT v2 FROM big_items WHERE id=400000
+    expect: {data: [{v2: 32}]}
+  - name: Another primary key still collides with the new secondary key
+    sql: INSERT INTO big_items(id,v0,v1) VALUES(400001,-1,-1)
+    expect: {error: true}
+  - name: AFTER INSERT may update the same distributed unique key
+    sql: |
+      CREATE TRIGGER unique_after_insert AFTER INSERT ON big_items FOR EACH ROW
+      BEGIN
+        UPDATE big_items SET v2=v2+7 WHERE id=NEW.id;
+      END
+    expect: {rows: 0}
+  - name: Distributed insert completes its nested AFTER mutation
+    sql: INSERT INTO big_items(id,v0,v1,v2) VALUES(400002,-2,-2,11)
+    expect: {affected_rows: 1}
+  - name: AFTER mutation is visible before INSERT returns
+    sql: SELECT id,v2 FROM big_items WHERE id=400002
+    expect:
+      data: [{id: 400002, v2: 18}]
+      cluster: {min_remote_shards: 1}
+  - name: Remove distributed AFTER trigger
+    sql: DROP TRIGGER unique_after_insert
+    expect: {rows: 0}
+
+  - name: BEFORE INSERT assigns the final distributed primary key
+    sql: CREATE TRIGGER unique_before_insert BEFORE INSERT ON big_items FOR EACH ROW SET NEW.id=400000
+    expect: {rows: 0}
+  - name: Distributed UNIQUE rejects a collision introduced by BEFORE INSERT
+    sql: INSERT INTO big_items(id,v0,v1) VALUES(400003,-3,-3)
+    expect: {error: true}
+  - name: Remove the distributed BEFORE INSERT trigger
+    sql: DROP TRIGGER unique_before_insert
+    expect: {rows: 0}
+
+  - name: BEFORE INSERT can repair an original distributed collision
+    sql: CREATE TRIGGER unique_before_insert BEFORE INSERT ON big_items FOR EACH ROW SET NEW.id=400004
+    expect: {rows: 0}
+  - name: Publish the final distributed key instead of rejecting the original key
+    sql: INSERT INTO big_items(id,v0,v1,v2) VALUES(400000,-4,-4,0)
+    expect: {affected_rows: 1}
+  - name: Trigger-generated distributed key is visible
+    sql: SELECT id,v0,v1 FROM big_items WHERE id=400004
+    expect: {data: [{id: 400004, v0: -4, v1: -4}]}
+  - name: Remove the key-repair trigger
+    sql: DROP TRIGGER unique_before_insert
+    expect: {rows: 0}
+  - name: BEFORE UPDATE uses the current distributed counter
+    sql: CREATE TRIGGER unique_before_update BEFORE UPDATE ON big_items FOR EACH ROW SET NEW.v2=OLD.v2+1
+    expect: {rows: 0}
+  - name: Collision updates remain atomic through BEFORE UPDATE
+    timeout: 10
+    scm: |
+      (begin
+        (define target (table "{database}" false "big_items" false))
+        (list (reduce (produceN 32) (lambda (count i)
+          (+ count (insert target '("id" "v0" "v1" "v2") (list (list 400004 -4 -4 0)) '("v2" "$update")
+            (lambda (old update) (begin
+              (if (equal? old i) true (error "BEFORE UPDATE lost distributed increment"))
+              (update (list "v2" (+ old 1))) true))))) 0)))
+    expect: {data: [[64]]}
+  - name: Counter after distributed BEFORE UPDATE is exact
+    sql: SELECT v2 FROM big_items WHERE id=400004
+    expect: {data: [{v2: 32}]}
+  - name: Remove the distributed BEFORE UPDATE trigger
+    sql: DROP TRIGGER unique_before_update
+    expect: {rows: 0}

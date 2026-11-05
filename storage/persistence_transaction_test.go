@@ -235,7 +235,7 @@ func TestNativeACIDUpdatesSurviveRestart(t *testing.T) {
 			tx := NewTxContext(TxACID)
 			defer tx.Rollback()
 			for _, table := range tables {
-				table.ActiveShards()[0].UpdateFunction(0, false, false, tx)(scm.NewSlice([]scm.Scmer{scm.NewString("payload"), scm.NewString("committed")}))
+				table.ActiveShards()[0].UpdateFunction(0, false, false, tx, nil)(scm.NewSlice([]scm.Scmer{scm.NewString("payload"), scm.NewString("committed")}))
 			}
 			if err := tx.Commit(); err != nil {
 				t.Fatal(err)

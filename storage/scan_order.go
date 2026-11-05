@@ -265,7 +265,7 @@ func compileScanOrderAccess(schemaExpr, valuesExpr, sortColsExpr, sortDirsExpr s
 			if !collation.IsString() || !staticReverse {
 				return schemaExpr, valuesExpr, false
 			}
-			directionValue = scm.Apply(scm.Globalenv.Vars[scm.Symbol("collate")], collation, scm.NewBool(scm.ToBool(reverse)))
+			directionValue = scm.Collate(collation, scm.NewBool(scm.ToBool(reverse)))
 		}
 		// Only canonical collation relations are accepted below. Runtime-capturing
 		// procedures and arbitrary native callbacks retain the runtime fallback.

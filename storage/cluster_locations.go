@@ -209,6 +209,15 @@ func (cluster *nodeCluster) locateViaSchema(ctx context.Context, resource mosiRe
 		}
 		cluster.installLocationHint(record)
 	}
+	// The hint may have lost to a newer native owner or an active acquisition.
+	// Route through the accepted publication, never the rejected wire value.
+	record = cluster.report(record.Resource)
+	if record.State == "M" || record.State == "O" {
+		return cluster.self.ID, nil
+	}
+	if record.Handoff != "" {
+		return record.Handoff, nil
+	}
 	if record.Owner == cluster.self.ID {
 		cell := cluster.manager.resourceCell(record.Resource)
 		if cell.ownstate.Phase() == mosi.IO {

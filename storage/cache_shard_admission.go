@@ -13,7 +13,10 @@ package storage
 // shardRAMSnapshot is immutable runtime admission metadata, published by the
 // existing cache actor. These are measured ledger bytes, not a second estimate.
 // The percentage is a cold-load threshold; warm payload remains usable locally.
-type shardRAMSnapshot struct{ Allowed bool }
+type shardRAMSnapshot struct {
+	Allowed bool
+	Budget  int64
+}
 
 func (cm *CacheManager) shardBudget() int64 {
 	return cm.memoryBudget * int64(cm.shardPercent) / 100
@@ -22,10 +25,10 @@ func (cm *CacheManager) shardBudget() int64 {
 func (cm *CacheManager) publishShardRAM() {
 	limit := cm.shardBudget()
 	allowed := limit > 0 && cm.sizeByType[TypeShard] < limit
-	if old := cm.shardCapacity.Load(); old != nil && old.Allowed == allowed {
+	if old := cm.shardCapacity.Load(); old != nil && old.Allowed == allowed && old.Budget == limit {
 		return
 	}
-	cm.shardCapacity.Store(&shardRAMSnapshot{Allowed: allowed})
+	cm.shardCapacity.Store(&shardRAMSnapshot{Allowed: allowed, Budget: limit})
 }
 func (cm *CacheManager) canLoadClusterShard(tbl *table) bool {
 	snapshot := cm.shardCapacity.Load()
