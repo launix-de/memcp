@@ -235,12 +235,18 @@ func compileProcedureFactory(expression Scmer, cache func(string, func() Scmer) 
 		return NewSlice(result)
 	}
 	body := factor(expression)
-	factoryExpression := NewSlice([]Scmer{NewSymbol("lambda"), NewSlice(params), body})
+	factoryExpression := body
+	if len(captures) > 0 {
+		factoryExpression = NewSlice([]Scmer{NewSymbol("lambda"), NewSlice(params), body})
+	}
 	var source bytes.Buffer
 	// Preserve numbered operands in cache identity too; diagnostic printing may
 	// rename them to parameter symbols and is not an IR identity function.
 	Serialize(&source, factoryExpression, &Globalenv, new(SerializationContext))
 	factory := cache(source.String(), func() Scmer { return CompileJIT(Eval(ownProcedureCode(factoryExpression), &Globalenv), true) })
+	if len(captures) == 0 {
+		return factory
+	}
 	return Apply(factory, captures...)
 }
 

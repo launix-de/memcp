@@ -400,7 +400,36 @@ func tokenize(source, s string, sourceInfo bool) []Scmer {
 				result = append(result, NewSymbol("'"))
 				state = 0
 			} else if ch == '"' {
-				// start string
+				// Wire values need no source positions. Skip complete string spans
+				// with the standard byte search instead of running the token state
+				// machine once per payload byte (including binary metadata).
+				if !sourceInfo {
+					end := i + 1
+					escaped := false
+					for {
+						offset := strings.IndexAny(s[end:], "\"\\")
+						if offset < 0 {
+							return result // preserve incomplete-string token semantics
+						}
+						end += offset
+						if s[end] == '"' {
+							break
+						}
+						escaped = true
+						end += 2
+						if end > len(s) {
+							return result
+						}
+					}
+					text := s[i+1 : end]
+					if escaped {
+						text = schemeStringUnescaper.Replace(text)
+					}
+					result = append(result, NewString(text))
+					i, state = end, 0
+					continue
+				}
+				// start string with source-position tracking
 				state = 3
 			} else if ch >= '0' && ch <= '9' || ch == '-' {
 				// start Number

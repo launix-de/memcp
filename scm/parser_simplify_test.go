@@ -315,6 +315,39 @@ func TestReadWithoutSourceInfo(t *testing.T) {
 	}
 }
 
+func TestWireStringSpansMatchLocatedTokens(t *testing.T) {
+	binary := make([]byte, 256)
+	for i := range binary {
+		binary[i] = byte(i)
+	}
+	for _, payload := range []string{"", "plain", string(binary), strings.Repeat(string(binary), 16), `a\"b\\c`, "日本語\n\r"} {
+		wire := SerializeToString(NewString(payload), &Globalenv)
+		for _, source := range []string{wire, `(list ` + wire + ` "tail")`, wire + ` "unfinished\`, wire + ` "unfinished`} {
+			plain, located := tokenize(t.Name(), source, false), tokenize(t.Name(), source, true)
+			if len(plain) != len(located) {
+				t.Fatalf("token count: %d / %d for %q", len(plain), len(located), source)
+			}
+			for i := range plain {
+				if !Equal(plain[i], located[i].WithoutSourceInfo()) {
+					t.Fatalf("token %d differs for %q", i, source)
+				}
+			}
+		}
+	}
+}
+
+func BenchmarkClusterCodecStringRead(b *testing.B) {
+	payload := strings.Repeat("binary metadata\x00\x01 payload\n", 128)
+	wire := SerializeToString(NewString(payload), &Globalenv)
+	b.ReportAllocs()
+	b.SetBytes(int64(len(wire)))
+	for b.Loop() {
+		if value := Read("wire", wire, false); value.String() != payload {
+			b.Fatal("string changed")
+		}
+	}
+}
+
 func BenchmarkClusterCodecRead(b *testing.B) {
 	source := `(lambda (acc id) (begin ` + strings.Repeat(`(if (> id 7) (+ acc id) (+ acc 1)) `, 32) + `))`
 	for _, located := range []bool{true, false} {

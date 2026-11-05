@@ -255,9 +255,11 @@ unchanged.
 
 ## Node codec and worker closures (protocol 17)
 
-The WebSocket subprotocol is `memcp.mosi.v3`. A frame addresses a numeric handle
+The WebSocket subprotocol is `memcp.mosi.v4`. A frame addresses a numeric handle
 slot, a reserved endpoint, a reply slot, or MOSI, followed by that recipient's
-payload. Handle deliveries contain only the slot and raw Scheme reconstruction
+payload. Already queued small records may share one frame without a flush
+timer or acknowledgement; large records and raw column chunks remain separate.
+Handle deliveries contain only the slot and raw Scheme reconstruction
 text after the version/address prefix. There is no JSON envelope, Scmer type,
 operation UUID, or per-call token around a callback. Handle constructors contain
 only the slot; the authenticated receiving connection supplies peer/incarnation
@@ -276,13 +278,14 @@ operands retain the sender's numbered parameter slots and are decoded alongside
 runtime references; transport does not rename them back into symbol lookups. The JIT
 also binds symbolic variadic parameters directly. Scan-context binding
 and capture resolution copy only changed AST ancestors. A pure code factory
-is reused through the existing budgeted cachemap. Runtime functions, native
+is reused through the existing budgeted cachemap. Capture-free procedures reuse
+the compiled callable directly, without constructing a factory invocation. Runtime functions, native
 objects, dictionaries and execution contexts are factory arguments; every
 bound closure owns its invocation's captures. TX executors and bound closures
 are never retained in the code cache. GC and overlapping-binding regressions
 check this separation.
-Parsing network text omits source-location objects; normal module/error parsing
-retains them. Native builtin names come from `DeclarationForValue`. Arithmetic
+Parsing network text omits source-location objects and skips complete string
+spans with byte searches; normal module/error parsing retains source positions. Native builtin names come from `DeclarationForValue`. Arithmetic
 and other declared builtins execute locally without callback handles.
 
 Repeated captures within one message use constructor IDs instead of repeating
@@ -320,7 +323,9 @@ bounded. Ordered-scan prefetch/refill and merge semantics are retained.
 Callback/return slots and object grant addresses use counters, not per-call
 UUIDs. A return address includes its authenticated stream namespace. Fixed-width
 slot spelling preserves the replay registry's ordering across numeric boundaries;
-return packets carry only the numeric slot and payload. Cancellation may abandon
+return packets carry only the numeric slot and payload. One-shot control returns
+use the common `ResultReceiver`, without a second FIFO delivery queue. Duplicate
+returns cannot revoke grants belonging to the first accepted result. Cancellation may abandon
 a local wait, but a late-result disposer remains until completion/disconnect and
 retains no query state. Shard, transaction and node identities keep their own
 contracts.

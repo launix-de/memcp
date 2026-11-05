@@ -459,7 +459,9 @@ func (s *scanRPCSession) operationID(slot uint64) string {
 type controlResultHandle struct {
 	service  *nodeScanService
 	peer     *mosiPeer
-	receiver *clusterReceiver
+	receiver *scm.ResultReceiver
+	once     sync.Once
+	offers   []scm.ClusterReference
 }
 
 // Cancellation can end a local wait before a needed remote result arrives.
@@ -513,9 +515,32 @@ func (handle *controlResultHandle) Handle(value scm.Scmer) {
 	if err := unmarshalNode([]byte(value.String()), &result); err != nil {
 		panic(err)
 	}
-	_, err := handle.receiver.HandleClusterRequest(context.Background(), scm.ClusterRequest{Method: "receive", Arguments: []scm.Scmer{scm.NewAny(result)}})
-	if err != nil {
-		handle.service.discardObjectOffers(handle.peer, result.Offers)
+	accepted := false
+	handle.once.Do(func() {
+		handle.offers = result.Offers
+		handle.receiver.Handle(scm.NewAny(result))
+		accepted = true
+	})
+	if !accepted {
+		// An exact duplicate shares the first delivery's grants. Releasing them
+		// here could invalidate a result before its consumer reconstructs it.
+		var unused []scm.ClusterReference
+		for _, parent := range result.Offers {
+			for _, ref := range referenceOffers(parent) {
+				shared := false
+				for _, previous := range handle.offers {
+					for _, known := range referenceOffers(previous) {
+						if ref.URI == known.URI && ref.Owner == known.Owner && ref.Incarnation == known.Incarnation && ref.Token == known.Token {
+							shared = true
+						}
+					}
+				}
+				if !shared {
+					unused = append(unused, ref)
+				}
+			}
+		}
+		handle.service.discardObjectOffers(handle.peer, unused)
 	}
 }
 
@@ -531,10 +556,8 @@ func (service *nodeScanService) control(ctx context.Context, peer *mosiPeer, met
 	}()
 	slot := service.allocateHandleSlot()
 	id := (&scanRPCSession{peer: peer}).operationID(slot)
-	results := make(chan scanCompletion, 1)
-	receiver := newClusterReceiver(1, func(_ context.Context, value scm.Scmer) error { results <- value.Any().(scanCompletion); return nil })
-	receiver.Seal()
-	entry := &handleSlot{peer: peer.objectPeer, handler: &controlResultHandle{service, peer, receiver}}
+	receiver := scm.NewResultReceiver()
+	entry := &handleSlot{peer: peer.objectPeer, handler: &controlResultHandle{service: service, peer: peer, receiver: receiver}}
 	service.handles.Store(slot, entry)
 	received := false
 	defer func() {
@@ -553,15 +576,18 @@ func (service *nodeScanService) control(ctx context.Context, peer *mosiPeer, met
 			service.handles.Delete(slot)
 		}
 		entry.close()
-		receiver.Close()
-		select {
-		case abandoned := <-results:
-			service.discardObjectOffers(peer, abandoned.Offers)
-			if orphan != nil {
-				orphan.retire()
+		if !received {
+			select {
+			case <-receiver.Done():
+				abandoned := receiver.Wait().Any().(scanCompletion)
+				service.discardObjectOffers(peer, abandoned.Offers)
+				if orphan != nil {
+					orphan.retire()
+				}
+			default:
 			}
-		default:
 		}
+		receiver.Close()
 		if orphan != nil {
 			orphan.watch()
 		}
@@ -605,7 +631,8 @@ func (service *nodeScanService) control(ctx context.Context, peer *mosiPeer, met
 		}
 		if joinOnCancel {
 			select {
-			case result := <-results:
+			case <-receiver.Done():
+				result := receiver.Wait().Any().(scanCompletion)
 				received = true
 				service.discardObjectOffers(peer, result.Offers)
 			case <-peer.done:
@@ -615,7 +642,8 @@ func (service *nodeScanService) control(ctx context.Context, peer *mosiPeer, met
 		return ctx.Err()
 	case <-peer.done:
 		return fmt.Errorf("Cluster network error")
-	case result := <-results:
+	case <-receiver.Done():
+		result := receiver.Wait().Any().(scanCompletion)
 		received = true
 		completed = true
 		if result.Panic != nil {

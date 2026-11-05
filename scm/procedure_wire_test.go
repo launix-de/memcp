@@ -21,6 +21,28 @@ import "encoding/json"
 import "runtime"
 import "weak"
 
+func TestProcedureFactoryReusesCaptureFreeCode(t *testing.T) {
+	entries := make(map[string]Scmer)
+	compilations := 0
+	cache := func(key string, create func() Scmer) Scmer {
+		if value, ok := entries[key]; ok {
+			return value
+		}
+		compilations++
+		value := create()
+		entries[key] = value
+		return value
+	}
+	left := compileProcedureFactory(Read(t.Name(), `(lambda (x) (+ x 7))`, false), cache)
+	right := compileProcedureFactory(Read(t.Name(), `(lambda (x) (+ x 7))`, false), cache)
+	if compilations != 1 || left != right {
+		t.Fatal("capture-free code rebuilt an invocation closure", compilations)
+	}
+	if Apply(left, NewInt(4)).Int() != 11 || Apply(right, NewInt(8)).Int() != 15 {
+		t.Fatal("shared code retained invocation arguments")
+	}
+}
+
 func TestProcedureFactoryKeepsInvocationCapturesPrivate(t *testing.T) {
 	if !jitEnabled {
 		t.Skip("requires native factory compilation")

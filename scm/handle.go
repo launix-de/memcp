@@ -65,7 +65,10 @@ func (receiver *ResultReceiver) RetainHandleRelease(release func()) {
 }
 func (receiver *ResultReceiver) Fail(err error) { receiver.Handle(NewAny(&handleFailure{err.Error()})) }
 func (receiver *ResultReceiver) Close()         { receiver.Handle(NewNil()) }
-func (receiver *ResultReceiver) Wait() Scmer    { return receiver.WaitContext(context.Background()) }
+
+// Done exposes readiness without running a callback or consuming the value.
+func (receiver *ResultReceiver) Done() <-chan struct{} { return receiver.done }
+func (receiver *ResultReceiver) Wait() Scmer           { return receiver.WaitContext(context.Background()) }
 func (receiver *ResultReceiver) WaitContext(ctx context.Context) Scmer {
 	defer receiver.Close()
 	select {

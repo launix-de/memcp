@@ -632,10 +632,8 @@ func TestClusterObjectAbandonedCompletionDiscardsOffers(t *testing.T) {
 		t.Fatal(err)
 	}
 	id := client.nextHandle.Add(1)
-	results := make(chan scanCompletion, 1)
-	receiver := newClusterReceiver(1, func(_ context.Context, v scm.Scmer) error { results <- v.Any().(scanCompletion); return nil })
-	receiver.Seal()
-	client.handles.Store(id, &handleSlot{peer: peer.objectPeer, handler: &controlResultHandle{client, peer, receiver}})
+	receiver := scm.NewResultReceiver()
+	client.handles.Store(id, &handleSlot{peer: peer.objectPeer, handler: &controlResultHandle{service: client, peer: peer, receiver: receiver}})
 	defer client.handles.Delete(id)
 	completion, _ := freezeScanValue(scm.NewString(string(mustNodeMetadata(scanCompletion{Offers: []scm.ClusterReference{ref}}))))
 	s := &scanRPCSession{service: client, peer: peer}
@@ -644,14 +642,15 @@ func TestClusterObjectAbandonedCompletionDiscardsOffers(t *testing.T) {
 	}
 	// Cancellation after delivery but before collection must release the offer.
 	receiver.Close()
-	abandoned := <-results
+	abandoned := receiver.Wait().Any().(scanCompletion)
 	client.discardObjectOffers(peer, abandoned.Offers)
 	waitObjectGC(t, func() bool { return objectEntryCount(owner) == 0 })
-	// A late duplicate is harmless and cannot repopulate a closed collector.
+	// A late duplicate is harmless and cannot replace the accepted result.
+	completion, _ = freezeScanValue(scm.NewString(string(mustNodeMetadata(scanCompletion{Data: []byte("late"), Offers: []scm.ClusterReference{ref}}))))
 	if err := s.handleValue(id, completion); err != nil {
 		t.Fatal(err)
 	}
-	if len(results) != 0 {
+	if len(receiver.Wait().Any().(scanCompletion).Data) != 0 {
 		t.Fatal("late completion was delivered to a closed collector")
 	}
 }
@@ -1407,5 +1406,34 @@ func TestClusterCancelledReturnHandleDiscardsLateGrants(t *testing.T) {
 	var discarded []scm.ClusterReference
 	if message.Method != "object.discard" || unmarshalNode(message.Data, &discarded) != nil || len(discarded) != 1 || discarded[0].Token != ref.Token {
 		t.Fatal("abandoned result leaked its grant")
+	}
+}
+
+func TestClusterDuplicateResultPreservesAcceptedGrant(t *testing.T) {
+	service := &nodeScanService{id: "client"}
+	defer service.stopObjects()
+	peer := &mosiPeer{done: make(chan struct{}), outgoing: newMosiMailbox(), objectPeer: clusterObjectPeer{"owner", "boot"}}
+	receiver := scm.NewResultReceiver()
+	handler := &controlResultHandle{service: service, peer: peer, receiver: receiver}
+	original := scm.ClusterReference{URI: "owner/1", Owner: "owner", Incarnation: "boot", Token: "1", Type: "session"}
+	deliver := func(refs ...scm.ClusterReference) {
+		handler.Handle(scm.NewString(string(mustNodeMetadata(scanCompletion{Offers: refs}))))
+	}
+	deliver(original)
+	deliver(original)
+	if peer.outgoing.len() != 0 {
+		t.Fatal("duplicate released the first result's still-unconsumed grant")
+	}
+	unexpected := original
+	unexpected.Token = "2"
+	deliver(original, unexpected)
+	message := takeMosi(peer.outgoing)
+	var discarded []scm.ClusterReference
+	if message.Method != "object.discard" || unmarshalNode(message.Data, &discarded) != nil || len(discarded) != 1 || discarded[0].Token != "2" {
+		t.Fatal("duplicate leaked a separate unused grant", discarded)
+	}
+	accepted := receiver.Wait().Any().(scanCompletion)
+	if len(accepted.Offers) != 1 || accepted.Offers[0].Token != original.Token {
+		t.Fatal("duplicate replaced the accepted result")
 	}
 }
