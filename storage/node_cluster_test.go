@@ -13,8 +13,8 @@ package storage
 import "fmt"
 import "time"
 import "context"
-import "testing"
 import "strings"
+import "testing"
 import "encoding/json"
 import "github.com/google/uuid"
 import "github.com/launix-de/memcp/scm"
@@ -1413,5 +1413,84 @@ func TestClusterColdPlacementExcludesRefusedOwner(t *testing.T) {
 		if candidate == links[0] {
 			t.Fatal("capacity retry kept the owner which refused admission")
 		}
+	}
+}
+
+func TestClusterShardRecoveryRestoresCurrentContentFromOlderSchema(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "t_cluster_recover_current_content", 4)
+	RebuildTable(tbl, true, false)
+	checkpoint, err := json.Marshal(tbl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldID := tbl.ActiveShards()[0].uuid
+	tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(99), scm.NewString("new content")}}, nil, scm.NewNil(), false, nil)
+	RebuildTable(tbl, true, false)
+	content := tbl.ActiveShards()[0].uuid.String()
+	if content == oldID.String() {
+		t.Fatal("fixture did not publish a successor")
+	}
+	// Restart from an older schema checkpoint. Data-resource coherence already
+	// knows the newer durable content; the schema holder need not own that data.
+	var restored table
+	if err := json.Unmarshal(checkpoint, &restored); err != nil {
+		t.Fatal(err)
+	}
+	restored.schema = tbl.schema
+	for _, shard := range restored.Shards {
+		shard.t = &restored
+	}
+	restored.publishTopologyLocked()
+	tbl.schema.tables.Set(tbl.Name, &restored)
+	self, reader := "memcp://"+uuid.NewString(), "memcp://"+uuid.NewString()
+	service := &nodeScanService{}
+	peer := &mosiPeer{done: make(chan struct{}), outgoing: make(chan mosiMessage, 1)}
+	cluster := &nodeCluster{self: clusterMember{ID: self}, service: service, ctx: context.Background()}
+	cluster.initializeManager()
+	service.cluster = cluster
+	cluster.view.Store(&clusterView{members: []clusterMember{cluster.self, {ID: reader}}, links: []*clusterLink{{member: clusterMember{ID: reader}, peer: peer}}})
+	resource := mosiResource{Database: tbl.schema.Name, Table: tbl.Name, Shard: oldID.String()}
+	cell := cluster.manager.shardCell(restored.ActiveShards()[0])
+	cluster.manager.updateRecord(resource, func(record *replicaRecord) bool {
+		record.Owner, record.Epoch, record.Content = self, 3, oldID.String()
+		return true
+	})
+	mounts := sharedClusterMounts.Swap(&map[string]bool{tbl.schema.Name: true})
+	defer sharedClusterMounts.Store(mounts)
+	oldService := nodeScans.Swap(service)
+	defer nodeScans.Store(oldService)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	finished := make(chan error, 1)
+	go func() {
+		owner, err := cluster.locate(ctx, resource)
+		if err == nil && owner != self {
+			err = fmt.Errorf("wrong recovery owner %s", owner)
+		}
+		finished <- err
+	}()
+	select {
+	case message := <-peer.outgoing:
+		var request struct{ Return, Method string }
+		if err := json.Unmarshal(message.Data, &request); err != nil || request.Method != "cluster.report" || cell.ownstate.Initialized() {
+			t.Fatal("recovery omitted live authority proof", request, err)
+		}
+		route, _ := service.returns.Load(request.Return)
+		deliverTestCompletion(t, route, scanCompletion{Data: mustScanJSON(replicaRecord{Resource: resource, Owner: self, State: "S", Epoch: 3, Content: content})})
+	case <-ctx.Done():
+		t.Fatal("recovery did not request live proof")
+	}
+	if err := <-finished; err != nil {
+		t.Fatal(err)
+	}
+	current := restored.ActiveShards()[0]
+	if current.uuid.String() != content || cluster.manager.resourceCell(resource).publishedShard() != current {
+		t.Fatal("recovered authority still addresses the older checkpoint")
+	}
+	if current.state() != COLD {
+		t.Fatal("authority recovery eagerly loaded the shard payload")
+	}
+	if restored.CountExact() != 5 {
+		t.Fatal("recovery lost the row absent from the older checkpoint")
 	}
 }

@@ -97,7 +97,7 @@ type uniqueReservationSet struct {
 	nativeWrites    []WriteAccess
 	nativeCommands  *clusterReceiver
 	nativeGuardHeld bool
-	guard           *uniqueWriteGuard
+	guard           *uniqueWriteGuard // coordinator guard; workers retain guards per native shard
 	ctx             context.Context
 	table           *table
 	topology        *tableShardTopology
@@ -226,7 +226,70 @@ func uniqueRowArray(rows [][]scm.Scmer) scm.Scmer {
 }
 
 func (set *uniqueReservationSet) valid() bool {
-	return set.table.topology.Load().routing == set.topology.routing && set.ctx.Err() == nil
+	if set.ctx.Err() != nil {
+		return false
+	}
+	current := set.table.topology.Load()
+	if current.routing == set.topology.routing {
+		return true
+	}
+	// Free writer lanes only append. Every global UNIQUE writer must still
+	// acquire the retained participants' key stripes, so an append cannot
+	// invalidate reads made while holding those keys. Repartition/removal does.
+	if current.mode != ShardModeFree || set.topology.mode != ShardModeFree || len(set.topology.shards) == 0 || len(current.shards) < len(set.topology.shards) {
+		return false
+	}
+	for i, previous := range set.topology.shards {
+		next := current.shards[i]
+		if previous == next || previous != nil && next != nil && previous.uuid == next.uuid {
+			continue
+		}
+		if previous == nil || next == nil {
+			return false
+		}
+		before, after := previous.coherence.Load(), next.coherence.Load()
+		if before == nil || after == nil || before.resolved() != after.resolved() {
+			return false
+		}
+	}
+	return true
+}
+
+// A changed key can require an absence read on a newly appended lane or a
+// rebuilt UUID. A retained participant in that key's current domain already
+// serializes every competing UNIQUE writer. Borrow that proof for a read only;
+// physical row IDs and updates still require their original reservation.
+func (set *uniqueReservationSet) uniqueProbeAnchor(columns []string, key []scm.Scmer) *uniqueNativeShard {
+	anchors := make(map[*replicaCell]*uniqueNativeShard, len(set.local)+1)
+	add := func(part *uniqueNativeShard) {
+		if cell := part.shard.coherence.Load(); cell != nil {
+			anchors[cell.resolved()] = part
+		}
+	}
+	if set.singleSource != nil {
+		add(&set.singleNative)
+	}
+	for _, part := range set.local {
+		add(part)
+	}
+	if len(anchors) == 0 {
+		return nil
+	}
+	for _, shard := range set.table.uniqueProbeShards(set.table.activeTopology(), columns, key) {
+		if cell := shard.coherence.Load(); cell != nil {
+			if anchor := anchors[cell.resolved()]; anchor != nil {
+				return anchor
+			}
+		}
+	}
+	return nil
+}
+
+func (set *uniqueReservationSet) bindNativeShard(id string, part *uniqueNativeShard) {
+	set.local[id] = part
+	if actual := part.shard.uuid.String(); actual != id {
+		set.local[actual] = part
+	}
 }
 
 func (set *uniqueReservationSet) nativeShard(shard *storageShard) *uniqueNativeShard {
@@ -239,7 +302,18 @@ func (set *uniqueReservationSet) nativeShard(shard *storageShard) *uniqueNativeS
 func (set *uniqueReservationSet) call(shard *storageShard, operation string, arguments ...scm.Scmer) scm.Scmer {
 	client := set.clients[shard.uuid.String()]
 	if client == nil {
-		if set.local == nil {
+		if operation == "probe" && len(arguments) == 3 && len(arguments[2].Slice()) == 0 {
+			columns, err := uniqueStrings(arguments[0])
+			if err != nil {
+				panic(err)
+			}
+			key := arguments[1].Slice()
+			if anchor := set.uniqueProbeAnchor(columns, key); anchor != nil {
+				found := shard.probeUnique(exactScanAccess(newExactScanAccessSchema(columns), key), anchor.tx)
+				return scm.NewSlice([]scm.Scmer{scm.NewBool(found), scm.NewInt(0), scm.NewSlice(nil)})
+			}
+		}
+		if set.guard != nil {
 			// A concurrent lane append/rebuild can publish another topology
 			// while the initial owner channels are being acquired. The outer
 			// native boundary retries only if this batch has published no effects.
@@ -577,7 +651,7 @@ func (set *uniqueReservationSet) reserveLocalUniqueGroup(shards []*storageShard,
 			}
 			native = &uniqueNativeShard{shard: current, guard: set.guard, tx: tx}
 		}
-		set.local[shard.uuid.String()] = native
+		set.bindNativeShard(shard.uuid.String(), native)
 	}
 	if !set.guard.held {
 		if !set.guard.tryLock() {
@@ -754,7 +828,7 @@ func (s *storageShard) serveUniqueScan(ctx context.Context, input shardScanInvoc
 		s = firstWrite.shard
 	}
 	scope := &uniqueReservationSet{ctx: ctx, table: s.t, topology: s.t.activeTopology(), local: make(map[string]*uniqueNativeShard), clients: make(map[string]*uniqueReservationClient)}
-	scope.local[ids[0]] = &uniqueNativeShard{shard: s, guard: guardPointer, tx: tx}
+	scope.bindNativeShard(ids[0], &uniqueNativeShard{shard: s, guard: guardPointer, tx: tx})
 	guardPointer.reservations = scope
 	for _, id := range ids[1:] {
 		resource := mosiResource{Database: s.t.schema.Name, Table: s.t.Name, Shard: id}
@@ -778,7 +852,7 @@ func (s *storageShard) serveUniqueScan(ctx context.Context, input shardScanInvoc
 			}
 		}
 		if existing != nil {
-			scope.local[id] = existing
+			scope.bindNativeShard(id, existing)
 			continue
 		}
 		access, admitted := part.getWrite(tx, false)
@@ -786,7 +860,7 @@ func (s *storageShard) serveUniqueScan(ctx context.Context, input shardScanInvoc
 			return false, uniqueReservationBusy{shard: remoteScanShard{Resource: resource}}
 		}
 		defer access.Release()
-		scope.local[id] = &uniqueNativeShard{shard: access.shard, guard: guardPointer, tx: tx}
+		scope.bindNativeShard(id, &uniqueNativeShard{shard: access.shard, guard: guardPointer, tx: tx})
 	}
 	if !guardPointer.held {
 		if !guardPointer.tryLock() {

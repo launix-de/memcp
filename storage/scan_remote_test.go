@@ -12,15 +12,15 @@ package storage
 
 import "fmt"
 import "bytes"
-import "runtime"
-import "math/bits"
 import "sync"
 import "time"
 import "context"
+import "runtime"
 import "strings"
 import "testing"
-import "sync/atomic"
 import "net/http"
+import "math/bits"
+import "sync/atomic"
 import "encoding/json"
 import "net/http/httptest"
 import "github.com/google/uuid"
@@ -1391,23 +1391,34 @@ func TestRemoteScanRoutesForwardedUUIDWithoutHistoricalPayload(t *testing.T) {
 }
 
 func TestRemoteScanResolvesNativeShardBeforeFirstPayloadPublication(t *testing.T) {
-	tbl, _ := createDurabilityTestTable(t, "t_remote_native_publication", 4)
-	RebuildTable(tbl, true, false)
-	r := replicaRecoveryFixture()
-	previous := replication.Swap(r)
-	defer replication.Store(previous)
-	current := tbl.ActiveShards()[0]
-	cell := r.declareShard(current, r.id, true)
-	cell.current.Store(nil)
-	peer, _, _ := setupRemoteScanConnection(t)
-	task := makeRemoteScanTask(t, remoteScanShard{Schema: tbl.filterSchemaFingerprint(), Resource: *cell.resource.Load()})
-	var response remoteScanResult
-	if err := peer.scanService.control(context.Background(), peer, "scan.execute", task, &response, true); err != nil {
-		t.Fatal(err)
-	}
-	value, err := schemeValue(response.Value).reconstruct()
-	if err != nil || value.Int() != 9 || response.OutCount != 3 {
-		t.Fatalf("native topology lost its unpublished payload binding: %+v, %v", response, err)
+	for _, forwarded := range []bool{false, true} {
+		t.Run(fmt.Sprint(forwarded), func(t *testing.T) {
+			tbl, _ := createDurabilityTestTable(t, "t_remote_native_publication", 4)
+			RebuildTable(tbl, true, false)
+			r := replicaRecoveryFixture()
+			previous := replication.Swap(r)
+			defer replication.Store(previous)
+			current := tbl.ActiveShards()[0]
+			cell := r.declareShard(current, r.id, true)
+			cell.current.Store(nil)
+			peer, _, _ := setupRemoteScanConnection(t)
+			resource := *cell.resource.Load()
+			if forwarded {
+				alias := resource
+				alias.Shard = uuid.NewString()
+				r.forwardResource(alias, resource)
+				resource = alias
+			}
+			task := makeRemoteScanTask(t, remoteScanShard{Schema: tbl.filterSchemaFingerprint(), Resource: resource})
+			var response remoteScanResult
+			if err := peer.scanService.control(context.Background(), peer, "scan.execute", task, &response, true); err != nil {
+				t.Fatal(err)
+			}
+			value, err := schemeValue(response.Value).reconstruct()
+			if err != nil || value.Int() != 9 || response.OutCount != 3 {
+				t.Fatalf("native topology lost its unpublished payload binding: %+v, %v", response, err)
+			}
+		})
 	}
 }
 

@@ -4,15 +4,16 @@ SPDX-License-Identifier: GPL-3.0-or-later
 */
 package storage
 
-import "sync"
 import "fmt"
+import "sync"
 import "time"
-import "testing"
-import "runtime"
 import "context"
+import "runtime"
+import "strings"
+import "testing"
 import "sync/atomic"
-import "runtime/debug"
 import "encoding/json"
+import "runtime/debug"
 import "github.com/google/uuid"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/memcp/storage/mosi"
@@ -1520,4 +1521,136 @@ func TestClusterLocalUniqueUpdaterCannotEscapeReservation(t *testing.T) {
 	if !found || reader.GetValue(id).Int() != 0 {
 		t.Fatal("expired updater changed visible data")
 	}
+}
+
+func TestClusterUniqueCoordinatorRetriesAfterLaneAppend(t *testing.T) {
+	tbl := setupScanParallelTestTable(t, "t_unique_coordinator_lane_append")
+	tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}}
+	tbl.Shards = []*storageShard{NewShard(tbl), NewShard(tbl)}
+	tbl.publishTopologyLocked()
+	cluster := globalTestCluster(t, tbl.schema.Name)
+	mounts := sharedClusterMounts.Swap(&map[string]bool{tbl.schema.Name: true})
+	defer sharedClusterMounts.Store(mounts)
+	service := nodeScans.Swap(&nodeScanService{cluster: cluster})
+	defer nodeScans.Store(service)
+	cluster.manager.resourceCell(mosiResource{Database: tbl.schema.Name}).ownstate.Initialize(mosi.M)
+	for _, shard := range tbl.ActiveShards() {
+		cluster.declareShard(shard, true)
+	}
+	columns, rows := []string{"id"}, [][]scm.Scmer{{scm.NewInt(42)}}
+	guard := tbl.guardUniqueWrites(columns, rows, false, 0)
+	defer guard.release()
+	set := tbl.reserveUniqueDomain(columns, rows, false, nil, nil, &guard)
+	defer set.close(false)
+	// Another INSERT may publish an empty writer lane between reservation and
+	// the coordinator's first probe. No callback/effect has run yet: this must
+	// restart preflight, not report a worker-domain extension to the application.
+	next := NewShard(tbl)
+	cluster.declareShard(next, true)
+	tbl.Shards = append(tbl.Shards, next)
+	tbl.publishTopologyLocked()
+	defer func() {
+		if _, retry := recover().(uniqueReadRetry); !retry {
+			t.Error("coordinator did not retry a changed preflight domain")
+		}
+	}()
+	set.probe(next, columns, rows[0], []string{"$update"})
+}
+
+func TestClusterUniqueKeyChangeChecksAppendedLane(t *testing.T) {
+	for _, collision := range []bool{false, true} {
+		t.Run(fmt.Sprint(collision), func(t *testing.T) {
+			tbl := setupScanParallelTestTable(t, "t_unique_key_change_new_lane")
+			tbl.CreateColumn("value", "INT", nil, nil)
+			tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}, {Id: "value", Cols: []string{"value"}}}
+			tbl.Shards = []*storageShard{NewShard(tbl), NewShard(tbl)}
+			tbl.publishTopologyLocked()
+			columns := []string{"id", "value"}
+			rows := [][]scm.Scmer{{scm.NewInt(42), scm.NewInt(0)}}
+			tbl.Insert(columns, rows, nil, scm.NewNil(), false, nil)
+			next := NewShard(tbl)
+			value := int64(100)
+			if collision {
+				value = 1
+			}
+			next.Insert(columns, [][]scm.Scmer{{scm.NewInt(99), scm.NewInt(value)}}, false, nil, nil, false, nil, nil)
+			cluster := globalTestCluster(t, tbl.schema.Name)
+			mounts := sharedClusterMounts.Swap(&map[string]bool{tbl.schema.Name: true})
+			defer sharedClusterMounts.Store(mounts)
+			service := nodeScans.Swap(&nodeScanService{cluster: cluster})
+			defer nodeScans.Store(service)
+			cluster.manager.resourceCell(mosiResource{Database: tbl.schema.Name}).ownstate.Initialize(mosi.M)
+			for _, shard := range tbl.ActiveShards() {
+				cluster.declareShard(shard, true)
+			}
+			var failure any
+			func() {
+				defer func() { failure = recover() }()
+				tbl.Insert(columns, rows, []string{"value", "$update"}, scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
+					cluster.declareShard(next, true)
+					tbl.Shards = append(tbl.Shards, next)
+					tbl.publishTopologyLocked()
+					return scm.Apply(values[1], scm.NewSlice([]scm.Scmer{scm.NewString("value"), scm.NewInt(values[0].Int() + 1)}))
+				}), false, nil)
+			}()
+			if collision {
+				if failure == nil || !strings.Contains(fmt.Sprint(failure), "Duplicate entry") {
+					t.Fatalf("new lane's conflicting key was not checked: %v", failure)
+				}
+			} else if failure != nil {
+				t.Fatalf("unrelated lane append broke an atomic update: %v", failure)
+			}
+			var actual int64 = -1
+			for _, shard := range tbl.ActiveShards() {
+				lease := shard.GetRead(nil, false)
+				id, found := lease.shard.GetRecordidForUnique(exactScanAccess(newExactScanAccessSchema([]string{"id"}), []scm.Scmer{scm.NewInt(42)}), nil, true)
+				if found {
+					reader := lease.shard.ColumnReaderTx(nil, "value", false, ReadAuto)
+					actual = reader.GetValue(id).Int()
+					ReleaseColumnReader(reader)
+				}
+				lease.Release()
+			}
+			want := int64(1)
+			if collision {
+				want = 0
+			}
+			if actual != want || tbl.CountExact() != 2 {
+				t.Fatalf("key change published incorrectly: value=%d want=%d rows=%d", actual, want, tbl.CountExact())
+			}
+		})
+	}
+}
+
+func TestClusterUniqueUnreservedReadNeedsHeldParticipant(t *testing.T) {
+	tbl := setupScanParallelTestTable(t, "t_unique_unreserved_partition")
+	tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}}
+	left, middle, right := NewShard(tbl), NewShard(tbl), NewShard(tbl)
+	tbl.Shards = []*storageShard{left, middle}
+	tbl.publishTopologyLocked()
+	cluster := globalTestCluster(t, tbl.schema.Name)
+	mounts := sharedClusterMounts.Swap(&map[string]bool{tbl.schema.Name: true})
+	defer sharedClusterMounts.Store(mounts)
+	service := nodeScans.Swap(&nodeScanService{cluster: cluster})
+	defer nodeScans.Store(service)
+	cluster.manager.resourceCell(mosiResource{Database: tbl.schema.Name}).ownstate.Initialize(mosi.M)
+	cluster.declareShard(left, true)
+	cluster.declareShard(middle, true)
+	columns := []string{"id"}
+	guard := tbl.guardUniqueWrites(columns, [][]scm.Scmer{{scm.NewInt(7)}}, false, 0)
+	defer guard.release()
+	set := tbl.reserveUniqueDomain(columns, [][]scm.Scmer{{scm.NewInt(7)}}, false, nil, nil, &guard)
+	defer set.close(false)
+	cluster.declareShard(right, true)
+	tbl.ShardMode, tbl.PShards = ShardModePartition, []*storageShard{left, middle, right}
+	tbl.PDimensions = []shardDimension{{Column: "id", NumPartitions: 3, Pivots: []scm.Scmer{scm.NewInt(10), scm.NewInt(20)}}}
+	tbl.publishTopologyLocked()
+	additional := tbl.guardUniqueWrites(columns, [][]scm.Scmer{{scm.NewInt(99)}}, false, 0)
+	guard.extend(additional.mask)
+	defer func() {
+		if _, retry := recover().(uniqueReadRetry); !retry {
+			t.Error("unreserved read accepted a domain without a retained participant")
+		}
+	}()
+	set.probe(right, columns, []scm.Scmer{scm.NewInt(99)}, nil)
 }

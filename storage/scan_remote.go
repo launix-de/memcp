@@ -11,8 +11,8 @@ warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See
 package storage
 
 import "fmt"
-import "runtime"
 import "context"
+import "runtime"
 import "strings"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/memcp/storage/mosi"
@@ -364,10 +364,16 @@ func withRemoteScanShard(expected *remoteScanShard, tx *TxContext, mutation bool
 		// cell before its first payload publication. Its topology remains the
 		// owner of that existing physical generation.
 		if selected == nil {
-			selected = findScanShard(tbl, expected.Resource)
-		}
-		if selected == nil {
-			return fmt.Errorf("remote shard disappeared")
+			resource := expected.Resource
+			if sourceCell != nil {
+				// Acquisition already resolved UUID forwarding. An unpublished
+				// payload binds to that native identity, not the sender's alias.
+				resource = *sourceCell.resolved().resource.Load()
+			}
+			selected = findScanShard(tbl, resource)
+			if selected == nil {
+				return fmt.Errorf("remote shard disappeared: requested %s, acquired %s, %d active shards", expected.Resource.key(), resource.key(), len(topology.shards))
+			}
 		}
 		if !topology.acquireOperation() {
 			continue
