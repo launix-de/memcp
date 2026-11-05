@@ -5,13 +5,10 @@ SPDX-License-Identifier: GPL-3.0-or-later
 package scm
 
 import "fmt"
-import "bytes"
 import "sync"
-import "weak"
-import "runtime"
 import "errors"
-import "context"
 import "unsafe"
+import "context"
 
 // A local encoding failure before dispatch. It is safe to split an unsent
 // output batch; a remote error or ambiguous completion must never be replayed.
@@ -123,16 +120,16 @@ func ClusterObjectOf(value Scmer) (ClusterObject, bool) {
 // callback captures, for every object type alike. Objects produce their own
 // immutable view once; each target peer gets a distinct registered handle.
 type SerializationContext struct {
-	Peer         *SerializationPeer
-	publication  *serializationPublication
-	ExportHandle func(Handle) (Scmer, error)
-	Invocation   Scmer // native owner of invocation-scoped exported callbacks
-	Export       func(ClusterObject, Scmer) (ClusterReference, error)
-	root         *SerializationContext
-	mu           sync.Mutex
-	views        map[ClusterObject]*clusterViewCapture
-	literals     map[Scmer]*clusterLiteralCapture
-	demands      map[ClusterObject]map[Scmer]struct{}
+	Peer          *SerializationPeer
+	publication   *serializationPublication
+	ExportHandle  func(Handle) (Scmer, error)
+	Invocation    Scmer // native owner of invocation-scoped exported callbacks
+	Export        func(ClusterObject, Scmer) (ClusterReference, error)
+	root          *SerializationContext
+	mu            sync.Mutex
+	views         map[ClusterObject]*clusterViewCapture
+	demands       map[ClusterObject]map[Scmer]struct{}
+	valueSnapshot *serializationValueSnapshot
 }
 
 type clusterViewCapture struct {
@@ -528,31 +525,6 @@ func BindClusterInvocation(value, scope Scmer) (Scmer, error) {
 	return value, nil
 }
 
-// Large immutable dictionary captures use the ordinary object protocol. The
-// snapshot belongs to this serialization context; it never observes later
-// sender mutations. Runtime callables stay in their invocation-bound path.
-type clusterLiteral struct{ source string }
-type clusterLiteralCapture struct {
-	done   chan struct{}
-	object *clusterLiteral
-	err    error
-}
-
-func (*clusterLiteral) ClusterObjectType() string { return "literal" }
-func (*clusterLiteral) ClusterImmutableView()     {}
-func (v *clusterLiteral) Serialize(ctx *SerializationContext) (Scmer, error) {
-	return ctx.ReferenceExpression(v)
-}
-func (v *clusterLiteral) executeClusterRequest(ctx context.Context, request ClusterRequest) (any, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	switch request.Method {
-	case "view":
-		return NewString(v.source), nil
-	}
-	return nil, fmt.Errorf("unsupported immutable capture request")
-}
 func plainClusterLiteral(value Scmer, depth int) bool {
 	if depth > 64 {
 		return false
@@ -578,113 +550,4 @@ func plainClusterLiteral(value Scmer, depth int) bool {
 		return true
 	}
 	return false
-}
-func (ctx *SerializationContext) literal(value Scmer) (*clusterLiteral, error) {
-	if ctx.root != nil {
-		ctx = ctx.root
-	}
-	ctx.mu.Lock()
-	if ctx.literals == nil {
-		ctx.literals = make(map[Scmer]*clusterLiteralCapture)
-	}
-	capture := ctx.literals[value]
-	first := capture == nil
-	if first {
-		capture = &clusterLiteralCapture{done: make(chan struct{})}
-		ctx.literals[value] = capture
-	}
-	ctx.mu.Unlock()
-	if first {
-		func() {
-			defer close(capture.done)
-			defer func() {
-				if failure := recover(); failure != nil {
-					capture.err = fmt.Errorf("immutable capture: %v", failure)
-				}
-			}()
-			if !plainClusterLiteral(value, 0) {
-				return
-			}
-			var source bytes.Buffer
-			Serialize(&source, value, &Globalenv)
-			// The source reply remains one bounded message even after textual
-			// string escaping in both the Scmer value and its result envelope.
-			if source.Len() <= 48*1024 {
-				capture.object = &clusterLiteral{source.String()}
-			}
-		}()
-	} else {
-		<-capture.done
-	}
-	return capture.object, capture.err
-}
-
-type clusterLiteralImport struct {
-	mu      sync.Mutex
-	value   weak.Pointer[FastDict]
-	loading *clusterLiteralLoad
-}
-type clusterLiteralLoad struct {
-	ready   chan struct{}
-	value   Scmer
-	failure any
-}
-
-func importClusterLiteral(handle ClusterHandle) (value Scmer) {
-	if handle.Lifetime == nil {
-		panic("immutable capture requires a peer lifetime")
-	}
-	state := handle.Lifetime.LocalState(func() any { return new(clusterLiteralImport) }).(*clusterLiteralImport)
-	state.mu.Lock()
-	if dict := state.value.Value(); dict != nil {
-		state.mu.Unlock()
-		return NewFastDict(dict)
-	}
-	if loading := state.loading; loading != nil {
-		state.mu.Unlock()
-		// This lease owns the accepted materialization. Join it; a cancelled
-		// waiter must not abandon shared work needed by another invocation.
-		<-loading.ready
-		if loading.failure != nil {
-			panic(loading.failure)
-		}
-		return loading.value
-	}
-	loading := &clusterLiteralLoad{ready: make(chan struct{})}
-	state.loading = loading
-	state.mu.Unlock()
-	defer func() {
-		failure := recover()
-		state.mu.Lock()
-		if failure == nil {
-			state.value = weak.Make(value.FastDict())
-		}
-		loading.value, loading.failure = value, failure
-		state.loading = nil // no strong value reachable from its own cleanup argument
-		close(loading.ready)
-		state.mu.Unlock()
-		if failure != nil {
-			panic(failure)
-		}
-	}()
-	source := handle.View
-	if !source.IsString() {
-		panic("missing pushed immutable capture")
-	}
-	value = Eval(Read("immutable cluster capture", source.String(), false), &Globalenv)
-	if !value.IsFastDict() {
-		panic("invalid immutable dictionary capture")
-	}
-	runtime.AddCleanup(value.FastDict(), func(retained ClusterLifetime) { runtime.KeepAlive(retained) }, handle.Lifetime)
-	return value
-}
-func init() { RegisterClusterObjectType("literal", importClusterLiteral) }
-
-func (v *clusterLiteral) HandleClusterRequest(ctx context.Context, payload []byte) {
-	ReceiveClusterValue(ctx, payload, func(request ClusterRequest) (any, error) { return v.executeClusterRequest(ctx, request) })
-}
-
-func (v *clusterLiteral) ClusterView(ctx context.Context) (Scmer, error) {
-	value, err := v.executeClusterRequest(ctx, ClusterRequest{Method: "view"})
-	return ClusterViewValue(value, err)
 }

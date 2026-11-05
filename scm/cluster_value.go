@@ -7,8 +7,8 @@ package scm
 import "fmt"
 import "sync"
 import "weak"
-import "unsafe"
 import "bytes"
+import "unsafe"
 import "runtime"
 import "strings"
 import "sync/atomic"
@@ -179,6 +179,20 @@ func (ctx *SerializationContext) cachedValue(value Scmer) (Scmer, bool, error) {
 			return NewNil(), false, nil
 		}
 		key = plain
+		if plain.IsSlice() || plain.IsFastDict() {
+			// Optimizer-owned builders may reuse a container after this invocation.
+			// Freeze once across its shards, without retaining the invocation/Tx.
+			root := ctx
+			if root.root != nil {
+				root = root.root
+			}
+			root.mu.Lock()
+			if root.valueSnapshot == nil {
+				root.valueSnapshot = new(serializationValueSnapshot)
+			}
+			key = cachedSnapshotValue{plain, root.valueSnapshot}
+			root.mu.Unlock()
+		}
 		if _, known := peer.known.Load(key); !known && !plainClusterLiteral(plain, 0) {
 			return NewNil(), false, nil
 		}
@@ -199,6 +213,9 @@ func (ctx *SerializationContext) cachedValue(value Scmer) (Scmer, bool, error) {
 		}
 		record := entry.(*exportedClusterValue)
 		if !loaded {
+			if !ctx.publication.hold(record) {
+				continue
+			}
 			func() {
 				defer close(record.ready)
 				defer func() {
@@ -242,16 +259,25 @@ func (ctx *SerializationContext) cachedValue(value Scmer) (Scmer, bool, error) {
 	}
 }
 
+type serializationValueSnapshot struct{ identity byte }
+type cachedSnapshotValue struct {
+	value    Scmer
+	snapshot *serializationValueSnapshot
+}
+
 type receivedClusterValue struct {
-	peer       *SerializationPeer
-	id         string
-	source     []byte // retirement window only; never roots the parsed/compiled value
-	lambda     bool
-	mu         sync.Mutex
-	pointer    weak.Pointer[byte]
-	aux        uint64
-	retiring   bool
-	unregister func()
+	peer         weak.Pointer[SerializationPeer]
+	id           string
+	source       []byte // retirement window only; never roots the parsed/compiled value
+	lambda       bool
+	prepared     bool
+	mu           sync.Mutex
+	pointer      weak.Pointer[byte]
+	aux          uint64
+	retiring     bool
+	acknowledged bool
+	released     atomic.Bool
+	unregister   func()
 }
 
 var clusterValues sync.Map // UUID -> receivedClusterValue, weak decoded value
@@ -261,9 +287,10 @@ func (value *receivedClusterValue) decode() (Scmer, error) {
 	if len(tokens) != 0 {
 		return NewNil(), fmt.Errorf("cluster declaration contains trailing data")
 	}
-	if value.lambda && value.peer.Prepare != nil {
+	peer := value.peer.Value()
+	if value.lambda && !value.prepared && peer != nil && peer.Prepare != nil {
 		var err error
-		expression, err = value.peer.Prepare(expression)
+		expression, err = peer.Prepare(expression)
 		if err != nil {
 			return NewNil(), err
 		}
@@ -271,33 +298,42 @@ func (value *receivedClusterValue) decode() (Scmer, error) {
 	if err := validateProcedureWire(expression, make(map[Symbol]struct{}), &Globalenv, false, 0); err != nil {
 		return NewNil(), err
 	}
+	if !value.prepared {
+		// Keep prepared source self-contained; a disconnected peer/its callbacks
+		// must not be rooted by a weak cache record or needed for local revival.
+		var prepared bytes.Buffer
+		Serialize(&prepared, expression, &Globalenv, new(SerializationContext))
+		value.source = bytes.Clone(prepared.Bytes())
+		value.prepared = true
+	}
 	expression, err := ResolveSerializedObjects(expression, nil, nil)
 	if err != nil {
 		return NewNil(), err
 	}
-	result := Eval(expression, &Globalenv)
+	var result Scmer
 	if value.lambda {
-		if !result.IsProc() {
-			return NewNil(), fmt.Errorf("lambda declaration did not produce a lambda")
-		}
-		result = CompileJIT(result, true)
-		result.Proc().lambdaFactory = true
+		result = compileLambdaTemplate(expression)
+	} else {
+		result = Eval(expression, &Globalenv)
 	}
 	if result.ptr == nil || (!value.lambda && (!plainClusterLiteral(result, 0) || (!result.IsSlice() && !result.IsFastDict() && !result.IsString()))) {
 		return NewNil(), fmt.Errorf("cluster declaration needs an immutable GC-tracked value")
 	}
 	value.pointer = weak.Make(result.ptr)
 	value.aux = result.aux
-	peer, id := value.peer, value.id
+	identity := weak.Make(value)
+	generation := value.pointer
 	runtime.AddCleanup(result.ptr, func(retired struct {
-		peer *SerializationPeer
-		id   string
+		record     weak.Pointer[receivedClusterValue]
+		generation weak.Pointer[byte]
 	}) {
-		retired.peer.retireValue(retired.id)
+		if value := retired.record.Value(); value != nil {
+			value.retire(retired.generation)
+		}
 	}, struct {
-		peer *SerializationPeer
-		id   string
-	}{peer, id})
+		record     weak.Pointer[receivedClusterValue]
+		generation weak.Pointer[byte]
+	}{identity, generation})
 	return result, nil
 }
 func (peer *SerializationPeer) Receive(id string, source []byte, lambda bool) (err error) {
@@ -323,16 +359,12 @@ func (peer *SerializationPeer) Receive(id string, source []byte, lambda bool) (e
 	if _, err := uuid.Parse(id); err != nil {
 		return err
 	}
-	value = &receivedClusterValue{peer: peer, id: id, source: bytes.Clone(source), lambda: lambda}
+	value = &receivedClusterValue{peer: weak.Make(peer), id: id, source: bytes.Clone(source), lambda: lambda}
 	value.unregister = peer.Register(id, func(data []byte) error {
 		if len(data) != 1 || data[0] != valueRetireAck {
 			return fmt.Errorf("invalid value retirement acknowledgement")
 		}
-		release := func() {
-			clusterValues.CompareAndDelete(id, value)
-			peer.received.CompareAndDelete(id, value)
-			value.unregister()
-		}
+		release := value.acknowledge
 		if peer.AfterReceived != nil {
 			peer.AfterReceived(release)
 		} else {
@@ -358,20 +390,44 @@ func (peer *SerializationPeer) Receive(id string, source []byte, lambda bool) (e
 	runtime.KeepAlive(result)
 	return nil
 }
-func (peer *SerializationPeer) retireValue(id string) {
-	entry, ok := peer.received.Load(id)
-	if !ok {
+func (value *receivedClusterValue) release() {
+	if !value.released.CompareAndSwap(false, true) {
 		return
 	}
-	value := entry.(*receivedClusterValue)
+	clusterValues.CompareAndDelete(value.id, value)
+	if peer := value.peer.Value(); peer != nil {
+		peer.received.CompareAndDelete(value.id, value)
+	}
+	value.unregister()
+}
+func (value *receivedClusterValue) acknowledge() {
 	value.mu.Lock()
+	value.acknowledged = true
+	gone := value.pointer.Value() == nil
+	value.mu.Unlock()
+	if gone {
+		value.release()
+	}
+}
+func (value *receivedClusterValue) retire(generation weak.Pointer[byte]) {
+	value.mu.Lock()
+	if value.pointer != generation {
+		value.mu.Unlock()
+		return
+	}
+	peer := value.peer.Value()
+	if value.acknowledged || peer == nil || peer.closed.Load() {
+		value.mu.Unlock()
+		value.release()
+		return
+	}
 	if value.retiring {
 		value.mu.Unlock()
 		return
 	}
 	value.retiring = true
 	value.mu.Unlock()
-	_ = peer.Send(id, []byte{valueRetire})
+	_ = peer.Send(value.id, []byte{valueRetire})
 }
 func ClusterValue(id string) Scmer {
 	entry, ok := clusterValues.Load(id)
@@ -403,11 +459,12 @@ func (peer *SerializationPeer) Close() {
 		peer.exported.Delete(key)
 		return true
 	})
-	peer.received.Range(func(key, entry any) bool {
+	peer.received.Range(func(_, entry any) bool {
 		value := entry.(*receivedClusterValue)
-		clusterValues.CompareAndDelete(key, value)
 		value.unregister()
-		peer.received.Delete(key)
+		// Decoded values and retained view/result buffers survive reconnect. Their
+		// last local Go owner removes the weak UUID entry without contacting a dead edge.
+		value.acknowledge()
 		return true
 	})
 }
@@ -456,4 +513,60 @@ func (ctx *SerializationContext) lambdaContext(proc *Proc) *lambdaContextSnapsho
 		<-snapshot.ready
 	}
 	return snapshot
+}
+
+// RetainClusterValues ties an owned receive buffer to the cached values named
+// by its inert serialization source. Most data has no references and only pays
+// a byte search. No constructors or query code execute during the walk.
+func RetainClusterValues(source []byte) (err error) {
+	if !bytes.Contains(source, []byte("(cluster_value ")) {
+		return nil
+	}
+	defer func() {
+		if failure := recover(); failure != nil {
+			err = fmt.Errorf("cached receive buffer: %v", failure)
+		}
+	}()
+	var roots []Scmer
+	seen := map[string]bool{}
+	var walk func(Scmer, int)
+	walk = func(value Scmer, depth int) {
+		if depth > 128 {
+			panic("cached receive buffer nesting limit")
+		}
+		value = value.WithoutSourceInfo()
+		if !value.IsSlice() {
+			return
+		}
+		items := value.Slice()
+		if len(items) == 0 {
+			return
+		}
+		if scmerIsSymbol(items[0], "quote") {
+			return
+		}
+		if len(items) == 2 && scmerIsSymbol(items[0], "cluster_value") && items[1].IsString() {
+			id := items[1].String()
+			if !seen[id] {
+				roots = append(roots, ClusterValue(id))
+				seen[id] = true
+			}
+			return
+		}
+		if len(items) == 7 && scmerIsSymbol(items[0], "cluster_object") && items[6].IsString() {
+			nested := items[6].String()
+			if strings.Contains(nested, "(cluster_value ") {
+				walk(Read("cached object view", nested, false), depth+1)
+			}
+		}
+		for _, item := range items {
+			walk(item, depth+1)
+		}
+	}
+	walk(Read("cached receive buffer", string(source), false), 0)
+	if len(roots) > 0 {
+		runtime.AddCleanup(&source[0], func(values []Scmer) { runtime.KeepAlive(values) }, roots)
+	}
+	runtime.KeepAlive(source)
+	return nil
 }

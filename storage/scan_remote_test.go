@@ -2165,3 +2165,29 @@ func TestRemoteScanSpecializedPayloadLayouts(t *testing.T) {
 		}
 	}
 }
+
+func TestRemoteScanDirectionUsesNativeValueContract(t *testing.T) {
+	for _, reverse := range []bool{false, true} {
+		comparator := scm.Collate(scm.NewString("utf8mb4"), scm.NewBool(reverse)).Func()
+		ctx := (&scm.SerializationContext{}).WithPeer(&scm.SerializationPeer{Declare: func(string, []byte, bool) error { t.Fatal("native relation was declared as a lambda"); return nil }})
+		encoded, err := freezeScanDirection(comparator, ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Contains(encoded, []byte("lambda")) || bytes.Contains(encoded, []byte("cluster_value")) {
+			t.Fatal("invented code for native relation", string(encoded))
+		}
+		value, err := schemeValue(encoded).reconstruct()
+		ctx.Queued()
+		if err != nil {
+			t.Fatal(err)
+		}
+		name, gotReverse, ok := scm.LookupCollate(value.Func())
+		if !ok || name != "utf8mb4" || gotReverse != reverse {
+			t.Fatal("relation identity lost")
+		}
+	}
+	if _, err := freezeScanDirection(func(...scm.Scmer) scm.Scmer { return scm.NewNil() }, nil); err == nil {
+		t.Fatal("nonportable comparator accepted")
+	}
+}

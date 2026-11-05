@@ -688,9 +688,7 @@ type Proc struct {
 	// serializing unrelated procedures.
 	jitCompiling uint32
 	// Shared code identity and GC ownership are independent of invocation values.
-	rebindPlan    *lambdaPlan
-	codeOwner     *Proc
-	lambdaFactory bool
+	lambdaMeta *lambdaMetadata
 }
 
 // ProcJIT describes the native closure ABI. Context is a flexible array member:
@@ -726,8 +724,8 @@ func (p *Proc) snapshot() Proc {
 	return Proc{
 		JITCode: code, Params: p.Params, Body: p.Body, En: p.En,
 		Compiled: entry, OptimizerMeta: p.OptimizerMeta,
-		rebindPlan: (*lambdaPlan)(atomic.LoadPointer((*unsafe.Pointer)(unsafe.Pointer(&p.rebindPlan)))), codeOwner: p.codeOwner, lambdaFactory: p.lambdaFactory,
-		NumVars: p.NumVars, NumberedOnly: p.NumberedOnly,
+		lambdaMeta: (*lambdaMetadata)(atomic.LoadPointer((*unsafe.Pointer)(unsafe.Pointer(&p.lambdaMeta)))),
+		NumVars:    p.NumVars, NumberedOnly: p.NumberedOnly,
 	}
 }
 

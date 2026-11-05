@@ -39,6 +39,7 @@ type clusterObjectPeer struct {
 	Boot string
 }
 type clusterObjectRelease struct {
+	value     *clusterValueRelease
 	peer      clusterObjectPeer
 	reference scm.ClusterReference
 	slot      uint64 // callback close; zero denotes an object lease
@@ -859,6 +860,9 @@ func (service *nodeScanService) discardObjectOffers(peer *mosiPeer, refs []scm.C
 // Reconnected transports are shared service connections. A release operation
 // must leave queued sends and concurrent native handle calls alive.
 func (service *nodeScanService) deliverObjectRelease(release clusterObjectRelease) bool {
+	if release.value != nil {
+		return release.value.deliver()
+	}
 	if release.slot != 0 {
 		peer := service.objectConnection(release.peer)
 		return peer != nil && peer.send(context.Background(), mosiMessage{Channel: handleChannel(release.slot), Payload: []byte{handleClose}}) == nil
@@ -967,7 +971,11 @@ func (peer *mosiPeer) publishObjectView(method string, data []byte) error {
 	if peer.receivedViewBytes+len(declaration.URI)+len(declaration.View) > objectViewBudget || peer.receivedViewSlots >= objectViewSlots {
 		return fmt.Errorf("object declarations exceed byte budget")
 	}
-	peer.objectViews.Store(declaration.URI, append([]byte(nil), declaration.View...))
+	view := append([]byte(nil), declaration.View...)
+	if err := scm.RetainClusterValues(view); err != nil {
+		return err
+	}
+	peer.objectViews.Store(declaration.URI, view)
 	peer.receivedViewBytes += len(declaration.URI) + len(declaration.View)
 	peer.receivedViewSlots++
 	return nil

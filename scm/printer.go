@@ -22,9 +22,9 @@ import "io"
 import "fmt"
 import "math"
 import "bytes"
+import "unsafe"
 import "strconv"
 import "strings"
-import "unsafe"
 
 var schemeStringEscaper = strings.NewReplacer("\\", "\\\\", "\"", "\\\"", "\r", "\\r", "\n", "\\n")
 
@@ -37,11 +37,12 @@ const (
 // forwards to the caller's bytes.Buffer or consumes bytes directly into FNV-1a.
 // Avoiding io.Writer/hash.Hash dispatch matters for the many tiny AST tokens.
 type schemeTextWriter struct {
-	buffer     *bytes.Buffer
-	objects    *SerializationContext
-	references map[ClusterObject]Scmer
-	literals   map[Scmer]int64 // envelope-local constructor IDs; same capture namespace as objects
-	hash       uint64
+	buffer        *bytes.Buffer
+	objects       *SerializationContext
+	references    map[ClusterObject]Scmer
+	literals      map[Scmer]int64 // envelope-local constructor IDs; same capture namespace as objects
+	hash          uint64
+	cacheCaptures bool // immutable closure bindings, never one-use result buffers
 }
 
 func bufferTextWriter(buffer *bytes.Buffer) *schemeTextWriter {
@@ -326,7 +327,10 @@ func serializeEx(b *schemeTextWriter, v Scmer, en *Env, glob *Env, p *Proc) {
 				id = int64(len(b.literals) + len(b.references) + 1)
 				b.literals[v] = id
 			}
+			previous := b.cacheCaptures
+			b.cacheCaptures = true
 			serializeEx(b, NewSlice([]Scmer{NewSymbol("serialized_value"), NewInt(id), expression}), glob, glob, nil)
+			b.cacheCaptures = previous
 			return
 		}
 	}
@@ -373,7 +377,12 @@ func serializeEx(b *schemeTextWriter, v Scmer, en *Env, glob *Env, p *Proc) {
 				items := expression.Slice()
 				expression = NewSlice([]Scmer{items[0], items[1], NewNil()})
 			}
+			// Constructor fields are protocol data. In particular a view is already
+			// serialized source, which the static offer walker must read literally.
+			previous := b.cacheCaptures
+			b.cacheCaptures = false
 			serializeEx(b, expression, glob, glob, nil)
+			b.cacheCaptures = previous
 			return
 		}
 	}
@@ -417,6 +426,14 @@ func serializeEx(b *schemeTextWriter, v Scmer, en *Env, glob *Env, p *Proc) {
 			b.WriteString(".0")
 		}
 	case tagString, tagCString, tagBString, tagLZ4:
+		if b.cacheCaptures && b.objects != nil && b.objects.Peer != nil && v.IsString() {
+			if expression, ok, err := b.objects.cachedValue(v); err != nil {
+				panic(err)
+			} else if ok {
+				serializeEx(b, expression, glob, glob, nil)
+				return
+			}
+		}
 		b.WriteByte('"')
 		if v.IsBufferString() {
 			serializeBufferString(b, v)
@@ -530,7 +547,7 @@ func serializeEx(b *schemeTextWriter, v Scmer, en *Env, glob *Env, p *Proc) {
 		}
 		serializeProcShallow(b, v.Proc().snapshot(), glob)
 	case tagFastDict:
-		if b.objects != nil && b.objects.Peer != nil {
+		if b.cacheCaptures && b.objects != nil && b.objects.Peer != nil {
 			if expression, ok, err := b.objects.cachedValue(v); err != nil {
 				panic(err)
 			} else if ok {
@@ -538,16 +555,7 @@ func serializeEx(b *schemeTextWriter, v Scmer, en *Env, glob *Env, p *Proc) {
 				return
 			}
 		}
-		if b.objects != nil && b.objects.Peer == nil && b.objects.Export != nil && v.FastDict() != nil && len(v.FastDict().Pairs) >= 512 {
-			literal, err := b.objects.literal(v)
-			if err != nil {
-				panic(err)
-			}
-			if literal != nil {
-				serializeEx(b, NewAny(literal), glob, glob, nil)
-				return
-			}
-		}
+
 		if b.objects != nil {
 			if b.literals == nil {
 				b.literals = make(map[Scmer]int64)
@@ -801,7 +809,7 @@ func prettyLines(v Scmer, glob *Env, width int, indent int) []string {
 // Ordinary quoted source remains inert, including literal cluster_object forms.
 func serializeClusterLiteral(b *schemeTextWriter, value Scmer, glob *Env) {
 	value = value.WithoutSourceInfo()
-	if b.objects != nil && b.objects.Peer != nil && (value.IsSlice() || value.IsFastDict() || value.IsString()) {
+	if b.cacheCaptures && b.objects != nil && b.objects.Peer != nil && (value.IsSlice() || value.IsFastDict() || value.IsString()) {
 		if expression, ok, err := b.objects.cachedValue(value); err != nil {
 			panic(err)
 		} else if ok {

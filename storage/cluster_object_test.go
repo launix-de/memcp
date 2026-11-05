@@ -1213,62 +1213,61 @@ func TestClusterTransferredParticipantKeepsEnlistedCapability(t *testing.T) {
 func prepareSharedLiteral(t *testing.T, owner, client *nodeScanService, peer *mosiPeer) weak.Pointer[scm.FastDict] {
 	t.Helper()
 	source := objectOwnerPeer(t, owner, client)
-	bindings := (&scm.SerializationContext{}).WithExport(func(object scm.ClusterObject, view scm.Scmer) (scm.ClusterReference, error) {
-		return owner.exportObject(source, object, view, nil)
-	})
+	bindings := (&scm.SerializationContext{}).WithPeer(source.valuePeer())
+	defer bindings.Queued()
 	dict := scm.NewFastDictValue(512)
 	for i := 0; i < 512; i++ {
 		dict.Set(scm.NewInt(int64(i)), scm.NewInt(int64(i+7)), nil)
 	}
-	first, err := freezeScanValue(scm.NewFastDict(dict), bindings)
+	sourceProc := scm.Eval(scm.Read(t.Name(), `(lambda () captured)`, false), &scm.Env{Vars: scm.Vars{scm.Symbol("captured"): scm.NewFastDict(dict)}, Outer: &scm.Globalenv})
+	first, err := scm.MarshalProcedure(sourceProc, bindings)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := freezeScanValue(scm.NewFastDict(dict), bindings)
+	second, err := scm.MarshalProcedure(sourceProc, bindings)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(first) > 1024 || len(second) > 1024 {
 		t.Fatal("dictionary was inlined per shard", len(first), len(second))
 	}
-	// This test reconstructs wire values directly, outside the socket reader.
-	// Wait for the preceding declaration to arrive; real tasks follow it on
-	// the same stream and therefore cannot overtake its inline publication.
-	for _, reference := range serializedReferences(first) {
-		if len(reference.View) != 0 {
-			continue
+	// Direct test reconstruction is outside the socket reader. Real tasks use
+	// the FIFO; the test waits until the preceding declaration was admitted.
+	var ready scm.Scmer
+	deadline := time.Now().Add(time.Second)
+	for {
+		ready, err = scm.UnmarshalProcedure(first)
+		if err == nil {
+			break
 		}
-		deadline := time.Now().Add(time.Second)
-		for {
-			if _, arrived := peer.objectViews.Load(reference.URI); arrived {
-				break
-			}
-			if time.Now().After(deadline) {
-				t.Fatal("immutable declaration did not arrive before direct reconstruction")
-			}
-			time.Sleep(time.Millisecond)
+		if !strings.Contains(err.Error(), "unknown cluster value") || time.Now().After(deadline) {
+			t.Fatal(err)
 		}
+		time.Sleep(time.Millisecond)
 	}
 	// Mutation after export must not change the frozen statement snapshot.
 	dict.Set(scm.NewInt(0), scm.NewInt(900), nil)
-	decode := scm.ProcedureDecode{Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) {
-		return client.importObject(context.Background(), peer, ref)
-	}}
 	type restored struct {
 		value scm.Scmer
 		err   error
 	}
 	results := make(chan restored, 16)
-	wires := []schemeValue{first, second}
+	wires := [][]byte{first, second}
 	for len(wires) < 16 {
-		wire, err := freezeScanValue(scm.NewFastDict(dict), bindings)
+		wire, err := scm.MarshalProcedure(sourceProc, bindings)
 		if err != nil {
 			t.Fatal(err)
 		}
 		wires = append(wires, wire)
 	}
 	for _, wire := range wires {
-		go func(wire schemeValue) { value, err := wire.reconstruct(decode); results <- restored{value, err} }(wire)
+		go func(wire []byte) {
+			value, err := scm.UnmarshalProcedure(wire)
+			if err == nil {
+				value = scm.Apply(value)
+			}
+			results <- restored{value, err}
+		}(wire)
 	}
 	values := make([]scm.Scmer, 0, len(wires))
 	for range wires {
@@ -1281,6 +1280,7 @@ func prepareSharedLiteral(t *testing.T, owner, client *nodeScanService, peer *mo
 		}
 		values = append(values, got.value)
 	}
+	runtime.KeepAlive(ready)
 	a, b := values[0], values[1]
 	if a.FastDict() != b.FastDict() {
 		t.Fatal("same lease reconstructed the dictionary twice")
@@ -1469,7 +1469,7 @@ func TestClusterImportedTransactionExportRetainsRoot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	root, err := owner.exportObject(source, tx.transactionState, view)
+	root, err := owner.exportObject(source, tx.transactionState, view, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1477,7 +1477,7 @@ func TestClusterImportedTransactionExportRetainsRoot(t *testing.T) {
 	// Construct the proxy held by a different process explicitly, so exporting
 	// it exercises forwarding rather than resolving back to the native root.
 	proxy := &transactionState{clusterID: tx.ClusterObjectID(), coordinator: &scm.ClusterHandle{Reference: root, View: view}}
-	forwarded, err := client.exportObject(peer, proxy, view)
+	forwarded, err := client.exportObject(peer, proxy, view, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

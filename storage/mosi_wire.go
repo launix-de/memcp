@@ -838,6 +838,9 @@ func unmarshalNode(data []byte, target any) (err error) {
 			p.Raw = raw.data
 		} else {
 			p.Value = raw.data
+			if err := scm.RetainClusterValues(p.Value); err != nil {
+				return err
+			}
 		}
 		raw.data = nil
 	default:
@@ -1255,6 +1258,9 @@ func (r *nodeReader) references() []scm.ClusterReference {
 	refs := make([]scm.ClusterReference, int(n))
 	for i := range refs {
 		refs[i] = scm.ClusterReference{URI: string(r.blob()), Owner: string(r.blob()), Incarnation: string(r.blob()), Token: string(r.blob()), Type: string(r.blob()), View: r.blob()}
+		if err := scm.RetainClusterValues(refs[i].View); err != nil {
+			panic(err)
+		}
 		if len(refs[i].View) == 0 {
 			refs[i].View = nil
 		}

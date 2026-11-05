@@ -18,8 +18,8 @@ import "encoding/binary"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/memcp/storage/mosi"
 
-// Version 20 carries handler-specific binary parameters and native redirect progress.
-const scanWireVersion = 20
+// Version 21 sends native order relations directly, without synthetic lambda factories.
+const scanWireVersion = 21
 
 type remoteScanShard struct {
 	Schema   uint64       `json:"schema"`
@@ -1040,6 +1040,9 @@ func (r *nodeReader) scanResult() remoteScanResult {
 	p.InputCount = r.integer()
 	p.CandidateCount = r.integer()
 	p.Value = r.data
+	if err := scm.RetainClusterValues(p.Value); err != nil {
+		panic(err)
+	}
 	r.data = nil
 	return p
 }

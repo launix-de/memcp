@@ -31,6 +31,7 @@ type lambdaBinding struct {
 }
 type lambdaPlan struct {
 	identity      lambdaCodeIdentity
+	codeIdentity  lambdaCodeIdentity
 	codeOwner     *Proc
 	sourceBody    weak.Pointer[byte]
 	bodyTracked   bool
@@ -48,6 +49,7 @@ var lambdaPlanBuildMu sync.Mutex // cold code publication only
 const lambdaScopeSymbol = "\x00lambda:scope"
 
 func lambdaProcedure(value Scmer) *Proc {
+	value = value.WithoutSourceInfo()
 	if value.IsProc() {
 		return value.Proc()
 	}
@@ -56,34 +58,69 @@ func lambdaProcedure(value Scmer) *Proc {
 	}
 	return nil
 }
+
+type lambdaMetadata struct {
+	plan     atomic.Pointer[lambdaPlan]
+	owner    *Proc
+	template *lambdaTemplate
+}
+type lambdaTemplate struct {
+	parameters  []Symbol
+	captures    []int
+	environment bool
+	bound       *lambdaMetadata
+}
+
+func (proc *Proc) lambdaMetadata() *lambdaMetadata {
+	pointer := (*unsafe.Pointer)(unsafe.Pointer(&proc.lambdaMeta))
+	if state := (*lambdaMetadata)(atomic.LoadPointer(pointer)); state != nil {
+		return state
+	}
+	candidate := new(lambdaMetadata)
+	if atomic.CompareAndSwapPointer(pointer, nil, unsafe.Pointer(candidate)) {
+		return candidate
+	}
+	return (*lambdaMetadata)(atomic.LoadPointer(pointer))
+}
 func procedureLambdaPlan(proc *Proc) *lambdaPlan {
-	key := lambdaCodeIdentity{body: uintptr(unsafe.Pointer(proc.Body.ptr)), params: uintptr(unsafe.Pointer(proc.Params.ptr)), bodyTag: proc.Body.aux, paramsTag: proc.Params.aux, vars: proc.NumVars}
+	state := proc.lambdaMetadata()
+	body, params := proc.Body.WithoutSourceInfo(), proc.Params.WithoutSourceInfo()
+	key := lambdaCodeIdentity{body: uintptr(unsafe.Pointer(body.ptr)), params: uintptr(unsafe.Pointer(params.ptr)), bodyTag: body.aux, paramsTag: params.aux, vars: proc.NumVars}
 	if entry := proc.compiled(); entry != nil {
 		key.captureBase, key.captureCount = entry.CaptureBase, entry.CaptureCount
 	}
-	if proc.Body.IsSymbol() || proc.Body.IsString() {
+	if body.IsSymbol() || body.IsString() {
 		key.body = 0
-		key.bodyName = proc.Body.String()
+		key.bodyName = body.String()
 	}
-	if proc.Params.IsSymbol() {
+	if params.IsSymbol() {
 		key.params = 0
-		key.paramsName = proc.Params.String()
+		key.paramsName = params.String()
 	}
-	if entry := proc.compiled(); entry != nil && entry.CodePtr != nil {
-		key.code = uintptr(entry.CodePtr)
-		key.body, key.params = 0, 0
-		key.bodyName, key.paramsName = "", ""
-		key.bodyTag, key.paramsTag = 0, 0
+	var codeKey lambdaCodeIdentity
+	entry := proc.compiled()
+	if entry != nil && entry.CodePtr != nil {
+		codeKey = lambdaCodeIdentity{code: uintptr(entry.CodePtr), vars: key.vars, captureBase: key.captureBase, captureCount: key.captureCount}
+		for entry.Owner != nil {
+			entry = entry.Owner
+		}
 	}
-
-	if existing := (*lambdaPlan)(atomic.LoadPointer((*unsafe.Pointer)(unsafe.Pointer(&proc.rebindPlan)))); existing != nil && existing.identity == key {
+	if existing := state.plan.Load(); existing != nil && (existing.identity == key || codeKey.code != 0 && existing.codeIdentity == codeKey && existing.entry.Value() == entry) {
 		return existing
 	}
 	load := func() *lambdaPlan {
 		if value, ok := lambdaPlanIndex.Load(key); ok {
 			plan := value.(weak.Pointer[lambdaPlan]).Value()
-			if plan != nil && (!plan.bodyTracked || plan.sourceBody.Value() == proc.Body.ptr) && (!plan.paramsTracked || plan.sourceParams.Value() == proc.Params.ptr) && (key.code == 0 || plan.entry.Value() == proc.compiled()) {
+			if plan != nil && (!plan.bodyTracked || plan.sourceBody.Value() == body.ptr) && (!plan.paramsTracked || plan.sourceParams.Value() == params.ptr) {
 				return plan
+			}
+		}
+		if codeKey.code != 0 {
+			if value, ok := lambdaPlanIndex.Load(codeKey); ok {
+				plan := value.(weak.Pointer[lambdaPlan]).Value()
+				if plan != nil && plan.entry.Value() == entry {
+					return plan
+				}
 			}
 		}
 		return nil
@@ -97,37 +134,48 @@ func procedureLambdaPlan(proc *Proc) *lambdaPlan {
 			key.bodyName = strings.Clone(key.bodyName)
 			key.paramsName = strings.Clone(key.paramsName)
 			plan.identity = key
+			plan.codeIdentity = codeKey
 			pointer := weak.Make(plan)
 			lambdaPlanIndex.Store(key, pointer)
+			if codeKey.code != 0 {
+				lambdaPlanIndex.Store(codeKey, pointer)
+			}
 			runtime.AddCleanup(plan, func(value struct {
-				key     lambdaCodeIdentity
-				pointer weak.Pointer[lambdaPlan]
+				key, codeKey lambdaCodeIdentity
+				pointer      weak.Pointer[lambdaPlan]
 			}) {
 				lambdaPlanIndex.CompareAndDelete(value.key, value.pointer)
+				if value.codeKey.code != 0 {
+					lambdaPlanIndex.CompareAndDelete(value.codeKey, value.pointer)
+				}
 			}, struct {
-				key     lambdaCodeIdentity
-				pointer weak.Pointer[lambdaPlan]
-			}{key, pointer})
+				key, codeKey lambdaCodeIdentity
+				pointer      weak.Pointer[lambdaPlan]
+			}{key, codeKey, pointer})
 		}
 		lambdaPlanBuildMu.Unlock()
 	}
-	atomic.StorePointer((*unsafe.Pointer)(unsafe.Pointer(&proc.rebindPlan)), unsafe.Pointer(plan))
+	state.plan.Store(plan)
 	return plan
 }
 func buildLambdaPlan(proc *Proc) *lambdaPlan {
-	plan := &lambdaPlan{codeOwner: proc.codeOwner}
+	plan := &lambdaPlan{codeOwner: proc.lambdaMetadata().owner}
 	if entry := proc.compiled(); entry != nil && entry.CodePtr != nil {
+		for entry.Owner != nil {
+			entry = entry.Owner
+		}
 		plan.entry = weak.Make(entry)
-	} else {
-		plan.bodyTracked = proc.Body.IsSlice() || proc.Body.IsSourceInfo() || proc.Body.GetTag() == tagAny || proc.Body.IsProc()
-		plan.paramsTracked = proc.Params.IsSlice() && proc.Params.ptr != nil
-		if plan.bodyTracked {
-			plan.sourceBody = weak.Make(proc.Body.ptr)
-		}
-		if plan.paramsTracked {
-			plan.sourceParams = weak.Make(proc.Params.ptr)
-		}
 	}
+	sourceBody, sourceParams := proc.Body.WithoutSourceInfo(), proc.Params.WithoutSourceInfo()
+	plan.bodyTracked = sourceBody.IsSlice() || sourceBody.GetTag() == tagAny || sourceBody.IsProc()
+	plan.paramsTracked = sourceParams.IsSlice() && sourceParams.ptr != nil
+	if plan.bodyTracked {
+		plan.sourceBody = weak.Make(sourceBody.ptr)
+	}
+	if plan.paramsTracked {
+		plan.sourceParams = weak.Make(sourceParams.ptr)
+	}
+
 	var params []Scmer
 	bind := func(binding lambdaBinding) Scmer {
 		// Names contain NUL so ordinary source identifiers cannot collide with
@@ -188,7 +236,8 @@ func buildLambdaPlan(proc *Proc) *lambdaPlan {
 		if !plain.IsSlice() {
 			return value
 		}
-		items := plain.Slice()
+		raw := plain.Slice()
+		items := lambdaSyntaxOperands(raw)
 		if len(items) == 2 && scmerIsSymbol(items[0], "quote") {
 			if !plainClusterLiteral(items[1], 0) {
 				return bind(lambdaBinding{pointer: weak.Make(items[1].ptr), aux: items[1].aux, inline: -1, literal: true})
@@ -196,6 +245,9 @@ func buildLambdaPlan(proc *Proc) *lambdaPlan {
 			return value
 		}
 		var result []Scmer
+		if len(items) != len(raw) {
+			result = append([]Scmer(nil), items...)
+		}
 		for i, item := range items {
 			next := native(item)
 			if next != item && result == nil {
@@ -242,37 +294,116 @@ func (plan *lambdaPlan) context(proc *Proc) []Scmer {
 
 // LambdaRebind shares a code factory while constructing a private capture
 // context. The original closure and all other rebindings remain immutable.
+// compileLambdaTemplate compiles only the code which will actually execute.
+// Rebindings copy its GC-typed inline capture array; they neither invoke nor
+// compile an enclosing factory. Variadic and fixed-arity lambdas share this path.
+func compileLambdaTemplate(expression Scmer) Scmer {
+	factory := expression.WithoutSourceInfo().Slice()
+	if len(factory) < 3 || !scmerIsSymbol(factory[0], "lambda") || !factory[1].WithoutSourceInfo().IsSlice() {
+		panic("invalid lambda template")
+	}
+	parameters := factory[1].WithoutSourceInfo().Slice()
+	vars := make(Vars, len(parameters))
+	template := &lambdaTemplate{parameters: make([]Symbol, len(parameters)), environment: true}
+	for i, param := range parameters {
+		template.parameters[i] = mustSymbol(param)
+		vars[template.parameters[i]] = NewNil()
+	}
+	value := Eval(factory[2], &Env{Vars: vars, Outer: &Globalenv})
+	if !value.IsProc() {
+		panic("lambda template must contain a lambda")
+	}
+	original := value.Proc().snapshot()
+	if jitEnabled && !jitExpressionConsumesRuntimeEnv(original.Body) {
+		base := original.NumVars
+		if original.Params.IsSlice() && len(original.Params.Slice()) > base {
+			base = len(original.Params.Slice())
+		}
+		if original.Params.IsSymbol() && base < 1 {
+			base = 1
+		}
+		base, _ = jitRequiredLocalSlots(original.Body, base)
+		free := map[Symbol]bool{}
+		for _, name := range jitLambdaFreeSymbols(original.Params, original.Body) {
+			free[name] = true
+		}
+		bindings := map[Symbol]NthLocalVar{}
+		var symbols []Symbol
+		var keys []Scmer
+		for i, name := range template.parameters {
+			if !free[name] {
+				continue
+			}
+			bindings[name] = NthLocalVar(base + len(symbols))
+			symbols = append(symbols, name)
+			keys = append(keys, NewSymbol(string(name)))
+			template.captures = append(template.captures, i)
+		}
+		prepared := original
+		prepared.Body = jitBindLambdaCaptures(original.Body, bindings, nil, nil)
+		prepared.NumVars = base + len(symbols)
+		prepared.En = &Globalenv
+		prepared.Compiled = &JITEntryPoint{CaptureBase: base, CaptureCount: len(symbols), CaptureKeys: keys, CaptureSymbols: symbols}
+		compiled := jitAllocateProcContext(&prepared, len(symbols))
+		value = CompileJIT(Scmer{(*byte)(unsafe.Pointer(compiled)), makeAux(tagProc, 0)}, true)
+		if value.Proc().nativeCode() != 0 {
+			template.environment = false
+		} else {
+			value = NewProcStruct(original)
+		}
+	} else {
+		value = CompileJIT(value, true)
+	}
+	p := value.Proc()
+	template.bound = &lambdaMetadata{owner: p}
+	p.lambdaMeta = &lambdaMetadata{template: template}
+	return value
+}
 func LambdaRebind(old Scmer, context ...Scmer) Scmer {
 	proc := lambdaProcedure(old)
 	if proc == nil {
 		panic("lambda_rebind expects a Scheme lambda")
 	}
 	factory := old
-	if !proc.lambdaFactory {
+	if proc.lambdaMetadata().template == nil {
 		plan := procedureLambdaPlan(proc)
-		plan.once.Do(func() {
-			plan.compiled = CompileJIT(Eval(plan.factory, &Globalenv), true)
-			plan.compiled.Proc().lambdaFactory = true
-		})
+		plan.once.Do(func() { plan.compiled = compileLambdaTemplate(plan.factory) })
 		factory = plan.compiled
 	}
 	p := factory.Proc()
-	arity := len(p.Params.Slice())
+	template := p.lambdaMetadata().template
+	arity := len(template.parameters)
 	if len(context) == arity-1 {
 		context = append(append([]Scmer(nil), context...), NewNil())
 	}
 	if len(context) != arity {
 		panic(fmt.Sprintf("lambda_rebind expects %d bindings, got %d", arity-1, len(context)))
 	}
-	value := Apply(factory, context...)
-	if !value.IsProc() {
-		panic("lambda_rebind factory did not return a lambda")
+	count := 0
+	if entry := p.compiled(); entry != nil && entry.CodePtr != nil {
+		count = entry.CaptureCount
 	}
-	if entry := value.Proc().compiled(); entry != nil && entry.CaptureCount == 0 {
-		value = NewProcStruct(value.Proc().snapshot())
+	var bound *Proc
+	if p.nativeCode() != 0 {
+		bound = jitAllocateProcContext(p, count)
+	} else {
+		copy := p.snapshot()
+		bound = &copy
 	}
-	value.Proc().codeOwner = p
-	return value
+	if !template.environment {
+		captures := jitProcCaptures(bound)
+		for index, parameter := range template.captures {
+			captures[index] = context[parameter]
+		}
+	} else {
+		vars := make(Vars, arity)
+		for i, name := range template.parameters {
+			vars[name] = context[i]
+		}
+		bound.En = &Env{Vars: vars, Outer: &Globalenv}
+	}
+	bound.lambdaMeta = template.bound
+	return Scmer{(*byte)(unsafe.Pointer(bound)), makeAux(tagProc, 0)}
 }
 func initLambdaRebind() {
 	Declare(&Globalenv, &Declaration{Name: "lambda_rebind", Fn: func(args ...Scmer) Scmer {

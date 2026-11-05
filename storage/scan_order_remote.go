@@ -7,6 +7,7 @@ package storage
 import "fmt"
 import "sync"
 import "time"
+import "bytes"
 import "context"
 import "strings"
 import "sync/atomic"
@@ -111,10 +112,12 @@ func freezeScanDirection(direction func(...scm.Scmer) scm.Scmer, bindings *scm.S
 	if err != nil {
 		return nil, err
 	}
-	// Construct the native collation once on the worker, preserving its identity
-	// and index-order metadata as well as its value/NULL comparison semantics.
-	proc := scm.Eval(scm.NewSlice([]scm.Scmer{scm.NewSymbol("lambda"), scm.NewSlice(nil), expression}), &scm.Globalenv)
-	return scm.MarshalProcedure(proc, bindings)
+	// Relations are native values with an existing reconstruction expression.
+	// Inventing a fresh lambda per shard hides their shared identity and forces
+	// needless code declarations/compilation in the peer cache.
+	var source bytes.Buffer
+	scm.Serialize(&source, expression, &scm.Globalenv, bindings)
+	return source.Bytes(), nil
 }
 
 func (wire *remoteScanOrder) bind(decode scm.ProcedureDecode) (*shardOrderInvocation, error) {
@@ -131,11 +134,11 @@ func (wire *remoteScanOrder) bind(decode scm.ProcedureDecode) (*shardOrderInvoca
 	}
 	var directions []scm.Scmer
 	for _, encoded := range wire.Directions {
-		value, err := scm.UnmarshalProcedure(encoded, decode)
+		value, err := schemeValue(encoded).reconstruct(decode)
 		if err != nil {
 			return nil, err
 		}
-		directions = append(directions, scm.Apply(value))
+		directions = append(directions, value)
 	}
 	result.directions = scanSortDirections(directions)
 	if len(wire.Accept) > 0 {

@@ -857,6 +857,9 @@ func decodeScanCompletion(data []byte, result *scanCompletion) (err error) {
 		}
 		if bits&2 != 0 {
 			result.Panic.Value = r.blob()
+			if err := scm.RetainClusterValues(result.Panic.Value); err != nil {
+				return err
+			}
 		}
 		if bits&4 != 0 {
 			result.Panic.Stack = string(r.blob())

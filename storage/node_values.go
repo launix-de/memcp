@@ -4,6 +4,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 */
 package storage
 
+import "fmt"
 import "time"
 import "sync/atomic"
 import "github.com/google/uuid"
@@ -26,7 +27,7 @@ func (peer *mosiPeer) valuePeer() *scm.SerializationPeer {
 				return peer.send(peer.ctxOrBackground(), mosiMessage{Channel: channel, Payload: append(value[:], source...)})
 			},
 			Send: func(id string, payload []byte) error {
-				return peer.send(peer.ctxOrBackground(), mosiMessage{Channel: "value/" + id, Payload: payload})
+				return peer.sendValueRelease(id, payload)
 			},
 			Register: func(id string, receive func([]byte) error) func() {
 				return peer.registerChannel("value/"+id, channelHandler(func(connection *mosiPeer, payload []byte, _ int, _ time.Time) bool {
@@ -122,4 +123,42 @@ func queuedValuePublications(refs []scm.ClusterReference) {
 	for _, ref := range refs {
 		ref.Publication.Queued()
 	}
+}
+
+// A full native send queue must not lose the only GC notification. Reuse the
+// existing release worker; retries never block the cleanup or application Send.
+// Value declarations are connection-scoped, so disconnected edges need no retry.
+type clusterValueRelease struct {
+	peer   *mosiPeer
+	id     string
+	action byte
+}
+
+func (release *clusterValueRelease) deliver() bool {
+	select {
+	case <-release.peer.done:
+		return true
+	default:
+	}
+	return release.peer.send(release.peer.ctxOrBackground(), mosiMessage{Channel: "value/" + release.id, Payload: []byte{release.action}}) == nil
+}
+func (peer *mosiPeer) sendValueRelease(id string, payload []byte) error {
+	if len(payload) != 1 {
+		return fmt.Errorf("invalid value release")
+	}
+	release := &clusterValueRelease{peer, id, payload[0]}
+	if release.deliver() {
+		return nil
+	}
+	registry := peer.scanService.objectRegistry()
+	registry.mu.Lock()
+	if !registry.stopped {
+		registry.releases = append(registry.releases, clusterObjectRelease{value: release})
+	}
+	registry.mu.Unlock()
+	select {
+	case registry.wake <- struct{}{}:
+	default:
+	}
+	return nil
 }

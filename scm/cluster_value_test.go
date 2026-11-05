@@ -6,12 +6,13 @@ package scm
 
 import "sync"
 import "time"
+import "weak"
 import "bytes"
 import "strings"
-import "github.com/google/uuid"
 import "testing"
 import "runtime"
 import "sync/atomic"
+import "github.com/google/uuid"
 
 func valuePeerPair(t testing.TB) (*SerializationPeer, *SerializationPeer, *atomic.Int64) {
 	t.Helper()
@@ -128,7 +129,7 @@ func TestClusterValueRetirementKeepsPreparedReference(t *testing.T) {
 	}
 	var id string
 	receiver.received.Range(func(key, _ any) bool { id = key.(string); return false })
-	receiver.retireValue(id)
+	func() { v, _ := receiver.received.Load(id); r := v.(*receivedClusterValue); r.retire(r.pointer) }()
 	if _, ok := receiver.received.Load(id); !ok {
 		t.Fatal("freed value while sender still prepared its reference")
 	}
@@ -137,8 +138,8 @@ func TestClusterValueRetirementKeepsPreparedReference(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx.Queued()
-	if _, ok := receiver.received.Load(id); ok {
-		t.Fatal("registry survived ordered retirement")
+	if _, ok := sender.exported.Load(id); ok {
+		t.Fatal("sender still advertises a retired value")
 	}
 	if got := Apply(value, NewInt(7)); got.Int() != 38 {
 		t.Fatal("retirement invalidated running closure", got)
@@ -254,7 +255,7 @@ func BenchmarkClusterLambdaContexts(b *testing.B) {
 				closures = append(closures, value)
 			}
 			b.StopTimer()
-			b.ReportMetric(float64(compilations), "factory-builds")
+			b.ReportMetric(float64(compilations)+float64(declarations.Load()), "code-builds")
 			b.ReportMetric(float64(declarations.Load()), "declarations")
 			b.ReportMetric(float64(totalBytes)/float64(b.N), "task-B/op")
 			runtime.KeepAlive(closures)
@@ -398,4 +399,273 @@ func TestClusterValueOptimizedNumberedLocals(t *testing.T) {
 	if Apply(value, NewInt(7), NewInt(11), NewInt(13)).Int() != 31 {
 		t.Fatal("numbered locals changed")
 	}
+}
+
+func TestClusterValueNestedLambdaBindingProof(t *testing.T) {
+	sender, _, _ := valuePeerPair(t)
+	nested := prepareLambdaBindings([]Scmer{NewSymbol("lambda"), NewSlice([]Scmer{NewSymbol("y")}), NewNthLocalVar(0), NewInt(1)})
+	original := NewProcStruct(Proc{Params: NewSlice(nil), Body: NewSlice(nested), En: &Globalenv})
+	ctx := (&SerializationContext{}).WithPeer(sender)
+	data, err := MarshalProcedure(original, ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err := UnmarshalProcedure(data)
+	ctx.Queued()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if Apply(Apply(value), NewInt(31)).Int() != 31 {
+		t.Fatal("nested lambda lost its numbered binding")
+	}
+}
+
+func TestClusterValueDoesNotCacheOneUseOutput(t *testing.T) {
+	sender, _, declarations := valuePeerPair(t)
+	ctx := (&SerializationContext{}).WithPeer(sender)
+	values := make([]Scmer, 128)
+	for i := range values {
+		values[i] = NewInt(int64(i))
+	}
+	var text bytes.Buffer
+	Serialize(&text, serializedValueLiteral(NewSlice(values)), &Globalenv, ctx)
+	if declarations.Load() != 0 || bytes.Contains(text.Bytes(), []byte("cluster_value")) {
+		t.Fatal("one-use output was registered as a captured constant")
+	}
+	ctx.Queued()
+}
+
+func TestClusterValueSharesCapturedString(t *testing.T) {
+	sender, _, declarations := valuePeerPair(t)
+	captured := NewString(strings.Repeat("captured", 64))
+	proc := Eval(Read(t.Name(), `(lambda () captured)`, false), &Env{Vars: Vars{Symbol("captured"): captured}, Outer: &Globalenv})
+	var live []Scmer
+	for i := 0; i < 8; i++ {
+		ctx := (&SerializationContext{}).WithPeer(sender)
+		data, err := MarshalProcedure(proc, ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		value, err := UnmarshalProcedure(data)
+		ctx.Queued()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !Equal(Apply(value), captured) {
+			t.Fatal("captured string changed")
+		}
+		live = append(live, value)
+	}
+	if declarations.Load() != 2 {
+		t.Fatal("code and string were not each declared once", declarations.Load())
+	}
+	runtime.KeepAlive(live)
+}
+
+func TestClusterValueSharesBodyAcrossNativeSpecializations(t *testing.T) {
+	if !jitEnabled {
+		t.Skip("native JIT required")
+	}
+	sender, _, declarations := valuePeerPair(t)
+	syntax := Read(t.Name(), `(lambda (x) (+ x captured))`, false)
+	var live []Scmer
+	codes := map[uintptr]bool{}
+	for i := 0; i < 32; i++ {
+		original := CompileJIT(Eval(syntax, &Env{Vars: Vars{Symbol("captured"): NewInt(int64(i))}, Outer: &Globalenv}), true)
+		codes[original.Proc().nativeCode()] = true
+		ctx := (&SerializationContext{}).WithPeer(sender)
+		data, err := MarshalProcedure(original, ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		value, err := UnmarshalProcedure(data)
+		ctx.Queued()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if Apply(value, NewInt(7)).Int() != int64(i+7) {
+			t.Fatal("specialized context changed")
+		}
+		live = append(live, value)
+	}
+	if len(codes) < 2 || declarations.Load() != 1 {
+		t.Fatal("shared source body was redeclared for each native specialization", len(codes), declarations.Load())
+	}
+	runtime.KeepAlive(live)
+}
+func TestClusterValueSharesNativeCodeWithClonedSourceBodies(t *testing.T) {
+	if !jitEnabled {
+		t.Skip("native JIT required")
+	}
+	sender, _, declarations := valuePeerPair(t)
+	factory := CompileJIT(Eval(Read(t.Name(), `(lambda (captured) (lambda (x) (+ x captured)))`, false), &Globalenv), true)
+	var live []Scmer
+	for i := 0; i < 32; i++ {
+		original := Apply(factory, NewInt(int64(i)))
+		copied := jitAllocateProcContext(original.Proc(), original.Proc().compiled().CaptureCount)
+		copy(jitProcCaptures(copied), jitProcCaptures(original.Proc()))
+		copied.Body = ownLambdaCode(copied.Body)
+		ctx := (&SerializationContext{}).WithPeer(sender)
+		data, err := MarshalProcedure(NewFunc(copied.jitFunction()), ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		value, err := UnmarshalProcedure(data)
+		ctx.Queued()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if Apply(value, NewInt(7)).Int() != int64(i+7) {
+			t.Fatal("native context changed")
+		}
+		live = append(live, value)
+	}
+	if declarations.Load() != 1 {
+		t.Fatal("shared native code was redeclared for cloned source bodies", declarations.Load())
+	}
+	runtime.KeepAlive(live)
+}
+
+func TestClusterValueLeavesObjectConstructorMetadataLiteral(t *testing.T) {
+	sender, _, declarations := valuePeerPair(t)
+	view := strings.Repeat("opaque-view", 64)
+	ctx := (&SerializationContext{Export: func(object ClusterObject, _ Scmer) (ClusterReference, error) {
+		return ClusterReference{URI: "http://owner/cluster/value", Owner: "owner", Incarnation: "boot", Token: "token", Type: object.ClusterObjectType(), View: []byte(view)}, nil
+	}}).WithPeer(sender)
+	original := Eval(Read(t.Name(), `(lambda () session)`, false), &Env{Vars: Vars{Symbol("session"): NewSession()}, Outer: &Globalenv})
+	data, err := MarshalProcedure(original, ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refs := SerializedClusterReferences(data[1:])
+	if len(refs) != 1 || string(refs[0].View) != view {
+		t.Fatal("constructor metadata was substituted", refs)
+	}
+	value, err := UnmarshalProcedure(data, ProcedureDecode{Resolve: func(ref ClusterReference) (Scmer, error) {
+		if string(ref.View) != view {
+			t.Fatal("opaque view changed")
+		}
+		return NewInt(41), nil
+	}})
+	ctx.Queued()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if Apply(value).Int() != 41 || declarations.Load() != 1 {
+		t.Fatal("metadata was cached as a closure value")
+	}
+}
+
+func TestClusterValueRetirementDuringFirstDeclaration(t *testing.T) {
+	sender, receiver, count := valuePeerPair(t)
+	declare := sender.Declare
+	sender.Declare = func(id string, source []byte, lambda bool) error {
+		err := declare(id, source, lambda)
+		if err == nil {
+			func() { v, _ := receiver.received.Load(id); r := v.(*receivedClusterValue); r.retire(r.pointer) }()
+		}
+		return err
+	}
+	proc := Eval(Read(t.Name(), `(lambda (x) (+ x 9))`, false), &Globalenv)
+	ctx := (&SerializationContext{}).WithPeer(sender)
+	data, err := MarshalProcedure(proc, ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err := UnmarshalProcedure(data)
+	ctx.Queued()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count.Load() != 1 || Apply(value, NewInt(7)).Int() != 16 {
+		t.Fatal("early retirement lost the first prepared reference", count.Load())
+	}
+}
+
+//go:noinline
+func retainCachedBufferAcrossClose(t *testing.T) (string, weak.Pointer[byte]) {
+	sender, receiver, _ := valuePeerPair(t)
+	ctx := (&SerializationContext{}).WithPeer(sender)
+	proc := Eval(Read(t.Name(), `(lambda (x) (+ x 9))`, false), &Globalenv)
+	wire, err := MarshalProcedure(proc, ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := bytes.Clone(wire[1:])
+	if err := RetainClusterValues(source); err != nil {
+		t.Fatal(err)
+	}
+	ctx.Queued()
+	var id string
+	var pointer weak.Pointer[byte]
+	receiver.received.Range(func(key, value any) bool {
+		id = key.(string)
+		pointer = value.(*receivedClusterValue).pointer
+		return false
+	})
+	sender.Close()
+	receiver.Close()
+	for i := 0; i < 3; i++ {
+		runtime.GC()
+	}
+	decoded, err := UnmarshalProcedure(append([]byte{procedureWireVersion}, source...))
+	if err != nil {
+		t.Fatal("buffer lost its values across close", err)
+	}
+	if Apply(decoded, NewInt(7)).Int() != 16 {
+		t.Fatal("retained buffer changed")
+	}
+	runtime.KeepAlive(source)
+	return id, pointer
+}
+func TestClusterValueRetainedBuffersSurviveCloseAndReleaseWithGC(t *testing.T) {
+	id, pointer := retainCachedBufferAcrossClose(t)
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		runtime.GC()
+		_, registered := clusterValues.Load(id)
+		if !registered && pointer.Value() == nil {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("retained receive buffer leaked its cache registration")
+}
+func TestClusterValueQuotedDataDoesNotCreateBufferReferences(t *testing.T) {
+	for _, source := range []string{`'(cluster_value "unknown")`, `"(cluster_value unknown)"`} {
+		if err := RetainClusterValues(bytes.Clone([]byte(source))); err != nil {
+			t.Fatal("interpreted literal data", err)
+		}
+	}
+}
+
+func TestClusterValueContainerSnapshotsDoNotReuseLaterBuilderState(t *testing.T) {
+	sender, _, _ := valuePeerPair(t)
+	data := NewFastDictValue(128)
+	for i := 0; i < 128; i++ {
+		data.Set(NewInt(int64(i)), NewInt(7), nil)
+	}
+	value := NewFastDict(data)
+	first := (&SerializationContext{}).WithPeer(sender)
+	old, ok, err := first.cachedValue(value)
+	if !ok || err != nil {
+		t.Fatal(err)
+	}
+	frozen := Eval(old, &Globalenv)
+	data.Set(NewInt(0), NewInt(99), nil)
+	second := (&SerializationContext{}).WithPeer(sender)
+	current, ok, err := second.cachedValue(value)
+	if !ok || err != nil {
+		t.Fatal(err)
+	}
+	latest := Eval(current, &Globalenv)
+	a, _ := frozen.FastDict().Get(NewInt(0))
+	b, _ := latest.FastDict().Get(NewInt(0))
+	if a.Int() != 7 || b.Int() != 99 {
+		t.Fatal("reused a stale container snapshot", a, b)
+	}
+	first.Queued()
+	second.Queued()
+	runtime.KeepAlive(frozen)
+	runtime.KeepAlive(latest)
 }

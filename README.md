@@ -364,7 +364,7 @@ and encodes only that action’s parameters, followed by raw compressed bytes fo
 chunks. Scan, INSERT, object, membership and replication operations use their own
 binary parameter layouts without field names or a generic method/data envelope.
 Runtime values and closures use the Scheme serializer.
-For a peer destination, the serializer declares immutable values and lambda code
+For a peer destination, the serializer declares immutable closure bindings and lambda code
 once using a UUID and the self-contained Scheme value. Later messages use
 `(cluster_value uuid)`; closures use `(lambda_rebind old_func context...)` to share
 compiled code with private bindings. Declarations are pushed ahead of their uses
