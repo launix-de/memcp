@@ -152,6 +152,45 @@ These rules describe the target architecture, never implement mechanisms that wo
   immutable reads; mutations use their owner endpoint. No extra shard read lock,
   row-level registration, counter or CAS may be added for these references.
 
+### Exact cluster message definition
+You must always keep exactly this format and you MUST NOT change or extend it since it guarantees minimal communication overhead:
+ - based on websocket binary protocol
+ - no metadata
+ - layout of a message: u8 channel-strlength | channelname | payload
+ - sending is always nonblocking and fire&forget
+ - every channel (ClusterObject/HandleClusterRequest) implements its own handling logic based on the internal channel type
+ - typical payload layouts are: binary-header (e.g. operation, flags, fixed-size parameters) | serialized-Scmer-payload (e.g. database data, panic-payloads) or raw shard data
+ - keep track of the cluster-wide lifetime of cluster objects and handles/handlers using manual cleanup or AddCleanup if we rely on the GC to safely manage the lifetime of objects
+
+Try to avoid waiting whenever possible. If you wait, wait as late as possible.
+In case of messages where a result MUST be awaited, use the following schema:
+ - var donechannel, result
+ - backchannel = node.registerchannel(func(payload) { result = payload; donechannel.Done(); })
+ - msg = encode(command, parameters, backchannel)
+ - peer.send(msg) // nonblocking
+ - do some work, e.g. send messages to other peers or simply give controlflow to other goroutines via Wait
+ - donechannel.Wait()
+ - work_with(result)
+
+Always try to cover waiting time with useful work. An example is the distributed scan_order implementation: the next items to process are requested from the peers as soon as the queue buffer is half empty.
+
+### Cluster placement strategies
+Every node must make wise decisions how to place data in the cluster network. Running things locally is always the fastest option if data is already available locally.
+Sometimes data gets bigger than a single machine's RAM, so the cluster peers will be involved.
+In order to reserve enough space for complex multi-table joins, the total loaded shards of a single table must not exceed 30% of the total available shard RAM. This parameter must be tunable via settings+dashboard. All attempts to read a shard from storage while the table-ram-limit is exceeded must panic in a typed error message such that we can catch this exception and instead ask another cluster peer to load that shard and do some work on it.
+The storage table RAM accounting must be as efficient as possible. Recompute the size of shards only in the resbuild phase or set a cached initial value from the deserialization procedure. Use CAS to track the resident size of each table using a field in the table struct. Only update that field during rebuild/repartition phase, as well as during shard loading/unloading.
+
+If we have work for a remote shard, we always have 2 options:
+ a) claim the shard with M (for write) or S (for read) and do the work ourselves
+ b) forward the task to the owning peer
+
+The following things must be considered to decide whether to fetch the shard or to delegate:
+ - table-resident-limit exceeded: no claim, forward instead
+ - small requests (e.g. a single insert) that are smaller than the estimated shard size (estimation is always 250k if unknown; do not load the shard to get its size!)
+ - large work: prefer claiming the shard before working
+ - also small request sizes must somehow accumulate over the time per node (so we track a decision budget inside the MOSI-state) such that we can negotiate with the owner who reads/writes more on that shard
+ - this means each peer must have that int decision_budget in its mosi state. when a peer delegates a job to another owner but he still has enough single-table-space, he can send his decision_budget together with the task and the receiving peer can compare their both decision_budget variables of their MOSI state and in case proactively transfer the shard (for M) or share (for O) (probably AFTER the delegated task in order to avoid retry complexity)
+
 ## Parallel execution and publication
 
 MemCP must execute independent work in parallel, using as few locks as possible.
