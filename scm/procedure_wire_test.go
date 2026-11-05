@@ -119,23 +119,25 @@ func TestCollationRelationReconstructsLocally(t *testing.T) {
 				if err != nil || !Equal(expression, NewSlice([]Scmer{NewSymbol("collate"), NewString(name), NewBool(reverse)})) {
 					t.Fatal("collation did not emit its local constructor", expression, err)
 				}
-				data, err := MarshalProcedure(value, bindings)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if !strings.Contains(string(data), "serialized_value") || strings.Contains(string(data), "cluster_handle") || strings.Contains(string(data), "remote_closure") {
-					t.Fatal("collation was not reconstructed before invocation", string(data))
-				}
-				restored, err := UnmarshalProcedure(data)
-				if err != nil {
-					t.Fatal(err)
-				}
-				for _, pair := range [][2]Scmer{
-					{NewNil(), NewString("a")}, {NewString("a"), NewString("b")},
-					{NewString("key"), NewString("Key")}, {NewString("a9"), NewString("a10")},
-				} {
-					if expected, actual := Apply(value, pair[:]...), Apply(restored, pair[:]...); !Equal(actual, expected) {
-						t.Fatal("reconstructed Less changed ordering", pair, actual, expected)
+				for _, source := range []Scmer{value, NewFunc(value.Func())} {
+					data, err := MarshalProcedure(source, bindings)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if !strings.Contains(string(data), "serialized_value") || strings.Contains(string(data), "cluster_handle") || strings.Contains(string(data), "remote_closure") {
+						t.Fatal("collation was not reconstructed before invocation", string(data))
+					}
+					restored, err := UnmarshalProcedure(data)
+					if err != nil {
+						t.Fatal(err)
+					}
+					for _, pair := range [][2]Scmer{
+						{NewNil(), NewString("a")}, {NewString("a"), NewString("b")},
+						{NewString("key"), NewString("Key")}, {NewString("a9"), NewString("a10")},
+					} {
+						if expected, actual := Apply(value, pair[:]...), Apply(restored, pair[:]...); !Equal(actual, expected) {
+							t.Fatal("reconstructed Less changed ordering", pair, actual, expected)
+						}
 					}
 				}
 			})

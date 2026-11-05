@@ -670,7 +670,12 @@ func serializeNativeFunc(b *schemeTextWriter, fn any, en *Env) {
 			return
 		}
 		if col, rev, ok := LookupCollate(f); ok {
-			// Raw native values use the same object-owned reconstruction contract.
+			// Native operator metadata can retain only the raw function. Restore
+			// its canonical value so network captures also reconstruct once.
+			if b.objects != nil {
+				serializeEx(b, Collate(NewString(col), NewBool(rev)), &Globalenv, &Globalenv, nil)
+				return
+			}
 			relation := &collationRelation{name: col, reverse: rev}
 			expression, _ := relation.Serialize(b.objects)
 			serializeEx(b, expression, &Globalenv, &Globalenv, nil)
