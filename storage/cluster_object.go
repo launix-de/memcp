@@ -183,7 +183,7 @@ func (service *nodeScanService) exportObject(peer *mosiPeer, object ClusterObjec
 		}
 		complete = true
 		uri := strings.TrimRight(endpoint, "/") + "/" + named.ClusterObjectPath()
-		service.registerObjectChannel(uri)
+		service.registerObjectChannel(uri, object.ClusterObjectType())
 		return scm.ClusterReference{URI: uri, Owner: service.authNodeID(), Incarnation: service.id, Type: object.ClusterObjectType(), View: payload}, nil
 	}
 	identity := ""
@@ -212,7 +212,7 @@ func (service *nodeScanService) exportObject(peer *mosiPeer, object ClusterObjec
 		}
 		r.entries[uri] = &clusterObjectEntry{identity: identity, object: object, uri: uri, tokens: make(map[string]clusterObjectPeer), leases: make(map[string]clusterObjectPeer), offers: make(map[string]*mosiPeer)}
 		r.identities[object] = uri
-		service.registerObjectChannel(uri)
+		service.registerObjectChannel(uri, object.ClusterObjectType())
 	}
 	token := r.nextID()
 	r.entries[uri].leases[token] = peer.objectPeer
@@ -540,11 +540,7 @@ func (s *scanRPCSession) handleObject(ctx context.Context, method string, data [
 		return nil, nil
 	}
 
-	var call clusterObjectCall
-	if err := unmarshalNode(data, &call); err != nil {
-		return nil, err
-	}
-	value, err := s.requestObject(ctx, call)
+	value, err := s.requestObject(ctx, data)
 	if err != nil {
 		return nil, err
 	}
@@ -567,11 +563,15 @@ func (s *scanRPCSession) handleObject(ctx context.Context, method string, data [
 	return clusterObjectReply{Value: frozen, Offers: transferManifest(refs)}, err
 }
 
-func (s *scanRPCSession) requestObject(ctx context.Context, call clusterObjectCall) (scm.Scmer, error) {
-	object, err := s.resolveObject(call.Reference)
-	if err != nil {
-		return scm.NewNil(), err
+func (s *scanRPCSession) requestObject(ctx context.Context, payload []byte) (scm.Scmer, error) {
+	target, ok := ctx.Value(clusterObjectTargetKey{}).(clusterObjectTarget)
+	if !ok {
+		return scm.NewNil(), fmt.Errorf("missing registered object receiver")
 	}
+	if target.err != nil {
+		return scm.NewNil(), target.err
+	}
+	object := target.object
 	// Native query ownership is established once for callable/helper requests.
 	// Decoded nested scans borrow this cancellation/transaction context.
 	id, _ := ctx.Value(remoteScanContextKey{}).(string)
@@ -606,7 +606,7 @@ func (s *scanRPCSession) requestObject(ctx context.Context, call clusterObjectCa
 	var failure error
 	replied := false
 	ctx = scm.WithClusterValueDelivery(context.WithValue(ctx, clusterObjectSessionKey{}, s), decode, func(result scm.Scmer, err error) { value, failure, replied = result, err, true })
-	receiver.HandleClusterRequest(ctx, call.Payload)
+	receiver.HandleClusterRequest(ctx, payload)
 	if !replied {
 		return scm.NewNil(), fmt.Errorf("object handler did not complete its value delivery")
 	}
@@ -1001,8 +1001,41 @@ func objectChannel(uri string) string {
 	}
 	return "object/" + path
 }
-func (service *nodeScanService) registerObjectChannel(uri string) {
-	service.channels.LoadOrStore(objectChannel(uri), workerChannel(func(peer *mosiPeer, payload []byte) error {
+
+type clusterObjectTargetKey struct{}
+type clusterObjectTarget struct {
+	object ClusterObject
+	err    error
+}
+
+func (service *nodeScanService) channelObject(peer *mosiPeer, uri, kind string) (ClusterObject, error) {
+	r := service.objectRegistry()
+	r.mu.Lock()
+	entry := r.entries[uri]
+	if entry != nil {
+		for _, identity := range entry.leases {
+			if identity == peer.objectPeer {
+				object := entry.object
+				r.mu.Unlock()
+				return object, nil
+			}
+		}
+		r.mu.Unlock()
+		return nil, fmt.Errorf("object channel belongs to another peer")
+	}
+	r.mu.Unlock()
+	reference := scm.ClusterReference{URI: uri, Type: kind, Owner: service.authNodeID(), Incarnation: service.id}
+	if kind == "transaction" {
+		return resolveTransactionRoot(reference)
+	}
+	if kind == "table" {
+		return resolveClusterCatalog(uri)
+	}
+	return nil, fmt.Errorf("expired object channel")
+}
+
+func (service *nodeScanService) registerObjectChannel(uri, kind string) {
+	_, loaded := service.channels.LoadOrStore(objectChannel(uri), workerChannel(func(peer *mosiPeer, payload []byte) error {
 		if len(payload) == 0 {
 			return fmt.Errorf("empty object delivery")
 		}
@@ -1015,10 +1048,24 @@ func (service *nodeScanService) registerObjectChannel(uri string) {
 		case handleValue:
 			// The object protocol's work payload includes its own return channel and
 			// cancellation scope. The transport never creates a reply.
-			_, err := peer.scanSession.channelMessage(peer.ctxOrBackground(), "node.control", payload[1:])
+			object, failure := service.channelObject(peer, uri, kind)
+			ctx := context.WithValue(peer.ctxOrBackground(), clusterObjectTargetKey{}, clusterObjectTarget{object, failure})
+			_, err := peer.scanSession.channelMessage(ctx, "node.control", payload[1:])
 			return err
 		default:
 			return fmt.Errorf("invalid object delivery")
 		}
 	}))
+	if !loaded && kind == "transaction" {
+		// Named transaction roots are owned by the originating session, not a
+		// remote lease. Their directory is weak; this registration must be too.
+		if state, err := resolveTransactionRoot(scm.ClusterReference{URI: uri}); err == nil {
+			runtime.AddCleanup(state, func(cleanup clusterRootChannelCleanup) { cleanup.service.channels.Delete(cleanup.channel) }, clusterRootChannelCleanup{service, objectChannel(uri)})
+		}
+	}
+}
+
+type clusterRootChannelCleanup struct {
+	service *nodeScanService
+	channel string
 }

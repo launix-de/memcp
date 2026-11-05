@@ -80,6 +80,9 @@ func EncodeClusterRequest(request ClusterRequest, bindings ...*SerializationCont
 	if len(args) == 0 {
 		return payload, nil
 	}
+	if len(bindings) == 0 || bindings[0] == nil {
+		bindings = []*SerializationContext{new(SerializationContext)}
+	}
 	var tail bytes.Buffer
 	Serialize(&tail, NewSlice([]Scmer{NewSymbol("quote"), NewSlice(args)}), &Globalenv, bindings...)
 	return append(payload, tail.Bytes()...), nil
@@ -145,7 +148,14 @@ func DecodeClusterRequest(payload []byte, decode ProcedureDecode) (request Clust
 		if !value.IsSlice() {
 			return request, fmt.Errorf("cluster arguments must be a list")
 		}
-		request.Arguments = append(request.Arguments, value.Slice()...)
+		for _, argument := range value.Slice() {
+			// The former per-argument codec JITted a decoded procedure. Preserve
+			// that behavior when all dynamic arguments share one serialized tail.
+			if argument.IsProc() {
+				argument = CompileJIT(argument, true)
+			}
+			request.Arguments = append(request.Arguments, argument)
+		}
 	}
 	if request.Method == "enlist" {
 		if len(request.Arguments) != 2 {

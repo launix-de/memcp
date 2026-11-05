@@ -1148,3 +1148,26 @@ func TestClusterRequestBinaryFixedFields(t *testing.T) {
 		t.Fatal(decoded, err)
 	}
 }
+
+func TestClusterRequestJITsProcedureArgument(t *testing.T) {
+	procedure := Eval(Optimize(Read(t.Name(), "(lambda (x) (+ x 1))", false), &Globalenv, nil), &Globalenv)
+	payload, err := EncodeClusterRequest(ClusterRequest{Method: "call", Arguments: []Scmer{procedure}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := DecodeClusterRequest(payload, ProcedureDecode{})
+	if err != nil || len(request.Arguments) != 1 {
+		t.Fatal(request, err)
+	}
+	fn := request.Arguments[0]
+
+	if jitEnabled {
+		entry := fn.Proc().compiled()
+		if entry == nil || entry.CodePtr == nil {
+			t.Fatal("decoded procedure argument was not JITted")
+		}
+	}
+	if got := Apply(fn, NewInt(41)); got.Int() != 42 {
+		t.Fatalf("result=%v tag=%d payload=%s source=%s", got, fn.GetTag(), payload, String(procedure))
+	}
+}

@@ -5,6 +5,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 package storage
 
 import "fmt"
+import "bytes"
 import "weak"
 import "time"
 import "sync"
@@ -1689,4 +1690,69 @@ func TestClusterForwardedTransactionRootKeepsOriginalCoordinator(t *testing.T) {
 	if objectEntryCount(service) != 0 {
 		t.Fatal("routing root allocated a lifetime registration")
 	}
+}
+
+func TestClusterObjectCallUsesRegisteredAddressWithoutRepeatingReference(t *testing.T) {
+	service := &nodeScanService{}
+	defer service.stopObjects()
+	peer := &mosiPeer{done: make(chan struct{}), outgoing: newMosiMailbox(), objectPeer: clusterObjectPeer{"owner", "boot"}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	payload, err := scm.EncodeClusterRequest(scm.ClusterRequest{Method: "ack", Arguments: []scm.Scmer{scm.NewInt(64), scm.NewInt(128)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reference := scm.ClusterReference{URI: "http://owner/cluster/7", Owner: "owner", Incarnation: "boot", Token: "grant", Type: "ordered-run", View: []byte(strings.Repeat("immutable-view", 1024))}
+	finished := make(chan error, 1)
+	go func() {
+		finished <- service.control(ctx, peer, "object.call", clusterObjectCall{reference, payload}, nil, false)
+	}()
+	message := takeMosi(peer.outgoing)
+	if message.Channel != "object/7" || len(message.Payload) == 0 || message.Payload[0] != handleValue {
+		t.Fatal("object did not use its registered receiver", message.Channel)
+	}
+	var request struct {
+		Return string
+		Data   []byte
+	}
+	if err := unmarshalNode(message.Payload[1:], &request); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(request.Data, payload) {
+		t.Fatal("invocation repeated its URI/type/immutable view instead of raw operation bytes")
+	}
+	cancel()
+	if err := <-finished; err != context.Canceled {
+		t.Fatal(err)
+	}
+	service.deleteHandle(controlReturnSlot(request.Return))
+}
+
+//go:noinline
+func exportCollectibleTransactionChannel(t *testing.T, service *nodeScanService) (string, weak.Pointer[transactionState]) {
+	t.Helper()
+	tx := NewTxContext(TxCursorStability)
+	view, err := tx.ClusterView(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, err := service.exportObject(&mosiPeer{objectPeer: clusterObjectPeer{"reader", "boot"}}, tx.transactionState, view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	channel := objectChannel(ref.URI)
+	if _, exists := service.channels.Load(channel); !exists {
+		t.Fatal("transaction root did not register its raw receiver")
+	}
+	return channel, weak.Make(tx.transactionState)
+}
+
+func TestClusterTransactionRootChannelFollowsNativeGC(t *testing.T) {
+	service := &nodeScanService{id: "root-owner"}
+	defer service.stopObjects()
+	channel, state := exportCollectibleTransactionChannel(t, service)
+	waitObjectGC(t, func() bool {
+		_, registered := service.channels.Load(channel)
+		return state.Value() == nil && !registered
+	})
 }

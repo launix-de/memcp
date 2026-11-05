@@ -370,7 +370,8 @@ producers separately admit their next chunk before publication.
 All channels implement the same raw-byte `ClusterRequestHandler`; capture
 serialization is an independent concern. Object operation codes, ordered ACK
 counters and transaction capabilities use binary fields, followed by at most one
-serialized Scheme value for dynamic arguments.
+serialized Scheme value for dynamic arguments. Object calls address their
+registered channel directly; they do not repeat the URI, type or immutable view.
 
 One-shot return channels deregister on completion or cancellation. A final
 result carries its release in the same delivery, avoiding a separate GC close.

@@ -597,15 +597,25 @@ func (service *nodeScanService) control(ctx context.Context, peer *mosiPeer, met
 		}
 	}()
 	offers = transferManifest(offers)
+	call, objectCall := input.(clusterObjectCall)
+	objectCall = objectCall && method == "object.call"
+	var data []byte
+	if objectCall {
+		data = call.Payload
+	} else {
+		data = mustNodeMetadata(input)
+	}
 	request := struct {
 		Offers []scm.ClusterReference `json:"offers,omitempty"`
 		Return string                 `json:"return"`
 		Method string                 `json:"method"`
 		Data   []byte                 `json:"data"`
-	}{offers, id, method, mustNodeMetadata(input)}
+	}{offers, id, method, data}
 	service.commitObjectOffers(peer, offers)
 	var sendErr error
-	if call, ok := input.(clusterObjectCall); ok && method == "object.call" {
+	if objectCall {
+		// The registered channel already identifies and authorizes the object.
+		// Its invocation carries only operation bytes, never a second URI/type/view.
 		payload, err := marshalNode(request)
 		if err != nil {
 			return err
