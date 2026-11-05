@@ -343,7 +343,7 @@ func (t *table) uniqueAccess(access scanAccess) scanAccess {
 			if strings.Contains(declaration.Collation, "_ci") {
 				orderName = "unicode-simple-fold"
 			}
-			order := scm.Apply(scm.Globalenv.Vars[scm.Symbol("collate")], scm.NewString(orderName), scm.NewBool(false))
+			order := scm.Collate(scm.NewString(orderName), scm.NewBool(false))
 			box.order, box.orderMetadata = order.Func(), orderName+":asc"
 			schema[scanAccessSchemaHeaderSize+i] = NewScanBoundaryScmer(&box)
 			break

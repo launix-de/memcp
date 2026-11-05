@@ -234,7 +234,7 @@ func scanBoundaryOrderFromMetadata(metadata string) func(...scm.Scmer) scm.Scmer
 	if direction != ":asc" && direction != ":desc" {
 		return nil
 	}
-	value := scm.Apply(scm.Globalenv.Vars[scm.Symbol("collate")],
+	value := scm.Collate(
 		scm.NewString(metadata[:separator]), scm.NewBool(direction == ":desc"))
 	return value.Func() // the collation factory already returns the native relation
 }

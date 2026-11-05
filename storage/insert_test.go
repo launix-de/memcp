@@ -865,6 +865,36 @@ func TestUniqueCollatedIndexLookup(t *testing.T) {
 	}
 }
 
+func TestUniqueTextProbeDuringGlobalDefinitions(t *testing.T) {
+	tbl := setupScanParallelTestTable(t, "t_unique_bootstrap_lookup")
+	tbl.CreateColumn("label", "VARCHAR", []int{40}, nil)
+	tbl.Unique = []uniqueKey{{Id: "label", Cols: []string{"label"}}}
+	tbl.Insert([]string{"label"}, [][]scm.Scmer{{scm.NewString("key")}}, nil, scm.NewNil(), false, nil)
+	shard := tbl.ActiveShards()[0]
+	access := exactScanAccess(newExactScanAccessSchema([]string{"label"}), []scm.Scmer{scm.NewString("key")})
+	// Replication starts while lib/main.scm is still defining unrelated globals.
+	// Engine collation construction must not consult that mutable environment.
+	const iterations = 4096
+	name := scm.Symbol("unique_probe_bootstrap_definition")
+	defer delete(scm.Globalenv.Vars, name)
+	start, finished := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(finished)
+		<-start
+		for i := range iterations {
+			scm.Globalenv.Vars[name] = scm.NewInt(int64(i))
+		}
+	}()
+	close(start)
+	for range iterations {
+		if _, found := shard.GetRecordidForUnique(access, nil, true); !found {
+			t.Error("global definitions changed UNIQUE membership")
+			break
+		}
+	}
+	<-finished
+}
+
 func TestUniqueProbePrunesKnownPartitionDimensions(t *testing.T) {
 	tbl := setupUniqueContentionTable(t, "extra")
 	topology := tbl.activeTopology()
