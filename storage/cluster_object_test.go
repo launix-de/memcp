@@ -1618,3 +1618,35 @@ func TestClusterResultReceiverGCReleasesHandleAndDisconnectHook(t *testing.T) {
 	})
 	cancel() // the stopped disconnect hook cannot resurrect the receiver
 }
+
+func TestClusterDeregisteredChannelsDiscardLateNativeGrants(t *testing.T) {
+	for _, binaryCompletion := range []bool{false, true} {
+		t.Run(fmt.Sprint(binaryCompletion), func(t *testing.T) {
+			_, client, _ := setupRemoteScanConnection(t)
+			owner := nodeScans.Load()
+			source := objectOwnerPeer(t, owner, client)
+			object, _ := scm.ClusterObjectOf(scm.NewSession())
+			view, _ := scm.ClusterObjectValue(object, context.Background(), scm.ClusterRequest{Method: "view"})
+			ref, err := owner.exportObject(source, object, view)
+			if err != nil {
+				t.Fatal(err)
+			}
+			owner.commitObjectOffers(source, []scm.ClusterReference{ref})
+			var payload []byte
+			if binaryCompletion {
+				payload = mustNodeMetadata(scanCompletion{Offers: []scm.ClusterReference{ref}})
+			} else {
+				frozen, err := freezeScanValue(scm.NewAny(object), (&scm.SerializationContext{}).WithExport(func(scm.ClusterObject, scm.Scmer) (scm.ClusterReference, error) { return ref, nil }))
+				if err != nil {
+					t.Fatal(err)
+				}
+				payload = frozen
+			}
+			if err := source.send(context.Background(), mosiMessage{Channel: handleChannel(client.allocateHandleSlot()), Payload: payload}); err != nil {
+				t.Fatal(err)
+			}
+			waitObjectGC(t, func() bool { return objectEntryCount(owner) == 0 })
+			client.handles.Range(func(key, _ any) bool { t.Error("late delivery retained a handler", key); return true })
+		})
+	}
+}

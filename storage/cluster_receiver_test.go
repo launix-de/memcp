@@ -14,7 +14,9 @@ import "github.com/launix-de/memcp/scm"
 
 func deliverTestCompletion(t *testing.T, entry any, result scanCompletion) {
 	t.Helper()
-	entry.(*handleSlot).handler.Handle(scm.NewString(string(mustNodeMetadata(result))))
+	if err := entry.(*handleSlot).raw(mustNodeMetadata(result)); err != nil {
+		t.Fatal(err)
+	}
 }
 func receiveTestValue(receiver *clusterReceiver, ctx context.Context, value int64) error {
 	_, err := receiver.HandleClusterRequest(ctx, scm.ClusterRequest{Method: "receive", Arguments: []scm.Scmer{scm.NewInt(value)}})

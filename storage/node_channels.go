@@ -177,6 +177,7 @@ func (p *mosiPeer) startCommand(ctx context.Context, method string, input any) (
 	}
 	if err != nil {
 		receiver.release()
+		receiver.cleanup.Stop()
 		return nil, err
 	}
 	return receiver, nil
@@ -207,6 +208,11 @@ func registerScanChannels(p *mosiPeer, session *scanRPCSession) {
 	p.channels = &session.service.channels
 	p.scanSession = session
 	session.service.channelOnce.Do(func() {
+		// No per-retired-channel tombstones: a state-free disposer returns
+		// unused native grants carried by late deliveries after deregistration.
+		p.channels.Store("", workerChannel(func(peer *mosiPeer, payload []byte) error {
+			return peer.scanService.discardHandlePayload(peer, payload)
+		}))
 		for _, name := range []string{"object.declare", "object.forget"} {
 			name := name
 			p.registerChannel(name, func(peer *mosiPeer, payload []byte, _ int, _ time.Time) bool {

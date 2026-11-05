@@ -164,11 +164,29 @@ func (service *nodeScanService) handleBindings(bindings *scm.SerializationContex
 		return scm.NewSlice([]scm.Scmer{scm.NewSymbol("cluster_handle"), scm.NewInt(int64(slot))}), nil
 	})
 }
+
+// The scan role owns both payload codecs. Serializer source never begins with
+// the binary nodeMap tag; control completions are binary records, not Scheme.
+// Inspect only inert manifests, never reconstruct a cancelled query's values.
+func (service *nodeScanService) discardHandlePayload(peer *mosiPeer, payload []byte) error {
+	var refs []scm.ClusterReference
+	if len(payload) > 0 && payload[0] == nodeMap {
+		var completion scanCompletion
+		if err := unmarshalNode(payload, &completion); err != nil {
+			return err
+		}
+		refs = completion.Offers
+	} else {
+		refs = serializedReferences(schemeValue(payload))
+	}
+	service.discardObjectOffers(peer, refs)
+	return nil
+}
+
 func (s *scanRPCSession) handleValue(slot uint64, payload schemeValue) error {
 	entry, ok := s.service.handles.Load(slot)
 	if !ok {
-		s.service.discardObjectOffers(s.peer, serializedReferences(payload))
-		return nil
+		return s.service.discardHandlePayload(s.peer, payload)
 	} // a late delivery to a completed invocation is inert
 	target := entry.(*handleSlot)
 	if target.peer != s.peer.objectPeer {

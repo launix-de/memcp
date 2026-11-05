@@ -381,8 +381,13 @@ func (p *mosiPeer) dispatchMessage(m mosiMessage, size int, readyAt time.Time) b
 	}
 	handler, ok := p.channels.Load(m.Channel)
 	if !ok {
-		return true
-	} // late delivery to an unregistered one-shot channel
+		// A role may register an undelivered-payload disposer under the local
+		// empty key. The transport still knows nothing about payload formats.
+		handler, ok = p.channels.Load("")
+		if !ok {
+			return true
+		}
+	}
 	return handler.(nodeChannel)(p, m.Payload, size, readyAt)
 }
 
