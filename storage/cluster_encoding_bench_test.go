@@ -4,17 +4,14 @@ SPDX-License-Identifier: GPL-3.0-or-later
 */
 package storage
 
-import "bytes"
 import "testing"
-import "strings"
-import "encoding/json"
 import "github.com/google/uuid"
 import "github.com/launix-de/memcp/scm"
 
 var clusterEncodingSink []byte
 
-// Measure the existing size check + collector + transport against retaining the
-// first encoding. Fixtures are prepared outside timing, as in shard completion.
+// Exercise the actual completion/transport metadata path. Scmer fixtures are
+// frozen before timing, as in shard completion; decoding validates the result.
 func BenchmarkClusterCompletionEncoding(b *testing.B) {
 	dict := scm.NewFastDictValue(512)
 	for i := 0; i < 512; i++ {
@@ -31,20 +28,20 @@ func BenchmarkClusterCompletionEncoding(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
-		return remoteScanResult{Version: scanWireVersion, Shard: remoteScanShard{Schema: 7, Resource: mosiResource{Database: "bench", Table: "items", Shard: "00000000-0000-0000-0000-000000000001"}}, Value: json.RawMessage(source), OutCount: 1}
+		return remoteScanResult{Version: scanWireVersion, Shard: remoteScanShard{Schema: 7, Resource: mosiResource{Database: "bench", Table: "items", Shard: "00000000-0000-0000-0000-000000000001"}}, Value: []byte(source), OutCount: 1}
 	}
 	input := &storageShard{uuid: uuid.MustParse("00000000-0000-4000-8000-000000000001"), t: &table{Name: "items", schema: &database{Name: "bench"}}}
 	bindings := (&scm.SerializationContext{}).WithExport(func(object scm.ClusterObject, view scm.Scmer) (scm.ClusterReference, error) {
 		encoded, err := freezeScanValue(view)
-		return scm.ClusterReference{URI: "http://node/cluster/00000000-0000-4000-8000-000000000001", Owner: "00000000-0000-4000-8000-000000000002", Incarnation: "00000000-0000-4000-8000-000000000003", Token: "00000000-0000-4000-8000-000000000004", Type: object.ClusterObjectType(), View: json.RawMessage(encoded)}, err
+		return scm.ClusterReference{URI: "http://node/cluster/00000000-0000-4000-8000-000000000001", Owner: "00000000-0000-4000-8000-000000000002", Incarnation: "00000000-0000-4000-8000-000000000003", Token: "00000000-0000-4000-8000-000000000004", Type: object.ClusterObjectType(), View: []byte(encoded)}, err
 	})
 	encodedReference, err := freezeScanValue(scm.NewAny(input), bindings)
 	if err != nil {
 		b.Fatal(err)
 	}
 	reference := result(scm.NewNil())
-	reference.Value = json.RawMessage(encodedReference)
-	operationID := strings.Repeat("0", 64) + "/00000000-0000-7000-8000-000000000001"
+	reference.Value = []byte(encodedReference)
+	operationID := uint64(37)
 	for name, value := range map[string]any{
 		"scalar":       result(scm.NewInt(42)),
 		"list":         result(scm.NewSlice(rows[:8])),
@@ -54,43 +51,49 @@ func BenchmarkClusterCompletionEncoding(b *testing.B) {
 	} {
 		b.Run(name, func(b *testing.B) {
 			offers := value.(remoteScanResult).ClusterObjectOffers()
-			for _, mode := range []string{"existing", "reuse", "buffer"} {
-				b.Run(mode, func(b *testing.B) {
-					b.ReportAllocs()
-					for b.Loop() {
-						var data []byte
-						var err error
-						if mode == "buffer" {
-							var buf bytes.Buffer
-							err = json.NewEncoder(&buf).Encode(value)
-							data = buf.Bytes()
-						} else {
-							data, err = json.Marshal(value)
-						}
-						if err != nil {
-							b.Fatal(err)
-						}
-						if len(data) > 192*1024 {
-							b.Fatal("fixture exceeds limit")
-						}
-						if mode == "existing" {
-							data, err = json.Marshal(value)
-							if err != nil {
-								b.Fatal(err)
-							}
-						}
-						completion := scanCompletion{Return: operationID, Data: data, Offers: offers}
-						envelope, err := json.Marshal(completion)
-						if err != nil {
-							b.Fatal(err)
-						}
-						clusterEncodingSink, err = encodeMosiMessage(mosiMessage{Method: "scan.result", Data: envelope})
-						if err != nil {
-							b.Fatal(err)
-						}
-					}
-				})
+			encode := func() []byte {
+				data, err := marshalNode(value)
+				if err != nil {
+					b.Fatal(err)
+				}
+				envelope, err := marshalNode(scanCompletion{Data: data, Offers: offers})
+				if err != nil {
+					b.Fatal(err)
+				}
+				frame, err := encodeMosiMessage(mosiMessage{Slot: operationID, Payload: schemeValue(scm.SerializeToString(scm.NewString(string(envelope)), &scm.Globalenv))})
+				if err != nil {
+					b.Fatal(err)
+				}
+				return frame
 			}
+			frame := encode()
+			b.Run("encode", func(b *testing.B) {
+				b.ReportAllocs()
+				for b.Loop() {
+					clusterEncodingSink = encode()
+				}
+				b.ReportMetric(float64(len(frame)), "wire-B")
+			})
+			b.Run("decode", func(b *testing.B) {
+				b.ReportAllocs()
+				for b.Loop() {
+					message, err := decodeMosiMessage(frame)
+					if err != nil {
+						b.Fatal(err)
+					}
+					var completion scanCompletion
+					if err := unmarshalNode([]byte(scm.Eval(scm.Read("completion", string(message.Payload), false), &scm.Globalenv).String()), &completion); err != nil {
+						b.Fatal(err)
+					}
+					var result remoteScanResult
+					if err := unmarshalNode(completion.Data, &result); err != nil {
+						b.Fatal(err)
+					}
+					if result.Version != scanWireVersion || result.OutCount != 1 {
+						b.Fatal("completion changed")
+					}
+				}
+			})
 		})
 	}
 }

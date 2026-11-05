@@ -132,7 +132,7 @@ func BenchmarkScanOrderPlannerCompiledFixedCosts(b *testing.B) {
 	expr := scm.Read(b.Name(), `(lambda (table_value)
 		(scan_order nil table_value '() '() '() (lambda () true)
 			'("id") (list (collate "utf8mb4" false)) 0 0 72
-			'("id") (lambda (acc id) acc) nil false nil '() nil))`)
+			'("id") (lambda (acc id) acc) nil false nil '() nil))`, true)
 	proc := scm.Eval(scm.Optimize(expr, &scm.Globalenv, nil), &scm.Globalenv)
 	tableValue := NewTableScmer(tbl)
 	for range 3 {

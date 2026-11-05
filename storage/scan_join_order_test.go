@@ -51,14 +51,14 @@ func BenchmarkScanJoinOrderBatchedPointProbe(b *testing.B) {
 		b.Fatalf("rebuild errors: %v", result.errors)
 	}
 	trueFn := scanJoinTrue()
-	filterAST := scm.Read("scan join order benchmark filter", "(lambda (kind) (equal?? kind 1))")
+	filterAST := scm.Read("scan join order benchmark filter", "(lambda (kind) (equal?? kind 1))", true)
 	filterColumns := scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), scm.NewSlice([]scm.Scmer{scm.NewString("kind")})})
 	accessSchema, accessValues, ok := compileScanAccess(filterColumns, filterAST)
 	if !ok {
 		b.Fatal("point access did not compile")
 	}
 	accessSchema = markCoveredScanAccessSchema(accessSchema,
-		scm.Read("scan join order benchmark residual", "(lambda () true)"))
+		scm.Read("scan join order benchmark residual", "(lambda () true)", true))
 	_, descending := integerOrder(true)
 	spec := scanJoinOrderSpec{
 		inputs: []scanJoinOrderInput{
@@ -431,7 +431,7 @@ func TestScanJoinOrderUsesSerialCountPipeline(t *testing.T) {
 	right := setupScanJoinOrderTable(t, database, "right_rows", []string{"key_col"}, [][]scm.Scmer{
 		{scm.NewInt(1)}, {scm.NewInt(2)}, {scm.NewInt(3)},
 	})
-	mapReduceFn := scm.Eval(scm.Optimize(scm.Read("scan_join_order count mapreducer", "(lambda (acc value) (+ acc 1))"), &scm.Globalenv, nil), &scm.Globalenv)
+	mapReduceFn := scm.Eval(scm.Optimize(scm.Read("scan_join_order count mapreducer", "(lambda (acc value) (+ acc 1))", true), &scm.Globalenv, nil), &scm.Globalenv)
 	result := scanJoinOrder(nil, scanJoinOrderSpec{
 		inputs: []scanJoinOrderInput{
 			{table: left, accessSchema: newScanAccessSchema(scanAccessConsumerScan, nil, -1)},

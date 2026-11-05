@@ -20,7 +20,6 @@ import "crypto/hmac"
 import "sync/atomic"
 import "encoding/hex"
 import "crypto/sha256"
-import "encoding/json"
 import "github.com/google/uuid"
 import "github.com/gorilla/websocket"
 import "github.com/launix-de/memcp/scm"
@@ -30,20 +29,21 @@ import "github.com/launix-de/memcp/scm"
 var nodeScans atomic.Pointer[nodeScanService]
 
 type nodeScanService struct {
-	handles     sync.Map // fresh slot -> invocation-owned handle
-	nextHandle  atomic.Uint64
-	objects     clusterObjectRegistry
-	executions  sync.Map // invocation UUID -> worker TxContext, never persisted or serialized
-	returns     sync.Map // consumer-owned operation UUID -> *receiverRoute, removed on completion/error
-	id          string
-	cluster     *nodeCluster // immutable startup-owned adapter; nil for standalone object endpoints
-	secret      []byte
-	release     func()
-	mu          sync.Mutex
-	peers       map[*mosiPeer]bool
-	stopping    bool
-	connections sync.WaitGroup
-	slots       chan struct{}
+	procedureCache sync.Once
+	procedures     scm.Scmer // existing budgeted cachemap; contains pure code factories only
+	handles        sync.Map  // fresh slot -> invocation-owned handle
+	nextHandle     atomic.Uint64
+	objects        clusterObjectRegistry
+	executions     sync.Map // invocation UUID -> worker TxContext, never persisted or serialized
+	id             string
+	cluster        *nodeCluster // immutable startup-owned adapter; nil for standalone object endpoints
+	secret         []byte
+	release        func()
+	mu             sync.Mutex
+	peers          map[*mosiPeer]bool
+	stopping       bool
+	connections    sync.WaitGroup
+	slots          chan struct{}
 }
 
 type scanChallenge struct {
@@ -57,7 +57,7 @@ type scanChallenge struct {
 
 func scanAuthProof(secret []byte, role string, server, client scanChallenge) string {
 	mac := hmac.New(sha256.New, secret)
-	for _, item := range []string{mosiSubprotocol + "/objects.channels.v9", role, server.Node, server.Boot, server.Nonce, client.Node, client.Boot, client.Nonce} {
+	for _, item := range []string{mosiSubprotocol + "/objects.channels.v11", role, server.Node, server.Boot, server.Nonce, client.Node, client.Boot, client.Nonce} {
 		mac.Write([]byte(item))
 		mac.Write([]byte{0})
 	}
@@ -65,7 +65,7 @@ func scanAuthProof(secret []byte, role string, server, client scanChallenge) str
 }
 
 func scanAuthMessage(conn *websocket.Conn, method string, input any) error {
-	data, err := json.Marshal(input)
+	data, err := marshalNode(input)
 	if err != nil {
 		return err
 	}
@@ -98,7 +98,7 @@ func readScanAuth(conn *websocket.Conn, method string, output any) error {
 	if err != nil || message.Method != method || message.Packet != nil || message.ID != 0 {
 		return fmt.Errorf("invalid node authentication")
 	}
-	return json.Unmarshal(message.Data, output)
+	return unmarshalNode(message.Data, output)
 }
 
 func validScanChallenge(c scanChallenge) bool {
@@ -178,7 +178,6 @@ func (service *nodeScanService) forget(peer *mosiPeer) {
 	defer service.connections.Done()
 	peer.close()
 	peer.wait()
-	service.cancelPeerObjectOffers(peer)
 	service.mu.Lock()
 	delete(service.peers, peer)
 	service.mu.Unlock()

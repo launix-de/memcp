@@ -477,7 +477,7 @@ func TestNullableCallbackSignatureValidation(t *testing.T) {
 					t.Errorf("callback validation failed=%v, want %v", failed, test.invalid)
 				}
 			}()
-			Validate(Read(t.Name(), "("+name+" "+test.argument+")"), "bool")
+			Validate(Read(t.Name(), "("+name+" "+test.argument+")", true), "bool")
 		})
 	}
 }
@@ -503,6 +503,6 @@ func TestPairVariadicCallbackSlots(t *testing.T) {
 		`(set_assoc (list) "key" 1 "other" (lambda (x) x))`,
 		`(set_assoc (list) "key" 1 "other" 2 (lambda (old new) (+ old new)))`,
 	} {
-		Validate(Read(t.Name(), source), "any")
+		Validate(Read(t.Name(), source, true), "any")
 	}
 }

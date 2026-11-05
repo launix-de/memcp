@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 metadata:
-  performance_shard_weight: 2
+  # Keep this suite alone: its complete seven-pair verification is expensive.
+  performance_shard_weight: 480
   version: '1.0'
   description: Selective dimension drives composite-key fact joins before grouped aggregation
   isolated: true

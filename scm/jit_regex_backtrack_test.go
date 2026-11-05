@@ -72,11 +72,11 @@ func TestJITRegexBacktrackingRepeat(t *testing.T) {
 				t.Fatalf("expected native lowering (backtracking stack), got Go regexp fallback for %q", goRegex.String())
 			}
 
-			testFn := Eval(Read("f", `(jit (eval (optimize (quote (lambda (s) (regexp_test s `+schemePatternLiteral(tc.pat)+`))))))`), &Globalenv)
+			testFn := Eval(Read("f", `(jit (eval (optimize (quote (lambda (s) (regexp_test s `+schemePatternLiteral(tc.pat)+`))))))`, true), &Globalenv)
 			if !(testFn.IsProc() && testFn.Proc() != nil && testFn.Proc().Compiled != nil) {
 				t.Fatalf("regexp_test %q did NOT JIT-compile", tc.pat)
 			}
-			matchesFn := Eval(Read("f", `(jit (eval (optimize (quote (lambda (s) (regexp_matches s `+schemePatternLiteral(tc.pat)+`))))))`), &Globalenv)
+			matchesFn := Eval(Read("f", `(jit (eval (optimize (quote (lambda (s) (regexp_matches s `+schemePatternLiteral(tc.pat)+`))))))`, true), &Globalenv)
 			if !(matchesFn.IsProc() && matchesFn.Proc() != nil && matchesFn.Proc().Compiled != nil) {
 				t.Fatalf("regexp_matches %q did NOT JIT-compile", tc.pat)
 			}
@@ -117,7 +117,7 @@ func TestJITRegexBacktrackingTokenizer(t *testing.T) {
 	if program == nil {
 		t.Fatalf("expected native lowering, got Go regexp fallback for %q", goRegex.String())
 	}
-	f := Eval(Read("f", `(jit (eval (optimize (quote (lambda (s) (regexp_matches s `+schemePatternLiteral(pat)+`))))))`), &Globalenv)
+	f := Eval(Read("f", `(jit (eval (optimize (quote (lambda (s) (regexp_matches s `+schemePatternLiteral(pat)+`))))))`, true), &Globalenv)
 	if !(f.IsProc() && f.Proc() != nil && f.Proc().Compiled != nil) {
 		t.Fatalf("regexp_matches tokenizer did NOT JIT-compile")
 	}

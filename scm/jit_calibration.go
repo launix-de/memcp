@@ -484,7 +484,7 @@ func JITExpressionCost(expression Scmer) int {
 }
 
 func calibrationProcedure(source string) *Proc {
-	parsed := Read("jit startup calibration", source)
+	parsed := Read("jit startup calibration", source, true)
 	optimized := Optimize(parsed, &Globalenv, nil)
 	procedure := Eval(optimized, &Globalenv)
 	if procedure.Proc() == nil {

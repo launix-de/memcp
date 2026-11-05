@@ -77,12 +77,12 @@ func (cluster *nodeCluster) tryRead(ctx context.Context, resource mosiResource) 
 	return true
 }
 
-func (cluster *nodeCluster) handleTryRead(ctx context.Context, source string, data json.RawMessage) (any, error) {
+func (cluster *nodeCluster) handleTryRead(ctx context.Context, source string, data []byte) (any, error) {
 	if err := cluster.requireMember(source); err != nil {
 		return nil, err
 	}
 	var packet mosiPacket
-	if err := json.Unmarshal(data, &packet); err != nil {
+	if err := unmarshalNode(data, &packet); err != nil {
 		return nil, err
 	}
 	if !packet.Resource.valid() || !cluster.databases[packet.Resource.Database] || packet.Kind != "read" ||

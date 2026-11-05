@@ -156,7 +156,7 @@ func TestMatchWildcardDoesNotBind(t *testing.T) {
 	} {
 		t.Run(tc.pattern, func(t *testing.T) {
 			env := &Env{Outer: &Globalenv}
-			if !match(tc.value, Read("wildcard pattern", tc.pattern), env, false) {
+			if !match(tc.value, Read("wildcard pattern", tc.pattern, true), env, false) {
 				t.Fatal("wildcard rejected a matching value")
 			}
 			if env.Vars != nil {
@@ -173,7 +173,7 @@ func TestMatchWildcardDoesNotBind(t *testing.T) {
 func TestMatchWildcardPreservesOuterBinding(t *testing.T) {
 	for _, optimized := range []bool{false, true} {
 		env := &Env{Vars: Vars{"_": NewInt(99)}, Outer: &Globalenv}
-		expr := Read("wildcard scope", `(match (list 7 9) (list _ _) _)`)
+		expr := Read("wildcard scope", `(match (list 7 9) (list _ _) _)`, true)
 		if optimized {
 			expr = Optimize(expr, env, nil)
 		}
@@ -186,7 +186,7 @@ func TestMatchWildcardPreservesOuterBinding(t *testing.T) {
 func TestMatchConcatWildcardIgnoresOuterBinding(t *testing.T) {
 	outer := &Env{Vars: Vars{"_": NewString("outer")}, Outer: &Globalenv}
 	env := &Env{Outer: outer}
-	pattern := Read("concat wildcard scope", `(concat "prefix" _)`)
+	pattern := Read("concat wildcard scope", `(concat "prefix" _)`, true)
 	if !match(NewString("prefixvalue"), pattern, env, false) || env.Vars != nil {
 		t.Fatal("concat wildcard resolved or rebound its outer namesake")
 	}

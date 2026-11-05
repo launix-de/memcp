@@ -83,6 +83,12 @@ func (w *schemeTextWriter) WriteString(value string) (int, error) {
 	return len(value), nil
 }
 
+// Keep numeric tokens in a stack scratch buffer instead of allocating strings.
+func (w *schemeTextWriter) writeInt(value int64) {
+	var scratch [20]byte
+	_, _ = w.Write(strconv.AppendInt(scratch[:0], value, 10))
+}
+
 func String(v Scmer) string {
 	switch v.GetTag() {
 	case tagNil:
@@ -342,6 +348,10 @@ func serializeEx(b *schemeTextWriter, v Scmer, en *Env, glob *Env, p *Proc) {
 				}
 				b.references[object] = expression
 			}
+			if exists && b.objects != nil {
+				items := expression.Slice()
+				expression = NewSlice([]Scmer{items[0], items[1], NewNil()})
+			}
 			serializeEx(b, expression, glob, glob, nil)
 			return
 		}
@@ -365,12 +375,12 @@ func serializeEx(b *schemeTextWriter, v Scmer, en *Env, glob *Env, p *Proc) {
 			// Network values preserve the native date scalar, including its zone.
 			// Local diagnostic/persistence text keeps its historical spelling.
 			b.WriteString("(serialized_date ")
-			b.WriteString(strconv.FormatInt(v.Int(), 10))
+			b.writeInt(v.Int())
 			b.WriteByte(' ')
 			b.WriteString(strconv.Itoa(TagDateDecodeZone(auxVal(v.aux))))
 			b.WriteByte(')')
 		} else {
-			b.WriteString(strconv.FormatInt(v.Int(), 10))
+			b.writeInt(v.Int())
 		}
 	case tagFloat:
 		if b.objects != nil && (math.IsInf(v.Float(), 0) || math.IsNaN(v.Float())) {
@@ -499,6 +509,16 @@ func serializeEx(b *schemeTextWriter, v Scmer, en *Env, glob *Env, p *Proc) {
 		}
 		serializeProcShallow(b, v.Proc().snapshot(), glob)
 	case tagFastDict:
+		if b.objects != nil && b.objects.Export != nil && v.FastDict() != nil && len(v.FastDict().Pairs) >= 512 {
+			literal, err := b.objects.literal(v)
+			if err != nil {
+				panic(err)
+			}
+			if literal != nil {
+				serializeEx(b, NewAny(literal), glob, glob, nil)
+				return
+			}
+		}
 		if b.objects != nil {
 			if b.literals == nil {
 				b.literals = make(map[Scmer]int64)
@@ -509,8 +529,12 @@ func serializeEx(b *schemeTextWriter, v Scmer, en *Env, glob *Env, p *Proc) {
 				b.literals[v] = id
 			}
 			b.WriteString("(serialized_value ")
-			b.WriteString(strconv.FormatInt(id, 10))
+			b.writeInt(id)
 			b.WriteByte(' ')
+			if exists {
+				b.WriteString("nil)")
+				return
+			}
 		}
 		b.WriteString("(set_assoc '()")
 		if fd := v.FastDict(); fd != nil {
@@ -532,7 +556,7 @@ func serializeEx(b *schemeTextWriter, v Scmer, en *Env, glob *Env, p *Proc) {
 		b.WriteString(v.Regex().String())
 	case tagNthLocalVar:
 		idx := v.NthLocalVar()
-		if p != nil && p.NumVars >= int(idx) && p.Params.GetTag() == tagSlice {
+		if b.objects == nil && p != nil && p.NumVars >= int(idx) && p.Params.GetTag() == tagSlice {
 			params := p.Params.Slice()
 			if int(idx) < len(params) && params[idx].IsSymbol() {
 				b.WriteString(params[idx].String())
@@ -540,7 +564,7 @@ func serializeEx(b *schemeTextWriter, v Scmer, en *Env, glob *Env, p *Proc) {
 			}
 		}
 		b.WriteString("(var ")
-		b.WriteString(fmt.Sprint(idx))
+		b.writeInt(int64(idx))
 		b.WriteByte(')')
 	case tagAny:
 		if si, ok := v.Any().(SourceInfo); ok {
@@ -548,7 +572,7 @@ func serializeEx(b *schemeTextWriter, v Scmer, en *Env, glob *Env, p *Proc) {
 			return
 		}
 		if idx, ok := v.Any().(NthLocalVar); ok {
-			if p != nil && p.NumVars >= int(idx) && p.Params.GetTag() == tagSlice {
+			if b.objects == nil && p != nil && p.NumVars >= int(idx) && p.Params.GetTag() == tagSlice {
 				params := p.Params.Slice()
 				if int(idx) < len(params) && params[idx].IsSymbol() {
 					b.WriteString(params[idx].String())
@@ -556,7 +580,7 @@ func serializeEx(b *schemeTextWriter, v Scmer, en *Env, glob *Env, p *Proc) {
 				}
 			}
 			b.WriteString("(var ")
-			b.WriteString(fmt.Sprint(idx))
+			b.writeInt(int64(idx))
 			b.WriteByte(')')
 			return
 		}
@@ -617,7 +641,7 @@ func serializeProc(b *schemeTextWriter, v Proc, en *Env, glob *Env, parent *Proc
 	serializeEx(b, v.Body, v.En, glob, &v)
 	if v.NumVars > 0 {
 		b.WriteByte(' ')
-		b.WriteString(fmt.Sprint(v.NumVars))
+		b.writeInt(int64(v.NumVars))
 	}
 	b.WriteByte(')')
 }
@@ -633,7 +657,7 @@ func serializeProcShallow(b *schemeTextWriter, v Proc, glob *Env) {
 	serializeEx(b, v.Body, glob, glob, &v)
 	if v.NumVars > 0 {
 		b.WriteByte(' ')
-		b.WriteString(fmt.Sprint(v.NumVars))
+		b.writeInt(int64(v.NumVars))
 	}
 	b.WriteByte(')')
 }
@@ -659,14 +683,9 @@ func serializeNativeFunc(b *schemeTextWriter, fn any, en *Env) {
 		}
 	}
 	if call, ok := fn.(func(...Scmer) Scmer); ok {
-		identity := FunctionIdentity(call)
-		for scope := en; scope != nil; scope = scope.Outer {
-			for name, value := range scope.Vars {
-				if value.GetTag() == tagFunc && FunctionIdentity(value.Func()) == identity {
-					b.WriteString(string(name))
-					return
-				}
-			}
+		if declaration := DeclarationForValue(NewFunc(call)); declaration != nil {
+			b.WriteString(declaration.Name)
+			return
 		}
 	}
 	if b.objects != nil {

@@ -17,15 +17,22 @@ import "github.com/launix-de/memcp/scm"
 
 // schemeValue contains only existing Scheme reconstruction source; transport
 // has no runtime type switch or aggregation semantics.
-type schemeValue json.RawMessage
+type schemeValue []byte
 
 func (v schemeValue) MarshalJSON() ([]byte, error) {
 	if len(v) == 0 {
 		return []byte("null"), nil
 	}
-	return v, nil
+	return json.Marshal(string(v))
 }
-func (v *schemeValue) UnmarshalJSON(data []byte) error { *v = append((*v)[:0], data...); return nil }
+func (v *schemeValue) UnmarshalJSON(data []byte) error {
+	var source string
+	if err := json.Unmarshal(data, &source); err != nil {
+		return err
+	}
+	*v = schemeValue(source)
+	return nil
+}
 
 // The transport calls the ordinary serializer directly. Quoted lists remain
 // data; Serialize emits constructors only where reconstruction requires them.
@@ -45,8 +52,7 @@ func freezeScanValue(value scm.Scmer, bindings ...*scm.SerializationContext) (da
 	}
 	var source bytes.Buffer
 	scm.Serialize(&source, value, &scm.Globalenv, bindings...)
-	encoded, err := json.Marshal(source.String())
-	return schemeValue(encoded), err
+	return schemeValue(source.Bytes()), nil
 }
 func (value schemeValue) reconstruct(decode ...scm.ProcedureDecode) (result scm.Scmer, err error) {
 	defer func() {
@@ -55,11 +61,8 @@ func (value schemeValue) reconstruct(decode ...scm.ProcedureDecode) (result scm.
 			err = fmt.Errorf("value reconstruction: %v", failure)
 		}
 	}()
-	var source string
-	if err = json.Unmarshal(value, &source); err != nil {
-		return scm.NewNil(), err
-	}
-	expression := scm.Read("cluster value", source)
+	source := string(value)
+	expression := scm.Read("cluster value", source, false)
 	var option scm.ProcedureDecode
 	if len(decode) > 0 {
 		option = decode[0]
@@ -74,7 +77,13 @@ func (value schemeValue) reconstruct(decode ...scm.ProcedureDecode) (result scm.
 	if err != nil {
 		return scm.NewNil(), err
 	}
-	return scm.Eval(scm.Optimize(expression, &scm.Globalenv, nil), &scm.Globalenv).WithoutSourceInfo(), nil
+	// Serialized data and capture constructors need evaluation, not another
+	// optimizer pass over the sender's already prepared code or quoted values.
+	result = scm.Eval(expression, &scm.Globalenv).WithoutSourceInfo()
+	if result.IsProc() {
+		result = scm.CompileJIT(result, true)
+	}
+	return result, nil
 }
 
 // remoteScanAccess reuses the native persisted boundary representation and
@@ -82,11 +91,11 @@ func (value schemeValue) reconstruct(decode ...scm.ProcedureDecode) (result scm.
 // the existing scan engine; no residual predicate or mandatory constraint is
 // discarded by delegation. Runtime physical source sets remain nonportable.
 type remoteScanAccess struct {
-	Mutation   bool              `json:"mutation,omitempty"`
-	Orders     []json.RawMessage `json:"orders,omitempty"`
-	Boundaries []scm.Scmer       `json:"boundaries,omitempty"`
-	Values     []schemeValue     `json:"values,omitempty"`
-	Covered    bool              `json:"covered,omitempty"`
+	Mutation   bool          `json:"mutation,omitempty"`
+	Orders     [][]byte      `json:"orders,omitempty"`
+	Boundaries []scm.Scmer   `json:"boundaries,omitempty"`
+	Values     []schemeValue `json:"values,omitempty"`
+	Covered    bool          `json:"covered,omitempty"`
 }
 
 func freezeScanAccess(access scanAccess, bindings ...*scm.SerializationContext) (remoteScanAccess, error) {
@@ -138,7 +147,7 @@ func freezeScanAccess(access scanAccess, bindings ...*scm.SerializationContext) 
 				box.lowerSlot = slot
 			}
 		}
-		var order json.RawMessage
+		var order []byte
 		if box.order != nil {
 			if _, _, collation := scm.LookupCollate(box.order); !collation {
 				var err error

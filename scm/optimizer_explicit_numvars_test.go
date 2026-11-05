@@ -20,7 +20,7 @@ import "testing"
 import "encoding/json"
 
 func TestSerialProcUsesNumberedFixedParams(t *testing.T) {
-	lambda := Eval(Optimize(Read("test", "(lambda (value) (+ value value))"), &Globalenv, nil), &Globalenv)
+	lambda := Eval(Optimize(Read("test", "(lambda (value) (+ value value))", true), &Globalenv, nil), &Globalenv)
 	if !lambda.Proc().NumberedOnly {
 		t.Fatal("expected optimized lambda to use numbered bindings only")
 	}
@@ -31,7 +31,7 @@ func TestSerialProcUsesNumberedFixedParams(t *testing.T) {
 }
 
 func TestOptimizedLambdaPreservesNamesAndBindingProof(t *testing.T) {
-	code := Optimize(Read("test", "(lambda (value) (list value (quote value)))"), &Globalenv, nil)
+	code := Optimize(Read("test", "(lambda (value) (list value (quote value)))", true), &Globalenv, nil)
 	proc := Eval(code, &Globalenv).Proc()
 	if !proc.Params.Slice()[0].SymbolEquals("value") {
 		t.Fatal("optimized lambda changed its parameter name")
@@ -47,7 +47,7 @@ func TestOptimizedLambdaPreservesNamesAndBindingProof(t *testing.T) {
 }
 
 func TestOptimizedLambdaRetainsAssignedNamedBinding(t *testing.T) {
-	code := Optimize(Read("test", "(lambda (value) (begin (set value (+ value 1)) value))"), &Globalenv, nil)
+	code := Optimize(Read("test", "(lambda (value) (begin (set value (+ value 1)) value))", true), &Globalenv, nil)
 	proc := Eval(code, &Globalenv)
 	if !proc.Proc().Params.Slice()[0].SymbolEquals("value") {
 		t.Fatal("assigned named parameter must retain its lexical binding")
@@ -58,7 +58,7 @@ func TestOptimizedLambdaRetainsAssignedNamedBinding(t *testing.T) {
 }
 
 func TestOptimizedBindingProofPreservesClosureSlots(t *testing.T) {
-	code := Optimize(Read("test", "(lambda (value) (lambda (increment) (+ value increment)))"), &Globalenv, nil)
+	code := Optimize(Read("test", "(lambda (value) (lambda (increment) (+ value increment)))", true), &Globalenv, nil)
 	outer := Eval(code, &Globalenv)
 	first := Apply(outer, NewInt(6))
 	second := Apply(outer, NewInt(9))
@@ -86,7 +86,7 @@ func TestAnonymousCallbackParamsKeepDistinctSlotTypes(t *testing.T) {
 }
 
 func TestOptimizedVariadicBindingKeepsArgumentOwnership(t *testing.T) {
-	proc := Eval(Optimize(Read("test", "(lambda values (list values (quote values)))"), &Globalenv, nil), &Globalenv)
+	proc := Eval(Optimize(Read("test", "(lambda values (list values (quote values)))", true), &Globalenv, nil), &Globalenv)
 	args := []Scmer{NewInt(6), NewInt(9)}
 	got := Apply(proc, args...)
 	args[0] = NewInt(100)
@@ -97,7 +97,7 @@ func TestOptimizedVariadicBindingKeepsArgumentOwnership(t *testing.T) {
 }
 
 func TestOptimizedBindingProofRejectsExtraOperands(t *testing.T) {
-	proc := Eval(Optimize(Read("test", "(lambda (value) (+ value 1))"), &Globalenv, nil), &Globalenv)
+	proc := Eval(Optimize(Read("test", "(lambda (value) (+ value 1))", true), &Globalenv, nil), &Globalenv)
 	defer func() {
 		if recover() == nil {
 			t.Fatal("binding metadata must not change fixed arity")
@@ -107,7 +107,7 @@ func TestOptimizedBindingProofRejectsExtraOperands(t *testing.T) {
 }
 
 func TestLambdaBindingProofRejectsRewrittenBody(t *testing.T) {
-	code := Optimize(Read("test", "(lambda (value) (+ value 1))"), &Globalenv, nil)
+	code := Optimize(Read("test", "(lambda (value) (+ value 1))", true), &Globalenv, nil)
 	items := append([]Scmer(nil), code.Slice()...)
 	items[2] = NewSymbol("value")
 	proc := Eval(NewSlice(items), &Globalenv)
@@ -120,7 +120,7 @@ func TestLambdaBindingProofRejectsRewrittenBody(t *testing.T) {
 }
 
 func TestLambdaBindingProofSerializationFallsBackSafely(t *testing.T) {
-	code := Optimize(Read("test", "(lambda (value) (+ value 1))"), &Globalenv, nil)
+	code := Optimize(Read("test", "(lambda (value) (+ value 1))", true), &Globalenv, nil)
 	encoded, err := json.Marshal(code)
 	if err != nil {
 		t.Fatal(err)
@@ -132,7 +132,7 @@ func TestLambdaBindingProofSerializationFallsBackSafely(t *testing.T) {
 	// Text serialization of a procedure restores symbolic parameter references;
 	// raw optimized AST text is a diagnostic display of numbered instructions.
 	text := SerializeToString(Eval(code, &Globalenv), &Globalenv)
-	for _, restored := range []Scmer{decoded, Read("test", text)} {
+	for _, restored := range []Scmer{decoded, Read("test", text, true)} {
 		Validate(restored, "func")
 		if got := Apply(Eval(restored, &Globalenv), NewInt(6)); ToInt(got) != 7 {
 			t.Fatalf("restored lambda: got %s, want 7", String(got))
@@ -146,7 +146,7 @@ func TestLambdaBindingProofCannotBeForgedBySource(t *testing.T) {
 			t.Fatal("ordinary source operands must still obey lambda arity")
 		}
 	}()
-	Validate(Read("test", "(lambda (value) value 1 true)"), "func")
+	Validate(Read("test", "(lambda (value) value 1 true)", true), "func")
 }
 
 func TestSerialProcUsesNumberedVariadicParam(t *testing.T) {
@@ -187,7 +187,7 @@ func TestApplyVariadicProcOwnsRetainedArguments(t *testing.T) {
 }
 
 func TestSerialProcExplicitNumVarsKeepsNamedParamBinding(t *testing.T) {
-	lambda := Eval(Read("test", "(lambda ($update) ($update) 1)"), &Globalenv)
+	lambda := Eval(Read("test", "(lambda ($update) ($update) 1)", true), &Globalenv)
 	called := false
 	update := NewFunc(func(args ...Scmer) Scmer {
 		called = true
@@ -252,7 +252,7 @@ func TestBeginBindingsRetainTheirLexicalScope(t *testing.T) {
 	for _, optimized := range []bool{false, true} {
 		env := &Env{Vars: Vars{"value": NewInt(99)}, Outer: &Globalenv}
 		expr := Read("begin lexical scope", `(lambda (input)
-			(begin (define value input) (lambda () value)))`)
+			(begin (define value input) (lambda () value)))`, true)
 		if optimized {
 			expr = Optimize(expr, env, nil)
 		}

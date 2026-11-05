@@ -164,7 +164,7 @@ func Repl(en *Env) {
 				}
 			}()
 			var b bytes.Buffer
-			code := Read("user prompt", line)
+			code := Read("user prompt", line, true)
 			Validate(code, "any")
 			code = Optimize(code, en, nil)
 			result := Eval(code, en)

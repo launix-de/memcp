@@ -245,7 +245,7 @@ func TestClusterControlDoesNotConsumeComputeSlots(t *testing.T) {
 	session.service = &nodeScanService{cluster: &nodeCluster{}}
 	// Control discovery has no compute semaphore. Its domain handler must be
 	// reachable independently of the UUID scopes of concurrently running scans.
-	_, err := session.handle(context.Background(), "cluster.report", []byte(`{"database":"unmounted"}`))
+	_, err := session.handle(context.Background(), "cluster.report", mustNodeMetadata(map[string]string{"database": "unmounted"}))
 	if err == nil || err.Error() != "invalid cluster report" {
 		t.Fatalf("control message was blocked by compute admission: %v", err)
 	}
@@ -281,7 +281,7 @@ func TestClusterQueuedRequestForwardsAfterOwnerHandover(t *testing.T) {
 	cluster.initializeManager()
 	owner := "memcp://" + uuid.NewString()
 	requester := "memcp://" + uuid.NewString()
-	peer := &mosiPeer{done: make(chan struct{}), outgoing: make(chan mosiMessage, 1)}
+	peer := &mosiPeer{done: make(chan struct{}), outgoing: newMosiMailbox()}
 	cluster.view.Store(&clusterView{links: []*clusterLink{{member: clusterMember{ID: owner}, peer: peer}}})
 	resource := mosiResource{Database: "forward_db"}
 	cluster.manager.updateRecord(resource, func(record *replicaRecord) bool {
@@ -292,7 +292,7 @@ func TestClusterQueuedRequestForwardsAfterOwnerHandover(t *testing.T) {
 	if err := cluster.manager.coordinate(context.Background(), requester, request); err != nil {
 		t.Fatal(err)
 	}
-	message := <-peer.outgoing
+	message := takeMosi(peer.outgoing)
 	if message.Packet == nil || message.Packet.Kind != "write" || message.Packet.From != requester || message.Packet.To != owner || message.Packet.ID != request.ID {
 		t.Fatal("old owner recalled its successor instead of forwarding the original request")
 	}
@@ -305,7 +305,7 @@ func TestClusterCancelledReaderRetainsSharedRequestFlight(t *testing.T) {
 	cluster := &nodeCluster{self: clusterMember{ID: "memcp://" + uuid.NewString()}, ctx: context.Background()}
 	cluster.initializeManager()
 	owner := "memcp://" + uuid.NewString()
-	peer := &mosiPeer{done: make(chan struct{}), outgoing: make(chan mosiMessage, 1)}
+	peer := &mosiPeer{done: make(chan struct{}), outgoing: newMosiMailbox()}
 	cluster.view.Store(&clusterView{links: []*clusterLink{{member: clusterMember{ID: owner}, peer: peer}}})
 	resource := mosiResource{Database: "cancel_db"}
 	cluster.manager.updateRecord(resource, func(record *replicaRecord) bool {
@@ -324,7 +324,7 @@ func TestClusterCancelledReaderRetainsSharedRequestFlight(t *testing.T) {
 		}()
 		cluster.obtain(ctx, resource, mosi.S)
 	}()
-	if cell.ownstate.Phase() != mosi.SR || request.Flight().Err() != nil || len(peer.outgoing) != 0 {
+	if cell.ownstate.Phase() != mosi.SR || request.Flight().Err() != nil || peer.outgoing.len() != 0 {
 		t.Fatal("one reader cancellation aborted or duplicated the common flight")
 	}
 	if _, err := cell.ownstate.Grant(request.Flight().ID(), mosi.S, func() error { return nil }); err != nil {
@@ -407,7 +407,7 @@ func TestClusterDiscoveryIgnoresUnavailableNonOwner(t *testing.T) {
 			live := clusterMember{ID: "memcp://" + uuid.NewString()}
 			unavailable := &mosiPeer{done: make(chan struct{})}
 			close(unavailable.done)
-			available := &mosiPeer{done: make(chan struct{}), outgoing: make(chan mosiMessage, 1)}
+			available := &mosiPeer{done: make(chan struct{}), outgoing: newMosiMailbox()}
 			cluster.view.Store(&clusterView{members: []clusterMember{cluster.self, dead, live}, links: []*clusterLink{{member: dead, peer: unavailable}, {member: live, peer: available}}})
 			resource := mosiResource{Database: "discovery_db"}
 			cell := cluster.manager.resourceCell(resource)
@@ -419,11 +419,12 @@ func TestClusterDiscoveryIgnoresUnavailableNonOwner(t *testing.T) {
 			defer cancel()
 			go func() {
 				select {
-				case message := <-available.outgoing:
+				case <-available.outgoing.ready:
+					message := takeMosi(available.outgoing)
 					var request struct {
 						Return string `json:"return"`
 					}
-					if json.Unmarshal(message.Data, &request) != nil {
+					if unmarshalNode(message.Data, &request) != nil {
 						return
 					}
 					answer := replicaRecord{Resource: resource, State: "S", Owner: dead.ID, Epoch: 7}
@@ -433,8 +434,8 @@ func TestClusterDiscoveryIgnoresUnavailableNonOwner(t *testing.T) {
 					if scenario == "restart-with-missing-peer" {
 						answer.Owner = cluster.self.ID
 					}
-					if value, ok := cluster.service.returns.Load(request.Return); ok {
-						deliverTestCompletion(t, value, scanCompletion{Data: mustScanJSON(answer)})
+					if value, ok := cluster.service.handles.Load(controlReturnSlot(request.Return)); ok {
+						deliverTestCompletion(t, value, scanCompletion{Data: mustNodeMetadata(answer)})
 					}
 				case <-ctx.Done():
 				}
@@ -511,7 +512,7 @@ func TestClusterAccessCancellationKeepsCommonFlight(t *testing.T) {
 			cluster := &nodeCluster{self: clusterMember{ID: "memcp://" + uuid.NewString()}, ctx: nodeCtx}
 			cluster.initializeManager()
 			owner := "memcp://" + uuid.NewString()
-			peer := &mosiPeer{done: make(chan struct{}), outgoing: make(chan mosiMessage, 2)}
+			peer := &mosiPeer{done: make(chan struct{}), outgoing: newMosiMailbox()}
 			cluster.view.Store(&clusterView{links: []*clusterLink{{member: clusterMember{ID: owner}, peer: peer}}})
 			tbl := &table{schema: &database{Name: "cancel_access_db"}, Name: "items"}
 			shard := &storageShard{t: tbl, uuid: uuid.New()}
@@ -557,7 +558,7 @@ func TestClusterAccessCancellationKeepsCommonFlight(t *testing.T) {
 				<-done
 				t.Fatal("access ignored query cancellation")
 			}
-			if request.Flight().Err() != nil || len(peer.outgoing) != 0 {
+			if request.Flight().Err() != nil || peer.outgoing.len() != 0 {
 				t.Fatal("cancelled access changed the common request")
 			}
 			if _, err := cell.ownstate.Grant(request.Flight().ID(), wanted, func() error { return nil }); err != nil {
@@ -576,7 +577,7 @@ func TestClusterReferenceKeepsAcquisitionID(t *testing.T) {
 	cluster.initializeManager()
 	r := cluster.manager
 	requester := "memcp://" + uuid.NewString()
-	peer := &mosiPeer{done: make(chan struct{}), outgoing: make(chan mosiMessage, 4)}
+	peer := &mosiPeer{done: make(chan struct{}), outgoing: newMosiMailbox()}
 	cluster.view.Store(&clusterView{links: []*clusterLink{{member: clusterMember{ID: requester}, peer: peer}}})
 	resource := mosiResource{Database: tbl.schema.Name}
 	cell := r.resourceCell(resource)
@@ -592,7 +593,8 @@ func TestClusterReferenceKeepsAcquisitionID(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- r.coordinate(ctx, requester, request) }()
 	select {
-	case message := <-peer.outgoing:
+	case <-peer.outgoing.ready:
+		message := takeMosi(peer.outgoing)
 		if message.Packet == nil || message.Packet.Kind != "reference" || message.Packet.ID != request.ID {
 			t.Fatal("reference lost the pending acquisition identity", message.Packet)
 		}
@@ -680,8 +682,8 @@ func TestClusterSchemaLocationsFollowForwardedAcquisition(t *testing.T) {
 
 func TestClusterShardLocationQueriesOnlySchemaOwner(t *testing.T) {
 	service := &nodeScanService{}
-	schemaPeer := &mosiPeer{done: make(chan struct{}), outgoing: make(chan mosiMessage, 2)}
-	unrelated := &mosiPeer{done: make(chan struct{}), outgoing: make(chan mosiMessage, 2)}
+	schemaPeer := &mosiPeer{done: make(chan struct{}), outgoing: newMosiMailbox()}
+	unrelated := &mosiPeer{done: make(chan struct{}), outgoing: newMosiMailbox()}
 	cluster := &nodeCluster{self: clusterMember{ID: "local"}, service: service}
 	cluster.initializeManager()
 	cluster.view.Store(&clusterView{links: []*clusterLink{{member: clusterMember{ID: "schema-owner"}, peer: schemaPeer}, {member: clusterMember{ID: "unrelated"}, peer: unrelated}}})
@@ -701,31 +703,31 @@ func TestClusterShardLocationQueriesOnlySchemaOwner(t *testing.T) {
 			finished <- owner
 		}
 	}()
-	message := <-schemaPeer.outgoing
+	message := takeMosi(schemaPeer.outgoing)
 	var request struct {
 		Return, Method string
-		Data           json.RawMessage
+		Data           []byte
 	}
-	if err := json.Unmarshal(message.Data, &request); err != nil || request.Method != "cluster.location" {
+	if err := unmarshalNode(message.Data, &request); err != nil || request.Method != "cluster.location" {
 		t.Fatal("per-shard discovery did not use schema owner", request, err)
 	}
-	route, _ := service.returns.Load(request.Return)
-	deliverTestCompletion(t, route, scanCompletion{Data: mustScanJSON(replicaRecord{Resource: resource, Owner: "schema-owner", Epoch: 3})})
+	route, _ := service.handles.Load(controlReturnSlot(request.Return))
+	deliverTestCompletion(t, route, scanCompletion{Data: mustNodeMetadata(replicaRecord{Resource: resource, Owner: "schema-owner", Epoch: 3})})
 	if owner := <-finished; owner != "schema-owner" {
 		t.Fatal(owner)
 	}
-	if len(unrelated.outgoing) != 0 {
+	if unrelated.outgoing.len() != 0 {
 		t.Fatal("queried unrelated peer for shard placement")
 	}
 	owner, err := cluster.locate(ctx, resource)
-	if err != nil || owner != "schema-owner" || len(schemaPeer.outgoing) != 0 {
+	if err != nil || owner != "schema-owner" || schemaPeer.outgoing.len() != 0 {
 		t.Fatal("known route performed another probe", owner, err)
 	}
 }
 
 func TestClusterSchemaLocationTransferUsesBoundedBatches(t *testing.T) {
 	service := &nodeScanService{}
-	peer := &mosiPeer{done: make(chan struct{}), outgoing: make(chan mosiMessage, 1)}
+	peer := &mosiPeer{done: make(chan struct{}), outgoing: newMosiMailbox()}
 	cluster := &nodeCluster{self: clusterMember{ID: "local"}, service: service}
 	cluster.initializeManager()
 	cluster.view.Store(&clusterView{links: []*clusterLink{{member: clusterMember{ID: "target"}, peer: peer}}})
@@ -741,12 +743,12 @@ func TestClusterSchemaLocationTransferUsesBoundedBatches(t *testing.T) {
 	go func() {
 		var batches []int
 		for i := 0; i < 3; i++ {
-			message := <-peer.outgoing
+			message := takeMosi(peer.outgoing)
 			var request struct {
 				Return string
 				Data   clusterSchemaLocations
 			}
-			if err := json.Unmarshal(message.Data, &request); err != nil {
+			if err := unmarshalNode(message.Data, &request); err != nil {
 				t.Error(err)
 				return
 			}
@@ -756,7 +758,7 @@ func TestClusterSchemaLocationTransferUsesBoundedBatches(t *testing.T) {
 					t.Error("schema directory copied shard reader/operation ownership")
 				}
 			}
-			route, _ := service.returns.Load(request.Return)
+			route, _ := service.handles.Load(controlReturnSlot(request.Return))
 			deliverTestCompletion(t, route, scanCompletion{})
 		}
 		counts <- batches
@@ -801,7 +803,7 @@ func TestClusterSchemaLocationsRetainNativeUUIDAliases(t *testing.T) {
 
 func TestClusterSchemaRecoveryRestoresBoundedRoutesWithoutPermissions(t *testing.T) {
 	service := &nodeScanService{}
-	peer := &mosiPeer{done: make(chan struct{}), outgoing: make(chan mosiMessage, 1)}
+	peer := &mosiPeer{done: make(chan struct{}), outgoing: newMosiMailbox()}
 	local := &nodeCluster{self: clusterMember{ID: "local"}, service: service}
 	local.initializeManager()
 	owner := &nodeCluster{self: clusterMember{ID: "live"}, databases: map[string]bool{"tenant": true}}
@@ -824,12 +826,13 @@ func TestClusterSchemaRecoveryRestoresBoundedRoutesWithoutPermissions(t *testing
 	}()
 	for _, count := range []int{64, 64, 3} {
 		select {
-		case message := <-peer.outgoing:
+		case <-peer.outgoing.ready:
+			message := takeMosi(peer.outgoing)
 			var request struct {
 				Return string
-				Data   json.RawMessage
+				Data   []byte
 			}
-			if err := json.Unmarshal(message.Data, &request); err != nil {
+			if err := unmarshalNode(message.Data, &request); err != nil {
 				t.Fatal(err)
 			}
 			value, err := owner.handleLocations(ctx, local.self.ID, "cluster.schema_locations", request.Data)
@@ -840,8 +843,8 @@ func TestClusterSchemaRecoveryRestoresBoundedRoutesWithoutPermissions(t *testing
 			if len(page.Entries) != count {
 				t.Fatal("unbounded recovery batch", len(page.Entries))
 			}
-			route, _ := service.returns.Load(request.Return)
-			deliverTestCompletion(t, route, scanCompletion{Data: mustScanJSON(page)})
+			route, _ := service.handles.Load(controlReturnSlot(request.Return))
+			deliverTestCompletion(t, route, scanCompletion{Data: mustNodeMetadata(page)})
 		case <-ctx.Done():
 			t.Fatal(ctx.Err())
 		}
@@ -998,7 +1001,7 @@ func TestClusterShardRestartRecoveryUsesLiveReports(t *testing.T) {
 	for _, learnedFromSchema := range []bool{false, true} {
 		t.Run(fmt.Sprint("schema-hint=", learnedFromSchema), func(t *testing.T) {
 			service := &nodeScanService{}
-			remote := &mosiPeer{done: make(chan struct{}), outgoing: make(chan mosiMessage, 1)}
+			remote := &mosiPeer{done: make(chan struct{}), outgoing: newMosiMailbox()}
 			cluster := &nodeCluster{self: clusterMember{ID: "local"}, service: service}
 			cluster.initializeManager()
 			cluster.view.Store(&clusterView{members: []clusterMember{cluster.self, {ID: "reader"}}, links: []*clusterLink{{member: clusterMember{ID: "reader"}, peer: remote}}})
@@ -1026,16 +1029,16 @@ func TestClusterShardRestartRecoveryUsesLiveReports(t *testing.T) {
 				methods = append([]string{"cluster.location"}, methods...)
 			}
 			for _, method := range methods {
-				message := <-remote.outgoing
+				message := takeMosi(remote.outgoing)
 				var request struct{ Return, Method string }
-				if err := json.Unmarshal(message.Data, &request); err != nil || request.Method != method {
+				if err := unmarshalNode(message.Data, &request); err != nil || request.Method != method {
 					t.Fatal("restart omitted native recovery", request, err)
 				}
 				if cell.ownstate.Initialized() {
 					t.Fatal("schema hint granted authority before live recovery")
 				}
-				route, _ := service.returns.Load(request.Return)
-				deliverTestCompletion(t, route, scanCompletion{Data: mustScanJSON(replicaRecord{Resource: resource, Owner: "local", State: "S", Epoch: 3})})
+				route, _ := service.handles.Load(controlReturnSlot(request.Return))
+				deliverTestCompletion(t, route, scanCompletion{Data: mustNodeMetadata(replicaRecord{Resource: resource, Owner: "local", State: "S", Epoch: 3})})
 			}
 			if err := <-finished; err != nil {
 				t.Fatal(err)
@@ -1096,7 +1099,7 @@ func TestClusterCacheTryReadLeavesExistingAcquisitionAlone(t *testing.T) {
 	cluster := &nodeCluster{self: clusterMember{ID: "memcp://" + uuid.NewString()}, ctx: context.Background()}
 	cluster.initializeManager()
 	owner := "memcp://" + uuid.NewString()
-	peer := &mosiPeer{done: make(chan struct{}), outgoing: make(chan mosiMessage, 1)}
+	peer := &mosiPeer{done: make(chan struct{}), outgoing: newMosiMailbox()}
 	cluster.view.Store(&clusterView{links: []*clusterLink{{member: clusterMember{ID: owner}, peer: peer}}})
 	resource := mosiResource{Database: "cache_try_existing"}
 	cluster.manager.updateRecord(resource, func(record *replicaRecord) bool {
@@ -1108,7 +1111,7 @@ func TestClusterCacheTryReadLeavesExistingAcquisitionAlone(t *testing.T) {
 	if cluster.tryRead(context.Background(), resource) {
 		t.Fatal("a pending acquisition certified cache reuse")
 	}
-	if cell.ownstate.Phase() != mosi.SR || request.Flight().Err() != nil || len(peer.outgoing) != 0 {
+	if cell.ownstate.Phase() != mosi.SR || request.Flight().Err() != nil || peer.outgoing.len() != 0 {
 		t.Fatal("cache admission cancelled or duplicated the existing acquisition")
 	}
 }
@@ -1174,21 +1177,22 @@ func TestClusterDiscoveryFollowsOwnerEpochAcrossReplies(t *testing.T) {
 			defer cancel()
 			for _, epoch := range epochs {
 				member := clusterMember{ID: "memcp://" + uuid.NewString()}
-				peer := &mosiPeer{done: make(chan struct{}), outgoing: make(chan mosiMessage, 1)}
+				peer := &mosiPeer{done: make(chan struct{}), outgoing: newMosiMailbox()}
 				members = append(members, member)
 				links = append(links, &clusterLink{member: member, peer: peer})
 				go func(epoch uint64) {
 					select {
-					case message := <-peer.outgoing:
+					case <-peer.outgoing.ready:
+						message := takeMosi(peer.outgoing)
 						var request struct {
 							Return string `json:"return"`
 						}
-						if err := json.Unmarshal(message.Data, &request); err != nil {
+						if err := unmarshalNode(message.Data, &request); err != nil {
 							return
 						}
 						answer := replicaRecord{Resource: resource, State: "M", Owner: member.ID, Epoch: epoch}
-						if value, ok := cluster.service.returns.Load(request.Return); ok {
-							deliverTestCompletion(t, value, scanCompletion{Data: mustScanJSON(answer)})
+						if value, ok := cluster.service.handles.Load(controlReturnSlot(request.Return)); ok {
+							deliverTestCompletion(t, value, scanCompletion{Data: mustNodeMetadata(answer)})
 						}
 					case <-ctx.Done():
 					}
@@ -1220,8 +1224,8 @@ func TestClusterAcquisitionRefreshesOwnerAfterUUIDForward(t *testing.T) {
 	cluster := &nodeCluster{self: clusterMember{ID: "memcp://" + uuid.NewString()}, ctx: context.Background()}
 	cluster.initializeManager()
 	oldOwner, newOwner := "memcp://"+uuid.NewString(), "memcp://"+uuid.NewString()
-	oldPeer := &mosiPeer{done: make(chan struct{}), outgoing: make(chan mosiMessage, 2)}
-	newPeer := &mosiPeer{done: make(chan struct{}), outgoing: make(chan mosiMessage, 2)}
+	oldPeer := &mosiPeer{done: make(chan struct{}), outgoing: newMosiMailbox()}
+	newPeer := &mosiPeer{done: make(chan struct{}), outgoing: newMosiMailbox()}
 	cluster.view.Store(&clusterView{links: []*clusterLink{{member: clusterMember{ID: oldOwner}, peer: oldPeer}, {member: clusterMember{ID: newOwner}, peer: newPeer}}})
 	r := cluster.manager
 	from := mosiResource{Database: "owner_refresh", Table: "items", Shard: uuid.NewString()}
@@ -1242,7 +1246,8 @@ func TestClusterAcquisitionRefreshesOwnerAfterUUIDForward(t *testing.T) {
 		done <- cluster.obtain(ctx, from, mosi.M)
 	}()
 	select {
-	case <-oldPeer.outgoing:
+	case <-oldPeer.outgoing.ready:
+		takeMosi(oldPeer.outgoing)
 	case <-ctx.Done():
 		t.Fatal("initial acquisition missing")
 	}
@@ -1252,9 +1257,11 @@ func TestClusterAcquisitionRefreshesOwnerAfterUUIDForward(t *testing.T) {
 	// A newer inbound identity supersedes the old placeholder and wakes its waiters.
 	r.forwardResource(from, to)
 	select {
-	case message := <-oldPeer.outgoing:
+	case <-oldPeer.outgoing.ready:
+		message := takeMosi(oldPeer.outgoing)
 		t.Fatalf("successor request reused stale owner: %+v", message.Packet)
-	case message := <-newPeer.outgoing:
+	case <-newPeer.outgoing.ready:
+		message := takeMosi(newPeer.outgoing)
 		if message.Packet == nil || message.Packet.Resource != to {
 			t.Fatal("lost successor identity")
 		}
@@ -1280,7 +1287,7 @@ func TestClusterAcquisitionQueuesBehindOutgoingHandover(t *testing.T) {
 	cluster := &nodeCluster{self: clusterMember{ID: "memcp://" + uuid.NewString()}, ctx: context.Background()}
 	cluster.initializeManager()
 	owner := "memcp://" + uuid.NewString()
-	peer := &mosiPeer{done: make(chan struct{}), outgoing: make(chan mosiMessage, 1)}
+	peer := &mosiPeer{done: make(chan struct{}), outgoing: newMosiMailbox()}
 	cluster.view.Store(&clusterView{links: []*clusterLink{{member: clusterMember{ID: owner}, peer: peer}}})
 	r := cluster.manager
 	resource := mosiResource{Database: "handover_queue", Table: "items", Shard: uuid.NewString()}
@@ -1311,7 +1318,8 @@ func TestClusterAcquisitionQueuesBehindOutgoingHandover(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	select {
-	case <-peer.outgoing:
+	case <-peer.outgoing.ready:
+		takeMosi(peer.outgoing)
 		releaseCoordination()
 		t.Fatal("request preceded the destination's reference installation")
 	case <-time.After(20 * time.Millisecond):
@@ -1322,7 +1330,8 @@ func TestClusterAcquisitionQueuesBehindOutgoingHandover(t *testing.T) {
 	})
 	releaseCoordination()
 	select {
-	case message := <-peer.outgoing:
+	case <-peer.outgoing.ready:
+		message := takeMosi(peer.outgoing)
 		if message.Packet == nil || message.Packet.Resource != resource {
 			t.Fatal("handover lost request identity")
 		}
@@ -1348,7 +1357,7 @@ func TestClusterGrantedReadDoesNotRediscoverMissingOwner(t *testing.T) {
 	cluster := &nodeCluster{self: clusterMember{ID: "memcp://" + uuid.NewString()}, ctx: context.Background()}
 	cluster.initializeManager()
 	owner := "memcp://" + uuid.NewString()
-	peer := &mosiPeer{done: make(chan struct{}), outgoing: make(chan mosiMessage, 1)}
+	peer := &mosiPeer{done: make(chan struct{}), outgoing: newMosiMailbox()}
 	cluster.view.Store(&clusterView{members: []clusterMember{cluster.self, {ID: owner}}, links: []*clusterLink{{member: clusterMember{ID: owner}, peer: peer}}})
 	resource := mosiResource{Database: "granted_read"}
 	r := cluster.manager
@@ -1367,7 +1376,8 @@ func TestClusterGrantedReadDoesNotRediscoverMissingOwner(t *testing.T) {
 		done <- cluster.obtain(ctx, resource, mosi.S)
 	}()
 	select {
-	case message := <-peer.outgoing:
+	case <-peer.outgoing.ready:
+		message := takeMosi(peer.outgoing)
 		// Losing a contact hint does not revoke an already issued S grant.
 		cluster.view.Store(&clusterView{members: []clusterMember{cluster.self}})
 		if _, err := cell.ownstate.Grant(message.Packet.ID, mosi.S, func() error { return nil }); err != nil {

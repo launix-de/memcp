@@ -39,7 +39,7 @@ func TestJITDotKeepsNativeFloatAccumulators(t *testing.T) {
 		{name: "euclidean", source: `(lambda (left right) (dot left right "EUCLIDEAN"))`, want: 5},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			compiled := jitCompile(Eval(Read(t.Name(), test.source), &Globalenv))
+			compiled := jitCompile(Eval(Read(t.Name(), test.source, true), &Globalenv))
 			if compiled.GetTag() != tagProc || compiled.Proc().Compiled == nil {
 				t.Fatal("dot expression did not compile")
 			}
@@ -68,7 +68,7 @@ func BenchmarkJITDotNativeFP(b *testing.B) {
 		{"cosine", `(lambda (left right) (dot left right "COSINE"))`},
 	} {
 		b.Run(test.name, func(b *testing.B) {
-			compiled := jitCompile(Eval(Read(b.Name(), test.source), &Globalenv))
+			compiled := jitCompile(Eval(Read(b.Name(), test.source, true), &Globalenv))
 			if compiled.GetTag() != tagProc || compiled.Proc().Compiled == nil {
 				b.Fatal("dot benchmark did not compile")
 			}

@@ -80,7 +80,7 @@ func TestStrictValueIdentityIsNotFoldable(t *testing.T) {
 		t.Fatal("identity must be declared without constant folding")
 	}
 	for _, source := range []string{"(identical? 1 1)", "(identical? '(1) '(1))"} {
-		if optimized := Optimize(Read(t.Name(), source), &Globalenv, nil); optimized.WithoutSourceInfo().IsBool() {
+		if optimized := Optimize(Read(t.Name(), source, true), &Globalenv, nil); optimized.WithoutSourceInfo().IsBool() {
 			t.Fatalf("identity comparison folded to a reconstructed literal: %s", source)
 		}
 		func() {
@@ -89,7 +89,7 @@ func TestStrictValueIdentityIsNotFoldable(t *testing.T) {
 					t.Fatalf("tryfold accepted reference identity: %s", source)
 				}
 			}()
-			TryFold(Read(t.Name(), source), &Globalenv)
+			TryFold(Read(t.Name(), source, true), &Globalenv)
 		}()
 	}
 }
@@ -102,7 +102,7 @@ func TestStrictValueIdentityArity(t *testing.T) {
 					t.Fatal("invalid argument count accepted")
 				}
 			}()
-			Validate(Read(t.Name(), source), "bool")
+			Validate(Read(t.Name(), source, true), "bool")
 		})
 	}
 }
@@ -250,7 +250,7 @@ func TestOptimizeOrderedNumericConstants(t *testing.T) {
 }
 
 func BenchmarkOptimizedOrderedComparison(b *testing.B) {
-	proc := Eval(Optimize(Read("comparison-benchmark", "(lambda (x) (and (> x -1) (< x 60001) (>= x 0) (<= x 60000)))"), &Globalenv, nil), &Globalenv).Proc()
+	proc := Eval(Optimize(Read("comparison-benchmark", "(lambda (x) (and (> x -1) (< x 60001) (>= x 0) (<= x 60000)))", true), &Globalenv, nil), &Globalenv).Proc()
 	env := &Env{Outer: &Globalenv, VarsNumbered: []Scmer{NewInt(511)}}
 	b.ReportAllocs()
 	b.ResetTimer()

@@ -18,7 +18,6 @@ import "time"
 import "context"
 import "net/http"
 import "sync/atomic"
-import "encoding/json"
 import "github.com/gorilla/websocket"
 import "github.com/launix-de/memcp/storage/mosi"
 
@@ -73,7 +72,13 @@ func registerMosiRole(role string, handler http.Handler) (func(), error) {
 // Neither RPC handlers nor storage I/O run under its mutex.
 // A disconnected peer fails every outstanding call; no write is retried here.
 type mosiPeer struct {
-	receiveIO *ioSimulation // shared node ingress budget; receiver-only instrumentation
+	viewMu            sync.Mutex
+	declaredViews     map[string]int // sender knowledge, published only after enqueue
+	declaredViewBytes int
+	receivedViewBytes int
+	receivedViewSlots int
+	objectViews       sync.Map      // URI -> immutable constructor bytes received on this stream
+	receiveIO         *ioSimulation // shared node ingress budget; receiver-only instrumentation
 
 	operationPrefix string            // immutable authenticated connection binding for query operations
 	recoveryDone    chan struct{}     // replication hello installed; nil for roles without recovery
@@ -82,7 +87,7 @@ type mosiPeer struct {
 	scanService     *nodeScanService  // immutable before an outbound scan is dispatched
 	conn            *websocket.Conn
 	writeMu         sync.Mutex
-	outgoing        chan mosiMessage
+	outgoing        *mosiMailbox
 	writeDone       chan struct{}
 	mu              sync.Mutex
 	pending         map[uint64]chan mosiMessage
@@ -92,7 +97,7 @@ type mosiPeer struct {
 	done            chan struct{}
 	once            sync.Once
 	handleValue     func(uint64, schemeValue) error
-	handle          func(context.Context, string, json.RawMessage) (any, error)
+	handle          func(context.Context, string, []byte) (any, error)
 	packet          func(*mosiPacket) error
 	ctx             context.Context
 	cancel          context.CancelFunc
@@ -117,22 +122,135 @@ func (p *mosiPeer) recovered() bool {
 }
 
 type mosiMessage struct {
-	Slot    uint64          `json:"slot,omitempty"`
-	Payload schemeValue     `json:"payload,omitempty"`
-	encoded []byte          // immutable local frame; never part of wire metadata
-	ID      uint64          `json:"id,omitempty"`
-	Method  string          `json:"method,omitempty"`
-	Data    json.RawMessage `json:"data,omitempty"`
-	Error   string          `json:"error,omitempty"`
-	Packet  *mosiPacket     `json:"packet,omitempty"`
+	Slot    uint64      `json:"slot,omitempty"`
+	Payload schemeValue `json:"payload,omitempty"`
+	encoded []byte      // immutable local frame; never part of wire metadata
+	ID      uint64      `json:"id,omitempty"`
+	Method  string      `json:"method,omitempty"`
+	Data    []byte      `json:"data,omitempty"`
+	Error   string      `json:"error,omitempty"`
+	Packet  *mosiPacket `json:"packet,omitempty"`
+}
+
+// The network worker owns socket writes. Publication/removal in this bounded
+// mailbox never waits on a channel send or on a remote callback. Credit-based
+// invocation windows prevent an output producer from filling it without bound.
+type mosiMailbox struct {
+	mu    sync.Mutex
+	items []mosiMessage
+	head  int
+	bytes int
+	ready chan struct{}
+	space chan struct{}
+}
+
+func newMosiMailbox() *mosiMailbox {
+	return &mosiMailbox{ready: make(chan struct{}, 1)}
+}
+func (q *mosiMailbox) len() int { q.mu.Lock(); defer q.mu.Unlock(); return len(q.items) - q.head }
+func (q *mosiMailbox) push(m mosiMessage) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.pushLocked(m)
+}
+
+func (q *mosiMailbox) pushLocked(m mosiMessage) error {
+	if q.bytes+len(m.encoded) > 32<<20 || len(q.items)-q.head >= 65536 {
+		return fmt.Errorf("node send window exhausted")
+	}
+	if q.head > 1024 && q.head >= len(q.items)/2 {
+		copy(q.items, q.items[q.head:])
+		remaining := len(q.items) - q.head
+		clear(q.items[remaining:])
+		q.items = q.items[:remaining]
+		q.head = 0
+	}
+	q.items = append(q.items, m)
+	q.bytes += len(m.encoded)
+	select {
+	case q.ready <- struct{}{}:
+	default:
+	}
+	return nil
+}
+
+// The caller owns q.mu. One pop wakes byte-admission waiters as before.
+func (q *mosiMailbox) popLocked() mosiMessage {
+	m := q.items[q.head]
+	q.items[q.head] = mosiMessage{}
+	q.head++
+	q.bytes -= len(m.encoded)
+	if q.space != nil {
+		close(q.space)
+		q.space = nil
+	}
+	if q.head == len(q.items) {
+		q.items = q.items[:0]
+		q.head = 0
+		select {
+		case <-q.ready:
+		default:
+		}
+	} else {
+		select {
+		case q.ready <- struct{}{}:
+		default:
+		}
+	}
+	return m
+}
+
+func (q *mosiMailbox) next(ctx context.Context) (mosiMessage, error) {
+	for {
+		q.mu.Lock()
+		if q.head < len(q.items) {
+			m := q.popLocked()
+			q.mu.Unlock()
+			return m, nil
+		}
+		q.mu.Unlock()
+		select {
+		case <-q.ready:
+		case <-ctx.Done():
+			return mosiMessage{}, ctx.Err()
+		}
+	}
+}
+
+// Bulk storage workers admit packets before publication, leaving room for
+// callback completions/control traffic. The queue operations never wait.
+func (q *mosiMailbox) publishPacket(done <-chan struct{}, message mosiMessage) error {
+	for {
+		select {
+		case <-done:
+			return fmt.Errorf("node peer disconnected")
+		default:
+		}
+		q.mu.Lock()
+		if q.bytes+len(message.encoded) <= 8<<20 && len(q.items)-q.head < 8192 {
+			err := q.pushLocked(message)
+			q.mu.Unlock()
+			return err
+		}
+		if q.space == nil {
+			q.space = make(chan struct{})
+		}
+		ready := q.space
+		q.mu.Unlock()
+		select {
+		case <-ready:
+		case <-done:
+			return fmt.Errorf("node peer disconnected")
+		}
+	}
 }
 
 type mosiRemoteError string
 
 func (e mosiRemoteError) Error() string { return string(e) }
 
-func newMosiPeer(conn *websocket.Conn, handle func(context.Context, string, json.RawMessage) (any, error), packet func(*mosiPacket) error, initialize ...func(*mosiPeer)) *mosiPeer {
-	p := &mosiPeer{conn: conn, pending: make(map[uint64]chan mosiMessage), done: make(chan struct{}), handle: handle, packet: packet, outgoing: make(chan mosiMessage, 8), writeDone: make(chan struct{})}
+func newMosiPeer(conn *websocket.Conn, handle func(context.Context, string, []byte) (any, error), packet func(*mosiPacket) error, initialize ...func(*mosiPeer)) *mosiPeer {
+	p := &mosiPeer{conn: conn, pending: make(map[uint64]chan mosiMessage), done: make(chan struct{}), handle: handle, packet: packet, outgoing: newMosiMailbox(), writeDone: make(chan struct{})}
 	p.receiveIO = activeClusterReceiveIO()
 	p.readDone = make(chan struct{})
 	p.ctx, p.cancel = context.WithCancel(context.Background())
@@ -188,28 +306,30 @@ func (p *mosiPeer) send(ctx context.Context, m mosiMessage) error {
 		return err
 	}
 	select {
-	case <-ctx.Done():
-		return ctx.Err()
 	case <-p.done:
 		return fmt.Errorf(mosi.NetworkError)
-	case p.outgoing <- m:
-		return nil
+	default:
 	}
+	if m.encoded == nil {
+		var err error
+		m.encoded, err = encodeMosiMessage(m)
+		if err != nil {
+			return err
+		}
+	}
+	return p.outgoing.push(m)
 }
 
-// The bounded queue owns each message after send returns. Producers never
-// wait for a protocol reply here; the connection reader completes acquisitions.
 func (p *mosiPeer) write() {
 	defer close(p.writeDone)
 	defer p.close()
 	for {
-		select {
-		case <-p.done:
+		m, err := p.outgoing.next(p.ctx)
+		if err != nil {
 			return
-		case m := <-p.outgoing:
-			if err := p.writeMessage(m); err != nil {
-				return
-			}
+		}
+		if err = p.writeMessage(m); err != nil {
+			return
 		}
 	}
 }
@@ -237,7 +357,7 @@ func (p *mosiPeer) writeMessage(m mosiMessage) error {
 }
 
 func (p *mosiPeer) call(ctx context.Context, method string, input, output any) error {
-	data, err := json.Marshal(input)
+	data, err := marshalNode(input)
 	if err != nil {
 		return err
 	}
@@ -265,7 +385,7 @@ func (p *mosiPeer) call(ctx context.Context, method string, input, output any) e
 		if output == nil {
 			return nil
 		}
-		return json.Unmarshal(reply.Data, output)
+		return unmarshalNode(reply.Data, output)
 	}
 }
 
@@ -304,74 +424,92 @@ func (p *mosiPeer) read() {
 		if err != nil {
 			return
 		}
-		if m.Packet != nil {
-			if p.packet == nil {
-				return
-			}
-			if !p.dispatchPacket(m.Packet, len(frame), readyAt) {
-				return
-			}
-			continue
-		}
-		if m.Slot == 0 && m.Method == "" && (p.receiveIO == nil || p.receiveIO.latency == 0) {
-			p.deliverReply(m)
-			continue
-		}
-		if p.packetBytes.Add(int64(len(frame))) > 32<<20 {
-			p.packetBytes.Add(-int64(len(frame)))
+		if !p.dispatchMessage(m, len(frame), readyAt) {
 			return
 		}
-		p.workers.Add(1)
-		go func(m mosiMessage, size int, readyAt time.Time) {
-			defer p.workers.Done()
-			defer p.packetBytes.Add(-int64(size))
-			if !p.waitDispatch(readyAt) {
-				return
-			}
-			if m.Slot != 0 {
-				defer func() {
-					if recover() != nil {
-						p.close()
-					}
-				}()
-				if p.handleValue == nil || p.handleValue(m.Slot, m.Payload) != nil {
+	}
+}
+
+func (p *mosiPeer) dispatchMessage(m mosiMessage, size int, readyAt time.Time) bool {
+	// A declaration is a bounded publication, never executable Scheme or a
+	// request. Install it before admitting a later task from this stream.
+	if m.ID == 0 && m.Slot == 0 && (m.Method == "object.declare" || m.Method == "object.forget") {
+		if p.scanService == nil {
+			return false
+		} // authenticated node role only
+		if err := p.publishObjectView(m.Method, m.Data); err != nil {
+			return false
+		}
+		return true
+	}
+	if m.Packet != nil {
+		if p.packet == nil {
+			return false
+		}
+		if !p.dispatchPacket(m.Packet, size, readyAt) {
+			return false
+		}
+		return true
+	}
+	if m.Slot == 0 && m.Method == "" && (p.receiveIO == nil || p.receiveIO.latency == 0) {
+		p.deliverReply(m)
+		return true
+	}
+	if p.packetBytes.Add(int64(size)) > 32<<20 {
+		p.packetBytes.Add(-int64(size))
+		return false
+	}
+	p.workers.Add(1)
+	go func(m mosiMessage, size int, readyAt time.Time) {
+		defer p.workers.Done()
+		defer p.packetBytes.Add(-int64(size))
+		if !p.waitDispatch(readyAt) {
+			return
+		}
+		if m.Slot != 0 {
+			defer func() {
+				if recover() != nil {
 					p.close()
-				}
-				return
-			}
-			if m.Method == "" {
-				p.deliverReply(m)
-				return
-			}
-			reply := mosiMessage{ID: m.ID}
-			func() {
-				defer func() {
-					if r := recover(); r != nil {
-						reply.Error = fmt.Sprint(r)
-					}
-				}()
-				value, err := p.handle(p.ctx, m.Method, m.Data)
-				if err != nil {
-					reply.Error = err.Error()
-					return
-				}
-				reply.Data, err = json.Marshal(value)
-				if err != nil {
-					reply.Error = err.Error()
 				}
 			}()
-			if m.ID == 0 {
-				if reply.Error != "" {
-					fmt.Println("node message rejected:", m.Method, reply.Error)
-					p.close()
-				}
-				return
-			} // fire-and-forget messages complete via their registered channel
-			if err := p.send(p.ctx, reply); err != nil {
+			if p.handleValue == nil || p.handleValue(m.Slot, m.Payload) != nil {
 				p.close()
 			}
-		}(m, len(frame), readyAt)
-	}
+			return
+		}
+		if m.Method == "" {
+			p.deliverReply(m)
+			return
+		}
+		reply := mosiMessage{ID: m.ID}
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					reply.Error = fmt.Sprint(r)
+				}
+			}()
+			value, err := p.handle(p.ctx, m.Method, m.Data)
+			if err != nil {
+				reply.Error = err.Error()
+				return
+			}
+			reply.Data, err = marshalNode(value)
+			if err != nil {
+				reply.Error = err.Error()
+			}
+		}()
+		if m.ID == 0 {
+			if reply.Error != "" {
+				fmt.Println("node message rejected:", m.Method, reply.Error)
+				p.close()
+			}
+			return
+		} // fire-and-forget messages complete via their registered channel
+		if err := p.send(p.ctx, reply); err != nil {
+			p.close()
+		}
+	}(m, size, readyAt)
+	return true
 }
 
 // Delay delivery outside the reader so propagation latency overlaps independent

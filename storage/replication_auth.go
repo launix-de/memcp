@@ -87,14 +87,14 @@ func (r *replicationManager) authenticate(user, hash string, salt, scramble []by
 	return auth, nil
 }
 
-func (r *replicationManager) handleMaster(ctx context.Context, id string, peer *mosiPeer, method string, data json.RawMessage) (any, error) {
+func (r *replicationManager) handleMaster(ctx context.Context, id string, peer *mosiPeer, method string, data []byte) (any, error) {
 	select {
 	case <-r.done:
 		return nil, fmt.Errorf(mosi.NetworkError)
 	default:
 	}
 	var req replicaRequest
-	if err := json.Unmarshal(data, &req); err != nil {
+	if err := unmarshalNode(data, &req); err != nil {
 		return nil, err
 	}
 	r.mu.Lock()
@@ -136,7 +136,7 @@ func (r *replicationManager) handleMaster(ctx context.Context, id string, peer *
 	return nil, fmt.Errorf("unknown authentication method")
 }
 
-func (r *replicationManager) handleSlave(ctx context.Context, method string, data json.RawMessage) (any, error) {
+func (r *replicationManager) handleSlave(ctx context.Context, method string, data []byte) (any, error) {
 	if method == "retire" {
 		err := r.storeConfig(replicaConfigEntry{Kind: "retired", Name: r.id, Value: true})
 		if err != nil {

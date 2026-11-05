@@ -55,7 +55,7 @@ func TestJITScanOrderPreservesAdjacentMapColumnNames(t *testing.T) {
 				(lambda (__scan_acc ID post_status post_type)
 					(resultrow (list "ID" ID "post_status" post_status "post_type" post_type)))
 				1 nil false)))`
-	proc := scm.Eval(scm.Optimize(scm.Read(t.Name(), source), &scm.Globalenv, nil), &scm.Globalenv)
+	proc := scm.Eval(scm.Optimize(scm.Read(t.Name(), source, true), &scm.Globalenv, nil), &scm.Globalenv)
 	compiled := scm.Apply(scm.Globalenv.Vars[scm.Symbol("jit")], proc)
 	if !compiled.IsProc() || compiled.Proc().Compiled == nil {
 		t.Skip("requires GOEXPERIMENT=jit")
@@ -413,7 +413,7 @@ func TestShardMapReducerBulkReadsFinalMapColumns(t *testing.T) {
 
 func TestShardMapReducerUsesDirectJITLoop(t *testing.T) {
 	source := scm.Eval(scm.Optimize(
-		scm.Read(t.Name(), `(lambda (acc value) (+ acc value))`),
+		scm.Read(t.Name(), `(lambda (acc value) (+ acc value))`, true),
 		&scm.Globalenv, nil), &scm.Globalenv)
 	compiled := scm.Apply(scm.Globalenv.Vars[scm.Symbol("jit")], source)
 	if !compiled.IsProc() || compiled.Proc().Compiled == nil {

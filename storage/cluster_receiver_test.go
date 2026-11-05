@@ -14,10 +14,7 @@ import "github.com/launix-de/memcp/scm"
 
 func deliverTestCompletion(t *testing.T, entry any, result scanCompletion) {
 	t.Helper()
-	_, err := entry.(*receiverRoute).receiver.HandleClusterRequest(context.Background(), scm.ClusterRequest{Method: "receive", Arguments: []scm.Scmer{scm.NewAny(result)}})
-	if err != nil {
-		t.Error(err)
-	}
+	entry.(*handleSlot).handler.Handle(scm.NewString(string(mustNodeMetadata(result))))
 }
 func receiveTestValue(receiver *clusterReceiver, ctx context.Context, value int64) error {
 	_, err := receiver.HandleClusterRequest(ctx, scm.ClusterRequest{Method: "receive", Arguments: []scm.Scmer{scm.NewInt(value)}})
@@ -410,15 +407,17 @@ func TestClusterReceiverFailureAdvancesFIFO(t *testing.T) {
 	}
 }
 
-func TestClusterReceiverImportedCloseCancelsBlockedSend(t *testing.T) {
+func TestClusterReceiverImportedCloseCancelsPendingReply(t *testing.T) {
 	service := &nodeScanService{}
-	peer := &mosiPeer{done: make(chan struct{}), outgoing: make(chan mosiMessage)}
+	peer := &mosiPeer{done: make(chan struct{}), outgoing: newMosiMailbox()}
 	entered := make(chan struct{})
 	value, err := scm.ReconstructClusterObject(scm.ClusterHandle{
 		Reference: scm.ClusterReference{Type: "receiver"},
 		Call: func(ctx context.Context, _ scm.ClusterRequest) (scm.Scmer, error) {
 			close(entered)
-			return scm.NewNil(), service.control(ctx, peer, "object.call", nil, nil, true)
+			// Imported receive forwards CancelWithoutJoin: Close cancels the
+			// reply wait even when an idle socket writer has not drained publication.
+			return scm.NewNil(), service.control(ctx, peer, "object.call", nil, nil, false)
 		},
 	})
 	if err != nil {
@@ -440,8 +439,25 @@ func TestClusterReceiverImportedCloseCancelsBlockedSend(t *testing.T) {
 	if err := <-delivered; err != context.Canceled {
 		t.Fatal("blocked send lost cancellation", err)
 	}
-	service.returns.Range(func(key, _ any) bool {
-		t.Error("cancelled send retained collector", key)
+	service.handles.Range(func(key, value any) bool {
+		entry := value.(*handleSlot)
+		if _, cleanup := entry.handler.(*abandonedControlHandle); !cleanup || !entry.owner.IsNil() {
+			t.Error("cancelled send retained a query collector", key)
+			return true
+		}
+		// A published request may still return. Only its state-free disposer
+		// survives cancellation, and that late completion must retire it.
+		payload, err := freezeScanValue(scm.NewString(string(mustNodeMetadata(scanCompletion{}))))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := (&scanRPCSession{service: service, peer: peer}).handleValue(key.(uint64), payload); err != nil {
+			t.Fatal(err)
+		}
+		return true
+	})
+	service.handles.Range(func(key, _ any) bool {
+		t.Error("late completion retained its cleanup slot", key)
 		return true
 	})
 }
@@ -560,7 +576,7 @@ func TestClusterReceiverRemoteDisconnectJoinsCallback(t *testing.T) {
 		t.Fatal("disconnect did not cancel remote callback state")
 	}
 	receiver.Close()
-	client.returns.Range(func(key, _ any) bool {
+	client.handles.Range(func(key, _ any) bool {
 		t.Error("disconnect retained collector", key)
 		return true
 	})

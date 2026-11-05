@@ -8,7 +8,6 @@ import "fmt"
 import "sort"
 import "strings"
 import "context"
-import "encoding/json"
 import "github.com/launix-de/memcp/storage/mosi"
 
 // Location is routing metadata in the existing MOSI resource directory. It is
@@ -287,14 +286,14 @@ func (cluster *nodeCluster) coordinate(ctx context.Context, source string, packe
 	return nil
 }
 
-func (cluster *nodeCluster) handleLocations(ctx context.Context, source, method string, data json.RawMessage) (any, error) {
+func (cluster *nodeCluster) handleLocations(ctx context.Context, source, method string, data []byte) (any, error) {
 	if err := cluster.requireMember(source); err != nil {
 		return nil, err
 	}
 	switch method {
 	case "cluster.schema_locations":
 		var request clusterSchemaLocations
-		if err := json.Unmarshal(data, &request); err != nil {
+		if err := unmarshalNode(data, &request); err != nil {
 			return nil, err
 		}
 		if request.Header.ID == "" {
@@ -308,7 +307,7 @@ func (cluster *nodeCluster) handleLocations(ctx context.Context, source, method 
 		return nil, cluster.installSchemaLocations(source, request)
 	case "cluster.location_update":
 		var entries []replicaRecord
-		if err := json.Unmarshal(data, &entries); err != nil {
+		if err := unmarshalNode(data, &entries); err != nil {
 			return nil, err
 		}
 		if len(entries) == 0 {
@@ -322,7 +321,7 @@ func (cluster *nodeCluster) handleLocations(ctx context.Context, source, method 
 		return nil, cluster.registerLocations(ctx, entries)
 	case "cluster.location":
 		var resource mosiResource
-		if err := json.Unmarshal(data, &resource); err != nil {
+		if err := unmarshalNode(data, &resource); err != nil {
 			return nil, err
 		}
 		if !resource.valid() || resource.Shard == "" || !cluster.databases[resource.Database] {

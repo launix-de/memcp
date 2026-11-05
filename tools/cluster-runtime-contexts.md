@@ -7,7 +7,7 @@
 
 ```sh
 python3 tools/replication_cluster_stress.py --binary ./memcp \
-  --cluster-context-only --artifacts /tmp/cluster-contexts --seed 20261027
+  --cluster-context-only --artifacts .artifacts/cluster-contexts --seed 20261027
 ```
 
 The runner executes the same 14 SQL cases standalone and on four authenticated
@@ -58,7 +58,7 @@ explicitly until they have a portable execution/lifetime contract.
 
 **Reconstruct captured objects.** `Serialize` emits a `cluster_object` call with
 an owner URI, process incarnation, type and independent reference token. The
-receiver resolves these calls before Optimize/Eval, preserving repeated capture
+receiver resolves these calls before Eval, preserving repeated capture
 identity. `scm.ClusterObject.HandleClusterRequest` is the shared endpoint contract
 for sessions, cachemaps, transactions, transaction-shard visibility views,
 physical generations and catalog objects. Serialization does not switch on their
@@ -108,18 +108,18 @@ before permission publication. A data resource also waits for a preceding schema
 publication introducing its namespace. These waits belong to workers, never the
 reader. Independent shards and databases remain parallel. Pending packet bytes
 are bounded. Requests and replies are fire-and-forget envelopes; the outer
-operation collects replies using registered UUID channels. Panics, including SQL
+operation collects needed replies through the ordinary numeric handle registry. Panics, including SQL
 errors and their originating stack, cross this same channel. Cancellation fences
 shard tasks and propagates through nested invocations, without row-loop probes.
 
-The owner registry pins native objects from serialization through a pending
-transfer reservation. Import joins a shared peer lease before dropping that
-reservation. The peer's weak directory deduplicates endpoints by owner,
-incarnation and URI. Concurrent subscans retain that shared Go object; their
-immutable session views and native TX participants stay query-local. There is no
-per-use distributed reference count. Each new Go lifetime has a fresh lease ID,
-so a delayed old GC release cannot revoke its replacement. Repeated imports of
-one offer preserve value identity through a second weak directory.
+The owner registry pregrants independent lifetime tokens before sending a
+reference. Queue publication commits them; import needs no acquisition request
+or confirmation. Duplicate imports of one token share one weakly indexed Go
+lifetime. Immutable native factory state may be shared by endpoint identity;
+invocation views and TX executors remain separate. GC queues a one-way release.
+Encoding failure withdraws only unsent grants; recipients explicitly discard
+unused grants. Disconnect cannot prove non-delivery and does not revoke grants.
+A delayed old release cannot remove a newer token or change MOSI permissions.
 
 `Serialize` constructors carry envelope-local capture IDs. `UnmarshalProcedure`
 MUST construct those captures exactly once on the receiving peer, restore the
@@ -171,7 +171,9 @@ copy deletion masks. Unbounded grouped-result streaming and specialized physical
 RecSet/merge-state transport are not implemented by this change and continue to
 fail explicitly.
 
-The message channel has one UUID collector protocol for calls and scan tasks.
+Administrative calls, scan results and runtime callbacks share numeric
+fire-and-forget handle slots (see protocol 17 below). Needed results use an
+explicit return handle; publication and GC notifications have no return path.
 There is no separate scan-task envelope or cluster execution switch: the
 recipient resolves the database handler, which checks membership for shared
 sources, reconstructs the request once and acquires its generation once. The
@@ -250,3 +252,100 @@ claim a general wire contract for those runtime containers.
 None of these paths adds reader registration, row-loop cancellation probes,
 shared-memory admission writes or another reader/writer gate. INVARIANTS.md is
 unchanged.
+
+## Node codec and worker closures (protocol 17)
+
+The WebSocket subprotocol is `memcp.mosi.v5`. A frame addresses a numeric handle
+slot, a reserved endpoint, a reply slot, or MOSI, followed by that recipient's
+payload. Handle deliveries contain only the slot and raw Scheme reconstruction
+text after the version/address prefix. There is no JSON envelope, Scmer type,
+operation UUID, or per-call token around a callback. Handle constructors contain
+only the slot; the authenticated receiving connection supplies peer/incarnation
+identity. Re-exporting to a third peer registers an invocation-owned forwarding slot. The legacy RPC endpoint
+interprets its own binary payload containing a return slot, method and arguments.
+Control structs and live-handover metadata use binary integers/lengths/bytes;
+native column chunks keep their existing storage encoding. Persisted schemas,
+WAL and column formats are unchanged. Scheme values and lambda bodies remain
+text, not a new binary Scmer format. Incompatible protocol versions are rejected.
+
+Received procedures materialize their captures, bind the current worker's native
+execution scope and JIT locally before entering the shard loop. The sender's
+plan is already optimized; received procedures, values and immutable capture
+sources are reconstructed without another optimizer pass. Textual `(var n)`
+operands retain the sender's numbered parameter slots and are decoded alongside
+runtime references; transport does not rename them back into symbol lookups. The JIT
+also binds symbolic variadic parameters directly. Scan-context binding
+and capture resolution copy only changed AST ancestors. A pure code factory
+is reused through the existing budgeted cachemap. Capture-free procedures reuse
+the compiled callable directly, without constructing a factory invocation. Runtime functions, native
+objects, dictionaries and execution contexts are factory arguments; every
+bound closure owns its invocation's captures. TX executors and bound closures
+are never retained in the code cache. GC and overlapping-binding regressions
+check this separation.
+Parsing network text omits source-location objects and skips complete string
+spans with byte searches; normal module/error parsing retains source positions. Native builtin names come from `DeclarationForValue`. Arithmetic
+and other declared builtins execute locally without callback handles.
+
+Repeated captures within one message use constructor IDs instead of repeating
+their bodies. Large plain immutable dictionaries (at least 256 entries, with
+snapshot source no larger than 48 KiB) additionally use the existing registered
+object/grant protocol. A statement freezes one source snapshot. The sender
+pushes its immutable constructor once per peer stream before publishing tasks
+which reference it. Reader-side publication installs opaque bytes before later
+tasks are admitted; it does not parse or execute Scheme. Sender knowledge is
+updated only after enqueue. Declaration admission is bounded to 64 entries /
+128 KiB per stream; other views travel inline. Owner retirement queues forget
+after the last grant is gone. Concurrent imports share one reconstructed
+read-only dictionary through native weak factory state.
+Other captures keep their ordinary reconstruction path. A weak cache and
+`runtime.AddCleanup` retain the lease exactly while the dictionary is reachable;
+the cleanup argument never points back to that dictionary. In-progress loads
+publish through a completion channel, with no registry/publication mutex held
+during reconstruction or network I/O. Import does not fetch a source from its owner. This is capture sharing, not permission
+to share a mutable transaction/query executor or grant a shard MOSI right.
+
+Output-only closures batch 64 argument tuples and admit up to four outstanding
+batches per invocation. Dispatch does not wait for a callback result. Closure relays substitute their
+own one-shot receivers and forward replies asynchronously, retiring return slots
+on each reply rather than retaining one forwarding slot per batch until EOF. A separate
+one-shot numeric return handle releases credits and wakes waiting producers;
+cleanup joins every accepted callback. Imperative sink calls serialize by FIFO
+admission outside publication locks. Cancellation stops further production;
+already accepted callbacks retain their owner until completion. Return delivery
+is independent of a cancelled query context; connection loss fails retained
+return receivers. The socket reader/writer queues never wait for those callbacks.
+Bulk transfer workers admit their own bytes before publishing, leaving control
+and completion capacity available. Network buffers and invocation windows remain
+bounded. Ordered-scan prefetch/refill and merge semantics are retained.
+
+Callback/return slots and object grant addresses use counters, not per-call
+UUIDs. A return address includes its authenticated stream namespace. Fixed-width
+slot spelling preserves the replay registry's ordering across numeric boundaries;
+return packets carry only the numeric slot and payload. One-shot control returns
+use the common `ResultReceiver`, without a second FIFO delivery queue. Duplicate
+returns cannot revoke grants belonging to the first accepted result. Cancellation may abandon
+a local wait, but a late-result disposer remains until completion/disconnect and
+retains no query state. Shard, transaction and node identities keep their own
+contracts.
+
+## Performance diagnosis and simulation precision
+
+Incoming native scan code reuses compiled factories, and pure procedures reuse
+compiled callables directly. Join-key comparisons bind projected column positions
+once during physical operator preparation and compare existing values directly.
+The native joined-aggregate control suite has its own performance shard so its
+full seven fresh A/B fixture pairs fit the existing job deadline. Query counts,
+fixtures, assertions, warmup, timing aggregation and budgets are unchanged.
+
+Linux Go netpoll rounds idle sub-millisecond timers up to one millisecond. Faster
+workers consequently encountered longer simulated waits despite less CPU and
+traffic. Short configured I/O deadlines now use a monotonic kernel timer which
+wakes the Go poller without spinning. Cancellation closes the owned timer file;
+ordinary timers remain the fallback and serve longer deadlines. Bandwidth,
+latency, shared-node accounting and query time limits retain their values.
+Matched-model codec A/B measurements apply this same timing implementation to
+both binaries; unthrottled measurements diagnose actual execution costs.
+
+Opaque immutable declarations own their retained bytes, keeping their admission
+budget independent of receive-buffer size. Every socket frame contains one
+recipient and its payload. Scheme values and lambda bodies retain text encoding.

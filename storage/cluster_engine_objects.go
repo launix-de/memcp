@@ -6,7 +6,6 @@ package storage
 
 import "fmt"
 import "strings"
-import "encoding/json"
 import "sync"
 import "sort"
 import "time"
@@ -525,13 +524,7 @@ func registerTransactionState(state *transactionState) *transactionState {
 
 func init() {
 	scm.ClusterObjectResolver = resolveRuntimeClusterObject
-	scm.HandleResolver = func(owner, boot string, slot uint64) (scm.Handle, error) {
-		service := nodeScans.Load()
-		if service == nil {
-			return nil, fmt.Errorf("cluster protocol is disabled")
-		}
-		return service.handleResolver(context.Background(), scm.NewNil())(owner, boot, slot)
-	}
+
 	scm.RegisterClusterObjectType("tx-shard", func(handle scm.ClusterHandle) scm.Scmer {
 		view := handle.View.Slice()
 		if len(view) != 3 {
@@ -574,8 +567,7 @@ func (tx *TxContext) Serialize(ctx *scm.SerializationContext) (scm.Scmer, error)
 
 func (tx *transactionState) Serialize(ctx *scm.SerializationContext) (scm.Scmer, error) {
 	if tx.coordinator != nil {
-		data, err := json.Marshal(tx.coordinator.Reference)
-		return scm.NewSlice([]scm.Scmer{scm.NewSymbol("cluster_object"), scm.NewString(string(data))}), err
+		return scm.ClusterReferenceExpression(tx.coordinator.Reference), nil
 	}
 	return ctx.ReferenceExpression(tx)
 }
@@ -628,10 +620,7 @@ func (service *nodeScanService) importTransactionRoot(ctx context.Context, peer 
 	if peer.objectPeer.ID != ref.Owner || peer.objectPeer.Boot != ref.Incarnation {
 		return scm.NewNil(), fmt.Errorf("foreign transaction root")
 	}
-	var frozen schemeValue
-	if err := json.Unmarshal(ref.View, &frozen); err != nil {
-		return scm.NewNil(), err
-	}
+	frozen := schemeValue(ref.View)
 	view, err := frozen.reconstruct(scm.ProcedureDecode{})
 	if err != nil {
 		return scm.NewNil(), err

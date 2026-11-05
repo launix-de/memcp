@@ -66,8 +66,8 @@ func Simplify(s string) Scmer {
 	return NewString(s)
 }
 
-func Read(source, s string) (expression Scmer) {
-	tokens := tokenize(source, s)
+func Read(source, s string, sourceInfo bool) (expression Scmer) {
+	tokens := tokenize(source, s, sourceInfo)
 	return readFrom(&tokens)
 }
 
@@ -84,7 +84,7 @@ func EvalAllJIT(source, s string, en *Env) (expression Scmer) {
 }
 
 func evalAll(source, s string, en *Env, compileProcedures bool) (expression Scmer) {
-	tokens := tokenize(source, s)
+	tokens := tokenize(source, s, true)
 	deferredProcs := make(map[Symbol]struct{})
 	for len(tokens) > 0 {
 		code := readFrom(&tokens)
@@ -213,14 +213,18 @@ func readFrom(tokens *[]Scmer) (expression Scmer) {
 	// pop first element from tokens
 	token := (*tokens)[0]
 	*tokens = (*tokens)[1:]
-	if token.IsSourceInfo() {
+	located := token.IsSourceInfo()
+	if located {
 		source_info = *token.SourceInfo()
 		token = source_info.value
 	}
 	if token.IsSymbol() {
 		sym := token.String()
 		if sym == "(" {
-			L := make([]Scmer, 0)
+			var L []Scmer
+			if len(*tokens) > 0 && !scmerIsSymbol((*tokens)[0], ")") {
+				L = make([]Scmer, 0, 4)
+			}
 			for {
 				if len(*tokens) == 0 {
 					panic(source_info.String() + ": expecting matching )")
@@ -228,7 +232,11 @@ func readFrom(tokens *[]Scmer) (expression Scmer) {
 				next := (*tokens)[0]
 				if next.IsSymbol() && next.String() == ")" {
 					*tokens = (*tokens)[1:]
-					source_info.value = NewSlice(L)
+					value := NewSlice(L)
+					if !located {
+						return value
+					}
+					source_info.value = value
 					return NewSourceInfo(source_info)
 				}
 				L = append(L, readFrom(tokens))
@@ -296,7 +304,7 @@ func parseNumberToken(text string) Scmer {
 	return NewSymbol("NaN")
 }
 
-func tokenize(source, s string) []Scmer {
+func tokenize(source, s string, sourceInfo bool) []Scmer {
 	/* tokenizer state machine:
 		0 = expecting next item
 		1 = inside Number
@@ -318,13 +326,14 @@ func tokenize(source, s string) []Scmer {
 
 	state := 0
 	startToken := 0
-	result := make([]Scmer, 0)
-	for i, ch := range s {
+	result := make([]Scmer, 0, min(128, len(s)/4))
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
 		// line counting
-		if ch == '\n' {
+		if sourceInfo && ch == '\n' {
 			line++
 			col = 1
-		} else {
+		} else if sourceInfo && ch&0xc0 != 0x80 {
 			col++
 		}
 
@@ -359,7 +368,11 @@ func tokenize(source, s string) []Scmer {
 			state = 3 // continue with string
 		} else if state == 3 && ch == '"' {
 			// finish string
-			result = append(result, NewString(schemeStringUnescaper.Replace(string(s[startToken+1:i]))))
+			text := s[startToken+1 : i]
+			if strings.IndexByte(text, '\\') >= 0 {
+				text = schemeStringUnescaper.Replace(text)
+			}
+			result = append(result, NewString(text))
 			state = 0
 		} else {
 			// otherwise: state change!
@@ -374,7 +387,11 @@ func tokenize(source, s string) []Scmer {
 			// now detect what to parse next
 			startToken = i
 			if ch == '(' {
-				result = append(result, NewSourceInfo(SourceInfo{source: source, line: line, col: col, value: NewSymbol("(")}))
+				token := NewSymbol("(")
+				if sourceInfo {
+					token = NewSourceInfo(SourceInfo{source: source, line: line, col: col, value: token})
+				}
+				result = append(result, token)
 				state = 0
 			} else if ch == ')' {
 				result = append(result, NewSymbol(")"))
@@ -383,7 +400,36 @@ func tokenize(source, s string) []Scmer {
 				result = append(result, NewSymbol("'"))
 				state = 0
 			} else if ch == '"' {
-				// start string
+				// Wire values need no source positions. Skip complete string spans
+				// with the standard byte search instead of running the token state
+				// machine once per payload byte (including binary metadata).
+				if !sourceInfo {
+					end := i + 1
+					escaped := false
+					for {
+						offset := strings.IndexAny(s[end:], "\"\\")
+						if offset < 0 {
+							return result // preserve incomplete-string token semantics
+						}
+						end += offset
+						if s[end] == '"' {
+							break
+						}
+						escaped = true
+						end += 2
+						if end > len(s) {
+							return result
+						}
+					}
+					text := s[i+1 : end]
+					if escaped {
+						text = schemeStringUnescaper.Replace(text)
+					}
+					result = append(result, NewString(text))
+					i, state = end, 0
+					continue
+				}
+				// start string with source-position tracking
 				state = 3
 			} else if ch >= '0' && ch <= '9' || ch == '-' {
 				// start Number

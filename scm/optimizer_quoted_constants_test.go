@@ -25,7 +25,7 @@ func TestExpressionSyntaxPreservesLiteralTypes(t *testing.T) {
 			t.Fatalf("literal %q became syntax: %v", word, got)
 		}
 	}
-	expr := Read(t.Name(), `(lambda (x) (list "lambda" x))`)
+	expr := Read(t.Name(), `(lambda (x) (list "lambda" x))`, true)
 	got := ExpressionSyntax(expr)
 	if !got.IsSlice() || !got.Slice()[0].SymbolEquals("lambda") {
 		t.Fatalf("reader special form was not normalized: %v", got)
@@ -40,7 +40,7 @@ func TestFoldedReaderResultRemainsExpressionData(t *testing.T) {
 		`(scheme "(lambda (x) (+ x 1))")`,
 		`(scheme "(error \"must remain data\")")`,
 	} {
-		expr := Read(t.Name(), source)
+		expr := Read(t.Name(), source, true)
 		want := Eval(expr, &Globalenv)
 		got := Eval(Optimize(expr, &Globalenv, nil), &Globalenv)
 		if !astStructuralEqual(got, want) || got.WithoutSourceInfo().IsProc() {
@@ -51,14 +51,14 @@ func TestFoldedReaderResultRemainsExpressionData(t *testing.T) {
 
 func TestOptimizeQuoteIsBorrowedPassthrough(t *testing.T) {
 	ome := newOptimizerMetainfo()
-	optimized, resultType := OptimizeEx(Read("test", "(quote ((1 2) (3 4)))"), &Globalenv, &ome, true)
+	optimized, resultType := OptimizeEx(Read("test", "(quote ((1 2) (3 4)))", true), &Globalenv, &ome, true)
 	if resultType.Const() {
 		t.Fatal("source-level quote must remain an optimizer barrier")
 	}
 	if resultType.Transfer() {
 		t.Fatal("quoted list must not transfer ownership")
 	}
-	want := Eval(Read("test", "(quote ((1 2) (3 4)))"), &Globalenv)
+	want := Eval(Read("test", "(quote ((1 2) (3 4)))", true), &Globalenv)
 	if got := Eval(optimized, &Globalenv); !Equal(got, want) {
 		t.Fatalf("optimized quote evaluated to %s", String(got))
 	}
@@ -116,7 +116,7 @@ func TestWrapEmbeddedConstantListDoesNotAddQuotes(t *testing.T) {
 
 func TestOptimizeSmallConstantListKeepsFreshOwnership(t *testing.T) {
 	ome := newOptimizerMetainfo()
-	optimized, resultType := OptimizeEx(Read("test", "(list 1 2)"), &Globalenv, &ome, true)
+	optimized, resultType := OptimizeEx(Read("test", "(list 1 2)", true), &Globalenv, &ome, true)
 	items, ok := scmerSlice(optimized)
 	if !ok || len(items) != 3 || !scmerIsSymbol(items[0], "list") {
 		t.Fatalf("small constant list = %s; want list constructor", String(optimized))
@@ -127,7 +127,7 @@ func TestOptimizeSmallConstantListKeepsFreshOwnership(t *testing.T) {
 }
 
 func TestOptimizeDoesNotFoldMutatingCallOnQuotedList(t *testing.T) {
-	expr := Read("test", "(nth_mut (quote (1 2)) 0 9)")
+	expr := Read("test", "(nth_mut (quote (1 2)) 0 9)", true)
 	exprItems, _ := scmerSlice(expr)
 	literal := Eval(exprItems[1], &Globalenv)
 	literal, _ = scmerStripSourceInfo(literal)

@@ -297,8 +297,8 @@ func TestLookupComputeTriggersInvalidateMatchingRows(t *testing.T) {
 			'("ref_id") (lambda (source_ref_id) (equal? source_ref_id (outer 1 ref_id)))
 			'("val") (lambda (acc val) val)
 			0 (lambda (old value) value) false))`
-	rawComputor := scm.Eval(scm.Read("raw lookup trigger test", computorSource), &scm.Globalenv)
-	compiledComputor := scm.Eval(scm.Optimize(scm.Read("compiled lookup trigger test", computorSource), &scm.Globalenv, nil), &scm.Globalenv)
+	rawComputor := scm.Eval(scm.Read("raw lookup trigger test", computorSource, true), &scm.Globalenv)
+	compiledComputor := scm.Eval(scm.Optimize(scm.Read("compiled lookup trigger test", computorSource, true), &scm.Globalenv, nil), &scm.Globalenv)
 	for variant, computor := range map[string]scm.Scmer{"raw": rawComputor, "compiled": compiledComputor} {
 		refs := extractScanJoinInfo(computor)
 		if len(refs) != 1 || len(refs[0].srcCols) != 1 || refs[0].srcCols[0] != "ref_id" || refs[0].inputCols[0] != "ref_id" {
@@ -343,7 +343,7 @@ func TestQualifiedLookupComputeTriggerUsesPhysicalTargetColumn(t *testing.T) {
 			'("ref_id") (lambda (source_ref_id) (equal? source_ref_id (outer 1 base.ref_id)))
 			'("val") (lambda (acc val) val)
 			0 (lambda (old value) value) false))`
-	computor := scm.Read(t.Name(), computorSource)
+	computor := scm.Read(t.Name(), computorSource, true)
 	refs := extractScanJoinInfo(computor)
 	if len(refs) != 1 || len(refs[0].srcCols) != 1 || refs[0].srcCols[0] != "ref_id" {
 		t.Fatalf("lookup relation not extracted: %#v", refs)
@@ -371,7 +371,7 @@ func TestExtractScanJoinInfoUsesCompiledAccessWhenResidualIsEmpty(t *testing.T) 
 			'() (lambda () true)
 			'("value") (lambda (acc value) value)
 			nil nil false))`
-	computor := scm.Read(t.Name(), source)
+	computor := scm.Read(t.Name(), source, true)
 	root := stripSourceInfo(computor).Slice()
 	scan := stripSourceInfo(root[2]).Slice()
 	schema := scm.NewSlice([]scm.Scmer{
@@ -396,7 +396,7 @@ func TestExplicitReadDependenciesSurvivePrunedFilters(t *testing.T) {
 						'() (list ref_id 1)
 						'() (lambda () true)
 						'("value") (lambda (acc value) value)
-						nil nil false))`)
+						nil nil false))`, true)
 				root := stripSourceInfo(computor).Slice()
 				scan := stripSourceInfo(root[2]).Slice()
 				readColumns := scm.NewSlice([]scm.Scmer{scm.NewString("source_ref"), scm.NewString("allowed"), scm.NewString("priority"), scm.NewString("weight")})
@@ -406,8 +406,8 @@ func TestExplicitReadDependenciesSurvivePrunedFilters(t *testing.T) {
 				})
 				scan[3] = scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), schema})
 				if residual {
-					scan[5] = scm.Read(t.Name(), `'("source_ref")`)
-					scan[6] = scm.Read(t.Name(), `(lambda (source_ref) (equal? source_ref (outer 1 ref_id)))`)
+					scan[5] = scm.Read(t.Name(), `'("source_ref")`, true)
+					scan[6] = scm.Read(t.Name(), `(lambda (source_ref) (equal? source_ref (outer 1 ref_id)))`, true)
 				}
 				if dynamicValues {
 					scan[4] = scm.NewSymbol("runtime_values")
@@ -563,7 +563,7 @@ func TestRestoredComputeDependencyTriggersRefreshGuards(t *testing.T) {
 					t.Fatalf("restored trigger kept obsolete dependency guard, missing %s:\n%s", want, plan)
 				}
 			}
-			parsedBody := stripSourceInfo(scm.Read(t.Name(), plan)).Slice()
+			parsedBody := stripSourceInfo(scm.Read(t.Name(), plan, true)).Slice()
 			guard := scm.Eval(lambdaAst([]string{"OLD", "NEW"}, parsedBody[1]), &scm.Globalenv)
 			oldRow := src.rowToDict(dataset{scm.NewInt(7), scm.NewInt(10), scm.NewInt(1)})
 			newRow := src.rowToDict(dataset{scm.NewInt(7), scm.NewInt(10), scm.NewInt(0)})

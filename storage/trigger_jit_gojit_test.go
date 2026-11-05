@@ -80,7 +80,7 @@ func TestLazyTriggerPlanIsOptimizedBeforeJIT(t *testing.T) {
 				(set changed_rows (set_assoc changed_rows "name" "always"))
 				(if (> (get_assoc NEW "value") 100)
 					(set changed_rows (set_assoc changed_rows "value" 100)) nil))
-			changed_rows))`),
+			changed_rows))`, true),
 		Language: "sql",
 	}
 	compileTriggerForUse("test", "items", &trigger)

@@ -26,7 +26,7 @@ func TestKleeneParserWithoutMemoization(t *testing.T) {
 	parserValue := Eval(Read("no-memo parser", `(parser '(
 		(define values (* (regex "[0-9]+" false false) "," true))
 		$
-	) values "")`), &Globalenv)
+	) values "")`, true), &Globalenv)
 	parser := parserValue.Parser()
 
 	if got := parser.Execute("1,2,3", &Globalenv); String(got) != `(1 2 3)` {
@@ -46,7 +46,7 @@ func TestInterpreterAccumulateRepeat(t *testing.T) {
 			(lambda (a x) (append_mut a x))
 			(lambda (a) a)))
 		$
-	) v "")`), &Globalenv).Parser()
+	) v "")`, true), &Globalenv).Parser()
 	if got := acc.Execute("a,b,c", &Globalenv); String(got) != "(head a b c)" {
 		t.Fatalf("accumulate = %s, want (head a b c)", String(got))
 	}
@@ -58,7 +58,7 @@ func TestInterpreterAccumulateRepeat(t *testing.T) {
 			(lambda (a x) (append_mut a x))
 			(lambda (a) (if (equal? (count a) 1) (nth a 0) (cons (quote andop) a)))))
 		$
-	) b "")`), &Globalenv).Parser()
+	) b "")`, true), &Globalenv).Parser()
 	if got := cascade.Execute("p+q+r", &Globalenv); String(got) != "(andop p q r)" {
 		t.Fatalf("cascade multi = %s, want (andop p q r)", String(got))
 	}
@@ -73,7 +73,7 @@ func TestSharedParserConcurrentCaptures(t *testing.T) {
 			(regex "value-[0-9]+" false false)
 			(regex "word-[a-z]+" false false)))
 		$
-	) value "")`), &Globalenv)
+	) value "")`, true), &Globalenv)
 	parser := parserValue.Parser()
 
 	const workers = 64
@@ -108,7 +108,7 @@ func benchmarkCaptureParser(b *testing.B) *ScmParser {
 	return Eval(Read("parser benchmark", `(parser '(
 		(define values (* (regex "[a-z]+" false false) "," true))
 		$
-	) values "")`), &Globalenv).Parser()
+	) values "")`, true), &Globalenv).Parser()
 }
 
 func BenchmarkSharedParserSequential(b *testing.B) {

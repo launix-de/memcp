@@ -441,8 +441,8 @@ func TestPruneScanResidualKeepsSecondRangeColumn(t *testing.T) {
 }
 
 func TestCompileScanAccessKeepsPointProbeWithDuplicatePredicate(t *testing.T) {
-	columns := scm.Read(t.Name(), `(list "id")`)
-	filter := scm.Read(t.Name(), `(lambda (id) (and (equal?? id wanted) (equal?? id wanted)))`)
+	columns := scm.Read(t.Name(), `(list "id")`, true)
+	filter := scm.Read(t.Name(), `(lambda (id) (and (equal?? id wanted) (equal?? id wanted)))`, true)
 	schema, bindings, compiled := compileScanAccess(columns, filter)
 	if !compiled || len(bindings) != 1 {
 		t.Fatalf("duplicate equality compiled=%v bindings=%d", compiled, len(bindings))
@@ -454,8 +454,8 @@ func TestCompileScanAccessKeepsPointProbeWithDuplicatePredicate(t *testing.T) {
 }
 
 func TestPruneScanResidualKeepsConflictingDuplicatePredicate(t *testing.T) {
-	columns := scm.Read(t.Name(), `(list "id")`)
-	filter := scm.Read(t.Name(), `(lambda (id) (and (equal?? id 1) (equal?? id 2)))`)
+	columns := scm.Read(t.Name(), `(list "id")`, true)
+	filter := scm.Read(t.Name(), `(lambda (id) (and (equal?? id 1) (equal?? id 2)))`, true)
 	residualColumns, residualFilter := pruneScanResidual(columns, filter, false)
 	columnItems, ok := scanStaticColumns(residualColumns)
 	if !ok || len(columnItems) != 1 || columnItems[0].String() != "id" {
@@ -488,7 +488,7 @@ func TestScanAccessNullProbeIsImpossibleWithoutTreatingNilCheckAsImpossible(t *t
 	nullSafeCall := scm.Read(t.Name(), `(scan nil table_value
 		'(369435906932736) '()
 		(list "id") (lambda (id) (equal?? id wanted_id))
-		(list "id") (lambda (acc id) id) nil nil false)`)
+		(list "id") (lambda (acc id) id) nil nil false)`, true)
 	nullSafeItems, ok := scmerSlice(nullSafeCall)
 	if !ok {
 		t.Fatal("failed to parse null-safe scan")
@@ -518,7 +518,7 @@ func TestCompileScanAccessAcceptsParsedSourceInfo(t *testing.T) {
 	call := scm.Read(t.Name(), `(scan nil table_value
 		'(369435906932736) '()
 		(list "id") (lambda (id) (equal?? id wanted_id))
-		(list "id") (lambda (acc id) id) nil nil false)`)
+		(list "id") (lambda (acc id) id) nil nil false)`, true)
 	items, ok := scmerSlice(call)
 	if !ok || len(items) < 5 {
 		t.Fatalf("unexpected parsed scan expression: %s", scm.SerializeToString(call, &scm.Globalenv))

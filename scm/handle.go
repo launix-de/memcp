@@ -28,6 +28,7 @@ type ResultReceiver struct {
 	value    Scmer
 	closed   bool
 	releases []func()
+	onResult func(Scmer) // installed before publication; wakes an admitted worker
 }
 
 func NewResultReceiver() *ResultReceiver { return &ResultReceiver{done: make(chan struct{})} }
@@ -42,7 +43,12 @@ func (receiver *ResultReceiver) Handle(value Scmer) {
 	releases := receiver.releases
 	receiver.releases = nil
 	close(receiver.done)
+	notify := receiver.onResult
+	receiver.onResult = nil
 	receiver.mu.Unlock()
+	if notify != nil {
+		notify(value)
+	}
 	for _, release := range releases {
 		release()
 	}
@@ -57,8 +63,12 @@ func (receiver *ResultReceiver) RetainHandleRelease(release func()) {
 	receiver.mu.Unlock()
 	release()
 }
-func (receiver *ResultReceiver) Close()      { receiver.Handle(NewNil()) }
-func (receiver *ResultReceiver) Wait() Scmer { return receiver.WaitContext(context.Background()) }
+func (receiver *ResultReceiver) Fail(err error) { receiver.Handle(NewAny(&handleFailure{err.Error()})) }
+func (receiver *ResultReceiver) Close()         { receiver.Handle(NewNil()) }
+
+// Done exposes readiness without running a callback or consuming the value.
+func (receiver *ResultReceiver) Done() <-chan struct{} { return receiver.done }
+func (receiver *ResultReceiver) Wait() Scmer           { return receiver.WaitContext(context.Background()) }
 func (receiver *ResultReceiver) WaitContext(ctx context.Context) Scmer {
 	defer receiver.Close()
 	select {
@@ -140,19 +150,10 @@ func (bindings *SerializationContext) InvocationScope() Scmer {
 	return bindings.Invocation
 }
 
-var HandleResolver func(string, string, uint64) (Handle, error)
-
 func initHandles() {
-	Declare(&Globalenv, &Declaration{Name: "cluster_handle", Fn: func(args ...Scmer) Scmer {
-		if HandleResolver == nil {
-			panic("handle resolver is unavailable")
-		}
-		handle, err := HandleResolver(args[0].String(), args[1].String(), uint64(args[2].Int()))
-		if err != nil {
-			panic(err)
-		}
-		return NewAny(handle)
-	}, Type: &TypeDescriptor{Kind: "func", HasSideEffects: true, Params: []*TypeDescriptor{{Kind: "string"}, {Kind: "string"}, {Kind: "int"}}, Return: &TypeDescriptor{Kind: "any"}}})
+	Declare(&Globalenv, &Declaration{Name: "cluster_handle", Fn: func(...Scmer) Scmer {
+		panic("handle requires a peer reconstruction context")
+	}, Type: &TypeDescriptor{Kind: "func", HasSideEffects: true, Params: []*TypeDescriptor{{Kind: "int"}}, Return: &TypeDescriptor{Kind: "any"}}})
 	Declare(&Globalenv, &Declaration{Name: "handle_failure", Fn: func(args ...Scmer) Scmer { return NewAny(&handleFailure{args[0].String()}) }, Type: &TypeDescriptor{Kind: "func", Params: []*TypeDescriptor{{Kind: "string"}}, Return: &TypeDescriptor{Kind: "any"}}})
 	Declare(&Globalenv, &Declaration{Name: "remote_closure", Fn: func(args ...Scmer) Scmer {
 		callback := &clusterCallback{endpoint: args[1].Any().(Handle), ctx: context.Background()}

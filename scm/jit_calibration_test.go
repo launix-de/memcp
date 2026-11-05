@@ -167,7 +167,7 @@ func TestJITExpressionCostUsesDeclarationMetadata(t *testing.T) {
 }
 
 func TestJITExpressionCostDoesNotInterpretQuotedData(t *testing.T) {
-	quoted := Read("jit calibration quoted data", `(quote ((+ 1 2) (> 3 2)))`)
+	quoted := Read("jit calibration quoted data", `(quote ((+ 1 2) (> 3 2)))`, true)
 	for quoted.GetTag() == tagSourceInfo {
 		quoted = quoted.SourceInfo().value
 	}

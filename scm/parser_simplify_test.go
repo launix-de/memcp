@@ -18,6 +18,7 @@ package scm
 
 import (
 	"math"
+	"strings"
 	"testing"
 )
 
@@ -130,7 +131,7 @@ func TestReadIntegerLiterals(t *testing.T) {
 	} {
 		// Exercise both end-of-input and delimiter-terminated tokens.
 		for _, suffix := range []string{"", " "} {
-			value := Read(t.Name(), test.input+suffix)
+			value := Read(t.Name(), test.input+suffix, true)
 			if !value.IsInt() || value.Int() != test.want {
 				t.Fatalf("Read(%q) = %v (tag %d), want integer %d", test.input+suffix, value, value.GetTag(), test.want)
 			}
@@ -141,7 +142,7 @@ func TestReadIntegerLiterals(t *testing.T) {
 func TestReadFloatAndOperatorTokens(t *testing.T) {
 	for _, input := range []string{"1.0", "-0.0", "12.5", "9223372036854775808", "-9223372036854775809"} {
 		for _, suffix := range []string{"", " "} {
-			value := Read(t.Name(), input+suffix)
+			value := Read(t.Name(), input+suffix, true)
 			if !value.IsFloat() {
 				t.Fatalf("Read(%q) tag = %d, want float", input+suffix, value.GetTag())
 			}
@@ -152,7 +153,7 @@ func TestReadFloatAndOperatorTokens(t *testing.T) {
 	}
 	for _, test := range []struct{ input, want string }{{"-", "-"}, {"1.2.3", "NaN"}} {
 		for _, suffix := range []string{"", " "} {
-			value := Read(t.Name(), test.input+suffix)
+			value := Read(t.Name(), test.input+suffix, true)
 			if !value.IsSymbol() || value.Symbol() != Symbol(test.want) {
 				t.Fatalf("Read(%q) = %v, want symbol %s", test.input+suffix, value, test.want)
 			}
@@ -162,7 +163,7 @@ func TestReadFloatAndOperatorTokens(t *testing.T) {
 
 func TestReadIntegerConstantFolding(t *testing.T) {
 	for _, input := range []string{"(+ 9007199254740992 1)", "(intdiv 9007199254740993 1)"} {
-		value := Optimize(Read(t.Name(), input), &Globalenv, nil)
+		value := Optimize(Read(t.Name(), input, true), &Globalenv, nil)
 		if !value.IsInt() || value.Int() != 9007199254740993 {
 			t.Fatalf("Optimize(%s) = %v, want exact integer", input, value)
 		}
@@ -269,8 +270,128 @@ func BenchmarkTokenizeNumbers(b *testing.B) {
 		b.Run(test.name, func(b *testing.B) {
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
-				numberTokenBenchmarkSink = tokenize("benchmark", test.input)
+				numberTokenBenchmarkSink = tokenize("benchmark", test.input, true)
 			}
 		})
 	}
+}
+
+func TestReadWithoutSourceInfo(t *testing.T) {
+	for _, source := range []string{
+		`(lambda (ä) (list ä "日本語" "a\nb\\c\"" -2.5e-7 '(x (y))))`,
+		`/* comment */ (begin (+ 17 25) '(lambda (x) x))`,
+	} {
+		located, plain := Read(t.Name(), source, true), Read(t.Name(), source, false)
+		var check func(Scmer)
+		check = func(v Scmer) {
+			if v.IsSourceInfo() {
+				t.Fatal("source wrapper in unlocated tree")
+			}
+			if v.IsSlice() {
+				for _, child := range v.Slice() {
+					check(child)
+				}
+			}
+		}
+		check(plain)
+		if String(located) != String(plain) {
+			t.Fatalf("parse changed: %s / %s", String(located), String(plain))
+		}
+	}
+	value := Read(t.Name(), "(list \"ä\" (list 1))", true)
+	inner := value.SourceInfo().value.Slice()[2].SourceInfo()
+	if inner.line != 1 || inner.col != 11 {
+		t.Fatalf("Unicode source location: %v", inner)
+	}
+	for _, located := range []bool{false, true} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Error("unclosed list accepted")
+				}
+			}()
+			Read(t.Name(), "(list 1", located)
+		}()
+	}
+}
+
+func TestWireStringSpansMatchLocatedTokens(t *testing.T) {
+	binary := make([]byte, 256)
+	for i := range binary {
+		binary[i] = byte(i)
+	}
+	for _, payload := range []string{"", "plain", string(binary), strings.Repeat(string(binary), 16), `a\"b\\c`, "日本語\n\r"} {
+		wire := SerializeToString(NewString(payload), &Globalenv)
+		for _, source := range []string{wire, `(list ` + wire + ` "tail")`, wire + ` "unfinished\`, wire + ` "unfinished`} {
+			plain, located := tokenize(t.Name(), source, false), tokenize(t.Name(), source, true)
+			if len(plain) != len(located) {
+				t.Fatalf("token count: %d / %d for %q", len(plain), len(located), source)
+			}
+			for i := range plain {
+				if !Equal(plain[i], located[i].WithoutSourceInfo()) {
+					t.Fatalf("token %d differs for %q", i, source)
+				}
+			}
+		}
+	}
+}
+
+func BenchmarkClusterCodecStringRead(b *testing.B) {
+	payload := strings.Repeat("binary metadata\x00\x01 payload\n", 128)
+	wire := SerializeToString(NewString(payload), &Globalenv)
+	b.ReportAllocs()
+	b.SetBytes(int64(len(wire)))
+	for b.Loop() {
+		if value := Read("wire", wire, false); value.String() != payload {
+			b.Fatal("string changed")
+		}
+	}
+}
+
+func BenchmarkClusterCodecRead(b *testing.B) {
+	source := `(lambda (acc id) (begin ` + strings.Repeat(`(if (> id 7) (+ acc id) (+ acc 1)) `, 32) + `))`
+	for _, located := range []bool{true, false} {
+		name := "plain"
+		if located {
+			name = "source"
+		}
+		b.Run(name, func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				if !Read("wire", source, located).WithoutSourceInfo().IsSlice() {
+					b.Fatal("not a lambda")
+				}
+			}
+		})
+	}
+}
+
+func BenchmarkClusterCodecProcedure(b *testing.B) {
+	env := &Env{Vars: Vars{Symbol("captured"): NewInt(7)}, Outer: &Globalenv}
+	proc := Eval(Optimize(Read("bench", `(lambda (acc id) (+ acc (* id captured)))`, false), env, nil), env)
+	wire, err := MarshalProcedure(proc)
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.Run("encode", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			data, err := MarshalProcedure(proc)
+			if err != nil || len(data) == 0 {
+				b.Fatal(err)
+			}
+		}
+	})
+	b.Run("decode", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			value, err := UnmarshalProcedure(wire)
+			if err != nil {
+				b.Fatal(err)
+			}
+			if Apply(value, NewInt(1), NewInt(3)).Int() != 22 {
+				b.Fatal("wrong result")
+			}
+		}
+	})
 }

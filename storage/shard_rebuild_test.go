@@ -1796,7 +1796,7 @@ func TestCreateColumnBuiltinUpgradesExistingColumnToORC(t *testing.T) {
 		{scm.NewInt(2), scm.NewInt(20), scm.NewInt(200)},
 	}, nil, scm.NewNil(), false, nil)
 
-	mapReduceFn := scm.Eval(scm.Read("test", "(lambda (acc $set v) (begin (define new_acc (+ acc v)) ($set new_acc) new_acc))"), &scm.Globalenv)
+	mapReduceFn := scm.Eval(scm.Read("test", "(lambda (acc $set v) (begin (define new_acc (+ acc v)) ($set new_acc) new_acc))", true), &scm.Globalenv)
 	options := scm.NewSlice([]scm.Scmer{
 		scm.NewString("sortcols"), scm.NewSlice([]scm.Scmer{scm.NewString("day")}),
 		scm.NewString("sortdirs"), scm.NewSlice([]scm.Scmer{scm.NewBool(false)}),
@@ -1867,7 +1867,7 @@ func TestMutationScanRepairsInvalidOrderedComputeColumnBeforeTakingShardLock(t *
 		{scm.NewInt(20), scm.NewInt(200)},
 	}, nil, scm.NewNil(), false, nil)
 
-	mapReduceFn := scm.Eval(scm.Read("test", "(lambda (acc $set v) (begin (define new_acc (+ acc v)) ($set new_acc) new_acc))"), &scm.Globalenv)
+	mapReduceFn := scm.Eval(scm.Read("test", "(lambda (acc $set v) (begin (define new_acc (+ acc v)) ($set new_acc) new_acc))", true), &scm.Globalenv)
 	options := scm.NewSlice([]scm.Scmer{
 		scm.NewString("sortcols"), scm.NewSlice([]scm.Scmer{scm.NewString("day")}),
 		scm.NewString("sortdirs"), scm.NewSlice([]scm.Scmer{scm.NewBool(false)}),

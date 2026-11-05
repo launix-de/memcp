@@ -21,7 +21,6 @@ import "strings"
 import "net/url"
 import "net/http"
 import "sync/atomic"
-import "encoding/json"
 import "github.com/google/uuid"
 import "github.com/gorilla/websocket"
 import "github.com/launix-de/memcp/scm"
@@ -234,7 +233,7 @@ func (r *replicationManager) accept(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	var connection *mosiPeer
-	p := newMosiPeer(conn, func(ctx context.Context, method string, data json.RawMessage) (any, error) {
+	p := newMosiPeer(conn, func(ctx context.Context, method string, data []byte) (any, error) {
 		return r.handleMaster(ctx, id, connection, method, data)
 	}, func(packet *mosiPacket) error { return r.receivePacket(id, packet) }, func(peer *mosiPeer) {
 		connection = peer

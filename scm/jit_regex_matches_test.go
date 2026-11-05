@@ -41,7 +41,7 @@ func TestJITRegexpMatchesNative(t *testing.T) {
 	inputs := []string{"ab12 c", "SELECT x FROM t WHERE a = 5", "", "  yes_1  ", "()"}
 	for _, pat := range cases {
 		re := regexp.MustCompile(pat)
-		f := Eval(Read("f", `(jit (eval (optimize (quote (lambda (s) (regexp_matches s "`+pat+`"))))))`), &Globalenv)
+		f := Eval(Read("f", `(jit (eval (optimize (quote (lambda (s) (regexp_matches s "`+pat+`"))))))`, true), &Globalenv)
 		if !(f.IsProc() && f.Proc() != nil && f.Proc().Compiled != nil) {
 			t.Errorf("regexp_matches %q did NOT JIT-compile", pat)
 		}

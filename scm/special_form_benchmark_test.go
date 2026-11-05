@@ -20,7 +20,7 @@ import "testing"
 
 func BenchmarkEvalOptimizedNativeCall(b *testing.B) {
 	environment := &Env{Vars: Vars{Symbol("x"): NewInt(1)}, Outer: &Globalenv}
-	expression := Optimize(Read(b.Name(), "(+ x 2)"), environment, nil)
+	expression := Optimize(Read(b.Name(), "(+ x 2)", true), environment, nil)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -30,7 +30,7 @@ func BenchmarkEvalOptimizedNativeCall(b *testing.B) {
 
 func BenchmarkEvalOptimizedSpecialForm(b *testing.B) {
 	environment := &Env{Vars: Vars{Symbol("x"): NewBool(true)}, Outer: &Globalenv}
-	expression := Optimize(Read(b.Name(), "(if x (+ 1 2) 0)"), environment, nil)
+	expression := Optimize(Read(b.Name(), "(if x (+ 1 2) 0)", true), environment, nil)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -41,7 +41,7 @@ func BenchmarkEvalOptimizedSpecialForm(b *testing.B) {
 func benchmarkOptimizedForm(b *testing.B, source string, vars Vars) {
 	b.Helper()
 	environment := &Env{Vars: vars, Outer: &Globalenv}
-	expression := Optimize(Read(b.Name(), source), environment, nil)
+	expression := Optimize(Read(b.Name(), source, true), environment, nil)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {

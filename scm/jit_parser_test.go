@@ -246,7 +246,7 @@ func TestJITParserGrammarMatchesPackrat(t *testing.T) {
 		(atom "SELECT" true)
 		(define values (+ (regex "[a-z]+" false true) ","))
 		$
-	) values)`), environment)
+	) values)`, true), environment)
 	environment.Vars[Symbol("test_parser")] = parserValue
 	parser := parserValue.Parser()
 	want := parser.Execute(" select alpha,beta,gamma ", environment)
@@ -280,7 +280,7 @@ func TestJITParserEnvironmentRootsKeepWhitespace(t *testing.T) {
 		{"dash", `(parser '("alpha" "beta" $) "accepted" "^(?:--[^\\r\\n]*[\\r\\n]|[\\r\\n\\t ]+)+")`, "alpha -- dash comment\nbeta"},
 	}
 	for _, test := range cases {
-		value := Eval(Read(test.name+" root grammar", test.grammar), environment)
+		value := Eval(Read(test.name+" root grammar", test.grammar, true), environment)
 		environment.Vars[Symbol(test.name)] = value
 		if got := value.Parser().Execute(test.input, environment); got.String() != "accepted" {
 			t.Fatalf("interpreted %s root returned %s", test.name, String(got))
@@ -310,10 +310,10 @@ func TestJITParserNestedRuleKeepsStandaloneWhitespace(t *testing.T) {
 		t.Skip("requires GOEXPERIMENT=jit")
 	}
 	leafEnvironment := &Env{Vars: make(Vars), Outer: &Globalenv}
-	leaf := Eval(Read("standalone leaf grammar", `(parser '("alpha" "beta") "accepted")`), leafEnvironment)
+	leaf := Eval(Read("standalone leaf grammar", `(parser '("alpha" "beta") "accepted")`, true), leafEnvironment)
 	leafEnvironment.Vars[Symbol("leaf")] = leaf
 	rootEnvironment := &Env{Vars: make(Vars), Outer: leafEnvironment}
-	root := Eval(Read("comment root grammar", `(parser '((define result leaf) $) result "^(?:#[^\\r\\n]*[\\r\\n]|[\\r\\n\\t ]+)+")`), rootEnvironment)
+	root := Eval(Read("comment root grammar", `(parser '((define result leaf) $) result "^(?:#[^\\r\\n]*[\\r\\n]|[\\r\\n\\t ]+)+")`, true), rootEnvironment)
 	rootEnvironment.Vars[Symbol("root")] = root
 	const input = "alpha # inherited comment\nbeta"
 	if got := root.Parser().Execute(input, rootEnvironment); got.String() != "accepted" {
@@ -362,7 +362,7 @@ func TestJITParserGrammarSpillsWideGeneratorCaptures(t *testing.T) {
 		(define f (regex "[a-z]+" false false)) ","
 		(define g (regex "[a-z]+" false false)) ","
 		(define h (regex "[a-z]+" false false)) $)
-		(list a b c d e f g h) "")`), environment)
+		(list a b c d e f g h) "")`, true), environment)
 	environment.Vars[Symbol("wide_parser")] = parserValue
 	parser := parserValue.Parser()
 	want := parser.Execute("a,b,c,d,e,f,g,h", environment)
@@ -458,7 +458,7 @@ func TestJITParserUnicodeClass(t *testing.T) {
 		t.Skip("requires GOEXPERIMENT=jit")
 	}
 	environment := &Env{Vars: make(Vars), Outer: &Globalenv}
-	parserValue := Eval(Read(t.Name(), `(parser (regex "[\\p{L}]+" false false))`), environment)
+	parserValue := Eval(Read(t.Name(), `(parser (regex "[\\p{L}]+" false false))`, true), environment)
 	environment.Vars[Symbol("unicode_parser")] = parserValue
 	jitCompileEnvironmentParsers(environment)
 	if got := parserValue.Parser().Execute("Grüße", environment); got.String() != "Grüße" {
@@ -473,7 +473,7 @@ func TestJITParserManyUnicodeTerminalsReleaseInput(t *testing.T) {
 	environment := &Env{Vars: make(Vars), Outer: &Globalenv}
 	for i := 1; i <= 32; i++ {
 		source := fmt.Sprintf(`(parser (regex "[\\p{L}]{%d}" false false))`, i)
-		environment.Vars[Symbol(fmt.Sprintf("unicode_%d", i))] = Eval(Read(t.Name(), source), environment)
+		environment.Vars[Symbol(fmt.Sprintf("unicode_%d", i))] = Eval(Read(t.Name(), source, true), environment)
 	}
 	jitCompileEnvironmentParsers(environment)
 	for i := 1; i <= 32; i++ {

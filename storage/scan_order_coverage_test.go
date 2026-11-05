@@ -37,7 +37,7 @@ func TestScanOrderOptimizerCompilesOrderIntoAccessSchema(t *testing.T) {
 	expr := scm.Read(t.Name(), `(lambda (table_value)
 		(scan_order nil table_value '() '() '() (lambda () true)
 			'("rank") (list (collate "utf8mb4" false)) 0 0 10
-			'("rank") (lambda (acc rank) rank) nil false nil '() nil))`)
+			'("rank") (lambda (acc rank) rank) nil false nil '() nil))`, true)
 	optimized := scm.Optimize(expr, &scm.Globalenv, nil)
 	plan := scm.SerializeToString(optimized, &scm.Globalenv)
 	if !strings.Contains(plan, `(scan_boundary "range" "rank" -1 -1 true true "" false)`) {
@@ -50,7 +50,7 @@ func TestScanOrderBatchAcceptOptimizerCompilesOrderIntoAccessSchema(t *testing.T
 	expr := scm.Read(t.Name(), `(lambda (table_value)
 		(scan_order_batch_accept nil table_value '() '()
 			(lambda (input) input) '("rank") (list (collate "utf8mb4" false)) 0 0 10
-			'("rank") (lambda (acc rank) rank) nil false nil))`)
+			'("rank") (lambda (acc rank) rank) nil false nil))`, true)
 	optimized := scm.Optimize(expr, &scm.Globalenv, nil)
 	plan := scm.SerializeToString(optimized, &scm.Globalenv)
 	if !strings.Contains(plan, `(scan_boundary "range" "rank" -1 -1 true true "" false)`) {
@@ -198,7 +198,7 @@ func TestCompileScanOrderAccessPreservesOptimizedLocalValuesExpression(t *testin
 func TestCompileScanOrderAccessStoresComputedOrderMapper(t *testing.T) {
 	Init(scm.Globalenv)
 	directionValue, _ := persistableTestOrder(false)
-	computed := scm.Eval(scm.Optimize(scm.Read(t.Name(), `(lambda (rank) (+ rank 1))`), &scm.Globalenv, nil), &scm.Globalenv)
+	computed := scm.Eval(scm.Optimize(scm.Read(t.Name(), `(lambda (rank) (+ rank 1))`, true), &scm.Globalenv, nil), &scm.Globalenv)
 	proc := computed.Proc()
 	if !isRawDataset(proc.Params.Slice(), proc.Body) {
 		t.Fatal("computed ORDER BY fixture is not indexable")

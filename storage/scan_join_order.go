@@ -127,12 +127,13 @@ type scanJoinOrderInput struct {
 	filterCols []string
 	filter     scm.Scmer
 	// Optional immutable semijoin filter; the complete join still runs below.
-	candidateCols []string
-	candidate     scm.Scmer
-	accessSchema  scm.Scmer
-	accessValues  []scm.Scmer
-	sourceKeyCols []scanJoinOrderColumn
-	targetKeyCols []string
+	candidateCols  []string
+	candidate      scm.Scmer
+	accessSchema   scm.Scmer
+	accessValues   []scm.Scmer
+	sourceKeyCols  []scanJoinOrderColumn
+	targetKeyCols  []string
+	targetKeySlots []int
 
 	readCols     []string
 	readColIndex map[string]int
@@ -338,6 +339,13 @@ func prepareScanJoinOrderSpec(spec *scanJoinOrderSpec) {
 			input.lateMapCols, input.lateMapIndex = appendScanJoinColumn(input.lateMapCols, input.lateMapIndex, ref.column)
 		}
 	}
+	for i := range spec.inputs {
+		input := &spec.inputs[i]
+		input.targetKeySlots = make([]int, len(input.targetKeyCols))
+		for i, column := range input.targetKeyCols {
+			input.targetKeySlots[i] = input.readColIndex[column]
+		}
+	}
 }
 
 func collectScanJoinOrderRecords(currentTx *TxContext, input *scanJoinOrderInput, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, offset int, limit int, acceptCols []string, accept scm.Scmer) []orderedBatchRecord {
@@ -430,7 +438,7 @@ func scanJoinOrderCandidateDriver(spec *scanJoinOrderSpec, innerRecords [][]*sca
 		}
 		keys := make([][]scm.Scmer, 0, len(innerRecords[inputIndex]))
 		for _, record := range innerRecords[inputIndex] {
-			key := scanJoinOrderRecordKey(inner, record, inner.targetKeyCols, nil)
+			key := scanJoinOrderRecordKey(inner, record, nil)
 			if scanJoinOrderKeyHasNull(key) || (len(keys) > 0 && compareProjectKey(keys[len(keys)-1], key) == 0) {
 				continue
 			}
@@ -540,16 +548,32 @@ func scanJoinOrderKeyHasNull(key []scm.Scmer) bool {
 	return false
 }
 
-func scanJoinOrderRecordKey(input *scanJoinOrderInput, record *scanJoinOrderRecord, cols []string, dst []scm.Scmer) []scm.Scmer {
-	if cap(dst) < len(cols) {
-		dst = make([]scm.Scmer, len(cols))
+func scanJoinOrderRecordKey(input *scanJoinOrderInput, record *scanJoinOrderRecord, dst []scm.Scmer) []scm.Scmer {
+	if cap(dst) < len(input.targetKeySlots) {
+		dst = make([]scm.Scmer, len(input.targetKeySlots))
 	} else {
-		dst = dst[:len(cols)]
+		dst = dst[:len(input.targetKeySlots)]
 	}
-	for i, col := range cols {
-		dst[i] = scanJoinOrderRecordValue(input, record, col)
+	for i, position := range input.targetKeySlots {
+		dst[i] = record.values[position]
 	}
 	return dst
+}
+
+// Compare prepared tuple positions directly: neither a column-name lookup nor
+// a temporary candidate-key slice belongs in every binary-search comparison.
+func compareScanJoinOrderRecordKey(input *scanJoinOrderInput, record *scanJoinOrderRecord, key []scm.Scmer) int {
+	for i, position := range input.targetKeySlots {
+		value := record.values[position]
+		if scm.Equal(value, key[i]) {
+			continue
+		}
+		if scm.Less(value, key[i]) {
+			return -1
+		}
+		return 1
+	}
+	return 0
 }
 
 func scanJoinOrderTupleKey(spec *scanJoinOrderSpec, tuple *scanJoinOrderTuple, refs []scanJoinOrderColumn, dst []scm.Scmer) []scm.Scmer {
@@ -565,12 +589,10 @@ func joinScanOrderInputRange(spec *scanJoinOrderSpec, tuples []*scanJoinOrderTup
 			continue
 		}
 		start := sort.Search(len(inner), func(i int) bool {
-			candidate := scanJoinOrderRecordKey(input, inner[i], input.targetKeyCols, nil)
-			return compareProjectKey(candidate, key) >= 0
+			return compareScanJoinOrderRecordKey(input, inner[i], key) >= 0
 		})
 		for position := start; position < len(inner); position++ {
-			candidate := scanJoinOrderRecordKey(input, inner[position], input.targetKeyCols, nil)
-			comparison := compareProjectKey(candidate, key)
+			comparison := compareScanJoinOrderRecordKey(input, inner[position], key)
 			if comparison != 0 {
 				break
 			}
@@ -619,9 +641,9 @@ func scanJoinOrderPartitions(input *scanJoinOrderInput, inner []*scanJoinOrderRe
 		if part == count || end >= len(inner) {
 			end = len(inner)
 		} else {
-			previous := scanJoinOrderRecordKey(input, inner[end-1], input.targetKeyCols, nil)
+			previous := scanJoinOrderRecordKey(input, inner[end-1], nil)
 			for end < len(inner) {
-				current := scanJoinOrderRecordKey(input, inner[end], input.targetKeyCols, nil)
+				current := scanJoinOrderRecordKey(input, inner[end], nil)
 				if compareProjectKey(previous, current) != 0 {
 					break
 				}
@@ -631,7 +653,7 @@ func scanJoinOrderPartitions(input *scanJoinOrderInput, inner []*scanJoinOrderRe
 		if end <= start {
 			continue
 		}
-		upper := scanJoinOrderRecordKey(input, inner[end-1], input.targetKeyCols, nil)
+		upper := scanJoinOrderRecordKey(input, inner[end-1], nil)
 		result = append(result, scanJoinOrderPartition{
 			innerStart: start,
 			innerEnd:   end,
@@ -660,11 +682,11 @@ func scanJoinOrderShardPartitions(input *scanJoinOrderInput, inner []*scanJoinOr
 	start := 0
 	for _, pivot := range topology.dimensions[0].Pivots {
 		end := sort.Search(len(inner), func(i int) bool {
-			key := scanJoinOrderRecordKey(input, inner[i], input.targetKeyCols, nil)
+			key := scanJoinOrderRecordKey(input, inner[i], nil)
 			return scm.Less(pivot, key[0])
 		})
 		if end > start {
-			upper := scanJoinOrderRecordKey(input, inner[end-1], input.targetKeyCols, nil)
+			upper := scanJoinOrderRecordKey(input, inner[end-1], nil)
 			result = append(result, scanJoinOrderPartition{
 				innerStart: start,
 				innerEnd:   end,
@@ -674,7 +696,7 @@ func scanJoinOrderShardPartitions(input *scanJoinOrderInput, inner []*scanJoinOr
 		start = end
 	}
 	if start < len(inner) {
-		upper := scanJoinOrderRecordKey(input, inner[len(inner)-1], input.targetKeyCols, nil)
+		upper := scanJoinOrderRecordKey(input, inner[len(inner)-1], nil)
 		result = append(result, scanJoinOrderPartition{
 			innerStart: start,
 			innerEnd:   len(inner),
@@ -1412,12 +1434,10 @@ func runScanJoinOrderShardCombination(currentTx *TxContext, spec *scanJoinOrderS
 		}
 		inner := combination[inputIndex].records
 		start := sort.Search(len(inner), func(i int) bool {
-			candidate := scanJoinOrderRecordKey(input, inner[i], input.targetKeyCols, nil)
-			return compareProjectKey(candidate, key) >= 0
+			return compareScanJoinOrderRecordKey(input, inner[i], key) >= 0
 		})
 		for position := start; position < len(inner); position++ {
-			candidate := scanJoinOrderRecordKey(input, inner[position], input.targetKeyCols, nil)
-			if compareProjectKey(candidate, key) != 0 {
+			if compareScanJoinOrderRecordKey(input, inner[position], key) != 0 {
 				break
 			}
 			records[inputIndex] = inner[position]
@@ -1480,12 +1500,10 @@ func reduceScanJoinOrderShardCombination(currentTx *TxContext, spec *scanJoinOrd
 		}
 		inner := combination[inputIndex].records
 		start := sort.Search(len(inner), func(i int) bool {
-			candidate := scanJoinOrderRecordKey(input, inner[i], input.targetKeyCols, nil)
-			return compareProjectKey(candidate, key) >= 0
+			return compareScanJoinOrderRecordKey(input, inner[i], key) >= 0
 		})
 		for position := start; position < len(inner); position++ {
-			candidate := scanJoinOrderRecordKey(input, inner[position], input.targetKeyCols, nil)
-			if compareProjectKey(candidate, key) != 0 {
+			if compareScanJoinOrderRecordKey(input, inner[position], key) != 0 {
 				break
 			}
 			records[inputIndex] = inner[position]

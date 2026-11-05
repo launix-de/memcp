@@ -64,7 +64,21 @@ func (handle *remoteHandle) Handle(value scm.Scmer) {
 	if peer == nil {
 		panic("handle peer is disconnected")
 	}
-	bindings := handle.service.handleBindings(&scm.SerializationContext{Invocation: handle.owner}, peer)
+	var offers []scm.ClusterReference
+	bindings := (&scm.SerializationContext{Invocation: handle.owner}).WithExport(func(object scm.ClusterObject, view scm.Scmer) (scm.ClusterReference, error) {
+		ref, err := handle.service.exportObject(peer, object, view)
+		if err == nil {
+			offers = append(offers, ref)
+		}
+		return ref, err
+	})
+	queued := false
+	defer func() {
+		if !queued {
+			handle.service.refuseObjectOffers(peer, offers)
+		}
+	}()
+	bindings = handle.service.handleBindings(bindings, peer)
 	payload, err := freezeScanValue(value, bindings)
 	if err != nil {
 		panic(err)
@@ -74,13 +88,23 @@ func (handle *remoteHandle) Handle(value scm.Scmer) {
 	if err != nil {
 		panic(err)
 	}
-	if err = peer.send(handle.ctx, message); err != nil {
+	handle.service.commitObjectOffers(peer, offers)
+	if err = peer.send(context.Background(), message); err != nil {
 		panic(err)
 	}
+	queued = true
 }
-func (service *nodeScanService) handleResolver(ctx context.Context, scope scm.Scmer) func(string, string, uint64) (scm.Handle, error) {
-	return func(owner, boot string, slot uint64) (scm.Handle, error) {
-		identity := clusterObjectPeer{owner, boot}
+
+func (service *nodeScanService) allocateHandleSlot() uint64 {
+	slot := service.nextHandle.Add(1)
+	if slot == 0 || slot>>63 != 0 {
+		panic("handle address space exhausted")
+	}
+	return slot
+}
+func (service *nodeScanService) handleResolver(ctx context.Context, peer *mosiPeer, scope scm.Scmer) func(uint64) (scm.Handle, error) {
+	return func(slot uint64) (scm.Handle, error) {
+		identity := peer.objectPeer
 		if slot == 0 || service.objectConnection(identity) == nil {
 			return nil, fmt.Errorf("unknown handle peer or slot")
 		}
@@ -90,22 +114,27 @@ func (service *nodeScanService) handleResolver(ctx context.Context, scope scm.Sc
 func (service *nodeScanService) handleBindings(bindings *scm.SerializationContext, peer *mosiPeer) *scm.SerializationContext {
 	owner := bindings.InvocationScope()
 	return bindings.WithHandleExport(func(handler scm.Handle) (scm.Scmer, error) {
-		slot := service.nextHandle.Add(1)
+		slot := service.allocateHandleSlot()
 		entry := &handleSlot{peer: peer.objectPeer, handler: handler, owner: owner}
 		service.handles.Store(slot, entry)
 		release := func() { service.handles.Delete(slot) }
 		if receiver, ok := handler.(interface{ RetainHandleRelease(func()) }); ok {
 			receiver.RetainHandleRelease(release)
+			if result, ok := handler.(*scm.ResultReceiver); ok && peer.ctx != nil {
+				stop := context.AfterFunc(peer.ctx, func() { result.Fail(fmt.Errorf("handle peer disconnected")) })
+				result.RetainHandleRelease(func() { stop() })
+			}
 		} else if lifetime, ok := owner.Any().(interface{ RetainQueryWork(func()) bool }); !ok || !lifetime.RetainQueryWork(func() { release(); entry.close() }) {
 			release()
 			return scm.NewNil(), fmt.Errorf("exported handle requires a live invocation owner")
 		}
-		return scm.NewSlice([]scm.Scmer{scm.NewSymbol("cluster_handle"), scm.NewString(service.authNodeID()), scm.NewString(service.id), scm.NewInt(int64(slot))}), nil
+		return scm.NewSlice([]scm.Scmer{scm.NewSymbol("cluster_handle"), scm.NewInt(int64(slot))}), nil
 	})
 }
 func (s *scanRPCSession) handleValue(slot uint64, payload schemeValue) error {
 	entry, ok := s.service.handles.Load(slot)
 	if !ok {
+		s.service.discardObjectOffers(s.peer, serializedReferences(payload))
 		return nil
 	} // a late delivery to a completed invocation is inert
 	target := entry.(*handleSlot)
@@ -113,10 +142,15 @@ func (s *scanRPCSession) handleValue(slot uint64, payload schemeValue) error {
 		return fmt.Errorf("foreign handle slot")
 	}
 	if !target.enter() {
+		// A cancelled waiter can hand its result slot to a state-free cleanup
+		// handler. An already admitted delivery must follow that handoff.
+		if current, exists := s.service.handles.Load(slot); exists && current != entry {
+			return s.handleValue(slot, payload)
+		}
 		return nil
 	}
 	defer target.calls.Done()
-	value, err := payload.reconstruct(scm.ProcedureDecode{ResolveHandle: s.service.handleResolver(s.peer.ctx, target.owner), Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) {
+	value, err := payload.reconstruct(scm.ProcedureDecode{ResolveHandle: s.service.handleResolver(s.peer.ctx, s.peer, target.owner), Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) {
 		return s.service.importObject(s.peer.ctx, s.peer, ref)
 	}})
 	if err != nil {

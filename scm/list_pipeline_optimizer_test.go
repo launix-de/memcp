@@ -27,7 +27,7 @@ import (
 func optimizeListPipeline(t testing.TB, source string) (Scmer, *Env) {
 	t.Helper()
 	env := newOptimizerTestEnv()
-	optimized := Optimize(Read("list pipeline optimizer test", source), env, nil)
+	optimized := Optimize(Read("list pipeline optimizer test", source, true), env, nil)
 	return optimized, env
 }
 
@@ -563,7 +563,7 @@ func TestConcurrentMapFilterInferenceKeepsTypesLocal(t *testing.T) {
 				env := newOptimizerTestEnv()
 				Optimize(Read(t.Name(), `(lambda (values)
 					(map (filter values (lambda (value) (> value 1)))
-						(lambda (value) (list value))))`), env, nil)
+						(lambda (value) (list value))))`, true), env, nil)
 			}
 		}()
 	}

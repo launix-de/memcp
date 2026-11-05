@@ -374,7 +374,7 @@ func scanColumnCostPredicate(b *testing.B, terms int, distinctCols bool) scm.Scm
 		}
 	}
 	source := fmt.Sprintf("(lambda (%s) (and %s))", strings.Join(params, " "), strings.Join(parts, " "))
-	return scm.Eval(scm.Optimize(scm.Read("scan column cost benchmark", source), &scm.Globalenv, nil), &scm.Globalenv)
+	return scm.Eval(scm.Optimize(scm.Read("scan column cost benchmark", source, true), &scm.Globalenv, nil), &scm.Globalenv)
 }
 
 func BenchmarkScanFilterExpressionCost(b *testing.B) {
@@ -405,7 +405,7 @@ func BenchmarkScanFilterExpressionCost(b *testing.B) {
 func BenchmarkCompleteFilterFeedback(b *testing.B) {
 	Init(scm.Globalenv)
 	tbl, cols := scanColumnCostTable(b, "filter_feedback", 65536)
-	filter := scm.Read("feedback-benchmark", "(lambda (x) (not (equal? (mod x 10) 0)))")
+	filter := scm.Read("feedback-benchmark", "(lambda (x) (not (equal? (mod x 10) 0)))", true)
 	schema, values, _ := compileScanAccess(scm.NewSlice([]scm.Scmer{scm.NewString(cols[0])}), filter)
 	for i := range values {
 		values[i] = scm.Eval(values[i], &scm.Globalenv)
@@ -433,7 +433,7 @@ func BenchmarkScanFilterSpectrum(b *testing.B) {
 			{name: "simple", source: "(lambda (a) (> a -1))", columnCnt: 1},
 			{name: "arithmetic", source: "(lambda (a b c) (> (+ a (* b c)) -1))", columnCnt: 3},
 		} {
-			condition := scm.Eval(scm.Optimize(scm.Read("scan filter spectrum", shape.source), &scm.Globalenv, nil), &scm.Globalenv)
+			condition := scm.Eval(scm.Optimize(scm.Read("scan filter spectrum", shape.source, true), &scm.Globalenv, nil), &scm.Globalenv)
 			callback := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[0] })
 			b.Run(fmt.Sprintf("rows=%05d/shape=%s", rows, shape.name), func(b *testing.B) {
 				b.ReportAllocs()
@@ -793,7 +793,7 @@ func TestScanBulkBufferConcurrentRelease(t *testing.T) {
 func BenchmarkCompleteRecSetFeedback(b *testing.B) {
 	Init(scm.Globalenv)
 	tbl, cols := scanColumnCostTable(b, "recset_feedback", 65536)
-	filter := scm.Read("feedback-benchmark", "(lambda (x) (not (equal? (mod x 10) 0)))")
+	filter := scm.Read("feedback-benchmark", "(lambda (x) (not (equal? (mod x 10) 0)))", true)
 	schema, values, _ := compileScanAccess(scm.NewSlice([]scm.Scmer{scm.NewString(cols[0])}), filter)
 	for i := range values {
 		values[i] = scm.Eval(values[i], &scm.Globalenv)
