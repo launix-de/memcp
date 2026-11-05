@@ -492,6 +492,9 @@ func (service *nodeScanService) objectCaller(peer *mosiPeer, reference scm.Clust
 			}
 			target = connected
 		}
+		if target.objectPeer != peer.objectPeer {
+			return scm.NewNil(), fmt.Errorf("expired cluster object incarnation")
+		}
 		var result clusterObjectReply
 		operation := callCtx
 		var offered []scm.ClusterReference
@@ -862,11 +865,14 @@ func (service *nodeScanService) deliverObjectRelease(release clusterObjectReleas
 		}
 		endpoint.Path = endpoint.Path[:slash]
 		endpoint.RawPath = ""
-		connected, _, err := service.connect(ctx, endpoint.String())
+		connected, err := service.objectEndpoint(ctx, endpoint.String())
 		if err != nil {
 			return false
 		}
 		peer = connected
+	}
+	if peer.objectPeer != release.peer {
+		return false
 	}
 	token := release.reference.Token
 	if len(token) > 65535 {

@@ -1756,3 +1756,64 @@ func TestClusterTransactionRootChannelFollowsNativeGC(t *testing.T) {
 		return state.Value() == nil && !registered
 	})
 }
+
+func TestClusterObjectOldIncarnationCannotCallOrReleaseNewOwner(t *testing.T) {
+	peer, client, _ := setupRemoteScanConnection(t)
+	owner := nodeScans.Load()
+	source := objectOwnerPeer(t, owner, client)
+	value := scm.NewSession()
+	scm.Apply(value, scm.NewString("key"), scm.NewInt(7))
+	object, _ := scm.ClusterObjectOf(value)
+	view, err := scm.ClusterObjectValue(object, context.Background(), scm.ClusterRequest{Method: "view"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := owner.exportObject(source, object, view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A restarted owner can reuse the same address and local grant number.
+	// Its authenticated boot must fence both old calls and delayed GC closes.
+	stale := fresh
+	stale.Incarnation = uuid.NewString()
+	previous := &mosiPeer{objectPeer: clusterObjectPeer{ID: peer.objectPeer.ID, Boot: stale.Incarnation}}
+	call := client.objectCaller(previous, stale, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if _, err := call(ctx, scm.ClusterRequest{Method: "call", Arguments: []scm.Scmer{scm.NewString("key"), scm.NewInt(99)}}); err == nil {
+		t.Fatal("old handle executed on a different owner incarnation")
+	}
+	if got := scm.Apply(value, scm.NewString("key")); got.Int() != 7 {
+		t.Fatal("old call changed the new owner", got)
+	}
+	if client.deliverObjectRelease(clusterObjectRelease{peer: previous.objectPeer, reference: stale}) {
+		t.Fatal("old GC release was published to a different incarnation")
+	}
+	if objectEntryCount(owner) != 1 {
+		t.Fatal("old cleanup revoked the new owner's grant")
+	}
+}
+
+func TestClusterObjectGCReconnectKeepsQueuedCloseConnectionAlive(t *testing.T) {
+	peer, client, _ := setupRemoteScanConnection(t)
+	owner := nodeScans.Load()
+	source := objectOwnerPeer(t, owner, client)
+	object, _ := scm.ClusterObjectOf(scm.NewSession())
+	view, err := scm.ClusterObjectValue(object, context.Background(), scm.ClusterRequest{Method: "view"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reference, err := owner.exportObject(source, object, view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := peer.objectPeer
+	client.forget(peer)
+	if !client.deliverObjectRelease(clusterObjectRelease{peer: identity, reference: reference}) {
+		t.Fatal("same-incarnation reconnect did not queue its close")
+	}
+	if client.objectConnection(identity) == nil {
+		t.Fatal("GC closed its socket before the asynchronous writer could send")
+	}
+	waitObjectGC(t, func() bool { return objectEntryCount(owner) == 0 })
+}
