@@ -126,6 +126,13 @@ func (service *nodeScanService) exportObject(peer *mosiPeer, object ClusterObjec
 	if endpoint, ok := object.(interface{ ClusterEndpoint() scm.ClusterObject }); ok {
 		object = endpoint.ClusterEndpoint()
 	}
+	if forwarded, ok := object.(interface{ ClusterForwardedHandle() *scm.ClusterHandle }); ok {
+		if handle := forwarded.ClusterForwardedHandle(); handle != nil && handle.Reference.Token == "" {
+			// Named routing endpoints have no independent lease to regrant.
+			// Keep their original authority instead of introducing a relay.
+			return handle.Reference, nil
+		}
+	}
 	if peer == nil || object == nil {
 		return scm.ClusterReference{}, fmt.Errorf("missing cluster object peer/owner")
 	}

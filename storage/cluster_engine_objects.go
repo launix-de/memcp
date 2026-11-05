@@ -25,6 +25,11 @@ func (tx *TxContext) HandleClusterRequest(ctx context.Context, r scm.ClusterRequ
 	return tx.transactionState.HandleClusterRequest(ctx, r)
 }
 func (*transactionState) ClusterObjectType() string { return "transaction" }
+
+// An imported transaction root is a routing endpoint at its original
+// coordinator, including when a MOSI snapshot exports it directly.
+func (tx *transactionState) ClusterForwardedHandle() *scm.ClusterHandle { return tx.coordinator }
+
 func (tx *transactionState) ClusterObjectID() string {
 	if tx.clusterID != "" {
 		return tx.clusterID

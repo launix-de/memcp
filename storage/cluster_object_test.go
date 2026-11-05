@@ -12,6 +12,7 @@ import "context"
 import "strings"
 import "runtime"
 import "testing"
+import "reflect"
 import "sync/atomic"
 import "github.com/google/uuid"
 import "github.com/launix-de/memcp/scm"
@@ -1653,5 +1654,20 @@ func TestClusterDeregisteredChannelsDiscardLateNativeGrants(t *testing.T) {
 			waitObjectGC(t, func() bool { return objectEntryCount(owner) == 0 })
 			client.handles.Range(func(key, _ any) bool { t.Error("late delivery retained a handler", key); return true })
 		})
+	}
+}
+
+func TestClusterForwardedTransactionRootKeepsOriginalCoordinator(t *testing.T) {
+	service := &nodeScanService{id: "relay"}
+	defer service.stopObjects()
+	peer := &mosiPeer{objectPeer: clusterObjectPeer{"target", "boot"}}
+	root := scm.ClusterReference{URI: "http://original/cluster/transactions/17", Owner: "original", Incarnation: "original-boot", Type: "transaction", View: []byte("root view")}
+	state := &transactionState{coordinator: &scm.ClusterHandle{Reference: root}}
+	ref, err := service.exportObject(peer, state, scm.NewNil())
+	if err != nil || !reflect.DeepEqual(ref, root) {
+		t.Fatal("MOSI export introduced a transaction-root relay", ref, err)
+	}
+	if objectEntryCount(service) != 0 {
+		t.Fatal("routing root allocated a lifetime registration")
 	}
 }
