@@ -1838,3 +1838,49 @@ func TestClusterRemoteMutationJoinsPendingOwnerGrant(t *testing.T) {
 		t.Fatal("granted task did not execute")
 	}
 }
+
+func TestClusterQueuedReadFollowsNativeHandoverBeforeGranting(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "t_queued_read_handover", 3)
+	cluster := globalTestCluster(t, tbl.schema.Name)
+	r := cluster.manager
+	cell := cluster.declareShard(tbl.ActiveShards()[0], false)
+	cell.ownstate.Initialize(mosi.IO)
+	cell.clusterstate.Initialize(mosi.IO)
+	resource := *cell.resource.Load()
+	target := clusterMember{ID: "memcp://" + uuid.NewString(), Boot: uuid.NewString()}
+	peer := &mosiPeer{ctx: context.Background(), done: make(chan struct{}), outgoing: newMosiMailbox()}
+	cluster.view.Store(&clusterView{members: []clusterMember{cluster.self, target}, links: []*clusterLink{{member: target, peer: peer}}})
+	// The source already revoked M; its recipient can write before the source
+	// ACK worker resumes. A queued local read must follow that recipient.
+	r.updateRecord(resource, func(record *replicaRecord) bool {
+		record.Owner, record.Handoff, record.Epoch, record.State = r.id, target.ID, 3, "M"
+		return true
+	})
+	pending, _ := cell.ownstate.Request(mosi.S)
+	packet := mosiPacket{Kind: "read", Resource: resource, ID: pending.Flight().ID(), Sequence: r.requestSequence(pending.Flight()), Boot: cluster.self.Boot}
+	if err := r.coordinate(context.Background(), r.id, packet); err != nil {
+		t.Fatal(err)
+	}
+	if cell.ownstate.ReadReady() || cell.clusterstate.Phase().Readable() {
+		t.Fatal("former owner granted itself O while its handover recipient holds M")
+	}
+	select {
+	case <-peer.outgoing.ready:
+		message := takeMosi(peer.outgoing)
+		if message.Packet == nil || message.Packet.ID != packet.ID || message.Packet.To != target.ID || message.Packet.From != r.id {
+			t.Fatal("queued acquisition lost its native request identity")
+		}
+	default:
+		t.Fatal("queued acquisition was not forwarded to the handover recipient")
+	}
+	r.mu.Lock()
+	record := r.directory.Records[r.resourceKey(resource)]
+	r.mu.Unlock()
+	grant := mosiPacket{Kind: "reference", Resource: resource, ID: packet.ID, Epoch: 3, State: "S", Owner: target.ID}
+	if _, err := cluster.referenceSource(target.ID, grant, cell, record); err != nil {
+		t.Fatalf("named handover recipient could not answer the queued flight: %v", err)
+	}
+	if _, err := cluster.referenceSource("foreign-peer", grant, cell, record); err == nil {
+		t.Fatal("unrelated peer answered a same-epoch queued flight")
+	}
+}

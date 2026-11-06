@@ -652,8 +652,12 @@ func (cluster *nodeCluster) referenceSource(source string, packet mosiPacket, c 
 	}
 	publication := c.ownstate.Snapshot()
 	if expected == nil {
+		owner := record.Owner
+		if record.Handoff != "" {
+			owner = record.Handoff
+		}
 		if publication.Phase().Requested() {
-			if publication.Flight().ID() != packet.ID || record.Owner != source && packet.Epoch <= record.Epoch {
+			if publication.Flight().ID() != packet.ID || owner != source && packet.Epoch <= record.Epoch {
 				return nil, fmt.Errorf("unexpected shared reference request: resource=%s incoming=%s epoch=%d pending=%s epoch=%d owner=%s source=%s", packet.Resource.key(), packet.ID, packet.Epoch, publication.Flight().ID(), record.Epoch, record.Owner, source)
 			}
 		} else if publication.Phase() != mosi.S || record.Owner != source || record.Epoch != packet.Epoch {

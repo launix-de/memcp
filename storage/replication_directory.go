@@ -293,7 +293,14 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 		// directory ownership. The old owner forwards to the successor; it must
 		// never become a permanent coordinator recalling the actual owner.
 		r.mu.Lock()
-		owner := r.directory.Records[r.resourceKey(packet.Resource)].Owner
+		entry := r.directory.Records[r.resourceKey(packet.Resource)]
+		owner := entry.Owner
+		if entry.Handoff != "" {
+			// A queued request may resume after M reached the recipient but
+			// before the source's final ACK publication. The old owner field
+			// cannot authorize a new local grant during that interval.
+			owner = entry.Handoff
+		}
 		r.mu.Unlock()
 		if owner != "" && owner != r.id {
 			if packet.TryRead {
