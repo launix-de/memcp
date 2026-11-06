@@ -91,6 +91,27 @@ func TestClusterValueLambdaContextsShareDeclaration(t *testing.T) {
 	runtime.KeepAlive(closures)
 }
 
+func TestClusterValueSharedBodyPreservesLocalBuiltinBinding(t *testing.T) {
+	sender, _, _ := valuePeerPair(t)
+	syntax := Read(t.Name(), `(lambda (x) (+ x 1))`, false)
+	for i, env := range []*Env{&Globalenv, {Vars: Vars{Symbol("+"): Globalenv.Vars[Symbol("-")]}, Outer: &Globalenv}} {
+		original := Eval(syntax, env)
+		ctx := (&SerializationContext{}).WithPeer(sender)
+		wire, err := MarshalProcedure(original, ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		decoded, err := UnmarshalProcedure(wire)
+		ctx.Queued()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := Apply(decoded, NewInt(8)); got.Int() != int64(9-2*i) {
+			t.Fatal("shared code lost the local primitive binding", i, got, string(wire))
+		}
+	}
+}
+
 //go:noinline
 func declareCollectibleClusterLambda(t *testing.T, sender *SerializationPeer) {
 	proc := Eval(Read(t.Name(), `(lambda (x) (+ x captured))`, false), &Env{Vars: Vars{Symbol("captured"): NewInt(11)}, Outer: &Globalenv})

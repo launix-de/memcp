@@ -40,8 +40,33 @@ type lambdaPlan struct {
 	sourceParams  weak.Pointer[byte]
 	factory       Scmer
 	bindings      []lambdaBinding
+	globals       []Symbol
 	once          sync.Once
 	compiled      Scmer
+}
+
+// Source bodies can also be evaluated in different lexical scopes. A local
+// binding of a primitive is a capture, while its ordinary global declaration
+// executes locally. Only compatible binding layouts can share a wire template.
+func (plan *lambdaPlan) compatible(proc *Proc) bool {
+	env := proc.En
+	if env == nil {
+		env = &Globalenv
+	}
+	for _, name := range plan.globals {
+		if env.FindRead(name) != &Globalenv {
+			return false
+		}
+	}
+	for _, binding := range plan.bindings {
+		if binding.inline < 0 && !binding.literal && binding.expression.IsSymbol() {
+			owner := env.FindRead(binding.expression.Symbol())
+			if owner == nil || owner == &Globalenv {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 var lambdaPlanIndex sync.Map     // lambdaCodeIdentity -> weak.Pointer[lambdaPlan]
@@ -132,20 +157,20 @@ func procedureLambdaPlan(proc *Proc) *lambdaPlan {
 			entry = entry.Owner
 		}
 	}
-	if existing := state.plan.Load(); existing != nil && (existing.identity == key || codeKey.code != 0 && existing.codeIdentity == codeKey && existing.entry.Value() == entry) {
+	if existing := state.plan.Load(); existing != nil && (existing.identity == key || codeKey.code != 0 && existing.codeIdentity == codeKey && existing.entry.Value() == entry) && existing.compatible(proc) {
 		return existing
 	}
 	load := func() *lambdaPlan {
 		if value, ok := lambdaPlanIndex.Load(key); ok {
 			plan := value.(weak.Pointer[lambdaPlan]).Value()
-			if plan != nil && (!plan.bodyTracked || plan.sourceBody.Value() == body.ptr) && (!plan.paramsTracked || plan.sourceParams.Value() == params.ptr) {
+			if plan != nil && (!plan.bodyTracked || plan.sourceBody.Value() == body.ptr) && (!plan.paramsTracked || plan.sourceParams.Value() == params.ptr) && plan.compatible(proc) {
 				return plan
 			}
 		}
 		if codeKey.code != 0 {
 			if value, ok := lambdaPlanIndex.Load(codeKey); ok {
 				plan := value.(weak.Pointer[lambdaPlan]).Value()
-				if plan != nil && plan.entry.Value() == entry {
+				if plan != nil && plan.entry.Value() == entry && plan.compatible(proc) {
 					return plan
 				}
 			}
@@ -243,6 +268,11 @@ func buildLambdaPlan(proc *Proc) *lambdaPlan {
 		}
 		return bind(lambdaBinding{expression: expression, inline: -1})
 	})
+	for _, name := range jitLambdaFreeSymbols(proc.Params, body) {
+		if frame.Outer.FindRead(name) == &Globalenv {
+			plan.globals = append(plan.globals, Symbol(strings.Clone(string(name))))
+		}
+	}
 	var native func(Scmer) Scmer
 	native = func(value Scmer) Scmer {
 		plain := value.WithoutSourceInfo()
