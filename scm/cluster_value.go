@@ -207,7 +207,7 @@ func (ctx *SerializationContext) cachedValue(value Scmer) (Scmer, bool, error) {
 	for {
 		entry, loaded := peer.known.Load(key)
 		if !loaded {
-			candidate := &exportedClusterValue{peer: peer, key: key, id: uuid.NewString(), ready: make(chan struct{})}
+			candidate := &exportedClusterValue{peer: peer, key: key, ready: make(chan struct{})}
 			entry, loaded = peer.known.LoadOrStore(key, candidate)
 		}
 		record := entry.(*exportedClusterValue)
@@ -222,6 +222,7 @@ func (ctx *SerializationContext) cachedValue(value Scmer) (Scmer, bool, error) {
 						record.err = fmt.Errorf("cluster value declaration: %v", failure)
 					}
 				}()
+				record.id = uuid.NewString()
 				record.unregister = peer.Register(record.id, record.receive)
 				peer.exported.Store(record.id, record)
 				var text bytes.Buffer

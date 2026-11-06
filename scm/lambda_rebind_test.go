@@ -57,3 +57,19 @@ func TestLambdaRebindVariadicCodeIsShared(t *testing.T) {
 		}
 	}
 }
+
+func TestLambdaRebindNativeTemplate(t *testing.T) {
+	if !jitEnabled {
+		t.Skip("native JIT required")
+	}
+	original := Eval(Read(t.Name(), `(lambda (x) (+ x captured))`, false), &Env{Vars: Vars{Symbol("captured"): NewInt(1)}, Outer: &Globalenv})
+	template := compileLambdaTemplate(procedureLambdaPlan(original.Proc()).factory)
+	native := NewFunc(template.Proc().jitFunction())
+	bound := LambdaRebind(native, NewInt(9))
+	if got := Apply(bound, NewInt(7)); got.Int() != 16 {
+		t.Fatal("native template lost its private binding", got)
+	}
+	if bound.Proc().nativeCode() != template.Proc().nativeCode() {
+		t.Fatal("native template was recompiled")
+	}
+}

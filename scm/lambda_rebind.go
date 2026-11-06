@@ -391,13 +391,12 @@ func LambdaRebind(old Scmer, context ...Scmer) Scmer {
 	if proc == nil {
 		panic("lambda_rebind expects a Scheme lambda")
 	}
-	factory := old
+	p := proc
 	if proc.lambdaMetadata().template == nil {
 		plan := procedureLambdaPlan(proc)
 		plan.once.Do(func() { plan.compiled = compileLambdaTemplate(plan.factory) })
-		factory = plan.compiled
+		p = plan.compiled.Proc()
 	}
-	p := factory.Proc()
 	template := p.lambdaMetadata().template
 	arity := len(template.parameters)
 	if len(context) == arity-1 {
