@@ -1238,7 +1238,7 @@ func TestClusterRemoteMutationRedirectsBeforeRecallingParticipant(t *testing.T) 
 				}
 			}()
 			executed := false
-			err := withRemoteScanShard(&remoteScanShard{Schema: tbl.filterSchemaFingerprint(), Resource: resource}, nil, true, "coordinator", "",
+			err := withRemoteScanShard(&remoteScanShard{Schema: tbl.filterSchemaFingerprint(), Resource: resource}, nil, true, false, "coordinator", "",
 				func(*storageShard) error { executed = true; return nil })
 			redirect, ok := err.(clusterScanRedirect)
 			if !ok || redirect.Owner != "transaction-participant" || redirect.Epoch != 4 || redirect.Generation != resource.Shard || executed || cell.ownstate.Phase() != mosi.IO {
@@ -1806,6 +1806,15 @@ func TestClusterRemoteMutationJoinsPendingOwnerGrant(t *testing.T) {
 	defer sharedClusterMounts.Store(oldMounts)
 	oldService := nodeScans.Swap(&nodeScanService{cluster: cluster})
 	defer nodeScans.Store(oldService)
+	// A group reservation cannot join this flight while its coordinator may
+	// retain another group needed by that same incoming handover.
+	err := withRemoteScanShard(&remoteScanShard{Schema: tbl.filterSchemaFingerprint(), Resource: resource}, nil, false, true, "coordinator", "", func(*storageShard) error {
+		t.Fatal("ungranted owner-group reservation executed a callback")
+		return nil
+	})
+	if busy, ok := err.(uniqueReservationBusy); !ok || busy.shard.Resource != resource || cell.ownstate.Snapshot().Flight() != pending.Flight() {
+		t.Fatal("reservation waited for or replaced the native pending grant", err)
+	}
 	done := make(chan error, 1)
 	executed := make(chan struct{}, 1)
 	go func() {
@@ -1814,7 +1823,7 @@ func TestClusterRemoteMutationJoinsPendingOwnerGrant(t *testing.T) {
 				done <- fmt.Errorf("pending acquisition failed: %v", failure)
 			}
 		}()
-		done <- withRemoteScanShard(&remoteScanShard{Schema: tbl.filterSchemaFingerprint(), Resource: resource}, nil, true, "coordinator", "", func(*storageShard) error { executed <- struct{}{}; return nil })
+		done <- withRemoteScanShard(&remoteScanShard{Schema: tbl.filterSchemaFingerprint(), Resource: resource}, nil, true, false, "coordinator", "", func(*storageShard) error { executed <- struct{}{}; return nil })
 	}()
 	select {
 	case err := <-done:

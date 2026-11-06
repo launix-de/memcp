@@ -216,7 +216,7 @@ func (executor *clusterScanExecutor) ExecuteShardScan(resource mosiResource, inv
 func (cluster *nodeCluster) shardRAMUnavailable(shard, origin *storageShard) shardReadDelegation {
 	cluster.capacity.Add(1)
 	expected := remoteScanShard{Schema: shard.t.filterSchemaFingerprint(), Resource: mosiResource{Database: shard.t.schema.Name, Table: shard.t.Name, Shard: shard.uuid.String()}}
-	return shardReadDelegation{&shardScanTarget{resource: expected.Resource, origin: origin, executor: &clusterScanExecutor{cluster: cluster, expected: expected}}}
+	return shardReadDelegation{&shardScanTarget{resource: expected.Resource, origin: origin, executor: &clusterScanExecutor{cluster: cluster, expected: expected, exclude: cluster.self.ID}}}
 }
 
 // Feedback is bounded per node, allocated only for genuinely remote INSERTs.

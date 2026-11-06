@@ -206,7 +206,7 @@ func (database *database) executeScanTask(ctx context.Context, s *scanRPCSession
 	}
 	var output remoteScanResult
 	withInput := func(execute func(*storageShard) error) error {
-		return withRemoteScanShard(&request.Shard, tx, request.Access.Mutation, s.peer.objectPeer.ID, request.AcquireFrom, execute)
+		return withRemoteScanShard(&request.Shard, tx, request.Access.Mutation, request.Operator == shardUniqueReserve, s.peer.objectPeer.ID, request.AcquireFrom, execute)
 	}
 	if input != nil {
 		withInput = func(execute func(*storageShard) error) error {
@@ -258,6 +258,14 @@ func (database *database) executeScanTask(ctx context.Context, s *scanRPCSession
 		output = remoteScanResult{Version: scanWireVersion, Shard: request.Shard, Value: []byte(encoded), OutCount: result.outCount, InputCount: result.inputCount, CandidateCount: result.candidateCount}
 		return nil
 	})
+	if busy, ok := err.(uniqueReservationBusy); ok {
+		value, encodeErr := freezeScanValue(scm.NewSlice([]scm.Scmer{scm.NewString("busy"), scm.NewString(busy.shard.Resource.Shard), scm.NewBool(busy.capacity), scm.NewBool(busy.retry)}))
+		if encodeErr != nil {
+			return nil, encodeErr
+		}
+		output = remoteScanResult{Version: scanWireVersion, Shard: request.Shard, Value: []byte(value)}
+		err = nil
+	}
 	if _, capacity := err.(clusterCapacityRejection); capacity {
 		return remoteScanResult{Rejected: true}, nil
 	}
@@ -306,7 +314,7 @@ func boundedScanReply(value any) (any, error) {
 // Acquire through the same schema/shard MOSI and generation lifetime boundaries
 // as a local scan. Routing hints follow its current generation; physical input
 // IDs are retained only by the explicit native object path.
-func withRemoteScanShard(expected *remoteScanShard, tx *TxContext, mutation bool, sender, acquireFrom string, execute func(*storageShard) error) (err error) {
+func withRemoteScanShard(expected *remoteScanShard, tx *TxContext, mutation, ownerBound bool, sender, acquireFrom string, execute func(*storageShard) error) (err error) {
 	// A shared-backend worker either admits this generation once or refuses
 	// before scan callbacks. Capacity refusal alone permits choosing another peer.
 	shared := sharedClusterDatabase(expected.Resource.Database)
@@ -340,6 +348,11 @@ func withRemoteScanShard(expected *remoteScanShard, tx *TxContext, mutation bool
 			record := r.cluster.report(expected.Resource)
 			phase := mosi.ParsePhase(record.State)
 			local := phase.Readable()
+			// Owner-group reservations refuse before shard acquisition. Even
+			// joining MR can depend on another group held by this coordinator.
+			if ownerBound && r.resourceCell(record.Resource).ownstate.Phase() != mosi.M {
+				return uniqueReservationBusy{shard: *expected}
+			}
 			// Reports expose retained permission, not an in-flight request.
 			// A recipient already acquiring this generation joins that native
 			// flight below; bouncing it to the old owner creates a false cycle.
@@ -349,8 +362,8 @@ func withRemoteScanShard(expected *remoteScanShard, tx *TxContext, mutation bool
 				owner = record.Handoff
 			}
 			// A handover routes to its recipient before the final owner ACK.
-			// The sender can deliberately delegate its own cold payload when it
-			// cannot admit it; other owners must execute at their native boundary.
+			// A non-reservation task may deliberately delegate its sender's cold
+			// payload. Owner-bound reservations already refused that path above.
 			if !local && !acquiring && owner != "" && owner != r.id && owner != sender && owner != acquireFrom {
 				return clusterScanRedirect{Owner: owner, Epoch: record.Epoch, Generation: record.Resource.Shard}
 			}
@@ -359,7 +372,13 @@ func withRemoteScanShard(expected *remoteScanShard, tx *TxContext, mutation bool
 		if mutation {
 			wanted = mosi.M
 		}
-		sourceCell = r.obtain(expected.Resource, wanted, replicationUser(tx), tx)
+		if ownerBound && shared {
+			// Its native handler owns nonblocking GetWrite for the whole group.
+			// Reacquiring S here could wait after the M check raced a handover.
+			sourceCell = r.resourceCell(expected.Resource)
+		} else {
+			sourceCell = r.obtain(expected.Resource, wanted, replicationUser(tx), tx)
+		}
 	}
 	declarations := tbl.columnNamesSnapshot.Load()
 	for {
@@ -401,28 +420,33 @@ func withRemoteScanShard(expected *remoteScanShard, tx *TxContext, mutation bool
 			// Only an explicit input object above retains historical physical IDs.
 			var lease ReadAccess
 			var capacity bool
-			func() {
-				defer func() {
-					if failure := recover(); failure != nil {
-						if _, delegated := failure.(shardReadDelegation); shared && delegated {
-							capacity = true
-						} else {
-							panic(failure)
+			shard := selected
+			if !ownerBound {
+				func() {
+					defer func() {
+						if failure := recover(); failure != nil {
+							if _, delegated := failure.(shardReadDelegation); shared && delegated {
+								capacity = true
+							} else {
+								panic(failure)
+							}
 						}
+					}()
+					if mutation {
+						write := selected.GetWrite(tx)
+						lease = ReadAccess{shard: write.shard, mutation: &write}
+					} else {
+						lease = selected.GetRead(tx, false)
 					}
 				}()
-				if mutation {
-					write := selected.GetWrite(tx)
-					lease = ReadAccess{shard: write.shard, mutation: &write}
-				} else {
-					lease = selected.GetRead(tx, false)
+				if capacity {
+					return clusterCapacityRejection{}
 				}
-			}()
-			if capacity {
-				return clusterCapacityRejection{}
+				defer lease.Release()
+				shard = lease.shard
 			}
-			defer lease.Release()
-			shard := lease.shard
+			// The reservation handler supplies GetWrite; other operators use
+			// the prepared read/write lease above. Never take both admissions.
 			if err := execute(shard); err != nil {
 				return err
 			}
