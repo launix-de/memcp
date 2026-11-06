@@ -26,7 +26,7 @@ import "github.com/launix-de/memcp/scm"
 const mosiPacketBytes = 64 * 1024
 
 const mosiHTTPPath = "/cluster"
-const mosiSubprotocol = "memcp.channels.v8"
+const mosiSubprotocol = "memcp.channels.v9"
 const mosiMaxMessageBytes = 256 * 1024
 const maxNodeRecordBytes = 32 * 1024 * 1024
 

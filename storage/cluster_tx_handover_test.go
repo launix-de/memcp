@@ -297,7 +297,7 @@ func TestClusterCursorDecisionDoesNotPinWritersAcrossParticipants(t *testing.T) 
 						lateCalls++
 						return scm.NewBool(true), nil
 					}}
-					if _, err := tx.transactionState.HandleClusterRequest(ctx, scm.ClusterRequest{Method: "enlist", Arguments: []scm.Scmer{scm.NewAny(late), scm.NewString(late.decisionToken)}}); err != nil {
+					if _, err := tx.transactionState.executeClusterRequest(ctx, scm.ClusterRequest{Method: "enlist", Arguments: []scm.Scmer{scm.NewAny(late), scm.NewString(late.decisionToken)}}); err != nil {
 						t.Error("handover could not enlist its successor", err)
 					}
 				}

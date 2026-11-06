@@ -355,7 +355,7 @@ and independent backend namespace, including separate buckets/prefixes for
 remote storage. The existing persistence backends are used without modification.
 `schema.json` remains the schema format. `SHUTDOWN` affects the addressed instance.
 
-Both listeners negotiate `memcp.channels.v8` and exchange bounded binary WebSocket
+Both listeners negotiate `memcp.channels.v9` and exchange bounded binary WebSocket
 messages. Every application frame contains exactly one byte giving the channel
 name's byte length (1–255), the channel name, then its opaque payload. There is no
 transport request ID, reply type, version prefix or JSON envelope. Registered

@@ -1531,7 +1531,7 @@ func TestClusterObjectReleaseReconnectKeepsServiceConnection(t *testing.T) {
 	owner := nodeScans.Load()
 	source := objectOwnerPeer(t, owner, client)
 	object, _ := scm.ClusterObjectOf(scm.NewSession())
-	ref, err := owner.exportObject(source, object, scm.NewNil())
+	ref, err := owner.exportObject(source, object, scm.NewNil(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1574,7 +1574,7 @@ func TestClusterDuplicateLinkDoesNotCancelBorrowedHandle(t *testing.T) {
 	})
 	defer callback.Close()
 	defer unblock()
-	ref, err := owner.exportObject(objectOwnerPeer(t, owner, client), callback, scm.NewNil())
+	ref, err := owner.exportObject(objectOwnerPeer(t, owner, client), callback, scm.NewNil(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1585,7 +1585,10 @@ func TestClusterDuplicateLinkDoesNotCancelBorrowedHandle(t *testing.T) {
 	finished := make(chan error, 1)
 	go func() {
 		var reply clusterObjectReply
-		err := client.control(ctx, candidate, "object.call", clusterObjectCall{Reference: ref, Method: "receive", Arguments: []schemeValue{view}}, &reply, true)
+		payload, err := scm.EncodeClusterRequest(scm.ClusterRequest{Method: "receive", Arguments: []scm.Scmer{scm.NewNil()}})
+		if err == nil {
+			err = client.control(ctx, candidate, "object.call", clusterObjectCall{Reference: ref, Payload: payload}, &reply, true)
+		}
 		if err == nil {
 			result, decodeErr := reply.Value.reconstruct()
 			if decodeErr != nil {
@@ -1842,7 +1845,8 @@ func TestClusterObjectGCReconnectKeepsQueuedCloseConnectionAlive(t *testing.T) {
 		t.Fatal(err)
 	}
 	identity := peer.objectPeer
-	client.forget(peer)
+	peer.close()
+	peer.wait()
 	if !client.deliverObjectRelease(clusterObjectRelease{peer: identity, reference: reference}) {
 		t.Fatal("same-incarnation reconnect did not queue its close")
 	}

@@ -1716,7 +1716,7 @@ func (probe *liveReferencePhaseProbe) ClusterObjectID() string { return probe.id
 func (probe *liveReferencePhaseProbe) Serialize(bindings *scm.SerializationContext) (scm.Scmer, error) {
 	return bindings.ReferenceExpression(probe)
 }
-func (probe *liveReferencePhaseProbe) HandleClusterRequest(_ context.Context, request scm.ClusterRequest) (any, error) {
+func (probe *liveReferencePhaseProbe) executeClusterRequest(_ context.Context, request scm.ClusterRequest) (any, error) {
 	if request.Method != "next" {
 		return nil, fmt.Errorf("unexpected transfer probe request")
 	}
@@ -1759,7 +1759,7 @@ func TestClusterLiveReferencePublishesEpochBeforePayloadCanMergeCells(t *testing
 		r.mu.Unlock()
 		observed <- observation{r.resourceCell(target), epoch}
 	}}
-	ref, err := owner.exportObject(objectOwnerPeer(t, owner, client), probe, scm.NewNil())
+	ref, err := owner.exportObject(objectOwnerPeer(t, owner, client), probe, scm.NewNil(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1815,11 +1815,11 @@ func TestClusterUniqueReservationRegroupsInsteadOfFollowingOwner(t *testing.T) {
 		select {
 		case <-links[0].peer.outgoing.ready:
 			message := takeMosi(links[0].peer.outgoing)
-			if message.Method != "node.control" {
+			if message.Channel != "scan.execute" {
 				continue
 			}
 			var request struct{ Return, Method string }
-			if err := unmarshalNode(message.Data, &request); err != nil || request.Method != "scan.execute" {
+			if err := decodeTestInvocation(message.Channel, message.Payload, &request); err != nil || request.Method != "scan.execute" {
 				t.Fatal("invalid reservation request", err)
 			}
 			entry, _ := service.handles.Load(controlReturnSlot(request.Return))
@@ -1842,4 +1842,8 @@ func TestClusterUniqueReservationRegroupsInsteadOfFollowingOwner(t *testing.T) {
 			t.Fatal("reservation refusal did not return", ctx.Err())
 		}
 	}
+}
+
+func (probe *liveReferencePhaseProbe) HandleClusterRequest(ctx context.Context, payload []byte) {
+	scm.ReceiveClusterValue(ctx, payload, func(request scm.ClusterRequest) (any, error) { return probe.executeClusterRequest(ctx, request) })
 }

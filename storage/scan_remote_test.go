@@ -1826,14 +1826,14 @@ func TestRemoteUniqueOperationsUseCurrentTransactionParticipant(t *testing.T) {
 				t.Fatalf("native participant operation rejected before dispatch: %v", failure)
 			case <-peer.outgoing.ready:
 				message := takeMosi(peer.outgoing)
-				if message.Method != "node.control" {
+				if message.Channel != "scan.execute" {
 					continue
 				}
 				var envelope struct {
 					Return, Method string
 					Data           []byte
 				}
-				if err := unmarshalNode(message.Data, &envelope); err != nil || envelope.Method != "scan.execute" {
+				if err := decodeTestInvocation(message.Channel, message.Payload, &envelope); err != nil || envelope.Method != "scan.execute" {
 					t.Fatal("invalid native request", err)
 				}
 				var task remoteScanTask

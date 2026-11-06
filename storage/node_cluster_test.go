@@ -1661,6 +1661,7 @@ func TestClusterDelegationDistinguishesHandoverFromRoutingCycle(t *testing.T) {
 			defer cancel()
 			service := &nodeScanService{}
 			cluster := &nodeCluster{service: service, ctx: ctx}
+			cluster.initializeManager()
 			var links []*clusterLink
 			for _, id := range []string{"owner-a", "owner-b"} {
 				peer := &mosiPeer{ctx: ctx, done: make(chan struct{}), outgoing: newMosiMailbox(), scanService: service, objectPeer: clusterObjectPeer{ID: id, Boot: "boot"}}
@@ -1688,8 +1689,12 @@ func TestClusterDelegationDistinguishesHandoverFromRoutingCycle(t *testing.T) {
 				select {
 				case <-peer.outgoing.ready:
 					message := takeMosi(peer.outgoing)
+					if message.Channel != "scan.execute" {
+						step-- // declarations precede their first referring task
+						continue
+					}
 					var request struct{ Return, Method string }
-					if err := unmarshalNode(message.Data, &request); err != nil || request.Method != "scan.execute" {
+					if err := decodeTestInvocation(message.Channel, message.Payload, &request); err != nil || request.Method != "scan.execute" {
 						t.Fatal("delegation did not use its native scan contract", request, err)
 					}
 					response := remoteScanResult{Redirect: &clusterScanRedirect{Owner: links[(step+1)%2].member.ID, Epoch: 4, Generation: expected.Resource.Shard}}
@@ -2106,7 +2111,7 @@ func TestClusterLocationReplyRefreshesRequestedAlias(t *testing.T) {
 					Return, Method string
 					Data           []byte
 				}
-				if err := unmarshalNode(message.Data, &request); err != nil || request.Method != "cluster.location" {
+				if err := decodeTestInvocation(message.Channel, message.Payload, &request); err != nil || request.Method != "cluster.location" {
 					t.Fatal("invalid location request", err)
 				}
 				entry, _ := service.handles.Load(controlReturnSlot(request.Return))

@@ -807,8 +807,12 @@ func (capture *liveShardTransfer) enlist(ctx context.Context, request scm.Cluste
 		}
 		tx := &TxContext{transactionState: st.transaction}
 		st.forwarded.Store(child)
-		// The new owner has already enlisted directly. This source-side
-		// completion only publishes its forwarding view and retires old rights.
+		if tx.coordinator != nil {
+			endpoint := st.ClusterEndpoint()
+			if _, err := tx.executeClusterRequest(ctx, scm.ClusterRequest{Method: "enlist", Arguments: []scm.Scmer{scm.NewAny(endpoint), scm.NewString(child.decisionToken)}}); err != nil {
+				return nil, err
+			}
+		}
 		tx.mu.Lock()
 		defer tx.mu.Unlock()
 		directory := tx.shards.Load()

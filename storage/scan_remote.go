@@ -18,8 +18,8 @@ import "encoding/binary"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/memcp/storage/mosi"
 
-// Version 21 sends native order relations directly, without synthetic lambda factories.
-const scanWireVersion = 21
+// Version 22 combines native redirect progress with shared lambda code and binary parameters.
+const scanWireVersion = 22
 
 type remoteScanShard struct {
 	Schema   uint64       `json:"schema"`
@@ -67,7 +67,7 @@ type remoteScanTask struct {
 	Neutral       []byte                `json:"neutral"`
 }
 type remoteScanResult struct {
-	bindings *scm.SerializationContext
+	bindings       *scm.SerializationContext
 	Redirect       *clusterScanRedirect `json:"redirect,omitempty"` // routing refusal before acquiring payload or executing callbacks
 	Rejected       bool                 `json:"rejected,omitempty"` // capacity refusal before executing scan callbacks
 	Version        int                  `json:"version"`
@@ -1010,12 +1010,14 @@ func encodeScanResult(p remoteScanResult) []byte {
 	if p.Rejected {
 		flags |= 1
 	}
-	if p.RedirectTo != "" {
+	if p.Redirect != nil {
 		flags |= 2
 	}
 	w.data = append(w.data, flags)
 	if flags&2 != 0 {
-		w.text(p.RedirectTo)
+		w.text(p.Redirect.Owner)
+		w.number(p.Redirect.Epoch)
+		w.text(p.Redirect.Generation)
 	}
 	w.number(uint64(p.Version))
 	w.shard(p.Shard)
@@ -1032,7 +1034,7 @@ func (r *nodeReader) scanResult() remoteScanResult {
 	}
 	p := remoteScanResult{Rejected: flags&1 != 0}
 	if flags&2 != 0 {
-		p.RedirectTo = string(r.blob())
+		p.Redirect = &clusterScanRedirect{Owner: string(r.blob()), Epoch: r.uint(), Generation: string(r.blob())}
 	}
 	p.Version = int(r.uint())
 	p.Shard = r.shard()
