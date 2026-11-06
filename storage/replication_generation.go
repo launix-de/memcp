@@ -1063,6 +1063,10 @@ func (r *replicationManager) replicaDeclaration(table *table, includeTopology bo
 	if json.Unmarshal(fields["Columns"], &columns) == nil {
 		for _, column := range columns {
 			delete(column, "PartitioningScore")
+			// ADD recovery extents belong to physical UUIDs. Rebuild materializes
+			// their values without changing the column's SQL declaration/default.
+			delete(column, "initial_value")
+			delete(column, "initial_values")
 		}
 		fields["Columns"], _ = json.Marshal(columns)
 	}
