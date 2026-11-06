@@ -27,6 +27,7 @@ var jitProcStackPointerOffsets = [...]int32{
 	int32(unsafe.Offsetof(Proc{}.En)),
 	int32(unsafe.Offsetof(Proc{}.Compiled)),
 	int32(unsafe.Offsetof(Proc{}.OptimizerMeta)),
+	int32(unsafe.Offsetof(Proc{}.lambdaMeta)),
 }
 
 func jitSpecialFormList(name string, args []Scmer) []Scmer {

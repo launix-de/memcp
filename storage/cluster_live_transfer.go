@@ -12,7 +12,6 @@ import "sync"
 import "bufio"
 import "reflect"
 import "context"
-import "encoding/base64"
 import "encoding/binary"
 import "github.com/google/uuid"
 import "github.com/launix-de/memcp/scm"
@@ -135,10 +134,10 @@ func (capture *liveShardTransfer) export(peer *mosiPeer) (scm.ClusterReference, 
 		return scm.ClusterReference{}, fmt.Errorf("live shard transfer has finished")
 	}
 	capture.peer = peer
-	return capture.manager.cluster.service.exportObject(peer, capture, scm.NewNil())
+	return capture.manager.cluster.service.exportObject(peer, capture, scm.NewNil(), nil)
 }
 
-func (capture *liveShardTransfer) HandleClusterRequest(ctx context.Context, request scm.ClusterRequest) (any, error) {
+func (capture *liveShardTransfer) executeClusterRequest(ctx context.Context, request scm.ClusterRequest) (any, error) {
 	if request.Method == "view" {
 		return scm.NewNil(), nil
 	}
@@ -186,7 +185,7 @@ func (capture *liveShardTransfer) HandleClusterRequest(ctx context.Context, requ
 	if n == 0 {
 		return scm.NewNil(), nil
 	}
-	return scm.NewString(base64.RawStdEncoding.EncodeToString(buffer[:n])), nil
+	return scm.NewAny(buffer[:n]), nil
 }
 
 func (capture *liveShardTransfer) clusterInputShards() []*storageShard {
@@ -455,7 +454,7 @@ func (capture *liveShardTransfer) write(writer io.Writer) error {
 			if tx.coordinator != nil {
 				ref = tx.coordinator.Reference
 			} else {
-				ref, err = capture.manager.cluster.service.exportObject(capture.peer, tx.transactionState, view)
+				ref, err = capture.manager.cluster.service.exportObject(capture.peer, tx.transactionState, view, nil)
 			}
 			if err != nil {
 				return err
@@ -501,7 +500,7 @@ func (*remoteLiveTransfer) ClusterObjectType() string { return "shard-transfer" 
 func (remote *remoteLiveTransfer) Serialize(bindings *scm.SerializationContext) (scm.Scmer, error) {
 	return bindings.ReferenceExpression(remote)
 }
-func (remote *remoteLiveTransfer) HandleClusterRequest(ctx context.Context, request scm.ClusterRequest) (any, error) {
+func (remote *remoteLiveTransfer) executeClusterRequest(ctx context.Context, request scm.ClusterRequest) (any, error) {
 	return remote.handle.Call(ctx, request)
 }
 
@@ -521,9 +520,10 @@ func (reader *liveTransferReader) Read(data []byte) (int, error) {
 		if value.IsNil() {
 			reader.ended = true
 		} else {
-			reader.buffer, err = base64.RawStdEncoding.DecodeString(value.String())
-			if err != nil {
-				return 0, err
+			var ok bool
+			reader.buffer, ok = value.Any().([]byte)
+			if !ok {
+				return 0, fmt.Errorf("live transfer omitted raw chunk")
 			}
 		}
 	}
@@ -742,8 +742,19 @@ func (cluster *nodeCluster) installLiveShard(cell *replicaCell, packet mosiPacke
 		// state. From here it must survive even a lost subsequent grant/ACK.
 		complete = true
 		for _, st := range overlays {
+			// Keep the transferred decision capability, but register the new
+			// native participant directly at the original transaction root.
+			// A completed handover must not depend on its now-empty source.
+			st.enlist.Do(func() {
+				_, st.enlistError = st.transaction.executeClusterRequest(peer.ctx, scm.ClusterRequest{
+					Method: "enlist", Arguments: []scm.Scmer{scm.NewAny(st), scm.NewString(st.decisionToken)},
+				})
+			})
+			if st.enlistError != nil {
+				return st.enlistError
+			}
 			view := scm.NewSlice([]scm.Scmer{scm.NewString(st.shardUUID.String()), scm.NewString(st.clusterTxID), scm.NewString(cluster.self.ID)})
-			ref, err := cluster.service.exportObject(peer, st, view)
+			ref, err := cluster.service.exportObject(peer, st, view, nil)
 			if err != nil {
 				return err
 			}
@@ -807,12 +818,8 @@ func (capture *liveShardTransfer) enlist(ctx context.Context, request scm.Cluste
 		}
 		tx := &TxContext{transactionState: st.transaction}
 		st.forwarded.Store(child)
-		if tx.coordinator != nil {
-			endpoint := st.ClusterEndpoint()
-			if _, err := tx.HandleClusterRequest(ctx, scm.ClusterRequest{Method: "enlist", Arguments: []scm.Scmer{scm.NewAny(endpoint), scm.NewString(child.decisionToken)}}); err != nil {
-				return nil, err
-			}
-		}
+		// The receiver already registered directly with the original root.
+		// This source only publishes its forwarding view and retires its rights.
 		tx.mu.Lock()
 		defer tx.mu.Unlock()
 		directory := tx.shards.Load()
@@ -856,4 +863,22 @@ func (tx *TxContext) publishReadViewLocked(shard *storageShard, st *storageShard
 	}
 	views[shard] = st
 	tx.readViews.Store(&views)
+}
+
+func (capture *liveShardTransfer) HandleClusterRequest(ctx context.Context, payload []byte) {
+	scm.ReceiveClusterValue(ctx, payload, func(request scm.ClusterRequest) (any, error) { return capture.executeClusterRequest(ctx, request) })
+}
+
+func (capture *liveShardTransfer) ClusterView(ctx context.Context) (scm.Scmer, error) {
+	value, err := capture.executeClusterRequest(ctx, scm.ClusterRequest{Method: "view"})
+	return scm.ClusterViewValue(value, err)
+}
+
+func (remote *remoteLiveTransfer) HandleClusterRequest(ctx context.Context, payload []byte) {
+	scm.ReceiveClusterValue(ctx, payload, func(request scm.ClusterRequest) (any, error) { return remote.executeClusterRequest(ctx, request) })
+}
+
+func (remote *remoteLiveTransfer) ClusterView(ctx context.Context) (scm.Scmer, error) {
+	value, err := remote.executeClusterRequest(ctx, scm.ClusterRequest{Method: "view"})
+	return scm.ClusterViewValue(value, err)
 }

@@ -494,7 +494,7 @@ func calibrationProcedure(source string) *Proc {
 }
 
 func cloneCalibrationProcedure(template *Proc) *Proc {
-	copy := template.snapshot()
+	copy := template.Snapshot()
 	copy.JITCode = 0
 	copy.Compiled = nil
 	copy.jitCompiling = 0

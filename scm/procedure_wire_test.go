@@ -13,76 +13,39 @@ package scm
 import "fmt"
 import "math"
 import "time"
+import "weak"
+import "sync"
 import "bytes"
 import "context"
 import "strings"
 import "testing"
-import "encoding/json"
 import "runtime"
-import "weak"
-import "sync"
+import "encoding/json"
 
-func TestProcedureFactoryReusesCaptureFreeCode(t *testing.T) {
-	entries := make(map[string]Scmer)
-	compilations := 0
-	cache := func(key string, create func() Scmer) Scmer {
-		if value, ok := entries[key]; ok {
-			return value
-		}
-		compilations++
-		value := create()
-		entries[key] = value
-		return value
+func TestLambdaRebindCaptureFreeCode(t *testing.T) {
+	old := Eval(Read(t.Name(), `(lambda (x) (+ x 7))`, false), &Globalenv)
+	left, right := LambdaRebind(old), LambdaRebind(old)
+	if left.Proc() != right.Proc() {
+		t.Fatal("allocated a redundant capture-free header")
 	}
-	left := compileProcedureFactory(Read(t.Name(), `(lambda (x) (+ x 7))`, false), cache)
-	right := compileProcedureFactory(Read(t.Name(), `(lambda (x) (+ x 7))`, false), cache)
-	if compilations != 1 || left != right {
-		t.Fatal("capture-free code rebuilt an invocation closure", compilations)
+	if left.Proc().Body != right.Proc().Body {
+		t.Fatal("copied code per binding")
+	}
+	if jitEnabled && (left.Proc().nativeCode() == 0 || left.Proc().nativeCode() != right.Proc().nativeCode()) {
+		t.Fatal("compiled different code")
 	}
 	if Apply(left, NewInt(4)).Int() != 11 || Apply(right, NewInt(8)).Int() != 15 {
-		t.Fatal("shared code retained invocation arguments")
+		t.Fatal("context-free result changed")
 	}
 }
-
-func TestProcedureFactoryKeepsInvocationCapturesPrivate(t *testing.T) {
-	if !jitEnabled {
-		t.Skip("requires native factory compilation")
-	}
-	entries := make(map[string]Scmer)
-	compilations := 0
-	cache := func(key string, create func() Scmer) Scmer {
-		if value, exists := entries[key]; exists {
-			return value
-		}
-		compilations++
-		value := create()
-		entries[key] = value
-		return value
-	}
+func TestLambdaRebindNativeCapturesPrivate(t *testing.T) {
+	syntax := Read(t.Name(), `(lambda (x) (list (callback x) ((lambda (y) (callback y)) (+ x 1)) '("literal" 7)))`, false)
+	original := Eval(syntax, &Env{Vars: Vars{Symbol("callback"): NewFunc(func(args ...Scmer) Scmer { return args[0] })}, Outer: &Globalenv})
 	var callbacks []Scmer
-	for index := 0; index < 64; index++ {
-		offset := int64(index * 100)
+	for i := 0; i < 64; i++ {
+		offset := int64(i * 100)
 		callback := NewFunc(func(args ...Scmer) Scmer { return NewInt(offset + args[0].Int()) })
-		expression := Read(t.Name(), `(lambda (x) (list (callback x) ((lambda (y) (callback y)) (+ x 1)) '("literal" 7)))`, false)
-		// Stand in for an invocation-local reconstructed native callback.
-		var bind func(Scmer) Scmer
-		bind = func(value Scmer) Scmer {
-			if value.IsSymbol() && value.SymbolEquals("callback") {
-				return callback
-			}
-			if !value.IsSlice() {
-				return value
-			}
-			items := append([]Scmer(nil), value.Slice()...)
-			for i := range items {
-				items[i] = bind(items[i])
-			}
-			return NewSlice(items)
-		}
-		callbacks = append(callbacks, compileProcedureFactory(bind(expression), cache))
-	}
-	if compilations != 1 {
-		t.Fatalf("compiled %d factories for identical code", compilations)
+		callbacks = append(callbacks, LambdaRebind(original, callback))
 	}
 	var calls sync.WaitGroup
 	for index, callback := range callbacks {
@@ -91,7 +54,7 @@ func TestProcedureFactoryKeepsInvocationCapturesPrivate(t *testing.T) {
 		go func() {
 			defer calls.Done()
 			if result := Apply(callback, NewInt(3)); !Equal(result, expected) {
-				t.Errorf("invocation %d: %s, expected %s", index, String(result), String(expected))
+				t.Errorf("context %d: %s, want %s", index, String(result), String(expected))
 			}
 		}()
 	}
@@ -107,7 +70,7 @@ func TestCollationRelationReconstructsLocally(t *testing.T) {
 				if !ok {
 					t.Fatal("collation has no object-owned serialization contract")
 				}
-				if _, err := object.HandleClusterRequest(context.Background(), ClusterRequest{Method: "call", Arguments: []Scmer{NewString("a"), NewString("b")}}); err == nil {
+				if _, remote := object.(ClusterRequestHandler); remote {
 					t.Fatal("collation exposed a remote comparison endpoint")
 				}
 				bindings := new(SerializationContext).WithExport(func(ClusterObject, Scmer) (ClusterReference, error) {
@@ -156,11 +119,11 @@ func TestClusterCallbackOwnerCancellationAndInvocationBinding(t *testing.T) {
 	if !ok || Apply(value, NewInt(7)).Int() != 7 {
 		t.Fatal("callback lost its native callable ABI")
 	}
-	if _, err := object.HandleClusterRequest(context.Background(), ClusterRequest{Method: "invalid"}); err == nil {
+	if _, err := ClusterObjectValue(object, context.Background(), ClusterRequest{Method: "invalid"}); err == nil {
 		t.Fatal("invalid callback method accepted")
 	}
 	cancelOwner()
-	if _, err := object.HandleClusterRequest(context.Background(), ClusterRequest{Method: "call", Arguments: []Scmer{NewInt(9)}}); err != context.Canceled || calls != 1 {
+	if _, err := ClusterObjectValue(object, context.Background(), ClusterRequest{Method: "call", Arguments: []Scmer{NewInt(9)}}); err != context.Canceled || calls != 1 {
 		t.Fatalf("expired owner admitted callback: err=%v calls=%d", err, calls)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -304,6 +267,9 @@ func TestProcedureWireRejectsInvalidEnvelopesAndBounds(t *testing.T) {
 	for _, data := range [][]byte{
 		[]byte(`{"version":2,"code":null}`), []byte(`{"version":1,"code":17}`),
 		[]byte(`{"version":1`), bytes.Repeat([]byte(" "), maxProcedureWireBytes+1),
+		append([]byte{procedureWireVersion}, []byte(`(lambda_rebind)`)...),
+		append([]byte{procedureWireVersion}, []byte(`(lambda_rebind (+ 1 2))`)...),
+		append([]byte{procedureWireVersion}, []byte(`(lambda_rebind (cluster_value 17))`)...),
 	} {
 		if _, err := UnmarshalProcedure(data); err == nil {
 			t.Fatal("invalid envelope accepted")
@@ -531,9 +497,6 @@ func (v *standaloneSerializableValue) Serialize(*SerializationContext) (Scmer, e
 	}
 	return NewSlice([]Scmer{NewSymbol("quote"), NewSlice([]Scmer{NewString("portable"), NewInt(42)})}), nil
 }
-func (*standaloneSerializableValue) HandleClusterRequest(context.Context, ClusterRequest) (any, error) {
-	return nil, fmt.Errorf("standalone value needs no cluster requests")
-}
 
 func TestProcedureWireStandaloneObjectOwnsSerialization(t *testing.T) {
 	object := &standaloneSerializableValue{}
@@ -591,9 +554,6 @@ type eagerWireTestValue struct{}
 func (*eagerWireTestValue) ClusterObjectType() string { return "eager-test-value" }
 func (*eagerWireTestValue) Serialize(*SerializationContext) (Scmer, error) {
 	return NewSlice([]Scmer{NewSymbol("wire_test_construct_capture_once")}), nil
-}
-func (*eagerWireTestValue) HandleClusterRequest(context.Context, ClusterRequest) (any, error) {
-	return nil, fmt.Errorf("constructor fixture has no remote requests")
 }
 func TestProcedureWireMaterializesCapturesBeforeAnyInvocation(t *testing.T) {
 	constructions := 0
@@ -1053,34 +1013,127 @@ type procedureFactoryMarker struct {
 }
 
 //go:noinline
-func collectableProcedureFactoryCapture(t *testing.T, cache func(string, func() Scmer) Scmer) weak.Pointer[procedureFactoryMarker] {
+func collectableLambdaContext(t *testing.T, literal bool) (*lambdaPlan, weak.Pointer[procedureFactoryMarker]) {
 	marker := &procedureFactoryMarker{value: 17}
-	expression := NewSlice([]Scmer{NewSymbol("lambda"), NewSlice(nil), NewAny(marker)})
-	bound := compileProcedureFactory(expression, cache)
-	if Apply(bound).Any().(*procedureFactoryMarker).value != 17 {
-		t.Fatal("factory changed its capture")
+	var source Scmer
+	if literal {
+		source = NewProcStruct(Proc{Params: NewSlice(nil), Body: NewAny(marker), En: &Globalenv})
+	} else {
+		source = Eval(Read(t.Name(), `(lambda () marker)`, false), &Env{Vars: Vars{Symbol("marker"): NewAny(marker)}, Outer: &Globalenv})
 	}
-	return weak.Make(marker)
+	plan := procedureLambdaPlan(source.Proc())
+	bound := LambdaRebind(source, NewAny(marker))
+	if Apply(bound).Any().(*procedureFactoryMarker).value != 17 {
+		t.Fatal("context changed")
+	}
+	return plan, weak.Make(marker)
+}
+func TestLambdaPlanDoesNotRetainInvocation(t *testing.T) {
+	for _, literal := range []bool{false, true} {
+		t.Run(fmt.Sprint(literal), func(t *testing.T) {
+			plan, marker := collectableLambdaContext(t, literal)
+			deadline := time.Now().Add(3 * time.Second)
+			for marker.Value() != nil && time.Now().Before(deadline) {
+				runtime.GC()
+				time.Sleep(time.Millisecond)
+			}
+			if marker.Value() != nil {
+				t.Fatal("code plan retained an invocation capture")
+			}
+			runtime.KeepAlive(plan)
+		})
+	}
 }
 
-func TestProcedureFactoryCacheDoesNotRetainInvocation(t *testing.T) {
-	entries := make(map[string]Scmer)
-	cache := func(key string, create func() Scmer) Scmer {
-		if value, ok := entries[key]; ok {
-			return value
+func TestOutputAndForwardedRepliesSurviveGCWhileWorkIsPending(t *testing.T) {
+	for _, forwarded := range []bool{false, true} {
+		t.Run(fmt.Sprint(forwarded), func(t *testing.T) {
+			owner := &outputPipelineOwner{}
+			var pending weak.Pointer[ResultReceiver]
+			result := NewBool(true)
+			callback := &clusterCallback{ctx: context.Background(), batchResult: &result, endpoint: HandleFunc(func(value Scmer) {
+				pending = weak.Make(value.Slice()[1].Any().(*ResultReceiver))
+			})}
+			if forwarded {
+				handle, err := callback.forwardClosure(&SerializationContext{Invocation: NewAny(owner)})
+				if err != nil {
+					t.Fatal(err)
+				}
+				handle.Handle(NewSlice([]Scmer{NewSlice(nil), NewNil()}))
+			} else {
+				output, err := callback.bindOutput(context.Background(), owner)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for i := 0; i < 64; i++ {
+					Apply(output, NewInt(int64(i)))
+				}
+			}
+			runtime.GC()
+			receiver := pending.Value()
+			if receiver == nil {
+				t.Fatal("GC retired a return channel still needed by its invocation")
+			}
+			receiver.Handle(NewNil())
+			owner.finish()
+			runtime.KeepAlive(owner)
+		})
+	}
+}
+
+func TestClusterRequestBinaryFixedFields(t *testing.T) {
+	payload, err := EncodeClusterRequest(ClusterRequest{Method: "ack", Arguments: []Scmer{NewInt(64), NewInt(128)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(payload) != 17 || payload[0] != 6 || payload[8] != 64 || payload[16] != 128 {
+		t.Fatalf("ACK contains more than its operation and two binary integers: %x", payload)
+	}
+	decoded, err := DecodeClusterRequest(payload, ProcedureDecode{})
+	if err != nil || decoded.Method != "ack" || decoded.Arguments[0].Int() != 64 || decoded.Arguments[1].Int() != 128 {
+		t.Fatal(decoded, err)
+	}
+	for _, malformed := range [][]byte{nil, {0}, {255}, payload[:16], append(append([]byte{}, payload...), 0), {8}, {8, 0, 4, 'x'}} {
+		if _, err := DecodeClusterRequest(malformed, ProcedureDecode{}); err == nil {
+			t.Fatalf("accepted malformed payload %x", malformed)
 		}
-		value := create()
-		entries[key] = value
-		return value
 	}
-	marker := collectableProcedureFactoryCapture(t, cache)
-	deadline := time.Now().Add(3 * time.Second)
-	for marker.Value() != nil && time.Now().Before(deadline) {
-		runtime.GC()
-		time.Sleep(time.Millisecond)
+	if _, err := DecodeClusterRequest(append([]byte{2}, []byte("'(1) '(2)")...), ProcedureDecode{}); err == nil {
+		t.Fatal("accepted multiple dynamic tail values")
 	}
-	if marker.Value() != nil {
-		t.Fatal("pure factory cache retained a completed invocation")
+	request := ClusterRequest{Method: "rollback-savepoint", Arguments: []Scmer{NewString("private-capability"), NewSlice([]Scmer{NewInt(42), NewString("dynamic")})}}
+	payload, err = EncodeClusterRequest(request)
+	if err != nil {
+		t.Fatal(err)
 	}
-	runtime.KeepAlive(entries)
+	if !bytes.Equal(payload[3:3+len("private-capability")], []byte("private-capability")) {
+		t.Fatal("capability was serialized as Scheme")
+	}
+	decoded, err = DecodeClusterRequest(payload, ProcedureDecode{})
+	if err != nil || !Equal(NewSlice(decoded.Arguments), NewSlice(request.Arguments)) {
+		t.Fatal(decoded, err)
+	}
+}
+
+func TestClusterRequestJITsProcedureArgument(t *testing.T) {
+	procedure := Eval(Optimize(Read(t.Name(), "(lambda (x) (+ x 1))", false), &Globalenv, nil), &Globalenv)
+	payload, err := EncodeClusterRequest(ClusterRequest{Method: "call", Arguments: []Scmer{procedure}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := DecodeClusterRequest(payload, ProcedureDecode{})
+	if err != nil || len(request.Arguments) != 1 {
+		t.Fatal(request, err)
+	}
+	fn := request.Arguments[0]
+
+	if jitEnabled {
+		entry := fn.Proc().compiled()
+		if entry == nil || entry.CodePtr == nil {
+			t.Fatal("decoded procedure argument was not JITted")
+		}
+	}
+	if got := Apply(fn, NewInt(41)); got.Int() != 42 {
+		t.Fatalf("result=%v tag=%d payload=%s source=%s", got, fn.GetTag(), payload, String(procedure))
+	}
 }

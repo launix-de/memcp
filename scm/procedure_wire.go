@@ -13,8 +13,6 @@ package scm
 import "fmt"
 import "maps"
 import "bytes"
-import "strconv"
-import "strings"
 
 const procedureWireVersion = 3
 const maxProcedureWireBytes = 256 * 1024
@@ -33,11 +31,20 @@ func MarshalProcedure(value Scmer, bindings ...*SerializationContext) (data []by
 			data = nil
 		}
 	}()
+	if len(bindings) > 0 && bindings[0] != nil && bindings[0].Peer != nil && lambdaProcedure(value) != nil {
+		var source bytes.Buffer
+		source.WriteByte(procedureWireVersion)
+		Serialize(&source, value, &Globalenv, bindings...)
+		if source.Len() > maxProcedureWireBytes {
+			return nil, fmt.Errorf("procedure exceeds wire size limit")
+		}
+		return source.Bytes(), nil
+	}
 	if !value.IsProc() && value.IsNativeFunc() {
 		if _, ok := ClusterObjectOf(value); ok || len(bindings) > 0 && bindings[0] != nil && bindings[0].ExportHandle != nil && DeclarationForValue(value) == nil {
 			// Runtime callables keep their native local ABI. The normal serializer
 			// reconstructs their portable value/peer handle once, before invocation.
-			value = Eval(NewSlice([]Scmer{NewSymbol("lambda"), NewSymbol("args"), NewSlice([]Scmer{NewSymbol("apply"), value, NewSymbol("args")})}), &Globalenv)
+			value = nativeProcedureEnvelope(value)
 		}
 	}
 	if !value.IsProc() {
@@ -45,10 +52,19 @@ func MarshalProcedure(value Scmer, bindings ...*SerializationContext) (data []by
 		if declaration == nil || value.IsSymbol() {
 			return nil, fmt.Errorf("procedure encoding requires a Scheme procedure or declared builtin (tag %d)", value.GetTag())
 		}
-		value = Eval(NewSlice([]Scmer{NewSymbol("lambda"), NewSymbol("args"), NewSlice([]Scmer{NewSymbol("apply"), NewSymbol(declaration.Name), NewSymbol("args")})}), &Globalenv)
+		value = nativeProcedureEnvelope(value)
 	}
 	if len(bindings) == 0 || bindings[0] == nil {
 		bindings = []*SerializationContext{new(SerializationContext)}
+	}
+	if bindings[0].Peer != nil {
+		var source bytes.Buffer
+		source.WriteByte(procedureWireVersion)
+		Serialize(&source, value, &Globalenv, bindings...)
+		if source.Len() > maxProcedureWireBytes {
+			return nil, fmt.Errorf("procedure exceeds wire size limit")
+		}
+		return source.Bytes(), nil
 	}
 	closed := CloseProcedure(value)
 	proc := closed.Proc()
@@ -89,28 +105,43 @@ func UnmarshalProcedure(data []byte, options ...ProcedureDecode) (value Scmer, e
 	tokens := tokenize("remote procedure", source, false)
 	expression := readFrom(&tokens)
 	items, ok := scmerAsSlice(expression)
-	if !ok || (len(items) != 3 && len(items) != 4) || !scmerIsSymbol(items[0], "lambda") || len(tokens) != 0 {
+	if !ok || len(items) == 0 || len(tokens) != 0 {
 		return NewNil(), fmt.Errorf("procedure envelope must contain exactly one lambda")
 	}
-	params := items[1].WithoutSourceInfo()
-	if !params.IsSymbol() {
-		if !params.IsSlice() {
-			return NewNil(), fmt.Errorf("invalid procedure parameters")
+	if scmerIsSymbol(items[0], "lambda") {
+		if len(items) != 3 && len(items) != 4 {
+			return NewNil(), fmt.Errorf("invalid lambda envelope")
 		}
-		for _, param := range params.Slice() {
-			if !param.WithoutSourceInfo().IsSymbol() {
-				return NewNil(), fmt.Errorf("invalid procedure parameter")
+		params := items[1].WithoutSourceInfo()
+		if !params.IsSymbol() {
+			if !params.IsSlice() {
+				return NewNil(), fmt.Errorf("invalid procedure parameters")
+			}
+			for _, param := range params.Slice() {
+				if !param.WithoutSourceInfo().IsSymbol() {
+					return NewNil(), fmt.Errorf("invalid procedure parameter")
+				}
 			}
 		}
-	}
-	if len(items) == 4 {
-		count := items[3].WithoutSourceInfo()
-		if !count.IsInt() || count.Int() < 0 || count.Int() > 65536 {
-			return NewNil(), fmt.Errorf("invalid procedure frame size")
+		if len(items) == 4 {
+			count := items[3].WithoutSourceInfo()
+			if !count.IsInt() || count.Int() < 0 || count.Int() > 65536 {
+				return NewNil(), fmt.Errorf("invalid procedure frame size")
+			}
 		}
-	}
-	if err := validateProcedureWire(items[2], procedureWireBindings(params, items[2], nil), &Globalenv, false, 0); err != nil {
-		return NewNil(), err
+		if err := validateProcedureWire(items[2], procedureWireBindings(params, items[2], nil), &Globalenv, false, 0); err != nil {
+			return NewNil(), err
+		}
+	} else if scmerIsSymbol(items[0], "lambda_rebind") {
+		if len(items) < 2 {
+			return NewNil(), fmt.Errorf("invalid lambda rebinding")
+		}
+		code, ok := scmerAsSlice(items[1])
+		if !ok || len(code) != 2 || !scmerIsSymbol(code[0], "cluster_value") || !code[1].IsString() {
+			return NewNil(), fmt.Errorf("lambda rebinding requires a declared code reference")
+		}
+	} else if !scmerIsSymbol(items[0], "serialized_value") {
+		return NewNil(), fmt.Errorf("procedure envelope must construct a lambda")
 	}
 	if len(options) > 0 && options[0].Prepare != nil {
 		expression, err = options[0].Prepare(expression)
@@ -132,143 +163,15 @@ func UnmarshalProcedure(data []byte, options ...ProcedureDecode) (value Scmer, e
 	if err != nil {
 		return NewNil(), err
 	}
+	if expression.IsProc() {
+		return expression, nil
+	}
+
 	// Capture constructors have run exactly once; now build the callable and
 	// enclosed scope. The sender already optimized the plan; reconstruction
 	// must not optimize it again. Ordinary query code stays inert until invocation.
-	if len(options) > 0 && options[0].Cache != nil && jitEnabled {
-		return compileProcedureFactory(expression, options[0].Cache), nil
-	}
+
 	return CompileJIT(Eval(expression, &Globalenv), true), nil
-}
-
-// Compile a pure factory, not a bound callback. Its runtime arguments become
-// ordinary native closure captures. The existing lambda compiler therefore
-// owns binding, GC roots and source reconstruction on a later delegation.
-// Cache ownership/eviction belongs to the embedding's existing memory budget.
-func compileProcedureFactory(expression Scmer, cache func(string, func() Scmer) Scmer) Scmer {
-	used := make(map[Symbol]bool)
-	var symbols func(Scmer)
-	symbols = func(value Scmer) {
-		if value.IsSymbol() {
-			used[value.Symbol()] = true
-		} else if value.IsSlice() {
-			for _, item := range value.Slice() {
-				symbols(item)
-			}
-		}
-	}
-	symbols(expression)
-	var params, captures []Scmer
-	var runtimeData func(Scmer) bool
-	runtimeData = func(value Scmer) bool {
-		if value.GetTag() >= 100 {
-			return true
-		}
-		if _, object := ClusterObjectOf(value); object {
-			return true
-		}
-		switch value.GetTag() {
-		case tagAny, tagFastDict, tagProc, tagFuncEnv, tagClosure, tagJIT, tagParser, tagPromise, tagVector, tagBSON, tagCString, tagBString, tagLZ4:
-			return true
-		case tagFunc:
-			return DeclarationForValue(value) == nil
-		case tagSlice:
-			for _, item := range value.Slice() {
-				if runtimeData(item) {
-					return true
-				}
-			}
-		}
-		return false
-	}
-	bind := func(value Scmer) Scmer {
-		name := Symbol("\x00peer-capture:" + strconv.Itoa(len(captures)))
-		for used[name] {
-			name += ":"
-		}
-		params = append(params, NewSymbol(string(name)))
-		captures = append(captures, value)
-		return params[len(params)-1]
-	}
-	var factor func(Scmer) Scmer
-	factor = func(value Scmer) Scmer {
-		plain := value.WithoutSourceInfo()
-		if _, object := ClusterObjectOf(plain); object {
-			return bind(plain)
-		}
-		if plain.GetTag() >= 100 {
-			return bind(plain)
-		}
-		switch plain.GetTag() {
-		case tagAny, tagFastDict, tagProc, tagFuncEnv, tagClosure, tagJIT, tagParser, tagPromise, tagVector, tagBSON, tagCString, tagBString, tagLZ4:
-			return bind(plain)
-		case tagFunc:
-			if DeclarationForValue(plain) == nil {
-				return bind(plain)
-			}
-		}
-		if !plain.IsSlice() {
-			return value
-		}
-		items := plain.Slice()
-		if len(items) == 2 && scmerIsSymbol(items[0], "quote") {
-			// Quoted runtime data may enclose arbitrary native captures. Supplying
-			// the whole value prevents a cached tree from retaining any of them.
-			if runtimeData(items[1]) {
-				return bind(items[1])
-			}
-			return value
-		}
-		var result []Scmer
-		for i, item := range items {
-			next := factor(item)
-			if next != item && result == nil {
-				result = append([]Scmer(nil), items...)
-			}
-			if result != nil {
-				result[i] = next
-			}
-		}
-		if result == nil {
-			return value
-		}
-		return NewSlice(result)
-	}
-	body := factor(expression)
-	factoryExpression := body
-	if len(captures) > 0 {
-		factoryExpression = NewSlice([]Scmer{NewSymbol("lambda"), NewSlice(params), body})
-	}
-	var source bytes.Buffer
-	// Preserve numbered operands in cache identity too; diagnostic printing may
-	// rename them to parameter symbols and is not an IR identity function.
-	Serialize(&source, factoryExpression, &Globalenv, new(SerializationContext))
-	factory := cache(source.String(), func() Scmer { return CompileJIT(Eval(ownProcedureCode(factoryExpression), &Globalenv), true) })
-	if len(captures) == 0 {
-		return factory
-	}
-	return Apply(factory, captures...)
-}
-
-// Cache misses detach code tokens from the incoming buffer. Small substrings
-// must not keep a complete packet (including invocation data) alive in a code
-// cache. Hits neither copy nor retain the newly received syntax tree.
-func ownProcedureCode(value Scmer) Scmer {
-	switch value.GetTag() {
-	case tagString:
-		return NewString(strings.Clone(value.String()))
-	case tagSymbol:
-		return NewSymbol(strings.Clone(value.String()))
-	case tagSlice:
-		items := value.Slice()
-		owned := make([]Scmer, len(items))
-		for i, item := range items {
-			owned[i] = ownProcedureCode(item)
-		}
-		return NewSlice(owned)
-	default:
-		return value
-	}
 }
 
 func procedureWireBindings(params, body Scmer, parent map[Symbol]struct{}) map[Symbol]struct{} {
@@ -330,6 +233,9 @@ func procedurePatternBindings(pattern Scmer, bound map[Symbol]struct{}) {
 }
 
 func closeProcedurePattern(pattern Scmer, callFrame *Env, scopes []map[Symbol]struct{}) Scmer {
+	return transformProcedurePattern(pattern, callFrame, scopes, func(expression Scmer) Scmer { return closedCaptureLiteral(Eval(expression, callFrame)) })
+}
+func transformProcedurePattern(pattern Scmer, callFrame *Env, scopes []map[Symbol]struct{}, capture func(Scmer) Scmer) Scmer {
 	value := pattern.WithoutSourceInfo()
 	if !value.IsSlice() {
 		return pattern
@@ -346,10 +252,10 @@ func closeProcedurePattern(pattern Scmer, callFrame *Env, scopes []map[Symbol]st
 		closed[index] = value
 	}
 	if len(items) == 2 && scmerIsSymbol(items[0], "eval") {
-		replace(1, closeProcedureScopeCaptures(items[1], callFrame, scopes))
+		replace(1, transformProcedureCaptures(items[1], callFrame, scopes, capture))
 	} else {
 		for i, item := range items {
-			replace(i, closeProcedurePattern(item, callFrame, scopes))
+			replace(i, transformProcedurePattern(item, callFrame, scopes, capture))
 		}
 	}
 	if closed == nil {

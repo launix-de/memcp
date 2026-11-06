@@ -404,7 +404,7 @@ func WithSession(session Scmer, fn Scmer) Scmer {
 		return Apply(fn)
 	}
 	original := fn.Proc()
-	proc := original.snapshot()
+	proc := original.Snapshot()
 	outer := original.En
 	if outer == nil {
 		outer = &Globalenv

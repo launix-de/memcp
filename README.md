@@ -355,13 +355,54 @@ and independent backend namespace, including separate buckets/prefixes for
 remote storage. The existing persistence backends are used without modification.
 `schema.json` remains the schema format. `SHUTDOWN` affects the addressed instance.
 
-Both listeners negotiate `memcp.mosi.v2` and exchange bounded binary WebSocket
-messages. Each message contains a versioned envelope, JSON control metadata and
-raw compressed transfer bytes, without base64 expansion of shard chunks. Text
-messages, unsupported versions and oversized messages are rejected. Peers using
-older protocol versions must be upgraded together. SQL requests on the same HTTP port
-continue to use their ordinary authentication; `/cluster` owns its existing
-replication authentication and per-message authorization.
+Both listeners negotiate `memcp.channels.v9` and exchange bounded binary WebSocket
+messages. Every application frame contains exactly one byte giving the channel
+name's byte length (1–255), the channel name, then its opaque payload. There is no
+transport request ID, reply type, version prefix or JSON envelope. Registered
+channel handlers own their payload formats: MOSI starts with a numeric action byte
+and encodes only that action’s parameters, followed by raw compressed bytes for
+chunks. Scan, INSERT, object, membership and replication operations use their own
+binary parameter layouts without field names or a generic method/data envelope.
+Runtime values and closures use the Scheme serializer.
+For a peer destination, the serializer declares immutable closure bindings and lambda code
+once using a UUID and the self-contained Scheme value. Later messages use
+`(cluster_value uuid)`; closures use `(lambda_rebind old_func context...)` to share
+compiled code with private bindings. Declarations are pushed ahead of their uses
+on the same FIFO; no receiver pull or synchronous acknowledgement is required.
+Each peer tracks its own declarations. Received values are weakly indexed, and
+Go `AddCleanup` notifies the sender when the last local owner disappears.
+Retirement also covers already prepared and admitted messages, so queued work
+keeps working without retaining values indefinitely. Serialization without a
+peer, including persisted schemas, remains self-contained.
+
+Commands that need a result include a return-channel URI in their own payload.
+The reply is another ordinary channel delivery, and the consumer chooses when to
+wait. Sending only publishes to a bounded queue without waiting for socket I/O,
+queue space or a response; exhaustion returns an immediate error. Bulk transfer
+producers separately admit their next chunk before publication.
+
+All channels implement the same raw-byte `ClusterRequestHandler`; capture
+serialization is an independent concern. Object operation codes, ordered ACK
+counters and transaction capabilities use binary fields, followed by at most one
+serialized Scheme value for dynamic arguments. Object calls address their
+registered channel directly; they do not repeat the URI, type or immutable view.
+
+One-shot return channels deregister on completion or cancellation. A final
+result carries its release in the same delivery, avoiding a separate GC close.
+Imported
+callback handles and native object references own GC leases, weakly indexed on
+the importing peer. Go `AddCleanup` queues a close notification to the same
+channel used for calls. The owner then drops that remote registration; freeing
+forwarding callbacks can release further handles on other peers. Cleanup never
+waits for a peer response. Accepted callbacks retain their own Go references;
+query cleanup still joins their execution before releasing query resources.
+Query-owned hooks retain callback registrations weakly so they cannot prevent
+early GC-driven release. Query completion also explicitly breaks callback cycles;
+local GC and release notifications alone do not collect cross-peer cycles.
+Text messages, unsupported versions and oversized messages are rejected. Peers
+using older protocol versions must be upgraded together. SQL requests on the same
+HTTP port continue to use their ordinary authentication; `/cluster` owns its
+existing replication authentication and per-message authorization.
 The shared route dispatches the explicit `X-MemCP-Role` to its enabled adapter;
 selecting a role grants no rights, and removing one adapter preserves others.
 
@@ -493,7 +534,7 @@ writes retain their lifetime rules; this threshold is not a hard process RSS cap
 It reserves the remaining tracked budget for computation and query caches.
 
 Tasks and control messages are fire-and-forget; the receiver routes results and
-serialized panics to the reducer's UUID return channel. Cancellation propagates to
+serialized panics to the reducer's numeric return channel. Cancellation propagates to
 nested scans and remote descendants at shard scheduling boundaries, without checks
 inside item loops. `cluster_status` reports peer membership, placement counters
 and measured shard admission usage.

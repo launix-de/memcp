@@ -339,6 +339,9 @@ func astStructuralEqual(a, b Scmer) bool {
 	if a.GetTag() != b.GetTag() {
 		return false
 	}
+	if a.GetTag() == tagNthLocalVar {
+		return a.NthLocalVar() == b.NthLocalVar()
+	}
 	if a.GetTag() != tagSlice {
 		return Equal(a, b)
 	}

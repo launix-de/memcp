@@ -83,7 +83,7 @@ func TestClusterTransactionExportKeepsNumericIdentityAndLocalRegistration(t *tes
 	cluster := globalTestCluster(t, tbl.schema.Name)
 	previous := nodeScans.Swap(&nodeScanService{cluster: cluster})
 	defer nodeScans.Store(previous)
-	value, err := tx.HandleClusterRequest(context.Background(), scm.ClusterRequest{Method: "view"})
+	value, err := tx.executeClusterRequest(context.Background(), scm.ClusterRequest{Method: "view"})
 	if err != nil {
 		t.Fatal(err)
 	}

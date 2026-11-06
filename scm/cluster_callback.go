@@ -5,9 +5,10 @@ SPDX-License-Identifier: GPL-3.0-or-later
 package scm
 
 import "fmt"
-import "errors"
 import "sync"
+import "errors"
 import "context"
+import "runtime"
 
 // A native callback retains process-local state, such as a connection writer.
 // Scheme callers keep their normal local ABI; a captured callback addresses
@@ -81,7 +82,7 @@ func (callback *clusterCallback) Serialize(ctx *SerializationContext) (Scmer, er
 			method = "batch"
 			args = args[0].Slice()
 		}
-		value, err := ClusterObjectValue(callback, callback.ctx, ClusterRequest{Method: method, Arguments: args})
+		value, err := ClusterViewValue(callback.executeClusterRequest(callback.ctx, ClusterRequest{Method: method, Arguments: args}))
 		if err != nil {
 			panic(err)
 		}
@@ -105,9 +106,11 @@ func (callback *clusterCallback) forwardClosure(bindings *SerializationContext) 
 	}
 	var mu sync.Mutex
 	var pending sync.WaitGroup
+	inflight := make(map[*ResultReceiver]struct{})
 	closed := false
 	var failure any
 	finish := func() {
+		defer runtime.KeepAlive(inflight)
 		mu.Lock()
 		closed = true
 		mu.Unlock()
@@ -135,15 +138,19 @@ func (callback *clusterCallback) forwardClosure(bindings *SerializationContext) 
 		if closed {
 			mu.Unlock()
 			if reply != nil {
-				reply.Handle(NewAny(&handleFailure{"forwarded closure owner has finished"}))
+				SendHandleResult(reply, NewAny(&handleFailure{"forwarded closure owner has finished"}))
 			}
 			return
 		}
 		pending.Add(1)
 		mu.Unlock()
 		receiver := NewResultReceiver()
+		mu.Lock()
+		inflight[receiver] = struct{}{}
+		mu.Unlock()
 		receiver.onResult = func(value Scmer) {
 			defer pending.Done()
+			defer func() { mu.Lock(); delete(inflight, receiver); mu.Unlock() }()
 			defer func() {
 				if err := recover(); err != nil {
 					mu.Lock()
@@ -154,7 +161,7 @@ func (callback *clusterCallback) forwardClosure(bindings *SerializationContext) 
 				}
 			}()
 			if reply != nil {
-				reply.Handle(value)
+				SendHandleResult(reply, value)
 			}
 		}
 		defer func() {
@@ -192,7 +199,7 @@ func (callback *clusterCallback) value() Scmer {
 	return NewClusterFunc(call, callback, clusterCallbackType)
 }
 
-func (callback *clusterCallback) HandleClusterRequest(ctx context.Context, request ClusterRequest) (any, error) {
+func (callback *clusterCallback) executeClusterRequest(ctx context.Context, request ClusterRequest) (any, error) {
 	if err := ctx.Err(); err != nil {
 		return NewNil(), err
 	}
@@ -258,6 +265,7 @@ func (callback *clusterCallback) bindOutput(ctx context.Context, owner interface
 	var mu sync.Mutex
 	batch := make([]Scmer, 0, batchSize)
 	pending := 0
+	inflight := make(map[*ResultReceiver]struct{})
 	closing := false
 	var failure any
 	wake := make(chan struct{})
@@ -287,8 +295,12 @@ func (callback *clusterCallback) bindOutput(ctx context.Context, owner interface
 			}
 		}
 		receiver := NewResultReceiver()
+		mu.Lock()
+		inflight[receiver] = struct{}{}
+		mu.Unlock()
 		receiver.onResult = func(value Scmer) {
 			mu.Lock()
+			delete(inflight, receiver)
 			pending--
 			if value.GetTag() == tagAny {
 				if err, ok := value.Any().(*handleFailure); ok && failure == nil {
@@ -323,6 +335,7 @@ func (callback *clusterCallback) bindOutput(ctx context.Context, owner interface
 		}
 	}
 	finish := func() {
+		defer runtime.KeepAlive(inflight)
 		mu.Lock()
 		closing = true
 		tail := batch
@@ -379,4 +392,13 @@ func (callback *clusterCallback) bindOutput(ctx context.Context, owner interface
 		return result
 	}
 	return NewClusterFunc(call, &clusterCallback{endpoint: callback.endpoint, ctx: ctx, batchResult: callback.batchResult}, clusterCallbackType), nil
+}
+
+func (callback *clusterCallback) HandleClusterRequest(ctx context.Context, payload []byte) {
+	ReceiveClusterValue(ctx, payload, func(request ClusterRequest) (any, error) { return callback.executeClusterRequest(ctx, request) })
+}
+
+func (callback *clusterCallback) ClusterView(ctx context.Context) (Scmer, error) {
+	value, err := callback.executeClusterRequest(ctx, ClusterRequest{Method: "view"})
+	return ClusterViewValue(value, err)
 }

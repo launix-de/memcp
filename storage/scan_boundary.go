@@ -18,7 +18,6 @@ package storage
 
 import "fmt"
 import "unsafe"
-import "context"
 import "strings"
 import "encoding/json"
 
@@ -114,9 +113,6 @@ func (b *scanBoundaryBox) OrderMetadata() string               { return b.orderM
 func (b *scanBoundaryBox) Mandatory() bool                     { return b.mandatory }
 
 func (*scanBoundaryBox) ClusterObjectType() string { return "scan-boundary" }
-func (*scanBoundaryBox) HandleClusterRequest(context.Context, scm.ClusterRequest) (any, error) {
-	return nil, fmt.Errorf("immutable scan boundaries use portable constructors")
-}
 
 // Boundaries are immutable plan values. Reconstruct them once on the worker;
 // adjacent invocation values and native reader/transaction rights stay separate.

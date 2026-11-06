@@ -22,6 +22,7 @@ import "io"
 import "fmt"
 import "math"
 import "bytes"
+import "unsafe"
 import "strconv"
 import "strings"
 
@@ -36,11 +37,13 @@ const (
 // forwards to the caller's bytes.Buffer or consumes bytes directly into FNV-1a.
 // Avoiding io.Writer/hash.Hash dispatch matters for the many tiny AST tokens.
 type schemeTextWriter struct {
-	buffer     *bytes.Buffer
-	objects    *SerializationContext
-	references map[ClusterObject]Scmer
-	literals   map[Scmer]int64 // envelope-local constructor IDs; same capture namespace as objects
-	hash       uint64
+	buffer        *bytes.Buffer
+	objects       *SerializationContext
+	references    map[ClusterObject]Scmer
+	literals      map[Scmer]int64 // envelope-local constructor IDs; same capture namespace as objects
+	hash          uint64
+	cacheCaptures bool                      // immutable closure bindings, never one-use result buffers
+	procedures    map[*lambdaMetadata]int64 // no borrowed Proc headers in heap maps
 }
 
 func bufferTextWriter(buffer *bytes.Buffer) *schemeTextWriter {
@@ -123,7 +126,7 @@ func String(v Scmer) string {
 		// Pretty-print procedures as (lambda ...) expressions without
 		// serializing the captured environment to avoid recursion.
 		var b bytes.Buffer
-		serializeProcShallow(bufferTextWriter(&b), v.Proc().snapshot(), &Globalenv)
+		serializeProcShallow(bufferTextWriter(&b), v.Proc().Snapshot(), &Globalenv)
 		return b.String()
 	case tagJIT:
 		var b bytes.Buffer
@@ -215,7 +218,7 @@ func WriteStringValue(w *schemeTextWriter, v Scmer) {
 	case tagFunc:
 		w.WriteString("[native func]")
 	case tagProc:
-		serializeProcShallow(w, v.Proc().snapshot(), &Globalenv)
+		serializeProcShallow(w, v.Proc().Snapshot(), &Globalenv)
 	case tagJIT:
 		serializeProcShallow(w, v.JIT().Proc, &Globalenv)
 	case tagFastDict:
@@ -281,7 +284,19 @@ func Serialize(b *bytes.Buffer, v Scmer, glob *Env, objects ...*SerializationCon
 	if len(objects) > 0 {
 		writer.objects = objects[0]
 		if writer.objects != nil {
-			writer.objects.prepare(v, true)
+			var visiting [8]*lambdaContextSnapshot
+			writer.objects.prepare(v, true, visiting[:0])
+			if writer.objects.Peer != nil && lambdaProcedure(v) != nil {
+				// The enclosing decoder already constructs a root callable once.
+				// Only nested captures need an envelope-local alias constructor.
+				expression, _, err := writer.objects.cachedValue(v)
+				if err != nil {
+					panic(err)
+				}
+				writer.cacheCaptures = true
+				serializeEx(writer, expression, glob, glob, nil)
+				return
+			}
 		}
 	}
 	serializeEx(writer, v, glob, glob, nil)
@@ -308,6 +323,30 @@ func serializeEx(b *schemeTextWriter, v Scmer, en *Env, glob *Env, p *Proc) {
 		serializeEx(b, v, en.Outer, glob, p)
 		b.WriteString(")")
 		return
+	}
+	if b.objects != nil && b.objects.Peer != nil && lambdaProcedure(v) != nil {
+		identity := lambdaProcedure(v).serializationMetadata()
+		if id := b.procedures[identity]; id != 0 {
+			serializeEx(b, NewSlice([]Scmer{NewSymbol("serialized_value"), NewInt(id), NewNil()}), glob, glob, nil)
+			return
+		}
+		if expression, ok, err := b.objects.cachedValue(v); err != nil {
+			panic(err)
+		} else if ok {
+			if b.procedures == nil {
+				b.procedures = make(map[*lambdaMetadata]int64)
+			}
+			id := b.procedures[identity]
+			if id == 0 {
+				id = int64(len(b.literals) + len(b.references) + len(b.procedures) + 1)
+				b.procedures[identity] = id
+			}
+			previous := b.cacheCaptures
+			b.cacheCaptures = true
+			serializeEx(b, NewSlice([]Scmer{NewSymbol("serialized_value"), NewInt(id), expression}), glob, glob, nil)
+			b.cacheCaptures = previous
+			return
+		}
 	}
 	if b.objects != nil && v.GetTag() == tagAny {
 		if handle, ok := v.Any().(Handle); ok {
@@ -344,7 +383,7 @@ func serializeEx(b *schemeTextWriter, v Scmer, en *Env, glob *Env, p *Proc) {
 				// this capture once before compiling any row callback, even for an
 				// empty shard. The envelope-local ID also preserves capture aliases.
 				if b.objects != nil {
-					expression = NewSlice([]Scmer{NewSymbol("serialized_value"), NewInt(int64(len(b.references) + len(b.literals) + 1)), expression})
+					expression = NewSlice([]Scmer{NewSymbol("serialized_value"), NewInt(int64(len(b.references) + len(b.literals) + len(b.procedures) + 1)), expression})
 				}
 				b.references[object] = expression
 			}
@@ -352,7 +391,12 @@ func serializeEx(b *schemeTextWriter, v Scmer, en *Env, glob *Env, p *Proc) {
 				items := expression.Slice()
 				expression = NewSlice([]Scmer{items[0], items[1], NewNil()})
 			}
+			// Constructor fields are protocol data. In particular a view is already
+			// serialized source, which the static offer walker must read literally.
+			previous := b.cacheCaptures
+			b.cacheCaptures = false
 			serializeEx(b, expression, glob, glob, nil)
+			b.cacheCaptures = previous
 			return
 		}
 	}
@@ -396,6 +440,14 @@ func serializeEx(b *schemeTextWriter, v Scmer, en *Env, glob *Env, p *Proc) {
 			b.WriteString(".0")
 		}
 	case tagString, tagCString, tagBString, tagLZ4:
+		if b.cacheCaptures && b.objects != nil && b.objects.Peer != nil && v.IsString() {
+			if expression, ok, err := b.objects.cachedValue(v); err != nil {
+				panic(err)
+			} else if ok {
+				serializeEx(b, expression, glob, glob, nil)
+				return
+			}
+		}
 		b.WriteByte('"')
 		if v.IsBufferString() {
 			serializeBufferString(b, v)
@@ -507,25 +559,24 @@ func serializeEx(b *schemeTextWriter, v Scmer, en *Env, glob *Env, p *Proc) {
 		if b.objects != nil {
 			v = CloseProcedure(v)
 		}
-		serializeProcShallow(b, v.Proc().snapshot(), glob)
+		serializeProcShallow(b, v.Proc().Snapshot(), glob)
 	case tagFastDict:
-		if b.objects != nil && b.objects.Export != nil && v.FastDict() != nil && len(v.FastDict().Pairs) >= 512 {
-			literal, err := b.objects.literal(v)
-			if err != nil {
+		if b.cacheCaptures && b.objects != nil && b.objects.Peer != nil {
+			if expression, ok, err := b.objects.cachedValue(v); err != nil {
 				panic(err)
-			}
-			if literal != nil {
-				serializeEx(b, NewAny(literal), glob, glob, nil)
+			} else if ok {
+				serializeEx(b, expression, glob, glob, nil)
 				return
 			}
 		}
+
 		if b.objects != nil {
 			if b.literals == nil {
 				b.literals = make(map[Scmer]int64)
 			}
 			id, exists := b.literals[v]
 			if !exists {
-				id = int64(len(b.references) + len(b.literals) + 1)
+				id = int64(len(b.references) + len(b.literals) + len(b.procedures) + 1)
 				b.literals[v] = id
 			}
 			b.WriteString("(serialized_value ")
@@ -666,7 +717,8 @@ func serializeNativeFunc(b *schemeTextWriter, fn any, en *Env) {
 	switch f := fn.(type) {
 	case func(...Scmer) Scmer:
 		if proc := JITProcForFunction(f); proc != nil {
-			serializeProcShallow(b, *proc, &Globalenv)
+			closed := CloseProcedure(Scmer{(*byte)(unsafe.Pointer(proc)), makeAux(tagProc, 0)})
+			serializeProcShallow(b, closed.Proc().Snapshot(), &Globalenv)
 			return
 		}
 		if col, rev, ok := LookupCollate(f); ok {
@@ -771,6 +823,14 @@ func prettyLines(v Scmer, glob *Env, width int, indent int) []string {
 // Ordinary quoted source remains inert, including literal cluster_object forms.
 func serializeClusterLiteral(b *schemeTextWriter, value Scmer, glob *Env) {
 	value = value.WithoutSourceInfo()
+	if b.cacheCaptures && b.objects != nil && b.objects.Peer != nil && (value.IsSlice() || value.IsFastDict() || value.IsString()) {
+		if expression, ok, err := b.objects.cachedValue(value); err != nil {
+			panic(err)
+		} else if ok {
+			serializeEx(b, expression, glob, glob, nil)
+			return
+		}
+	}
 	if value.IsSlice() {
 		b.WriteString("(list")
 		for _, item := range value.Slice() {

@@ -94,14 +94,16 @@ func TestClusterReceiveThrottlesMessagesAndJoinsCancellation(t *testing.T) {
 		if err != nil {
 			return
 		}
-		serverPeer <- newMosiPeer(conn, func(context.Context, string, []byte) (any, error) { return true, nil }, nil)
+		serverPeer <- newMosiPeer(conn, func(p *mosiPeer) {
+			registerNodeCommand(p, "echo", func(context.Context, []byte) (any, error) { return true, nil })
+		})
 	}))
 	defer server.Close()
 	conn, _, err := websocket.DefaultDialer.Dial("ws"+server.URL[4:]+"/cluster", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	client := newMosiPeer(conn, nil, nil)
+	client := newMosiPeer(conn)
 	peer := <-serverPeer
 	defer func() { client.close(); peer.close(); client.wait(); peer.wait() }()
 	// Only native /cluster WebSocket messages enter this instrumentation.
@@ -114,7 +116,7 @@ func TestClusterReceiveThrottlesMessagesAndJoinsCancellation(t *testing.T) {
 		t.Fatal("ordinary HTTP was throttled")
 	}
 	started := time.Now()
-	if err := client.call(context.Background(), "echo", true, nil); err != nil {
+	if err := client.request(context.Background(), "echo", true, nil); err != nil {
 		t.Fatal(err)
 	}
 	if time.Since(started) < 80*time.Millisecond {
@@ -128,10 +130,10 @@ func TestClusterReceiveThrottlesMessagesAndJoinsCancellation(t *testing.T) {
 	time.Sleep(250 * time.Millisecond)
 	started = time.Now()
 	payload := string(bytes.Repeat([]byte("x"), 24000))
-	if err := client.call(context.Background(), "echo", payload, nil); err != nil {
+	if err := client.request(context.Background(), "echo", payload, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := client.call(context.Background(), "echo", payload, nil); err != nil {
+	if err := client.request(context.Background(), "echo", payload, nil); err != nil {
 		t.Fatal(err)
 	}
 	if time.Since(started) < 192*time.Millisecond {

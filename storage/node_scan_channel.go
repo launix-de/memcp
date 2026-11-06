@@ -15,9 +15,9 @@ import "sync"
 import "time"
 import "context"
 import "strings"
+import "strconv"
 import "sync/atomic"
 import "runtime/debug"
-import "strconv"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/go-mysqlstack/sqldb"
 
@@ -25,9 +25,10 @@ import "github.com/launix-de/go-mysqlstack/sqldb"
 // delivered as slot + payload through the ordinary handle registry. Cancelling never interrupts a shard's item
 // loop: it fences new shard tasks and is inherited by nested scan invocations.
 type scanCompletion struct {
-	Offers []scm.ClusterReference `json:"offers,omitempty"`
-	Data   []byte                 `json:"data,omitempty"`
-	Panic  *scanPanic             `json:"panic,omitempty"`
+	bindings *scm.SerializationContext
+	Offers   []scm.ClusterReference `json:"offers,omitempty"`
+	Data     []byte                 `json:"data,omitempty"`
+	Panic    *scanPanic             `json:"panic,omitempty"`
 }
 type scanPanic struct {
 	SQL     *sqldb.SQLError `json:"sql,omitempty"`
@@ -174,7 +175,7 @@ func (*clusterReceiver) ClusterObjectType() string { return "receiver" }
 func (receiver *clusterReceiver) Serialize(ctx *scm.SerializationContext) (scm.Scmer, error) {
 	return ctx.ReferenceExpression(receiver)
 }
-func (receiver *clusterReceiver) HandleClusterRequest(ctx context.Context, request scm.ClusterRequest) (any, error) {
+func (receiver *clusterReceiver) executeClusterRequest(ctx context.Context, request scm.ClusterRequest) (any, error) {
 	if request.Method == "view" {
 		return scm.NewNil(), nil
 	}
@@ -308,7 +309,7 @@ func postScanMessage(ctx context.Context, peer *mosiPeer, method string, value a
 	if err != nil {
 		return err
 	}
-	message := mosiMessage{Method: method, Data: data}
+	message := mosiMessage{Channel: method, Payload: data}
 	message.encoded, err = encodeMosiMessage(message)
 	if err != nil {
 		return err
@@ -347,69 +348,72 @@ func (s *scanRPCSession) channelMessage(ctx context.Context, method string, data
 		}
 		s.tasks.cancelTask(id)
 		return nil, nil
-	case "node.control":
-		var request struct {
-			Offers []scm.ClusterReference `json:"offers,omitempty"`
-			Return string                 `json:"return"`
-			Method string                 `json:"method"`
-			Data   []byte                 `json:"data"`
-		}
-		if err := unmarshalNode(data, &request); err != nil {
-			return nil, err
-		}
-		id := request.Return
-		if request.Return == "" || !s.validOperation(id) {
-			return nil, fmt.Errorf("invalid operation identity")
-		}
-		completion := scanCompletion{}
-		defer s.service.discardObjectOffers(s.peer, request.Offers)
-		func() {
-			defer func() {
-				if failure := recover(); failure != nil {
-					completion.Panic = freezeScanPanic(failure)
-				}
-			}()
-			scope, err := s.tasks.begin(ctx, id)
-			if err != nil {
-				panic(err)
-			}
-			defer s.tasks.finish(id)
-			if request.Method == "node.control" || request.Method == "scan.result" || request.Method == "scan.cancel" {
-				panic("invalid nested control envelope")
-			}
-			value, err := s.handle(scope.ctx, request.Method, request.Data)
-			if err != nil {
-				panic(err)
-			}
-			if exported, ok := value.(interface{ ClusterObjectOffers() []scm.ClusterReference }); ok {
-				completion.Offers = transferManifest(exported.ClusterObjectOffers())
-			}
-			// boundedScanReply already encoded and checked this response. Keep
-			// those immutable bytes through the collector; do not marshal even
-			// a RawMessage wrapper here (which scans and copies it again).
-			if encoded, ok := value.(encodedReply); ok {
-				completion.Data = encoded.data
-				return
-			}
-			completion.Data, err = marshalNode(value)
-			if err != nil {
-				panic(err)
-			}
-		}()
-		s.service.commitObjectOffers(s.peer, completion.Offers)
-		payload, err := freezeScanValue(scm.NewString(string(mustNodeMetadata(completion))))
-		if err != nil {
-			return nil, err
-		}
-		if err := s.peer.send(ctx, mosiMessage{Slot: controlReturnSlot(request.Return), Payload: payload}); err != nil {
-			s.service.refuseObjectOffers(s.peer, completion.Offers)
-			return nil, err
-		}
-		return nil, nil
 
 	}
 	return nil, fmt.Errorf("unknown scan channel message")
 }
+
+// Each registered operation supplies its own decoder; the channel, never an
+// inner method string, selects execution. This helper only owns task lifetime.
+func (s *scanRPCSession) receiveInvocation(ctx context.Context, method string, payload []byte) (any, error) {
+	id, offers, data, err := decodeInvocation(method, payload)
+	if err != nil {
+		return nil, err
+	}
+	if id == "" || !s.validOperation(id) {
+		return nil, fmt.Errorf("invalid operation identity")
+	}
+	completion := scanCompletion{}
+	defer func() { completion.bindings.Queued(); queuedValuePublications(completion.Offers) }()
+	defer s.service.discardObjectOffers(s.peer, offers)
+	func() {
+		defer func() {
+			if failure := recover(); failure != nil {
+				completion.Panic = freezeScanPanic(failure)
+			}
+		}()
+		scope, err := s.tasks.begin(ctx, id)
+		if err != nil {
+			panic(err)
+		}
+		defer s.tasks.finish(id)
+		value, err := s.handle(scope.ctx, method, data)
+		if err != nil {
+			panic(err)
+		}
+		if source, ok := value.(interface {
+			serializationBindings() *scm.SerializationContext
+		}); ok {
+			completion.bindings = source.serializationBindings()
+		}
+		if exported, ok := value.(interface{ ClusterObjectOffers() []scm.ClusterReference }); ok {
+			completion.Offers = transferManifest(exported.ClusterObjectOffers())
+		}
+		// boundedScanReply already encoded and checked this response. Keep
+		// those immutable bytes through the collector; do not marshal even
+		// a RawMessage wrapper here (which scans and copies it again).
+		if encoded, ok := value.(encodedReply); ok {
+			completion.Data = encoded.data
+			return
+		}
+		completion.Data, err = marshalNode(value)
+		if err != nil {
+			panic(err)
+		}
+	}()
+	s.service.commitObjectOffers(s.peer, completion.Offers)
+	payload, err = marshalNode(completion)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.peer.send(ctx, mosiMessage{Channel: handleChannel(controlReturnSlot(id)), Payload: payload}); err != nil {
+		s.service.refuseObjectOffers(s.peer, completion.Offers)
+		return nil, err
+	}
+	return nil, nil
+
+}
+
 func mustNodeMetadata(value any) []byte {
 	data, err := marshalNode(value)
 	if err != nil {
@@ -485,7 +489,9 @@ func (handle *abandonedControlHandle) retire() {
 	if stop != nil {
 		stop()
 	}
-	handle.service.handles.CompareAndDelete(handle.slot, handle.entry)
+	if handle.service.handles.CompareAndDelete(handle.slot, handle.entry) {
+		handle.service.channels.Delete(handleChannel(handle.slot))
+	}
 }
 func (handle *abandonedControlHandle) watch() {
 	if handle.peer.ctx == nil {
@@ -501,18 +507,19 @@ func (handle *abandonedControlHandle) watch() {
 	handle.stop = stop
 	handle.mu.Unlock()
 }
-func (handle *abandonedControlHandle) Handle(value scm.Scmer) {
+func (handle *abandonedControlHandle) receive(payload []byte) error {
 	defer handle.retire()
 	var result scanCompletion
-	if err := unmarshalNode([]byte(value.String()), &result); err != nil {
+	if err := unmarshalNode(payload, &result); err != nil {
 		panic(err)
 	}
 	handle.service.discardObjectOffers(handle.peer, result.Offers)
+	return nil
 }
 
-func (handle *controlResultHandle) Handle(value scm.Scmer) {
+func (handle *controlResultHandle) receive(payload []byte) error {
 	var result scanCompletion
-	if err := unmarshalNode([]byte(value.String()), &result); err != nil {
+	if err := unmarshalNode(payload, &result); err != nil {
 		panic(err)
 	}
 	accepted := false
@@ -542,12 +549,19 @@ func (handle *controlResultHandle) Handle(value scm.Scmer) {
 		}
 		handle.service.discardObjectOffers(handle.peer, unused)
 	}
+	return nil
 }
 
 // Operations use the same fire-and-forget transport and numeric handle
 // registry. Waiting belongs to the control operation's collector, never a held
 // send handle, native shard lock or long-lived per-call connection.
 func (service *nodeScanService) control(ctx context.Context, peer *mosiPeer, method string, input, output any, joinOnCancel bool, offers ...scm.ClusterReference) error {
+	defer queuedValuePublications(offers)
+	if source, ok := input.(interface {
+		serializationBindings() *scm.SerializationContext
+	}); ok {
+		defer source.serializationBindings().Queued()
+	}
 	queued := false
 	defer func() {
 		if !queued {
@@ -557,8 +571,8 @@ func (service *nodeScanService) control(ctx context.Context, peer *mosiPeer, met
 	slot := service.allocateHandleSlot()
 	id := (&scanRPCSession{peer: peer}).operationID(slot)
 	receiver := scm.NewResultReceiver()
-	entry := &handleSlot{peer: peer.objectPeer, handler: &controlResultHandle{service: service, peer: peer, receiver: receiver}}
-	service.handles.Store(slot, entry)
+	entry := &handleSlot{peer: peer.objectPeer, receiver: &controlResultHandle{service: service, peer: peer, receiver: receiver}}
+	service.storeHandle(slot, entry)
 	received := false
 	defer func() {
 		var orphan *abandonedControlHandle
@@ -570,10 +584,10 @@ func (service *nodeScanService) control(ctx context.Context, peer *mosiPeer, met
 		}
 		if queued && !received && live {
 			orphan = &abandonedControlHandle{service: service, peer: peer, slot: slot}
-			orphan.entry = &handleSlot{peer: peer.objectPeer, handler: orphan}
-			service.handles.Store(slot, orphan.entry)
+			orphan.entry = &handleSlot{peer: peer.objectPeer, receiver: orphan}
+			service.storeHandle(slot, orphan.entry)
 		} else {
-			service.handles.Delete(slot)
+			service.deleteHandle(slot)
 		}
 		entry.close()
 		if !received {
@@ -593,15 +607,27 @@ func (service *nodeScanService) control(ctx context.Context, peer *mosiPeer, met
 		}
 	}()
 	offers = transferManifest(offers)
-	request := struct {
-		Offers []scm.ClusterReference `json:"offers,omitempty"`
-		Return string                 `json:"return"`
-		Method string                 `json:"method"`
-		Data   []byte                 `json:"data"`
-	}{offers, id, method, mustNodeMetadata(input)}
-	service.commitObjectOffers(peer, offers)
-	if err := postScanMessage(ctx, peer, "node.control", request); err != nil {
+	call, objectCall := input.(clusterObjectCall)
+	objectCall = objectCall && method == "object.call"
+	var data []byte
+	if objectCall {
+		data = call.Payload
+	} else {
+		data = mustNodeMetadata(input)
+	}
+	payload, err := encodeInvocation(method, id, offers, data)
+	if err != nil {
 		return err
+	}
+	service.commitObjectOffers(peer, offers)
+	channel := method
+	if objectCall {
+		channel = objectChannel(call.Reference.URI)
+		payload = append([]byte{handleValue}, payload...)
+	}
+	sendErr := peer.send(ctx, mosiMessage{Channel: channel, Payload: payload})
+	if sendErr != nil {
+		return sendErr
 	}
 	queued = true
 	completed := false
@@ -655,6 +681,9 @@ func (service *nodeScanService) control(ctx context.Context, peer *mosiPeer, met
 				service.discardObjectOffers(peer, result.Offers)
 				return err
 			}
+			if reply, ok := output.(*clusterObjectReply); ok {
+				reply.Offers = result.Offers
+			}
 		} else {
 			service.discardObjectOffers(peer, result.Offers)
 		}
@@ -693,4 +722,149 @@ func panicRemoteOperation(err error) {
 		panic(*failure)
 	}
 	panic(err)
+}
+
+func (receiver *clusterReceiver) HandleClusterRequest(ctx context.Context, payload []byte) {
+	scm.ReceiveClusterValue(ctx, payload, func(request scm.ClusterRequest) (any, error) { return receiver.executeClusterRequest(ctx, request) })
+}
+
+func (receiver *clusterReceiver) ClusterView(ctx context.Context) (scm.Scmer, error) {
+	value, err := receiver.executeClusterRequest(ctx, scm.ClusterRequest{Method: "view"})
+	return scm.ClusterViewValue(value, err)
+}
+
+func (handle *controlResultHandle) HandleClusterRequest(_ context.Context, payload []byte) {
+	if err := handle.receive(payload); err != nil {
+		panic(err)
+	}
+}
+func (handle *abandonedControlHandle) HandleClusterRequest(_ context.Context, payload []byte) {
+	if err := handle.receive(payload); err != nil {
+		panic(err)
+	}
+}
+
+// Only scan/insert and object invocation protocols transfer capture grants.
+// Membership and residency requests have just a return address and their own
+// parameters. There is no generic method/fields map on the wire.
+func invocationCaptures(method string) bool {
+	return method == "scan.execute" || method == "insert.execute" || method == "object.call"
+}
+func encodeInvocation(method, address string, refs []scm.ClusterReference, data []byte) ([]byte, error) {
+	if !invocationCaptures(method) && len(refs) != 0 {
+		return nil, fmt.Errorf("operation does not transfer captures")
+	}
+	b := appendNodeBlob(make([]byte, 0, len(address)+len(data)+16+len(refs)*128), []byte(address))
+	if invocationCaptures(method) {
+		b = appendReferences(b, refs)
+	}
+	return append(b, data...), nil
+}
+func decodeInvocation(method string, data []byte) (address string, refs []scm.ClusterReference, body []byte, err error) {
+	defer func() {
+		if failure := recover(); failure != nil {
+			err = fmt.Errorf("invalid %s invocation: %v", method, failure)
+		}
+	}()
+	r := nodeReader{data}
+	address = string(r.blob())
+	if invocationCaptures(method) {
+		refs = r.references()
+	}
+	return address, refs, r.data, nil
+}
+
+// A result receiver owns this completion protocol. Ordinary success is two
+// bytes followed by the raw result; only failures/capture transfers carry their
+// extra parameters. The marker also lets the retired-channel disposer release
+// grants without evaluating a late result's Scheme tail.
+const scanCompletionMarker byte = 0xf3
+
+func encodeScanCompletion(result scanCompletion) ([]byte, error) {
+	flags := byte(0)
+	if result.Panic != nil {
+		flags |= 1
+	}
+	if len(result.Offers) != 0 {
+		flags |= 2
+	}
+	b := make([]byte, 2, 2+len(result.Data)+len(result.Offers)*128)
+	b[0], b[1] = scanCompletionMarker, flags
+	if flags&2 != 0 {
+		b = appendReferences(b, result.Offers)
+	}
+	if flags&1 != 0 {
+		w := mosiWriter{data: b}
+		failure := result.Panic
+		bits := byte(0)
+		if failure.SQL != nil {
+			bits |= 1
+		}
+		if len(failure.Value) != 0 {
+			bits |= 2
+		}
+		if failure.Stack != "" {
+			bits |= 4
+		}
+		w.data = append(w.data, bits)
+		w.text(failure.Message)
+		if bits&1 != 0 {
+			w.number(uint64(failure.SQL.Num))
+			w.text(failure.SQL.State)
+			w.text(failure.SQL.Message)
+			w.text(failure.SQL.Query)
+		}
+		if bits&2 != 0 {
+			w.blob(failure.Value)
+		}
+		if bits&4 != 0 {
+			w.text(failure.Stack)
+		}
+		b = w.data
+	}
+	return append(b, result.Data...), nil
+}
+func decodeScanCompletion(data []byte, result *scanCompletion) (err error) {
+	defer func() {
+		if caught := recover(); caught != nil {
+			err = fmt.Errorf("invalid scan completion: %v", caught)
+		}
+	}()
+	r := nodeReader{data}
+	if r.octet() != scanCompletionMarker {
+		return fmt.Errorf("invalid scan completion")
+	}
+	flags := r.octet()
+	if flags&^3 != 0 {
+		return fmt.Errorf("invalid completion flags")
+	}
+	*result = scanCompletion{}
+	if flags&2 != 0 {
+		result.Offers = r.references()
+	}
+	if flags&1 != 0 {
+		bits := r.octet()
+		if bits&^7 != 0 {
+			return fmt.Errorf("invalid error flags")
+		}
+		result.Panic = &scanPanic{Message: string(r.blob())}
+		if bits&1 != 0 {
+			number := r.uint()
+			if number > 65535 {
+				return fmt.Errorf("invalid SQL error number")
+			}
+			result.Panic.SQL = &sqldb.SQLError{Num: uint16(number), State: string(r.blob()), Message: string(r.blob()), Query: string(r.blob())}
+		}
+		if bits&2 != 0 {
+			result.Panic.Value = r.blob()
+			if err := scm.RetainClusterValues(result.Panic.Value); err != nil {
+				return err
+			}
+		}
+		if bits&4 != 0 {
+			result.Panic.Stack = string(r.blob())
+		}
+	}
+	result.Data = r.data
+	return nil
 }

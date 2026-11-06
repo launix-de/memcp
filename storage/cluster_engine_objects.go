@@ -21,10 +21,15 @@ import "github.com/launix-de/memcp/scm"
 // retains an object; it is never an independent grant of current shard M.
 func (tx *TxContext) ClusterObjectType() string { return tx.transactionState.ClusterObjectType() }
 func (tx *TxContext) ClusterObjectID() string   { return tx.transactionState.ClusterObjectID() }
-func (tx *TxContext) HandleClusterRequest(ctx context.Context, r scm.ClusterRequest) (any, error) {
-	return tx.transactionState.HandleClusterRequest(ctx, r)
+func (tx *TxContext) executeClusterRequest(ctx context.Context, r scm.ClusterRequest) (any, error) {
+	return tx.transactionState.executeClusterRequest(ctx, r)
 }
 func (*transactionState) ClusterObjectType() string { return "transaction" }
+
+// An imported transaction root is a routing endpoint at its original
+// coordinator, including when a MOSI snapshot exports it directly.
+func (tx *transactionState) ClusterForwardedHandle() *scm.ClusterHandle { return tx.coordinator }
+
 func (tx *transactionState) ClusterObjectID() string {
 	if tx.clusterID != "" {
 		return tx.clusterID
@@ -34,7 +39,7 @@ func (tx *transactionState) ClusterObjectID() string {
 	}
 	return uuid.NewSHA1(uuid.NameSpaceOID, []byte(walBootID+fmt.Sprint(tx.ID))).String()
 }
-func (tx *transactionState) HandleClusterRequest(ctx context.Context, r scm.ClusterRequest) (any, error) {
+func (tx *transactionState) executeClusterRequest(ctx context.Context, r scm.ClusterRequest) (any, error) {
 	if err := ctx.Err(); err != nil {
 		return scm.NewNil(), err
 	}
@@ -111,7 +116,7 @@ func (tx *transactionState) HandleClusterRequest(ctx context.Context, r scm.Clus
 }
 func (*storageShard) ClusterObjectType() string { return "shard" }
 func (s *storageShard) ClusterObjectID() string { return s.uuid.String() }
-func (s *storageShard) HandleClusterRequest(ctx context.Context, r scm.ClusterRequest) (any, error) {
+func (s *storageShard) executeClusterRequest(ctx context.Context, r scm.ClusterRequest) (any, error) {
 	if err := ctx.Err(); err != nil {
 		return scm.NewNil(), err
 	}
@@ -232,7 +237,7 @@ func (object *remoteShardObject) prepareSource(ctx context.Context, peer *mosiPe
 }
 
 func (*remoteShardObject) ClusterObjectType() string { return "shard" }
-func (s *remoteShardObject) HandleClusterRequest(ctx context.Context, r scm.ClusterRequest) (any, error) {
+func (s *remoteShardObject) executeClusterRequest(ctx context.Context, r scm.ClusterRequest) (any, error) {
 	if r.Method == "view" {
 		return s.handle.View, nil
 	}
@@ -246,9 +251,9 @@ func (*storageShardTransaction) ClusterObjectType() string { return "tx-shard" }
 func (st *storageShardTransaction) ClusterObjectID() string {
 	return uuid.NewSHA1(uuid.NameSpaceOID, []byte(st.clusterTxID+"/"+st.shardUUID.String())).String()
 }
-func (st *storageShardTransaction) HandleClusterRequest(ctx context.Context, r scm.ClusterRequest) (any, error) {
+func (st *storageShardTransaction) executeClusterRequest(ctx context.Context, r scm.ClusterRequest) (any, error) {
 	if next := st.forwarded.Load(); next != nil {
-		return next.HandleClusterRequest(ctx, r)
+		return next.executeClusterRequest(ctx, r)
 	}
 	if err := ctx.Err(); err != nil {
 		return scm.NewNil(), err
@@ -405,7 +410,7 @@ func (tx *TxContext) captureRemoteSavepoints() map[string]scm.Scmer {
 	ctx := scanQueryContext(tx, context.Background())
 	views := make(map[string]scm.Scmer, len(owners))
 	for owner, participant := range owners {
-		raw, err := participant.HandleClusterRequest(ctx, scm.ClusterRequest{Method: "savepoint", Arguments: []scm.Scmer{scm.NewString(participant.decisionToken)}})
+		raw, err := participant.executeClusterRequest(ctx, scm.ClusterRequest{Method: "savepoint", Arguments: []scm.Scmer{scm.NewString(participant.decisionToken)}})
 		if err != nil {
 			panic(err)
 		}
@@ -424,7 +429,7 @@ func (tx *TxContext) rollbackRemoteSavepoints(sp Savepoint) {
 	var failure error
 	view := sp.clusterView()
 	for _, participant := range owners {
-		_, err := participant.HandleClusterRequest(ctx, scm.ClusterRequest{Method: "rollback-savepoint", Arguments: []scm.Scmer{scm.NewString(participant.decisionToken), view}})
+		_, err := participant.executeClusterRequest(ctx, scm.ClusterRequest{Method: "rollback-savepoint", Arguments: []scm.Scmer{scm.NewString(participant.decisionToken), view}})
 		if err != nil && failure == nil {
 			failure = err
 		}
@@ -457,7 +462,7 @@ func (tx *TxContext) finishRemoteParticipants(method string) error {
 	var failure error
 	completed := false
 	for _, participant := range participants {
-		_, err := participant.HandleClusterRequest(ctx, scm.ClusterRequest{Method: method, Arguments: []scm.Scmer{scm.NewString(participant.decisionToken)}})
+		_, err := participant.executeClusterRequest(ctx, scm.ClusterRequest{Method: method, Arguments: []scm.Scmer{scm.NewString(participant.decisionToken)}})
 		if err != nil && failure == nil {
 			failure = err
 		}
@@ -594,10 +599,6 @@ func (tx *TxContext) Serialize(ctx *scm.SerializationContext) (scm.Scmer, error)
 	return tx.transactionState.Serialize(ctx)
 }
 
-func (tx *transactionState) ClusterForwardedHandle() *scm.ClusterHandle {
-	return tx.coordinator
-}
-
 func (tx *transactionState) Serialize(ctx *scm.SerializationContext) (scm.Scmer, error) {
 	if tx.coordinator != nil {
 		return scm.ClusterReferenceExpression(tx.coordinator.Reference), nil
@@ -671,4 +672,49 @@ func (s *remoteShardObject) Serialize(ctx *scm.SerializationContext) (scm.Scmer,
 
 func (st *storageShardTransaction) Serialize(ctx *scm.SerializationContext) (scm.Scmer, error) {
 	return ctx.ReferenceExpression(st)
+}
+
+func (tx *TxContext) HandleClusterRequest(ctx context.Context, payload []byte) {
+	scm.ReceiveClusterValue(ctx, payload, func(request scm.ClusterRequest) (any, error) { return tx.executeClusterRequest(ctx, request) })
+}
+
+func (tx *TxContext) ClusterView(ctx context.Context) (scm.Scmer, error) {
+	value, err := tx.executeClusterRequest(ctx, scm.ClusterRequest{Method: "view"})
+	return scm.ClusterViewValue(value, err)
+}
+
+func (tx *transactionState) HandleClusterRequest(ctx context.Context, payload []byte) {
+	scm.ReceiveClusterValue(ctx, payload, func(request scm.ClusterRequest) (any, error) { return tx.executeClusterRequest(ctx, request) })
+}
+
+func (tx *transactionState) ClusterView(ctx context.Context) (scm.Scmer, error) {
+	value, err := tx.executeClusterRequest(ctx, scm.ClusterRequest{Method: "view"})
+	return scm.ClusterViewValue(value, err)
+}
+
+func (s *storageShard) HandleClusterRequest(ctx context.Context, payload []byte) {
+	scm.ReceiveClusterValue(ctx, payload, func(request scm.ClusterRequest) (any, error) { return s.executeClusterRequest(ctx, request) })
+}
+
+func (s *storageShard) ClusterView(ctx context.Context) (scm.Scmer, error) {
+	value, err := s.executeClusterRequest(ctx, scm.ClusterRequest{Method: "view"})
+	return scm.ClusterViewValue(value, err)
+}
+
+func (s *remoteShardObject) HandleClusterRequest(ctx context.Context, payload []byte) {
+	scm.ReceiveClusterValue(ctx, payload, func(request scm.ClusterRequest) (any, error) { return s.executeClusterRequest(ctx, request) })
+}
+
+func (s *remoteShardObject) ClusterView(ctx context.Context) (scm.Scmer, error) {
+	value, err := s.executeClusterRequest(ctx, scm.ClusterRequest{Method: "view"})
+	return scm.ClusterViewValue(value, err)
+}
+
+func (st *storageShardTransaction) HandleClusterRequest(ctx context.Context, payload []byte) {
+	scm.ReceiveClusterValue(ctx, payload, func(request scm.ClusterRequest) (any, error) { return st.executeClusterRequest(ctx, request) })
+}
+
+func (st *storageShardTransaction) ClusterView(ctx context.Context) (scm.Scmer, error) {
+	value, err := st.executeClusterRequest(ctx, scm.ClusterRequest{Method: "view"})
+	return scm.ClusterViewValue(value, err)
 }

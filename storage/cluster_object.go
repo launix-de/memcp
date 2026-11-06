@@ -14,10 +14,11 @@ import "runtime"
 import "net/url"
 import "strconv"
 import "sync/atomic"
+import "encoding/binary"
 import "github.com/launix-de/memcp/scm"
 
 // ClusterObject is shared with the runtime, avoiding a storage dependency in scm.
-// Shards, transactions and runtime callables implement this same owner contract.
+// This describes capture serialization only; raw receivers use ClusterRequestHandler.
 type ClusterObject = scm.ClusterObject
 
 type clusterObjectEntry struct {
@@ -38,14 +39,17 @@ type clusterObjectPeer struct {
 	Boot string
 }
 type clusterObjectRelease struct {
+	value     *clusterValueRelease
 	peer      clusterObjectPeer
 	reference scm.ClusterReference
+	slot      uint64 // callback close; zero denotes an object lease
 }
 
 // Only cold export/import/release paths take this mutex. Registered objects are
 // not touched by ordinary local readers. Historical shard registration therefore
 // pins the Go generation without adding a read counter to its element loop.
 type clusterObjectRegistry struct {
+	service       *nodeScanService
 	next          uint64 // guarded by mu; incarnation/peer bindings give the namespace
 	mu            sync.Mutex
 	once          sync.Once
@@ -58,6 +62,7 @@ type clusterObjectRegistry struct {
 	stopped       bool
 	imported      map[string]weak.Pointer[clusterObjectImport] // weak import identity; never roots peer values
 	states        map[string]weak.Pointer[clusterObjectState]
+	remoteHandles map[remoteHandleKey]weak.Pointer[remoteHandleLease]
 	remoteObjects map[string]weak.Pointer[clusterObjectLease]
 	retired       []weak.Pointer[storageShard] // local in-flight owners survive last peer release
 }
@@ -78,6 +83,7 @@ func (service *nodeScanService) objectRegistry() *clusterObjectRegistry {
 		// publishes to registry callers; these other observers use this mutex.
 		r.mu.Lock()
 		defer r.mu.Unlock()
+		r.service = service
 		r.entries = make(map[string]*clusterObjectEntry)
 		r.identities = make(map[ClusterObject]string)
 		r.wake = make(chan struct{}, 1)
@@ -122,13 +128,15 @@ func (service *nodeScanService) objectRegistry() *clusterObjectRegistry {
 	})
 	return r
 }
-func (service *nodeScanService) exportObject(peer *mosiPeer, object ClusterObject, view scm.Scmer, nesting ...int) (scm.ClusterReference, error) {
+func (service *nodeScanService) exportObject(peer *mosiPeer, object ClusterObject, view scm.Scmer, parent *scm.SerializationContext, nesting ...int) (scm.ClusterReference, error) {
 	if endpoint, ok := object.(interface{ ClusterEndpoint() scm.ClusterObject }); ok {
 		object = endpoint.ClusterEndpoint()
 	}
 	if forwarded, ok := object.(interface{ ClusterForwardedHandle() *scm.ClusterHandle }); ok {
-		if handle := forwarded.ClusterForwardedHandle(); handle != nil {
-			return service.offerObject(context.Background(), handle.Reference, peer.objectPeer, clusterObjectPeer{service.authNodeID(), service.id})
+		if handle := forwarded.ClusterForwardedHandle(); handle != nil && handle.Reference.Token == "" {
+			// Named routing endpoints have no independent lease to regrant.
+			// Keep their original authority instead of introducing a relay.
+			return handle.Reference, nil
 		}
 	}
 	if peer == nil || object == nil {
@@ -148,8 +156,13 @@ func (service *nodeScanService) exportObject(peer *mosiPeer, object ClusterObjec
 			service.cancelObjectOffers(peer, children)
 		}
 	}()
-	bindings := (&scm.SerializationContext{}).WithExport(func(child scm.ClusterObject, childView scm.Scmer) (scm.ClusterReference, error) {
-		ref, err := service.exportObject(peer, child, childView, depth+1)
+	base := parent
+	if base == nil {
+		base = (&scm.SerializationContext{}).WithPeer(peer.valuePeer())
+	}
+	var bindings *scm.SerializationContext
+	bindings = base.WithExport(func(child scm.ClusterObject, childView scm.Scmer) (scm.ClusterReference, error) {
+		ref, err := service.exportObject(peer, child, childView, bindings, depth+1)
 		if err == nil {
 			children = append(children, ref)
 		}
@@ -175,7 +188,9 @@ func (service *nodeScanService) exportObject(peer *mosiPeer, object ClusterObjec
 			endpoint = "memcp://" + service.id + "/cluster"
 		}
 		complete = true
-		return scm.ClusterReference{URI: strings.TrimRight(endpoint, "/") + "/" + named.ClusterObjectPath(), Owner: service.authNodeID(), Incarnation: service.id, Type: object.ClusterObjectType(), View: payload}, nil
+		uri := strings.TrimRight(endpoint, "/") + "/" + named.ClusterObjectPath()
+		service.registerObjectChannel(uri, object.ClusterObjectType())
+		return scm.ClusterReference{URI: uri, Owner: service.authNodeID(), Incarnation: service.id, Type: object.ClusterObjectType(), View: payload, Publication: bindings}, nil
 	}
 	identity := ""
 	if named, ok := object.(interface{ ClusterObjectID() string }); ok {
@@ -203,13 +218,14 @@ func (service *nodeScanService) exportObject(peer *mosiPeer, object ClusterObjec
 		}
 		r.entries[uri] = &clusterObjectEntry{identity: identity, object: object, uri: uri, tokens: make(map[string]clusterObjectPeer), leases: make(map[string]clusterObjectPeer), offers: make(map[string]*mosiPeer)}
 		r.identities[object] = uri
+		service.registerObjectChannel(uri, object.ClusterObjectType())
 	}
 	token := r.nextID()
 	r.entries[uri].leases[token] = peer.objectPeer
 	r.entries[uri].tokens[token] = peer.objectPeer
 	r.entries[uri].offers[token] = peer
 	complete = true
-	ref := scm.ClusterReference{URI: uri, Owner: service.authNodeID(), Incarnation: service.id, Token: token, Type: object.ClusterObjectType(), View: payload}
+	ref := scm.ClusterReference{URI: uri, Owner: service.authNodeID(), Incarnation: service.id, Token: token, Type: object.ClusterObjectType(), View: payload, Publication: bindings}
 	if _, immutable := object.(scm.ClusterImmutableView); immutable && peer.declareObjectView(ref.URI, payload) {
 		if r.entries[uri].declared == nil {
 			r.entries[uri].declared = make(map[*mosiPeer]bool)
@@ -220,6 +236,7 @@ func (service *nodeScanService) exportObject(peer *mosiPeer, object ClusterObjec
 	return ref, nil
 }
 func (service *nodeScanService) releaseObject(peer *mosiPeer, reference scm.ClusterReference) error {
+	defer reference.Publication.Queued()
 	r := service.objectRegistry()
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -257,6 +274,9 @@ func (r *clusterObjectRegistry) retireObjectLocked(entry *clusterObjectEntry) {
 		}
 	}
 	delete(r.entries, entry.uri)
+	if r.service != nil {
+		r.service.channels.Delete(objectChannel(entry.uri))
+	}
 	for peer := range entry.declared {
 		peer.forgetObjectView(entry.uri)
 	}
@@ -345,7 +365,7 @@ func finalizeClusterObject(cleanup clusterObjectCleanup) {
 		r.mu.Unlock()
 		return
 	}
-	r.releases = append(r.releases, clusterObjectRelease{cleanup.peer, cleanup.reference})
+	r.releases = append(r.releases, clusterObjectRelease{peer: cleanup.peer, reference: cleanup.reference})
 	r.mu.Unlock()
 	select {
 	case r.wake <- struct{}{}:
@@ -479,71 +499,49 @@ func (service *nodeScanService) objectCaller(peer *mosiPeer, reference scm.Clust
 			}
 			target = connected
 		}
+		if target.objectPeer != peer.objectPeer {
+			return scm.NewNil(), fmt.Errorf("expired cluster object incarnation")
+		}
 		var result clusterObjectReply
 		operation := callCtx
 		var offered []scm.ClusterReference
-		bindings := (&scm.SerializationContext{}).WithExport(func(object scm.ClusterObject, view scm.Scmer) (scm.ClusterReference, error) {
-			ref, err := service.exportObject(target, object, view)
+		var bindings *scm.SerializationContext
+		bindings = (&scm.SerializationContext{}).WithExport(func(object scm.ClusterObject, view scm.Scmer) (scm.ClusterReference, error) {
+			ref, err := service.exportObject(target, object, view, bindings)
 			if err == nil {
 				offered = append(offered, ref)
 			}
 			return ref, err
 		})
-		args := make([]schemeValue, len(request.Arguments))
 		submitted := false
 		defer func() {
 			if !submitted {
 				service.cancelObjectOffers(target, offered)
 			}
 		}()
-		for i, arg := range request.Arguments {
-			var err error
-			args[i], err = freezeScanValue(arg, bindings)
-			if err != nil {
-				return scm.NewNil(), err
-			}
+		bindings = bindings.WithPeer(target.valuePeer())
+		defer bindings.Queued()
+		payload, err := scm.EncodeClusterRequest(request, bindings)
+		if err != nil {
+			return scm.NewNil(), err
 		}
 		submitted = true
-		err := service.control(operation, target, "object.call", clusterObjectCall{handleReference, request.Method, args}, &result, !request.CancelWithoutJoin, offered...)
+		err = service.control(operation, target, "object.call", clusterObjectCall{Reference: handleReference, Payload: payload, bindings: bindings}, &result, !request.CancelWithoutJoin, offered...)
 		if err != nil {
 			return scm.NewNil(), err
 		}
 		defer service.discardObjectOffers(target, result.Offers)
+		if result.Raw != nil {
+			return scm.NewAny(result.Raw), nil
+		}
 		return result.Value.reconstruct(scm.ProcedureDecode{ResolveHandle: service.handleResolver(callCtx, target, scm.NewNil()), Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) { return service.importObject(callCtx, target, ref) }})
 	}
 }
 
-type clusterObjectOffer struct {
-	Reference scm.ClusterReference
-	Target    clusterObjectPeer
-	Issuer    clusterObjectPeer
-}
-
-// Re-export an imported native endpoint at its real owner. The final receiver
-// acquires its own existing Go lease, so intermediate peers are not call relays.
-func (service *nodeScanService) offerObject(ctx context.Context, ref scm.ClusterReference, target, issuer clusterObjectPeer) (scm.ClusterReference, error) {
-	if ref.Owner == target.ID && ref.Incarnation == target.Boot {
-		return ref, nil
-	}
-	if service.cluster == nil {
-		return scm.ClusterReference{}, fmt.Errorf("forwarding native references requires cluster membership")
-	}
-	peer, err := service.cluster.ensurePeer(ctx, ref.Owner)
-	if err != nil {
-		return scm.ClusterReference{}, err
-	}
-	if peer.objectPeer.Boot != ref.Incarnation {
-		return scm.ClusterReference{}, fmt.Errorf("expired forwarding incarnation")
-	}
-	var result scm.ClusterReference
-	err = service.control(ctx, peer, "object.offer", clusterObjectOffer{ref, target, issuer}, &result, true)
-	return result, err
-}
-
 type clusterObjectCall struct {
+	bindings  *scm.SerializationContext
 	Reference scm.ClusterReference `json:"reference"`
-	Method    string               `json:"method"`
-	Arguments []schemeValue        `json:"arguments,omitempty"`
+	Payload   []byte               `json:"payload"`
 }
 
 func (s *scanRPCSession) handleObject(ctx context.Context, method string, data []byte) (any, error) {
@@ -555,98 +553,46 @@ func (s *scanRPCSession) handleObject(ctx context.Context, method string, data [
 		s.service.refuseObjectOffers(s.peer, refs)
 		return nil, nil
 	}
-	if method == "object.offer" {
-		var request clusterObjectOffer
-		if err := unmarshalNode(data, &request); err != nil {
-			return nil, err
-		}
-		object, err := s.resolveObject(request.Reference)
-		if err != nil {
-			return nil, err
-		}
-		cluster := s.service.cluster
-		if cluster == nil {
-			return nil, fmt.Errorf("reference forwarding requires cluster membership")
-		}
-		if forwarded, ok := object.(interface{ ClusterForwardedHandle() *scm.ClusterHandle }); ok {
-			if handle := forwarded.ClusterForwardedHandle(); handle != nil {
-				return s.service.offerObject(ctx, handle.Reference, request.Target, request.Issuer)
-			}
-		}
-		target, err := cluster.ensurePeer(ctx, request.Target.ID)
-		if err != nil {
-			return nil, err
-		}
-		issuer := target
-		if request.Issuer.ID != s.service.authNodeID() {
-			issuer, err = cluster.ensurePeer(ctx, request.Issuer.ID)
-			if err != nil {
-				return nil, err
-			}
-		} else if request.Issuer.Boot != s.service.id {
-			return nil, fmt.Errorf("expired forwarding source")
-		}
-		if target.objectPeer != request.Target || (request.Issuer.ID != s.service.authNodeID() && issuer.objectPeer != request.Issuer) {
-			return nil, fmt.Errorf("expired forwarded reference recipient")
-		}
-		view, err := scm.ClusterObjectValue(object, ctx, scm.ClusterRequest{Method: "view"})
-		if err != nil {
-			return nil, err
-		}
-		ref, err := s.service.exportObject(target, object, view)
-		if err != nil {
-			return nil, err
-		}
-		r := s.service.objectRegistry()
-		r.mu.Lock()
-		if entry := r.entries[ref.URI]; entry != nil {
-			entry.offers[ref.Token] = issuer
-		}
-		r.mu.Unlock()
-		return ref, nil
-	}
 
-	if method == "object.release" {
-		var ref scm.ClusterReference
-		if err := unmarshalNode(data, &ref); err != nil {
-			return nil, err
-		}
-		return nil, s.service.releaseObject(s.peer, ref)
-	}
-	var call clusterObjectCall
-	if err := unmarshalNode(data, &call); err != nil {
-		return nil, err
-	}
-	value, err := s.requestObject(ctx, call)
+	value, err := s.requestObject(ctx, data)
 	if err != nil {
 		return nil, err
 	}
+	if raw, ok := value.Any().([]byte); ok {
+		return clusterObjectReply{Raw: raw}, nil
+	}
 	var offered []scm.ClusterReference
-	bindings := (&scm.SerializationContext{}).WithExport(func(object scm.ClusterObject, view scm.Scmer) (scm.ClusterReference, error) {
-		ref, err := s.service.exportObject(s.peer, object, view)
+	var bindings *scm.SerializationContext
+	bindings = (&scm.SerializationContext{}).WithExport(func(object scm.ClusterObject, view scm.Scmer) (scm.ClusterReference, error) {
+		ref, err := s.service.exportObject(s.peer, object, view, bindings)
 		if err == nil {
 			offered = append(offered, ref)
 		}
 		return ref, err
 	})
+	bindings = bindings.WithPeer(s.peer.valuePeer())
 	frozen, err := freezeScanValue(value, bindings)
 	refs := serializedReferences(frozen)
 	if err != nil {
 		s.service.cancelObjectOffers(s.peer, offered)
 	}
-	return clusterObjectReply{frozen, transferManifest(refs)}, err
+	return clusterObjectReply{Value: frozen, Offers: transferManifest(refs), bindings: bindings}, err
 }
 
-func (s *scanRPCSession) requestObject(ctx context.Context, call clusterObjectCall) (scm.Scmer, error) {
-	object, err := s.resolveObject(call.Reference)
-	if err != nil {
-		return scm.NewNil(), err
+func (s *scanRPCSession) requestObject(ctx context.Context, payload []byte) (scm.Scmer, error) {
+	target, ok := ctx.Value(clusterObjectTargetKey{}).(clusterObjectTarget)
+	if !ok {
+		return scm.NewNil(), fmt.Errorf("missing registered object receiver")
 	}
+	if target.err != nil {
+		return scm.NewNil(), target.err
+	}
+	object := target.object
 	// Native query ownership is established once for callable/helper requests.
 	// Decoded nested scans borrow this cancellation/transaction context.
 	id, _ := ctx.Value(remoteScanContextKey{}).(string)
 	if id == "" {
-		return scm.NewNil(), fmt.Errorf("object execution requires an operation envelope")
+		return scm.NewNil(), fmt.Errorf("object execution requires an invocation scope")
 	}
 	ss := &scm.SessionState{}
 	seq := ss.BeginQuery("Cluster", "object request")
@@ -661,7 +607,6 @@ func (s *scanRPCSession) requestObject(ctx context.Context, call clusterObjectCa
 	defer s.service.executions.Delete(id)
 	ctx = context.WithValue(ctx, clusterObjectQueryKey{}, tx)
 	binding := scm.NewSlice([]scm.Scmer{scm.NewSymbol("node_query_context"), scm.NewString(id)})
-	args := make([]scm.Scmer, len(call.Arguments))
 	decode := scm.ProcedureDecode{ResolveHandle: s.service.handleResolver(ctx, s.peer, scm.NewAny(tx)), Prepare: prepareScanProcedure(binding), Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) {
 		value, err := s.service.importObject(ctx, s.peer, ref)
 		if err != nil {
@@ -669,18 +614,19 @@ func (s *scanRPCSession) requestObject(ctx context.Context, call clusterObjectCa
 		}
 		return scm.BindClusterInvocation(value, scm.NewAny(tx))
 	}}
-	for i, arg := range call.Arguments {
-		var err error
-		args[i], err = arg.reconstruct(decode)
-		if err != nil {
-			return scm.NewNil(), err
-		}
+	receiver, ok := object.(scm.ClusterRequestHandler)
+	if !ok {
+		return scm.NewNil(), fmt.Errorf("object has no receiving channel")
 	}
-	value, err := scm.ClusterObjectValue(object, context.WithValue(ctx, clusterObjectSessionKey{}, s), scm.ClusterRequest{Method: call.Method, Arguments: args})
-	if err != nil {
-		return scm.NewNil(), err
+	var value scm.Scmer
+	var failure error
+	replied := false
+	ctx = scm.WithClusterValueDelivery(context.WithValue(ctx, clusterObjectSessionKey{}, s), decode, func(result scm.Scmer, err error) { value, failure, replied = result, err, true })
+	receiver.HandleClusterRequest(ctx, payload)
+	if !replied {
+		return scm.NewNil(), fmt.Errorf("object handler did not complete its value delivery")
 	}
-	return value, nil
+	return value, failure
 }
 
 // Reconnect keeps handles of the SAME authenticated process incarnation usable.
@@ -709,6 +655,9 @@ func (service *nodeScanService) stopObjects() {
 	if r.stop != nil && !r.stopped {
 		r.stopped = true
 		close(r.stop)
+		for uri := range r.entries {
+			service.channels.Delete(objectChannel(uri))
+		}
 		r.entries = nil
 		r.identities = nil
 		r.releases = nil
@@ -811,6 +760,7 @@ func (s *scanRPCSession) resolveObject(ref scm.ClusterReference) (ClusterObject,
 // connection loss; only recipient refusal or GC releases them. A disconnect
 // cannot distinguish an unread packet from an already materialized handle.
 func (service *nodeScanService) cancelObjectOffers(peer *mosiPeer, references []scm.ClusterReference) {
+	defer queuedValuePublications(references)
 	var expanded []scm.ClusterReference
 	for _, ref := range references {
 		expanded = append(expanded, referenceOffers(ref)...)
@@ -856,6 +806,7 @@ func (service *nodeScanService) commitObjectOffers(peer *mosiPeer, refs []scm.Cl
 // Only an unsent local transfer or an explicit refusal by its recipient may
 // withdraw a published grant. There is no acquisition request/confirmation.
 func (service *nodeScanService) refuseObjectOffers(peer *mosiPeer, refs []scm.ClusterReference) {
+	defer queuedValuePublications(refs)
 	for _, parent := range refs {
 		for _, ref := range referenceOffers(parent) {
 			if ref.Owner != service.authNodeID() && service.cluster != nil {
@@ -876,8 +827,10 @@ func (service *nodeScanService) refuseObjectOffers(peer *mosiPeer, refs []scm.Cl
 }
 
 type clusterObjectReply struct {
-	Value  schemeValue            `json:"value"`
-	Offers []scm.ClusterReference `json:"offers,omitempty"`
+	bindings *scm.SerializationContext
+	Raw      []byte                 `json:"raw,omitempty"` // native transfer chunks bypass Scheme/base64
+	Value    schemeValue            `json:"value"`
+	Offers   []scm.ClusterReference `json:"offers,omitempty"`
 }
 
 func (reply clusterObjectReply) ClusterObjectOffers() []scm.ClusterReference { return reply.Offers }
@@ -907,6 +860,13 @@ func (service *nodeScanService) discardObjectOffers(peer *mosiPeer, refs []scm.C
 // Reconnected transports are shared service connections. A release operation
 // must leave queued sends and concurrent native handle calls alive.
 func (service *nodeScanService) deliverObjectRelease(release clusterObjectRelease) bool {
+	if release.value != nil {
+		return release.value.deliver()
+	}
+	if release.slot != 0 {
+		peer := service.objectConnection(release.peer)
+		return peer != nil && peer.send(context.Background(), mosiMessage{Channel: handleChannel(release.slot), Payload: []byte{handleClose}}) == nil
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	peer := service.objectConnection(release.peer)
@@ -924,13 +884,22 @@ func (service *nodeScanService) deliverObjectRelease(release clusterObjectReleas
 		}
 		endpoint.Path = endpoint.Path[:slash]
 		endpoint.RawPath = ""
-		connected, _, err := service.connect(ctx, endpoint.String())
+		connected, err := service.objectEndpoint(ctx, endpoint.String())
 		if err != nil {
 			return false
 		}
 		peer = connected
 	}
-	return postScanMessage(ctx, peer, "object.release", release.reference) == nil
+	if peer.objectPeer != release.peer {
+		return false
+	}
+	token := release.reference.Token
+	if len(token) > 65535 {
+		return false
+	}
+	payload := binary.BigEndian.AppendUint16([]byte{handleClose}, uint16(len(token)))
+	payload = append(payload, token...)
+	return peer.send(ctx, mosiMessage{Channel: objectChannel(release.reference.URI), Payload: payload}) == nil
 }
 
 type clusterObjectQueryKey struct{}
@@ -1002,7 +971,11 @@ func (peer *mosiPeer) publishObjectView(method string, data []byte) error {
 	if peer.receivedViewBytes+len(declaration.URI)+len(declaration.View) > objectViewBudget || peer.receivedViewSlots >= objectViewSlots {
 		return fmt.Errorf("object declarations exceed byte budget")
 	}
-	peer.objectViews.Store(declaration.URI, append([]byte(nil), declaration.View...))
+	view := append([]byte(nil), declaration.View...)
+	if err := scm.RetainClusterValues(view); err != nil {
+		return err
+	}
+	peer.objectViews.Store(declaration.URI, view)
 	peer.receivedViewBytes += len(declaration.URI) + len(declaration.View)
 	peer.receivedViewSlots++
 	return nil
@@ -1040,4 +1013,95 @@ func transferManifest(refs []scm.ClusterReference) []scm.ClusterReference {
 		}
 	}
 	return result
+}
+
+// Object calls and lifetime notifications address the same registered receiver.
+// Its URI path is sender-relative; connection identity supplies host and boot.
+func objectChannel(uri string) string {
+	parsed, err := url.Parse(uri)
+	if err != nil {
+		panic(err)
+	}
+	path := parsed.EscapedPath()
+	if index := strings.Index(path, "/cluster/"); index >= 0 {
+		path = path[index+len("/cluster/"):]
+	} else {
+		path = strings.TrimPrefix(path, "/")
+	}
+	return "object/" + path
+}
+
+type clusterObjectTargetKey struct{}
+type clusterObjectTarget struct {
+	object ClusterObject
+	err    error
+}
+
+func (service *nodeScanService) channelObject(peer *mosiPeer, uri, kind string) (ClusterObject, error) {
+	r := service.objectRegistry()
+	r.mu.Lock()
+	entry := r.entries[uri]
+	if entry != nil {
+		for _, identity := range entry.leases {
+			if identity == peer.objectPeer {
+				object := entry.object
+				r.mu.Unlock()
+				return object, nil
+			}
+		}
+		r.mu.Unlock()
+		return nil, fmt.Errorf("object channel belongs to another peer")
+	}
+	r.mu.Unlock()
+	reference := scm.ClusterReference{URI: uri, Type: kind, Owner: service.authNodeID(), Incarnation: service.id}
+	if kind == "transaction" {
+		return resolveTransactionRoot(reference)
+	}
+	if kind == "table" {
+		return resolveClusterCatalog(uri)
+	}
+	return nil, fmt.Errorf("expired object channel")
+}
+
+func (service *nodeScanService) registerObjectChannel(uri, kind string) {
+	_, loaded := service.channels.LoadOrStore(objectChannel(uri), workerChannel(func(peer *mosiPeer, payload []byte) error {
+		if len(payload) == 0 {
+			return fmt.Errorf("empty object delivery")
+		}
+		switch payload[0] {
+		case handleClose:
+			if len(payload) < 3 || int(binary.BigEndian.Uint16(payload[1:])) != len(payload)-3 {
+				return fmt.Errorf("invalid object close")
+			}
+			return service.releaseObject(peer, scm.ClusterReference{URI: uri, Owner: service.authNodeID(), Incarnation: service.id, Token: string(payload[3:])})
+		case handleValue:
+			// The object protocol's work payload includes its own return channel and
+			// cancellation scope. The transport never creates a reply.
+			object, failure := service.channelObject(peer, uri, kind)
+			ctx := context.WithValue(peer.ctxOrBackground(), clusterObjectTargetKey{}, clusterObjectTarget{object, failure})
+			_, err := peer.scanSession.receiveInvocation(ctx, "object.call", payload[1:])
+			return err
+		default:
+			return fmt.Errorf("invalid object delivery")
+		}
+	}))
+	if !loaded && kind == "transaction" {
+		// Named transaction roots are owned by the originating session, not a
+		// remote lease. Their directory is weak; this registration must be too.
+		if state, err := resolveTransactionRoot(scm.ClusterReference{URI: uri}); err == nil {
+			runtime.AddCleanup(state, func(cleanup clusterRootChannelCleanup) { cleanup.service.channels.Delete(cleanup.channel) }, clusterRootChannelCleanup{service, objectChannel(uri)})
+		}
+	}
+}
+
+type clusterRootChannelCleanup struct {
+	service *nodeScanService
+	channel string
+}
+
+func (value clusterObjectCall) serializationBindings() *scm.SerializationContext {
+	return value.bindings
+}
+func (value clusterObjectReply) serializationBindings() *scm.SerializationContext {
+	return value.bindings
 }

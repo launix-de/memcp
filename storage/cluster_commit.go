@@ -367,7 +367,7 @@ func (tx *TxContext) commitDistributedACID() error {
 	setKeys()
 	call := func(owner, method string) error {
 		st := owners[owner]
-		_, err := st.HandleClusterRequest(ctx, scm.ClusterRequest{Method: method, Arguments: []scm.Scmer{scm.NewString(st.decisionToken)}})
+		_, err := st.executeClusterRequest(ctx, scm.ClusterRequest{Method: method, Arguments: []scm.Scmer{scm.NewString(st.decisionToken)}})
 		return err
 	}
 	if !tx.decisionStarted {

@@ -29,21 +29,21 @@ import "github.com/launix-de/memcp/scm"
 var nodeScans atomic.Pointer[nodeScanService]
 
 type nodeScanService struct {
-	procedureCache sync.Once
-	procedures     scm.Scmer // existing budgeted cachemap; contains pure code factories only
-	handles        sync.Map  // fresh slot -> invocation-owned handle
-	nextHandle     atomic.Uint64
-	objects        clusterObjectRegistry
-	executions     sync.Map // invocation UUID -> worker TxContext, never persisted or serialized
-	id             string
-	cluster        *nodeCluster // immutable startup-owned adapter; nil for standalone object endpoints
-	secret         []byte
-	release        func()
-	mu             sync.Mutex
-	peers          map[*mosiPeer]bool
-	stopping       bool
-	connections    sync.WaitGroup
-	slots          chan struct{}
+	channelOnce sync.Once
+	channels    sync.Map // shared registered channels survive peer reconnection
+	handles     sync.Map // fresh slot -> invocation-owned handle
+	nextHandle  atomic.Uint64
+	objects     clusterObjectRegistry
+	executions  sync.Map // invocation UUID -> worker TxContext, never persisted or serialized
+	id          string
+	cluster     *nodeCluster // immutable startup-owned adapter; nil for standalone object endpoints
+	secret      []byte
+	release     func()
+	mu          sync.Mutex
+	peers       map[*mosiPeer]bool
+	stopping    bool
+	connections sync.WaitGroup
+	slots       chan struct{}
 }
 
 type scanChallenge struct {
@@ -53,52 +53,16 @@ type scanChallenge struct {
 	Node            string `json:"node"`
 	Nonce           string `json:"nonce"`
 	Proof           string `json:"proof,omitempty"`
+	Return          string `json:"return,omitempty"`
 }
 
 func scanAuthProof(secret []byte, role string, server, client scanChallenge) string {
 	mac := hmac.New(sha256.New, secret)
-	for _, item := range []string{mosiSubprotocol + "/objects.channels.v11", role, server.Node, server.Boot, server.Nonce, client.Node, client.Boot, client.Nonce} {
+	for _, item := range []string{mosiSubprotocol + "/objects.channels.v11", role, server.Node, server.Boot, server.Nonce, server.Return, client.Node, client.Boot, client.Nonce, client.Return} {
 		mac.Write([]byte(item))
 		mac.Write([]byte{0})
 	}
 	return hex.EncodeToString(mac.Sum(nil))
-}
-
-func scanAuthMessage(conn *websocket.Conn, method string, input any) error {
-	data, err := marshalNode(input)
-	if err != nil {
-		return err
-	}
-	frame, err := encodeMosiMessage(mosiMessage{Method: method, Data: data})
-	if err != nil {
-		return err
-	}
-	return conn.WriteMessage(websocket.BinaryMessage, frame)
-}
-
-func readScanAuth(conn *websocket.Conn, method string, output any) error {
-	started := time.Now()
-	kind, frame, err := conn.ReadMessage()
-	if err != nil {
-		return err
-	}
-	if kind != websocket.BinaryMessage {
-		return fmt.Errorf("binary node authentication required")
-	}
-	if profile := activeClusterReceiveIO(); profile != nil {
-		profile.stats.operations.Add(1)
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		ready := time.Now().Add(profile.latency)
-		if !profile.transfer(ctx, len(frame), started) || !profile.wait(ctx, ready) {
-			return fmt.Errorf("node authentication throttle deadline")
-		}
-	}
-	message, err := decodeMosiMessage(frame)
-	if err != nil || message.Method != method || message.Packet != nil || message.ID != 0 {
-		return fmt.Errorf("invalid node authentication")
-	}
-	return unmarshalNode(message.Data, output)
 }
 
 func validScanChallenge(c scanChallenge) bool {
@@ -108,43 +72,42 @@ func validScanChallenge(c scanChallenge) bool {
 	}
 	_, nonceErr := uuid.Parse(c.Nonce)
 	_, bootErr := uuid.Parse(c.Boot)
-	return c.Version == scanWireVersion && nodeErr == nil && nonceErr == nil && bootErr == nil
+	return c.Version == scanWireVersion && nodeErr == nil && nonceErr == nil && bootErr == nil && len(c.Return) > 0 && len(c.Return) <= 255
 }
 
-func (service *nodeScanService) authenticate(conn *websocket.Conn, incoming bool) (scanChallenge, error) {
-	conn.SetReadLimit(256 * 1024)
-	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-	local := scanChallenge{Version: scanWireVersion, Node: service.authNodeID(), Boot: service.id, Nonce: uuid.NewString()}
+func (service *nodeScanService) authenticate(peer *mosiPeer, incoming bool) (scanChallenge, error) {
+	peer.conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	local := scanChallenge{Version: scanWireVersion, Node: service.authNodeID(), Boot: service.id, Nonce: uuid.NewString(), Return: "scan.accept"}
 	var remote scanChallenge
 	if incoming {
-		if err := scanAuthMessage(conn, "scan.challenge", local); err != nil {
+		local.Return = "scan.proof"
+		if err := postScanMessage(peer.ctx, peer, "scan.challenge", local); err != nil {
 			return scanChallenge{}, err
 		}
-		if err := readScanAuth(conn, "scan.proof", &remote); err != nil {
+		if err := peer.readAuth(local.Return, &remote); err != nil {
 			return scanChallenge{}, err
 		}
 		if !validScanChallenge(remote) || !hmac.Equal([]byte(remote.Proof), []byte(scanAuthProof(service.secret, "client", local, remote))) {
 			return scanChallenge{}, fmt.Errorf("node authentication failed")
 		}
-		if err := scanAuthMessage(conn, "scan.accept", scanChallenge{Version: scanWireVersion, Proof: scanAuthProof(service.secret, "server", local, remote)}); err != nil {
+		if err := postScanMessage(peer.ctx, peer, remote.Return, scanChallenge{Version: scanWireVersion, Proof: scanAuthProof(service.secret, "server", local, remote)}); err != nil {
 			return scanChallenge{}, err
 		}
 		remote.OperationPrefix = scanAuthProof(service.secret, "operation", local, remote)
 		return remote, nil
 	}
-	if err := readScanAuth(conn, "scan.challenge", &remote); err != nil {
+	if err := peer.readAuth("scan.challenge", &remote); err != nil {
 		return scanChallenge{}, err
 	}
 	if !validScanChallenge(remote) {
 		return scanChallenge{}, fmt.Errorf("invalid node challenge")
 	}
 	local.Proof = scanAuthProof(service.secret, "client", remote, local)
-	if err := scanAuthMessage(conn, "scan.proof", local); err != nil {
+	if err := postScanMessage(peer.ctx, peer, remote.Return, local); err != nil {
 		return scanChallenge{}, err
 	}
 	var accepted scanChallenge
-	if err := readScanAuth(conn, "scan.accept", &accepted); err != nil {
+	if err := peer.readAuth(local.Return, &accepted); err != nil {
 		return scanChallenge{}, err
 	}
 	if accepted.Version != scanWireVersion || !hmac.Equal([]byte(accepted.Proof), []byte(scanAuthProof(service.secret, "server", remote, local))) {
@@ -218,26 +181,11 @@ func (service *nodeScanService) accept(w http.ResponseWriter, req *http.Request)
 	if err != nil {
 		return
 	}
-	remote, err := service.authenticate(conn, true)
-	if err != nil {
-		conn.Close()
-		return
-	}
-	// Only an authenticated peer may name this node's object endpoint; an
-	// arbitrary Host header would redirect peers into a relayable handshake.
-	registry := service.objectRegistry()
-	registry.mu.Lock()
-	if registry.endpoint == "" {
-		scheme := "http"
-		if req.TLS != nil {
-			scheme = "https"
-		}
-		registry.endpoint = scheme + "://" + req.Host + req.URL.Path
-	}
-	registry.mu.Unlock()
-	remoteID := remote.Node
+	var remote scanChallenge
+	var authErr error
+	remoteID := ""
 	session := newScanRPCSession()
-	session.service, session.remoteID = service, remoteID
+	session.service = service
 	var packets func(*mosiPacket) error
 	if service.cluster != nil {
 		packets = func(packet *mosiPacket) error {
@@ -245,13 +193,37 @@ func (service *nodeScanService) accept(w http.ResponseWriter, req *http.Request)
 			return service.cluster.receive(remoteID, packet, session.peer)
 		}
 	}
-	peer := newMosiPeer(conn, session.handle, packets, func(peer *mosiPeer) {
+	peer := newMosiPeer(conn, func(peer *mosiPeer) {
+		remote, authErr = service.authenticate(peer, true)
+		if authErr != nil {
+			peer.close()
+			return
+		}
+		// Only an authenticated peer may name this node's object endpoint; an
+		// arbitrary Host header would redirect peers into a relayable handshake.
+		registry := service.objectRegistry()
+		registry.mu.Lock()
+		if registry.endpoint == "" {
+			scheme := "http"
+			if req.TLS != nil {
+				scheme = "https"
+			}
+			registry.endpoint = scheme + "://" + req.Host + req.URL.Path
+		}
+		registry.mu.Unlock()
+		remoteID = remote.Node
+		session.remoteID = remoteID
 		peer.scanService = service
-		peer.handleValue = session.handleValue
+		registerScanChannels(peer, session)
+		registerMosiChannel(peer, packets)
 		peer.operationPrefix = remote.OperationPrefix
 		peer.objectPeer = clusterObjectPeer{remote.Node, remote.Boot}
 		session.bindPeer(peer)
 	})
+	if authErr != nil {
+		peer.wait()
+		return
+	}
 	if !service.track(peer) {
 		peer.close()
 	}
@@ -305,14 +277,11 @@ func (service *nodeScanService) connect(ctx context.Context, address string) (*m
 		conn.Close()
 		return nil, "", fmt.Errorf("unsupported node protocol")
 	}
-	remote, err := service.authenticate(conn, false)
-	if err != nil {
-		conn.Close()
-		return nil, "", err
-	}
-	remoteID := remote.Node
+	var remote scanChallenge
+	var authErr error
+	remoteID := ""
 	session := newScanRPCSession()
-	session.service, session.remoteID = service, remoteID
+	session.service = service
 	var packets func(*mosiPacket) error
 	if service.cluster != nil {
 		packets = func(packet *mosiPacket) error {
@@ -320,14 +289,26 @@ func (service *nodeScanService) connect(ctx context.Context, address string) (*m
 			return service.cluster.receive(remoteID, packet, session.peer)
 		}
 	}
-	peer := newMosiPeer(conn, session.handle, packets, func(peer *mosiPeer) {
+	peer := newMosiPeer(conn, func(peer *mosiPeer) {
+		remote, authErr = service.authenticate(peer, false)
+		if authErr != nil {
+			peer.close()
+			return
+		}
+		remoteID = remote.Node
+		session.remoteID = remoteID
 		peer.objectEndpoint = endpoint
 		peer.scanService = service
-		peer.handleValue = session.handleValue
+		registerScanChannels(peer, session)
+		registerMosiChannel(peer, packets)
 		peer.operationPrefix = remote.OperationPrefix
 		peer.objectPeer = clusterObjectPeer{remote.Node, remote.Boot}
 		session.bindPeer(peer)
 	})
+	if authErr != nil {
+		peer.wait()
+		return nil, "", authErr
+	}
 	if !service.track(peer) {
 		peer.close()
 		peer.wait()

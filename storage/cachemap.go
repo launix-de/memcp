@@ -314,7 +314,7 @@ func cacheMapGetLastUsed(pointer any) time.Time {
 }
 
 func (*cacheMap) ClusterObjectType() string { return "cachemap" }
-func (cm *cacheMap) HandleClusterRequest(ctx context.Context, r scm.ClusterRequest) (any, error) {
+func (cm *cacheMap) executeClusterRequest(ctx context.Context, r scm.ClusterRequest) (any, error) {
 	if err := ctx.Err(); err != nil {
 		return scm.NewNil(), err
 	}
@@ -360,4 +360,13 @@ func init() {
 
 func (cm *cacheMap) Serialize(ctx *scm.SerializationContext) (scm.Scmer, error) {
 	return ctx.ReferenceExpression(cm)
+}
+
+func (cm *cacheMap) HandleClusterRequest(ctx context.Context, payload []byte) {
+	scm.ReceiveClusterValue(ctx, payload, func(request scm.ClusterRequest) (any, error) { return cm.executeClusterRequest(ctx, request) })
+}
+
+func (cm *cacheMap) ClusterView(ctx context.Context) (scm.Scmer, error) {
+	value, err := cm.executeClusterRequest(ctx, scm.ClusterRequest{Method: "view"})
+	return scm.ClusterViewValue(value, err)
 }

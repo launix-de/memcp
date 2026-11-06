@@ -7,6 +7,7 @@ package scm
 import "fmt"
 import "sync"
 import "context"
+import "runtime"
 
 // Handle receives one value. Delivery has no transport-level result or method.
 // A handler defines its own payload and may receive another handle as a reply path.
@@ -27,11 +28,34 @@ type ResultReceiver struct {
 	done     chan struct{}
 	value    Scmer
 	closed   bool
-	releases []func()
+	lifetime *handleReleases
+	cleanup  runtime.Cleanup
 	onResult func(Scmer) // installed before publication; wakes an admitted worker
 }
 
-func NewResultReceiver() *ResultReceiver { return &ResultReceiver{done: make(chan struct{})} }
+// Cleanup arguments contain registration releases only, never the receiver or
+// its result/callback. Registries must weakly retain one-shot receivers.
+type handleReleases struct {
+	mu       sync.Mutex
+	closed   bool
+	releases []func()
+}
+
+func (lifetime *handleReleases) close() {
+	lifetime.mu.Lock()
+	lifetime.closed = true
+	releases := lifetime.releases
+	lifetime.releases = nil
+	lifetime.mu.Unlock()
+	for _, release := range releases {
+		release()
+	}
+}
+func NewResultReceiver() *ResultReceiver {
+	receiver := &ResultReceiver{done: make(chan struct{}), lifetime: new(handleReleases)}
+	receiver.cleanup = runtime.AddCleanup(receiver, (*handleReleases).close, receiver.lifetime)
+	return receiver
+}
 func (receiver *ResultReceiver) Handle(value Scmer) {
 	receiver.mu.Lock()
 	if receiver.closed {
@@ -40,27 +64,27 @@ func (receiver *ResultReceiver) Handle(value Scmer) {
 	}
 	receiver.value = value
 	receiver.closed = true
-	releases := receiver.releases
-	receiver.releases = nil
-	close(receiver.done)
 	notify := receiver.onResult
 	receiver.onResult = nil
 	receiver.mu.Unlock()
+	// Publish readiness after the callback and deregistration have completed.
+	defer close(receiver.done)
+	defer receiver.lifetime.close()
+	receiver.cleanup.Stop()
 	if notify != nil {
 		notify(value)
 	}
-	for _, release := range releases {
-		release()
-	}
 }
 func (receiver *ResultReceiver) RetainHandleRelease(release func()) {
-	receiver.mu.Lock()
-	if !receiver.closed {
-		receiver.releases = append(receiver.releases, release)
-		receiver.mu.Unlock()
+	defer runtime.KeepAlive(receiver)
+	lifetime := receiver.lifetime
+	lifetime.mu.Lock()
+	if !lifetime.closed {
+		lifetime.releases = append(lifetime.releases, release)
+		lifetime.mu.Unlock()
 		return
 	}
-	receiver.mu.Unlock()
+	lifetime.mu.Unlock()
 	release()
 }
 func (receiver *ResultReceiver) Fail(err error) { receiver.Handle(NewAny(&handleFailure{err.Error()})) }
@@ -88,6 +112,17 @@ type handleFailure struct{ message string }
 
 func (failure *handleFailure) Error() string { return failure.message }
 
+// SendHandleResult consumes the closure protocol's one-shot return handle.
+// Binary adapters can combine its final value and lifetime release in one
+// delivery. Ordinary Handle calls retain their multi-use semantics.
+func SendHandleResult(handle Handle, value Scmer) {
+	if result, ok := handle.(interface{ HandleResult(Scmer) }); ok {
+		result.HandleResult(value)
+	} else {
+		handle.Handle(value)
+	}
+}
+
 // ClosureHandle interprets (parameters return-handle). The result is sent raw;
 // error values have their own reconstruction constructor, not a transport field.
 func ClosureHandle(ctx context.Context, call func(...Scmer) Scmer) Handle {
@@ -105,7 +140,7 @@ func ClosureHandle(ctx context.Context, call func(...Scmer) Scmer) Handle {
 				if reply == nil {
 					panic(failure)
 				}
-				reply.Handle(NewAny(&handleFailure{fmt.Sprint(failure)}))
+				SendHandleResult(reply, NewAny(&handleFailure{fmt.Sprint(failure)}))
 			}
 		}()
 		if err := ctx.Err(); err != nil {
@@ -113,7 +148,7 @@ func ClosureHandle(ctx context.Context, call func(...Scmer) Scmer) Handle {
 		}
 		result := call(values[0].Slice()...)
 		if reply != nil {
-			reply.Handle(result)
+			SendHandleResult(reply, result)
 		}
 	})
 }
@@ -141,7 +176,7 @@ func (bindings *SerializationContext) WithHandleExport(export func(Handle) (Scme
 	if bindings.root != nil {
 		root = bindings.root
 	}
-	return &SerializationContext{Export: bindings.Export, ExportHandle: export, root: root}
+	return &SerializationContext{Peer: bindings.Peer, publication: bindings.publication, Export: bindings.Export, ExportHandle: export, root: root}
 }
 func (bindings *SerializationContext) InvocationScope() Scmer {
 	if bindings.root != nil {
@@ -151,6 +186,8 @@ func (bindings *SerializationContext) InvocationScope() Scmer {
 }
 
 func initHandles() {
+	initLambdaRebind()
+	initClusterValues()
 	Declare(&Globalenv, &Declaration{Name: "cluster_handle", Fn: func(...Scmer) Scmer {
 		panic("handle requires a peer reconstruction context")
 	}, Type: &TypeDescriptor{Kind: "func", HasSideEffects: true, Params: []*TypeDescriptor{{Kind: "int"}}, Return: &TypeDescriptor{Kind: "any"}}})

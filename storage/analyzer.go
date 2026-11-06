@@ -1424,7 +1424,7 @@ func singleLikeBoundaryCoversCondition(conditionCols []string, condition scm.Scm
 	}
 	var p scm.Proc
 	if condition.IsProc() {
-		p = *condition.Proc()
+		p = condition.Proc().Snapshot()
 	} else if legacy, ok := condition.Any().(scm.Proc); ok {
 		p = legacy
 	} else {

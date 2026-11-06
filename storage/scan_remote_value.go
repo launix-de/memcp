@@ -178,11 +178,11 @@ func (access remoteScanAccess) bind(decode ...scm.ProcedureDecode) (scanAccess, 
 			if len(decode) > 0 {
 				options = decode[0]
 			}
-			constructor, err := scm.UnmarshalProcedure(access.Orders[i], options)
+			directionValue, err := schemeValue(access.Orders[i]).reconstruct(options)
 			if err != nil {
 				return scanAccess{}, err
 			}
-			direction := scanSortDirections([]scm.Scmer{scm.Apply(constructor)})[0]
+			direction := scanSortDirections([]scm.Scmer{directionValue})[0]
 			if !item.IsCustom(TagScanBoundary) {
 				return scanAccess{}, fmt.Errorf("invalid ordered boundary")
 			}

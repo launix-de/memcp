@@ -13,6 +13,7 @@ package storage
 import "fmt"
 import "time"
 import "context"
+import "reflect"
 import "strings"
 import "testing"
 import "encoding/json"
@@ -199,17 +200,17 @@ func TestClusterRetiredResidencyProbeIsRejected(t *testing.T) {
 func TestClusterMountCannotBypassAdmissionThroughExplicitScanRPC(t *testing.T) {
 	old := sharedClusterMounts.Swap(nil)
 	defer sharedClusterMounts.Store(old)
-	peer, _, _ := setupRemoteScanConnection(t)
+	peer, service, _ := setupRemoteScanConnection(t)
 	if err := prepareSharedClusterMounts("mounted_snapshot"); err != nil {
 		t.Fatal(err)
 	}
 	var reply any
-	err := peer.call(context.Background(), "scan.describe", remoteScanDescribe{scanWireVersion, "mounted_snapshot", "items"}, &reply)
+	err := service.control(context.Background(), peer, "scan.describe", remoteScanDescribe{scanWireVersion, "mounted_snapshot", "items"}, &reply, true)
 	if err == nil {
 		t.Fatal("unbudgeted describe opened a mounted snapshot")
 	}
 	task := remoteScanTask{Shard: remoteScanShard{Resource: mosiResource{Database: "mounted_snapshot", Table: "items", Shard: uuid.NewString()}}}
-	err = peer.call(context.Background(), "scan.execute", task, &reply)
+	err = service.control(context.Background(), peer, "scan.execute", task, &reply, true)
 	if err == nil {
 		t.Fatal("explicit scan RPC bypassed mandatory cluster admission")
 	}
@@ -253,7 +254,7 @@ func TestClusterControlDoesNotConsumeComputeSlots(t *testing.T) {
 	session.service = &nodeScanService{cluster: &nodeCluster{}}
 	// Control discovery has no compute semaphore. Its domain handler must be
 	// reachable independently of the UUID scopes of concurrently running scans.
-	_, err := session.handle(context.Background(), "cluster.report", mustNodeMetadata(map[string]string{"database": "unmounted"}))
+	_, err := session.handle(context.Background(), "cluster.report", mustNodeMetadata(mosiResource{Database: "unmounted"}))
 	if err == nil || err.Error() != "invalid cluster report" {
 		t.Fatalf("control message was blocked by compute admission: %v", err)
 	}
@@ -432,7 +433,7 @@ func TestClusterDiscoveryIgnoresUnavailableNonOwner(t *testing.T) {
 					var request struct {
 						Return string `json:"return"`
 					}
-					if unmarshalNode(message.Data, &request) != nil {
+					if decodeTestInvocation(message.Channel, message.Payload, &request) != nil {
 						return
 					}
 					answer := replicaRecord{Resource: resource, State: "S", Owner: dead.ID, Epoch: 7}
@@ -716,7 +717,7 @@ func TestClusterShardLocationQueriesOnlySchemaOwner(t *testing.T) {
 		Return, Method string
 		Data           []byte
 	}
-	if err := unmarshalNode(message.Data, &request); err != nil || request.Method != "cluster.location" {
+	if err := decodeTestInvocation(message.Channel, message.Payload, &request); err != nil || request.Method != "cluster.location" {
 		t.Fatal("per-shard discovery did not use schema owner", request, err)
 	}
 	route, _ := service.handles.Load(controlReturnSlot(request.Return))
@@ -756,7 +757,7 @@ func TestClusterSchemaLocationTransferUsesBoundedBatches(t *testing.T) {
 				Return string
 				Data   clusterSchemaLocations
 			}
-			if err := unmarshalNode(message.Data, &request); err != nil {
+			if err := decodeTestInvocation(message.Channel, message.Payload, &request); err != nil {
 				t.Error(err)
 				return
 			}
@@ -840,7 +841,7 @@ func TestClusterSchemaRecoveryRestoresBoundedRoutesWithoutPermissions(t *testing
 				Return string
 				Data   []byte
 			}
-			if err := unmarshalNode(message.Data, &request); err != nil {
+			if err := decodeTestInvocation(message.Channel, message.Payload, &request); err != nil {
 				t.Fatal(err)
 			}
 			value, err := owner.handleLocations(ctx, local.self.ID, "cluster.schema_locations", request.Data)
@@ -1007,7 +1008,7 @@ func TestClusterSchemaLocationKeepsAcceptedOwnerAfterStaleSelfHint(t *testing.T)
 			case <-peer.outgoing.ready:
 				message := takeMosi(peer.outgoing)
 				var request struct{ Return, Method string }
-				if err := unmarshalNode(message.Data, &request); err != nil || request.Method != "cluster.location" {
+				if err := decodeTestInvocation(message.Channel, message.Payload, &request); err != nil || request.Method != "cluster.location" {
 					t.Fatal("missing location request", request, err)
 				}
 				route, ok := service.handles.Load(controlReturnSlot(request.Return))
@@ -1107,7 +1108,7 @@ func TestClusterShardRestartRecoveryUsesLiveReports(t *testing.T) {
 			for _, method := range methods {
 				message := takeMosi(remote.outgoing)
 				var request struct{ Return, Method string }
-				if err := unmarshalNode(message.Data, &request); err != nil || request.Method != method {
+				if err := decodeTestInvocation(message.Channel, message.Payload, &request); err != nil || request.Method != method {
 					t.Fatal("restart omitted native recovery", request, err)
 				}
 				if cell.ownstate.Initialized() {
@@ -1275,7 +1276,7 @@ func TestClusterDiscoveryFollowsOwnerEpochAcrossReplies(t *testing.T) {
 						var request struct {
 							Return string `json:"return"`
 						}
-						if err := unmarshalNode(message.Data, &request); err != nil {
+						if err := decodeTestInvocation(message.Channel, message.Payload, &request); err != nil {
 							return
 						}
 						answer := replicaRecord{Resource: resource, State: "M", Owner: member.ID, Epoch: epoch}
@@ -1578,7 +1579,7 @@ func testClusterShardRecoveryContent(t *testing.T, variant string) {
 	case <-peer.outgoing.ready:
 		message := takeMosi(peer.outgoing)
 		var request struct{ Return, Method string }
-		if err := unmarshalNode(message.Data, &request); err != nil || request.Method != "cluster.report" || cell.ownstate.Initialized() {
+		if err := decodeTestInvocation(message.Channel, message.Payload, &request); err != nil || request.Method != "cluster.report" || cell.ownstate.Initialized() {
 			t.Fatal("recovery omitted live authority proof", request, err)
 		}
 		route, ok := service.handles.Load(controlReturnSlot(request.Return))
@@ -1660,6 +1661,7 @@ func TestClusterDelegationDistinguishesHandoverFromRoutingCycle(t *testing.T) {
 			defer cancel()
 			service := &nodeScanService{}
 			cluster := &nodeCluster{service: service, ctx: ctx}
+			cluster.initializeManager()
 			var links []*clusterLink
 			for _, id := range []string{"owner-a", "owner-b"} {
 				peer := &mosiPeer{ctx: ctx, done: make(chan struct{}), outgoing: newMosiMailbox(), scanService: service, objectPeer: clusterObjectPeer{ID: id, Boot: "boot"}}
@@ -1687,8 +1689,12 @@ func TestClusterDelegationDistinguishesHandoverFromRoutingCycle(t *testing.T) {
 				select {
 				case <-peer.outgoing.ready:
 					message := takeMosi(peer.outgoing)
+					if message.Channel != "scan.execute" {
+						step-- // declarations precede their first referring task
+						continue
+					}
 					var request struct{ Return, Method string }
-					if err := unmarshalNode(message.Data, &request); err != nil || request.Method != "scan.execute" {
+					if err := decodeTestInvocation(message.Channel, message.Payload, &request); err != nil || request.Method != "scan.execute" {
 						t.Fatal("delegation did not use its native scan contract", request, err)
 					}
 					response := remoteScanResult{Redirect: &clusterScanRedirect{Owner: links[(step+1)%2].member.ID, Epoch: 4, Generation: expected.Resource.Shard}}
@@ -2105,7 +2111,7 @@ func TestClusterLocationReplyRefreshesRequestedAlias(t *testing.T) {
 					Return, Method string
 					Data           []byte
 				}
-				if err := unmarshalNode(message.Data, &request); err != nil || request.Method != "cluster.location" {
+				if err := decodeTestInvocation(message.Channel, message.Payload, &request); err != nil || request.Method != "cluster.location" {
 					t.Fatal("invalid location request", err)
 				}
 				entry, _ := service.handles.Load(controlReturnSlot(request.Return))
@@ -2131,5 +2137,56 @@ func TestClusterLocationReplyRefreshesRequestedAlias(t *testing.T) {
 				t.Fatal("a routing hint merged cells or granted native rights")
 			}
 		})
+	}
+}
+
+// Test adapters inspect the parameter layout selected by the actual channel.
+// This record is never serialized or used by production code.
+func decodeTestInvocation(channel string, payload []byte, destination any) error {
+	address, _, body, err := decodeInvocation(channel, payload)
+	if err != nil {
+		return err
+	}
+	v := reflect.ValueOf(destination).Elem()
+	if field := v.FieldByName("Return"); field.IsValid() {
+		field.SetString(address)
+	}
+	if field := v.FieldByName("Method"); field.IsValid() {
+		field.SetString(channel)
+	}
+	if field := v.FieldByName("Data"); field.IsValid() {
+		if field.Type() == reflect.TypeOf([]byte(nil)) {
+			field.SetBytes(body)
+		} else {
+			return unmarshalNode(body, field.Addr().Interface())
+		}
+	}
+	return nil
+}
+
+// A restarted peer need not retain every historical UUID alias. The sender
+// already knows the native successor, so delegate that identity without an
+// extra discovery request or requiring the destination to reconstruct aliases.
+func TestClusterDelegationUsesKnownSuccessorAfterPeerRestart(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "t_cluster_task_successor", 4)
+	RebuildTable(tbl, true, false)
+	peer, _, _ := setupRemoteScanConnection(t)
+	current := mosiResource{Database: tbl.schema.Name, Table: tbl.Name, Shard: tbl.ActiveShards()[0].uuid.String()}
+	previous := current
+	previous.Shard = uuid.NewString()
+	cluster := &nodeCluster{ctx: context.Background()}
+	cluster.initializeManager()
+	cluster.manager.forwardResource(previous, current)
+	cluster.view.Store(&clusterView{links: []*clusterLink{{member: clusterMember{ID: "worker"}, peer: peer}}})
+	executor := clusterScanExecutor{cluster: cluster, expected: remoteScanShard{Schema: tbl.filterSchemaFingerprint(), Resource: previous}}
+	invocation := shardScanInvocation{operator: shardReduce, conditionCols: []string{"id"}, callbackCols: []string{"id"},
+		condition: scm.Eval(scm.Read(t.Name(), "(lambda (id) (> id 1))", false), &scm.Globalenv),
+		mapReduce: scm.Eval(scm.Read(t.Name(), "(lambda (acc id) (+ acc id))", false), &scm.Globalenv), neutral: scm.NewInt(0)}
+	result := executor.ExecuteShardScan(previous, invocation)
+	if result.err.r != nil || result.res.Int() != 9 {
+		t.Fatalf("known successor did not execute on restarted peer: %+v", result)
+	}
+	if executor.expected.Resource != previous {
+		t.Fatal("delegation mutated its shared input description")
 	}
 }

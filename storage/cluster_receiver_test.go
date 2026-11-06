@@ -14,10 +14,10 @@ import "github.com/launix-de/memcp/scm"
 
 func deliverTestCompletion(t *testing.T, entry any, result scanCompletion) {
 	t.Helper()
-	entry.(*handleSlot).handler.Handle(scm.NewString(string(mustNodeMetadata(result))))
+	entry.(*handleSlot).receiver.HandleClusterRequest(context.Background(), mustNodeMetadata(result))
 }
 func receiveTestValue(receiver *clusterReceiver, ctx context.Context, value int64) error {
-	_, err := receiver.HandleClusterRequest(ctx, scm.ClusterRequest{Method: "receive", Arguments: []scm.Scmer{scm.NewInt(value)}})
+	_, err := receiver.executeClusterRequest(ctx, scm.ClusterRequest{Method: "receive", Arguments: []scm.Scmer{scm.NewInt(value)}})
 	return err
 }
 
@@ -236,7 +236,7 @@ func TestClusterReceiverCancelledBeforeCallback(t *testing.T) {
 	defer receiver.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err := receiver.HandleClusterRequest(ctx, scm.ClusterRequest{Method: "receive", Arguments: []scm.Scmer{scm.NewNil()}})
+	_, err := receiver.executeClusterRequest(ctx, scm.ClusterRequest{Method: "receive", Arguments: []scm.Scmer{scm.NewNil()}})
 	if err != context.Canceled {
 		t.Fatal(err)
 	}
@@ -256,7 +256,7 @@ func TestClusterReceiverRemoteUnlimitedUsesObjectLifetime(t *testing.T) {
 	})
 	defer receiver.Close()
 	receiver.Seal()
-	ref, err := owner.exportObject(source, receiver, scm.NewNil())
+	ref, err := owner.exportObject(source, receiver, scm.NewNil(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -266,7 +266,7 @@ func TestClusterReceiverRemoteUnlimitedUsesObjectLifetime(t *testing.T) {
 	}
 	object, _ := scm.ClusterObjectOf(imported)
 	for _, name := range []string{"get", "set"} {
-		_, err := object.HandleClusterRequest(context.Background(), scm.ClusterRequest{Method: "receive", Arguments: []scm.Scmer{scm.NewSlice([]scm.Scmer{scm.NewString(name), scm.NewInt(7)})}})
+		_, err := scm.ClusterObjectValue(object, context.Background(), scm.ClusterRequest{Method: "receive", Arguments: []scm.Scmer{scm.NewSlice([]scm.Scmer{scm.NewString(name), scm.NewInt(7)})}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -275,7 +275,7 @@ func TestClusterReceiverRemoteUnlimitedUsesObjectLifetime(t *testing.T) {
 		t.Fatal("wrong callback count", calls)
 	}
 	receiver.Close()
-	if _, err := object.HandleClusterRequest(context.Background(), scm.ClusterRequest{Method: "receive", Arguments: []scm.Scmer{scm.NewNil()}}); err == nil {
+	if _, err := scm.ClusterObjectValue(object, context.Background(), scm.ClusterRequest{Method: "receive", Arguments: []scm.Scmer{scm.NewNil()}}); err == nil {
 		t.Fatal("late remote callback ran")
 	}
 }
@@ -297,7 +297,7 @@ func TestClusterReceiverEachParallelValueIsProcessedOnce(t *testing.T) {
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
-			_, err := receiver.HandleClusterRequest(context.Background(), scm.ClusterRequest{Method: "receive", Arguments: []scm.Scmer{scm.NewInt(int64(i))}})
+			_, err := receiver.executeClusterRequest(context.Background(), scm.ClusterRequest{Method: "receive", Arguments: []scm.Scmer{scm.NewInt(int64(i))}})
 			if err != nil {
 				t.Error(err)
 			}
@@ -540,17 +540,17 @@ func TestClusterReceiverImportedCloseCancelsPendingReply(t *testing.T) {
 	}
 	service.handles.Range(func(key, value any) bool {
 		entry := value.(*handleSlot)
-		if _, cleanup := entry.handler.(*abandonedControlHandle); !cleanup || !entry.owner.IsNil() {
+		if _, abandoned := entry.receiver.(*abandonedControlHandle); !abandoned || !entry.owner.IsNil() {
 			t.Error("cancelled send retained a query collector", key)
 			return true
 		}
 		// A published request may still return. Only its state-free disposer
 		// survives cancellation, and that late completion must retire it.
-		payload, err := freezeScanValue(scm.NewString(string(mustNodeMetadata(scanCompletion{}))))
+		payload, err := marshalNode(scanCompletion{})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := (&scanRPCSession{service: service, peer: peer}).handleValue(key.(uint64), payload); err != nil {
+		if err := (&scanRPCSession{service: service, peer: peer}).handleValue(key.(uint64), schemeValue(payload)); err != nil {
 			t.Fatal(err)
 		}
 		return true
@@ -578,7 +578,7 @@ func TestClusterReceiverRemoteCancellationAndIndependentDelivery(t *testing.T) {
 	defer unblock()
 	importReceiver := func(receiver *clusterReceiver) *clusterReceiver {
 		t.Helper()
-		ref, err := owner.exportObject(source, receiver, scm.NewNil())
+		ref, err := owner.exportObject(source, receiver, scm.NewNil(), nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -642,7 +642,7 @@ func TestClusterReceiverRemoteDisconnectJoinsCallback(t *testing.T) {
 		return scm.NewNil(), ctx.Err()
 	})
 	defer receiver.Close()
-	ref, err := owner.exportObject(source, receiver, scm.NewNil())
+	ref, err := owner.exportObject(source, receiver, scm.NewNil(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

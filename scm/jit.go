@@ -368,7 +368,7 @@ func (proc *Proc) jitFunction() func(...Scmer) Scmer {
 func jitAllocateProcContext(proc *Proc, captureCount int) *Proc {
 	typ := jitProcContextAllocation(captureCount)
 	bound := (*Proc)(jitRuntimeAllocTyped(typ))
-	*bound = proc.snapshot()
+	*bound = proc.Snapshot()
 	return bound
 }
 
@@ -377,7 +377,8 @@ func jitAllocateProcContext(proc *Proc, captureCount int) *Proc {
 // white. Raw JIT stores would hide those edges from concurrent marking.
 func jitBindProcContext(prepared unsafe.Pointer, template *Proc, captures *Scmer, count int, bindSelf bool) *Proc {
 	bound := (*Proc)(jitRuntimeAllocTyped(prepared))
-	*bound = template.snapshot()
+	*bound = template.Snapshot()
+	bound.lambdaMeta = template.copyLambdaMetadata()
 	target := unsafe.Slice((*Scmer)(unsafe.Add(unsafe.Pointer(bound), unsafe.Offsetof(ProcJIT{}.Context))), count)
 	copyCount := count
 	if bindSelf && copyCount != 0 {
@@ -3129,6 +3130,7 @@ func jitRebindProcCapture(proc *Proc, env *Env, key, previous Scmer, hasPrevious
 	sourceCaptures := jitProcCaptures(proc)
 	boundProc := jitAllocateProcContext(proc, len(sourceCaptures))
 	boundProc.En = env
+	boundProc.lambdaMeta = proc.copyLambdaMetadata()
 	boundCaptures := jitProcCaptures(boundProc)
 	copy(boundCaptures, sourceCaptures)
 	if index >= 0 {
@@ -3160,15 +3162,18 @@ func (proc *Proc) JITCapturedLocals() (base int, captures []Scmer) {
 // independently of executable mappings, so their serialized body must not
 // depend on the process-local capture tail.
 func closeJITProcedureCaptures(expr Scmer, captureBase int, captures []Scmer, depth int) Scmer {
+	return transformJITCaptures(expr, captureBase, len(captures), depth, func(index int) Scmer { return closedCaptureLiteral(captures[index]) })
+}
+func transformJITCaptures(expr Scmer, captureBase, count, depth int, capture func(int) Scmer) Scmer {
 	if expr.IsSourceInfo() {
 		source := *expr.SourceInfo()
-		source.value = closeJITProcedureCaptures(source.value, captureBase, captures, depth)
+		source.value = transformJITCaptures(source.value, captureBase, count, depth, capture)
 		return NewSourceInfo(source)
 	}
 	if depth == 0 && expr.IsNthLocalVar() {
 		index := int(expr.NthLocalVar()) - captureBase
-		if index >= 0 && index < len(captures) {
-			return closedCaptureLiteral(captures[index])
+		if index >= 0 && index < count {
+			return capture(index)
 		}
 		return expr
 	}
@@ -3188,8 +3193,8 @@ func closeJITProcedureCaptures(expr Scmer, captureBase int, captures []Scmer, de
 		key := items[2].WithoutSourceInfo()
 		if validDepth && int(outerDepth) == depth && key.IsNthLocalVar() {
 			index := int(key.NthLocalVar()) - captureBase
-			if index >= 0 && index < len(captures) {
-				return closedCaptureLiteral(captures[index])
+			if index >= 0 && index < count {
+				return capture(index)
 			}
 		}
 	}
@@ -3198,34 +3203,34 @@ func closeJITProcedureCaptures(expr Scmer, captureBase int, captures []Scmer, de
 		switch head {
 		case Symbol("lambda"):
 			if len(items) >= 3 {
-				bound[2] = closeJITProcedureCaptures(items[2], captureBase, captures, depth+1)
+				bound[2] = transformJITCaptures(items[2], captureBase, count, depth+1, capture)
 			}
 			return NewSlice(bound)
 		case Symbol("begin"):
 			for index := 1; index < len(items); index++ {
-				bound[index] = closeJITProcedureCaptures(items[index], captureBase, captures, depth+1)
+				bound[index] = transformJITCaptures(items[index], captureBase, count, depth+1, capture)
 			}
 			return NewSlice(bound)
 		case Symbol("begin_mut"):
 			if len(items) > 1 {
-				bound[1] = closeJITProcedureCaptures(items[1], captureBase, captures, depth)
+				bound[1] = transformJITCaptures(items[1], captureBase, count, depth, capture)
 			}
 			for index := 2; index < len(items); index++ {
-				bound[index] = closeJITProcedureCaptures(items[index], captureBase, captures, depth+1)
+				bound[index] = transformJITCaptures(items[index], captureBase, count, depth+1, capture)
 			}
 			return NewSlice(bound)
 		case Symbol("match"), Symbol("match_mut"):
 			if len(items) > 1 {
-				bound[1] = closeJITProcedureCaptures(items[1], captureBase, captures, depth)
+				bound[1] = transformJITCaptures(items[1], captureBase, count, depth, capture)
 			}
 			for index := 3; index < len(items); index += 2 {
-				bound[index] = closeJITProcedureCaptures(items[index], captureBase, captures, depth+1)
+				bound[index] = transformJITCaptures(items[index], captureBase, count, depth+1, capture)
 			}
 			return NewSlice(bound)
 		}
 	}
 	for index, item := range items {
-		bound[index] = closeJITProcedureCaptures(item, captureBase, captures, depth)
+		bound[index] = transformJITCaptures(item, captureBase, count, depth, capture)
 	}
 	return NewSlice(bound)
 }
@@ -3472,7 +3477,7 @@ func jitOptimizerProcReturnSpecial(args ...Scmer) Scmer {
 	if !ok {
 		panic("optimizer_proc_return received invalid return metadata")
 	}
-	proc := value.Proc().snapshot()
+	proc := value.Proc().Snapshot()
 	proc.OptimizerMeta = &ProcOptimizerMeta{Return: metadata.Return, HasReturn: metadata.HasReturn, Sequence: metadata.Sequence}
 	return NewProcStruct(proc)
 }
@@ -7140,7 +7145,7 @@ func jitCompileModePublish(recursiveLambdas bool, waitForPublication, install bo
 					fmt.Printf("%X\n", code)
 				}
 				maybeDumpJITCode(ptr, code)
-				sourceProc := proc.snapshot()
+				sourceProc := proc.Snapshot()
 				sourceProc.JITCode = 0
 				sourceProc.Compiled = nil
 				sourceProc.jitCompiling = 0

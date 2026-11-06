@@ -304,7 +304,7 @@ func (r *replicationManager) receivePacket(source string, packet *mosiPacket) er
 		}
 	}
 	object := r.resourceCell(packet.Resource)
-	_, err := object.HandleClusterRequest(context.Background(), scm.ClusterRequest{Method: "packet", Payload: replicaPacketInvocation{source, packet}})
+	_, err := object.executeClusterRequest(context.Background(), scm.ClusterRequest{Method: "packet", Payload: replicaPacketInvocation{source, packet}})
 	return err
 }
 
@@ -318,7 +318,7 @@ type replicaPacketInvocation struct {
 	packet *mosiPacket
 }
 
-func (cell *replicaCell) HandleClusterRequest(ctx context.Context, request scm.ClusterRequest) (any, error) {
+func (cell *replicaCell) executeClusterRequest(ctx context.Context, request scm.ClusterRequest) (any, error) {
 	invocation, ok := request.Payload.(replicaPacketInvocation)
 	if request.Method != "packet" || !ok || cell.engine == nil {
 		return nil, fmt.Errorf("invalid native coherence request")

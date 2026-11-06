@@ -17,7 +17,7 @@ func (*table) ClusterObjectType() string { return "table" }
 func (t *table) ClusterObjectPath() string {
 	return "catalog/" + url.PathEscape(t.schema.Name) + "/" + url.PathEscape(t.clusterPublishedName())
 }
-func (t *table) HandleClusterRequest(ctx context.Context, r scm.ClusterRequest) (any, error) {
+func (t *table) executeClusterRequest(ctx context.Context, r scm.ClusterRequest) (any, error) {
 	if err := ctx.Err(); err != nil {
 		return scm.NewNil(), err
 	}
@@ -84,4 +84,13 @@ func (t *table) Serialize(*scm.SerializationContext) (scm.Scmer, error) {
 	// transport. The generic capture marker resolves it once on wire import;
 	// native schema GetRead still guards lookup, never each mapped row.
 	return scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(t.schema.Name), scm.NewBool(false), scm.NewString(t.clusterPublishedName()), scm.NewBool(false)}), nil
+}
+
+func (t *table) HandleClusterRequest(ctx context.Context, payload []byte) {
+	scm.ReceiveClusterValue(ctx, payload, func(request scm.ClusterRequest) (any, error) { return t.executeClusterRequest(ctx, request) })
+}
+
+func (t *table) ClusterView(ctx context.Context) (scm.Scmer, error) {
+	value, err := t.executeClusterRequest(ctx, scm.ClusterRequest{Method: "view"})
+	return scm.ClusterViewValue(value, err)
 }

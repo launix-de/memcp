@@ -172,7 +172,7 @@ func (r *replicationManager) retire(id string) error {
 	r.mu.Unlock()
 	if p != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		_ = p.call(ctx, "retire", struct{}{}, nil)
+		_ = p.request(ctx, "retire", struct{}{}, nil)
 		cancel()
 		p.close()
 		// Join the reader and resource workers before backup promotion. An
@@ -344,7 +344,7 @@ func replicationAdmin(arguments []scm.Scmer) scm.Scmer {
 	defer cancel()
 	var result replicaAdminResult
 	request := replicaRequest{User: user, Hash: auth.Hash, Database: database, SQL: arguments[2].String(), PostgreSQL: arguments[3].Bool()}
-	if err := peer.call(ctx, "admin", request, &result); err != nil {
+	if err := peer.request(ctx, "admin", request, &result); err != nil {
 		panic(err)
 	}
 	for _, fields := range result.Fields {

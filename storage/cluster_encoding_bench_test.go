@@ -60,7 +60,7 @@ func BenchmarkClusterCompletionEncoding(b *testing.B) {
 				if err != nil {
 					b.Fatal(err)
 				}
-				frame, err := encodeMosiMessage(mosiMessage{Slot: operationID, Payload: schemeValue(scm.SerializeToString(scm.NewString(string(envelope)), &scm.Globalenv))})
+				frame, err := encodeMosiMessage(mosiMessage{Channel: handleChannel(operationID), Payload: envelope})
 				if err != nil {
 					b.Fatal(err)
 				}
@@ -82,7 +82,7 @@ func BenchmarkClusterCompletionEncoding(b *testing.B) {
 						b.Fatal(err)
 					}
 					var completion scanCompletion
-					if err := unmarshalNode([]byte(scm.Eval(scm.Read("completion", string(message.Payload), false), &scm.Globalenv).String()), &completion); err != nil {
+					if err := unmarshalNode(message.Payload, &completion); err != nil {
 						b.Fatal(err)
 					}
 					var result remoteScanResult

@@ -8,10 +8,12 @@ import "fmt"
 import "weak"
 import "time"
 import "sync"
+import "bytes"
 import "context"
 import "strings"
 import "runtime"
 import "testing"
+import "reflect"
 import "sync/atomic"
 import "github.com/google/uuid"
 import "github.com/launix-de/memcp/scm"
@@ -60,11 +62,11 @@ func TestClusterObjectIndependentHandlesAndIncarnation(t *testing.T) {
 	value := scm.NewSession()
 	object, _ := scm.ClusterObjectOf(value)
 	view, _ := scm.ClusterObjectValue(object, context.Background(), scm.ClusterRequest{Method: "view"})
-	first, err := owner.exportObject(peer, object, view)
+	first, err := owner.exportObject(peer, object, view, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := owner.exportObject(peer, object, view)
+	second, err := owner.exportObject(peer, object, view, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +110,7 @@ func prepareHistoricalObject(t *testing.T, owner *nodeScanService, peer *mosiPee
 	if err != nil {
 		t.Fatal(err)
 	}
-	ref, err := owner.exportObject(peer, old, view)
+	ref, err := owner.exportObject(peer, old, view, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,8 +178,9 @@ func TestClusterCallbackRejectsCallsAfterExportingQueryEnds(t *testing.T) {
 	}, nil)
 	env := &scm.Env{Vars: scm.Vars{scm.Symbol("output"): callback}, Outer: &scm.Globalenv}
 	proc := scm.Eval(scm.Read(t.Name(), `(lambda () (output))`, true), env)
-	bindings := (&scm.SerializationContext{Invocation: scm.NewAny(tx)}).WithExport(func(object scm.ClusterObject, view scm.Scmer) (scm.ClusterReference, error) {
-		return owner.exportObject(source, object, view)
+	var bindings *scm.SerializationContext
+	bindings = (&scm.SerializationContext{Invocation: scm.NewAny(tx)}).WithExport(func(object scm.ClusterObject, view scm.Scmer) (scm.ClusterReference, error) {
+		return owner.exportObject(source, object, view, bindings)
 	})
 	bindings = owner.handleBindings(bindings, source)
 	data, err := scm.MarshalProcedure(proc, bindings)
@@ -186,12 +189,9 @@ func TestClusterCallbackRejectsCallsAfterExportingQueryEnds(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	remote, err := scm.UnmarshalProcedure(data, scm.ProcedureDecode{ResolveHandle: client.handleResolver(ctx, peer, scm.NewNil()), Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) {
+	remote := unmarshalTestProcedureDelivery(t, source, peer, data, bindings, scm.ProcedureDecode{ResolveHandle: client.handleResolver(ctx, peer, scm.NewNil()), Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) {
 		return client.importObject(context.Background(), peer, ref)
 	}})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if !scm.Apply(remote).Bool() || calls.Load() != 1 {
 		t.Fatal("live callback did not execute")
 	}
@@ -224,19 +224,18 @@ func TestClusterObjectSerializedSessionUsesOwnerEndpoint(t *testing.T) {
 	session.Func()(scm.NewString("x"), scm.NewInt(17))
 	environment := &scm.Env{Vars: scm.Vars{scm.Symbol("session"): session}, Outer: &scm.Globalenv}
 	proc := scm.Eval(scm.Read(t.Name(), `(lambda () (session "x"))`, true), environment)
-	bindings := (&scm.SerializationContext{}).WithExport(func(object scm.ClusterObject, view scm.Scmer) (scm.ClusterReference, error) {
-		return owner.exportObject(source, object, view)
+	var bindings *scm.SerializationContext
+	bindings = (&scm.SerializationContext{}).WithExport(func(object scm.ClusterObject, view scm.Scmer) (scm.ClusterReference, error) {
+		return owner.exportObject(source, object, view, bindings)
 	})
+	bindings = bindings.WithPeer(source.valuePeer())
 	data, err := scm.MarshalProcedure(proc, bindings)
 	if err != nil {
 		t.Fatal(err)
 	}
-	restored, err := scm.UnmarshalProcedure(data, scm.ProcedureDecode{Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) {
+	restored := unmarshalTestProcedureDelivery(t, source, peer, data, bindings, scm.ProcedureDecode{Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) {
 		return client.importObject(context.Background(), peer, ref)
 	}})
-	if err != nil {
-		t.Fatal(err)
-	}
 	session.Func()(scm.NewString("x"), scm.NewInt(91))
 	if result := scm.Apply(restored); result.Int() != 17 {
 		t.Fatal("prepared session view changed during statement", result)
@@ -301,7 +300,7 @@ func TestClusterObjectOwnerCacheMapFactoryAndNestedRuntimeCapture(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	ref, err := owner.exportObject(source, object, view)
+	ref, err := owner.exportObject(source, object, view, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -353,7 +352,7 @@ func TestClusterObjectNativeOverlayReferenceKeepsPhysicalIdentity(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	ref, err := owner.exportObject(source, overlay, view)
+	ref, err := owner.exportObject(source, overlay, view, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -388,7 +387,7 @@ func TestClusterParticipantDecisionJoinsNativeInvocations(t *testing.T) {
 	defer invocation.endQuery(8)
 	finished := make(chan error, 1)
 	go func() {
-		_, err := participant.HandleClusterRequest(context.Background(), scm.ClusterRequest{Method: "rollback", Arguments: []scm.Scmer{scm.NewString(participant.decisionToken)}})
+		_, err := participant.executeClusterRequest(context.Background(), scm.ClusterRequest{Method: "rollback", Arguments: []scm.Scmer{scm.NewString(participant.decisionToken)}})
 		finished <- err
 	}()
 	select {
@@ -449,7 +448,7 @@ func TestClusterNativeParticipantSavepointPreservesEarlierMutations(t *testing.T
 	imported.remoteObject = &scm.ClusterHandle{
 		Reference: scm.ClusterReference{Owner: "worker"},
 		Call: func(ctx context.Context, request scm.ClusterRequest) (scm.Scmer, error) {
-			value, err := participant.HandleClusterRequest(ctx, request)
+			value, err := participant.executeClusterRequest(ctx, request)
 			if err != nil {
 				return scm.NewNil(), err
 			}
@@ -484,7 +483,7 @@ func TestClusterObjectCatalogNamesNeedNoRegistration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ref, err := owner.exportObject(source, table, view)
+	ref, err := owner.exportObject(source, table, view, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -505,11 +504,11 @@ func TestClusterObjectOfferCancellationCannotDropAcquiredReader(t *testing.T) {
 	session := scm.NewSession()
 	object, _ := scm.ClusterObjectOf(session)
 	view, _ := scm.ClusterObjectValue(object, context.Background(), scm.ClusterRequest{Method: "view"})
-	pending, err := owner.exportObject(source, object, view)
+	pending, err := owner.exportObject(source, object, view, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	live, err := owner.exportObject(source, object, view)
+	live, err := owner.exportObject(source, object, view, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -539,7 +538,7 @@ func TestClusterObjectRepeatedImportSharesOneGCLifetime(t *testing.T) {
 	session := scm.NewSession()
 	object, _ := scm.ClusterObjectOf(session)
 	view, _ := scm.ClusterObjectValue(object, context.Background(), scm.ClusterRequest{Method: "view"})
-	ref, err := owner.exportObject(source, object, view)
+	ref, err := owner.exportObject(source, object, view, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -627,17 +626,17 @@ func TestClusterObjectAbandonedCompletionDiscardsOffers(t *testing.T) {
 	value := scm.NewSession()
 	object, _ := scm.ClusterObjectOf(value)
 	view, _ := scm.ClusterObjectValue(object, context.Background(), scm.ClusterRequest{Method: "view"})
-	ref, err := owner.exportObject(source, object, view)
+	ref, err := owner.exportObject(source, object, view, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	id := client.nextHandle.Add(1)
 	receiver := scm.NewResultReceiver()
-	client.handles.Store(id, &handleSlot{peer: peer.objectPeer, handler: &controlResultHandle{service: client, peer: peer, receiver: receiver}})
+	client.handles.Store(id, &handleSlot{peer: peer.objectPeer, receiver: &controlResultHandle{service: client, peer: peer, receiver: receiver}})
 	defer client.handles.Delete(id)
-	completion, _ := freezeScanValue(scm.NewString(string(mustNodeMetadata(scanCompletion{Offers: []scm.ClusterReference{ref}}))))
+	completion, _ := marshalNode(scanCompletion{Offers: []scm.ClusterReference{ref}})
 	s := &scanRPCSession{service: client, peer: peer}
-	if err := s.handleValue(id, completion); err != nil {
+	if err := s.handleValue(id, schemeValue(completion)); err != nil {
 		t.Fatal(err)
 	}
 	// Cancellation after delivery but before collection must release the offer.
@@ -646,8 +645,8 @@ func TestClusterObjectAbandonedCompletionDiscardsOffers(t *testing.T) {
 	client.discardObjectOffers(peer, abandoned.Offers)
 	waitObjectGC(t, func() bool { return objectEntryCount(owner) == 0 })
 	// A late duplicate is harmless and cannot replace the accepted result.
-	completion, _ = freezeScanValue(scm.NewString(string(mustNodeMetadata(scanCompletion{Data: []byte("late"), Offers: []scm.ClusterReference{ref}}))))
-	if err := s.handleValue(id, completion); err != nil {
+	completion, _ = marshalNode(scanCompletion{Data: []byte("late"), Offers: []scm.ClusterReference{ref}})
+	if err := s.handleValue(id, schemeValue(completion)); err != nil {
 		t.Fatal(err)
 	}
 	if len(receiver.Wait().Any().(scanCompletion).Data) != 0 {
@@ -662,7 +661,7 @@ func prepareRegisteredDiskGeneration(t *testing.T, owner *nodeScanService, peer 
 	if err != nil {
 		t.Fatal(err)
 	}
-	ref, err := owner.exportObject(peer, old, view)
+	ref, err := owner.exportObject(peer, old, view, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -745,7 +744,7 @@ func TestClusterDiscoveryRefreshesRoutingAfterConcurrentHandover(t *testing.T) {
 	var request struct {
 		Return string `json:"return"`
 	}
-	if err := unmarshalNode(message.Data, &request); err != nil {
+	if err := decodeTestInvocation(message.Channel, message.Payload, &request); err != nil {
 		t.Fatal(err)
 	}
 	cluster.manager.updateRecord(resource, func(record *replicaRecord) bool {
@@ -771,7 +770,7 @@ func TestClusterObjectScopedSessionForwardsInvocationCancellation(t *testing.T) 
 	session := scm.NewSession()
 	object, _ := scm.ClusterObjectOf(session)
 	view, _ := scm.ClusterObjectValue(object, context.Background(), scm.ClusterRequest{Method: "view"})
-	ref, err := owner.exportObject(source, object, view)
+	ref, err := owner.exportObject(source, object, view, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -839,9 +838,6 @@ func (*portableClusterTestValue) ClusterObjectType() string { return "portable-w
 func (*portableClusterTestValue) Serialize(*scm.SerializationContext) (scm.Scmer, error) {
 	return scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), scm.NewSlice([]scm.Scmer{scm.NewString("portable"), scm.NewInt(42)})}), nil
 }
-func (*portableClusterTestValue) HandleClusterRequest(context.Context, scm.ClusterRequest) (any, error) {
-	return nil, fmt.Errorf("portable value has no remote owner")
-}
 func TestClusterObjectWireUsesMandatorySerializer(t *testing.T) {
 	encoded, err := freezeScanValue(scm.NewAny(&portableClusterTestValue{}), &scm.SerializationContext{})
 	if err != nil {
@@ -858,21 +854,20 @@ func TestClusterObjectWireUsesMandatorySerializer(t *testing.T) {
 
 //go:noinline
 func importNeverCalledSubscan(t *testing.T, owner, client *nodeScanService, source, peer *mosiPeer, session scm.Scmer) scm.Scmer {
-	bindings := (&scm.SerializationContext{}).WithExport(func(object scm.ClusterObject, view scm.Scmer) (scm.ClusterReference, error) {
-		return owner.exportObject(source, object, view)
+	var bindings *scm.SerializationContext
+	bindings = (&scm.SerializationContext{}).WithExport(func(object scm.ClusterObject, view scm.Scmer) (scm.ClusterReference, error) {
+		return owner.exportObject(source, object, view, bindings)
 	})
 	body := scm.NewSlice([]scm.Scmer{scm.NewSymbol("if"), scm.NewSymbol("take"), session, scm.NewNil()})
 	proc := scm.Eval(scm.NewSlice([]scm.Scmer{scm.NewSymbol("lambda"), scm.NewSlice([]scm.Scmer{scm.NewSymbol("take")}), body}), &scm.Globalenv)
+	bindings = bindings.WithPeer(source.valuePeer())
 	data, err := scm.MarshalProcedure(proc, bindings)
 	if err != nil {
 		t.Fatal(err)
 	}
-	received, err := scm.UnmarshalProcedure(data, scm.ProcedureDecode{Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) {
+	received := unmarshalTestProcedureDelivery(t, source, peer, data, bindings, scm.ProcedureDecode{Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) {
 		return client.importObject(context.Background(), peer, ref)
 	}})
-	if err != nil {
-		t.Fatal(err)
-	}
 	return received
 }
 func TestClusterObjectDeduplicatesOverlappingEmptySubscansAndGC(t *testing.T) {
@@ -924,12 +919,12 @@ func TestClusterObjectPendingTransferSurvivesPriorLeaseRelease(t *testing.T) {
 	peer := &mosiPeer{objectPeer: clusterObjectPeer{uuid.NewString(), uuid.NewString()}}
 	object, _ := scm.ClusterObjectOf(scm.NewSession())
 	view, _ := scm.ClusterObjectValue(object, context.Background(), scm.ClusterRequest{Method: "view"})
-	first, err := owner.exportObject(peer, object, view)
+	first, err := owner.exportObject(peer, object, view, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	owner.commitObjectOffers(peer, []scm.ClusterReference{first})
-	pending, err := owner.exportObject(peer, object, view)
+	pending, err := owner.exportObject(peer, object, view, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -976,10 +971,8 @@ func TestClusterCancellationQueuesMessageBeforeCollectorReturns(t *testing.T) {
 				executor.dispatch(remoteScanTask{})
 			}()
 			request := takeMosi(peer.outgoing)
-			var envelope struct {
-				Return string `json:"return"`
-			}
-			if err := unmarshalNode(request.Data, &envelope); err != nil {
+			address, _, _, err := decodeInvocation(request.Channel, request.Payload)
+			if err != nil {
 				t.Fatal(err)
 			}
 			cancel()
@@ -987,7 +980,7 @@ func TestClusterCancellationQueuesMessageBeforeCollectorReturns(t *testing.T) {
 			case <-peer.outgoing.ready:
 				message := takeMosi(peer.outgoing)
 				var id string
-				if message.Method != "scan.cancel" || unmarshalNode(message.Data, &id) != nil || id != envelope.Return {
+				if message.Channel != "scan.cancel" || unmarshalNode(message.Payload, &id) != nil || id != address {
 					t.Fatal("wrong remote cancellation", message)
 				}
 			case <-time.After(time.Second):
@@ -1000,7 +993,7 @@ func TestClusterCancellationQueuesMessageBeforeCollectorReturns(t *testing.T) {
 			}
 			// The existing return channel is also the join acknowledgement. No
 			// cancelled invocation may release its captures before this delivery.
-			entry, ok := service.handles.Load(controlReturnSlot(envelope.Return))
+			entry, ok := service.handles.Load(controlReturnSlot(address))
 			if !ok {
 				t.Fatal("cancelled invocation dropped its return channel")
 			}
@@ -1046,25 +1039,26 @@ func TestClusterObjectReleaseRetriesWithoutAnotherGCOrReconnect(t *testing.T) {
 		}
 		t.Fatal("release worker did not progress")
 	}
-	// Hold the queue lock until the worker has taken ownership. The full
-	// window then rejects this attempt, without a fake remote result/ack.
-	peer.outgoing.mu.Lock()
-	peer.outgoing.bytes = 32 << 20
+	// A full publication window rejects immediately, without a remote ack.
+	// Its release worker retains the work for a later independent retry.
+	peer.outgoing.bytes.Store(32 << 20)
 	registry.mu.Lock()
 	registry.releases = append(registry.releases, clusterObjectRelease{peer: identity, reference: scm.ClusterReference{URI: "http://owner/cluster/" + uuid.NewString()}})
 	registry.mu.Unlock()
 	registry.wake <- struct{}{}
-	wait(func() bool { registry.mu.Lock(); defer registry.mu.Unlock(); return len(registry.releases) == 0 })
-	peer.outgoing.mu.Unlock()
-	wait(func() bool { registry.mu.Lock(); defer registry.mu.Unlock(); return len(registry.releases) == 1 })
-	peer.outgoing.mu.Lock()
-	peer.outgoing.bytes = 0
-	peer.outgoing.mu.Unlock()
+	// Observe a completed refusal, not the fleeting empty list between taking
+	// work and restoring it. Publication no longer has a mutex to pause there.
+	wait(func() bool {
+		registry.mu.Lock()
+		defer registry.mu.Unlock()
+		return peer.outgoing.rejected.Load() > 0 && len(registry.releases) == 1
+	})
+	peer.outgoing.bytes.Store(0)
 	select {
 	case <-peer.outgoing.ready:
 		message := takeMosi(peer.outgoing)
-		if message.Method != "object.release" || message.ID != 0 {
-			t.Fatal("release is not fire-and-forget", message.Method, message.ID)
+		if !strings.HasPrefix(message.Channel, "object/") {
+			t.Fatal("release is not fire-and-forget", message.Channel)
 		}
 		if _, exists := service.handles.Load(""); exists {
 			t.Fatal("release allocated a reply collector")
@@ -1104,7 +1098,7 @@ func prepareRegisteredOrderedRun(t *testing.T, owner *nodeScanService, peer *mos
 	if err != nil {
 		t.Fatal(err)
 	}
-	ref, err := owner.exportObject(peer, run, view)
+	ref, err := owner.exportObject(peer, run, view, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1143,7 +1137,7 @@ func TestClusterObjectDictionaryCallbacksPrepareCompleteSessionView(t *testing.T
 	env := &scm.Env{Vars: scm.Vars{scm.Symbol("session"): session}, Outer: &scm.Globalenv}
 	var offers []scm.ClusterReference
 	bindings := (&scm.SerializationContext{}).WithExport(func(object scm.ClusterObject, view scm.Scmer) (scm.ClusterReference, error) {
-		ref, err := owner.exportObject(source, object, view)
+		ref, err := owner.exportObject(source, object, view, nil)
 		if err == nil {
 			offers = append(offers, ref)
 		}
@@ -1178,6 +1172,46 @@ func TestClusterObjectDictionaryCallbacksPrepareCompleteSessionView(t *testing.T
 	}
 }
 
+func TestClusterObjectCachedLambdaPreparesCachemapKeysBeforeInvocation(t *testing.T) {
+	for _, code := range []string{`(lambda () (cache "ready"))`, `(lambda () (cache key))`, `(lambda () ((lambda () (cache key))))`} {
+		for _, native := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/native=%t", code, native), func(t *testing.T) {
+				calls := 0
+				cache := NewCacheMap(scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+					calls++
+					if args[0].String() != "ready" {
+						t.Fatal("unexpected prepared key", args[0])
+					}
+					return scm.NewInt(17)
+				}))
+				function := scm.Eval(scm.Read(t.Name(), code, false), &scm.Env{Vars: scm.Vars{scm.Symbol("cache"): cache, scm.Symbol("key"): scm.NewString("ready")}, Outer: &scm.Globalenv})
+				if native {
+					function = scm.CompileJIT(function, true)
+				}
+				peer := &scm.SerializationPeer{
+					Declare:  func(string, []byte, bool) error { return nil },
+					Send:     func(string, []byte) error { return nil },
+					Register: func(string, func([]byte) error) func() { return func() {} },
+				}
+				defer peer.Close()
+				var exported scm.Scmer
+				bindings := (&scm.SerializationContext{}).WithPeer(peer).WithExport(func(object scm.ClusterObject, view scm.Scmer) (scm.ClusterReference, error) {
+					exported = view
+					data, err := freezeScanValue(view, nil)
+					return scm.ClusterReference{URI: "memcp://owner/cache", Owner: "owner", Incarnation: "boot", Token: "lease", Type: object.ClusterObjectType(), View: []byte(data)}, err
+				})
+				defer bindings.Queued()
+				if _, err := scm.MarshalProcedure(function, bindings); err != nil {
+					t.Fatal(err)
+				}
+				if calls != 1 || !exported.IsSlice() || len(exported.Slice()) != 2 || exported.Slice()[1].Int() != 17 {
+					t.Fatal("factory was deferred to worker invocation", calls, exported)
+				}
+			})
+		}
+	}
+}
+
 // A transferred overlay is already enlisted before MOSI publishes its grant.
 // Its first local writer must retain the capability held by older endpoints.
 func TestClusterTransferredParticipantKeepsEnlistedCapability(t *testing.T) {
@@ -1202,11 +1236,11 @@ func TestClusterTransferredParticipantKeepsEnlistedCapability(t *testing.T) {
 	endpoint := &storageShardTransaction{}
 	endpoint.forwarded.Store(participant)
 	for _, invalid := range []string{"", "foreign-capability"} {
-		if _, err := endpoint.HandleClusterRequest(context.Background(), scm.ClusterRequest{Method: "savepoint", Arguments: []scm.Scmer{scm.NewString(invalid)}}); err == nil {
+		if _, err := endpoint.executeClusterRequest(context.Background(), scm.ClusterRequest{Method: "savepoint", Arguments: []scm.Scmer{scm.NewString(invalid)}}); err == nil {
 			t.Fatal("forwarding admitted an unenlisted capability")
 		}
 	}
-	if _, err := endpoint.HandleClusterRequest(context.Background(), scm.ClusterRequest{Method: "savepoint", Arguments: []scm.Scmer{scm.NewString(capability)}}); err != nil {
+	if _, err := endpoint.executeClusterRequest(context.Background(), scm.ClusterRequest{Method: "savepoint", Arguments: []scm.Scmer{scm.NewString(capability)}}); err != nil {
 		t.Fatalf("first write invalidated the enlisted endpoint: %v", err)
 	}
 }
@@ -1215,44 +1249,61 @@ func TestClusterTransferredParticipantKeepsEnlistedCapability(t *testing.T) {
 func prepareSharedLiteral(t *testing.T, owner, client *nodeScanService, peer *mosiPeer) weak.Pointer[scm.FastDict] {
 	t.Helper()
 	source := objectOwnerPeer(t, owner, client)
-	bindings := (&scm.SerializationContext{}).WithExport(func(object scm.ClusterObject, view scm.Scmer) (scm.ClusterReference, error) {
-		return owner.exportObject(source, object, view)
-	})
+	bindings := (&scm.SerializationContext{}).WithPeer(source.valuePeer())
+	defer bindings.Queued()
 	dict := scm.NewFastDictValue(512)
 	for i := 0; i < 512; i++ {
 		dict.Set(scm.NewInt(int64(i)), scm.NewInt(int64(i+7)), nil)
 	}
-	first, err := freezeScanValue(scm.NewFastDict(dict), bindings)
+	sourceProc := scm.Eval(scm.Read(t.Name(), `(lambda () captured)`, false), &scm.Env{Vars: scm.Vars{scm.Symbol("captured"): scm.NewFastDict(dict)}, Outer: &scm.Globalenv})
+	first, err := scm.MarshalProcedure(sourceProc, bindings)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := freezeScanValue(scm.NewFastDict(dict), bindings)
+	second, err := scm.MarshalProcedure(sourceProc, bindings)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(first) > 1024 || len(second) > 1024 {
 		t.Fatal("dictionary was inlined per shard", len(first), len(second))
 	}
+	// Direct test reconstruction is outside the socket reader. Real tasks use
+	// the FIFO; the test waits until the preceding declaration was admitted.
+	var ready scm.Scmer
+	deadline := time.Now().Add(time.Second)
+	for {
+		ready, err = scm.UnmarshalProcedure(first)
+		if err == nil {
+			break
+		}
+		if !strings.Contains(err.Error(), "unknown cluster value") || time.Now().After(deadline) {
+			t.Fatal(err)
+		}
+		time.Sleep(time.Millisecond)
+	}
 	// Mutation after export must not change the frozen statement snapshot.
 	dict.Set(scm.NewInt(0), scm.NewInt(900), nil)
-	decode := scm.ProcedureDecode{Resolve: func(ref scm.ClusterReference) (scm.Scmer, error) {
-		return client.importObject(context.Background(), peer, ref)
-	}}
 	type restored struct {
 		value scm.Scmer
 		err   error
 	}
 	results := make(chan restored, 16)
-	wires := []schemeValue{first, second}
+	wires := [][]byte{first, second}
 	for len(wires) < 16 {
-		wire, err := freezeScanValue(scm.NewFastDict(dict), bindings)
+		wire, err := scm.MarshalProcedure(sourceProc, bindings)
 		if err != nil {
 			t.Fatal(err)
 		}
 		wires = append(wires, wire)
 	}
 	for _, wire := range wires {
-		go func(wire schemeValue) { value, err := wire.reconstruct(decode); results <- restored{value, err} }(wire)
+		go func(wire []byte) {
+			value, err := scm.UnmarshalProcedure(wire)
+			if err == nil {
+				value = scm.Apply(value)
+			}
+			results <- restored{value, err}
+		}(wire)
 	}
 	values := make([]scm.Scmer, 0, len(wires))
 	for range wires {
@@ -1265,6 +1316,7 @@ func prepareSharedLiteral(t *testing.T, owner, client *nodeScanService, peer *mo
 		}
 		values = append(values, got.value)
 	}
+	runtime.KeepAlive(ready)
 	a, b := values[0], values[1]
 	if a.FastDict() != b.FastDict() {
 		t.Fatal("same lease reconstructed the dictionary twice")
@@ -1306,7 +1358,7 @@ func TestClusterPregrantedSnapshotImportsAfterDisconnect(t *testing.T) {
 	scm.Apply(session, scm.NewString("key"), scm.NewInt(17))
 	object, _ := scm.ClusterObjectOf(session)
 	view, _ := scm.ClusterObjectValue(object, context.Background(), scm.ClusterRequest{Method: "view"})
-	ref, err := owner.exportObject(source, object, view)
+	ref, err := owner.exportObject(source, object, view, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1336,11 +1388,11 @@ func TestClusterViewDeclarationsPublishOnceAndRespectBudget(t *testing.T) {
 		t.Fatal("known view was sent twice")
 	}
 	message := takeMosi(peer.outgoing)
-	if message.ID != 0 || message.Method != "object.declare" {
+	if message.Channel != "object.declare" {
 		t.Fatal("declaration allocated a result channel")
 	}
 	receiver := &mosiPeer{}
-	if err := receiver.publishObjectView(message.Method, message.Data); err != nil {
+	if err := receiver.publishObjectView(message.Channel, message.Payload); err != nil {
 		t.Fatal(err)
 	}
 	if got, ok := receiver.objectViews.Load("owner/1"); !ok || string(got.([]byte)) != string(view) {
@@ -1354,7 +1406,7 @@ func TestClusterViewDeclarationsPublishOnceAndRespectBudget(t *testing.T) {
 	}
 	peer.forgetObjectView("owner/1")
 	message = takeMosi(peer.outgoing)
-	if err := receiver.publishObjectView(message.Method, message.Data); err != nil {
+	if err := receiver.publishObjectView(message.Channel, message.Payload); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := receiver.objectViews.Load("owner/1"); ok {
@@ -1371,11 +1423,15 @@ func TestClusterCancelledReturnHandleDiscardsLateGrants(t *testing.T) {
 	finished := make(chan error, 1)
 	go func() { finished <- service.control(ctx, peer, "fixture", nil, nil, false) }()
 	request := takeMosi(peer.outgoing)
-	var envelope struct{ Return string }
-	if err := unmarshalNode(request.Data, &envelope); err != nil {
+	address, _, _, err := decodeInvocation(request.Channel, request.Payload)
+	if err != nil {
 		t.Fatal(err)
 	}
-	slot := controlReturnSlot(envelope.Return)
+	slot := controlReturnSlot(address)
+	previous, ok := service.channels.Load(handleChannel(slot))
+	if !ok {
+		t.Fatal("missing original receiver")
+	}
 	cancel()
 	if err := <-finished; err != context.Canceled {
 		t.Fatal("wrong wait cancellation", err)
@@ -1384,27 +1440,27 @@ func TestClusterCancelledReturnHandleDiscardsLateGrants(t *testing.T) {
 	if !ok {
 		t.Fatal("cancelled waiter discarded its necessary result cleanup")
 	}
-	if _, ok := entry.(*handleSlot).handler.(*abandonedControlHandle); !ok {
+	if _, abandoned := entry.(*handleSlot).receiver.(*abandonedControlHandle); !abandoned {
 		t.Fatal("cancelled result retained query state")
 	}
-	if cancelMessage := takeMosi(peer.outgoing); cancelMessage.Method != "scan.cancel" {
+	if cancelMessage := takeMosi(peer.outgoing); cancelMessage.Channel != "scan.cancel" {
 		t.Fatal("missing remote cancellation")
 	}
 	ref := scm.ClusterReference{URI: "http://owner/cluster/1", Owner: "owner", Incarnation: "boot", Token: "1", Type: "session"}
-	payload, err := freezeScanValue(scm.NewString(string(mustNodeMetadata(scanCompletion{Offers: []scm.ClusterReference{ref}}))))
+	payload, err := marshalNode(scanCompletion{Offers: []scm.ClusterReference{ref}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	session := &scanRPCSession{service: service, peer: peer}
-	if err := session.handleValue(slot, payload); err != nil {
-		t.Fatal(err)
-	}
+	// The reader may have fetched the old receiver before cancellation
+	// replaced it with the state-free disposer. Exercise that exact handoff.
+	previous.(scm.ClusterRequestHandler).HandleClusterRequest(&channelDelivery{Context: context.Background(), peer: peer}, payload)
+	peer.workers.Wait()
 	if _, ok := service.handles.Load(slot); ok {
 		t.Fatal("late result retained its cleanup slot")
 	}
 	message := takeMosi(peer.outgoing)
 	var discarded []scm.ClusterReference
-	if message.Method != "object.discard" || unmarshalNode(message.Data, &discarded) != nil || len(discarded) != 1 || discarded[0].Token != ref.Token {
+	if message.Channel != "object.discard" || unmarshalNode(message.Payload, &discarded) != nil || len(discarded) != 1 || discarded[0].Token != ref.Token {
 		t.Fatal("abandoned result leaked its grant")
 	}
 }
@@ -1417,7 +1473,9 @@ func TestClusterDuplicateResultPreservesAcceptedGrant(t *testing.T) {
 	handler := &controlResultHandle{service: service, peer: peer, receiver: receiver}
 	original := scm.ClusterReference{URI: "owner/1", Owner: "owner", Incarnation: "boot", Token: "1", Type: "session"}
 	deliver := func(refs ...scm.ClusterReference) {
-		handler.Handle(scm.NewString(string(mustNodeMetadata(scanCompletion{Offers: refs}))))
+		if err := handler.receive(mustNodeMetadata(scanCompletion{Offers: refs})); err != nil {
+			t.Fatal(err)
+		}
 	}
 	deliver(original)
 	deliver(original)
@@ -1429,7 +1487,7 @@ func TestClusterDuplicateResultPreservesAcceptedGrant(t *testing.T) {
 	deliver(original, unexpected)
 	message := takeMosi(peer.outgoing)
 	var discarded []scm.ClusterReference
-	if message.Method != "object.discard" || unmarshalNode(message.Data, &discarded) != nil || len(discarded) != 1 || discarded[0].Token != "2" {
+	if message.Channel != "object.discard" || unmarshalNode(message.Payload, &discarded) != nil || len(discarded) != 1 || discarded[0].Token != "2" {
 		t.Fatal("duplicate leaked a separate unused grant", discarded)
 	}
 	accepted := receiver.Wait().Any().(scanCompletion)
@@ -1447,7 +1505,7 @@ func TestClusterImportedTransactionExportRetainsRoot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	root, err := owner.exportObject(source, tx.transactionState, view)
+	root, err := owner.exportObject(source, tx.transactionState, view, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1455,7 +1513,7 @@ func TestClusterImportedTransactionExportRetainsRoot(t *testing.T) {
 	// Construct the proxy held by a different process explicitly, so exporting
 	// it exercises forwarding rather than resolving back to the native root.
 	proxy := &transactionState{clusterID: tx.ClusterObjectID(), coordinator: &scm.ClusterHandle{Reference: root, View: view}}
-	forwarded, err := client.exportObject(peer, proxy, view)
+	forwarded, err := client.exportObject(peer, proxy, view, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1473,7 +1531,7 @@ func TestClusterObjectReleaseReconnectKeepsServiceConnection(t *testing.T) {
 	owner := nodeScans.Load()
 	source := objectOwnerPeer(t, owner, client)
 	object, _ := scm.ClusterObjectOf(scm.NewSession())
-	ref, err := owner.exportObject(source, object, scm.NewNil())
+	ref, err := owner.exportObject(source, object, scm.NewNil(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1516,7 +1574,7 @@ func TestClusterDuplicateLinkDoesNotCancelBorrowedHandle(t *testing.T) {
 	})
 	defer callback.Close()
 	defer unblock()
-	ref, err := owner.exportObject(objectOwnerPeer(t, owner, client), callback, scm.NewNil())
+	ref, err := owner.exportObject(objectOwnerPeer(t, owner, client), callback, scm.NewNil(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1527,7 +1585,10 @@ func TestClusterDuplicateLinkDoesNotCancelBorrowedHandle(t *testing.T) {
 	finished := make(chan error, 1)
 	go func() {
 		var reply clusterObjectReply
-		err := client.control(ctx, candidate, "object.call", clusterObjectCall{Reference: ref, Method: "receive", Arguments: []schemeValue{view}}, &reply, true)
+		payload, err := scm.EncodeClusterRequest(scm.ClusterRequest{Method: "receive", Arguments: []scm.Scmer{scm.NewNil()}})
+		if err == nil {
+			err = client.control(ctx, candidate, "object.call", clusterObjectCall{Reference: ref, Payload: payload}, &reply, true)
+		}
 		if err == nil {
 			result, decodeErr := reply.Value.reconstruct()
 			if decodeErr != nil {
@@ -1567,4 +1628,230 @@ func TestClusterConnectReusesManagedEndpoint(t *testing.T) {
 	if next != peer || id != peer.objectPeer.ID {
 		t.Fatal("repeated setup allocated another connection for the same endpoint")
 	}
+}
+
+func TestClusterForwardedOverlayExportNeedsNoOwnerRoundTrip(t *testing.T) {
+	service := &nodeScanService{id: "relay"}
+	defer service.stopObjects()
+	peer := &mosiPeer{done: make(chan struct{}), outgoing: newMosiMailbox(), objectPeer: clusterObjectPeer{"target", "boot"}}
+	object := &storageShardTransaction{remoteObject: &scm.ClusterHandle{
+		Reference: scm.ClusterReference{Owner: "original", Incarnation: "old", Token: "lease", Type: "tx-shard"},
+		Call: func(context.Context, scm.ClusterRequest) (scm.Scmer, error) {
+			t.Fatal("export contacted original owner")
+			return scm.NewNil(), nil
+		},
+	}}
+	ref, err := service.exportObject(peer, object, scm.NewNil(), nil)
+	if err != nil || ref.Owner != service.authNodeID() || ref.Token == "" {
+		t.Fatal("failed to pregrant forwarding endpoint", ref, err)
+	}
+	registry := service.objectRegistry()
+	registry.mu.Lock()
+	retained := registry.entries[ref.URI].object
+	registry.mu.Unlock()
+	if retained != object || object.remoteObject == nil {
+		t.Fatal("forwarder lost the original import's Go lifetime")
+	}
+	if peer.outgoing.len() != 0 {
+		t.Fatal("export unexpectedly required remote coordination")
+	}
+}
+
+func TestClusterResultReceiverGCReleasesHandleAndDisconnectHook(t *testing.T) {
+	service := &nodeScanService{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	peer := &mosiPeer{ctx: ctx, done: make(chan struct{}), objectPeer: clusterObjectPeer{"peer", "boot"}}
+	abandon := func() uint64 {
+		receiver := scm.NewResultReceiver()
+		bindings := service.handleBindings(&scm.SerializationContext{}, peer)
+		expression, err := bindings.HandleExpression(receiver)
+		if err != nil {
+			t.Fatal(err)
+		}
+		slot := uint64(expression.Slice()[1].Int())
+		runtime.KeepAlive(receiver)
+		return slot
+	}
+	slot := abandon()
+	waitObjectGC(t, func() bool {
+		_, handle := service.handles.Load(slot)
+		_, channel := service.channels.Load(handleChannel(slot))
+		return !handle && !channel
+	})
+	cancel() // the stopped disconnect hook cannot resurrect the receiver
+}
+
+func TestClusterDeregisteredChannelsDiscardLateNativeGrants(t *testing.T) {
+	for _, binaryCompletion := range []bool{false, true} {
+		t.Run(fmt.Sprint(binaryCompletion), func(t *testing.T) {
+			_, client, _ := setupRemoteScanConnection(t)
+			owner := nodeScans.Load()
+			source := objectOwnerPeer(t, owner, client)
+			object, _ := scm.ClusterObjectOf(scm.NewSession())
+			view, _ := scm.ClusterObjectValue(object, context.Background(), scm.ClusterRequest{Method: "view"})
+			ref, err := owner.exportObject(source, object, view, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			owner.commitObjectOffers(source, []scm.ClusterReference{ref})
+			var payload []byte
+			if binaryCompletion {
+				payload = mustNodeMetadata(scanCompletion{Offers: []scm.ClusterReference{ref}})
+			} else {
+				frozen, err := freezeScanValue(scm.NewAny(object), (&scm.SerializationContext{}).WithExport(func(scm.ClusterObject, scm.Scmer) (scm.ClusterReference, error) { return ref, nil }))
+				if err != nil {
+					t.Fatal(err)
+				}
+				payload = frozen
+			}
+			if err := source.send(context.Background(), mosiMessage{Channel: handleChannel(client.allocateHandleSlot()), Payload: payload}); err != nil {
+				t.Fatal(err)
+			}
+			waitObjectGC(t, func() bool { return objectEntryCount(owner) == 0 })
+			client.handles.Range(func(key, _ any) bool { t.Error("late delivery retained a handler", key); return true })
+		})
+	}
+}
+
+func TestClusterForwardedTransactionRootKeepsOriginalCoordinator(t *testing.T) {
+	service := &nodeScanService{id: "relay"}
+	defer service.stopObjects()
+	peer := &mosiPeer{objectPeer: clusterObjectPeer{"target", "boot"}}
+	root := scm.ClusterReference{URI: "http://original/cluster/transactions/17", Owner: "original", Incarnation: "original-boot", Type: "transaction", View: []byte("root view")}
+	state := &transactionState{coordinator: &scm.ClusterHandle{Reference: root}}
+	ref, err := service.exportObject(peer, state, scm.NewNil(), nil)
+	if err != nil || !reflect.DeepEqual(ref, root) {
+		t.Fatal("MOSI export introduced a transaction-root relay", ref, err)
+	}
+	if objectEntryCount(service) != 0 {
+		t.Fatal("routing root allocated a lifetime registration")
+	}
+}
+
+func TestClusterObjectCallUsesRegisteredAddressWithoutRepeatingReference(t *testing.T) {
+	service := &nodeScanService{}
+	defer service.stopObjects()
+	peer := &mosiPeer{done: make(chan struct{}), outgoing: newMosiMailbox(), objectPeer: clusterObjectPeer{"owner", "boot"}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	payload, err := scm.EncodeClusterRequest(scm.ClusterRequest{Method: "ack", Arguments: []scm.Scmer{scm.NewInt(64), scm.NewInt(128)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reference := scm.ClusterReference{URI: "http://owner/cluster/7", Owner: "owner", Incarnation: "boot", Token: "grant", Type: "ordered-run", View: []byte(strings.Repeat("immutable-view", 1024))}
+	finished := make(chan error, 1)
+	go func() {
+		finished <- service.control(ctx, peer, "object.call", clusterObjectCall{Reference: reference, Payload: payload}, nil, false)
+	}()
+	message := takeMosi(peer.outgoing)
+	if message.Channel != "object/7" || len(message.Payload) == 0 || message.Payload[0] != handleValue {
+		t.Fatal("object did not use its registered receiver", message.Channel)
+	}
+	var request struct {
+		Return string
+		Data   []byte
+	}
+	if err := decodeTestInvocation("object.call", message.Payload[1:], &request); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(request.Data, payload) {
+		t.Fatal("invocation repeated its URI/type/immutable view instead of raw operation bytes")
+	}
+	cancel()
+	if err := <-finished; err != context.Canceled {
+		t.Fatal(err)
+	}
+	service.deleteHandle(controlReturnSlot(request.Return))
+}
+
+//go:noinline
+func exportCollectibleTransactionChannel(t *testing.T, service *nodeScanService) (string, weak.Pointer[transactionState]) {
+	t.Helper()
+	tx := NewTxContext(TxCursorStability)
+	view, err := tx.ClusterView(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, err := service.exportObject(&mosiPeer{objectPeer: clusterObjectPeer{"reader", "boot"}}, tx.transactionState, view, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	channel := objectChannel(ref.URI)
+	if _, exists := service.channels.Load(channel); !exists {
+		t.Fatal("transaction root did not register its raw receiver")
+	}
+	return channel, weak.Make(tx.transactionState)
+}
+
+func TestClusterTransactionRootChannelFollowsNativeGC(t *testing.T) {
+	service := &nodeScanService{id: "root-owner"}
+	defer service.stopObjects()
+	channel, state := exportCollectibleTransactionChannel(t, service)
+	waitObjectGC(t, func() bool {
+		_, registered := service.channels.Load(channel)
+		return state.Value() == nil && !registered
+	})
+}
+
+func TestClusterObjectOldIncarnationCannotCallOrReleaseNewOwner(t *testing.T) {
+	peer, client, _ := setupRemoteScanConnection(t)
+	owner := nodeScans.Load()
+	source := objectOwnerPeer(t, owner, client)
+	value := scm.NewSession()
+	scm.Apply(value, scm.NewString("key"), scm.NewInt(7))
+	object, _ := scm.ClusterObjectOf(value)
+	view, err := scm.ClusterObjectValue(object, context.Background(), scm.ClusterRequest{Method: "view"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := owner.exportObject(source, object, view, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A restarted owner can reuse the same address and local grant number.
+	// Its authenticated boot must fence both old calls and delayed GC closes.
+	stale := fresh
+	stale.Incarnation = uuid.NewString()
+	previous := &mosiPeer{objectPeer: clusterObjectPeer{ID: peer.objectPeer.ID, Boot: stale.Incarnation}}
+	call := client.objectCaller(previous, stale, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if _, err := call(ctx, scm.ClusterRequest{Method: "call", Arguments: []scm.Scmer{scm.NewString("key"), scm.NewInt(99)}}); err == nil {
+		t.Fatal("old handle executed on a different owner incarnation")
+	}
+	if got := scm.Apply(value, scm.NewString("key")); got.Int() != 7 {
+		t.Fatal("old call changed the new owner", got)
+	}
+	if client.deliverObjectRelease(clusterObjectRelease{peer: previous.objectPeer, reference: stale}) {
+		t.Fatal("old GC release was published to a different incarnation")
+	}
+	if objectEntryCount(owner) != 1 {
+		t.Fatal("old cleanup revoked the new owner's grant")
+	}
+}
+
+func TestClusterObjectGCReconnectKeepsQueuedCloseConnectionAlive(t *testing.T) {
+	peer, client, _ := setupRemoteScanConnection(t)
+	owner := nodeScans.Load()
+	source := objectOwnerPeer(t, owner, client)
+	object, _ := scm.ClusterObjectOf(scm.NewSession())
+	view, err := scm.ClusterObjectValue(object, context.Background(), scm.ClusterRequest{Method: "view"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reference, err := owner.exportObject(source, object, view, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := peer.objectPeer
+	peer.close()
+	peer.wait()
+	if !client.deliverObjectRelease(clusterObjectRelease{peer: identity, reference: reference}) {
+		t.Fatal("same-incarnation reconnect did not queue its close")
+	}
+	if client.objectConnection(identity) == nil {
+		t.Fatal("GC closed its socket before the asynchronous writer could send")
+	}
+	waitObjectGC(t, func() bool { return objectEntryCount(owner) == 0 })
 }

@@ -67,7 +67,7 @@ func prepareSerialInterpreter(val Scmer) func([]Scmer) Scmer {
 	if proc.nativeCode() != 0 {
 		return func(args []Scmer) Scmer { return proc.callJIT(args) }
 	}
-	p := proc.snapshot()
+	p := proc.Snapshot()
 	if serialExprMayCaptureEnv(p.Body) {
 		// Optimized numbered bodies can reuse prepared expression structure,
 		// while every invocation still owns the scope retained by its lambdas.

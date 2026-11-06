@@ -23,7 +23,6 @@ import "sync"
 import "bytes"
 import "regexp"
 import "unsafe"
-import "context"
 import "net/url"
 import "strings"
 import "unicode"
@@ -235,12 +234,6 @@ var collationRelationType = RegisterCallableType(&TypeDescriptor{
 func (*collationRelation) ClusterObjectType() string { return "collation" }
 func (relation *collationRelation) Serialize(*SerializationContext) (Scmer, error) {
 	return NewSlice([]Scmer{NewSymbol("collate"), NewString(relation.name), NewBool(relation.reverse)}), nil
-}
-func (relation *collationRelation) HandleClusterRequest(_ context.Context, request ClusterRequest) (any, error) {
-	if request.Method == "view" {
-		return NewSlice([]Scmer{NewString(relation.name), NewBool(relation.reverse)}), nil
-	}
-	return NewNil(), fmt.Errorf("collation comparisons are reconstructed locally")
 }
 
 func newCollationRelation(call func(...Scmer) Scmer, name string, reverse bool) Scmer {

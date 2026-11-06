@@ -4,8 +4,6 @@ SPDX-License-Identifier: GPL-3.0-or-later
 */
 package storage
 
-import "fmt"
-import "context"
 import "github.com/launix-de/memcp/scm"
 
 // Dynamic join/membership filters are immutable runtime values. Keep their
@@ -21,9 +19,6 @@ type scanKeyPredicate struct {
 var scanKeyPredicateType = scm.RegisterCallableType(&scm.TypeDescriptor{Kind: "func", Label: "immutable key predicate", Params: []*scm.TypeDescriptor{{Kind: "any", Variadic: true}}, Return: &scm.TypeDescriptor{Kind: "bool"}})
 
 func (*scanKeyPredicate) ClusterObjectType() string { return "scan-key-predicate" }
-func (*scanKeyPredicate) HandleClusterRequest(context.Context, scm.ClusterRequest) (any, error) {
-	return nil, fmt.Errorf("immutable key predicates use portable constructors")
-}
 func (predicate *scanKeyPredicate) Serialize(*scm.SerializationContext) (scm.Scmer, error) {
 	constraints := make([]scm.Scmer, len(predicate.constraints))
 	for i, constraint := range predicate.constraints {

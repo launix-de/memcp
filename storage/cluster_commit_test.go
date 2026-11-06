@@ -42,7 +42,7 @@ func distributedCommitFixture(t *testing.T) (*TxContext, *TxContext, *storageSha
 	participant.decisionToken = "test-capability"
 	imported := &storageShardTransaction{clusterTxID: worker.clusterID, shardUUID: right.uuid, decisionToken: participant.decisionToken,
 		remoteObject: &scm.ClusterHandle{Reference: scm.ClusterReference{Owner: "worker"}, Call: func(ctx context.Context, request scm.ClusterRequest) (scm.Scmer, error) {
-			value, err := participant.HandleClusterRequest(ctx, request)
+			value, err := participant.executeClusterRequest(ctx, request)
 			if err != nil {
 				return scm.NewNil(), err
 			}

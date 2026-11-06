@@ -268,7 +268,7 @@ func specialOptimizerProcReturn(code []Scmer, en *Env) Scmer {
 	if !ok {
 		panic("optimizer_proc_return received invalid return metadata")
 	}
-	proc := value.Proc().snapshot()
+	proc := value.Proc().Snapshot()
 	proc.OptimizerMeta = &ProcOptimizerMeta{Return: metadata.Return, HasReturn: metadata.HasReturn, Sequence: metadata.Sequence}
 	return NewProcStruct(proc)
 }

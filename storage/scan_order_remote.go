@@ -7,6 +7,7 @@ package storage
 import "fmt"
 import "sync"
 import "time"
+import "bytes"
 import "context"
 import "strings"
 import "sync/atomic"
@@ -111,10 +112,12 @@ func freezeScanDirection(direction func(...scm.Scmer) scm.Scmer, bindings *scm.S
 	if err != nil {
 		return nil, err
 	}
-	// Construct the native collation once on the worker, preserving its identity
-	// and index-order metadata as well as its value/NULL comparison semantics.
-	proc := scm.Eval(scm.NewSlice([]scm.Scmer{scm.NewSymbol("lambda"), scm.NewSlice(nil), expression}), &scm.Globalenv)
-	return scm.MarshalProcedure(proc, bindings)
+	// Relations are native values with an existing reconstruction expression.
+	// Inventing a fresh lambda per shard hides their shared identity and forces
+	// needless code declarations/compilation in the peer cache.
+	var source bytes.Buffer
+	scm.Serialize(&source, expression, &scm.Globalenv, bindings)
+	return source.Bytes(), nil
 }
 
 func (wire *remoteScanOrder) bind(decode scm.ProcedureDecode) (*shardOrderInvocation, error) {
@@ -131,11 +134,11 @@ func (wire *remoteScanOrder) bind(decode scm.ProcedureDecode) (*shardOrderInvoca
 	}
 	var directions []scm.Scmer
 	for _, encoded := range wire.Directions {
-		value, err := scm.UnmarshalProcedure(encoded, decode)
+		value, err := schemeValue(encoded).reconstruct(decode)
 		if err != nil {
 			return nil, err
 		}
-		directions = append(directions, scm.Apply(value))
+		directions = append(directions, value)
 	}
 	result.directions = scanSortDirections(directions)
 	if len(wire.Accept) > 0 {
@@ -197,7 +200,7 @@ func (*orderedScanRun) ClusterObjectType() string { return "ordered-run" }
 func (run *orderedScanRun) Serialize(ctx *scm.SerializationContext) (scm.Scmer, error) {
 	return ctx.ReferenceExpression(run)
 }
-func (run *orderedScanRun) HandleClusterRequest(ctx context.Context, request scm.ClusterRequest) (any, error) {
+func (run *orderedScanRun) executeClusterRequest(ctx context.Context, request scm.ClusterRequest) (any, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -282,7 +285,7 @@ func (*remoteOrderedRun) ClusterObjectType() string { return "ordered-run" }
 func (run *remoteOrderedRun) Serialize(ctx *scm.SerializationContext) (scm.Scmer, error) {
 	return ctx.ReferenceExpression(run)
 }
-func (run *remoteOrderedRun) HandleClusterRequest(ctx context.Context, request scm.ClusterRequest) (any, error) {
+func (run *remoteOrderedRun) executeClusterRequest(ctx context.Context, request scm.ClusterRequest) (any, error) {
 	if request.Method == "view" {
 		return run.handle.View, nil
 	}
@@ -677,4 +680,22 @@ func (queue *shardqueue) orderedInputUUID() [16]byte {
 		return queue.remote.generation
 	}
 	return queue.shard.uuid
+}
+
+func (run *orderedScanRun) HandleClusterRequest(ctx context.Context, payload []byte) {
+	scm.ReceiveClusterValue(ctx, payload, func(request scm.ClusterRequest) (any, error) { return run.executeClusterRequest(ctx, request) })
+}
+
+func (run *orderedScanRun) ClusterView(ctx context.Context) (scm.Scmer, error) {
+	value, err := run.executeClusterRequest(ctx, scm.ClusterRequest{Method: "view"})
+	return scm.ClusterViewValue(value, err)
+}
+
+func (run *remoteOrderedRun) HandleClusterRequest(ctx context.Context, payload []byte) {
+	scm.ReceiveClusterValue(ctx, payload, func(request scm.ClusterRequest) (any, error) { return run.executeClusterRequest(ctx, request) })
+}
+
+func (run *remoteOrderedRun) ClusterView(ctx context.Context) (scm.Scmer, error) {
+	value, err := run.executeClusterRequest(ctx, scm.ClusterRequest{Method: "view"})
+	return scm.ClusterViewValue(value, err)
 }
