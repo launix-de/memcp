@@ -266,21 +266,33 @@ type cachedSnapshotValue struct {
 }
 
 type receivedClusterValue struct {
-	peer         weak.Pointer[SerializationPeer]
-	id           string
-	source       []byte // retirement window only; never roots the parsed/compiled value
-	lambda       bool
-	prepared     bool
-	mu           sync.Mutex
-	pointer      weak.Pointer[byte]
-	aux          uint64
-	retiring     bool
-	acknowledged bool
-	released     atomic.Bool
-	unregister   func()
+	peer           weak.Pointer[SerializationPeer]
+	id             string
+	source         []byte // retirement window only; never roots the parsed/compiled value
+	lambda         bool
+	prepared       bool
+	mu             sync.Mutex
+	pointer        weak.Pointer[byte]
+	aux            uint64
+	retiring       bool
+	acknowledged   bool
+	released       atomic.Bool
+	unregister     func()
+	unregisterOnce sync.Once
 }
 
 var clusterValues sync.Map // UUID -> receivedClusterValue, weak decoded value
+// A live decoded value can outlast its connection. Deregistering must also
+// drop the callback's capture of the complete channel map, whose other handlers
+// can otherwise retain the disconnected peer and its source registrations.
+func (value *receivedClusterValue) unregisterChannel() {
+	value.unregisterOnce.Do(func() {
+		if value.unregister != nil {
+			value.unregister()
+			value.unregister = nil
+		}
+	})
+}
 func (value *receivedClusterValue) decode() (Scmer, error) {
 	tokens := tokenize("cluster declaration", strings.Clone(string(value.source)), false)
 	expression := readFrom(&tokens)
@@ -345,9 +357,7 @@ func (peer *SerializationPeer) Receive(id string, source []byte, lambda bool) (e
 		if err != nil && value != nil {
 			clusterValues.CompareAndDelete(id, value)
 			peer.received.CompareAndDelete(id, value)
-			if value.unregister != nil {
-				value.unregister()
-			}
+			value.unregisterChannel()
 		}
 	}()
 	if _, exists := clusterValues.Load(id); exists {
@@ -378,13 +388,13 @@ func (peer *SerializationPeer) Receive(id string, source []byte, lambda bool) (e
 		return value.decode()
 	}()
 	if err != nil {
-		value.unregister()
+		value.unregisterChannel()
 		return err
 	}
 	peer.received.Store(id, value)
 	if _, exists := clusterValues.LoadOrStore(id, value); exists {
 		peer.received.Delete(id)
-		value.unregister()
+		value.unregisterChannel()
 		return fmt.Errorf("duplicate cluster value UUID")
 	}
 	runtime.KeepAlive(result)
@@ -398,7 +408,7 @@ func (value *receivedClusterValue) release() {
 	if peer := value.peer.Value(); peer != nil {
 		peer.received.CompareAndDelete(value.id, value)
 	}
-	value.unregister()
+	value.unregisterChannel()
 }
 func (value *receivedClusterValue) acknowledge() {
 	value.mu.Lock()
@@ -461,7 +471,7 @@ func (peer *SerializationPeer) Close() {
 	})
 	peer.received.Range(func(_, entry any) bool {
 		value := entry.(*receivedClusterValue)
-		value.unregister()
+		value.unregisterChannel()
 		// Decoded values and retained view/result buffers survive reconnect. Their
 		// last local Go owner removes the weak UUID entry without contacting a dead edge.
 		value.acknowledge()

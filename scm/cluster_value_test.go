@@ -837,3 +837,27 @@ func TestClusterValuePublicationDoesNotRetainCreationFrame(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 }
+
+func closedValueWithLiveDecodedOwner() (*receivedClusterValue, weak.Pointer[[64]byte], Scmer) {
+	marker := new([64]byte)
+	peer := new(SerializationPeer)
+	decoded := NewString(strings.Repeat("retained", 32))
+	value := &receivedClusterValue{peer: weak.Make(peer), pointer: weak.Make(decoded.ptr), unregister: func() { runtime.KeepAlive(marker) }}
+	peer.received.Store("closed-value", value)
+	peer.Close()
+	return value, weak.Make(marker), decoded
+}
+
+func TestClusterValueCloseDropsChannelRegistryCapture(t *testing.T) {
+	value, marker, decoded := closedValueWithLiveDecodedOwner()
+	defer value.release()
+	deadline := time.Now().Add(3 * time.Second)
+	for marker.Value() != nil && time.Now().Before(deadline) {
+		runtime.GC()
+		time.Sleep(time.Millisecond)
+	}
+	if marker.Value() != nil {
+		t.Fatal("closed cache value retained its deregistration closure/channel registry")
+	}
+	runtime.KeepAlive(decoded)
+}
