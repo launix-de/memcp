@@ -4,6 +4,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 */
 package storage
 
+import "fmt"
 import "time"
 import "context"
 import "sync"
@@ -254,5 +255,130 @@ func TestClusterDecisionAcquiresWriteBeforeClosingMigration(t *testing.T) {
 				t.Fatal("decision lost the native transaction effect")
 			}
 		})
+	}
+}
+
+// CS publication must not pin local M while asking another native owner to
+// finish. Opposite coordinators can otherwise each retain the writer needed by
+// the other's participant. A transfer may also enlist a new owner in this phase.
+func TestClusterCursorDecisionDoesNotPinWritersAcrossParticipants(t *testing.T) {
+	for _, commit := range []bool{false, true} {
+		t.Run(fmt.Sprint(commit), func(t *testing.T) {
+			tbl, _ := createDurabilityTestTable(t, "t_cursor_decision_network", 2)
+			shard := tbl.ActiveShards()[0]
+			tx := NewTxContext(TxCursorStability)
+			tx.AddToDeleteMask(shard, 0)
+			cluster := globalTestCluster(t, tbl.schema.Name)
+			cell := cluster.manager.shardCell(shard)
+			cell.current.Store(shard)
+			cell.ownstate.Initialize(mosi.M)
+			oldMounts := sharedClusterMounts.Swap(&map[string]bool{tbl.schema.Name: true})
+			defer sharedClusterMounts.Store(oldMounts)
+			oldService := nodeScans.Swap(&nodeScanService{cluster: cluster})
+			defer nodeScans.Store(oldService)
+			calls, lateCalls := 0, 0
+			participant := &storageShardTransaction{shardUUID: uuid.New(), decisionToken: "first"}
+			participant.remoteObject = &scm.ClusterHandle{Reference: scm.ClusterReference{Owner: "worker"}, Call: func(ctx context.Context, request scm.ClusterRequest) (scm.Scmer, error) {
+				calls++
+				if cell.ownstate.Writing() {
+					t.Error("remote decision retained a local MOSI writer")
+				}
+				migration, err := tx.beginMigration()
+				if err != nil {
+					t.Error("remote decision prevented its own overlay migration")
+				} else {
+					migration()
+				}
+				if calls == 1 {
+					late := &storageShardTransaction{clusterTxID: tx.ClusterObjectID(), shardUUID: uuid.New(), decisionToken: "late"}
+					late.remoteObject = &scm.ClusterHandle{Reference: scm.ClusterReference{Owner: "late-worker"}, Call: func(context.Context, scm.ClusterRequest) (scm.Scmer, error) {
+						lateCalls++
+						return scm.NewBool(true), nil
+					}}
+					if _, err := tx.transactionState.HandleClusterRequest(ctx, scm.ClusterRequest{Method: "enlist", Arguments: []scm.Scmer{scm.NewAny(late), scm.NewString(late.decisionToken)}}); err != nil {
+						t.Error("handover could not enlist its successor", err)
+					}
+				}
+				return scm.NewBool(true), nil
+			}}
+			tx.participants = map[uuid.UUID]*storageShardTransaction{participant.shardUUID: participant}
+			if commit {
+				if err := tx.Commit(); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				tx.Rollback()
+			}
+			if calls != 2 || lateCalls != 1 || cell.ownstate.Writing() || len(tx.remoteParticipantOwners()) != 0 {
+				t.Fatal("decision did not release its native scopes and participants")
+			}
+		})
+	}
+}
+
+func TestClusterOppositeCursorDecisionsFinishWithoutWriterCycle(t *testing.T) {
+	first, _ := createDurabilityTestTable(t, "t_cursor_opposite_first", 4)
+	second, _ := CreateTable(first.schema.Name, "opposite_second", Safe, false)
+	second.CreateColumn("id", "INT", nil, nil)
+	second.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(1)}, {scm.NewInt(2)}}, nil, scm.NewNil(), false, nil)
+	shards := []*storageShard{first.ActiveShards()[0], second.ActiveShards()[0]}
+	roots := []*TxContext{NewTxContext(TxCursorStability), NewTxContext(TxCursorStability)}
+	workers := []*TxContext{NewTxContext(TxCursorStability), NewTxContext(TxCursorStability)}
+	cluster := globalTestCluster(t, first.schema.Name)
+	oldMounts := sharedClusterMounts.Swap(&map[string]bool{first.schema.Name: true})
+	defer sharedClusterMounts.Store(oldMounts)
+	oldService := nodeScans.Swap(&nodeScanService{cluster: cluster})
+	defer nodeScans.Store(oldService)
+	for i, shard := range shards {
+		roots[i].AddToDeleteMask(shard, 0)
+		workers[1-i].AddToDeleteMask(shard, 1)
+		cell := cluster.manager.shardCell(shard)
+		cell.current.Store(shard)
+		cell.ownstate.Initialize(mosi.M)
+	}
+	arrived := make(chan struct{}, 2)
+	proceed := make(chan struct{})
+	for i, root := range roots {
+		worker := workers[i]
+		participant := &storageShardTransaction{shardUUID: shards[1-i].uuid, decisionToken: "crossed"}
+		participant.remoteObject = &scm.ClusterHandle{Reference: scm.ClusterReference{Owner: "worker"}, Call: func(ctx context.Context, request scm.ClusterRequest) (scm.Scmer, error) {
+			// Inspect before either worker starts its native commit. The
+			// rendezvous fixes the formerly deadlocking coordinator schedule.
+			pinned := cluster.manager.shardCell(shards[i]).ownstate.Writing()
+			arrived <- struct{}{}
+			<-proceed
+			if pinned {
+				return scm.NewNil(), fmt.Errorf("coordinator retained writer across remote decision")
+			}
+			return scm.NewBool(true), worker.Commit()
+		}}
+		root.participants = map[uuid.UUID]*storageShardTransaction{participant.shardUUID: participant}
+	}
+	done := make(chan error, 2)
+	for _, root := range roots {
+		go func() { done <- root.Commit() }()
+	}
+	for range roots {
+		select {
+		case <-arrived:
+		case <-time.After(5 * time.Second):
+			t.Fatal("coordinators did not reach remote decisions")
+		}
+	}
+	close(proceed)
+	for range roots {
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("opposite decisions retained a writer cycle")
+		}
+	}
+	for _, tx := range append(roots, workers...) {
+		if tx.State != TxCommitted {
+			t.Fatal("native transaction did not commit")
+		}
 	}
 }

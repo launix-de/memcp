@@ -29,8 +29,21 @@ func (st *storageShardTransaction) MOSIState() mosi.Phase {
 // A handover needed to obtain M must still be able to move this transaction's
 // overlays. Once every current generation is pinned, the decision lock joins
 // already-running migrations and protects the journals through publication.
-func (tx *TxContext) lockDecision(ctx context.Context, write bool) func() {
+func (tx *TxContext) lockDecision(ctx context.Context, write bool, before func() error) (func(), error) {
 	for {
+		// Remote CS decisions run without a local writer or migration closure.
+		// After admission, validate that no transfer enlisted another owner.
+		if before != nil {
+			if err := before(); err != nil {
+				return nil, err
+			}
+		}
+		var epoch uint64
+		if before != nil {
+			tx.mu.Lock()
+			epoch = tx.participantEpoch
+			tx.mu.Unlock()
+		}
 		var releaseRights func()
 		var protected map[*storageShard]*storageShardTransaction
 		complete := true
@@ -63,6 +76,7 @@ func (tx *TxContext) lockDecision(ctx context.Context, write bool) func() {
 		// decision lock, rather than acquiring a late M under that lock.
 		if write {
 			tx.mu.Lock()
+			complete = complete && (before == nil || tx.participantEpoch == epoch && len(tx.participants) == 0)
 			for shard, overlay := range tx.shardTransactions() {
 				complete = complete && protected[shard] == overlay
 			}
@@ -78,8 +92,17 @@ func (tx *TxContext) lockDecision(ctx context.Context, write bool) func() {
 				releaseRights()
 			}
 			tx.decisionMu.Unlock()
-		}
+		}, nil
 	}
+}
+
+// Cursor-stability effects already have native visibility. Finish their remote
+// owners before pinning local publication; ACID uses its separate prepare proof.
+func (tx *TxContext) beforeDecision(method string) func() error {
+	if tx.Mode != TxCursorStability || method != "commit" && method != "rollback" {
+		return nil
+	}
+	return func() error { return tx.finishRemoteParticipants(method) }
 }
 
 func (tx *transactionState) beginMigration() (func(), error) {

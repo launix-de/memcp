@@ -65,6 +65,10 @@ func (tx *transactionState) HandleClusterRequest(ctx context.Context, r scm.Clus
 		if !ok || participant.clusterTxID != tx.ClusterObjectID() {
 			return scm.NewNil(), fmt.Errorf("participant belongs to another transaction")
 		}
+		if tx.Mode == TxCursorStability {
+			tx.decisionMu.Lock()
+			defer tx.decisionMu.Unlock()
+		}
 		tx.mu.Lock()
 		defer tx.mu.Unlock()
 		if tx.State != TxActive {
@@ -300,7 +304,10 @@ func (st *storageShardTransaction) HandleClusterRequest(ctx context.Context, r s
 				}
 			}
 		}
-		release := tx.lockDecision(ctx, r.Method != "savepoint")
+		release, err := tx.lockDecision(ctx, r.Method != "savepoint", tx.beforeDecision(r.Method))
+		if err != nil {
+			return scm.NewNil(), err
+		}
 		defer release()
 		switch r.Method {
 		case "prepare":
@@ -431,7 +438,7 @@ func (tx *TxContext) rollbackRemoteSavepoints(sp Savepoint) {
 // runs its existing transaction implementation, including all local overlays,
 // WAL barriers, rebuild forwarding and cleanup. No mutation is replayed here.
 func (tx *TxContext) finishRemoteParticipants(method string) error {
-	owners := tx.remoteParticipantOwners()
+	owners, epoch := tx.remoteParticipantSnapshot()
 	participants := make([]*storageShardTransaction, 0, len(owners))
 	for _, participant := range owners {
 		participants = append(participants, participant)
@@ -465,7 +472,9 @@ func (tx *TxContext) finishRemoteParticipants(method string) error {
 		return failure
 	}
 	tx.mu.Lock()
-	tx.participants = nil
+	if tx.participantEpoch == epoch {
+		tx.participants = nil
+	}
 	tx.mu.Unlock()
 	return nil
 }

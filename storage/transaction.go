@@ -844,7 +844,7 @@ func (tx *TxContext) releasedUniqueReservation(shard *storageShard, recid uint32
 
 // CreateSavepoint captures the current transaction state for later rollback.
 func (tx *TxContext) CreateSavepoint() Savepoint {
-	release := tx.lockDecision(context.Background(), false)
+	release, _ := tx.lockDecision(context.Background(), false, nil)
 	defer release()
 	return tx.createSavepointLocked()
 }
@@ -888,7 +888,7 @@ func (tx *TxContext) trackedShardSetLocked() map[*storageShard]struct{} {
 
 // RollbackToSavepoint undoes all changes made since the savepoint was created.
 func (tx *TxContext) RollbackToSavepoint(sp Savepoint) {
-	release := tx.lockDecision(context.Background(), true)
+	release, _ := tx.lockDecision(context.Background(), true, nil)
 	defer release()
 	tx.rollbackToSavepointLocked(sp)
 }
@@ -978,7 +978,10 @@ func (tx *TxContext) rollbackToSavepointLocked(sp Savepoint) {
 
 // Commit finalizes the transaction.
 func (tx *TxContext) Commit() error {
-	release := tx.lockDecision(context.Background(), true)
+	release, err := tx.lockDecision(context.Background(), true, tx.beforeDecision("commit"))
+	if err != nil {
+		return err
+	}
 	defer release()
 	return tx.commitLocked()
 }
@@ -1005,8 +1008,10 @@ func (tx *TxContext) commitLocked() error {
 			return tx.commitDistributedACID()
 		}
 	}
-	if err := tx.finishRemoteParticipants("commit"); err != nil {
-		return err
+	if tx.Mode != TxCursorStability {
+		if err := tx.finishRemoteParticipants("commit"); err != nil {
+			return err
+		}
 	}
 	switch tx.Mode {
 	case TxCursorStability:
@@ -1222,7 +1227,10 @@ func (tx *TxContext) finishCursorStabilityCommit() {
 
 // Rollback undoes the transaction.
 func (tx *TxContext) Rollback() {
-	release := tx.lockDecision(context.Background(), true)
+	release, err := tx.lockDecision(context.Background(), true, tx.beforeDecision("rollback"))
+	if err != nil {
+		panic(err)
+	}
 	defer release()
 	tx.rollbackLocked()
 }
@@ -1232,8 +1240,10 @@ func (tx *TxContext) rollbackLocked() {
 	}
 	defer tx.releasePreparation()
 	tx.releasePreparation()
-	if err := tx.finishRemoteParticipants("rollback"); err != nil {
-		panic(err)
+	if tx.Mode != TxCursorStability {
+		if err := tx.finishRemoteParticipants("rollback"); err != nil {
+			panic(err)
+		}
 	}
 	for _, table := range tx.contributionMutationTables() {
 		defer table.endContributionMutation()
