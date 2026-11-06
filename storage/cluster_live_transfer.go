@@ -742,6 +742,17 @@ func (cluster *nodeCluster) installLiveShard(cell *replicaCell, packet mosiPacke
 		// state. From here it must survive even a lost subsequent grant/ACK.
 		complete = true
 		for _, st := range overlays {
+			// Keep the transferred decision capability, but register the new
+			// native participant directly at the original transaction root.
+			// A completed handover must not depend on its now-empty source.
+			st.enlist.Do(func() {
+				_, st.enlistError = st.transaction.executeClusterRequest(peer.ctx, scm.ClusterRequest{
+					Method: "enlist", Arguments: []scm.Scmer{scm.NewAny(st), scm.NewString(st.decisionToken)},
+				})
+			})
+			if st.enlistError != nil {
+				return st.enlistError
+			}
 			view := scm.NewSlice([]scm.Scmer{scm.NewString(st.shardUUID.String()), scm.NewString(st.clusterTxID), scm.NewString(cluster.self.ID)})
 			ref, err := cluster.service.exportObject(peer, st, view, nil)
 			if err != nil {
@@ -807,12 +818,8 @@ func (capture *liveShardTransfer) enlist(ctx context.Context, request scm.Cluste
 		}
 		tx := &TxContext{transactionState: st.transaction}
 		st.forwarded.Store(child)
-		if tx.coordinator != nil {
-			endpoint := st.ClusterEndpoint()
-			if _, err := tx.executeClusterRequest(ctx, scm.ClusterRequest{Method: "enlist", Arguments: []scm.Scmer{scm.NewAny(endpoint), scm.NewString(child.decisionToken)}}); err != nil {
-				return nil, err
-			}
-		}
+		// The receiver already registered directly with the original root.
+		// This source only publishes its forwarding view and retires its rights.
 		tx.mu.Lock()
 		defer tx.mu.Unlock()
 		directory := tx.shards.Load()
