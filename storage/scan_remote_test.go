@@ -404,8 +404,7 @@ func setupRemoteScanConnection(t *testing.T) (*mosiPeer, *nodeScanService, strin
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		client.forget(peer)
-		client.stopObjects()
+		client.stop()
 		StopNodeScans()
 		nodeScans.Store(old)
 		server.Close()
@@ -517,8 +516,8 @@ func TestRemoteScanTransportsListsAndRejectsWrongSecret(t *testing.T) {
 		t.Fatal("list result changed", list, err)
 	}
 	wrong := &nodeScanService{id: uuid.NewString(), secret: []byte("different-node-secret"), peers: make(map[*mosiPeer]bool)}
-	if rejected, _, err := wrong.connect(context.Background(), endpoint); err == nil {
-		wrong.forget(rejected)
+	if _, _, err := wrong.connect(context.Background(), endpoint); err == nil {
+		wrong.stop()
 		t.Fatal("wrong node secret accepted")
 	}
 	// An unauthenticated node may receive a public challenge, never the secret
@@ -1388,7 +1387,7 @@ func TestRemoteScanReconnectRejectsOldOperationIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer client.forget(next)
+	defer next.close()
 	if next.objectPeer != first.objectPeer || next.operationPrefix == first.operationPrefix {
 		t.Fatal("reconnect lost incarnation identity or reused an old operation domain")
 	}
@@ -1690,11 +1689,9 @@ func TestClosureRelayUsesPeerRelativeOneShotSlots(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		consumer.forget(toRelay)
-		consumer.stopObjects()
+		consumer.stop()
 		server.Close()
-		relay.forget(toOwner)
-		relay.stopObjects()
+		relay.stop()
 	})
 	ownerTx, relayTx, consumerTx := NewTxContext(TxCursorStability), NewTxContext(TxCursorStability), NewTxContext(TxCursorStability)
 	for _, tx := range []*TxContext{ownerTx, relayTx, consumerTx} {

@@ -1467,3 +1467,104 @@ func TestClusterImportedTransactionExportRetainsRoot(t *testing.T) {
 		t.Fatalf("returned root no longer resolves to its native transaction: %v", err)
 	}
 }
+
+func TestClusterObjectReleaseReconnectKeepsServiceConnection(t *testing.T) {
+	peer, client, _ := setupRemoteScanConnection(t)
+	owner := nodeScans.Load()
+	source := objectOwnerPeer(t, owner, client)
+	object, _ := scm.ClusterObjectOf(scm.NewSession())
+	ref, err := owner.exportObject(source, object, scm.NewNil())
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := peer.objectPeer
+	peer.close()
+	peer.wait()
+	if !client.deliverObjectRelease(clusterObjectRelease{peer: identity, reference: ref}) {
+		t.Fatal("release could not reconnect to its owner")
+	}
+	if client.objectConnection(identity) == nil {
+		t.Fatal("release closed a published connection before its queued message and other borrowers could finish")
+	}
+	deadline := time.Now().Add(time.Second)
+	for objectEntryCount(owner) != 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if objectEntryCount(owner) != 0 {
+		t.Fatal("reconnected release did not reach its owner")
+	}
+}
+
+func TestClusterDuplicateLinkDoesNotCancelBorrowedHandle(t *testing.T) {
+	prior, client, endpoint := setupRemoteScanConnection(t)
+	candidate, _, err := client.connect(context.Background(), strings.Replace(endpoint, "127.0.0.1", "localhost", 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer candidate.close()
+	owner := nodeScans.Load()
+	entered, release := make(chan struct{}), make(chan struct{})
+	unblock := sync.OnceFunc(func() { close(release) })
+	callback := newClusterReceiver(-1, func(ctx context.Context, _ scm.Scmer) (scm.Scmer, error) {
+		close(entered)
+		select {
+		case <-release:
+			return scm.NewInt(42), nil
+		case <-ctx.Done():
+			return scm.NewNil(), ctx.Err()
+		}
+	})
+	defer callback.Close()
+	defer unblock()
+	ref, err := owner.exportObject(objectOwnerPeer(t, owner, client), callback, scm.NewNil())
+	if err != nil {
+		t.Fatal(err)
+	}
+	view, _ := freezeScanValue(scm.NewNil())
+	ref.View = []byte(view)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	finished := make(chan error, 1)
+	go func() {
+		var reply clusterObjectReply
+		err := client.control(ctx, candidate, "object.call", clusterObjectCall{Reference: ref, Method: "receive", Arguments: []schemeValue{view}}, &reply, true)
+		if err == nil {
+			result, decodeErr := reply.Value.reconstruct()
+			if decodeErr != nil {
+				err = decodeErr
+			} else if result.Int() != 42 {
+				err = fmt.Errorf("borrowed callback returned %v", result)
+			}
+		}
+		finished <- err
+	}()
+	select {
+	case <-entered:
+	case err := <-finished:
+		t.Fatal("callback was not admitted", err)
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	member := clusterMember{ID: prior.objectPeer.ID, Boot: prior.objectPeer.Boot, Address: endpoint}
+	cluster := &nodeCluster{service: client, members: map[string]clusterMember{member.ID: member}, links: map[string]*clusterLink{member.ID: {member: member, peer: prior}}}
+	cluster.publishLocked()
+	if got := cluster.installLink(&clusterLink{member: member, peer: candidate}); got != prior {
+		t.Fatal("duplicate changed the primary routing connection")
+	}
+	unblock()
+	if err := <-finished; err != nil {
+		t.Fatal("routing publication cancelled another user's admitted callback", err)
+	}
+}
+
+func TestClusterConnectReusesManagedEndpoint(t *testing.T) {
+	peer, client, endpoint := setupRemoteScanConnection(t)
+	next, id, err := client.connect(context.Background(), endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer next.close()
+	if next != peer || id != peer.objectPeer.ID {
+		t.Fatal("repeated setup allocated another connection for the same endpoint")
+	}
+}
