@@ -5,6 +5,8 @@ SPDX-License-Identifier: GPL-3.0-or-later
 package storage
 
 import "fmt"
+import "bytes"
+import "bufio"
 import "time"
 import "context"
 import "sync"
@@ -380,5 +382,51 @@ func TestClusterOppositeCursorDecisionsFinishWithoutWriterCycle(t *testing.T) {
 		if tx.State != TxCommitted {
 			t.Fatal("native transaction did not commit")
 		}
+	}
+}
+
+func TestClusterLiveTransferCarriesExistingDecisionCapability(t *testing.T) {
+	fixture, _ := createDurabilityTestTable(t, "t_transfer_capability", 1)
+	tbl, _ := CreateTable(fixture.schema.Name, "empty_overlay", Memory, false)
+	shard := NewShard(tbl)
+	tx := NewTxContext(TxCursorStability)
+	defer tx.Rollback()
+	tx.mu.Lock()
+	st := tx.getOrCreateShardTxLocked(shard)
+	st.decisionToken = "capability-held-by-an-existing-endpoint"
+	tx.mu.Unlock()
+	cluster := globalTestCluster(t, tbl.schema.Name)
+	cluster.service = &nodeScanService{id: cluster.self.Boot, cluster: cluster}
+	defer cluster.service.stopObjects()
+	peer := &mosiPeer{objectPeer: clusterObjectPeer{uuid.NewString(), uuid.NewString()}}
+	capture := &liveShardTransfer{manager: cluster.manager, shards: []*storageShard{shard}, overlays: []*storageShardTransaction{st}, peer: peer}
+	var output bytes.Buffer
+	if err := capture.write(&output); err != nil {
+		t.Fatal(err)
+	}
+	reader := bufio.NewReader(&output)
+	var stream struct{ Version, Generations int }
+	var grain liveGrainHeader
+	if err := readLiveRecord(reader, &stream); err != nil {
+		t.Fatal(err)
+	}
+	if err := readLiveRecord(reader, &grain); err != nil {
+		t.Fatal(err)
+	}
+	if grain.Overlays != 1 || grain.DeltaRows != 0 || len(grain.Columns) != 0 {
+		t.Fatal("invalid empty-overlay fixture")
+	}
+	if err := readLiveMask(reader, &shard.deletions); err != nil {
+		t.Fatal(err)
+	}
+	if err := readLiveMask(reader, &shard.rollbackProtected); err != nil {
+		t.Fatal(err)
+	}
+	var overlay struct{ DecisionToken string }
+	if err := readLiveRecord(reader, &overlay); err != nil {
+		t.Fatal(err)
+	}
+	if overlay.DecisionToken != st.decisionToken {
+		t.Fatal("live handover discarded the capability retained by existing endpoints")
 	}
 }
