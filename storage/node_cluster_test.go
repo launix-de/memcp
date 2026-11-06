@@ -2158,3 +2158,30 @@ func decodeTestInvocation(channel string, payload []byte, destination any) error
 	}
 	return nil
 }
+
+// A restarted peer need not retain every historical UUID alias. The sender
+// already knows the native successor, so delegate that identity without an
+// extra discovery request or requiring the destination to reconstruct aliases.
+func TestClusterDelegationUsesKnownSuccessorAfterPeerRestart(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "t_cluster_task_successor", 4)
+	RebuildTable(tbl, true, false)
+	peer, _, _ := setupRemoteScanConnection(t)
+	current := mosiResource{Database: tbl.schema.Name, Table: tbl.Name, Shard: tbl.ActiveShards()[0].uuid.String()}
+	previous := current
+	previous.Shard = uuid.NewString()
+	cluster := &nodeCluster{ctx: context.Background()}
+	cluster.initializeManager()
+	cluster.manager.forwardResource(previous, current)
+	cluster.view.Store(&clusterView{links: []*clusterLink{{member: clusterMember{ID: "worker"}, peer: peer}}})
+	executor := clusterScanExecutor{cluster: cluster, expected: remoteScanShard{Schema: tbl.filterSchemaFingerprint(), Resource: previous}}
+	invocation := shardScanInvocation{operator: shardReduce, conditionCols: []string{"id"}, callbackCols: []string{"id"},
+		condition: scm.Eval(scm.Read(t.Name(), "(lambda (id) (> id 1))", false), &scm.Globalenv),
+		mapReduce: scm.Eval(scm.Read(t.Name(), "(lambda (acc id) (+ acc id))", false), &scm.Globalenv), neutral: scm.NewInt(0)}
+	result := executor.ExecuteShardScan(previous, invocation)
+	if result.err.r != nil || result.res.Int() != 9 {
+		t.Fatalf("known successor did not execute on restarted peer: %+v", result)
+	}
+	if executor.expected.Resource != previous {
+		t.Fatal("delegation mutated its shared input description")
+	}
+}

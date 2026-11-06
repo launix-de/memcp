@@ -127,6 +127,9 @@ func (executor *clusterScanExecutor) candidates() []*clusterLink {
 }
 
 func (executor *clusterScanExecutor) ExecuteShardScan(resource mosiResource, invocation shardScanInvocation) scanResult {
+	if resource != executor.expected.Resource {
+		panic("remote scan resource mismatch")
+	}
 	if !clusterScanSupported(invocation.tx) {
 		panic("automatic cluster placement requires native CS or ACID read visibility")
 	}
@@ -169,8 +172,13 @@ func (executor *clusterScanExecutor) ExecuteShardScan(resource mosiResource, inv
 					}
 				}
 			}()
-			remote := peerScanExecutor{peer: link.peer, ctx: ctx, prepared: executor.expected, acquireFrom: acquireFrom}
-			result = remote.ExecuteShardScan(resource, invocation)
+			// The source may retain a predecessor which the destination has
+			// already forgotten after restart. Ordinary delegation follows the
+			// known native successor; explicit historical inputs use their handle.
+			prepared := executor.expected
+			prepared.Resource = executor.cluster.manager.canonicalResource(prepared.Resource)
+			remote := peerScanExecutor{peer: link.peer, ctx: ctx, prepared: prepared, acquireFrom: acquireFrom}
+			result = remote.ExecuteShardScan(prepared.Resource, invocation)
 		}()
 		if redirect != nil {
 			// Discovery spans live ownership publications. Returning to a peer
