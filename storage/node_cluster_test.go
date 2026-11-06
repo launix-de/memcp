@@ -1714,3 +1714,60 @@ func TestClusterDelegationDistinguishesHandoverFromRoutingCycle(t *testing.T) {
 		})
 	}
 }
+
+func TestClusterSchemaPublicationKeepsRebuildCoordination(t *testing.T) {
+	tbl := setupScanParallelTestTable(t, "t_cluster_schema_rebuild_authority")
+	source := tbl.ActiveShards()[0]
+	successor := NewShard(tbl)
+	cluster := globalTestCluster(t, tbl.schema.Name)
+	mounts := sharedClusterMounts.Swap(&map[string]bool{tbl.schema.Name: true})
+	defer sharedClusterMounts.Store(mounts)
+	service := nodeScans.Swap(&nodeScanService{cluster: cluster})
+	defer nodeScans.Store(service)
+	cell := cluster.declareShard(source, true)
+	coordination := cell.clusterstate.TryCoordinate()
+	if coordination == nil {
+		t.Fatal("could not start the source handover")
+	}
+	defer coordination.Release()
+	// A routing hint may already have created an invalid placeholder. It must
+	// share the source's active coordination before a schema can expose its UUID.
+	next := cluster.manager.shardResource(successor)
+	cluster.manager.resourceCell(next).ownstate.Initialize(mosi.IO)
+	cluster.manager.updateRecord(next, func(record *replicaRecord) bool {
+		record.Owner, record.Epoch = cluster.self.ID, 1
+		return true
+	})
+	successor.coherence.Store(cell)
+	source.next.Store(successor)
+	source.nextReady.Store(true)
+	tbl.mu.Lock()
+	tbl.Shards = []*storageShard{successor}
+	tbl.publishSchemaTopology(ShardModeFree, tbl.Shards, tbl.PDimensions)
+	tbl.mu.Unlock()
+	encoded, err := json.Marshal(tbl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var persisted struct{ Shards []string }
+	if err := json.Unmarshal(encoded, &persisted); err != nil || len(persisted.Shards) != 1 || persisted.Shards[0] != successor.uuid.String() {
+		t.Fatal("schema fixture did not expose its private successor", err)
+	}
+	published := cluster.manager.resourceCell(next).resolved()
+	if published != cell {
+		t.Error("schema exposed a rebuild UUID with an independent coherence cell")
+	}
+	if concurrent := published.clusterstate.TryCoordinate(); concurrent != nil {
+		concurrent.Release()
+		t.Error("schema allowed a second handover while the source handover was active")
+	}
+	if cell.current.Load() != source || tbl.ActiveShards()[0] != source {
+		t.Fatal("schema publication replaced the still-active native input")
+	}
+	tbl.mu.Lock()
+	tbl.publishTopologyLocked()
+	tbl.mu.Unlock()
+	if cell.current.Load() != successor {
+		t.Fatal("native publication did not advance its payload hint")
+	}
+}

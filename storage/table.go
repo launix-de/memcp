@@ -953,29 +953,6 @@ func (t *table) publishTopologyLocked() *tableShardTopology {
 	for _, shard := range topology.shards {
 		if shard != nil {
 			shard.generation.Store(topology)
-			if cell := shard.coherence.Load(); cell != nil {
-				cell = cell.resolved()
-				if previous := cell.current.Load(); previous != nil && previous != shard {
-					// The payload hint can lag a preceding import's topology swap.
-					// Publish every native successor, including an intermediate
-					// rebuild retained by a concurrent invocation.
-					previous = cell.publishedShard()
-					for previous != nil && previous != shard {
-						next := previous.loadNext()
-						if next == nil || !previous.nextReady.Load() {
-							break
-						}
-						cell = cell.resolved()
-						cell.retainShard(previous)
-						if r := activeReplication(t.schema); r != nil && validReplicaDatabase(t.schema.Name) {
-							target := r.shardResource(next)
-							r.forwardResource(*cell.resource.Load(), target)
-							r.forwardResource(r.shardResource(previous), target)
-						}
-						previous = next
-					}
-				}
-			}
 		}
 	}
 	topology.routing = new(tablePartitionRouting)
@@ -1030,10 +1007,20 @@ func (t *table) publishSchemaTopology(mode ShardMode, shards []*storageShard, di
 		forwards = maps.Clone(t.RestoredShardForwards)
 		t.RestoredShardForwards = nil
 	}
+	var manager *replicationManager
+	if t.schema != nil && validReplicaDatabase(t.schema.Name) && !t.isEphemeralQueryTable() {
+		manager = activeReplication(t.schema)
+	}
 	add := func(from, to string) {
 		if from != to {
 			if forwards == nil {
 				forwards = make(map[string]string)
+			}
+			// A durable schema can expose this UUID before active topology
+			// publication. Bind its native authority first, including the
+			// source's in-flight coordination, without advancing its payload.
+			if manager != nil {
+				manager.forwardResource(mosiResource{Database: t.schema.Name, Table: t.Name, Shard: from}, mosiResource{Database: t.schema.Name, Table: t.Name, Shard: to})
 			}
 			forwards[from] = to
 		}
@@ -1041,10 +1028,6 @@ func (t *table) publishSchemaTopology(mode ShardMode, shards []*storageShard, di
 	// Persist the exact native edge before publishing distributed topology.
 	// Ordinary local tables need no routing history; retained distributed
 	// metadata remains valid if the database is later opened without networking.
-	var manager *replicationManager
-	if t.schema != nil && validReplicaDatabase(t.schema.Name) && !t.isEphemeralQueryTable() {
-		manager = activeReplication(t.schema)
-	}
 	if previous := t.topology.Load(); previous != nil && (manager != nil || len(forwards) != 0) {
 		targets := make(map[*storageShard]bool, len(shards))
 		for _, shard := range shards {
@@ -1057,6 +1040,9 @@ func (t *table) publishSchemaTopology(mode ShardMode, shards []*storageShard, di
 					break
 				}
 				if next.uuid != uuid.Nil {
+					if manager != nil {
+						manager.shardCell(current).retainShard(current)
+					}
 					add(current.uuid.String(), next.uuid.String())
 				}
 				current = next
