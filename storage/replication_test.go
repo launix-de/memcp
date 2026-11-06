@@ -1463,8 +1463,13 @@ func TestReplicationCheckpointRoutesBeforeActivePublication(t *testing.T) {
 	tbl.publishSchemaTopology(ShardModeFree, tbl.Shards, tbl.PDimensions)
 	tbl.mu.Unlock()
 	tbl.schema.save()
-	if r.lookupCell(r.shardResource(successor)) != nil {
-		t.Fatal("fixture already published runtime forwarding")
+	// Schema publication itself must establish the route, before capture can
+	// advertise it or another peer can declare an independent successor cell.
+	if r.lookupCell(r.shardResource(successor)) != cell || r.resourceKey(resource) != r.shardResource(successor).key() {
+		t.Fatal("checkpoint exposed its successor before binding native authority")
+	}
+	if cell.current.Load() != source || tbl.ActiveShards()[0] != source {
+		t.Fatal("checkpoint prematurely replaced the active native generation")
 	}
 	transfer, err := r.captureResource(mosiResource{Database: tbl.schema.Name}, "")
 	if err != nil {
