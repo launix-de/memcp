@@ -1231,7 +1231,7 @@ func TestClusterRemoteMutationRedirectsBeforeRecallingParticipant(t *testing.T) 
 	err := withRemoteScanShard(&remoteScanShard{Schema: tbl.filterSchemaFingerprint(), Resource: resource}, nil, true, "coordinator", "",
 		func(*storageShard) error { executed = true; return nil })
 	redirect, ok := err.(clusterScanRedirect)
-	if !ok || redirect.owner != "transaction-participant" || executed || cell.ownstate.Phase() != mosi.IO {
+	if !ok || redirect.Owner != "transaction-participant" || redirect.Epoch != 4 || redirect.Generation != resource.Shard || executed || cell.ownstate.Phase() != mosi.IO {
 		t.Fatalf("stale task recalled participant rights or executed callbacks: %v, executed=%v", err, executed)
 	}
 }
@@ -1636,6 +1636,80 @@ func TestClusterTopologyPublishesEveryRebuildSuccessor(t *testing.T) {
 			}
 			if cell.current.Load() != last || cell.resource.Load().Shard != last.uuid.String() {
 				t.Fatal("topology publication did not advance its native authority")
+			}
+		})
+	}
+}
+
+func TestClusterDelegationDistinguishesHandoverFromRoutingCycle(t *testing.T) {
+	for _, progress := range []string{"unchanged", "epoch", "generation"} {
+		t.Run(progress, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			service := &nodeScanService{}
+			cluster := &nodeCluster{service: service, ctx: ctx}
+			var links []*clusterLink
+			for _, id := range []string{"owner-a", "owner-b"} {
+				peer := &mosiPeer{ctx: ctx, done: make(chan struct{}), outgoing: newMosiMailbox(), scanService: service, objectPeer: clusterObjectPeer{ID: id, Boot: "boot"}}
+				links = append(links, &clusterLink{member: clusterMember{ID: id}, peer: peer})
+			}
+			cluster.view.Store(&clusterView{links: links})
+			expected := remoteScanShard{Schema: 1, Resource: mosiResource{Database: "delegation", Table: "items", Shard: uuid.NewString()}}
+			executor := &clusterScanExecutor{cluster: cluster, expected: expected, preferred: links[0]}
+			condition := scm.Eval(scm.Read(t.Name(), "(lambda () true)", true), &scm.Globalenv)
+			finished := make(chan scanResult, 1)
+			go func() {
+				var result scanResult
+				defer func() {
+					if failure := recover(); failure != nil {
+						result.err = scanError{r: failure}
+					}
+					finished <- result
+				}()
+				result = executor.ExecuteShardScan(expected.Resource, shardScanInvocation{operator: shardExists, condition: condition, neutral: scm.NewBool(false)})
+			}()
+			var result scanResult
+			completed := false
+			for step := 0; step < 3 && !completed; step++ {
+				peer := links[step%2].peer
+				select {
+				case <-peer.outgoing.ready:
+					message := takeMosi(peer.outgoing)
+					var request struct{ Return, Method string }
+					if err := unmarshalNode(message.Data, &request); err != nil || request.Method != "scan.execute" {
+						t.Fatal("delegation did not use its native scan contract", request, err)
+					}
+					response := remoteScanResult{Redirect: &clusterScanRedirect{Owner: links[(step+1)%2].member.ID, Epoch: 4, Generation: expected.Resource.Shard}}
+					if progress == "epoch" && step == 1 {
+						response.Redirect.Epoch = 5
+					}
+					if progress == "generation" && step == 1 {
+						response.Redirect.Generation = uuid.NewString()
+					}
+					if progress != "unchanged" && step == 2 {
+						response = remoteScanResult{Version: scanWireVersion, Shard: expected, Value: []byte("true"), OutCount: 1}
+					}
+					entry, _ := service.handles.Load(controlReturnSlot(request.Return))
+					deliverTestCompletion(t, entry, scanCompletion{Data: mustNodeMetadata(response)})
+				case result = <-finished:
+					completed = true
+				case <-ctx.Done():
+					t.Fatal("delegation did not finish", ctx.Err())
+				}
+			}
+			if !completed {
+				select {
+				case result = <-finished:
+				case <-ctx.Done():
+					t.Fatal(ctx.Err())
+				}
+			}
+			if progress != "unchanged" {
+				if result.err.r != nil || !result.res.Bool() {
+					t.Fatal("live ownership progress was rejected as a cycle", result.err.r)
+				}
+			} else if result.err.r == nil || !strings.Contains(fmt.Sprint(result.err.r), "ownership route cycled") {
+				t.Fatal("unchanged cyclic hints were allowed to loop", result.err.r)
 			}
 		})
 	}

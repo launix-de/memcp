@@ -430,8 +430,8 @@ func (executor *peerScanExecutor) dispatch(task remoteScanTask, offers ...scm.Cl
 	if result.Rejected {
 		panic(clusterCapacityRejection{})
 	}
-	if result.RedirectTo != "" {
-		panic(clusterScanRedirect{owner: result.RedirectTo})
+	if result.Redirect != nil {
+		panic(*result.Redirect)
 	}
 	return result
 }

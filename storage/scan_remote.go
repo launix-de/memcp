@@ -17,8 +17,8 @@ import "strings"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/memcp/storage/mosi"
 
-// Version 19 combines binary node metadata with retained UNIQUE receiver scopes.
-const scanWireVersion = 19
+// Version 20 carries native generation/epoch progress with scan redirects.
+const scanWireVersion = 20
 
 type remoteScanShard struct {
 	Schema   uint64       `json:"schema"`
@@ -65,14 +65,14 @@ type remoteScanTask struct {
 	Neutral       []byte                `json:"neutral"`
 }
 type remoteScanResult struct {
-	RedirectTo     string          `json:"redirect_to,omitempty"` // routing refusal before acquiring payload or executing callbacks
-	Rejected       bool            `json:"rejected,omitempty"`    // capacity refusal before executing scan callbacks
-	Version        int             `json:"version"`
-	Shard          remoteScanShard `json:"shard"`
-	Value          []byte          `json:"value"`
-	OutCount       int64           `json:"out_count"`
-	InputCount     int64           `json:"input_count"`
-	CandidateCount int64           `json:"candidate_count"`
+	Redirect       *clusterScanRedirect `json:"redirect,omitempty"` // routing refusal before acquiring payload or executing callbacks
+	Rejected       bool                 `json:"rejected,omitempty"` // capacity refusal before executing scan callbacks
+	Version        int                  `json:"version"`
+	Shard          remoteScanShard      `json:"shard"`
+	Value          []byte               `json:"value"`
+	OutCount       int64                `json:"out_count"`
+	InputCount     int64                `json:"input_count"`
+	CandidateCount int64                `json:"candidate_count"`
 }
 
 // The authenticated connection owns operation cancellation and duplicate suppression.
@@ -262,7 +262,7 @@ func (database *database) executeScanTask(ctx context.Context, s *scanRPCSession
 		return remoteScanResult{Rejected: true}, nil
 	}
 	if redirect, ok := err.(clusterScanRedirect); ok {
-		return remoteScanResult{RedirectTo: redirect.owner}, nil
+		return remoteScanResult{Redirect: &redirect}, nil
 	}
 	if err != nil {
 		return nil, err
@@ -344,7 +344,7 @@ func withRemoteScanShard(expected *remoteScanShard, tx *TxContext, mutation bool
 			// it cannot admit that shard. That path still uses native acquisition;
 			// a third-party owner is a stale task route to follow first.
 			if !local && record.Owner != "" && record.Owner != r.id && record.Owner != sender && record.Owner != acquireFrom {
-				return clusterScanRedirect{owner: record.Owner}
+				return clusterScanRedirect{Owner: record.Owner, Epoch: record.Epoch, Generation: record.Resource.Shard}
 			}
 		}
 		wanted := mosi.S

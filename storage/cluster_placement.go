@@ -22,10 +22,14 @@ type clusterCapacityRejection struct{}
 
 func (clusterCapacityRejection) Error() string { return "cluster shard RAM capacity unavailable" }
 
-type clusterScanRedirect struct{ owner string }
+type clusterScanRedirect struct {
+	Owner      string `json:"owner"`
+	Epoch      uint64 `json:"epoch"`
+	Generation string `json:"generation"`
+}
 
 func (redirect clusterScanRedirect) Error() string {
-	return "cluster scan owner changed to " + redirect.owner
+	return "cluster scan owner changed to " + redirect.Owner
 }
 
 // scanQueryContext is used only when scheduling/acquiring a cold shard. The
@@ -136,6 +140,7 @@ func (executor *clusterScanExecutor) ExecuteShardScan(resource mosiResource, inv
 	defer cancel()
 	candidates := executor.candidates()
 	attempted := make(map[string]bool)
+	var redirected map[string]clusterScanRedirect
 	acquireFrom := ""
 	for len(candidates) > 0 {
 		link := candidates[0]
@@ -150,13 +155,13 @@ func (executor *clusterScanExecutor) ExecuteShardScan(resource mosiResource, inv
 		default:
 		}
 		rejected := false
-		redirectTo := ""
+		var redirect *clusterScanRedirect
 		var result scanResult
 		func() {
 			defer func() {
 				if failure := recover(); failure != nil {
-					if redirect, ok := failure.(clusterScanRedirect); ok {
-						redirectTo = redirect.owner
+					if route, ok := failure.(clusterScanRedirect); ok {
+						redirect = &route
 					} else if _, ok := failure.(clusterCapacityRejection); ok {
 						rejected = true
 					} else {
@@ -167,20 +172,31 @@ func (executor *clusterScanExecutor) ExecuteShardScan(resource mosiResource, inv
 			remote := peerScanExecutor{peer: link.peer, ctx: ctx, prepared: executor.expected, acquireFrom: acquireFrom}
 			result = remote.ExecuteShardScan(resource, invocation)
 		}()
-		if redirectTo != "" {
-			if attempted[redirectTo] {
-				panic("cluster scan ownership route cycled")
+		if redirect != nil {
+			// Discovery spans live ownership publications. Returning to a peer
+			// after a new epoch/generation is progress, not a cycle. Refusals
+			// precede callback execution, so following them never replays effects.
+			previous, seen := redirected[link.member.ID]
+			if seen && previous.Generation == redirect.Generation && redirect.Epoch <= previous.Epoch {
+				panic(fmt.Errorf("cluster scan ownership route cycled: peer=%s generation=%s epoch=%d owner=%s", link.member.ID, redirect.Generation, redirect.Epoch, redirect.Owner))
 			}
+			if redirected == nil {
+				redirected = make(map[string]clusterScanRedirect)
+			}
+			// Native UUID forwarding is monotonic. Retain one latest refusal
+			// per peer, not an unbounded history of ownership changes.
+			redirected[link.member.ID] = *redirect
 			var target *clusterLink
 			for _, candidate := range executor.cluster.view.Load().links {
-				if candidate.member.ID == redirectTo {
+				if candidate.member.ID == redirect.Owner {
 					target = candidate
 					break
 				}
 			}
 			if target == nil {
-				panic(fmt.Errorf("cluster scan owner %s is unavailable", redirectTo))
+				panic(fmt.Errorf("cluster scan owner %s is unavailable", redirect.Owner))
 			}
+			attempted[target.member.ID] = false
 			candidates = append([]*clusterLink{target}, candidates...)
 			continue
 		}
