@@ -29,6 +29,10 @@ type lambdaBinding struct {
 	pointer    weak.Pointer[byte]
 	aux        uint64
 }
+type lambdaDemand struct {
+	object, keyBinding int
+	key                Scmer
+}
 type lambdaPlan struct {
 	identity      lambdaCodeIdentity
 	codeIdentity  lambdaCodeIdentity
@@ -41,6 +45,7 @@ type lambdaPlan struct {
 	factory       Scmer
 	bindings      []lambdaBinding
 	globals       []Symbol
+	demands       []lambdaDemand
 	once          sync.Once
 	compiled      Scmer
 }
@@ -94,6 +99,7 @@ type lambdaTemplate struct {
 	parameters  []Symbol
 	captures    []int
 	environment bool
+	contextFree bool
 	bound       *lambdaMetadata
 }
 
@@ -229,10 +235,12 @@ func buildLambdaPlan(proc *Proc) *lambdaPlan {
 	}
 
 	var params []Scmer
+	captureNames := map[Symbol]int{}
 	bind := func(binding lambdaBinding) Scmer {
 		// Names contain NUL so ordinary source identifiers cannot collide with
 		// compiler-generated context parameters.
 		name := NewSymbol("\x00lambda:context:" + strconv.Itoa(len(params)))
+		captureNames[name.Symbol()] = len(params)
 		params = append(params, name)
 		plan.bindings = append(plan.bindings, binding)
 		return name
@@ -314,10 +322,27 @@ func buildLambdaPlan(proc *Proc) *lambdaPlan {
 				result[i] = next
 			}
 		}
-		if result == nil {
-			return value
+		if result != nil {
+			items = result
+			value = NewSlice(result)
 		}
-		return NewSlice(result)
+		if len(items) > 0 && items[0].IsSymbol() {
+			if index, exists := captureNames[items[0].Symbol()]; exists {
+				demand := lambdaDemand{object: index, keyBinding: -1}
+				if len(items) == 2 {
+					key := items[1].WithoutSourceInfo()
+					if key.IsString() {
+						demand.key = ownLambdaCode(key)
+					} else if key.IsSymbol() {
+						if binding, exists := captureNames[key.Symbol()]; exists {
+							demand.keyBinding = binding
+						}
+					}
+				}
+				plan.demands = append(plan.demands, demand)
+			}
+		}
+		return value
 	}
 	body = native(body)
 	params = append(params, NewSymbol(lambdaScopeSymbol))
@@ -371,7 +396,18 @@ func compileLambdaTemplate(expression Scmer) Scmer {
 		panic("lambda template must contain a lambda")
 	}
 	original := value.Proc().Snapshot()
-	if jitEnabled && !jitExpressionConsumesRuntimeEnv(original.Body) {
+	consumesEnvironment := jitExpressionConsumesRuntimeEnv(original.Body)
+	free := map[Symbol]bool{}
+	for _, name := range jitLambdaFreeSymbols(original.Params, original.Body) {
+		free[name] = true
+	}
+	template.contextFree = !consumesEnvironment
+	for _, name := range template.parameters {
+		if free[name] {
+			template.contextFree = false
+		}
+	}
+	if jitEnabled && !consumesEnvironment {
 		base := original.NumVars
 		if original.Params.IsSlice() && len(original.Params.Slice()) > base {
 			base = len(original.Params.Slice())
@@ -380,10 +416,6 @@ func compileLambdaTemplate(expression Scmer) Scmer {
 			base = 1
 		}
 		base, _ = jitRequiredLocalSlots(original.Body, base)
-		free := map[Symbol]bool{}
-		for _, name := range jitLambdaFreeSymbols(original.Params, original.Body) {
-			free[name] = true
-		}
 		bindings := map[Symbol]NthLocalVar{}
 		var symbols []Symbol
 		var keys []Scmer
@@ -413,7 +445,7 @@ func compileLambdaTemplate(expression Scmer) Scmer {
 	}
 	p := value.Proc()
 	template.bound = &lambdaMetadata{owner: p, shared: true}
-	p.lambdaMeta = &lambdaMetadata{template: template}
+	p.lambdaMeta = &lambdaMetadata{owner: p, template: template}
 	return value
 }
 func LambdaRebind(old Scmer, context ...Scmer) Scmer {
@@ -429,11 +461,30 @@ func LambdaRebind(old Scmer, context ...Scmer) Scmer {
 	}
 	template := p.lambdaMetadata().template
 	arity := len(template.parameters)
-	if len(context) == arity-1 {
-		context = append(append([]Scmer(nil), context...), NewNil())
-	}
-	if len(context) != arity {
+	if len(context) != arity && len(context) != arity-1 {
 		panic(fmt.Sprintf("lambda_rebind expects %d bindings, got %d", arity-1, len(context)))
+	}
+	// A function which reads no factory bindings already is the complete
+	// callable. Its immutable header and code have the same Go/peer lifetime.
+	if template.contextFree {
+		return Scmer{(*byte)(unsafe.Pointer(p)), makeAux(tagProc, 0)}
+	}
+	if len(context) == arity-1 {
+		scope := NewNil()
+		if entry := proc.compiled(); entry != nil && proc.nativeCode() != 0 {
+			for i, name := range entry.CaptureSymbols {
+				if name == Symbol(lambdaScopeSymbol) {
+					scope = jitProcCaptures(proc)[i]
+					break
+				}
+			}
+		}
+		if scope.IsNil() && proc.En != nil {
+			if frame := proc.En.FindRead(Symbol(lambdaScopeSymbol)); frame != nil {
+				scope = frame.Vars[Symbol(lambdaScopeSymbol)]
+			}
+		}
+		context = append(append([]Scmer(nil), context...), scope)
 	}
 	count := 0
 	if entry := p.compiled(); entry != nil && entry.CodePtr != nil {

@@ -25,6 +25,9 @@ import "encoding/json"
 func TestLambdaRebindCaptureFreeCode(t *testing.T) {
 	old := Eval(Read(t.Name(), `(lambda (x) (+ x 7))`, false), &Globalenv)
 	left, right := LambdaRebind(old), LambdaRebind(old)
+	if left.Proc() != right.Proc() {
+		t.Fatal("allocated a redundant capture-free header")
+	}
 	if left.Proc().Body != right.Proc().Body {
 		t.Fatal("copied code per binding")
 	}

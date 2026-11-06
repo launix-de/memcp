@@ -287,6 +287,34 @@ func BenchmarkClusterLambdaContexts(b *testing.B) {
 	}
 }
 
+func BenchmarkClusterCaptureFreeLambda(b *testing.B) {
+	sender, _, declarations := valuePeerPair(b)
+	syntax := Read(b.Name(), `(lambda (x) (+ x 1))`, false)
+	closures := make([]Scmer, 0, b.N)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		original := Eval(syntax, &Globalenv)
+		ctx := (&SerializationContext{}).WithPeer(sender)
+		wire, err := MarshalProcedure(original, ctx)
+		if err != nil {
+			b.Fatal(err)
+		}
+		decoded, err := UnmarshalProcedure(wire)
+		ctx.Queued()
+		if err != nil {
+			b.Fatal(err)
+		}
+		if Apply(decoded, NewInt(7)).Int() != 8 {
+			b.Fatal("capture-free result changed")
+		}
+		closures = append(closures, decoded)
+	}
+	b.StopTimer()
+	b.ReportMetric(float64(declarations.Load()), "declarations")
+	runtime.KeepAlive(closures)
+}
+
 func TestClusterValueSnapshotsImperativeCaptureOnce(t *testing.T) {
 	sender, _, _ := valuePeerPair(t)
 	calls := 0

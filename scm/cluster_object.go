@@ -236,46 +236,46 @@ func (bindings *SerializationContext) WithExport(export func(ClusterObject, Scme
 
 // Collect demands before Serialize exports the first object. Runtime lists and
 // dictionaries contain values; their symbols are never interpreted as calls.
-func (bindings *SerializationContext) prepare(value Scmer, literal bool) {
+func (bindings *SerializationContext) prepare(value Scmer, literal bool, visiting []*lambdaContextSnapshot) {
 	if bindings.Peer != nil {
 		if proc := lambdaProcedure(value); proc != nil {
 			snapshot := bindings.lambdaContext(proc)
-			if !snapshot.prepared.CompareAndSwap(false, true) {
-				return
+			for _, active := range visiting {
+				if active == snapshot {
+					return
+				}
+			}
+			visiting = append(visiting, snapshot)
+			for _, demand := range snapshot.plan.demands {
+				if object, ok := ClusterObjectOf(snapshot.values[demand.object]); ok {
+					key := demand.key
+					if demand.keyBinding >= 0 {
+						if bound := snapshot.values[demand.keyBinding].WithoutSourceInfo(); bound.IsString() {
+							key = bound
+						}
+					}
+					bindings.demand(object, key)
+				}
 			}
 			for _, capture := range snapshot.values {
-				bindings.prepare(capture, true)
+				bindings.prepare(capture, true, visiting)
 			}
 			return
 		}
 	}
-	if bindings.root != nil {
-		bindings = bindings.root
-	}
 	value = value.WithoutSourceInfo()
 	if value.IsProc() {
-		bindings.prepare(CloseProcedure(value).Proc().Body, false)
+		bindings.prepare(CloseProcedure(value).Proc().Body, false, visiting)
 		return
 	}
 	if value.IsFastDict() {
 		for _, item := range value.FastDict().Pairs {
-			bindings.prepare(item, true)
+			bindings.prepare(item, true, visiting)
 		}
 		return
 	}
-	demand := func(object ClusterObject, key Scmer) {
-		bindings.mu.Lock()
-		defer bindings.mu.Unlock()
-		if bindings.demands == nil {
-			bindings.demands = make(map[ClusterObject]map[Scmer]struct{})
-		}
-		if bindings.demands[object] == nil {
-			bindings.demands[object] = make(map[Scmer]struct{})
-		}
-		bindings.demands[object][key] = struct{}{}
-	}
 	if object, ok := ClusterObjectOf(value); ok {
-		demand(object, NewNil())
+		bindings.demand(object, NewNil())
 		return
 	}
 	if !value.IsSlice() {
@@ -283,7 +283,7 @@ func (bindings *SerializationContext) prepare(value Scmer, literal bool) {
 	}
 	items := value.Slice()
 	if !literal && len(items) == 2 && scmerIsSymbol(items[0], "quote") {
-		bindings.prepare(items[1], true)
+		bindings.prepare(items[1], true, visiting)
 		return
 	}
 	if !literal && len(items) > 0 {
@@ -292,13 +292,28 @@ func (bindings *SerializationContext) prepare(value Scmer, literal bool) {
 			if len(items) == 2 && items[1].WithoutSourceInfo().IsString() {
 				key = items[1].WithoutSourceInfo()
 			}
-			demand(object, key)
+			bindings.demand(object, key)
 			items = items[1:]
 		}
 	}
 	for _, item := range items {
-		bindings.prepare(item, literal)
+		bindings.prepare(item, literal, visiting)
 	}
+}
+
+func (bindings *SerializationContext) demand(object ClusterObject, key Scmer) {
+	if bindings.root != nil {
+		bindings = bindings.root
+	}
+	bindings.mu.Lock()
+	defer bindings.mu.Unlock()
+	if bindings.demands == nil {
+		bindings.demands = make(map[ClusterObject]map[Scmer]struct{})
+	}
+	if bindings.demands[object] == nil {
+		bindings.demands[object] = make(map[Scmer]struct{})
+	}
+	bindings.demands[object][key] = struct{}{}
 }
 
 func ResolveSerializedObjects(value Scmer, resolve func(ClusterReference) (Scmer, error), resolveHandle func(uint64) (Handle, error)) (Scmer, error) {

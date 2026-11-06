@@ -475,10 +475,9 @@ func initClusterValues() {
 // A publication snapshots each closure once. Preparation and printing must not
 // evaluate imperative outer capture expressions twice.
 type lambdaContextSnapshot struct {
-	plan     *lambdaPlan
-	values   []Scmer
-	ready    chan struct{}
-	prepared atomic.Bool
+	plan   *lambdaPlan
+	values []Scmer
+	ready  chan struct{}
 }
 
 func (ctx *SerializationContext) lambdaContext(proc *Proc) *lambdaContextSnapshot {

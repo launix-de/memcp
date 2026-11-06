@@ -1172,6 +1172,46 @@ func TestClusterObjectDictionaryCallbacksPrepareCompleteSessionView(t *testing.T
 	}
 }
 
+func TestClusterObjectCachedLambdaPreparesCachemapKeysBeforeInvocation(t *testing.T) {
+	for _, code := range []string{`(lambda () (cache "ready"))`, `(lambda () (cache key))`, `(lambda () ((lambda () (cache key))))`} {
+		for _, native := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/native=%t", code, native), func(t *testing.T) {
+				calls := 0
+				cache := NewCacheMap(scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+					calls++
+					if args[0].String() != "ready" {
+						t.Fatal("unexpected prepared key", args[0])
+					}
+					return scm.NewInt(17)
+				}))
+				function := scm.Eval(scm.Read(t.Name(), code, false), &scm.Env{Vars: scm.Vars{scm.Symbol("cache"): cache, scm.Symbol("key"): scm.NewString("ready")}, Outer: &scm.Globalenv})
+				if native {
+					function = scm.CompileJIT(function, true)
+				}
+				peer := &scm.SerializationPeer{
+					Declare:  func(string, []byte, bool) error { return nil },
+					Send:     func(string, []byte) error { return nil },
+					Register: func(string, func([]byte) error) func() { return func() {} },
+				}
+				defer peer.Close()
+				var exported scm.Scmer
+				bindings := (&scm.SerializationContext{}).WithPeer(peer).WithExport(func(object scm.ClusterObject, view scm.Scmer) (scm.ClusterReference, error) {
+					exported = view
+					data, err := freezeScanValue(view, nil)
+					return scm.ClusterReference{URI: "memcp://owner/cache", Owner: "owner", Incarnation: "boot", Token: "lease", Type: object.ClusterObjectType(), View: []byte(data)}, err
+				})
+				defer bindings.Queued()
+				if _, err := scm.MarshalProcedure(function, bindings); err != nil {
+					t.Fatal(err)
+				}
+				if calls != 1 || !exported.IsSlice() || len(exported.Slice()) != 2 || exported.Slice()[1].Int() != 17 {
+					t.Fatal("factory was deferred to worker invocation", calls, exported)
+				}
+			})
+		}
+	}
+}
+
 // A transferred overlay is already enlisted before MOSI publishes its grant.
 // Its first local writer must retain the capability held by older endpoints.
 func TestClusterTransferredParticipantKeepsEnlistedCapability(t *testing.T) {

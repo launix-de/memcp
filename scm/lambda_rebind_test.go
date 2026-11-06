@@ -73,3 +73,17 @@ func TestLambdaRebindNativeTemplate(t *testing.T) {
 		t.Fatal("native template was recompiled")
 	}
 }
+
+func TestLambdaRebindRetainsExistingExecutionBinding(t *testing.T) {
+	body := NewSlice([]Scmer{NewSymbol("+"), NewSymbol("x"), NewSymbol("captured"), NewSymbol(lambdaScopeSymbol)})
+	original := NewProcStruct(Proc{Params: NewSlice([]Scmer{NewSymbol("x")}), Body: body,
+		En: &Env{Vars: Vars{Symbol("captured"): NewInt(9), Symbol(lambdaScopeSymbol): NewInt(37)}, Outer: &Globalenv}})
+	bound := LambdaRebind(original, NewInt(2))
+	if got := Apply(bound, NewInt(7)); got.Int() != 46 {
+		t.Fatal("rebinding dropped its existing execution scope", got)
+	}
+	bound = LambdaRebind(bound, NewInt(3))
+	if got := Apply(bound, NewInt(7)); got.Int() != 47 {
+		t.Fatal("native rebinding dropped its existing execution scope", got)
+	}
+}

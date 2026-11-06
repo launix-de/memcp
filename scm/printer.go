@@ -284,7 +284,8 @@ func Serialize(b *bytes.Buffer, v Scmer, glob *Env, objects ...*SerializationCon
 	if len(objects) > 0 {
 		writer.objects = objects[0]
 		if writer.objects != nil {
-			writer.objects.prepare(v, true)
+			var visiting [8]*lambdaContextSnapshot
+			writer.objects.prepare(v, true, visiting[:0])
 			if writer.objects.Peer != nil && lambdaProcedure(v) != nil {
 				// The enclosing decoder already constructs a root callable once.
 				// Only nested captures need an envelope-local alias constructor.
