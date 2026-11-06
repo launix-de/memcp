@@ -340,11 +340,15 @@ func withRemoteScanShard(expected *remoteScanShard, tx *TxContext, mutation bool
 			record := r.cluster.report(expected.Resource)
 			phase := mosi.ParsePhase(record.State)
 			local := phase.Readable()
-			// The sender can deliberately delegate its own cold payload because
-			// it cannot admit that shard. That path still uses native acquisition;
-			// a third-party owner is a stale task route to follow first.
-			if !local && record.Owner != "" && record.Owner != r.id && record.Owner != sender && record.Owner != acquireFrom {
-				return clusterScanRedirect{Owner: record.Owner, Epoch: record.Epoch, Generation: record.Resource.Shard}
+			owner := record.Owner
+			if record.Handoff != "" {
+				owner = record.Handoff
+			}
+			// A handover routes to its recipient before the final owner ACK.
+			// The sender can deliberately delegate its own cold payload when it
+			// cannot admit it; other owners must execute at their native boundary.
+			if !local && owner != "" && owner != r.id && owner != sender && owner != acquireFrom {
+				return clusterScanRedirect{Owner: owner, Epoch: record.Epoch, Generation: record.Resource.Shard}
 			}
 		}
 		wanted := mosi.S
