@@ -141,7 +141,7 @@ func (executor *clusterScanExecutor) ExecuteShardScan(resource mosiResource, inv
 	candidates := executor.candidates()
 	attempted := make(map[string]bool)
 	var redirected map[string]clusterScanRedirect
-	acquireFrom := ""
+	acquireFrom := executor.exclude
 	for len(candidates) > 0 {
 		link := candidates[0]
 		candidates = candidates[1:]

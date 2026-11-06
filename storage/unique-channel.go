@@ -784,15 +784,15 @@ func (t *table) startUniqueReservation(parent context.Context, owner string, fir
 			result = scanResult{res: scm.NewBool(committed)}
 			return
 		}
-		var preferred *clusterLink
-		for _, link := range cluster.view.Load().links {
-			if link.member.ID == owner {
-				preferred = link
-				break
-			}
+		peer := cluster.peer(owner)
+		if peer == nil {
+			panic(mosi.NetworkError)
 		}
 		resource := mosiResource{Database: t.schema.Name, Table: t.Name, Shard: first.uuid.String()}
-		executor := clusterScanExecutor{cluster: cluster, preferred: preferred, expected: remoteScanShard{Schema: t.filterSchemaFingerprint(), Resource: resource}}
+		// This channel reserves one owner group. Following a redirect here
+		// could reserve the same node's stripe twice through different groups.
+		// Refuse before callbacks; admission/regrouping runs after set.close.
+		executor := peerScanExecutor{peer: peer, ctx: ctx, prepared: remoteScanShard{Schema: t.filterSchemaFingerprint(), Resource: resource}}
 		result = executor.ExecuteShardScan(resource, invocation)
 	}()
 	select {
@@ -801,7 +801,14 @@ func (t *table) startUniqueReservation(parent context.Context, owner string, fir
 	case result := <-client.done:
 		cancel()
 		if result.err.r != nil {
-			panic(result.err)
+			switch result.err.r.(type) {
+			case clusterScanRedirect:
+				panic(uniqueReservationBusy{shard: remoteScanShard{Schema: t.filterSchemaFingerprint(), Resource: cluster.manager.shardResource(first)}, owner: owner})
+			case clusterCapacityRejection:
+				panic(uniqueReservationBusy{shard: remoteScanShard{Schema: t.filterSchemaFingerprint(), Resource: cluster.manager.shardResource(first)}, owner: owner, capacity: true})
+			default:
+				panic(result.err)
+			}
 		}
 		if result.res.IsSlice() && len(result.res.Slice()) == 4 && scm.String(result.res.Slice()[0]) == "busy" {
 			panic(uniqueReservationBusy{shard: remoteScanShard{Schema: t.filterSchemaFingerprint(), Resource: mosiResource{Database: t.schema.Name, Table: t.Name, Shard: scm.String(result.res.Slice()[1])}}, owner: owner, capacity: result.res.Slice()[2].Bool(), retry: result.res.Slice()[3].Bool()})
@@ -896,6 +903,18 @@ func (s *storageShard) serveUniqueScan(ctx context.Context, input shardScanInvoc
 	ids, err := uniqueStrings(parameters[5])
 	if err != nil || len(ids) == 0 {
 		return false, fmt.Errorf("UNIQUE reservation requires its shard group")
+	}
+	if sharedClusterSource(s.t) {
+		// All members must still belong to this native M owner. Claiming a
+		// moved member while earlier groups retain their channels can wait on
+		// our own reservation. Admission is a separate phase without stripes.
+		manager := activeNodeCluster().manager
+		for _, id := range ids {
+			resource := mosiResource{Database: s.t.schema.Name, Table: s.t.Name, Shard: id}
+			if manager.resourceCell(resource).ownstate.Phase() != mosi.M {
+				return false, uniqueReservationBusy{shard: remoteScanShard{Resource: resource}}
+			}
+		}
 	}
 	if input.uniqueGuard == nil {
 		firstWrite, admitted := s.getWrite(tx, false)

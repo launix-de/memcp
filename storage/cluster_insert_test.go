@@ -1779,3 +1779,67 @@ func TestClusterLiveReferencePublishesEpochBeforePayloadCanMergeCells(t *testing
 		t.Fatal("incomplete transfer lost its pending request or fabricated a grant")
 	}
 }
+
+func TestClusterUniqueReservationRegroupsInsteadOfFollowingOwner(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "t_unique_owner_group_redirect", 3)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	cluster := globalTestCluster(t, tbl.schema.Name)
+	cluster.ctx, cluster.cancel = ctx, cancel
+	service := &nodeScanService{id: cluster.self.Boot, cluster: cluster}
+	cluster.service = service
+	registry := service.objectRegistry()
+	registry.endpoint = "http://127.0.0.1/cluster"
+	t.Cleanup(service.stop)
+	var links []*clusterLink
+	for range 2 {
+		member := clusterMember{ID: "memcp://" + uuid.NewString(), Boot: uuid.NewString()}
+		peer := &mosiPeer{ctx: ctx, done: make(chan struct{}), outgoing: newMosiMailbox(), scanService: service, objectPeer: clusterObjectPeer{ID: member.ID, Boot: member.Boot}}
+		links = append(links, &clusterLink{member: member, peer: peer})
+	}
+	cluster.view.Store(&clusterView{links: links})
+	previous := nodeScans.Swap(service)
+	t.Cleanup(func() { nodeScans.Store(previous) })
+	shard := tbl.ActiveShards()[0]
+	resource := cluster.manager.shardResource(shard)
+	done := make(chan any, 1)
+	go func() {
+		defer func() { done <- recover() }()
+		guard := tbl.guardUniqueWrites([]string{"id"}, [][]scm.Scmer{{scm.NewInt(42)}}, false, 0, nil)
+		client := tbl.startUniqueReservation(ctx, links[0].member.ID, shard, []string{shard.uuid.String()}, []string{"id"}, [][]scm.Scmer{{scm.NewInt(42)}}, false, nil, &guard)
+		client.cancel()
+	}()
+	// The first peer refused before callbacks because its owner group moved.
+	// The second may already hold another group for this same coordinator.
+	for {
+		select {
+		case <-links[0].peer.outgoing.ready:
+			message := takeMosi(links[0].peer.outgoing)
+			if message.Method != "node.control" {
+				continue
+			}
+			var request struct{ Return, Method string }
+			if err := unmarshalNode(message.Data, &request); err != nil || request.Method != "scan.execute" {
+				t.Fatal("invalid reservation request", err)
+			}
+			entry, _ := service.handles.Load(controlReturnSlot(request.Return))
+			deliverTestCompletion(t, entry, scanCompletion{Data: mustNodeMetadata(remoteScanResult{Redirect: &clusterScanRedirect{Owner: links[1].member.ID, Epoch: 5, Generation: resource.Shard}})})
+		case failure := <-done:
+			busy, ok := failure.(uniqueReservationBusy)
+			if !ok || busy.owner != links[0].member.ID || busy.shard.Resource != resource || busy.retry || busy.capacity {
+				t.Fatalf("owner-group refusal lost its regrouping identity: %T %v", failure, failure)
+			}
+			if links[1].peer.outgoing.len() != 0 {
+				t.Fatal("reservation followed a redirect into an independently reserved owner group")
+			}
+			return
+		case <-links[1].peer.outgoing.ready:
+			cancel()
+			close(links[1].peer.done)
+			<-done
+			t.Fatal("reservation followed a redirect into an independently reserved owner group")
+		case <-ctx.Done():
+			t.Fatal("reservation refusal did not return", ctx.Err())
+		}
+	}
+}
