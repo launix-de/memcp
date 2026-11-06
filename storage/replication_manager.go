@@ -78,9 +78,10 @@ type replicationManager struct {
 	shutdown        func()
 	stopping        bool
 	stopOnce        sync.Once
-	steps           sync.Map // transfer/invalidations; values are *replicaStep
-	transfers       sync.Map // active outgoing *replicaTransfer -> database; cold GC lifetime only
-	imports         sync.Map // connection ID + transfer ID; reader-owned *replicaImport
+	acquisitions    map[string]replicaAcquisition // issued requests, protected by mu until their terminal replies
+	steps           sync.Map                      // transfer/invalidations; values are *replicaStep
+	transfers       sync.Map                      // active outgoing *replicaTransfer -> database; cold GC lifetime only
+	imports         sync.Map                      // connection ID + transfer ID; reader-owned *replicaImport
 }
 
 // StartReplication initializes engine adapters from trusted Scheme startup.

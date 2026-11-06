@@ -18,6 +18,63 @@ import "encoding/json"
 import "github.com/launix-de/memcp/storage/mosi"
 
 var errClusterReadBusy = fmt.Errorf("cluster read acquisition would wait for a writer")
+var errClusterAcquisitionSuperseded = fmt.Errorf("cluster acquisition superseded by a newer native request")
+
+// An issued request outlives its initiating query and any UUID forwarding.
+// Only pending wire replies are retained; this is not another rights directory.
+// The original cell follows native forwarding, so unrelated resources cannot
+// use a known request ID to install content or obtain a grant.
+type replicaAcquisition struct {
+	cell  *replicaCell
+	read  bool
+	write bool
+}
+
+func (r *replicationManager) issueAcquisition(c *replicaCell, packet mosiPacket) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.acquisitions == nil {
+		r.acquisitions = make(map[string]replicaAcquisition)
+	}
+	request := r.acquisitions[packet.ID]
+	request.cell = c
+	if packet.Kind == "write" {
+		request.write = true
+	} else {
+		request.read = true
+	}
+	r.acquisitions[packet.ID] = request
+}
+
+func (r *replicationManager) issuedAcquisition(c *replicaCell, packet mosiPacket) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	request, exists := r.acquisitions[packet.ID]
+	return exists && request.cell.resolved() == c.resolved() &&
+		(packet.State == "" || packet.State == "M" && request.write || packet.State != "M" && request.read)
+}
+
+func (r *replicationManager) finishAcquisition(packet mosiPacket) {
+	if r.cluster == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	request, exists := r.acquisitions[packet.ID]
+	if !exists {
+		return
+	}
+	if packet.State == "M" {
+		request.write = false
+	} else {
+		request.read = false
+	}
+	if request.read || request.write {
+		r.acquisitions[packet.ID] = request
+	} else {
+		delete(r.acquisitions, packet.ID)
+	}
+}
 
 // tryRead acquires ordinary MOSI S without materializing a payload. A cache
 // needs these rights even when its producer delegates all shard work. If a
@@ -54,6 +111,7 @@ func (cluster *nodeCluster) tryRead(ctx context.Context, resource mosiResource) 
 	packet := mosiPacket{Kind: "read", Resource: resource, From: cluster.self.ID,
 		To: owner, ID: publication.Flight().ID(), Sequence: cluster.manager.requestSequence(publication.Flight()),
 		Boot: cluster.self.Boot, TryRead: true}
+	cluster.manager.issueAcquisition(c, packet)
 	granted := false
 	if owner == cluster.self.ID {
 		err = cluster.coordinate(ctx, cluster.self.ID, packet)
@@ -69,6 +127,9 @@ func (cluster *nodeCluster) tryRead(ctx context.Context, resource mosiResource) 
 	if err != nil {
 		c.ownstate.Fail(packet.ID, err, mosi.S)
 		panic(err)
+	}
+	if !granted {
+		cluster.manager.finishAcquisition(mosiPacket{ID: packet.ID, State: "S"})
 	}
 	if !granted || !c.resolved().ownstate.Phase().Readable() {
 		c.ownstate.Fail(packet.ID, errClusterReadBusy, mosi.S)
@@ -436,6 +497,7 @@ func (cluster *nodeCluster) obtain(parent context.Context, resource mosiResource
 			if publication.Phase() == mosi.MR {
 				packet.Kind = "write"
 			}
+			r.issueAcquisition(c, packet)
 			if owner == r.id {
 				c := c
 				go func() {
@@ -475,7 +537,7 @@ func (cluster *nodeCluster) obtain(parent context.Context, resource mosiResource
 				continue
 			}
 			if publication.Flight().Err() != nil {
-				if publication.Flight().Err() == errClusterReadBusy {
+				if publication.Flight().Err() == errClusterReadBusy || publication.Flight().Err() == errClusterAcquisitionSuperseded {
 					continue // a cache's declined try-read cannot fail a normal waiter
 				}
 				fmt.Println("cluster acquisition failed:", resource.key(), publication.Flight().Err())
@@ -656,11 +718,12 @@ func (cluster *nodeCluster) referenceSource(source string, packet mosiPacket, c 
 		if record.Handoff != "" {
 			owner = record.Handoff
 		}
+		issued := r.issuedAcquisition(c, packet)
 		if publication.Phase().Requested() {
-			if publication.Flight().ID() != packet.ID || owner != source && packet.Epoch <= record.Epoch {
+			if (publication.Flight().ID() != packet.ID && !issued) || (owner != source && packet.Epoch <= record.Epoch) {
 				return nil, fmt.Errorf("unexpected shared reference request: resource=%s incoming=%s epoch=%d pending=%s epoch=%d owner=%s source=%s", packet.Resource.key(), packet.ID, packet.Epoch, publication.Flight().ID(), record.Epoch, record.Owner, source)
 			}
-		} else if publication.Phase() != mosi.S || record.Owner != source || record.Epoch != packet.Epoch {
+		} else if (issued && owner != source && packet.Epoch <= record.Epoch) || (!issued && (publication.Phase() != mosi.S || record.Owner != source || record.Epoch != packet.Epoch)) {
 			// Unsolicited O updates may refresh existing S readers only at the
 			// exact recorded authority epoch. They never create a new grant.
 			return nil, fmt.Errorf("unsolicited shared reference for %s in %s", packet.Resource.key(), publication.Phase())
@@ -779,6 +842,9 @@ func (cluster *nodeCluster) installReference(source string, packet mosiPacket) e
 		if err := r.grantAcquired(c.resolved(), packet); err != nil {
 			return err
 		}
+	}
+	if expected == nil && packet.State != "" {
+		r.finishAcquisition(packet)
 	}
 	c.acquire.Unlock()
 	locked = false

@@ -1884,3 +1884,164 @@ func TestClusterQueuedReadFollowsNativeHandoverBeforeGranting(t *testing.T) {
 		t.Fatal("unrelated peer answered a same-epoch queued flight")
 	}
 }
+
+// Two native UUIDs can both have sent a request before a rebuild route arrives.
+// Folding their cells must not turn the loser's legitimate reply into a forged
+// request, nor may a weaker reply satisfy an outstanding write request.
+func TestClusterIssuedAcquisitionSurvivesUUIDFolding(t *testing.T) {
+	for _, pending := range []mosi.Phase{mosi.IO, mosi.S, mosi.M} {
+		t.Run(pending.String(), func(t *testing.T) {
+			cluster := &nodeCluster{self: clusterMember{ID: "memcp://" + uuid.NewString()}}
+			cluster.initializeManager()
+			r := cluster.manager
+			from := mosiResource{Database: "folded_flight", Table: "items", Shard: uuid.NewString()}
+			to := from
+			to.Shard = uuid.NewString()
+			owner := "memcp://" + uuid.NewString()
+			original, successor := r.resourceCell(from), r.resourceCell(to)
+			original.ownstate.Initialize(mosi.IO)
+			successor.ownstate.Initialize(mosi.IO)
+			r.updateRecord(from, func(record *replicaRecord) bool { record.Owner, record.Epoch = owner, 3; return true })
+			r.updateRecord(to, func(record *replicaRecord) bool { record.Owner, record.Epoch = owner, 4; return true })
+			read, _ := original.ownstate.Request(mosi.S)
+			request := mosiPacket{Resource: from, Kind: "read", ID: read.Flight().ID()}
+			r.issueAcquisition(original, request)
+			original.ownstate.Request(mosi.M)
+			request.Kind = "write"
+			r.issueAcquisition(original, request)
+			var waiting *mosi.Publication
+			if pending != mosi.IO {
+				waiting, _ = successor.ownstate.Request(pending)
+				kind := "read"
+				if pending == mosi.M {
+					kind = "write"
+				}
+				r.issueAcquisition(successor, mosiPacket{Kind: kind, ID: waiting.Flight().ID(), Resource: to})
+			}
+			r.forwardResource(from, to)
+			if original.resolved() != successor {
+				t.Fatal("fixture did not replace the issuing cell")
+			}
+			record := cluster.report(to)
+			answer := mosiPacket{Resource: from, ID: request.ID, State: "S", Owner: owner, Epoch: 5}
+			if _, err := cluster.referenceSource(owner, answer, successor, record); err != nil {
+				t.Fatalf("known read reply lost across UUID folding: %v", err)
+			}
+			for _, mutation := range []string{"id", "resource", "sender"} {
+				bad, source := answer, owner
+				switch mutation {
+				case "id":
+					bad.ID = uuid.NewString()
+				case "resource":
+					bad.Resource.Shard = uuid.NewString()
+				case "sender":
+					source, bad.Epoch = "foreign", record.Epoch
+				}
+				cell := successor
+				if mutation == "resource" {
+					cell = r.resourceCell(bad.Resource)
+				}
+				if _, err := cluster.referenceSource(source, bad, cell, record); err == nil {
+					t.Fatalf("invalid %s accepted an issued request ID", mutation)
+				}
+			}
+			if err := r.grantAcquired(successor, answer); err != nil {
+				t.Fatal(err)
+			}
+			r.finishAcquisition(answer)
+			if pending == mosi.M && successor.ownstate.Phase() != mosi.MR {
+				t.Fatal("weaker predecessor reply completed canonical write acquisition")
+			}
+			answer.State, answer.Owner, answer.Epoch = "M", r.id, 6
+			if !r.issuedAcquisition(successor, answer) {
+				t.Fatal("read completion discarded the pending write reply")
+			}
+			if err := r.grantAcquired(successor, answer); err != nil {
+				t.Fatal(err)
+			}
+			r.finishAcquisition(answer)
+			if successor.ownstate.Phase() != mosi.M || successor.clusterstate.Phase() != mosi.M {
+				t.Fatal("valid predecessor write reply did not grant canonical authority")
+			}
+			if waiting != nil {
+				select {
+				case <-waiting.Flight().Done():
+				default:
+					t.Fatal("canonical waiters did not wake")
+				}
+			}
+			if waiting != nil {
+				confirmation := mosiPacket{Resource: to, ID: waiting.Flight().ID(), State: "O", Owner: r.id, Epoch: 7}
+				if pending == mosi.M {
+					confirmation.State = "M"
+				}
+				if err := r.acceptGrant(confirmation); err != nil {
+					t.Fatal(err)
+				}
+				if successor.ownstate.Phase() != mosi.M {
+					t.Fatal("late read confirmation downgraded already granted M")
+				}
+				if pending == mosi.M && cluster.report(to).Epoch != 7 {
+					t.Fatal("already granted M lost the later request's authority epoch")
+				}
+			}
+			if len(r.acquisitions) != 0 {
+				t.Fatal("terminal replies retained request capabilities")
+			}
+		})
+	}
+}
+
+func TestClusterSupersededAcquisitionCompletesProtocolCapability(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "t_superseded_flight", 3)
+	owner := globalTestCluster(t, tbl.schema.Name)
+	r := owner.manager
+	cell := owner.declareShard(tbl.ActiveShards()[0], true)
+	resource := *cell.resource.Load()
+	requester := clusterMember{ID: "memcp://" + uuid.NewString(), Boot: uuid.NewString()}
+	peer := &mosiPeer{done: make(chan struct{}), outgoing: newMosiMailbox()}
+	owner.view.Store(&clusterView{members: []clusterMember{owner.self, requester}, links: []*clusterLink{{member: requester, peer: peer}}})
+	origin := &nodeCluster{self: requester}
+	origin.initializeManager()
+	origin.view.Store(&clusterView{links: []*clusterLink{{member: owner.self, peer: peer}}})
+	original := origin.manager.resourceCell(resource)
+	original.ownstate.Initialize(mosi.IO)
+	old, _ := original.ownstate.Request(mosi.M)
+	packet := mosiPacket{Kind: "write", Resource: resource, ID: old.Flight().ID(), Sequence: 8, Boot: requester.Boot}
+	origin.manager.issueAcquisition(original, packet)
+	original.ownstate.Fail(packet.ID, errClusterAcquisitionSuperseded, mosi.M)
+	current, _ := original.ownstate.Request(mosi.M)
+	newRequest := packet
+	newRequest.ID, newRequest.Sequence = current.Flight().ID(), 9
+	origin.manager.issueAcquisition(original, newRequest)
+	r.updateRecord(resource, func(record *replicaRecord) bool {
+		record.Requests = map[string]replicaRequestMark{requester.ID: {Boot: requester.Boot, ID: newRequest.ID, Sequence: 9, Write: true}}
+		return true
+	})
+	if err := r.coordinate(context.Background(), requester.ID, packet); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-peer.outgoing.ready:
+		message := takeMosi(peer.outgoing)
+		if message.Packet == nil || message.Packet.ID != packet.ID || message.Packet.Kind != "failure" || message.Packet.Error != errClusterAcquisitionSuperseded.Error() {
+			t.Fatalf("superseded request did not receive its own terminal reply: %#v", message.Packet)
+		}
+		if err := origin.manager.applyResourcePacket(owner.self.ID, message.Packet); err != nil {
+			t.Fatal(err)
+		}
+	default:
+		t.Fatal("superseded request was silently dropped")
+	}
+	if _, exists := origin.manager.acquisitions[packet.ID]; exists {
+		t.Fatal("terminal failure retained the old protocol capability")
+	}
+	if !origin.manager.issuedAcquisition(original, mosiPacket{ID: newRequest.ID, State: "M"}) {
+		t.Fatal("old failure discarded the newer request")
+	}
+	select {
+	case <-current.Flight().Done():
+		t.Fatal("old failure canceled the newer native acquisition")
+	default:
+	}
+}
