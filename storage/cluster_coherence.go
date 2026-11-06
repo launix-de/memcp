@@ -703,6 +703,20 @@ func (cluster *nodeCluster) installReference(source string, packet mosiPacket) e
 	if cluster.peer(source) == nil {
 		return fmt.Errorf(mosi.NetworkError)
 	}
+	// Epoch, authenticated sender and flight have been checked.
+	// Publish the observed owner version before merging native UUID cells. A
+	// successor may already contain an older invalidation, while this exact
+	// predecessor flight is receiving a newer grant. Merging first would discard
+	// the pending flight and then ACK a grant that could never install. Live
+	// payload decoding itself publishes UUID edges, so do this before decoding.
+	// An older retained read proof does not survive this owner version.
+	if packet.Epoch > record.Epoch {
+		c.ownstate.Publish(mosi.IO)
+		r.updateRecord(packet.Resource, func(current *replicaRecord) bool {
+			current.Epoch = packet.Epoch
+			return true
+		})
+	}
 	db := GetDatabase(packet.Resource.Database)
 	if db == nil && packet.Resource != globalResource {
 		return fmt.Errorf("missing shared database")
@@ -733,20 +747,7 @@ func (cluster *nodeCluster) installReference(source string, packet mosiPacket) e
 			return err
 		}
 	}
-	// Epoch, authenticated sender, flight and content have all been checked.
-	// Publish the observed owner version before merging native UUID cells. A
-	// successor may already contain an older invalidation, while this exact
-	// predecessor flight is receiving a newer grant. Merging first would discard
-	// the pending flight and then ACK a grant that could never install. An older
-	// retained read proof does not survive advancement to this owner version.
-	if packet.Epoch > record.Epoch {
-		c.ownstate.Publish(mosi.IO)
-		r.updateRecord(packet.Resource, func(current *replicaRecord) bool {
-			current.Epoch = packet.Epoch
-			return true
-		})
-	}
-	// Rejected references above leave both lookup and active UUID unchanged.
+	// Only the validated reference may publish its advertised UUID edges.
 	for _, route := range packet.Forwards {
 		r.forwardResource(route.From, route.To)
 	}
