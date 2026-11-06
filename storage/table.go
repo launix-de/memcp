@@ -1157,13 +1157,18 @@ func (t *table) MarshalJSON() ([]byte, error) {
 		PShards            []*storageShard
 		PDimensions        []shardDimension
 	}
-	triggers := t.Triggers
+	// Lazy compilation updates runtime trigger fields under t.mu, independently
+	// of schema ownership. Copy the declarations before encoding outside the lock.
+	t.mu.Lock()
+	triggers := append([]TriggerDescription(nil), t.Triggers...)
+	t.mu.Unlock()
 	if t.schema != nil && sharedClusterDatabase(t.schema.Name) {
 		// Generated computation edges bind a node's private cache objects. The
 		// declarative columns/queries reconstruct them locally; another node must
 		// never replace its source table because these runtime edges differ.
+		snapshot := triggers
 		triggers = nil
-		for _, trigger := range t.Triggers {
+		for _, trigger := range snapshot {
 			if trigger.cacheTarget == nil && trigger.Acquire == nil && !trigger.needsRegeneration {
 				triggers = append(triggers, trigger)
 			}
