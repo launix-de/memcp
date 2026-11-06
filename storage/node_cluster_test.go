@@ -1783,3 +1783,58 @@ func TestClusterSchemaPublicationKeepsRebuildCoordination(t *testing.T) {
 		t.Fatal("native publication did not advance its payload hint")
 	}
 }
+
+func TestClusterRemoteMutationJoinsPendingOwnerGrant(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "t_remote_pending_owner", 4)
+	shard := tbl.ActiveShards()[0]
+	cluster := globalTestCluster(t, tbl.schema.Name)
+	owner := clusterMember{ID: "old-owner", Boot: uuid.NewString()}
+	peer := &mosiPeer{done: make(chan struct{}), outgoing: newMosiMailbox()}
+	cluster.view.Store(&clusterView{members: []clusterMember{cluster.self, owner}, links: []*clusterLink{{member: owner, peer: peer}}})
+	schema := cluster.manager.resourceCell(mosiResource{Database: tbl.schema.Name})
+	schema.ownstate.Initialize(mosi.M)
+	cell := cluster.declareShard(shard, false)
+	cell.ownstate.Initialize(mosi.IO)
+	cell.clusterstate.Initialize(mosi.M)
+	resource := *cell.resource.Load()
+	cluster.manager.updateRecord(resource, func(record *replicaRecord) bool {
+		record.Owner, record.Epoch = owner.ID, 4
+		return true
+	})
+	pending, _ := cell.ownstate.Request(mosi.M)
+	oldMounts := sharedClusterMounts.Swap(&map[string]bool{tbl.schema.Name: true})
+	defer sharedClusterMounts.Store(oldMounts)
+	oldService := nodeScans.Swap(&nodeScanService{cluster: cluster})
+	defer nodeScans.Store(oldService)
+	done := make(chan error, 1)
+	executed := make(chan struct{}, 1)
+	go func() {
+		defer func() {
+			if failure := recover(); failure != nil {
+				done <- fmt.Errorf("pending acquisition failed: %v", failure)
+			}
+		}()
+		done <- withRemoteScanShard(&remoteScanShard{Schema: tbl.filterSchemaFingerprint(), Resource: resource}, nil, true, "coordinator", "", func(*storageShard) error { executed <- struct{}{}; return nil })
+	}()
+	select {
+	case err := <-done:
+		t.Fatalf("pending owner bounced a task back to its grant source: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	if _, err := cell.ownstate.Grant(pending.Flight().ID(), mosi.M, func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("task did not join its existing native grant")
+	}
+	select {
+	case <-executed:
+	default:
+		t.Fatal("granted task did not execute")
+	}
+}

@@ -340,6 +340,10 @@ func withRemoteScanShard(expected *remoteScanShard, tx *TxContext, mutation bool
 			record := r.cluster.report(expected.Resource)
 			phase := mosi.ParsePhase(record.State)
 			local := phase.Readable()
+			// Reports expose retained permission, not an in-flight request.
+			// A recipient already acquiring this generation joins that native
+			// flight below; bouncing it to the old owner creates a false cycle.
+			acquiring := r.resourceCell(record.Resource).ownstate.Phase().Requested()
 			owner := record.Owner
 			if record.Handoff != "" {
 				owner = record.Handoff
@@ -347,7 +351,7 @@ func withRemoteScanShard(expected *remoteScanShard, tx *TxContext, mutation bool
 			// A handover routes to its recipient before the final owner ACK.
 			// The sender can deliberately delegate its own cold payload when it
 			// cannot admit it; other owners must execute at their native boundary.
-			if !local && owner != "" && owner != r.id && owner != sender && owner != acquireFrom {
+			if !local && !acquiring && owner != "" && owner != r.id && owner != sender && owner != acquireFrom {
 				return clusterScanRedirect{Owner: owner, Epoch: record.Epoch, Generation: record.Resource.Shard}
 			}
 		}
