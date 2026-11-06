@@ -1,0 +1,79 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  description: T-SQL database access probes use the authenticated account and native grants
+  syntax: tsql
+  requires_tds: true
+  isolated: true
+setup:
+- scm: (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS dbaccess_reader" nil (newsession) nil))
+- scm: (eval (parse_sql "memcp-tests" "CREATE USER dbaccess_reader IDENTIFIED BY 'pw'" nil (newsession) nil))
+cleanup:
+- scm: (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS dbaccess_reader" nil (newsession) nil))
+test_cases:
+- name: Administrator can access the existing database using mixed case
+  sql: SELECT HAS_DBACCESS(N'MEMCP-TESTS') AS allowed
+  expect: {rows: 1, data: [{allowed: 1}]}
+- name: Invalid and NULL database names return NULL
+  sql: SELECT HAS_DBACCESS(N'dbaccess_missing') AS missing, HAS_DBACCESS(NULL) AS null_name, HAS_DBACCESS(N'') AS empty_name
+  expect: {rows: 1, data: [{missing: null, null_name: null, empty_name: null}]}
+- name: Function accepts a database expression
+  sql: DECLARE @db NVARCHAR(128)=DB_NAME(); SELECT HAS_DBACCESS(@db) AS allowed
+  expect: {rows: 1, data: [{allowed: 1}]}
+- name: Nonadministrator without a grant receives zero
+  username: dbaccess_reader
+  password: pw
+  sql: SELECT HAS_DBACCESS(N'memcp-tests') AS allowed
+  expect: {rows: 1, data: [{allowed: 0}]}
+- name: Nonadministrator cannot claim a grant to an invalid database
+  username: dbaccess_reader
+  password: pw
+  sql: SELECT HAS_DBACCESS(N'dbaccess_missing') AS allowed
+  expect: {rows: 1, data: [{allowed: null}]}
+- name: Grant native database access
+  scm: (eval (parse_sql "memcp-tests" "GRANT ALL ON `memcp-tests`.* TO dbaccess_reader" nil (newsession) nil))
+- name: Cached access probe observes a new grant
+  username: dbaccess_reader
+  password: pw
+  sql: SELECT HAS_DBACCESS(N'memcp-tests') AS allowed
+  expect: {rows: 1, data: [{allowed: 1}]}
+- name: Grant lookup uses the canonical database name
+  username: dbaccess_reader
+  password: pw
+  sql: SELECT HAS_DBACCESS(N'MEMCP-TESTS') AS allowed
+  expect: {rows: 1, data: [{allowed: 1}]}
+- name: Grant to one database does not grant access to the system database
+  username: dbaccess_reader
+  password: pw
+  sql: SELECT HAS_DBACCESS(N'system') AS allowed
+  expect: {rows: 1, data: [{allowed: 0}]}
+- name: TDS access result is declared INT
+  tds:
+    statements:
+    - sql: SELECT HAS_DBACCESS(N'MEMCP-TESTS') AS allowed
+      expect:
+        rows: 1
+        data: [{allowed: 1}]
+        column_types: [{name: allowed, type: INT}]
+    - sql: SELECT HAS_DBACCESS(NULL) AS allowed
+      expect:
+        rows: 1
+        data: [{allowed: null}]
+        column_types: [{name: allowed, type: INT}]
+- name: Revoke native database access
+  scm: (eval (parse_sql "memcp-tests" "REVOKE ALL ON `memcp-tests`.* FROM dbaccess_reader" nil (newsession) nil))
+- name: Cached access probe observes revocation
+  username: dbaccess_reader
+  password: pw
+  sql: SELECT HAS_DBACCESS(N'memcp-tests') AS allowed
+  expect: {rows: 1, data: [{allowed: 0}]}
+- name: Administrator query does not reuse another users denied result
+  sql: SELECT HAS_DBACCESS(N'memcp-tests') AS allowed
+  expect: {rows: 1, data: [{allowed: 1}]}
+- name: Database name argument is required
+  sql: SELECT HAS_DBACCESS() AS allowed
+  expect: {error: true}
+- name: Additional arguments are rejected
+  sql: SELECT HAS_DBACCESS(N'memcp-tests',N'root') AS allowed
+  expect: {error: true}

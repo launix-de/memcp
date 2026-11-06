@@ -352,3 +352,40 @@ func TestPersistedTableCallABIUpgradeRejectsAmbiguousRebinding(t *testing.T) {
 		(table 1 2)))`, true)
 	requirePanic(t, func() { upgradePersistedTableCalls(original) })
 }
+
+// Point lookup must not load database/table contents or freeze a DDL-sensitive
+// answer while compiling a constant-name expression.
+func TestDatabaseNameBuiltinUsesPublishedDirectory(t *testing.T) {
+	Init(scm.Globalenv)
+	const name = "DatabaseNameProbe"
+	previous := databases.Get(name)
+	t.Cleanup(func() {
+		databases.Remove(name)
+		if previous != nil {
+			databases.Set(name, previous)
+		}
+	})
+	databases.Remove(name)
+	expression := scm.Optimize(scm.Read(t.Name(), `(database_name "DATABASENAMEPROBE" true)`, true), &scm.Globalenv, nil)
+	if !scm.Eval(expression, &scm.Globalenv).IsNil() {
+		t.Fatal("missing database did not return nil")
+	}
+	db := newDatabase()
+	db.Name = name
+	// No persistence backend: any attempt to load this schema would panic.
+	databases.Set(name, db)
+	if got := scm.Eval(expression, &scm.Globalenv); got.String() != name {
+		t.Fatalf("lookup after publication = %v, want %s", got, name)
+	}
+	lookup := scm.Globalenv.Vars["database_name"]
+	if got := scm.Apply(lookup, scm.NewString(name)); got.String() != name {
+		t.Fatalf("exact lookup = %v, want %s", got, name)
+	}
+	if !scm.Apply(lookup, scm.NewString("DATABASENAMEPROBE")).IsNil() {
+		t.Fatal("exact lookup ignored case without being asked")
+	}
+	databases.Remove(name)
+	if !scm.Eval(expression, &scm.Globalenv).IsNil() {
+		t.Fatal("compiled lookup retained a dropped database")
+	}
+}

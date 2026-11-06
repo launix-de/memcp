@@ -994,6 +994,26 @@ func Init(en scm.Env) {
 	})
 
 	scm.Declare(&en, &scm.Declaration{
+		Name: "database_name",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			db := GetDatabase(a[0].String(), len(a) > 1 && a[1].Bool())
+			if db == nil {
+				return scm.NewNil()
+			}
+			return scm.NewString(db.Name)
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "resolve a database identifier to its canonical name, or nil; reads published metadata without loading the schema",
+			// DDL changes lookup results; cached code must not fold this read.
+			HasSideEffects: true,
+			Params: []*scm.TypeDescriptor{
+				{Kind: "string", Label: "name"},
+				{Kind: "bool", Label: "ignore_case", Optional: true},
+			},
+			Return: &scm.TypeDescriptor{Kind: "string"},
+		},
+	})
+
+	scm.Declare(&en, &scm.Declaration{
 		Name: "table",
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {

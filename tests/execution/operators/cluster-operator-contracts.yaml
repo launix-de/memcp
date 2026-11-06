@@ -23,6 +23,15 @@ metadata:
     storage_bandwidth_mbps: 1000
     storage_latency_ms: 5
 test_cases:
+- name: tsql-database-access-probe-survives-delegation
+  syntax: tsql
+  sql: >-
+    SELECT id,HAS_DBACCESS(CASE WHEN id=0 THEN UPPER(DB_NAME())
+    WHEN id=1 THEN N'dbaccess_missing' ELSE NULL END) AS allowed
+    FROM big_items WHERE id<3 ORDER BY id
+  expect:
+    data: [{id: 0, allowed: 1}, {id: 1, allowed: null}, {id: 2, allowed: null}]
+    cluster: {min_remote_shards: 1}
 # Search probes use the original fixture, before the bulk DELETE cases below.
 - name: boolean-fulltext-filter-and-score
   sql: >-

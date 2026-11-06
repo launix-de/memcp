@@ -5,6 +5,22 @@ SPDX-License-Identifier: GPL-3.0-or-later */
 (define tsql_queryplan_cache (newcachemap))
 (define tsql_statement_text strtrim)
 
+/* Database access probes use the authenticated invocation identity and the
+same native account/grant lookups as sql_policy. Keep the probe at execution
+time so cached statements observe grants and revocations. */
+(define tsql_has_dbaccess (lambda (name username)
+	(if (nil? name) nil (begin
+		(define database (database_name name true))
+		(if (nil? database) nil (begin
+			(define is_admin (scan_lookup nil (table "system" false "user" false)
+				(list 372734710317056 (scan_boundary "equal" "username" 0 0 true true "" false) "admin") (list username)))
+			(if is_admin 1
+				(scan_lookup nil (table "system" false "access" false)
+					(list 371635467059200
+						(scan_boundary "equal" "username" 0 0 true true "" false)
+						(scan_boundary "equal" "database" 1 1 true true "" false)) (list username database)) 1
+				0)))))))
+
 /* Alias declarations are ordinary, durable frontend data, like SQL views.
 The native column keeps the qualified alias spelling in its existing RawType.
 Only this frontend interprets the declaration; storage has no alias registry. */
