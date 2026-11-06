@@ -291,10 +291,11 @@ func (cluster *nodeCluster) locate(ctx context.Context, resource mosiResource) (
 				content, contentEpoch, liveContent = record.Content, record.Epoch, record.State == "S"
 			}
 		}
-		if resource.Shard != "" && content != "" && content != resource.Shard {
+		if resource.Shard != "" && content != "" {
 			// The schema checkpoint may predate the owner's last rebuild. The
 			// completed live proof authorizes its current reference, not the old
-			// checkpoint. Install only the native cold binding before granting M/O;
+			// checkpoint. A canonical UUID route does not prove that its native
+			// generation is installed. Bind the proven content before granting M/O;
 			// column loading and WAL replay still use ordinary GetRead/GetWrite.
 			db := GetDatabase(resource.Database)
 			if db == nil {

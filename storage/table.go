@@ -955,11 +955,24 @@ func (t *table) publishTopologyLocked() *tableShardTopology {
 			shard.generation.Store(topology)
 			if cell := shard.coherence.Load(); cell != nil {
 				cell = cell.resolved()
-				previous := cell.current.Load()
-				if previous != nil && previous != shard && previous.loadNext() == shard {
-					cell.retainShard(previous)
-					if r := activeReplication(t.schema); r != nil && validReplicaDatabase(t.schema.Name) {
-						r.forwardResource(*cell.resource.Load(), mosiResource{Database: t.schema.Name, Table: t.Name, Shard: shard.uuid.String()})
+				if previous := cell.current.Load(); previous != nil && previous != shard {
+					// The payload hint can lag a preceding import's topology swap.
+					// Publish every native successor, including an intermediate
+					// rebuild retained by a concurrent invocation.
+					previous = cell.publishedShard()
+					for previous != nil && previous != shard {
+						next := previous.loadNext()
+						if next == nil || !previous.nextReady.Load() {
+							break
+						}
+						cell = cell.resolved()
+						cell.retainShard(previous)
+						if r := activeReplication(t.schema); r != nil && validReplicaDatabase(t.schema.Name) {
+							target := r.shardResource(next)
+							r.forwardResource(*cell.resource.Load(), target)
+							r.forwardResource(r.shardResource(previous), target)
+						}
+						previous = next
 					}
 				}
 			}
@@ -997,7 +1010,7 @@ func (t *table) publishTopologyLocked() *tableShardTopology {
 		if shard != nil {
 			if cell := shard.coherence.Load(); cell != nil {
 				cell = cell.resolved()
-				if source := cell.current.Load(); source != nil && source != shard && source.loadNext() == shard {
+				if source := cell.current.Load(); source != shard {
 					cell.current.CompareAndSwap(source, shard)
 				}
 			}

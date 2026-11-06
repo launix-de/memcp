@@ -1493,6 +1493,14 @@ func TestClusterColdPlacementExcludesRefusedOwner(t *testing.T) {
 }
 
 func TestClusterShardRecoveryRestoresCurrentContentFromOlderSchema(t *testing.T) {
+	for _, variant := range []string{"older-resource-uuid", "already-canonical-resource-uuid", "unbound-canonical-resource-uuid"} {
+		t.Run(variant, func(t *testing.T) {
+			testClusterShardRecoveryContent(t, variant)
+		})
+	}
+}
+
+func testClusterShardRecoveryContent(t *testing.T, variant string) {
 	tbl, _ := createDurabilityTestTable(t, "t_cluster_recover_current_content", 4)
 	RebuildTable(tbl, true, false)
 	checkpoint, err := json.Marshal(tbl)
@@ -1527,6 +1535,15 @@ func TestClusterShardRecoveryRestoresCurrentContentFromOlderSchema(t *testing.T)
 	cluster.view.Store(&clusterView{members: []clusterMember{cluster.self, {ID: reader}}, links: []*clusterLink{{member: clusterMember{ID: reader}, peer: peer}}})
 	resource := mosiResource{Database: tbl.schema.Name, Table: tbl.Name, Shard: oldID.String()}
 	cell := cluster.manager.shardCell(restored.ActiveShards()[0])
+	if variant != "older-resource-uuid" {
+		successor := resource
+		successor.Shard = content
+		cluster.manager.forwardResource(resource, successor)
+		resource = successor
+		if variant == "unbound-canonical-resource-uuid" {
+			cell.current.Store(nil)
+		}
+	}
 	cluster.manager.updateRecord(resource, func(record *replicaRecord) bool {
 		record.Owner, record.Epoch, record.Content = self, 3, oldID.String()
 		return true
@@ -1572,5 +1589,54 @@ func TestClusterShardRecoveryRestoresCurrentContentFromOlderSchema(t *testing.T)
 	}
 	if restored.CountExact() != 5 {
 		t.Fatal("recovery lost the row absent from the older checkpoint")
+	}
+}
+
+func TestClusterTopologyPublishesEveryRebuildSuccessor(t *testing.T) {
+	for _, imported := range []bool{false, true} {
+		name := "rebuild-chain"
+		if imported {
+			name = "import-with-lagging-payload-hint"
+		}
+		t.Run(name, func(t *testing.T) {
+			tbl := setupScanParallelTestTable(t, "t_cluster_rebuild_chain_publication")
+			source := tbl.ActiveShards()[0]
+			// Successors are private generations, not independently declared M owners.
+			middle, last := NewShard(tbl), NewShard(tbl)
+			cluster := globalTestCluster(t, tbl.schema.Name)
+			mounts := sharedClusterMounts.Swap(&map[string]bool{tbl.schema.Name: true})
+			defer sharedClusterMounts.Store(mounts)
+			service := nodeScans.Swap(&nodeScanService{cluster: cluster})
+			defer nodeScans.Store(service)
+			cell := cluster.declareShard(source, true)
+			middle.coherence.Store(cell)
+			last.coherence.Store(cell)
+			if imported {
+				if err := cluster.manager.replaceShard(cluster.manager.shardResource(source), source, middle); err != nil {
+					t.Fatal(err)
+				}
+				// Import publishes topology before its caller advances this advisory
+				// hint. A following rebuild must start at the published generation.
+				cell.current.Store(source)
+			} else {
+				source.next.Store(middle)
+				source.nextReady.Store(true)
+			}
+			middle.next.Store(last)
+			middle.nextReady.Store(true)
+			tbl.mu.Lock()
+			tbl.Shards = []*storageShard{last}
+			tbl.publishTopologyLocked()
+			tbl.mu.Unlock()
+			for _, shard := range []*storageShard{source, middle, last} {
+				resource := cluster.manager.shardResource(shard)
+				if found := cluster.manager.lookupCell(resource); found != cell {
+					t.Errorf("published native UUID %s has no shared authority: %p, want %p", shard.uuid, found, cell)
+				}
+			}
+			if cell.current.Load() != last || cell.resource.Load().Shard != last.uuid.String() {
+				t.Fatal("topology publication did not advance its native authority")
+			}
+		})
 	}
 }
