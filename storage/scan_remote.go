@@ -543,13 +543,15 @@ func (origin *peerScanExecutor) ExecuteShardScan(resource mosiResource, invocati
 	}
 	task.Access.Mutation = task.Access.Mutation || scanMutates(invocation.callbackCols) || invocation.operator == shardUniqueAdmit
 	if invocation.tx != nil {
-		// Export only unmodified remote inputs. A modified generation is kept
-		// resident by native TX pins and must execute at its participant; a cold
-		// path must not silently drop its private delete/undelete overlay.
-		if db := GetDatabase(resource.Database); db != nil {
-			if r := activeReplication(db); r != nil {
-				if shard := r.findShard(resource); shard != nil && invocation.tx.getShardTx(shard) != nil {
-					panic("remote modified input requires its transaction participant")
+		// Physical scans must retain a modified generation's row visibility.
+		// UNIQUE key-domain operations address the current native participant
+		// through Transaction below, without transmitting physical input IDs.
+		if invocation.operator < shardUniqueProbe {
+			if db := GetDatabase(resource.Database); db != nil {
+				if r := activeReplication(db); r != nil {
+					if shard := r.findShard(resource); shard != nil && invocation.tx.getShardTx(shard) != nil {
+						panic("remote modified input requires its transaction participant")
+					}
 				}
 			}
 		}

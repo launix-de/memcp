@@ -2054,3 +2054,82 @@ func TestClusterSupersededAcquisitionCompletesProtocolCapability(t *testing.T) {
 	default:
 	}
 }
+
+func TestClusterLocationReplyRefreshesRequestedAlias(t *testing.T) {
+	for _, scenario := range []struct{ newer, granted bool }{{false, false}, {true, false}, {true, true}} {
+		t.Run(fmt.Sprint("newer=", scenario.newer, "/native-grant=", scenario.granted), func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			service := &nodeScanService{}
+			cluster := &nodeCluster{self: clusterMember{ID: "requester"}, service: service, ctx: ctx}
+			cluster.initializeManager()
+			var links []*clusterLink
+			for _, id := range []string{"schema-owner", "old-owner", "current-owner", "newest-owner"} {
+				peer := &mosiPeer{ctx: ctx, done: make(chan struct{}), outgoing: newMosiMailbox(), scanService: service}
+				links = append(links, &clusterLink{member: clusterMember{ID: id}, peer: peer})
+			}
+			cluster.view.Store(&clusterView{links: links})
+			r := cluster.manager
+			from := mosiResource{Database: "location_reply", Table: "items", Shard: uuid.NewString()}
+			to := from
+			to.Shard = uuid.NewString()
+			r.resourceCell(mosiResource{Database: from.Database}).ownstate.Initialize(mosi.IO)
+			r.updateRecord(mosiResource{Database: from.Database}, func(record *replicaRecord) bool { record.Owner = links[0].member.ID; return true })
+			original := r.resourceCell(from)
+			phase := mosi.IO
+			if scenario.granted {
+				phase = mosi.S
+			}
+			original.ownstate.Initialize(phase)
+			r.updateRecord(from, func(record *replicaRecord) bool {
+				record.Owner, record.Epoch, record.State = links[1].member.ID, 3, phase.String()
+				return true
+			})
+			want, epoch := links[2].member.ID, uint64(4)
+			if scenario.newer {
+				cluster.installLocationHint(replicaRecord{Resource: to, Owner: links[3].member.ID, Epoch: 7, Content: to.Shard})
+				want, epoch = links[3].member.ID, 7
+			}
+			done := make(chan error, 1)
+			go func() {
+				owner, err := cluster.locateViaSchema(ctx, from)
+				if err == nil && owner != want {
+					err = fmt.Errorf("resolved owner %s, want %s", owner, want)
+				}
+				done <- err
+			}()
+			select {
+			case <-links[0].peer.outgoing.ready:
+				message := takeMosi(links[0].peer.outgoing)
+				var request struct {
+					Return, Method string
+					Data           []byte
+				}
+				if err := unmarshalNode(message.Data, &request); err != nil || request.Method != "cluster.location" {
+					t.Fatal("invalid location request", err)
+				}
+				entry, _ := service.handles.Load(controlReturnSlot(request.Return))
+				deliverTestCompletion(t, entry, scanCompletion{Data: mustNodeMetadata(replicaRecord{Resource: to, Owner: links[2].member.ID, Epoch: 4, Content: to.Shard})})
+			case <-ctx.Done():
+				t.Fatal(ctx.Err())
+			}
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+			lookupWant, content := want, to.Shard
+			if scenario.granted {
+				lookupWant, epoch, content = links[1].member.ID, 3, ""
+			}
+			owner, err := cluster.locate(ctx, from)
+			if err != nil || owner != lookupWant {
+				t.Fatalf("next owner grouping reused stale alias owner: %s, %v; want %s", owner, err, lookupWant)
+			}
+			if record := cluster.report(from); record.Epoch != epoch || record.Content != content {
+				t.Fatal("alias lost the accepted canonical publication", record)
+			}
+			if original.resolved() != original || r.lookupCell(to) == original || *original.resource.Load() != from || original.ownstate.Phase() != phase || r.lookupCell(to).ownstate.Phase() != mosi.IO {
+				t.Fatal("a routing hint merged cells or granted native rights")
+			}
+		})
+	}
+}

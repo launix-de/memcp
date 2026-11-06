@@ -25,6 +25,7 @@ import "net/http/httptest"
 import "github.com/google/uuid"
 import "github.com/gorilla/websocket"
 import "github.com/launix-de/memcp/scm"
+import "github.com/launix-de/memcp/storage/mosi"
 
 const testScanSecret = "scan-test-secret-32-bytes-constant"
 
@@ -1749,5 +1750,82 @@ func TestRemoteControlHandlesCrossReplayWindow(t *testing.T) {
 		if err := client.control(ctx, peer, "scan.describe", remoteScanDescribe{scanWireVersion, tbl.schema.Name, tbl.Name}, &parts, true); err != nil {
 			t.Fatalf("control %d after handle boundary/replay pruning: %v", index, err)
 		}
+	}
+}
+
+func TestRemoteUniqueOperationsUseCurrentTransactionParticipant(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "t_unique_native_participant", 3)
+	tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	cluster := globalTestCluster(t, tbl.schema.Name)
+	cluster.ctx, cluster.cancel = ctx, cancel
+	service := &nodeScanService{id: cluster.self.Boot, cluster: cluster}
+	cluster.service = service
+	service.objectRegistry().endpoint = "http://127.0.0.1/cluster"
+	t.Cleanup(service.stop)
+	oldService := nodeScans.Swap(service)
+	defer nodeScans.Store(oldService)
+	mounts := sharedClusterMounts.Swap(&map[string]bool{tbl.schema.Name: true})
+	defer sharedClusterMounts.Store(mounts)
+	cluster.manager.resourceCell(mosiResource{Database: tbl.schema.Name}).ownstate.Initialize(mosi.M)
+	shard := tbl.ActiveShards()[0]
+	cluster.declareShard(shard, true)
+	tx := NewTxContext(TxCursorStability)
+	defer tx.Rollback()
+	tbl.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(42)}}, nil, scm.NewNil(), false, nil, tx)
+	if tx.getShardTx(shard) == nil {
+		t.Fatal("fixture did not modify its native participant")
+	}
+	peer := &mosiPeer{ctx: ctx, done: make(chan struct{}), outgoing: newMosiMailbox(), scanService: service, objectPeer: clusterObjectPeer{ID: "peer", Boot: "boot"}}
+	expected := remoteScanShard{Schema: tbl.filterSchemaFingerprint(), Resource: cluster.manager.shardResource(shard)}
+	for _, operator := range []shardScanOperator{shardUniqueProbe, shardUniqueReserve, shardUniqueAdmit} {
+		done := make(chan any, 1)
+		go func() {
+			defer func() { done <- recover() }()
+			executor := peerScanExecutor{peer: peer, ctx: ctx, prepared: expected}
+			executor.ExecuteShardScan(expected.Resource, shardScanInvocation{operator: operator, tx: tx})
+		}()
+		answered := false
+		for !answered {
+			select {
+			case failure := <-done:
+				t.Fatalf("native participant operation rejected before dispatch: %v", failure)
+			case <-peer.outgoing.ready:
+				message := takeMosi(peer.outgoing)
+				if message.Method != "node.control" {
+					continue
+				}
+				var envelope struct {
+					Return, Method string
+					Data           []byte
+				}
+				if err := unmarshalNode(message.Data, &envelope); err != nil || envelope.Method != "scan.execute" {
+					t.Fatal("invalid native request", err)
+				}
+				var task remoteScanTask
+				if err := unmarshalNode(envelope.Data, &task); err != nil || task.Transaction == nil || task.Input != nil || task.Operator != operator {
+					t.Fatal("operation lost its native transaction identity", err)
+				}
+				entry, _ := service.handles.Load(controlReturnSlot(envelope.Return))
+				deliverTestCompletion(t, entry, scanCompletion{Data: mustNodeMetadata(remoteScanResult{Version: scanWireVersion, Shard: expected, Value: []byte("false")})})
+				answered = true
+			case <-ctx.Done():
+				t.Fatal(ctx.Err())
+			}
+		}
+		if failure := <-done; failure != nil {
+			t.Fatal(failure)
+		}
+	}
+	// Ordinary scan input still requires its retained generation contract.
+	var failure any
+	func() {
+		defer func() { failure = recover() }()
+		executor := peerScanExecutor{peer: peer, ctx: ctx, prepared: expected}
+		executor.ExecuteShardScan(expected.Resource, shardScanInvocation{operator: shardExists, tx: tx})
+	}()
+	if failure == nil || !strings.Contains(fmt.Sprint(failure), "modified input requires its transaction participant") {
+		t.Fatal("ordinary physical input bypassed generation validation", failure)
 	}
 }
