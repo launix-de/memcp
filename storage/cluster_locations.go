@@ -212,6 +212,20 @@ func (cluster *nodeCluster) locateViaSchema(ctx context.Context, resource mosiRe
 	// The hint may have lost to a newer native owner or an active acquisition.
 	// Route through the accepted publication, never the rejected wire value.
 	record = cluster.report(record.Resource)
+	if record.Resource != resource {
+		// A direct lookup can return a rebuild successor. Retain the accepted
+		// URI/epoch for the requested alias too; otherwise the next owner group
+		// repeats its stale route despite a successful admission. This is only
+		// a location hint, never UUID forwarding or a native permission grant.
+		alias := locationRecord(record)
+		alias.Resource = resource
+		if record.State == "M" || record.State == "O" {
+			alias.Owner = cluster.self.ID
+		}
+		if alias.Owner != "" {
+			cluster.installLocationHint(alias)
+		}
+	}
 	if record.State == "M" || record.State == "O" {
 		return cluster.self.ID, nil
 	}

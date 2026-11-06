@@ -1463,8 +1463,13 @@ func TestReplicationCheckpointRoutesBeforeActivePublication(t *testing.T) {
 	tbl.publishSchemaTopology(ShardModeFree, tbl.Shards, tbl.PDimensions)
 	tbl.mu.Unlock()
 	tbl.schema.save()
-	if r.lookupCell(r.shardResource(successor)) != nil {
-		t.Fatal("fixture already published runtime forwarding")
+	// Schema publication itself must establish the route, before capture can
+	// advertise it or another peer can declare an independent successor cell.
+	if r.lookupCell(r.shardResource(successor)) != cell || r.resourceKey(resource) != r.shardResource(successor).key() {
+		t.Fatal("checkpoint exposed its successor before binding native authority")
+	}
+	if cell.current.Load() != source || tbl.ActiveShards()[0] != source {
+		t.Fatal("checkpoint prematurely replaced the active native generation")
 	}
 	transfer, err := r.captureResource(mosiResource{Database: tbl.schema.Name}, "")
 	if err != nil {
@@ -2069,5 +2074,46 @@ func TestMosiDeclarationOwnsItsBytesBeforeTask(t *testing.T) {
 	peer.workers.Wait()
 	if !<-checked {
 		t.Fatal("task borrowed the old frame or overtook its declaration")
+	}
+}
+
+func TestReplicationDeclarationIgnoresMaterializedColumnAddExtents(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "t_replica_add_extent_identity", 3)
+	tbl.CreateColumn("counter", "INT", nil, []scm.Scmer{scm.NewString("default"), scm.NewInt(0)})
+	encoded, err := json.Marshal(tbl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var incoming table
+	if err := json.Unmarshal(encoded, &incoming); err != nil {
+		t.Fatal(err)
+	}
+	incoming.schema = tbl.schema
+	for _, shard := range incoming.Shards {
+		shard.t = &incoming
+	}
+	if len(incoming.Columns[len(incoming.Columns)-1].InitialValues) == 0 {
+		t.Fatal("fixture omitted ADD recovery extents")
+	}
+	r := replicaRecoveryFixture()
+	previous := replication.Swap(r)
+	defer replication.Store(previous)
+	r.declareShard(tbl.ActiveShards()[0], r.id, true)
+	RebuildTable(tbl, true, false)
+	current := tbl.ActiveShards()[0]
+	if !r.sameReplicaDeclaration(tbl, &incoming) {
+		t.Error("materializing ADD recovery extents changed logical declaration identity")
+	}
+	incoming.Shards = append(incoming.Shards, NewShard(&incoming))
+	incoming.publishTopologyLocked()
+	if merged, err := r.mergeClusterInsertTopology(tbl, &incoming); !merged || err != nil {
+		t.Fatalf("writer lane import replaced an unchanged declaration: merged=%v err=%v", merged, err)
+	}
+	if tbl.ActiveShards()[0] != current {
+		t.Fatal("writer lane import replaced the native payload")
+	}
+	incoming.Columns[len(incoming.Columns)-1].Default = scm.NewInt(1)
+	if r.sameReplicaDeclaration(tbl, &incoming) {
+		t.Fatal("changed SQL default was mistaken for physical materialization")
 	}
 }

@@ -260,6 +260,29 @@ func (service *nodeScanService) accept(w http.ResponseWriter, req *http.Request)
 	<-peer.readDone
 }
 func (service *nodeScanService) connect(ctx context.Context, address string) (*mosiPeer, string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, "", err
+	}
+	endpoint, err := mosiEndpointURL(address)
+	if err != nil {
+		return nil, "", err
+	}
+	// A successful dial publishes a shared service connection. Reuse it for
+	// later setup/release work instead of accumulating per-call transports.
+	service.mu.Lock()
+	if !service.stopping {
+		for peer := range service.peers {
+			if peer.objectEndpoint == endpoint {
+				select {
+				case <-peer.done:
+				default:
+					service.mu.Unlock()
+					return peer, peer.objectPeer.ID, nil
+				}
+			}
+		}
+	}
+	service.mu.Unlock()
 	if !service.beginConnection() {
 		return nil, "", fmt.Errorf("node stopping")
 	}
@@ -269,10 +292,6 @@ func (service *nodeScanService) connect(ctx context.Context, address string) (*m
 			service.connections.Done()
 		}
 	}()
-	endpoint, err := mosiEndpointURL(address)
-	if err != nil {
-		return nil, "", err
-	}
 	dialer := *websocket.DefaultDialer
 	dialer.Subprotocols = []string{mosiSubprotocol}
 	conn, response, err := dialer.DialContext(ctx, endpoint, http.Header{"X-Memcp-Role": []string{"scan"}})
@@ -315,6 +334,12 @@ func (service *nodeScanService) connect(ctx context.Context, address string) (*m
 		return nil, "", fmt.Errorf("node stopping")
 	}
 	handedOff = true
+	// Publication in service.peers makes this connection available to every
+	// native handle caller. Its lifetime belongs to the service, not the dialer.
+	go func() {
+		<-peer.readDone
+		service.forget(peer)
+	}()
 	return peer, remoteID, nil
 }
 
@@ -354,10 +379,12 @@ func (service *nodeScanService) authNodeID() string {
 }
 
 func StopNodeScans() {
-	service := nodeScans.Load()
-	if service == nil {
-		return
+	if service := nodeScans.Load(); service != nil {
+		service.stop()
 	}
+}
+
+func (service *nodeScanService) stop() {
 	if service.cluster != nil {
 		service.cluster.cancel()
 	}
@@ -368,7 +395,9 @@ func StopNodeScans() {
 		peers = append(peers, peer)
 	}
 	service.mu.Unlock()
-	service.release()
+	if service.release != nil {
+		service.release()
+	}
 	for _, peer := range peers {
 		peer.close()
 	}

@@ -877,3 +877,42 @@ func TestDropColumnLifecycleReleasesDDLOwnership(t *testing.T) {
 		})
 	}
 }
+
+func TestTriggerCompilationConcurrentSchemaSnapshot(t *testing.T) {
+	tbl := setupScanParallelTestTable(t, "t_trigger_compilation_snapshot")
+	const count = 128
+	const source = "(lambda (OLD NEW) NEW)"
+	for i := 0; i < count; i++ {
+		tbl.AddTrigger(TriggerDescription{
+			Name: fmt.Sprintf("lazy_%d", i), Timing: BeforeUpdate,
+			Language: "scheme", Source: source,
+			FuncPlan: scm.Read("lazy snapshot trigger", source, true),
+		})
+	}
+	start, done := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		<-start
+		tbl.GetTriggers(BeforeUpdate)
+	}()
+	defer func() { <-done }()
+	close(start)
+	for i := 0; i < 64; i++ {
+		encoded, err := json.Marshal(tbl)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var saved struct{ Triggers []map[string]json.RawMessage }
+		if err := json.Unmarshal(encoded, &saved); err != nil {
+			t.Fatal(err)
+		}
+		if len(saved.Triggers) != count {
+			t.Fatalf("schema lost trigger declarations: %d", len(saved.Triggers))
+		}
+		for _, trigger := range saved.Triggers {
+			if string(trigger["source"]) != `"`+source+`"` || trigger["func"] != nil {
+				t.Fatalf("compiled runtime state replaced the durable definition: %s", encoded)
+			}
+		}
+	}
+}

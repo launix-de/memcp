@@ -62,9 +62,10 @@ type liveGrainHeader struct {
 	Overlays         int
 }
 type liveOverlayHeader struct {
-	Tx          scm.ClusterReference
-	Depth       uint32
-	Repartition []uint32
+	Tx            scm.ClusterReference
+	Depth         uint32
+	DecisionToken string
+	Repartition   []uint32
 }
 
 func (r *replicationManager) captureLiveShard(cell *replicaCell, current *storageShard) (capture *liveShardTransfer, err error) {
@@ -385,7 +386,7 @@ func (capture *liveShardTransfer) write(writer io.Writer) error {
 	if err := encode.Encode(struct {
 		Version     int
 		Generations int
-	}{2, len(capture.shards)}); err != nil {
+	}{3, len(capture.shards)}); err != nil {
 		return err
 	}
 	for _, shard := range capture.shards {
@@ -461,7 +462,12 @@ func (capture *liveShardTransfer) write(writer io.Writer) error {
 			}
 			capture.offers = append(capture.offers, ref)
 			tx.mu.Lock()
-			meta := liveOverlayHeader{Tx: ref, Depth: tx.Depth}
+			// The capability belongs to this native participant's lifetime.
+			// Existing handles continue through forwarding after a handover.
+			if st.decisionToken == "" {
+				st.decisionToken = uuid.NewString()
+			}
+			meta := liveOverlayHeader{Tx: ref, Depth: tx.Depth, DecisionToken: st.decisionToken}
 			for _, action := range tx.repartitionDeletes {
 				if action.shard == shard {
 					meta.Repartition = append(meta.Repartition, action.oldRecid)
@@ -554,7 +560,7 @@ func (cluster *nodeCluster) installLiveShard(cell *replicaCell, packet mosiPacke
 	if err := readLiveRecord(reader, &stream); err != nil {
 		return err
 	}
-	if stream.Version != 2 || stream.Generations < 1 {
+	if stream.Version != 3 || stream.Generations < 1 {
 		return fmt.Errorf("invalid live shard header")
 	}
 	db := databases.Get(packet.Resource.Database)
@@ -665,12 +671,15 @@ func (cluster *nodeCluster) installLiveShard(cell *replicaCell, packet mosiPacke
 			if err := readLiveRecord(reader, &meta); err != nil {
 				return err
 			}
+			if meta.DecisionToken == "" {
+				return fmt.Errorf("live overlay omitted its decision capability")
+			}
 			value, err := cluster.service.importObject(peer.ctx, peer, meta.Tx)
 			if err != nil {
 				return err
 			}
 			tx := value.Any().(*TxContext)
-			st := &storageShardTransaction{clusterShard: shard, transaction: tx.transactionState, clusterTxID: tx.ClusterObjectID(), shardUUID: id, readOnly: !owned}
+			st := &storageShardTransaction{clusterShard: shard, transaction: tx.transactionState, clusterTxID: tx.ClusterObjectID(), shardUUID: id, readOnly: !owned, decisionToken: meta.DecisionToken}
 			st.InsertRecids, err = readLiveJournal(reader, &st.InsertMask)
 			if err != nil {
 				return err
@@ -733,7 +742,6 @@ func (cluster *nodeCluster) installLiveShard(cell *replicaCell, packet mosiPacke
 		// state. From here it must survive even a lost subsequent grant/ACK.
 		complete = true
 		for _, st := range overlays {
-			st.decisionToken = uuid.NewString()
 			view := scm.NewSlice([]scm.Scmer{scm.NewString(st.shardUUID.String()), scm.NewString(st.clusterTxID), scm.NewString(cluster.self.ID)})
 			ref, err := cluster.service.exportObject(peer, st, view)
 			if err != nil {

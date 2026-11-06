@@ -21,14 +21,36 @@ func (r *replicationManager) acceptGrant(packet mosiPacket) error {
 	c := r.resourceCell(packet.Resource)
 	c.acquire.Lock()
 	defer c.acquire.Unlock()
-	return r.grantAcquired(c, packet)
+	if err := r.grantAcquired(c, packet); err != nil {
+		return err
+	}
+	r.finishAcquisition(packet)
+	return nil
 }
 
 // The caller owns this cell's inbound publication boundary. Cluster references
 // install data and publish the matching grant before acknowledging the owner.
 func (r *replicationManager) grantAcquired(c *replicaCell, packet mosiPacket) error {
+	c = c.resolved()
+	phase := mosi.ParsePhase(packet.State)
+	if !phase.Readable() {
+		return fmt.Errorf("invalid MOSI grant")
+	}
 	publication := c.ownstate.Snapshot()
-	if r.cluster != nil && packet.State == "S" && publication.Phase() == mosi.MR && publication.Flight().ID() == packet.ID {
+	grantID, ready := packet.ID, false
+	if r.cluster != nil && r.issuedAcquisition(c, packet) {
+		// A reply for a predecessor flight proves rights for this same native
+		// resource. UUID folding changes its waiter, never the wire operation.
+		if !publication.Phase().Requested() {
+			var action mosi.Action
+			publication, action = c.ownstate.Request(phase)
+			ready = action == mosi.Ready
+		}
+		if publication.Phase().Requested() {
+			grantID = publication.Flight().ID()
+		}
+	}
+	if r.cluster != nil && packet.State != "M" && publication.Phase() == mosi.MR && publication.Flight().ID() == grantID {
 		// A read grant superseded by this flight's write upgrade still proves
 		// the reader epoch registered by its owner. Keep that control metadata
 		// so a subsequent invalidation can revoke the registered reader; never
@@ -42,7 +64,7 @@ func (r *replicationManager) grantAcquired(c *replicaCell, packet mosiPacket) er
 		})
 		return nil
 	}
-	_, err := c.ownstate.Grant(packet.ID, mosi.ParsePhase(packet.State), func() error {
+	install := func() error {
 		r.mu.Lock()
 		current := r.directory.Records[r.resourceKey(packet.Resource)]
 		r.mu.Unlock()
@@ -65,9 +87,15 @@ func (r *replicationManager) grantAcquired(c *replicaCell, packet mosiPacket) er
 		// Publish outward permission before Grant wakes local query/write waiters.
 		// A future delegating slave must grant its own descendants through their
 		// directory; it must never treat this outer M as unconditional local M.
-		c.clusterstate.Publish(mosi.ParsePhase(packet.State))
+		c.clusterstate.Publish(phase)
 		return nil
-	})
+	}
+	if ready && publication.Phase() == phase {
+		// A second queued wire request may confirm rights already obtained
+		// through its predecessor. Its newer directory epoch still matters.
+		return install()
+	}
+	_, err := c.ownstate.Grant(grantID, phase, install)
 	return err
 }
 
@@ -293,7 +321,14 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 		// directory ownership. The old owner forwards to the successor; it must
 		// never become a permanent coordinator recalling the actual owner.
 		r.mu.Lock()
-		owner := r.directory.Records[r.resourceKey(packet.Resource)].Owner
+		entry := r.directory.Records[r.resourceKey(packet.Resource)]
+		owner := entry.Owner
+		if entry.Handoff != "" {
+			// A queued request may resume after M reached the recipient but
+			// before the source's final ACK publication. The old owner field
+			// cannot authorize a new local grant during that interval.
+			owner = entry.Handoff
+		}
 		r.mu.Unlock()
 		if owner != "" && owner != r.id {
 			if packet.TryRead {
@@ -343,6 +378,25 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 		return true
 	})
 	if stale {
+		if mark := record.Requests[requester]; r.cluster != nil && (mark.ID != packet.ID || mark.Write && !write) {
+			// UUID folding can send two flights to this same native owner. A
+			// superseded flight still needs a terminal reply, otherwise its
+			// protocol capability and any original waiters would live forever.
+			state, wanted := "S", mosi.S
+			if write {
+				state, wanted = "M", mosi.M
+			}
+			failure := mosiPacket{Kind: "failure", Resource: packet.Resource, ID: packet.ID, State: state, Error: errClusterAcquisitionSuperseded.Error()}
+			if requester == r.id {
+				c.resolved().ownstate.Fail(packet.ID, errClusterAcquisitionSuperseded, wanted)
+				r.finishAcquisition(failure)
+				return nil
+			}
+			if peer := r.peer(requester); peer != nil {
+				return peer.post(failure)
+			}
+			return fmt.Errorf(mosi.NetworkError)
+		}
 		return nil
 	}
 	originalOwner, originalEpoch := record.Owner, record.Epoch
@@ -529,12 +583,15 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 		}
 	}
 	if requester == r.id {
-		_, err := c.ownstate.Grant(packet.ID, mosi.ParsePhase(grantState), func() error {
-			if r.cluster != nil {
-				c.clusterstate.Publish(mosi.ParsePhase(grantState))
+		if r.cluster != nil {
+			packet.State, packet.Owner, packet.Epoch = grantState, record.Owner, record.Epoch
+			err := r.grantAcquired(c.resolved(), packet)
+			if err == nil {
+				r.finishAcquisition(packet)
 			}
-			return nil
-		})
+			return err
+		}
+		_, err := c.ownstate.Grant(packet.ID, mosi.ParsePhase(grantState), func() error { return nil })
 		return err
 	}
 	peer := r.peer(requester)

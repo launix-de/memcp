@@ -17,8 +17,8 @@ import "strings"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/memcp/storage/mosi"
 
-// Version 19 combines binary node metadata with retained UNIQUE receiver scopes.
-const scanWireVersion = 19
+// Version 20 carries native generation/epoch progress with scan redirects.
+const scanWireVersion = 20
 
 type remoteScanShard struct {
 	Schema   uint64       `json:"schema"`
@@ -65,14 +65,14 @@ type remoteScanTask struct {
 	Neutral       []byte                `json:"neutral"`
 }
 type remoteScanResult struct {
-	RedirectTo     string          `json:"redirect_to,omitempty"` // routing refusal before acquiring payload or executing callbacks
-	Rejected       bool            `json:"rejected,omitempty"`    // capacity refusal before executing scan callbacks
-	Version        int             `json:"version"`
-	Shard          remoteScanShard `json:"shard"`
-	Value          []byte          `json:"value"`
-	OutCount       int64           `json:"out_count"`
-	InputCount     int64           `json:"input_count"`
-	CandidateCount int64           `json:"candidate_count"`
+	Redirect       *clusterScanRedirect `json:"redirect,omitempty"` // routing refusal before acquiring payload or executing callbacks
+	Rejected       bool                 `json:"rejected,omitempty"` // capacity refusal before executing scan callbacks
+	Version        int                  `json:"version"`
+	Shard          remoteScanShard      `json:"shard"`
+	Value          []byte               `json:"value"`
+	OutCount       int64                `json:"out_count"`
+	InputCount     int64                `json:"input_count"`
+	CandidateCount int64                `json:"candidate_count"`
 }
 
 // The authenticated connection owns operation cancellation and duplicate suppression.
@@ -206,7 +206,7 @@ func (database *database) executeScanTask(ctx context.Context, s *scanRPCSession
 	}
 	var output remoteScanResult
 	withInput := func(execute func(*storageShard) error) error {
-		return withRemoteScanShard(&request.Shard, tx, request.Access.Mutation, s.peer.objectPeer.ID, request.AcquireFrom, execute)
+		return withRemoteScanShard(&request.Shard, tx, request.Access.Mutation, request.Operator == shardUniqueReserve, s.peer.objectPeer.ID, request.AcquireFrom, execute)
 	}
 	if input != nil {
 		withInput = func(execute func(*storageShard) error) error {
@@ -258,11 +258,19 @@ func (database *database) executeScanTask(ctx context.Context, s *scanRPCSession
 		output = remoteScanResult{Version: scanWireVersion, Shard: request.Shard, Value: []byte(encoded), OutCount: result.outCount, InputCount: result.inputCount, CandidateCount: result.candidateCount}
 		return nil
 	})
+	if busy, ok := err.(uniqueReservationBusy); ok {
+		value, encodeErr := freezeScanValue(scm.NewSlice([]scm.Scmer{scm.NewString("busy"), scm.NewString(busy.shard.Resource.Shard), scm.NewBool(busy.capacity), scm.NewBool(busy.retry)}))
+		if encodeErr != nil {
+			return nil, encodeErr
+		}
+		output = remoteScanResult{Version: scanWireVersion, Shard: request.Shard, Value: []byte(value)}
+		err = nil
+	}
 	if _, capacity := err.(clusterCapacityRejection); capacity {
 		return remoteScanResult{Rejected: true}, nil
 	}
 	if redirect, ok := err.(clusterScanRedirect); ok {
-		return remoteScanResult{RedirectTo: redirect.owner}, nil
+		return remoteScanResult{Redirect: &redirect}, nil
 	}
 	if err != nil {
 		return nil, err
@@ -306,7 +314,7 @@ func boundedScanReply(value any) (any, error) {
 // Acquire through the same schema/shard MOSI and generation lifetime boundaries
 // as a local scan. Routing hints follow its current generation; physical input
 // IDs are retained only by the explicit native object path.
-func withRemoteScanShard(expected *remoteScanShard, tx *TxContext, mutation bool, sender, acquireFrom string, execute func(*storageShard) error) (err error) {
+func withRemoteScanShard(expected *remoteScanShard, tx *TxContext, mutation, ownerBound bool, sender, acquireFrom string, execute func(*storageShard) error) (err error) {
 	// A shared-backend worker either admits this generation once or refuses
 	// before scan callbacks. Capacity refusal alone permits choosing another peer.
 	shared := sharedClusterDatabase(expected.Resource.Database)
@@ -340,18 +348,37 @@ func withRemoteScanShard(expected *remoteScanShard, tx *TxContext, mutation bool
 			record := r.cluster.report(expected.Resource)
 			phase := mosi.ParsePhase(record.State)
 			local := phase.Readable()
-			// The sender can deliberately delegate its own cold payload because
-			// it cannot admit that shard. That path still uses native acquisition;
-			// a third-party owner is a stale task route to follow first.
-			if !local && record.Owner != "" && record.Owner != r.id && record.Owner != sender && record.Owner != acquireFrom {
-				return clusterScanRedirect{owner: record.Owner}
+			// Owner-group reservations refuse before shard acquisition. Even
+			// joining MR can depend on another group held by this coordinator.
+			if ownerBound && r.resourceCell(record.Resource).ownstate.Phase() != mosi.M {
+				return uniqueReservationBusy{shard: *expected}
+			}
+			// Reports expose retained permission, not an in-flight request.
+			// A recipient already acquiring this generation joins that native
+			// flight below; bouncing it to the old owner creates a false cycle.
+			acquiring := r.resourceCell(record.Resource).ownstate.Phase().Requested()
+			owner := record.Owner
+			if record.Handoff != "" {
+				owner = record.Handoff
+			}
+			// A handover routes to its recipient before the final owner ACK.
+			// A non-reservation task may deliberately delegate its sender's cold
+			// payload. Owner-bound reservations already refused that path above.
+			if !local && !acquiring && owner != "" && owner != r.id && owner != sender && owner != acquireFrom {
+				return clusterScanRedirect{Owner: owner, Epoch: record.Epoch, Generation: record.Resource.Shard}
 			}
 		}
 		wanted := mosi.S
 		if mutation {
 			wanted = mosi.M
 		}
-		sourceCell = r.obtain(expected.Resource, wanted, replicationUser(tx), tx)
+		if ownerBound && shared {
+			// Its native handler owns nonblocking GetWrite for the whole group.
+			// Reacquiring S here could wait after the M check raced a handover.
+			sourceCell = r.resourceCell(expected.Resource)
+		} else {
+			sourceCell = r.obtain(expected.Resource, wanted, replicationUser(tx), tx)
+		}
 	}
 	declarations := tbl.columnNamesSnapshot.Load()
 	for {
@@ -393,28 +420,33 @@ func withRemoteScanShard(expected *remoteScanShard, tx *TxContext, mutation bool
 			// Only an explicit input object above retains historical physical IDs.
 			var lease ReadAccess
 			var capacity bool
-			func() {
-				defer func() {
-					if failure := recover(); failure != nil {
-						if _, delegated := failure.(shardReadDelegation); shared && delegated {
-							capacity = true
-						} else {
-							panic(failure)
+			shard := selected
+			if !ownerBound {
+				func() {
+					defer func() {
+						if failure := recover(); failure != nil {
+							if _, delegated := failure.(shardReadDelegation); shared && delegated {
+								capacity = true
+							} else {
+								panic(failure)
+							}
 						}
+					}()
+					if mutation {
+						write := selected.GetWrite(tx)
+						lease = ReadAccess{shard: write.shard, mutation: &write}
+					} else {
+						lease = selected.GetRead(tx, false)
 					}
 				}()
-				if mutation {
-					write := selected.GetWrite(tx)
-					lease = ReadAccess{shard: write.shard, mutation: &write}
-				} else {
-					lease = selected.GetRead(tx, false)
+				if capacity {
+					return clusterCapacityRejection{}
 				}
-			}()
-			if capacity {
-				return clusterCapacityRejection{}
+				defer lease.Release()
+				shard = lease.shard
 			}
-			defer lease.Release()
-			shard := lease.shard
+			// The reservation handler supplies GetWrite; other operators use
+			// the prepared read/write lease above. Never take both admissions.
 			if err := execute(shard); err != nil {
 				return err
 			}
@@ -511,13 +543,15 @@ func (origin *peerScanExecutor) ExecuteShardScan(resource mosiResource, invocati
 	}
 	task.Access.Mutation = task.Access.Mutation || scanMutates(invocation.callbackCols) || invocation.operator == shardUniqueAdmit
 	if invocation.tx != nil {
-		// Export only unmodified remote inputs. A modified generation is kept
-		// resident by native TX pins and must execute at its participant; a cold
-		// path must not silently drop its private delete/undelete overlay.
-		if db := GetDatabase(resource.Database); db != nil {
-			if r := activeReplication(db); r != nil {
-				if shard := r.findShard(resource); shard != nil && invocation.tx.getShardTx(shard) != nil {
-					panic("remote modified input requires its transaction participant")
+		// Physical scans must retain a modified generation's row visibility.
+		// UNIQUE key-domain operations address the current native participant
+		// through Transaction below, without transmitting physical input IDs.
+		if invocation.operator < shardUniqueProbe {
+			if db := GetDatabase(resource.Database); db != nil {
+				if r := activeReplication(db); r != nil {
+					if shard := r.findShard(resource); shard != nil && invocation.tx.getShardTx(shard) != nil {
+						panic("remote modified input requires its transaction participant")
+					}
 				}
 			}
 		}

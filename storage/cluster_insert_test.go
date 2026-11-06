@@ -1705,3 +1705,141 @@ func TestClusterUniqueContentionDoesNotMoveOwnership(t *testing.T) {
 		})
 	}
 }
+
+type liveReferencePhaseProbe struct {
+	id         string
+	firstChunk func()
+}
+
+func (*liveReferencePhaseProbe) ClusterObjectType() string     { return "shard-transfer" }
+func (probe *liveReferencePhaseProbe) ClusterObjectID() string { return probe.id }
+func (probe *liveReferencePhaseProbe) Serialize(bindings *scm.SerializationContext) (scm.Scmer, error) {
+	return bindings.ReferenceExpression(probe)
+}
+func (probe *liveReferencePhaseProbe) HandleClusterRequest(_ context.Context, request scm.ClusterRequest) (any, error) {
+	if request.Method != "next" {
+		return nil, fmt.Errorf("unexpected transfer probe request")
+	}
+	probe.firstChunk()
+	return scm.NewNil(), nil // deliberately incomplete: no payload may grant rights
+}
+
+func TestClusterLiveReferencePublishesEpochBeforePayloadCanMergeCells(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "t_live_reference_epoch", 4)
+	peer, client, _ := setupRemoteScanConnection(t)
+	owner := nodeScans.Load()
+	cluster := &nodeCluster{self: clusterMember{ID: client.authNodeID(), Boot: client.id}, ctx: context.Background(), service: client}
+	cluster.initializeManager()
+	remote := peer.objectPeer.ID
+	cluster.view.Store(&clusterView{links: []*clusterLink{{member: clusterMember{ID: remote}, peer: peer}}})
+	r := cluster.manager
+	target := r.shardResource(tbl.ActiveShards()[0])
+	predecessor := target
+	predecessor.Shard = uuid.NewString()
+	old := r.resourceCell(predecessor)
+	old.ownstate.Initialize(mosi.S)
+	old.clusterstate.Initialize(mosi.S)
+	r.updateRecord(predecessor, func(record *replicaRecord) bool { record.Owner, record.Epoch = remote, 3; return true })
+	pending, _ := old.ownstate.Request(mosi.M)
+	next := r.resourceCell(target)
+	next.ownstate.Initialize(mosi.IO)
+	r.updateRecord(target, func(record *replicaRecord) bool { record.Owner, record.Epoch = remote, 4; return true })
+	next.ownstate.Request(mosi.M)
+	type observation struct {
+		cell  *replicaCell
+		epoch uint64
+	}
+	observed := make(chan observation, 1)
+	probe := &liveReferencePhaseProbe{id: uuid.NewString(), firstChunk: func() {
+		// Live payload installation can publish its physical successor before
+		// returning to installReference. Its validated owner version must win.
+		r.forwardResource(predecessor, target)
+		r.mu.Lock()
+		epoch := r.directory.Records[r.resourceKey(target)].Epoch
+		r.mu.Unlock()
+		observed <- observation{r.resourceCell(target), epoch}
+	}}
+	ref, err := owner.exportObject(objectOwnerPeer(t, owner, client), probe, scm.NewNil())
+	if err != nil {
+		t.Fatal(err)
+	}
+	packet := mosiPacket{Kind: "reference", ID: pending.Flight().ID(), Resource: predecessor, Epoch: 5, State: "M", Owner: r.id, Content: target.Shard, Capture: &ref}
+	if err := cluster.installReference(remote, packet); err == nil {
+		t.Fatal("incomplete live payload granted permission")
+	}
+	select {
+	case got := <-observed:
+		if got.cell != old || got.epoch != 5 {
+			t.Fatalf("live installation retired the validated request before publishing its epoch: cell=%p want=%p epoch=%d", got.cell, old, got.epoch)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("live transfer did not reach its payload boundary")
+	}
+	if old.ownstate.Phase() != mosi.MR || old.ownstate.Snapshot().Flight() != pending.Flight() || old.ownstate.ReadReady() {
+		t.Fatal("incomplete transfer lost its pending request or fabricated a grant")
+	}
+}
+
+func TestClusterUniqueReservationRegroupsInsteadOfFollowingOwner(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "t_unique_owner_group_redirect", 3)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	cluster := globalTestCluster(t, tbl.schema.Name)
+	cluster.ctx, cluster.cancel = ctx, cancel
+	service := &nodeScanService{id: cluster.self.Boot, cluster: cluster}
+	cluster.service = service
+	registry := service.objectRegistry()
+	registry.endpoint = "http://127.0.0.1/cluster"
+	t.Cleanup(service.stop)
+	var links []*clusterLink
+	for range 2 {
+		member := clusterMember{ID: "memcp://" + uuid.NewString(), Boot: uuid.NewString()}
+		peer := &mosiPeer{ctx: ctx, done: make(chan struct{}), outgoing: newMosiMailbox(), scanService: service, objectPeer: clusterObjectPeer{ID: member.ID, Boot: member.Boot}}
+		links = append(links, &clusterLink{member: member, peer: peer})
+	}
+	cluster.view.Store(&clusterView{links: links})
+	previous := nodeScans.Swap(service)
+	t.Cleanup(func() { nodeScans.Store(previous) })
+	shard := tbl.ActiveShards()[0]
+	resource := cluster.manager.shardResource(shard)
+	done := make(chan any, 1)
+	go func() {
+		defer func() { done <- recover() }()
+		guard := tbl.guardUniqueWrites([]string{"id"}, [][]scm.Scmer{{scm.NewInt(42)}}, false, 0, nil)
+		client := tbl.startUniqueReservation(ctx, links[0].member.ID, shard, []string{shard.uuid.String()}, []string{"id"}, [][]scm.Scmer{{scm.NewInt(42)}}, false, nil, &guard)
+		client.cancel()
+	}()
+	// The first peer refused before callbacks because its owner group moved.
+	// The second may already hold another group for this same coordinator.
+	for {
+		select {
+		case <-links[0].peer.outgoing.ready:
+			message := takeMosi(links[0].peer.outgoing)
+			if message.Method != "node.control" {
+				continue
+			}
+			var request struct{ Return, Method string }
+			if err := unmarshalNode(message.Data, &request); err != nil || request.Method != "scan.execute" {
+				t.Fatal("invalid reservation request", err)
+			}
+			entry, _ := service.handles.Load(controlReturnSlot(request.Return))
+			deliverTestCompletion(t, entry, scanCompletion{Data: mustNodeMetadata(remoteScanResult{Redirect: &clusterScanRedirect{Owner: links[1].member.ID, Epoch: 5, Generation: resource.Shard}})})
+		case failure := <-done:
+			busy, ok := failure.(uniqueReservationBusy)
+			if !ok || busy.owner != links[0].member.ID || busy.shard.Resource != resource || busy.retry || busy.capacity {
+				t.Fatalf("owner-group refusal lost its regrouping identity: %T %v", failure, failure)
+			}
+			if links[1].peer.outgoing.len() != 0 {
+				t.Fatal("reservation followed a redirect into an independently reserved owner group")
+			}
+			return
+		case <-links[1].peer.outgoing.ready:
+			cancel()
+			close(links[1].peer.done)
+			<-done
+			t.Fatal("reservation followed a redirect into an independently reserved owner group")
+		case <-ctx.Done():
+			t.Fatal("reservation refusal did not return", ctx.Err())
+		}
+	}
+}

@@ -1207,32 +1207,44 @@ func TestClusterCacheTryReadUsesGrantedBackendWithoutOwnerLookup(t *testing.T) {
 }
 
 func TestClusterRemoteMutationRedirectsBeforeRecallingParticipant(t *testing.T) {
-	tbl, _ := createDurabilityTestTable(t, "t_remote_mutation_redirect", 4)
-	shard := tbl.ActiveShards()[0]
-	cluster := &nodeCluster{self: clusterMember{ID: "former-owner"}, ctx: context.Background(), databases: map[string]bool{tbl.schema.Name: true}}
-	cluster.initializeManager()
-	cluster.view.Store(&clusterView{})
-	schema := cluster.manager.resourceCell(mosiResource{Database: tbl.schema.Name})
-	schema.ownstate.Initialize(mosi.M)
-	schema.clusterstate.Initialize(mosi.M)
-	cell := cluster.declareShard(shard, false)
-	cell.ownstate.Initialize(mosi.IO)
-	cell.clusterstate.Initialize(mosi.IO)
-	resource := *cell.resource.Load()
-	cluster.manager.updateRecord(resource, func(record *replicaRecord) bool {
-		record.Owner, record.Epoch = "transaction-participant", 4
-		return true
-	})
-	oldMounts := sharedClusterMounts.Swap(&map[string]bool{tbl.schema.Name: true})
-	defer sharedClusterMounts.Store(oldMounts)
-	oldService := nodeScans.Swap(&nodeScanService{cluster: cluster})
-	defer nodeScans.Store(oldService)
-	executed := false
-	err := withRemoteScanShard(&remoteScanShard{Schema: tbl.filterSchemaFingerprint(), Resource: resource}, nil, true, "coordinator", "",
-		func(*storageShard) error { executed = true; return nil })
-	redirect, ok := err.(clusterScanRedirect)
-	if !ok || redirect.owner != "transaction-participant" || executed || cell.ownstate.Phase() != mosi.IO {
-		t.Fatalf("stale task recalled participant rights or executed callbacks: %v, executed=%v", err, executed)
+	for _, handoff := range []bool{false, true} {
+		t.Run(fmt.Sprint(handoff), func(t *testing.T) {
+			tbl, _ := createDurabilityTestTable(t, "t_remote_mutation_redirect", 4)
+			shard := tbl.ActiveShards()[0]
+			cluster := &nodeCluster{self: clusterMember{ID: "former-owner"}, ctx: context.Background(), databases: map[string]bool{tbl.schema.Name: true}}
+			cluster.initializeManager()
+			cluster.view.Store(&clusterView{})
+			schema := cluster.manager.resourceCell(mosiResource{Database: tbl.schema.Name})
+			schema.ownstate.Initialize(mosi.M)
+			schema.clusterstate.Initialize(mosi.M)
+			cell := cluster.declareShard(shard, false)
+			cell.ownstate.Initialize(mosi.IO)
+			cell.clusterstate.Initialize(mosi.IO)
+			resource := *cell.resource.Load()
+			cluster.manager.updateRecord(resource, func(record *replicaRecord) bool {
+				record.Owner, record.Epoch = "transaction-participant", 4
+				if handoff {
+					record.Owner, record.Handoff = cluster.self.ID, "transaction-participant"
+				}
+				return true
+			})
+			oldMounts := sharedClusterMounts.Swap(&map[string]bool{tbl.schema.Name: true})
+			defer sharedClusterMounts.Store(oldMounts)
+			oldService := nodeScans.Swap(&nodeScanService{cluster: cluster})
+			defer nodeScans.Store(oldService)
+			defer func() {
+				if failure := recover(); failure != nil {
+					t.Fatalf("stale task tried to reacquire participant rights: %v", failure)
+				}
+			}()
+			executed := false
+			err := withRemoteScanShard(&remoteScanShard{Schema: tbl.filterSchemaFingerprint(), Resource: resource}, nil, true, false, "coordinator", "",
+				func(*storageShard) error { executed = true; return nil })
+			redirect, ok := err.(clusterScanRedirect)
+			if !ok || redirect.Owner != "transaction-participant" || redirect.Epoch != 4 || redirect.Generation != resource.Shard || executed || cell.ownstate.Phase() != mosi.IO {
+				t.Fatalf("stale task recalled participant rights or executed callbacks: %v, executed=%v", err, executed)
+			}
+		})
 	}
 }
 
@@ -1493,6 +1505,14 @@ func TestClusterColdPlacementExcludesRefusedOwner(t *testing.T) {
 }
 
 func TestClusterShardRecoveryRestoresCurrentContentFromOlderSchema(t *testing.T) {
+	for _, variant := range []string{"older-resource-uuid", "already-canonical-resource-uuid", "unbound-canonical-resource-uuid"} {
+		t.Run(variant, func(t *testing.T) {
+			testClusterShardRecoveryContent(t, variant)
+		})
+	}
+}
+
+func testClusterShardRecoveryContent(t *testing.T, variant string) {
 	tbl, _ := createDurabilityTestTable(t, "t_cluster_recover_current_content", 4)
 	RebuildTable(tbl, true, false)
 	checkpoint, err := json.Marshal(tbl)
@@ -1527,6 +1547,15 @@ func TestClusterShardRecoveryRestoresCurrentContentFromOlderSchema(t *testing.T)
 	cluster.view.Store(&clusterView{members: []clusterMember{cluster.self, {ID: reader}}, links: []*clusterLink{{member: clusterMember{ID: reader}, peer: peer}}})
 	resource := mosiResource{Database: tbl.schema.Name, Table: tbl.Name, Shard: oldID.String()}
 	cell := cluster.manager.shardCell(restored.ActiveShards()[0])
+	if variant != "older-resource-uuid" {
+		successor := resource
+		successor.Shard = content
+		cluster.manager.forwardResource(resource, successor)
+		resource = successor
+		if variant == "unbound-canonical-resource-uuid" {
+			cell.current.Store(nil)
+		}
+	}
 	cluster.manager.updateRecord(resource, func(record *replicaRecord) bool {
 		record.Owner, record.Epoch, record.Content = self, 3, oldID.String()
 		return true
@@ -1572,5 +1601,535 @@ func TestClusterShardRecoveryRestoresCurrentContentFromOlderSchema(t *testing.T)
 	}
 	if restored.CountExact() != 5 {
 		t.Fatal("recovery lost the row absent from the older checkpoint")
+	}
+}
+
+func TestClusterTopologyPublishesEveryRebuildSuccessor(t *testing.T) {
+	for _, imported := range []bool{false, true} {
+		name := "rebuild-chain"
+		if imported {
+			name = "import-with-lagging-payload-hint"
+		}
+		t.Run(name, func(t *testing.T) {
+			tbl := setupScanParallelTestTable(t, "t_cluster_rebuild_chain_publication")
+			source := tbl.ActiveShards()[0]
+			// Successors are private generations, not independently declared M owners.
+			middle, last := NewShard(tbl), NewShard(tbl)
+			cluster := globalTestCluster(t, tbl.schema.Name)
+			mounts := sharedClusterMounts.Swap(&map[string]bool{tbl.schema.Name: true})
+			defer sharedClusterMounts.Store(mounts)
+			service := nodeScans.Swap(&nodeScanService{cluster: cluster})
+			defer nodeScans.Store(service)
+			cell := cluster.declareShard(source, true)
+			middle.coherence.Store(cell)
+			last.coherence.Store(cell)
+			if imported {
+				if err := cluster.manager.replaceShard(cluster.manager.shardResource(source), source, middle); err != nil {
+					t.Fatal(err)
+				}
+				// Import publishes topology before its caller advances this advisory
+				// hint. A following rebuild must start at the published generation.
+				cell.current.Store(source)
+			} else {
+				source.next.Store(middle)
+				source.nextReady.Store(true)
+			}
+			middle.next.Store(last)
+			middle.nextReady.Store(true)
+			tbl.mu.Lock()
+			tbl.Shards = []*storageShard{last}
+			tbl.publishTopologyLocked()
+			tbl.mu.Unlock()
+			for _, shard := range []*storageShard{source, middle, last} {
+				resource := cluster.manager.shardResource(shard)
+				if found := cluster.manager.lookupCell(resource); found != cell {
+					t.Errorf("published native UUID %s has no shared authority: %p, want %p", shard.uuid, found, cell)
+				}
+			}
+			if cell.current.Load() != last || cell.resource.Load().Shard != last.uuid.String() {
+				t.Fatal("topology publication did not advance its native authority")
+			}
+		})
+	}
+}
+
+func TestClusterDelegationDistinguishesHandoverFromRoutingCycle(t *testing.T) {
+	for _, progress := range []string{"unchanged", "epoch", "generation"} {
+		t.Run(progress, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			service := &nodeScanService{}
+			cluster := &nodeCluster{service: service, ctx: ctx}
+			var links []*clusterLink
+			for _, id := range []string{"owner-a", "owner-b"} {
+				peer := &mosiPeer{ctx: ctx, done: make(chan struct{}), outgoing: newMosiMailbox(), scanService: service, objectPeer: clusterObjectPeer{ID: id, Boot: "boot"}}
+				links = append(links, &clusterLink{member: clusterMember{ID: id}, peer: peer})
+			}
+			cluster.view.Store(&clusterView{links: links})
+			expected := remoteScanShard{Schema: 1, Resource: mosiResource{Database: "delegation", Table: "items", Shard: uuid.NewString()}}
+			executor := &clusterScanExecutor{cluster: cluster, expected: expected, preferred: links[0]}
+			condition := scm.Eval(scm.Read(t.Name(), "(lambda () true)", true), &scm.Globalenv)
+			finished := make(chan scanResult, 1)
+			go func() {
+				var result scanResult
+				defer func() {
+					if failure := recover(); failure != nil {
+						result.err = scanError{r: failure}
+					}
+					finished <- result
+				}()
+				result = executor.ExecuteShardScan(expected.Resource, shardScanInvocation{operator: shardExists, condition: condition, neutral: scm.NewBool(false)})
+			}()
+			var result scanResult
+			completed := false
+			for step := 0; step < 3 && !completed; step++ {
+				peer := links[step%2].peer
+				select {
+				case <-peer.outgoing.ready:
+					message := takeMosi(peer.outgoing)
+					var request struct{ Return, Method string }
+					if err := unmarshalNode(message.Data, &request); err != nil || request.Method != "scan.execute" {
+						t.Fatal("delegation did not use its native scan contract", request, err)
+					}
+					response := remoteScanResult{Redirect: &clusterScanRedirect{Owner: links[(step+1)%2].member.ID, Epoch: 4, Generation: expected.Resource.Shard}}
+					if progress == "epoch" && step == 1 {
+						response.Redirect.Epoch = 5
+					}
+					if progress == "generation" && step == 1 {
+						response.Redirect.Generation = uuid.NewString()
+					}
+					if progress != "unchanged" && step == 2 {
+						response = remoteScanResult{Version: scanWireVersion, Shard: expected, Value: []byte("true"), OutCount: 1}
+					}
+					entry, _ := service.handles.Load(controlReturnSlot(request.Return))
+					deliverTestCompletion(t, entry, scanCompletion{Data: mustNodeMetadata(response)})
+				case result = <-finished:
+					completed = true
+				case <-ctx.Done():
+					t.Fatal("delegation did not finish", ctx.Err())
+				}
+			}
+			if !completed {
+				select {
+				case result = <-finished:
+				case <-ctx.Done():
+					t.Fatal(ctx.Err())
+				}
+			}
+			if progress != "unchanged" {
+				if result.err.r != nil || !result.res.Bool() {
+					t.Fatal("live ownership progress was rejected as a cycle", result.err.r)
+				}
+			} else if result.err.r == nil || !strings.Contains(fmt.Sprint(result.err.r), "ownership route cycled") {
+				t.Fatal("unchanged cyclic hints were allowed to loop", result.err.r)
+			}
+		})
+	}
+}
+
+func TestClusterSchemaPublicationKeepsRebuildCoordination(t *testing.T) {
+	tbl := setupScanParallelTestTable(t, "t_cluster_schema_rebuild_authority")
+	source := tbl.ActiveShards()[0]
+	successor := NewShard(tbl)
+	cluster := globalTestCluster(t, tbl.schema.Name)
+	mounts := sharedClusterMounts.Swap(&map[string]bool{tbl.schema.Name: true})
+	defer sharedClusterMounts.Store(mounts)
+	service := nodeScans.Swap(&nodeScanService{cluster: cluster})
+	defer nodeScans.Store(service)
+	cell := cluster.declareShard(source, true)
+	coordination := cell.clusterstate.TryCoordinate()
+	if coordination == nil {
+		t.Fatal("could not start the source handover")
+	}
+	defer coordination.Release()
+	// A routing hint may already have created an invalid placeholder. It must
+	// share the source's active coordination before a schema can expose its UUID.
+	next := cluster.manager.shardResource(successor)
+	cluster.manager.resourceCell(next).ownstate.Initialize(mosi.IO)
+	cluster.manager.updateRecord(next, func(record *replicaRecord) bool {
+		record.Owner, record.Epoch = cluster.self.ID, 1
+		return true
+	})
+	successor.coherence.Store(cell)
+	source.next.Store(successor)
+	source.nextReady.Store(true)
+	tbl.mu.Lock()
+	tbl.Shards = []*storageShard{successor}
+	tbl.publishSchemaTopology(ShardModeFree, tbl.Shards, tbl.PDimensions)
+	tbl.mu.Unlock()
+	encoded, err := json.Marshal(tbl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var persisted struct{ Shards []string }
+	if err := json.Unmarshal(encoded, &persisted); err != nil || len(persisted.Shards) != 1 || persisted.Shards[0] != successor.uuid.String() {
+		t.Fatal("schema fixture did not expose its private successor", err)
+	}
+	published := cluster.manager.resourceCell(next).resolved()
+	if published != cell {
+		t.Error("schema exposed a rebuild UUID with an independent coherence cell")
+	}
+	if concurrent := published.clusterstate.TryCoordinate(); concurrent != nil {
+		concurrent.Release()
+		t.Error("schema allowed a second handover while the source handover was active")
+	}
+	if cell.current.Load() != source || tbl.ActiveShards()[0] != source {
+		t.Fatal("schema publication replaced the still-active native input")
+	}
+	tbl.mu.Lock()
+	tbl.publishTopologyLocked()
+	tbl.mu.Unlock()
+	if cell.current.Load() != successor {
+		t.Fatal("native publication did not advance its payload hint")
+	}
+}
+
+func TestClusterRemoteMutationJoinsPendingOwnerGrant(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "t_remote_pending_owner", 4)
+	shard := tbl.ActiveShards()[0]
+	cluster := globalTestCluster(t, tbl.schema.Name)
+	owner := clusterMember{ID: "old-owner", Boot: uuid.NewString()}
+	peer := &mosiPeer{done: make(chan struct{}), outgoing: newMosiMailbox()}
+	cluster.view.Store(&clusterView{members: []clusterMember{cluster.self, owner}, links: []*clusterLink{{member: owner, peer: peer}}})
+	schema := cluster.manager.resourceCell(mosiResource{Database: tbl.schema.Name})
+	schema.ownstate.Initialize(mosi.M)
+	cell := cluster.declareShard(shard, false)
+	cell.ownstate.Initialize(mosi.IO)
+	cell.clusterstate.Initialize(mosi.M)
+	resource := *cell.resource.Load()
+	cluster.manager.updateRecord(resource, func(record *replicaRecord) bool {
+		record.Owner, record.Epoch = owner.ID, 4
+		return true
+	})
+	pending, _ := cell.ownstate.Request(mosi.M)
+	oldMounts := sharedClusterMounts.Swap(&map[string]bool{tbl.schema.Name: true})
+	defer sharedClusterMounts.Store(oldMounts)
+	oldService := nodeScans.Swap(&nodeScanService{cluster: cluster})
+	defer nodeScans.Store(oldService)
+	// A group reservation cannot join this flight while its coordinator may
+	// retain another group needed by that same incoming handover.
+	err := withRemoteScanShard(&remoteScanShard{Schema: tbl.filterSchemaFingerprint(), Resource: resource}, nil, false, true, "coordinator", "", func(*storageShard) error {
+		t.Fatal("ungranted owner-group reservation executed a callback")
+		return nil
+	})
+	if busy, ok := err.(uniqueReservationBusy); !ok || busy.shard.Resource != resource || cell.ownstate.Snapshot().Flight() != pending.Flight() {
+		t.Fatal("reservation waited for or replaced the native pending grant", err)
+	}
+	done := make(chan error, 1)
+	executed := make(chan struct{}, 1)
+	go func() {
+		defer func() {
+			if failure := recover(); failure != nil {
+				done <- fmt.Errorf("pending acquisition failed: %v", failure)
+			}
+		}()
+		done <- withRemoteScanShard(&remoteScanShard{Schema: tbl.filterSchemaFingerprint(), Resource: resource}, nil, true, false, "coordinator", "", func(*storageShard) error { executed <- struct{}{}; return nil })
+	}()
+	select {
+	case err := <-done:
+		t.Fatalf("pending owner bounced a task back to its grant source: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	if _, err := cell.ownstate.Grant(pending.Flight().ID(), mosi.M, func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("task did not join its existing native grant")
+	}
+	select {
+	case <-executed:
+	default:
+		t.Fatal("granted task did not execute")
+	}
+}
+
+func TestClusterQueuedReadFollowsNativeHandoverBeforeGranting(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "t_queued_read_handover", 3)
+	cluster := globalTestCluster(t, tbl.schema.Name)
+	r := cluster.manager
+	cell := cluster.declareShard(tbl.ActiveShards()[0], false)
+	cell.ownstate.Initialize(mosi.IO)
+	cell.clusterstate.Initialize(mosi.IO)
+	resource := *cell.resource.Load()
+	target := clusterMember{ID: "memcp://" + uuid.NewString(), Boot: uuid.NewString()}
+	peer := &mosiPeer{ctx: context.Background(), done: make(chan struct{}), outgoing: newMosiMailbox()}
+	cluster.view.Store(&clusterView{members: []clusterMember{cluster.self, target}, links: []*clusterLink{{member: target, peer: peer}}})
+	// The source already revoked M; its recipient can write before the source
+	// ACK worker resumes. A queued local read must follow that recipient.
+	r.updateRecord(resource, func(record *replicaRecord) bool {
+		record.Owner, record.Handoff, record.Epoch, record.State = r.id, target.ID, 3, "M"
+		return true
+	})
+	pending, _ := cell.ownstate.Request(mosi.S)
+	packet := mosiPacket{Kind: "read", Resource: resource, ID: pending.Flight().ID(), Sequence: r.requestSequence(pending.Flight()), Boot: cluster.self.Boot}
+	if err := r.coordinate(context.Background(), r.id, packet); err != nil {
+		t.Fatal(err)
+	}
+	if cell.ownstate.ReadReady() || cell.clusterstate.Phase().Readable() {
+		t.Fatal("former owner granted itself O while its handover recipient holds M")
+	}
+	select {
+	case <-peer.outgoing.ready:
+		message := takeMosi(peer.outgoing)
+		if message.Packet == nil || message.Packet.ID != packet.ID || message.Packet.To != target.ID || message.Packet.From != r.id {
+			t.Fatal("queued acquisition lost its native request identity")
+		}
+	default:
+		t.Fatal("queued acquisition was not forwarded to the handover recipient")
+	}
+	r.mu.Lock()
+	record := r.directory.Records[r.resourceKey(resource)]
+	r.mu.Unlock()
+	grant := mosiPacket{Kind: "reference", Resource: resource, ID: packet.ID, Epoch: 3, State: "S", Owner: target.ID}
+	if _, err := cluster.referenceSource(target.ID, grant, cell, record); err != nil {
+		t.Fatalf("named handover recipient could not answer the queued flight: %v", err)
+	}
+	if _, err := cluster.referenceSource("foreign-peer", grant, cell, record); err == nil {
+		t.Fatal("unrelated peer answered a same-epoch queued flight")
+	}
+}
+
+// Two native UUIDs can both have sent a request before a rebuild route arrives.
+// Folding their cells must not turn the loser's legitimate reply into a forged
+// request, nor may a weaker reply satisfy an outstanding write request.
+func TestClusterIssuedAcquisitionSurvivesUUIDFolding(t *testing.T) {
+	for _, pending := range []mosi.Phase{mosi.IO, mosi.S, mosi.M} {
+		t.Run(pending.String(), func(t *testing.T) {
+			cluster := &nodeCluster{self: clusterMember{ID: "memcp://" + uuid.NewString()}}
+			cluster.initializeManager()
+			r := cluster.manager
+			from := mosiResource{Database: "folded_flight", Table: "items", Shard: uuid.NewString()}
+			to := from
+			to.Shard = uuid.NewString()
+			owner := "memcp://" + uuid.NewString()
+			original, successor := r.resourceCell(from), r.resourceCell(to)
+			original.ownstate.Initialize(mosi.IO)
+			successor.ownstate.Initialize(mosi.IO)
+			r.updateRecord(from, func(record *replicaRecord) bool { record.Owner, record.Epoch = owner, 3; return true })
+			r.updateRecord(to, func(record *replicaRecord) bool { record.Owner, record.Epoch = owner, 4; return true })
+			read, _ := original.ownstate.Request(mosi.S)
+			request := mosiPacket{Resource: from, Kind: "read", ID: read.Flight().ID()}
+			r.issueAcquisition(original, request)
+			original.ownstate.Request(mosi.M)
+			request.Kind = "write"
+			r.issueAcquisition(original, request)
+			var waiting *mosi.Publication
+			if pending != mosi.IO {
+				waiting, _ = successor.ownstate.Request(pending)
+				kind := "read"
+				if pending == mosi.M {
+					kind = "write"
+				}
+				r.issueAcquisition(successor, mosiPacket{Kind: kind, ID: waiting.Flight().ID(), Resource: to})
+			}
+			r.forwardResource(from, to)
+			if original.resolved() != successor {
+				t.Fatal("fixture did not replace the issuing cell")
+			}
+			record := cluster.report(to)
+			answer := mosiPacket{Resource: from, ID: request.ID, State: "S", Owner: owner, Epoch: 5}
+			if _, err := cluster.referenceSource(owner, answer, successor, record); err != nil {
+				t.Fatalf("known read reply lost across UUID folding: %v", err)
+			}
+			for _, mutation := range []string{"id", "resource", "sender"} {
+				bad, source := answer, owner
+				switch mutation {
+				case "id":
+					bad.ID = uuid.NewString()
+				case "resource":
+					bad.Resource.Shard = uuid.NewString()
+				case "sender":
+					source, bad.Epoch = "foreign", record.Epoch
+				}
+				cell := successor
+				if mutation == "resource" {
+					cell = r.resourceCell(bad.Resource)
+				}
+				if _, err := cluster.referenceSource(source, bad, cell, record); err == nil {
+					t.Fatalf("invalid %s accepted an issued request ID", mutation)
+				}
+			}
+			if err := r.grantAcquired(successor, answer); err != nil {
+				t.Fatal(err)
+			}
+			r.finishAcquisition(answer)
+			if pending == mosi.M && successor.ownstate.Phase() != mosi.MR {
+				t.Fatal("weaker predecessor reply completed canonical write acquisition")
+			}
+			answer.State, answer.Owner, answer.Epoch = "M", r.id, 6
+			if !r.issuedAcquisition(successor, answer) {
+				t.Fatal("read completion discarded the pending write reply")
+			}
+			if err := r.grantAcquired(successor, answer); err != nil {
+				t.Fatal(err)
+			}
+			r.finishAcquisition(answer)
+			if successor.ownstate.Phase() != mosi.M || successor.clusterstate.Phase() != mosi.M {
+				t.Fatal("valid predecessor write reply did not grant canonical authority")
+			}
+			if waiting != nil {
+				select {
+				case <-waiting.Flight().Done():
+				default:
+					t.Fatal("canonical waiters did not wake")
+				}
+			}
+			if waiting != nil {
+				confirmation := mosiPacket{Resource: to, ID: waiting.Flight().ID(), State: "O", Owner: r.id, Epoch: 7}
+				if pending == mosi.M {
+					confirmation.State = "M"
+				}
+				if err := r.acceptGrant(confirmation); err != nil {
+					t.Fatal(err)
+				}
+				if successor.ownstate.Phase() != mosi.M {
+					t.Fatal("late read confirmation downgraded already granted M")
+				}
+				if pending == mosi.M && cluster.report(to).Epoch != 7 {
+					t.Fatal("already granted M lost the later request's authority epoch")
+				}
+			}
+			if len(r.acquisitions) != 0 {
+				t.Fatal("terminal replies retained request capabilities")
+			}
+		})
+	}
+}
+
+func TestClusterSupersededAcquisitionCompletesProtocolCapability(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "t_superseded_flight", 3)
+	owner := globalTestCluster(t, tbl.schema.Name)
+	r := owner.manager
+	cell := owner.declareShard(tbl.ActiveShards()[0], true)
+	resource := *cell.resource.Load()
+	requester := clusterMember{ID: "memcp://" + uuid.NewString(), Boot: uuid.NewString()}
+	peer := &mosiPeer{done: make(chan struct{}), outgoing: newMosiMailbox()}
+	owner.view.Store(&clusterView{members: []clusterMember{owner.self, requester}, links: []*clusterLink{{member: requester, peer: peer}}})
+	origin := &nodeCluster{self: requester}
+	origin.initializeManager()
+	origin.view.Store(&clusterView{links: []*clusterLink{{member: owner.self, peer: peer}}})
+	original := origin.manager.resourceCell(resource)
+	original.ownstate.Initialize(mosi.IO)
+	old, _ := original.ownstate.Request(mosi.M)
+	packet := mosiPacket{Kind: "write", Resource: resource, ID: old.Flight().ID(), Sequence: 8, Boot: requester.Boot}
+	origin.manager.issueAcquisition(original, packet)
+	original.ownstate.Fail(packet.ID, errClusterAcquisitionSuperseded, mosi.M)
+	current, _ := original.ownstate.Request(mosi.M)
+	newRequest := packet
+	newRequest.ID, newRequest.Sequence = current.Flight().ID(), 9
+	origin.manager.issueAcquisition(original, newRequest)
+	r.updateRecord(resource, func(record *replicaRecord) bool {
+		record.Requests = map[string]replicaRequestMark{requester.ID: {Boot: requester.Boot, ID: newRequest.ID, Sequence: 9, Write: true}}
+		return true
+	})
+	if err := r.coordinate(context.Background(), requester.ID, packet); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-peer.outgoing.ready:
+		message := takeMosi(peer.outgoing)
+		if message.Packet == nil || message.Packet.ID != packet.ID || message.Packet.Kind != "failure" || message.Packet.Error != errClusterAcquisitionSuperseded.Error() {
+			t.Fatalf("superseded request did not receive its own terminal reply: %#v", message.Packet)
+		}
+		if err := origin.manager.applyResourcePacket(owner.self.ID, message.Packet); err != nil {
+			t.Fatal(err)
+		}
+	default:
+		t.Fatal("superseded request was silently dropped")
+	}
+	if _, exists := origin.manager.acquisitions[packet.ID]; exists {
+		t.Fatal("terminal failure retained the old protocol capability")
+	}
+	if !origin.manager.issuedAcquisition(original, mosiPacket{ID: newRequest.ID, State: "M"}) {
+		t.Fatal("old failure discarded the newer request")
+	}
+	select {
+	case <-current.Flight().Done():
+		t.Fatal("old failure canceled the newer native acquisition")
+	default:
+	}
+}
+
+func TestClusterLocationReplyRefreshesRequestedAlias(t *testing.T) {
+	for _, scenario := range []struct{ newer, granted bool }{{false, false}, {true, false}, {true, true}} {
+		t.Run(fmt.Sprint("newer=", scenario.newer, "/native-grant=", scenario.granted), func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			service := &nodeScanService{}
+			cluster := &nodeCluster{self: clusterMember{ID: "requester"}, service: service, ctx: ctx}
+			cluster.initializeManager()
+			var links []*clusterLink
+			for _, id := range []string{"schema-owner", "old-owner", "current-owner", "newest-owner"} {
+				peer := &mosiPeer{ctx: ctx, done: make(chan struct{}), outgoing: newMosiMailbox(), scanService: service}
+				links = append(links, &clusterLink{member: clusterMember{ID: id}, peer: peer})
+			}
+			cluster.view.Store(&clusterView{links: links})
+			r := cluster.manager
+			from := mosiResource{Database: "location_reply", Table: "items", Shard: uuid.NewString()}
+			to := from
+			to.Shard = uuid.NewString()
+			r.resourceCell(mosiResource{Database: from.Database}).ownstate.Initialize(mosi.IO)
+			r.updateRecord(mosiResource{Database: from.Database}, func(record *replicaRecord) bool { record.Owner = links[0].member.ID; return true })
+			original := r.resourceCell(from)
+			phase := mosi.IO
+			if scenario.granted {
+				phase = mosi.S
+			}
+			original.ownstate.Initialize(phase)
+			r.updateRecord(from, func(record *replicaRecord) bool {
+				record.Owner, record.Epoch, record.State = links[1].member.ID, 3, phase.String()
+				return true
+			})
+			want, epoch := links[2].member.ID, uint64(4)
+			if scenario.newer {
+				cluster.installLocationHint(replicaRecord{Resource: to, Owner: links[3].member.ID, Epoch: 7, Content: to.Shard})
+				want, epoch = links[3].member.ID, 7
+			}
+			done := make(chan error, 1)
+			go func() {
+				owner, err := cluster.locateViaSchema(ctx, from)
+				if err == nil && owner != want {
+					err = fmt.Errorf("resolved owner %s, want %s", owner, want)
+				}
+				done <- err
+			}()
+			select {
+			case <-links[0].peer.outgoing.ready:
+				message := takeMosi(links[0].peer.outgoing)
+				var request struct {
+					Return, Method string
+					Data           []byte
+				}
+				if err := unmarshalNode(message.Data, &request); err != nil || request.Method != "cluster.location" {
+					t.Fatal("invalid location request", err)
+				}
+				entry, _ := service.handles.Load(controlReturnSlot(request.Return))
+				deliverTestCompletion(t, entry, scanCompletion{Data: mustNodeMetadata(replicaRecord{Resource: to, Owner: links[2].member.ID, Epoch: 4, Content: to.Shard})})
+			case <-ctx.Done():
+				t.Fatal(ctx.Err())
+			}
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+			lookupWant, content := want, to.Shard
+			if scenario.granted {
+				lookupWant, epoch, content = links[1].member.ID, 3, ""
+			}
+			owner, err := cluster.locate(ctx, from)
+			if err != nil || owner != lookupWant {
+				t.Fatalf("next owner grouping reused stale alias owner: %s, %v; want %s", owner, err, lookupWant)
+			}
+			if record := cluster.report(from); record.Epoch != epoch || record.Content != content {
+				t.Fatal("alias lost the accepted canonical publication", record)
+			}
+			if original.resolved() != original || r.lookupCell(to) == original || *original.resource.Load() != from || original.ownstate.Phase() != phase || r.lookupCell(to).ownstate.Phase() != mosi.IO {
+				t.Fatal("a routing hint merged cells or granted native rights")
+			}
+		})
 	}
 }

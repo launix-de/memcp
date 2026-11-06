@@ -210,7 +210,8 @@ func (cluster *nodeCluster) installLink(link *clusterLink) *mosiPeer {
 	}
 	cluster.mu.Unlock()
 	if prior != nil {
-		cluster.service.forget(link.peer)
+		// Both authenticated connections are service-owned and may already
+		// carry independent handle calls. Only select the primary route here.
 		return prior.peer
 	}
 	return link.peer
@@ -235,12 +236,11 @@ func (cluster *nodeCluster) ensurePeer(ctx context.Context, id string) (*mosiPee
 		return nil, err
 	}
 	if identity != id {
-		cluster.service.forget(peer)
+		peer.close()
 		return nil, fmt.Errorf("cluster contact identity changed")
 	}
 	link := &clusterLink{member: member, peer: peer}
 	if err := cluster.exchange(link); err != nil {
-		cluster.service.forget(peer)
 		return nil, err
 	}
 	return cluster.installLink(link), nil
@@ -251,7 +251,7 @@ func (cluster *nodeCluster) loop() {
 	defer ticker.Stop()
 	defer func() {
 		for _, link := range cluster.view.Load().links {
-			cluster.service.forget(link.peer)
+			link.peer.close()
 		}
 	}()
 	for {
@@ -269,10 +269,11 @@ func (cluster *nodeCluster) loop() {
 			delete(addresses, link.member.Address)
 			select {
 			case <-link.peer.done:
-				cluster.service.forget(link.peer)
 				cluster.mu.Lock()
-				delete(cluster.links, link.member.ID)
-				cluster.publishLocked()
+				if cluster.links[link.member.ID] == link {
+					delete(cluster.links, link.member.ID)
+					cluster.publishLocked()
+				}
 				cluster.mu.Unlock()
 			default:
 				if err := cluster.exchange(link); err != nil && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
@@ -292,12 +293,11 @@ func (cluster *nodeCluster) loop() {
 				continue
 			}
 			if id == cluster.self.ID || expectedID != "" && id != expectedID {
-				cluster.service.forget(peer)
+				peer.close()
 				continue
 			}
 			link := &clusterLink{member: clusterMember{ID: id, Address: address}, peer: peer}
 			if err := cluster.exchange(link); err != nil {
-				cluster.service.forget(peer)
 				continue
 			}
 			cluster.installLink(link)

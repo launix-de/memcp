@@ -904,8 +904,8 @@ func (service *nodeScanService) discardObjectOffers(peer *mosiPeer, refs []scm.C
 
 // GC runs no network operations. Its queue worker pushes release notifications
 // and retries queue-admission failures through the same process's connection.
-// A temporary connection is needed for object callers
-// whose original query connection has already closed.
+// Reconnected transports are shared service connections. A release operation
+// must leave queued sends and concurrent native handle calls alive.
 func (service *nodeScanService) deliverObjectRelease(release clusterObjectRelease) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -929,7 +929,6 @@ func (service *nodeScanService) deliverObjectRelease(release clusterObjectReleas
 			return false
 		}
 		peer = connected
-		defer service.forget(peer)
 	}
 	return postScanMessage(ctx, peer, "object.release", release.reference) == nil
 }
