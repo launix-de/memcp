@@ -162,3 +162,7 @@ test_cases:
 - name: UTF8 repetition never splits a multibyte scalar at its byte limit
   sql: SELECT LEN(REPLACE(REPLICATE(utf8_label,3000),'€','x')) AS scalar_count FROM editing_samples WHERE id=2
   expect: {data: [{scalar_count: 2666}]}
+
+- name: Ordered producers retain resolved editing operators and helper bindings
+  sql: SELECT id,STUFF(N'abc',2,1,CONCAT(N'n',id)) AS edited,REPLICATE(N'q',id+1) AS repeated FROM editing_samples WHERE id<3 UNION ALL SELECT -1,N'aZc',N'q' ORDER BY edited,id
+  expect: {data: [{id: -1, edited: aZc, repeated: q}, {id: 1, edited: an1c, repeated: qq}, {id: 2, edited: an2c, repeated: qqq}]}
