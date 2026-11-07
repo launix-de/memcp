@@ -2314,7 +2314,7 @@ The frontend chooses accepted declarations and every SQL return contract. */
 	(define character (has? '("CHAR" "VARCHAR" "NCHAR" "NVARCHAR" "TEXT" "NTEXT" "SYSNAME") type))
 	(if (or character (sql_numeric_type? type) (has? '("NULL" "BIT" "MONEY" "SMALLMONEY") type)) true
 		(error "ISNUMERIC does not support this declaration: " type))
-	(sql_info (if character (list (quote tsql_isnumeric_text) (sql_info_formula input))
+	(sql_info (if character (list tsql_isnumeric_text (sql_info_formula input))
 		(list (quote if) (list (quote nil?) (sql_info_formula input)) 0 1)) "INT" nil))))
 (define tsql_sign (lambda (value) (if (nil? value) nil (< value 0) -1 (> value 0) 1 0)))
 (define tsql_compile_sign (lambda (infos) (begin
@@ -2328,7 +2328,7 @@ The frontend chooses accepted declarations and every SQL return contract. */
 	(define floating (or (has? '("FLOAT" "REAL") type) (has? tsql_addition_text_types type)))
 	(if (or integer monetary decimal floating) true (error "SIGN requires a numeric declaration"))
 	(define converted (if floating (tsql_convert_value_info input "FLOAT" nil) input))
-	(sql_info (list (quote tsql_sign) (sql_info_formula converted))
+	(sql_info (list tsql_sign (sql_info_formula converted))
 		(if integer (if (equal? type "BIGINT") "BIGINT" "INT")
 			monetary "MONEY" decimal (sql_info_datatype input) "FLOAT") nil))))
 (define tsql_power (lambda (value exponent) (if (or (nil? value) (nil? exponent)) nil (begin
@@ -2359,14 +2359,14 @@ The frontend chooses accepted declarations and every SQL return contract. */
 	(define value (sql_info_formula converted))
 	(define power (sql_info_formula exponent))
 	(define formula (if integer
-		(list (quote tsql_power_integer) value power
+		(list tsql_power_integer value power
 			(if (equal? type "BIGINT") tsql_round_int64_minimum -2147483648)
 			(if (equal? type "BIGINT") tsql_round_int64_maximum 2147483647))
-		(list (quote tsql_power) value power)))
+		(list tsql_power value power)))
 	(define dimensions (sql_info_dimensions input))
 	(define scale (if (and decimal (not (empty_list? dimensions))) (cadr dimensions) 0))
-	(sql_info (if monetary (list (quote tsql_cast_money) formula false)
-		decimal (list (quote tsql_cast_decimal) formula 38 scale) formula)
+	(sql_info (if monetary (list tsql_cast_money formula false)
+		decimal (list tsql_cast_decimal formula 38 scale) formula)
 		(if integer (if (equal? type "BIGINT") "BIGINT" "INT")
 			monetary "MONEY" decimal (list "DECIMAL" (list 38 scale)) "FLOAT") nil))))
 
