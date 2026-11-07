@@ -1893,6 +1893,7 @@ dimensions are metadata only and are absent from the executable plan. */
 	((symbol tsql_cast_decimal) _value precision scale) (list precision scale)
 	((symbol tsql_quote_name) _value _delimiter) '(258)
 	((symbol tsql_space) _amount) '(8000)
+	((symbol tsql_str) _value width _places) (tsql_str_dimensions width)
 	((symbol tsql_read_identity) _state) '(38 0)
 	((symbol tsql_cast_binary) _value length _fixed) (list length)
 	((symbol tsql_integer_to_binary) _value _width length _fixed) (list length)
@@ -1975,6 +1976,7 @@ row or supplied parameter value exists. */
 	(define money (has? '("MONEY" "SMALLMONEY") type))
 	(define kind (if (has? '("INT" "INTEGER" "BIGINT" "SMALLINT" "TINYINT") type) 38
 		money 110 numeric 108 (tsql_binary_type? type) 165
+		(equal? type "VARCHAR") 167
 		(has? '("FLOAT" "DOUBLE" "REAL" "DECIMAL" "NUMERIC") type) 109
 		(has? '("BOOLEAN" "BOOL" "BIT") type) 104
 		(equal? type "DATE") 40 (equal? type "TIME") 41 (equal? type "DATETIME2") 42
@@ -1991,11 +1993,16 @@ row or supplied parameter value exists. */
 		108 (if (<= precision 9) 5 (<= precision 19) 9 (<= precision 28) 13 17)
 		165 (if (equal? type "ROWVERSION") 8
 			(and (not (empty_list? dimensions)) (> (car dimensions) 0)) (car dimensions) 65535)
+		167 (if (empty_list? dimensions) 8000
+			(equal? (car dimensions) -1) 65535 (max 1 (car dimensions)))
 		231 (if (and (has? '("NVARCHAR" "NCHAR") type) (not (empty_list? dimensions)))
 			(if (equal? (car dimensions) -1) 65535 (* 2 (car dimensions))) 8000)
 		104 1
 		_ (match type "TINYINT" 1 "SMALLINT" 2 "INT" 4 "INTEGER" 4 _ 8)))
-	(list "kind" kind "size" size "precision" precision "scale" scale))))
+	(merge (list "kind" kind "size" size "precision" precision "scale" scale)
+		/* Match the transport's existing nonnational CP1252 character codec.
+		National declarations retain UTF16 wire values and widths. */
+		(if (equal? kind 167) (list "collation" (hex2bin "0904d00034")) '())))))
 (define tsql_result_columns (lambda (query parameters) (match query
 	((symbol query-block) _schema sources fields _where _group _having _order _limit _offset _hidden _stages _facts)
 	(begin
@@ -2283,6 +2290,32 @@ No character list, decoder, relation or runtime SQL type is constructed here. */
 		"LTRIM" (quote tsql_ltrim) "RTRIM" (quote tsql_rtrim) "TRIM" (quote tsql_trim)))
 	(sql_info (list helper (sql_info_formula converted)) output (sql_info_collation input)))))
 
+/* STR owns field width and half-away-from-zero rounding in the frontend.
+The runtime formatter only renders the already rounded floating value. */
+(define tsql_str (lambda (value width places)
+	(if (or (nil? value) (nil? width) (nil? places)) nil
+		(or (<= width 0) (< places 0)) nil
+		(> width 8000) (error "STR fields wider than 8000 are unsupported")
+		(begin
+			(define precision (min places 16))
+			(define rounded (tsql_round_real value precision 0 (tsql_round_real_factor precision)))
+			(define text (format_fixed (if (equal? rounded 0) 0 rounded) precision))
+			(if (> (strlen text) width) (string_repeat "*" width)
+				(concat (string_repeat " " (- width (strlen text))) text))))))
+(define tsql_str_dimensions (lambda (width) (begin
+	(define known (try (lambda () (tryfold width)) (lambda (_cause) nil)))
+	(list (if (and (number? known) (> known 0) (<= known 8000)) known 8000)))))
+(define tsql_compile_str (lambda (infos) (begin
+	(if (and (>= (count infos) 1) (<= (count infos) 3)) true
+		(error "STR requires value and optional length and decimal arguments"))
+	(define input (tsql_convert_value_info (car infos) "FLOAT" nil))
+	(define width (if (>= (count infos) 2)
+		(tsql_convert_value_info (cadr infos) "INT" nil) (sql_info 10 "INT" nil)))
+	(define places (if (equal? (count infos) 3)
+		(tsql_convert_value_info (nth infos 2) "INT" nil) (sql_info 0 "INT" nil)))
+	(sql_info (list (quote tsql_str) (sql_info_formula input) (sql_info_formula width) (sql_info_formula places))
+		(list "VARCHAR" (tsql_str_dimensions (sql_info_formula width))) nil))))
+
 (define tsql_builtin_compiler (lambda (name) (lambda (infos)
 	(if (has? '("NEWID" "UUIDV7") name) (begin
 		(if (empty_list? infos) true (error name " takes no arguments"))
@@ -2297,6 +2330,7 @@ No character list, decoder, relation or runtime SQL type is constructed here. */
 (define tsql_builtin_expr (lambda (name arguments) (begin
 	(if (equal? name "PARSENAME")
 		(cons (quote sql_compile_expr) (cons (quote tsql_compile_parsename) arguments))
+		(equal? name "STR") (cons (quote sql_compile_expr) (cons (quote tsql_compile_str) arguments))
 		(begin
 			(if (tsql_builtins name) true (error "unknown function " name))
 			(cons (quote sql_compile_expr) (cons (list (quote tsql_builtin_compiler) name) arguments)))))))
