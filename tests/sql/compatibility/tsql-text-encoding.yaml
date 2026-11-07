@@ -1,0 +1,30 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: T-SQL encoded byte characters and declared text lengths
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+setup: []
+test_cases:
+- name: CHAR decodes CP1252 characters
+  sql: SELECT CHAR(65) AS letter,CHAR(233) AS accent,CHAR(128) AS currency
+  expect: {rows: 1, data: [{letter: A, accent: é, currency: €}]}
+- name: ASCII uses the encoded first byte
+  sql: SELECT ASCII(N'é') AS accent,ASCII(N'€') AS currency,ASCII(N'A漢') AS prefix
+  expect: {rows: 1, data: [{accent: 233, currency: 128, prefix: 65}]}
+- name: Character bounds and NULL remain explicit
+  sql: SELECT CHAR(-1) AS negative,CHAR(256) AS excessive,CHAR(NULL) AS missing,ASCII('') AS empty
+  expect: {rows: 1, data: [{negative: null, excessive: null, missing: null, empty: null}]}
+- name: Byte lengths follow declared national and nonnational encodings
+  sql: SELECT DATALENGTH('é€ ') AS narrow,DATALENGTH(N'é€ ') AS national,DATALENGTH(N'😀') AS pair
+  expect: {rows: 1, data: [{narrow: 3, national: 6, pair: 4}]}
+- name: LEN uses CP1252 characters and national UTF16 units
+  sql: SELECT LEN('é€  ') AS narrow,LEN(N'😀é ') AS national,LEN(CHAR(9)) AS tab
+  expect: {rows: 1, data: [{narrow: 2, national: 3, tab: 1}]}
+- name: VARCHAR casts truncate encoded bytes rather than UTF8 carrier bytes
+  sql: SELECT CAST(N'éx' AS VARCHAR(1)) AS accent,CAST(N'€x' AS VARCHAR(1)) AS currency,CAST(N'é' AS CHAR(3)) AS padded
+  expect: {rows: 1, data: [{accent: é, currency: €, padded: 'é  '}]}
+- name: Unrepresentable default-codepage input fails explicitly
+  sql: SELECT ASCII(N'漢')
+  expect: {error: true}
