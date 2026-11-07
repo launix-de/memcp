@@ -73,3 +73,27 @@ test_cases:
 - name: Extra server property arguments are rejected
   sql: SELECT SERVERPROPERTY(N'Edition',N'other')
   expect: {error: true}
+- name: Unsupported variant comparison fails instead of comparing its internal tuple
+  sql: SELECT CASE WHEN SERVERPROPERTY('Edition')=N'MemCP' THEN 1 ELSE 0 END AS value
+  expect: {error: true}
+- name: Unsupported implicit concatenation refuses internal variant stringification
+  sql: SELECT CONCAT(SERVERPROPERTY('Edition'),N'x') AS value
+  expect: {error: true}
+- name: Unsupported common type conversion from a variant fails explicitly
+  sql: SELECT COALESCE(SERVERPROPERTY('Edition'),N'x') AS value
+  expect: {error: true}
+- name: Unsupported numeric variant conversion fails
+  sql: SELECT CAST(SERVERPROPERTY('Edition') AS INT) AS value
+  expect: {error: true}
+- name: Unsupported approximate variant conversion fails
+  sql: SELECT CAST(SERVERPROPERTY('Edition') AS FLOAT) AS value
+  expect: {error: true}
+- name: Unsupported Boolean variant conversion fails
+  sql: SELECT CAST(SERVERPROPERTY('Edition') AS BIT) AS value
+  expect: {error: true}
+- name: Variant NULL inspection uses SQL NULL rather than its intrinsic payload
+  sql: SELECT CASE WHEN SERVERPROPERTY('Edition') IS NOT NULL THEN 1 ELSE 0 END AS present, CASE WHEN SERVERPROPERTY('Unknown') IS NULL THEN 1 ELSE 0 END AS missing
+  expect: {rows: 1, data: [{present: 1, missing: 1}]}
+- name: Unsupported variant ordering fails instead of ordering internal tuples
+  sql: SELECT SERVERPROPERTY('Edition') AS edition ORDER BY SERVERPROPERTY('Edition')
+  expect: {error: true}

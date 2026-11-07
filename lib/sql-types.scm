@@ -416,6 +416,8 @@ merged collation remains in the info slot for other compiler consumers. */
 	(begin
 		(define lt (sql_info_type left_info))
 		(define rt (sql_info_type right_info))
+		(if (or (equal? lt "SQL_VARIANT") (equal? rt "SQL_VARIANT"))
+			(error "SQL_VARIANT comparison is not implemented") true)
 		(define plain (list head (sql_info_formula left_info) (sql_info_formula right_info)))
 		(if (and (sql_text_type? lt) (sql_text_type? rt))
 			(begin
@@ -495,6 +497,12 @@ operand contract. Unknown registered reducers retain an explicit any contract. *
 /* Call contracts consume resolved SQL triples from their producing scope. */
 (define sql_call_info (lambda (head infos)
 	(begin
+		/* A SQL_VARIANT is an intrinsic tagged SQL scalar. Generic SCM list
+		comparison/stringification is not its SQL semantics. Until those typed
+		consumers exist, only NULL inspection may use the generic call path. */
+		(if (and (not (or (equal? head (quote nil?)) (equal? head nil?)))
+			(reduce infos (lambda (found info) (or found (equal? (sql_info_type info) "SQL_VARIANT"))) false))
+			(error "this SQL_VARIANT operation is not implemented") true)
 		(define forms (map infos sql_info_formula))
 		(if (equal? head (quote aggregate)) (sql_aggregate_info head infos)
 			(has? '(date_add date_sub) head) (sql_temporal_arithmetic_info head infos)
@@ -621,6 +629,8 @@ contracts select their comparator once, outside executable row loops. */
 		'(order_expr order_dir) (begin
 			(define order_dir (eval order_dir))
 			(define info (sql_expr_info sources order_expr))
+			(if (equal? (sql_info_type info) "SQL_VARIANT")
+				(error "SQL_VARIANT ordering is not implemented") true)
 			(define coll (sql_info_collation info))
 			(if (and (equal? (sql_info_type info) "ENUM")
 				(or (equal? order_dir <) (equal? order_dir >)))
