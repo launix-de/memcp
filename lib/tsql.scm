@@ -1188,7 +1188,9 @@ no supplied value, physical plan, cache binding or marker is executed. */
 		(quote tsql_cast_decimal) (quote tsql_cast_integer) (quote tsql_cast_float)
 		(quote tsql_cast_bit)) head)
 		(expression_equal? head tsql_cast_integer) (expression_equal? head tsql_cast_float)
-		(expression_equal? head tsql_cast_bit))))
+		(expression_equal? head tsql_cast_bit)
+		(reduce (list tsql_cast_text tsql_cast_fixed_text tsql_cast_binary tsql_cast_decimal)
+			(lambda (matched helper) (or matched (expression_equal? head helper))) false))))
 (define tsql_parameter_analysis_join (lambda (left right)
 	(list (merge (list (car left) (car right))) (merge (list (cadr left) (cadr right))))))
 (define tsql_parameter_candidates (lambda (node sources declarations) (match node
@@ -1201,8 +1203,9 @@ no supplied value, physical plan, cache binding or marker is executed. */
 				(cons head (cons operand _arguments)) (begin
 					(define parameter (tsql_parameter_probe operand))
 					(if (and parameter (tsql_parameter_cast_head? head))
-						(list (list (car parameter) (cadr parameter) type
-							(coalesceNil (tsql_result_dimensions scope formula declarations) '()))) '()))
+						(list (list (car parameter) (cadr parameter) (sql_datatype_name type)
+							(match type '(_name dimensions) dimensions
+								_ (coalesceNil (tsql_result_dimensions scope formula declarations) '())))) '()))
 				_ '())
 			'(head left right) (if (has? (list (quote equal?) (quote equal??)) head) (begin
 				(define parameter (coalesceNil (tsql_parameter_probe left) (tsql_parameter_probe right)))
