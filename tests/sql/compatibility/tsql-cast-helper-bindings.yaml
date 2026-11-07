@@ -46,3 +46,7 @@ test_cases:
   syntax: tsql
   sql: SELECT id,CAST(CAST(id AS NVARCHAR(20)) AS DECIMAL(10,2)) AS number FROM ordered_binding_rows ORDER BY CAST(CAST(id AS NVARCHAR(20)) AS DECIMAL(10,2)) DESC
   expect: {data: [{id: 3,number: 3},{id: 2,number: 2},{id: 1,number: 1}]}
+- name: Closed currency formatting helper preserves thousands grouping
+  syntax: tsql
+  sql: SELECT CONVERT(NVARCHAR(40),CAST(1234567.89 AS MONEY),1) AS amount
+  expect: {data: [{amount: '1,234,567.89'}]}

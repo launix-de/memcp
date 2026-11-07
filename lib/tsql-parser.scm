@@ -783,7 +783,7 @@ syntax selects a source-dependent style through the separate factory below. */
 	(define national (has? '("NVARCHAR" "NCHAR") type))
 	(define fixed (has? '("CHAR" "NCHAR") type))
 	(if (has? '("MONEY" "SMALLMONEY") source)
-		(sql_info (list (quote tsql_cast_money_text) (sql_info_formula input) style
+		(sql_info (list tsql_cast_money_text (sql_info_formula input) style
 			length national fixed) type nil)
 		(tsql_temporal_type? source) (if (equal? style 100)
 			(if (has? '("DATETIME" "SMALLDATETIME") source)
