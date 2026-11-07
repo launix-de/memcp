@@ -1,0 +1,38 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  description: Exact physical access constraints on virtual catalog sources
+setup: []
+cleanup: []
+test_cases:
+- name: Catalog equality remains effective after residual pruning
+  sql: SELECT schema_name FROM information_schema.schemata WHERE schema_name='memcp-tests'
+  expect: {rows: 1, data: [{schema_name: memcp-tests}]}
+- name: Missing catalog equality returns no rows
+  sql: SELECT schema_name FROM information_schema.schemata WHERE schema_name='missing_catalog_source'
+  expect: {rows: 0}
+- name: Ordered catalog equality filters before taking a window
+  sql: SELECT schema_name FROM information_schema.schemata WHERE schema_name='memcp-tests' ORDER BY schema_name LIMIT 1
+  expect: {rows: 1, data: [{schema_name: memcp-tests}]}
+- name: Ordered missing equality does not return the first catalog row
+  sql: SELECT schema_name FROM information_schema.schemata WHERE schema_name='missing_catalog_source' ORDER BY schema_name LIMIT 1
+  expect: {rows: 0}
+- name: Catalog range endpoints are enforced
+  sql: SELECT schema_name FROM information_schema.schemata WHERE schema_name>='memcp-tests' AND schema_name<'memcp-testt' ORDER BY schema_name
+  expect: {rows: 1, data: [{schema_name: memcp-tests}]}
+- name: Catalog strict range excludes its endpoint
+  sql: SELECT schema_name FROM information_schema.schemata WHERE schema_name>'memcp-tests' AND schema_name<'memcp-testt'
+  expect: {rows: 0}
+- name: Catalog case insensitive equality keeps its comparison contract
+  sql: SELECT schema_name FROM information_schema.schemata WHERE schema_name='MEMCP-TESTS' ORDER BY schema_name
+  expect: {rows: 1, data: [{schema_name: memcp-tests}]}
+- name: Computed catalog equality evaluates the computed access column
+  sql: SELECT schema_name FROM information_schema.schemata WHERE LOWER(schema_name)='memcp-tests' ORDER BY schema_name
+  expect: {rows: 1, data: [{schema_name: memcp-tests}]}
+- name: Catalog residual callback still rejects candidate-only predicates
+  sql: SELECT schema_name FROM information_schema.schemata WHERE schema_name='memcp-tests' AND schema_name LIKE 'absent%'
+  expect: {rows: 0}
+- name: Catalog equality and offset do not skip into an unrelated row
+  sql: SELECT schema_name FROM information_schema.schemata WHERE schema_name='memcp-tests' ORDER BY schema_name LIMIT 1 OFFSET 1
+  expect: {rows: 0}

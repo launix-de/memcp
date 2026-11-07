@@ -1806,6 +1806,7 @@ func Init(en scm.Env) {
 			isOuter := len(a) > layout.outerIdx && scm.ToBool(a[layout.outerIdx])
 
 			if list, ok := scmerSlice(tableArg); ok {
+				access := bindListScanAccess(accessSchema, accessValues)
 				neutral := scm.NewNil()
 				if len(a) > layout.neutralIdx {
 					neutral = a[layout.neutralIdx]
@@ -1819,6 +1820,9 @@ func Init(en scm.Env) {
 				for _, val := range list {
 					row := mustScmerSlice(val, "scan list row")
 					ds := dataset(row)
+					if !access.matches(ds) {
+						continue
+					}
 					for i, col := range filtercols {
 						filterparams[i], _ = ds.GetI(col)
 					}
@@ -2154,6 +2158,7 @@ func Init(en scm.Env) {
 			// metadata/RDF callers use physical scan sources. Query plans must never
 			// materialize cardinality-dependent rows into SCM lists.
 			if list, ok := scmerSlice(tableArg); ok {
+				access := bindListScanAccess(accessSchema, accessValues)
 				result := scm.ApplyOnce(neutral, nil)
 				filterfn := scm.PrepareSerialProc(a[layout.filterFnIdx])
 				filterparams := make([]scm.Scmer, len(filtercols))
@@ -2168,6 +2173,9 @@ func Init(en scm.Env) {
 				for _, val := range list {
 					row := mustScmerSlice(val, "scan_order list row")
 					ds := dataset(row)
+					if !access.matches(ds) {
+						continue
+					}
 					for i, col := range filtercols {
 						filterparams[i], _ = ds.GetI(col)
 					}
