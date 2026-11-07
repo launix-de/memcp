@@ -2338,7 +2338,8 @@ runtime primitives know only explicit encodings and raw byte coordinates. */
 		(list "CHAR" '(1)) '("utf8mb4_general_ci" 4)))))
 (define tsql_ascii (lambda (value encoding binary)
 	(if (nil? value) nil
-		(byte_value (if binary value (tsql_encode_character value encoding 1)) 0))))
+		(byte_value (if (or binary (equal? encoding "utf-8")) value
+			(tsql_encode_character value encoding 1)) 0))))
 (define tsql_compile_ascii (lambda (infos) (begin
 	(if (equal? (count infos) 1) true (error "ASCII requires one argument"))
 	(define input (car infos))
