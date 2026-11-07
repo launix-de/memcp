@@ -1001,7 +1001,10 @@ func Init(en scm.Env) {
 			if err != nil {
 				panic(err)
 			}
-			return scm.NewString(root + string(filepath.Separator))
+			if !strings.HasSuffix(root, string(filepath.Separator)) {
+				root += string(filepath.Separator)
+			}
+			return scm.NewString(root)
 		},
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "Absolute configured local storage root with a trailing native path separator", HasSideEffects: true, Params: []*scm.TypeDescriptor{}, Return: &scm.TypeDescriptor{Kind: "string"}},
 	})

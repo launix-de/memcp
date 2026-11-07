@@ -119,6 +119,18 @@ driver. Each probe keeps one connection for its statements, supports named
 parameters and prepared calls, and checks rows, values, column names and errors.
 Unsupported frontend features remain noncritical specifications.
 
+`sql/compatibility/tsql-server-properties.yaml` covers the native server-property
+profile: `Edition` identifies MemCP; `InstanceDefaultDataPath` and
+`InstanceDefaultLogPath` report the configured absolute local storage root
+(with a trailing native separator). Native WAL files share that root. Other
+properties return NULL rather than fabricated SQL Server version or capability
+claims. Property expressions are resolved at execution time, and TDS declares
+SQL_VARIANT even for NULL results. The intrinsic variant subtype is NVARCHAR(128).
+HTTP output unwraps that scalar at the result edge; explicit text casts are
+supported. General SQL_VARIANT column storage, implicit conversions, comparisons,
+and non-text subtype conversions are outside this property profile.
+
+
 Place a regression at the layer that owns its root cause, not at the layer
 where an application happened to expose it. Use `integration/query-shapes`
 only when the composition of otherwise independent SQL features is the subject
