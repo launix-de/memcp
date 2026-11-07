@@ -1,0 +1,40 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  description: Text cast formulas retain resolved frontend helper procedures
+setup:
+- sql: DROP TABLE IF EXISTS ordered_binding_rows
+- sql: CREATE TABLE ordered_binding_rows(id INT PRIMARY KEY,label VARCHAR(30))
+- sql: INSERT INTO ordered_binding_rows VALUES(1,'beta'),(2,'alpha'),(3,NULL)
+cleanup:
+- sql: DROP TABLE IF EXISTS ordered_binding_rows
+test_cases:
+- name: Computed cast sort callback binds its frontend helper
+  syntax: tsql
+  sql: SELECT id FROM ordered_binding_rows ORDER BY CAST(label AS NVARCHAR(20)),id
+  expect: {data: [{id: 3},{id: 2},{id: 1}]}
+- name: Constant cast sort callback preserves tied rows
+  syntax: tsql
+  sql: SELECT id FROM ordered_binding_rows ORDER BY CAST(N'constant' AS NVARCHAR(20)),id DESC
+  expect: {data: [{id: 3},{id: 2},{id: 1}]}
+- name: Ordered native union callbacks bind cast functions in both branches
+  syntax: tsql
+  sql: SELECT CAST(label AS NVARCHAR(20)) AS name FROM ordered_binding_rows WHERE id=1 UNION ALL SELECT CAST(label AS NVARCHAR(20)) AS name FROM ordered_binding_rows WHERE id=2 ORDER BY name
+  expect: {data: [{name: alpha},{name: beta}]}
+- name: Ordered mixed catalog union evaluates frontend helper callbacks
+  syntax: tsql
+  sql: SELECT CAST(N'catalog_probe' AS NVARCHAR(128)) AS name FROM information_schema.tables WHERE table_schema=N'memcp-tests' AND table_name=N'ordered_binding_rows' UNION ALL SELECT CAST(N'remote_probe' AS NVARCHAR(128)) AS name FROM ordered_binding_rows WHERE id=1 ORDER BY name
+  expect: {data: [{name: catalog_probe},{name: remote_probe}]}
+- name: Fixed national text sort callback retains width and padding
+  syntax: tsql
+  sql: SELECT id,CAST(label AS NCHAR(6)) AS name FROM ordered_binding_rows WHERE id<3 ORDER BY CAST(label AS NCHAR(6))
+  expect: {data: [{id: 2,name: 'alpha '},{id: 1,name: 'beta  '}]}
+- name: Numeric national text sort callback retains numeric spelling
+  syntax: tsql
+  sql: SELECT id FROM ordered_binding_rows ORDER BY CAST(id AS NVARCHAR(20)) DESC
+  expect: {data: [{id: 3},{id: 2},{id: 1}]}
+- name: Money text sort callback retains its requested width
+  syntax: tsql
+  sql: SELECT id,CAST(CAST(id AS MONEY) AS NVARCHAR(20)) AS amount FROM ordered_binding_rows WHERE id<3 ORDER BY CAST(CAST(id AS MONEY) AS NVARCHAR(20)) DESC
+  expect: {data: [{id: 2,amount: '2.00'},{id: 1,amount: '1.00'}]}

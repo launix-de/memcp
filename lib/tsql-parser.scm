@@ -707,12 +707,12 @@ national text retain their conversion error. Runtime carriers select no type. */
 					"DATETIME2" "%Y-%m-%d %H:%i:%s.000" _ "%Y-%m-%d %H:%i:%s")))
 		(sql_info_formula info)))
 	(define converted (if (has? '("MONEY" "SMALLMONEY") source)
-		(list (quote tsql_cast_money_text) formula 0 length national fixed)
+		(list tsql_cast_money_text formula 0 length national fixed)
 		(sql_numeric_type? source)
-		(list (quote tsql_cast_numeric_text) formula length national fixed
+		(list tsql_cast_numeric_text formula length national fixed
 			(and (not national) (has? '("TINYINT" "SMALLINT" "INT" "INTEGER") source))
 			(has? '("BIT" "BOOL" "BOOLEAN") source))
-		(list (if fixed (quote tsql_cast_fixed_text) (quote tsql_cast_text)) formula length national)))
+		(list (if fixed tsql_cast_fixed_text tsql_cast_text) formula length national)))
 	(sql_info converted
 		(if (and national fixed) "NCHAR" national "NVARCHAR" fixed "CHAR" "VARCHAR")
 		(sql_info_collation info))))))
