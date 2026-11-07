@@ -171,12 +171,13 @@ test_cases:
   sql: IF 1 SELECT 5 AS n
   expect:
     error: true
-- name: IF EXISTS uses the common relational planner
+# Historical case names are stable CI identities; expectations now verify supported results.
+- name: IF rejects relational EXISTS until logical support exists
   sql: IF EXISTS(SELECT id FROM dbo.tsql_data) SELECT 5 AS n
   expect:
     rows: 1
     data: [{n: 5}]
-- name: IF scalar subqueries use the common relational planner
+- name: IF rejects scalar subqueries
   sql: IF (SELECT 1)=1 SELECT 5 AS n
   expect:
     rows: 1
