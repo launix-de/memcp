@@ -1728,11 +1728,15 @@ func Init(en scm.Env) {
 			filtercols := scmerSliceToStrings(mustScmerSlice(a[4], "filterColumns"))
 			tableArg := a[1]
 			if list, ok := scmerSlice(tableArg); ok {
+				access := bindListScanAccess(accessSchema, accessValues)
 				filterfn := scm.PrepareSerialProc(a[5])
 				filterparams := make([]scm.Scmer, len(filtercols))
 				for _, val := range list {
 					row := mustScmerSlice(val, "scan_exists list row")
 					ds := dataset(row)
+					if !access.matches(ds) {
+						continue
+					}
 					for i, col := range filtercols {
 						filterparams[i], _ = ds.GetI(col)
 					}
@@ -1806,6 +1810,7 @@ func Init(en scm.Env) {
 			isOuter := len(a) > layout.outerIdx && scm.ToBool(a[layout.outerIdx])
 
 			if list, ok := scmerSlice(tableArg); ok {
+				access := bindListScanAccess(accessSchema, accessValues)
 				neutral := scm.NewNil()
 				if len(a) > layout.neutralIdx {
 					neutral = a[layout.neutralIdx]
@@ -1819,6 +1824,9 @@ func Init(en scm.Env) {
 				for _, val := range list {
 					row := mustScmerSlice(val, "scan list row")
 					ds := dataset(row)
+					if !access.matches(ds) {
+						continue
+					}
 					for i, col := range filtercols {
 						filterparams[i], _ = ds.GetI(col)
 					}
@@ -1909,6 +1917,10 @@ func Init(en scm.Env) {
 			isOuter := len(a) > layout.outerIdx+sbShift && scm.ToBool(a[layout.outerIdx+sbShift])
 
 			if list, ok := scmerSlice(tableArg); ok {
+				access, valid := scanAccessFromScheme(accessSchema, accessValues, nil)
+				if !valid {
+					panic("invalid list scan_batch access schema")
+				}
 				neutral := scm.NewNil()
 				if len(a) > layout.neutralIdx+sbShift {
 					neutral = a[layout.neutralIdx+sbShift]
@@ -1924,9 +1936,16 @@ func Init(en scm.Env) {
 					batchCount = len(batchdata) / stride
 				}
 				for batchid := 0; batchid < batchCount; batchid++ {
+					if access.impossibleBatch(stride, batchdata, batchid) {
+						continue
+					}
+					matcher := prepareListScanAccess(access.withBatch(stride, batchdata, batchid), batchdata[batchid*stride:(batchid+1)*stride])
 					for _, val := range list {
 						row := mustScmerSlice(val, "scan_batch list row")
 						ds := dataset(row)
+						if !matcher.matches(ds) {
+							continue
+						}
 						for i, col := range filtercols {
 							if subidx, ok := parseBatchPseudoColName(col); ok {
 								filterparams[i] = batchdata[batchid*stride+subidx]
@@ -2154,6 +2173,7 @@ func Init(en scm.Env) {
 			// metadata/RDF callers use physical scan sources. Query plans must never
 			// materialize cardinality-dependent rows into SCM lists.
 			if list, ok := scmerSlice(tableArg); ok {
+				access := bindListScanAccess(accessSchema, accessValues)
 				result := scm.ApplyOnce(neutral, nil)
 				filterfn := scm.PrepareSerialProc(a[layout.filterFnIdx])
 				filterparams := make([]scm.Scmer, len(filtercols))
@@ -2168,6 +2188,9 @@ func Init(en scm.Env) {
 				for _, val := range list {
 					row := mustScmerSlice(val, "scan_order list row")
 					ds := dataset(row)
+					if !access.matches(ds) {
+						continue
+					}
 					for i, col := range filtercols {
 						filterparams[i], _ = ds.GetI(col)
 					}
