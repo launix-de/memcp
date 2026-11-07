@@ -2390,8 +2390,9 @@ runtime primitives know only explicit encodings and raw byte coordinates. */
 		((tsql_text_compiler -1 false false) infos)))
 	(define encoding (if (or national binary) nil (tsql_character_encoding converted)))
 	(define collation (sql_info_collation input))
-	(define unit (if (or (equal? encoding "utf-8")
-		(and national collation (regexp_test (car collation) "(?i)_sc(_|$)"))) "rune" national "utf16" "byte"))
+	(define supplementary (if national
+		(if (nil? collation) false (regexp_test (car collation) "(?i)_sc(_|$)")) false))
+	(define unit (if (or (equal? encoding "utf-8") supplementary) "rune" national "utf16" "byte"))
 	(sql_info (list tsql_len (sql_info_formula converted) unit encoding)
 		(if (and (has? '("VARCHAR" "NVARCHAR" "VARBINARY") type) (equal? (sql_info_dimensions input) '(-1))) "BIGINT" "INT") nil))))
 
