@@ -31,7 +31,7 @@ test_cases:
     UNION ALL SELECT CAST(N'remote_probe' AS NVARCHAR(128)) AS name,1 AS valid
     FROM big_items WHERE id=0 ORDER BY name
   expect:
-    data: [{name: replica_test, valid: 1}, {name: remote_probe, valid: 1}]
+    data: [{name: remote_probe, valid: 1}, {name: replica_test, valid: 1}]
     cluster: {min_remote_shards: 1}
 - name: tsql-object-catalog-and-remote-source-share-the-planner
   syntax: tsql
