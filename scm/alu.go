@@ -86,6 +86,7 @@ func roundSQLDecimalOutput(value float64, scale int) float64 {
 func init_alu() {
 	// string functions
 	DeclareTitle("Arithmetic / Logic")
+	initNumberPower()
 
 	// These pure operations use one exact 64-bit carrier. Width, signedness
 	// and source-language conversion rules belong to their callers.
