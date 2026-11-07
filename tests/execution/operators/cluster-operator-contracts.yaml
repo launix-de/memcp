@@ -92,6 +92,15 @@ test_cases:
     - name: remote_probe
     cluster:
       min_remote_shards: 1
+- name: tsql-text-editing-survives-delegation
+  syntax: tsql
+  sql: >-
+    SELECT id,STUFF(N'a😀bc',2,2,CONVERT(NVARCHAR(20),id)) AS edited,
+    REPLICATE(CAST('é' AS VARCHAR(20)),id+1) AS repeated
+    FROM big_items WHERE id<3 ORDER BY id
+  expect:
+    data: [{id: 0, edited: a0bc, repeated: 'é'}, {id: 1, edited: a1bc, repeated: 'éé'}, {id: 2, edited: a2bc, repeated: 'ééé'}]
+    cluster: {min_remote_shards: 1}
 - name: tsql-database-access-probe-survives-delegation
   syntax: tsql
   sql: >-
