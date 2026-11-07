@@ -5,26 +5,392 @@ metadata:
   syntax: tsql
   isolated: true
   requires_tds: true
-setup: []
+setup:
+- sql: DROP TABLE IF EXISTS encoding_items
+- sql: CREATE TABLE encoding_items(id INT PRIMARY KEY,plain_text VARCHAR(20),fixed_text CHAR(4),wide_text NVARCHAR(20),wide_fixed NCHAR(4),large_text
+    VARCHAR(MAX),large_wide NVARCHAR(MAX),bytes VARBINARY(MAX),clock TIME(3),approximate FLOAT(24),amount DECIMAL(20,2),utf8_text VARCHAR(20)
+    COLLATE Latin1_General_100_CI_AS_SC_UTF8,supplementary NVARCHAR(20) COLLATE Latin1_General_100_CI_AS_SC)
+- sql: INSERT INTO encoding_items VALUES(1,N'é €',N'é',N'😀é ',N'😀',N'é ',N'😀 ',0x00FF20,N'12:34:56',1.5,123.45,N'é😀 ',N'😀é ')
+- sql: INSERT INTO encoding_items(id) VALUES(2)
+cleanup:
+- sql: DROP TABLE IF EXISTS encoding_items
 test_cases:
 - name: CHAR decodes CP1252 characters
   sql: SELECT CHAR(65) AS letter,CHAR(233) AS accent,CHAR(128) AS currency
-  expect: {rows: 1, data: [{letter: A, accent: é, currency: €}]}
-- name: ASCII uses the encoded first byte
-  sql: SELECT ASCII(N'é') AS accent,ASCII(N'€') AS currency,ASCII(N'A漢') AS prefix
-  expect: {rows: 1, data: [{accent: 233, currency: 128, prefix: 65}]}
-- name: Character bounds and NULL remain explicit
-  sql: SELECT CHAR(-1) AS negative,CHAR(256) AS excessive,CHAR(NULL) AS missing,ASCII('') AS empty
-  expect: {rows: 1, data: [{negative: null, excessive: null, missing: null, empty: null}]}
-- name: Byte lengths follow declared national and nonnational encodings
+  expect:
+    rows: 1
+    data:
+    - letter: A
+      accent: é
+      currency: €
+- name: Embedded zero and control codes remain byte values
+  sql: SELECT ASCII(CHAR(0)) AS zero,ASCII(CHAR(9)) AS tab,ASCII(CHAR(10)) AS line_feed,ASCII(CHAR(13)) AS carriage_return
+  expect:
+    rows: 1
+    data:
+    - zero: 0
+      tab: 9
+      line_feed: 10
+      carriage_return: 13
+- name: CHAR bounds and NULL are explicit
+  sql: SELECT CHAR(-1) AS negative,CHAR(256) AS excessive,CHAR(NULL) AS missing
+  expect:
+    rows: 1
+    data:
+    - negative: null
+      excessive: null
+      missing: null
+- name: Undefined CP1252 byte codes return NULL
+  sql: SELECT CHAR(129) AS missing,CHAR(141) AS another
+  expect:
+    rows: 1
+    data:
+    - missing: null
+      another: null
+- name: CHAR converts its declared integer operand before the byte range check
+  sql: SELECT CHAR(N'65') AS text_code,CHAR(65.9) AS truncated,CHAR(CAST(65.9 AS MONEY)) AS rounded
+  expect:
+    rows: 1
+    data:
+    - text_code: A
+      truncated: A
+      rounded: B
+- name: Integer narrowing overflow does not wrap to a byte
+  sql: SELECT CHAR(CAST(2147483648 AS BIGINT))
+  expect:
+    error: true
+- name: ASCII examines codepage bytes rather than UTF8 carrier bytes
+  sql: SELECT ASCII(N'é') AS accent,ASCII(N'€') AS currency,ASCII(N'æ') AS ligature
+  expect:
+    rows: 1
+    data:
+    - accent: 233
+      currency: 128
+      ligature: 230
+- name: ASCII returns NULL for empty and NULL inputs
+  sql: SELECT ASCII('') AS empty,ASCII(NULL) AS missing,ASCII(CAST(NULL AS NVARCHAR(5))) AS typed
+  expect:
+    rows: 1
+    data:
+    - empty: null
+      missing: null
+      typed: null
+- name: ASCII does not convert an unrelated tail
+  sql: SELECT ASCII(N'A漢') AS code
+  expect:
+    rows: 1
+    data:
+    - code: 65
+- name: ASCII uses ordinary numeric text conversion
+  sql: SELECT ASCII(123) AS number,ASCII(CAST(1 AS BIT)) AS bit_code
+  expect:
+    rows: 1
+    data:
+    - number: 49
+      bit_code: 49
+- name: ASCII accepts native binary bytes
+  sql: SELECT ASCII(0xE941) AS code,ASCII(0xFF) AS maximum
+  expect:
+    rows: 1
+    data:
+    - code: 233
+      maximum: 255
+- name: DATALENGTH counts encoded bytes including trailing spaces
   sql: SELECT DATALENGTH('é€ ') AS narrow,DATALENGTH(N'é€ ') AS national,DATALENGTH(N'😀') AS pair
-  expect: {rows: 1, data: [{narrow: 3, national: 6, pair: 4}]}
-- name: LEN uses CP1252 characters and national UTF16 units
-  sql: SELECT LEN('é€  ') AS narrow,LEN(N'😀é ') AS national,LEN(CHAR(9)) AS tab
-  expect: {rows: 1, data: [{narrow: 2, national: 3, tab: 1}]}
-- name: VARCHAR casts truncate encoded bytes rather than UTF8 carrier bytes
-  sql: SELECT CAST(N'éx' AS VARCHAR(1)) AS accent,CAST(N'€x' AS VARCHAR(1)) AS currency,CAST(N'é' AS CHAR(3)) AS padded
-  expect: {rows: 1, data: [{accent: é, currency: €, padded: 'é  '}]}
-- name: Unrepresentable default-codepage input fails explicitly
+  expect:
+    rows: 1
+    data:
+    - narrow: 3
+      national: 6
+      pair: 4
+- name: DATALENGTH preserves empty strings and NULL
+  sql: SELECT DATALENGTH('') AS narrow,DATALENGTH(N'') AS national,DATALENGTH(NULL) AS missing
+  expect:
+    rows: 1
+    data:
+    - narrow: 0
+      national: 0
+      missing: null
+- name: VARCHAR casts use complete codepage characters
+  sql: SELECT CAST(N'éx' AS VARCHAR(1)) AS accent,CAST(N'€x' AS VARCHAR(1)) AS currency
+  expect:
+    rows: 1
+    data:
+    - accent: é
+      currency: €
+- name: Fixed character casts pad encoded width
+  sql: SELECT CAST(N'é' AS CHAR(4)) AS narrow,DATALENGTH(CAST(N'é' AS CHAR(4))) AS narrow_bytes,DATALENGTH(CAST(N'😀' AS NCHAR(4))) AS national_bytes
+  expect:
+    rows: 1
+    data:
+    - narrow: 'é   '
+      narrow_bytes: 4
+      national_bytes: 8
+- name: Declared source lengths do not use their native UTF8 carrier width
+  sql: SELECT DATALENGTH(plain_text) AS narrow,DATALENGTH(fixed_text) AS fixed,DATALENGTH(wide_text) AS national,DATALENGTH(wide_fixed) AS national_fixed,DATALENGTH(bytes)
+    AS binary_bytes FROM encoding_items WHERE id=1
+  expect:
+    rows: 1
+    data:
+    - narrow: 3
+      fixed: 4
+      national: 8
+      national_fixed: 8
+      binary_bytes: 3
+- name: Fixed width declarations still propagate NULL source values
+  sql: SELECT DATALENGTH(plain_text) AS narrow,DATALENGTH(fixed_text) AS fixed,DATALENGTH(amount) AS amount FROM encoding_items WHERE id=2
+  expect:
+    rows: 1
+    data:
+    - narrow: null
+      fixed: null
+      amount: null
+- name: LEN trims only ASCII spaces and counts CP1252 characters
+  sql: SELECT LEN('é€  ') AS narrow,LEN(CAST(N'é' AS CHAR(4))) AS fixed,LEN(CHAR(9)) AS tab
+  expect:
+    rows: 1
+    data:
+    - narrow: 2
+      fixed: 1
+      tab: 1
+- name: LEN keeps default national UTF16 coordinates
+  sql: SELECT LEN(N'😀é ') AS national,LEN(CAST(N'😀' AS NCHAR(4))) AS fixed,LEN(NCHAR(65)) AS simple
+  expect:
+    rows: 1
+    data:
+    - national: 3
+      fixed: 2
+      simple: 1
+- name: LEN preserves empty and NULL inputs
+  sql: SELECT LEN('') AS empty,LEN(NULL) AS missing
+  expect:
+    rows: 1
+    data:
+    - empty: 0
+      missing: null
+- name: Binary LEN excludes only trailing space bytes
+  sql: SELECT LEN(0x00FF20) AS bytes,LEN(0x4109) AS tab
+  expect:
+    rows: 1
+    data:
+    - bytes: 2
+      tab: 2
+- name: LEN numeric inputs use declared text conversion
+  sql: SELECT LEN(1234) AS digits,LEN(CAST(1 AS BIT)) AS bit_length
+  expect:
+    rows: 1
+    data:
+    - digits: 4
+      bit_length: 1
+- name: UTF8 columns use UTF8 byte counts and scalar LEN coordinates
+  sql: SELECT ASCII(utf8_text) AS first,DATALENGTH(utf8_text) AS bytes,LEN(utf8_text) AS characters FROM encoding_items WHERE id=1
+  expect:
+    rows: 1
+    data:
+    - first: 195
+      bytes: 7
+      characters: 2
+- name: Supplementary national collations retain UTF16 byte lengths
+  sql: SELECT LEN(supplementary) AS characters,DATALENGTH(supplementary) AS bytes FROM encoding_items WHERE id=1
+  expect:
+    rows: 1
+    data:
+    - characters: 2
+      bytes: 8
+- name: UTF8 byte-bound casts retain complete scalar boundaries
+  sql: SELECT CAST(utf8_text AS VARCHAR(1)) AS absent,CAST(utf8_text AS VARCHAR(2)) AS accent,CAST(utf8_text AS CHAR(3)) AS padded FROM encoding_items
+    WHERE id=1
+  expect:
+    rows: 1
+    data:
+    - absent: ''
+      accent: é
+      padded: 'é '
+- name: Native integer and Boolean SQL widths are fixed
+  sql: SELECT DATALENGTH(CAST(1 AS TINYINT)) AS tiny,DATALENGTH(CAST(1 AS SMALLINT)) AS small,DATALENGTH(1) AS integer,DATALENGTH(CAST(1 AS BIGINT))
+    AS big,DATALENGTH(CAST(1 AS BIT)) AS bit_bytes
+  expect:
+    rows: 1
+    data:
+    - tiny: 1
+      small: 2
+      integer: 4
+      big: 8
+      bit_bytes: 1
+- name: Approximate and monetary widths come from declarations
+  sql: SELECT DATALENGTH(CAST(1 AS REAL)) AS real_bytes,DATALENGTH(CAST(1 AS FLOAT)) AS float_bytes,DATALENGTH(CAST(1 AS FLOAT(24))) AS short_float,DATALENGTH(CAST(1
+    AS MONEY)) AS money,DATALENGTH(CAST(1 AS SMALLMONEY)) AS small_money
+  expect:
+    rows: 1
+    data:
+    - real_bytes: 4
+      float_bytes: 8
+      short_float: 4
+      money: 8
+      small_money: 4
+- name: Decimal widths retain precision tiers
+  sql: SELECT DATALENGTH(CAST(1 AS DECIMAL(9,0))) AS small,DATALENGTH(CAST(1 AS NUMERIC(10,0))) AS medium,DATALENGTH(CAST(1 AS DECIMAL(20,2)))
+    AS wide,DATALENGTH(CAST(1 AS DECIMAL(29,0))) AS largest,DATALENGTH(CAST(1 AS DECIMAL)) AS defaults
+  expect:
+    rows: 1
+    data:
+    - small: 5
+      medium: 9
+      wide: 13
+      largest: 17
+      defaults: 9
+- name: Temporal and UUID widths do not measure formatted output
+  sql: SELECT DATALENGTH(CAST(N'2024-01-02' AS DATE)) AS date_bytes,DATALENGTH(CAST(N'2024-01-02' AS DATETIME)) AS legacy,DATALENGTH(CAST(N'2024-01-02'
+    AS SMALLDATETIME)) AS small,DATALENGTH(CAST(N'00112233-4455-6677-8899-aabbccddeeff' AS UNIQUEIDENTIFIER)) AS uuid_bytes
+  expect:
+    rows: 1
+    data:
+    - date_bytes: 3
+      legacy: 8
+      small: 4
+      uuid_bytes: 16
+- name: Time and DATETIME2 widths retain declared precision
+  sql: SELECT DATALENGTH(CAST(N'12:34:56' AS TIME(0))) AS short_time,DATALENGTH(CAST(N'12:34:56' AS TIME(3))) AS medium_time,DATALENGTH(CAST(N'12:34:56'
+    AS TIME(7))) AS wide_time,DATALENGTH(CAST(N'2024-01-02' AS DATETIME2(0))) AS short_date,DATALENGTH(CAST(N'2024-01-02' AS DATETIME2(3))) AS
+    medium_date,DATALENGTH(CAST(N'2024-01-02' AS DATETIME2(7))) AS wide_date
+  expect:
+    rows: 1
+    data:
+    - short_time: 3
+      medium_time: 4
+      wide_time: 5
+      short_date: 6
+      medium_date: 7
+      wide_date: 8
+- name: Point column binding retains precision declarations
+  sql: SELECT DATALENGTH(clock) AS time_bytes,DATALENGTH(approximate) AS float_bytes,DATALENGTH(amount) AS decimal_bytes FROM encoding_items WHERE
+    id=1
+  expect:
+    rows: 1
+    data:
+    - time_bytes: 4
+      float_bytes: 4
+      decimal_bytes: 13
+- name: Binary lengths retain zero bytes and fixed padding
+  sql: SELECT DATALENGTH(0x00FF20) AS variable,DATALENGTH(CAST(0xFF AS BINARY(4))) AS fixed
+  expect:
+    rows: 1
+    data:
+    - variable: 3
+      fixed: 4
+- name: MAX values retain runtime byte lengths
+  sql: SELECT DATALENGTH(large_text) AS narrow,DATALENGTH(large_wide) AS national,LEN(large_text) AS narrow_len,LEN(large_wide) AS national_len
+    FROM encoding_items WHERE id=1
+  expect:
+    rows: 1
+    data:
+    - narrow: 2
+      national: 6
+      narrow_len: 1
+      national_len: 2
+- name: CHAR arity
+  sql: SELECT CHAR()
+  expect:
+    error: true
+- name: ASCII arity
+  sql: SELECT ASCII('a','b')
+  expect:
+    error: true
+- name: DATALENGTH arity
+  sql: SELECT DATALENGTH()
+  expect:
+    error: true
+- name: LEN arity
+  sql: SELECT LEN('a','b')
+  expect:
+    error: true
+- name: Unrepresentable CP1252 characters fail explicitly
   sql: SELECT ASCII(N'漢')
-  expect: {error: true}
+  expect:
+    error: true
+- name: Default VARCHAR never silently reinterprets Unicode as UTF8
+  sql: SELECT CAST(N'😀' AS VARCHAR(20))
+  expect:
+    error: true
+- name: Unknown decimal precision is not inferred from a runtime carrier
+  sql: SELECT DATALENGTH(12.3)
+  expect:
+    error: true
+- name: Wire CP1252 character type and bytes agree
+  tds:
+    statements:
+    - sql: SELECT CHAR(233) AS accent,CHAR(128) AS currency,ASCII(N'€') AS code,DATALENGTH(N'😀') AS bytes
+      expect:
+        rows: 1
+        data:
+        - accent: é
+          currency: €
+          code: 128
+          bytes: 4
+        column_types:
+        - name: accent
+          type: CHAR
+          length: 1
+        - name: currency
+          type: CHAR
+          length: 1
+        - name: code
+          type: INT
+        - name: bytes
+          type: INT
+    - sql: SELECT CAST(N'é' AS VARCHAR(1)) AS accent,CAST(N'é' AS CHAR(3)) AS padded
+      expect:
+        rows: 1
+        data:
+        - accent: é
+          padded: 'é  '
+        column_types:
+        - name: accent
+          type: VARCHAR
+          length: 1
+        - name: padded
+          type: CHAR
+          length: 3
+- name: Wire UTF8 flags preserve selected character encodings
+  tds:
+    statements:
+    - sql: SELECT utf8_text,CAST(utf8_text AS VARCHAR(2)) AS accent FROM encoding_items WHERE id=1
+      expect:
+        rows: 1
+        data:
+        - utf8_text: 'é😀 '
+          accent: é
+        column_types:
+        - name: utf8_text
+          type: VARCHAR
+          length: 20
+        - name: accent
+          type: VARCHAR
+          length: 2
+- name: MAX sources return BIGINT length metadata without result rows
+  tds:
+    statements:
+    - sql: SELECT DATALENGTH(large_text) AS narrow,DATALENGTH(large_wide) AS national,DATALENGTH(bytes) AS binary_bytes,LEN(large_text) AS characters
+        FROM encoding_items WHERE 1=0
+      expect:
+        rows: 0
+        column_types:
+        - name: narrow
+          type: BIGINT
+        - name: national
+          type: BIGINT
+        - name: binary_bytes
+          type: BIGINT
+        - name: characters
+          type: BIGINT
+    - sql: SELECT DATALENGTH(CAST(NULL AS VARCHAR(MAX))) AS narrow,LEN(CAST(NULL AS NVARCHAR(MAX))) AS national
+      expect:
+        rows: 1
+        data:
+        - narrow: null
+          national: null
+        column_types:
+        - name: narrow
+          type: BIGINT
+        - name: national
+          type: BIGINT
