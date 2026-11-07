@@ -1,0 +1,54 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  syntax: tsql
+  description: Relational control predicates use the ordinary SQL planner
+  isolated: true
+setup:
+- sql: CREATE TABLE control_probe(id INT PRIMARY KEY, value INT)
+- sql: INSERT INTO control_probe VALUES(1,10),(2,NULL)
+cleanup:
+- sql: DROP TABLE IF EXISTS control_probe
+test_cases:
+- name: Existing relation rows select the true branch
+  sql: IF EXISTS(SELECT id FROM control_probe WHERE id=1) SELECT 1 AS chosen ELSE SELECT 0 AS chosen
+  expect: {rows: 1, data: [{chosen: 1}]}
+- name: Missing relation rows select the false branch
+  sql: IF EXISTS(SELECT id FROM control_probe WHERE id=3) SELECT 1 AS chosen ELSE SELECT 0 AS chosen
+  expect: {rows: 1, data: [{chosen: 0}]}
+- name: NOT EXISTS retains SQL negation
+  sql: IF NOT EXISTS(SELECT id FROM control_probe WHERE id=3) SELECT 1 AS chosen ELSE SELECT 0 AS chosen
+  expect: {rows: 1, data: [{chosen: 1}]}
+- name: One-row scalar subqueries use their value
+  sql: IF (SELECT value FROM control_probe WHERE id=1)=10 SELECT 1 AS chosen ELSE SELECT 0 AS chosen
+  expect: {rows: 1, data: [{chosen: 1}]}
+- name: Empty scalar subqueries produce unknown predicates
+  sql: IF (SELECT value FROM control_probe WHERE id=3)=10 SELECT 1 AS chosen ELSE SELECT 0 AS chosen
+  expect: {rows: 1, data: [{chosen: 0}]}
+- name: Scalar subquery cardinality remains checked
+  sql: IF (SELECT id FROM control_probe)=1 SELECT 1 AS chosen
+  expect: {error: true}
+- name: Membership predicates use relational lowering
+  sql: IF 1 IN(SELECT id FROM control_probe) SELECT 1 AS chosen ELSE SELECT 0 AS chosen
+  expect: {rows: 1, data: [{chosen: 1}]}
+- name: NOT IN retains unknown from a NULL right side
+  sql: IF 20 NOT IN(SELECT value FROM control_probe) SELECT 1 AS chosen ELSE SELECT 0 AS chosen
+  expect: {rows: 1, data: [{chosen: 0}]}
+- name: Earlier statements can change a cached control predicate
+  sql: INSERT INTO control_probe VALUES(3,30)
+- name: Reused predicate observes inserted rows
+  sql: IF EXISTS(SELECT id FROM control_probe WHERE id=3) SELECT 1 AS chosen ELSE SELECT 0 AS chosen
+  expect: {rows: 1, data: [{chosen: 1}]}
+- name: Control parameters stay lexical SQL inputs
+  sql: DECLARE @wanted INT=3; IF EXISTS(SELECT id FROM control_probe WHERE id=@wanted) SELECT 1 AS chosen ELSE SELECT 0 AS chosen
+  expect: {rows: 1, data: [{chosen: 1}]}
+- name: Unselected branch is not physically compiled
+  sql: IF EXISTS(SELECT id FROM control_probe WHERE id=1) SELECT 1 AS chosen ELSE SELECT * FROM control_missing
+  expect: {rows: 1, data: [{chosen: 1}]}
+- name: WHILE predicates observe lexical values through the relational planner
+  sql: DECLARE @n INT=1; WHILE EXISTS(SELECT id FROM control_probe WHERE id=@n) BEGIN SET @n=@n+1 END; SELECT @n AS final_value
+  expect: {rows: 1, data: [{final_value: 4}]}
+- name: Correlated EXISTS is decorrelated inside a control predicate
+  sql: IF EXISTS(SELECT p.id FROM control_probe p WHERE EXISTS(SELECT q.id FROM control_probe q WHERE q.id=p.id)) SELECT 1 AS chosen ELSE SELECT 0 AS chosen
+  expect: {rows: 1, data: [{chosen: 1}]}

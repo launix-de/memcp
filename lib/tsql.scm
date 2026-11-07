@@ -513,8 +513,20 @@ and all row execution stay in the existing shared SQL compiler and planner. */
 	/* Scalar control expressions use the same scope dependency as SELECT leaves.
 	Restore the caller owner before shared compilation after a child procedure. */
 	(session "__tsql_scope_identity" ((tsql_identity_scope session) "__tsql_scope_identity"))
-	((tsql_scalar_formula schema text (session "__tsql_parameter_declarations") mode target tx)
-		session tx (lambda (_row) (error "scalar expression emitted rows")) (lambda args true)))))
+	(if (equal? mode "predicate") (begin
+		/* A control predicate is a one-column SQL query. EXISTS, IN and scalar
+		subqueries pass through the common logical binder and decorrelator once,
+		before execution; there is no recursive row-time subquery evaluator. */
+		(define answer (newsession))
+		(tsql_execute_statement tx schema
+			(concat "SELECT CASE WHEN (" text "\n) THEN CAST(1 AS BIT) ELSE CAST(0 AS BIT) END AS __tsql_predicate")
+			session (lambda (row) (begin
+				(if (answer "seen") (error "control predicate produced multiple rows") true)
+				(answer "seen" true)
+				(answer "value" (row "__tsql_predicate")))) (lambda args true))
+		(if (answer "seen") (answer "value") (error "control predicate produced no row")))
+		((tsql_scalar_formula schema text (session "__tsql_parameter_declarations") mode target tx)
+			session tx (lambda (_row) (error "scalar expression emitted rows")) (lambda args true))))))
 (define tsql_run_commands (lambda (commands statement session resultrow resultfields)
 	(reduce commands (lambda (_result command)
 		(if ((tsql_identity_scope session) "__tsql_transfer") _result
