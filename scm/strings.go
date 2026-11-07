@@ -863,6 +863,7 @@ func utf16Prefix(text string, limit int64) string {
 }
 
 func init_strings() {
+	initTextPositions()
 	initTextSearch()
 	init_uuid()
 	// Encode one scalar value independently of any frontend character type or

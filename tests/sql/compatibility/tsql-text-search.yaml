@@ -1,0 +1,150 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  syntax: tsql
+  requires_tds: true
+  description: Literal and wildcard text search with declared positions and result types
+setup:
+- sql: DROP TABLE IF EXISTS search_text
+- sql: CREATE TABLE search_text(id INT PRIMARY KEY,label NVARCHAR(100),large_label NVARCHAR(MAX))
+- sql: INSERT search_text VALUES(1,N'alpha 12',N'alpha 12'),(2,N'bravo',N'bravo'),(3,NULL,NULL)
+cleanup:
+- sql: DROP TABLE IF EXISTS search_text
+test_cases:
+- name: CHARINDEX returns a one-based position
+  sql: SELECT CHARINDEX(N'b',N'abc') AS value
+  expect: {rows: 1, data: [{value: 2}]}
+- name: CHARINDEX honors its optional start
+  sql: SELECT CHARINDEX(N'is',N'This is a string',4) AS value
+  expect: {rows: 1, data: [{value: 6}]}
+- name: CHARINDEX zero and negative starts search from the beginning
+  sql: SELECT CHARINDEX(N'b',N'abc',0) AS zero_start,CHARINDEX(N'b',N'abc',-42) AS negative_start
+  expect: {rows: 1, data: [{zero_start: 2, negative_start: 2}]}
+- name: CHARINDEX returns zero for missing text and starts beyond the input
+  sql: SELECT CHARINDEX(N'q',N'abc') AS missing,CHARINDEX(N'a',N'abc',100) AS beyond
+  expect: {rows: 1, data: [{missing: 0, beyond: 0}]}
+- name: CHARINDEX propagates each NULL argument
+  sql: SELECT CHARINDEX(NULL,N'abc') AS a,CHARINDEX(N'a',NULL) AS b,CHARINDEX(N'a',N'abc',NULL) AS c
+  expect: {rows: 1, data: [{a: null, b: null, c: null}]}
+- name: CHARINDEX treats wildcard and regex symbols as literal text
+  sql: SELECT CHARINDEX(N'[_].*',N'xx[_].*yy') AS value
+  expect: {rows: 1, data: [{value: 3}]}
+- name: CHARINDEX follows case-insensitive default collation
+  sql: SELECT CHARINDEX(N'B',N'abc') AS value
+  expect: {rows: 1, data: [{value: 2}]}
+- name: CHARINDEX follows explicit binary collation
+  sql: SELECT CHARINDEX(N'B',N'abc' COLLATE utf8mb4_bin) AS value
+  expect: {rows: 1, data: [{value: 0}]}
+- name: CHARINDEX follows an explicit case-insensitive operand
+  sql: SELECT CHARINDEX(N'B' COLLATE utf8mb4_general_ci,N'abc') AS value
+  expect: {rows: 1, data: [{value: 2}]}
+- name: CHARINDEX counts UTF16 units by default
+  sql: SELECT CHARINDEX(N'x',N'雪😀x') AS value
+  expect: {rows: 1, data: [{value: 4}]}
+- name: CHARINDEX counts scalars for supplementary-character collations
+  sql: SELECT CHARINDEX(N'x',N'雪😀x' COLLATE Latin1_General_100_CI_AS_SC) AS value
+  expect: {rows: 1, data: [{value: 3}]}
+- name: CHARINDEX starts in scalar coordinates with SC collation
+  sql: SELECT CHARINDEX(N'x',N'😀xx' COLLATE Latin1_General_100_CI_AS_SC,3) AS value
+  expect: {rows: 1, data: [{value: 3}]}
+- name: CHARINDEX keeps positions when folding changes UTF8 byte width
+  sql: SELECT CHARINDEX(N'x',N'Kx') AS value
+  expect: {rows: 1, data: [{value: 2}]}
+- name: CHARINDEX reads ordinary and MAX columns
+  sql: SELECT id,CHARINDEX(N'a',label) AS normal_position,CHARINDEX(N'a',large_label) AS large_position FROM search_text ORDER BY id
+  expect:
+    data: [{id: 1, normal_position: 1, large_position: 1}, {id: 2, normal_position: 3, large_position: 3}, {id: 3, normal_position: null, large_position: null}]
+- name: PATINDEX returns the beginning of its nonleading-percent match
+  sql: SELECT PATINDEX(N'%ter%',N'interesting data') AS value
+  expect: {rows: 1, data: [{value: 3}]}
+- name: PATINDEX handles one-character wildcards
+  sql: SELECT PATINDEX(N'%en_ure%',N'Please ensure the door is locked!') AS value
+  expect: {rows: 1, data: [{value: 8}]}
+- name: PATINDEX preserves beginning and end anchors
+  sql: SELECT PATINDEX(N'a%',N'abc') AS beginning,PATINDEX(N'%a',N'cba') AS ending,PATINDEX(N'a%',N'cba') AS not_beginning,PATINDEX(N'%a',N'abc') AS not_ending
+  expect: {rows: 1, data: [{beginning: 1, ending: 3, not_beginning: 0, not_ending: 0}]}
+- name: PATINDEX handles repeated leading percent wildcards
+  sql: SELECT PATINDEX(N'%%%b%',N'abc') AS value
+  expect: {rows: 1, data: [{value: 2}]}
+- name: PATINDEX handles positive character sets and ranges
+  sql: SELECT PATINDEX(N'%[0-9]%',N'abc42') AS digit,PATINDEX(N'%[xz]%',N'abcx') AS member
+  expect: {rows: 1, data: [{digit: 4, member: 4}]}
+- name: PATINDEX handles a negated character class
+  sql: SELECT PATINDEX(N'%[^ 0-9A-Za-z]%',N'Please ensure the door is locked!') AS value
+  expect: {rows: 1, data: [{value: 33}]}
+- name: PATINDEX class syntax can quote wildcard characters
+  sql: SELECT PATINDEX(N'%[%]%',N'a%b') AS percent_char,PATINDEX(N'%[_]%',N'a_b') AS underscore_char
+  expect: {rows: 1, data: [{percent_char: 2, underscore_char: 2}]}
+- name: PATINDEX classes preserve literal bracket members
+  sql: SELECT PATINDEX(N'%[[]%',N'a[b') AS opening,PATINDEX(N'%[]]%',N'a]b') AS closing
+  expect: {rows: 1, data: [{opening: 2, closing: 2}]}
+- name: PATINDEX preserves regex metacharacters as literals
+  sql: SELECT PATINDEX(N'%.+*?(){}|^$%',N'xx.+*?(){}|^$yy') AS value
+  expect: {rows: 1, data: [{value: 3}]}
+- name: PATINDEX propagates a NULL pattern
+  sql: SELECT PATINDEX(NULL,N'abc') AS value
+  expect: {rows: 1, data: [{value: null}]}
+- name: PATINDEX returns zero for an absent pattern
+  sql: SELECT PATINDEX(N'%q%',N'abc') AS value
+  expect: {rows: 1, data: [{value: 0}]}
+- name: PATINDEX counts UTF16 units and honors SC collation
+  sql: SELECT PATINDEX(N'%x%',N'雪😀x') AS units,PATINDEX(N'%x%',N'雪😀x' COLLATE Latin1_General_100_CI_AS_SC) AS scalars
+  expect: {rows: 1, data: [{units: 4, scalars: 3}]}
+- name: PATINDEX wildcard consumes a single UTF16 unit without SC
+  sql: SELECT PATINDEX(N'%_x%',N'😀x') AS units,PATINDEX(N'%_x%',N'😀x' COLLATE Latin1_General_100_CI_AS_SC) AS scalars
+  expect: {rows: 1, data: [{units: 2, scalars: 1}]}
+- name: PATINDEX follows the declared case policy
+  sql: SELECT PATINDEX(N'%B%',N'abc') AS folded,PATINDEX(N'%B%',N'abc' COLLATE utf8mb4_bin) AS exact
+  expect: {rows: 1, data: [{folded: 2, exact: 0}]}
+- name: PATINDEX rejects NULL expressions
+  sql: SELECT PATINDEX(N'%a%',CAST(NULL AS NVARCHAR(10))) AS value
+  expect: {error: true}
+- name: Search rejects NUL patterns
+  sql: SELECT CHARINDEX(NCHAR(0),N'abc') AS value
+  expect: {error: true}
+- name: CHARINDEX requires two or three operands
+  sql: SELECT CHARINDEX(N'a') AS value
+  expect: {error: true}
+- name: PATINDEX requires exactly two operands
+  sql: SELECT PATINDEX(N'%a%',N'abc',1) AS value
+  expect: {error: true}
+- name: Conflicting explicit collations remain errors
+  sql: SELECT CHARINDEX(N'a' COLLATE utf8mb4_bin,N'abc' COLLATE utf8mb4_general_ci) AS value
+  expect: {error: true}
+- name: TDS search types follow declarations without reading result rows
+  tds:
+    statements:
+    - sql: SELECT TOP(0) CHARINDEX(N'a',label) AS normal_position,CHARINDEX(N'a',large_label) AS large_position FROM search_text
+      expect:
+        rows: 0
+        column_types: [{name: normal_position, type: INT}, {name: large_position, type: BIGINT}]
+    - sql: SELECT CHARINDEX(N'a',CAST(N'abc' AS NVARCHAR(MAX))) AS value
+      expect:
+        data: [{value: 1}]
+        column_types: [{name: value, type: BIGINT}]
+    - sql: DECLARE @value NVARCHAR(MAX)=N'abc'; SELECT CHARINDEX(N'a',@value) AS value
+      expect:
+        data: [{value: 1}]
+        column_types: [{name: value, type: BIGINT}]
+    - sql: SELECT CHARINDEX(N'a',@value) AS value
+      prepare: true
+      parameters: [{name: value, value: abc}]
+      expect: {data: [{value: 1}]}
+
+- name: COLLATE postfix preserves LIKE and equality predicates
+  sql: SELECT CASE WHEN N'A' COLLATE utf8mb4_bin=N'a' THEN 1 ELSE 0 END AS exact,CASE WHEN N'A' COLLATE utf8mb4_general_ci LIKE N'a%' THEN 1 ELSE 0 END AS folded,CASE WHEN N'A' COLLATE utf8mb4_bin NOT LIKE N'a%' THEN 1 ELSE 0 END AS excluded
+  expect: {rows: 1, data: [{exact: 0, folded: 1, excluded: 1}]}
+- name: Search rejects explicit accent-insensitive collations
+  sql: SELECT CHARINDEX(N'e',N'é' COLLATE Latin1_General_100_CI_AI) AS value
+  expect: {error: true, contains: accent-insensitive}
+- name: CHARINDEX can start inside a UTF16 surrogate pair
+  sql: SELECT CHARINDEX(N'x',N'😀x',2) AS value
+  expect: {rows: 1, data: [{value: 3}]}
+
+- name: Search remains composable with numeric row predicates
+  sql: SELECT id,CHARINDEX(N'a',label) AS value FROM search_text WHERE id<3 ORDER BY id
+  expect: {data: [{id: 1, value: 1}, {id: 2, value: 3}]}
+- name: Case-insensitive search uses Unicode simple fold classes
+  sql: SELECT CHARINDEX(N'σ',N'ς') AS literal_position,PATINDEX(N'%σ%',N'ς') AS wildcard_position
+  expect: {data: [{literal_position: 1, wildcard_position: 1}]}
