@@ -2942,6 +2942,8 @@ that context explicitly; stored views refuse this scalar before publication. */
 				(tsql_inline_values_query aliases (tsql_finalize_sources rows child_kind bindings blocked))
 				((symbol query-block) db sources fields condition group having order limit offset hidden stages facts)
 				(begin
+					(if (qassoc_get facts (quote tsql_select_assignments) false)
+						(error "SELECT assignment is only allowed as a standalone statement") true)
 					(if definition_scope (begin
 						(if (and (not (empty_list? (coalesceNil order '()))) (nil? limit) (nil? offset))
 							(error "CTE ORDER BY requires TOP or OFFSET") true)
@@ -2989,6 +2991,8 @@ that context explicitly; stored views refuse this scalar before publication. */
 			(parser (? (atom "ALL" true)) false)))
 		(define prefix_limit tsql_select_prefix)
 		(define cols (+ (or
+			(parser '((define target tsql_variable_name) "=" (define expression tsql_expression))
+				(list (concat "__tsql_assignment:" target) expression false target))
 			/* Assignment aliases must precede expression comparisons. */
 			(parser '((define title (or tsql_identifier tsql_string)) "=" (define e tsql_expression)) '(title e))
 			(parser "*" (list "*" (list (quote sql_compile_column) (quote tsql_compile_column) (list (quote get_column) nil false "*" false))))
@@ -3035,6 +3039,12 @@ that context explicitly; stored views refuse this scalar before publication. */
 		)
 
 	) (begin
+			(define assignments (filter cols (lambda (column) (equal? (count column) 4))))
+			(if (and (not (empty_list? assignments)) (not (equal? (count assignments) (count cols))))
+				(error "SELECT cannot mix variable assignments and result columns") true)
+			(define targets (map assignments (lambda (column) (nth column 3))))
+			(if (equal? (count targets) (count (merge_unique (list targets)))) true
+				(error "duplicate SELECT assignment target"))
 			(define fields (merge (map cols (lambda (column) (slice column 0 2)))))
 			(define unnamed_output (not (nil? (find cols (lambda (column) (equal? (count column) 3)) nil))))
 			(define projected_exprs (extract_assoc fields (lambda (_title expr) expr)))
@@ -3053,6 +3063,7 @@ that context explicitly; stored views refuse this scalar before publication. */
 					/* The common name binder resolves all joined/derived sources.
 					HAVING names belong to the input scope in this frontend. */
 					(list (list (quote having_input_scope) true))
+					(if (empty_list? targets) '() (list (list (quote tsql_select_assignments) targets)))
 					(if distinct (list (list (quote select_distinct) true)) '())
 					(if unnamed_output (list (list (quote tsql_parser_unnamed_output) true)) '())))))))
 
@@ -3332,7 +3343,33 @@ that context explicitly; stored views refuse this scalar before publication. */
 			nil nil nil nil nil '() '() '()) policy planning_session))
 		(define fields (tsql_result_columns bound parameters))
 		(if (list? fields) (list (quote quote) '()) (error "invalid prepared mutation contract")))))
+	/* Assignment targets are frontend syntax until this statement boundary.
+	Apply declared casts to ordinary logical projections, remove the parser fact,
+	then let the shared planner own every source, filter, aggregate and order. */
+	(define tsql_select_assignment_targets (lambda (query) (match query
+		((symbol tsql_pending_with) _definitions body) (tsql_select_assignment_targets body)
+		((symbol query-block) _db _sources _fields _condition _group _having _order _limit _offset _hidden _stages facts)
+		(qassoc_get facts (quote tsql_select_assignments) nil)
+		_ nil)))
+	(define tsql_select_assignment_query (lambda (query targets) (match query
+		((symbol tsql_pending_with) definitions body)
+		(list (quote tsql_pending_with) definitions (tsql_select_assignment_query body targets))
+		_ (begin
+			(define fields (qb_fields query))
+			(define converted (merge (map targets (lambda (target) (begin
+				(define declaration (find parameters (lambda (item) (equal? (car item) target)) nil))
+				(if declaration true (error "undeclared SELECT assignment target: @" target))
+				(define contract (tsql_effective_parameter_contract (cadr declaration)))
+				(define title (concat "__tsql_assignment:" target))
+				(list title (tsql_cast_expr (fields title) (car contract) (cdr contract))))))))
+			(make_query_block (qb_schema query) (qb_sources query) converted
+				(qb_where query) (qb_group query) (qb_having query) (qb_order query)
+				(qb_limit query) (qb_offset query) (qb_hidden query) (qb_stages query)
+				(filter (qb_facts query) (lambda (fact)
+					(not (equal? (car fact) (quote tsql_select_assignments))))))))))
 	(define tsql_build_select_plan (lambda (query) (begin
+		(define targets (tsql_select_assignment_targets query))
+		(define query (if targets (tsql_select_assignment_query query targets) query))
 		(define bound_query (tsql_finalize_sources query "query" '() '()))
 		(define expanded (tsql_bind_column_compilers (sql_expand_views bound_query policy) (tsql_column_compiler planning_session)))
 		/* Binding validates names and contracts but lowers conversion callbacks.
@@ -3342,7 +3379,11 @@ that context explicitly; stored views refuse this scalar before publication. */
 		(define checked (if describe (tsql_describe_query expanded policy planning_session) expanded))
 		(define descriptors (tsql_result_columns expanded parameters))
 		(if analyze_parameters (list (quote quote) checked)
-			describe (list (quote quote) descriptors) (list (quote !begin)
+			describe (list (quote quote) (if targets '() descriptors))
+			targets (list (quote tsql_run_select_assignment) (quote session) (list (quote quote) targets)
+				(list (quote lambda) (list (quote resultrow))
+					(build_queryplan_term expanded planning_session tx)))
+			(list (quote !begin)
 				(list (quote resultfields) (list (quote quote) (queryplan_result_titles expanded))
 					(list (quote quote) descriptors))
 				(tsql_result_output_plan (build_queryplan_term expanded planning_session tx) descriptors))))))

@@ -23,6 +23,24 @@ metadata:
     storage_bandwidth_mbps: 1000
     storage_latency_ms: 5
 test_cases:
+- name: tsql-select-assignment-survives-delegation
+  syntax: tsql
+  sql: >-
+    DECLARE @value BIGINT=99,@offset BIGINT=7;
+    SELECT @value=SUM(id+@offset) FROM big_items WHERE id<5000;
+    SELECT @value AS value
+  expect:
+    data: [{value: 12532500}]
+    cluster: {min_remote_shards: 1}
+- name: tsql-ordered-row-assignment-survives-delegation
+  syntax: tsql
+  sql: >-
+    DECLARE @value BIGINT=99;
+    SELECT @value=id FROM big_items WHERE id<3 ORDER BY id DESC;
+    SELECT @value AS value
+  expect:
+    data: [{value: 0}]
+    cluster: {min_remote_shards: 1}
 - name: tsql-database-access-probe-survives-delegation
   syntax: tsql
   sql: >-

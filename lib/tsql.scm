@@ -515,6 +515,18 @@ and all row execution stay in the existing shared SQL compiler and planner. */
 	(session "__tsql_scope_identity" ((tsql_identity_scope session) "__tsql_scope_identity"))
 	((tsql_scalar_formula schema text (session "__tsql_parameter_declarations") mode target tx)
 		session tx (lambda (_row) (error "scalar expression emitted rows")) (lambda args true)))))
+/* SELECT assignment consumes the ordinary planner's result stream. Retain only
+one final scalar tuple, then publish it to the invoking batch/procedure scope.
+No user result set is exposed and a zero-row query leaves its locals unchanged.
+RHS session dependencies are bound by the shared compiler before execution;
+recursive assignment reads statement inputs rather than a row accumulator. */
+(define tsql_run_select_assignment (lambda (session targets run) (begin
+	(define output (newsession))
+	(define result (run (lambda (row) (begin (output "last" row) 1))))
+	(define row (output "last"))
+	(if row (map targets (lambda (target)
+		(session (concat "__tsql_parameter:" target) (row (concat "__tsql_assignment:" target))))) true)
+	(if (number? result) result 0))))
 (define tsql_run_commands (lambda (commands statement session resultrow resultfields)
 	(reduce commands (lambda (_result command)
 		(if ((tsql_identity_scope session) "__tsql_transfer") _result
@@ -756,7 +768,9 @@ ordinary expression compiler owns each substitution's declared SQL contract. */
 		(coalesceNil ((tsql_identity_scope scoped) "__tsql_return_status") 0) scoped))))
 (define tsql_execute_batches (lambda (schema text session statement resultrow resultfields) (begin
 	(session "schema" schema)
-	(session "__tsql_connection_session" (tsql_connection_session session))
+	/* A root connection is already its own owner. Only child scopes retain an
+	explicit connection link; storing self here would make a captured parent
+	view cyclic when a batch parameter is delegated to a cluster peer. */
 	(define inherited (coalesceNil (session "__tsql_parameter_declarations") '()))
 	(define supplied (map inherited (lambda (declaration)
 		(list (car declaration) (session (concat "__tsql_parameter:" (car declaration)))))))
