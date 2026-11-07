@@ -5,7 +5,10 @@ SPDX-License-Identifier: GPL-3.0-or-later */
 existing native DDL/DML operations, as the other SQL frontends do. */
 /* Integer tokens and integer text conversions use native int64 arithmetic.
 The negative accumulator also represents the minimum int64 without overflow. */
-(define tsql_parse_integer (lambda (text) (begin
+(define tsql_raise_error (lambda (number message state)
+	(error (list "tsql-error" number message state))))
+(define tsql_parse_integer (close_procedure ((lambda (tsql_raise_error)
+	(lambda (text) (begin
 	(define trimmed (sql_trim text))
 	(if (equal? trimmed "") 0 (begin
 		(if (regexp_test trimmed "^[+-]?[0-9]+$") true (tsql_raise_error 245 "invalid integer text" 1))
@@ -16,7 +19,7 @@ The negative accumulator also represents the minimum int64 without overflow. */
 			(tsql_raise_error 8115 "integer conversion overflow" 1) true)
 		(define coefficient (reduce (produceN (strlen digits)) (lambda (acc i)
 			(- (* acc 10) (intdiv (simplify (substr digits i 1)) 1))) 0))
-		(if negative coefficient (- 0 coefficient)))))))
+		(if negative coefficient (- 0 coefficient))))))) tsql_raise_error)))
 (define tsql_int (parser (define value (regex "-?[0-9]+")) (tsql_parse_integer value)))
 (define tsql_number (parser (define value (regex "-?(?:[0-9]+\\.?[0-9]*|\\.[0-9]+)(?:e-?[0-9]+)?" true))
 	(begin
@@ -333,7 +336,8 @@ Represent decimals as integer coefficients and apply scale corrections through
 the frontend's compile-time type system. Keep precision/scale out of the Scheme
 runtime and storage hot paths; do not substitute float64 for exact casts. */
 (define tsql_float_max (simplify "1.7976931348623157e308"))
-(define tsql_numeric_input (lambda (value)
+(define tsql_numeric_input (close_procedure ((lambda (tsql_float_max tsql_raise_error)
+	(lambda (value)
 	(if (number? value) (if (and (>= value (- 0 tsql_float_max)) (<= value tsql_float_max)) value (tsql_raise_error 8115 "floating conversion overflow" 1))
 		(if (string? value) (begin
 			(define text (sql_trim value))
@@ -343,15 +347,18 @@ runtime and storage hot paths; do not substitute float64 for exact casts. */
 						(if (and (number? number) (>= number (- 0 tsql_float_max)) (<= number tsql_float_max)) number
 							(tsql_raise_error 8115 "floating conversion overflow" 1)))
 					(tsql_raise_error 8114 "invalid numeric text" 1))))
-			(if (equal? value true) 1 (if (equal? value false) 0 (error "unsupported numeric conversion")))))))
-(define tsql_cast_integer (lambda (value minimum maximum)
+			(if (equal? value true) 1 (if (equal? value false) 0 (error "unsupported numeric conversion"))))))) tsql_float_max tsql_raise_error)))
+(define tsql_cast_integer (close_procedure ((lambda (tsql_parse_integer tsql_numeric_input tsql_raise_error)
+	(lambda (value minimum maximum)
 	(if (nil? value) nil (begin
 		(define integer (if (string? value) (tsql_parse_integer value)
 			(if (int? value) value (intdiv (tsql_numeric_input value) 1))))
 		(if (or (nil? integer) (< integer minimum) (> integer maximum))
-			(tsql_raise_error 8115 "integer conversion overflow" 1) integer)))))
-(define tsql_cast_float (lambda (value) (if (nil? value) nil (simplify (tsql_numeric_input value)))))
-(define tsql_cast_decimal (lambda (value precision scale) (if (nil? value) nil (begin
+			(tsql_raise_error 8115 "integer conversion overflow" 1) integer))))) tsql_parse_integer tsql_numeric_input tsql_raise_error)))
+(define tsql_cast_float (close_procedure ((lambda (tsql_numeric_input)
+	(lambda (value) (if (nil? value) nil (simplify (tsql_numeric_input value))))) tsql_numeric_input)))
+(define tsql_cast_decimal (close_procedure ((lambda (tsql_parse_integer tsql_numeric_input tsql_cast_integer tsql_raise_error)
+	(lambda (value precision scale) (if (nil? value) nil (begin
 	(if (and (string? value) (equal? (sql_trim value) ""))
 		(tsql_raise_error 8114 "invalid numeric text" 1) true)
 	/* The declaration selects the integer carrier for scale zero. Preserve an
@@ -365,12 +372,13 @@ runtime and storage hot paths; do not substitute float64 for exact casts. */
 			(error "decimal scale exceeds native numeric precision"))))
 	(define bound (simplify (concat "1e" (- precision scale))))
 	(if (and (> converted (- 0 bound)) (< converted bound)) converted
-		(tsql_raise_error 8115 "decimal conversion overflow" 1))))))
+		(tsql_raise_error 8115 "decimal conversion overflow" 1)))))) tsql_parse_integer tsql_numeric_input tsql_cast_integer tsql_raise_error)))
 /* Currency declarations have fixed scale four. Values remain ordinary native
 numbers; only formatting and transport use an unscaled integer coefficient.
 The float carrier cannot preserve every coefficient at the 64-bit endpoints.
 Reject an out-of-range conversion before intdiv can wrap its sign. */
-(define tsql_money_coefficient (lambda (value small) (if (nil? value) nil (begin
+(define tsql_money_coefficient (close_procedure ((lambda (tsql_numeric_input tsql_raise_error)
+	(lambda (value small) (if (nil? value) nil (begin
 	(define scaled (round (* (sql_decimal_output (tsql_numeric_input value) 4) 10000)))
 	(define limit (simplify "9223372036854775808.0"))
 	/* At either 64-bit endpoint the float carrier cannot distinguish the
@@ -379,15 +387,17 @@ Reject an out-of-range conversion before intdiv can wrap its sign. */
 		(tsql_raise_error 8115 "currency conversion overflow" 1) true)
 	(define coefficient (intdiv scaled 1))
 	(if (and small (or (< coefficient -2147483648) (> coefficient 2147483647)))
-		(tsql_raise_error 8115 "small currency conversion overflow" 1) coefficient)))))
-(define tsql_cast_money (lambda (value small)
-	(if (nil? value) nil (/ (tsql_money_coefficient value small) 10000))))
-(define tsql_money_text_input (lambda (value) (if (nil? value) nil (begin
+		(tsql_raise_error 8115 "small currency conversion overflow" 1) coefficient))))) tsql_numeric_input tsql_raise_error)))
+(define tsql_cast_money (close_procedure ((lambda (tsql_money_coefficient)
+	(lambda (value small)
+	(if (nil? value) nil (/ (tsql_money_coefficient value small) 10000)))) tsql_money_coefficient)))
+(define tsql_money_text_input (close_procedure ((lambda (tsql_numeric_input tsql_raise_error)
+	(lambda (value) (if (nil? value) nil (begin
 	(define text (sql_trim value))
 	(if (or (equal? text "")
 		(regexp_test text "^(?:[+-]?\\p{Sc}?|\\p{Sc}[+-]?)(?:[0-9][0-9,]*(?:\\.[0-9]*)?|\\.[0-9]+)$")) true
 		(tsql_raise_error 235 "invalid currency text" 1))
-	(tsql_numeric_input (regexp_replace (replace text "," "") "\\p{Sc}" ""))))))
+	(tsql_numeric_input (regexp_replace (replace text "," "") "\\p{Sc}" "")))))) tsql_numeric_input tsql_raise_error)))
 (define tsql_money_compiler (lambda (small) (lambda (infos) (begin
 	(define input (car infos))
 	(define type (sql_info_type input))
@@ -395,8 +405,8 @@ Reject an out-of-range conversion before intdiv can wrap its sign. */
 	(if (or (sql_numeric_type? type) character (has? '("MONEY" "SMALLMONEY" "NULL") type)) true
 		(error "currency conversion from " type " is not implemented"))
 	(define formula (sql_info_formula input))
-	(sql_info (list (quote tsql_cast_money)
-		(if character (list (quote tsql_money_text_input) formula) formula) small)
+	(sql_info (list tsql_cast_money
+		(if character (list tsql_money_text_input formula) formula) small)
 		(if small "SMALLMONEY" "MONEY") nil)))))
 (define tsql_cast_money_expr (lambda (value small)
 	(list (quote sql_compile_expr) (list (quote tsql_money_compiler) small) value)))
@@ -404,9 +414,12 @@ Reject an out-of-range conversion before intdiv can wrap its sign. */
 numeric representation. Split before taking absolute values so the signed
 64-bit minimum never needs to be negated. */
 (define tsql_money_group_digits (lambda (text)
-	(if (<= (strlen text) 3) text
-		(concat (tsql_money_group_digits (substr text 0 (- (strlen text) 3))) "," (substr text (- (strlen text) 3))))))
-(define tsql_money_text (lambda (value style) (if (nil? value) nil (begin
+	/* This bounded scalar string uses no recursive global callback binding. */
+	(reduce_range (strlen text) (lambda (result index)
+		(concat result (if (and (> index 0) (equal? (mod (- (strlen text) index) 3) 0)) "," "")
+			(substr text index 1))) "")))
+(define tsql_money_text (close_procedure ((lambda (tsql_money_coefficient tsql_money_group_digits)
+	(lambda (value style) (if (nil? value) nil (begin
 	(define coefficient (tsql_money_coefficient value false))
 	(define four (has? '(2 126) style))
 	(define units (if four coefficient (begin
@@ -419,12 +432,8 @@ numeric representation. Split before taking absolute values so the signed
 	(define digits (string (if (< whole 0) (- 0 whole) whole)))
 	(define tail (string (if (< fraction 0) (- 0 fraction) fraction)))
 	(concat (if (< units 0) "-" "") (if (equal? style 1) (tsql_money_group_digits digits) digits)
-		"." (string_repeat "0" (- (if four 4 2) (strlen tail))) tail)))))
-(define tsql_cast_money_text (lambda (value style length national fixed) (if (nil? value) nil (begin
-	(define text (tsql_money_text value style))
-	(if (and (not (equal? length -1)) (> (strlen text) length))
-		(tsql_raise_error 8115 "currency character conversion overflow" 1) true)
-	((if fixed tsql_cast_fixed_text tsql_cast_text) text length national)))))
+		"." (string_repeat "0" (- (if four 4 2) (strlen tail))) tail))))) tsql_money_coefficient tsql_money_group_digits)))
+
 (define tsql_cast_binary (lambda (value length fixed) (if (nil? value) nil (begin
 	(if (string? value) true (error "numeric binary conversion is not implemented"))
 	(define bytes (if (or (equal? length -1) (<= (strlen value) length)) value (substr value 0 length)))
@@ -451,7 +460,8 @@ Complementing the nonnegative magnitude avoids negating the int64 minimum. */
 	"0" 0 "1" 1 "2" 2 "3" 3 "4" 4 "5" 5 "6" 6 "7" 7
 	"8" 8 "9" 9 "a" 10 "b" 11 "c" 12 "d" 13 "e" 14 "f" 15
 	_ (error "invalid binary hexadecimal digit"))))
-(define tsql_binary_to_integer (lambda (value width signed) (if (nil? value) nil (begin
+(define tsql_binary_to_integer (close_procedure ((lambda (tsql_hex_digit_integer)
+	(lambda (value width signed) (if (nil? value) nil (begin
 	/* Oversized inputs need a separately verified source-kind truncation contract.
 	Do not silently guess which bytes the original dialect would discard. */
 	(define count (strlen value))
@@ -462,22 +472,23 @@ Complementing the nonnegative magnitude avoids negating the int64 minimum. */
 	(reduce_range (strlen hex) (lambda (acc index) (begin
 		(define digit (tsql_hex_digit_integer (substr hex index 1)))
 		(if (and signed (equal? count width) (equal? index 0) (>= digit 8))
-			(- digit 16) (+ (* acc 16) digit)))) 0)))))
+			(- digit 16) (+ (* acc 16) digit)))) 0))))) tsql_hex_digit_integer)))
 (define tsql_integer_compiler (lambda (type minimum maximum) (lambda (infos) (begin
 	(define input (car infos))
 	(sql_info (if (tsql_binary_type? (sql_info_type input))
-		(list (quote tsql_binary_to_integer) (sql_info_formula input) (tsql_integer_width type) (< minimum 0))
-		(list (quote tsql_cast_integer)
+		(list tsql_binary_to_integer (sql_info_formula input) (tsql_integer_width type) (< minimum 0))
+		(list tsql_cast_integer
 			(if (has? '("MONEY" "SMALLMONEY") (sql_info_type input))
-				(list (quote tsql_money_integer) (sql_info_formula input)) (sql_info_formula input)) minimum maximum)) type nil)))))
+				(list tsql_money_integer (sql_info_formula input)) (sql_info_formula input)) minimum maximum)) type nil)))))
 (define tsql_money_integer (lambda (value) (if (nil? value) nil (round value))))
 (define tsql_cast_integer_expr (lambda (value type minimum maximum)
 	(list (quote sql_compile_expr) (list (quote tsql_integer_compiler) type minimum maximum) value)))
-(define tsql_cast_bit (lambda (value)
+(define tsql_cast_bit (close_procedure ((lambda (tsql_numeric_input)
+	(lambda (value)
 	(if (nil? value) nil
 		(if (and (string? value) (equal? (toUpper (sql_trim value)) "TRUE")) true
 			(if (and (string? value) (equal? (toUpper (sql_trim value)) "FALSE")) false
-				(not (equal? (tsql_numeric_input value) 0)))))))
+				(not (equal? (tsql_numeric_input value) 0))))))) tsql_numeric_input)))
 /* Character casts own their width semantics in the frontend. National text
 counts UTF-16 units and never returns half of a supplementary character. The
 fast path avoids splitting the ordinary short numeric/text conversions. */
@@ -490,14 +501,21 @@ fast path avoids splitting the ordinary short numeric/text conversions. */
 			(if (< (car prefix) units) (list 0 (cadr prefix))
 				(list (- (car prefix) units) (concat (cadr prefix) character)))))
 			(list length ""))))))))
-(define tsql_cast_fixed_text (lambda (value length national) (if (nil? value) nil (begin
+(define tsql_cast_fixed_text (close_procedure ((lambda (tsql_cast_text)
+	(lambda (value length national) (if (nil? value) nil (begin
 	(define text (tsql_cast_text value length national))
 	(define units (if national (utf16_length text) (strlen text)))
-	(concat text (string_repeat " " (- length units)))))))
+	(concat text (string_repeat " " (- length units))))))) tsql_cast_text)))
 /* A cast keeps its syntax-declared SQL type until the shared expression
 compiler consumes the (expr, type, collation) contract. Runtime values do not
 select that type, and no arithmetic operation is needed merely to mark it. */
 
+(define tsql_cast_money_text (close_procedure ((lambda (tsql_money_text tsql_raise_error tsql_cast_fixed_text tsql_cast_text)
+	(lambda (value style length national fixed) (if (nil? value) nil (begin
+	(define text (tsql_money_text value style))
+	(if (and (not (equal? length -1)) (> (strlen text) length))
+		(tsql_raise_error 8115 "currency character conversion overflow" 1) true)
+	((if fixed tsql_cast_fixed_text tsql_cast_text) text length national))))) tsql_money_text tsql_raise_error tsql_cast_fixed_text tsql_cast_text)))
 (define tsql_cast_expr (lambda (value type dimensions) (begin
 	(define name (toUpper type))
 	(if (tsql_builtin_type_declaration name) (error "alias types cannot be explicit conversion targets") true)
@@ -508,13 +526,13 @@ select that type, and no arithmetic operation is needed merely to mark it. */
 		"SMALLINT" (tsql_cast_integer_expr value name -32768 32767)
 		"TINYINT" (tsql_cast_integer_expr value name 0 255)
 		"BIGINT" (tsql_cast_integer_expr value name (tsql_parse_integer "-9223372036854775808") (tsql_parse_integer "9223372036854775807"))
-		"FLOAT" (list (quote tsql_cast_float) value)
+		"FLOAT" (list tsql_cast_float value)
 		/* Approximate types use native floating precision. Binary32 rounding and
 		dialect precision boundaries remain noncritical compatibility work. */
-		"REAL" (list (quote tsql_cast_float) value)
+		"REAL" (list tsql_cast_float value)
 		"MONEY" (tsql_cast_money_expr value false)
 		"SMALLMONEY" (tsql_cast_money_expr value true)
-		"BIT" (list (quote tsql_cast_bit) value)
+		"BIT" (list tsql_cast_bit value)
 		"UNIQUEIDENTIFIER" (list (quote tsql_uuid) value)
 		"DECIMAL" (tsql_cast_decimal_expr value name dimensions)
 		"NUMERIC" (tsql_cast_decimal_expr value name dimensions)
@@ -537,7 +555,7 @@ select that type, and no arithmetic operation is needed merely to mark it. */
 	(if (or (sql_numeric_type? input_type)
 		(has? '("NULL" "any" "MONEY" "SMALLMONEY" "CHAR" "VARCHAR" "NCHAR" "NVARCHAR" "TEXT" "NTEXT") input_type)) true
 		(error "decimal conversion from " input_type " is not implemented"))
-	(sql_info (list (quote tsql_cast_decimal) (sql_info_formula input) (car dims) (cadr dims)) type nil)))))
+	(sql_info (list tsql_cast_decimal (sql_info_formula input) (car dims) (cadr dims)) type nil)))))
 (define tsql_cast_decimal_expr (lambda (value type dimensions) (begin
 	(define dims (tsql_decl_dimensions type dimensions))
 	(list (quote sql_compile_expr) (list (quote tsql_decimal_compiler) type (list (quote quote) dims)) value))))
@@ -690,12 +708,13 @@ bounded month directory is frontend syntax, not a second temporal carrier. */
 /* Numeric text width and Boolean spelling follow the declared input type.
 Only the small integer family uses the ASCII overflow marker; BIGINT and
 national text retain their conversion error. Runtime carriers select no type. */
-(define tsql_cast_numeric_text (lambda (value length national fixed asterisk boolean)
+(define tsql_cast_numeric_text (close_procedure ((lambda (tsql_raise_error tsql_cast_fixed_text tsql_cast_text)
+	(lambda (value length national fixed asterisk boolean)
 	(if (nil? value) nil (begin
 		(define text (string (if boolean (if value 1 0) value)))
 		(define text (if (and (not (equal? length -1)) (> (strlen text) length))
 			(if asterisk "*" (tsql_raise_error 8115 "numeric character conversion overflow" 1)) text))
-		((if fixed tsql_cast_fixed_text tsql_cast_text) text length national)))))
+		((if fixed tsql_cast_fixed_text tsql_cast_text) text length national))))) tsql_raise_error tsql_cast_fixed_text tsql_cast_text)))
 (define tsql_text_compiler (lambda (length national fixed) (lambda (infos) (begin
 	(define info (car infos))
 	(define source (sql_info_type info))
@@ -1063,7 +1082,7 @@ is available; accepting them here would silently lose the user's value. */
 		(error "calendar interval is not supported for TIME") true)
 	(define type (if (tsql_temporal_type? input_type) input_type "DATETIME"))
 	(define minimum (if (equal? type "DATETIME") -6847804800 -62135596800))
-	(define integer (list (quote tsql_cast_integer) (sql_info_formula amount_info) -2147483648 2147483647))
+	(define integer (list tsql_cast_integer (sql_info_formula amount_info) -2147483648 2147483647))
 	(define formula (list (if months tsql_calendar_shift_months tsql_calendar_shift_seconds)
 		(tsql_calendar_difference_formula input)
 		(list (quote *) integer (coalesceNil months seconds))))
@@ -1100,7 +1119,7 @@ is available; accepting them here would silently lose the user's value. */
 		(define difference (list (quote -)
 			(list boundary (tsql_calendar_difference_formula (cadr infos)))
 			(list boundary (tsql_calendar_difference_formula (car infos)))))
-		(sql_info (list (quote tsql_cast_integer) difference minimum maximum) type nil))))))
+		(sql_info (list tsql_cast_integer difference minimum maximum) type nil))))))
 (define tsql_datediff_expr (lambda (unit first last type) (begin
 	(define unit (tsql_calendar_unit unit))
 	(if (equal? unit "iso_week") (error "DATEDIFF does not support ISO week") true)
@@ -1298,7 +1317,7 @@ runtime errors are never caught and classified by their message text. */
 		(error "unary minus requires a numeric operand"))
 	(define negated (list (quote -) 0 formula))
 	(sql_info (if (has? '("MONEY" "SMALLMONEY") type)
-		(list (quote tsql_cast_money) negated (equal? type "SMALLMONEY")) negated)
+		(list tsql_cast_money negated (equal? type "SMALLMONEY")) negated)
 		(if (equal? type "TINYINT") "SMALLINT" type) nil))))
 (define tsql_negate_expr (lambda (value)
 	(list (quote sql_compile_expr) (quote tsql_compile_negate) value)))
@@ -1635,8 +1654,7 @@ Only the selected native operation survives the shared compile boundary. */
 			(sql_merge_collation collation (sql_info_collation info))) nil))))))
 (define tsql_add_expr (lambda (left right)
 	(list (quote sql_compile_expr) (quote tsql_compile_addition) left right)))
-(define tsql_raise_error (lambda (number message state)
-	(error (list "tsql-error" number message state))))
+
 (define tsql_integer_divide (lambda (left right)
 	(if (or (nil? left) (nil? right)) nil
 		(equal? right 0) (tsql_raise_error 8134 "division by zero" 1)
@@ -1698,7 +1716,7 @@ character dimensions retain the existing unbounded text conversion contract. */
 				declaration; the same payload declared as text remains decimal text. */
 				(and (has? '("BINARY" "VARBINARY") source) (tsql_integer_width target))))
 		(if (has? '("DECIMAL" "MONEY" "SMALLMONEY") target)
-			(list (quote tsql_cast_float) formula)
+			(list tsql_cast_float formula)
 			(sql_type_lower_annotations (tsql_cast_expr typed target '())))
 		(tsql_temporal_type? target)
 		(sql_type_lower_annotations (tsql_cast_expr typed target '()))
@@ -2181,7 +2199,7 @@ Other scalar return families are selected by the frontend compiler below. */
 						(list (quote if) (list (quote <) (quote scalar_value) 0)
 							(list (quote -) 0 (quote scalar_value)) (quote scalar_value))
 						(list (if (equal? name "FLOOR") (quote floor) (quote ceil)) (quote scalar_value))))))
-			(sql_info (if money (list (quote tsql_cast_money) formula false) formula)
+			(sql_info (if money (list tsql_cast_money formula false) formula)
 				(if integer (if (equal? type "BIGINT") "BIGINT" "INT") money "MONEY" "FLOAT") nil))))))
 
 /* These functions consume FLOAT contracts. Convert once before arithmetic:
