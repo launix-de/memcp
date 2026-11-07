@@ -57,3 +57,12 @@ test_cases:
 - name: Negative catalog EXISTS preserves its range boundary
   sql: SELECT CASE WHEN EXISTS(SELECT 1 FROM information_schema.schemata WHERE schema_name>'memcp-tests' AND schema_name<'memcp-testt') THEN 1 ELSE 0 END AS present
   expect: {data: [{present: 0}]}
+- name: Catalog join access binds each requested database independently
+  setup:
+  - sql: DROP TABLE IF EXISTS requested_databases
+  - sql: CREATE TABLE requested_databases(id INT PRIMARY KEY, name VARCHAR(128))
+  - sql: INSERT INTO requested_databases VALUES(1,'memcp-tests'),(2,'missing_catalog_source'),(3,NULL)
+  sql: SELECT r.id FROM requested_databases AS r JOIN information_schema.schemata AS s ON s.schema_name=r.name WHERE r.id<4 ORDER BY r.id
+  expect: {data: [{id: 1}]}
+  cleanup:
+  - sql: DROP TABLE requested_databases
