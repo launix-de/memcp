@@ -549,7 +549,9 @@ select that type, and no arithmetic operation is needed merely to mark it. */
 		"TIME" (tsql_temporal_cast_expr value name 0 dimensions)
 		_ (error "unsupported conversion to " name)))
 	(list (quote sql_type_expr) formula
-		(if (has? '("DECIMAL" "NUMERIC") name) (list name (tsql_decl_dimensions name dimensions)) name) nil))))
+		(if (has? '("DECIMAL" "NUMERIC") name) (list name (tsql_decl_dimensions name dimensions))
+			(has? '("CHAR" "VARCHAR" "NCHAR" "NVARCHAR" "BINARY" "VARBINARY") name)
+			(list name (if (empty_list? dimensions) '(30) dimensions)) name) nil))))
 (define tsql_decimal_compiler (lambda (type dims) (lambda (infos) (begin
 	(define input (car infos))
 	(define input_type (sql_info_type input))
@@ -589,7 +591,7 @@ Validate the complete input before truncation, then decode only needed bytes. */
 	(sql_info (if (and width (equal? style 0))
 		(list (quote tsql_integer_to_binary) formula width length fixed)
 		(list (quote tsql_cast_binary) formula length fixed))
-		(if fixed "BINARY" "VARBINARY") nil)))))
+		(list (if fixed "BINARY" "VARBINARY") (list length)) nil)))))
 (define tsql_cast_binary_expr (lambda (value dimensions fixed style) (begin
 	(if (has? '(0 1 2) style) true (error "unsupported binary conversion style"))
 	(define length (car (tsql_decl_dimensions (if fixed "BINARY" "VARBINARY")
@@ -734,7 +736,7 @@ national text retain their conversion error. Runtime carriers select no type. */
 			(has? '("BIT" "BOOL" "BOOLEAN") source))
 		(list (if fixed tsql_cast_fixed_text tsql_cast_text) formula length national)))
 	(sql_info converted
-		(if (and national fixed) "NCHAR" national "NVARCHAR" fixed "CHAR" "VARCHAR")
+		(list (if (and national fixed) "NCHAR" national "NVARCHAR" fixed "CHAR" "VARCHAR") (list length))
 		(sql_info_collation info))))))
 (define tsql_cast_text_expr (lambda (value dimensions national fixed) (begin
 	(define length (if (empty_list? dimensions) 30 (car dimensions)))
