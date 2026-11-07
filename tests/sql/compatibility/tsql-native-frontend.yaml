@@ -1134,7 +1134,7 @@ test_cases:
         (define info (sql_expr_info sources (tsql_cast_expr expr "NVARCHAR" (list 20))))
         (if (and (equal? (sql_info_type info) "NVARCHAR")
             (equal? (sql_info_collation info) (list "bin" 2))
-            (equal? (car (sql_info_formula info)) (quote tsql_cast_text)))
+            (expression_equal? (car (sql_info_formula info)) tsql_cast_text))
           true (error "text conversion lost its compiler contract")))
     expect: {result: true}
   - name: Having aggregate operand binds to the second joined source before its output alias

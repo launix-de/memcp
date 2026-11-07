@@ -394,3 +394,16 @@ test_cases:
           type: BIGINT
         - name: national
           type: BIGINT
+- name: UTF8 source and cast descriptors retain the UTF8 collation flag without rows
+  scm: >-
+    (begin
+      (define fields (tds_describe "memcp-tests"
+        "SELECT utf8_text,CAST(utf8_text AS VARCHAR(2)) AS accent FROM encoding_items WHERE 1=0" "" (newsession)))
+      (if (and (equal? (count fields) 2)
+          (equal? ((car fields) "kind") 167)
+          (equal? ((car fields) "size") 20)
+          (equal? ((cadr fields) "size") 2)
+          (equal? (bin2hex ((car fields) "collation")) "0904000400")
+          (equal? (bin2hex ((cadr fields) "collation")) "0904000400"))
+        true (error "UTF8 result descriptors lost their encoding or width")))
+  expect: {result: true}
