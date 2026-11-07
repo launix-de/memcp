@@ -424,7 +424,7 @@ numeric representation. Split before taking absolute values so the signed
 	(define text (tsql_money_text value style))
 	(if (and (not (equal? length -1)) (> (strlen text) length))
 		(tsql_raise_error 8115 "currency character conversion overflow" 1) true)
-	((if fixed tsql_cast_fixed_text tsql_cast_text) text length national)))))
+	((if fixed tsql_cast_fixed_text tsql_cast_text) text length national "windows-1252")))))
 (define tsql_cast_binary (lambda (value length fixed) (if (nil? value) nil (begin
 	(if (string? value) true (error "numeric binary conversion is not implemented"))
 	(define bytes (if (or (equal? length -1) (<= (strlen value) length)) value (substr value 0 length)))
@@ -478,22 +478,40 @@ Complementing the nonnegative magnitude avoids negating the int64 minimum. */
 		(if (and (string? value) (equal? (toUpper (sql_trim value)) "TRUE")) true
 			(if (and (string? value) (equal? (toUpper (sql_trim value)) "FALSE")) false
 				(not (equal? (tsql_numeric_input value) 0)))))))
+/* VARCHAR uses the existing TDS CP1252 profile unless a real SQL UTF8
+collation selects UTF8 explicitly. Internal comparison labels do not change
+that wire profile. Unknown code pages fail before choosing any row operator. */
+(define tsql_character_encoding (lambda (info) (begin
+	(define collation (sql_info_collation info))
+	(define name (if collation (toLower (car collation)) ""))
+	(if (equal? name "") "windows-1252"
+		(regexp_test name "_utf8$") "utf-8"
+		(regexp_test name "^(utf8mb[34]|utf8|binary|bin)(_|$)") "windows-1252"
+		(regexp_test name "^latin1_general(_|$)") "windows-1252"
+		(regexp_test name "^sql_latin1_general_cp1(_|$)") "windows-1252"
+		(error "unsupported T-SQL character code page for collation: " name)))))
+(define tsql_encode_character (lambda (value encoding limit)
+	(if (nil? value) nil
+		(equal? encoding "utf-8") (utf8_prefix value (if (equal? limit -1) (strlen value) limit))
+		(single_byte_encode value encoding limit))))
+(define tsql_decode_character (lambda (value encoding)
+	(if (nil? value) nil
+		(equal? encoding "utf-8") (utf8_prefix value (strlen value))
+		(single_byte_decode value encoding))))
+
 /* Character casts own their width semantics in the frontend. National text
 counts UTF-16 units and never returns half of a supplementary character. The
 fast path avoids splitting the ordinary short numeric/text conversions. */
-(define tsql_cast_text (lambda (value length national) (if (nil? value) nil (begin
+(define tsql_cast_text (lambda (value length national encoding) (if (nil? value) nil (begin
 	(define text (string value))
-	(if (or (equal? length -1) (<= (strlen text) length)) text
-		national (utf16_prefix text length)
-		(cadr (reduce (split text "") (lambda (prefix character) (begin
-			(define units (strlen character))
-			(if (< (car prefix) units) (list 0 (cadr prefix))
-				(list (- (car prefix) units) (concat (cadr prefix) character)))))
-			(list length ""))))))))
-(define tsql_cast_fixed_text (lambda (value length national) (if (nil? value) nil (begin
-	(define text (tsql_cast_text value length national))
-	(define units (if national (utf16_length text) (strlen text)))
+	(if national
+		(if (or (equal? length -1) (<= (strlen text) length)) text (utf16_prefix text length))
+		(tsql_decode_character (tsql_encode_character text encoding length) encoding))))))
+(define tsql_cast_fixed_text (lambda (value length national encoding) (if (nil? value) nil (begin
+	(define text (tsql_cast_text value length national encoding))
+	(define units (if national (utf16_length text) (strlen (tsql_encode_character text encoding -1))))
 	(concat text (string_repeat " " (- length units)))))))
+
 /* A cast keeps its syntax-declared SQL type until the shared expression
 compiler consumes the (expr, type, collation) contract. Runtime values do not
 select that type, and no arithmetic operation is needed merely to mark it. */
@@ -530,14 +548,16 @@ select that type, and no arithmetic operation is needed merely to mark it. */
 		"SMALLDATETIME" (tsql_temporal_cast_expr value name 0 dimensions)
 		"TIME" (tsql_temporal_cast_expr value name 0 dimensions)
 		_ (error "unsupported conversion to " name)))
-	(list (quote sql_type_expr) formula name nil))))
+	(if (has? '("CHAR" "VARCHAR" "NCHAR" "NVARCHAR" "BINARY" "VARBINARY" "DECIMAL" "NUMERIC") name) formula
+		(list (quote sql_type_expr) formula
+			(if (empty_list? dimensions) name (list name (tsql_decl_dimensions name dimensions))) nil)))))
 (define tsql_decimal_compiler (lambda (type dims) (lambda (infos) (begin
 	(define input (car infos))
 	(define input_type (sql_info_type input))
 	(if (or (sql_numeric_type? input_type)
 		(has? '("NULL" "any" "MONEY" "SMALLMONEY" "CHAR" "VARCHAR" "NCHAR" "NVARCHAR" "TEXT" "NTEXT") input_type)) true
 		(error "decimal conversion from " input_type " is not implemented"))
-	(sql_info (list (quote tsql_cast_decimal) (sql_info_formula input) (car dims) (cadr dims)) type nil)))))
+	(sql_info (list (quote tsql_cast_decimal) (sql_info_formula input) (car dims) (cadr dims)) (list type dims) nil)))))
 (define tsql_cast_decimal_expr (lambda (value type dimensions) (begin
 	(define dims (tsql_decl_dimensions type dimensions))
 	(list (quote sql_compile_expr) (list (quote tsql_decimal_compiler) type (list (quote quote) dims)) value))))
@@ -570,7 +590,7 @@ Validate the complete input before truncation, then decode only needed bytes. */
 	(sql_info (if (and width (equal? style 0))
 		(list (quote tsql_integer_to_binary) formula width length fixed)
 		(list (quote tsql_cast_binary) formula length fixed))
-		(if fixed "BINARY" "VARBINARY") nil)))))
+		(list (if fixed "BINARY" "VARBINARY") (list length)) nil)))))
 (define tsql_cast_binary_expr (lambda (value dimensions fixed style) (begin
 	(if (has? '(0 1 2) style) true (error "unsupported binary conversion style"))
 	(define length (car (tsql_decl_dimensions (if fixed "BINARY" "VARBINARY")
@@ -592,8 +612,10 @@ rounding, before native insertion. Full precision-limit emulation is deferred. *
 		(tsql_cast_expr value type '())
 		/* Minute rounding belongs to the declared assignment contract, before
 		the existing sink receives the native calendar value. */
-		(has? '("NVARCHAR" "NCHAR" "SMALLDATETIME" "UNIQUEIDENTIFIER") type)
-		(tsql_cast_expr value type (declaration "Dimensions"))
+		(has? '("CHAR" "VARCHAR" "NVARCHAR" "NCHAR" "SMALLDATETIME" "UNIQUEIDENTIFIER") type)
+		(tsql_cast_expr (if (and (has? '("CHAR" "VARCHAR" "NVARCHAR" "NCHAR") type) (declaration "Collation"))
+			(list (quote sql_compile_expr) (list (quote tsql_collation_compiler) (declaration "Collation")) value) value)
+			type (declaration "Dimensions"))
 		(has? '("MONEY" "SMALLMONEY") type) (tsql_cast_expr value type '())
 		(has? '("DECIMAL" "NUMERIC") type) (begin
 			(define dimensions (declaration "Dimensions"))
@@ -695,7 +717,7 @@ national text retain their conversion error. Runtime carriers select no type. */
 		(define text (string (if boolean (if value 1 0) value)))
 		(define text (if (and (not (equal? length -1)) (> (strlen text) length))
 			(if asterisk "*" (tsql_raise_error 8115 "numeric character conversion overflow" 1)) text))
-		((if fixed tsql_cast_fixed_text tsql_cast_text) text length national)))))
+		((if fixed tsql_cast_fixed_text tsql_cast_text) text length national "windows-1252")))))
 (define tsql_text_compiler (lambda (length national fixed) (lambda (infos) (begin
 	(define info (car infos))
 	(define source (sql_info_type info))
@@ -712,9 +734,10 @@ national text retain their conversion error. Runtime carriers select no type. */
 		(list (quote tsql_cast_numeric_text) formula length national fixed
 			(and (not national) (has? '("TINYINT" "SMALLINT" "INT" "INTEGER") source))
 			(has? '("BIT" "BOOL" "BOOLEAN") source))
-		(list (if fixed (quote tsql_cast_fixed_text) (quote tsql_cast_text)) formula length national)))
+		(list (if fixed tsql_cast_fixed_text tsql_cast_text) formula length national
+			(if national "windows-1252" (tsql_character_encoding info)))))
 	(sql_info converted
-		(if (and national fixed) "NCHAR" national "NVARCHAR" fixed "CHAR" "VARCHAR")
+		(list (if (and national fixed) "NCHAR" national "NVARCHAR" fixed "CHAR" "VARCHAR") (list length))
 		(sql_info_collation info))))))
 (define tsql_cast_text_expr (lambda (value dimensions national fixed) (begin
 	(define length (if (empty_list? dimensions) 30 (car dimensions)))
@@ -755,8 +778,8 @@ syntax selects a source-dependent style through the separate factory below. */
 (define tsql_styled_text_compiler (lambda (pattern type dimensions) (lambda (infos) (begin
 	(define input (car infos))
 	(define formula (list format_date (tsql_calendar_difference_formula input) pattern))
-	(sql_info (list (if (has? '("CHAR" "NCHAR") type) (quote tsql_cast_fixed_text) (quote tsql_cast_text))
-		formula (if (empty_list? dimensions) 30 (car dimensions)) (has? '("NVARCHAR" "NCHAR") type)) type nil)))))
+	(sql_info (list (if (has? '("CHAR" "NCHAR") type) tsql_cast_fixed_text tsql_cast_text)
+		formula (if (empty_list? dimensions) 30 (car dimensions)) (has? '("NVARCHAR" "NCHAR") type) "windows-1252") type nil)))))
 (define tsql_convert_text_compiler (lambda (style type dimensions) (lambda (infos) (begin
 	(define input (car infos))
 	(define source (sql_info_type input))
@@ -775,9 +798,9 @@ syntax selects a source-dependent style through the separate factory below. */
 			((tsql_styled_text_compiler (tsql_temporal_style_pattern style true) type dimensions) infos))
 		(tsql_binary_type? source) (begin
 			(if (has? '(1 2) style) true (error "unsupported binary conversion style"))
-			(sql_info (list (if fixed (quote tsql_cast_fixed_text) (quote tsql_cast_text))
+			(sql_info (list (if fixed tsql_cast_fixed_text tsql_cast_text)
 				(list (quote tsql_binary_to_hex) (sql_info_formula input) (equal? style 1) length)
-				length national) type nil))
+				length national "windows-1252") type nil))
 		((tsql_text_compiler length national fixed) infos))))))
 (define tsql_convert_expr (lambda (value type dimensions style) (begin
 	(if (tsql_builtin_type_declaration type) (error "alias types cannot be explicit conversion targets") true)
@@ -843,7 +866,7 @@ cancellation and unsupported operations are never successful NULL casts. */
 		(list (list (quote tsql_try_cast_input) operand (has? '("NCHAR" "NVARCHAR" "NTEXT") source))) '()))
 	(sql_info (list (list (quote lambda) (list operand)
 		(cons (quote begin) (append checks body))) (sql_info_formula input))
-		(sql_info_type converted)
+		(sql_info_datatype converted)
 		(if (and text (has? '("CHAR" "VARCHAR" "NCHAR" "NVARCHAR") type))
 			(sql_info_collation input) (sql_info_collation converted)))))))
 (define tsql_try_convert_expr (lambda (value type dimensions style bounded_input) (begin
@@ -1047,7 +1070,7 @@ is available; accepting them here would silently lose the user's value. */
 		"TIME" (list tsql_calendar_time_only formula)
 		"SMALLDATETIME" (list tsql_calendar_small_datetime formula)
 		_ (list tsql_calendar_range formula (if (equal? target "DATETIME") -6847804800 -62135596800))))
-	(sql_info converted target nil)))))
+	(sql_info converted (if (empty_list? dimensions) target (list target dimensions)) nil)))))
 (define tsql_temporal_cast_expr (lambda (value target style dimensions)
 	(list (quote sql_compile_expr)
 		(list (quote tsql_temporal_compiler) target style (list (quote quote) dimensions)) value)))
@@ -1070,7 +1093,9 @@ is available; accepting them here would silently lose the user's value. */
 	(sql_info (match type
 		"TIME" (list tsql_calendar_time_only formula)
 		"SMALLDATETIME" (list tsql_calendar_small_datetime formula)
-		_ (list tsql_calendar_range formula minimum)) type nil)))))
+		_ (list tsql_calendar_range formula minimum))
+		(if (and (equal? type input_type) (not (empty_list? (sql_info_dimensions input))))
+			(sql_info_datatype input) type) nil)))))
 (define tsql_dateadd_expr (lambda (unit amount value) (begin
 	(define unit (tsql_calendar_unit unit))
 	(if (equal? unit "iso_week") (error "DATEADD does not support ISO week") true)
@@ -1691,7 +1716,7 @@ character dimensions retain the existing unbounded text conversion contract. */
 	(define converted (if (or (equal? source "NULL") (equal? source target)) formula
 		(and (has? tsql_addition_text_types target) (has? tsql_addition_text_types source)) formula
 		(and (has? tsql_addition_text_types target) (has? tsql_addition_numeric_types source))
-		(list (quote tsql_cast_text) formula -1 (has? '("NVARCHAR" "NCHAR") target))
+		(list (quote tsql_cast_text) formula -1 (has? '("NVARCHAR" "NCHAR") target) "windows-1252")
 		(and (has? tsql_addition_numeric_types target)
 			(or (has? tsql_addition_numeric_types source) (has? tsql_addition_text_types source)
 				/* The existing integer cast selects byte decoding from the SQL
@@ -1862,6 +1887,8 @@ The shared expression compiler still owns the SQL type; these additional wire
 dimensions are metadata only and are absent from the executable plan. */
 (define tsql_result_dimensions (lambda (sources expression parameters) (match expression
 	((symbol sql_compile_column) _compiler column) (tsql_result_dimensions sources column parameters)
+	(cons (symbol sql_compile_expr) (cons ((symbol tsql_builtin_compiler) "CHAR") _arguments)) '(1)
+	((symbol tsql_char) _value _money) '(1)
 	((symbol sql_compile_expr) ((symbol tsql_text_compiler) length _national _fixed) _value) (list length)
 	((symbol sql_type_expr) formula _type _collation) (tsql_result_dimensions sources formula parameters)
 	((symbol sql_compile_expr) ((symbol tsql_temporal_compiler) _target _style ((symbol quote) dimensions)) _value) dimensions
@@ -1896,8 +1923,8 @@ dimensions are metadata only and are absent from the executable plan. */
 	((symbol tsql_read_identity) _state) '(38 0)
 	((symbol tsql_cast_binary) _value length _fixed) (list length)
 	((symbol tsql_integer_to_binary) _value _width length _fixed) (list length)
-	((symbol tsql_cast_text) _value length _national) (list length)
-	((symbol tsql_cast_fixed_text) _value length _national) (list length)
+	((symbol tsql_cast_text) _value length _national _encoding) (list length)
+	((symbol tsql_cast_fixed_text) _value length _national _encoding) (list length)
 	((symbol tsql_cast_money_text) _value _style length _national _fixed) (list length)
 	((symbol tsql_cast_numeric_text) _value length _national _fixed _asterisk _boolean) (list length)
 	((symbol hex2bin) hex) (if (string? hex) (list (intdiv (strlen hex) 2)) nil)
@@ -1975,6 +2002,7 @@ row or supplied parameter value exists. */
 	(define money (has? '("MONEY" "SMALLMONEY") type))
 	(define kind (if (has? '("INT" "INTEGER" "BIGINT" "SMALLINT" "TINYINT") type) 38
 		money 110 numeric 108 (tsql_binary_type? type) 165
+		(equal? type "VARCHAR") 167 (equal? type "CHAR") 175
 		(has? '("FLOAT" "DOUBLE" "REAL" "DECIMAL" "NUMERIC") type) 109
 		(has? '("BOOLEAN" "BOOL" "BIT") type) 104
 		(equal? type "DATE") 40 (equal? type "TIME") 41 (equal? type "DATETIME2") 42
@@ -1991,11 +2019,15 @@ row or supplied parameter value exists. */
 		108 (if (<= precision 9) 5 (<= precision 19) 9 (<= precision 28) 13 17)
 		165 (if (equal? type "ROWVERSION") 8
 			(and (not (empty_list? dimensions)) (> (car dimensions) 0)) (car dimensions) 65535)
+		167 (if (empty_list? dimensions) 8000
+			(equal? (car dimensions) -1) 65535 (max 1 (car dimensions)))
+		175 (if (empty_list? dimensions) 1 (max 1 (car dimensions)))
 		231 (if (and (has? '("NVARCHAR" "NCHAR") type) (not (empty_list? dimensions)))
 			(if (equal? (car dimensions) -1) 65535 (* 2 (car dimensions))) 8000)
 		104 1
 		_ (match type "TINYINT" 1 "SMALLINT" 2 "INT" 4 "INTEGER" 4 _ 8)))
-	(list "kind" kind "size" size "precision" precision "scale" scale))))
+	(merge (list "kind" kind "size" size "precision" precision "scale" scale)
+		(if (has? '(167 175) kind) (list "collation" (hex2bin "0904d00034")) '())))))
 (define tsql_result_columns (lambda (query parameters) (match query
 	((symbol query-block) _schema sources fields _where _group _having _order _limit _offset _hidden _stages _facts)
 	(begin
@@ -2016,9 +2048,15 @@ row or supplied parameter value exists. */
 			(define origin (nth entry 3))
 			(define flags (tsql_result_flags origin editable))
 			(define type (sql_info_type info))
-			(define dimensions (coalesceNil (tsql_result_dimensions sources expression parameters)
-				(tsql_result_dimensions sources (sql_info_formula info) parameters) '()))
+			(define dimensions (if (empty_list? (sql_info_dimensions info))
+				(coalesceNil (tsql_result_dimensions sources expression parameters)
+					(tsql_result_dimensions sources (sql_info_formula info) parameters) '())
+				(sql_info_dimensions info)))
 			(define wire (tsql_wire_contract type dimensions))
+			(define wire (if (and (has? '("CHAR" "VARCHAR") type)
+				(equal? (tsql_character_encoding info) "utf-8"))
+				(map_assoc wire (lambda (key value)
+					(if (equal? key "collation") (hex2bin "0904000400") value))) wire))
 			(merge wire (list "name" name "flags" (car flags) "user_type" (coalesceNil (cadr flags) 0) "sql_type" type)
 				(if origin (list "source" (list (source_schema (car origin)) "dbo"
 					(source_relation (car origin)) ((cadr origin) "Field"))) '()))))))
@@ -2055,7 +2093,7 @@ compiling; the emitted row callback contains no SQL type tags or dispatch. */
 
 (define tsql_collation_compiler (lambda (name) (lambda (infos) (begin
 	(define info (car infos))
-	(sql_info (sql_info_formula info) (sql_info_type info) (list name 0))))))
+	(sql_info (sql_info_formula info) (sql_info_datatype info) (list name 0))))))
 
 /* ROUND owns SQL length, truncation and return-width rules at this frontend
 compile boundary. Integer inputs never pass through floating-point scaling.
@@ -2266,7 +2304,8 @@ No character list, decoder, relation or runtime SQL type is constructed here. */
 	(sql_info (if (equal? name "SUBSTRING")
 		(cons (quote tsql_substring) (append arguments binary))
 		(cons (if (equal? name "LEFT") (quote tsql_left) (quote tsql_right)) arguments))
-		output (if binary nil (sql_info_collation converted))))))
+		(if (empty_list? (sql_info_dimensions converted)) output (list output (sql_info_dimensions converted)))
+		(if binary nil (sql_info_collation converted))))))
 
 (define tsql_compile_string_normalization (lambda (name infos) (begin
 	(if (equal? (count infos) 1) true (error name " requires one argument"))
@@ -2281,12 +2320,92 @@ No character list, decoder, relation or runtime SQL type is constructed here. */
 	(define helper (match name
 		"UPPER" (quote tsql_upper) "LOWER" (quote tsql_lower)
 		"LTRIM" (quote tsql_ltrim) "RTRIM" (quote tsql_rtrim) "TRIM" (quote tsql_trim)))
-	(sql_info (list helper (sql_info_formula converted)) output (sql_info_collation input)))))
+	(sql_info (list helper (sql_info_formula converted))
+		(if (empty_list? (sql_info_dimensions input)) output (list output (sql_info_dimensions input)))
+		(sql_info_collation input)))))
+
+/* Byte/code-point interpretation is selected from SQL declarations here. The
+runtime primitives know only explicit encodings and raw byte coordinates. */
+(define tsql_char (lambda (value money) (if (nil? value) nil (begin
+	(define code (tsql_cast_integer (if money (round value) value) -2147483648 2147483647))
+	(single_byte_decode (byte_char code) "windows-1252"))))))
+(define tsql_compile_char (lambda (infos) (begin
+	(if (equal? (count infos) 1) true (error "CHAR requires one argument"))
+	(define input (car infos))
+	(define type (tsql_addition_type (sql_info_type input)))
+	(if (has? '("NULL" "BIT" "TINYINT" "SMALLINT" "INT" "BIGINT" "REAL" "FLOAT" "DECIMAL" "MONEY" "SMALLMONEY" "CHAR" "VARCHAR" "NCHAR" "NVARCHAR") type)
+		true (error "CHAR requires an implicitly convertible integer expression"))
+	(sql_info (list tsql_char (sql_info_formula input) (has? '("MONEY" "SMALLMONEY") type))
+		(list "CHAR" '(1)) '("utf8mb4_general_ci" 4)))))
+(define tsql_ascii (lambda (value encoding binary)
+	(if (nil? value) nil
+		(byte_value (if (or binary (equal? encoding "utf-8")) value
+			(tsql_encode_character value encoding 1)) 0))))
+(define tsql_compile_ascii (lambda (infos) (begin
+	(if (equal? (count infos) 1) true (error "ASCII requires one argument"))
+	(define input (car infos))
+	(define binary (tsql_binary_type? (sql_info_type input)))
+	(if (has? '("TEXT" "NTEXT" "IMAGE") (sql_info_type input))
+		(error "ASCII requires a convertible character or binary declaration") true)
+	(define converted (if (or binary (has? '("NULL" "CHAR" "VARCHAR" "NCHAR" "NVARCHAR") (sql_info_type input))) input
+		((tsql_text_compiler -1 false false) infos)))
+	(sql_info (list tsql_ascii (sql_info_formula converted)
+		(if binary "windows-1252" (tsql_character_encoding converted)) binary) "INT" nil))))
+(define tsql_fixed_datalength (lambda (value width) (if (nil? value) nil width)))
+(define tsql_encoded_datalength (lambda (value encoding)
+	(if (nil? value) nil (strlen (tsql_encode_character value encoding -1)))))
+(define tsql_national_datalength (lambda (value) (if (nil? value) nil (* 2 (utf16_length value)))))
+(define tsql_binary_datalength (lambda (value) (if (nil? value) nil (strlen value))))
+(define tsql_compile_datalength (lambda (infos) (begin
+	(if (equal? (count infos) 1) true (error "DATALENGTH requires one argument"))
+	(define input (car infos))
+	(define type (sql_info_type input))
+	(define dimensions (sql_info_dimensions input))
+	(define formula (sql_info_formula input))
+	(if (and (has? '("DECIMAL" "NUMERIC") type) (empty_list? dimensions))
+		(error "DATALENGTH requires a declared precision for this decimal expression") true)
+	(define result_type (if (and (has? '("VARCHAR" "NVARCHAR" "VARBINARY") type) (equal? dimensions '(-1))) "BIGINT" "INT"))
+	(define expression (if (has? '("VARCHAR" "TEXT") type)
+		(list tsql_encoded_datalength formula (tsql_character_encoding input))
+		(has? '("NVARCHAR" "NTEXT") type) (list tsql_national_datalength formula)
+		(has? '("VARBINARY" "IMAGE") type) (list tsql_binary_datalength formula)
+		(equal? type "NULL") (list tsql_fixed_datalength formula 0)
+		(begin
+			(define width (tsql_declared_byte_length (list "RawType" type "Dimensions" dimensions)))
+			(if width (list tsql_fixed_datalength formula width)
+				(error "DATALENGTH requires a supported SQL declaration; got " type)))))
+	(sql_info expression result_type nil))))
+(define tsql_len (lambda (value unit encoding) (if (nil? value) nil (begin
+	(define text (tsql_rtrim value))
+	(match unit
+		"utf16" (utf16_length text)
+		"rune" (text_length text "rune")
+		_ (strlen (if encoding (tsql_encode_character text encoding -1) text))))))))
+(define tsql_compile_len (lambda (infos) (begin
+	(if (equal? (count infos) 1) true (error "LEN requires one argument"))
+	(define input (car infos))
+	(define type (sql_info_type input))
+	(if (has? '("TEXT" "NTEXT" "IMAGE") type) (error "LEN requires a convertible character or binary declaration") true)
+	(define binary (tsql_binary_type? type))
+	(define national (has? '("NCHAR" "NVARCHAR") type))
+	(define converted (if (or binary national (has? '("CHAR" "VARCHAR" "NULL") type)) input
+		((tsql_text_compiler -1 false false) infos)))
+	(define encoding (if (or national binary) nil (tsql_character_encoding converted)))
+	(define collation (sql_info_collation input))
+	(define supplementary (if national
+		(if (nil? collation) false (regexp_test (car collation) "(?i)_sc(_|$)")) false))
+	(define unit (if (or (equal? encoding "utf-8") supplementary) "rune" national "utf16" "byte"))
+	(sql_info (list tsql_len (sql_info_formula converted) unit encoding)
+		(if (and (has? '("VARCHAR" "NVARCHAR" "VARBINARY") type) (equal? (sql_info_dimensions input) '(-1))) "BIGINT" "INT") nil))))
 
 (define tsql_builtin_compiler (lambda (name) (lambda (infos)
 	(if (has? '("NEWID" "UUIDV7") name) (begin
 		(if (empty_list? infos) true (error name " takes no arguments"))
 		(sql_info (list (if (equal? name "NEWID") (quote uuid_v4) (quote uuid_v7))) "UNIQUEIDENTIFIER" nil))
+		(equal? name "CHAR") (tsql_compile_char infos)
+		(equal? name "ASCII") (tsql_compile_ascii infos)
+		(equal? name "DATALENGTH") (tsql_compile_datalength infos)
+		(equal? name "LEN") (tsql_compile_len infos)
 		(equal? name "ROUND") (tsql_compile_round infos)
 		(has? '("ABS" "FLOOR" "CEILING") name) (tsql_compile_numeric_scalar name infos)
 		(has? '("SQUARE" "SQRT") name) (tsql_compile_floating_scalar name infos)
@@ -2310,7 +2429,10 @@ No character list, decoder, relation or runtime SQL type is constructed here. */
 	"LEFT" tsql_left
 	"RIGHT" tsql_right
 	"SUBSTRING" (lambda (value start amount) (tsql_substring value start amount false))
-	"LEN" (lambda (value) (if (nil? value) nil (strlen (sql_rtrim value))))
+	"CHAR" tsql_char
+	"ASCII" tsql_ascii
+	"DATALENGTH" tsql_binary_datalength
+	"LEN" (lambda (value) (tsql_len value "byte" "windows-1252"))
 	"SQUARE" tsql_square
 	"SQRT" tsql_square_root
 	"LTRIM" tsql_ltrim
@@ -2415,7 +2537,9 @@ that context explicitly; stored views refuse this scalar before publication. */
 			(list (quote sql_type_expr) (list (quote tsql_unbound_parameter) name spelling) "any" nil)
 			(empty_list? declaration) (error "undeclared T-SQL parameter: @" name)
 			(list (quote sql_type_expr) (list (quote session) (concat "__tsql_parameter:" name))
-				(car (tsql_effective_parameter_contract (cadr (car declaration)))) nil)))))
+				(begin
+					(define contract (tsql_effective_parameter_contract (cadr (car declaration))))
+					(if (empty_list? (cdr contract)) (car contract) (list (car contract) (cdr contract)))) nil)))))
 
 	(define placeholder_counter (newsession))
 	(placeholder_counter "n" 0)
