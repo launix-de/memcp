@@ -21,6 +21,30 @@ time so cached statements observe grants and revocations. */
 						(scan_boundary "equal" "database" 1 1 true true "" false)) (list username database)) 1
 				0)))))))
 
+/* Compatibility database identifiers are durable frontend data, not a
+second database directory. Membership always comes from native (show).
+A unique native key serializes concurrent first use across cluster peers;
+ordinary reads reuse the assigned identity without catalog writes. */
+(eval (parse_sql "system" "CREATE TABLE IF NOT EXISTS tsql_database_ids (id INT NOT NULL AUTO_INCREMENT PRIMARY KEY, name VARCHAR(255) COLLATE utf8mb4_bin NOT NULL UNIQUE) ENGINE=SAFE AUTO_INCREMENT=5"
+	(lambda (_schema _table _write) true)))
+(define tsql_database_id (lambda (name) (begin
+	(define identities (table "system" false "tsql_database_ids" false))
+	(define lookup (lambda () (scan_lookup nil identities
+		(list 372734710317056 (scan_boundary "equal" "name" 0 0 true true "" false) "id") (list name))))
+	(define existing (lookup))
+	(if existing
+		(if (and (> existing 0) (<= existing 2147483647)) existing
+			(error "database identity exceeds the T-SQL INT domain"))
+		(begin
+		/* master has its conventional identity when present; no fictitious
+		tempdb, model or msdb rows are introduced into the native directory. */
+		(if (equal? name "master")
+			(insert identities '("id" "name") (list (list 1 name)) '() (lambda () true))
+			(insert identities '("name") (list (list name)) '() (lambda () true)))
+		(define identity (lookup))
+		(if (and identity (> identity 0) (<= identity 2147483647)) identity
+			(error "database identity exceeds the T-SQL INT domain")))))))
+
 /* Alias declarations are ordinary, durable frontend data, like SQL views.
 The native column keeps the qualified alias spelling in its existing RawType.
 Only this frontend interprets the declaration; storage has no alias registry. */

@@ -141,3 +141,25 @@ runs. The final check needs real connection/bootstrap queries, original schema
 and procedure definitions, migration batches, and initial application reads and
 writes through a real driver. Add a small independent regression for each
 observed missing form and place the fix in the owning layer.
+
+## Native catalog query sources
+
+`sys.databases` and database-qualified `[catalog].sys.databases` are derived
+logical queries over the shared `INFORMATION_SCHEMA.SCHEMATA` adapter. The
+supported columns are `name` (`NVARCHAR(128)`) and `database_id` (`INT`). Names
+are enumerated at execution time, and visibility follows native account grants.
+The numeric compatibility identities are assigned using a native SAFE table
+with a unique name key, retained after DROP and reused after restart. They are
+frontend identifiers; the native directory remains the membership authority.
+
+`sys.objects` currently adapts native table and stored-view declarations, with
+`name`, `type` and `type_desc`. It does not yet expose procedure, trigger or
+constraint objects, nor the remaining SQL Server catalog columns. The shared
+`INFORMATION_SCHEMA.TABLES` adapter now also includes stored views. Bracketed
+and double-quoted database and owner names use the normal identifier grammar.
+
+Catalog filters, joins and ordering use the common planner and native scan
+operators. `COUNT(DISTINCT ...)` over a runtime metadata source still needs a
+native temporary-table/grouping implementation; its positive regression remains
+critical and failing in `tsql-database-catalog.yaml`. Do not replace it with a
+list-set reducer or treat this catalog slice as complete metadata compatibility.

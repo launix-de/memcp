@@ -338,6 +338,22 @@ storage call avoids a DROP racing the second per-table lookup. */
 	)
 )))
 
+/* Native table declarations and stored SQL view definitions are the two
+owners of TABLES metadata. Enumerate both at request time; a view has no engine
+or row statistics of its own. */
+(define info_schema_tables_rows (lambda () (merge (list
+	(merge (map (show) (lambda (db)
+		(map (show db true) (lambda (metadata) (info_schema_table_row db metadata))))))
+	(merge (map (show) (lambda (db)
+		(scan nil (table "system" false "views" false)
+			(list 369436175368192 (scan_boundary "equal" "database" 0 0 true true "" false))
+			(list db) '() (lambda () true)
+		'("database" "name")
+		(lambda (acc database name) (cons (list "table_catalog" "def" "table_schema" database
+			"table_name" name "table_type" "VIEW" "engine" nil "table_rows" nil
+			"data_length" nil "table_collation" nil "table_comment" "") acc))
+		'() (lambda (a b) (merge (list a b)))))))))))
+
 /* Column catalog for virtual INFORMATION_SCHEMA relations. Storage-backed
 relations are deliberately resolved by the single public get_schema dispatcher. */
 (define information_schema_column_catalog (lambda (schema tbl) (match '(schema tbl)
@@ -484,9 +500,7 @@ relations are deliberately resolved by the single public get_schema dispatcher. 
 			"schema_comment" "")))
 
 	'((ignorecase "information_schema") (ignorecase "tables"))
-	(merge (map (show) (lambda (db)
-		(map (show db true) (lambda (table_info)
-			(info_schema_table_row db table_info))))))
+	(info_schema_tables_rows)
 
 	'((ignorecase "information_schema") (ignorecase "columns"))
 	(merge (map (show) (lambda (db)
@@ -525,14 +539,7 @@ relations are deliberately resolved by the single public get_schema dispatcher. 
 		'('map '('show) '('lambda '('schema) '('list "catalog_name" "def" "schema_name" 'schema "default_character_set_name" "utf8mb4" "default_collation_name" "utf8mb3_general_ci" "sql_path" NULL "schema_comment" "")))
 	) rest)
 	'((ignorecase "information_schema") (ignorecase "tables"))
-	(list 'begin
-		/* TODO(planner-scalability): expose catalog metadata as a physical
-		relation instead of constructing a cardinality-dependent SCM list. */
-		/* Materialize a complete catalog snapshot at runtime but BEFORE the scan
-		starts.  The single (show schema true) call also keeps concurrent DROP from
-		invalidating names between table discovery and metadata collection. */
-		'('define '__info_tables_data '('merge '('map '('show) '('lambda '('s) '('map '('show 's true) '('lambda '('t) '('info_schema_table_row 's 't)))))))
-		(merge '(scanfn '(session "__memcp_tx") '__info_tables_data) rest))
+	(merge '(scanfn '(session "__memcp_tx") '(info_schema_tables_rows)) rest)
 	'((ignorecase "information_schema") (ignorecase "columns"))
 	(merge '(scanfn '(session "__memcp_tx")
 		'((quote merge) '((quote map) '((quote show)) '((quote lambda) '((quote schema)) '((quote merge) '((quote map) '((quote show) (quote schema)) '((quote lambda) '((quote tbl)) '((quote info_schema_columns_for_table) (quote schema) (quote tbl))))))))
