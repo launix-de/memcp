@@ -5657,7 +5657,7 @@ table snapshot and request bindings are unchanged. Pin that observation in the
 query scope so a broad/no-hit predicate is sampled once, while a later request
 still rechecks current data and autoindex statistics. */
 (define query_scoped_source_filter_estimate_expr (lambda (src condition max_rows)
-	(begin
+	(if (not (source_is_native_table? src)) nil (begin
 		(define alias (source_alias src))
 		(define cols (extract_columns_for_alias src condition))
 		(define estimate_expr (compile_scan_plan (quote scan_selectivity_estimate)
@@ -5677,7 +5677,7 @@ still rechecks current data and autoindex statistics. */
 			(list (quote tx_query) (quote tx))
 			key
 			(quote tx)
-			(list (quote lambda) (list (quote tx)) estimate_expr)))))
+			(list (quote lambda) (list (quote tx)) estimate_expr))))))
 
 /* Recreate only the source-local statistic read used for carrier costing. The
 expression is emitted into the cache guard and evaluated against the current

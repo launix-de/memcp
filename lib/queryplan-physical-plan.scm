@@ -5652,6 +5652,14 @@ chooses the producer/driver implementation from canonical stage facts. */
 		(and (string? relation)
 			(equal?? schema "information_schema")))))
 
+/* Virtual catalogs are named logical relations but produce runtime rows,
+not native table handles. Native statistics, feedback and packed multi-table
+scans require a native owner; generic scans and ordered branch producers also
+accept row domains. This capability is independent of logical source shape. */
+(define source_is_native_table? (lambda (src)
+	(and (source_is_base_table? src)
+		(not (information_schema_source? (source_schema src) (source_relation src))))))
+
 /* A literal-rows source (see lib/queryplan-logical.scm) is compiled once and
 scanned via the plain-list branch scan/scan_order already support -- no
 per-branch recompilation, no temporary storage table. Its rows are already
@@ -12296,14 +12304,15 @@ stars through the same catalog-aware path used by physical lowering. */
 
 (define union_ordered_branch_supported? (lambda (branch)
 	(and (query_block? branch)
-		(and (single_source? (qb_sources branch))
-			(and (empty_list? (qb_stages branch))
-				(and (empty_list? (qb_group branch))
-					(and (nil? (qb_having branch))
-						(and (not (query_block_has_aggregates? branch))
-							(and (empty_list? (qb_order branch))
-								(and (nil? (qb_limit branch))
-									(nil? (qb_offset branch))))))))))))
+		(single_source? (qb_sources branch))
+		(source_is_native_table? (car (qb_sources branch)))
+		(empty_list? (qb_stages branch))
+		(empty_list? (qb_group branch))
+		(nil? (qb_having branch))
+		(not (query_block_has_aggregates? branch))
+		(empty_list? (qb_order branch))
+		(nil? (qb_limit branch))
+		(nil? (qb_offset branch)))))
 
 (define grouped_union_branch? (lambda (branch)
 	(and (query_block? branch)
