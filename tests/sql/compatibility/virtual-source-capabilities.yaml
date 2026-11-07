@@ -1,0 +1,68 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  description: Virtual catalog sources select native-compatible guards and streaming ordered producers
+setup:
+- sql: DROP TABLE IF EXISTS meta_stats_alpha
+- sql: DROP TABLE IF EXISTS meta_stats_beta
+- sql: DROP TABLE IF EXISTS meta_stats_gamma
+- sql: CREATE TABLE meta_stats_alpha(id INT PRIMARY KEY,label VARCHAR(30))
+- sql: CREATE TABLE meta_stats_beta(id INT PRIMARY KEY,label VARCHAR(30))
+- sql: INSERT INTO meta_stats_alpha VALUES(1,'alpha'),(2,'beta'),(3,'gamma')
+cleanup:
+- sql: DROP TABLE IF EXISTS meta_stats_alpha
+- sql: DROP TABLE IF EXISTS meta_stats_beta
+- sql: DROP TABLE IF EXISTS meta_stats_gamma
+test_cases:
+- name: Virtual LIKE predicate survives initial compilation and cache guard evaluation
+  sql: SELECT table_name FROM information_schema.tables WHERE table_schema='memcp-tests' AND table_name LIKE 'meta_stats_%' ORDER BY table_name
+  expect: {data: [{table_name: meta_stats_alpha}, {table_name: meta_stats_beta}]}
+- name: Cached virtual LIKE query uses the same filtered metadata source
+  sql: SELECT table_name FROM information_schema.tables WHERE table_schema='memcp-tests' AND table_name LIKE 'meta_stats_%' ORDER BY table_name
+  expect: {data: [{table_name: meta_stats_alpha}, {table_name: meta_stats_beta}]}
+- name: Virtual OR predicate preserves both branches
+  sql: SELECT table_name FROM information_schema.tables WHERE table_schema='memcp-tests' AND (table_name='meta_stats_alpha' OR table_name='meta_stats_beta') ORDER BY table_name
+  expect: {data: [{table_name: meta_stats_alpha}, {table_name: meta_stats_beta}]}
+- name: Virtual OR predicate does not leak rows from other databases
+  sql: SELECT table_name FROM information_schema.tables WHERE table_schema='memcp-tests' AND (table_name='meta_stats_alpha' OR table_name='user') ORDER BY table_name
+  expect: {data: [{table_name: meta_stats_alpha}]}
+- name: Virtual LIKE retains a selective pattern
+  sql: SELECT table_name FROM information_schema.tables WHERE table_schema='memcp-tests' AND table_name LIKE 'meta_stats_a%' ORDER BY table_name
+  expect: {data: [{table_name: meta_stats_alpha}]}
+- name: Virtual LIKE retains an empty matching domain
+  sql: SELECT table_name FROM information_schema.tables WHERE table_schema='memcp-tests' AND table_name LIKE 'meta_stats_missing%' ORDER BY table_name
+  expect: {rows: 0}
+- name: Publish a new metadata row
+  sql: CREATE TABLE meta_stats_gamma(id INT PRIMARY KEY)
+- name: Cached virtual LIKE query observes catalog growth
+  sql: SELECT table_name FROM information_schema.tables WHERE table_schema='memcp-tests' AND table_name LIKE 'meta_stats_%' ORDER BY table_name
+  expect: {data: [{table_name: meta_stats_alpha}, {table_name: meta_stats_beta}, {table_name: meta_stats_gamma}]}
+- name: Native OR query retains native table statistics
+  sql: SELECT id FROM meta_stats_alpha WHERE id=1 OR id=3 ORDER BY id
+  expect: {data: [{id: 1}, {id: 3}]}
+- name: Native LIKE query retains native table statistics
+  sql: SELECT id FROM meta_stats_alpha WHERE label LIKE 'a%' ORDER BY id
+  expect: {data: [{id: 1}]}
+- name: Scalar virtual LIKE reduction does not request native filter observations
+  syntax: tsql
+  sql: SELECT COUNT(*) AS total FROM information_schema.tables WHERE table_schema=N'memcp-tests' AND table_name LIKE N'meta_stats_a%'
+  expect: {data: [{total: 1}]}
+- name: Scalar virtual OR reduction does not request native filter observations
+  syntax: tsql
+  sql: SELECT COUNT(*) AS total FROM information_schema.tables WHERE table_schema=N'memcp-tests' AND (table_name=N'meta_stats_alpha' OR table_name=N'meta_stats_beta')
+  expect: {data: [{total: 2}]}
+- name: Cached scalar virtual OR keeps its runtime source contract
+  syntax: tsql
+  sql: SELECT COUNT(*) AS total FROM information_schema.tables WHERE table_schema=N'memcp-tests' AND (table_name=N'meta_stats_alpha' OR table_name=N'meta_stats_beta')
+  expect: {data: [{total: 2}]}
+
+- name: Ordered UNION merges virtual and native branch producers
+  sql: SELECT table_name AS name FROM information_schema.tables WHERE table_schema='memcp-tests' AND table_name='meta_stats_alpha' UNION ALL SELECT label AS name FROM meta_stats_alpha WHERE id=2 ORDER BY name
+  expect: {data: [{name: beta}, {name: meta_stats_alpha}]}
+- name: Ordered UNION preserves reverse order offset and limit
+  sql: SELECT table_name AS name FROM information_schema.tables WHERE table_schema='memcp-tests' AND table_name='meta_stats_alpha' UNION ALL SELECT label AS name FROM meta_stats_alpha WHERE id=2 ORDER BY name DESC LIMIT 1 OFFSET 1
+  expect: {data: [{name: beta}]}
+- name: Ordered UNION retains duplicate complete rows across source families
+  sql: SELECT table_schema AS name FROM information_schema.tables WHERE table_schema='memcp-tests' AND table_name='meta_stats_alpha' UNION ALL SELECT 'memcp-tests' AS name FROM meta_stats_alpha WHERE id<3 ORDER BY name
+  expect: {data: [{name: memcp-tests}, {name: memcp-tests}, {name: memcp-tests}]}

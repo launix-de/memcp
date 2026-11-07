@@ -349,7 +349,7 @@ bounded scalar metadata; this lookup never scans, loads columns or builds indexe
 (define planner_record_filter_feedback_guard (lambda (src columns callback planning_session)
 	(begin
 		(define planning_session (planner_effective_session planning_session))
-		(if (or (nil? planning_session)
+		(if (or (not (source_is_native_table? src)) (nil? planning_session)
 			(nil? (planning_session "__memcp_queryplan_guard_conditions"))) nil
 			(begin
 				/* Keep the predicate unbound while generating metadata. Its slots must
@@ -388,7 +388,7 @@ bounded scalar metadata; this lookup never scans, loads columns or builds indexe
 		(if (not (single_source? aliases)) nil
 			(begin
 				(define src (join_optimizer_source_by_alias sources (car aliases)))
-				(if (not (source_is_base_table? src)) nil
+				(if (not (source_is_native_table? src)) nil
 					(try (lambda ()
 						(begin
 							(define cols (extract_columns_for_alias src expr))
@@ -1888,7 +1888,7 @@ particular star shape. */
 		(if hypergraph (quote goo-dphyp) (quote decomposed-dphyp)))))
 
 (define planner_record_table_statistics_guards (lambda (sources planning_session)
-	(reduce (filter sources source_is_base_table?) (lambda (_ src)
+	(reduce (filter sources source_is_native_table?) (lambda (_ src)
 		(begin
 			(define table_value (table (source_schema src) false (source_relation src) false))
 			(define table_expr
@@ -3093,7 +3093,7 @@ floor avoids pretending that an unseen word is impossible. */
 		(if (nil? stats) nil (stats "row_count")))))
 
 (define planner_source_filter_estimate (lambda (src condition max_rows tx planning_session)
-	(if (not (source_is_base_table? src))
+	(if (not (source_is_native_table? src))
 		nil
 		(try
 			(lambda ()
@@ -3135,7 +3135,7 @@ floor avoids pretending that an unseen word is impossible. */
 			(lambda (_e) nil)))))
 
 (define planner_source_row_count (lambda (src)
-	(if (source_is_base_table? src)
+	(if (source_is_native_table? src)
 		(planner_table_row_count (source_schema src) (source_relation src))
 		(if (row_domain_relation? (source_relation src))
 			(count (row_domain_data (source_relation src)))
