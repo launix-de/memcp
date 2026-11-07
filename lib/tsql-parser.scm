@@ -177,14 +177,21 @@ Only the consuming compilation creates callbacks; SQL operands stay separate. */
 	(define right_type (sql_info_type right_info))
 	(define head (match op "eq" (quote equal??) "ne" (quote equal??)
 		"lt" (quote <) "gt" (quote >) "le" (quote <=) "ge" (quote >=)))
-	(define comparison (if (and
+	(define binary (and
 		(or (tsql_binary_type? left_type) (equal? left_type "NULL"))
 		(or (tsql_binary_type? right_type) (equal? right_type "NULL"))
-		(or (tsql_binary_type? left_type) (tsql_binary_type? right_type)))
+		(or (tsql_binary_type? left_type) (tsql_binary_type? right_type))))
+	(define collation (if (and (sql_text_type? left_type) (sql_text_type? right_type))
+		(sql_merge_collation (sql_info_collation left_info) (sql_info_collation right_info)) nil))
+	/* Explicit COLLATE also governs constants and direct column comparisons.
+	Do not lose its contract when a postfix annotation lowers to a literal. */
+	(define explicit (and (not (nil? collation)) (equal? (cadr collation) 0)))
+	(define comparison (if (or binary explicit)
 		(sql_info (if (has? '("eq" "ne") op)
-			(list (quote equal_collate) (sql_info_formula left_info) (sql_info_formula right_info) "bin")
+			(list (quote equal_collate) (sql_info_formula left_info) (sql_info_formula right_info)
+				(if binary "bin" (car collation)))
 			(list (quote sql_compare) (sql_info_formula left_info) (sql_info_formula right_info)
-				(collate "bin" false) (string head))) "BOOLEAN" nil)
+				(collate (if binary "bin" (car collation)) false) (string head))) "BOOLEAN" collation)
 		(sql_comparison_info head left_info right_info)))
 	(sql_info (if (equal? op "ne") (list (quote sql_not) (sql_info_formula comparison))
 		(sql_info_formula comparison)) "BOOLEAN" (sql_info_collation comparison))))))
@@ -530,7 +537,9 @@ select that type, and no arithmetic operation is needed merely to mark it. */
 		"SMALLDATETIME" (tsql_temporal_cast_expr value name 0 dimensions)
 		"TIME" (tsql_temporal_cast_expr value name 0 dimensions)
 		_ (error "unsupported conversion to " name)))
-	(list (quote sql_type_expr) formula name nil))))
+	(list (quote sql_type_expr) formula
+		(if (has? '("CHAR" "VARCHAR" "NCHAR" "NVARCHAR") name)
+			(list name (if (empty_list? dimensions) '(30) dimensions)) name) nil))))
 (define tsql_decimal_compiler (lambda (type dims) (lambda (infos) (begin
 	(define input (car infos))
 	(define input_type (sql_info_type input))
@@ -714,7 +723,7 @@ national text retain their conversion error. Runtime carriers select no type. */
 			(has? '("BIT" "BOOL" "BOOLEAN") source))
 		(list (if fixed (quote tsql_cast_fixed_text) (quote tsql_cast_text)) formula length national)))
 	(sql_info converted
-		(if (and national fixed) "NCHAR" national "NVARCHAR" fixed "CHAR" "VARCHAR")
+		(list (if (and national fixed) "NCHAR" national "NVARCHAR" fixed "CHAR" "VARCHAR") (list length))
 		(sql_info_collation info))))))
 (define tsql_cast_text_expr (lambda (value dimensions national fixed) (begin
 	(define length (if (empty_list? dimensions) 30 (car dimensions)))
@@ -2055,7 +2064,7 @@ compiling; the emitted row callback contains no SQL type tags or dispatch. */
 
 (define tsql_collation_compiler (lambda (name) (lambda (infos) (begin
 	(define info (car infos))
-	(sql_info (sql_info_formula info) (sql_info_type info) (list name 0))))))
+	(sql_info (sql_info_formula info) (sql_info_datatype info) (list name 0))))))
 
 /* ROUND owns SQL length, truncation and return-width rules at this frontend
 compile boundary. Integer inputs never pass through floating-point scaling.
@@ -2283,6 +2292,75 @@ No character list, decoder, relation or runtime SQL type is constructed here. */
 		"LTRIM" (quote tsql_ltrim) "RTRIM" (quote tsql_rtrim) "TRIM" (quote tsql_trim)))
 	(sql_info (list helper (sql_info_formula converted)) output (sql_info_collation input)))))
 
+/* Search syntax, SQL NULL contracts and declared result types stay in this
+frontend. Runtime operators receive plain strings and explicit coordinates. */
+(define tsql_search_limit (lambda (value)
+	(if (or (> (utf16_length value) 8000) (regexp_test value "\x00"))
+		(error "search patterns require at most 8000 UTF16 units and no NUL") value)))
+(define tsql_charindex (lambda (pattern text start fold unit)
+	(if (or (nil? pattern) (nil? text) (nil? start)) nil (begin
+		(tsql_search_limit pattern)
+		(+ 1 (string_find text pattern (- (max start 1) 1) fold unit))))))
+(define tsql_regex_literal (lambda (token)
+	(if (has? '("." "*" "+" "?" "(" ")" "[" "]" "{" "}" "^" "$" "|" "\\") token)
+		(concat "\\" token) token)))
+(define tsql_pattern_token_regex (lambda (token)
+	(if (equal? token "%") ".*" (equal? token "_") "."
+		(and (> (strlen token) 1) (equal? (substr token 0 1) "["))
+		(begin
+			(define inner (substr token 1 (- (strlen token) 2)))
+			(define negated (equal? (substr inner 0 1) "^"))
+			(define members (if negated (substr inner 1) inner))
+			/* Backslash and brackets are literal class members in T-SQL. */
+			(define escaped (map (regexp_matches members "(?s:.)") (lambda (char)
+				(if (has? '("\\" "[" "]") char) (concat "\\" char) char))))
+			(concat "[" (if negated "^" "") (apply concat escaped) "]"))
+		(tsql_regex_literal token))))
+(define tsql_pattern_regex (lambda (pattern fold) (begin
+	(define pattern (if fold (toLower pattern) pattern))
+	(define tokens (regexp_matches pattern "\\[(?:\\^?\\]?[^\\]]*)\\]|(?s:.)"))
+	(define leading (and (not (empty_list? tokens)) (equal? (car tokens) "%")))
+	(define body (reduce tokens (lambda (body token)
+		(if (and (equal? body "") (equal? token "%")) body
+			(concat body (tsql_pattern_token_regex token)))) ""))
+	(if (equal? body "") "(?s)^"
+		(concat "(?s)" (if leading "" "^") body "$")))))
+(define tsql_patindex (lambda (pattern text fold unit)
+	(if (nil? pattern) nil (nil? text) (error "PATINDEX expression must not be NULL")
+		(equal? pattern "") 0
+		(begin
+			(tsql_search_limit pattern)
+			(if (regexp_test text "\x00") (error "PATINDEX expression must not contain NUL") true)
+			(+ 1 (regexp_find text (tsql_pattern_regex pattern fold) fold unit))))))
+(define tsql_search_text_info (lambda (info)
+	(if (or (sql_text_type? (sql_info_type info)) (equal? (sql_info_type info) "NULL")) info
+		((tsql_text_compiler -1 false false) (list info)))))
+(define tsql_compile_search (lambda (name) (lambda (infos) (begin
+	(if (if (equal? name "CHARINDEX") (has? '(2 3) (count infos)) (equal? (count infos) 2)) true
+		(error name " has an invalid argument count"))
+	(define original (cadr infos))
+	(if (or (tsql_binary_type? (sql_info_type original)) (tsql_binary_type? (sql_info_type (car infos)))
+		(and (equal? name "CHARINDEX")
+			(or (has? '("TEXT" "NTEXT") (sql_info_type original)) (has? '("TEXT" "NTEXT") (sql_info_type (car infos))))))
+		(error name " requires supported character declarations") true)
+	(define pattern (tsql_search_text_info (car infos)))
+	(define input (tsql_search_text_info original))
+	(define collation (sql_merge_collation (sql_info_collation pattern) (sql_info_collation input)))
+	(define collation_name (toLower (if (nil? collation) "utf8mb4_general_ci" (car collation))))
+	(if (regexp_test collation_name "_ai(?:_|$)") (error "accent-insensitive search is unsupported") true)
+	(define fold (regexp_test collation_name "_ci(?:_|$)"))
+	(define unit (if (regexp_test collation_name "_sc(?:_|$)") "rune" "utf16"))
+	(define arguments (list (sql_info_formula pattern) (sql_info_formula input)))
+	(define call (if (equal? name "CHARINDEX")
+		(cons (quote tsql_charindex) (merge (list arguments (list
+			(if (equal? (count infos) 3) (sql_info_formula (tsql_convert_value_info (nth infos 2) "BIGINT" nil)) 1) fold unit))))
+		(cons (quote tsql_patindex) (merge (list arguments (list fold unit))))))
+	(sql_info call (if (equal? (sql_info_dimensions original) '(-1)) "BIGINT" "INT") nil)))))
+(define tsql_compile_like (lambda (infos) (begin
+	(define collation (sql_merge_collation (sql_info_collation (car infos)) (sql_info_collation (cadr infos))))
+	(sql_info (list (quote strlike) (sql_info_formula (car infos)) (sql_info_formula (cadr infos))
+		(if (nil? collation) "utf8mb4_general_ci" (car collation))) "BOOLEAN" nil))))
+
 (define tsql_builtin_compiler (lambda (name) (lambda (infos)
 	(if (has? '("NEWID" "UUIDV7") name) (begin
 		(if (empty_list? infos) true (error name " takes no arguments"))
@@ -2295,7 +2373,9 @@ No character list, decoder, relation or runtime SQL type is constructed here. */
 		(sql_call_info (coalesce (tsql_builtins name) (error "unknown function " name)) infos)))))
 
 (define tsql_builtin_expr (lambda (name arguments) (begin
-	(if (equal? name "PARSENAME")
+	(if (has? '("CHARINDEX" "PATINDEX") name)
+		(cons (quote sql_compile_expr) (cons (list (quote tsql_compile_search) name) arguments))
+		(equal? name "PARSENAME")
 		(cons (quote sql_compile_expr) (cons (quote tsql_compile_parsename) arguments))
 		(begin
 			(if (tsql_builtins name) true (error "unknown function " name))
@@ -2415,7 +2495,10 @@ that context explicitly; stored views refuse this scalar before publication. */
 			(list (quote sql_type_expr) (list (quote tsql_unbound_parameter) name spelling) "any" nil)
 			(empty_list? declaration) (error "undeclared T-SQL parameter: @" name)
 			(list (quote sql_type_expr) (list (quote session) (concat "__tsql_parameter:" name))
-				(car (tsql_effective_parameter_contract (cadr (car declaration)))) nil)))))
+				(begin
+					(define contract (tsql_effective_parameter_contract (cadr (car declaration))))
+					(if (has? '("VARCHAR" "NVARCHAR" "CHAR" "NCHAR") (car contract))
+						(list (car contract) (cdr contract)) (car contract))) nil)))))
 
 	(define placeholder_counter (newsession))
 	(placeholder_counter "n" 0)
@@ -2456,9 +2539,6 @@ that context explicitly; stored views refuse this scalar before publication. */
 		(parser '((define a tsql_expression3) (atom "IN" true) "(" (define sub tsql_select) ")") (tsql_predicate_expr '('inner_select_in a sub)))
 		(parser '((define a tsql_expression3) (atom "NOT" true) (atom "IN" true) "(" (define sub tsql_select) ")") (list (quote not) (tsql_predicate_expr (list (quote inner_select_in) a sub))))
 
-		(parser '((define a tsql_expression3) (atom "COLLATE" true) (define collation tsql_identifier) "=" (define b tsql_expression2)) '('equal_collate a b collation))
-		(parser '((define a tsql_expression3) (atom "COLLATE" true) (define collation tsql_identifier) "<>" (define b tsql_expression2)) '('notequal_collate a b collation))
-		(parser '((define a tsql_expression3) (atom "COLLATE" true) (define collation tsql_identifier) "!=" (define b tsql_expression2)) '('notequal_collate a b collation))
 		(parser '((define a tsql_expression3) (define op (or
 			(parser "=" "eq")
 			(parser "<>" "ne")
@@ -2468,10 +2548,9 @@ that context explicitly; stored views refuse this scalar before publication. */
 			(parser "<" "lt")
 			(parser ">" "gt")
 		)) (define b tsql_expression2)) (tsql_comparison_expr op a b))
-		(parser '((define a tsql_expression3) (atom "COLLATE" true) (define collation tsql_identifier) (atom "LIKE" true) (define b tsql_expression2)) '('strlike a b collation))
 
-		(parser '((define a tsql_expression3) (atom "LIKE" true) (define b tsql_expression2)) '('strlike a b "utf8mb4_general_ci"))
-		(parser '((define a tsql_expression3) (atom "NOT" true) (atom "LIKE" true) (define b tsql_expression2)) '('sql_not '('strlike a b "utf8mb4_general_ci")))
+		(parser '((define a tsql_expression3) (atom "LIKE" true) (define b tsql_expression2)) (list (quote sql_compile_expr) (quote tsql_compile_like) a b))
+		(parser '((define a tsql_expression3) (atom "NOT" true) (atom "LIKE" true) (define b tsql_expression2)) (list (quote sql_not) (list (quote sql_compile_expr) (quote tsql_compile_like) a b)))
 
 		(parser '((define a tsql_expression3) (atom "IN" true) (define b tsql_in_values)) (tsql_predicate_expr '('sql_in b a)))
 		(parser '((define a tsql_expression3) (atom "NOT" true) (atom "IN" true) (define b tsql_in_values)) (list (quote sql_not) (tsql_predicate_expr (list (quote sql_in) b a))))
@@ -2500,10 +2579,14 @@ that context explicitly; stored views refuse this scalar before publication. */
 		tsql_expression6
 		(parser '("+" (define expr tsql_unary_expression)) (tsql_positive_expr expr))
 		(parser '("-" (define expr tsql_unary_expression)) (tsql_negate_expr expr)))))
+	(define tsql_collated_expression (parser '((define value tsql_unary_expression)
+		(? (atom "COLLATE" true) (define collation tsql_identifier)))
+		(if (nil? collation) value
+			(list (quote sql_compile_expr) (list (quote tsql_collation_compiler) collation) value))))
 	(define tsql_expression5 (parser (or
-		(parser '((define expr tsql_unary_expression) (atom "IS" true) (atom "NULL" true)) '('nil? expr))
-		(parser '((define expr tsql_unary_expression) (atom "IS" true) (atom "NOT" true) (atom "NULL" true)) '('not '('nil? expr)))
-		tsql_unary_expression)))
+		(parser '((define expr tsql_collated_expression) (atom "IS" true) (atom "NULL" true)) '('nil? expr))
+		(parser '((define expr tsql_collated_expression) (atom "IS" true) (atom "NOT" true) (atom "NULL" true)) '('not '('nil? expr)))
+		tsql_collated_expression)))
 
 	/* Both count spellings emit the same native COUNT descriptor. Only the
 	frontend result contract differs; ALL uses its ordinary non-NULL input. */

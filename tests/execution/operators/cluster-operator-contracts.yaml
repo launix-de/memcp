@@ -32,6 +32,15 @@ test_cases:
   expect:
     data: [{id: 0, allowed: 1}, {id: 1, allowed: null}, {id: 2, allowed: null}]
     cluster: {min_remote_shards: 1}
+- name: tsql-text-search-survives-delegation
+  syntax: tsql
+  sql: >-
+    SELECT id,CHARINDEX(N'x',CONCAT(N'😀x',id)) AS literal_position,
+    PATINDEX(N'%[0-9]%',CONCAT(N'😀x',id) COLLATE Latin1_General_100_CI_AS_SC) AS wildcard_position
+    FROM big_items WHERE id<3 ORDER BY id
+  expect:
+    data: [{id: 0, literal_position: 3, wildcard_position: 3}, {id: 1, literal_position: 3, wildcard_position: 3}, {id: 2, literal_position: 3, wildcard_position: 3}]
+    cluster: {min_remote_shards: 1}
 # Search probes use the original fixture, before the bulk DELETE cases below.
 - name: boolean-fulltext-filter-and-score
   sql: >-
