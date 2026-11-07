@@ -23,6 +23,28 @@ metadata:
     storage_bandwidth_mbps: 1000
     storage_latency_ms: 5
 test_cases:
+- name: integer-cast-dynamic-text-parser
+  syntax: tsql
+  sql: SELECT id FROM big_items WHERE id<3 ORDER BY CAST(CAST(id AS NVARCHAR(20))
+    AS BIGINT) DESC
+  expect:
+    data:
+    - id: 2
+    - id: 1
+    - id: 0
+    cluster:
+      min_remote_shards: 1
+- name: decimal-cast-dynamic-text-parser
+  syntax: tsql
+  sql: SELECT id FROM big_items WHERE id<3 ORDER BY CAST(CAST(id AS NVARCHAR(20))
+    AS DECIMAL(10,2)) DESC
+  expect:
+    data:
+    - id: 2
+    - id: 1
+    - id: 0
+    cluster:
+      min_remote_shards: 1
 - name: dynamic-numeric-text-callback
   syntax: tsql
   sql: SELECT id FROM big_items WHERE id<3 ORDER BY CAST(id AS NVARCHAR(20)) DESC
