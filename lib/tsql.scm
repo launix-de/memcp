@@ -1443,9 +1443,9 @@ path as the other frontends. Wire actions are interpreted here, never in scm/. *
 (define tds_frontend (lambda (event session payload row fields state sequence) (match event
 	"login" (begin
 		(define user (payload "username"))
-		(define database (payload "database"))
+		(define database (database_name (payload "database") true))
 		(define stored (mysql_auth user))
-		(if (and stored (equal? stored (password (payload "password"))) (mysql_schema user database))
+		(if (and database stored (equal? stored (password (payload "password"))) (mysql_schema user database))
 			(begin
 				((sql_policy user) database true false)
 				(define session (newsession))
@@ -1472,9 +1472,9 @@ path as the other frontends. Wire actions are interpreted here, never in scm/. *
 	"execute" (begin
 		(define output (newsession))
 		(define result (with_query_request session state sequence (payload "text") (lambda (statement) (begin
-			(tds_bind_parameters session (tds_bind_declarations (payload "database") (payload "declarations"))
+			(tds_bind_parameters session (tds_bind_declarations (database_name (payload "database") true) (payload "declarations"))
 				(payload "parameters"))
-			(tsql_execute_batches (payload "database") (payload "text") session statement
+			(tsql_execute_batches (database_name (payload "database") true) (payload "text") session statement
 				(lambda (values) (row (map (output "descriptors") (lambda (descriptor) (begin
 					(define value (values (descriptor "name")))
 					(tds_result_value descriptor value))))))
@@ -1486,7 +1486,7 @@ path as the other frontends. Wire actions are interpreted here, never in scm/. *
 		(if (session "__tsql_nocount")
 			(list "rows" (if (number? result) result 0) "no_count" true)
 			(if (number? result) (list "rows" result) nil)))
-	"describe" (tds_describe (payload "database") (payload "text") (payload "declarations") session)
+	"describe" (tds_describe (database_name (payload "database") true) (payload "text") (payload "declarations") session)
 	"metadata" (begin
 		(define arguments (map (payload "parameters") (lambda (parameter) (begin
 			(if (equal? (parameter "flags") 0) true (error "metadata output parameters are unsupported"))
