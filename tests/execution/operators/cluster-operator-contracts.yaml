@@ -23,6 +23,15 @@ metadata:
     storage_bandwidth_mbps: 1000
     storage_latency_ms: 5
 test_cases:
+- name: catalog-source-boundaries-compose-with-remote-native-scan
+  sql: SELECT schema_name FROM information_schema.schemata WHERE schema_name='replica_test'
+    UNION ALL SELECT 'native_shard' AS schema_name FROM big_items WHERE id=0
+  expect:
+    data:
+    - schema_name: replica_test
+    - schema_name: native_shard
+    cluster:
+      min_remote_shards: 1
 - name: tsql-database-access-probe-survives-delegation
   syntax: tsql
   sql: >-

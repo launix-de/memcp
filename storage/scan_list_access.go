@@ -25,6 +25,7 @@ type listScanConstraint struct {
 type listScanAccess struct {
 	impossible  bool
 	constraints []listScanConstraint
+	batch       []scm.Scmer
 }
 
 func bindListScanAccess(schema scm.Scmer, values []scm.Scmer) listScanAccess {
@@ -32,7 +33,11 @@ func bindListScanAccess(schema scm.Scmer, values []scm.Scmer) listScanAccess {
 	if !valid {
 		panic("invalid list scan access schema")
 	}
-	result := listScanAccess{impossible: access.impossible()}
+	return prepareListScanAccess(access, nil)
+}
+
+func prepareListScanAccess(access scanAccess, batch []scm.Scmer) listScanAccess {
+	result := listScanAccess{impossible: access.impossible(), batch: batch}
 	for i := 0; i < access.len(); i++ {
 		analyzer := access.boundaryAnalyzer(i)
 		if analyzer != EqualMatcher && analyzer != RangeMatcher {
@@ -74,7 +79,11 @@ func (access *listScanAccess) matches(row dataset) bool {
 		value, _ := row.GetI(c.column)
 		if c.mapped {
 			for j, column := range c.mapColumns {
-				c.mapValues[j], _ = row.GetI(column)
+				if index, ok := parseBatchPseudoColName(column); ok && access.batch != nil {
+					c.mapValues[j] = access.batch[index]
+				} else {
+					c.mapValues[j], _ = row.GetI(column)
+				}
 			}
 			value = c.mapper.Call(c.mapValues)
 		}
