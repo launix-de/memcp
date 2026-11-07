@@ -28,6 +28,7 @@ import "strconv"
 import "reflect"
 import "strings"
 import "math/rand"
+import "path/filepath"
 import "sync/atomic"
 import "unicode/utf8"
 import "encoding/json"
@@ -991,6 +992,18 @@ func Init(en scm.Env) {
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "upgrade persisted native call shapes before compiling a restored definition; quoted data stays unchanged",
 			Params: []*scm.TypeDescriptor{{Kind: "any", Label: "definition"}},
 			Return: &scm.TypeDescriptor{Kind: "any"}},
+	})
+
+	scm.Declare(&en, &scm.Declaration{
+		Name: "storage_root",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			root, err := filepath.Abs(Basepath)
+			if err != nil {
+				panic(err)
+			}
+			return scm.NewString(root + string(filepath.Separator))
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "Absolute configured local storage root with a trailing native path separator", HasSideEffects: true, Params: []*scm.TypeDescriptor{}, Return: &scm.TypeDescriptor{Kind: "string"}},
 	})
 
 	scm.Declare(&en, &scm.Declaration{
