@@ -1,0 +1,73 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  description: Runtime metadata and literal row sources use bounded scalar reductions
+  syntax: tsql
+  requires_tds: true
+  isolated: true
+setup:
+- sql: DROP TABLE IF EXISTS metadata_scalar_first
+- sql: DROP TABLE IF EXISTS metadata_scalar_second
+- sql: CREATE TABLE metadata_scalar_first(id INT PRIMARY KEY)
+cleanup:
+- sql: DROP TABLE IF EXISTS metadata_scalar_first
+- sql: DROP TABLE IF EXISTS metadata_scalar_second
+test_cases:
+- name: Scalar catalog count applies its point predicate
+  sql: SELECT COUNT(*) AS total FROM information_schema.schemata WHERE schema_name=N'memcp-tests'
+  expect: {data: [{total: 1}]}
+- name: Scalar catalog count excludes NULL inputs
+  sql: SELECT COUNT(sql_path) AS total FROM information_schema.schemata WHERE schema_name=N'memcp-tests'
+  expect: {data: [{total: 0}]}
+- name: Scalar catalog aggregates compose with arithmetic
+  sql: SELECT COUNT(*)+4 AS total FROM information_schema.schemata WHERE schema_name=N'memcp-tests'
+  expect: {data: [{total: 5}]}
+- name: Multiple scalar states retain independent aggregate contracts
+  sql: SELECT COUNT(*) AS total,SUM(2) AS amount,MIN(CONVERT(NVARCHAR(128),schema_name)) AS first_name,MAX(CONVERT(NVARCHAR(128),schema_name)) AS last_name,AVG(2) AS average FROM information_schema.schemata WHERE schema_name=N'memcp-tests'
+  expect: {data: [{total: 1, amount: 2, first_name: memcp-tests, last_name: memcp-tests, average: 2}]}
+- name: Empty catalog inputs retain the scalar aggregate row
+  sql: SELECT COUNT(*) AS total,SUM(2) AS amount,MIN(CONVERT(NVARCHAR(128),schema_name)) AS first_name,MAX(CONVERT(NVARCHAR(128),schema_name)) AS last_name,AVG(2) AS average FROM information_schema.schemata WHERE schema_name=N'metadata_missing'
+  expect: {data: [{total: 0, amount: null, first_name: null, last_name: null, average: null}]}
+- name: HAVING accepts a qualifying scalar catalog group
+  sql: SELECT COUNT(*) AS total FROM information_schema.schemata WHERE schema_name=N'memcp-tests' HAVING COUNT(*)>0
+  expect: {data: [{total: 1}]}
+- name: HAVING rejects a nonqualifying empty scalar catalog group
+  sql: SELECT COUNT(*) AS total FROM information_schema.schemata WHERE schema_name=N'metadata_missing' HAVING COUNT(*)>0
+  expect: {rows: 0}
+- name: TOP zero suppresses the scalar aggregate output
+  sql: SELECT TOP(0) COUNT(*) AS total FROM information_schema.schemata
+  expect: {rows: 0}
+- name: Literal row scalar aggregates do not require a native cache owner
+  sql: SELECT COUNT(*) AS total,SUM(value) AS amount,MIN(value) AS minimum,MAX(value) AS maximum,AVG(value) AS average FROM (VALUES(1),(2),(NULL)) AS source_rows(value)
+  expect: {data: [{total: 3, amount: 3, minimum: 1, maximum: 2, average: 1}]}
+- name: Empty literal row scalar aggregates retain NULL and zero contracts
+  sql: SELECT COUNT(*) AS total,SUM(value) AS amount FROM (VALUES(1),(2)) AS source_rows(value) WHERE value>10
+  expect: {data: [{total: 0, amount: null}]}
+- name: Native metadata source starts with one matching table
+  sql: SELECT COUNT(*) AS total FROM information_schema.tables WHERE table_schema=N'memcp-tests'
+  expect: {data: [{total: 1}]}
+- name: Publish another matching table
+  sql: CREATE TABLE metadata_scalar_second(id INT PRIMARY KEY)
+- name: Cached scalar plan observes newly published native catalog rows
+  sql: SELECT COUNT(*) AS total FROM information_schema.tables WHERE table_schema=N'memcp-tests'
+  expect: {data: [{total: 2}]}
+- name: Remove the second matching table
+  sql: DROP TABLE metadata_scalar_second
+- name: Cached scalar plan observes removed native catalog rows
+  sql: SELECT COUNT(*) AS total FROM information_schema.tables WHERE table_schema=N'memcp-tests'
+  expect: {data: [{total: 1}]}
+- name: Runtime row GROUP BY requires a native temporary group carrier
+  sql: SELECT schema_name,COUNT(*) AS total FROM information_schema.schemata GROUP BY schema_name
+  expect: {error: true, contains: bounded scalar aggregates}
+- name: Runtime row COUNT DISTINCT requires a native temporary group carrier
+  sql: SELECT COUNT(DISTINCT schema_name) AS total FROM information_schema.schemata
+  expect: {error: true, contains: bounded scalar aggregates}
+- name: Real TDS metadata remains declared for scalar catalog output
+  tds:
+    statements:
+    - sql: SELECT COUNT(*) AS total FROM information_schema.schemata WHERE schema_name=N'memcp-tests'
+      prepare: true
+      expect:
+        data: [{total: 1}]
+        column_types: [{name: total, type: INT}]

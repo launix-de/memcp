@@ -23,6 +23,14 @@ metadata:
     storage_bandwidth_mbps: 1000
     storage_latency_ms: 5
 test_cases:
+- name: runtime-metadata-scalar-and-native-aggregate-delegation
+  syntax: tsql
+  sql: >-
+    SELECT N'catalog' AS kind,COUNT(*) AS total FROM information_schema.schemata WHERE schema_name=N'replica_test'
+    UNION ALL SELECT N'rows' AS kind,COUNT(*) AS total FROM big_items WHERE id<3
+  expect:
+    data: [{kind: catalog, total: 1}, {kind: rows, total: 3}]
+    cluster: {min_remote_shards: 1}
 - name: tsql-database-access-probe-survives-delegation
   syntax: tsql
   sql: >-

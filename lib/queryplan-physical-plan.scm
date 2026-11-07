@@ -5652,6 +5652,16 @@ chooses the producer/driver implementation from canonical stage facts. */
 		(and (string? relation)
 			(equal?? schema "information_schema")))))
 
+/* Runtime row domains have no native table or maintenance-trigger owner.
+Their scalar reductions are invocation-local, with one bounded state per
+aggregate. Reusing a maintained cache would retain a stale catalog snapshot. */
+(define runtime_rows_source? (lambda (src)
+	(or (information_schema_source? (source_schema src) (source_relation src))
+		(row_domain_relation? (source_relation src)))))
+(define bounded_scalar_aggregate? (lambda (ag)
+	(has? (list (quote +) + (quote sql_sum_reduce) sql_sum_reduce
+		(quote min) min (quote max) max) (cadr ag))))
+
 /* A literal-rows source (see lib/queryplan-logical.scm) is compiled once and
 scanned via the plain-list branch scan/scan_order already support -- no
 per-branch recompilation, no temporary storage table. Its rows are already
@@ -6833,7 +6843,13 @@ scalar comparison work rather than an uncalibrated multiplier. */
 		(if (or (not (empty_list? (qb_group block))) (or (not (nil? (qb_having block))) (query_block_has_aggregates? block)))
 			(begin
 				(define group_stage (make_group_stage_for_block grouped_block src))
-				(if (direct_base_group_plan_preferred? group_stage)
+				(if (runtime_rows_source? src)
+					(if (and (empty_list? (gs_keys group_stage))
+						(reduce (gs_aggregates group_stage) (lambda (bounded ag)
+							(and bounded (bounded_scalar_aggregate? ag))) true))
+						(lower_query_local_base_scalar_stage group_stage fields (qb_offset block) (qb_limit block))
+						(neumann_fail "build_queryplan" "runtime row sources require bounded scalar aggregates; grouped and DISTINCT aggregates are unsupported"))
+					(direct_base_group_plan_preferred? group_stage)
 					(lower_direct_base_group_stage group_stage fields (qb_order block) (qb_offset block) (qb_limit block))
 					(if (direct_base_group_plan_eligible? group_stage)
 						(list (quote with_cache_sources) (physical_query_tx_symbol)
