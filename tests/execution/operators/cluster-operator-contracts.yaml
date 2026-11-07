@@ -23,6 +23,28 @@ metadata:
     storage_bandwidth_mbps: 1000
     storage_latency_ms: 5
 test_cases:
+- name: tsql-date-validation-and-names-survive-delegation
+  syntax: tsql
+  sql: >-
+    SELECT id,ISDATE(CASE WHEN id=0 THEN N'20240229'
+    WHEN id=1 THEN N'20230229' ELSE NULL END) AS valid,
+    DATENAME(month,DATEADD(month,id,CONVERT(DATE,N'20240101',112))) AS month,
+    DATENAME(weekday,CASE WHEN id=0 THEN N'2024-01-01'
+    WHEN id=1 THEN N'2024-01-02' ELSE NULL END) AS weekday
+    FROM big_items WHERE id<3 ORDER BY id
+  expect:
+    data: [{id: 0, valid: 1, month: January, weekday: Monday}, {id: 1, valid: 0, month: February, weekday: Tuesday}, {id: 2, valid: 0, month: March, weekday: null}]
+    cluster: {min_remote_shards: 1}
+- name: tsql-calendar-names-preserve-delegated-datefirst-input
+  syntax: tsql
+  sql: >-
+    SET DATEFIRST 1;
+    SELECT id,DATENAME(week,DATEADD(day,id,CONVERT(DATE,N'20240107',112))) AS week,
+    DATENAME(weekday,DATEADD(day,id,CONVERT(DATE,N'20240107',112))) AS weekday
+    FROM big_items WHERE id<3 ORDER BY id
+  expect:
+    data: [{id: 0, week: '1', weekday: Sunday}, {id: 1, week: '2', weekday: Monday}, {id: 2, week: '2', weekday: Tuesday}]
+    cluster: {min_remote_shards: 1}
 - name: tsql-database-access-probe-survives-delegation
   syntax: tsql
   sql: >-

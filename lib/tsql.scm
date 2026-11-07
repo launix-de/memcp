@@ -756,7 +756,9 @@ ordinary expression compiler owns each substitution's declared SQL contract. */
 		(coalesceNil ((tsql_identity_scope scoped) "__tsql_return_status") 0) scoped))))
 (define tsql_execute_batches (lambda (schema text session statement resultrow resultfields) (begin
 	(session "schema" schema)
-	(session "__tsql_connection_session" (tsql_connection_session session))
+	/* A root connection is already its own owner. Only child scopes retain an
+	explicit connection link; storing self here would make a captured parent
+	view cyclic when a batch parameter is delegated to a cluster peer. */
 	(define inherited (coalesceNil (session "__tsql_parameter_declarations") '()))
 	(define supplied (map inherited (lambda (declaration)
 		(list (car declaration) (session (concat "__tsql_parameter:" (car declaration)))))))

@@ -1121,6 +1121,112 @@ is available; accepting them here would silently lose the user's value. */
 		(if (has? '("week" "weekday") unit) (list (tsql_datefirst_expr)) '()))))))
 
 
+/* This frontend currently exposes the default English date environment.
+Normalize its date spellings before calling the native Gregorian parser; the
+native whole-second carrier is sufficient for validation and calendar names.
+Fractional parts are validated lexically here, never turned into SQL wrappers. */
+(define tsql_calendar_full_month_names '("January" "February" "March" "April" "May" "June" "July" "August" "September" "October" "November" "December"))
+(define tsql_calendar_weekday_names '("Monday" "Tuesday" "Wednesday" "Thursday" "Friday" "Saturday" "Sunday"))
+(define tsql_english_year (lambda (value)
+	(if (regexp_test value "^[0-9]{4}$") value
+		(regexp_test value "^[0-9]{2}$") (concat (if (< (tsql_parse_integer value) 50) "20" "19") value)
+		nil)))
+(define tsql_calendar_pad (lambda (value)
+	(if (equal? (strlen value) 1) (concat "0" value) value)))
+(define tsql_english_date_parts (lambda (year month day) (begin
+	(define year (tsql_english_year year))
+	(if year (concat year "-" (tsql_calendar_pad month) "-" (tsql_calendar_pad day)) nil))))
+(define tsql_english_named_date (lambda (parts) (begin
+	(define month_position (if (regexp_test (car parts) "^[A-Z]+$") 0 1))
+	(define month (nth parts month_position))
+	(define index (find (produceN 12) (lambda (index)
+		(or (equal? month (toUpper (nth tsql_calendar_month_names index)))
+			(equal? month (toUpper (nth tsql_calendar_full_month_names index))))) nil))
+	(if (nil? index) nil (begin
+		(define day (nth parts (if (equal? month_position 0) 1 0)))
+		(if (regexp_test day "^[0-9]{1,2}$")
+			(tsql_english_date_parts (nth parts 2) (string (+ index 1)) day) nil))))))
+(define tsql_english_clock (lambda (value) (begin
+	(define clock (replace (toUpper value) " " ""))
+	(if (regexp_test clock "^[0-9]{1,2}:[0-9]{2}(:[0-9]{2}(\\.[0-9]+)?)?(AM|PM)?$") (begin
+		(define meridian (if (regexp_test clock "(AM|PM)$") (substr clock (- (strlen clock) 2)) nil))
+		(define clock (if meridian (substr clock 0 (- (strlen clock) 2)) clock))
+		(define parts (split clock ":"))
+		(define hour (tsql_parse_integer (car parts)))
+		(if (and meridian (or (< hour 1) (> hour 12))) nil (begin
+			(define hour (if meridian (+ (mod hour 12) (if (equal? meridian "PM") 12 0)) hour))
+			(concat (tsql_calendar_pad (string hour)) ":" (cadr parts) ":"
+				(if (equal? (count parts) 3) (nth parts 2) "00"))))) nil))))
+(define tsql_english_datetime_text (lambda (value) (if (nil? value) nil (begin
+	(define text (sql_trim (regexp_replace (toUpper value) "\\s+" " ")))
+	(define text (if (regexp_test text "^([A-Z]+ [0-9]{1,2}|[0-9]{1,2} [A-Z]+), ?[0-9]{4}($| )")
+		(regexp_replace text ", *" " ") text))
+	(define separated (regexp_matches text "^([0-9]{8}|[0-9]{4}[-/][0-9]{1,2}[-/][0-9]{1,2}|[0-9]{1,2}[-/.][0-9]{1,2}[-/.]([0-9]{4}|[0-9]{2}))($|[ T])"))
+	(define named (if (empty_list? separated)
+		(regexp_matches text "^([A-Z]+ [0-9]{1,2}|[0-9]{1,2} [A-Z]+) [0-9]{4}($| )") '()))
+	(define prefix (if (not (empty_list? separated)) (sql_trim (car separated))
+		(not (empty_list? named)) (sql_trim (car named)) nil))
+	(define prefix (if (and prefix (equal? (substr prefix (- (strlen prefix) 1)) "T"))
+		(substr prefix 0 (- (strlen prefix) 1)) prefix))
+	(define date (if (nil? prefix) "1900-01-01"
+		(not (empty_list? named)) (tsql_english_named_date (split prefix " "))
+		(regexp_test prefix "^[0-9]{8}$") (concat (substr prefix 0 4) "-" (substr prefix 4 2) "-" (substr prefix 6 2))
+		(begin
+			(define parts (split (regexp_replace prefix "[-/.]" " ") " "))
+			(if (equal? (strlen (car parts)) 4)
+				(tsql_english_date_parts (car parts) (cadr parts) (nth parts 2))
+				(tsql_english_date_parts (nth parts 2) (car parts) (cadr parts))))))
+	(define tail (if prefix (sql_trim (substr text (strlen prefix))) text))
+	(define tail (if (and (> (strlen tail) 0) (equal? (substr tail 0 1) "T")) (substr tail 1) tail))
+	(if (nil? date) nil
+		(and prefix (equal? tail "")) date
+		(begin
+			(define clock (tsql_english_clock tail))
+			(if clock (concat date " " clock) nil)))))))
+(define tsql_isdate_temporal (lambda (value)
+	(if (nil? value) 0
+		(and (>= (unix_timestamp value) -6847804800) (<= (unix_timestamp value) 253402300799)) 1 0)))
+(define tsql_isdate_text (lambda (value) (if (nil? value) 0 (begin
+	(if (>= (utf16_length value) 4000) (error "ISDATE input must contain fewer than 4000 characters") true)
+	(define normalized (tsql_english_datetime_text value))
+	(if (or (nil? normalized) (regexp_test normalized "\\.[0-9]{4,}")) 0 (begin
+		(define parsed (parse_date normalized))
+		(if (and parsed (equal? (unix_timestamp parsed) 253402300799)
+			(regexp_test normalized "\\.999$")) 0 (tsql_isdate_temporal parsed))))))))
+(define tsql_isdate_other (lambda (value) (if (nil? value) 0 0)))
+(define tsql_compile_isdate (lambda (infos) (begin
+	(if (equal? (count infos) 1) true (error "ISDATE requires one argument"))
+	(define input (car infos))
+	(define type (sql_info_type input))
+	(sql_info (list (if (has? '("CHAR" "VARCHAR" "NCHAR" "NVARCHAR") type) (quote tsql_isdate_text)
+		(has? '("DATETIME" "SMALLDATETIME") type) (quote tsql_isdate_temporal)
+		(quote tsql_isdate_other)) (sql_info_formula input)) "INT" nil))))
+(define tsql_datename_text (lambda (value) (if (nil? value) nil (string value))))
+(define tsql_datename_month (lambda (value) (if (nil? value) nil
+	(nth tsql_calendar_full_month_names (- (extract_date value "MONTH") 1)))))
+(define tsql_datename_weekday (lambda (value) (if (nil? value) nil
+	(nth tsql_calendar_weekday_names (extract_date value "WEEKDAY")))))
+(define tsql_datename_calendar_text (lambda (value) (if (nil? value) nil (begin
+	(define normalized (tsql_english_datetime_text value))
+	(define parsed (if normalized (parse_date normalized) nil))
+	(if (and parsed (>= (unix_timestamp parsed) -62135596800)
+		(<= (unix_timestamp parsed) 253402300799)) parsed
+		(tsql_raise_error 241 "invalid DATENAME calendar input" 1))))))
+(define tsql_datename_compiler (lambda (unit) (lambda (infos) (begin
+	(define input (car infos))
+	(define input (if (sql_text_type? (sql_info_type input))
+		(sql_info (list (quote tsql_datename_calendar_text) (sql_info_formula input)) "DATETIME2" nil) input))
+	(define formula (if (has? '("month" "weekday") unit)
+		(list (if (equal? unit "month") (quote tsql_datename_month) (quote tsql_datename_weekday))
+			(tsql_calendar_part_formula unit input))
+		(list (quote tsql_datename_text) (sql_info_formula
+			((tsql_datepart_compiler unit) (cons input (cdr infos)))))))
+	(sql_info formula (list "NVARCHAR" '(4000)) '("utf8mb4_general_ci" 4))))))
+(define tsql_datename_expr (lambda (unit value) (begin
+	(define unit (tsql_calendar_unit unit))
+	(merge (list (list (quote sql_compile_expr) (list (quote tsql_datename_compiler) unit) value)
+		(if (equal? unit "week") (list (tsql_datefirst_expr)) '()))))))
+
 /* Calendar constructors compile their input contracts once and use the same
 native date value as columns and ordinary calendar arithmetic. */
 (define tsql_calendar_integer_formula (lambda (info)
@@ -1862,6 +1968,7 @@ The shared expression compiler still owns the SQL type; these additional wire
 dimensions are metadata only and are absent from the executable plan. */
 (define tsql_result_dimensions (lambda (sources expression parameters) (match expression
 	((symbol sql_compile_column) _compiler column) (tsql_result_dimensions sources column parameters)
+	(cons (symbol sql_compile_expr) (cons ((symbol tsql_datename_compiler) _unit) _arguments)) '(4000)
 	((symbol sql_compile_expr) ((symbol tsql_text_compiler) length _national _fixed) _value) (list length)
 	((symbol sql_type_expr) formula _type _collation) (tsql_result_dimensions sources formula parameters)
 	((symbol sql_compile_expr) ((symbol tsql_temporal_compiler) _target _style ((symbol quote) dimensions)) _value) dimensions
@@ -2295,7 +2402,9 @@ No character list, decoder, relation or runtime SQL type is constructed here. */
 		(sql_call_info (coalesce (tsql_builtins name) (error "unknown function " name)) infos)))))
 
 (define tsql_builtin_expr (lambda (name arguments) (begin
-	(if (equal? name "PARSENAME")
+	(if (equal? name "ISDATE")
+		(cons (quote sql_compile_expr) (cons (quote tsql_compile_isdate) arguments))
+		(equal? name "PARSENAME")
 		(cons (quote sql_compile_expr) (cons (quote tsql_compile_parsename) arguments))
 		(begin
 			(if (tsql_builtins name) true (error "unknown function " name))
@@ -2575,6 +2684,8 @@ that context explicitly; stored views refuse this scalar before publication. */
 			(tsql_datediff_expr unit first last type))
 		(parser '((atom "DATEPART" true) "(" (define unit tsql_identifier) "," (define value tsql_expression) ")")
 			(tsql_datepart_expr unit value))
+		(parser '((atom "DATENAME" true) "(" (define unit tsql_identifier) "," (define value tsql_expression) ")")
+			(tsql_datename_expr unit value))
 		(parser '((atom "DATEFROMPARTS" true) "(" (define year tsql_expression) ","
 			(define month tsql_expression) "," (define day tsql_expression) ")") (tsql_datefromparts_expr year month day))
 		(parser '((atom "EOMONTH" true) "(" (define value tsql_expression)

@@ -1,0 +1,139 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: T-SQL date validation and English calendar part names
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+setup:
+- sql: DROP TABLE IF EXISTS date_name_items
+- sql: CREATE TABLE date_name_items (id INT PRIMARY KEY, label NVARCHAR(100), moment DATETIME, precise DATETIME2)
+- sql: INSERT INTO date_name_items VALUES (1,N'2024-02-29',N'2024-02-29 12:34:56',N'2024-02-29 12:34:56'),(2,N'2023-02-29',NULL,NULL),(3,NULL,NULL,NULL)
+cleanup:
+- sql: DROP TABLE IF EXISTS date_name_items
+test_cases:
+- name: ISDATE recognizes compact and ISO dates
+  sql: SELECT ISDATE(N'20240102') AS compact, ISDATE(N'2024-01-02') AS iso
+  expect: {rows: 1, data: [{compact: 1, iso: 1}]}
+- name: ISDATE validates leap days rather than accepting a date-shaped token
+  sql: SELECT ISDATE(N'20240229') AS leap,ISDATE(N'20230229') AS invalid,ISDATE(N'19000229') AS century,ISDATE(N'20000229') AS leap_century
+  expect: {rows: 1, data: [{leap: 1, invalid: 0, century: 0, leap_century: 1}]}
+- name: ISDATE checks legacy datetime bounds
+  sql: SELECT ISDATE(N'1752-12-31') AS before_minimum,ISDATE(N'1753-01-01') AS minimum,ISDATE(N'9999-12-31') AS maximum,ISDATE(N'10000-01-01') AS overflow
+  expect: {rows: 1, data: [{before_minimum: 0, minimum: 1, maximum: 1, overflow: 0}]}
+- name: ISDATE validates fractional precision without retaining a fractional carrier
+  sql: SELECT ISDATE(N'2024-01-02T12:34:56.123') AS millisecond,ISDATE(N'2024-01-02 12:34:56.1234') AS excessive,ISDATE(N'2024-01-02 12:34:56.0000') AS excessive_zero
+  expect: {rows: 1, data: [{millisecond: 1, excessive: 0, excessive_zero: 0}]}
+- name: Maximum legacy datetime rejects fractional rounding past the final year
+  sql: SELECT ISDATE(N'9999-12-31 23:59:59.997') AS allowed,ISDATE(N'9999-12-31 23:59:59.999') AS overflow
+  expect: {rows: 1, data: [{allowed: 1, overflow: 0}]}
+- name: Default English numeric dates use month day year and the 2049 cutoff
+  sql: SELECT ISDATE(N'12/31/2024') AS mdy,ISDATE(N'31/12/2024') AS invalid,ISDATE(N'2/29/24') AS short_year,ISDATE(N'2/29/00') AS century
+  expect: {rows: 1, data: [{mdy: 1, invalid: 0, short_year: 1, century: 1}]}
+- name: English month names and abbreviated month names are accepted
+  sql: SELECT ISDATE(N'January 2, 2024') AS full,ISDATE(N'2 jan 2024') AS abbreviated,ISDATE(N'February 30 2024') AS invalid
+  expect: {rows: 1, data: [{full: 1, abbreviated: 1, invalid: 0}]}
+- name: Time-only values use the legacy base date
+  sql: SELECT ISDATE(N'12:34') AS short_clock,ISDATE(N'1:05 PM') AS afternoon,ISDATE(N'24:00:00') AS invalid
+  expect: {rows: 1, data: [{short_clock: 1, afternoon: 1, invalid: 0}]}
+- name: ISDATE rejects malformed clocks, suffixes, zero dates and empty input
+  sql: SELECT ISDATE(N'2024-01-02 12:99:00') AS clock,ISDATE(N'2024-01-02 extra') AS suffix,ISDATE(N'0000-00-00') AS zero_date,ISDATE(N'') AS empty
+  expect: {rows: 1, data: [{clock: 0, suffix: 0, zero_date: 0, empty: 0}]}
+- name: ISDATE returns zero for NULL and numeric declarations
+  sql: SELECT ISDATE(NULL) AS missing,ISDATE(123) AS number,ISDATE(CAST(NULL AS NVARCHAR(10))) AS text_null
+  expect: {rows: 1, data: [{missing: 0, number: 0, text_null: 0}]}
+- name: ISDATE distinguishes DATETIME and DATETIME2 from their declarations
+  sql: SELECT ISDATE(moment) AS legacy,ISDATE(precise) AS precise FROM date_name_items WHERE id=1
+  expect: {rows: 1, data: [{legacy: 1, precise: 0}]}
+- name: ISDATE applies to stored text including NULL
+  sql: SELECT id,ISDATE(label) AS valid FROM date_name_items ORDER BY id
+  expect: {rows: 3, data: [{id: 1, valid: 1}, {id: 2, valid: 0}, {id: 3, valid: 0}]}
+- name: DATENAME returns text for numeric calendar parts
+  sql: SELECT DATENAME(year,CONVERT(DATE,N'20240102',112)) AS year,DATENAME(quarter,N'2024-05-02') AS quarter,DATENAME(day,N'2024-05-02') AS day,DATENAME(dayofyear,N'2024-02-29') AS day_of_year
+  expect: {rows: 1, data: [{year: '2024', quarter: '2', day: '2', day_of_year: '60'}]}
+- name: DATENAME uses full English month and weekday names
+  sql: SELECT DATENAME(month,N'2024-02-29') AS month,DATENAME(weekday,N'2024-02-29') AS weekday
+  expect: {rows: 1, data: [{month: February, weekday: Thursday}]}
+- name: DATENAME accepts the documented datepart abbreviations
+  sql: SELECT DATENAME(yy,N'20240102') AS year,DATENAME(mm,N'20240102') AS month,DATENAME(dw,N'20240102') AS weekday
+  expect: {rows: 1, data: [{year: '2024', month: January, weekday: Tuesday}]}
+- name: DATENAME extracts the clock and accepts English textual inputs
+  sql: SELECT DATENAME(hour,N'January 2 2024 1:05 PM') AS hour,DATENAME(minute,N'13:05:06') AS minute,DATENAME(second,N'13:05:06.123') AS second
+  expect: {rows: 1, data: [{hour: '13', minute: '5', second: '6'}]}
+- name: DATENAME NULL values remain SQL NULL
+  sql: SELECT DATENAME(year,NULL) AS year,DATENAME(month,NULL) AS month,DATENAME(weekday,NULL) AS weekday
+  expect: {rows: 1, data: [{year: null, month: null, weekday: null}]}
+- name: DATENAME handles declared temporal column values
+  sql: SELECT id,DATENAME(month,moment) AS month,DATENAME(weekday,precise) AS weekday FROM date_name_items ORDER BY id
+  expect: {rows: 3, data: [{id: 1, month: February, weekday: Thursday}, {id: 2, month: null, weekday: null}, {id: 3, month: null, weekday: null}]}
+- name: DATENAME week consumes the visible DATEFIRST setting
+  sql: SET DATEFIRST 7; SELECT DATENAME(week,N'2024-01-07') AS week
+  expect: {rows: 1, data: [{week: '2'}]}
+- name: DATENAME week rebinding does not reuse a stale result
+  sql: SET DATEFIRST 1; SELECT DATENAME(week,N'2024-01-07') AS week
+  expect: {rows: 1, data: [{week: '1'}]}
+- name: Weekday spelling is independent of its numeric DATEFIRST position
+  sql: SET DATEFIRST 1; SELECT DATENAME(weekday,N'2024-01-07') AS weekday
+  expect: {rows: 1, data: [{weekday: Sunday}]}
+- name: ISDATE arity is checked
+  sql: SELECT ISDATE()
+  expect: {error: true}
+- name: DATENAME requires a supported datepart
+  sql: SELECT DATENAME(millisecond,N'2024-01-02 00:00:00.123')
+  expect: {error: true}
+- name: DATENAME rejects invalid calendar input
+  sql: SELECT DATENAME(month,N'2023-02-29')
+  expect: {error: true}
+- name: A typed TIME does not acquire a missing date part
+  sql: SELECT DATENAME(year,CAST(N'12:34:56' AS TIME))
+  expect: {error: true}
+- name: ISDATE does not hide errors in its operand
+  sql: SELECT ISDATE(CAST(N'invalid' AS DATETIME2))
+  expect: {error: true}
+- name: Date functions declare INT and NVARCHAR results on the wire
+  tds:
+    statements:
+    - sql: SELECT ISDATE(N'20240102') AS valid,DATENAME(month,N'20240102') AS month
+      expect:
+        rows: 1
+        data: [{valid: 1, month: January}]
+        column_types: [{name: valid, type: INT}, {name: month, type: NVARCHAR, length: 4000}]
+- name: Calendar names preserve the default two digit year cutoff
+  sql: SELECT DATENAME(year,N'01/02/49') AS before_cutoff,DATENAME(year,N'01/02/50') AS after_cutoff
+  expect: {rows: 1, data: [{before_cutoff: '2049', after_cutoff: '1950'}]}
+- name: DATENAME literal dates retain the DATETIME2 calendar range
+  sql: SELECT DATENAME(year,N'0001-01-01') AS year,ISDATE(N'0001-01-01') AS legacy
+  expect: {rows: 1, data: [{year: '1', legacy: 0}]}
+- name: Clock literals expose their base date while typed TIME remains strict
+  sql: SELECT DATENAME(year,N'12:34:56') AS year,DATENAME(month,N'12:34:56') AS month,DATENAME(hour,CAST(N'12:34:56' AS TIME)) AS hour
+  expect: {rows: 1, data: [{year: '1900', month: January, hour: '12'}]}
+- name: Numeric calendar inputs retain their day-offset contract
+  sql: SELECT DATENAME(year,0) AS year,DATENAME(weekday,0) AS weekday
+  expect: {rows: 1, data: [{year: '1900', weekday: Monday}]}
+- name: ISDATE rejects timezone suffixes for legacy datetime values
+  sql: SELECT ISDATE(N'2024-01-02T12:34:56Z') AS utc,ISDATE(N'2024-01-02 12:34:56+01:00') AS zone_offset
+  expect: {rows: 1, data: [{utc: 0, zone_offset: 0}]}
+- name: ISDATE does not turn operand arithmetic errors into a false result
+  sql: SELECT ISDATE(1/0) AS value
+  expect: {error: true}
+- name: ISDATE rejects additional arguments
+  sql: SELECT ISDATE(NULL,1)
+  expect: {error: true}
+- name: DATENAME does not expose the native MySQL zero-date sentinel
+  sql: SELECT DATENAME(year,N'0000-00-00')
+  expect: {error: true}
+- name: DATENAME rejects year zero rather than using the native proleptic calendar
+  sql: SELECT DATENAME(month,N'0000-01-01')
+  expect: {error: true}
+- name: Unsupported date languages fail before names are evaluated
+  sql: SET LANGUAGE German; SELECT DATENAME(month,N'2024-01-01') AS month
+  expect: {error: true}
+- name: Unsupported date format changes are explicit
+  sql: SET DATEFORMAT dmy; SELECT ISDATE(N'31/12/2024') AS valid
+  expect: {error: true}
+- name: ISDATE filters malformed stored text through the normal predicate compiler
+  sql: SELECT id FROM date_name_items WHERE ISDATE(label)=1 ORDER BY id
+  expect: {rows: 1, data: [{id: 1}]}
+- name: Date validation protects a lazy conversion branch from malformed rows
+  sql: SELECT id,CASE WHEN ISDATE(label)=1 THEN YEAR(CONVERT(DATE,label)) ELSE 0 END AS year FROM date_name_items ORDER BY id
+  expect: {rows: 3, data: [{id: 1, year: 2024}, {id: 2, year: 0}, {id: 3, year: 0}]}
