@@ -141,3 +141,33 @@ runs. The final check needs real connection/bootstrap queries, original schema
 and procedure definitions, migration batches, and initial application reads and
 writes through a real driver. Add a small independent regression for each
 observed missing form and place the fix in the owning layer.
+
+## Scalar and composed-shape probes
+
+A neutral capability audit distinguishes accepted syntax, correct results and
+wire declarations. Acceptance alone is insufficient: SELECT variable assignment
+can emit an unintended result column, and a filtered ROW_NUMBER query can return
+no rows. Both now have positive specifications in
+`tests/sql/compatibility/tsql-capability-probes.yaml`; their noncritical failures
+remain visible until the owning planner/frontend implements the contracts.
+
+| Family | Verified behavior | Open work |
+| --- | --- | --- |
+| Existing scalar expressions | ISNULL, CONVERT/TRY_CONVERT, DATEADD/DATEPART, LEN, SUBSTRING, REPLACE, QUOTENAME, PARSENAME and SPACE pass simple value probes | Individual overloads, collations and extreme values still require their topic suites |
+| Composed reads | TOP, CASE inside SUM, UNION ALL, scalar aggregate subqueries, correlated EXISTS and ordinary CTEs pass representative probes | Filtered ROW_NUMBER and SELECT assignment require semantic fixes; parser acceptance is not coverage |
+| Numeric text fields | STR supports default/explicit field widths, sixteen fractional digits, half-away rounding, NULL and overflow markers; VARCHAR metadata is independent of rows | STR fields wider than 8000 remain explicitly unsupported |
+| Other scalars | Positive specifications describe CHARINDEX, PATINDEX, STUFF, REPLICATE, CHAR, ASCII, POWER, SIGN, ISNUMERIC, ISDATE, DATENAME and DATALENGTH | These functions remain unsupported; a constant/example-only replacement would not establish their type, collation or NULL contracts |
+| Catalog and context | DB_NAME is invocation-bound; existing catalog/ODBC suites describe object and column metadata | DB_ID, SCHEMA_NAME, USER_NAME, HOST_NAME, SERVERPROPERTY, DATABASEPROPERTY/EX, legacy sysobjects/sysdatabases and broader sys catalogs need real native metadata/identity semantics |
+| Procedural and installation shapes | Existing script and DDL suites remain the implementation inventory | Table variables, temporary tables, cursors, scalar-function DDL and XML output are separate feature families |
+
+`tests/sql/compatibility/tsql-number-formatting.yaml` exercises STR over constants,
+row inputs and prepared TDS parameters, including empty result metadata. Its
+cluster counterpart in `cluster-operator-contracts.yaml` requires actual remote
+shard execution. Nonnational VARCHAR descriptors use the transport's existing
+CP1252 codec; NVARCHAR keeps its UTF16 descriptor. Other nonnational encodings
+and wire collations are not established by this codec coverage.
+
+Feature families should be implemented in separate patches, reusing native
+storage, policy, transaction and logical-planning contracts. Use synthetic
+fixtures and independently specified expectations. Lexical frequency in scripts
+or an expected-error test does not prove successful execution of a SQL shape.

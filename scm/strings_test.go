@@ -565,3 +565,33 @@ func TestStrLikeCustomEscape(t *testing.T) {
 	}()
 	StrLike("abc", "abc", "ab")
 }
+
+func TestFormatFixed(t *testing.T) {
+	fn := Globalenv.Vars[Symbol("format_fixed")]
+	compiled := Eval(Optimize(Read(t.Name(), `(lambda (value precision) (format_fixed value precision))`, true), &Globalenv, nil), &Globalenv)
+	jit := CompileJIT(NewProcStruct(*calibrationProcedure("(lambda (value precision) (format_fixed value precision))")), true)
+	for _, tc := range []struct {
+		value     float64
+		precision int64
+		want      string
+	}{
+		{12.5, 2, "12.50"},
+		{1e20, 0, "100000000000000000000"},
+		{-1.25, 2, "-1.25"},
+		{1.5, 16, "1.5000000000000000"},
+		{0, 4, "0.0000"},
+	} {
+		for _, callable := range []Scmer{fn, compiled, jit} {
+			got := Apply(callable, NewFloat(tc.value), NewInt(tc.precision))
+			if got.String() != tc.want {
+				t.Fatalf("format_fixed(%v, %d) = %q, want %q", tc.value, tc.precision, got.String(), tc.want)
+			}
+		}
+	}
+	defer func() {
+		if recover() == nil {
+			t.Fatal("negative precision was accepted")
+		}
+	}()
+	Apply(fn, NewFloat(1), NewInt(-1))
+}

@@ -23,6 +23,12 @@ metadata:
     storage_bandwidth_mbps: 1000
     storage_latency_ms: 5
 test_cases:
+- name: tsql-fixed-number-formatting-survives-delegation
+  syntax: tsql
+  sql: SELECT id,STR(id+0.25,6,1) AS formatted FROM big_items WHERE id<3 ORDER BY id
+  expect:
+    data: [{id: 0, formatted: '   0.3'}, {id: 1, formatted: '   1.3'}, {id: 2, formatted: '   2.3'}]
+    cluster: {min_remote_shards: 1}
 # Search probes use the original fixture, before the bulk DELETE cases below.
 - name: boolean-fulltext-filter-and-score
   sql: >-

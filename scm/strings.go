@@ -25,6 +25,7 @@ import "regexp"
 import "unsafe"
 import "net/url"
 import "strings"
+import "strconv"
 import "unicode"
 import "crypto/md5"
 import "crypto/sha1"
@@ -865,6 +866,28 @@ func utf16Prefix(text string, limit int64) string {
 func init_strings() {
 	initTextSearch()
 	init_uuid()
+	// Formatting is independent of SQL types, padding, width and rounding policy.
+	Declare(&Globalenv, &Declaration{
+		Name: "format_fixed",
+		Fn: func(a ...Scmer) Scmer {
+			precision := a[1].Int()
+			if precision < 0 {
+				panic("format_fixed precision must be nonnegative")
+			}
+			return NewString(strconv.FormatFloat(a[0].Float(), 'f', int(precision), 64))
+		},
+		Type: &TypeDescriptor{Kind: "func", Description: "format a number in fixed-point notation with a specified number of fractional digits",
+			Params: []*TypeDescriptor{{Kind: "number", Label: "value"}, {Kind: "int", Label: "precision"}},
+			Return: &TypeDescriptor{Kind: "string"},
+			Const:  true,
+			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				ctx.Coverage.NativeCalls++
+				return jitEmitGeneratedCallBoundary(ctx, declarations["format_fixed"], sourceArgs, args, result)
+			},
+			JITVirtualArgs: true,
+			JITInlineCost:  65535,
+		},
+	})
 	// Encode one scalar value independently of any frontend character type or
 	// collation. Frontends select their own ranges before calling this operator.
 	Declare(&Globalenv, &Declaration{
