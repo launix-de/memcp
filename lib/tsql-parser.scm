@@ -2642,6 +2642,15 @@ that context explicitly; stored views refuse this scalar before publication. */
 		Its SQL declaration is independent of the session value carrier. */
 		(parser '((atom "DB_NAME" true) "(" ")")
 			(list (quote sql_type_expr) (list (quote session) "schema") "NVARCHAR" '("utf8mb4_general_ci" 4)))
+		(parser '((atom "IS_SRVROLEMEMBER" true) "(" (define args (* tsql_expression ",")) ")")
+			(begin
+				(if (or (< (count args) 1) (> (count args) 2))
+					(error "IS_SRVROLEMEMBER requires one or two arguments") true)
+				(list (quote sql_type_expr)
+					(list tsql_is_srvrolemember (tsql_cast_expr (car args) "NVARCHAR" '(128))
+						(if (equal? (count args) 1) (list (quote session) "username")
+							(tsql_cast_expr (nth args 1) "NVARCHAR" '(128)))
+						(list (quote session) "username")) "INT" nil)))
 		(parser '((atom "HAS_DBACCESS" true) "(" (define name tsql_expression) ")")
 			(list (quote sql_type_expr)
 				(list (quote tsql_has_dbaccess) (tsql_cast_expr name "NVARCHAR" '(128))
