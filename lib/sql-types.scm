@@ -35,6 +35,12 @@ datatype. "any" means the SQL frontend has no stronger contract.
 /* SQL declarations, including DECIMAL precision/scale, are compile-time data
 inside the TYPE slot. Operators consume and produce these same contracts;
 output formatting never re-reads declarations or guesses from runtime values. */
+/* Rounding a plain integral carrier at nonnegative scale is an identity.
+Keep that exact arithmetic path before the floating primitive sees the value;
+the SQL declaration has already selected the scale at compilation. */
+(define sql_decimal_value (lambda (value scale)
+	(if (and (>= scale 0) (int? value)) value (sql_decimal_output value scale))))
+
 (define sql_info_decimal_scale (lambda (info)
 	(if (and (has? '("DECIMAL" "NUMERIC") (sql_info_type info))
 		(> (count (sql_info_dimensions info)) 1))
@@ -459,7 +465,7 @@ conversion is emitted as plain code; the target descriptor stays at compile time
 		(define formula (if (sql_text_type? type) (list (quote concat) value)
 			(equal? type "BIGINT") (list (quote intdiv) numeric 1)
 			(and (equal? type "DECIMAL") (> (count dimensions) 1))
-			(list (quote sql_decimal_output) numeric (cadr dimensions))
+			(list sql_decimal_value numeric (cadr dimensions))
 			numeric))
 		(sql_info formula (if (empty_list? dimensions) type (list type dimensions))
 			(if (sql_text_type? type) (sql_info_collation input) nil))))))
@@ -807,7 +813,7 @@ fields and ordering retain their executable formulas and declared contracts. */
 		(define formula (sql_info_formula info))
 		(define type (sql_info_type info))
 		(define scale (sql_info_decimal_scale info))
-		(if (not (nil? scale)) (list (quote sql_decimal_output) formula scale)
+		(if (not (nil? scale)) (list sql_decimal_value formula scale)
 			(has? '("DATE" "DATETIME" "TIMESTAMP") type)
 			(list (quote sql_temporal_output) formula type (list (quote session_globalvar) "time_zone"))
 			formula))))

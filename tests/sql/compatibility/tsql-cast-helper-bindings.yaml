@@ -50,3 +50,12 @@ test_cases:
   syntax: tsql
   sql: SELECT CONVERT(NVARCHAR(40),CAST(1234567.89 AS MONEY),1) AS amount
   expect: {data: [{amount: '1,234,567.89'}]}
+- name: Parameter inference recognizes resolved cast function values
+  syntax: tsql
+  sql: EXEC sp_describe_undeclared_parameters N'SELECT CAST(@d AS DECIMAL(9,2)),CAST(@text AS NVARCHAR(12)),CAST(@fixed AS NCHAR(6))'
+  expect:
+    rows: 3
+    data:
+    - {name: '@d',suggested_system_type_name: 'decimal(9,2)',suggested_precision: 9,suggested_scale: 2}
+    - {name: '@text',suggested_system_type_name: 'nvarchar(12)'}
+    - {name: '@fixed',suggested_system_type_name: 'nchar(6)'}

@@ -548,14 +548,15 @@ select that type, and no arithmetic operation is needed merely to mark it. */
 		"SMALLDATETIME" (tsql_temporal_cast_expr value name 0 dimensions)
 		"TIME" (tsql_temporal_cast_expr value name 0 dimensions)
 		_ (error "unsupported conversion to " name)))
-	(list (quote sql_type_expr) formula name nil))))
+	(list (quote sql_type_expr) formula
+		(if (has? '("DECIMAL" "NUMERIC") name) (list name (tsql_decl_dimensions name dimensions)) name) nil))))
 (define tsql_decimal_compiler (lambda (type dims) (lambda (infos) (begin
 	(define input (car infos))
 	(define input_type (sql_info_type input))
 	(if (or (sql_numeric_type? input_type)
 		(has? '("NULL" "any" "MONEY" "SMALLMONEY" "CHAR" "VARCHAR" "NCHAR" "NVARCHAR" "TEXT" "NTEXT") input_type)) true
 		(error "decimal conversion from " input_type " is not implemented"))
-	(sql_info (list tsql_cast_decimal (sql_info_formula input) (car dims) (cadr dims)) type nil)))))
+	(sql_info (list tsql_cast_decimal (sql_info_formula input) (car dims) (cadr dims)) (list type dims) nil)))))
 (define tsql_cast_decimal_expr (lambda (value type dimensions) (begin
 	(define dims (tsql_decl_dimensions type dimensions))
 	(list (quote sql_compile_expr) (list (quote tsql_decimal_compiler) type (list (quote quote) dims)) value))))
