@@ -2055,7 +2055,8 @@ row or supplied parameter value exists. */
 			(define wire (tsql_wire_contract type dimensions))
 			(define wire (if (and (has? '("CHAR" "VARCHAR") type)
 				(equal? (tsql_character_encoding info) "utf-8"))
-				(set_assoc wire "collation" (hex2bin "0904000400")) wire))
+				(map_assoc wire (lambda (key value)
+					(if (equal? key "collation") (hex2bin "0904000400") value))) wire))
 			(merge wire (list "name" name "flags" (car flags) "user_type" (coalesceNil (cadr flags) 0) "sql_type" type)
 				(if origin (list "source" (list (source_schema (car origin)) "dbo"
 					(source_relation (car origin)) ((cadr origin) "Field"))) '()))))))
