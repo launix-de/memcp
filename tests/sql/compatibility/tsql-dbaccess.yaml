@@ -77,3 +77,27 @@ test_cases:
 - name: Additional arguments are rejected
   sql: SELECT HAS_DBACCESS(N'memcp-tests',N'root') AS allowed
   expect: {error: true}
+
+- name: TDS mixed-case database login uses the canonical schema
+  tds:
+    database: MEMCP-TESTS
+    statements:
+    - sql: SELECT DB_NAME() AS current_database, HAS_DBACCESS(N'MEMCP-TESTS') AS allowed
+      expect:
+        rows: 1
+        data: [{current_database: memcp-tests, allowed: 1}]
+    - sql: SELECT DB_NAME() AS current_database
+      prepare: true
+      expect:
+        rows: 1
+        data: [{current_database: memcp-tests}]
+- name: TDS missing database login is rejected
+  tds:
+    database: dbaccess_missing
+    expect_login_error: true
+- name: TDS mixed-case database does not bypass revoked grants
+  tds:
+    database: MEMCP-TESTS
+    username: dbaccess_reader
+    password: pw
+    expect_login_error: true
