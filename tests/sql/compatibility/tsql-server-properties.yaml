@@ -6,12 +6,8 @@ metadata:
   syntax: tsql
   requires_tds: true
   isolated: true
-setup:
-- sql: DROP TABLE IF EXISTS property_storage_root
-- sql: CREATE TABLE property_storage_root (expected NVARCHAR(4000))
-- scm: (insert (table "memcp-tests" false "property_storage_root" false) '("expected") (list (list (storage_root))))
-cleanup:
-- sql: DROP TABLE IF EXISTS property_storage_root
+setup: []
+cleanup: []
 test_cases:
 - name: Edition identifies the actual engine
   sql: SELECT SERVERPROPERTY(N'Edition') AS edition
@@ -28,12 +24,36 @@ test_cases:
 - name: Dynamic SQL expressions choose server properties
   sql: DECLARE @property NVARCHAR(128) = N'Edition'; SELECT SERVERPROPERTY(@property) AS edition
   expect: {rows: 1, data: [{edition: MemCP}]}
-- name: Default data path reports configured native storage rather than an invented drive
-  sql: SELECT CASE WHEN CAST(SERVERPROPERTY(N'InstanceDefaultDataPath') AS NVARCHAR(4000)) = expected THEN 1 ELSE 0 END AS matches FROM property_storage_root
-  expect: {rows: 1, data: [{matches: 1}]}
-- name: Default log path uses the native colocated WAL root
-  sql: SELECT CASE WHEN CAST(SERVERPROPERTY(N'InstanceDefaultLogPath') AS NVARCHAR(4000)) = expected THEN 1 ELSE 0 END AS matches FROM property_storage_root
-  expect: {rows: 1, data: [{matches: 1}]}
+- name: Default data path is an opaque Windows namespace label
+  sql: SELECT SERVERPROPERTY(N'InstanceDefaultDataPath') AS path
+  expect: {rows: 1, data: [{path: 'C:\MemCP\Data\'}]}
+- name: Default log path never exposes the native WAL directory
+  sql: SELECT SERVERPROPERTY(N'InstanceDefaultLogPath') AS path
+  expect: {rows: 1, data: [{path: 'C:\MemCP\Log\'}]}
+- name: Prepared TDS paths are virtual and independent of host storage configuration
+  tds:
+    statements:
+    - sql: SELECT SERVERPROPERTY(@property) AS path
+      prepare: true
+      parameters: [{name: property, value: InstanceDefaultDataPath}]
+      expect: {rows: 1, data: [{path: 'C:\MemCP\Data\'}], column_types: [{name: path, type: SQL_VARIANT}]}
+    - sql: SELECT SERVERPROPERTY(N'InstanceDefaultLogPath') AS path
+      expect: {rows: 1, data: [{path: 'C:\MemCP\Log\'}], column_types: [{name: path, type: SQL_VARIANT}]}
+- name: Instance machine identity is not disclosed
+  sql: SELECT SERVERPROPERTY(N'MachineName') AS machine, SERVERPROPERTY(N'ServerName') AS server, SERVERPROPERTY(N'ComputerNamePhysicalNetBIOS') AS host
+  expect: {rows: 1, data: [{machine: null, server: null, host: null}]}
+- name: Client database filenames cannot select host storage paths
+  sql: CREATE DATABASE [virtual_path_probe] ON PRIMARY (NAME=N'probe', FILENAME=N'C:\MemCP\Data\probe.mdf')
+  expect: {error: true}
+- name: Client restore paths cannot access host files
+  sql: RESTORE DATABASE [virtual_path_probe] FROM DISK=N'C:\MemCP\Data\probe.bak'
+  expect: {error: true}
+- name: Client backup paths cannot write host files
+  sql: BACKUP DATABASE [memcp-tests] TO DISK=N'C:\MemCP\Data\probe.bak'
+  expect: {error: true}
+- name: Server file readers are unavailable
+  sql: SELECT * FROM OPENROWSET(BULK N'C:\MemCP\Data\probe.txt', SINGLE_CLOB) AS content
+  expect: {error: true}
 - name: Explicit text conversions unwrap the intrinsic variant value
   sql: SELECT CAST(SERVERPROPERTY(N'Edition') AS NVARCHAR(20)) AS edition, CAST(SERVERPROPERTY(NULL) AS NVARCHAR(20)) AS missing
   expect: {rows: 1, data: [{edition: MemCP, missing: null}]}

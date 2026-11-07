@@ -119,10 +119,12 @@ driver. Each probe keeps one connection for its statements, supports named
 parameters and prepared calls, and checks rows, values, column names and errors.
 Unsupported frontend features remain noncritical specifications.
 
-`sql/compatibility/tsql-server-properties.yaml` covers the native server-property
+`sql/compatibility/tsql-server-properties.yaml` covers the isolated server-property
 profile: `Edition` identifies MemCP; `InstanceDefaultDataPath` and
-`InstanceDefaultLogPath` report the configured absolute local storage root
-(with a trailing native separator). Native WAL files share that root. Other
+`InstanceDefaultLogPath` report the virtual Windows labels `C:\MemCP\Data\` and
+`C:\MemCP\Log\`. These labels never map to host files or disclose physical
+locations, even for administrators. Client-supplied filesystem operations remain
+unsupported and must not resolve these labels into host paths. Other
 properties return NULL rather than fabricated SQL Server version or capability
 claims. Property expressions are resolved at execution time, and TDS declares
 SQL_VARIANT even for NULL results. The intrinsic variant subtype is NVARCHAR(128).

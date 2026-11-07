@@ -508,9 +508,10 @@ NVARCHAR(128) variants only; other variant conversions fail explicitly. */
 (define tsql_serverproperty (lambda (property) (if (nil? property) nil (begin
 	(define value (match (toLower property)
 		"edition" "MemCP"
-		"instancedefaultdatapath" (storage_root)
-		/* Native WAL files live below the same configured root as tables. */
-		"instancedefaultlogpath" (storage_root)
+		/* Compatibility paths are opaque SQL namespace labels. They never
+		name or map to host files, including for administrators. */
+		"instancedefaultdatapath" "C:\\MemCP\\Data\\"
+		"instancedefaultlogpath" "C:\\MemCP\\Log\\"
 		_ nil))
 	(if (nil? value) nil
 		(list "variant" (list "kind" 231 "size" 256 "precision" 0 "scale" 0 "collation" (hex2bin "0904d00034"))
