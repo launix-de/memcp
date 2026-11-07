@@ -1995,7 +1995,10 @@ row or supplied parameter value exists. */
 			(if (equal? (car dimensions) -1) 65535 (* 2 (car dimensions))) 8000)
 		104 1
 		_ (match type "TINYINT" 1 "SMALLINT" 2 "INT" 4 "INTEGER" 4 _ 8)))
-	(list "kind" kind "size" size "precision" precision "scale" scale))))
+	(merge (list "kind" kind "size" size "precision" precision "scale" scale)
+		/* Unicode descriptors also need a valid TDS collation: SqlClient
+		resolves its code page before consuming any result rows. */
+		(if (equal? kind 231) (list "collation" (hex2bin "0904d00034")) '())))))
 (define tsql_result_columns (lambda (query parameters) (match query
 	((symbol query-block) _schema sources fields _where _group _having _order _limit _offset _hidden _stages _facts)
 	(begin
