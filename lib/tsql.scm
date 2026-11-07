@@ -89,9 +89,15 @@ the common binder consumes the temporary callback before planning. */
 (define tsql_column_compiler (lambda (planning_session) (lambda (info declaration)
 	(if (nil? declaration) info (begin
 		(define alias (tsql_alias_declaration (declaration "RawType") planning_session))
-		(if (nil? alias) info (begin
+		(if (nil? alias)
+			(sql_info (sql_info_formula info)
+				(if (has? '("CHAR" "VARCHAR" "NCHAR" "NVARCHAR" "BINARY" "VARBINARY") (sql_info_type info))
+					(list (sql_info_type info) (coalesceNil (declaration "Dimensions") '())) (sql_info_datatype info))
+				(sql_info_collation info)) (begin
 			(if (alias "id") (tsql_guard_type_alias (declaration "RawType") (alias "id") planning_session) true)
-			(sql_info (sql_info_formula info) (alias "base_type")
+			(sql_info (sql_info_formula info)
+				(if (has? '("CHAR" "VARCHAR" "NCHAR" "NVARCHAR" "BINARY" "VARBINARY") (alias "base_type"))
+					(list (alias "base_type") (alias "dimensions")) (alias "base_type"))
 				(if (sql_text_type? (alias "base_type"))
 					(list (coalesce (declaration "Collation") "utf8mb4_general_ci") 2) nil)))))))))
 (define tsql_compile_column (tsql_column_compiler nil))

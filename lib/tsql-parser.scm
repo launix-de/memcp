@@ -492,6 +492,27 @@ Complementing the nonnegative magnitude avoids negating the int64 minimum. */
 /* Character casts own their width semantics in the frontend. National text
 counts UTF-16 units and never returns half of a supplementary character. The
 fast path avoids splitting the ordinary short numeric/text conversions. */
+/* VARCHAR uses the existing TDS CP1252 profile unless a real SQL UTF8
+collation selects UTF8 explicitly. Internal comparison labels do not change
+that wire profile. Unknown code pages fail before choosing any row operator. */
+(define tsql_character_encoding (lambda (info) (begin
+	(define collation (sql_info_collation info))
+	(define name (if collation (toLower (car collation)) ""))
+	(if (equal? name "") "windows-1252"
+		(regexp_test name "_utf8$") "utf-8"
+		(regexp_test name "^(utf8mb[34]|utf8|binary)(_|$)") "windows-1252"
+		(regexp_test name "^latin1_general(_|$)") "windows-1252"
+		(regexp_test name "^sql_latin1_general_cp1(_|$)") "windows-1252"
+		(error "unsupported T-SQL character code page for collation: " name)))))
+(define tsql_encode_character (lambda (value encoding limit)
+	(if (nil? value) nil
+		(equal? encoding "utf-8") (utf8_prefix value (if (equal? limit -1) (strlen value) limit))
+		(single_byte_encode value encoding limit))))
+(define tsql_decode_character (lambda (value encoding)
+	(if (nil? value) nil
+		(equal? encoding "utf-8") (utf8_prefix value (strlen value))
+		(single_byte_decode value encoding))))
+
 (define tsql_cast_text (lambda (value length national) (if (nil? value) nil (begin
 	(define text (string value))
 	(if (or (equal? length -1) (<= (strlen text) length)) text
@@ -551,7 +572,7 @@ select that type, and no arithmetic operation is needed merely to mark it. */
 	(list (quote sql_type_expr) formula
 		(if (has? '("DECIMAL" "NUMERIC") name) (list name (tsql_decl_dimensions name dimensions))
 			(has? '("CHAR" "VARCHAR" "NCHAR" "NVARCHAR" "BINARY" "VARBINARY") name)
-			(list name (if (empty_list? dimensions) '(30) dimensions)) name) nil))))
+			(list name (tsql_decl_dimensions name (if (empty_list? dimensions) '(30) dimensions))) name) nil))))
 (define tsql_decimal_compiler (lambda (type dims) (lambda (infos) (begin
 	(define input (car infos))
 	(define input_type (sql_info_type input))
@@ -1892,7 +1913,8 @@ dimensions are metadata only and are absent from the executable plan. */
 	((symbol sql_compile_expr) ((symbol tsql_text_compiler) length _national _fixed) _value) (list length)
 	(cons (symbol sql_compile_expr) (cons ((symbol tsql_builtin_compiler) name) (cons value _arguments)))
 	(if (has? '("UPPER" "LOWER" "LTRIM" "RTRIM" "TRIM" "LEFT" "RIGHT" "SUBSTRING") name)
-		(tsql_result_dimensions sources value parameters) nil)
+		(tsql_result_dimensions sources value parameters)
+		nil)
 	((symbol tsql_left) value _amount) (tsql_result_dimensions sources value parameters)
 	((symbol tsql_right) value _amount) (tsql_result_dimensions sources value parameters)
 	((symbol tsql_substring) value _start _amount _binary) (tsql_result_dimensions sources value parameters)
@@ -1910,8 +1932,10 @@ dimensions are metadata only and are absent from the executable plan. */
 	((symbol sql_compile_expr) ((symbol tsql_try_conversion_compiler) type ((symbol quote) dimensions) _style _bounded) _value)
 	(tsql_decl_dimensions type (if (and (empty_list? dimensions)
 		(has? '("VARCHAR" "NVARCHAR" "CHAR" "NCHAR" "BINARY" "VARBINARY") type)) '(30) dimensions))
-	(cons (symbol sql_compile_expr) _arguments)
-	(tsql_result_dimensions sources (sql_type_formula sources expression) parameters)
+	(cons (symbol sql_compile_expr) (cons compiler _arguments))
+	(if (or (expression_equal? compiler tsql_compile_stuff) (expression_equal? compiler tsql_compile_replicate))
+		(sql_info_dimensions (sql_expr_info sources expression))
+		(tsql_result_dimensions sources (sql_type_formula sources expression) parameters))
 	((symbol tsql_cast_decimal) _value precision scale) (list precision scale)
 	((symbol tsql_quote_name) _value _delimiter) '(258)
 	((symbol tsql_space) _amount) '(8000)
@@ -2305,6 +2329,112 @@ No character list, decoder, relation or runtime SQL type is constructed here. */
 		"LTRIM" (quote tsql_ltrim) "RTRIM" (quote tsql_rtrim) "TRIM" (quote tsql_trim)))
 	(sql_info (list helper (sql_info_formula converted)) output (sql_info_collation input)))))
 
+/* Runtime operator factories capture every frontend helper as an actual
+procedure value. Workers execute the emitted SCM without resolving dialect
+helper names in their global environment.
+Editing coordinates and output capacity are separate SQL contracts.
+Collations can count supplementary scalars once while NVARCHAR capacity still
+counts UTF16 units. Positions are validated before any allocation or slicing. */
+(define tsql_edit_prefix (lambda (text amount unit) (begin
+	(define prefix (text_prefix text amount unit))
+	(if (and (< (strlen prefix) (strlen text)) (< (text_length prefix unit) amount))
+		(error "text edit boundary inside a surrogate pair is unsupported") prefix))))
+(define tsql_stuff_operator (lambda (take_prefix raise_error) (lambda (value start amount replacement unit size_unit limit)
+	(if (or (nil? value) (nil? start) (nil? amount)) nil
+		(or (<= start 0) (< amount 0) (> start (text_length value unit))) nil
+		(begin
+			(define prefix (take_prefix value (- start 1) unit))
+			(define remaining (substr value (strlen prefix)))
+			(define removed (take_prefix remaining (min amount (text_length remaining unit)) unit))
+			(define suffix (substr remaining (strlen removed)))
+			(define replacement (coalesceNil replacement ""))
+			(define size (+ (text_length prefix size_unit) (text_length replacement size_unit) (text_length suffix size_unit)))
+			(if (> size limit) (raise_error 8115 "STUFF result exceeds its declared return capacity" 1) true)
+			(concat prefix replacement suffix))))))
+(define tsql_replicate_operator (lambda (take_prefix raise_error) (lambda (value amount size_unit limit large utf8)
+	(if (or (nil? value) (nil? amount)) nil
+		(< amount 0) nil
+		(or (equal? amount 0) (equal? value "")) ""
+		(begin
+			(define width (text_length value size_unit))
+			(define repetitions (intdiv limit width))
+			(if large (begin
+				(if (or (> amount repetitions) (> amount (intdiv 2147483647 (strlen value))))
+					(raise_error 8115 "REPLICATE result exceeds its declared return capacity" 1) true)
+				(string_repeat value amount))
+				(begin
+					(define complete (min amount repetitions))
+					(define prefix (string_repeat value complete))
+					(if (<= amount repetitions) prefix
+						(concat prefix (if utf8 (utf8_prefix value (mod limit width))
+							(take_prefix value (mod limit width) size_unit)))))))))))
+(define tsql_edit_decoder (lambda (decode) (lambda (bytes encoding) (if (nil? bytes) nil (begin
+	(define decoded (decode bytes encoding))
+	(if (nil? decoded) (error "undefined byte in the supported nonnational character encoding") decoded))))))
+(define tsql_edit_character_info (lambda (info national)
+	(if (or (sql_text_type? (sql_info_type info)) (equal? (sql_info_type info) "NULL")) info
+		((tsql_text_compiler -1 national false) (list info)))))
+(define tsql_edit_national? (lambda (info)
+	(has? '("NCHAR" "NVARCHAR" "SYSNAME") (sql_info_type info))))
+(define tsql_edit_large? (lambda (info)
+	(equal? (sql_info_dimensions info) '(-1))))
+(define tsql_edit_collation (lambda (infos)
+	(reduce infos (lambda (collation info) (sql_merge_collation collation (sql_info_collation info))) nil)))
+(define tsql_edit_return_type (lambda (national binary large)
+	(list (if binary "VARBINARY" national "NVARCHAR" "VARCHAR")
+		(list (if large -1 national 4000 8000)))))
+(define tsql_compile_stuff (lambda (infos) (begin
+	(if (equal? (count infos) 4) true (error "STUFF requires four arguments"))
+	(define input (car infos))
+	(define replacement (nth infos 3))
+	(define binary (tsql_binary_type? (sql_info_type input)))
+	(if (has? '("TEXT" "NTEXT" "IMAGE") (sql_info_type input))
+		(error "STUFF requires a convertible character or binary declaration") true)
+	(if (if binary (or (tsql_binary_type? (sql_info_type replacement))
+		(has? '("NULL" "CHAR" "VARCHAR") (sql_info_type replacement)))
+		(not (tsql_binary_type? (sql_info_type replacement)))) true
+		(error "STUFF replacement conversion between binary and character data is not implemented"))
+	(define national (and (not binary) (or (tsql_edit_national? input) (tsql_edit_national? replacement))))
+	(define large (tsql_edit_large? input))
+	(define text (if binary input (tsql_edit_character_info input national)))
+	(define replacement (if binary replacement (tsql_edit_character_info replacement national)))
+	(define collation (if binary nil (tsql_edit_collation (list text replacement))))
+	(define encoding (if national "utf-8" binary (tsql_character_encoding replacement)
+		(tsql_character_encoding (sql_info nil "VARCHAR" collation))))
+	(define positions (if binary "byte" (not national) (if (equal? encoding "utf-8") "rune" "byte")
+		(and collation (regexp_test (car collation) "(?i)_sc(?:_|$)")) "rune" "utf16"))
+	(define size_unit (if national "utf16" "byte"))
+	(define text_formula (if (or binary national) (sql_info_formula text)
+		(list tsql_encode_character (sql_info_formula text) encoding -1)))
+	(define replacement_formula (if (or national (tsql_binary_type? (sql_info_type replacement)))
+		(sql_info_formula replacement) (list tsql_encode_character (sql_info_formula replacement) encoding -1)))
+	(define limit (if large (if national 1073741823 2147483647) national 4000 8000))
+	(define formula (list (tsql_stuff_operator tsql_edit_prefix tsql_raise_error) text_formula
+		(sql_info_formula (tsql_convert_value_info (nth infos 1) "BIGINT" nil))
+		(sql_info_formula (tsql_convert_value_info (nth infos 2) "BIGINT" nil))
+		replacement_formula positions size_unit limit))
+	(sql_info (if (or binary national) formula (list (tsql_edit_decoder tsql_decode_character) formula encoding))
+		(tsql_edit_return_type national binary large) collation))))
+(define tsql_compile_replicate (lambda (infos) (begin
+	(if (equal? (count infos) 2) true (error "REPLICATE requires two arguments"))
+	(define input (car infos))
+	(if (has? '("TEXT" "NTEXT" "IMAGE") (sql_info_type input))
+		(error "REPLICATE requires a convertible character declaration") true)
+	(define national (tsql_edit_national? input))
+	(define large (tsql_edit_large? input))
+	(define binary (tsql_binary_type? (sql_info_type input)))
+	(define converted (if binary input (tsql_edit_character_info input national)))
+	(define encoding (if national "utf-8" (tsql_character_encoding converted)))
+	(define value (if (or national binary) (sql_info_formula converted)
+		(list tsql_encode_character (sql_info_formula converted) encoding -1)))
+	(define formula (list (tsql_replicate_operator tsql_edit_prefix tsql_raise_error) value
+		(sql_info_formula (tsql_convert_value_info (cadr infos) "BIGINT" nil))
+		(if national "utf16" "byte")
+		(if large (if national 1073741823 2147483647) national 4000 8000) large
+		(and (not national) (equal? encoding "utf-8"))))
+	(sql_info (if national formula (list (tsql_edit_decoder tsql_decode_character) formula encoding))
+		(tsql_edit_return_type national false large) (if binary nil (sql_info_collation converted))))))
+
 (define tsql_builtin_compiler (lambda (name) (lambda (infos)
 	(if (has? '("NEWID" "UUIDV7") name) (begin
 		(if (empty_list? infos) true (error name " takes no arguments"))
@@ -2317,7 +2447,9 @@ No character list, decoder, relation or runtime SQL type is constructed here. */
 		(sql_call_info (coalesce (tsql_builtins name) (error "unknown function " name)) infos)))))
 
 (define tsql_builtin_expr (lambda (name arguments) (begin
-	(if (equal? name "PARSENAME")
+	(if (has? '("STUFF" "REPLICATE") name)
+		(cons (quote sql_compile_expr) (cons (if (equal? name "STUFF") tsql_compile_stuff tsql_compile_replicate) arguments))
+		(equal? name "PARSENAME")
 		(cons (quote sql_compile_expr) (cons (quote tsql_compile_parsename) arguments))
 		(begin
 			(if (tsql_builtins name) true (error "unknown function " name))
@@ -2437,7 +2569,10 @@ that context explicitly; stored views refuse this scalar before publication. */
 			(list (quote sql_type_expr) (list (quote tsql_unbound_parameter) name spelling) "any" nil)
 			(empty_list? declaration) (error "undeclared T-SQL parameter: @" name)
 			(list (quote sql_type_expr) (list (quote session) (concat "__tsql_parameter:" name))
-				(car (tsql_effective_parameter_contract (cadr (car declaration)))) nil)))))
+				(begin
+					(define contract (tsql_effective_parameter_contract (cadr (car declaration))))
+					(if (has? '("CHAR" "VARCHAR" "NCHAR" "NVARCHAR" "BINARY" "VARBINARY") (car contract))
+						(list (car contract) (cdr contract)) (car contract))) nil)))))
 
 	(define placeholder_counter (newsession))
 	(placeholder_counter "n" 0)

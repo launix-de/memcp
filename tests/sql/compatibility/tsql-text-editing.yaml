@@ -1,0 +1,168 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  description: T-SQL string insertion, deletion and bounded repetition
+  syntax: tsql
+  requires_tds: true
+setup:
+- sql: DROP TABLE IF EXISTS editing_samples
+- sql: CREATE TABLE editing_samples(id INT PRIMARY KEY, label NVARCHAR(100), large_label NVARCHAR(MAX), sc_label NVARCHAR(100) COLLATE utf8mb4_general_ci_sc, utf8_label VARCHAR(100) COLLATE Latin1_General_100_CI_AS_SC_UTF8)
+- sql: INSERT INTO editing_samples VALUES(1,N'abcdef',N'ab',N'a😀bc','a€c'),(2,N'xy',N'z',NULL,'€'),(3,NULL,NULL,NULL,NULL)
+cleanup:
+- sql: DROP TABLE editing_samples
+test_cases:
+- name: Stuff replaces a specified span
+  sql: SELECT STUFF(N'abcdef',2,3,N'X') AS value
+  expect: {data: [{value: aXef}]}
+- name: Stuff inserts without deleting when length is zero
+  sql: SELECT STUFF(N'abcdef',2,0,N'X') AS value
+  expect: {data: [{value: aXbcdef}]}
+- name: NULL replacement removes the selected span
+  sql: SELECT STUFF(N'abcdef',2,3,NULL) AS value
+  expect: {data: [{value: aef}]}
+- name: Deletion saturates at the end of the input
+  sql: SELECT STUFF(N'abcdef',2,9223372036854775807,N'X') AS value
+  expect: {data: [{value: aX}]}
+- name: Invalid starting positions return NULL
+  sql: SELECT STUFF(N'abc',0,1,N'X') AS zero_start, STUFF(N'abc',-1,1,N'X') AS negative_start, STUFF(N'abc',4,0,N'X') AS past_end
+  expect: {data: [{zero_start: null, negative_start: null, past_end: null}]}
+- name: Negative deletion length returns NULL
+  sql: SELECT STUFF(N'abc',1,-1,N'X') AS value
+  expect: {data: [{value: null}]}
+- name: NULL input or position remains NULL
+  sql: SELECT STUFF(CAST(NULL AS NVARCHAR(20)),1,1,N'X') AS no_text, STUFF(N'abc',NULL,1,N'X') AS no_start, STUFF(N'abc',1,NULL,N'X') AS no_length
+  expect: {data: [{no_text: null, no_start: null, no_length: null}]}
+- name: Stuff does not insert into an empty source
+  sql: SELECT STUFF(N'',1,0,N'X') AS value
+  expect: {data: [{value: null}]}
+- name: Non supplementary collation positions count UTF16 units
+  sql: SELECT STUFF(N'a😀bc',2,2,N'X') AS value
+  expect: {data: [{value: aXbc}]}
+- name: Supplementary collation positions count one Unicode scalar
+  sql: SELECT STUFF(sc_label,2,1,N'X') AS value FROM editing_samples WHERE id=1
+  expect: {data: [{value: aXbc}]}
+- name: A boundary inside a surrogate pair is explicitly unsupported
+  sql: SELECT STUFF(N'a😀bc',2,1,N'X') AS value
+  expect: {error: true}
+- name: Binary stuff edits byte positions and preserves byte values
+  sql: SELECT CONVERT(VARCHAR(20),STUFF(0x410042FF,2,2,0x5859),2) AS value
+  expect: {data: [{value: '415859FF'}]}
+- name: Stuff can remove binary bytes with a NULL replacement
+  sql: SELECT CONVERT(VARCHAR(20),STUFF(0x41424344,2,2,NULL),2) AS value
+  expect: {data: [{value: '4144'}]}
+- name: Stuff rejects mixed binary replacement without an encoding contract
+  sql: SELECT STUFF(0x4142,1,1,N'X') AS value
+  expect: {error: true}
+- name: Stuff converts numeric input using the text conversion contract
+  sql: SELECT STUFF(12345,2,2,N'X') AS value
+  expect: {data: [{value: 1X45}]}
+- name: Stuff validates its argument count
+  sql: SELECT STUFF(N'a',1,1)
+  expect: {error: true}
+- name: Replicate repeats Unicode and preserves trailing spaces
+  sql: SELECT REPLICATE(N'ab',3) AS value, REPLICATE(N'a ',2) AS trailing
+  expect: {data: [{value: ababab, trailing: 'a a '}]}
+- name: Replicate zero and empty inputs return empty strings
+  sql: SELECT REPLICATE(N'ab',0) AS zero_count, REPLICATE(N'',9223372036854775807) AS empty_text
+  expect: {data: [{zero_count: '', empty_text: ''}]}
+- name: Replicate negative or NULL arguments return NULL
+  sql: SELECT REPLICATE(N'ab',-1) AS negative_count, REPLICATE(N'ab',NULL) AS no_count, REPLICATE(CAST(NULL AS NVARCHAR(20)),2) AS no_text
+  expect: {data: [{negative_count: null, no_count: null, no_text: null}]}
+- name: Bounded national repetition truncates at 4000 UTF16 units
+  sql: SELECT LEN(REPLICATE(N'ab',3000)) AS length_value
+  expect: {data: [{length_value: 4000}]}
+- name: Bounded nonnational repetition truncates at 8000 characters
+  sql: SELECT LEN(REPLICATE('ab',5000)) AS length_value
+  expect: {data: [{length_value: 8000}]}
+- name: Bounded repetition handles huge counts without overflowing multiplication
+  sql: SELECT LEN(REPLICATE(N'x',9223372036854775807)) AS length_value
+  expect: {data: [{length_value: 4000}]}
+- name: MAX repetition retains values beyond the bounded national capacity
+  sql: SELECT LEN(REPLICATE(CAST(N'ab' AS NVARCHAR(MAX)),3000)) AS length_value
+  expect: {data: [{length_value: 6000}]}
+- name: MAX column repetition retains the declared unlimited contract
+  sql: SELECT LEN(REPLICATE(large_label,3000)) AS length_value FROM editing_samples WHERE id=1
+  expect: {data: [{length_value: 6000}]}
+- name: Bounded stuff reports overflow instead of truncating replacement text
+  sql: SELECT STUFF(N'x',1,0,REPLICATE(CAST(N'y' AS NVARCHAR(MAX)),4000)) AS value
+  expect: {error: true}
+- name: MAX stuff retains a large replacement
+  sql: SELECT LEN(STUFF(CAST(N'xy' AS NVARCHAR(MAX)),1,0,REPLICATE(CAST(N'z' AS NVARCHAR(MAX)),4000))) AS length_value
+  expect: {data: [{length_value: 4002}]}
+- name: Excessive MAX repetition is rejected before allocation
+  sql: SELECT REPLICATE(CAST(N'ab' AS NVARCHAR(MAX)),9223372036854775807) AS value
+  expect: {error: true}
+- name: Replicate converts integer input to text
+  sql: SELECT REPLICATE(12,3) AS value
+  expect: {data: [{value: '121212'}]}
+- name: Replicate validates its argument count
+  sql: SELECT REPLICATE(N'ab')
+  expect: {error: true}
+- name: Text editing composes with column scans
+  sql: SELECT id,STUFF(label,2,1,N'X') AS edited,REPLICATE(label,2) AS repeated FROM editing_samples ORDER BY id
+  expect: {data: [{id: 1, edited: aXcdef, repeated: abcdefabcdef}, {id: 2, edited: xX, repeated: xyxy}, {id: 3, edited: null, repeated: null}]}
+- name: Text editing wire metadata retains bounded and MAX national declarations
+  tds:
+    statements:
+    - sql: SELECT STUFF(N'abc',2,1,N'X') AS edited,REPLICATE(N'ab',3) AS repeated
+      expect:
+        data: [{edited: aXc, repeated: ababab}]
+        column_types: [{name: edited, type: NVARCHAR, length: 4000}, {name: repeated, type: NVARCHAR, length: 4000}]
+    - sql: SELECT REPLICATE(CAST(N'ab' AS NVARCHAR(MAX)),3) AS repeated
+      expect:
+        data: [{repeated: ababab}]
+        column_types: [{name: repeated, type: NVARCHAR}]
+    - sql: SELECT STUFF(@label,2,1,N'X') AS edited
+      prepare: true
+      parameters: [{name: label, value: abc}]
+      expect: {data: [{edited: aXc}]}
+
+    - sql: SELECT STUFF(0x410042FF,2,2,0x5859) AS edited
+      expect:
+        data: [{edited: {binary_hex: '415859ff'}}]
+        column_types: [{name: edited, type: VARBINARY, length: 8000}]
+- name: Nonnational repetition counts encoded bytes rather than UTF8 carrier bytes
+  sql: SELECT LEN(REPLACE(REPLICATE('é',8000),'é','x')) AS length_value
+  expect: {data: [{length_value: 8000}]}
+- name: Replicate converts binary bytes to nonnational text
+  sql: SELECT REPLICATE(0x41E9,2) AS value
+  expect: {data: [{value: 'AéAé'}]}
+- name: Nonnational stuff edits encoded characters
+  sql: SELECT STUFF('aébc',2,1,'X') AS value
+  expect: {data: [{value: aXbc}]}
+- name: Binary stuff encodes a nonnational replacement
+  sql: SELECT CONVERT(VARCHAR(20),STUFF(0x4142,1,1,'X'),2) AS value
+  expect: {data: [{value: '5842'}]}
+- name: Undefined binary byte conversion is explicit
+  sql: SELECT REPLICATE(0x81,2)
+  expect: {error: true}
+- name: National repetition keeps the partial final copy
+  sql: SELECT RIGHT(REPLICATE(N'abc',2000),4) AS ending
+  expect: {data: [{ending: abca}]}
+- name: Nonnational repetition keeps a partial encoded copy
+  sql: SELECT RIGHT(REPLICATE('a€c',3000),2) AS ending
+  expect: {data: [{ending: 'a€'}]}
+- name: National repetition counts supplementary UTF16 width at its byte limit
+  sql: SELECT LEN(REPLACE(REPLICATE(N'😀',3000),N'😀',N'x')) AS scalar_count
+  expect: {data: [{scalar_count: 2000}]}
+- name: MAX nonnational repetition retains values beyond 8000 encoded bytes
+  sql: SELECT LEN(REPLICATE(CAST('x' AS VARCHAR(MAX)),9000)) AS length_value
+  expect: {data: [{length_value: 9000}]}
+- name: MAX variable contracts preserve large repetition
+  sql: DECLARE @label NVARCHAR(MAX)=N'ab'; SELECT LEN(REPLICATE(@label,3000)) AS length_value
+  expect: {data: [{length_value: 6000}]}
+
+- name: UTF8 character editing counts scalars while preserving byte capacity
+  sql: SELECT STUFF(utf8_label,2,1,'X') AS value FROM editing_samples WHERE id=1
+  expect: {data: [{value: aXc}]}
+- name: UTF8 repetition caps encoded bytes rather than code points
+  sql: SELECT LEN(REPLACE(REPLICATE(utf8_label,2000),'€','x')) AS length_value FROM editing_samples WHERE id=1
+  expect: {data: [{length_value: 4800}]}
+- name: UTF8 repetition never splits a multibyte scalar at its byte limit
+  sql: SELECT LEN(REPLACE(REPLICATE(utf8_label,3000),'€','x')) AS scalar_count FROM editing_samples WHERE id=2
+  expect: {data: [{scalar_count: 2666}]}
+
+- name: Ordered producers retain resolved editing operators and helper bindings
+  sql: SELECT id,STUFF(N'abc',2,1,CONCAT(N'n',id)) AS edited,REPLICATE(N'q',id+1) AS repeated FROM editing_samples WHERE id<3 UNION ALL SELECT -1,N'aZc',N'q' ORDER BY edited,id
+  expect: {data: [{id: -1, edited: aZc, repeated: q}, {id: 1, edited: an1c, repeated: qq}, {id: 2, edited: an2c, repeated: qqq}]}
