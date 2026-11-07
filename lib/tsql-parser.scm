@@ -530,14 +530,15 @@ select that type, and no arithmetic operation is needed merely to mark it. */
 		"SMALLDATETIME" (tsql_temporal_cast_expr value name 0 dimensions)
 		"TIME" (tsql_temporal_cast_expr value name 0 dimensions)
 		_ (error "unsupported conversion to " name)))
-	(list (quote sql_type_expr) formula name nil))))
+	(list (quote sql_type_expr) formula
+		(if (has? '("DECIMAL" "NUMERIC") name) (list name (tsql_decl_dimensions name dimensions)) name) nil))))
 (define tsql_decimal_compiler (lambda (type dims) (lambda (infos) (begin
 	(define input (car infos))
 	(define input_type (sql_info_type input))
 	(if (or (sql_numeric_type? input_type)
 		(has? '("NULL" "any" "MONEY" "SMALLMONEY" "CHAR" "VARCHAR" "NCHAR" "NVARCHAR" "TEXT" "NTEXT") input_type)) true
 		(error "decimal conversion from " input_type " is not implemented"))
-	(sql_info (list (quote tsql_cast_decimal) (sql_info_formula input) (car dims) (cadr dims)) type nil)))))
+	(sql_info (list (quote tsql_cast_decimal) (sql_info_formula input) (car dims) (cadr dims)) (list type dims) nil)))))
 (define tsql_cast_decimal_expr (lambda (value type dimensions) (begin
 	(define dims (tsql_decl_dimensions type dimensions))
 	(list (quote sql_compile_expr) (list (quote tsql_decimal_compiler) type (list (quote quote) dims)) value))))
@@ -1869,8 +1870,11 @@ dimensions are metadata only and are absent from the executable plan. */
 	(tsql_result_dimensions sources value parameters)
 	((symbol sql_compile_expr) ((symbol tsql_text_compiler) length _national _fixed) _value) (list length)
 	(cons (symbol sql_compile_expr) (cons ((symbol tsql_builtin_compiler) name) (cons value _arguments)))
-	(if (has? '("UPPER" "LOWER" "LTRIM" "RTRIM" "TRIM" "LEFT" "RIGHT" "SUBSTRING") name)
-		(tsql_result_dimensions sources value parameters) nil)
+	(if (has? '("UPPER" "LOWER" "LTRIM" "RTRIM" "TRIM" "LEFT" "RIGHT" "SUBSTRING" "SIGN") name)
+		(tsql_result_dimensions sources value parameters)
+		(equal? name "POWER") (begin
+			(define dimensions (tsql_result_dimensions sources value parameters))
+			(if (equal? (count (coalesceNil dimensions '())) 2) (list 38 (cadr dimensions)) nil)) nil)
 	((symbol tsql_left) value _amount) (tsql_result_dimensions sources value parameters)
 	((symbol tsql_right) value _amount) (tsql_result_dimensions sources value parameters)
 	((symbol tsql_substring) value _start _amount _binary) (tsql_result_dimensions sources value parameters)
@@ -2283,11 +2287,97 @@ No character list, decoder, relation or runtime SQL type is constructed here. */
 		"LTRIM" (quote tsql_ltrim) "RTRIM" (quote tsql_rtrim) "TRIM" (quote tsql_trim)))
 	(sql_info (list helper (sql_info_formula converted)) output (sql_info_collation input)))))
 
+/* Numeric validation is deliberately distinct from TRY_CONVERT(INT,...):
+SQL numeric text also includes decimal, floating and monetary spellings.
+The frontend chooses accepted declarations and every SQL return contract. */
+(define tsql_numeric_currency "[$¢£¤¥৲৳฿៛₠₡₢₣₤₥₦₧₨₩₪₫€₭₮₯₰₱﷼﹩＄￠￡￥￦]")
+(define tsql_isnumeric_text (lambda (value) (if (nil? value) 0 (begin
+	(define text (sql_trim value))
+	(if (equal? text "") 0
+		(regexp_test text (concat "^(?:[+.,-]|" tsql_numeric_currency ")$")) 1
+		(begin
+			(define money (regexp_test text (concat "^(?:[+-]?" tsql_numeric_currency "|" tsql_numeric_currency "[+-]?)[0-9.,]+$")))
+			(define plain (if money (regexp_replace text tsql_numeric_currency "") text))
+			(define monetary (or money (regexp_test plain ",")))
+			(define valid (if monetary
+				(regexp_test plain "^[+-]?(?:[0-9][0-9,]*(?:\\.[0-9]*)?|\\.[0-9]+)$")
+				(regexp_test plain "^[+-]?(?:[0-9]+\\.?[0-9]*|\\.[0-9]+)(?:[eEdD][+-]?[0-9]+)?$")))
+			(if (not valid) 0
+				(try (lambda () (begin
+					(define number (tsql_numeric_input (replace (replace (replace plain "," "") "D" "e") "d" "e")))
+					(if monetary (begin (tsql_money_coefficient number false) 1) 1)))
+					(lambda (_cause) 0)))))))))
+(define tsql_compile_isnumeric (lambda (infos) (begin
+	(if (equal? (count infos) 1) true (error "ISNUMERIC requires one argument"))
+	(define input (car infos))
+	(define type (tsql_addition_type (sql_info_type input)))
+	(define character (has? '("CHAR" "VARCHAR" "NCHAR" "NVARCHAR" "TEXT" "NTEXT" "SYSNAME") type))
+	(if (or character (sql_numeric_type? type) (has? '("NULL" "BIT" "MONEY" "SMALLMONEY") type)) true
+		(error "ISNUMERIC does not support this declaration: " type))
+	(sql_info (if character (list tsql_isnumeric_text (sql_info_formula input))
+		(list (quote if) (list (quote nil?) (sql_info_formula input)) 0 1)) "INT" nil))))
+(define tsql_sign (lambda (value) (if (nil? value) nil (< value 0) -1 (> value 0) 1 0)))
+(define tsql_compile_sign (lambda (infos) (begin
+	(if (equal? (count infos) 1) true (error "SIGN requires one argument"))
+	(define input (car infos))
+	(define type (tsql_addition_type (sql_info_type input)))
+	(if (equal? type "BIT") (error "SIGN does not accept BIT") true)
+	(define integer (has? '("NULL" "TINYINT" "SMALLINT" "INT" "BIGINT") type))
+	(define monetary (has? '("MONEY" "SMALLMONEY") type))
+	(define decimal (equal? type "DECIMAL"))
+	(define floating (or (has? '("FLOAT" "REAL") type) (has? tsql_addition_text_types type)))
+	(if (or integer monetary decimal floating) true (error "SIGN requires a numeric declaration"))
+	(define converted (if floating (tsql_convert_value_info input "FLOAT" nil) input))
+	(sql_info (list tsql_sign (sql_info_formula converted))
+		(if integer (if (equal? type "BIGINT") "BIGINT" "INT")
+			monetary "MONEY" decimal (sql_info_datatype input) "FLOAT") nil))))
+(define tsql_power (lambda (value exponent) (if (or (nil? value) (nil? exponent)) nil (begin
+	(if (and (< value 0) (not (equal? exponent (floor exponent))))
+		(tsql_raise_error 3623 "invalid floating point operation" 1) true)
+	(tsql_numeric_input (number_power value exponent))))))
+(define tsql_power_integer (lambda (value exponent minimum maximum) (begin
+	(define result (tsql_power value exponent))
+	(if (nil? result) nil
+		/* A floating value at +2^63 cannot distinguish INT64_MAX. Test the
+		exclusive bound before the generic integer conversion can round it. */
+		(and (not (int? result)) (>= result (simplify "9223372036854775808.0")))
+		(tsql_raise_error 8115 "POWER integer overflow" 1)
+		(tsql_cast_integer result minimum maximum)))))
+(define tsql_compile_power (lambda (infos) (begin
+	(if (equal? (count infos) 2) true (error "POWER requires two arguments"))
+	(define input (car infos))
+	(define type (tsql_addition_type (sql_info_type input)))
+	(define exponent (cadr infos))
+	(if (equal? (sql_info_type exponent) "BIT") (error "POWER exponent does not accept BIT") true)
+	(define exponent (tsql_convert_value_info exponent "FLOAT" nil))
+	(define integer (has? '("NULL" "TINYINT" "SMALLINT" "INT" "BIGINT") type))
+	(define monetary (has? '("MONEY" "SMALLMONEY") type))
+	(define decimal (equal? type "DECIMAL"))
+	(define floating (or (has? '("FLOAT" "REAL" "BIT") type) (has? tsql_addition_text_types type)))
+	(if (or integer monetary decimal floating) true (error "POWER requires a numeric declaration"))
+	(define converted (if floating (tsql_convert_value_info input "FLOAT" nil) input))
+	(define value (sql_info_formula converted))
+	(define power (sql_info_formula exponent))
+	(define formula (if integer
+		(list tsql_power_integer value power
+			(if (equal? type "BIGINT") tsql_round_int64_minimum -2147483648)
+			(if (equal? type "BIGINT") tsql_round_int64_maximum 2147483647))
+		(list tsql_power value power)))
+	(define dimensions (sql_info_dimensions input))
+	(define scale (if (and decimal (not (empty_list? dimensions))) (cadr dimensions) 0))
+	(sql_info (if monetary (list tsql_cast_money formula false)
+		decimal (list tsql_cast_decimal formula 38 scale) formula)
+		(if integer (if (equal? type "BIGINT") "BIGINT" "INT")
+			monetary "MONEY" decimal (list "DECIMAL" (list 38 scale)) "FLOAT") nil))))
+
 (define tsql_builtin_compiler (lambda (name) (lambda (infos)
 	(if (has? '("NEWID" "UUIDV7") name) (begin
 		(if (empty_list? infos) true (error name " takes no arguments"))
 		(sql_info (list (if (equal? name "NEWID") (quote uuid_v4) (quote uuid_v7))) "UNIQUEIDENTIFIER" nil))
 		(equal? name "ROUND") (tsql_compile_round infos)
+		(equal? name "ISNUMERIC") (tsql_compile_isnumeric infos)
+		(equal? name "SIGN") (tsql_compile_sign infos)
+		(equal? name "POWER") (tsql_compile_power infos)
 		(has? '("ABS" "FLOOR" "CEILING") name) (tsql_compile_numeric_scalar name infos)
 		(has? '("SQUARE" "SQRT") name) (tsql_compile_floating_scalar name infos)
 		(has? '("LEFT" "RIGHT" "SUBSTRING") name) (tsql_compile_slicing name infos)
@@ -2311,6 +2401,9 @@ No character list, decoder, relation or runtime SQL type is constructed here. */
 	"RIGHT" tsql_right
 	"SUBSTRING" (lambda (value start amount) (tsql_substring value start amount false))
 	"LEN" (lambda (value) (if (nil? value) nil (strlen (sql_rtrim value))))
+	"ISNUMERIC" tsql_isnumeric_text
+	"SIGN" tsql_sign
+	"POWER" tsql_power
 	"SQUARE" tsql_square
 	"SQRT" tsql_square_root
 	"LTRIM" tsql_ltrim
@@ -2415,7 +2508,10 @@ that context explicitly; stored views refuse this scalar before publication. */
 			(list (quote sql_type_expr) (list (quote tsql_unbound_parameter) name spelling) "any" nil)
 			(empty_list? declaration) (error "undeclared T-SQL parameter: @" name)
 			(list (quote sql_type_expr) (list (quote session) (concat "__tsql_parameter:" name))
-				(car (tsql_effective_parameter_contract (cadr (car declaration)))) nil)))))
+				(begin
+					(define contract (tsql_effective_parameter_contract (cadr (car declaration))))
+					(if (has? '("DECIMAL" "NUMERIC") (car contract))
+						(list (car contract) (cdr contract)) (car contract))) nil)))))
 
 	(define placeholder_counter (newsession))
 	(placeholder_counter "n" 0)

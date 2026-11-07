@@ -23,6 +23,15 @@ metadata:
     storage_bandwidth_mbps: 1000
     storage_latency_ms: 5
 test_cases:
+- name: tsql-numeric-validation-and-powers-survive-delegation
+  syntax: tsql
+  sql: >-
+    SELECT id,POWER(id+2,3) AS cubed,SIGN(id-1) AS direction,
+    ISNUMERIC(CASE WHEN id=1 THEN N'invalid' ELSE CONVERT(NVARCHAR(20),id) END) AS valid_number
+    FROM big_items WHERE id<3 ORDER BY id
+  expect:
+    data: [{id: 0, cubed: 8, direction: -1, valid_number: 1}, {id: 1, cubed: 27, direction: 0, valid_number: 0}, {id: 2, cubed: 64, direction: 1, valid_number: 1}]
+    cluster: {min_remote_shards: 1}
 - name: tsql-database-access-probe-survives-delegation
   syntax: tsql
   sql: >-
