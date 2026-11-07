@@ -1,0 +1,50 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  description: T-SQL object existence probes consume native table and view declarations
+  syntax: tsql
+  requires_tds: true
+  isolated: true
+setup:
+- sql: CREATE DATABASE object_other
+- sql: CREATE TABLE object_probe(id INT)
+- sql: CREATE TABLE object_other.object_probe(id INT)
+- sql: CREATE VIEW object_view AS SELECT id FROM object_probe
+cleanup:
+- sql: DROP VIEW IF EXISTS object_view
+- sql: DROP TABLE IF EXISTS object_probe
+- sql: DROP DATABASE IF EXISTS object_other
+test_cases:
+- name: Object names and kinds come from table and view declarations
+  sql: SELECT name,type_desc FROM sys.objects WHERE name LIKE N'object_%' ORDER BY name
+  expect: {rows: 2, data: [{name: object_probe, type_desc: USER_TABLE}, {name: object_view, type_desc: VIEW}]}
+- name: Qualified object catalog is confined to the selected database
+  sql: SELECT name FROM object_other.sys.objects WHERE name LIKE N'object_%' ORDER BY name
+  expect: {rows: 1, data: [{name: object_probe}]}
+- name: Bracketed catalog and owner keep the same source semantics
+  sql: SELECT name FROM [memcp-tests].[sys].[objects] WHERE name=N'object_probe'
+  expect: {rows: 1, data: [{name: object_probe}]}
+- name: Existing metadata object selects the positive conditional branch
+  sql: IF EXISTS(SELECT * FROM [memcp-tests].sys.objects WHERE name=N'object_probe') BEGIN SELECT 1 AS present END ELSE BEGIN SELECT 0 AS present END
+  expect: {rows: 1, data: [{present: 1}]}
+- name: Missing metadata object selects the negative conditional branch
+  sql: IF EXISTS(SELECT * FROM [memcp-tests].sys.objects WHERE name=N'object_missing') BEGIN SELECT 1 AS present END ELSE BEGIN SELECT 0 AS present END
+  expect: {rows: 1, data: [{present: 0}]}
+- name: Double-quoted catalog owner uses identifier grammar
+  sql: SELECT name FROM "memcp-tests"."sys"."objects" WHERE name=N'object_probe'
+  expect: {rows: 1, data: [{name: object_probe}]}
+- name: Stored views are also visible through the shared metadata adapter
+  scm: >-
+    (if (find (information_schema_rows "information_schema" "tables")
+      (lambda (row) (and (equal? (row "table_schema") "memcp-tests")
+        (equal? (row "table_name") "object_view") (equal? (row "table_type") "VIEW"))) nil)
+      true (error "stored view is missing from the metadata adapter"))
+- name: Object names retain national Unicode wire metadata
+  tds:
+    statements:
+    - sql: SELECT name FROM sys.objects WHERE name=N'object_probe'
+      expect:
+        rows: 1
+        data: [{name: object_probe}]
+        column_types: [{name: name, type: NVARCHAR, length: 128}]

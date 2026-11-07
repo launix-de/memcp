@@ -1863,7 +1863,8 @@ dimensions are metadata only and are absent from the executable plan. */
 (define tsql_result_dimensions (lambda (sources expression parameters) (match expression
 	((symbol sql_compile_column) _compiler column) (tsql_result_dimensions sources column parameters)
 	((symbol sql_compile_expr) ((symbol tsql_text_compiler) length _national _fixed) _value) (list length)
-	((symbol sql_type_expr) formula _type _collation) (tsql_result_dimensions sources formula parameters)
+	((symbol sql_type_expr) formula type _collation)
+	(if (list? type) (nth type 1) (tsql_result_dimensions sources formula parameters))
 	((symbol sql_compile_expr) ((symbol tsql_temporal_compiler) _target _style ((symbol quote) dimensions)) _value) dimensions
 	((symbol sql_compile_expr) ((symbol tsql_dateadd_compiler) _unit _months _seconds) _amount value)
 	(tsql_result_dimensions sources value parameters)
@@ -2749,7 +2750,54 @@ that context explicitly; stored views refuse this scalar before publication. */
 			planning_session)
 		(if policy (policy database canonical false) true)
 		(list alias database canonical false nil))))
+	/* System relations are ordinary derived logical queries over the shared
+	metadata source. No SQL text matching or independent catalog executor. */
+	(define tsql_catalog_source (lambda (alias qualifier name) (begin
+		(define owner (if (nil? qualifier) schema (tsql_qualifier_database qualifier schema frontend_options)))
+		(define owner (database_name owner true))
+		(if (nil? owner) (error "catalog database does not exist") true)
+		(if (has? '("databases" "objects") (toLower name)) true (error "unsupported system relation: sys." name))
+		(define query (if (equal?? name "databases") (begin
+		(define source_alias "__tsql_databases")
+		(define database_name_expr (list (quote get_column) source_alias false "schema_name" false))
+		(define query (make_query_block owner
+			(list (list source_alias "information_schema" "schemata" false nil))
+			(list "name" (list (quote sql_type_expr) database_name_expr (list "NVARCHAR" (list 128)) (list "utf8mb4_general_ci" 2))
+				"database_id" (list (quote sql_type_expr)
+					(list (quote tsql_database_id) database_name_expr) "INT" nil))
+			(list (quote equal?) (list (quote tsql_has_dbaccess) database_name_expr
+				(list (quote session) "username")) 1)
+			nil nil nil nil nil '() '() '()))
+			query) (begin
+			(define source_alias "__tsql_objects")
+			(define object_name (list (quote get_column) source_alias false "table_name" false))
+			(define object_database (list (quote get_column) source_alias false "table_schema" false))
+			(define object_kind (list (quote get_column) source_alias false "table_type" false))
+			(define is_view (list (quote equal?) object_kind "VIEW"))
+			(make_query_block owner
+				(list (list source_alias "information_schema" "tables" false nil))
+				(list "name" (list (quote sql_type_expr) object_name (list "NVARCHAR" (list 128)) (list "utf8mb4_general_ci" 2))
+					"type" (list (quote sql_type_expr) (list (quote if) is_view "V" "U") (list "CHAR" (list 2)) nil)
+					"type_desc" (list (quote sql_type_expr) (list (quote if) is_view "VIEW" "USER_TABLE") (list "NVARCHAR" (list 60)) (list "utf8mb4_general_ci" 2)))
+				(list (quote and) (list (quote equal?) object_database owner)
+					(list (quote and) (list (quote not) (list (quote internal_column_name?) object_name))
+						(list (quote equal?) (list (quote tsql_has_dbaccess) object_database (list (quote session) "username")) 1)))
+				nil nil nil nil nil '() '() '()))))
+		(list alias owner query false nil))))
+	(define tsql_catalog_owner (parser (or
+		(atom "sys" true) (atom "[sys]" true)
+		(parser '("\"" (atom "sys" true) "\"") "sys"))))
+	(define tsql_catalog_prefix (parser (or
+		(parser '((define catalog tsql_identifier) "." tsql_catalog_owner ".") catalog)
+		(parser '(tsql_catalog_owner ".") nil))))
 	(define tabledef (parser (or
+
+		(parser '((define catalog tsql_catalog_prefix) (define name tsql_identifier)
+			(atom "AS" true) (define alias tsql_identifier)) (tsql_catalog_source alias catalog name))
+		(parser '((define catalog tsql_catalog_prefix) (define name tsql_identifier)
+			(define alias tsql_identifier)) (tsql_catalog_source alias catalog name))
+		(parser '((define catalog tsql_catalog_prefix) (define name tsql_identifier))
+			(tsql_catalog_source name catalog name))
 
 		/* VALUES is syntax data, lowered to the same logical SELECT/UNION
 		blocks as other inline relations. The common planner owns joins,
