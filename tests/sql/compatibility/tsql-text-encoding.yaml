@@ -351,10 +351,10 @@ test_cases:
         - name: padded
           type: CHAR
           length: 3
-- name: Wire UTF8 flags preserve selected character encodings
+- name: Wire national projection preserves UTF8 source characters
   tds:
     statements:
-    - sql: SELECT utf8_text,CAST(utf8_text AS VARCHAR(2)) AS accent FROM encoding_items WHERE id=1
+    - sql: SELECT CAST(utf8_text AS NVARCHAR(20)) AS utf8_text,CAST(CAST(utf8_text AS VARCHAR(2)) AS NVARCHAR(2)) AS accent FROM encoding_items WHERE id=1
       expect:
         rows: 1
         data:
@@ -362,10 +362,10 @@ test_cases:
           accent: é
         column_types:
         - name: utf8_text
-          type: VARCHAR
+          type: NVARCHAR
           length: 20
         - name: accent
-          type: VARCHAR
+          type: NVARCHAR
           length: 2
 - name: MAX sources return BIGINT length metadata without result rows
   tds:

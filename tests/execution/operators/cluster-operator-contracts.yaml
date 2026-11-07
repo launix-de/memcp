@@ -23,6 +23,31 @@ metadata:
     storage_bandwidth_mbps: 1000
     storage_latency_ms: 5
 test_cases:
+- name: tsql-character-codecs-and-lengths-survive-delegation
+  syntax: tsql
+  sql: SELECT id,CHAR(CASE WHEN id=0 THEN 233 WHEN id=1 THEN 128 ELSE 65 END) AS character_value,ASCII(CASE WHEN
+    id=0 THEN N'é' WHEN id=1 THEN N'€' ELSE N'A' END) AS byte_value,DATALENGTH(CASE WHEN id=0 THEN N'😀' ELSE N'é'
+    END) AS byte_length,LEN(CASE WHEN id=0 THEN N'😀 ' ELSE N'é ' END) AS character_length FROM big_items WHERE id<3
+    ORDER BY id
+  expect:
+    data:
+    - id: 0
+      character_value: é
+      byte_value: 233
+      byte_length: 4
+      character_length: 2
+    - id: 1
+      character_value: €
+      byte_value: 128
+      byte_length: 2
+      character_length: 1
+    - id: 2
+      character_value: A
+      byte_value: 65
+      byte_length: 2
+      character_length: 1
+    cluster:
+      min_remote_shards: 1
 - name: tsql-database-access-probe-survives-delegation
   syntax: tsql
   sql: >-
