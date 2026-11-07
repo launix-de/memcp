@@ -21,6 +21,24 @@ time so cached statements observe grants and revocations. */
 						(scan_boundary "equal" "database" 1 1 true true "" false)) (list username database)) 1
 				0)))))))
 
+/* Native server-role profile: admin accounts are sysadmin; every account is
+public. The other fixed roles have no native members. Unknown roles/logins
+and membership hidden from another nonadministrator yield SQL NULL.
+Read account state at execution time, never at query compilation. */
+(define tsql_is_srvrolemember (lambda (role login caller)
+	(if (or (nil? role) (nil? login) (nil? caller)) nil (begin
+		(define normalized (toLower role))
+		(if (not (has? '("sysadmin" "public" "serveradmin" "securityadmin" "processadmin" "setupadmin" "bulkadmin" "diskadmin" "dbcreator") normalized)) nil (begin
+			(define users (table "system" false "user" false))
+			(define boundary (scan_boundary "equal" "username" 0 0 true true "" false))
+			(define caller_admin (scan_lookup nil users (list 372734710317056 boundary "admin") (list caller)))
+			(if (not (or (equal? caller login) caller_admin)) nil
+				(nil? (scan_lookup nil users (list 372734710317056 boundary "username") (list login))) nil
+				(equal? normalized "public") 1
+				(equal? normalized "sysadmin")
+					(if (scan_lookup nil users (list 372734710317056 boundary "admin") (list login)) 1 0)
+				0)))))))
+
 /* Alias declarations are ordinary, durable frontend data, like SQL views.
 The native column keeps the qualified alias spelling in its existing RawType.
 Only this frontend interprets the declaration; storage has no alias registry. */

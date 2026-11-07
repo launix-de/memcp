@@ -1,0 +1,69 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  description: T-SQL server role membership follows native account state and visibility
+  syntax: tsql
+  requires_tds: true
+  isolated: true
+setup:
+- scm: (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS role_reader" nil (newsession) nil))
+- scm: (eval (parse_sql "memcp-tests" "CREATE USER role_reader IDENTIFIED BY 'pw'" nil (newsession) nil))
+cleanup:
+- scm: (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS role_reader" nil (newsession) nil))
+test_cases:
+- name: Current administrator belongs to sysadmin and public
+  sql: SELECT IS_SRVROLEMEMBER('sysadmin') AS admin, IS_SRVROLEMEMBER(N'PUBLIC') AS everyone
+  expect: {rows: 1, data: [{admin: 1, everyone: 1}]}
+- name: Administrator can inspect another native account
+  sql: SELECT IS_SRVROLEMEMBER('sysadmin','role_reader') AS admin, IS_SRVROLEMEMBER('public','role_reader') AS everyone
+  expect: {rows: 1, data: [{admin: 0, everyone: 1}]}
+- name: Unknown roles and accounts return NULL
+  sql: SELECT IS_SRVROLEMEMBER('missing_role') AS role, IS_SRVROLEMEMBER('sysadmin','missing_login') AS login
+  expect: {rows: 1, data: [{role: null, login: null}]}
+- name: Explicit NULL arguments return NULL
+  sql: SELECT IS_SRVROLEMEMBER(NULL) AS role, IS_SRVROLEMEMBER('sysadmin',NULL) AS login
+  expect: {rows: 1, data: [{role: null, login: null}]}
+- name: Administrator membership does not imply membership in other fixed roles
+  sql: SELECT IS_SRVROLEMEMBER('serveradmin') AS a, IS_SRVROLEMEMBER('securityadmin') AS b, IS_SRVROLEMEMBER('processadmin') AS c, IS_SRVROLEMEMBER('setupadmin') AS d, IS_SRVROLEMEMBER('bulkadmin') AS e, IS_SRVROLEMEMBER('diskadmin') AS f, IS_SRVROLEMEMBER('dbcreator') AS g
+  expect: {rows: 1, data: [{a: 0, b: 0, c: 0, d: 0, e: 0, f: 0, g: 0}]}
+- name: Nonadministrator sees its own membership
+  username: role_reader
+  password: pw
+  sql: SELECT IS_SRVROLEMEMBER('sysadmin') AS admin, IS_SRVROLEMEMBER('public','role_reader') AS everyone
+  expect: {rows: 1, data: [{admin: 0, everyone: 1}]}
+- name: Nonadministrator cannot inspect another account
+  username: role_reader
+  password: pw
+  sql: SELECT IS_SRVROLEMEMBER('sysadmin','root') AS admin
+  expect: {rows: 1, data: [{admin: null}]}
+- name: SQL expressions supply role names
+  sql: DECLARE @role NVARCHAR(128) = N'SySADMIN'; SELECT IS_SRVROLEMEMBER(@role) AS admin
+  expect: {rows: 1, data: [{admin: 1}]}
+- name: TDS result has declared INT metadata including NULL and prepared execution
+  tds:
+    statements:
+    - sql: SELECT IS_SRVROLEMEMBER('sysadmin') AS member
+      expect: {rows: 1, data: [{member: 1}], column_types: [{name: member, type: INT}]}
+    - sql: SELECT IS_SRVROLEMEMBER(NULL) AS member
+      expect: {rows: 1, data: [{member: null}], column_types: [{name: member, type: INT}]}
+    - sql: SELECT IS_SRVROLEMEMBER(@role) AS member
+      prepare: true
+      parameters: [{name: role, value: sysadmin}]
+      expect: {rows: 1, data: [{member: 1}], column_types: [{name: member, type: INT}]}
+- name: Grant native administrator membership
+  scm: (eval (parse_sql "memcp-tests" "GRANT ALL ON *.* TO role_reader" nil (newsession) nil))
+- name: Cached probe observes a new administrator grant
+  sql: SELECT IS_SRVROLEMEMBER('sysadmin','role_reader') AS admin
+  expect: {rows: 1, data: [{admin: 1}]}
+- name: Revoke native administrator membership
+  scm: (eval (parse_sql "memcp-tests" "REVOKE ALL ON *.* FROM role_reader" nil (newsession) nil))
+- name: Cached probe observes administrator revocation
+  sql: SELECT IS_SRVROLEMEMBER('sysadmin','role_reader') AS admin
+  expect: {rows: 1, data: [{admin: 0}]}
+- name: Role argument is required
+  sql: SELECT IS_SRVROLEMEMBER()
+  expect: {error: true}
+- name: Additional arguments are rejected
+  sql: SELECT IS_SRVROLEMEMBER('sysadmin','root','extra')
+  expect: {error: true}
