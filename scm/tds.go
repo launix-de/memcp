@@ -38,8 +38,21 @@ func tdsTypeData(t tds.WireType) Scmer {
 		NewString("precision"), NewInt(int64(t.Precision)), NewString("scale"), NewInt(int64(t.Scale)),
 		NewString("collation"), NewString(string(t.Collation[:]))})
 }
+
+// Preserve protocol descriptors explicitly across the language boundary. In
+// particular, SQL_VARIANT owns a base descriptor; never infer it from a value.
+func tdsTypeFromData(data Scmer) tds.WireType {
+	t := tds.WireType{Kind: byte(tdsAssoc(data, "kind").Int()), Size: int(tdsAssoc(data, "size").Int()),
+		Precision: byte(tdsAssoc(data, "precision").Int()), Scale: byte(tdsAssoc(data, "scale").Int())}
+	if collation := tdsAssoc(data, "collation"); !collation.IsNil() {
+		copy(t.Collation[:], collation.String())
+	}
+	return t
+}
 func tdsValueData(v any) Scmer {
 	switch x := v.(type) {
+	case tds.Variant:
+		return NewSlice([]Scmer{NewString("variant"), tdsTypeData(x.Type), NewString("value"), tdsValueData(x.Value)})
 	case []byte:
 		return NewString(string(x))
 	case tds.Decimal:
@@ -65,18 +78,11 @@ func tdsColumns(data Scmer) []tds.Column {
 	for i, item := range data.Slice() {
 		c := &columns[i]
 		c.Name = tdsAssoc(item, "name").String()
-		c.Kind = byte(tdsAssoc(item, "kind").Int())
-		c.Size = int(tdsAssoc(item, "size").Int())
-		c.Scale = byte(tdsAssoc(item, "scale").Int())
-		c.Precision = byte(tdsAssoc(item, "precision").Int())
+		c.WireType = tdsTypeFromData(item)
 		c.Flags = uint16(tdsAssoc(item, "flags").Int())
 		c.UserType = uint32(tdsAssoc(item, "user_type").Int())
 		c.Key = tdsAssoc(item, "key").Bool()
 		c.Browse = tdsAssoc(item, "browse").Bool()
-		collation := tdsAssoc(item, "collation")
-		if !collation.IsNil() {
-			copy(c.Collation[:], collation.String())
-		}
 		source := tdsAssoc(item, "source")
 		if !source.IsNil() {
 			if len(source.Slice()) != 4 {
@@ -105,6 +111,9 @@ func tdsWireValue(v Scmer) any {
 		return nil
 	}
 	if v.IsSlice() {
+		if descriptor := tdsAssoc(v, "variant"); !descriptor.IsNil() {
+			return tds.Variant{Type: tdsTypeFromData(descriptor), Value: tdsWireValue(tdsAssoc(v, "value"))}
+		}
 		if bytes := tdsAssoc(v, "bytes"); !bytes.IsNil() {
 			return []byte(bytes.String())
 		}

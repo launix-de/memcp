@@ -498,6 +498,24 @@ fast path avoids splitting the ordinary short numeric/text conversions. */
 compiler consumes the (expr, type, collation) contract. Runtime values do not
 select that type, and no arithmetic operation is needed merely to mark it. */
 
+/* SQL_VARIANT is an intrinsically tagged scalar SQL value. Its subtype is
+part of the value itself, unlike a compiler's (expression,type,collation)
+triple, which never reaches execution. This initial property profile produces
+NVARCHAR(128) variants only; other variant conversions fail explicitly. */
+(define tsql_variant_text (lambda (value) (if (nil? value) nil
+	(if (has? '(167 175 231 239) ((value "variant") "kind")) (value "value")
+		(error "conversion from this SQL_VARIANT subtype to text is not implemented")))))
+(define tsql_serverproperty (lambda (property) (if (nil? property) nil (begin
+	(define value (match (toLower property)
+		"edition" "MemCP"
+		"instancedefaultdatapath" (storage_root)
+		/* Native WAL files live below the same configured root as tables. */
+		"instancedefaultlogpath" (storage_root)
+		_ nil))
+	(if (nil? value) nil
+		(list "variant" (list "kind" 231 "size" 256 "precision" 0 "scale" 0 "collation" (hex2bin "0904d00034"))
+			"value" value))))))
+
 (define tsql_cast_expr (lambda (value type dimensions) (begin
 	(define name (toUpper type))
 	(if (tsql_builtin_type_declaration name) (error "alias types cannot be explicit conversion targets") true)
@@ -699,7 +717,9 @@ national text retain their conversion error. Runtime carriers select no type. */
 (define tsql_text_compiler (lambda (length national fixed) (lambda (infos) (begin
 	(define info (car infos))
 	(define source (sql_info_type info))
-	(define formula (if (tsql_temporal_type? source)
+	(define formula (if (equal? source "SQL_VARIANT")
+		(list tsql_variant_text (sql_info_formula info))
+		(tsql_temporal_type? source)
 		(if (has? '("DATETIME" "SMALLDATETIME") source)
 			(list (quote tsql_calendar_month_output) (tsql_calendar_difference_formula info))
 			(list format_date (tsql_calendar_difference_formula info)
@@ -1973,7 +1993,8 @@ row or supplied parameter value exists. */
 (define tsql_wire_contract (lambda (type dimensions) (begin
 	(define numeric (and (has? '("DECIMAL" "NUMERIC") type) (>= (count dimensions) 2)))
 	(define money (has? '("MONEY" "SMALLMONEY") type))
-	(define kind (if (has? '("INT" "INTEGER" "BIGINT" "SMALLINT" "TINYINT") type) 38
+	(define kind (if (equal? type "SQL_VARIANT") 98
+		(has? '("INT" "INTEGER" "BIGINT" "SMALLINT" "TINYINT") type) 38
 		money 110 numeric 108 (tsql_binary_type? type) 165
 		(has? '("FLOAT" "DOUBLE" "REAL" "DECIMAL" "NUMERIC") type) 109
 		(has? '("BOOLEAN" "BOOL" "BIT") type) 104
@@ -1983,6 +2004,7 @@ row or supplied parameter value exists. */
 	(define scale (if money 4 numeric (cadr dimensions)
 		(has? '("TIME" "DATETIME2") type) (if (empty_list? dimensions) 7 (car dimensions)) 0))
 	(define size (match kind
+		98 8016
 		40 3
 		41 (if (<= scale 2) 3 (<= scale 4) 4 5)
 		42 (+ 3 (if (<= scale 2) 3 (<= scale 4) 4 5))
@@ -2031,7 +2053,7 @@ storage keep their Unix values. The declaration selects each formatter while
 compiling; the emitted row callback contains no SQL type tags or dispatch. */
 (define tsql_result_output_plan (lambda (plan descriptors)
 	(if (reduce descriptors (lambda (found column)
-		(or found (tsql_temporal_type? (column "sql_type")))) false)
+		(or found (equal? (column "sql_type") "SQL_VARIANT") (tsql_temporal_type? (column "sql_type")))) false)
 		(list (quote begin)
 			(list (quote define) (quote __tsql_raw_resultrow) (quote resultrow))
 			(list (quote define) (quote resultrow)
@@ -2049,7 +2071,8 @@ compiling; the emitted row callback contains no SQL type tags or dispatch. */
 								anchor conversion from the declared type at compile time. */
 								(define calendar_value (if (equal? (column "sql_type") "TIME")
 									(list tsql_calendar_text value) value))
-								(list (column "name") (if pattern (list format_date calendar_value pattern) value)))))))))))
+								(list (column "name") (if (equal? (column "sql_type") "SQL_VARIANT")
+									(list tsql_variant_text value) pattern (list format_date calendar_value pattern) value)))))))))))
 			plan)
 		plan)))
 
@@ -2642,6 +2665,9 @@ that context explicitly; stored views refuse this scalar before publication. */
 		Its SQL declaration is independent of the session value carrier. */
 		(parser '((atom "DB_NAME" true) "(" ")")
 			(list (quote sql_type_expr) (list (quote session) "schema") "NVARCHAR" '("utf8mb4_general_ci" 4)))
+		(parser '((atom "SERVERPROPERTY" true) "(" (define property tsql_expression) ")")
+			(list (quote sql_type_expr) (list tsql_serverproperty
+				(tsql_cast_expr property "NVARCHAR" '(128))) "SQL_VARIANT" nil))
 		(parser '((atom "HAS_DBACCESS" true) "(" (define name tsql_expression) ")")
 			(list (quote sql_type_expr)
 				(list (quote tsql_has_dbaccess) (tsql_cast_expr name "NVARCHAR" '(128))
