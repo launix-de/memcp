@@ -216,8 +216,11 @@ test_cases:
   sql: IF 1 SELECT 7 AS value
   expect: {error: true}
 - name: REST rejects a relational scalar fallback in IF
-  sql: IF EXISTS(SELECT 1) SELECT 7 AS value
-  expect: {error: true}
+  sql: |
+    IF EXISTS(SELECT 1) SELECT 7 AS value
+  # Valid SQL implementation gap: check behavior, warn until implemented.
+  expect: {"rows": 1, "data": [{"value": 7}]}
+  noncritical: true
 - name: REST source procedures bind named positional and default arguments
   sql: |
     CREATE PROCEDURE dbo.script_rest_proc @value INT, @amount INT=3 AS
@@ -576,8 +579,11 @@ test_cases:
   sql: WHILE 0 BREAK
   expect: {error: true}
 - name: WHILE rejects relational scalar fallback
-  sql: WHILE EXISTS(SELECT 1) BREAK
-  expect: {error: true}
+  sql: |
+    WHILE EXISTS(SELECT 1) BREAK; SELECT 7 AS value
+  # Valid SQL implementation gap: check behavior, warn until implemented.
+  expect: {"rows": 1, "data": [{"value": 7}]}
+  noncritical: true
 - name: Loop writes use the same native explicit transaction
   setup:
   - sql: DROP TABLE IF EXISTS dbo.script_loop_rows

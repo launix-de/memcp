@@ -1068,11 +1068,11 @@ test_cases:
       line: 1004
       label: Beta
 - name: A right nested outer join boundary is rejected until represented logically
-  sql: SELECT d.id FROM day_docs d JOIN day_lines l LEFT JOIN day_items i ON l.tenant=i.tenant AND l.article=i.article
-    ON d.tenant=l.tenant AND d.id=l.doc_id
-  expect:
-    error: true
-    contains: nested outer join units are not supported
+  sql: |
+    SELECT d.id FROM day_docs d JOIN day_lines l LEFT JOIN day_items i ON l.tenant=i.tenant AND l.article=i.article ON d.tenant=l.tenant AND d.id=l.doc_id ORDER BY d.id
+  # Valid SQL implementation gap: check behavior, warn until implemented.
+  expect: {"rows": 12, "data": [{"id": 10}, {"id": 10}, {"id": 10}, {"id": 10}, {"id": 10}, {"id": 10}, {"id": 11}, {"id": 11}, {"id": 12}, {"id": 14}, {"id": 15}, {"id": 16}]}
+  noncritical: true
 - name: A bound zero TOP suppresses a source free projection
   sql: DECLARE @cap INT=0; SELECT TOP (@cap) 42 AS value
   expect:
@@ -1105,10 +1105,11 @@ test_cases:
     error: true
     contains: TOP requires an invocation scalar
 - name: TOP rejects a count subquery until relational bound lowering exists
-  sql: SELECT TOP ((SELECT MAX(id) FROM day_lines)) id FROM day_docs
-  expect:
-    error: true
-    contains: TOP requires an invocation scalar
+  sql: |
+    SELECT TOP ((SELECT MAX(id) FROM day_lines)) id FROM day_docs ORDER BY id
+  # Valid SQL implementation gap: check behavior, warn until implemented.
+  expect: {"rows": 10, "data": [{"id": 10}, {"id": 10}, {"id": 11}, {"id": 12}, {"id": 13}, {"id": 14}, {"id": 15}, {"id": 16}, {"id": 17}, {"id": 18}]}
+  noncritical: true
 - name: A typed column cast still cannot become a TOP invocation bound
   sql: SELECT TOP (CAST(id AS INT)) id FROM day_docs
   expect:

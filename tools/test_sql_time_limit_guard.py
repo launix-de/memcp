@@ -35,6 +35,7 @@ from check_sql_time_limit import check_added_planner_lines
 from check_sql_time_limit import check_runner
 from check_sql_time_limit import compare_suites
 from check_sql_time_limit import load_suite
+from check_sql_time_limit import implementation_gap_context, policy_digest, load_implementation_gap_migrations
 from check_sql_time_limit import validate_suite
 
 
@@ -193,12 +194,13 @@ class BaseComparisonTest(unittest.TestCase):
         with self.assertRaisesRegex(GuardFailure, "removed expect.data"):
             compare_suites(old, new, "tests/planner/regression.yaml")
 
-    def test_must_fail_can_become_a_correctness_test(self) -> None:
+    def test_unlisted_must_fail_cannot_become_a_correctness_test(self) -> None:
         old = suite({"name": "regression", "expect": {"error": True}})
         new = suite(
             {"name": "regression", "expect": {"rows": 1, "data": [{"value": 1}]}}
         )
-        compare_suites(old, new, "tests/planner/regression.yaml")
+        with self.assertRaisesRegex(GuardFailure, "reviewed implementation-gap"):
+            compare_suites(old, new, "tests/planner/regression.yaml")
 
     def test_tighter_budget_and_updated_expected_value_are_allowed(self) -> None:
         old = suite(
@@ -286,6 +288,137 @@ class NonYamlFixtureDiffTest(unittest.TestCase):
                 {"tests/regression.yaml": json.dumps(old), "tests/fixture.php": "<?php"},
                 {"tests/regression.yaml": json.dumps(new), "tests/fixture.php": "<?php echo 1;"},
             )
+
+
+class ImplementationGapMigrationTest(unittest.TestCase):
+    path = "tests/planner/regression.yaml"
+
+    def fixtures(self):
+        old = suite({"name": "regression", "sql": "SELECT id FROM source",
+                     "expect": {"error": True, "contains": "not implemented"}})
+        new = suite({"name": "regression", "sql": "SELECT id FROM source", "noncritical": True,
+                     "expect": {"rows": 1, "data": [{"id": 1}]}})
+        record = {"old_sql_sha256": policy_digest(old["test_cases"][0]["sql"]),
+                  "new_sql_sha256": policy_digest(new["test_cases"][0]["sql"]),
+                  "old_expect": old["test_cases"][0]["expect"],
+                  "new_expect": new["test_cases"][0]["expect"], "syntax": "mysql",
+                  "old_context_sha256": implementation_gap_context(old, 0),
+                  "new_context_sha256": implementation_gap_context(new, 0)}
+        return old, new, {(self.path, "regression", 1): record}
+
+    def compare(self, old, new, records, path=None):
+        with patch("check_sql_time_limit.load_implementation_gap_migrations", return_value=records):
+            compare_suites(old, new, path or self.path)
+
+    def test_exact_reviewed_gap_allows_positive_noncritical(self):
+        old, new, records = self.fixtures()
+        self.compare(old, new, records)
+
+    def test_implementation_can_become_critical_without_weakening_its_oracle(self):
+        old, new, records = self.fixtures()
+        critical = json.loads(json.dumps(new))
+        critical["test_cases"][0].pop("noncritical")
+        self.compare(old, critical, records)
+        self.compare(new, critical, records)
+
+    def test_case_identity_query_and_dialect_are_exact(self):
+        for change in ("name", "sql", "syntax", "path", "occurrence"):
+            old, new, records = self.fixtures()
+            if change == "path":
+                target = "tests/planner/other.yaml"
+            else:
+                target = self.path
+                if change == "occurrence":
+                    records = {(self.path, "regression", 2): next(iter(records.values()))}
+                else:
+                    new["test_cases"][0][change] = {"name": "renamed", "sql": "SELECT 1", "syntax": "tsql"}[change]
+            with self.subTest(change=change), self.assertRaises(GuardFailure):
+                self.compare(old, new, records, target)
+
+    def test_oracle_cannot_lose_values_rows_types_or_exact_cardinality(self):
+        invalid = [{"rows": 1}, {"data": [{"id": 1}]}, {"rows": 0, "data": []},
+                   {"rows": True, "data": [{"id": 1}]}, {"rows": 1.0, "data": [{"id": 1}]},
+                   {"rows": 1, "data": [{}]}, {"rows": 1, "data": [{"id": True}]},
+                   {"rows": 1, "data": [{"id": 2}]}, {"rows": 2, "data": [{"id": 1}]},
+                   {"error": True, "rows": 1, "data": [{"id": 1}]}]
+        for oracle in invalid:
+            old, new, records = self.fixtures()
+            new["test_cases"][0]["expect"] = oracle
+            with self.subTest(oracle=oracle), self.assertRaises(GuardFailure):
+                self.compare(old, new, records)
+
+    def test_regular_errors_and_not_contains_remain_protected(self):
+        for extra in ({"contains": "access denied"}, {"not_contains": "panic"}):
+            old, new, records = self.fixtures()
+            old["test_cases"][0]["expect"].update(extra)
+            # The registry owns the original reviewed data, not the edited test.
+            records = json.loads(json.dumps(list(records.values())))
+            records[0]["old_expect"] = {"error": True, "contains": "not implemented"}
+            registry = {(self.path, "regression", 1): records[0]}
+            with self.subTest(extra=extra), self.assertRaises(GuardFailure):
+                self.compare(old, new, registry)
+        old, new, records = self.fixtures()
+        with self.assertRaises(GuardFailure):
+            self.compare(old, new, {})
+
+    def test_positive_oracles_cannot_be_hidden_by_switching_back_to_error(self):
+        _, positive, records = self.fixtures()
+        invalid = json.loads(json.dumps(positive))
+        invalid["test_cases"][0]["expect"]["error"] = True
+        with self.assertRaisesRegex(GuardFailure, "bypass positive"):
+            self.compare(positive, invalid, records)
+
+    def test_budgets_disable_and_ci_controls_cannot_be_relaxed(self):
+        for option in ({"max_time": 2}, {"max_plan_size": 200_000},
+                       {"max_planner_time_ms": 2}, {"threshold_ms": 1}, {"disabled": True}):
+            old, new, records = self.fixtures()
+            old["test_cases"][0].update(max_time=1, max_plan_size=100_000, max_planner_time_ms=1)
+            new["test_cases"][0].update(max_time=1, max_plan_size=100_000, max_planner_time_ms=1)
+            new["test_cases"][0].update(option)
+            with self.subTest(option=option), self.assertRaises(GuardFailure):
+                self.compare(old, new, records)
+        old, new, records = self.fixtures()
+        new["metadata"]["ci"] = False
+        with self.assertRaisesRegex(GuardFailure, "metadata.ci"):
+            self.compare(old, new, records)
+
+    def test_fixture_prefix_and_transport_cannot_be_substituted(self):
+        for change in ("setup", "prefix", "scm", "steps", "tds_probe"):
+            old, new, records = self.fixtures()
+            if change == "setup":
+                new["setup"] = [{"sql": "DELETE FROM source"}]
+            elif change == "prefix":
+                new["test_cases"].insert(0, {"name": "changed fixture", "sql": "DELETE FROM source", "expect": {}})
+            else:
+                new["test_cases"][0][change] = "different execution path"
+            with self.subTest(change=change), self.assertRaises(GuardFailure):
+                self.compare(old, new, records)
+
+    def test_trusted_registry_has_only_well_formed_unique_exact_oracles(self):
+        records = load_implementation_gap_migrations()
+        self.assertGreater(len(records), 0)
+        for record in records.values():
+            self.assertEqual(record["new_expect"]["rows"], len(record["new_expect"]["data"]))
+            self.assertNotIn("not_contains", record["old_expect"])
+            self.assertNotIn("affected_rows", record["new_expect"])
+        valid = {"version": 1, "migrations": [next(iter(records.values()))]}
+        invalid = [[], {"version": True, "migrations": []}, {"version": 2, "migrations": []}]
+        duplicate = json.loads(json.dumps(valid))
+        duplicate["migrations"] *= 2
+        invalid.append(duplicate)
+        for oracle in ({"rows": True, "data": [{"id": 1}]}, {"rows": 1, "data": [{}]},
+                       {"rows": 1, "data": []}, {"rows": 1, "data": [{"id": 1}], "affected_rows": 0}):
+            document = json.loads(json.dumps(valid))
+            document["migrations"][0]["new_expect"] = oracle
+            invalid.append(document)
+        try:
+            for document in invalid:
+                load_implementation_gap_migrations.cache_clear()
+                with self.subTest(document=document), patch("check_sql_time_limit.Path.read_text", return_value=json.dumps(document)):
+                    with self.assertRaises(GuardFailure):
+                        load_implementation_gap_migrations()
+        finally:
+            load_implementation_gap_migrations.cache_clear()
 
 
 class PlannerSourceDiffTest(unittest.TestCase):

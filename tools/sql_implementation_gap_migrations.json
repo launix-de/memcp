@@ -1,0 +1,786 @@
+{
+  "copyright": "Copyright (C) 2026 Carl-Philip Hänsch",
+  "license": "GPL-3.0-or-later",
+  "version": 1,
+  "description": "Exact reviewed valid-SQL implementation-gap migrations; no generic error-to-success exception.",
+  "migrations": [
+    {
+      "path": "tests/integration/query-shapes/tsql-document-workflows.yaml",
+      "name": "A right nested outer join boundary is rejected until represented logically",
+      "occurrence": 1,
+      "syntax": "tsql",
+      "old_sql_sha256": "be261eabe74ca4c17413a0ac7231c4d0c006aeeee7b7f47f29c2747e7b30dfcb",
+      "new_sql_sha256": "da1141c1f81711c5f20a9e13a060ba00f4b311e8f2c5c47faae849a35fb1222c",
+      "old_expect": {
+        "error": true,
+        "contains": "nested outer join units are not supported"
+      },
+      "new_expect": {
+        "rows": 12,
+        "data": [
+          {
+            "id": 10
+          },
+          {
+            "id": 10
+          },
+          {
+            "id": 10
+          },
+          {
+            "id": 10
+          },
+          {
+            "id": 10
+          },
+          {
+            "id": 10
+          },
+          {
+            "id": 11
+          },
+          {
+            "id": 11
+          },
+          {
+            "id": 12
+          },
+          {
+            "id": 14
+          },
+          {
+            "id": 15
+          },
+          {
+            "id": 16
+          }
+        ]
+      },
+      "old_context_sha256": "7ae48505440342df74ff5e5aadaa87730e0b70e7ffb7ba686956eb5e090a99c8",
+      "reason": "Complete original join bag: six10, two11, and12/14/15/16; ORDER only makes visible id deterministic.",
+      "reference": "https://learn.microsoft.com/en-us/sql/t-sql/queries/from-transact-sql",
+      "new_context_sha256": "7ae48505440342df74ff5e5aadaa87730e0b70e7ffb7ba686956eb5e090a99c8"
+    },
+    {
+      "path": "tests/integration/query-shapes/tsql-document-workflows.yaml",
+      "name": "TOP rejects a count subquery until relational bound lowering exists",
+      "occurrence": 1,
+      "syntax": "tsql",
+      "old_sql_sha256": "d5c2be3a429bf9118d6335615ed9b8d1cd3c8ae9ae299feaefe40e8b0fcbf5d0",
+      "new_sql_sha256": "ec44b8575a3786c1d3616115a25908867417078deffebc63eb1e0da7deb81c95",
+      "old_expect": {
+        "error": true,
+        "contains": "TOP requires an invocation scalar"
+      },
+      "new_expect": {
+        "rows": 10,
+        "data": [
+          {
+            "id": 10
+          },
+          {
+            "id": 10
+          },
+          {
+            "id": 11
+          },
+          {
+            "id": 12
+          },
+          {
+            "id": 13
+          },
+          {
+            "id": 14
+          },
+          {
+            "id": 15
+          },
+          {
+            "id": 16
+          },
+          {
+            "id": 17
+          },
+          {
+            "id": 18
+          }
+        ]
+      },
+      "old_context_sha256": "58a5684e7b796b3d9ded2c7aea017cdd54c05bf787b7a0b1a8cee78398e8aa26",
+      "reason": "MAX(line id)=1600 exceeds all ten fixture documents; tenant2 preserves duplicate id10.",
+      "reference": "https://learn.microsoft.com/en-us/sql/t-sql/queries/top-transact-sql",
+      "new_context_sha256": "b6253da3728a5f10f074a87a8168038cbbbcfbf1d1ec76ad7f26a8ef61428059"
+    },
+    {
+      "path": "tests/planner/aggregates/composed-scalar-aggregate-shapes.yaml",
+      "name": "conditional_sum_presence_offset_remains_explicitly_unsupported",
+      "occurrence": 1,
+      "syntax": "mysql",
+      "old_sql_sha256": "6263a327693a559eea04eabd14ff3a02a8f9d5c5950f11e8dd71edc74ed4e3a4",
+      "new_sql_sha256": "a0f4207c811fc194b9beb0090bf9a2fbc61af1c5d72d657e280a9417028c98df",
+      "old_expect": {
+        "error": true
+      },
+      "new_expect": {
+        "rows": 5,
+        "data": [
+          {
+            "id": 1,
+            "enabled": true
+          },
+          {
+            "id": 2,
+            "enabled": true
+          },
+          {
+            "id": 3,
+            "enabled": true
+          },
+          {
+            "id": 4,
+            "enabled": true
+          },
+          {
+            "id": 5,
+            "enabled": true
+          }
+        ]
+      },
+      "old_context_sha256": "49c0d3d8dedbdf98419dd97a91c08da344c0f434dc9d17483cc47ad88ab2349e",
+      "reason": "Ungrouped aggregate returns one row; OFFSET1 removes it; scalar NULL coalesces toTRUE for every parent.",
+      "reference": "https://dev.mysql.com/doc/refman/8.4/en/subqueries.html",
+      "new_context_sha256": "49c0d3d8dedbdf98419dd97a91c08da344c0f434dc9d17483cc47ad88ab2349e"
+    },
+    {
+      "path": "tests/planner/set-operations/union-all.yaml",
+      "name": "Derived UNION DISTINCT rejects unsupported computed output order",
+      "occurrence": 1,
+      "syntax": "mysql",
+      "old_sql_sha256": "300237701d2ed494df604460f48fc1127edca8628dab3034a6b325b03e54e8bd",
+      "new_sql_sha256": "7e946e1b06ce37afe6b297f4b27811ff54e1d33f65524ed589b69c4ae80c1f2c",
+      "old_expect": {
+        "error": true
+      },
+      "new_expect": {
+        "rows": 2,
+        "data": [
+          {
+            "next_n": 2
+          },
+          {
+            "next_n": 3
+          }
+        ]
+      },
+      "old_context_sha256": "c70cd8891f25e85d4380b1722a84151e79677fde6fc99c058083efba735f3658",
+      "reason": "DISTINCT removes duplicate2 before projection n+1 and final order.",
+      "reference": "https://dev.mysql.com/doc/refman/8.4/en/subqueries.html",
+      "new_context_sha256": "c70cd8891f25e85d4380b1722a84151e79677fde6fc99c058083efba735f3658"
+    },
+    {
+      "path": "tests/planner/subqueries/in-subquery.yaml",
+      "name": "Grouped NOT IN remains explicitly unsupported",
+      "occurrence": 1,
+      "syntax": "mysql",
+      "old_sql_sha256": "2936b7ec110a7d00b6631112f12253932b4be2f11186e2a2bf29f08730902290",
+      "new_sql_sha256": "6a2a962c454087a6dec5a36454218dcbd8bdb84cee48fc6506b680707e7b66c9",
+      "old_expect": {
+        "error": true
+      },
+      "new_expect": {
+        "rows": 3,
+        "data": [
+          {
+            "ID": 3
+          },
+          {
+            "ID": 4
+          },
+          {
+            "ID": 5
+          }
+        ]
+      },
+      "old_context_sha256": "6f42fbd0471a409b20e82a79d59da1a6a940bcbe5d834b76055a94d2cab718fd",
+      "reason": "Grouped RHS is {1,2}; fixture source IDs are1..5.",
+      "reference": "https://dev.mysql.com/doc/refman/8.4/en/subqueries.html",
+      "new_context_sha256": "6f42fbd0471a409b20e82a79d59da1a6a940bcbe5d834b76055a94d2cab718fd"
+    },
+    {
+      "path": "tests/planner/subqueries/in-subquery.yaml",
+      "name": "Projected grouped IN remains explicitly unsupported",
+      "occurrence": 1,
+      "syntax": "mysql",
+      "old_sql_sha256": "5e8c1d55ddb6a18f8944e7590879c3a261e45a93ae2515cefb4b0eac2d3434ba",
+      "new_sql_sha256": "25355eb75faceb7064637f5c44a5c2b4f70bf9b06c8c9514e49d76f00dea1c7e",
+      "old_expect": {
+        "error": true
+      },
+      "new_expect": {
+        "rows": 5,
+        "data": [
+          {
+            "ID": 1,
+            "grouped_match": true
+          },
+          {
+            "ID": 2,
+            "grouped_match": true
+          },
+          {
+            "ID": 3,
+            "grouped_match": false
+          },
+          {
+            "ID": 4,
+            "grouped_match": false
+          },
+          {
+            "ID": 5,
+            "grouped_match": false
+          }
+        ]
+      },
+      "old_context_sha256": "e99f9d0d4b8d942919788354b6713d091871298ade42c084ea8dc44397967c0f",
+      "reason": "Grouped RHS is {1,2}, without NULL; all five source IDs checked.",
+      "reference": "https://dev.mysql.com/doc/refman/8.4/en/subqueries.html",
+      "new_context_sha256": "a612e124ba40baac62bee03a38c7210b4fe6a93d94c96f5cf74c6642a365b3f0"
+    },
+    {
+      "path": "tests/sql/compatibility/psql-parser.yaml",
+      "name": "Ordered aggregate window fails until default frames are supported",
+      "occurrence": 1,
+      "syntax": "postgresql",
+      "old_sql_sha256": "a32ee607c00124406646a65d16674d4eb5dd38bebf8eb2b5925bf0a038b3f7c6",
+      "new_sql_sha256": "fdbf2ea7fb53218973de7803e0ec35bbf730d7f4207c45b08471efe705bdc994",
+      "old_expect": {
+        "error": true
+      },
+      "new_expect": {
+        "rows": 4,
+        "data": [
+          {
+            "total": 10
+          },
+          {
+            "total": 40
+          },
+          {
+            "total": 90
+          },
+          {
+            "total": 110
+          }
+        ]
+      },
+      "old_context_sha256": "7ccaccc8cfd2976131951e4b6734492c60f5bfd6b22bc0a16d21177ea6419d42",
+      "reason": "Fixture values10,30,50,20; unique id default frames yield running sums10,40,90,110.",
+      "reference": "https://www.postgresql.org/docs/current/functions-window.html",
+      "new_context_sha256": "dad8976b5f571b1b472956d3b4c854cfa8b83f44ba3abfa85fca992893a279bb"
+    },
+    {
+      "path": "tests/sql/compatibility/psql-parser.yaml",
+      "name": "Unsupported LEAD default fails explicitly",
+      "occurrence": 1,
+      "syntax": "postgresql",
+      "old_sql_sha256": "7f4d41fe715a5c9da7b450d041532c5880ecc57f0a1db09d2f7e11a2f19f6382",
+      "new_sql_sha256": "641179ae8d918a5c187737e6c792c339cc8f99fcf8297b8f1a4869a1f41f668f",
+      "old_expect": {
+        "error": true
+      },
+      "new_expect": {
+        "rows": 4,
+        "data": [
+          {
+            "value": -1
+          },
+          {
+            "value": -1
+          },
+          {
+            "value": 20
+          },
+          {
+            "value": 50
+          }
+        ]
+      },
+      "old_context_sha256": "d3d3f817e1a7a52d5eacf004813dccf42176375c46b920c5a9cebbf587b48a6d",
+      "reason": "Two-row lead yields50,20,-1,-1; complete sorted multiset retained.",
+      "reference": "https://www.postgresql.org/docs/current/functions-window.html",
+      "new_context_sha256": "f4727493f52b47cec543780fd7706befecc1ca771ed4ba092e2484f3fa178502"
+    },
+    {
+      "path": "tests/sql/compatibility/psql-parser.yaml",
+      "name": "Unsupported window frame fails explicitly",
+      "occurrence": 1,
+      "syntax": "postgresql",
+      "old_sql_sha256": "55a7006c6edfe8c6a49648d165861cfa88f59b4307675e03ca942330228569a3",
+      "new_sql_sha256": "c01eaf6fa87a9468c108ef86cb049964521f634b1b5244afa5e88979df5efa58",
+      "old_expect": {
+        "error": true
+      },
+      "new_expect": {
+        "rows": 4,
+        "data": [
+          {
+            "total": 10
+          },
+          {
+            "total": 40
+          },
+          {
+            "total": 70
+          },
+          {
+            "total": 80
+          }
+        ]
+      },
+      "old_context_sha256": "75978b5f5151d95862ea76a822ab524058abae5571a9379a0e2b001a62de8074",
+      "reason": "Fixture values10,30,50,20; two-row windows10,40,80,70, sorted by visible result.",
+      "reference": "https://www.postgresql.org/docs/current/functions-window.html",
+      "new_context_sha256": "75978b5f5151d95862ea76a822ab524058abae5571a9379a0e2b001a62de8074"
+    },
+    {
+      "path": "tests/sql/compatibility/tsql-apply.yaml",
+      "name": "Partitioned TOP in APPLY is explicitly unsupported",
+      "occurrence": 1,
+      "syntax": "tsql",
+      "old_sql_sha256": "a9173ec046593101f9ee957120cec0d50cb4696512b2bdf40201c8237c97a5a1",
+      "new_sql_sha256": "bcf35cc179cc62411fbce497088dca70f2a37d7c88e6f7219656e9619bf15f14",
+      "old_expect": {
+        "error": true
+      },
+      "new_expect": {
+        "rows": 5,
+        "data": [
+          {
+            "id": 1,
+            "child_id": 10
+          },
+          {
+            "id": 2,
+            "child_id": 10
+          },
+          {
+            "id": 3,
+            "child_id": null
+          },
+          {
+            "id": 4,
+            "child_id": 12
+          },
+          {
+            "id": 5,
+            "child_id": null
+          }
+        ]
+      },
+      "old_context_sha256": "e78270c9315f5112ff9306fa55df0d373ebf10a650d8a18383bdf54ef5a64132",
+      "reason": "Lookup keys7,7,NULL,9,12; earliest matching child IDs10,10,NULL,12,NULL.",
+      "reference": "https://learn.microsoft.com/en-us/sql/t-sql/queries/from-transact-sql",
+      "new_context_sha256": "e78270c9315f5112ff9306fa55df0d373ebf10a650d8a18383bdf54ef5a64132"
+    },
+    {
+      "path": "tests/sql/compatibility/tsql-identifiers.yaml",
+      "name": "Four part column references fail instead of selecting another table",
+      "occurrence": 1,
+      "syntax": "tsql",
+      "old_sql_sha256": "f193a3b86cab8cc1f53955c82a4638ca1ab2b792ae9b263a6ad6dd497f97d852",
+      "new_sql_sha256": "051a47ce4fa169badc35e8a64948aa24b3a172f54a9546eba7084743ca910208",
+      "old_expect": {
+        "error": true
+      },
+      "new_expect": {
+        "rows": 3,
+        "data": [
+          {
+            "id": 1
+          },
+          {
+            "id": 2
+          },
+          {
+            "id": 3
+          }
+        ]
+      },
+      "old_context_sha256": "07fa553440e8e3a4e60ec61bd5fb2b6d5822fc94957385cc9e1071387c042a35",
+      "reason": "Valid T-SQL behavior; complete projected values are specified. Historical negative identity retained.",
+      "reference": "https://learn.microsoft.com/en-us/sql/t-sql/queries/from-transact-sql",
+      "new_context_sha256": "36d02c966c808444b6735b6700098d849aabee7ff4659cef457ed059b6c0f81a"
+    },
+    {
+      "path": "tests/sql/compatibility/tsql-identifiers.yaml",
+      "name": "Three part column references fail instead of silently truncating the source",
+      "occurrence": 1,
+      "syntax": "tsql",
+      "old_sql_sha256": "6ebff8a612ac262f288011c0f046e6f53fe790da6118f202820648db6cbf2793",
+      "new_sql_sha256": "7987086333771fd8f1891a064fc5d3b77e070c4e33dfe0f0390c7c16c8b89070",
+      "old_expect": {
+        "error": true
+      },
+      "new_expect": {
+        "rows": 3,
+        "data": [
+          {
+            "id": 1
+          },
+          {
+            "id": 2
+          },
+          {
+            "id": 3
+          }
+        ]
+      },
+      "old_context_sha256": "dba3ccd8c8bca07e186f8fe4a7a3a09bfe1bd1c87719dc084c32ece7431c1a8d",
+      "reason": "Valid T-SQL behavior; complete projected values are specified. Historical negative identity retained.",
+      "reference": "https://learn.microsoft.com/en-us/sql/t-sql/queries/from-transact-sql",
+      "new_context_sha256": "dba3ccd8c8bca07e186f8fe4a7a3a09bfe1bd1c87719dc084c32ece7431c1a8d"
+    },
+    {
+      "path": "tests/sql/compatibility/tsql-native-frontend.yaml",
+      "name": "Unsupported double quoted string mode is rejected",
+      "occurrence": 1,
+      "syntax": "tsql",
+      "old_sql_sha256": "ce6227299e1209731fe360fee1ea93c7b11d8cad314e640005fb4a19998db1b9",
+      "new_sql_sha256": "5bcfbc3c4252485a57dc9dd9df53d072d5f2c403532fa82294b3bac1779723b5",
+      "old_expect": {
+        "error": true
+      },
+      "new_expect": {
+        "rows": 1,
+        "data": [
+          {
+            "value": "actual literal"
+          }
+        ]
+      },
+      "old_context_sha256": "24d1421ac8f2f79f949c122e58d3037438921307b860449db3355af7c5d45caf",
+      "reason": "Valid T-SQL behavior; complete projected values are specified. Historical negative identity retained.",
+      "reference": "https://learn.microsoft.com/en-us/sql/t-sql/statements/set-quoted-identifier-transact-sql",
+      "new_context_sha256": "24d1421ac8f2f79f949c122e58d3037438921307b860449db3355af7c5d45caf"
+    },
+    {
+      "path": "tests/sql/compatibility/tsql-parser.yaml",
+      "name": "CTE rejects recursion explicitly until supported",
+      "occurrence": 1,
+      "syntax": "tsql",
+      "old_sql_sha256": "a8e92c9779d4b53d9452ce5cfbb4f53208ec107840a5d89d794c67b773b475e1",
+      "new_sql_sha256": "f85cbaa86027e69ce853fbbe09468ee1de06c1c145c4fc196e8a8f6b73a3b46c",
+      "old_expect": {
+        "error": true
+      },
+      "new_expect": {
+        "rows": 3,
+        "data": [
+          {
+            "n": 1
+          },
+          {
+            "n": 2
+          },
+          {
+            "n": 3
+          }
+        ]
+      },
+      "old_context_sha256": "0ad757f22ec4309386621da6c26823cacd8f7039c34d556acb489c34e77aa33c",
+      "reason": "Anchor1 and recursive n+1 while n<3 produce exactly1,2,3.",
+      "reference": "https://learn.microsoft.com/en-us/sql/t-sql/queries/recursive-common-table-expression-transact-sql",
+      "new_context_sha256": "df125d1da1594f38f499d877e7f5f1de41b61c007eb5e4c5158a3571c798a55a"
+    },
+    {
+      "path": "tests/sql/compatibility/tsql-parser.yaml",
+      "name": "IF rejects an internal semicolon before ELSE",
+      "occurrence": 1,
+      "syntax": "tsql",
+      "old_sql_sha256": "f2a9514eb4b3d518a7f5f400af5de5be3d8a355e18a6fddf669e70162bad3a20",
+      "new_sql_sha256": "2cf710d62844909c81f389b297f01d3fda901fe669d8ba6f73320bfc1f2050c2",
+      "old_expect": {
+        "error": true
+      },
+      "new_expect": {
+        "rows": 1,
+        "data": [
+          {
+            "n": 5
+          }
+        ]
+      },
+      "old_context_sha256": "d878b114b94d06c2d0ce92685973ca2142635f4089e6abcf07c43007845b5ad4",
+      "reason": "Valid T-SQL behavior; complete projected values are specified. Historical negative identity retained.",
+      "reference": "https://learn.microsoft.com/en-us/sql/t-sql/language-elements/if-else-transact-sql",
+      "new_context_sha256": "9da6bf19ef808d4d86f4c190bbb1911cfb918cf0cc78f0de5723eb2f8c72a344"
+    },
+    {
+      "path": "tests/sql/compatibility/tsql-parser.yaml",
+      "name": "IF rejects relational EXISTS until logical support exists",
+      "occurrence": 1,
+      "syntax": "tsql",
+      "old_sql_sha256": "86a0fec19e68271ff381205e46e775d29a2ac4f6d8578d97b9575d74dc83ba9d",
+      "new_sql_sha256": "8a1b7fcbd13560895eb0cc558a15cb487c33c24aef46355ec352c4028d74d56d",
+      "old_expect": {
+        "error": true
+      },
+      "new_expect": {
+        "rows": 1,
+        "data": [
+          {
+            "n": 5
+          }
+        ]
+      },
+      "old_context_sha256": "7defd72e14abd2a88b3d4a9948ed51c2e39e1fe6baf2651bc26da5fb0f035efe",
+      "reason": "Valid T-SQL behavior; complete projected values are specified. Historical negative identity retained.",
+      "reference": "https://learn.microsoft.com/en-us/sql/t-sql/language-elements/if-else-transact-sql",
+      "new_context_sha256": "7defd72e14abd2a88b3d4a9948ed51c2e39e1fe6baf2651bc26da5fb0f035efe"
+    },
+    {
+      "path": "tests/sql/compatibility/tsql-parser.yaml",
+      "name": "IF rejects scalar subqueries",
+      "occurrence": 1,
+      "syntax": "tsql",
+      "old_sql_sha256": "9b9b4671adee82c8352f147b6b318e35cd28148726cf8f24e44a8a0dff134946",
+      "new_sql_sha256": "ba71524725013ab8167aa6384ff77c63e67aae2e37ea4b30dc3767f33c654db2",
+      "old_expect": {
+        "error": true
+      },
+      "new_expect": {
+        "rows": 1,
+        "data": [
+          {
+            "n": 5
+          }
+        ]
+      },
+      "old_context_sha256": "fda709185817c7ca72e17d2ef11b6fc5ecdcd445c3235a3319ef3b9de93ba910",
+      "reason": "Valid T-SQL behavior; complete projected values are specified. Historical negative identity retained.",
+      "reference": "https://learn.microsoft.com/en-us/sql/t-sql/language-elements/if-else-transact-sql",
+      "new_context_sha256": "ed95b6e1988edacdcf91840fa842435ccdbcfdfce15f8b7d845bb7ca168a0814"
+    },
+    {
+      "path": "tests/sql/compatibility/tsql-parser.yaml",
+      "name": "Ordered aggregate window is explicitly unsupported",
+      "occurrence": 1,
+      "syntax": "tsql",
+      "old_sql_sha256": "8ecb4e52de97c200c0d52ea0a369692627cdc19784813e602aa2e9f663fbe555",
+      "new_sql_sha256": "334c04356f7b659d130872f689ccad13c7e1619f7cd2b8ea8a0474a591eb6608",
+      "old_expect": {
+        "error": true
+      },
+      "new_expect": {
+        "rows": 4,
+        "data": [
+          {
+            "total": 10
+          },
+          {
+            "total": 40
+          },
+          {
+            "total": 90
+          },
+          {
+            "total": 110
+          }
+        ]
+      },
+      "old_context_sha256": "259dc9e36b3fc8b201c4d13e694c4380cd17682f8f1c8ca10fe6af3021e7800c",
+      "reason": "Fixture values10,30,50,20; no earlier mutation of source rows.",
+      "reference": "https://learn.microsoft.com/en-us/sql/t-sql/queries/select-over-clause-transact-sql",
+      "new_context_sha256": "086e793c5a3910b6892794569edb06e0a0b1e282c6c860e05c4988c52e504a40"
+    },
+    {
+      "path": "tests/sql/compatibility/tsql-scripts.yaml",
+      "name": "REST rejects a relational scalar fallback in IF",
+      "occurrence": 1,
+      "syntax": "tsql",
+      "old_sql_sha256": "0c90c7ec5dc249ad59e99253411ed5a30af71f0a069cb2bbaff05ab90c8d90d0",
+      "new_sql_sha256": "1c00776c2e00bde78d5cadb718465b79fa9fc38eafd96dd08a4df27c1872a5ed",
+      "old_expect": {
+        "error": true
+      },
+      "new_expect": {
+        "rows": 1,
+        "data": [
+          {
+            "value": 7
+          }
+        ]
+      },
+      "old_context_sha256": "136f12896a810c3ef4a6bb8bed6b67f3258be06100d40e4dddf380ede02a0561",
+      "reason": "Valid T-SQL behavior; complete projected values are specified. Historical negative identity retained.",
+      "reference": "https://learn.microsoft.com/en-us/sql/t-sql/language-elements/if-else-transact-sql",
+      "new_context_sha256": "136f12896a810c3ef4a6bb8bed6b67f3258be06100d40e4dddf380ede02a0561"
+    },
+    {
+      "path": "tests/sql/compatibility/tsql-scripts.yaml",
+      "name": "WHILE rejects relational scalar fallback",
+      "occurrence": 1,
+      "syntax": "tsql",
+      "old_sql_sha256": "3628baf83d1d8d652e36508ccb04eb41b1097b9e0e2cb6298eb97c9aad776e49",
+      "new_sql_sha256": "a146666188f2f20f93f536598ffb2807f947528b96743a7e1036e2825b137f35",
+      "old_expect": {
+        "error": true
+      },
+      "new_expect": {
+        "rows": 1,
+        "data": [
+          {
+            "value": 7
+          }
+        ]
+      },
+      "old_context_sha256": "8a1f6fd8d5926203ed8098e8d2320363eaccf688d2c35cdd738f4f42f8b95416",
+      "reason": "Valid T-SQL behavior; complete projected values are specified. Historical negative identity retained.",
+      "reference": "https://learn.microsoft.com/en-us/sql/t-sql/language-elements/if-else-transact-sql",
+      "new_context_sha256": "1a92d4bb4f03a842d74df5376af7874cfb036f2a978a9f5730dd61846d50b48c"
+    },
+    {
+      "path": "tests/sql/compatibility/tsql-temporal.yaml",
+      "name": "Fractional temporal conversions fail rather than silently lose precision",
+      "occurrence": 1,
+      "syntax": "tsql",
+      "old_sql_sha256": "9812f9f222b4d931b8c9b198c203eac031ac1ca889ece9e940875e10373776d4",
+      "new_sql_sha256": "35521d86a9f48246d35f56dd3cbc3c5875484d3ee51d070b334908d6aa5e1b08",
+      "old_expect": {
+        "error": true
+      },
+      "new_expect": {
+        "rows": 1,
+        "data": [
+          {
+            "CAST(N'2026-03-15 12:13:14.123' AS DATETIME2(3))": "2026-03-15 12:13:14.123"
+          }
+        ]
+      },
+      "old_context_sha256": "05eb8961b26d11783cbeb5b2967f5bf21166d984416d647efe7b2e45387c77fa",
+      "reason": "Valid T-SQL behavior; complete projected values are specified. Historical negative identity retained.",
+      "reference": "https://learn.microsoft.com/en-us/sql/t-sql/functions/cast-and-convert-transact-sql",
+      "new_context_sha256": "05eb8961b26d11783cbeb5b2967f5bf21166d984416d647efe7b2e45387c77fa"
+    },
+    {
+      "path": "tests/sql/compatibility/tsql-temporal.yaml",
+      "name": "Fractional time conversions fail rather than silently lose precision",
+      "occurrence": 1,
+      "syntax": "tsql",
+      "old_sql_sha256": "301f9f5ca4a0f8997e25faa7eeccdd9ec9361a369e95e09786bfac5bc65d70f0",
+      "new_sql_sha256": "4b0e0836157d39c489ce3997a7ee75461710ad9da02309b616d3d2b5d71dddef",
+      "old_expect": {
+        "error": true
+      },
+      "new_expect": {
+        "rows": 1,
+        "data": [
+          {
+            "CAST(N'12:13:14.123' AS TIME(3))": "12:13:14.123"
+          }
+        ]
+      },
+      "old_context_sha256": "acdc497bd88ef47d153aa69422e5a469be3ee5f67f58c4f3bf0454af42e5629d",
+      "reason": "Valid T-SQL behavior; complete projected values are specified. Historical negative identity retained.",
+      "reference": "https://learn.microsoft.com/en-us/sql/t-sql/functions/cast-and-convert-transact-sql",
+      "new_context_sha256": "c991519eb5bc71bf99047b0878f57e799634cfc23c7cd9e6bbc6964fe907e222"
+    },
+    {
+      "path": "tests/sql/compatibility/tsql-temporal.yaml",
+      "name": "TRY clock-only TIME refuses unsupported fractional carriers",
+      "occurrence": 1,
+      "syntax": "tsql",
+      "old_sql_sha256": "56b2bb2f9def865674b7db3b2200e04a91bf6d861061a2adacd4d83f86dafa41",
+      "new_sql_sha256": "fa28ee0dcd8d279a534a4b9858de02de31000103750b3443992dcb6e80f2f18e",
+      "old_expect": {
+        "error": true,
+        "contains": "fractional"
+      },
+      "new_expect": {
+        "rows": 1,
+        "data": [
+          {
+            "value": "12:13:14.123"
+          }
+        ]
+      },
+      "old_context_sha256": "cfd894100959fb23554a4e12a271ba5ff5cc84aca7afced89d05a9dc88cd80bd",
+      "reason": "Valid T-SQL behavior; complete projected values are specified. Historical negative identity retained.",
+      "reference": "https://learn.microsoft.com/en-us/sql/t-sql/functions/cast-and-convert-transact-sql",
+      "new_context_sha256": "752b105064abc836d838c38a9dd3757f771c6d2e2245377315a0a168bca00651"
+    },
+    {
+      "path": "tests/sql/compatibility/tsql-temporal.yaml",
+      "name": "TRY clock-only datetime refuses unsupported fractional carriers",
+      "occurrence": 1,
+      "syntax": "tsql",
+      "old_sql_sha256": "f762f58ceed1c665709341db0cb7fd4244b42c268689fe6dae20b19304141bf8",
+      "new_sql_sha256": "83ed5641a22aa14341ca98c15496571a6c6ef21e243d1c08647ece9a85287f89",
+      "old_expect": {
+        "error": true,
+        "contains": "fractional"
+      },
+      "new_expect": {
+        "rows": 1,
+        "data": [
+          {
+            "value": "1900-01-01 12:13:14.123"
+          }
+        ]
+      },
+      "old_context_sha256": "60baccca644592656755f13cf1e5f0f536d92028e817a1c703893813a9a02ca3",
+      "reason": "Valid T-SQL behavior; complete projected values are specified. Historical negative identity retained.",
+      "reference": "https://learn.microsoft.com/en-us/sql/t-sql/functions/cast-and-convert-transact-sql",
+      "new_context_sha256": "8ad370046084bc43b2ec0d7baa6c0728f701cd8a60b92429d385111e605406c7"
+    },
+    {
+      "path": "tests/sql/compatibility/tsql-temporal.yaml",
+      "name": "TRY_CAST refuses unsupported fractional temporal carriers",
+      "occurrence": 1,
+      "syntax": "tsql",
+      "old_sql_sha256": "ce0c265cb9e098024249f748b92799ae471a81021394afa860ddd453c2a29fcf",
+      "new_sql_sha256": "1994546e5e869df6a9224890c60ade0b9f578f02f17412fab2e2ff2ac0811540",
+      "old_expect": {
+        "error": true,
+        "contains": "fractional"
+      },
+      "new_expect": {
+        "rows": 1,
+        "data": [
+          {
+            "value": "2026-03-15 12:13:14.123"
+          }
+        ]
+      },
+      "old_context_sha256": "2fb91ae2f1134a7a743b822af3cd46d5fa94389e2d09bac524ab08c897698203",
+      "reason": "Valid T-SQL behavior; complete projected values are specified. Historical negative identity retained.",
+      "reference": "https://learn.microsoft.com/en-us/sql/t-sql/functions/cast-and-convert-transact-sql",
+      "new_context_sha256": "d32c9390b301af2d4b7f608e7bb25ecbf7c05fc4437c6166b8ec14f5cf6ba15a"
+    },
+    {
+      "path": "tests/sql/compatibility/tsql-temporal.yaml",
+      "name": "TRY_CONVERT refuses unsupported fractional temporal carriers",
+      "occurrence": 1,
+      "syntax": "tsql",
+      "old_sql_sha256": "0570df1f562718b4a9129ad3101c40ff43c4ca7a0a2bc042b11be8fc39675627",
+      "new_sql_sha256": "dfdbfc75b9da033204ce4ef211a2ab1e19b5e67edb13dd896d5f9ca2a7aeebc9",
+      "old_expect": {
+        "error": true,
+        "contains": "fractional"
+      },
+      "new_expect": {
+        "rows": 1,
+        "data": [
+          {
+            "value": "2026-03-15 12:13:14.123"
+          }
+        ]
+      },
+      "old_context_sha256": "a168a39fdfec8c88dd8d00dbaef2611cfcf3b1de2bebcb7e3680e3e0ad013489",
+      "reason": "Valid T-SQL behavior; complete projected values are specified. Historical negative identity retained.",
+      "reference": "https://learn.microsoft.com/en-us/sql/t-sql/functions/cast-and-convert-transact-sql",
+      "new_context_sha256": "cfc2b6086be0534805e68066f2cb4d6ab32dbbfdf1744d52c0171f615b0f090e"
+    }
+  ]
+}

@@ -403,13 +403,17 @@ test_cases:
   expect:
     error: true
 - name: Three part column references fail instead of silently truncating the source
-  sql: SELECT [dbo].[tsql_qualified].[id] FROM dbo.tsql_qualified
-  expect:
-    error: true
+  sql: |
+    SELECT [dbo].[tsql_qualified].[id] FROM dbo.tsql_qualified ORDER BY [dbo].[tsql_qualified].[id]
+  # Valid SQL implementation gap: check behavior, warn until implemented.
+  expect: {"rows": 3, "data": [{"id": 1}, {"id": 2}, {"id": 3}]}
+  noncritical: true
 - name: Four part column references fail instead of selecting another table
-  sql: SELECT [memcp-tests].[dbo].[tsql_qualified].[id] FROM dbo.tsql_qualified
-  expect:
-    error: true
+  sql: |
+    SELECT [memcp-tests].[dbo].[tsql_qualified].[id] FROM dbo.tsql_qualified ORDER BY [memcp-tests].[dbo].[tsql_qualified].[id]
+  # Valid SQL implementation gap: check behavior, warn until implemented.
+  expect: {"rows": 3, "data": [{"id": 1}, {"id": 2}, {"id": 3}]}
+  noncritical: true
 - name: Multiple part assignment columns fail before writes
   sql: UPDATE dbo.tsql_qualified SET dbo.tsql_qualified.value=99 WHERE id=1
   expect:

@@ -892,10 +892,11 @@ test_cases:
       - id: 5
         enabled: true
   - name: conditional_sum_presence_offset_remains_explicitly_unsupported
-    sql: SELECT p.id, COALESCE((SELECT SUM(CASE WHEN i.state THEN 1 ELSE 0 END) FROM
-      csa_item i WHERE i.parent_id=p.id LIMIT 1 OFFSET 1) > 0, TRUE) AS enabled FROM
-      csa_parent p ORDER BY p.id
-    expect: {error: true}
+    sql: |
+      SELECT p.id, COALESCE((SELECT SUM(CASE WHEN i.state THEN 1 ELSE 0 END) FROM csa_item i WHERE i.parent_id=p.id LIMIT 1 OFFSET 1) > 0, TRUE) AS enabled FROM csa_parent p ORDER BY p.id
+    # Valid SQL implementation gap: check behavior, warn until implemented.
+    expect: {"rows": 5, "data": [{"id": 1, "enabled": true}, {"id": 2, "enabled": true}, {"id": 3, "enabled": true}, {"id": 4, "enabled": true}, {"id": 5, "enabled": true}]}
+    noncritical: true
   - name: conditional_sum_presence_validates_missing_column
     sql: SELECT p.id, COALESCE((SELECT SUM(CASE WHEN i.missing_flag THEN 1 ELSE 0 END)
       FROM csa_item i WHERE i.parent_id=p.id) > 0, TRUE) AS enabled FROM csa_parent

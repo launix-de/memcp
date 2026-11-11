@@ -308,6 +308,19 @@ measurements and describe the margin, measurement isolation and intended failure
 mode. Changes to protected calibration or policy code require the maintainer's
 policy-update procedure; do not hide a budget relaxation in an engine patch.
 
+## Valid SQL with missing implementation
+
+A missing implementation is a positive behavior test marked `noncritical: true`,
+not an assertion that valid SQL must fail. Promote it to critical after the
+implementation and its result are proved. The historical case identity remains.
+
+Only the exact reviewed [implementation-gap inventory](implementation-gaps.md)
+may migrate an old error assertion or become noncritical. Its protected manifest
+binds SQL, dialect, fixture prefix and the full approved result oracle. Regular
+syntax/type/ACL/security errors and all timing/plan gates remain protected.
+Policy changes require the separate administrative PR/review procedure described
+there; preparing the PR grants no merge or bypass authority.
+
 ## Baseline queries that cannot execute
 
 In `--perf-ab`, a baseline query error or request timeout is recorded as

@@ -22,11 +22,13 @@ from __future__ import annotations
 import argparse
 import ast
 import hashlib
+import json
 import math
 import re
 import subprocess
 import sys
 from collections import Counter
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -50,6 +52,7 @@ MAPPING_BUDGETS = ("max_compile_phase_ms", "max_compile_metrics")
 PROTECTED_POLICY_PATHS = (
     ".github/workflows/sql-regression-policy.yml",
     "tools/check_sql_time_limit.py",
+    "tools/sql_implementation_gap_migrations.json",
 )
 PROTECTED_EXPECTATIONS = (
     "rows",
@@ -473,8 +476,89 @@ def compare_mapping_budget(old: Any, new: Any, label: str) -> None:
         assert_not_relaxed(old_limit, new_limit, f"{label}.{key}")
 
 
+def policy_digest(value: Any) -> str:
+    """Hash typed JSON data; unlike Python equality, True is not the number 1."""
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def implementation_gap_context(suite: dict[str, Any], index: int) -> str:
+    return policy_digest({
+        "syntax": suite.get("metadata", {}).get("syntax", "mysql"),
+        "setup": suite.get("setup", []),
+        "prefix": [{key: case[key] for key in ("sql", "scm", "steps", "tds_probe", "syntax")
+                    if key in case} for case in suite["test_cases"][:index]],
+    })
+
+
+@lru_cache(maxsize=1)
+def load_implementation_gap_migrations() -> dict[tuple[str, str, int], dict[str, Any]]:
+    # Always load beside THIS trusted checker, never from --root/candidate.
+    path = Path(__file__).with_name("sql_implementation_gap_migrations.json")
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise GuardFailure(f"cannot read trusted implementation-gap migrations: {exc}") from exc
+    if (not isinstance(document, dict) or type(document.get("version")) is not int
+            or document["version"] != 1 or not isinstance(document.get("migrations"), list)):
+        raise GuardFailure("invalid implementation-gap migration format")
+    migrations = {}
+    for record in document["migrations"]:
+        if not isinstance(record, dict):
+            raise GuardFailure("implementation-gap migration must be a mapping")
+        identity = (record.get("path"), record.get("name"), record.get("occurrence"))
+        path, name, occurrence = identity
+        if (not isinstance(path, str) or not path.startswith("tests/")
+                or not path.endswith(".yaml") or ".." in Path(path).parts
+                or not isinstance(name, str) or not name
+                or type(occurrence) is not int or occurrence < 1 or identity in migrations):
+            raise GuardFailure("invalid or duplicate implementation-gap migration identity")
+        old, positive = record.get("old_expect"), record.get("new_expect")
+        if (not isinstance(old, dict) or old.get("error") is not True
+                or set(old) - {"error", "contains"}):
+            raise GuardFailure(f"{identity} does not describe a plain missing-feature error")
+        rows = positive.get("rows") if isinstance(positive, dict) else None
+        data = positive.get("data") if isinstance(positive, dict) else None
+        if (not isinstance(positive, dict) or positive.get("error", False) is not False
+                or set(positive) - {"error", "rows", "data"}
+                or type(rows) is not int or rows < 0 or not isinstance(data, list)
+                or len(data) != rows or any(not isinstance(row, dict) or not row for row in data)):
+            raise GuardFailure(f"{identity} needs an exact reviewed rows/data oracle")
+        for key in ("old_sql_sha256", "new_sql_sha256", "old_context_sha256", "new_context_sha256"):
+            if not isinstance(record.get(key), str) or not re.fullmatch(r"[0-9a-f]{64}", record[key]):
+                raise GuardFailure(f"{identity} has an invalid {key}")
+        if not all(isinstance(record.get(key), str) and record[key]
+                   for key in ("syntax", "reason", "reference")):
+            raise GuardFailure(f"{identity} lacks its reviewed dialect/derivation/reference")
+        migrations[identity] = record
+    return migrations
+
+
+def reviewed_implementation_gap(
+    old_case: dict[str, Any], new_case: dict[str, Any], path: str, occurrence: int,
+    old_suite: dict[str, Any], new_suite: dict[str, Any], old_index: int, new_index: int,
+) -> bool:
+    record = load_implementation_gap_migrations().get((path, old_case.get("name"), occurrence))
+    if record is None:
+        return False
+    if any(key in case for case in (old_case, new_case) for key in ("scm", "steps", "tds_probe")):
+        return False
+    if type(new_case.get("noncritical", False)) is not bool:
+        return False
+    for case, suite, prefix, index in ((old_case, old_suite, "old", old_index),
+                                       (new_case, new_suite, "new", new_index)):
+        if (not isinstance(case.get("sql"), str)
+                or policy_digest(case["sql"]) != record[prefix + "_sql_sha256"]
+                or policy_digest(case.get("expect")) != policy_digest(record[prefix + "_expect"])
+                or case.get("syntax", suite.get("metadata", {}).get("syntax", "mysql")) != record["syntax"]
+                or implementation_gap_context(suite, index) != record[prefix + "_context_sha256"]):
+            return False
+    return True
+
+
 def compare_expectations(
-    old_case: dict[str, Any], new_case: dict[str, Any], label: str
+    old_case: dict[str, Any], new_case: dict[str, Any], label: str,
+    implementation_gap: bool = False,
 ) -> None:
     old_expect = old_case.get("expect")
     new_expect = new_case.get("expect")
@@ -482,13 +566,13 @@ def compare_expectations(
         return
     if not isinstance(new_expect, dict):
         raise GuardFailure(f"{label} removed its expectation mapping")
+    if old_expect.get("error") is True and new_expect.get("error") is not True and not implementation_gap:
+        raise GuardFailure(f"{label} changed an error contract without an exact reviewed implementation-gap migration")
+    if not old_expect.get("error") and new_expect.get("error") and old_expect:
+        raise GuardFailure(f"{label} would bypass positive assertions by expecting an error")
     for key in PROTECTED_EXPECTATIONS:
         if key in old_expect and key not in new_expect:
-            if key == "error" and any(
-                candidate in new_expect
-                for candidate in PROTECTED_EXPECTATIONS
-                if candidate != "error"
-            ):
+            if implementation_gap and key in ("error", "contains"):
                 continue
             raise GuardFailure(
                 f"{label} removed expect.{key}; retain an equally strong correctness assertion"
@@ -514,6 +598,8 @@ def compare_suites(old: dict[str, Any], new: dict[str, Any], label: str) -> None
 
     old_cases = numbered_cases(old)
     new_cases = numbered_cases(new)
+    old_positions = {identity: index for index, identity in enumerate(old_cases)}
+    new_positions = {identity: index for index, identity in enumerate(new_cases)}
     for identity, old_case in old_cases.items():
         name, occurrence = identity
         case_label = f"{label}:{name}" + (
@@ -524,9 +610,14 @@ def compare_suites(old: dict[str, Any], new: dict[str, Any], label: str) -> None
                 f"{case_label} was deleted; preserve the regression or move it unchanged"
             )
         new_case = new_cases[identity]
+        implementation_gap = reviewed_implementation_gap(
+            old_case, new_case, label, occurrence, old, new,
+            old_positions[identity], new_positions[identity],
+        )
         if (
             old_case.get("noncritical") is not True
             and new_case.get("noncritical") is True
+            and not implementation_gap
         ):
             raise GuardFailure(f"{case_label} was changed from critical to noncritical")
         if old_case.get("disabled") is not True and new_case.get("disabled") is True:
@@ -546,7 +637,7 @@ def compare_suites(old: dict[str, Any], new: dict[str, Any], label: str) -> None
             compare_mapping_budget(
                 old_case.get(key), new_case.get(key), f"{case_label}.{key}"
             )
-        compare_expectations(old_case, new_case, case_label)
+        compare_expectations(old_case, new_case, case_label, implementation_gap)
 
 
 def added_planner_lines(root: Path, base_ref: str) -> list[tuple[int | None, str]]:
