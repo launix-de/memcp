@@ -11,7 +11,8 @@ This change includes no engine, frontend or runner implementation.
 
 The protected [migration manifest](../tools/sql_implementation_gap_migrations.json)
 authorizes only these exact cases, SQL, dialects, previous errors, new result
-oracles and fixture/execution prefixes. Hashes include typed JSON values, so
+oracles and complete case/fixture/execution prefixes (including session and
+authentication-related fields). Hashes include typed JSON values, so
 Boolean `true` cannot substitute for integer `1`. The manifest does not infer SQL
 semantics or projection coverage: each listed oracle is reviewed against all
 selected columns and fixture values. A record is not a license to remove other

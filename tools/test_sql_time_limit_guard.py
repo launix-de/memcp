@@ -35,7 +35,7 @@ from check_sql_time_limit import check_added_planner_lines
 from check_sql_time_limit import check_runner
 from check_sql_time_limit import compare_suites
 from check_sql_time_limit import load_suite
-from check_sql_time_limit import implementation_gap_context, policy_digest, load_implementation_gap_migrations
+from check_sql_time_limit import implementation_gap_context, implementation_gap_case_contract, policy_digest, load_implementation_gap_migrations
 from check_sql_time_limit import validate_suite
 
 
@@ -302,6 +302,8 @@ class ImplementationGapMigrationTest(unittest.TestCase):
                   "new_sql_sha256": policy_digest(new["test_cases"][0]["sql"]),
                   "old_expect": old["test_cases"][0]["expect"],
                   "new_expect": new["test_cases"][0]["expect"], "syntax": "mysql",
+                  "old_case_sha256": policy_digest(implementation_gap_case_contract(old["test_cases"][0])),
+                  "new_case_sha256": policy_digest(implementation_gap_case_contract(new["test_cases"][0])),
                   "old_context_sha256": implementation_gap_context(old, 0),
                   "new_context_sha256": implementation_gap_context(new, 0)}
         return old, new, {(self.path, "regression", 1): record}
@@ -383,12 +385,21 @@ class ImplementationGapMigrationTest(unittest.TestCase):
             self.compare(old, new, records)
 
     def test_fixture_prefix_and_transport_cannot_be_substituted(self):
-        for change in ("setup", "prefix", "scm", "steps", "tds_probe"):
+        for change in ("setup", "prefix", "scm", "steps", "tds_probe", "session_id", "metadata", "prefix_session"):
             old, new, records = self.fixtures()
             if change == "setup":
                 new["setup"] = [{"sql": "DELETE FROM source"}]
             elif change == "prefix":
                 new["test_cases"].insert(0, {"name": "changed fixture", "sql": "DELETE FROM source", "expect": {}})
+            elif change == "metadata":
+                new["metadata"]["database"] = "different-context"
+            elif change == "prefix_session":
+                earlier = {"name": "earlier", "sql": "SELECT 1", "expect": {}}
+                old["test_cases"].insert(0, earlier)
+                new["test_cases"].insert(0, {**earlier, "session_id": "other-owner"})
+                record = next(iter(records.values()))
+                record["old_context_sha256"] = implementation_gap_context(old, 1)
+                record["new_context_sha256"] = implementation_gap_context(old, 1)
             else:
                 new["test_cases"][0][change] = "different execution path"
             with self.subTest(change=change), self.assertRaises(GuardFailure):

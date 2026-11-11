@@ -482,12 +482,22 @@ def policy_digest(value: Any) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+def implementation_gap_case_contract(case: dict[str, Any]) -> dict[str, Any]:
+    # Oracle/NC are this migration's explicit changes. Existing independent
+    # budget checks remain authoritative, including allowing tighter limits.
+    independent = {"expect", "noncritical", "max_time", "max_plan_size",
+                   "max_planner_time_ms", "threshold_ms", *MAPPING_BUDGETS}
+    return {key: value for key, value in case.items() if key not in independent}
+
+
 def implementation_gap_context(suite: dict[str, Any], index: int) -> str:
+    metadata = {key: value for key, value in suite.get("metadata", {}).items()
+                if key not in ("max_time", "max_plan_size")}
     return policy_digest({
-        "syntax": suite.get("metadata", {}).get("syntax", "mysql"),
+        "metadata": metadata,
         "setup": suite.get("setup", []),
-        "prefix": [{key: case[key] for key in ("sql", "scm", "steps", "tds_probe", "syntax")
-                    if key in case} for case in suite["test_cases"][:index]],
+        "prefix": [implementation_gap_case_contract(case)
+                   for case in suite["test_cases"][:index]],
     })
 
 
@@ -524,7 +534,8 @@ def load_implementation_gap_migrations() -> dict[tuple[str, str, int], dict[str,
                 or type(rows) is not int or rows < 0 or not isinstance(data, list)
                 or len(data) != rows or any(not isinstance(row, dict) or not row for row in data)):
             raise GuardFailure(f"{identity} needs an exact reviewed rows/data oracle")
-        for key in ("old_sql_sha256", "new_sql_sha256", "old_context_sha256", "new_context_sha256"):
+        for key in ("old_sql_sha256", "new_sql_sha256", "old_context_sha256", "new_context_sha256",
+                    "old_case_sha256", "new_case_sha256"):
             if not isinstance(record.get(key), str) or not re.fullmatch(r"[0-9a-f]{64}", record[key]):
                 raise GuardFailure(f"{identity} has an invalid {key}")
         if not all(isinstance(record.get(key), str) and record[key]
@@ -550,6 +561,7 @@ def reviewed_implementation_gap(
         if (not isinstance(case.get("sql"), str)
                 or policy_digest(case["sql"]) != record[prefix + "_sql_sha256"]
                 or policy_digest(case.get("expect")) != policy_digest(record[prefix + "_expect"])
+                or policy_digest(implementation_gap_case_contract(case)) != record[prefix + "_case_sha256"]
                 or case.get("syntax", suite.get("metadata", {}).get("syntax", "mysql")) != record["syntax"]
                 or implementation_gap_context(suite, index) != record[prefix + "_context_sha256"]):
             return False
