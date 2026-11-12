@@ -409,6 +409,11 @@ class ImplementationGapMigrationTest(unittest.TestCase):
         records = load_implementation_gap_migrations()
         self.assertGreater(len(records), 0)
         for record in records.values():
+            if record.get("kind") == "tds-suite":
+                self.assertTrue(record["review_patch"].endswith(".patch"))
+                self.assertEqual(len(record["old_suite_sha256"]), 64)
+                self.assertEqual(len(record["new_suite_sha256"]), 64)
+                continue
             self.assertEqual(record["new_expect"]["rows"], len(record["new_expect"]["data"]))
             self.assertNotIn("not_contains", record["old_expect"])
             self.assertNotIn("affected_rows", record["new_expect"])
@@ -430,6 +435,64 @@ class ImplementationGapMigrationTest(unittest.TestCase):
                         load_implementation_gap_migrations()
         finally:
             load_implementation_gap_migrations.cache_clear()
+
+
+class TransportImplementationGapMigrationTest(unittest.TestCase):
+    path = "tests/sql/compatibility/reviewed-loop.yaml"
+
+    def fixtures(self):
+        old = suite({"name": "mixed loop sequence", "tds": {"statements": [
+            {"sql": "CREATE FUNCTION original_loop() RETURNS INT AS BEGIN RETURN 1; END",
+             "expect": {"error": True, "contains": "not implemented"}}]}},
+            {"syntax": "tsql", "requires_tds": True})
+        new = suite({"name": "mixed loop sequence", "noncritical": True,
+                     "tds": {"statements": [
+                         {"sql": "CREATE FUNCTION original_loop() RETURNS INT AS BEGIN RETURN 1; END"},
+                         {"sql": "SELECT original_loop() AS value",
+                          "expect": {"rows": 1, "data": [{"value": 1}]}}]}},
+                    {"syntax": "tsql", "requires_tds": True})
+        critical = {"name": "invalid division remains critical", "tds": {"statements": [
+            {"sql": "SELECT 1/0", "expect": {"error": True, "contains": "division by zero"}}]}}
+        old["test_cases"].append(json.loads(json.dumps(critical)))
+        new["test_cases"].append(json.loads(json.dumps(critical)))
+        record = {"kind": "tds-suite", "syntax": "tsql",
+                  "old_suite_sha256": policy_digest(old), "new_suite_sha256": policy_digest(new),
+                  "old_case_sha256": policy_digest(old["test_cases"][0]),
+                  "new_case_sha256": policy_digest(new["test_cases"][0])}
+        return old, new, {(self.path, "mixed loop sequence", 1): record}
+
+    def test_only_complete_reviewed_transport_trees_migrate(self):
+        old, new, records = self.fixtures()
+        with patch("check_sql_time_limit.load_implementation_gap_migrations", return_value=records):
+            compare_suites(old, new, self.path)
+
+    def test_child_oracle_fixture_session_and_critical_siblings_are_exact(self):
+        for change in ("sql", "value", "row_count", "fixture", "session", "authentication",
+                       "remove_child", "critical_sibling", "metadata", "unlisted"):
+            old, new, records = self.fixtures()
+            target = new["test_cases"][0]["tds"]
+            if change == "sql":
+                target["statements"][0]["sql"] += " -- changed"
+            elif change == "value":
+                target["statements"][1]["expect"]["data"][0]["value"] = True
+            elif change == "row_count":
+                target["statements"][1]["expect"]["rows"] = 2
+            elif change == "fixture":
+                new["setup"] = [{"sql": "DELETE FROM fixture"}]
+            elif change in ("session", "authentication"):
+                target[change] = "different owner"
+            elif change == "remove_child":
+                target["statements"].pop()
+            elif change == "critical_sibling":
+                new["test_cases"][1]["tds"]["statements"][0].pop("expect")
+            elif change == "metadata":
+                new["metadata"]["requires_tds"] = False
+            elif change == "unlisted":
+                records = {}
+            with self.subTest(change=change), patch(
+                    "check_sql_time_limit.load_implementation_gap_migrations", return_value=records):
+                with self.assertRaises(GuardFailure):
+                    compare_suites(old, new, self.path)
 
 
 class PlannerSourceDiffTest(unittest.TestCase):

@@ -523,6 +523,24 @@ def load_implementation_gap_migrations() -> dict[tuple[str, str, int], dict[str,
                 or not isinstance(name, str) or not name
                 or type(occurrence) is not int or occurrence < 1 or identity in migrations):
             raise GuardFailure("invalid or duplicate implementation-gap migration identity")
+        if record.get("kind") == "tds-suite":
+            # A mixed transport sequence cannot use the ordinary one-statement
+            # migration. Its separately reviewed split locks the ENTIRE old/new
+            # suite, including child oracles, fixtures, sessions and critical cases.
+            for key in ("old_suite_sha256", "new_suite_sha256", "old_case_sha256", "new_case_sha256"):
+                if not isinstance(record.get(key), str) or not re.fullmatch(r"[0-9a-f]{64}", record[key]):
+                    raise GuardFailure(f"{identity} has an invalid {key}")
+            review = record.get("review_patch")
+            if (record.get("syntax") != "tsql" or not isinstance(review, str)
+                    or not review.startswith("tests/") or not review.endswith(".patch")
+                    or ".." in Path(review).parts
+                    or not all(isinstance(record.get(key), str) and record[key]
+                               for key in ("reason", "reference"))):
+                raise GuardFailure(f"{identity} lacks its exact transport-suite review")
+            migrations[identity] = record
+            continue
+        if record.get("kind", "sql") != "sql":
+            raise GuardFailure(f"{identity} has an unknown migration kind")
         old, positive = record.get("old_expect"), record.get("new_expect")
         if (not isinstance(old, dict) or old.get("error") is not True
                 or set(old) - {"error", "contains"}):
@@ -552,6 +570,15 @@ def reviewed_implementation_gap(
     record = load_implementation_gap_migrations().get((path, old_case.get("name"), occurrence))
     if record is None:
         return False
+    if record.get("kind") == "tds-suite":
+        # No statement-level transport exemption: only these complete reviewed
+        # before/after execution trees can change the historical mixed case.
+        if any(not isinstance(case.get("tds"), dict) or "sql" in case
+               for case in (old_case, new_case)):
+            return False
+        return all(policy_digest(value) == record[key] for key, value in (
+            ("old_suite_sha256", old_suite), ("new_suite_sha256", new_suite),
+            ("old_case_sha256", old_case), ("new_case_sha256", new_case)))
     if any(key in case for case in (old_case, new_case) for key in ("scm", "steps", "tds_probe")):
         return False
     if type(new_case.get("noncritical", False)) is not bool:

@@ -833,6 +833,20 @@
       "new_context_sha256": "faeec66287db3c1ef855ea0c6ae23d35b083e0b9a6e859962b4a8c2ee43d13bd",
       "old_case_sha256": "a52bed677d1c179fa47d881ab3985a68797b57ab1ec844ed794635d6f3b6b4cc",
       "new_case_sha256": "6773f29b3ca36f0bc2a7a461ae928462221038bfe8970783c2e2b7e4bd30fd64"
+    },
+    {
+      "kind": "tds-suite",
+      "path": "tests/sql/compatibility/tsql-scalar-character-loops.yaml",
+      "name": "Unsupported loop control and relational bodies fail before publication",
+      "occurrence": 1,
+      "syntax": "tsql",
+      "old_suite_sha256": "e2c867c8b38ce20d7545dc469a639a42e73461ad0d7ce97f3f2b551c1a7e4978",
+      "new_suite_sha256": "aab80c7c39f3d6e76003a300b292d655d07089cd170efc08d03f03fa8ce13f1f",
+      "old_case_sha256": "82e5f90fb569772b73d8ce16595d755d5638857b9f9be8af48b94048c1f78c23",
+      "new_case_sha256": "cc30280a3ac269b96206d2bb2dc5da49e731bb25cfbddbd42f436cfb36e83803",
+      "review_patch": "tests/implementation-gap-migrations/tsql-scalar-character-loops.patch",
+      "reason": "Split one mixed unsupported-feature sequence into independent valid RETURN, finite CONTINUE and finite relational-WHILE positive noncritical cases. BREAK stays critical, invalid declarations and division by zero remain must-fail. Complete transport trees, fixtures and all sibling assertions are locked.",
+      "reference": "https://learn.microsoft.com/en-us/sql/t-sql/language-elements/while-transact-sql"
     }
   ]
 }

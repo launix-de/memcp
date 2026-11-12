@@ -18,7 +18,8 @@ semantics or projection coverage: each listed oracle is reviewed against all
 selected columns and fixture values. A record is not a license to remove other
 assertions or reclassify another error.
 
-This draft contains 26 derived migrations. The wider scan found 85 explicitly
+This draft contains 26 derived statement migrations and one exact transport-suite
+split. The wider scan found 85 explicitly
 labelled candidates among 1409 top-level error assertions. That wording is only
 an inventory lead: unknown catalogs, invalid arithmetic/type combinations,
 malformed syntax and safety/admission failures remain negative. Binary encoding
@@ -60,6 +61,38 @@ JOIN keeps the original twelve-row bag, now ordered only by its visible `id`.
 | sql/compatibility/tsql-temporal.yaml | TRY clock-only datetime refuses unsupported fractional carriers | 1 rows; Valid T-SQL behavior; complete projected values are specified. Historical negative identity retained. |
 | sql/compatibility/tsql-temporal.yaml | TRY_CAST refuses unsupported fractional temporal carriers | 1 rows; Valid T-SQL behavior; complete projected values are specified. Historical negative identity retained. |
 | sql/compatibility/tsql-temporal.yaml | TRY_CONVERT refuses unsupported fractional temporal carriers | 1 rows; Valid T-SQL behavior; complete projected values are specified. Historical negative identity retained. |
+| sql/compatibility/tsql-scalar-character-loops.yaml | Unsupported loop control and relational bodies fail before publication | Exact five-way split: RETURN, finite CONTINUE and finite relational WHILE become independent positive noncritical cases; BREAK and an independent publication check remain critical. Existing invalid declarations, division errors and detailed BREAK result checks stay unchanged. |
+
+## Exact scalar-loop transport migration
+
+The [review patch](implementation-gap-migrations/tsql-scalar-character-loops.patch)
+targets a suite introduced in the feature branch, absent from this infrastructure
+branch's base. It is intentionally a review artifact rather than an active copy
+of tests whose scalar-loop implementation is absent here. Apply this exact patch
+only after the separately approved infrastructure update reaches the trusted base.
+
+The mixed historical TDS case reused `invalid_loop` after each assumed failure.
+Once BREAK succeeds, later declarations collide with that published function.
+Independent function names and explicit cleanup remove that accidental coupling.
+The historical case identity remains on the RETURN specification. The two existing
+positive BREAK cases remain critical with their complete result oracles intact.
+Duplicate variable declarations and division by zero remain expected failures.
+
+CONTINUE's old unconditional loop could not terminate with a positive counter.
+Its positive specification decrements the counter before CONTINUE and observes
+which subsequent assignments are skipped. The old relational WHILE referenced a
+missing table and had no terminating row predicate. Its positive specification
+uses a declared two-row fixture and `id=@count`, so each updated binding changes
+the next condition. Calls cover active, absent, zero and NULL inputs. No missing
+catalog or invalid-SQL rule becomes an implementation-gap exception.
+
+This one transport migration is authorized by hashes of the **complete** old and
+new suite and historical case, using typed JSON. That includes all statements,
+child expectations, metadata, fixtures, session/authentication options and critical
+sibling tests. There is no generic transport error-to-success exception. Changing
+any element requires another exact administrative review. The added Python guard
+cases cover altered child SQL/oracles, Boolean-versus-integer substitutions,
+fixtures, sessions, authentication, removed children and weakened critical siblings.
 
 ## Administrative policy-update procedure
 
