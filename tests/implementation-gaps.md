@@ -71,11 +71,18 @@ branch's base. It is intentionally a review artifact rather than an active copy
 of tests whose scalar-loop implementation is absent here. Apply this exact patch
 only after the separately approved infrastructure update reaches the trusted base.
 
+The frozen source is feature commit `6f8c15794`: its 13 cases become 17 cases.
+Every existing case except the one historical mixed sequence remains byte-for-byte
+equivalent after YAML parsing. In particular all four proved BREAK/RETURN cases
+retain their critical status and complete result expectations.
+
 The mixed historical TDS case reused `invalid_loop` after each assumed failure.
 Once BREAK succeeds, later declarations collide with that published function.
 Independent function names and explicit cleanup remove that accidental coupling.
 The historical case identity remains on the RETURN specification. The two existing
-positive BREAK cases remain critical with their complete result oracles intact.
+positive BREAK cases and both early-RETURN cases remain critical with their complete
+result oracles intact. The migrated historical RETURN specification can initially
+remain noncritical; proving that exact new specification permits promotion to critical.
 Duplicate variable declarations and division by zero remain expected failures.
 
 CONTINUE's old unconditional loop could not terminate with a positive counter.
