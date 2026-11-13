@@ -114,6 +114,13 @@ BIGINT endpoints: checking a wrapped result afterwards would lose overflow. */
 			(if overflow (raise_error 8115 "arithmetic integer overflow" 1)
 				(match operation "add" (+ left right) "subtract" (- left right)
 					"multiply" (* left right))))))) tsql_raise_error)))
+(define tsql_numeric_condition_result (lambda (infos) (begin
+	(define input (car infos))
+	(sql_info (list tsql_arithmetic_value (tsql_ansi_warnings_formula)
+		(list 'lambda '() (sql_info_formula input)))
+		(sql_info_datatype input) (sql_info_collation input)))))
+(define tsql_numeric_condition_expr (lambda (expression)
+	(list 'sql_compile_expr 'tsql_numeric_condition_result expression)))
 (define tsql_arithmetic_result (lambda (infos) (begin
 	(define input (car infos))
 	(define type (sql_info_type input))
@@ -868,9 +875,11 @@ from declared virtual property metadata, never from a runtime value carrier. */
 		"SMALLDATETIME" (tsql_temporal_cast_expr value name 0 dimensions)
 		"TIME" (tsql_temporal_cast_expr value name 0 dimensions)
 		_ (error "unsupported conversion to " name)))
-	(if (has? '("CHAR" "VARCHAR" "NCHAR" "NVARCHAR" "BINARY" "VARBINARY" "DECIMAL" "NUMERIC") name) formula
+	(define typed (if (has? '("CHAR" "VARCHAR" "NCHAR" "NVARCHAR" "BINARY" "VARBINARY" "DECIMAL" "NUMERIC") name) formula
 		(list (quote sql_type_expr) formula
-			(if (empty_list? dimensions) name (list name (tsql_decl_dimensions name dimensions))) nil)))))
+			(if (empty_list? dimensions) name (list name (tsql_decl_dimensions name dimensions))) nil)))
+	(if (has? '("INT" "INTEGER" "BIGINT" "SMALLINT" "TINYINT" "FLOAT" "REAL" "DECIMAL" "NUMERIC" "MONEY" "SMALLMONEY") name)
+		(tsql_numeric_condition_expr typed) typed))))
 /* Assignment conversion is distinct from explicit CAST/CONVERT. Inspect the
 SQL source contract before using the ordinary width/scale conversion compiler;
 the native value carrier cannot establish whether a legacy date is an integer.
@@ -984,7 +993,7 @@ local variables and module parameters keep their ordinary width conversion. */
 			(if (equal? scale 0) (tsql_implicit_cast_expr value type (list precision scale)) (begin
 				(define threshold (- (simplify (concat "1e" (- precision scale)))
 					(* 0.5 (simplify (concat "1e-" scale)))))
-				(list (quote sql_type_expr) (list (quote tsql_assignment_decimal) value threshold) type nil))))
+				(tsql_numeric_condition_expr (list (quote sql_type_expr) (list (quote tsql_assignment_decimal) value threshold) type nil)))))
 		value))))
 /* DEFAULT is frontend syntax for the existing column declaration. Share this
 translation between explicit INSERT cells and UPDATE assignments. Omitted
