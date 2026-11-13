@@ -264,7 +264,8 @@ profile supplies its error boundary at the ordinary relational expression. */
 	((symbol quote) _value) formula
 	(list head _previous ((symbol lambda) '() body))
 	(if (or (equal? head 'tsql_arithmetic_value) (expression_equal? head tsql_arithmetic_value))
-		(list head enabled (list 'lambda '() (tsql_computed_policy_formula body enabled)))
+		(if enabled (tsql_computed_policy_formula body true)
+			(list head false (list 'lambda '() (tsql_computed_policy_formula body false))))
 		(cons (tsql_computed_policy_formula head enabled)
 			(map (cdr formula) (lambda (child) (tsql_computed_policy_formula child enabled)))))
 	(cons head arguments) (cons (tsql_computed_policy_formula head enabled)
@@ -457,11 +458,20 @@ locals or capture layout. Only this exact pure helper registry is restored. */
 /* Older native computations have no frontend expression profile. Their pure
 ON definition remains readable; OFF cannot reconstruct lost SQL operation
 boundaries from an optimized callable and therefore reports that absence. */
+/* The Scheme reader produces expression symbols for reserved scalar literals.
+Restore only those exact data encodings before applying the pure recipe checks. */
+(define tsql_computed_recipe_data (lambda (expression) (match expression
+	(symbol true) true
+	(symbol false) false
+	(symbol nil) nil
+	(cons head arguments) (cons (tsql_computed_recipe_data head)
+		(map arguments tsql_computed_recipe_data))
+	_ expression)))
 (define tsql_computed_off_function (lambda (source declaration recipe) (begin
 	(define properties (coalesceNil (declaration "Properties") '()))
 	(define encoded (properties "tsql.computed.off"))
 	(if (string? encoded) true (error "computed declaration has no ANSI_WARNINGS OFF expression profile"))
-	(define formula (match (scheme encoded)
+	(define formula (match (tsql_computed_recipe_data (expression_syntax (scheme encoded)))
 		(list "tsql-computed-off-v1" body) body
 		_ (error "invalid computed expression profile")))
 	(if (and (tsql_computed_formula_safe? formula) (tsql_computed_recipe_comparisons? formula)) true
