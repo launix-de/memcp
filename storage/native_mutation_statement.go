@@ -66,7 +66,7 @@ func (operation *nativeMutationOperation) admitCompletionStatementTable(t *table
 	if statement.tables[t] != nil {
 		return
 	}
-	lease, err := t.writeAdmission.admitStatement(operation, operation.state)
+	lease, err := t.admitStatement(operation)
 	if err != nil {
 		panic(err)
 	}

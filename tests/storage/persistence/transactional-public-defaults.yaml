@@ -11,7 +11,9 @@ setup:
 - sql: CREATE TABLE public_default_tds(id INT PRIMARY KEY,value INT)
 - sql: CREATE TABLE public_default_named(id INT PRIMARY KEY,value INT)
 - sql: CREATE TABLE public_default_deferred(id INT PRIMARY KEY,value INT DEFAULT 3)
+- sql: CREATE TABLE public_default_acid(id INT PRIMARY KEY,value INT,label VARCHAR(3))
 cleanup:
+- sql: DROP TABLE IF EXISTS public_default_acid
 - scm: (dropprocedure "memcp-tests" "public_default_source" true)
 - sql: DROP TABLE IF EXISTS public_default_native
 - sql: DROP TABLE IF EXISTS public_default_mysql
@@ -212,3 +214,29 @@ test_cases:
     - sql: INSERT public_default_tds(id) VALUES(2)
     - sql: SELECT id,value FROM public_default_tds ORDER BY id
       expect: {rows: 2,data: [{id: 1,value: 19},{id: 2,value: 19}]}
+
+- name: The ACID checked statement borrows its own default only declaration lease
+  tds:
+    statements:
+    - connection: acid_owner
+      sql: SET ANSI_WARNINGS ON; BEGIN TRANSACTION; ALTER TABLE public_default_acid ADD CONSTRAINT DF_public_acid DEFAULT 29 FOR value; INSERT public_default_acid(id,label) VALUES(1,'abc'),(2,'def')
+    - connection: acid_owner
+      sql: BEGIN TRY UPDATE public_default_acid SET label=CASE WHEN id=1 THEN 'xy' ELSE 'long' END; END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS code,@@TRANCOUNT AS depth; END CATCH; SELECT id,value,label FROM public_default_acid ORDER BY id
+      expect:
+        data: [{code: 8152,depth: 1},{id: 1,value: 29,label: abc},{id: 2,value: 29,label: def}]
+    - connection: acid_owner
+      sql: INSERT public_default_acid(id,label) VALUES(3,'end'); COMMIT TRANSACTION
+    - connection: acid_observer
+      sql: SELECT id,value,label FROM public_default_acid ORDER BY id
+      expect:
+        rows: 3
+        data: [{id: 1,value: 29,label: abc},{id: 2,value: 29,label: def},{id: 3,value: 29,label: end}]
+- name: The same ACID default and statement ownership rolls back together
+  tds:
+    statements:
+    - connection: acid_owner
+      sql: BEGIN TRANSACTION; ALTER TABLE public_default_acid DROP CONSTRAINT DF_public_acid; ALTER TABLE public_default_acid ADD CONSTRAINT DF_public_acid_retired DEFAULT 31 FOR value; INSERT public_default_acid(id,label) VALUES(4,'new'); ROLLBACK TRANSACTION
+    - connection: acid_observer
+      sql: INSERT public_default_acid(id,label) VALUES(5,'old'); SELECT id,value,label FROM public_default_acid ORDER BY id
+      expect:
+        data: [{id: 1,value: 29,label: abc},{id: 2,value: 29,label: def},{id: 3,value: 29,label: end},{id: 5,value: 29,label: old}]

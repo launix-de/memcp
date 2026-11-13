@@ -43,19 +43,25 @@ type statementTableWriteLease struct {
 	once        sync.Once
 }
 
-func (owner *tableWriteAdmission) admitStatement(operation *nativeMutationOperation, transaction *transactionState) (*statementTableWriteLease, error) {
-	owner.mu.Lock()
-	defer owner.mu.Unlock()
-	if operation == nil || transaction == nil {
+// Caller owns operation.mu. A default-only declaration may lend its already
+// exclusive endpoint to this same transaction's statement. Its immutable native
+// writer summary excludes pending FK/CHECK/trigger enforcement declarations.
+func (t *table) admitStatement(operation *nativeMutationOperation) (*statementTableWriteLease, error) {
+	if operation == nil || operation.state == nil || operation.invocation == nil ||
+		operation.invocation.transactionState != operation.state {
 		return nil, fmt.Errorf("statement writer requires native operation ownership")
 	}
+	transaction := operation.state
+	owner := &t.writeAdmission
+	owner.mu.Lock()
+	defer owner.mu.Unlock()
 	if owner.statement != nil {
 		if owner.statement.operation == operation && owner.statement.transaction == transaction {
 			return owner.statement, nil
 		}
 		return nil, fmt.Errorf("native statement conflicts with an active table writer; retry transaction")
 	}
-	if owner.declaration != nil {
+	if owner.declaration != nil && (owner.declaration != transaction || !operation.invocation.publicDefaultMutationAllowed(t)) {
 		return nil, fmt.Errorf("native statement conflicts with a pending declaration; retry transaction")
 	}
 	for writer := range owner.writers {
