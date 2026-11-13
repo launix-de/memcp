@@ -243,3 +243,133 @@ test_cases:
   expect:
     rows: 4
     data: [{id: 1,value: 7,phase: 1},{id: 2,value: null,phase: 1},{id: 1,value: 17,phase: 2},{id: 2,value: null,phase: 2}]
+
+- name: A trigger drops multiple local result generations across rollback and repeated commit
+  setup:
+  - sql: CREATE TABLE select_into_multi_input(id INT PRIMARY KEY,value INT)
+  - sql: INSERT select_into_multi_input VALUES(1,7),(2,NULL)
+  - sql: CREATE TABLE select_into_multi_log(id INT,value INT,phase INT)
+  - sql: |-
+      CREATE TRIGGER select_into_multi_drop ON select_into_multi_input AFTER UPDATE AS BEGIN
+       SET NOCOUNT ON;
+       SELECT id,value INTO #first FROM inserted;
+       SELECT id,value INTO #second FROM inserted;
+       INSERT select_into_multi_log SELECT id,value,1 FROM #first;
+       INSERT select_into_multi_log SELECT id,value,2 FROM #second;
+       DROP TABLE #first,#second;
+       SELECT id,value+10 AS value INTO #first FROM inserted;
+       SELECT id,value+20 AS value INTO #second FROM inserted;
+       INSERT select_into_multi_log SELECT id,value,3 FROM #first;
+       INSERT select_into_multi_log SELECT id,value,4 FROM #second;
+       DROP TABLE IF EXISTS #absent,#first,#second;
+      END
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: UPDATE select_into_multi_input SET value=value
+      expect:
+        affected_rows: 2
+    - connection: owner
+      sql: SELECT id,value,phase FROM select_into_multi_log ORDER BY phase,id
+      expect:
+        rows: 8
+        data:
+        - id: 1
+          value: 7
+          phase: 1
+        - id: 2
+          value: null
+          phase: 1
+        - id: 1
+          value: 7
+          phase: 2
+        - id: 2
+          value: null
+          phase: 2
+        - id: 1
+          value: 17
+          phase: 3
+        - id: 2
+          value: null
+          phase: 3
+        - id: 1
+          value: 27
+          phase: 4
+        - id: 2
+          value: null
+          phase: 4
+    - connection: observer
+      sql: SELECT COUNT(*) AS published FROM select_into_multi_log
+      expect:
+        rows: 1
+        data:
+        - published: 0
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: observer
+      sql: SELECT COUNT(*) AS published FROM select_into_multi_log
+      expect:
+        rows: 1
+        data:
+        - published: 0
+    - connection: owner
+      sql: UPDATE select_into_multi_input SET value=value
+      expect:
+        affected_rows: 2
+    - connection: observer
+      sql: SELECT id,value,phase FROM select_into_multi_log ORDER BY phase,id
+      expect:
+        rows: 8
+        data:
+        - id: 1
+          value: 7
+          phase: 1
+        - id: 2
+          value: null
+          phase: 1
+        - id: 1
+          value: 7
+          phase: 2
+        - id: 2
+          value: null
+          phase: 2
+        - id: 1
+          value: 17
+          phase: 3
+        - id: 2
+          value: null
+          phase: 3
+        - id: 1
+          value: 27
+          phase: 4
+        - id: 2
+          value: null
+          phase: 4
+    - connection: owner
+      sql: UPDATE select_into_multi_input SET value=value
+      expect:
+        affected_rows: 2
+    - connection: observer
+      sql: SELECT phase,COUNT(*) AS copies,SUM(CASE WHEN value IS NULL THEN 1 ELSE 0 END) AS nulls FROM select_into_multi_log
+        GROUP BY phase ORDER BY phase
+      expect:
+        rows: 4
+        data:
+        - phase: 1
+          copies: 4
+          nulls: 2
+        - phase: 2
+          copies: 4
+          nulls: 2
+        - phase: 3
+          copies: 4
+          nulls: 2
+        - phase: 4
+          copies: 4
+          nulls: 2
+  cleanup:
+  - sql: DROP TRIGGER IF EXISTS select_into_multi_drop
+  - sql: DROP TABLE IF EXISTS select_into_multi_input
+  - sql: DROP TABLE IF EXISTS select_into_multi_log
