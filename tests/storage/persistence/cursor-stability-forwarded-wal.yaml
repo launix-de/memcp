@@ -12,7 +12,7 @@ cleanup:
 - sql: DROP TABLE IF EXISTS cs_forward_ready
 - sql: DROP TABLE IF EXISTS cs_forward_rows
 test_cases:
-- name: A native cursor-stability writer commits UPDATE and DELETE through its retained generation
+- name: A retained native generation forwards two hundred replacements and a DELETE
   parallel: cs_forward_publication
   scm: |
     (begin
@@ -37,7 +37,10 @@ test_cases:
               (begin
                 (insert ready '("id") (list (list 1)))
                 (await_publication 300)
-                (update '("value" 11)))
+                (if (update '("value" 10)) (error "same-value UPDATE changed a row"))
+                (reduce (produceN 200) (lambda (_done index)
+                  (if (update (list "value" (+ 11 index))) true
+                    (error "replacement UPDATE lost its target"))) true))
               (update))
             (+ acc 1))) 0 +))
         (tx_commit owner)
@@ -59,7 +62,7 @@ test_cases:
   expect: {result: true}
 - name: The published generation exposes exactly the committed mutations
   sql: SELECT id,value FROM cs_forward_rows ORDER BY id
-  expect: {rows: 2,data: [{id: 1,value: 11},{id: 3,value: 30}]}
+  expect: {rows: 2,data: [{id: 1,value: 210},{id: 3,value: 30}]}
 - name: Crash before a shutdown checkpoint can replace the forwarded WAL
   scm: (crash)
   expect: {interrupted_ok: true}
@@ -67,4 +70,4 @@ test_cases:
   action: restart
 - name: Crash recovery retains the forwarded UPDATE and DELETE exactly once
   sql: SELECT id,value FROM cs_forward_rows ORDER BY id
-  expect: {rows: 2,data: [{id: 1,value: 11},{id: 3,value: 30}]}
+  expect: {rows: 2,data: [{id: 1,value: 210},{id: 3,value: 30}]}

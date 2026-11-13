@@ -1661,7 +1661,6 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 		result := false // result = true when update was possible; false if there was a RESTRICT
 		targetIdx := idx
 		var maintenanceNext *storageShard
-		var maintenanceUpdateChanges []scm.Scmer
 		if len(a) > 0 {
 			// update command
 			t.t.requireCheckMutation(currentTx, "UPDATE")
@@ -1672,6 +1671,38 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 			var newRecid uint32                      // recid of the newly inserted row (for tx undo)
 			var dualWriteCols []string               // captured for dual-write forwarding
 			var dualWriteRow [][]scm.Scmer           // captured for dual-write forwarding
+			var successorBarriers []replacementWALBarrier
+			replacementComplete := false
+			if currentTx == nil && t.t.PersistencyMode == Safe {
+				defer func() {
+					// Every acquired generation unwinds even if mutation or fsync
+					// panics. The entries belong to this invocation, never a registry.
+					defer func() {
+						for _, barrier := range successorBarriers {
+							if barrier.generation != nil {
+								barrier.generation.releaseOperation()
+							}
+						}
+					}()
+					if !replacementComplete || !result {
+						return
+					}
+					flush := func() {
+						generation := t.generation.Load()
+						if t.logfile != nil && (generation == nil || !generation.retired.Load()) {
+							t.logfile.Flush(true)
+						}
+						for _, barrier := range successorBarriers {
+							barrier.flush()
+						}
+					}
+					if alreadyLocked {
+						t.runWithWriteLockReleased(currentTx, flush)
+					} else {
+						flush()
+					}
+				}()
+			}
 			// Build a row in schema-column order from a delta-ordered row buffer.
 			schemaRowFromDelta := func(deltaRow dataset) dataset {
 				row := make(dataset, len(declarations))
@@ -1941,18 +1972,7 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 				}
 
 				payloadCols, payloadRow := buildPayload()
-				newRecid = t.main_count + uint32(len(t.deltaRows()))
-				t.insertDataset(payloadCols, [][]scm.Scmer{payloadRow}, nil, nil, currentTx)
-				if !acidMode && !uniqueCheckNeeded {
-					// Atomic visibility switch under shard write lock:
-					// make new row hidden first, then delete old, then publish new.
-					t.deletions.Set(uint(newRecid), true)
-					t.deletions.Set(uint(targetIdx), true)
-					t.deletions.Set(uint(newRecid), false)
-					// The shard write lock serializes replacement of the current
-					// visible version. Stale callbacks resolve their target above;
-					// this publication preserves PRIMARY-key uniqueness directly.
-				}
+				newRecid = t.replacePreparedRowLocked(targetIdx, payloadCols, payloadRow, currentTx, false, false, &successorBarriers)
 				// Capture for dual-write forwarding (cols/d2 are closure-local).
 				// Use repartitionDualWriteActive (set after Phase B snapshot)
 				// so rows already in the snapshot are not dual-written again.
@@ -1961,57 +1981,11 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 					dualWriteRow = [][]scm.Scmer{payloadRow}
 				}
 
-				if currentTx != nil && currentTx.Mode == TxACID {
-					// Check if old row was staged by this tx (in UndeleteMask)
-					st := currentTx.getShardTx(t)
-					wasStaged := st != nil && st.UndeleteMask.Get(uint(targetIdx))
-					if wasStaged {
-						// Row was staged by this tx → remove from UndeleteMask.
-						// Keep shard.deletions[targetIdx]=true (already globally hidden).
-						// Don't add to DeleteMask (not a pre-existing row).
-						st.UndeleteMask.Set(uint(targetIdx), false)
-					} else {
-						// Pre-existing committed row → undo temporary global deletion
-						t.deletions.Set(uint(targetIdx), false)
-						currentTx.AddToDeleteMask(t, targetIdx)
-					}
-					// Stage new version: hide globally, add to undelete mask
-					t.deletions.Set(uint(newRecid), true)
-					t.rollbackProtected.Set(uint(newRecid), true)
-					currentTx.AddToUndeleteMask(t, newRecid)
-					// Only log the insert (delete applied at commit)
-					if (t.t.PersistencyMode == Safe || t.t.PersistencyMode == Logged) && t.logfile != nil {
-						t.writeRecoveryEntry(LogEntryInsertHidden{cols: payloadCols, values: [][]scm.Scmer{payloadRow}, txID: currentTx.durableID()})
-					}
-				} else {
-					// Cursor-stability / no-tx: existing behavior
-					if currentTx != nil {
-						t.rollbackProtected.Set(uint(targetIdx), true)
-						// Register undo state before WAL I/O. A storage panic must
-						// be able to reverse every mutation already made in memory.
-						currentTx.LogDelete(t, targetIdx)
-						currentTx.LogInsert(t, newRecid)
-					}
-					if (t.t.PersistencyMode == Safe || t.t.PersistencyMode == Logged) && t.logfile != nil {
-						txID := ""
-						if currentTx != nil {
-							txID = currentTx.durableID()
-						}
-						t.writeRecoveryEntry(LogEntryDelete{idx: targetIdx, txID: txID})
-						t.writeRecoveryEntry(LogEntryInsert{cols: payloadCols, values: [][]scm.Scmer{payloadRow}, txID: txID})
-					}
-				}
 				if eventWriter != nil {
 					eventChunk = eventWriter.capture(nativeMutationUpdate, eventOldRow, schemaRowFromDelta(d2))
 				}
-				maintenanceNext = t.nextForMaintenanceLocked(&targetIdx)
-				if maintenanceNext != nil {
-					maintenanceUpdateChanges = make([]scm.Scmer, 0, 2*len(payloadCols))
-					for i, col := range payloadCols {
-						maintenanceUpdateChanges = append(maintenanceUpdateChanges, scm.NewString(col), payloadRow[i])
-					}
-				}
 			}()
+			replacementComplete = true
 			if eventWriter != nil {
 				if alreadyLocked {
 					t.runWithWriteLockReleased(currentTx, func() { eventWriter.flush(eventChunk, uniqueGuard) })
@@ -2022,9 +1996,6 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 			// Dual-write: forward the new row to the secondary shard set
 			if result && dualWriteRow != nil {
 				t.t.dualWriteInsertFromOld(t, newRecid, dualWriteCols, dualWriteRow, currentTx)
-			}
-			if result && currentTx == nil && t.t.PersistencyMode == Safe && t.logfile != nil {
-				defer t.logfile.Flush(true)
 			}
 			if withTrigger && triggerOldRow != nil {
 				if alreadyLocked {
@@ -2191,11 +2162,7 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 			if maintenanceNext != nil {
 				// Propagate to the rebuild successor shard via the stable
 				// old→new recid translation published by rebuild().
-				if len(a) > 0 {
-					t.propagateUpdateToNext(maintenanceNext, targetIdx, currentTx, uniqueGuard, scm.NewSlice(maintenanceUpdateChanges))
-				} else {
-					t.propagateDeleteToNext(maintenanceNext, idx, currentTx, uniqueGuard)
-				}
+				t.propagateDeleteToNext(maintenanceNext, idx, currentTx, uniqueGuard)
 			}
 		}
 		completed = true
@@ -2203,20 +2170,148 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 	}
 }
 
-// propagateUpdateToNext uses the old→new recid translation built by rebuild()
-// and extended by mirrored delta inserts.
-func (t *storageShard) propagateUpdateToNext(next *storageShard, oldRecid uint32, currentTx *TxContext, uniqueGuard *uniqueWriteGuard, a ...scm.Scmer) {
+// replacementWALBarrier retains an already published generation through the
+// nil-transaction SAFE barrier. Unpublished successors have no generation yet;
+// their current maintenance owner retains the private build/publication window.
+type replacementWALBarrier struct {
+	shard      *storageShard
+	generation *tableShardTopology
+}
+
+func (barrier replacementWALBarrier) flush() {
+	generation := barrier.generation
+	if generation == nil {
+		// A private successor may have been published while source ownership
+		// was released. Borrow its actual existing generation when available.
+		generation = barrier.shard.generation.Load()
+		if generation != nil {
+			if !generation.acquireOperation() {
+				return // retirement already made its successor durable
+			}
+			defer generation.releaseOperation()
+		}
+	}
+	if generation == nil || !generation.retired.Load() {
+		barrier.shard.logfile.Flush(true)
+	}
+}
+
+// replacePreparedRowLocked is the physical copy-on-write step shared by an
+// admitted UPDATE and its rebuild replica. The complete stored payload has
+// already passed logical validation/default/trigger processing at the source.
+// Caller holds t.mu; no logical callbacks or UNIQUE probes run in this step.
+func (t *storageShard) replacePreparedRowLocked(oldRecid uint32, columns []string, row []scm.Scmer, currentTx *TxContext, replica, oldStaged bool, successorBarriers *[]replacementWALBarrier) uint32 {
+	acidMode := currentTx != nil && currentTx.Mode == TxACID
+	generation := t.generation.Load()
+	active := generation == nil || !generation.retired.Load()
+	// A retired intermediate generation carries translation and visibility to
+	// its ready successor, not another WAL/transaction participant incarnation.
+	journal := currentTx != nil && (!replica || active)
+	newRecid := t.main_count + uint32(len(t.deltaRows()))
+	t.insertDataset(columns, [][]scm.Scmer{row}, nil, nil, currentTx)
+	// Forward/log actual stored values if the native append supplied an ID.
+	// Ordinary complete replacement payloads already match and need no copy.
+	stored := t.deltaRows()[newRecid-t.main_count]
+	for i, column := range columns {
+		if row[i] != stored[t.deltaColumns[column]] {
+			row = append([]scm.Scmer(nil), row...)
+			for j := i; j < len(columns); j++ {
+				row[j] = stored[t.deltaColumns[columns[j]]]
+			}
+			break
+		}
+	}
+	if !acidMode {
+		// Atomic visibility switch under shard write lock:
+		// make new row hidden first, then delete old, then publish new.
+		t.deletions.Set(uint(newRecid), true)
+		t.deletions.Set(uint(oldRecid), true)
+		t.deletions.Set(uint(newRecid), false)
+		// The shard write lock serializes replacement of the current
+		// visible version. Stale callbacks resolve their target above;
+		// this publication preserves PRIMARY-key uniqueness directly.
+	}
+
+	if currentTx != nil && currentTx.Mode == TxACID {
+		// Check if old row was staged by this tx (in UndeleteMask)
+		st := currentTx.getShardTx(t)
+		if st != nil && st.UndeleteMask.Get(uint(oldRecid)) {
+			oldStaged = true
+			// Row was staged by this tx → remove from UndeleteMask.
+			// Keep shard.deletions[oldRecid]=true (already globally hidden).
+			// Don't add to DeleteMask (not a pre-existing row).
+			st.UndeleteMask.Set(uint(oldRecid), false)
+		} else if !oldStaged {
+			// Pre-existing committed row → undo temporary global deletion
+			t.deletions.Set(uint(oldRecid), false)
+			if journal {
+				currentTx.AddToDeleteMask(t, oldRecid)
+			}
+		}
+		// A checkpoint copy can inherit staged provenance without having its
+		// own old-row overlay yet. Such an uncommitted version stays hidden.
+		if oldStaged {
+			t.deletions.Set(uint(oldRecid), true)
+		}
+		// Stage new version: hide globally, add to undelete mask
+		t.deletions.Set(uint(newRecid), true)
+		t.rollbackProtected.Set(uint(newRecid), true)
+		if journal {
+			currentTx.AddToUndeleteMask(t, newRecid)
+		}
+		// Only log the insert (delete applied at commit)
+		if active && (t.t.PersistencyMode == Safe || t.t.PersistencyMode == Logged) && t.logfile != nil {
+			t.writeRecoveryEntry(LogEntryInsertHidden{cols: columns, values: [][]scm.Scmer{row}, txID: currentTx.durableID()})
+		}
+	} else {
+		// Cursor-stability / no-tx: existing behavior
+		if journal {
+			t.rollbackProtected.Set(uint(oldRecid), true)
+			// Register undo state before WAL I/O. A storage panic must
+			// be able to reverse every mutation already made in memory.
+			currentTx.LogDelete(t, oldRecid)
+			currentTx.LogInsert(t, newRecid)
+		}
+		if active && (t.t.PersistencyMode == Safe || t.t.PersistencyMode == Logged) && t.logfile != nil {
+			txID := ""
+			if currentTx != nil {
+				txID = currentTx.durableID()
+			}
+			t.writeRecoveryEntry(LogEntryDelete{idx: oldRecid, txID: txID})
+			t.writeRecoveryEntry(LogEntryInsert{cols: columns, values: [][]scm.Scmer{row}, txID: txID})
+		}
+	}
+	if next := t.nextForMaintenanceLocked(&oldRecid); next != nil {
+		t.propagateUpdateToNext(next, oldRecid, newRecid, columns, row, currentTx, oldStaged, successorBarriers)
+	}
+	return newRecid
+}
+
+// propagateUpdateToNext mirrors a completed physical replacement while the
+// source mutation lock still orders writers. Every new source version receives
+// its own successor version; no logical UPDATE/default/trigger runs twice.
+func (t *storageShard) propagateUpdateToNext(next *storageShard, oldRecid, replacementRecid uint32, columns []string, row []scm.Scmer, currentTx *TxContext, oldStaged bool, successorBarriers *[]replacementWALBarrier) {
 	targetRecid, ok := t.translateNextRecid(oldRecid)
 	if !ok {
-		// The successor stays write-locked until rebuild() has published the
-		// initial translation. Wait for that point once, then retry the map.
-		next.mu.Lock()
-		next.mu.Unlock()
-		targetRecid, ok = t.translateNextRecid(oldRecid)
+		panic("completed rebuild is missing a live row translation")
 	}
-	if ok {
-		next.UpdateFunction(targetRecid, false, false, currentTx, uniqueGuard)(a...)
+	next.mu.Lock()
+	defer next.mu.Unlock()
+	generation := next.generation.Load()
+	if generation != nil && generation.acquireOperation() {
+		if currentTx == nil && next.t.PersistencyMode == Safe && next.logfile != nil {
+			*successorBarriers = append(*successorBarriers, replacementWALBarrier{next, generation})
+		} else {
+			defer generation.releaseOperation()
+		}
+	} else if generation == nil && currentTx == nil && next.t.PersistencyMode == Safe && next.logfile != nil {
+		*successorBarriers = append(*successorBarriers, replacementWALBarrier{shard: next})
 	}
+	nextRecid := next.replacePreparedRowLocked(targetRecid, columns, row, currentTx, true, oldStaged, successorBarriers)
+	// This is an exact native mutation result, never a post-write delta-length
+	// guess or a key lookup. Publish it before another source writer can use the
+	// replacement, and preserve it for commit/rollback and later generations.
+	t.recordNextInsertRange(replacementRecid, nextRecid, 1)
 }
 
 // propagateDeleteToNext uses the old→new recid translation built by rebuild()
