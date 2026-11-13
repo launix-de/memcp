@@ -13197,6 +13197,11 @@ this neither stores relation rows nor adds another ordering/window decision. */
 /* UNION DISTINCT owns a complete tuple key, not the parent's projected
 columns. The logical set node stays intact until this native physical owner;
 only its finished unique relation receives the set node's final window. */
+(define physical_union_identity (lambda (block)
+	(begin
+		(define identity (qassoc_get (union_facts block) (quote physical_union_identity) nil))
+		(if identity identity (stable_structural_hash block true)))))
+
 (define lower_union_distinct_native (lambda (block)
 	(begin
 		(if (empty_list? (union_hidden_output block)) true
@@ -13213,7 +13218,7 @@ only its finished unique relation receives the set node's final window. */
 			(map (union_branches block) (lambda (branch)
 				(union_align_branch_fields branch internal_names (count canonical)))) '() nil nil
 			(qassoc_set (union_facts block) (quote alias) alias)))
-		(define stage (make_group_stage (concat "union-distinct:" (stable_structural_hash block true))
+		(define stage (make_group_stage (concat "union-distinct:" (physical_union_identity block))
 			input '() (projection_exprs fields) '() nil fields '() nil nil
 			(list (list (quote condition) true)
 				(list (quote group-value-collations)
@@ -13271,7 +13276,12 @@ build_queryplan contract. */
 			(make_union_block (union_mode node)
 				(map (union_branches node) (lambda (branch)
 					(physical_node_with_planning_context branch planning_session tx)))
-				(union_order node) (union_limit node) (union_offset node) (union_facts node))
+				(union_order node) (union_limit node) (union_offset node)
+				/* Capture identity before branch facts acquire native compile handles.
+				Those handles must never enter the set's semantic hash or a wire value. */
+				(if (equal? (union_mode node) (quote all)) (union_facts node)
+					(qassoc_set (union_facts node) (quote physical_union_identity)
+						(physical_union_identity node))))
 			node))))
 
 (define prepare_physical_queryplan (lambda (ir planning_session tx)

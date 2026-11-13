@@ -664,3 +664,39 @@ test_cases:
       (tx_rollback s)
       (list join_result nested_result private))
   expect: {result: [[2,3,0,1],[2,3,2,2],true]}
+
+- name: Native ACID compilation keeps UNION identity independent of each session owner
+  scm: |
+    (begin
+      (define shared (newcachemap))
+      (define queries (list
+        "SELECT id AS value FROM catalog_binding_rows UNION SELECT NULL FROM catalog_binding_rows ORDER BY value"
+        "SELECT id-1 AS bucket,SUM(CAST(0.5 AS FLOAT)) AS quantity FROM catalog_binding_rows GROUP BY id UNION SELECT id-1,CASE WHEN id=1 THEN 2 ELSE NULL END FROM catalog_binding_rows ORDER BY bucket,quantity"
+        "SELECT id AS value FROM catalog_binding_rows UNION SELECT NULL FROM catalog_binding_rows ORDER BY value OFFSET 1 ROWS FETCH NEXT 1 ROWS ONLY"))
+      (define run (lambda () (begin
+        (define s (newsession)) (s "username" "root") (s "schema" "memcp-tests")
+        (tx_begin_acid s)
+        (define tx (s "__memcp_tx"))
+        (define result (try (lambda ()
+          (map queries (lambda (query) (begin
+            (define out (newsession)) (out "rows" '())
+            (define formula (cached_parse shared "union-owner" (list parse_tsql)
+              "memcp-tests" query nil "root" s false tx))
+            (sql_execute_formula s tx formula
+              (lambda (row) (out "rows" (append (out "rows") (list row))))
+              (lambda args true))
+            (out "rows")))))
+          (lambda (failure) (begin (tx_rollback s) (error failure)))))
+        (tx_rollback s) result)))
+      (list (run) (run) (count (shared))))
+  expect:
+    result:
+    - - [ [value, null], [value, 1], [value, 2] ]
+      - [ [bucket, 0, quantity, 0.5], [bucket, 0, quantity, 2],
+          [bucket, 1, quantity, null], [bucket, 1, quantity, 0.5] ]
+      - [ [value, 1] ]
+    - - [ [value, null], [value, 1], [value, 2] ]
+      - [ [bucket, 0, quantity, 0.5], [bucket, 0, quantity, 2],
+          [bucket, 1, quantity, null], [bucket, 1, quantity, 0.5] ]
+      - [ [value, 1] ]
+    - 0
