@@ -4542,22 +4542,30 @@ func init() {
 		},
 	})
 	Declare(&Globalenv, &Declaration{
+		Name: "failure_value",
+		Fn: func(a ...Scmer) Scmer {
+			value := a[0]
+			for value.GetTag() == tagAny {
+				carrier, ok := value.Any().(interface{ OriginalFailure() any })
+				if !ok {
+					break
+				}
+				value = FromAny(carrier.OriginalFailure())
+			}
+			return value
+		},
+		Type: &TypeDescriptor{Kind: "func", Const: true,
+			Description: "projects a native failure's original language value for diagnostics; catch and rethrow retain the original failure owner",
+			Params:      []*TypeDescriptor{{Kind: "any", Label: "failure"}},
+			Return:      &TypeDescriptor{Kind: "any"}},
+	})
+	Declare(&Globalenv, &Declaration{
 		Name: "try",
 
 		Fn: func(a ...Scmer) (result Scmer) {
 			defer func() {
 				err := recover()
 				if err != nil {
-					// Native owners may wrap a language panic with stack or
-					// completion facts. Preserve those facts through native
-					// unwinding; expose the original value only to this handler.
-					for {
-						carrier, ok := err.(interface{ OriginalFailure() any })
-						if !ok {
-							break
-						}
-						err = carrier.OriginalFailure()
-					}
 					result = Apply(a[1], FromAny(err))
 				}
 			}()

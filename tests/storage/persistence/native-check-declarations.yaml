@@ -619,12 +619,13 @@ test_cases:
               (lambda (acc update) (begin (update (list "v" 6)) (+ acc 1))) 0 +)))))
         (define rejected (try (lambda () (begin
           (with_autocommit owner nil 0 "failed ACID statement" (lambda (tx)
-            (with_table_mutation (list h) (list "insert" '()) tx owner (lambda (tx) (begin
+            (try (lambda ()
+              (with_table_mutation (list h) (list "insert" '()) tx owner (lambda (tx) (begin
               (scan tx h '() '() '() (lambda () true) '("v" "$update")
                 (lambda (acc v update) (begin (update (list "v" (+ v 1))) (+ acc 1))) 0 +)
               (scan tx h '() '() '("id") (lambda (id) (equal? id 1)) '("$update")
                 (lambda (acc update) (begin (update) (+ acc 1))) 0 +)
-              (insert h '("id" "v") (list (list 3 -1)) '() nil false nil tx))))))
+              (insert h '("id" "v") (list (list 3 -1)) '() nil false nil tx))))) (lambda (failure) (error failure)))))
           false)) (lambda (failure) (strlike (string failure) "%check constraint CK_acid_versions failed%"))))
         (define tx (owner "__memcp_tx"))
         (define count_rows (lambda (reader)

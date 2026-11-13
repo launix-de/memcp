@@ -125,10 +125,15 @@ ordinary connection marker before this language-specific message is raised. */
 				(error (tds_diagnostic_error (list "number" 3609 "state" 1 "severity" 16
 					"text" text "server" "MemCP" "procedure" "" "line" 1)))
 				(tsql_raise_error 3609 text 1)))
-			(match failure
+			(match (failure_value failure)
 				'("tsql-error" number text state severity)
 				(if (session "wire_metadata")
 					(error (tds_diagnostic_error (list "number" number "state" state "severity" severity
+						"text" text "server" "MemCP" "procedure" "" "line" 1)))
+					(error failure))
+				'("tsql-error" number text state)
+				(if (session "wire_metadata")
+					(error (tds_diagnostic_error (list "number" number "state" state "severity" 16
 						"text" text "server" "MemCP" "procedure" "" "line" 1)))
 					(error failure))
 				_ (error failure)))))))

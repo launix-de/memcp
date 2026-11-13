@@ -1208,6 +1208,15 @@ leaves still execute through the existing statement owner and command dispatcher
 	(session "__tsql_error_message" (tsql_error_value context "message"))
 	(session "__tsql_error_state" (tsql_error_value context "state"))
 	(session "__tsql_error_severity" (tsql_error_value context "severity")))))
+/* Diagnostics inspect the language value only after the native statement has
+finished its decision. THROW retains the raw cause, including completion facts. */
+(define tsql_error_context (lambda (cause)
+	(match (failure_value cause)
+		'("tsql-error" number message state severity)
+		(list "error" cause "number" number "message" message "state" state "severity" severity)
+		'("tsql-error" number message state)
+		(list "error" cause "number" number "message" message "state" state "severity" 16)
+		_ (list "error" cause "number" nil "message" (string cause) "state" nil))))
 (define tsql_run_try (lambda (body recovery statement session resultrow resultfields)
 	(try (lambda () (tsql_run_commands body statement session resultrow resultfields))
 		(lambda (err) (if (transaction_abort_transfer? err) (error err) (begin
@@ -1215,12 +1224,7 @@ leaves still execute through the existing statement owner and command dispatcher
 			recovery capability admits this boundary, never an aborted-tx write. */
 			(statement "catch boundary" true (lambda (_tx) true))
 			(define previous (session "__tsql_error_context"))
-			(define context (match err
-				'("tsql-error" number message state severity)
-				(list "error" err "number" number "message" message "state" state "severity" severity)
-				'("tsql-error" number message state)
-				(list "error" err "number" number "message" message "state" state "severity" 16)
-				_ (list "error" err "number" nil "message" (string err) "state" nil)))
+			(define context (tsql_error_context err))
 			(tsql_install_error_context session context)
 			/* Consume the recovery result before restoring the enclosing context.
 			The eager argument boundary makes this dependency explicit instead of
