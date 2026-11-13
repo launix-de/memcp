@@ -30,9 +30,9 @@ test_cases:
   sql: >-
     SET SESSION character_set_client=utf8mb4,
     @set_contract_copy=CAST(@set_contract_clock AS INTEGER)+1,
-    @set_contract_nested=CONVERT(CAST(COALESCE(NULL,'7') AS CHAR),SIGNED),
-    @set_contract_optional=CAST(NULL AS CHAR),
-    @set_contract_fallback=COALESCE(CAST(NULL AS CHAR),'fallback')
+    @set_contract_nested=CONVERT(CAST(COALESCE(NULL,'7') AS CHARACTER),SIGNED),
+    @set_contract_optional=NULL,
+    @set_contract_fallback=COALESCE(NULL,CAST('fallback' AS CHARACTER))
   expect: {}
 - name: Read nested conversion results and unchanged NULL semantics
   session_id: set-contract-a
@@ -46,7 +46,7 @@ test_cases:
     - {charset: utf8mb4, copied: 43, nested_value: 7, optional_value: null, fallback_value: fallback}
 - name: Compile a global assignment value
   session_id: set-contract-a
-  sql: SET GLOBAL set_expression_contract_global=CONVERT(CAST('211' AS CHAR),INTEGER)
+  sql: SET GLOBAL set_expression_contract_global=CONVERT(CAST('211' AS CHARACTER),INTEGER)
   expect: {}
 - name: Read the compiled global value in its assigning session
   session_id: set-contract-a
@@ -57,5 +57,4 @@ test_cases:
   sql: SELECT @@GLOBAL.set_expression_contract_global AS value
   expect: {rows: 1, data: [{value: 211}]}
 cleanup:
-- sql: (globalvars "set_expression_contract_global" nil)
-  dialect: scm
+- scm: (globalvars "set_expression_contract_global" nil)
