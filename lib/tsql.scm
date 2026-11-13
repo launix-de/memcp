@@ -348,7 +348,7 @@ has already been proved constant; its pure declared conversion needs no session.
 Deferred SQL source remains bound by the later actual insertion session. */
 (define tsql_default_destination_value (lambda (value type dimensions)
 	(eval (tsql_computed_policy_formula
-		(sql_type_formula '() (tsql_implicit_cast_expr value type dimensions)) true))))
+		(sql_type_formula '() (tsql_implicit_cast_expr value (tsql_addition_type (toUpper type)) dimensions)) true))))
 (define tsql_prepare_column (lambda (database definition planning_session) (match definition
 	'((symbol list) "column" name type dimensions attributes) (begin
 		(define contract (tsql_resolve_schema_type database type (cdr dimensions) planning_session))
@@ -482,7 +482,8 @@ Restore only those exact data encodings before applying the pure recipe checks. 
 		_ (error "invalid computed expression profile")))
 	(if (and (tsql_computed_formula_safe? formula) (tsql_computed_recipe_comparisons? formula)) true
 		(error "computed expression profile is not a supported pure scalar"))
-	(define input_source (list "__computed" (source_schema source) (source_relation source) false nil))
+	(define input_source (list "__computed" (source_schema source) (source_relation source) false nil
+		(source_declarations source)))
 	(define inputs (extract_columns_for_alias input_source formula))
 	(if (expression_equal? inputs (car recipe)) true
 		(error "computed expression profile input declaration changed"))
