@@ -131,17 +131,17 @@ test_cases:
     - connection: observer
       sql: SELECT name FROM sys.objects WHERE name=N'default_disconnected'
       expect: {rows: 0}
-- name: Public defaults cannot be silently changed by an explicit transaction
+- name: A public default fixture retains its original value
   sql: CREATE TABLE default_public(id INT DEFAULT 3)
   expect: {rows: 0, result_not_contains: '"affected_rows"'}
-- name: Real TDS refuses nontransactional alteration of a public declaration
+- name: Real TDS rejects a second default on the same column
   tds:
     statements:
     - connection: owner
       sql: BEGIN TRANSACTION
     - connection: owner
       sql: ALTER TABLE default_public ADD DEFAULT 9 FOR id
-      expect: {error: true,contains: ['owned unpublished table']}
+      expect: {error: true,contains: ['column already has a default']}
     - connection: owner
       sql: ROLLBACK TRANSACTION
     - connection: observer
