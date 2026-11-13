@@ -2875,6 +2875,7 @@ dimensions are metadata only and are absent from the executable plan. */
 	(cons (symbol sql_compile_expr) (cons ((symbol tsql_builtin_compiler) "CHAR") _arguments)) '(1)
 	((symbol tsql_char) _value _money) '(1)
 	(cons (symbol sql_compile_expr) (cons ((symbol tsql_datename_compiler) _unit) _arguments)) '(4000)
+	(cons (symbol sql_compile_expr) (cons (symbol tsql_compile_format) _arguments)) '(4000)
 	((symbol sql_compile_expr) ((symbol tsql_text_compiler) length _national _fixed) _value) (list length)
 	((symbol sql_type_expr) formula type _collation)
 	(if (list? type) (nth type 1) (tsql_result_dimensions sources formula parameters))
@@ -3901,6 +3902,7 @@ a separator is recognized only on a physical line containing no SQL text. */
 	(coalesceNil (session "__tsql_connection_session") session)))
 
 (import "tsql-parse-context.scm")
+(import "tsql-format.scm")
 
 /* Metadata scalars require the current consuming policy. Direct queries pass
 that context explicitly; stored views refuse this scalar before publication. */
@@ -4179,6 +4181,8 @@ that context explicitly; stored views refuse this scalar before publication. */
 			(tsql_datepart_expr unit value))
 		(parser '((atom "DATENAME" true) "(" (define unit tsql_identifier) "," (define value tsql_expression) ")")
 			(tsql_datename_expr unit value))
+		(parser '((atom "FORMAT" true) "(" (define arguments (* tsql_expression ",")) ")")
+			(cons 'sql_compile_expr (cons 'tsql_compile_format arguments)))
 		(parser '((atom "DATEFROMPARTS" true) "(" (define year tsql_expression) ","
 			(define month tsql_expression) "," (define day tsql_expression) ")") (tsql_datefromparts_expr year month day))
 		(parser '((atom "EOMONTH" true) "(" (define value tsql_expression)

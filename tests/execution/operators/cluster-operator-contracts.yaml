@@ -1016,6 +1016,18 @@ test_cases:
   expect:
     data: [{id: 0, formatted: '   0.3'}, {id: 1, formatted: '   1.3'}, {id: 2, formatted: '   2.3'}]
     cluster: {min_remote_shards: 1}
+- name: tsql-custom-format-values-and-locale-captures-survive-delegation
+  syntax: tsql
+  sql: >-
+    SELECT id,FORMAT(id-1,'0000','en-US') AS number_value,
+    FORMAT(DATEADD(day,id,CONVERT(DATE,N'20240309',112)),N'ddd MMM MM\/yyyy','de-DE') AS date_value,
+    FORMAT(CASE WHEN id=2 THEN NULL ELSE id END,'000') AS nullable_value
+    FROM big_items WHERE id<3 ORDER BY id
+  expect:
+    data: [{id: 0, number_value: '-0001', date_value: 'Sa Mrz 03/2024', nullable_value: '000'},
+      {id: 1, number_value: '0000', date_value: 'So Mrz 03/2024', nullable_value: '001'},
+      {id: 2, number_value: '0001', date_value: 'Mo Mrz 03/2024', nullable_value: null}]
+    cluster: {min_remote_shards: 1}
 # Search probes use the original fixture, before the bulk DELETE cases below.
 - name: integer-cast-dynamic-text-parser
   syntax: tsql
