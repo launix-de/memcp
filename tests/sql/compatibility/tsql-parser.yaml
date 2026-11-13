@@ -172,13 +172,17 @@ test_cases:
   expect:
     error: true
 - name: IF rejects relational EXISTS until logical support exists
-  sql: IF EXISTS(SELECT id FROM dbo.tsql_data) SELECT 5 AS n
-  expect:
-    error: true
+  sql: |
+    IF EXISTS(SELECT id FROM dbo.tsql_data) SELECT 5 AS n
+  # Valid SQL implementation gap: check behavior, warn until implemented.
+  expect: {"rows": 1, "data": [{"n": 5}]}
+  noncritical: true
 - name: IF rejects scalar subqueries
-  sql: IF (SELECT 1)=1 SELECT 5 AS n
-  expect:
-    error: true
+  sql: |
+    IF (SELECT 1)=1 SELECT 5 AS n
+  # Valid SQL implementation gap: check behavior, warn until implemented.
+  expect: {"rows": 1, "data": [{"n": 5}]}
+  noncritical: true
 - name: IF rejects unbound column predicates
   sql: IF id=1 SELECT 5 AS n
   expect:
@@ -204,9 +208,11 @@ test_cases:
     rows: 1
     data: [{n: 5}]
 - name: IF rejects an internal semicolon before ELSE
-  sql: IF 1=1 SELECT 5 AS n; ELSE SELECT 6 AS n
-  expect:
-    error: true
+  sql: |
+    IF 1=1 SELECT 5 AS n; ELSE SELECT 6 AS n
+  # Valid SQL implementation gap: check behavior, warn until implemented.
+  expect: {"rows": 1, "data": [{"n": 5}]}
+  noncritical: true
 - name: IF does not dispatch arbitrary procedure text
   # Unselected EXEC must not look up or invoke a procedure.
   sql: IF 1=0 EXEC unknown_installation_procedure ELSE SELECT 5 AS n
@@ -603,9 +609,10 @@ test_cases:
   expect:
     error: true
 - name: Ordered aggregate window is explicitly unsupported
-  sql: SELECT SUM(val) OVER (ORDER BY id) AS total FROM tsql_data
-  expect:
-    error: true
+  sql: |
+    SELECT SUM(val) OVER (ORDER BY id) AS total FROM tsql_data ORDER BY total
+  # Valid SQL implementation gap: check behavior, warn until implemented.
+  expect: {"rows": 4, "data": [{"total": 10}, {"total": 40}, {"total": 90}, {"total": 110}]}
   noncritical: true
 - name: Missing USE database is rejected
   sql: USE tsql_missing_database
@@ -1187,9 +1194,11 @@ test_cases:
   expect:
     error: true
 - name: CTE rejects recursion explicitly until supported
-  sql: WITH local_rows(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM local_rows WHERE n<3) SELECT n FROM local_rows
-  expect:
-    error: true
+  sql: |
+    WITH local_rows(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM local_rows WHERE n<3) SELECT n FROM local_rows ORDER BY n
+  # Valid SQL implementation gap: check behavior, warn until implemented.
+  expect: {"rows": 3, "data": [{"n": 1}, {"n": 2}, {"n": 3}]}
+  noncritical: true
 - name: CTE rejects a self reference even when a native relation exists
   sql: WITH tsql_data AS (SELECT id FROM tsql_data) SELECT id FROM tsql_data
   expect:

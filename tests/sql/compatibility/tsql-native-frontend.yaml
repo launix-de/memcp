@@ -1496,8 +1496,13 @@ test_cases:
     sql: SET ANSI_NULLS OFF
     expect: {error: true}
   - name: Unsupported double quoted string mode is rejected
-    sql: SET QUOTED_IDENTIFIER OFF
-    expect: {error: true}
+    sql: |
+      SET QUOTED_IDENTIFIER OFF;
+      SELECT "actual literal" AS value;
+      SET QUOTED_IDENTIFIER ON;
+    # Valid SQL implementation gap: check behavior, warn until implemented.
+    expect: {"rows": 1, "data": [{"value": "actual literal"}]}
+    noncritical: true
   - name: Startup declarations reject values outside the fixed ON mode
     sql: SET ANSI_NULLS 1
     expect: {error: true}

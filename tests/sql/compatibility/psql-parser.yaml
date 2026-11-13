@@ -669,13 +669,17 @@ test_cases:
     expect:
       error: true
   - name: Unsupported window frame fails explicitly
-    sql: SELECT SUM(val) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) FROM psql_data
-    expect:
-      error: true
-
+    sql: |
+      SELECT SUM(val) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS total FROM psql_data ORDER BY total
+    # Valid SQL implementation gap: check behavior, warn until implemented.
+    expect: {"rows": 4, "data": [{"total": 10}, {"total": 40}, {"total": 70}, {"total": 80}]}
+    noncritical: true
   - name: Ordered aggregate window fails until default frames are supported
-    sql: SELECT SUM(val) OVER (ORDER BY id) FROM psql_data
-    expect: {error: true}
+    sql: |
+      SELECT SUM(val) OVER (ORDER BY id) AS total FROM psql_data ORDER BY total
+    # Valid SQL implementation gap: check behavior, warn until implemented.
+    expect: {"rows": 4, "data": [{"total": 10}, {"total": 40}, {"total": 90}, {"total": 110}]}
+    noncritical: true
 
   - name: RANK and DENSE_RANK preserve peers
     sql: SELECT id,RANK() OVER (ORDER BY name) AS rank,DENSE_RANK() OVER (ORDER BY name) AS dense FROM psql_data ORDER BY id
@@ -718,8 +722,11 @@ test_cases:
     expect: {error: true}
 
   - name: Unsupported LEAD default fails explicitly
-    sql: SELECT LEAD(val,2,-1) OVER (ORDER BY id) FROM psql_data
-    expect: {error: true}
+    sql: |
+      SELECT LEAD(val,2,-1) OVER (ORDER BY id) AS value FROM psql_data ORDER BY value
+    # Valid SQL implementation gap: check behavior, warn until implemented.
+    expect: {"rows": 4, "data": [{"value": -1}, {"value": -1}, {"value": 20}, {"value": 50}]}
+    noncritical: true
 
   - name: Ranking functions require an ordering
     sql: SELECT RANK() OVER () FROM psql_data
