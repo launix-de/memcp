@@ -95,13 +95,46 @@ cancellation and transaction failures retain their original error boundary. */
 		'("tsql-error" number _message _state)
 		(if (and (not enabled) (has? '(8115 8134) number)) nil (error cause))
 		_ (error cause)))))))
+/* Check the declared integer domain before native int64 operations, including
+BIGINT endpoints: checking a wrapped result afterwards would lose overflow. */
+(define tsql_checked_integer_operation (close_procedure ((lambda (raise_error)
+	(lambda (operation left right minimum maximum)
+		(if (or (nil? left) (nil? right)) nil (begin
+			(define overflow (match operation
+				"add" (or (and (> right 0) (> left (- maximum right)))
+					(and (< right 0) (< left (- minimum right))))
+				"subtract" (or (and (< right 0) (> left (+ maximum right)))
+					(and (> right 0) (< left (+ minimum right))))
+				"multiply" (if (or (equal? left 0) (equal? right 0)) false
+					(and (> left 0) (> right 0)) (> left (intdiv maximum right))
+					(and (> left 0) (< right 0)) (< right (intdiv minimum left))
+					(and (< left 0) (> right 0)) (< left (intdiv minimum right))
+					(< left (intdiv maximum right)))
+				_ false))
+			(if overflow (raise_error 8115 "arithmetic integer overflow" 1)
+				(match operation "add" (+ left right) "subtract" (- left right)
+					"multiply" (* left right))))))) tsql_raise_error)))
 (define tsql_arithmetic_result (lambda (infos) (begin
 	(define input (car infos))
 	(define type (sql_info_type input))
-	(define formula (if (has? '("INT" "INTEGER" "BIGINT" "SMALLINT" "TINYINT") type)
+	(define integer (has? '("INT" "INTEGER" "BIGINT" "SMALLINT" "TINYINT") type))
+	(define operand (if integer (match (sql_info_formula input)
+		'(head left right) (begin
+			(define operation (if (or (equal? head '+) (identical? head +)) "add"
+				(or (equal? head '-) (identical? head -)) "subtract"
+				(or (equal? head '*) (identical? head *)) "multiply" nil))
+			(if operation (begin
+				(define minimum (match type "TINYINT" 0 "SMALLINT" -32768
+					"BIGINT" (tsql_parse_integer "-9223372036854775808") _ -2147483648))
+				(define maximum (match type "TINYINT" 255 "SMALLINT" 32767
+					"BIGINT" (tsql_parse_integer "9223372036854775807") _ 2147483647))
+				(list tsql_checked_integer_operation operation left right minimum maximum))
+				(sql_info_formula input)))
+		_ (sql_info_formula input)) (sql_info_formula input)))
+	(define formula (if integer
 		(sql_type_formula '() (tsql_cast_expr
-			(list 'sql_type_expr (sql_info_formula input) (sql_info_datatype input) nil) type '()))
-		(sql_info_formula input)))
+			(list 'sql_type_expr operand (sql_info_datatype input) nil) type '()))
+		(has? '("FLOAT" "REAL") type) (list tsql_cast_float operand) operand))
 	(sql_info (list tsql_arithmetic_value (tsql_ansi_warnings_formula)
 		(list 'lambda '() formula)) (sql_info_datatype input) (sql_info_collation input)))))
 (define tsql_arithmetic_expr (lambda (expression)
@@ -1975,16 +2008,20 @@ runtime errors are never caught and classified by their message text. */
 		'(conversion operand minimum maximum)
 		(if (and (or (equal? conversion (quote tsql_cast_integer)) (equal? conversion tsql_cast_integer)) (plain_literal_expr? operand)
 			(< minimum 0) (equal? (tsql_cast_integer operand minimum maximum) minimum))
-			(error "unary integer conversion overflow") true)
+			(tsql_raise_error 8115 "unary integer conversion overflow" 1) true)
 		_ true)
 	(if (tsql_numeric_operand_type? type) true
 		(error "unary minus requires a numeric operand"))
-	(define negated (list (quote -) 0 formula))
+	(define negated (if (has? '("INT" "INTEGER" "BIGINT" "SMALLINT") type)
+		(list tsql_checked_integer_operation "subtract" 0 formula
+			(match type "BIGINT" (tsql_parse_integer "-9223372036854775808") "SMALLINT" -32768 _ -2147483648)
+			(match type "BIGINT" (tsql_parse_integer "9223372036854775807") "SMALLINT" 32767 _ 2147483647))
+		(list (quote -) 0 formula)))
 	(sql_info (if (has? '("MONEY" "SMALLMONEY") type)
 		(list tsql_cast_money negated (equal? type "SMALLMONEY")) negated)
 		(if (equal? type "TINYINT") "SMALLINT" type) nil))))
 (define tsql_negate_expr (lambda (value)
-	(list (quote sql_compile_expr) (quote tsql_compile_negate) value)))
+	(tsql_arithmetic_expr (list (quote sql_compile_expr) (quote tsql_compile_negate) value))))
 (define tsql_key_placement (parser (? (or (atom "CLUSTERED" true) (atom "NONCLUSTERED" true)))))
 (define tsql_key_columns (parser (define columns (+ (parser '(
 	(define name tsql_identifier) (? (or (atom "ASC" true) (atom "DESC" true)))) name) ",")) columns))
