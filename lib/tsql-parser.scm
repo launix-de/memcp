@@ -121,7 +121,7 @@ BIGINT endpoints: checking a wrapped result afterwards would lose overflow. */
 	(define input (car infos))
 	/* A proven constant success cannot signal an arithmetic condition. Retain
 	its original typed formula; failed folding never samples invocation state. */
-	(define safe (try (lambda () (begin (tryfold (sql_info_formula input)) true))
+	(define safe (try (lambda () (begin (sql_constant_value (sql_info_formula input)) true))
 		(lambda (_cause) false)))
 	(if safe input
 		(sql_info (list tsql_arithmetic_value (tsql_ansi_warnings_formula)

@@ -38,6 +38,7 @@ scalars remain rejected. No creator session is retained in the program. */
 				'tsql_cast_integer 'tsql_cast_float 'tsql_cast_decimal 'tsql_cast_text
 				'tsql_cast_fixed_text 'tsql_numeric_input 'sql_decimal_value
 				'tsql_checked_integer_operation tsql_checked_integer_operation
+				'tsql_integer_divide 'tsql_fractional_divide tsql_integer_divide tsql_fractional_divide
 				+ - * / div_null intdiv mod coalesceNil nil? equal? equal?? < <= > >= not sql_not
 				tsql_cast_integer tsql_cast_float tsql_cast_decimal tsql_cast_text
 				tsql_cast_fixed_text tsql_numeric_input sql_decimal_value

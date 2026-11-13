@@ -364,7 +364,7 @@ profile supplies its error boundary at the ordinary relational expression. */
 		/* Context-free defaults use the native value. Temporal text retains its
 		SQL recipe for conversion under the later writing session. */
 		(define default_options (tsql_prepare_default identity_options base
-			(lambda (value) (eval (sql_type_formula '() (tsql_implicit_cast_expr value base native_dimensions))))))
+			(lambda (value) (eval (tsql_strict_computed_formula (sql_type_formula '() (tsql_implicit_cast_expr value base native_dimensions)))))))
 		(define marked_options (if (default_options "rowguidcol")
 			(append (merge (extract_assoc default_options (lambda (key value)
 				(if (equal? key "rowguidcol") '() (list key value)))))
@@ -403,6 +403,7 @@ request state can become part of the persisted function. */
 			'tsql_cast_integer 'tsql_cast_float 'tsql_cast_decimal 'tsql_cast_text
 			'tsql_cast_fixed_text 'tsql_numeric_input 'sql_decimal_value 'tsql_padded_text_equal
 			'tsql_checked_integer_operation tsql_checked_integer_operation
+			'tsql_integer_divide 'tsql_fractional_divide tsql_integer_divide tsql_fractional_divide
 			+ - * / div_null intdiv mod coalesceNil nil? equal? equal?? < <= > >= not sql_not
 			tsql_cast_integer tsql_cast_float tsql_cast_decimal tsql_cast_text
 			tsql_cast_fixed_text tsql_numeric_input sql_decimal_value tsql_padded_text_equal) head)
@@ -419,8 +420,10 @@ independent of receiver-side global names. */
 		(list 'tsql_cast_integer tsql_cast_integer) (list 'tsql_cast_float tsql_cast_float)
 		(list 'tsql_cast_decimal tsql_cast_decimal) (list 'tsql_cast_text tsql_cast_text)
 		(list 'tsql_cast_fixed_text tsql_cast_fixed_text) (list 'tsql_numeric_input tsql_numeric_input)
-		(list 'tsql_checked_integer_operation tsql_checked_integer_operation)
-		(list 'tsql_arithmetic_value tsql_arithmetic_value)))
+		(list 'tsql_checked_integer_operation tsql_checked_integer_operation
+			'tsql_integer_divide 'tsql_fractional_divide tsql_integer_divide tsql_fractional_divide)
+		(list 'tsql_arithmetic_value tsql_arithmetic_value)
+		(list 'tsql_integer_divide tsql_integer_divide) (list 'tsql_fractional_divide tsql_fractional_divide)))
 	(list 'close_procedure (cons
 		(list 'lambda (map bindings car) (list 'lambda parameters body))
 		(map bindings cadr))))))
