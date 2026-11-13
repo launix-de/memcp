@@ -25,6 +25,9 @@ test_cases:
   - name: Procedure executes its setting before arithmetic
     sql: SET ANSI_WARNINGS ON; EXEC ansi_warning_scope; SELECT SESSIONPROPERTY('ANSI_WARNINGS') AS enabled
     expect: {data: [{value: null},{enabled: 1}]}
+  - name: Procedure restores an OFF caller after its final ON statement
+    sql: SET ANSI_WARNINGS OFF; EXEC ansi_warning_scope; SELECT SESSIONPROPERTY('ANSI_WARNINGS') AS enabled; SET ANSI_WARNINGS ON
+    expect: {data: [{value: null},{enabled: 0}]}
   - name: Disabled integer arithmetic returns null
     sql: SET ANSI_WARNINGS OFF; SELECT 9/0 AS divide_value,2147483647+1 AS add_value,50000*50000 AS multiply_value; SET ANSI_WARNINGS ON
     expect: {data: [{divide_value: null,add_value: null,multiply_value: null}]}
@@ -43,6 +46,15 @@ test_cases:
   - name: Variable and explicit casts keep their own truncation rules
     sql: SET ANSI_WARNINGS ON; DECLARE @text VARCHAR(3)='long'; SELECT @text AS variable,CAST(N'long' AS NVARCHAR(3)) AS converted
     expect: {data: [{variable: lon,converted: lon}]}
+  - name: Numeric conversion overflow returns null when disabled
+    sql: SET ANSI_WARNINGS OFF; SELECT CAST(256 AS TINYINT) AS narrowed,CAST(1000 AS DECIMAL(2,0)) AS decimal_value; SET ANSI_WARNINGS ON
+    expect: {data: [{narrowed: null,decimal_value: null}]}
+  - name: Disabled arithmetic policy preserves invalid numeric text errors
+    sql: SET ANSI_WARNINGS OFF; BEGIN TRY SELECT CAST('invalid' AS INT) AS value; END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS code; END CATCH; SET ANSI_WARNINGS ON
+    expect: {data: [{code: 245}]}
+  - name: Truncating UPDATE rolls back the complete statement
+    sql: SET ANSI_WARNINGS ON; BEGIN TRY UPDATE ansi_warning_rows SET label=CASE WHEN id=2 THEN 'xy' ELSE 'too long' END WHERE id IN(2,3); END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS code; END CATCH; SELECT id,label FROM ansi_warning_rows WHERE id IN(2,3) ORDER BY id
+    expect: {data: [{code: 8152},{id: 2,label: lon},{id: 3,label: abc}]}
   - name: BIGINT overflow is checked before the native carrier wraps
     sql: SET ANSI_WARNINGS OFF; SELECT CAST(9223372036854775807 AS BIGINT)+CAST(1 AS BIGINT) AS added,CAST(-9223372036854775808 AS BIGINT)-CAST(1 AS BIGINT) AS subtracted,CAST(-9223372036854775808 AS BIGINT)*CAST(-1 AS BIGINT) AS multiplied; SET ANSI_WARNINGS ON
     expect: {data: [{added: null,subtracted: null,multiplied: null}]}
