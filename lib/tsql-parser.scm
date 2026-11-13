@@ -5823,7 +5823,10 @@ that context explicitly; stored views refuse this scalar before publication. */
 				(list 'list "computed" name expression (if persisted true false)))
 			(parser (define column column_definition) (match column '(name type dimensions attributes)
 				(list (quote list) "column" name type dimensions (cons (quote list) attributes))))
-		) ",")) ")"
+		) ","))
+		/* SQL Server accepts one trailing separator in CREATE TABLE only.
+		Keep the nonempty definition list and other list grammars unchanged. */
+		(? ",") ")"
 		(? tsql_index_location)
 	) (lambda () (begin
 			(if policy (policy (tsql_qualifier_database schema2 schema frontend_options) name true) true)

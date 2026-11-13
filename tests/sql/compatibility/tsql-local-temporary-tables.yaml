@@ -6,6 +6,59 @@ metadata:
   requires_tds: true
   isolated: true
 test_cases:
+  # SQL Server 2022 reference: https://dbfiddle.uk/l3TQJdic
+  - name: Persistent CREATE TABLE accepts one final column separator
+    setup:
+      - sql: CREATE TABLE comma_persistent (id INT,)
+      - sql: INSERT comma_persistent VALUES (7)
+    sql: SELECT id FROM comma_persistent
+    expect: {rows: 1, data: [{id: 7}]}
+    cleanup:
+      - sql: DROP TABLE IF EXISTS comma_persistent
+  - name: Consecutive temporary declarations retain every column after a final separator
+    sql: |
+      CREATE TABLE #comma_first (id INT);
+      CREATE TABLE #comma_second (id INT, amount FLOAT, /* final column */);
+      INSERT #comma_first VALUES (4);
+      INSERT #comma_second VALUES (4,2.5);
+      SELECT a.id,b.amount FROM #comma_first a JOIN #comma_second b ON a.id=b.id;
+    expect: {rows: 1, data: [{id: 4, amount: 2.5}]}
+  - name: Final separator after a table constraint preserves primary key enforcement
+    setup:
+      - sql: CREATE TABLE comma_constrained (id INT, CONSTRAINT pk_comma_constrained PRIMARY KEY (id),)
+      - sql: INSERT comma_constrained VALUES (9)
+    sql: INSERT comma_constrained VALUES (9)
+    expect: {error: true}
+    cleanup:
+      - sql: DROP TABLE IF EXISTS comma_constrained
+  - name: Stored procedure executes a temporary declaration ending with a separator
+    setup:
+      - sql: |
+          CREATE PROCEDURE comma_temporary_procedure AS
+          CREATE TABLE #items (id INT, amount FLOAT,);
+          INSERT #items VALUES (2,3.5);
+          SELECT id,amount FROM #items;
+    sql: EXEC comma_temporary_procedure
+    expect: {rows: 1, data: [{id: 2, amount: 3.5}]}
+    cleanup:
+      - sql: DROP PROCEDURE IF EXISTS comma_temporary_procedure
+  - name: A repeated final separator remains invalid CREATE TABLE syntax
+    sql: CREATE TABLE comma_invalid (id INT,,)
+    expect: {error: true}
+  - name: A final separator cannot replace a required column declaration
+    sql: CREATE TABLE comma_empty (,)
+    expect: {error: true}
+  - name: Table variable declarations retain their stricter separator grammar
+    sql: DECLARE @items TABLE (id INT,)
+    expect: {error: true}
+  - name: Native TDS executes final separators in ordinary and temporary declarations
+    tds:
+      statements:
+        - sql: "CREATE TABLE #wire_comma (id INT, amount FLOAT,)"
+        - sql: "INSERT #wire_comma VALUES (5,6.5)"
+        - sql: "SELECT id,amount FROM #wire_comma"
+          expect: {rows: 1, data: [{id: 5, amount: 6.5}]}
+        - sql: "DROP TABLE #wire_comma"
   - name: Local temporary table accepts the native system-name alias
     session_id: local-temporary-a
     sql: "CREATE TABLE #probe (id INT PRIMARY KEY, label SYSNAME, amount INT NOT NULL DEFAULT 7)"
