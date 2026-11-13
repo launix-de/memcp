@@ -6,7 +6,10 @@ metadata:
 setup:
 - sql: CREATE TABLE cs_forward_rows(id INT PRIMARY KEY,value INT) ENGINE=SAFE
 - sql: INSERT INTO cs_forward_rows VALUES(1,10),(2,20),(3,30)
-- sql: CREATE TABLE cs_forward_ready(id INT PRIMARY KEY) ENGINE=MEMORY
+# The single-writer readiness signal needs no UNIQUE admission. Its INSERT
+# runs while the retained callback owns the data row's node-wide key stripes;
+# a second constrained table could select the same finite stripe and self-wait.
+- sql: CREATE TABLE cs_forward_ready(id INT) ENGINE=MEMORY
 - scm: (begin (rebuild (table "memcp-tests" false "cs_forward_rows" false nil) true false) true)
 cleanup:
 - sql: DROP TABLE IF EXISTS cs_forward_ready
