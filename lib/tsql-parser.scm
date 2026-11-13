@@ -966,7 +966,7 @@ local variables and module parameters keep their ordinary width conversion. */
 	(define input (car infos))
 	(define unbounded (sql_expr_info '() (tsql_cast_expr
 		(list 'sql_type_expr (sql_info_formula input) (sql_info_datatype input) (sql_info_collation input))
-		type '(-1))))
+		(if (has? '("NCHAR" "NVARCHAR") type) "NVARCHAR" "VARCHAR") '(-1))))
 	(define width (if (empty_list? dimensions) 1 (car dimensions)))
 	(define formula (list tsql_assignment_text_value (sql_info_formula unbounded)
 		(tsql_ansi_warnings_formula) width (has? '("NCHAR" "NVARCHAR") type)
@@ -979,7 +979,10 @@ local variables and module parameters keep their ordinary width conversion. */
 	(define type (toUpper (declaration "RawType")))
 	(if (equal? type "ROWVERSION")
 		(error "generated version column cannot be assigned explicitly")
-		(declaration "AliasId") (tsql_implicit_cast_expr value type (declaration "Dimensions"))
+		(declaration "AliasId") (begin
+			(define contract (tsql_effective_parameter_contract (cons type (declaration "Dimensions"))))
+			(tsql_assignment_expr value (set_assoc (set_assoc (set_assoc declaration
+				"AliasId" nil) "RawType" (car contract)) "Dimensions" (cdr contract))))
 		(has? '("BIT" "BOOL" "BOOLEAN") type) (tsql_implicit_cast_expr value "BIT" '())
 		(has? '("INT" "INTEGER" "BIGINT" "SMALLINT" "TINYINT") type)
 		(tsql_implicit_cast_expr value type '())
@@ -990,6 +993,7 @@ local variables and module parameters keep their ordinary width conversion. */
 			(if (and (has? '("CHAR" "VARCHAR" "NVARCHAR" "NCHAR") type) (declaration "Collation"))
 				(list (quote sql_compile_expr) (list (quote tsql_collation_compiler) (declaration "Collation")) value) value)
 			type (declaration "Dimensions"))
+		(has? '("BINARY" "VARBINARY") type) (tsql_implicit_cast_expr value type (declaration "Dimensions"))
 		(has? '("MONEY" "SMALLMONEY") type) (tsql_implicit_cast_expr value type '())
 		(has? '("DECIMAL" "NUMERIC") type) (begin
 			(define dimensions (declaration "Dimensions"))
