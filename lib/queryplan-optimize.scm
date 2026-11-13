@@ -6103,19 +6103,19 @@ three-valued expressions whose NULL behavior remains observable. */
 					(filter (map (produceN (min (count (gs_aggregates original)) (count (gs_aggregates folded))))
 						(lambda (i)
 							(begin
-								(define original_col (aggregate_col_name_using
-									(gs_input original) (nth (gs_aggregates original) i)))
-								(define folded_col (aggregate_col_name_using
-									(gs_input folded) (nth (gs_aggregates folded) i)))
+								(define original_col (group_stage_aggregate_column
+									original (nth (gs_aggregates original) i)))
+								(define folded_col (group_stage_aggregate_column
+									folded (nth (gs_aggregates folded) i)))
 								(if (equal? original_col folded_col)
 									'()
 									(list (source_alias src) original_col folded_col)))))
 						(lambda (entry) (not (empty_list? entry))))))))))
 
-/* Boolean folding can change an aggregate descriptor's physical column hash.
-Keep every consumer synchronized, including stages with the implicit
-cardinality aggregate where the older single-output canonicalizer cannot infer
-which output was renamed. */
+/* Boolean folding can rename an aggregate's output when it has no published
+interface yet. Compare stage contracts so already frozen outputs retain their
+names while every consumer of a real rename stays synchronized, including
+the implicit cardinality aggregate. */
 (define stage_output_aggregate_fold_map (lambda (block original_stages folded_stages)
 	(begin
 		(define original_index (stage_output_stage_index original_stages))
