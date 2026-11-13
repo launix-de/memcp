@@ -5930,7 +5930,9 @@ that context explicitly; stored views refuse this scalar before publication. */
 					(if (nil? declaration) (error "DEFAULT column does not exist: " column) true)
 					(define default (tsql_prepare_default default
 						(coalesceNil (declaration "BaseType") (declaration "RawType"))
-						(lambda (value) (eval (sql_type_formula '() (tsql_assignment_expr value declaration))))))
+						(lambda (value) (tsql_default_destination_value value
+							(coalesceNil (declaration "BaseType") (declaration "RawType"))
+							(declaration "Dimensions")))))
 					(define value (default "default"))
 					(list (quote !begin)
 						(list (quote altercolumn) (list (quote table) database false name false (quote tx))

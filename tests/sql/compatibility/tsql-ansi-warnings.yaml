@@ -12,6 +12,7 @@ setup:
 cleanup:
   - sql: DROP TABLE IF EXISTS ansi_statement_rows
   - sql: DROP FUNCTION IF EXISTS ansi_warning_scalar
+  - sql: DROP TABLE IF EXISTS ansi_warning_principal_default
   - sql: DROP TABLE IF EXISTS ansi_warning_defaults
   - sql: DROP TABLE IF EXISTS ansi_warning_computed
   - sql: DROP TABLE IF EXISTS ansi_warning_checked
@@ -123,6 +124,15 @@ test_cases:
   - name: Static defaults retain exact values across the option
     sql: SET ANSI_WARNINGS OFF; INSERT ansi_warning_defaults(id) VALUES(1); SELECT value FROM ansi_warning_defaults; SET ANSI_WARNINGS ON
     expect: {data: [{value: 10}]}
+  - name: Context default retains its full source before column assignment
+    sql: CREATE TABLE ansi_warning_principal_default(label NVARCHAR(2) DEFAULT USER_NAME())
+    expect: {rows: 0}
+  - name: Enabled contextual default truncation cancels insertion
+    sql: SET ANSI_WARNINGS ON; BEGIN TRY INSERT ansi_warning_principal_default DEFAULT VALUES; END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS code; END CATCH; SELECT COUNT(*) AS total FROM ansi_warning_principal_default
+    expect: {data: [{code: 8152},{total: 0}]}
+  - name: Disabled contextual default truncates at the destination
+    sql: SET ANSI_WARNINGS OFF; INSERT ansi_warning_principal_default DEFAULT VALUES; SELECT label FROM ansi_warning_principal_default; SET ANSI_WARNINGS ON
+    expect: {data: [{label: db}]}
   - name: Native connection reuses a warm arithmetic plan with current setting
     tds:
       statements:

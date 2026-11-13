@@ -32,9 +32,9 @@ test_cases:
   sql: |
     CREATE TABLE contextual_defaults(id INT IDENTITY(1,1) PRIMARY KEY,
       actor NVARCHAR(128) NOT NULL DEFAULT ((USER_NAME())),
-      short_name NVARCHAR(3) DEFAULT USER_NAME(),
+      short_name NVARCHAR(3) DEFAULT CAST(USER_NAME() AS NVARCHAR(3)),
       label NVARCHAR(128) DEFAULT ((USER_NAME()+N'#entry')), login_name NVARCHAR(128) DEFAULT SUSER_SNAME())
-- name: Omitted contextual cells use the caller and declared destination width
+- name: Omitted contextual cells use the caller and explicit default conversion width
   username: defer_writer
   password: pw
   sql: INSERT INTO contextual_defaults(label) VALUES(N'explicit')

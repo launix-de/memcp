@@ -343,6 +343,12 @@ profile supplies its error boundary at the ordinary relational expression. */
 			(if (empty_list? dimensions) true (error "alias dimensions cannot be overridden"))
 			(define alias (coalesceNil (tsql_find_type_alias database name planning_session) (error "unknown type: " name)))
 			(merge (list "type" (tsql_qualified_type database (alias "name"))) alias))))))
+/* CREATE and ALTER share one constant DEFAULT destination owner. The source
+has already been proved constant; its pure declared conversion needs no session.
+Deferred SQL source remains bound by the later actual insertion session. */
+(define tsql_default_destination_value (lambda (value type dimensions)
+	(eval (tsql_computed_policy_formula
+		(sql_type_formula '() (tsql_implicit_cast_expr value type dimensions)) true))))
 (define tsql_prepare_column (lambda (database definition planning_session) (match definition
 	'((symbol list) "column" name type dimensions attributes) (begin
 		(define contract (tsql_resolve_schema_type database type (cdr dimensions) planning_session))
@@ -364,7 +370,7 @@ profile supplies its error boundary at the ordinary relational expression. */
 		/* Context-free defaults use the native value. Temporal text retains its
 		SQL recipe for conversion under the later writing session. */
 		(define default_options (tsql_prepare_default identity_options base
-			(lambda (value) (eval (tsql_computed_policy_formula (sql_type_formula '() (tsql_implicit_cast_expr value base native_dimensions)) true)))))
+			(lambda (value) (tsql_default_destination_value value base native_dimensions))))
 		(define marked_options (if (default_options "rowguidcol")
 			(append (merge (extract_assoc default_options (lambda (key value)
 				(if (equal? key "rowguidcol") '() (list key value)))))
