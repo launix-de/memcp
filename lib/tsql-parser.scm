@@ -85,9 +85,12 @@ source and permission guards still belong to the enclosing write plan. */
 (define tsql_raise_error (lambda (number message state)
 	(error (list "tsql-error" number message state))))
 (define tsql_sessionproperty (close_procedure (lambda (property warnings ansi quoted)
-	(if (nil? property) nil (match (toUpper property)
-		"ANSI_WARNINGS" (if warnings 1 0) "ANSI_NULLS" ansi
-		"QUOTED_IDENTIFIER" quoted "ANSI_PADDING" 1 _ nil)))))
+	(if (nil? property) nil (begin
+		(define value (match (toUpper property)
+			"ANSI_WARNINGS" (if warnings 1 0) "ANSI_NULLS" ansi
+			"QUOTED_IDENTIFIER" quoted "ANSI_PADDING" 1 _ nil))
+		(if (nil? value) nil
+			(list "variant" (list "kind" 38 "size" 4 "precision" 0 "scale" 0) "value" value)))))))
 /* Catch only frontend arithmetic conditions. Conversion, permission, request
 cancellation and transaction failures retain their original error boundary. */
 (define tsql_arithmetic_value (close_procedure (lambda (enabled compute)
