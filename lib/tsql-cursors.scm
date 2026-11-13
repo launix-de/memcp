@@ -82,9 +82,9 @@ https://learn.microsoft.com/sql/t-sql/language-elements/deallocate-transact-sql 
 			(cons (list name retained) (filter (tsql_cursor_variable_entries session)
 				(lambda (entry) (not (equal? (car entry) name)))))) 0)
 		(error "cursor reference retirement did not complete")))))
-(define tsql_cursor_reference_syntax (parser (or
+(define tsql_cursor_reference_syntax (parser (define reference (or
 	(parser (define name tsql_variable_name) (list "variable" name))
-	(parser (define name tsql_identifier) (toLower name)))
+	(parser (define name tsql_identifier) (toLower name)))) reference
 	"^(?:/\\*(?s:.*?)\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+"))
 (define tsql_cursor_assign_reference (lambda (name text statement session)
 	(statement "SET CURSOR REFERENCE" false (lambda (_tx)
