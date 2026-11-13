@@ -2085,20 +2085,26 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 			}
 
 			if tx := currentTx; tx != nil && tx.Mode == TxACID {
-				// Check if row was staged by this tx
-				wasStaged := tx.UnstageRow(t, idx)
-				if wasStaged {
-					// Row was staged by this tx → remove from UndeleteMask.
-					// Keep shard.deletions[idx]=true (already globally hidden).
-				} else {
-					// Pre-existing committed row → add to delete mask
-					tx.AddToDeleteMask(t, idx)
-				}
-				// shard already registered via OpenMapReducer
-				if t.nextReady.Load() {
-					maintenanceNext = t.loadNext()
-				}
-				result = true
+				func() {
+					if !alreadyLocked {
+						t.mu.Lock()
+						defer t.mu.Unlock()
+					}
+					// UNIQUE readers borrow this same shard lock while reading
+					// the staged-row journal. Match INSERT/UPDATE's source-write
+					// owner before appending an UnstageRow visibility change.
+					// Staged rows remain globally hidden until native decision.
+					if !tx.UnstageRow(t, idx) {
+						// Pre-existing committed row: apply its delete at commit.
+						tx.AddToDeleteMask(t, idx)
+					}
+					// Capture only the successor here; forwarding, callbacks and
+					// durability work run after this short write owner returns.
+					if t.nextReady.Load() {
+						maintenanceNext = t.loadNext()
+					}
+					result = true
+				}()
 			} else {
 				func() {
 					if !alreadyLocked {

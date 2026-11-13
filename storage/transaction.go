@@ -856,6 +856,8 @@ func (tx *TxContext) AddToUndeleteMask(shard *storageShard, recid uint32) {
 
 // UnstageRow removes recid from UndeleteMask (ACID UPDATE/DELETE of a staged row).
 // Returns true if the row was staged by this tx and has been un-staged.
+// Caller holds the shard write lock, as for AddToUndeleteMask: UNIQUE readers
+// consume the journal under the matching shard read lock, without taking st.mu.
 func (tx *TxContext) UnstageRow(shard *storageShard, recid uint32) bool {
 	st := tx.getShardTx(shard)
 	if st == nil {
@@ -1167,8 +1169,8 @@ func (tx *TxContext) rollbackToSavepointLocked(sp Savepoint) {
 						shard.rollbackProtected.Set(uint(change.recid), change.previous)
 						shard.syncNextVisibilityLocked(change.recid, trackedShards, tx, true, tx.writeHeld)
 						st.UndeleteMask.Set(uint(change.recid), change.previous)
+						st.UndeleteRecids = st.UndeleteRecids[:len(st.UndeleteRecids)-1]
 					}()
-					st.UndeleteRecids = st.UndeleteRecids[:len(st.UndeleteRecids)-1]
 				}
 			}
 		}()
