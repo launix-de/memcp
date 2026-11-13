@@ -6,7 +6,7 @@ metadata:
   requires_tds: true
   description: Isolation statements are stored executable module commands, never declaration-time effects
 setup:
-- sql: CREATE TABLE isolation_visibility_rows(id INT PRIMARY KEY)
+- sql: CREATE TABLE isolation_visibility_rows(id INT PRIMARY KEY,amount INT NOT NULL DEFAULT 10)
 cleanup:
 - sql: DROP TABLE IF EXISTS isolation_visibility_rows
 - sql: DROP PROCEDURE IF EXISTS isolation_trailing
@@ -16,6 +16,7 @@ cleanup:
 - sql: DROP PROCEDURE IF EXISTS isolation_snapshot
 - sql: DROP PROCEDURE IF EXISTS isolation_serializable
 - sql: DROP PROCEDURE IF EXISTS isolation_invalid
+- sql: DROP PROCEDURE IF EXISTS isolation_inside_transaction
 - sql: DROP FUNCTION IF EXISTS isolation_invalid_function
 test_cases:
 - name: A procedure stores a trailing READ COMMITTED statement after ordinary SQL
@@ -76,12 +77,10 @@ test_cases:
       RETURN 1
     END
   expect: {error: true}
-- name: Executable READ COMMITTED is a positive pending visibility contract
-  noncritical: true
+- name: READ COMMITTED executes before the following statement
   sql: SET TRANSACTION ISOLATION LEVEL READ COMMITTED; SELECT 43 AS value
   expect: {rows: 1, data: [{value: 43}]}
 - name: READ COMMITTED exposes own changes and only other committed changes
-  noncritical: true
   tds:
     statements:
     - connection: writer
@@ -91,7 +90,7 @@ test_cases:
     - connection: writer
       sql: BEGIN TRANSACTION;
     - connection: writer
-      sql: INSERT isolation_visibility_rows VALUES(1)
+      sql: INSERT isolation_visibility_rows(id) VALUES(1)
     - connection: writer
       sql: SELECT id FROM isolation_visibility_rows
       expect: {rows: 1, data: [{id: 1}]}
@@ -103,3 +102,114 @@ test_cases:
     - connection: observer
       sql: SELECT id FROM isolation_visibility_rows
       expect: {rows: 1, data: [{id: 1}]}
+- name: The default isolation stages pending writes without an explicit SET
+  tds:
+    statements:
+    - connection: default_writer
+      sql: BEGIN TRANSACTION;
+    - connection: default_writer
+      sql: INSERT isolation_visibility_rows VALUES(2,20)
+    - connection: default_writer
+      sql: SELECT amount FROM isolation_visibility_rows WHERE id=2
+      expect: {rows: 1, data: [{amount: 20}]}
+    - connection: default_observer
+      sql: SELECT amount FROM isolation_visibility_rows WHERE id=2
+      expect: {rows: 0}
+    - connection: default_writer
+      sql: ROLLBACK TRANSACTION;
+    - connection: default_observer
+      sql: SELECT amount FROM isolation_visibility_rows WHERE id=2
+      expect: {rows: 0}
+- name: Pending UPDATE and DELETE preserve the other connection's committed rows
+  tds:
+    statements:
+    - connection: changes_writer
+      sql: BEGIN TRANSACTION;
+    - connection: changes_writer
+      sql: UPDATE isolation_visibility_rows SET amount=20 WHERE id=1
+    - connection: changes_reader
+      sql: SELECT amount FROM isolation_visibility_rows WHERE id=1
+      expect: {rows: 1, data: [{amount: 10}]}
+    - connection: changes_writer
+      sql: SELECT amount FROM isolation_visibility_rows WHERE id=1
+      expect: {rows: 1, data: [{amount: 20}]}
+    - connection: changes_writer
+      sql: ROLLBACK TRANSACTION;
+    - connection: changes_reader
+      sql: SELECT amount FROM isolation_visibility_rows WHERE id=1
+      expect: {rows: 1, data: [{amount: 10}]}
+    - connection: changes_writer
+      sql: BEGIN TRANSACTION;
+    - connection: changes_writer
+      sql: DELETE FROM isolation_visibility_rows WHERE id=1
+    - connection: changes_reader
+      sql: SELECT amount FROM isolation_visibility_rows WHERE id=1
+      expect: {rows: 1, data: [{amount: 10}]}
+    - connection: changes_writer
+      sql: SELECT id FROM isolation_visibility_rows WHERE id=1
+      expect: {rows: 0}
+    - connection: changes_writer
+      sql: ROLLBACK TRANSACTION;
+    - connection: changes_reader
+      sql: SELECT amount FROM isolation_visibility_rows WHERE id=1
+      expect: {rows: 1, data: [{amount: 10}]}
+- name: Later READ COMMITTED statements observe another connection's commit
+  tds:
+    statements:
+    - connection: current_reader
+      sql: BEGIN TRANSACTION;
+    - connection: current_reader
+      sql: SELECT amount FROM isolation_visibility_rows WHERE id=1
+      expect: {rows: 1, data: [{amount: 10}]}
+    - connection: current_writer
+      sql: UPDATE isolation_visibility_rows SET amount=30 WHERE id=1
+    - connection: current_reader
+      sql: SELECT amount FROM isolation_visibility_rows WHERE id=1
+      expect: {rows: 1, data: [{amount: 30}]}
+    - connection: current_reader
+      sql: COMMIT TRANSACTION;
+- name: SET isolation does not commit work from the active transaction
+  tds:
+    statements:
+    - connection: setter_writer
+      sql: BEGIN TRANSACTION;
+    - connection: setter_writer
+      sql: INSERT isolation_visibility_rows VALUES(5,50)
+    - connection: setter_writer
+      sql: SET TRANSACTION ISOLATION LEVEL READ COMMITTED;
+    - connection: setter_reader
+      sql: SELECT id FROM isolation_visibility_rows WHERE id=5
+      expect: {rows: 0}
+    - connection: setter_writer
+      sql: ROLLBACK TRANSACTION;
+    - connection: setter_reader
+      sql: SELECT id FROM isolation_visibility_rows WHERE id=5
+      expect: {rows: 0}
+- name: A procedure stores a scoped isolation setter and its ordinary mutation
+  sql: |
+    CREATE PROCEDURE isolation_inside_transaction AS
+    BEGIN
+      SET TRANSACTION ISOLATION LEVEL READ COMMITTED
+      INSERT isolation_visibility_rows VALUES(3,30)
+    END
+  expect: {rows: 0}
+- name: A procedure isolation setter retains the caller's pending transaction
+  tds:
+    statements:
+    - connection: module_writer
+      sql: BEGIN TRANSACTION;
+    - connection: module_writer
+      sql: INSERT isolation_visibility_rows VALUES(4,40)
+    - connection: module_writer
+      sql: EXEC isolation_inside_transaction
+    - connection: module_writer
+      sql: SELECT id,amount FROM isolation_visibility_rows WHERE id IN(3,4) ORDER BY id
+      expect: {rows: 2, data: [{id: 3, amount: 30}, {id: 4, amount: 40}]}
+    - connection: module_reader
+      sql: SELECT id FROM isolation_visibility_rows WHERE id IN(3,4)
+      expect: {rows: 0}
+    - connection: module_writer
+      sql: ROLLBACK TRANSACTION;
+    - connection: module_reader
+      sql: SELECT id FROM isolation_visibility_rows WHERE id IN(3,4)
+      expect: {rows: 0}

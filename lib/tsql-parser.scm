@@ -4228,29 +4228,29 @@ that context explicitly; stored views refuse this scalar before publication. */
 			(match (source_relation src)
 				((symbol tsql_pending_source_order) _names relation) relation
 				_ (source_relation src))))))
-(define tsql_attach_join_suffix (lambda (left suffix)
-	(match suffix
-		'((symbol tsql_pending_right_suffix) preserved predicate)
-		(begin
-			/* Preserve the complete right cloud before appending the nullable
-			left unit. Its internal ONs cannot see that left unit's aliases. */
-			(define order (merge (list (tsql_join_export_order left) (tsql_join_export_order preserved))))
-			(define preserved (cons (tsql_with_join_export_order (car preserved) order) (cdr preserved)))
-			(tsql_attach_join_suffix preserved (list (if (equal? (count left) 1)
-				(match (car left) '(id database relation _ _join declarations)
-					(list id database relation true predicate declarations))
-				(list (source_alias (car left)) (source_schema (car left))
-					(list 'tsql_pending_join_operand (tsql_join_operand_aliases preserved) left)
-					true predicate nil)))))
-		(cons src '()) (match (source_relation src)
-			((symbol tsql_pending_nullable_join) _left right)
-			(append left (source_with_relation src (list 'tsql_pending_nullable_join
-				(tsql_join_operand_aliases left) right)))
-			((symbol tsql_pending_join_operand) _left right)
-			(append left (source_with_relation src (list 'tsql_pending_join_operand
-				(tsql_join_operand_aliases left) right)))
-			_ (append left src))
-		_ (merge left suffix))))
+	(define tsql_attach_join_suffix (lambda (left suffix)
+		(match suffix
+			'((symbol tsql_pending_right_suffix) preserved predicate)
+			(begin
+				/* Preserve the complete right cloud before appending the nullable
+				left unit. Its internal ONs cannot see that left unit's aliases. */
+				(define order (merge (list (tsql_join_export_order left) (tsql_join_export_order preserved))))
+				(define preserved (cons (tsql_with_join_export_order (car preserved) order) (cdr preserved)))
+				(tsql_attach_join_suffix preserved (list (if (equal? (count left) 1)
+					(match (car left) '(id database relation _ _join declarations)
+						(list id database relation true predicate declarations))
+					(list (source_alias (car left)) (source_schema (car left))
+						(list 'tsql_pending_join_operand (tsql_join_operand_aliases preserved) left)
+						true predicate nil)))))
+			(cons src '()) (match (source_relation src)
+				((symbol tsql_pending_nullable_join) _left right)
+				(append left (source_with_relation src (list 'tsql_pending_nullable_join
+					(tsql_join_operand_aliases left) right)))
+				((symbol tsql_pending_join_operand) _left right)
+				(append left (source_with_relation src (list 'tsql_pending_join_operand
+					(tsql_join_operand_aliases left) right)))
+				_ (append left src))
+			_ (merge left suffix))))
 
 	/* A joined table is an operand on either side of JOIN. Parentheses delimit
 	that operand; they do not turn its aliases into a derived SELECT scope. */
@@ -5070,8 +5070,8 @@ that context explicitly; stored views refuse this scalar before publication. */
 			(parser "=" "assign")))
 		(define expression (or (parser (atom "DEFAULT" true) (quote sql_default)) tsql_expression))
 	) (match column
-		((symbol sql_compile_column) _compiler ((symbol get_column) qualifier _relation_ic title _column_ic))
-		(list title qualifier op expression))))
+			((symbol sql_compile_column) _compiler ((symbol get_column) qualifier _relation_ic title _column_ic))
+			(list title qualifier op expression))))
 	(define tsql_update_values (lambda (target cols) (begin
 		(define names (map cols (lambda (col) (toLower (car col)))))
 		(if (equal? (count names) (count (merge_unique (list names)))) true
@@ -5145,10 +5145,10 @@ that context explicitly; stored views refuse this scalar before publication. */
 						(list 'local_update_target (source_relation target))
 						(list 'dml_target_alias (source_alias target))))
 				(if describe (tsql_describe_dml (source_schema target) (tsql_write_sources target sources)
-				values bound_condition)
-				(tsql_build_dml_plan (source_schema target) (source_relation target) (source_alias target)
-					(tsql_write_sources target sources) values
-					bound_condition nil limit nil planning_session tx)))))))
+					values bound_condition)
+					(tsql_build_dml_plan (source_schema target) (source_relation target) (source_alias target)
+						(tsql_write_sources target sources) values
+						bound_condition nil limit nil planning_session tx)))))))
 	(define tsql_delete (parser '(
 		(atom "DELETE" true)
 		(define limit tsql_write_limit)
@@ -5991,11 +5991,8 @@ that context explicitly; stored views refuse this scalar before publication. */
 				(list (quote tsql_set_identity_insert) (quote session) database name enabled (quote tx)))))
 		(parser (define setting tsql_format_only_setting)
 			(lambda () (list 'session "__tsql_fmtonly" (cadr setting))))
-		/* Isolation is executable SQL, including inside a stored module. Admit
-		the documented grammar without executing it during declaration. Native
-		cursor-stability publishes uncommitted changes; switching to tx_begin_acid
-		would commit the current transaction. Neither is a READ COMMITTED setter.
-		Keep execution explicit until the native visibility owner supports it.
+		/* Isolation remains executable module code. Native ACID staging is selected
+		by the T-SQL request owner; the scoped setter never replaces that owner.
 		https://learn.microsoft.com/sql/t-sql/statements/set-transaction-isolation-level-transact-sql */
 		(parser '((atom "SET" true) (atom "TRANSACTION" true) (atom "ISOLATION" true) (atom "LEVEL" true)
 			(define level (or
@@ -6004,7 +6001,7 @@ that context explicitly; stored views refuse this scalar before publication. */
 				(parser '((atom "REPEATABLE" true) (atom "READ" true)) "REPEATABLE READ")
 				(parser (atom "SNAPSHOT" true) "SNAPSHOT")
 				(parser (atom "SERIALIZABLE" true) "SERIALIZABLE"))))
-			(lambda () (list (quote error) "T-SQL isolation-level execution is not implemented: " level)))
+			(lambda () (list (quote tsql_set_transaction_isolation) (quote session) level)))
 		(parser '((atom "SET" true) (atom "NOCOUNT" true)
 			(define enabled (or (parser (atom "ON" true) true) (parser (atom "OFF" true) false))))
 			(lambda () (list (quote session) "__tsql_nocount" enabled)))

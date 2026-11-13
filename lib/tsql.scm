@@ -652,12 +652,20 @@ Classify with the SQL lexer, so leading comments never bypass this guard. */
 execution paths. The cache, transaction owner and compiled evaluator are shared. */
 /* SQL transaction meanings stay in the frontend. The native TDS adapter only
 consumes explicit transport edges and current database names. */
+/* READ COMMITTED uses native ACID row staging for implicit statements and
+explicit BEGIN alike. SET changes the scoped SQL option, never the transaction
+owner: BEGIN would finalize/reset pending work and is not an isolation setter. */
+(define tsql_set_transaction_isolation (lambda (session level) (begin
+	(if (equal? level "READ COMMITTED") true
+		(error "unsupported T-SQL isolation level: " level))
+	(session "__tsql_isolation_level" level)
+	true)))
 (define tsql_begin_transaction (lambda (session tx) (begin
 	/* The native connection currently owns one explicit transaction. Refuse
 	nesting before BEGIN could finish/reset the existing transaction. */
 	(if ((tsql_connection_session session) "transaction")
 		(error "nested T-SQL transactions are not supported") true)
-	(tx_begin (tsql_connection_session session) tx)
+	(tx_begin_acid (tsql_connection_session session) tx)
 	(session "__tsql_transaction_end" 0)
 	true)))
 (define tsql_commit_transaction (lambda (session) (begin
@@ -809,7 +817,7 @@ planner session or stored in a reusable plan. Nested SQL scopes inherit it. */
 	without a shared-session save/restore race. Ordinary batches delegate these
 	options, retaining their connection state across GO and subsequent requests. */
 	(define module_keys (if module_settings
-		'("__tsql_identity_insert" "__tsql_datefirst" "__tsql_dateformat" "__tsql_language" "__tsql_nocount" "__tsql_fmtonly" "__tsql_temporary_scope" "__tsql_quoted_identifier" "__tsql_ansi_nulls") '()))
+		'("__tsql_identity_insert" "__tsql_datefirst" "__tsql_dateformat" "__tsql_language" "__tsql_nocount" "__tsql_fmtonly" "__tsql_temporary_scope" "__tsql_quoted_identifier" "__tsql_ansi_nulls" "__tsql_isolation_level") '()))
 	(map (filter module_keys (lambda (key) (not (equal? key "__tsql_temporary_scope"))))
 		(lambda (key) (local key (parent key))))
 	/* Error-reporting procedures inherit the enclosing immutable CATCH context.
@@ -1334,7 +1342,7 @@ the storage engine owns rollback, partitioning, constraints and durability. */
 	(define pending (session "__tsql_bulk_target"))
 	(session "__tsql_bulk_target" nil)
 	(if pending true (error "bulk data has no preceding INSERT BULK command"))
-	(with_query_request (tsql_connection_session session) state sequence "bulk import" (lambda (statement)
+	(with_query_request (tsql_connection_session session) state sequence "bulk import" "acid" (lambda (statement)
 		(statement "bulk import" false (lambda (tx) (begin
 			(define database (pending "database"))
 			(define name (pending "name"))
@@ -1590,7 +1598,7 @@ native results: both module DDL and a zero-row DML may return numeric zero. */
 connection session and its reusable transaction record. */
 (define tsql_execute_request (lambda (schema text session state sequence resultrow resultfields)
 	(tsql_trigger_abort_boundary session (lambda ()
-		(with_query_request (tsql_connection_session session) state sequence text (lambda (statement)
+		(with_query_request (tsql_connection_session session) state sequence text "acid" (lambda (statement)
 			(begin (tsql_validate_login_identity session)
 				(tsql_initialize_date_context session)
 				(tsql_initialize_parse_context session)
@@ -2478,7 +2486,7 @@ path as the other frontends. Wire actions are interpreted here, never in scm/. *
 		"execute" (begin
 			(session "__tsql_bulk_target" nil)
 			(define output (newsession))
-			(define result (with_query_request (tsql_connection_session session) state sequence (payload "text") (lambda (statement) (begin
+			(define result (with_query_request (tsql_connection_session session) state sequence (payload "text") "acid" (lambda (statement) (begin
 				(tsql_require_database_access (tsql_session_actor session) (database_name (payload "database") true))
 				(tds_bind_parameters session (tds_bind_declarations (database_name (payload "database") true) (payload "declarations"))
 					(payload "parameters"))
@@ -2508,7 +2516,7 @@ path as the other frontends. Wire actions are interpreted here, never in scm/. *
 				(if (has? '(31 38 104 167 175 231 239) ((parameter "type") "kind")) true
 					(error "unsupported metadata argument wire type"))
 				(list (parameter "name") (parameter "value"))))))
-			(define result (with_query_request (tsql_connection_session session) state sequence "metadata procedure" (lambda (statement)
+			(define result (with_query_request (tsql_connection_session session) state sequence "metadata procedure" "acid" (lambda (statement)
 				(statement "metadata procedure" false (lambda (tx)
 					(tsql_metadata_result (session "schema") (payload "procedure") arguments
 						(tsql_policy (tsql_session_actor session)) (tsql_session_actor session) tx))))))

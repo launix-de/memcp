@@ -737,7 +737,7 @@ user table merely to discard a newly constructed policy closure. */
 
 /* Frontends supply parsed recovery admission to the generic request executor. */
 (define sql_with_statement (lambda (session state sequence text body)
-	(with_query_request session state sequence text (lambda (statement)
+	(with_query_request session state sequence text "cursor-stability" (lambda (statement)
 		(statement text (sql_recovery_statement? text) body)))))
 
 (define sql_execute_formula (lambda (session tx formula resultrow resultfields)
