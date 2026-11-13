@@ -4566,6 +4566,7 @@ func init() {
 			},
 			JITInlineCallbacks: false,
 			JITInlineCost:      65535,
+			JITVirtualArgs:     true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
