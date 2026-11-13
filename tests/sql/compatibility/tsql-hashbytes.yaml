@@ -1,0 +1,102 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: SQL Server HASHBYTES declared encodings, algorithms and binary result contract
+  syntax: tsql
+  requires_tds: true
+setup:
+  - sql: DROP TABLE IF EXISTS hash_samples
+  - sql: CREATE TABLE hash_samples(id INT PRIMARY KEY, algorithm VARCHAR(20), label VARCHAR(20), national_label NVARCHAR(20), bytes VARBINARY(20))
+  - sql: INSERT INTO hash_samples VALUES(1,'sha1','abc',N'a雪😀',0x0041FF80),(2,'SHA2_256','abc',NULL,NULL),(3,'unknown','abc',N'abc',0x616263),(4,NULL,'abc',N'abc',0x616263),(5,'SHA1 ',NULL,NULL,NULL)
+cleanup:
+  - sql: DROP TABLE hash_samples
+test_cases:
+  - name: SHA1 hashes the nonnational character bytes
+    sql: SELECT CONVERT(VARCHAR(40),HASHBYTES('SHA1','abc'),2) AS digest
+    expect: {data: [{digest: A9993E364706816ABA3E25717850C26C9CD0D89D}]}
+  - name: Legacy MD4 and MD5 algorithms return their actual digests
+    sql: SELECT CONVERT(VARCHAR(32),HASHBYTES('MD4','abc'),2) AS md4_hash, CONVERT(VARCHAR(32),HASHBYTES('MD5','abc'),2) AS md5_hash
+    expect: {data: [{md4_hash: A448017AAF21D8525FC10AE87AA6729D, md5_hash: 900150983CD24FB0D6963F7D28E17F72}]}
+  - name: SHA is a SHA1 alias
+    sql: SELECT CONVERT(VARCHAR(40),HASHBYTES('SHA','abc'),2) AS digest
+    expect: {data: [{digest: A9993E364706816ABA3E25717850C26C9CD0D89D}]}
+  - name: SHA2 algorithms return 256 and 512 bit digests
+    sql: SELECT CONVERT(VARCHAR(64),HASHBYTES('SHA2_256','abc'),2) AS small_hash, CONVERT(VARCHAR(128),HASHBYTES('SHA2_512','abc'),2) AS large_hash
+    expect: {data: [{small_hash: BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD, large_hash: DDAF35A193617ABACC417349AE20413112E6FA4E89A97EA20A9EEEE64B55D39A2192992A274FC1A836BA3C23A3FEEBBD454D4423643CE80E2A9AC94FA54CA49F}]}
+  - name: National text hashes UTF16LE including supplementary pairs
+    sql: SELECT CONVERT(VARCHAR(40),HASHBYTES('SHA1',national_label),2) AS digest FROM hash_samples WHERE id=1
+    expect: {data: [{digest: 2FF53081CEF1C19F29607BC7E9B4FB5F1DECAD8E}]}
+  - name: Nonnational text hashes code page bytes
+    sql: SELECT CONVERT(VARCHAR(40),HASHBYTES('SHA1','€'),2) AS digest
+    expect: {data: [{digest: C78EBD3C85A39A596D9F5CFD2B8D240BC1B9C125}]}
+  - name: Explicit UTF8 collation chooses UTF8 bytes
+    sql: SELECT CONVERT(VARCHAR(40),HASHBYTES('SHA1','a€c' COLLATE Latin1_General_100_CI_AS_SC_UTF8),2) AS digest
+    expect: {data: [{digest: DE72CDF2C39B84A874ABD4E334DC2EA25DA5F887}]}
+  - name: Binary input preserves zero and nontext bytes
+    sql: SELECT CONVERT(VARCHAR(40),HASHBYTES('SHA1',bytes),2) AS digest FROM hash_samples WHERE id=1
+    expect: {data: [{digest: A94D5D76CF9A2E54A4629471F50CEFDC588E65A6}]}
+  - name: Fixed character inputs preserve padding bytes
+    sql: SELECT CONVERT(VARCHAR(40),HASHBYTES('SHA1',CAST('abc' AS CHAR(5))),2) AS text_hash, CONVERT(VARCHAR(40),HASHBYTES('SHA1',CAST(N'abc' AS NCHAR(5))),2) AS national_hash
+    expect: {data: [{text_hash: 03E1D0300F607FC2346B76F8EFAEE3730357097E, national_hash: 7563939C39A0DBF4E19F3BED43F6CC6DB0B99CD6}]}
+  - name: Empty input has a digest distinct from NULL
+    sql: SELECT CONVERT(VARCHAR(40),HASHBYTES('SHA1',''),2) AS digest, HASHBYTES('SHA1',CAST(NULL AS VARCHAR(20))) AS null_hash
+    expect: {data: [{digest: DA39A3EE5E6B4B0D3255BFEF95601890AFD80709, null_hash: null}]}
+  - name: Typed NULL input preserves NULL for each encoding family
+    sql: SELECT HASHBYTES('SHA1',CAST(NULL AS NVARCHAR(20))) AS national_hash, HASHBYTES('SHA1',CAST(NULL AS VARBINARY(20))) AS binary_hash
+    expect: {data: [{national_hash: null, binary_hash: null}]}
+  - name: Dynamic algorithms retain row specific digests and NULL semantics
+    sql: SELECT id,CONVERT(VARCHAR(64),HASHBYTES(algorithm,label),2) AS digest FROM hash_samples ORDER BY id
+    expect:
+      data:
+        - {id: 1, digest: A9993E364706816ABA3E25717850C26C9CD0D89D}
+        - {id: 2, digest: BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD}
+        - {id: 3, digest: null}
+        - {id: 4, digest: null}
+        - {id: 5, digest: null}
+  - name: Algorithm names ignore case and trailing spaces
+    sql: SELECT CONVERT(VARCHAR(40),HASHBYTES(CAST(N'sHa1' AS NCHAR(10)),'abc'),2) AS digest
+    expect: {data: [{digest: A9993E364706816ABA3E25717850C26C9CD0D89D}]}
+  - name: Unknown algorithms and leading spaces return NULL
+    sql: SELECT HASHBYTES('unknown','abc') AS unknown_hash,HASHBYTES(' SHA1','abc') AS leading_hash,HASHBYTES('SHA256','abc') AS unsupported_alias
+    expect: {data: [{unknown_hash: null, leading_hash: null, unsupported_alias: null}]}
+  - name: MAX input supports more than 8000 bytes
+    sql: SELECT CONVERT(VARCHAR(40),HASHBYTES('SHA1',REPLICATE(CAST('ab' AS VARCHAR(MAX)),5000)),2) AS digest
+    expect: {data: [{digest: 6DB574E55BF713C1EF9CAF119D45C2F8BDD11AEC}]}
+  - name: Hash results expose VARBINARY metadata and raw bytes over TDS
+    tds:
+      statements:
+        - sql: SELECT HASHBYTES('SHA1','abc') AS digest
+          expect:
+            data: [{digest: {binary_hex: a9993e364706816aba3e25717850c26c9cd0d89d}}]
+            column_types: [{name: digest, type: VARBINARY, length: 8000}]
+        - sql: SELECT HASHBYTES(@algorithm,@payload) AS digest
+          prepare: true
+          parameters: [{name: algorithm, value: SHA1}, {name: payload, value: abc}]
+          expect:
+            data: [{digest: {binary_hex: 9f04f41a848514162050e3d68c1a7abb441dc2b5}}]
+            column_types: [{name: digest, type: VARBINARY, length: 8000}]
+  - name: Numeric input is not implicitly converted to text
+    sql: SELECT HASHBYTES('SHA1',123)
+    expect: {error: true}
+  - name: Numeric algorithm is invalid
+    sql: SELECT HASHBYTES(123,'abc')
+    expect: {error: true}
+  - name: Binary algorithm is invalid
+    sql: SELECT HASHBYTES(0x53484131,'abc')
+    expect: {error: true}
+  - name: Untyped NULL input lacks a character or binary contract
+    sql: SELECT HASHBYTES('SHA1',NULL)
+    expect: {error: true}
+  - name: Untyped NULL algorithm lacks a character contract
+    sql: SELECT HASHBYTES(NULL,'abc')
+    expect: {error: true}
+  - name: Trailing tabs do not match an algorithm name
+    sql: SELECT HASHBYTES('SHA1'+CHAR(9),'abc') AS digest
+    expect: {data: [{digest: null}]}
+  - name: Hashbytes requires exactly two arguments
+    sql: SELECT HASHBYTES('SHA1')
+    expect: {error: true}
+  - name: MD2 retains its positive standard digest implementation target
+    noncritical: true
+    sql: SELECT CONVERT(VARCHAR(32),HASHBYTES('MD2','abc'),2) AS digest
+    expect: {data: [{digest: DA853B0D3F88D99B30283A69E6DED6BB}]}

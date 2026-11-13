@@ -3406,6 +3406,37 @@ runtime primitives know only explicit encodings and raw byte coordinates. */
 	(if (nil? value) nil (strlen (tsql_encode_character value encoding -1)))))
 (define tsql_national_datalength (lambda (value) (if (nil? value) nil (* 2 (utf16_length value)))))
 (define tsql_binary_datalength (lambda (value) (if (nil? value) nil (strlen value))))
+/* HASHBYTES owns SQL spellings and byte encodings here. In particular an
+NVARCHAR declaration hashes UTF16LE even though its runtime carrier is UTF8.
+https://learn.microsoft.com/en-us/sql/t-sql/functions/hashbytes-transact-sql
+SQL Server 2022 references: https://dbfiddle.uk/83dFd0KH and
+https://dbfiddle.uk/qVU206sE */
+(define tsql_hashbytes (lambda (algorithm bytes)
+	(if (or (nil? algorithm) (nil? bytes)) nil
+		(begin
+			(define algorithm (toUpper (tsql_rtrim algorithm)))
+			(define digest (match algorithm
+				"MD4" "md4" "MD5" "md5" "SHA" "sha1" "SHA1" "sha1"
+				"SHA2_256" "sha256" "SHA2_512" "sha512"
+				/* MD2 remains a genuine implementation gap, tracked by a positive
+				noncritical exact-digest case rather than a fabricated digest. */
+				"MD2" (error "HASHBYTES MD2 is not implemented") _ nil))
+			(if digest (hash_digest bytes digest) nil)))))
+(define tsql_compile_hashbytes (lambda (infos) (begin
+	(if (equal? (count infos) 2) true (error "HASHBYTES requires two arguments"))
+	(define algorithm (car infos))
+	(define input (cadr infos))
+	(if (has? '("CHAR" "VARCHAR" "NCHAR" "NVARCHAR") (sql_info_type algorithm)) true
+		(error "HASHBYTES algorithm requires a character declaration"))
+	(define type (sql_info_type input))
+	(if (has? '("CHAR" "VARCHAR" "NCHAR" "NVARCHAR" "BINARY" "VARBINARY" "ROWVERSION") type) true
+		(error "HASHBYTES requires a character or binary input declaration"))
+	(define bytes (if (has? '("NCHAR" "NVARCHAR") type)
+		(list (quote utf16le_encode) (sql_info_formula input))
+		(has? '("CHAR" "VARCHAR") type)
+		(list tsql_encode_character (sql_info_formula input) (tsql_character_encoding input) -1)
+		(sql_info_formula input)))
+	(sql_info (list tsql_hashbytes (sql_info_formula algorithm) bytes) (list "VARBINARY" '(8000)) nil))))
 (define tsql_compile_datalength (lambda (infos) (begin
 	(if (equal? (count infos) 1) true (error "DATALENGTH requires one argument"))
 	(define input (car infos))
@@ -3738,6 +3769,7 @@ frontend. Runtime operators receive plain strings and explicit coordinates. */
 		(equal? name "CHAR") (tsql_compile_char infos)
 		(equal? name "ASCII") (tsql_compile_ascii infos)
 		(equal? name "DATALENGTH") (tsql_compile_datalength infos)
+		(equal? name "HASHBYTES") (tsql_compile_hashbytes infos)
 		(equal? name "LEN") (tsql_compile_len infos)
 		(equal? name "ROUND") (tsql_compile_round infos)
 		(equal? name "ISNUMERIC") (tsql_compile_isnumeric infos)
@@ -3786,6 +3818,7 @@ remain explicit unsupported cases rather than guessed native aliases. */
 	"CHAR" tsql_char
 	"ASCII" tsql_ascii
 	"DATALENGTH" tsql_binary_datalength
+	"HASHBYTES" tsql_hashbytes
 	"LEN" (lambda (value) (tsql_len value "byte" "windows-1252"))
 
 	"ISNUMERIC" tsql_isnumeric_text

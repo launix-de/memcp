@@ -5,6 +5,7 @@ package scm
 
 import "strings"
 import "unicode/utf8"
+import "unicode/utf16"
 import "golang.org/x/text/encoding/charmap"
 import "golang.org/x/text/encoding/ianaindex"
 
@@ -79,6 +80,32 @@ func initTextEncoding() {
 				JITVirtualArgs: true, JITInlineCost: 65535},
 		})
 	}
+	declare("utf16le_encode", "encodes valid UTF-8 text as UTF-16 little-endian bytes without a byte-order mark", "string",
+		[]*TypeDescriptor{{Kind: "string", Label: "text"}}, func(args ...Scmer) Scmer {
+			if args[0].IsNil() {
+				return NewNil()
+			}
+			text := args[0].String()
+			if !utf8.ValidString(text) {
+				panic("utf16le_encode requires valid UTF-8 text")
+			}
+			var output strings.Builder
+			output.Grow(int(2 * utf16Length(text)))
+			writeUnit := func(unit rune) {
+				output.WriteByte(byte(unit))
+				output.WriteByte(byte(unit >> 8))
+			}
+			for _, character := range text {
+				if character > 0xffff {
+					high, low := utf16.EncodeRune(character)
+					writeUnit(high)
+					writeUnit(low)
+				} else {
+					writeUnit(character)
+				}
+			}
+			return NewString(output.String())
+		})
 	declare("utf8_prefix", "returns a whole-scalar UTF-8 prefix bounded by bytes", "string",
 		[]*TypeDescriptor{{Kind: "string", Label: "text"}, {Kind: "number", Label: "limit"}}, func(args ...Scmer) Scmer {
 			if args[0].IsNil() || args[1].IsNil() {

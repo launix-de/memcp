@@ -866,6 +866,7 @@ func utf16Prefix(text string, limit int64) string {
 func init_strings() {
 	initTextUnits()
 	initTextEncoding()
+	initHashDigest()
 	initTextPositions()
 	initTextSearch()
 	init_uuid()
