@@ -154,9 +154,26 @@ test_cases:
 - name: An independent caller cannot acquire the retired module local name
   sql: 'SELECT * FROM #abort_copy'
   expect: {error: true, contains: 'local temporary table does not exist'}
-- name: Ordinary top level SELECT INTO is explicitly outside the module lifetime profile
+- name: Ordinary SELECT INTO creates a caller-owned temporary relation
+  session_id: select-into-outside-owner
   sql: 'SELECT id INTO #outside FROM select_into_input'
-  expect: {error: true, contains: 'statement-trigger module'}
+  expect: {affected_rows: 2}
+- name: Caller-owned SELECT INTO rows survive the population decision
+  session_id: select-into-outside-owner
+  sql: 'SELECT id FROM #outside ORDER BY id'
+  expect: {rows: 2, data: [{id: 1}, {id: 2}]}
+- name: Another connection cannot acquire the SELECT INTO local name
+  session_id: select-into-outside-other
+  sql: 'SELECT id FROM #outside'
+  expect: {error: true, contains: local temporary table does not exist}
+- name: The SELECT INTO owner can retire its ordinary temporary relation
+  session_id: select-into-outside-owner
+  sql: 'DROP TABLE #outside'
+  expect: {rows: 0, result_not_contains: '"affected_rows"'}
+- name: Dropped caller-owned SELECT INTO names cannot read retired rows
+  session_id: select-into-outside-owner
+  sql: 'SELECT id FROM #outside'
+  expect: {error: true, contains: local temporary table does not exist}
 - name: Global temporary SELECT INTO is rejected by the shared name owner
   scm: |
     (parse_tsql_batch "memcp-tests" "SELECT id INTO ##global FROM deleted")
