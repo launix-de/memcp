@@ -148,3 +148,26 @@ test_cases:
           sql: SET ANSI_WARNINGS ON; BEGIN TRANSACTION; INSERT ansi_statement_rows VALUES(4,'win'); BEGIN TRY BEGIN TRY UPDATE ansi_statement_rows SET label='long' WHERE id=1; END TRY BEGIN CATCH THROW; END CATCH; END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS code,@@TRANCOUNT AS depth; END CATCH; SELECT id,label FROM ansi_statement_rows ORDER BY id; COMMIT TRANSACTION
           expect:
             data: [{code: 8152,depth: 1},{id: 1,label: abc},{id: 2,label: def},{id: 3,label: ok},{id: 4,label: win}]
+  - name: Uncached source row supplies the persisted OFF profile fixture
+    sql: INSERT ansi_warning_computed(id,denominator) VALUES(3,0)
+    expect: {affected_rows: 1}
+  - name: OFF profile is warm before restart without changing the pure ON cache
+    sql: SET ANSI_WARNINGS OFF; SELECT value,fallback,chosen FROM ansi_warning_computed WHERE id=3; SET ANSI_WARNINGS ON
+    expect: {data: [{value: null,fallback: 99,chosen: 77}]}
+  - name: Restart reloads declared computation inputs and scalar profile properties
+    action: restart
+  - name: Recovered ON cache retains its declared pure function
+    sql: SET ANSI_WARNINGS ON; SELECT value,shifted,fallback,chosen FROM ansi_warning_computed WHERE id=1
+    expect: {data: [{value: 4,shifted: 3,fallback: 4,chosen: 4}]}
+  - name: Recovered OFF operation boundaries retain COALESCE and CASE results
+    sql: SET ANSI_WARNINGS OFF; SELECT id,value,fallback,chosen FROM ansi_warning_computed ORDER BY id; SET ANSI_WARNINGS ON
+    expect: {data: [{id: 1,value: 4,fallback: 4,chosen: 4},{id: 2,value: 2,fallback: 2,chosen: 2},{id: 3,value: null,fallback: 99,chosen: 77}]}
+  - name: Recovered native connection switches between warmed immutable profiles
+    tds:
+      statements:
+        - sql: SET ANSI_WARNINGS OFF; SELECT value,fallback,chosen FROM ansi_warning_computed WHERE id=3
+          expect: {data: [{value: null,fallback: 99,chosen: 77}]}
+        - sql: SET ANSI_WARNINGS ON; SELECT value,fallback,chosen FROM ansi_warning_computed WHERE id=3
+          expect: {error: true,contains: ['division by zero']}
+        - sql: SET ANSI_WARNINGS OFF; SELECT value,fallback,chosen FROM ansi_warning_computed WHERE id=3
+          expect: {data: [{value: null,fallback: 99,chosen: 77}]}

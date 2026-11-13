@@ -450,8 +450,12 @@ locals or capture layout. Only this exact pure helper registry is restored. */
 	(cons _head arguments) (reduce arguments (lambda (safe child)
 		(and safe (tsql_computed_recipe_comparisons? child))) true)
 	_ true)))
+/* Older native computations have no frontend expression profile. Their pure
+ON definition remains readable; OFF cannot reconstruct lost SQL operation
+boundaries from an optimized callable and therefore reports that absence. */
 (define tsql_computed_off_function (lambda (source declaration recipe) (begin
-	(define encoded ((declaration "Properties") "tsql.computed.off"))
+	(define properties (coalesceNil (declaration "Properties") '()))
+	(define encoded (properties "tsql.computed.off"))
 	(if (string? encoded) true (error "computed declaration has no ANSI_WARNINGS OFF expression profile"))
 	(define formula (match (scheme encoded)
 		(list "tsql-computed-off-v1" body) body
