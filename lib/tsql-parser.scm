@@ -6094,10 +6094,15 @@ that context explicitly; stored views refuse this scalar before publication. */
 					name (if ifexists true false) (quote session)))))
 		(parser '((atom "DROP" true) (atom "TABLE" true)
 			(define ifexists (? (atom "IF" true) (atom "EXISTS" true)))
-			(? (define schema2 tsql_schema_identifier)) (define name tsql_identifier))
-			(lambda () (begin
+			(define targets (+ (parser '((? (define schema2 tsql_schema_identifier))
+				(define name tsql_identifier)) (list schema2 name)) ",")))
+			(lambda () (tsql_declaration_formula (cons (quote !begin) (map targets (lambda (target) (begin
+				(define schema2 (car target))
+				(define name (cadr target))
 				(define database (tsql_qualifier_database schema2 schema frontend_options))
-				(tsql_declaration_formula (if (tsql_temporary_name? name) (begin
+				/* Preserve source order: a referencing table must precede its
+				referenced table. Each target retains ordinary policy and lifetime. */
+				(if (tsql_temporary_name? name) (begin
 					(tsql_temporary_check_name name)
 					(if policy (policy database name true) true)
 					(require_action database name "ALTER")
@@ -6106,7 +6111,7 @@ that context explicitly; stored views refuse this scalar before publication. */
 						(if policy (policy database name true) true)
 						(require_action database name "ALTER")
 						(list (quote tsql_drop_table) database name (if ifexists true false)
-							(quote session) (quote tx))))))))
+							(quote session) (quote tx)))))))))))
 		(parser '((atom "DROP" true) (atom "VIEW" true)
 			(define ifexists (? (atom "IF" true) (atom "EXISTS" true)))
 			(? (define schema2 tsql_schema_identifier)) (define name tsql_identifier))

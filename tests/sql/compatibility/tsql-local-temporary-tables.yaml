@@ -6,6 +6,57 @@ metadata:
   requires_tds: true
   isolated: true
 test_cases:
+  # Ordered DROP TABLE target-list reference: https://dbfiddle.uk/0RtgktJM
+  - name: DROP TABLE resolves every persistent target with its own qualifier
+    setup:
+      - sql: CREATE TABLE drop_list_first (id INT)
+      - sql: CREATE TABLE drop_list_second (id INT)
+    sql: |
+      DROP TABLE drop_list_first,dbo.drop_list_second;
+      SELECT OBJECT_ID('drop_list_first') AS first_id,OBJECT_ID('drop_list_second') AS second_id;
+    expect: {rows: 1, data: [{first_id: null, second_id: null}]}
+    cleanup:
+      - sql: DROP TABLE IF EXISTS drop_list_first
+      - sql: DROP TABLE IF EXISTS drop_list_second
+  - name: IF EXISTS applies to every DROP TABLE target
+    setup:
+      - sql: CREATE TABLE drop_list_optional (id INT)
+    sql: |
+      DROP TABLE IF EXISTS drop_list_absent,dbo.drop_list_optional,drop_list_also_absent;
+      SELECT OBJECT_ID('drop_list_optional') AS optional_id;
+    expect: {rows: 1, data: [{optional_id: null}]}
+    cleanup:
+      - sql: DROP TABLE IF EXISTS drop_list_optional
+  - name: Ordered DROP TABLE removes the referencing relation before its parent
+    setup:
+      - sql: CREATE TABLE drop_list_parent (id INT PRIMARY KEY)
+      - sql: CREATE TABLE drop_list_child (id INT, FOREIGN KEY (id) REFERENCES drop_list_parent(id))
+    sql: |
+      DROP TABLE drop_list_child,drop_list_parent;
+      SELECT OBJECT_ID('drop_list_child') AS child_id,OBJECT_ID('drop_list_parent') AS parent_id;
+    expect: {rows: 1, data: [{child_id: null, parent_id: null}]}
+    cleanup:
+      - sql: DROP TABLE IF EXISTS drop_list_child
+      - sql: DROP TABLE IF EXISTS drop_list_parent
+  - name: DROP TABLE target lists retain missing-relation errors
+    sql: DROP TABLE drop_list_absent,drop_list_also_absent
+    expect: {error: true}
+  - name: DROP TABLE target lists do not accept a final separator
+    sql: DROP TABLE IF EXISTS drop_list_absent,
+    expect: {error: true}
+  - name: Native TDS can recreate every local name after a multiple-target DROP
+    tds:
+      statements:
+        - sql: "CREATE TABLE #drop_a (id INT)"
+        - sql: "CREATE TABLE #drop_b (id INT)"
+        - sql: "DROP TABLE #drop_a,#drop_b"
+        - sql: "CREATE TABLE #drop_a (id INT)"
+        - sql: "CREATE TABLE #drop_b (id INT)"
+        - sql: "INSERT #drop_a VALUES (17)"
+        - sql: "INSERT #drop_b VALUES (23)"
+        - sql: "SELECT a.id AS first_id,b.id AS second_id FROM #drop_a a CROSS JOIN #drop_b b"
+          expect: {rows: 1, data: [{first_id: 17, second_id: 23}]}
+        - sql: "DROP TABLE #drop_a,#drop_b"
   # SQL Server 2022 reference: https://dbfiddle.uk/l3TQJdic
   - name: Persistent CREATE TABLE accepts one final column separator
     setup:
