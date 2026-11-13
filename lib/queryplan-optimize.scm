@@ -2125,7 +2125,7 @@ running DP over a wide projection-only graph. */
 		(define chosen_entries (+ (cadr selected)
 			(if pipeline_wins (cadr pipeline_result) 0)))
 		/* An ordered search is one delivery alternative. An unavailable
-		   property leaves the unrestricted join and final native sort eligible. */
+		property leaves the unrestricted join and final native sort eligible. */
 		(if (nil? chosen_plan)
 			(if (or (not (empty_list? (join_order_required_drivers required_drivers)))
 				(not (empty_list? (join_order_required_aliases required_drivers)))) nil
@@ -6770,8 +6770,9 @@ so generated aliases and dependency IDs do not hide equivalent stage graphs. */
 			requested_col
 			(begin
 				(define rewritten_stage (rewrite_stage_graph_stage alias_map id_map true stage))
-				(aggregate_col_name_using
-					(gs_input rewritten_stage)
+				/* Rebinding operands preserves an already published output contract.
+				Resolve the rewritten descriptor through that stage's interface. */
+				(group_stage_aggregate_column rewritten_stage
 					(rewrite_stage_graph_expr alias_map id_map ag)))))))
 
 /* Source declarations must follow the same alias map as their column reads.
