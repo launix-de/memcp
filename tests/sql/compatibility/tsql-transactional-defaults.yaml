@@ -181,7 +181,7 @@ test_cases:
       (expression_equal? (map '("memo" "national" "payload") (lambda (name) (begin
         (define declaration (show target "column" name false nil))
         (list (declaration "RawType") (declaration "Dimensions")))))
-        '(("TEXT" ()) ("NTEXT" ()) ("IMAGE" ()))))
+        (list (list "TEXT" '()) (list "NTEXT" '()) (list "IMAGE" '()))))
   expect: {result: true}
 - name: Large value assignments have no bounded character conversion limit
   sql: UPDATE default_inline_large SET memo=REPLICATE(CAST('x' AS VARCHAR(MAX)),12001),national=REPLICATE(CAST(N'ä' AS NVARCHAR(MAX)),5001) WHERE id=1
