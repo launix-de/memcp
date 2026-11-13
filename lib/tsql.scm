@@ -440,8 +440,12 @@ locals or capture layout. Only this exact pure helper registry is restored. */
 			(scheme (serialize formula))))))))
 (define tsql_computed_recipe_comparisons? (lambda (formula) (match formula
 	((symbol quote) _value) true
-	((symbol sql_compare) left right comparison _operation)
-	(and (tsql_computed_recipe_comparisons? left) (tsql_computed_recipe_comparisons? right)
+	((symbol get_column) alias alias_ic name name_ic)
+	(and (equal? alias "__computed") (identical? alias_ic false)
+		(string? name) (identical? name_ic false))
+	((symbol sql_compare) left right comparison operation)
+	(and (has? '("equal?" "equal??" "<" ">" "<=" ">=") operation)
+		(tsql_computed_recipe_comparisons? left) (tsql_computed_recipe_comparisons? right)
 		(or (has? '(equal? equal?? < <= > >=) comparison)
 			(match comparison
 				((symbol collate) name reverse) (and (string? name)
