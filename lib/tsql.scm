@@ -1853,14 +1853,22 @@ Only parameter-sized scalar tuples are collected; relational SQL stays native. *
 				(if contract (list (car declaration) target (cadr contract))
 					(error "undeclared output variable: @" target)))
 			_ nil)))) (lambda (item) (not (nil? item)))))
-	(define values (statement "procedure parameter binding" false (lambda (tx) (map declarations (lambda (declaration) (begin
+	/* Explicit arguments read caller locals. Defaults referring to formals read
+	only the already converted values of preceding declarations in this scope. */
+	(define defaults (tsql_scope_session caller declarations nil false))
+	(define values (statement "procedure parameter binding" false (lambda (tx) (reverse (reduce declarations (lambda (values declaration) (begin
 		(define name (car declaration))
 		(define supplied (find named (lambda (item) (equal? (car item) name)) nil))
 		(define expression (match (if supplied (cadr supplied) '("default"))
 			'("output" target) (concat "@" target)
 			'("default") (if (nil? (nth declaration 2)) (error "missing procedure argument: @" name) (nth declaration 2))
 			text text))
-		(list name (tsql_scalar_value (caller "schema") expression caller tx "assignment" (cadr declaration)))))))))
+		(define value (match expression
+			'("parameter-reference" reference)
+			(tsql_scalar_value (caller "schema") (concat "@" reference) defaults tx "assignment" (cadr declaration))
+			_ (tsql_scalar_value (caller "schema") expression caller tx "assignment" (cadr declaration))))
+		(defaults (concat "__tsql_parameter:" name) value)
+		(cons (list name value) values))) '())))))
 	(list values outputs))))
 (define tsql_copy_outputs (lambda (outputs scoped statement caller) (begin
 	/* Convert all outgoing scalars using the callee's declared source contract

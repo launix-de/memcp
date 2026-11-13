@@ -453,8 +453,17 @@ can be bound for the full procedure lifetime. */
 		(concat prefix (if (equal? prefix "") "" ".") "[" (replace part "]" "]]") "]")) "")))
 (define tsql_unique_parameters (lambda (parameters) (begin
 	(define names (map parameters car))
-	(if (equal? (count names) (count (merge_unique (list names)))) parameters
-		(error "duplicate procedure parameter declaration")))))
+	(if (equal? (count names) (count (merge_unique (list names)))) true
+		(error "duplicate procedure parameter declaration"))
+	/* A default may borrow an earlier formal parameter, never a caller local
+	or a forward/self reference. Literal defaults keep their existing source. */
+	(reduce parameters (lambda (visible declaration) (begin
+		(if (> (count declaration) 2) (match (nth declaration 2)
+			'("parameter-reference" name) (if (has? visible name) true
+				(error "undeclared parameter in procedure default: @" name))
+			_ true) true)
+		(cons (car declaration) visible))) '())
+	parameters)))
 /* Catalog values describe SQL declarations. COL_LENGTH uses native point
 metadata and the frontend alias catalog; application values and compressed
 widths never determine a declared SQL width. */
@@ -6404,12 +6413,14 @@ that context explicitly; stored views refuse this scalar before publication. */
 			(define tsql_script_procedure_parameter (parser '(
 				(define name tsql_script_variable) (? (atom "AS" true))
 				(define type tsql_declared_type) (define dimensions tsql_type_dimensions)
-				/* Procedure defaults are literal declarations, unlike DECLARE
-				initializers; they cannot capture an invocation's caller locals. */
-				(? "=" (define initializer (capture (or tsql_literal (parser '("+" (define value tsql_number)) value)))))
+				/* SQL Server also admits an earlier formal parameter as a default.
+				Keep that lexical reference distinct from literal SQL source. */
+				(? "=" (define initializer (or
+					(parser (define reference tsql_script_variable) (list "parameter-reference" reference))
+					(parser (define literal (capture (or tsql_literal (parser '("+" (define value tsql_number)) value)))) (car literal)))))
 				(define output (? (or (atom "OUTPUT" true) (atom "OUT" true))))
 			) (list name (tsql_parameter_declaration schema type dimensions)
-					(if initializer (car initializer) nil) (if output true false))))
+					initializer (if output true false))))
 			(define tsql_script_scalar_parameter (parser '(
 				(define name tsql_script_variable) (? (atom "AS" true))
 				(define type tsql_declared_type) (define dimensions tsql_type_dimensions)
