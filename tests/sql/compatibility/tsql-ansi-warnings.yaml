@@ -60,6 +60,9 @@ test_cases:
   - name: Truncating UPDATE rolls back the complete statement
     sql: SET ANSI_WARNINGS ON; BEGIN TRY UPDATE ansi_warning_rows SET label=CASE WHEN id=2 THEN 'xy' ELSE 'too long' END WHERE id IN(2,3); END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS code; END CATCH; SELECT id,label FROM ansi_warning_rows WHERE id IN(2,3) ORDER BY id
     expect: {data: [{code: 8152},{id: 2,label: lon},{id: 3,label: abc}]}
+  - name: NULL predicates bind after arithmetic and retain Boolean CASE contracts
+    sql: SET ANSI_WARNINGS OFF; SELECT CASE WHEN 8/0 IS NULL THEN 77 ELSE 5 END AS missing,CASE WHEN 8/2 IS NOT NULL THEN 4 ELSE 9 END AS present; SET ANSI_WARNINGS ON
+    expect: {data: [{missing: 77,present: 4}]}
   - name: BIGINT overflow is checked before the native carrier wraps
     sql: SET ANSI_WARNINGS OFF; SELECT CAST(9223372036854775807 AS BIGINT)+CAST(1 AS BIGINT) AS added,CAST(-9223372036854775808 AS BIGINT)-CAST(1 AS BIGINT) AS subtracted,CAST(-9223372036854775808 AS BIGINT)*CAST(-1 AS BIGINT) AS multiplied; SET ANSI_WARNINGS ON
     expect: {data: [{added: null,subtracted: null,multiplied: null}]}

@@ -3958,6 +3958,11 @@ that context explicitly; stored views refuse this scalar before publication. */
 		(parser '((atom "NOT" true) (atom "EXISTS" true) "(" (define sub tsql_select) ")") (list (quote not) (tsql_predicate_expr (list (quote inner_select_exists) sub))))
 		(parser '((atom "NOT" true) (define expr tsql_expression2)) '('sql_not expr))
 
+		/* NULL tests are predicates over the complete arithmetic operand.
+		Attaching this suffix to an atom would parse a/b IS NULL as a/(b IS NULL). */
+		(parser '((define expr tsql_expression3) (atom "IS" true) (atom "NULL" true)) '('nil? expr))
+		(parser '((define expr tsql_expression3) (atom "IS" true) (atom "NOT" true) (atom "NULL" true)) '('not '('nil? expr)))
+
 		(parser '((define a tsql_expression3) (atom "IN" true) "(" (define sub tsql_select) ")") (tsql_predicate_expr '('inner_select_in a sub)))
 		(parser '((define a tsql_expression3) (atom "NOT" true) (atom "IN" true) "(" (define sub tsql_select) ")") (list (quote not) (tsql_predicate_expr (list (quote inner_select_in) a sub))))
 
@@ -4005,10 +4010,7 @@ that context explicitly; stored views refuse this scalar before publication. */
 		(? (atom "COLLATE" true) (define collation tsql_identifier)))
 		(if (nil? collation) value
 			(list (quote sql_compile_expr) (list (quote tsql_collation_compiler) collation) value))))
-	(define tsql_expression5 (parser (or
-		(parser '((define expr tsql_collated_expression) (atom "IS" true) (atom "NULL" true)) '('nil? expr))
-		(parser '((define expr tsql_collated_expression) (atom "IS" true) (atom "NOT" true) (atom "NULL" true)) '('not '('nil? expr)))
-		tsql_collated_expression)))
+	(define tsql_expression5 tsql_collated_expression)
 
 	/* Both count spellings emit the same native COUNT descriptor. Only the
 	frontend result contract differs; ALL uses its ordinary non-NULL input. */
