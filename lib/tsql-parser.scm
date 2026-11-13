@@ -958,7 +958,7 @@ local variables and module parameters keep their ordinary width conversion. */
 (define tsql_assignment_text_value (close_procedure ((lambda (encode raise_error)
 	(lambda (value enabled length national encoding) (if (nil? value) nil (begin
 		(define meaningful (regexp_replace value " +$" ""))
-		(define units (if national (utf16_length meaningful) (strlen (encode meaningful encoding))))
+		(define units (if national (utf16_length meaningful) (strlen (encode meaningful encoding -1))))
 		(if (and enabled (>= length 0) (> units length))
 			(raise_error 8152 "String or binary data would be truncated." 1) value)))))
 	tsql_encode_character tsql_raise_error)))
@@ -2016,14 +2016,6 @@ runtime errors are never caught and classified by their message text. */
 	(define info (car infos))
 	(define formula (sql_info_formula info))
 	(define type (sql_info_type info))
-	/* Diagnose constant conversion overflow using the declared range.
-	Column-bearing operands are resolved by the shared compiler first. */
-	(match formula
-		'(conversion operand minimum maximum)
-		(if (and (or (equal? conversion (quote tsql_cast_integer)) (equal? conversion tsql_cast_integer)) (plain_literal_expr? operand)
-			(< minimum 0) (equal? (tsql_cast_integer operand minimum maximum) minimum))
-			(tsql_raise_error 8115 "unary integer conversion overflow" 1) true)
-		_ true)
 	(if (tsql_numeric_operand_type? type) true
 		(error "unary minus requires a numeric operand"))
 	(define negated (if (has? '("INT" "INTEGER" "BIGINT" "SMALLINT") type)
