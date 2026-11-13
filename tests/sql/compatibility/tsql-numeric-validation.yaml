@@ -36,7 +36,12 @@ test_cases:
         data: [{numeric_value: '123',decimal_value: '456'}]
         column_types: [{name: numeric_value,type: DECIMAL,precision: 38,scale: 0},{name: decimal_value,type: DECIMAL,precision: 38,scale: 0}]
 - name: Stored conversion syntax retains its original precision spelling
-  sql: CREATE PROCEDURE numeric_precision_temporary AS BEGIN CREATE TABLE #precision_input(value VARCHAR(30)); INSERT #precision_input VALUES('12'),('30'); SELECT SUM(CONVERT(NUMERIC(50),value)) AS total FROM #precision_input; END
+  sql: |
+    CREATE PROCEDURE numeric_precision_temporary AS BEGIN
+      CREATE TABLE #precision_input(value VARCHAR(30));
+      INSERT #precision_input VALUES('12'),('30');
+      SELECT SUM(CONVERT(NUMERIC(50),value)) AS total FROM #precision_input;
+    END
   expect: {rows: 0}
 - name: Stored conversions execute over actual temporary source rows
   sql: EXEC numeric_precision_temporary
