@@ -5,12 +5,15 @@ metadata:
   isolated: true
   description: Shared declaration binding and native transaction-owned query plans
 setup:
+- sql: CREATE TABLE catalog_union_pending(id INT PRIMARY KEY)
+- sql: INSERT catalog_union_pending VALUES(1),(2)
 - sql: CREATE TABLE catalog_count_binding(id INT PRIMARY KEY)
 - sql: CREATE TABLE catalog_binding_rows(id INT PRIMARY KEY,label NVARCHAR(23) UNIQUE)
 - sql: INSERT catalog_binding_rows VALUES(1,N'first'),(2,N'second')
 - sql: CREATE TABLE catalog_point_stats(id INT PRIMARY KEY,payload VARCHAR(12),note VARCHAR(12))
 - sql: INSERT catalog_point_stats VALUES(1,'initial','one')
 cleanup:
+- sql: DROP TABLE IF EXISTS catalog_union_pending
 - sql: DROP TABLE IF EXISTS catalog_point_stats
 - sql: DROP VIEW IF EXISTS catalog_union_binding
 - sql: DROP VIEW IF EXISTS catalog_snapshot_view
@@ -665,38 +668,48 @@ test_cases:
       (list join_result nested_result private))
   expect: {result: [[2,3,0,1],[2,3,2,2],true]}
 
-- name: Native ACID compilation keeps UNION identity independent of each session owner
+- name: Native ACID UNION plans keep each pending domain through commit and rollback
   scm: |
     (begin
       (define shared (newcachemap))
-      (define queries (list
-        "SELECT id AS value FROM catalog_binding_rows UNION SELECT NULL FROM catalog_binding_rows ORDER BY value"
-        "SELECT id-1 AS bucket,SUM(CAST(0.5 AS FLOAT)) AS quantity FROM catalog_binding_rows GROUP BY id UNION SELECT id-1,CASE WHEN id=1 THEN 2 ELSE NULL END FROM catalog_binding_rows ORDER BY bucket,quantity"
-        "SELECT id AS value FROM catalog_binding_rows UNION SELECT NULL FROM catalog_binding_rows ORDER BY value OFFSET 1 ROWS FETCH NEXT 1 ROWS ONLY"))
-      (define run (lambda () (begin
-        (define s (newsession)) (s "username" "root") (s "schema" "memcp-tests")
-        (tx_begin_acid s)
+      (define first (newsession)) (first "username" "root") (first "schema" "memcp-tests")
+      (define second (newsession)) (second "username" "root") (second "schema" "memcp-tests")
+      (tx_begin_acid first) (tx_begin_acid second)
+      (define execute (lambda (s query) (begin
         (define tx (s "__memcp_tx"))
-        (define result (try (lambda ()
-          (map queries (lambda (query) (begin
-            (define out (newsession)) (out "rows" '())
-            (define formula (cached_parse shared "union-owner" (list parse_tsql)
-              "memcp-tests" query nil "root" s false tx))
-            (sql_execute_formula s tx formula
-              (lambda (row) (out "rows" (append (out "rows") (list row))))
-              (lambda args true))
-            (out "rows")))))
-          (lambda (failure) (begin (tx_rollback s) (error failure)))))
-        (tx_rollback s) result)))
-      (list (run) (run) (count (shared))))
+        (define out (newsession)) (out "rows" '())
+        (define formula (cached_parse shared "union-owner" (list parse_tsql)
+          "memcp-tests" query nil "root" s false tx))
+        (sql_execute_formula s tx formula
+          (lambda (row) (out "rows" (append (out "rows") (list row))))
+          (lambda args true))
+        (out "rows"))))
+      (define queries (list
+        "SELECT id AS value FROM catalog_union_pending UNION SELECT NULL FROM catalog_union_pending ORDER BY value"
+        "SELECT id AS bucket,SUM(CAST(0.5 AS FLOAT)) AS quantity FROM catalog_union_pending GROUP BY id UNION SELECT id,CASE WHEN id=0 THEN 2 ELSE NULL END FROM catalog_union_pending ORDER BY bucket,quantity"
+        "SELECT id AS value FROM catalog_union_pending UNION SELECT NULL FROM catalog_union_pending ORDER BY value OFFSET 3 ROWS FETCH NEXT 1 ROWS ONLY"))
+      (define result (try (lambda () (begin
+        (execute first "INSERT catalog_union_pending VALUES(3)")
+        (execute second "INSERT catalog_union_pending VALUES(4)")
+        (define first_rows (map queries (lambda (query) (execute first query))))
+        (define second_rows (map queries (lambda (query) (execute second query))))
+        (tx_commit first) (tx_rollback second)
+        (tx_begin_acid first)
+        (define committed_rows (execute first (car queries)))
+        (tx_rollback first)
+        (list first_rows second_rows committed_rows)))
+        (lambda (failure) (begin (tx_rollback first) (tx_rollback second) (error failure)))))
+      result)
   expect:
     result:
-    - - [ [value, null], [value, 1], [value, 2] ]
-      - [ [bucket, 0, quantity, 0.5], [bucket, 0, quantity, 2],
-          [bucket, 1, quantity, null], [bucket, 1, quantity, 0.5] ]
-      - [ [value, 1] ]
-    - - [ [value, null], [value, 1], [value, 2] ]
-      - [ [bucket, 0, quantity, 0.5], [bucket, 0, quantity, 2],
-          [bucket, 1, quantity, null], [bucket, 1, quantity, 0.5] ]
-      - [ [value, 1] ]
-    - 0
+    - - [ [value, null], [value, 1], [value, 2], [value, 3] ]
+      - [ [bucket, 1, quantity, null], [bucket, 1, quantity, 0.5],
+          [bucket, 2, quantity, null], [bucket, 2, quantity, 0.5],
+          [bucket, 3, quantity, null], [bucket, 3, quantity, 0.5] ]
+      - [ [value, 3] ]
+    - - [ [value, null], [value, 1], [value, 2], [value, 4] ]
+      - [ [bucket, 1, quantity, null], [bucket, 1, quantity, 0.5],
+          [bucket, 2, quantity, null], [bucket, 2, quantity, 0.5],
+          [bucket, 4, quantity, null], [bucket, 4, quantity, 0.5] ]
+      - [ [value, 4] ]
+    - [ [value, null], [value, 1], [value, 2], [value, 3] ]
