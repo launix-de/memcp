@@ -5,6 +5,16 @@ metadata:
   isolated: true
   requires_tds: true
   description: Scalar source WHILE loops carry typed lexical values through the existing scalar loop operator
+setup:
+- sql: CREATE TABLE loop_condition_rows(id INT PRIMARY KEY)
+- sql: INSERT loop_condition_rows VALUES(1),(2)
+cleanup:
+- sql: DROP FUNCTION IF EXISTS dbo.gap_return_loop
+- sql: DROP FUNCTION IF EXISTS dbo.break_declaration_loop
+- sql: DROP FUNCTION IF EXISTS dbo.gap_continue_loop
+- sql: DROP FUNCTION IF EXISTS dbo.gap_relational_loop
+- sql: DROP FUNCTION IF EXISTS dbo.invalid_loop
+- sql: DROP TABLE IF EXISTS loop_condition_rows
 test_cases:
 - name: A character WHILE loop scans numeric text and changes its own exit value
   tds:
@@ -105,18 +115,50 @@ test_cases:
         END
     - sql: SELECT dbo.nested_steps(3) AS total,dbo.nested_steps(0) AS zero_value
       expect: {rows: 1, data: [{total: 6, zero_value: 0}]}
+# The historical case identity is retained; RETURN is valid SQL whose
+# implementation must eventually satisfy this positive specification.
 - name: Unsupported loop control and relational bodies fail before publication
+  noncritical: true
   tds:
     statements:
-    - sql: CREATE FUNCTION dbo.invalid_loop(@count INT) RETURNS INT AS BEGIN WHILE @count>0 RETURN @count; RETURN 0; END
-      expect: {error: true, contains: ['RETURN inside a scalar function WHILE body is unsupported']}
-    - sql: CREATE FUNCTION dbo.invalid_loop(@count INT) RETURNS INT AS BEGIN WHILE @count>0 BREAK; RETURN 0; END
-      expect: {error: true, contains: ['unsupported statement in scalar function body']}
-    - sql: CREATE FUNCTION dbo.invalid_loop(@count INT) RETURNS INT AS BEGIN WHILE @count>0 CONTINUE; RETURN 0; END
-      expect: {error: true, contains: ['unsupported statement in scalar function body']}
-    - sql: CREATE FUNCTION dbo.invalid_loop(@count INT) RETURNS INT AS BEGIN WHILE EXISTS(SELECT 1 FROM missing_loop_source) SET @count=@count-1; RETURN 0; END
-      expect: {error: true, contains: ['scalar function expression requires a relational plan']}
+    - sql: CREATE FUNCTION dbo.gap_return_loop(@count INT) RETURNS INT AS BEGIN WHILE @count>0 RETURN @count; RETURN 0; END
+    - sql: SELECT dbo.gap_return_loop(3) AS active_value,dbo.gap_return_loop(0) AS skipped,dbo.gap_return_loop(NULL) AS unknown
+      expect: {rows: 1,data: [{active_value: 3,skipped: 0,unknown: 0}]}
+- name: A supported BREAK declaration publishes and returns its continuation value
+  tds:
+    statements:
+    - sql: CREATE FUNCTION dbo.break_declaration_loop(@count INT) RETURNS INT AS BEGIN WHILE @count>0 BREAK; RETURN 0; END
+    - sql: SELECT dbo.break_declaration_loop(3) AS stopped,dbo.break_declaration_loop(0) AS skipped,dbo.break_declaration_loop(NULL) AS unknown
+      expect: {rows: 1,data: [{stopped: 0,skipped: 0,unknown: 0}]}
+- name: CONTINUE skips the remaining body while retaining the next iteration state
+  noncritical: true
+  tds:
+    statements:
+    - sql: |
+        CREATE FUNCTION dbo.gap_continue_loop(@count INT) RETURNS INT AS BEGIN
+          DECLARE @value INT=0;
+          WHILE @count>0 BEGIN
+            SET @count=@count-1;
+            IF @count=1 CONTINUE;
+            SET @value=@value+1;
+          END
+          RETURN @value;
+        END
+    - sql: SELECT dbo.gap_continue_loop(3) AS active_value,dbo.gap_continue_loop(0) AS skipped,dbo.gap_continue_loop(NULL) AS unknown
+      expect: {rows: 1,data: [{active_value: 2,skipped: 0,unknown: 0}]}
+- name: Relational WHILE conditions observe each updated local binding
+  noncritical: true
+  tds:
+    statements:
+    - sql: CREATE FUNCTION dbo.gap_relational_loop(@count INT) RETURNS INT AS BEGIN WHILE EXISTS(SELECT id FROM loop_condition_rows WHERE id=@count) SET @count=@count-1; RETURN @count; END
+    - sql: SELECT dbo.gap_relational_loop(2) AS active_value,dbo.gap_relational_loop(9) AS missing,dbo.gap_relational_loop(0) AS skipped,dbo.gap_relational_loop(NULL) AS unknown
+      expect: {rows: 1,data: [{active_value: 0,missing: 9,skipped: 0,unknown: null}]}
+- name: The former probe identity remains independently publishable
+  tds:
+    statements:
     - sql: CREATE FUNCTION dbo.invalid_loop(@count INT) RETURNS INT AS BEGIN RETURN @count; END
+    - sql: SELECT dbo.invalid_loop(4) AS value
+      expect: {rows: 1,data: [{value: 4}]}
 - name: Loop declaration rules remain lexical even when the loop cannot run
   tds:
     statements:
