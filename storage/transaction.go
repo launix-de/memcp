@@ -92,10 +92,18 @@ type storageShardTransaction struct {
 	InsertRecids   []uint32
 	DeletedRecids  []uint32
 	DeleteRecids   []uint32
-	UndeleteRecids []uint32
+	UndeleteRecids []stagedVisibilityChange
 	generation     *tableShardTopology
 
 	mu sync.Mutex
+}
+
+// stagedVisibilityChange is one entry in the existing ACID visibility journal.
+// Recording the previous bit makes savepoint rewind idempotent, including an
+// UPDATE/DELETE which removes a row staged before the savepoint.
+type stagedVisibilityChange struct {
+	recid    uint32
+	previous bool
 }
 
 // shardSavepoint records the Recids slice lengths for one shard at a savepoint.
@@ -826,8 +834,10 @@ func (tx *TxContext) AddToDeleteMask(shard *storageShard, recid uint32) {
 	st := tx.getOrCreateShardTxLocked(shard)
 	tx.mu.Unlock()
 	st.mu.Lock()
-	st.DeleteMask.Set(uint(recid), true)
-	st.DeleteRecids = append(st.DeleteRecids, recid)
+	if !st.DeleteMask.Get(uint(recid)) {
+		st.DeleteMask.Set(uint(recid), true)
+		st.DeleteRecids = append(st.DeleteRecids, recid)
+	}
 	st.mu.Unlock()
 }
 
@@ -837,8 +847,10 @@ func (tx *TxContext) AddToUndeleteMask(shard *storageShard, recid uint32) {
 	st := tx.getOrCreateShardTxLocked(shard)
 	tx.mu.Unlock()
 	st.mu.Lock()
-	st.UndeleteMask.Set(uint(recid), true)
-	st.UndeleteRecids = append(st.UndeleteRecids, recid)
+	if !st.UndeleteMask.Get(uint(recid)) {
+		st.UndeleteRecids = append(st.UndeleteRecids, stagedVisibilityChange{recid: recid})
+		st.UndeleteMask.Set(uint(recid), true)
+	}
 	st.mu.Unlock()
 }
 
@@ -846,10 +858,15 @@ func (tx *TxContext) AddToUndeleteMask(shard *storageShard, recid uint32) {
 // Returns true if the row was staged by this tx and has been un-staged.
 func (tx *TxContext) UnstageRow(shard *storageShard, recid uint32) bool {
 	st := tx.getShardTx(shard)
-	if st == nil || !st.UndeleteMask.Get(uint(recid)) {
+	if st == nil {
 		return false
 	}
-	// plain Set is safe: caller holds the shard write lock
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if !st.UndeleteMask.Get(uint(recid)) {
+		return false
+	}
+	st.UndeleteRecids = append(st.UndeleteRecids, stagedVisibilityChange{recid: recid, previous: true})
 	st.UndeleteMask.Set(uint(recid), false)
 	return true
 }
@@ -973,7 +990,7 @@ func (tx *TxContext) releasedUniqueReservation(shard *storageShard, recid uint32
 		return true
 	}
 	for _, staged := range st.UndeleteRecids {
-		if staged == recid {
+		if staged.recid == recid {
 			return !st.UndeleteMask.Get(uint(recid))
 		}
 	}
@@ -1133,22 +1150,26 @@ func (tx *TxContext) rollbackToSavepointLocked(sp Savepoint) {
 					st.DeleteMask.Set(uint(st.DeleteRecids[i]), false)
 				}
 				st.DeleteRecids = st.DeleteRecids[:lens.DeleteLen]
-				// Rollback UndeleteMask additions (re-hide the staged rows)
-				for i := len(st.UndeleteRecids) - 1; i >= lens.UndeleteLen; i-- {
-					recid := st.UndeleteRecids[i]
-					st.UndeleteMask.Set(uint(recid), false)
+				// Rewind actual visibility changes, not just inserted row IDs. Keep
+				// the last entry until compensation succeeds: a failed restore can
+				// retry the exact same previous bit without toggling it twice.
+				for len(st.UndeleteRecids) > lens.UndeleteLen {
+					change := st.UndeleteRecids[len(st.UndeleteRecids)-1]
 					func() {
 						ownsShardWrite := tx.writeHeld[shard] > 0
 						if !ownsShardWrite {
 							shard.mu.Lock()
 							defer shard.mu.Unlock()
 						}
-						shard.deletions.Set(uint(recid), true)
-						shard.rollbackProtected.Set(uint(recid), false)
-						shard.syncNextVisibilityLocked(recid, trackedShards, tx, true, tx.writeHeld)
+						// Both the restored own version and discarded new version
+						// stay globally hidden until the ACID decision.
+						shard.deletions.Set(uint(change.recid), true)
+						shard.rollbackProtected.Set(uint(change.recid), change.previous)
+						shard.syncNextVisibilityLocked(change.recid, trackedShards, tx, true, tx.writeHeld)
+						st.UndeleteMask.Set(uint(change.recid), change.previous)
 					}()
+					st.UndeleteRecids = st.UndeleteRecids[:len(st.UndeleteRecids)-1]
 				}
-				st.UndeleteRecids = st.UndeleteRecids[:lens.UndeleteLen]
 			}
 		}()
 	}
@@ -1363,7 +1384,8 @@ func (tx *TxContext) commitACID() error {
 		// Apply UndeleteMask → clear global deletions (make staged rows visible).
 		for _, shard := range shards {
 			st := directory[shard]
-			for _, recid := range st.UndeleteRecids {
+			for _, change := range st.UndeleteRecids {
+				recid := change.recid
 				shard.rollbackProtected.Set(uint(recid), false)
 				if !st.UndeleteMask.Get(uint(recid)) {
 					shard.syncNextVisibilityLocked(recid, trackedShards, tx, true, heldByCaller)
@@ -1435,7 +1457,8 @@ func (tx *TxContext) abortACIDCommit(shards []*storageShard, trackedShards map[*
 				shard.syncNextVisibilityLocked(recid, trackedShards, tx, false, heldByCaller)
 			}
 		}
-		for _, recid := range st.UndeleteRecids {
+		for _, change := range st.UndeleteRecids {
+			recid := change.recid
 			shard.rollbackProtected.Set(uint(recid), false)
 			if st.UndeleteMask.Get(uint(recid)) {
 				shard.deletions.Set(uint(recid), true)
@@ -1618,7 +1641,8 @@ func (tx *TxContext) rollbackACID() {
 	for shard, st := range tx.shardTransactions() {
 		st.mu.Lock()
 		shard.mu.Lock()
-		for _, recid := range st.UndeleteRecids {
+		for _, change := range st.UndeleteRecids {
+			recid := change.recid
 			shard.rollbackProtected.Set(uint(recid), false)
 			shard.syncNextVisibilityLocked(recid, trackedShards, tx, false, tx.writeHeld)
 		}

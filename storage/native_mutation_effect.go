@@ -154,8 +154,8 @@ func (t *table) requireStatementTriggerMutation(tx *TxContext, event nativeMutat
 	if t.statementTriggerEvents.Load()&(1<<event) == 0 {
 		return
 	}
-	if tx == nil || tx.Mode != TxCursorStability || tx.mutationOperation == nil {
-		panic("statement-triggered mutation requires an outer cursor-stability producer")
+	if tx == nil || (tx.Mode != TxCursorStability && tx.Mode != TxACID) || tx.mutationOperation == nil {
+		panic("statement-triggered mutation requires an outer native statement producer")
 	}
 	requireCheckInvocation(tx)
 	tx.requireMutationBinding()

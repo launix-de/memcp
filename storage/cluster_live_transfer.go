@@ -62,10 +62,11 @@ type liveGrainHeader struct {
 	Overlays         int
 }
 type liveOverlayHeader struct {
-	Tx            scm.ClusterReference
-	Depth         uint32
-	DecisionToken string
-	Repartition   []uint32
+	Tx              scm.ClusterReference
+	Depth           uint32
+	DecisionToken   string
+	Repartition     []uint32
+	UndeleteHistory bool
 }
 
 func (r *replicationManager) captureLiveShard(cell *replicaCell, current *storageShard) (capture *liveShardTransfer, err error) {
@@ -348,6 +349,57 @@ func readLiveJournal(reader io.Reader, mask *NonLockingReadMap.NonBlockingBitMap
 	return ids, nil
 }
 
+// The live stream's overlay header declares these extra journal bits. Bit zero
+// remains the final mask value; bit one records the previous value at this
+// journal position. Persistent table/WAL formats are unaffected.
+func writeLiveUndeleteJournal(writer io.Writer, entries []stagedVisibilityChange, mask *NonLockingReadMap.NonBlockingBitMap) error {
+	if err := binary.Write(writer, binary.LittleEndian, uint64(len(entries))); err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if err := binary.Write(writer, binary.LittleEndian, entry.recid); err != nil {
+			return err
+		}
+		var bits uint8
+		if mask.Get(uint(entry.recid)) {
+			bits |= 1
+		}
+		if entry.previous {
+			bits |= 2
+		}
+		if err := binary.Write(writer, binary.LittleEndian, bits); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func readLiveUndeleteJournal(reader io.Reader, mask *NonLockingReadMap.NonBlockingBitMap, history bool) ([]stagedVisibilityChange, error) {
+	var count uint64
+	if err := binary.Read(reader, binary.LittleEndian, &count); err != nil {
+		return nil, err
+	}
+	entries := make([]stagedVisibilityChange, 0)
+	for range count {
+		var id uint32
+		var bits uint8
+		if err := binary.Read(reader, binary.LittleEndian, &id); err != nil {
+			return nil, err
+		}
+		if err := binary.Read(reader, binary.LittleEndian, &bits); err != nil {
+			return nil, err
+		}
+		if bits > 3 || !history && bits > 1 {
+			return nil, fmt.Errorf("invalid staged visibility journal bits")
+		}
+		// Legacy entries represented only a newly staged row. Their old
+		// savepoint semantics restore false; retain that exact interpretation.
+		entries = append(entries, stagedVisibilityChange{recid: id, previous: bits&2 != 0})
+		mask.Set(uint(id), bits&1 != 0)
+	}
+	return entries, nil
+}
+
 // Live handover records share the binary metadata codec. Column frames and
 // native journals below keep their storage encoding; this is a network version.
 func readLiveRecord(reader *bufio.Reader, value any) error {
@@ -467,7 +519,7 @@ func (capture *liveShardTransfer) write(writer io.Writer) error {
 			if st.decisionToken == "" {
 				st.decisionToken = uuid.NewString()
 			}
-			meta := liveOverlayHeader{Tx: ref, Depth: tx.Depth, DecisionToken: st.decisionToken}
+			meta := liveOverlayHeader{Tx: ref, Depth: tx.Depth, DecisionToken: st.decisionToken, UndeleteHistory: true}
 			for _, action := range tx.repartitionDeletes {
 				if action.shard == shard {
 					meta.Repartition = append(meta.Repartition, action.oldRecid)
@@ -485,7 +537,7 @@ func (capture *liveShardTransfer) write(writer io.Writer) error {
 				err = writeLiveJournal(writer, st.DeleteRecids, &st.DeleteMask)
 			}
 			if err == nil {
-				err = writeLiveJournal(writer, st.UndeleteRecids, &st.UndeleteMask)
+				err = writeLiveUndeleteJournal(writer, st.UndeleteRecids, &st.UndeleteMask)
 			}
 			if err != nil {
 				return err
@@ -693,7 +745,7 @@ func (cluster *nodeCluster) installLiveShard(cell *replicaCell, packet mosiPacke
 			if err != nil {
 				return err
 			}
-			st.UndeleteRecids, err = readLiveJournal(reader, &st.UndeleteMask)
+			st.UndeleteRecids, err = readLiveUndeleteJournal(reader, &st.UndeleteMask, meta.UndeleteHistory)
 			if err != nil {
 				return err
 			}

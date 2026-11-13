@@ -39,7 +39,16 @@ setup:
           "CK_statement_versions" "tsql-check" "v >= 0" '("v") (owner "__memcp_tx") owner)
         (tx_commit owner)))
         (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+- sql: CREATE TABLE check_acid_versions(id INT PRIMARY KEY,v INT)
+- sql: INSERT INTO check_acid_versions VALUES(0,5)
+- scm: |-
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (createcheck (table "memcp-tests" false "check_acid_versions" false (owner "__memcp_tx"))
+        "CK_acid_versions" "tsql-check" "v >= 0" '("v") (owner "__memcp_tx") owner)
+      (tx_commit owner))
 cleanup:
+- sql: DROP TABLE IF EXISTS check_acid_versions
 - sql: DROP TABLE IF EXISTS check_statement_versions
 - sql: DROP TABLE IF EXISTS check_stream_target
 - sql: DROP TABLE IF EXISTS check_stream_source
@@ -594,3 +603,103 @@ test_cases:
   expect:
     rows: 1
     data: [{id: 90, v: 9}]
+
+- name: ACID checked failure restores previously staged UPDATE and DELETE versions
+  scm: |-
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define h (table "memcp-tests" false "check_acid_versions" false nil))
+      (try (lambda () (begin
+        (with_autocommit owner nil 0 "prior ACID inserts" (lambda (tx)
+          (with_table_mutation (list h) (list "insert" '()) tx owner (lambda (tx)
+            (insert h '("id" "v") (list (list 1 10) (list 2 20)) '() nil false nil tx)))))
+        (with_autocommit owner nil 0 "prior ACID update" (lambda (tx)
+          (with_table_mutation (list h) (list "update" '("v")) tx owner (lambda (tx)
+            (scan tx h '() '() '("id") (lambda (id) (equal? id 0)) '("$update")
+              (lambda (acc update) (begin (update (list "v" 6)) (+ acc 1))) 0 +)))))
+        (define rejected (try (lambda () (begin
+          (with_autocommit owner nil 0 "failed ACID statement" (lambda (tx)
+            (with_table_mutation (list h) (list "insert" '()) tx owner (lambda (tx) (begin
+              (scan tx h '() '() '() (lambda () true) '("v" "$update")
+                (lambda (acc v update) (begin (update (list "v" (+ v 1))) (+ acc 1))) 0 +)
+              (scan tx h '() '() '("id") (lambda (id) (equal? id 1)) '("$update")
+                (lambda (acc update) (begin (update) (+ acc 1))) 0 +)
+              (insert h '("id" "v") (list (list 3 -1)) '() nil false nil tx))))))
+          false)) (lambda (failure) (strlike (string failure) "%check constraint CK_acid_versions failed%"))))
+        (define tx (owner "__memcp_tx"))
+        (define count_rows (lambda (reader)
+          (scan reader h '() '() '() (lambda () true) '("id") (lambda (acc id) (+ acc 1)) 0 +)))
+        (define total_rows (lambda (reader)
+          (scan reader h '() '() '() (lambda () true) '("id" "v")
+            (lambda (acc id v) (+ acc (* id 100) v)) 0 +)))
+        (define restored (and rejected (equal? (owner "transaction") true)
+          (equal? (count_rows tx) 3) (equal? (total_rows tx) 336)
+          (equal? (count_rows nil) 1) (equal? (total_rows nil) 5)))
+        (tx_commit owner) restored))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect: {result: true}
+- name: ACID statement COMMIT publishes exactly the preserved pre-statement versions
+  sql: SELECT id,v FROM check_acid_versions ORDER BY id
+  expect:
+    rows: 3
+    data: [{id: 0, v: 6}, {id: 1, v: 10}, {id: 2, v: 20}]
+- name: ACID nested savepoints restore staged versions repeatedly and retain earlier work
+  scm: |-
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (define h (table "memcp-tests" false "check_acid_versions" false nil))
+      (try (lambda () (begin
+        (with_table_mutation (list h) (list "insert" '()) tx owner (lambda (tx)
+          (insert h '("id" "v") (list (list 4 40)) '() nil false nil tx)))
+        (define outer (tx_savepoint tx))
+        (with_table_mutation (list h) (list "update" '("v")) tx owner (lambda (tx)
+          (scan tx h '() '() '("id") (lambda (id) (equal? id 4)) '("$update")
+            (lambda (acc update) (begin (update (list "v" 41)) (+ acc 1))) 0 +)))
+        (define inner (tx_savepoint tx))
+        (with_table_mutation (list h) (list "delete" '()) tx owner (lambda (tx)
+          (scan tx h '() '() '("id") (lambda (id) (equal? id 4)) '("$update")
+            (lambda (acc update) (begin (update) (+ acc 1))) 0 +)))
+        (tx_rollback_to_savepoint tx inner)
+        (define restored_inner (scan tx h '() '() '("id") (lambda (id) (equal? id 4)) '("v") + 0 +))
+        (tx_rollback_to_savepoint tx inner)
+        (tx_rollback_to_savepoint tx outer)
+        (define restored_outer (scan tx h '() '() '("id") (lambda (id) (equal? id 4)) '("v") + 0 +))
+        (tx_commit owner)
+        (and (equal? restored_inner 41) (equal? restored_outer 40))))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect: {result: true}
+- name: A terminal statement completion uses the existing whole ACID transaction rollback
+  scm: |-
+    (begin
+      (registertriggerlanguage "acid-statement-abort"
+        (lambda (source context) (lambda (OLD NEW session tx) (request_transaction_abort tx))) false false true)
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define h (table "memcp-tests" false "check_acid_versions" false nil))
+      (createstatementtrigger h "acid_statement_abort" "after_statement" "acid-statement-abort" "abort"
+        '("delete") false false (owner "__memcp_tx"))
+      (tx_commit owner)
+      (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (with_table_mutation (list h) (list "insert" '()) tx owner (lambda (tx)
+        (insert h '("id" "v") (list (list 9 90)) '() nil false nil tx)))
+      (define transferred (try (lambda () (begin
+        (with_table_mutation (list h) (list "delete" '()) tx owner (lambda (tx)
+          (scan tx h '() '() '("id") (lambda (id) (equal? id 1)) '("$update")
+            (lambda (acc update) (begin (update) (+ acc 1))) 0 +)))
+        false)) (lambda (failure) (transaction_abort_transfer? failure))))
+      (and transferred (nil? (owner "transaction"))))
+  expect: {result: true}
+- name: ACID terminal rollback preserves committed rows and removes earlier pending inserts
+  sql: SELECT id,v FROM check_acid_versions ORDER BY id
+  expect:
+    rows: 4
+    data: [{id: 0, v: 6}, {id: 1, v: 10}, {id: 2, v: 20}, {id: 4, v: 40}]
+- name: Restart the checked ACID decision through ordinary server shutdown
+  sql: SHUTDOWN
+  expect: {rows: 0}
+- name: SAFE replay preserves the exact ACID savepoint and terminal rollback outcomes
+  sql: SELECT id,v FROM check_acid_versions ORDER BY id
+  expect:
+    rows: 4
+    data: [{id: 0, v: 6}, {id: 1, v: 10}, {id: 2, v: 20}, {id: 4, v: 40}]

@@ -5,7 +5,7 @@ package storage
 
 import "fmt"
 
-// One outer CS producer owns one undo boundary, including synchronous user
+// One outer native producer owns one undo boundary, including synchronous user
 // trigger effects. This is not an isolation-mode conversion or a second journal.
 // It remains private until all producer/control/callback callers are ported.
 type nativeMutationStatement struct {
@@ -30,8 +30,8 @@ func (operation *nativeMutationOperation) beginStatement(db *database) {
 	state := operation.state
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	if state.Mode != TxCursorStability {
-		panic("CHECK row mutation currently requires native cursor stability")
+	if state.Mode != TxCursorStability && state.Mode != TxACID {
+		panic("CHECK row mutation requires a supported native transaction mode")
 	}
 	if state.State != TxActive || state.decisionStarted || state.mutationOperations != 1 || state.checkedMutation != nil || state.mutationAdmissionClosed {
 		panic(newNativeMutationBusyError(state, "statement entry"))

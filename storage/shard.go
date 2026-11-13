@@ -2086,12 +2086,10 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 
 			if tx := currentTx; tx != nil && tx.Mode == TxACID {
 				// Check if row was staged by this tx
-				st2 := tx.getShardTx(t)
-				wasStaged := st2 != nil && st2.UndeleteMask.Get(uint(idx))
+				wasStaged := tx.UnstageRow(t, idx)
 				if wasStaged {
 					// Row was staged by this tx → remove from UndeleteMask.
 					// Keep shard.deletions[idx]=true (already globally hidden).
-					st2.UndeleteMask.Set(uint(idx), false)
 				} else {
 					// Pre-existing committed row → add to delete mask
 					tx.AddToDeleteMask(t, idx)
@@ -2234,13 +2232,11 @@ func (t *storageShard) replacePreparedRowLocked(oldRecid uint32, columns []strin
 
 	if currentTx != nil && currentTx.Mode == TxACID {
 		// Check if old row was staged by this tx (in UndeleteMask)
-		st := currentTx.getShardTx(t)
-		if st != nil && st.UndeleteMask.Get(uint(oldRecid)) {
+		if currentTx.UnstageRow(t, oldRecid) {
 			oldStaged = true
 			// Row was staged by this tx → remove from UndeleteMask.
 			// Keep shard.deletions[oldRecid]=true (already globally hidden).
 			// Don't add to DeleteMask (not a pre-existing row).
-			st.UndeleteMask.Set(uint(oldRecid), false)
 		} else if !oldStaged {
 			// Pre-existing committed row → undo temporary global deletion
 			t.deletions.Set(uint(oldRecid), false)

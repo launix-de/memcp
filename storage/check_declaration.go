@@ -345,8 +345,8 @@ func (t *table) requireCheckMutation(tx *TxContext, operation string) {
 		panic("check-constrained " + operation + " requires a native statement transaction")
 	}
 	requireCheckInvocation(tx)
-	if tx.Mode != TxCursorStability || tx.mutationOperation == nil {
-		panic("check-constrained " + operation + " requires an outer cursor-stability mutation producer")
+	if (tx.Mode != TxCursorStability && tx.Mode != TxACID) || tx.mutationOperation == nil {
+		panic("check-constrained " + operation + " requires an outer native statement mutation producer")
 	}
 	tx.requireMutationBinding()
 	owner := tx.mutationOperation

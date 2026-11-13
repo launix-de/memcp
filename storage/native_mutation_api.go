@@ -71,10 +71,10 @@ func withNativeTableMutation(targets []*table, descriptor nativeMutationDescript
 		}
 		checked = checked || target.hasCheckConstraints.Load() || target.statementTriggerEvents.Load() != 0
 		// Synchronous callbacks can reach a checked/statement-triggered target
-		// that is not named by this producer. Own the CS savepoint BEFORE the
+		// that is not named by this producer. Own the native savepoint BEFORE the
 		// first outer write, not only when that later target happens to open one.
-		// Native ACID, distributed and nil-Tx legacy profiles are unchanged.
-		if parent != nil && parent.mutationOperation == nil && parent.Mode == TxCursorStability &&
+		// Distributed and nil-Tx legacy profiles are unchanged.
+		if parent != nil && parent.mutationOperation == nil && (parent.Mode == TxCursorStability || parent.Mode == TxACID) &&
 			activeReplication(target.schema) == nil && !sharedClusterDatabase(target.schema.Name) && !target.isEphemeralQueryTable() {
 			// Ordinary writer admission excludes staged FK publication.
 			// The existing declaration counter also closes legacy FK and user-trigger

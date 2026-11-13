@@ -147,7 +147,8 @@ func (tx *TxContext) writeACIDIntents(shards []*storageShard, directory map[*sto
 				shard.writeRecoveryEntry(LogEntryDelete{idx: recid, txID: tx.durableID()})
 			}
 		}
-		for _, recid := range st.UndeleteRecids {
+		for _, change := range st.UndeleteRecids {
+			recid := change.recid
 			if st.UndeleteMask.Get(uint(recid)) {
 				shard.writeRecoveryEntry(LogEntryUndelete{idx: recid, txID: tx.durableID()})
 			}
@@ -212,7 +213,8 @@ func (tx *TxContext) prepareACID(ctx context.Context) error {
 				intents[recid] = true
 			}
 		}
-		for _, recid := range st.UndeleteRecids {
+		for _, change := range st.UndeleteRecids {
+			recid := change.recid
 			if st.UndeleteMask.Get(uint(recid)) {
 				intents[recid] = false
 			}

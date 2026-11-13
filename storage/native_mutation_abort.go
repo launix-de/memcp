@@ -55,7 +55,7 @@ func (tx *TxContext) requestMutationAbort() {
 }
 
 // Caller owns the actual state.finalizationMu and the drained outer operation.
-// Reuse the SAME resource/decision/CS-undo owners; do not call public Rollback
+// Reuse the SAME resource/decision/undo owners; do not call public Rollback
 // from a live callback or close resources while the operation still owns them.
 // A failed row undo keeps the operation, exclusions and exact retry suffixes.
 func (operation *nativeMutationOperation) rollbackDrainedStatement(invocation *TxContext) {
@@ -68,7 +68,7 @@ func (operation *nativeMutationOperation) rollbackDrainedStatement(invocation *T
 		panic("native transaction abort requires its drained outer statement")
 	}
 	state.mu.Lock()
-	valid = state.checkedMutation == operation && state.mutationOperations == 1 && state.Mode == TxCursorStability && !state.decisionStarted
+	valid = state.checkedMutation == operation && state.mutationOperations == 1 && (state.Mode == TxCursorStability || state.Mode == TxACID) && !state.decisionStarted
 	aborted := state.State == TxAborted
 	active := state.State == TxActive
 	state.mu.Unlock()
