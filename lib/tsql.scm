@@ -1586,7 +1586,7 @@ native results: both module DDL and a zero-row DML may return numeric zero. */
 	(if (and (session "__tsql_insert_exec") (has? '("create-procedure" "alter-procedure" "drop-procedure") (car command)))
 		(error "procedure DDL is unsupported inside INSERT EXEC") true)
 	(match command
-		'("select-into" name query) (tsql_run_select_into name query statement session)
+		'("select-into" name query definitions) (tsql_run_select_into name query definitions statement session)
 		'("declare-table" name columns) (tsql_run_declare_table name columns statement session)
 		'("insert-local" name columns query) (tsql_run_insert_local name columns query statement session resultrow resultfields)
 		'("insert-local-source" text) (statement text false (lambda (tx)

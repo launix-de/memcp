@@ -6250,7 +6250,8 @@ that context explicitly; stored views refuse this scalar before publication. */
 					(define arguments (* tsql_script_exec_argument ",")))
 					(list "execute" (tsql_qualifier_database owner schema frontend_options) name arguments)))))
 			(define tsql_script_command (parser (or
-				(parser '((define projection (capture tsql_select_head))
+				(parser '((? (define definitions (capture tsql_cte_definitions)))
+					(define projection (capture tsql_select_head))
 					(atom "INTO" true) (? (define owner tsql_schema_identifier))
 					(define name tsql_identifier)
 					(define remainder (capture (parser '(tsql_select_tail tsql_select_set_terms
@@ -6261,7 +6262,8 @@ that context explicitly; stored views refuse this scalar before publication. */
 						(tsql_temporary_check_name name)
 						(if (find (nth (cadr projection) 2) (lambda (column) (not (equal? (count column) 2))) nil)
 							(error "SELECT INTO requires named result columns without variable assignments") true)
-						(list "select-into" name (concat (car projection) " " (car remainder)))))
+						(list "select-into" name (concat (car projection) " " (car remainder))
+							(if definitions (concat (car definitions) " ") ""))))
 				(parser (define statement (capture (or tsql_rollback tsql_commit))) (list "recovery" (strtrim (car statement))))
 				(parser '((atom "BEGIN" true) (atom "TRY" true) (define body (* tsql_script_item empty))
 					(atom "END" true) (atom "TRY" true) (atom "BEGIN" true) (atom "CATCH" true)

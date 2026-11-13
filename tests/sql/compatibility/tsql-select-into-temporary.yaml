@@ -6,6 +6,49 @@ metadata:
   requires_tds: true
   isolated: true
 test_cases:
+  - name: CTE SELECT INTO retains duplicate rows and typed NULL values
+    sql: |
+      WITH seed AS (
+        SELECT 1 AS id,CAST(N'one' AS NVARCHAR(4)) AS label
+        UNION ALL SELECT 1,CAST(N'one' AS NVARCHAR(4))
+        UNION ALL SELECT 2,CAST(NULL AS NVARCHAR(4))
+      ), selected AS (SELECT id,label FROM seed)
+      SELECT * INTO #cte_selected FROM selected;
+      SELECT id,label FROM #cte_selected ORDER BY id;
+    expect: {rows: 3, data: [{id: 1, label: one}, {id: 1, label: one}, {id: 2, label: null}]}
+  - name: Stored CTE population binds a qualified temporary input after its creation
+    setup:
+      - sql: |
+          CREATE PROCEDURE cte_temporary_population AS
+            CREATE TABLE #cte_input (id INT);
+            INSERT #cte_input VALUES (7);
+            WITH chosen AS (SELECT id FROM dbo.#cte_input)
+            SELECT * INTO #cte_output FROM chosen;
+            SELECT id FROM #cte_output;
+    sql: EXEC cte_temporary_population
+    expect: {rows: 1, data: [{id: 7}]}
+    cleanup:
+      - sql: DROP PROCEDURE cte_temporary_population
+  - name: Empty CTE population retains a writable typed declaration
+    sql: |
+      WITH empty_seed AS (SELECT CAST(1 AS INT) AS id WHERE 1=0)
+      SELECT id INTO #cte_empty FROM empty_seed;
+      INSERT #cte_empty VALUES (9);
+      SELECT id FROM #cte_empty;
+    expect: {rows: 1, data: [{id: 9}]}
+  - name: CTE definitions remain local to their population statement
+    sql: SELECT id FROM empty_seed
+    expect: {error: true}
+  - name: CTE SELECT INTO retains native transaction rollback through TDS
+    tds:
+      statements:
+        - sql: BEGIN TRANSACTION
+        - sql: "WITH seed AS (SELECT 5 AS id) SELECT id INTO #cte_rollback FROM seed"
+        - sql: "SELECT id FROM dbo.#cte_rollback"
+          expect: {rows: 1, data: [{id: 5}]}
+        - sql: ROLLBACK TRANSACTION
+        - sql: "SELECT id FROM #cte_rollback"
+          expect: {error: true}
   - name: Ordinary SELECT INTO copies complete rows and NULL payloads
     session_id: select_into_session
     sql: |

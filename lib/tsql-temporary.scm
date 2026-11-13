@@ -177,7 +177,7 @@ https://learn.microsoft.com/en-us/sql/t-sql/queries/select-into-clause-transact-
 SELECT INTO has two ordinary autocommit decisions: failed population
 leaves the empty declaration. An explicit transaction and a trigger completion
 instead retain their existing actual transaction across both operations. */
-(define tsql_prepare_select_into (lambda (name query tx session) (begin
+(define tsql_prepare_select_into (lambda (name query definitions tx session) (begin
 	(define trigger (not (nil? (session "__tsql_trigger_event"))))
 	(define scope (tsql_temporary_scope session))
 	(tsql_temporary_check_name name)
@@ -186,7 +186,7 @@ instead retain their existing actual transaction across both operations. */
 			(not (and (> (count binding) 3) (equal? (nth binding 3) "trigger_temporary"))))) nil)
 		(error "local temporary table already exists: " name) true)
 	(define schema (session "schema"))
-	(define fields (tsql_describe_statement tx schema query
+	(define fields (tsql_describe_statement tx schema (concat definitions query)
 		(coalesceNil (session "__tsql_parameter_declarations") '()) session))
 	(if (empty_list? fields) (error "SELECT INTO requires result columns") true)
 	(define names (map fields (lambda (field) (field "name"))))
@@ -206,15 +206,17 @@ instead retain their existing actual transaction across both operations. */
 	/* The normal INSERT SELECT compiler owns the complete source stream, casts,
 	row effects and count. This rebuild quotes only parsed/declared identifiers. */
 	(define quoted (lambda (name) (concat "[" (replace name "]" "]]") "]")))
-	(concat "INSERT INTO " (quoted name) " (" (reduce (map names quoted)
+	/* Keep the CTE before the mutation, so the ordinary CTE binder owns its
+	definitions for both description and the INSERT SELECT source. */
+	(concat definitions "INSERT INTO " (quoted name) " (" (reduce (map names quoted)
 		(lambda (text column) (concat text (if (equal? text "") "" ",") column)) "") ") " query))))
-(define tsql_run_select_into (lambda (name query statement session) (begin
+(define tsql_run_select_into (lambda (name query definitions statement session) (begin
 	(define populate (lambda (tx input)
 		(tsql_execute_statement tx (session "schema") input session (lambda (_row) true) (lambda args true))))
 	(if (or (session "transaction") (session "__tsql_trigger_event"))
 		(statement "SELECT INTO" false (lambda (tx)
-			(populate tx (tsql_prepare_select_into name query tx session))))
+			(populate tx (tsql_prepare_select_into name query definitions tx session))))
 		(begin
 			(define input (statement "SELECT INTO declaration" false (lambda (tx)
-				(tsql_prepare_select_into name query tx session))))
+				(tsql_prepare_select_into name query definitions tx session))))
 			(statement "SELECT INTO" false (lambda (tx) (populate tx input))))))))
