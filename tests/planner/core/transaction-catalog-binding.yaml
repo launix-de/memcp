@@ -5,15 +5,12 @@ metadata:
   isolated: true
   description: Shared declaration binding and native transaction-owned query plans
 setup:
-- sql: CREATE TABLE catalog_union_pending(id INT PRIMARY KEY)
-- sql: INSERT catalog_union_pending VALUES(1),(2)
 - sql: CREATE TABLE catalog_count_binding(id INT PRIMARY KEY)
 - sql: CREATE TABLE catalog_binding_rows(id INT PRIMARY KEY,label NVARCHAR(23) UNIQUE)
 - sql: INSERT catalog_binding_rows VALUES(1,N'first'),(2,N'second')
 - sql: CREATE TABLE catalog_point_stats(id INT PRIMARY KEY,payload VARCHAR(12),note VARCHAR(12))
 - sql: INSERT catalog_point_stats VALUES(1,'initial','one')
 cleanup:
-- sql: DROP TABLE IF EXISTS catalog_union_pending
 - sql: DROP TABLE IF EXISTS catalog_point_stats
 - sql: DROP VIEW IF EXISTS catalog_union_binding
 - sql: DROP VIEW IF EXISTS catalog_snapshot_view
@@ -674,6 +671,10 @@ test_cases:
       (define shared (newcachemap))
       (define first (newsession)) (first "username" "root") (first "schema" "memcp-tests")
       (define second (newsession)) (second "username" "root") (second "schema" "memcp-tests")
+      (define request (lambda (s text)
+        (tsql_execute_request "memcp-tests" text s nil 0 (lambda (_row) true) (lambda args true))))
+      (request first "CREATE TABLE #union_pending(id INT PRIMARY KEY); INSERT #union_pending VALUES(1),(2)")
+      (request second "CREATE TABLE #union_pending(id INT PRIMARY KEY); INSERT #union_pending VALUES(1),(2)")
       (tx_begin_acid first) (tx_begin_acid second)
       (define execute (lambda (s query) (begin
         (define tx (s "__memcp_tx"))
@@ -681,23 +682,28 @@ test_cases:
         (define formula (cached_parse shared "union-owner" (list parse_tsql)
           "memcp-tests" query nil "root" s false tx))
         (sql_execute_formula s tx formula
-          (lambda (row) (out "rows" (append (out "rows") (list row))))
+          (lambda (row) (out "rows" (append (out "rows") row)))
           (lambda args true))
         (out "rows"))))
       (define queries (list
-        "SELECT id AS value FROM catalog_union_pending UNION SELECT NULL FROM catalog_union_pending ORDER BY value"
-        "SELECT id AS bucket,SUM(CAST(0.5 AS FLOAT)) AS quantity FROM catalog_union_pending GROUP BY id UNION SELECT id,CASE WHEN id=0 THEN 2 ELSE NULL END FROM catalog_union_pending ORDER BY bucket,quantity"
-        "SELECT id AS value FROM catalog_union_pending UNION SELECT NULL FROM catalog_union_pending ORDER BY value OFFSET 3 ROWS FETCH NEXT 1 ROWS ONLY"))
+        "SELECT id AS value FROM #union_pending UNION SELECT NULL FROM #union_pending ORDER BY value"
+        "SELECT id AS bucket,SUM(CAST(0.5 AS FLOAT)) AS quantity FROM #union_pending GROUP BY id UNION SELECT id,CASE WHEN id=0 THEN 2 ELSE NULL END FROM #union_pending ORDER BY bucket,quantity"
+        "SELECT id AS value FROM #union_pending UNION SELECT NULL FROM #union_pending ORDER BY value OFFSET 3 ROWS FETCH NEXT 1 ROWS ONLY"))
       (define result (try (lambda () (begin
-        (execute first "INSERT catalog_union_pending VALUES(3)")
-        (execute second "INSERT catalog_union_pending VALUES(4)")
+        (execute first "INSERT #union_pending VALUES(3)")
+        (execute second "INSERT #union_pending VALUES(4)")
         (define first_rows (map queries (lambda (query) (execute first query))))
         (define second_rows (map queries (lambda (query) (execute second query))))
         (tx_commit first) (tx_rollback second)
         (tx_begin_acid first)
         (define committed_rows (execute first (car queries)))
         (tx_rollback first)
-        (list first_rows second_rows committed_rows)))
+        (tx_begin_acid second)
+        (define rolled_back_rows (execute second (car queries)))
+        (tx_rollback second)
+        (request first "DROP TABLE #union_pending")
+        (request second "DROP TABLE #union_pending")
+        (list first_rows second_rows committed_rows rolled_back_rows)))
         (lambda (failure) (begin (tx_rollback first) (tx_rollback second) (error failure)))))
       result)
   expect:
@@ -713,3 +719,4 @@ test_cases:
           [bucket, 4, quantity, null], [bucket, 4, quantity, 0.5] ]
       - [ [value, 4] ]
     - [ [value, null], [value, 1], [value, 2], [value, 3] ]
+    - [ [value, null], [value, 1], [value, 2] ]
