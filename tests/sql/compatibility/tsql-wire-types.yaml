@@ -23,9 +23,33 @@ setup:
   - sql: CREATE VIEW tsql_wire_calendar_view AS SELECT d,tm,dt0,dt7,legacy,small FROM
       tsql_wire_calendar_output
 test_cases:
+  - name: Declared BIT result values retain boolean wire representation
+    scm: |
+      (json_encode (map '(0 1 -2 true false nil) (lambda (value)
+        (tds_result_value (list "kind" 104 "size" 1) value))))
+    expect: {result: '[false,true,true,true,false,null]'}
+  - name: Nullable BIT columns roundtrip after native rebuild
+    setup:
+      - sql: CREATE TABLE tsql_wire_boolean_output(id INT PRIMARY KEY,enabled BIT NULL)
+      - sql: INSERT INTO tsql_wire_boolean_output VALUES(1,0),(2,1),(3,NULL)
+      - scm: (rebuild (table "memcp-tests" false "tsql_wire_boolean_output" false nil) true false)
+    cleanup:
+      - sql: DROP TABLE tsql_wire_boolean_output
+    tds:
+      statements:
+        - sql: SELECT id,enabled FROM tsql_wire_boolean_output ORDER BY id
+          expect:
+            rows: 3
+            data: [{id: 1, enabled: false}, {id: 2, enabled: true}, {id: 3, enabled: null}]
+            column_types: [{name: id, type: INT}, {name: enabled, type: BIT}]
+        - sql: UPDATE tsql_wire_boolean_output SET enabled=1 WHERE id=1
+        - sql: SELECT id,enabled FROM tsql_wire_boolean_output ORDER BY id
+          expect:
+            rows: 3
+            data: [{id: 1, enabled: true}, {id: 2, enabled: true}, {id: 3, enabled: null}]
   - name: Version keyword alias preserves its distinct native declaration
     scm: |
-      (and (equal? ((cadr (get_schema "memcp-tests" "tsql_wire_version_contract")) "RawType") "ROWVERSION")
+      (and (equal? ((cadr (get_schema "memcp-tests" "tsql_wire_version_contract" nil)) "RawType") "ROWVERSION")
         (not (tsql_binary_type? "TIMESTAMP")))
     expect: {result: true}
   - name: Version declaration exposes binary width without generating values
@@ -33,11 +57,69 @@ test_cases:
       (begin
         (define field (car (tds_describe "memcp-tests"
           "SELECT TOP(0) rv FROM tsql_wire_version_contract" "" (newsession))))
-        (and (equal? (field "sql_type") "ROWVERSION") (equal? (field "kind") 165) (equal? (field "size") 8)))
+        (and (equal? (field "sql_type") "ROWVERSION") (equal? (field "kind") 173)
+          (equal? (field "size") 8) (equal? (field "user_type") 80) (equal? (field "flags") 1)))
     expect: {result: true}
+  - name: Nullable timestamp and ordinary binary retain distinct generation metadata
+    setup:
+      - sql: CREATE TABLE tsql_wire_nullable_version(id INT PRIMARY KEY,rv TIMESTAMP NULL,plain VARBINARY(8))
+    cleanup:
+      - sql: DROP TABLE tsql_wire_nullable_version
+    scm: |
+      (begin
+        (define fields (tds_describe "memcp-tests"
+          "SELECT TOP(0) id,rv,plain FROM tsql_wire_nullable_version" "" (newsession)))
+        (define version (nth fields 1))
+        (define plain (nth fields 2))
+        (and (equal? (version "kind") 173) (equal? (version "size") 8)
+          (equal? (version "user_type") 80) (equal? (version "flags") 1)
+          (equal? (plain "kind") 165) (equal? (plain "user_type") 0)))
+    expect: {result: true}
+  - name: Actual metadata-only result sends fixed binary for a generated version
+    tds:
+      statements:
+        - sql: SET FMTONLY ON; SELECT id,rv FROM tsql_wire_version_contract; SET FMTONLY OFF
+          expect:
+            rows: 0
+            column_types:
+              - {name: id, type: INT}
+              - {name: rv, type: BINARY}
+  - name: Binary conversion of a generated version is an ordinary binary result
+    scm: |
+      (begin
+        (define field (car (tds_describe "memcp-tests"
+          "SELECT TOP(0) CAST(rv AS VARBINARY(8)) AS value FROM tsql_wire_version_contract" "" (newsession))))
+        (and (equal? (field "kind") 165) (equal? (field "size") 8)
+          (equal? (field "user_type") 0)))
+    expect: {result: true}
+  - name: Bulk copy omits generated versions and preserves ordinary binary bytes
+    setup:
+      - sql: CREATE TABLE tsql_wire_bulk_version(id INT PRIMARY KEY,plain VARBINARY(8),rv ROWVERSION NOT NULL)
+    cleanup:
+      - sql: DROP TABLE tsql_wire_bulk_version
+    tds:
+      statements:
+        - bulk:
+            table: '[memcp-tests].[dbo].[tsql_wire_bulk_version]'
+            columns: [id, plain]
+            rows:
+              - [1, {binary_hex: 00010203fcfdfeff}]
+              - [2, {binary_hex: 00010203fcfdfeff}]
+          expect: {rows: 2}
+        - sql: SELECT COUNT(DISTINCT rv) AS n FROM tsql_wire_bulk_version WHERE DATALENGTH(rv)=8 AND plain=0x00010203fcfdfeff
+          expect: {rows: 1, data: [{n: 2}]}
+        - sql: SELECT rv FROM tsql_wire_bulk_version ORDER BY id
+          expect:
+            rows: 2
+            column_types:
+              - {name: rv, type: BINARY}
+        - sql: INSERT tsql_wire_bulk_version(id,rv) VALUES(3,0x0000000000000000)
+          expect: {error: true, contains: [generated version]}
+        - sql: SELECT COUNT(*) AS n FROM tsql_wire_bulk_version
+          expect: {rows: 1, data: [{n: 2}]}
   - name: Native column metadata retains original national declarations
     scm: |
-      (equal? (map (get_schema "memcp-tests" "tsql_wire_text") (lambda (column) (column "RawType")))
+      (equal? (map (get_schema "memcp-tests" "tsql_wire_text" nil) (lambda (column) (column "RawType")))
         '("INT" "NVARCHAR" "NCHAR" "NVARCHAR"))
     expect: {result: true}
   - name: National assignments preserve whole supplementary characters
@@ -98,7 +180,7 @@ test_cases:
         (define fields (tds_describe "memcp-tests"
           "SELECT TOP(0) CAST(NULL AS NUMERIC(20,4)) AS amount,CAST(NULL AS BINARY) AS bytes" "" (newsession)))
         (and (equal? ((car fields) "precision") 20) (equal? ((car fields) "scale") 4)
-          (equal? ((car fields) "size") 13) (equal? ((cadr fields) "size") 30)))
+          (equal? ((car fields) "size") 17) (equal? ((cadr fields) "size") 30)))
     expect: {result: true}
   - name: Numeric parameter binding preserves native integer coefficients
     scm: |
@@ -289,7 +371,7 @@ test_cases:
               (list "name" "n" "flags" 0 "type" (list "kind" 108 "precision" 38 "scale" 0 "size" 17)
                 "value" (list "coefficient" "9007199254740993"))
               (list "name" "b" "flags" 0 "type" (list "kind" 165 "size" 20) "value" (hex2bin "0080ff"))))
-          (lambda (row) (output "row" row)) (lambda (fields) (output "fields" fields)) nil nil)
+          (lambda (row) (output "row" row)) (lambda (fields) (output "fields" fields)) nil nil nil)
         (and (equal? ((car (output "row")) "coefficient") "9007199254740993")
           (expression_equal? ((cadr (output "row")) "bytes") (hex2bin "0080ff"))
           (equal? (nth (output "row") 2) "Grüße 🐘")
@@ -476,6 +558,7 @@ test_cases:
               "value" (list "days" 0 "ticks" 1440 "offset" 0))))
         (nil? (s "__tsql_parameter:v")))
     expect: {error: true, contains: temporal parameter clock overflow}
+  # Historical regression identity; the exact positive oracle now forbids precision loss.
   - name: Datetime2 RPC refuses subsecond truncation
     scm: |
       (begin
@@ -483,8 +566,9 @@ test_cases:
         (tds_bind_parameters s (tds_bind_declarations "memcp-tests" "@v DATETIME2(7)")
             (list (list "name" "v" "flags" 0 "type" (list "kind" 42 "size" 8 "scale" 7)
               "value" (list "days" 719162 "ticks" 1 "offset" 0))))
-        (nil? (s "__tsql_parameter:v")))
-    expect: {error: true, contains: fractional temporal parameter}
+        (cadr (date_parts (s "__tsql_parameter:v"))))
+    expect: {result: 100, contains: '100'}
+  # Historical regression identity; the exact positive oracle now forbids precision loss.
   - name: Legacy datetime RPC refuses subsecond truncation
     scm: |
       (begin
@@ -492,8 +576,9 @@ test_cases:
         (tds_bind_parameters s (tds_bind_declarations "memcp-tests" "@v DATETIME")
             (list (list "name" "v" "flags" 0 "type" (list "kind" 111 "size" 8 "scale" 0)
               "value" (list "days" 25567 "ticks" 1 "offset" 0))))
-        (nil? (s "__tsql_parameter:v")))
-    expect: {error: true, contains: fractional temporal parameter}
+        (cadr (date_parts (s "__tsql_parameter:v"))))
+    expect: {result: 3333333, contains: '3333333'}
+  # Historical regression identity; the exact positive oracle now forbids precision loss.
   - name: Time RPC refuses subsecond truncation
     scm: |
       (begin
@@ -501,8 +586,8 @@ test_cases:
         (tds_bind_parameters s (tds_bind_declarations "memcp-tests" "@v TIME(7)")
             (list (list "name" "v" "flags" 0 "type" (list "kind" 41 "size" 5 "scale" 7)
               "value" (list "days" 0 "ticks" 1 "offset" 0))))
-        (nil? (s "__tsql_parameter:v")))
-    expect: {error: true, contains: fractional temporal parameter}
+        (cadr (date_parts (s "__tsql_parameter:v"))))
+    expect: {result: 100, contains: '100'}
   - name: Datetime2 RPC validates scale independently of payload
     scm: |
       (begin
@@ -603,7 +688,7 @@ test_cases:
           (tds_bind_parameters s (tds_bind_declarations "memcp-tests" "@id INT,@v DATETIME2(7)")
             (list (list "name" "id" "flags" 0 "type" (list "kind" 38 "size" 4) "value" 7)
               (list "name" "v" "flags" 0 "type" (list "kind" 42 "size" 8 "scale" 7)
-                "value" (list "days" 719162 "ticks" 1 "offset" 0))))) (lambda (_err) nil))
+                "value" (list "days" 719162 "ticks" 864000000000 "offset" 0))))) (lambda (_err) nil))
         (and (equal? (s "__tsql_parameter:id") 99)
           (nil? (s "__tsql_parameter_declarations"))))
     expect:
@@ -718,6 +803,7 @@ test_cases:
               temporal_type: datetime2
               value: '2026-03-16T01:02:03Z'
       - sql: DROP TABLE tsql_wire_clock
+  # Historical regression identity; the exact positive oracle now forbids precision loss.
   - name: Native TDS temporal RPC refuses fractional and offset loss before execution
     tds:
       statements:
@@ -728,19 +814,18 @@ test_cases:
             temporal_type: datetime2
             value: '2026-03-15T12:34:56.1234567Z'
         expect:
-          error: true
-          contains:
-          - fractional temporal parameter
-      - sql: SELECT @v AS value
+          rows: 1
+          data:
+          - value:
+              temporal_type: datetime2
+              value: '2026-03-15T12:34:56.1234567Z'
+      - sql: SELECT CONVERT(VARCHAR(40),@v,121) AS value
         parameters:
         - name: v
           value:
             temporal_type: datetime
             value: '2026-03-15T12:34:56.007Z'
-        expect:
-          error: true
-          contains:
-          - fractional temporal parameter
+        expect: {rows: 1, data: [{value: '2026-03-15 12:34:56.007'}]}
       - sql: SELECT @v AS value
         parameters:
         - name: v
@@ -748,9 +833,11 @@ test_cases:
             temporal_type: time
             value: '12:34:56.1234567'
         expect:
-          error: true
-          contains:
-          - fractional temporal parameter
+          rows: 1
+          data:
+          - value:
+              temporal_type: time
+              value: '12:34:56.1234567'
       - sql: SELECT @v AS value
         parameters:
         - name: v
@@ -1155,14 +1242,17 @@ test_cases:
             dt:
               temporal_type: datetime2
               value: '1969-12-29T12:13:14Z'
+  # Historical regression identity; the exact positive oracle now forbids precision loss.
   - name: Calendar wire fractional input is still rejected rather than rounded silently
     tds:
       statements:
       - sql: SELECT CAST('2026-03-15 12:34:56.1' AS DATETIME2(7)) AS value
         expect:
-          error: true
-          contains:
-          - fractional temporal conversion
+          rows: 1
+          data:
+          - value:
+              temporal_type: datetime2
+              value: '2026-03-15T12:34:56.1Z'
   - name: Calendar wire CONVERT styles retain declared result scale
     scm: "(begin\n (define fields (tds_describe \"memcp-tests\" \"SELECT CONVERT(DATETIME2(0),N'31.12.1969',104)\
       \ AS dt,CONVERT(TIME(3),N'12:34:56',NULL) AS tm\" \"\" (newsession)))\n (and (equal? (map fields (lambda\
@@ -1272,6 +1362,7 @@ test_cases:
     expect:
       error: true
       contains: whole minutes
+  # Historical regression identity; the exact positive oracle now forbids precision loss.
   - name: Calendar wire refuses fractional raw datetime2 output
     tds:
       statements:
@@ -1280,10 +1371,13 @@ test_cases:
       - sql: INSERT INTO tsql_wire_raw_datetime2 VALUES(1,N'2026-03-15 12:34:56.1')
       - sql: SELECT v FROM tsql_wire_raw_datetime2
         expect:
-          error: true
-          contains:
-          - fractional temporal conversion
+          rows: 1
+          data:
+          - v:
+              temporal_type: datetime2
+              value: '2026-03-15T12:34:56.1Z'
       - sql: DROP TABLE tsql_wire_raw_datetime2
+  # Historical regression identity; the exact positive oracle now forbids precision loss.
   - name: Calendar wire refuses fractional raw time output
     tds:
       statements:
@@ -1292,9 +1386,11 @@ test_cases:
       - sql: INSERT INTO tsql_wire_raw_time VALUES(1,N'12:34:56.1')
       - sql: SELECT v FROM tsql_wire_raw_time
         expect:
-          error: true
-          contains:
-          - fractional temporal conversion
+          rows: 1
+          data:
+          - v:
+              temporal_type: time
+              value: '12:34:56.1'
       - sql: DROP TABLE tsql_wire_raw_time
   - name: Calendar wire stored whole and zero-fraction clocks remain typed
     tds:
@@ -1442,6 +1538,46 @@ test_cases:
           - b
           - c
           - d
+  - name: Declared date and ISO zero fractions retain their text conversion contracts
+    tds:
+      statements:
+      - sql: SELECT CONVERT(VARCHAR(40),CAST('2026-03-15' AS DATE),121) AS date_only,CONVERT(VARCHAR(40),CAST('2026-03-15 12:34:56' AS DATETIME),126) AS legacy_zero,CONVERT(VARCHAR(40),CAST('2026-03-15 12:34:56' AS DATETIME2(7)),126) AS precise_zero
+        expect:
+          data:
+          - {date_only: '2026-03-15', legacy_zero: '2026-03-15T12:34:56', precise_zero: '2026-03-15T12:34:56'}
+
+
+  - name: REST temporal projections preserve fractional values and whole-second spelling
+    sql: >-
+      SELECT CAST(N'2026-03-15 12:13:14.123' AS DATETIME2(3)) AS precise,
+        CAST(N'12:13:14.1234567' AS TIME(7)) AS clock,
+        CAST(N'2026-03-15 12:13:14.007' AS DATETIME) AS legacy,
+        TRY_CAST(N'12:13:14.123' AS DATETIME2(3)) AS anchored,
+        TRY_CONVERT(DATETIME2(3),N'2026-03-15 12:13:14.123',121) AS converted,
+        CAST(N'2026-03-15 12:13:14' AS DATETIME2(7)) AS whole,
+        CAST(NULL AS TIME(7)) AS absent
+    expect:
+      data:
+      - precise: '2026-03-15 12:13:14.123'
+        clock: '12:13:14.1234567'
+        legacy: '2026-03-15 12:13:14.007'
+        anchored: '1900-01-01 12:13:14.123'
+        converted: '2026-03-15 12:13:14.123'
+        whole: '2026-03-15 12:13:14'
+        absent: null
+
+  - name: Numeric wire buffers are distinct from the unchanged SQL declaration lengths
+    scm: |
+      (begin
+        (define fields (tds_describe "memcp-tests" "SELECT TOP(0) amount,whole FROM tsql_wire_contract" "" (newsession)))
+        (and (equal? ((car fields) "size") 17) (equal? ((cadr fields) "size") 17)
+          (equal? ((car fields) "precision") 9) (equal? ((car fields) "scale") 2)
+          (equal? ((cadr fields) "precision") 18) (equal? ((cadr fields) "scale") 0)))
+    expect: {result: true}
+  - name: SQL COL_LENGTH retains numeric declaration storage widths
+    sql: SELECT COL_LENGTH(N'dbo.tsql_wire_contract',N'amount') AS narrow,COL_LENGTH(N'dbo.tsql_wire_contract',N'whole') AS wide
+    expect: {rows: 1, data: [{narrow: 5, wide: 9}]}
+
 cleanup:
   - sql: DROP VIEW IF EXISTS tsql_wire_calendar_view
   - sql: DROP TABLE IF EXISTS tsql_wire_calendar_output

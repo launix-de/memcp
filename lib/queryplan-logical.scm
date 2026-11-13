@@ -70,7 +70,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 /* ------------------------------------------------------------------------- */
 /* Small assoc helpers                                                        */
 
-(define get_schema (lambda (schema tbl)
+(define get_schema (lambda (schema tbl tx)
 	(if (equal?? schema "information_schema")
 		/* sql-metadata.scm owns only the virtual catalog. This is the sole
 		public dispatcher, so module load order cannot replace its semantics. */
@@ -78,24 +78,38 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(try
 			(lambda ()
 				(begin
-					(define handle (table schema false tbl false))
-					(if handle (show handle) (show schema tbl))))
+					(define handle (table schema false tbl false tx))
+					(if handle (show handle "columns" tx) '())))
 			(lambda (_e) '())))))
+
+/* Runtime proof guards ask for one declared column, not a new logical source.
+Native reads borrow one immutable publication; virtual catalogs own their fixed
+column directory. Missing relations/columns return nil, owner errors propagate. */
+(define get_column_schema (lambda (schema tbl column tx)
+	(if (equal?? schema "information_schema")
+		(find (information_schema_column_catalog schema tbl)
+			(lambda (declaration) (equal?? (declaration "Field") column)) nil)
+		(begin
+			(define handle (table schema false tbl false tx))
+			(if handle (show handle "column" column true tx) nil)))))
 
 /* Runtime-only helper columns (window-function row-number caches, correlated
 lookup carriers) share the naming conventions already used elsewhere to keep
 them out of filter feedback and plan serialization: a "." or "$" prefix, or
 the "__orc_" family. Implicit INSERT/UPSERT column lists must skip them too,
 since get_schema surfaces them alongside real columns. */
-(define internal_column_name? (lambda (name)
-	(and (string? name) (or
-		(orc_column_name? name)
-		(and (> (strlen name) 0) (or
-			(equal? (substr name 0 1) ".")
-			(equal? (substr name 0 1) "$")))))))
+(define orc_column_name? (lambda (col)
+	(and (string? col) (and (>= (strlen col) 6) (equal? (substr col 0 6) "__orc_")))))
+(define internal_column_name? (close_procedure ((lambda (orc_column_name?)
+	(lambda (name)
+		(and (string? name) (or
+			(orc_column_name? name)
+			(and (> (strlen name) 0) (or
+				(equal? (substr name 0 1) ".")
+				(equal? (substr name 0 1) "$"))))))) orc_column_name?)))
 
-(define table_insertable_columns (lambda (schema tbl)
-	(filter (map (get_schema schema tbl) (lambda (col) (col "Field")))
+(define table_insertable_columns (lambda (schema tbl tx)
+	(filter (map (get_schema schema tbl tx) (lambda (col) (col "Field")))
 		(lambda (name) (not (internal_column_name? name))))))
 
 (define qassoc_get (lambda (xs key default)
@@ -454,6 +468,16 @@ Unlike literal rows, they must never be substituted as compile-time values. */
 (define row_domain_columns (lambda (relation) (nth relation 1)))
 (define row_domain_data (lambda (relation) (nth relation 2)))
 
+/* An invocation-local relation has a declared SQL schema, but no physical
+identity until its owning scoped program runs. The symbol names a lexical
+native table handle, never an SQL name or a semantic cache coordinate. */
+(define local_relation_reference? (lambda (relation)
+	(expression_equal? (logical_op relation) 'local-relation)))
+(define make_local_relation_reference (lambda (name columns)
+	(list 'local-relation name columns)))
+(define local_relation_symbol (lambda (relation) (nth relation 1)))
+(define local_relation_columns (lambda (relation) (nth relation 2)))
+
 /* A one-row literal CROSS JOIN is a compile-time binding, not a relational
 cardinality choice. Substitute its qualified columns before decorrelation so
 dead CASE/OR branches do not manufacture scalar stages that can never run.
@@ -464,6 +488,22 @@ domains (for example dashboard time windows). */
 		(and (equal? (count (literal_rows_data (source_relation src))) 1)
 			(and (not (source_outer? src))
 				(or (nil? (source_join_expr src)) (equal? (source_join_expr src) true)))))))
+
+/* Grouping needs a relational input even when constant CROSS bindings have
+been substituted. Preserve one existing unit if possible; an implicit FROM is
+its canonical one-row literal relation, introduced after SQL name binding. */
+(define group_input_unit_sources (lambda (block sources original_sources ctx)
+	(if (or (not (empty_list? sources))
+		(not (or (not (empty_list? (qb_group block))) (not (nil? (qb_having block)))
+			(query_block_has_local_aggregates? block))))
+		sources
+		(not (empty_list? original_sources)) (list (car original_sources))
+		(begin
+			(define names (binding_collect_string_catalog (list block (uctx_get ctx 'outer-sources '())) '()))
+			(define folded (merge (extract_assoc names (lambda (name _present) (list (toLower name) true)))))
+			(define alias (binding_fresh_alias folded "__aggregate_unit"))
+			(list (list alias (qb_schema block)
+				(list 'literal-rows '("unit") (list '("unit" 1))) false nil nil))))))
 
 (define single_literal_source_binding (lambda (src)
 	(list (source_alias src) (car (literal_rows_data (source_relation src))))))
@@ -480,11 +520,23 @@ domains (for example dashboard time windows). */
 	(and (not (symbol? expr))
 		(not (and (list? expr) (not (empty_list? expr)))))))
 
+/* Lists are syntax/data containers, not scalar operator or boolean names.
+Keep scalar coercion local without rendering whole nested logical inputs. */
+(define logical_scalar_equal? (lambda (value literal)
+	(and (not (list? value)) (equal? value literal))))
+
 (define logical_sql_null_literal? (lambda (expr)
 	(and (list? expr)
 		(and (equal? (count expr) 1)
-			(or (equal? (car expr) (sql_builtins "SQL_NULL"))
-				(equal? (serialize (car expr)) "(lambda () nil)"))))))
+			(if (list? (car expr))
+				/* A literal lambda AST is also a supported zero-argument thunk.
+				Do not serialize unrelated relation/source/quoted data here. */
+				(match (car expr)
+					((symbol lambda) '() body)
+					(or (expression_equal? body nil) (expression_equal? body (quote nil)))
+					_ false)
+				(or (equal? (car expr) (sql_builtins "SQL_NULL"))
+					(equal? (serialize (car expr)) "(lambda () nil)")))))))
 
 (define logical_expr_contains_null_literal? (lambda (expr)
 	(or (logical_sql_null_literal? expr)
@@ -499,9 +551,9 @@ domains (for example dashboard time windows). */
 		(cons item rest) (begin
 			(define folded_item (fold_single_literal_expr '() item))
 			(define folded_rest (fold_literal_and rest))
-			(if (or (equal? folded_item false) (equal? folded_rest false)) false
-				(if (equal? folded_item true) folded_rest
-					(if (equal? folded_rest true) folded_item
+			(if (or (logical_scalar_equal? folded_item false) (logical_scalar_equal? folded_rest false)) false
+				(if (logical_scalar_equal? folded_item true) folded_rest
+					(if (logical_scalar_equal? folded_rest true) folded_item
 						(list (quote and) folded_item folded_rest)))))
 		_ true)))
 
@@ -510,11 +562,22 @@ domains (for example dashboard time windows). */
 		(cons item rest) (begin
 			(define folded_item (fold_single_literal_expr '() item))
 			(define folded_rest (fold_literal_or rest))
-			(if (or (equal? folded_item true) (equal? folded_rest true)) true
-				(if (equal? folded_item false) folded_rest
-					(if (equal? folded_rest false) folded_item
+			(if (or (logical_scalar_equal? folded_item true) (logical_scalar_equal? folded_rest true)) true
+				(if (logical_scalar_equal? folded_item false) folded_rest
+					(if (logical_scalar_equal? folded_rest false) folded_item
 						(list (quote or) folded_item folded_rest)))))
 		_ false)))
+
+/* A pure conditional with literal arms has a finite scalar result domain.
+If both arms compare alike, its predicate cannot change this equality. */
+(define fold_literal_conditional_equality (lambda (value literal original)
+	(match value
+		((symbol if) condition then_value else_value)
+		(if (and (logical_literal_value? literal) (logical_literal_value? then_value)
+			(logical_literal_value? else_value) (contribution_pure_expr? condition)
+			(expression_equal? (equal?? then_value literal) (equal?? else_value literal)))
+			(equal?? then_value literal) original)
+		_ original)))
 
 (define fold_single_literal_expr (lambda (bindings expr)
 	/* SQL NULL is represented by a zero-argument thunk so ordinary Scheme
@@ -524,6 +587,7 @@ domains (for example dashboard time windows). */
 	(if (logical_sql_null_literal? expr)
 		nil
 		(match expr
+			((symbol quote) _literal) expr
 			((symbol get_column) alias _alias_ic column _column_ic)
 			(literal_binding_value bindings alias column expr)
 			((quote get_column) alias alias_ic column column_ic)
@@ -550,7 +614,10 @@ domains (for example dashboard time windows). */
 				(define folded_right (fold_single_literal_expr bindings right))
 				(if (and (logical_literal_value? folded_left) (logical_literal_value? folded_right))
 					(equal?? folded_left folded_right)
-					(list (quote equal??) folded_left folded_right)))
+					(begin
+						(define original (list (quote equal??) folded_left folded_right))
+						(fold_literal_conditional_equality folded_left folded_right
+							(fold_literal_conditional_equality folded_right folded_left original)))))
 			((quote equal??) left right)
 			(fold_single_literal_expr bindings (list (symbol "equal??") left right))
 			((symbol hex2bin) value) (if (string? value) (hex2bin value) expr)
@@ -558,9 +625,9 @@ domains (for example dashboard time windows). */
 			(cons head tail) (begin
 				(define folded_tail (map tail (lambda (item)
 					(fold_single_literal_expr bindings item))))
-				(if (or (equal? head (quote and)) (equal? head (symbol "and")))
+				(if (or (logical_scalar_equal? head (quote and)) (logical_scalar_equal? head (symbol "and")))
 					(fold_literal_and folded_tail)
-					(if (or (equal? head (quote or)) (equal? head (symbol "or")))
+					(if (or (logical_scalar_equal? head (quote or)) (logical_scalar_equal? head (symbol "or")))
 						(fold_literal_or folded_tail)
 						(cons head folded_tail))))
 			_ expr))))
@@ -582,7 +649,7 @@ domains (for example dashboard time windows). */
 (define fold_single_literal_source_join (lambda (bindings src)
 	(list (source_alias src) (source_schema src) (source_relation src)
 		(source_outer? src)
-		(fold_single_literal_expr bindings (source_join_expr src)))))
+		(fold_single_literal_expr bindings (source_join_expr src)) (source_declarations src))))
 
 /* A derived projection can mix a literal guard with bound session values.
 Fold after rewriting its references even when the other projected fields are
@@ -638,6 +705,9 @@ dynamic. Leave unrelated query blocks alone so their plan keys stay stable. */
 	(reduce (coalesceNil required '()) (lambda (contains_all item)
 		(and contains_all (contains? (coalesceNil items '()) item))) true)))
 
+/* Same-ID aggregate extensions preserve one invocation and its output ABI.
+Freshness prevents sharing distinct occurrences, not collecting the declared
+columns of this already identified carrier. */
 (define same_group_carrier_backbone? (lambda (left right)
 	(and (equal? (gs_input left) (gs_input right))
 		(equal? (gs_domain left) (gs_domain right))
@@ -771,20 +841,166 @@ prepare stage creates. */
 		(coalesceNil facts '()))))
 
 (define source_alias (lambda (src)
-	(match src '(alias _schema _relation _outer _join) alias _ nil)))
+	(match src '(alias _ _ _ _ _) alias _ nil)))
 (define source_schema (lambda (src)
-	(match src '(_alias schema _relation _outer _join) schema _ nil)))
+	(match src '(_ schema _ _ _ _) schema _ nil)))
 (define source_relation (lambda (src)
-	(match src '(_alias _schema relation _outer _join) relation _ nil)))
+	(match src '(_ _ relation _ _ _) relation _ nil)))
 (define source_outer? (lambda (src)
-	(match src '(_alias _schema _relation outer _join) outer _ nil)))
+	(match src '(_ _ _ outer _ _) outer _ nil)))
 (define source_join_expr (lambda (src)
-	(match src '(_alias _schema _relation _outer join) join _ nil)))
+	(match src '(_ _ _ _ join _) join _ nil)))
+
+/* A source carries only semantic declaration facts. Native identities,
+transactions, row estimates and physical helpers never enter this slot. */
+(define source_declarations (lambda (src)
+	(match src '(_ _ _ _ _ declarations) declarations _ nil)))
+/* These builtin relations read the current metadata publication, not rows
+of a native table with DML maintenance hooks. Their snapshot belongs to one
+query invocation even when their column declarations remain unchanged. */
+(define information_schema_source? (lambda (schema relation)
+	(and (string? schema) (string? relation) (equal?? schema "information_schema"))))
+/* Invocation-owned sources publish a semantic lifetime, not their native
+identity or controller capability. Builtin catalog lifetime remains known when
+late frontend expansion has not attached a native column declaration packet. */
+(define source_invocation_lifetime? (lambda (src)
+	(or (information_schema_source? (source_schema src) (source_relation src))
+		(equal? (get_assoc (coalesceNil (source_declarations src) '()) "lifetime" nil) "invocation"))))
+
+/* Frontends may preserve a declared SQL object name through view expansion.
+These binding-only facts are pure names, never native declaration authority. */
+
+(define qualified_relation_ref? (lambda (value) (match value
+	((symbol qualified-relation) database namespace relation)
+	(and (or (nil? database) (string? database)) (string? namespace) (string? relation))
+	_ false)))
+(define source_binding_name (lambda (src)
+	(get_assoc (coalesceNil (source_declarations src) '()) "binding_name" nil)))
+(define source_native_declarations (lambda (declarations)
+	(if (has_assoc? (coalesceNil declarations '()) "columns")
+		(if (has_assoc? declarations "binding_name")
+			(filter_assoc declarations (lambda (key _value) (not (equal? key "binding_name")))) declarations)
+		nil)))
+(define source_binding_name_matches? (lambda (src selector ignorecase) (begin
+	(define declared (source_binding_name src))
+	(if (nil? declared) false (not (nth declared 3)) false
+		(begin
+			(define same (if ignorecase equal?? equal?))
+			(and (if (nil? (nth selector 1)) true (same (nth declared 0) (nth selector 1)))
+				(same (nth declared 1) (nth selector 2)) (same (nth declared 2) (nth selector 3))))))))
+
+/* Native ANY declarations may contain opaque values. SQL metadata has a
+pure data contract: copy scalar/list values recursively and reject capabilities
+before a native declaration enters logical binding or a query-plan key. */
+(define sql_declaration_data (lambda (value)
+	(if (list? value) (map value sql_declaration_data)
+		(or (nil? value) (number? value) (string? value)
+			(identical? value true) (identical? value false)) value
+		(error "opaque native value cannot be bound as a SQL declaration"))))
+(define sql_semantic_column_fields '("Field" "Type" "RawType" "Dimensions" "Null" "Key" "Collation"
+	"Extra" "Computed" "Default" "DefaultExpression" "DefaultDeferred" "DefaultName" "EnumValues" "Properties" "Comment"))
+(define sql_column_declaration (lambda (column)
+	(merge (map sql_semantic_column_fields
+		(lambda (key) (list key (sql_declaration_data (column key))))))))
+(define sql_relation_local_declarations (lambda (database name tx) (begin
+	(define handle (if (equal?? database "information_schema") nil
+		(table database false name false tx)))
+	(if handle (sql_declaration_data (show handle "declarations" tx))
+		(list "columns" (map (if (equal?? database "information_schema")
+			(information_schema_column_catalog database name) '()) sql_column_declaration)
+			"constraints" '("Unique" () "ForeignKeys" ()))))))
+/* Referenced uniqueness is a consumed declaration too. Acquire direct FK
+targets at the catalog boundary, without recursively following the FK graph.
+Their pure local facts let costing prove keys without late catalog lookups. */
+(define sql_relation_declarations (lambda (database name tx) (begin
+	(define declarations (sql_relation_local_declarations database name tx))
+	(define constraints (declarations "constraints"))
+	(define targets (merge_unique (list (map (filter (constraints "ForeignKeys")
+		(lambda (foreign_key) (equal? (foreign_key "Role") "referencing")))
+		(lambda (foreign_key) (foreign_key "OtherTable"))))))
+	(merge (list declarations (list "references" (map targets (lambda (target)
+		(list target (sql_relation_local_declarations database target tx))))))))))
+/* A cache guard reads the current native publication but does not construct
+another logical snapshot. Expected facts have already passed strict pure-data
+validation during compilation. Opaque or changed values compare unequal and
+therefore return through ordinary recompilation and validation. */
+(define sql_relation_local_declarations_match? (lambda (database name tx expected) (begin
+	(define handle (if (equal?? database "information_schema") nil
+		(table database false name false tx)))
+	(define actual (if handle (show handle "declarations" tx)
+		(list "columns" (map (if (equal?? database "information_schema")
+			(information_schema_column_catalog database name) '()) sql_column_declaration)
+			"constraints" '("Unique" () "ForeignKeys" ()))))
+	(and (expression_equal? (expected "columns") (actual "columns"))
+		(expression_equal? (expected "constraints") (actual "constraints"))))))
+(define sql_relation_declarations_match? (lambda (database name tx expected)
+	(and (sql_relation_local_declarations_match? database name tx expected)
+		(reduce (coalesceNil (expected "references") '()) (lambda (same reference)
+			(and same (sql_relation_local_declarations_match? database (car reference) tx (cadr reference)))) true))))
+(define source_columns (lambda (src)
+	(if (nil? (source_declarations src)) '() ((source_declarations src) "columns"))))
+(define source_constraints (lambda (src)
+	(if (nil? (source_declarations src)) '("Unique" () "ForeignKeys" ())
+		((source_declarations src) "constraints"))))
+(define source_referenced_declarations (lambda (src target)
+	(if (nil? (source_declarations src)) nil
+		(qassoc_get ((source_declarations src) "references") target nil))))
+(define source_column_declaration (lambda (src column ignorecase)
+	(find (source_columns src) (lambda (declaration)
+		(if ignorecase (equal?? (declaration "Field") column)
+			(equal? (declaration "Field") column))) nil)))
+(define source_with_declarations (lambda (src declarations)
+	(list (source_alias src) (source_schema src) (source_relation src)
+		(source_outer? src) (source_join_expr src) declarations)))
+
+(define source_with_binding_name (lambda (src database namespace relation visible)
+	(source_with_declarations src (set_assoc (coalesceNil (source_declarations src) '())
+		"binding_name" (list database namespace relation visible)))))
+(define source_without_binding_name (lambda (src)
+	(if (nil? (source_binding_name src)) src
+		(source_with_declarations src (source_native_declarations (source_declarations src))))))
+
+/* This boundary owns native catalog acquisition. All nested logical sources
+are resolved before SQL wildcard, name, type and key binding. The transaction
+is an explicit compile input and is discarded after facts have been copied. */
+(define sql_bind_catalog_declarations (lambda (node tx planning_session) (match node
+	((symbol quote) _literal) node
+	((symbol query-block) database sources fields condition grouping having ordering limit offset hidden stages facts)
+	(make_query_block database
+		(map sources (lambda (src) (begin
+			(define binding_name (source_binding_name src))
+			(define declarations (if (local_relation_reference? (source_relation src))
+				(list "columns" (local_relation_columns (source_relation src)) "constraints" '("Unique" () "ForeignKeys" ()))
+				(string? (source_relation src))
+				(coalesceNil (source_native_declarations (source_declarations src))
+					(sql_relation_declarations (source_schema src) (source_relation src) tx))
+				/* Logical producers publish their own export declarations. They
+				are not native catalog entries and must survive this boundary. */
+				(source_native_declarations (source_declarations src))))
+			/* Reuse this compile's snapshot, but validate actual native metadata
+			before a cached plan executes. Row/statistics changes are absent. */
+			(if (and declarations (string? (source_relation src))) (planner_record_guard_condition
+				(list (quote sql_relation_declarations_match?) (source_schema src) (source_relation src) (quote tx)
+					(list (quote quote) declarations)) planning_session) true)
+			(source_with_declarations
+				(source_with_join_expr (source_with_relation src
+					(sql_bind_catalog_declarations (source_relation src) tx planning_session))
+					(sql_bind_catalog_declarations (source_join_expr src) tx planning_session))
+				(if (nil? binding_name) declarations
+					(set_assoc (coalesceNil declarations '()) "binding_name" binding_name))))))
+		(sql_bind_catalog_declarations fields tx planning_session) (sql_bind_catalog_declarations condition tx planning_session)
+		(sql_bind_catalog_declarations grouping tx planning_session) (sql_bind_catalog_declarations having tx planning_session)
+		(sql_bind_catalog_declarations ordering tx planning_session) limit offset
+		(sql_bind_catalog_declarations hidden tx planning_session) (sql_bind_catalog_declarations stages tx planning_session) facts)
+	(cons head tail) (cons (sql_bind_catalog_declarations head tx planning_session)
+		(map tail (lambda (child) (sql_bind_catalog_declarations child tx planning_session))))
+	_ node)))
 
 (define source_lateral? (lambda (src)
 	(begin
 		(define relation (source_relation src))
-		(and (query_block? relation) (qassoc_get (qb_facts relation) (quote lateral) false)))))
+		(or (and (query_block? relation) (qassoc_get (qb_facts relation) (quote lateral) false))
+			(and (union_block? relation) (qassoc_get (union_facts relation) (quote lateral) false))))))
 
 (define source_prefix_for_alias (lambda (sources alias)
 	(match (coalesceNil sources '())
@@ -794,17 +1010,17 @@ prepare stage creates. */
 
 (define source_with_relation (lambda (src relation)
 	(match src
-		'(alias schema _relation outer join) (list alias schema relation outer join)
+		'(alias schema _relation outer join declarations) (list alias schema relation outer join declarations)
 		_ src)))
 
 (define source_with_join_expr (lambda (src join_expr)
 	(match src
-		'(alias schema relation outer _join) (list alias schema relation outer join_expr)
+		'(alias schema relation outer _join declarations) (list alias schema relation outer join_expr declarations)
 		_ src)))
 
 (define source_with_schema_relation (lambda (src schema relation)
 	(match src
-		'(alias _schema _relation outer join) (list alias schema relation outer join)
+		'(alias _schema _relation outer join declarations) (list alias schema relation outer join declarations)
 		_ src)))
 
 /* ------------------------------------------------------------------------- */
@@ -1068,9 +1284,6 @@ move arbitrary calls or subqueries across short-circuit guards. */
 		(cons _head tail) (reduce tail (lambda (a b) (or a (expr_contains_window? b))) false)
 		_ false)))
 
-(define orc_column_name? (lambda (col)
-	(and (string? col) (and (>= (strlen col) 6) (equal? (substr col 0 6) "__orc_")))))
-
 (define expr_contains_orc_column? (lambda (expr)
 	(match expr
 		((symbol get_column) _tblvar _ignorecase col _json_path) (orc_column_name? col)
@@ -1131,6 +1344,15 @@ move arbitrary calls or subqueries across short-circuit guards. */
 				(node_contains_physical_helper? (gs_input node))
 				false)))))
 
+/* Presence of an already validated scalar branch ignores its projection and
+normalizes a NULL WHERE result to absence. No stages or windows are consumed. */
+(define zero_domain_exists_truth (lambda (inner)
+	(if (and (query_block_no_from? inner) (empty_list? (qb_stages inner)))
+		(begin (define condition (coalesceNil (qb_where inner) true))
+			(if (literal_true? condition) true (literal_false? condition) false
+				(list 'if condition true false)))
+		(neumann_fail "untangle_query" "scalar EXISTS requires an unstaged row without a window"))))
+
 (define untangle_zero_domain_subquery (lambda (kind probe subquery ctx)
 	(begin
 		(define normalized (normalize_query_ast subquery))
@@ -1143,7 +1365,7 @@ move arbitrary calls or subqueries across short-circuit guards. */
 					(symbol inner_select) (if (equal? where true)
 						(query_block_first_expr inner)
 						(list (quote if) where (query_block_first_expr inner) nil))
-					(symbol inner_select_exists) where
+					(symbol inner_select_exists) (zero_domain_exists_truth inner)
 					(symbol inner_select_in) (begin
 						(define rhs (query_block_first_expr inner))
 						(define compare
@@ -1231,6 +1453,11 @@ projection for every source; that turns read-model queries into O(N^2) planner
 work before decorrelation has even started. */
 (define query_expr_alias_set (lambda (default_alias expr aliases)
 	(match expr
+		((symbol quote) _literal) aliases
+		(cons (symbol query-block) _parts)
+		(query_expr_alias_set default_alias (derived_operator_reference_exprs expr) aliases)
+		(cons (symbol group-stage) _parts)
+		(query_expr_alias_set default_alias (derived_operator_reference_exprs expr) aliases)
 		((symbol membership_truth) probe stage_alias _count_col)
 		(query_expr_alias_set default_alias probe (set_assoc aliases stage_alias true))
 		((quote membership_truth) probe stage_alias _count_col)
@@ -1251,7 +1478,7 @@ work before decorrelation has even started. */
 (define source_primary_key_columns (lambda (src)
 	(if (not (source_is_base_table? src))
 		'()
-		(map (filter (get_schema (source_schema src) (source_relation src)) (lambda (col)
+		(map (filter (source_columns src) (lambda (col)
 			(equal?? (col "Key") "PRI"))) (lambda (col) (col "Field"))))))
 
 (define source_unique_key_sets (lambda (src)
@@ -1262,7 +1489,7 @@ work before decorrelation has even started. */
 			(define unique_keys (try
 				(lambda ()
 					(begin
-						(define info (show (source_schema src) (source_relation src) "constraints"))
+						(define info (source_constraints src))
 						(map (info "Unique") (lambda (unique_key)
 							(unique_key "Cols")))))
 				(lambda (_e) '())))
@@ -1280,7 +1507,7 @@ membership path until their nullability is represented in logical metadata. */
 	(if (or (nil? src) (not (source_is_base_table? src)))
 		false
 		(begin
-			(define meta (find (get_schema (source_schema src) (source_relation src))
+			(define meta (find (source_columns src)
 				(lambda (candidate) (equal?? (candidate "Field") col)) nil))
 			(and (not (nil? meta)) (not (meta "Null")))))))
 
@@ -1400,10 +1627,31 @@ silently stops seeing the join as a keyed lookup at all. */
 		duplicate_insensitive))))
 
 
+/* A logical source carries a pure native declaration beside its expressions.
+Reference discovery must inspect relation/join positions without interpreting
+that descriptor (or quoted values) as code. Stage facts remain semantic input. */
+(define derived_source_reference_exprs (lambda (src)
+	(list (source_relation src) (source_join_expr src))))
+
+(define derived_operator_reference_exprs (lambda (node)
+	(match node
+		((symbol query-block) _database sources fields condition grouping having ordering limit offset hidden stages facts)
+		(list (map sources derived_source_reference_exprs)
+			fields condition grouping having ordering limit offset hidden stages facts)
+		((symbol group-stage) _id input domain keys aggregates having output ordering limit offset facts)
+		(list (if (source_alias input) (derived_source_reference_exprs input) input)
+			domain keys aggregates having output ordering limit offset facts)
+		_ '())))
+
 /* Walk an expression tree and collect every column name referenced from a
 specific derived-table alias. The result is a flat assoc-list col_name->true. */
 (define collect_alias_col_refs_deep (lambda (alias expr acc)
 	(match expr
+		((symbol quote) _literal) acc
+		(cons (symbol query-block) _parts)
+		(collect_alias_col_refs_deep alias (derived_operator_reference_exprs expr) acc)
+		(cons (symbol group-stage) _parts)
+		(collect_alias_col_refs_deep alias (derived_operator_reference_exprs expr) acc)
 		((symbol get_column) tblvar _ col _) (if (equal? tblvar alias)
 			(set_assoc acc col true)
 			acc)
@@ -1423,6 +1671,11 @@ specific derived-table alias. The result is a flat assoc-list col_name->true. */
 /* True if expr is or contains t.* or * for the given alias. */
 (define expr_derived_star_ref (lambda (alias expr)
 	(match expr
+		((symbol quote) _literal) false
+		(cons (symbol query-block) _parts)
+		(expr_derived_star_ref alias (derived_operator_reference_exprs expr))
+		(cons (symbol group-stage) _parts)
+		(expr_derived_star_ref alias (derived_operator_reference_exprs expr))
 		((symbol get_column) tblvar _ "*" _) (or (nil? tblvar) (equal? tblvar alias))
 		((quote get_column) tblvar _ "*" _) (or (nil? tblvar) (equal? tblvar alias))
 		(cons head tail) (or (expr_derived_star_ref alias head)
@@ -1471,7 +1724,7 @@ specific derived-table alias. The result is a flat assoc-list col_name->true. */
 					(qb_stages relation)
 					(qb_facts relation))
 				(source_outer? src)
-				(source_join_expr src))))))
+				(source_join_expr src) nil)))))
 
 /* Pre-prune one derived-table source: drop inner fields not in needed.
 outer_direct_consumers already includes all outer ON conditions. */
@@ -1556,6 +1809,30 @@ by the outer block's direct consumers (fields/where/group/having/order/hidden). 
 			inner_sources
 			outer_sources))))))
 
+/* A retained relation source introduces its own name scope. Collect only its
+free caller coordinates; a same-named branch alias shadows the caller just as
+it does during ordinary SQL binding. Stage domains already declare their free
+inputs and do not authorize walking their internal sources as caller data. */
+(define btw2025_relation_outer_column_refs (lambda (relation outer_sources)
+	(if (union_block? relation)
+		(merge_unique (map (union_branches relation) (lambda (branch)
+			(btw2025_relation_outer_column_refs branch outer_sources))))
+		(query_block? relation) (begin
+			(define local_sources (qb_sources relation))
+			(define visible_outer (filter outer_sources (lambda (candidate)
+				(not (reduce local_sources (lambda (shadowed local)
+					(or shadowed (equal?? (source_alias local) (source_alias candidate)))) false)))))
+			(merge_unique (list
+				(btw2025_terms_outer_column_refs (list
+					(qb_fields relation) (qb_hidden relation) (qb_where relation)
+					(qb_group relation) (qb_having relation) (qb_order relation)
+					(qb_limit relation) (qb_offset relation)
+					(map (filter (qb_stages relation) group_stage?) gs_domain)) local_sources visible_outer)
+				(btw2025_sources_outer_column_refs local_sources local_sources visible_outer)
+				(merge (map local_sources (lambda (source)
+					(btw2025_relation_outer_column_refs (source_relation source) visible_outer)))))))
+		'())))
+
 /* Session reads affect a dependent helper like outer-column reads do. Keep
 their expressions in Domain D so reusable group caches are keyed by the binding
 instead of capturing whichever session populated the cache first. */
@@ -1573,7 +1850,7 @@ instead of capturing whichever session populated the cache first. */
 				(list (quote session) (car tail))
 				(if (equal? head session_globalvar)
 					(list (quote session_globalvar) (car tail))
-					nil))
+					(if (equal? head relational_iteration_parameter) expr nil)))
 			nil)
 		_ nil)))
 
@@ -1583,6 +1860,13 @@ instead of capturing whichever session populated the cache first. */
 		(if (not (nil? read_expr))
 			(list read_expr)
 			(match expr
+				((symbol quote) _datum) '()
+				((symbol group-stage) _id _input _domain _keys _aggregates _having _output _order _limit _offset _facts)
+				(if (scoped_relational_program_stage? expr)
+					/* The transition binds its feedback state and clock reads.
+					Only the declared external domain escapes this operator. */
+					(query_expr_session_reads (gs_domain expr))
+					(merge_unique (map (cdr expr) query_expr_session_reads)))
 				(cons head tail) (merge_unique (cons
 					(query_expr_session_reads head)
 					(map tail query_expr_session_reads)))
@@ -1850,10 +2134,15 @@ drivers use the same cache through the row-local preparation fallback. */
 	(nth pair 1)))
 
 (define correlation_pair_preferred? (lambda (current candidate)
-	(and
-		(expr_refs_stage_output_alias? (nth current 0))
-		(not (expr_refs_stage_output_alias? (nth candidate 0))))))
-
+	/* An identity pair records an inherited domain read, not a local
+	representative. It must never replace an equality that already maps that
+	domain coordinate to this query's input, including another stage's key. */
+	(if (equal? (car current) (cadr current))
+		(not (equal? (car candidate) (cadr candidate)))
+		(equal? (car candidate) (cadr candidate)) false
+		(and
+			(expr_refs_stage_output_alias? (car current))
+			(not (expr_refs_stage_output_alias? (car candidate)))))))
 (define upsert_domain_correlation_pair (lambda (pairs pair)
 	(begin
 		(define domain_key (correlation_pair_domain_key pair))
@@ -1998,7 +2287,7 @@ then matched without repeated deep comparisons. */
 			(source_schema src)
 			(source_relation src)
 			(source_outer? src)
-			(combine_where_terms local_terms true)))))
+			(combine_where_terms local_terms true) (source_declarations src)))))
 
 (define sources_without_outer_join_terms (lambda (inner_default inner_sources outer_sources sources)
 	(map (coalesceNil sources '()) (lambda (src)
@@ -2041,8 +2330,18 @@ drifting on source-join pairs or residual outer references. */
 				(range_bound_has_preparable_outer_source?
 					bound inner_sources outer_sources)))))
 		(define range_domains (range_correlation_domains range_bounds))
+		/* An attached operator's declared domain is an input of this query,
+		even when the visible projection only reads that operator's output. */
+		(define nested_domain_refs (merge_unique (list
+			(btw2025_terms_outer_column_refs
+				(merge (map (filter (qb_stages inner) group_stage?) gs_domain))
+				inner_sources (filter outer_sources (lambda (source)
+					(not (contains? (source_aliases inner_sources) (source_alias source))))))
+			(merge (map inner_sources (lambda (source)
+				(btw2025_relation_outer_column_refs (source_relation source) outer_sources)))))))
+		(define nested_domain_pairs (map nested_domain_refs (lambda (ref) (list ref ref))))
 		(define raw_lookup_pairs (domain_correlation_pairs
-			(merge (list term_pairs source_pairs (coalesceNil extra_pairs '())))))
+			(merge (list term_pairs source_pairs nested_domain_pairs (coalesceNil extra_pairs '())))))
 		/* A synthetic session-domain pair whose value already cuts a range axis
 		is not also a point key. Keep real equality correlations even when they
 		happen to reuse that outer expression for another inner column. */
@@ -2065,7 +2364,7 @@ drifting on source-join pairs or residual outer references. */
 					(filter (map (split_and_terms (coalesceNil (source_join_expr src) true)) (lambda (term)
 						(local_correlation_term inner_default lookup_pairs
 							(exists_correlation_pair inner_default inner_sources outer_sources term) term)))
-						(lambda (term) (not (nil? term)))) true)))))
+						(lambda (term) (not (nil? term)))) true) (source_declarations src)))))
 		(define residual_outer_refs (merge_unique (list
 			(btw2025_terms_outer_column_refs local_terms inner_sources outer_sources)
 			(btw2025_sources_outer_column_refs local_sources inner_sources outer_sources))))
@@ -2075,6 +2374,14 @@ drifting on source-join pairs or residual outer references. */
 					inner_default inner_sources outer_sources term))
 				(or (nil? bound)
 					(not (range_domain_consumes_bound? range_domains bound)))))))
+		/* Residual predicates are functions of their caller coordinates as well
+		as inner rows. Range cuts remove only the consumed bound; caller reads
+		remaining in the invariant identify independent point partitions. */
+		(define range_residual_refs (btw2025_terms_outer_column_refs
+			range_invariant_terms inner_sources outer_sources))
+		(define range_lookup_pairs (domain_correlation_pairs (merge (list
+			range_lookup_pairs
+			(map range_residual_refs (lambda (expr) (list expr expr)))))))
 		(list
 			(list (quote inner_src) inner_src)
 			(list (quote inner_sources) inner_sources)
@@ -2134,6 +2441,7 @@ drifting on source-join pairs or residual outer references. */
 		(define info (make_btw2025_unnesting_info handle parent ancestors domain domain accessing residual_accessing_after_simple cclasses repr))
 		(list
 			(list (quote btw2025_accessing) accessing)
+			(list (quote btw2025_input_accessing_after_simple) accessing_after_simple)
 			(list (quote btw2025_accessing_after_simple) residual_accessing_after_simple)
 			(list (quote btw2025_simple_d_eliminated) (and (not (empty_list? accessing)) (empty_list? residual_accessing_after_simple)))
 			(list (quote btw2025_domain) domain)
@@ -2259,6 +2567,12 @@ physical membership probe. */
 		(if (nil? (qassoc_get (gs_facts stage) (quote contribution-domain) nil)) '()
 			(cons (nth (qassoc_get (gs_facts stage) (quote contribution-domain) nil) 2)
 				(nth (qassoc_get (gs_facts stage) (quote contribution-domain) nil) 4)))))))
+
+/* A self-pair labels an outer binding, including NULL; it is not an SQL
+equality predicate between an inner row and its caller. */
+(define correlation_binding_identity? (lambda (key value)
+	(expression_equal? (canonical_column_expr_for_alias nil key)
+		(canonical_column_expr_for_alias nil value))))
 
 (define make_stage_lookup_condition (lambda (stage_alias key_names outer_domain post_condition)
 	(combine_where
@@ -2517,6 +2831,13 @@ row containing NULL must remain distinguishable for non-strict functions. */
 					(and valid (scalar_projection_null_propagating? alias item)))) true))
 		_ false)))
 
+/* A projection depending only on the outer row is evaluated in that row's
+scope, after the scalar stage has proved that an inner row exists. A stored 1
+keeps a missing row distinct from a matching row whose outer value is NULL. */
+(define scalar_projection_outer_only? (lambda (inner_sources outer_sources expr)
+	(and (expr_refs_sources? nil outer_sources expr)
+		(not (expr_refs_sources? nil inner_sources expr)))))
+
 (define scalar_projection_lifted_input (lambda (alias expr)
 	(begin
 		(define inputs (scalar_projection_input_columns alias expr))
@@ -2581,8 +2902,9 @@ row containing NULL must remain distinguishable for non-strict functions. */
 					(and (equal? (qassoc_get facts (quote on_overflow) nil) (quote ignore))
 						(and (not (empty_list? lookup_keys))
 							(and (empty_list? residual_accessing)
-								(and (not (reduce lookup_keys (lambda (found key)
-									(or found (expr_refs_stage_output_alias? key))) false))
+								/* Scope admission validates dependency resolution. Alias
+								spelling cannot determine whether a key is bindable. */
+								(and (equal? (count lookup_keys) (count (gs_keys stage)))
 									(or
 										(source_is_base_table? (gs_input stage))
 										(and (query_block? (gs_input stage))
@@ -2604,6 +2926,7 @@ row containing NULL must remain distinguishable for non-strict functions. */
 	(or (scalar_first_probe_stage? stage) (scalar_first_range_probe_stage? stage))))
 
 (define scalar_aggregate_probe_stage? (lambda (stage)
+	(if (scoped_relational_program_stage? stage) true
 	(if (not (group_stage? stage))
 		false
 		(begin
@@ -2616,6 +2939,11 @@ row containing NULL must remain distinguishable for non-strict functions. */
 						(and (equal? (count keys) (count lookup_keys))
 							(and (equal? (coalesceNil (gs_having stage) true) true)
 								(or (source_is_base_table? (gs_input stage))
+									/* Query inputs retain their complete range predicate and
+									nested aggregate sources. The existing query-probe lowerer
+									binds the caller domain before native dataset reduction;
+									it never narrows this input to a base range-cache source. */
+									(query_block? (gs_input stage))
 									(not (nil? (qassoc_get (gs_facts stage) (quote contribution-domain) nil)))
 									(not (nil? (qassoc_get (gs_facts stage) (quote invariant-property-cover) nil)))
 									(and (not (qassoc_get (gs_facts stage) (quote aggregate-payload-dependency) false))
@@ -2629,7 +2957,7 @@ row containing NULL must remain distinguishable for non-strict functions. */
 									(not (stage_has_residual_outer_refs? stage))))
 								(and (equal? (coalesceNil (gs_having stage) true) true)
 									(or (source_is_base_table? (gs_input stage))
-										(query_block? (gs_input stage)))))))))))))
+											(query_block? (gs_input stage))))))))))))))
 
 (define scalar_cardinality_probe_stage? (lambda (stage)
 	(if (not (group_stage? stage))
@@ -2642,7 +2970,9 @@ row containing NULL must remain distinguishable for non-strict functions. */
 					(and (equal? (qassoc_get (gs_facts stage) (quote on_overflow) nil) (quote error))
 						(and (not (empty_list? lookup_keys))
 							(and (equal? (count (gs_keys stage)) (count lookup_keys))
-								(and (empty_list? (qassoc_get (gs_facts stage) (quote btw2025_accessing_after_simple) '()))
+								(and (empty_list? (qassoc_get (gs_facts stage)
+									(if (query_block? (gs_input stage)) 'btw2025_input_accessing_after_simple 'btw2025_accessing_after_simple)
+									(qassoc_get (gs_facts stage) 'btw2025_accessing_after_simple '())))
 									(and (equal? (coalesceNil (gs_having stage) true) true)
 										(and (or (source_is_base_table? (gs_input stage))
 											(query_block? (gs_input stage)))
@@ -2778,7 +3108,7 @@ boolean-shaped. A missing ELSE is the implicit nullable boolean result. */
 	(if (not (source_is_base_table? src))
 		false
 		(begin
-			(define info (find (get_schema (source_schema src) (source_relation src))
+			(define info (find (source_columns src)
 				(lambda (candidate) (equal?? (candidate "Field") col)) nil))
 			(define raw_type (toLower
 				(if (nil? info) "" (coalesceNil (info "RawType") ""))))
@@ -2985,7 +3315,7 @@ general recursive boolean proof above. */
 			(correlation_lookup_keys lookup_pairs)
 			residual_outer_refs)))
 		(define condition (combine_where_terms local_terms true))
-		(define stage_input (if (and (single_source? (qb_sources inner)) (empty_list? (qb_stages inner)))
+		(define stage_input (if (and (single_source? (qb_sources inner)) (source_is_base_table? inner_src) (empty_list? (qb_stages inner)))
 			inner_src
 			(make_query_block
 				(qb_schema inner)
@@ -3032,7 +3362,7 @@ general recursive boolean proof above. */
 			(group_stage_schema stage)
 			(make_stage_output_relation stage_id)
 			(stage_source_outer? outer_sources)
-			(make_exists_stage_join_condition stage_alias key_names lookup_keys false)))
+			(make_exists_stage_join_condition stage_alias key_names lookup_keys false) nil))
 		(define count_col (aggregate_col_name aggregate_count_descriptor))
 		(list
 			(list (quote >)
@@ -3107,13 +3437,13 @@ general recursive boolean proof above. */
 		(define stage_alias (exists_stage_alias stage_id))
 		(define key_names (group_key_cols keys))
 		(define having_expr (replace_group_expr
-			(gs_input stage) inner_default stage_alias keys key_names ags (coalesceNil (qb_having inner) true)))
+			(gs_input stage) inner_default stage_alias keys key_names stage (coalesceNil (qb_having inner) true)))
 		(define source (list
 			stage_alias
 			(group_stage_schema stage)
 			(make_stage_output_relation stage_id)
 			(stage_source_outer? outer_sources)
-			(make_stage_lookup_condition stage_alias key_names lookup_keys having_expr)))
+			(make_stage_lookup_condition stage_alias key_names lookup_keys having_expr) nil))
 		(define count_col (aggregate_col_name aggregate_count_descriptor))
 		(list
 			(list (quote >)
@@ -3259,7 +3589,7 @@ general recursive boolean proof above. */
 			(group_stage_schema stage)
 			(make_stage_output_relation stage_id)
 			(stage_source_outer? outer_sources)
-			(make_exists_stage_join_condition stage_alias (group_key_cols keys) lookup_keys false)))
+			(make_exists_stage_join_condition stage_alias (group_key_cols keys) lookup_keys false) nil))
 		(list
 			(list (quote >)
 				(list (quote coalesceNil)
@@ -3270,7 +3600,21 @@ general recursive boolean proof above. */
 			(list stage)
 			(list source)))))
 
-(define make_exists_union_stage_rewrite (lambda (inner args)
+/* EXISTS consumes presence only: a proven positive literal cap without
+OFFSET cannot change whether a UNION emits a row. Keep zero, dynamic limits
+and every OFFSET outside this normalization; their cardinality matters.
+Binding/type validation precedes this logical owner. Branch windows remain
+untouched and UNION ALL/DISTINCT retain their ordinary branch semantics. */
+(define exists_union_presence_input (lambda (inner)
+	(if (and (union_block? inner) (nil? (union_offset inner))
+		(or (nil? (union_limit inner))
+			(and (number? (union_limit inner)) (> (union_limit inner) 0))))
+		(make_union_block (union_mode inner) (union_branches inner) '() nil nil (union_facts inner))
+		inner)))
+
+(define make_exists_union_stage_rewrite (lambda (original_inner args)
+	(begin
+	(define inner (exists_union_presence_input original_inner))
 	(if (not (union_block? inner))
 		(neumann_fail "untangle_query" "EXISTS UNION lowering expects union-block")
 		(if (or (not (empty_list? (union_order inner)))
@@ -3278,14 +3622,18 @@ general recursive boolean proof above. */
 			(neumann_fail "untangle_query" "EXISTS over UNION currently supports plain unordered branches")
 			(begin
 				(define results (map (union_branches inner) (lambda (branch)
-					(make_exists_stage_rewrite branch (list
-						(nth args 0)
-						branch
-						(if (>= (count args) 3) (nth args 2) nil))))))
+					(if (and (query_block_no_from? branch) (empty_list? (qb_stages branch)))
+						/* A scalar SELECT contributes its one row exactly when its
+						WHERE is true; projected NULL still establishes presence. */
+						(list (zero_domain_exists_truth branch) '() '())
+						(make_exists_stage_rewrite branch (list
+							(nth args 0)
+							branch
+							(if (>= (count args) 3) (nth args 2) nil)))))))
 				(if (and (equal? (union_mode inner) (quote all))
 					(exists_union_results_compatible? results))
 					(make_combined_exists_union_stage_rewrite inner results args)
-					(combine_exists_union_results results)))))))
+					(combine_exists_union_results results))))))))
 
 /* Canonicalization is the only layer that should know IN was written over a
 UNION. In positive WHERE truth context, each branch becomes one membership
@@ -3453,13 +3801,13 @@ without separately proving two-valued semantics. */
 			(or truth_membership (not semijoin_where))
 			(if semijoin_where
 				(make_positive_in_join_condition (gs_input stage) stage_alias key_names (list probe) probe aggregate_count_descriptor)
-				(make_exists_stage_join_condition stage_alias key_names (list probe) false))))
+				(make_exists_stage_join_condition stage_alias key_names (list probe) false)) nil))
 		(define null_source (list
 			null_stage_alias
 			(group_stage_schema null_stage)
 			(make_stage_output_relation null_stage_id)
 			true
-			true))
+			true nil))
 		(if semijoin_where
 			(list true (list stage) (list source))
 			(if truth_membership
@@ -3581,13 +3929,13 @@ without separately proving two-valued semantics. */
 			(or truth_membership (not semijoin_where))
 			(if semijoin_where
 				(make_positive_in_join_condition (gs_input stage) stage_alias key_names lookup_keys probe aggregate_count_descriptor)
-				(make_exists_stage_join_condition stage_alias key_names lookup_keys false))))
+				(make_exists_stage_join_condition stage_alias key_names lookup_keys false)) nil))
 		(define null_source (list
 			null_stage_alias
 			(group_stage_schema null_stage)
 			(make_stage_output_relation null_stage_id)
 			true
-			(make_exists_stage_join_condition null_stage_alias null_key_names domain_lookup_keys false)))
+			(make_exists_stage_join_condition null_stage_alias null_key_names domain_lookup_keys false) nil))
 		(define count_col (aggregate_col_name aggregate_count_descriptor))
 		(if semijoin_where
 			(list true (list stage) (list source))
@@ -3634,7 +3982,7 @@ without separately proving two-valued semantics. */
 		(define stage_alias (exists_stage_alias (gs_id stage)))
 		(define key_names (group_key_cols keys))
 		(define having_expr (replace_group_expr
-			(gs_input stage) input_alias stage_alias keys key_names ags (coalesceNil (gs_having stage) true)))
+			(gs_input stage) input_alias stage_alias keys key_names stage (coalesceNil (gs_having stage) true)))
 		(define join_condition (combine_where_terms
 			(list
 				(make_exists_stage_join_condition stage_alias (list (nth key_names key_idx)) (list probe) false)
@@ -3646,7 +3994,7 @@ without separately proving two-valued semantics. */
 			(group_stage_schema stage)
 			(make_stage_output_relation (gs_id stage))
 			false
-			join_condition))
+			join_condition nil))
 		(list true (list stage) (list source)))))
 
 (define make_in_stage_rewrite (lambda (probe inner args)
@@ -3698,8 +4046,24 @@ without separately proving two-valued semantics. */
 			(lambda (pair) (not (nil? pair)))))
 		(define local_having_terms (filter having_terms (lambda (term)
 			(nil? (exists_correlation_pair inner_default inner_sources outer_sources term)))))
+		/* A residual predicate such as a nullable OR still reads its caller's
+		binding even when it cannot supply an equality correlation. Retain that
+		coordinate in D, just as EXISTS does; otherwise preparing the aggregate
+		before its caller row silently reads an unbound outer value as NULL. */
+		(define residual_refs (qassoc_get analysis (quote residual_outer_refs) '()))
+		(define residual_pairs (map residual_refs (lambda (expr) (list expr expr))))
 		(define all_corr_pairs (domain_correlation_pairs (merge (list
-			where_corr_pairs having_corr_pairs))))
+			where_corr_pairs having_corr_pairs residual_pairs))))
+		/* Aggregate operands can read caller columns without filtering an inner
+		row. Keep those remaining reads in D after equality substitution too;
+		the payload must not become one shared value for all caller bindings. */
+		(define payload_refs (btw2025_expr_outer_column_refs
+			(decorrelate_expr_with_pairs inner_default all_corr_pairs value_expr)
+			inner_sources outer_sources))
+		(define payload_pairs (map payload_refs (lambda (expr) (list expr expr))))
+		(define all_corr_pairs (domain_correlation_pairs (merge (list all_corr_pairs payload_pairs))))
+		(define range_where_corr_pairs (domain_correlation_pairs
+			(merge (list range_where_corr_pairs payload_pairs))))
 		(define local_value_expr (decorrelate_expr_with_pairs inner_default all_corr_pairs value_expr))
 		(define ags (dedupe_aggregates_by_col (merge (list (extract_aggregates local_value_expr) (list aggregate_count_descriptor)))))
 		/* COUNT(DISTINCT)/GROUP_CONCAT(DISTINCT) lower to a merge_unique LIST
@@ -3731,7 +4095,9 @@ without separately proving two-valued semantics. */
 		(define condition (combine_where_terms local_terms true))
 		(define local_having (decorrelate_expr_with_pairs inner_default all_corr_pairs
 			(combine_where_terms local_having_terms true)))
-		(define stage_input (if (and (single_source? (qb_sources inner)) (empty_list? (qb_stages inner)))
+		/* A six-field source is the native base-table shortcut. Logical row
+		domains keep their complete query block, including its filter and scope. */
+		(define stage_input (if (and (single_source? (qb_sources inner)) (source_is_base_table? inner_src) (empty_list? (qb_stages inner)))
 			inner_src
 			(make_query_block
 				(qb_schema inner)
@@ -3777,18 +4143,18 @@ without separately proving two-valued semantics. */
 					(list (quote null_semantics) (quote aggregate))
 					(list (quote partition_by) keys)
 					(list (quote result_max_rows_per_partition) 1))
-				(btw2025_stage_facts inner outer_sources all_corr_pairs '() pending_info)))))
+				(btw2025_stage_facts inner outer_sources all_corr_pairs residual_refs pending_info)))))
 		(define stage_alias (exists_stage_alias stage_id))
 		(define key_names (group_key_cols keys))
-		(define post_condition (replace_group_expr stage_input inner_default stage_alias keys key_names ags local_having))
+		(define post_condition (replace_group_expr stage_input inner_default stage_alias keys key_names stage local_having))
 		(define source (list
 			stage_alias
 			(group_stage_schema stage)
 			(make_stage_output_relation stage_id)
 			(or (stage_source_outer? outer_sources) (not (equal? local_having true)) ags_have_list_accumulator)
-			(make_stage_lookup_condition stage_alias key_names lookup_keys post_condition)))
+			(make_stage_lookup_condition stage_alias key_names lookup_keys post_condition) nil))
 		(define presence_expr (list (quote get_column) stage_alias false (aggregate_col_name aggregate_count_descriptor) false))
-		(define scalar_value_expr (replace_group_expr stage_input inner_default stage_alias keys key_names ags local_value_expr))
+		(define scalar_value_expr (replace_group_expr stage_input inner_default stage_alias keys key_names stage local_value_expr))
 		(list
 			(if (equal? local_having true)
 				scalar_value_expr
@@ -3848,12 +4214,16 @@ without separately proving two-valued semantics. */
 		(define values_for_inner (map value_exprs (lambda (value_expr)
 			(canonical_column_expr_for_alias inner_default
 				(decorrelate_expr_with_pairs inner_default lookup_pairs value_expr)))))
+		(define outer_values (map values_for_inner (lambda (value_expr)
+			(scalar_projection_outer_only? local_sources outer_sources value_expr))))
+		(define values_for_stage (mapIndex values_for_inner (lambda (i value_expr)
+			(if (nth outer_values i) 1 value_expr))))
 		(define order_for_inner (map (coalesceNil (qb_order inner) '()) (lambda (item)
 			(match item '(expr dir) (list (canonical_column_expr_for_alias inner_default
 				(decorrelate_expr_with_pairs inner_default lookup_pairs expr)) dir)))))
-		(define ags (dedupe_aggregates_by_col (map values_for_inner (lambda (value_for_inner)
+		(define ags (dedupe_aggregates_by_col (map values_for_stage (lambda (value_for_inner)
 			(scalar_once_descriptor value_for_inner order_for_inner (qb_offset inner))))))
-		(define stage_input (if (and (single_source? local_sources) (empty_list? (qb_stages inner)))
+		(define stage_input (if (and (single_source? local_sources) (source_is_base_table? inner_src) (empty_list? (qb_stages inner)))
 			inner_src
 			(make_query_block
 				(qb_schema inner)
@@ -3911,10 +4281,13 @@ without separately proving two-valued semantics. */
 			(group_stage_schema stage)
 			(make_stage_output_relation stage_id)
 			(stage_source_outer? outer_sources)
-			(make_exists_stage_join_condition stage_alias key_names lookup_keys false)))
-		(define output_exprs (map values_for_inner (lambda (value_for_inner)
-			(scalar_once_value_expr stage_input stage_alias
-				(scalar_once_descriptor value_for_inner order_for_inner (qb_offset inner))))))
+			(make_exists_stage_join_condition stage_alias key_names lookup_keys false) nil))
+		(define output_exprs (mapIndex values_for_stage (lambda (i value_for_stage) (begin
+			(define stored (scalar_once_value_expr stage_input stage_alias
+				(scalar_once_descriptor value_for_stage order_for_inner (qb_offset inner))))
+			(if (nth outer_values i)
+				(list (quote if) (list (quote nil?) stored) nil (nth values_for_inner i))
+				stored)))))
 		(list
 			(nth output_exprs output_index)
 			(list stage)
@@ -3979,7 +4352,7 @@ without separately proving two-valued semantics. */
 				(define ag (list value_expr (scalar_once_reduce_first) nil))
 				(scalar_once_value_expr stage_input alias ag)))))
 		(list
-			(list alias (group_stage_schema stage) (make_stage_output_relation stage_id) false nil)
+			(list alias (group_stage_schema stage) (make_stage_output_relation stage_id) false nil nil)
 			projection
 			stage))))
 
@@ -3996,7 +4369,7 @@ without separately proving two-valued semantics. */
 		(define key_names (group_key_cols keys))
 		(define ags (gs_aggregates stage))
 		(map_assoc (gs_output stage) (lambda (_title expr)
-			(replace_group_order_expr (gs_input stage) input_alias alias keys key_names ags expr))))))
+			(replace_group_order_expr (gs_input stage) input_alias alias keys key_names stage expr))))))
 
 (define make_grouped_derived_stage_source (lambda (src alias inner)
 	(begin
@@ -4009,7 +4382,7 @@ without separately proving two-valued semantics. */
 		(define derived_having (if (nil? (gs_having stage))
 			nil
 			(replace_group_expr
-				(gs_input stage) input_alias alias keys key_names ags (gs_having stage))))
+				(gs_input stage) input_alias alias keys key_names stage (gs_having stage))))
 		(define derived_join (rewrite_derived_ref alias projection (source_join_expr src)))
 		(define source_condition (if (nil? derived_having)
 			derived_join
@@ -4019,14 +4392,14 @@ without separately proving two-valued semantics. */
 				(filter (cdr (qb_sources (gs_input stage))) (lambda (extra)
 					(source_needed_after_group_stage? input_alias stage extra)))
 				(lambda (extra)
-					(rewrite_source_for_group_domain (gs_input stage) input_alias alias keys key_names ags extra)))
+					(rewrite_source_for_group_domain (gs_input stage) input_alias alias keys key_names stage extra)))
 			'()))
 		(define source (list
 			alias
 			(group_stage_schema stage)
 			(make_stage_output_relation (gs_id stage))
 			(source_outer? src)
-			source_condition))
+			source_condition nil))
 		(list (cons source logical_extra_sources) projection stage))))
 
 /* A lateral aggregate without GROUP/HAVING returns one row per complete
@@ -4089,7 +4462,7 @@ the existing aggregate-domain rewrite collects all payloads into one stage. */
 			(neumann_fail "untangle_query" "ordered derived relation requires a base inner source")
 			true)
 		(define inner_alias (source_alias inner_src))
-		(define derived_src (list alias (source_schema inner_src) (source_relation inner_src) false nil))
+		(define derived_src (list alias (source_schema inner_src) (source_relation inner_src) false nil (source_declarations inner_src)))
 		(define helper_sources (requalify_source_join_exprs inner_alias alias (cdr (qb_sources inner))))
 		(define order_items (map (qb_order inner) (lambda (item)
 			(match item '(expr dir) (list (requalify_single_source_expr inner_alias alias expr) dir)))))
@@ -4126,8 +4499,13 @@ the existing aggregate-domain rewrite collects all payloads into one stage. */
 			(list (list (quote kind) (quote ordered-window)))))
 		(define rn_expr (list (quote get_column) alias false rn_col false))
 		(define offset_value (coalesceNil (qb_offset inner) 0))
-		(define upper_bound (+ offset_value (qb_limit inner)))
-		(define lower_filter (if (> offset_value 0) (list (quote >) rn_expr offset_value) true))
+		/* Bounds remain invocation expressions. Arithmetic on their syntax
+		would coerce an AST to a numeric placeholder during compilation. The
+		native range access evaluates the generated upper bound before scanning. */
+		(define upper_bound (if (and (number? offset_value) (number? (qb_limit inner)))
+			(+ offset_value (qb_limit inner)) (list (quote +) offset_value (qb_limit inner))))
+		(define lower_filter (if (if (number? offset_value) (<= offset_value 0) false) true
+			(list (quote >) rn_expr offset_value)))
 		(define limit_filter (combine_where lower_filter (list (quote <=) rn_expr upper_bound)))
 		(define derived_filter (combine_where inner_where limit_filter))
 		/* An INNER JOIN predicate belongs above the complete ordered/limited
@@ -4280,17 +4658,20 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 		(define values_for_inner (map value_exprs (lambda (value_expr)
 			(canonical_column_expr_for_alias inner_default
 				(decorrelate_expr_with_pairs inner_default lookup_pairs value_expr)))))
+		(define outer_values (map values_for_inner (lambda (value_expr)
+			(scalar_projection_outer_only? local_sources outer_sources value_expr))))
 		(define lifted_inputs (map values_for_inner (lambda (value_for_inner)
 			(scalar_projection_lifted_input inner_default value_for_inner))))
 		(define values_for_stage (map (produceN (count values_for_inner)) (lambda (i)
 			(begin
 				(define lifted_input (nth lifted_inputs i))
-				(if (nil? lifted_input) (nth values_for_inner i) lifted_input)))))
+				(if (nth outer_values i) 1
+					(if (nil? lifted_input) (nth values_for_inner i) lifted_input))))))
 		(define value_ags (map values_for_stage (lambda (value_for_inner)
 			(car (scalar_single_aggregates value_for_inner)))))
 		(define count_ag aggregate_count_descriptor)
 		(define ags (dedupe_aggregates_by_col (merge (list value_ags (list count_ag)))))
-		(define stage_input (if (and (single_source? (qb_sources inner)) (empty_list? (qb_stages inner)))
+		(define stage_input (if (and (single_source? (qb_sources inner)) (source_is_base_table? inner_src) (empty_list? (qb_stages inner)))
 			inner_src
 			(make_query_block
 				(qb_schema inner)
@@ -4334,13 +4715,15 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 			(group_stage_schema stage)
 			(make_stage_output_relation stage_id)
 			(stage_source_outer? outer_sources)
-			(make_exists_stage_join_condition stage_alias key_names lookup_keys false)))
+			(make_exists_stage_join_condition stage_alias key_names lookup_keys false) nil))
 		(define output_exprs (map (produceN (count value_ags)) (lambda (i)
 			(begin
 				(define output_ag (nth value_ags i))
 				(define stored (scalar_single_value_expr stage_input stage_alias output_ag count_ag))
 				(define lifted_input (nth lifted_inputs i))
-				(if (nil? lifted_input)
+				(if (nth outer_values i)
+					(list (quote if) (list (quote nil?) stored) nil (nth values_for_inner i))
+					(nil? lifted_input)
 					stored
 					(replace_scalar_projection_input inner_default lifted_input stored
 						(nth values_for_inner i)))))))
@@ -4480,7 +4863,7 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 			(neumann_fail "untangle_query" "window offset ORC stage currently supports one base source")
 			true)
 		(match local_sources
-			(cons src _rest) (match src '(alias _schema relation _outer _join)
+			(cons src _rest) (match src '(alias _schema relation _outer _join declarations)
 				(if (not (string? relation))
 					(neumann_fail "untangle_query" "window offset ORC stage requires a base source")
 					(match over '(partition_exprs order_items) (begin
@@ -4622,7 +5005,7 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 			(neumann_fail "untangle_query" "rank ORC stage currently supports one base source")
 			true)
 		(match local_sources
-			(cons src _rest) (match src '(alias _schema relation _outer _join)
+			(cons src _rest) (match src '(alias _schema relation _outer _join declarations)
 				(if (not (string? relation))
 					(neumann_fail "untangle_query" "rank ORC stage requires a base source")
 					(match over '(partition_exprs order_items) (begin
@@ -4669,7 +5052,7 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 			(neumann_fail "untangle_query" "ROW_NUMBER ORC stage currently supports one base source")
 			true)
 		(match local_sources
-			(cons src _rest) (match src '(alias _schema relation _outer _join)
+			(cons src _rest) (match src '(alias _schema relation _outer _join declarations)
 				(if (not (string? relation))
 					(neumann_fail "untangle_query" "ROW_NUMBER ORC stage requires a base source")
 					(match over '(partition_exprs order_items) (begin
@@ -4811,7 +5194,7 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 			(source_schema src)
 			(make_stage_output_relation stage_id)
 			true
-			(make_exists_stage_join_condition stage_alias key_names outer_domain true)))
+			(make_exists_stage_join_condition stage_alias key_names outer_domain true) nil))
 		(list
 			(window_aggregate_value_expr stage_input fn canonical_args ags stage_alias)
 			(list stage)
@@ -4843,7 +5226,8 @@ until the existing dependency-demand pass removes unused work. */
 		(define normalized (normalize_query_ast subquery))
 		(define sub_ctx (make_uctx ctx (list (list (quote outer-sources) outer_sources))))
 		(define pending_info (uctx_get ctx (quote btw2025-current-info) nil))
-		(define inner (untangle_query normalized sub_ctx))
+		(define producer (untangle_query normalized sub_ctx))
+		(define inner (if (union_block? producer) (logical_union_relation_query producer) producer))
 		(if (query_block_no_from? inner)
 			(list (untangle_zero_domain_subquery (quote inner_select) nil subquery ctx) '() '())
 			(if (grouped_scalar_top_supported? inner outer_sources)
@@ -4889,7 +5273,11 @@ until the existing dependency-demand pass removes unused work. */
 		(define normalized (normalize_query_ast subquery))
 		(define sub_ctx (make_uctx ctx (list (list (quote outer-sources) outer_sources))))
 		(define pending_info (uctx_get ctx (quote btw2025-current-info) nil))
-		(define inner (untangle_query normalized sub_ctx))
+		(define producer (untangle_query normalized sub_ctx))
+		(define inner (if (and (union_block? producer)
+			(or (not (empty_list? (union_order producer))) (not (nil? (union_limit producer)))
+				(not (nil? (union_offset producer)))))
+			(logical_union_relation_query producer) producer))
 		(if (union_block? inner)
 			(make_in_union_stage_rewrite rewritten_probe inner (list outer_sources subquery false semijoin_where pending_info))
 			(if (query_block_no_from? inner)
@@ -4901,7 +5289,11 @@ until the existing dependency-demand pass removes unused work. */
 		(define normalized (normalize_query_ast subquery))
 		(define sub_ctx (make_uctx ctx (list (list (quote outer-sources) outer_sources))))
 		(define pending_info (uctx_get ctx (quote btw2025-current-info) nil))
-		(define inner (untangle_query normalized sub_ctx))
+		(define producer (untangle_query normalized sub_ctx))
+		(define inner (if (and (union_block? producer)
+			(or (not (empty_list? (union_order producer))) (not (nil? (union_limit producer)))
+				(not (nil? (union_offset producer)))))
+			(logical_union_relation_query producer) producer))
 		(define rewritten_probe (nth (untangle_expr_with_stages probe outer_sources ctx) 0))
 		(if (union_block? inner)
 			(make_in_union_stage_rewrite rewritten_probe inner (list outer_sources subquery true false pending_info))
@@ -5080,9 +5472,9 @@ membership_truth rather than adding another physical lowering path. */
 (define untangle_if_expr_with_stages (lambda (head args outer_sources ctx)
 	(match args
 		(cons condition (cons branch rest))
-		(if (equal? condition true)
+		(if (and (not (list? condition)) (equal? condition true))
 			(untangle_expr_with_stages branch outer_sources ctx)
-			(if (or (equal? condition false) (nil? condition))
+			(if (or (and (not (list? condition)) (equal? condition false)) (nil? condition))
 				(match rest
 					(cons fallback '()) (untangle_expr_with_stages fallback outer_sources ctx)
 					_ (untangle_if_expr_with_stages head rest outer_sources ctx))
@@ -5678,9 +6070,9 @@ its original source scope; never infer it from the alias spelling. */
 	(match expr
 		((symbol sql_compile_column) _compiler column) (star_expr_matches_source? column src)
 		((symbol get_column) alias ignorecase "*" _)
-		(or (nil? alias) (if ignorecase (equal?? alias (source_alias src)) (equal? alias (source_alias src))))
+		(or (nil? alias) (source_alias_matches? src (source_alias src) alias ignorecase))
 		((quote get_column) alias ignorecase "*" _)
-		(or (nil? alias) (if ignorecase (equal?? alias (source_alias src)) (equal? alias (source_alias src))))
+		(or (nil? alias) (source_alias_matches? src (source_alias src) alias ignorecase))
 		_ false)))
 
 (define star_expr? (lambda (expr)
@@ -5712,18 +6104,43 @@ base-table schema silently produces empty result metadata for derived.*. */
 				(cons title (cons expr (expand_query_block_fields sources rest)))))
 		_ '())))
 
+/* Hidden UNION exports carry ordering inputs between its native branch
+producers and merge. They are logical columns, never part of the SQL schema. */
+(define union_hidden_output (lambda (block)
+	(qassoc_get (union_facts block) (quote hidden-output) '())))
+(define union_visible_fields (lambda (block fields)
+	(merge (extract_assoc fields (lambda (title expression)
+		(if (has? (union_hidden_output block) title) '() (list title expression)))))))
+
 /* Derived relations expose their projection, not every column of the base
 sources that replace them during logical flattening. Expand stars before the
 parent builds its binding catalog: the star marker is not an exported column.
 Keep that SQL scope available while nested queries are decorrelated. */
+(define query_block_export_sources (lambda (block)
+	(begin
+		(define order (qassoc_get (qb_facts block) 'source_export_order nil))
+		(if (nil? order) (qb_sources block)
+			(map order (lambda (name)
+				(find (qb_sources block) (lambda (src) (equal? (source_alias src) name)) nil)))))))
+
+/* Set expressions inherit their execution database through their first
+branch, including nested sets with an independent row window. A set mode is
+never a database identifier. All callers consume this canonical shape owner. */
+(define logical_relation_schema (lambda (relation)
+	(if (query_block? relation) (qb_schema relation)
+		(union_block? relation) (match (union_branches relation)
+			(cons branch _rest) (logical_relation_schema branch)
+			_ (neumann_fail "query_schema" "UNION requires a branch to identify its database"))
+		(neumann_fail "query_schema" "expected a canonical query-block or union-block"))))
+
 (define logical_relation_fields (lambda (relation)
 	(begin
 		(define normalized (normalize_query_ast relation))
 		(if (query_block? normalized)
-			(expand_query_block_fields (qb_sources normalized) (qb_fields normalized))
+			(expand_query_block_fields (query_block_export_sources normalized) (qb_fields normalized))
 			(if (union_block? normalized)
 				(match (union_branches normalized)
-					(cons branch _rest) (logical_relation_fields branch)
+					(cons branch _rest) (union_visible_fields normalized (logical_relation_fields branch))
 					_ '())
 				'())))))
 
@@ -5741,8 +6158,9 @@ source alias is the stable identity consumed by all later planner phases. */
 (define binding_source_columns (lambda (src)
 	(begin
 		(define relation (normalize_query_ast (source_relation src)))
-		(if (string? relation)
-			(map (get_schema (source_schema src) relation) (lambda (column) (column "Field")))
+		(if (or (string? relation) (local_relation_reference? relation)
+			(stage_output_relation? relation))
+			(map (source_columns src) (lambda (column) (column "Field")))
 			(if (table_function_relation? relation)
 				(table_function_columns relation)
 				(if (row_domain_relation? relation)
@@ -5753,8 +6171,8 @@ source alias is the stable identity consumed by all later planner phases. */
 which do not exist yet. Guard that declaration through the ordinary compile
 accumulator: point-column guards cannot detect a later ADD. Neither shard
 topology nor statistics participate in this contract. */
-(define planner_star_column_names (lambda (schema tbl)
-	(map (get_schema schema tbl) (lambda (column) (column "Field")))))
+(define planner_star_column_names (lambda (schema tbl tx)
+	(map (get_schema schema tbl tx) (lambda (column) (column "Field")))))
 
 (define planner_guard_star_columns (lambda (query planning_session)
 	(begin
@@ -5768,7 +6186,7 @@ topology nor statistics participate in this contract. */
 								(lambda (found expr) (or found (star_expr_matches_source? expr src))) false))
 							(planner_record_guard_condition
 								(list (quote expression_equal?)
-									(list (quote planner_star_column_names) (source_schema src) (source_relation src))
+									(list (quote planner_star_column_names) (source_schema src) (source_relation src) (quote tx))
 									(list (quote quote) (binding_source_columns src))) planning_session)
 							nil)
 						(if (string? (source_relation src)) nil
@@ -5809,12 +6227,12 @@ topology nor statistics participate in this contract. */
 
 (define binding_entries_for_alias (lambda (entries tblvar tbl_ignorecase)
 	(filter (coalesceNil entries '()) (lambda (entry)
-		(if tbl_ignorecase
-			(equal?? (binding_entry_name entry) tblvar)
-			(or
-				(equal? (binding_entry_name entry) tblvar)
-				/* Expanded output aliases already contain bound references. */
-				(equal? (source_alias (binding_entry_source entry)) tblvar)))))))
+		(if (qualified_relation_ref? tblvar)
+			(source_binding_name_matches? (binding_entry_source entry) tblvar tbl_ignorecase)
+			(if tbl_ignorecase (equal?? (binding_entry_name entry) tblvar)
+				(or (equal? (binding_entry_name entry) tblvar)
+					/* Expanded output aliases already contain bound references. */
+					(equal? (source_alias (binding_entry_source entry)) tblvar))))))))
 
 (define binding_entries_for_column (lambda (entries col col_ignorecase)
 	(filter (coalesceNil entries '()) (lambda (entry)
@@ -5822,12 +6240,12 @@ topology nor statistics participate in this contract. */
 			(not (binding_entry_catalog_known? entry))
 			(not (nil? (binding_catalog_column_name (binding_entry_columns entry) col col_ignorecase))))))))
 
-(define bind_qualified_column_in_scopes (lambda (scopes tblvar tbl_ignorecase col col_ignorecase)
+(define try_bind_qualified_column_in_scopes (lambda (scopes tblvar tbl_ignorecase col col_ignorecase)
 	(match (coalesceNil scopes '())
 		(cons entries outer_scopes) (begin
 			(define matches (binding_entries_for_alias entries tblvar tbl_ignorecase))
 			(if (empty_list? matches)
-				(bind_qualified_column_in_scopes outer_scopes tblvar tbl_ignorecase col col_ignorecase)
+				(try_bind_qualified_column_in_scopes outer_scopes tblvar tbl_ignorecase col col_ignorecase)
 				(if (single_source? matches)
 					(begin
 						(define entry (car matches))
@@ -5838,11 +6256,15 @@ topology nor statistics participate in this contract. */
 								(define resolved_col (binding_catalog_column_name (binding_entry_columns entry) col col_ignorecase))
 								(if (nil? resolved_col)
 									(if (binding_entry_catalog_known? entry)
-										(neumann_fail "bind_query_names" (concat "Column does not exist: " (concat tblvar (concat "." col))))
+										(neumann_fail "bind_query_names" (concat "Column does not exist: " (concat (string tblvar) (concat "." col))))
 										(list (quote get_column) (source_alias src) false col col_ignorecase))
 									(list (quote get_column) (source_alias src) false resolved_col false)))))
-					(neumann_fail "bind_query_names" (concat "ambiguous relation alias: " tblvar)))))
-		_ (neumann_fail "bind_query_names" (concat "unknown relation alias: " tblvar)))))
+					(neumann_fail "bind_query_names" (concat "ambiguous relation alias: " (string tblvar))))))
+		_ nil)))
+
+(define bind_qualified_column_in_scopes (lambda (scopes tblvar tbl_ignorecase col col_ignorecase)
+	(coalesceNil (try_bind_qualified_column_in_scopes scopes tblvar tbl_ignorecase col col_ignorecase)
+		(neumann_fail "bind_query_names" (concat "unknown relation alias: " (string tblvar))))))
 
 (define bind_unqualified_column_in_scopes (lambda (scopes col col_ignorecase)
 	(match (coalesceNil scopes '())
@@ -5905,10 +6327,33 @@ subqueries and operator stages keep separate namespaces and canonical names. */
 		(binding_fresh_alias string_catalog (concat candidate ":"))
 		candidate)))
 
+/* A source's declaration is data, not a namespace containing expressions.
+Retain its public column names without another catalog read or star/type
+planning pass. Derived exports are already visible through their projections
+and the recursively visited sources supplying wildcard columns. */
+(define binding_source_string_inputs (lambda (src)
+	(begin
+		(define declarations (source_declarations src))
+		(list (source_alias src) (source_schema src)
+			(source_relation src) (source_join_expr src)
+			(map (if (nil? declarations) '() (coalesceNil (declarations "columns") '()))
+				(lambda (column) (column "Field")))))))
+
 (define binding_collect_string_catalog (lambda (value catalog)
 	(if (string? value)
 		(if (has_assoc? catalog value) catalog (set_assoc catalog value true))
 		(match value
+			((symbol quote) _datum) catalog
+			((symbol query-block) database sources fields condition grouping having ordering limit offset hidden stages facts)
+			(binding_collect_string_catalog
+				(list database (map sources binding_source_string_inputs)
+					fields condition grouping having ordering limit offset hidden stages facts) catalog)
+			((symbol group-stage) id input domain keys aggregates having output ordering limit offset facts)
+			(binding_collect_string_catalog
+				(list id (if (source_alias input) (binding_source_string_inputs input) input)
+					domain keys aggregates having output ordering limit offset facts) catalog)
+			((symbol union-block) mode branches ordering limit offset facts)
+			(binding_collect_string_catalog (list mode branches ordering limit offset facts) catalog)
 			(cons head tail) (reduce tail (lambda (current item)
 				(binding_collect_string_catalog item current))
 				(binding_collect_string_catalog head catalog))
@@ -5921,30 +6366,34 @@ subqueries and operator stages keep separate namespaces and canonical names. */
 			(bind_query_expr_tail scopes rest path all_strings (+ index 1)))
 		_ '())))
 
+/* Expression contracts belong to their producing SQL scope. GROUP BY has
+its own alias precedence, but consumes the same compiler/result contract as
+other expressions before decorrelation can move a key into a group-stage. */
+(define bind_sql_expression_contract (lambda (sources compiler arguments) (begin
+	(define info ((sql_expression_compiler compiler)
+		(map arguments (lambda (argument) (sql_bound_expr_info sources argument)))))
+	(define formula (sql_info_formula info))
+	/* Fixed BOOLEAN operators remain visible to logical predicate analysis. */
+	(if (and (equal? (sql_info_type info) "BOOLEAN")
+		(match formula
+			(cons head _arguments) (match (sql_function_rule head)
+				'(_ "BOOLEAN" "fixed") true _ false)
+			_ false))
+		formula
+		(list (quote sql_type_expr) formula (sql_info_datatype info) (sql_info_collation info))))))
+
 (define bind_query_expr (lambda (scopes expr path all_strings)
 	(match expr
 		((symbol sql_compile_column) compiler expression) (begin
 			(define bound (bind_query_expr scopes expression path all_strings))
-			(define info (sql_compile_column_info (map (merge scopes) binding_entry_source) compiler bound))
-			(if (expression_equal? info (sql_expr_info (map (merge scopes) binding_entry_source) bound)) bound
-				(list (quote sql_type_expr) (sql_info_formula info) (sql_info_datatype info) (sql_info_collation info))))
-		(cons (symbol sql_compile_expr) (cons compiler arguments)) (begin
-			/* Freeze frontend contracts in their producing SQL scope before
-			derived/group rewrites move expressions to different source scopes.
-			Only compile-time annotations remain; executable lowering consumes them. */
-			(define bound (bind_query_expr_tail scopes arguments path all_strings 0))
 			(define sources (map (merge scopes) binding_entry_source))
-			(define info ((sql_expression_compiler compiler) (map bound (lambda (argument) (sql_expr_info sources argument)))))
-			(define formula (sql_info_formula info))
-			/* A fixed frontend BOOLEAN operator already carries this contract.
-			Keep its predicate AST visible to the shared logical extractors. */
-			(if (and (equal? (sql_info_type info) "BOOLEAN")
-				(match formula
-					(cons head _arguments) (match (sql_function_rule head)
-						'(_ "BOOLEAN" "fixed") true _ false)
-					_ false))
-				formula
-				(list (quote sql_type_expr) formula (sql_info_datatype info) (sql_info_collation info))))
+			(define base_info (sql_bound_expr_info sources bound))
+			(define info (sql_resolve_column_info sources compiler base_info))
+			(if (expression_equal? info base_info) bound
+				(list (quote sql_type_expr) (sql_info_formula info) (sql_info_datatype info) (sql_info_collation info))))
+		(cons (symbol sql_compile_expr) (cons compiler arguments))
+		(bind_sql_expression_contract (map (merge scopes) binding_entry_source) compiler
+			(bind_query_expr_tail scopes arguments path all_strings 0))
 		((symbol inner_select) subquery)
 		(list (quote inner_select) (bind_query_names_at subquery scopes (binding_path path "subquery" 0) all_strings))
 		((quote inner_select) subquery)
@@ -5987,9 +6436,14 @@ subqueries and operator stages keep separate namespaces and canonical names. */
 	(match expr
 		((symbol sql_compile_column) compiler expression) (begin
 			(define bound (bind_group_expr scopes fields expression path all_strings))
-			(define info (sql_compile_column_info (map (merge scopes) binding_entry_source) compiler bound))
-			(if (expression_equal? info (sql_expr_info (map (merge scopes) binding_entry_source) bound)) bound
+			(define sources (map (merge scopes) binding_entry_source))
+			(define base_info (sql_bound_expr_info sources bound))
+			(define info (sql_resolve_column_info sources compiler base_info))
+			(if (expression_equal? info base_info) bound
 				(list (quote sql_type_expr) (sql_info_formula info) (sql_info_datatype info) (sql_info_collation info))))
+		(cons (symbol sql_compile_expr) (cons compiler arguments))
+		(bind_sql_expression_contract (map (merge scopes) binding_entry_source) compiler
+			(bind_group_expr_tail scopes fields arguments path all_strings 0))
 		((symbol inner_select) _subquery) (bind_query_expr scopes expr path all_strings)
 		((quote inner_select) _subquery) (bind_query_expr scopes expr path all_strings)
 		((symbol inner_select_exists) _subquery) (bind_query_expr scopes expr path all_strings)
@@ -6045,18 +6499,61 @@ subqueries and operator stages keep separate namespaces and canonical names. */
 					path all_strings (+ index 1))))
 		_ '())))
 
-(define bind_query_source_joins (lambda (entries outer_scopes visible_entries path all_strings index)
+/* Frontend expression expansion and ordinary name binding use the same ON
+boundary. An enclosing joined operand sees both complete children; predicates
+inside it see only that operand's preceding sources and their current source. */
+(define join_predicate_scope_aliases (lambda (name visible units) (begin
+	(define headed (find (reverse units) (lambda (unit) (equal? name (car unit))) nil))
+	(define unit (if headed headed (find units (lambda (unit) (has? (cadr unit) name)) nil)))
+	(if (nil? unit) visible
+		(match unit '(head children left)
+			(if (equal? name head) (merge (list left (cons head children)))
+				(filter visible (lambda (alias) (has? (cons head children) alias)))))))))
+
+/* The guard rewrite is optional. Certify the complete, already bound unit
+before adding any guards; otherwise retain its ordinary nullable query-block.
+Opaque frontend helpers need no common-planner purity whitelist. */
+(define nullable_join_flatten_certificate (lambda (sources entries unit)
+	(match unit '(head children _left) (begin
+		(define members (map (cons head children) (lambda (name) (begin
+			(define alias (source_alias (binding_entry_source (find entries (lambda (entry)
+				(equal? (binding_entry_name entry) name)) nil))))
+			(find sources (lambda (src) (equal? (source_alias src) alias)) nil)))))
+		(if (reduce members (lambda (valid src) (and valid (source_is_base_table? src))) true)
+			(begin
+				(define producer (car members))
+				(define child_aliases (source_aliases (cdr members)))
+				(define presence (find (source_columns producer) (lambda (column) (not (column "Null"))) nil))
+				(if (and (not (nil? presence))
+					(reduce members (lambda (valid src)
+						(and valid (contribution_pure_expr? (sql_type_lower_annotations sources (source_join_expr src))))) true)
+					(not (expr_refs_any_alias? nil child_aliases (source_join_expr producer))))
+					(list (source_alias producer) (presence "Field") child_aliases) nil)) nil)))))
+
+(define guard_flattened_nullable_source (lambda (src certificates)
+	(begin
+		(define certificate (find certificates (lambda (candidate)
+			(has? (nth candidate 2) (source_alias src))) nil))
+		(if (nil? certificate) src
+			(source_with_join_expr src (combine_where
+				(list 'not (list 'nil? (list 'get_column (car certificate) false (cadr certificate) false)))
+				(source_join_expr src)))))))
+
+(define bind_query_source_joins (lambda (entries all_entries outer_scopes visible_entries nullable_units operand_units path all_strings index)
 	(match (coalesceNil entries '())
 		(cons entry rest) (begin
 			(define src (binding_entry_source entry))
 			(define visible (merge (list visible_entries (list entry))))
+			(define join_path (binding_path path "join" index))
+			(define aliases (join_predicate_scope_aliases (binding_entry_name entry)
+				(map visible binding_entry_name) (merge (list nullable_units operand_units))))
+			(define scoped (filter all_entries (lambda (candidate)
+				(has? aliases (binding_entry_name candidate)))))
 			(cons
 				(source_with_join_expr src
-					(bind_query_expr (cons visible outer_scopes) (source_join_expr src)
-						(binding_path path "join" index) all_strings))
-				(bind_query_source_joins rest outer_scopes visible path all_strings (+ index 1))))
+					(bind_query_expr (cons scoped outer_scopes) (source_join_expr src) join_path all_strings))
+				(bind_query_source_joins rest all_entries outer_scopes visible nullable_units operand_units path all_strings (+ index 1))))
 		_ '())))
-
 (define binding_scope_has_alias? (lambda (entries alias)
 	(reduce (coalesceNil entries '()) (lambda (found entry)
 		(or found (equal? (binding_entry_name entry) alias))) false)))
@@ -6084,7 +6581,7 @@ subqueries and operator stages keep separate namespaces and canonical names. */
 				(source_schema src)
 				(source_relation src)
 				(source_outer? src)
-				(source_join_expr src)))
+				(source_join_expr src) (source_declarations src)))
 			(cons
 				(begin
 					(define columns (binding_source_columns internal_source))
@@ -6121,22 +6618,27 @@ subqueries and operator stages keep separate namespaces and canonical names. */
 		(cons head tail) (cons head (map tail (lambda (item) (bind_output_alias_refs fields item))))
 		_ expr)))
 
-(define bind_query_fields (lambda (fields scopes path all_strings index)
+(define bind_query_fields (lambda (fields scopes exports path all_strings index)
 	(match (coalesceNil fields '())
 		(cons title (cons ((symbol sql_compile_column) compiler column) rest))
 		(if (star_expr? column) (begin
 			(define bound (bind_query_expr scopes column path all_strings))
-			(define expanded (expand_star_for_sources (map (car scopes) binding_entry_source)
+			(define expanded (expand_star_for_sources (map exports binding_entry_source)
 				(list (quote sql_compile_column) compiler bound)))
 			(merge (list
-				(bind_query_fields expanded scopes path all_strings index)
-				(bind_query_fields rest scopes path all_strings (+ index 1)))))
+				(bind_query_fields expanded scopes exports path all_strings index)
+				(bind_query_fields rest scopes exports path all_strings (+ index 1)))))
 			(cons title (cons (bind_query_expr scopes (list (quote sql_compile_column) compiler column)
 				(binding_path path "field" index) all_strings)
-				(bind_query_fields rest scopes path all_strings (+ index 1)))))
-		(cons title (cons expr rest)) (cons title (cons
-			(bind_query_expr scopes expr (binding_path path "field" index) all_strings)
-			(bind_query_fields rest scopes path all_strings (+ index 1))))
+				(bind_query_fields rest scopes exports path all_strings (+ index 1)))))
+		(cons title (cons expr rest))
+		(if (star_expr? expr) (begin
+			(define bound (bind_query_expr scopes expr path all_strings))
+			(define expanded (expand_star_for_sources (map exports binding_entry_source) bound))
+			(merge (list (bind_query_fields expanded scopes exports path all_strings index)
+				(bind_query_fields rest scopes exports path all_strings (+ index 1)))))
+			(cons title (cons (bind_query_expr scopes expr (binding_path path "field" index) all_strings)
+				(bind_query_fields rest scopes exports path all_strings (+ index 1)))))
 		_ '())))
 
 (define bind_query_order (lambda (items scopes fields alias_first path all_strings index)
@@ -6199,15 +6701,27 @@ expressions are values in their own right and stay untouched. */
 			(binding_scope_entries (qb_sources block) outer_scopes path all_strings 0)
 			outer_scopes (if (reduce (qb_sources block) (lambda (found src)
 				(or found (source_lateral? src))) false) '() nil) path all_strings 0))
-		(define sources (bind_query_source_joins entries outer_scopes '() path all_strings 0))
+		(define nullable_units (qassoc_get (qb_facts block) 'nullable_join_scopes '()))
+		(define operand_units (qassoc_get (qb_facts block) 'join_operand_scopes '()))
+		(define sources (bind_query_source_joins entries entries outer_scopes '() nullable_units operand_units path all_strings 0))
+		(define decisions (map nullable_units (lambda (unit)
+			(list unit (nullable_join_flatten_certificate sources entries unit)))))
+		(define certificates (map (filter decisions (lambda (decision) (not (nil? (cadr decision))))) cadr))
+		(define retained_units (merge (list
+			(map (filter decisions (lambda (decision) (nil? (cadr decision)))) car) operand_units)))
+		(define sources (map sources (lambda (src) (guard_flattened_nullable_source src certificates))))
 		(define scopes (cons entries outer_scopes))
-		(define fields (bind_query_fields (qb_fields block) scopes path all_strings 0))
+		(define export_order (qassoc_get (qb_facts block) 'source_export_order nil))
+		(define exports (if (nil? export_order) entries (map export_order (lambda (name)
+			(find entries (lambda (entry) (equal? (binding_entry_name entry) name)) nil)))))
+		(define fields (bind_query_fields (qb_fields block) scopes exports path all_strings 0))
+		(define validate_order_only (qassoc_get (qb_facts block) 'validate_order_only false))
 		(define bind_alias_first_expr (lambda (expr)
 			(bind_query_expr scopes (bind_output_alias_refs fields expr)
 				(binding_path path "output" 0) all_strings)))
-		(make_query_block
+		(define bound (make_query_block
 			(qb_schema block)
-			sources
+			(map sources source_without_binding_name)
 			fields
 			(bind_query_expr scopes (qb_where block) (binding_path path "where" 0) all_strings)
 			/* MariaDB resolves GROUP BY against input columns first, while
@@ -6219,13 +6733,111 @@ expressions are values in their own right and stay untouched. */
 			(if (qassoc_get (qb_facts block) (quote having_input_scope) false)
 				(bind_query_expr scopes (qb_having block) (binding_path path "having" 0) all_strings)
 				(bind_alias_first_expr (qb_having block)))
-			(bind_query_order (qb_order block) scopes
-				(if (empty_list? (qb_order block)) fields (order_value_fields fields)) true path all_strings 0)
+			(begin
+				(define order (bind_query_order (qb_order block) scopes
+					(if (empty_list? (qb_order block)) fields (order_value_fields fields)) true path all_strings 0))
+				/* A nested ORDER can be valid syntax without selecting a row
+				window. Bind its names and positions before discarding it. */
+				(if validate_order_only (begin
+					(define width (intdiv (count fields) 2))
+					(if (find order (lambda (item) (begin
+						(define position (car item))
+						(and (number? position) (or (<= position 0) (> position width))))) nil)
+						(neumann_fail "bind_query_names" "ORDER BY position is out of range") nil)) order))
 			(qb_limit block)
 			(qb_offset block)
-			(bind_query_fields (qb_hidden block) scopes (binding_path path "hidden" 0) all_strings 0)
-			(qb_stages block)
-			(qb_facts block)))))
+			(bind_query_fields (qb_hidden block) scopes entries (binding_path path "hidden" 0) all_strings 0)
+			(mapIndex (qb_stages block) (lambda (index stage)
+				(if (scoped_relational_program_stage? stage)
+					(bind_scoped_relational_program_stage stage scopes (binding_path path "iteration" index) all_strings) stage)))
+			(if (or validate_order_only (not (nil? export_order)) (not (empty_list? nullable_units)) (not (empty_list? operand_units)))
+				(filter (qb_facts block) (lambda (fact)
+					(not (has? (list 'validate_order_only 'nullable_join_scopes 'join_operand_scopes 'source_export_order) (car fact))))) (qb_facts block))))
+		/* One lexical source instance owns initialization even when physical
+		join execution re-enters its scan. This is query-local identity data,
+		not a canonical cache/helper name or a request capability. */
+		(define bound (if (query_block_invocation_scope? bound)
+			(append (slice bound 0 12) (qassoc_set (qb_facts bound) 'invocation_scope_identity path)) bound))
+		/* The binding-only directory distinguishes generated transparent
+		operands from ordinary derived aliases. It never enters query facts,
+		stored views, helper identities or physical execution. */
+		/* Every nested operand owns a lexical identity, even when several
+		groups preserve the same head alias. An enclosing export must never
+		shadow the child relation it reads. */
+		(car (reduce (mapIndex retained_units (lambda (index unit)
+			(list (binding_path path "operand" index) unit))) (lambda (state item)
+				(bind_join_operand (car state) entries (cadr item) (car item) all_strings (cadr state)))
+			(list bound '()))))))
+/* Transparent SQL operand aliases bind once in their original scope. The
+complete nullable input then becomes an ordinary logical producer whose
+export slots retain those columns without leaking the inner alias scope. */
+(define join_operand_source_aliases (lambda (src transparent)
+	(coalesceNil (get_assoc transparent (source_alias src) nil) (list (source_alias src)))))
+
+(define join_operand_source_has_nullable_input? (lambda (src)
+	(or (source_outer? src)
+		(if (query_block? (source_relation src))
+			(not (nil? (find (qb_sources (source_relation src)) join_operand_source_has_nullable_input? nil))) false))))
+
+/* A complete nullable operand may own dependent stages without becoming a
+row bag or a grouped result. Every stage-output leaf must resolve in that
+producer's own declaration catalog; nested producers keep their own catalog. */
+(define join_operand_source_supported? (lambda (src stages)
+	(if (or (source_is_base_table? src) (row_domain_relation? (source_relation src))
+		(union_block? (source_relation src))) true
+		(query_block_invocation_scope? (source_relation src)) true
+		(source_is_stage_output? src)
+		(not (nil? (stage_by_id stages (stage_output_relation_id (source_relation src)))))
+		(and (query_block? (source_relation src))
+			(begin
+				(define inner (source_relation src))
+				/* A FROM-less ungrouped producer owns at most one candidate.
+				Its WHERE still selects that candidate inside the operand reducer. */
+				(and (not (derived_block_needs_operator? inner))
+					(reduce (qb_sources inner) (lambda (valid member)
+						(and valid (join_operand_source_supported? member (query_block_stage_catalog inner)))) true)))))))
+
+(define bind_join_operand (lambda (block entries unit path all_strings transparent)
+	(match unit '(head children _left) (begin
+		(define names (cons head children))
+		(define members (map names (lambda (name)
+			(source_alias (binding_entry_source (find entries (lambda (entry)
+				(equal? (binding_entry_name entry) name)) nil))))))
+		(define sources (filter (qb_sources block) (lambda (src)
+			(reduce (join_operand_source_aliases src transparent) (lambda (found alias)
+				(or found (has? members alias))) false))))
+		(if (empty_list? sources)
+			(neumann_fail "bind_query_names" "joined operand has no complete native input") true)
+		(if (reduce sources (lambda (valid src)
+			(and valid (reduce (join_operand_source_aliases src transparent) (lambda (inside alias)
+				(and inside (has? members alias))) true))) true) true
+			(neumann_fail "bind_query_names" "joined operand boundaries overlap without nesting"))
+		/* Binding owns lexical membership. Operator eligibility belongs after
+		untangle_query, when grouped derived inputs have become group stages. */
+		(define first (car sources))
+		(define alias (binding_fresh_alias (nth all_strings 0) (concat "__join_operand:" path ":" head)))
+		(define exports (mapIndex sources (lambda (src_index src)
+			(map (binding_source_columns src) (lambda (column)
+				(list column (concat "__join:" src_index ":" column)))))))
+		(define fields (merge (mapIndex sources (lambda (src_index src)
+			(merge (map (nth exports src_index) (lambda (export)
+				(list (cadr export) (list 'get_column (source_alias src) false (car export) false)))))))))
+		(define rewrites (mapIndex sources (lambda (src_index src)
+			(list (source_alias src) (merge (map (nth exports src_index) (lambda (export)
+				(list (car export) (list 'get_column alias false (cadr export) false)))))))))
+		(define producer (make_query_block (qb_schema block)
+			(cons (list (source_alias first) (source_schema first) (source_relation first) false true
+				(source_declarations first)) (cdr sources)) fields true '() nil '() nil nil '() '() '()))
+		(define grouped (list alias (qb_schema block) producer (source_outer? first) (source_join_expr first) nil))
+		(define remaining (merge (map (qb_sources block) (lambda (src)
+			(if (equal? (source_alias src) (source_alias first)) (list grouped)
+				(contains? sources src) '() (list src))))))
+		(list (rewrite_derived_ref_chain rewrites
+			(make_query_block (qb_schema block) remaining (qb_fields block) (qb_where block)
+				(qb_group block) (qb_having block) (qb_order block) (qb_limit block) (qb_offset block)
+				(qb_hidden block) (qb_stages block) (qb_facts block)))
+			(set_assoc transparent alias (merge (map sources (lambda (source)
+				(join_operand_source_aliases source transparent))))))))))
 
 (define bind_query_branches (lambda (branches outer_scopes path all_strings index)
 	(match (coalesceNil branches '())
@@ -6259,8 +6871,10 @@ Only flattenable FROM relations share the latter two with their parent. */
 				normalized)))))
 
 (define bind_query_names (lambda (query outer_scopes)
-	(bind_query_names_at query outer_scopes "query"
-		(list (binding_collect_string_catalog query '())))))
+	(begin
+		(define query (normalize_query_ast query))
+		(bind_query_names_at query outer_scopes "query"
+			(list (binding_collect_string_catalog query '()))))))
 
 (define derived_star_ref? (lambda (alias expr)
 	(match expr
@@ -6279,11 +6893,33 @@ Only flattenable FROM relations share the latter two with their parent. */
 		(contains? (source_aliases
 			(if (query_block? (gs_input expr)) (qb_sources (gs_input expr))
 				(match (gs_input expr)
-					'(_alias _schema _relation _outer _join) (list (gs_input expr))
+					'(_alias _schema _relation _outer _join _declarations) (list (gs_input expr))
 					_ '()))) alias)
 		_ false)
 		expr
 		(match expr
+			((symbol quote) _literal) expr
+			((symbol query-block) database sources fields condition grouping having ordering limit offset hidden stages facts)
+			(make_query_block database
+				(map sources (lambda (src) (rewrite_derived_source alias projection src)))
+				(rewrite_derived_ref alias projection fields) (rewrite_derived_ref alias projection condition)
+				(rewrite_derived_ref alias projection grouping) (rewrite_derived_ref alias projection having)
+				(rewrite_derived_ref alias projection ordering) (rewrite_derived_ref alias projection limit)
+				(rewrite_derived_ref alias projection offset) (rewrite_derived_ref alias projection hidden)
+				(rewrite_derived_ref alias projection stages) (rewrite_derived_ref alias projection facts))
+			((symbol group-stage) id input domain keys aggregates having output ordering limit offset facts)
+			(make_group_stage id
+				(if (source_alias input) (rewrite_derived_source alias projection input)
+					(rewrite_derived_ref alias projection input))
+				(rewrite_derived_ref alias projection domain) (rewrite_derived_ref alias projection keys)
+				(rewrite_derived_ref alias projection aggregates) (rewrite_derived_ref alias projection having)
+				(rewrite_derived_ref alias projection output) (rewrite_derived_ref alias projection ordering)
+				(rewrite_derived_ref alias projection limit) (rewrite_derived_ref alias projection offset)
+				/* Consumers already address this stage's output columns. Closing a
+				caller coordinate over a derived projection changes executable
+				operands, not the published aggregate interface. */
+				(rewrite_derived_ref alias projection
+					(gs_facts (freeze_group_stage_aggregate_outputs expr))))
 			((symbol get_column) tblvar _tbl_ignorecase col col_ignorecase) (if (equal? tblvar alias)
 				(coalesceNil (field_expr_by_title projection col col_ignorecase) expr)
 				expr)
@@ -6294,6 +6930,13 @@ Only flattenable FROM relations share the latter two with their parent. */
 				(rewrite_derived_ref alias projection head)
 				(map tail (lambda (item) (rewrite_derived_ref alias projection item))))
 			_ expr))))
+
+/* Declaration payloads describe a relation; they are not expressions in the
+eliminated derived alias. Rewrite only executable relation/join positions. */
+(define rewrite_derived_source (lambda (alias projection src)
+	(source_with_join_expr
+		(source_with_relation src (rewrite_derived_ref alias projection (source_relation src)))
+		(rewrite_derived_ref alias projection (source_join_expr src)))))
 
 (define rewrite_derived_fields (lambda (alias projection fields)
 	(match (coalesceNil fields '())
@@ -6314,7 +6957,7 @@ Only flattenable FROM relations share the latter two with their parent. */
 		(source_schema src)
 		(source_relation src)
 		(source_outer? src)
-		(rewrite_derived_ref alias projection (source_join_expr src)))))
+		(rewrite_derived_ref alias projection (source_join_expr src)) (source_declarations src))))
 
 (define rewrite_sources_join_for_derived (lambda (alias projection sources)
 	(map (coalesceNil sources '()) (lambda (src)
@@ -6327,6 +6970,12 @@ Only flattenable FROM relations share the latter two with their parent. */
 (define requalify_source_join_exprs (lambda (old_alias new_alias sources)
 	(map (coalesceNil sources '()) (lambda (src)
 		(requalify_source_join_expr old_alias new_alias src)))))
+
+/* Predicates already produced inside a derived input refer to its native
+column namespace. Close only later predicates which consume this projection;
+reapplying the export mapping to its own input would overwrite those columns. */
+(define rewrite_derived_where_terms (lambda (alias projection terms)
+	(map terms (lambda (term) (rewrite_derived_ref alias projection term)))))
 
 (define rewrite_derived_ref_chain (lambda (rewrites expr)
 	(reduce (coalesceNil rewrites '()) (lambda (acc rewrite)
@@ -6406,17 +7055,22 @@ that actually owns the title consumes the reference. */
 			(map_assoc (coalesceNil fields '()) (lambda (_title expr)
 				(list (quote if) (list (quote nil?) presence) nil expr)))))))
 
-/* A nullable output is not a row-presence witness. Lateral projections may
-even contain only constants. Use the existing non-null primary key when
-available, including when that key is not exported by the derived relation. */
-(define derived_projection_presence (lambda (src alias fields lateral)
-	(begin
-		(define keys (source_primary_key_columns src))
-		(match keys
-			(cons key _rest) (list (quote get_column) alias false key false)
-			_ (if lateral
-				(neumann_fail "untangle_query" "lateral outer projection needs a non-null row-presence key")
-				(first_projection_expr fields))))))
+/* NULL extension needs a declaration-proven row witness. Neither a nullable
+value nor a constant projection distinguishes a real row from a missing one.
+When no witness exists, the caller keeps the complete relational operand. */
+(define derived_projection_presence (lambda (src alias lateral) (begin
+	(define column (if (source_outer? src) nil
+		(find (source_columns src) (lambda (column) (not (column "Null"))) nil)))
+	(if column (list 'get_column alias false (column "Field") false)
+		lateral (neumann_fail "untangle_query" "lateral outer projection needs a non-null row-presence key")
+		nil))))
+(define derived_projection_requires_operand? (lambda (src inner lateral) (begin
+	(define sources (qb_sources inner))
+	(if (and (source_outer? src) (not (empty_list? sources)))
+		(if (or (equal? (count sources) 1) (scalar_source_shape_supported? sources))
+			(if (derived_block_needs_operator? inner) false
+				(nil? (derived_projection_presence (car sources) (source_alias src) lateral))) false)
+		false))))
 
 (define literal_true? (lambda (expr)
 	(match expr
@@ -6441,7 +7095,7 @@ available, including when that key is not exported by the derived relation. */
 	(combine_where_terms (list a b) true)))
 
 (define derived_block_needs_operator? (lambda (block)
-	(or (not (empty_list? (qb_group block)))
+	(or (query_block_invocation_scope? block) (not (empty_list? (qb_group block)))
 		(or (not (nil? (qb_having block)))
 			(or (not (nil? (qb_limit block)))
 				(or (not (nil? (qb_offset block)))
@@ -6453,7 +7107,7 @@ available, including when that key is not exported by the derived relation. */
 		(source_schema src)
 		(normalize_query_ast (source_relation src))
 		(source_outer? src)
-		(source_join_expr src))))
+		(source_join_expr src) (source_declarations src))))
 
 /* Closed scalar whitelist: volatile/UDF evaluation is not a reusable
 contribution. More expression families require an explicit purity contract. */
@@ -6499,20 +7153,22 @@ bindings are stable here, unlike mutable SQL session variables. */
 	(and (reduce (query_expr_session_reads expr) (lambda (valid read)
 		(and valid (match read ((symbol session) key)
 			(and (string? key) (regexp_test key "^v[0-9]+$")) _ false))) true)
-		(contribution_pure_expr? (fold_single_literal_expr '() (sql_type_lower_annotations expr))))))
+		(contribution_pure_expr? (fold_single_literal_expr '() (sql_type_lower_annotations '() expr))))))
 
-(define flatten_constant_derived_join (lambda (src inner tail) (begin
-	(if (and (literal_true? (coalesceNil (qb_where inner) true))
+(define constant_derived_join_substitution? (lambda (src inner)
+	(and (literal_true? (coalesceNil (qb_where inner) true))
 		(empty_list? (qb_order inner)) (empty_list? (qb_hidden inner))
 		(empty_list? (qb_stages inner))
 		(reduce (extract_assoc (qb_fields inner) (lambda (_name expr) expr))
-			(lambda (valid expr) (and valid (constant_derived_projection_expr? expr))) true))
-		true (neumann_fail "untangle_query" "zero-source derived JOIN requires a literal or positional-parameter projection"))
+			(lambda (valid expr) (and valid (constant_derived_projection_expr? expr))) true)
+		(or (not (source_outer? src))
+			(constant_derived_join_predicate? (coalesceNil
+				(rewrite_derived_ref (source_alias src) (qb_fields inner) (source_join_expr src)) true))))))
+
+(define flatten_constant_derived_join (lambda (src inner tail) (begin
 	(define alias (source_alias src))
 	(define projection (qb_fields inner))
 	(define matched (coalesceNil (rewrite_derived_ref alias projection (source_join_expr src)) true))
-	(if (and (source_outer? src) (not (constant_derived_join_predicate? matched)))
-		(neumann_fail "untangle_query" "constant derived LEFT JOIN needs a repeatable ON predicate") true)
 	/* The right row exists independently of its nullable payload. ON selects
 	that one candidate; a LEFT JOIN keeps every left row and NULL-extends only
 	its exported values. No filter may cross that outer-join boundary. */
@@ -6522,7 +7178,9 @@ bindings are stable here, unlike mutable SQL session variables. */
 	(list
 		(rewrite_sources_join_for_derived alias effective_projection (nth tail 0))
 		(prepend_derived_rewrite alias effective_projection (nth tail 1))
-		(if (source_outer? src) (nth tail 2) (cons matched (nth tail 2)))
+		(if (source_outer? src)
+			(rewrite_derived_where_terms alias effective_projection (nth tail 2))
+			(cons matched (rewrite_derived_where_terms alias effective_projection (nth tail 2))))
 		(nth tail 3)))))
 
 (define flatten_source_list (lambda (sources ctx preceding)
@@ -6545,16 +7203,28 @@ bindings are stable here, unlike mutable SQL session variables. */
 			(define tail_wheres (nth tail 2))
 			(define tail_stages (nth tail 3))
 			(if (or (stage_output_relation? relation)
-				(or (string? relation) (or (table_function_relation? relation) (row_domain_relation? relation))))
+				(or (or (string? relation) (local_relation_reference? relation)) (or (table_function_relation? relation) (row_domain_relation? relation))))
 				(begin
 					(list
-						(cons (list (source_alias src) (source_schema src) relation (source_outer? src) (source_join_expr src))
+						(cons (list (source_alias src) (source_schema src) relation (source_outer? src) (source_join_expr src)
+							(if (or (string? relation) (local_relation_reference? relation)) (source_declarations src) nil))
 							tail_sources)
 						tail_rewrites
 						tail_wheres
 						tail_stages))
 				(if (union_block? relation)
-					(neumann_fail "untangle_query" "FROM union-block needs union logical lowering before source flattening")
+					(begin
+						(if (and (source_lateral? src)
+							(or (not (empty_list? (union_order relation)))
+								(not (nil? (union_limit relation))) (not (nil? (union_offset relation)))))
+							(neumann_fail "untangle_query" "lateral UNION ORDER/LIMIT needs partitioned domain lowering") true)
+						(define producer_ctx (if (source_lateral? src)
+							(make_uctx ctx (list (list (quote outer-sources)
+								(merge (list preceding (uctx_get ctx (quote outer-sources) '())))))) ctx))
+						(define producer (untangle_union_block relation producer_ctx))
+						(define bound (source_with_declarations (source_with_relation src producer)
+							(union_source_declarations producer)))
+						(list (cons bound tail_sources) tail_rewrites tail_wheres tail_stages))
 					(begin
 						(define alias (source_alias src))
 						(define lateral (source_lateral? src))
@@ -6566,7 +7236,33 @@ bindings are stable here, unlike mutable SQL session variables. */
 							(neumann_fail "untangle_query" "lateral ORDER/LIMIT or windows need partitioned domain lowering") true)
 						(define inner (untangle_query relation (if lateral
 							(make_uctx ctx (list (list (quote outer-sources) lateral_sources))) ctx)))
-						(if (derived_block_needs_operator? inner)
+						(if (union_block? inner)
+							/* Untangling a query block may lift its embedded UNION.
+							Dispatch on that returned relation before reading QB slots;
+							the complete set still owns its output and join boundary. */
+							(begin
+								(if (and lateral
+									(or (not (empty_list? (union_order inner)))
+										(not (nil? (union_limit inner))) (not (nil? (union_offset inner)))))
+									(neumann_fail "untangle_query" "lateral UNION ORDER/LIMIT needs partitioned domain lowering") true)
+								(define producer (if lateral
+									(make_union_block (union_mode inner) (union_branches inner)
+										(union_order inner) (union_limit inner) (union_offset inner)
+										(qassoc_set (union_facts inner) (quote lateral) true)) inner))
+								(list (cons (source_with_declarations (source_with_relation src producer)
+									(union_source_declarations producer)) tail_sources)
+									tail_rewrites tail_wheres tail_stages))
+							(query_block_invocation_scope? inner)
+							/* Local declarations and initialization must remain in this
+							producer's lexical scope, even for a simple projection. */
+							(list (cons (source_with_relation src inner) tail_sources)
+								tail_rewrites tail_wheres tail_stages)
+							(derived_projection_requires_operand? src inner lateral)
+							/* Native operand matching distinguishes real all-NULL rows
+							from a missing row, without testing an arbitrary SQL value. */
+							(list (cons (source_with_relation src inner) tail_sources)
+								tail_rewrites tail_wheres tail_stages)
+							(derived_block_needs_operator? inner)
 							(if (grouped_derived_relation? inner)
 								(begin
 									(define staged (if lateral
@@ -6577,8 +7273,16 @@ bindings are stable here, unlike mutable SQL session variables. */
 											(nth staged 0)
 											(rewrite_sources_join_for_derived alias (nth staged 1) tail_sources)))
 										(prepend_derived_rewrite alias (nth staged 1) tail_rewrites)
-										tail_wheres
+										(rewrite_derived_where_terms alias (nth staged 1) tail_wheres)
 										(cons (nth staged 2) (merge (list (qb_stages inner) tail_stages)))))
+								(if (and (ordered_limited_derived_supported? inner src)
+									(empty_list? (qb_stages inner)))
+									/* A complete ordered producer owns its invocation bounds and
+									selection. Keep that boundary for native operand streaming:
+									substituting row-number predicates would repeat volatile
+									bounds or move a parent's predicate below its window. */
+									(list (cons (source_with_relation src inner) tail_sources)
+										tail_rewrites tail_wheres tail_stages)
 								(if (ordered_limited_derived_supported? inner src)
 									(begin
 										(define staged (make_ordered_limited_derived_rewrite src alias inner))
@@ -6586,7 +7290,7 @@ bindings are stable here, unlike mutable SQL session variables. */
 										(list
 											(merge (list (nth staged 0) tail_sources))
 											(prepend_derived_rewrite alias (nth staged 1) tail_rewrites)
-											(cons (nth staged 2) tail_wheres)
+											(cons (nth staged 2) (rewrite_derived_where_terms alias (nth staged 1) tail_wheres))
 											(cons (nth staged 3) (merge (list requalified_inner_stages tail_stages)))))
 									(if (or (source_outer? src) (not (nil? (source_join_expr src))))
 										(neumann_fail "untangle_query" "derived relation stage with outer join needs relation-unit lowering")
@@ -6595,18 +7299,18 @@ bindings are stable here, unlike mutable SQL session variables. */
 											(list
 												(cons (nth staged 0) tail_sources)
 												(prepend_derived_rewrite alias (nth staged 1) tail_rewrites)
-												tail_wheres
-												(cons (nth staged 2) (merge (list (qb_stages inner) tail_stages))))))))
+												(rewrite_derived_where_terms alias (nth staged 1) tail_wheres)
+												(cons (nth staged 2) (merge (list (qb_stages inner) tail_stages)))))))))
 							(begin
 								(define inner_sources (coalesceNil (qb_sources inner) '()))
 								(if (empty_list? inner_sources)
-									(if (or (source_outer? src) (not (nil? (source_join_expr src))))
+									(if (constant_derived_join_substitution? src inner)
 										(flatten_constant_derived_join src inner tail)
-										(list
-											(rewrite_sources_join_for_derived alias (qb_fields inner) tail_sources)
-											(prepend_derived_rewrite alias (qb_fields inner) tail_rewrites)
-											(cons (qb_where inner) tail_wheres)
-											(merge (list (qb_stages inner) tail_stages))))
+										/* A FROM-less SELECT owns one candidate before WHERE.
+										Keep its computed projection as a relational operand:
+										substitution could repeat it or bypass its selection. */
+										(list (cons (source_with_relation src inner) tail_sources)
+											tail_rewrites tail_wheres tail_stages))
 									(if (equal? (count inner_sources) 1)
 										(begin
 											(define only_inner (car inner_sources))
@@ -6617,7 +7321,7 @@ bindings are stable here, unlike mutable SQL session variables. */
 												(requalify_single_source_fields inner_alias alias (qb_fields inner))))
 											(define effective_projection (if (source_outer? src)
 												(null_extend_projection_fields projection
-													(derived_projection_presence only_inner alias projection lateral))
+													(derived_projection_presence only_inner alias lateral))
 												projection))
 											(define inner_where (requalify_single_source_expr inner_alias alias
 												(combine_where (qb_where inner) (source_join_expr only_inner))))
@@ -6638,12 +7342,14 @@ bindings are stable here, unlike mutable SQL session variables. */
 														(source_schema only_inner)
 														(rebind_derived_stage_expr stage_rebinding (source_relation only_inner))
 														(source_outer? src)
-														joined_condition)
+														joined_condition (source_declarations only_inner))
 													(rewrite_sources_join_for_derived alias effective_projection tail_sources))
 												(prepend_derived_rewrite alias effective_projection tail_rewrites)
-												(if (nil? parent_condition) tail_wheres (cons parent_condition tail_wheres))
+												(if (nil? parent_condition)
+													(rewrite_derived_where_terms alias effective_projection tail_wheres)
+													(cons parent_condition (rewrite_derived_where_terms alias effective_projection tail_wheres)))
 												(merge (list (nth stage_rebinding 0) tail_stages))))
-										(if (or (source_outer? src) (not (nil? (source_join_expr src))))
+										(if (source_outer? src)
 											(if (scalar_source_shape_supported? inner_sources)
 												(begin
 													(define only_inner (car inner_sources))
@@ -6654,7 +7360,7 @@ bindings are stable here, unlike mutable SQL session variables. */
 														(requalify_single_source_fields inner_alias alias (qb_fields inner))))
 													(define effective_projection (if (source_outer? src)
 														(null_extend_projection_fields projection
-															(derived_projection_presence only_inner alias projection lateral))
+															(derived_projection_presence only_inner alias lateral))
 														projection))
 													(define inner_where (requalify_single_source_expr inner_alias alias
 														(combine_where (qb_where inner) (source_join_expr only_inner))))
@@ -6667,7 +7373,7 @@ bindings are stable here, unlike mutable SQL session variables. */
 														(source_schema only_inner)
 														(rebind_derived_stage_expr stage_rebinding (source_relation only_inner))
 														(source_outer? src)
-														joined_condition))
+														joined_condition (source_declarations only_inner)))
 													(define derived_stage_sources (rebind_derived_stage_sources stage_rebinding
 														(requalify_source_join_exprs inner_alias alias (cdr inner_sources))))
 													(list
@@ -6676,13 +7382,23 @@ bindings are stable here, unlike mutable SQL session variables. */
 															derived_stage_sources
 															(rewrite_sources_join_for_derived alias effective_projection tail_sources)))
 														(prepend_derived_rewrite alias effective_projection tail_rewrites)
-														tail_wheres
+														(rewrite_derived_where_terms alias effective_projection tail_wheres)
 														(merge (list (nth stage_rebinding 0) tail_stages))))
-												(neumann_fail "untangle_query" "multi-source derived JOIN needs relation-unit lowering"))
+												/* Preserve either the enclosing null boundary or an
+												internal one; moving this INNER ON into an internal
+												LEFT ON would change complete-operand filtering. */
+												(if (reduce inner_sources (lambda (valid member)
+														(and valid (join_operand_source_supported? member (query_block_stage_catalog inner)))) true)
+													(list (cons (source_with_relation src inner) tail_sources)
+														tail_rewrites tail_wheres tail_stages)
+													(neumann_fail "untangle_query" "joined operand streaming requires supported native or bounded relation inputs")))
 											(list
 												(merge (list inner_sources (rewrite_sources_join_for_derived alias (qb_fields inner) tail_sources)))
 												(prepend_derived_rewrite alias (qb_fields inner) tail_rewrites)
-												(cons (qb_where inner) tail_wheres)
+												/* INNER ON filters the completed derived operand. */
+												(cons (combine_where (qb_where inner)
+													(rewrite_derived_ref alias (qb_fields inner) (source_join_expr src)))
+													(rewrite_derived_where_terms alias (qb_fields inner) tail_wheres))
 												(merge (list (qb_stages inner) tail_stages)))))))))
 ))))))
 
@@ -6783,6 +7499,7 @@ Checked here at the AST level instead, once per branch. */
 
 (define literal_only_union_block? (lambda (relation)
 	(and (union_block? relation)
+		(empty_list? (union_order relation)) (nil? (union_limit relation)) (nil? (union_offset relation))
 		(reduce (coalesceNil (union_branches relation) '()) (lambda (all_literal branch)
 			(and all_literal (begin
 				(define normalized (normalize_query_ast branch))
@@ -6839,7 +7556,7 @@ the base case. */
 		/* All values are already known literals, so UNION (as opposed to UNION
 		ALL) can dedupe right here at compile time instead of needing any
 		runtime distinct machinery. */
-		(define deduped_rows (if (equal? (union_mode relation) (quote distinct))
+		(define deduped_rows (if (equal? (canonical_union_mode (union_mode relation)) (quote union_distinct))
 			(literal_union_dedupe_rows value_rows) value_rows))
 		(list (quote literal-rows) columns
 			(map deduped_rows (lambda (values) (literal_rows_assoc_row columns values)))))))
@@ -6868,7 +7585,11 @@ the base case. */
 			(begin
 				(define relation (normalize_query_ast (source_relation src)))
 				(if (and (union_block? relation) (not (literal_only_union_block? relation))
-					(and (not (source_outer? src)) (nil? (source_join_expr src))))
+					(and (not (source_outer? src))
+						/* An inner join distributes over UNION ALL with its ON
+						predicate intact. DISTINCT needs its own input boundary;
+						the nullable side of an outer join cannot distribute. */
+						(or (nil? (source_join_expr src)) (equal? (union_mode relation) (quote all)))))
 					src
 					nil))))
 		nil)))
@@ -6954,9 +7675,9 @@ can be represented by the same reducer. */
 				(define output_alias (concat "__union_group:" (gs_id stage)))
 				(define replace_expr (lambda (expr)
 					(replace_group_expr input alias output_alias
-						(gs_keys stage) (group_key_cols (gs_keys stage)) (gs_aggregates stage) expr)))
+						(gs_keys stage) (group_key_cols (gs_keys stage)) stage expr)))
 				(make_query_block (qb_schema block)
-					(list (list output_alias (qb_schema block) (make_stage_output_relation (gs_id stage)) false nil))
+					(list (list output_alias (qb_schema block) (make_stage_output_relation (gs_id stage)) false nil nil))
 					(map_assoc (qb_fields block) (lambda (_title expr) (replace_expr expr)))
 					(replace_expr (coalesceNil (qb_having block) true))
 					'() nil
@@ -6971,6 +7692,7 @@ can be represented by the same reducer. */
 	(begin
 		(define title (union_count_projection_title (qb_fields block)))
 		(if (or (nil? title)
+			(not (equal? (canonical_union_mode (union_mode (source_relation src))) 'all))
 			(or (not (equal? (coalesceNil (qb_where block) true) true))
 				(or (not (empty_list? (qb_order block)))
 					(or (not (nil? (qb_limit block)))
@@ -7024,60 +7746,116 @@ names in projections, predicates, and correlated subqueries. */
 	(match (coalesceNil (union_branches relation) '())
 		(cons first_branch _rest) (begin
 			(define normalized (normalize_query_ast first_branch))
-			(if (query_block? normalized)
+			(if (or (query_block? normalized) (union_block? normalized))
 				(logical_relation_fields normalized)
-				(neumann_fail "untangle_query" "FROM UNION wrapper expects query-block branches")))
+				(neumann_fail "untangle_query" "FROM UNION wrapper expects canonical relation branches")))
 		_ '())))
 
-(define wrap_union_branch_query (lambda (outer alias branch canonical_fields)
+(define wrap_union_branch_query (lambda (outer source branch canonical_fields)
 	(begin
 		(define inner (logical_union_align_branch branch canonical_fields))
-		(define projection (qb_fields inner))
-		(make_query_block
-			(qb_schema inner)
-			(qb_sources inner)
-			(rewrite_derived_fields alias projection (qb_fields outer))
-			(combine_where (qb_where inner) (rewrite_derived_ref alias projection (qb_where outer)))
-			(qb_group inner)
-			(qb_having inner)
-			'()
-			(qb_limit inner)
-			(qb_offset inner)
-			(qb_hidden inner)
-			(qb_stages inner)
-			(qb_facts inner)))))
+		/* The branch's window selects its own input rows before the enclosing
+		   projection and filter. Let ordinary derived-relation lowering keep
+		   that boundary instead of fusing the two query blocks. */
+		(if (or (not (nil? (qb_limit inner))) (not (nil? (qb_offset inner))))
+			(make_query_block (qb_schema outer) (list (source_with_relation source inner))
+				(qb_fields outer) (qb_where outer) (qb_group outer) (qb_having outer)
+				'() nil nil (qb_hidden outer) (qb_stages outer) (qb_facts outer))
+			(begin
+				(define alias (source_alias source))
+				(define projection (qb_fields inner))
+				(make_query_block (qb_schema inner) (qb_sources inner)
+					(rewrite_derived_fields alias projection (qb_fields outer))
+					(combine_where (qb_where inner) (rewrite_derived_ref alias projection (qb_where outer)))
+					(qb_group inner) (qb_having inner) '() nil nil
+					(qb_hidden inner) (qb_stages inner) (qb_facts inner)))))))
 
-/* Name binding has already expanded output aliases to their expressions.
-When distributing a projection over UNION, restore references to the new
-output slots; the UNION order belongs to that projection, not the old source. */
-(define union_wrapper_output_order (lambda (block)
-	(map (coalesceNil (qb_order block) '()) (lambda (item) (match item
-		'(expr direction) (begin
-			(define title (find (extract_assoc (qb_fields block) (lambda (title projected)
-				(if (expression_equal? (sql_type_lower_annotations expr)
-					(sql_type_lower_annotations projected)) title nil))) (lambda (title) (not (nil? title))) nil))
-			(list (if (nil? title) expr (list (quote get_column) nil false title false)) direction))
-		_ item)))))
+/* Name binding has expanded output aliases to expressions. Retain actual
+sort inputs as hidden branch exports when the projection does not expose them.
+The root UNION owns the complete bag's ORDER/window; only its final sink drops
+these syntax-sized extra fields. Compare original syntax before lowering type
+contracts, whose frontend compilers may create fresh equivalent procedures. */
+(define union_wrapper_order_title (lambda (fields expression)
+	(find (extract_assoc fields (lambda (title projected)
+		(if (or (expression_equal? expression projected)
+			(expression_equal? (sql_type_lower_annotations '() expression)
+				(sql_type_lower_annotations '() projected))) title nil)))
+		(lambda (title) (not (nil? title))) nil)))
+(define union_wrapper_hidden_title (lambda (fields index) (begin
+	(define title (concat "__union_order:" index))
+	(if (find (extract_assoc fields (lambda (name _expression) name))
+		(lambda (name) (equal?? name title)) nil)
+		(union_wrapper_hidden_title fields (+ index 1)) title))))
+/* Resolve aliases/positions against SQL values, not presentation formatters.
+UNION owns a shared merge relation, so its type compiler selects a comparator
+from the declared contract even for a direct input column. */
+(define union_wrapper_projection (lambda (block) (begin
+	(define fields (expand_query_block_fields (qb_sources block) (qb_fields block)))
+	(define values (order_value_fields fields))
+	(reduce (coalesceNil (qb_order block) '()) (lambda (state item) (match item
+		'(original direction) (begin
+			(if (and (number? original) (not (and (> original 0)
+				(<= original (intdiv (count fields) 2)) (equal? original (floor original)))))
+				(neumann_fail "untangle_query" "ORDER BY position is outside the UNION output") true)
+			(define expression (if (number? original) (nth values (- (* original 2) 1)) original))
+			(define ordering (sql_type_order_item (qb_sources block) (list expression direction) false))
+			(define title (union_wrapper_order_title (car state) expression))
+			(define hidden (nil? title))
+			(define title (if hidden (union_wrapper_hidden_title (car state)
+				(intdiv (count (car state)) 2)) title))
+			(list (if hidden (merge (list (car state) (list title expression))) (car state))
+				(append (cadr state) (list (list (quote get_column) nil false title false) (cadr ordering)))
+				(if hidden (append (nth state 2) title) (nth state 2))))
+		_ (list (car state) (append (cadr state) item) (nth state 2))))
+		(list fields '() '())))))
+
+(define union_wrapper_with_fields (lambda (block fields)
+	(make_query_block (qb_schema block) (qb_sources block) fields
+		(qb_where block) (qb_group block) (qb_having block) (qb_order block)
+		(qb_limit block) (qb_offset block) (qb_hidden block) (qb_stages block) (qb_facts block))))
+(define union_wrapper_order_facts (lambda (relation projection) (begin
+	(if (empty_list? (union_hidden_output relation)) true
+		(neumann_fail "untangle_query" "nested hidden UNION ordering requires its own input boundary"))
+	(define hidden (nth projection 2))
+	/* Hidden sorts are introduced only for an unbounded UNION ALL input.
+	A branch/input window must retain its separate relation-unit boundary. */
+	(if (and (not (empty_list? hidden))
+		(or (not (empty_list? (union_order relation))) (not (nil? (union_limit relation)))
+			(not (nil? (union_offset relation)))
+			(reduce (union_branches relation) (lambda (bounded branch)
+				(or bounded (and (query_block? branch)
+					(or (not (empty_list? (qb_order branch))) (not (nil? (qb_limit branch)))
+						(not (nil? (qb_offset branch))))))) false)))
+		(neumann_fail "untangle_query" "hidden UNION ordering over a bounded input is not supported") true)
+	(if (empty_list? hidden) (union_facts relation)
+		(qassoc_set (union_facts relation) (quote hidden-output) hidden)))))
 
 (define rewrite_query_block_over_union_source (lambda (block src)
 	(begin
-		(if (not (union_wrapper_rewrite_allowed? block))
+		(if (or (not (union_wrapper_rewrite_allowed? block))
+			(not (equal? (canonical_union_mode (union_mode (source_relation src))) 'all))
+			(not (empty_list? (union_order (source_relation src))))
+			(not (nil? (union_limit (source_relation src))))
+			(not (nil? (union_offset (source_relation src)))))
 			nil
 			(begin
 				(define relation (normalize_query_ast (source_relation src)))
 				(define canonical_fields (union_canonical_fields relation))
+				(define all (equal? (union_mode relation) (quote all)))
+				(define projection (if all (union_wrapper_projection block) nil))
+				(define wrapper (if all (union_wrapper_with_fields block (car projection)) block))
 				(make_union_block
 					(union_mode relation)
 					(map (union_branches relation) (lambda (branch)
-						(wrap_union_branch_query block (source_alias src) branch canonical_fields)))
+						(wrap_union_branch_query wrapper src branch canonical_fields)))
 					(if (empty_list? (qb_order block)) (union_order relation)
-						(equal? (union_mode relation) (quote all)) (union_wrapper_output_order block)
+						all (cadr projection)
 						/* DISTINCT lowering does not yet preserve these computed output
 						order slots. Retain its explicit unsupported-shape rejection. */
 						(qb_order block))
 					(coalesceNil (qb_limit block) (union_limit relation))
 					(coalesceNil (qb_offset block) (union_offset relation))
-					(union_facts relation)))))))
+					(if all (union_wrapper_order_facts relation projection) (union_facts relation))))))))
 
 (define replace_union_source_branch (lambda (sources union_src branch)
 	(map (coalesceNil sources '()) (lambda (src)
@@ -7086,40 +7864,86 @@ output slots; the UNION order belongs to that projection, not the old source. */
 			src)))))
 
 (define wrap_embedded_union_branch_query (lambda (outer union_src branch canonical_fields)
-	(make_query_block
-		(qb_schema outer)
-		(replace_union_source_branch (qb_sources outer) union_src
-			(logical_union_align_branch branch canonical_fields))
-		(qb_fields outer)
-		(qb_where outer)
-		(qb_group outer)
-		(qb_having outer)
-		(qb_order outer)
-		(qb_limit outer)
-		(qb_offset outer)
-		(qb_hidden outer)
-		(qb_stages outer)
-		(qb_facts outer))))
+	(begin
+		(define all (equal? (union_mode (source_relation union_src)) (quote all)))
+		(make_query_block
+			(qb_schema outer)
+			(replace_union_source_branch (qb_sources outer) union_src
+				(logical_union_align_branch branch canonical_fields))
+			(qb_fields outer)
+			(qb_where outer)
+			(qb_group outer)
+			(qb_having outer)
+			(if all '() (qb_order outer))
+			(if all nil (qb_limit outer))
+			(if all nil (qb_offset outer))
+			(qb_hidden outer)
+			(qb_stages outer)
+			(qb_facts outer)))))
 
 (define rewrite_query_block_over_embedded_union_source (lambda (block src)
 	(begin
-		(if (not (union_wrapper_rewrite_allowed? block))
+		(if (or (not (union_wrapper_rewrite_allowed? block))
+			(not (equal? (canonical_union_mode (union_mode (source_relation src))) 'all)))
 			nil
 			(begin
 				(define relation (normalize_query_ast (source_relation src)))
 				(define canonical_fields (union_canonical_fields relation))
-				(make_union_block
-					(union_mode relation)
-					(map (union_branches relation) (lambda (branch)
-						(wrap_embedded_union_branch_query block src branch canonical_fields)))
-					(union_order relation)
-					(union_limit relation)
-					(union_offset relation)
-					(union_facts relation)))))))
+				(define all (equal? (union_mode relation) (quote all)))
+				(define projection (if all (union_wrapper_projection block) nil))
+				(define wrapper (if all (union_wrapper_with_fields block (car projection)) block))
+				/* The inner input window precedes the join and requires a
+				relation-unit operator. The enclosing window belongs once to the
+				complete joined bag, never to its distributed branches. */
+				(if (and all (or (not (empty_list? (union_order relation)))
+					(not (nil? (union_limit relation))) (not (nil? (union_offset relation))))) nil
+					(make_union_block
+						(union_mode relation)
+						(map (union_branches relation) (lambda (branch)
+							(wrap_embedded_union_branch_query wrapper src branch canonical_fields)))
+						(if all (cadr projection) (union_order relation))
+						(if all (qb_limit block) (union_limit relation))
+						(if all (qb_offset block) (union_offset relation))
+						(if all (union_wrapper_order_facts relation projection) (union_facts relation)))))))))
+
+/* Projection/filter wrappers over a derived UNION are the same relational
+rewrite at every nesting depth. Lift those wrappers before the source flattener
+expects ordinary query blocks; aggregation keeps its existing whole-bag owner. */
+(define normalize_derived_union_projections (lambda (node)
+	(if (union_block? node)
+		(begin
+			(define mode (canonical_union_mode (union_mode node)))
+			(define normalized (make_union_block mode
+				(flatten_untangled_union_branches mode
+					(map (union_branches node) normalize_derived_union_projections))
+				(union_order node) (union_limit node) (union_offset node) (union_facts node)))
+			/* Set mode and its complete visible tuple remain a logical UNION
+			boundary. Native duplicate elimination belongs to physical lowering;
+			membership and later rewrites must still see these branch producers. */
+			normalized)
+		(if (not (query_block? node)) node (begin
+			(define block (make_query_block (qb_schema node)
+				(map (qb_sources node) (lambda (source)
+					(source_with_relation source (normalize_derived_union_projections (source_relation source)))))
+				(qb_fields node) (qb_where node) (qb_group node) (qb_having node) (qb_order node)
+				(qb_limit node) (qb_offset node) (qb_hidden node) (qb_stages node) (qb_facts node)))
+			(define union_source (single_union_source block))
+			(if union_source (begin
+				(define relation (source_relation union_source))
+				/* A window belongs to its input bag. It cannot move through a
+				parent filter/projection without a separate relation-unit operator. */
+				(if (and (empty_list? (qb_order block)) (nil? (qb_limit block)) (nil? (qb_offset block))
+					(empty_list? (union_order relation)) (nil? (union_limit relation)) (nil? (union_offset relation)))
+					(coalesceNil (rewrite_query_block_over_union_source block union_source) block) block)) block))))))
 
 (define untangle_query_block (lambda (raw_block ctx)
 	(begin
-		(define block (normalize_group_representatives raw_block))
+		(define block (normalize_group_representatives
+			(make_query_block (qb_schema raw_block)
+				(map (qb_sources raw_block) (lambda (source)
+					(source_with_relation source (normalize_derived_union_projections (source_relation source)))))
+				(qb_fields raw_block) (qb_where raw_block) (qb_group raw_block) (qb_having raw_block) (qb_order raw_block)
+				(qb_limit raw_block) (qb_offset raw_block) (qb_hidden raw_block) (qb_stages raw_block) (qb_facts raw_block))))
 		(define child_ctx (make_uctx ctx
 			(list
 				(list (quote compile-budget-ms) 1000)
@@ -7175,10 +7999,12 @@ output slots; the UNION order belongs to that projection, not the old source. */
 									'()))
 								(define literal_bindings (map literal_sources single_literal_source_binding))
 								(define flattened_source_list (map
-									(if (empty_list? (qb_stages block))
-										(filter raw_flattened_source_list (lambda (src)
-											(not (single_literal_cross_source? src))))
-										raw_flattened_source_list)
+									(group_input_unit_sources block
+										(if (empty_list? (qb_stages block))
+											(filter raw_flattened_source_list (lambda (src)
+												(not (single_literal_cross_source? src))))
+											raw_flattened_source_list)
+										raw_flattened_source_list child_ctx)
 									(lambda (src) (apply_single_literal_source_join literal_bindings src))))
 								(define rewrites (nth flattened_sources 1))
 								(define inherited_literal_rewrites (filter
@@ -7188,7 +8014,10 @@ output slots; the UNION order belongs to that projection, not the old source. */
 									(filter rewrites literal_derived_rewrite?) inherited_literal_rewrites)))
 								(define fold_literal_rewrites (not (empty_list? carried_literal_rewrites)))
 								(define active_rewrites (merge (list rewrites inherited_literal_rewrites)))
-								(define source_where_terms (rewrite_derived_ref_chain active_rewrites (nth flattened_sources 2)))
+								/* Flattening already closes local source predicates. Their native
+								namespace can share the eliminated SQL alias; replaying its export
+								projection here would replace input columns with output values. */
+								(define source_where_terms (rewrite_derived_ref_chain inherited_literal_rewrites (nth flattened_sources 2)))
 								/* A later lateral stage can consume a preceding derived
 								projection. Apply the same closure to its domain, lookup keys,
 								predicates and metadata, not just the enclosing SELECT fields. */
@@ -7294,11 +8123,12 @@ output slots; the UNION order belongs to that projection, not the old source. */
 
 (define flattenable_nested_union? (lambda (outer_mode branch)
 	(and (union_block? branch)
-		(and (empty_list? (union_order branch))
-			(and (nil? (union_limit branch))
-				(and (nil? (union_offset branch))
-					(or (equal? outer_mode (quote union_distinct))
-						(equal? (canonical_union_mode (union_mode branch)) (quote all)))))))))
+		(and (empty_list? (union_hidden_output branch))
+			(and (empty_list? (union_order branch))
+				(and (nil? (union_limit branch))
+					(and (nil? (union_offset branch))
+						(or (equal? outer_mode (quote union_distinct))
+							(equal? (canonical_union_mode (union_mode branch)) (quote all))))))))))
 
 (define flatten_untangled_union_branches (lambda (outer_mode branches)
 	(merge (map branches (lambda (branch)
@@ -7306,18 +8136,56 @@ output slots; the UNION order belongs to that projection, not the old source. */
 			(union_branches branch)
 			(list branch)))))))
 
+/* A bound UNION ORDER references its output namespace. Rebind that logical
+namespace to the ordinary grouping input, never to a branch's input aliases. */
+(define union_group_output_expr (lambda (fields expr)
+	(match expr
+		((symbol quote) _datum) expr
+		((symbol get_column) _alias _alias_ic column column_ic)
+		(coalesceNil (field_expr_by_title fields column column_ic)
+			(neumann_fail "untangle_query" "UNION ORDER BY requires an output column"))
+		(cons head tail) (cons head (map tail (lambda (item) (union_group_output_expr fields item))))
+		_ expr)))
+
+/* Consumers which require a single projection interface retain the UNION as
+an explicit source relation. This identity QB neither deduplicates nor changes
+its input tuple/window; the set node remains visible in the combined model. */
+(define logical_union_relation_query (lambda (relation)
+	(begin
+		(define alias (binding_fresh_alias (binding_collect_string_catalog relation '())
+			(concat "__union_relation:" (stable_structural_hash relation true))))
+		(define database (logical_relation_schema relation))
+		(define declarations (union_source_declarations relation))
+		(define source (list alias database relation false nil declarations))
+		(define fields (merge (map (queryplan_result_titles relation) (lambda (title)
+			(list title (list (quote get_column) alias false title false))))))
+		(make_query_block database (list source) fields true '() nil '() nil nil '() '()
+			(list (list (quote default_alias) alias))))))
+
+(define union_source_declarations (lambda (relation)
+	(begin
+		(define names (queryplan_result_titles relation))
+		(define columns (mapIndex names (lambda (index name)
+			(begin
+				(define info (sql_projection_info_at relation index '()))
+				(list "Field" name "RawType" (sql_info_type info) "Type" (sql_info_type info)
+					"Dimensions" (sql_info_dimensions info) "Null" true "Key" ""
+					"Collation" (sql_collation_name info))))))
+		(list "columns" columns "constraints" (list "Unique"
+			(if (equal? (canonical_union_mode (union_mode relation)) (quote union_distinct))
+				(list (list "Name" "union_tuple" "Cols" names "NullsNotDistinct" true)) '())
+			"ForeignKeys" '()) "references" '()))))
+
 (define untangle_union_block (lambda (block ctx)
 	(begin
 		(define mode (canonical_union_mode (union_mode block)))
-		(define branches (map (union_branches block) (lambda (branch)
+		(define raw_branches (map (union_branches block) (lambda (branch)
 			(untangle_query (normalize_query_ast branch) ctx))))
-		(make_union_block
-			mode
-			(flatten_untangled_union_branches mode branches)
-			(union_order block)
-			(union_limit block)
-			(union_offset block)
-			(union_facts block)))))
+		(define branches (map (flatten_untangled_union_branches mode raw_branches) (lambda (branch)
+			(if (union_block? branch) (logical_union_relation_query branch) branch))))
+		(make_union_block mode
+			branches
+			(union_order block) (union_limit block) (union_offset block) (union_facts block)))))
 
 /* A projection grouped by its sole base source's complete primary key has
 exactly one row per group. With no aggregates or HAVING, grouping is an
@@ -7325,6 +8193,7 @@ identity, not a competing physical operator. Remove it before decorrelation
 so a surrounding COUNT (including FOUND_ROWS) sees the same row relation and
 membership remains available to the ordinary costed scan alternatives.
 Do not generalize this proof to joins, nullable UNIQUE keys or partial PKs. */
+
 (define remove_identity_primary_key_group (lambda (block)
 	(if (and (query_block? block)
 		(and (single_source? (qb_sources block))
@@ -7359,6 +8228,12 @@ Do not generalize this proof to joins, nullable UNIQUE keys or partial PKs. */
 (define untangle_query (lambda (query ctx)
 	(begin
 		(define normalized (remove_identity_primary_key_group (normalize_query_ast query)))
+		(define normalized (if (query_block? normalized)
+			(make_query_block (qb_schema normalized) (qb_sources normalized) (qb_fields normalized)
+				(qb_where normalized) (qb_group normalized) (qb_having normalized) (qb_order normalized)
+				(qb_limit normalized) (qb_offset normalized) (qb_hidden normalized)
+				(map (qb_stages normalized) (lambda (stage) (if (scoped_relational_program_stage? stage)
+					(untangle_scoped_relational_program_stage stage ctx) stage))) (qb_facts normalized)) normalized))
 		(match (logical_op normalized)
 			(symbol query-block) (untangle_query_block normalized ctx)
 			(symbol union-block) (untangle_union_block normalized ctx)

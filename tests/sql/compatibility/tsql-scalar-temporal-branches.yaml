@@ -1,0 +1,151 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Scalar source IF branches retain lexical values and declared temporal return contracts
+test_cases:
+- name: Both temporal IF outcomes and NULL predicates retain declared DATETIME values
+  tds:
+    statements:
+    - sql: |
+        CREATE FUNCTION dbo.choose_instant(@first DATETIME,@second DATETIME) RETURNS DATETIME
+        AS BEGIN
+          DECLARE @chosen DATETIME;
+          IF @first>@second
+          BEGIN SET @chosen=@second; END
+          ELSE
+          BEGIN SET @chosen=@first; END
+          RETURN @chosen;
+        END
+    - sql: SELECT dbo.choose_instant(CONVERT(DATETIME,N'20250102',112),CONVERT(DATETIME,N'20250101',112)) AS value
+      expect:
+        rows: 1
+        data: [{value: {temporal_type: datetime, value: '2025-01-01T00:00:00Z'}}]
+        column_types: [{name: value, type: DATETIME}]
+    - sql: SELECT dbo.choose_instant(CONVERT(DATETIME,N'20250101',112),CONVERT(DATETIME,N'20250102',112)) AS value
+      expect: {rows: 1, data: [{value: {temporal_type: datetime, value: '2025-01-01T00:00:00Z'}}]}
+    - sql: SELECT dbo.choose_instant(CAST(NULL AS DATETIME),CONVERT(DATETIME,N'20250102',112)) AS value
+      expect: {rows: 1, data: [{value: null}], column_types: [{name: value, type: DATETIME}]}
+    - sql: SELECT dbo.choose_instant(CONVERT(DATETIME,N'20250101',112),CAST(NULL AS DATETIME)) AS value
+      expect: {rows: 1, data: [{value: {temporal_type: datetime, value: '2025-01-01T00:00:00Z'}}]}
+- name: Branch merges preserve sequential assignments and unchanged variables
+  tds:
+    statements:
+    - sql: |
+        CREATE FUNCTION dbo.merge_values(@mode INT) RETURNS INT
+        AS BEGIN
+          DECLARE @first INT=1,@second INT=10;
+          IF @mode=1
+          BEGIN SET @first=@second+1; SET @second=@first+1; END
+          ELSE
+          BEGIN SET @second=@first+3; END
+          SET @first=@first+100;
+          RETURN @first*100+@second;
+        END
+    - sql: SELECT dbo.merge_values(1) AS taken,dbo.merge_values(0) AS other,dbo.merge_values(NULL) AS unknown
+      expect: {rows: 1, data: [{taken: 11112, other: 10104, unknown: 10104}]}
+- name: A local declared in one branch is NULL on its untaken path
+  tds:
+    statements:
+    - sql: |
+        CREATE FUNCTION dbo.branch_local(@take INT) RETURNS INT
+        AS BEGIN
+          IF @take=1 BEGIN DECLARE @local INT=7; END
+          RETURN @local;
+        END
+    - sql: SELECT dbo.branch_local(1) AS taken,dbo.branch_local(0) AS other,dbo.branch_local(NULL) AS unknown
+      expect: {rows: 1, data: [{taken: 7, other: null, unknown: null}]}
+- name: Initializers execute only when their declaration branch is taken
+  tds:
+    statements:
+    - sql: |
+        CREATE FUNCTION dbo.branch_initializer(@take INT,@divisor INT) RETURNS INT
+        AS BEGIN
+          IF @take=1 BEGIN DECLARE @local INT=10/@divisor; END
+          RETURN 3;
+        END
+    - sql: SELECT dbo.branch_initializer(0,0) AS value
+      expect: {rows: 1, data: [{value: 3}]}
+    - sql: SELECT dbo.branch_initializer(1,0) AS value
+      expect: {error: true, contains: ['division by zero']}
+- name: Early RETURN bypasses the shared continuation only on its selected path
+  tds:
+    statements:
+    - sql: |
+        CREATE FUNCTION dbo.branch_return(@take INT,@value INT) RETURNS INT
+        AS BEGIN
+          IF @take=1 RETURN @value+1;
+          SET @value=@value+2;
+          RETURN @value;
+        END
+    - sql: SELECT dbo.branch_return(1,5) AS taken,dbo.branch_return(0,5) AS other,dbo.branch_return(NULL,5) AS unknown
+      expect: {rows: 1, data: [{taken: 6, other: 7, unknown: 7}]}
+- name: Duplicate declarations remain invalid across mutually exclusive branches
+  tds:
+    statements:
+    - sql: |
+        CREATE FUNCTION dbo.duplicate_branch(@take INT) RETURNS INT
+        AS BEGIN
+          IF @take=1 DECLARE @local INT=1; ELSE DECLARE @local INT=2;
+          RETURN @local;
+        END
+      expect: {error: true, contains: ['duplicate scalar function variable']}
+    - sql: CREATE FUNCTION dbo.duplicate_branch(@take INT) RETURNS INT AS BEGIN RETURN @take; END
+- name: Boolean predicate and scalar body boundaries are enforced before source publication
+  tds:
+    statements:
+    - sql: CREATE FUNCTION dbo.invalid_branch(@take INT) RETURNS INT AS BEGIN IF @take RETURN 1; RETURN 2; END
+      expect: {error: true, contains: ['scalar function IF requires a Boolean predicate']}
+    - sql: CREATE FUNCTION dbo.invalid_branch(@take INT) RETURNS INT AS BEGIN WHILE @take>0 BREAK; RETURN @take; END
+      expect: {error: true, contains: ['unsupported statement in scalar function body']}
+    - sql: CREATE FUNCTION dbo.caller_calendar_branch(@take INT) RETURNS DATETIME AS BEGIN RETURN CAST(N'03/04/2025' AS DATETIME); END
+    - sql: CREATE FUNCTION dbo.invalid_branch(@take INT) RETURNS INT AS BEGIN RETURN @take; END
+    - sql: SET DATEFORMAT mdy
+    - sql: SELECT dbo.caller_calendar_branch(1) AS value
+      expect: {rows: 1, data: [{value: {temporal_type: datetime, value: '2025-03-04T00:00:00Z'}}]}
+- name: Temporal return conversion retains fractional width and carry
+  tds:
+    statements:
+    - sql: |
+        CREATE FUNCTION dbo.round_instant(@value DATETIME2(7)) RETURNS DATETIME2(3)
+        AS BEGIN RETURN @value; END
+    - sql: SELECT dbo.round_instant(CAST(N'2025-01-02T12:34:56.1234' AS DATETIME2(7))) AS value
+      expect:
+        rows: 1
+        data: [{value: {temporal_type: datetime2, value: '2025-01-02T12:34:56.123Z'}}]
+        column_types: [{name: value, type: DATETIME2}]
+    - sql: SELECT dbo.round_instant(CAST(N'2025-01-02T12:34:56.9996' AS DATETIME2(7))) AS value
+      expect: {rows: 1, data: [{value: {temporal_type: datetime2, value: '2025-01-02T12:34:57Z'}}]}
+    - sql: SELECT dbo.round_instant(CAST(NULL AS DATETIME2(7))) AS value
+      expect: {rows: 1, data: [{value: null}], column_types: [{name: value, type: DATETIME2}]}
+- name: Date and minute return declarations apply their existing conversion contracts
+  tds:
+    statements:
+    - sql: CREATE FUNCTION dbo.date_component(@value DATETIME) RETURNS DATE AS BEGIN RETURN @value; END
+    - sql: CREATE FUNCTION dbo.minute_component(@value DATETIME2(7)) RETURNS SMALLDATETIME AS BEGIN RETURN @value; END
+    - sql: SELECT dbo.date_component(CAST(N'2025-01-02T12:34:45' AS DATETIME)) AS day,dbo.minute_component(CAST(N'2025-01-02T12:34:45' AS DATETIME2(7))) AS minute
+      expect:
+        rows: 1
+        data: [{day: {temporal_type: date, value: '2025-01-02'}, minute: {temporal_type: smalldatetime, value: '2025-01-02T12:35:00Z'}}]
+        column_types: [{name: day, type: DATE}, {name: minute, type: SMALLDATETIME}]
+- name: Static branch source retains QUOTED_IDENTIFIER OFF when the caller changes it
+  tds:
+    statements:
+    - sql: SET QUOTED_IDENTIFIER OFF
+    - sql: CREATE FUNCTION dbo.branch_label(@take INT) RETURNS NVARCHAR(8) AS BEGIN IF @take=1 RETURN "yes"; RETURN "no"; END
+    - sql: SET QUOTED_IDENTIFIER ON
+    - sql: SELECT dbo.branch_label(1) AS taken,dbo.branch_label(0) AS other
+      expect: {rows: 1, data: [{taken: 'yes', other: 'no'}]}
+- name: Restart preserves saved branch source settings and temporal declarations
+  action: restart
+- name: Reloaded scalar branch functions regenerate the same lexical callables
+  tds:
+    statements:
+    - sql: SELECT dbo.branch_label(1) AS taken,dbo.branch_label(NULL) AS other
+      expect: {rows: 1, data: [{taken: 'yes', other: 'no'}]}
+    - sql: SELECT dbo.merge_values(1) AS taken,dbo.merge_values(0) AS other
+      expect: {rows: 1, data: [{taken: 11112, other: 10104}]}
+    - sql: SELECT dbo.choose_instant(CONVERT(DATETIME,N'20250102',112),CONVERT(DATETIME,N'20250101',112)) AS value
+      expect: {rows: 1, data: [{value: {temporal_type: datetime, value: '2025-01-01T00:00:00Z'}}]}

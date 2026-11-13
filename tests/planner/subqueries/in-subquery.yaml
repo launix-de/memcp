@@ -59,13 +59,13 @@ setup:
                 (if (>= id 9974)
                   (list id "narrow_b" "narrow_b:1" id)
                   (list id "noise" (concat "noise:" id) id))))))))
-        (insert (table "memcp-tests" false "membership_event" false)
+        (insert (table "memcp-tests" false "membership_event" false nil)
           '("ID" "entity_kind" "entity_key" "event_time") events)
-        (insert (table "memcp-tests" false "membership_narrow_key_a" false)
+        (insert (table "memcp-tests" false "membership_narrow_key_a" false nil)
           '("ID" "enabled") (list (list 1 1) (list 2 0)))
-        (insert (table "memcp-tests" false "membership_narrow_key_b" false)
+        (insert (table "memcp-tests" false "membership_narrow_key_b" false nil)
           '("ID" "enabled") (list (list 1 1) (list 2 0)))
-        (insert (table "memcp-tests" false "membership_broad_key" false)
+        (insert (table "memcp-tests" false "membership_broad_key" false nil)
           '("ID" "enabled")
           (map (produceN 8000) (lambda (i) (list (+ i 1) 1))))
         true)
@@ -74,16 +74,16 @@ test_cases:
   - name: "Membership normalization publishes the final source catalog before join search"
     scm: |
       (begin
-        (define driver '("d" "memcp-tests" "membership_item" false nil))
-        (define peer '("p" "memcp-tests" "membership_item" false nil))
-        (define input '("r" "memcp-tests" "membership_assignment" false nil))
+        (define driver '("d" "memcp-tests" "membership_item" false nil (sql_relation_declarations "memcp-tests" "membership_item" nil)))
+        (define peer '("p" "memcp-tests" "membership_item" false nil (sql_relation_declarations "memcp-tests" "membership_item" nil)))
+        (define input '("r" "memcp-tests" "membership_assignment" false nil (sql_relation_declarations "memcp-tests" "membership_assignment" nil)))
         (define probe (list 'get_column "d" false "ID" false))
         (define key (list 'get_column "r" false "result" false))
         (define stage (make_group_stage "membership-contract" input (list probe) (list key)
           (list aggregate_count_descriptor) nil nil nil nil nil
           (list (list 'purpose 'in_membership) (list 'condition true)
             (list 'lookup-keys (list probe)))))
-        (define output (list "lookup" "memcp-tests" (make_stage_output_relation (gs_id stage)) true nil))
+        (define output (list "lookup" "memcp-tests" (make_stage_output_relation (gs_id stage)) true nil nil))
         (define block (make_query_block "memcp-tests" (list driver peer output) (list "ID" probe)
           (list 'or (list 'equal? probe 2) (list 'membership_truth probe "lookup" "count"))
           nil nil nil nil nil nil (list stage) nil))
@@ -939,25 +939,25 @@ test_cases:
           (begin
             (define long_search (reduce (produceN 192) (lambda (text _i)
               (concat text "common searchable text ")) ""))
-            (insert (table "memcp-tests" false "in_batch_file" false) '("ID" "flag" "search")
+            (insert (table "memcp-tests" false "in_batch_file" false nil) '("ID" "flag" "search")
               (map (produceN 8000) (lambda (i)
                 (list (+ i 1) 1 long_search))))
-            (insert (table "memcp-tests" false "in_batch_doc" false) '("ID" "file_id" "sort_key")
+            (insert (table "memcp-tests" false "in_batch_doc" false nil) '("ID" "file_id" "sort_key")
               (map (produceN 10000) (lambda (i)
                 (list (+ i 1) (if (< i 8000) (+ i 1) (- i 7999)) (- 10000 i)))))
             /* All candidate keys match flag=1, but none occurs in this driver.
             This deliberately breaks the uniform-FK assumption which cannot be
             repaired by more accurate source-local selectivity statistics. */
-            (insert (table "memcp-tests" false "in_skew_doc" false) '("ID" "file_id" "sort_key")
+            (insert (table "memcp-tests" false "in_skew_doc" false nil) '("ID" "file_id" "sort_key")
               (map (produceN 100000) (lambda (i)
                 (list (+ i 1) 9000 (- 100000 i)))))
-            (insert (table "memcp-tests" false "in_skew_acl" false) '("ID" "document_id" "allowed")
+            (insert (table "memcp-tests" false "in_skew_acl" false nil) '("ID" "document_id" "allowed")
               (map (produceN 10000) (lambda (i)
                 (list (+ i 1) (+ i 1) 1))))
-            (rebuild (table "memcp-tests" false "in_batch_file" false) true false)
-            (rebuild (table "memcp-tests" false "in_batch_doc" false) true false)
-            (rebuild (table "memcp-tests" false "in_skew_doc" false) true false)
-            (rebuild (table "memcp-tests" false "in_skew_acl" false) true false)
+            (rebuild (table "memcp-tests" false "in_batch_file" false nil) true false)
+            (rebuild (table "memcp-tests" false "in_batch_doc" false nil) true false)
+            (rebuild (table "memcp-tests" false "in_skew_doc" false nil) true false)
+            (rebuild (table "memcp-tests" false "in_skew_acl" false nil) true false)
             true)
     steps:
       - sql: |
@@ -1150,16 +1150,16 @@ test_cases:
             (define sess session)
             (define query "SELECT d.ID FROM in_dv_doc d WHERE d.file_id IN (SELECT f.ID FROM in_dv_file f WHERE f.filename LIKE '%hit%' UNION SELECT f.ID FROM in_dv_file f WHERE f.search LIKE '%needle%') ORDER BY d.sort_key LIMIT 10")
             (define formula ((lambda (session tx)
-              (cached_parse cache (list parse_sql) "memcp-tests" query
+              (cached_parse cache "sql" (list parse_sql) "memcp-tests" query
                 (sql_policy "root") "root" session true tx)) sess nil))
-            (define eval_guard (lambda (guard guard_session guard_tx)
-              ((sql_queryplan_compile_formula nil guard)
-                guard_session guard_tx (lambda (_row) nil) (lambda (_fields) nil))))
+            (define matches_variant (lambda (variant guard_session guard_tx)
+              (not (nil? (sql_queryplan_matching_variant (list variant)
+                guard_session guard_tx (lambda (_row) nil) (lambda (_fields) nil))))))
             (define entry (car (cache (car (cache)))))
-            (define guard (car (car (entry "variants"))))
-            (define cold_guard (eval_guard guard sess nil))
-            (rebuild (table "memcp-tests" false "in_dv_file" false) true false)
-            (define rebuilt_guard (eval_guard guard sess nil))
+            (define variant (car (entry "variants")))
+            (define cold_guard (matches_variant variant sess nil))
+            (rebuild (table "memcp-tests" false "in_dv_file" false nil) true false)
+            (define rebuilt_guard (matches_variant variant sess nil))
             (if (and cold_guard (not rebuilt_guard))
               "ok"
               (error (concat "membership carrier guard did not follow refined statistics: "
@@ -2700,7 +2700,7 @@ test_cases:
       - sql: "INSERT INTO worker_file VALUES (10, 'x-one', ''), (20, '', 'x-two')"
       - sql: "INSERT INTO worker_item VALUES (100, 10, 7, 70), (200, 20, 8, 80)"
       - scm: |
-          (partitiontable (table "memcp-tests" false "worker_item" false)
+          (partitiontable (table "memcp-tests" false "worker_item" false nil)
             (list "ID" (list 150)))
     sql: |
       SELECT i.ID
@@ -2821,10 +2821,10 @@ test_cases:
       - sql: "CREATE TABLE in_prefilter_doc (ID INT PRIMARY KEY, file_id INT, tenant INT, sort_key INT)"
       - scm: |
           (begin
-            (insert (table "memcp-tests" false "in_prefilter_file" false) '("ID" "filename" "search")
+            (insert (table "memcp-tests" false "in_prefilter_file" false nil) '("ID" "filename" "search")
               (map (produceN 20000) (lambda (i)
                 (list (+ i 1) (concat "asset-" i) (concat "broad needle text " i)))))
-            (insert (table "memcp-tests" false "in_prefilter_doc" false) '("ID" "file_id" "tenant" "sort_key")
+            (insert (table "memcp-tests" false "in_prefilter_doc" false nil) '("ID" "file_id" "tenant" "sort_key")
               (map (produceN 20000) (lambda (i)
                 (list (+ i 1) (+ i 1)
                   (if (>= i 19900) 7 (if (>= i 19148) 8 9)) i))))

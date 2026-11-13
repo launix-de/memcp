@@ -111,6 +111,18 @@ parameter contracts without executing the query. National character declarations
 retain their original schema types; assignment and cast width uses UTF-16 units.
 Integer division uses the declared operand types and rejects zero divisors.
 
+T-SQL sessions support `SET DATEFORMAT` (all six orders) and `SET LANGUAGE`
+for `us_english`/`English` and `Deutsch`/`German`. Language selects the default
+input order, first weekday and calendar names; a later `SET DATEFORMAT` overrides
+only the input order. Conversion uses the executing session, including cached
+queries and defaults. ISO timestamps with `T` and compact `yyyyMMdd` dates remain
+independent of these settings. Modern DATE/DATETIME2 inputs reject numeric `ydm`.
+Use `--tds-language=Deutsch` to initialize new TDS/HTTP T-SQL connections in German
+with `dmy` and Monday as the first weekday. The default is `us_english`. SCM callers
+can initialize an owned session with `(tsql_set_language session "Deutsch")`.
+Language selection currently localizes date input and calendar names; server error
+messages retain their existing language.
+
 Schema DDL retains declared identifier spelling while resolving table, view and
 column references without case sensitivity. Named defaults use the existing
 native column defaults, including ALTER ADD/DROP. CREATE TYPE ... FROM stores
@@ -132,6 +144,44 @@ Non-NULL binary RPC inputs currently require a binary declaration; their native
 string carrier is never interpreted as numeric or character text.
 T-SQL plans retain the existing plan cache and JIT; the dialect currently uses
 exact query text, as its literal syntax differs from the shared lexer.
+
+
+T-SQL server metadata uses a bounded synthetic compatibility profile:
+`xp_msver` identifies MemCP and reports SQL compatibility version `16.0.0.1`, a virtual
+Windows path environment, one virtual processor slot, and unknown physical
+memory. These values do not describe the host or the MemCP binary version.
+`SERVERPROPERTY` retains typed `SQL_VARIANT` values; its collation names the
+frontend's actual `utf8mb4_general_ci` comparison profile. Read-only
+`xp_regread` / `xp_instance_regread` allow only the virtual SQL setup root and
+default data/log locations under `C:\MemCP\`. Unknown registry reads and registry
+writes fail; no call accesses the host registry, files, environment, or processes.
+
+
+T-SQL uses native database membership for all operations within that database.
+Compatibility `GRANT`, `REVOKE`, `DENY` and ownership statements do not modify
+native access. Server operations still require native administrator authority;
+login names have no implicit administrative alias. `IS_MEMBER` projects current
+database membership as `db_owner` and `public`, with no separate fixed-role or
+Windows-group catalog. Cached probes observe the authenticated login incarnation
+and current native access.
+
+Foreign keys accept `NOT FOR REPLICATION` in inline and `ALTER TABLE` declarations.
+This frontend offers ordinary client execution, where the modifier preserves
+native historical-row validation and INSERT/UPDATE/DELETE enforcement. It does
+not expose SQL Server replication-agent execution or `is_not_for_replication`
+metadata, and never turns native MemCP replication or MOSI into a constraint bypass.
+Granting a permission does not implement an otherwise unsupported SQL operation.
+Account and grant authority follows the frontend's native system catalog;
+workers need not share its login incarnation namespace. Authorization happens
+at the authenticated coordinator before native operator delegation. Revocation
+removes explicit frontend grants; inherited native administrator/database
+membership remains unchanged. Traditional master/slave replication retains its
+separate native database resource checks: frontend-only grants do not create
+raw database or offline-replica access rights. A frontend-only account can
+therefore be denied a query when such a replica must fetch protected native
+resources; delegated query capabilities for that replication profile are not
+yet supported.
+
 
 
 ### Reverse-proxy handlers
@@ -240,6 +290,27 @@ benchmark using the same fixtures, warm-up, and repetitions; no protected case
 may regress more than 20%. Run the local perf suite with `PERF_TEST=1 make
 test`. Performance PRs must additionally include manual A/B measurements
 (development baseline vs. change, same fixture and sampling) in the description.
+
+### Runtime profiles
+
+Use `-profile /tmp/memcp.cpu.pprof` for a CPU profile. For retained memory and
+cumulative allocations, start with `-heap-profile /tmp/memcp.heap.pprof` and
+send `SIGUSR1` to the server process when a snapshot is needed:
+
+```bash
+kill -USR1 SERVER_PID
+go tool pprof -top -sample_index=inuse_space ./memcp /tmp/memcp.heap.pprof
+go tool pprof -top -sample_index=alloc_space ./memcp /tmp/memcp.heap.pprof
+```
+
+Heap snapshots do not force garbage collection; retained-memory samples can lag
+by up to two garbage collection cycles. Each snapshot atomically
+replaces the profile file, so copy it before requesting another snapshot when
+comparing phases. A final snapshot is written before graceful shutdown. This
+optional diagnostic uses a local file and adds no network endpoint.
+The same signal and shutdown snapshot also write all goroutine stacks to
+`/tmp/memcp.heap.pprof.goroutines.txt`. Both files are replaced atomically with
+owner-only permissions (`0600`).
 
 ## Docker
 
@@ -355,7 +426,7 @@ and independent backend namespace, including separate buckets/prefixes for
 remote storage. The existing persistence backends are used without modification.
 `schema.json` remains the schema format. `SHUTDOWN` affects the addressed instance.
 
-Both listeners negotiate `memcp.channels.v9` and exchange bounded binary WebSocket
+Both listeners negotiate `memcp.channels.v10` and exchange bounded binary WebSocket
 messages. Every application frame contains exactly one byte giving the channel
 name's byte length (1–255), the channel name, then its opaque payload. There is no
 transport request ID, reply type, version prefix or JSON envelope. Registered
@@ -881,6 +952,18 @@ does not compile or activate the experimental runtime integration.
 ### Authentication
 
 > **Security note:** Never expose MemCP directly to the internet with default credentials. Always set a strong `--root-password` before any network-accessible deployment.
+
+SQL, RDF, and administration HTTP endpoints authenticate every request. An
+`X-Session-Id` preserves state within the same credential scope; the identifier
+alone grants no access. The authenticated account incarnation is bound before
+session state is used. Dropping and recreating an account requires a new session
+identifier, even when its name and password are reused. Temporary tables and
+transactions cannot be inherited from the previous account. Private execution
+parameters cannot be supplied through URL query arguments.
+
+T-SQL's zero-argument `SUSER_SNAME()` returns the authenticated invocation's login
+name as `NVARCHAR(128)`. SID lookup, impersonation, and login-dependent column
+defaults are currently unsupported and fail explicitly.
 
 - Source builds default to `root` / `admin` unless `--root-password` is supplied
   for the first start of a fresh data directory.

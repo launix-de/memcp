@@ -1,0 +1,184 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Typed lexical scalar functions use native transactional source publication
+test_cases:
+- name: Source body retains sequential typed parameter assignments and binary collation
+  tds:
+    statements:
+    - sql: |
+        CREATE FUNCTION [dbo].[format_marker](@value VARCHAR(6)) RETURNS VARCHAR(6)
+        AS BEGIN
+          SET @value = REPLACE(@value COLLATE Latin1_General_BIN,'a','xy');
+          SET @value = REPLACE(@value,'!','?');
+          RETURN @value;
+        END
+    - sql: SELECT [dbo].[format_marker]('Aa!') AS value
+      expect: {rows: 1, data: [{value: 'Axy?'}]}
+    - sql: SELECT dbo.format_marker(NULL) AS value
+      expect: {rows: 1, data: [{value: null}]}
+    - sql: SELECT dbo.format_marker('0123456789') AS value
+      expect: {rows: 1, data: [{value: '012345'}]}
+- name: Local declaration and assignment are isolated for every row invocation
+  tds:
+    statements:
+    - sql: |
+        CREATE FUNCTION dbo.shift_marker(@value INT) RETURNS INT
+        AS BEGIN
+          DECLARE @local INT=@value+3;
+          SET @value=@local+2;
+          RETURN @value;
+        END
+    - sql: CREATE TABLE function_rows(id INT PRIMARY KEY)
+    - sql: INSERT function_rows VALUES(1),(2)
+    - sql: SELECT id,dbo.shift_marker(id) AS value FROM function_rows ORDER BY dbo.shift_marker(id) DESC
+      expect: {data: [{id: 2, value: 7}, {id: 1, value: 6}]}
+    - sql: SELECT dbo.shift_marker('7') AS value
+      expect: {rows: 1, data: [{value: 12}]}
+    - sql: SELECT dbo.shift_marker() AS value
+      expect: {error: true, contains: ['wrong number of scalar function arguments']}
+- name: Literal zero remains a return expression and declaration initializer
+  tds:
+    statements:
+    - sql: CREATE FUNCTION dbo.zero_return_marker() RETURNS INT AS BEGIN RETURN 0; END
+    - sql: CREATE FUNCTION dbo.zero_local_marker() RETURNS INT AS BEGIN DECLARE @local INT=0; RETURN @local; END
+    - sql: SELECT dbo.zero_return_marker() AS direct_value,dbo.zero_local_marker() AS local_value
+      expect: {rows: 1, data: [{direct_value: 0, local_value: 0}]}
+- name: Native source transaction exposes only its own staged definition and rollback clears the call
+  tds:
+    statements:
+    - {connection: owner, sql: BEGIN TRANSACTION}
+    - {connection: owner, sql: 'CREATE FUNCTION dbo.staged_marker() RETURNS INT AS BEGIN RETURN 5; END'}
+    - connection: owner
+      sql: SELECT dbo.staged_marker() AS value
+      expect: {rows: 1, data: [{value: 5}]}
+    - connection: observer
+      sql: SELECT dbo.staged_marker() AS value
+      expect: {error: true}
+    - {connection: owner, sql: ROLLBACK TRANSACTION}
+    - connection: owner
+      sql: SELECT dbo.staged_marker() AS value
+      expect: {error: true}
+    - {connection: observer, sql: 'CREATE FUNCTION dbo.staged_marker() RETURNS INT AS BEGIN RETURN 8; END'}
+    - connection: owner
+      sql: SELECT dbo.staged_marker() AS value
+      expect: {rows: 1, data: [{value: 8}]}
+- name: Procedure invocation and mutations cannot consume a scalar declaration
+  tds:
+    statements:
+    - sql: EXEC dbo.shift_marker 4
+      expect: {error: true}
+    - sql: DROP PROCEDURE dbo.shift_marker
+      expect: {error: true, contains: ['object is not a procedure']}
+    - sql: CREATE OR ALTER PROCEDURE dbo.shift_marker AS SELECT 0 AS value
+      expect: {error: true, contains: ['a scalar function already owns this object name']}
+    - sql: CREATE TABLE shift_marker(id INT)
+      expect: {error: true, contains: ['a scalar function already owns this object name']}
+    - sql: CREATE VIEW shift_marker AS SELECT 0 AS value
+      expect: {error: true, contains: ['a scalar function already owns this object name']}
+    - sql: CREATE FUNCTION dbo.function_rows() RETURNS INT AS BEGIN RETURN 0; END
+      expect: {error: true, contains: ['a relation already owns this object name']}
+- name: Unsupported scalar bodies fail before publication and cannot run statements
+  tds:
+    statements:
+    - sql: CREATE FUNCTION dbo.invalid_marker() RETURNS INT AS BEGIN INSERT function_rows VALUES(9); RETURN 1; END
+      expect: {error: true, contains: ['unsupported statement in scalar function body']}
+    - sql: CREATE FUNCTION dbo.invalid_marker() RETURNS INT AS BEGIN RETURN (SELECT MAX(id) FROM function_rows); END
+      expect: {error: true, contains: ['scalar function expression requires a relational plan']}
+    - sql: SELECT id FROM function_rows ORDER BY id
+      expect: {data: [{id: 1}, {id: 2}]}
+    - sql: CREATE FUNCTION dbo.invalid_marker() RETURNS INT AS BEGIN RETURN 4; END
+    - sql: SELECT dbo.invalid_marker() AS value
+      expect: {rows: 1, data: [{value: 4}]}
+- name: A dbo function address is relative to the active database
+  tds:
+    statements:
+    - sql: CREATE DATABASE scalar_module_other
+    - sql: USE scalar_module_other
+    - sql: CREATE FUNCTION dbo.shift_marker(@value INT) RETURNS INT AS BEGIN RETURN @value+10; END
+    - sql: SELECT dbo.shift_marker(4) AS value
+      expect: {rows: 1, data: [{value: 14}]}
+    - sql: USE [memcp-tests]
+    - sql: SELECT dbo.shift_marker(4) AS value
+      expect: {rows: 1, data: [{value: 9}]}
+    - sql: DROP DATABASE scalar_module_other
+- name: Currency scalar parameters locals and returns retain fixed scale and literal defaults
+  tds:
+    statements:
+    - sql: |
+        CREATE FUNCTION dbo.currency_total(@amount MONEY,@fee SMALLMONEY=0.1250) RETURNS MONEY
+        AS BEGIN
+          DECLARE @local MONEY=@amount;
+          DECLARE @small SMALLMONEY=@fee;
+          SET @local=@local+@small;
+          RETURN @local;
+        END
+    - sql: SELECT CONVERT(VARCHAR(40),dbo.currency_total(CAST(12.3456 AS MONEY),DEFAULT),2) AS value
+      expect: {rows: 1, data: [{value: '12.4706'}]}
+    - sql: SELECT CONVERT(VARCHAR(40),dbo.currency_total(N'1.23456',N'0.0001'),2) AS value
+      expect: {rows: 1, data: [{value: '1.2347'}]}
+    - sql: SELECT dbo.currency_total(NULL,DEFAULT) AS value
+      expect: {rows: 1, data: [{value: null}]}
+- name: Small currency return conversion retains its declared bounds and four fractional places
+  tds:
+    statements:
+    - sql: |
+        CREATE FUNCTION dbo.currency_narrow(@amount MONEY) RETURNS SMALLMONEY
+        AS BEGIN
+          DECLARE @local SMALLMONEY=@amount;
+          RETURN @local;
+        END
+    - sql: SELECT CONVERT(VARCHAR(40),dbo.currency_narrow(N'214748.3647'),2) AS positive_value,CONVERT(VARCHAR(40),dbo.currency_narrow(N'-214748.3648'),2) AS negative_value
+      expect: {rows: 1, data: [{positive_value: '214748.3647', negative_value: '-214748.3648'}]}
+    - sql: SELECT CONVERT(VARCHAR(40),dbo.currency_narrow(N'2.34567'),2) AS value
+      expect: {rows: 1, data: [{value: '2.3457'}]}
+    - sql: SELECT dbo.currency_narrow(NULL) AS value
+      expect: {rows: 1, data: [{value: null}]}
+- name: Recreated scalar source retains each current parameter and return declaration
+  tds:
+    statements:
+    - sql: CREATE FUNCTION dbo.recipe_header_marker(@value VARCHAR(2)) RETURNS VARCHAR(8) AS BEGIN RETURN @value; END
+    - sql: SELECT dbo.recipe_header_marker('abcd') AS value
+      expect: {rows: 1, data: [{value: 'ab'}]}
+    - sql: DROP FUNCTION dbo.recipe_header_marker
+    - sql: CREATE FUNCTION dbo.recipe_header_marker(@value VARCHAR(4)) RETURNS VARCHAR(8) AS BEGIN RETURN @value; END
+    - sql: SELECT dbo.recipe_header_marker('abcd') AS value
+      expect: {rows: 1, data: [{value: 'abcd'}]}
+    - sql: DROP FUNCTION dbo.recipe_header_marker
+    - sql: CREATE FUNCTION dbo.recipe_header_marker(@value VARCHAR(4)) RETURNS VARCHAR(2) AS BEGIN RETURN @value; END
+    - sql: SELECT dbo.recipe_header_marker('abcd') AS value
+      expect: {rows: 1, data: [{value: 'ab'}]}
+- name: Recreated identical scalar text retains its current saved ANSI mode
+  tds:
+    statements:
+    - sql: SET ANSI_NULLS OFF
+    - sql: |
+        CREATE FUNCTION dbo.recipe_mode_marker(@value INT) RETURNS INT AS BEGIN
+          IF @value=NULL RETURN 1;
+          RETURN 0;
+        END
+    - sql: SELECT dbo.recipe_mode_marker(NULL) AS value
+      expect: {rows: 1, data: [{value: 1}]}
+    - sql: DROP FUNCTION dbo.recipe_mode_marker
+    - sql: SET ANSI_NULLS ON
+    - sql: |
+        CREATE FUNCTION dbo.recipe_mode_marker(@value INT) RETURNS INT AS BEGIN
+          IF @value=NULL RETURN 1;
+          RETURN 0;
+        END
+    - sql: SELECT dbo.recipe_mode_marker(NULL) AS value
+      expect: {rows: 1, data: [{value: 0}]}
+- name: Restart reloads committed scalar source and signature
+  action: restart
+- name: Committed scalar source regenerates its callable on restart
+  tds:
+    statements:
+    - sql: SELECT dbo.shift_marker(4) AS value
+      expect: {rows: 1, data: [{value: 9}]}
+    - sql: SELECT dbo.staged_marker() AS value
+      expect: {rows: 1, data: [{value: 8}]}
+    - sql: SELECT CONVERT(VARCHAR(40),dbo.currency_total(CAST(12.3456 AS MONEY),DEFAULT),2) AS money_value,CONVERT(VARCHAR(40),dbo.currency_narrow(N'2.34567'),2) AS small_money_value
+      expect: {rows: 1, data: [{money_value: '12.4706', small_money_value: '2.3457'}]}

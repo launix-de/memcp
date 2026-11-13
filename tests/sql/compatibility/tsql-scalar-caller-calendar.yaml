@@ -1,0 +1,130 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Scalar source reads explicit caller calendar context without retaining creation sessions
+setup:
+- sql: CREATE FUNCTION dbo.caller_precise(@text VARCHAR(30)) RETURNS DATETIME2(6) AS BEGIN RETURN @text; END
+- sql: CREATE FUNCTION dbo.caller_pure(@value INT) RETURNS INT AS BEGIN RETURN @value+1; END
+test_cases:
+- name: Definition session selects a different language and date order
+  session_id: calendar_creator
+  sql: SET LANGUAGE Deutsch; SET DATEFORMAT dmy
+- name: Scalar definition does not capture its creating sessions calendar context
+  session_id: calendar_creator
+  sql: |
+    CREATE FUNCTION dbo.caller_calendar(@text VARCHAR(30)) RETURNS DATETIME AS
+    BEGIN
+      DECLARE @value VARCHAR(30);
+      SET @value=@text;
+      IF ISDATE(@value)=0 SET @value=NULL;
+      RETURN @value;
+    END
+- name: Caller chooses mdy independently of definition language and date order
+  session_id: calendar_caller
+  sql: SET LANGUAGE us_english; SET DATEFORMAT mdy
+- name: Warm scalar source uses caller mdy
+  session_id: calendar_caller
+  sql: SELECT dbo.caller_calendar('02/03/2025') AS value
+  expect: {rows: 1,data: [{value: '2025-02-03 00:00:00'}]}
+- name: Caller changes order without changing the source definition
+  session_id: calendar_caller
+  sql: SET DATEFORMAT dmy
+- name: Identical cached SQL uses current caller dmy
+  session_id: calendar_caller
+  sql: SELECT dbo.caller_calendar('02/03/2025') AS value
+  expect: {rows: 1,data: [{value: '2025-03-02 00:00:00'}]}
+- name: Caller changes back to the prior cache domain
+  session_id: calendar_caller
+  sql: SET DATEFORMAT mdy
+- name: Repeated cached SQL restores caller mdy
+  session_id: calendar_caller
+  sql: SELECT dbo.caller_calendar('02/03/2025') AS value
+  expect: {rows: 1,data: [{value: '2025-02-03 00:00:00'}]}
+- name: ISDATE false and NULL inputs return typed NULL without a conversion error
+  session_id: calendar_caller
+  sql: SELECT dbo.caller_calendar('not-a-date') AS invalid_value,dbo.caller_calendar(NULL) AS null_value,dbo.caller_precise(NULL) AS precise_null
+  expect: {rows: 1,data: [{invalid_value: null,null_value: null,precise_null: null}]}
+- name: Caller selects German month-name context
+  session_id: calendar_language
+  sql: SET LANGUAGE Deutsch; SET DATEFORMAT dmy
+- name: Calendar validation and implicit return consume caller language
+  session_id: calendar_language
+  sql: SELECT dbo.caller_calendar('03 März 2025') AS value
+  expect: {rows: 1,data: [{value: '2025-03-03 00:00:00'}]}
+- name: Caller selects English month-name context
+  session_id: calendar_language
+  sql: SET LANGUAGE us_english; SET DATEFORMAT mdy
+- name: Identical cached month-name SQL consumes the changed caller language
+  session_id: calendar_language
+  sql: SELECT dbo.caller_calendar('03 März 2025') AS value
+  expect: {rows: 1,data: [{value: null}]}
+- name: Same scalar source consumes current English language
+  session_id: calendar_language
+  sql: SELECT dbo.caller_calendar('03 March 2025') AS value
+  expect: {rows: 1,data: [{value: '2025-03-03 00:00:00'}]}
+- name: Existing pure scalar SQL arity and values remain unchanged
+  sql: SELECT dbo.caller_pure(4) AS value,dbo.caller_pure(NULL) AS null_value
+  expect: {rows: 1,data: [{value: 5,null_value: null}]}
+- name: Native source header retains only declared SQL parameters
+  scm: |
+    (begin
+      (define declaration (car (showprocedures "memcp-tests" "caller_calendar" nil)))
+      (define signature (declaration "parameters"))
+      (and (equal? (count (car signature)) 1)
+        (equal? (car (car (car signature))) "text")
+        (equal? (car (tsql_scalar_function_declaration (cadr signature))) "DATETIME")))
+  expect: {result: true}
+- name: Wire binds caller context on the same connection and preserves return types
+  tds:
+    statements:
+    - sql: SET LANGUAGE us_english; SET DATEFORMAT mdy
+    - sql: SELECT dbo.caller_calendar('02/03/2025') AS value
+      expect: {rows: 1,data: [{value: {temporal_type: datetime,value: '2025-02-03T00:00:00Z'}}],column_types: [{name: value,type: DATETIME}]}
+    - sql: SET DATEFORMAT dmy
+    - sql: SELECT dbo.caller_calendar('02/03/2025') AS value
+      expect: {rows: 1,data: [{value: {temporal_type: datetime,value: '2025-03-02T00:00:00Z'}}],column_types: [{name: value,type: DATETIME}]}
+    - sql: SELECT dbo.caller_precise(NULL) AS precise_null WHERE 1=0
+      expect: {rows: 0,column_types: [{name: precise_null,type: DATETIME2}]}
+- name: Calendar source and its neutral creation contract survive restart
+  action: restart
+- name: Restarted source uses a fresh callers explicit date order
+  session_id: calendar_restart
+  sql: SET LANGUAGE us_english; SET DATEFORMAT dmy
+- name: Restarted source still validates and returns dates in caller context
+  session_id: calendar_restart
+  sql: SELECT dbo.caller_calendar('02/03/2025') AS value,dbo.caller_pure(4) AS pure_value
+  expect: {rows: 1,data: [{value: '2025-03-02 00:00:00',pure_value: 5}]}
+- name: Hidden caller context preserves exact temporal TYPEINFO scale
+  tds:
+    rpc_packets:
+    - packet_type: 1
+      payload_hex: 16000000120000000200000000000000000001000000530045004c004500430054002000640062006f002e00630061006c006c00650072005f00700072006500630069007300650028004e0055004c004c002900200041005300200070007200650063006900730065005f006e0075006c006c00200057004800450052004500200031003d003000
+      contains_hex: ['2a060c70007200650063006900730065005f006e0075006c006c00']
+      done_rows: 0
+
+- name: Stored weekday calculations retain a caller supplied DATEFIRST
+  tds:
+    statements:
+    - sql: CREATE FUNCTION dbo.caller_weekday(@value DATE) RETURNS INT AS BEGIN RETURN DATEPART(weekday,@value); END
+    - sql: SET DATEFIRST 1
+    - sql: SELECT dbo.caller_weekday(CONVERT(DATE,'2026-01-04',23)) AS weekday
+      expect: {rows: 1,data: [{weekday: 7}]}
+    - sql: SET DATEFIRST 7
+    - sql: SELECT dbo.caller_weekday(CONVERT(DATE,'2026-01-04',23)) AS weekday
+      expect: {rows: 1,data: [{weekday: 1}]}
+    - sql: SET DATEFIRST 1
+    - sql: SELECT dbo.caller_weekday(CONVERT(DATE,'2026-01-04',23)) AS weekday
+      expect: {rows: 1,data: [{weekday: 7}]}
+- name: Nested stored weekday calculations forward the same caller calendar
+  tds:
+    statements:
+    - sql: CREATE FUNCTION dbo.forward_weekday(@value DATE) RETURNS INT AS BEGIN RETURN dbo.caller_weekday(@value); END
+    - sql: SET DATEFIRST 7
+    - sql: SELECT dbo.forward_weekday(CONVERT(DATE,'2026-01-05',23)) AS weekday
+      expect: {rows: 1,data: [{weekday: 2}]}
+    - sql: SET DATEFIRST 1
+    - sql: SELECT dbo.forward_weekday(CONVERT(DATE,'2026-01-05',23)) AS weekday
+      expect: {rows: 1,data: [{weekday: 1}]}

@@ -1,0 +1,85 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  description: Native relation identities retain generation and transaction visibility
+setup:
+- sql: CREATE TABLE native_identity_ordinary(id INT)
+cleanup:
+- sql: DROP TABLE IF EXISTS native_identity_ordinary
+- sql: DROP TABLE IF EXISTS native_identity_target
+- sql: DROP TABLE IF EXISTS native_identity_saved
+test_cases:
+- name: Ordinary autocommit CREATE owns a real native generation identity
+  scm: |
+    (begin
+      (define identity (show (table "memcp-tests" false "native_identity_ordinary" false nil) "identity" nil))
+      (and (string? identity) (equal? (strlen identity) 36)
+        (equal? identity (show (table "memcp-tests" false "native_identity_ordinary" false nil) "identity" nil))))
+  expect: {result: true}
+- name: Only the creator can inspect an unpublished native identity
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define foreign (newsession)) (foreign "username" "root") (tx_begin foreign)
+      (define tx (owner "__memcp_tx"))
+      (createtable "memcp-tests" "native_identity_target"
+        (list (list "column" "id" "INT" (list) (list))) (list "engine" "safe") false tx)
+      (createtable "memcp-tests" "native_identity_saved"
+        (list (list "column" "name" "TEXT" (list) (list))
+          (list "column" "value" "TEXT" (list) (list))
+          (list "unique" "PRIMARY" (list "name"))) (list "engine" "safe") false tx)
+      (define handle (table "memcp-tests" false "native_identity_target" false tx))
+      (define identity (show handle "identity" tx))
+      (define anonymous (try (lambda () (begin (show handle "identity" nil) false))
+        (lambda (failure) (strlike (concat failure) "%not visible%"))))
+      (define other (try (lambda () (begin (show handle "identity" (foreign "__memcp_tx")) false))
+        (lambda (failure) (strlike (concat failure) "%not visible%"))))
+      (insert (table "memcp-tests" false "native_identity_saved" false tx) '("name" "value")
+        (list (list "original" identity)
+          (list "ordinary" (show (table "memcp-tests" false "native_identity_ordinary" false nil) "identity" nil))) '() nil false nil tx)
+      (tx_commit owner) (tx_rollback foreign)
+      (and anonymous other (string? identity) (equal? (strlen identity) 36)
+        (equal? (show handle "identity" nil) identity)))
+  expect: {result: true}
+- name: A committed identity comes from the actual generation across fresh handles
+  scm: |
+    (begin
+      (define saved (scan nil (table "memcp-tests" false "native_identity_saved" false nil)
+        '() '() '("name") (lambda (name) (equal? name "original")) '("value")
+        (lambda (acc value) (coalesceNil acc value)) nil (lambda (a b) (coalesceNil a b))))
+      (equal? saved (show (table "memcp-tests" false "native_identity_target" false nil) "identity" nil)))
+  expect: {result: true}
+- name: Restart native declarations without assigning new identities
+  action: restart
+- name: The native stored identity survives restart unchanged
+  scm: |
+    (begin
+      (define saved (scan nil (table "memcp-tests" false "native_identity_saved" false nil)
+        '() '() '("name") (lambda (name) (equal? name "original")) '("value")
+        (lambda (acc value) (coalesceNil acc value)) nil (lambda (a b) (coalesceNil a b))))
+      (define ordinary (scan nil (table "memcp-tests" false "native_identity_saved" false nil)
+        '() '() '("name") (lambda (name) (equal? name "ordinary")) '("value")
+        (lambda (acc value) (coalesceNil acc value)) nil (lambda (a b) (coalesceNil a b))))
+      (and (equal? saved (show (table "memcp-tests" false "native_identity_target" false nil) "identity" nil))
+        (equal? ordinary (show (table "memcp-tests" false "native_identity_ordinary" false nil) "identity" nil))))
+  expect: {result: true}
+- name: Reusing a name creates a different identity and rejects the retired handle
+  scm: |
+    (begin
+      (define old (table "memcp-tests" false "native_identity_target" false nil))
+      (define before (show old "identity" nil))
+      (droptable "memcp-tests" "native_identity_target" false)
+      (define s (newsession)) (s "username" "root") (tx_begin s)
+      (define tx (s "__memcp_tx"))
+      (createtable "memcp-tests" "native_identity_target"
+        (list (list "column" "id" "INT" (list) (list))) (list "engine" "safe") false tx)
+      (tx_commit s)
+      (define identity (show (table "memcp-tests" false "native_identity_target" false nil) "identity" nil))
+      (define rejected (try (lambda () (begin (show old "identity" nil) false))
+        (lambda (failure) (strlike (concat failure) "%not visible%"))))
+      (and rejected (not (equal? before identity)))))
+  expect: {result: true}
+- name: An unknown relation has no fabricated native identity
+  scm: (nil? (show (table "memcp-tests" false "native_identity_missing" false nil) "identity" nil))
+  expect: {result: true}

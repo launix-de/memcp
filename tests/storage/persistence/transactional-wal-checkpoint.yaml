@@ -1,0 +1,112 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+metadata:
+  version: '1.0'
+  description: Rebuilt committed rows retain their WAL decision until a durable independent checkpoint
+  isolated: true
+setup:
+- sql: CREATE TABLE wal_checkpoint_rows(id INT PRIMARY KEY,value INT) ENGINE=SAFE
+cleanup:
+- sql: DROP TABLE IF EXISTS wal_checkpoint_cold_rows
+- sql: DROP TABLE IF EXISTS wal_checkpoint_rows
+
+test_cases:
+- name: Commit an ACID insert whose payload crossed a rebuild generation
+  # No savepoint or UnstageRow is involved. This isolates durable commit
+  # authority; private visibility before commit is a separate native contract.
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root")
+      (owner "schema" "memcp-tests") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (define target (table "memcp-tests" false "wal_checkpoint_rows" false tx))
+      (insert target '("id" "value") (list (list 1 10)) '() nil false nil tx)
+      (rebuild target true false)
+      (tx_commit owner)
+      (nil? (owner "transaction")))
+  expect: {result: true}
+- name: Completed native commit exposes the rebuilt row
+  sql: SELECT id,value FROM wal_checkpoint_rows
+  expect: {rows: 1,data: [{id: 1,value: 10}]}
+- name: Ordinary shutdown checkpoints transactional visibility before retiring decisions
+  sql: SHUTDOWN
+  restart_timeout: 60
+  expect: {rows: 0}
+- name: Clean restart retains the row whose commit depended on the database log
+  sql: SELECT id,value FROM wal_checkpoint_rows
+  expect: {rows: 1,data: [{id: 1,value: 10}]}
+- name: Rebuild the recovered warm generation without forcing all shards
+  scm: (begin (rebuild (table "memcp-tests" false "wal_checkpoint_rows" false nil) false false) true)
+  expect: {result: true}
+- name: Publish the subsequent independent checkpoint
+  sql: SHUTDOWN
+  restart_timeout: 60
+  expect: {rows: 0}
+- name: Repeated checkpoint and restart preserve the same committed payload
+  sql: SELECT id,value FROM wal_checkpoint_rows
+  expect: {rows: 1,data: [{id: 1,value: 10}]}
+- name: An independent warm no-op preserves its published physical UUID
+  scm: |
+    (begin
+      (define schema_file (concat (arg "data" "data" "data") "/memcp-tests/schema.json"))
+      (define generation (lambda () (begin
+        (define declarations (((json_decode (readfile schema_file)) "tables") "wal_checkpoint_rows"))
+        (car (coalesceNil (declarations "PShards") (declarations "Shards"))))))
+      (define before (generation))
+      (define warm (not (equal? ((show "memcp-tests" "wal_checkpoint_rows" 0) "state") "COLD")))
+      (rebuild (table "memcp-tests" false "wal_checkpoint_rows" false nil) false false)
+      (and warm (string? before) (not (equal? before "")) (equal? before (generation))))
+  expect: {result: true}
+- name: A proven warm physical no-op preserves exact rows
+  sql: SELECT id,value FROM wal_checkpoint_rows
+  expect: {rows: 1,data: [{id: 1,value: 10}]}
+- name: Create a committed seed for genuinely lazy cold recovery
+  # Startup legitimately replays zero-estimate legacy generations. A real
+  # visible seed keeps this table's persisted estimate positive; no statistics
+  # or schema files are patched to manufacture the cold path.
+  steps:
+  - sql: CREATE TABLE wal_checkpoint_cold_rows(id INT PRIMARY KEY,value INT) ENGINE=SAFE
+    expect: {affected_rows: 0}
+  - sql: INSERT INTO wal_checkpoint_cold_rows VALUES(0,0)
+    expect: {affected_rows: 1}
+- name: Checkpoint the visible seed before staging another ACID row
+  scm: (begin (rebuild (table "memcp-tests" false "wal_checkpoint_cold_rows" false nil) true false) true)
+  expect: {result: true}
+- name: Commit a separate cross-generation WAL before cold recovery
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root")
+      (owner "schema" "memcp-tests") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (define target (table "memcp-tests" false "wal_checkpoint_cold_rows" false tx))
+      (insert target '("id" "value") (list (list 2 20)) '() nil false nil tx)
+      (rebuild target true false)
+      (tx_commit owner)
+      (nil? (owner "transaction")))
+  expect: {result: true}
+- name: The committed cold-recovery fixture is visible before a crash
+  sql: SELECT id,value FROM wal_checkpoint_cold_rows ORDER BY id
+  expect: {rows: 2,data: [{id: 0,value: 0},{id: 2,value: 20}]}
+- name: Crash without folding the remaining coordinator-qualified WAL
+  scm: (crash)
+  expect: {interrupted_ok: true}
+- name: Restart without reading the cold target rows
+  action: restart
+- name: Native diagnostics observe an unreplayed cold generation
+  # SHOW's resident shard statistics do not open columns or replay the WAL.
+  scm: (equal? ((show "memcp-tests" "wal_checkpoint_cold_rows" 0) "state") "COLD")
+  expect: {result: true}
+- name: Ordinary shutdown preserves an unreplayed generation and its authority
+  sql: SHUTDOWN
+  restart_timeout: 60
+  expect: {rows: 0}
+- name: The retained generation is still cold before its first row read
+  scm: (equal? ((show "memcp-tests" "wal_checkpoint_cold_rows" 0) "state") "COLD")
+  expect: {result: true}
+- name: Cold replay retains exact committed rows after the intervening shutdown
+  sql: SELECT id,value FROM wal_checkpoint_cold_rows ORDER BY id
+  expect: {rows: 2,data: [{id: 0,value: 0},{id: 2,value: 20}]}
+- name: Cold recovery also preserves the independent checkpoint control
+  sql: SELECT id,value FROM wal_checkpoint_rows
+  expect: {rows: 1,data: [{id: 1,value: 10}]}

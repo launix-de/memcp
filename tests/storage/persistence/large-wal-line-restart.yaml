@@ -15,7 +15,7 @@ test_cases:
     scm: |
       (begin
         (define big (apply concat (map (produceN 70000) (lambda (i) "x"))))
-        (insert (table "memcp-tests" false "safe_large_log" false) '("id" "note")
+        (insert (table "memcp-tests" false "safe_large_log" false nil) '("id" "note")
           (list (list 1 big))))
 
   - name: "Large row is visible before restart"

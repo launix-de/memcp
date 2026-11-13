@@ -1,0 +1,160 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Declared computed columns use typed native row definitions and survive restart
+cleanup:
+- sql: DROP TABLE IF EXISTS computed_device
+- sql: DROP TABLE IF EXISTS computed_empty
+- sql: DROP TABLE IF EXISTS computed_rejected
+- sql: DROP TABLE IF EXISTS computed_private
+- sql: DROP TABLE IF EXISTS computed_tail
+- sql: DROP TABLE IF EXISTS computed_rollback
+test_cases:
+- name: Untyped AS declaration resolves nested CASE against same-table column contracts
+  sql: |
+    CREATE TABLE computed_device(id INT PRIMARY KEY, kind VARCHAR(16) COLLATE utf8mb4_general_ci, [flag ] BIT,
+      category AS (CASE WHEN ISNULL(kind,'')='' THEN 0
+        ELSE CASE WHEN kind='EdgeA' OR kind='EdgeB' THEN 2
+          ELSE CASE WHEN kind='Alternate' THEN 8 ELSE 1 END END END),
+      label AS (CAST(kind AS NVARCHAR(12))), shifted AS (id+1))
+  expect: {rows: 0, result_not_contains: '"affected_rows"'}
+- name: Implicit INSERT omits the declared read-only computation
+  sql: INSERT computed_device VALUES(1,NULL,0),(2,'edgea',1),(3,'Alternate',0),(4,'123456789012345',1)
+  expect: {affected_rows: 4}
+- name: The native row formula evaluates every CASE branch
+  sql: SELECT id,category FROM computed_device ORDER BY id
+  expect: {rows: 4,data: [{id: 1,category: 0},{id: 2,category: 2},{id: 3,category: 8},{id: 4,category: 1}]}
+- name: Inferred text dimensions and integer arithmetic use ordinary SQL contracts
+  sql: SELECT id,label,shifted FROM computed_device WHERE id=2
+  expect: {rows: 1,data: [{id: 2,label: edgea,shifted: 3}]}
+- name: A computed character cast enforces its inferred output width
+  sql: SELECT label FROM computed_device WHERE id=4
+  expect: {rows: 1,data: [{label: '123456789012'}]}
+- name: Updating a physical dependency invalidates the computed value
+  sql: UPDATE computed_device SET kind='' WHERE id=3
+  expect: {affected_rows: 1}
+- name: A warmed computation observes the changed dependency
+  sql: SELECT category FROM computed_device WHERE id=3
+  expect: {rows: 1,data: [{category: 0}]}
+- name: Explicit INSERT cannot assign the computed column
+  sql: INSERT computed_device(id,category) VALUES(5,9)
+  expect: {error: true}
+- name: UPDATE cannot assign the computed column
+  sql: UPDATE computed_device SET category=9 WHERE id=1
+  expect: {error: true}
+- name: Computed SQL declaration metadata is independent of row values
+  scm: |
+    (begin (define column (show (table "memcp-tests" false "computed_device" false nil) "column" "category" false))
+      (and (column "Computed") (equal? (column "RawType") "INT")))
+  expect: {result: true}
+- name: Empty computed table has a persisted recipe before any scan or row insert
+  sql: CREATE TABLE computed_empty(id INT, word VARCHAR(16), matched AS (CASE WHEN word='Alpha' THEN 1 ELSE 0 END), answer AS (40+2))
+  expect: {rows: 0, result_not_contains: '"affected_rows"'}
+- name: Volatile clocks cannot silently become cached row definitions
+  sql: CREATE TABLE computed_rejected(id INT, value AS GETDATE())
+  expect: {error: true}
+- name: A computed definition cannot capture a SQL variable
+  sql: DECLARE @offset INT=1; CREATE TABLE computed_rejected(id INT, value AS (id+@offset))
+  expect: {error: true}
+- name: Unknown computed inputs fail before table publication
+  sql: CREATE TABLE computed_rejected(id INT, value AS (missing+1))
+  expect: {error: true}
+- name: A foreign qualifier cannot become an unbound stored callback variable
+  sql: CREATE TABLE computed_rejected(id INT, value AS (CASE WHEN other_table.id IS NULL THEN 0 ELSE 1 END))
+  expect: {error: true}
+- name: Relational subqueries cannot bypass stored row dependencies
+  sql: CREATE TABLE computed_rejected(id INT, value AS ((SELECT 1)))
+  expect: {error: true}
+- name: PERSISTED does not masquerade as ordinary lazy caching
+  sql: CREATE TABLE computed_rejected(id INT, value AS (id+1) PERSISTED)
+  expect: {error: true}
+- name: Real TDS installation owns its typed computation and commits the complete declaration
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: |
+        CREATE TABLE computed_private(id INT PRIMARY KEY, kind VARCHAR(16),
+          category AS (CASE WHEN ISNULL(kind,'')='' THEN 0 ELSE 2 END));
+        CREATE TABLE computed_tail(id INT);
+        INSERT computed_private VALUES(1,'EdgeA');
+    - connection: owner
+      sql: SELECT id,category FROM computed_private
+      expect: {rows: 1,data: [{id: 1,category: 2}]}
+    - connection: observer
+      sql: SELECT name FROM sys.objects WHERE name=N'computed_private'
+      expect: {rows: 0}
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT id,category FROM computed_private
+      expect: {rows: 1,data: [{id: 1,category: 2}]}
+- name: Real TDS rollback retires the computed declaration with its rows
+  tds:
+    statements:
+    - connection: rollback_owner
+      sql: BEGIN TRANSACTION
+    - connection: rollback_owner
+      sql: CREATE TABLE computed_rollback(id INT, doubled AS (id*2)); INSERT computed_rollback VALUES(3)
+    - connection: rollback_owner
+      sql: SELECT doubled FROM computed_rollback
+      expect: {rows: 1,data: [{doubled: 6}]}
+    - connection: rollback_owner
+      sql: ROLLBACK TRANSACTION
+    - connection: observer
+      sql: SELECT name FROM sys.objects WHERE name=N'computed_rollback'
+      expect: {rows: 0}
+- name: Restart restores declared recipes with WAL-only and empty storage
+  action: restart
+- name: Recovered computed values are derived from committed source rows
+  sql: SELECT id,category FROM computed_device ORDER BY id
+  expect: {rows: 4,data: [{id: 1,category: 0},{id: 2,category: 2},{id: 3,category: 0},{id: 4,category: 1}]}
+- name: Recovered private computation retains its committed expression and source row
+  sql: SELECT id,category FROM computed_private
+  expect: {rows: 1,data: [{id: 1,category: 2}]}
+- name: An initially empty computed table computes its first row after restart
+  sql: INSERT computed_empty(id) VALUES(7)
+  expect: {affected_rows: 1}
+- name: A zero-input computed recipe survives restart
+  sql: SELECT id,answer FROM computed_empty
+  expect: {rows: 1,data: [{id: 7,answer: 42}]}
+- name: A stored recipe keeps the native default column collation
+  sql: INSERT computed_empty(id,word) VALUES(8,'alpha')
+  expect: {affected_rows: 1}
+# Native ordinary VARCHAR declarations default to utf8mb4, whose equality is
+# case-sensitive. An explicit _ci declaration remains independently supported.
+- name: Recovered computation preserves case-sensitive default and explicit collation
+  sql: >-
+    SELECT matched,CASE WHEN word='Alpha' THEN 1 ELSE 0 END AS ordinary,
+    CASE WHEN word COLLATE utf8mb4_general_ci='Alpha' THEN 1 ELSE 0 END AS explicit_ci
+    FROM computed_empty WHERE id=8
+  expect: {rows: 1,data: [{matched: 0,ordinary: 0,explicit_ci: 1}]}
+- name: Real TDS reports the inferred type even for an empty result
+  tds:
+    statements:
+    - sql: SELECT category FROM computed_device WHERE id=-1
+      expect:
+        rows: 0
+        column_types: [{name: category,type: INT,nullable: true}]
+- name: Rejected computation declarations left no table
+  sql: SELECT name FROM sys.objects WHERE name=N'computed_rejected'
+  expect: {rows: 0}
+
+- name: A recovered computed comparison keeps significant and padding characters distinct
+  sql: INSERT computed_empty(id,word) VALUES(9,'Alpha   '),(10,'Alpha'+NCHAR(9)),(11,NULL)
+  expect: {affected_rows: 3}
+- name: Stored and ordinary character equality agree on spaces tabs and NULL
+  sql: >-
+    SELECT id,matched,CASE WHEN word='Alpha' THEN 1 ELSE 0 END AS ordinary
+    FROM computed_empty WHERE id>=9 ORDER BY id
+  expect: {rows: 3,data: [{id: 9,matched: 1,ordinary: 1},{id: 10,matched: 0,ordinary: 0},{id: 11,matched: 0,ordinary: 0}]}
+- name: A callback without an admitted pure head cannot become a stored column
+  sql: CREATE TABLE computed_rejected(id INT,value AS OBJECT_ID(N'dbo.computed_empty'))
+  expect: {error: true}
+- name: A session metadata callback leaves no rejected computed declaration
+  sql: SELECT name FROM sys.objects WHERE name=N'computed_rejected'
+  expect: {rows: 0}

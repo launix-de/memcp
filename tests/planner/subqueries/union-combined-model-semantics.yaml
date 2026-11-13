@@ -1,0 +1,202 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  description: Explicit UNION boundaries preserve whole tuples membership NULLs and windows
+setup:
+- sql: CREATE TABLE union_model_left(id INT PRIMARY KEY,a INT,b INT)
+- sql: CREATE TABLE union_model_right(id INT PRIMARY KEY,a INT,b INT)
+- sql: CREATE TABLE union_model_driver(id INT PRIMARY KEY,val INT)
+- sql: INSERT INTO union_model_left VALUES(1,0,10),(2,0,20),(3,NULL,30),(4,1,40)
+- sql: INSERT INTO union_model_right VALUES(1,0,10),(2,NULL,30),(3,2,50)
+- sql: INSERT INTO union_model_driver VALUES(1,0),(2,1),(3,2),(4,NULL)
+- sql: CREATE TABLE union_model_text(id INT PRIMARY KEY,ci VARCHAR(8) COLLATE utf8mb4_general_ci,bin VARCHAR(8) COLLATE bin)
+- sql: INSERT INTO union_model_text VALUES(1,'A','A'),(2,'a','a'),(3,'B','B')
+test_cases:
+- name: Complete UNION DISTINCT tuples remain separate before a parent projection
+  sql: SELECT q.a FROM (SELECT a,b FROM union_model_left UNION SELECT a,b FROM union_model_right) q ORDER BY q.a
+  expect:
+    rows: 5
+    data: [{a: null},{a: 0},{a: 0},{a: 1},{a: 2}]
+- name: Parent joins retain multiplicity from complete distinct tuples
+  sql: SELECT p.id,q.b FROM union_model_driver p INNER JOIN (SELECT a,b FROM union_model_left UNION SELECT a,b FROM union_model_right) q ON p.val=q.a ORDER BY p.id,q.b
+  expect:
+    rows: 4
+    data: [{id: 1,b: 10},{id: 1,b: 20},{id: 2,b: 40},{id: 3,b: 50}]
+- name: A joined UNION consumer applies its invocation window after complete matches
+  sql: SELECT p.id,q.b FROM union_model_driver p INNER JOIN (SELECT a,b FROM union_model_left UNION SELECT a,b FROM union_model_right) q ON p.val=q.a ORDER BY p.id,q.b LIMIT 2 OFFSET 1
+  expect:
+    rows: 2
+    data: [{id: 1,b: 20},{id: 2,b: 40}]
+- name: A UNION input window precedes the parent selection
+  sql: SELECT q.a,q.b FROM (SELECT a,b FROM union_model_left UNION SELECT a,b FROM union_model_right ORDER BY b LIMIT 2 OFFSET 1) q WHERE q.a=0 ORDER BY q.b
+  expect:
+    rows: 1
+    data: [{a: 0,b: 20}]
+- name: Nullable UNION operand matches include real all NULL payloads
+  sql: SELECT p.id,q.b FROM union_model_driver p LEFT JOIN (SELECT NULL AS a,NULL AS b FROM union_model_left WHERE id=1 UNION SELECT NULL,1 FROM union_model_right WHERE id=1) q ON p.id=1 WHERE p.id IN(1,2) ORDER BY p.id,q.b
+  expect:
+    rows: 3
+    data: [{id: 1,b: null},{id: 1,b: 1},{id: 2,b: null}]
+- name: Membership consumes explicit UNION branches without changing duplicate truth
+  sql: SELECT id FROM union_model_driver WHERE val IN(SELECT a FROM union_model_left UNION SELECT a FROM union_model_right) ORDER BY id
+  expect:
+    rows: 3
+    data: [{id: 1},{id: 2},{id: 3}]
+- name: NOT IN keeps a UNION NULL witness even when branches contain duplicates
+  sql: SELECT id FROM union_model_driver WHERE val NOT IN(SELECT a FROM union_model_left UNION SELECT a FROM union_model_right) ORDER BY id
+  expect: {rows: 0}
+- name: Duplicate-insensitive membership retains three valued projection semantics
+  sql: SELECT id,CASE WHEN val IN(SELECT a FROM union_model_left WHERE a<>2 UNION SELECT a FROM union_model_right WHERE a<>2 OR a IS NULL) THEN 'present' WHEN val NOT IN(SELECT a FROM union_model_left WHERE a<>2 UNION SELECT a FROM union_model_right WHERE a<>2 OR a IS NULL) THEN 'absent' ELSE 'unknown' END AS membership FROM union_model_driver ORDER BY id
+  expect:
+    rows: 4
+    data: [{id: 1,membership: present},{id: 2,membership: present},{id: 3,membership: unknown},{id: 4,membership: unknown}]
+- name: A bounded distinct membership input owns deduplication before OFFSET
+  sql: SELECT id FROM union_model_driver WHERE val IN(SELECT a FROM union_model_left UNION SELECT a FROM union_model_right ORDER BY a LIMIT 1 OFFSET 1) ORDER BY id
+  expect:
+    rows: 1
+    data: [{id: 1}]
+- name: UNION ALL keeps a nested distinct producer boundary
+  sql: SELECT q.a,q.b FROM (SELECT a,b FROM (SELECT a,b FROM union_model_left UNION SELECT a,b FROM union_model_right) inner_set UNION ALL SELECT a,b FROM union_model_right WHERE id=1) q ORDER BY q.a,q.b
+  expect:
+    rows: 6
+    data: [{a: null,b: 30},{a: 0,b: 10},{a: 0,b: 10},{a: 0,b: 20},{a: 1,b: 40},{a: 2,b: 50}]
+- name: A scalar UNION preserves its completed row cardinality
+  sql: SELECT (SELECT a FROM union_model_left WHERE id=1 UNION SELECT a FROM union_model_right WHERE id=1) AS value
+  expect:
+    rows: 1
+    data: [{value: 0}]
+- name: A scalar UNION ALL keeps duplicate rows for the cardinality check
+  sql: SELECT (SELECT a FROM union_model_left WHERE id=1 UNION ALL SELECT a FROM union_model_right WHERE id=1) AS value
+  expect: {error: true,contains: more than one row}
+- name: Scalar aggregate row mapping and branch state merging remain separate
+  sql: SELECT COUNT(*) AS n,SUM(q.b) AS total FROM (SELECT a,b FROM union_model_left UNION ALL SELECT a,b FROM union_model_right) q
+  expect:
+    rows: 1
+    data: [{n: 7,total: 190}]
+- name: Parent grouped reducers combine both nonempty UNION ALL branches
+  sql: SELECT q.a,COUNT(*) AS n,SUM(q.b) AS total FROM (SELECT a,b FROM union_model_left UNION ALL SELECT a,b FROM union_model_right) q GROUP BY q.a ORDER BY q.a
+  expect:
+    rows: 4
+    data: [{a: null,n: 2,total: 60},{a: 0,n: 3,total: 40},{a: 1,n: 1,total: 40},{a: 2,n: 1,total: 50}]
+- name: Distinct text tuples use the declared case insensitive collation
+  sql: SELECT 'ok' AS marker FROM (SELECT ci AS value FROM union_model_text WHERE id<=2 UNION SELECT ci FROM union_model_text WHERE id=3) q ORDER BY q.value
+  expect:
+    rows: 2
+    data: [{marker: ok},{marker: ok}]
+- name: Distinct text tuples retain binary case differences
+  sql: SELECT 'ok' AS marker FROM (SELECT bin AS value FROM union_model_text WHERE id<=2 UNION SELECT bin FROM union_model_text WHERE id=3) q ORDER BY q.value
+  expect:
+    rows: 3
+    data: [{marker: ok},{marker: ok},{marker: ok}]
+- name: A derived text UNION join retains native declared comparison semantics
+  sql: SELECT p.id FROM union_model_driver p INNER JOIN (SELECT ci AS value FROM union_model_text WHERE id<=2 UNION SELECT ci FROM union_model_text WHERE id=3) q ON q.value='a' WHERE p.id=1
+  expect:
+    rows: 1
+    data: [{id: 1}]
+- name: A joined UNION operand keeps row reducers separate from branch state merging
+  sql: SELECT COUNT(*) AS n,SUM(q.b) AS total FROM union_model_driver p INNER JOIN (SELECT a,b FROM union_model_left UNION ALL SELECT a,b FROM union_model_right) q ON p.val=q.a
+  expect:
+    rows: 1
+    data: [{n: 5,total: 130}]
+- name: Correlated UNION branches retain the complete caller domain
+  sql: SELECT p.id,(SELECT l.b FROM union_model_left l WHERE l.a=p.val AND l.id=1 UNION SELECT r.b FROM union_model_right r WHERE r.a=p.val AND r.id=1) AS value FROM union_model_driver p ORDER BY p.id
+  expect:
+    rows: 4
+    data: [{id: 1,value: 10},{id: 2,value: null},{id: 3,value: null},{id: 4,value: null}]
+- name: A UNION branch alias shadows a same named caller source
+  sql: SELECT p.id,(SELECT q.b FROM (SELECT p.b FROM union_model_left p WHERE p.id=1 UNION SELECT r.b FROM union_model_right r WHERE r.id=1) q) AS value FROM union_model_driver p ORDER BY p.id
+  expect:
+    rows: 4
+    data: [{id: 1,value: 10},{id: 2,value: 10},{id: 3,value: 10},{id: 4,value: 10}]
+- name: An ALL input window stays before the parent selection
+  sql: SELECT q.b FROM (SELECT a,b FROM union_model_left UNION ALL SELECT a,b FROM union_model_right ORDER BY b LIMIT 1) q WHERE q.a=2
+  expect: {rows: 0}
+- name: A parent row window stays separate from a UNION input row window
+  sql: SELECT q.a,q.b FROM (SELECT a,b FROM union_model_left UNION ALL SELECT a,b FROM union_model_right ORDER BY b LIMIT 4) q ORDER BY q.b DESC LIMIT 1 OFFSET 1
+  expect:
+    rows: 1
+    data: [{a: 0,b: 20}]
+- name: Membership requirements inside retained UNION branches keep their own scope
+  sql: SELECT q.id FROM (SELECT id FROM union_model_left WHERE a IN(SELECT val FROM union_model_driver) UNION SELECT id FROM union_model_right WHERE a IN(SELECT val FROM union_model_driver)) q ORDER BY q.id
+  expect:
+    rows: 4
+    data: [{id: 1},{id: 2},{id: 3},{id: 4}]
+- name: A parent scalar group consumes completed distinct tuples
+  sql: SELECT COUNT(*) AS n,SUM(q.b) AS total FROM (SELECT a,b FROM union_model_left UNION SELECT a,b FROM union_model_right) q
+  expect:
+    rows: 1
+    data: [{n: 5,total: 150}]
+- name: A parent keyed group keeps complete tuple deduplication before regrouping
+  sql: SELECT q.a,COUNT(*) AS n,SUM(q.b) AS total FROM (SELECT a,b FROM union_model_left UNION SELECT a,b FROM union_model_right) q GROUP BY q.a ORDER BY q.a
+  expect:
+    rows: 4
+    data: [{a: null,n: 1,total: 30},{a: 0,n: 2,total: 30},{a: 1,n: 1,total: 40},{a: 2,n: 1,total: 50}]
+- name: A windowed nested first UNION branch retains its database through a derived source
+  sql: SELECT q.a,q.b FROM ((SELECT a,b FROM union_model_left UNION SELECT a,b FROM union_model_right ORDER BY b LIMIT 2) UNION ALL SELECT a,b FROM union_model_right WHERE id=3) q ORDER BY q.b
+  expect:
+    rows: 3
+    data: [{a: 0,b: 10},{a: 0,b: 20},{a: 2,b: 50}]
+- name: A scalar nested UNION owns the first branch window before outer deduplication
+  sql: SELECT (SELECT q.b FROM ((SELECT b FROM union_model_left UNION SELECT b FROM union_model_right ORDER BY b LIMIT 1) UNION SELECT b FROM union_model_left WHERE id=1) q) AS value
+  expect:
+    rows: 1
+    data: [{value: 10}]
+- name: A nullable joined operand may contain a bounded literal relation
+  sql: SELECT p.id,q.b FROM union_model_driver p LEFT JOIN (SELECT l.a,l.b FROM union_model_left l INNER JOIN (SELECT 1 AS tag UNION ALL SELECT 2 AS tag) tags ON tags.tag=1 LEFT JOIN union_model_right r ON r.a=l.a) q ON q.a=p.val WHERE p.id IN(1,4) ORDER BY p.id,q.b
+  expect:
+    rows: 3
+    data: [{id: 1,b: 10},{id: 1,b: 20},{id: 4,b: null}]
+- name: An empty scalar over a bounded declaration domain emits one NULL row
+  sql: SELECT (SELECT entry.name FROM (SELECT 1 AS id,'one' AS name UNION ALL SELECT 2 AS id,'two' AS name) entry WHERE entry.id=99) AS name
+  expect:
+    rows: 1
+    data: [{name: null}]
+- name: Computed literal-domain partition keys remain required scalar predicates
+  sql: SELECT p.id,(SELECT e.name FROM (SELECT 0 AS id,'zero' AS name UNION ALL SELECT 1 AS id,'one' AS name UNION ALL SELECT 100 AS id,'account' AS name) e WHERE CASE WHEN e.id=100 THEN 3 ELSE e.id END=CASE WHEN p.id=1 THEN 0 WHEN p.id=2 THEN 1 ELSE 3 END) AS name FROM union_model_driver p ORDER BY p.id
+  expect:
+    rows: 4
+    data: [{id: 1,name: zero},{id: 2,name: one},{id: 3,name: account},{id: 4,name: account}]
+- name: Computed literal-domain aggregate keys filter each caller partition
+  sql: SELECT p.id,(SELECT COUNT(*) FROM (SELECT 0 AS id UNION ALL SELECT 1 AS id UNION ALL SELECT 100 AS id) e WHERE CASE WHEN e.id=100 THEN 3 ELSE e.id END=CASE WHEN p.id=1 THEN 0 WHEN p.id=2 THEN 1 ELSE 99 END) AS n FROM union_model_driver p ORDER BY p.id
+  expect:
+    rows: 4
+    data: [{id: 1,n: 1},{id: 2,n: 1},{id: 3,n: 0},{id: 4,n: 0}]
+- name: Create a native object for a reusable SQL metadata lookup
+  sql: CREATE TABLE union_metadata_epoch_probe(id INT)
+  expect: {affected_rows: 0}
+- name: A current metadata scalar initially observes the visible native object
+  sql: SELECT (SELECT t.table_name FROM information_schema.tables t WHERE t.table_schema='memcp-tests' AND t.table_name='union_metadata_epoch_probe') AS name
+  expect: {rows: 1,data: [{name: union_metadata_epoch_probe}]}
+- name: Retire the native object without ordinary row DML
+  sql: DROP TABLE union_metadata_epoch_probe
+  expect: {affected_rows: 0}
+- name: Identical metadata SQL cannot retain a dropped object row
+  sql: SELECT (SELECT t.table_name FROM information_schema.tables t WHERE t.table_schema='memcp-tests' AND t.table_name='union_metadata_epoch_probe') AS name
+  expect: {rows: 1,data: [{name: null}]}
+- name: A nullable complete operand retains an accepted zero source candidate
+  sql: SELECT p.id,q.tag FROM union_model_driver p LEFT JOIN (SELECT d.tag FROM (SELECT 7 AS tag WHERE 1=1) d INNER JOIN (SELECT 1 AS gate WHERE 1=1) s ON s.gate=1) q ON p.id=1 WHERE p.id<=2 ORDER BY p.id
+  expect:
+    rows: 2
+    data: [{id: 1,tag: 7},{id: 2,tag: null}]
+- name: A nullable complete operand keeps zero source rejection inside its boundary
+  sql: SELECT p.id,q.tag FROM union_model_driver p LEFT JOIN (SELECT d.tag FROM (SELECT 7 AS tag WHERE 1=1) d INNER JOIN (SELECT 1 AS gate WHERE 1=0) s ON s.gate=1) q ON p.id=1 WHERE p.id<=2 ORDER BY p.id
+  expect:
+    rows: 2
+    data: [{id: 1,tag: null},{id: 2,tag: null}]
+
+
+- name: Source deletion changes a later invocation of a cached UNION producer
+  sql: DELETE FROM union_model_left WHERE id=2
+  expect: {affected_rows: 1}
+- name: A later native UNION invocation cannot retain its previous tuple buffer
+  sql: SELECT q.a FROM (SELECT a,b FROM union_model_left UNION SELECT a,b FROM union_model_right) q ORDER BY q.a
+  expect:
+    rows: 4
+    data: [{a: null},{a: 0},{a: 1},{a: 2}]
+cleanup:
+- sql: DROP TABLE IF EXISTS union_metadata_epoch_probe
+- sql: DROP TABLE IF EXISTS union_model_text
+- sql: DROP TABLE IF EXISTS union_model_driver
+- sql: DROP TABLE IF EXISTS union_model_left
+- sql: DROP TABLE IF EXISTS union_model_right

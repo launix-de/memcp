@@ -16,11 +16,11 @@ setup:
   # MEMORY table returns COUNT(*) = 0 before KILL_QUERY can cancel the scan.
   - sql: "CREATE TABLE rks_scan (id INT PRIMARY KEY) ENGINE=SAFE"
   - scm: |
-      (insert (table "memcp-tests" false "rks_rows" false) '("id" "payload")
+      (insert (table "memcp-tests" false "rks_rows" false nil) '("id" "payload")
         (map (produceN 20000) (lambda (i)
           (list (+ i 1) (concat "payload-" (+ i 1))))))
   - scm: |
-      (insert (table "memcp-tests" false "rks_scan" false) '("id")
+      (insert (table "memcp-tests" false "rks_scan" false nil) '("id")
         (map (produceN 800) (lambda (i) (list (+ i 1)))))
 
 test_cases:
@@ -67,7 +67,7 @@ test_cases:
 
   - name: "Add a WAL-backed delta generation"
     scm: |
-      (insert (table "memcp-tests" false "rks_rows" false) '("id" "payload")
+      (insert (table "memcp-tests" false "rks_rows" false nil) '("id" "payload")
         (map (produceN 2000) (lambda (i)
           (list (+ i 20001) (concat "delta-" (+ i 20001))))))
 
@@ -94,7 +94,7 @@ test_cases:
               checksum: 242011000
 
   - name: "Rebuild immediately after query cancellation"
-    scm: '(rebuild (table "memcp-tests" false "rks_rows" false) true false)'
+    scm: '(rebuild (table "memcp-tests" false "rks_rows" false nil) true false)'
     timeout: 20
 
   - name: "Rebuilt generation remains exact"
@@ -119,7 +119,7 @@ test_cases:
 
   - name: "Rebuild interrupted by hard process crash"
     parallel: rks_crash_rebuild
-    scm: '(rebuild (table "memcp-tests" false "rks_rows" false) true false)'
+    scm: '(rebuild (table "memcp-tests" false "rks_rows" false nil) true false)'
     expect:
       interrupted_ok: true
 
@@ -141,7 +141,7 @@ test_cases:
           checksum: 242011000
 
   - name: "Second rebuild succeeds after crash recovery"
-    scm: '(rebuild (table "memcp-tests" false "rks_rows" false) true false)'
+    scm: '(rebuild (table "memcp-tests" false "rks_rows" false nil) true false)'
     timeout: 20
 
   - name: "Warm a computed result index before shutdown"
@@ -154,7 +154,7 @@ test_cases:
         (define query "SELECT SQL_CALC_FOUND_ROWS id FROM rks_rows WHERE payload LIKE '%payload%' ORDER BY id LIMIT 2")
         (map (produceN 6) (lambda (_)
           (sql_execute_formula sess nil
-            (cached_parse cache (list parse_sql) "memcp-tests" query nil "root" sess true nil)
+            (cached_parse cache "sql" (list parse_sql) "memcp-tests" query nil "root" sess true nil)
             (lambda (_row) true) (lambda (_fields) nil))))
         (if (equal? (sess "found_rows") 20000) "ok"
           (error (concat "unexpected prepared count: " (sess "found_rows")))))

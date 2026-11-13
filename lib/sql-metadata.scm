@@ -32,6 +32,9 @@ ordering. The inherited value is stored, so ADD COLUMN and restart agree. */
 				'("column" col typ dimensions attributes)
 				(list "column" col typ dimensions
 					(sql_column_collation_defaults typ attributes (get_assoc options "collation")))
+				'("column" col typ dimensions attributes inputs computor)
+				(list "column" col typ dimensions
+					(sql_column_collation_defaults typ attributes (get_assoc options "collation")) inputs computor)
 				_ definition))) options ifnotexists tx)))
 
 (define sql_create_column (lambda (relation name typ dimensions attributes)
@@ -198,8 +201,9 @@ table, timing, and event around that language-neutral persisted source. */
 				(quote_mysql_string (col "Default"))
 				(concat (col "Default")))))))
 
-(define info_schema_columns_for_table (lambda (schema table_name) (begin
-	(define columns (show schema table_name))
+(define info_schema_columns_for_table (lambda (schema table_name tx) (begin
+	(define handle (table schema false table_name false tx))
+	(define columns (if (nil? handle) '() (show handle)))
 	(map (produceN (count columns)) (lambda (ordinal) (begin
 		(define col (nth columns ordinal))
 		(list
@@ -280,19 +284,17 @@ table, timing, and event around that language-neutral persisted source. */
 			"referenced_column_name" NULL)
 			(info_schema_unique_column_rows schema tbl key (cdr columns) (+ ordinal 1))))))
 
-(define info_schema_fk_unique_name (lambda (schema fk) (begin
-	(define referenced_info (show schema (fk "OtherTable") true))
-	(define referenced_meta (referenced_info "meta"))
+(define info_schema_fk_unique_name (lambda (schema fk tx) (begin
+	(define referenced_meta (show (table schema false (fk "OtherTable") false tx) "constraints" tx))
 	(define referenced_key (find (referenced_meta "Unique") (lambda (key)
 		(equal? (key "Cols") (fk "OtherColumns")))))
 	(if (nil? referenced_key) NULL (sql_key_constraint_name referenced_key))
 )))
 
-(define info_schema_key_column_usage_rows (lambda ()
+(define info_schema_key_column_usage_rows (lambda (tx)
 	(merge (map (show) (lambda (schema)
-		(merge (map (show schema) (lambda (tbl) (begin
-			(define tblinfo (show schema tbl true))
-			(define meta (tblinfo "meta"))
+		(merge (map (show schema false tx) (lambda (tbl) (begin
+			(define meta (show (table schema false tbl false tx) "constraints" tx))
 			(define unique_rows (merge (map (meta "Unique") (lambda (key)
 				(info_schema_unique_column_rows schema tbl key (key "Cols") 1)))))
 			(define foreign_rows (merge (map (filter (meta "ForeignKeys") (lambda (fk)
@@ -302,24 +304,45 @@ table, timing, and event around that language-neutral persisted source. */
 			(merge unique_rows foreign_rows)
 )))))))))
 
-(define info_schema_referential_constraint_rows (lambda ()
-	(merge (map (show) (lambda (schema)
-		(merge (map (show schema) (lambda (tbl) (begin
-			(define tblinfo (show schema tbl true))
-			(define meta (tblinfo "meta"))
-			(map (filter (meta "ForeignKeys") (lambda (fk)
-				(equal? (fk "Role") "referencing"))) (lambda (fk)
-					(list "constraint_catalog" "def" "constraint_schema" schema
-						"constraint_name" (fk "Id")
-						"unique_constraint_catalog" "def"
-						"unique_constraint_schema" schema
-						"unique_constraint_name" (info_schema_fk_unique_name schema fk)
-						"match_option" "NONE"
-						"update_rule" (toUpper (fk "UpdateMode"))
-						"delete_rule" (toUpper (fk "DeleteMode"))
-						"table_name" tbl
-						"referenced_table_name" (fk "OtherTable"))))
-)))))))))
+(define info_schema_referential_constraints_for_table (lambda (schema tbl tx) (begin
+	(define handle (table schema false tbl false tx))
+	(define meta (if (nil? handle) nil (show handle "constraints" tx)))
+	(define foreign (if (nil? meta) '() (meta "ForeignKeys")))
+	(map (filter foreign (lambda (fk)
+		(equal? (fk "Role") "referencing"))) (lambda (fk)
+			(list "constraint_catalog" "def" "constraint_schema" schema
+				"constraint_name" (fk "Id")
+				"unique_constraint_catalog" "def"
+				"unique_constraint_schema" schema
+				"unique_constraint_name" (info_schema_fk_unique_name schema fk tx)
+				"match_option" "NONE"
+				"update_rule" (toUpper (fk "UpdateMode"))
+				"delete_rule" (toUpper (fk "DeleteMode"))
+				"table_name" tbl
+				"referenced_table_name" (fk "OtherTable"))))
+)))
+
+/* Constraint catalogs describe actual native declaration publications. No
+query rows, synthetic constraints, or automatic access indexes enter them. */
+(define info_schema_constraint_rows (lambda (database name tx checks_only) (begin
+	(define handle (table database false name false tx))
+	(if (nil? handle) '() (begin
+		(define constraints (show handle "constraints" tx))
+		(define checks (coalesceNil (constraints "Checks") '()))
+		(if checks_only (map checks (lambda (check)
+			(list "constraint_catalog" "def" "constraint_schema" database
+				"constraint_name" (check "Id") "check_clause" (check "Source"))))
+			(begin
+				(define row (lambda (id type enabled)
+					(list "constraint_catalog" "def" "constraint_schema" database "constraint_name" id
+						"table_catalog" "def" "table_schema" database "table_name" name
+						"constraint_type" type "enforced" (if enabled "YES" "NO"))))
+				(merge (list
+					(map (constraints "Unique") (lambda (key)
+						(row (sql_key_constraint_name key) (if (equal? (key "Id") "PRIMARY") "PRIMARY KEY" "UNIQUE") true)))
+					(map (filter (constraints "ForeignKeys") (lambda (key) (equal? (key "Role") "referencing")))
+						(lambda (key) (row (key "Id") "FOREIGN KEY" (if (has_assoc? key "Enabled") (key "Enabled") true))))
+					(map checks (lambda (check) (row (check "Id") "CHECK" (if (has_assoc? check "Enabled") (check "Enabled") true)))))))))))))
 
 /* build one INFORMATION_SCHEMA.TABLES row from the catalog snapshot returned
 by (show schema true).  Keeping table discovery and metadata collection in one
@@ -380,6 +403,13 @@ relations are deliberately resolved by the single public get_schema dispatcher. 
 		'("Field" "is_generated")
 		'("Field" "generation_expression")
 	)
+	'((ignorecase "information_schema") (ignorecase "check_constraints")) '(
+		'("Field" "constraint_catalog") '("Field" "constraint_schema")
+		'("Field" "constraint_name") '("Field" "check_clause"))
+	'((ignorecase "information_schema") (ignorecase "table_constraints")) '(
+		'("Field" "constraint_catalog") '("Field" "constraint_schema") '("Field" "constraint_name")
+		'("Field" "table_catalog") '("Field" "table_schema") '("Field" "table_name")
+		'("Field" "constraint_type") '("Field" "enforced"))
 	'((ignorecase "information_schema") (ignorecase "key_column_usage")) '(
 		'("Field" "constraint_catalog")
 		'("Field" "constraint_schema")
@@ -472,9 +502,39 @@ relations are deliberately resolved by the single public get_schema dispatcher. 
 )))
 
 /* runtime row source for virtual INFORMATION_SCHEMA tables */
-(define information_schema_rows (lambda (schema tbl) (match '(schema tbl)
+/* Physical name selectors restrict metadata construction, never replace the
+scan predicate. A predicate receives only one native name, not an executable
+query, session, or relation. Exact selectors use native case-sensitive lookup;
+SQL value comparisons instead retain every matching catalog name. */
+(define info_schema_name_matches (lambda (selector name)
+	(match selector
+		nil true
+		'("exact" value) (equal? name value)
+		'("predicate" predicate) (predicate name)
+		_ (error "invalid metadata name selector"))))
+
+(define info_schema_selected_databases (lambda (selection)
+	(if (literal_false? selection) '()
+		(filter (show) (lambda (db)
+			(info_schema_name_matches (get_assoc (coalesceNil selection '()) "schema" nil) db))))))
+
+(define info_schema_selected_tables (lambda (db tx selection)
+	(match (get_assoc (coalesceNil selection '()) "table" nil)
+		'("exact" name) (if (nil? (table db false name false tx)) '() (list name))
+		selector (filter (show db false tx) (lambda (name)
+			(info_schema_name_matches selector name))))))
+
+/* Keep one table-level producer for columns and statistics, so name selection
+happens before invoking any per-table row builder. Ordinary enumeration retains
+its existing explicit transaction visibility. */
+(define info_schema_table_rows (lambda (tx selection rows_for_table)
+	(merge (map (info_schema_selected_databases selection) (lambda (db)
+		(merge (map (info_schema_selected_tables db tx selection) (lambda (name)
+			(rows_for_table db name tx)))))))))
+
+(define information_schema_rows (lambda (schema tbl tx selection) (match '(schema tbl)
 	'((ignorecase "information_schema") (ignorecase "schemata"))
-	(map (show) (lambda (db)
+	(map (info_schema_selected_databases selection) (lambda (db)
 		(list
 			"catalog_name" "def"
 			"schema_name" db
@@ -484,25 +544,31 @@ relations are deliberately resolved by the single public get_schema dispatcher. 
 			"schema_comment" "")))
 
 	'((ignorecase "information_schema") (ignorecase "tables"))
-	(merge (map (show) (lambda (db)
-		(map (show db true) (lambda (table_info)
-			(info_schema_table_row db table_info))))))
+	/* Native table summaries have a different descriptive contract from SHOW
+	a handle's full diagnostics. Preserve the existing summary owner and narrow
+	its names before formatting rows; columns/statistics narrow before building. */
+	(merge (map (info_schema_selected_databases selection) (lambda (db)
+		(map (filter (show db true tx) (lambda (table_info)
+			(info_schema_name_matches (get_assoc (coalesceNil selection '()) "table" nil)
+				(table_info "name"))))
+			(lambda (table_info) (info_schema_table_row db table_info))))))
 
 	'((ignorecase "information_schema") (ignorecase "columns"))
-	(merge (map (show) (lambda (db)
-		(merge (map (show db) (lambda (table_name)
-			(info_schema_columns_for_table db table_name)))))))
+	(info_schema_table_rows tx selection info_schema_columns_for_table)
 
+	'((ignorecase "information_schema") (ignorecase "check_constraints"))
+	(info_schema_table_rows tx selection (lambda (database name tx) (info_schema_constraint_rows database name tx true)))
+	'((ignorecase "information_schema") (ignorecase "table_constraints"))
+	(info_schema_table_rows tx selection (lambda (database name tx) (info_schema_constraint_rows database name tx false)))
 	'((ignorecase "information_schema") (ignorecase "key_column_usage"))
-	(info_schema_key_column_usage_rows)
+	(info_schema_key_column_usage_rows tx)
 
 	'((ignorecase "information_schema") (ignorecase "referential_constraints"))
-	(info_schema_referential_constraint_rows)
+	(info_schema_table_rows tx selection info_schema_referential_constraints_for_table)
 
 	'((ignorecase "information_schema") (ignorecase "statistics"))
-	(merge (map (show) (lambda (db)
-		(merge (map (show db) (lambda (table_name)
-			(show db table_name (sql_metadata_identity "statistics"))))))))
+	(info_schema_table_rows tx selection (lambda (db name context)
+		(show (table db false name false context) (sql_metadata_identity "statistics"))))
 
 	'((ignorecase "information_schema") (ignorecase "triggers"))
 	(info_schema_trigger_rows)
@@ -516,39 +582,13 @@ relations are deliberately resolved by the single public get_schema dispatcher. 
 	'((ignorecase "information_schema") _)
 	(error (concat "INFORMATION_SCHEMA." tbl " is not supported yet"))
 
-	(show schema tbl)
+	(show (table schema false tbl false tx))
 )))
 
 (define scan_wrapper (lambda args (match args (merge '(scanfn schema tbl) rest) (match '(schema tbl)
-	'((ignorecase "information_schema") (ignorecase "schemata"))
-	(merge '(scanfn '(session "__memcp_tx")
-		'('map '('show) '('lambda '('schema) '('list "catalog_name" "def" "schema_name" 'schema "default_character_set_name" "utf8mb4" "default_collation_name" "utf8mb3_general_ci" "sql_path" NULL "schema_comment" "")))
-	) rest)
-	'((ignorecase "information_schema") (ignorecase "tables"))
-	(list 'begin
-		/* TODO(planner-scalability): expose catalog metadata as a physical
-		relation instead of constructing a cardinality-dependent SCM list. */
-		/* Materialize a complete catalog snapshot at runtime but BEFORE the scan
-		starts.  The single (show schema true) call also keeps concurrent DROP from
-		invalidating names between table discovery and metadata collection. */
-		'('define '__info_tables_data '('merge '('map '('show) '('lambda '('s) '('map '('show 's true) '('lambda '('t) '('info_schema_table_row 's 't)))))))
-		(merge '(scanfn '(session "__memcp_tx") '__info_tables_data) rest))
-	'((ignorecase "information_schema") (ignorecase "columns"))
-	(merge '(scanfn '(session "__memcp_tx")
-		'((quote merge) '((quote map) '((quote show)) '((quote lambda) '((quote schema)) '((quote merge) '((quote map) '((quote show) (quote schema)) '((quote lambda) '((quote tbl)) '((quote info_schema_columns_for_table) (quote schema) (quote tbl))))))))
-	) rest)
-	'((ignorecase "information_schema") (ignorecase "key_column_usage"))
-	(merge '(scanfn '(session "__memcp_tx") '('info_schema_key_column_usage_rows)) rest)
-	'((ignorecase "information_schema") (ignorecase "referential_constraints"))
-	(merge '(scanfn '(session "__memcp_tx") '('info_schema_referential_constraint_rows)) rest)
-	'((ignorecase "information_schema") (ignorecase "statistics"))
-	(merge '(scanfn '(session "__memcp_tx") '('merge '('map '('show) '('lambda '('schema) '('merge '('map '('show 'schema) '('lambda '('tbl) '('show 'schema 'tbl "statistics")))))))) rest)
-	'((ignorecase "information_schema") (ignorecase "triggers"))
-	(merge '(scanfn '(session "__memcp_tx") '('info_schema_trigger_rows)) rest)
-	'((ignorecase "information_schema") (ignorecase "files"))
-	(merge '(scanfn '(session "__memcp_tx") '(list)) rest) /* empty: MemCP has no tablespaces/undo logs */
-	'((ignorecase "information_schema") (ignorecase "partitions"))
-	(merge '(scanfn '(session "__memcp_tx") '(list)) rest) /* empty: no MySQL partitions */
+	'((ignorecase "information_schema") _)
+	(merge (list scanfn (list (quote session) "__memcp_tx")
+		(list (quote information_schema_rows) schema tbl (list (quote session) "__memcp_tx") nil)) rest)
 	'(schema tbl) /* normal case */
 	(begin
 		/* scan helpers receive a runtime source as their table argument.
@@ -566,6 +606,6 @@ relations are deliberately resolved by the single public get_schema dispatcher. 
 			table_source)))
 		(define tbl_resolved (scan-table-source tbl))
 		/* materialized subqueries produce list expressions — pass as-is; real tables get (table schema name) */
-		(define tbl_arg (if (string? tbl_resolved) (list 'table schema false tbl_resolved false) tbl_resolved))
+		(define tbl_arg (if (string? tbl_resolved) (list 'table schema false tbl_resolved false (quote tx)) tbl_resolved))
 		(merge (list scanfn '(session "__memcp_tx") tbl_arg) rest))
 ))))

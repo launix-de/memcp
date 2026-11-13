@@ -1,0 +1,82 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  description: View identity uses the same identifier comparison in native bounds and residuals
+setup:
+- sql: DROP VIEW IF EXISTS dbo.FoldedViewProbe
+- sql: DROP VIEW IF EXISTS dbo.[KelvinViewProbe]
+- sql: DROP VIEW IF EXISTS dbo.FoldedViewProbe2
+- sql: DROP VIEW IF EXISTS dbo.FoldedViewProbe02
+- sql: DROP TABLE IF EXISTS dbo.folded_view_source
+- sql: CREATE TABLE dbo.folded_view_source(id INT PRIMARY KEY,value INT)
+- sql: INSERT INTO dbo.folded_view_source VALUES(7,19)
+- sql: CREATE VIEW dbo.FoldedViewProbe AS SELECT id,value FROM dbo.folded_view_source
+- sql: CREATE VIEW dbo.[KelvinViewProbe] AS SELECT id,value FROM dbo.folded_view_source
+- sql: CREATE VIEW dbo.FoldedViewProbe2 AS SELECT id,value+2 AS value FROM dbo.folded_view_source
+- sql: CREATE VIEW dbo.FoldedViewProbe02 AS SELECT id,value+20 AS value FROM dbo.folded_view_source
+test_cases:
+- name: Cold folded view lookup retains its declared output
+  sql: SELECT id,value FROM dbo.foldedviewprobe
+  expect: {rows: 1,data: [{id: 7,value: 19}]}
+- name: Warm folded view lookup reuses the same canonical declaration
+  sql: SELECT id,value FROM dbo.foldedviewprobe
+  expect: {rows: 1,data: [{id: 7,value: 19}]}
+- name: Identifier lookup retains database scope and ordinary exact view lookup
+  scm: |
+    (and (equal? (tsql_view_name "memcp-tests" "FOLDEDVIEWPROBE") "FoldedViewProbe")
+      (nil? (tsql_view_name "system" "FOLDEDVIEWPROBE"))
+      (nil? (tsql_view_name "memcp-tests" "missing_folded_view"))
+      (nil? (sql_find_view "memcp-tests" "foldedviewprobe"))
+      (not (nil? (sql_find_view "memcp-tests" "FoldedViewProbe"))))
+  expect: {result: true}
+- name: A folded view collision cannot replace the existing declaration
+  sql: CREATE VIEW dbo.FOLDEDVIEWPROBE AS SELECT id FROM dbo.folded_view_source
+  expect: {error: true}
+- name: A table cannot claim a folded view name
+  sql: CREATE TABLE dbo.foldedviewprobe(id INT)
+  expect: {error: true}
+- name: Identifier equality retains Unicode SimpleFold equivalence
+  sql: SELECT id,value FROM dbo.[kelvinviewprobe]
+  expect: {rows: 1,data: [{id: 7,value: 19}]}
+- name: Identifier lookup does not collapse natural numeric spellings
+  scm: |
+    (and (equal? (tsql_view_name "memcp-tests" "foldedviewprobe2") "FoldedViewProbe2")
+      (equal? (tsql_view_name "memcp-tests" "foldedviewprobe02") "FoldedViewProbe02"))
+  expect: {result: true}
+- name: Distinct numeric spellings retain distinct view data
+  sql: SELECT value FROM dbo.foldedviewprobe02
+  expect: {rows: 1,data: [{value: 39}]}
+- name: Rebuilt native view names retain the explicit identifier comparison
+  scm: |
+    (begin
+      (rebuild (table "system" false "views" false nil) true false)
+      (and (equal? (tsql_view_name "memcp-tests" "foldedviewprobe") "FoldedViewProbe")
+        (equal? (tsql_view_name "memcp-tests" "kelvinviewprobe") "KelvinViewProbe")))
+  expect: {result: true}
+- name: Rebuilt view output retains its declared spelling and values
+  sql: SELECT ID,VALUE FROM dbo.FOLDEDVIEWPROBE
+  expect: {rows: 1,data: [{ID: 7,VALUE: 19}]}
+- name: Restart restores the real view catalog before folded lookup
+  sql: SHUTDOWN
+  syntax: mysql
+- name: Restored folded view lookup retains complete output
+  sql: SELECT id,value FROM dbo.foldedviewprobe
+  expect: {rows: 1,data: [{id: 7,value: 19}]}
+- name: ALTER resolves the existing canonical declaration after reload
+  sql: ALTER VIEW dbo.FOLDEDVIEWPROBE AS SELECT id,value+1 AS value FROM dbo.folded_view_source
+- name: Warm lookup observes the replaced view body
+  sql: SELECT id,value FROM dbo.foldedviewprobe
+  expect: {rows: 1,data: [{id: 7,value: 20}]}
+- name: DROP retires the same declaration through a folded spelling
+  sql: DROP VIEW dbo.foldedviewprobe
+- name: Retired folded view is absent from the native catalog lookup
+  scm: (nil? (tsql_view_name "memcp-tests" "FOLDEDVIEWPROBE"))
+  expect: {result: true}
+cleanup:
+- sql: DROP VIEW IF EXISTS dbo.FoldedViewProbe
+- sql: DROP VIEW IF EXISTS dbo.[KelvinViewProbe]
+- sql: DROP VIEW IF EXISTS dbo.FoldedViewProbe2
+- sql: DROP VIEW IF EXISTS dbo.FoldedViewProbe02
+- sql: DROP TABLE IF EXISTS dbo.folded_view_source

@@ -58,9 +58,9 @@ setup:
         (define previous (settings "ShardSize"))
         (try (lambda () (begin
           (settings "ShardSize" 250)
-          (insert (table "memcp-tests" false "ua_parallel" false) '("ID")
+          (insert (table "memcp-tests" false "ua_parallel" false nil) '("ID")
             (map (produceN 1001) (lambda (i) (list (+ i 1)))))
-          (rebuild (table "memcp-tests" false "ua_parallel" false) true false)
+          (rebuild (table "memcp-tests" false "ua_parallel" false nil) true false)
           (settings "ShardSize" previous) true))
           (lambda (failure) (begin (settings "ShardSize" previous) (error failure)))))
 
@@ -77,24 +77,24 @@ setup:
   - sql: "INSERT INTO ua_access VALUES (7, 1), (8, NULL)"
   - scm: |
       (begin
-        (insert (table "memcp-tests" false "ua_period" false) '("id" "tenant_id")
+        (insert (table "memcp-tests" false "ua_period" false nil) '("id" "tenant_id")
           (map (produceN 128) (lambda (i) (list (+ i 1) (+ i 1)))))
-        (insert (table "memcp-tests" false "ua_tenant" false) '("id")
+        (insert (table "memcp-tests" false "ua_tenant" false nil) '("id")
           (map (produceN 128) (lambda (i) (list (+ i 1)))))
-        (insert (table "memcp-tests" false "ua_site" false) '("id")
+        (insert (table "memcp-tests" false "ua_site" false nil) '("id")
           (map (produceN 16) (lambda (i) (list (+ i 1)))))
-        (insert (table "memcp-tests" false "ua_fact" false) '("period_id" "site_id")
+        (insert (table "memcp-tests" false "ua_fact" false nil) '("period_id" "site_id")
           (map (produceN 65536) (lambda (i)
             (list (+ 1 (mod (floor (/ i 16)) 128)) (+ 1 (mod i 16))))))
         (map '("ua_period" "ua_tenant" "ua_site" "ua_fact" "ua_access")
-          (lambda (name) (rebuild (table "memcp-tests" false name false) true false))))
+          (lambda (name) (rebuild (table "memcp-tests" false name false nil) true false))))
 
 test_cases:
 
   - name: "Non-NULL truth filters prove distinguishing nullable UNIQUE prefixes"
     scm: |
       (begin
-        (define src '("e" "memcp-tests" "ua_event" false nil))
+        (define src '("e" "memcp-tests" "ua_event" false nil (sql_relation_declarations "memcp-tests" "ua_event" nil)))
         (list
           (order_prefix_column_nonnull? src "id"
             (scheme "(not (nil? (get_column \"e\" false \"id\" false)))"))
@@ -868,8 +868,8 @@ test_cases:
   - name: "Lookup order carrier may precede the driver in the source catalog"
     scm: |
       (begin
-        (define lookup '("f" "memcp-tests" "ua_fop_files" false nil))
-        (define driver '("r" "memcp-tests" "renderjob" false nil))
+        (define lookup '("f" "memcp-tests" "ua_fop_files" false nil (sql_relation_declarations "memcp-tests" "ua_fop_files" nil)))
+        (define driver '("r" "memcp-tests" "renderjob" false nil (sql_relation_declarations "memcp-tests" "renderjob" nil)))
         (define label (list (quote get_column) "f" false "name" false))
         (define job (list (quote get_column) "r" false "ID" false))
         (order_items_supported_by_join_driver? (list lookup driver) "f" driver
@@ -1174,12 +1174,16 @@ test_cases:
       - next_n: 2
       - next_n: 3
 
+  # Historical case identity retained: this exact query now has a native
+  # logical DISTINCT boundary and a positive ordered-result oracle.
   - name: Derived UNION DISTINCT rejects unsupported computed output order
-    sql: |
-      SELECT d.n+1 AS next_n FROM (SELECT 2 AS n UNION SELECT 1 AS n UNION SELECT 2 AS n) d ORDER BY next_n
-    # Valid SQL implementation gap: check behavior, warn until implemented.
-    expect: {"rows": 2, "data": [{"next_n": 2}, {"next_n": 3}]}
-    noncritical: true
+    sql: SELECT d.n+1 AS next_n FROM (SELECT 2 AS n UNION SELECT 1 AS n UNION SELECT 2 AS n) d ORDER BY next_n
+    expect:
+      rows: 2
+      data:
+      - next_n: 2
+      - next_n: 3
+
   - name: Derived UNION DISTINCT must preserve computed output ordering
     sql: SELECT d.n+1 AS next_n FROM (SELECT 2 AS n UNION SELECT 1 AS n UNION SELECT 2 AS n) d ORDER BY next_n
     expect:
@@ -1187,7 +1191,6 @@ test_cases:
       data:
       - next_n: 2
       - next_n: 3
-    noncritical: true
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS ua_period"

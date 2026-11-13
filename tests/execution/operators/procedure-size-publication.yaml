@@ -1,0 +1,114 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  description: Optimizer-owned procedure size publication preserves live payloads and lexical frames
+  # The module import publishes definitions into the shared IO environment.
+  isolated: true
+setup: []
+test_cases:
+- name: Named dynamic eval preserves assigned parameters with omitted and zero local slots
+  scm: |
+    (begin
+      (define named (scheme "(lambda (value) (begin (set value (+ value 2)) (eval (quote value))))"))
+      (define explicit (scheme "(lambda (value) (begin (set value (+ value 2)) (eval (quote value))) 0)"))
+      (define raw (eval (clone_optimizer_expression named)))
+      (define optimized (eval (optimize (clone_optimizer_expression named))))
+      (define zero (eval (optimize explicit)))
+      (and (equal? (raw 5) 7) (equal? (optimized 5) 7) (equal? (zero 5) 7)
+        (equal? ((jit optimized) 8) 10) (equal? ((jit zero) 8) 10)))
+  expect: {result: true}
+- name: Repeated named optimization retains fresh binding proof and nested lexical captures
+  scm: |
+    (begin
+      (define syntax (scheme "(lambda (value) (begin (set value (+ value 1)) ((lambda (more) (+ (eval (quote value)) more)) 4)))"))
+      (define once (optimize syntax))
+      (define twice (optimize once))
+      (define procedure (eval twice))
+      (and (equal? (procedure 3) 8) (equal? ((jit procedure) 6) 11)))
+  expect: {result: true}
+- name: Quoted mutable payload size remains live after publication
+  scm: |
+    (begin
+      (define payload (list "value" "short"))
+      (define procedure (eval (optimize (list 'lambda (list 'unused) (list 'quote payload)))))
+      (define before (size procedure))
+      (define payload_before (size payload))
+      (set_assoc_mut payload "value" "a substantially longer replacement payload that changes allocation size")
+      (and (equal? (- (size procedure) before) (- (size payload) payload_before))
+        (equal? ((procedure nil) "value") "a substantially longer replacement payload that changes allocation size")))
+  expect: {result: true}
+- name: Raw procedures retain additive size accounting without optimizer proof
+  scm: |
+    (begin
+      (define procedure (eval (scheme "(lambda (value) (+ value 1))")))
+      (define pair_overhead (- (size (list 0 0)) (* 2 (size 0))))
+      (and (equal? (size (list procedure procedure)) (+ pair_overhead (* 2 (size procedure))))
+        (equal? (procedure 9) 10)))
+  expect: {result: true}
+- name: Closing named lexical captures preserves payload and procedure behavior
+  scm: |
+    (begin
+      (define make (eval (optimize (scheme "(lambda (captured) (lambda (value) (+ captured (eval (quote value)))))"))))
+      (define closed (close_procedure (make 6)))
+      (and (equal? (closed 4) 10) (equal? ((jit closed) 7) 13)
+        (> (size closed) 0)))
+  expect: {result: true}
+- name: Published named closures retain native and quoted captures across forced garbage collection
+  scm: |
+    (begin
+      (define holder (newsession)) (holder "value" 7)
+      (define make (eval (optimize (scheme "(lambda (native payload) (lambda (value) (begin (cluster_object_status true) (+ (native \"value\") (payload \"value\") (eval (quote value))))))"))))
+      (define closure (jit (make holder (list "value" 5))))
+      (and (equal? (closure 3) 15) (equal? (closure 4) 16)))
+  expect: {result: true}
+- name: Named dynamic syntax survives serialization and a new code declaration
+  scm: |
+    (begin
+      (define original (eval (optimize (scheme "(lambda (value) (begin (set value (+ value 2)) (eval (quote value))))"))))
+      (define restored (eval (scheme (serialize original))))
+      (define changed (eval (optimize (scheme "(lambda (value) (begin (set value (+ value 9)) (eval (quote value))))"))))
+      (and (equal? (restored 3) 5) (equal? ((jit restored) 4) 6)
+        (equal? (changed 3) 12) (equal? ((jit changed) 4) 13)
+        (> (size original) 0) (> (size restored) 0) (> (size changed) 0)))
+  expect: {result: true}
+- name: Private module publication preserves named parser frames and captures across garbage collection
+  scm: |
+    (begin
+      (import (concat __CWD__ "/tests/execution/operators/fixtures/procedure-size-module.scm"))
+      (define native (newsession)) (native "value" 7)
+      (define procedure (jit (size_fixture_make native (list "value" 5))))
+      (and (equal? (size_fixture_named 3) 5) (equal? ((jit size_fixture_named) 4) 6)
+        (equal? (size_fixture_parser "token") "token")
+        (equal? (procedure 3) 15) (equal? (procedure 4) 16)
+        (> (size size_fixture_named) 0) (> (size size_fixture_parser) 0)))
+  expect: {result: true}
+- name: Public optimized executable aliases retain full live size accounting
+  scm: |
+    (begin
+      (define code (optimize (list 'lambda (list 'value)
+        (list 'concat (list 'eval (list 'quote 'value)) "short"))))
+      (define body (nth code 2))
+      (define procedure (eval code))
+      (define before (size procedure)) (define body_before (size body))
+      (set_assoc_mut body (car body) "a much longer executable operand replacing the dynamic expression")
+      (and (equal? (- (size procedure) before) (- (size body) body_before))
+        (equal? (procedure "unused") "a much longer executable operand replacing the dynamic expressionshort")))
+  expect: {result: true}
+- name: Public optimization preserves omitted slots and explicit zero without adding module metadata
+  scm: |
+    (begin
+      (define lambda_node (lambda (expression) (begin
+        (define plain (expression_syntax expression))
+        (if (equal? (car plain) 'lambda) plain (cadr plain)))))
+      (define named (lambda_node (optimize (list 'lambda (list 'value)
+        (list 'eval (list 'quote 'value))))))
+      (define zero_dynamic (lambda_node (optimize (list 'lambda (list)
+        (list 'eval (list 'quote 7))))))
+      (define zero_plain (lambda_node (optimize (list 'lambda (list) 7))))
+      (define explicit (lambda_node (optimize (list 'lambda (list 'value)
+        (list 'eval (list 'quote 'value)) 0))))
+      (define arities (list (count named) (count zero_dynamic) (count zero_plain) (count explicit)))
+      (if (equal? arities (list 3 3 3 4)) true
+        (error (concat "unexpected public lambda arities: " (string arities))))))
+  expect: {result: true}

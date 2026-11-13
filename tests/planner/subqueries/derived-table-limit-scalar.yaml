@@ -64,11 +64,11 @@ setup:
   - scm: |
       (begin
         (insert
-          (table "memcp-tests" false "dtl_group_parent" false)
+          (table "memcp-tests" false "dtl_group_parent" false nil)
           '("ID" "label")
           (map (produceN 1201) (lambda (i) (list (+ i 1) (concat "parent-" (+ i 1))))))
         (insert
-          (table "memcp-tests" false "dtl_group_child" false)
+          (table "memcp-tests" false "dtl_group_child" false nil)
           '("ID" "parent_id" "amount")
           (map (produceN 200) (lambda (i) (list (+ i 1) (+ i 1) (+ i 1)))))
         true)
@@ -86,11 +86,11 @@ setup:
           (list "engine" "memory")
           true)
         (insert
-          (table "memcp-tests" false ".grp:dtl_global_access:c686880da9e520fc" false)
+          (table "memcp-tests" false ".grp:dtl_global_access:c686880da9e520fc" false nil)
           (list "k0")
           (list (list 1) (list 2) (list 3) (list 4)))
         (createcolumn
-          (table "memcp-tests" false ".grp:dtl_global_access:c686880da9e520fc" false)
+          (table "memcp-tests" false ".grp:dtl_global_access:c686880da9e520fc" false nil)
           "agg_f0d39398d80eb9d2"
           "any"
           (list)
@@ -538,7 +538,7 @@ test_cases:
         (define y66_child_ag (list 1 (quote +) 0))
         (define y66_child_stage (make_group_stage
           "y66-child"
-          (list "child" "memcp-tests" "child_source" false nil)
+          (list "child" "memcp-tests" "child_source" false nil (sql_relation_declarations "memcp-tests" "child_source" nil))
           '() '(1) (list y66_child_ag) nil '() '() nil nil '()))
         (define y66_parent_ag (list
           (list (quote scalar_first_probe)
@@ -549,7 +549,7 @@ test_cases:
           0))
         (define y66_parent_stage (make_group_stage
           "y66-parent"
-          (list "parent" "memcp-tests" (make_stage_output_relation "y66-child") false nil)
+          (list "parent" "memcp-tests" (make_stage_output_relation "y66-child") false nil nil)
           '() '(1) (list y66_parent_ag) nil '() '() nil nil '()))
         (define y66_fixture (rebind_derived_stages
           "lookup"
@@ -578,7 +578,7 @@ test_cases:
       (begin
         (define y66_graph_stage (make_group_stage
           "root-old"
-          (list "probe" "memcp-tests" (make_stage_output_relation "dep-old") false nil)
+          (list "probe" "memcp-tests" (make_stage_output_relation "dep-old") false nil nil)
           '() '(1) '() nil '() '() nil nil '()))
         (define y66_graph_id_map (list
           (list "root-old" "root-new")
@@ -603,7 +603,7 @@ test_cases:
         (define y66_interface_ag (list (list (quote and) true false) (quote max) false))
         (define y66_interface_target (make_group_stage
           "interface-target"
-          (list "target-row" "memcp-tests" "dtl_join_ref" false nil)
+          (list "target-row" "memcp-tests" "dtl_join_ref" false nil (sql_relation_declarations "memcp-tests" "dtl_join_ref" nil))
           '() '(1) (list y66_interface_ag) nil '() '() nil nil '()))
         (define y66_interface_consumer_ag (list
           (list (quote get_column) "target-output" false
@@ -615,7 +615,7 @@ test_cases:
           (make_query_block
             "memcp-tests"
             (list (list "target-output" "memcp-tests"
-              (make_stage_output_relation "interface-target") true true))
+              (make_stage_output_relation "interface-target") true true nil))
             '() true nil nil nil nil nil '() '() '())
           '() '(1) (list y66_interface_consumer_ag) nil '() '() nil nil '()))
         (define y66_interface_root (make_query_block "memcp-tests" '() '()
@@ -638,7 +638,7 @@ test_cases:
         (define y66_ambiguous_second (list false (quote min) true))
         (define y66_ambiguous_target (make_group_stage
           "ambiguous-target"
-          (list "target-row" "memcp-tests" "dtl_join_ref" false nil)
+          (list "target-row" "memcp-tests" "dtl_join_ref" false nil (sql_relation_declarations "memcp-tests" "dtl_join_ref" nil))
           '() '(1) (list y66_ambiguous_first y66_ambiguous_second)
           nil '() '() nil nil '()))
         (define y66_ambiguous_consumer (make_group_stage
@@ -646,7 +646,7 @@ test_cases:
           (make_query_block
             "memcp-tests"
             (list (list "target-output" "memcp-tests"
-              (make_stage_output_relation "ambiguous-target") true true))
+              (make_stage_output_relation "ambiguous-target") true true nil))
             '() true nil nil nil nil nil '() '() '())
           '() '(1) (list (list
             (list (quote get_column) "target-output" false "agg_unknown" false)
@@ -667,7 +667,7 @@ test_cases:
           (list (quote and) true false) (quote max) false))
         (define y66_fold_child (make_group_stage
           "fold-child"
-          (list "child-row" "memcp-tests" "dtl_join_ref" false nil)
+          (list "child-row" "memcp-tests" "dtl_join_ref" false nil (sql_relation_declarations "memcp-tests" "dtl_join_ref" nil))
           '() '(1) (list y66_fold_child_ag) nil '() '() nil nil '()))
         (define y66_fold_child_col (aggregate_col_name_using
           (gs_input y66_fold_child) y66_fold_child_ag))
@@ -678,7 +678,7 @@ test_cases:
           "fold-middle"
           (make_query_block "memcp-tests"
             (list (list "fold-child-output" "memcp-tests"
-              (make_stage_output_relation "fold-child") true true))
+              (make_stage_output_relation "fold-child") true true nil))
             '() true nil nil nil nil nil '() '() '())
           '() '(1) (list y66_fold_middle_ag) nil '() '() nil nil '()))
         (define y66_fold_middle_col (aggregate_col_name_using
@@ -690,14 +690,14 @@ test_cases:
           "fold-top"
           (make_query_block "memcp-tests"
             (list (list "fold-middle-output" "memcp-tests"
-              (make_stage_output_relation "fold-middle") true true))
+              (make_stage_output_relation "fold-middle") true true nil))
             '() true nil nil nil nil nil '() '() '())
           '() '(1) (list y66_fold_top_ag) nil '() '() nil nil '()))
         (define y66_fold_top_col (aggregate_col_name_using
           (gs_input y66_fold_top) y66_fold_top_ag))
         (define y66_fold_root (make_query_block "memcp-tests"
           (list (list "fold-top-output" "memcp-tests"
-            (make_stage_output_relation "fold-top") true true))
+            (make_stage_output_relation "fold-top") true true nil))
           (list "value" (list (quote get_column)
             "fold-top-output" false y66_fold_top_col false))
           true nil nil nil nil nil '()
@@ -1157,7 +1157,7 @@ test_cases:
       (begin
         (define ag (list 1 (quote +) 0))
         (define facts (list (list (quote null_semantics) (quote scalar))))
-        (define input (list "r" "memcp-tests" "dtl_join_ref" false nil))
+        (define input (list "r" "memcp-tests" "dtl_join_ref" false nil (sql_relation_declarations "memcp-tests" "dtl_join_ref" nil)))
         (define first (make_group_stage "catalog-first" input '() '(1)
           (list ag) nil '() '() nil nil facts))
         (define second (make_group_stage "catalog-second" input '() '(1)
@@ -1165,8 +1165,8 @@ test_cases:
         (define stages (list first second))
         (define branch (make_query_block "memcp-tests"
           (list
-            (list "a" "memcp-tests" (make_stage_output_relation "catalog-first") true true)
-            (list "b" "memcp-tests" (make_stage_output_relation "catalog-second") true true))
+            (list "a" "memcp-tests" (make_stage_output_relation "catalog-first") true true nil)
+            (list "b" "memcp-tests" (make_stage_output_relation "catalog-second") true true nil))
           (list "value" (list (quote get_column) "b" false (aggregate_col_name ag) false))
           true nil nil nil nil nil '() stages '()))
         (define merged (merge_compatible_stage_output_left_joins_ir

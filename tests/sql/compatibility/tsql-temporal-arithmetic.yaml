@@ -1,0 +1,129 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Legacy arithmetic reference: https://dbfiddle.uk/bXL6jubZ
+# Fractional minute boundary: https://dbfiddle.uk/e8gpxV4r
+metadata:
+  syntax: tsql
+  requires_tds: true
+  description: Legacy temporal day arithmetic keeps declared contracts through CASE and calendar consumers
+setup:
+- sql: CREATE TABLE temporal_day_ranges(id INT PRIMARY KEY,category INT,began DATETIME,ended DATETIME,minute_stamp SMALLDATETIME,days INT)
+- sql: |
+    INSERT temporal_day_ranges VALUES
+      (1,1,CAST(N'2026-01-01' AS DATETIME),CAST(N'2026-01-05T12:00:00.003' AS DATETIME),CAST(N'2026-01-03T12:00:00' AS SMALLDATETIME),1),
+      (2,1,CAST(N'2025-12-30' AS DATETIME),NULL,NULL,2),
+      (3,2,CAST(N'2026-01-03T06:00:00' AS DATETIME),CAST(N'2026-01-04T08:00:00' AS DATETIME),CAST(N'2026-01-03T12:00:00' AS SMALLDATETIME),NULL),
+      (4,2,CAST(N'2025-12-28' AS DATETIME),CAST(N'2025-12-31T12:00:00.003' AS DATETIME),CAST(N'2026-01-03T12:00:00' AS SMALLDATETIME),-1)
+cleanup:
+- sql: DROP VIEW IF EXISTS dbo.temporal_day_totals
+- sql: DROP TABLE IF EXISTS temporal_day_ranges
+test_cases:
+- name: DATETIME minus a declared integer preserves its clock and legacy precision
+  sql: SELECT CONVERT(VARCHAR(30),ended-days,121) AS value FROM temporal_day_ranges WHERE id=1
+  expect: {rows: 1,data: [{value: '2026-01-04 12:00:00.003'}]}
+- name: DATETIME addition accepts both numeric operand positions
+  sql: |
+    SELECT CONVERT(VARCHAR(30),ended+days,121) AS forward,
+      CONVERT(VARCHAR(30),days+ended,121) AS reversed FROM temporal_day_ranges WHERE id=1
+  expect: {rows: 1,data: [{forward: '2026-01-06 12:00:00.003',reversed: '2026-01-06 12:00:00.003'}]}
+- name: Declared decimal fractions represent days rather than seconds
+  sql: |
+    SELECT CONVERT(VARCHAR(30),ended+CAST(0.5 AS DECIMAL(3,1)),121) AS forward,
+      CONVERT(VARCHAR(30),ended-CAST(1.5 AS DECIMAL(3,1)),121) AS backward
+    FROM temporal_day_ranges WHERE id=1
+  expect: {rows: 1,data: [{forward: '2026-01-06 00:00:00.003',backward: '2026-01-04 00:00:00.003'}]}
+- name: Negative fractions cross midnight without truncating the interval
+  sql: |
+    SELECT CONVERT(VARCHAR(30),CAST(N'1900-01-01' AS DATETIME)+CAST(-0.5 AS DECIMAL(2,1)),121) AS backward,
+      CONVERT(VARCHAR(30),CAST(N'1900-01-01' AS DATETIME)-CAST(-0.5 AS DECIMAL(2,1)),121) AS forward
+  expect: {rows: 1,data: [{backward: '1899-12-31 12:00:00.000',forward: '1900-01-01 12:00:00.000'}]}
+- name: Fractional arithmetic uses the existing DATETIME tick quantizer
+  sql: |
+    SELECT CONVERT(VARCHAR(30),CAST(N'2026-01-03T12:00:00' AS DATETIME)+CAST(0.0000000193 AS DECIMAL(12,10)),121) AS upward,
+      CONVERT(VARCHAR(30),CAST(N'2026-01-03T12:00:00.003' AS DATETIME)-CAST(0.0000000193 AS DECIMAL(12,10)),121) AS downward
+  expect: {rows: 1,data: [{upward: '2026-01-03 12:00:00.003',downward: '2026-01-03 12:00:00.000'}]}
+- name: BIT offsets are converted from their declared Boolean carrier
+  sql: SELECT CONVERT(VARCHAR(30),CAST(N'2026-01-03' AS DATETIME)+CAST(1 AS BIT),121) AS value
+  expect: {rows: 1,data: [{value: '2026-01-04 00:00:00.000'}]}
+- name: SMALLDATETIME integer day arithmetic preserves its minute contract
+  sql: |
+    SELECT CONVERT(VARCHAR(30),minute_stamp-days,121) AS backward,
+      CONVERT(VARCHAR(30),days+minute_stamp,121) AS forward FROM temporal_day_ranges WHERE id=1
+  expect: {rows: 1,data: [{backward: '2026-01-02 12:00:00.000',forward: '2026-01-04 12:00:00.000'}]}
+- name: NULL temporal values and intervals remain NULL
+  sql: |
+    SELECT ended-days AS absent_date,minute_stamp+days AS absent_minute
+    FROM temporal_day_ranges WHERE id=2
+  expect: {rows: 1,data: [{absent_date: null,absent_minute: null}]}
+- name: A NULL interval does not erase the declared temporal result contract
+  tds:
+    statements:
+    - sql: SELECT ended-days AS value FROM temporal_day_ranges WHERE id=3
+      expect: {rows: 1,data: [{value: null}],column_types: [{name: value,type: DATETIME}]}
+- name: CASE date arithmetic remains temporal when consumed by DATEDIFF
+  sql: |
+    SELECT id,DATEDIFF(day,began,CASE WHEN id=1 THEN ended-1 ELSE began+1 END) AS elapsed
+    FROM temporal_day_ranges ORDER BY id
+  expect: {rows: 4,data: [{id: 1,elapsed: 3},{id: 2,elapsed: 1},{id: 3,elapsed: 1},{id: 4,elapsed: 1}]}
+- name: Grouped calendar bounds retain DATETIME minus integer in the CASE alternative
+  sql: |
+    SELECT category,SUM(DATEDIFF(day,
+      CASE WHEN began<CONVERT(DATETIME,STR(1)+'.'+STR(1)+'.'+STR(2026))
+        THEN CONVERT(DATETIME,STR(1)+'.'+STR(1)+'.'+STR(2026)) ELSE began END,
+      CASE WHEN ended>=CONVERT(DATETIME,STR(1)+'.'+STR(1)+'.'+STR(2026)) OR ended IS NULL
+        THEN DATEADD(month,1,CONVERT(DATETIME,STR(1)+'.'+STR(1)+'.'+STR(2026))) ELSE ended-1 END)) AS total
+    FROM temporal_day_ranges GROUP BY category ORDER BY category
+  expect: {rows: 2,data: [{category: 1,total: 62},{category: 2,total: 27}]}
+- name: Stored calendar expressions preserve their declared arithmetic type
+  sql: |
+    CREATE VIEW dbo.temporal_day_totals AS
+    SELECT category,SUM(DATEDIFF(day,began,CASE WHEN ended IS NULL THEN began+1 ELSE ended-1 END)) AS total
+    FROM temporal_day_ranges GROUP BY category
+- name: Reading the stored arithmetic view preserves CASE and aggregate evaluation
+  sql: SELECT category,total FROM dbo.temporal_day_totals ORDER BY category
+  expect: {rows: 2,data: [{category: 1,total: 4},{category: 2,total: 2}]}
+- name: Legacy wire metadata comes from the SQL arithmetic contract
+  tds:
+    statements:
+    - sql: |
+        SELECT CAST(N'2026-01-03T12:00:00' AS DATETIME)-1 AS instant,
+          CAST(N'2026-01-03T12:00:00' AS SMALLDATETIME)+1 AS minute,
+          CAST(NULL AS DATETIME)-1 AS missing
+      expect:
+        rows: 1
+        data: [{instant: {temporal_type: datetime,value: '2026-01-02T12:00:00Z'},
+          minute: {temporal_type: smalldatetime,value: '2026-01-04T12:00:00Z'},missing: null}]
+        column_types: [{name: instant,type: DATETIME},{name: minute,type: SMALLDATETIME},{name: missing,type: DATETIME}]
+- name: DATE is not admitted as a legacy arithmetic carrier
+  sql: SELECT CAST(N'2026-01-03' AS DATE)-1 AS value
+  expect: {error: true,contains: day arithmetic is only supported}
+- name: DATETIME2 is not admitted as a legacy arithmetic carrier
+  sql: SELECT CAST(N'2026-01-03T12:00:00' AS DATETIME2(7))+1 AS value
+  expect: {error: true,contains: day arithmetic is only supported}
+- name: TIME is not admitted as a legacy arithmetic carrier
+  sql: SELECT CAST(N'12:00:00' AS TIME)-1 AS value
+  expect: {error: true,contains: day arithmetic is only supported}
+- name: Two-temporal legacy arithmetic stays an explicit unsupported profile
+  sql: SELECT CAST(N'1900-01-03' AS DATETIME)-CAST(N'1900-01-02' AS DATETIME) AS value
+  expect: {error: true,contains: two-temporal legacy arithmetic}
+- name: Numeric minus temporal stays an explicit unsupported profile
+  sql: SELECT 1-CAST(N'1900-01-02T06:00:00' AS DATETIME) AS value
+  expect: {error: true,contains: numeric minus temporal arithmetic}
+- name: A declared text offset cannot acquire day semantics from its runtime value
+  sql: SELECT CAST(N'2026-01-03' AS DATETIME)-CAST(N'1' AS NVARCHAR(3)) AS value
+  expect: {error: true,contains: declared numeric day offset}
+- name: Fractional SMALLDATETIME arithmetic remains explicit until its own rounding contract is modeled
+  sql: SELECT CAST(N'2026-01-03T12:00:00' AS SMALLDATETIME)+CAST(0.00034722 AS DECIMAL(9,8)) AS value
+  expect: {error: true,contains: fractional SMALLDATETIME arithmetic}
+- name: Lower legacy calendar overflow is checked after arithmetic
+  sql: SELECT CAST(N'1753-01-01' AS DATETIME)-1 AS value
+  expect: {error: true,contains: overflow}
+- name: Upper legacy calendar overflow is checked after arithmetic
+  sql: SELECT CAST(N'9999-12-31' AS DATETIME)+1 AS value
+  expect: {error: true,contains: overflow}
+- name: Very large declared numeric offsets fail before native part construction
+  sql: SELECT CAST(N'2026-01-03' AS DATETIME)+CAST(1e100 AS FLOAT) AS value
+  expect: {error: true,contains: temporal day arithmetic overflow}
+- name: Ordinary numeric subtraction retains its existing SQL contract
+  sql: SELECT CAST(7 AS INT)-CAST(2 AS INT) AS value
+  expect: {rows: 1,data: [{value: 5}]}

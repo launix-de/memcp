@@ -1,0 +1,90 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  requires_tds: true
+  description: UNION DISTINCT groups complete visible tuples before its final ordering and row window
+setup:
+- sql: CREATE TABLE distinct_left(id INT PRIMARY KEY,amount INT,label VARCHAR(8) COLLATE utf8mb4_bin)
+- sql: CREATE TABLE distinct_right(id INT PRIMARY KEY,amount INT,label VARCHAR(8) COLLATE utf8mb4_bin)
+- sql: INSERT distinct_left VALUES(1,1,'a'),(2,1,'a'),(3,NULL,'n'),(4,2,'b'),(5,2,'z')
+- sql: INSERT distinct_right VALUES(10,1,'a'),(11,NULL,'n'),(12,3,'c'),(13,2,'b')
+cleanup:
+- sql: DROP VIEW IF EXISTS dbo.distinct_order_view
+- sql: DROP TABLE IF EXISTS distinct_right
+- sql: DROP TABLE IF EXISTS distinct_left
+test_cases:
+- name: Computed DISTINCT output retains ascending null ordering
+  sql: SELECT amount+0 AS value FROM distinct_left UNION SELECT amount+0 FROM distinct_right ORDER BY value
+  expect: {rows: 4,data: [{value: null},{value: 1},{value: 2},{value: 3}]}
+- name: Descending DISTINCT ordering reverses the final unique result
+  sql: SELECT amount+0 AS value FROM distinct_left UNION SELECT amount+0 FROM distinct_right ORDER BY value DESC
+  expect: {rows: 4,data: [{value: 3},{value: 2},{value: 1},{value: null}]}
+- name: All visible fields participate in duplicate elimination
+  sql: SELECT amount,label FROM distinct_left UNION SELECT amount,label FROM distinct_right ORDER BY amount,label
+  expect: {rows: 5,data: [{amount: null,label: n},{amount: 1,label: a},
+      {amount: 2,label: b},{amount: 2,label: z},{amount: 3,label: c}]}
+- name: Final OFFSET FETCH skips unique tuples rather than duplicate branch rows
+  sql: |
+    SELECT amount+0 AS value FROM distinct_left UNION SELECT amount+0 FROM distinct_right
+    ORDER BY value OFFSET 1 ROWS FETCH NEXT 2 ROWS ONLY
+  expect: {rows: 2,data: [{value: 1},{value: 2}]}
+- name: Descending final window is applied after branch overlap is removed
+  sql: |
+    SELECT amount+0 AS value FROM distinct_left UNION SELECT amount+0 FROM distinct_right
+    ORDER BY value DESC OFFSET 1 ROWS FETCH NEXT 2 ROWS ONLY
+  expect: {rows: 2,data: [{value: 2},{value: 1}]}
+- name: An offset beyond unique output produces no row
+  sql: |
+    SELECT amount AS value FROM distinct_left UNION SELECT amount FROM distinct_right
+    ORDER BY value OFFSET 4 ROWS FETCH NEXT 2 ROWS ONLY
+  expect: {rows: 0}
+- name: Shared MySQL final LIMIT is also downstream of duplicate elimination
+  syntax: mysql
+  sql: SELECT amount+0 AS value FROM distinct_left UNION SELECT amount+0 FROM distinct_right ORDER BY value LIMIT 2 OFFSET 1
+  expect: {rows: 2,data: [{value: 1},{value: 2}]}
+- name: Shared PostgreSQL final LIMIT retains the same complete set window
+  syntax: psql
+  sql: SELECT amount+0 AS value FROM distinct_left WHERE amount IS NOT NULL UNION SELECT amount+0 FROM distinct_right WHERE amount IS NOT NULL ORDER BY value LIMIT 2 OFFSET 1
+  expect: {rows: 2,data: [{value: 2},{value: 3}]}
+- name: Explicit ALL retains every branch duplicate next to the DISTINCT operator
+  sql: SELECT amount AS value FROM distinct_left UNION ALL SELECT amount FROM distinct_right ORDER BY value
+  expect: {rows: 9,data: [{value: null},{value: null},{value: 1},{value: 1},{value: 1},
+      {value: 2},{value: 2},{value: 2},{value: 3}]}
+- name: NULL tuples compare equal for set duplicate elimination
+  sql: SELECT amount AS value FROM distinct_left WHERE amount IS NULL UNION SELECT amount FROM distinct_right WHERE amount IS NULL
+  expect: {rows: 1,data: [{value: null}]}
+- name: Empty set branches cannot manufacture an aggregate neutral row
+  sql: SELECT amount AS value FROM distinct_left WHERE 1=0 UNION SELECT amount FROM distinct_right WHERE 1=0 ORDER BY value
+  expect: {rows: 0}
+- name: Outer projection cannot erase original DISTINCT tuple keys before deduplication
+  sql: |
+    SELECT u.amount FROM (SELECT id,amount FROM distinct_left UNION SELECT id,amount FROM distinct_right) u ORDER BY amount
+  expect: {rows: 9,data: [{amount: null},{amount: null},{amount: 1},{amount: 1},{amount: 1},
+      {amount: 2},{amount: 2},{amount: 2},{amount: 3}]}
+- name: Constant outer projection preserves the original unique tuple multiplicity
+  sql: SELECT 1 AS value FROM (SELECT id,amount FROM distinct_left UNION SELECT id,amount FROM distinct_right) u
+  expect: {rows: 9,data: [{value: 1},{value: 1},{value: 1},{value: 1},{value: 1},{value: 1},{value: 1},{value: 1},{value: 1}]}
+- name: COUNT observes the complete unique input tuples before an outer projection
+  sql: SELECT COUNT(*) AS total,SUM(amount) AS quantity FROM (SELECT id,amount FROM distinct_left UNION SELECT id,amount FROM distinct_right) u
+  expect: {rows: 1,data: [{total: 9,quantity: 12}]}
+- name: Outer grouping consumes the deduplicated projected set
+  sql: SELECT COUNT(*) AS total,SUM(amount) AS quantity FROM (SELECT amount FROM distinct_left UNION SELECT amount FROM distinct_right) u
+  expect: {rows: 1,data: [{total: 4,quantity: 6}]}
+- name: Common numeric conversion precedes duplicate grouping and sorting
+  sql: SELECT CAST(amount AS FLOAT) AS value FROM distinct_left UNION SELECT amount FROM distinct_right ORDER BY value
+  expect: {rows: 4,data: [{value: null},{value: 1},{value: 2},{value: 3}]}
+- name: Ordinal UNION ordering names the complete projected tuple
+  sql: SELECT amount+0 AS value,label FROM distinct_left UNION SELECT amount+0,label FROM distinct_right ORDER BY 1,2 DESC
+  expect: {rows: 5,data: [{value: null,label: n},{value: 1,label: a},
+      {value: 2,label: z},{value: 2,label: b},{value: 3,label: c}]}
+- name: Stored UNION retains the logical distinct boundary
+  sql: CREATE VIEW dbo.distinct_order_view AS SELECT amount+0 AS value,label FROM distinct_left UNION SELECT amount+0,label FROM distinct_right
+- name: Typed stored UNION preserves its complete unique tuple and declaration
+  tds:
+    statements:
+    - sql: SELECT value,label FROM dbo.distinct_order_view ORDER BY value,label
+      expect:
+        rows: 5
+        data: [{value: null,label: n},{value: 1,label: a},{value: 2,label: b},{value: 2,label: z},{value: 3,label: c}]
+        column_types: [{name: value,type: INT},{name: label,type: VARCHAR,length: 8}]

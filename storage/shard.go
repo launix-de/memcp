@@ -20,6 +20,7 @@ import "fmt"
 import "math"
 import "sync"
 import "time"
+import "weak"
 import "slices"
 import "unsafe"
 import "context"
@@ -77,6 +78,7 @@ type storageShard struct {
 	writeOwners       map[uint64]uint32  // goroutine-local write ownership marker
 	writeOwnMu        sync.Mutex         // guards writeOwners
 	logfile           PersistenceLogfile // only in safe mode
+	walNeedsDecision  atomic.Bool        // this generation may replay coordinator-qualified WAL
 	// mu protects shard-local topology/runtime state:
 	//   - columns / deltaColumns and delta publication by writers
 	//   - Indexes
@@ -119,7 +121,12 @@ type storageShard struct {
 	activeTransactions atomic.Int32
 	prepared           atomic.Pointer[acidPreparation]
 	overlays           sync.Map // native transaction owners, one entry on first mutation
-	generation         atomic.Pointer[tableShardTopology]
+	// Search only: open journals are strongly owned by transactionState.shards
+	// and their existing generation pins, including imported native participants.
+	// Those owners retain the Source -> Next chain until decision. A successor
+	// must not itself retain completed transactions or retired source payloads.
+	rebuildSource weak.Pointer[storageShard]
+	generation    atomic.Pointer[tableShardTopology]
 
 	// guards RemoveFromDisk against double execution (finalizer + explicit cleanup)
 	cleanupOnce sync.Once
@@ -168,18 +175,24 @@ func (s *storageShard) nextForMaintenanceLocked(deletedRecid *uint32) *storageSh
 
 // syncNextVisibilityLocked mirrors the final visibility of one source recid
 // when transaction commit/rollback changes it after the rebuild snapshot. A
-// successor already tracked by the same transaction applies its own masks
-// and must not be locked recursively here. Caller must hold s.mu.Lock().
-func (s *storageShard) syncNextVisibilityLocked(oldRecid uint32, trackedByTx map[*storageShard]struct{}, currentTx *TxContext, persist bool) {
+// successor applies its own masks only for rows actually covered by its journal.
+// heldByCaller describes actual write-lock ownership independently from that
+// membership, so ACID's prelocked successors are never locked recursively.
+// Caller must hold s.mu.Lock().
+func (s *storageShard) syncNextVisibilityLocked(oldRecid uint32, trackedByTx map[*storageShard]struct{}, currentTx *TxContext, persist bool, heldByCaller map[*storageShard]uint32) {
 	current := s
 	currentRecid := oldRecid
-	currentIsSource := true
+	currentOwned := false
+	// The caller owns the source lock. Each completed hop transfers the newly
+	// acquired lock here until the next hop or function exit.
+	defer func() {
+		if currentOwned {
+			current.mu.Unlock()
+		}
+	}()
 	for {
 		next := current.loadNext()
 		if next == nil {
-			break
-		}
-		if _, tracked := trackedByTx[next]; tracked {
 			break
 		}
 		if !current.nextReady.Load() {
@@ -190,35 +203,60 @@ func (s *storageShard) syncNextVisibilityLocked(oldRecid uint32, trackedByTx map
 		if !ok {
 			break
 		}
+		if _, tracked := trackedByTx[next]; tracked && currentTx != nil {
+			// A successor may own a later mutation without owning this older
+			// checkpoint row's undo. Only its actual row masks apply independently.
+			if overlay := currentTx.getShardTx(next); overlay != nil {
+				covered := overlay.InsertMask.Get(uint(newRecid)) || overlay.DeletedMask.Get(uint(newRecid))
+				if currentTx.Mode == TxACID {
+					covered = overlay.DeleteMask.Get(uint(newRecid)) || overlay.UndeleteMask.Get(uint(newRecid))
+				}
+				if covered {
+					break
+				}
+			}
+		}
 		deleted := current.deletions.Get(uint(currentRecid))
 		protected := current.rollbackProtected.Get(uint(currentRecid))
-		next.mu.Lock()
-		wasDeleted := next.deletions.Get(uint(newRecid))
-		next.deletions.Set(uint(newRecid), deleted)
-		next.rollbackProtected.Set(uint(newRecid), protected)
-		generation := next.generation.Load()
-		// A transaction may span several completed rebuilds. Intermediate
-		// generations still need their in-memory visibility forwarded so the
-		// RecID translation chain remains valid, but retirement has closed their
-		// WALs. Only the current (or not-yet-published) generation is durable state.
-		persistNext := persist && (generation == nil || !generation.retired.Load())
-		if persistNext && wasDeleted != deleted {
-			txID := ""
-			if currentTx != nil {
-				txID = currentTx.durableID()
-				currentTx.RegisterTouchedShard(next)
+		func() {
+			owned := heldByCaller[next] == 0
+			if owned {
+				next.mu.Lock()
 			}
-			next.logVisibilityChangeLocked(newRecid, deleted, txID)
-		}
-		if !currentIsSource {
-			current.mu.Unlock()
-		}
-		current = next
-		currentRecid = newRecid
-		currentIsSource = false
-	}
-	if !currentIsSource {
-		current.mu.Unlock()
+			transferred := false
+			defer func() {
+				if !transferred && owned {
+					next.mu.Unlock()
+				}
+			}()
+			wasDeleted := next.deletions.Get(uint(newRecid))
+			next.deletions.Set(uint(newRecid), deleted)
+			next.rollbackProtected.Set(uint(newRecid), protected)
+			generation := next.generation.Load()
+			// A transaction may span several completed rebuilds. Intermediate
+			// generations still need their in-memory visibility forwarded so the
+			// RecID translation chain remains valid, but retirement has closed their
+			// WALs. Only the current (or not-yet-published) generation is durable state.
+			persistNext := persist && (generation == nil || !generation.retired.Load())
+			// Checkpoint intents can differ from the live bit. An undo/decision
+			// must supersede those conditional records even when that bit agrees.
+			projected := currentTx != nil && currentTx.recoveryNeedsDatabaseDecision.Load()
+			if persistNext && (wasDeleted != deleted || projected) {
+				txID := ""
+				if currentTx != nil {
+					txID = currentTx.durableID()
+					currentTx.RegisterTouchedShard(next)
+				}
+				next.logVisibilityChangeLocked(newRecid, deleted, txID)
+			}
+			if currentOwned {
+				current.mu.Unlock()
+			}
+			current = next
+			currentRecid = newRecid
+			currentOwned = owned
+			transferred = true
+		}()
 	}
 }
 
@@ -229,17 +267,17 @@ func (s *storageShard) logVisibilityChangeLocked(recid uint32, deleted bool, txI
 		return
 	}
 	if deleted {
-		s.logfile.Write(LogEntryDelete{idx: recid, txID: txID})
+		s.writeRecoveryEntry(LogEntryDelete{idx: recid, txID: txID})
 		return
 	}
-	s.logfile.Write(LogEntryUndelete{idx: recid, txID: txID})
+	s.writeRecoveryEntry(LogEntryUndelete{idx: recid, txID: txID})
 }
 
 // catchUpRebuildLocked replays only mutations that happened after the rebuild
 // snapshot. Caller holds both s.mu and next.mu. Inserts are recoverable from
 // the append-only delta suffix; deletes are the small recid journal populated
 // by nextForMaintenanceLocked.
-func (s *storageShard) catchUpRebuildLocked(next *storageShard, snapshotInsertCount int) {
+func (s *storageShard) catchUpRebuildLocked(next *storageShard, snapshotInsertCount int, initial, pending checkpointRecoveryProjection) {
 	seen := make(map[uint32]struct{}, len(s.nextPendingDeletes))
 	syncNext := func(oldRecid uint32) {
 		if _, duplicate := seen[oldRecid]; duplicate {
@@ -258,7 +296,9 @@ func (s *storageShard) catchUpRebuildLocked(next *storageShard, snapshotInsertCo
 		// replacement hidden. The bounded catch-up then publishes the committed
 		// visibility. Persist both directions: omitting the undelete transition
 		// makes a correct in-memory commit reappear as deleted after WAL replay.
-		if wasDeleted != deleted {
+		if cell, exists := pending[oldRecid]; exists {
+			next.writeCheckpointRecoveryLocked(newRecid, cell)
+		} else if _, projected := initial[oldRecid]; projected || wasDeleted != deleted {
 			next.logVisibilityChangeLocked(newRecid, deleted, "")
 		}
 	}
@@ -592,6 +632,7 @@ func (u *storageShard) load() {
 		entryCount := 0
 		for logentry := range log {
 			entryCount++
+			u.noteRecoveryEntry(logentry)
 			switch l := logentry.(type) {
 			case LogEntryDelete:
 				if isCommitted(l.txID) {
@@ -694,6 +735,13 @@ func (u *storageShard) attachColumnRuntime(colName string, columnstorage ColumnS
 		// the owning shard/column must be restored when the storage is loaded.
 		proxy.shard = u
 		proxy.colName = colName
+		if col != nil && col.ComputorDefinition != nil {
+			// Cache files own values, not the immutable declared recipe. Rebind
+			// that definition even when an older cache payload serialized a
+			// process-local callable through the legacy cache codec.
+			proxy.computor = col.Computor
+			proxy.inputCols = col.ComputorInputCols
+		}
 		if col != nil && len(col.OrcSortCols) > 0 {
 			proxy.isOrdered = true
 			u.t.hasOrderedColumns.Store(true)
@@ -755,7 +803,11 @@ func (u *storageShard) ensureColumnLoaded(colName string, alreadyLocked bool, cu
 		}
 		if col := u.schemaColumn(colName); col != nil && u.t.PersistencyMode != Memory && u.t.PersistencyMode != Cache && !isRuntimeComputedColumn(col) {
 			if initial, exists := col.InitialValues[u.uuid.String()]; exists {
-				u.columns[colName] = &StorageConst{value: col.InitialValue, count: uint64(initial.MainRows)}
+				value := col.InitialValue
+				if col.recoverPersisted != nil && !value.IsNil() {
+					value = col.recoverPersisted(value)
+				}
+				u.columns[colName] = &StorageConst{value: value, count: uint64(initial.MainRows)}
 				if initial.MainRows > u.main_count {
 					u.main_count = initial.MainRows
 					u.plannerMainRows.Store(initial.MainRows)
@@ -785,13 +837,22 @@ func (u *storageShard) ensureColumnLoaded(colName string, alreadyLocked bool, cu
 		f := u.t.schema.persistence.ReadColumn(u.uuid.String(), colName)
 		var magicbyte uint8
 		if err := binary.Read(f, binary.LittleEndian, &magicbyte); err != nil {
-			u.columns[colName] = new(StorageSparse)
-			return u.columns[colName]
+			f.Close()
+			if missing, ok := f.(interface{ Missing() bool }); ok && missing.Missing() {
+				u.columns[colName] = new(StorageSparse)
+				return u.columns[colName]
+			}
+			// A present but unreadable column is not an empty main storage.
+			// This also protects versioned readers from an absent magic byte.
+			panic(err)
 		}
 		fmt.Println("loading storage "+u.t.schema.Name+" shard "+u.uuid.String()+" column "+colName+" of type", magicbyte)
 		columnstorage := reflect.New(storages[magicbyte]).Interface().(ColumnStorage)
 		cnt := columnstorage.Deserialize(f)
 		f.Close()
+		if declaration := u.schemaColumn(colName); declaration != nil && declaration.recoverPersisted != nil && !isRuntimeComputedColumn(declaration) {
+			columnstorage = restoreCalendarStorage(columnstorage, uint32(cnt), declaration.recoverPersisted)
+		}
 		if uint32(cnt) > u.main_count {
 			u.main_count = uint32(cnt)
 			u.plannerMainRows.Store(uint32(cnt))
@@ -991,6 +1052,19 @@ func (s *storageShard) GetRead(currentTx *TxContext, mayDelegate bool) ReadAcces
 // Physical query-local IDs retain their original immutable generation. Rights
 // acquisition may install a successor, but must never reinterpret those IDs.
 func (s *storageShard) getRead(currentTx *TxContext, options shardReadOptions) ReadAccess {
+	var relation *relationScope
+	if source := s.t; source != nil && source.transitionRelation != nil {
+		transition := source.transitionRelation
+		relation = transition.borrowRead(currentTx)
+		defer func() {
+			if relation != nil {
+				ReadAccess{relation: relation}.Release()
+			}
+		}()
+	}
+	if currentTx != nil {
+		currentTx.noteNativeRowAccess(s.t)
+	}
 	admissionTable := s.t
 	if options.mutation {
 		admissionTable = nil
@@ -1039,7 +1113,9 @@ func (s *storageShard) getRead(currentTx *TxContext, options shardReadOptions) R
 	}
 	atomic.StoreUint64(&s.lastAccessed, uint64(time.Now().UnixNano()))
 	ready = true
-	return ReadAccess{shard: s}
+	result := ReadAccess{shard: s, relation: relation}
+	relation = nil
+	return result
 }
 func (s *storageShard) GetWrite(currentTx *TxContext) WriteAccess {
 	access, _ := s.getWrite(currentTx, true)
@@ -1050,6 +1126,15 @@ func (s *storageShard) GetWrite(currentTx *TxContext) WriteAccess {
 // loading/participant boundary. Nonblocking admission performs no acquisition
 // wait; callers must release any earlier writers before trying the blocking path.
 func (s *storageShard) getWrite(currentTx *TxContext, blocking bool) (WriteAccess, bool) {
+	if s.t != nil && s.t.mutationReadOnly {
+		panic("native result relation is read-only")
+	}
+	if currentTx != nil {
+		currentTx.noteNativeRowAccess(s.t)
+	}
+	if currentTx != nil {
+		currentTx.admitCatalogMutation(s.t)
+	}
 	origin := s
 	// A write retains its generation until the transaction releases it. Such
 	// pins may consume the node-wide shard budget; the per-table read reserve
@@ -1167,6 +1252,9 @@ func (s *storageShard) claimEviction() (*mosi.Handover, bool) {
 // Returns false if the shard lock cannot be acquired (non-blocking).
 func shardCleanup(ptr any, freedByType *[numEvictableTypes]int64) bool {
 	s := ptr.(*storageShard)
+	if s.t != nil && !s.t.committedAt(s.t.schema.catalogView().version) {
+		return false
+	}
 	// Safety: MEMORY-engine shards must NEVER be evicted (data would be lost permanently).
 	if s.t != nil && s.t.PersistencyMode == Memory {
 		return false
@@ -1480,8 +1568,27 @@ func (t *storageShard) resolveVisiblePrimaryRecidLocked(staleRecid uint32) (uint
 }
 
 func (t *storageShard) UpdateFunction(idx uint32, withTrigger bool, alreadyLocked bool, currentTx *TxContext, uniqueGuard *uniqueWriteGuard) func(...scm.Scmer) scm.Scmer {
-	update := t.UpdateFunctionBatch(idx, withTrigger, alreadyLocked, nil, nil, currentTx, uniqueGuard)
+	var eventWriter *nativeMutationEventWriter
+	if withTrigger && currentTx != nil && currentTx.mutationOperation != nil {
+		eventWriter = currentTx.mutationOperation.eventWriter(t)
+	}
+	update := t.UpdateFunctionBatch(idx, withTrigger, alreadyLocked, nil, nil, currentTx, uniqueGuard, eventWriter)
 	return func(a ...scm.Scmer) scm.Scmer {
+		if currentTx != nil && currentTx.mutationOperation != nil {
+			leave := currentTx.mutationOperation.borrowMutation(currentTx)
+			defer func() {
+				failure := recover()
+				leave(failure)
+				if failure != nil {
+					panic(failure)
+				}
+			}()
+		}
+
+		if currentTx != nil {
+			currentTx.admitCatalogMutation(t.t)
+			currentTx.noteNativeRowAccess(t.t)
+		}
 		t.t.beginContributionMutation()
 		defer t.t.endContributionMutation()
 		if uniqueGuard == nil && !alreadyLocked {
@@ -1491,7 +1598,7 @@ func (t *storageShard) UpdateFunction(idx uint32, withTrigger bool, alreadyLocke
 			}
 			if guard != nil {
 				defer guard.release()
-				return t.UpdateFunctionBatch(current, withTrigger, alreadyLocked, nil, nil, currentTx, guard)(a...)
+				return t.UpdateFunctionBatch(current, withTrigger, alreadyLocked, nil, nil, currentTx, guard, eventWriter)(a...)
 			}
 		}
 		return update(a...)
@@ -1512,11 +1619,25 @@ func isRuntimeComputedColumn(colDesc *column) bool {
 	return len(colDesc.OrcSortCols) > 0 || !colDesc.Computor.IsNil() || len(colDesc.ComputorInputCols) > 0
 }
 
-func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, alreadyLocked bool, batch *triggerBatch, deletedRows *uint64, currentTx *TxContext, uniqueGuard *uniqueWriteGuard) func(...scm.Scmer) scm.Scmer {
+func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, alreadyLocked bool, batch *triggerBatch, deletedRows *uint64, currentTx *TxContext, uniqueGuard *uniqueWriteGuard, eventWriter *nativeMutationEventWriter) func(...scm.Scmer) scm.Scmer {
 	declarations := t.t.columnDeclarations() // one immutable declaration contract for this callback
 	initialUniqueGuard := uniqueGuard
 	// returns a callback with which you can delete or update an item
 	return func(a ...scm.Scmer) scm.Scmer {
+		if t.t.mutationReadOnly {
+			panic("native result relation is read-only")
+		}
+		if withTrigger {
+			event := nativeMutationDelete
+			if len(a) != 0 {
+				event = nativeMutationUpdate
+			}
+			t.t.requireStatementTriggerMutation(currentTx, event)
+		}
+		if currentTx != nil {
+			currentTx.admitCatalogMutation(t.t)
+			currentTx.noteNativeRowAccess(t.t)
+		}
 		uniqueGuard := initialUniqueGuard
 		var retainedUnique *uniqueWriteGuard
 		completed := false
@@ -1543,6 +1664,10 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 		var maintenanceUpdateChanges []scm.Scmer
 		if len(a) > 0 {
 			// update command
+			t.t.requireCheckMutation(currentTx, "UPDATE")
+			var eventOldRow dataset
+			var eventChunk nativeMutationEventChunk
+			var finalValidators []TriggerDescription
 			var triggerOldRow, triggerNewRow dataset // for AFTER UPDATE triggers
 			var newRecid uint32                      // recid of the newly inserted row (for tx undo)
 			var dualWriteCols []string               // captured for dual-write forwarding
@@ -1650,6 +1775,9 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 				if len(t.t.Triggers) > 0 {
 					oldDeltaRow = append(dataset{}, d2...)
 				}
+				if eventWriter != nil {
+					eventOldRow = schemaRowFromDelta(d2)
+				}
 				// copy slice for triggers before modifying (scheme values are immutable, but Go slice is modified)
 				if withTrigger && len(t.t.Triggers) > 0 {
 					triggerOldRow = schemaRowFromDelta(d2)
@@ -1688,7 +1816,7 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 					// performs nested DML on the same target. Do not replay
 					// trigger effects when that validation detects a conflict.
 					t.runWithWriteLockReleased(currentTx, func() {
-						newSchemaRow = t.t.ExecuteBeforeUpdateTriggers(triggerOldRow, newSchemaRow, currentTx)
+						newSchemaRow, finalValidators = t.t.ExecuteBeforeUpdateTriggers(triggerOldRow, newSchemaRow, currentTx)
 					})
 					// Write trigger-mutated schema values back to delta row layout.
 					for i, colDesc := range declarations {
@@ -1718,7 +1846,18 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 					}
 				}
 
+				// CHECK may consume invocation context. Even a same-value UPDATE
+				// validates final normalized values before the physical no-op skip.
+				if len(finalValidators) != 0 {
+					newRow := schemaRowFromDelta(d2)
+					t.runWithWriteLockReleased(currentTx, func() {
+						t.t.validateFinalUpdateRow(declarations, triggerOldRow, newRow, finalValidators, currentTx)
+					})
+				}
 				if !result { // only do a write if something changed
+					if eventWriter != nil {
+						eventChunk = eventWriter.capture(nativeMutationUpdate, eventOldRow, schemaRowFromDelta(d2))
+					}
 					return // leave inner func to unlock
 				}
 
@@ -1842,7 +1981,7 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 					currentTx.AddToUndeleteMask(t, newRecid)
 					// Only log the insert (delete applied at commit)
 					if (t.t.PersistencyMode == Safe || t.t.PersistencyMode == Logged) && t.logfile != nil {
-						t.logfile.Write(LogEntryInsertHidden{cols: payloadCols, values: [][]scm.Scmer{payloadRow}, txID: currentTx.durableID()})
+						t.writeRecoveryEntry(LogEntryInsertHidden{cols: payloadCols, values: [][]scm.Scmer{payloadRow}, txID: currentTx.durableID()})
 					}
 				} else {
 					// Cursor-stability / no-tx: existing behavior
@@ -1858,9 +1997,12 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 						if currentTx != nil {
 							txID = currentTx.durableID()
 						}
-						t.logfile.Write(LogEntryDelete{idx: targetIdx, txID: txID})
-						t.logfile.Write(LogEntryInsert{cols: payloadCols, values: [][]scm.Scmer{payloadRow}, txID: txID})
+						t.writeRecoveryEntry(LogEntryDelete{idx: targetIdx, txID: txID})
+						t.writeRecoveryEntry(LogEntryInsert{cols: payloadCols, values: [][]scm.Scmer{payloadRow}, txID: txID})
 					}
+				}
+				if eventWriter != nil {
+					eventChunk = eventWriter.capture(nativeMutationUpdate, eventOldRow, schemaRowFromDelta(d2))
 				}
 				maintenanceNext = t.nextForMaintenanceLocked(&targetIdx)
 				if maintenanceNext != nil {
@@ -1870,6 +2012,13 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 					}
 				}
 			}()
+			if eventWriter != nil {
+				if alreadyLocked {
+					t.runWithWriteLockReleased(currentTx, func() { eventWriter.flush(eventChunk, uniqueGuard) })
+				} else {
+					eventWriter.flush(eventChunk, uniqueGuard)
+				}
+			}
 			// Dual-write: forward the new row to the secondary shard set
 			if result && dualWriteRow != nil {
 				t.t.dualWriteInsertFromOld(t, newRecid, dualWriteCols, dualWriteRow, currentTx)
@@ -1888,44 +2037,59 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 			}
 		} else {
 			// delete
+			var eventChunk nativeMutationEventChunk
 			var triggerDeletedRow dataset // for BEFORE/AFTER DELETE trigger
 
 			// capture row data for triggers before deletion (outside lock for BEFORE trigger)
 			if withTrigger && len(t.t.Triggers) > 0 {
-				if alreadyLocked {
-					triggerDeletedRow = make(dataset, len(declarations))
+				readDeletedRow := func() dataset {
+					row := make(dataset, len(declarations))
 					for i, col := range declarations {
-						// An internal ordered cache may need a full dependency scan,
-						// which cannot run while this shard is locked. Ordinary computed
-						// values remain OLD inputs for dependent cache maintenance.
+						// Ordered cache repair needs preparation outside this lock.
+						// Preserve ordinary computed OLD inputs for cache maintenance.
 						if col.IsTemp && len(col.OrcSortCols) > 0 {
-							triggerDeletedRow[i] = scm.NewNil()
+							row[i] = scm.NewNil()
 							continue
 						}
 						cs := t.getColumnStorageOrPanic(col.Name, true, nil)
 						if idx < t.main_count {
-							triggerDeletedRow[i] = cs.GetValue(idx)
+							row[i] = cs.GetValue(idx)
 						} else {
-							triggerDeletedRow[i] = t.getDelta(int(idx-t.main_count), col.Name)
+							row[i] = t.getDelta(int(idx-t.main_count), col.Name)
 						}
 					}
+					return row
+				}
+
+				if eventWriter != nil && eventWriter.replacement {
+					// Capture the complete candidate set without deleting rows or
+					// running their native row/constraint/AFTER effects. The drained
+					// statement owner invokes the replacement with these immutable rows.
+					accepted := false
+					func() {
+						if !alreadyLocked {
+							t.mu.Lock()
+							defer t.mu.Unlock()
+						}
+						eventChunk, accepted = eventWriter.captureReplacementDelete(idx, readDeletedRow())
+					}()
+					if alreadyLocked {
+						t.runWithWriteLockReleased(currentTx, func() { eventWriter.flush(eventChunk, uniqueGuard) })
+					} else {
+						eventWriter.flush(eventChunk, uniqueGuard)
+					}
+					if accepted && deletedRows != nil {
+						*deletedRows++
+					}
+					completed = true
+					return scm.NewBool(accepted)
+				}
+
+				if alreadyLocked {
+					triggerDeletedRow = readDeletedRow()
 				} else {
 					t.mu.RLock()
-					triggerDeletedRow = make(dataset, len(declarations))
-					for i, col := range declarations {
-						// Preserve ordinary computed OLD inputs; ordered cache repair
-						// needs preparation outside this shard's locked section.
-						if col.IsTemp && len(col.OrcSortCols) > 0 {
-							triggerDeletedRow[i] = scm.NewNil()
-							continue
-						}
-						cs := t.getColumnStorageOrPanic(col.Name, true, nil)
-						if idx < t.main_count {
-							triggerDeletedRow[i] = cs.GetValue(idx)
-						} else {
-							triggerDeletedRow[i] = t.getDelta(int(idx-t.main_count), col.Name)
-						}
-					}
+					triggerDeletedRow = readDeletedRow()
 					t.mu.RUnlock()
 				}
 
@@ -1983,14 +2147,24 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 						if currentTx != nil {
 							txID = currentTx.durableID()
 						}
-						t.logfile.Write(LogEntryDelete{idx: idx, txID: txID})
+						t.writeRecoveryEntry(LogEntryDelete{idx: idx, txID: txID})
 					}
 					maintenanceNext = t.nextForMaintenanceLocked(&idx)
+					if eventWriter != nil {
+						eventChunk = eventWriter.capture(nativeMutationDelete, triggerDeletedRow, nil)
+					}
 					result = true
 				}()
 				// deferred sync (shard already registered via OpenMapReducer)
 				if tx == nil && t.t.PersistencyMode == Safe && t.logfile != nil {
 					defer t.logfile.Flush(true)
+				}
+			}
+			if eventWriter != nil {
+				if alreadyLocked {
+					t.runWithWriteLockReleased(currentTx, func() { eventWriter.flush(eventChunk, uniqueGuard) })
+				} else {
+					eventWriter.flush(eventChunk, uniqueGuard)
 				}
 			}
 			if withTrigger && triggerDeletedRow != nil {
@@ -2198,7 +2372,10 @@ type ShardMapReducer struct {
 	mapProgram        scm.SerialProc
 	mapReduceProgram  scm.SerialProc
 	mapReduceScmer    scm.Scmer // original Scmer for network serialization
-	bufferReduceProc  *scm.Proc // source retained for a profitable typed main-buffer specialization
+	eventWriter       *nativeMutationEventWriter
+	dataInputReleases []func()             // operator-owned target data views, never row-owned leases
+	mutationFrame     *nativeMutationFrame // borrowed row/UNIQUE/batch callback payload
+	bufferReduceProc  *scm.Proc            // source retained for a profitable typed main-buffer specialization
 	bufferReduceFn    scm.JITMapReduceBufferFunc
 	bufferValueTypes  []uint8
 	bufferColumnCount int
@@ -2349,6 +2526,7 @@ func (m *ShardMapReducer) beginUniqueRow(id uint32) (uint32, bool) {
 }
 
 func (m *ShardMapReducer) endUniqueRow() {
+	m.closeMutationFrame()
 	if m.uniqueGuard != nil {
 		m.uniqueGuard.release()
 		m.uniqueGuard = nil
@@ -2363,6 +2541,7 @@ func (m *ShardMapReducer) MapOne(id uint32) scm.Scmer {
 		m.loadDirectReadArgs(id, 0, false)
 		return m.mapProgram.Call(m.args[1:])
 	}
+	defer m.closeMutationFrame()
 	if m.hasUpdateCol && !m.shardWriteLocked && m.uniqueGuard == nil {
 		current, found := m.beginUniqueRow(id)
 		if !found {
@@ -2378,7 +2557,58 @@ func (m *ShardMapReducer) MapOne(id uint32) scm.Scmer {
 	for i, getter := range getters {
 		m.args[i+1] = getter(id, 0)
 	}
-	return m.mapProgram.Call(m.args[1:])
+	if m.mutationFrame == nil {
+		return m.mapProgram.Call(m.args[1:])
+	}
+	return m.callMutationMapper(func() scm.Scmer { return m.mapProgram.Call(m.args[1:]) })
+}
+
+// Only operation-bound native writers use a rowframe. Legacy native/nil-Tx
+// callbacks retain their existing owner; readers/$increment do not register.
+func (m *ShardMapReducer) bindMutationCallback(body func(...scm.Scmer) scm.Scmer) scm.Scmer {
+	if m.currentTx == nil || m.currentTx.mutationOperation == nil {
+		return scm.NewFunc(body)
+	}
+	operation := m.currentTx.mutationOperation
+	if m.mutationFrame == nil {
+		m.mutationFrame = operation.newFrame()
+	}
+	return scm.NewFunc(m.mutationFrame.bind(func(_ *nativeMutationScope, values ...scm.Scmer) scm.Scmer {
+		defer func() {
+			if failure := recover(); failure != nil {
+				operation.failStatement(failure)
+				panic(failure)
+			}
+		}()
+		return body(values...)
+	}))
+}
+
+func (m *ShardMapReducer) closeMutationFrame() {
+	if frame := m.mutationFrame; frame != nil {
+		frame.close()
+		m.mutationFrame = nil
+	}
+}
+
+// Join escaped active calls BEFORE the physical producer reacquires a borrowed
+// write lock, returns UNIQUE rights or pools its argument/batch storage. A
+// frame-backed callback acquires its own shard lock; it never borrows this one.
+func (m *ShardMapReducer) callMutationMapper(body func() scm.Scmer) scm.Scmer {
+	if m.mutationFrame == nil {
+		return body()
+	}
+	var result scm.Scmer
+	call := func() {
+		defer m.closeMutationFrame()
+		result = body()
+	}
+	if m.shardWriteLocked {
+		m.shard.runWithWriteLockReleased(m.currentTx, call)
+	} else {
+		call()
+	}
+	return result
 }
 
 // initMapReducer initializes the general mapper, including pseudo-columns and
@@ -2451,7 +2681,8 @@ func (t *storageShard) initMapReducer(mr *ShardMapReducer, cols []string, mapRed
 			continue
 		}
 		if col == "$recmap_call" {
-			fnptr := recMapCallClosure(t, currentTx)
+			fnptr, finishInput := recMapCallClosure(t, currentTx)
+			mr.dataInputReleases = append(mr.dataInputReleases, finishInput)
 			getter := func(id uint32, batchid uint32) scm.Scmer {
 				return scm.NewClosure(fnptr, id)
 			}
@@ -2517,6 +2748,9 @@ func (t *storageShard) initMapReducer(mr *ShardMapReducer, cols []string, mapRed
 		} else {
 			mr.mainCols[i] = t.getColumnStorageOrPanic(col, alreadyLocked, currentTx)
 		}
+	}
+	if mr.hasUpdateCol && currentTx != nil && currentTx.mutationOperation != nil {
+		mr.eventWriter = currentTx.mutationOperation.eventWriter(t)
 	}
 	// Pre-allocate tagClosure fn ptrs (hoisted, one per pseudo-col type per column).
 	// These are allocated once here so processMainBlock/processDeltaBlock can use
@@ -2626,6 +2860,9 @@ func (t *storageShard) initMapReducer(mr *ShardMapReducer, cols []string, mapRed
 		if needsMutationMetadata && mr.isSet[i] {
 			if fnptr := mr.setClosureFn[i]; fnptr != nil {
 				getter := func(id uint32, batchid uint32) scm.Scmer {
+					if mr.currentTx != nil && mr.currentTx.mutationOperation != nil {
+						return mr.bindMutationCallback(func(values ...scm.Scmer) scm.Scmer { return (*fnptr)(id, values...) })
+					}
 					return scm.NewClosure(fnptr, id)
 				}
 				mr.mainGetters[i] = getter
@@ -2649,7 +2886,8 @@ func (t *storageShard) initMapReducer(mr *ShardMapReducer, cols []string, mapRed
 		}
 		if needsMutationMetadata && mr.isUpdate[i] {
 			getter := func(id uint32, batchid uint32) scm.Scmer {
-				return scm.NewFunc(mr.shard.UpdateFunctionBatch(id, true, mr.shardWriteLocked, mr.deleteBatch, &mr.deletedRows, mr.currentTx, mr.uniqueGuard))
+				borrowedLock := mr.shardWriteLocked && (mr.currentTx == nil || mr.currentTx.mutationOperation == nil)
+				return mr.bindMutationCallback(mr.shard.UpdateFunctionBatch(id, true, borrowedLock, mr.deleteBatch, &mr.deletedRows, mr.currentTx, mr.uniqueGuard, mr.eventWriter))
 			}
 			mr.mainGetters[i] = getter
 			mr.deltaGetters[i] = getter
@@ -3016,7 +3254,10 @@ func (m *ShardMapReducer) Stream(acc scm.Scmer, recids []uint32, batchids []uint
 
 func (m *ShardMapReducer) callMapReduce(acc scm.Scmer) scm.Scmer {
 	m.args[0] = acc
-	return m.mapReduceProgram.CallPrepared(m.args)
+	if m.mutationFrame == nil {
+		return m.mapReduceProgram.CallPrepared(m.args)
+	}
+	return m.callMutationMapper(func() scm.Scmer { return m.mapReduceProgram.CallPrepared(m.args) })
 }
 
 // processMainBlock is a tight loop over main-storage records – no branching
@@ -3262,6 +3503,8 @@ func (m *ShardMapReducer) processDeltaBlockBatch(acc scm.Scmer, recids []uint32,
 // batches — that must happen after all shard locks are released.
 // Call FlushTriggerBatch() separately after the scan completes.
 func (m *ShardMapReducer) Close() {
+	defer m.closeDataInputs()
+	m.closeMutationFrame()
 	for _, reader := range m.mainBulkReaders {
 		ReleaseColumnReader(reader)
 	}
@@ -3279,6 +3522,28 @@ func (m *ShardMapReducer) Close() {
 	m.bufferReduceFn = nil
 	m.bufferReduceProc = nil
 	m.bufferValueTypes = nil
+}
+
+func (m *ShardMapReducer) closeDataInputs() {
+	var pending []func()
+	var first any
+	for _, finish := range m.dataInputReleases {
+		func() {
+			defer func() {
+				if failure := recover(); failure != nil {
+					pending = append(pending, finish)
+					if first == nil {
+						first = failure
+					}
+				}
+			}()
+			finish()
+		}()
+	}
+	m.dataInputReleases = pending
+	if first != nil {
+		panic(first)
+	}
 }
 
 // FlushSideEffects flushes all batched side effects (triggers, increments,
@@ -3314,6 +3579,17 @@ func (m *ShardMapReducer) FlushSideEffects() {
 }
 
 func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLocked bool, validatedSchema *tableColumnNamesSnapshot, onFirstInsertId func(int64), isIgnore bool, currentTx *TxContext, uniqueGuard *uniqueWriteGuard) uint32 {
+	if t.t.mutationReadOnly {
+		panic("native result relation is read-only")
+	}
+	if validatedSchema == nil && t.t.statementTriggerEvents.Load()&(1<<nativeMutationInsert) != 0 {
+		panic("native statement INSERT requires the outer prepared table INSERT owner")
+	}
+	t.t.requireStatementTriggerMutation(currentTx, nativeMutationInsert)
+	var eventWriter *nativeMutationEventWriter
+	if currentTx != nil && currentTx.mutationOperation != nil {
+		eventWriter = currentTx.mutationOperation.eventWriter(t)
+	}
 	t.t.beginContributionMutation()
 	defer t.t.endContributionMutation()
 	ss := SessionStateFromTx(currentTx)
@@ -3327,13 +3603,23 @@ func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLoc
 	// provide no prepared declaration and still execute their triggers here.
 	var beforeInsertTriggers []TriggerDescription
 	if validatedSchema == nil {
+		// Raw physical insertion has no final-row proof. In particular it
+		// must not lazily compile a CHECK while a caller owns shard.mu.
+		if t.t.hasCheckConstraints.Load() {
+			panic("native final INSERT validation requires the outer table INSERT owner")
+		}
 		beforeInsertTriggers = t.t.GetTriggers(BeforeInsert)
+		for _, trigger := range beforeInsertTriggers {
+			if trigger.needsFinalInsertValues {
+				panic("native final INSERT validation requires the outer table INSERT owner")
+			}
+		}
 	}
 	if len(beforeInsertTriggers) > 0 {
 		preparedColumns := make([][]string, 0, len(values))
 		preparedRows := make([][]scm.Scmer, 0, len(values))
 		for _, row := range values {
-			rowColumns, preparedRow, ok := t.t.executeBeforeInsertTriggerRow(columns, row, isIgnore, currentTx)
+			rowColumns, preparedRow, ok := t.t.executeBeforeInsertTriggerRow(columns, row, beforeInsertTriggers, isIgnore, currentTx)
 			if !ok {
 				continue
 			}
@@ -3354,7 +3640,7 @@ func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLoc
 		firstNewRecid := uint32(0)
 		firstInsertId := onFirstInsertId
 		for i, row := range preparedRows {
-			recid := t.insertPreparedLocked(preparedColumns[i], [][]scm.Scmer{row}, firstInsertId, true, true, validatedSchema, currentTx, uniqueGuard)
+			recid := t.insertPreparedLocked(preparedColumns[i], [][]scm.Scmer{row}, firstInsertId, true, true, validatedSchema, currentTx, uniqueGuard, eventWriter)
 			if i == 0 {
 				firstNewRecid = recid
 			}
@@ -3376,7 +3662,7 @@ func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLoc
 		t.lockForMutation(currentTx, uniqueGuard)
 		defer t.mu.Unlock()
 	}
-	firstNewRecid := t.insertPreparedLocked(columns, values, onFirstInsertId, true, true, validatedSchema, currentTx, uniqueGuard)
+	firstNewRecid := t.insertPreparedLocked(columns, values, onFirstInsertId, true, true, validatedSchema, currentTx, uniqueGuard, eventWriter)
 	return firstNewRecid
 }
 
@@ -3408,7 +3694,7 @@ func (t *storageShard) insertReplica(columns []string, values [][]scm.Scmer, alr
 		t.mu.Lock()
 	}
 	firstNewInsertIdx := len(t.deltaRows())
-	firstNewRecid := t.insertPreparedLocked(columns, values, nil, false, false, nil, currentTx, nil)
+	firstNewRecid := t.insertPreparedLocked(columns, values, nil, false, false, nil, currentTx, nil, nil)
 	if next := t.nextForMaintenanceLocked(nil); next != nil {
 		// A writer may still hold an older immutable table-topology snapshot
 		// after more than one rebuild generation has been published. Replica
@@ -3441,13 +3727,13 @@ func (t *storageShard) materializedInsertedRowsLocked(firstNewInsertIdx int) ([]
 	return idx2col, logVals
 }
 
-func (t *storageShard) insertPreparedLocked(columns []string, values [][]scm.Scmer, onFirstInsertId func(int64), fireTriggers bool, propagateMaintenance bool, validatedSchema *tableColumnNamesSnapshot, currentTx *TxContext, uniqueGuard *uniqueWriteGuard) uint32 {
+func (t *storageShard) insertPreparedLocked(columns []string, values [][]scm.Scmer, onFirstInsertId func(int64), fireTriggers bool, propagateMaintenance bool, validatedSchema *tableColumnNamesSnapshot, currentTx *TxContext, uniqueGuard *uniqueWriteGuard, eventWriter *nativeMutationEventWriter) uint32 {
 	// capture starting row index for undo logging
 	firstNewRecid := t.main_count + uint32(len(t.deltaRows()))
 	firstNewInsertIdx := len(t.deltaRows()) // for capturing actual rows after insertDataset fills auto-increment
 	var triggerInsertRows []dataset
 	t.insertDataset(columns, values, onFirstInsertId, validatedSchema, currentTx)
-	if fireTriggers && len(t.t.Triggers) > 0 {
+	if fireTriggers && len(t.t.Triggers) > 0 && (t.t.statementTriggerEvents.Load() == 0 || t.t.hasNonStatementTriggers.Load()) {
 		declarations := t.t.columnDeclarations()
 		newRows := t.deltaRows()[firstNewInsertIdx:]
 		triggerInsertRows = make([]dataset, len(newRows))
@@ -3497,9 +3783,9 @@ func (t *storageShard) insertPreparedLocked(columns []string, values [][]scm.Scm
 			txID = currentTx.durableID()
 		}
 		if currentTx != nil && currentTx.Mode == TxACID {
-			t.logfile.Write(LogEntryInsertHidden{cols: payloadCols, values: payloadVals, txID: txID})
+			t.writeRecoveryEntry(LogEntryInsertHidden{cols: payloadCols, values: payloadVals, txID: txID})
 		} else {
-			t.logfile.Write(LogEntryInsert{cols: payloadCols, values: payloadVals, txID: txID})
+			t.writeRecoveryEntry(LogEntryInsert{cols: payloadCols, values: payloadVals, txID: txID})
 		}
 	}
 	if propagateMaintenance {
@@ -3515,10 +3801,28 @@ func (t *storageShard) insertPreparedLocked(columns []string, values [][]scm.Scm
 	if currentTx == nil && t.t.PersistencyMode == Safe && t.logfile != nil {
 		t.logfile.Flush(true) // write barrier; no tx means immediate sync
 	}
+	if eventWriter != nil {
+		declarations := t.t.columnDeclarations()
+		// Fix the accepted range before releasing the source lock. A concurrent
+		// append is never part of this physical INSERT's logical event.
+		accepted := t.deltaRows()[firstNewInsertIdx : firstNewInsertIdx+len(values)]
+		for _, deltaRow := range accepted {
+			row := make(dataset, len(declarations))
+			for index, declaration := range declarations {
+				if position, ok := t.deltaColumns[declaration.Name]; ok && position < len(deltaRow) {
+					row[index] = deltaRow[position]
+				}
+			}
+			chunk := eventWriter.capture(nativeMutationInsert, nil, row)
+			if len(chunk.new) != 0 {
+				t.runWithWriteLockReleased(currentTx, func() { eventWriter.flush(chunk, uniqueGuard) })
+			}
+		}
+	}
 	// execute AFTER INSERT triggers outside the shard write lock, matching the
 	// AFTER UPDATE/DELETE paths and avoiding lock inversion with computed-column
 	// invalidation on shared keytables.
-	if fireTriggers && len(t.t.Triggers) > 0 {
+	if fireTriggers && len(t.t.Triggers) > 0 && (t.t.statementTriggerEvents.Load() == 0 || t.t.hasNonStatementTriggers.Load()) {
 		func() {
 			t.mu.Unlock()
 			defer t.lockForMutation(currentTx, uniqueGuard)
@@ -3534,7 +3838,7 @@ func (t *storageShard) insertPreparedLocked(columns []string, values [][]scm.Scm
 func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer, onFirstInsertId func(int64), validatedSchema *tableColumnNamesSnapshot, currentTx *TxContext) {
 	rows := slices.Grow(t.deltaRows(), len(values))
 	firstNew := len(rows)
-	snapshot := t.t.columnNamesSnapshot.Load()
+	snapshot := t.t.columnNamesForTx(currentTx)
 	var declarations []*column
 	if snapshot != nil {
 		declarations = snapshot.declarations
@@ -3690,7 +3994,11 @@ func (s *storageShard) initialColumnValues() map[string]columnRecoveryValue {
 	result := make(map[string]columnRecoveryValue)
 	for _, c := range s.t.columnDeclarations() {
 		if initial, exists := c.InitialValues[s.uuid.String()]; exists {
-			result[c.Name] = columnRecoveryValue{c.InitialValue, initial}
+			value := c.InitialValue
+			if c.recoverPersisted != nil && !value.IsNil() {
+				value = c.recoverPersisted(value)
+			}
+			result[c.Name] = columnRecoveryValue{value, initial}
 		}
 	}
 	return result
@@ -3704,7 +4012,15 @@ func (t *storageShard) insertDatasetFromLog(columns []string, values [][]scm.Scm
 	initial := t.initialColumnValues()
 	// map provided column names to delta positions, extending deltaColumns if needed
 	colidx := make([]int, len(columns))
+	recoverers := make([]func(scm.Scmer) scm.Scmer, len(columns))
+	recoverByName := make(map[string]func(scm.Scmer) scm.Scmer)
+	for _, declaration := range t.t.columnDeclarations() {
+		if declaration.recoverPersisted != nil {
+			recoverByName[declaration.Name] = declaration.recoverPersisted
+		}
+	}
 	for i, col := range columns {
+		recoverers[i] = recoverByName[col]
 		if idx, ok := t.deltaColumns[col]; ok {
 			colidx[i] = idx
 		} else {
@@ -3722,7 +4038,11 @@ func (t *storageShard) insertDatasetFromLog(columns []string, values [][]scm.Scm
 		newrow := make([]scm.Scmer, len(t.deltaColumns))
 		for j, pos := range colidx {
 			if j < len(row) {
-				newrow[pos] = row[j]
+				value := row[j]
+				if recoverers[j] != nil && !value.IsNil() {
+					value = recoverers[j](value)
+				}
+				newrow[pos] = value
 			}
 		}
 		for col, captured := range initial {
@@ -4282,8 +4602,10 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 	var insertsSnapshot [][]scm.Scmer
 	var mainCount uint32
 	var maxInsertIndex int
+	var needsCheckpoint bool
 	var deletions NonLockingReadMap.NonBlockingBitMap
 	var rollbackProtected NonLockingReadMap.NonBlockingBitMap
+	var initialRecovery checkpointRecoveryProjection
 	for {
 		t.mu.Lock()
 		if t.state() != COLD {
@@ -4292,20 +4614,31 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 				// lock+unlock the next shard so we don't return too early (sync hazards)
 				next.mu.Lock()
 				next.mu.Unlock()
+				if t.loadNext() != next || !t.nextReady.Load() {
+					continue // the private builder failed; the source still owns recovery
+				}
 				return next // already rebuilding (happens on parallel inserts)
+			}
+			var retry func()
+			initialRecovery, retry = t.captureCheckpointRecoveryLocked()
+			if retry != nil {
+				t.mu.Unlock()
+				retry()
+				continue
 			}
 
 			maxInsertIndex = len(t.deltaRows())
 			deletions = t.deletions.Copy()
 			rollbackProtected = t.rollbackProtected.Copy()
-			if !all && maxInsertIndex == 0 && deletions.Count() == 0 {
+			needsCheckpoint = all || maxInsertIndex > 0 || deletions.Count() > 0 || t.walNeedsDecision.Load()
+			if !needsCheckpoint {
 				// Keep one owner of the column map, indexes and lazy-loaded
 				// storages. A replacement sharing those objects would guard
 				// them with a different mutex while old readers are still live.
 				t.mu.Unlock()
 				return t
 			}
-			if all || maxInsertIndex > 0 || deletions.Count() > 0 {
+			if needsCheckpoint {
 				// Materialize cold columns before publishing t.next. The initial
 				// snapshot and rebuild publication must become visible atomically;
 				// only the bounded final catch-up reacquires the source afterward.
@@ -4354,6 +4687,7 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 	}()
 	result := new(storageShard)
 	result.t = t.t
+	result.rebuildSource = weak.Make(t)
 	result.coherence.Store(t.coherence.Load())
 	result.localMutations.Store(t.localMutationState())
 	result.setState(WRITE) // mark as live so ensureLoaded() won't reset columns
@@ -4407,7 +4741,7 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 	// The expensive build can now run without blocking source mutations. Their
 	// delta suffix and delete recids are replayed by the bounded final catch-up.
 
-	if all || maxInsertIndex > 0 || deletions.Count() > 0 {
+	if needsCheckpoint {
 		result.uuid, _ = uuid.NewRandom() // new uuid, serialize
 
 		var b strings.Builder
@@ -4549,12 +4883,13 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 			if rollbackProtected.Get(uint(oldRecid)) {
 				result.rollbackProtected.Set(uint(newRecid), true)
 			}
-			if !deletions.Get(uint(oldRecid)) {
-				continue
+			if deletions.Get(uint(oldRecid)) {
+				result.deletions.Set(uint(newRecid), true)
 			}
-			result.deletions.Set(uint(newRecid), true)
-			if result.logfile != nil {
-				result.logfile.Write(LogEntryDelete{idx: newRecid})
+			if cell, pending := initialRecovery[oldRecid]; pending {
+				result.writeCheckpointRecoveryLocked(newRecid, cell)
+			} else if deletions.Get(uint(oldRecid)) && result.logfile != nil {
+				result.writeRecoveryEntry(LogEntryDelete{idx: newRecid})
 			}
 		}
 
@@ -4688,6 +5023,11 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 		// durably committed, then removes it explicitly. A finalizer must never
 		// delete files because the last committed schema may still reference them.
 
+		// The manifest describes the finished main columns only; catch-up rows
+		// remain in the delta/WAL. Persist it while this successor is private,
+		// before nextReady admits writers that would wait for result.mu.
+		writeBlobManifest(result)
+
 		// Writers never wait for result.mu while the expensive generation is
 		// built. Briefly stop source mutations, replay only the delta suffix and
 		// buffered deletes, then switch subsequent mutations to direct forwarding.
@@ -4704,7 +5044,13 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 				inherited = preparation
 				continue
 			}
-			t.catchUpRebuildLocked(result, maxInsertIndex)
+			pendingRecovery, retry := t.captureCheckpointRecoveryLocked()
+			if retry != nil {
+				t.mu.Unlock()
+				retry()
+				continue
+			}
+			t.catchUpRebuildLocked(result, maxInsertIndex, initialRecovery, pendingRecovery)
 			result.tempColumnBytes = t.tempColumnBytes
 			t.tempColumnBytes = nil
 			t.nextReady.Store(true)
@@ -4712,7 +5058,6 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 			break
 		}
 	}
-	writeBlobManifest(result)
 	// Unlock result before registration (ComputeSize needs RLock)
 	result.mu.Unlock()
 	resultLocked = false

@@ -43,6 +43,71 @@ func (tx *transactionState) executeClusterRequest(ctx context.Context, r scm.Clu
 	if err := ctx.Err(); err != nil {
 		return scm.NewNil(), err
 	}
+	if r.Method == "checkpoint_decision" {
+		if tx.coordinator != nil {
+			return tx.coordinator.Call(ctx, r)
+		}
+		if len(r.Arguments) != 3 || !r.Arguments[0].IsString() || !r.Arguments[1].IsString() || !r.Arguments[2].IsBool() {
+			return scm.NewNil(), fmt.Errorf("invalid checkpoint decision request")
+		}
+		return scm.NewBool(true), tx.checkpointDecision(r.Arguments[0].String(), r.Arguments[1].String(), r.Arguments[2].Bool())
+	}
+	if r.Method == "catalog_position" || r.Method == "catalog_retire" {
+		if tx.coordinator != nil {
+			return tx.coordinator.Call(ctx, r)
+		}
+		if tx.State != TxActive || tx.decisionStarted {
+			return scm.NewNil(), fmt.Errorf("native catalog transaction is finishing")
+		}
+		scope := tx.resourceScope()
+		if r.Method == "catalog_position" {
+			scope.mu.Lock()
+			defer scope.mu.Unlock()
+			if scope.constructing != 0 {
+				return scm.NewNil(), fmt.Errorf("native catalog construction is still active")
+			}
+			count := 0
+			if intents := tx.catalogIntents.Load(); intents != nil {
+				count = len(*intents)
+			}
+			return scm.NewSlice([]scm.Scmer{scm.NewInt(int64(count)), scm.NewInt(int64((&TxContext{transactionState: tx}).catalogDeclarationPosition()))}), nil
+		}
+		if len(r.Arguments) != 2 || r.Arguments[0].Int() < 0 || r.Arguments[1].Int() < 0 {
+			return scm.NewNil(), fmt.Errorf("invalid native catalog savepoint")
+		}
+		tx.beginResourceDecision()
+		defer tx.finishResourceDecision()
+		(&TxContext{transactionState: tx, invocationContext: ctx}).retireCatalogSavepoint(int(r.Arguments[0].Int()), int(r.Arguments[1].Int()))
+		return scm.NewBool(true), nil
+	}
+	if r.Method == "catalog_column" {
+		if tx.coordinator != nil {
+			return tx.coordinator.Call(ctx, r)
+		}
+		return tx.applyCatalogColumn(ctx, r.Arguments)
+	}
+	if r.Method == "catalog_key" {
+		if tx.coordinator != nil {
+			return tx.coordinator.Call(ctx, r)
+		}
+		return tx.applyCatalogKey(ctx, r.Arguments)
+	}
+	if r.Method == "catalog_create" {
+		if tx.coordinator != nil {
+			return tx.coordinator.Call(ctx, r)
+		}
+		if len(r.Arguments) != 5 {
+			return scm.NewNil(), fmt.Errorf("native catalog creation requires five declaration arguments")
+		}
+		invocation := &TxContext{transactionState: tx, invocationContext: ctx}
+		arguments := append(append([]scm.Scmer(nil), r.Arguments...), scm.NewAny(invocation))
+		created := nativeCreateTable(arguments...)
+		view, err := tx.executeClusterRequest(ctx, scm.ClusterRequest{Method: "view"})
+		if err != nil {
+			return scm.NewNil(), err
+		}
+		return scm.NewSlice([]scm.Scmer{created, view.(scm.Scmer)}), nil
+	}
 	if r.Method == "enlist" {
 		if tx.coordinator != nil {
 			if len(r.Arguments) == 2 {
@@ -110,9 +175,14 @@ func (tx *transactionState) executeClusterRequest(ctx context.Context, r scm.Clu
 	if registerTransactionState(tx) != tx {
 		return scm.NewNil(), fmt.Errorf("conflicting native transaction identity")
 	}
+	identity := tx.catalogIdentity.Load()
+	if identity == nil {
+		identity = new(catalogIdentity)
+	}
 	return scm.NewSlice([]scm.Scmer{scm.NewInt(int64(tx.Mode)), scm.NewBool(tx.autoCommit),
 		scm.NewInt(int64(tx.ID)), scm.NewString(tx.durableID()), scm.NewInt(int64(tx.SnapshotEpoch)),
-		scm.NewInt(int64(tx.sourceSessionID)), scm.NewString(tx.ClusterObjectID())}), nil
+		scm.NewInt(int64(tx.sourceSessionID)), scm.NewString(tx.ClusterObjectID()),
+		scm.NewString(identity.Database), scm.NewString(identity.Decision), scm.NewString(identity.Installation), scm.NewString(identity.Namespace), scm.NewString(identity.Incarnation)}), nil
 }
 func (*storageShard) ClusterObjectType() string { return "shard" }
 func (s *storageShard) ClusterObjectID() string { return s.uuid.String() }
@@ -292,6 +362,8 @@ func (st *storageShardTransaction) executeClusterRequest(ctx context.Context, r 
 			}
 		}
 		tx := &TxContext{transactionState: st.transaction}
+		tx.finalizationMu.Lock()
+		defer tx.finalizationMu.Unlock()
 		if r.Method == "prepare" || r.Method == "commit" || r.Method == "rollback" {
 			// A broken connection cancels the task, but its bounded shard loop
 			// may still be finishing. Stop admission and join that native work
@@ -313,6 +385,7 @@ func (st *storageShardTransaction) executeClusterRequest(ctx context.Context, r 
 		if err != nil {
 			return scm.NewNil(), err
 		}
+		defer tx.finishResourceDecision()
 		defer release()
 		switch r.Method {
 		case "prepare":
@@ -331,10 +404,10 @@ func (st *storageShardTransaction) executeClusterRequest(ctx context.Context, r 
 				return scm.NewNil(), fmt.Errorf("participant rollback requires a native savepoint")
 			}
 			view := r.Arguments[1].Slice()
-			if len(view) != 2 {
+			if len(view) != 5 {
 				return scm.NewNil(), fmt.Errorf("invalid native savepoint")
 			}
-			sp := Savepoint{Depth: uint32(view[0].Int()), shardLens: make(map[*storageShard]shardSavepoint)}
+			sp := Savepoint{Depth: uint32(view[0].Int()), shardLens: make(map[*storageShard]shardSavepoint), catalogCount: int(view[2].Int()), catalogDeclarationCount: int(view[3].Int()), relationSchemaCount: int(view[4].Int()), owner: tx.transactionState}
 			tx.mu.Lock()
 			for _, row := range view[1].Slice() {
 				parts := row.Slice()
@@ -360,8 +433,8 @@ func (st *storageShardTransaction) executeClusterRequest(ctx context.Context, r 
 				return scm.NewNil(), fmt.Errorf("participant transaction is not active")
 			}
 			if tx.prepared != nil {
-				engine := sharedCommitBackend()
-				if engine == nil || !readDistributedDecision(engine, tx.durableID()) {
+				engine := tx.catalogDecisionBackend()
+				if engine == nil || !readDistributedDecision(engine, tx.commitAuthorityID()) {
 					return scm.NewNil(), fmt.Errorf("participant has no shared commit decision")
 				}
 				tx.decisionStarted, tx.commitDecided = true, true
@@ -525,12 +598,29 @@ type importedTransactionCleanup struct {
 
 func importTransactionState(handle scm.ClusterHandle) scm.Scmer {
 	view := handle.View.Slice()
-	if len(view) != 7 {
+	if len(view) != 12 {
 		panic("invalid native transaction view")
 	}
 	state := &transactionState{ID: atomic.AddUint64(&txIDCounter, 1), Mode: TxMode(view[0].Int()), State: TxActive,
 		autoCommit: view[1].Bool(), SnapshotEpoch: uint64(view[4].Int()), sourceSessionID: uint64(view[5].Int()),
 		clusterID: view[6].String(), coordinator: &handle}
+	if !view[7].IsNil() && view[7].String() != "" {
+		identity := &catalogIdentity{Database: view[7].String(), Decision: view[8].String(), Installation: view[9].String(), Namespace: view[10].String(), Incarnation: view[11].String()}
+		if state.Mode != TxACID || !validDatabaseName(identity.Database) {
+			panic("invalid native catalog transaction view")
+		}
+		for _, id := range []string{identity.Decision, identity.Installation, identity.Incarnation} {
+			if _, err := uuid.Parse(id); err != nil {
+				panic("invalid native catalog authority")
+			}
+		}
+		if identity.Namespace != "" {
+			if _, err := uuid.Parse(identity.Namespace); err != nil {
+				panic("invalid native catalog namespace")
+			}
+		}
+		state.catalogIdentity.Store(identity)
+	}
 	durableID := view[3].String()
 	state.walTxID.Store(&durableID)
 	return scm.NewAny(&TxContext{transactionState: registerTransactionState(state), remoteObject: &handle})
@@ -543,6 +633,23 @@ func registerTransactionState(state *transactionState) *transactionState {
 		previous, loaded := importedTransactions.LoadOrStore(key, entry)
 		if loaded {
 			if existing := previous.(weak.Pointer[transactionState]).Value(); existing != nil {
+				if incoming := state.catalogIdentity.Load(); incoming != nil {
+					existing.mu.Lock()
+					current := existing.catalogIdentity.Load()
+					if current == nil {
+						if len(existing.shardTransactions()) != 0 || existing.readViews.Load() != nil {
+							existing.mu.Unlock()
+							panic("catalog promotion reached a participant with existing row effects")
+						}
+						existing.Mode = TxACID
+						existing.SnapshotEpoch = state.SnapshotEpoch
+						existing.catalogIdentity.Store(incoming)
+					} else if current.Database != incoming.Database || current.Incarnation != incoming.Incarnation || current.Decision != incoming.Decision || current.Installation != incoming.Installation || current.Namespace != incoming.Namespace {
+						existing.mu.Unlock()
+						panic("conflicting native catalog authority")
+					}
+					existing.mu.Unlock()
+				}
 				return existing
 			}
 			if !importedTransactions.CompareAndSwap(key, previous, entry) {
@@ -583,19 +690,34 @@ func (origin *TxContext) BindClusterInvocation(value scm.Scmer) (scm.Scmer, erro
 	if target.remoteObject != nil && target.ClusterObjectID() != origin.ClusterObjectID() {
 		return scm.NewNil(), fmt.Errorf("one invocation cannot mix independent transaction coordinators")
 	}
-	// A nested delegated task can return to its original coordinator, where the
-	// reference resolves to the native root instead of an imported proxy.
-	// Preparation owns target exclusively; callbacks have not started. Statement
-	// identity/cancellation and native reader cleanup remain with that executor.
-	target.transactionState = origin.transactionState
-	target.remoteObject = origin.remoteObject
-	if target.SessionState != nil {
-		target.SessionState.ID = origin.sourceSessionID
+	if target.transactionState == origin.transactionState {
+		return scm.NewAny(target), nil
 	}
-	return scm.NewAny(target), nil
+	// Borrow cancellation and cleanup, never the outer operator's commit
+	// authority. In particular an anonymous scan must not COMMIT an explicitly
+	// captured transaction when its own invocation completes.
+	bound := origin.newInvocation()
+	if bound.remoteObject == nil {
+		bound.retainRemoteInvocation()
+	}
+	ctx := scanQueryContext(target, context.Background())
+	ss := &scm.SessionState{ID: origin.sourceSessionID}
+	seq := ss.BeginQuery("Cluster", "captured transaction")
+	ss.SetQueryContext(seq, ctx)
+	bound.beginQuery(ss, seq, "captured transaction")
+	stop := context.AfterFunc(ctx, func() { ss.KillQuery(seq) })
+	cleanup := func() { stop(); bound.endQuery(seq) }
+	if !target.RetainQueryWork(cleanup) {
+		cleanup()
+		return scm.NewNil(), fmt.Errorf("native invocation is finishing")
+	}
+	return scm.NewAny(bound), nil
 }
 
 func (tx *TxContext) Serialize(ctx *scm.SerializationContext) (scm.Scmer, error) {
+	if tx.relationData != nil {
+		return scm.NewNil(), fmt.Errorf("independent private execution views cannot be serialized")
+	}
 	return tx.transactionState.Serialize(ctx)
 }
 

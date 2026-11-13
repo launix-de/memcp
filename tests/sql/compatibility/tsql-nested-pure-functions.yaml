@@ -1,0 +1,99 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Nested pure scalar source binds transactional callee snapshots into guarded plans
+
+test_cases:
+  - name: Pure source admission defers nested callee binding to the current transaction
+    tds:
+      statements:
+        - {connection: owner, sql: BEGIN TRANSACTION}
+        - connection: owner
+          sql: CREATE FUNCTION dbo.nested_calendar(@year INT,@month INT,@day INT) RETURNS DATE AS BEGIN RETURN DATEFROMPARTS(@year,@month,@day); END
+        - connection: owner
+          sql: |
+            CREATE FUNCTION dbo.nested_day(@year INT,@month INT) RETURNS INT AS BEGIN
+              DECLARE @date DATE;
+              SET @date=dbo.nested_calendar(@year,@month,1);
+              RETURN DAY(@date);
+            END
+        - connection: owner
+          sql: SELECT dbo.nested_day(2024,2) AS value
+          expect: {rows: 1, data: [{value: 1}]}
+        - {connection: owner, sql: COMMIT TRANSACTION}
+        - sql: CREATE TABLE nested_inputs(id INT PRIMARY KEY, year_value INT, month_value INT)
+        - sql: INSERT nested_inputs VALUES(1,2024,2),(2,2024,2),(3,NULL,2)
+        - sql: SELECT id,dbo.nested_day(year_value,month_value) AS value FROM nested_inputs ORDER BY id
+          expect: {rows: 3, data: [{id: 1, value: 1}, {id: 2, value: 1}, {id: 3, value: null}]}
+
+  - name: A warm caller rebinds the changed body and default declaration of its callee
+    tds:
+      statements:
+        - sql: CREATE FUNCTION dbo.nested_add(@value INT,@offset INT=3) RETURNS INT AS BEGIN RETURN @value+@offset; END
+        - sql: CREATE FUNCTION dbo.nested_total(@value INT) RETURNS INT AS BEGIN RETURN dbo.nested_add(@value,DEFAULT); END
+        - sql: SELECT dbo.nested_total(5) AS value
+          expect: {rows: 1, data: [{value: 8}]}
+        - sql: DROP FUNCTION dbo.nested_add
+        - sql: CREATE FUNCTION dbo.nested_add(@value INT,@offset INT=7) RETURNS INT AS BEGIN RETURN @value*2+@offset; END
+        - sql: SELECT dbo.nested_total(5) AS value
+          expect: {rows: 1, data: [{value: 17}]}
+        - sql: SELECT dbo.nested_total(NULL) AS value
+          expect: {rows: 1, data: [{value: null}]}
+
+  - name: Nested callees receive the current explicit date context
+    tds:
+      statements:
+        - sql: CREATE FUNCTION dbo.nested_parse_day(@value NVARCHAR(10)) RETURNS INT AS BEGIN RETURN DAY(CONVERT(DATE,@value)); END
+        - sql: CREATE FUNCTION dbo.nested_context(@value NVARCHAR(10)) RETURNS INT AS BEGIN RETURN dbo.nested_parse_day(@value); END
+        - sql: SET DATEFORMAT dmy
+        - sql: SELECT dbo.nested_context('04/03/2024') AS value
+          expect: {rows: 1, data: [{value: 4}]}
+        - sql: SET DATEFORMAT mdy
+        - sql: SELECT dbo.nested_context('04/03/2024') AS value
+          expect: {rows: 1, data: [{value: 3}]}
+
+  - name: Transactional callee replacement remains private and rollback restores warm binding
+    tds:
+      statements:
+        - {connection: owner, sql: BEGIN TRANSACTION}
+        - {connection: owner, sql: DROP FUNCTION dbo.nested_add}
+        - {connection: owner, sql: 'CREATE FUNCTION dbo.nested_add(@value INT,@offset INT=20) RETURNS INT AS BEGIN RETURN @value+@offset; END'}
+        - connection: owner
+          sql: SELECT dbo.nested_total(5) AS value
+          expect: {rows: 1, data: [{value: 25}]}
+        - connection: observer
+          sql: SELECT dbo.nested_total(5) AS value
+          expect: {rows: 1, data: [{value: 17}]}
+        - {connection: owner, sql: ROLLBACK TRANSACTION}
+        - connection: owner
+          sql: SELECT dbo.nested_total(5) AS value
+          expect: {rows: 1, data: [{value: 17}]}
+
+  - name: A missing callee cannot leave an earlier callable in a warm caller plan
+    tds:
+      statements:
+        - sql: DROP FUNCTION dbo.nested_add
+        - sql: SELECT dbo.nested_total(5) AS value
+          expect: {error: true}
+        - sql: CREATE FUNCTION dbo.nested_add(@value INT,@offset INT=1) RETURNS INT AS BEGIN RETURN @value-@offset; END
+        - sql: SELECT dbo.nested_total(5) AS value
+          expect: {rows: 1, data: [{value: 4}]}
+
+  - name: Relational recipes bind their pure declarations and control expressions before expansion
+    tds:
+      statements:
+        - sql: |
+            CREATE FUNCTION dbo.nested_relational(@limit INT) RETURNS INT AS BEGIN
+              DECLARE @value INT=1;
+              SELECT @value=COUNT(*) FROM nested_inputs;
+              WHILE @value<@limit BEGIN
+                SET @value=@value+1;
+              END
+              IF @value=8 SET @value=@value+2;
+              RETURN @value;
+            END
+        - sql: SELECT dbo.nested_relational(8) AS value
+          expect: {rows: 1, data: [{value: 10}]}

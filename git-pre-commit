@@ -448,24 +448,39 @@ parallel_tests=()
 sequential_tests=()
 debug_parallel_tests=()
 debug_sequential_tests=()
-suite_mode() {
-  python3 - "$1" <<'PY'
+if ! suite_modes=$(python3 - "${test_files_arr[@]}" <<'PY'
 import sys
 
 from run_sql_tests import suite_execution_mode, suite_scan_debugging
 
-mode = suite_execution_mode(sys.argv[1])
-print(("debug_" if suite_scan_debugging(sys.argv[1]) else "") + mode)
+modes = []
+for path in sys.argv[1:]:
+    mode = suite_execution_mode(path)
+    modes.append(("debug_" if suite_scan_debugging(path) else "") + mode)
+# Do not publish a successful prefix if a later suite fails validation.
+print("\n".join(modes))
 PY
-}
+); then
+  echo "❌ Invalid suite scheduling metadata" >&2
+  exit 1
+fi
+suite_modes_arr=()
+if [ -n "$suite_modes" ]; then
+  mapfile -t suite_modes_arr <<< "$suite_modes"
+fi
+if [ "${#suite_modes_arr[@]}" -ne "${#test_files_arr[@]}" ]; then
+  echo "❌ Suite scheduling metadata count differs from the selected files" >&2
+  exit 1
+fi
 
 # Scheduling contract:
 # - shared suites may run in parallel against the long-lived shared MemCP
 #   process
 # - every exclusive suite runs sequentially against that same process lifecycle
 #   and data directory
-for tf in "${test_files_arr[@]}"; do
-  case "$(suite_mode "$tf")" in
+for idx in "${!test_files_arr[@]}"; do
+  tf="${test_files_arr[$idx]}"
+  case "${suite_modes_arr[$idx]}" in
     parallel) parallel_tests+=("$tf") ;;
     exclusive) sequential_tests+=("$tf") ;;
     debug_parallel) debug_parallel_tests+=("$tf") ;;
@@ -479,6 +494,17 @@ if ! [[ "$max_jobs" =~ ^[0-9]+$ ]] || [ "$max_jobs" -lt 1 ]; then
   max_jobs=4
 fi
 if [ "$max_jobs" -gt 16 ]; then max_jobs=16; fi
+
+# A basename is not a suite identity: different directories may use the same
+# filename. Keep one stable artifact stem per selected path across all phases.
+declare -A suite_artifact_stems=()
+{
+  for idx in "${!test_files_arr[@]}"; do
+    tf="${test_files_arr[$idx]}"
+    suite_artifact_stems["$tf"]="suite-$idx"
+    printf '%s\t%s\n' "suite-$idx" "$tf"
+  done
+} > "$tmpdir/suite-index.tsv"
 
 lockfile="/tmp/memcp-print.lock"
 
@@ -592,15 +618,15 @@ PY
 if [ "$fail_fast_mode" -eq 1 ]; then
   for idx in "${!test_files_arr[@]}"; do
     tf="${test_files_arr[$idx]}"
-    out="$tmpdir/$(basename "$tf").out"
-    statusf="$tmpdir/$(basename "$tf").status"
+    out="$tmpdir/${suite_artifact_stems[$tf]}.out"
+    statusf="$tmpdir/${suite_artifact_stems[$tf]}.status"
     run_one "$tf" "$out" "$statusf"
     if [ ! -f "$statusf" ] || ! grep -q OK "$statusf"; then
       all_passed=false
       remaining_files=$(( ${#test_files_arr[@]} - idx - 1 ))
       if [ "$remaining_files" -gt 0 ]; then
         for skipped_tf in "${test_files_arr[@]:$((idx + 1))}"; do
-          echo SKIP > "$tmpdir/$(basename "$skipped_tf").status"
+          echo SKIP > "$tmpdir/${suite_artifact_stems[$skipped_tf]}.status"
         done
         echo "⏭️  Fail-fast skipped $remaining_files suite files after the first failure"
       fi
@@ -611,8 +637,8 @@ else
   run_phase() {
     local -n phase_parallel="$1" phase_sequential="$2"
     for tf in "${phase_parallel[@]}"; do
-      out="$tmpdir/$(basename "$tf").out"
-      statusf="$tmpdir/$(basename "$tf").status"
+      out="$tmpdir/${suite_artifact_stems[$tf]}.out"
+      statusf="$tmpdir/${suite_artifact_stems[$tf]}.status"
       run_one "$tf" "$out" "$statusf" &
       active_pids+=("$!")
       while [ ${#active_pids[@]} -ge $max_jobs ]; do
@@ -627,8 +653,8 @@ else
     active_pids=()
 
     for tf in "${phase_sequential[@]}"; do
-      out="$tmpdir/$(basename "$tf").out"
-      statusf="$tmpdir/$(basename "$tf").status"
+      out="$tmpdir/${suite_artifact_stems[$tf]}.out"
+      statusf="$tmpdir/${suite_artifact_stems[$tf]}.status"
       run_one "$tf" "$out" "$statusf"
     done
   }
@@ -662,7 +688,7 @@ print_scm_coverage_report
 stop_supervisor
 
 for tf in "${test_files_arr[@]}"; do
-  statusf="$tmpdir/$(basename "$tf").status"
+  statusf="$tmpdir/${suite_artifact_stems[$tf]}.status"
   if [ -f "$statusf" ] && grep -q OK "$statusf"; then
     :
   elif [ -f "$statusf" ] && grep -q SKIP "$statusf"; then
@@ -677,7 +703,7 @@ if [ "$all_passed" != true ]; then
   echo ""
   echo "🔎 Detailed failure logs:"
   for tf in "${test_files_arr[@]}"; do
-    statusf="$tmpdir/$(basename "$tf").status"
+    statusf="$tmpdir/${suite_artifact_stems[$tf]}.status"
     if [ -f "$statusf" ] && grep -q OK "$statusf"; then
       continue
     fi
@@ -685,14 +711,14 @@ if [ "$all_passed" != true ]; then
       continue
     fi
     echo ""
-    echo "===== $(basename "$tf") ====="
-    out="$tmpdir/$(basename "$tf").out"
+    echo "===== $tf ====="
+    out="$tmpdir/${suite_artifact_stems[$tf]}.out"
     if [ -f "$out" ]; then
       cat "$out"
     else
       echo "(no output captured)"
     fi
-    echo "===== end $(basename "$tf") ====="
+    echo "===== end $tf ====="
   done
   echo ""
 fi

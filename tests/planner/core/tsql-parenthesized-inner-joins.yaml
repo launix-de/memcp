@@ -1,0 +1,50 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  description: Leading T-SQL inner join groups retain native sources and their lexical names
+setup:
+- sql: CREATE TABLE grouped_left(id INT PRIMARY KEY, amount INT)
+- sql: CREATE TABLE grouped_middle(id INT PRIMARY KEY, left_id INT)
+- sql: CREATE TABLE grouped_right(id INT PRIMARY KEY, middle_id INT)
+- sql: INSERT grouped_left VALUES(1,10),(2,20),(3,30)
+- sql: INSERT grouped_middle VALUES(11,1),(12,1),(13,2),(14,9)
+- sql: INSERT grouped_right VALUES(21,11),(22,11),(23,13),(24,14)
+cleanup:
+- sql: DROP VIEW IF EXISTS grouped_view
+- sql: DROP TABLE IF EXISTS grouped_right
+- sql: DROP TABLE IF EXISTS grouped_middle
+- sql: DROP TABLE IF EXISTS grouped_left
+test_cases:
+- name: A leading inner group keeps its qualified names and the following join predicate
+  sql: |
+    SELECT dbo.grouped_left.id AS left_id,r.id AS right_id
+    FROM (dbo.grouped_left INNER JOIN dbo.grouped_middle
+      ON dbo.grouped_left.id=dbo.grouped_middle.left_id)
+    INNER JOIN dbo.grouped_right AS r ON r.middle_id=dbo.grouped_middle.id
+    ORDER BY r.id
+  expect: {rows: 3,data: [{left_id: 1,right_id: 21},{left_id: 1,right_id: 22},{left_id: 2,right_id: 23}]}
+- name: A nested leading group composes with an ordinary comma source in a view
+  sql: |
+    CREATE VIEW dbo.grouped_view AS
+    SELECT l.id AS id,m.id AS middle_id
+    FROM ((grouped_left AS l INNER JOIN grouped_middle AS m ON l.id=m.left_id)
+      INNER JOIN grouped_right AS r ON r.middle_id=m.id),
+      (SELECT 1 AS required_id) AS t
+    WHERE l.id=t.required_id
+- name: View expansion preserves join multiplicity
+  sql: SELECT id,middle_id FROM dbo.grouped_view
+  expect: {rows: 2,data: [{id: 1,middle_id: 11},{id: 1,middle_id: 11}]}
+- name: A following relation is invisible within the grouped join predicate
+  sql: |
+    SELECT l.id FROM (grouped_left AS l INNER JOIN grouped_middle AS m ON r.middle_id=m.id)
+      INNER JOIN grouped_right AS r ON l.id=m.left_id
+  expect: {error: true,contains: unknown relation alias}
+- name: A grouped outer join is not flattened as an inner join group
+  sql: SELECT l.id FROM (grouped_left AS l LEFT JOIN grouped_middle AS m ON l.id=m.left_id)
+  expect: {error: true,contains: parenthesized source requires an inner join group}
+- name: A parenthesized join after a comma cannot see the preceding source
+  sql: |
+    SELECT p.id FROM grouped_left AS p,
+      (grouped_middle AS m INNER JOIN grouped_right AS r ON p.id=r.middle_id)
+  expect: {error: true,contains: parenthesized join groups require the leading FROM source}

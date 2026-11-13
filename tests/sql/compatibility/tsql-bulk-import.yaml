@@ -1,0 +1,692 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Real bulk-copy wire requests use declared columns and native transactional insertion
+setup:
+- scm: (eval (parse_sql "memcp-tests" "CREATE USER bulk_reader IDENTIFIED BY 'pw'" nil))
+- sql: GRANT CONNECT,SELECT TO bulk_reader
+- sql: DROP TABLE IF EXISTS bulk_items
+- sql: DROP TABLE IF EXISTS bulk_defaults
+- sql: DROP TABLE IF EXISTS bulk_failure
+cleanup:
+- scm: (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS bulk_reader" nil))
+- sql: DROP TABLE IF EXISTS bulk_items
+- sql: DROP TABLE IF EXISTS bulk_defaults
+- sql: DROP TABLE IF EXISTS bulk_failure
+- sql: DROP TABLE IF EXISTS bulk_currency_payload
+test_cases:
+- name: Bulk copy preserves explicit identity Unicode binary and nullable values
+  tds:
+    statements:
+    - sql: DROP TABLE IF EXISTS bulk_items
+    - sql: CREATE TABLE bulk_items (id INT IDENTITY(1,1) PRIMARY KEY, label NVARCHAR(64) NULL, payload VARBINARY(16)
+        NULL, enabled BIT NOT NULL)
+    - bulk:
+        table: '[memcp-tests].[dbo].[bulk_items]'
+        columns:
+        - id
+        - label
+        - payload
+        - enabled
+        keep_nulls: true
+        rows:
+        - - 17
+          - Grüße 🙂
+          - binary_hex: 00ff41
+          - true
+        - - 23
+          - null
+          - null
+          - false
+      expect:
+        rows: 2
+    - sql: SELECT id,label,CONVERT(VARCHAR(32),payload,2) AS payload_hex,enabled FROM bulk_items ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 17
+          label: Grüße 🙂
+          payload_hex: 00FF41
+          enabled: true
+        - id: 23
+          label: null
+          payload_hex: null
+          enabled: false
+    - sql: INSERT INTO bulk_items(label,payload,enabled) VALUES('generated',NULL,1)
+    - sql: SELECT id FROM bulk_items WHERE label='generated'
+      expect:
+        rows: 1
+        data:
+        - id: 24
+- name: Bulk seed rows retain legacy datetime GUID decimal and ANSI column declarations
+  setup:
+  - sql: DROP TABLE IF EXISTS bulk_seed_payload
+  - sql: CREATE TABLE bulk_seed_payload(id INT IDENTITY(100,1) PRIMARY KEY,label VARCHAR(50),created_at DATETIME
+      NOT NULL,changed_at DATETIME NULL,token UNIQUEIDENTIFIER ROWGUIDCOL NOT NULL,amount DECIMAL(12,2),calendar_day
+      DATE)
+  cleanup:
+  - sql: DROP TABLE IF EXISTS bulk_seed_payload
+  tds:
+    statements:
+    - bulk:
+        table: '[memcp-tests].[dbo].[bulk_seed_payload]'
+        columns:
+        - id
+        - label
+        - created_at
+        - changed_at
+        - token
+        - amount
+        - calendar_day
+        keep_nulls: true
+        rows:
+        - - 100
+          - binary_hex: 5072fc66756e672080
+          - '2020-01-02 03:04:05Z'
+          - null
+          - binary_hex: 33221100554477668899aabbccddeeff
+          - '1234.56'
+          - '2020-01-02'
+      expect:
+        rows: 1
+    - sql: SELECT id,label,created_at,changed_at,LOWER(CONVERT(VARCHAR(36),token)) AS token,amount,calendar_day
+        FROM bulk_seed_payload
+      expect:
+        rows: 1
+        data:
+        - id: 100
+          label: Prüfung €
+          created_at:
+            temporal_type: datetime
+            value: '2020-01-02T03:04:05Z'
+          changed_at: null
+          token: 00112233-4455-6677-8899-aabbccddeeff
+          amount: '1234.56'
+          calendar_day:
+            temporal_type: date
+            value: '2020-01-02'
+        column_types:
+        - name: id
+          type: INT
+        - name: label
+          type: VARCHAR
+          length: 50
+        - name: created_at
+          type: DATETIME
+        - name: changed_at
+          type: DATETIME
+        - name: token
+          type: VARCHAR
+          length: 36
+        - name: amount
+          type: DECIMAL
+          precision: 12
+          scale: 2
+        - name: calendar_day
+          type: DATE
+- name: Floating declarations retain their declared TDS widths
+  setup:
+  - sql: CREATE TABLE bulk_float_widths(single_value REAL,narrow_value FLOAT(24),wide_value FLOAT(53))
+  - sql: INSERT bulk_float_widths VALUES(1.25,2.5,3.75)
+  cleanup:
+  - sql: DROP TABLE IF EXISTS bulk_float_widths
+  tds:
+    statements:
+    - sql: SET FMTONLY ON; SELECT * FROM bulk_float_widths; SET FMTONLY OFF
+      expect:
+        rows: 0
+        column_types:
+        - {name: single_value, type: REAL}
+        - {name: narrow_value, type: REAL}
+        - {name: wide_value, type: FLOAT}
+    - sql: SELECT * FROM bulk_float_widths
+      expect:
+        rows: 1
+        data: [{single_value: 1.25, narrow_value: 2.5, wide_value: 3.75}]
+        column_types:
+        - {name: single_value, type: REAL}
+        - {name: narrow_value, type: REAL}
+        - {name: wide_value, type: FLOAT}
+- name: Currency bulk declarations carry width and preserve implicit fixed scale
+  setup:
+  - sql: CREATE TABLE bulk_currency_payload(id INT PRIMARY KEY,amount MONEY NOT NULL,fee SMALLMONEY NULL)
+  # The released Go client's CopyIn does not encode MONEY. These bounded wire
+  # fixtures send its actual MONEYN descriptor and coefficient representation.
+  tds:
+    rpc_packets:
+    - packet_type: 1
+      payload_hex: 1600000012000000020000000000000000000100000049004e0053004500520054002000420055004c004b0020005b006d0065006d00630070002d00740065007300740073005d002e005b00640062006f005d002e005b00620075006c006b005f00630075007200720065006e00630079005f007000610079006c006f00610064005d00200028005b00690064005d00200049004e0054002c005b0061006d006f0075006e0074005d0020004d004f004e00450059002c005b006600650065005d00200053004d0041004c004c004d004f004e00450059002900
+    - packet_type: 7
+      payload_hex: 810300000000000100260402690064000000000001006e080661006d006f0075006e0074000000000001006e0403660065006500d104010000000800000000a85ebc000484de0100d1040200000008ffffffffffffffff00fd100000000200000000000000
+    - packet_type: 1
+      payload_hex: 1600000012000000020000000000000000000100000049004e0053004500520054002000420055004c004b0020005b006d0065006d00630070002d00740065007300740073005d002e005b00640062006f005d002e005b00620075006c006b005f00630075007200720065006e00630079005f007000610079006c006f00610064005d00200028005b00690064005d00200049004e0054002c005b0061006d006f0075006e0074005d0020004d004f004e00450059002c005b006600650065005d00200053004d0041004c004c004d004f004e00450059002900
+    - packet_type: 7
+      payload_hex: 810300000000000100260402690064000000000001006e040661006d006f0075006e0074000000000001006e0403660065006500fd000000000000000000000000
+      error: true
+      contains: [bulk wire declaration differs]
+- name: Currency bulk rows preserve values and nullable fixed-scale payloads
+  sql: SELECT id,CAST(amount AS DECIMAL(12,4)) AS amount,CAST(fee AS DECIMAL(12,4)) AS fee FROM bulk_currency_payload ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - {id: 1, amount: 1234.5, fee: 12.25}
+    - {id: 2, amount: -0.0001, fee: null}
+
+- name: Bulk NULL default substitution and omitted caller defaults share INSERT semantics
+  tds:
+    hostname: bulk-client
+    appname: bulk-importer
+    statements:
+    - sql: DROP TABLE IF EXISTS bulk_defaults
+    - sql: CREATE TABLE bulk_defaults (id INT PRIMARY KEY, status INT NULL DEFAULT 7, actor VARCHAR(128) DEFAULT
+        USER_NAME(), origin VARCHAR(255) DEFAULT HOST_NAME()+'#'+APP_NAME())
+    - bulk:
+        table: '[memcp-tests].[dbo].[bulk_defaults]'
+        columns:
+        - id
+        - status
+        rows:
+        - - 1
+          - null
+        - - 2
+          - 9
+      expect:
+        rows: 2
+    - sql: SELECT id,status,actor,origin FROM bulk_defaults ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          status: 7
+          actor: dbo
+          origin: bulk-client#bulk-importer
+        - id: 2
+          status: 9
+          actor: dbo
+          origin: bulk-client#bulk-importer
+    - bulk:
+        table: '[memcp-tests].[dbo].[bulk_defaults]'
+        columns:
+        - id
+        - status
+        keep_nulls: true
+        rows:
+        - - 3
+          - null
+      expect:
+        rows: 1
+    - sql: SELECT status FROM bulk_defaults WHERE id=3
+      expect:
+        rows: 1
+        data:
+        - status: null
+- name: Duplicate key after an accepted bulk row rolls back the entire request
+  tds:
+    statements:
+    - sql: DROP TABLE IF EXISTS bulk_failure
+    - sql: CREATE TABLE bulk_failure (id INT PRIMARY KEY, required_value INT NOT NULL)
+    - bulk:
+        table: '[memcp-tests].[dbo].[bulk_failure]'
+        columns:
+        - id
+        - required_value
+        rows:
+        - - 1
+          - 10
+        - - 1
+          - 20
+      expect:
+        error: true
+    - sql: SELECT COUNT(*) AS n FROM bulk_failure
+      expect:
+        rows: 1
+        data:
+        - n: 0
+    - bulk:
+        table: '[memcp-tests].[dbo].[bulk_failure]'
+        columns:
+        - id
+        - required_value
+        keep_nulls: true
+        rows:
+        - - 2
+          - 30
+        - - 3
+          - null
+      expect:
+        error: true
+    - sql: SELECT COUNT(*) AS n FROM bulk_failure
+      expect:
+        rows: 1
+        data:
+        - n: 0
+    - bulk:
+        table: '[memcp-tests].[dbo].[bulk_failure]'
+        columns:
+        - id
+        - required_value
+        rows:
+        - - 4
+          - 40
+      expect:
+        rows: 1
+    - sql: SELECT id,required_value FROM bulk_failure
+      expect:
+        rows: 1
+        data:
+        - id: 4
+          required_value: 40
+- name: A bulk request participates in the caller transaction and rolls back natively
+  tds:
+    statements:
+    - sql: DROP TABLE IF EXISTS bulk_failure
+    - sql: CREATE TABLE bulk_failure (id INT PRIMARY KEY, required_value INT NOT NULL)
+    - sql: BEGIN TRANSACTION
+    - bulk:
+        table: '[memcp-tests].[dbo].[bulk_failure]'
+        columns:
+        - id
+        - required_value
+        rows:
+        - - 5
+          - 50
+        - - 6
+          - 60
+      expect:
+        rows: 2
+    - sql: SELECT COUNT(*) AS n FROM bulk_failure
+      expect:
+        rows: 1
+        data:
+        - n: 2
+    - sql: ROLLBACK TRANSACTION
+    - sql: SELECT COUNT(*) AS n FROM bulk_failure
+      expect:
+        rows: 1
+        data:
+        - n: 0
+- name: HTTP cannot arm a connection-local wire import
+  setup:
+  - sql: DROP TABLE IF EXISTS bulk_failure
+  - sql: CREATE TABLE bulk_failure (id INT PRIMARY KEY, required_value INT NOT NULL)
+  sql: INSERT BULK bulk_failure (id INT,required_value INT)
+  expect:
+    error: true
+    contains:
+    - TDS connection
+- name: Bulk grammar rejects unknown bypass options before import admission
+  tds:
+    statements:
+    - sql: DROP TABLE IF EXISTS bulk_failure
+    - sql: CREATE TABLE bulk_failure (id INT PRIMARY KEY, required_value INT NOT NULL)
+    - sql: INSERT BULK bulk_failure (id INT,required_value INT) WITH (IGNORE_CONSTRAINTS)
+      expect:
+        error: true
+    - sql: INSERT BULK bulk_failure (id INT,id INT)
+      expect:
+        error: true
+        contains:
+        - duplicate INSERT column
+    - sql: INSERT BULK bulk_failure (id INT,missing INT)
+      expect:
+        error: true
+        contains:
+        - unknown INSERT column
+    - sql: INSERT BULK bulk_failure (id INT,required_value INT) WITH (ROWS_PER_BATCH=0)
+      expect:
+        error: true
+    - sql: SELECT COUNT(*) AS n FROM bulk_failure
+      expect:
+        rows: 1
+        data:
+        - n: 0
+- name: Read-only metadata access cannot authorize a bulk write
+  setup:
+  - sql: DROP TABLE IF EXISTS bulk_failure
+  - sql: CREATE TABLE bulk_failure (id INT PRIMARY KEY, required_value INT NOT NULL)
+  tds:
+    username: bulk_reader
+    password: pw
+    # Ignored frontend grants do not admit this account to the native database.
+    expect_login_error: true
+- name: Ignored grants and rejected bulk login preserve target rows
+  sql: SELECT COUNT(*) AS n FROM bulk_failure
+  expect: {rows: 1, data: [{n: 0}]}
+- name: Native database membership permits metadata and bulk insertion
+  setup:
+  - scm: (eval (parse_sql "memcp-tests" "GRANT ALL ON `memcp-tests`.* TO bulk_reader" nil))
+  tds:
+    username: bulk_reader
+    password: pw
+    statements:
+    - bulk:
+        table: '[memcp-tests].[dbo].[bulk_failure]'
+        columns: [id, required_value]
+        rows: [[1, 10]]
+      expect: {rows: 1}
+    - sql: SELECT id,required_value FROM bulk_failure
+      expect: {rows: 1, data: [{id: 1, required_value: 10}]}
+- name: Hidden INSERT triggers require explicit bulk firing and retain their native program
+  setup:
+  - sql: DROP TABLE IF EXISTS bulk_trigger_guard
+  - sql: CREATE TABLE bulk_trigger_guard(id INT PRIMARY KEY,score INT)
+  - scm: (createtrigger (table "memcp-tests" false "bulk_trigger_guard" false nil) "bulk_hidden_insert" "before_insert"
+      "" "" (lambda (OLD NEW session tx) (set_assoc NEW "score" 41)) false)
+  cleanup:
+  - sql: DROP TABLE IF EXISTS bulk_trigger_guard
+  tds:
+    statements:
+    - bulk:
+        table: '[memcp-tests].[dbo].[bulk_trigger_guard]'
+        columns:
+        - id
+        - score
+        rows:
+        - - 1
+          - 1
+      expect:
+        error: true
+        contains:
+        - FIRE_TRIGGERS
+    - sql: SELECT COUNT(*) AS n FROM bulk_trigger_guard
+      expect:
+        rows: 1
+        data:
+        - n: 0
+    - bulk:
+        table: '[memcp-tests].[dbo].[bulk_trigger_guard]'
+        columns:
+        - id
+        - score
+        rows:
+        - - 2
+          - 2
+        fire_triggers: true
+      expect:
+        rows: 1
+    - sql: SELECT id,score FROM bulk_trigger_guard
+      expect:
+        rows: 1
+        data:
+        - id: 2
+          score: 41
+- name: Bulk firing retains definitions and rejects reentrant trigger replacement before effects
+  setup:
+  - sql: DROP TABLE IF EXISTS bulk_trigger_guard
+  - sql: CREATE TABLE bulk_trigger_guard(id INT PRIMARY KEY,score INT)
+  - scm: '(createtrigger (table "memcp-tests" false "bulk_trigger_guard" false nil) "bulk_reentrant_insert" "before_insert"
+      "" ""
+
+      (lambda (OLD NEW session tx) (begin
+
+      (createtrigger (table "memcp-tests" false "bulk_trigger_guard" false nil) "bulk_unexpected_insert" "after_insert"
+      "" "" (lambda (OLD NEW session tx) true) true)
+
+      NEW)) true)'
+  cleanup:
+  - sql: DROP TABLE IF EXISTS bulk_trigger_guard
+  tds:
+    statements:
+    - bulk:
+        table: '[memcp-tests].[dbo].[bulk_trigger_guard]'
+        columns:
+        - id
+        - score
+        rows:
+        - - 1
+          - 1
+        fire_triggers: true
+      expect:
+        error: true
+        contains:
+        - trigger declarations are in use
+    - sql: SELECT COUNT(*) AS n FROM bulk_trigger_guard
+      expect:
+        rows: 1
+        data:
+        - n: 0
+- name: Numeric bulk wire aliases preserve declared precision scale and payload width
+  scm: '(and
+
+    (tsql_bulk_wire_matches? (list "kind" 106 "size" 9 "precision" 12 "scale" 2) (list "NUMERIC" ''(12 2) nil))
+
+    (tsql_bulk_wire_matches? (list "kind" 108 "size" 9 "precision" 12 "scale" 2) (list "DECIMAL" ''(12 2) nil))
+
+    (not (tsql_bulk_wire_matches? (list "kind" 106 "size" 9 "precision" 12 "scale" 3) (list "DECIMAL" ''(12 2) nil)))
+
+    (not (tsql_bulk_wire_matches? (list "kind" 106 "size" 5 "precision" 12 "scale" 2) (list "DECIMAL" ''(12 2) nil)))
+
+    (not (tsql_bulk_wire_matches? (list "kind" 38 "size" 9 "precision" 12 "scale" 2) (list "DECIMAL" ''(12 2) nil))))'
+  expect:
+    result: true
+- name: Bulk insertion into a private declared relation keeps its native owner and rollback scope
+  cleanup:
+  - sql: DROP TABLE IF EXISTS bulk_private_guard
+  tds:
+    statements:
+    - sql: DROP TABLE IF EXISTS bulk_private_guard
+    - sql: BEGIN TRANSACTION
+    - sql: CREATE TABLE bulk_private_guard(id INT PRIMARY KEY,value INT DEFAULT 7)
+    - bulk:
+        table: '[memcp-tests].[dbo].[bulk_private_guard]'
+        columns:
+        - id
+        rows:
+        - - 29
+      expect:
+        rows: 1
+    - sql: SELECT id,value FROM bulk_private_guard
+      expect:
+        rows: 1
+        data:
+        - id: 29
+          value: 7
+    - connection: observer
+      sql: SELECT name FROM sys.objects WHERE name=N'bulk_private_guard'
+      expect:
+        rows: 0
+    - sql: ROLLBACK TRANSACTION
+    - sql: SELECT name FROM sys.objects WHERE name=N'bulk_private_guard'
+      expect:
+        rows: 0
+- name: Frozen text defaults type both bulk branches without replacing supplied values
+  setup:
+  - sql: CREATE TABLE bulk_text_defaults(id INT PRIMARY KEY,body TEXT COLLATE utf8mb4,side TEXT)
+  - sql: ALTER TABLE bulk_text_defaults ADD CONSTRAINT df_bulk_text_defaults_body DEFAULT ('fallback') FOR body
+  cleanup:
+  - sql: DROP TABLE bulk_text_defaults
+  tds:
+    statements:
+    - bulk:
+        table: '[memcp-tests].[dbo].[bulk_text_defaults]'
+        columns: [id, body, side]
+        rows:
+        - [1, supplied, left]
+        - [2, null, right]
+        - [3, '', empty]
+      expect: {rows: 3}
+    - sql: SELECT id,body,side FROM bulk_text_defaults ORDER BY id
+      expect:
+        rows: 3
+        data:
+        - {id: 1, body: supplied, side: left}
+        - {id: 2, body: fallback, side: right}
+        - {id: 3, body: '', side: empty}
+- name: KEEP_NULLS bypasses a frozen text default while omitted columns still use it
+  setup:
+  - sql: CREATE TABLE bulk_text_keep_defaults(id INT PRIMARY KEY,body TEXT COLLATE utf8mb4,side TEXT)
+  - sql: ALTER TABLE bulk_text_keep_defaults ADD CONSTRAINT df_bulk_text_keep_body DEFAULT ('fallback') FOR body
+  cleanup:
+  - sql: DROP TABLE bulk_text_keep_defaults
+  tds:
+    statements:
+    - bulk:
+        table: '[memcp-tests].[dbo].[bulk_text_keep_defaults]'
+        columns: [id, body]
+        keep_nulls: true
+        rows: [[1, null]]
+      expect: {rows: 1}
+    - bulk:
+        table: '[memcp-tests].[dbo].[bulk_text_keep_defaults]'
+        columns: [id, side]
+        rows: [[2, other]]
+      expect: {rows: 1}
+    - sql: SELECT id,body FROM bulk_text_keep_defaults ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - {id: 1, body: null}
+        - {id: 2, body: fallback}
+- name: Frozen character defaults use declared dimensions in INSERT and UPDATE
+  setup:
+  - sql: CREATE TABLE bulk_text_explicit_defaults(id INT PRIMARY KEY,body TEXT,label VARCHAR(4) DEFAULT 'abcdef')
+  - sql: ALTER TABLE bulk_text_explicit_defaults ADD CONSTRAINT df_bulk_text_explicit_body DEFAULT ('fallback') FOR body
+  cleanup:
+  - sql: DROP TABLE bulk_text_explicit_defaults
+  tds:
+    statements:
+    - sql: INSERT bulk_text_explicit_defaults(id,body,label) VALUES(1,DEFAULT,DEFAULT)
+    - sql: UPDATE bulk_text_explicit_defaults SET body='changed',label='xy' WHERE id=1
+    - sql: UPDATE bulk_text_explicit_defaults SET body=DEFAULT,label=DEFAULT WHERE id=1
+    - sql: SELECT body,label FROM bulk_text_explicit_defaults WHERE id=1
+      expect: {rows: 1, data: [{body: fallback, label: abcd}]}
+- name: Frozen DEFAULT descriptors use SQL collation pairs and native declared dimensions
+  setup:
+  - sql: CREATE TABLE bulk_default_contract(id INT DEFAULT 7,body TEXT COLLATE utf8mb4,label VARCHAR(4) DEFAULT 'abcdef')
+  - sql: ALTER TABLE bulk_default_contract ADD CONSTRAINT df_bulk_default_contract_body DEFAULT ('fallback') FOR body
+  cleanup:
+  - sql: DROP TABLE bulk_default_contract
+  scm: |
+    (begin
+      (define declarations (get_schema "memcp-tests" "bulk_default_contract" nil))
+      (define infos (map declarations (lambda (column)
+        (sql_expr_info '() (tsql_default_assignment_expr column "memcp-tests" nil nil nil)))))
+      (and (expression_equal? (sql_info_datatype (nth infos 0)) "INT")
+        (nil? (sql_info_collation (nth infos 0)))
+        (expression_equal? (sql_info_datatype (nth infos 1)) "TEXT")
+        (expression_equal? (sql_info_collation (nth infos 1)) (list "utf8mb4" 2))
+        (expression_equal? (sql_info_datatype (nth infos 2)) (list "VARCHAR" (list 4)))
+        (expression_equal? (sql_info_collation (nth infos 2)) (list "utf8mb4" 2))))
+  expect: {result: true}
+# Raw source declaration retains explicit COLLATE, which CopyIn omits.
+- name: Explicit bulk source collation merges frozen TEXT defaults before row consumption
+  setup:
+  - sql: CREATE TABLE bulk_text_wire_defaults(id INT PRIMARY KEY,body TEXT COLLATE utf8mb4)
+  - sql: ALTER TABLE bulk_text_wire_defaults ADD CONSTRAINT df_bulk_text_wire_body DEFAULT ('fallback') FOR body
+  cleanup:
+  - sql: DROP TABLE bulk_text_wire_defaults
+  tds:
+    rpc_packets:
+    - packet_type: 1
+      payload_hex: 1600000012000000020000000000000000000100000049004e0053004500520054002000420055004c004b0020005b006d0065006d00630070002d00740065007300740073005d002e005b00640062006f005d002e005b00620075006c006b005f0074006500780074005f0077006900720065005f00640065006600610075006c00740073005d00200028005b00690064005d00200049004e0054002c005b0062006f00640079005d002000560041005200430048004100520028004d00410058002900200043004f004c004c00410054004500200075007400660038006d00620034002900
+    - packet_type: 7
+      payload_hex: 81020000000000010026040269006400000000000100a7ffff0904d000340462006f0064007900d10401000000080000000000000008000000737570706c69656400000000d10402000000ffffffffffffffffd10403000000000000000000000000000000fd100000000300000000000000
+    - packet_type: 1
+      payload_hex: 16000000120000000200000000000000000001000000530045004c004500430054002000430041005300450020005700480045004e00200043004f0055004e00540028002a0029003d00330020005400480045004e0020004e002700620075006c006b002d00640065006600610075006c0074002d006f006b002700200045004c005300450020004e002700620075006c006b002d00640065006600610075006c0074002d006200610064002700200045004e0044002000410053002000730074006100740065002000460052004f004d002000620075006c006b005f0074006500780074005f0077006900720065005f00640065006600610075006c007400730020005700480045005200450020002800690064003d003100200041004e004400200062006f00640079003d00270073007500700070006c006900650064002700290020004f00520020002800690064003d003200200041004e004400200062006f00640079003d002700660061006c006c006200610063006b002700290020004f00520020002800690064003d003300200041004e004400200062006f00640079003d00270027002900
+      contains:
+      - bulk-default-ok
+
+- name: Legacy fractional bulk dates preserve ticks and nullable values
+  setup:
+  - sql: CREATE TABLE bulk_precise_dates(id INT PRIMARY KEY,created DATETIME,changed DATETIME)
+  cleanup:
+  - sql: DROP TABLE bulk_precise_dates
+  tds:
+    statements:
+    - bulk:
+        table: '[memcp-tests].[dbo].[bulk_precise_dates]'
+        columns: [id, created, changed]
+        keep_nulls: true
+        rows:
+        # The released Go client floors 300Hz ticks; 4ms supplies exactly tick 1.
+        - [1, '2020-01-02 03:04:05.004Z', null]
+        - [2, '2020-01-02 03:04:05.007Z', '2020-01-02 03:04:05Z']
+        - [3, '2020-01-02 03:04:05.997Z', '2020-01-02 03:04:05.010Z']
+      expect: {rows: 3}
+    - sql: SELECT id,CONVERT(VARCHAR(40),created,121) AS created,CONVERT(VARCHAR(40),changed,121) AS changed FROM bulk_precise_dates ORDER BY id
+      expect:
+        data:
+        - {id: 1, created: '2020-01-02 03:04:05.003', changed: null}
+        - {id: 2, created: '2020-01-02 03:04:05.007', changed: '2020-01-02 03:04:05.000'}
+        - {id: 3, created: '2020-01-02 03:04:05.997', changed: '2020-01-02 03:04:05.010'}
+
+- name: Numeric bulk source buffers vary independently of exact precision and scale
+  scm: |
+    (begin
+      (define contract (list "NUMERIC" (list 18 0) nil))
+      (and (tsql_bulk_wire_matches? (list "kind" 108 "size" 9 "precision" 18 "scale" 0) contract)
+        (tsql_bulk_wire_matches? (list "kind" 106 "size" 17 "precision" 18 "scale" 0) contract)
+        (not (tsql_bulk_wire_matches? (list "kind" 108 "size" 5 "precision" 18 "scale" 0) contract))
+        (not (tsql_bulk_wire_matches? (list "kind" 108 "size" 13 "precision" 17 "scale" 0) contract))
+        (not (tsql_bulk_wire_matches? (list "kind" 108 "size" 17 "precision" 18 "scale" 1) contract))))
+  expect: {result: true}
+
+- name: Bulk precision18 accepts an explicit 9 byte coefficient buffer
+  setup:
+  - sql: CREATE TABLE bulk_numeric_buffer_9(id INT PRIMARY KEY,amount NUMERIC(18,0))
+  cleanup:
+  - sql: DROP TABLE bulk_numeric_buffer_9
+  tds:
+    rpc_packets:
+    - packet_type: 1
+      payload_hex: 1600000012000000020000000000000000000100000049004e0053004500520054002000420055004c004b0020005b006d0065006d00630070002d00740065007300740073005d002e005b00640062006f005d002e005b00620075006c006b005f006e0075006d0065007200690063005f006200750066006600650072005f0039005d00200028005b00690064005d00200049004e0054002c005b0061006d006f0075006e0074005d0020004e0055004d0045005200490043002800310038002c00300029002900
+    - packet_type: 7
+      payload_hex: 8102000000000000003802690064000000000001006c0912000661006d006f0075006e007400d10100000009012a00000000000000d10200000009004ef330a64b9bb601d10300000000fd100000000300000000000000
+    - packet_type: 1
+      payload_hex: 16000000120000000200000000000000000001000000530045004c004500430054002000430041005300450020005700480045004e00200043004f0055004e00540028002a0029003d00330020005400480045004e0020004e0027006e0075006d0065007200690063002d006200750066006600650072002d006f006b002700200045004c005300450020004e0027006e0075006d0065007200690063002d006200750066006600650072002d006200610064002700200045004e00440020004100530020007300740061007400750073002000460052004f004d002000620075006c006b005f006e0075006d0065007200690063005f006200750066006600650072005f00390020005700480045005200450020002800690064003d003100200041004e004400200061006d006f0075006e0074003d0034003200290020004f00520020002800690064003d003200200041004e004400200061006d006f0075006e0074003d002d00310032003300340035003600370038003900300031003200330034003500360037003800290020004f00520020002800690064003d003300200041004e004400200061006d006f0075006e00740020004900530020004e0055004c004c002900
+      contains:
+      - numeric-buffer-ok
+- name: Bulk precision18 accepts an explicit 17 byte coefficient buffer
+  setup:
+  - sql: CREATE TABLE bulk_numeric_buffer_17(id INT PRIMARY KEY,amount NUMERIC(18,0))
+  cleanup:
+  - sql: DROP TABLE bulk_numeric_buffer_17
+  tds:
+    rpc_packets:
+    - packet_type: 1
+      payload_hex: 1600000012000000020000000000000000000100000049004e0053004500520054002000420055004c004b0020005b006d0065006d00630070002d00740065007300740073005d002e005b00640062006f005d002e005b00620075006c006b005f006e0075006d0065007200690063005f006200750066006600650072005f00310037005d00200028005b00690064005d00200049004e0054002c005b0061006d006f0075006e0074005d0020004e0055004d0045005200490043002800310038002c00300029002900
+    - packet_type: 7
+      payload_hex: 8102000000000000003802690064000000000001006c1112000661006d006f0075006e007400d10100000011012a000000000000000000000000000000d10200000011004ef330a64b9bb6010000000000000000d10300000000fd100000000300000000000000
+    - packet_type: 1
+      payload_hex: 16000000120000000200000000000000000001000000530045004c004500430054002000430041005300450020005700480045004e00200043004f0055004e00540028002a0029003d00330020005400480045004e0020004e0027006e0075006d0065007200690063002d006200750066006600650072002d006f006b002700200045004c005300450020004e0027006e0075006d0065007200690063002d006200750066006600650072002d006200610064002700200045004e00440020004100530020007300740061007400750073002000460052004f004d002000620075006c006b005f006e0075006d0065007200690063005f006200750066006600650072005f003100370020005700480045005200450020002800690064003d003100200041004e004400200061006d006f0075006e0074003d0034003200290020004f00520020002800690064003d003200200041004e004400200061006d006f0075006e0074003d002d00310032003300340035003600370038003900300031003200330034003500360037003800290020004f00520020002800690064003d003300200041004e004400200061006d006f0075006e00740020004900530020004e0055004c004c002900
+      contains:
+      - numeric-buffer-ok
+- name: Ordinary bulk client preserves numeric values through wider result metadata
+  setup:
+  - sql: CREATE TABLE bulk_numeric_client(id INT PRIMARY KEY,amount NUMERIC(18,0))
+  cleanup:
+  - sql: DROP TABLE bulk_numeric_client
+  tds:
+    statements:
+    - bulk:
+        table: '[memcp-tests].[dbo].[bulk_numeric_client]'
+        columns:
+        - id
+        - amount
+        keep_nulls: true
+        rows:
+        - - 1
+          - 42
+        - - 2
+          - -123456789012345678
+        - - 3
+          - null
+      expect:
+        rows: 3
+    - sql: SELECT id,CONVERT(VARCHAR(30),amount) AS amount,COL_LENGTH(N'dbo.bulk_numeric_client',N'amount') AS declared
+        FROM bulk_numeric_client ORDER BY id
+      expect:
+        rows: 3
+        data:
+        - id: 1
+          amount: '42'
+          declared: 9
+        - id: 2
+          amount: '-123456789012345678'
+          declared: 9
+        - id: 3
+          amount: null
+          declared: 9

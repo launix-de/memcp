@@ -1,0 +1,80 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: Portable object address scanning preserves existing identifier syntax
+  syntax: tsql
+  isolated: true
+setup:
+  - sql: CREATE TABLE object_address_target(id INT PRIMARY KEY)
+cleanup:
+  - sql: DROP TABLE IF EXISTS object_address_target
+test_cases:
+  - name: Address scanner shares the regular SQL identifier category and keyword policy
+    scm: |
+      (and
+        (expression_equal? (tsql_object_name_parts "dbo.Änderung") (list nil "dbo" "Änderung"))
+        (expression_equal? (tsql_object_name_parts "dbo.SELECT_suffix") (list nil "dbo" "SELECT_suffix"))
+        (not (tsql_regular_identifier? "SELECT"))
+        (not (tsql_regular_identifier? "1name"))
+        (not (tsql_regular_identifier? "𐐀name")))
+    expect: {result: true}
+  - name: Bracket and double quote escapes preserve dots within each address part
+    scm: |
+      (and
+        (expression_equal? (tsql_object_name_parts "[db.name].[owner]]name].[leaf.name]")
+          '("db.name" "owner]name" "leaf.name"))
+        (expression_equal? (tsql_object_name_parts "\"db.name\".\"dbo\".\"leaf\"\"name\"")
+          '("db.name" "dbo" "leaf\"name")))
+    expect: {result: true}
+  - name: Optional middle owner and lexical whitespace keep their existing defaults
+    scm: |
+      (and
+        (expression_equal? (tsql_object_name_parts "  [memcp-tests] . . [object_address_target]  ")
+          '("memcp-tests" "dbo" "object_address_target"))
+        (expression_equal? (tsql_object_name_parts "object_address_target")
+          (list nil "dbo" "object_address_target")))
+    expect: {result: true}
+  - name: Delimited reserved names retain their existing identifier contract
+    scm: (expression_equal? (tsql_object_name_parts "dbo.[SELECT]") (list nil "dbo" "SELECT"))
+    expect: {result: true}
+  - name: Unquoted reserved names retain the existing SQL token restriction
+    scm: (tsql_object_name_parts "dbo.SELECT")
+    expect: {error: true}
+  - name: Empty bracket names remain invalid
+    scm: (tsql_object_name_parts "dbo.[]")
+    expect: {error: true}
+  - name: An unterminated quoted name remains invalid
+    scm: (tsql_object_name_parts "dbo.[object_address_target")
+    expect: {error: true}
+  - name: A quoted identifier suffix must be consumed completely
+    scm: (tsql_object_name_parts "dbo.[object_address_target]suffix")
+    expect: {error: true}
+  - name: An unquoted identifier suffix must be consumed completely
+    scm: (tsql_object_name_parts "dbo.object_address_target suffix")
+    expect: {error: true}
+  - name: A fourth address component remains unsupported
+    scm: (tsql_object_name_parts "server.database.dbo.object_address_target")
+    expect: {error: true}
+  - name: A leading empty owner remains unsupported
+    scm: (tsql_object_name_parts ".object_address_target")
+    expect: {error: true}
+  - name: An empty final identifier remains unsupported
+    scm: (tsql_object_name_parts "dbo.")
+    expect: {error: true}
+  - name: Private native relation addresses remain inaccessible even when quoted
+    scm: (tsql_object_name_parts "dbo.[.##private]")
+    expect: {error: true}
+  - name: Quoted and relative object addresses resolve the same native declaration
+    sql: >-
+      SELECT CASE WHEN OBJECT_ID(N'[dbo].[object_address_target]',N'U')=OBJECT_ID(N'object_address_target',N'U')
+      AND OBJECT_ID(N'"dbo"."object_address_target"',N'U')=OBJECT_ID(N'dbo.object_address_target',N'U')
+      AND OBJECT_ID(N'[memcp-tests]..[object_address_target]',N'U')=OBJECT_ID(N'dbo.object_address_target',N'U')
+      THEN 1 ELSE 0 END AS same_id
+    expect: {rows: 1,data: [{same_id: 1}]}
+  - name: Invalid address comments and trailing statements never resolve a prefix
+    sql: >-
+      SELECT OBJECT_ID(N'dbo.object_address_target--suffix') AS line_comment,
+      OBJECT_ID(N'dbo.object_address_target/*suffix*/') AS block_comment,
+      OBJECT_ID(N'dbo.object_address_target;SELECT 1') AS statement,
+      OBJECT_ID(N'dbo.[object_address_target]suffix') AS quoted_suffix
+    expect: {rows: 1,data: [{line_comment: null,block_comment: null,statement: null,quoted_suffix: null}]}

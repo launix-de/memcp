@@ -1,0 +1,138 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Fixed before measurement: widths 1/4/12, five samples including cold, no warmup.
+metadata:
+  syntax: tsql
+  isolated: true
+  perf_ci: true
+  performance_shard_weight: 6
+  max_regression_pct: 20
+  description: Repeated relational function expansion preserves separate invocation arguments
+setup:
+- sql: CREATE TABLE udf_compile_ids(id INT PRIMARY KEY)
+- sql: INSERT udf_compile_ids VALUES(1),(2),(3)
+- sql: CREATE TABLE udf_compile_amounts(id INT,month_id INT,amount INT,PRIMARY KEY(id,month_id))
+- sql: |
+    INSERT udf_compile_amounts(id,month_id,amount) VALUES
+      (1,1,1),(1,2,2),(1,3,3),(1,4,4),(1,5,5),(1,6,6),
+      (1,7,7),(1,8,8),(1,9,9),(1,10,10),(1,11,11),(1,12,12),
+      (2,1,NULL),(2,2,NULL),(2,3,NULL),(2,4,NULL),(2,5,NULL),(2,6,NULL),
+      (2,7,NULL),(2,8,NULL),(2,9,NULL),(2,10,NULL),(2,11,NULL),(2,12,NULL)
+- scm: |
+    (begin
+      (globalvars "__udf_compile_sql" (map (list 1 4 12) (lambda (width)
+        (list width (concat "CREATE OR ALTER VIEW udf_compile_view_" width " AS SELECT id,"
+          (reduce (produceN width) (lambda (text index)
+            (concat text (if (equal? index 0) "" ",")
+              "dbo.udf_compile_total(id," (+ index 1) ") AS c" index)) "")
+          " FROM udf_compile_ids")))))
+      true)
+- scm: |
+    (begin
+      (globalvars "__udf_compile_declare" (lambda (width) (begin
+        (define text (cadr (find (globalvars "__udf_compile_sql")
+          (lambda (recipe) (equal? (car recipe) width)) nil)))
+        (define session (newsession)) (session "schema" "memcp-tests") (session "username" "root")
+        (with_autocommit session nil nil text (lambda (tx)
+          (sql_execute_formula session tx
+            (sql_queryplan_compile_formula tx (parse_tsql "memcp-tests" text (tsql_policy (tsql_session_actor session)) session tx))
+            (lambda (_row) (error "view declaration emitted a result row")) (lambda (_fields) true))))
+        true)))
+      true)
+- scm: |
+    (begin
+      /* Definition syntax is inert setup data. Old binaries must reach the
+      measured query boundary before reporting an unavailable SQL feature. */
+      (globalvars "__udf_compile_initialize" (lambda () (begin
+        (map (list
+          "DROP FUNCTION IF EXISTS dbo.udf_compile_total"
+          "DROP FUNCTION IF EXISTS dbo.udf_compile_leaf"
+          "CREATE FUNCTION dbo.udf_compile_leaf(@id INT,@month INT) RETURNS INT AS BEGIN\n  DECLARE @part INT;\n  SELECT @part=SUM(amount) FROM udf_compile_amounts WHERE id=@id AND month_id<=@month;\n  RETURN @part;\nEND"
+          "CREATE FUNCTION dbo.udf_compile_total(@id INT,@month INT) RETURNS INT AS BEGIN\n  DECLARE @total INT=0,@iteration INT=1,@part INT;\n  WHILE @iteration<=2 BEGIN\n    SELECT @part=dbo.udf_compile_leaf(@id,@month) FROM udf_compile_ids WHERE id=@id;\n    SET @total=@total+ISNULL(@part,0);\n    SELECT @part=SUM(amount) FROM udf_compile_amounts WHERE id=@id AND month_id<=@month;\n    SET @total=@total+ISNULL(@part,0);\n    SELECT @part=SUM(amount) FROM udf_compile_amounts WHERE id=@id AND month_id<=@month;\n    SET @total=@total+ISNULL(@part,0);\n    SET @iteration=@iteration+1;\n  END;\n  RETURN @total;\nEND")
+          (lambda (text) (begin
+            (define session (newsession)) (session "schema" "memcp-tests") (session "username" "root")
+            (define outcome (try (lambda () (list true
+              (tsql_execute_request "memcp-tests" text session nil 0
+                (lambda (_row) (error "function declaration emitted a result row")) (lambda (_fields) true))))
+              (lambda (failure) (list false failure))))
+            (tds_frontend "close" session nil nil nil nil nil nil)
+            (if (car outcome) (cadr outcome) (error (cadr outcome))))))
+        (map (list 1 4 12) (lambda (width) ((globalvars "__udf_compile_declare") width)))
+        true)))
+      true)
+test_cases:
+- name: Initialize relational definitions and views at an explicit measured SQL boundary
+  scm: ((globalvars "__udf_compile_initialize"))
+  expect: {data: [true]}
+  threshold_ms: 10000
+  timeout: 120
+  performance_rows: 1
+  warmup: 0
+  timing_samples: 1
+  timing_aggregation: total
+- name: Declaration compilation with 1 independent relational function arguments
+  scm: ((globalvars "__udf_compile_declare") 1)
+  expect: {data: [true]}
+  threshold_ms: 10000
+  timeout: 120
+  performance_rows: 1
+  warmup: 0
+  timing_samples: 5
+  timing_aggregation: total
+- name: Declaration compilation with 4 independent relational function arguments
+  scm: ((globalvars "__udf_compile_declare") 4)
+  expect: {data: [true]}
+  threshold_ms: 10000
+  timeout: 120
+  performance_rows: 1
+  warmup: 0
+  timing_samples: 5
+  timing_aggregation: total
+- name: Declaration compilation with 12 independent relational function arguments
+  scm: ((globalvars "__udf_compile_declare") 12)
+  expect: {data: [true]}
+  threshold_ms: 10000
+  timeout: 120
+  performance_rows: 1
+  warmup: 0
+  timing_samples: 5
+  timing_aggregation: total
+# A/B selects timed cases only. Result-only execution skips timed cases,
+# so initialize the same declarations before evaluating the exact rows.
+- name: Initialize relational definitions for result correctness execution
+  scm: ((globalvars "__udf_compile_initialize"))
+  expect: {result: true}
+- name: Inlined 1 call view preserves independent months nullable sums and missing rows
+  sql: SELECT id,c0 FROM udf_compile_view_1 ORDER BY id
+  expect:
+    rows: 3
+    data: [{"id": 1, "c0": 6}, {"id": 2, "c0": 0}, {"id": 3, "c0": 0}]
+- name: Inlined 4 call view preserves independent months nullable sums and missing rows
+  sql: SELECT id,c0,c3 FROM udf_compile_view_4 ORDER BY id
+  expect:
+    rows: 3
+    data: [{"id": 1, "c0": 6, "c3": 60}, {"id": 2, "c0": 0, "c3": 0}, {"id": 3, "c0": 0, "c3": 0}]
+- name: Inlined 12 call view preserves independent months nullable sums and missing rows
+  sql: SELECT id,c0,c11 FROM udf_compile_view_12 ORDER BY id
+  expect:
+    rows: 3
+    data: [{"id": 1, "c0": 6, "c11": 468}, {"id": 2, "c0": 0, "c11": 0}, {"id": 3, "c0": 0, "c11": 0}]
+cleanup:
+- sql: DROP VIEW IF EXISTS udf_compile_view_12
+- sql: DROP VIEW IF EXISTS udf_compile_view_4
+- sql: DROP VIEW IF EXISTS udf_compile_view_1
+# Cleanup also runs when the baseline cannot parse the measured function DDL.
+# Both revisions expose the same native source-catalog deletion operation.
+- scm: |
+    (begin
+      (dropprocedure "memcp-tests" "udf_compile_total" true)
+      (dropprocedure "memcp-tests" "udf_compile_leaf" true)
+      true)
+- sql: DROP TABLE IF EXISTS udf_compile_amounts
+- sql: DROP TABLE IF EXISTS udf_compile_ids
+- scm: |
+    (begin
+      (globalvars "__udf_compile_sql" nil)
+      (globalvars "__udf_compile_initialize" nil)
+      (globalvars "__udf_compile_declare" nil)
+      true)

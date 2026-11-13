@@ -1,0 +1,238 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  requires_tds: true
+  isolated: true
+  description: Correlated aggregate ON predicates stay inside complete nullable join operands
+setup:
+- sql: CREATE TABLE effective_root(id INT PRIMARY KEY,head_id INT)
+- sql: CREATE TABLE effective_head(id INT PRIMARY KEY,reference_id INT,cutoff INT)
+- sql: CREATE TABLE effective_history(id INT PRIMARY KEY,reference_id INT,effective_at INT,label NVARCHAR(12))
+- sql: INSERT effective_root VALUES(1,10),(2,10),(3,20),(4,30),(5,40),(6,50),(7,60),(8,999)
+- sql: INSERT effective_head VALUES(10,1,25),(20,2,1),(30,3,NULL),(40,NULL,20),(50,4,20),(60,5,20)
+- sql: INSERT effective_history VALUES(101,1,10,N'old'),(102,1,20,N'current'),(103,1,30,N'future'),(201,2,10,N'first'),(202,2,10,N'tied'),(301,3,7,N'fallback'),(305,3,NULL,N'no-date'),(501,4,NULL,N'no-date'),(601,5,15,NULL)
+cleanup:
+- sql: DROP VIEW IF EXISTS dbo.effective_join_view
+- sql: DROP TABLE IF EXISTS effective_history
+- sql: DROP TABLE IF EXISTS effective_head
+- sql: DROP TABLE IF EXISTS effective_root
+test_cases:
+- name: Parenthesized nullable operands retain maximum selection minimum fallback and duplicate matches
+  sql: |
+    SELECT r.id AS root_id,o.id AS head_id,h.id AS history_id,h.label
+    FROM effective_root r
+    LEFT JOIN (effective_head o LEFT JOIN effective_history h
+      ON h.reference_id=o.reference_id AND h.effective_at=COALESCE(
+        (SELECT MAX(m.effective_at) FROM effective_history m WHERE m.effective_at<=o.cutoff AND m.reference_id=o.reference_id),
+        (SELECT MIN(n.effective_at) FROM effective_history n WHERE n.reference_id=o.reference_id)))
+    ON r.head_id=o.id ORDER BY r.id,h.id
+  expect:
+    rows: 9
+    data:
+    - {root_id: 1,head_id: 10,history_id: 102,label: current}
+    - {root_id: 2,head_id: 10,history_id: 102,label: current}
+    - {root_id: 3,head_id: 20,history_id: 201,label: first}
+    - {root_id: 3,head_id: 20,history_id: 202,label: tied}
+    - {root_id: 4,head_id: 30,history_id: 301,label: fallback}
+    - {root_id: 5,head_id: 40,history_id: null,label: null}
+    - {root_id: 6,head_id: 50,history_id: null,label: null}
+    - {root_id: 7,head_id: 60,history_id: 601,label: null}
+    - {root_id: 8,head_id: null,history_id: null,label: null}
+- name: Unparenthesized right operands retain identical row multiplicity
+  sql: |
+    SELECT r.id AS root_id,o.id AS head_id,h.id AS history_id
+    FROM effective_root r LEFT JOIN effective_head o LEFT JOIN effective_history h
+      ON h.reference_id=o.reference_id AND h.effective_at=COALESCE(
+        (SELECT MAX(m.effective_at) FROM effective_history m WHERE m.effective_at<=o.cutoff AND m.reference_id=o.reference_id),
+        (SELECT MIN(n.effective_at) FROM effective_history n WHERE n.reference_id=o.reference_id))
+      ON r.head_id=o.id ORDER BY r.id,h.id
+  expect:
+    rows: 9
+    data: [{root_id: 1,head_id: 10,history_id: 102},{root_id: 2,head_id: 10,history_id: 102},
+      {root_id: 3,head_id: 20,history_id: 201},{root_id: 3,head_id: 20,history_id: 202},
+      {root_id: 4,head_id: 30,history_id: 301},{root_id: 5,head_id: 40,history_id: null},
+      {root_id: 6,head_id: 50,history_id: null},{root_id: 7,head_id: 60,history_id: 601},
+      {root_id: 8,head_id: null,history_id: null}]
+- name: Aggregate consumers count complete nullable tuples and real null payloads
+  sql: |
+    SELECT COUNT(*) AS total,COUNT(o.id) AS heads,COUNT(h.id) AS histories,COUNT(h.label) AS labels,SUM(h.effective_at) AS dates
+    FROM effective_root r LEFT JOIN effective_head o LEFT JOIN effective_history h
+      ON h.reference_id=o.reference_id AND h.effective_at=COALESCE(
+        (SELECT MAX(m.effective_at) FROM effective_history m WHERE m.effective_at<=o.cutoff AND m.reference_id=o.reference_id),
+        (SELECT MIN(n.effective_at) FROM effective_history n WHERE n.reference_id=o.reference_id))
+      ON r.head_id=o.id
+  expect: {rows: 1,data: [{total: 9,heads: 8,histories: 6,labels: 5,dates: 82}]}
+- name: A consumer WHERE sees unmatched heads after the complete nested join
+  sql: |
+    SELECT r.id AS root_id,o.id AS head_id
+    FROM effective_root r LEFT JOIN effective_head o LEFT JOIN effective_history h
+      ON h.reference_id=o.reference_id AND h.effective_at=COALESCE(
+        (SELECT MAX(m.effective_at) FROM effective_history m WHERE m.effective_at<=o.cutoff AND m.reference_id=o.reference_id),
+        (SELECT MIN(n.effective_at) FROM effective_history n WHERE n.reference_id=o.reference_id))
+      ON r.head_id=o.id WHERE h.id IS NULL ORDER BY r.id
+  expect: {rows: 3,data: [{root_id: 5,head_id: 40},{root_id: 6,head_id: 50},{root_id: 8,head_id: null}]}
+- name: The enclosing ON selects the complete operand before null extending its head
+  sql: |
+    SELECT r.id AS root_id,o.id AS head_id,h.id AS history_id
+    FROM effective_root r LEFT JOIN effective_head o LEFT JOIN effective_history h
+      ON h.reference_id=o.reference_id AND h.effective_at=COALESCE(
+        (SELECT MAX(m.effective_at) FROM effective_history m WHERE m.effective_at<=o.cutoff AND m.reference_id=o.reference_id),
+        (SELECT MIN(n.effective_at) FROM effective_history n WHERE n.reference_id=o.reference_id))
+      ON r.head_id=o.id AND h.id=201 ORDER BY r.id
+  expect:
+    rows: 8
+    data: [{root_id: 1,head_id: null,history_id: null},{root_id: 2,head_id: null,history_id: null},
+      {root_id: 3,head_id: 20,history_id: 201},{root_id: 4,head_id: null,history_id: null},
+      {root_id: 5,head_id: null,history_id: null},{root_id: 6,head_id: null,history_id: null},
+      {root_id: 7,head_id: null,history_id: null},{root_id: 8,head_id: null,history_id: null}]
+- name: A null accepting local ON matches real nullable heads but never synthetic heads
+  sql: |
+    SELECT r.id AS root_id,o.id AS head_id,h.id AS history_id
+    FROM effective_root r LEFT JOIN effective_head o LEFT JOIN effective_history h
+      ON (h.reference_id=o.reference_id AND h.effective_at=COALESCE(
+        (SELECT MAX(m.effective_at) FROM effective_history m WHERE m.effective_at<=o.cutoff AND m.reference_id=o.reference_id),
+        (SELECT MIN(n.effective_at) FROM effective_history n WHERE n.reference_id=o.reference_id))) OR o.reference_id IS NULL
+      ON r.head_id=o.id WHERE r.id IN (5,8) ORDER BY r.id,h.id
+  expect:
+    rows: 10
+    data: [{root_id: 5,head_id: 40,history_id: 101},{root_id: 5,head_id: 40,history_id: 102},
+      {root_id: 5,head_id: 40,history_id: 103},{root_id: 5,head_id: 40,history_id: 201},
+      {root_id: 5,head_id: 40,history_id: 202},{root_id: 5,head_id: 40,history_id: 301},
+      {root_id: 5,head_id: 40,history_id: 305},{root_id: 5,head_id: 40,history_id: 501},
+      {root_id: 5,head_id: 40,history_id: 601},{root_id: 8,head_id: null,history_id: null}]
+- name: A stored view keeps lexical aggregate correlations inside the right operand
+  sql: |
+    CREATE VIEW dbo.effective_join_view AS
+    SELECT r.id AS root_id,o.id AS head_id,h.id AS history_id,h.label
+    FROM effective_root r LEFT JOIN effective_head o LEFT JOIN effective_history h
+      ON h.reference_id=o.reference_id AND h.effective_at=COALESCE(
+        (SELECT MAX(m.effective_at) FROM effective_history m WHERE m.effective_at<=o.cutoff AND m.reference_id=o.reference_id),
+        (SELECT MIN(n.effective_at) FROM effective_history n WHERE n.reference_id=o.reference_id))
+      ON r.head_id=o.id
+- name: Stored view exports retain duplicate historical matches and nullable output types
+  tds:
+    statements:
+    - sql: SELECT root_id,head_id,history_id,label FROM dbo.effective_join_view WHERE root_id IN (3,7) ORDER BY root_id,history_id
+      expect:
+        rows: 3
+        data: [{root_id: 3,head_id: 20,history_id: 201,label: first},
+          {root_id: 3,head_id: 20,history_id: 202,label: tied},
+          {root_id: 7,head_id: 60,history_id: 601,label: null}]
+        column_types: [{name: root_id,type: INT},{name: head_id,type: INT},
+          {name: history_id,type: INT},{name: label,type: NVARCHAR,length: 12}]
+
+- name: Grouped derived aliases remain closed inside complete nested join operands
+  sql: |
+    SELECT r.id AS root_id,o.id AS head_id,totals.total
+    FROM (SELECT head_id,COUNT(*) AS users FROM effective_root GROUP BY head_id) counts
+    INNER JOIN effective_root r LEFT JOIN effective_head o
+      LEFT JOIN (SELECT reference_id,SUM(effective_at) AS total FROM effective_history GROUP BY reference_id) totals
+      ON totals.reference_id=o.reference_id
+    ON r.head_id=o.id ON counts.head_id=r.head_id ORDER BY r.id
+  expect:
+    rows: 8
+    data: [{root_id: 1,head_id: 10,total: 60},{root_id: 2,head_id: 10,total: 60},
+      {root_id: 3,head_id: 20,total: 20},{root_id: 4,head_id: 30,total: 7},
+      {root_id: 5,head_id: 40,total: null},{root_id: 6,head_id: 50,total: null},
+      {root_id: 7,head_id: 60,total: 15},{root_id: 8,head_id: null,total: null}]
+- name: An enclosing grouped alias joins complete nullable tuples without exposing its private input names
+  sql: |
+    SELECT counts.head_id,COUNT(r.id) AS roots,MAX(totals.total) AS total
+    FROM (SELECT head_id,COUNT(*) AS users FROM effective_root GROUP BY head_id) counts
+    INNER JOIN effective_root r LEFT JOIN effective_head o
+      LEFT JOIN (SELECT reference_id,SUM(effective_at) AS total FROM effective_history GROUP BY reference_id) totals
+      ON totals.reference_id=o.reference_id
+    ON r.head_id=o.id ON counts.head_id=r.head_id
+    GROUP BY counts.head_id ORDER BY counts.head_id
+  expect:
+    rows: 7
+    data: [{head_id: 10,roots: 2,total: 60},{head_id: 20,roots: 1,total: 20},
+      {head_id: 30,roots: 1,total: 7},{head_id: 40,roots: 1,total: null},
+      {head_id: 50,roots: 1,total: null},{head_id: 60,roots: 1,total: 15},
+      {head_id: 999,roots: 1,total: null}]
+
+- name: Parenthesized inner join operands compose on both sides before grouping
+  sql: |
+    SELECT r.id AS root_id,COUNT(h.id) AS histories,MIN(h.label) AS label
+    FROM (effective_root r INNER JOIN effective_head o ON r.head_id=o.id)
+    INNER JOIN (effective_history h INNER JOIN effective_head p ON h.reference_id=p.reference_id)
+    ON o.id=p.id GROUP BY r.id ORDER BY r.id
+  expect:
+    rows: 6
+    data: [{root_id: 1,histories: 3,label: current},{root_id: 2,histories: 3,label: current},
+      {root_id: 3,histories: 2,label: first},{root_id: 4,histories: 2,label: fallback},
+      {root_id: 6,histories: 1,label: no-date},{root_id: 7,histories: 1,label: null}]
+- name: A left join null extends only after the complete parenthesized inner operand
+  sql: |
+    SELECT r.id AS root_id,COUNT(h.id) AS histories,MAX(o.id) AS head_id
+    FROM effective_root r
+    LEFT JOIN (effective_head o INNER JOIN effective_history h ON h.reference_id=o.reference_id)
+    ON r.head_id=o.id GROUP BY r.id ORDER BY r.id
+  expect:
+    rows: 8
+    data: [{root_id: 1,histories: 3,head_id: 10},{root_id: 2,histories: 3,head_id: 10},
+      {root_id: 3,histories: 2,head_id: 20},{root_id: 4,histories: 2,head_id: 30},
+      {root_id: 5,histories: 0,head_id: null},{root_id: 6,histories: 1,head_id: 50},
+      {root_id: 7,histories: 1,head_id: 60},{root_id: 8,histories: 0,head_id: null}]
+- name: A right join preserves its entire parenthesized inner operand
+  sql: |
+    SELECT r.id AS root_id,h.id AS history_id
+    FROM (effective_root r INNER JOIN effective_head o ON r.head_id=o.id AND r.id=1)
+    RIGHT JOIN (effective_history h INNER JOIN effective_head p ON h.reference_id=p.reference_id)
+    ON o.id=p.id ORDER BY h.id
+  expect:
+    rows: 9
+    data: [{root_id: 1,history_id: 101},{root_id: 1,history_id: 102},{root_id: 1,history_id: 103},
+      {root_id: null,history_id: 201},{root_id: null,history_id: 202},
+      {root_id: null,history_id: 301},{root_id: null,history_id: 305},
+      {root_id: null,history_id: 501},{root_id: null,history_id: 601}]
+
+- name: A right join preserves a nullable joined right cloud as one input
+  sql: |
+    SELECT s.id AS root_id,r.id AS matched_id,x.id AS head_id,p.id AS allowed_id
+    FROM effective_root r INNER JOIN effective_head o ON r.head_id=o.id AND r.id=1
+    RIGHT JOIN effective_root s LEFT JOIN effective_head x
+      INNER JOIN effective_head p ON x.id=p.id AND p.id=10
+      ON s.head_id=x.id
+    ON o.id=x.id ORDER BY s.id
+  expect:
+    rows: 8
+    data: [{root_id: 1,matched_id: 1,head_id: 10,allowed_id: 10},
+      {root_id: 2,matched_id: 1,head_id: 10,allowed_id: 10},
+      {root_id: 3,matched_id: null,head_id: null,allowed_id: null},
+      {root_id: 4,matched_id: null,head_id: null,allowed_id: null},
+      {root_id: 5,matched_id: null,head_id: null,allowed_id: null},
+      {root_id: 6,matched_id: null,head_id: null,allowed_id: null},
+      {root_id: 7,matched_id: null,head_id: null,allowed_id: null},
+      {root_id: 8,matched_id: null,head_id: null,allowed_id: null}]
+- name: A post-join filter observes the nested preserved NULL extension
+  sql: |
+    SELECT s.id AS root_id,r.id AS matched_id
+    FROM effective_root r INNER JOIN effective_head o ON r.head_id=o.id AND r.id=1
+    RIGHT JOIN effective_root s LEFT JOIN effective_head x
+      INNER JOIN effective_head p ON x.id=p.id AND p.id=10
+      ON s.head_id=x.id
+    ON o.id=x.id WHERE p.id IS NULL ORDER BY s.id
+  expect:
+    rows: 6
+    data: [{root_id: 3,matched_id: null},{root_id: 4,matched_id: null},
+      {root_id: 5,matched_id: null},{root_id: 6,matched_id: null},
+      {root_id: 7,matched_id: null},{root_id: 8,matched_id: null}]
+- name: Both right join inputs retain their own nullable boundaries and multiplicity
+  sql: |
+    SELECT s.id AS root_id,r.id AS matched_id,h.id AS history_id
+    FROM effective_root r LEFT JOIN effective_history h ON h.reference_id=1 AND r.id=1
+      INNER JOIN effective_head o ON r.head_id=o.id AND r.id IN (1,5)
+    RIGHT JOIN effective_root s LEFT JOIN effective_head x
+      INNER JOIN effective_head p ON x.id=p.id AND p.id IN (10,40)
+      ON s.head_id=x.id
+    ON o.id=x.id ORDER BY s.id,h.id
+  expect:
+    rows: 12
+    data: [{root_id: 1,matched_id: 1,history_id: 101},{root_id: 1,matched_id: 1,history_id: 102},
+      {root_id: 1,matched_id: 1,history_id: 103},{root_id: 2,matched_id: 1,history_id: 101},
+      {root_id: 2,matched_id: 1,history_id: 102},{root_id: 2,matched_id: 1,history_id: 103},
+      {root_id: 3,matched_id: null,history_id: null},{root_id: 4,matched_id: null,history_id: null},
+      {root_id: 5,matched_id: 5,history_id: null},{root_id: 6,matched_id: null,history_id: null},
+      {root_id: 7,matched_id: null,history_id: null},{root_id: 8,matched_id: null,history_id: null}]

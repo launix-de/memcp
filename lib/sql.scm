@@ -63,8 +63,14 @@ snapshot through the stable handle for the rest of this compile only. */
 	(begin
 		(define catalog (newsession))
 		(lambda (schema tbl write)
-			(if write
-				(begin
+			(if (and write (sql_database_create_request? tbl)) (begin
+				(define actor (sql_database_create_policy_result (if policy (policy schema tbl true) true)))
+				/* Preserve the authorization value across this wrapper. The
+				collector retains request data, never an admin/member decision. */
+				(access "database-create" (cons (list schema (cadr tbl) actor)
+					(coalesceNil (access "database-create") '())))
+				actor)
+				write (begin
 					(if policy (policy schema tbl true) true)
 					(access "write" true)
 					(if (and (equal? schema "system") (equal? tbl true)) (access "admin" true) true)
@@ -72,7 +78,7 @@ snapshot through the stable handle for the rest of this compile only. */
 					intent on cached plans; admin commands route to the master. */
 					(if (or readonly (equal? schema "system")) true (replication_write tx)))
 				(begin
-					(define handle (table schema false tbl false))
+					(define handle (table schema false tbl false tx))
 					(if (and handle (catalog handle))
 						true
 						(begin
@@ -148,12 +154,12 @@ functional planner return value. */
 			(cons (quote session) (map tail sql_queryplan_bind_execution_session)))
 		(cons (symbol connection_id) _tail) (list (quote tx_connection_id) (quote tx))
 		(cons (quote connection_id) _tail) (list (quote tx_connection_id) (quote tx))
-		(cons head tail) (if (equal? head session_globalvar)
+		(cons head tail) (if (expression_equal? head session_globalvar)
 			(cons session_globalvar_explicit
 				(cons (quote session) (map tail sql_queryplan_bind_execution_session)))
-			(if (equal? head connection_id)
+			(if (expression_equal? head connection_id)
 				(list (quote tx_connection_id) (quote tx))
-				(if (and (equal? head context)
+				(if (and (expression_equal? head context)
 					(and (equal? (count tail) 1) (equal? (car tail) "session")))
 					(quote session)
 					(cons
@@ -161,19 +167,67 @@ functional planner return value. */
 						(map tail sql_queryplan_bind_execution_session)))))
 		_ expr)))
 
-/* Exact DML plans do not enter the guarded SELECT variant pipeline. Bind only
-request-context primitives here; session binding has broader AST semantics and
-must remain in the guarded-plan path. */
-(define sql_queryplan_bind_tx_calls (lambda (expr)
+/* Legacy named SHOW reports missing ordinary relations. Resolving through
+native transaction handles must preserve that contract instead of feeding a
+nullable handle to SHOW. Unpublished helper names keep their empty description. */
+(define sql_show_table_columns (lambda (tx database name) (begin
+	(define handle (table database false name false tx))
+	(if handle (show handle)
+		(and (strlike name ".%") (not (nil? (show database)))) '()
+		(error "table " database "." name " does not exist")))))
+
+/* One request-expression visitor owns primitive binding. With a search
+catalog it also hoists programs; nil retains the standalone binding contract.
+A legacy dynamic SHOW keeps its operand-binding boundary while search programs
+inside it may still be prepared. Program arguments bind before key creation,
+without hoisting nested programs out of the enclosing program. */
+(define sql_queryplan_rewrite_request (lambda (expr search_bindings bind_tx)
 	(match expr
 		((symbol quote) _value) expr
-		(cons (symbol connection_id) _tail) (list (quote tx_connection_id) (quote tx))
-		(cons (quote connection_id) _tail) (list (quote tx_connection_id) (quote tx))
-		(cons head tail) (if (equal? head connection_id)
+		((symbol show) db name)
+		(if bind_tx
+			(if (and (string? db) (string? name))
+				(list (quote sql_show_table_columns) (quote tx) db name)
+				(if search_bindings (sql_queryplan_rewrite_request expr search_bindings false) expr))
+			(cons (car expr) (map (cdr expr) (lambda (part)
+				(sql_queryplan_rewrite_request part search_bindings false)))))
+		((symbol show) db name "constraints")
+		(if bind_tx
+			(list (quote show) (list (quote table)
+				(sql_queryplan_rewrite_request db search_bindings true) false
+				(sql_queryplan_rewrite_request name search_bindings true) false (quote tx)) "constraints")
+			(cons (car expr) (map (cdr expr) (lambda (part)
+				(sql_queryplan_rewrite_request part search_bindings false)))))
+		(cons (symbol connection_id) _tail)
+		(if bind_tx (list (quote tx_connection_id) (quote tx))
+			(cons (car expr) (map (cdr expr) (lambda (part)
+				(sql_queryplan_rewrite_request part search_bindings false)))))
+		(cons (quote connection_id) _tail)
+		(if bind_tx (list (quote tx_connection_id) (quote tx))
+			(cons (car expr) (map (cdr expr) (lambda (part)
+				(sql_queryplan_rewrite_request part search_bindings false)))))
+		/* Callable recognition is syntactic. Scalar equality can coerce boolean
+		heads or render whole lambda/data trees before comparing unlike tags. */
+		(cons head tail) (if (and bind_tx (expression_equal? head connection_id))
 			(list (quote tx_connection_id) (quote tx))
-			(cons (sql_queryplan_bind_tx_calls head)
-				(map tail sql_queryplan_bind_tx_calls)))
+			(and search_bindings (expression_equal? head sql_text_search_prepare)) (begin
+				(define args (if bind_tx (map tail (lambda (part)
+					(sql_queryplan_rewrite_request part nil true))) tail))
+				(define key (json_encode args))
+				(define entry (search_bindings key))
+				(if entry (car entry) (begin
+					(define name (symbol (concat "search_program_" (sha256 key))))
+					(search_bindings key (list name (cons head args)))
+					name)))
+			/* A callable head owns its lexical parameters. Bind its primitives,
+			but keep its search programs inside that callable's scope. */
+			(cons (sql_queryplan_rewrite_request head nil bind_tx)
+				(map tail (lambda (part) (sql_queryplan_rewrite_request part search_bindings bind_tx)))))
 		_ expr)))
+
+/* Exact DML binds request primitives without the SELECT session rewrite. */
+(define sql_queryplan_bind_tx_calls (lambda (expr)
+	(sql_queryplan_rewrite_request expr nil true)))
 
 (define sql_queryplan_uncovered_binding_conditions (lambda (planning_session)
 	(begin
@@ -329,11 +383,19 @@ request and makes the complete dispatcher eligible for native compilation.
 The Proc retains its optimized Scheme body, so cachemap memory accounting and
 serialization still see the complete plan. */
 (define sql_queryplan_write_guard (lambda (formula access readonly schema parse_query parse_fn)
-	(if (and (not readonly) (access "write")
-		(not (match formula
-			(cons head tail) (and (empty_list? tail)
-				(or (equal? head shutdown) (equal? head (quote shutdown))))
-			_ false)))
+	(if (and (not readonly) (access "database-create"))
+		(if (or (access "write") (not (equal? (count (access "database-create")) 1)))
+			(error "mixed database creation statements are not supported")
+			(list (quote if) (list (quote replication_slave))
+				(list (quote sql_database_create_replica) (quote tx)
+					(list (quote quote) (access "database-create")) (quote session) schema parse_query
+					(if (list? parse_fn) (equal? (car parse_fn) parse_psql) false)
+					(quote resultrow) (quote resultfields)) formula))
+		(and (not readonly) (access "write")
+			(not (match formula
+				(cons head tail) (and (empty_list? tail)
+					(or (equal? head shutdown) (equal? head (quote shutdown))))
+				_ false)))
 		(if (access "admin")
 			(list (quote if) (list (quote replication_slave))
 				(list (quote replication_admin) (quote session) schema parse_query
@@ -347,24 +409,12 @@ serialization still see the complete plan. */
 identical programs once outside row closures, including parameterized plans. */
 (define sql_queryplan_prepare_search (lambda (formula) (begin
 	(define bindings (newsession))
-	(define rewrite (lambda (expr) (match expr
-		(cons head tail) (if (equal? head (quote quote)) expr
-			(equal? head sql_text_search_prepare) (begin
-				(define key (json_encode tail))
-				(define entry (bindings key))
-				(if entry (car entry) (begin
-					(define name (symbol (concat "search_program_" (sha256 key))))
-					(bindings key (list name expr))
-					name)))
-			(cons head (map tail rewrite)))
-		_ expr)))
-	(define rewritten (rewrite formula))
+	(define rewritten (sql_queryplan_rewrite_request formula bindings true))
 	(cons (quote !begin)
 		(merge (list
 			(map (bindings) (lambda (key)
 				(list (quote define) (car (bindings key)) (cadr (bindings key)))))
-			(list rewritten))))
-)))
+			(list rewritten)))))))
 
 (define sql_queryplan_compile_formula (lambda (compile_tx formula)
 	(jit (close_procedure (eval (optimize (list
@@ -396,11 +446,16 @@ identical programs once outside row closures, including parameterized plans. */
 		(tx_check tx)
 		/* Diagnostics must refresh their captured estimates when table statistics
 		change, but checking their cache must never execute candidate preparations. */
-		(list
-			(if statistics_diagnostic
-				(sql_queryplan_statistics_guard_from_session planning_session)
-				(sql_queryplan_guard_from_session planning_session))
-			plan
+		(define guard (if statistics_diagnostic
+			(sql_queryplan_statistics_guard_from_session planning_session)
+			(sql_queryplan_guard_from_session planning_session)))
+		/* A variant publishes one compiled guard owner. Its immutable literal
+		metadata stays in that procedure; registry and dispatch reuse the callable
+		instead of retaining and repeatedly cloning an optimizer blueprint. */
+		(define guard (if (expression_equal? guard true) true
+			(sql_queryplan_compile_formula tx (sql_queryplan_bind_execution_session guard))))
+		(tx_check tx)
+		(list guard plan
 			(if statistics_diagnostic '()
 				(sql_queryplan_preparations_from_session planning_session))))))
 
@@ -445,10 +500,13 @@ otherwise side-effect-free guard. */
 			(define tail_expr (sql_queryplan_formula_dispatch rest prepared_catalog miss_expr))
 			(define bound_plan (list (cadr variant)
 				(quote session) (quote tx) (quote resultrow) (quote resultfields)))
-			(define dispatch (if (equal? (car variant) true)
+			(define dispatch (if (expression_equal? (car variant) true)
 				bound_plan
 				(list (quote if)
-					(sql_queryplan_bind_execution_session (car variant))
+					/* APPLY keeps this published guard at its own compiled boundary;
+					the dispatcher must not specialize or inline its metadata body. */
+					(list (quote apply) (car variant)
+						(list (quote list) (quote session) (quote tx) (quote resultrow) (quote resultfields)))
 					bound_plan tail_expr)))
 			(if (empty_list? new_preparations)
 				dispatch
@@ -479,13 +537,9 @@ otherwise side-effect-free guard. */
 (define sql_queryplan_install_variants (lambda (queryplan_cache cache_key entry parse_fn schema parse_query policy variants tx)
 	(begin
 		(define recent_variants (sql_queryplan_recent_variants variants))
-		/* Optimize owns and rewrites the dispatcher AST in place. The registry is
-		read again by the miss path, so its guard must not alias the compiler-owned
-		copy or inherit dispatcher-local NthLocalVar slots. */
-		(entry "variants" (map recent_variants (lambda (variant) (list
-			(clone_optimizer_expression (car variant))
-			(cadr variant)
-			(nth variant 2)))))
+		/* Published variants contain immutable compiled callables. Dispatcher
+		construction owns only its small call containers, never guard syntax. */
+		(entry "variants" recent_variants)
 		(entry "formula" (sql_queryplan_compile_formula tx
 			(sql_queryplan_formula queryplan_cache cache_key entry parse_fn schema parse_query policy recent_variants)))
 		(entry "formula"))))
@@ -508,11 +562,10 @@ otherwise side-effect-free guard. */
 				((sql_queryplan_compile_formula tx
 					(sql_queryplan_preparation_expr preparation))
 					session tx resultrow resultfields)))
-			/* Guards are code, not expressions in this helper's lexical scope. Compile
-			them against the same explicit request boundary as the cached dispatcher;
-			naked eval would couple their symbols/NthLocalVars to this helper's frame. */
-			(if ((sql_queryplan_compile_formula tx (clone_optimizer_expression (car variant)))
-				session tx resultrow resultfields)
+			/* The guard already owns its compiled lexical frame. Forward this
+			request explicitly after preparations, without recompilation or eval. */
+			(if (if (expression_equal? (car variant) true) true
+				(apply (car variant) (list session tx resultrow resultfields)))
 				variant
 				(sql_queryplan_matching_variant rest session tx resultrow resultfields)))
 		_ nil)))
@@ -552,7 +605,7 @@ the common guard-dispatch path. */
 /* cached_parse: wraps SELECT planning with a lazy polymorphic Scheme plan
 cache. DDL, DML and transaction-control formulas retain the original exact
 cache path because their AST may intentionally operate on session state.
-cache_key = username:schema:view-generation:hash(query-shape), retaining policy
+cache_key = principal:schema:view-generation:hash(query-shape), retaining policy
 isolation while sharing safe SELECT plans across literal variants. Each entry
 is a compiled callable whose dispatcher contains guarded specialized plans and
 one compile-miss arm.
@@ -563,14 +616,29 @@ user table merely to discard a newly constructed policy closure. */
 (define sql_policy_spec_resolve (lambda (policy_spec)
 	(if (and (list? policy_spec)
 		(equal? (car policy_spec) (quote sql-policy-for)))
-		(sql_policy (cadr policy_spec))
+		(sql_policy (if (equal? (count policy_spec) 3)
+			(list (cadr policy_spec) (nth policy_spec 2)) (cadr policy_spec)))
 		policy_spec)))
 
 (define sql_queryplan_cache_key (lambda (username schema query shape_hash)
 	(concat username ":" schema ":" (sql_view_query_generation query) ":" shape_hash)))
 
-(define cached_parse (lambda (queryplan_cache parse_fn schema query policy username session parameterize_literals tx)
+(define cached_parse (lambda (queryplan_cache cache_domain parse_fn schema query policy username session parameterize_literals tx)
 	(begin
+		/* Only built-in authenticated policy specs have a native account owner.
+		Custom trusted policies retain their existing independent cache contract. */
+		(define builtin_policy (and (list? policy) (equal? (car policy) (quote sql-policy-for))))
+		(define actor (if builtin_policy (sql_session_actor session (cadr policy)
+			(if (equal? (count policy) 3) (nth policy 2) nil)) nil))
+		(if (and (not (nil? actor)) (not (equal? username (car actor))))
+			(error "access denied: authenticated login identity changed") true)
+		(define policy (if builtin_policy
+			(list (quote sql-policy-for) (car actor) (cadr actor)) policy))
+		(define cache_principal (if actor (json_encode actor) username))
+		(define query_local (tx_requires_query_local_cache tx))
+		(define queryplan_cache (if query_local
+			(tx_get_or_compute_resource tx (concat "sql-query-plans:" cache_domain) (lambda () (newcachemap)))
+			queryplan_cache))
 		(define explain_query (match (toUpper query)
 			(regex "^\\s*EXPLAIN\\b" _) true
 			_ false))
@@ -582,13 +650,18 @@ user table merely to discard a newly constructed policy closure. */
 				Reuse that lexical decision without retaining a second cache entry or
 				repeating SQL tokenization. Normal policy and plan guards still run. */
 				(if (or explain_query (not parameterize_literals)
-					(queryplan_cache (sql_queryplan_cache_key username schema query (nth exact_shape 2))))
+					(queryplan_cache (sql_queryplan_cache_key cache_principal schema query (nth exact_shape 2))))
 					exact_shape (sql_parameterize_select_literals query true)))))
 		(match parameterized '(parse_query bindings shape_hash) (begin
-			(define cache_key (sql_queryplan_cache_key username schema parse_query shape_hash))
+			(define cache_key (sql_queryplan_cache_key cache_principal schema parse_query shape_hash))
 			(define compile_diagnostic (and explain_query (match (toUpper parse_query)
 				(regex "^\\s*EXPLAIN\\s+COMPILE\\b" _) true
 				_ false)))
+			/* Cachemap factories take no arguments. Only a transaction-owned cache
+			may compile against private declarations; shared misses use independent
+			authority and cannot inherit their first waiter's transaction. Diagnostics
+			are uncached and retain the requesting transaction explicitly. */
+			(define compile_tx (if (or query_local compile_diagnostic) tx nil))
 			(if (not (equal? bindings '()))
 				(reduce (produceN (count bindings)) (lambda (_ idx)
 					(session (concat "v" (string (+ idx 1))) (nth bindings idx))) nil)
@@ -611,8 +684,9 @@ user table merely to discard a newly constructed policy closure. */
 					(define first_token (sql_parameter_next_significant_index tokens 0))
 					(define select_query (if (< first_token (count tokens))
 						(equal?? (nth tokens first_token) "SELECT") false))
-					/* EXPLAIN captures planning statistics and needs their invalidation too.
-					Ordinary point and ordered scans retain the smaller exact cache path. */
+					/* Cost-sensitive queries retain their existing variant search.
+					Simple SELECTs use the smaller exact variant path, including
+					their semantic declaration guards. */
 					(define guarded_query (or explain_query (and select_query
 						(match (toUpper parse_query)
 							(regex "\\b(?:LIKE|MATCH|JOIN|EXISTS|IN)\\b|\\(\\s*SELECT\\b" _) true
@@ -622,26 +696,26 @@ user table merely to discard a newly constructed policy closure. */
 						exact producer remains identical to its guard-free implementation;
 						its cold optimizer must not compile an unused variant producer. */
 						(if (or (and (list? parse_fn) (> (count parse_fn) 1) ((cadr parse_fn) "exact_guards"))
-							/* A bare star conservatively selects declaration collection;
-							the logical AST decides whether any directory was consumed.
-							Point queries retain their original direct exact compiler. */
-							(and select_query (has? tokens "*"))
+							/* Every SELECT may consume declared type/name/key contracts.
+							The existing variant path collapses source-free constant
+							queries with no dependencies to a direct compiled procedure. */
+							select_query
 							(match (toUpper parse_query)
 								(regex "^\\s*(?:UPDATE|DELETE)\\b" _) true _ false))
 							(begin
-								(define exact_compile (lambda (compile_tx) (begin
+								(define exact_compile (lambda () (begin
 									(define resolved_policy (sql_policy_spec_resolve policy))
 									(define variant (sql_compile_queryplan_variant parse_fn schema parse_query resolved_policy session compile_tx))
-									(if (and (equal? (car variant) true) (empty_list? (nth variant 2)))
+									(if (and (expression_equal? (car variant) true) (empty_list? (nth variant 2)))
 										(cadr variant)
 										(sql_queryplan_new_entry queryplan_cache cache_key parse_fn schema parse_query resolved_policy session compile_tx variant)))))
-								(define compiled (if compile_diagnostic (exact_compile tx)
+								(define compiled (if compile_diagnostic (exact_compile)
 									(queryplan_cache cache_key tx exact_compile)))
 								(if (list? compiled) (cadr compiled) compiled))
 							(begin
 								/* Build the exact-cache compiler only for its own branch. Guarded
 								cache hits must not repeatedly optimize an unused closure. */
-								(define exact_compile (lambda (compile_tx)
+								(define exact_compile (lambda ()
 									(begin
 										(define resolved_policy (sql_policy_spec_resolve policy))
 										(define access (newsession))
@@ -652,11 +726,11 @@ user table merely to discard a newly constructed policy closure. */
 													(sql_invoke_parse_fn parse_fn schema parse_query compile_policy session compile_tx))))))
 										(sql_queryplan_compile_formula compile_tx (sql_queryplan_write_guard raw_plan access compile_diagnostic schema parse_query parse_fn)))))
 								(if compile_diagnostic
-									(exact_compile tx)
+									(exact_compile)
 									(queryplan_cache cache_key tx exact_compile))))
 						(begin
 							(define cached_entry (queryplan_cache cache_key tx
-								(lambda (compile_tx) (sql_queryplan_new_entry queryplan_cache cache_key parse_fn schema parse_query
+								(lambda () (sql_queryplan_new_entry queryplan_cache cache_key parse_fn schema parse_query
 									(sql_policy_spec_resolve policy) session compile_tx nil))))
 							(cadr cached_entry))))))
 			formula)))))
@@ -678,25 +752,34 @@ then you can query the policy by
 if everything is fine, the function call will do nothing.
 if the user is not allowed to access this property, the function will throw an error and the query is aborted before it has run
 */
+(define sql_private_relation? (lambda (name)
+	(and (string? name) (regexp_test name "^\\.[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}#|^\\.##"))))
 (define sql_policy (lambda (username)
 	(begin
-		(define is_admin (scan_lookup nil (table "system" false "user" false)
+		(define actor (if (list? username) username nil))
+		(define username (if actor (car actor) username))
+		(define is_admin (scan_lookup nil (table "system" false "user" false nil)
 			(list 372734710317056 (scan_boundary "equal" "username" 0 0 true true "" false) "admin") (list username)))
-		(if is_admin (lambda (schema tblname write) true) /* admin -> allow all */
+		(define account_policy (if is_admin (lambda (schema tblname write) true) /* admin -> allow all */
 			/* else: complicated policy */
 			(lambda (schema tblname write)
 				(begin
 					/* Allow virtual INFORMATION_SCHEMA for all users */
 					(if (equal?? schema "information_schema") true (begin
 						/* Database-level check via system.access */
-						(define has_access (scan_lookup nil (table "system" false "access" false)
+						(define has_access (scan_lookup nil (table "system" false "access" false nil)
 							(list 371635467059200
 								(scan_boundary "equal" "username" 0 0 true true "" false)
 								(scan_boundary "equal" "database" 1 1 true true "" false)) (list username schema)))
 						(if has_access true (error (concat "access denied: user '" username "' may not " (if write "write" "read") " " schema "." tblname)))
 					))
 			))
-		)
+		))
+		(lambda (schema tblname write)
+			(if (sql_database_create_request? tblname)
+				(sql_database_create_actor (if actor actor username) schema (cadr tblname))
+				(sql_private_relation? tblname) (error "access denied to private SQL relation")
+				(account_policy schema tblname write)))
 	)
 ))
 
@@ -709,7 +792,7 @@ if the user is not allowed to access this property, the function will throw an e
 (if (has? (show "system") "user") true (begin
 	(print "creating table system.user")
 	(eval (parse_sql "system" "CREATE TABLE `user`(username text, password text, admin boolean DEFAULT FALSE) ENGINE=SAFE" (lambda (schema tblname write) true)))
-	(insert (table "system" false "user" false) '("username" "password" "admin") '('("root" (password (arg "root-password" "admin")) true)))
+	(insert (table "system" false "user" false nil) '("username" "password" "admin") '('("root" (password (arg "root-password" "admin")) true)))
 ))
 
 /* migration: older instances may miss the admin column; add it and mark all existing users as admin */
@@ -718,8 +801,8 @@ if the user is not allowed to access this property, the function will throw an e
 		(if (has? (map (show "system" "user") (lambda (col) (get_assoc col "Field"))) "admin")
 			true
 			(begin
-				(createcolumn (table "system" false "user" false) "admin" "boolean" '() '())
-				(scan nil (table "system" false "user" false) '(369435906932736) '() '() (lambda () true) '("$update") (lambda (acc $update) (begin ($update '("admin" true)) acc)))
+				(createcolumn (table "system" false "user" false nil) "admin" "boolean" '() '())
+				(scan nil (table "system" false "user" false nil) '(369435906932736) '() '() (lambda () true) '("$update") (lambda (acc $update) (begin ($update '("admin" true)) acc)))
 			)
 		)
 	) true)
@@ -729,7 +812,7 @@ if the user is not allowed to access this property, the function will throw an e
 (try (lambda () (begin
 	(if (has? (show "system") "user") (begin
 		(if (has? (map (show "system" "user") (lambda (col) (get_assoc col "Field"))) "id")
-			(migratedropcolumn (table "system" false "user" false) "id")
+			(migratedropcolumn (table "system" false "user" false nil) "id")
 			true)
 	) true)
 )) (lambda (e) true))
@@ -737,7 +820,7 @@ if the user is not allowed to access this property, the function will throw an e
 /* migration: ensure root always has admin=true */
 (try (lambda () (begin
 	(if (has? (show "system") "user")
-		(scan nil (table "system" false "user" false) (list 369436175368192 (scan_boundary "equal" "username" 0 0 true true "" false)) '("root") '() (lambda () true) '("$update") (lambda (acc $update) (begin ($update '("admin" true)) acc)))
+		(scan nil (table "system" false "user" false nil) (list 369436175368192 (scan_boundary "equal" "username" 0 0 true true "" false)) '("root") '() (lambda () true) '("$update") (lambda (acc $update) (begin ($update '("admin" true)) acc)))
 		true)
 )) (lambda (e) true))
 
@@ -763,7 +846,7 @@ qry    — query text (pass "" when unknown) */
 	(error_log_counter "count" (+ (error_log_counter "count") 1))
 	(if (settings "ErrorQueryLog") (begin
 		(try (lambda () (begin
-			(insert (table "system_statistic" false "errors" false)
+			(insert (table "system_statistic" false "errors" false nil)
 				'("datetime" "database" "user" "query" "error")
 				(list (list (now) db usr qry (concat errmsg))))
 			/* trimming moved to 15-minute cron in dashboard.scm */
@@ -791,31 +874,33 @@ the latter is expanded before logical planning and never materialized. */
 ))
 
 (sql_view_catalog_set_count
-	(scan nil (table "system" false "views" false) '(369435906932736) '() '() (lambda () true) '() (lambda (acc) (+ acc 1)) 0 +))
+	(scan nil (table "system" false "views" false nil) '(369435906932736) '() '() (lambda () true) '() (lambda (acc) (+ acc 1)) 0 +))
 
 /* Bootstrap owns these fixed catalog constraints. Do not suppress failures:
 without them repeated grants create duplicate accounts and ambiguous authentication. */
 (init_sql_catalog_keys)
+
+(import "sql-accounts.scm")
 
 /* http hook for handling SQL */
 (define http_handler (begin
 	(set old_handler http_handler)
 	(define handle_query (lambda (req res schema query) (begin
 		/* check for password */
-		(set pw (scan_lookup nil (table "system" false "user" false) (list 372734710317056 (scan_boundary "equal" "username" 0 0 true true "" false) "password") (list (req "username"))))
-		(if (and pw (equal? pw (password (req "password"))))
+		(define account (sql_authenticate_account (req "username") (req "password")))
+		(if account
 			(begin
 				(try (lambda () (time (begin
 					((res "header") "Content-Type" "text/event-stream; charset=utf-8")
 					(define resultrow (res "jsonl"))
-					(define session (req "__session"))
+					(define session (sql_bind_http_session req account))
 					(define session_state (req "__session_state"))
 					(define query_seq (req "__query_seq"))
-					(session "username" (req "username"))
+					(session "username" (account "username"))
 					(session "schema" schema)
 					/* Bind URL query params (v1=, v2=, ...) as prepared-statement args into the session
 					before parse/build so session-sensitive planner rewrites see the right values. */
-					(extract_assoc (req "query") (lambda (k v) (session k v)))
+					(sql_http_query_parameters req session)
 					(set resultrow_called false)
 					(set original_resultrow resultrow)
 					(define resultrow (lambda (row) (begin
@@ -823,7 +908,7 @@ without them repeated grants create duplicate accounts and ambiguous authenticat
 						(original_resultrow row))))
 					(set query_result (sql_with_statement session session_state query_seq query
 						(lambda (tx) (begin
-							(define formula (cached_parse sql_queryplan_cache (list parse_sql) schema query
+							(define formula (cached_parse sql_queryplan_cache "sql" (list parse_sql) schema query
 								(list (quote sql-policy-for) (req "username")) (req "username") session true tx))
 							(sql_execute_formula session tx formula resultrow (lambda (_fields) true))))))
 					/* If no resultrow was called and we got a number, return it as affected_rows */
@@ -847,16 +932,16 @@ without them repeated grants create duplicate accounts and ambiguous authenticat
 	)))
 	(define handle_query_postgres (lambda (req res schema query) (begin
 		/* check for password */
-		(set pw (scan_lookup nil (table "system" false "user" false) (list 372734710317056 (scan_boundary "equal" "username" 0 0 true true "" false) "password") (list (req "username"))))
-		(if (and pw (equal? pw (password (req "password"))))
+		(define account (sql_authenticate_account (req "username") (req "password")))
+		(if account
 			(begin
 				(try (lambda () (time (begin
 					((res "header") "Content-Type" "text/plain")
 					(define resultrow (res "jsonl"))
-					(define session (req "__session"))
+					(define session (sql_bind_http_session req account))
 					(define session_state (req "__session_state"))
 					(define query_seq (req "__query_seq"))
-					(session "username" (req "username"))
+					(session "username" (account "username"))
 					(session "schema" schema)
 					(set resultrow_called false)
 					(set original_resultrow resultrow)
@@ -882,14 +967,17 @@ without them repeated grants create duplicate accounts and ambiguous authenticat
 						(lambda (tx) (if handled nil (begin
 							/* Bind URL query params (v1=, v2=, ...) as prepared-statement args into the session
 							before parse/build so session-sensitive planner rewrites see the right values. */
-							(extract_assoc (req "query") (lambda (k v) (session k v)))
-							(define formula (cached_parse psql_queryplan_cache (list parse_psql) schema query
+							(sql_http_query_parameters req session)
+							(define formula (cached_parse psql_queryplan_cache "psql" (list parse_psql) schema query
 								(list (quote sql-policy-for) (req "username")) (req "username") session false tx))
 							(sql_execute_formula session tx formula resultrow (lambda (_fields) true)))))))
-					/* If no resultrow was called and we got a number, return it as affected_rows */
-					(if (and (not resultrow_called) (number? query_result)) (begin
-						(original_resultrow '("affected_rows" query_result))
-					))
+					/* The PostgreSQL frontend owns both command tags and count absence.
+					Transport the declared completion through the existing JSON result edge;
+					ordinary declarations never acquire a synthetic affected_rows field. */
+					(define command_tag (psql_command_tag query_result))
+					(if command_tag (original_resultrow (list "command_tag" command_tag))
+						(and (not resultrow_called) (number? query_result))
+						(original_resultrow (list "affected_rows" query_result)))
 				) query)) (lambda(e) (begin
 						(error_log (concat e) schema (req "username") query)
 						((res "header") "Content-Type" "text/plain")
@@ -908,15 +996,13 @@ without them repeated grants create duplicate accounts and ambiguous authenticat
 	/* handler for raw Scheme code execution (global, no schema) */
 	(define handle_scm (lambda (req res code) (begin
 		/* check for password - must be admin */
-		(set pw (scan_lookup nil (table "system" false "user" false)
-			(list 373834222010370 (scan_boundary "equal" "username" 0 0 true true "" false) "password" "admin")
-			(list (req "username") (lambda (password admin) (list password admin)))))
-		(if (and pw (equal? (car pw) (password (req "password"))) (car (cdr pw)))
+		(define account (sql_authenticate_account (req "username") (req "password")))
+		(if (if account (account "admin") false)
 			(begin
 				(try (lambda () (begin
 					((res "header") "Content-Type" "application/json")
-					(define session (req "__session"))
-					(session "username" (req "username"))
+					(define session (sql_bind_http_session req account))
+					(session "username" (account "username"))
 					(session "schema" "")
 					(set result (eval (scheme code)))
 					((res "print") (json_encode result))
@@ -980,7 +1066,7 @@ without them repeated grants create duplicate accounts and ambiguous authenticat
 
 /* shared callbacks for mysql protocol (TCP and Unix socket) */
 (set mysql_auth (lambda (username_)
-	(scan_lookup nil (table "system" false "user" false) (list 372734710317056 (scan_boundary "equal" "username" 0 0 true true "" false) "password") (list username_))))
+	(scan_lookup nil (table "system" false "user" false nil) (list 372734710317056 (scan_boundary "equal" "username" 0 0 true true "" false) "password") (list username_))))
 (set mysql_schema (lambda (username schema) (or (equal?? schema "information_schema") (list? (show schema)))))
 
 /* Top-level so the interpreter compiles this body once instead of rebuilding a
@@ -997,11 +1083,15 @@ statement inside the per-query transaction callback. */
 		nil)
 	(define mysql_username (coalesce (session "username") "root"))
 	(define formula (if (equal? (session "syntax") "postgresql")
-		(cached_parse psql_queryplan_cache (list parse_psql) schema sql_parse_input
+		(cached_parse psql_queryplan_cache "psql" (list parse_psql) schema sql_parse_input
 			(list (quote sql-policy-for) mysql_username) mysql_username session false tx)
-		(cached_parse sql_queryplan_cache (list parse_sql) schema sql_parse_input
+		(cached_parse sql_queryplan_cache "sql" (list parse_sql) schema sql_parse_input
 			(list (quote sql-policy-for) mysql_username) mysql_username session true tx)))
-	(sql_execute_formula session tx formula resultrow resultfields_sql))))
+	(define result (sql_execute_formula session tx formula resultrow resultfields_sql))
+	/* PostgreSQL syntax can be tunneled over the MySQL connection. This is
+	still a MySQL OK packet, whose affected_rows field is mandatory; mapping a
+	count-free PostgreSQL command tag here is transport adaptation, not PG wire. */
+	(if (and (equal? (session "syntax") "postgresql") (psql_command_tag result)) 0 result))))
 
 (set mysql_handler (lambda (schema sql resultrow_sql resultfields_sql session session_state query_seq) (begin
 	(session "schema" schema)
@@ -1010,7 +1100,7 @@ statement inside the per-query transaction callback. */
 		(if (equal? (session "syntax") "scheme") (begin
 			/* Recheck the authenticated user's current privilege for every Scheme
 			statement, including sessions switched before an admin revocation. */
-			(if (not (scan_lookup nil (table "system" false "user" false)
+			(if (not (scan_lookup nil (table "system" false "user" false nil)
 				(list 372734710317056 (scan_boundary "equal" "username" 0 0 true true "" false) "admin")
 				(list (session "username"))))
 				(error "Scheme execution requires administrator privileges"))

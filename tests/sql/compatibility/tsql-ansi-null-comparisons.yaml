@@ -1,0 +1,268 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Microsoft Learn: SET ANSI_NULLS, SET statements, CREATE PROCEDURE/VIEW.
+# SQL Server 2022 reference profiles:
+# https://dbfiddle.uk/0OEQL_op https://dbfiddle.uk/qTd6lR2X https://dbfiddle.uk/Oz8i_ERp
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: ANSI null comparisons retain operand provenance and saved source settings
+setup:
+- sql: CREATE TABLE ansi_mode_rows(id INT PRIMARY KEY,a INT,b INT)
+- sql: INSERT ansi_mode_rows VALUES(1,NULL,NULL),(2,NULL,0),(3,0,NULL),(4,0,0)
+- sql: CREATE TABLE ansi_mode_audit(id INT,value INT)
+cleanup:
+- sql: DROP TRIGGER IF EXISTS ansi_mode_trigger
+- sql: DROP PROCEDURE IF EXISTS ansi_mode_on
+- sql: DROP PROCEDURE IF EXISTS ansi_mode_off
+- sql: DROP PROCEDURE IF EXISTS ansi_mode_dynamic
+- sql: DROP VIEW IF EXISTS ansi_mode_view_off
+- sql: DROP VIEW IF EXISTS ansi_mode_view_on
+- sql: DROP FUNCTION IF EXISTS dbo.ansi_mode_pure_off
+- sql: DROP FUNCTION IF EXISTS dbo.ansi_mode_read_off
+- sql: DROP FUNCTION IF EXISTS dbo.ansi_mode_table_off
+- sql: DROP FUNCTION IF EXISTS dbo.ansi_mode_defaults_off
+- sql: DROP FUNCTION IF EXISTS dbo.ansi_mode_quoted_off
+- sql: DROP TABLE IF EXISTS ansi_mode_audit
+- sql: DROP TABLE IF EXISTS ansi_mode_rows
+test_cases:
+- name: REST statements start with ANSI null behavior
+  session_id: ansi-mode-rest
+  sql: &rest_query SELECT CASE WHEN NULL=NULL THEN 1 WHEN NOT(NULL=NULL) THEN 0 ELSE -1 END AS value,@@OPTIONS&32 AS option_bit
+  expect: {rows: 1,data: [{value: -1,option_bit: 32}]}
+- name: REST SET OFF changes actual comparison semantics and the option bit
+  session_id: ansi-mode-rest
+  sql: SET ANSI_NULLS OFF
+- name: An identical warmed REST statement compiles with its current setting
+  session_id: ansi-mode-rest
+  sql: *rest_query
+  expect: {rows: 1,data: [{value: 1,option_bit: 0}]}
+- name: REST SET ON restores the original statement contract
+  session_id: ansi-mode-rest
+  sql: SET ANSI_NULLS ON
+- name: The same REST query returns to three valued logic
+  session_id: ansi-mode-rest
+  sql: *rest_query
+  expect: {rows: 1,data: [{value: -1,option_bit: 32}]}
+- name: OFF distinguishes NULL literals variables columns and compound operands
+  tds:
+    statements:
+    - sql: SET ANSI_NULLS OFF
+    - sql: |
+        DECLARE @n INT=NULL,@z INT=0;
+        SELECT id,
+          CASE WHEN a=NULL THEN 1 WHEN NOT(a=NULL) THEN 0 ELSE -1 END AS literal_null,
+          CASE WHEN a=@n THEN 1 WHEN NOT(a=@n) THEN 0 ELSE -1 END AS null_variable,
+          CASE WHEN a=@z THEN 1 WHEN NOT(a=@z) THEN 0 ELSE -1 END AS nonnull_variable,
+          CASE WHEN a=b THEN 1 WHEN NOT(a=b) THEN 0 ELSE -1 END AS two_columns,
+          CASE WHEN a=CAST(NULL AS INT) THEN 1 WHEN NOT(a=CAST(NULL AS INT)) THEN 0 ELSE -1 END AS cast_null,
+          CASE WHEN a=0 THEN 1 WHEN NOT(a=0) THEN 0 ELSE -1 END AS literal_zero
+        FROM ansi_mode_rows ORDER BY id
+      expect:
+        rows: 4
+        data:
+        - {id: 1,literal_null: 1,null_variable: 1,nonnull_variable: 0,two_columns: -1,cast_null: -1,literal_zero: -1}
+        - {id: 2,literal_null: 1,null_variable: 1,nonnull_variable: 0,two_columns: -1,cast_null: -1,literal_zero: -1}
+        - {id: 3,literal_null: 0,null_variable: 0,nonnull_variable: 1,two_columns: -1,cast_null: -1,literal_zero: 1}
+        - {id: 4,literal_null: 0,null_variable: 0,nonnull_variable: 1,two_columns: 1,cast_null: -1,literal_zero: 1}
+- name: ON keeps null variable comparisons unknown
+  tds:
+    statements:
+    - sql: SET ANSI_NULLS ON
+    - sql: DECLARE @n INT=NULL; SELECT id,CASE WHEN a=@n THEN 1 WHEN NOT(a=@n) THEN 0 ELSE -1 END AS value FROM ansi_mode_rows ORDER BY id
+      expect: {rows: 4,data: [{id: 1,value: -1},{id: 2,value: -1},{id: 3,value: -1},{id: 4,value: -1}]}
+- name: OFF handles equality inequality BIT false and unchanged ordered comparisons
+  tds:
+    statements:
+    - sql: SET ANSI_NULLS OFF
+    - sql: |
+        DECLARE @n INT=NULL,@z INT=0,@flag BIT=0;
+        SELECT CASE WHEN NULL<>NULL THEN 1 ELSE 0 END AS null_ne,
+          CASE WHEN @n<>@z THEN 1 ELSE 0 END AS variable_ne,
+          CASE WHEN @flag=NULL THEN 1 ELSE 0 END AS false_eq_null,
+          CASE WHEN @flag<>NULL THEN 1 ELSE 0 END AS false_ne_null,
+          CASE WHEN NULL>NULL THEN 1 WHEN NOT(NULL>NULL) THEN 0 ELSE -1 END AS ordered_value,
+          CASE NULL WHEN NULL THEN 1 ELSE 0 END AS simple_case
+      expect: {rows: 1,data: [{null_ne: 0,variable_ne: 1,false_eq_null: 0,false_ne_null: 1,ordered_value: -1,simple_case: 1}]}
+- name: OFF comparisons retain the existing declared text collation and padding
+  tds:
+    statements:
+    - sql: SET ANSI_NULLS OFF
+    - sql: DECLARE @label NVARCHAR(8)=N'a '; SELECT CASE WHEN @label=N'A' COLLATE utf8mb4_general_ci THEN 1 ELSE 0 END AS value
+      expect: {rows: 1,data: [{value: 1}]}
+- name: Session modes do not change ordinary MySQL null comparisons
+  syntax: mysql
+  sql: SELECT CASE WHEN NULL=NULL THEN 1 WHEN NOT(NULL=NULL) THEN 0 ELSE -1 END AS value
+  expect: {rows: 1,data: [{value: -1}]}
+- name: Session modes do not change ordinary PostgreSQL null comparisons
+  syntax: psql
+  sql: SELECT CASE WHEN NULL=NULL THEN 1 WHEN NOT(NULL=NULL) THEN 0 ELSE -1 END AS value
+  expect: {rows: 1,data: [{value: -1}]}
+- name: Stored procedures retain ON and ignore conflicting static SET
+  tds:
+    statements:
+    - sql: SET ANSI_NULLS ON
+    - sql: |
+        CREATE PROCEDURE ansi_mode_on AS BEGIN
+          SELECT CASE WHEN NULL=NULL THEN 1 ELSE 0 END AS initial_value,@@OPTIONS&32 AS option_bit;
+          SET ANSI_NULLS OFF;
+          SELECT CASE WHEN NULL=NULL THEN 1 ELSE 0 END AS changed_value,@@OPTIONS&32 AS option_bit;
+          EXEC(N'SELECT CASE WHEN NULL=NULL THEN 1 ELSE 0 END AS dynamic_value,@@OPTIONS&32 AS option_bit');
+        END
+    - sql: SET ANSI_NULLS OFF
+    - sql: EXEC ansi_mode_on
+      expect:
+        result_sets:
+        - {rows: 1,data: [{initial_value: 0,option_bit: 32}]}
+        - {rows: 1,data: [{changed_value: 0,option_bit: 32}]}
+        - {rows: 1,data: [{dynamic_value: 0,option_bit: 32}]}
+    - sql: SELECT CASE WHEN NULL=NULL THEN 1 ELSE 0 END AS value,@@OPTIONS&32 AS option_bit
+      expect: {rows: 1,data: [{value: 1,option_bit: 0}]}
+- name: Stored procedures retain OFF under an ON caller
+  tds:
+    statements:
+    - sql: SET ANSI_NULLS OFF
+    - sql: |
+        CREATE PROCEDURE ansi_mode_off AS BEGIN
+          SET ANSI_NULLS ON;
+          SELECT CASE WHEN NULL=NULL THEN 1 ELSE 0 END AS value,@@OPTIONS&32 AS option_bit;
+        END
+    - sql: SET ANSI_NULLS ON
+    - sql: EXEC ansi_mode_off
+      expect: {rows: 1,data: [{value: 1,option_bit: 0}]}
+    - sql: SELECT CASE WHEN NULL=NULL THEN 1 ELSE 0 END AS value,@@OPTIONS&32 AS option_bit
+      expect: {rows: 1,data: [{value: 0,option_bit: 32}]}
+- name: Dynamic SQL inside a stored module owns an independently changeable mode
+  tds:
+    statements:
+    - sql: SET ANSI_NULLS ON
+    - sql: |
+        CREATE PROCEDURE ansi_mode_dynamic AS BEGIN
+          EXEC(N'SET ANSI_NULLS OFF; SELECT CASE WHEN NULL=NULL THEN 1 ELSE 0 END AS dynamic_value,@@OPTIONS&32 AS option_bit');
+          SELECT CASE WHEN NULL=NULL THEN 1 ELSE 0 END AS module_value,@@OPTIONS&32 AS option_bit;
+        END
+    - sql: SET ANSI_NULLS OFF
+    - sql: EXEC ansi_mode_dynamic
+      expect:
+        result_sets:
+        - {rows: 1,data: [{dynamic_value: 1,option_bit: 0}]}
+        - {rows: 1,data: [{module_value: 0,option_bit: 32}]}
+    - sql: SELECT @@OPTIONS&32 AS option_bit
+      expect: {rows: 1,data: [{option_bit: 0}]}
+- name: Dynamic batches restore a caller mode after successful completion
+  tds:
+    statements:
+    - sql: SET ANSI_NULLS OFF
+    - sql: EXEC(N'SET ANSI_NULLS ON; SELECT CASE WHEN NULL=NULL THEN 1 ELSE 0 END AS value,@@OPTIONS&32 AS option_bit'); SELECT CASE WHEN NULL=NULL THEN 1 ELSE 0 END AS value,@@OPTIONS&32 AS option_bit
+      expect:
+        result_sets:
+        - {rows: 1,data: [{value: 0,option_bit: 32}]}
+        - {rows: 1,data: [{value: 1,option_bit: 0}]}
+- name: Dynamic batches restore a caller mode after an error
+  tds:
+    statements:
+    - sql: SET ANSI_NULLS OFF
+    - sql: EXEC(N'SET ANSI_NULLS ON; THROW 51000,N''mode failure'',1')
+      expect: {error: true,contains: [mode failure]}
+    - sql: SELECT @@OPTIONS&32 AS option_bit
+      expect: {rows: 1,data: [{option_bit: 0}]}
+- name: Views retain creation time null semantics
+  tds:
+    statements:
+    - sql: SET ANSI_NULLS OFF
+    - sql: CREATE VIEW ansi_mode_view_off AS SELECT id FROM ansi_mode_rows WHERE a=NULL
+    - sql: SET ANSI_NULLS ON
+    - sql: CREATE VIEW ansi_mode_view_on AS SELECT id FROM ansi_mode_rows WHERE a=NULL
+    - sql: SELECT id FROM ansi_mode_view_off ORDER BY id
+      expect: {rows: 2,data: [{id: 1},{id: 2}]}
+    - sql: SELECT id FROM ansi_mode_view_on
+      expect: {rows: 0}
+- name: A MySQL consumer preserves a stored TSQL view mode
+  syntax: mysql
+  sql: SELECT id FROM ansi_mode_view_off ORDER BY id
+  expect: {rows: 2,data: [{id: 1},{id: 2}]}
+- name: A PostgreSQL consumer preserves the same stored TSQL view mode
+  syntax: psql
+  sql: SELECT id FROM ansi_mode_view_off ORDER BY id
+  expect: {rows: 2,data: [{id: 1},{id: 2}]}
+- name: Pure relational and table functions capture OFF in their source declarations
+  tds:
+    statements:
+    - sql: SET ANSI_NULLS OFF
+    - sql: CREATE FUNCTION dbo.ansi_mode_pure_off(@v INT) RETURNS INT AS BEGIN RETURN CASE WHEN @v=NULL THEN 1 ELSE 0 END; END
+    - sql: |
+        CREATE FUNCTION dbo.ansi_mode_read_off(@v INT) RETURNS INT AS BEGIN
+          DECLARE @total INT;
+          SELECT @total=COUNT(*) FROM ansi_mode_rows WHERE a=@v;
+          RETURN @total;
+        END
+    - sql: |
+        CREATE FUNCTION dbo.ansi_mode_table_off(@v INT) RETURNS @rows TABLE(id INT) AS BEGIN
+          INSERT @rows SELECT id FROM ansi_mode_rows WHERE a=@v;
+          RETURN;
+        END
+    - sql: SET ANSI_NULLS ON
+    - sql: SELECT dbo.ansi_mode_pure_off(NULL) AS pure_value,dbo.ansi_mode_read_off(NULL) AS relational_value
+      expect: {rows: 1,data: [{pure_value: 1,relational_value: 2}]}
+    - sql: DECLARE @v INT=NULL; SELECT id FROM dbo.ansi_mode_table_off(@v) ORDER BY id
+      expect: {rows: 2,data: [{id: 1},{id: 2}]}
+# Valid SQL. Local tables currently admit literal DEFAULT declarations only;
+# this expression needs its separate declaration/invocation lowering owner.
+- name: Function table declaration defaults retain the source admission setting
+  noncritical: true
+  tds:
+    statements:
+    - sql: SET ANSI_NULLS OFF
+    - sql: |
+        CREATE FUNCTION dbo.ansi_mode_defaults_off() RETURNS @rows TABLE(value INT) AS BEGIN
+          DECLARE @local TABLE(id INT,flag INT DEFAULT CASE WHEN NULL=NULL THEN 1 ELSE 0 END);
+          INSERT @local(id) SELECT 7;
+          INSERT @rows SELECT flag FROM @local;
+          RETURN;
+        END
+    - sql: SET ANSI_NULLS ON
+    - sql: SELECT value FROM dbo.ansi_mode_defaults_off()
+      expect: {rows: 1,data: [{value: 1}]}
+- name: Relational function parameter provenance covers null and nonnull arguments
+  tds:
+    statements:
+    - sql: SET ANSI_NULLS ON
+    - sql: SELECT dbo.ansi_mode_read_off(NULL) AS null_value,dbo.ansi_mode_read_off(0) AS zero_value,dbo.ansi_mode_read_off(1) AS absent_value
+      expect: {rows: 1,data: [{null_value: 2,zero_value: 2,absent_value: 0}]}
+- name: QUOTED_IDENTIFIER and ANSI_NULLS are independently persisted source modes
+  tds:
+    statements:
+    - sql: SET QUOTED_IDENTIFIER OFF
+    - sql: SET ANSI_NULLS OFF
+    - sql: CREATE FUNCTION dbo.ansi_mode_quoted_off(@v INT) RETURNS VARCHAR(3) AS BEGIN RETURN CASE WHEN @v=NULL THEN "yes" ELSE "no" END; END
+    - sql: SET QUOTED_IDENTIFIER ON
+    - sql: SET ANSI_NULLS ON
+    - sql: SELECT dbo.ansi_mode_quoted_off(NULL) AS value
+      expect: {rows: 1,data: [{value: 'yes'}]}
+- name: Triggers capture creation mode without changing the writer
+  tds:
+    statements:
+    - sql: SET ANSI_NULLS OFF
+    - sql: |
+        CREATE TRIGGER ansi_mode_trigger ON ansi_mode_rows AFTER UPDATE AS BEGIN
+          INSERT ansi_mode_audit SELECT id,CASE WHEN a=NULL THEN 1 ELSE 0 END FROM inserted;
+        END
+    - sql: SET ANSI_NULLS ON
+    - sql: UPDATE ansi_mode_rows SET b=1 WHERE id=1
+    - sql: SELECT id,value FROM ansi_mode_audit
+      expect: {rows: 1,data: [{id: 1,value: 1}]}
+    - sql: SELECT @@OPTIONS&32 AS option_bit
+      expect: {rows: 1,data: [{option_bit: 32}]}
+- name: Saved source modes survive a catalog restart
+  action: restart
+- name: Restored functions and views retain OFF independently of the caller
+  tds:
+    statements:
+    - sql: SET ANSI_NULLS ON
+    - sql: SELECT dbo.ansi_mode_pure_off(NULL) AS value
+      expect: {rows: 1,data: [{value: 1}]}
+    - sql: SELECT id FROM ansi_mode_view_off ORDER BY id
+      expect: {rows: 2,data: [{id: 1},{id: 2}]}
+    - sql: EXEC ansi_mode_off
+      expect: {rows: 1,data: [{value: 1,option_bit: 0}]}

@@ -1,0 +1,209 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Scalar source WHILE loops carry typed lexical values through the existing scalar loop operator
+test_cases:
+- name: A character WHILE loop scans numeric text and changes its own exit value
+  tds:
+    statements:
+    - sql: |
+        CREATE FUNCTION dbo.encode_digits(@number FLOAT) RETURNS VARCHAR(500)
+        AS BEGIN
+          DECLARE @input VARCHAR(500),@result VARCHAR(500),@piece VARCHAR(1),@position INT;
+          SET @input=CONVERT(VARCHAR(500),@number);
+          SET @result='[';
+          SET @position=1;
+          WHILE @position<=LEN(@input)
+          BEGIN
+            SET @piece=SUBSTRING(@input,@position,1);
+            IF @piece>='0' AND @piece<='9'
+              SET @result=@result+CASE @piece WHEN '0' THEN 'z' WHEN '1' THEN 'a' WHEN '2' THEN 'b' ELSE 'c' END;
+            ELSE
+              SET @position=LEN(@input);
+            SET @position=@position+1;
+          END
+          RETURN @result+']';
+        END
+    - sql: SELECT dbo.encode_digits(12) AS digits,dbo.encode_digits(12.5) AS decimal_value,dbo.encode_digits(-12) AS negative_value,dbo.encode_digits(0) AS zero_value,dbo.encode_digits(NULL) AS missing_value
+      expect: {rows: 1, data: [{digits: '[ab]', decimal_value: '[ab]', negative_value: '[]', zero_value: '[z]', missing_value: '[]'}]}
+- name: Every loop assignment retains the declared text width
+  tds:
+    statements:
+    - sql: |
+        CREATE FUNCTION dbo.repeat_label(@count INT) RETURNS VARCHAR(4)
+        AS BEGIN
+          DECLARE @value VARCHAR(4)='';
+          WHILE @count>0
+          BEGIN
+            SET @value=@value+'x';
+            SET @count=@count-1;
+          END
+          RETURN @value;
+        END
+    - sql: SELECT dbo.repeat_label(0) AS empty_value,dbo.repeat_label(2) AS short_value,dbo.repeat_label(6) AS bounded_value,dbo.repeat_label(NULL) AS missing_value
+      expect: {rows: 1, data: [{empty_value: '', short_value: xx, bounded_value: xxxx, missing_value: ''}]}
+- name: Conditional loop assignments merge into the next iteration
+  tds:
+    statements:
+    - sql: |
+        CREATE FUNCTION dbo.sum_steps(@limit INT) RETURNS INT
+        AS BEGIN
+          DECLARE @sum INT=0,@position INT=1;
+          WHILE @position<=@limit
+          BEGIN
+            DECLARE @piece INT=@position;
+            IF @position%2=0 SET @sum=@sum+@piece;
+            ELSE SET @sum=@sum+1;
+            SET @position=@position+1;
+          END
+          RETURN @sum;
+        END
+    - sql: SELECT dbo.sum_steps(3) AS total,dbo.sum_steps(0) AS zero_value,dbo.sum_steps(NULL) AS missing_value
+      expect: {rows: 1, data: [{total: 4, zero_value: 0, missing_value: 0}]}
+- name: An untaken loop never evaluates its declaration initializer
+  tds:
+    statements:
+    - sql: |
+        CREATE FUNCTION dbo.divide_steps(@count INT,@divisor INT) RETURNS INT
+        AS BEGIN
+          DECLARE @sum INT=0;
+          WHILE @count>0
+          BEGIN
+            DECLARE @piece INT=10/@divisor;
+            SET @sum=@sum+@piece;
+            SET @count=@count-1;
+          END
+          RETURN @sum;
+        END
+    - sql: SELECT dbo.divide_steps(0,0) AS value
+      expect: {rows: 1, data: [{value: 0}]}
+    - sql: SELECT dbo.divide_steps(1,0) AS value
+      expect: {error: true, contains: ['division by zero']}
+    - sql: SELECT dbo.divide_steps(2,2) AS value
+      expect: {rows: 1, data: [{value: 10}]}
+- name: Nested loops reset their declaration initializer on each outer iteration
+  tds:
+    statements:
+    - sql: |
+        CREATE FUNCTION dbo.nested_steps(@limit INT) RETURNS INT
+        AS BEGIN
+          DECLARE @total INT=0,@outer INT=0;
+          WHILE @outer<@limit
+          BEGIN
+            DECLARE @inner INT=0;
+            WHILE @inner<2
+            BEGIN
+              SET @total=@total+1;
+              SET @inner=@inner+1;
+            END
+            SET @outer=@outer+1;
+          END
+          RETURN @total;
+        END
+    - sql: SELECT dbo.nested_steps(3) AS total,dbo.nested_steps(0) AS zero_value
+      expect: {rows: 1, data: [{total: 6, zero_value: 0}]}
+- name: Unsupported loop control and relational bodies fail before publication
+  tds:
+    statements:
+    - sql: CREATE FUNCTION dbo.invalid_loop(@count INT) RETURNS INT AS BEGIN WHILE @count>0 RETURN @count; RETURN 0; END
+      expect: {error: true, contains: ['RETURN inside a scalar function WHILE body is unsupported']}
+    - sql: CREATE FUNCTION dbo.invalid_loop(@count INT) RETURNS INT AS BEGIN WHILE @count>0 BREAK; RETURN 0; END
+      expect: {error: true, contains: ['unsupported statement in scalar function body']}
+    - sql: CREATE FUNCTION dbo.invalid_loop(@count INT) RETURNS INT AS BEGIN WHILE @count>0 CONTINUE; RETURN 0; END
+      expect: {error: true, contains: ['unsupported statement in scalar function body']}
+    - sql: CREATE FUNCTION dbo.invalid_loop(@count INT) RETURNS INT AS BEGIN WHILE EXISTS(SELECT 1 FROM missing_loop_source) SET @count=@count-1; RETURN 0; END
+      expect: {error: true, contains: ['scalar function expression requires a relational plan']}
+    - sql: CREATE FUNCTION dbo.invalid_loop(@count INT) RETURNS INT AS BEGIN RETURN @count; END
+- name: Loop declaration rules remain lexical even when the loop cannot run
+  tds:
+    statements:
+    - sql: CREATE FUNCTION dbo.duplicate_loop(@count INT) RETURNS INT AS BEGIN DECLARE @local INT=1; WHILE @count>0 DECLARE @local INT=2; RETURN @local; END
+      expect: {error: true, contains: ['duplicate scalar function variable']}
+    - sql: CREATE FUNCTION dbo.duplicate_loop(@count INT) RETURNS INT AS BEGIN RETURN @count; END
+- name: Restart preserves the loop source and declaration contracts
+  action: restart
+- name: Reloaded scalar loop callables retain iteration state semantics
+  tds:
+    statements:
+    - sql: SELECT dbo.encode_digits(12) AS digits,dbo.repeat_label(6) AS bounded_value,dbo.nested_steps(3) AS nested_total
+      expect: {rows: 1, data: [{digits: '[ab]', bounded_value: xxxx, nested_total: 6}]}
+
+- name: BREAK retains assignments already made and skips the rest of the loop body
+  tds:
+    statements:
+    - sql: |
+        CREATE FUNCTION dbo.stop_steps(@limit INT) RETURNS INT AS BEGIN
+          DECLARE @value INT=0,@i INT=0;
+          WHILE @i<@limit BEGIN
+            SET @i=@i+1;
+            SET @value=@value+@i;
+            IF @i=2 BREAK;
+            SET @value=@value+10;
+          END
+          RETURN @value+@i;
+        END
+    - sql: SELECT dbo.stop_steps(5) AS stopped,dbo.stop_steps(1) AS exhausted,dbo.stop_steps(0) AS skipped,dbo.stop_steps(NULL) AS unknown
+      expect: {rows: 1,data: [{stopped: 15,exhausted: 12,skipped: 0,unknown: 0}]}
+- name: Nested BREAK exits only its nearest loop and keeps outer continuation values
+  tds:
+    statements:
+    - sql: |
+        CREATE FUNCTION dbo.stop_inner_steps(@limit INT) RETURNS INT AS BEGIN
+          DECLARE @total INT=0,@outer INT=0;
+          WHILE @outer<@limit BEGIN
+            DECLARE @inner INT=0;
+            WHILE @inner<5 BEGIN
+              SET @inner=@inner+1;
+              SET @total=@total+1;
+              IF @inner=2 BREAK;
+              SET @total=@total+10;
+            END
+            SET @outer=@outer+1;
+            SET @total=@total+100;
+          END
+          RETURN @total;
+        END
+    - sql: SELECT dbo.stop_inner_steps(2) AS total,dbo.stop_inner_steps(0) AS skipped
+      expect: {rows: 1,data: [{total: 224,skipped: 0}]}
+
+- name: RETURN inside WHILE leaves the function and skips the remaining body
+  tds:
+    statements:
+    - sql: |
+        CREATE FUNCTION dbo.return_from_loop(@limit INT,@target INT,@zero INT) RETURNS INT AS BEGIN
+          DECLARE @i INT=0,@value INT=0;
+          WHILE @i<@limit BEGIN
+            SET @i=@i+1;
+            IF @i=@target BEGIN
+              RETURN @i*10;
+              SET @value=1/@zero;
+            END
+          END
+          RETURN -1;
+        END
+    - sql: SELECT dbo.return_from_loop(5,2,0) AS found,dbo.return_from_loop(1,2,0) AS missing,dbo.return_from_loop(0,2,0) AS skipped
+      expect: {rows: 1,data: [{found: 20,missing: -1,skipped: -1}]}
+- name: RETURN NULL inside nested loops exits every enclosing loop
+  tds:
+    statements:
+    - sql: |
+        CREATE FUNCTION dbo.return_nested_loop(@limit INT,@nullable BIT,@zero INT) RETURNS INT AS BEGIN
+          DECLARE @outer INT=0,@inner INT;
+          WHILE @outer<@limit BEGIN
+            SET @inner=0;
+            WHILE @inner<3 BEGIN
+              SET @inner=@inner+1;
+              IF @inner=2 BEGIN
+                IF @nullable=1 RETURN NULL;
+                RETURN @outer+@inner;
+              END
+            END
+            SET @outer=1/@zero;
+          END
+          RETURN -1;
+        END
+    - sql: SELECT dbo.return_nested_loop(5,0,0) AS value,dbo.return_nested_loop(5,1,0) AS nullable,dbo.return_nested_loop(0,0,0) AS skipped
+      expect: {rows: 1,data: [{value: 2,nullable: null,skipped: -1}]}

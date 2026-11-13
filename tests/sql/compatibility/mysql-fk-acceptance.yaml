@@ -1,3 +1,5 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Foreign key DDL acceptance and enforcement tests
 
 metadata:
@@ -19,7 +21,13 @@ test_cases:
   - name: "Create parent table"
     sql: "CREATE TABLE fk_parent (id INT PRIMARY KEY, name VARCHAR(50))"
     expect:
-      affected_rows: 1
+      affected_rows: 0
+      result_contains: '"affected_rows"'
+
+  - name: "Completed MySQL declaration is present: Create parent table"
+    syntax: mysql
+    sql: "SHOW CREATE TABLE fk_parent"
+    expect: {rows: 1,data: [{Table: "fk_parent"}]}
 
   - name: "Create child table with FK RESTRICT"
     sql: |
@@ -105,7 +113,13 @@ test_cases:
   - name: "Create cascade parent"
     sql: "CREATE TABLE fk_parent_cas (id INT PRIMARY KEY, name VARCHAR(50))"
     expect:
-      affected_rows: 1
+      affected_rows: 0
+      result_contains: '"affected_rows"'
+
+  - name: "Completed MySQL declaration is present: Create cascade parent"
+    syntax: mysql
+    sql: "SHOW CREATE TABLE fk_parent_cas"
+    expect: {rows: 1,data: [{Table: "fk_parent_cas"}]}
 
   - name: "Create cascade child"
     sql: |
@@ -165,7 +179,13 @@ test_cases:
   - name: "Create set-null parent"
     sql: "CREATE TABLE fk_parent_sn (id INT PRIMARY KEY, name VARCHAR(50))"
     expect:
-      affected_rows: 1
+      affected_rows: 0
+      result_contains: '"affected_rows"'
+
+  - name: "Completed MySQL declaration is present: Create set-null parent"
+    syntax: mysql
+    sql: "SHOW CREATE TABLE fk_parent_sn"
+    expect: {rows: 1,data: [{Table: "fk_parent_sn"}]}
 
   - name: "Create set-null child"
     sql: |
@@ -235,7 +255,13 @@ test_cases:
   - name: "Create table with NOT NULL column"
     sql: "CREATE TABLE nn_test (id INT PRIMARY KEY, name VARCHAR(50) NOT NULL, val INT)"
     expect:
-      affected_rows: 1
+      affected_rows: 0
+      result_contains: '"affected_rows"'
+
+  - name: "Completed MySQL declaration is present: Create table with NOT NULL column"
+    syntax: mysql
+    sql: "SHOW CREATE TABLE nn_test"
+    expect: {rows: 1,data: [{Table: "nn_test"}]}
 
   - name: "Insert with NOT NULL column value"
     sql: "INSERT INTO nn_test (id, name, val) VALUES (1, 'hello', 42)"
@@ -313,7 +339,13 @@ test_cases:
   - name: "Create audit table"
     sql: "CREATE TABLE fk_audit (id INT PRIMARY KEY AUTO_INCREMENT, msg VARCHAR(200))"
     expect:
-      affected_rows: 1
+      affected_rows: 0
+      result_contains: '"affected_rows"'
+
+  - name: "Completed MySQL declaration is present: Create audit table"
+    syntax: mysql
+    sql: "SHOW CREATE TABLE fk_audit"
+    expect: {rows: 1,data: [{Table: "fk_audit"}]}
 
   - name: "Create trigger with BEGIN...END"
     sql: |

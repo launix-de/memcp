@@ -1,0 +1,151 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Row GUID markers are native declaration metadata without implicit generation or uniqueness
+setup:
+- sql: DROP TABLE IF EXISTS initial_declaration_probe
+- sql: DROP TABLE IF EXISTS initial_numeric_probe
+- sql: DROP TABLE IF EXISTS row_guid_nullable
+- sql: DROP TABLE IF EXISTS row_guid_added
+- sql: DROP TABLE IF EXISTS row_guid_rejected
+cleanup:
+- sql: DROP TABLE IF EXISTS initial_declaration_probe
+- sql: DROP TABLE IF EXISTS initial_numeric_probe
+- sql: DROP TABLE IF EXISTS row_guid_nullable
+- sql: DROP TABLE IF EXISTS row_guid_added
+- sql: DROP TABLE IF EXISTS row_guid_rejected
+- sql: DROP TYPE IF EXISTS row_guid_alias
+test_cases:
+- name: Initial composite declaration preserves scalar types nullability row marker and nonclustered key
+  sql: |
+    CREATE TABLE [dbo].[initial_declaration_probe](
+      [tenant_id] INT NOT NULL,[subject_id] INT NOT NULL,[permission_id] INT NOT NULL,[ordinal] INT NOT NULL,
+      [rank] SMALLINT NULL,[weight] REAL NULL,[note] TEXT NULL,[starts_at] DATETIME NULL,[ends_at] DATETIME NULL,
+      [record_guid] UNIQUEIDENTIFIER ROWGUIDCOL NOT NULL,
+      CONSTRAINT [PK_initial_declaration_probe] PRIMARY KEY NONCLUSTERED ([tenant_id] ASC,[subject_id] ASC,[permission_id] ASC,[ordinal] ASC));
+  expect: {rows: 0, result_not_contains: '"affected_rows"'}
+- name: Row marker has dedicated immutable metadata and changes no default key or comment
+  scm: |
+    (begin
+      (define column (show (table "memcp-tests" false "initial_declaration_probe" false nil) "column" "record_guid" false))
+      (and ((column "Properties") "tsql.rowguidcol")
+        ((tsql_effective_column column nil) "IsRowGuidCol")
+        (equal? (column "RawType") "UNIQUEIDENTIFIER")
+        (equal? (column "Comment") "") (equal? (column "Extra") "")
+        (nil? (column "Default")) (equal? (column "Key") "")))
+  expect: {result: true}
+- name: Marker does not supply an omitted nonnullable GUID
+  sql: INSERT initial_declaration_probe(tenant_id,subject_id,permission_id,ordinal) VALUES(1,2,3,4)
+  expect: {error: true}
+- name: Explicit GUID values use ordinary typed insertion
+  sql: INSERT initial_declaration_probe(tenant_id,subject_id,permission_id,ordinal,record_guid) VALUES(1,2,3,4,'00000000-0000-0000-0000-000000000001')
+  expect: {affected_rows: 1}
+- name: Composite native primary key remains enforced
+  sql: INSERT initial_declaration_probe(tenant_id,subject_id,permission_id,ordinal,record_guid) VALUES(1,2,3,4,'00000000-0000-0000-0000-000000000002')
+  expect: {error: true}
+- name: Following numeric and wide character declaration uses the same parser path
+  sql: |
+    CREATE TABLE [dbo].[initial_numeric_probe](
+      [tenant_id] INT NOT NULL,[subject_id] INT NOT NULL,[period] SMALLINT NOT NULL,
+      [host_label] VARCHAR(500) NOT NULL,[amount] REAL NULL,[total] FLOAT(53) NULL,
+      [record_guid] UNIQUEIDENTIFIER ROWGUIDCOL NOT NULL,
+      CONSTRAINT [PK_initial_numeric_probe] PRIMARY KEY CLUSTERED([tenant_id] ASC,[subject_id] ASC,[period] ASC,[host_label] ASC));
+    CREATE NONCLUSTERED INDEX [IX_initial_numeric_probe] ON [dbo].[initial_numeric_probe]([subject_id] ASC,[tenant_id] ASC);
+  expect: {affected_rows: 0}
+- name: Nullable row marker does not imply a key or NOT NULL
+  sql: CREATE TABLE row_guid_nullable(id INT PRIMARY KEY,guid UNIQUEIDENTIFIER ROWGUIDCOL NULL)
+  expect: {rows: 0, result_not_contains: '"affected_rows"'}
+- name: Marker permits duplicate values and omitted nullable values
+  sql: INSERT row_guid_nullable(id,guid) VALUES(1,'00000000-0000-0000-0000-000000000001'),(2,'00000000-0000-0000-0000-000000000001'); INSERT row_guid_nullable(id) VALUES(3)
+  expect: {affected_rows: 1}
+- name: No implicit GUID generation or uniqueness is reported
+  sql: SELECT id,guid FROM row_guid_nullable ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - {id: 1,guid: '00000000-0000-0000-0000-000000000001'}
+    - {id: 2,guid: '00000000-0000-0000-0000-000000000001'}
+    - {id: 3,guid: null}
+- name: Non-GUID marker fails before table publication
+  sql: CREATE TABLE row_guid_rejected(id INT ROWGUIDCOL)
+  expect: {error: true,contains: ROWGUIDCOL requires the native UNIQUEIDENTIFIER declaration}
+- name: Multiple row markers fail before table publication
+  sql: CREATE TABLE row_guid_rejected(a UNIQUEIDENTIFIER ROWGUIDCOL,b UNIQUEIDENTIFIER ROWGUIDCOL)
+  expect: {error: true,contains: only one ROWGUIDCOL column is allowed}
+- name: Duplicate marker on one column is rejected
+  sql: CREATE TABLE row_guid_rejected(id UNIQUEIDENTIFIER ROWGUIDCOL ROWGUIDCOL)
+  expect: {error: true,contains: duplicate ROWGUIDCOL declaration}
+- name: User alias is not the direct native GUID declaration
+  sql: CREATE TYPE row_guid_alias FROM UNIQUEIDENTIFIER; CREATE TABLE row_guid_rejected(id row_guid_alias ROWGUIDCOL)
+  expect: {error: true,contains: ROWGUIDCOL requires the native UNIQUEIDENTIFIER declaration}
+- name: Invalid marked declarations leave no native table
+  scm: (nil? (table "memcp-tests" false "row_guid_rejected" false nil))
+  expect: {result: true}
+- name: Complete creation owns its marker before publication
+  sql: CREATE TABLE row_guid_added(id INT PRIMARY KEY,guid UNIQUEIDENTIFIER ROWGUIDCOL NULL)
+  expect: {rows: 0, result_not_contains: '"affected_rows"'}
+- name: Marked ADD remains unsupported until native atomic declaration validation
+  sql: ALTER TABLE row_guid_added ADD other_guid UNIQUEIDENTIFIER ROWGUIDCOL NULL
+  expect: {error: true,contains: ROWGUIDCOL in ALTER ADD is not supported}
+- name: Rejected ADD has no partial native column
+  scm: (nil? (show (table "memcp-tests" false "row_guid_added" false nil) "column" "other_guid" false))
+  expect: {result: true}
+- name: Unrelated stored-column cloning preserves declaration properties
+  scm: |
+    (begin
+      (define source (table "memcp-tests" false "row_guid_added" false nil))
+      (altercolumn source "guid" "comment" "ordinary comment")
+      (define column (show source "column" "guid" false))
+      (and ((column "Properties") "tsql.rowguidcol") (equal? (column "Comment") "ordinary comment")))
+  expect: {result: true}
+- name: Generic scalar properties replace independently of type default and comment
+  scm: |
+    (begin
+      (define source (table "memcp-tests" false "row_guid_added" false nil))
+      (altercolumn source "id" "properties" '("client.marker" 7 "client.label" "bounded"))
+      (define column (show source "column" "id" false))
+      (and (equal? ((column "Properties") "client.marker") 7)
+        (equal? ((column "Properties") "client.label") "bounded")
+        (equal? (column "RawType") "INT") (equal? (column "Key") "PRI")))
+  expect: {result: true}
+- name: Executable and nested property payloads are rejected before metadata publication
+  scm: |
+    (begin
+      (define source (table "memcp-tests" false "row_guid_added" false nil))
+      (define rejected (try (lambda () (begin
+        (altercolumn source "id" "properties" (list "client.marker" (lambda () 1))) false)) (lambda (_error) true)))
+      (and rejected (equal? (((show source "column" "id" false) "Properties") "client.marker") 7)))
+  expect: {result: true}
+- name: Pseudo-column references remain explicitly unsupported until logical binder support
+  sql: SELECT $ROWGUID FROM row_guid_nullable
+  expect: {error: true}
+- name: Native admission still refuses permanent marked creation in an explicit transaction
+  session_id: row-guid-transaction
+  sql: BEGIN TRANSACTION; CREATE TABLE row_guid_rejected(id UNIQUEIDENTIFIER ROWGUIDCOL)
+  expect: {affected_rows: 0}
+- name: Rejected marked creation uses ordinary transaction recovery
+  session_id: row-guid-transaction
+  sql: ROLLBACK TRANSACTION
+  expect: {affected_rows: 0}
+- name: Native schema reload retains the optional declaration properties
+  syntax: mysql
+  sql: SHUTDOWN
+  restart_timeout: 60
+  expect: {rows: 0}
+- name: Marker and ordinary scalar properties survive restart
+  scm: |
+    (begin
+      (define source (table "memcp-tests" false "row_guid_added" false nil))
+      (and (((show source "column" "guid" false) "Properties") "tsql.rowguidcol")
+        (equal? (((show source "column" "id" false) "Properties") "client.marker") 7)))
+  expect: {result: true}
+- name: Dropping a marked column retires its properties with the native declaration
+  sql: ALTER TABLE row_guid_added DROP COLUMN guid; ALTER TABLE row_guid_added ADD replacement UNIQUEIDENTIFIER NULL
+  expect: {affected_rows: 0}
+- name: A replacement native column does not inherit retired declaration properties
+  scm: |
+    (not (((show (table "memcp-tests" false "row_guid_added" false nil) "column" "replacement" false) "Properties") "tsql.rowguidcol"))
+  expect: {result: true}

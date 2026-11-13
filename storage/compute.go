@@ -153,6 +153,9 @@ func (t *table) computeColumnDDLLocked(tx *TxContext, name string, inputCols []s
 			t.ddlMu.Lock()
 		}
 	}()
+	if dependency := t.checkColumnDependency(name); dependency != nil {
+		panic("column declaration is required by check constraint " + dependency.Id + ": " + name)
+	}
 	for i, c := range t.Columns {
 		if c.Name == name {
 			// Software contract:
@@ -361,6 +364,10 @@ func (t *table) computeOrderedColumnDDLLocked(name string, sortCols []string, so
 	paramsChanged := false
 	isTemp := false
 	t.schema.schemalock.Lock()
+	if dependency := t.checkColumnDependency(name); dependency != nil {
+		t.schema.schemalock.Unlock()
+		panic("column declaration is required by check constraint " + dependency.Id + ": " + name)
+	}
 	for i, c := range t.Columns {
 		if c.Name == name {
 			// Detect parameter changes (different OVER clause on same column).
@@ -871,6 +878,38 @@ func (t *table) registerORCTriggers(name string) {
 			break
 		}
 	}
+
+	for _, timing := range []TriggerTiming{AfterInsert, AfterUpdate, AfterDelete} {
+		triggerName := ".orc:" + t.Name + ":" + name + "|" + timing.String()
+		exists := false
+		for _, tr := range t.Triggers {
+			if tr.Name == triggerName {
+				exists = true
+				break
+			}
+		}
+		if exists {
+			continue
+		}
+
+		t.AddTrigger(TriggerDescription{
+			Name:     triggerName,
+			Timing:   timing,
+			IsSystem: true,
+			Priority: 100,
+			Func:     buildFKProc(t.orcInvalidationTriggerBody(name, col, timing)),
+		})
+	}
+	if col != nil {
+		refs := extractScanJoinInfo(col.OrcMapReduceFn)
+		t.registerORCDependencyTriggers(name, col, refs)
+	}
+}
+
+// orcInvalidationTriggerBody derives only the native self-maintenance recipe
+// from the current column declaration. Both registration and unpublished reload
+// use this producer; persisted executable code is not declaration authority.
+func (t *table) orcInvalidationTriggerBody(name string, col *column, timing TriggerTiming) scm.Scmer {
 	hasSortKey := col != nil && len(col.OrcSortCols) > 0
 	relevantCols := []string(nil)
 	if col != nil {
@@ -891,62 +930,63 @@ func (t *table) registerORCTriggers(name string) {
 		return scm.NewSlice(parts)
 	}
 
-	for _, timing := range []TriggerTiming{AfterInsert, AfterUpdate, AfterDelete} {
-		triggerName := ".orc:" + t.Name + ":" + name + "|" + timing.String()
-		exists := false
-		for _, tr := range t.Triggers {
-			if tr.Name == triggerName {
-				exists = true
-				break
-			}
-		}
-		if exists {
-			continue
-		}
-
-		var body scm.Scmer
-		if hasSortKey {
-			// Invalidate from composite sort key onwards via validMask scan
-			switch timing {
-			case AfterInsert:
-				tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(t.schema.Name), scm.NewBool(false), scm.NewString(t.Name), scm.NewBool(false)})
-				body = scm.NewSlice([]scm.Scmer{scm.NewSymbol("invalidateorc"), tblExpr, scm.NewString(name), buildSortKeyExpr("NEW")})
-			case AfterDelete:
-				tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(t.schema.Name), scm.NewBool(false), scm.NewString(t.Name), scm.NewBool(false)})
-				body = scm.NewSlice([]scm.Scmer{scm.NewSymbol("invalidateorc"), tblExpr, scm.NewString(name), buildSortKeyExpr("OLD")})
-			case AfterUpdate:
-				// For UPDATE: invalidate from both OLD and NEW positions
-				tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(t.schema.Name), scm.NewBool(false), scm.NewString(t.Name), scm.NewBool(false)})
-				body = scm.NewSlice([]scm.Scmer{
-					scm.NewSymbol("begin"),
-					scm.NewSlice([]scm.Scmer{scm.NewSymbol("invalidateorc"), tblExpr, scm.NewString(name), buildSortKeyExpr("OLD")}),
-					scm.NewSlice([]scm.Scmer{scm.NewSymbol("invalidateorc"), tblExpr, scm.NewString(name), buildSortKeyExpr("NEW")}),
-				})
-			}
-		} else {
-			// No sort key: full column invalidation
-			tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(t.schema.Name), scm.NewBool(false), scm.NewString(t.Name), scm.NewBool(false)})
+	var body scm.Scmer
+	if hasSortKey {
+		// Invalidate from composite sort key onwards via validMask scan
+		switch timing {
+		case AfterInsert:
+			tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(t.schema.Name), scm.NewBool(false), scm.NewString(t.Name), scm.NewBool(false), scm.NewSymbol("tx")})
+			body = scm.NewSlice([]scm.Scmer{scm.NewSymbol("invalidateorc"), tblExpr, scm.NewString(name), buildSortKeyExpr("NEW")})
+		case AfterDelete:
+			tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(t.schema.Name), scm.NewBool(false), scm.NewString(t.Name), scm.NewBool(false), scm.NewSymbol("tx")})
+			body = scm.NewSlice([]scm.Scmer{scm.NewSymbol("invalidateorc"), tblExpr, scm.NewString(name), buildSortKeyExpr("OLD")})
+		case AfterUpdate:
+			// For UPDATE: invalidate from both OLD and NEW positions
+			tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(t.schema.Name), scm.NewBool(false), scm.NewString(t.Name), scm.NewBool(false), scm.NewSymbol("tx")})
 			body = scm.NewSlice([]scm.Scmer{
-				scm.NewSymbol("invalidatecolumn"),
-				tblExpr,
-				scm.NewString(name),
+				scm.NewSymbol("begin"),
+				scm.NewSlice([]scm.Scmer{scm.NewSymbol("invalidateorc"), tblExpr, scm.NewString(name), buildSortKeyExpr("OLD")}),
+				scm.NewSlice([]scm.Scmer{scm.NewSymbol("invalidateorc"), tblExpr, scm.NewString(name), buildSortKeyExpr("NEW")}),
 			})
 		}
-		if timing == AfterUpdate {
-			body = wrapUpdateBodyWithRelevantChangeGuard(body, relevantCols)
-		}
-		t.AddTrigger(TriggerDescription{
-			Name:     triggerName,
-			Timing:   timing,
-			IsSystem: true,
-			Priority: 100,
-			Func:     buildFKProc(body),
+	} else {
+		// No sort key: full column invalidation
+		tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(t.schema.Name), scm.NewBool(false), scm.NewString(t.Name), scm.NewBool(false), scm.NewSymbol("tx")})
+		body = scm.NewSlice([]scm.Scmer{
+			scm.NewSymbol("invalidatecolumn"),
+			tblExpr,
+			scm.NewString(name),
+			scm.NewSymbol("tx"),
 		})
 	}
-	if col != nil {
-		refs := extractScanJoinInfo(col.OrcMapReduceFn)
-		t.registerORCDependencyTriggers(name, col, refs)
+	if timing == AfterUpdate {
+		body = wrapUpdateBodyWithRelevantChangeGuard(body, relevantCols)
 	}
+	return body
+}
+
+// Restore only this owner's exact self-header slot from the actual ORC
+// declaration. Dependency registration belongs to later cache preparation and
+// must not recurse into database acquisition while loading this database.
+func (t *table) regenerateORCTriggerAfterLoad(trigger *TriggerDescription) bool {
+	if !trigger.IsSystem || trigger.Source != "" || trigger.Language != "" {
+		return false
+	}
+	switch trigger.Timing {
+	case AfterInsert, AfterUpdate, AfterDelete:
+	default:
+		return false
+	}
+	for _, col := range t.Columns {
+		if col.OrcMapReduceFn.IsNil() || trigger.Name != ".orc:"+t.Name+":"+col.Name+"|"+trigger.Timing.String() {
+			continue
+		}
+		trigger.Func = buildFKProc(t.orcInvalidationTriggerBody(col.Name, col, trigger.Timing))
+		trigger.FuncPlan, trigger.VectorFunc = scm.NewNil(), scm.NewNil()
+		finalizeTriggerCompilation(trigger)
+		return true
+	}
+	return false
 }
 
 type tableRef struct{ schema, table string }
@@ -959,18 +999,22 @@ func scanTableReference(expr scm.Scmer) (tableRef, bool) {
 	}
 	if expr.IsSlice() {
 		items := expr.Slice()
-		if len(items) == 5 && callHeadIs(items[0], "table") {
+		if len(items) == 6 && callHeadIs(items[0], "table") {
 			schema, name := scm.String(items[1]), scm.String(items[3])
 			if items[2].Bool() || items[4].Bool() {
 				db := GetDatabase(schema, items[2].Bool())
 				if db == nil {
 					return tableRef{}, false
 				}
-				t := db.GetTable(name, items[4].Bool())
-				if t == nil || t.publishedName.Load() == nil {
+				// This is static dependency discovery, not expression
+				// execution. A concrete capability can resolve a private
+				// native source; dynamic transaction expressions stay opaque.
+				tx := scmerToTxContext(items[5])
+				t := db.GetTableForTx(name, items[4].Bool(), tx)
+				if t == nil {
 					return tableRef{}, false
 				}
-				return tableRef{schema: db.Name, table: *t.publishedName.Load()}, true
+				return tableRef{schema: db.Name, table: t.clusterPublishedName()}, true
 			}
 			return tableRef{schema: schema, table: name}, true
 		}
@@ -1688,6 +1732,8 @@ func buildKeytableScanFilter(targetTable string, srcCols, inputCols []string, di
 // buildIncrementScan builds a scan expression that walks the keytable, matches rows
 // by join key values from a trigger dict (OLD or NEW), and calls the $increment:
 // closure to update the proxy's cached value in-place. No shard rebuild needed.
+// All generated maintenance bodies run in buildFKProc's four-argument frame;
+// resolve and scan their targets with the actual native tx, never the session.
 func buildIncrementScan(targetSchema, targetTable, colName string, srcCols, inputCols []string, dictSym string, deltaExpr scm.Scmer, negate bool) scm.Scmer {
 	filterColElems, filterParams, filterBody := buildKeytableScanFilter(targetTable, srcCols, inputCols, dictSym)
 	filterCols := scm.NewSlice(filterColElems)
@@ -1713,10 +1759,10 @@ func buildIncrementScan(targetSchema, targetTable, colName string, srcCols, inpu
 			scm.NewSlice([]scm.Scmer{scm.NewSymbol("$incr"), valueExpr})}),
 	})
 
-	tableExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewBool(false), scm.NewString(targetTable), scm.NewBool(false)})
+	tableExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewBool(false), scm.NewString(targetTable), scm.NewBool(false), scm.NewSymbol("tx")})
 	return scm.NewSlice([]scm.Scmer{
 		scm.NewSymbol("scan"),
-		scm.NewSymbol("session"),
+		scm.NewSymbol("tx"),
 		tableExpr,
 		accessSchema,
 		accessValues,
@@ -1842,8 +1888,9 @@ func buildIncrementalBody(targetSchema, targetTable, colName string, srcCols, in
 		})
 		invalidateBody := scm.NewSlice([]scm.Scmer{
 			scm.NewSymbol("invalidatecolumn"),
-			scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewBool(false), scm.NewString(targetTable), scm.NewBool(false)}),
+			scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewBool(false), scm.NewString(targetTable), scm.NewBool(false), scm.NewSymbol("tx")}),
 			scm.NewString(colName),
+			scm.NewSymbol("tx"),
 		})
 		// Build (and (equal? (get_assoc "OLD" "srcCol1") (get_assoc "NEW" "srcCol1")) ...)
 		keyEqualChecks := make([]scm.Scmer, len(srcCols))
@@ -1880,8 +1927,9 @@ func buildIncrementalBody(targetSchema, targetTable, colName string, srcCols, in
 		// Fallback: full invalidation.
 		return scm.NewSlice([]scm.Scmer{
 			scm.NewSymbol("invalidatecolumn"),
-			scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewBool(false), scm.NewString(targetTable), scm.NewBool(false)}),
+			scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewBool(false), scm.NewString(targetTable), scm.NewBool(false), scm.NewSymbol("tx")}),
 			scm.NewString(colName),
+			scm.NewSymbol("tx"),
 		})
 	}
 }
@@ -1927,10 +1975,10 @@ func buildInvalidateScan(targetSchema, targetTable, colName string, srcCols, inp
 	// Build result col list: '("$invalidate:colName")
 	invColName := "$invalidate:" + colName
 
-	tableExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewBool(false), scm.NewString(targetTable), scm.NewBool(false)})
+	tableExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewBool(false), scm.NewString(targetTable), scm.NewBool(false), scm.NewSymbol("tx")})
 	return scm.NewSlice([]scm.Scmer{
 		scm.NewSymbol("scan"),
-		scm.NewSymbol("session"),
+		scm.NewSymbol("tx"),
 		tableExpr,
 		accessSchema,
 		accessValues,
@@ -1963,8 +2011,9 @@ func buildSelectiveInvalidationBody(targetSchema, targetTable, colName string, s
 		// Fallback: full invalidation
 		return scm.NewSlice([]scm.Scmer{
 			scm.NewSymbol("invalidatecolumn"),
-			scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewBool(false), scm.NewString(targetTable), scm.NewBool(false)}),
+			scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewBool(false), scm.NewString(targetTable), scm.NewBool(false), scm.NewSymbol("tx")}),
 			scm.NewString(colName),
+			scm.NewSymbol("tx"),
 		})
 	}
 }
@@ -1990,7 +2039,7 @@ func buildInvalidateORCScan(targetSchema, targetTable, colName string, sortCols,
 		copy(parts[1:], mapParams)
 		sortKeyExpr = scm.NewSlice(parts)
 	}
-	tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewBool(false), scm.NewString(targetTable), scm.NewBool(false)})
+	tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewBool(false), scm.NewString(targetTable), scm.NewBool(false), scm.NewSymbol("tx")})
 	mapReduceParams := append([]scm.Scmer{scm.NewSymbol("acc")}, mapParams...)
 	mapReduceBody := scm.NewSlice([]scm.Scmer{
 		scm.NewSymbol("begin"),
@@ -1999,7 +2048,7 @@ func buildInvalidateORCScan(targetSchema, targetTable, colName string, sortCols,
 	})
 	return scm.NewSlice([]scm.Scmer{
 		scm.NewSymbol("scan"),
-		scm.NewSymbol("session"),
+		scm.NewSymbol("tx"),
 		tblExpr,
 		accessSchema,
 		accessValues,
@@ -2026,14 +2075,61 @@ func buildSelectiveORCInvalidationBody(targetSchema, targetTable, colName string
 	default:
 		return scm.NewSlice([]scm.Scmer{
 			scm.NewSymbol("invalidatecolumn"),
-			scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewBool(false), scm.NewString(targetTable), scm.NewBool(false)}),
+			scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewBool(false), scm.NewString(targetTable), scm.NewBool(false), scm.NewSymbol("tx")}),
 			scm.NewString(colName),
+			scm.NewSymbol("tx"),
 		})
 	}
 }
 
+func dependencyTriggerName(prefix string, target *table, column string, refIndex int, source *table, timing TriggerTiming) string {
+	name := prefix + target.Name + ":" + column
+	if refIndex >= 0 {
+		name += "|scan" + strconv.Itoa(refIndex)
+	}
+	return name + "|" + source.Name + "|" + timing.String()
+}
+
+// The current native computation definition owns cleanup code. In particular,
+// restored generated procedures must not retain an obsolete public DROP ABI.
+// This compiler only resolves metadata names; it does not scan user rows or
+// inspect/rewrite the previous executable or quoted payloads.
+func (t *table) dependencyCleanupProgram(name string, refs []scanJoinInfo, ordered bool) scm.Scmer {
+	prefix := ".cache:"
+	if ordered {
+		prefix = ".orcdep:"
+	}
+	var removals []systemTriggerRemoval
+	seen := make(map[string]bool)
+	appendRemoval := func(schema, name string) {
+		key := schema + "\x00" + name
+		if !seen[key] {
+			seen[key] = true
+			removals = append(removals, systemTriggerRemoval{schema, name})
+		}
+	}
+	for index, ref := range refs {
+		db := GetDatabase(ref.schema)
+		if db == nil {
+			continue
+		}
+		source := db.GetTable(ref.table)
+		if source == nil || source == t {
+			continue
+		}
+		for _, timing := range []TriggerTiming{AfterInsert, AfterUpdate, AfterDelete} {
+			appendRemoval(ref.schema, dependencyTriggerName(prefix, t, name, index, source, timing))
+		}
+		appendRemoval(ref.schema, dependencyTriggerName(prefix, t, name, -1, source, AfterInvalidate))
+		if !ordered && strings.HasPrefix(t.Name, ".") {
+			appendRemoval(ref.schema, dependencyTriggerName(prefix, t, name, -1, source, AfterDropTable))
+		}
+	}
+	return compileSystemTriggerRemovals(removals)
+}
+
 func registerInvalidationPropagationTrigger(prefix string, srcTable, targetTable *table, colName string, acquire func(*TxContext) bool, release func()) string {
-	triggerName := prefix + targetTable.Name + ":" + colName + "|" + srcTable.Name + "|" + AfterInvalidate.String()
+	triggerName := dependencyTriggerName(prefix, targetTable, colName, -1, srcTable, AfterInvalidate)
 	targetKey := targetTable.schema.Name + "\x00" + targetTable.Name + "\x00" + colName
 	propagationAcquire := func(tx *TxContext) bool {
 		if tx != nil {
@@ -2046,18 +2142,15 @@ func registerInvalidationPropagationTrigger(prefix string, srcTable, targetTable
 		}
 		return acquire(tx)
 	}
-	for _, tr := range srcTable.Triggers {
-		if tr.Name == triggerName {
-			srcTable.SetTriggerTarget(triggerName, targetTable, propagationAcquire, release)
-			return triggerName
-		}
+	if srcTable.reuseComputeDependencyTrigger(triggerName, targetTable, propagationAcquire, release) {
+		return triggerName
 	}
 	tblExpr := scm.NewSlice([]scm.Scmer{
 		scm.NewSymbol("table"),
 		scm.NewString(targetTable.schema.Name), scm.NewBool(false),
 		scm.NewString(targetTable.Name), scm.NewBool(false),
-	})
-	srcTable.AddTrigger(TriggerDescription{
+		scm.NewSymbol("tx")})
+	srcTable.installComputeDependencyTrigger(TriggerDescription{
 		Name:     triggerName,
 		Timing:   AfterInvalidate,
 		IsSystem: true,
@@ -2066,6 +2159,7 @@ func registerInvalidationPropagationTrigger(prefix string, srcTable, targetTable
 			scm.NewSymbol("invalidatecolumn"),
 			tblExpr,
 			scm.NewString(colName),
+			scm.NewSymbol("tx"),
 		})),
 		cacheTarget: targetTable,
 		Acquire:     propagationAcquire,
@@ -2084,6 +2178,9 @@ func (t *table) reuseComputeDependencyTrigger(name string, target *table, acquir
 	for i := range t.Triggers {
 		trigger := &t.Triggers[i]
 		if trigger.Name == name {
+			if !trigger.IsSystem {
+				panic("dependency trigger name collides with a user definition")
+			}
 			if trigger.needsRegeneration {
 				return false
 			}
@@ -2103,16 +2200,22 @@ func (t *table) installComputeDependencyTrigger(trigger TriggerDescription) {
 	finalizeTriggerCompilation(&trigger)
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	release := t.admitTriggerMutationLocked(trigger.Name, trigger.IsSystem)
+	defer release()
 	for i := range t.Triggers {
 		if t.Triggers[i].Name == trigger.Name {
+			if !t.Triggers[i].IsSystem {
+				panic("dependency trigger name collides with a user definition")
+			}
 			// Generated dependency triggers keep their fixed priority and original
 			// slot; concurrent readers see either complete immutable description.
 			trigger.cacheTarget.rememberCacheTriggerSource(t)
 			t.Triggers[i] = trigger
+			t.refreshTriggerMemoryLocked()
 			return
 		}
 	}
-	t.addTriggerLocked(trigger)
+	t.insertTriggerLocked(trigger)
 }
 
 // registerComputeTriggers installs AfterInsert/AfterUpdate/AfterDelete triggers
@@ -2183,19 +2286,20 @@ func (t *table) registerComputeTriggersWithRefs(name string, computor scm.Scmer,
 		}
 
 		for _, timing := range []TriggerTiming{AfterInsert, AfterUpdate, AfterDelete} {
-			triggerName := ".cache:" + t.Name + ":" + name + "|scan" + strconv.Itoa(refIdx) + "|" + srcTable.Name + "|" + timing.String()
+			triggerName := dependencyTriggerName(".cache:", t, name, refIdx, srcTable, timing)
 			if !srcTable.reuseComputeDependencyTrigger(triggerName, t, acquireTarget, releaseTarget) {
 				var body scm.Scmer
 				if incremental && timing != AfterInvalidate {
 					// scan layout: [fn, tx, table, accessSchema, accessValues,
 					// filterCols, filter, mapCols, mapreduce, ...]
 					mapColsIdx, mapReduceIdx := 7, 8
-					tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewBool(false), scm.NewString(t.Name), scm.NewBool(false)})
+					tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewBool(false), scm.NewString(t.Name), scm.NewBool(false), scm.NewSymbol("tx")})
 					if isConstantOneAggregate(scanNode[mapReduceIdx]) {
 						body = scm.NewSlice([]scm.Scmer{
 							scm.NewSymbol("invalidatecolumn"),
 							tblExpr,
 							scm.NewString(name),
+							scm.NewSymbol("tx"),
 						})
 					} else {
 						body = buildIncrementalBody(targetSchema, t.Name, name, ref.srcCols, ref.inputCols, scanNode[mapColsIdx], scanNode[mapReduceIdx], timing)
@@ -2209,11 +2313,12 @@ func (t *table) registerComputeTriggersWithRefs(name string, computor scm.Scmer,
 				} else {
 					// Opaque scans have no proven reverse mapping. They must retain the
 					// complete invalidation fallback for correctness.
-					tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewBool(false), scm.NewString(t.Name), scm.NewBool(false)})
+					tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewBool(false), scm.NewString(t.Name), scm.NewBool(false), scm.NewSymbol("tx")})
 					body = scm.NewSlice([]scm.Scmer{
 						scm.NewSymbol("invalidatecolumn"),
 						tblExpr,
 						scm.NewString(name),
+						scm.NewSymbol("tx"),
 					})
 				}
 				if timing == AfterUpdate {
@@ -2241,7 +2346,7 @@ func (t *table) registerComputeTriggersWithRefs(name string, computor scm.Scmer,
 		// AfterDropTable: when source table is dropped, drop the target table too
 		// Only for internal temp tables (dot-prefixed) — never drop user base tables
 		if strings.HasPrefix(t.Name, ".") {
-			dropTriggerName := ".cache:" + t.Name + ":" + name + "|" + srcTable.Name + "|" + AfterDropTable.String()
+			dropTriggerName := dependencyTriggerName(".cache:", t, name, -1, srcTable, AfterDropTable)
 			dropExists := false
 			for _, tr := range srcTable.Triggers {
 				if tr.Name == dropTriggerName {
@@ -2283,21 +2388,12 @@ func (t *table) registerComputeTriggersWithRefs(name string, computor scm.Scmer,
 			}
 		}
 		if !exists {
-			calls := []scm.Scmer{scm.NewSymbol("begin")}
-			for _, rn := range registeredNames {
-				calls = append(calls, scm.NewSlice([]scm.Scmer{
-					scm.NewSymbol("droptrigger"),
-					scm.NewString(rn.schema),
-					scm.NewString(rn.name),
-					scm.NewBool(true),
-				}))
-			}
 			t.AddTrigger(TriggerDescription{
 				Name:     selfCleanupName,
 				Timing:   AfterDropTable,
 				IsSystem: true,
 				Priority: 50,
-				Func:     buildFKProc(scm.NewSlice(calls)),
+				Func:     t.dependencyCleanupProgram(name, refs, false),
 			})
 		}
 	}
@@ -2336,15 +2432,16 @@ func (t *table) registerORCDependencyTriggers(name string, col *column, refs []s
 		selective := validInputCols && validSourceCols && len(ref.srcCols) > 0 && len(ref.srcCols) == len(ref.inputCols)
 		relevantCols := scanRelevantSourceCols(ref, srcTable)
 		for _, timing := range []TriggerTiming{AfterInsert, AfterUpdate, AfterDelete} {
-			triggerName := ".orcdep:" + t.Name + ":" + name + "|scan" + strconv.Itoa(refIdx) + "|" + srcTable.Name + "|" + timing.String()
+			triggerName := dependencyTriggerName(".orcdep:", t, name, refIdx, srcTable, timing)
 			if srcTable.reuseComputeDependencyTrigger(triggerName, t, acquireTarget, releaseTarget) {
 				continue
 			}
-			tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewBool(false), scm.NewString(t.Name), scm.NewBool(false)})
+			tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewBool(false), scm.NewString(t.Name), scm.NewBool(false), scm.NewSymbol("tx")})
 			body := scm.NewSlice([]scm.Scmer{
 				scm.NewSymbol("invalidatecolumn"),
 				tblExpr,
 				scm.NewString(name),
+				scm.NewSymbol("tx"),
 			})
 			if selective {
 				body = buildSelectiveORCInvalidationBody(targetSchema, t.Name, name, col.OrcSortCols, ref.srcCols, ref.inputCols, timing)
@@ -2387,21 +2484,12 @@ func (t *table) registerORCDependencyTriggers(name string, col *column, refs []s
 	if exists {
 		return
 	}
-	calls := []scm.Scmer{scm.NewSymbol("begin")}
-	for _, rn := range registeredNames {
-		calls = append(calls, scm.NewSlice([]scm.Scmer{
-			scm.NewSymbol("droptrigger"),
-			scm.NewString(rn.schema),
-			scm.NewString(rn.name),
-			scm.NewBool(true),
-		}))
-	}
 	t.AddTrigger(TriggerDescription{
 		Name:     selfCleanupName,
 		Timing:   AfterDropTable,
 		IsSystem: true,
 		Priority: 50,
-		Func:     buildFKProc(scm.NewSlice(calls)),
+		Func:     t.dependencyCleanupProgram(name, refs, true),
 	})
 }
 
@@ -2411,7 +2499,7 @@ func (t *table) removeORCDependencyTriggers(name string) {
 		changed := false
 		newTriggers := make([]TriggerDescription, 0, len(srcTable.Triggers))
 		for _, tr := range srcTable.Triggers {
-			if strings.HasPrefix(tr.Name, prefix) {
+			if tr.IsSystem && strings.HasPrefix(tr.Name, prefix) {
 				changed = true
 				continue
 			}
@@ -2419,13 +2507,14 @@ func (t *table) removeORCDependencyTriggers(name string) {
 		}
 		if changed {
 			srcTable.Triggers = newTriggers
+			srcTable.refreshTriggerMemoryLocked()
 		}
 	}
 	cleanupName := ".orcdep_cleanup:" + t.Name + ":" + name
 	changed := false
 	newTriggers := make([]TriggerDescription, 0, len(t.Triggers))
 	for _, tr := range t.Triggers {
-		if tr.Name == cleanupName {
+		if tr.IsSystem && tr.Name == cleanupName {
 			changed = true
 			continue
 		}
@@ -2433,6 +2522,7 @@ func (t *table) removeORCDependencyTriggers(name string) {
 	}
 	if changed {
 		t.Triggers = newTriggers
+		t.refreshTriggerMemoryLocked()
 	}
 }
 
@@ -2444,7 +2534,7 @@ func (t *table) removeComputeTriggers(name string) {
 		changed := false
 		newTriggers := make([]TriggerDescription, 0, len(srcTable.Triggers))
 		for _, tr := range srcTable.Triggers {
-			if strings.HasPrefix(tr.Name, prefix) {
+			if tr.IsSystem && strings.HasPrefix(tr.Name, prefix) {
 				changed = true
 				continue
 			}
@@ -2453,6 +2543,7 @@ func (t *table) removeComputeTriggers(name string) {
 		if changed {
 			srcTable.mu.Lock()
 			srcTable.Triggers = newTriggers
+			srcTable.refreshTriggerMemoryLocked()
 			srcTable.mu.Unlock()
 		}
 	}

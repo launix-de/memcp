@@ -774,8 +774,11 @@ func TestStorageSCMERPreservesBSONTag(t *testing.T) {
 	storage := &StorageSCMER{values: []scm.Scmer{value, scm.NewNil()}}
 	var serialized bytes.Buffer
 	storage.Serialize(&serialized)
-	if magic, err := serialized.ReadByte(); err != nil || magic != 1 {
-		t.Fatalf("magic = %d, err=%v; want 1", magic, err)
+	if magic, err := serialized.ReadByte(); err != nil || magic != 3 {
+		t.Fatalf("magic = %d, err=%v; want 3", magic, err)
+	}
+	if remaining := serialized.Bytes(); len(remaining) == 0 || remaining[0] != 1 {
+		t.Fatalf("missing exact-scalar format version 1: %x", remaining)
 	}
 
 	var decoded StorageSCMER

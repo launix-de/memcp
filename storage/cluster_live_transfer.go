@@ -9,6 +9,7 @@ import "fmt"
 import "maps"
 import "sort"
 import "sync"
+import "weak"
 import "bufio"
 import "reflect"
 import "context"
@@ -735,6 +736,7 @@ func (cluster *nodeCluster) installLiveShard(cell *replicaCell, packet mosiPacke
 				return fmt.Errorf("missing live successor")
 			}
 			shard.storeNext(successor)
+			successor.rebuildSource = weak.Make(shard)
 		}
 	}
 	if owned {

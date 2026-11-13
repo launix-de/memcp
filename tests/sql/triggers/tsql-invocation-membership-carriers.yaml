@@ -1,0 +1,69 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Replacement trigger memberships own fresh native key carriers through commit and rollback
+setup:
+- sql: CREATE TABLE invocation_input(id INT PRIMARY KEY,tag NVARCHAR(12) COLLATE utf8mb4_general_ci,value INT)
+- sql: CREATE TABLE invocation_mirror(id INT PRIMARY KEY,tag NVARCHAR(12) COLLATE utf8mb4_general_ci)
+- sql: CREATE TABLE invocation_counts(old_rows INT)
+- sql: INSERT invocation_input VALUES(1,N'a',10),(2,N'b',20),(3,NULL,30),(4,N'd',40)
+- sql: INSERT invocation_mirror VALUES(1,N'a'),(2,N'b'),(3,NULL),(4,N'd'),(9,NULL),(11,N'A')
+- sql: |
+    CREATE TRIGGER invocation_delete ON invocation_input INSTEAD OF DELETE AS BEGIN
+      SET NOCOUNT ON;
+      INSERT invocation_counts SELECT COUNT(*) FROM deleted;
+      DELETE FROM invocation_mirror WHERE tag IN (SELECT tag FROM deleted);
+      DELETE FROM invocation_input WHERE id IN (SELECT id FROM deleted);
+    END
+cleanup:
+- sql: DROP TRIGGER IF EXISTS invocation_delete
+- sql: DROP TABLE IF EXISTS invocation_counts
+- sql: DROP TABLE IF EXISTS invocation_mirror
+- sql: DROP TABLE IF EXISTS invocation_input
+test_cases:
+- name: A multirow replacement consumes its current OLD key domains
+  sql: DELETE FROM invocation_input WHERE id IN (1,3)
+- name: Nullable membership retains UNKNOWN rows and case insensitive duplicate target matches
+  sql: SELECT id,tag FROM invocation_mirror ORDER BY id
+  expect: {rows: 4,data: [{id: 2,tag: b},{id: 3,tag: null},{id: 4,tag: d},{id: 9,tag: null}]}
+- name: The explicit inner mutation selects each real target once
+  sql: SELECT id,value FROM invocation_input ORDER BY id
+  expect: {rows: 2,data: [{id: 2,value: 20},{id: 4,value: 40}]}
+- name: Caller rollback restores every membership sink and releases its private resources
+  tds:
+    statements:
+    - {connection: owner,sql: BEGIN TRANSACTION}
+    - {connection: owner,sql: DELETE FROM invocation_input WHERE id=2}
+    - connection: owner
+      sql: SELECT id FROM invocation_mirror ORDER BY id
+      expect: {rows: 3,data: [{id: 3},{id: 4},{id: 9}]}
+    - connection: owner
+      sql: SELECT id FROM invocation_input ORDER BY id
+      expect: {rows: 1,data: [{id: 4}]}
+    - {connection: owner,sql: ROLLBACK TRANSACTION}
+    - connection: observer
+      sql: SELECT id FROM invocation_input ORDER BY id
+      expect: {rows: 2,data: [{id: 2},{id: 4}]}
+    - connection: observer
+      sql: SELECT id FROM invocation_mirror ORDER BY id
+      expect: {rows: 4,data: [{id: 2},{id: 3},{id: 4},{id: 9}]}
+- name: Later rows reuse the same SQL shapes with new statement images
+  tds:
+    statements:
+    - sql: INSERT invocation_input VALUES(1,N'a',100),(3,NULL,300)
+    - sql: INSERT invocation_mirror VALUES(1,N'a'),(11,N'A')
+    - sql: DELETE FROM invocation_input WHERE id=3
+    - sql: DELETE FROM invocation_input WHERE id=-1
+    - sql: DELETE FROM invocation_input WHERE id=1
+- name: Subsequent and empty key domains leave unrelated and null target rows intact
+  sql: SELECT id,tag FROM invocation_mirror ORDER BY id
+  expect: {rows: 4,data: [{id: 2,tag: b},{id: 3,tag: null},{id: 4,tag: d},{id: 9,tag: null}]}
+- name: Repeated replacements retain the new complete input relation
+  sql: SELECT id,value FROM invocation_input ORDER BY id
+  expect: {rows: 2,data: [{id: 2,value: 20},{id: 4,value: 40}]}
+- name: Only committed statement images contribute counts including an empty image
+  sql: SELECT old_rows FROM invocation_counts ORDER BY old_rows
+  expect: {rows: 4,data: [{old_rows: 0},{old_rows: 1},{old_rows: 1},{old_rows: 2}]}

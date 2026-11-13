@@ -1,0 +1,128 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: TSQL write producers allocate durable database-scoped versions per affected row
+setup:
+  - sql: CREATE TABLE generated_versions(id INT PRIMARY KEY,value INT,rv ROWVERSION NOT NULL)
+  - sql: CREATE TABLE generated_version_alias(id INT PRIMARY KEY,rv TIMESTAMP NOT NULL)
+  - sql: CREATE TABLE generated_version_defaults(id INT IDENTITY PRIMARY KEY,rv ROWVERSION NOT NULL)
+  - sql: CREATE PROCEDURE generated_version_source AS SELECT 21 AS id,210 AS value UNION ALL SELECT 22,220
+  - sql: CREATE TABLE generated_version_witness(id INT PRIMARY KEY,token VARBINARY(8))
+cleanup:
+  - sql: DROP TABLE IF EXISTS generated_versions
+  - sql: DROP TABLE IF EXISTS generated_version_alias
+  - sql: DROP TABLE IF EXISTS generated_version_defaults
+  - sql: DROP PROCEDURE IF EXISTS generated_version_source
+  - sql: DROP TABLE IF EXISTS generated_version_witness
+test_cases:
+  - name: A database starts without a consumed version
+    # Isolated suites share their server and database sequence highwaters.
+    # Prove initial zero in a genuinely unused database, never reset a counter.
+    setup:
+      - scm: (createdatabase "memcp-tests-unused-version" false)
+    cleanup:
+      - scm: (dropdatabase "memcp-tests-unused-version" false)
+    tds:
+      statements:
+        - sql: USE [memcp-tests-unused-version]
+        - sql: SELECT CONVERT(VARCHAR(16),@@DBTS,2) AS token
+          expect: {rows: 1, data: [{token: '0000000000000000'}]}
+  - name: Multirow insert generates a distinct version for every row
+    sql: INSERT generated_versions VALUES(1,10),(2,20)
+  - name: Generated values have the declared binary width
+    sql: SELECT COUNT(DISTINCT rv) AS n FROM generated_versions WHERE DATALENGTH(rv)=8 AND rv<>0x0000000000000000
+    expect: {rows: 1, data: [{n: 2}]}
+  - name: Capture a version before a no-op update
+    sql: INSERT generated_version_witness SELECT id,rv FROM generated_versions WHERE id=1
+  - name: No-op update still generates a fresh version
+    sql: UPDATE generated_versions SET value=value WHERE id=1
+  - name: Optimistic readers can distinguish the changed row
+    sql: SELECT COUNT(*) AS n FROM generated_versions v JOIN generated_version_witness w ON v.id=w.id WHERE v.rv>w.token AND v.value=10
+    expect: {rows: 1, data: [{n: 1}]}
+  - name: INSERT SELECT uses the same per-row generation producer
+    sql: INSERT generated_versions(id,value) SELECT id+10,value FROM generated_versions WHERE id<10
+  - name: All streamed insert rows have independent versions
+    sql: SELECT COUNT(DISTINCT rv) AS n FROM generated_versions
+    expect: {rows: 1, data: [{n: 4}]}
+  - name: Multirow updates allocate within the affected-row callback
+    sql: UPDATE generated_versions SET value=value
+  - name: Every updated row retains its own generated value
+    sql: SELECT COUNT(DISTINCT rv) AS n FROM generated_versions
+    expect: {rows: 1, data: [{n: 4}]}
+  - name: INSERT EXEC generates a fresh value for each emitted result row
+    sql: INSERT generated_versions(id,value) EXEC generated_version_source
+  - name: Procedure result rows participate in the same version domain
+    sql: SELECT COUNT(DISTINCT rv) AS n FROM generated_versions
+    expect: {rows: 1, data: [{n: 6}]}
+  - name: DEFAULT VALUES supplies both the identity and the generated version
+    sql: INSERT generated_version_defaults DEFAULT VALUES
+  - name: Default insertion has a real nonzero generated value
+    sql: SELECT COUNT(*) AS n FROM generated_version_defaults WHERE id=1 AND DATALENGTH(rv)=8 AND rv<>0x0000000000000000
+    expect: {rows: 1, data: [{n: 1}]}
+  - name: Timestamp tables consume the same database sequence
+    sql: INSERT generated_version_alias VALUES(1)
+  - name: Versions remain unique across tables
+    sql: SELECT COUNT(*) AS n FROM generated_versions v JOIN generated_version_alias a ON v.rv=a.rv
+    expect: {rows: 1, data: [{n: 0}]}
+  - name: Metadata-only insertion does not consume a version
+    tds:
+      statements:
+        - sql: |
+            DECLARE @before VARBINARY(8)=@@DBTS;
+            SET FMTONLY ON;
+            INSERT generated_versions(id,value) VALUES(99,99);
+            SET FMTONLY OFF;
+            SELECT CASE WHEN @@DBTS=@before THEN 1 ELSE 0 END AS unchanged;
+          expect: {rows: 1, data: [{unchanged: 1}]}
+  - name: Rollback restores rows without reusing consumed version numbers
+    tds:
+      statements:
+        - sql: |
+            DECLARE @before VARBINARY(8),@consumed VARBINARY(8),@restored INT;
+            SELECT @before=rv FROM generated_versions WHERE id=2;
+            BEGIN TRANSACTION;
+            UPDATE generated_versions SET value=21 WHERE id=2;
+            SELECT @consumed=rv FROM generated_versions WHERE id=2;
+            ROLLBACK TRANSACTION;
+            SELECT @restored=CASE WHEN rv=@before AND value=20 THEN 1 ELSE 0 END FROM generated_versions WHERE id=2;
+            UPDATE generated_versions SET value=22 WHERE id=2;
+            SELECT CASE WHEN @restored=1 AND rv>@consumed THEN 1 ELSE 0 END AS verified FROM generated_versions WHERE id=2;
+          expect: {rows: 1, data: [{verified: 1}]}
+  - name: Empty insert and update producers do not consume a version
+    tds:
+      statements:
+        - sql: |
+            DECLARE @before VARBINARY(8)=@@DBTS;
+            UPDATE generated_versions SET value=value WHERE id=-1;
+            INSERT generated_versions(id,value) SELECT id+100,value FROM generated_versions WHERE id=-1;
+            SELECT CASE WHEN @@DBTS=@before THEN 1 ELSE 0 END AS unchanged;
+          expect: {rows: 1, data: [{unchanged: 1}]}
+  - name: Explicit generated assignment remains forbidden
+    sql: UPDATE generated_versions SET rv=rv WHERE id=-1
+    expect: {error: true, contains: [generated version]}
+  - name: A computed projection of the generated value is not a second write target
+    setup:
+      - sql: CREATE TABLE generated_version_computed(id INT PRIMARY KEY,rv ROWVERSION NOT NULL,mirror AS rv)
+    cleanup:
+      - sql: DROP TABLE generated_version_computed
+    tds:
+      statements:
+        - sql: INSERT generated_version_computed(id) VALUES(1)
+        - sql: UPDATE generated_version_computed SET id=id
+        - sql: SELECT COUNT(*) AS n FROM generated_version_computed WHERE mirror=rv AND DATALENGTH(rv)=8
+          expect: {rows: 1, data: [{n: 1}]}
+  - name: Save the database highwater before restart
+    sql: INSERT generated_version_witness VALUES(99,@@DBTS)
+  - name: Restart recovers the consumed database sequence
+    action: restart
+  - name: The recovered highwater covers every emitted version
+    sql: SELECT CASE WHEN @@DBTS>=token THEN 1 ELSE 0 END AS recovered FROM generated_version_witness WHERE id=99
+    expect: {rows: 1, data: [{recovered: 1}]}
+  - name: New values advance beyond the recovered highwater
+    sql: INSERT generated_version_alias VALUES(2)
+  - name: The first post-restart value cannot repeat an earlier reservation
+    sql: SELECT CASE WHEN @@DBTS>token THEN 1 ELSE 0 END AS advanced FROM generated_version_witness WHERE id=99
+    expect: {rows: 1, data: [{advanced: 1}]}

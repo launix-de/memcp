@@ -1,3 +1,5 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 Carl-Philip Haensch
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Edge Cases and Error Handling Test Suite
@@ -387,5 +389,17 @@ test_cases:
   #   expect:
   #     error: true
   #     error_type: "query_too_long"
+
+  - name: Qualified DESC also rejects a missing table
+    sql: DESC `memcp-tests`.`invisible_table`
+    expect: {error: true}
+  - name: DESCRIBE returns current native column declarations
+    setup:
+      - sql: CREATE TABLE describe_current_owner(id INT)
+    sql: DESCRIBE describe_current_owner
+    expect: {rows: 1,contains: [id,INT]}
+    cleanup:
+      - sql: DROP TABLE describe_current_owner
+
 
 cleanup: []

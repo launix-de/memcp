@@ -1,0 +1,351 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  description: Session-local temporary relations use native typed DDL and DML
+  requires_tds: true
+  isolated: true
+test_cases:
+  - name: Local temporary table accepts the native system-name alias
+    session_id: local-temporary-a
+    sql: "CREATE TABLE #probe (id INT PRIMARY KEY, label SYSNAME, amount INT NOT NULL DEFAULT 7)"
+    expect: {rows: 0, result_not_contains: '"affected_rows"'}
+  - name: Local temporary rows survive the next request
+    session_id: local-temporary-a
+    sql: "INSERT #probe (id,label) VALUES (1,N'first'),(2,N'second')"
+    expect: {affected_rows: 2}
+  - name: Local temporary source uses case-insensitive relation binding
+    session_id: local-temporary-a
+    sql: "SELECT id,label,amount FROM #PROBE ORDER BY id"
+    expect:
+      rows: 2
+      data: [{id: 1,label: first,amount: 7},{id: 2,label: second,amount: 7}]
+  - name: Independent connection cannot read another connection's local name
+    session_id: local-temporary-b
+    sql: "SELECT id FROM #probe"
+    expect: {error: true}
+  - name: Independent connection can create the same local name
+    session_id: local-temporary-b
+    sql: "CREATE TABLE #probe (id INT PRIMARY KEY, label NVARCHAR(20), amount INT)"
+    expect: {rows: 0, result_not_contains: '"affected_rows"'}
+  - name: Independent temporary relation has independent storage
+    session_id: local-temporary-b
+    sql: "INSERT #probe VALUES (9,N'other',20)"
+    expect: {affected_rows: 1}
+  - name: Identical SQL binds to the first connection's relation
+    session_id: local-temporary-a
+    sql: "SELECT id,label,amount FROM #PROBE ORDER BY id"
+    expect:
+      rows: 2
+      data: [{id: 1,label: first,amount: 7},{id: 2,label: second,amount: 7}]
+  - name: Identical SQL binds to the second connection's relation
+    session_id: local-temporary-b
+    sql: "SELECT id,label,amount FROM #PROBE ORDER BY id"
+    expect: {rows: 1,data: [{id: 9,label: other,amount: 20}]}
+  - name: Temporary relation uses the common update operator
+    session_id: local-temporary-a
+    sql: "UPDATE #probe SET amount=amount+5 WHERE id=1"
+    expect: {affected_rows: 1}
+  - name: Temporary relation uses the common delete operator
+    session_id: local-temporary-a
+    sql: "DELETE FROM #probe WHERE id=2"
+    expect: {affected_rows: 1}
+  - name: Temporary relation retains native declaration constraints
+    session_id: local-temporary-a
+    sql: "INSERT #probe VALUES (1,N'duplicate',30)"
+    expect: {error: true}
+  - name: Temporary relation participates in native transactions
+    session_id: local-temporary-a
+    sql: BEGIN TRANSACTION
+    expect: {affected_rows: 0}
+  - name: Temporary transaction sees its own mutation
+    session_id: local-temporary-a
+    sql: "UPDATE #probe SET amount=99 WHERE id=1"
+    expect: {affected_rows: 1}
+  - name: Temporary mutation rolls back through the common transaction
+    session_id: local-temporary-a
+    sql: ROLLBACK TRANSACTION
+    expect: {affected_rows: 0}
+  - name: Rolled-back temporary mutation restores the preceding value
+    session_id: local-temporary-a
+    sql: "SELECT id,label,amount FROM #PROBE ORDER BY id"
+    expect: {rows: 1,data: [{id: 1,label: first,amount: 12}]}
+  - name: Dropping one local relation preserves the other connection's relation
+    session_id: local-temporary-a
+    sql: "DROP TABLE #probe"
+    expect: {rows: 0, result_not_contains: '"affected_rows"'}
+  - name: Dropped local relation does not leave a reusable cached source
+    session_id: local-temporary-a
+    sql: "SELECT id,label,amount FROM #PROBE ORDER BY id"
+    expect: {error: true}
+  - name: Remaining connection keeps its own temporary rows
+    session_id: local-temporary-b
+    sql: "SELECT id,label,amount FROM #PROBE ORDER BY id"
+    expect: {rows: 1,data: [{id: 9,label: other,amount: 20}]}
+  - name: Recreated local name starts with empty native storage
+    session_id: local-temporary-a
+    sql: "CREATE TABLE #probe (id INT PRIMARY KEY,label SYSNAME,amount INT)"
+    expect: {rows: 0, result_not_contains: '"affected_rows"'}
+  - name: Cached query rebinds after drop and recreation
+    session_id: local-temporary-a
+    sql: "SELECT id,label,amount FROM #PROBE ORDER BY id"
+    expect: {rows: 0,data: []}
+  - name: Global temporary tables require their own explicit lifetime contract
+    session_id: local-temporary-a
+    sql: "CREATE TABLE ##shared_probe (id INT)"
+    expect: {error: true}
+  - name: Local temporary names cannot be published by a persistent view
+    session_id: local-temporary-a
+    sql: "CREATE VIEW local_temporary_view AS SELECT id FROM #probe"
+    expect: {error: true}
+  - name: Real TDS connection keeps temporary rows across batches
+    tds:
+      statements:
+        - sql: "CREATE TABLE #wire_probe (id INT PRIMARY KEY,label SYSNAME)"
+        - sql: "INSERT #wire_probe VALUES (1,N'wire')"
+        - sql: "SELECT id,label FROM #wire_probe"
+          expect: {rows: 1,data: [{id: 1,label: wire}]}
+        - sql: "UPDATE #wire_probe SET label=N'updated' WHERE id=1"
+        - sql: "SELECT id,label FROM #wire_probe"
+          expect: {rows: 1,data: [{id: 1,label: updated}]}
+        - sql: "DROP TABLE #wire_probe"
+        - sql: "SELECT id,label FROM #wire_probe"
+          expect: {error: true}
+  - name: Real TDS sessions isolate local names and clean up reset and socket close
+    tds:
+      statements:
+        - {connection: first,sql: "CREATE TABLE #wire_shared(id INT PRIMARY KEY)"}
+        - {connection: first,sql: "INSERT #wire_shared VALUES(1)"}
+        - connection: second
+          sql: "SELECT id FROM #wire_shared"
+          expect: {error: true}
+        - {connection: second,sql: "CREATE TABLE #wire_shared(id INT PRIMARY KEY)"}
+        - {connection: second,sql: "INSERT #wire_shared VALUES(2)"}
+        - connection: first
+          sql: "SELECT id FROM #wire_shared"
+          expect: {rows: 1,data: [{id: 1}]}
+        - connection: second
+          sql: "SELECT id FROM #wire_shared"
+          expect: {rows: 1,data: [{id: 2}]}
+        - {connection: first,sql: BEGIN TRANSACTION}
+        - {connection: first,sql: "INSERT #wire_shared VALUES(3)"}
+        - connection: first
+          reset: true
+          sql: "SELECT id FROM #wire_shared"
+          expect: {error: true}
+        - connection: second
+          sql: "SELECT id FROM #wire_shared"
+          expect: {rows: 1,data: [{id: 2}]}
+        - {connection: first,sql: "CREATE TABLE #wire_shared(id INT PRIMARY KEY)"}
+        - {connection: first,sql: "INSERT #wire_shared VALUES(4)"}
+        - {connection: first,close: true}
+        - connection: second
+          sql: "SELECT id FROM #wire_shared"
+          expect: {rows: 1,data: [{id: 2}]}
+        - connection: first
+          sql: "SELECT id FROM #wire_shared"
+          expect: {error: true}
+        - {connection: second,sql: "DROP TABLE #wire_shared"}
+  - name: First connection explicitly retires its recreated local relation
+    session_id: local-temporary-a
+    sql: "DROP TABLE #probe"
+    expect: {rows: 0, result_not_contains: '"affected_rows"'}
+  - name: Second connection explicitly retires its independent local relation
+    session_id: local-temporary-b
+    sql: "DROP TABLE #probe"
+    expect: {rows: 0, result_not_contains: '"affected_rows"'}
+  - name: Caller temporary relation survives batch separators
+    session_id: local-module
+    sql: |
+      CREATE TABLE #caller(id INT PRIMARY KEY);
+      INSERT #caller VALUES(1);
+      GO
+      SELECT id FROM #caller;
+    expect: {rows: 1,data: [{id: 1}]}
+  - name: Nested procedure reads caller temporary relations and its own relation
+    session_id: local-module
+    sql: |
+      CREATE PROCEDURE local_temporary_child AS BEGIN
+        SELECT id FROM #caller;
+        CREATE TABLE #child(id INT);
+        INSERT #child VALUES(2);
+        SELECT id FROM #child;
+      END;
+      GO
+      EXEC local_temporary_child;
+    expect: {rows: 2,data: [{id: 1},{id: 2}]}
+  - name: Procedure-created temporary relation is not visible after return
+    session_id: local-module
+    sql: "SELECT id FROM #child"
+    expect: {error: true}
+  - name: Parent temporary storage remains intact after child teardown
+    session_id: local-module
+    sql: "SELECT id FROM #caller"
+    expect: {rows: 1,data: [{id: 1}]}
+  - name: Procedure temporary name can shadow the caller binding
+    session_id: local-module
+    sql: |
+      CREATE PROCEDURE local_temporary_shadow AS BEGIN
+        CREATE TABLE #caller(id INT PRIMARY KEY);
+        INSERT #caller VALUES(9);
+        SELECT id FROM #caller;
+      END;
+      GO
+      EXEC local_temporary_shadow;
+    expect: {rows: 1,data: [{id: 9}]}
+  - name: Returning from a shadow scope restores the caller relation
+    session_id: local-module
+    sql: "SELECT id FROM #caller"
+    expect: {rows: 1,data: [{id: 1}]}
+  - name: Dynamic SQL reads inherited temporary storage and owns new local tables
+    session_id: local-module
+    sql: |
+      EXEC sp_executesql N'SELECT id FROM #caller; CREATE TABLE #dynamic_child(id INT); INSERT #dynamic_child VALUES(3); SELECT id FROM #dynamic_child;';
+    expect: {rows: 2,data: [{id: 1},{id: 3}]}
+  - name: Dynamic SQL temporary relation ends with the dynamic scope
+    session_id: local-module
+    sql: "SELECT id FROM #dynamic_child"
+    expect: {error: true}
+  - name: Procedure failure unwinds its local temporary namespace
+    session_id: local-module
+    sql: |
+      CREATE PROCEDURE local_temporary_failure AS BEGIN
+        CREATE TABLE #failed_child(id INT);
+        INSERT #failed_child VALUES(4);
+        THROW 50001,N'expected module failure',1;
+      END;
+      GO
+      EXEC local_temporary_failure;
+    expect: {error: true,contains: expected module failure}
+  - name: Failed procedure leaves no accessible local relation
+    session_id: local-module
+    sql: "SELECT id FROM #failed_child"
+    expect: {error: true}
+  - name: Module tests retire the caller relation
+    session_id: local-module
+    sql: "DROP TABLE #caller"
+    expect: {rows: 0, result_not_contains: '"affected_rows"'}
+  - name: Temporary insertion and joined mutation use common logical sources
+    session_id: local-joined
+    sql: |
+      CREATE TABLE #target(id INT PRIMARY KEY,amount INT DEFAULT 7);
+      CREATE TABLE #source(id INT PRIMARY KEY,amount INT);
+      INSERT #source VALUES(1,10),(2,20);
+      INSERT #target(id) SELECT id FROM #source;
+      UPDATE #target SET amount=s.amount FROM #target t JOIN #source s ON t.id=s.id WHERE t.id=1;
+      DELETE #target FROM #target t JOIN #source s ON t.id=s.id WHERE t.id=2;
+      SELECT id,amount FROM #target;
+    expect: {rows: 1,data: [{id: 1,amount: 10}]}
+  - name: Temporary maintenance targets bind their native relation
+    session_id: local-joined
+    sql: |
+      TRUNCATE TABLE #target
+    expect: {error: true, contains: 'TRUNCATE TABLE is not supported'}
+  - name: Unsupported temporary truncation preserves the owned rows
+    session_id: local-joined
+    sql: |
+      SELECT id,amount FROM #target
+    expect: {rows: 1, data: [{id: 1, amount: 10}]}
+  - name: Temporary DELETE and DROP bind their native relation
+    session_id: local-joined
+    sql: |
+      DELETE FROM #target;
+      SELECT COUNT(*) AS n FROM #target;
+      DROP TABLE #target;
+      DROP TABLE #source;
+    expect: {rows: 1, data: [{n: 0}]}
+  - name: Temporary identity insertion uses the owned relation capability
+    session_id: local-identity
+    sql: |
+      CREATE TABLE #identity_target(id INT IDENTITY PRIMARY KEY,amount INT);
+      SET IDENTITY_INSERT #identity_target ON;
+      INSERT #identity_target(id,amount) VALUES(10,7);
+      SET IDENTITY_INSERT #identity_target OFF;
+      SELECT id,amount FROM #identity_target;
+      DROP TABLE #identity_target;
+    expect: {rows: 1,data: [{id: 10,amount: 7}]}
+  - name: Temporary DDL starts a normal explicit transaction for a rejection check
+    session_id: local-ddl-rejection
+    sql: BEGIN TRANSACTION
+    expect: {affected_rows: 0}
+  - name: Transactional temporary creation fails before publishing a native relation
+    session_id: local-ddl-rejection
+    sql: "CREATE TABLE #transactional_ddl(id INT)"
+    expect: {error: true,contains: temporary DDL inside explicit transactions is not supported}
+  - name: Failed temporary DDL uses ordinary transaction recovery
+    session_id: local-ddl-rejection
+    sql: ROLLBACK TRANSACTION
+    expect: {affected_rows: 0}
+  - name: Rejected temporary DDL leaves no binding after recovery
+    session_id: local-ddl-rejection
+    sql: "SELECT id FROM #transactional_ddl"
+    expect: {error: true}
+  - name: Closing a TDS session retires its native temporary relation
+    scm: |
+      (begin
+        (define s (newsession))
+        (s "username" "root")
+        (s "schema" "memcp-tests")
+        (tsql_execute_request "memcp-tests" "CREATE TABLE #close_probe(id INT)" s nil 0
+          (lambda (_row) true) (lambda args true))
+        (define relation (tsql_resolve_relation "memcp-tests" "#close_probe" s))
+        (tds_frontend "close" s nil nil nil nil nil nil)
+        (nil? (table (car relation) false (cadr relation) false nil)))
+    expect: {result: true}
+  - name: Resetting a pooled TDS connection retires the old native relation
+    scm: |
+      (begin
+        (define s (newsession))
+        (s "username" "root")
+        (s "schema" "memcp-tests")
+        (tsql_execute_request "memcp-tests" "CREATE TABLE #reset_probe(id INT)" s nil 0
+          (lambda (_row) true) (lambda args true))
+        (define relation (tsql_resolve_relation "memcp-tests" "#reset_probe" s))
+        (define replacement (tds_frontend "reset" s nil nil nil nil nil nil))
+        (and (nil? (table (car relation) false (cadr relation) false nil))
+          (equal? (replacement "username") "root")
+          (equal? (replacement "schema") "memcp-tests")))
+    expect: {result: true}
+  - name: An administrator cannot read a guessed native temporary identity through another dialect
+    scm: |
+      (begin
+        (define s (newsession))
+        (s "username" "root")
+        (s "schema" "memcp-tests")
+        (tsql_execute_request "memcp-tests" "CREATE TABLE #security_probe(id INT)" s nil 0
+          (lambda (_row) true) (lambda args true))
+        (define relation (tsql_resolve_relation "memcp-tests" "#security_probe" s))
+        (define denied (try (lambda () (begin
+          (parse_sql (car relation) (concat "SELECT id FROM `" (cadr relation) "`")
+            (sql_policy "root")) false)) (lambda (_error) true)))
+        (tds_frontend "close" s nil nil nil nil nil nil)
+        denied)
+    expect: {result: true}
+
+  - name: Temporary scope exports keep logical bindings without native lifetime controls
+    scm: |
+      (begin
+        (define owner (newsession))
+        (define parent (tsql_temporary_new_scope nil owner))
+        (define bindings (list (list "#kept" "memcp-tests" ".kept-logical-name")))
+        (parent "bindings" bindings)
+        (define child (tsql_temporary_new_scope parent owner))
+        (define native (tsql_temporary_native_scope child nil))
+        (define valid (and (nil? (parent "native")) (nil? (child "native"))
+          (identical? (child "parent") parent)
+          (expression_equal? (tsql_temporary_visible child nil) bindings)
+          (identical? native (tsql_temporary_native_scope child nil))))
+        (tsql_temporary_cleanup_scope child)
+        (define retained (and (identical? native (tsql_temporary_native_scope child nil))
+          (expression_equal? (parent "bindings") bindings)))
+        (tsql_temporary_cleanup_scope parent)
+        (and valid retained))
+    expect: {result: true}
+  - name: A missing temporary lifetime cannot manufacture a replacement capability
+    scm: (tsql_temporary_native_scope (newsession) nil)
+    expect: {error: true,contains: temporary scope has no native lifetime}
+
+cleanup:
+  - sql: DROP PROCEDURE IF EXISTS local_temporary_child
+  - sql: DROP PROCEDURE IF EXISTS local_temporary_shadow
+  - sql: DROP PROCEDURE IF EXISTS local_temporary_failure

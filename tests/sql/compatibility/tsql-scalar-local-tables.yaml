@@ -1,0 +1,169 @@
+# Copyright (C) 2026 Carl-Philip Haensch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  description: Scalar function local tables retain native bag NULL and lexical control semantics
+setup:
+- sql: CREATE TABLE local_function_callers(id INT PRIMARY KEY,n INT,value FLOAT,include_value BIT)
+- sql: INSERT local_function_callers VALUES(1,3,2.5,1),(2,0,2.5,1),(3,2,NULL,1),(4,3,2.5,1),(5,2,7,0)
+test_cases:
+- name: Local scalar tables accept typed rows through a conditional loop
+  sql: |
+    CREATE FUNCTION dbo.repeat_amount(@n INT,@value FLOAT,@include BIT) RETURNS FLOAT AS BEGIN
+      DECLARE @rows TABLE(amount FLOAT NULL);
+      DECLARE @i INT=0;
+      DECLARE @total FLOAT;
+      WHILE @i<@n BEGIN
+        IF @include=1 BEGIN
+          INSERT INTO @rows(amount) SELECT @value;
+        END ELSE BEGIN
+          INSERT INTO @rows(amount) SELECT CONVERT(FLOAT,NULL);
+        END
+        SET @i=@i+1;
+      END
+      SELECT @total=SUM(amount) FROM @rows;
+      RETURN @total;
+    END
+- name: Duplicate inserted rows contribute separately to SUM
+  sql: SELECT dbo.repeat_amount(3,2.5,1) AS total
+  expect: {rows: 1,data: [{total: 7.5}]}
+- name: An empty local table retains scalar aggregate NULL
+  sql: SELECT dbo.repeat_amount(0,2.5,1) AS total
+  expect: {rows: 1,data: [{total: null}]}
+- name: Matching nullable rows retain SQL SUM NULL
+  sql: SELECT dbo.repeat_amount(2,NULL,1) AS total
+  expect: {rows: 1,data: [{total: null}]}
+- name: The ELSE insertion remains independent of the TRUE branch
+  sql: SELECT dbo.repeat_amount(2,7,0) AS total
+  expect: {rows: 1,data: [{total: null}]}
+- name: Local table invocations retain duplicate caller bindings and distinct row bags
+  sql: SELECT id,dbo.repeat_amount(n,value,include_value) AS total FROM local_function_callers ORDER BY id
+  expect: {rows: 5,data: [{id: 1,total: 7.5},{id: 2,total: null},{id: 3,total: null},{id: 4,total: 7.5},{id: 5,total: null}]}
+- name: Repeated warm calls do not accumulate rows from an earlier local scope
+  sql: SELECT dbo.repeat_amount(2,3,1) AS first_total,dbo.repeat_amount(2,3,1) AS second_total,dbo.repeat_amount(1,4,1) AS other_total
+  expect: {rows: 1,data: [{first_total: 6,second_total: 6,other_total: 4}]}
+- name: Each local aggregate observes the rows inserted by the current loop step
+  sql: |
+    CREATE FUNCTION dbo.cumulative_count(@n INT) RETURNS INT AS BEGIN
+      DECLARE @rows TABLE(amount INT NULL);
+      DECLARE @i INT=0;
+      DECLARE @count INT;
+      DECLARE @total INT=0;
+      WHILE @i<@n BEGIN
+        INSERT INTO @rows(amount) SELECT 1;
+        SELECT @count=COUNT(*) FROM @rows;
+        SET @total=@total+@count;
+        SET @i=@i+1;
+      END
+      RETURN @total;
+    END
+- name: Repeated reads of one mutable local relation retain their current results
+  sql: SELECT dbo.cumulative_count(3) AS total,dbo.cumulative_count(0) AS skipped
+  expect: {rows: 1,data: [{total: 6,skipped: 0}]}
+- name: UNION children retain independent local scopes and duplicate results
+  sql: |
+    SELECT outputs.total FROM (
+      SELECT dbo.cumulative_count(3) AS total
+      UNION ALL SELECT dbo.cumulative_count(0) AS total
+      UNION ALL SELECT dbo.cumulative_count(3) AS total
+    ) AS outputs ORDER BY outputs.total
+  expect: {rows: 3,data: [{total: 0},{total: 6},{total: 6}]}
+- name: A lazy branch keeps its invalid conversion outside the unchosen insertion
+  sql: |
+    CREATE FUNCTION dbo.chosen_amount(@choose BIT) RETURNS FLOAT AS BEGIN
+      DECLARE @rows TABLE(amount FLOAT NULL);
+      DECLARE @total FLOAT;
+      IF @choose=1 BEGIN
+        INSERT INTO @rows(amount) SELECT 9;
+      END ELSE BEGIN
+        INSERT INTO @rows(amount) SELECT CONVERT(FLOAT,'invalid-number');
+      END
+      SELECT @total=SUM(amount) FROM @rows;
+      RETURN @total;
+    END
+- name: FALSE branch work is not executed or initialized before its predicate
+  sql: SELECT dbo.chosen_amount(1) AS total
+  expect: {rows: 1,data: [{total: 9}]}
+- name: NULL IF selects ELSE and never executes the TRUE insertion
+  sql: |
+    CREATE FUNCTION dbo.null_branch(@choose BIT) RETURNS FLOAT AS BEGIN
+      DECLARE @rows TABLE(amount FLOAT NULL);
+      DECLARE @total FLOAT;
+      IF @choose=1 BEGIN
+        INSERT INTO @rows(amount) SELECT CONVERT(FLOAT,'invalid-number');
+      END ELSE BEGIN
+        INSERT INTO @rows(amount) SELECT 5;
+      END
+      SELECT @total=SUM(amount) FROM @rows;
+      RETURN @total;
+    END
+- name: UNKNOWN IF follows the ELSE branch
+  sql: SELECT dbo.null_branch(NULL) AS total
+  expect: {rows: 1,data: [{total: 5}]}
+- name: Local row producers retain empty SELECT input rather than inserting NULL
+  sql: |
+    CREATE FUNCTION dbo.filtered_amount(@include BIT) RETURNS FLOAT AS BEGIN
+      DECLARE @rows TABLE(amount FLOAT NULL);
+      DECLARE @total FLOAT;
+      INSERT INTO @rows(amount) SELECT 3 WHERE @include=1;
+      INSERT INTO @rows(amount) SELECT 4;
+      SELECT @total=SUM(amount) FROM @rows;
+      RETURN @total;
+    END
+- name: Missing insertion retains previous state without manufacturing a row
+  sql: SELECT dbo.filtered_amount(0) AS missing,dbo.filtered_amount(1) AS matched
+  expect: {rows: 1,data: [{missing: 4,matched: 7}]}
+- name: String control flow can append typed local rows before a final scalar aggregate
+  sql: |
+    CREATE FUNCTION dbo.sum_fragments(@input VARCHAR(64)) RETURNS FLOAT AS BEGIN
+      DECLARE @rows TABLE(amount FLOAT NULL);
+      DECLARE @tail VARCHAR(64);
+      DECLARE @part VARCHAR(64);
+      DECLARE @position INT;
+      DECLARE @result FLOAT=0;
+      IF LEN(@input)>0 BEGIN
+        SELECT @tail=@input;
+        SELECT @position=CHARINDEX(';',@tail);
+        WHILE @position>0 BEGIN
+          SELECT @part=REPLACE(SUBSTRING(@tail,1,@position-1),',','.');
+          IF LEN(@part)>0 BEGIN
+            INSERT INTO @rows(amount) SELECT CASE WHEN ISNUMERIC(@part)=0 THEN '0' ELSE CONVERT(FLOAT,@part) END;
+          END
+          SELECT @tail=SUBSTRING(@tail,@position+1,LEN(@tail));
+          SELECT @position=CHARINDEX(';',@tail);
+        END
+        SELECT @part=REPLACE(@tail,',','.');
+        IF LEN(@part)>0 BEGIN
+          INSERT INTO @rows(amount) SELECT CASE WHEN ISNUMERIC(@part)=0 THEN '0' ELSE CONVERT(FLOAT,@part) END;
+        END
+        SELECT @result=SUM(amount) FROM @rows;
+      END
+      RETURN @result;
+    END
+- name: String-produced duplicate rows and decimal values all contribute
+  sql: SELECT dbo.sum_fragments('2;2;3.5') AS total,dbo.sum_fragments('1;invalid;2,5') AS mixed
+  expect: {rows: 1,data: [{total: 7.5,mixed: 3.5}]}
+- name: FALSE UNKNOWN and entered-but-empty branches retain distinct SQL results
+  sql: SELECT dbo.sum_fragments('') AS empty_text,dbo.sum_fragments(NULL) AS unknown,dbo.sum_fragments(';;') AS no_rows
+  expect: {rows: 1,data: [{empty_text: 0,unknown: 0,no_rows: null}]}
+- name: Local row lifetimes remain inside their invoking transaction
+  session_id: local_function_owner
+  sql: BEGIN TRANSACTION
+- name: Explicit transactions can read and append their private local rows
+  session_id: local_function_owner
+  sql: SELECT dbo.repeat_amount(3,2,1) AS total
+  expect: {rows: 1,data: [{total: 6}]}
+- name: The caller can roll back after a completed private row lifetime
+  session_id: local_function_owner
+  sql: ROLLBACK TRANSACTION
+- name: Rollback does not retain a previous function local relation
+  sql: SELECT dbo.repeat_amount(1,8,1) AS total
+  expect: {rows: 1,data: [{total: 8}]}
+- name: Reload discards local rows and rebuilds immutable function declarations
+  action: restart
+- name: Reloaded source creates independent local row scopes
+  sql: SELECT dbo.repeat_amount(3,2.5,1) AS total,dbo.filtered_amount(0) AS missing
+  expect: {rows: 1,data: [{total: 7.5,missing: 4}]}
+cleanup:
+- sql: DROP TABLE local_function_callers

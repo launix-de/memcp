@@ -64,8 +64,8 @@ func TestSourceCoverageRegistrySupportsConcurrentCompilation(t *testing.T) {
 			count++
 		}
 	}
-	if count != workers*registrations {
-		t.Fatalf("registered coverage points = %d, want %d", count, workers*registrations)
+	if count != registrations {
+		t.Fatalf("unique registered coverage points = %d, want %d", count, registrations)
 	}
 }
 

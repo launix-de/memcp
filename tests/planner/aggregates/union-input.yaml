@@ -164,10 +164,13 @@ test_cases:
     data:
     - total: 20
   syntax: tsql
+# Historical case identity retained: the original query now succeeds with a
+# complete DISTINCT input boundary before its outer aggregate.
 - name: UNION DISTINCT input is rejected rather than summed as a bag
   sql: SELECT SUM(v) AS total FROM (SELECT v FROM ug_rows UNION SELECT v FROM ug_rows) u
   expect:
-    error: true
+    rows: 1
+    data: [{total: 7}]
 - name: Grouped UNION IR retains a logical union input
   sql: EXPLAIN IR SELECT g,SUM(v) AS total FROM (SELECT g,v FROM ug_rows UNION ALL SELECT g AS other_g,v AS other_v
     FROM ug_rows) u GROUP BY g

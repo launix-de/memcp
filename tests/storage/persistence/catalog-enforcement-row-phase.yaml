@@ -1,0 +1,127 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  description: Native catalog construction and default row admission share one monotone enforcement boundary
+setup:
+- sql: CREATE TABLE catalog_phase_parent(id INT PRIMARY KEY)
+- sql: CREATE TABLE catalog_phase_rows(id INT PRIMARY KEY,value INT DEFAULT 3)
+- sql: CREATE TABLE catalog_phase_existing(id INT PRIMARY KEY,value INT DEFAULT 3)
+- sql: INSERT INTO catalog_phase_parent VALUES(1)
+- sql: INSERT INTO catalog_phase_existing VALUES(1,1)
+- scm: |
+    (begin
+      (registertriggerlanguage "catalog-phase-statement"
+        (lambda (source _context) (lambda (OLD NEW session tx) source)) false false true)
+      (registerprocedurelanguage "catalog-phase-literal"
+        (lambda (source _context) (lambda () (simplify source)))))
+cleanup:
+- scm: (dropprocedure "memcp-tests" "catalog_phase_source" true)
+- sql: DROP TABLE IF EXISTS catalog_phase_rows
+- sql: DROP TABLE IF EXISTS catalog_phase_existing
+- sql: DROP TABLE IF EXISTS catalog_phase_parent
+test_cases:
+- name: A late CHECK cannot validate ahead of an admitted default row phase
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (define target (table "memcp-tests" false "catalog_phase_rows" false tx))
+      (altercolumn target "value" "default" 9 tx)
+      (insert target '("id") (list (list 1)) '() nil false nil tx)
+      (define denied (try (lambda () (begin
+        (createcheck target "CK_catalog_phase_late" "tsql-check" "value >= 0" '("value") tx owner) false))
+        (lambda (failure) (strlike (concat failure) "%enforcement declarations must precede native row mutation%"))))
+      (define intact (and
+        (equal? ((show target "column" "value" false tx) "Default") 9)
+        (empty_list? (coalesceNil ((show target "constraints" tx) "Checks") '()))
+        (equal? (scan tx target '() '() '() (lambda () true) '("value") (lambda (acc value) (+ acc value)) 0 +) 9)))
+      (altercolumn target "value" "default" 11 tx)
+      (insert target '("id") (list (list 2)) '() nil false nil tx)
+      (define continuation (equal? (scan tx target '() '() '() (lambda () true) '("value") (lambda (acc value) (+ acc value)) 0 +) 20))
+      (tx_rollback owner)
+      (and denied intact continuation
+        (equal? ((show target "column" "value" false) "Default") 3)
+        (empty_list? (coalesceNil ((show target "constraints") "Checks") '()))
+        (equal? (scan nil target '() '() '() (lambda () true) '() (lambda (acc) (+ acc 1)) 0 +) 0)))
+  expect: {result: true}
+- name: A late foreign key cannot reuse the default lease after row admission
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (define target (table "memcp-tests" false "catalog_phase_rows" false tx))
+      (define parent (table "memcp-tests" false "catalog_phase_parent" false tx))
+      (altercolumn target "value" "default" 1 tx)
+      (insert target '("id") (list (list 3)) '() nil false nil tx)
+      (define denied (try (lambda () (begin
+        (createforeignkey target "FK_catalog_phase_late" '("value") parent '("id") "restrict" "restrict" tx) false))
+        (lambda (failure) (strlike (concat failure) "%enforcement declarations must precede native row mutation%"))))
+      (define intact (and
+        (empty_list? ((show target "constraints" tx) "ForeignKeys"))
+        (equal? (scan tx target '() '() '() (lambda () true) '("id" "value") (lambda (acc id value) (+ acc (+ (* id 100) value))) 0 +) 301)))
+      (tx_rollback owner)
+      (and denied intact (empty_list? ((show target "constraints") "ForeignKeys"))
+        (equal? ((show target "column" "value" false) "Default") 3)
+        (equal? (scan nil target '() '() '() (lambda () true) '() (lambda (acc) (+ acc 1)) 0 +) 0)))
+  expect: {result: true}
+- name: A late statement trigger cannot change the program of an admitted row phase
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (define target (table "memcp-tests" false "catalog_phase_rows" false tx))
+      (altercolumn target "value" "default" 13 tx)
+      (insert target '("id") (list (list 4)) '() nil false nil tx)
+      (define denied (try (lambda () (begin
+        (createstatementtrigger target "catalog_phase_late_trigger" "after_statement" "catalog-phase-statement" "ok" '("insert") false false tx) false))
+        (lambda (failure) (strlike (concat failure) "%enforcement declarations must precede native row mutation%"))))
+      (define intact (and (empty_list? (show target "statement_triggers" tx))
+        (equal? (scan tx target '() '() '() (lambda () true) '("id" "value") (lambda (acc id value) (+ acc (+ (* id 100) value))) 0 +) 413)))
+      (tx_rollback owner)
+      (and denied intact (empty_list? (show target "statement_triggers"))
+        (equal? ((show target "column" "value" false) "Default") 3)
+        (equal? (scan nil target '() '() '() (lambda () true) '() (lambda (acc) (+ acc 1)) 0 +) 0)))
+  expect: {result: true}
+- name: Historical validation remains read only and permits successive enforcement declarations
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (define target (table "memcp-tests" false "catalog_phase_existing" false tx))
+      (define parent (table "memcp-tests" false "catalog_phase_parent" false tx))
+      (altercolumn target "value" "default" 7 tx)
+      (createcheck target "CK_catalog_phase_first" "tsql-check" "value >= 0" '("value") tx owner)
+      (createforeignkey target "FK_catalog_phase_first" '("value") parent '("id") "restrict" "restrict" tx)
+      (createcheck target "CK_catalog_phase_second" "tsql-check" "value < 20" '("value") tx owner)
+      (define own (and (equal? (count ((show target "constraints" tx) "Checks")) 2)
+        (equal? (count ((show target "constraints" tx) "ForeignKeys")) 1)))
+      (define denied (try (lambda () (begin
+        (insert target '("id") (list (list 2)) '() nil false nil tx) false))
+        (lambda (failure) (strlike (concat failure) "%metadata-only%"))))
+      (tx_rollback owner)
+      (and own denied (equal? ((show target "column" "value" false) "Default") 3)
+        (empty_list? (coalesceNil ((show target "constraints") "Checks") '()))
+        (empty_list? ((show target "constraints") "ForeignKeys"))
+        (equal? (scan nil target '() '() '() (lambda () true) '("id" "value") (lambda (acc id value) (+ acc (+ (* id 100) value))) 0 +) 101)))
+  expect: {result: true}
+- name: Later defaults and callable source declarations preserve their existing row transaction
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (define target (table "memcp-tests" false "catalog_phase_rows" false tx))
+      (altercolumn target "value" "default" 9 tx)
+      (insert target '("id") (list (list 11)) '() nil false nil tx)
+      (altercolumn target "value" "default" 17 tx)
+      (createprocedure "memcp-tests" "catalog_phase_source" "catalog-phase-literal" "23" nil false tx)
+      (insert target '("id") (list (list 12)) '() nil false nil tx)
+      (define own (and (equal? ((procedure "memcp-tests" "catalog_phase_source" false tx)) 23)
+        (empty_list? (showprocedures "memcp-tests" "catalog_phase_source" nil))))
+      (tx_commit owner)
+      (and own (equal? ((procedure "memcp-tests" "catalog_phase_source")) 23)
+        (equal? ((show target "column" "value" false) "Default") 17)
+        (equal? (scan nil target '() '() '() (lambda () true) '() (lambda (acc) (+ acc 1)) 0 +) 2)
+        (equal? (scan nil target '() '() '("id") (lambda (id) (equal? id 11)) '("value") (lambda (acc value) (+ acc value)) 0 +) 9)
+        (equal? (scan nil target '() '() '("id") (lambda (id) (equal? id 12)) '("value") (lambda (acc value) (+ acc value)) 0 +) 17)))
+  expect: {result: true}

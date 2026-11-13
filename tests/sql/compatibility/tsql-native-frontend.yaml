@@ -442,7 +442,7 @@ test_cases:
       (expression_equal?
         (parse_tsql "memcp-tests" "CREATE UNIQUE NONCLUSTERED INDEX uq_pair ON [dbo].[tsql_index_rows] ([tenant] DESC,[code] ASC)" nil nil nil)
         (list (quote if)
-          (list (quote createkey) (list (quote table) "memcp-tests" false "tsql_index_rows" false) "uq_pair" true
+          (list (quote createkey) (list (quote table) "memcp-tests" false "tsql_index_rows" false (quote tx)) "uq_pair" true
             (list (quote list) "tenant" "Code") (quote tx) (list (quote list) "nulls_not_distinct" true))
           true (list (quote error) "index already exists: " "uq_pair")))
     expect: {result: true}
@@ -672,7 +672,7 @@ test_cases:
           (list "database" "memcp-tests" "parameters" (list) "declarations" ""
             "text" "SELECT CAST('9007199254740993' AS BIGINT) AS exact, CAST('9223372036854775807' AS BIGINT) AS maximum, CAST('1' AS BIT) AS flag, CAST(NULL AS FLOAT) AS absent")
           (lambda (values) (output "values" values))
-          (lambda (fields) (output "fields" fields)) nil nil)
+          (lambda (fields) (output "fields" fields)) nil nil nil)
         (and (expression_equal? (car (output "values")) (tsql_parse_integer "9007199254740993"))
           (expression_equal? (cadr (output "values")) (tsql_parse_integer "9223372036854775807"))
           (equal? (nth (output "values") 2) true)
@@ -1129,12 +1129,12 @@ test_cases:
   - name: Text cast compiler returns its type and collation separately from code
     scm: >-
       (begin
-        (define sources (list (list "c" "memcp-tests" "tsql_cast_collation" false nil)))
+        (define sources (list (list "c" "memcp-tests" "tsql_cast_collation" false nil (sql_relation_declarations "memcp-tests" "tsql_cast_collation" nil))))
         (define expr (list (quote get_column) "c" true "value" true))
         (define info (sql_expr_info sources (tsql_cast_expr expr "NVARCHAR" (list 20))))
         (if (and (equal? (sql_info_type info) "NVARCHAR")
             (equal? (sql_info_collation info) (list "bin" 2))
-            (equal? (car (sql_info_formula info)) (quote tsql_cast_text)))
+            (expression_equal? (car (sql_info_formula info)) tsql_cast_text))
           true (error "text conversion lost its compiler contract")))
     expect: {result: true}
   - name: Having aggregate operand binds to the second joined source before its output alias
@@ -1162,7 +1162,7 @@ test_cases:
       (begin
         (define info (sql_expr_info (list) (tsql_cast_expr "42" "SMALLINT" (list))))
         (and (equal? (sql_info_type info) "SMALLINT")
-          (expression_equal? (sql_info_formula info) (list (quote tsql_cast_integer) "42" -32768 32767))
+          (expression_equal? (sql_info_formula info) (list tsql_cast_integer "42" -32768 32767))
           (equal? (eval (sql_info_formula info)) 42)))
     expect:
       result: true
@@ -1171,7 +1171,7 @@ test_cases:
       (begin
         (define info (sql_expr_info (list) (tsql_cast_expr "1" "BIT" (list))))
         (and (equal? (sql_info_type info) "BIT")
-          (expression_equal? (sql_info_formula info) (list (quote tsql_cast_bit) "1"))
+          (expression_equal? (sql_info_formula info) (list tsql_cast_bit "1"))
           (equal? (eval (sql_info_formula info)) true)))
     expect:
       result: true
@@ -1180,7 +1180,7 @@ test_cases:
       (begin
         (define info (sql_expr_info (list) (tsql_cast_expr 1 "FLOAT" (list))))
         (and (equal? (sql_info_type info) "FLOAT")
-          (expression_equal? (sql_info_formula info) (list (quote tsql_cast_float) 1))
+          (expression_equal? (sql_info_formula info) (list tsql_cast_float 1))
           (equal? (eval (sql_info_formula info)) 1)))
     expect:
       result: true
@@ -1191,7 +1191,7 @@ test_cases:
           (tsql_cast_expr (tsql_cast_expr "42" "SMALLINT" (list)) "FLOAT" (list))))
         (and (equal? (sql_info_type info) "FLOAT")
           (expression_equal? (sql_info_formula info)
-            (list (quote tsql_cast_float) (list (quote tsql_cast_integer) "42" -32768 32767)))
+            (list tsql_cast_float (list tsql_cast_integer "42" -32768 32767)))
           (equal? (eval (sql_info_formula info)) 42)))
     expect:
       result: true
@@ -1246,7 +1246,7 @@ test_cases:
           (list "database" "memcp-tests" "parameters" (list) "declarations" ""
             "text" "SELECT CAST(NULL AS SMALLINT) AS absent, CAST(CAST(1 AS INT) AS FLOAT) AS numeric_value, CAST(NULL AS BIT) AS flag WHERE 1=0")
           (lambda (values) (output "row" true))
-          (lambda (fields) (output "fields" fields)) nil nil)
+          (lambda (fields) (output "fields" fields)) nil nil nil)
         (and (nil? (output "row"))
           (equal? (map (output "fields") (lambda (field) (field "kind"))) '(38 109 104))))
     expect: {result: true}
@@ -1262,7 +1262,7 @@ test_cases:
           (list "database" "memcp-tests" "parameters" (list) "declarations" ""
             "text" "SELECT CAST('255' AS TINYINT) AS tiny_value, CAST('-32768' AS SMALLINT) AS small_value, CAST('2147483647' AS INT) AS int_value, CAST('9223372036854775807' AS BIGINT) AS big_value")
           (lambda (values) (output "values" values))
-          (lambda (fields) (output "fields" fields)) nil nil)
+          (lambda (fields) (output "fields" fields)) nil nil nil)
         (and (equal? (map (output "fields") (lambda (field) (field "size"))) '(1 2 4 8))
           (equal? (map (output "fields") (lambda (field) (field "kind"))) '(38 38 38 38))
           (reduce (map (output "values") int?) (lambda (ok value) (and ok value)) true)
@@ -1276,7 +1276,7 @@ test_cases:
         (define typed (sql_type_query_block block (list)))
         (define result ((qassoc_get (qb_facts typed) (quote result-types) nil) "value"))
         (and (equal? (sql_info_type result) "INT")
-          (expression_equal? ((qb_fields typed) "value") (list (quote tsql_cast_integer) nil -2147483648 2147483647))))
+          (expression_equal? ((qb_fields typed) "value") (list tsql_cast_integer nil -2147483648 2147483647))))
     expect:
       result: true
   - name: conversion inside window input uses the existing window planner
@@ -1298,7 +1298,7 @@ test_cases:
           (tsql_window_expr "SUM" (list (tsql_cast_expr "42" "SMALLINT" (list))) (list))))
         (and (equal? (sql_info_type info) "INT")
           (expression_equal? (sql_info_formula info)
-            (list (quote window_func) "SUM" (list (list (quote tsql_cast_integer) "42" -32768 32767)) (list)))))
+            (list (quote window_func) "SUM" (list (list tsql_cast_integer "42" -32768 32767)) (list)))))
     expect:
       result: true
   - name: executable window plan contains no frontend type annotations
@@ -1329,7 +1329,7 @@ test_cases:
                 "value" (tsql_parse_integer "9007199254740993"))
               (list "name" "@missing" "flags" 0 "type" (list "kind" 231 "size" 2) "value" nil)))
           (lambda (values) (output "values" values))
-          (lambda (fields) (output "fields" fields)) nil nil)
+          (lambda (fields) (output "fields" fields)) nil nil nil)
         (and (expression_equal? (car (output "values")) (tsql_parse_integer "9007199254740993"))
           (nil? (cadr (output "values")))
           (equal? (map (output "fields") (lambda (f) (f "sql_type"))) '("BIGINT" "INT"))))
@@ -1346,7 +1346,7 @@ test_cases:
               "declarations" (concat "@v " type)
               "parameters" (list (list "name" "@v" "flags" 0 "type" (list "kind" 231 "size" 10) "value" value)))
             (lambda (row) (output "value" (car row)))
-            (lambda (fields) (output "type" ((car fields) "sql_type"))) nil nil)
+            (lambda (fields) (output "type" ((car fields) "sql_type"))) nil nil nil)
           (list (output "value") (output "type")))))
         (and (expression_equal? (query "INT" "7") '(7 "INT"))
           (expression_equal? (query "INT" "8") '(8 "INT"))
@@ -1386,12 +1386,17 @@ test_cases:
       (tds_bind_parameters (newsession) (tds_bind_declarations "memcp-tests" "@v INT")
         (list (list "name" "v" "flags" 1 "type" (list "kind" 38 "size" 4) "value" 7)))
     expect: {error: true}
+  # Keep the historical regression identity; precise carriers now require
+  # successful normalization with the original single-100ns input retained.
   - name: RPC temporal wire inputs remain explicit unsupported types
     scm: |
-      (tds_bind_parameters (newsession) (tds_bind_declarations "memcp-tests" "@v DATETIME2(7)")
-        (list (list "name" "v" "flags" 0 "type" (list "kind" 42 "scale" 7)
-          "value" (list "days" 719162 "ticks" 1 "offset" 0))))
-    expect: {error: true, contains: fractional temporal parameter}
+      (begin
+        (define s (newsession))
+        (tds_bind_parameters s (tds_bind_declarations "memcp-tests" "@v DATETIME2(7)")
+          (list (list "name" "v" "flags" 0 "type" (list "kind" 42 "scale" 7)
+            "value" (list "days" 719162 "ticks" 1 "offset" 0))))
+        (date_parts (s "__tsql_parameter:v")))
+    expect: {result: [0, 100, 0], contains: '100'}
   - name: RPC temporal NULL retains its declared contract
     scm: |
       (begin
@@ -1429,7 +1434,7 @@ test_cases:
         (define run (lambda (text) (tds_frontend "execute" s
           (list "database" "memcp-tests" "text" text "declarations" "" "parameters" (list))
           (lambda (row) (output (concat "id:" (string (car row))) true))
-          (lambda fields true) nil nil)))
+          (lambda fields true) nil nil nil)))
         (define setting (run "SET NOCOUNT ON"))
         (define write (run "UPDATE tsql_native SET amount=amount+1 WHERE id=1"))
         (define read (run "SELECT id FROM tsql_native"))
@@ -1443,7 +1448,7 @@ test_cases:
         (s "username" "root")
         (define run (lambda (text) (tds_frontend "execute" s
           (list "database" "memcp-tests" "text" text "declarations" "" "parameters" (list))
-          (lambda row true) (lambda fields true) nil nil)))
+          (lambda row true) (lambda fields true) nil nil nil)))
         (run "SET NOCOUNT ON")
         (run "SET NOCOUNT OFF")
         (define write (run "UPDATE tsql_native SET amount=amount-1 WHERE id=1"))
@@ -1456,7 +1461,7 @@ test_cases:
         (s "username" "root")
         (s "schema" "memcp-tests")
         (s "__tsql_nocount" true)
-        (define replacement (tds_frontend "reset" s nil nil nil nil nil))
+        (define replacement (tds_frontend "reset" s nil nil nil nil nil nil))
         (and (nil? (replacement "__tsql_nocount"))
           (equal? (replacement "username") "root") (equal? (replacement "schema") "memcp-tests")))
     expect: {result: true}
@@ -1495,14 +1500,13 @@ test_cases:
   - name: Unsupported nonstandard NULL comparisons are rejected
     sql: SET ANSI_NULLS OFF
     expect: {error: true}
+  # Historical case identity retained; OFF is now implemented and verified.
   - name: Unsupported double quoted string mode is rejected
     sql: |
       SET QUOTED_IDENTIFIER OFF;
       SELECT "actual literal" AS value;
       SET QUOTED_IDENTIFIER ON;
-    # Valid SQL implementation gap: check behavior, warn until implemented.
-    expect: {"rows": 1, "data": [{"value": "actual literal"}]}
-    noncritical: true
+    expect: {rows: 1, data: [{value: actual literal}]}
   - name: Startup declarations reject values outside the fixed ON mode
     sql: SET ANSI_NULLS 1
     expect: {error: true}
@@ -1517,7 +1521,7 @@ test_cases:
   - name: Identity declaration compiles native nonnullable auto increment options
     scm: |
       (begin
-        (define column (car (get_schema "memcp-tests" "tsql_identity_declaration")))
+        (define column (car (get_schema "memcp-tests" "tsql_identity_declaration" nil)))
         (and (not (column "Null")) (equal? (column "Extra") "auto_increment")))
     expect: {result: true}
   - name: Native identity allocation fills omitted values
@@ -1664,7 +1668,7 @@ test_cases:
     sql: SELECT COUNT(*) AS n FROM tsql_identity_tiny_limit
     expect: {rows: 1, data: [{n: 0}]}
   - name: Failed generated batch never rewinds a consumed reservation
-    scm: '(reserve_ids (table "memcp-tests" false "tsql_identity_tiny_limit" false) 1)'
+    scm: '(reserve_ids (table "memcp-tests" false "tsql_identity_tiny_limit" false nil) 1)'
     expect: {result: [257,257]}
   - name: Explicit identity NULL cannot bypass generated bounds
     sql: INSERT INTO tsql_identity_tiny_limit(id,value) VALUES (NULL,3)
@@ -1884,7 +1888,7 @@ test_cases:
       - sql: CREATE TABLE tsql_identity_completion_trigger(id INT IDENTITY,value INT)
     scm: |
       (begin
-        (createtrigger (table "memcp-tests" false "tsql_identity_completion_trigger" false)
+        (createtrigger (table "memcp-tests" false "tsql_identity_completion_trigger" false nil)
           "tsql_identity_abort" "before_insert" "" ""
           (lambda (OLD NEW session tx) (error "intentional admission abort")) false)
         (define s (newsession))
@@ -1906,7 +1910,7 @@ test_cases:
       - sql: DROP TABLE IF EXISTS tsql_identity_perf_source
       - sql: CREATE TABLE tsql_identity_perf_source(id INT,value INT)
       - sql: CREATE TABLE tsql_identity_perf_target(id INT IDENTITY,value INT)
-      - scm: '(insert (table "memcp-tests" false "tsql_identity_perf_source" false) ''("id" "value") (map (produceN {rows}) (lambda (i) (list i (+ i 10)))))'
+      - scm: '(insert (table "memcp-tests" false "tsql_identity_perf_source" false nil) ''("id" "value") (map (produceN {rows}) (lambda (i) (list i (+ i 10)))))'
     scm: |
       (begin
         (define s (newsession))
@@ -1927,7 +1931,7 @@ test_cases:
       - sql: DROP TABLE IF EXISTS tsql_identity_perf_source
       - sql: CREATE TABLE tsql_identity_perf_source(id INT,value INT)
       - sql: CREATE TABLE tsql_identity_perf_target(id INT IDENTITY,value INT)
-      - scm: '(insert (table "memcp-tests" false "tsql_identity_perf_source" false) ''("id" "value") (map (produceN 1024) (lambda (i) (list i (+ i 10)))))'
+      - scm: '(insert (table "memcp-tests" false "tsql_identity_perf_source" false nil) ''("id" "value") (map (produceN 1024) (lambda (i) (list i (+ i 10)))))'
       - sql: INSERT INTO tsql_identity_perf_target(value) SELECT value FROM tsql_identity_perf_source ORDER BY id
       - sql: INSERT INTO tsql_identity_perf_target(value) SELECT value FROM tsql_identity_perf_source ORDER BY id
       - sql: INSERT INTO tsql_identity_perf_target(value) SELECT value FROM tsql_identity_perf_source ORDER BY id
@@ -2556,7 +2560,7 @@ test_cases:
         "bin")) (list "column" "VALUE" "INT" (list) (list))) (list) false nil)
     scm: |
       (begin
-        (define sources (list (list "c" "memcp-tests" "portable_case_contract" false nil)))
+        (define sources (list (list "c" "memcp-tests" "portable_case_contract" false nil (sql_relation_declarations "memcp-tests" "portable_case_contract" nil))))
         (define lower (sql_expr_info sources (list (quote get_column) "c" false "value" false)))
         (define upper (sql_expr_info sources (list (quote get_column) "c" false "VALUE" false)))
         (and (equal? (sql_info_type lower) "VARCHAR") (equal? (sql_info_collation lower) '("bin" 2))
@@ -2580,10 +2584,7 @@ test_cases:
         portable_lifecycle_input
     sql: CREATE PROCEDURE portable_lifecycle_read @row_id INT AS SELECT label,adjusted FROM portable_lifecycle_view WHERE
       id=@row_id
-    expect:
-      rows: 1
-      data:
-      - affected_rows: 0
+    expect: {rows: 0, data: [], result_not_contains: '"affected_rows"'}
   - name: Portable view procedure reads its first declared compile contract
     sql: EXEC portable_lifecycle_read @row_id=1
     expect:
@@ -2689,10 +2690,7 @@ test_cases:
         adjusted: 221
   - name: Remove portable view procedure lifecycle fixture
     sql: DROP PROCEDURE portable_lifecycle_read
-    expect:
-      rows: 1
-      data:
-      - affected_rows: 0
+    expect: {rows: 0, data: [], result_not_contains: '"affected_rows"'}
     cleanup:
     - sql: DROP VIEW portable_lifecycle_view
     - sql: DROP TABLE portable_lifecycle_input
@@ -3211,14 +3209,12 @@ test_cases:
       rows: 1
       data:
       - value: lo
-    noncritical: true
   - name: ISNULL character column replacement obeys its declaration width
     sql: SELECT ISNULL(txt,N'long replacement') AS value FROM tsql_null_contract_input WHERE id=2
     expect:
       rows: 1
       data:
       - value: long rep
-    noncritical: true
   - name: ISNULL lazily evaluates a row dependent numeric replacement
     sql: SELECT id,ISNULL(i,10/(id-1)) AS value FROM tsql_null_contract_input ORDER BY id
     expect:
@@ -3863,7 +3859,7 @@ test_cases:
       - value: 255
   - name: Binary integer empty native binary payload decodes as zero
     setup:
-    - scm: (insert (table "memcp-tests" false "binary_integer_input" false) '("id" "raw") (list (list 4 "")))
+    - scm: (insert (table "memcp-tests" false "binary_integer_input" false nil) '("id" "raw") (list (list 4 "")))
     sql: SELECT CAST(raw AS BIGINT) AS value FROM binary_integer_input WHERE id=4
     expect:
       rows: 1
@@ -3876,7 +3872,7 @@ test_cases:
         (define info (sql_expr_info (list) (tsql_cast_expr value "VARBINARY" (list 8))))
         (and (equal? (sql_info_type info) "VARBINARY") (nil? (sql_info_collation info))
           (expression_equal? (sql_info_formula info)
-            (list 'tsql_integer_to_binary (list 'tsql_cast_integer 219 0 255) 1 8 false))
+            (list 'tsql_integer_to_binary (list tsql_cast_integer 219 0 255) 1 8 false))
           (equal? (bin2hex (eval (sql_info_formula info))) "db")))
     expect:
       result: true
@@ -3892,7 +3888,7 @@ test_cases:
           (list "database" "memcp-tests" "parameters" (list) "declarations" ""
             "text" "SELECT CAST(CAST(17 AS TINYINT) AS VARBINARY(5)) AS tiny_value,CAST(CAST(17 AS INT) AS BINARY(6)) AS fixed_value,CAST(0x8000000000000000 AS BIGINT) AS big_value WHERE 1=0")
           (lambda (values) (output "row" true))
-          (lambda (fields) (output "fields" fields)) nil nil)
+          (lambda (fields) (output "fields" fields)) nil nil nil)
         (and (nil? (output "row"))
           (equal? (map (output "fields") (lambda (field) (field "size"))) '(5 6 8))
           (equal? (map (output "fields") (lambda (field) (field "kind"))) '(165 165 38))
@@ -5733,10 +5729,7 @@ test_cases:
   - name: Bitmask stored view keeps portable bit compiler contracts
     sql: CREATE VIEW bitmask_stored_view AS SELECT id,flags & 46 AS masked,tiny_flags << 1 AS clipped,wide_flags ^ CAST(-1
       AS BIGINT) AS wide FROM bitmask_columns
-    expect:
-      rows: 1
-      data:
-      - affected_rows: 1
+    expect: {rows: 0, data: [], result_not_contains: '"affected_rows"'}
   - name: Bitmask stored view evaluates native flag columns
     sql: SELECT masked,clipped,wide FROM bitmask_stored_view WHERE id=1
     expect:
@@ -5759,10 +5752,7 @@ test_cases:
         wide: 9223372036854775807
   - name: Bitmask remove stored bit view fixture
     sql: DROP VIEW bitmask_stored_view
-    expect:
-      rows: 1
-      data:
-      - affected_rows: 1
+    expect: {rows: 0, data: [], result_not_contains: '"affected_rows"'}
   - name: Bitmask remove native flag fixture
     sql: DROP TABLE bitmask_columns
     expect:
@@ -6041,8 +6031,7 @@ test_cases:
         padded: null
   - name: Text construction create portable view
     sql: CREATE VIEW text_construct_view AS SELECT id,QUOTENAME(label) AS quoted,SPACE(amount) AS padded FROM text_construct_input
-    expect:
-      affected_rows: 1
+    expect: {rows: 0, result_not_contains: '"affected_rows"'}
   - name: Text construction stored view uses ordinary native input
     sql: SELECT quoted,padded FROM text_construct_view WHERE id=1
     expect:
@@ -6069,8 +6058,7 @@ test_cases:
       result: true
   - name: Text construction remove portable view fixture
     sql: DROP VIEW text_construct_view
-    expect:
-      affected_rows: 1
+    expect: {rows: 0, result_not_contains: '"affected_rows"'}
   - name: Text construction remove native input fixture
     sql: DROP TABLE text_construct_input
     expect:
@@ -6317,7 +6305,7 @@ test_cases:
         (tds_frontend "execute" session
           (list "database" "memcp-tests" "parameters" (list) "declarations" ""
             "text" "SELECT TRY_CAST(NULL AS SMALLINT) AS narrow,TRY_CONVERT(INT,N'bad') AS absent,TRY_CAST(NULL AS BIT) AS flag WHERE 1=0")
-          (lambda (_row) (output "row" true)) (lambda (fields) (output "fields" fields)) nil nil)
+          (lambda (_row) (output "row" true)) (lambda (fields) (output "fields" fields)) nil nil nil)
         (and (nil? (output "row"))
           (equal? (map (output "fields") (lambda (field) (field "kind"))) '(38 38 104))
           (equal? (map (output "fields") (lambda (field) (field "size"))) '(2 4 1))))
@@ -6333,7 +6321,7 @@ test_cases:
           (list "database" "memcp-tests" "parameters" (list
             (list "name" "@raw" "flags" 0 "type" (list "kind" 231 "size" 24) "value" "42"))
             "declarations" "@raw nvarchar(12)" "text" "SELECT TRY_CAST(@raw AS SMALLINT) AS value")
-          (lambda (row) (output "row" row)) (lambda (fields) (output "fields" fields)) nil nil)
+          (lambda (row) (output "row" row)) (lambda (fields) (output "fields" fields)) nil nil nil)
         (and (equal? (output "row") '(42)) (equal? ((car (output "fields")) "size") 2)))
     expect:
       result: true
@@ -6538,8 +6526,16 @@ test_cases:
     scm: |-
       (begin
        (define info (sql_expr_info (list) (tsql_try_convert_expr 7 "INT" (list) nil false)))
-       (eval (list (list (quote lambda) (list (quote tsql_cast_integer)) (sql_info_formula info))
-        (lambda (_value _minimum _maximum) (error "unexpected-converter-failure")))))
+       ;; Inject at the resolved procedure head, retaining the generated TRY
+       ;; boundary. Lexically rebinding a helper name cannot affect closed code.
+       (define failure (lambda (_value _minimum _maximum) (error "unexpected-converter-failure")))
+       (define inject (lambda (form)
+        (if (expression_equal? form tsql_cast_integer) failure
+         (match form
+          ((symbol quote) _data) form
+          (cons _head _tail) (map form inject)
+          _ form))))
+       (eval (inject (sql_info_formula info)))))
     expect:
       error: true
       contains: unexpected-converter-failure
@@ -6561,10 +6557,10 @@ test_cases:
        (define session (newsession)) (session "username" "root") (session "schema" "memcp-tests") (session "wire_metadata" true)
        (define output (newsession))
        (tds_frontend "execute" session (list "database" "memcp-tests" "parameters" (list) "declarations" "" "text" "SELECT TRY_CAST(N'12.34' AS DECIMAL(8,2)) AS d,TRY_CAST(N'x' AS NVARCHAR(5)) AS n,TRY_CAST(0x01 AS VARBINARY(5)) AS b,TRY_CAST(N'x' AS NVARCHAR) AS dn,TRY_CAST(0x01 AS VARBINARY) AS db WHERE 1=0")
-        (lambda (_row) (output "row" true)) (lambda (fields) (output "fields" fields)) nil nil)
+        (lambda (_row) (output "row" true)) (lambda (fields) (output "fields" fields)) nil nil nil)
        (and (nil? (output "row"))
         (equal? (map (output "fields") (lambda (field) (field "kind"))) '(108 231 165 231 165))
-        (equal? (map (output "fields") (lambda (field) (field "size"))) '(5 10 5 60 30))
+        (equal? (map (output "fields") (lambda (field) (field "size"))) '(17 10 5 60 30))
         (equal? ((car (output "fields")) "precision") 8) (equal? ((car (output "fields")) "scale") 2)))
     expect:
       result: true
@@ -6576,10 +6572,10 @@ test_cases:
        (define session (newsession)) (session "username" "root") (session "schema" "memcp-tests") (session "wire_metadata" true)
        (define output (newsession))
        (tds_frontend "execute" session (list "database" "memcp-tests" "parameters" (list) "declarations" "" "text" "SELECT TRY_CAST(NULL AS DECIMAL(8,2)) AS d,TRY_CONVERT(NVARCHAR(5),NULL,NULL) AS n,TRY_CAST(NULL AS VARBINARY(5)) AS b,TRY_CAST(NULL AS NVARCHAR) AS dn,TRY_CAST(NULL AS VARBINARY) AS db WHERE 1=0")
-        (lambda (_row) (output "row" true)) (lambda (fields) (output "fields" fields)) nil nil)
+        (lambda (_row) (output "row" true)) (lambda (fields) (output "fields" fields)) nil nil nil)
        (and (nil? (output "row"))
         (equal? (map (output "fields") (lambda (field) (field "kind"))) '(108 231 165 231 165))
-        (equal? (map (output "fields") (lambda (field) (field "size"))) '(5 10 5 60 30))
+        (equal? (map (output "fields") (lambda (field) (field "size"))) '(17 10 5 60 30))
         (equal? ((car (output "fields")) "precision") 8) (equal? ((car (output "fields")) "scale") 2)))
     expect:
       result: true
@@ -6591,10 +6587,10 @@ test_cases:
        (define session (newsession)) (session "username" "root") (session "schema" "memcp-tests") (session "wire_metadata" true)
        (define output (newsession))
        (tds_frontend "execute" session (list "database" "memcp-tests" "parameters" (list) "declarations" "" "text" "SELECT * FROM try_dimensions_view WHERE 1=0")
-        (lambda (_row) (output "row" true)) (lambda (fields) (output "fields" fields)) nil nil)
+        (lambda (_row) (output "row" true)) (lambda (fields) (output "fields" fields)) nil nil nil)
        (and (nil? (output "row"))
         (equal? (map (output "fields") (lambda (field) (field "kind"))) '(108 231 165 231 165))
-        (equal? (map (output "fields") (lambda (field) (field "size"))) '(5 10 5 60 30))
+        (equal? (map (output "fields") (lambda (field) (field "size"))) '(17 10 5 60 30))
         (equal? ((car (output "fields")) "precision") 8) (equal? ((car (output "fields")) "scale") 2)))
     expect:
       result: true
@@ -6617,7 +6613,7 @@ test_cases:
        (define session (newsession)) (session "username" "root") (session "schema" "memcp-tests") (session "wire_metadata" true)
        (define output (newsession))
        (tds_frontend "execute" session (list "database" "memcp-tests" "parameters" (list) "declarations" "" "text" "SELECT CAST(12 AS NVARCHAR(5)) AS n,CONVERT(NVARCHAR(7),12) AS c,CAST(CAST(1 AS BIT) AS NCHAR(3)) AS b WHERE 1=0")
-        (lambda (_row) (output "row" true)) (lambda (fields) (output "fields" fields)) nil nil)
+        (lambda (_row) (output "row" true)) (lambda (fields) (output "fields" fields)) nil nil nil)
        (and (nil? (output "row"))
         (equal? (map (output "fields") (lambda (field) (field "kind"))) '(231 231 231))
         (equal? (map (output "fields") (lambda (field) (field "size"))) '(10 14 6))))
@@ -6629,7 +6625,7 @@ test_cases:
        (define session (newsession)) (session "username" "root") (session "schema" "memcp-tests") (session "wire_metadata" true)
        (define output (newsession))
        (tds_frontend "execute" session (list "database" "memcp-tests" "parameters" (list) "declarations" "" "text" "SELECT CAST(CAST(NULL AS INT) AS NVARCHAR(5)) AS n,CONVERT(NVARCHAR(7),CAST(NULL AS BIGINT)) AS c,CAST(CAST(NULL AS BIT) AS NCHAR(3)) AS b WHERE 1=0")
-        (lambda (_row) (output "row" true)) (lambda (fields) (output "fields" fields)) nil nil)
+        (lambda (_row) (output "row" true)) (lambda (fields) (output "fields" fields)) nil nil nil)
        (and (nil? (output "row"))
         (equal? (map (output "fields") (lambda (field) (field "kind"))) '(231 231 231))
         (equal? (map (output "fields") (lambda (field) (field "size"))) '(10 14 6))))
@@ -6748,6 +6744,25 @@ test_cases:
       data:
       - a: '40'
         b: from
+  - name: Multipart zero and false components remain identifier text
+    sql: SELECT PARSENAME(N'0',1) AS single_zero,PARSENAME(N'catalog.0.item',2) AS middle_zero,PARSENAME(N'catalog.owner.0',1) AS last_zero,PARSENAME(N'[0]',1) AS quoted_zero,PARSENAME(N'false',1) AS false_text
+    expect:
+      rows: 1
+      data:
+      - single_zero: '0'
+        middle_zero: '0'
+        last_zero: '0'
+        quoted_zero: '0'
+        false_text: 'false'
+  - name: Multipart empty components stay NULL beside zero components
+    sql: SELECT PARSENAME(N'',1) AS empty_name,PARSENAME(N'[]',1) AS empty_quoted,PARSENAME(N'catalog..0',2) AS omitted_schema,PARSENAME(N'catalog..0',1) AS zero_object
+    expect:
+      rows: 1
+      data:
+      - empty_name: null
+        empty_quoted: null
+        omitted_schema: null
+        zero_object: '0'
   - name: Multipart names decode existing identifier escaping
     sql: SELECT PARSENAME(N'[tenant.db].[own]]er]."it""em"',1) AS a,PARSENAME(N'[tenant.db].[own]]er]."it""em"',2) AS b,PARSENAME(N'[tenant.db].[own]]er]."it""em"',3)
       AS c
@@ -7373,7 +7388,7 @@ test_cases:
     scm: |
       (begin
         (define fields (tds_describe "memcp-tests" "SELECT label,short_label,next_id FROM cte_portable_view WHERE 1=0" "" (newsession)))
-        (define original (show (table "memcp-tests" false "cte_portable_input" false) "column" "label" false))
+        (define original (show (table "memcp-tests" false "cte_portable_input" false nil) "column" "label" false))
         (and (equal? (count fields) 3)
           (equal? (original "RawType") "[memcp-tests].[dbo].[cte_portable_text]")
           (equal? ((nth fields 0) "sql_type") "NVARCHAR") (equal? ((nth fields 0) "size") 16)
@@ -7498,6 +7513,44 @@ test_cases:
       data:
       - retained: 2
         scoped: 2
+  - name: Fixed ANSI and quoted identifier modes accept one combined declaration
+    sql: SET ANSI_NULLS, QUOTED_IDENTIFIER ON
+    expect: {rows: 0}
+  - name: Fixed ON option lists retain case insensitive ordering and repetition
+    sql: set quoted_identifier, ansi_nulls, quoted_identifier on
+    expect: {rows: 0}
+  - name: Combined fixed modes retain native NULL semantics and quoted identifiers over TDS
+    tds:
+      statements:
+      - sql: SET ANSI_NULLS, QUOTED_IDENTIFIER ON
+        expect: {rows: 0}
+      - sql: SELECT CASE WHEN NULL=NULL THEN 1 ELSE 0 END AS "quoted output",CASE WHEN NULL IS NULL THEN 1 ELSE 0 END AS is_null
+        expect:
+          rows: 1
+          columns: [quoted output, is_null]
+          data: [{quoted output: 0, is_null: 1}]
+  - name: Combined declarations do not enable unsupported OFF semantics
+    sql: SET ANSI_NULLS, QUOTED_IDENTIFIER OFF
+    expect: {error: true}
+  - name: Combined fixed mode declarations do not absorb another session setting
+    sql: SET ANSI_NULLS, NOCOUNT ON
+    expect: {error: true}
+  - name: Combined fixed mode declarations reject a dangling option separator
+    sql: SET ANSI_NULLS, ON
+    expect: {error: true}
+
+
+  - name: Compiled character dimension inspection never executes arbitrary unary helpers
+    scm: |-
+      (begin
+        (define input (sql_info_formula (sql_expr_info '() (tsql_cast_expr " a " "NVARCHAR" '(5)))))
+        (define unknown (lambda (value) (error "dimension inspection executed an unknown helper")))
+        (list (tsql_result_dimensions '() (list tsql_upper input) '())
+          (tsql_result_dimensions '() (list unknown input) '())
+          (tsql_result_dimensions '() (list tsql_upper input input) '())))
+    expect:
+      result: [[5],null,null]
+
 cleanup:
 - sql: DROP TABLE IF EXISTS tsql_null_money
 - sql: DROP TABLE IF EXISTS tsql_null_contract_input

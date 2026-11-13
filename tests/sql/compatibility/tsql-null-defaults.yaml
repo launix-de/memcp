@@ -1,0 +1,53 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  description: Constant default compilation lowers protected SQL NULL literals before generic purity folding
+cleanup:
+- sql: DROP TABLE IF EXISTS null_defaults
+- sql: DROP TABLE IF EXISTS null_default_rejected
+test_cases:
+- name: Typed constant defaults accept direct and nested SQL NULL literals
+  sql: CREATE TABLE null_defaults(id INT PRIMARY KEY,value INT DEFAULT(NULL),label NVARCHAR(16) DEFAULT(CAST(NULL AS NVARCHAR(16))),fallback INT DEFAULT(ISNULL(CAST(NULL AS INT),7)),spare INT)
+  expect: {rows: 0, result_not_contains: '"affected_rows"'}
+- name: Omitted values use the complete typed constant declaration
+  sql: INSERT null_defaults(id) VALUES(1)
+  expect: {affected_rows: 1}
+- name: Default NULL remains distinct from constant fallback values
+  sql: SELECT id,value,label,fallback FROM null_defaults
+  expect: {rows: 1,data: [{id: 1,value: null,label: null,fallback: 7}]}
+- name: Parenthesized named NULL defaults compile through ALTER
+  sql: ALTER TABLE null_defaults ADD CONSTRAINT DF_null_spare DEFAULT((NULL)) FOR spare
+  expect: {affected_rows: 0}
+- name: A named NULL default remains a real declaration
+  scm: (equal? ((show (table "memcp-tests" false "null_defaults" false nil) "column" "spare" false) "DefaultName") "DF_null_spare")
+  expect: {result: true}
+- name: Explicit DEFAULT uses the declared nullable type
+  sql: INSERT null_defaults(id,value,label,fallback,spare) VALUES(2,DEFAULT,DEFAULT,DEFAULT,DEFAULT)
+  expect: {affected_rows: 1}
+- name: Explicit and omitted NULL defaults agree
+  sql: SELECT id,value,label,fallback,spare FROM null_defaults ORDER BY id
+  expect: {rows: 2,data: [{id: 1,value: null,label: null,fallback: 7,spare: null},{id: 2,value: null,label: null,fallback: 7,spare: null}]}
+- name: A constant NULL result cannot hide a volatile prefix
+  scm: |
+    (try (lambda () (begin
+      (sql_constant_value (list 'begin (list 'now) (sql_null_literal))) false))
+      (lambda (failure) (strlike (concat failure) "%expression is not constant%")))
+  expect: {result: true}
+- name: Literal-looking nodes inside quoted data remain data
+  scm: |
+    (begin (define data (list (sql_null_literal)))
+      (expression_equal? (sql_constant_value (list 'quote data)) data))
+  expect: {result: true}
+- name: Bare callable syntax is not an executed NULL literal
+  scm: |
+    (begin (define callable (list 'lambda '() (sql_null_literal)))
+      (expression_equal? (sql_constant_formula callable) callable))
+  expect: {result: true}
+- name: Relational defaults cannot bypass the scalar declaration contract
+  sql: CREATE TABLE null_default_rejected(id INT DEFAULT((SELECT NULL)))
+  expect: {error: true}
+- name: A rejected relational default publishes no table
+  sql: SELECT name FROM sys.objects WHERE name=N'null_default_rejected'
+  expect: {rows: 0}

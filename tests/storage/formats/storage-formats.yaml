@@ -28,14 +28,17 @@ test_cases:
   - name: "Create float table"
     sql: "CREATE TABLE sf_float (id INT, val DOUBLE)"
     expect:
-      rows: 0
+      affected_rows: 0
+      rows: 1
+      data: [{affected_rows: 0}]
+      result_contains: '"affected_rows"'
 
   - name: "Insert float data (non-aligned floats)"
     scm: |
       (begin
         (set b (map (produceN 30) (lambda (i)
           (list i (/ (* (+ i 1) 3.14159265) (+ i 2.71828))))))
-        (insert (table "memcp-tests" false "sf_float" false) '("id" "val") b)
+        (insert (table "memcp-tests" false "sf_float" false nil) '("id" "val") b)
         30)
 
   - name: "Float: verify cell id=0"
@@ -75,7 +78,10 @@ test_cases:
   - name: "Create string-dict table"
     sql: "CREATE TABLE sf_string_dict (id INT, city VARCHAR(50))"
     expect:
-      rows: 0
+      affected_rows: 0
+      rows: 1
+      data: [{affected_rows: 0}]
+      result_contains: '"affected_rows"'
 
   - name: "Insert string-dict data (5 cities repeated)"
     scm: |
@@ -83,7 +89,7 @@ test_cases:
         (define cities '("Berlin" "Munich" "Hamburg" "Cologne" "Frankfurt"))
         (set b (map (produceN 200) (lambda (i)
           (list i (nth cities (- i (* 5 (floor (/ i 5)))))))))
-        (insert (table "memcp-tests" false "sf_string_dict" false) '("id" "city") b)
+        (insert (table "memcp-tests" false "sf_string_dict" false nil) '("id" "city") b)
         200)
 
   - name: "Dict: verify id=0 Berlin"
@@ -132,14 +138,17 @@ test_cases:
   - name: "Create string-nodict table"
     sql: "CREATE TABLE sf_string_nodict (id INT, description VARCHAR(200))"
     expect:
-      rows: 0
+      affected_rows: 0
+      rows: 1
+      data: [{affected_rows: 0}]
+      result_contains: '"affected_rows"'
 
   - name: "Insert unique strings (>100 distinct in first 100 triggers nodict)"
     scm: |
       (begin
         (set b (map (produceN 150) (lambda (i)
           (list i (concat "item_" i "_description_unique_" (* i 7))))))
-        (insert (table "memcp-tests" false "sf_string_nodict" false) '("id" "description") b)
+        (insert (table "memcp-tests" false "sf_string_nodict" false nil) '("id" "description") b)
         150)
 
   - name: "Nodict: verify id=0"
@@ -188,14 +197,17 @@ test_cases:
   - name: "Create sparse table"
     sql: "CREATE TABLE sf_sparse (id INT, rare_val INT)"
     expect:
-      rows: 0
+      affected_rows: 0
+      rows: 1
+      data: [{affected_rows: 0}]
+      result_contains: '"affected_rows"'
 
   - name: "Insert sparse non-null values only (10 rows with values)"
     scm: |
       (begin
         (set b (map (produceN 10) (lambda (i)
           (list (* i 20) (* i 200)))))
-        (insert (table "memcp-tests" false "sf_sparse" false) '("id" "rare_val") b)
+        (insert (table "memcp-tests" false "sf_sparse" false nil) '("id" "rare_val") b)
         10)
 
   - name: "Insert sparse NULL rows batch 1 (id 1-19)"
@@ -338,14 +350,17 @@ test_cases:
   - name: "Create seq table"
     sql: "CREATE TABLE sf_seq (id INT, seq_val INT)"
     expect:
-      rows: 0
+      affected_rows: 0
+      rows: 1
+      data: [{affected_rows: 0}]
+      result_contains: '"affected_rows"'
 
   - name: "Insert sequential data (arithmetic: 100,102,104,...)"
     scm: |
       (begin
         (set b (map (produceN 100) (lambda (i)
           (list i (+ 100 (* i 2))))))
-        (insert (table "memcp-tests" false "sf_seq" false) '("id" "seq_val") b)
+        (insert (table "memcp-tests" false "sf_seq" false nil) '("id" "seq_val") b)
         100)
 
   - name: "Seq: verify id=0 (start=100)"
@@ -382,7 +397,7 @@ test_cases:
       (begin
         (set b (map (produceN 50) (lambda (i)
           (list (+ i 100) (+ 500 (* i 3))))))
-        (insert (table "memcp-tests" false "sf_seq" false) '("id" "seq_val") b)
+        (insert (table "memcp-tests" false "sf_seq" false nil) '("id" "seq_val") b)
         50)
 
   - name: "Seq: verify second run id=100 (500)"
@@ -412,7 +427,10 @@ test_cases:
   - name: "Create int-null table"
     sql: "CREATE TABLE sf_int_null (id INT, val INT)"
     expect:
-      rows: 0
+      affected_rows: 0
+      rows: 1
+      data: [{affected_rows: 0}]
+      result_contains: '"affected_rows"'
 
   - name: "Insert ints with NULLs"
     sql: |
@@ -463,7 +481,10 @@ test_cases:
   - name: "Create int-wide table"
     sql: "CREATE TABLE sf_int_wide (id INT, val BIGINT)"
     expect:
-      rows: 0
+      affected_rows: 0
+      rows: 1
+      data: [{affected_rows: 0}]
+      result_contains: '"affected_rows"'
 
   - name: "Insert wide-range ints"
     sql: |
@@ -500,7 +521,10 @@ test_cases:
   - name: "Create decimal-neg table"
     sql: "CREATE TABLE sf_decimal_neg (id INT, amount DECIMAL(12,2))"
     expect:
-      rows: 0
+      affected_rows: 0
+      rows: 1
+      data: [{affected_rows: 0}]
+      result_contains: '"affected_rows"'
 
   - name: "Insert negative decimals"
     sql: |

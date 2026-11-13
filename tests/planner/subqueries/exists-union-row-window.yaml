@@ -1,0 +1,111 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: EXISTS-only UNION window normalization retains cardinality-sensitive controls
+setup:
+- sql: CREATE TABLE exists_window_outer(id INT)
+- sql: CREATE TABLE exists_window_inner(id INT)
+- sql: INSERT INTO exists_window_outer VALUES(1),(2)
+- sql: INSERT INTO exists_window_inner VALUES(3)
+cleanup:
+- sql: DROP TABLE IF EXISTS exists_window_outer
+- sql: DROP TABLE IF EXISTS exists_window_inner
+test_cases:
+- name: Positive literal cap preserves UNION ALL presence
+  sql: SELECT id FROM exists_window_outer WHERE EXISTS (SELECT n FROM (SELECT id AS n FROM exists_window_inner UNION
+    ALL SELECT id AS n FROM exists_window_inner) u LIMIT 1) ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+    - id: 2
+- name: Ordered positive cap preserves UNION DISTINCT presence
+  sql: SELECT id FROM exists_window_outer WHERE EXISTS (SELECT n FROM (SELECT id AS n FROM exists_window_inner UNION
+    SELECT id AS n FROM exists_window_inner) u ORDER BY n DESC LIMIT 2) ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+    - id: 2
+- name: Empty UNION remains absent under a positive cap
+  sql: SELECT id FROM exists_window_outer WHERE EXISTS (SELECT n FROM (SELECT id AS n FROM exists_window_inner WHERE
+    id<0 UNION ALL SELECT id AS n FROM exists_window_inner WHERE id<0) u LIMIT 1) ORDER BY id
+  expect:
+    rows: 0
+    data: []
+- name: NULL projected values still establish existence
+  sql: SELECT id FROM exists_window_outer WHERE EXISTS (SELECT n FROM (SELECT NULL AS n FROM exists_window_inner
+    UNION SELECT NULL AS n FROM exists_window_inner) u LIMIT 1) ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+    - id: 2
+- name: Zero cap is not discarded
+  scm: '(begin (define input (make_union_block ''all ''() ''() 0 nil ''()))
+
+    (expression_equal? input (exists_union_presence_input input)))'
+  expect:
+    result: true
+- name: An explicit offset is not discarded
+  scm: '(begin (define input (make_union_block ''all ''() ''() 1 1 ''()))
+
+    (expression_equal? input (exists_union_presence_input input)))'
+  expect:
+    result: true
+- name: Dynamic cap is not inferred from its type
+  scm: '(begin (define input (make_union_block ''all ''() ''() (list ''session "v1") nil ''()))
+
+    (expression_equal? input (exists_union_presence_input input)))'
+  expect:
+    result: true
+- name: Zero cap fails closed at the existing unsupported UNION boundary
+  scm: (make_exists_union_stage_rewrite (make_union_block 'all '() '() 0 nil '()) '())
+  expect:
+    error: true
+- name: Scalar UNION NULL rows establish presence
+  sql: SELECT id FROM exists_window_outer WHERE EXISTS (SELECT NULL AS n UNION ALL SELECT NULL AS n) ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+    - id: 2
+- name: Filtered scalar UNION rows remain absent
+  sql: SELECT id FROM exists_window_outer WHERE EXISTS (SELECT 1 AS n WHERE 1=0 UNION SELECT 2 AS n WHERE 1=0) ORDER
+    BY id
+  expect:
+    rows: 0
+    data: []
+- name: NULL scalar predicates do not establish presence
+  sql: SELECT id FROM exists_window_outer WHERE EXISTS (SELECT 1 AS n WHERE NULL UNION ALL SELECT 2 AS n WHERE 1=0)
+    ORDER BY id
+  expect:
+    rows: 0
+    data: []
+- name: Scalar and table UNION branches retain correlated presence
+  sql: SELECT id FROM exists_window_outer WHERE EXISTS (SELECT 1 AS n WHERE exists_window_outer.id=1 UNION ALL SELECT
+    id AS n FROM exists_window_inner WHERE id<0) ORDER BY id
+  expect:
+    rows: 1
+    data:
+    - id: 1
+- name: A literal row domain uses its native scan for presence
+  sql: SELECT id FROM exists_window_outer WHERE EXISTS (SELECT n FROM (SELECT 1 AS n UNION ALL SELECT 2 AS n) values_in WHERE n=2) ORDER BY id
+  expect:
+    rows: 2
+    data: [{id: 1}, {id: 2}]
+- name: A filtered literal row domain remains absent
+  sql: SELECT id FROM exists_window_outer WHERE EXISTS (SELECT n FROM (SELECT 1 AS n UNION ALL SELECT 2 AS n) values_in WHERE n=3) ORDER BY id
+  expect:
+    rows: 0
+    data: []
+- name: Literal NULL cells establish presence without becoming truth values
+  sql: SELECT id FROM exists_window_outer WHERE EXISTS (SELECT n FROM (SELECT NULL AS n UNION ALL SELECT NULL AS n) values_in) ORDER BY id
+  expect:
+    rows: 2
+    data: [{id: 1}, {id: 2}]
+- name: Literal-domain scalar windows retain their existing cardinality admission
+  sql: SELECT (SELECT n FROM (SELECT 1 AS n UNION ALL SELECT 2 AS n) values_in ORDER BY n DESC LIMIT 1) AS selected
+  expect:
+    error: true
+    contains: partition_limit=2 and overflow checking

@@ -1,0 +1,204 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  requires_tds: true
+  description: Module-owned temporary relations retire safely before explicit transaction
+    decisions
+  isolated: true
+test_cases:
+- name: RETURN module creates owned storage before its explicit transaction for COMMIT
+  session_id: module_tx_return_commit
+  sql: |-
+    CREATE TABLE #caller(id INT);
+    GO
+    CREATE PROCEDURE module_tx_return_commit AS BEGIN
+     CREATE TABLE #probe(id INT);
+     BEGIN TRANSACTION;
+     INSERT #probe VALUES(7);
+     INSERT #caller VALUES(9);
+     RETURN;
+    END;
+  expect: {}
+- name: RETURN module closes owned storage while leaving caller transaction active
+    for COMMIT
+  session_id: module_tx_return_commit
+  sql: EXEC module_tx_return_commit
+  expect: {}
+- name: RETURN module permits caller COMMIT after owned storage retirement
+  session_id: module_tx_return_commit
+  sql: COMMIT
+  expect: {}
+- name: RETURN module caller rows reflect COMMIT
+  session_id: module_tx_return_commit
+  sql: 'SELECT id FROM #caller'
+  expect:
+    rows: 1
+    data:
+    - id: 9
+- name: COMMIT cannot resurrect RETURN module relation
+  session_id: module_tx_return_commit
+  sql: 'SELECT id FROM #probe'
+  expect:
+    error: true
+    contains: 'local temporary table does not exist: #probe'
+- name: RETURN module released namespace after COMMIT
+  session_id: module_tx_return_commit
+  sql: |-
+    CREATE TABLE #probe(id INT);
+    INSERT #probe VALUES(11);
+    SELECT id FROM #probe;
+    DROP TABLE #probe;
+    DROP TABLE #caller;
+    DROP PROCEDURE module_tx_return_commit;
+  expect:
+    data:
+    - id: 11
+- name: RETURN module creates owned storage before its explicit transaction for ROLLBACK
+  session_id: module_tx_return_rollback
+  sql: |-
+    CREATE TABLE #caller(id INT);
+    GO
+    CREATE PROCEDURE module_tx_return_rollback AS BEGIN
+     CREATE TABLE #probe(id INT);
+     BEGIN TRANSACTION;
+     INSERT #probe VALUES(7);
+     INSERT #caller VALUES(9);
+     RETURN;
+    END;
+  expect: {}
+- name: RETURN module closes owned storage while leaving caller transaction active
+    for ROLLBACK
+  session_id: module_tx_return_rollback
+  sql: EXEC module_tx_return_rollback
+  expect: {}
+- name: RETURN module permits caller ROLLBACK after owned storage retirement
+  session_id: module_tx_return_rollback
+  sql: ROLLBACK
+  expect: {}
+- name: RETURN module caller rows reflect ROLLBACK
+  session_id: module_tx_return_rollback
+  sql: 'SELECT id FROM #caller'
+  expect:
+    rows: 0
+    data: []
+- name: ROLLBACK cannot resurrect RETURN module relation
+  session_id: module_tx_return_rollback
+  sql: 'SELECT id FROM #probe'
+  expect:
+    error: true
+    contains: 'local temporary table does not exist: #probe'
+- name: RETURN module released namespace after ROLLBACK
+  session_id: module_tx_return_rollback
+  sql: |-
+    CREATE TABLE #probe(id INT);
+    INSERT #probe VALUES(11);
+    SELECT id FROM #probe;
+    DROP TABLE #probe;
+    DROP TABLE #caller;
+    DROP PROCEDURE module_tx_return_rollback;
+  expect:
+    data:
+    - id: 11
+- name: THROW module creates owned storage before its explicit transaction for COMMIT
+  session_id: module_tx_throw_commit
+  sql: |-
+    CREATE TABLE #caller(id INT);
+    GO
+    CREATE PROCEDURE module_tx_throw_commit AS BEGIN
+     CREATE TABLE #probe(id INT);
+     BEGIN TRANSACTION;
+     INSERT #probe VALUES(7);
+     INSERT #caller VALUES(9);
+     THROW 50001,N'expected transaction module failure',1;
+    END;
+  expect: {}
+- name: THROW module closes owned storage while leaving caller transaction active
+    for COMMIT
+  session_id: module_tx_throw_commit
+  sql: EXEC module_tx_throw_commit
+  expect:
+    error: true
+    contains: expected transaction module failure
+- name: THROW leaves the existing aborted transaction contract intact for COMMIT
+  session_id: module_tx_throw_commit
+  sql: COMMIT
+  expect:
+    error: true
+    contains: transaction is aborted; ROLLBACK required
+- name: ROLLBACK completes after rejected COMMIT of the aborted module transaction
+  session_id: module_tx_throw_commit
+  sql: ROLLBACK
+  expect: {}
+- name: Rejected COMMIT followed by ROLLBACK discards caller rows
+  session_id: module_tx_throw_commit
+  sql: 'SELECT id FROM #caller'
+  expect:
+    rows: 0
+    data: []
+- name: COMMIT cannot resurrect THROW module relation
+  session_id: module_tx_throw_commit
+  sql: 'SELECT id FROM #probe'
+  expect:
+    error: true
+    contains: 'local temporary table does not exist: #probe'
+- name: THROW module released namespace after COMMIT
+  session_id: module_tx_throw_commit
+  sql: |-
+    CREATE TABLE #probe(id INT);
+    INSERT #probe VALUES(11);
+    SELECT id FROM #probe;
+    DROP TABLE #probe;
+    DROP TABLE #caller;
+    DROP PROCEDURE module_tx_throw_commit;
+  expect:
+    data:
+    - id: 11
+- name: THROW module creates owned storage before its explicit transaction for ROLLBACK
+  session_id: module_tx_throw_rollback
+  sql: |-
+    CREATE TABLE #caller(id INT);
+    GO
+    CREATE PROCEDURE module_tx_throw_rollback AS BEGIN
+     CREATE TABLE #probe(id INT);
+     BEGIN TRANSACTION;
+     INSERT #probe VALUES(7);
+     INSERT #caller VALUES(9);
+     THROW 50001,N'expected transaction module failure',1;
+    END;
+  expect: {}
+- name: THROW module closes owned storage while leaving caller transaction active
+    for ROLLBACK
+  session_id: module_tx_throw_rollback
+  sql: EXEC module_tx_throw_rollback
+  expect:
+    error: true
+    contains: expected transaction module failure
+- name: THROW module permits caller ROLLBACK after owned storage retirement
+  session_id: module_tx_throw_rollback
+  sql: ROLLBACK
+  expect: {}
+- name: THROW module caller rows reflect ROLLBACK
+  session_id: module_tx_throw_rollback
+  sql: 'SELECT id FROM #caller'
+  expect:
+    rows: 0
+    data: []
+- name: ROLLBACK cannot resurrect THROW module relation
+  session_id: module_tx_throw_rollback
+  sql: 'SELECT id FROM #probe'
+  expect:
+    error: true
+    contains: 'local temporary table does not exist: #probe'
+- name: THROW module released namespace after ROLLBACK
+  session_id: module_tx_throw_rollback
+  sql: |-
+    CREATE TABLE #probe(id INT);
+    INSERT #probe VALUES(11);
+    SELECT id FROM #probe;
+    DROP TABLE #probe;
+    DROP TABLE #caller;
+    DROP PROCEDURE module_tx_throw_rollback;
+  expect:
+    data:
+    - id: 11

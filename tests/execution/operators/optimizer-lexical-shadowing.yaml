@@ -1,0 +1,101 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: Local callback shadowing preserves earlier outer reads across lambda scopes
+setup: []
+test_cases:
+- name: A locally shadowed callback is used after an earlier read of the outer callback
+  scm: |
+    (begin
+      (define syntax (scheme "(lambda (callback) (list ((lambda (value) (begin (define original callback) (define callback (lambda (input) (+ 10 (original input)))) (callback value))) 3) (callback 3)))"))
+      (define raw (eval (clone_optimizer_expression syntax)))
+      (define optimized (eval (optimize (clone_optimizer_expression syntax))))
+      (define callback (lambda (input) (+ input 1)))
+      (list (raw callback) (optimized callback) ((jit optimized) callback)))
+  expect: {result: [[14,4],[14,4],[14,4]]}
+- name: A local scalar initializer reads the preceding parameter without overwriting it
+  scm: |
+    (begin
+      (define syntax (scheme "(lambda (value) (list (begin (define previous value) (define value (+ value 10)) (list previous value)) value))"))
+      (define raw (eval (clone_optimizer_expression syntax)))
+      (define optimized (eval (optimize (clone_optimizer_expression syntax))))
+      (list (raw 4) (optimized 4) ((jit optimized) 4)))
+  expect: {result: [[[4,14],4],[[4,14],4],[[4,14],4]]}
+- name: A source wrapped local recursive callback resolves its own definition and preserves the outer callback
+  scm: |
+    (begin
+      (define syntax (source "local-callback" 1 1 (scheme "(lambda (callback) (list ((lambda (value) (begin (define original callback) (define callback (lambda (input) (if (<= input 0) (original 0) (+ 10 (callback (- input 1)))))) (callback value))) 3) (callback 3)))")))
+      (define raw (eval (clone_optimizer_expression syntax)))
+      (define optimized (eval (optimize (clone_optimizer_expression syntax))))
+      (define callback (lambda (input) (+ input 1)))
+      (list (raw callback) (optimized callback) ((jit optimized) callback)))
+  expect: {result: [[31,4],[31,4],[31,4]]}
+- name: An earlier closure observes the same local frame before and after a later definition
+  scm: |
+    (begin
+      (define syntax (scheme "(lambda (second) (list (begin (define first (lambda () second)) (define before (first)) (define second (+ second 10)) (list before (first) second)) second))"))
+      (define raw (eval (clone_optimizer_expression syntax)))
+      (define optimized (eval (optimize (clone_optimizer_expression syntax))))
+      (list (raw 4) (optimized 4) ((jit optimized) 4)))
+  expect: {result: [[[4,14,14],4],[[4,14,14],4],[[4,14,14],4]]}
+- name: An inlinable outer value remains a real fallback for a later nested local definition
+  scm: |
+    (begin
+      (define syntax (list 'begin (list 'define 'value 4)
+        (list 'list (list 'begin (list 'define 'previous 'value)
+          (source "shadow" 1 1 (list 'define 'value (list '+ 'value 10)))
+          (list 'list 'previous 'value)) 'value)))
+      (define raw (eval (clone_optimizer_expression syntax)))
+      (define optimized (eval (optimize (clone_optimizer_expression syntax))))
+      (define compiled (jit (eval (optimize (list 'lambda '() (clone_optimizer_expression syntax))))))
+      (list raw optimized (compiled)))
+  expect: {result: [[[4,14],4],[[4,14],4],[[4,14],4]]}
+- name: A local publication without prefix reads does not consume its outer value
+  scm: |
+    (begin
+      (define syntax (scheme "(lambda (value) (list (begin (define value 14) value) value))"))
+      (define raw (eval (clone_optimizer_expression syntax)))
+      (define optimized (eval (optimize (clone_optimizer_expression syntax))))
+      (list (raw 4) (optimized 4) ((jit optimized) 4)))
+  expect: {result: [[14,4],[14,4],[14,4]]}
+- name: Repeated local definitions read their already published frame
+  scm: |
+    (begin
+      (define syntax (scheme "(lambda (value) (list (begin (define value 14) (define value (+ value 10)) value) value))"))
+      (define raw (eval (clone_optimizer_expression syntax)))
+      (define optimized (eval (optimize (clone_optimizer_expression syntax))))
+      (list (raw 4) (optimized 4) ((jit optimized) 4)))
+  expect: {result: [[24,4],[24,4],[24,4]]}
+- name: A more deeply published shadow does not read the enclosing fallback
+  scm: |
+    (begin
+      (define syntax (scheme "(lambda (value) (list (begin (define previous (begin (define value 9) value)) (define value 14) (list previous value)) value))"))
+      (define raw (eval (clone_optimizer_expression syntax)))
+      (define optimized (eval (optimize (clone_optimizer_expression syntax))))
+      (list (raw 4) (optimized 4) ((jit optimized) 4)))
+  expect: {result: [[[9,14],4],[[9,14],4],[[9,14],4]]}
+- name: Dynamic evaluation before local publication retains the named outer fallback
+  scm: |
+    (begin
+      (define syntax (scheme "(lambda (value) (list (begin (define previous (eval (symbol \"value\"))) (define value 14) (list previous value)) value))"))
+      (define raw (eval (clone_optimizer_expression syntax)))
+      (define optimized (eval (optimize (clone_optimizer_expression syntax))))
+      (list (raw 4) (optimized 4) ((jit optimized) 4)))
+  expect: {result: [[[4,14],4],[[4,14],4],[[4,14],4]]}
+- name: Lambda parameters hide unrelated outer names during prefix classification
+  scm: |
+    (begin
+      (define syntax (scheme "(lambda (value) (list ((lambda (value) (begin (define value (+ value 10)) value)) 2) value))"))
+      (define raw (eval (clone_optimizer_expression syntax)))
+      (define optimized (eval (optimize (clone_optimizer_expression syntax))))
+      (list (raw 4) (optimized 4) ((jit optimized) 4)))
+  expect: {result: [[12,4],[12,4],[12,4]]}
+- name: A closure created in the prefix observes a later local publication
+  scm: |
+    (begin
+      (define syntax (scheme "(lambda (value) (list (begin (define read (lambda () value)) (define value 14) (read)) value))"))
+      (define raw (eval (clone_optimizer_expression syntax)))
+      (define optimized (eval (optimize (clone_optimizer_expression syntax))))
+      (list (raw 4) (optimized 4) ((jit optimized) 4)))
+  expect: {result: [[14,4],[14,4],[14,4]]}
+cleanup: []

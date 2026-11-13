@@ -1,0 +1,312 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  description: Native scoped cursor rowsets, declared FETCH conversions and lexical control lifetime
+setup:
+- sql: CREATE TABLE cursor_source(id INT PRIMARY KEY, text_value NVARCHAR(40), amount DECIMAL(10,2))
+- sql: INSERT INTO cursor_source VALUES(1,N'first',1.25),(2,NULL,2.50),(3,N'third',3.75)
+- sql: CREATE TABLE cursor_commands(id INT PRIMARY KEY, command_text NVARCHAR(200))
+- sql: CREATE TABLE cursor_audit(value INT)
+- sql: CREATE TABLE cursor_key_commands(id INT PRIMARY KEY)
+- sql: CREATE TABLE cursor_abort_commands(id INT PRIMARY KEY)
+- sql: CREATE TABLE cursor_insert_counts(id INT)
+- sql: CREATE TABLE cursor_statement_calls(value INT)
+cleanup:
+- sql: DROP TABLE IF EXISTS cursor_insert_counts
+- sql: DROP TABLE IF EXISTS cursor_statement_calls
+- sql: DROP TRIGGER IF EXISTS cursor_abort_guard
+- sql: DROP TABLE IF EXISTS cursor_abort_commands
+- sql: DROP TRIGGER IF EXISTS cursor_key_trigger
+- sql: DROP PROCEDURE IF EXISTS cursor_apply
+- sql: DROP PROCEDURE IF EXISTS cursor_unsafe_apply
+- sql: DROP TABLE IF EXISTS cursor_hidden_ddl
+- sql: DROP TABLE IF EXISTS cursor_key_commands
+- sql: DROP TRIGGER IF EXISTS cursor_command_trigger
+- sql: DROP PROCEDURE IF EXISTS cursor_status_child
+- sql: DROP PROCEDURE IF EXISTS cursor_shadow_child
+- sql: DROP TABLE IF EXISTS cursor_commands
+- sql: DROP TABLE IF EXISTS cursor_audit
+- sql: DROP TABLE IF EXISTS cursor_source
+test_cases:
+- name: Cursor recipes retain explicit options and names without executing their SELECT
+  scm: |
+    (begin
+      (define commands (cadr (parse_tsql_batch "memcp-tests"
+        "DECLARE [Items] CURSOR LOCAL FORWARD_ONLY STATIC READ_ONLY FOR SELECT id FROM cursor_source; OPEN Items; FETCH NEXT FROM Items INTO @x; CLOSE Items; DEALLOCATE Items;")))
+      (define declaration (car commands))
+      (and (equal? (count commands) 5) (equal? (car declaration) "cursor-declare")
+        (equal? (cadr declaration) "items") ((nth declaration 2) "local")
+        (equal? ((nth declaration 2) "kind") "static")
+        (not ((nth declaration 2) "scroll"))
+        (equal? (car (nth commands 2)) "cursor-fetch")))
+  expect: {result: true}
+- name: Conflicting cursor options are rejected before declaration
+  sql: DECLARE conflict_cursor CURSOR LOCAL GLOBAL STATIC FOR SELECT id FROM cursor_source
+  expect: {error: true, contains: conflicting cursor options}
+- name: Unsupported keyset semantics are not silently replaced with a snapshot
+  sql: DECLARE key_cursor CURSOR LOCAL KEYSET READ_ONLY FOR SELECT id FROM cursor_source
+  expect: {error: true, contains: unsupported cursor option}
+- name: Ordinary default dynamic cursors reject instead of hiding concurrent changes
+  sql: DECLARE dynamic_cursor CURSOR FOR SELECT id FROM cursor_source
+  expect: {error: true, contains: dynamic cursors require an immutable direct transition source}
+- name: Failed dynamic admission publishes no cursor name
+  sql: OPEN dynamic_cursor
+  expect: {error: true, contains: cursor does not exist}
+- name: Empty STATIC fetch leaves every initialized variable unchanged
+  sql: |
+    DECLARE empty_cursor CURSOR LOCAL STATIC READ_ONLY FOR SELECT id,text_value FROM cursor_source WHERE id>99;
+    DECLARE @id INT=77,@text NVARCHAR(40)=N'unchanged';
+    OPEN empty_cursor;
+    FETCH NEXT FROM empty_cursor INTO @id,@text;
+    SELECT @id AS id,@text AS text_value,@@FETCH_STATUS AS fetch_status;
+    CLOSE empty_cursor; DEALLOCATE empty_cursor;
+  expect: {rows: 1, data: [{id: 77, text_value: unchanged, fetch_status: -1}]}
+- name: FETCH uses declared source and target widths and decimal scale
+  sql: |
+    DECLARE typed_cursor CURSOR LOCAL FORWARD_ONLY STATIC READ_ONLY FOR SELECT text_value,amount FROM cursor_source WHERE id=1;
+    DECLARE @text NVARCHAR(3),@amount DECIMAL(12,3);
+    OPEN typed_cursor; FETCH NEXT FROM typed_cursor INTO @text,@amount;
+    SELECT @text AS text_value,@amount AS amount,@@FETCH_STATUS AS fetch_status;
+    CLOSE typed_cursor; DEALLOCATE typed_cursor;
+  expect: {rows: 1, data: [{text_value: fir, amount: 1.250, fetch_status: 0}]}
+- name: A NULL row is a successful FETCH and the later miss preserves it
+  sql: |
+    DECLARE null_cursor CURSOR LOCAL STATIC READ_ONLY FOR SELECT text_value FROM cursor_source WHERE id=2;
+    DECLARE @text NVARCHAR(40)=N'initial';
+    OPEN null_cursor; FETCH NEXT FROM null_cursor INTO @text;
+    DECLARE @first_status INT=@@FETCH_STATUS;
+    FETCH NEXT FROM null_cursor INTO @text;
+    SELECT @text AS text_value,@first_status AS first_status,@@FETCH_STATUS AS last_status;
+    CLOSE null_cursor; DEALLOCATE null_cursor;
+  expect: {rows: 1, data: [{text_value: null, first_status: 0, last_status: -1}]}
+- name: STATIC retains OPEN values and CLOSE permits fresh materialization
+  sql: |
+    DECLARE static_cursor CURSOR LOCAL STATIC READ_ONLY FOR SELECT id FROM cursor_source ORDER BY id;
+    DECLARE @old INT,@new INT;
+    OPEN static_cursor;
+    UPDATE cursor_source SET id=10 WHERE id=1;
+    FETCH FIRST FROM static_cursor INTO @old;
+    CLOSE static_cursor; OPEN static_cursor;
+    FETCH FIRST FROM static_cursor INTO @new;
+    SELECT @old AS opened_first,@new AS reopened_first;
+    DEALLOCATE static_cursor;
+  expect: {rows: 1, data: [{opened_first: 1, reopened_first: 2}]}
+- name: Restore the source after the static membership control
+  sql: UPDATE cursor_source SET id=1 WHERE id=10
+  expect: {rows: 1, data: [{affected_rows: 1}]}
+- name: STATIC scrolling uses native indexed ordinals in both directions
+  sql: |
+    DECLARE scroll_cursor CURSOR LOCAL STATIC READ_ONLY FOR SELECT id FROM cursor_source ORDER BY id;
+    DECLARE @last INT,@prior INT,@absolute INT,@relative INT;
+    OPEN scroll_cursor; FETCH LAST FROM scroll_cursor INTO @last;
+    FETCH PRIOR FROM scroll_cursor INTO @prior;
+    FETCH ABSOLUTE -3 FROM scroll_cursor INTO @absolute;
+    FETCH RELATIVE 1 FROM scroll_cursor INTO @relative;
+    SELECT @last AS last_id,@prior AS prior_id,@absolute AS absolute_id,@relative AS relative_id;
+    DEALLOCATE scroll_cursor;
+  expect: {rows: 1, data: [{last_id: 3, prior_id: 2, absolute_id: 1, relative_id: 2}]}
+- name: FAST_FORWARD uses its permitted static implementation and rejects backward movement
+  sql: |
+    DECLARE fast_cursor CURSOR LOCAL FAST_FORWARD FOR SELECT id FROM cursor_source ORDER BY id;
+    DECLARE @id INT;
+    OPEN fast_cursor;
+    BEGIN TRY FETCH PRIOR FROM fast_cursor INTO @id; END TRY
+    BEGIN CATCH FETCH NEXT FROM fast_cursor INTO @id; END CATCH;
+    SELECT @id AS id,@@FETCH_STATUS AS fetch_status;
+    DEALLOCATE fast_cursor;
+  expect: {rows: 1, data: [{id: 1, fetch_status: 0}]}
+- name: GLOBAL cursor OPEN survives a batch boundary on the same connection
+  session_id: cursor_global_owner
+  sql: DECLARE shared_cursor CURSOR GLOBAL STATIC READ_ONLY FOR SELECT id FROM cursor_source ORDER BY id; OPEN shared_cursor
+- name: A later batch fetches the same global native rowset
+  session_id: cursor_global_owner
+  sql: DECLARE @id INT; FETCH NEXT FROM GLOBAL shared_cursor INTO @id; SELECT @id AS id
+  expect: {rows: 1, data: [{id: 1}]}
+- name: A different connection cannot borrow a global cursor
+  session_id: cursor_global_observer
+  sql: OPEN GLOBAL shared_cursor
+  expect: {error: true, contains: cursor does not exist}
+- name: A local cursor shadows the connection global without advancing it
+  session_id: cursor_global_owner
+  sql: |
+    DECLARE shared_cursor CURSOR LOCAL STATIC READ_ONLY FOR SELECT id FROM cursor_source WHERE id=3;
+    DECLARE @local INT,@global INT;
+    OPEN shared_cursor; FETCH NEXT FROM shared_cursor INTO @local;
+    FETCH NEXT FROM GLOBAL shared_cursor INTO @global;
+    SELECT @local AS local_id,@global AS global_id;
+    DEALLOCATE shared_cursor;
+  expect: {rows: 1, data: [{local_id: 3, global_id: 2}]}
+- name: GLOBAL deallocation releases the actual rowset across batches
+  session_id: cursor_global_owner
+  sql: DEALLOCATE GLOBAL shared_cursor
+- name: LOCAL cursor lifetime ends with the declaring batch
+  session_id: cursor_local_owner
+  sql: DECLARE local_cursor CURSOR LOCAL STATIC READ_ONLY FOR SELECT id FROM cursor_source; OPEN local_cursor
+- name: A later batch cannot reopen the expired local cursor
+  session_id: cursor_local_owner
+  sql: OPEN local_cursor
+  expect: {error: true, contains: cursor does not exist}
+- name: A nested procedure updates the connection fetch status
+  sql: |
+    CREATE PROCEDURE cursor_status_child AS
+    BEGIN
+      DECLARE child_cursor CURSOR LOCAL STATIC READ_ONLY FOR SELECT id FROM cursor_source WHERE id=1;
+      DECLARE @child INT;
+      OPEN child_cursor; FETCH NEXT FROM child_cursor INTO @child;
+      FETCH NEXT FROM child_cursor INTO @child;
+      RETURN;
+    END
+- name: FETCH_STATUS is shared across procedure scopes while variables remain lexical
+  sql: |
+    DECLARE outer_cursor CURSOR LOCAL STATIC READ_ONLY FOR SELECT id FROM cursor_source WHERE id=2;
+    DECLARE @id INT;
+    OPEN outer_cursor; FETCH NEXT FROM outer_cursor INTO @id;
+    EXEC cursor_status_child;
+    SELECT @id AS id,@@FETCH_STATUS AS fetch_status;
+    DEALLOCATE outer_cursor;
+  expect: {rows: 1, data: [{id: 2, fetch_status: -1}]}
+- name: Failed FETCH width validation does not advance the cursor
+  sql: |
+    DECLARE width_cursor CURSOR LOCAL STATIC READ_ONLY FOR SELECT id,text_value FROM cursor_source WHERE id=1;
+    DECLARE @id INT,@text NVARCHAR(40);
+    OPEN width_cursor;
+    BEGIN TRY FETCH NEXT FROM width_cursor INTO @id; END TRY
+    BEGIN CATCH FETCH NEXT FROM width_cursor INTO @id,@text; END CATCH;
+    SELECT @id AS id,@text AS text_value;
+    DEALLOCATE width_cursor;
+  expect: {rows: 1, data: [{id: 1, text_value: first}]}
+- name: A caught error keeps the same batch local cursor alive until lexical exit
+  sql: |
+    DECLARE caught_cursor CURSOR LOCAL STATIC READ_ONLY FOR SELECT id FROM cursor_source WHERE id=3;
+    DECLARE @id INT;
+    OPEN caught_cursor;
+    BEGIN TRY THROW 50001,N'control',1; END TRY
+    BEGIN CATCH FETCH NEXT FROM caught_cursor INTO @id; END CATCH;
+    SELECT @id AS id;
+  expect: {rows: 1, data: [{id: 3}]}
+- name: An actual default cursor consumes immutable inserted rows and dynamic SQL through the shared interpreter
+  sql: |
+    CREATE TRIGGER cursor_command_trigger ON cursor_commands AFTER INSERT AS
+    BEGIN
+      INSERT INTO cursor_statement_calls(value) VALUES(1);
+      DECLARE command_cursor CURSOR FOR SELECT command_text FROM inserted;
+      OPEN command_cursor;
+      DECLARE @command NVARCHAR(200);
+      FETCH NEXT FROM command_cursor INTO @command;
+      WHILE @@FETCH_STATUS=0
+      BEGIN
+        EXEC(@command);
+        FETCH NEXT FROM command_cursor INTO @command;
+      END;
+      CLOSE command_cursor; DEALLOCATE command_cursor;
+    END
+- name: One multirow statement drives the whole cursor loop without per row statement handlers
+  sql: INSERT INTO cursor_commands VALUES(1,N'INSERT INTO cursor_audit(value) VALUES(7)'),(2,N'INSERT INTO cursor_audit(value) VALUES(9)')
+  expect: {rows: 1, data: [{affected_rows: 2}]}
+- name: Both immutable transition commands produce real native effects
+  sql: SELECT COUNT(*) AS entries,SUM(value) AS total FROM cursor_audit
+  expect: {rows: 1, data: [{entries: 2, total: 16}]}
+- name: Zero inserted rows still executes one empty default cursor and leaves no dangling global name
+  sql: INSERT INTO cursor_commands SELECT 3,N'INSERT INTO cursor_audit(value) VALUES(11)' WHERE 1=0
+  expect: {rows: 1, data: [{affected_rows: 0}]}
+- name: The empty cursor loop leaves prior effects unchanged
+  sql: SELECT COUNT(*) AS entries,SUM(value) AS total FROM cursor_audit
+  expect: {rows: 1, data: [{entries: 2, total: 16}]}
+- name: The zero row INSERT SELECT still executes exactly one additional statement handler
+  sql: SELECT COUNT(*) AS calls FROM cursor_statement_calls
+  expect: {rows: 1, data: [{calls: 2}]}
+- name: Trigger dynamic SQL cannot bypass existing DDL recipe admission
+  sql: INSERT INTO cursor_commands VALUES(4,N'CREATE TABLE cursor_hidden_ddl(id INT)')
+  expect: {error: true, contains: unsupported statement-trigger SQL leaf}
+- name: Rejected dynamic DDL rolls back the invoking INSERT
+  sql: SELECT id FROM cursor_commands ORDER BY id
+  expect: {rows: 2, data: [{id: 1}, {id: 2}]}
+- name: A trigger-invoked procedure keeps its own ordinary RETURN value
+  scm: |
+    (begin
+      (define commands (cadr (parse_tsql_batch "memcp-tests" "RETURN 0;")))
+      (expression_equal? (tsql_prepare_trigger_body "memcp-tests" commands true) commands))
+  expect: {result: true}
+- name: Direct trigger RETURN still cannot silently supply a procedure status
+  scm: (tsql_prepare_trigger_body "memcp-tests" (cadr (parse_tsql_batch "memcp-tests" "RETURN 0;")) false)
+  expect: {error: true, contains: trigger RETURN cannot supply a value}
+- name: A normal TSQL procedure is the real dynamic invocation target
+  sql: |
+    CREATE PROCEDURE cursor_apply @key INT AS
+    BEGIN
+      INSERT INTO cursor_audit(value) VALUES(@key);
+      RETURN 0;
+    END
+- name: The immutable integer cursor converts FETCH to SYSNAME before a dynamic bare procedure call
+  sql: |
+    CREATE TRIGGER cursor_key_trigger ON cursor_key_commands AFTER INSERT AS
+    BEGIN
+      DECLARE key_cursor CURSOR FOR SELECT id FROM inserted;
+      OPEN key_cursor;
+      DECLARE @key sysname;
+      FETCH NEXT FROM key_cursor INTO @key;
+      WHILE @@FETCH_STATUS=0
+      BEGIN
+        EXEC(N'cursor_apply ' + @key);
+        FETCH NEXT FROM key_cursor INTO @key;
+      END;
+      CLOSE key_cursor; DEALLOCATE key_cursor;
+    END
+- name: Both integer transition rows invoke the actual procedure
+  sql: INSERT INTO cursor_key_commands VALUES(21),(22)
+  expect: {rows: 1, data: [{affected_rows: 2}]}
+- name: Dynamic procedure invocation preserves real parameter conversion and effects
+  sql: SELECT COUNT(*) AS entries,SUM(value) AS total FROM cursor_audit WHERE value IN(21,22)
+  expect: {rows: 1, data: [{entries: 2, total: 43}]}
+- name: A called procedure cannot hide DDL after an earlier ordinary DML leaf
+  sql: |
+    CREATE PROCEDURE cursor_unsafe_apply @key INT AS
+    BEGIN
+      INSERT INTO cursor_audit(value) VALUES(99);
+      CREATE TABLE cursor_hidden_ddl(id INT);
+    END
+- name: Procedure entry validates the whole trigger profile before its first body effect
+  sql: INSERT INTO cursor_commands VALUES(5,N'cursor_unsafe_apply 1')
+  expect: {error: true, contains: unsupported statement-trigger SQL leaf}
+- name: Dynamic ROLLBACK cannot bypass an unknown outer trigger continuation
+  sql: INSERT INTO cursor_commands VALUES(6,N'INSERT INTO cursor_audit(value) VALUES(99); ROLLBACK;')
+  expect: {error: true, contains: transaction control in a trigger-invoked module is not supported}
+- name: Both rejected module shapes preserve prior rows and emit no partial procedure effect
+  sql: SELECT COUNT(*) AS entries FROM cursor_audit WHERE value=99
+  expect: {rows: 1, data: [{entries: 0}]}
+- name: A dynamic rollback cannot silently skip the outer trigger DML suffix
+  sql: |
+    CREATE TRIGGER cursor_abort_guard ON cursor_abort_commands AFTER INSERT AS
+    BEGIN
+      EXEC(N'ROLLBACK;');
+      INSERT INTO cursor_audit(value) VALUES(1000);
+    END
+- name: Dynamic recovery rejects as a statement failure and preserves prior explicit transaction work
+  session_id: cursor_abort_owner
+  sql: |
+    BEGIN TRANSACTION;
+    INSERT INTO cursor_audit(value) VALUES(77);
+    DECLARE @message NVARCHAR(4000);
+    BEGIN TRY INSERT INTO cursor_abort_commands VALUES(1); END TRY
+    BEGIN CATCH SET @message=ERROR_MESSAGE(); END CATCH;
+    SELECT CASE WHEN @message LIKE N'%transaction control in a trigger-invoked module is not supported%' THEN 1 ELSE 0 END AS rejected,
+      COUNT(*) AS prior_rows,@@TRANCOUNT AS open_transactions FROM cursor_audit WHERE value=77;
+    ROLLBACK;
+  expect: {rows: 1, data: [{rejected: 1, prior_rows: 1, open_transactions: 1}]}
+- name: Neither the rejected invoking write nor the outer trigger suffix was published
+  sql: SELECT COUNT(*) AS entries FROM cursor_audit WHERE value IN(77,1000)
+  expect: {rows: 1, data: [{entries: 0}]}
+- name: Dynamic recovery rejection leaves the public invoking relation empty
+  sql: SELECT COUNT(*) AS entries FROM cursor_abort_commands
+  expect: {rows: 1, data: [{entries: 0}]}
+- name: Zero row plain INSERT SELECT returns the native statement count zero
+  sql: INSERT INTO cursor_insert_counts SELECT 100 WHERE 1=0
+  expect: {rows: 1, data: [{affected_rows: 0}]}
+- name: Every UNION branch contributes its actual INSERT count
+  sql: INSERT INTO cursor_insert_counts SELECT 101 UNION ALL SELECT 102
+  expect: {rows: 1, data: [{affected_rows: 2}]}
+- name: Actual UNION sink effects match the reported count
+  sql: SELECT id FROM cursor_insert_counts ORDER BY id
+  expect: {rows: 2, data: [{id: 101}, {id: 102}]}

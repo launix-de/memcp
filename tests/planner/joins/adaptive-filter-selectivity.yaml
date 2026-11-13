@@ -10,7 +10,7 @@ setup:
   - sql: "CREATE TABLE afs_check (id INT PRIMARY KEY, label VARCHAR(64)) ENGINE=sloppy"
   - scm: |
       (begin
-        (insert (table "memcp-tests" false "afs_check" false) '("id" "label")
+        (insert (table "memcp-tests" false "afs_check" false nil) '("id" "label")
           (map (produceN 1000) (lambda (i)
             (list i (if (< i 900) "common" nil)))))
         (rebuild))
@@ -21,7 +21,7 @@ test_cases:
   - name: "Unified estimator reads measured feedback without evaluating the predicate again"
     scm: |
       (begin
-        (define tbl (table "memcp-tests" false "afs_check" false))
+        (define tbl (table "memcp-tests" false "afs_check" false nil))
         (define callback (list 'lambda (list 'x) (list '>= 'x 200)))
         (define access (eval (compile_scan_access '("id") callback)))
         (define values (map (nth access 1) (lambda (v) (eval v))))
@@ -41,7 +41,7 @@ test_cases:
   - name: "Unified estimator preserves unknown bindings and permits bounded fallback explicitly"
     scm: |
       (begin
-        (define tbl (table "memcp-tests" false "afs_check" false))
+        (define tbl (table "memcp-tests" false "afs_check" false nil))
         (define callback (list 'lambda (list 'x) (list '>= 'x 201)))
         (define access (eval (compile_scan_access '("id") callback)))
         (define values (map (nth access 1) (lambda (v) (eval v))))
@@ -58,7 +58,7 @@ test_cases:
   - name: "Physical source costing consumes the same learned selectivity as reorder"
     scm: |
       (begin
-        (define src (list "a" "memcp-tests" "afs_check" false nil))
+        (define src (list "a" "memcp-tests" "afs_check" false nil (sql_relation_declarations "memcp-tests" "afs_check" nil)))
         (define predicate (list '>= (list 'get_column "a" false "id" false) 200))
         (define reorder (join_optimizer_expr_selectivity_estimate (list src) "a" predicate nil))
         (define physical (planner_source_filter_estimate src predicate 512 nil nil))
@@ -75,7 +75,7 @@ test_cases:
   - name: "Bound scalar literals share feedback with their unquoted scan predicate"
     scm: |
       (begin
-        (define tbl (table "memcp-tests" false "afs_check" false))
+        (define tbl (table "memcp-tests" false "afs_check" false nil))
         (define callback (list 'lambda (list 'x) (list '>= 'x (list 'quote 200))))
         (define access (eval (compile_scan_access '("id") callback)))
         (define estimate (scan_selectivity_estimate nil tbl (car access)
@@ -102,7 +102,7 @@ test_cases:
   - name: "A different-word length prior must not suppress permitted sampling"
     scm: |
       (begin
-        (define tbl (table "memcp-tests" false "afs_check" false))
+        (define tbl (table "memcp-tests" false "afs_check" false nil))
         (define rare (list 'lambda (list 'x) (list 'strlike 'x "%rarexx%" "utf8mb4_general_ci")))
         (define rare_access (eval (compile_scan_access '("label") rare)))
         (scan_recset nil tbl (nth rare_access 0)
@@ -123,8 +123,8 @@ test_cases:
   - name: "Complete filter feedback replaces a range constant and participates in plan guards"
     scm: |
       (begin
-        (define tbl (table "memcp-tests" false "afs_check" false))
-        (define src (list "a" "memcp-tests" "afs_check" false nil))
+        (define tbl (table "memcp-tests" false "afs_check" false nil))
+        (define src (list "a" "memcp-tests" "afs_check" false nil (sql_relation_declarations "memcp-tests" "afs_check" nil)))
         (define expr (list '< (list 'get_column "a" false "id" false) 100))
         (define callback (list 'lambda (list 'x) (list '< 'x 100)))
         (define access (eval (compile_scan_access '("id") callback)))
@@ -145,7 +145,7 @@ test_cases:
   - name: "LIKE length buckets interpolate unknown patterns without crossing wildcard topology"
     scm: |
       (begin
-        (define tbl (table "memcp-tests" false "afs_check" false))
+        (define tbl (table "memcp-tests" false "afs_check" false nil))
         (define access_for (lambda (pattern)
           (eval (compile_scan_access '("label") (list 'lambda (list 'x)
             (list 'strlike 'x pattern "utf8mb4_general_ci"))))))
@@ -170,7 +170,7 @@ test_cases:
   - name: "Observed zero LIKE matches override the nonzero text prior"
     scm: |
       (begin
-        (define tbl (table "memcp-tests" false "afs_check" false))
+        (define tbl (table "memcp-tests" false "afs_check" false nil))
         (define callback (list 'lambda (list 'x) (list 'strlike 'x "%absent%" "utf8mb4_general_ci")))
         (define access (eval (compile_scan_access '("label") callback)))
         (define values (map (nth access 1) (lambda (v) (eval v))))
@@ -195,11 +195,11 @@ test_cases:
   - name: "Complete indexed RecSet learns a table rate and refreshes plan guards"
     scm: |
       (begin
-        (define tbl (table "memcp-tests" false "afs_check" false))
+        (define tbl (table "memcp-tests" false "afs_check" false nil))
         (define callback (list 'lambda (list 'x) (list 'strlike 'x "%common%" "utf8mb4_general_ci")))
         (define access (eval (compile_scan_access '("label") callback)))
         (define values (map (nth access 1) (lambda (v) (eval v))))
-        (define src (list "a" "memcp-tests" "afs_check" false nil))
+        (define src (list "a" "memcp-tests" "afs_check" false nil (sql_relation_declarations "memcp-tests" "afs_check" nil)))
         (define guards (sql_queryplan_compile_session (newsession) nil))
         (planner_record_filter_feedback_guard src '("label") callback guards)
         (define guard (sql_queryplan_guard_from_session guards))
@@ -225,7 +225,7 @@ test_cases:
             (list 'error "candidate preparation must not run for EXPLAIN") 0))
           (list 'resultrow (list 'list "ok" true)))))
         (with_autocommit sess nil 1 "explain feedback guard test" (lambda (tx) (begin
-          (define formula (cached_parse cache (list diagnostic_parser) "memcp-tests"
+          (define formula (cached_parse cache "sql" (list diagnostic_parser) "memcp-tests"
             "EXPLAIN SELECT 1" nil "root" sess false tx))
           (sql_execute_formula sess tx formula (lambda (_row) true) (lambda (_fields) nil))))))
     expect:
@@ -289,7 +289,7 @@ test_cases:
   - name: "EXPLAIN guards refresh concrete feedback without executing cost guards"
     scm: |
       (begin
-        (define src (list "a" "memcp-tests" "afs_check" false nil))
+        (define src (list "a" "memcp-tests" "afs_check" false nil (sql_relation_declarations "memcp-tests" "afs_check" nil)))
         (define callback (list 'lambda (list 'x) (list '< 'x 321)))
         (define parser (lambda (schema query policy planning tx) (begin
           (planner_record_filter_feedback_guard src '("id") callback planning)
@@ -301,13 +301,14 @@ test_cases:
           (list 'quote true))))
         (define variant (sql_compile_queryplan_variant (list parser) "memcp-tests"
           "EXPLAIN SELECT id FROM afs_check WHERE id < 321" nil (newsession) nil))
-        (define guard (car variant))
-        (define before (eval guard))
+        (define matches_guard (lambda () (not (nil? (sql_queryplan_matching_variant (list variant)
+          (newsession) nil (lambda (_row) true) (lambda (_fields) true))))))
+        (define before (matches_guard))
         (define access (eval (compile_scan_access '("id") callback)))
         (define values (map (nth access 1) (lambda (value) (eval value))))
-        (define matches (scan nil (table "memcp-tests" false "afs_check" false)
+        (define matches (scan nil (table "memcp-tests" false "afs_check" false nil)
           (nth access 0) values '("id") (eval callback) '() scan_count 0 + false))
-        (if (and before (equal? matches 321) (not (eval guard)) (empty_list? (nth variant 2)))
-          true (error (concat "diagnostic feedback guard failed: " (serialize (list before matches (eval guard) (nth variant 2) guard))))))
+        (if (and before (equal? matches 321) (not (matches_guard)) (empty_list? (nth variant 2)))
+          true (error (concat "diagnostic feedback guard failed: " (serialize (list before matches (matches_guard) (nth variant 2)))))))
     expect:
       data: [true]

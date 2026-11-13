@@ -1,0 +1,247 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: mysql
+  requires_tds: true
+  isolated: true
+  description: Native database identities cannot escape filesystem or backend configuration
+    ownership
+cleanup:
+- scm: (dropdatabase "path%2f..%25" true)
+- scm: (dropdatabase "path%252f..%2525" true)
+- scm: (dropdatabase "clone%2f..%25" true)
+- scm: (dropdatabase "quoted db ä" true)
+- scm: (dropdatabase "settings" true)
+- scm: (dropdatabase "contained_clone_rejected" true)
+test_cases:
+- name: Native createdatabase rejects unsafe component ''
+  scm: (createdatabase "" true)
+  expect:
+    error: true
+    contains: invalid database name
+- name: Native dropdatabase rejects unsafe component ''
+  scm: (dropdatabase "" true)
+  expect:
+    error: true
+    contains: invalid database name
+- name: Native createdatabase rejects unsafe component '.'
+  scm: (createdatabase "." true)
+  expect:
+    error: true
+    contains: invalid database name
+- name: Native dropdatabase rejects unsafe component '.'
+  scm: (dropdatabase "." true)
+  expect:
+    error: true
+    contains: invalid database name
+- name: Native createdatabase rejects unsafe component '..'
+  scm: (createdatabase ".." true)
+  expect:
+    error: true
+    contains: invalid database name
+- name: Native dropdatabase rejects unsafe component '..'
+  scm: (dropdatabase ".." true)
+  expect:
+    error: true
+    contains: invalid database name
+- name: Native createdatabase rejects unsafe component '../outside_probe'
+  scm: (createdatabase "../outside_probe" true)
+  expect:
+    error: true
+    contains: invalid database name
+- name: Native dropdatabase rejects unsafe component '../outside_probe'
+  scm: (dropdatabase "../outside_probe" true)
+  expect:
+    error: true
+    contains: invalid database name
+- name: Native createdatabase rejects unsafe component 'nested/database'
+  scm: (createdatabase "nested/database" true)
+  expect:
+    error: true
+    contains: invalid database name
+- name: Native dropdatabase rejects unsafe component 'nested/database'
+  scm: (dropdatabase "nested/database" true)
+  expect:
+    error: true
+    contains: invalid database name
+- name: Native createdatabase rejects unsafe component 'nested\\database'
+  scm: (createdatabase "nested\\database" true)
+  expect:
+    error: true
+    contains: invalid database name
+- name: Native dropdatabase rejects unsafe component 'nested\\database'
+  scm: (dropdatabase "nested\\database" true)
+  expect:
+    error: true
+    contains: invalid database name
+- name: Native createdatabase rejects unsafe component 'nul\x00name'
+  scm: (createdatabase "nul\u0000name" true)
+  expect:
+    error: true
+    contains: invalid database name
+- name: Native dropdatabase rejects unsafe component 'nul\x00name'
+  scm: (dropdatabase "nul\u0000name" true)
+  expect:
+    error: true
+    contains: invalid database name
+- name: Native createdatabase rejects unsafe component 'line\nname'
+  scm: (createdatabase "line\nname" true)
+  expect:
+    error: true
+    contains: invalid database name
+- name: Native dropdatabase rejects unsafe component 'line\nname'
+  scm: (dropdatabase "line\nname" true)
+  expect:
+    error: true
+    contains: invalid database name
+- name: Native createdatabase rejects unsafe component 'delete\x7fname'
+  scm: (createdatabase "delete\u007fname" true)
+  expect:
+    error: true
+    contains: invalid database name
+- name: Native dropdatabase rejects unsafe component 'delete\x7fname'
+  scm: (dropdatabase "delete\u007fname" true)
+  expect:
+    error: true
+    contains: invalid database name
+- name: Remote backend config creation rejects traversal before writing config
+  scm: (createdatabase "../outside_config" false (list "backend" "FakeRemote"))
+  expect:
+    error: true
+    contains: invalid database name
+- name: Clone validates its destination before writing backend metadata
+  scm: (createdatabase "../outside_clone" false nil "memcp-tests")
+  expect:
+    error: true
+    contains: invalid database name
+- name: Clone validates its source before reading backend metadata
+  scm: (createdatabase "contained_clone_rejected" false nil "../outside_source")
+  expect:
+    error: true
+    contains: invalid database name
+- name: Backend migration validates database identity before any lookup or backend
+    effect
+  scm: (alterdatabase_storage "../outside_move" (list "backend" "filesystem"))
+  expect:
+    error: true
+    contains: invalid database name
+- name: mysql CREATE passes quoted database identities through native validation
+  syntax: mysql
+  sql: CREATE DATABASE `../outside_sql`
+  expect:
+    error: true
+    contains: invalid database name
+- name: mysql DROP passes quoted database identities through native validation
+  syntax: mysql
+  sql: DROP DATABASE `../outside_sql`
+  expect:
+    error: true
+    contains: invalid database name
+- name: psql CREATE passes quoted database identities through native validation
+  syntax: psql
+  sql: CREATE DATABASE "../outside_sql"
+  expect:
+    error: true
+    contains: invalid database name
+- name: psql DROP passes quoted database identities through native validation
+  syntax: psql
+  sql: DROP DATABASE "../outside_sql"
+  expect:
+    error: true
+    contains: invalid database name
+- name: tsql CREATE passes quoted database identities through native validation
+  syntax: tsql
+  sql: CREATE DATABASE [../outside_sql]
+  expect:
+    error: true
+    contains: invalid database name
+- name: tsql DROP passes quoted database identities through native validation
+  syntax: tsql
+  sql: DROP DATABASE [../outside_sql]
+  expect:
+    error: true
+    contains: invalid database name
+- name: Percent escapes remain literal database identity bytes
+  scm: (createdatabase "path%2f..%25" false (list "backend" "FakeRemote"))
+  expect:
+    result: true
+- name: Database directory cannot claim another database backend config file
+  scm: (createdatabase "path%2f..%25.json" false)
+  expect:
+    error: true
+    contains: existing non-directory entry
+- name: Rejected config-file collision publishes no catalog identity
+  scm: (dropdatabase "path%2f..%25.json" true)
+  expect:
+    result: false
+- name: Cloned database cannot claim a backend config file as its directory
+  scm: (createdatabase "path%2f..%25.json" false nil "path%2f..%25")
+  expect:
+    error: true
+    contains: existing non-directory entry
+- name: Encoded-looking names cannot alias another database
+  scm: (createdatabase "path%252f..%2525" false)
+  expect:
+    result: true
+- name: Quoted Unicode and spaces preserve their native filesystem identity
+  scm: (createdatabase "quoted db ä" false)
+  expect:
+    result: true
+- name: Filesystem settings database remains a distinct directory
+  scm: (createdatabase "settings" false)
+  expect:
+    result: true
+- name: Dropping settings database does not own server settings metadata
+  scm: (dropdatabase "settings" false)
+  expect:
+    result: true
+- name: Remote backend cannot claim reserved server settings configuration
+  scm: (createdatabase "settings" false (list "backend" "FakeRemote"))
+  expect:
+    error: true
+    contains: reserved server settings
+- name: Prepare a durable native row in the exact percent-containing backend
+  scm: (begin (createtable "path%2f..%25" "probe" (list (list "column" "id" "INT"
+    (list) (list))) (list "engine" "safe") false nil) (insert (table "path%2f..%25"
+    false "probe" false nil) '("id") (list (list 7))))
+  expect:
+    result: 1
+- name: Clone backend configuration preserves exact target identity
+  scm: (createdatabase "clone%2f..%25" false nil "path%2f..%25")
+  expect:
+    result: true
+- name: Restart native backend discovery without renaming quoted identities
+  sql: SHUTDOWN
+  expect:
+    affected_rows: 0
+- name: Native backend discovery recovers the exact percent-containing database
+  scm: (scan nil (table "path%2f..%25" false "probe" false nil) (list) (list) (list) (lambda
+    () true) '("id") (lambda (acc id) (+ acc id)) 0 +)
+  expect:
+    result: 7
+- name: Distinct encoded-looking database survives discovery independently
+  scm: (createdatabase "path%252f..%2525" true)
+  expect:
+    result: false
+- name: Cloned backend config discovers its original target identity
+  scm: (createdatabase "clone%2f..%25" true)
+  expect:
+    result: false
+- name: Unicode quoted identity survives restart without encoding changes
+  scm: (createdatabase "quoted db ä" true)
+  expect:
+    result: false
+- name: Server settings filename is reserved before filesystem database publication
+  scm: (createdatabase "settings.json" false)
+  expect:
+    error: true
+    contains: reserved server settings
+- name: Rejected settings-file database cannot become a later DROP target
+  scm: (dropdatabase "settings.json" true)
+  expect:
+    result: false
+- name: Default filesystem-backed remote backend also protects server settings filename
+  scm: (createdatabase "settings.json" false (list "backend" "FakeRemote"))
+  expect:
+    error: true
+    contains: reserved server settings

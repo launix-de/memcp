@@ -1,0 +1,280 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Relational scalar function bodies remain visible to ordinary decorrelation
+setup:
+- sql: CREATE TABLE function_locations(tenant INT,location INT,code VARCHAR(8),primary_flag INT,valid_from DATETIME,valid_until DATETIME,PRIMARY KEY(tenant,location))
+- sql: CREATE TABLE function_tenants(tenant INT PRIMARY KEY,code VARCHAR(8))
+- sql: CREATE TABLE function_options(tenant INT,option_id INT,use_primary INT,PRIMARY KEY(tenant,option_id))
+- sql: INSERT function_locations VALUES(1,10,'12',1,'2026-01-01',NULL),(1,20,'34',0,'2026-01-01',NULL),(2,10,NULL,1,'2026-01-01',NULL),(2,20,'56',0,'2026-01-01',NULL)
+- sql: INSERT function_tenants VALUES(1,'78'),(2,'90')
+- sql: INSERT function_options VALUES(1,1,1),(1,2,0),(2,1,1),(2,2,0)
+- sql: CREATE TABLE function_invocations(id INT PRIMARY KEY,tenant INT,location INT,option_id INT)
+- sql: INSERT function_invocations VALUES(1,1,20,1),(2,1,20,2),(3,2,20,1),(4,9,20,1),(5,1,20,1)
+- sql: CREATE TABLE function_nodes(id INT PRIMARY KEY,parent_id INT,code VARCHAR(8))
+- sql: INSERT function_nodes VALUES(1,NULL,'A'),(2,1,'B'),(3,2,'C'),(4,NULL,NULL),(5,99,'orphan')
+test_cases:
+- name: Relational function source preserves TOP assignment and subsequent joined local use
+  sql: |
+    CREATE FUNCTION dbo.resolve_code(@tenant INT,@day INT,@location INT,@option INT) RETURNS VARCHAR(8)
+    AS BEGIN
+      DECLARE @code VARCHAR(8);
+      DECLARE @primary_code VARCHAR(8);
+      SELECT TOP 1 @primary_code=code FROM function_locations
+      WHERE tenant=@tenant AND primary_flag<>0
+        AND @day BETWEEN YEAR(valid_from)*10000+MONTH(valid_from)*100+DAY(valid_from)
+        AND CASE WHEN valid_until IS NULL THEN 29991231 ELSE YEAR(valid_until)*10000+MONTH(valid_until)*100+DAY(valid_until) END;
+      SELECT @code=CASE WHEN options.use_primary=1 THEN RIGHT('0'+LTRIM(tenants.code),8)
+        ELSE RIGHT('0'+LTRIM(locations.code),8) END
+      FROM (SELECT tenant,ISNULL(@primary_code,code) AS code FROM function_tenants WHERE tenant=@tenant) AS tenants
+      INNER JOIN (SELECT tenant,use_primary FROM function_options WHERE tenant=@tenant AND option_id=@option) AS options
+        ON tenants.tenant=options.tenant
+      INNER JOIN (SELECT tenant,location,code FROM function_locations WHERE tenant=@tenant AND location=@location) AS locations
+        ON tenants.tenant=locations.tenant;
+      RETURN ISNULL(@code,'');
+    END
+- name: Function call arguments and earlier relational assignments remain local to each outer row
+  sql: SELECT id,dbo.resolve_code(tenant,20260701,location,option_id) AS code FROM function_invocations ORDER BY id
+  expect: {rows: 5, data: [{id: 1,code: '012'},{id: 2,code: '034'},{id: 3,code: '090'},{id: 4,code: ''},{id: 5,code: '012'}]}
+- name: Zero rows in a SELECT assignment retain a nonnull previous local value
+  sql: |
+    CREATE FUNCTION dbo.retain_code(@tenant INT) RETURNS VARCHAR(8) AS BEGIN
+      DECLARE @code VARCHAR(8)='old';
+      SELECT TOP 1 @code=code FROM function_tenants WHERE tenant=@tenant;
+      RETURN @code;
+    END
+- name: Empty assignment is distinct from assigning a genuine SQL NULL
+  sql: SELECT dbo.retain_code(9) AS missing,dbo.retain_code(1) AS matched
+  expect: {rows: 1,data: [{missing: old,matched: '78'}]}
+- name: Matched NULL overwrites a nonnull old local rather than coalescing it away
+  sql: |
+    CREATE FUNCTION dbo.null_code(@tenant INT) RETURNS VARCHAR(8) AS BEGIN
+      DECLARE @code VARCHAR(8)='old';
+      SELECT TOP 1 @code=code FROM function_locations WHERE tenant=@tenant AND primary_flag=1;
+      RETURN @code;
+    END
+- name: Presence is tracked independently of a nullable assigned value
+  sql: SELECT dbo.null_code(2) AS matched_null,dbo.null_code(9) AS no_match
+  expect: {rows: 1,data: [{matched_null: null,no_match: old}]}
+- name: A real TOP ordering belongs to the function input rather than the caller ordering
+  sql: |
+    CREATE FUNCTION dbo.latest_code(@tenant INT) RETURNS VARCHAR(8) AS BEGIN
+      DECLARE @code VARCHAR(8)='old';
+      SELECT TOP 1 @code=code FROM function_locations WHERE tenant=@tenant ORDER BY location DESC;
+      RETURN @code;
+    END
+- name: Parameter dependent TOP ordering selects one row separately for each invocation
+  sql: SELECT id,dbo.latest_code(tenant) AS code FROM function_invocations ORDER BY id DESC
+  expect: {rows: 5,data: [{id: 5,code: '34'},{id: 4,code: old},{id: 3,code: '56'},{id: 2,code: '34'},{id: 1,code: '34'}]}
+- name: A scalar aggregate assignment still produces its row over empty input
+  sql: |
+    CREATE FUNCTION dbo.count_locations(@tenant INT) RETURNS INT AS BEGIN
+      DECLARE @amount INT=9;
+      SELECT @amount=COUNT(*) FROM function_locations WHERE tenant=@tenant;
+      RETURN @amount;
+    END
+- name: Empty aggregate result overwrites the old local with valid zero
+  sql: SELECT dbo.count_locations(9) AS empty_count,dbo.count_locations(1) AS populated_count
+  expect: {rows: 1,data: [{empty_count: 0,populated_count: 2}]}
+- name: Global count assignment retains each caller including its empty input
+  sql: SELECT id,dbo.count_locations(tenant) AS amount FROM function_invocations ORDER BY id
+  expect: {rows: 5,data: [{id: 1,amount: 2},{id: 2,amount: 2},{id: 3,amount: 2},{id: 4,amount: 0},{id: 5,amount: 2}]}
+- name: Global sum assignment has one nullable result over empty input
+  sql: |
+    CREATE FUNCTION dbo.sum_locations(@tenant INT) RETURNS INT AS BEGIN
+      DECLARE @amount INT=9;
+      SELECT @amount=SUM(location) FROM function_locations WHERE tenant=@tenant;
+      RETURN @amount;
+    END
+- name: Empty sum assignment overwrites a previous nonnull local with NULL
+  sql: SELECT dbo.sum_locations(9) AS amount
+  expect: {rows: 1,data: [{amount: null}]}
+- name: Nonempty sum assignment retains the aggregate value
+  sql: SELECT dbo.sum_locations(1) AS amount
+  expect: {rows: 1,data: [{amount: 30}]}
+- name: SET scalar subqueries use their scalar result for local assignment
+  sql: |
+    CREATE FUNCTION dbo.set_location_code(@tenant INT) RETURNS VARCHAR(8) AS BEGIN
+      DECLARE @code VARCHAR(8)='old';
+      SET @code=(SELECT TOP 1 code FROM function_locations WHERE tenant=@tenant AND primary_flag=1);
+      RETURN @code;
+    END
+- name: Missing SET scalar subquery overwrites the previous local with NULL
+  sql: SELECT dbo.set_location_code(9) AS code
+  expect: {rows: 1,data: [{code: null}]}
+- name: SET scalar subquery retains a matching value
+  sql: SELECT dbo.set_location_code(1) AS code
+  expect: {rows: 1,data: [{code: '12'}]}
+- name: SET scalar subquery retains a matching SQL NULL
+  sql: SELECT dbo.set_location_code(2) AS code
+  expect: {rows: 1,data: [{code: null}]}
+- name: Relational WHILE owns SELECT assignment and scalar SET transitions
+  sql: |
+    CREATE FUNCTION dbo.node_path(@node INT) RETURNS VARCHAR(64) AS BEGIN
+      DECLARE @path VARCHAR(64)='';
+      DECLARE @code VARCHAR(8);
+      WHILE @node IS NOT NULL BEGIN
+        SELECT TOP 1 @code=code FROM function_nodes WHERE id=@node;
+        SET @path=ISNULL(@code,'?')+'/'+@path;
+        SET @node=(SELECT TOP 1 parent_id FROM function_nodes WHERE id=@node);
+      END
+      RETURN @path;
+    END
+- name: Relational WHILE returns the terminal path after several reads
+  sql: SELECT dbo.node_path(3) AS path
+  expect: {rows: 1,data: [{path: 'A/B/C/'}]}
+- name: A NULL initial state exits WHILE before the first relational step
+  sql: SELECT dbo.node_path(NULL) AS path
+  expect: {rows: 1,data: [{path: ''}]}
+- name: Matched NULL payload remains distinct from loop termination
+  sql: SELECT dbo.node_path(4) AS path
+  expect: {rows: 1,data: [{path: '?/'}]}
+- name: Missing SELECT retains its local until missing scalar SET terminates
+  sql: SELECT dbo.node_path(5) AS path
+  expect: {rows: 1,data: [{path: 'orphan/orphan/'}]}
+- name: Relational WHILE retains independent caller states and duplicate bindings
+  sql: SELECT id,dbo.node_path(tenant) AS path FROM function_invocations ORDER BY id
+  expect: {rows: 5,data: [{id: 1,path: 'A/'},{id: 2,path: 'A/'},{id: 3,path: 'A/B/'},
+      {id: 4,path: '?/'},{id: 5,path: 'A/'}]}
+- name: Wire metadata derives its scalar result type from the function declaration
+  tds:
+    statements:
+    - sql: SELECT dbo.resolve_code(1,20260701,20,1) AS code,dbo.count_locations(1) AS amount
+      expect: {rows: 1,data: [{code: '012',amount: 2}],column_types: [{name: code,type: VARCHAR,length: 8},{name: amount,type: INT}]}
+- name: Restart rebuilds relational source recipes without retaining invocation state
+  action: restart
+- name: Reloaded source preserves lexical inputs and relational dependencies
+  sql: SELECT dbo.resolve_code(1,20260701,20,2) AS code,dbo.null_code(2) AS matched_null
+  expect: {rows: 1,data: [{code: '034',matched_null: null}]}
+- name: Unbounded unordered assignment retains one coherent final input tuple
+  sql: |
+    CREATE FUNCTION dbo.coherent_assignment(@tenant INT) RETURNS INT AS BEGIN
+      DECLARE @location INT;
+      DECLARE @code VARCHAR(8);
+      SELECT @location=location,@code=code FROM function_locations WHERE tenant=@tenant;
+      RETURN CASE WHEN @location=10 AND @code='12' THEN 1
+        WHEN @location=20 AND @code='34' THEN 1 ELSE 0 END;
+    END
+- name: Last tuple reduction never combines fields from different input rows
+  sql: SELECT dbo.coherent_assignment(1) AS coherent
+  expect: {rows: 1,data: [{coherent: 1}]}
+- name: Scalar source can read its invoking transaction own writes
+  session_id: relational_owner
+  sql: BEGIN TRANSACTION; INSERT function_tenants VALUES(3,'77')
+- name: Transactional invocation resolves the current native source snapshot
+  session_id: relational_owner
+  sql: SELECT dbo.retain_code(3) AS value
+  expect: {rows: 1,data: [{value: '77'}]}
+- name: Rolling back source data does not replace the function declaration
+  session_id: relational_owner
+  sql: ROLLBACK TRANSACTION
+- name: Subsequent invocation observes rollback and retains its old local
+  sql: SELECT dbo.retain_code(3) AS value
+  expect: {rows: 1,data: [{value: old}]}
+- name: Relational scalar source admits a reachable early RETURN before a later RETURN
+  sql: |
+    CREATE FUNCTION dbo.early_relational_return(@tenant INT) RETURNS INT AS BEGIN
+      DECLARE @code VARCHAR(8);
+      SELECT TOP 1 @code=code FROM function_tenants WHERE tenant=@tenant;
+      RETURN 7;
+      RETURN 9;
+    END
+- name: First relational RETURN wins instead of the last stored recipe
+  sql: SELECT dbo.early_relational_return(1) AS value
+  expect: {rows: 1,data: [{value: 7}]}
+- name: Unqualified helper-like argument names bind to their actual caller source
+  sql: SELECT dbo.retain_code(unit) AS value FROM (SELECT 9 AS unit) q
+  expect: {rows: 1,data: [{value: old}]}
+- name: Qualified helper-like argument names retain the same caller binding
+  sql: SELECT dbo.retain_code(q.unit) AS value FROM (SELECT 9 AS unit) q
+  expect: {rows: 1,data: [{value: old}]}
+- name: Caller helper-like column names do not bind to generated state fields
+  sql: SELECT dbo.retain_code(__fn_state) AS value FROM (SELECT 9 AS __fn_state) q
+  expect: {rows: 1,data: [{value: old}]}
+- name: Nested caller scopes retain nearest unqualified column ownership
+  sql: SELECT (SELECT dbo.retain_code(unit) FROM (SELECT 9 AS unit) inner_source) AS value FROM (SELECT 1 AS unit) outer_source
+  expect: {rows: 1,data: [{value: old}]}
+- name: Local assignment capture crosses each derived query boundary explicitly
+  sql: |
+    CREATE FUNCTION dbo.nested_local_code(@tenant INT) RETURNS VARCHAR(8) AS BEGIN
+      DECLARE @input VARCHAR(8);
+      DECLARE @result VARCHAR(8)='old';
+      SELECT TOP 1 @input=code FROM function_locations WHERE tenant=@tenant AND primary_flag=1;
+      SELECT TOP 1 @result=wrapped.code
+      FROM (SELECT inner_codes.code,inner_codes.tenant
+        FROM (SELECT ISNULL(@input,'empty') AS code,tenant FROM function_tenants) inner_codes) wrapped
+      WHERE wrapped.tenant=@tenant;
+      RETURN @result;
+    END
+- name: Nested local captures preserve the prior value NULL and missing row separately
+  sql: SELECT dbo.nested_local_code(1) AS populated,dbo.nested_local_code(2) AS nullable,dbo.nested_local_code(9) AS missing
+  expect: {rows: 1,data: [{populated: '12',nullable: empty,missing: old}]}
+- name: Pure assignments after a relational read retain sequential lexical local values
+  sql: |
+    CREATE FUNCTION dbo.transition_amount(@tenant INT) RETURNS INT AS BEGIN
+      DECLARE @amount INT=-1;
+      DECLARE @result INT;
+      SELECT TOP 1 @amount=CASE WHEN code IS NULL THEN NULL ELSE location END
+      FROM function_locations WHERE tenant=@tenant AND primary_flag=1;
+      SET @amount=@amount+@amount;
+      SET @result=@amount+@amount;
+      SET @amount=@amount+1;
+      RETURN @result+@amount;
+    END
+- name: Repeated local reads preserve NULL and missing assignment in the same query
+  sql: SELECT dbo.transition_amount(1) AS populated,dbo.transition_amount(2) AS nullable,dbo.transition_amount(9) AS missing
+  expect: {rows: 1,data: [{populated: 61,nullable: null,missing: -5}]}
+- name: Sequential pure assignments retain separate invocation bindings for every outer row
+  sql: SELECT id,dbo.transition_amount(tenant) AS amount FROM function_invocations ORDER BY id
+  expect: {rows: 5,data: [{id: 1,amount: 61},{id: 2,amount: 61},{id: 3,amount: null},{id: 4,amount: -5},{id: 5,amount: 61}]}
+
+- name: Relational IF EXISTS keeps its joined condition inside the function state
+  sql: |
+    CREATE FUNCTION dbo.has_location_option(@tenant INT,@option INT) RETURNS INT AS BEGIN
+      DECLARE @result INT;
+      IF EXISTS(SELECT locations.code FROM function_locations locations
+        INNER JOIN function_options options ON options.tenant=locations.tenant
+        WHERE locations.tenant=@tenant AND options.option_id=@option)
+        SELECT @result=1;
+      ELSE
+        SELECT @result=0;
+      RETURN @result;
+    END
+- name: EXISTS retains nullable matching values and missing argument domains
+  sql: SELECT dbo.has_location_option(2,1) AS nullable_match,dbo.has_location_option(9,1) AS missing,dbo.has_location_option(NULL,1) AS unknown
+  expect: {rows: 1,data: [{nullable_match: 1,missing: 0,unknown: 0}]}
+- name: Joined IF conditions retain duplicate outer invocations
+  sql: SELECT id,dbo.has_location_option(tenant,option_id) AS present FROM function_invocations ORDER BY id
+  expect: {rows: 5,data: [{id: 1,present: 1},{id: 2,present: 1},{id: 3,present: 1},{id: 4,present: 0},{id: 5,present: 1}]}
+- name: Query predicates alone select the relational function compiler
+  sql: |
+    CREATE FUNCTION dbo.missing_option(@tenant INT) RETURNS INT AS BEGIN
+      DECLARE @result INT=9;
+      IF NOT EXISTS(SELECT option_id FROM function_options WHERE tenant=@tenant)
+        SET @result=7;
+      ELSE
+        SET @result=3;
+      RETURN @result;
+    END
+- name: NOT EXISTS chooses its branch without a query assignment statement
+  sql: SELECT dbo.missing_option(1) AS populated,dbo.missing_option(9) AS missing,dbo.missing_option(NULL) AS unknown
+  expect: {rows: 1,data: [{populated: 3,missing: 7,unknown: 7}]}
+- name: Unqualified conditional reads stay local beside outer columns and scoped state exports
+  sql: SELECT id,dbo.missing_option(tenant) AS branch_value FROM function_invocations ORDER BY id
+  expect: {rows: 5,data: [{id: 1,branch_value: 3},{id: 2,branch_value: 3},{id: 3,branch_value: 3},{id: 4,branch_value: 7},{id: 5,branch_value: 3}]}
+
+- name: FROM-less query assignments retain their own selection boundary
+  sql: |
+    CREATE FUNCTION dbo.guarded_scalar_assignment(@enabled INT) RETURNS INT AS BEGIN
+      DECLARE @result INT=8;
+      SELECT @result=3 WHERE 1=0;
+      SELECT @result=@result+1 WHERE @enabled=1;
+      RETURN @result;
+    END
+- name: Empty FROM-less assignments preserve prior state and matching packets update it
+  sql: SELECT dbo.guarded_scalar_assignment(1) AS matched,dbo.guarded_scalar_assignment(0) AS absent,dbo.guarded_scalar_assignment(NULL) AS unknown
+  expect: {rows: 1,data: [{matched: 9,absent: 8,unknown: 8}]}
+  max_time: 5

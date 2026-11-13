@@ -1,0 +1,91 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  description: Native immutable source definitions own portable parameters and initial compiled payload at their database
+setup:
+- scm: (createdatabase "source_metadata_owner" false)
+cleanup:
+- scm: (dropdatabase "source_metadata_owner" true)
+test_cases:
+- name: Actual source compiler receives owned plain dictionary keys and exact scalar data
+  scm: |
+    (begin
+      (registerprocedurelanguage "source-memory-data" (lambda (source context)
+        (begin (define parameters (context "parameters"))
+          (lambda () (list source (parameters "symbol") (parameters "var") (parameters "bytes")
+            (parameters "limit") (base64_encode (parameters "binary")))))))
+      (define parameters (set_assoc '() "symbol" "plain" "var" 7 "bytes" "literal"
+        "limit" 9223372036854775807 "binary" (base64_decode "/wA=")))
+      (createprocedure "source_metadata_owner" "data" "source-memory-data" "payload" parameters false)
+      (define result ((procedure "source_metadata_owner" "data")))
+      (and (equal? (count result) 6) (expression_equal? (list (nth result 0) (nth result 1) (nth result 2) (nth result 3) (nth result 4))
+        (list "payload" "plain" 7 "literal" 9223372036854775807))
+        (equal? (nth result 5) "/wA=")
+        (regexp_test (stat "source_metadata_owner") "Database metadata bytes = [1-9][0-9]*")))
+  expect: {result: true}
+- name: Replacement releases old catalog payload while a held old callable retains its actual behavior
+  scm: |
+    (begin
+      (registerprocedurelanguage "source-memory-text" (lambda (source _context) (lambda () source)))
+      (define bytes (lambda () (simplify (car (split (cadr (split (stat "source_metadata_owner")
+        "Database metadata bytes = ")) "\n")))))
+      (createprocedure "source_metadata_owner" "text" "source-memory-text" (string_repeat "x" 8192) nil false)
+      (define held (procedure "source_metadata_owner" "text"))
+      (define large (bytes))
+      (createprocedure "source_metadata_owner" "text" "source-memory-text" "small" nil true)
+      (define small (bytes))
+      (and (> (- large small) 8000) (equal? small (bytes))
+        (equal? (strlen (held)) 8192) (equal? ((procedure "source_metadata_owner" "text")) "small")))
+  expect: {result: true}
+- name: Failed source compilation preserves the previous callable and its real metadata charge
+  scm: |
+    (begin
+      (registerprocedurelanguage "source-memory-reject" (lambda (_source _context) (error "fixture source rejected")))
+      (define before (stat "source_metadata_owner"))
+      (define rejected (try (lambda () (begin
+        (createprocedure "source_metadata_owner" "text" "source-memory-reject" "bad" nil true) false))
+        (lambda (failure) (regexp_test (string failure) "fixture source rejected"))))
+      (and rejected (equal? before (stat "source_metadata_owner"))
+        (equal? ((procedure "source_metadata_owner" "text")) "small")))
+  expect: {result: true}
+- name: Nonportable source parameter is rejected without changing the stored callable
+  scm: |
+    (begin
+      (define before (stat "source_metadata_owner"))
+      (define rejected (try (lambda () (begin
+        (createprocedure "source_metadata_owner" "text" "source-memory-text" "bad" (list (lambda () 1)) true) false))
+        (lambda (failure) (regexp_test (string failure) "portable declaration data"))))
+      (and rejected (equal? before (stat "source_metadata_owner"))
+        (equal? ((procedure "source_metadata_owner" "text")) "small")))
+  expect: {result: true}
+- name: Restart loads durable source declarations without preserving process callables
+  # Force a real process restart in both managed and connect-only CI runs.
+  sql: SHUTDOWN
+- name: Reloaded portable data and regenerated callable retain actual values and a stable metadata owner
+  scm: |
+    (begin
+      (showprocedures "source_metadata_owner" "")
+      (define bytes (lambda () (simplify (car (split (cadr (split (stat "source_metadata_owner")
+        "Database metadata bytes = ")) "\n")))))
+      (define cold (bytes))
+      (registerprocedurelanguage "source-memory-data" (lambda (source context)
+        (begin (define parameters (context "parameters"))
+          (lambda () (list source (parameters "symbol") (parameters "var") (parameters "bytes")
+            (parameters "limit") (base64_encode (parameters "binary")))))))
+      (registerprocedurelanguage "source-memory-text" (lambda (source _context) (lambda () source)))
+      (define result ((procedure "source_metadata_owner" "data")))
+      (and (> cold 0) (> (bytes) cold) (equal? (count result) 6)
+        (expression_equal? (list (nth result 0) (nth result 1) (nth result 2) (nth result 3) (nth result 4))
+        (list "payload" "plain" 7 "literal" 9223372036854775807))
+        (equal? (nth result 5) "/wA=")
+        (equal? ((procedure "source_metadata_owner" "text")) "small") (equal? (bytes) (bytes))))
+  expect: {result: true}
+- name: Dropping all real source definitions releases their database metadata ownership
+  scm: |
+    (begin
+      (dropprocedure "source_metadata_owner" "data" false)
+      (dropprocedure "source_metadata_owner" "text" false)
+      (and (empty_list? (showprocedures "source_metadata_owner" ""))
+        (regexp_test (stat "source_metadata_owner") "Database metadata bytes = 0\n")))
+  expect: {result: true}

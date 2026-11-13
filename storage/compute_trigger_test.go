@@ -74,7 +74,7 @@ func TestComputeProxyRestoresPersistedProcedures(t *testing.T) {
 				}
 				if strings.Contains(encoded, `"symbol":"table"`) {
 					call := proxy.computor.Proc().Body.Slice()[2].Slice()
-					if len(call) != 5 || call[2].Bool() || call[4].Bool() {
+					if len(call) != 6 || call[2].Bool() || call[4].Bool() || !call[5].IsNil() {
 						t.Fatal("historical computor did not migrate its native table call")
 					}
 				}
@@ -152,7 +152,7 @@ func nestedScanAst(schema, table, outerParam string) scm.Scmer {
 	return scm.NewSlice([]scm.Scmer{
 		scm.NewSymbol("scan"),
 		scm.NewSlice([]scm.Scmer{scm.NewSymbol("session"), scm.NewString("__memcp_tx")}),
-		scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(schema), scm.NewBool(false), scm.NewString(table), scm.NewBool(false)}),
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(schema), scm.NewBool(false), scm.NewString(table), scm.NewBool(false), scm.NewNil()}),
 		scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), newScanAccessSchema(scanAccessConsumerScan, nil, -1)}),
 		listAst(),
 		listAst(scm.NewString("ref_id")),
@@ -178,7 +178,7 @@ func TestExtractScanJoinInfoIncludesDynamicTablePlan(t *testing.T) {
 			scm.NewSymbol("table"),
 			scm.NewString("dynamic_dependency"), scm.NewBool(false),
 			scm.NewString("driver"), scm.NewBool(false),
-		}),
+			scm.NewNil()}),
 	})
 	computor := scm.NewSlice([]scm.Scmer{
 		scm.NewSymbol("scan"),
@@ -292,7 +292,7 @@ func TestLookupComputeTriggersInvalidateMatchingRows(t *testing.T) {
 	src.CreateColumn("val", "INT", nil, nil)
 
 	computorSource := `(lambda (ref_id)
-		(scan nil (table "tlookuptrigger" false "src" false)
+		(scan nil (table "tlookuptrigger" false "src" false nil)
 			'(369435906932736) '()
 			'("ref_id") (lambda (source_ref_id) (equal? source_ref_id (outer 1 ref_id)))
 			'("val") (lambda (acc val) val)
@@ -338,7 +338,7 @@ func TestQualifiedLookupComputeTriggerUsesPhysicalTargetColumn(t *testing.T) {
 	base.Insert([]string{"ref_id", "cached"}, [][]scm.Scmer{{scm.NewInt(7), scm.NewInt(0)}}, nil, scm.NewNil(), false, nil)
 
 	computorSource := `(lambda (base.ref_id)
-		(scan nil (table "tqualifiedlookuptrigger" false "src" false)
+		(scan nil (table "tqualifiedlookuptrigger" false "src" false nil)
 			'(369435906932736) '()
 			'("ref_id") (lambda (source_ref_id) (equal? source_ref_id (outer 1 base.ref_id)))
 			'("val") (lambda (acc val) val)
@@ -365,7 +365,7 @@ func TestQualifiedLookupComputeTriggerUsesPhysicalTargetColumn(t *testing.T) {
 
 func TestExtractScanJoinInfoUsesCompiledAccessWhenResidualIsEmpty(t *testing.T) {
 	source := `(lambda (ref_id)
-		(scan nil (table "tcompileddependency" false "src" false)
+		(scan nil (table "tcompileddependency" false "src" false nil)
 			'()
 			(list ref_id)
 			'() (lambda () true)
@@ -392,7 +392,7 @@ func TestExplicitReadDependenciesSurvivePrunedFilters(t *testing.T) {
 		for _, dynamicValues := range []bool{false, true} {
 			t.Run(fmt.Sprintf("residual=%t/dynamic_values=%t", residual, dynamicValues), func(t *testing.T) {
 				computor := scm.Read(t.Name(), `(lambda (ref_id)
-					(scan nil (table "tcompileddependency" false "src" false)
+					(scan nil (table "tcompileddependency" false "src" false nil)
 						'() (list ref_id 1)
 						'() (lambda () true)
 						'("value") (lambda (acc value) value)

@@ -29,12 +29,16 @@ import "unsafe"
 // main type for storage: can store any value, is inefficient but does type analysis how to optimize
 type StorageSCMER struct {
 	storageJITFunctions
+	legacy      bool
 	values      []scm.Scmer `jit:"immutable-after-finish"`
 	minIntScale int8        // power-of-ten exponent of finest granularity
 	//   0 = pure ints, -2 = 2 decimal places, 2 = multiples of 100
 	//   math.MinInt8 = not representable as scaled int
+	hasDate      bool
+	dateOnly     bool
 	hasString    bool
 	hasBSON      bool
+	hasOther     bool // values outside numeric, calendar and text codec domains
 	longStrings  int
 	null         uint  // amount of NULL values (sparse map!)
 	numSeq       uint  // sequence statistics
@@ -44,6 +48,15 @@ type StorageSCMER struct {
 	enumVals  [enumMaxSymbols]scm.Scmer
 	enumFreqs [enumMaxSymbols]uint64
 	enumK     uint8 // number of distinct values seen so far (0xFF = abandoned)
+}
+
+// Magic 1 retains the historical generic JSON interpretation. Re-saving a
+// legacy generation uses the current exact-value writer, never old bytes.
+type storageSCMERLegacy struct{ StorageSCMER }
+
+func (s *storageSCMERLegacy) Deserialize(reader io.Reader) uint {
+	s.legacy = true
+	return s.StorageSCMER.Deserialize(reader)
 }
 
 func (s *StorageSCMER) ComputeSize() uint {
@@ -59,7 +72,10 @@ func (s *StorageSCMER) String() string {
 	return "SCMER"
 }
 
-// StorageSCMER binary layout (magic byte 1 consumed by shard loader):
+// StorageSCMER binary layout (magic byte 1 legacy / 3 exact-value):
+// Magic 3 has an explicit version byte (v1), followed by count/JSONL.
+// Native date-v1 and opaque BSON-v1 envelopes retain exact scalar identity.
+// Magic 1 keeps its original unversioned TransformFromJSON reader.
 //
 //	[count uint64]
 //	[values: count × JSON line (terminated by '\n')]
@@ -138,8 +154,15 @@ func (s *StorageSCMER) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result
 }
 
 func (s *StorageSCMER) Serialize(f io.Writer) {
-	binary.Write(f, binary.LittleEndian, uint8(1)) // 1 = StorageSCMER
-	binary.Write(f, binary.LittleEndian, uint64(len(s.values)))
+	// Magic 3 v1: header, uint64 row count, then uint64 byte length and
+	// complete private JSON for each scalar. Exact framing composes inside
+	// containers that have their own trailing fields; no stream read-ahead.
+	if err := binary.Write(f, binary.LittleEndian, [2]byte{3, 1}); err != nil {
+		panic(err)
+	}
+	if err := binary.Write(f, binary.LittleEndian, uint64(len(s.values))); err != nil {
+		panic(err)
+	}
 	for i := 0; i < len(s.values); i++ {
 		value := s.values[i]
 		var v []byte
@@ -152,16 +175,83 @@ func (s *StorageSCMER) Serialize(f io.Writer) {
 				"payload":      base64.RawStdEncoding.EncodeToString(payload),
 			})
 		} else {
-			v, err = json.Marshal(value)
+			v, err = scm.MarshalPersistentJSON(value)
 		}
 		if err != nil {
 			panic(err)
 		}
-		f.Write(v)
-		f.Write([]byte("\n")) // endline so the serialized file becomes a jsonl file beginning at byte 10
+		if err := binary.Write(f, binary.LittleEndian, uint64(len(v))); err != nil {
+			panic(err)
+		}
+		if count, err := f.Write(v); err != nil {
+			panic(err)
+		} else if count != len(v) {
+			panic(io.ErrShortWrite)
+		}
 	}
 }
 func (s *StorageSCMER) Deserialize(f io.Reader) uint {
+	if s.legacy {
+		return s.deserializeLegacy(f)
+	}
+	var version [1]byte
+	readStorageBytes(f, version[:])
+	if version[0] != 1 {
+		panic("unknown generic scalar column version")
+	}
+	var count uint64
+	if err := binary.Read(f, binary.LittleEndian, &count); err != nil {
+		panic(err)
+	}
+	if count > uint64(^uint32(0)) {
+		panic("scalar column count exceeds row identifier domain")
+	}
+	s.values = make([]scm.Scmer, 0, min(count, 1024))
+	for index := uint64(0); index < count; index++ {
+		var length uint64
+		if err := binary.Read(f, binary.LittleEndian, &length); err != nil {
+			panic(err)
+		}
+		if length > uint64(int(^uint(0)>>1)) {
+			panic("scalar column record exceeds addressable memory")
+		}
+		payload := make([]byte, int(length))
+		if _, err := io.ReadFull(f, payload); err != nil {
+			panic(err)
+		}
+		s.values = append(s.values, decodePersistentColumnValue(payload))
+	}
+	return uint(count)
+}
+
+func decodePersistentColumnValue(line []byte) scm.Scmer {
+	if !json.Valid(line) {
+		panic("invalid persistent scalar column JSON")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(line))
+	decoder.UseNumber()
+	var decoded any
+	if err := decoder.Decode(&decoded); err != nil {
+		panic(err)
+	}
+	// This opaque envelope is shared with the permanent magic-1 BSON writer.
+	if envelope, ok := decoded.(map[string]any); ok && len(envelope) == 3 && envelope["$memcp.scmer"] == "bson-v1" {
+		kind := scm.TransformFromJSON(envelope["type"])
+		payload, ok := envelope["payload"].(string)
+		data, err := base64.RawStdEncoding.DecodeString(payload)
+		if !kind.IsInt() || kind.Int() < 0 || kind.Int() > 255 || !ok || err != nil {
+			panic("invalid BSON envelope in scalar column")
+		}
+		return scm.NewBSONRaw(byte(kind.Int()), data)
+	}
+	var value scm.Scmer
+	if err := scm.UnmarshalPersistentJSON(line, &value); err != nil {
+		panic(err)
+	}
+	return value
+}
+
+func (s *StorageSCMER) deserializeLegacy(f io.Reader) uint {
 	// No version byte: this type had no padding byte in v0.1.0.
 	// Count is read directly.  Format changes require a new magic byte.
 	var l uint64
@@ -279,12 +369,16 @@ func (s *StorageSCMER) scan(i uint32, value scm.Scmer) {
 		s.null++
 		return
 	}
+	if !value.IsDate() {
+		s.dateOnly = false
+	}
 	if value.IsBSON() {
 		s.hasBSON = true
 		s.minIntScale = math.MinInt8
 		return
 	}
 	if value.GetTag() == scm.TagDate {
+		s.hasDate = true
 		v2 := value.Int()
 		if v2-s.last1 == s.last1-s.last2 {
 			s.numSeq++
@@ -336,12 +430,17 @@ func (s *StorageSCMER) scan(i uint32, value scm.Scmer) {
 		if len(value.String()) > maxInlineBlobBytes {
 			s.longStrings++
 		}
+	} else {
+		s.hasOther = true
 	}
 }
 func (s *StorageSCMER) prepare() {
+	s.dateOnly = true
+	s.hasDate = false
 	s.minIntScale = math.MaxInt8 // neutral, gets driven down by scan
 	s.hasString = false
 	s.hasBSON = false
+	s.hasOther = false
 	s.enumK = 0
 }
 func (s *StorageSCMER) init(i uint32) {
@@ -358,6 +457,12 @@ func (s *StorageSCMER) finish() {
 
 // soley to StorageSCMER
 func (s *StorageSCMER) proposeCompression(i uint32) ColumnStorage {
+	if s.hasDate {
+		if s.dateOnly {
+			return new(StorageDate)
+		}
+		return nil
+	}
 	if s.hasBSON {
 		return nil
 	}
@@ -395,6 +500,12 @@ func (s *StorageSCMER) proposeCompression(i uint32) ColumnStorage {
 		if entropy < pforBits*0.8 {
 			return new(StorageEnum)
 		}
+	}
+	// Const, sparse and enum preserve the actual value. Numeric/text codecs
+	// must never coerce collections or other values merely because scaling
+	// analysis could not classify them as numbers.
+	if s.hasOther {
+		return nil
 	}
 	if s.hasString {
 		if s.longStrings > 2 {

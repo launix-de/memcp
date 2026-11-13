@@ -19,48 +19,62 @@ setup:
 
 test_cases:
   - name: "Persist every FK callback with the pre-transaction ABI"
+    # OLD writes this ABI in upgrade-run.sh; the current public API must
+    # preserve all four engine-owned definitions instead of manufacturing it.
     scm: |
-      (begin
-        (createtrigger
-          (table "memcp-tests" false "fk_upgrade_child" false)
-          "__fk_fk_upgrade_ref_child_insert"
-          "before_insert"
-          ""
-          ""
-          (lambda (OLD NEW session tx)
-            (begin
-              (__fk_check_ref "memcp-tests" "fk_upgrade_parent" '("id") (list (get_assoc NEW "parent_id")) "fk_upgrade_ref")
-              NEW))
-          false)
-        (createtrigger
-          (table "memcp-tests" false "fk_upgrade_child" false)
-          "__fk_fk_upgrade_ref_child_update"
-          "before_update"
-          ""
-          ""
-          (lambda (OLD NEW session tx)
-            (begin
-              (__fk_check_ref "memcp-tests" "fk_upgrade_parent" '("id") (list (get_assoc NEW "parent_id")) "fk_upgrade_ref")
-              NEW))
-          false)
-        (createtrigger
-          (table "memcp-tests" false "fk_upgrade_parent" false)
-          "__fk_fk_upgrade_ref_parent_delete"
-          "before_delete"
-          ""
-          ""
-          (lambda (OLD NEW session tx)
-            (__fk_on_parent_delete "memcp-tests" "fk_upgrade_child" '("parent_id") (list (get_assoc OLD "id")) "fk_upgrade_ref" "CASCADE"))
-          false)
-        (createtrigger
-          (table "memcp-tests" false "fk_upgrade_parent" false)
-          "__fk_fk_upgrade_ref_parent_update"
-          "after_update"
-          ""
-          ""
-          (lambda (OLD NEW session tx)
-            (__fk_on_parent_update "memcp-tests" "fk_upgrade_child" '("parent_id") (list (get_assoc OLD "id")) (list (get_assoc NEW "id")) "fk_upgrade_ref" "CASCADE"))
+      (and
+        (try (lambda () (begin
+          (createtrigger
+              (table "memcp-tests" false "fk_upgrade_child" false nil)
+              "__fk_fk_upgrade_ref_child_insert"
+              "before_insert"
+              ""
+              ""
+              (lambda (OLD NEW session tx)
+                (begin
+                  (__fk_check_ref "memcp-tests" "fk_upgrade_parent" '("id") (list (get_assoc NEW "parent_id")) "fk_upgrade_ref")
+                  NEW))
+              false)
           false))
+          (lambda (failure) (strlike (concat failure) "%system trigger definitions are owned by the storage engine%")))
+        (try (lambda () (begin
+          (createtrigger
+              (table "memcp-tests" false "fk_upgrade_child" false nil)
+              "__fk_fk_upgrade_ref_child_update"
+              "before_update"
+              ""
+              ""
+              (lambda (OLD NEW session tx)
+                (begin
+                  (__fk_check_ref "memcp-tests" "fk_upgrade_parent" '("id") (list (get_assoc NEW "parent_id")) "fk_upgrade_ref")
+                  NEW))
+              false)
+          false))
+          (lambda (failure) (strlike (concat failure) "%system trigger definitions are owned by the storage engine%")))
+        (try (lambda () (begin
+          (createtrigger
+              (table "memcp-tests" false "fk_upgrade_parent" false nil)
+              "__fk_fk_upgrade_ref_parent_delete"
+              "before_delete"
+              ""
+              ""
+              (lambda (OLD NEW session tx)
+                (__fk_on_parent_delete "memcp-tests" "fk_upgrade_child" '("parent_id") (list (get_assoc OLD "id")) "fk_upgrade_ref" "CASCADE"))
+              false)
+          false))
+          (lambda (failure) (strlike (concat failure) "%system trigger definitions are owned by the storage engine%")))
+        (try (lambda () (begin
+          (createtrigger
+              (table "memcp-tests" false "fk_upgrade_parent" false nil)
+              "__fk_fk_upgrade_ref_parent_update"
+              "after_update"
+              ""
+              ""
+              (lambda (OLD NEW session tx)
+                (__fk_on_parent_update "memcp-tests" "fk_upgrade_child" '("parent_id") (list (get_assoc OLD "id")) (list (get_assoc NEW "id")) "fk_upgrade_ref" "CASCADE"))
+              false)
+          false))
+          (lambda (failure) (strlike (concat failure) "%system trigger definitions are owned by the storage engine%"))))
     expect:
       data: [true]
 

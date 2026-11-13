@@ -49,8 +49,7 @@ func prepareSharedClusterMounts(names string) error {
 		}
 		mounted[name] = true
 	}
-	sharedClusterMounts.Store(&mounted)
-	return nil
+	return publishSharedClusterMounts(mounted)
 }
 func sharedClusterDatabase(name string) bool {
 	if mounts := sharedClusterMounts.Load(); mounts != nil {

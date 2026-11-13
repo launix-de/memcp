@@ -754,7 +754,10 @@ func TestKeytableEvictionKeepsLiveDependentInvalidationPath(t *testing.T) {
 }
 
 func TestForeignKeyTriggerRestoresFinalValuePriority(t *testing.T) {
+	oldBasepath := Basepath
+	defer func() { Basepath = oldBasepath }()
 	for _, mode := range []foreignKeyMode{RESTRICT, CASCADE, SETNULL} {
+		Basepath = t.TempDir()
 		Init(scm.Globalenv)
 		const name = "fk_final_value_priority_upgrade"
 		defer databases.Remove(name)

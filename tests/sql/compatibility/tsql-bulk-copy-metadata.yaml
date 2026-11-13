@@ -1,0 +1,178 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Bulk-copy metadata batches return transaction, empty typed schema and native column collations as
+    distinct TDS result sets
+setup:
+- sql: CREATE TABLE bulk_metadata_target(id INT,label NVARCHAR(9))
+- sql: CREATE DATABASE bulk_metadata_context
+cleanup:
+- sql: DROP TABLE IF EXISTS bulk_metadata_target
+- sql: DROP DATABASE IF EXISTS bulk_metadata_context
+test_cases:
+- name: Actual metadata batch keeps its three result contracts in order
+  tds:
+    statements:
+    - sql: "SELECT @@TRANCOUNT;\nDECLARE @Column_Names NVARCHAR(MAX) = NULL;\nIF EXISTS (SELECT TOP 1 * FROM sys.all_columns\
+        \ WHERE object_id=OBJECT_ID(N'sys.all_columns') AND name=N'graph_type')\nBEGIN\n SELECT @Column_Names=COALESCE(@Column_Names+N',\
+        \ ',N'')+QUOTENAME(name)\n FROM [memcp-tests].sys.all_columns\n WHERE object_id=OBJECT_ID(N'[memcp-tests].[dbo].[bulk_metadata_target]')\n\
+        \ AND COALESCE(graph_type,0) NOT IN (1,3,4,6,7)\n ORDER BY column_id;\nEND\nELSE\nBEGIN\n SELECT @Column_Names=COALESCE(@Column_Names+N',\
+        \ ',N'')+QUOTENAME(name)\n FROM [memcp-tests].sys.all_columns\n WHERE object_id=OBJECT_ID(N'[memcp-tests].[dbo].[bulk_metadata_target]')\n\
+        \ ORDER BY column_id;\nEND;\nSELECT @Column_Names=COALESCE(@Column_Names,N'*');\nSET FMTONLY ON;\nEXEC(N'SELECT\
+        \ '+@Column_Names+N' FROM [memcp-tests].[dbo].[bulk_metadata_target]');\nSET FMTONLY OFF;\nEXEC [memcp-tests]..sp_tablecollations_100\
+        \ N'[dbo].[bulk_metadata_target]';\n"
+      expect:
+        result_sets: &id001
+        - rows: 1
+          column_types:
+          - name: '@@TRANCOUNT'
+            type: INT
+        - rows: 0
+          columns:
+          - id
+          - label
+          column_types:
+          - name: id
+            type: INT
+          - name: label
+            type: NVARCHAR
+        - rows: 2
+          columns:
+          - colid
+          - name
+          - tds_collation
+          - collation
+          column_types:
+          - name: colid
+            type: INT
+          - name: name
+            type: NVARCHAR
+          - name: tds_collation
+            type: VARBINARY
+            length: 5
+          - name: collation
+            type: NVARCHAR
+          data:
+          - colid: 1
+            name: id
+            tds_collation: null
+            collation: null
+          - colid: 2
+            name: label
+            tds_collation:
+              binary_hex: 0904d00034
+            collation: utf8mb4
+- name: Three-part target metadata is independent of the login default database
+  tds:
+    database: bulk_metadata_context
+    statements:
+    - sql: "SELECT @@TRANCOUNT;\nDECLARE @Column_Names NVARCHAR(MAX) = NULL;\nIF EXISTS (SELECT TOP 1 * FROM sys.all_columns\
+        \ WHERE object_id=OBJECT_ID(N'sys.all_columns') AND name=N'graph_type')\nBEGIN\n SELECT @Column_Names=COALESCE(@Column_Names+N',\
+        \ ',N'')+QUOTENAME(name)\n FROM [memcp-tests].sys.all_columns\n WHERE object_id=OBJECT_ID(N'[memcp-tests].[dbo].[bulk_metadata_target]')\n\
+        \ AND COALESCE(graph_type,0) NOT IN (1,3,4,6,7)\n ORDER BY column_id;\nEND\nELSE\nBEGIN\n SELECT @Column_Names=COALESCE(@Column_Names+N',\
+        \ ',N'')+QUOTENAME(name)\n FROM [memcp-tests].sys.all_columns\n WHERE object_id=OBJECT_ID(N'[memcp-tests].[dbo].[bulk_metadata_target]')\n\
+        \ ORDER BY column_id;\nEND;\nSELECT @Column_Names=COALESCE(@Column_Names,N'*');\nSET FMTONLY ON;\nEXEC(N'SELECT\
+        \ '+@Column_Names+N' FROM [memcp-tests].[dbo].[bulk_metadata_target]');\nSET FMTONLY OFF;\nEXEC [memcp-tests]..sp_tablecollations_100\
+        \ N'[dbo].[bulk_metadata_target]';\n"
+      expect:
+        result_sets: *id001
+- name: Metadata discovery has no target row effects
+  sql: SELECT COUNT(*) AS n FROM bulk_metadata_target
+  expect:
+    rows: 1
+    data:
+    - n: 0
+
+- name: IF EXISTS self catalog discovery preserves positive and negative identity predicates
+  tds:
+    statements:
+    - sql: IF EXISTS (SELECT TOP 1 * FROM sys.all_columns WHERE [object_id]=OBJECT_ID('sys.all_columns') AND [name]='graph_type') SELECT 1 AS discovered ELSE SELECT 0 AS discovered
+      expect:
+        rows: 1
+        data: [{discovered: 1}]
+    - sql: IF NOT EXISTS (SELECT TOP 1 * FROM sys.all_columns WHERE [object_id]=OBJECT_ID('sys.all_columns') AND [name]='missing_catalog_field') SELECT 1 AS absent ELSE SELECT 0 AS absent
+      expect:
+        rows: 1
+        data: [{absent: 1}]
+
+- name: Virtual self catalog EXISTS passes its empty native domain to the actual metadata provider
+  scm: |
+    (begin
+      (define owner (newsession))
+      (owner "username" "root")
+      (define code (parse_tsql "memcp-tests"
+        "SELECT CASE WHEN EXISTS (SELECT TOP 1 * FROM sys.all_columns WHERE object_id=OBJECT_ID(N'sys.all_columns') AND name=N'graph_type') THEN 1 ELSE 0 END AS discovered"
+        nil owner nil))
+      (define observed (newsession))
+      (define native_source information_schema_rows)
+      (define provider (lambda (database relation tx selection) (begin
+        (if (and (equal?? database "information_schema") (equal?? relation "columns"))
+          (if (nil? selection) (error "EXISTS discarded its metadata production restriction") true) true)
+        (define rows (native_source database relation tx selection))
+        (if (and (equal?? database "information_schema") (equal?? relation "columns")) (begin
+          (if (equal? (count rows) 0) true (error "EXISTS produced unrelated native column metadata"))
+          (observed "produced" (count rows))) true)
+        rows)))
+      (define execute (eval (list 'lambda
+        (list 'information_schema_rows 'session 'tx 'resultrow 'resultfields) code)))
+      (execute provider owner nil (lambda (row) (observed "row" row)) (lambda fields true))
+      (and (expression_equal? (observed "produced") 0)
+        (equal? ((observed "row") "discovered") 1)))
+  expect: {result: true}
+
+- name: Native target EXISTS passes its necessary table address to the actual metadata provider
+  scm: |
+    (begin
+      (define owner (newsession))
+      (owner "username" "root")
+      (define code (parse_tsql "memcp-tests"
+        "SELECT CASE WHEN EXISTS (SELECT TOP 1 * FROM sys.all_columns WHERE object_id=OBJECT_ID(N'dbo.bulk_metadata_target') AND name=N'label') THEN 1 ELSE 0 END AS discovered"
+        nil owner nil))
+      (define observed (newsession))
+      (define native_source information_schema_rows)
+      (define provider (lambda (database relation tx selection) (begin
+        (if (and (equal?? database "information_schema") (equal?? relation "columns"))
+          (if (nil? selection) (error "EXISTS discarded its metadata production restriction") true) true)
+        (define rows (native_source database relation tx selection))
+        (if (and (equal?? database "information_schema") (equal?? relation "columns")) (begin
+          (if (equal? (count rows) 2) true (error "EXISTS produced unrelated native column metadata"))
+          (observed "produced" (count rows))) true)
+        rows)))
+      (define execute (eval (list 'lambda
+        (list 'information_schema_rows 'session 'tx 'resultrow 'resultfields) code)))
+      (execute provider owner nil (lambda (row) (observed "row" row)) (lambda fields true))
+      (and (expression_equal? (observed "produced") 2)
+        (equal? ((observed "row") "discovered") 1)))
+  expect: {result: true}
+
+- name: Nullable session domain coordinates do not change original SQL NULL predicates
+  tds:
+    statements:
+    - sql: DECLARE @nullable INT=NULL; SELECT CASE WHEN EXISTS (SELECT TOP 1 * FROM sys.all_columns WHERE object_id=OBJECT_ID(N'dbo.bulk_metadata_target') AND name=N'label' AND @nullable=@nullable) THEN 1 ELSE 0 END AS discovered
+      expect:
+        rows: 1
+        data: [{discovered: 0}]
+    - sql: DECLARE @nullable INT=NULL; SELECT CASE WHEN EXISTS (SELECT TOP 1 * FROM sys.all_columns WHERE object_id=OBJECT_ID(N'dbo.bulk_metadata_target') AND name=N'label' AND @nullable IS NULL) THEN 1 ELSE 0 END AS discovered
+      expect:
+        rows: 1
+        data: [{discovered: 1}]
+    - sql: DECLARE @nullable INT=7; SELECT CASE WHEN EXISTS (SELECT TOP 1 * FROM sys.all_columns WHERE object_id=OBJECT_ID(N'dbo.bulk_metadata_target') AND name=N'label' AND @nullable=@nullable) THEN 1 ELSE 0 END AS discovered
+      expect:
+        rows: 1
+        data: [{discovered: 1}]
+- name: Presence probes retain SQL NULL rejection for genuine row correlations
+  setup:
+  - sql: INSERT INTO bulk_metadata_target(id,label) VALUES(NULL,N'a-null'),(1,N'b-one')
+  tds:
+    statements:
+    - sql: SELECT parent.label AS label,CASE WHEN EXISTS (SELECT 1 FROM bulk_metadata_target AS child WHERE child.id=parent.id) THEN 1 ELSE 0 END AS matched FROM bulk_metadata_target AS parent ORDER BY parent.label
+      expect:
+        rows: 2
+        data:
+        - {label: a-null, matched: 0}
+        - {label: b-one, matched: 1}
+  cleanup:
+  - sql: DELETE FROM bulk_metadata_target

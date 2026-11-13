@@ -1,0 +1,79 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  description: Scoped scalar programs keep caller domains over selective native driver scans
+setup:
+- sql: CREATE TABLE selective_driver(id INT PRIMARY KEY)
+- sql: CREATE TABLE selective_labels(id INT PRIMARY KEY,label VARCHAR(12))
+- scm: |
+    (begin
+      (insert (table "memcp-tests" false "selective_driver" false nil) '("id")
+        (map (produceN 2000) (lambda (i) (list (+ i 1)))))
+      true)
+- sql: INSERT selective_labels VALUES(2,'grouped'),(1999,'entry')
+- sql: |
+    CREATE FUNCTION dbo.selective_label(@id INT) RETURNS VARCHAR(12) AS BEGIN
+      DECLARE @label VARCHAR(12)='missing';
+      SELECT @label=label FROM selective_labels WHERE id=@id;
+      RETURN @label;
+    END
+- sql: |
+    CREATE FUNCTION dbo.selective_iteration(@start INT) RETURNS INT AS BEGIN
+      DECLARE @current INT=@start;
+      DECLARE @value INT;
+      DECLARE @total INT=0;
+      DECLARE @ticks INT=0;
+      WHILE @ticks<2 BEGIN
+        SELECT TOP 1 @value=id FROM selective_driver WHERE id=@current;
+        SET @total=@total+ISNULL(@value,0);
+        SET @current=@current-1;
+        SET @ticks=@ticks+1;
+      END
+      RETURN @total;
+    END
+- sql: |
+    CREATE FUNCTION dbo.selective_local(@value INT) RETURNS INT AS BEGIN
+      DECLARE @rows TABLE(amount INT NULL);
+      DECLARE @i INT=0;
+      DECLARE @result INT;
+      WHILE @i<2 BEGIN
+        IF @value IS NOT NULL INSERT INTO @rows(amount) SELECT @value;
+        SET @i=@i+1;
+      END
+      SELECT @result=SUM(amount) FROM @rows;
+      RETURN @result;
+    END
+cleanup:
+- sql: DROP FUNCTION IF EXISTS dbo.selective_label,dbo.selective_iteration,dbo.selective_local
+- sql: DROP TABLE IF EXISTS selective_labels
+- sql: DROP TABLE IF EXISTS selective_driver
+test_cases:
+- name: Select assignment binds each selective IN driver independently
+  sql: SELECT id,dbo.selective_label(id) AS label FROM selective_driver WHERE id IN(2,1999,2000) ORDER BY id
+  expect: {rows: 3,data: [{id: 2,label: grouped},{id: 1999,label: entry},{id: 2000,label: missing}]}
+- name: Select assignment retains its scope with a native range driver
+  sql: SELECT id,dbo.selective_label(id) AS label FROM selective_driver WHERE id>=1999 ORDER BY id
+  expect: {rows: 2,data: [{id: 1999,label: entry},{id: 2000,label: missing}]}
+- name: Iteration feedback and public reads share each IN caller domain
+  sql: SELECT id,dbo.selective_iteration(id) AS total FROM selective_driver WHERE id IN(2,1999,2000) ORDER BY id
+  expect: {rows: 3,data: [{id: 2,total: 3},{id: 1999,total: 3997},{id: 2000,total: 3999}]}
+- name: Iteration feedback survives native range access selection
+  sql: SELECT id,dbo.selective_iteration(id) AS total FROM selective_driver WHERE id>=1999 ORDER BY id
+  expect: {rows: 2,data: [{id: 1999,total: 3997},{id: 2000,total: 3999}]}
+- name: Local relation scopes remain independent for selective caller domains
+  sql: SELECT id,dbo.selective_local(id) AS total,dbo.selective_local(NULL) AS absent FROM selective_driver WHERE id IN(2,1999,2000) ORDER BY id
+  expect: {rows: 3,data: [{id: 2,total: 4,absent: null},{id: 1999,total: 3998,absent: null},{id: 2000,total: 4000,absent: null}]}
+- name: Local relation values retain scope under native range access
+  sql: SELECT id,dbo.selective_local(id) AS total FROM selective_driver WHERE id>=1999 ORDER BY id
+  expect: {rows: 2,data: [{id: 1999,total: 3998},{id: 2000,total: 4000}]}
+- name: Grouped consumers retain the scoped program producer
+  sql: SELECT SUM(dbo.selective_iteration(id)) AS total FROM selective_driver WHERE id IN(2,1999,2000)
+  expect: {rows: 1,data: [{total: 7999}]}
+- name: Grouped local effects retain each input domain and SQL NULL
+  sql: SELECT SUM(dbo.selective_local(id)) AS total FROM selective_driver WHERE id IN(2,1999,2000)
+  expect: {rows: 1,data: [{total: 8002}]}
+- name: Grouped scoped keys remain available to computed ordering
+  sql: SELECT dbo.selective_iteration(id) AS key_value,COUNT(*) AS n FROM selective_driver WHERE id IN(2,1999,2000) GROUP BY dbo.selective_iteration(id) ORDER BY dbo.selective_iteration(id)+1
+  expect: {rows: 3,data: [{key_value: 3,n: 1},{key_value: 3997,n: 1},{key_value: 3999,n: 1}]}

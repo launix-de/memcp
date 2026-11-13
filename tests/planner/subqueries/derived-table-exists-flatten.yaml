@@ -119,15 +119,261 @@ test_cases:
           (list "value" (list (quote +) (list (quote get_column) "r" false "value" false) 1))
           true nil nil nil nil nil '() '() (list (list (quote lateral) true))))
         (define flattened (flatten_source_list
-          (list (list "q" "memcp-tests" q false nil)
-            (list "r" "memcp-tests" r false nil)
-            (list "s" "memcp-tests" s false nil)) nil '()))
+          (list (list "q" "memcp-tests" q false nil nil)
+            (list "r" "memcp-tests" r false nil nil)
+            (list "s" "memcp-tests" s false nil nil)) nil '()))
         (define formula (rewrite_derived_ref_chain (nth flattened 1)
           (list (quote get_column) "s" false "value" false)))
         (and (empty_list? (nth flattened 0))
           (empty_list? (query_expr_alias_set nil formula '()))
           (equal? (tryfold formula) 3)))
     expect: {result: true}
+
+  - name: "Derived reference discovery treats quoted column forms as values"
+    scm: |
+      (begin
+        (define fake (list (quote quote) (list (quote get_column) "d" false "payload" false)))
+        (define star (list (quote quote) (list (quote get_column) "d" false "*" false)))
+        (and (empty_list? (collect_alias_col_refs_deep "d" fake '()))
+          (not (expr_derived_star_ref "d" star))
+          (empty_list? (query_expr_alias_set nil fake '()))
+          (has_assoc? (collect_alias_col_refs_deep "d"
+            (list (quote list) fake (list (quote get_column) "d" false "ID" false)) '()) "ID")
+          (expr_derived_star_ref "d"
+            (list (quote list) star (list (quote get_column) "d" false "*" false)))))
+    expect: {result: true}
+
+  - name: "Derived reference discovery excludes genuine native default payloads"
+    scm: |
+      (begin
+        (define scope (new_relation_scope (newsession)))
+        (createtable "memcp-tests" "dtef_native_payload"
+          (list (list "column" "payload" "ANY" '()
+            (list "default" (list "get_column" "d" false "*" false))))
+          (list "engine" "memory" "ephemeral" true "scope" scope) false nil)
+        (define declarations (sql_relation_declarations "memcp-tests" "dtef_native_payload" nil))
+        (define src (list "payload" "memcp-tests" "dtef_native_payload" false nil declarations))
+        (define relation (make_query_block "memcp-tests" (list src) '("value" 1)
+          true nil nil nil nil nil nil nil nil))
+        (define stage (make_group_stage "stage" src '() '() '("value" 1)
+          nil '() '() nil nil '()))
+        (define result (and
+          (equal? ((car (declarations "columns")) "Default") '("get_column" "d" false "*" false))
+          (empty_list? (collect_alias_col_refs_deep "d" relation '()))
+          (empty_list? (collect_alias_col_refs_deep "d" stage '()))
+          (not (expr_derived_star_ref "d" relation))
+          (not (expr_derived_star_ref "d" stage))
+          (empty_list? (query_expr_alias_set nil relation '()))
+          (empty_list? (query_expr_alias_set nil stage '()))))
+        (close_relation_scope scope) result)
+    expect: {result: true}
+
+  - name: "Derived reference discovery retains joins nested relations and semantic facts"
+    scm: |
+      (begin
+        (define ref (lambda (name) (list (quote get_column) "d" false name false)))
+        (define src (list "i" "memcp-tests" "dtef_items" false (ref "join_value")
+          (sql_relation_declarations "memcp-tests" "dtef_items" nil)))
+        (define stage (make_group_stage "g" src (list (ref "domain_value")) (list (ref "key_value"))
+          (list "a" (ref "aggregate_value")) (ref "having_value")
+          (list "o" (ref "output_value")) (list (list (ref "order_value") true))
+          (ref "limit_value") (ref "offset_value") (list "guard" (ref "fact_value"))))
+        (define nested (make_query_block "memcp-tests" (list src) (list "f" (ref "field_value"))
+          (ref "where_value") (list (ref "group_value")) (ref "nested_having")
+          (list (list (ref "nested_order") true)) nil nil (list "h" (ref "hidden_value"))
+          (list stage) (list "guard" (ref "nested_fact"))))
+        (define found (collect_alias_col_refs_deep "d" nested '()))
+        (and (equal? (count found) 34)
+          (has_assoc? (query_expr_alias_set nil nested '()) "d")
+          (reduce '("join_value" "domain_value" "key_value" "aggregate_value" "having_value"
+            "output_value" "order_value" "limit_value" "offset_value" "fact_value"
+            "field_value" "where_value" "group_value" "nested_having" "nested_order" "hidden_value" "nested_fact")
+            (lambda (ok name) (and ok (has_assoc? found name))) true)
+          (expr_derived_star_ref "d" (make_query_block "memcp-tests" '() '("value" 1)
+            true nil nil nil nil nil nil (list stage) (list "guard" (ref "*"))))))
+    expect: {result: true}
+
+  - name: "Join pruning retains membership stage aliases while ignoring quoted values"
+    scm: |
+      (begin
+        (define probe (list (quote sql_+) (list (quote get_column) "real" false "ID" false)
+          (list (quote quote) (list (quote get_column) "literal" false "ID" false))))
+        (define membership (list (quote membership_truth) probe "helper" "count"))
+        (define found (query_expr_alias_set nil membership '()))
+        (and (equal? (count found) 4) (has_assoc? found "real") (has_assoc? found "helper")
+          (not (has_assoc? found "literal"))))
+    expect: {result: true}
+
+  - name: "Binding collision discovery preserves quoted strings as data"
+    scm: |
+      (begin
+        (define quoted (list (quote quote) '("__binding:payload" "hidden")))
+        (define catalog (binding_collect_string_catalog
+          (list "visible" quoted (list (quote get_column) "source" false "column" false)) '()))
+        (and (has_assoc? catalog "visible") (has_assoc? catalog "source")
+          (has_assoc? catalog "column") (not (has_assoc? catalog "__binding:payload"))
+          (expression_equal? quoted (list (quote quote) '("__binding:payload" "hidden"))))))
+    expect: {result: true}
+
+  - name: "Native default data does not reserve names while exported columns do"
+    scm: |
+      (begin
+        (define scope (new_relation_scope (newsession)))
+        (createtable "memcp-tests" "dtef_identifier_payload"
+          (list (list "column" "__binding:column" "ANY" '()
+            '("default" "__binding:default")))
+          (list "engine" "memory" "ephemeral" true "scope" scope) false nil)
+        (define declarations (sql_relation_declarations "memcp-tests" "dtef_identifier_payload" nil))
+        (define source (list "__binding:alias" "memcp-tests" "dtef_identifier_payload" false nil declarations))
+        (define query (make_query_block "memcp-tests" (list source) '("exported" 1)
+          true nil nil nil nil nil '() '() '()))
+        (define catalog (binding_collect_string_catalog query '()))
+        (define result (and (has_assoc? catalog "__binding:alias")
+          (has_assoc? catalog "memcp-tests") (has_assoc? catalog "dtef_identifier_payload")
+          (has_assoc? catalog "exported") (has_assoc? catalog "__binding:column")
+          (not (has_assoc? catalog "__binding:default"))
+          (equal? (binding_fresh_alias catalog "__binding:column") "__binding:column:")
+          (equal? (binding_fresh_alias catalog "__binding:alias") "__binding:alias:")
+          (equal? (binding_fresh_alias catalog "__binding:default") "__binding:default")
+          (expression_equal? (source_declarations (car (qb_sources query))) declarations)
+          (equal? ((car (declarations "columns")) "Default") "__binding:default")))
+        (close_relation_scope scope) result)
+    expect: {result: true}
+
+  - name: "Binding collision discovery retains wildcard and renamed derived exports"
+    scm: |
+      (begin
+        (define src (list "inside" "memcp-tests" "dtef_items" false nil
+          (sql_relation_declarations "memcp-tests" "dtef_items" nil)))
+        (define inner (make_query_block "memcp-tests" (list src)
+          (list "*" (list (quote get_column) "inside" false "*" false)
+            "renamed" (list (quote get_column) "inside" false "val" false))
+          true nil nil nil nil nil '() '() '()))
+        (define outer (make_query_block "memcp-tests" (list
+          (list "derived" "memcp-tests" inner false nil nil))
+          (list "*" (list (quote get_column) "derived" false "*" false))
+          true nil nil nil nil nil '() '() '()))
+        (define catalog (binding_collect_string_catalog outer '()))
+        (reduce '("inside" "derived" "ID" "team_id" "val" "renamed")
+          (lambda (ok name) (and ok (has_assoc? catalog name))) true))
+    expect: {result: true}
+
+  - name: "Binding collision discovery reads no missing native catalog"
+    scm: |
+      (begin
+        (define query (make_query_block "unavailable_catalog"
+          (list (list "virtual_source" "unavailable_catalog" "unavailable_table" false nil nil))
+          '("value" 1) true nil nil nil nil nil '() '() '()))
+        (define catalog (binding_collect_string_catalog query '()))
+        (and (has_assoc? catalog "virtual_source") (has_assoc? catalog "unavailable_catalog")
+          (has_assoc? catalog "unavailable_table"))))
+    expect: {result: true}
+
+  - name: "Binding collision discovery retains union group hidden and fact operands"
+    scm: |
+      (begin
+        (define ref (lambda (name) (list (quote get_column) "visible" false name false)))
+        (define source (list "visible" "memcp-tests" "dtef_items" false (ref "join_operand")
+          (sql_relation_declarations "memcp-tests" "dtef_items" nil)))
+        (define stage (make_group_stage "group_name" source (list (ref "domain_operand"))
+          (list (ref "key_operand")) (list "aggregate_name" (ref "aggregate_operand"))
+          (ref "having_operand") (list "output_name" (ref "output_operand"))
+          (list (list (ref "group_order") true)) (ref "group_limit") (ref "group_offset")
+          (list "guard" (ref "group_fact"))))
+        (define branch (make_query_block "memcp-tests" (list source) '("field_name" 1)
+          (ref "where_operand") (list (ref "group_operand")) (ref "query_having")
+          (list (list (ref "query_order") true)) (ref "query_limit") (ref "query_offset")
+          (list "hidden_name" (ref "hidden_operand")) (list stage)
+          (list "guard" (ref "query_fact"))))
+        (define query (make_union_block (quote all) (list branch)
+          (list (list (ref "union_order") true)) (ref "union_limit") (ref "union_offset")
+          (list "guard" (ref "union_fact"))))
+        (define catalog (binding_collect_string_catalog query '()))
+        (reduce '("visible" "ID" "group_name" "field_name" "hidden_name" "join_operand"
+          "domain_operand" "key_operand" "aggregate_name" "aggregate_operand" "having_operand"
+          "output_name" "output_operand" "group_order" "group_limit" "group_offset" "group_fact"
+          "where_operand" "group_operand" "query_having" "query_order" "query_limit" "query_offset"
+          "hidden_operand" "query_fact" "union_order" "union_limit" "union_offset" "union_fact")
+          (lambda (ok name) (and ok (has_assoc? catalog name))) true))
+    expect: {result: true}
+
+  - name: "Nested shadowed aliases and correlated aliases retain separate bindings"
+    sql: |
+      SELECT p.ID,
+        (SELECT p.val FROM dtef_items p WHERE p.ID = 2 LIMIT 1) AS shadowed,
+        (SELECT q.val FROM dtef_items q WHERE q.ID = p.ID LIMIT 1) AS correlated
+      FROM dtef_items p ORDER BY p.ID
+    expect:
+      data:
+        - {ID: 1, shadowed: 200, correlated: 100}
+        - {ID: 2, shadowed: 200, correlated: 200}
+        - {ID: 3, shadowed: 200, correlated: 300}
+
+  - name: "MySQL derived constant export does not overwrite its native input predicate"
+    syntax: mysql
+    sql: |
+      SELECT d.val, d.team_id FROM
+        (SELECT i.val, -1 AS team_id FROM dtef_items i
+         WHERE i.team_id = 10 AND i.val > 50) d
+      WHERE d.team_id = -1
+    expect:
+      rows: 1
+      data: [{val: 100, team_id: -1}]
+
+  - name: "PostgreSQL derived constant export does not overwrite its native input predicate"
+    syntax: psql
+    sql: |
+      SELECT d.val, d.team_id FROM
+        (SELECT i.val, -1 AS team_id FROM dtef_items i
+         WHERE i.team_id = 10 AND i.val > 50) d
+      WHERE d.team_id = -1
+    expect:
+      rows: 1
+      data: [{val: 100, team_id: -1}]
+
+  - name: "TSQL derived constant export does not overwrite its native input predicate"
+    syntax: tsql
+    sql: |
+      SELECT d.val, d.team_id FROM
+        (SELECT i.val, -1 AS team_id FROM dtef_items i
+         WHERE i.team_id = 10 AND i.val > 50) d
+      WHERE d.team_id = -1
+    expect:
+      rows: 1
+      data: [{val: 100, team_id: -1}]
+
+  - name: "Renamed derived exports preserve native input filters and outer residuals"
+    sql: |
+      SELECT d.team_id, d.val FROM
+        (SELECT i.val AS team_id, i.team_id AS val FROM dtef_items i
+         WHERE i.team_id = 10 AND i.val = 100) d
+      WHERE d.team_id = 100 AND d.val = 10
+    expect:
+      rows: 1
+      data: [{team_id: 100, val: 10}]
+
+  - name: "Later APPLY predicate consumes the preceding derived export once"
+    syntax: tsql
+    sql: |
+      SELECT d.val, q.amount FROM
+        (SELECT i.val, -1 AS team_id FROM dtef_items i WHERE i.team_id = 10) d
+      CROSS APPLY
+        (SELECT t.val AS amount FROM dtef_items t
+         WHERE t.team_id = 20 AND d.team_id = -1) q
+    expect:
+      rows: 1
+      data: [{val: 100, amount: 200}]
+
+  - name: "LEFT derived constant export preserves unmatched row null extension"
+    sql: |
+      SELECT u.ID AS id, d.team_id FROM dtef_users u
+      LEFT JOIN
+        (SELECT i.ID, -1 AS team_id FROM dtef_items i WHERE i.team_id = 10) d
+        ON d.ID = u.ID
+      ORDER BY u.ID
+    expect:
+      rows: 2
+      data: [{id: 1, team_id: -1}, {id: 2, team_id: null}]
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS dtef_items"

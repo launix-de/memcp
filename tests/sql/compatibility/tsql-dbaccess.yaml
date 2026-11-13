@@ -9,11 +9,15 @@ metadata:
 setup:
 - scm: (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS dbaccess_reader" nil (newsession) nil))
 - scm: (eval (parse_sql "memcp-tests" "CREATE USER dbaccess_reader IDENTIFIED BY 'pw'" nil (newsession) nil))
+- sql: DROP DATABASE IF EXISTS dbaccess_target
+- sql: CREATE DATABASE dbaccess_target
+- scm: (eval (parse_sql "memcp-tests" "GRANT ALL ON `memcp-tests`.* TO dbaccess_reader" nil))
 cleanup:
 - scm: (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS dbaccess_reader" nil (newsession) nil))
+- sql: DROP DATABASE IF EXISTS dbaccess_target
 test_cases:
 - name: Administrator can access the existing database using mixed case
-  sql: SELECT HAS_DBACCESS(N'MEMCP-TESTS') AS allowed
+  sql: SELECT HAS_DBACCESS(N'DBACCESS_TARGET') AS allowed
   expect: {rows: 1, data: [{allowed: 1}]}
 - name: Invalid and NULL database names return NULL
   sql: SELECT HAS_DBACCESS(N'dbaccess_missing') AS missing, HAS_DBACCESS(NULL) AS null_name, HAS_DBACCESS(N'') AS empty_name
@@ -22,9 +26,10 @@ test_cases:
   sql: DECLARE @db NVARCHAR(128)=DB_NAME(); SELECT HAS_DBACCESS(@db) AS allowed
   expect: {rows: 1, data: [{allowed: 1}]}
 - name: Nonadministrator without a grant receives zero
+  session_id: database-access-permission-probe
   username: dbaccess_reader
   password: pw
-  sql: SELECT HAS_DBACCESS(N'memcp-tests') AS allowed
+  sql: SELECT HAS_DBACCESS(N'dbaccess_target') AS allowed
   expect: {rows: 1, data: [{allowed: 0}]}
 - name: Nonadministrator cannot claim a grant to an invalid database
   username: dbaccess_reader
@@ -32,16 +37,17 @@ test_cases:
   sql: SELECT HAS_DBACCESS(N'dbaccess_missing') AS allowed
   expect: {rows: 1, data: [{allowed: null}]}
 - name: Grant native database access
-  scm: (eval (parse_sql "memcp-tests" "GRANT ALL ON `memcp-tests`.* TO dbaccess_reader" nil (newsession) nil))
+  scm: (eval (parse_sql "memcp-tests" "GRANT ALL ON dbaccess_target.* TO dbaccess_reader" nil (newsession) nil))
 - name: Cached access probe observes a new grant
+  session_id: database-access-permission-probe
   username: dbaccess_reader
   password: pw
-  sql: SELECT HAS_DBACCESS(N'memcp-tests') AS allowed
+  sql: SELECT HAS_DBACCESS(N'dbaccess_target') AS allowed
   expect: {rows: 1, data: [{allowed: 1}]}
 - name: Grant lookup uses the canonical database name
   username: dbaccess_reader
   password: pw
-  sql: SELECT HAS_DBACCESS(N'MEMCP-TESTS') AS allowed
+  sql: SELECT HAS_DBACCESS(N'DBACCESS_TARGET') AS allowed
   expect: {rows: 1, data: [{allowed: 1}]}
 - name: Grant to one database does not grant access to the system database
   username: dbaccess_reader
@@ -51,7 +57,7 @@ test_cases:
 - name: TDS access result is declared INT
   tds:
     statements:
-    - sql: SELECT HAS_DBACCESS(N'MEMCP-TESTS') AS allowed
+    - sql: SELECT HAS_DBACCESS(N'DBACCESS_TARGET') AS allowed
       expect:
         rows: 1
         data: [{allowed: 1}]
@@ -62,14 +68,15 @@ test_cases:
         data: [{allowed: null}]
         column_types: [{name: allowed, type: INT}]
 - name: Revoke native database access
-  scm: (eval (parse_sql "memcp-tests" "REVOKE ALL ON `memcp-tests`.* FROM dbaccess_reader" nil (newsession) nil))
+  scm: (eval (parse_sql "memcp-tests" "REVOKE ALL ON dbaccess_target.* FROM dbaccess_reader" nil (newsession) nil))
 - name: Cached access probe observes revocation
+  session_id: database-access-permission-probe
   username: dbaccess_reader
   password: pw
-  sql: SELECT HAS_DBACCESS(N'memcp-tests') AS allowed
+  sql: SELECT HAS_DBACCESS(N'dbaccess_target') AS allowed
   expect: {rows: 1, data: [{allowed: 0}]}
 - name: Administrator query does not reuse another users denied result
-  sql: SELECT HAS_DBACCESS(N'memcp-tests') AS allowed
+  sql: SELECT HAS_DBACCESS(N'dbaccess_target') AS allowed
   expect: {rows: 1, data: [{allowed: 1}]}
 - name: Database name argument is required
   sql: SELECT HAS_DBACCESS() AS allowed
@@ -77,3 +84,27 @@ test_cases:
 - name: Additional arguments are rejected
   sql: SELECT HAS_DBACCESS(N'memcp-tests',N'root') AS allowed
   expect: {error: true}
+
+- name: TDS mixed-case database login uses the canonical schema
+  tds:
+    database: MEMCP-TESTS
+    statements:
+    - sql: SELECT DB_NAME() AS current_database, HAS_DBACCESS(N'DBACCESS_TARGET') AS allowed
+      expect:
+        rows: 1
+        data: [{current_database: memcp-tests, allowed: 1}]
+    - sql: SELECT DB_NAME() AS current_database
+      prepare: true
+      expect:
+        rows: 1
+        data: [{current_database: memcp-tests}]
+- name: TDS missing database login is rejected
+  tds:
+    database: dbaccess_missing
+    expect_login_error: true
+- name: TDS mixed-case database does not bypass revoked grants
+  tds:
+    database: DBACCESS_TARGET
+    username: dbaccess_reader
+    password: pw
+    expect_login_error: true

@@ -239,11 +239,6 @@ func TestSchemaQueueRetainsCaptureOwnershipAndPublishesNewerDDL(t *testing.T) {
 	}
 	db.persistence = blocking
 	db.schemalock.RLock()
-	older, err := json.Marshal(db)
-	if err != nil {
-		db.schemalock.RUnlock()
-		t.Fatal(err)
-	}
 	db.saveMu.Lock()
 	queueLocked, backendReleased := true, false
 	published := make(chan any, 1)
@@ -261,7 +256,7 @@ func TestSchemaQueueRetainsCaptureOwnershipAndPublishesNewerDDL(t *testing.T) {
 	go func() {
 		defer func() { published <- recover() }()
 		close(started)
-		db.commitSchemaSnapshot(older, true, func() {
+		db.commitSchemaSnapshot(true, func() {
 			db.schemalock.RUnlock()
 			close(released)
 		})

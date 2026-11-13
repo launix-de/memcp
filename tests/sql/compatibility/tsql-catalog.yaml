@@ -206,7 +206,7 @@ test_cases:
       amount: 9
       unlimited: -1
 - name: Alias length metadata preserves native declarations
-  scm: "(begin\n  (define handle (table \"memcp-tests\" false \"catalog_items\" false))\n  (define before (show\
+  scm: "(begin\n  (define handle (table \"memcp-tests\" false \"catalog_items\" false nil))\n  (define before (show\
     \ handle \"column\" \"title\" false))\n  (define length (tsql_column_length \"memcp-tests\" (sql_policy\
     \ \"root\") \"dbo.catalog_items\" \"title\"))\n  (define after (show handle \"column\" \"title\" false))\n\
     \  (list length (before \"Dimensions\")\n    (equal? (before \"RawType\") \"[memcp-tests].[dbo].[catalog_text]\"\
@@ -332,7 +332,6 @@ test_cases:
     data:
     - edition: MemCP
       missing: null
-  noncritical: true
 - name: Named column DEFAULT is a real catalog object
   sql: SELECT name,type_desc,definition,is_system_named FROM sys.default_constraints WHERE parent_object_id=OBJECT_ID(N'dbo.catalog_constraints')
   expect:
@@ -457,7 +456,7 @@ test_cases:
     \  (drop_sql_type_alias \"memcp-tests\" \"catalog_transient_alias\" false nil)\n  (create_sql_type_alias \"memcp-tests\"\
     \ \"catalog_transient_alias\" \"INT\" '() true nil)\n  (define rejected (try (lambda () (begin\n    (sql_execute_formula\
     \ session nil formula (lambda row true) (lambda fields true)) false)) (lambda (_) true)))\n  (if (and rejected\
-    \ (nil? (table \"memcp-tests\" false \"catalog_stale_alias\" false))) true\n    (error \"cached CREATE published\
+    \ (nil? (table \"memcp-tests\" false \"catalog_stale_alias\" false nil))) true\n    (error \"cached CREATE published\
     \ an obsolete alias declaration\")))\n"
   expect:
     result: true
@@ -496,7 +495,7 @@ test_cases:
 - name: Named default is part of the existing column snapshot
   scm: |
     (begin
-      (define c (show (table "memcp-tests" false "ddl_native_defaults" false) "column" "value" false))
+      (define c (show (table "memcp-tests" false "ddl_native_defaults" false nil) "column" "value" false))
       (and (equal? (c "DefaultName") "DF value]native") (equal? (c "Default") 10)))
   expect: {result: true}
 - name: Qualified INSERT consumes the native defaults
@@ -539,8 +538,10 @@ test_cases:
 - name: Duplicate defaults fail before table publication
   sql: CREATE TABLE dbo.ddl_duplicate_defaults(id INT DEFAULT 1 DEFAULT 2)
   expect: {error: true}
+# Ordinary row-free volatile scalar defaults are deferred rather than sampled.
+# A relational input remains outside that scalar declaration contract.
 - name: Volatile compound defaults are not frozen during CREATE
-  sql: CREATE TABLE dbo.ddl_duplicate_defaults(id DATETIME DEFAULT DATEADD(day,1,GETDATE()))
+  sql: CREATE TABLE dbo.ddl_duplicate_defaults(id DATETIME DEFAULT DATEADD(day,1,(SELECT GETDATE())))
   expect: {error: true}
 - name: Remove previous view alteration fixture
   sql: DROP VIEW IF EXISTS dbo.DdlNativeView
@@ -572,7 +573,7 @@ test_cases:
   setup:
   - sql: DROP TABLE IF EXISTS dbo.ddl_alias_primary
   - sql: CREATE TABLE dbo.ddl_alias_primary(value dbo.ddl_alias_text,PRIMARY KEY(value))
-  scm: (not ((show (table "memcp-tests" false "ddl_alias_primary" false) "column" "value" false) "Null"))
+  scm: (not ((show (table "memcp-tests" false "ddl_alias_primary" false nil) "column" "value" false) "Null"))
   expect: {result: true}
   cleanup:
   - sql: DROP TABLE dbo.ddl_alias_primary
@@ -586,7 +587,7 @@ test_cases:
 - name: Native metadata preserves the original qualified alias
   scm: |
     (begin
-      (define column (show (table "memcp-tests" false "ddl_alias_values" false) "column" "label" false))
+      (define column (show (table "memcp-tests" false "ddl_alias_values" false nil) "column" "label" false))
       (and (equal? (column "RawType") "[memcp-tests].[dbo].[ddl_alias_text]")
         (expression_equal? (column "Dimensions") '(8)) (column "Null")))
   expect: {result: true}
@@ -675,10 +676,14 @@ test_cases:
 - name: In-use text alias cannot be dropped
   sql: DROP TYPE dbo.ddl_alias_text
   expect: {error: true}
+- name: Remove previous nested alias view fixture
+  sql: DROP VIEW IF EXISTS dbo.DdlNestedAliasView
 - name: Remove previous alias view fixture
   sql: DROP VIEW IF EXISTS dbo.DdlAliasView
 - name: Alias view persists logical SQL through the existing view catalog
   sql: CREATE VIEW dbo.DdlAliasView AS SELECT number,label FROM dbo.ddl_alias_values
+- name: Nested alias view persists its qualified source declaration
+  sql: CREATE VIEW dbo.DdlNestedAliasView AS SELECT dbo.DdlAliasView.number,dbo.DdlAliasView.label FROM dbo.DdlAliasView
 - name: Alias declarations survive a graceful restart
   sql: SHUTDOWN
   syntax: mysql
@@ -688,6 +693,11 @@ test_cases:
 - name: Restored alias view resolves the producer contract
   sql: SELECT number+1 AS number,label+N'!' AS text FROM dbo.DDLALIASVIEW WHERE number=6
   expect: {rows: 1, data: [{number: 7, text: 'text!'}]}
+- name: Restored nested alias view resolves its saved qualified producer
+  sql: SELECT dbo.DdlNestedAliasView.number+1 AS number,dbo.DdlNestedAliasView.label+N'!' AS text FROM dbo.DdlNestedAliasView WHERE dbo.DdlNestedAliasView.number=6
+  expect: {rows: 1,data: [{number: 7,text: 'text!'}]}
+- name: Remove restored nested alias view
+  sql: DROP VIEW dbo.DdlNestedAliasView
 - name: Remove restored alias view
   sql: DROP VIEW dbo.ddlaliasview
 - name: Restored alias defaults remain native defaults
@@ -895,6 +905,7 @@ test_cases:
     (begin
       (define tx nil)
       (define session (newsession))
+    (session "username" "root")
       (define outcome (try (lambda () (begin
         (map (list (list parse_sql "`memcp-tests`") (list parse_psql "\"memcp-tests\"")
           (list parse_tsql "[memcp-tests]")) (lambda (frontend) (begin

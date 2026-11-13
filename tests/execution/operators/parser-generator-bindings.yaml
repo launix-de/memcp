@@ -1,0 +1,59 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: Parser semantic actions own their local definitions and captured match bindings
+setup: []
+test_cases:
+- name: A bare generator definition does not publish into the grammar creation frame
+  scm: |
+    (begin
+      (define value "outer")
+      (define grammar (parser (define token (regex "[a-z]+")) (define value token)))
+      (list (grammar "alpha") (grammar "beta") (eval (quote value))))
+  expect: {result: [alpha,beta,outer]}
+- name: A bare generator set has the same invocation local definition contract
+  scm: |
+    (begin
+      (define value "outer")
+      (define grammar (parser (define token (regex "[a-z]+")) (set value token)))
+      (list (grammar "alpha") (grammar "beta") (eval (quote value))))
+  expect: {result: [alpha,beta,outer]}
+- name: Replacing a matched name owns a copy of every pattern binding
+  scm: |
+    (begin
+      (define first "outer")
+      (define grammar (parser '((define first (regex "[a-z]+" false false)) (define second (regex "[0-9]+" false false)))
+        (define first (concat first second))))
+      (list (grammar "alpha12") (grammar "beta34") (eval (quote first))))
+  expect: {result: [alpha12,beta34,outer]}
+- name: Closures from two semantic actions retain their own match values
+  scm: |
+    (begin
+      (define read "outer")
+      (define grammar (parser (define token (regex "[a-z]+")) (define read (lambda () token))))
+      (define alpha (grammar "alpha"))
+      (define beta (grammar "beta"))
+      (list (alpha) (beta) (alpha) (eval (quote read))))
+  expect: {result: [alpha,beta,alpha,outer]}
+- name: Concurrent calls to one grammar keep semantic definitions invocation owned
+  scm: |
+    (begin
+      (define value "outer")
+      (define grammar (parser (define token (regex "[0-9]+")) (define value token)))
+      (define results (parallelN 16 (lambda (index)
+        (equal? (grammar (string index)) (string index)))))
+      (and (reduce results (lambda (valid result) (and valid result)) true)
+        (equal? (eval (quote value)) "outer")))
+  expect: {result: true}
+- name: Raw optimized and compiled grammar factories preserve the same local action boundary
+  scm: |
+    (begin
+      (define syntax (scheme "(lambda () (begin (define value \"outer\") (define grammar (parser (define token (regex \"[a-z]+\")) (define value token))) (list grammar (lambda () (eval (quote value))))))"))
+      (define check (lambda (factory) (begin
+        (define pair (factory))
+        (list ((car pair) "alpha") ((car pair) "beta") ((cadr pair))))))
+      (list (check (eval (clone_optimizer_expression syntax)))
+        (check (eval (optimize (clone_optimizer_expression syntax))))
+        (check (jit (eval (optimize (clone_optimizer_expression syntax)))))))
+  expect: {result: [[alpha,beta,outer],[alpha,beta,outer],[alpha,beta,outer]]}
+cleanup: []

@@ -1,0 +1,34 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: Existing Scmer JSON procedure codec preserves numbered frames and lexical reconstruction
+setup: []
+cleanup: []
+test_cases:
+- name: Scmer JSON restores optimized procedure parameters and internal numbered locals
+  scm: |
+    (begin
+      (define original (eval (optimize (scheme
+        "(lambda (value) (begin (define doubled (* value 2)) (+ doubled doubled 2)))"))))
+      (define encoded (json_encode original))
+      (define restored (json_decode_scmer encoded))
+      (and (strlike encoded "%\"var\"%") (equal? (original 3) 14)
+        (equal? (restored 3) 14) (equal? ((jit restored) 5) 22)))
+  expect: {result: true}
+- name: Nested Scmer JSON lambda reconstruction observes a real hostile lexical helper
+  scm: |
+    (begin
+      (define body (list 'lambda (list 'value) (list 'helper 'value)))
+      (define factory (json_decode_scmer (json_encode (list 'lambda (list 'helper) body))))
+      (define restored (factory (lambda (value) (+ value 90))))
+      (equal? (restored 3) 93))
+  expect: {result: true}
+- name: Explicitly closed helper survives the same hostile Scmer JSON reconstruction frame
+  scm: |
+    (begin
+      (define helper (close_procedure (lambda (value) (+ value 7))))
+      (define closed (close_procedure ((lambda (helper) (lambda (value) (helper value))) helper)))
+      (define factory (json_decode_scmer (json_encode (list 'lambda (list 'helper) closed))))
+      (define restored (factory (lambda (value) (+ value 90))))
+      (and (equal? (closed 3) 10) (equal? (restored 3) 10) (equal? ((jit restored) 5) 12)))
+  expect: {result: true}

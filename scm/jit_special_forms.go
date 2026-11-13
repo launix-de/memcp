@@ -28,6 +28,7 @@ var jitProcStackPointerOffsets = [...]int32{
 	int32(unsafe.Offsetof(Proc{}.Compiled)),
 	int32(unsafe.Offsetof(Proc{}.OptimizerMeta)),
 	int32(unsafe.Offsetof(Proc{}.lambdaMeta)),
+	int32(unsafe.Offsetof(Proc{}.syntaxSize)),
 }
 
 func jitSpecialFormList(name string, args []Scmer) []Scmer {
@@ -110,7 +111,10 @@ func jitEmitSpecialDefine(ctx *JITContext, args []Scmer, _ []JITValueDesc, resul
 	}
 	valueTarget := jitAllocTrackedPair(ctx, JITTypeUnknown)
 	previousDefiningSymbol := ctx.DefiningSymbol
-	ctx.DefiningSymbol = binding.Symbol()
+	ctx.DefiningSymbol = ""
+	if jitIsLambdaForm(args[1]) {
+		ctx.DefiningSymbol = binding.Symbol()
+	}
 	value := jitCompileExpr(ctx, args[1], ctx.SliceBase, valueTarget)
 	ctx.DefiningSymbol = previousDefiningSymbol
 	if value.Loc != LocRegPair || value.Reg != valueTarget.Reg || value.Reg2 != valueTarget.Reg2 {
@@ -751,6 +755,12 @@ func jitEmitSpecialLambda(ctx *JITContext, args []Scmer, _ []JITValueDesc, resul
 	if len(args) > 2 {
 		numVars = int(ToInt(args[2]))
 	}
+	var ownedSyntax *procSyntaxSize
+	if len(args) > 3 && args[3].GetTag() == tagAny {
+		if proof, ok := matchingLambdaBindingProof(params, body, numVars, args[3]); ok {
+			ownedSyntax = proof.syntaxSize
+		}
+	}
 	// Raw internal ASTs do not carry the optimizer's explicit local-slot count.
 	// Public parameters still occupy the leading numbered slots: captures must
 	// start after them or the first callback argument aliases the first captured
@@ -780,6 +790,9 @@ func jitEmitSpecialLambda(ctx *JITContext, args []Scmer, _ []JITValueDesc, resul
 		}
 	}
 	for _, symbol := range freeSymbols {
+		if symbol == ctx.DefiningSymbol {
+			continue
+		}
 		if ctx.Env != nil {
 			if _, ok := ctx.Env.Lookup(symbol); ok {
 				capturedSymbols = append(capturedSymbols, symbol)
@@ -890,12 +903,14 @@ func jitEmitSpecialLambda(ctx *JITContext, args []Scmer, _ []JITValueDesc, resul
 		closure := jitBuildNamedLambdaClosure(
 			NewSymbol(string(ctx.DefiningSymbol)), params, body, NewInt(int64(numVars)),
 		)
+		closure.Proc().syntaxSize = ownedSyntax
 		compiled := jitCompileModeDeferred(true, closure, ctx.CompileScope)
 		ctx.TrackImm(compiled)
 		return jitPlaceScmerIntoTarget(ctx, JITValueDesc{Loc: LocImm, Type: tagProc, Imm: compiled}, result)
 	}
 	if ctx.RecursiveLambdas && ctx.DefiningSymbol == "" && len(argExprs) == 3 && !jitExpressionConsumesRuntimeEnv(body) {
 		closure := jitBuildLambdaClosure(params, body, NewInt(int64(numVars)))
+		closure.Proc().syntaxSize = ownedSyntax
 		compiled := jitCompileModeDeferred(true, closure, ctx.CompileScope)
 		ctx.TrackImm(compiled)
 		if result.StackFunc {
@@ -904,21 +919,16 @@ func jitEmitSpecialLambda(ctx *JITContext, args []Scmer, _ []JITValueDesc, resul
 		return jitPlaceScmerIntoTarget(ctx, JITValueDesc{Loc: LocImm, Type: tagProc, Imm: compiled}, result)
 	}
 	builder := jitBuildLambdaClosure
-	if ctx.RecursiveLambdas {
-		if ctx.DefiningSymbol != "" {
-			argExprs = append([]Scmer{NewSlice([]Scmer{NewSymbol("quote"), NewSymbol(string(ctx.DefiningSymbol))})}, argExprs...)
-			if !jitExpressionConsumesRuntimeEnv(body) {
-				builder = jitBuildNamedCompiledLambdaClosure
-			} else {
-				builder = jitBuildNamedLambdaClosure
-			}
-		} else {
-			if !jitExpressionConsumesRuntimeEnv(body) {
-				builder = jitBuildCompiledLambdaClosureWithRuntimeEnv
-				argExprs = argExprs[:3]
-				argExprs = append(argExprs, jitRuntimeCaptureArgExprs(ctx)...)
-			}
+	if ctx.DefiningSymbol != "" {
+		argExprs = append([]Scmer{NewSlice([]Scmer{NewSymbol("quote"), NewSymbol(string(ctx.DefiningSymbol))})}, argExprs...)
+		builder = jitBuildNamedLambdaClosure
+		if ctx.RecursiveLambdas && !consumesRuntimeEnv {
+			builder = jitBuildNamedCompiledLambdaClosure
 		}
+	} else if ctx.RecursiveLambdas && !consumesRuntimeEnv {
+		builder = jitBuildCompiledLambdaClosureWithRuntimeEnv
+		argExprs = argExprs[:3]
+		argExprs = append(argExprs, jitRuntimeCaptureArgExprs(ctx)...)
 	}
 	return jitEmitGoVariadicCallFromExprs(ctx, builder, argExprs, ctx.SliceBase, result, false)
 }

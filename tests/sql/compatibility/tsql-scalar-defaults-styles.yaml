@@ -1,0 +1,132 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Scalar literal defaults and numeric temporal styles preserve declaration and caller-context boundaries
+test_cases:
+- name: A defaulted day and explicit numeric date style compose with scalar branches
+  tds:
+    statements:
+    - sql: |
+        CREATE FUNCTION dbo.make_instant(@year SMALLINT,@month SMALLINT,@day SMALLINT=1) RETURNS DATETIME
+        AS BEGIN
+          DECLARE @text VARCHAR(10),@value DATETIME;
+          SET @text='1.'+LTRIM(@month)+'.'+LTRIM(@year);
+          SET @value=CONVERT(DATETIME,@text,104);
+          IF @day>1 SET @value=DATEADD(day,@day-1,@value);
+          RETURN @value;
+        END
+    - sql: SELECT dbo.make_instant(2025,2,DEFAULT) AS default_value,dbo.make_instant(2025,2,3) AS explicit_value
+      expect:
+        rows: 1
+        data: [{default_value: {temporal_type: datetime, value: '2025-02-01T00:00:00Z'}, explicit_value: {temporal_type: datetime, value: '2025-02-03T00:00:00Z'}}]
+        column_types: [{name: default_value, type: DATETIME}, {name: explicit_value, type: DATETIME}]
+    - sql: SELECT dbo.make_instant(2025,2) AS value
+      expect: {error: true, contains: ['wrong number of scalar function arguments']}
+    - sql: SELECT dbo.make_instant(DEFAULT,2,DEFAULT) AS value
+      expect: {error: true, contains: ['scalar function parameter has no default']}
+- name: Absent defaults and explicit NULL and zero retain separate meanings
+  tds:
+    statements:
+    - sql: CREATE FUNCTION dbo.default_zero(@value INT=0) RETURNS INT AS BEGIN RETURN @value; END
+    - sql: CREATE FUNCTION dbo.default_null(@value INT=NULL) RETURNS INT AS BEGIN RETURN @value; END
+    - sql: CREATE FUNCTION dbo.required_value(@value INT) RETURNS INT AS BEGIN RETURN @value; END
+    - sql: SELECT dbo.default_zero(DEFAULT) AS default_zero,dbo.default_zero(NULL) AS explicit_null,dbo.default_null(DEFAULT) AS default_null,dbo.default_null(0) AS explicit_zero,dbo.required_value(0) AS required_zero
+      expect: {rows: 1, data: [{default_zero: 0, explicit_null: null, default_null: null, explicit_zero: 0, required_zero: 0}]}
+    - sql: SELECT dbo.required_value(DEFAULT) AS value
+      expect: {error: true, contains: ['scalar function parameter has no default']}
+    - sql: SELECT dbo.default_zero() AS value
+      expect: {error: true, contains: ['wrong number of scalar function arguments']}
+- name: Signed numeric literal defaults retain each parameter position
+  tds:
+    statements:
+    - sql: CREATE FUNCTION dbo.signed_defaults(@first INT=+2,@second INT=-3) RETURNS INT AS BEGIN RETURN @first*10+@second; END
+    - sql: SELECT dbo.signed_defaults(DEFAULT,DEFAULT) AS both_defaults,dbo.signed_defaults(0,DEFAULT) AS explicit_first,dbo.signed_defaults(DEFAULT,0) AS explicit_second
+      expect: {rows: 1, data: [{both_defaults: 17, explicit_first: -3, explicit_second: 20}]}
+- name: Literal string defaults receive the declared parameter width
+  tds:
+    statements:
+    - sql: CREATE FUNCTION dbo.default_label(@value NVARCHAR(3)=N'abcdef') RETURNS NVARCHAR(3) AS BEGIN RETURN @value; END
+    - sql: CREATE FUNCTION dbo.default_word(@value NVARCHAR(8)=N'DEFAULT') RETURNS NVARCHAR(8) AS BEGIN RETURN @value; END
+    - sql: SELECT dbo.default_label(DEFAULT) AS bounded,dbo.default_word(DEFAULT) AS keyword_value,dbo.default_word(N'NULL') AS explicit_text
+      expect: {rows: 1, data: [{bounded: abc, keyword_value: DEFAULT, explicit_text: 'NULL'}]}
+- name: Defaults cannot refer to earlier parameters or execute expressions
+  tds:
+    statements:
+    - sql: CREATE FUNCTION dbo.invalid_default(@first INT,@second INT=@first) RETURNS INT AS BEGIN RETURN @second; END
+      expect: {error: true}
+    - sql: CREATE FUNCTION dbo.invalid_default(@value INT=ABS(-2)) RETURNS INT AS BEGIN RETURN @value; END
+      expect: {error: true}
+    - sql: CREATE FUNCTION dbo.invalid_default(@value INT=1+2) RETURNS INT AS BEGIN RETURN @value; END
+      expect: {error: true}
+    - sql: CREATE FUNCTION dbo.invalid_default(@value DATETIME=GETDATE()) RETURNS DATETIME AS BEGIN RETURN @value; END
+      expect: {error: true}
+    - sql: CREATE FUNCTION dbo.invalid_default(@value INT=2) RETURNS INT AS BEGIN RETURN @value; END
+    - sql: SELECT dbo.invalid_default(DEFAULT) AS value
+      expect: {rows: 1, data: [{value: 2}]}
+- name: Explicit numeric styles ignore caller language and DATEFORMAT
+  tds:
+    statements:
+    - sql: SET LANGUAGE Deutsch
+    - sql: SET DATEFORMAT ymd
+    - sql: SELECT dbo.make_instant(2025,2,DEFAULT) AS value
+      expect: {rows: 1, data: [{value: {temporal_type: datetime, value: '2025-02-01T00:00:00Z'}}]}
+    - sql: SET LANGUAGE us_english
+    - sql: SET DATEFORMAT dmy
+    - sql: SELECT dbo.make_instant(2025,2,3) AS value
+      expect: {rows: 1, data: [{value: {temporal_type: datetime, value: '2025-02-03T00:00:00Z'}}]}
+    - sql: SELECT CONVERT(DATETIME,N'2025.2.1',102) AS year_first,CONVERT(DATETIME,N'2/1/2025',101) AS month_first,CONVERT(DATETIME,N'1/2/2025',103) AS day_first
+      expect:
+        rows: 1
+        data: [{year_first: {temporal_type: datetime, value: '2025-02-01T00:00:00Z'}, month_first: {temporal_type: datetime, value: '2025-02-01T00:00:00Z'}, day_first: {temporal_type: datetime, value: '2025-02-01T00:00:00Z'}}]
+- name: A literal text default enters the same explicit-style body as a supplied value
+  tds:
+    statements:
+    - sql: CREATE FUNCTION dbo.parse_instant(@text VARCHAR(10)='31.12.2025') RETURNS DATETIME AS BEGIN RETURN CONVERT(DATETIME,@text,104); END
+    - sql: SELECT dbo.parse_instant(DEFAULT) AS default_value,dbo.parse_instant('1.2.2025') AS explicit_value,dbo.parse_instant(NULL) AS missing_value
+      expect:
+        rows: 1
+        data: [{default_value: {temporal_type: datetime, value: '2025-12-31T00:00:00Z'}, explicit_value: {temporal_type: datetime, value: '2025-02-01T00:00:00Z'}, missing_value: null}]
+    - sql: SELECT dbo.parse_instant('01.2.2025') AS padded_day,dbo.parse_instant('1.02.2025') AS padded_month,dbo.parse_instant('01.02.2025') AS padded_both,CONVERT(VARCHAR(10),dbo.parse_instant('1.2.2025'),104) AS formatted
+      expect:
+        rows: 1
+        data: [{padded_day: {temporal_type: datetime, value: '2025-02-01T00:00:00Z'}, padded_month: {temporal_type: datetime, value: '2025-02-01T00:00:00Z'}, padded_both: {temporal_type: datetime, value: '2025-02-01T00:00:00Z'}, formatted: '01.02.2025'}]
+    - sql: SELECT dbo.parse_instant('not-a-date') AS value
+      expect: {error: true, contains: ['invalid styled calendar input']}
+    - sql: SELECT dbo.parse_instant('31.2.2025') AS value
+      expect: {error: true, contains: ['invalid styled calendar input']}
+    - sql: SELECT dbo.parse_instant('0.2.2025') AS value
+      expect: {error: true, contains: ['invalid styled calendar input']}
+    - sql: SELECT dbo.parse_instant('1.13.2025') AS value
+      expect: {error: true, contains: ['invalid styled calendar input']}
+    - sql: SELECT dbo.parse_instant('1..2.2025') AS value
+      expect: {error: true, contains: ['invalid styled calendar input']}
+- name: Language-sensitive and unstyled body conversions retain their explicit context requirement
+  tds:
+    statements:
+    - sql: CREATE FUNCTION dbo.contextual_style(@text VARCHAR(32)) RETURNS DATETIME AS BEGIN RETURN CONVERT(DATETIME,@text,100); END
+    - sql: CREATE FUNCTION dbo.contextual_unstyled(@text VARCHAR(32)) RETURNS DATETIME AS BEGIN RETURN CAST(@text AS DATETIME); END
+    - sql: SET LANGUAGE us_english; SET DATEFORMAT mdy
+    - sql: SELECT dbo.contextual_style('Jan 03 2025') AS styled_value,dbo.contextual_unstyled('02/03/2025') AS unstyled_value
+      expect:
+        rows: 1
+        data: [{styled_value: {temporal_type: datetime,value: '2025-01-03T00:00:00Z'},unstyled_value: {temporal_type: datetime,value: '2025-02-03T00:00:00Z'}}]
+- name: Quoted literal defaults retain the definition QUOTED_IDENTIFIER setting
+  tds:
+    statements:
+    - sql: SET QUOTED_IDENTIFIER OFF
+    - sql: CREATE FUNCTION dbo.quoted_default(@value NVARCHAR(8)="off") RETURNS NVARCHAR(8) AS BEGIN RETURN @value; END
+    - sql: SET QUOTED_IDENTIFIER ON
+    - sql: SELECT dbo.quoted_default(DEFAULT) AS default_value,dbo.quoted_default(N'on') AS explicit_value
+      expect: {rows: 1, data: [{default_value: 'off', explicit_value: 'on'}]}
+- name: Restart retains literal default presence and fixed source signatures
+  action: restart
+- name: Reloaded defaults and explicit-style functions retain their original behavior
+  tds:
+    statements:
+    - sql: SELECT dbo.default_zero(DEFAULT) AS default_zero,dbo.default_zero(NULL) AS explicit_null,dbo.default_null(DEFAULT) AS default_null,dbo.quoted_default(DEFAULT) AS quoted_value
+      expect: {rows: 1, data: [{default_zero: 0, explicit_null: null, default_null: null, quoted_value: 'off'}]}
+    - sql: SELECT dbo.make_instant(2025,2,DEFAULT) AS value
+      expect: {rows: 1, data: [{value: {temporal_type: datetime, value: '2025-02-01T00:00:00Z'}}]}

@@ -1,0 +1,138 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  description: Freshness summaries respect lexical stage catalogs repeated readers and volatile dependencies
+setup:
+- syntax: mysql
+  sql: CREATE TABLE freshness_scope_rows(id INT PRIMARY KEY)
+- syntax: mysql
+  sql: INSERT INTO freshness_scope_rows VALUES(1),(2),(3)
+test_cases:
+- name: Repeated stage readers preserve a deterministic summary
+  scm: |
+    (begin
+    (define block (lambda (stages relation fields)
+      (make_query_block "memcp-tests"
+        (if (nil? relation) '() (list (list "s" "memcp-tests" relation false nil nil)))
+        fields true nil nil nil nil nil nil stages nil)))
+    (define stage (lambda (id input)
+      (make_group_stage id input '() '() (list (list 1 '+ 0)) nil '() '() nil nil '())))
+    (define stable (stage "shared" (block '() nil '("value" 1))))
+    (define query (block (list stable) (make_stage_output_relation "shared") '("value" 1)))
+    (list (query_requires_fresh_invocation? query nil)
+      (query_result_reusable_using_stages? (list stable) query)))
+  expect: {result: [false, true]}
+- name: A volatile transitive producer remains fresh through repeated readers
+  scm: |
+    (begin
+    (define block (lambda (stages relation fields)
+      (make_query_block "memcp-tests"
+        (if (nil? relation) '() (list (list "s" "memcp-tests" relation false nil nil)))
+        fields true nil nil nil nil nil nil stages nil)))
+    (define stage (lambda (id input)
+      (make_group_stage id input '() '() (list (list 1 '+ 0)) nil '() '() nil nil '())))
+    (define leaf (stage "volatile" (block '() nil (list "value" (list 'uuid)))))
+    (define parent (stage "consumer" (block '() (make_stage_output_relation "volatile") '("value" 1))))
+    (define query (block (list parent leaf) (make_stage_output_relation "consumer") '("value" 1)))
+    (list (query_requires_fresh_invocation? query nil)
+      (query_result_reusable_using_stages? (list parent leaf) query)))
+  expect: {result: [true, false]}
+- name: Nested declaration scopes may reuse an ancestor stage identifier without a cycle
+  scm: |
+    (begin
+    (define block (lambda (stages relation fields)
+      (make_query_block "memcp-tests"
+        (if (nil? relation) '() (list (list "s" "memcp-tests" relation false nil nil)))
+        fields true nil nil nil nil nil nil stages nil)))
+    (define stage (lambda (id input)
+      (make_group_stage id input '() '() (list (list 1 '+ 0)) nil '() '() nil nil '())))
+    (define leaf (stage "same" (block '() nil '("value" 1))))
+    (define inner (block (list leaf) (make_stage_output_relation "same") '("value" 1)))
+    (define outer (stage "same" inner))
+    (query_requires_fresh_invocation? (block (list outer) (make_stage_output_relation "same") '("value" 1)) nil))
+  expect: {result: false}
+- name: Sibling stage identifiers retain their own volatile declarations
+  scm: |
+    (begin
+    (define block (lambda (stages relation fields)
+      (make_query_block "memcp-tests"
+        (if (nil? relation) '() (list (list "s" "memcp-tests" relation false nil nil)))
+        fields true nil nil nil nil nil nil stages nil)))
+    (define stage (lambda (id input)
+      (make_group_stage id input '() '() (list (list 1 '+ 0)) nil '() '() nil nil '())))
+    (define pure (stage "same" (block '() nil '("value" 1))))
+    (define volatile (stage "same" (block '() nil (list "value" (list 'uuid)))))
+    (define left (block (list pure) (make_stage_output_relation "same") '("value" 1)))
+    (define right (block (list volatile) (make_stage_output_relation "same") '("value" 1)))
+    (query_requires_fresh_invocation? (make_union_block 'all (list left right) '() nil nil nil) nil))
+  expect: {result: true}
+- name: Local declarations shadow an external stage catalog
+  scm: |
+    (begin
+    (define block (lambda (stages relation fields)
+      (make_query_block "memcp-tests"
+        (if (nil? relation) '() (list (list "s" "memcp-tests" relation false nil nil)))
+        fields true nil nil nil nil nil nil stages nil)))
+    (define stage (lambda (id input)
+      (make_group_stage id input '() '() (list (list 1 '+ 0)) nil '() '() nil nil '())))
+    (define outer (stage "same" (block '() nil (list "value" (list 'uuid)))))
+    (define inner (stage "same" (block '() nil '("value" 1))))
+    (query_requires_fresh_invocation? (block (list inner) (make_stage_output_relation "same") '("value" 1))
+      (lambda (_id) outer)))
+  expect: {result: false}
+- name: An external declaration resolves dependencies in its own declaring catalog
+  scm: |
+    (begin
+    (define block (lambda (stages relation fields)
+      (make_query_block "memcp-tests"
+        (if (nil? relation) '() (list (list "s" "memcp-tests" relation false nil nil)))
+        fields true nil nil nil nil nil nil stages nil)))
+    (define stage (lambda (id input)
+      (make_group_stage id input '() '() (list (list 1 '+ 0)) nil '() '() nil nil '())))
+    (define external_b (stage "B" (block '() nil (list "value" (list 'uuid)))))
+    (define external_a (stage "A" (block '() (make_stage_output_relation "B") '("value" 1))))
+    (define local_b (stage "B" (block '() nil '("value" 1))))
+    (define lookup (lambda (id)
+      (if (equal? id "A") external_a (equal? id "B") external_b nil)))
+    (query_requires_fresh_invocation?
+      (block (list local_b) (make_stage_output_relation "A") '("value" 1)) lookup))
+  expect: {result: true}
+- name: Real dependency cycles and unresolved complete catalogs remain nonreusable
+  scm: |
+    (begin
+    (define block (lambda (stages relation fields)
+      (make_query_block "memcp-tests"
+        (if (nil? relation) '() (list (list "s" "memcp-tests" relation false nil nil)))
+        fields true nil nil nil nil nil nil stages nil)))
+    (define stage (lambda (id input)
+      (make_group_stage id input '() '() (list (list 1 '+ 0)) nil '() '() nil nil '())))
+    (define cyclic (stage "cycle" (block '() (make_stage_output_relation "cycle") '("value" 1))))
+    (list (query_requires_fresh_invocation? (block (list cyclic) (make_stage_output_relation "cycle") '("value" 1)) nil)
+      (query_requires_fresh_invocation? (make_stage_output_relation "unknown") (lambda (_id) nil))
+      (query_requires_fresh_invocation? (make_stage_output_relation "unknown") nil)
+      (query_requires_fresh_invocation? (list 'quote (list 'uuid)) nil)))
+  expect: {result: [true, true, false, false]}
+- name: Native volatile values remain distinct for each input row
+  syntax: mysql
+  sql: SELECT COUNT(DISTINCT UUID()) AS n FROM freshness_scope_rows
+  expect: {rows: 1,data: [{n: 3}]}
+- name: TSQL volatile values remain distinct for each input row
+  syntax: tsql
+  sql: SELECT COUNT(DISTINCT NEWID()) AS n FROM freshness_scope_rows
+  expect: {rows: 1,data: [{n: 3}]}
+- name: Reused ordinary aggregate observes a new native source row
+  syntax: mysql
+  sql: SELECT SUM(id) AS n FROM freshness_scope_rows
+  expect: {rows: 1,data: [{n: 6}]}
+- name: Source growth remains visible to subsequent reusable aggregates
+  syntax: mysql
+  sql: INSERT INTO freshness_scope_rows VALUES(4)
+  expect: {affected_rows: 1}
+- name: Current aggregate retains all input rows after source growth
+  syntax: mysql
+  sql: SELECT SUM(id) AS n FROM freshness_scope_rows
+  expect: {rows: 1,data: [{n: 10}]}
+cleanup:
+- syntax: mysql
+  sql: DROP TABLE IF EXISTS freshness_scope_rows

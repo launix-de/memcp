@@ -1,0 +1,129 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: Ordinary MySQL table and trigger DDL reports zero on HTTP and native
+    wire
+  isolated: true
+  requires_mysql: true
+setup:
+- sql: CREATE TABLE ddl_completion_source(id INT PRIMARY KEY)
+- sql: CREATE TABLE ddl_completion_audit(id INT)
+cleanup:
+- sql: DROP TRIGGER IF EXISTS ddl_completion_wire_insert
+- sql: DROP TRIGGER IF EXISTS ddl_completion_after_insert
+- sql: DROP TABLE IF EXISTS ddl_completion_created
+- sql: DROP TABLE IF EXISTS ddl_completion_wire
+- sql: DROP TABLE IF EXISTS ddl_completion_audit
+- sql: DROP TABLE IF EXISTS ddl_completion_source
+test_cases:
+- name: HTTP reports the zero-count successful MySQL table declaration
+  sql: CREATE TABLE ddl_completion_created(id INT PRIMARY KEY,value INT)
+  expect:
+    affected_rows: 0
+    result_contains: '"affected_rows"'
+- name: HTTP reports zero-count reuse without replacing an existing declaration
+  sql: CREATE TABLE IF NOT EXISTS ddl_completion_created(other INT)
+  expect:
+    affected_rows: 0
+    result_contains: '"affected_rows"'
+- name: Existing schema remains writable after a reused declaration
+  sql: INSERT INTO ddl_completion_created(id,value) VALUES(1,7)
+  expect:
+    affected_rows: 1
+- name: Native declaration completion agrees with stored schema and rows
+  sql: SELECT id,value FROM ddl_completion_created
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      value: 7
+- name: A rejected duplicate definition remains an error
+  sql: CREATE TABLE ddl_completion_created(other INT)
+  expect:
+    error: true
+- name: Rejected duplicate creation preserves the original declaration and row
+  sql: SELECT id,value FROM ddl_completion_created
+  expect: {rows: 1,data: [{id: 1,value: 7}]}
+- name: HTTP reports zero-count MySQL trigger installation
+  sql: CREATE TRIGGER ddl_completion_after_insert AFTER INSERT ON ddl_completion_source
+    FOR EACH ROW INSERT INTO ddl_completion_audit(id) VALUES(NEW.id)
+  expect:
+    affected_rows: 0
+    result_contains: '"affected_rows"'
+- name: The completed trigger installation affects its actual source write
+  sql: INSERT INTO ddl_completion_source VALUES(1)
+  expect:
+    affected_rows: 1
+- name: Trigger readback proves installation completed before acknowledgement
+  sql: SELECT id FROM ddl_completion_audit
+  expect:
+    rows: 1
+    data:
+    - id: 1
+- name: A trigger without a native source relation cannot complete
+  sql: CREATE TRIGGER ddl_completion_missing AFTER INSERT ON ddl_completion_absent
+    FOR EACH ROW INSERT INTO ddl_completion_audit(id) VALUES(NEW.id)
+  expect:
+    error: true
+- name: HTTP reports the zero-count MySQL table removal result
+  sql: DROP TABLE ddl_completion_created
+  expect:
+    affected_rows: 0
+    result_contains: '"affected_rows"'
+- name: Completed table removal makes the relation unavailable
+  sql: SELECT id FROM ddl_completion_created
+  expect:
+    error: true
+- name: A failed native table removal does not become a completion
+  sql: DROP TABLE ddl_completion_created
+  expect:
+    error: true
+- name: Conditional removal preserves the zero-count MySQL acknowledgement
+  sql: DROP TABLE IF EXISTS ddl_completion_created
+  expect:
+    affected_rows: 0
+    result_contains: '"affected_rows"'
+- name: MySQL native completion counts agree with schema and row readback
+  mysql:
+    statements:
+    - sql: CREATE TABLE ddl_completion_wire(id INT)
+      expect:
+        affected_rows: 0
+    - sql: CREATE TABLE IF NOT EXISTS ddl_completion_wire(other INT)
+      expect:
+        affected_rows: 0
+    - sql: CREATE TABLE ddl_completion_wire(other INT)
+      expect: {error: true}
+    - sql: CREATE TRIGGER ddl_completion_wire_insert AFTER INSERT ON ddl_completion_wire
+        FOR EACH ROW INSERT INTO ddl_completion_audit(id) VALUES(NEW.id)
+      expect:
+        affected_rows: 0
+    - sql: INSERT INTO ddl_completion_wire(id) VALUES(3)
+      expect:
+        affected_rows: 1
+    - sql: SELECT id FROM ddl_completion_audit WHERE id=3
+      expect:
+        rows: 1
+        data:
+        - id: 3
+    - sql: DROP TRIGGER ddl_completion_wire_insert
+      expect:
+        affected_rows: 0
+    - sql: INSERT INTO ddl_completion_wire(id) VALUES(4)
+      expect:
+        affected_rows: 1
+    - sql: SELECT id FROM ddl_completion_audit WHERE id=4
+      expect:
+        rows: 0
+    - sql: SELECT id FROM ddl_completion_wire ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 3
+        - id: 4
+    - sql: DROP TABLE ddl_completion_wire
+      expect:
+        affected_rows: 0
+    - sql: DROP TABLE ddl_completion_wire
+      expect:
+        error: true

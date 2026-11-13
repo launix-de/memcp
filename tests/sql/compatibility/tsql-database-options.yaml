@@ -1,0 +1,142 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  requires_tds: true
+  isolated: true
+  description: Virtual database file labels and bounded options preserve native database lifecycle
+setup:
+  - sql: DROP DATABASE IF EXISTS database_profile
+  - sql: DROP DATABASE IF EXISTS database_rejected
+cleanup:
+  - scm: (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS database_profile_reader" nil (newsession) nil))
+  - sql: DROP DATABASE IF EXISTS database_profile
+  - sql: DROP DATABASE IF EXISTS database_rejected
+test_cases:
+  - name: Virtual data and log labels create a real native database without preallocation
+    sql: |
+      CREATE DATABASE [database_profile]
+        ON (NAME=profile_data,FILENAME=N'C:\MemCP\Data\profile.mdf',SIZE=300)
+        LOG ON (NAME=profile_log,FILENAME=N'C:\MemCP\Data\profile.ldf',SIZE=150);
+    expect: {affected_rows: 0}
+  - name: Newly created database exposes the bounded default profile
+    sql: SELECT is_auto_close_on,is_auto_shrink_on,recovery_model_desc,is_trustworthy_on FROM sys.databases WHERE name=N'database_profile'
+    expect: {rows: 1,data: [{is_auto_close_on: false,is_auto_shrink_on: false,recovery_model_desc: SIMPLE,is_trustworthy_on: false}]}
+  - name: Native database supports ordinary tables and rows
+    sql: CREATE TABLE database_profile.profile_rows(id INT PRIMARY KEY); INSERT database_profile.profile_rows VALUES(1); SELECT id FROM database_profile.profile_rows
+    expect: {rows: 1,data: [{id: 1}]}
+  - name: Observed option sequence remains in the explicit compatibility profile
+    sql: |
+      ALTER DATABASE [database_profile] SET RECOVERY SIMPLE;
+      ALTER DATABASE [database_profile] SET AUTO_CLOSE OFF;
+      ALTER DATABASE [database_profile] SET AUTO_SHRINK OFF;
+      ALTER DATABASE [database_profile] SET TRUSTWORTHY ON;
+    expect: {affected_rows: 0}
+  - name: Reused catalog query reflects the inert flag without changing resource policies
+    sql: SELECT is_auto_close_on,is_auto_shrink_on,recovery_model_desc,is_trustworthy_on FROM sys.databases WHERE name=N'database_profile'
+    expect: {rows: 1,data: [{is_auto_close_on: false,is_auto_shrink_on: false,recovery_model_desc: SIMPLE,is_trustworthy_on: true}]}
+  - name: Trust flag does not authorize arbitrary process execution
+    sql: EXEC xp_cmdshell N'whoami'
+    expect: {error: true}
+  - name: Trust flag does not authorize arbitrary host registry reads
+    sql: EXEC xp_instance_regread N'HKEY_LOCAL_MACHINE',N'SOFTWARE\Microsoft\Windows NT\CurrentVersion',N'SystemRoot'
+    expect: {error: true}
+  - name: Seed a reader whose only native grant is the test database
+    scm: |
+      (begin
+        (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS database_profile_reader" nil (newsession) nil))
+        (eval (parse_sql "memcp-tests" "CREATE USER database_profile_reader IDENTIFIED BY 'pw'" nil (newsession) nil))
+        (eval (parse_sql "memcp-tests" "GRANT ALL ON database_profile.* TO database_profile_reader" nil (newsession) nil)))
+  - name: Frontend route admission does not add native database membership
+    sql: GRANT CONNECT TO database_profile_reader
+    expect: {affected_rows: 0}
+  - name: Native membership admits the profile reader to the query database
+    scm: (eval (parse_sql "memcp-tests" "GRANT ALL ON `memcp-tests`.* TO database_profile_reader" nil))
+  - name: Database reader sees the inert flag through the filtered catalog
+    username: database_profile_reader
+    password: pw
+    sql: SELECT is_trustworthy_on FROM sys.databases WHERE name=N'database_profile'
+    expect: {rows: 1,data: [{is_trustworthy_on: true}]}
+  - name: Trust flag never grants a database reader native administrator policy
+    username: database_profile_reader
+    password: pw
+    sql: SELECT IS_SRVROLEMEMBER(N'sysadmin') AS native_admin
+    expect: {rows: 1,data: [{native_admin: 0}]}
+  - name: A native database member can change its inert compatibility options
+    username: database_profile_reader
+    password: pw
+    sql: ALTER DATABASE database_profile SET TRUSTWORTHY OFF
+    expect: {affected_rows: 0}
+    cleanup:
+      - sql: ALTER DATABASE database_profile SET TRUSTWORTHY ON
+  - name: Unsupported recovery guarantees fail explicitly
+    sql: ALTER DATABASE database_profile SET RECOVERY FULL
+    expect: {error: true,contains: unsupported database option profile}
+  - name: Unsupported automatic close cannot silently change resources
+    sql: ALTER DATABASE database_profile SET AUTO_CLOSE ON
+    expect: {error: true,contains: unsupported database option profile}
+  - name: Unsupported automatic shrink cannot silently change resources
+    sql: ALTER DATABASE database_profile SET AUTO_SHRINK ON
+    expect: {error: true,contains: unsupported database option profile}
+  - name: Typed catalog is available over the real TDS protocol
+    tds:
+      statements:
+        - sql: SELECT is_auto_close_on,is_auto_shrink_on,recovery_model_desc,is_trustworthy_on FROM sys.databases WHERE name=N'database_profile'
+          expect:
+            rows: 1
+            data: [{is_auto_close_on: false,is_auto_shrink_on: false,recovery_model_desc: SIMPLE,is_trustworthy_on: true}]
+            column_types:
+              - {name: is_auto_close_on,type: BIT}
+              - {name: is_auto_shrink_on,type: BIT}
+              - {name: recovery_model_desc,type: NVARCHAR,size: 120}
+              - {name: is_trustworthy_on,type: BIT}
+  - name: Host filesystem labels fail before native creation
+    sql: CREATE DATABASE database_rejected ON (NAME=data_file,FILENAME=N'/tmp/profile.mdf',SIZE=1)
+    expect: {error: true}
+  - name: Rejected file label creates no database
+    sql: SELECT name FROM sys.databases WHERE name=N'database_rejected'
+    expect: {rows: 0}
+  - name: Invalid log label is checked before publishing a valid data label
+    sql: CREATE DATABASE database_rejected ON (NAME=data_file,FILENAME=N'C:\MemCP\Data\profile.mdf') LOG ON(NAME=log_file,FILENAME=N'C:\Windows\profile.ldf')
+    expect: {error: true}
+  - name: Invalid trailing log declaration leaves no partial database
+    sql: SELECT name FROM sys.databases WHERE name=N'database_rejected'
+    expect: {rows: 0}
+  - name: Parent traversal in a virtual filename is rejected
+    sql: CREATE DATABASE database_rejected ON(NAME=data_file,FILENAME=N'C:\MemCP\Data\..\Data\profile.mdf')
+    expect: {error: true}
+  - name: Alternate stream syntax cannot become a virtual data label
+    sql: CREATE DATABASE database_rejected ON(NAME=data_file,FILENAME=N'C:\MemCP\Data\profile.mdf:payload')
+    expect: {error: true}
+  - name: Duplicate file options are rejected before mutation
+    sql: CREATE DATABASE database_rejected ON(NAME=data_file,FILENAME=N'C:\MemCP\Data\profile.mdf',SIZE=1,SIZE=2)
+    expect: {error: true}
+  - name: Invalid SIZE hint is not treated as successful allocation
+    sql: CREATE DATABASE database_rejected ON(NAME=data_file,FILENAME=N'C:\MemCP\Data\profile.mdf',SIZE=-1)
+    expect: {error: true}
+  - name: Missing option targets are never silently created
+    sql: ALTER DATABASE database_rejected SET TRUSTWORTHY ON
+    expect: {error: true,contains: database does not exist}
+  - name: Compatibility flag persists through the native catalog WAL
+    syntax: mysql
+    sql: SHUTDOWN
+    restart_timeout: 60
+    expect: {rows: 0}
+  - name: Persisted compatibility flag survives restart
+    sql: SELECT is_trustworthy_on FROM sys.databases WHERE name=N'database_profile'
+    expect: {rows: 1,data: [{is_trustworthy_on: true}]}
+  - name: Turning the flag off updates its declared state
+    sql: ALTER DATABASE database_profile SET TRUSTWORTHY OFF
+    expect: {affected_rows: 0}
+  - name: Reused catalog sees the flag disabled
+    sql: SELECT is_trustworthy_on FROM sys.databases WHERE name=N'database_profile'
+    expect: {rows: 1,data: [{is_trustworthy_on: false}]}
+  - name: Enable the inert flag before testing namespace retirement
+    sql: ALTER DATABASE database_profile SET TRUSTWORTHY ON
+    expect: {affected_rows: 0}
+  - name: Native drop and recreation retire previous frontend option metadata
+    sql: DROP DATABASE database_profile; CREATE DATABASE database_profile
+    expect: {affected_rows: 0}
+  - name: A new native namespace starts with default options
+    sql: SELECT is_trustworthy_on FROM sys.databases WHERE name=N'database_profile'
+    expect: {rows: 1,data: [{is_trustworthy_on: false}]}

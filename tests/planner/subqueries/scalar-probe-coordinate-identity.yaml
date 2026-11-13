@@ -1,0 +1,42 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  description: Complete scalar invocation coordinates retain typed expression identity
+test_cases:
+- name: Distinct NULL zero and text coordinates execute with their own bound values
+  scm: |
+    (begin
+      (define column (list 'get_column "caller" false "flag" false))
+      (define null_key (list 'if column nil 1))
+      (define zero_key (list 'if column 0 1))
+      (define text_key (list 'if column "0" 1))
+      (define coordinates (list null_key zero_key text_key))
+      (define parameters (list 'null_value 'zero_value 'text_value))
+      (define bindings (scalar_query_probe_param_index coordinates coordinates parameters))
+      (define program (rewrite_scalar_query_probe_params bindings (cons 'list coordinates)))
+      (eval (list (list 'lambda parameters program) nil 0 "0")))
+  expect: {data: [[null,0,"0"]]}
+- name: Binding complete coordinates never changes quoted user data
+  scm: |
+    (begin
+      (define column (list 'get_column "caller" false "flag" false))
+      (define null_key (list 'if column nil 1))
+      (define zero_key (list 'if column 0 1))
+      (define coordinates (list null_key zero_key))
+      (define bindings (scalar_query_probe_param_index coordinates coordinates (list 'null_value 'zero_value)))
+      (define datum (list 'quote coordinates))
+      (define preserved (eval (rewrite_scalar_query_probe_params bindings datum)))
+      (list (nth (nth preserved 0) 2) (nth (nth preserved 1) 2)))
+  expect: {data: [[null,0]]}
+- name: Binding an entire computed coordinate does not capture its constituent column
+  scm: |
+    (begin
+      (define column (list 'get_column "caller" false "id" false))
+      (define coordinate (list '+ column 1))
+      (define bindings (scalar_query_probe_param_index (list coordinate) (list coordinate) (list 'computed_value)))
+      (define read_column (rewrite_scalar_query_probe_params bindings column))
+      (define getter (list 'lambda (list '_alias '_alias_ic '_column '_column_ic) 7))
+      (eval (list (list 'lambda (list 'computed_value)
+        (list (list 'lambda (list 'get_column) read_column) getter)) 42)))
+  expect: {data: [7]}

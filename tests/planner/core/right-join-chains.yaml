@@ -1,0 +1,151 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  requires_tds: true
+  description: Chained RIGHT joins preserve complete nullable inputs and declaration order
+setup:
+- sql: CREATE TABLE right_a(aid INT,ak INT,ad INT,label NVARCHAR(8))
+- sql: CREATE TABLE right_b(bid INT,bk INT,bd INT)
+- sql: CREATE TABLE right_c(cid INT,ck INT,cd INT)
+- sql: CREATE TABLE right_d(did INT,dk INT,dd INT)
+- sql: INSERT right_a VALUES(1,7,1,N'first'),(2,7,1,N'second'),(3,NULL,1,N'unknown'),(NULL,9,2,N'actual')
+- sql: INSERT right_b VALUES(10,7,1),(11,8,1),(12,9,2),(NULL,10,2)
+- sql: INSERT right_c VALUES(20,7,1),(21,8,1),(22,8,2),(23,9,2),(24,NULL,1),(25,10,2)
+- sql: INSERT right_d VALUES(30,7,1),(31,8,1),(32,8,2),(33,11,1)
+cleanup:
+- sql: DROP VIEW IF EXISTS dbo.right_chain_view
+- sql: DROP TABLE IF EXISTS right_d
+- sql: DROP TABLE IF EXISTS right_c
+- sql: DROP TABLE IF EXISTS right_b
+- sql: DROP TABLE IF EXISTS right_a
+test_cases:
+- name: Two RIGHT suffixes preserve real nulls and the whole missing earlier input
+  sql: |
+    SELECT a.aid,b.bid,c.cid,a.label FROM right_a a
+    RIGHT OUTER JOIN right_b b ON a.ak=b.bk
+    RIGHT OUTER JOIN right_c c ON b.bk=c.ck AND b.bd=c.cd
+    ORDER BY c.cid,a.aid
+  expect:
+    rows: 7
+    data: [{aid: 1,bid: 10,cid: 20,label: first},{aid: 2,bid: 10,cid: 20,label: second},
+      {aid: null,bid: 11,cid: 21,label: null},{aid: null,bid: null,cid: 22,label: null},
+      {aid: null,bid: 12,cid: 23,label: actual},{aid: null,bid: null,cid: 24,label: null},
+      {aid: null,bid: null,cid: 25,label: null}]
+- name: A later ON may inspect a column of the earliest nullable relation
+  sql: |
+    SELECT a.aid,b.bid,c.cid FROM right_a a RIGHT JOIN right_b b ON a.ak=b.bk
+    RIGHT JOIN right_c c ON b.bk=c.ck AND a.aid=2 ORDER BY c.cid
+  expect:
+    rows: 6
+    data: [{aid: 2,bid: 10,cid: 20},{aid: null,bid: null,cid: 21},
+      {aid: null,bid: null,cid: 22},{aid: null,bid: null,cid: 23},
+      {aid: null,bid: null,cid: 24},{aid: null,bid: null,cid: 25}]
+- name: WHERE cannot replace rejected complete RIGHT matches with a null tuple
+  sql: |
+    SELECT c.cid FROM right_a a RIGHT JOIN right_b b ON a.ak=b.bk
+    RIGHT JOIN right_c c ON b.bk=c.ck AND b.bd=c.cd WHERE c.cid=20 AND a.aid IS NULL
+  expect: {rows: 0}
+- name: A first ON cannot see an alias introduced by a later RIGHT suffix
+  sql: |
+    SELECT c.cid FROM right_a a RIGHT JOIN right_b b ON a.ak=c.ck
+    RIGHT JOIN right_c c ON b.bk=c.ck
+  expect: {error: true,contains: unknown relation alias}
+- name: Explicit aliases still hide the original table names
+  sql: |
+    SELECT right_a.aid FROM right_a a RIGHT JOIN right_b b ON a.ak=b.bk
+    RIGHT JOIN right_c c ON b.bk=c.ck
+  expect: {error: true,contains: unknown relation alias}
+- name: Complete RIGHT units use the existing scalar aggregate reducer
+  sql: |
+    SELECT COUNT(*) AS total,COUNT(a.aid) AS earlier,COUNT(b.bid) AS middle,COUNT(c.cid) AS preserved
+    FROM right_a a RIGHT JOIN right_b b ON a.ak=b.bk
+    RIGHT JOIN right_c c ON b.bk=c.ck AND b.bd=c.cd
+  expect: {rows: 1,data: [{total: 7,earlier: 2,middle: 4,preserved: 7}]}
+- name: Three RIGHT suffixes retain each nested nullable boundary
+  sql: |
+    SELECT a.aid,b.bid,c.cid,d.did FROM right_a a RIGHT JOIN right_b b ON a.ak=b.bk
+    RIGHT JOIN right_c c ON b.bk=c.ck AND b.bd=c.cd
+    RIGHT JOIN right_d d ON c.ck=d.dk AND c.cd=d.dd ORDER BY d.did,a.aid
+  expect:
+    rows: 5
+    data: [{aid: 1,bid: 10,cid: 20,did: 30},{aid: 2,bid: 10,cid: 20,did: 30},
+      {aid: null,bid: 11,cid: 21,did: 31},{aid: null,bid: null,cid: 22,did: 32},
+      {aid: null,bid: null,cid: null,did: 33}]
+- name: Nested RIGHT scalar counts distinguish each complete input
+  sql: |
+    SELECT COUNT(*) AS total,COUNT(a.aid) AS earlier,COUNT(b.bid) AS middle,COUNT(c.cid) AS inner_preserved
+    FROM right_a a RIGHT JOIN right_b b ON a.ak=b.bk
+    RIGHT JOIN right_c c ON b.bk=c.ck AND b.bd=c.cd
+    RIGHT JOIN right_d d ON c.ck=d.dk AND c.cd=d.dd
+  expect: {rows: 1,data: [{total: 5,earlier: 2,middle: 3,inner_preserved: 4}]}
+- name: A RIGHT suffix preserves a preceding INNER cloud as a complete nullable unit
+  sql: |
+    SELECT a.aid,b.bid,c.cid FROM right_a a INNER JOIN right_b b ON a.ak=b.bk
+    RIGHT JOIN right_c c ON b.bk=c.ck AND b.bd=c.cd ORDER BY c.cid,a.aid
+  expect:
+    rows: 7
+    data: [{aid: 1,bid: 10,cid: 20},{aid: 2,bid: 10,cid: 20},
+      {aid: null,bid: null,cid: 21},{aid: null,bid: null,cid: 22},
+      {aid: null,bid: 12,cid: 23},{aid: null,bid: null,cid: 24},{aid: null,bid: null,cid: 25}]
+- name: A RIGHT output window counts complete tuples
+  sql: |
+    SELECT a.aid,b.bid,c.cid FROM right_a a RIGHT JOIN right_b b ON a.ak=b.bk
+    RIGHT JOIN right_c c ON b.bk=c.ck AND b.bd=c.cd
+    ORDER BY c.cid,a.aid OFFSET 1 ROWS FETCH NEXT 2 ROWS ONLY
+  expect: {rows: 2,data: [{aid: 2,bid: 10,cid: 20},{aid: null,bid: 11,cid: 21}]}
+- name: Unqualified wildcard exports use SQL declaration order after RIGHT normalization
+  tds:
+    statements:
+    - sql: |
+        SELECT * FROM right_a a RIGHT JOIN right_b b ON a.ak=b.bk
+        RIGHT JOIN right_c c ON b.bk=c.ck AND b.bd=c.cd WHERE c.cid=21
+      expect:
+        rows: 1
+        data: [{aid: null,ak: null,ad: null,label: null,bid: 11,bk: 8,bd: 1,cid: 21,ck: 8,cd: 1}]
+        column_types: [{name: aid,type: INT},{name: ak,type: INT},{name: ad,type: INT},
+          {name: label,type: NVARCHAR,length: 8},{name: bid,type: INT},{name: bk,type: INT},
+          {name: bd,type: INT},{name: cid,type: INT},{name: ck,type: INT},{name: cd,type: INT}]
+- name: Qualified wildcards retain the explicit SELECT list order
+  tds:
+    statements:
+    - sql: |
+        SELECT c.*,a.* FROM right_a a RIGHT JOIN right_b b ON a.ak=b.bk
+        RIGHT JOIN right_c c ON b.bk=c.ck AND b.bd=c.cd WHERE c.cid=21
+      expect:
+        rows: 1
+        data: [{cid: 21,ck: 8,cd: 1,aid: null,ak: null,ad: null,label: null}]
+        column_types: [{name: cid,type: INT},{name: ck,type: INT},{name: cd,type: INT},
+          {name: aid,type: INT},{name: ak,type: INT},{name: ad,type: INT},{name: label,type: NVARCHAR,length: 8}]
+- name: The first RIGHT join also retains SQL wildcard declaration order
+  tds:
+    statements:
+    - sql: SELECT * FROM right_a a RIGHT JOIN right_b b ON a.ak=b.bk WHERE b.bid=11
+      expect:
+        rows: 1
+        data: [{aid: null,ak: null,ad: null,label: null,bid: 11,bk: 8,bd: 1}]
+        column_types: [{name: aid,type: INT},{name: ak,type: INT},{name: ad,type: INT},
+          {name: label,type: NVARCHAR,length: 8},{name: bid,type: INT},{name: bk,type: INT},{name: bd,type: INT}]
+- name: A stored wildcard view freezes its original RIGHT declaration order
+  sql: |
+    CREATE VIEW dbo.right_chain_view AS SELECT * FROM right_a a
+    RIGHT JOIN right_b b ON a.ak=b.bk RIGHT JOIN right_c c ON b.bk=c.ck AND b.bd=c.cd
+- name: Restored RIGHT wildcard view retains SQL output order and types
+  tds:
+    statements:
+    - sql: SELECT * FROM dbo.right_chain_view WHERE cid=21
+      expect:
+        rows: 1
+        data: [{aid: null,ak: null,ad: null,label: null,bid: 11,bk: 8,bd: 1,cid: 21,ck: 8,cd: 1}]
+        column_types: [{name: aid,type: INT},{name: ak,type: INT},{name: ad,type: INT},
+          {name: label,type: NVARCHAR,length: 8},{name: bid,type: INT},{name: bk,type: INT},
+          {name: bd,type: INT},{name: cid,type: INT},{name: ck,type: INT},{name: cd,type: INT}]
+- name: UNION type positions use original wildcard exports before binding
+  sql: |
+    SELECT * FROM right_a a RIGHT JOIN right_b b ON a.ak=b.bk WHERE b.bid=11
+    UNION ALL SELECT CAST(99 AS INT),CAST(98 AS INT),CAST(97 AS INT),CAST(N'branch' AS NVARCHAR(8)),
+      CAST(96 AS INT),CAST(95 AS INT),CAST(94 AS INT) ORDER BY 1
+  expect:
+    rows: 2
+    data: [{aid: null,ak: null,ad: null,label: null,bid: 11,bk: 8,bd: 1},
+      {aid: 99,ak: 98,ad: 97,label: branch,bid: 96,bk: 95,bd: 94}]

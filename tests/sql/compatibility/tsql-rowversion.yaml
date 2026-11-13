@@ -316,7 +316,7 @@ test_cases:
   expect:
     rows: 0
 - name: Rejected rowversion DDL keeps rows and schema intact
-  scm: "(begin\n  (define columns (get_schema \"memcp-tests\" \"tsql_rowversion_data\"))\n  (if (and (nil? (find\
+  scm: "(begin\n  (define columns (get_schema \"memcp-tests\" \"tsql_rowversion_data\" nil))\n  (if (and (nil? (find\
     \ columns (lambda (column) (equal? (column \"Field\") \"other_rv\")) nil))\n      (not (nil? (find columns (lambda\
     \ (column) (equal? (column \"Field\") \"recovered\")) nil)))) true\n    (error \"rejected DDL changed the published\
     \ definition\")))\n"
@@ -332,7 +332,7 @@ test_cases:
     error: true
   noncritical: true
 - name: Rejected empty ADD leaves no generated column
-  scm: (if (nil? (find (get_schema "memcp-tests" "tsql_rowversion_empty") (lambda (column) (equal? (column "Field")
+  scm: (if (nil? (find (get_schema "memcp-tests" "tsql_rowversion_empty" nil) (lambda (column) (equal? (column "Field")
     "added_rv")) nil)) true (error "rejected ADD published a generated column"))
   noncritical: true
 - name: Insert remains valid after empty ADD rejection

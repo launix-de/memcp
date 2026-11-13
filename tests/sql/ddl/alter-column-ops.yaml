@@ -1,3 +1,5 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
 # ALTER TABLE and column operations
 # Targets table.go Alter, DropColumn, CreateColumn, ShowColumns,
 # and storage.go Init paths.
@@ -18,7 +20,10 @@ test_cases:
   - name: "Create base table"
     sql: "CREATE TABLE alt_base (id INT, name VARCHAR(50))"
     expect:
-      rows: 0
+      affected_rows: 0
+      rows: 1
+      data: [{affected_rows: 0}]
+      result_contains: '"affected_rows"'
 
   - name: "Insert initial data"
     sql: "INSERT INTO alt_base VALUES (1, 'alice'), (2, 'bob'), (3, 'carol')"
@@ -142,7 +147,10 @@ test_cases:
   - name: "Create modify table"
     sql: "CREATE TABLE alt_modify (a INT, b INT, c INT)"
     expect:
-      rows: 0
+      affected_rows: 0
+      rows: 1
+      data: [{affected_rows: 0}]
+      result_contains: '"affected_rows"'
 
   - name: "Insert data"
     sql: "INSERT INTO alt_modify VALUES (1, 2, 3), (4, 5, 6)"
@@ -188,7 +196,10 @@ test_cases:
   - name: "Create table for ALTER COLUMN properties"
     sql: "CREATE TABLE alt_props (id INT, name VARCHAR(50), val INT)"
     expect:
-      rows: 0
+      affected_rows: 0
+      rows: 1
+      data: [{affected_rows: 0}]
+      result_contains: '"affected_rows"'
 
   - name: "Insert data for ALTER COLUMN properties"
     sql: "INSERT INTO alt_props VALUES (1, 'alice', 10), (2, 'bob', 20)"

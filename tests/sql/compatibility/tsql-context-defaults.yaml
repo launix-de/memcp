@@ -1,0 +1,214 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Deferred SQL defaults use the invoking database principal before native insertion
+setup:
+- sql: DROP TABLE IF EXISTS contextual_defaults
+- scm: (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS defer_writer" nil))
+- scm: (eval (parse_sql "memcp-tests" "CREATE USER defer_writer IDENTIFIED BY 'pw'" nil))
+- scm: (eval (parse_sql "memcp-tests" "GRANT ALL ON `memcp-tests`.* TO defer_writer" nil))
+cleanup:
+- sql: DROP TABLE IF EXISTS function_client_defaults
+- sql: DROP FUNCTION IF EXISTS dbo.context_default_client
+- sql: DROP TABLE IF EXISTS function_context_defaults
+- sql: DROP TABLE IF EXISTS function_version_defaults
+- sql: DROP TABLE IF EXISTS function_private_defaults
+- sql: DROP FUNCTION IF EXISTS dbo.context_default_actor,dbo.context_default_app,dbo.context_default_version,dbo.context_private_default
+- sql: DROP TABLE IF EXISTS contextual_defaults
+- scm: (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS defer_writer" nil))
+test_cases:
+- name: Current database administrator and login have distinct principal names
+  sql: SELECT USER_NAME() AS principal,SUSER_SNAME() AS login_name
+  expect: {rows: 1, data: [{principal: dbo, login_name: root}]}
+- name: Ordinary database member retains its authenticated principal
+  username: defer_writer
+  password: pw
+  sql: SELECT USER_NAME() AS principal
+  expect: {rows: 1, data: [{principal: defer_writer}]}
+- name: Contextual declaration remains symbolic and does not freeze its creator
+  sql: |
+    CREATE TABLE contextual_defaults(id INT IDENTITY(1,1) PRIMARY KEY,
+      actor NVARCHAR(128) NOT NULL DEFAULT ((USER_NAME())),
+      short_name NVARCHAR(3) DEFAULT USER_NAME(),
+      label NVARCHAR(128) DEFAULT ((USER_NAME()+N'#entry')), login_name NVARCHAR(128) DEFAULT SUSER_SNAME())
+- name: Omitted contextual cells use the caller and declared destination width
+  username: defer_writer
+  password: pw
+  sql: INSERT INTO contextual_defaults(label) VALUES(N'explicit')
+- name: Explicit DEFAULT uses the same invocation rather than DDL creator
+  username: defer_writer
+  password: pw
+  sql: INSERT INTO contextual_defaults(actor,short_name,label) VALUES(DEFAULT,DEFAULT,DEFAULT)
+- name: DEFAULT VALUES expands all deferred cells before native identity routing
+  username: defer_writer
+  password: pw
+  sql: INSERT INTO contextual_defaults DEFAULT VALUES
+- name: INSERT SELECT appends deferred cells without changing its source width
+  username: defer_writer
+  password: pw
+  sql: INSERT INTO contextual_defaults(label) SELECT N'selected' UNION ALL SELECT N'second'
+- name: Explicit SQL NULL is retained and is not replaced by a default
+  username: defer_writer
+  password: pw
+  sql: INSERT INTO contextual_defaults(actor,short_name,label) VALUES(N'given',NULL,NULL)
+- name: Deferred rows retain values and typed widths on the native target
+  sql: SELECT id,actor,short_name,label FROM contextual_defaults ORDER BY id
+  expect:
+    rows: 6
+    data:
+    - {id: 1, actor: defer_writer, short_name: def, label: explicit}
+    - {id: 2, actor: defer_writer, short_name: def, label: 'defer_writer#entry'}
+    - {id: 3, actor: defer_writer, short_name: def, label: 'defer_writer#entry'}
+    - {id: 4, actor: defer_writer, short_name: def, label: selected}
+    - {id: 5, actor: defer_writer, short_name: def, label: second}
+    - {id: 6, actor: given, short_name: null, label: null}
+- name: UPDATE DEFAULT applies the current principal with the ordinary assignment compiler
+  sql: UPDATE contextual_defaults SET actor=DEFAULT,short_name=DEFAULT,label=DEFAULT WHERE id=6
+- name: UPDATE DEFAULT observes database principal rather than login spelling
+  sql: SELECT actor,short_name,label FROM contextual_defaults WHERE id=6
+  expect: {rows: 1, data: [{actor: dbo, short_name: dbo, label: 'dbo#entry'}]}
+- name: Native callers must expand opaque defaults rather than silently inserting NULL
+  scm: |
+    (try (lambda () (begin (insert (table "memcp-tests" false "contextual_defaults" false nil) '("label") (list (list "unexpanded")) '() nil false nil nil) false))
+      (lambda (failure) (if (strlike (concat failure) "%deferred default requires an explicit frontend value%") true
+        (error "unexpected native default rejection: " failure))))
+  expect: {result: true}
+- name: Native description preserves symbolic source and deferred mode together
+  scm: |
+    (begin
+      (define column (show (table "memcp-tests" false "contextual_defaults" false nil) "column" "actor" false))
+      (and (column "DefaultDeferred") (nil? (column "Default"))
+        (regexp_test (column "DefaultExpression") "(?i)USER_NAME")))
+  expect: {result: true}
+
+- name: Real TDS constructor owns deferred default until rollback without evaluating DDL context
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: |
+        CREATE TABLE contextual_private(id INT, actor NVARCHAR(128));
+        ALTER TABLE contextual_private ADD CONSTRAINT DF_private_actor DEFAULT ((USER_NAME())) FOR actor
+    - connection: observer
+      sql: SELECT name FROM sys.objects WHERE name=N'contextual_private'
+      expect: {rows: 0}
+    - connection: owner
+      sql: INSERT contextual_private(id) VALUES(1); SELECT id,actor FROM contextual_private
+      expect: {rows: 1, data: [{id: 1, actor: dbo}]}
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: observer
+      sql: SELECT name FROM sys.objects WHERE name=N'contextual_private'
+      expect: {rows: 0}
+
+- name: A bare login default resolves the later caller rather than the creator or dbo alias
+  sql: SELECT DISTINCT login_name FROM contextual_defaults
+  expect: {rows: 1, data: [{login_name: defer_writer}]}
+- name: Persisted login default contains SQL source and no captured login value
+  scm: |
+    (begin
+      (define column (show (table "memcp-tests" false "contextual_defaults" false nil) "column" "login_name" false))
+      (and (column "DefaultDeferred") (nil? (column "Default"))
+        (regexp_test (column "DefaultExpression") "(?i)SUSER_SNAME")))
+  expect: {result: true}
+
+- name: Function based defaults retain source rather than the DDL callers context
+  tds:
+    appname: default-creator
+    statements:
+    - sql: CREATE FUNCTION dbo.context_default_actor() RETURNS NVARCHAR(128) AS BEGIN RETURN USER_NAME(); END
+    - sql: CREATE FUNCTION dbo.context_default_app() RETURNS NVARCHAR(128) AS BEGIN RETURN APP_NAME(); END
+    - sql: SELECT dbo.context_default_app()+N':entry' AS label
+      expect: {rows: 1,data: [{label: 'default-creator:entry'}]}
+    - sql: CREATE TABLE function_context_defaults(id INT PRIMARY KEY,actor NVARCHAR(128) DEFAULT dbo.context_default_actor(),label NVARCHAR(160) DEFAULT (dbo.context_default_app()+N':entry'))
+- name: Missing explicit and selected default cells use the consuming client
+  tds:
+    username: defer_writer
+    password: pw
+    appname: default-writer
+    statements:
+    - sql: INSERT function_context_defaults(id) VALUES(1)
+    - sql: INSERT function_context_defaults(id,actor,label) VALUES(2,DEFAULT,DEFAULT)
+    - sql: INSERT function_context_defaults(id) SELECT 3 UNION ALL SELECT 4
+    - sql: SELECT id,actor,label FROM function_context_defaults ORDER BY id
+      expect: {rows: 4,data: [{id: 1,actor: defer_writer,label: 'default-writer:entry'},{id: 2,actor: defer_writer,label: 'default-writer:entry'},{id: 3,actor: defer_writer,label: 'default-writer:entry'},{id: 4,actor: defer_writer,label: 'default-writer:entry'}]}
+- name: UPDATE DEFAULT and bulk omitted cells bind their current native statement context
+  tds:
+    appname: default-updater
+    statements:
+    - sql: UPDATE function_context_defaults SET actor=DEFAULT,label=DEFAULT WHERE id=4
+    - bulk:
+        table: '[memcp-tests].[dbo].[function_context_defaults]'
+        columns: [id]
+        rows: [[5],[6]]
+      expect: {rows: 2}
+    - sql: SELECT id,actor,label FROM function_context_defaults WHERE id>=4 ORDER BY id
+      expect: {rows: 3,data: [{id: 4,actor: dbo,label: 'default-updater:entry'},{id: 5,actor: dbo,label: 'default-updater:entry'},{id: 6,actor: dbo,label: 'default-updater:entry'}]}
+- name: An identical warm INSERT binds a replaced default function declaration
+  tds:
+    statements:
+    - sql: CREATE FUNCTION dbo.context_default_version() RETURNS INT AS BEGIN RETURN 7; END
+    - sql: CREATE TABLE function_version_defaults(id INT PRIMARY KEY,value INT DEFAULT dbo.context_default_version())
+    - sql: INSERT function_version_defaults(id) VALUES(@id)
+      prepare: true
+      parameters: [{name: id,value: 1}]
+    - sql: DROP FUNCTION dbo.context_default_version
+    - sql: CREATE FUNCTION dbo.context_default_version() RETURNS INT AS BEGIN RETURN 9; END
+    - sql: INSERT function_version_defaults(id) VALUES(@id)
+      prepare: true
+      parameters: [{name: id,value: 2}]
+    - sql: SELECT id,value FROM function_version_defaults ORDER BY id
+      expect: {rows: 2,data: [{id: 1,value: 7},{id: 2,value: 9}]}
+- name: A staged function and default bind inside the same native transaction
+  tds:
+    statements:
+    - sql: CREATE TABLE function_private_defaults(value INT)
+    - sql: BEGIN TRANSACTION
+    - sql: CREATE FUNCTION dbo.context_private_default() RETURNS INT AS BEGIN RETURN 31; END
+    - sql: ALTER TABLE function_private_defaults ADD CONSTRAINT df_function_private_value DEFAULT dbo.context_private_default() FOR value
+    - sql: INSERT function_private_defaults DEFAULT VALUES
+    - sql: SELECT value FROM function_private_defaults
+      expect: {rows: 1,data: [{value: 31}]}
+    - sql: ROLLBACK TRANSACTION
+    - sql: SELECT COUNT(*) AS n FROM function_private_defaults
+      expect: {rows: 1,data: [{n: 0}]}
+    - sql: SELECT name FROM sys.objects WHERE name=N'context_private_default'
+      expect: {rows: 0,data: []}
+- name: ALTER DEFAULT admits a scalar client context function without unrelated session reads
+  tds:
+    hostname: default-creator-host
+    appname: default-creator-app
+    statements:
+    - sql: |
+        CREATE FUNCTION dbo.context_default_client() RETURNS VARCHAR(500) AS BEGIN
+          DECLARE @context VARCHAR(500);
+          SET @context=HOST_NAME()+'#'+APP_NAME()+'#'+USER_NAME();
+          RETURN @context;
+        END
+    - sql: CREATE TABLE function_client_defaults(id INT PRIMARY KEY,client_context VARCHAR(500))
+    - sql: ALTER TABLE function_client_defaults ADD CONSTRAINT df_function_client_context DEFAULT(dbo.context_default_client()) FOR client_context
+- name: Context defaults bind their consuming client independently of NOCOUNT
+  tds:
+    username: defer_writer
+    password: pw
+    hostname: default-writer-host
+    appname: default-writer-app
+    statements:
+    - sql: SET NOCOUNT ON
+    - sql: INSERT function_client_defaults(id) VALUES(1)
+    - sql: SET NOCOUNT OFF
+    - sql: INSERT function_client_defaults(id) VALUES(2)
+    - sql: SELECT id,client_context FROM function_client_defaults ORDER BY id
+      expect: {rows: 2,data: [{id: 1,client_context: 'default-writer-host#default-writer-app#defer_writer'},{id: 2,client_context: 'default-writer-host#default-writer-app#defer_writer'}]}
+- name: A different writer replaces no client context with the declaration creator
+  tds:
+    hostname: default-admin-host
+    appname: default-admin-app
+    statements:
+    - sql: INSERT function_client_defaults(id) VALUES(3)
+    - sql: SELECT client_context FROM function_client_defaults WHERE id=3
+      expect: {rows: 1,data: [{client_context: 'default-admin-host#default-admin-app#dbo'}]}

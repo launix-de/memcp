@@ -1,0 +1,79 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  description: Typed scalar default source is independent of generic constant-fold support
+setup:
+- sql: DROP TABLE IF EXISTS scalar_default_recipe
+- sql: DROP TABLE IF EXISTS scalar_default_bad_value
+- sql: DROP TABLE IF EXISTS scalar_default_variable
+- sql: DROP TABLE IF EXISTS scalar_default_parameter
+- sql: DROP TABLE IF EXISTS scalar_default_clock
+cleanup:
+- sql: DROP TABLE IF EXISTS scalar_default_recipe
+- sql: DROP TABLE IF EXISTS scalar_default_bad_value
+- sql: DROP TABLE IF EXISTS scalar_default_variable
+- sql: DROP TABLE IF EXISTS scalar_default_parameter
+- sql: DROP TABLE IF EXISTS scalar_default_clock
+test_cases:
+- name: Closed typed CAST and CONVERT expressions retain valid scalar default recipes
+  sql: |
+    CREATE TABLE scalar_default_recipe(value INT DEFAULT CAST(N'7' AS INT),
+      nullable_value INT DEFAULT CAST(NULL AS INT), nullable_text NVARCHAR(20) DEFAULT CAST(NULL AS NVARCHAR(20)),
+      created DATETIME DEFAULT CONVERT([datetime],N'2002-01-01',0), literal_text NVARCHAR(20) DEFAULT N'@value USER_NAME()')
+- name: Scalar default recipes execute through the ordinary typed assignment compiler
+  sql: INSERT scalar_default_recipe DEFAULT VALUES
+- name: Typed values and typed NULLs are not sampled or mistaken for executable literals
+  sql: SELECT value,nullable_value,nullable_text,YEAR(created) AS year,literal_text FROM scalar_default_recipe
+  expect: {rows: 1, data: [{value: 7,nullable_value: null,nullable_text: null,year: 2002,literal_text: '@value USER_NAME()'}]}
+- name: A scalar value conversion failure remains deferred until an insert consumes its default
+  sql: CREATE TABLE scalar_default_bad_value(value INT DEFAULT CAST(N'not_a_number' AS INT))
+- name: Invalid scalar default value raises the normal conversion failure
+  sql: INSERT scalar_default_bad_value DEFAULT VALUES
+  expect: {error: true}
+- name: Conversion failure publishes no inserted row
+  sql: SELECT COUNT(*) AS n FROM scalar_default_bad_value
+  expect: {rows: 1, data: [{n: 0}]}
+- name: Batch variables cannot become a durable default recipe
+  sql: DECLARE @value INT=7; CREATE TABLE scalar_default_variable(value INT DEFAULT (@value))
+  expect: {error: true}
+- name: Rejected batch variable default has no published table
+  sql: SELECT name FROM sys.objects WHERE name=N'scalar_default_variable'
+  expect: {rows: 0, data: []}
+- name: Prepared parameter reads cannot be frozen or persisted as default source
+  scm: |
+    (begin
+      (define caller (newsession)) (caller "username" "root") (caller "schema" "memcp-tests")
+      (caller "__tsql_parameter_declarations" (list (list "value" (tsql_parameter_declaration "memcp-tests" "INT" '()))))
+      (caller "__tsql_parameter:value" 7)
+      (try (lambda () (begin
+        (tsql_execute_statement nil "memcp-tests" "CREATE TABLE scalar_default_parameter(value INT DEFAULT @value)"
+          caller (lambda (row) true) (lambda fields true)) false))
+        (lambda (failure) (strlike (concat failure) "%row- and parameter-free scalar SQL%"))))
+  expect: {result: true}
+- name: Rejected prepared parameter default has no published table
+  sql: SELECT name FROM sys.objects WHERE name=N'scalar_default_parameter'
+  expect: {rows: 0, data: []}
+- name: Relational source cannot become a deferred scalar default
+  sql: CREATE TABLE scalar_default_parameter(value INT DEFAULT (SELECT 7))
+  expect: {error: true}
+- name: Rejected relational default leaves no intermediate declaration
+  sql: SELECT name FROM sys.objects WHERE name=N'scalar_default_parameter'
+  expect: {rows: 0, data: []}
+
+- name: A volatile compound scalar default keeps its original SQL source
+  sql: CREATE TABLE scalar_default_clock(created DATETIME DEFAULT DATEADD(day,1,GETDATE()))
+- name: Compound clock declaration retains no DDL-time sampled value
+  scm: |
+    (begin
+      (define column (show (table "memcp-tests" false "scalar_default_clock" false nil) "column" "created" false))
+      (and (column "DefaultDeferred") (nil? (column "Default"))
+        (regexp_test (column "DefaultExpression") "(?i)DATEADD")
+        (regexp_test (column "DefaultExpression") "(?i)GETDATE")))
+  expect: {result: true}
+- name: Compound clock default executes through normal INSERT assignment
+  sql: INSERT scalar_default_clock DEFAULT VALUES
+- name: Inserted compound clock result has the declared temporal value
+  sql: SELECT CASE WHEN created IS NOT NULL AND DATEDIFF(day,GETDATE(),created) BETWEEN 0 AND 2 THEN 1 ELSE 0 END AS valid_clock FROM scalar_default_clock
+  expect: {rows: 1, data: [{valid_clock: 1}]}

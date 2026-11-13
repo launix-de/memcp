@@ -1,0 +1,39 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  description: UPDATE probe preparation retains correlated membership domains in every frontend
+setup:
+- sql: CREATE TABLE update_probe_candidates(id INT PRIMARY KEY,value INT)
+- sql: INSERT INTO update_probe_candidates VALUES(1,1),(2,1),(3,1),(4,1)
+- sql: CREATE TABLE update_probe_windows(id INT PRIMARY KEY,group_id INT,first_id INT,last_id INT)
+- sql: INSERT INTO update_probe_windows VALUES(1,1,2,3),(2,2,1,4)
+test_cases:
+- name: MySQL UPDATE retains its complete correlated NOT EXISTS domain
+  syntax: mysql
+  sql: UPDATE update_probe_candidates SET value=0 WHERE NOT EXISTS(SELECT w.id FROM update_probe_windows w WHERE w.group_id=1 AND update_probe_candidates.id BETWEEN w.first_id AND w.last_id)
+- name: MySQL mutation changes precisely the two unmatched target rows
+  syntax: mysql
+  sql: SELECT id,value FROM update_probe_candidates ORDER BY id
+  expect: {rows: 4,data: [{id: 1,value: 0},{id: 2,value: 1},{id: 3,value: 1},{id: 4,value: 0}]}
+- name: Reset candidates before another dialect binds the same predicate
+  sql: UPDATE update_probe_candidates SET value=1
+- name: PostgreSQL UPDATE retains its complete correlated NOT EXISTS domain
+  syntax: psql
+  sql: UPDATE update_probe_candidates SET value=0 WHERE NOT EXISTS(SELECT w.id FROM update_probe_windows w WHERE w.group_id=1 AND update_probe_candidates.id BETWEEN w.first_id AND w.last_id)
+- name: PostgreSQL mutation changes precisely the two unmatched target rows
+  syntax: psql
+  sql: SELECT id,value FROM update_probe_candidates ORDER BY id
+  expect: {rows: 4,data: [{id: 1,value: 0},{id: 2,value: 1},{id: 3,value: 1},{id: 4,value: 0}]}
+- name: Reset candidates before the TSQL parameterized predicate
+  sql: UPDATE update_probe_candidates SET value=1
+- name: TSQL UPDATE binds the requested parameter before selecting its correlated probe
+  syntax: tsql
+  sql: DECLARE @group INT=1; UPDATE c SET value=0 FROM update_probe_candidates c WHERE NOT EXISTS(SELECT w.id FROM update_probe_windows w WHERE w.group_id=@group AND c.id BETWEEN w.first_id AND w.last_id)
+- name: TSQL mutation changes precisely the two unmatched target rows
+  syntax: tsql
+  sql: SELECT id,value FROM update_probe_candidates ORDER BY id
+  expect: {rows: 4,data: [{id: 1,value: 0},{id: 2,value: 1},{id: 3,value: 1},{id: 4,value: 0}]}
+cleanup:
+- sql: DROP TABLE update_probe_windows
+- sql: DROP TABLE update_probe_candidates

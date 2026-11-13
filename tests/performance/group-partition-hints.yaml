@@ -18,10 +18,10 @@ setup:
   - sql: CREATE TABLE partition_hint_oversized (k0 INT, k1 INT, k2 INT) ENGINE=memory
   - scm: |
       (begin
-        (insert (table "memcp-tests" false "partition_hint_source" false) '("id" "event_time" "a" "b" "c")
+        (insert (table "memcp-tests" false "partition_hint_source" false nil) '("id" "event_time" "a" "b" "c")
           (map (produceN 60000) (lambda (i)
             (list i (+ 1700000000 i) (mod i 40) (mod (floor (/ i 40)) 40) (floor (/ i 1600))))))
-        (rebuild (table "memcp-tests" false "partition_hint_source" false)) true)
+        (rebuild (table "memcp-tests" false "partition_hint_source" false nil)) true)
 
 test_cases:
   - name: Correlated ID and time group initialization
@@ -34,11 +34,16 @@ test_cases:
     setup:
       - scm: '(settings "ShardSize" 12000)'
     scm: |
-      (eval (group_cache_partition_plan "memcp-tests" "partition_hint_source" "s"
-        '("s" "memcp-tests" "partition_hint_source" false true)
-        "partition_hint_diagonal"
-        (list (list 'get_column "s" false "id" false) (list 'get_column "s" false "event_time" false))
-        '("k0" "k1")))
+      (begin
+        /* This consumer only asks whether the source is a base relation.
+        Use the runtime's existing source selector to preserve its tuple ABI;
+        the newer declarations slot is unused, so it honestly remains nil. */
+        (define source '("s" "memcp-tests" "partition_hint_source" false true))
+        (define source (if (source_is_base_table? source) source (merge (list source (list nil)))))
+        (eval (group_cache_partition_plan "memcp-tests" "partition_hint_source" "s" source
+          "partition_hint_diagonal"
+          (list (list 'get_column "s" false "id" false) (list 'get_column "s" false "event_time" false))
+          '("k0" "k1"))))
     expect: {data: [true]}
 
   - name: Independent three-dimensional group initialization
@@ -51,11 +56,16 @@ test_cases:
     setup:
       - scm: '(settings "ShardSize" 12000)'
     scm: |
-      (eval (group_cache_partition_plan "memcp-tests" "partition_hint_source" "s"
-        '("s" "memcp-tests" "partition_hint_source" false true)
-        "partition_hint_uniform"
-        (list (list 'get_column "s" false "a" false) (list 'get_column "s" false "b" false) (list 'get_column "s" false "c" false))
-        '("k0" "k1" "k2")))
+      (begin
+        /* This consumer only asks whether the source is a base relation.
+        Use the runtime's existing source selector to preserve its tuple ABI;
+        the newer declarations slot is unused, so it honestly remains nil. */
+        (define source '("s" "memcp-tests" "partition_hint_source" false true))
+        (define source (if (source_is_base_table? source) source (merge (list source (list nil)))))
+        (eval (group_cache_partition_plan "memcp-tests" "partition_hint_source" "s" source
+          "partition_hint_uniform"
+          (list (list 'get_column "s" false "a" false) (list 'get_column "s" false "b" false) (list 'get_column "s" false "c" false))
+          '("k0" "k1" "k2"))))
     expect: {data: [true]}
 
   - name: Oversized three-dimensional group initialization
@@ -68,11 +78,16 @@ test_cases:
     setup:
       - scm: '(settings "ShardSize" 4000)'
     scm: |
-      (eval (group_cache_partition_plan "memcp-tests" "partition_hint_source" "s"
-        '("s" "memcp-tests" "partition_hint_source" false true)
-        "partition_hint_oversized"
-        (list (list 'get_column "s" false "a" false) (list 'get_column "s" false "b" false) (list 'get_column "s" false "c" false))
-        '("k0" "k1" "k2")))
+      (begin
+        /* This consumer only asks whether the source is a base relation.
+        Use the runtime's existing source selector to preserve its tuple ABI;
+        the newer declarations slot is unused, so it honestly remains nil. */
+        (define source '("s" "memcp-tests" "partition_hint_source" false true))
+        (define source (if (source_is_base_table? source) source (merge (list source (list nil)))))
+        (eval (group_cache_partition_plan "memcp-tests" "partition_hint_source" "s" source
+          "partition_hint_oversized"
+          (list (list 'get_column "s" false "a" false) (list 'get_column "s" false "b" false) (list 'get_column "s" false "c" false))
+          '("k0" "k1" "k2"))))
     expect: {data: [true]}
 
 cleanup:

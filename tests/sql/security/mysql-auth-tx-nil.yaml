@@ -14,13 +14,15 @@ setup:
   - sql: "INSERT INTO tsql_auth_identity VALUES (7)"
   - sql: "DELETE FROM system.user WHERE username IN ('auth_scan_nil_repro', 'auth_scan_nil_other')"
   - sql: "INSERT INTO system.user (username, password, admin) VALUES ('auth_scan_nil_repro', PASSWORD('secret123'), FALSE)"
+  - scm: (createdatabase "memcp-tests-auth-landing" true)
+  - scm: (eval (parse_sql "memcp-tests" "GRANT ALL ON `memcp-tests-auth-landing`.* TO auth_scan_nil_repro" nil))
 
 test_cases:
   - name: "Direct scan nil resolves password from system.user"
     scm: |
       (if
         (equal?
-          (scan nil (table "system" false "user" false)
+          (scan nil (table "system" false "user" false nil)
             (list 369436175368192 (scan_boundary "equal" "username" 0 0 true true "" false)) '("auth_scan_nil_repro")
             '() (lambda () true)
             '("password")
@@ -42,7 +44,7 @@ test_cases:
     scm: |
       (if
         (equal?
-          (scan_lookup nil (table "system" false "user" false)
+          (scan_lookup nil (table "system" false "user" false nil)
             (list 372734710317056 (scan_boundary "equal" "username" 0 0 true true "" false) "password") '("auth_scan_nil_repro"))
           (password "secret123"))
         "ok"
@@ -92,116 +94,68 @@ test_cases:
   - name: "Dashboard users API returns admin and non-admin rows for the database access column"
     scm: |
       (begin
-        (define response (newsession))
-        (http_handler
-          (lambda (key) (match key
-            "path" "/dashboard/api/users"
-            "username" "root"
-            "password" "admin"
-            "__session" (newsession)
-            nil))
-          (lambda (key) (match key
-            "header" (lambda (name value) (response name value))
-            "status" (lambda (value) (response "status" value))
-            "print" (lambda (value) (response "body" value))
-            nil)))
+        (define response (http_request "GET"
+          (concat "http://127.0.0.1:" (arg "api-port" "4321") "/dashboard/api/users")
+          '("Authorization" "Basic cm9vdDphZG1pbg==") ""))
         (define users (json_decode (response "body")))
         (define admins (filter users (lambda (u) (equal? (u "username") "root"))))
         (define readers (filter users (lambda (u) (equal? (u "username") "auth_scan_nil_repro"))))
-        (if (and
-            (equal? (response "Content-Type") "application/json")
+        (if (and (equal? (response "status") 200)
+            (equal? ((response "headers") "Content-Type") "application/json")
             (equal? (count admins) 1) ((car admins) "admin")
             (equal? (count readers) 1) (not ((car readers) "admin"))
-            (empty_list? ((car readers) "databases")))
+            (equal? ((car readers) "databases") '("memcp-tests-auth-landing")))
           "ok" (error "dashboard user overview returned incorrect access metadata")))
 
   - name: "Dashboard users API rejects non-admin and unauthenticated requests"
     scm: |
       (map '("auth_scan_nil_repro" "") (lambda (username) (begin
-        (define response (newsession))
-        (http_handler
-          (lambda (key) (match key
-            "path" "/dashboard/api/users"
-            "username" username
-            "password" "secret123"
-            "__session" (newsession)
-            nil))
-          (lambda (key) (match key
-            "header" (lambda (name value) (response name value))
-            "status" (lambda (value) (response "status" value))
-            "print" (lambda (value) (response "body" value))
-            nil)))
+        (define response (http_request "GET"
+          (concat "http://127.0.0.1:" (arg "api-port" "4321") "/dashboard/api/users")
+          (list "Authorization" (concat "Basic " (base64_encode (concat username ":secret123")))) ""))
         (if (and (equal? (response "status") 401) (equal? (response "body") "Unauthorized"))
           "ok" (error "dashboard exposed user overview without admin credentials")))))
 
   - name: T-SQL HTTP query options cannot change the authenticated user
     scm: |
       (begin
-        (define response (newsession))
-        (define session (newsession))
-        (http_handler
-          (lambda (key) (match key
-            "path" "/tsql/memcp-tests"
-            "username" "auth_scan_nil_repro"
-            "password" "secret123"
-            "body" (lambda () "SELECT id FROM tsql_auth_identity")
-            "query" '("username" "root")
-            "__session" session
-            nil))
-          (lambda (key) (match key
-            "header" (lambda (name value) (response name value))
-            "status" (lambda (value) (response "status" value))
-            "print" (lambda values (response "body" (reduce values concat "")))
-            "jsonl" (lambda (row) (response "row" row))
-            nil)))
-        (and (equal? (response "status") 500) (nil? (response "row"))
-          (equal? (session "username") "auth_scan_nil_repro")))
+        (define headers (list "Authorization" (concat "Basic " (base64_encode "auth_scan_nil_repro:secret123"))
+          "X-Session-Id" "auth-options-reader"))
+        (define response (http_request "POST"
+          (concat "http://127.0.0.1:" (arg "api-port" "4321") "/tsql/memcp-tests-auth-landing?username=root")
+          headers "SELECT id FROM [memcp-tests].dbo.tsql_auth_identity"))
+        (define identity (http_request "POST"
+          (concat "http://127.0.0.1:" (arg "api-port" "4321") "/tsql/memcp-tests-auth-landing?username=root")
+          headers "SELECT SUSER_SNAME() AS actor"))
+        (and (equal? (response "status") 500)
+          (not (regexp_test (response "body") "[\"]id[\"][ ]*:"))
+          (equal? (identity "status") 200)
+          (equal? ((json_decode (identity "body")) "actor") "auth_scan_nil_repro")))
+
     expect: {result: true}
 
   - name: T-SQL HTTP authenticated identity and route override forged query options
     scm: |
       (begin
-        (define response (newsession))
-        (define session (newsession))
-        (http_handler
-          (lambda (key) (match key
-            "path" "/tsql/memcp-tests"
-            "username" "root"
-            "password" "admin"
-            "body" (lambda () "SELECT id FROM tsql_auth_identity")
-            "query" '("username" "auth_scan_nil_repro" "schema" "otherdb")
-            "__session" session
-            nil))
-          (lambda (key) (match key
-            "header" (lambda (name value) (response name value))
-            "status" (lambda (value) (response "status" value))
-            "print" (lambda values (response "body" (reduce values concat "")))
-            "jsonl" (lambda (row) (response "row" row))
-            nil)))
-        (and (nil? (response "status")) (equal? ((response "row") "id") 7)
-          (equal? (session "username") "root") (equal? (session "schema") "memcp-tests")))
+        (define response (http_request "POST"
+          (concat "http://127.0.0.1:" (arg "api-port" "4321") "/tsql/memcp-tests?username=auth_scan_nil_repro&schema=otherdb")
+          '("Authorization" "Basic cm9vdDphZG1pbg==")
+          "SELECT id,SUSER_SNAME() AS actor,DB_NAME() AS selected_database FROM tsql_auth_identity"))
+        (define row (json_decode (response "body")))
+        (and (equal? (response "status") 200) (equal? (row "id") 7)
+          (equal? (row "actor") "root") (equal? (row "selected_database") "memcp-tests")))
+
     expect: {result: true}
 
   - name: T-SQL HTTP still supplies ordinary positional query parameters
     scm: |
       (begin
-        (define response (newsession))
-        (http_handler
-          (lambda (key) (match key
-            "path" "/tsql/memcp-tests"
-            "username" "root"
-            "password" "admin"
-            "body" (lambda () "SELECT ? AS supplied")
-            "query" '("v1" "8")
-            "__session" (newsession)
-            nil))
-          (lambda (key) (match key
-            "header" (lambda (name value) (response name value))
-            "status" (lambda (value) (response "status" value))
-            "print" (lambda values (response "body" (reduce values concat "")))
-            "jsonl" (lambda (row) (response "row" row))
-            nil)))
-        (and (nil? (response "status")) (equal? ((response "row") "supplied") "8")))
+        (define response (http_request "POST"
+          (concat "http://127.0.0.1:" (arg "api-port" "4321") "/tsql/memcp-tests?v1=8")
+          '("Authorization" "Basic cm9vdDphZG1pbg==") "SELECT ? AS supplied"))
+        (and (equal? (response "status") 200)
+          (equal? ((json_decode (response "body")) "supplied") "8")))
+
     expect: {result: true}
 
 
@@ -244,7 +198,7 @@ test_cases:
             rows: 1
             data: [{result: 42}]
         - sql: |
-            (scan nil (table "system" false "user" false)
+            (scan nil (table "system" false "user" false nil)
               (list 369436175368192 (scan_boundary "equal" "username" 0 0 true true "" false))
               '("auth_scan_nil_other") '() (lambda () true) '("$update")
               (lambda (acc update) (begin (update '("admin" false)) (+ acc 1)))
@@ -258,6 +212,22 @@ test_cases:
             contains: ["administrator privileges"]
             not_contains: ["scheme_body_executed_after_revoke"]
 
+  - name: MySQL wire members can ensure their existing database without server authority
+    mysql:
+      username: auth_scan_nil_repro
+      password: secret123
+      database: memcp-tests-auth-landing
+      statements:
+        - sql: CREATE DATABASE IF NOT EXISTS `memcp-tests-auth-landing`
+        - sql: CREATE DATABASE IF NOT EXISTS mysql_member_forbidden
+          expect: {error: true, contains: [access denied]}
+        - sql: CREATE DATABASE `memcp-tests-auth-landing`
+          expect: {error: true, contains: [access denied]}
+        - sql: SELECT 1 AS retained
+          expect: {rows: 1, data: [{retained: 1}]}
+
+
 cleanup:
+  - scm: (dropdatabase "memcp-tests-auth-landing" true)
   - sql: "DROP TABLE IF EXISTS tsql_auth_identity"
   - sql: "DELETE FROM system.user WHERE username IN ('auth_scan_nil_repro', 'auth_scan_nil_other')"

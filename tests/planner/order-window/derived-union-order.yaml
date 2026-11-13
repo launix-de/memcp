@@ -1,0 +1,152 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: Native ordered UNION ALL retains hidden source keys until the final visible projection
+  requires_tds: true
+setup:
+- sql: CREATE TABLE uop_rows(id INT PRIMARY KEY,sort_key INT,label VARCHAR(20))
+- sql: INSERT INTO uop_rows VALUES(1,20,'b'),(2,10,'d'),(3,20,'a'),(4,10,'c'),(5,30,'b'),(6,NULL,'z')
+- sql: CREATE TABLE uop_lookup(id INT PRIMARY KEY,label VARCHAR(20))
+- sql: INSERT INTO uop_lookup VALUES(1,'one'),(4,'four'),(6,'six')
+- sql: CREATE TABLE uop_collations(id INT PRIMARY KEY,sort_key VARCHAR(12) COLLATE utf8mb4_unicode_ci,payload INT)
+- sql: INSERT INTO uop_collations VALUES(1,'b',10),(2,'A',20),(3,'a',30),(4,'B',40),(5,NULL,50)
+cleanup:
+- sql: DROP TABLE IF EXISTS uop_collations
+- sql: DROP TABLE IF EXISTS uop_lookup
+- sql: DROP TABLE IF EXISTS uop_rows
+test_cases:
+- name: A derived UNION ALL orders by hidden source keys and preserves ties and NULL
+  sql: |
+    SELECT label FROM(SELECT id,sort_key,label FROM uop_rows WHERE id<=3
+      UNION ALL SELECT id,sort_key,label FROM uop_rows WHERE id>3) AS u
+    ORDER BY u.sort_key,u.id
+  expect:
+    rows: 6
+    data: [{label: z},{label: d},{label: c},{label: b},{label: a},{label: b}]
+    result_not_contains: '__union_order:'
+- name: A computed projection orders by its hidden original numeric input
+  sql: |
+    SELECT CONCAT('item-',CAST(u.id AS VARCHAR(20))) AS label
+    FROM(SELECT id FROM uop_rows WHERE id<4 UNION ALL SELECT id FROM uop_rows WHERE id>=4) AS u
+    ORDER BY u.id DESC
+  expect:
+    rows: 6
+    data: [{label: item-6},{label: item-5},{label: item-4},{label: item-3},{label: item-2},{label: item-1}]
+- name: A projected ordinal keeps the computed output's ordering
+  sql: |
+    SELECT CONCAT('item-',CAST(u.id AS VARCHAR(20))) AS label
+    FROM(SELECT id FROM uop_rows WHERE id<4 UNION ALL SELECT id FROM uop_rows WHERE id>=4) AS u
+    ORDER BY 1 DESC
+  expect:
+    rows: 6
+    data: [{label: item-6},{label: item-5},{label: item-4},{label: item-3},{label: item-2},{label: item-1}]
+- name: A projected alias retains computed ordering across all native producers
+  sql: |
+    SELECT CONCAT('item-',CAST(u.id AS VARCHAR(20))) AS label
+    FROM(SELECT id FROM uop_rows WHERE id<4 UNION ALL SELECT id FROM uop_rows WHERE id>=4) AS u
+    ORDER BY label DESC
+  expect:
+    rows: 6
+    data: [{label: item-6},{label: item-5},{label: item-4},{label: item-3},{label: item-2},{label: item-1}]
+- name: The outer LIMIT and OFFSET apply once after the complete ordered bag
+  sql: |
+    SELECT label FROM(SELECT id,sort_key,label FROM uop_rows WHERE id<=3
+      UNION ALL SELECT id,sort_key,label FROM uop_rows WHERE id>3) AS u
+    ORDER BY u.sort_key,u.id LIMIT 3 OFFSET 1
+  expect: {rows: 3,data: [{label: d},{label: c},{label: b}]}
+- name: Hidden source keys do not deduplicate equal projected UNION ALL values
+  sql: |
+    SELECT label FROM(SELECT id,sort_key,label FROM uop_rows
+      UNION ALL SELECT id,sort_key,label FROM uop_rows) AS u
+    ORDER BY u.sort_key,u.id
+  expect:
+    rows: 12
+    data: [{label: z},{label: z},{label: d},{label: d},{label: c},{label: c},{label: b},{label: b},{label: a},{label: a},{label: b},{label: b}]
+- name: Outer predicates remain active before the complete ordered window
+  sql: |
+    SELECT label FROM(SELECT id,sort_key,label FROM uop_rows WHERE id<=3
+      UNION ALL SELECT id,sort_key,label FROM uop_rows WHERE id>3) AS u
+    WHERE sort_key>=20 ORDER BY u.id
+  expect: {rows: 3,data: [{label: b},{label: a},{label: b}]}
+- name: Hidden ordering names never collide with an actual projected identifier
+  sql: |
+    SELECT label AS `__union_order:1` FROM(SELECT id,label FROM uop_rows WHERE id<=3
+      UNION ALL SELECT id,label FROM uop_rows WHERE id>3) AS u ORDER BY u.id
+  expect:
+    rows: 6
+    data: [{'__union_order:1': b},{'__union_order:1': d},{'__union_order:1': a},{'__union_order:1': c},{'__union_order:1': b},{'__union_order:1': z}]
+- name: A joined UNION ALL retains lookup predicates and hidden sort inputs
+  sql: |
+    SELECT lookup.label FROM(SELECT id,sort_key FROM uop_rows WHERE id<=3
+      UNION ALL SELECT id,sort_key FROM uop_rows WHERE id>3) AS u
+    JOIN uop_lookup AS lookup ON lookup.id=u.id ORDER BY u.sort_key,u.id
+  expect: {rows: 3,data: [{label: six},{label: four},{label: one}]}
+- name: A typed calendar projection retains its original hidden timestamp ordering
+  syntax: tsql
+  sql: |
+    SELECT CONVERT(NVARCHAR(30),q.stamp,121) AS stamp
+    FROM(VALUES(CAST(N'2026-01-02T12:00:00.003' AS DATETIME)),
+      (CAST(N'2026-01-01T12:00:00' AS DATETIME)),(NULL)) AS q(stamp)
+    ORDER BY q.stamp
+  expect:
+    rows: 3
+    data: [{stamp: null},{stamp: '2026-01-01 12:00:00.000'},{stamp: '2026-01-02 12:00:00.003'}]
+- name: A typed projected ordinal does not require evaluating fresh expression compilers for equality
+  syntax: tsql
+  sql: |
+    SELECT CONVERT(NVARCHAR(30),q.stamp,121) AS stamp
+    FROM(VALUES(CAST(N'2026-01-02T12:00:00.003' AS DATETIME)),
+      (CAST(N'2026-01-01T12:00:00' AS DATETIME)),(NULL)) AS q(stamp)
+    ORDER BY 1
+  expect:
+    rows: 3
+    data: [{stamp: null},{stamp: '2026-01-01 12:00:00.000'},{stamp: '2026-01-02 12:00:00.003'}]
+- name: A direct UNION ALL orders by its second output position
+  syntax: tsql
+  sql: SELECT 1 AS id,30 AS score UNION ALL SELECT 2,10 UNION ALL SELECT 3,20 ORDER BY 2
+  expect: {rows: 3,data: [{id: 2,score: 10},{id: 3,score: 20},{id: 1,score: 30}]}
+- name: A derived UNION ALL rejects an ordinal beyond the SELECT list
+  syntax: tsql
+  sql: SELECT u.label FROM(SELECT id,label FROM uop_rows WHERE id<=3 UNION ALL SELECT id,label FROM uop_rows WHERE id>3) AS u ORDER BY 2
+  expect: {error: true}
+- name: Parameters used only by hidden ordering remain invocation inputs
+  syntax: tsql
+  sql: |
+    DECLARE @direction INT=-1;
+    SELECT label FROM(SELECT id,sort_key,label FROM uop_rows WHERE id<=3
+      UNION ALL SELECT id,sort_key,label FROM uop_rows WHERE id>3) AS u
+    ORDER BY @direction*u.sort_key,u.id OFFSET 1 ROWS FETCH NEXT 3 ROWS ONLY
+  expect: {rows: 3,data: [{label: b},{label: b},{label: a}]}
+- name: The actual TSQL result sink publishes only the visible projection
+  scm: |
+    (begin
+      (define session (newsession)) (session "username" "root") (session "schema" "memcp-tests")
+      (define output (newsession)) (output "valid" true)
+      (tsql_execute_request "memcp-tests"
+        "SELECT CAST(u.id AS NVARCHAR(20)) AS label FROM(SELECT id,sort_key FROM uop_rows WHERE id<=3 UNION ALL SELECT id,sort_key FROM uop_rows WHERE id>3)AS u ORDER BY u.sort_key,u.id"
+        session nil 0
+        (lambda (row) (if (equal? (count row) 2) true (output "valid" false)))
+        (lambda (names descriptors) (if (equal? (count names) 1) true (output "valid" false))))
+      (output "valid"))
+  expect: {result: true}
+- name: Hidden sorting over a bounded input retains an explicit unsupported boundary
+  sql: |
+    SELECT label FROM((SELECT id,label FROM uop_rows ORDER BY id LIMIT 2)
+      UNION ALL SELECT id,label FROM uop_rows WHERE id=6)AS u ORDER BY u.id
+  expect: {error: true}
+
+- name: Hidden linguistic text ordering uses the declared collation for every branch and merge
+  sql: |
+    SELECT payload FROM(SELECT id,sort_key,payload FROM uop_collations WHERE id<=3
+      UNION ALL SELECT id,sort_key,payload FROM uop_collations WHERE id>3)AS u
+    ORDER BY u.sort_key,u.id
+  expect: {rows: 5,data: [{payload: 50},{payload: 20},{payload: 30},{payload: 10},{payload: 40}]}
+- name: Projected linguistic aliases keep the same collation across a native ordered UNION
+  sql: |
+    SELECT CONCAT(sort_key,'')AS label,payload
+    FROM(SELECT id,sort_key,payload FROM uop_collations WHERE id<=3
+      UNION ALL SELECT id,sort_key,payload FROM uop_collations WHERE id>3)AS u
+    ORDER BY label,u.id
+  expect:
+    rows: 5
+    data: [{label: null,payload: 50},{label: A,payload: 20},{label: a,payload: 30},{label: b,payload: 10},{label: B,payload: 40}]

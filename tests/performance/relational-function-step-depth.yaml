@@ -1,0 +1,153 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Separate depth control fixed before measurement; five cold-inclusive samples.
+metadata:
+  syntax: tsql
+  isolated: true
+  perf_ci: true
+  performance_shard_weight: 6
+  max_regression_pct: 20
+  description: Accumulated relational assignment depth scales without repeated namespace tree scans
+setup:
+- sql: CREATE TABLE udf_depth_ids(id INT PRIMARY KEY)
+- sql: INSERT udf_depth_ids VALUES(1),(2),(3)
+- sql: CREATE TABLE udf_depth_amounts(id INT,amount INT)
+- sql: INSERT udf_depth_amounts VALUES(1,3),(2,NULL)
+- sql: |
+    CREATE FUNCTION dbo.udf_depth_8(@id INT) RETURNS INT AS BEGIN
+      DECLARE @total INT=0,@part INT;
+      SELECT @part=SUM(amount) FROM udf_depth_amounts WHERE id=@id;
+      SET @total=@total+ISNULL(@part,0);
+      SELECT @part=SUM(amount) FROM udf_depth_amounts WHERE id=@id;
+      SET @total=@total+ISNULL(@part,0);
+      SELECT @part=SUM(amount) FROM udf_depth_amounts WHERE id=@id;
+      SET @total=@total+ISNULL(@part,0);
+      SELECT @part=SUM(amount) FROM udf_depth_amounts WHERE id=@id;
+      SET @total=@total+ISNULL(@part,0);
+      SELECT @part=SUM(amount) FROM udf_depth_amounts WHERE id=@id;
+      SET @total=@total+ISNULL(@part,0);
+      SELECT @part=SUM(amount) FROM udf_depth_amounts WHERE id=@id;
+      SET @total=@total+ISNULL(@part,0);
+      SELECT @part=SUM(amount) FROM udf_depth_amounts WHERE id=@id;
+      SET @total=@total+ISNULL(@part,0);
+      SELECT @part=SUM(amount) FROM udf_depth_amounts WHERE id=@id;
+      SET @total=@total+ISNULL(@part,0);
+      RETURN @total;
+    END
+- sql: |
+    CREATE FUNCTION dbo.udf_depth_32(@id INT) RETURNS INT AS BEGIN
+      DECLARE @total INT=0,@part INT;
+      SELECT @part=SUM(amount) FROM udf_depth_amounts WHERE id=@id;
+      SET @total=@total+ISNULL(@part,0);
+      SELECT @part=SUM(amount) FROM udf_depth_amounts WHERE id=@id;
+      SET @total=@total+ISNULL(@part,0);
+      SELECT @part=SUM(amount) FROM udf_depth_amounts WHERE id=@id;
+      SET @total=@total+ISNULL(@part,0);
+      SELECT @part=SUM(amount) FROM udf_depth_amounts WHERE id=@id;
+      SET @total=@total+ISNULL(@part,0);
+      SELECT @part=SUM(amount) FROM udf_depth_amounts WHERE id=@id;
+      SET @total=@total+ISNULL(@part,0);
+      SELECT @part=SUM(amount) FROM udf_depth_amounts WHERE id=@id;
+      SET @total=@total+ISNULL(@part,0);
+      SELECT @part=SUM(amount) FROM udf_depth_amounts WHERE id=@id;
+      SET @total=@total+ISNULL(@part,0);
+      SELECT @part=SUM(amount) FROM udf_depth_amounts WHERE id=@id;
+      SET @total=@total+ISNULL(@part,0);
+      SELECT @part=SUM(amount) FROM udf_depth_amounts WHERE id=@id;
+      SET @total=@total+ISNULL(@part,0);
+      SELECT @part=SUM(amount) FROM udf_depth_amounts WHERE id=@id;
+      SET @total=@total+ISNULL(@part,0);
+      SELECT @part=SUM(amount) FROM udf_depth_amounts WHERE id=@id;
+      SET @total=@total+ISNULL(@part,0);
+      SELECT @part=SUM(amount) FROM udf_depth_amounts WHERE id=@id;
+      SET @total=@total+ISNULL(@part,0);
+      SELECT @part=SUM(amount) FROM udf_depth_amounts WHERE id=@id;
+      SET @total=@total+ISNULL(@part,0);
+      SELECT @part=SUM(amount) FROM udf_depth_amounts WHERE id=@id;
+      SET @total=@total+ISNULL(@part,0);
+      SELECT @part=SUM(amount) FROM udf_depth_amounts WHERE id=@id;
+      SET @total=@total+ISNULL(@part,0);
+      SELECT @part=SUM(amount) FROM udf_depth_amounts WHERE id=@id;
+      SET @total=@total+ISNULL(@part,0);
+      SELECT @part=SUM(amount) FROM udf_depth_amounts WHERE id=@id;
+      SET @total=@total+ISNULL(@part,0);
+      SELECT @part=SUM(amount) FROM udf_depth_amounts WHERE id=@id;
+      SET @total=@total+ISNULL(@part,0);
+      SELECT @part=SUM(amount) FROM udf_depth_amounts WHERE id=@id;
+      SET @total=@total+ISNULL(@part,0);
+      SELECT @part=SUM(amount) FROM udf_depth_amounts WHERE id=@id;
+      SET @total=@total+ISNULL(@part,0);
+      SELECT @part=SUM(amount) FROM udf_depth_amounts WHERE id=@id;
+      SET @total=@total+ISNULL(@part,0);
+      SELECT @part=SUM(amount) FROM udf_depth_amounts WHERE id=@id;
+      SET @total=@total+ISNULL(@part,0);
+      SELECT @part=SUM(amount) FROM udf_depth_amounts WHERE id=@id;
+      SET @total=@total+ISNULL(@part,0);
+      SELECT @part=SUM(amount) FROM udf_depth_amounts WHERE id=@id;
+      SET @total=@total+ISNULL(@part,0);
+      SELECT @part=SUM(amount) FROM udf_depth_amounts WHERE id=@id;
+      SET @total=@total+ISNULL(@part,0);
+      SELECT @part=SUM(amount) FROM udf_depth_amounts WHERE id=@id;
+      SET @total=@total+ISNULL(@part,0);
+      SELECT @part=SUM(amount) FROM udf_depth_amounts WHERE id=@id;
+      SET @total=@total+ISNULL(@part,0);
+      SELECT @part=SUM(amount) FROM udf_depth_amounts WHERE id=@id;
+      SET @total=@total+ISNULL(@part,0);
+      SELECT @part=SUM(amount) FROM udf_depth_amounts WHERE id=@id;
+      SET @total=@total+ISNULL(@part,0);
+      SELECT @part=SUM(amount) FROM udf_depth_amounts WHERE id=@id;
+      SET @total=@total+ISNULL(@part,0);
+      SELECT @part=SUM(amount) FROM udf_depth_amounts WHERE id=@id;
+      SET @total=@total+ISNULL(@part,0);
+      SELECT @part=SUM(amount) FROM udf_depth_amounts WHERE id=@id;
+      SET @total=@total+ISNULL(@part,0);
+      RETURN @total;
+    END
+- scm: |
+    (begin
+      (globalvars "__udf_depth_declare" (lambda (depth) (begin
+        (define text (concat "CREATE OR ALTER VIEW udf_depth_view_" depth
+          " AS SELECT id,dbo.udf_depth_" depth "(id) AS value FROM udf_depth_ids"))
+        (define session (newsession)) (session "schema" "memcp-tests") (session "username" "root")
+        (with_autocommit session nil nil text (lambda (tx)
+          (sql_execute_formula session tx
+            (sql_queryplan_compile_formula tx (parse_tsql "memcp-tests" text
+              (tsql_policy (tsql_session_actor session)) session tx))
+            (lambda (_row) (error "view declaration emitted a result row")) (lambda (_fields) true))))
+        true)))
+      true)
+- scm: (begin ((globalvars "__udf_depth_declare") 8) true)
+- scm: (begin ((globalvars "__udf_depth_declare") 32) true)
+test_cases:
+- name: One relational invocation with 8 sequential assignments
+  scm: ((globalvars "__udf_depth_declare") 8)
+  expect: {data: [true]}
+  threshold_ms: 10000
+  timeout: 120
+  performance_rows: 1
+  warmup: 0
+  timing_samples: 5
+  timing_aggregation: total
+- name: Depth 8 preserves accumulated values nullable sums and empty input
+  sql: SELECT id,value FROM udf_depth_view_8 ORDER BY id
+  expect: {rows: 3,data: [{id: 1,value: 24},{id: 2,value: 0},{id: 3,value: 0}]}
+- name: One relational invocation with 32 sequential assignments
+  scm: ((globalvars "__udf_depth_declare") 32)
+  expect: {data: [true]}
+  threshold_ms: 10000
+  timeout: 120
+  performance_rows: 1
+  warmup: 0
+  timing_samples: 5
+  timing_aggregation: total
+- name: Depth 32 preserves accumulated values nullable sums and empty input
+  sql: SELECT id,value FROM udf_depth_view_32 ORDER BY id
+  expect: {rows: 3,data: [{id: 1,value: 96},{id: 2,value: 0},{id: 3,value: 0}]}
+cleanup:
+- sql: DROP VIEW IF EXISTS udf_depth_view_32
+- sql: DROP VIEW IF EXISTS udf_depth_view_8
+- sql: DROP FUNCTION IF EXISTS dbo.udf_depth_32
+- sql: DROP FUNCTION IF EXISTS dbo.udf_depth_8
+- sql: DROP TABLE IF EXISTS udf_depth_amounts
+- sql: DROP TABLE IF EXISTS udf_depth_ids
+- scm: (begin (globalvars "__udf_depth_declare" nil) true)

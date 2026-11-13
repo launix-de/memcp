@@ -198,7 +198,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(list 'lambda (list '__scan_acc 'value) (list '+ '__scan_acc (list '* 'value 2))))
 		true "non-identity aggregate map remains one fused callback")
 	(define simple_select_ast (list "memcp-tests"
-		(list (list "t" "memcp-tests" "t" false nil))
+		(list (list "t" "memcp-tests" "t" false nil nil))
 		(list "id" expr_gc)
 		true nil nil nil nil nil))
 	(define simple_ir (untangle_query_term simple_select_ast nil))
@@ -229,12 +229,12 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			(list (quote and) "d" (list (quote and) "e" "f")))
 		true)) '("a" "b" "c" "d" "e" "f")) true "combine_where_terms flattens nested AND terms")
 	(define test_exists_union_outer_source
-		(list "outer_asset" "memcp-tests" "trace_asset" false nil))
+		(list "outer_asset" "memcp-tests" "trace_asset" false nil nil))
 	(define test_exists_union_probe
 		(list (quote get_column) "outer_asset" false "id" false))
 	(define test_exists_union_branch (lambda (alias relation)
 		(begin
-			(define src (list alias "memcp-tests" relation false nil))
+			(define src (list alias "memcp-tests" relation false nil nil))
 			(make_query_block "memcp-tests" (list src)
 				(list "id" (list (quote get_column) alias false "asset_id" false))
 				true '() nil '() nil nil '() '() '()))))
@@ -257,11 +257,11 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(define graph_col (lambda (alias column)
 		(list (quote get_column) alias false column false)))
 	(define graph_sources (list
-		(list "a" "memcp-tests" "graph_a" false nil)
+		(list "a" "memcp-tests" "graph_a" false nil nil)
 		(list "b" "memcp-tests" "graph_b" false
-			(list (quote equal??) (graph_col "a" "id") (graph_col "b" "a_id")))
+			(list (quote equal??) (graph_col "a" "id") (graph_col "b" "a_id")) nil)
 		(list "c" "memcp-tests" "graph_c" false
-			(list (quote equal??) (graph_col "b" "id") (graph_col "c" "b_id")))))
+			(list (quote equal??) (graph_col "b" "id") (graph_col "c" "b_id")) nil)))
 	(define graph_where (list (quote and)
 		(list (quote >) (graph_col "a" "score") 10)
 		(list (quote equal??)
@@ -281,10 +281,10 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (equal? (map (qb_sources graph_block) source_join_expr)
 		(map graph_sources source_join_expr)) true "join hypergraph extraction leaves ON predicates on their sources")
 	(define outer_graph_sources (list
-		(list "a" "memcp-tests" "graph_a" false nil)
-		(list "c" "memcp-tests" "graph_c" false nil)
+		(list "a" "memcp-tests" "graph_a" false nil nil)
+		(list "c" "memcp-tests" "graph_c" false nil nil)
 		(list "b" "memcp-tests" "graph_b" true
-			(list (quote equal??) (graph_col "a" "id") (graph_col "b" "a_id")))))
+			(list (quote equal??) (graph_col "a" "id") (graph_col "b" "a_id")) nil)))
 	(define outer_graph (extract_join_hypergraph (make_query_block
 		"memcp-tests" outer_graph_sources '() true nil nil nil nil nil '() '() '())))
 	(define outer_barrier (car (qassoc_get outer_graph 'barriers '())))
@@ -399,7 +399,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			(list 'preserve_empty_domain true)
 			(list 'lookup-keys '()))))
 	(define singleton_source (list "scalar" "memcp-tests"
-		(list 'stage-output "logical-singleton") true true))
+		(list 'stage-output "logical-singleton") true true nil))
 	(define singleton_block (make_query_block
 		"memcp-tests" (list (car graph_sources) singleton_source) '()
 		(list 'equal?? (graph_col "a" "id") (graph_col "scalar" "value"))
@@ -555,15 +555,15 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(make_join_optimizer_node 'inner (make_join_optimizer_leaf "a") (make_join_optimizer_leaf "b") '())
 		(make_join_optimizer_node 'left-outer (make_join_optimizer_leaf "c") (make_join_optimizer_leaf "d") '()) '()))
 	(define bushy_scan_sources (list
-		(list "a" "memcp-tests" "graph_a" false nil)
-		(list "b" "memcp-tests" "graph_b" false nil)
-		(list "c" "memcp-tests" "graph_c" false nil)
-		(list "d" "memcp-tests" "graph_d" false nil)))
+		(list "a" "memcp-tests" "graph_a" false nil nil)
+		(list "b" "memcp-tests" "graph_b" false nil nil)
+		(list "c" "memcp-tests" "graph_c" false nil nil)
+		(list "d" "memcp-tests" "graph_d" false nil nil)))
 	(define test_physical_scan_signature (lambda (expr)
 		(match expr
-			((symbol scan) _tx ((symbol table) _schema _database_ignorecase relation _table_ignorecase) _access_schema _access_values _filtercols _filterfn _mapcols mapreduce _init _combine outer)
+			((symbol scan) _tx ((symbol table) _schema _database_ignorecase relation _table_ignorecase _lookup_tx) _access_schema _access_values _filtercols _filterfn _mapcols mapreduce _init _combine outer)
 			(concat relation ":" (string outer) ">" (test_physical_scan_signature mapreduce))
-			((symbol scan_order) _tx ((symbol table) _schema _database_ignorecase relation _table_ignorecase) _access_schema _access_values _filtercols _filterfn _sortcols _sortdirs _brake _offset _limit _mapcols mapreduce _init outer)
+			((symbol scan_order) _tx ((symbol table) _schema _database_ignorecase relation _table_ignorecase _lookup_tx) _access_schema _access_values _filtercols _filterfn _sortcols _sortdirs _brake _offset _limit _mapcols mapreduce _init outer)
 			(concat relation ":" (string outer) ">" (test_physical_scan_signature mapreduce))
 			(cons head tail) (concat (test_physical_scan_signature head) (test_physical_scan_signature tail))
 			_ "")))
@@ -593,20 +593,23 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(define probe_param (symbol "__probe_key_0"))
 	(define probe_param_index (scalar_query_probe_param_index
 		(list probe_outer_column) (list probe_logical_column) (list probe_param)))
-	(assert (equal?
-		(rewrite_scalar_query_probe_params probe_param_index probe_outer_column)
-		probe_param) true "scalar query probe binds a direct inherited column")
-	(assert (equal?
-		(rewrite_scalar_query_probe_params probe_param_index (list (quote stage-fixture) (list probe_outer_column)))
-		(list (quote stage-fixture) (list probe_param))) true "scalar query probe binds inherited columns throughout stage data")
-	(assert (equal?
-		(rewrite_scalar_query_probe_params probe_param_index probe_logical_column)
-		probe_param) true "scalar query probe binds pre-derived logical aliases")
+	(assert (eval (list (list (quote lambda) (list probe_param)
+		(rewrite_scalar_query_probe_params probe_param_index probe_outer_column)) 41))
+		41 "scalar query probe evaluates a direct inherited column in its bound caller")
+	(define probe_nested_data (list (quote stage-fixture) (list (quote list) probe_outer_column)))
+	(assert (eval (list (list (quote lambda) (list probe_param (quote stage-fixture))
+		(rewrite_scalar_query_probe_params probe_param_index probe_nested_data))
+		41 (lambda (value) value)))
+		(list 41) "scalar query probe evaluates inherited columns throughout nested stage data")
+	(assert (eval (list (list (quote lambda) (list probe_param)
+		(rewrite_scalar_query_probe_params probe_param_index probe_logical_column)) 41))
+		41 "scalar query probe evaluates pre-derived logical aliases in their bound caller")
+
 	(define memo_probe_stage (make_group_stage
 		"memo-probe-stage"
-		(list "mp" "memcp-tests" "memo_probe_source" false nil)
+		(list "mp" "memcp-tests" "memo_probe_source" false nil nil)
 		'() '(1) (list (list 1 (quote +) 0)) nil '() '() nil nil '()))
-	(define memo_probe_expr (memoize_scalar_query_probe
+	(define memo_probe_expr (memoize_scalar_query_probe '()
 		memo_probe_stage (list probe_param) (list (quote probe-body) probe_param)))
 	(define memo_probe_key_expr (nth memo_probe_expr 3))
 	(define memo_probe_producer (nth memo_probe_expr 5))
@@ -620,17 +623,17 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 								(equal? (nth memo_probe_producer 2)
 									(list (quote probe-body) probe_param))))))))) true
 		"nested scalar probes memoize by correlation key in query scope")
-	(assert (memoize_scalar_query_probe memo_probe_stage '() 17) 17
+	(assert (memoize_scalar_query_probe '() memo_probe_stage '() 17) 17
 		"uncorrelated scalar probes do not allocate a keyed memo")
 	(assert (equal?
-		(nth (nth (memoize_scalar_query_probe
+		(nth (nth (memoize_scalar_query_probe '()
 			memo_probe_stage (list probe_param) (list (quote probe-body) probe_param)) 3) 1)
-		(nth (nth (memoize_scalar_query_probe
+		(nth (nth (memoize_scalar_query_probe '()
 			memo_probe_stage (list probe_param) (list (quote other-probe-body) probe_param)) 3) 1))
 		false "nested scalar memo keys isolate different stage projections")
 	(define canonical_group_sum (list (list (quote get_column) "g" false "amount" false) (quote +) 0))
 	(define canonical_group_count (list 1 (quote +) 0))
-	(define canonical_group_source (list "g" "memcp-tests" "group_values" false nil))
+	(define canonical_group_source (list "g" "memcp-tests" "group_values" false nil nil))
 	(define canonical_group_keys (list (list (quote get_column) "g" false "owner_id" false)))
 	(define canonical_group_sum_stage (make_group_stage "group-sum" canonical_group_source '()
 		canonical_group_keys (list canonical_group_sum) nil '() '() nil nil '()))
@@ -643,7 +646,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(define rebind_child_ag (list 1 (quote +) 0))
 	(define rebind_child_stage (make_group_stage
 		"rebind-child"
-		(list "child" "memcp-tests" "child_source" false nil)
+		(list "child" "memcp-tests" "child_source" false nil nil)
 		'() '(1) (list rebind_child_ag) nil '() '() nil nil '()))
 	(define rebind_parent_ag (list
 		(list (quote scalar_first_probe)
@@ -654,7 +657,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		0))
 	(define rebind_parent_stage (make_group_stage
 		"rebind-parent"
-		(list "parent" "memcp-tests" (make_stage_output_relation "rebind-child") false nil)
+		(list "parent" "memcp-tests" (make_stage_output_relation "rebind-child") false nil nil)
 		'() '(1) (list rebind_parent_ag) nil '() '() nil nil '()))
 	(define rebind_fixture (rebind_derived_stages
 		"lookup"
@@ -687,7 +690,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	previously caused exactly that regression against a real production table. */
 	(define cost_probe_stage (make_group_stage
 		"cost-probe-stage"
-		(list "cp" "memcp-tests" "cost_probe_source" false nil)
+		(list "cp" "memcp-tests" "cost_probe_source" false nil nil)
 		'() '(1) (list (list 1 (quote +) 0)) nil '() '() nil nil '()))
 	(assert (scalar_first_probe_keytable_cost_preferred? cost_probe_stage nil) false
 		"keytable cost check refuses the carrier when probe_work_rows is unknown")
@@ -736,7 +739,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	metadata read separately, then execute its cardinality expression against
 	deterministic observations without creating a table during startup. */
 	(define membership_text_source
-		(list "f" "memcp-tests" "membership_text_source" false nil))
+		(list "f" "memcp-tests" "membership_text_source" false nil nil))
 	(define membership_text_condition
 		(list (quote strlike) "filename" "%alternate%" "utf8mb4_general_ci"))
 	(define membership_text_rows_expr (membership_runtime_source_rows_expr
@@ -826,22 +829,22 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	there is no single row-identity to build a carrier around. */
 	(define session_key_stage (make_group_stage
 		"session-key-stage"
-		(list "sk" "memcp-tests" "session_key_source" false nil)
+		(list "sk" "memcp-tests" "session_key_source" false nil nil)
 		(list (list (quote session) "probe_user"))
 		(list (list (quote get_column) "sk" false "id" false) (list (quote session) "probe_user"))
 		(list (list 1 (quote +) 0)) nil '() '() nil nil '()))
-	(define session_key_src (list "sk" "memcp-tests" "session_key_source" false nil))
+	(define session_key_src (list "sk" "memcp-tests" "session_key_source" false nil nil))
 	(define session_key_keys (list (list (quote get_column) "sk" false "id" false) (list (quote session) "probe_user")))
 	(assert (nil? (scalar_first_probe_keytable_key_index session_key_stage session_key_src session_key_keys)) true
 		"keytable key index declines when the source's uniqueness cannot be verified (unknown table)")
 	(define multi_row_key_stage (make_group_stage
 		"multi-row-key-stage"
-		(list "mk" "memcp-tests" "multi_row_key_source" false nil)
+		(list "mk" "memcp-tests" "multi_row_key_source" false nil nil)
 		'()
 		(list (list (quote get_column) "mk" false "a" false) (list (quote get_column) "mk" false "b" false))
 		(list (list 1 (quote +) 0)) nil '() '() nil nil '()))
 	(assert (nil? (scalar_first_probe_keytable_key_index multi_row_key_stage
-		(list "mk" "memcp-tests" "multi_row_key_source" false nil)
+		(list "mk" "memcp-tests" "multi_row_key_source" false nil nil)
 		(list (list (quote get_column) "mk" false "a" false) (list (quote get_column) "mk" false "b" false)))) true
 		"keytable key index declines when more than one non-session key remains")
 	/* planner_row_count_after_selectivity: an unlimited dataset reduce (a bare
@@ -851,7 +854,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	source's row count genuinely cannot be determined (not a base table, or
 	an unverifiable/fabricated one), matching the same "unknown stays
 	unknown" discipline as the keytable cost check above. */
-	(define row_count_unknown_src (list "rc" "memcp-tests" "row_count_unknown_source" false nil))
+	(define row_count_unknown_src (list "rc" "memcp-tests" "row_count_unknown_source" false nil nil))
 	(assert (equal? (planner_row_count_after_selectivity
 		row_count_unknown_src (list row_count_unknown_src) "rc" true nil nil) nil) true
 		"row count after selectivity falls back to the caller's sentinel for an unverifiable source")
@@ -865,7 +868,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	bind such a stage once instead of re-probing it per row. */
 	(define invariant_probe_stage (make_group_stage
 		"invariant-probe-stage"
-		(list "ip" "memcp-tests" "invariant_probe_source" false nil)
+		(list "ip" "memcp-tests" "invariant_probe_source" false nil nil)
 		(list (list (quote session) "probe_user"))
 		(list (list (quote get_column) "ip" false "user" false))
 		(list aggregate_count_descriptor)
@@ -905,7 +908,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		true "deduplicated prepare recipe helper is itself stable across call sites")
 	(define correlated_probe_stage (make_group_stage
 		"correlated-probe-stage"
-		(list "cp2" "memcp-tests" "correlated_probe_source" false nil)
+		(list "cp2" "memcp-tests" "correlated_probe_source" false nil nil)
 		(list (list (quote get_column) "outer" false "standort" false))
 		(list (list (quote get_column) "cp2" false "user" false))
 		(list aggregate_count_descriptor)
@@ -927,7 +930,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		"(resultrow '(\"result\" 8))") true "build_queryplan_term lowers no-FROM projection")
 	(define inner_derived_ast (list "memcp-tests" '() (list "a" 1) true nil nil nil nil nil))
 	(define outer_derived_ast (list "memcp-tests"
-		(list (list "d" "memcp-tests" inner_derived_ast false nil))
+		(list (list "d" "memcp-tests" inner_derived_ast false nil nil))
 		(list "*" (list 'get_column nil false "*" false))
 		true nil nil nil nil nil))
 	(define derived_ir (untangle_query_term outer_derived_ast nil))
@@ -963,13 +966,13 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		"(resultrow '(\"x\" 8 \"in_ok\" (if (nil? 8) nil (if (nil? 8) nil (equal?? 8 8))) \"exists_ok\" true))") true "build_queryplan_term lowers zero-domain expression subqueries")
 	(define nested_catalog_stage (make_group_stage
 		"nested-catalog-stage"
-		(list "n" "memcp-tests" "nested_source" false nil)
+		(list "n" "memcp-tests" "nested_source" false nil nil)
 		'() '(1) '() nil '() '() nil nil '()))
 	(define nested_catalog_input (make_query_block
 		"memcp-tests"
 		(list
-			(list "o" "memcp-tests" "outer_source" false nil)
-			(list "nested" "memcp-tests" (make_stage_output_relation "nested-catalog-stage") false true))
+			(list "o" "memcp-tests" "outer_source" false nil nil)
+			(list "nested" "memcp-tests" (make_stage_output_relation "nested-catalog-stage") false true nil))
 		'() true '() nil '() nil nil '() '() '()))
 	(define outer_catalog_stage (make_group_stage
 		"outer-catalog-stage"
@@ -980,7 +983,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		true "group-stage lowering keeps nested stage-output metadata from the full catalog")
 	(define catalog_root (make_query_block
 		"memcp-tests"
-		(list (list "o" "memcp-tests" "outer_source" false nil))
+		(list (list "o" "memcp-tests" "outer_source" false nil nil))
 		'() true '() nil '() nil nil '() (list outer_catalog_stage) '()))
 	(define prepared_catalog_root (ir_root (prepare_physical_queryplan
 		(make_ir (quote select) catalog_root '() nil (quote rows)))))
@@ -1000,14 +1003,14 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			(map (produceN 23) (lambda (i)
 				(make_group_stage
 					(concat "indexed-catalog-stage-" i)
-					(list (concat "s" i) "memcp-tests" (concat "indexed_source_" i) false nil)
+					(list (concat "s" i) "memcp-tests" (concat "indexed_source_" i) false nil nil)
 					'() '(1) '() nil '() '() nil nil '()))))))
 	(define prepared_lowering_catalog (make_lowering_catalog indexed_catalog_stages))
 	(assert (lowering_catalog? prepared_lowering_catalog) true
 		"physical preparation indexes stage catalogs above the measured crossover")
 	(define merged_catalog_stage (make_group_stage
 		"merged-catalog-stage"
-		(list "merged" "memcp-tests" "merged_source" false nil)
+		(list "merged" "memcp-tests" "merged_source" false nil nil)
 		'() '(1) '() nil '() '() nil nil '()))
 	(define merged_indexed_catalog (merge_stage_catalogs
 		(list prepared_lowering_catalog (list merged_catalog_stage))))
@@ -1029,13 +1032,13 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(group_stage_cache_schema outer_catalog_stage)
 		(group_stage_cache_relation outer_catalog_stage)
 		false
-		nil))
+		nil nil))
 	(assert (equal? (gs_id (stage_for_group_cache_source prepared_lowering_catalog outer_catalog_group_cache_source))
 		"outer-catalog-stage")
 		true "indexed physical catalog resolves group-cache sources")
 	(define local_catalog_stage (make_group_stage
 		"local-catalog-stage"
-		(list "local" "memcp-tests" "local_source" false nil)
+		(list "local" "memcp-tests" "local_source" false nil nil)
 		'() '(1) '() nil '() '() nil nil '()))
 	(define child_lowering_catalog
 		(lowering_catalog_with_local_stages prepared_lowering_catalog (list local_catalog_stage)))
@@ -1067,8 +1070,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		"indexed physical stages do not copy the complete prepared catalog into their facts")
 	(assert (lowering_catalog? (qassoc_get (gs_facts indexed_catalog_stage) (quote lowering_catalog) nil)) true
 		"indexed physical stages retain only the lowering catalog handle")
-	(define btw_outer_sources (list (list "o" "memcp-tests" "outer_t" false nil)))
-	(define btw_inner_sources (list (list "i" "memcp-tests" "inner_t" false nil)))
+	(define btw_outer_sources (list (list "o" "memcp-tests" "outer_t" false nil nil)))
+	(define btw_inner_sources (list (list "i" "memcp-tests" "inner_t" false nil nil)))
 	(define btw_outer_id (list 'get_column "o" false "id" false))
 	(define btw_outer_limit (list 'get_column "o" false "limit_value" false))
 	(define btw_inner_user_id (list 'get_column "i" false "user_id" false))
@@ -1797,8 +1800,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	/* scan callback ownership: shards share a constant initializer, so only a
 	factory initializer (zero-argument lambda) gives each accumulator a fresh
 	owned value and enables _mut inside the reducer body */
-	(assert (serialize (optimize '('scan nil '('table "db" false "tbl" false) '(quote '(369435906932736)) '(list) '("x") '('lambda '('x) true) '("x") '('lambda '('acc 'x) '(set_assoc 'acc 'x true)) '('lambda '() '(list)) nil false))) "(scan nil (table \"db\" false \"tbl\" false) (quote (369435906932736)) '() (\"x\") (lambda (x) true 1) (\"x\") (lambda (acc x) (set_assoc_mut acc x true) 2) (lambda () '()) nil false)" "scan hook: factory accumulator enables set_assoc_mut")
-	(assert (serialize (optimize '('scan nil '('table "db" false "tbl" false) '(quote '(369435906932736)) '(list) '("x") '('lambda '('x) true) '("x") '('lambda '('acc 'x) '(set_assoc 'acc 'x true)) '(list) nil false))) "(scan nil (table \"db\" false \"tbl\" false) (quote (369435906932736)) '() (\"x\") (lambda (x) true 1) (\"x\") (lambda (acc x) (set_assoc acc x true) 2) '() nil false)" "scan hook: shared constant accumulator stays immutable")
+	(assert (serialize (optimize '('scan nil '('table "db" false "tbl" false (quote tx)) '(quote '(369435906932736)) '(list) '("x") '('lambda '('x) true) '("x") '('lambda '('acc 'x) '(set_assoc 'acc 'x true)) '('lambda '() '(list)) nil false))) "(scan nil (table \"db\" false \"tbl\" false tx) (quote (369435906932736)) '() (\"x\") (lambda (x) true 1) (\"x\") (lambda (acc x) (set_assoc_mut acc x true) 2) (lambda () '()) nil false)" "scan hook: factory accumulator enables set_assoc_mut")
+	(assert (serialize (optimize '('scan nil '('table "db" false "tbl" false (quote tx)) '(quote '(369435906932736)) '(list) '("x") '('lambda '('x) true) '("x") '('lambda '('acc 'x) '(set_assoc 'acc 'x true)) '(list) nil false))) "(scan nil (table \"db\" false \"tbl\" false tx) (quote (369435906932736)) '() (\"x\") (lambda (x) true 1) (\"x\") (lambda (acc x) (set_assoc acc x true) 2) '() nil false)" "scan hook: shared constant accumulator stays immutable")
 	(define opt_merge_unique_ser (serialize (optimize
 		(list 'lambda
 			(list 'a 'b 'c)
@@ -2693,11 +2696,11 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	/* JIT match: compile-time pattern pruning and direct list destructuring */
 	(define _jit_match_source (jit (lambda (src)
 		(match src
-			'((symbol alias) schema relation outer join) (list schema relation outer join)
+			'((symbol alias) schema relation outer join declarations) (list schema relation outer join declarations)
 			_ nil))))
 	(jit-warn-if-fallback _jit_match_source "jit: fixed-list match")
-	(assert (equal? (_jit_match_source (list (symbol "alias") "sales" "orders" false nil)) '("sales" "orders" false nil)) true "jit: fixed-list match binds fields")
-	(assert (nil? (_jit_match_source (list (symbol "other") "sales" "orders" false nil))) true "jit: fixed-list literal mismatch falls through")
+	(assert (equal? (_jit_match_source (list (symbol "alias") "sales" "orders" false nil nil)) '("sales" "orders" false nil nil)) true "jit: fixed-list match binds fields")
+	(assert (nil? (_jit_match_source (list (symbol "other") "sales" "orders" false nil nil))) true "jit: fixed-list literal mismatch falls through")
 	(assert (nil? (_jit_match_source (list (symbol "alias") "sales" "orders"))) true "jit: fixed-list length mismatch falls through")
 
 	(define _jit_match_cons (jit (lambda (values)

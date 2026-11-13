@@ -1,0 +1,189 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: T-SQL SELECT variable assignments use the shared relational planner
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+setup:
+- sql: DROP TABLE IF EXISTS assignment_items
+- sql: CREATE TABLE assignment_items (id INT PRIMARY KEY, amount INT, label NVARCHAR(20))
+- sql: INSERT INTO assignment_items VALUES (1, 10, N'alpha'), (2, 20, N'beta'), (3, NULL, N'gamma')
+- scm: (eval (parse_sql "memcp-tests" "CREATE USER assignment_metadata_reader IDENTIFIED BY 'pw'" nil))
+- sql: GRANT CONNECT TO assignment_metadata_reader
+cleanup:
+- sql: DROP TABLE IF EXISTS assignment_items
+- sql: DROP TABLE IF EXISTS assignment_private
+- scm: (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS assignment_metadata_reader" nil))
+test_cases:
+- name: Scalar assignment updates the declared local and emits only the final SELECT
+  sql: DECLARE @value INT = 1; SELECT @value = 7; SELECT @value AS value
+  expect: {rows: 1, data: [{value: 7}]}
+- name: Multiple assignments retain independent declared contracts
+  sql: DECLARE @value INT, @label NVARCHAR(3); SELECT @value=N'42', @label=N'abcdef'; SELECT @value AS value, @label AS label
+  expect: {rows: 1, data: [{value: 42, label: abc}]}
+- name: Assignment variable names are case insensitive
+  sql: DECLARE @Value INT=1; SELECT @VALUE=9; SELECT @value AS value
+  expect: {rows: 1, data: [{value: 9}]}
+- name: Null assignment replaces the current value
+  sql: DECLARE @value INT=7; SELECT @value=NULL; SELECT @value AS value
+  expect: {rows: 1, data: [{value: null}]}
+- name: Ordinary WHERE filters assignment source rows
+  sql: DECLARE @value INT=99; SELECT @value=amount FROM assignment_items WHERE id=2; SELECT @value AS value
+  expect: {rows: 1, data: [{value: 20}]}
+- name: Zero matching rows retain the current value
+  sql: DECLARE @value INT=99; SELECT @value=amount FROM assignment_items WHERE id=9; SELECT @value AS value
+  expect: {rows: 1, data: [{value: 99}]}
+- name: Ordered multirow assignment uses the final result row
+  sql: DECLARE @value INT; SELECT @value=amount FROM assignment_items ORDER BY id DESC; SELECT @value AS value
+  expect: {rows: 1, data: [{value: 10}]}
+- name: All assignment targets come from the same final row
+  sql: DECLARE @value INT, @label NVARCHAR(20); SELECT @value=amount,@label=label FROM assignment_items ORDER BY id; SELECT @value AS value,@label AS label
+  expect: {rows: 1, data: [{value: null, label: gamma}]}
+- name: TOP limits assignments before final row selection
+  sql: DECLARE @value INT; SELECT TOP(2) @value=amount FROM assignment_items ORDER BY id; SELECT @value AS value
+  expect: {rows: 1, data: [{value: 20}]}
+- name: TOP zero leaves a local unchanged
+  sql: DECLARE @value INT=99; SELECT TOP(0) @value=amount FROM assignment_items; SELECT @value AS value
+  expect: {rows: 1, data: [{value: 99}]}
+- name: Aggregate assignment uses the ordinary group stage
+  sql: DECLARE @value INT; SELECT @value=SUM(amount) FROM assignment_items; SELECT @value AS value
+  expect: {rows: 1, data: [{value: 30}]}
+- name: Scalar subquery assignment is decorrelated by the normal planner
+  sql: DECLARE @value INT=99; SELECT @value=(SELECT amount FROM assignment_items WHERE id=2); SELECT @value AS value
+  expect: {rows: 1, data: [{value: 20}]}
+- name: Empty scalar subquery assigns NULL rather than retaining the old value
+  sql: DECLARE @value INT=99; SELECT @value=(SELECT amount FROM assignment_items WHERE id=9); SELECT @value AS value
+  expect: {rows: 1, data: [{value: null}]}
+- name: RHS parameter values remain invocation inputs across repeated statements
+  sql: DECLARE @input INT=3,@value INT; SELECT @value=@input+1; SET @input=9; SELECT @value=@input+1; SELECT @value AS value
+  expect: {rows: 1, data: [{value: 10}]}
+- name: Repeated aggregate assignments bind the current scalar input for each invocation
+  sql: DECLARE @offset INT=3,@value BIGINT; SELECT @value=SUM(amount+@offset) FROM assignment_items; SET @offset=10; SELECT @value=SUM(amount+@offset) FROM assignment_items; SELECT @value AS value
+  expect: {rows: 1, data: [{value: 50}]}
+- name: Scalar self reference uses the input value
+  sql: DECLARE @value INT=3; SELECT @value=@value+1; SELECT @value AS value
+  expect: {rows: 1, data: [{value: 4}]}
+- name: Assignment without a following result SELECT emits no rows
+  sql: DECLARE @value INT=1; SELECT @value=7
+  expect: {affected_rows: 1}
+- name: Undeclared assignment target is rejected
+  sql: SELECT @missing=1
+  expect: {error: true}
+- name: Assignment cannot mix with result columns
+  sql: DECLARE @value INT; SELECT @value=1, 2 AS another
+  expect: {error: true}
+- name: Duplicate target is rejected
+  sql: DECLARE @value INT; SELECT @value=1,@value=2
+  expect: {error: true}
+- name: Narrowing overflow uses the ordinary declared assignment contract
+  sql: DECLARE @value TINYINT; SELECT @value=256
+  expect: {error: true}
+- name: Assignment in a derived table is rejected
+  sql: DECLARE @value INT; SELECT * FROM (SELECT @value=1) AS nested
+  expect: {error: true}
+- name: Assignment in a UNION branch is rejected
+  sql: DECLARE @value INT; SELECT @value=1 UNION ALL SELECT 2
+  expect: {error: true}
+- name: Wire clients observe the final result set only
+  tds:
+    statements:
+    - sql: DECLARE @value INT=1; SELECT @value=7; SELECT @value AS value
+      expect: {rows: 1, data: [{value: 7}], column_types: [{name: value, type: INT}]}
+- name: Pure preparation validates assignment contracts without executing it
+  tds:
+    statements:
+    - sql: SELECT @value=amount FROM assignment_items WHERE id=1
+      declarations: '@value INT'
+      prepare_only: true
+    - sql: SELECT @value=amount FROM assignment_items
+      declarations: '@value SMALLINT'
+      prepare_only: true
+- name: Pure preparation rejects an undeclared assignment target
+  tds:
+    statements:
+    - sql: SELECT @missing=1
+      prepare_only: true
+      expect: {error: true}
+- name: Assignment preserves native temporal values for later expressions
+  sql: DECLARE @value DATE; SELECT @value=CONVERT(DATE,N'20240102',112); SELECT YEAR(DATEADD(year,1,@value)) AS year
+  expect: {rows: 1, data: [{year: 2025}]}
+- name: Procedure assignment changes its local output parameter
+  setup:
+  - sql: DROP PROCEDURE IF EXISTS assignment_output
+  - sql: CREATE PROCEDURE assignment_output @value INT OUTPUT AS SELECT @value=amount FROM assignment_items WHERE id=2
+  cleanup:
+  - sql: DROP PROCEDURE IF EXISTS assignment_output
+  sql: DECLARE @value INT=3; EXEC assignment_output @value OUTPUT; SELECT @value AS value
+  expect: {rows: 1, data: [{value: 20}]}
+- name: Procedure local assignment does not overwrite the caller local
+  setup:
+  - sql: DROP PROCEDURE IF EXISTS assignment_local
+  - sql: CREATE PROCEDURE assignment_local @value INT AS SELECT @value=amount FROM assignment_items WHERE id=2
+  cleanup:
+  - sql: DROP PROCEDURE IF EXISTS assignment_local
+  sql: DECLARE @value INT=3; EXEC assignment_local @value; SELECT @value AS value
+  expect: {rows: 1, data: [{value: 3}]}
+- name: Ordered relational scalar subquery assignment uses normal decorrelation
+  sql: DECLARE @value INT; SELECT @value=(SELECT amount FROM assignment_items AS inside WHERE inside.id=outside.id) FROM assignment_items AS outside ORDER BY outside.id DESC; SELECT @value AS value
+  expect: {rows: 1, data: [{value: 10}]}
+- name: CTE source assignment uses the common logical CTE binding
+  sql: DECLARE @value INT; WITH chosen AS (SELECT amount FROM assignment_items WHERE id<3) SELECT @value=SUM(amount) FROM chosen; SELECT @value AS value
+  expect: {rows: 1, data: [{value: 30}]}
+- name: Assignment inside a CTE definition is rejected
+  sql: DECLARE @value INT; WITH chosen AS (SELECT @value=1) SELECT * FROM chosen
+  expect: {error: true}
+- name: Distinct assignment still retains the final ordered value
+  sql: DECLARE @value INT; SELECT DISTINCT @value=amount FROM assignment_items WHERE amount IS NOT NULL ORDER BY amount; SELECT @value AS value
+  expect: {rows: 1, data: [{value: 20}]}
+- name: Unsupported compound assignment fails explicitly
+  sql: DECLARE @value INT=1; SELECT @value+=amount FROM assignment_items
+  expect: {error: true}
+- name: Scalar subquery cardinality errors remain enforced
+  sql: DECLARE @value INT; SELECT @value=(SELECT amount FROM assignment_items)
+  expect: {error: true}
+- name: Joined source assignments retain the shared join plan
+  sql: DECLARE @value INT; SELECT @value=left_item.amount+right_item.amount FROM assignment_items AS left_item JOIN assignment_items AS right_item ON right_item.id=left_item.id+1 WHERE left_item.id=1; SELECT @value AS value
+  expect: {rows: 1, data: [{value: 30}]}
+- name: Ordinary equals-sign result aliases remain result columns
+  sql: SELECT value=7
+  expect: {rows: 1, data: [{value: 7}]}
+- name: CONNECT alone cannot expose table names through metadata assignment
+  username: assignment_metadata_reader
+  password: pw
+  session_id: assignment-metadata-authority
+  sql: DECLARE @value BIGINT; SELECT @value=COUNT(*) FROM sys.objects WHERE name=N'assignment_items'; SELECT @value AS value
+  # CONNECT is ignored, so the nonmember is rejected at database admission.
+  expect: {error: true, contains: access denied}
+- name: Grant declaration visibility to the existing assignment caller
+  scm: (eval (parse_sql "memcp-tests" "GRANT ALL ON `memcp-tests`.* TO assignment_metadata_reader" nil))
+- name: Metadata assignment preserves an authorized actor incarnation
+  username: assignment_metadata_reader
+  password: pw
+  session_id: assignment-metadata-authority
+  sql: DECLARE @value BIGINT; SELECT @value=COUNT(*) FROM sys.objects WHERE name=N'assignment_items'; SELECT @value AS value
+  expect: {rows: 1,data: [{value: 1}]}
+- name: Revoke declaration visibility from the warm assignment caller
+  scm: (eval (parse_sql "memcp-tests" "REVOKE ALL ON `memcp-tests`.* FROM assignment_metadata_reader" nil))
+- name: Warm metadata assignment rechecks current authority after revocation
+  username: assignment_metadata_reader
+  password: pw
+  session_id: assignment-metadata-authority
+  sql: DECLARE @value BIGINT; SELECT @value=COUNT(*) FROM sys.objects WHERE name=N'assignment_items'; SELECT @value AS value
+  expect: {error: true, contains: access denied}
+- name: Metadata assignment preserves private catalog visibility and rollback
+  tds:
+    statements:
+    - connection: private_owner
+      sql: BEGIN TRANSACTION; CREATE TABLE assignment_private(id INT)
+    - connection: private_owner
+      sql: DECLARE @value BIGINT; SELECT @value=COUNT(*) FROM sys.objects WHERE name=N'assignment_private'; SELECT @value AS value
+      expect: {rows: 1,data: [{value: 1}]}
+    - connection: private_observer
+      sql: DECLARE @value BIGINT; SELECT @value=COUNT(*) FROM sys.objects WHERE name=N'assignment_private'; SELECT @value AS value
+      expect: {rows: 1,data: [{value: 0}]}
+    - connection: private_owner
+      sql: ROLLBACK TRANSACTION
+    - connection: private_observer
+      sql: DECLARE @value BIGINT; SELECT @value=COUNT(*) FROM sys.objects WHERE name=N'assignment_private'; SELECT @value AS value
+      expect: {rows: 1,data: [{value: 0}]}

@@ -1,0 +1,114 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Composite schema installation commits and rolls back through real TDS transactions
+cleanup:
+- sql: DROP TABLE IF EXISTS installation_detail
+- sql: DROP TABLE IF EXISTS installation_header
+- sql: DROP TABLE IF EXISTS installation_aborted
+test_cases:
+- name: Native transaction owns composite declarations and their row data until commit
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: |
+        PRINT N'Creating schema 🐘';
+        CREATE TABLE dbo.installation_header(
+          tenant_id INT NOT NULL, item_id INT NOT NULL, sequence_id INT NOT NULL,
+          weight REAL NULL, note TEXT NULL, start_time DATETIME NULL,
+          row_id UNIQUEIDENTIFIER ROWGUIDCOL NOT NULL,
+          CONSTRAINT installation_header_pk PRIMARY KEY NONCLUSTERED(tenant_id ASC,item_id ASC,sequence_id ASC));
+        CREATE UNIQUE NONCLUSTERED INDEX installation_header_lookup
+          ON dbo.installation_header(tenant_id ASC,item_id ASC,sequence_id ASC);
+        CREATE TABLE dbo.installation_detail(
+          tenant_id INT NOT NULL, item_id INT NOT NULL, host_label VARCHAR(500) NOT NULL,
+          amount FLOAT(53) NULL, row_id UNIQUEIDENTIFIER ROWGUIDCOL NOT NULL,
+          CONSTRAINT installation_detail_pk PRIMARY KEY CLUSTERED(tenant_id ASC,item_id ASC,host_label ASC));
+        CREATE NONCLUSTERED INDEX installation_detail_lookup ON dbo.installation_detail(item_id ASC,tenant_id ASC);
+      expect: {rows: 0, messages: [{text: 'Creating schema 🐘'}]}
+    - connection: owner
+      sql: SELECT name FROM sys.objects WHERE name IN(N'installation_header',N'installation_detail') ORDER BY name
+      expect: {rows: 2, data: [{name: installation_detail},{name: installation_header}]}
+    - connection: owner
+      sql: SELECT COUNT(DISTINCT name) AS total FROM sys.objects WHERE name IN(N'installation_header',N'installation_detail')
+      expect: {rows: 1, data: [{total: 2}]}
+    - connection: observer
+      sql: SELECT name FROM sys.objects WHERE name IN(N'installation_header',N'installation_detail') ORDER BY name
+      expect: {rows: 0}
+    - connection: owner
+      sql: INSERT installation_header(tenant_id,item_id,sequence_id,row_id) VALUES(1,2,3,'11111111-1111-4111-8111-111111111111')
+    - connection: owner
+      sql: SELECT tenant_id,item_id,sequence_id FROM installation_header
+      expect: {rows: 1, data: [{tenant_id: 1,item_id: 2,sequence_id: 3}]}
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT tenant_id,item_id,sequence_id FROM installation_header
+      expect: {rows: 1, data: [{tenant_id: 1,item_id: 2,sequence_id: 3}]}
+    - connection: observer
+      sql: SELECT row_id FROM installation_header
+      expect:
+        rows: 1
+        data: [{row_id: {binary_hex: '11111111111111418111111111111111'}}]
+        column_types: [{name: row_id,type: UNIQUEIDENTIFIER,nullable: false}]
+- name: Rolled back declaration and its rows never become visible
+  tds:
+    statements:
+    - connection: rollback_owner
+      sql: BEGIN TRANSACTION
+    - connection: rollback_owner
+      sql: CREATE TABLE installation_aborted(id INT PRIMARY KEY,label NVARCHAR(30)); INSERT installation_aborted VALUES(7,N'private')
+    - connection: rollback_owner
+      sql: SELECT id,label FROM installation_aborted
+      expect: {rows: 1, data: [{id: 7,label: private}]}
+    - connection: observer
+      sql: SELECT name FROM sys.objects WHERE name=N'installation_aborted'
+      expect: {rows: 0}
+    - connection: rollback_owner
+      sql: ROLLBACK TRANSACTION
+    - connection: observer
+      sql: SELECT name FROM sys.objects WHERE name=N'installation_aborted'
+      expect: {rows: 0}
+- name: Bare transaction recovery retains rollback semantics through TDS
+  tds:
+    statements:
+    - connection: bare_owner
+      sql: BEGIN TRAN
+    - connection: bare_owner
+      sql: CREATE TABLE installation_aborted(id INT PRIMARY KEY); INSERT installation_aborted VALUES(11)
+    - connection: bare_owner
+      # A terminator makes go-mssqldb send SQL text rather than an RPC procedure name.
+      sql: ROLLBACK;
+    - connection: observer
+      sql: SELECT name FROM sys.objects WHERE name=N'installation_aborted'
+      expect: {rows: 0}
+- name: Restart recovers only committed installation declarations
+  syntax: mysql
+  sql: SHUTDOWN
+  restart_timeout: 60
+  expect: {rows: 0}
+- name: Recovered schema retains committed typed row data
+  sql: SELECT tenant_id,item_id,sequence_id,row_id FROM installation_header
+  expect: {rows: 1,data: [{tenant_id: 1,item_id: 2,sequence_id: 3,row_id: '11111111-1111-4111-8111-111111111111'}]}
+- name: Recovered catalog omits aborted declarations
+  sql: SELECT name FROM sys.objects WHERE name IN(N'installation_header',N'installation_detail',N'installation_aborted') ORDER BY name
+  expect: {rows: 2,data: [{name: installation_detail},{name: installation_header}]}
+- name: Recovered schema retains the separately named unique index declaration
+  scm: |
+    (begin
+      (define keys ((show (table "memcp-tests" false "installation_header" false nil) "constraints") "Unique"))
+      (define index (find keys (lambda (key) (equal? (key "Id") "installation_header_lookup")) nil))
+      (and (not (nil? index)) (equal? (index "Cols") '("tenant_id" "item_id" "sequence_id"))))
+  expect: {result: true}
+- name: Recovered schema retains the immutable row GUID declaration marker
+  scm: |
+    (begin
+      (define declaration (show (table "memcp-tests" false "installation_header" false nil) "column" "row_id" false))
+      (and ((declaration "Properties") "tsql.rowguidcol")
+        (not (declaration "Null")) (equal? (declaration "RawType") "UNIQUEIDENTIFIER")))
+  expect: {result: true}

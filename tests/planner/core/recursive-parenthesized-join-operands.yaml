@@ -1,0 +1,188 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  description: Recursive parenthesized joined tables retain nullable multisets and
+    lexical ON visibility
+  requires_tds: true
+setup:
+- sql: CREATE TABLE recursive_root(id INT PRIMARY KEY,parent_id INT)
+- sql: CREATE TABLE recursive_head(id INT,parent_id INT,unit INT)
+- sql: CREATE TABLE recursive_detail(id INT,unit INT)
+- sql: CREATE TABLE recursive_child(id INT,unit INT)
+- sql: CREATE TABLE recursive_extra(id INT,unit INT,label NVARCHAR(12))
+- sql: INSERT recursive_root VALUES(1,10),(2,20),(3,30),(4,40)
+- sql: INSERT recursive_head VALUES(10,100,7),(20,200,8),(40,NULL,NULL)
+- sql: INSERT recursive_detail VALUES(50,7),(51,7),(NULL,NULL)
+- sql: INSERT recursive_child VALUES(100,9),(200,10),(NULL,11)
+- sql: INSERT recursive_extra VALUES(60,9,N'sixty'),(61,9,N'sixty-one'),(NULL,10,N'actual-null'),(62,NULL,N'other')
+cleanup:
+- sql: DROP VIEW IF EXISTS dbo.recursive_join_view
+- sql: DROP TABLE IF EXISTS recursive_extra
+- sql: DROP TABLE IF EXISTS recursive_child
+- sql: DROP TABLE IF EXISTS recursive_detail
+- sql: DROP TABLE IF EXISTS recursive_head
+- sql: DROP TABLE IF EXISTS recursive_root
+test_cases:
+- name: A parenthesized inner operand retains its actual two rows
+  sql: SELECT b.id AS bid,c.id AS cid FROM (recursive_head b INNER JOIN recursive_child
+    c ON b.parent_id=c.id) ORDER BY b.id
+  expect:
+    rows: 2
+    data:
+    - bid: 10
+      cid: 100
+    - bid: 20
+      cid: 200
+- name: One grouped inner operand followed by a nullable source retains its three
+    rows
+  sql: SELECT b.id AS bid,d.id AS did FROM (recursive_head b INNER JOIN recursive_child
+    c ON b.parent_id=c.id) LEFT JOIN recursive_detail d ON b.unit=d.unit ORDER BY
+    b.id,d.id
+  expect:
+    rows: 3
+    data:
+    - bid: 10
+      did: 50
+    - bid: 10
+      did: 51
+    - bid: 20
+      did: null
+- name: Nested grouping of the complete nullable operand preserves identical rows
+  sql: SELECT b.id AS bid,d.id AS did FROM ((recursive_head b INNER JOIN recursive_child
+    c ON b.parent_id=c.id) LEFT JOIN recursive_detail d ON b.unit=d.unit) ORDER BY
+    b.id,d.id
+  expect:
+    rows: 3
+    data:
+    - bid: 10
+      did: 50
+    - bid: 10
+      did: 51
+    - bid: 20
+      did: null
+- name: A deeply parenthesized nullable operand composes with INNER LEFT and comma
+    sources
+  sql: "SELECT a.id AS aid,b.id AS bid,d.id AS did,c.id AS cid,e.id AS eid,e.label,x.id\
+    \ AS xid\nFROM recursive_root a INNER JOIN\n  (((((recursive_head b INNER JOIN\
+    \ recursive_child c ON b.parent_id=c.id)\n      LEFT JOIN recursive_detail d ON\
+    \ b.unit=d.unit)\n      LEFT JOIN recursive_extra e ON c.unit=e.unit)))\n  ON\
+    \ a.parent_id=b.id\nLEFT OUTER JOIN recursive_extra x ON x.id=e.id,\n  (SELECT\
+    \ 1 AS enabled) option_row\nWHERE option_row.enabled=1 ORDER BY a.id,d.id,e.id"
+  expect:
+    rows: 5
+    data: &id001
+    - aid: 1
+      bid: 10
+      did: 50
+      cid: 100
+      eid: 60
+      label: sixty
+      xid: 60
+    - aid: 1
+      bid: 10
+      did: 50
+      cid: 100
+      eid: 61
+      label: sixty-one
+      xid: 61
+    - aid: 1
+      bid: 10
+      did: 51
+      cid: 100
+      eid: 60
+      label: sixty
+      xid: 60
+    - aid: 1
+      bid: 10
+      did: 51
+      cid: 100
+      eid: 61
+      label: sixty-one
+      xid: 61
+    - aid: 2
+      bid: 20
+      did: null
+      cid: 200
+      eid: null
+      label: actual-null
+      xid: null
+- name: A leading recursive outer group retains its following INNER predicate
+  sql: "SELECT a.id AS aid,d.id AS did FROM\n (((recursive_head b INNER JOIN recursive_child\
+    \ c ON b.parent_id=c.id)\n   LEFT JOIN recursive_detail d ON b.unit=d.unit))\n\
+    \ INNER JOIN recursive_root a ON a.parent_id=b.id ORDER BY a.id,d.id"
+  expect:
+    rows: 3
+    data:
+    - aid: 1
+      did: 50
+    - aid: 1
+      did: 51
+    - aid: 2
+      did: null
+- name: A grouped comma operand keeps ordinary selection multiplicity
+  sql: "SELECT a.id AS aid,d.id AS did FROM recursive_root a,\n ((recursive_head b\
+    \ INNER JOIN recursive_child c ON b.parent_id=c.id)\n   LEFT JOIN recursive_detail\
+    \ d ON b.unit=d.unit)\n WHERE a.parent_id=b.id ORDER BY a.id,d.id"
+  expect:
+    rows: 3
+    data:
+    - aid: 1
+      did: 50
+    - aid: 1
+      did: 51
+    - aid: 2
+      did: null
+- name: A nullable right operand does not import the enclosing left alias
+  sql: SELECT a.id FROM recursive_root a INNER JOIN ((recursive_head b INNER JOIN
+    recursive_child c ON a.parent_id=c.id) LEFT JOIN recursive_detail d ON b.unit=d.unit)
+    ON a.parent_id=b.id
+  expect:
+    error: true
+    contains: unknown relation alias
+- name: A parenthesized inner ON cannot read an enclosing left alias
+  sql: SELECT a.id FROM recursive_root a INNER JOIN (recursive_head b INNER JOIN recursive_child
+    c ON a.parent_id=c.id) ON a.parent_id=b.id
+  expect:
+    error: true
+    contains: unknown relation alias
+- name: An inner ON after a comma cannot read its preceding comma source
+  sql: SELECT a.id FROM recursive_root a,(recursive_head b INNER JOIN recursive_child
+    c ON a.parent_id=c.id)
+  expect:
+    error: true
+    contains: unknown relation alias
+- name: A stored nested joined table uses its actual source scopes
+  sql: "CREATE VIEW dbo.recursive_join_view AS SELECT a.id AS aid,b.id AS bid,d.id\
+    \ AS did,c.id AS cid,e.id AS eid,e.label,x.id AS xid\nFROM recursive_root a INNER\
+    \ JOIN\n  (((((recursive_head b INNER JOIN recursive_child c ON b.parent_id=c.id)\n\
+    \      LEFT JOIN recursive_detail d ON b.unit=d.unit)\n      LEFT JOIN recursive_extra\
+    \ e ON c.unit=e.unit)))\n  ON a.parent_id=b.id\nLEFT OUTER JOIN recursive_extra\
+    \ x ON x.id=e.id,\n  (SELECT 1 AS enabled) option_row\nWHERE option_row.enabled=1"
+- name: A stored nested joined table preserves the full multiset
+  sql: SELECT aid,bid,did,cid,eid,label,xid FROM dbo.recursive_join_view ORDER BY
+    aid,did,eid
+  expect: &id002
+    rows: 5
+    data: *id001
+- name: mysql consumes a stored recursive operand with the same complete exports
+  syntax: mysql
+  sql: SELECT aid,bid,did,cid,eid,label,xid FROM recursive_join_view ORDER BY aid,did,eid
+  expect: *id002
+- name: psql consumes a stored recursive operand with the same complete exports
+  syntax: psql
+  sql: SELECT aid,bid,did,cid,eid,label,xid FROM recursive_join_view ORDER BY aid,did,eid
+  expect: *id002
+- name: Empty joined view results retain declared wire column contracts
+  tds:
+    statements:
+    - sql: SELECT aid,label FROM dbo.recursive_join_view WHERE 1=0
+      expect:
+        rows: 0
+        column_types:
+        - name: aid
+          type: INT
+        - name: label
+          type: NVARCHAR
+          length: 12

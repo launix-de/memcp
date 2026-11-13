@@ -1,3 +1,5 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
 # INSERT edge cases and storage type selection coverage
 # Targets shard.go Insert/insertDataset, table.go Insert,
 # storage-int.go init (76.9%), storage-scmer.go proposeCompression (81.8%).
@@ -22,7 +24,10 @@ test_cases:
   - name: "Create bulk table"
     sql: "CREATE TABLE iec_bulk (id INT, val INT)"
     expect:
-      rows: 0
+      affected_rows: 0
+      rows: 1
+      data: [{affected_rows: 0}]
+      result_contains: '"affected_rows"'
 
   - name: "Multi-row INSERT"
     sql: |
@@ -51,7 +56,10 @@ test_cases:
   - name: "Create typed table"
     sql: "CREATE TABLE iec_types (id INT, name VARCHAR(50), score DOUBLE)"
     expect:
-      rows: 0
+      affected_rows: 0
+      rows: 1
+      data: [{affected_rows: 0}]
+      result_contains: '"affected_rows"'
 
   - name: "INSERT string into INT column"
     sql: "INSERT INTO iec_types VALUES (1, 'test', 3.14)"
@@ -111,7 +119,10 @@ test_cases:
   - name: "Create negatives table"
     sql: "CREATE TABLE iec_negatives (id INT, val INT)"
     expect:
-      rows: 0
+      affected_rows: 0
+      rows: 1
+      data: [{affected_rows: 0}]
+      result_contains: '"affected_rows"'
 
   - name: "INSERT negative values"
     sql: |
@@ -147,7 +158,10 @@ test_cases:
   - name: "Create wide table"
     sql: "CREATE TABLE iec_wide (a INT, b INT, c INT, d INT, e INT, f VARCHAR(20), g DOUBLE)"
     expect:
-      rows: 0
+      affected_rows: 0
+      rows: 1
+      data: [{affected_rows: 0}]
+      result_contains: '"affected_rows"'
 
   - name: "INSERT wide row"
     sql: "INSERT INTO iec_wide VALUES (1, 2, 3, 4, 5, 'wide', 6.6)"
@@ -172,7 +186,10 @@ test_cases:
   - name: "Create constant column table"
     sql: "CREATE TABLE iec_constants (id INT, const_val INT, const_str VARCHAR(20))"
     expect:
-      rows: 0
+      affected_rows: 0
+      rows: 1
+      data: [{affected_rows: 0}]
+      result_contains: '"affected_rows"'
 
   - name: "Insert all-same-value data"
     sql: |

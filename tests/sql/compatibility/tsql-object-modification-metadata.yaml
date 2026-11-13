@@ -1,0 +1,101 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Object modification metadata reports unknown history with a declared nullable temporal type
+setup:
+- scm: (eval (parse_sql "memcp-tests" "CREATE USER modification_reader IDENTIFIED BY 'pw'" nil))
+- scm: (eval (parse_sql "memcp-tests" "GRANT ALL ON `memcp-tests`.* TO modification_reader" nil))
+- sql: CREATE TABLE modification_parent(id INT PRIMARY KEY)
+- sql: CREATE TABLE modification_child(id INT PRIMARY KEY,parent_id INT,CONSTRAINT modification_fk FOREIGN KEY(parent_id) REFERENCES modification_parent(id))
+- sql: CREATE VIEW dbo.modification_view AS SELECT id FROM modification_parent
+- sql: CREATE PROCEDURE dbo.modification_procedure AS SELECT 1 AS value
+- sql: CREATE FUNCTION dbo.modification_function() RETURNS INT AS BEGIN RETURN 1; END
+cleanup:
+- sql: DROP FUNCTION IF EXISTS dbo.modification_function
+- sql: DROP PROCEDURE IF EXISTS dbo.modification_procedure
+- sql: DROP VIEW IF EXISTS dbo.modification_view
+- sql: DROP TABLE IF EXISTS modification_child
+- sql: DROP TABLE IF EXISTS modification_parent
+- sql: DROP TABLE IF EXISTS modification_pending
+- scm: (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS modification_reader" nil))
+test_cases:
+- name: Relation constraint and module branches expose unknown modification dates
+  sql: SELECT name,type,modify_date FROM sys.objects WHERE name LIKE N'modification_%' ORDER BY name
+  expect:
+    rows: 6
+    data:
+    - {name: modification_child,type: U,modify_date: null}
+    - {name: modification_fk,type: F,modify_date: null}
+    - {name: modification_function,type: FN,modify_date: null}
+    - {name: modification_parent,type: U,modify_date: null}
+    - {name: modification_procedure,type: P,modify_date: null}
+    - {name: modification_view,type: V,modify_date: null}
+- name: Nonempty object metadata retains nullable DATETIME wire declarations
+  tds:
+    statements:
+    - sql: SELECT modify_date FROM sys.objects WHERE name=N'modification_fk'
+      expect:
+        rows: 1
+        data: [{modify_date: null}]
+        column_types: [{name: modify_date,type: DATETIME,nullable: true}]
+- name: Empty object metadata has the same temporal wire contract
+  tds:
+    statements:
+    - sql: SELECT modify_date FROM sys.objects WHERE name=N'modification_absent'
+      expect:
+        rows: 0
+        column_types: [{name: modify_date,type: DATETIME,nullable: true}]
+- name: Unknown modification history composes with joins sorting and SELECT INTO
+  tds:
+    statements:
+    - sql: |
+        SELECT c.name AS constraint_name,p.name AS table_name INTO #modification_keys
+        FROM sys.objects c INNER JOIN sys.objects p ON c.parent_object_id=p.object_id
+        WHERE c.type=N'F' AND c.name=N'modification_fk' ORDER BY c.type DESC,c.modify_date DESC
+    - sql: |
+        SELECT constraint_name,table_name FROM #modification_keys
+      expect: {rows: 1,data: [{constraint_name: modification_fk,table_name: modification_child}]}
+    - sql: |
+        DROP TABLE #modification_keys
+- name: Transaction-private object declarations expose only their owners unknown history
+  tds:
+    statements:
+    - {connection: owner,sql: BEGIN TRANSACTION}
+    - {connection: owner,sql: CREATE TABLE modification_pending(id INT)}
+    - connection: owner
+      sql: SELECT name,modify_date FROM sys.objects WHERE name=N'modification_pending'
+      expect: {rows: 1,data: [{name: modification_pending,modify_date: null}]}
+    - sql: SELECT name,modify_date FROM sys.objects WHERE name=N'modification_pending'
+      expect: {rows: 0}
+    - {connection: owner,sql: ROLLBACK TRANSACTION}
+    - sql: SELECT name,modify_date FROM sys.objects WHERE name=N'modification_pending'
+      expect: {rows: 0}
+- name: Altering a declaration does not fabricate missing timestamp history
+  tds:
+    statements:
+    - sql: ALTER TABLE modification_parent ADD note VARCHAR(12)
+    - sql: SELECT name,modify_date FROM sys.objects WHERE name=N'modification_parent'
+      expect: {rows: 1,data: [{name: modification_parent,modify_date: null}]}
+- name: Native database members can read the same nullable metadata
+  username: modification_reader
+  password: pw
+  session_id: modification-authority
+  sql: SELECT name,modify_date FROM sys.objects WHERE name=N'modification_parent'
+  expect: {rows: 1,data: [{name: modification_parent,modify_date: null}]}
+- name: Retire database membership after warming a metadata plan
+  scm: (eval (parse_sql "memcp-tests" "REVOKE ALL ON `memcp-tests`.* FROM modification_reader" nil))
+  expect: {}
+- name: Warm metadata plans recheck database authority
+  username: modification_reader
+  password: pw
+  session_id: modification-authority
+  sql: SELECT name,modify_date FROM sys.objects WHERE name=N'modification_parent'
+  expect: {error: true,contains: access denied}
+- name: Object metadata survives catalog reload without inventing dates
+  action: restart
+- name: Restored relation constraint and source declarations retain unknown history
+  sql: SELECT COUNT(*) AS total,COUNT(modify_date) AS known_dates FROM sys.objects WHERE name LIKE N'modification_%'
+  expect: {rows: 1,data: [{total: 6,known_dates: 0}]}

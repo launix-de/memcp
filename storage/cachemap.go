@@ -45,6 +45,10 @@ type cacheMap struct {
 	mu            sync.RWMutex
 	entries       map[string]*cacheMapEntry
 	flights       map[string]*cacheMapFlight
+	closed        bool
+	closeDone     chan struct{}
+	publications  sync.WaitGroup
+	producers     sync.WaitGroup // includes abandoned flights until their factories actually finish
 }
 
 type cacheMapFlight struct {
@@ -93,6 +97,10 @@ func NewCacheMap(a ...scm.Scmer) scm.Scmer {
 		case 0:
 			// list all keys
 			cm.mu.RLock()
+			if cm.closed {
+				cm.mu.RUnlock()
+				panic("cachemap is closed")
+			}
 			keys := make([]scm.Scmer, 0, len(cm.entries))
 			for k := range cm.entries {
 				keys = append(keys, scm.NewString(k))
@@ -103,6 +111,10 @@ func NewCacheMap(a ...scm.Scmer) scm.Scmer {
 			// get
 			key := scm.String(a[0])
 			cm.mu.RLock()
+			if cm.closed {
+				cm.mu.RUnlock()
+				panic("cachemap is closed")
+			}
 			entry, ok := cm.entries[key]
 			cm.mu.RUnlock()
 			if !ok {
@@ -156,6 +168,12 @@ func registerCacheMapEntry(entry *cacheMapEntry) {
 func (cm *cacheMap) store(key string, value scm.Scmer) {
 	entry := newCacheMapEntry(cm, key, value)
 	cm.mu.Lock()
+	if cm.closed {
+		cm.mu.Unlock()
+		panic("cachemap is closed")
+	}
+	cm.publications.Add(1)
+	defer cm.publications.Done()
 	old := cm.entries[key]
 	cm.entries[key] = entry
 	delta := entry.size
@@ -190,6 +208,10 @@ func cacheMapContext(queryState scm.Scmer) context.Context {
 
 func (cm *cacheMap) getOrCompute(key string, queryState scm.Scmer, producer scm.Scmer) scm.Scmer {
 	cm.mu.RLock()
+	if cm.closed {
+		cm.mu.RUnlock()
+		panic("cachemap is closed")
+	}
 	if entry := cm.entries[key]; entry != nil {
 		entry.lastUsed.Store(time.Now().UnixNano())
 		cm.mu.RUnlock()
@@ -198,6 +220,10 @@ func (cm *cacheMap) getOrCompute(key string, queryState scm.Scmer, producer scm.
 	cm.mu.RUnlock()
 
 	cm.mu.Lock()
+	if cm.closed {
+		cm.mu.Unlock()
+		panic("cachemap is closed")
+	}
 	if entry := cm.entries[key]; entry != nil {
 		entry.lastUsed.Store(time.Now().UnixNano())
 		cm.mu.Unlock()
@@ -212,6 +238,10 @@ func (cm *cacheMap) getOrCompute(key string, queryState scm.Scmer, producer scm.
 			waiters: 1,
 		}
 		cm.flights[key] = flight
+		// Close excludes new admissions under this mutex before joining. A
+		// cancelled waiter may detach its flight from the key directory, but
+		// that must not detach the running factory from its native owner.
+		cm.producers.Add(1)
 		go cm.runProducer(compileCtx, key, producer, flight)
 	} else {
 		flight.waiters++
@@ -244,6 +274,7 @@ func (cm *cacheMap) cancelWaiter(key string, flight *cacheMapFlight) {
 }
 
 func (cm *cacheMap) runProducer(ctx context.Context, key string, producer scm.Scmer, flight *cacheMapFlight) {
+	defer cm.producers.Done()
 	// A finished owner call includes native cache registration. Waking waiters
 	// earlier let a following lifecycle reset race the still-running producer.
 	defer close(flight.done)
@@ -260,11 +291,18 @@ func (cm *cacheMap) runProducer(ctx context.Context, key string, producer scm.Sc
 		return
 	}
 	delete(cm.flights, key)
+	if cm.closed {
+		entry = nil
+		failed = true
+		panicValue = "cachemap is closed"
+	}
 	flight.value = value
 	flight.panicValue = panicValue
 	flight.failed = failed || ctx.Err() != nil
 	var old *cacheMapEntry
 	if entry != nil {
+		cm.publications.Add(1)
+		defer cm.publications.Done()
 		old = cm.entries[key]
 		cm.entries[key] = entry
 		delta := entry.size
@@ -369,4 +407,35 @@ func (cm *cacheMap) HandleClusterRequest(ctx context.Context, payload []byte) {
 func (cm *cacheMap) ClusterView(ctx context.Context) (scm.Scmer, error) {
 	value, err := cm.executeClusterRequest(ctx, scm.ClusterRequest{Method: "view"})
 	return scm.ClusterViewValue(value, err)
+}
+
+// Close ends this native resource's actual lifetime, including independently
+// retained GlobalCache entries and asynchronous factories. Invocation owners
+// join their readers before closing a transaction-owned cache.
+func (cm *cacheMap) Close() error {
+	cm.mu.Lock()
+	if cm.closed {
+		done := cm.closeDone
+		cm.mu.Unlock()
+		<-done
+		return nil
+	}
+	cm.closed = true
+	cm.closeDone = make(chan struct{})
+	defer close(cm.closeDone)
+	for _, flight := range cm.flights {
+		flight.cancel()
+	}
+	cm.mu.Unlock()
+	cm.producers.Wait()
+	cm.publications.Wait()
+	cm.mu.Lock()
+	entries := cm.entries
+	cm.entries = nil
+	cm.residentBytes.Store(0)
+	cm.mu.Unlock()
+	for _, entry := range entries {
+		GlobalCache.Remove(entry)
+	}
+	return nil
 }

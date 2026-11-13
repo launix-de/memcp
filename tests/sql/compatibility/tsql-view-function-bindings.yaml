@@ -1,0 +1,192 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Stored views retain pure function references and bind actual consumer
+    policy, guards and transaction across dialects
+setup:
+- sql: CREATE TABLE view_function_rows(id INT PRIMARY KEY,value INT)
+- sql: INSERT view_function_rows VALUES(1,2),(2,4),(3,NULL)
+- sql: CREATE FUNCTION dbo.view_add(@value INT) RETURNS INT AS BEGIN RETURN @value+3;
+    END
+- sql: CREATE FUNCTION dbo.view_lookup(@key INT) RETURNS INT AS BEGIN DECLARE @total
+    INT; SELECT @total=SUM(value) FROM view_function_rows WHERE id=@key; RETURN @total;
+    END
+- sql: CREATE VIEW view_scalar AS SELECT id,dbo.view_add(value) AS adjusted FROM view_function_rows
+- sql: CREATE VIEW view_nested AS SELECT id,adjusted FROM view_scalar WHERE adjusted>5
+- sql: CREATE VIEW view_relational AS SELECT id,dbo.view_lookup(id) AS total FROM
+    view_function_rows
+- sql: CREATE VIEW view_top AS SELECT TOP(dbo.view_add(-1)) id FROM view_function_rows
+    ORDER BY id
+cleanup:
+- sql: DROP VIEW IF EXISTS view_top
+- sql: DROP VIEW IF EXISTS view_relational
+- sql: DROP VIEW IF EXISTS view_nested
+- sql: DROP VIEW IF EXISTS view_scalar
+- sql: DROP FUNCTION IF EXISTS dbo.view_add,dbo.view_lookup
+- sql: DROP TABLE IF EXISTS view_function_rows
+test_cases:
+- name: A tsql consumer binds the stored scalar view declaration
+  syntax: tsql
+  sql: SELECT id,adjusted FROM view_scalar ORDER BY id
+  expect:
+    rows: 3
+    data: &id001
+    - id: 1
+      adjusted: 5
+    - id: 2
+      adjusted: 7
+    - id: 3
+      adjusted: null
+- name: A mysql consumer binds the stored scalar view declaration
+  syntax: mysql
+  sql: SELECT id,adjusted FROM view_scalar ORDER BY id
+  expect:
+    rows: 3
+    data: *id001
+- name: A psql consumer binds the stored scalar view declaration
+  syntax: psql
+  sql: SELECT id,adjusted FROM view_scalar ORDER BY id
+  expect:
+    rows: 3
+    data: *id001
+- name: A tsql consumer binds relational function source in the stored view
+  syntax: tsql
+  sql: SELECT id,total FROM view_relational ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - id: 1
+      total: 2
+    - id: 2
+      total: 4
+    - id: 3
+      total: null
+- name: A mysql consumer binds relational function source in the stored view
+  syntax: mysql
+  sql: SELECT id,total FROM view_relational ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - id: 1
+      total: 2
+    - id: 2
+      total: 4
+    - id: 3
+      total: null
+- name: A psql consumer binds relational function source in the stored view
+  syntax: psql
+  sql: SELECT id,total FROM view_relational ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - id: 1
+      total: 2
+    - id: 2
+      total: 4
+    - id: 3
+      total: null
+- name: Nested stored views bind their functions in the same consuming plan
+  sql: SELECT id,adjusted FROM view_nested ORDER BY id
+  expect:
+    rows: 1
+    data:
+    - id: 2
+      adjusted: 7
+- name: Pure view functions also bind in the ordinary TOP expression
+  sql: SELECT id FROM view_top ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+    - id: 2
+- name: A pending replacement is visible only to its native transaction and rollback
+    restores the view binding
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: DROP FUNCTION dbo.view_add
+    - connection: owner
+      sql: CREATE FUNCTION dbo.view_add(@value INT) RETURNS INT AS BEGIN RETURN @value+7;
+        END
+    - connection: owner
+      sql: SELECT id,adjusted FROM view_scalar ORDER BY id
+      expect:
+        rows: 3
+        data: &id002
+        - &id003
+          id: 1
+          adjusted: 9
+        - &id004
+          id: 2
+          adjusted: 11
+        - id: 3
+          adjusted: null
+    - connection: observer
+      sql: SELECT id,adjusted FROM view_scalar ORDER BY id
+      expect:
+        rows: 3
+        data: *id001
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: owner
+      sql: SELECT id,adjusted FROM view_scalar ORDER BY id
+      expect:
+        rows: 3
+        data: *id001
+- name: Commit a new function source without rewriting the durable views
+  tds:
+    statements:
+    - sql: BEGIN TRANSACTION
+    - sql: DROP FUNCTION dbo.view_add
+    - sql: CREATE FUNCTION dbo.view_add(@value INT) RETURNS INT AS BEGIN RETURN @value+7;
+        END
+    - sql: COMMIT TRANSACTION
+- name: The identical warm tsql query observes the replaced function body
+  syntax: tsql
+  sql: SELECT id,adjusted FROM view_scalar ORDER BY id
+  expect:
+    rows: 3
+    data: *id002
+- name: The identical warm mysql query observes the replaced function body
+  syntax: mysql
+  sql: SELECT id,adjusted FROM view_scalar ORDER BY id
+  expect:
+    rows: 3
+    data: *id002
+- name: The identical warm psql query observes the replaced function body
+  syntax: psql
+  sql: SELECT id,adjusted FROM view_scalar ORDER BY id
+  expect:
+    rows: 3
+    data: *id002
+- name: A changed function also changes the nested view predicate result
+  sql: SELECT id,adjusted FROM view_nested ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - *id003
+    - *id004
+- name: Restart retains names and SQL argument syntax without bound function closures
+  action: restart
+- name: Restored scalar view binds the current native source definition
+  sql: SELECT id,adjusted FROM view_scalar ORDER BY id
+  expect:
+    rows: 3
+    data: *id002
+- name: Restored relational view binds current declaration and source data
+  syntax: psql
+  sql: SELECT id,total FROM view_relational ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - id: 1
+      total: 2
+    - id: 2
+      total: 4
+    - id: 3
+      total: null

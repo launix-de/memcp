@@ -123,18 +123,19 @@ func (m *uniqueWriteMask) include(other uniqueWriteMask) {
 }
 
 type uniqueWriteGuard struct {
-	afterTriggers []uniqueAfterTrigger
-	ownedShard    *storageShard // an UPDATE already owns this native MOSI writer
-	reservations  *uniqueReservationSet
-	mutation      *mosi.Writer
-	table         *table // SQL table-lock admission; the stripe pool remains node-global
-	tx            *TxContext
-	admitted      bool
-	locks         *UniqueLockPool
-	mask          uniqueWriteMask
-	held          bool
-	wrote         bool
-	version       uint64 // advances when a collision callback temporarily releases guards
+	afterTriggers         []uniqueAfterTrigger
+	transitionCompression []*nativeTransitionWriter
+	ownedShard            *storageShard // an UPDATE already owns this native MOSI writer
+	reservations          *uniqueReservationSet
+	mutation              *mosi.Writer
+	table                 *table // SQL table-lock admission; the stripe pool remains node-global
+	tx                    *TxContext
+	admitted              bool
+	locks                 *UniqueLockPool
+	mask                  uniqueWriteMask
+	held                  bool
+	wrote                 bool
+	version               uint64 // advances when a collision callback temporarily releases guards
 }
 
 // AFTER triggers run after the mutation's key reservations are released. They
@@ -161,11 +162,30 @@ func (g *uniqueWriteGuard) release() {
 		g.mutation.Release()
 		g.mutation = nil
 	}
+	// The existing AFTER owner already requires source shard/UNIQUE release.
+	// Transition data is independently owned, so compress its sealed native
+	// generations here, never inside a borrowed mutation/frame callback.
+	pending := g.transitionCompression
+	g.transitionCompression = nil
+	for _, writer := range pending {
+		writer.compressReady()
+	}
 	events := g.afterTriggers
 	g.afterTriggers = nil
 	for _, event := range events {
 		event.table.ExecuteTriggers(event.timing, event.old, event.new, event.tx)
 	}
+}
+
+// At most one entry per actual transition writer in this mutation guard;
+// registration occurs at shard-size rotation, not in the inner row loop.
+func (g *uniqueWriteGuard) deferTransitionCompression(writer *nativeTransitionWriter) {
+	for _, previous := range g.transitionCompression {
+		if previous == writer {
+			return
+		}
+	}
+	g.transitionCompression = append(g.transitionCompression, writer)
 }
 
 type uniqueReadRetry struct{}
@@ -397,6 +417,12 @@ func uniqueColumnValue(declaration *column, value scm.Scmer) scm.Scmer {
 // UNIQUE comparison and hashing share the declared type/collation contract,
 // independently of plain, compressed and UUID string representations.
 func (t *table) uniqueColumnDeclaration(columnName string) *column {
+	if names := t.columnNamesSnapshot.Load(); names != nil {
+		if entry, found := names.exact[columnName]; found {
+			return names.declarations[entry.ordinal]
+		}
+		return nil
+	}
 	for _, candidate := range t.columnDeclarations() {
 		if candidate.Name == columnName {
 			return candidate
@@ -803,9 +829,9 @@ func (t *table) localInsertShard(shard *storageShard) bool {
 
 // Expand volatile defaults before partition routing and UNIQUE checks. The
 // generated value becomes explicit invocation data, reused by WAL and forwarding.
-func (t *table) prepareInsertDefaults(columns []string, values [][]scm.Scmer) ([]string, [][]scm.Scmer) {
+func (t *table) prepareInsertDefaults(columns []string, values [][]scm.Scmer, declarations []*column) ([]string, [][]scm.Scmer) {
 	var missing []*column
-	for _, c := range t.columnDeclarations() {
+	for _, c := range declarations {
 		if c.DefaultExpression == "" {
 			continue
 		}
@@ -838,10 +864,11 @@ func (t *table) prepareInsertDefaults(columns []string, values [][]scm.Scmer) ([
 	return cols, rows
 }
 
-// Reserve before shard ownership when clustering or hash routing requires the
-// generated values. The shard sink then receives explicit IDs.
-func (t *table) prepareInsertIDs(columns []string, values [][]scm.Scmer, notify func(int64), dimensions []shardDimension) ([]string, [][]scm.Scmer, bool) {
-	needed := sharedClusterSource(t)
+// Reserve before shard ownership when clustering/routing or finite native
+// validation requires generated values. The shard sink receives explicit IDs.
+// Notification retains the first ASSIGNED ID contract, including IGNORE gaps.
+func (t *table) prepareInsertIDs(columns []string, values [][]scm.Scmer, notify func(int64), dimensions []shardDimension, force bool) ([]string, [][]scm.Scmer, bool) {
+	needed := force || sharedClusterSource(t)
 	for _, d := range dimensions {
 		needed = needed || d.Method != ""
 	}

@@ -1,0 +1,61 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  description: Configured physical storage has one logical database owner across restart
+setup:
+  - scm: (createdatabase "memcp-tests-discovery-logical" false (list "backend" "FakeRemote" "prefix" "memcp-tests-discovery-physical"))
+  - scm: (createdatabase "memcp-tests-discovery-control" false)
+  - scm: (createtable "memcp-tests-discovery-logical" "original" (list (list "column" "id" "INT" '() '())) (list "engine" "safe") false nil)
+  - scm: (insert (table "memcp-tests-discovery-logical" false "original" false nil) '("id") (list (list 7)))
+  - scm: (createtable "memcp-tests-discovery-control" "ordinary" (list (list "column" "id" "INT" '() '())) (list "engine" "safe") false nil)
+  - scm: (insert (table "memcp-tests-discovery-control" false "ordinary" false nil) '("id") (list (list 11)))
+cleanup:
+  - scm: (dropdatabase "memcp-tests-discovery-logical" true)
+  - scm: (dropdatabase "memcp-tests-discovery-control" true)
+test_cases:
+  - name: Reserve authority in the configured logical owner before restart
+    scm: (equal? (sequence_reserve "memcp-tests-discovery-logical" "discovery" 3 nil) (list 1 3))
+    expect: {result: true}
+  - name: Restart discovers explicit configuration and its physical directory together
+    sql: SHUTDOWN
+  - name: The physical storage directory does not become a second logical database
+    scm: (nil? (show "memcp-tests-discovery-physical" false nil))
+    expect: {result: true}
+  - name: Existing physical storage cannot be overwritten by a new default database
+    scm: (createdatabase "memcp-tests-discovery-physical" false)
+    expect: {error: true, contains: destination storage already contains a database schema}
+  - name: Configured and ordinary database owners retain their exact rows
+    scm: |
+      (and
+        (equal? (scan nil (table "memcp-tests-discovery-logical" false "original" false nil)
+          '() '() '() (lambda () true) '("id") (lambda (total id) (+ total id)) 0 +) 7)
+        (equal? (scan nil (table "memcp-tests-discovery-control" false "ordinary" false nil)
+          '() '() '() (lambda () true) '("id") (lambda (total id) (+ total id)) 0 +) 11)
+        (equal? (sequence_current "memcp-tests-discovery-logical" "discovery" nil) 3))
+    expect: {result: true}
+  - name: Publish a new safe table after discovery
+    scm: |
+      (begin
+        (createtable "memcp-tests-discovery-logical" "later"
+          (list (list "column" "id" "INT" '() '())) (list "engine" "safe") false nil)
+        (equal? (insert (table "memcp-tests-discovery-logical" false "later" false nil)
+          '("id") (list (list 17))) 1))
+    expect: {result: true}
+  - name: Checkpoint both original and newly published physical generations
+    scm: (begin (rebuild true false) true)
+    expect: {result: true}
+  - name: Restart runs ordinary discovery and cleanup again
+    sql: SHUTDOWN
+  - name: Recovery preserves new columns and rows without a stale second schema owner
+    scm: |
+      (and
+        (nil? (show "memcp-tests-discovery-physical" false nil))
+        (equal? (scan nil (table "memcp-tests-discovery-logical" false "original" false nil)
+          '() '() '() (lambda () true) '("id") (lambda (total id) (+ total id)) 0 +) 7)
+        (equal? (scan nil (table "memcp-tests-discovery-logical" false "later" false nil)
+          '() '() '() (lambda () true) '("id") (lambda (total id) (+ total id)) 0 +) 17)
+        (equal? (scan nil (table "memcp-tests-discovery-control" false "ordinary" false nil)
+          '() '() '() (lambda () true) '("id") (lambda (total id) (+ total id)) 0 +) 11)
+        (equal? (sequence_reserve "memcp-tests-discovery-logical" "discovery" 1 nil) (list 4 4)))
+    expect: {result: true}

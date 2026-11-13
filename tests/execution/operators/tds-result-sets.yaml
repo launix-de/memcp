@@ -1,0 +1,30 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  requires_tds: true
+  description: Real TDS expectations validate each result set including typed empty sets
+test_cases:
+- name: Result-set contracts retain a typed empty set between two populated sets
+  tds:
+    statements:
+    - sql: SELECT 1 AS first; SELECT CAST(NULL AS NVARCHAR(9)) AS empty WHERE 1=0; SELECT N'end' AS final
+      expect:
+        result_sets:
+        - rows: 1
+          data:
+          - first: 1
+          column_types:
+          - name: first
+            type: INT
+        - rows: 0
+          columns:
+          - empty
+          column_types:
+          - name: empty
+            type: NVARCHAR
+        - rows: 1
+          data:
+          - final: end
+          column_types:
+          - name: final
+            type: NVARCHAR

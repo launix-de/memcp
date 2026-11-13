@@ -35,25 +35,25 @@ test_cases:
     sql: SELECT 1 AS SeLeCt
     expect: {error: true}
   - name: Exact database policy rejects another spelling
-    scm: (nil? (table "MEMCP-TESTS" false "NamePolicyMixed" false))
+    scm: (nil? (table "MEMCP-TESTS" false "NamePolicyMixed" false nil))
     expect: {result: true}
   - name: Database folding does not change exact table policy
-    scm: (show (table "MEMCP-TESTS" true "NamePolicyMixed" false) "name")
+    scm: (show (table "MEMCP-TESTS" true "NamePolicyMixed" false nil) "name")
     expect: {result: NamePolicyMixed}
   - name: Exact table policy rejects another spelling
-    scm: (nil? (table "memcp-tests" false "namepolicymixed" false))
+    scm: (nil? (table "memcp-tests" false "namepolicymixed" false nil))
     expect: {result: true}
   - name: Table folding works independently of database folding
-    scm: (show (table "memcp-tests" false "namepolicymixed" true) "name")
+    scm: (show (table "memcp-tests" false "namepolicymixed" true nil) "name")
     expect: {result: NamePolicyMixed}
   - name: Both identifiers can be resolved without their original casing
-    scm: (show (table "MEMCP-TESTS" true "NAMEPOLICYMIXED" true) "name")
+    scm: (show (table "MEMCP-TESTS" true "NAMEPOLICYMIXED" true nil) "name")
     expect: {result: NamePolicyMixed}
   - name: A missing table has no published name
-    scm: (show (table "memcp-tests" false "NamePolicyMissing" true) "name")
+    scm: (show (table "memcp-tests" false "NamePolicyMissing" true nil) "name")
     expect: {result: null}
   - name: Serialized table handles use the central marker interface
-    scm: (show (eval (scheme (serialize (table "memcp-tests" false "NamePolicyMixed" false)))) "name")
+    scm: (show (eval (scheme (serialize (table "memcp-tests" false "NamePolicyMixed" false nil)))) "name")
     expect: {result: NamePolicyMixed}
   - name: Restore an old native table call embedded in persisted view IR
     scm: |
@@ -64,7 +64,7 @@ test_cases:
         (create_sql_view nil "memcp-tests" "NamePolicyView" "tsql"
           "SELECT COL_LENGTH(N'NamePolicyMixed',N'id') AS value FROM NamePolicyMixed"
           (list (quote query-block) "memcp-tests"
-            (list (list "source" "memcp-tests" "NamePolicyMixed" false nil))
+            (list (list "source" "memcp-tests" "NamePolicyMixed" false nil (sql_relation_declarations "memcp-tests" "NamePolicyMixed" nil)))
             (list "value" (list (quote sql_type_expr) (list historical) "INT" nil))
             true '() true nil nil nil '() '() '()) "error")
         true)
@@ -77,23 +77,23 @@ test_cases:
   - name: The exact frontend can create a distinct case-sensitive name
     sql: CREATE TABLE NAMEPOLICYMIXED (id INT PRIMARY KEY)
   - name: Folded ambiguity rejects even an exact-looking spelling
-    scm: (table "memcp-tests" false "NamePolicyMixed" true)
+    scm: (table "memcp-tests" false "NamePolicyMixed" true nil)
     expect: {error: true}
   - name: Exact lookup remains available during folded ambiguity
-    scm: (show (table "memcp-tests" false "NAMEPOLICYMIXED" false) "name")
+    scm: (show (table "memcp-tests" false "NAMEPOLICYMIXED" false nil) "name")
     expect: {result: NAMEPOLICYMIXED}
   - name: Remove the conflicting exact table
     sql: DROP TABLE NAMEPOLICYMIXED
   - name: Folded lookup recovers when the conflict is removed
-    scm: (show (table "memcp-tests" false "NAMEPOLICYMIXED" true) "name")
+    scm: (show (table "memcp-tests" false "NAMEPOLICYMIXED" true nil) "name")
     expect: {result: NamePolicyMixed}
   - name: Rename the table through the existing DDL path
     sql: RENAME TABLE NamePolicyMixed TO NamePolicyRenamed
   - name: Rename retires the old folded binding
-    scm: (nil? (table "memcp-tests" false "namepolicymixed" true))
+    scm: (nil? (table "memcp-tests" false "namepolicymixed" true nil))
     expect: {result: true}
   - name: Rename publishes its canonical metadata name
-    scm: (show (table "MEMCP-TESTS" true "namepolicyrenamed" true) "name")
+    scm: (show (table "MEMCP-TESTS" true "namepolicyrenamed" true nil) "name")
     expect: {result: NamePolicyRenamed}
 cleanup:
   - sql: DROP VIEW IF EXISTS NamePolicyView

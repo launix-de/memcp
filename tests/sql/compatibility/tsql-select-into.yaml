@@ -1,0 +1,245 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Trigger-local SELECT INTO retains native typed mutable rows through the actual transaction decision
+setup:
+- sql: CREATE TABLE select_into_input(id INT PRIMARY KEY,amount DECIMAL(10,2),label NVARCHAR(20))
+- sql: CREATE TABLE select_into_log(id INT,amount DECIMAL(10,2),label NVARCHAR(20))
+- sql: INSERT INTO select_into_input VALUES(1,1.25,N'first'),(2,NULL,NULL)
+- sql: |
+    CREATE TRIGGER select_into_copy ON select_into_input AFTER UPDATE
+    /* ordinary declaration header */ AS BEGIN
+      IF UPDATE(amount) BEGIN
+        SELECT id AS chosen_id,amount,label INTO #selected FROM inserted;
+        UPDATE #selected SET amount=amount+0.25 WHERE chosen_id=1;
+        DELETE FROM #selected WHERE chosen_id=2;
+        INSERT INTO #selected(chosen_id,amount,label) VALUES(9,2.50,N'extra');
+        INSERT INTO select_into_log(id,amount,label) SELECT chosen_id,amount,label FROM #selected;
+      END
+    END
+- sql: CREATE TABLE select_into_abort_input(id INT PRIMARY KEY,value INT)
+- sql: INSERT INTO select_into_abort_input VALUES(1,4)
+- sql: |
+    CREATE TRIGGER select_into_abort ON select_into_abort_input AFTER UPDATE AS BEGIN
+      SELECT id,value INTO #abort_copy FROM inserted;
+      UPDATE #abort_copy SET value=value+1;
+      INSERT INTO select_into_log(id,amount,label) SELECT id,value,N'abort' FROM #abort_copy;
+      RAISERROR(N'local materialization rejected',16,1); ROLLBACK;
+    END
+- sql: CREATE TABLE select_into_nested_input(id INT PRIMARY KEY,value INT)
+- sql: INSERT INTO select_into_nested_input VALUES(1,5)
+- sql: |
+    CREATE PROCEDURE select_into_nested_proc AS BEGIN
+      SELECT id,value INTO #nested_copy FROM inserted;
+      UPDATE #nested_copy SET value=value+1;
+      INSERT INTO select_into_log(id,amount,label) SELECT id,value,N'nested' FROM #nested_copy;
+    END
+- sql: |
+    CREATE TRIGGER select_into_nested ON select_into_nested_input AFTER UPDATE AS BEGIN
+      EXEC select_into_nested_proc;
+    END
+- sql: CREATE TABLE select_into_continuation_log(caller_value INT,later_value INT)
+- sql: |
+    CREATE PROCEDURE select_into_continue_auto AS BEGIN
+      CREATE TABLE #caller(id INT);
+      INSERT INTO #caller VALUES(31);
+      UPDATE select_into_input SET amount=1 WHERE id=1;
+      CREATE TABLE #later(id INT);
+      INSERT INTO #later VALUES(32);
+      UPDATE select_into_input SET amount=2 WHERE id=1;
+      INSERT INTO select_into_continuation_log(caller_value,later_value)
+        SELECT (SELECT id FROM #caller),(SELECT id FROM #later);
+    END
+- sql: |
+    CREATE PROCEDURE select_into_continue_explicit AS BEGIN
+      CREATE TABLE #caller(id INT);
+      INSERT INTO #caller VALUES(41);
+      BEGIN TRANSACTION;
+      UPDATE select_into_input SET amount=3 WHERE id=1;
+      INSERT INTO select_into_continuation_log(caller_value,later_value)
+        SELECT id,42 FROM #caller;
+      RETURN;
+    END
+- sql: CREATE TABLE select_into_drop_input(id INT PRIMARY KEY,value INT)
+- sql: INSERT select_into_drop_input VALUES(1,7),(2,NULL)
+- sql: CREATE TABLE select_into_drop_log(id INT,value INT,phase INT)
+- sql: |
+    CREATE TRIGGER select_into_drop ON select_into_drop_input AFTER UPDATE AS BEGIN
+      SELECT id,value INTO #scratch FROM inserted;
+      INSERT select_into_drop_log SELECT id,value,1 FROM #scratch;
+      DROP TABLE #scratch;
+      SELECT id,value+10 AS value INTO #scratch FROM inserted;
+      INSERT select_into_drop_log SELECT id,value,2 FROM #scratch;
+      DROP TABLE IF EXISTS #scratch;
+      DROP TABLE IF EXISTS #absent;
+    END
+cleanup:
+- sql: DROP TRIGGER IF EXISTS select_into_drop
+- sql: DROP TABLE IF EXISTS select_into_drop_input
+- sql: DROP TABLE IF EXISTS select_into_drop_log
+- sql: DROP PROCEDURE IF EXISTS select_into_continue_auto
+- sql: DROP PROCEDURE IF EXISTS select_into_continue_explicit
+- sql: DROP TABLE IF EXISTS select_into_continuation_log
+- sql: DROP TRIGGER IF EXISTS select_into_nested
+- sql: DROP PROCEDURE IF EXISTS select_into_nested_proc
+- sql: DROP TABLE IF EXISTS select_into_nested_input
+- sql: DROP TRIGGER IF EXISTS select_into_abort
+- sql: DROP TRIGGER IF EXISTS select_into_copy
+- sql: DROP TABLE IF EXISTS select_into_abort_input
+- sql: DROP TABLE IF EXISTS select_into_input
+- sql: DROP TABLE IF EXISTS select_into_log
+- sql: 'DROP TABLE IF EXISTS #selected'
+test_cases:
+- name: Shared SELECT grammar emits a typed local result recipe without an INTO planner artifact
+  scm: |
+    (begin
+      (define commands (cadr (parse_tsql_batch "memcp-tests"
+        "SELECT id AS picked INTO #local FROM deleted WHERE NOT id IS NULL")))
+      (define command (car commands))
+      (and (equal? (count commands) 1) (equal? (car command) "select-into")
+        (equal? (cadr command) "#local")
+        (not (nil? (parse_tsql "memcp-tests" (nth command 2) nil
+          ((lambda (options) (begin (options "__tsql_script_syntax" true) options)) (newsession)) nil)))))
+  expect: {result: true}
+- name: A caller temporary name remains independent of the trigger local materialization
+  session_id: select-into-owner
+  sql: 'CREATE TABLE #selected(chosen_id INT); INSERT INTO #selected VALUES(123)'
+  expect: {affected_rows: 1}
+- name: Mutable typed trigger result participates in one explicit transaction
+  session_id: select-into-owner
+  sql: BEGIN TRANSACTION; UPDATE select_into_input SET amount=amount
+  expect: {affected_rows: 2}
+- name: Module exit restores the caller binding while preserving the explicit transaction
+  session_id: select-into-owner
+  sql: 'SELECT chosen_id,@@TRANCOUNT AS open_transactions FROM #selected'
+  expect: {rows: 1, data: [{chosen_id: 123,open_transactions: 1}]}
+- name: Native mutable result preserves exact scale and selected values
+  session_id: select-into-owner
+  sql: SELECT id,amount,label FROM select_into_log ORDER BY id
+  expect: {rows: 2, data: [{id: 1,amount: 1.50,label: first},{id: 9,amount: 2.50,label: extra}]}
+- name: Commit closes physical module scopes after actual row ownership ends
+  session_id: select-into-owner
+  sql: COMMIT
+  expect: {}
+- name: Committed result effects remain visible and the caller name is still its original relation
+  session_id: select-into-owner
+  sql: 'SELECT chosen_id FROM #selected'
+  expect: {rows: 1, data: [{chosen_id: 123}]}
+- name: Caller temporary cleanup remains an ordinary explicit SQL operation
+  session_id: select-into-owner
+  sql: 'DROP TABLE #selected'
+  expect: {}
+- name: A zero row statement still creates a declared empty result before native local mutation
+  sql: UPDATE select_into_input SET amount=3 WHERE id=99
+  expect: {affected_rows: 0}
+- name: Zero row completion records only the deliberate local insert
+  sql: SELECT id,amount,label FROM select_into_log ORDER BY id,amount
+  expect:
+    rows: 3
+    data: [{id: 1,amount: 1.50,label: first},{id: 9,amount: 2.50,label: extra},{id: 9,amount: 2.50,label: extra}]
+- name: Trigger abort rewinds the whole transaction including earlier rows and local table effects
+  session_id: select-into-abort-owner
+  sql: BEGIN TRANSACTION; INSERT INTO select_into_abort_input VALUES(2,7); UPDATE select_into_abort_input SET value=9 WHERE id=1
+  expect: {error: true, contains: '3609'}
+- name: Whole rollback retains the prior committed relation and clears the transaction marker
+  session_id: select-into-abort-owner
+  sql: SELECT id,value,@@TRANCOUNT AS open_transactions FROM select_into_abort_input ORDER BY id
+  expect: {rows: 1, data: [{id: 1,value: 4,open_transactions: 0}]}
+- name: Aborted materialization has no surviving public side effect
+  sql: SELECT COUNT(*) AS remaining FROM select_into_log WHERE label=N'abort'
+  expect: {rows: 1, data: [{remaining: 0}]}
+- name: An independent caller cannot acquire the retired module local name
+  sql: 'SELECT * FROM #abort_copy'
+  expect: {error: true, contains: 'local temporary table does not exist'}
+- name: Ordinary top level SELECT INTO is explicitly outside the module lifetime profile
+  sql: 'SELECT id INTO #outside FROM select_into_input'
+  expect: {error: true, contains: 'statement-trigger module'}
+- name: Global temporary SELECT INTO is rejected by the shared name owner
+  scm: |
+    (parse_tsql_batch "memcp-tests" "SELECT id INTO ##global FROM deleted")
+  expect: {error: true, contains: global temporary tables are not supported}
+- name: Persistent SELECT INTO is rejected rather than bypass native catalog decisions
+  scm: |
+    (parse_tsql_batch "memcp-tests" "SELECT id INTO persistent_result FROM deleted")
+  expect: {error: true, contains: 'local temporary target'}
+- name: Unnamed result expressions cannot become guessed native declarations
+  scm: |
+    (parse_tsql_batch "memcp-tests" "SELECT id+1 INTO #unnamed FROM deleted")
+  expect: {error: true, contains: 'named result columns'}
+- name: Child procedure materialization keeps every module ancestor alive until commit
+  session_id: select-into-nested-owner
+  sql: BEGIN TRANSACTION; UPDATE select_into_nested_input SET value=10
+  expect: {affected_rows: 1}
+- name: Nested child effects retain their actual transaction and hide lexical aliases
+  session_id: select-into-nested-owner
+  sql: SELECT id,amount,@@TRANCOUNT AS open_transactions FROM select_into_log WHERE label=N'nested'
+  expect: {rows: 1, data: [{id: 1,amount: 11,open_transactions: 1}]}
+- name: Commit retires child and ancestor native resource scopes after their row decision
+  session_id: select-into-nested-owner
+  sql: COMMIT
+  expect: {}
+- name: Child procedure temporary name cannot escape through its parent trigger
+  session_id: select-into-nested-owner
+  sql: 'SELECT * FROM #nested_copy'
+  expect: {error: true, contains: local temporary table does not exist}
+- name: A second nested materialization can be rolled back after all module aliases end
+  session_id: select-into-nested-owner
+  sql: BEGIN TRANSACTION; UPDATE select_into_nested_input SET value=20; ROLLBACK
+  expect: {}
+- name: Nested rollback preserves previously committed rows and completion effects exactly
+  sql: SELECT id,value FROM select_into_nested_input
+  expect: {rows: 1, data: [{id: 1,value: 10}]}
+- name: Nested rollback leaves no additional public completion output
+  sql: SELECT id,amount FROM select_into_log WHERE label=N'nested'
+  expect: {rows: 1, data: [{id: 1,amount: 11}]}
+- name: A live procedure ancestor continues across independent triggered autocommit leaves
+  sql: EXEC select_into_continue_auto
+  expect: {}
+- name: Autocommit result retirement preserves both earlier and later procedure temporary tables
+  sql: SELECT caller_value,later_value FROM select_into_continuation_log
+  expect: {rows: 1, data: [{caller_value: 31,later_value: 32}]}
+- name: A procedure can return while its independent trigger result still belongs to an explicit transaction
+  session_id: select-into-continuation-explicit
+  sql: EXEC select_into_continue_explicit
+  expect: {}
+- name: The explicit owner survives procedure module cleanup with its native result effects
+  session_id: select-into-continuation-explicit
+  sql: SELECT caller_value,later_value,@@TRANCOUNT AS open_transactions FROM select_into_continuation_log ORDER BY caller_value
+  expect:
+    rows: 2
+    data: [{caller_value: 31,later_value: 32,open_transactions: 1},{caller_value: 41,later_value: 42,open_transactions: 1}]
+- name: Commit retires the independent result scope without reopening a retired module
+  session_id: select-into-continuation-explicit
+  sql: COMMIT
+  expect: {}
+
+- name: Trigger DROP retires its own name and permits a fresh typed result within one transaction
+  tds:
+    statements:
+    - {connection: owner, sql: 'CREATE TABLE #scratch(id INT); INSERT #scratch VALUES(777)'}
+    - {connection: owner, sql: BEGIN TRANSACTION}
+    - {connection: owner, sql: UPDATE select_into_drop_input SET value=value}
+    - connection: owner
+      sql: SELECT id,value,phase FROM select_into_drop_log ORDER BY phase,id
+      expect:
+        rows: 4
+        data: [{id: 1,value: 7,phase: 1},{id: 2,value: null,phase: 1},{id: 1,value: 17,phase: 2},{id: 2,value: null,phase: 2}]
+    - connection: owner
+      sql: 'SELECT id,@@TRANCOUNT AS open_transactions FROM #scratch'
+      expect: {rows: 1,data: [{id: 777,open_transactions: 1}]}
+    - {connection: owner, sql: ROLLBACK TRANSACTION}
+    - connection: observer
+      sql: SELECT id FROM select_into_drop_log
+      expect: {rows: 0}
+    - {connection: owner, sql: 'DROP TABLE #scratch'}
+- name: Autocommit publishes both result generations after their lexical names are dropped
+  sql: UPDATE select_into_drop_input SET value=value
+  expect: {affected_rows: 2}
+- name: Native decision retains the exact committed rows from both dropped generations
+  sql: SELECT id,value,phase FROM select_into_drop_log ORDER BY phase,id
+  expect:
+    rows: 4
+    data: [{id: 1,value: 7,phase: 1},{id: 2,value: null,phase: 1},{id: 1,value: 17,phase: 2},{id: 2,value: null,phase: 2}]

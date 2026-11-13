@@ -487,12 +487,12 @@ test_cases:
     error: true
     contains: integer conversion overflow
 - name: Native distinct NULL key retains its generic declaration
-  scm: (createkey (table "memcp-tests" false "write_null_distinct" false) "nullable_key" true '("code") nil '("nulls_not_distinct" false))
+  scm: (createkey (table "memcp-tests" false "write_null_distinct" false nil) "nullable_key" true '("code") nil '("nulls_not_distinct" false))
   expect:
     result: true
 - name: Null safe lookup honors distinct native NULL keys
-  scm: "(begin\n  (define t '(\"t\" \"memcp-tests\" \"write_null_target\" false nil))\n\
-    \  (define s '(\"s\" \"memcp-tests\" \"write_null_distinct\" false nil))\n  (define\
+  scm: "(begin\n  (define t '(\"t\" \"memcp-tests\" \"write_null_target\" false nil (sql_relation_declarations \"memcp-tests\" \"write_null_target\" nil)))\n\
+    \  (define s '(\"s\" \"memcp-tests\" \"write_null_distinct\" false nil (sql_relation_declarations \"memcp-tests\" \"write_null_distinct\" nil)))\n  (define\
     \ scol (list (quote get_column) \"s\" false \"code\" false))\n  (define tcol (list\
     \ (quote get_column) \"t\" false \"code\" false))\n  (source_is_unique_lookup_from_sources?\
     \ (list t s) \"t\" (list t) s '()\n    (list (quote or) (list (quote equal??)\
@@ -501,8 +501,8 @@ test_cases:
   expect:
     result: false
 - name: Null safe lookup honors equal native NULL keys
-  scm: "(begin\n  (define t '(\"t\" \"memcp-tests\" \"write_null_target\" false nil))\n\
-    \  (define s '(\"s\" \"memcp-tests\" \"write_null_equal\" false nil))\n  (define\
+  scm: "(begin\n  (define t '(\"t\" \"memcp-tests\" \"write_null_target\" false nil (sql_relation_declarations \"memcp-tests\" \"write_null_target\" nil)))\n\
+    \  (define s '(\"s\" \"memcp-tests\" \"write_null_equal\" false nil (sql_relation_declarations \"memcp-tests\" \"write_null_equal\" nil)))\n  (define\
     \ scol (list (quote get_column) \"s\" false \"code\" false))\n  (define tcol (list\
     \ (quote get_column) \"t\" false \"code\" false))\n  (source_is_unique_lookup_from_sources?\
     \ (list t s) \"t\" (list t) s '()\n    (list (quote or) (list (quote equal??)\
@@ -744,7 +744,7 @@ test_cases:
   expect:
     affected_rows: 0
 - name: Replace source uniqueness with distinct NULL semantics
-  scm: (createkey (table "memcp-tests" false "write_guard_null_source" false) "unique_write_null" true '("code") nil '("nulls_not_distinct" false))
+  scm: (createkey (table "memcp-tests" false "write_guard_null_source" false nil) "unique_write_null" true '("code") nil '("nulls_not_distinct" false))
   expect:
     result: true
 - name: A distinct NULL source can publish another NULL key
@@ -866,18 +866,32 @@ test_cases:
     FOR EACH ROW BEGIN UPDATE write_guard_trigger_target t JOIN write_guard_trigger_source
     s ON t.id=s.code SET value=t.value+s.amount; END
   expect:
-    affected_rows: 1
+    affected_rows: 0
+    result_contains: '"affected_rows"'
+
+- name: "Completed MySQL declaration is present: A language-defined trigger retains its joined source contract"
+  syntax: mysql
+  sql: "SHOW CREATE TRIGGER write_guard_trigger_mutation"
+  expect: {rows: 1,data: [{Trigger: "write_guard_trigger_mutation"}]}
+
 - name: Record actual trigger target mutations
   syntax: mysql
   sql: CREATE TRIGGER write_guard_trigger_changes AFTER UPDATE ON write_guard_trigger_target
     FOR EACH ROW BEGIN INSERT INTO write_guard_trigger_audit (`value`) VALUES(NEW.`value`);
     END
   expect:
-    affected_rows: 1
+    affected_rows: 0
+    result_contains: '"affected_rows"'
+
+- name: "Completed MySQL declaration is present: Record actual trigger target mutations"
+  syntax: mysql
+  sql: "SHOW CREATE TRIGGER write_guard_trigger_changes"
+  expect: {rows: 1,data: [{Trigger: "write_guard_trigger_changes"}]}
+
 - name: Refresh source statistics without changing the declaration contract
-  scm: (rebuild (table "memcp-tests" false "write_guard_trigger_source" false) true false)
+  scm: (rebuild (table "memcp-tests" false "write_guard_trigger_source" false nil) true false)
 - name: Refresh target statistics without invalidating inline mutation contracts
-  scm: (rebuild (table "memcp-tests" false "write_guard_trigger_target" false) true false)
+  scm: (rebuild (table "memcp-tests" false "write_guard_trigger_target" false nil) true false)
 - name: Initial trigger invocation has one declared source match
   sql: INSERT INTO write_guard_trigger_event VALUES(1)
   expect:
@@ -1114,7 +1128,35 @@ test_cases:
     AND write_composite.value<>write_source.value
   expect:
     affected_rows: 2
+- name: TSQL UPDATE counts changed and unchanged matches including NULL assignments
+  setup:
+  - sql: CREATE TABLE write_count_target(id INT PRIMARY KEY,value INT)
+  - sql: CREATE TABLE write_count_source(id INT PRIMARY KEY)
+  - sql: INSERT INTO write_count_target VALUES(1,10),(2,NULL),(3,30)
+  - sql: INSERT INTO write_count_source VALUES(1),(2),(3)
+  sql: UPDATE write_count_target SET value=COALESCE(value,20)
+  expect: {rows: 1, data: [{affected_rows: 3}]}
+- name: Bounded unchanged TSQL UPDATE counts only its admitted target
+  sql: UPDATE TOP(1) write_count_target SET value=value WHERE id=1
+  expect: {rows: 1, data: [{affected_rows: 1}]}
+- name: Joined unchanged TSQL UPDATE counts each unique target match once
+  sql: UPDATE t SET value=t.value FROM write_count_target AS t JOIN write_count_source AS s ON t.id=s.id
+  expect: {rows: 1, data: [{affected_rows: 3}]}
+- name: Unmatched TSQL UPDATE returns an explicit zero count
+  sql: UPDATE write_count_target SET value=99 WHERE id=99
+  expect: {rows: 1, data: [{affected_rows: 0}]}
+- name: MySQL unchanged UPDATE preserves changed row counting on the same native relation
+  syntax: mysql
+  sql: UPDATE write_count_target SET value=value
+  expect: {rows: 1, data: [{affected_rows: 0}]}
+- name: Count selection preserves every native value after all update paths
+  sql: SELECT id,value FROM write_count_target ORDER BY id
+  expect:
+    rows: 3
+    data: [{id: 1, value: 10}, {id: 2, value: 20}, {id: 3, value: 30}]
 cleanup:
+- sql: DROP TABLE IF EXISTS write_count_source
+- sql: DROP TABLE IF EXISTS write_count_target
 - sql: DROP TABLE IF EXISTS write_guard_trigger_event
 - sql: DROP TABLE IF EXISTS write_guard_trigger_audit
 - sql: DROP TABLE IF EXISTS write_guard_trigger_source

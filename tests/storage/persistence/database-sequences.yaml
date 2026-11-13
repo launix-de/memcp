@@ -1,0 +1,139 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: "1.0"
+  isolated: true
+  description: "Nontransactional named database sequence reservations remain durable"
+setup:
+  - sql: DROP TABLE IF EXISTS native_sequence_record
+  - sql: CREATE TABLE native_sequence_record (id INT PRIMARY KEY, sequence_name TEXT, high BIGINT) ENGINE=SAFE
+test_cases:
+  - name: Reading an unused sequence returns exact zero
+    scm: |
+      (begin
+        (define name (concat "sequence-unused:" (uuid)))
+        (and (equal? (sequence_current "memcp-tests" name nil) 0)
+          (equal? (sequence_current "memcp-tests" name nil) 0)))
+    expect: {result: true}
+  - name: Reservations return inclusive disjoint intervals
+    scm: |
+      (begin
+        (define name (concat "sequence-ranges:" (uuid)))
+        (define first (sequence_reserve "memcp-tests" name 3 nil))
+        (define second (sequence_reserve "memcp-tests" name 2 nil))
+        (and (equal? first (list 1 3)) (equal? second (list 4 5))
+          (equal? (sequence_current "memcp-tests" name nil) 5)))
+    expect: {result: true}
+  - name: Named sequences retain exact Unicode spelling and independent values
+    scm: |
+      (begin
+        (define prefix (concat "sequence-names:" (uuid)))
+        (define upper (concat prefix "Å"))
+        (define lower (concat prefix "å"))
+        (and (equal? (sequence_reserve "memcp-tests" upper 2 nil) (list 1 2))
+          (equal? (sequence_reserve "memcp-tests" lower 1 nil) (list 1 1))
+          (equal? (sequence_current "memcp-tests" upper nil) 2)
+          (equal? (sequence_current "memcp-tests" lower nil) 1)))
+    expect: {result: true}
+  - name: Savepoint and transaction rollback restore rows without rewinding reservations
+    scm: |
+      (begin
+        (define name (concat "sequence-rollback:" (uuid)))
+        (define s (newsession)) (s "username" "root") (tx_begin_acid s)
+        (define tx (s "__memcp_tx"))
+        (insert (table "memcp-tests" false "native_sequence_record" false tx)
+          '("id" "sequence_name" "high") (list (list 10 name 1)) '() nil false nil tx)
+        (define first (sequence_reserve "memcp-tests" name 1 tx))
+        (define boundary (tx_savepoint tx))
+        (define later (sequence_reserve "memcp-tests" name 2 tx))
+        (tx_rollback_to_savepoint tx boundary)
+        (define retained (equal? (sequence_current "memcp-tests" name tx) 3))
+        (tx_rollback s)
+        (and retained (equal? first (list 1 1)) (equal? later (list 2 3))
+          (equal? (sequence_reserve "memcp-tests" name 1 nil) (list 4 4))))
+    expect: {result: true}
+  - name: The row written by the rolled back transaction is absent
+    sql: SELECT COUNT(*) AS n FROM native_sequence_record WHERE id=10
+    expect: {rows: 1, data: [{n: 0}]}
+  - name: Concurrent native reservations share one highwater
+    scm: |
+      (begin
+        (define name (concat "sequence-parallel:" (uuid)))
+        (define results (newsession))
+        (parallel
+          (results "0" (sequence_reserve "memcp-tests" name 2 nil))
+          (results "1" (sequence_reserve "memcp-tests" name 2 nil))
+          (results "2" (sequence_reserve "memcp-tests" name 2 nil))
+          (results "3" (sequence_reserve "memcp-tests" name 2 nil)))
+        (define intervals (sort (list (results "0") (results "1") (results "2") (results "3"))
+          (lambda (left right) (< (car left) (car right)))))
+        (and (equal? intervals (list (list 1 2) (list 3 4) (list 5 6) (list 7 8)))
+          (equal? (sequence_current "memcp-tests" name nil) 8)))
+    expect: {result: true}
+  - name: Zero is not a reservation count
+    scm: (sequence_reserve "memcp-tests" "sequence-invalid-count" 0 nil)
+    expect: {error: true}
+  - name: Invalid counts names and transaction carriers fail without reserving
+    scm: |
+      (begin
+        (define name (concat "sequence-invalid:" (uuid)))
+        (define negative (try (lambda () (begin (sequence_reserve "memcp-tests" name -1 nil) false)) (lambda (_) true)))
+        (define fractional (try (lambda () (begin (sequence_reserve "memcp-tests" name 1.5 nil) false)) (lambda (_) true)))
+        (define empty (try (lambda () (begin (sequence_reserve "memcp-tests" "" 1 nil) false)) (lambda (_) true)))
+        (define invalid_utf8 (try (lambda () (begin (sequence_reserve "memcp-tests" (hex2bin "ff") 1 nil) false)) (lambda (_) true)))
+        (define oversized (try (lambda () (begin (sequence_reserve "memcp-tests" (string_repeat "x" 1025) 1 nil) false)) (lambda (_) true)))
+        (define carrier (try (lambda () (begin (sequence_reserve "memcp-tests" name 1 false) false)) (lambda (_) true)))
+        (and negative fractional empty invalid_utf8 oversized carrier
+          (equal? (sequence_current "memcp-tests" name nil) 0)))
+    expect: {result: true}
+  - name: Signed integer exhaustion rejects before changing the highwater
+    scm: |
+      (begin
+        (define name (concat "sequence-overflow:" (uuid)))
+        (define maximum 9223372036854775807)
+        (define interval (sequence_reserve "memcp-tests" name maximum nil))
+        (define rejected (try (lambda () (begin (sequence_reserve "memcp-tests" name 1 nil) false)) (lambda (_) true)))
+        (and (equal? interval (list 1 maximum)) rejected
+          (equal? (sequence_current "memcp-tests" name nil) maximum)))
+    expect: {result: true}
+  - name: Durable reservations and a real ACID row share the database authority log
+    scm: |
+      (begin
+        (define name (concat "sequence-restart:" (uuid)))
+        (define interval (sequence_reserve "memcp-tests" name 5 nil))
+        (define s (newsession)) (s "username" "root") (tx_begin_acid s)
+        (define tx (s "__memcp_tx"))
+        (insert (table "memcp-tests" false "native_sequence_record" false tx)
+          '("id" "sequence_name" "high") (list (list 1 name (cadr interval))) '() nil false nil tx)
+        (tx_commit s)
+        (and (equal? interval (list 1 5)) (equal? (sequence_current "memcp-tests" name nil) 5)))
+    expect: {result: true}
+  - name: Restart after the durable interval
+    sql: SHUTDOWN
+  - name: Replay retains both the committed row and its independently reserved interval
+    scm: |
+      (scan nil (table "memcp-tests" false "native_sequence_record" false nil) '() '() '()
+        (lambda () true) '("sequence_name" "high")
+        (lambda (seen name high) (begin
+          (if (and (equal? high 5) (equal? (sequence_current "memcp-tests" name nil) high)
+              (equal? (sequence_reserve "memcp-tests" name 2 nil) (list (+ high 1) (+ high 2)))) true
+            (error "replayed row or sequence interval changed"))
+          (+ seen 1))) 0 +)
+    expect: {result: 1}
+  - name: Rebuild and database checkpoint preserve sequence authority
+    scm: (begin (rebuild true false) true)
+    expect: {result: true}
+  - name: Restart after checkpoint
+    sql: SHUTDOWN
+  - name: Checkpoint replay does not reuse reservations made after the first restart
+    scm: |
+      (scan nil (table "memcp-tests" false "native_sequence_record" false nil) '() '() '()
+        (lambda () true) '("sequence_name" "high")
+        (lambda (seen name high) (begin
+          (if (and (equal? high 5) (equal? (sequence_current "memcp-tests" name nil) (+ high 2))
+              (equal? (sequence_reserve "memcp-tests" name 1 nil) (list (+ high 3) (+ high 3)))) true
+            (error "checkpoint lost the committed row or sequence highwater"))
+          (+ seen 1))) 0 +)
+    expect: {result: 1}
+cleanup:
+  - sql: DROP TABLE IF EXISTS native_sequence_record

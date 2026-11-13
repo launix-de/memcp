@@ -442,7 +442,7 @@ test_cases:
       (define output (newsession))
       (tsql_http_query
         (list "username" "root" "password" "admin" "body" (lambda () "SELECT 1 AS value")
-          "__session" session "__session_state" nil "__query_seq" 0
+          "__session" session "__session_state" (req "__session_state") "__query_seq" (req "__query_seq")
           "query" (list "tsql_import_target" "another_source" "tsql_import_source" "memcp-tests"))
         (list "header" (lambda args true) "jsonl" (lambda (row) (output "row" row))
           "status" (lambda (status) (output "status" status)) "print" (lambda args (output "error" args)))

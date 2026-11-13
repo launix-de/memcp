@@ -1,0 +1,70 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  description: Cursor-stability mutations forwarded across a rebuild retain their commit authority after a crash
+setup:
+- sql: CREATE TABLE cs_forward_rows(id INT PRIMARY KEY,value INT) ENGINE=SAFE
+- sql: INSERT INTO cs_forward_rows VALUES(1,10),(2,20),(3,30)
+- sql: CREATE TABLE cs_forward_ready(id INT PRIMARY KEY) ENGINE=MEMORY
+- scm: (begin (rebuild (table "memcp-tests" false "cs_forward_rows" false nil) true false) true)
+cleanup:
+- sql: DROP TABLE IF EXISTS cs_forward_ready
+- sql: DROP TABLE IF EXISTS cs_forward_rows
+test_cases:
+- name: A native cursor-stability writer commits UPDATE and DELETE through its retained generation
+  parallel: cs_forward_publication
+  scm: |
+    (begin
+      (define owner (newsession))
+      (owner "username" "root")
+      (tx_begin owner)
+      (try (lambda () (begin
+        (define tx (owner "__memcp_tx"))
+        (define target (table "memcp-tests" false "cs_forward_rows" false tx))
+        (define ready (table "memcp-tests" false "cs_forward_ready" false nil))
+        (define schema_file (concat (arg "data" "data" "data") "/memcp-tests/schema.json"))
+        (define generation (lambda ()
+          (car ((((json_decode (readfile schema_file)) "tables") "cs_forward_rows") "Shards"))))
+        (define original (generation))
+        (define await_publication (lambda (remaining)
+          (if (not (equal? original (generation))) true
+            (<= remaining 0) (error "rebuild publication did not complete")
+            (begin (sleep 0.01) (await_publication (- remaining 1))))))
+        (define changed (scan tx target '() '() '("id") (lambda (id) (<= id 2)) '("id" "$update")
+          (lambda (acc id update) (begin
+            (if (equal? id 1)
+              (begin
+                (insert ready '("id") (list (list 1)))
+                (await_publication 300)
+                (update '("value" 11)))
+              (update))
+            (+ acc 1))) 0 +))
+        (tx_commit owner)
+        (and (equal? changed 2) (nil? (owner "transaction")))))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect: {result: true}
+- name: Ordinary rebuild publishes while the original scan retains its native generation
+  parallel: cs_forward_publication
+  scm: |
+    (begin
+      (define ready (table "memcp-tests" false "cs_forward_ready" false nil))
+      (define await_writer (lambda (remaining)
+        (if (not (table_empty? nil ready)) true
+          (<= remaining 0) (error "native writer did not enter its retained scan")
+          (begin (sleep 0.01) (await_writer (- remaining 1))))))
+      (await_writer 300)
+      (rebuild (table "memcp-tests" false "cs_forward_rows" false nil) true false)
+      true)
+  expect: {result: true}
+- name: The published generation exposes exactly the committed mutations
+  sql: SELECT id,value FROM cs_forward_rows ORDER BY id
+  expect: {rows: 2,data: [{id: 1,value: 11},{id: 3,value: 30}]}
+- name: Crash before a shutdown checkpoint can replace the forwarded WAL
+  scm: (crash)
+  expect: {interrupted_ok: true}
+- name: Restart from the published generation and its committed WAL
+  action: restart
+- name: Crash recovery retains the forwarded UPDATE and DELETE exactly once
+  sql: SELECT id,value FROM cs_forward_rows ORDER BY id
+  expect: {rows: 2,data: [{id: 1,value: 11},{id: 3,value: 30}]}

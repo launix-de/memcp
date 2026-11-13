@@ -64,7 +64,7 @@ test_cases:
 - name: Clock default expressions remain schema expressions
   scm: |
     (begin
-      (define relation (table "memcp-tests" false "tsql_clock_defaults" false))
+      (define relation (table "memcp-tests" false "tsql_clock_defaults" false nil))
       (define created (show relation "column" "created" false))
       (define precise (show relation "column" "precise" false))
       (define standard (show relation "column" "standard" false))
@@ -477,18 +477,21 @@ test_cases:
     rows: 1
     data:
     - value: '2026-03-15'
+# Microsoft compatibility example D shows seven fractional digits for default
+# TIME/DATETIME2 style 121; precision zero has no fractional positions.
+# https://learn.microsoft.com/en-us/sql/t-sql/statements/alter-database-transact-sql-compatibility-level#d-the-difference-between-styles-0-and-121
 - name: Default time output format
   sql: SELECT CONVERT(VARCHAR(30),CAST(N'12:13:14' AS TIME)) AS value
   expect:
     rows: 1
     data:
-    - value: '12:13:14'
+    - value: '12:13:14.0000000'
 - name: Default datetime2 output format
   sql: SELECT CONVERT(VARCHAR(30),CAST(N'2026-03-15 12:13:14' AS DATETIME2)) AS value
   expect:
     rows: 1
     data:
-    - value: '2026-03-15 12:13:14.000'
+    - value: '2026-03-15 12:13:14.0000000'
 - name: Date add uses declared column type
   sql: SELECT DATEADD(day,1,d) AS value FROM tsql_temporal_data
   expect:
@@ -832,7 +835,7 @@ test_cases:
   - sql: CREATE TABLE tsql_added_clock (id INT)
   - sql: INSERT tsql_added_clock VALUES (1),(2)
   - sql: ALTER TABLE tsql_added_clock ADD stamp DATETIME2(7) NOT NULL DEFAULT SYSDATETIME()
-  scm: "(begin\n  (define column (find (get_schema \"memcp-tests\" \"tsql_added_clock\") (lambda (column) (equal?\
+  scm: "(begin\n  (define column (find (get_schema \"memcp-tests\" \"tsql_added_clock\" nil) (lambda (column) (equal?\
     \ (column \"Field\") \"stamp\")) nil))\n  (define calculator (column \"DefaultCalculator\"))\n  (define first\
     \ (calculator '(\"utc_ticks\" 17672256000000000 \"zone_offset_seconds\" 0)))\n  (define second (calculator '(\"\
     utc_ticks\" 17672256010000000 \"zone_offset_seconds\" 0)))\n  (if (and (equal? first 17672256000000000) (equal?\
@@ -1065,18 +1068,20 @@ test_cases:
 - name: Temporal numeric conversion rejects unsupported wide datetime contracts
   sql: SELECT CAST(0 AS DATETIME2)
   expect: {error: true}
+# Keep historical case names for comparison; the supported precise carrier now
+# requires exact positive output instead of the former unsupported error.
 - name: Fractional temporal conversions fail rather than silently lose precision
-  sql: |
-    SELECT CAST(N'2026-03-15 12:13:14.123' AS DATETIME2(3))
-  # Valid SQL implementation gap: check behavior, warn until implemented.
-  expect: {"rows": 1, "data": [{"CAST(N'2026-03-15 12:13:14.123' AS DATETIME2(3))": "2026-03-15 12:13:14.123"}]}
-  noncritical: true
+  sql: SELECT CAST(N'2026-03-15 12:13:14.123' AS DATETIME2(3))
+  expect:
+    rows: 1
+    data:
+    - CAST(N'2026-03-15 12:13:14.123' AS DATETIME2(3)): '2026-03-15 12:13:14.123'
 - name: Fractional time conversions fail rather than silently lose precision
-  sql: |
-    SELECT CAST(N'12:13:14.123' AS TIME(3))
-  # Valid SQL implementation gap: check behavior, warn until implemented.
-  expect: {"rows": 1, "data": [{"CAST(N'12:13:14.123' AS TIME(3))": "12:13:14.123"}]}
-  noncritical: true
+  sql: SELECT CAST(N'12:13:14.123' AS TIME(3))
+  expect:
+    rows: 1
+    data:
+    - CAST(N'12:13:14.123' AS TIME(3)): '12:13:14.123'
 - name: Zero fractional seconds retain an exactly representable clock
   sql: SELECT CAST(N'12:13:14.000' AS TIME(3)) AS clock
   expect: {rows: 1, data: [{clock: '12:13:14'}]}
@@ -1806,7 +1811,7 @@ test_cases:
   - sql: CREATE TABLE tsql_clock_declaration(id INT,value DATETIME2(7) DEFAULT ((SYSDATETIME())))
   scm: |
     (begin
-      (define declaration (show (table "memcp-tests" false "tsql_clock_declaration" false) "column" "value" false))
+      (define declaration (show (table "memcp-tests" false "tsql_clock_declaration" false nil) "column" "value" false))
       (if (and (equal? (declaration "DefaultExpression") "CURRENT_TIMESTAMP")
           (equal? (declaration "RawType") "DATETIME2")
           (equal? (declaration "Dimensions") '(7))) true
@@ -1894,17 +1899,19 @@ test_cases:
     data:
     - value: '20260315'
 - name: TRY_CAST refuses unsupported fractional temporal carriers
-  sql: |
-    SELECT TRY_CAST(N'2026-03-15 12:13:14.123' AS DATETIME2(3)) AS value
-  # Valid SQL implementation gap: check behavior, warn until implemented.
-  expect: {"rows": 1, "data": [{"value": "2026-03-15 12:13:14.123"}]}
-  noncritical: true
+  sql: SELECT TRY_CAST(N'2026-03-15 12:13:14.123' AS DATETIME2(3)) AS value
+  expect:
+    contains: '.123'
+    rows: 1
+    data:
+    - value: '2026-03-15 12:13:14.123'
 - name: TRY_CONVERT refuses unsupported fractional temporal carriers
-  sql: |
-    SELECT TRY_CONVERT(DATETIME2(3),N'2026-03-15 12:13:14.123',121) AS value
-  # Valid SQL implementation gap: check behavior, warn until implemented.
-  expect: {"rows": 1, "data": [{"value": "2026-03-15 12:13:14.123"}]}
-  noncritical: true
+  sql: SELECT TRY_CONVERT(DATETIME2(3),N'2026-03-15 12:13:14.123',121) AS value
+  expect:
+    contains: '.123'
+    rows: 1
+    data:
+    - value: '2026-03-15 12:13:14.123'
 - name: TRY_CAST rejects forbidden numeric to DATE contracts
   sql: SELECT TRY_CAST(1 AS DATE) AS value
   expect:
@@ -1932,17 +1939,19 @@ test_cases:
       c: null
       d: null
 - name: TRY clock-only TIME refuses unsupported fractional carriers
-  sql: |
-    SELECT TRY_CAST(N'12:13:14.123' AS TIME(3)) AS value
-  # Valid SQL implementation gap: check behavior, warn until implemented.
-  expect: {"rows": 1, "data": [{"value": "12:13:14.123"}]}
-  noncritical: true
+  sql: SELECT TRY_CAST(N'12:13:14.123' AS TIME(3)) AS value
+  expect:
+    contains: '.123'
+    rows: 1
+    data:
+    - value: '12:13:14.123'
 - name: TRY clock-only datetime refuses unsupported fractional carriers
-  sql: |
-    SELECT TRY_CAST(N'12:13:14.123' AS DATETIME2(3)) AS value
-  # Valid SQL implementation gap: check behavior, warn until implemented.
-  expect: {"rows": 1, "data": [{"value": "1900-01-01 12:13:14.123"}]}
-  noncritical: true
+  sql: SELECT TRY_CAST(N'12:13:14.123' AS DATETIME2(3)) AS value
+  expect:
+    contains: '.123'
+    rows: 1
+    data:
+    - value: '1900-01-01 12:13:14.123'
 - name: CONVERT keeps temporal style 101 beside binary hex styles
   sql: SELECT CONVERT(VARCHAR(10),CAST(N'2026-03-15' AS DATETIME),101) AS value
   expect:
@@ -1954,5 +1963,152 @@ test_cases:
   expect:
     rows: 1
     data:
-    - value: '2026-03-15 12:13:14.000'
+    - value: '2026-03-15 12:13:14'
+- name: Millisecond differences count crossed boundaries rather than elapsed intervals
+  sql: SELECT DATEDIFF(ms,N'2026-03-15 12:00:00.0009999',N'2026-03-15 12:00:00.0010000') AS crossed,DATEDIFF(millisecond,N'2026-03-15
+    12:00:00.0010000',N'2026-03-15 12:00:00.0009999') AS reverse,DATEDIFF(ms,N'2026-03-15 12:00:00.0001000',N'2026-03-15
+    12:00:00.0009999') AS same_bucket
+  expect:
+    rows: 1
+    data:
+    - crossed: 1
+      reverse: -1
+      same_bucket: 0
+- name: Millisecond indices use floor seconds before the Unix epoch
+  sql: SELECT DATEDIFF(ms,N'1969-12-31 23:59:59.9999999',N'1970-01-01 00:00:00.0000000') AS crossed,DATEDIFF_BIG(MILLISECOND,N'1970-01-01
+    00:00:00.0000000',N'1969-12-31 23:59:59.9999999') AS reverse
+  expect:
+    rows: 1
+    data:
+    - crossed: 1
+      reverse: -1
+- name: Millisecond differences preserve declared DATETIME rounding
+  sql: SELECT DATEDIFF(ms,CAST(N'2026-03-15 12:00:00.000' AS DATETIME),CAST(N'2026-03-15 12:00:00.002' AS DATETIME))
+    AS legacy,DATEDIFF(ms,CAST(N'2026-03-15 12:00:00.000' AS DATETIME2(7)),CAST(N'2026-03-15 12:00:00.002' AS DATETIME2(7)))
+    AS precise
+  expect:
+    rows: 1
+    data:
+    - legacy: 3
+      precise: 2
+- name: Millisecond differences retain TIME and DATE declaration anchoring
+  sql: SELECT DATEDIFF(ms,CAST(N'12:00:00.0009999' AS TIME(7)),CAST(N'12:00:00.0010000' AS TIME(7))) AS clock,DATEDIFF(ms,CAST(N'2026-03-15'
+    AS DATE),CAST(N'2026-03-16' AS DATE)) AS calendar
+  expect:
+    rows: 1
+    data:
+    - clock: 1
+      calendar: 86400000
+- name: Millisecond differences keep NULL operands nullable
+  sql: SELECT DATEDIFF(ms,CAST(NULL AS DATETIME2(7)),N'2026-03-15') AS missing_start,DATEDIFF_BIG(ms,N'2026-03-15',CAST(NULL
+    AS DATETIME2(7))) AS missing_finish
+  expect:
+    rows: 1
+    data:
+    - missing_start: null
+      missing_finish: null
+- name: Millisecond INT differences include both exact signed limits
+  sql: SELECT DATEDIFF(ms,N'2024-01-01',N'2024-01-25 20:31:23.647') AS maximum,DATEDIFF(ms,N'2024-01-25 20:31:23.648',N'2024-01-01')
+    AS minimum
+  expect:
+    rows: 1
+    data:
+    - maximum: 2147483647
+      minimum: -2147483648
+- name: Millisecond positive INT overflow is rejected
+  sql: SELECT DATEDIFF(ms,N'2024-01-01',N'2024-01-25 20:31:23.648') AS value
+  expect:
+    error: true
+    contains: overflow
+- name: Millisecond negative INT overflow is rejected
+  sql: SELECT DATEDIFF(ms,N'2024-01-25 20:31:23.649',N'2024-01-01') AS value
+  expect:
+    error: true
+    contains: overflow
+- name: DATEDIFF_BIG retains a millisecond result wider than INT
+  sql: SELECT DATEDIFF_BIG(ms,N'2024-01-01',N'2024-01-31') AS value
+  expect:
+    rows: 1
+    data:
+    - value: 2592000000
+- name: DATEDIFF_BIG millisecond indices remain exact across the SQL calendar range
+  sql: SELECT DATEDIFF_BIG(ms,CAST(N'0001-01-01' AS DATETIME2(7)),CAST(N'9999-12-31 23:59:59.9999999' AS DATETIME2(7)))
+    AS value
+  expect:
+    rows: 1
+    data:
+    - value: 315537897599999
+- name: Millisecond character inputs obey datetime2 fractional precision
+  sql: SELECT DATEDIFF(ms,N'2026-03-15 12:00:00.00000001',N'2026-03-15 12:00:00.001') AS value
+  expect:
+    error: true
+    contains: seven fractional digits
+- name: Millisecond DATEDIFF support does not silently widen DATEADD
+  sql: SELECT DATEADD(ms,1,CAST(N'2026-03-15' AS DATETIME2(7))) AS value
+  expect:
+    error: true
+    contains: unsupported calendar unit
+- name: Millisecond DATEDIFF support does not silently widen DATEPART
+  sql: SELECT DATEPART(ms,CAST(N'2026-03-15' AS DATETIME2(7))) AS value
+  expect:
+    error: true
+    contains: unsupported calendar unit
+- name: Millisecond differences execute on stored nullable date columns
+  setup:
+  - &id001
+    sql: CREATE TABLE tsql_ms_boundary_rows(id INT PRIMARY KEY,started DATETIME2(7),finished DATETIME2(7))
+  - &id002
+    sql: INSERT tsql_ms_boundary_rows VALUES(1,N'1969-12-31 23:59:59.9999999',N'1970-01-01 00:00:00'),(2,N'2026-03-15
+      12:00:00.0001',N'2026-03-15 12:00:00.0009'),(3,NULL,N'2026-03-15')
+  sql: SELECT id,DATEDIFF(ms,started,finished) AS elapsed FROM tsql_ms_boundary_rows ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - id: 1
+      elapsed: 1
+    - id: 2
+      elapsed: 0
+    - id: 3
+      elapsed: null
+  cleanup: &id003
+  - sql: DROP TABLE IF EXISTS tsql_ms_boundary_rows
+- name: Millisecond differences filter stored nullable date columns
+  setup:
+  - *id001
+  - *id002
+  sql: SELECT id FROM tsql_ms_boundary_rows WHERE DATEDIFF(ms,started,finished)=1
+  expect:
+    rows: 1
+    data:
+    - id: 1
+  cleanup: *id003
+- name: Millisecond procedure guards preserve their early RETURN
+  setup:
+  - &id004
+    sql: CREATE PROCEDURE tsql_ms_boundary_guard @started DATETIME2(7),@finished DATETIME2(7) AS BEGIN IF DATEDIFF(ms,@started,@finished)<1
+      RETURN; SELECT DATEDIFF_BIG(millisecond,@started,@finished) AS elapsed; END
+  sql: EXEC tsql_ms_boundary_guard N'2026-03-15 12:00:00.0001',N'2026-03-15 12:00:00.0009'
+  expect:
+    affected_rows: 0
+  cleanup: &id005
+  - sql: DROP PROCEDURE IF EXISTS tsql_ms_boundary_guard
+- name: Millisecond guards parse when a procedure is defined and execute through its source owner
+  setup:
+  - *id004
+  sql: EXEC tsql_ms_boundary_guard N'1969-12-31 23:59:59.9999999',N'1970-01-01 00:00:00'
+  expect:
+    rows: 1
+    data:
+    - elapsed: 1
+  cleanup: *id005
+- name: Canonical temporal text retains declared scale independently of ISO zero omission
+  sql: SELECT CONVERT(VARCHAR(30),CAST(N'2026-03-15 12:13:14' AS DATETIME2(7)),121) AS canonical,CONVERT(VARCHAR(30),CAST(N'2026-03-15
+    12:13:14' AS DATETIME2(7)),126) AS iso,CONVERT(VARCHAR(30),CAST(N'2026-03-15 12:13:14' AS DATETIME2(0)),121)
+    AS seconds
+  expect:
+    rows: 1
+    data:
+    - canonical: '2026-03-15 12:13:14.0000000'
+      iso: '2026-03-15T12:13:14'
+      seconds: '2026-03-15 12:13:14'
 cleanup: []

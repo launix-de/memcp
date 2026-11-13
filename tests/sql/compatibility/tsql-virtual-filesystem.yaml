@@ -1,0 +1,140 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  description: Virtual server filesystem probes never inspect host paths
+  syntax: tsql
+  requires_tds: true
+  isolated: true
+setup: []
+cleanup: []
+test_cases:
+- name: Advertised data directory exists in the virtual namespace
+  sql: EXEC master..xp_fileexist N'C:\MemCP\Data\'
+  expect: {rows: 1, data: [{'File Exists': 0, 'File is a Directory': 1, 'Parent Directory Exists': 1}]}
+- name: Log directory uses the same namespace
+  sql: EXEC xp_fileexist N'C:\MemCP\Log'
+  expect: {rows: 1, data: [{'File Exists': 0, 'File is a Directory': 1, 'Parent Directory Exists': 1}]}
+- name: Bare procedure invocation supports driver batches
+  sql: master.dbo.xp_fileexist 'C:\MemCP\Data\'
+  expect: {rows: 1, data: [{'File Exists': 0, 'File is a Directory': 1, 'Parent Directory Exists': 1}]}
+- name: System owner resolves the supported virtual procedure
+  sql: EXEC sys.xp_fileexist N'C:\MemCP\Data\'
+  expect: {rows: 1, data: [{'File Exists': 0, 'File is a Directory': 1, 'Parent Directory Exists': 1}]}
+- name: Drive root is virtual and exposes no files
+  sql: EXEC xp_fileexist N'C:\'
+  expect: {rows: 1, data: [{'File Exists': 0, 'File is a Directory': 1, 'Parent Directory Exists': 1}]}
+- name: Missing file has an existing virtual parent
+  sql: EXEC xp_fileexist N'C:\MemCP\Data\missing.mdf'
+  expect: {rows: 1, data: [{'File Exists': 0, 'File is a Directory': 0, 'Parent Directory Exists': 1}]}
+- name: Missing nested parent is not invented
+  sql: EXEC xp_fileexist N'C:\MemCP\Data\missing\file.mdf'
+  expect: {rows: 1, data: [{'File Exists': 0, 'File is a Directory': 0, 'Parent Directory Exists': 0}]}
+- name: Real looking host directories are not exposed
+  sql: EXEC xp_fileexist N'C:\Windows\System32'
+  expect: {rows: 1, data: [{'File Exists': 0, 'File is a Directory': 0, 'Parent Directory Exists': 0}]}
+- name: Windows case and mixed separators normalize consistently
+  sql: EXEC xp_fileexist N'c:/mEmCp\DaTa//'
+  expect: {rows: 1, data: [{'File Exists': 0, 'File is a Directory': 1, 'Parent Directory Exists': 1}]}
+- name: Dot segments normalize without escaping the namespace
+  sql: EXEC xp_fileexist N'C:\MemCP\Data\..\Log\.\'
+  expect: {rows: 1, data: [{'File Exists': 0, 'File is a Directory': 1, 'Parent Directory Exists': 1}]}
+- name: NULL path reveals no existence information
+  sql: EXEC xp_fileexist NULL
+  expect: {rows: 1, data: [{'File Exists': 0, 'File is a Directory': 0, 'Parent Directory Exists': 0}]}
+- name: Input variables use ordinary SQL argument evaluation
+  sql: DECLARE @path NVARCHAR(4000)=N'C:\MemCP\Data'; EXEC xp_fileexist @path
+  expect: {rows: 1, data: [{'File Exists': 0, 'File is a Directory': 1, 'Parent Directory Exists': 1}]}
+- name: Optional output returns file existence without a result set
+  sql: DECLARE @exists INT=99; EXEC xp_fileexist N'C:\MemCP\Data', @exists OUTPUT; SELECT @exists AS present
+  expect: {rows: 1, data: [{present: 0}]}
+- name: Procedure return status uses ordinary batch return binding
+  sql: DECLARE @status INT=99, @exists INT=99; EXEC @status = xp_fileexist N'C:\MemCP\Data', @exists OUTPUT; SELECT @status AS status,@exists AS present
+  expect: {rows: 1, data: [{status: 0, present: 0}]}
+- name: Output requires an existing declared variable
+  sql: EXEC xp_fileexist N'C:\MemCP\Data', @missing OUTPUT
+  expect: {error: true}
+- name: TDS returns declared INT columns and supports prepared scalar paths
+  tds:
+    statements:
+    - sql: EXEC master..xp_fileexist N'C:\MemCP\Data\'
+      expect:
+        rows: 1
+        data: [{'File Exists': 0, 'File is a Directory': 1, 'Parent Directory Exists': 1}]
+        column_types: [{name: 'File Exists', type: INT}, {name: 'File is a Directory', type: INT}, {name: 'Parent Directory Exists', type: INT}]
+    - sql: EXEC xp_fileexist @path
+      prepare: true
+      parameters: [{name: path, value: 'C:\MemCP\Log\'}]
+      expect: {rows: 1, data: [{'File Exists': 0, 'File is a Directory': 1, 'Parent Directory Exists': 1}]}
+- name: UNIX host paths are outside the namespace
+  sql: EXEC xp_fileexist N'/etc/passwd'
+  expect: {error: true}
+- name: Unsupported drive letters are rejected
+  sql: EXEC xp_fileexist N'D:\data'
+  expect: {error: true}
+- name: UNC network paths cannot trigger remote access
+  sql: EXEC xp_fileexist N'\\server\share\file'
+  expect: {error: true}
+- name: Windows extended paths cannot bypass namespace resolution
+  sql: EXEC xp_fileexist N'\\?\C:\MemCP\Data'
+  expect: {error: true}
+- name: Windows device paths cannot bypass namespace resolution
+  sql: EXEC xp_fileexist N'\\.\C:\MemCP\Data'
+  expect: {error: true}
+- name: Drive relative paths are rejected
+  sql: EXEC xp_fileexist N'C:MemCP\Data'
+  expect: {error: true}
+- name: Root relative paths are rejected
+  sql: EXEC xp_fileexist N'\MemCP\Data'
+  expect: {error: true}
+- name: Empty paths have no implicit working directory
+  sql: EXEC xp_fileexist N''
+  expect: {error: true}
+- name: Traversal outside the namespace fails
+  sql: EXEC xp_fileexist N'C:\MemCP\..\Windows'
+  expect: {error: true}
+- name: Mixed separator traversal cannot escape
+  sql: EXEC xp_fileexist N'C:/MemCP/Data/..\..\Windows'
+  expect: {error: true}
+- name: Alternate data streams are rejected
+  sql: EXEC xp_fileexist N'C:\MemCP\Data\file:stream'
+  expect: {error: true}
+- name: Ambiguous trailing dots are rejected
+  sql: EXEC xp_fileexist N'C:\MemCP\Data.\'
+  expect: {error: true}
+- name: Ambiguous trailing spaces are rejected
+  sql: EXEC xp_fileexist N'C:\MemCP\Data \'
+  expect: {error: true}
+- name: Wildcards are not host enumeration requests
+  sql: EXEC xp_fileexist N'C:\MemCP\Data\*'
+  expect: {error: true}
+- name: Missing required argument is rejected
+  sql: EXEC xp_fileexist
+  expect: {error: true}
+- name: Extra arguments are rejected
+  sql: EXEC xp_fileexist N'C:\MemCP\Data',NULL,NULL
+  expect: {error: true}
+- name: Shell execution is not part of the virtual interface
+  sql: EXEC xp_cmdshell N'cmd.exe /c dir C:\MemCP\Data'
+  expect: {error: true}
+- name: File deletion helpers cannot mutate virtual or host files
+  sql: EXEC xp_delete_file 0,N'C:\MemCP\Data',N'bak'
+  expect: {error: true}
+- name: Executable extension loading is unavailable
+  sql: EXEC sp_addextendedproc N'probe', N'C:\MemCP\Data\probe.dll'
+  expect: {error: true}
+- name: Reserved Windows device names are rejected even under a virtual root
+  sql: EXEC xp_fileexist N'C:\MemCP\Data\NUL.txt'
+  expect: {error: true}
+- name: NUL bytes cannot truncate a path at a lower layer
+  sql: DECLARE @path NVARCHAR(4000)=N'C:\MemCP\Data'+NCHAR(0)+N'\missing'; EXEC xp_fileexist @path
+  expect: {error: true}
+- name: URL escapes are never decoded into namespace traversal
+  sql: EXEC xp_fileexist N'C:\MemCP\%2e%2e\Data'
+  expect: {rows: 1, data: [{'File Exists': 0, 'File is a Directory': 0, 'Parent Directory Exists': 0}]}
+- name: Nonoutput second arguments cannot silently discard results
+  sql: EXEC xp_fileexist N'C:\MemCP\Data', 99
+  expect: {error: true}
+- name: Namespace roots are advertised through the same provider as probes
+  scm: (and (equal? (tsql_filesystem_stat (tsql_filesystem_location "data")) '("file" 0 "directory" 1 "parent" 1)) (equal? (tsql_filesystem_stat (tsql_filesystem_location "log")) '("file" 0 "directory" 1 "parent" 1)))
+  expect: {result: true}

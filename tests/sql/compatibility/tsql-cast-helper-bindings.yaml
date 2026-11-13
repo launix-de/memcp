@@ -1,0 +1,216 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  syntax: tsql
+  description: Text cast formulas retain resolved frontend helper procedures
+  requires_tds: true
+setup:
+- sql: DROP TABLE IF EXISTS ordered_binding_rows
+- sql: CREATE TABLE ordered_binding_rows(id INT PRIMARY KEY,label VARCHAR(30))
+- sql: INSERT INTO ordered_binding_rows VALUES(1,'beta'),(2,'alpha'),(3,NULL)
+- sql: CREATE VIEW ordered_binding_view AS SELECT id,label FROM ordered_binding_rows
+- sql: CREATE TABLE common_legacy_dates(id INT PRIMARY KEY,stamp DATETIME)
+- sql: CREATE TABLE common_compact_dates(id INT PRIMARY KEY,stamp SMALLDATETIME,open_ended BIT)
+- sql: INSERT INTO common_legacy_dates VALUES(1,N'2026-01-01T12:00:00.003')
+- sql: INSERT INTO common_compact_dates VALUES(2,N'2026-01-02T12:00:00',0),(3,N'2026-01-03T12:00:00',1)
+cleanup:
+- sql: DROP VIEW IF EXISTS common_date_view
+- sql: DROP TABLE IF EXISTS common_compact_dates
+- sql: DROP TABLE IF EXISTS common_legacy_dates
+- sql: DROP VIEW IF EXISTS ordered_binding_view
+- sql: DROP TABLE IF EXISTS ordered_binding_rows
+test_cases:
+- name: Computed cast sort callback binds its frontend helper
+  syntax: tsql
+  sql: SELECT id FROM ordered_binding_rows ORDER BY CAST(label AS NVARCHAR(20)),id
+  expect: {data: [{id: 3},{id: 2},{id: 1}]}
+- name: Constant cast sort callback preserves tied rows
+  syntax: tsql
+  sql: SELECT id FROM ordered_binding_rows ORDER BY CAST(N'constant' AS NVARCHAR(20)),id DESC
+  expect: {data: [{id: 3},{id: 2},{id: 1}]}
+- name: Ordered native union callbacks bind cast functions in both branches
+  syntax: tsql
+  sql: SELECT CAST(label AS NVARCHAR(20)) AS name FROM ordered_binding_rows WHERE id=1 UNION ALL SELECT CAST(label AS NVARCHAR(20)) AS name FROM ordered_binding_rows WHERE id=2 ORDER BY name
+  expect: {data: [{name: alpha},{name: beta}]}
+- name: Ordered mixed catalog union evaluates frontend helper callbacks
+  syntax: tsql
+  sql: SELECT CAST(N'catalog_probe' AS NVARCHAR(128)) AS name FROM information_schema.tables WHERE table_catalog=N'memcp-tests' AND table_name=N'ordered_binding_rows' UNION ALL SELECT CAST(N'remote_probe' AS NVARCHAR(128)) AS name FROM ordered_binding_rows WHERE id=1 ORDER BY name
+  expect: {data: [{name: catalog_probe},{name: remote_probe}]}
+- name: UNION type inspection preserves the original view recipes
+  sql: SELECT label AS name FROM ordered_binding_view WHERE id=1 UNION ALL SELECT label FROM ordered_binding_view WHERE id=2 ORDER BY name
+  expect: {data: [{name: alpha},{name: beta}]}
+- name: UNION type inspection preserves original scalar view subqueries
+  sql: SELECT (SELECT label FROM ordered_binding_view WHERE id=1) AS name UNION ALL SELECT (SELECT label FROM ordered_binding_view WHERE id=2) ORDER BY name
+  expect: {data: [{name: alpha},{name: beta}]}
+- name: UNION national character contracts choose the longest declared input
+  tds:
+    statements:
+    - sql: SELECT CAST(N'ab' AS NVARCHAR(2)) AS label UNION ALL SELECT CAST(N'longer' AS NVARCHAR(12)) ORDER BY label
+      expect:
+        data: [{label: ab},{label: longer}]
+        column_types: [{name: label,type: NVARCHAR,length: 12}]
+    - sql: SELECT CAST(NULL AS NVARCHAR(18)) AS label UNION SELECT CAST(N'z' AS NVARCHAR(3)) ORDER BY label
+      expect:
+        data: [{label: null},{label: z}]
+        column_types: [{name: label,type: NVARCHAR,length: 18}]
+    - sql: SELECT CAST('ab' AS VARCHAR(2)) AS label UNION ALL SELECT CAST('longer' AS VARCHAR(12)) ORDER BY label
+      expect:
+        data: [{label: ab},{label: longer}]
+        column_types: [{name: label,type: VARCHAR,length: 12}]
+    - sql: SELECT label FROM (SELECT CAST(N'ab' AS NVARCHAR(2)) AS label UNION ALL SELECT CAST(N'longer' AS NVARCHAR(12))) AS combined ORDER BY label
+      expect:
+        data: [{label: ab},{label: longer}]
+        column_types: [{name: label,type: NVARCHAR,length: 12}]
+- name: UNION MAX contract remains unbounded when combined with bounded text
+  scm: |
+    (begin
+      (define field (car (tds_describe "memcp-tests"
+        "SELECT CAST(N'x' AS NVARCHAR(2)) AS label UNION ALL SELECT CAST(N'y' AS NVARCHAR(MAX))" "" (newsession))))
+      (and (equal? (field "kind") 231) (equal? (field "size") 65535)))
+  expect: {result: true}
+- name: Fixed national text sort callback retains width and padding
+  syntax: tsql
+  sql: SELECT id,CAST(label AS NCHAR(6)) AS name FROM ordered_binding_rows WHERE id<3 ORDER BY CAST(label AS NCHAR(6))
+  expect: {data: [{id: 2,name: 'alpha '},{id: 1,name: 'beta  '}]}
+- name: Numeric national text sort callback retains numeric spelling
+  syntax: tsql
+  sql: SELECT id FROM ordered_binding_rows ORDER BY CAST(id AS NVARCHAR(20)) DESC
+  expect: {data: [{id: 3},{id: 2},{id: 1}]}
+- name: Money text sort callback retains its requested width
+  syntax: tsql
+  sql: SELECT id,CAST(CAST(id AS MONEY) AS NVARCHAR(20)) AS amount FROM ordered_binding_rows WHERE id<3 ORDER BY CAST(CAST(id AS MONEY) AS NVARCHAR(20)) DESC
+  expect: {data: [{id: 2,amount: '2.00'},{id: 1,amount: '1.00'}]}
+- name: Integer cast helper captures text parsing dependencies
+  syntax: tsql
+  sql: SELECT id,CAST(CAST(id AS NVARCHAR(20)) AS BIGINT) AS number FROM ordered_binding_rows ORDER BY CAST(CAST(id AS NVARCHAR(20)) AS BIGINT) DESC
+  expect: {data: [{id: 3,number: 3},{id: 2,number: 2},{id: 1,number: 1}]}
+- name: Decimal cast helper captures numeric conversion dependencies
+  syntax: tsql
+  sql: SELECT id,CAST(CAST(id AS NVARCHAR(20)) AS DECIMAL(10,2)) AS number FROM ordered_binding_rows ORDER BY CAST(CAST(id AS NVARCHAR(20)) AS DECIMAL(10,2)) DESC
+  expect: {data: [{id: 3,number: 3},{id: 2,number: 2},{id: 1,number: 1}]}
+- name: Closed currency formatting helper preserves thousands grouping
+  syntax: tsql
+  sql: SELECT CONVERT(NVARCHAR(40),CAST(1234567.89 AS MONEY),1) AS amount
+  expect: {data: [{amount: '1,234,567.89'}]}
+- name: Parameter inference recognizes resolved cast function values
+  syntax: tsql
+  sql: EXEC sp_describe_undeclared_parameters N'SELECT CAST(@d AS DECIMAL(9,2)),CAST(@text AS NVARCHAR(12)),CAST(@fixed AS NCHAR(6))'
+  expect:
+    rows: 3
+    data:
+    - {name: '@d',suggested_system_type_name: 'decimal(9,2)',suggested_precision: 9,suggested_scale: 2}
+    - {name: '@text',suggested_system_type_name: 'nvarchar(12)'}
+    - {name: '@fixed',suggested_system_type_name: 'nchar(6)'}
+
+- name: Limited stored views preserve distinct executable cast recipes and declared widths
+  syntax: tsql
+  setup:
+  - sql: DROP VIEW IF EXISTS limited_cast_contract
+  - sql: DROP TABLE IF EXISTS limited_cast_source
+  - sql: CREATE TABLE limited_cast_source(note NVARCHAR(8))
+  - sql: INSERT INTO limited_cast_source VALUES(N'abcd'),(N'Zebra'),(N'bcde')
+  - sql: CREATE VIEW limited_cast_contract AS SELECT TOP 1 CAST(note AS NVARCHAR(2)) AS short_note,CAST(note AS NVARCHAR(8)) AS full_note FROM limited_cast_source ORDER BY note COLLATE bin ASC
+  sql: SELECT short_note,full_note FROM limited_cast_contract
+  expect: {rows: 1, data: [{short_note: Ze, full_note: Zebra}]}
+  cleanup:
+  - sql: DROP VIEW IF EXISTS limited_cast_contract
+  - sql: DROP TABLE IF EXISTS limited_cast_source
+- name: Limited stored view type annotations survive TDS without renaming aggregate state
+  syntax: tsql
+  setup:
+  - sql: DROP VIEW IF EXISTS limited_wire_contract
+  - sql: DROP TABLE IF EXISTS limited_wire_source
+  - sql: CREATE TABLE limited_wire_source(note NVARCHAR(8))
+  - sql: INSERT INTO limited_wire_source VALUES(N'abcd'),(N'Zebra'),(N'bcde')
+  - sql: CREATE VIEW limited_wire_contract AS SELECT TOP 1 CAST(note AS NVARCHAR(2)) AS short_note,CAST(note AS NVARCHAR(8)) AS full_note FROM limited_wire_source ORDER BY note COLLATE bin ASC
+  tds:
+    statements:
+    - sql: SELECT short_note,full_note FROM limited_wire_contract
+      expect:
+        rows: 1
+        data: [{short_note: Ze, full_note: Zebra}]
+        column_types: [{name: short_note, type: NVARCHAR, length: 2}, {name: full_note, type: NVARCHAR, length: 8}]
+  cleanup:
+  - sql: DROP VIEW IF EXISTS limited_wire_contract
+  - sql: DROP TABLE IF EXISTS limited_wire_source
+
+- name: A stored UNION view promotes compact and legacy calendar declarations
+  sql: |
+    CREATE VIEW common_date_view AS
+    SELECT id,stamp FROM common_legacy_dates
+    UNION
+    SELECT id,CASE WHEN open_ended<>0 THEN NULL ELSE stamp END FROM common_compact_dates
+- name: A stored calendar UNION preserves exact values and SQL NULL
+  sql: SELECT id,CONVERT(NVARCHAR(30),stamp,121) AS stamp FROM common_date_view ORDER BY id
+  expect:
+    rows: 3
+    data: [{id: 1,stamp: '2026-01-01 12:00:00.003'},{id: 2,stamp: '2026-01-02 12:00:00.000'},{id: 3,stamp: null}]
+- name: A promoted calendar UNION exposes the legacy full datetime wire contract
+  scm: |
+    (begin
+      (define field (car (tds_describe "memcp-tests" "SELECT stamp FROM common_date_view" "" (newsession))))
+      (and (equal? (field "kind") 111) (equal? (field "size") 8)))
+  expect: {result: true}
+- name: Conditional and NULL fallback expressions use the same calendar precedence
+  sql: |
+    SELECT CONVERT(NVARCHAR(30),COALESCE(CAST(NULL AS DATETIME),CAST(N'2026-01-01T12:00:00' AS SMALLDATETIME)),121) AS fallback_value,
+      CONVERT(NVARCHAR(30),CASE WHEN 1=1 THEN CAST(N'2026-01-01T12:00:00' AS SMALLDATETIME) ELSE CAST(NULL AS DATETIME) END,121) AS conditional_value
+  expect: {rows: 1,data: [{fallback_value: '2026-01-01 12:00:00.000',conditional_value: '2026-01-01 12:00:00.000'}]}
+- name: A modern calendar UNION merges fractional scale from the declared legacy input
+  scm: |
+    (begin
+      (define field (car (tds_describe "memcp-tests"
+        "SELECT CAST(N'2026-01-01T12:00:00' AS DATETIME2(0)) AS stamp UNION ALL SELECT CAST(N'2026-01-02T12:00:00.003' AS DATETIME)" "" (newsession))))
+      (and (equal? (field "kind") 42) (equal? (field "scale") 3)))
+  expect: {result: true}
+- name: Modern calendar NULL fallback retains the largest declared fractional scale
+  sql: SELECT CONVERT(NVARCHAR(30),COALESCE(CAST(NULL AS DATETIME2(3)),CAST(N'2026-01-01T12:00:00.12345' AS DATETIME2(5))),121) AS stamp
+  expect: {rows: 1,data: [{stamp: '2026-01-01 12:00:00.12345'}]}
+- name: Modern calendar fallback exposes its merged scale through the protocol descriptor
+  scm: |
+    (begin
+      (define field (car (tds_describe "memcp-tests"
+        "SELECT COALESCE(CAST(NULL AS DATETIME2(3)),CAST(N'2026-01-01T12:00:00.12345' AS DATETIME2(5))) AS stamp" "" (newsession))))
+      (and (equal? (field "kind") 42) (equal? (field "scale") 5)))
+  expect: {result: true}
+- name: Incompatible date and time branches still reject before calendar conversion
+  sql: SELECT CAST(N'2026-01-01' AS DATE) AS stamp UNION ALL SELECT CAST(N'12:00:00' AS TIME)
+  expect: {error: true}
+- name: Modern calendar precedence does not authorize an unsupported numeric conversion
+  sql: SELECT CAST(N'2026-01-01T12:00:00' AS DATETIME2(3)) AS stamp UNION ALL SELECT 1
+  expect: {error: true}
+- name: CASE keeps the common modern precision in its actual descriptor
+  scm: |
+    (begin
+      (define field (car (tds_describe "memcp-tests"
+        "SELECT CASE WHEN 1=1 THEN CAST(N'2026-01-01T12:00:00.123' AS DATETIME2(3)) ELSE CAST(N'2026-01-02T12:00:00.12345' AS DATETIME2(5)) END AS stamp" "" (newsession))))
+      (and (equal? (field "kind") 42) (equal? (field "scale") 5)))
+  expect: {result: true}
+- name: Inline VALUES shares declared calendar precedence and preserves SQL NULL
+  sql: |
+    SELECT CONVERT(NVARCHAR(30),q.stamp,121) AS stamp
+    FROM (VALUES (CAST(N'2026-01-01T12:00:00.003' AS DATETIME)),
+                 (CAST(N'2026-01-02T12:00:00' AS SMALLDATETIME)),(NULL)) AS q(stamp)
+    ORDER BY 1
+  expect:
+    rows: 3
+    data: [{stamp: null},{stamp: '2026-01-01 12:00:00.003'},{stamp: '2026-01-02 12:00:00.000'}]
+- name: TIME branches keep the largest declared fractional precision
+  scm: |
+    (begin
+      (define field (car (tds_describe "memcp-tests"
+        "SELECT COALESCE(CAST(NULL AS TIME(3)),CAST(N'12:00:00.12345' AS TIME(5))) AS clock" "" (newsession))))
+      (and (equal? (field "kind") 41) (equal? (field "scale") 5)))
+  expect: {result: true}
+- name: Legacy calendar precedence converts numeric days from the documented epoch
+  sql: |
+    SELECT CONVERT(NVARCHAR(30),q.stamp,121) AS stamp
+    FROM (SELECT CAST(NULL AS DATETIME) AS stamp UNION ALL SELECT 1) AS q
+    WHERE stamp IS NOT NULL
+  expect: {rows: 1,data: [{stamp: '1900-01-02 00:00:00.000'}]}
+- name: ISNULL retains its first calendar precision instead of the common maximum
+  sql: |
+    SELECT CONVERT(NVARCHAR(30),ISNULL(CAST(NULL AS DATETIME2(3)),
+      CAST(N'2026-01-01T12:00:00.12345' AS DATETIME2(5))),121) AS stamp
+  expect: {rows: 1,data: [{stamp: '2026-01-01 12:00:00.123'}]}

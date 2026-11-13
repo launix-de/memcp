@@ -399,7 +399,7 @@ func NewNthLocalVar(idx NthLocalVar) Scmer {
 func NewSourceInfo(si SourceInfo) Scmer {
 	ptr := new(SourceInfo)
 	*ptr = si
-	registerSourceCoverageInfo(ptr)
+	ptr.coverage = sourceCoveragePointFor(si.source, si.line, si.col)
 	return Scmer{(*byte)(unsafe.Pointer(ptr)), makeAux(tagSourceInfo, 0)}
 }
 
@@ -813,7 +813,7 @@ func (s Scmer) Float() float64 {
 	case tagBSON:
 		return bsonFloat(s)
 	case tagDate:
-		return float64(TagDateDecodeUnix(auxVal(s.aux)))
+		return float64(TagDateDecodeUnix(auxVal(s.aux))) + float64(s.DateNanosecond())/1000000000
 	case tagBool:
 		if auxVal(s.aux) != 0 {
 			return 1.0
@@ -1201,7 +1201,18 @@ func ToFloat(v Scmer) float64 { return v.Float() }
 // types first (nil, bool, float64/int64, string, []any, map-like assoc
 // list), ensuring stable and portable JSON output for persistence and APIs.
 func (s Scmer) MarshalJSON() ([]byte, error) {
+	return s.marshalJSON(false)
+}
+
+// MarshalPersistentJSON preserves native calendar identity in storage codecs.
+// Public JSON keeps its existing date-text representation.
+func MarshalPersistentJSON(s Scmer) ([]byte, error) { return s.marshalJSON(true) }
+
+func (s Scmer) marshalJSON(persistent bool) ([]byte, error) {
 	if s.IsBSON() {
+		if persistent {
+			return json.Marshal(persistentBSONValue(s))
+		}
 		return appendBSONText(nil, s, false, "")
 	}
 	// Custom, stable encoding for persistence of SCM values.
@@ -1218,6 +1229,9 @@ func (s Scmer) MarshalJSON() ([]byte, error) {
 		case tagFloat:
 			return v.Float()
 		case tagDate:
+			if persistent {
+				return map[string]any{"scmer_date_v1": []int64{v.Int(), int64(v.DateNanosecond()), int64(v.DateZone())}}
+			}
 			return DateToDisplay(v, time.UTC)
 		case tagString, tagLZ4:
 			s := v.String()
@@ -1275,6 +1289,9 @@ func (s Scmer) MarshalJSON() ([]byte, error) {
 		case tagSourceInfo:
 			return toJSONable(v.SourceInfo().value)
 		case tagBSON:
+			if persistent {
+				return persistentBSONValue(v)
+			}
 			return json.RawMessage(bsonText(v))
 		case tagJIT:
 			jep := v.JIT()
@@ -1376,7 +1393,18 @@ func (s *Scmer) Write(w io.Writer) {
 
 // UnmarshalJSON decodes JSON into a Scmer by first decoding into
 // interface{} and then transforming to Scmer using TransformFromJSON.
-func (s *Scmer) UnmarshalJSON(data []byte) error {
+func (s *Scmer) UnmarshalJSON(data []byte) error { return s.unmarshalJSON(data, false) }
+
+// UnmarshalPersistentJSON is selected by a versioned storage frame. Public and
+// historical JSON never interpret these native scalar envelopes.
+func UnmarshalPersistentJSON(data []byte, s *Scmer) error { return s.unmarshalJSON(data, true) }
+
+func persistentBSONValue(value Scmer) any {
+	kind, payload := value.BSONRaw()
+	return map[string]any{"scmer_bson_v1": []any{kind, base64.StdEncoding.EncodeToString(payload)}}
+}
+
+func (s *Scmer) unmarshalJSON(data []byte, persistent bool) error {
 	// Use decoder with UseNumber to preserve ints
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.UseNumber()
@@ -1429,6 +1457,48 @@ func (s *Scmer) UnmarshalJSON(data []byte) error {
 		case string:
 			return NewString(t)
 		case map[string]any:
+			if raw, ok := t["scmer_bson_v1"]; persistent && ok && len(t) == 1 {
+				parts, ok := raw.([]any)
+				if !ok || len(parts) != 2 {
+					panic("invalid persistent BSON envelope")
+				}
+				kind, ok := parts[0].(json.Number)
+				if !ok {
+					panic("invalid persistent BSON type")
+				}
+				code, err := kind.Int64()
+				if err != nil || code < 0 || code > 255 {
+					panic("invalid persistent BSON type")
+				}
+				text, ok := parts[1].(string)
+				if !ok {
+					panic("invalid persistent BSON payload")
+				}
+				payload, err := base64.StdEncoding.DecodeString(text)
+				if err != nil {
+					panic("invalid persistent BSON payload")
+				}
+				return NewBSONRaw(byte(code), payload)
+			}
+			if raw, ok := t["scmer_date_v1"]; persistent && ok && len(t) == 1 {
+				parts, ok := raw.([]any)
+				if !ok || len(parts) != 3 {
+					panic("invalid persistent date parts")
+				}
+				var values [3]int64
+				for index, part := range parts {
+					number, ok := part.(json.Number)
+					if !ok {
+						panic("invalid persistent date part")
+					}
+					value, err := number.Int64()
+					if err != nil {
+						panic("invalid persistent date integer")
+					}
+					values[index] = value
+				}
+				return NewDateNanoWithZone(values[0], int(values[1]), int(values[2]))
+			}
 			if encodedTag, ok := t["scmer_custom"]; ok && len(t) == 2 {
 				var tag int64 = -1
 				switch value := encodedTag.(type) {

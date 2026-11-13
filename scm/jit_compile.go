@@ -1074,7 +1074,7 @@ func (ctx *JITContext) EmitStoreScmerSliceElement(slice, index, value *JITValueD
 // ordinary Go-call bridge preserves live values and roots on the slow path.
 func (ctx *JITContext) TryEmitStoreScmerSliceElement(slice, index, value *JITValueDesc, elementSize int32) bool {
 	switch value.Type {
-	case tagNil, tagFloat, tagInt, tagBool, tagDate, tagNthLocalVar:
+	case tagNil, tagFloat, tagInt, tagBool, tagNthLocalVar:
 		value.NoHeapPointer = true
 	}
 	if !value.NoHeapPointer {
@@ -2025,7 +2025,7 @@ func jitReturnHasNoHeapPointer(td *TypeDescriptor) bool {
 		return false
 	}
 	switch td.Kind {
-	case "bool", "date", "int", "int|nil", "nil", "number", "number|nil":
+	case "bool", "int", "int|nil", "nil":
 		return true
 	default:
 		return false
@@ -3767,6 +3767,9 @@ func JITEmitProcInlineWithOuter(ctx *JITContext, proc *Proc, outer *JITEnv, args
 
 // Share lexical binding between value-producing and truth-filtering callbacks.
 func jitProcInlineEnv(ctx *JITContext, proc *Proc, outer *JITEnv, args []JITValueDesc) *JITEnv {
+	if jitLexicalPublicationNeedsRuntime(proc.Params, proc.Body) {
+		panic("jit: named binding publication requires a runtime lexical frame")
+	}
 	localCount, firstAssignment := jitRequiredLocalSlots(proc.Body, proc.NumVars)
 	if localCount < len(args) {
 		localCount = len(args)
@@ -3830,6 +3833,9 @@ func jitProcInlineEnv(ctx *JITContext, proc *Proc, outer *JITEnv, args []JITValu
 // form so explicit outer-depth references see exactly one environment per
 // Scheme scope.
 func JITEmitProcInlineWithEnv(ctx *JITContext, proc *Proc, env *JITEnv, sliceBase Reg, result JITValueDesc) JITValueDesc {
+	if jitLexicalPublicationNeedsRuntime(proc.Params, proc.Body) {
+		panic("jit: named binding publication requires a runtime lexical frame")
+	}
 	oldEnv := ctx.Env
 	ctx.Env = env
 	defer func() { ctx.Env = oldEnv }()
@@ -3899,6 +3905,11 @@ func jitLambdaTemplate(expr Scmer, outer *JITEnv) (*JITLambdaTemplate, bool) {
 		JITLambdaTemplate
 		procedure Proc
 	}{procedure: Proc{Params: params, Body: parts[2], NumVars: numVars, NumberedOnly: procCanUseNumberedOnly(params, parts[2], numVars)}}
+	if len(parts) > 4 && parts[4].GetTag() == tagAny {
+		if proof, ok := matchingLambdaBindingProof(params, parts[2], numVars, parts[4]); ok {
+			owned.procedure.syntaxSize = proof.syntaxSize
+		}
+	}
 	owned.Proc, owned.Outer = &owned.procedure, outer
 	return &owned.JITLambdaTemplate, true
 }

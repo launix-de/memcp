@@ -1,0 +1,129 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# SQL Server reference: https://dbfiddle.uk/kt0DVnH4
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Implicit assignments retain SQL source contracts independently of explicit casts
+setup:
+- sql: CREATE TABLE implicit_assignment_rows(id INT PRIMARY KEY,value INT,ended DATETIME)
+- sql: INSERT implicit_assignment_rows VALUES(1,7,'1900-01-03'),(2,NULL,NULL)
+- sql: CREATE FUNCTION dbo.implicit_assignment_scalar(@value INT) RETURNS INT AS BEGIN RETURN @value; END
+- sql: |
+    CREATE FUNCTION dbo.implicit_assignment_relational(@value INT) RETURNS INT AS BEGIN
+      DECLARE @total INT;
+      SELECT @total=COUNT(*) FROM implicit_assignment_rows;
+      RETURN @value+@total;
+    END
+- sql: |
+    CREATE FUNCTION dbo.implicit_assignment_return() RETURNS INT AS BEGIN
+      DECLARE @count INT;
+      SELECT @count=COUNT(*) FROM implicit_assignment_rows;
+      RETURN (SELECT ended FROM implicit_assignment_rows WHERE id=1);
+    END
+- sql: |
+    CREATE FUNCTION dbo.implicit_assignment_set_query() RETURNS INT AS BEGIN
+      DECLARE @value INT;
+      SET @value=(SELECT ended FROM implicit_assignment_rows WHERE id=1);
+      RETURN @value;
+    END
+- sql: |
+    CREATE FUNCTION dbo.implicit_assignment_select_query() RETURNS INT AS BEGIN
+      DECLARE @value INT;
+      SELECT @value=ended FROM implicit_assignment_rows WHERE id=1;
+      RETURN @value;
+    END
+- sql: |
+    CREATE FUNCTION dbo.implicit_assignment_table(@value INT) RETURNS @rows TABLE(value INT) AS BEGIN
+      INSERT @rows SELECT @value;
+      RETURN;
+    END
+cleanup:
+- sql: DROP FUNCTION IF EXISTS dbo.implicit_assignment_table
+- sql: DROP FUNCTION IF EXISTS dbo.implicit_assignment_select_query
+- sql: DROP FUNCTION IF EXISTS dbo.implicit_assignment_set_query
+- sql: DROP FUNCTION IF EXISTS dbo.implicit_assignment_return
+- sql: DROP FUNCTION IF EXISTS dbo.implicit_assignment_relational
+- sql: DROP FUNCTION IF EXISTS dbo.implicit_assignment_scalar
+- sql: DROP FUNCTION IF EXISTS dbo.implicit_assignment_bad_return
+- sql: DROP FUNCTION IF EXISTS dbo.implicit_assignment_bad_local
+- sql: DROP TABLE IF EXISTS implicit_assignment_rows
+test_cases:
+- name: SET requires an explicit conversion from DATETIME to INT
+  tds:
+    statements:
+    - sql: DECLARE @value INT; SET @value=CAST('1900-01-03' AS DATETIME); SELECT @value AS value
+      expect: {error: true,contains: [unsupported implicit conversion]}
+- name: DECLARE initialization uses the same implicit conversion rule
+  tds:
+    statements:
+    - sql: DECLARE @value BIGINT=CAST('1900-01-03' AS DATETIME); SELECT @value AS value
+      expect: {error: true,contains: [unsupported implicit conversion]}
+- name: SELECT assignment uses the declared source column type
+  tds:
+    statements:
+    - sql: DECLARE @value SMALLINT; SELECT @value=ended FROM implicit_assignment_rows WHERE id=1; SELECT @value AS value
+      expect: {error: true,contains: [unsupported implicit conversion]}
+- name: A NULL legacy date cannot bypass the assignment type check
+  tds:
+    statements:
+    - sql: DECLARE @value TINYINT; SET @value=CAST(NULL AS SMALLDATETIME); SELECT @value AS value
+      expect: {error: true,contains: [unsupported implicit conversion]}
+- name: VALUES applies the target column assignment contract
+  sql: INSERT implicit_assignment_rows(id,value) VALUES(3,CAST('1900-01-03' AS DATETIME))
+  expect: {error: true,contains: [unsupported implicit conversion]}
+- name: INSERT SELECT cannot assign a temporal source to an integer column
+  sql: INSERT implicit_assignment_rows(id,value) SELECT id+10,ended FROM implicit_assignment_rows
+  expect: {error: true,contains: [unsupported implicit conversion]}
+- name: UPDATE rejects an invalid assignment before changing any row
+  sql: UPDATE implicit_assignment_rows SET value=ended
+  expect: {error: true,contains: [unsupported implicit conversion]}
+- name: Failed assignments leave the original rows intact
+  sql: SELECT id,value FROM implicit_assignment_rows ORDER BY id
+  expect: {rows: 2,data: [{id: 1,value: 7},{id: 2,value: null}]}
+- name: Pure scalar return contracts require explicit date conversion
+  sql: CREATE FUNCTION dbo.implicit_assignment_bad_return() RETURNS INT AS BEGIN RETURN CAST('1900-01-03' AS DATETIME); END
+  expect: {error: true,contains: [unsupported implicit conversion]}
+- name: Pure scalar locals use the same assignment boundary
+  sql: CREATE FUNCTION dbo.implicit_assignment_bad_local() RETURNS INT AS BEGIN DECLARE @value INT=CAST('1900-01-03' AS DATETIME); RETURN @value; END
+  expect: {error: true,contains: [unsupported implicit conversion]}
+- name: Pure scalar actual parameters retain their declared source type
+  sql: SELECT dbo.implicit_assignment_scalar(CAST('1900-01-03' AS DATETIME)) AS value
+  expect: {error: true,contains: [unsupported implicit conversion]}
+- name: Relational scalar actual parameters use the same implicit boundary
+  sql: SELECT dbo.implicit_assignment_relational(CAST('1900-01-03' AS DATETIME)) AS value
+  expect: {error: true,contains: [unsupported implicit conversion]}
+- name: Relational scalar return queries require an explicit date conversion
+  sql: SELECT dbo.implicit_assignment_return() AS value
+  expect: {error: true,contains: [unsupported implicit conversion]}
+- name: Relational SET subqueries obey local assignment contracts
+  sql: SELECT dbo.implicit_assignment_set_query() AS value
+  expect: {error: true,contains: [unsupported implicit conversion]}
+- name: Relational SELECT assignments obey local assignment contracts
+  sql: SELECT dbo.implicit_assignment_select_query() AS value
+  expect: {error: true,contains: [unsupported implicit conversion]}
+- name: Table function actual parameters obey the declared implicit boundary
+  tds:
+    statements:
+    - sql: DECLARE @ended DATETIME='1900-01-03'; SELECT value FROM dbo.implicit_assignment_table(@ended)
+      expect: {error: true,contains: [unsupported implicit conversion]}
+- name: Explicit conversions remain valid in variable and target assignments
+  tds:
+    statements:
+    - sql: DECLARE @value INT=CONVERT(INT,CAST('1900-01-03' AS DATETIME)); SET @value=@value+1; SELECT @value AS value
+      expect: {rows: 1,data: [{value: 3}]}
+    - sql: UPDATE implicit_assignment_rows SET value=CONVERT(INT,ended) WHERE id=1
+    - sql: SELECT value FROM implicit_assignment_rows WHERE id=1
+      expect: {rows: 1,data: [{value: 2}]}
+- name: Ordinary assignments preserve declared string widths and decimal scales
+  tds:
+    statements:
+    - sql: DECLARE @text VARCHAR(3)='abcdef'; DECLARE @value DECIMAL(8,2)=12.345; SELECT @text AS text_value,@value AS value
+      expect:
+        rows: 1
+        data: [{text_value: abc,value: '12.35'}]
+        column_types: [{name: text_value,type: VARCHAR,length: 3},{name: value,type: DECIMAL,precision: 8,scale: 2}]
+- name: Explicitly converted arguments reach both scalar execution kinds
+  sql: SELECT dbo.implicit_assignment_scalar(CONVERT(INT,CAST('1900-01-03' AS DATETIME))) AS pure_value,dbo.implicit_assignment_relational(CONVERT(INT,CAST('1900-01-03' AS DATETIME))) AS relational_value
+  expect: {rows: 1,data: [{pure_value: 2,relational_value: 4}]}

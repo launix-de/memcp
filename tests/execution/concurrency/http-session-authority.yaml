@@ -1,0 +1,165 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  description: Persistent HTTP capabilities are scoped to credentials and immutable account incarnations
+setup:
+- scm: (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS session_scope_reader" nil))
+- scm: (eval (parse_sql "memcp-tests" "CREATE USER session_scope_reader IDENTIFIED BY 'pw'" nil))
+- scm: (eval (parse_sql "memcp-tests" "GRANT ALL ON `memcp-tests`.* TO session_scope_reader" nil))
+cleanup:
+- scm: (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS session_scope_reader" nil))
+test_cases:
+- name: Authenticated owner creates private temporary capabilities
+  session_id: authority-shared-client-id
+  sql: |
+    CREATE TABLE #secret(value NVARCHAR(30)); INSERT #secret VALUES(N'owner-only'); SELECT value FROM #secret
+  expect: {rows: 1, data: [{value: owner-only}]}
+- name: Another authenticated account using the same client id remains functional
+  username: session_scope_reader
+  password: pw
+  session_id: authority-shared-client-id
+  sql: SELECT 7 AS value
+  expect: {rows: 1, data: [{value: 7}]}
+- name: Another account cannot borrow the original private temporary capability
+  username: session_scope_reader
+  password: pw
+  session_id: authority-shared-client-id
+  sql: |
+    SELECT value FROM #secret
+  expect: {error: true, contains: 'local temporary table does not exist'}
+- name: Independent account owns independent same-named temporary data
+  username: session_scope_reader
+  password: pw
+  session_id: authority-shared-client-id
+  sql: |
+    CREATE TABLE #secret(value NVARCHAR(30)); INSERT #secret VALUES(N'reader-only'); SELECT value FROM #secret
+  expect: {rows: 1, data: [{value: reader-only}]}
+- name: Wrong credentials cannot consume the owner's session capabilities
+  username: root
+  password: invalid-session-password
+  session_id: authority-shared-client-id
+  sql: |
+    SELECT value FROM #secret
+  expect: {error: true, contains: Unauthorized}
+- name: Original authority retains its independent temporary values
+  session_id: authority-shared-client-id
+  sql: |
+    SELECT value FROM #secret
+  expect: {rows: 1, data: [{value: owner-only}]}
+- name: Original reader incarnation is replaced without changing its credentials
+  scm: |
+    (begin
+      (eval (parse_sql "memcp-tests" "DROP USER session_scope_reader" nil))
+      (eval (parse_sql "memcp-tests" "CREATE USER session_scope_reader IDENTIFIED BY 'pw'" nil))
+      (eval (parse_sql "memcp-tests" "GRANT ALL ON `memcp-tests`.* TO session_scope_reader" nil)))
+- name: Recreated account cannot inherit the previous incarnation's session
+  username: session_scope_reader
+  password: pw
+  session_id: authority-shared-client-id
+  sql: |
+    SELECT value FROM #secret
+  expect: {error: true, contains: 'session authority changed'}
+- name: Recreated account can authenticate with a fresh logical session
+  username: session_scope_reader
+  password: pw
+  session_id: authority-fresh-client-id
+  sql: SELECT 9 AS value
+  expect: {rows: 1, data: [{value: 9}]}
+- name: New incarnation has no predecessor temporary capabilities
+  username: session_scope_reader
+  password: pw
+  session_id: authority-fresh-client-id
+  sql: |
+    SELECT value FROM #secret
+  expect: {error: true, contains: 'local temporary table does not exist'}
+- name: MySQL rejects a recycled session authority before evaluation
+  username: session_scope_reader
+  password: pw
+  session_id: authority-shared-client-id
+  sql: SELECT 1 AS value
+  syntax: mysql
+  expect: {error: true, contains: 'session authority changed'}
+- name: PostgreSQL requests cannot reuse a previous account incarnation
+  username: session_scope_reader
+  password: pw
+  session_id: authority-shared-client-id
+  sql: SELECT 1 AS value
+  syntax: psql
+  expect: {error: true, contains: 'session authority changed'}
+- name: Public query arguments cannot overwrite private execution state
+  scm: |
+    (begin
+      (define result (http_request "POST"
+        (concat "http://127.0.0.1:" (arg "api-port" "4321") "/tsql/memcp-tests?__memcp_tx=forged")
+        '("Authorization" "Basic cm9vdDphZG1pbg==") "SELECT 1 AS value"))
+      (and (equal? (result "status") 500) (regexp_test (result "body") "reserved session parameter")))
+  expect: {result: true}
+- name: Normal public arguments still bind positional SQL values
+  sql: SELECT ? AS value
+  syntax: mysql
+  params: [11]
+  expect: {rows: 1, data: [{value: '11'}]}
+- name: RDF rejects a recycled authority before committing response headers
+  scm: |
+    (begin
+      (define result (http_request "POST"
+        (concat "http://127.0.0.1:" (arg "api-port" "4321") "/rdf/memcp-tests")
+        '("Authorization" "Basic c2Vzc2lvbl9zY29wZV9yZWFkZXI6cHc=" "X-Session-Id" "authority-shared-client-id")
+        "SELECT ?s WHERE {?s ?p ?o}"))
+      (and (equal? (result "status") 500) (regexp_test (result "body") "session authority changed")))
+  expect: {result: true}
+- name: Scheme administration authenticates actual admin claims before evaluation
+  scm: |
+    (begin
+      (define result (http_request "POST"
+        (concat "http://127.0.0.1:" (arg "api-port" "4321") "/scm")
+        '("Authorization" "Basic c2Vzc2lvbl9zY29wZV9yZWFkZXI6cHc=" "X-Session-Id" "authority-shared-client-id")
+        "(error \"must not execute\")"))
+      (equal? (result "status") 401))
+  expect: {result: true}
+- name: Dashboard administration does not borrow a shared client id's authority
+  scm: |
+    (begin
+      (define result (http_request "GET"
+        (concat "http://127.0.0.1:" (arg "api-port" "4321") "/dashboard/api/users")
+        '("Authorization" "Basic c2Vzc2lvbl9zY29wZV9yZWFkZXI6cHc=" "X-Session-Id" "authority-shared-client-id") ""))
+      (equal? (result "status") 500))
+  expect: {result: true}
+- name: RDF loading binds authority before any graph mutation
+  scm: |
+    (begin
+      (define result (http_request "POST"
+        (concat "http://127.0.0.1:" (arg "api-port" "4321") "/rdf/memcp-tests/load_ttl")
+        '("Authorization" "Basic c2Vzc2lvbl9zY29wZV9yZWFkZXI6cHc=" "X-Session-Id" "authority-shared-client-id")
+        "<urn:forbidden-subject> <urn:predicate> <urn:object> ."))
+      (and (equal? (result "status") 500) (regexp_test (result "body") "session authority changed")))
+  expect: {result: true}
+- name: Login name observes the authenticated invocation rather than shared query cache
+  session_id: authority-shared-client-id
+  sql: SELECT SUSER_SNAME() AS actor
+  expect: {rows: 1, data: [{actor: root}]}
+- name: Another authenticated incarnation receives its own login name
+  username: session_scope_reader
+  password: pw
+  session_id: authority-fresh-client-id
+  sql: SELECT SUSER_SNAME() AS actor
+  expect: {rows: 1, data: [{actor: session_scope_reader}]}
+- name: SID lookup is explicitly outside the current-context login profile
+  sql: SELECT SUSER_SNAME(0x01)
+  expect: {error: true}
+- name: Login-dependent defaults cannot freeze the schema creator identity
+  sql: CREATE TABLE default_context_probe(id INT, actor NVARCHAR(128) DEFAULT (SELECT SUSER_SNAME()))
+  expect: {error: true}
+- name: Unsupported contextual default leaves no published declaration
+  sql: SELECT name FROM sys.objects WHERE name=N'default_context_probe'
+  expect: {rows: 0, data: []}
+- name: Authentication snapshots contain coherent claims without returning password material
+  scm: |
+    (begin
+      (define account (sql_authenticate_account "root" "admin"))
+      (and (equal? (account "username") "root") (account "admin")
+        (equal? (account "principal_id") (sql_account_incarnation "root"))
+        (nil? (account "password")) (nil? (account "hash"))))
+  expect: {result: true}

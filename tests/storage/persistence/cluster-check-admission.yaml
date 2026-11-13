@@ -1,0 +1,44 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: Shared native CHECK ADD fails explicitly before claiming standalone declaration authority
+  cluster:
+    fixture: shared_analytics
+    rows_per_shard: 5000
+    shards: 64
+    columns: 8
+    nodes: 4
+    gomaxprocs: 2
+setup: []
+cleanup: []
+test_cases:
+- name: A shared table cannot acquire a local-only CHECK declaration lease
+  scm: |-
+    (begin
+      /* The shared_analytics harness first executes this same case in an
+      independent standalone oracle, then on the real four-node cluster. */
+      (define clustered (not (nil? (cluster_status))))
+      (define h (table "{database}" false "big_items" false nil))
+      (define before (show h "declarations"))
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (try (lambda () (begin
+        (define correct (if clustered
+          (try (lambda () (begin
+            (createcheck h "CK_cluster_explicit" "tsql-check" "id >= 0" '("id") (owner "__memcp_tx") owner)
+            false))
+            (lambda (failure) (regexp_test (string failure) "requires distributed table admission")))
+          (begin
+            (createcheck h "CK_cluster_explicit" "tsql-check" "id >= 0" '("id") (owner "__memcp_tx") owner)
+            (and (equal? (count ((show h "constraints" (owner "__memcp_tx")) "Checks")) 1)
+              (empty_list? (coalesceNil ((show h "constraints") "Checks") '()))))))
+        (tx_rollback owner)
+        (and correct (identical? before (show h "declarations")))))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect:
+    result: true
+- name: The original shared fixture row domain remains unchanged
+  sql: SELECT COUNT(*) AS n FROM big_items
+  expect:
+    rows: 1
+    data:
+    - n: 320000

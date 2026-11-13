@@ -1,0 +1,81 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: Declaration-based TDS nullability of complete joined operands
+  syntax: tsql
+  requires_tds: true
+  isolated: true
+setup:
+  - sql: CREATE TABLE operand_metadata_parent(id INT NOT NULL PRIMARY KEY)
+  - sql: CREATE TABLE operand_metadata_head(id INT NOT NULL PRIMARY KEY,parent_id INT NOT NULL)
+  - sql: CREATE TABLE operand_metadata_middle(id INT NOT NULL PRIMARY KEY,head_id INT NOT NULL)
+  - sql: CREATE TABLE operand_metadata_tail(id INT NOT NULL PRIMARY KEY,middle_id INT NOT NULL)
+  - sql: INSERT INTO operand_metadata_parent VALUES(1),(2)
+  - sql: INSERT INTO operand_metadata_head VALUES(10,1)
+  - sql: INSERT INTO operand_metadata_middle VALUES(20,10)
+  - sql: INSERT INTO operand_metadata_tail VALUES(30,20)
+cleanup:
+  - sql: DROP TABLE IF EXISTS operand_metadata_tail
+  - sql: DROP TABLE IF EXISTS operand_metadata_middle
+  - sql: DROP TABLE IF EXISTS operand_metadata_head
+  - sql: DROP TABLE IF EXISTS operand_metadata_parent
+test_cases:
+  - name: Empty LEFT result describes every member of the nullable INNER operand
+    tds:
+      statements:
+        - sql: >-
+            SELECT TOP(0) p.id AS pid,h.id AS hid,m.id AS mid,t.id AS tid
+            FROM operand_metadata_parent p
+            LEFT JOIN (operand_metadata_head h
+              INNER JOIN operand_metadata_middle m ON m.head_id=h.id
+              INNER JOIN operand_metadata_tail t ON t.middle_id=m.id)
+            ON h.parent_id=p.id
+          expect:
+            rows: 0
+            column_types: &nullable_operand
+              - {name: pid,type: INT,nullable: false}
+              - {name: hid,type: INT,nullable: true}
+              - {name: mid,type: INT,nullable: true}
+              - {name: tid,type: INT,nullable: true}
+  - name: LEFT nullable declaration agrees with complete operand null extension
+    tds:
+      statements:
+        - sql: >-
+            SELECT p.id AS pid,h.id AS hid,m.id AS mid,t.id AS tid
+            FROM operand_metadata_parent p
+            LEFT JOIN (operand_metadata_head h
+              INNER JOIN operand_metadata_middle m ON m.head_id=h.id
+              INNER JOIN operand_metadata_tail t ON t.middle_id=m.id)
+            ON h.parent_id=p.id ORDER BY p.id
+          expect:
+            rows: 2
+            data: [{pid: 1,hid: 10,mid: 20,tid: 30},{pid: 2,hid: null,mid: null,tid: null}]
+            column_types: *nullable_operand
+  - name: Empty RIGHT result describes its entire nullable INNER cloud
+    tds:
+      statements:
+        - sql: >-
+            SELECT TOP(0) p.id AS pid,h.id AS hid,m.id AS mid,t.id AS tid
+            FROM operand_metadata_head h
+            INNER JOIN operand_metadata_middle m ON m.head_id=h.id
+            INNER JOIN operand_metadata_tail t ON t.middle_id=m.id
+            RIGHT JOIN operand_metadata_parent p ON p.id=h.parent_id
+          expect:
+            rows: 0
+            column_types: *nullable_operand
+  - name: Ordinary INNER cloud retains its declared nonnullable columns
+    tds:
+      statements:
+        - sql: >-
+            SELECT TOP(0) p.id AS pid,h.id AS hid,m.id AS mid,t.id AS tid
+            FROM operand_metadata_parent p
+            INNER JOIN operand_metadata_head h ON h.parent_id=p.id
+            INNER JOIN operand_metadata_middle m ON m.head_id=h.id
+            INNER JOIN operand_metadata_tail t ON t.middle_id=m.id
+          expect:
+            rows: 0
+            column_types:
+              - {name: pid,type: INT,nullable: false}
+              - {name: hid,type: INT,nullable: false}
+              - {name: mid,type: INT,nullable: false}
+              - {name: tid,type: INT,nullable: false}

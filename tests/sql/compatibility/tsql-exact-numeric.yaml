@@ -76,7 +76,7 @@ test_cases:
       amount: 12.35
   noncritical: true
 - name: Direct engine insertion accepts the native carrier without dialect validation
-  scm: (insert (table "memcp-tests" false "tsql_assignment_bounds" false) '("id" "tiny") (list (list 9 256)))
+  scm: (insert (table "memcp-tests" false "tsql_assignment_bounds" false nil) '("id" "tiny") (list (list 9 256)))
   expect:
     result: 1
 - name: Remove the direct native insertion before further dialect tests
@@ -3148,4 +3148,81 @@ test_cases:
   expect:
     error: true
     contains: invalid numeric text
-cleanup: []
+- name: Scale zero decimal casts keep exact 18 digit limits and reject the adjacent integers
+  sql: SELECT CONVERT(VARCHAR(30),CAST(N'999999999999999999' AS NUMERIC(18,0))) AS maximum,CONVERT(VARCHAR(30),CAST(N'-999999999999999999'
+    AS DECIMAL(18,0))) AS minimum,TRY_CAST(N'1000000000000000000' AS NUMERIC(18,0)) AS overflow_positive,TRY_CAST(N'-1000000000000000000'
+    AS DECIMAL(18,0)) AS overflow_negative,CAST(NULL AS NUMERIC(18,0)) AS missing,TRY_CAST(9.5 AS DECIMAL(1,0))
+    AS rounded_overflow,TRY_CAST(-9.5 AS DECIMAL(1,0)) AS rounded_underflow,CONVERT(VARCHAR(10),CAST(9.49 AS DECIMAL(1,0)))
+    AS rounded_valid
+  expect:
+    rows: 1
+    data:
+    - maximum: '999999999999999999'
+      minimum: '-999999999999999999'
+      overflow_positive: null
+      overflow_negative: null
+      missing: null
+      rounded_overflow: null
+      rounded_underflow: null
+      rounded_valid: '9'
+- name: Scale zero INSERT and UPDATE retain exact integer values and reject overflow before effects
+  setup:
+  - sql: DROP TABLE IF EXISTS tsql_scale_zero_exact
+  - sql: CREATE TABLE tsql_scale_zero_exact(id INT PRIMARY KEY,amount NUMERIC(18,0))
+  tds:
+    statements:
+    - sql: INSERT INTO tsql_scale_zero_exact VALUES(1,999999999999999999),(2,-999999999999999999),(3,NULL),(4,0),(5,0)
+    - sql: UPDATE tsql_scale_zero_exact SET amount=123456789012345678 WHERE id=4
+    - sql: UPDATE tsql_scale_zero_exact SET amount=-123456789012345678 WHERE id=5
+    - sql: INSERT INTO tsql_scale_zero_exact VALUES(6,1000000000000000000)
+      expect:
+        error: true
+        contains:
+        - decimal conversion overflow
+    - sql: UPDATE tsql_scale_zero_exact SET amount=-1000000000000000000 WHERE id=1
+      expect:
+        error: true
+        contains:
+        - decimal conversion overflow
+    - sql: SELECT id,CONVERT(VARCHAR(30),amount) AS amount FROM tsql_scale_zero_exact ORDER BY id
+      expect:
+        rows: 5
+        data: &scale_zero_exact_rows
+        - id: 1
+          amount: '999999999999999999'
+        - id: 2
+          amount: '-999999999999999999'
+        - id: 3
+          amount: null
+        - id: 4
+          amount: '123456789012345678'
+        - id: 5
+          amount: '-123456789012345678'
+- name: Scale zero exact rows cross a real WAL shutdown before rebuilding
+  syntax: mysql
+  sql: SHUTDOWN
+- name: Scale zero WAL recovery preserves all exact values and NULL
+  tds:
+    statements:
+    - sql: SELECT id,CONVERT(VARCHAR(30),amount) AS amount FROM tsql_scale_zero_exact ORDER BY id
+      expect:
+        rows: 5
+        data: *scale_zero_exact_rows
+- name: Scale zero rebuild keeps native integer payloads rather than rounded floats
+  scm: "(begin\n  (define handle (table \"memcp-tests\" false \"tsql_scale_zero_exact\" false nil))\n  (rebuild\
+    \ handle true false)\n  (define lookup (lambda (id) (scan_lookup nil handle\n    (list 372734710317056 (scan_boundary\
+    \ \"equal\" \"id\" 0 0 true true \"\" false) \"amount\") (list id))))\n  (and (expression_equal? (lookup 1)\
+    \ (tsql_parse_integer \"999999999999999999\"))\n    (expression_equal? (lookup 2) (tsql_parse_integer \"-999999999999999999\"\
+    ))\n    (nil? (lookup 3))\n    (expression_equal? (lookup 4) (tsql_parse_integer \"123456789012345678\"))\n\
+    \    (expression_equal? (lookup 5) (tsql_parse_integer \"-123456789012345678\"))))"
+  expect:
+    result: true
+- name: Scale zero rebuilt rows retain the same exact SQL text
+  tds:
+    statements:
+    - sql: SELECT id,CONVERT(VARCHAR(30),amount) AS amount FROM tsql_scale_zero_exact ORDER BY id
+      expect:
+        rows: 5
+        data: *scale_zero_exact_rows
+cleanup:
+- sql: DROP TABLE IF EXISTS tsql_scale_zero_exact

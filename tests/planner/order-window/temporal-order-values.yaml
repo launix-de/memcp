@@ -17,7 +17,7 @@ test_cases:
     (begin
       (define value (list (quote get_column) "temporal_order_value" false "stamp" false))
       (define query (make_query_block "memcp-tests"
-        (list (list "temporal_order_value" "memcp-tests" "temporal_order_value" false nil))
+        (list (list "temporal_order_value" "memcp-tests" "temporal_order_value" false nil (sql_relation_declarations "memcp-tests" "temporal_order_value" nil)))
         (list "displayed" value) true nil nil
         (list (list (list (quote get_column) nil false "displayed" false) >))
         3 nil '() '() '()))

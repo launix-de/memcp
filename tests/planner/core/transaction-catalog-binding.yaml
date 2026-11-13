@@ -1,0 +1,666 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  description: Shared declaration binding and native transaction-owned query plans
+setup:
+- sql: CREATE TABLE catalog_count_binding(id INT PRIMARY KEY)
+- sql: CREATE TABLE catalog_binding_rows(id INT PRIMARY KEY,label NVARCHAR(23) UNIQUE)
+- sql: INSERT catalog_binding_rows VALUES(1,N'first'),(2,N'second')
+- sql: CREATE TABLE catalog_point_stats(id INT PRIMARY KEY,payload VARCHAR(12),note VARCHAR(12))
+- sql: INSERT catalog_point_stats VALUES(1,'initial','one')
+cleanup:
+- sql: DROP TABLE IF EXISTS catalog_point_stats
+- sql: DROP VIEW IF EXISTS catalog_union_binding
+- sql: DROP VIEW IF EXISTS catalog_snapshot_view
+- sql: DROP VIEW IF EXISTS catalog_legacy_view
+- sql: DROP VIEW IF EXISTS catalog_current_view
+- sql: DROP TABLE IF EXISTS catalog_binding_rows
+- sql: DROP TABLE IF EXISTS catalog_count_binding
+test_cases:
+- name: Warm a shared computed reduction before native source mutation
+  sql: SELECT COUNT(*) AS total FROM catalog_count_binding
+  expect: {data: [{total: 0}]}
+- name: Native source mutation invalidates an explicit-context computed dependency
+  sql: INSERT catalog_count_binding VALUES(1),(2),(3)
+  expect: {affected_rows: 3}
+- name: Warm computed reduction observes subsequent native source rows
+  sql: SELECT COUNT(*) AS total FROM catalog_count_binding
+  expect: {data: [{total: 3}]}
+- name: Native compile authority becomes pure semantic source declarations
+  scm: |
+    (begin
+      (define s (newsession)) (s "username" "root") (tx_begin s)
+      (define tx (s "__memcp_tx"))
+      (define query (make_query_block "memcp-tests"
+        (list (list "r" "memcp-tests" "catalog_binding_rows" false nil nil))
+        (list "label" (list 'get_column "r" false "label" false)) true nil nil nil nil nil nil nil nil))
+      (define bound (sql_bind_catalog_declarations query tx nil))
+      (define src (car (qb_sources bound)))
+      (define label (source_column_declaration src "LABEL" true))
+      (define answer (and (equal? (count src) 6)
+        (equal? (label "Dimensions") '(23))
+        (not (has_assoc? label "RowEstimate"))
+        (not (has_assoc? label "StatisticsKnown"))
+        (equal? (source_primary_key_columns src) '("id"))
+        (has? (source_unique_key_sets src) '("label"))
+        (equal? (sql_info_type (sql_get_column_info (list src) "r" false "label" false)) "NVARCHAR")))
+      (tx_rollback s) answer)
+  expect: {result: true}
+- name: Transaction-owned plans refresh wildcard declarations after the prior owner closes
+  scm: |
+    (begin
+      (define shared (newcachemap))
+      (define s (newsession)) (s "username" "root") (s "schema" "memcp-tests")
+      (define out (newsession))
+      (define row (lambda (value) (out "row" value)))
+      (tx_begin s)
+      (define first_tx (s "__memcp_tx"))
+      (define first (cached_parse shared "sql" (list parse_sql) "memcp-tests"
+        "SELECT * FROM catalog_binding_rows" nil "root" s false first_tx))
+      (sql_execute_formula s first_tx first row (lambda args true))
+      (define narrow (not (has_assoc? (out "row") "extra")))
+      (define first_cache (tx_get_or_compute_resource first_tx "sql-query-plans:sql"
+        (lambda () (error "compiler did not use the native transaction cache"))))
+      (tx_rollback s)
+      (define closed (try (lambda () (begin (first_cache) false)) (lambda (_failure) true)))
+      (createcolumn (table "memcp-tests" false "catalog_binding_rows" false nil)
+        "extra" "INT" '() '("default" 9))
+      (tx_begin s)
+      (define second_tx (s "__memcp_tx"))
+      (define second (cached_parse shared "sql" (list parse_sql) "memcp-tests"
+        "SELECT * FROM catalog_binding_rows" nil "root" s false second_tx))
+      (sql_execute_formula s second_tx second row (lambda args true))
+      (define wide (equal? ((out "row") "extra") 9))
+      (tx_commit s)
+      (and narrow closed wide (equal? (count (shared)) 0)))
+  expect: {result: true}
+- name: Constant domain propagation retains native declaration proofs
+  scm: |
+    (begin
+      (define constants (make_query_block "memcp-tests" '() '("n" 7)
+        true nil nil nil nil nil nil nil nil))
+      (define query (make_query_block "memcp-tests"
+        (list (list "r" "memcp-tests" "catalog_binding_rows" false nil nil)
+          (list "d" "memcp-tests" constants false nil nil))
+        (list "label" '(get_column "r" false "label" false))
+        (list 'equal?? (list 'get_column "d" false "n" false) 7) nil nil nil nil nil nil nil nil))
+      (define bound (sql_bind_catalog_declarations query nil nil))
+      (define original (car (qb_sources bound)))
+      (define rewritten (bind_constant_domain_columns bound nil false))
+      (define src (car (qb_sources rewritten)))
+      (and (not (expression_equal? (qb_where bound) (qb_where rewritten)))
+        (expression_equal? (source_declarations src) (source_declarations original))
+        (equal? (source_primary_key_columns src) '("id"))
+        (has? (source_unique_key_sets src) '("label"))
+        (equal? ((source_column_declaration src "label" false) "Dimensions") '(23))))
+  expect: {result: true}
+- name: Parameter row domain alternatives retain native declaration proofs
+  scm: |
+    (begin
+      (define branch (lambda (n) (make_query_block "memcp-tests" '() (list "n" n)
+        true nil nil nil nil nil nil nil nil)))
+      (define constants (make_union_block 'all (list (branch 7) (branch 8)) nil nil nil nil))
+      (define query (make_query_block "memcp-tests"
+        (list (list "r" "memcp-tests" "catalog_binding_rows" false nil nil)
+          (list "d" "memcp-tests" constants false nil nil))
+        (list "label" '(get_column "r" false "label" false))
+        true nil nil nil nil nil nil nil nil))
+      (define bound (sql_bind_catalog_declarations query nil nil))
+      (define original (car (qb_sources bound)))
+      (define rewritten (bind_parameter_row_domains bound nil))
+      (define src (car (qb_sources rewritten)))
+      (and (row_domain_relation? (source_relation (cadr (qb_sources rewritten))))
+        (expression_equal? (source_declarations src) (source_declarations original))
+        (equal? (source_primary_key_columns src) '("id"))
+        (has? (source_unique_key_sets src) '("label"))
+        (equal? ((source_column_declaration src "label" false) "Dimensions") '(23))))
+  expect: {result: true}
+- name: Distinct query cache families remain distinct inside one native transaction
+  scm: |
+    (begin
+      (define s (newsession)) (s "username" "root") (tx_begin s)
+      (define tx (s "__memcp_tx"))
+      (define shared (newcachemap))
+      (define left (cached_parse shared "family-left"
+        (lambda (_db _text _policy _planning _tx) 7) "memcp-tests" "SELECT 1" nil "root" s false tx))
+      (define right (cached_parse shared "family-right"
+        (lambda (_db _text _policy _planning _tx) 8) "memcp-tests" "SELECT 1" nil "root" s false tx))
+      (define a (sql_execute_formula s tx left (lambda (_row) true) (lambda args true)))
+      (define b (sql_execute_formula s tx right (lambda (_row) true) (lambda args true)))
+      (tx_rollback s)
+      (and (equal? a 7) (equal? b 8) (equal? (count (shared)) 0)))
+  expect: {result: true}
+- name: Restore migration changes source positions and preserves five-value SQL data
+  scm: |
+    (begin
+      (define literal (list 'quote (list 1 2 3 4 5)))
+      (define old (make_query_block "memcp-tests"
+        (list (list "r" "memcp-tests" "catalog_binding_rows" false nil))
+        (list "value" literal) true nil nil nil nil nil nil nil nil))
+      (define restored (sql_restore_source_layout old))
+      (and (equal? (count (car (qb_sources restored))) 6)
+        (equal? ((qb_fields restored) "value") literal)
+        (expression_equal? restored (sql_restore_source_layout restored))))
+  expect: {result: true}
+- name: Load a persisted view fixture written with the previous five-field source format
+  scm: |
+    (create_sql_view nil "memcp-tests" "catalog_legacy_view" "sql"
+      "SELECT id,label FROM catalog_binding_rows"
+      (make_query_block "memcp-tests"
+        (list (list "r" "memcp-tests" "catalog_binding_rows" false nil))
+        (list "id" (list 'get_column "r" false "id" false)
+          "label" (list 'get_column "r" false "label" false))
+        true nil nil nil nil nil nil nil nil) "error")
+  expect: {result: 1}
+- name: Previous persisted view source format binds current declarations
+  sql: SELECT id,label FROM catalog_legacy_view ORDER BY id
+  expect:
+    data: [{id: 1,label: first},{id: 2,label: second}]
+- name: New persisted view producers use the canonical source format
+  sql: CREATE VIEW catalog_current_view AS SELECT id,label FROM catalog_binding_rows
+  expect: {rows: 0, result_not_contains: '"affected_rows"'}
+- name: Canonical persisted view source positions have six fields
+  scm: |
+    (begin
+      (define stored (restore_storage_code (json_decode_scmer
+        (nth (sql_find_view "memcp-tests" "catalog_current_view") 2))))
+      (equal? (count (car (qb_sources stored))) 6))
+  expect: {result: true}
+- name: Persisted view source migration survives restart
+  action: restart
+- name: Prior persisted view remains usable after restart
+  sql: SELECT id,label FROM catalog_legacy_view ORDER BY id
+  expect:
+    data: [{id: 1,label: first},{id: 2,label: second}]
+- name: Canonical persisted view remains usable after restart
+  sql: SELECT id,label FROM catalog_current_view ORDER BY id
+  expect:
+    data: [{id: 1,label: first},{id: 2,label: second}]
+- name: Opaque native defaults are rejected before logical SQL binding
+  scm: |
+    (begin
+      (define s (newsession))
+      (define scope (new_relation_scope s))
+      (createtable "memcp-tests" "catalog_opaque_default"
+        (list (list "column" "value" "ANY" '()
+          (list "default" (lambda () 7))))
+        (list "engine" "memory" "ephemeral" true "scope" scope) false nil)
+      (define denied (try (lambda () (begin
+        (parse_sql "memcp-tests" "SELECT * FROM catalog_opaque_default" nil (newsession) nil) false))
+        (lambda (failure) (regexp_test (concat failure) "opaque native value"))))
+      (close_relation_scope scope)
+      denied)
+  expect: {result: true}
+- name: Nested native resource defaults cannot enter logical source facts
+  scm: |
+    (begin
+      (define s (newsession))
+      (define scope (new_relation_scope s))
+      (createtable "memcp-tests" "catalog_nested_default"
+        (list (list "column" "value" "ANY" '()
+          (list "default" (list "container" (newcachemap)))))
+        (list "engine" "memory" "ephemeral" true "scope" scope) false nil)
+      (define denied (try (lambda () (begin
+        (parse_psql "memcp-tests" "SELECT * FROM catalog_nested_default" nil (newsession) nil) false))
+        (lambda (failure) (regexp_test (concat failure) "opaque native value"))))
+      (close_relation_scope scope)
+      denied)
+  expect: {result: true}
+- name: Semantic declaration copying retains pure recursively nested scalar values
+  scm: |
+    (expression_equal?
+      (sql_declaration_data (list 1 "text" true false nil (list 2 (list "nested"))))
+      (list 1 "text" true false nil (list 2 (list "nested"))))
+  expect: {result: true}
+- name: A six-field persisted view fixture may contain a prior compile snapshot
+  scm: |
+    (create_sql_view nil "memcp-tests" "catalog_snapshot_view" "sql"
+      "SELECT label FROM catalog_binding_rows"
+      (sql_bind_catalog_declarations (make_query_block "memcp-tests"
+        (list (list "r" "memcp-tests" "catalog_binding_rows" false nil nil))
+        (list "label" (list 'get_column "r" false "label" false))
+        true nil nil nil nil nil nil nil nil) nil nil) "error")
+  expect: {result: 1}
+- name: Warm view output metadata rebinds after a consumed native declaration changes
+  scm: |
+    (begin
+      (define s (newsession)) (s "username" "root") (s "schema" "memcp-tests")
+      (define output (newsession))
+      (define run (lambda (text) (tsql_execute_request "memcp-tests" text s nil 0
+        (lambda (_row) true)
+        (lambda (titles declarations) (if (not (empty_list? declarations))
+          (output "size" ((car declarations) "size")) true)))))
+      (run "SELECT label FROM catalog_current_view")
+      (define first (output "size"))
+      (run "ALTER TABLE catalog_binding_rows ALTER COLUMN label NVARCHAR(47) NULL")
+      (run "SELECT label FROM catalog_current_view")
+      (list first (output "size")))
+  expect: {result: [46,94]}
+- name: Stored declaration snapshots are discarded before a view binds its current source
+  sql: EXEC sp_columns @table_name=N'catalog_snapshot_view'
+  expect:
+    rows: 1
+    data: [{COLUMN_NAME: label,TYPE_NAME: nvarchar,LENGTH: 94}]
+- name: Restart retains the current schema and persisted view format
+  action: restart
+- name: Reloaded view metadata uses the current source declaration
+  sql: EXEC sp_columns @table_name=N'catalog_snapshot_view'
+  expect:
+    rows: 1
+    data: [{COLUMN_NAME: label,TYPE_NAME: nvarchar,LENGTH: 94}]
+- name: UNION contract merging consumes bound source declarations
+  sql: CREATE VIEW catalog_union_binding AS SELECT id FROM catalog_binding_rows UNION ALL SELECT id FROM catalog_binding_rows
+  expect: {rows: 0, result_not_contains: '"affected_rows"'}
+- name: UNION view columns preserve their declared types without native keys
+  sql: EXEC sp_columns @table_name=N'catalog_union_binding'
+  expect:
+    rows: 1
+    data: [{COLUMN_NAME: id,TYPE_NAME: int,NULLABLE: 1}]
+- name: Plain SQL SELECT recompiles when its consumed declaration changes
+  scm: |
+    (begin
+      (define s (newsession)) (s "username" "root") (s "schema" "memcp-tests")
+      (define shared (newcachemap))
+      (define counter (newsession)) (counter "compiled" 0)
+      (define parser (lambda (db text policy planning tx) (begin
+        (counter "compiled" (+ 1 (counter "compiled")))
+        (parse_sql db text policy planning tx))))
+      (define run (lambda () (with_autocommit s nil nil "declaration guard" (lambda (tx)
+        (sql_execute_formula s tx (cached_parse shared "sql" (list parser) "memcp-tests"
+          "SELECT label FROM catalog_binding_rows WHERE id=1" nil "root" s false tx)
+          (lambda (_row) true) (lambda args true))))))
+      (run) (run)
+      (define first (counter "compiled"))
+      (altercolumn (table "memcp-tests" false "catalog_binding_rows" false nil)
+        "label" "dimensions" '(61))
+      (run)
+      (list first (counter "compiled")))
+  expect: {result: [1,2]}
+- name: Plain PSQL SELECT recompiles when its consumed declaration changes
+  scm: |
+    (begin
+      (define s (newsession)) (s "username" "root") (s "schema" "memcp-tests")
+      (define shared (newcachemap))
+      (define counter (newsession)) (counter "compiled" 0)
+      (define parser (lambda (db text policy planning tx) (begin
+        (counter "compiled" (+ 1 (counter "compiled")))
+        (parse_psql db text policy planning tx))))
+      (define run (lambda () (with_autocommit s nil nil "declaration guard" (lambda (tx)
+        (sql_execute_formula s tx (cached_parse shared "psql" (list parser) "memcp-tests"
+          "SELECT label FROM catalog_binding_rows WHERE id=1" nil "root" s false tx)
+          (lambda (_row) true) (lambda args true))))))
+      (run) (run)
+      (define first (counter "compiled"))
+      (altercolumn (table "memcp-tests" false "catalog_binding_rows" false nil)
+        "label" "dimensions" '(83))
+      (run)
+      (list first (counter "compiled")))
+  expect: {result: [1,2]}
+- name: One compile keeps its immutable facts while its live guard observes a new declaration
+  scm: |
+    (begin
+      (define s (newsession)) (s "username" "root")
+      (define planning (sql_queryplan_compile_session s nil))
+      (define query (make_query_block "memcp-tests"
+        (list (list "r" "memcp-tests" "catalog_binding_rows" false nil nil))
+        (list "label" (list 'get_column "r" false "label" false))
+        true nil nil nil nil nil nil nil nil))
+      (define first (sql_bind_catalog_declarations query nil planning))
+      (define original (source_declarations (car (qb_sources first))))
+      (altercolumn (table "memcp-tests" false "catalog_binding_rows" false nil)
+        "label" "dimensions" '(109))
+      (define second (sql_bind_catalog_declarations first nil planning))
+      (define guard (sql_queryplan_compile_formula nil (sql_queryplan_guard_from_session planning)))
+      (and (identical? original (source_declarations (car (qb_sources second))))
+        (not (guard s nil (lambda (_row) true) (lambda args true)))))
+  expect: {result: true}
+- name: CTE star exports are bound before their outer consumer
+  sql: WITH q AS (SELECT * FROM catalog_binding_rows) SELECT id,label FROM q ORDER BY id
+  expect:
+    data: [{id: 1,label: first},{id: 2,label: second}]
+- name: Explicit CTE aliases consume the bound wildcard export directory
+  sql: WITH q(key_value,display_value,extra_value) AS (SELECT * FROM catalog_binding_rows) SELECT key_value,display_value FROM q ORDER BY key_value
+  expect:
+    data: [{key_value: 1,display_value: first},{key_value: 2,display_value: second}]
+- name: A live guard rejects opaque changed defaults without invoking them
+  scm: |
+    (begin
+      (define s (newsession)) (define scope (new_relation_scope s))
+      (createtable "memcp-tests" "catalog_live_opaque"
+        (list (list "column" "value" "ANY" '() (list "default" 7)))
+        (list "engine" "memory" "ephemeral" true "scope" scope) false nil)
+      (define expected (sql_relation_declarations "memcp-tests" "catalog_live_opaque" nil))
+      (altercolumn (table "memcp-tests" false "catalog_live_opaque" false nil)
+        "value" "default" (lambda () (error "opaque default must never execute")))
+      (define mismatch (not (sql_relation_declarations_match?
+        "memcp-tests" "catalog_live_opaque" nil expected)))
+      (define denied (try (lambda () (begin
+        (parse_sql "memcp-tests" "SELECT value FROM catalog_live_opaque" nil (newsession) nil) false))
+        (lambda (failure) (regexp_test (concat failure) "opaque native value"))))
+      (close_relation_scope scope)
+      (and mismatch denied))
+  expect: {result: true}
+
+- name: SQL and PSQL cold plans bind unpublished declarations with their native owner
+  scm: |
+    (begin
+      (define s (newsession)) (s "username" "root") (s "schema" "memcp-tests") (tx_begin s)
+      (define tx (s "__memcp_tx"))
+      (createtable "memcp-tests" "catalog_private_binding"
+        (list (list "column" "id" "INT" '() '())
+          (list "column" "label" "VARCHAR" '(30) '()))
+        (list "engine" "safe") false tx)
+      (insert (table "memcp-tests" false "catalog_private_binding" false tx)
+        '("id" "label") (list (list 1 "first") (list 2 "second")) '() nil false nil tx)
+      (define shared (newcachemap))
+      (define results (map (list (list "sql" parse_sql) (list "psql" parse_psql))
+        (lambda (dialect)
+          (reduce (list "SELECT id,label FROM catalog_private_binding ORDER BY id"
+            "SELECT id,label FROM catalog_private_binding WHERE id IN(1,2) ORDER BY id")
+            (lambda (ok query) (begin
+              (define output (newsession))
+              (output "rows" '())
+              (define formula (cached_parse shared (car dialect) (list (cadr dialect))
+                "memcp-tests" query nil "root" s false tx))
+              (sql_execute_formula s tx formula
+                (lambda (row) (output "rows" (append (output "rows") row))) (lambda args true))
+              (and ok (equal? (output "rows")
+                (list (list "id" 1 "label" "first") (list "id" 2 "label" "second")))))) true))))
+      (define private (nil? (table "memcp-tests" false "catalog_private_binding" false nil)))
+      (tx_rollback s)
+      (and (reduce results (lambda (ok value) (and ok value)) true) private
+        (nil? (table "memcp-tests" false "catalog_private_binding" false nil))
+        (equal? (count (shared)) 0)))
+  expect: {result: true}
+
+- name: Every consumed semantic field participates in live declaration guards
+  scm: |
+    (begin
+      (define expected (sql_relation_declarations "memcp-tests" "catalog_binding_rows" nil))
+      (define columns (expected "columns"))
+      (define first (car columns))
+      (and (sql_relation_declarations_match? "memcp-tests" "catalog_binding_rows" nil expected)
+        (reduce sql_semantic_column_fields (lambda (all_changed key)
+          (begin
+            (define changed_column (map (produceN (count first)) (lambda (index)
+              (if (and (equal? (mod index 2) 1) (equal? (nth first (- index 1)) key))
+                (list "changed declaration" key) (nth first index)))))
+            (define changed (list "columns" (cons changed_column (cdr columns))
+              "constraints" (expected "constraints") "references" (expected "references")))
+            (and all_changed (not (sql_relation_declarations_match?
+              "memcp-tests" "catalog_binding_rows" nil changed))))) true)))
+  expect: {result: true}
+- name: Live declaration comparisons keep boolean and null defaults distinct
+  scm: |
+    (begin
+      (define scope (new_relation_scope (newsession)))
+      (createtable "memcp-tests" "catalog_guard_null_default"
+        (list (list "column" "value" "ANY" '() '()))
+        (list "engine" "memory" "ephemeral" true "scope" scope) false nil)
+      (define target (table "memcp-tests" false "catalog_guard_null_default" false nil))
+      (define expected (sql_relation_declarations "memcp-tests" "catalog_guard_null_default" nil))
+      (define before (sql_relation_declarations_match? "memcp-tests" "catalog_guard_null_default" nil expected))
+      (altercolumn target "value" "default" false)
+      (define changed (not (sql_relation_declarations_match? "memcp-tests" "catalog_guard_null_default" nil expected)))
+      (close_relation_scope scope)
+      (and before changed))
+  expect: {result: true}
+- name: Native declarations retain one schema description through statistics refresh
+  scm: |
+    (begin
+      (define target (table "memcp-tests" false "catalog_binding_rows" false nil))
+      (define before (show target "declarations"))
+      (define column (car (before "columns")))
+      (rebuild)
+      (and (identical? before (show target "declarations"))
+        (not (has_assoc? column "RowEstimate"))
+        (not (has_assoc? column "DistinctEstimate"))
+        (not (has_assoc? column "StatisticsKnown"))
+        (not (has_assoc? column "MinEstimate"))
+        (has_assoc? column "Computed")
+        (expression_equal? before (sql_declaration_data before))))
+  expect: {result: true}
+- name: Native column and key metadata publish together and retain earlier descriptions
+  scm: |
+    (begin
+      (define scope (new_relation_scope (newsession)))
+      (createtable "memcp-tests" "catalog_guard_native_publication"
+        (list (list "column" "value" "INT" '() '()))
+        (list "engine" "memory" "ephemeral" true "scope" scope) false nil)
+      (define target (table "memcp-tests" false "catalog_guard_native_publication" false nil))
+      (define first (show target "declarations"))
+      (createcolumn target "label" "VARCHAR" '(17) '())
+      (define second (show target "declarations"))
+      (createkey target "declaration_guard_key" true '("value") nil)
+      (define third (show target "declarations"))
+      (define valid (and (equal? (count (first "columns")) 1)
+        (equal? (count (second "columns")) 2)
+        (empty_list? ((first "constraints") "Unique"))
+        (empty_list? ((second "constraints") "Unique"))
+        (equal? (count ((third "constraints") "Unique")) 1)
+        (equal? ((car (first "columns")) "Key") "")
+        (equal? ((car (third "columns")) "Key") "UNI")))
+      (close_relation_scope scope) valid)
+  expect: {result: true}
+- name: Derived alias substitution preserves quoted expression-shaped values
+  scm: |
+    (begin
+      (define value (list 'quote (list 'get_column "eliminated" false "value" false)))
+      (and (expression_equal? (rewrite_derived_ref "eliminated" '("value" 7) value) value)
+        (equal? (rewrite_derived_ref "eliminated" '("value" 7)
+          (list 'get_column "eliminated" false "value" false)) 7)))
+  expect: {result: true}
+- name: Derived alias substitution keeps native declarations opaque inside query sources
+  scm: |
+    (begin
+      (define declarations (sql_relation_declarations "memcp-tests" "catalog_binding_rows" nil))
+      (define source (list "base" "memcp-tests" "catalog_binding_rows" false
+        (list 'equal? (list 'get_column "eliminated" false "value" false) 7) declarations))
+      (define query (make_query_block "memcp-tests" (list source)
+        (list "value" (list 'get_column "eliminated" false "value" false))
+        true nil nil nil nil nil nil nil nil))
+      (define rewritten (rewrite_derived_ref "eliminated" '("value" 7) query))
+      (and (expression_equal? (source_declarations (car (qb_sources rewritten))) declarations)
+        (expression_equal? (source_join_expr (car (qb_sources rewritten))) (list 'equal? 7 7))
+        (expression_equal? (qb_fields rewritten) '("value" 7))))
+  expect: {result: true}
+- name: Derived alias substitution respects stage input scopes and rewrites active stage expressions
+  scm: |
+    (begin
+      (define declarations (sql_relation_declarations "memcp-tests" "catalog_binding_rows" nil))
+      (define source (list "base" "memcp-tests" "catalog_binding_rows" false nil declarations))
+      (define reference (list 'get_column "eliminated" false "value" false))
+      (define stage (make_group_stage "test-stage" source (list "value" reference)
+        (list "value" reference) '() true (list "value" reference) nil nil nil
+        (list 'condition (list 'equal? reference 7))))
+      (define rewritten (rewrite_derived_ref "eliminated" '("value" 7) stage))
+      (define shadowed (make_query_block "memcp-tests"
+        (list (list "eliminated" "memcp-tests" "catalog_binding_rows" false nil declarations))
+        (list "value" reference) true nil nil nil nil nil nil nil nil))
+      (and (expression_equal? (source_declarations (gs_input rewritten)) declarations)
+        (expression_equal? (gs_domain rewritten) '("value" 7))
+        (expression_equal? (gs_output rewritten) '("value" 7))
+        (expression_equal? (gs_facts rewritten) (list 'condition (list 'equal? 7 7)))
+        (expression_equal? (rewrite_derived_ref "eliminated" '("value" 7) shadowed) shadowed)))
+  expect: {result: true}
+
+- name: Cached fixed scans observe data changes without statistics recompilation and retain DDL guards
+  scm: |
+    (begin
+      (define s (newsession)) (s "username" "root") (s "schema" "memcp-tests")
+      (define cache (newcachemap)) (define out (newsession))
+      (define counter (newsession)) (counter "compiled" 0)
+      (define parser (lambda (db text policy planning tx) (begin
+        (counter "compiled" (+ 1 (counter "compiled")))
+        (parse_sql db text policy planning tx))))
+      (define run (lambda () (begin
+        (with_autocommit s nil nil "fixed point read" (lambda (tx)
+          (sql_execute_formula s tx (cached_parse cache "sql" (list parser) "memcp-tests"
+            "SELECT payload FROM catalog_point_stats WHERE id=1" nil "root" s false tx)
+            (lambda (row) (out "payload" (row "payload"))) (lambda args true))))
+        (out "payload"))))
+      (define execute (lambda (text) (with_autocommit s nil nil text (lambda (tx)
+        (sql_execute_formula s tx (cached_parse (newcachemap) "sql" (list parse_sql) "memcp-tests"
+          text nil "root" s false tx) (lambda (_row) true) (lambda args true))))))
+      (define first (run))
+      (define target (table "memcp-tests" false "catalog_point_stats" false nil))
+      (define before (table_planner_statistics target))
+      (execute "INSERT INTO catalog_point_stats VALUES(2,'other','two'),(3,'third','three')")
+      (execute "UPDATE catalog_point_stats SET payload='updated' WHERE id=1")
+      (define after (run))
+      (define stable (counter "compiled"))
+      (define changed (not (expression_equal? before (table_planner_statistics target))))
+      (altercolumn target "payload" "dimensions" '(24))
+      (define ddl (run))
+      (list first after stable ddl (counter "compiled") changed))
+  expect: {result: [initial,updated,1,updated,2,true]}
+
+# Preserve the protected regression identifier; verify observable cached/fresh
+# results across growth and DDL rather than requiring a particular guard AST.
+- name: Only a basic native scan can omit whole statistics while cost profiles and EXPLAIN retain them
+  scm: |
+    (begin
+      (define s (newsession)) (s "username" "root") (s "schema" "memcp-tests")
+      (define shared (newcachemap))
+      (define target (table "memcp-tests" false "catalog_point_stats" false nil))
+      (define queries (list
+        "SELECT payload FROM catalog_point_stats WHERE id=1"
+        "SELECT payload FROM catalog_point_stats ORDER BY id"
+        "SELECT payload FROM catalog_point_stats LIMIT 1"
+        "SELECT payload FROM catalog_point_stats WHERE id=1 OR id=2"
+        "SELECT payload FROM catalog_point_stats WHERE id=1 OR id=2 ORDER BY id LIMIT 2"
+        "SELECT COUNT(*) AS n FROM catalog_point_stats"
+        "SELECT ROW_NUMBER() OVER (ORDER BY id) AS n FROM catalog_point_stats"
+        "SELECT p.id FROM catalog_point_stats p WHERE NOT EXISTS (SELECT c.id FROM catalog_count_binding c WHERE c.id=p.id)"
+        "EXPLAIN SELECT payload FROM catalog_point_stats WHERE id=1"))
+      (define run (lambda (cache text) (begin
+        (define output (newsession)) (output "rows" '())
+        (with_autocommit s nil nil text (lambda (tx)
+          (sql_execute_formula s tx
+            (cached_parse cache "sql" (list parse_sql) "memcp-tests" text nil "root" s false tx)
+            (lambda (row) (output "rows" (append (output "rows") row)))
+            (lambda (_fields) true))))
+        (output "rows"))))
+      (define occurrences (lambda (rows value)
+        (reduce rows (lambda (n row) (+ n (if (expression_equal? row value) 1 0))) 0)))
+      (define same_rows (lambda (left right)
+        (and (equal? (count left) (count right))
+          (reduce left (lambda (valid row) (and valid
+            (equal? (occurrences left row) (occurrences right row)))) true))))
+      (define verify (lambda () (map (produceN (count queries)) (lambda (index) (begin
+        (define text (nth queries index))
+        (define cached (run shared text))
+        (define fresh (run (newcachemap) text))
+        (if (equal? index 2)
+          /* An unordered LIMIT may choose any current source row. */
+          (and (equal? (count cached) 1)
+            (> (occurrences (run (newcachemap) "SELECT payload FROM catalog_point_stats") (car cached)) 0))
+          (if (equal? index 8)
+            /* Diagnostic code may select a different valid strategy. Concrete
+               feedback freshness is checked by the diagnostic feedback case. */
+            (and (equal? (count cached) 1) (> (strlen ((car cached) "code")) 0)
+              (equal? (count fresh) 1) (> (strlen ((car fresh) "code")) 0))
+            (if (or (equal? index 1) (equal? index 4))
+              (expression_equal? cached fresh) (same_rows cached fresh)))))))))
+      (define before (verify))
+      (insert target (list "id" "payload" "note") (list (list 9000 "growth" "new")))
+      (define after_growth (verify))
+      (altercolumn target "payload" "dimensions" (list 48))
+      (define after_declaration (verify))
+      (list before after_growth after_declaration))
+  expect:
+    result:
+    - [true,true,true,true,true,true,true,true,true]
+    - [true,true,true,true,true,true,true,true,true]
+    - [true,true,true,true,true,true,true,true,true]
+
+- name: EXPLAIN dependencies follow their planner owner rather than an ambient session
+  scm: |
+    (begin
+      (define source (newsession)) (source "username" "root")
+      (define diagnostic (sql_queryplan_compile_session source nil))
+      (diagnostic "__memcp_queryplan_diagnostic_statistics" true)
+      (define ordinary (sql_queryplan_compile_session source nil))
+      (ordinary "__memcp_queryplan_diagnostic_statistics" false)
+      (define relation (list "p" "memcp-tests" "catalog_point_stats" false nil
+        (sql_relation_declarations "memcp-tests" "catalog_point_stats" nil)))
+      (define block (make_query_block "memcp-tests" (list relation)
+        (list "payload" (list (quote get_column) "p" false "payload" false))
+        true nil nil nil nil nil nil nil nil))
+      (with_session ordinary (lambda ()
+        (hybrid_reorder_query_block_using '() block diagnostic nil)))
+      (with_session diagnostic (lambda ()
+        (hybrid_reorder_query_block_using '() block ordinary nil)))
+      (list
+        (sql_queryplan_guard_references_symbol?
+          (sql_queryplan_statistics_guard_from_session diagnostic) (quote table_planner_statistics))
+        (sql_queryplan_guard_references_symbol?
+          (sql_queryplan_statistics_guard_from_session ordinary) (quote table_planner_statistics))))
+  expect: {result: [true,false]}
+
+- name: A real private ordered source reuses one native transaction-owned plan
+  scm: |
+    (begin
+      (define s (newsession)) (s "username" "root") (s "schema" "memcp-tests")
+      (tx_begin s)
+      (define tx (s "__memcp_tx"))
+      (createtable "memcp-tests" "catalog_private_stats"
+        (list (list "column" "id" "INT" '() '())) '("engine" "memory") false tx)
+      (define target (table "memcp-tests" false "catalog_private_stats" false tx))
+      (insert target '("id") (list (list 1) (list 2)))
+      (define cache (newcachemap)) (define count (newsession)) (count "compiled" 0)
+      (define rows (newsession))
+      (define parser (lambda (db text policy planning context) (begin
+        (count "compiled" (+ 1 (count "compiled")))
+        (parse_sql db text policy planning context))))
+      (define run (lambda () (begin
+        (rows "count" 0)
+        (sql_execute_formula s tx (cached_parse cache "sql" (list parser) "memcp-tests"
+          "SELECT id FROM catalog_private_stats ORDER BY id" nil "root" s false tx)
+          (lambda (_row) (rows "count" (+ 1 (rows "count")))) (lambda args true)))))
+      (run) (define first (count "compiled"))
+      (run) (define second (count "compiled"))
+      (define answer (list first second (rows "count")
+        (nil? (table "memcp-tests" false "catalog_private_stats" false nil))))
+      (tx_rollback s) answer)
+  expect: {result: [1,1,2,true]}
+
+- name: Private joins and nested probes preserve compiler transaction statistics authority
+  scm: |
+    (begin
+      (define s (newsession)) (s "username" "root") (s "schema" "memcp-tests")
+      (tx_begin s) (define tx (s "__memcp_tx"))
+      (createtable "memcp-tests" "catalog_private_left"
+        (list (list "column" "id" "INT" '() '())) '("engine" "memory") false tx)
+      (createtable "memcp-tests" "catalog_private_right"
+        (list (list "column" "id" "INT" '() '())) '("engine" "memory") false tx)
+      (insert (table "memcp-tests" false "catalog_private_left" false tx)
+        '("id") (list (list 1) (list 2)))
+      (insert (table "memcp-tests" false "catalog_private_right" false tx)
+        '("id") (list (list 1) (list 2)))
+      (define cache (newcachemap)) (define counts (newsession)) (counts "compiled" 0)
+      (define out (newsession))
+      (define parser (lambda (db text policy planning context) (begin
+        (counts "compiled" (+ 1 (counts "compiled")))
+        (parse_sql db text policy planning context))))
+      (define run (lambda (text) (begin
+        (out "rows" 0) (out "ids" 0) (out "nested" 0)
+        (sql_execute_formula s tx (cached_parse cache "private-statistics" (list parser)
+          "memcp-tests" text nil "root" s false tx)
+          (lambda (row) (begin
+            (out "rows" (+ 1 (out "rows")))
+            (out "ids" (+ (row "id") (out "ids")))
+            (out "nested" (+ (coalesceNil (row "n") 0) (out "nested")))))
+          (lambda args true))
+        (list (out "rows") (out "ids") (out "nested") (counts "compiled")))))
+      (define joined "SELECT l.id FROM catalog_private_left l JOIN catalog_private_right r ON r.id=l.id ORDER BY l.id")
+      (run joined) (define join_result (run joined))
+      (define nested "SELECT l.id,(SELECT COUNT(*) FROM catalog_private_right r WHERE r.id=l.id) AS n FROM catalog_private_left l ORDER BY l.id")
+      (run nested) (define nested_result (run nested))
+      (define private (and (nil? (table "memcp-tests" false "catalog_private_left" false nil))
+        (nil? (table "memcp-tests" false "catalog_private_right" false nil))))
+      (tx_rollback s)
+      (list join_result nested_result private))
+  expect: {result: [[2,3,0,1],[2,3,2,2],true]}

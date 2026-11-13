@@ -1,0 +1,66 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  description: Concurrent rebuild and DDL snapshots preserve one complete durable database catalog
+setup:
+- sql: CREATE TABLE snapshot_first(id INT PRIMARY KEY,note TEXT) ENGINE=SAFE
+- sql: CREATE TABLE snapshot_second(id INT PRIMARY KEY,note TEXT) ENGINE=SAFE
+- sql: CREATE TABLE snapshot_third(id INT PRIMARY KEY,note TEXT) ENGINE=SAFE
+- scm: |
+    (map '("snapshot_first" "snapshot_second" "snapshot_third") (lambda (name)
+      (insert (table "memcp-tests" false name false nil) '("id" "note")
+        (map (produceN 400) (lambda (i) (list i (concat "payload-" i)))))))
+cleanup:
+- sql: DROP TABLE IF EXISTS snapshot_first
+- sql: DROP TABLE IF EXISTS snapshot_second
+- sql: DROP TABLE IF EXISTS snapshot_third
+test_cases:
+- name: Publish initial native generations before concurrent replacement
+  scm: |
+    (begin
+      (map '("snapshot_first" "snapshot_second" "snapshot_third") (lambda (name)
+        (rebuild (table "memcp-tests" false name false nil) true false))) true)
+  expect: {result: true}
+- name: Schema readers observe complete concurrent snapshot publications
+  parallel: snapshot_publication
+  action: observe_atomic_schema
+  duration: 1.0
+- name: Concurrent rebuilds and DDL share the actual database publication owner
+  parallel: snapshot_publication
+  start_delay_ms: 50
+  scm: |
+    (begin
+      (parallel
+        (rebuild (table "memcp-tests" false "snapshot_first" false nil) true false)
+        (rebuild (table "memcp-tests" false "snapshot_second" false nil) true false)
+        (rebuild (table "memcp-tests" false "snapshot_third" false nil) true false)
+        (eval (parse_sql "memcp-tests" "ALTER TABLE snapshot_first ADD COLUMN flag INT DEFAULT 7" nil))
+        (eval (parse_sql "memcp-tests" "ALTER TABLE snapshot_second ADD COLUMN peer_flag INT DEFAULT -3" nil))
+        (eval (parse_sql "memcp-tests" "ALTER TABLE snapshot_third ADD COLUMN peer_flag INT DEFAULT 11" nil))) true)
+  expect: {result: true}
+- name: Concurrent maintenance preserves rows and the new column declaration
+  sql: SELECT COUNT(*) AS total,SUM(id) AS checksum,SUM(flag) AS flags FROM snapshot_first
+  expect: {data: [{total: 400,checksum: 79800,flags: 2800}]}
+- name: Every concurrently acknowledged declaration retains its initialized values
+  sql: SELECT COUNT(*) AS total,SUM(id) AS checksum,SUM(peer_flag) AS flags FROM snapshot_second UNION ALL SELECT COUNT(*) AS total,SUM(id) AS checksum,SUM(peer_flag) AS flags FROM snapshot_third
+  expect: {data: [{total: 400,checksum: 79800,flags: -1200},{total: 400,checksum: 79800,flags: 4400}]}
+- name: Acknowledged concurrent checkpoints survive an immediate process crash
+  scm: (crash)
+  expect: {interrupted_ok: true}
+- name: Restart the acknowledged durable schema without a shutdown checkpoint
+  action: restart
+- name: Crash recovery retains the first acknowledged declaration and all rows
+  sql: SELECT COUNT(*) AS total,SUM(id) AS checksum,SUM(flag) AS flags FROM snapshot_first
+  expect: {data: [{total: 400,checksum: 79800,flags: 2800}]}
+- name: Crash recovery retains both peer declarations and their initialized rows
+  sql: SELECT COUNT(*) AS total,SUM(id) AS checksum,SUM(peer_flag) AS flags FROM snapshot_second UNION ALL SELECT COUNT(*) AS total,SUM(id) AS checksum,SUM(peer_flag) AS flags FROM snapshot_third
+  expect: {data: [{total: 400,checksum: 79800,flags: -1200},{total: 400,checksum: 79800,flags: 4400}]}
+- name: Checkpoint all three table generations and the latest DDL
+  sql: SHUTDOWN
+- name: Recovered snapshot retains the new declaration and initialized rows
+  sql: SELECT COUNT(*) AS total,SUM(id) AS checksum,SUM(flag) AS flags FROM snapshot_first
+  expect: {data: [{total: 400,checksum: 79800,flags: 2800}]}
+- name: Recovered peer generations retain their complete rows
+  sql: SELECT COUNT(*) AS total,SUM(id) AS checksum FROM snapshot_second UNION ALL SELECT COUNT(*) AS total,SUM(id) AS checksum FROM snapshot_third
+  expect: {data: [{total: 400,checksum: 79800},{total: 400,checksum: 79800}]}

@@ -1,0 +1,170 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Real TDS ALTER self references retain native transaction visibility and final IDENTITY values
+# Targets are committed before ALTER. The writable alternate key exercises
+# parent UPDATE without illegally assigning the IDENTITY column itself.
+# Each INSERT proposes one row; cross-new-row batch references remain separate.
+setup:
+- sql: CREATE TABLE tsql_self_values(id INT IDENTITY PRIMARY KEY,code INT NOT NULL UNIQUE,parent_id INT,parent_code INT)
+- sql: CREATE TABLE tsql_self_rejected(id INT IDENTITY PRIMARY KEY,parent_id INT)
+cleanup:
+- sql: DROP TABLE IF EXISTS tsql_self_values
+- sql: DROP TABLE IF EXISTS tsql_self_rejected
+test_cases:
+- name: TDS self ALTER exposes one pending declaration only to its owner and rollback removes it
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: ALTER TABLE dbo.TSQL_SELF_VALUES ADD CONSTRAINT FK_tsql_self_rolledback FOREIGN KEY(PARENT_ID) REFERENCES [memcp-tests]..[tsql_self_values](ID)
+    - connection: owner
+      sql: SELECT constraint_name AS name FROM information_schema.referential_constraints WHERE constraint_name=N'FK_tsql_self_rolledback'
+      expect: {rows: 1, data: [{name: FK_tsql_self_rolledback}]}
+    - connection: observer
+      sql: SELECT constraint_name AS name FROM information_schema.referential_constraints WHERE constraint_name=N'FK_tsql_self_rolledback'
+      expect: {rows: 0}
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: observer
+      sql: SELECT constraint_name AS name FROM information_schema.referential_constraints WHERE constraint_name=N'FK_tsql_self_rolledback'
+      expect: {rows: 0}
+- name: TDS self identity and alternate-key declarations publish exactly once on commit
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: ALTER TABLE [dbo].[tsql_self_values] ADD CONSTRAINT FK_tsql_self_identity FOREIGN KEY(parent_id) REFERENCES [memcp-tests].dbo.[TSQL_SELF_VALUES](id)
+    - connection: owner
+      sql: ALTER TABLE tsql_self_values ADD CONSTRAINT FK_tsql_self_code FOREIGN KEY(parent_code) REFERENCES dbo.tsql_self_values(code) ON DELETE NO ACTION ON UPDATE NO ACTION
+    - connection: owner
+      sql: SELECT constraint_name AS name FROM information_schema.referential_constraints WHERE constraint_name IN(N'FK_tsql_self_identity',N'FK_tsql_self_code') ORDER BY constraint_name
+      expect:
+        rows: 2
+        data: [{name: FK_tsql_self_code}, {name: FK_tsql_self_identity}]
+    - connection: observer
+      sql: SELECT constraint_name AS name FROM information_schema.referential_constraints WHERE constraint_name IN(N'FK_tsql_self_identity',N'FK_tsql_self_code')
+      expect: {rows: 0}
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT constraint_name AS name FROM information_schema.referential_constraints WHERE constraint_name IN(N'FK_tsql_self_identity',N'FK_tsql_self_code') ORDER BY constraint_name
+      expect:
+        rows: 2
+        data: [{name: FK_tsql_self_code}, {name: FK_tsql_self_identity}]
+- name: TDS omitted IDENTITY supplies the actual generated own-reference value
+  tds:
+    statements:
+    - connection: writer
+      sql: INSERT tsql_self_values(code,parent_id,parent_code) VALUES(10,1,10)
+    - connection: observer
+      sql: SELECT id,code,parent_id,parent_code FROM tsql_self_values
+      expect: {rows: 1, data: [{id: 1, code: 10, parent_id: 1, parent_code: 10}]}
+- name: TDS own alternate UNIQUE key and reference can change together
+  tds:
+    statements:
+    - connection: writer
+      sql: UPDATE tsql_self_values SET code=11,parent_code=11 WHERE id=1
+    - connection: observer
+      sql: SELECT id,code,parent_id,parent_code FROM tsql_self_values
+      expect: {rows: 1, data: [{id: 1, code: 11, parent_id: 1, parent_code: 11}]}
+- name: TDS another generated row references the already-visible self parent
+  tds:
+    statements:
+    - connection: writer
+      sql: INSERT tsql_self_values(code,parent_id,parent_code) VALUES(20,1,11)
+    - connection: observer
+      sql: SELECT id,code,parent_id,parent_code FROM tsql_self_values ORDER BY id
+      expect:
+        rows: 2
+        data: [{id: 1, code: 11, parent_id: 1, parent_code: 11}, {id: 2, code: 20, parent_id: 1, parent_code: 11}]
+- name: TDS self orphan rejection leaves both actual rows unchanged
+  tds:
+    statements:
+    - connection: writer
+      sql: INSERT tsql_self_values(code,parent_id,parent_code) VALUES(30,999,11)
+      expect: {error: true, contains: [foreign key constraint]}
+    - connection: observer
+      sql: SELECT id,code,parent_id,parent_code FROM tsql_self_values ORDER BY id
+      expect:
+        rows: 2
+        data: [{id: 1, code: 11, parent_id: 1, parent_code: 11}, {id: 2, code: 20, parent_id: 1, parent_code: 11}]
+- name: TDS changing a parent key cannot retain a disappearing OLD reference
+  tds:
+    statements:
+    - connection: writer
+      sql: UPDATE tsql_self_values SET code=12 WHERE id=1
+      expect: {error: true, contains: [foreign key constraint]}
+    - connection: observer
+      sql: SELECT id,code,parent_id,parent_code FROM tsql_self_values ORDER BY id
+      expect:
+        rows: 2
+        data: [{id: 1, code: 11, parent_id: 1, parent_code: 11}, {id: 2, code: 20, parent_id: 1, parent_code: 11}]
+- name: TDS external child blocks parent replacement even when its own NEW reference matches
+  tds:
+    statements:
+    - connection: writer
+      sql: UPDATE tsql_self_values SET code=12,parent_code=12 WHERE id=1
+      expect: {error: true, contains: [foreign key constraint]}
+    - connection: observer
+      sql: SELECT id,code,parent_id,parent_code FROM tsql_self_values ORDER BY id
+      expect:
+        rows: 2
+        data: [{id: 1, code: 11, parent_id: 1, parent_code: 11}, {id: 2, code: 20, parent_id: 1, parent_code: 11}]
+- name: TDS external child prevents deleting the referenced self row
+  tds:
+    statements:
+    - connection: writer
+      sql: DELETE FROM tsql_self_values WHERE id=1
+      expect: {error: true, contains: [foreign key constraint]}
+    - connection: observer
+      sql: SELECT id,code,parent_id,parent_code FROM tsql_self_values ORDER BY id
+      expect:
+        rows: 2
+        data: [{id: 1, code: 11, parent_id: 1, parent_code: 11}, {id: 2, code: 20, parent_id: 1, parent_code: 11}]
+- name: TDS removing the external child permits a matching own key replacement
+  tds:
+    statements:
+    - connection: writer
+      sql: DELETE FROM tsql_self_values WHERE id=2
+    - connection: writer
+      sql: UPDATE tsql_self_values SET code=12,parent_code=12 WHERE id=1
+    - connection: observer
+      sql: SELECT id,code,parent_id,parent_code FROM tsql_self_values
+      expect: {rows: 1, data: [{id: 1, code: 12, parent_id: 1, parent_code: 12}]}
+- name: TDS a sole self row can be deleted through both native RESTRICT roles
+  tds:
+    statements:
+    - connection: writer
+      sql: DELETE FROM tsql_self_values WHERE id=1
+    - connection: observer
+      sql: SELECT COUNT(*) AS n FROM tsql_self_values
+      expect: {rows: 1, data: [{n: 0}]}
+- name: TDS unsupported recursive actions fail before publication or row effects
+  tds:
+    statements:
+    - connection: cascade_owner
+      sql: BEGIN TRANSACTION
+    - connection: cascade_owner
+      sql: ALTER TABLE tsql_self_rejected ADD CONSTRAINT FK_tsql_self_bad_cascade FOREIGN KEY(parent_id) REFERENCES tsql_self_rejected(id) ON UPDATE CASCADE
+      expect: {error: true, contains: [require RESTRICT for both actions]}
+    - connection: cascade_owner
+      sql: ROLLBACK TRANSACTION
+    - connection: null_owner
+      sql: BEGIN TRANSACTION
+    - connection: null_owner
+      sql: ALTER TABLE tsql_self_rejected ADD CONSTRAINT FK_tsql_self_bad_null FOREIGN KEY(parent_id) REFERENCES tsql_self_rejected(id) ON DELETE SET NULL
+      expect: {error: true, contains: [require RESTRICT for both actions]}
+    - connection: null_owner
+      sql: ROLLBACK TRANSACTION
+    - connection: observer
+      sql: SELECT constraint_name AS name FROM information_schema.referential_constraints WHERE constraint_name IN(N'FK_tsql_self_bad_cascade',N'FK_tsql_self_bad_null')
+      expect: {rows: 0}
+    - connection: observer
+      sql: SELECT COUNT(*) AS n FROM tsql_self_rejected
+      expect: {rows: 1, data: [{n: 0}]}

@@ -33,11 +33,11 @@ setup:
   - sql: "CREATE TABLE stream_cache_source (id INT PRIMARY KEY)"
   - scm: |
       (begin
-        (insert (table "memcp-tests" false "stream_cache_source" false)
+        (insert (table "memcp-tests" false "stream_cache_source" false nil)
           '("id")
           (map (produceN 64) (lambda (id) (list id))))
         (partitiontable
-          (table "memcp-tests" false "stream_cache_source" false)
+          (table "memcp-tests" false "stream_cache_source" false nil)
           (list (list "id"
             (list 8 16 24 32 40 48 56)))))
 
@@ -51,9 +51,9 @@ test_cases:
           (list (list "column" "row_count" "int" (list) (list)))
           (list "engine" "cache")
           true nil)
-        (define cache (table "memcp-tests" false ".transactionless_stream_cache" false))
+        (define cache (table "memcp-tests" false ".transactionless_stream_cache" false nil))
         (initialize_cache_table nil cache
-          (list (table "memcp-tests" false "stream_cache_source" false))
+          (list (table "memcp-tests" false "stream_cache_source" false nil))
           (lambda (_tx) true)
           (lambda (_tx)
             (insert cache '("row_count")
@@ -64,7 +64,7 @@ test_cases:
                   0
                   (lambda (emit)
                     (scan nil
-                      (table "memcp-tests" false "stream_cache_source" false)
+                      (table "memcp-tests" false "stream_cache_source" false nil)
                       (car (eval (compile_scan_access '() (scheme "(lambda () true)")))) (cadr (eval (compile_scan_access '() (scheme "(lambda () true)")))) '() (lambda () true)
                       '("id") (lambda (acc id) (begin (emit 1) acc)))))))
               '() (lambda () true) false nil nil)))
@@ -86,19 +86,19 @@ test_cases:
             (list "engine" "cache")
             true nil))
         (initialize_cache_table nil
-          (table "memcp-tests" false ".transactionless_cache_init" false)
-          (list (table "memcp-tests" false "aggregate_source" false))
+          (table "memcp-tests" false ".transactionless_cache_init" false nil)
+          (list (table "memcp-tests" false "aggregate_source" false nil))
           (lambda (tx) true)
           (lambda (tx)
             (insert
-              (table "memcp-tests" false ".transactionless_cache_init" false)
+              (table "memcp-tests" false ".transactionless_cache_init" false tx)
               (list "id")
               (list (list 1))
               (list)
               (lambda () true)
               false nil nil)))
         (scan nil
-          (table "memcp-tests" false ".transactionless_cache_init" false)
+          (table "memcp-tests" false ".transactionless_cache_init" false nil)
           (car (eval (compile_scan_access (list) (scheme "(lambda () true)")))) (cadr (eval (compile_scan_access (list) (scheme "(lambda () true)")))) (list) (lambda () true)
           (list) (lambda (acc) (+ acc 1))
           0 +))
@@ -109,12 +109,12 @@ test_cases:
     scm: |
       (begin
         (define narrow (make_group_stage "shared-window-carrier"
-          (list "src" "memcp-tests" "aggregate_source" false nil)
+          (list "src" "memcp-tests" "aggregate_source" false nil (sql_relation_declarations "memcp-tests" "aggregate_source" nil))
           (list) (list 1) (list "count-aggregate") nil
           (list "count" "count-expression") (list) nil nil
           (list (list (quote merge-aggregate-extensions) true))))
         (define extended (make_group_stage "shared-window-carrier"
-          (list "src" "memcp-tests" "aggregate_source" false nil)
+          (list "src" "memcp-tests" "aggregate_source" false nil (sql_relation_declarations "memcp-tests" "aggregate_source" nil))
           (list) (list 1) (list "count-aggregate" "sum-aggregate") nil
           (list "count" "count-expression" "sum" "sum-expression") (list) nil nil
           (list (list (quote merge-aggregate-extensions) true))))
@@ -128,11 +128,11 @@ test_cases:
     scm: |
       (begin
         (define retained (make_group_stage "canonical-scalar-carrier"
-          (list "first" "memcp-tests" "aggregate_source" false nil)
+          (list "first" "memcp-tests" "aggregate_source" false nil (sql_relation_declarations "memcp-tests" "aggregate_source" nil))
           (list "first-domain") (list 1) (list "count-aggregate") nil
           (list "count" "count-expression") (list) 1 nil (list)))
         (define alias_variant (make_group_stage "canonical-scalar-carrier"
-          (list "first" "memcp-tests" "aggregate_source" false nil)
+          (list "first" "memcp-tests" "aggregate_source" false nil (sql_relation_declarations "memcp-tests" "aggregate_source" nil))
           (list "first-domain") (list 1) (list "sum-aggregate") nil
           (list "sum" "sum-expression") (list) 1 nil (list)))
         (define stages (unique_stages_by_id (list retained alias_variant)))
@@ -155,14 +155,14 @@ test_cases:
               (begin
                 (sleep 0.2)
                 (insert
-                  (table "memcp-tests" false ".creation_barrier" false)
+                  (table "memcp-tests" false ".creation_barrier" false nil)
                   (list "id")
                   (list (list 1))
                   (list)
                   (lambda () true)
                   false))))
           true)
-        (if (table_empty? (table "memcp-tests" false ".creation_barrier" false))
+        (if (table_empty? nil (table "memcp-tests" false ".creation_barrier" false nil))
           (error "createtable returned before oninit completed")
           true))
 

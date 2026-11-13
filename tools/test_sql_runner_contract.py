@@ -29,6 +29,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import itertools
 import requests
 import signal
+import shlex
 import subprocess
 import socket
 import sys
@@ -82,7 +83,7 @@ from run_sql_tests import (  # noqa: E402
     publish_performance_scale,
     request_shared_supervisor_restart,
     revision_specific_scm,
-    table_abi_fixture_sources,
+    scm_abi_fixture_sources,
     resolve_timing_samples,
     resolve_warmup_runs,
     run_test_specs,
@@ -1410,7 +1411,8 @@ class SQLResultPresenceContractTest(unittest.TestCase):
 
 class ResponseExpectationContractTest(unittest.TestCase):
     def matches(self, expect, results) -> bool:
-        response = SimpleNamespace(status_code=200, text=json.dumps(results), headers={})
+        response = SimpleNamespace(status_code=200,
+            text="\n".join(json.dumps(row) for row in results), headers={})
         return SQLTestRunner("http://unused").validate_expectation(
             {"expect": expect}, response, results)
 
@@ -1419,6 +1421,34 @@ class ResponseExpectationContractTest(unittest.TestCase):
             with self.subTest(count=count):
                 self.assertTrue(self.matches({"affected_rows": count}, [{"affected_rows": count}]))
                 self.assertFalse(self.matches({"affected_rows": count + 1}, [{"affected_rows": count}]))
+
+    def test_explicit_dml_completion_rejects_missing_or_mixed_results(self) -> None:
+        runner = SQLTestRunner("http://unused")
+        case = {"expect": {"affected_rows": 0, "rows": 1,
+                           "data": [{"affected_rows": 0}]}}
+        for text, wanted in (
+                ("", True), (" \n", True), ('{"affected_rows":0}', True),
+                ("not JSON", False), ("[]", False), ("null", False),
+                ('{"other":0}', False), ('{"affected_rows":1}', False),
+                ('{"affected_rows":false}', False), ('{"affected_rows":0.0}', False),
+                ('{"affected_rows":0,"other":1}', False),
+                ('{"affected_rows":1,"affected_rows":0}', False),
+                ('{"affected_rows":0}\n{"affected_rows":0}', False),
+                ('{"affected_rows":0}\ninvalid', False),
+                ('[{"affected_rows":0}]', False)):
+            with self.subTest(text=text):
+                response = SimpleNamespace(status_code=200, text=text, headers={})
+                self.assertEqual(runner.validate_expectation(
+                    case, response, runner.parse_jsonl_response(response)), wanted)
+        response = SimpleNamespace(status_code=200, text='{"affected_rows":0}', headers={})
+        for expect in ({"affected_rows": 0, "rows": 0},
+                       {"affected_rows": 0, "data": [{"affected_rows": 1}]},
+                       {"affected_rows": 1}, {"affected_rows": False}):
+            self.assertFalse(runner.validate_expectation(
+                {"expect": expect}, response, [{"affected_rows": 0}]))
+        self.assertFalse(runner.validate_expectation(
+            {"expect": {"affected_rows": 1}},
+            SimpleNamespace(status_code=200, text="", headers={}), []))
 
     def test_expected_null_requires_the_named_field(self) -> None:
         self.assertTrue(self.matches({"data": [{"nullable": None}]}, [{"nullable": None}]))
@@ -1702,10 +1732,10 @@ class FailFastParallelContractTest(unittest.TestCase):
             fingerprint = performance_case_fingerprint(spec["test_cases"][0], spec["setup"])
             with mock.patch("run_sql_tests.PERF_AB_MODE", "record"), \
                     mock.patch.dict(os.environ, {"MEMCP_TEST_WORKTREE": tmp, "PERF_FIXTURE_ROLE": "A"}):
-                mapping = table_abi_fixture_sources(str(path), spec)
+                mapping = scm_abi_fixture_sources(str(path), spec)
                 self.assertEqual(mapping, {new: old, new_plan: old_plan})
                 runner = SQLTestRunner("http://localhost:1")
-                runner._table_abi_sources = mapping
+                runner._scm_abi_sources = mapping
                 response = SimpleNamespace(status_code=200, text="1")
                 with mock.patch("run_sql_tests.requests.post", return_value=response) as post:
                     self.assertTrue(runner.run_setup(spec["setup"], "memcp-tests"))
@@ -1714,7 +1744,7 @@ class FailFastParallelContractTest(unittest.TestCase):
                 # fixture source cannot borrow an older workload.
                 for changed in (new.replace('false', 'true', 1), new.replace('{rows}', '1'),
                                 json.dumps(new), '(unrelated_call)'):
-                    self.assertEqual(table_abi_fixture_sources(str(path), {"scm": changed}), {})
+                    self.assertEqual(scm_abi_fixture_sources(str(path), {"scm": changed}), {})
             self.assertEqual(json.dumps(spec, sort_keys=True), original)
             self.assertEqual(performance_case_fingerprint(spec["test_cases"][0], spec["setup"]), fingerprint)
 
@@ -1724,8 +1754,84 @@ class FailFastParallelContractTest(unittest.TestCase):
                     mock.patch("run_sql_tests.PERF_AB_MODE", mode), \
                     mock.patch.dict(os.environ, {"PERF_FIXTURE_ROLE": role}), \
                     mock.patch("run_sql_tests.yaml.safe_load") as load:
-                self.assertEqual(table_abi_fixture_sources("missing.yaml", {}), {})
+                self.assertEqual(scm_abi_fixture_sources("missing.yaml", {}), {})
                 load.assert_not_called()
+
+    def test_nil_catalog_context_preserves_baseline_workload_and_authority(self) -> None:
+        for old in ('(table "db" "fixture")',
+                    '(table "db" false "fixture" false)',
+                    '(table "DB" true "FIXTURE" true)',
+                    "(list 'table (schema db) false (concat name suffix) false)",
+                    '(list (quote table) "db" false "fixture" false)'):
+            if old == '(table "db" "fixture")':
+                new = '(table "db" false "fixture" false nil)'
+            else:
+                new = old[:-1] + ' nil)'
+            with self.subTest(old=old), tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / 'tests/performance/context.yaml'
+                path.parent.mkdir(parents=True)
+                path.write_text(json.dumps({'setup': [{'scm': old}]}))
+                case = {'name': 'context probe', 'scm': new, 'threshold_ms': 1,
+                        'expect': {'result': True}}
+                original = json.dumps(case, sort_keys=True)
+                with mock.patch('run_sql_tests.PERF_AB_MODE', 'record'), \
+                        mock.patch.dict(os.environ, {'MEMCP_TEST_WORKTREE': tmp, 'PERF_FIXTURE_ROLE': 'A'}):
+                    self.assertEqual(scm_abi_fixture_sources(str(path), {'test_cases': [case]}), {new: old})
+                    for altered in (new[:-4] + 'tx)', new[:-4] + '(begin (mutate) nil))',
+                                    new.replace('fixture', 'other_fixture'), json.dumps(new)):
+                        if altered != new:
+                            self.assertEqual(scm_abi_fixture_sources(str(path), {'scm': altered}), {})
+                    # Quoted SQL data is not an executable lookup migration.
+                    path.write_text(json.dumps({'scm': "'" + old}))
+                    self.assertEqual(scm_abi_fixture_sources(str(path), {'scm': "'" + new}), {})
+                self.assertEqual(json.dumps(case, sort_keys=True), original)
+
+    def test_cache_domain_abi_preserves_exact_workload_and_parser_family(self) -> None:
+        for domain, parser in (("sql", "parse_sql"), ("psql", "parse_psql"),
+                               ("tsql", "parse_tsql"), ("sparql", "parse_sparql")):
+            old = f'(cached_parse cache (list {parser}) "db" query nil "root" sess true nil)'
+            new = old.replace('cache (list', f'cache "{domain}" (list', 1)
+            with self.subTest(domain=domain), tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "tests/performance/cache.yaml"
+                path.parent.mkdir(parents=True)
+                path.write_text(json.dumps({"test_cases": [{"scm": old}]}))
+                case = {"name": "cache probe", "scm": new, "threshold_ms": 2,
+                        "timing_aggregation": "total", "timing_samples": 100,
+                        "warmup": 0, "expect": {"result": True}}
+                fingerprint = performance_case_fingerprint(case)
+                with mock.patch("run_sql_tests.PERF_AB_MODE", "record"), \
+                        mock.patch.dict(os.environ, {"MEMCP_TEST_WORKTREE": tmp, "PERF_FIXTURE_ROLE": "A"}):
+                    self.assertEqual(scm_abi_fixture_sources(str(path), {"test_cases": [case]}), {new: old})
+                    for changed in (new.replace(f'"{domain}"', '"unknown"', 1),
+                                    new.replace(f'"{domain}"', 'domain', 1),
+                                    new.replace(f'"{domain}"', '(begin (mutate) "sql")', 1),
+                                    new.replace(parser, 'custom_parser'),
+                                    new.replace('query', 'other_query'),
+                                    new.replace('true nil)', 'false nil)'),
+                                    new.replace('sess', 'other_session'), json.dumps(new)):
+                        self.assertEqual(scm_abi_fixture_sources(str(path), {"scm": changed}), {})
+                    for prefix in ("'", "(quote "):
+                        suffix = ")" if prefix.startswith("(") else ""
+                        path.write_text(json.dumps({"scm": prefix + old + suffix}))
+                        self.assertEqual(scm_abi_fixture_sources(str(path), {"scm": prefix + new + suffix}), {})
+                    # The old optional transaction argument may be omitted,
+                    # but an actual capability can never be erased.
+                    old_without_tx = old[:-5] + ')'
+                    path.write_text(json.dumps({"scm": old_without_tx}))
+                    self.assertEqual(scm_abi_fixture_sources(str(path), {"scm": new}), {new: old_without_tx})
+                    self.assertEqual(scm_abi_fixture_sources(str(path), {"scm": new[:-5] + ')'}),
+                                     {new[:-5] + ')': old_without_tx})
+                    for changed in (new[:-5] + ' tx)', new[:-5] + ' (begin (mutate) nil))'):
+                        self.assertEqual(scm_abi_fixture_sources(str(path), {"scm": changed}), {})
+                    # Domain migration composes with only the permitted nil table ABI.
+                    old_combined = '(begin (table "db" "t") ' + old + ')'
+                    new_combined = '(begin (table "db" false "t" false nil) ' + new + ')'
+                    path.write_text(json.dumps({"scm": old_combined}))
+                    self.assertEqual(scm_abi_fixture_sources(str(path), {"scm": new_combined}),
+                                     {new_combined: old_combined})
+                    self.assertEqual(scm_abi_fixture_sources(str(path),
+                        {"scm": new_combined.replace('false nil)', 'false tx)', 1)}), {})
+                self.assertEqual(performance_case_fingerprint(case), fingerprint)
 
     def test_normal_run_keeps_current_revision_physical_scm(self) -> None:
         case = {
@@ -2109,6 +2215,166 @@ class SuiteIsolationContractTest(unittest.TestCase):
             encoding="utf-8",
         )
         self.assertIn('fail_fast_mode="${MEMCP_FAIL_FAST:-0}"', hook)
+
+class SuiteClassificationBatchContractTest(unittest.TestCase):
+    def classify(self, paths: list[Path]) -> subprocess.CompletedProcess:
+        root = Path(__file__).resolve().parents[1]
+        hook = (root / "git-pre-commit").read_text(encoding="utf-8")
+        # Exercise the actual admission block without building or starting MemCP.
+        start = hook.index("parallel_tests=()\n")
+        end = hook.index('\nmax_jobs="${MEMCP_TEST_JOBS:-4}"', start)
+        script = 'test_files_arr=("$@")\n' + hook[start:end] + r'''
+printf 'SCHEDULED\0'
+for tf in "${parallel_tests[@]}"; do printf 'parallel\0%s\0' "$tf"; done
+for tf in "${sequential_tests[@]}"; do printf 'exclusive\0%s\0' "$tf"; done
+for tf in "${debug_parallel_tests[@]}"; do printf 'debug_parallel\0%s\0' "$tf"; done
+for tf in "${debug_sequential_tests[@]}"; do printf 'debug_exclusive\0%s\0' "$tf"; done
+'''
+        environment = dict(os.environ)
+        with tempfile.TemporaryDirectory(prefix="classification-python-") as python_dir:
+            launcher = Path(python_dir) / "python3"
+            launcher.write_text("#!/bin/sh\nexec " + shlex.quote(sys.executable) + ' "$@"\n', encoding="utf-8")
+            launcher.chmod(0o755)
+            environment["PATH"] = python_dir + os.pathsep + environment.get("PATH", "")
+            return subprocess.run(
+                ["bash", "-c", script, "classification-contract", *map(str, paths)],
+                cwd=root, env=environment, capture_output=True, timeout=20,
+            )
+
+    def write_suite(self, directory: Path, name: str, metadata: dict,
+                    cases: list[dict] | None = None) -> Path:
+        path = directory / name
+        path.write_text(json.dumps({"metadata": metadata, "test_cases": cases or []}), encoding="utf-8")
+        return path
+
+    def test_batch_preserves_order_and_spaced_paths_in_all_four_phases(self):
+        with tempfile.TemporaryDirectory(prefix="classification paths ") as tmp:
+            root = Path(tmp)
+            paths = [
+                self.write_suite(root, "z shared.yaml", {}),
+                self.write_suite(root, "isolated.yaml", {"isolated": True}),
+                self.write_suite(root, "z debug.yaml", {"scan_debugging": True}),
+                self.write_suite(root, "a shared.yaml", {}),
+                self.write_suite(root, "restart.yaml", {}, [{"name": "restart", "sql": "SHUTDOWN"}]),
+                self.write_suite(root, "debug exclusive.yaml", {"isolated": True, "scan_debugging": True}),
+                self.write_suite(root, "mysql.yaml", {"requires_mysql": True}),
+                self.write_suite(root, "tds.yaml", {"requires_tds": True}),
+                self.write_suite(root, "a debug.yaml", {"scan_debugging": True}),
+            ]
+            result = self.classify(paths)
+            self.assertEqual(result.returncode, 0, result.stderr.decode())
+            fields = result.stdout.decode().split("\0")
+            self.assertEqual(fields[0], "SCHEDULED")
+            self.assertEqual(fields[-1], "")
+            actual = list(zip(fields[1:-1:2], fields[2:-1:2]))
+            self.assertEqual(actual, [
+                ("parallel", str(paths[0])), ("parallel", str(paths[3])),
+                ("exclusive", str(paths[1])), ("exclusive", str(paths[4])),
+                ("exclusive", str(paths[6])), ("exclusive", str(paths[7])),
+                ("debug_parallel", str(paths[2])), ("debug_parallel", str(paths[8])),
+                ("debug_exclusive", str(paths[5])),
+            ])
+
+    def test_invalid_later_metadata_rejects_the_entire_batch_before_scheduling(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first = self.write_suite(root, "valid first.yaml", {})
+            invalid = self.write_suite(root, "invalid later.yaml", {"scan_debugging": "yes"})
+            result = self.classify([first, invalid])
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(result.stdout, b"")
+            self.assertIn("metadata.scan_debugging must be boolean", result.stderr.decode())
+
+    def test_debug_restart_conflict_keeps_the_existing_validation_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first = self.write_suite(root, "valid debug.yaml", {"scan_debugging": True})
+            invalid = self.write_suite(root, "debug restart.yaml", {"scan_debugging": True},
+                                       [{"name": "restart", "action": "restart"}])
+            result = self.classify([first, invalid])
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(result.stdout, b"")
+            self.assertIn("scan-diagnostics clusters cannot restart the server", result.stderr.decode())
+
+    def test_empty_classification_has_no_phantom_path_or_phase(self):
+        result = self.classify([])
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        self.assertEqual(result.stdout, b"SCHEDULED\0")
+
+
+class SuiteArtifactIdentityContractTest(unittest.TestCase):
+    @staticmethod
+    def hook_text():
+        return (Path(__file__).resolve().parents[1] / "git-pre-commit").read_text(encoding="utf-8")
+
+    def run_hook(self, paths, *, failure="", fail_fast=False, parallel=False):
+        hook = self.hook_text()
+        start = hook.index('if [ "$max_jobs" -gt 16 ]; then max_jobs=16; fi\n')
+        start = hook.index("\n", start) + 1
+        artifacts = hook[start:hook.index('\nlockfile=', start)]
+        start = hook.index('if [ "$fail_fast_mode" -eq 1 ]; then\n  for idx')
+        scheduling = hook[start:hook.index('\n  if [ $(( ${#debug_parallel_tests[@]}', start)] + "\nfi\n"
+        start = hook.index('\nfor tf in "${test_files_arr[@]}"; do', hook.index('\nstop_supervisor\n'))
+        results = hook[start:hook.index('\n# Generate coverage report', start)]
+        gate = hook[hook.rindex('\nif [ "$all_passed" = true ]; then'):]
+        # Run the actual artifact, scheduler and gate owners with a finite fake
+        # suite command. No build, server, readiness or test runner is started.
+        script = r'''
+tmpdir=$1; failing_path=$2; fail_fast_mode=$3; parallel=$4; shift 4
+test_files_arr=("$@")
+parallel_tests=(); sequential_tests=("${test_files_arr[@]}")
+if [ "$parallel" = true ]; then
+  parallel_tests=("${test_files_arr[@]}"); sequential_tests=()
+fi
+active_pids=(); max_jobs=2; all_passed=true; failed_files=""; test_port=0
+run_one() {
+  printf 'output:%s\n' "$1" > "$2"
+  if [ "$1" = "$failing_path" ]; then echo FAIL > "$3"; else echo OK > "$3"; fi
+}
+'''
+        with tempfile.TemporaryDirectory(prefix="suite-artifact-contract-") as tmp:
+            result = subprocess.run(
+                ["bash", "-c", script + artifacts + scheduling + results + gate,
+                 "suite-artifact-contract", tmp, failure, str(int(fail_fast)),
+                 str(parallel).lower(), *paths], capture_output=True, text=True, timeout=5,
+            )
+            saved = {path.name: path.read_text(encoding="utf-8") for path in Path(tmp).iterdir()}
+        return result, saved
+
+    def test_later_same_basename_success_cannot_hide_an_earlier_failure(self):
+        paths = ["tests/first dir/shared.yaml", "tests/second dir/shared.yaml"]
+        result, saved = self.run_hook(paths, failure=paths[0])
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("Failed test files: " + paths[0], result.stdout)
+        self.assertNotIn("output:" + paths[1], result.stdout)
+        self.assertEqual(saved["suite-0.status"], "FAIL\n")
+        self.assertEqual(saved["suite-1.status"], "OK\n")
+        self.assertEqual(saved["suite-0.out"], "output:" + paths[0] + "\n")
+        self.assertEqual(saved["suite-1.out"], "output:" + paths[1] + "\n")
+        self.assertEqual(saved["suite-index.tsv"], "suite-0\t" + paths[0] + "\nsuite-1\t" + paths[1] + "\n")
+
+    def test_parallel_same_basename_suites_keep_independent_results(self):
+        paths = ["tests/one/shared.yaml", "tests/two/shared.yaml"]
+        result, saved = self.run_hook(paths, parallel=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(saved["suite-0.out"], "output:" + paths[0] + "\n")
+        self.assertEqual(saved["suite-1.out"], "output:" + paths[1] + "\n")
+        self.assertEqual(saved["suite-0.status"], "OK\n")
+        self.assertEqual(saved["suite-1.status"], "OK\n")
+
+    def test_fail_fast_skip_cannot_replace_the_failed_suite_status(self):
+        paths = ["tests/one/shared.yaml", "tests/two/shared.yaml"]
+        result, saved = self.run_hook(paths, failure=paths[0], fail_fast=True)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(saved["suite-0.status"], "FAIL\n")
+        self.assertEqual(saved["suite-1.status"], "SKIP\n")
+        self.assertNotIn("suite-1.out", saved)
+
+    def test_empty_selection_has_no_suite_artifact(self):
+        result, saved = self.run_hook([])
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(saved, {"suite-index.tsv": ""})
+
 
 class ScanDebuggingClusterContractTest(unittest.TestCase):
     def test_parallel_suites_share_one_stable_flag_and_restore_it(self):

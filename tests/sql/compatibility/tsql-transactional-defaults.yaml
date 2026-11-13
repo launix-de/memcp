@@ -1,0 +1,166 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Default constraints amend constructor-owned native declarations before atomic publication
+cleanup:
+- sql: DROP TABLE IF EXISTS default_install
+- sql: DROP TABLE IF EXISTS default_empty
+- sql: DROP TABLE IF EXISTS default_aborted
+- sql: DROP TABLE IF EXISTS default_disconnected
+- sql: DROP TABLE IF EXISTS default_public
+- sql: DROP TABLE IF EXISTS default_after_rows
+test_cases:
+- name: Real TDS installer adds typed defaults to an unpublished table
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: |
+        CREATE TABLE default_install(id INT NOT NULL, value INT NOT NULL, flag BIT, label VARCHAR(4), created DATETIME,
+          derived AS (value+1));
+        CREATE TABLE default_empty(id INT, value INT);
+        ALTER TABLE default_install ADD CONSTRAINT DF_install_value DEFAULT ((1)) FOR value;
+        ALTER TABLE default_install ADD CONSTRAINT DF_install_flag DEFAULT ((0)) FOR flag;
+        ALTER TABLE default_install ADD CONSTRAINT DF_install_label DEFAULT N'abcdef' FOR label;
+        ALTER TABLE default_install ADD CONSTRAINT DF_install_clock DEFAULT GETDATE() FOR created;
+        ALTER TABLE default_empty ADD CONSTRAINT DF_empty_value DEFAULT (3+4) FOR value;
+        CREATE UNIQUE INDEX install_unique ON default_install(id)
+    - connection: observer
+      sql: SELECT name FROM sys.objects WHERE name IN (N'default_install',N'default_empty')
+      expect: {rows: 0}
+    - connection: owner
+      sql: INSERT default_install(id) VALUES(1); SELECT id,value,flag,label,CASE WHEN created IS NULL THEN 0 ELSE 1 END AS has_clock,derived FROM default_install
+      expect: {rows: 1,data: [{id: 1,value: 1,flag: false,label: abcd,has_clock: 1,derived: 2}]}
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT id,value,flag,label,derived FROM default_install
+      expect: {rows: 1,data: [{id: 1,value: 1,flag: false,label: abcd,derived: 2}]}
+- name: Native publication exposes the named constraint with its ordinary declaration
+  scm: (equal? ((show (table "memcp-tests" false "default_empty" false nil) "column" "value" false) "DefaultName") "DF_empty_value")
+  expect: {result: true}
+- name: Savepoint retirement restores interleaved column and unique declarations
+  scm: |
+    (begin
+      (define s (newsession)) (s "username" "root") (tx_begin s)
+      (define tx (s "__memcp_tx"))
+      (createtable "memcp-tests" "default_aborted"
+        (list (list "column" "id" "INT" '() '()) (list "column" "value" "INT" '() '()))
+        '("engine" "safe") false tx)
+      (define target (table "memcp-tests" false "default_aborted" false tx))
+      (altercolumn target "value" "add_default" '(5 "" "DF_saved_value") tx)
+      (define boundary (tx_savepoint tx))
+      (createkey target "after_boundary" true '("id") tx)
+      (altercolumn target "DF_saved_value" "drop_default" nil tx)
+      (altercolumn target "value" "add_default" '(9 "" "DF_retired_value") tx)
+      (tx_rollback_to_savepoint tx boundary)
+      (define column (show target "column" "value" false))
+      (define restored (and (equal? (column "Default") 5) (equal? (column "DefaultName") "DF_saved_value")
+        (equal? (count (get_assoc (show target "constraints") "Unique")) 0)))
+      (tx_rollback s)
+      (and restored (nil? (table "memcp-tests" false "default_aborted" false nil))))
+  expect: {result: true}
+- name: An unpublished handle cannot grant another transaction or no transaction alteration rights
+  scm: |
+    (begin
+      (define s (newsession)) (define other (newsession)) (s "username" "root") (other "username" "root")
+      (tx_begin s) (tx_begin other)
+      (define tx (s "__memcp_tx"))
+      (createtable "memcp-tests" "default_aborted" (list (list "column" "id" "INT" '() '())) '("engine" "safe") false tx)
+      (define target (table "memcp-tests" false "default_aborted" false tx))
+      (define denied (reduce (list nil (other "__memcp_tx")) (lambda (valid unauthorized)
+        (and valid (try (lambda () (begin (altercolumn target "id" "add_default" '(7 "" "DF_denied") unauthorized) false))
+          (lambda (failure) (strlike (concat failure) "%active native catalog owner%"))))) true))
+      (define unchanged (equal? ((show target "column" "id" false) "DefaultName") ""))
+      (tx_rollback s) (tx_rollback other) (and denied unchanged))
+  expect: {result: true}
+- name: Rejected duplicate and computed defaults preserve the whole native declaration
+  scm: |
+    (begin
+      (define s (newsession)) (s "username" "root") (tx_begin s)
+      (define tx (s "__memcp_tx"))
+      (createtable "memcp-tests" "default_aborted"
+        (list (list "column" "id" "INT" '() '()) (list "column" "value" "INT" '() '())
+          (list "column" "doubled" "INT" '() '() '("id") (lambda (id) (* id 2)))) '("engine" "safe") false tx)
+      (define target (table "memcp-tests" false "default_aborted" false tx))
+      (altercolumn target "id" "add_default" '(7 "" "DF_taken") tx)
+      (define before (show target))
+      (define rejected (reduce '("value" "id" "doubled") (lambda (valid name)
+        (and valid (try (lambda () (begin (altercolumn target name "add_default" '(9 "" "DF_taken") tx) false))
+          (lambda (failure) true)))) true))
+      (define unchanged (equal? before (show target)))
+      (tx_rollback s) (and rejected unchanged))
+  expect: {result: true}
+- name: The row phase rejects later declaration amendments without changing the used default
+  scm: |
+    (begin
+      (define s (newsession)) (s "username" "root") (tx_begin s)
+      (define tx (s "__memcp_tx"))
+      (createtable "memcp-tests" "default_after_rows" (list (list "column" "id" "INT" '() '("default" 7))) '("engine" "safe") false tx)
+      (define target (table "memcp-tests" false "default_after_rows" false tx))
+      (insert target '() (list '()) '() nil false nil tx)
+      (define denied (try (lambda () (begin (altercolumn target "id" "default" 9 tx) false))
+        (lambda (failure) (strlike (concat failure) "%precede native row access%"))))
+      (define unchanged (equal? ((show target "column" "id" false) "Default") 7))
+      (tx_rollback s) (and denied unchanged))
+  expect: {result: true}
+- name: Real TDS rollback retires amended defaults and their inserted rows
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION; CREATE TABLE default_aborted(id INT, value INT); ALTER TABLE default_aborted ADD CONSTRAINT DF_aborted DEFAULT ((9)) FOR value; INSERT default_aborted(id) VALUES(1)
+    - connection: owner
+      sql: SELECT value FROM default_aborted
+      expect: {rows: 1,data: [{value: 9}]}
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: observer
+      sql: SELECT name FROM sys.objects WHERE name=N'default_aborted'
+      expect: {rows: 0}
+- name: A closed TDS owner cannot publish its amended declarations
+  tds:
+    statements:
+    - connection: closing_owner
+      sql: BEGIN TRANSACTION; CREATE TABLE default_disconnected(id INT); ALTER TABLE default_disconnected ADD CONSTRAINT DF_disconnected DEFAULT 8 FOR id
+    - connection: closing_owner
+      close: true
+    - connection: observer
+      sql: SELECT name FROM sys.objects WHERE name=N'default_disconnected'
+      expect: {rows: 0}
+- name: Public defaults cannot be silently changed by an explicit transaction
+  sql: CREATE TABLE default_public(id INT DEFAULT 3)
+  expect: {rows: 0, result_not_contains: '"affected_rows"'}
+- name: Real TDS refuses nontransactional alteration of a public declaration
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: ALTER TABLE default_public ADD DEFAULT 9 FOR id
+      expect: {error: true,contains: ['owned unpublished table']}
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: observer
+      sql: INSERT default_public DEFAULT VALUES; SELECT id FROM default_public
+      expect: {rows: 1,data: [{id: 3}]}
+- name: Restart recovers only committed default declarations
+  action: restart
+- name: WAL recovery retains the inserted default and typed computation
+  sql: SELECT id,value,flag,label,derived FROM default_install
+  expect: {rows: 1,data: [{id: 1,value: 1,flag: false,label: abcd,derived: 2}]}
+- name: An empty committed default declaration initializes its first row after restart
+  sql: INSERT default_empty(id) VALUES(5)
+  expect: {affected_rows: 1}
+- name: The recovered empty-table default uses the saved declaration
+  sql: SELECT id,value FROM default_empty
+  expect: {rows: 1,data: [{id: 5,value: 7}]}
+- name: Recovered named default metadata uses the same native column
+  scm: (equal? ((show (table "memcp-tests" false "default_empty" false nil) "column" "value" false) "DefaultName") "DF_empty_value")
+  expect: {result: true}
+- name: Rollback and disconnected declarations remain absent after restart
+  sql: SELECT name FROM sys.objects WHERE name IN (N'default_aborted',N'default_disconnected',N'default_after_rows')
+  expect: {rows: 0}

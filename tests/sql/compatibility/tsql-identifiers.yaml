@@ -341,7 +341,7 @@ test_cases:
     error: true
     contains: cross-database
 - name: Rejected foreign key qualifiers leave no native table
-  scm: (nil? (table "memcp-tests" false "tsql_qualified_bad_fk" false))
+  scm: (nil? (table "memcp-tests" false "tsql_qualified_bad_fk" false nil))
   expect:
     result: true
 - name: Brackets escape closing delimiters without changing the object identity
@@ -408,12 +408,36 @@ test_cases:
   # Valid SQL implementation gap: check behavior, warn until implemented.
   expect: {"rows": 3, "data": [{"id": 1}, {"id": 2}, {"id": 3}]}
   noncritical: true
+- name: Schema qualified columns return the exact native row set
+  description: Supported schema-qualified column binding now returns the exact unordered native rows.
+  sql: SELECT [dbo].[tsql_qualified].[id] FROM dbo.tsql_qualified
+  expect:
+    rows: 3
+    result_contains: ['{"id": 1}', '{"id": 2}', '{"id": 3}']
 - name: Four part column references fail instead of selecting another table
   sql: |
     SELECT [memcp-tests].[dbo].[tsql_qualified].[id] FROM dbo.tsql_qualified ORDER BY [memcp-tests].[dbo].[tsql_qualified].[id]
   # Valid SQL implementation gap: check behavior, warn until implemented.
   expect: {"rows": 3, "data": [{"id": 1}, {"id": 2}, {"id": 3}]}
   noncritical: true
+- name: Database qualified columns return the exact native row set
+  description: Supported database-qualified column binding now returns the exact unordered native rows.
+  sql: SELECT [memcp-tests].[dbo].[tsql_qualified].[id] FROM dbo.tsql_qualified
+  expect:
+    rows: 3
+    result_contains: ['{"id": 1}', '{"id": 2}', '{"id": 3}']
+- name: Explicit aliases hide the physical qualified column address
+  sql: SELECT [dbo].[tsql_qualified].[id] FROM dbo.tsql_qualified AS tsql_qualified
+  expect:
+    error: true
+- name: Two unaliased occurrences cannot silently select one qualified source
+  sql: SELECT [dbo].[tsql_qualified].[id] FROM dbo.tsql_qualified,dbo.tsql_qualified
+  expect:
+    error: true
+- name: A derived export cannot expose its inner physical qualified address
+  sql: SELECT [dbo].[tsql_qualified].[id] FROM (SELECT id FROM dbo.tsql_qualified) AS exported
+  expect:
+    error: true
 - name: Multiple part assignment columns fail before writes
   sql: UPDATE dbo.tsql_qualified SET dbo.tsql_qualified.value=99 WHERE id=1
   expect:
@@ -426,6 +450,13 @@ test_cases:
     - value: 11
 - name: Qualified TRUNCATE uses the existing DML planner
   sql: TRUNCATE TABLE [memcp-tests]..[tsql_qualified_child]
+- name: Unsupported qualified truncation preserves the child
+  description: Historical case identity retained; a valid child-table TRUNCATE must leave the child empty.
+  sql: SELECT id,parent_id FROM [memcp-tests]..[tsql_qualified_child]
+  expect: {rows: 0, data: []}
+- name: Qualified DELETE uses the existing DML planner
+  sql: DELETE FROM [memcp-tests]..[tsql_qualified_child]
+  expect: {affected_rows: 0}
 - name: Qualified truncation leaves the parent unchanged
   sql: SELECT COUNT(*) AS n FROM [memcp-tests].[dbo].[tsql_qualified]
   expect:
@@ -460,6 +491,10 @@ test_cases:
     error: true
     contains: native constraint-safe key removal
 - name: Relative default owner references resolve against the CREATE target context
+  setup:
+  - sql: CREATE DATABASE other_catalog
+  cleanup:
+  - sql: DROP DATABASE other_catalog
   scm: |
     (begin
       (define formula (parse_tsql "memcp-tests" "CREATE TABLE [other_catalog].[dbo].[child](id INT,parent_id INT,FOREIGN KEY(parent_id) REFERENCES [dbo].[parent](id))"
@@ -474,6 +509,10 @@ test_cases:
   expect:
     result: true
 - name: Unqualified references retain the CREATE target context
+  setup:
+  - sql: CREATE DATABASE other_catalog
+  cleanup:
+  - sql: DROP DATABASE other_catalog
   scm: |
     (begin
       (define formula (parse_tsql "memcp-tests" "CREATE TABLE [other_catalog].[dbo].[child](id INT,parent_id INT,FOREIGN KEY(parent_id) REFERENCES [parent](id))"
@@ -488,6 +527,10 @@ test_cases:
   expect:
     result: true
 - name: Explicit matching database references retain the existing native FK contract
+  setup:
+  - sql: CREATE DATABASE other_catalog
+  cleanup:
+  - sql: DROP DATABASE other_catalog
   scm: |
     (begin
       (define formula (parse_tsql "memcp-tests" "CREATE TABLE [other_catalog].[dbo].[child](id INT,parent_id INT,FOREIGN KEY(parent_id) REFERENCES [other_catalog].[dbo].[parent](id))"

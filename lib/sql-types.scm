@@ -23,6 +23,19 @@ datatype. "any" means the SQL frontend has no stronger contract.
 0 = explicit COLLATE, 2 = column, 4 = literal, 5 = numeric/ignorable. */
 
 (define sql_info (lambda (formula type collation) (list formula type collation)))
+/* SQL NULL uses a protected call node while parsing and logical rewrites.
+Only this compile-time scalar boundary lowers that exact literal to a native
+value before asking the generic optimizer to prove constantness. Quoted data
+and callable heads keep their identity; residual effects remain unfolderable. */
+(define sql_constant_formula (lambda (expression)
+	(if (logical_sql_null_literal? expression) nil (match expression
+		((symbol quote) _value) expression
+		(cons (symbol lambda) _body) expression
+		(cons head arguments) (cons head (map arguments sql_constant_formula))
+		_ expression))))
+(define sql_constant_value (lambda (expression)
+	(tryfold (sql_constant_formula expression))))
+
 (define sql_info_formula car)
 (define sql_info_datatype cadr)
 (define sql_datatype_name (lambda (type)
@@ -35,6 +48,12 @@ datatype. "any" means the SQL frontend has no stronger contract.
 /* SQL declarations, including DECIMAL precision/scale, are compile-time data
 inside the TYPE slot. Operators consume and produce these same contracts;
 output formatting never re-reads declarations or guesses from runtime values. */
+/* Rounding a plain integral carrier at nonnegative scale is an identity.
+Keep that exact arithmetic path before the floating primitive sees the value;
+the SQL declaration has already selected the scale at compilation. */
+(define sql_decimal_value (lambda (value scale)
+	(if (and (>= scale 0) (int? value)) value (sql_decimal_output value scale))))
+
 (define sql_info_decimal_scale (lambda (info)
 	(if (and (has? '("DECIMAL" "NUMERIC") (sql_info_type info))
 		(> (count (sql_info_dimensions info)) 1))
@@ -310,25 +329,35 @@ always plain and canonical; type/collation ride alongside for the consumer. */
 /* Read a producer's declared projection contract, never its runtime values.
 UNION can carry identical/NULL contracts without choosing dialect coercions;
 heterogeneous branches require a frontend-assigned contract or casts. */
-(define sql_projection_info_at (lambda (relation index outer_sources)
+(define sql_projection_info_at_using (lambda (relation index outer_sources expression_info)
 	(begin
 		(define relation (normalize_query_ast relation))
 		(if (query_block? relation) (begin
-			(define fields (projection_exprs (expand_query_block_fields (qb_sources relation) (qb_fields relation))))
+			(define fields (projection_exprs (logical_relation_fields relation)))
 			(if (>= index (count fields)) (sql_info nil "any" nil)
-				(sql_expr_info (merge (list (qb_sources relation) outer_sources)) (nth fields index))))
+				(expression_info (merge (list (qb_sources relation) outer_sources)) (nth fields index))))
 			(union_block? relation) (begin
-				(define infos (map (union_branches relation) (lambda (branch) (sql_projection_info_at branch index outer_sources))))
-				(define types (filter (map infos sql_info_type) (lambda (type) (not (equal? type "NULL")))))
+				(define infos (map (union_branches relation) (lambda (branch) (sql_projection_info_at_using branch index outer_sources expression_info))))
+				(define active (filter infos (lambda (info) (not (equal? (sql_info_type info) "NULL")))))
+				(define types (map active sql_info_type))
 				(define type (if (empty_list? types) "NULL" (car types)))
+				/* A frontend-assigned identical contract includes dimensions,
+				not just its type name. Preserve that complete declaration through
+				derived UNIONs; differing contracts keep the existing merge rule. */
+				(define datatype (if (and (not (empty_list? active))
+					(reduce active (lambda (same info)
+						(and same (expression_equal? (sql_info_datatype info) (sql_info_datatype (car active))))) true))
+					(sql_info_datatype (car active)) (sql_decimal_result_datatype type infos)))
 				(if (reduce types (lambda (same current) (and same (equal? current type))) true)
-					(sql_info nil (sql_decimal_result_datatype type infos) (reduce infos (lambda (collation info)
+					(sql_info nil datatype (reduce infos (lambda (collation info)
 						(sql_merge_collation collation (sql_info_collation info))) nil))
 					(sql_info nil "any" nil)))
 			(sql_info nil "any" nil)))))
+(define sql_projection_info_at (lambda (relation index outer_sources)
+	(sql_projection_info_at_using relation index outer_sources sql_expr_info)))
 /* A derived column keeps its producer's SQL contract and its own reference.
 This resolves metadata only; the logical planner still owns projection rewrite. */
-(define sql_projection_column_info (lambda (relation original col col_ignorecase outer_sources)
+(define sql_projection_column_info_using (lambda (relation original col col_ignorecase outer_sources expression_info)
 	(begin
 		/* Type consumers can precede the binder. Normalize only the shared
 		logical syntax node; no nested query is executed or planned here. */
@@ -346,24 +375,25 @@ This resolves metadata only; the logical planner still owns projection rewrite. 
 			(define titles (queryplan_result_titles relation))
 			(define index (find (produceN (count titles)) (lambda (index)
 				(if col_ignorecase (equal?? (nth titles index) col) (equal? (nth titles index) col))) nil))
-			(if (nil? index) (sql_info nil "any" nil) (sql_projection_info_at relation index outer_sources)))))
+			(if (nil? index) (sql_info nil "any" nil) (sql_projection_info_at_using relation index outer_sources expression_info)))))
 		(sql_info original (sql_info_datatype info) (sql_info_collation info)))))
+(define sql_projection_column_info (lambda (relation original col col_ignorecase outer_sources)
+	(sql_projection_column_info_using relation original col col_ignorecase outer_sources sql_expr_info)))
 
 /* Catalog type/collation for a base-table column, name canonicalized. Only a
 resolved base table is rewritten: derived-table / stage-output columns and any
 column whose name does not resolve are returned verbatim so downstream lowering
 keeps its existing (ignorecase-flagged) resolution for them. */
-(define sql_source_column_info (lambda (sources src original tblvar col col_ignorecase)
+(define sql_source_column_info_using (lambda (sources src original tblvar col col_ignorecase expression_info)
 	(if (not (source_is_base_table? src))
-		(sql_projection_column_info (source_relation src) original col col_ignorecase
-			(if (source_lateral? src) (source_prefix_for_alias sources (source_alias src)) '()))
+		(sql_projection_column_info_using (source_relation src) original col col_ignorecase
+			(if (source_lateral? src) (source_prefix_for_alias sources (source_alias src)) '()) expression_info)
 		(begin
 			(define canonical (source_column_name src col col_ignorecase))
 			(if (nil? canonical)
 				(sql_info original "any" nil)
 				(begin
-					(define handle (table (source_schema src) false (source_relation src) false))
-					(define meta (if (nil? handle) nil (show handle "column" canonical false)))
+					(define meta (source_column_declaration src canonical false))
 					(define type (if (nil? meta) "any" (toUpper (coalesceNil (meta "RawType") "any"))))
 					(define collname (if (nil? meta) nil (meta "Collation")))
 					(sql_info
@@ -374,13 +404,18 @@ keeps its existing (ignorecase-flagged) resolution for them. */
 								(list type (coalesceNil (meta "Dimensions") '())) type))
 						(if (and (sql_text_type? type) (string? collname) (not (equal? collname "")))
 							(list collname 2) nil))))))))
+(define sql_source_column_info (lambda (sources src original tblvar col col_ignorecase)
+	(sql_source_column_info_using sources src original tblvar col col_ignorecase sql_expr_info)))
 
-(define sql_get_column_info (lambda (sources tblvar tbl_ic col col_ic)
+(define sql_get_column_info_using (lambda (sources tblvar tbl_ic col col_ic expression_info)
 	(begin
 		(define original (list (quote get_column) tblvar tbl_ic col col_ic))
 		/* Metadata consumers can precede full query binding. Reuse the common
 		column binder for unqualified joined inputs instead of assuming source 0. */
-		(define reference (if (and (nil? tblvar) (not (single_source? sources)))
+		(define reference (if (qualified_relation_ref? tblvar)
+			(coalesceNil (try_bind_qualified_column_in_scopes
+				(list (binding_scope_entries sources '() "types" (list '() '() "types") 0)) tblvar tbl_ic col col_ic) original)
+			(and (nil? tblvar) (not (single_source? sources)))
 			(coalesceNil (try_bind_unqualified_column_in_scopes
 				(list (binding_scope_entries sources '() "types" (list '() '() "types") 0)) col col_ic) original)
 			original))
@@ -390,25 +425,39 @@ keeps its existing (ignorecase-flagged) resolution for them. */
 				(define src (source_for_alias sources default_alias alias alias_ic))
 				(if (nil? src)
 					(sql_info reference "any" nil)
-					(sql_source_column_info sources src reference alias column column_ic)))))))
+					(sql_source_column_info_using sources src reference alias column column_ic expression_info)))))))
+(define sql_get_column_info (lambda (sources tblvar tbl_ic col col_ic)
+	(sql_get_column_info_using sources tblvar tbl_ic col col_ic sql_expr_info)))
 
 /* Frontend declaration resolution runs after the common name binder. Give
 the compiler the existing immutable point description, not runtime values.
 Derived columns already carry their producer's expression contract. */
-(define sql_compile_column_info (lambda (sources compiler expression) (begin
-	(define info (sql_expr_info sources expression))
+/* The producing scope derives its operand triple once. This owner applies
+the declaration compiler to that same immutable triple; validation below must
+not trigger another walk through a derived producer's SQL expressions. */
+(define sql_resolve_column_info (lambda (sources compiler info) (begin
 	(define declaration (match (sql_info_formula info)
 		((symbol get_column) alias alias_ic column column_ic) (begin
 			(define src (source_for_alias sources
 				(if (empty_list? sources) nil (source_alias (car sources))) alias alias_ic))
 			(if (nil? src) nil (not (source_is_base_table? src)) nil (begin
-				(define handle (table (source_schema src) false (source_relation src) false))
-				(if (nil? handle) nil (show handle "column" column column_ic)))))
+				(source_column_declaration src column column_ic))))
 		_ nil))
 	(define resolved ((sql_expression_compiler compiler) info declaration))
 	(if (expression_equal? (sql_info_formula info) (sql_info_formula resolved)) resolved
 		(error "a column declaration compiler must preserve the column expression")))))
+(define sql_compile_column_info (lambda (sources compiler expression)
+	(sql_resolve_column_info sources compiler (sql_expr_info sources expression))))
 
+/* Collect column syntax without inventing a relation alias for an unresolved
+multipart reference. This same pure collector serves mutation contracts. */
+(define sql_column_refs (lambda (expr)
+	(match expr
+		((symbol get_column) _alias _alias_ic _column _column_ic) (list expr)
+		((symbol quote) _datum) '()
+		((symbol inner_select) _query) '()
+		(cons _head args) (merge (map args sql_column_refs))
+		_ '())))
 /* Comparison: BOOLEAN. Preserve plain operators for direct scan bounds;
 computed text comparisons use the compile-time selected Less relation. The
 merged collation remains in the info slot for other compiler consumers. */
@@ -416,6 +465,8 @@ merged collation remains in the info slot for other compiler consumers. */
 	(begin
 		(define lt (sql_info_type left_info))
 		(define rt (sql_info_type right_info))
+		(if (or (equal? lt "SQL_VARIANT") (equal? rt "SQL_VARIANT"))
+			(error "SQL_VARIANT comparison is not implemented") true)
 		(define plain (list head (sql_info_formula left_info) (sql_info_formula right_info)))
 		(if (and (sql_text_type? lt) (sql_text_type? rt))
 			(begin
@@ -425,7 +476,8 @@ merged collation remains in the info slot for other compiler consumers. */
 				relation in its residual scalar comparison too. */
 				(define computed? (lambda (info) (begin
 					(define formula (sql_info_formula info))
-					(and (not (sql_column_ref? formula)) (not (empty_list? (query_expr_alias_set "" formula '())))))))
+					(and (not (sql_column_ref? formula)) (or (not (empty_list? (sql_column_refs formula)))
+						(not (empty_list? (query_expr_alias_set "" formula '()))))))))
 				(sql_info (if (or (computed? left_info) (computed? right_info))
 					(list (quote sql_compare) (sql_info_formula left_info) (sql_info_formula right_info)
 						(collate (if (nil? collation) "bin" (car collation)) false) (string head))
@@ -459,7 +511,7 @@ conversion is emitted as plain code; the target descriptor stays at compile time
 		(define formula (if (sql_text_type? type) (list (quote concat) value)
 			(equal? type "BIGINT") (list (quote intdiv) numeric 1)
 			(and (equal? type "DECIMAL") (> (count dimensions) 1))
-			(list (quote sql_decimal_output) numeric (cadr dimensions))
+			(list sql_decimal_value numeric (cadr dimensions))
 			numeric))
 		(sql_info formula (if (empty_list? dimensions) type (list type dimensions))
 			(if (sql_text_type? type) (sql_info_collation input) nil))))))
@@ -471,14 +523,16 @@ conversion is emitted as plain code; the target descriptor stays at compile time
 /* The aggregate AST is a SQL operator contract. Native reducer representation
 does not supply a runtime SQL type; these declared SQL reducers preserve their
 operand contract. Unknown registered reducers retain an explicit any contract. */
+(define sql_aggregate_preserves_operand_contract? (lambda (reducer)
+	(or (equal? reducer (quote min)) (equal? reducer min)
+		(equal? reducer (quote max)) (equal? reducer max)
+		(equal? reducer (quote sql_sum_reduce)) (equal? reducer sql_sum_reduce)
+		(equal? reducer (quote +)) (equal? reducer +))))
 (define sql_aggregate_info (lambda (head infos)
 	(begin
 		(define input (car infos))
 		(define reducer (sql_info_formula (cadr infos)))
-		(define preserves (or (equal? reducer (quote min)) (equal? reducer min)
-			(equal? reducer (quote max)) (equal? reducer max)
-			(equal? reducer (quote sql_sum_reduce)) (equal? reducer sql_sum_reduce)
-			(equal? reducer (quote +)) (equal? reducer +)))
+		(define preserves (sql_aggregate_preserves_operand_contract? reducer))
 		(sql_info (cons head (map infos sql_info_formula))
 			(if preserves (sql_info_datatype input) "any")
 			(if preserves (sql_info_collation input) nil)))))
@@ -495,6 +549,12 @@ operand contract. Unknown registered reducers retain an explicit any contract. *
 /* Call contracts consume resolved SQL triples from their producing scope. */
 (define sql_call_info (lambda (head infos)
 	(begin
+		/* A SQL_VARIANT is an intrinsic tagged SQL scalar. Generic SCM list
+		comparison/stringification is not its SQL semantics. Until those typed
+		consumers exist, only NULL inspection may use the generic call path. */
+		(if (and (not (or (equal? head (quote nil?)) (equal? head nil?)))
+			(reduce infos (lambda (found info) (or found (equal? (sql_info_type info) "SQL_VARIANT"))) false))
+			(error "this SQL_VARIANT operation is not implemented") true)
 		(define forms (map infos sql_info_formula))
 		(if (equal? head (quote aggregate)) (sql_aggregate_info head infos)
 			(has? '(date_add date_sub) head) (sql_temporal_arithmetic_info head infos)
@@ -528,8 +588,32 @@ operand contract. Unknown registered reducers retain an explicit any contract. *
 					(sql_info (cons head forms) (if (has? (list "merge" "case") mode) (sql_info_datatype merged)
 						(sql_decimal_result_datatype type infos)) collation)))))))
 
+/* Raw frontend metadata may precede name binding. Bind a scalar subtree
+once, then consume its canonical projections without rebinding nested scalars. */
+(define sql_raw_scalar_info (lambda (sources query) (begin
+	(define outer_scope (binding_scope_entries sources '() "types" (list '() '() "types") 0))
+	(sql_bound_scalar_info sources (bind_query_names query (list outer_scope))))))
+
+/* This API consumes a subtree returned by the common binder, together with
+its explicit producing scope. No AST marker or cached assertion supplies that
+ownership, and no native metadata is acquired here. */
+(define sql_bound_scalar_info (lambda (sources query)
+	(if (equal? (count (queryplan_result_titles query)) 1)
+		(sql_projection_info_at_using query 0 sources sql_bound_expr_info)
+		(sql_info nil "any" nil))))
+
 (define sql_expr_info (lambda (sources expr)
-	(match expr
+	(sql_expr_info_using sources expr sql_expr_info sql_raw_scalar_info)))
+
+(define sql_bound_expr_info (lambda (sources expr)
+	(sql_expr_info_using sources expr sql_bound_expr_info sql_bound_scalar_info)))
+
+(define sql_expr_info_using (lambda (sources expr expression_info scalar_info)
+	/* Persisted SQL restores callable syntax without the bootstrap procedure's
+	identity. The logical literal owner already recognizes that protected NULL
+	node; retain its declaration instead of treating its restored head as an
+	unknown function. Explicit CAST/type annotations remain enclosing contracts. */
+	(if (logical_sql_null_literal? expr) (sql_info expr "NULL" nil) (match expr
 		/* Relational predicates own a BOOLEAN result. Their query is a lexical
 		relation, not a scalar argument list in the enclosing source scope. */
 		((symbol inner_select_exists) _query) (sql_info expr "BOOLEAN" nil)
@@ -537,40 +621,38 @@ operand contract. Unknown registered reducers retain an explicit any contract. *
 		((symbol inner_select_in) _probe _query) (sql_info expr "BOOLEAN" nil)
 		((quote inner_select_in) _probe _query) (sql_info expr "BOOLEAN" nil)
 		((symbol inner_select) query) (begin
-			/* Only metadata is read here. The original scalar query stays in the
-			logical AST for the common decorrelator and its cardinality checks. */
-			(define outer_scope (binding_scope_entries sources '() "types" (list '() '() "types") 0))
-			(define bound (bind_query_names query (list outer_scope)))
-			(define info (if (equal? (count (queryplan_result_titles bound)) 1)
-				(sql_projection_info_at bound 0 sources) (sql_info nil "any" nil)))
+			/* Binding and projection typing have separate owners. This callback
+			only supplies metadata; the original scalar query and its cardinality
+			checks remain in the common logical AST. */
+			(define info (scalar_info sources query))
 			(sql_info expr (sql_info_datatype info) (sql_info_collation info)))
-		((quote inner_select) query) (sql_expr_info sources (list (quote inner_select) query))
-		((symbol get_column) tblvar tbl_ic col col_ic) (sql_get_column_info sources tblvar tbl_ic col col_ic)
-		((quote get_column) tblvar tbl_ic col col_ic) (sql_get_column_info sources tblvar tbl_ic col col_ic)
+		((quote inner_select) query) (expression_info sources (list (quote inner_select) query))
+		((symbol get_column) tblvar tbl_ic col col_ic) (sql_get_column_info_using sources tblvar tbl_ic col col_ic expression_info)
+		((quote get_column) tblvar tbl_ic col col_ic) (sql_get_column_info_using sources tblvar tbl_ic col col_ic expression_info)
 		((symbol quote) _datum) (sql_info expr "any" nil)
 		/* Frontends attach the declared contract to their conversion formula.
 		Resolve the operand normally; only its executable formula survives. */
 		((symbol sql_type_expr) formula type collation)
 		(if (and (sql_text_type? (sql_datatype_name type)) (nil? collation))
 			(begin
-				(define info (sql_expr_info sources formula))
+				(define info (expression_info sources formula))
 				(sql_info (sql_info_formula info) type (sql_info_collation info)))
 			/* The producer already resolved this contract. Remove nested frontend
 			annotations without deriving every plain operand's type again. */
-			(sql_info (match (sql_type_annotation_replacement sources formula)
+			(sql_info (match (sql_type_annotation_replacement_using sources formula expression_info)
 				'(plain) plain _ formula) type collation))
 		/* Dialects compile type-directed operations from resolved argument triples.
 		The callback is a compiler, never an executable SQL operator. */
 		(cons (symbol sql_compile_expr) (cons compiler arguments))
-		((sql_expression_compiler compiler) (map arguments (lambda (argument) (sql_expr_info sources argument))))
+		((sql_expression_compiler compiler) (map arguments (lambda (argument) (expression_info sources argument))))
 		((symbol sql_compile_column) compiler expression)
-		(sql_compile_column_info sources compiler expression)
+		(sql_resolve_column_info sources compiler (expression_info sources expression))
 		((symbol session) _key) (sql_info expr "any" nil)
 		((symbol session_globalvar) _key) (sql_info expr "any" nil)
 		((symbol lambda) _params _body) (sql_info expr "any" nil)
-		(cons head args) (sql_call_info head (map args (lambda (argument) (sql_expr_info sources argument))))
+		(cons head args) (sql_call_info head (map args (lambda (argument) (expression_info sources argument))))
 		_ (sql_info expr (sql_type_of_literal expr)
-			(if (string? expr) (list "utf8mb4_general_ci" 4) nil)))))
+			(if (string? expr) (list "utf8mb4_general_ci" 4) nil))))))
 
 /* NULL-propagating comparison primitive emitted by sql_comparison_info. The Less
 relation and operator string are resolved at plan time. */
@@ -616,11 +698,13 @@ planner has its own star-expansion (and GROUP-BY-primary-key rules) downstream. 
 /* Resolve canonical persisted direction names while compiling. Bare columns
 keep the native scan-order path; computed expressions and explicit COLLATE
 contracts select their comparator once, outside executable row loops. */
-(define sql_type_order_item (lambda (sources item)
+(define sql_type_order_item (lambda (sources item native_columns)
 	(match item
 		'(order_expr order_dir) (begin
 			(define order_dir (eval order_dir))
 			(define info (sql_expr_info sources order_expr))
+			(if (equal? (sql_info_type info) "SQL_VARIANT")
+				(error "SQL_VARIANT ordering is not implemented") true)
 			(define coll (sql_info_collation info))
 			(if (and (equal? (sql_info_type info) "ENUM")
 				(or (equal? order_dir <) (equal? order_dir >)))
@@ -632,7 +716,7 @@ contracts select their comparator once, outside executable row loops. */
 						(order_dir (if (nil? a) nil (get_assoc ranks a))
 							(if (nil? b) nil (get_assoc ranks b))))))
 				(if (and (or (equal? order_dir <) (equal? order_dir >))
-					(or (not (sql_column_ref? (sql_info_formula info)))
+					(or (not native_columns) (not (sql_column_ref? (sql_info_formula info)))
 						(and (not (nil? coll)) (equal? (cadr coll) 0)))
 					(sql_text_type? (sql_info_type info))
 					(not (nil? coll)))
@@ -696,15 +780,8 @@ O(k) for the k declared keys and never reads shard data or automatic indexes. */
 	(if (nil? column) nil (list (column "RawType")
 		(coalesceNil (column "Dimensions") '()) (column "Null")
 		(coalesceNil (column "Collation") "")))))
-(define sql_mutation_column_refs (lambda (expr)
-	(match expr
-		((symbol get_column) _alias _alias_ic _column _column_ic) (list expr)
-		((symbol quote) _datum) '()
-		((symbol inner_select) _query) '()
-		(cons _head args) (merge (map args sql_mutation_column_refs))
-		_ '())))
 (define sql_mutation_contract_declarations (lambda (sources expressions)
-	(map (merge_unique (map expressions sql_mutation_column_refs)) (lambda (reference) (begin
+	(map (merge_unique (map expressions sql_column_refs)) (lambda (reference) (begin
 		(define resolved (match reference
 			((symbol get_column) nil _alias_ic col col_ic)
 			(if (single_source? sources) reference
@@ -715,15 +792,42 @@ O(k) for the k declared keys and never reads shard data or automatic indexes. */
 			((symbol get_column) alias alias_ic col col_ic) (begin
 				(define src (source_for_alias sources (if (empty_list? sources) nil (source_alias (car sources))) alias alias_ic))
 				(if (and src (source_is_base_table? src)
+					(not (local_relation_reference? (source_relation src)))
 					(not (physical_helper_relation? (source_relation src)))
 					(not (equal?? (source_schema src) "information_schema")))
 					(begin
-						(define handle (table (source_schema src) false (source_relation src) false))
-						(define declaration (if handle (show handle "column" col col_ic) nil))
+						(define declaration (source_column_declaration src col col_ic))
 						(list (source_schema src) (source_relation src)
 							(if declaration (declaration "Field") col)
 							(sql_mutation_column_contract declaration))) nil))
 			_ nil))))))
+
+/* Group-key equality needs the declared operand collation after executable
+formulas have consumed frontend annotations. These facts contain syntax and
+scalar contracts only; they are never executable value wrappers. */
+(define sql_group_distinct_collations_using (lambda (sources expression expression_info)
+	(match expression
+		((symbol count_distinct) operand) (begin
+			(define info (expression_info sources operand))
+			(if (nil? (sql_info_collation info)) '()
+				(list (list (sql_info_formula info) (sql_collation_name info)))))
+		((symbol quote) _data) '()
+		(cons _head rest) (merge (map rest (lambda (item) (sql_group_distinct_collations_using sources item expression_info))))
+		_ '())))
+(define sql_group_distinct_collations (lambda (sources expression)
+	(sql_group_distinct_collations_using sources expression sql_expr_info)))
+(define sql_group_value_collations_using (lambda (sources block expression_info)
+	(merge (list
+		(filter (map (coalesceNil (qb_group block) '()) (lambda (operand) (begin
+			(define info (expression_info sources operand))
+			(if (nil? (sql_info_collation info)) nil
+				(list (sql_info_formula info) (sql_collation_name info)))))) (lambda (fact) (not (nil? fact))))
+		(merge (map (extract_assoc (qb_fields block) (lambda (_title expr) expr))
+			(lambda (expr) (sql_group_distinct_collations_using sources expr expression_info))))
+		(sql_group_distinct_collations_using sources (qb_having block) expression_info)
+		(merge (map (order_exprs (qb_order block)) (lambda (expr) (sql_group_distinct_collations_using sources expr expression_info))))))))
+(define sql_group_value_collations (lambda (sources block)
+	(sql_group_value_collations_using sources block sql_expr_info)))
 
 (define sql_type_query_block (lambda (block outer_sources)
 	(if (not (query_block? block))
@@ -732,6 +836,8 @@ O(k) for the k declared keys and never reads shard data or automatic indexes. */
 			(define original_sources (qb_sources block))
 			(define original_scope (merge (list original_sources (coalesceNil outer_sources '()))))
 			(define mutation (qassoc_get (qb_facts block) (quote dml) false))
+			(define group_collations (coalesceNil (qassoc_get (qb_facts block) 'group-value-collations nil)
+				(sql_group_value_collations original_scope block)))
 			/* Capture before any frontend type getter runs. Later lowering uses
 			these immutable declarations to invalidate the original contracts. */
 			(define declarations (coalesceNil (qassoc_get (qb_facts block) (quote comparison-declarations) nil)
@@ -739,7 +845,7 @@ O(k) for the k declared keys and never reads shard data or automatic indexes. */
 			(define mutation_contracts (coalesceNil (qassoc_get (qb_facts block) (quote comparison-contracts) nil)
 				(if mutation (merge (map (cons (qb_where block) (source_join_exprs original_sources))
 					(lambda (expr) (sql_mutation_comparison_contracts original_scope expr)))) '())))
-			(define sources (sql_type_lower_annotations original_sources))
+			(define sources (sql_type_lower_annotations original_scope original_sources))
 			(define outer (coalesceNil outer_sources '()))
 			(define all_sources (if (empty_list? outer) sources (merge (list sources outer))))
 			(make_query_block
@@ -749,7 +855,7 @@ O(k) for the k declared keys and never reads shard data or automatic indexes. */
 				contract. Subsequent logical rewrites only need their remaining
 				compiler annotations removed, not another projection type walk. */
 				(if (not (nil? (qassoc_get (qb_facts block) (quote result-types) nil)))
-					(sql_type_lower_annotations (qb_fields block))
+					(sql_type_lower_annotations all_sources (qb_fields block))
 					(map_assoc (qb_fields block)
 						(lambda (field_title field_expr) (sql_type_field_formula all_sources field_expr))))
 				(sql_type_formula all_sources (qb_where block))
@@ -757,12 +863,12 @@ O(k) for the k declared keys and never reads shard data or automatic indexes. */
 					(lambda (group_expr) (sql_type_formula all_sources group_expr)))
 				(if (nil? (qb_having block)) nil (sql_type_formula all_sources (qb_having block)))
 				(map (coalesceNil (qb_order block) '())
-					(lambda (order_item) (sql_type_order_item all_sources order_item)))
+					(lambda (order_item) (sql_type_order_item all_sources order_item true)))
 				/* Bounds have no column scope. Compile frontend annotations only;
 				ordinary limits need no fresh SQL type/collation records. */
-				(sql_type_lower_annotations (qb_limit block)) (sql_type_lower_annotations (qb_offset block))
-				(sql_type_lower_annotations (qb_hidden block)) (sql_type_lower_annotations (qb_stages block))
-				(qassoc_set (qassoc_set (qassoc_set (qb_facts block) (quote comparison-declarations) declarations) (quote comparison-contracts) mutation_contracts) (quote result-types)
+				(sql_type_lower_annotations '() (qb_limit block)) (sql_type_lower_annotations '() (qb_offset block))
+				(sql_type_lower_annotations all_sources (qb_hidden block)) (sql_type_lower_annotations all_sources (qb_stages block))
+				(qassoc_set (qassoc_set (qassoc_set (qassoc_set (qb_facts block) 'group-value-collations group_collations) (quote comparison-declarations) declarations) (quote comparison-contracts) mutation_contracts) (quote result-types)
 					(coalesceNil (qassoc_get (qb_facts block) (quote result-types) nil)
 						(map_assoc (expand_query_block_fields sources (qb_fields block))
 							(lambda (rt_title rt_expr) (sql_type_result_descriptor all_sources rt_expr))))))))))
@@ -771,23 +877,54 @@ O(k) for the k declared keys and never reads shard data or automatic indexes. */
 unchanged; a singleton holds the replacement, including a legitimate NULL.
 Retain annotation-free sources/stage graphs instead of cloning every node
 for frontends that have emitted no contracts. Quoted syntax stays opaque. */
-(define sql_type_annotation_replacement (lambda (sources node)
+/* A logical query block is not itself a frontend annotation. Stage facts
+can retain the original query as provenance after its outer aliases have been
+eliminated. Such annotation-free syntax must stay inert, as in the ordinary
+replacement walk, rather than starting a second name/type resolution pass. */
+(define sql_type_annotations_present? (lambda (node)
 	(match node
-		((symbol sql_compile_column) _compiler _expression) (list (sql_type_formula sources node))
-		((symbol sql_type_expr) _formula _type _collation) (list (sql_type_formula sources node))
-		(cons (symbol sql_compile_expr) _arguments) (list (sql_type_formula sources node))
+		((symbol quote) _datum) false
+		(cons head tail) (or
+			(has? (list (quote sql_compile_expr) (quote sql_compile_column) (quote sql_type_expr)) head)
+			(sql_type_annotations_present? head)
+			(reduce tail (lambda (found item) (or found (sql_type_annotations_present? item))) false))
+		_ false)))
+
+(define sql_type_annotation_replacement_using (lambda (sources node expression_info)
+	(match node
+		/* Relational markers retain their own SQL scope until name binding
+		and decorrelation visit the query. A scalar annotation consumer must
+		not compile that raw query against its flattened metadata catalog. */
+		((symbol inner_select) _query) nil
+		((quote inner_select) _query) nil
+		((symbol inner_select_exists) _query) nil
+		((quote inner_select_exists) _query) nil
+		((symbol inner_select_in) _probe _query) nil
+		((quote inner_select_in) _probe _query) nil
+		/* A nested SQL scope owns its declarations. Its frontend compilers
+		must not inherit the containing scalar expression's column scope. */
+		((symbol query-block) _database _sources _fields _where _group _having _order _limit _offset _hidden _stages _facts)
+		(if (sql_type_annotations_present? node) (list (sql_type_query_block node sources)) nil)
+		((symbol sql_compile_column) _compiler _expression) (list (sql_info_formula (expression_info sources node)))
+		((symbol sql_type_expr) _formula _type _collation) (list (sql_info_formula (expression_info sources node)))
+		(cons (symbol sql_compile_expr) _arguments) (list (sql_info_formula (expression_info sources node)))
 		((symbol quote) _datum) nil
 		(cons head tail) (begin
-			(define rewritten_head (sql_type_annotation_replacement sources head))
-			(define rewritten_tail (sql_type_annotation_replacement sources tail))
+			(define rewritten_head (sql_type_annotation_replacement_using sources head expression_info))
+			(define rewritten_tail (sql_type_annotation_replacement_using sources tail expression_info))
 			(if (and (nil? rewritten_head) (nil? rewritten_tail)) nil
 				(list (cons
 					(if (nil? rewritten_head) head (car rewritten_head))
 					(if (nil? rewritten_tail) tail (car rewritten_tail))))))
 		_ nil)))
+(define sql_type_annotation_replacement (lambda (sources node)
+	(sql_type_annotation_replacement_using sources node sql_expr_info)))
 
-(define sql_type_lower_annotations (lambda (node)
-	(match (sql_type_annotation_replacement '() node)
+/* Nested query blocks add their own declarations to this explicit lexical
+source catalog. Clearing it while traversing fields, sources or stage inputs
+would make a valid multi-level correlation lose its producing scope. */
+(define sql_type_lower_annotations (lambda (sources node)
+	(match (sql_type_annotation_replacement sources node)
 		'(formula) formula
 		_ node)))
 
@@ -796,8 +933,8 @@ from nested logical inputs without inventing storage or planner operations. */
 (define sql_type_annotate_ir (lambda (ir)
 	(make_ir (ir_kind ir)
 		(if (query_block? (ir_root ir))
-			(sql_type_query_block (ir_root ir) '()) (sql_type_lower_annotations (ir_root ir)))
-		(sql_type_lower_annotations (ir_stages ir)) (ir_context_of ir) (ir_return ir))))
+			(sql_type_query_block (ir_root ir) '()) (sql_type_lower_annotations '() (ir_root ir)))
+		(sql_type_lower_annotations (if (query_block? (ir_root ir)) (qb_sources (ir_root ir)) '()) (ir_stages ir)) (ir_context_of ir) (ir_return ir))))
 
 /* Output consumes the same expression triple as comparisons and operators.
 Only the external projection receives formatting; relational inputs, hidden
@@ -807,7 +944,7 @@ fields and ordering retain their executable formulas and declared contracts. */
 		(define formula (sql_info_formula info))
 		(define type (sql_info_type info))
 		(define scale (sql_info_decimal_scale info))
-		(if (not (nil? scale)) (list (quote sql_decimal_output) formula scale)
+		(if (not (nil? scale)) (list sql_decimal_value formula scale)
 			(has? '("DATE" "DATETIME" "TIMESTAMP") type)
 			(list (quote sql_temporal_output) formula type (list (quote session_globalvar) "time_zone"))
 			formula))))
@@ -828,15 +965,17 @@ fields and ordering retain their executable formulas and declared contracts. */
 					(define sources (map (qb_sources block) (lambda (src)
 						(if (or (query_block? (source_relation src)) (union_block? (source_relation src)))
 							(source_with_relation src (sql_annotate_query_outputs (source_relation src) false)) src))))
+					(define group_collations (coalesceNil (qassoc_get (qb_facts block) 'group-value-collations nil)
+						(sql_group_value_collations_using sources block sql_bound_expr_info)))
 					(define infos (map_assoc (expand_query_block_fields sources (qb_fields block))
-						(lambda (_title expr) (sql_expr_info sources expr))))
+						(lambda (_title expr) (sql_bound_expr_info sources expr))))
 					(make_query_block (qb_schema block) sources
 						(if external_output
 							(map_assoc infos (lambda (_title info) (sql_output_formula info)))
 							(qb_fields block))
 						(qb_where block) (qb_group block) (qb_having block) (qb_order block)
 						(qb_limit block) (qb_offset block) (qb_hidden block) (qb_stages block)
-						(qassoc_set (qb_facts block) (quote result-types)
+						(qassoc_set (qassoc_set (qb_facts block) 'group-value-collations group_collations) (quote result-types)
 							(map_assoc infos (lambda (_title info)
 								(sql_info nil (sql_info_datatype info) (sql_info_collation info)))))))
 					(union_block? block)

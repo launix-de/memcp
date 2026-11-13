@@ -537,12 +537,14 @@ def revision_specific_scm(test_case: Dict[str, Any], spec_file: str) -> str:
     return matches[0]
 
 
-def table_abi_fixture_sources(spec_file: str, spec: Dict[str, Any]) -> Dict[str, str]:
-    """Use old SCM fixture source only when its exact lookup ABI is equivalent.
+def scm_abi_fixture_sources(spec_file: str, spec: Dict[str, Any]) -> Dict[str, str]:
+    """Use old SCM fixture source only when its exact call ABI is equivalent.
 
     A/B still uses the candidate's SQL, assertions, workload and timing policy.
     The old binary executes its own source, without a wrapper in measured code.
-    Unrelated source changes and folded lookups cannot match this migration.
+    Only explicit nil table/cache context, false comparison defaults and a
+    known literal cache-family domain paired with its parser can be removed.
+    Every other source token, including folded comparisons, remains identical.
     """
     if PERF_AB_MODE != "record" or os.environ.get("PERF_FIXTURE_ROLE") != "A":
         return {}
@@ -566,45 +568,87 @@ def table_abi_fixture_sources(spec_file: str, spec: Dict[str, Any]) -> Dict[str,
             for item in value:
                 yield from sources(item)
 
-    def tokens(source, remove_markers=False):
-        # Strings/comments are indivisible: never rewrite their contents.
+    def tokens(source, remove_flags=False, remove_context=False, remove_domain=False, remove_cache_context=False):
+        # Strings and comments are indivisible. Quoted data is never a call.
         parts = [match.group() for match in re.finditer(
             r'"(?:\\.|[^"\\])*"|;[^\n]*|/\*.*?\*/|[()\']|[^\s()\'";]+',
             source, re.DOTALL,
         ) if not match.group().startswith((";", "/*"))]
-        if remove_markers:
-            ends, stack = {}, []
-            for i, part in enumerate(parts):
-                if part == "(":
-                    stack.append(i)
-                elif part == ")" and stack:
-                    ends[stack.pop()] = i + 1
+        if not (remove_flags or remove_context or remove_domain or remove_cache_context):
+            return tuple(parts)
+        ends, stack, quoted = {}, [], set()
+        for i, part in enumerate(parts):
+            if part == "(":
+                literal = (stack and stack[-1][1]) or (i > 0 and parts[i - 1] == "'")
+                literal = literal or parts[i:i+2] == ["(", "quote"]
+                stack.append((i, literal))
+                if literal:
+                    quoted.add(i)
+            elif part == ")" and stack:
+                start, _ = stack.pop()
+                ends[start] = i + 1
 
-            def argument_end(i):
-                while i < len(parts) and parts[i] == "'":
-                    i += 1
-                return ends.get(i, i + 1)
+        def argument_end(i):
+            while i < len(parts) and parts[i] == "'":
+                i += 1
+            return ends.get(i, i + 1)
 
-            markers = set()
-            for i in range(len(parts) - 6):
-                head = 2 if parts[i:i+2] == ["(", "table"] else (
-                    4 if parts[i:i+4] == ["(", "list", "'", "table"] else 0)
-                if not head:
+        markers = set()
+        for i, end in ends.items():
+            if i in quoted:
+                continue
+            if (remove_domain or remove_cache_context) and parts[i:i+2] == ["(", "cached_parse"]:
+                arguments, cursor = [], i + 2
+                while cursor < end - 1:
+                    arguments.append(cursor)
+                    cursor = argument_end(cursor)
+                # Match the deliberate literal-domain API migration only.
+                # Older fixtures may omit the optional nil transaction context.
+                # A computed/custom domain or another parser is not ABI-only.
+                parsers = {'"sql"': 'parse_sql', '"psql"': 'parse_psql',
+                           '"tsql"': 'parse_tsql', '"sparql"': 'parse_sparql'}
+                if cursor == end - 1 and len(arguments) in (9, 10):
+                    domain, parser = arguments[1:3]
+                    expected = parsers.get(parts[domain])
+                    if (argument_end(domain) == domain + 1 and expected is not None
+                            and parts[parser:argument_end(parser)] == ["(", "list", expected, ")"]):
+                        if remove_domain:
+                            markers.add(domain)
+                        if (remove_cache_context and len(arguments) == 10
+                                and parts[arguments[-1]:end-1] == ["nil"]):
+                            markers.add(arguments[-1])
+            head = 2 if parts[i:i+2] == ["(", "table"] else (
+                4 if parts[i:i+4] == ["(", "list", "'", "table"] else (
+                6 if parts[i:i+6] == ["(", "list", "(", "quote", "table", ")"] else 0))
+            if not head:
+                continue
+            arguments, cursor = [], i + head
+            while cursor < end - 1:
+                arguments.append(cursor)
+                cursor = argument_end(cursor)
+            if cursor != end - 1 or len(arguments) not in (4, 5):
+                continue
+            if len(arguments) == 5:
+                context = arguments[-1]
+                if not remove_context or parts[context:end-1] != ["nil"]:
                     continue
-                database_flag = argument_end(i + head)
-                table_flag = argument_end(database_flag + 1)
-                if (table_flag + 1 < len(parts) and parts[database_flag] == "false"
-                        and parts[table_flag:table_flag+2] == ["false", ")"]):
-                    markers.update((database_flag, table_flag))
-            parts = [part for i, part in enumerate(parts) if i not in markers]
-        return tuple(parts)
+                markers.add(context)
+            if remove_flags and all(parts[arguments[j]:arguments[j]+1] == ["false"] for j in (1, 3)):
+                markers.update((arguments[1], arguments[3]))
+        return tuple(part for i, part in enumerate(parts) if i not in markers)
 
     old_sources = {tokens(source): source for source in sources(old_spec)}
     result = {}
     for source in sources(spec):
-        before, after = tokens(source), tokens(source, True)
-        if before != after and after in old_sources:
-            result[source] = old_sources[after]
+        before = tokens(source)
+        for flags, context, domain, cache_context in (
+                (flags, context, domain, cache_context)
+                for flags in (False, True) for context in (False, True)
+                for domain in (False, True) for cache_context in (False, True)):
+            after = tokens(source, flags, context, domain, cache_context)
+            if before != after and after in old_sources:
+                result[source] = old_sources[after]
+                break
     return result
 
 
@@ -843,7 +887,7 @@ class SQLTestRunner:
         self.log_times = log_times  # emit QUERY_TIME ns=... lines for A/B benchmarking
         self.fail_fast = fail_fast
         self.current_spec_file = None
-        self._table_abi_sources = {}
+        self._scm_abi_sources = {}
         self._config_loaded = False
         self.performance_calibration = performance_calibration or load_performance_scale()
         self._perf_round_setup_barrier = None
@@ -1060,7 +1104,7 @@ class SQLTestRunner:
                     if resp and resp.status_code == 200:
                         parts.append(f"[SQL] {step['sql'][:80]}\n       → {resp.text.strip()[:500]}")
                 elif "scm" in step:
-                    resp = requests.post(f"{self.base_url}/scm", data=self._table_abi_sources.get(step["scm"], step["scm"]).encode("utf-8"), headers=self.auth_header, timeout=5)
+                    resp = requests.post(f"{self.base_url}/scm", data=self._scm_abi_sources.get(step["scm"], step["scm"]).encode("utf-8"), headers=self.auth_header, timeout=5)
                     if resp and resp.status_code == 200:
                         parts.append(f"[SCM] {step['scm'][:80]}\n       → {resp.text.strip()[:500]}")
                 elif "psql" in step:
@@ -1561,7 +1605,7 @@ class SQLTestRunner:
                         if resp.status_code != 200 or "Error" in resp.text:
                             return fail_setup("Setup SQL failed", sql_code, resp)
                 elif "scm" in step:
-                    scm = self._table_abi_sources.get(step["scm"], step["scm"])
+                    scm = self._scm_abi_sources.get(step["scm"], step["scm"])
                     if is_perf_test:
                         scm = scm.replace("{rows}", str(perf_rows)).replace("{database}", database)
                     url = f"{self.base_url}/scm"
@@ -1615,7 +1659,7 @@ class SQLTestRunner:
             scm_code = revision_specific_scm(
                 test_case, self.current_spec_file or "",
             )
-            scm_code = self._table_abi_sources.get(scm_code, scm_code)
+            scm_code = self._scm_abi_sources.get(scm_code, scm_code)
             if scm_code:
                 scm_code = scm_code.replace("{database}", database)
         except (OSError, ValueError, yaml.YAMLError) as exc:
@@ -1696,7 +1740,10 @@ class SQLTestRunner:
                 step_timeout = int(step.get("timeout", 30))
                 if "scm" in step:
                     url = f"{self.base_url}/scm"
-                    return requests.post(url, data=self._table_abi_sources.get(step["scm"], step["scm"]).encode("utf-8"), headers=self.auth_header, timeout=step_timeout)
+                    headers = self.auth_header
+                    if step.get("session_id"):
+                        headers = {**headers, "X-Session-Id": step["session_id"]}
+                    return requests.post(url, data=self._scm_abi_sources.get(step["scm"], step["scm"]).encode("utf-8"), headers=headers, timeout=step_timeout)
                 else:
                     return self.execute_sql(database, step["sql"],
                                             session_id=step.get("session_id"),
@@ -2285,9 +2332,34 @@ class SQLTestRunner:
 
         if "affected_rows" in expect:
             expected = expect["affected_rows"]
-            if results and results and "affected_rows" in results[0]:
-                return results[0]["affected_rows"] == expected
-            return True
+            if type(expected) is not int or expected < 0:
+                return False
+            # Older HTTP SQL versions returned a genuinely empty body for zero
+            # DML. Normalize only that protocol version to the explicit scalar
+            # completion; never infer success from the permissive JSONL parser
+            # discarding malformed text, unrelated rows or missing count fields.
+            text = response.text.strip()
+            if not text:
+                if expected != 0:
+                    return False
+                completion = {"affected_rows": 0}
+            else:
+                def completion_object(fields):
+                    if len(fields) != 1:
+                        raise ValueError("DML completion requires one count field")
+                    return dict(fields)
+                try:
+                    completion = json.loads(text, object_pairs_hook=completion_object)
+                except (TypeError, ValueError):
+                    return False
+            if (not isinstance(completion, dict)
+                    or set(completion) != {"affected_rows"}
+                    or type(completion["affected_rows"]) is not int
+                    or completion["affected_rows"] != expected):
+                return False
+            # Keep cardinality and data assertions effective for both protocol
+            # versions instead of returning early after the count comparison.
+            results = [completion]
 
         if results is None:
             return False
@@ -2369,7 +2441,7 @@ class SQLTestRunner:
                     print(f"    HTTP {resp.status_code}: {resp.text[:500]}")
                     return False
             elif "scm" in step:
-                scm_code = self._table_abi_sources.get(step["scm"], step["scm"])
+                scm_code = self._scm_abi_sources.get(step["scm"], step["scm"])
                 try:
                     url = f"{self.base_url}/scm"
                     with performance_server_gate():
@@ -2421,7 +2493,7 @@ class SQLTestRunner:
                             session_id=session_id, timeout=int(step.get("timeout", 30)),
                         )
                     elif "scm" in step:
-                        statement = self._table_abi_sources.get(statement, statement)
+                        statement = self._scm_abi_sources.get(statement, statement)
                         headers = dict(self.auth_header)
                         if session_id:
                             headers["X-Session-Id"] = session_id
@@ -2493,7 +2565,7 @@ class SQLTestRunner:
             print(f"⏭️  Cluster suite: {spec_file} (use tools/replication_cluster_stress.py)")
             return True
         self.current_spec_file = spec_file
-        self._table_abi_sources = table_abi_fixture_sources(spec_file, spec)
+        self._scm_abi_sources = scm_abi_fixture_sources(spec_file, spec)
         self.suite_metadata = metadata
         self.suite_syntax = self._normalize_syntax(metadata.get("syntax"))
         self.current_suite_setup = spec.get('setup') or []
@@ -2505,9 +2577,12 @@ class SQLTestRunner:
     def run_test_spec(self, spec_file: str, setup_done: bool = False) -> bool:
         with open(spec_file, 'r') as f:
             spec = yaml.safe_load(f)
+        with suite_filesystem_fixture(spec.get("metadata", {}) or {}):
+            return self._run_test_spec(spec_file, spec, setup_done)
 
+    def _run_test_spec(self, spec_file: str, spec: Dict, setup_done: bool) -> bool:
         self.current_spec_file = spec_file
-        self._table_abi_sources = table_abi_fixture_sources(spec_file, spec)
+        self._scm_abi_sources = scm_abi_fixture_sources(spec_file, spec)
         metadata = spec.get('metadata', {})
         if suite_requires_cluster(metadata) and not self.cluster_mode:
             print(f"⏭️  Cluster suite: {spec_file} (use tools/replication_cluster_stress.py)")
@@ -2695,6 +2770,45 @@ class SQLTestRunner:
 
         # Suite success is determined solely by critical tests
         return failed_crit == 0
+
+@contextmanager
+def suite_filesystem_fixture(metadata: Dict):
+    """Own a bounded filesystem fixture across a suite, including server restarts."""
+    fixture = metadata.get("filesystem_fixture")
+    if fixture is None or metadata.get("disabled"):
+        yield
+        return
+    if fixture != "root_ancestors" or metadata.get("isolated") is not True:
+        raise ValueError("filesystem_fixture requires the root_ancestors preset and isolated: true")
+    configured = os.environ.get("MEMCP_TEST_DATA_DIR")
+    if not configured:
+        raise ValueError("filesystem_fixture requires a managed MEMCP_TEST_DATA_DIR")
+    data = Path(configured).resolve(strict=True)
+    if not data.is_dir():
+        raise ValueError("filesystem_fixture data path is not a directory")
+    # Names and targets are owned by this preset; YAML cannot select arbitrary
+    # files, shell commands, link destinations or preexisting directories.
+    link = data / "filesystem_ancestry_link"
+    info = data / "filesystem_ancestry_fixture.txt"
+    if link.exists() or link.is_symlink() or info.exists() or info.is_symlink():
+        raise ValueError("filesystem_fixture refuses to replace an existing fixture path")
+    linked = described = False
+    with tempfile.TemporaryDirectory(prefix="memcp-root-ancestors-") as temporary:
+        outside = Path(temporary)
+        (outside / "existing").mkdir()
+        try:
+            link.symlink_to(outside, target_is_directory=True)
+            linked = True
+            with info.open("x", encoding="utf-8") as output:
+                described = True
+                json.dump({"outside": str(outside)}, output)
+            yield
+        finally:
+            if described:
+                info.unlink(missing_ok=True)
+            if linked:
+                link.unlink(missing_ok=True)
+
 
 def wait_for_sql_ready(base_url: str, username: str = "root", password: str = "admin", database: str = "memcp-tests", timeout: int = 30) -> bool:
     auth = b64encode(f"{username}:{password}".encode()).decode()

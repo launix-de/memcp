@@ -24,7 +24,7 @@ func TestUUIDBinaryDefaultSurvivesWALAndRebuild(t *testing.T) {
 			tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}}
 			tbl.publishShowColumnsSnapshot(true)
 			tbl.schema.save()
-			cols, rows := tbl.prepareInsertDefaults([]string{"payload"}, [][]scm.Scmer{{scm.NewString("one")}, {scm.NewString("two")}, {scm.NewString("three")}})
+			cols, rows := tbl.prepareInsertDefaults([]string{"payload"}, [][]scm.Scmer{{scm.NewString("one")}, {scm.NewString("two")}, {scm.NewString("three")}}, tbl.columnDeclarations())
 			for _, row := range rows {
 				if len(row[1].String()) != 16 {
 					t.Fatal("binary default not sixteen bytes")
@@ -62,7 +62,7 @@ func TestUUIDDefaultsArePerRowAndExplicitBeforeInsert(t *testing.T) {
 	c.UpdateSanitizer()
 	tbl.publishShowColumnsSnapshot(true)
 	tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}}
-	cols, rows := tbl.prepareInsertDefaults(nil, [][]scm.Scmer{{}, {}, {}})
+	cols, rows := tbl.prepareInsertDefaults(nil, [][]scm.Scmer{{}, {}, {}}, tbl.columnDeclarations())
 	if len(cols) != 1 || len(rows) != 3 {
 		t.Fatal("default expansion")
 	}
@@ -80,7 +80,7 @@ func TestUUIDDefaultsArePerRowAndExplicitBeforeInsert(t *testing.T) {
 	if got := len(tbl.ActiveShards()[0].deltaRows()); got != 3 {
 		t.Fatalf("inserted %d", got)
 	}
-	_, explicit := tbl.prepareInsertDefaults([]string{"id"}, [][]scm.Scmer{{scm.NewNil()}})
+	_, explicit := tbl.prepareInsertDefaults([]string{"id"}, [][]scm.Scmer{{scm.NewNil()}}, tbl.columnDeclarations())
 	if !explicit[0][0].IsNil() {
 		t.Fatal("explicit NULL replaced by UUID default")
 	}

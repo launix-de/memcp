@@ -410,6 +410,13 @@ literals keep their existing direct representation (including additive plans). *
 	(if (< (count arguments) 5) (error "compile_scan_plan expects an operator, transaction, source, filter columns, and filter callback")
 		(match arguments (merge '(operator tx source columns filter) rest)
 			(begin
+				/* Native relation lookup and row access consume the same explicit
+				transaction. Persistent computed callbacks deliberately scan nil;
+				they must not capture the request which initialized the column. */
+				(define source (match source
+					((symbol table) database database_case name name_case _lookup_tx)
+					(list (quote table) database database_case name name_case tx)
+					_ source))
 				(define static (scan_plan_list columns))
 				(define initializer_index (match operator
 					(quote scan) 2 (quote scan_order) 7

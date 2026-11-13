@@ -30,6 +30,9 @@ def query(sql):
 def cases(changed=False):
     unchanged = not changed
     return [
+        ('legacy foreign callback rows', 6,
+         'SELECT id,parent_id,omitted_value FROM up_fk_abi_child ORDER BY id',
+         '1\t7\tNULL'),
         ('group aggregate', 12,
          'SELECT bucket, COUNT(*), SUM(value) FROM up_helper GROUP BY bucket ORDER BY bucket',
          '1\t2\t30\n2\t2\t70' if unchanged else '1\t2\t35\n2\t2\t70'),
@@ -88,6 +91,43 @@ def cases(changed=False):
          '(SELECT f.stamp FROM up_helper_file f WHERE f.id=d.file_id LIMIT 1) DESC, '
          'd.id DESC LIMIT 3',
          '4000\n3999\n3998' if unchanged else '1\n4000\n3999'),
+        ('constant calendar and NULL values', 6,
+         'SELECT COUNT(*), COUNT(moment), COUNT(optional_moment), COUNT(day), COUNT(stamp), '
+         "DATE_FORMAT(MIN(moment), '%Y-%m-%d %H:%i:%s'), "
+         "DATE_FORMAT(MAX(moment), '%Y-%m-%d %H:%i:%s') FROM up_calendar_const",
+         '5\t5\t3\t4\t4\t2024-02-29 12:34:56\t2024-02-29 12:34:56'),
+        ('variable calendar rows', 6,
+         "SELECT id, DATE_FORMAT(moment, '%Y-%m-%d %H:%i:%s'), "
+         "DATE_FORMAT(day, '%Y-%m-%d'), DATE_FORMAT(stamp, '%Y-%m-%d %H:%i:%s') "
+         'FROM up_calendar_variable ORDER BY id',
+         '1\t2000-01-01 00:00:00\t2000-01-01\t2000-01-01 00:00:00\n'
+         '2\t2024-02-29 12:34:56\t2024-02-29\t2024-02-29 12:34:56\n'
+         '3\t2030-12-31 23:59:59\t2030-12-31\t2030-12-31 23:59:59\n'
+         '4\t2000-01-01 00:00:00\t2000-01-01\t2000-01-01 00:00:00\n'
+         '5\t2024-02-29 00:00:01\t2024-02-29\t2024-02-29 00:00:01\n'
+         '6\tNULL\tNULL\tNULL'),
+        ('calendar grouping and duplicate values', 6,
+         "SELECT DATE_FORMAT(moment, '%Y-%m-%d %H:%i:%s'), COUNT(*) "
+         'FROM up_calendar_variable WHERE moment IS NOT NULL GROUP BY moment ORDER BY moment',
+         '2000-01-01 00:00:00\t2\n2024-02-29 00:00:01\t1\n'
+         '2024-02-29 12:34:56\t1\n2030-12-31 23:59:59\t1'),
+        ('calendar comparison and NULL selection', 6,
+         "SELECT id FROM up_calendar_variable WHERE moment >= '2024-02-29 00:00:01' "
+         "AND moment < '2025-01-01 00:00:00' OR moment IS NULL ORDER BY id",
+         '2\n5\n6'),
+        ('calendar indexed gather retains seconds and NULLs', 6,
+         "SELECT id, DATE_FORMAT(moment, '%Y-%m-%d %H:%i:%s'), "
+         "DATE_FORMAT(stamp, '%Y-%m-%d %H:%i:%s') "
+         'FROM up_calendar_variable WHERE id IN (2,5,6) ORDER BY id',
+         '2\t2024-02-29 12:34:56\t2024-02-29 12:34:56\n'
+         '5\t2024-02-29 00:00:01\t2024-02-29 00:00:01\n'
+         '6\tNULL\tNULL'),
+        ('calendar ordered page retains duplicate seconds', 6,
+         "SELECT id, DATE_FORMAT(moment, '%Y-%m-%d %H:%i:%s') "
+         'FROM up_calendar_variable WHERE moment IS NOT NULL '
+         'ORDER BY moment DESC,id LIMIT 4 OFFSET 1',
+         '2\t2024-02-29 12:34:56\n5\t2024-02-29 00:00:01\n'
+         '1\t2000-01-01 00:00:00\n4\t2000-01-01 00:00:00'),
     ]
 
 
@@ -156,6 +196,24 @@ elif mode in ('mutate', 'cold-mutate'):
     # happens after the repeated baseline has exercised adaptive caches.
     if mode == 'mutate':
         run_cases(oracle=oracle)
+    # Exercise all four regenerated callbacks before comparing original rows.
+    try:
+        query('INSERT INTO up_fk_abi_child(id,parent_id) VALUES(2,999)')
+    except RuntimeError as failure:
+        if 'foreign key' not in str(failure).lower():
+            raise
+    else:
+        raise AssertionError('upgraded foreign key admitted an orphan')
+    query('INSERT INTO up_fk_abi_child(id,parent_id) VALUES(2,9)')
+    query('UPDATE up_fk_abi_child SET parent_id=7 WHERE id=2')
+    query('UPDATE up_fk_abi_child SET parent_id=9 WHERE id=2')
+    query('UPDATE up_fk_abi_parent SET id=10 WHERE id=9')
+    if query('SELECT parent_id FROM up_fk_abi_child WHERE id=2') != '10':
+        raise AssertionError('upgraded foreign parent update did not cascade')
+    query('DELETE FROM up_fk_abi_parent WHERE id=10')
+    if query('SELECT COUNT(*) FROM up_fk_abi_child WHERE id=2') != '0':
+        raise AssertionError('upgraded foreign parent delete did not cascade')
+    query('INSERT INTO up_fk_abi_parent VALUES(9)')
     query('UPDATE up_helper SET value=15 WHERE id=1')
     query('UPDATE up_helper_file SET stamp=5000 WHERE id=1')
     query('UPDATE up_group_events SET amount=101 WHERE id=1')

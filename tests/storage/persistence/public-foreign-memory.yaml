@@ -1,0 +1,104 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  description: Finite native FK program and retained declaration container memory follows real savepoints and publication
+setup:
+- sql: CREATE TABLE fk_memory_parent(id INT PRIMARY KEY)
+- sql: CREATE TABLE fk_memory_child(id INT PRIMARY KEY,parent_id INT)
+- sql: CREATE TABLE fk_memory_rollback(id INT PRIMARY KEY,parent_id INT)
+- sql: CREATE TABLE fk_memory_orphan(id INT PRIMARY KEY,parent_id INT)
+- sql: INSERT INTO fk_memory_parent VALUES(1)
+- sql: INSERT INTO fk_memory_child VALUES(10,1)
+- sql: INSERT INTO fk_memory_orphan VALUES(30,99)
+cleanup:
+- sql: DROP TABLE IF EXISTS fk_memory_child
+- sql: DROP TABLE IF EXISTS fk_memory_rollback
+- sql: DROP TABLE IF EXISTS fk_memory_orphan
+- sql: DROP TABLE IF EXISTS fk_memory_parent
+test_cases:
+- name: Pending FK payload is counted once and savepoint zero preserves only the retained construction owner
+  scm: |
+    (begin
+      (define child (table "memcp-tests" false "fk_memory_child" false nil))
+      (define parent (table "memcp-tests" false "fk_memory_parent" false nil))
+      (define orphan (table "memcp-tests" false "fk_memory_orphan" false nil))
+      (define bytes (lambda () (+ ((show child "memory") "metadata_size_bytes") ((show parent "memory") "metadata_size_bytes"))))
+      (createtrigger child "fk_memory_user" "before_insert" "" ""
+        (lambda (OLD NEW session tx) (set_assoc NEW "id" (+ (get_assoc NEW "id") 1000))) true)
+      (define initial (bytes))
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (define zero (tx_savepoint tx))
+      (createforeignkey child "FK_memory_owned" '("parent_id") parent '("id") "cascade" "cascade" tx)
+      (define staged (bytes))
+      (define stable (and (equal? staged (bytes)) (equal? staged (bytes))))
+      (define failed (try (lambda () (begin
+        (createforeignkey orphan "FK_memory_orphan" '("parent_id") parent '("id") "restrict" "restrict" tx) false))
+        (lambda (failure) (strlike (concat failure) "%existing child row has no parent%"))))
+      (define after_failure (bytes))
+      (tx_rollback_to_savepoint tx zero)
+      (define rewound (bytes))
+      (define empty (and (empty_list? ((show child "constraints" tx) "ForeignKeys"))
+        (empty_list? ((show parent "constraints" tx) "ForeignKeys"))))
+      (createforeignkey child "FK_memory_owned" '("parent_id") parent '("id") "cascade" "cascade" tx)
+      (tx_commit owner)
+      (define published (bytes))
+      (define enforced (try (lambda () (begin (insert child '("id" "parent_id") (list (list 50 999))) false))
+        (lambda (failure) (strlike (concat failure) "%foreign key constraint%"))))
+      (and stable failed (>= after_failure staged) empty (> rewound initial)
+        (> (- staged rewound) 1024) (> published initial) (equal? published (bytes)) enforced
+        (equal? (count ((show child "constraints") "ForeignKeys")) 1)))
+  expect: {result: true}
+
+- name: Published FK programs retain real cascade behavior
+  sql: UPDATE fk_memory_parent SET id=2 WHERE id=1
+  expect: {affected_rows: 1}
+
+- name: Cascaded native rows and repeated program memory observations remain stable
+  scm: |
+    (begin
+      (define child (table "memcp-tests" false "fk_memory_child" false nil))
+      (define parent (table "memcp-tests" false "fk_memory_parent" false nil))
+      (define sum (scan nil child '() '() '() (lambda () true) '("parent_id") (lambda (acc value) (+ acc value)) 0 +))
+      (define first (show child "memory"))
+      (define second (show child "memory"))
+      (and (equal? sum 2) (equal? (first "metadata_size_bytes") (second "metadata_size_bytes"))
+        (> (first "metadata_size_bytes") 1024)
+        (equal? (count ((show parent "constraints") "ForeignKeys")) 1)))
+  expect: {result: true}
+
+- name: Rollback closes the retained owner after savepoint zero without leaving enforcement
+  scm: |
+    (begin
+      (define child (table "memcp-tests" false "fk_memory_rollback" false nil))
+      (define parent (table "memcp-tests" false "fk_memory_parent" false nil))
+      (define bytes (lambda () (+ ((show child "memory") "metadata_size_bytes") ((show parent "memory") "metadata_size_bytes"))))
+      (define initial (bytes))
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (define zero (tx_savepoint tx))
+      (createforeignkey child "FK_memory_rollback" '("parent_id") parent '("id") "restrict" "restrict" tx)
+      (tx_rollback_to_savepoint tx zero)
+      (define retained (bytes))
+      (tx_rollback owner)
+      (define closed (bytes))
+      (define inserted (insert child '("id" "parent_id") (list (list 99 999))))
+      (and (> retained initial) (< closed retained) (equal? inserted 1)
+        (empty_list? ((show child "constraints") "ForeignKeys"))))
+  expect: {result: true}
+
+- name: Removing generated programs releases their payload while preserving user trigger and backing capacity
+  scm: |
+    (begin
+      (define child (table "memcp-tests" false "fk_memory_child" false nil))
+      (define parent (table "memcp-tests" false "fk_memory_parent" false nil))
+      (define bytes (lambda () (+ ((show child "memory") "metadata_size_bytes") ((show parent "memory") "metadata_size_bytes"))))
+      (define before (bytes))
+      (define dropped (dropforeignkey child "FK_memory_owned"))
+      (define after (bytes))
+      (define inserted (insert child '("id" "parent_id") (list (list 20 999))))
+      (define ids (scan nil child '() '() '() (lambda () true) '("id") (lambda (acc value) (+ acc value)) 0 +))
+      (and dropped (> (- before after) 1024) (equal? after (bytes)) (equal? inserted 1)
+        (equal? ids 1030) (empty_list? ((show child "constraints") "ForeignKeys"))))
+  expect: {result: true}

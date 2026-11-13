@@ -1,0 +1,69 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  requires_tds: true
+  description: Large character declarations retain their common-type precedence and unbounded values
+setup:
+- sql: CREATE TABLE large_character_values(id INT PRIMARY KEY,s TEXT,n NTEXT)
+- sql: INSERT large_character_values VALUES(1,'alpha',N'omega'),(2,NULL,NULL)
+- sql: INSERT large_character_values VALUES(3,REPLICATE(CAST('q' AS VARCHAR(MAX)),9001),N'long')
+cleanup:
+- sql: DROP TABLE IF EXISTS large_character_values
+test_cases:
+- name: CASE converts a bounded fallback to the TEXT declaration
+  sql: SELECT CASE WHEN id=1 THEN s ELSE '' END AS value FROM large_character_values WHERE id<=2 ORDER BY id
+  expect: {rows: 2,data: [{value: alpha},{value: ''}]}
+- name: An explicit bounded conversion after CASE still truncates
+  sql: SELECT CONVERT(VARCHAR(3),CASE WHEN id=1 THEN s ELSE '' END) AS value FROM large_character_values WHERE id<=2 ORDER BY id
+  expect: {rows: 2,data: [{value: alp},{value: ''}]}
+- name: An aggregate consumes the explicitly converted CASE result
+  sql: SELECT MAX(CONVERT(VARCHAR(3),CASE WHEN id=1 THEN s ELSE '' END)) AS value FROM large_character_values
+  expect: {rows: 1,data: [{value: alp}]}
+- name: CASE retains national large text
+  sql: SELECT CONVERT(NVARCHAR(3),CASE WHEN id=1 THEN n ELSE N'' END) AS value FROM large_character_values WHERE id<=2 ORDER BY id
+  expect: {rows: 2,data: [{value: ome},{value: ''}]}
+- name: COALESCE uses the large text declaration and preserves NULL fallback
+  sql: SELECT COALESCE(s,'fallback') AS value FROM large_character_values WHERE id<=2 ORDER BY id
+  expect: {rows: 2,data: [{value: alpha},{value: fallback}]}
+- name: ISNULL retains the large first argument contract
+  sql: SELECT ISNULL(s,'fallback') AS value FROM large_character_values WHERE id<=2 ORDER BY id
+  expect: {rows: 2,data: [{value: alpha},{value: fallback}]}
+- name: Common large text has no inferred eight thousand character bound
+  sql: SELECT LEN(CONVERT(VARCHAR(MAX),CASE WHEN id=3 THEN s ELSE '' END)) AS width FROM large_character_values WHERE id=3
+  expect: {rows: 1,data: [{width: 9001}]}
+- name: A UNION ALL retains the large text contract and duplicates
+  sql: SELECT s AS value FROM large_character_values WHERE id=1 UNION ALL SELECT CAST('alpha' AS VARCHAR(10)) AS value
+  expect: {rows: 2,data: [{value: alpha},{value: alpha}]}
+- name: The common descriptor retains TEXT instead of a bounded fallback
+  scm: |
+    (map (tsql_common_value_infos
+      (list (sql_info "source" "TEXT" nil) (sql_info "fallback" (list "VARCHAR" (list 8)) nil)) nil)
+      sql_info_datatype)
+  expect: {result: [TEXT,TEXT]}
+- name: National large text precedes both TEXT and national bounded text
+  scm: |
+    (map (tsql_common_value_infos
+      (list (sql_info "a" "TEXT" nil) (sql_info "b" "NTEXT" nil)
+        (sql_info "c" (list "NVARCHAR" (list 8)) nil)) nil) sql_info_datatype)
+  expect: {result: [NTEXT,NTEXT,NTEXT]}
+- name: Large text does not become a valid operand of string addition
+  sql: SELECT s+'' AS value FROM large_character_values WHERE id=1
+  expect: {error: true}
+- name: Numeric precedence does not admit an unsupported implicit large text cast
+  sql: SELECT CASE WHEN id=1 THEN s ELSE 1 END AS value FROM large_character_values WHERE id=1
+  expect: {error: true,contains: unsupported implicit conversion}
+- name: A bounded first ISNULL argument truncates its large text replacement
+  sql: SELECT ISNULL(CAST(NULL AS VARCHAR(3)),s) AS value FROM large_character_values WHERE id=1
+  expect: {rows: 1,data: [{value: alp}]}
+- name: An unbounded first ISNULL argument preserves a large replacement
+  sql: SELECT LEN(ISNULL(CAST(NULL AS VARCHAR(MAX)),s)) AS width FROM large_character_values WHERE id=3
+  expect: {rows: 1,data: [{width: 9001}]}
+- name: TDS reports the retained bounded first argument widths
+  tds:
+    statements:
+    - sql: SELECT ISNULL(CAST(NULL AS VARCHAR(3)),s) AS a,ISNULL(CAST(NULL AS NVARCHAR(2)),n) AS n FROM large_character_values WHERE id=1
+      expect:
+        rows: 1
+        data: [{a: alp,n: om}]
+        column_types: [{name: a,type: VARCHAR,length: 3},{name: n,type: NVARCHAR,length: 2}]

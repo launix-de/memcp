@@ -1,0 +1,79 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Microsoft ScriptDOM TSql100.g setClauseColumnAssignment consumes a multipart
+# identifier as a regular column reference; UDT mutator calls are separate.
+# https://learn.microsoft.com/en-us/sql/t-sql/queries/update-transact-sql
+metadata:
+  syntax: tsql
+  isolated: true
+  description: Qualified assignment columns bind to the declared UPDATE target
+setup:
+- sql: CREATE TABLE qualified_write(id INT PRIMARY KEY,value INT DEFAULT 9)
+- sql: CREATE TABLE qualified_input(id INT PRIMARY KEY,value INT)
+- sql: INSERT INTO qualified_write VALUES(1,10),(2,20)
+- sql: INSERT INTO qualified_input VALUES(1,7),(2,8)
+- sql: CREATE TABLE [qualified.dot](id INT PRIMARY KEY,[value.dot] INT)
+- sql: INSERT INTO [qualified.dot] VALUES(1,30)
+- sql: |
+    CREATE PROCEDURE dbo.qualified_write_period @year INT,@month INT AS
+      UPDATE dbo.qualified_write
+      SET dbo.qualified_write.value=@year*100+@month
+      FROM dbo.qualified_write INNER JOIN dbo.qualified_input
+        ON qualified_write.id=qualified_input.id
+      WHERE qualified_input.id=1;
+test_cases:
+- name: Three part assignments execute within an ordinary stored procedure
+  sql: EXEC dbo.qualified_write_period @year=2026,@month=11
+- name: The qualified join updates only its target match
+  sql: SELECT id,value FROM qualified_write ORDER BY id
+  expect: {rows: 2,data: [{id: 1,value: 202611},{id: 2,value: 20}]}
+- name: An explicit catalog and owner resolve against the current target
+  sql: UPDATE dbo.qualified_write SET [memcp-tests].dbo.qualified_write.value=21 WHERE id=2
+  expect: {affected_rows: 1}
+- name: A qualified compound assignment retains the target column value
+  sql: UPDATE dbo.qualified_write SET dbo.qualified_write.value+=2 WHERE id=2
+  expect: {affected_rows: 1}
+- name: Compound conversion executes on the same declared column
+  sql: SELECT value FROM qualified_write WHERE id=2
+  expect: {rows: 1,data: [{value: 23}]}
+- name: Qualified identifiers preserve quoted dots as part of one name
+  sql: UPDATE dbo.[qualified.dot] SET dbo.[qualified.dot].[value.dot]=31 WHERE id=1
+  expect: {affected_rows: 1}
+- name: Quoted target assignment produces the requested value
+  sql: SELECT [value.dot] AS result FROM [qualified.dot]
+  expect: {rows: 1,data: [{result: 31}]}
+- name: A qualified DEFAULT retains the target declaration
+  sql: UPDATE dbo.qualified_write SET dbo.qualified_write.value=DEFAULT WHERE id=2
+  expect: {affected_rows: 1}
+- name: The default assignment reads the existing declaration
+  sql: SELECT value FROM qualified_write WHERE id=2
+  expect: {rows: 1,data: [{value: 9}]}
+- name: Explicit aliases retain two part assignment binding
+  sql: UPDATE target SET target.value=8 FROM qualified_write AS target WHERE target.id=2
+  expect: {affected_rows: 1}
+- name: A different joined table cannot qualify the assigned column
+  sql: UPDATE dbo.qualified_write SET dbo.qualified_input.value=999 FROM dbo.qualified_write JOIN dbo.qualified_input ON qualified_write.id=qualified_input.id
+  expect: {error: true}
+- name: A different database cannot qualify the assigned column
+  sql: UPDATE dbo.qualified_write SET other_catalog.dbo.qualified_write.value=999 WHERE id=2
+  expect: {error: true}
+- name: A different owner cannot qualify the assigned column
+  sql: UPDATE dbo.qualified_write SET other_owner.qualified_write.value=999 WHERE id=2
+  expect: {error: true}
+- name: An explicit alias hides the qualified original relation name
+  sql: UPDATE target SET dbo.qualified_write.value=999 FROM dbo.qualified_write AS target WHERE target.id=2
+  expect: {error: true}
+- name: A member spelling is not shortened to an ordinary target column
+  sql: UPDATE qualified_write SET value.value=999 WHERE id=2
+  expect: {error: true}
+- name: Mixed qualification does not permit duplicate target assignments
+  sql: UPDATE qualified_write SET value=998,dbo.qualified_write.value=999 WHERE id=2
+  expect: {error: true}
+- name: Failed foreign assignments leave the existing target unchanged
+  sql: SELECT id,value FROM qualified_write ORDER BY id
+  expect: {rows: 2,data: [{id: 1,value: 202611},{id: 2,value: 8}]}
+cleanup:
+- sql: DROP PROCEDURE IF EXISTS dbo.qualified_write_period
+- sql: DROP TABLE IF EXISTS [qualified.dot]
+- sql: DROP TABLE IF EXISTS qualified_input
+- sql: DROP TABLE IF EXISTS qualified_write

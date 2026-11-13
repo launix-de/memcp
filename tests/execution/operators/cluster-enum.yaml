@@ -29,3 +29,17 @@ test_cases:
   - name: Enum domain validation remains active with a shared schema
     sql: INSERT INTO enum_labels VALUES (3,'invalid')
     expect: {error: true}
+  - name: Native declarations remain coherent on the worker executing a delegated scan
+    scm: |
+      (begin
+        (define expected (sql_relation_local_declarations "{database}" "enum_labels" nil))
+        (scan nil (table "{database}" false "big_items" false nil) '() '()
+          '("id") (lambda (id) (< id 3)) '("id")
+          (close_procedure (lambda (acc _id)
+            (if (expression_equal? expected
+              (show (table "{database}" false "enum_labels" false nil) "declarations"))
+              (+ acc 1) (error "worker declaration differs from its schema owner")))) 0 +))
+    expect:
+      result: 3
+      cluster:
+        min_remote_shards: 1

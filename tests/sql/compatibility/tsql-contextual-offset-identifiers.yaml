@@ -1,0 +1,60 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# References: Microsoft reserved-keywords and SELECT ORDER BY documentation.
+metadata:
+  syntax: tsql
+  isolated: true
+  description: Contextual OFFSET identifiers coexist with real ordering windows and table-function recipes
+setup:
+- sql: CREATE TABLE offset(id INT PRIMARY KEY,offset INT)
+- sql: INSERT INTO offset VALUES(1,3),(2,4),(3,5)
+- sql: |
+    CREATE FUNCTION dbo.context_offset_rows(@times INT,@language VARCHAR(2)='DE')
+    RETURNS @result TABLE(slot INT,offset INT,label VARCHAR(2)) AS BEGIN
+      DECLARE @copy TABLE(amount INT);
+      DECLARE @i INT=0;
+      INSERT INTO @copy(amount) SELECT offset FROM offset WHERE id=1;
+      WHILE @i<@times BEGIN
+        INSERT INTO @result(slot,offset,label)
+          SELECT @i,q.offset,@language FROM (SELECT amount AS offset FROM @copy) AS q;
+        SET @i=@i+1;
+      END;
+      RETURN;
+    END
+test_cases:
+- name: An explicit projection alias may use the contextual OFFSET spelling
+  sql: SELECT 17 AS offset
+  expect: {rows: 1,data: [{offset: 17}]}
+- name: A derived projection retains its unquoted contextual alias
+  sql: SELECT q.offset FROM (SELECT 19 AS offset) AS q
+  expect: {rows: 1,data: [{offset: 19}]}
+- name: Contextual table column and source aliases retain actual row values
+  sql: SELECT offset.id,offset.offset FROM offset AS offset ORDER BY offset.id
+  expect: {rows: 3,data: [{id: 1,offset: 3},{id: 2,offset: 4},{id: 3,offset: 5}]}
+- name: A defaulted table function preserves local table loops and derived OFFSET exports
+  sql: SELECT slot,offset,label FROM dbo.context_offset_rows(2,DEFAULT) ORDER BY slot
+  expect: {rows: 2,data: [{slot: 0,offset: 3,label: DE},{slot: 1,offset: 3,label: DE}]}
+- name: An explicit function argument remains distinct from its declared default
+  sql: SELECT slot,offset,label FROM dbo.context_offset_rows(1,'EN')
+  expect: {rows: 1,data: [{slot: 0,offset: 3,label: EN}]}
+- name: A zero-iteration function remains empty
+  sql: SELECT slot,offset,label FROM dbo.context_offset_rows(0,DEFAULT)
+  expect: {rows: 0}
+- name: Real OFFSET FETCH syntax still owns the ordered input window
+  sql: SELECT id,offset FROM offset ORDER BY id OFFSET 1 ROWS FETCH NEXT 1 ROWS ONLY
+  expect: {rows: 1,data: [{id: 2,offset: 4}]}
+- name: A contextual ordering key remains separate from the following OFFSET clause
+  sql: SELECT id,offset FROM offset ORDER BY offset DESC OFFSET 1 ROWS FETCH FIRST 1 ROW ONLY
+  expect: {rows: 1,data: [{id: 2,offset: 4}]}
+- name: Real ordering windows retain an explicit zero skip
+  sql: SELECT id FROM offset ORDER BY id OFFSET 0 ROWS FETCH NEXT 1 ROWS ONLY
+  expect: {rows: 1,data: [{id: 1}]}
+- name: A real reserved keyword still requires identifier delimiters
+  sql: SELECT 1 AS FROM
+  expect: {error: true}
+- name: An incomplete ordering OFFSET clause remains invalid
+  sql: SELECT id FROM offset ORDER BY id OFFSET 1
+  expect: {error: true}
+cleanup:
+- sql: DROP FUNCTION IF EXISTS dbo.context_offset_rows
+- sql: DROP TABLE IF EXISTS offset

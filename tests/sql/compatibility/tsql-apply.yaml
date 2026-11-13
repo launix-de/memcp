@@ -15,6 +15,7 @@ setup:
   - sql: INSERT INTO tsql_apply_keywords VALUES (1,17)
   - sql: INSERT INTO tsql_apply_outer VALUES (1,7),(2,7),(3,NULL),(4,9),(5,12)
   - sql: INSERT INTO tsql_apply_inner VALUES (10,7,4),(11,7,NULL),(12,9,6),(13,NULL,8)
+  - sql: CREATE VIEW tsql_apply_inner_view AS SELECT id,lookup_key,amount FROM tsql_apply_inner
 test_cases:
   - name: APPLY remains an unquoted declared column and table alias
     sql: SELECT apply.apply AS n FROM tsql_apply_keywords apply
@@ -120,6 +121,23 @@ test_cases:
     expect:
       rows: 4
       data: [{parent_id: 1, child_id: 10, amount: 4}, {parent_id: 2, child_id: 11, amount: null}, {parent_id: 3, child_id: 12, amount: 6}, {parent_id: 4, child_id: 13, amount: 8}]
+  - name: APPLY view wildcard exports use the common declared source contracts
+    sql: >-
+      SELECT p.id AS parent_id,q.id AS child_id,q.amount FROM tsql_apply_outer p
+      CROSS APPLY (SELECT c.* FROM tsql_apply_inner_view c WHERE c.id=p.id+9) q
+      ORDER BY p.id
+    expect:
+      rows: 4
+      data: [{parent_id: 1,child_id: 10,amount: 4},{parent_id: 2,child_id: 11,amount: null},{parent_id: 3,child_id: 12,amount: 6},{parent_id: 4,child_id: 13,amount: 8}]
+  - name: APPLY view wildcard metadata retains the declared integer columns
+    scm: |
+      (begin
+        (define fields (tds_describe "memcp-tests"
+          "SELECT q.id,q.amount FROM tsql_apply_outer p CROSS APPLY (SELECT c.* FROM tsql_apply_inner_view c WHERE c.id=p.id+9) q"
+          "" (newsession)))
+        (and (equal? (map fields (lambda (field) (field "sql_type"))) '("INT" "INT"))
+          (equal? (map fields (lambda (field) (field "size"))) '(4 4))))
+    expect: {result: true}
   - name: APPLY aggregate domain follows the complete derived-left projection
     sql: >-
       SELECT p.id, q.n FROM
@@ -361,6 +379,7 @@ test_cases:
     expect:
       error: true
 cleanup:
+  - sql: DROP VIEW IF EXISTS tsql_apply_inner_view
   - sql: DROP TABLE IF EXISTS tsql_apply_keywords
   - sql: DROP TABLE IF EXISTS tsql_apply_inner
   - sql: DROP TABLE IF EXISTS tsql_apply_outer

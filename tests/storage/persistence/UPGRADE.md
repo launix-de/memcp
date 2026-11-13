@@ -43,7 +43,9 @@ The predecessor binary creates the complete fixture and supplies two oracles:
   stored value;
 - results from a public SQL workload, including repeated grouping, aggregate
   ordering, expression group keys, correlated equality/range lookups and
-  windows with opposing order directions.
+  windows with opposing order directions, and native calendar values with
+  constant/varying whole seconds, NULLs, duplicate grouping, comparisons,
+  indexed gathers and ordered pages.
 
 The same SQL workload runs on the predecessor, after a predecessor restart,
 after opening the data with the candidate, after cold and warm source-table
@@ -51,6 +53,12 @@ updates, and after a candidate restart. Each execution must return the declared
 result and the candidate's unchanged executions must equal the predecessor's
 saved query oracle. The updates are restored before the full data snapshot is
 compared.
+
+Calendar snapshots use public `DATE_FORMAT` expressions for DATE, DATETIME and
+TIMESTAMP rather than a predecessor's integer or text wire carrier. The same
+canonical expressions run on both writers and readers. These fixtures contain
+whole seconds understood by every pin; they do not assert fractional precision
+that an old writer could never produce.
 
 Queries which can create adaptive caches run repeatedly. This is deliberate:
 the workload must cross normal admission thresholds through public SQL rather

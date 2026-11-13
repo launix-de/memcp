@@ -95,6 +95,9 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 			coverage = JITCoverage{}
 		}
 	}()
+	if proc != nil && jitLexicalPublicationNeedsRuntime(proc.Params, body) {
+		panic("jit: named binding publication requires a runtime lexical frame")
+	}
 	numVars, firstAssignment := jitRequiredLocalSlots(body, numVars)
 
 	freeRegs := jitDefaultFreeGPRegs()

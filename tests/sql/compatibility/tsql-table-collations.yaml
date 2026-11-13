@@ -1,0 +1,105 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Column collation metadata agrees with native declarations and actual TDS result contracts
+setup:
+- sql: CREATE TABLE column_collation_rows(id INT,label NVARCHAR(9),code VARCHAR(8) COLLATE utf8mb4_bin,utf8_label
+    VARCHAR(8) COLLATE Latin1_General_100_CI_AS_SC_UTF8)
+- scm: (eval (parse_sql "memcp-tests" "CREATE USER column_collation_reader IDENTIFIED BY 'pw'" nil))
+- sql: GRANT CONNECT TO column_collation_reader
+cleanup:
+- sql: DROP TABLE IF EXISTS column_collation_rows
+- scm: (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS column_collation_reader" nil))
+test_cases:
+- name: Real metadata procedure returns one ordered typed collation row per actual column
+  tds:
+    statements:
+    - sql: EXEC [memcp-tests]..sp_tablecollations_100 N'[dbo].[column_collation_rows]'
+      expect:
+        rows: 4
+        columns:
+        - colid
+        - name
+        - tds_collation
+        - collation
+        column_types:
+        - name: colid
+          type: INT
+        - name: name
+          type: NVARCHAR
+        - name: tds_collation
+          type: VARBINARY
+          length: 5
+        - name: collation
+          type: NVARCHAR
+        data:
+        - colid: 1
+          name: id
+          tds_collation: null
+          collation: null
+        - colid: 2
+          name: label
+          tds_collation:
+            binary_hex: 0904d00034
+          collation: utf8mb4
+        - colid: 3
+          name: code
+          tds_collation:
+            binary_hex: 0904d00034
+          collation: utf8mb4_bin
+        - colid: 4
+          name: utf8_label
+          tds_collation:
+            binary_hex: 0904000400
+          collation: Latin1_General_100_CI_AS_SC_UTF8
+- name: Legacy procedure spelling uses the same declaration ordinal contract
+  tds:
+    statements:
+    - sql: EXEC sys.sp_tablecollations N'dbo.column_collation_rows'
+      expect:
+        rows: 4
+        columns:
+        - colid
+        - name
+        - tds_collation
+        - collation
+- name: Metadata-only procedure invocation describes columns without returning row values
+  tds:
+    statements:
+    - sql: SET FMTONLY ON; EXEC sys.sp_tablecollations_100 N'dbo.column_collation_rows'; SET FMTONLY OFF
+      expect:
+        rows: 0
+        columns:
+        - colid
+        - name
+        - tds_collation
+        - collation
+- name: Connection permission cannot reveal protected column collations
+  username: column_collation_reader
+  password: pw
+  sql: EXEC sys.sp_tablecollations_100 N'dbo.column_collation_rows'
+  expect:
+    error: true
+    contains: access denied
+- name: Another database cannot be silently substituted for the declared metadata owner
+  sql: EXEC sys.sp_tablecollations_100 N'other_database.dbo.column_collation_rows'
+  expect:
+    error: true
+    contains: qualifier
+- name: Missing objects are rejected before emitting invented metadata
+  sql: EXEC sys.sp_tablecollations_100 N'dbo.missing_column_collation'
+  expect:
+    error: true
+    contains: does not exist
+- name: FMTONLY never invokes virtual effectful system commands
+  sql: SET FMTONLY ON; EXEC xp_cmdshell N'unsupported'; SET FMTONLY OFF
+  expect:
+    error: true
+    contains: does not execute system commands
+- name: A collation address with trailing text cannot expose a real prefix target
+  sql: EXEC sys.sp_tablecollations_100 N'dbo.column_collation_rows unexpected'
+  expect:
+    error: true

@@ -1,0 +1,85 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Microsoft documents nested block comments and rejection of missing closers.
+metadata:
+  syntax: tsql
+  isolated: true
+  description: Nested block comments share lexical source ownership with SQL modules and quoted tokens
+setup:
+- sql: CREATE TABLE comment_source(id INT PRIMARY KEY,value INT)
+- sql: INSERT INTO comment_source VALUES(1,10),(2,20)
+- sql: CREATE TABLE comment_target(id INT,value INT)
+- sql: |
+    CREATE PROCEDURE dbo.nested_comment_copy(@minimum INT) AS BEGIN
+      INSERT INTO comment_target(id,value)
+        SELECT id, /* outer stored /* inner stored */ tail stored */ value+1
+        FROM comment_source WHERE id>=@minimum;
+    END;
+test_cases:
+- name: A nested comment remains trivia inside an ordinary projection
+  sql: SELECT 7 /* outer /* inner */ tail */ + 2 AS value
+  expect: {rows: 1,data: [{value: 9}]}
+- name: Several comment levels retain the surrounding arithmetic
+  sql: SELECT 5 /* one /* two /* three */ two tail */ one tail */ * 3 AS value
+  expect: {rows: 1,data: [{value: 15}]}
+- name: Newlines inside nested comments do not end their enclosing comment
+  sql: |
+    SELECT 11 /* outer
+      /* inner
+         nested */
+      outer tail
+    */ + 2 AS value
+  expect: {rows: 1,data: [{value: 13}]}
+- name: The stored procedure executes the complete commented SELECT
+  sql: EXEC dbo.nested_comment_copy @minimum=2
+- name: Procedure source comments do not alter its selected rows
+  sql: SELECT id,value FROM comment_target ORDER BY id
+  expect: {rows: 1,data: [{id: 2,value: 21}]}
+- name: Module metadata retains the exact original nested comment
+  scm: |
+    (begin
+      (define declaration (car (showprocedures "memcp-tests" "nested_comment_copy" nil)))
+      (>= (string_find (declaration "source")
+        "/* outer stored /* inner stored */ tail stored */" 0 false "byte") 0))
+  expect: {result: true}
+- name: Comment delimiters inside a string remain string data
+  sql: SELECT N'/* outer /* inner */ tail */' AS value,N'*/' AS closer
+  expect: {rows: 1,data: [{value: '/* outer /* inner */ tail */',closer: '*/'}]}
+- name: Bracket and double quoted identifiers retain literal delimiter characters
+  sql: SELECT q.[/* bracket */],q."/* quoted */" FROM (SELECT 17 AS [/* bracket */],19 AS "/* quoted */") AS q
+  expect: {rows: 1,data: [{'/* bracket */': 17,'/* quoted */': 19}]}
+- name: Quoted identifier OFF keeps double quoted comment text literal
+  sql: SET QUOTED_IDENTIFIER OFF; SELECT "/* literal */" AS value; SET QUOTED_IDENTIFIER ON;
+  expect: {rows: 1,data: [{value: '/* literal */'}]}
+- name: GO within a nested comment cannot split an executable script
+  sql: |
+    SELECT 23 /* outer
+      /* inner
+    GO
+      inner tail */ outer tail */ AS value;
+  expect: {rows: 1,data: [{value: 23}]}
+- name: A comment opener inside comment text still introduces a nested level
+  sql: SELECT 29 /* outer '/*' nested */ outer tail */ AS value
+  expect: {rows: 1,data: [{value: 29}]}
+- name: Canonical comments preserve UTF8 width CRLF and original source coordinates
+  scm: |
+    (begin
+      (define original "/* é😀 outer /* inner */ tail */\r\nSELECT 31 AS value")
+      (define context (tsql_parse_context original true false))
+      (define cooked (context "text"))
+      (define code_position (string_find cooked "SELECT" 0 false "byte"))
+      (list (equal? (strlen cooked) (strlen original))
+        (equal? (text_length cooked "rune") (text_length original "rune"))
+        (equal? (string_find cooked "\r\n" 0 false "byte") (string_find original "\r\n" 0 false "byte"))
+        (equal? (tsql_context_source_offset context code_position) (string_find original "SELECT" 0 false "byte"))))
+  expect: {result: [true,true,true,true]}
+- name: An unclosed outer comment remains invalid
+  sql: SELECT 1 /* outer /* inner */
+  expect: {error: true}
+- name: A nested opener cannot borrow the outer closing delimiter
+  sql: SELECT 1 /* outer '/*' */
+  expect: {error: true}
+cleanup:
+- sql: DROP PROCEDURE IF EXISTS dbo.nested_comment_copy
+- sql: DROP TABLE IF EXISTS comment_target
+- sql: DROP TABLE IF EXISTS comment_source

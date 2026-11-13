@@ -1,0 +1,130 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Native source declarations expose typed P and FN object identities with database visibility
+setup:
+- scm: |
+    (begin
+      (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS source_catalog_member" nil))
+      (eval (parse_sql "memcp-tests" "CREATE USER source_catalog_member IDENTIFIED BY 'pw'" nil))
+      (eval (parse_sql "memcp-tests" "GRANT ALL ON `memcp-tests`.* TO source_catalog_member" nil)))
+cleanup:
+- scm: (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS source_catalog_member" nil))
+- sql: DROP DATABASE IF EXISTS source_catalog_other
+test_cases:
+- name: Source declarations expose their actual scalar and procedure object kinds
+  tds:
+    statements:
+    - sql: CREATE FUNCTION dbo.source_catalog_fn() RETURNS NVARCHAR(32) AS BEGIN RETURN N'opaque_module_body_marker'; END
+    - sql: CREATE PROCEDURE dbo.source_catalog_proc AS SELECT 7 AS value
+    - sql: CREATE TABLE source_catalog_relation(id INT PRIMARY KEY)
+    - sql: CREATE VIEW source_catalog_view AS SELECT id FROM source_catalog_relation
+    - sql: SELECT name,type,type_desc,parent_object_id,schema_id,is_ms_shipped FROM sys.objects WHERE name IN(N'source_catalog_fn',N'source_catalog_proc',N'source_catalog_relation',N'source_catalog_view') ORDER BY name
+      expect:
+        rows: 4
+        data:
+        - {name: source_catalog_fn, type: FN, type_desc: SQL_SCALAR_FUNCTION, parent_object_id: 0, schema_id: 1, is_ms_shipped: false}
+        - {name: source_catalog_proc, type: P, type_desc: SQL_STORED_PROCEDURE, parent_object_id: 0, schema_id: 1, is_ms_shipped: false}
+        - {name: source_catalog_relation, type: U, type_desc: USER_TABLE, parent_object_id: 0, schema_id: 1, is_ms_shipped: false}
+        - {name: source_catalog_view, type: V, type_desc: VIEW, parent_object_id: 0, schema_id: 1, is_ms_shipped: false}
+    - sql: CREATE TABLE source_catalog_saved_ids(name NVARCHAR(128) PRIMARY KEY,saved_id INT)
+    - sql: INSERT source_catalog_saved_ids SELECT name,object_id FROM sys.objects WHERE name IN(N'source_catalog_fn',N'source_catalog_proc',N'source_catalog_relation',N'source_catalog_view')
+- name: OBJECT_ID agrees with each object kind and rejects wrong kinds
+  tds:
+    statements:
+    - sql: SELECT name,CASE WHEN object_id=OBJECT_ID(N'dbo.'+name,type) THEN 1 ELSE 0 END AS same_id FROM sys.objects WHERE name IN(N'source_catalog_fn',N'source_catalog_proc',N'source_catalog_relation',N'source_catalog_view') ORDER BY name
+      expect: {rows: 4, data: [{name: source_catalog_fn, same_id: 1}, {name: source_catalog_proc, same_id: 1}, {name: source_catalog_relation, same_id: 1}, {name: source_catalog_view, same_id: 1}]}
+    - sql: SELECT OBJECT_ID(N'dbo.source_catalog_fn',N'P') AS wrong_procedure,OBJECT_ID(N'dbo.source_catalog_fn',N'IF') AS wrong_inline,OBJECT_ID(N'dbo.source_catalog_fn',N'TF') AS wrong_table,OBJECT_ID(N'dbo.source_catalog_proc',N'FN') AS wrong_scalar,OBJECT_ID(N'dbo.source_catalog_relation',N'FN') AS wrong_relation,OBJECT_ID(N'dbo.source_catalog_view',N'U') AS wrong_view
+      expect: {rows: 1, data: [{wrong_procedure: null, wrong_inline: null, wrong_table: null, wrong_scalar: null, wrong_relation: null, wrong_view: null}]}
+- name: Dynamic header lookup classifies declarations without invoking a source body
+  tds:
+    statements:
+    - sql: CREATE FUNCTION dbo.source_catalog_header(@divisor INT) RETURNS INT AS BEGIN RETURN 1/@divisor; END
+    - sql: CREATE TABLE source_catalog_addresses(id INT PRIMARY KEY,address NVARCHAR(128),kind NVARCHAR(2))
+    - sql: INSERT source_catalog_addresses VALUES(1,N'[dbo].[SOURCE_CATALOG_FN]',N'FN'),(2,N'dbo.source_catalog_proc',N'P'),(3,N'dbo.source_catalog_header',N'FN'),(4,N'dbo.source_catalog_missing',N'FN')
+    - sql: SELECT id,CASE WHEN OBJECT_ID(address,kind) IS NULL THEN 0 ELSE 1 END AS visible FROM source_catalog_addresses ORDER BY id
+      expect: {rows: 4, data: [{id: 1, visible: 1}, {id: 2, visible: 1}, {id: 3, visible: 1}, {id: 4, visible: 0}]}
+- name: Transaction-visible source snapshots and warm catalog queries follow rollback and publication
+  tds:
+    statements:
+    - connection: observer
+      sql: SELECT COUNT(*) AS total FROM sys.objects WHERE name=N'source_catalog_staged' AND type=N'FN'
+      expect: {rows: 1, data: [{total: 0}]}
+    - {connection: owner, sql: BEGIN TRANSACTION}
+    - {connection: owner, sql: 'CREATE FUNCTION dbo.source_catalog_staged() RETURNS INT AS BEGIN RETURN 5; END'}
+    - connection: owner
+      sql: SELECT COUNT(*) AS total FROM sys.objects WHERE name=N'source_catalog_staged' AND type=N'FN'
+      expect: {rows: 1, data: [{total: 1}]}
+    - connection: owner
+      sql: SELECT CASE WHEN OBJECT_ID(N'dbo.source_catalog_staged',N'FN') IS NULL THEN 0 ELSE 1 END AS visible
+      expect: {rows: 1, data: [{visible: 1}]}
+    - connection: observer
+      sql: SELECT COUNT(*) AS total FROM sys.objects WHERE name=N'source_catalog_staged' AND type=N'FN'
+      expect: {rows: 1, data: [{total: 0}]}
+    - {connection: owner, sql: ROLLBACK TRANSACTION}
+    - connection: owner
+      sql: SELECT COUNT(*) AS total FROM sys.objects WHERE name=N'source_catalog_staged' AND type=N'FN'
+      expect: {rows: 1, data: [{total: 0}]}
+    - connection: owner
+      sql: SELECT OBJECT_ID(N'dbo.source_catalog_staged',N'FN') AS missing_id
+      expect: {rows: 1, data: [{missing_id: null}]}
+    - {connection: owner, sql: 'CREATE FUNCTION dbo.source_catalog_staged() RETURNS INT AS BEGIN RETURN 9; END'}
+    - connection: observer
+      sql: SELECT COUNT(*) AS total FROM sys.objects WHERE name=N'source_catalog_staged' AND type=N'FN'
+      expect: {rows: 1, data: [{total: 1}]}
+- name: Catalog plans retain only module names and language declarations
+  scm: |
+    (begin
+      (define s (newsession))
+      (s "username" "root")
+      (s "schema" "memcp-tests")
+      (define code (pretty_print (parse_tsql "memcp-tests"
+        "SELECT name,type,object_id FROM sys.objects WHERE type=N'FN'"
+        (tsql_policy (tsql_session_actor s)) s nil)))
+      (not (strlike code "%opaque_module_body_marker%")))
+  expect: {result: true}
+- name: Explicit database qualification uses the destination source catalog
+  tds:
+    statements:
+    - sql: CREATE DATABASE source_catalog_other
+    - sql: USE source_catalog_other
+    - sql: CREATE FUNCTION dbo.source_catalog_fn() RETURNS INT AS BEGIN RETURN 11; END
+    - sql: USE [memcp-tests]
+    - sql: SELECT name,type,CASE WHEN object_id=OBJECT_ID(N'source_catalog_other.dbo.source_catalog_fn',N'FN') THEN 1 ELSE 0 END AS same_id FROM source_catalog_other.sys.objects WHERE name=N'source_catalog_fn'
+      expect: {rows: 1, data: [{name: source_catalog_fn, type: FN, same_id: 1}]}
+    - sql: SELECT CASE WHEN OBJECT_ID(N'dbo.source_catalog_fn',N'FN')<>OBJECT_ID(N'source_catalog_other.dbo.source_catalog_fn',N'FN') THEN 1 ELSE 0 END AS different_ids
+      expect: {rows: 1, data: [{different_ids: 1}]}
+- name: Database membership governs module enumeration and qualified OBJECT_ID lookup
+  tds:
+    username: source_catalog_member
+    password: pw
+    statements:
+    - sql: SELECT name,type FROM sys.objects WHERE name IN(N'source_catalog_fn',N'source_catalog_proc') ORDER BY name
+      expect: {rows: 2, data: [{name: source_catalog_fn, type: FN}, {name: source_catalog_proc, type: P}]}
+    - sql: SELECT OBJECT_ID(N'source_catalog_other.dbo.source_catalog_fn',N'FN') AS hidden_id
+      expect: {rows: 1, data: [{hidden_id: null}]}
+    - sql: SELECT name FROM source_catalog_other.sys.objects WHERE type=N'FN'
+      expect: {error: true, contains: ['access denied']}
+- name: Scalar metadata visibility does not make a function executable as a procedure
+  tds:
+    statements:
+    - sql: EXEC dbo.source_catalog_fn
+      expect: {error: true, contains: ['procedure language cannot execute in this frontend']}
+    - sql: SELECT name,type FROM sys.objects WHERE name=N'source_catalog_fn' AND type IN(N'IF',N'FN',N'TF')
+      expect: {rows: 1, data: [{name: source_catalog_fn, type: FN}]}
+    - sql: SELECT name,type FROM sys.objects WHERE name IN(N'source_catalog_fn',N'source_catalog_proc') AND type IN(N'V',N'U',N'P ',N'FN') ORDER BY name
+      expect: {rows: 2, data: [{name: source_catalog_fn, type: FN}, {name: source_catalog_proc, type: P}]}
+    - sql: EXEC dbo.source_catalog_proc
+      expect: {rows: 1, data: [{value: 7}]}
+- name: Restart reloads native source declarations and the existing identity registry
+  action: restart
+- name: Recovered object rows and OBJECT_ID retain saved identities
+  tds:
+    statements:
+    - sql: SELECT s.name,CASE WHEN o.object_id=s.saved_id AND OBJECT_ID(N'dbo.'+s.name)=s.saved_id THEN 1 ELSE 0 END AS same_id FROM source_catalog_saved_ids s INNER JOIN sys.objects o ON o.name=s.name ORDER BY s.name
+      expect: {rows: 4, data: [{name: source_catalog_fn, same_id: 1}, {name: source_catalog_proc, same_id: 1}, {name: source_catalog_relation, same_id: 1}, {name: source_catalog_view, same_id: 1}]}
+    - sql: SELECT name,type FROM sys.objects WHERE name=N'source_catalog_staged'
+      expect: {rows: 1, data: [{name: source_catalog_staged, type: FN}]}
