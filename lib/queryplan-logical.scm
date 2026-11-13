@@ -4604,7 +4604,10 @@ while both modes rebind every reference and nested stage descriptor below it. */
 			(rewrite_stage_graph_expr alias_map id_map (gs_order stage))
 			(gs_limit stage)
 			(gs_offset stage)
-			(rewrite_stage_graph_expr alias_map id_map (gs_facts stage))))))
+			/* Rebinding a dependency changes executable operands, not the output
+			columns which this stage has already published to its consumers. */
+			(rewrite_stage_graph_expr alias_map id_map
+				(gs_facts (freeze_group_stage_aggregate_outputs stage)))))))
 
 (define rewrite_stage_graph_stages (lambda (alias_map id_map stages)
 	(map (coalesceNil stages '()) (lambda (stage)
