@@ -252,8 +252,7 @@ first and specialize this finite profile at the frontend cache boundary. */
 					(define inputs (map (car recipe) (lambda (name)
 						(visit (list 'get_column (source_alias source) false name false) outer))))
 					(define info ((tsql_column_compiler planning) (sql_expr_info outer node) declaration))
-					(list 'sql_type_expr (list tsql_arithmetic_value false
-						(list 'lambda '() (cons (cadr recipe) inputs)))
+					(list 'sql_type_expr (cons (tsql_computed_off_function source declaration recipe) inputs)
 						(sql_info_datatype info) (sql_info_collation info)))))))
 		_ (tsql_map_executable_children node (lambda (child) (visit child outer)))))))
 (define tsql_bind_computed_profile (lambda (query planning tx)
@@ -261,15 +260,15 @@ first and specialize this finite profile at the frontend cache boundary. */
 		(tsql_expand_computed_columns (bind_query_names query '()) '() planning tx))))
 /* Persisted native definitions are strict pure computations. The OFF query
 profile supplies its error boundary at the ordinary relational expression. */
-(define tsql_strict_computed_formula (lambda (formula) (match formula
+(define tsql_computed_policy_formula (lambda (formula enabled) (match formula
 	((symbol quote) _value) formula
-	(list head enabled ((symbol lambda) '() body))
+	(list head _previous ((symbol lambda) '() body))
 	(if (or (equal? head 'tsql_arithmetic_value) (expression_equal? head tsql_arithmetic_value))
-		(list head true (list 'lambda '() (tsql_strict_computed_formula body)))
-		(cons (tsql_strict_computed_formula head)
-			(map (cdr formula) tsql_strict_computed_formula)))
-	(cons head arguments) (cons (tsql_strict_computed_formula head)
-		(map arguments tsql_strict_computed_formula))
+		(list head enabled (list 'lambda '() (tsql_computed_policy_formula body enabled)))
+		(cons (tsql_computed_policy_formula head enabled)
+			(map (cdr formula) (lambda (child) (tsql_computed_policy_formula child enabled)))))
+	(cons head arguments) (cons (tsql_computed_policy_formula head enabled)
+		(map arguments (lambda (child) (tsql_computed_policy_formula child enabled))))
 	_ formula)))
 (define tsql_build_dml_plan (lambda (schema name alias sources columns condition order limit offset planning_session tx) (begin
 	(define compiler (tsql_column_compiler planning_session))
@@ -364,7 +363,7 @@ profile supplies its error boundary at the ordinary relational expression. */
 		/* Context-free defaults use the native value. Temporal text retains its
 		SQL recipe for conversion under the later writing session. */
 		(define default_options (tsql_prepare_default identity_options base
-			(lambda (value) (eval (tsql_strict_computed_formula (sql_type_formula '() (tsql_implicit_cast_expr value base native_dimensions)))))))
+			(lambda (value) (eval (tsql_computed_policy_formula (sql_type_formula '() (tsql_implicit_cast_expr value base native_dimensions)) true)))))
 		(define marked_options (if (default_options "rowguidcol")
 			(append (merge (extract_assoc default_options (lambda (key value)
 				(if (equal? key "rowguidcol") '() (list key value)))))
@@ -387,8 +386,8 @@ request state can become part of the persisted function. */
 (define tsql_computed_formula_safe? (lambda (formula) (match formula
 	((symbol get_column) _alias _alias_ic _name _name_ic) true
 	((symbol quote) value) (begin (sql_declaration_data value) true)
-	(list head true ((symbol lambda) '() body))
-	(and (or (equal? head 'tsql_arithmetic_value) (expression_equal? head tsql_arithmetic_value))
+	(list head enabled ((symbol lambda) '() body))
+	(and (or (identical? enabled true) (identical? enabled false)) (or (equal? head 'tsql_arithmetic_value) (expression_equal? head tsql_arithmetic_value))
 		(tsql_computed_formula_safe? body))
 	/* The trusted expression compiler selected this collation from declarations.
 	It is an immutable comparison function, never a SQL/session input. */
@@ -413,20 +412,59 @@ request state can become part of the persisted function. */
 /* Frontend helpers are Scheme globals, not declared runtime builtins. Bind
 those values explicitly before closing a persisted function so its meaning is
 independent of receiver-side global names. */
+(define tsql_computed_bindings (lambda () (list
+	(list 'sql_compare sql_compare) (list 'sql_decimal_value sql_decimal_value)
+	(list 'tsql_padded_text_equal tsql_padded_text_equal)
+	(list 'tsql_cast_integer tsql_cast_integer) (list 'tsql_cast_float tsql_cast_float)
+	(list 'tsql_cast_decimal tsql_cast_decimal) (list 'tsql_cast_text tsql_cast_text)
+	(list 'tsql_cast_fixed_text tsql_cast_fixed_text) (list 'tsql_numeric_input tsql_numeric_input)
+	(list 'tsql_checked_integer_operation tsql_checked_integer_operation)
+	(list 'tsql_arithmetic_value tsql_arithmetic_value)
+	(list 'tsql_integer_divide tsql_integer_divide) (list 'tsql_fractional_divide tsql_fractional_divide))))
 (define tsql_computed_function (lambda (parameters body) (begin
-	(define bindings (list
-		(list 'sql_compare sql_compare) (list 'sql_decimal_value sql_decimal_value)
-		(list 'tsql_padded_text_equal tsql_padded_text_equal)
-		(list 'tsql_cast_integer tsql_cast_integer) (list 'tsql_cast_float tsql_cast_float)
-		(list 'tsql_cast_decimal tsql_cast_decimal) (list 'tsql_cast_text tsql_cast_text)
-		(list 'tsql_cast_fixed_text tsql_cast_fixed_text) (list 'tsql_numeric_input tsql_numeric_input)
-		(list 'tsql_checked_integer_operation tsql_checked_integer_operation
-			'tsql_integer_divide 'tsql_fractional_divide tsql_integer_divide tsql_fractional_divide)
-		(list 'tsql_arithmetic_value tsql_arithmetic_value)
-		(list 'tsql_integer_divide tsql_integer_divide) (list 'tsql_fractional_divide tsql_fractional_divide)))
+	(define bindings (tsql_computed_bindings))
 	(list 'close_procedure (cons
 		(list 'lambda (map bindings car) (list 'lambda parameters body))
 		(map bindings cadr))))))
+/* Persist frontend expression data, never an optimized procedure's numbered
+locals or capture layout. Only this exact pure helper registry is restored. */
+(define tsql_computed_recipe_expr (lambda (formula) (begin
+	(define binding (find (tsql_computed_bindings)
+		(lambda (entry) (expression_equal? formula (cadr entry))) nil))
+	(if binding (car binding) (match formula
+		((symbol quote) _value) formula
+		(cons head arguments) (cons (tsql_computed_recipe_expr head)
+			(map arguments tsql_computed_recipe_expr))
+		_ (if (or (nil? formula) (string? formula) (number? formula) (symbol? formula)
+			(identical? formula true) (identical? formula false)) formula
+			(scheme (serialize formula))))))))
+(define tsql_computed_recipe_comparisons? (lambda (formula) (match formula
+	((symbol quote) _value) true
+	((symbol sql_compare) left right comparison _operation)
+	(and (tsql_computed_recipe_comparisons? left) (tsql_computed_recipe_comparisons? right)
+		(or (has? '(equal? equal?? < <= > >=) comparison)
+			(match comparison
+				((symbol collate) name reverse) (and (string? name)
+					(or (identical? reverse true) (identical? reverse false)))
+				_ false)))
+	(cons _head arguments) (reduce arguments (lambda (safe child)
+		(and safe (tsql_computed_recipe_comparisons? child))) true)
+	_ true)))
+(define tsql_computed_off_function (lambda (source declaration recipe) (begin
+	(define encoded ((declaration "Properties") "tsql.computed.off"))
+	(if (string? encoded) true (error "computed declaration has no ANSI_WARNINGS OFF expression profile"))
+	(define formula (match (scheme encoded)
+		(list "tsql-computed-off-v1" body) body
+		_ (error "invalid computed expression profile")))
+	(if (and (tsql_computed_formula_safe? formula) (tsql_computed_recipe_comparisons? formula)) true
+		(error "computed expression profile is not a supported pure scalar"))
+	(define input_source (list "__computed" (source_schema source) (source_relation source) false nil))
+	(define inputs (extract_columns_for_alias input_source formula))
+	(if (expression_equal? inputs (car recipe)) true
+		(error "computed expression profile input declaration changed"))
+	(eval (tsql_computed_function
+		(map inputs (lambda (name) (scan_callback_symbol_for_alias "__computed" name)))
+		(lower_column_expr_for_alias input_source formula))))))
 (define tsql_compile_computed_declarations (lambda (database definitions planning_session) (begin
 	(define source (tsql_computed_source database definitions))
 	(define names (merge (map definitions (lambda (definition) (match definition
@@ -445,8 +483,11 @@ independent of receiver-side global names. */
 				true nil nil nil nil nil nil nil nil) '()))
 			(define source (car (qb_sources bound)))
 			(define info (sql_expr_info (list source) (cadr (qb_fields bound))))
-			(define formula (tsql_strict_computed_formula (sql_type_lower_annotations (list source) (sql_info_formula info))))
-			(if (tsql_computed_formula_safe? formula) true
+			(define raw_formula (sql_type_lower_annotations (list source) (sql_info_formula info)))
+			(define formula (tsql_computed_policy_formula raw_formula true))
+			(define off_formula (tsql_computed_recipe_expr (tsql_computed_policy_formula raw_formula false)))
+			(if (and (tsql_computed_formula_safe? formula) (tsql_computed_formula_safe? off_formula)
+				(tsql_computed_recipe_comparisons? off_formula)) true
 				(error "computed column requires a deterministic local scalar expression"))
 			(define inputs (extract_columns_for_alias source formula))
 			(map inputs (lambda (column)
@@ -454,8 +495,10 @@ independent of receiver-side global names. */
 					(error "computed input column does not exist: " column))))
 			(if (has? '("any" "NULL") (sql_info_type info))
 				(error "computed column has no resolved SQL type") true)
-			(define attributes (if (sql_info_collation info)
-				(list "null" true "collate" (sql_collation_name info)) '("null" true)))
+			(define attributes (append (if (sql_info_collation info)
+				(list "null" true "collate" (sql_collation_name info)) '("null" true))
+				"properties" (list 'list "tsql.computed.off"
+					(serialize (list "tsql-computed-off-v1" off_formula)))))
 			(list 'list "column" name (tsql_storage_type (sql_info_type info))
 				(cons 'list (sql_info_dimensions info)) (cons 'list attributes)
 				(cons 'list inputs)

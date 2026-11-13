@@ -9,6 +9,7 @@ setup:
   - sql: CREATE TABLE ansi_warning_rows(id INT PRIMARY KEY,label VARCHAR(3),national NVARCHAR(3),value INT)
 cleanup:
   - sql: DROP FUNCTION IF EXISTS ansi_warning_scalar
+  - sql: DROP TABLE IF EXISTS ansi_warning_defaults
   - sql: DROP TABLE IF EXISTS ansi_warning_computed
   - sql: DROP TABLE IF EXISTS ansi_warning_checked
   - sql: DROP PROCEDURE IF EXISTS ansi_warning_scope
@@ -78,7 +79,7 @@ test_cases:
     sql: SET ANSI_WARNINGS OFF; INSERT ansi_warning_checked VALUES(0); SELECT value FROM ansi_warning_checked; SET ANSI_WARNINGS ON
     expect: {data: [{value: 0}]}
   - name: Declared computed arithmetic remains a pure stored recipe
-    sql: CREATE TABLE ansi_warning_computed(id INT PRIMARY KEY,denominator INT,value AS (8/denominator),shifted AS (denominator+1))
+    sql: CREATE TABLE ansi_warning_computed(id INT PRIMARY KEY,denominator INT,value AS (8/denominator),shifted AS (denominator+1),fallback AS (COALESCE(8/denominator,99)),chosen AS (CASE WHEN 8/denominator IS NULL THEN 77 ELSE 8/denominator END))
     expect: {rows: 0}
   - name: Computed inputs retain their ordinary declared values
     sql: INSERT ansi_warning_computed(id,denominator) VALUES(1,2),(2,0)
@@ -89,6 +90,12 @@ test_cases:
   - name: Disabled computed arithmetic receives current scalar inputs
     sql: SET ANSI_WARNINGS OFF; SELECT id,value,shifted FROM ansi_warning_computed ORDER BY id; SET ANSI_WARNINGS ON
     expect: {data: [{id: 1,value: 4,shifted: 3},{id: 2,value: null,shifted: 1}]}
+  - name: OFF computed COALESCE consumes an inner arithmetic null
+    sql: SET ANSI_WARNINGS OFF; SELECT id,fallback FROM ansi_warning_computed ORDER BY id; SET ANSI_WARNINGS ON
+    expect: {data: [{id: 1,fallback: 4},{id: 2,fallback: 99}]}
+  - name: OFF computed CASE observes each arithmetic boundary
+    sql: SET ANSI_WARNINGS OFF; SELECT id,chosen FROM ansi_warning_computed ORDER BY id; SET ANSI_WARNINGS ON
+    expect: {data: [{id: 1,chosen: 4},{id: 2,chosen: 77}]}
   - name: Enabled computed error keeps its typed diagnostic
     sql: SET ANSI_WARNINGS ON; BEGIN TRY SELECT value FROM ansi_warning_computed WHERE id=2; END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS code; END CATCH
     expect: {data: [{code: 8134}]}
@@ -104,6 +111,12 @@ test_cases:
           expect: {data: [{value: 4}]}
         - sql: SET ANSI_WARNINGS ON; SELECT value FROM ansi_warning_computed WHERE id=1
           expect: {data: [{value: 4}]}
+  - name: Static integer default conversion requires no invocation session
+    sql: CREATE TABLE ansi_warning_defaults(id INT PRIMARY KEY,value INT NOT NULL DEFAULT 10)
+    expect: {rows: 0}
+  - name: Static defaults retain exact values across the option
+    sql: SET ANSI_WARNINGS OFF; INSERT ansi_warning_defaults(id) VALUES(1); SELECT value FROM ansi_warning_defaults; SET ANSI_WARNINGS ON
+    expect: {data: [{value: 10}]}
   - name: Native connection reuses a warm arithmetic plan with current setting
     tds:
       statements:
