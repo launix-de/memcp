@@ -37,7 +37,10 @@ func (c *column) UnmarshalJSON(data []byte) (err error) {
 		if definition.Version != 1 || definition.Function == "" {
 			return fmt.Errorf("invalid declared computation format")
 		}
-		function := scm.Eval(scm.Read("declared computation", definition.Function, true), &scm.Globalenv)
+		// Serialized procedures include numbered local bindings. Decode them
+		// through the language compiler before evaluating the restored closure.
+		expression := scm.Read("declared computation", definition.Function, true)
+		function := scm.Eval(scm.Optimize(expression, &scm.Globalenv, nil), &scm.Globalenv)
 		if !function.IsProc() || hasImplicitComputeContext(function) {
 			return fmt.Errorf("declared computation must be a procedure using explicit inputs")
 		}

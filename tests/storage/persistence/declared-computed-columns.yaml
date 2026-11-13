@@ -9,6 +9,7 @@ cleanup:
 - sql: DROP TABLE IF EXISTS declared_compute_aborted
 - sql: DROP TABLE IF EXISTS declared_compute_invalid
 - sql: DROP TABLE IF EXISTS declared_compute_collation
+- sql: DROP TABLE IF EXISTS declared_compute_locals
 test_cases:
 - name: Private CREATE binds a lazy computation without publishing or reading row data
   scm: |
@@ -187,11 +188,38 @@ test_cases:
 - name: Rejected input schema changes preserve ordinary and computed row values
   sql: SELECT id,base,derived FROM declared_compute_data ORDER BY id
   expect: {data: [{id: 1,base: 7,derived: 17},{id: 2,base: null,derived: 0}]}
+- name: A declared computation binds nested local values before persistence
+  scm: |
+    (begin
+      (createtable "memcp-tests" "declared_compute_locals"
+        (list (list "column" "base" "INT" '() '())
+          (list "column" "derived" "INT" '() '() '("base")
+            (lambda (base) (begin
+              (define shifted (+ base 7))
+              ((lambda (value) (begin
+                (define doubled (* value 2))
+                (+ doubled shifted))) base)))))
+        '("engine" "safe") false nil)
+      (insert (table "memcp-tests" false "declared_compute_locals" false nil)
+        '("base") (list (list 2))) true)
+  expect: {result: true}
+- name: Nested computation locals evaluate with their actual source input
+  sql: SELECT base,derived FROM declared_compute_locals
+  expect: {data: [{base: 2,derived: 13}]}
 - name: Restart recovers the computation definition without a persisted cache prerequisite
   action: restart
 - name: WAL row values retain declared computations after restart
   sql: SELECT id,derived FROM declared_compute_data ORDER BY id
   expect: {data: [{id: 1,derived: 17},{id: 2,derived: 0}]}
+- name: Recovered nested local bindings retain both inner and outer values
+  sql: SELECT base,derived FROM declared_compute_locals
+  expect: {data: [{base: 2,derived: 13}]}
+- name: Recovered nested computations respond to a new source generation
+  sql: UPDATE declared_compute_locals SET base=3
+  expect: {affected_rows: 1}
+- name: Recomputed local values use the updated input after recovery
+  sql: SELECT base,derived FROM declared_compute_locals
+  expect: {data: [{base: 3,derived: 16}]}
 - name: A post-restart row in an empty table evaluates its persisted recipe
   sql: INSERT INTO declared_compute_empty(base) VALUES(6)
   expect: {affected_rows: 1}
