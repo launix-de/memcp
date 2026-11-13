@@ -4112,6 +4112,13 @@ func Init(en scm.Env) {
 					}
 					return t.ShowColumns(tx)
 				}
+				if (len(a) == 3 || len(a) == 4 || len(a) == 5) && a[1].IsString() && a[1].String() == "computation" {
+					var tx *TxContext
+					if len(a) == 5 {
+						tx = scmerToTxContext(a[4])
+					}
+					return t.ShowComputation(a[2].String(), len(a) >= 4 && a[3].Bool(), tx)
+				}
 				if (len(a) == 3 || len(a) == 4 || len(a) == 5) && a[1].IsString() && a[1].String() == "column" {
 					var tx *TxContext
 					if len(a) == 5 {

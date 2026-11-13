@@ -2237,9 +2237,10 @@ type tableColumnNamesSnapshot struct {
 // Name and ordinal are frozen together at declaration publication. The ordinal
 // addresses the matching full SHOW payload, never mutable column fields.
 type tableColumnName struct {
-	name     string
-	ordinal  int
-	computed bool
+	name        string
+	ordinal     int
+	computed    bool
+	computation scm.Scmer // immutable declared input names and closed pure procedure
 }
 
 func (t *table) buildShowColumnsSnapshot(rowEstimate uint, columnNames *tableColumnNamesSnapshot) *tableShowColumnsSnapshot {
@@ -2381,6 +2382,9 @@ func (t *table) buildColumnNamesSnapshot() *tableColumnNamesSnapshot {
 		computed := c.ComputorDefinition != nil
 		hasDeclaredComputations = hasDeclaredComputations || computed
 		entry := tableColumnName{name: c.Name, ordinal: i, computed: computed}
+		if computed {
+			entry.computation = scm.NewSlice([]scm.Scmer{showStringSlice(c.ComputorInputCols), c.Computor})
+		}
 		exact[c.Name] = entry
 		foldedName := scm.CaseFoldKey(c.Name)
 		if _, exists := folded[foldedName]; !exists {
@@ -2588,6 +2592,28 @@ func (t *table) ShowColumn(name string, ignoreCase bool, tx *TxContext) scm.Scme
 		}
 	}
 	return scm.NewNil()
+}
+
+// ShowComputation borrows a declared computation from the same immutable
+// directory as ShowColumn. Runtime caches have no declaration and return nil.
+// The closed pure function retains no invocation, session or transaction.
+func (t *table) ShowComputation(name string, ignoreCase bool, tx *TxContext) scm.Scmer {
+	if t == nil {
+		return scm.NewNil()
+	}
+	snapshot := t.declarationMetadataForTx(tx)
+	if snapshot == nil || snapshot.metadata == nil || snapshot.metadata.columnNames == nil {
+		return scm.NewNil()
+	}
+	names := snapshot.metadata.columnNames
+	resolved, ok := names.exact[name]
+	if !ok && ignoreCase {
+		resolved, ok = names.folded[scm.CaseFoldKey(name)]
+	}
+	if !ok || !resolved.computed {
+		return scm.NewNil()
+	}
+	return resolved.computation
 }
 
 // ResolveColumnName reads immutable DDL metadata without scanning SHOW rows.
