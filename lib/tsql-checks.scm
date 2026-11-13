@@ -16,6 +16,12 @@ scalars remain rejected. No creator session is retained in the program. */
 	((symbol quote) value) (begin (sql_declaration_data value) true)
 	((symbol sql_compare) left right _comparison _operation)
 	(and (tsql_check_formula_safe? left) (tsql_check_formula_safe? right))
+	/* The exact arithmetic boundary consumes the invocation's scalar option.
+	Its thunk is compiler-generated and contains only validated row formulas. */
+	(head enabled ((symbol lambda) () body))
+	(if (and (or (equal? head 'tsql_arithmetic_value) (expression_equal? head tsql_arithmetic_value))
+		(expression_equal? enabled (tsql_ansi_warnings_formula)))
+		(tsql_check_formula_safe? body) false)
 	((symbol session) _key) (error "CHECK session-dependent scalar expressions are not supported")
 	(cons head arguments) (if (has? (list tsql_isdate_text) head)
 		/* The compiler embeds the actual procedure value, not its symbol. */
@@ -31,6 +37,7 @@ scalars remain rejected. No creator session is retained in the program. */
 				'equal? 'equal?? '< '<= '> '>= '+ '- '* '/ 'div_null 'intdiv 'mod
 				'tsql_cast_integer 'tsql_cast_float 'tsql_cast_decimal 'tsql_cast_text
 				'tsql_cast_fixed_text 'tsql_numeric_input 'sql_decimal_value
+				'tsql_checked_integer_operation tsql_checked_integer_operation
 				+ - * / div_null intdiv mod coalesceNil nil? equal? equal?? < <= > >= not sql_not
 				tsql_cast_integer tsql_cast_float tsql_cast_decimal tsql_cast_text
 				tsql_cast_fixed_text tsql_numeric_input sql_decimal_value

@@ -358,7 +358,9 @@ independent of receiver-side global names. */
 		(list 'tsql_padded_text_equal tsql_padded_text_equal)
 		(list 'tsql_cast_integer tsql_cast_integer) (list 'tsql_cast_float tsql_cast_float)
 		(list 'tsql_cast_decimal tsql_cast_decimal) (list 'tsql_cast_text tsql_cast_text)
-		(list 'tsql_cast_fixed_text tsql_cast_fixed_text) (list 'tsql_numeric_input tsql_numeric_input)))
+		(list 'tsql_cast_fixed_text tsql_cast_fixed_text) (list 'tsql_numeric_input tsql_numeric_input)
+		(list 'tsql_checked_integer_operation tsql_checked_integer_operation)
+		(list 'tsql_arithmetic_value tsql_arithmetic_value)))
 	(list 'close_procedure (cons
 		(list 'lambda (map bindings car) (list 'lambda parameters body))
 		(map bindings cadr))))))

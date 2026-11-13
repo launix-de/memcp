@@ -60,7 +60,7 @@ context intrinsics' explicit invocation reads are meaningful in later scopes. */
 		(cons (symbol tsql_batch_variable) _args) false
 		(cons (symbol tsql_unbound_parameter) _args) false
 		((symbol session) key)
-		(has? '("username" "__tsql_principal_id" "schema" "__tsql_client_hostname" "__tsql_client_appname" "__tsql_language" "__tsql_dateformat" "__tsql_datefirst") key)
+		(has? '("username" "__tsql_principal_id" "schema" "__tsql_client_hostname" "__tsql_client_appname" "__tsql_language" "__tsql_dateformat" "__tsql_datefirst" "__tsql_ansi_warnings") key)
 		(cons head tail) (and (tsql_default_expression_allowed? head)
 			(reduce tail (lambda (allowed child) (and allowed (tsql_default_expression_allowed? child))) true))
 		_ true))))
@@ -4213,8 +4213,8 @@ that context explicitly; stored views refuse this scalar before publication. */
 		(parser '((atom "SESSIONPROPERTY" true) "(" (define property tsql_expression) ")")
 			(list 'sql_type_expr (list tsql_sessionproperty
 				(tsql_cast_expr property "NVARCHAR" '(128)) (tsql_ansi_warnings_formula)
-				(list 'if (list 'session "__tsql_ansi_nulls") 1 0)
-				(list 'if (list 'session "__tsql_quoted_identifier") 1 0)) "SQL_VARIANT" nil))
+				(list 'if (list 'coalesceNil (list 'session "__tsql_ansi_nulls") true) 1 0)
+				(list 'if (list 'coalesceNil (list 'session "__tsql_quoted_identifier") true) 1 0)) "SQL_VARIANT" nil))
 		(parser '((atom "SERVERPROPERTY" true) "(" (define property tsql_expression) ")")
 			(list (quote sql_type_expr) (list tsql_serverproperty
 				(tsql_cast_expr property "NVARCHAR" '(128))) "SQL_VARIANT" nil))

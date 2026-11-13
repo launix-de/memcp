@@ -23,6 +23,7 @@ request transaction is retained in the callable shipped to scan workers. */
 native declaration's SQL parameter header. Read session keys only at callsites;
 module compilation neither reads nor retains a creation-time session. */
 (define tsql_scalar_function_context_inputs (list
+	(list '__tsql_scalar_ansi_warnings "__tsql_ansi_warnings" (tsql_ansi_warnings_formula))
 	(list '__tsql_scalar_dateformat "__tsql_dateformat" (tsql_dateformat_formula))
 	(list '__tsql_scalar_language "__tsql_language" (tsql_language_formula))
 	(list '__tsql_scalar_datefirst "__tsql_datefirst" (list 'coalesceNil (list 'session "__tsql_datefirst") 7))
