@@ -8,6 +8,8 @@ metadata:
 setup:
   - sql: CREATE TABLE ansi_warning_rows(id INT PRIMARY KEY,label VARCHAR(3),national NVARCHAR(3),value INT)
 cleanup:
+  - sql: DROP FUNCTION IF EXISTS ansi_warning_scalar
+  - sql: DROP TABLE IF EXISTS ansi_warning_checked
   - sql: DROP PROCEDURE IF EXISTS ansi_warning_scope
   - sql: DROP TABLE IF EXISTS ansi_warning_rows
 test_cases:
@@ -41,6 +43,24 @@ test_cases:
   - name: Variable and explicit casts keep their own truncation rules
     sql: SET ANSI_WARNINGS ON; DECLARE @text VARCHAR(3)='long'; SELECT @text AS variable,CAST(N'long' AS NVARCHAR(3)) AS converted
     expect: {data: [{variable: lon,converted: lon}]}
+  - name: BIGINT overflow is checked before the native carrier wraps
+    sql: SET ANSI_WARNINGS OFF; SELECT CAST(9223372036854775807 AS BIGINT)+CAST(1 AS BIGINT) AS added,CAST(-9223372036854775808 AS BIGINT)-CAST(1 AS BIGINT) AS subtracted,CAST(-9223372036854775808 AS BIGINT)*CAST(-1 AS BIGINT) AS multiplied; SET ANSI_WARNINGS ON
+    expect: {data: [{added: null,subtracted: null,multiplied: null}]}
+  - name: BIGINT boundary arithmetic preserves exact valid values
+    sql: SET ANSI_WARNINGS ON; SELECT CAST(9223372036854775807 AS BIGINT)+CAST(0 AS BIGINT) AS maximum,CAST(-9223372036854775808 AS BIGINT)*CAST(1 AS BIGINT) AS minimum
+    expect: {data: [{maximum: 9223372036854775807,minimum: -9223372036854775808}]}
+  - name: Scalar module declares its arithmetic context as an invocation input
+    sql: CREATE FUNCTION ansi_warning_scalar(@denominator INT) RETURNS INT AS BEGIN RETURN 8/@denominator; END
+    expect: {rows: 0}
+  - name: Scalar module consumes current option without retaining a creator
+    sql: SET ANSI_WARNINGS OFF; SELECT dbo.ansi_warning_scalar(0) AS value; SET ANSI_WARNINGS ON
+    expect: {data: [{value: null}]}
+  - name: CHECK arithmetic compiles with the actual native row invocation
+    sql: CREATE TABLE ansi_warning_checked(value INT,CHECK(10/value>1))
+    expect: {rows: 0}
+  - name: Disabled arithmetic UNKNOWN satisfies CHECK
+    sql: SET ANSI_WARNINGS OFF; INSERT ansi_warning_checked VALUES(0); SELECT value FROM ansi_warning_checked; SET ANSI_WARNINGS ON
+    expect: {data: [{value: 0}]}
   - name: Native connection reuses a warm arithmetic plan with current setting
     tds:
       statements:
