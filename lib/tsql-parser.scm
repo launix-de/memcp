@@ -2534,16 +2534,18 @@ common SQL contract widens integer operators to BIGINT for other dialects. */
 (define tsql_sub_expr (lambda (left right)
 	(tsql_arithmetic_expr (list 'sql_compile_expr 'tsql_compile_subtraction left right))))
 
-(define tsql_integer_divide (lambda (left right)
-	(if (or (nil? left) (nil? right)) nil
-		(equal? right 0) (tsql_raise_error 8134 "division by zero" 1)
-		(and (equal? left (tsql_parse_integer "-9223372036854775808")) (equal? right -1))
-		(tsql_raise_error 8115 "integer division overflow" 1)
-		(intdiv left right))))
-(define tsql_fractional_divide (lambda (left right)
-	(if (or (nil? left) (nil? right)) nil
-		(equal? right 0) (tsql_raise_error 8134 "division by zero" 1)
-		(/ left right))))
+(define tsql_integer_divide (close_procedure ((lambda (raise_error minimum)
+	(lambda (left right)
+		(if (or (nil? left) (nil? right)) nil
+			(equal? right 0) (raise_error 8134 "division by zero" 1)
+			(and (equal? left minimum) (equal? right -1))
+			(raise_error 8115 "integer division overflow" 1)
+			(intdiv left right)))) tsql_raise_error (tsql_parse_integer "-9223372036854775808"))))
+(define tsql_fractional_divide (close_procedure ((lambda (raise_error)
+	(lambda (left right)
+		(if (or (nil? left) (nil? right)) nil
+			(equal? right 0) (raise_error 8134 "division by zero" 1)
+			(/ left right)))) tsql_raise_error)))
 (define tsql_compile_divide (lambda (infos) (begin
 	(define types (map infos (lambda (info) (tsql_addition_type (sql_info_type info)))))
 	(define active (filter types (lambda (type) (not (equal? type "NULL")))))
