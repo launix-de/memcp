@@ -649,6 +649,11 @@ ownership, and no native metadata is acquired here. */
 		(sql_resolve_column_info sources compiler (expression_info sources expression))
 		((symbol session) _key) (sql_info expr "any" nil)
 		((symbol session_globalvar) _key) (sql_info expr "any" nil)
+		/* A scalar thunk shares its enclosing SQL scope. Its deferred execution
+		does not defer compilation of frontend annotations inside its body. */
+		((symbol lambda) '() body) (sql_info (list (quote lambda) '()
+			(match (sql_type_annotation_replacement_using sources body expression_info)
+				'(plain) plain _ body)) "any" nil)
 		((symbol lambda) _params _body) (sql_info expr "any" nil)
 		(cons head args) (sql_call_info head (map args (lambda (argument) (expression_info sources argument))))
 		_ (sql_info expr (sql_type_of_literal expr)
