@@ -25,9 +25,16 @@ guessing from captured text or introducing a second recovery grammar. */
 
 /* DROP is admitted only for the ordinary parser's local temporary target.
 Persistent DDL remains outside native mutation callbacks. */
+(define tsql_trigger_temporary_drop_formula? (lambda (formula)
+	(match formula
+		((symbol tsql_drop_temporary) _name _ifexists (symbol session) (symbol tx)) true
+		(cons (symbol !begin) statements) (and (not (empty_list? statements))
+			(reduce statements (lambda (valid statement)
+				(and valid (tsql_trigger_temporary_drop_formula? statement))) true))
+		_ false)))
 (define tsql_trigger_temporary_drop? (lambda (schema text)
 	(match (parse_tsql schema text nil nil nil)
-		((symbol !begin) ((symbol tsql_drop_temporary) _name _ifexists (symbol session) (symbol tx)) _completion) true
+		((symbol !begin) formula _completion) (tsql_trigger_temporary_drop_formula? formula)
 		_ false)))
 
 /* The first completion profile has no autonomous transaction after ROLLBACK.
