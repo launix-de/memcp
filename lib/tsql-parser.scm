@@ -899,9 +899,19 @@ requires the SQL user to request it explicitly. */
 	(if (and (tsql_temporal_numeric_target? (sql_info_type input))
 		(has? '("INT" "INTEGER" "SMALLINT" "TINYINT" "BIGINT") target))
 		(tsql_raise_error 257 (concat "unsupported implicit conversion from " (sql_info_type input) " to " target) 3) true)
-	(sql_expr_info '() (tsql_cast_expr
+	/* Legacy large-value assignments use their corresponding MAX conversion.
+	Keep the declared SQL domain; this does not enable explicit CAST AS TEXT.
+	https://learn.microsoft.com/sql/t-sql/functions/cast-and-convert-transact-sql#large-value-data-types */
+	(define large (has? '("TEXT" "NTEXT" "IMAGE") target))
+	(if (and large (not (or (equal? (sql_info_type input) "NULL")
+		(if (equal? target "IMAGE") (tsql_binary_type? (sql_info_type input))
+			(has? '("CHAR" "VARCHAR" "NCHAR" "NVARCHAR" "TEXT" "NTEXT") (sql_info_type input))))))
+		(tsql_raise_error 257 (concat "unsupported implicit conversion from " (sql_info_type input) " to " target) 3) true)
+	(define converted (sql_expr_info '() (tsql_cast_expr
 		(list 'sql_type_expr (sql_info_formula input) (sql_info_datatype input) (sql_info_collation input))
-		type dimensions))))))
+		(match target "TEXT" "VARCHAR" "NTEXT" "NVARCHAR" "IMAGE" "VARBINARY" _ type)
+		(if large '(-1) dimensions))))
+	(if large (sql_info (sql_info_formula converted) target (sql_info_collation converted)) converted)))))
 (define tsql_implicit_cast_expr (lambda (value type dimensions)
 	(list 'sql_compile_expr (list 'tsql_implicit_cast_compiler type (list 'quote dimensions)) value)))
 (define tsql_decimal_compiler (lambda (type dims) (lambda (infos) (begin
@@ -991,12 +1001,12 @@ local variables and module parameters keep their ordinary width conversion. */
 		(tsql_implicit_cast_expr value type '())
 		/* Minute rounding belongs to the declared assignment contract, before
 		the existing sink receives the native calendar value. */
-		(has? '("CHAR" "VARCHAR" "NVARCHAR" "NCHAR" "DATE" "DATETIME" "DATETIME2" "TIME" "SMALLDATETIME" "UNIQUEIDENTIFIER") type)
+		(has? '("CHAR" "VARCHAR" "NVARCHAR" "NCHAR" "TEXT" "NTEXT" "DATE" "DATETIME" "DATETIME2" "TIME" "SMALLDATETIME" "UNIQUEIDENTIFIER") type)
 		((if (has? '("CHAR" "VARCHAR" "NVARCHAR" "NCHAR") type) tsql_assignment_text_expr tsql_implicit_cast_expr)
-			(if (and (has? '("CHAR" "VARCHAR" "NVARCHAR" "NCHAR") type) (declaration "Collation"))
+			(if (and (has? '("CHAR" "VARCHAR" "NVARCHAR" "NCHAR" "TEXT" "NTEXT") type) (declaration "Collation"))
 				(list (quote sql_compile_expr) (list (quote tsql_collation_compiler) (declaration "Collation")) value) value)
 			type (declaration "Dimensions"))
-		(has? '("BINARY" "VARBINARY") type) (tsql_implicit_cast_expr value type (declaration "Dimensions"))
+		(has? '("BINARY" "VARBINARY" "IMAGE") type) (tsql_implicit_cast_expr value type (declaration "Dimensions"))
 		(has? '("MONEY" "SMALLMONEY") type) (tsql_implicit_cast_expr value type '())
 		(has? '("DECIMAL" "NUMERIC") type) (begin
 			(define dimensions (declaration "Dimensions"))

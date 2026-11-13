@@ -12,6 +12,8 @@ cleanup:
 - sql: DROP TABLE IF EXISTS default_disconnected
 - sql: DROP TABLE IF EXISTS default_public
 - sql: DROP TABLE IF EXISTS default_after_rows
+- sql: DROP TABLE IF EXISTS default_large_values
+- sql: DROP TABLE IF EXISTS default_inline_large
 test_cases:
 - name: Real TDS installer adds typed defaults to an unpublished table
   tds:
@@ -147,11 +149,60 @@ test_cases:
     - connection: observer
       sql: INSERT default_public DEFAULT VALUES; SELECT id FROM default_public
       expect: {rows: 1,data: [{id: 3}]}
+- name: A native transaction owns legacy large value default declarations
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION; CREATE TABLE default_large_values(id INT PRIMARY KEY,memo TEXT,national NTEXT,payload IMAGE)
+    - connection: owner
+      sql: ALTER TABLE default_large_values ADD CONSTRAINT DF_large_memo DEFAULT (' ') FOR memo; ALTER TABLE default_large_values ADD CONSTRAINT DF_large_national DEFAULT (N'Grüße🙂') FOR national; ALTER TABLE default_large_values ADD CONSTRAINT DF_large_payload DEFAULT (0x00FF0080) FOR payload
+      expect: {rows: 0}
+    - connection: observer
+      sql: SELECT name FROM sys.objects WHERE name=N'default_large_values'
+      expect: {rows: 0}
+    - connection: owner
+      sql: INSERT default_large_values(id) VALUES(1); SELECT memo,national,CONVERT(VARCHAR(8),payload,2) AS hex_value FROM default_large_values
+      expect: {data: [{memo: ' ',national: 'Grüße🙂',hex_value: 00FF0080}]}
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT memo,national,CONVERT(VARCHAR(8),payload,2) AS hex_value FROM default_large_values
+      expect: {data: [{memo: ' ',national: 'Grüße🙂',hex_value: 00FF0080}]}
+- name: CREATE uses the same large value assignment contract
+  sql: CREATE TABLE default_inline_large(id INT PRIMARY KEY,memo TEXT DEFAULT ' ',national NTEXT DEFAULT N'Grüße🙂',payload IMAGE DEFAULT 0x00FF0080)
+  expect: {rows: 0}
+- name: Inline large value defaults retain complete values and embedded zero bytes
+  sql: INSERT default_inline_large(id) VALUES(1); SELECT memo,national,CONVERT(VARCHAR(8),payload,2) AS hex_value FROM default_inline_large
+  expect: {data: [{memo: ' ',national: 'Grüße🙂',hex_value: 00FF0080}]}
+- name: Large value default conversion preserves declared storage types
+  scm: |
+    (begin
+      (define target (table "memcp-tests" false "default_inline_large" false nil))
+      (expression_equal? (map '("memo" "national" "payload") (lambda (name) (begin
+        (define declaration (show target "column" name false nil))
+        (list (declaration "RawType") (declaration "Dimensions")))))
+        '(("TEXT" ()) ("NTEXT" ()) ("IMAGE" ()))))
+  expect: {result: true}
+- name: Large value assignments have no bounded character conversion limit
+  sql: UPDATE default_inline_large SET memo=REPLICATE(CAST('x' AS VARCHAR(MAX)),12001),national=REPLICATE(CAST(N'ä' AS NVARCHAR(MAX)),5001) WHERE id=1
+  expect: {affected_rows: 1}
+- name: Large assignments retain their full declared text domains
+  sql: SELECT DATALENGTH(memo) AS text_bytes,DATALENGTH(national) AS national_bytes FROM default_inline_large
+  expect: {data: [{text_bytes: 12001,national_bytes: 10002}]}
+- name: UPDATE DEFAULT restores complete legacy large values
+  sql: UPDATE default_inline_large SET memo=DEFAULT,national=DEFAULT,payload=DEFAULT WHERE id=1; SELECT memo,national,CONVERT(VARCHAR(8),payload,2) AS hex_value FROM default_inline_large
+  expect: {data: [{memo: ' ',national: 'Grüße🙂',hex_value: 00FF0080}]}
 - name: Restart recovers only committed default declarations
   action: restart
 - name: WAL recovery retains the inserted default and typed computation
   sql: SELECT id,value,flag,label,derived FROM default_install
   expect: {rows: 1,data: [{id: 1,value: 1,flag: false,label: abcd,derived: 2}]}
+- name: Recovered ALTER defaults retain legacy large value contracts
+  sql: INSERT default_large_values(id) VALUES(2); SELECT id,memo,national,CONVERT(VARCHAR(8),payload,2) AS hex_value FROM default_large_values ORDER BY id
+  expect: {data: [{id: 1,memo: ' ',national: 'Grüße🙂',hex_value: 00FF0080},{id: 2,memo: ' ',national: 'Grüße🙂',hex_value: 00FF0080}]}
+- name: Recovered CREATE defaults retain legacy large value contracts
+  sql: INSERT default_inline_large(id) VALUES(2); SELECT id,memo,national,CONVERT(VARCHAR(8),payload,2) AS hex_value FROM default_inline_large ORDER BY id
+  expect: {data: [{id: 1,memo: ' ',national: 'Grüße🙂',hex_value: 00FF0080},{id: 2,memo: ' ',national: 'Grüße🙂',hex_value: 00FF0080}]}
 - name: An empty committed default declaration initializes its first row after restart
   sql: INSERT default_empty(id) VALUES(5)
   expect: {affected_rows: 1}
