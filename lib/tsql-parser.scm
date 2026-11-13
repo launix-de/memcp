@@ -6285,7 +6285,7 @@ that context explicitly; stored views refuse this scalar before publication. */
 				(parser (define name tsql_script_variable) (list "variable" name))
 				(parser (define name tsql_identifier) (toLower name)))))
 			(define tsql_script_declaration (parser (or
-				(parser '((define name tsql_script_variable) (atom "CURSOR" true))
+				(parser '((define name tsql_script_variable) (? (atom "AS" true)) (atom "CURSOR" true))
 					(list name '("CURSOR") nil))
 				(parser '(
 					(define name tsql_script_variable) (? (atom "AS" true))
@@ -6356,6 +6356,18 @@ that context explicitly; stored views refuse this scalar before publication. */
 					(define options tsql_script_cursor_options)
 					(atom "FOR" true) (define query (capture tsql_root_select)))
 					(list "cursor-declare" (toLower name) options (car query)))
+				/* ISO prefix attributes do not mix with extended suffix attributes.
+				INSENSITIVE has the existing STATIC contract; an ordinary SCROLL
+				cursor retains the existing dynamic-source admission and visibility. */
+				(parser '((atom "DECLARE" true) (define name tsql_identifier)
+					(define insensitive (? (atom "INSENSITIVE" true)))
+					(define scroll (? (atom "SCROLL" true))) (atom "CURSOR" true)
+					(atom "FOR" true) (define query (capture tsql_root_select))
+					(? (atom "FOR" true) (atom "READ" true) (atom "ONLY" true)))
+					(list "cursor-declare" (toLower name)
+						(tsql_cursor_options (merge (list
+							(if insensitive '("STATIC") '())
+							(if scroll '("SCROLL") '("FORWARD_ONLY")) '("READ_ONLY")))) (car query)))
 				(parser '((atom "SET" true) (define name tsql_script_variable) "=" (atom "CURSOR" true)
 					(define options tsql_script_cursor_options) (atom "FOR" true)
 					(define query (capture tsql_root_select)))

@@ -15,6 +15,10 @@ setup:
 - sql: CREATE TABLE cursor_insert_counts(id INT)
 - sql: CREATE TABLE cursor_statement_calls(value INT)
 cleanup:
+- sql: DROP PROCEDURE IF EXISTS cursor_iso_declaration
+- sql: DROP TRIGGER IF EXISTS cursor_iso_transition
+- sql: DROP TABLE IF EXISTS cursor_iso_input
+- sql: DROP TABLE IF EXISTS cursor_iso_audit
 - sql: DROP PROCEDURE IF EXISTS cursor_variable_child
 - sql: DROP TABLE IF EXISTS cursor_insert_counts
 - sql: DROP TABLE IF EXISTS cursor_statement_calls
@@ -475,3 +479,68 @@ test_cases:
         SELECT @id AS id,CURSOR_STATUS('variable','@cursor') AS expired_variable;
         DEALLOCATE wire_variable_shared;
       expect: {rows: 1,data: [{id: 2,expired_variable: -3}]}
+
+- name: AS CURSOR declarations share the ordinary variable reference contract
+  sql: |
+    DECLARE @cursor AS CURSOR,@id INT;
+    SET @cursor=CURSOR LOCAL FAST_FORWARD FOR SELECT id FROM cursor_source WHERE id=2;
+    OPEN @cursor; FETCH NEXT FROM @cursor INTO @id;
+    SELECT @id AS id; DEALLOCATE @cursor;
+  expect: {rows: 1,data: [{id: 2}]}
+- name: ISO INSENSITIVE SCROLL exposes FIRST NEXT and PRIOR over the native rowset
+  sql: |
+    DECLARE iso_scrolling INSENSITIVE SCROLL CURSOR FOR
+      SELECT id FROM cursor_source ORDER BY id FOR READ ONLY;
+    DECLARE @first INT,@next INT,@prior INT;
+    OPEN iso_scrolling;
+    FETCH FIRST FROM iso_scrolling INTO @first;
+    FETCH NEXT FROM iso_scrolling INTO @next;
+    FETCH PRIOR FROM iso_scrolling INTO @prior;
+    SELECT @first AS first_id,@next AS next_id,@prior AS prior_id;
+    DEALLOCATE iso_scrolling;
+  expect: {rows: 1,data: [{first_id: 1,next_id: 2,prior_id: 1}]}
+- name: ISO INSENSITIVE cursor reads its OPEN snapshot of a temporary relation
+  sql: |
+    CREATE TABLE #cursor_iso_values(id INT);
+    INSERT #cursor_iso_values VALUES(4),(5);
+    DECLARE iso_temporary INSENSITIVE SCROLL CURSOR FOR SELECT id FROM #cursor_iso_values ORDER BY id;
+    DECLARE @first INT,@next INT,@prior INT;
+    OPEN iso_temporary;
+    UPDATE #cursor_iso_values SET id=id+10;
+    FETCH FIRST FROM iso_temporary INTO @first;
+    FETCH NEXT FROM iso_temporary INTO @next;
+    FETCH PRIOR FROM iso_temporary INTO @prior;
+    SELECT @first AS first_id,@next AS next_id,@prior AS prior_id;
+    DEALLOCATE iso_temporary; DROP TABLE #cursor_iso_values;
+  expect: {rows: 1,data: [{first_id: 4,next_id: 5,prior_id: 4}]}
+- name: A stored procedure admits deferred ISO SCROLL cursor syntax
+  sql: |
+    CREATE PROCEDURE cursor_iso_declaration AS
+    BEGIN
+      DECLARE iso_declared SCROLL CURSOR FOR SELECT id FROM cursor_source ORDER BY id;
+      DECLARE @id INT;
+      OPEN iso_declared; FETCH FIRST FROM iso_declared INTO @id;
+      CLOSE iso_declared; DEALLOCATE iso_declared;
+    END
+- name: ISO transition cursor fixture keeps separate public input and output relations
+  sql: CREATE TABLE cursor_iso_input(id INT)
+- name: ISO transition cursor output uses ordinary storage
+  sql: CREATE TABLE cursor_iso_audit(first_id INT,next_id INT,prior_id INT)
+- name: ISO SCROLL reuses immutable statement transition cursor semantics
+  sql: |
+    CREATE TRIGGER cursor_iso_transition ON cursor_iso_input AFTER INSERT AS
+    BEGIN
+      DECLARE iso_transition SCROLL CURSOR FOR SELECT id FROM inserted ORDER BY id;
+      DECLARE @first INT,@next INT,@prior INT;
+      OPEN iso_transition;
+      FETCH FIRST FROM iso_transition INTO @first;
+      FETCH NEXT FROM iso_transition INTO @next;
+      FETCH PRIOR FROM iso_transition INTO @prior;
+      INSERT cursor_iso_audit VALUES(@first,@next,@prior);
+      DEALLOCATE iso_transition;
+    END
+- name: A multirow transition supplies one ISO scrolling cursor invocation
+  sql: INSERT cursor_iso_input VALUES(8),(9)
+- name: ISO scrolling FETCH produces exact transition results
+  sql: SELECT first_id,next_id,prior_id FROM cursor_iso_audit
+  expect: {rows: 1,data: [{first_id: 8,next_id: 9,prior_id: 8}]}
