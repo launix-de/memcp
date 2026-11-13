@@ -7,7 +7,10 @@ metadata:
   isolated: true
 setup:
   - sql: CREATE TABLE ansi_warning_rows(id INT PRIMARY KEY,label VARCHAR(3),national NVARCHAR(3),value INT)
+  - sql: CREATE TABLE ansi_statement_rows(id INT PRIMARY KEY,label VARCHAR(3))
+  - sql: INSERT ansi_statement_rows VALUES(1,'abc'),(2,'def')
 cleanup:
+  - sql: DROP TABLE IF EXISTS ansi_statement_rows
   - sql: DROP FUNCTION IF EXISTS ansi_warning_scalar
   - sql: DROP TABLE IF EXISTS ansi_warning_defaults
   - sql: DROP TABLE IF EXISTS ansi_warning_computed
@@ -126,3 +129,22 @@ test_cases:
           expect: {error: true,contains: ['division by zero']}
         - sql: SET ANSI_WARNINGS OFF; SELECT 7/0 AS value
           expect: {data: [{value: null}],messages: []}
+
+  - name: Plain explicit statement truncation preserves earlier work and transaction depth
+    tds:
+      statements:
+        - connection: owner
+          sql: SET ANSI_WARNINGS ON; BEGIN TRANSACTION; INSERT ansi_statement_rows VALUES(3,'ok'); BEGIN TRY UPDATE ansi_statement_rows SET label=CASE WHEN id=1 THEN 'xy' ELSE 'long' END WHERE id IN(1,2); END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS code,@@TRANCOUNT AS depth; END CATCH; SELECT id,label FROM ansi_statement_rows ORDER BY id; COMMIT TRANSACTION
+          expect:
+            data: [{code: 8152,depth: 1},{id: 1,label: abc},{id: 2,label: def},{id: 3,label: ok}]
+        - connection: observer
+          sql: SELECT id,label FROM ansi_statement_rows ORDER BY id
+          expect:
+            data: [{id: 1,label: abc},{id: 2,label: def},{id: 3,label: ok}]
+  - name: Nested THROW preserves the native completion cause and earlier explicit work
+    tds:
+      statements:
+        - connection: owner
+          sql: SET ANSI_WARNINGS ON; BEGIN TRANSACTION; INSERT ansi_statement_rows VALUES(4,'win'); BEGIN TRY BEGIN TRY UPDATE ansi_statement_rows SET label='long' WHERE id=1; END TRY BEGIN CATCH THROW; END CATCH; END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS code,@@TRANCOUNT AS depth; END CATCH; SELECT id,label FROM ansi_statement_rows ORDER BY id; COMMIT TRANSACTION
+          expect:
+            data: [{code: 8152,depth: 1},{id: 1,label: abc},{id: 2,label: def},{id: 3,label: ok},{id: 4,label: win}]

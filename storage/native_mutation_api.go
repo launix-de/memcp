@@ -51,6 +51,7 @@ func withNativeTableMutation(targets []*table, descriptor nativeMutationDescript
 	checked = checked || parent != nil && parent.relationData != nil && nativeMutationDataOwner(targets) != nil
 	var db *database
 	var multipleDatabases bool
+	localStatementTargets := true
 	uniqueTargets := make([]*table, 0, len(targets))
 	seen := make(map[*table]struct{}, len(targets))
 	for _, target := range targets {
@@ -74,8 +75,11 @@ func withNativeTableMutation(targets []*table, descriptor nativeMutationDescript
 		// that is not named by this producer. Own the native savepoint BEFORE the
 		// first outer write, not only when that later target happens to open one.
 		// Distributed and nil-Tx legacy profiles are unchanged.
-		if parent != nil && parent.mutationOperation == nil && (parent.Mode == TxCursorStability || parent.Mode == TxACID) &&
-			activeReplication(target.schema) == nil && !sharedClusterDatabase(target.schema.Name) && !target.isEphemeralQueryTable() {
+		localStatementTarget := parent != nil && parent.mutationOperation == nil &&
+			(parent.Mode == TxCursorStability || parent.Mode == TxACID) &&
+			activeReplication(target.schema) == nil && !sharedClusterDatabase(target.schema.Name) && !target.isEphemeralQueryTable()
+		localStatementTargets = localStatementTargets && localStatementTarget
+		if localStatementTarget {
 			// Ordinary writer admission excludes staged FK publication.
 			// The existing declaration counter also closes legacy FK and user-trigger
 			// publication until this SAME producer returns; system cache
@@ -92,6 +96,15 @@ func withNativeTableMutation(targets []*table, descriptor nativeMutationDescript
 		}
 	}
 	targets = uniqueTargets
+	// The existing local statement admission owns ordinary ACID errors too,
+	// not only CHECK/trigger errors. Selection grants no mode authority: the
+	// same prepareStatement resource still admits and pins the actual database
+	// before any producer effect. Unbound, distributed, multi-database and
+	// query-scratch profiles retain their existing native execution owners.
+	if parent != nil && parent.Mode == TxACID && localStatementTargets && !multipleDatabases && db != nil &&
+		!session.IsNil() && (session.IsProc() || session.IsNativeFunc() || session.IsJIT()) {
+		checked = true
+	}
 	if !checked {
 		return scm.Apply(producer, txContextScmer(parent))
 	}
