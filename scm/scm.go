@@ -4548,6 +4548,16 @@ func init() {
 			defer func() {
 				err := recover()
 				if err != nil {
+					// Native owners may wrap a language panic with stack or
+					// completion facts. Preserve those facts through native
+					// unwinding; expose the original value only to this handler.
+					for {
+						carrier, ok := err.(interface{ OriginalFailure() any })
+						if !ok {
+							break
+						}
+						err = carrier.OriginalFailure()
+					}
 					result = Apply(a[1], FromAny(err))
 				}
 			}()

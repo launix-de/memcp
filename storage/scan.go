@@ -148,6 +148,10 @@ func (s scanError) Error() string {
 	return fmt.Sprint(s.r)
 }
 
+// OriginalFailure preserves callback language values through native scan
+// diagnostics. Only a language handler boundary consumes this payload.
+func (s scanError) OriginalFailure() any { return s.r }
+
 func (s scanError) Unwrap() error {
 	cause, _ := s.r.(error)
 	return cause

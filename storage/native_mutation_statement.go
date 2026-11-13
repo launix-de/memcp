@@ -220,6 +220,10 @@ func (operation *nativeMutationOperation) finishStatement() any {
 type nativeStatementRestoredError struct{ cause any }
 
 func (failure *nativeStatementRestoredError) Error() string { return fmt.Sprint(failure.cause) }
+
+// OriginalFailure is consumed only at the language handler edge. Native
+// transaction owners retain this restored marker while deciding rollback.
+func (failure *nativeStatementRestoredError) OriginalFailure() any { return failure.cause }
 func (failure *nativeStatementRestoredError) Unwrap() error {
 	cause, _ := failure.cause.(error)
 	return cause
