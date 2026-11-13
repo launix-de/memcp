@@ -18,7 +18,7 @@ scalars remain rejected. No creator session is retained in the program. */
 	(and (tsql_check_formula_safe? left) (tsql_check_formula_safe? right))
 	/* The exact arithmetic boundary consumes the invocation's scalar option.
 	Its thunk is compiler-generated and contains only validated row formulas. */
-	(head enabled ((symbol lambda) () body))
+	(list head enabled ((symbol lambda) '() body))
 	(if (and (or (equal? head 'tsql_arithmetic_value) (expression_equal? head tsql_arithmetic_value))
 		(expression_equal? enabled (tsql_ansi_warnings_formula)))
 		(tsql_check_formula_safe? body) false)

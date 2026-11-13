@@ -263,7 +263,7 @@ first and specialize this finite profile at the frontend cache boundary. */
 profile supplies its error boundary at the ordinary relational expression. */
 (define tsql_strict_computed_formula (lambda (formula) (match formula
 	((symbol quote) _value) formula
-	(head enabled ((symbol lambda) () body))
+	(list head enabled ((symbol lambda) '() body))
 	(if (or (equal? head 'tsql_arithmetic_value) (expression_equal? head tsql_arithmetic_value))
 		(list head true (list 'lambda '() (tsql_strict_computed_formula body)))
 		(cons (tsql_strict_computed_formula head)
@@ -387,7 +387,7 @@ request state can become part of the persisted function. */
 (define tsql_computed_formula_safe? (lambda (formula) (match formula
 	((symbol get_column) _alias _alias_ic _name _name_ic) true
 	((symbol quote) value) (begin (sql_declaration_data value) true)
-	(head true ((symbol lambda) () body))
+	(list head true ((symbol lambda) '() body))
 	(and (or (equal? head 'tsql_arithmetic_value) (expression_equal? head tsql_arithmetic_value))
 		(tsql_computed_formula_safe? body))
 	/* The trusted expression compiler selected this collation from declarations.

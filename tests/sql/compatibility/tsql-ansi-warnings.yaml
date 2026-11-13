@@ -9,6 +9,7 @@ setup:
   - sql: CREATE TABLE ansi_warning_rows(id INT PRIMARY KEY,label VARCHAR(3),national NVARCHAR(3),value INT)
 cleanup:
   - sql: DROP FUNCTION IF EXISTS ansi_warning_scalar
+  - sql: DROP TABLE IF EXISTS ansi_warning_computed
   - sql: DROP TABLE IF EXISTS ansi_warning_checked
   - sql: DROP PROCEDURE IF EXISTS ansi_warning_scope
   - sql: DROP TABLE IF EXISTS ansi_warning_rows
@@ -76,6 +77,33 @@ test_cases:
   - name: Disabled arithmetic UNKNOWN satisfies CHECK
     sql: SET ANSI_WARNINGS OFF; INSERT ansi_warning_checked VALUES(0); SELECT value FROM ansi_warning_checked; SET ANSI_WARNINGS ON
     expect: {data: [{value: 0}]}
+  - name: Declared computed arithmetic remains a pure stored recipe
+    sql: CREATE TABLE ansi_warning_computed(id INT PRIMARY KEY,denominator INT,value AS (8/denominator),shifted AS (denominator+1))
+    expect: {rows: 0}
+  - name: Computed inputs retain their ordinary declared values
+    sql: INSERT ansi_warning_computed(id,denominator) VALUES(1,2),(2,0)
+    expect: {affected_rows: 2}
+  - name: Enabled computed values use the native cache
+    sql: SET ANSI_WARNINGS ON; SELECT value,shifted FROM ansi_warning_computed WHERE id=1
+    expect: {data: [{value: 4,shifted: 3}]}
+  - name: Disabled computed arithmetic receives current scalar inputs
+    sql: SET ANSI_WARNINGS OFF; SELECT id,value,shifted FROM ansi_warning_computed ORDER BY id; SET ANSI_WARNINGS ON
+    expect: {data: [{id: 1,value: 4,shifted: 3},{id: 2,value: null,shifted: 1}]}
+  - name: Enabled computed error keeps its typed diagnostic
+    sql: SET ANSI_WARNINGS ON; BEGIN TRY SELECT value FROM ansi_warning_computed WHERE id=2; END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS code; END CATCH
+    expect: {data: [{code: 8134}]}
+  - name: Computed OFF filter and update share the declared expression
+    sql: SET ANSI_WARNINGS OFF; UPDATE ansi_warning_computed SET denominator=4 WHERE value IS NULL; SELECT id,value FROM ansi_warning_computed ORDER BY id; SET ANSI_WARNINGS ON
+    expect: {data: [{id: 1,value: 4},{id: 2,value: 2}]}
+  - name: Computed cache remains valid across finite option profiles
+    tds:
+      statements:
+        - sql: SET ANSI_WARNINGS ON; SELECT value FROM ansi_warning_computed WHERE id=1
+          expect: {data: [{value: 4}]}
+        - sql: SET ANSI_WARNINGS OFF; SELECT value FROM ansi_warning_computed WHERE id=1
+          expect: {data: [{value: 4}]}
+        - sql: SET ANSI_WARNINGS ON; SELECT value FROM ansi_warning_computed WHERE id=1
+          expect: {data: [{value: 4}]}
   - name: Native connection reuses a warm arithmetic plan with current setting
     tds:
       statements:
