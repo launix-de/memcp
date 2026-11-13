@@ -67,8 +67,11 @@ test_cases:
   - name: Scalar module consumes current option without retaining a creator
     sql: SET ANSI_WARNINGS OFF; SELECT dbo.ansi_warning_scalar(0) AS value; SET ANSI_WARNINGS ON
     expect: {data: [{value: null}]}
+  - name: CHECK arithmetic fixture has a declared integer input
+    sql: CREATE TABLE ansi_warning_checked(value INT)
+    expect: {rows: 0}
   - name: CHECK arithmetic compiles with the actual native row invocation
-    sql: CREATE TABLE ansi_warning_checked(value INT,CHECK(10/value>1))
+    sql: ALTER TABLE ansi_warning_checked ADD CONSTRAINT ansi_warning_nonzero CHECK(10/value>1)
     expect: {rows: 0}
   - name: Disabled arithmetic UNKNOWN satisfies CHECK
     sql: SET ANSI_WARNINGS OFF; INSERT ansi_warning_checked VALUES(0); SELECT value FROM ansi_warning_checked; SET ANSI_WARNINGS ON
