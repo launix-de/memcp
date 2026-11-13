@@ -368,22 +368,118 @@ test_cases:
       SELECT id,amount FROM #identity_target;
       DROP TABLE #identity_target;
     expect: {rows: 1,data: [{id: 10,amount: 7}]}
-  - name: Temporary DDL starts a normal explicit transaction for a rejection check
-    session_id: local-ddl-rejection
+  - name: Temporary DDL starts a normal explicit transaction
+    session_id: local-ddl-owner
     sql: BEGIN TRANSACTION
     expect: {affected_rows: 0}
-  - name: Transactional temporary creation fails before publishing a native relation
-    session_id: local-ddl-rejection
+  - name: Transactional temporary creation publishes to its native owner
+    session_id: local-ddl-owner
     sql: "CREATE TABLE #transactional_ddl(id INT)"
-    expect: {error: true,contains: temporary DDL inside explicit transactions is not supported}
-  - name: Failed temporary DDL uses ordinary transaction recovery
-    session_id: local-ddl-rejection
-    sql: ROLLBACK TRANSACTION
-    expect: {affected_rows: 0}
-  - name: Rejected temporary DDL leaves no binding after recovery
-    session_id: local-ddl-rejection
+    expect: {rows: 0, result_not_contains: '"affected_rows"'}
+  - name: Creating transaction writes its temporary relation
+    session_id: local-ddl-owner
+    sql: "INSERT #transactional_ddl VALUES(1)"
+    expect: {affected_rows: 1}
+  - name: Creating transaction reads its own temporary rows
+    session_id: local-ddl-owner
+    sql: "SELECT id FROM #transactional_ddl"
+    expect: {rows: 1, data: [{id: 1}]}
+  - name: Another connection cannot resolve an uncommitted local name
+    session_id: local-ddl-other
     sql: "SELECT id FROM #transactional_ddl"
     expect: {error: true}
+  - name: Another connection can create the same temporary name independently
+    session_id: local-ddl-other
+    sql: "CREATE TABLE #transactional_ddl(id INT)"
+    expect: {rows: 0, result_not_contains: '"affected_rows"'}
+  - name: Independent temporary relation retains its own rows
+    session_id: local-ddl-other
+    sql: "INSERT #transactional_ddl VALUES(2)"
+    expect: {affected_rows: 1}
+  - name: Temporary CREATE rolls back through the native transaction
+    session_id: local-ddl-owner
+    sql: ROLLBACK TRANSACTION
+    expect: {affected_rows: 0}
+  - name: Rolled-back temporary CREATE leaves no binding
+    session_id: local-ddl-owner
+    sql: "SELECT id FROM #transactional_ddl"
+    expect: {error: true}
+  - name: Temporary CREATE rollback preserves another connection's relation
+    session_id: local-ddl-other
+    sql: "SELECT id FROM #transactional_ddl"
+    expect: {rows: 1, data: [{id: 2}]}
+  - name: A second native transaction can reuse the rolled-back local name
+    session_id: local-ddl-owner
+    sql: BEGIN TRANSACTION
+    expect: {affected_rows: 0}
+  - name: Recreated temporary relation has a fresh native generation
+    session_id: local-ddl-owner
+    sql: "CREATE TABLE #transactional_ddl(id INT)"
+    expect: {rows: 0, result_not_contains: '"affected_rows"'}
+  - name: Recreated temporary relation starts empty
+    session_id: local-ddl-owner
+    sql: "SELECT id FROM #transactional_ddl"
+    expect: {rows: 0, data: []}
+  - name: Recreated temporary relation accepts different rows
+    session_id: local-ddl-owner
+    sql: "INSERT #transactional_ddl VALUES(3)"
+    expect: {affected_rows: 1}
+  - name: Temporary CREATE commits through the native transaction
+    session_id: local-ddl-owner
+    sql: COMMIT TRANSACTION
+    expect: {affected_rows: 0}
+  - name: Committed temporary relation survives the creating transaction
+    session_id: local-ddl-owner
+    sql: "SELECT id FROM #transactional_ddl"
+    expect: {rows: 1, data: [{id: 3}]}
+  - name: Commit preserves the other connection's independent rows
+    session_id: local-ddl-other
+    sql: "SELECT id FROM #transactional_ddl"
+    expect: {rows: 1, data: [{id: 2}]}
+  - name: Temporary DROP starts a normal explicit transaction
+    session_id: local-ddl-owner
+    sql: BEGIN TRANSACTION
+    expect: {affected_rows: 0}
+  - name: Temporary DROP stages removal in its native transaction
+    session_id: local-ddl-owner
+    sql: "DROP TABLE #transactional_ddl"
+    expect: {rows: 0, result_not_contains: '"affected_rows"'}
+  - name: Temporary DROP rolls back through the native transaction
+    session_id: local-ddl-owner
+    sql: ROLLBACK TRANSACTION
+    expect: {affected_rows: 0}
+  - name: Rolled-back temporary DROP restores the committed generation and rows
+    session_id: local-ddl-owner
+    sql: "SELECT id FROM #transactional_ddl"
+    expect: {rows: 1, data: [{id: 3}]}
+  - name: Temporary DROP rollback preserves the other connection's relation
+    session_id: local-ddl-other
+    sql: "SELECT id FROM #transactional_ddl"
+    expect: {rows: 1, data: [{id: 2}]}
+  - name: Temporary DROP commit starts a normal explicit transaction
+    session_id: local-ddl-owner
+    sql: BEGIN TRANSACTION
+    expect: {affected_rows: 0}
+  - name: Committing temporary DROP stages the owned relation only
+    session_id: local-ddl-owner
+    sql: "DROP TABLE #transactional_ddl"
+    expect: {rows: 0, result_not_contains: '"affected_rows"'}
+  - name: Temporary DROP commits through the native transaction
+    session_id: local-ddl-owner
+    sql: COMMIT TRANSACTION
+    expect: {affected_rows: 0}
+  - name: Committed temporary DROP removes the local binding
+    session_id: local-ddl-owner
+    sql: "SELECT id FROM #transactional_ddl"
+    expect: {error: true}
+  - name: Temporary DROP commit preserves the other connection's rows
+    session_id: local-ddl-other
+    sql: "SELECT id FROM #transactional_ddl"
+    expect: {rows: 1, data: [{id: 2}]}
+  - name: Independent temporary relation can be dropped by its owner
+    session_id: local-ddl-other
+    sql: "DROP TABLE #transactional_ddl"
+    expect: {rows: 0, result_not_contains: '"affected_rows"'}
   - name: Closing a TDS session retires its native temporary relation
     scm: |
       (begin
