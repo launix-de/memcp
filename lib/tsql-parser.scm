@@ -116,9 +116,14 @@ BIGINT endpoints: checking a wrapped result afterwards would lose overflow. */
 					"multiply" (* left right))))))) tsql_raise_error)))
 (define tsql_numeric_condition_result (lambda (infos) (begin
 	(define input (car infos))
-	(sql_info (list tsql_arithmetic_value (tsql_ansi_warnings_formula)
-		(list 'lambda '() (sql_info_formula input)))
-		(sql_info_datatype input) (sql_info_collation input)))))
+	/* A proven constant success cannot signal an arithmetic condition. Retain
+	its original typed formula; failed folding never samples invocation state. */
+	(define safe (try (lambda () (begin (tryfold (sql_info_formula input)) true))
+		(lambda (_cause) false)))
+	(if safe input
+		(sql_info (list tsql_arithmetic_value (tsql_ansi_warnings_formula)
+			(list 'lambda '() (sql_info_formula input)))
+			(sql_info_datatype input) (sql_info_collation input))))))
 (define tsql_numeric_condition_expr (lambda (expression)
 	(list 'sql_compile_expr 'tsql_numeric_condition_result expression)))
 (define tsql_arithmetic_result (lambda (infos) (begin
@@ -142,8 +147,8 @@ BIGINT endpoints: checking a wrapped result afterwards would lose overflow. */
 		(sql_type_formula '() (tsql_cast_expr
 			(list 'sql_type_expr operand (sql_info_datatype input) nil) type '()))
 		(has? '("FLOAT" "REAL") type) (list tsql_cast_float operand) operand))
-	(sql_info (list tsql_arithmetic_value (tsql_ansi_warnings_formula)
-		(list 'lambda '() formula)) (sql_info_datatype input) (sql_info_collation input)))))
+	(tsql_numeric_condition_result (list
+		(sql_info formula (sql_info_datatype input) (sql_info_collation input)))))))
 (define tsql_arithmetic_expr (lambda (expression)
 	(list 'sql_compile_expr 'tsql_arithmetic_result expression)))
 (define tsql_parse_integer (close_procedure ((lambda (tsql_raise_error)
