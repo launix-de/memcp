@@ -4558,6 +4558,14 @@ func init() {
 			Description: "projects a native failure's original language value for diagnostics; catch and rethrow retain the original failure owner",
 			Params:      []*TypeDescriptor{{Kind: "any", Label: "failure"}},
 			Return:      &TypeDescriptor{Kind: "any"},
+			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				// JITGen native call boundary: interface type assertion.
+				ctx.Coverage.NativeCalls++
+				declaration := declarations["failure_value"]
+				return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
+			},
+			JITInlineCallbacks: false,
+			JITInlineCost:      65535,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
