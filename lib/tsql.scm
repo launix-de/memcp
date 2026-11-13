@@ -219,14 +219,70 @@ owner slot; arbitrary six-element expressions are never inferred as sources. */
 (define tsql_bind_column_compilers (lambda (node compiler) (match node
 	((symbol sql_compile_column) _previous expression) (list (quote sql_compile_column) compiler expression)
 	_ (tsql_map_executable_children node (lambda (child) (tsql_bind_column_compilers child compiler))))))
+/* OFF plans use the same pure declared computation with explicit base inputs.
+Native readers load computed columns before projection, so an invocation IF
+around a cached get_column cannot own an arithmetic-error boundary. Bind names
+first and specialize this finite profile at the frontend cache boundary. */
+(define tsql_expand_computed_columns (lambda (node outer planning tx) (begin
+	(define visit (lambda (expression sources)
+		(tsql_expand_computed_columns expression sources planning tx)))
+	(match node
+		((symbol quote) _value) node
+		((symbol query-block) database sources fields condition group having order limit offset hidden stages facts) (begin
+			(define scope (merge (list sources outer)))
+			(make_query_block database
+				(map sources (lambda (source) (tsql_map_source_expressions source
+					(lambda (expression) (visit expression scope)))))
+				(visit fields scope) (visit condition scope) (visit group scope) (visit having scope)
+				(map order (lambda (item) (list (visit (car item) scope) (cadr item))))
+				(visit limit scope) (visit offset scope) (visit hidden scope) (visit stages scope) facts))
+		((symbol get_column) alias alias_ic column column_ic) (begin
+			(define source (source_for_alias outer (if (empty_list? outer) nil (source_alias (car outer))) alias alias_ic))
+			(define declaration (if (and source (source_is_base_table? source))
+				(source_column_declaration source column column_ic) nil))
+			(if (not (and declaration (declaration "Computed"))) node (begin
+				(define handle (table (source_schema source) false (source_relation source) false tx))
+				(define recipe (show handle "computation" (declaration "Field") false tx))
+				(if (nil? recipe) node (begin
+					/* Declarations are immutable until replacement of the relation.
+					The native identity is an O(1) scalar guard on this borrowed recipe. */
+					(planner_record_guard_condition (list 'equal?
+						(list 'show (list 'table (source_schema source) false (source_relation source) false 'tx) "identity" 'tx)
+						(show handle "identity" tx)) planning)
+					(define inputs (map (car recipe) (lambda (name)
+						(visit (list 'get_column (source_alias source) false name false) outer))))
+					(define info ((tsql_column_compiler planning) (sql_expr_info outer node) declaration))
+					(list 'sql_type_expr (list tsql_arithmetic_value false
+						(list 'lambda '() (cons (cadr recipe) inputs)))
+						(sql_info_datatype info) (sql_info_collation info)))))))
+		_ (tsql_map_executable_children node (lambda (child) (visit child outer)))))))
+(define tsql_bind_computed_profile (lambda (query planning tx)
+	(if (tsql_ansi_warnings planning) query
+		(tsql_expand_computed_columns (bind_query_names query '()) '() planning tx))))
+/* Persisted native definitions are strict pure computations. The OFF query
+profile supplies its error boundary at the ordinary relational expression. */
+(define tsql_strict_computed_formula (lambda (formula) (match formula
+	((symbol quote) _value) formula
+	(head enabled ((symbol lambda) () body))
+	(if (or (equal? head 'tsql_arithmetic_value) (expression_equal? head tsql_arithmetic_value))
+		(list head true (list 'lambda '() (tsql_strict_computed_formula body)))
+		(cons (tsql_strict_computed_formula head)
+			(map (cdr formula) tsql_strict_computed_formula)))
+	(cons head arguments) (cons (tsql_strict_computed_formula head)
+		(map arguments tsql_strict_computed_formula))
+	_ formula)))
 (define tsql_build_dml_plan (lambda (schema name alias sources columns condition order limit offset planning_session tx) (begin
 	(define compiler (tsql_column_compiler planning_session))
-	(build_dml_plan schema name alias
+	(define query (make_query_block schema
 		(map sources (lambda (source) (tsql_map_source_expressions source
 			(lambda (expression) (tsql_bind_column_compilers expression compiler)))))
 		(tsql_bind_column_compilers columns compiler)
-		(tsql_bind_column_compilers condition compiler)
-		(tsql_bind_column_compilers order compiler) limit offset true planning_session tx))))
+		(tsql_bind_column_compilers condition compiler) nil nil
+		(tsql_bind_column_compilers order compiler) limit offset '() '() '()))
+	(define expanded (if (tsql_ansi_warnings planning_session) query
+		(tsql_bind_computed_profile (sql_bind_catalog_declarations query tx planning_session) planning_session tx)))
+	(build_dml_plan schema name alias (qb_sources expanded) (qb_fields expanded) (qb_where expanded)
+		(qb_order expanded) (qb_limit expanded) (qb_offset expanded) true planning_session tx))))
 (define create_sql_type_alias (lambda (database name base dimensions nullable tx)
 	(tsql_type_ddl database tx (lambda () (begin
 		/* Until colliding user aliases have a bound precedence contract, reject
@@ -331,6 +387,9 @@ request state can become part of the persisted function. */
 (define tsql_computed_formula_safe? (lambda (formula) (match formula
 	((symbol get_column) _alias _alias_ic _name _name_ic) true
 	((symbol quote) value) (begin (sql_declaration_data value) true)
+	(head true ((symbol lambda) () body))
+	(and (or (equal? head 'tsql_arithmetic_value) (expression_equal? head tsql_arithmetic_value))
+		(tsql_computed_formula_safe? body))
 	/* The trusted expression compiler selected this collation from declarations.
 	It is an immutable comparison function, never a SQL/session input. */
 	((symbol sql_compare) left right _comparison _operation)
@@ -343,6 +402,7 @@ request state can become part of the persisted function. */
 			'coalesceNil 'nil? '+ '- '* '/ 'div_null 'intdiv 'mod 'sql_not
 			'tsql_cast_integer 'tsql_cast_float 'tsql_cast_decimal 'tsql_cast_text
 			'tsql_cast_fixed_text 'tsql_numeric_input 'sql_decimal_value 'tsql_padded_text_equal
+			'tsql_checked_integer_operation tsql_checked_integer_operation
 			+ - * / div_null intdiv mod coalesceNil nil? equal? equal?? < <= > >= not sql_not
 			tsql_cast_integer tsql_cast_float tsql_cast_decimal tsql_cast_text
 			tsql_cast_fixed_text tsql_numeric_input sql_decimal_value tsql_padded_text_equal) head)
@@ -382,7 +442,7 @@ independent of receiver-side global names. */
 				true nil nil nil nil nil nil nil nil) '()))
 			(define source (car (qb_sources bound)))
 			(define info (sql_expr_info (list source) (cadr (qb_fields bound))))
-			(define formula (sql_type_lower_annotations (list source) (sql_info_formula info)))
+			(define formula (tsql_strict_computed_formula (sql_type_lower_annotations (list source) (sql_info_formula info))))
 			(if (tsql_computed_formula_safe? formula) true
 				(error "computed column requires a deterministic local scalar expression"))
 			(define inputs (extract_columns_for_alias source formula))
@@ -728,10 +788,11 @@ other execution bindings retain their existing native owners. */
 	(define import_source (session "tsql_import_source"))
 	(define quoted (tsql_quoted_identifier session))
 	(define ansi (tsql_ansi_nulls session))
+	(define warnings (tsql_ansi_warnings session))
 	(define temporary_scope (tsql_temporary_scope session))
 	(define temporary_bindings (tsql_temporary_visible temporary_scope tx))
 	(session "__tsql_temporary_bindings" temporary_bindings)
-	(define cache_scope (json_encode (list username (session "__tsql_principal_id") declarations local_relations import_target import_source temporary_bindings quoted ansi)))
+	(define cache_scope (json_encode (list username (session "__tsql_principal_id") declarations local_relations import_target import_source temporary_bindings quoted ansi warnings)))
 	/* The cached dispatcher retains this parser for future misses. Close its
 	declaration/import/name and lexical snapshots here, before embedding it as a literal;
 	its creation frame also owns the current session, transaction and outputs. */
@@ -742,6 +803,7 @@ other execution bindings retain their existing native owners. */
 		(planning "tsql_import_source" import_source)
 		(planning "__tsql_quoted_identifier" quoted)
 		(planning "__tsql_ansi_nulls" ansi)
+		(planning "__tsql_ansi_warnings" warnings)
 		(planning "__tsql_temporary_bindings" temporary_bindings)
 		(planning "__tsql_database_access_requirements" '())
 		(define formula (parse_tsql database text policy planning tx))

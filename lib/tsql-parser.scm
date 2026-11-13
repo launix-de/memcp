@@ -5464,9 +5464,9 @@ that context explicitly; stored views refuse this scalar before publication. */
 	(define tsql_expand_select_query (lambda (query) (begin
 		(define bound_query (tsql_finalize_sources query "query" '() '()))
 		(define expanded (tsql_bind_column_compilers (sql_expand_views bound_query policy planning_session tx) (tsql_column_compiler planning_session)))
-		(tsql_bind_column_compilers
+		(tsql_bind_computed_profile (tsql_bind_column_compilers
 			(tsql_expand_relational_scalar_calls expanded '() policy planning_session tx)
-			(tsql_column_compiler planning_session)))))
+			(tsql_column_compiler planning_session)) planning_session tx))))
 	(define tsql_build_select_plan (lambda (query) (begin
 		(define targets (tsql_select_assignment_targets query))
 		(define query (if targets (tsql_select_assignment_query query targets) query))
