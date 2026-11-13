@@ -40,11 +40,17 @@ test_cases:
     SELECT l.id FROM (grouped_left AS l INNER JOIN grouped_middle AS m ON r.middle_id=m.id)
       INNER JOIN grouped_right AS r ON l.id=m.left_id
   expect: {error: true,contains: unknown relation alias}
-- name: A grouped outer join is not flattened as an inner join group
-  sql: SELECT l.id FROM (grouped_left AS l LEFT JOIN grouped_middle AS m ON l.id=m.left_id)
-  expect: {error: true,contains: parenthesized source requires an inner join group}
+- name: A grouped outer join preserves duplicate matches and its NULL extended row
+  sql: SELECT l.id,m.id AS middle_id FROM (grouped_left AS l LEFT JOIN grouped_middle AS m ON l.id=m.left_id)
+  expect:
+    rows: 4
+    data:
+    - {id: 1,middle_id: 11}
+    - {id: 1,middle_id: 12}
+    - {id: 2,middle_id: 13}
+    - {id: 3,middle_id: null}
 - name: A parenthesized join after a comma cannot see the preceding source
   sql: |
     SELECT p.id FROM grouped_left AS p,
       (grouped_middle AS m INNER JOIN grouped_right AS r ON p.id=r.middle_id)
-  expect: {error: true,contains: parenthesized join groups require the leading FROM source}
+  expect: {error: true,contains: 'unknown relation alias: p'}
