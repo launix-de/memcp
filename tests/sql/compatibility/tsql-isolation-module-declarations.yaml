@@ -1,0 +1,105 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Isolation statements are stored executable module commands, never declaration-time effects
+setup:
+- sql: CREATE TABLE isolation_visibility_rows(id INT PRIMARY KEY)
+cleanup:
+- sql: DROP TABLE IF EXISTS isolation_visibility_rows
+- sql: DROP PROCEDURE IF EXISTS isolation_trailing
+- sql: DROP PROCEDURE IF EXISTS isolation_skipped
+- sql: DROP PROCEDURE IF EXISTS isolation_uncommitted
+- sql: DROP PROCEDURE IF EXISTS isolation_repeatable
+- sql: DROP PROCEDURE IF EXISTS isolation_snapshot
+- sql: DROP PROCEDURE IF EXISTS isolation_serializable
+- sql: DROP PROCEDURE IF EXISTS isolation_invalid
+- sql: DROP FUNCTION IF EXISTS isolation_invalid_function
+test_cases:
+- name: A procedure stores a trailing READ COMMITTED statement after ordinary SQL
+  sql: |
+    CREATE PROCEDURE isolation_trailing AS
+    BEGIN
+      SET NOCOUNT ON
+      SELECT 41 AS value
+      SET NOCOUNT OFF
+      SET TRANSACTION ISOLATION LEVEL READ COMMITTED
+    END
+  expect: {rows: 0}
+- name: A nonexecuted isolation statement remains conditional at invocation
+  sql: |
+    CREATE PROCEDURE isolation_skipped AS
+    BEGIN
+      IF 1=0 SET TRANSACTION ISOLATION LEVEL READ COMMITTED
+      SELECT 42 AS value
+    END
+  expect: {rows: 0}
+- name: Executing the other branch does not execute an isolation setter
+  sql: EXEC isolation_skipped
+  expect: {rows: 1, data: [{value: 42}]}
+- name: A procedure can declare the READ UNCOMMITTED statement
+  sql: CREATE PROCEDURE isolation_uncommitted AS SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED
+  expect: {rows: 0}
+- name: A procedure can declare the REPEATABLE READ statement
+  sql: CREATE PROCEDURE isolation_repeatable AS SET TRANSACTION ISOLATION LEVEL REPEATABLE READ
+  expect: {rows: 0}
+- name: A procedure can declare the SNAPSHOT statement
+  sql: CREATE PROCEDURE isolation_snapshot AS SET TRANSACTION ISOLATION LEVEL SNAPSHOT
+  expect: {rows: 0}
+- name: A procedure can declare the SERIALIZABLE statement
+  sql: CREATE PROCEDURE isolation_serializable AS SET TRANSACTION ISOLATION LEVEL SERIALIZABLE
+  expect: {rows: 0}
+- name: All declared isolation procedures are ordinary catalog objects
+  sql: SELECT name FROM sys.objects WHERE type=N'P' AND name LIKE N'isolation_%' ORDER BY name
+  expect:
+    rows: 6
+    data:
+    - {name: isolation_repeatable}
+    - {name: isolation_serializable}
+    - {name: isolation_skipped}
+    - {name: isolation_snapshot}
+    - {name: isolation_trailing}
+    - {name: isolation_uncommitted}
+- name: An isolation statement requires the LEVEL keyword
+  sql: CREATE PROCEDURE isolation_invalid AS SET TRANSACTION ISOLATION READ COMMITTED
+  expect: {error: true}
+- name: An isolation statement requires a documented level
+  sql: CREATE PROCEDURE isolation_invalid AS SET TRANSACTION ISOLATION LEVEL READ SOMETIMES
+  expect: {error: true}
+- name: Scalar functions cannot set transaction isolation
+  sql: |
+    CREATE FUNCTION isolation_invalid_function() RETURNS INT AS
+    BEGIN
+      SET TRANSACTION ISOLATION LEVEL READ COMMITTED
+      RETURN 1
+    END
+  expect: {error: true}
+- name: Executable READ COMMITTED is a positive pending visibility contract
+  noncritical: true
+  sql: SET TRANSACTION ISOLATION LEVEL READ COMMITTED; SELECT 43 AS value
+  expect: {rows: 1, data: [{value: 43}]}
+- name: READ COMMITTED exposes own changes and only other committed changes
+  noncritical: true
+  tds:
+    statements:
+    - connection: writer
+      sql: SET TRANSACTION ISOLATION LEVEL READ COMMITTED;
+    - connection: observer
+      sql: SET TRANSACTION ISOLATION LEVEL READ COMMITTED;
+    - connection: writer
+      sql: BEGIN TRANSACTION;
+    - connection: writer
+      sql: INSERT isolation_visibility_rows VALUES(1)
+    - connection: writer
+      sql: SELECT id FROM isolation_visibility_rows
+      expect: {rows: 1, data: [{id: 1}]}
+    - connection: observer
+      sql: SELECT id FROM isolation_visibility_rows
+      expect: {rows: 0}
+    - connection: writer
+      sql: COMMIT TRANSACTION;
+    - connection: observer
+      sql: SELECT id FROM isolation_visibility_rows
+      expect: {rows: 1, data: [{id: 1}]}

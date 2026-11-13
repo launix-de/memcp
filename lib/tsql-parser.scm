@@ -5991,6 +5991,20 @@ that context explicitly; stored views refuse this scalar before publication. */
 				(list (quote tsql_set_identity_insert) (quote session) database name enabled (quote tx)))))
 		(parser (define setting tsql_format_only_setting)
 			(lambda () (list 'session "__tsql_fmtonly" (cadr setting))))
+		/* Isolation is executable SQL, including inside a stored module. Admit
+		the documented grammar without executing it during declaration. Native
+		cursor-stability publishes uncommitted changes; switching to tx_begin_acid
+		would commit the current transaction. Neither is a READ COMMITTED setter.
+		Keep execution explicit until the native visibility owner supports it.
+		https://learn.microsoft.com/sql/t-sql/statements/set-transaction-isolation-level-transact-sql */
+		(parser '((atom "SET" true) (atom "TRANSACTION" true) (atom "ISOLATION" true) (atom "LEVEL" true)
+			(define level (or
+				(parser '((atom "READ" true) (atom "UNCOMMITTED" true)) "READ UNCOMMITTED")
+				(parser '((atom "READ" true) (atom "COMMITTED" true)) "READ COMMITTED")
+				(parser '((atom "REPEATABLE" true) (atom "READ" true)) "REPEATABLE READ")
+				(parser (atom "SNAPSHOT" true) "SNAPSHOT")
+				(parser (atom "SERIALIZABLE" true) "SERIALIZABLE"))))
+			(lambda () (list (quote error) "T-SQL isolation-level execution is not implemented: " level)))
 		(parser '((atom "SET" true) (atom "NOCOUNT" true)
 			(define enabled (or (parser (atom "ON" true) true) (parser (atom "OFF" true) false))))
 			(lambda () (list (quote session) "__tsql_nocount" enabled)))
