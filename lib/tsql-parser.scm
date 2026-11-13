@@ -2512,6 +2512,14 @@ not choose the result type. */
 		(equal? target "REAL") (sql_type_lower_annotations '()
 			(tsql_cast_expr (list 'sql_type_expr formula "FLOAT" nil) "REAL" '())) formula)
 		(if (empty_list? dimensions) target (list target dimensions)) nil))))
+/* T-SQL keeps the highest-precedence declared numeric operand type. The
+common SQL contract widens integer operators to BIGINT for other dialects. */
+(define tsql_numeric_binary_result (lambda (operation infos) (begin
+	(define common (sql_call_info operation infos))
+	(define target (find tsql_addition_numeric_types (lambda (type)
+		(find infos (lambda (info) (equal? (tsql_addition_type (sql_info_type info)) type)) nil)) nil))
+	(if (has? '("BIGINT" "INT" "SMALLINT" "TINYINT" "FLOAT" "REAL") target)
+		(sql_info (sql_info_formula common) target nil) common))))
 (define tsql_compile_subtraction (lambda (infos)
 	(if (find infos tsql_arithmetic_temporal? nil) (tsql_compile_temporal_day_arithmetic infos true)
 		(and (equal? (count infos) 2)
@@ -2522,7 +2530,7 @@ not choose the result type. */
 		(tsql_compile_text_integer_subtraction infos)
 		(find infos (lambda (info) (has? '("MONEY" "SMALLMONEY") (sql_info_type info))) nil)
 		(tsql_compile_monetary_subtraction infos)
-		(sql_call_info '- infos))))
+		(tsql_numeric_binary_result '- infos))))
 (define tsql_sub_expr (lambda (left right)
 	(tsql_arithmetic_expr (list 'sql_compile_expr 'tsql_compile_subtraction left right))))
 
@@ -2574,7 +2582,7 @@ https://learn.microsoft.com/en-us/sql/t-sql/language-elements/multiply-transact-
 				target '())))))
 		(sql_info (list tsql_cast_money (cons tsql_nullable_product operands)
 			(equal? target "SMALLMONEY")) target nil))
-		(sql_call_info '* infos)))))
+		(tsql_numeric_binary_result '* infos)))))
 (define tsql_fold_multiplicative (lambda (acc term) (match term
 	'("divide" value) (tsql_divide_expr acc value)
 	'("multiply" value) (tsql_arithmetic_expr (list 'sql_compile_expr 'tsql_compile_multiplication acc value))
