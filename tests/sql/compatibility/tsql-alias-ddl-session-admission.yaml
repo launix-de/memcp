@@ -1,0 +1,84 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  description: Alias DDL distinguishes implicit native ACID from explicit SQL transactions
+setup:
+- sql: DROP TABLE IF EXISTS alias_session_rows
+- sql: DROP TABLE IF EXISTS alias_session_rejected
+- sql: DROP TYPE IF EXISTS dbo.alias_session_number
+- sql: DROP TYPE IF EXISTS dbo.alias_session_extra
+cleanup:
+- sql: DROP TABLE IF EXISTS alias_session_rejected
+- sql: DROP TABLE IF EXISTS alias_session_rows
+- sql: DROP TYPE IF EXISTS dbo.alias_session_extra
+- sql: DROP TYPE IF EXISTS dbo.alias_session_number
+test_cases:
+- name: Implicit native ACID admits an alias declaration
+  sql: CREATE TYPE dbo.alias_session_number FROM INT
+- name: Implicit native ACID admits a table consuming the alias
+  sql: CREATE TABLE alias_session_rows(id INT PRIMARY KEY,value dbo.alias_session_number)
+- name: Implicit native ACID admits an alias column addition
+  sql: ALTER TABLE alias_session_rows ADD extra dbo.alias_session_number
+- name: Alias consumers retain their declared integer values
+  sql: INSERT alias_session_rows VALUES(1,7,9)
+  expect: {affected_rows: 1}
+- name: Alias declaration and column addition retain complete rows
+  sql: SELECT id,value,extra FROM alias_session_rows
+  expect: {rows: 1,data: [{id: 1,value: 7,extra: 9}]}
+- name: A local temporary consumer receives the executing session
+  session_id: alias_session_temporary
+  sql: CREATE TABLE #alias_session_local(value dbo.alias_session_number)
+- name: Temporary alias rows retain their declared values
+  session_id: alias_session_temporary
+  sql: INSERT #alias_session_local VALUES(11)
+  expect: {affected_rows: 1}
+- name: Temporary alias reads preserve the native relation scope
+  session_id: alias_session_temporary
+  sql: SELECT value FROM #alias_session_local
+  expect: {rows: 1,data: [{value: 11}]}
+- name: Retire the temporary alias consumer
+  session_id: alias_session_temporary
+  sql: DROP TABLE #alias_session_local
+- name: A same-batch explicit owner still rejects alias creation
+  session_id: alias_session_create
+  sql: BEGIN TRANSACTION; CREATE TYPE dbo.alias_session_extra FROM INT
+  expect: {error: true,contains: 'alias DDL inside explicit transactions is not supported'}
+- name: Roll back the rejected alias creation owner
+  session_id: alias_session_create
+  sql: ROLLBACK
+- name: Rejected alias creation publishes no declaration
+  sql: SELECT COUNT(*) AS n FROM sys.types WHERE name='alias_session_extra'
+  expect: {rows: 1,data: [{n: 0}]}
+- name: A same-batch explicit owner still rejects alias removal
+  session_id: alias_session_drop
+  sql: BEGIN TRANSACTION; DROP TYPE dbo.alias_session_number
+  expect: {error: true,contains: 'alias DDL inside explicit transactions is not supported'}
+- name: Roll back the rejected alias removal owner
+  session_id: alias_session_drop
+  sql: ROLLBACK
+- name: Rejected alias removal preserves the declaration
+  sql: SELECT COUNT(*) AS n FROM sys.types WHERE name='alias_session_number'
+  expect: {rows: 1,data: [{n: 1}]}
+- name: A same-batch explicit owner still rejects an alias table consumer
+  session_id: alias_session_table
+  sql: BEGIN TRANSACTION; CREATE TABLE alias_session_rejected(value dbo.alias_session_number)
+  expect: {error: true,contains: 'alias DDL inside explicit transactions is not supported'}
+- name: Roll back the rejected alias table owner
+  session_id: alias_session_table
+  sql: ROLLBACK
+- name: Rejected alias table creation publishes no relation
+  sql: SELECT COUNT(*) AS n FROM sys.tables WHERE name='alias_session_rejected'
+  expect: {rows: 1,data: [{n: 0}]}
+- name: A same-batch explicit owner still rejects an alias column addition
+  session_id: alias_session_column
+  sql: BEGIN TRANSACTION; ALTER TABLE alias_session_rows ADD blocked dbo.alias_session_number
+  expect: {error: true,contains: 'alias DDL inside explicit transactions is not supported'}
+- name: Roll back the rejected alias column owner
+  session_id: alias_session_column
+  sql: ROLLBACK
+- name: Rejected alias column addition preserves the complete original declaration
+  sql: SELECT * FROM alias_session_rows
+  expect: {rows: 1,data: [{id: 1,value: 7,extra: 9}]}
+- name: Implicit alias removal succeeds after its consumers retire
+  sql: DROP TABLE alias_session_rows; DROP TYPE dbo.alias_session_number

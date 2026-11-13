@@ -255,7 +255,7 @@ Only consumed name bindings enter the shared plan guards, never catalog epochs. 
 		(list (quote equal?) (list (quote show) (list (quote tsql_native_relation_handle) database name (quote tx)) "name") canonical)
 		planning_session)
 	(coalesceNil canonical name))))
-(define tsql_create_relation (lambda (database name columns options ifnotexists tx) (begin
+(define tsql_create_relation (lambda (database name columns options ifnotexists tx session) (begin
 	(tsql_validate_row_guid_definitions columns)
 	(if (tsql_scalar_function_reserved? database name tx) (error "a scalar function already owns this object name: " name) true)
 	(if (tsql_view_name database name) (error "a view already owns this relation name: " name) true)
@@ -271,7 +271,7 @@ Only consumed name bindings enter the shared plan guards, never catalog epochs. 
 		_ false)))) 1) (error "only one generated version column is allowed")
 		(find columns (lambda (column) (match column
 			'("column" _name _type _dimensions attributes) (has_assoc? attributes "__tsql_alias_id") _ false)))
-		(tsql_type_ddl database tx publish) (publish)))))
+		(tsql_type_ddl database tx session publish) (publish)))))
 (define tsql_create_view_definition (lambda (tx database name dialect text query mode) (begin
 	(if (tsql_scalar_function_reserved? database name tx) (error "a scalar function already owns this object name: " name) true)
 	(if (show (table database false name true tx) "name") (error "a table already owns this relation name: " name) true)
@@ -5837,8 +5837,8 @@ that context explicitly; stored views refuse this scalar before publication. */
 			(if (sql_private_relation? name) (error "private SQL relation names cannot be created directly") true)
 			(define create (list (if (tsql_temporary_name? name) (quote tsql_create_temporary) (quote tsql_create_relation))
 				target_database name (cons (quote list) (map columns tsql_identity_native_column))
-				(tsql_identity_table_options columns) (if ifnotexists true false) (quote tx)))
-			(tsql_declaration_formula (if (tsql_temporary_name? name) (append create (quote session)) create))))))
+				(tsql_identity_table_options columns) (if ifnotexists true false) (quote tx) (quote session)))
+			(tsql_declaration_formula create)))))
 	(define tsql_alter_table (parser '(
 		(atom "ALTER" true) (atom "TABLE" true)
 		(? (define schema2 tsql_schema_identifier)) (define name tsql_identifier)
@@ -5961,7 +5961,7 @@ that context explicitly; stored views refuse this scalar before publication. */
 							(cons (quote list) (map columns (lambda (column)
 								(match column '(col type dimensions attributes)
 									(tsql_prepare_column database (list (quote list) "column" col type dimensions
-										(cons (quote list) attributes)) planning_session))))) (quote tx)))))
+										(cons (quote list) attributes)) planning_session))))) (quote tx) (quote session)))))
 			(parser '((atom "DROP" true) (atom "COLUMN" true)
 				(define ifexists (? (atom "IF" true) (atom "EXISTS" true)))
 				(define columns (+ tsql_identifier ",")))
@@ -6043,7 +6043,7 @@ that context explicitly; stored views refuse this scalar before publication. */
 				(if (or (nil? owner) (equal?? owner "dbo")) true (error "unsupported type owner: " owner))
 				(if policy (policy schema true true) true)
 				(require_action schema name "CREATE TYPE")
-				(list (quote create_sql_type_alias) schema name base (list (quote quote) dimensions) nullable (quote tx)))))
+				(list (quote create_sql_type_alias) schema name base (list (quote quote) dimensions) nullable (quote tx) (quote session)))))
 		(parser '((atom "DROP" true) (atom "TYPE" true)
 			(define ifexists (? (atom "IF" true) (atom "EXISTS" true)))
 			(? (define owner tsql_identifier) ".") (define name tsql_identifier))
@@ -6051,7 +6051,7 @@ that context explicitly; stored views refuse this scalar before publication. */
 				(if (or (nil? owner) (equal?? owner "dbo")) true (error "unsupported type owner: " owner))
 				(if policy (policy schema true true) true)
 				(require_action schema name "ALTER")
-				(list (quote drop_sql_type_alias) schema name (if ifexists true false) (quote tx)))))
+				(list (quote drop_sql_type_alias) schema name (if ifexists true false) (quote tx) (quote session)))))
 		(parser '((atom "CREATE" true) (atom "DATABASE" true)
 			(define ifnotexists (? (atom "IF" true) (atom "NOT" true) (atom "EXISTS" true)))
 			(define name tsql_identifier) (define files tsql_database_files)) (lambda () (begin

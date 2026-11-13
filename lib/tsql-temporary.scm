@@ -107,7 +107,7 @@ DROP/recreate chain. The frontend never keeps an undo journal or table values. *
 		(if (find columns (lambda (column) (equal? (car column) "foreign")) nil)
 			(error "temporary foreign keys are not supported") true)
 		(tsql_create_relation database native_name columns
-			(merge options (list "engine" "memory" "ephemeral" true "scope" native "scope_key" key)) false tx)
+			(merge options (list "engine" "memory" "ephemeral" true "scope" native "scope_key" key)) false tx session)
 		(if scoped true (scope "bindings" (cons (list name database key "scoped_schema") local)))
 		true)))))
 (define tsql_drop_temporary (lambda (name ifexists session tx) (begin
@@ -200,7 +200,7 @@ instead retain their existing actual transaction across both operations. */
 			(lambda () (new_relation_scope (tsql_connection_session session)))))
 		(define native_name (concat "." (scope "id") name ":" (uuid)))
 		(tsql_create_relation schema native_name columns
-			(list "engine" "memory" "ephemeral" true "scope" native) false tx)
+			(list "engine" "memory" "ephemeral" true "scope" native) false tx session)
 		(scope "bindings" (cons (list name schema native_name) (scope "bindings"))))
 		(tsql_create_temporary schema name columns '() false tx session))
 	/* The normal INSERT SELECT compiler owns the complete source stream, casts,

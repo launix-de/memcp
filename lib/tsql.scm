@@ -98,11 +98,11 @@ Only this frontend interprets the declaration; storage has no alias registry. */
 
 /* Alias DDL and database lifecycle share the common SQL DDL gate. Reads and
 DML never acquire it; the database must still exist once ownership is held. */
-(define tsql_type_ddl (lambda (database tx operation) (begin
+(define tsql_type_ddl (lambda (database tx session operation) (begin
 	/* Catalog-row writes and native column publication do not yet share a
-	transactional DDL contract. Refuse transaction-local DDL before either one
+	transactional DDL contract. Refuse explicit-transaction DDL before either one
 	changes, matching the frontend's source-procedure DDL restriction. */
-	(if (tx_requires_query_local_cache tx) (error "alias DDL inside explicit transactions is not supported") true)
+	(if (session "transaction") (error "alias DDL inside explicit transactions is not supported") true)
 	(sql_database_ddl database tx (lambda () (begin
 		/* This catalog enumeration is DDL-only, never a planner lookup. */
 		(if (nil? (show database)) (error "database does not exist: " database) true)
@@ -283,8 +283,8 @@ profile supplies its error boundary at the ordinary relational expression. */
 		(tsql_bind_computed_profile (sql_bind_catalog_declarations query tx planning_session) planning_session tx)))
 	(build_dml_plan schema name alias (qb_sources expanded) (qb_fields expanded) (qb_where expanded)
 		(qb_order expanded) (qb_limit expanded) (qb_offset expanded) true planning_session tx))))
-(define create_sql_type_alias (lambda (database name base dimensions nullable tx)
-	(tsql_type_ddl database tx (lambda () (begin
+(define create_sql_type_alias (lambda (database name base dimensions nullable tx session)
+	(tsql_type_ddl database tx session (lambda () (begin
 		/* Until colliding user aliases have a bound precedence contract, reject
 		the ambiguity explicitly instead of shadowing the built-in declaration. */
 		(if (equal?? name "sysname") (error "user alias colliding with built-in type is not supported") true)
@@ -296,8 +296,8 @@ profile supplies its error boundary at the ordinary relational expression. */
 		(insert (table "system" false "tsql_types" false tx) '("database" "name" "base_type" "dimensions" "nullable")
 			(list (list database name native_type (json_encode native_dimensions) nullable)))
 		true)))))
-(define drop_sql_type_alias (lambda (database name ifexists tx)
-	(tsql_type_ddl database tx (lambda () (begin
+(define drop_sql_type_alias (lambda (database name ifexists tx session)
+	(tsql_type_ddl database tx session (lambda () (begin
 		(define alias (tsql_find_type_alias database name nil))
 		(if (nil? alias) (if ifexists false (error "alias type does not exist: " name)) (begin
 			(define qualified (tsql_qualified_type database (alias "name")))
@@ -541,7 +541,7 @@ Restore only those exact data encodings before applying the pure recipe checks. 
 			(error "alias declaration changed before DDL execution")) true)
 	(merge (extract_assoc attributes (lambda (key value)
 		(if (equal? key "__tsql_alias_id") '() (list key value))))))))
-(define tsql_add_columns (lambda (database name columns tx) (begin
+(define tsql_add_columns (lambda (database name columns tx session) (begin
 	/* A frontend precheck cannot reserve a table-wide role across concurrent
 	DDL owners. CREATE validates an unpublished complete declaration; marked
 	ADD requires a native atomic declaration-validation boundary first. */
@@ -563,7 +563,7 @@ Restore only those exact data encodings before applying the pure recipe checks. 
 				(merge (sql_add_column_attributes attributes) '("name_ignorecase" true))) true
 				(error "column already exists: " column_name)))) true))))
 	(if (find columns (lambda (column) (has_assoc? (nth column 4) "__tsql_alias_id")))
-		(tsql_type_ddl database tx publish) (publish)))))
+		(tsql_type_ddl database tx session publish) (publish)))))
 
 /* Transport tuples describe bytes and unscaled coefficients only. Their SQL
 meaning is chosen here from the request's declaration, not in the Go bridge. */
