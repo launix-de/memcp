@@ -97,6 +97,10 @@ test_cases:
     sql: SELECT HASHBYTES('SHA1')
     expect: {error: true}
   - name: MD2 retains its positive standard digest implementation target
+    # SQL Server 2022 Linux returns NULL for MD2 (https://dbfiddle.uk/83dFd0KH).
+    # The documented MD2 algorithm remains a genuine implementation gap here;
+    # preserve the RFC 1319 A.5 digest target rather than asserting unsupported SQL.
+    # https://www.rfc-editor.org/rfc/rfc1319#appendix-A.5
     noncritical: true
     sql: SELECT CONVERT(VARCHAR(32),HASHBYTES('MD2','abc'),2) AS digest
     expect: {data: [{digest: DA853B0D3F88D99B30283A69E6DED6BB}]}
