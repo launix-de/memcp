@@ -4653,12 +4653,15 @@ that context explicitly; stored views refuse this scalar before publication. */
 		(parser '((atom "(" true) (define query tsql_select) (atom ")" true) (atom "AS" true) (define id tsql_identifier)) '(id schema query false nil nil))
 		(parser '((atom "(" true) (define query tsql_select) (atom ")" true) (define id tsql_identifier)) '(id schema query false nil nil))
 
-		(parser '((define owner tsql_schema_identifier) (define tbl tsql_identifier) (atom "AS" true) (define id tsql_identifier) (? tsql_table_hints)) (tsql_named_source (tsql_read_source id (tsql_qualifier_database owner database frontend_options) tbl) "dbo" tbl false))
-		(parser '((define owner tsql_schema_identifier) (define tbl tsql_identifier) (define id tsql_identifier) (? tsql_table_hints)) (tsql_named_source (tsql_read_source id (tsql_qualifier_database owner database frontend_options) tbl) "dbo" tbl false))
-		(parser '((define owner tsql_schema_identifier) (define tbl tsql_identifier) (? tsql_table_hints)) (tsql_named_source (tsql_read_source tbl (tsql_qualifier_database owner database frontend_options) tbl) "dbo" tbl true))
-		(parser '((define tbl tsql_identifier) (atom "AS" true) (define id tsql_identifier) (? tsql_table_hints)) (list id schema (list (quote tsql_source_name) tbl false) false nil nil))
-		(parser '((define tbl tsql_identifier) (define id tsql_identifier) (? tsql_table_hints)) (list id schema (list (quote tsql_source_name) tbl false) false nil nil))
-		(parser '((define tbl tsql_identifier) (? tsql_table_hints)) (list tbl schema (list (quote tsql_source_name) tbl true) false nil nil))
+		/* Both qualified and unqualified names are syntax until statement
+		compilation. CREATE PROCEDURE must not look up its future #temp tables.
+		Only an unqualified name can resolve to a lexical CTE definition. */
+		(parser '((define owner tsql_schema_identifier) (define tbl tsql_identifier) (atom "AS" true) (define id tsql_identifier) (? tsql_table_hints)) (list id (tsql_qualifier_database owner database frontend_options) (list (quote tsql_source_name) tbl false false) false nil nil))
+		(parser '((define owner tsql_schema_identifier) (define tbl tsql_identifier) (define id tsql_identifier) (? tsql_table_hints)) (list id (tsql_qualifier_database owner database frontend_options) (list (quote tsql_source_name) tbl false false) false nil nil))
+		(parser '((define owner tsql_schema_identifier) (define tbl tsql_identifier) (? tsql_table_hints)) (list tbl (tsql_qualifier_database owner database frontend_options) (list (quote tsql_source_name) tbl true false) false nil nil))
+		(parser '((define tbl tsql_identifier) (atom "AS" true) (define id tsql_identifier) (? tsql_table_hints)) (list id schema (list (quote tsql_source_name) tbl false true) false nil nil))
+		(parser '((define tbl tsql_identifier) (define id tsql_identifier) (? tsql_table_hints)) (list id schema (list (quote tsql_source_name) tbl false true) false nil nil))
+		(parser '((define tbl tsql_identifier) (? tsql_table_hints)) (list tbl schema (list (quote tsql_source_name) tbl true true) false nil nil))
 	)))
 
 	(define from nil)
@@ -4851,10 +4854,10 @@ that context explicitly; stored views refuse this scalar before publication. */
 					((symbol tsql_pending_source_order) _names inner)
 					(tsql_finalize_sources (list id database inner outer nil declarations)
 						source_kind bindings blocked)
-					((symbol tsql_source_name) name qualified_visible) (begin
-						(define local (find bindings (lambda (entry) (equal?? (car entry) name)) nil))
+					((symbol tsql_source_name) name qualified_visible allow_local) (begin
+						(define local (if allow_local (find bindings (lambda (entry) (equal?? (car entry) name)) nil) nil))
 						(if local (list id database (cadr local) outer nil nil)
-							(find blocked (lambda (entry) (equal?? entry name)) nil)
+							(and allow_local (find blocked (lambda (entry) (equal?? entry name)) nil))
 							(error "recursive or forward CTE reference is unsupported: " name)
 							(begin
 								(define native (tsql_named_source (tsql_read_source id database name) "dbo" name qualified_visible))

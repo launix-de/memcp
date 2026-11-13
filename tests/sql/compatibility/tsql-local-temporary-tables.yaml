@@ -6,6 +6,63 @@ metadata:
   requires_tds: true
   isolated: true
 test_cases:
+  # Deferred SQL Server procedure binding: https://dbfiddle.uk/L0Aw28Pn
+  - name: Procedure declaration defers qualified references to its future temporary relation
+    sql: |
+      CREATE PROCEDURE qualified_own_temporary AS
+        CREATE TABLE #qualified_items (id INT);
+        INSERT #qualified_items VALUES (7);
+        SELECT id FROM dbo.#qualified_items;
+    expect: {rows: 0}
+  - name: Procedure execution binds its qualified temporary source after creation
+    sql: EXEC qualified_own_temporary
+    expect: {rows: 1, data: [{id: 7}]}
+  - name: Procedure declaration does not require its caller temporary relation
+    sql: |
+      CREATE PROCEDURE qualified_caller_temporary AS
+        SELECT a.id FROM dbo.#qualified_caller AS a
+        JOIN dbo.#qualified_caller b ON a.id=b.id;
+    expect: {rows: 0}
+  - name: A qualified caller reference still fails when actually executed without its relation
+    sql: EXEC qualified_caller_temporary
+    expect: {error: true}
+  - name: First caller creates its own qualified procedure input
+    session_id: qualified-caller-a
+    sql: "CREATE TABLE #qualified_caller (id INT); INSERT #qualified_caller VALUES (11);"
+    expect: {affected_rows: 1}
+  - name: Second caller independently creates the same qualified procedure input
+    session_id: qualified-caller-b
+    sql: "CREATE TABLE #qualified_caller (id INT); INSERT #qualified_caller VALUES (23);"
+    expect: {affected_rows: 1}
+  - name: First execution resolves the qualified aliases through the current caller
+    session_id: qualified-caller-a
+    sql: EXEC qualified_caller_temporary
+    expect: {rows: 1, data: [{id: 11}]}
+  - name: Reused procedure resolves both qualified aliases through another caller
+    session_id: qualified-caller-b
+    sql: EXEC qualified_caller_temporary
+    expect: {rows: 1, data: [{id: 23}]}
+  - name: A schema-qualified public source is not shadowed by an equal CTE name
+    setup:
+      - sql: CREATE TABLE qualified_shadow (id INT)
+      - sql: INSERT qualified_shadow VALUES (100)
+    sql: WITH qualified_shadow AS (SELECT 1 AS id) SELECT id FROM dbo.qualified_shadow
+    expect: {rows: 1, data: [{id: 100}]}
+    cleanup:
+      - sql: DROP TABLE qualified_shadow
+  - name: An unqualified source retains ordinary CTE shadowing
+    sql: WITH qualified_shadow AS (SELECT 1 AS id) SELECT id FROM qualified_shadow
+    expect: {rows: 1, data: [{id: 1}]}
+  - name: A deferred public declaration binds a table created after the procedure
+    setup:
+      - sql: CREATE PROCEDURE qualified_public_later AS SELECT id FROM dbo.qualified_later
+      - sql: CREATE TABLE qualified_later (id INT)
+      - sql: INSERT qualified_later VALUES (42)
+    sql: EXEC qualified_public_later
+    expect: {rows: 1, data: [{id: 42}]}
+    cleanup:
+      - sql: DROP PROCEDURE qualified_public_later
+      - sql: DROP TABLE qualified_later
   # Ordered DROP TABLE target-list reference: https://dbfiddle.uk/0RtgktJM
   - name: DROP TABLE resolves every persistent target with its own qualifier
     setup:
