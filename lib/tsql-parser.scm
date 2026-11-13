@@ -849,10 +849,19 @@ from declared virtual property metadata, never from a runtime value carrier. */
 			(list "kind" 231 "size" 256 "precision" 0 "scale" 0 "collation" (hex2bin "0904d00034")))
 			"value" value)))))) tsql_filesystem_location tsql_server_profile_property))
 
+/* SQL Server normalizes an oversized single precision in CAST/CONVERT to
+NUMERIC(38,0). An explicit scale, column or parameter is a declaration and
+retains the strict range. Preserve empty dimensions for CAST's own defaults.
+Reference: https://dbfiddle.uk/DaaI192M (SQL Server 2022). */
+(define tsql_conversion_dimensions (lambda (type dimensions) (begin
+	(define normalized (if (and (has? '("NUMERIC" "DECIMAL") (toUpper type))
+		(equal? (count dimensions) 1) (> (car dimensions) 38)) '(38) dimensions))
+	(tsql_decl_dimensions type normalized)
+	normalized)))
 (define tsql_cast_expr (lambda (value type dimensions) (begin
 	(define name (toUpper type))
 	(define builtin (tsql_builtin_type_declaration name))
-	(tsql_decl_dimensions name dimensions)
+	(define dimensions (tsql_conversion_dimensions name dimensions))
 	(define dimensions (if builtin (builtin "dimensions") dimensions))
 	(define name (if builtin (builtin "base_type") name))
 	(define formula (match name
@@ -1261,7 +1270,7 @@ syntax selects a source-dependent style through the separate factory below. */
 		((tsql_text_compiler length national fixed) infos))))))
 (define tsql_convert_expr (lambda (value type dimensions style) (begin
 	(define builtin (tsql_builtin_type_declaration type))
-	(tsql_decl_dimensions type dimensions)
+	(define dimensions (tsql_conversion_dimensions type dimensions))
 	(define dimensions (if builtin (builtin "dimensions") dimensions))
 	(define type (if builtin (builtin "base_type") type))
 	(match style
@@ -1329,7 +1338,7 @@ cancellation and unsupported operations are never successful NULL casts. */
 		(if (and text (has? '("CHAR" "VARCHAR" "NCHAR" "NVARCHAR") type))
 			(sql_info_collation input) (sql_info_collation converted)))))))
 (define tsql_try_convert_expr (lambda (value type dimensions style bounded_input) (begin
-	(tsql_decl_dimensions type dimensions)
+	(define dimensions (tsql_conversion_dimensions type dimensions))
 	(list (quote sql_compile_expr) (list (quote tsql_try_conversion_compiler)
 		type (list (quote quote) dimensions) (list (quote quote) style) bounded_input) value))))
 /* Aggregate contracts come from SQL syntax and the declared input type.

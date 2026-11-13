@@ -10,8 +10,64 @@ setup:
 - sql: CREATE TABLE numeric_samples (id INT PRIMARY KEY, amount INT, spelling NVARCHAR(50))
 - sql: INSERT INTO numeric_samples VALUES (1,-3,N'12.5'),(2,0,N'invalid'),(3,4,NULL)
 cleanup:
+- sql: DROP PROCEDURE IF EXISTS numeric_precision_temporary
+- sql: DROP PROCEDURE IF EXISTS numeric_precision_invalid_parameter
+- sql: DROP PROCEDURE IF EXISTS numeric_precision_invalid_variable
+- sql: DROP TABLE IF EXISTS numeric_precision_invalid_column
 - sql: DROP TABLE numeric_samples
 test_cases:
+- name: Single precision CONVERT follows the SQL Server maximum result contract
+  sql: SELECT CONVERT(NUMERIC(50),'123') AS numeric_value,CONVERT(DECIMAL(50),'456') AS decimal_value
+  expect: {data: [{numeric_value: 123,decimal_value: 456}]}
+- name: Single precision CAST uses the same conversion contract
+  sql: SELECT CAST('123' AS NUMERIC(50)) AS numeric_value,CAST('456' AS DECIMAL(50)) AS decimal_value
+  expect: {data: [{numeric_value: 123,decimal_value: 456}]}
+- name: Conversion precision normalization applies beyond the storage boundary
+  sql: SELECT CAST('12' AS NUMERIC(39)) AS lower_value,CAST('34' AS NUMERIC(256)) AS upper_value
+  expect: {data: [{lower_value: 12,upper_value: 34}]}
+- name: TRY conversions normalize their declared target before evaluating input
+  sql: SELECT TRY_CONVERT(NUMERIC(50),'123') AS numeric_value,TRY_CAST('456' AS DECIMAL(50)) AS decimal_value,TRY_CONVERT(NUMERIC(50),'invalid') AS invalid_value
+  expect: {data: [{numeric_value: 123,decimal_value: 456,invalid_value: null}]}
+- name: Native conversion metadata reports effective precision and scale
+  tds:
+    statements:
+    - sql: SELECT CONVERT(NUMERIC(50),'123') AS numeric_value,CAST('456' AS DECIMAL(50)) AS decimal_value
+      expect:
+        data: [{numeric_value: '123',decimal_value: '456'}]
+        column_types: [{name: numeric_value,type: DECIMAL,precision: 38,scale: 0},{name: decimal_value,type: DECIMAL,precision: 38,scale: 0}]
+- name: Stored conversion syntax retains its original precision spelling
+  sql: CREATE PROCEDURE numeric_precision_temporary AS BEGIN CREATE TABLE #precision_input(value VARCHAR(30)); INSERT #precision_input VALUES('12'),('30'); SELECT SUM(CONVERT(NUMERIC(50),value)) AS total FROM #precision_input; END
+  expect: {rows: 0}
+- name: Stored conversions execute over actual temporary source rows
+  sql: EXEC numeric_precision_temporary
+  expect: {data: [{total: 42}]}
+- name: Explicit zero scale does not use single precision normalization
+  sql: SELECT CONVERT(NUMERIC(50,0),'123')
+  expect: {error: true}
+- name: Explicit nonzero scale retains the declared precision limit
+  sql: SELECT CAST('123.45' AS DECIMAL(50,2))
+  expect: {error: true}
+- name: TRY cannot hide an invalid explicit target declaration
+  sql: SELECT TRY_CONVERT(NUMERIC(50,0),'123')
+  expect: {error: true}
+- name: Zero conversion precision remains invalid
+  sql: SELECT CONVERT(NUMERIC(0),'123')
+  expect: {error: true}
+- name: Normal small precision still rejects overflowing input
+  sql: SELECT CONVERT(NUMERIC(2),'123')
+  expect: {error: true}
+- name: Column declarations do not inherit conversion normalization
+  sql: CREATE TABLE numeric_precision_invalid_column(value NUMERIC(50))
+  expect: {error: true}
+- name: Parameter declarations retain their own precision validation
+  sql: CREATE PROCEDURE numeric_precision_invalid_parameter @value NUMERIC(50) AS SELECT @value AS value
+  expect: {error: true}
+- name: Local declarations retain their own precision validation
+  sql: CREATE PROCEDURE numeric_precision_invalid_variable AS BEGIN DECLARE @value NUMERIC(50); SELECT 1 AS value; END
+  expect: {error: true}
+- name: Conversion normalization preserves omitted character length
+  sql: SELECT CAST(REPLICATE('x',40) AS VARCHAR) AS value
+  expect: {data: [{value: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx}]}
 - name: Numeric validation accepts integer decimal and exponent spellings
   sql: SELECT ISNUMERIC(N'12') AS integral, ISNUMERIC(N'-.25') AS fractional, ISNUMERIC(N'1e3') AS exponential, ISNUMERIC(N'1D2') AS alternate
   expect: {data: [{integral: 1, fractional: 1, exponential: 1, alternate: 1}]}
