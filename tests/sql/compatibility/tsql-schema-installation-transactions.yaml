@@ -6,6 +6,7 @@ metadata:
   requires_tds: true
   description: Composite schema installation commits and rolls back through real TDS transactions
 cleanup:
+- sql: DROP TABLE IF EXISTS installation_statement_error
 - sql: DROP TABLE IF EXISTS installation_detail
 - sql: DROP TABLE IF EXISTS installation_header
 - sql: DROP TABLE IF EXISTS installation_aborted
@@ -112,3 +113,23 @@ test_cases:
       (and ((declaration "Properties") "tsql.rowguidcol")
         (not (declaration "Null")) (equal? (declaration "RawType") "UNIQUEIDENTIFIER")))
   expect: {result: true}
+
+- name: Pending schema and earlier rows survive a failed plain ACID statement
+  tds:
+    statements:
+    - connection: pending_owner
+      sql: SET ANSI_WARNINGS ON; BEGIN TRANSACTION; CREATE TABLE installation_statement_error(id INT PRIMARY KEY,label VARCHAR(3)); INSERT installation_statement_error VALUES(1,'abc'),(2,'def')
+    - connection: observer
+      sql: SELECT name FROM sys.objects WHERE name=N'installation_statement_error'
+      expect: {rows: 0}
+    - connection: pending_owner
+      sql: BEGIN TRY UPDATE installation_statement_error SET label=CASE WHEN id=1 THEN 'xy' ELSE 'long' END; END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS code,@@TRANCOUNT AS depth; END CATCH; SELECT id,label FROM installation_statement_error ORDER BY id
+      expect:
+        data: [{code: 8152,depth: 1},{id: 1,label: abc},{id: 2,label: def}]
+    - connection: pending_owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT id,label FROM installation_statement_error ORDER BY id
+      expect:
+        rows: 2
+        data: [{id: 1,label: abc},{id: 2,label: def}]

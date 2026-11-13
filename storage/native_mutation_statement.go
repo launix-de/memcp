@@ -71,7 +71,7 @@ func (operation *nativeMutationOperation) admitCompletionStatementTable(t *table
 		panic(err)
 	}
 	// The exclusive statement lease now prevents native semantic retirement.
-	// Re-attest the actual public endpoint without acquiring schema under a
+	// Re-attest the actual endpoint without acquiring schema under a
 	// callback/operation lock. The database mode resource rechecks its own
 	// identity before the first effect. Scope-owned temporary relations require
 	// their separate lifetime contract and are not silently treated as public.
@@ -84,9 +84,9 @@ func (operation *nativeMutationOperation) admitCompletionStatementTable(t *table
 		finish()
 	}
 	if name == nil || GetDatabase(t.schema.Name) != t.schema || t.schema.tables.Get(*name) != t ||
-		(!private && !t.committedAt(t.schema.catalogView().version)) {
+		(!private && !t.visibleIn(operation.invocation, t.schema.catalogView().version)) {
 		_ = lease.Close()
-		panic("native statement requires the current committed public target")
+		panic("native statement requires the current transaction-visible target")
 	}
 	if statement.tables == nil {
 		statement.tables = make(map[*table]*statementTableWriteLease)
