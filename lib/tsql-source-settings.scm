@@ -2,6 +2,11 @@
 SPDX-License-Identifier: GPL-3.0-or-later */
 /* ANSI_NULLS is an execution setting. Stored source modes are portable
 language profiles; the normalized expression records preserve their own mode. */
+/* Execute-time state is read by expression plans, never captured in source tags.
+https://learn.microsoft.com/sql/t-sql/statements/set-ansi-warnings-transact-sql */
+(define tsql_ansi_warnings (lambda (session) (coalesceNil (session "__tsql_ansi_warnings") true)))
+(define tsql_ansi_warnings_formula (lambda ()
+	(list 'coalesceNil (list 'session "__tsql_ansi_warnings") true)))
 (define tsql_ansi_nulls (lambda (session) (coalesceNil (session "__tsql_ansi_nulls") true)))
 (define tsql_set_ansi_nulls (lambda (session enabled)
 	(if (session "__tsql_ansi_nulls_locked") nil (begin (session "__tsql_ansi_nulls" enabled) nil))))

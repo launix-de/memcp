@@ -817,7 +817,7 @@ planner session or stored in a reusable plan. Nested SQL scopes inherit it. */
 	without a shared-session save/restore race. Ordinary batches delegate these
 	options, retaining their connection state across GO and subsequent requests. */
 	(define module_keys (if module_settings
-		'("__tsql_identity_insert" "__tsql_datefirst" "__tsql_dateformat" "__tsql_language" "__tsql_nocount" "__tsql_fmtonly" "__tsql_temporary_scope" "__tsql_quoted_identifier" "__tsql_ansi_nulls" "__tsql_isolation_level") '()))
+		'("__tsql_ansi_warnings" "__tsql_identity_insert" "__tsql_datefirst" "__tsql_dateformat" "__tsql_language" "__tsql_nocount" "__tsql_fmtonly" "__tsql_temporary_scope" "__tsql_quoted_identifier" "__tsql_ansi_nulls" "__tsql_isolation_level") '()))
 	(map (filter module_keys (lambda (key) (not (equal? key "__tsql_temporary_scope"))))
 		(lambda (key) (local key (parent key))))
 	/* Error-reporting procedures inherit the enclosing immutable CATCH context.

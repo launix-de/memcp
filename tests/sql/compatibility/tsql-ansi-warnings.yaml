@@ -1,0 +1,52 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  description: Execute-time ANSI_WARNINGS controls arithmetic and column assignment
+  requires_tds: true
+  isolated: true
+setup:
+  - sql: CREATE TABLE ansi_warning_rows(id INT PRIMARY KEY,label VARCHAR(3),national NVARCHAR(3),value INT)
+cleanup:
+  - sql: DROP PROCEDURE IF EXISTS ansi_warning_scope
+  - sql: DROP TABLE IF EXISTS ansi_warning_rows
+test_cases:
+  - name: Runtime option controls session metadata
+    sql: SET ANSI_WARNINGS OFF; SELECT SESSIONPROPERTY('ANSI_WARNINGS') AS disabled,@@OPTIONS & 8 AS option_bit; SET ANSI_WARNINGS ON
+    expect: {data: [{disabled: 0,option_bit: 0}]}
+  - name: Enabled option appears in metadata
+    sql: SET ANSI_WARNINGS ON; SELECT SESSIONPROPERTY('ANSI_WARNINGS') AS enabled,@@OPTIONS & 8 AS option_bit
+    expect: {data: [{enabled: 1,option_bit: 8}]}
+  - name: Stored procedure retains execute time settings and restores its caller
+    sql: CREATE PROCEDURE ansi_warning_scope AS BEGIN SET ANSI_WARNINGS OFF; SELECT 9/0 AS value; SET ANSI_WARNINGS ON; END
+    expect: {rows: 0}
+  - name: Procedure executes its setting before arithmetic
+    sql: SET ANSI_WARNINGS ON; EXEC ansi_warning_scope; SELECT SESSIONPROPERTY('ANSI_WARNINGS') AS enabled
+    expect: {data: [{value: null},{enabled: 1}]}
+  - name: Disabled integer arithmetic returns null
+    sql: SET ANSI_WARNINGS OFF; SELECT 9/0 AS divide_value,2147483647+1 AS add_value,50000*50000 AS multiply_value; SET ANSI_WARNINGS ON
+    expect: {data: [{divide_value: null,add_value: null,multiply_value: null}]}
+  - name: Enabled arithmetic raises its SQL error
+    sql: SET ANSI_WARNINGS ON; BEGIN TRY SELECT 9/0 AS value; END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS code; END CATCH
+    expect: {data: [{code: 8134}]}
+  - name: Enabled column truncation is rejected
+    sql: SET ANSI_WARNINGS ON; BEGIN TRY INSERT ansi_warning_rows VALUES(1,'long',N'long',1); END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS code; END CATCH
+    expect: {data: [{code: 8152}]}
+  - name: Disabled column assignment truncates both text domains
+    sql: SET ANSI_WARNINGS OFF; INSERT ansi_warning_rows VALUES(2,'long',N'long',9/0); SELECT label,national,value FROM ansi_warning_rows WHERE id=2; SET ANSI_WARNINGS ON
+    expect: {data: [{label: lon,national: lon,value: null}]}
+  - name: Trailing spaces do not cause truncation errors
+    sql: SET ANSI_WARNINGS ON; INSERT ansi_warning_rows VALUES(3,'abc   ',N'abc   ',3); SELECT label,national FROM ansi_warning_rows WHERE id=3
+    expect: {data: [{label: abc,national: abc}]}
+  - name: Variable and explicit casts keep their own truncation rules
+    sql: SET ANSI_WARNINGS ON; DECLARE @text VARCHAR(3)='long'; SELECT @text AS variable,CAST(N'long' AS NVARCHAR(3)) AS converted
+    expect: {data: [{variable: lon,converted: lon}]}
+  - name: Native connection reuses a warm arithmetic plan with current setting
+    tds:
+      statements:
+        - sql: SET ANSI_WARNINGS OFF; SELECT 7/0 AS value
+          expect: {data: [{value: null}],messages: []}
+        - sql: SET ANSI_WARNINGS ON; SELECT 7/0 AS value
+          expect: {error: true,contains: ['division by zero']}
+        - sql: SET ANSI_WARNINGS OFF; SELECT 7/0 AS value
+          expect: {data: [{value: null}],messages: []}

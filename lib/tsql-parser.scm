@@ -84,6 +84,28 @@ source and permission guards still belong to the enclosing write plan. */
 		(sql_info_datatype info) (sql_info_collation info)))))
 (define tsql_raise_error (lambda (number message state)
 	(error (list "tsql-error" number message state))))
+(define tsql_sessionproperty (close_procedure (lambda (property warnings ansi quoted)
+	(if (nil? property) nil (match (toUpper property)
+		"ANSI_WARNINGS" (if warnings 1 0) "ANSI_NULLS" ansi
+		"QUOTED_IDENTIFIER" quoted "ANSI_PADDING" 1 _ nil)))))
+/* Catch only frontend arithmetic conditions. Conversion, permission, request
+cancellation and transaction failures retain their original error boundary. */
+(define tsql_arithmetic_value (close_procedure (lambda (enabled compute)
+	(try compute (lambda (cause) (match cause
+		'("tsql-error" number _message _state)
+		(if (and (not enabled) (has? '(8115 8134) number)) nil (error cause))
+		_ (error cause)))))))
+(define tsql_arithmetic_result (lambda (infos) (begin
+	(define input (car infos))
+	(define type (sql_info_type input))
+	(define formula (if (has? '("INT" "INTEGER" "BIGINT" "SMALLINT" "TINYINT") type)
+		(sql_type_formula '() (tsql_cast_expr
+			(list 'sql_type_expr (sql_info_formula input) (sql_info_datatype input) nil) type '()))
+		(sql_info_formula input)))
+	(sql_info (list tsql_arithmetic_value (tsql_ansi_warnings_formula)
+		(list 'lambda '() formula)) (sql_info_datatype input) (sql_info_collation input)))))
+(define tsql_arithmetic_expr (lambda (expression)
+	(list 'sql_compile_expr 'tsql_arithmetic_result expression)))
 (define tsql_parse_integer (close_procedure ((lambda (tsql_raise_error)
 	(lambda (text) (begin
 		(define trimmed (sql_trim text))
@@ -884,6 +906,28 @@ rounding, before native insertion. Full precision-limit emulation is deferred. *
 (define tsql_assignment_decimal (lambda (value threshold) (if (nil? value) nil (begin
 	(define number (tsql_numeric_input value))
 	(if (or (>= number threshold) (<= number (- 0 threshold))) (tsql_raise_error 8115 "decimal conversion overflow" 1) number)))))
+/* Only column assignment enforces ANSI truncation. Explicit conversions,
+local variables and module parameters keep their ordinary width conversion. */
+(define tsql_assignment_text_value (close_procedure ((lambda (encode raise_error)
+	(lambda (value enabled length national encoding) (if (nil? value) nil (begin
+		(define meaningful (regexp_replace value " +$" ""))
+		(define units (if national (utf16_length meaningful) (strlen (encode meaningful encoding))))
+		(if (and enabled (>= length 0) (> units length))
+			(raise_error 8152 "String or binary data would be truncated." 1) value)))))
+	tsql_encode_character tsql_raise_error)))
+(define tsql_assignment_text_compiler (lambda (type dimensions) (lambda (infos) (begin
+	(define input (car infos))
+	(define unbounded (sql_expr_info '() (tsql_cast_expr
+		(list 'sql_type_expr (sql_info_formula input) (sql_info_datatype input) (sql_info_collation input))
+		type '(-1))))
+	(define width (if (empty_list? dimensions) 1 (car dimensions)))
+	(define formula (list tsql_assignment_text_value (sql_info_formula unbounded)
+		(tsql_ansi_warnings_formula) width (has? '("NCHAR" "NVARCHAR") type)
+		(tsql_character_encoding unbounded)))
+	(sql_expr_info '() (tsql_cast_expr
+		(list 'sql_type_expr formula (sql_info_datatype unbounded) (sql_info_collation unbounded)) type dimensions))))))
+(define tsql_assignment_text_expr (lambda (value type dimensions)
+	(list 'sql_compile_expr (list 'tsql_assignment_text_compiler type (list 'quote dimensions)) value)))
 (define tsql_assignment_expr (lambda (value declaration) (begin
 	(define type (toUpper (declaration "RawType")))
 	(if (equal? type "ROWVERSION")
@@ -895,8 +939,9 @@ rounding, before native insertion. Full precision-limit emulation is deferred. *
 		/* Minute rounding belongs to the declared assignment contract, before
 		the existing sink receives the native calendar value. */
 		(has? '("CHAR" "VARCHAR" "NVARCHAR" "NCHAR" "DATE" "DATETIME" "DATETIME2" "TIME" "SMALLDATETIME" "UNIQUEIDENTIFIER") type)
-		(tsql_implicit_cast_expr (if (and (has? '("CHAR" "VARCHAR" "NVARCHAR" "NCHAR") type) (declaration "Collation"))
-			(list (quote sql_compile_expr) (list (quote tsql_collation_compiler) (declaration "Collation")) value) value)
+		((if (has? '("CHAR" "VARCHAR" "NVARCHAR" "NCHAR") type) tsql_assignment_text_expr tsql_implicit_cast_expr)
+			(if (and (has? '("CHAR" "VARCHAR" "NVARCHAR" "NCHAR") type) (declaration "Collation"))
+				(list (quote sql_compile_expr) (list (quote tsql_collation_compiler) (declaration "Collation")) value) value)
 			type (declaration "Dimensions"))
 		(has? '("MONEY" "SMALLMONEY") type) (tsql_implicit_cast_expr value type '())
 		(has? '("DECIMAL" "NUMERIC") type) (begin
@@ -2368,7 +2413,7 @@ absolute seconds count by a nanosecond scale. */
 			(if numeric nil (reduce infos (lambda (collation info)
 				(sql_merge_collation collation (sql_info_collation info))) nil))))))))
 (define tsql_add_expr (lambda (left right)
-	(list (quote sql_compile_expr) (quote tsql_compile_addition) left right)))
+	(tsql_arithmetic_expr (list (quote sql_compile_expr) (quote tsql_compile_addition) left right))))
 /* Character/integer subtraction uses the INT operand's SQL precedence.
 The generic dynamically typed arithmetic contract deliberately leaves mixed
 text/numeric inputs as any. Convert both operands here, before MIN/derived
@@ -2429,13 +2474,13 @@ not choose the result type. */
 		(tsql_compile_monetary_subtraction infos)
 		(sql_call_info '- infos))))
 (define tsql_sub_expr (lambda (left right)
-	(list 'sql_compile_expr 'tsql_compile_subtraction left right)))
+	(tsql_arithmetic_expr (list 'sql_compile_expr 'tsql_compile_subtraction left right))))
 
 (define tsql_integer_divide (lambda (left right)
 	(if (or (nil? left) (nil? right)) nil
 		(equal? right 0) (tsql_raise_error 8134 "division by zero" 1)
 		(and (equal? left (tsql_parse_integer "-9223372036854775808")) (equal? right -1))
-		(error "integer division overflow")
+		(tsql_raise_error 8115 "integer division overflow" 1)
 		(intdiv left right))))
 (define tsql_fractional_divide (lambda (left right)
 	(if (or (nil? left) (nil? right)) nil
@@ -2458,7 +2503,7 @@ not choose the result type. */
 	(define formula (cons (if integer (quote tsql_integer_divide) (quote tsql_fractional_divide)) operands))
 	(sql_info (if integer (sql_type_formula '() (tsql_cast_expr formula target '())) formula) target nil))))
 (define tsql_divide_expr (lambda (left right)
-	(list (quote sql_compile_expr) (quote tsql_compile_divide) left right)))
+	(tsql_arithmetic_expr (list (quote sql_compile_expr) (quote tsql_compile_divide) left right))))
 /* Currency multiplication keeps the higher declared monetary type rather
 than asking the common arithmetic compiler to infer one from native values.
 https://learn.microsoft.com/en-us/sql/t-sql/language-elements/multiply-transact-sql */
@@ -2482,7 +2527,7 @@ https://learn.microsoft.com/en-us/sql/t-sql/language-elements/multiply-transact-
 		(sql_call_info '* infos)))))
 (define tsql_fold_multiplicative (lambda (acc term) (match term
 	'("divide" value) (tsql_divide_expr acc value)
-	'("multiply" value) (list 'sql_compile_expr 'tsql_compile_multiplication acc value)
+	'("multiply" value) (tsql_arithmetic_expr (list 'sql_compile_expr 'tsql_compile_multiplication acc value))
 	_ (sql_fold_multiplicative_term acc term))))
 (define tsql_fold_additive (lambda (acc term) (match term
 	'("add" value) (tsql_add_expr acc value)
@@ -3988,7 +4033,8 @@ that context explicitly; stored views refuse this scalar before publication. */
 		(parser (atom "@@DATEFIRST" true) (tsql_datefirst_expr))
 		(parser (atom "@@OPTIONS" true) (list 'sql_type_expr
 			(list '+ 16 (if ansi_nulls 32 0) (if (tsql_quoted_identifier frontend_options) 256 0)
-				(list 'if (list 'session "__tsql_nocount") 512 0)) "INT" nil))
+				(list 'if (list 'session "__tsql_nocount") 512 0)
+				(list 'if (tsql_ansi_warnings_formula) 8 0)) "INT" nil))
 		(parser (atom "@@MICROSOFTVERSION" true)
 			(list 'sql_type_expr tsql_server_microsoft_version "INT" nil))
 		(parser (atom "@@LANGUAGE" true) (list (quote sql_type_expr) (tsql_language_formula) (list "NVARCHAR" '(128)) '("utf8mb4_general_ci" 4)))
@@ -4127,6 +4173,11 @@ that context explicitly; stored views refuse this scalar before publication. */
 							(tsql_cast_expr (nth args 1) "NVARCHAR" '(128)))
 						(list (quote session) "username")) "INT" nil)))
 
+		(parser '((atom "SESSIONPROPERTY" true) "(" (define property tsql_expression) ")")
+			(list 'sql_type_expr (list tsql_sessionproperty
+				(tsql_cast_expr property "NVARCHAR" '(128)) (tsql_ansi_warnings_formula)
+				(list 'if (list 'session "__tsql_ansi_nulls") 1 0)
+				(list 'if (list 'session "__tsql_quoted_identifier") 1 0)) "SQL_VARIANT" nil))
 		(parser '((atom "SERVERPROPERTY" true) "(" (define property tsql_expression) ")")
 			(list (quote sql_type_expr) (list tsql_serverproperty
 				(tsql_cast_expr property "NVARCHAR" '(128))) "SQL_VARIANT" nil))
@@ -6002,6 +6053,9 @@ that context explicitly; stored views refuse this scalar before publication. */
 				(parser (atom "SNAPSHOT" true) "SNAPSHOT")
 				(parser (atom "SERIALIZABLE" true) "SERIALIZABLE"))))
 			(lambda () (list (quote tsql_set_transaction_isolation) (quote session) level)))
+		(parser '((atom "SET" true) (atom "ANSI_WARNINGS" true)
+			(define enabled (or (parser (atom "ON" true) true) (parser (atom "OFF" true) false))))
+			(lambda () (list 'session "__tsql_ansi_warnings" enabled)))
 		(parser '((atom "SET" true) (atom "NOCOUNT" true)
 			(define enabled (or (parser (atom "ON" true) true) (parser (atom "OFF" true) false))))
 			(lambda () (list (quote session) "__tsql_nocount" enabled)))
