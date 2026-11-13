@@ -4557,7 +4557,8 @@ func init() {
 		Type: &TypeDescriptor{Kind: "func", Const: true,
 			Description: "projects a native failure's original language value for diagnostics; catch and rethrow retain the original failure owner",
 			Params:      []*TypeDescriptor{{Kind: "any", Label: "failure"}},
-			Return:      &TypeDescriptor{Kind: "any"}},
+			Return:      &TypeDescriptor{Kind: "any"},
+		},
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "try",
