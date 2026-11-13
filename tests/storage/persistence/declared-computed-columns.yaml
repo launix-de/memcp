@@ -194,11 +194,11 @@ test_cases:
       (createtable "memcp-tests" "declared_compute_locals"
         (list (list "column" "base" "INT" '() '())
           (list "column" "derived" "INT" '() '() '("base")
-            (lambda (base) (begin
+            (eval (optimize '(lambda (base) (begin
               (define shifted (+ base 7))
               ((lambda (value) (begin
                 (define doubled (* value 2))
-                (+ doubled shifted))) base)))))
+                (+ doubled shifted))) base)))))))
         '("engine" "safe") false nil)
       (insert (table "memcp-tests" false "declared_compute_locals" false nil)
         '("base") (list (list 2))) true)
