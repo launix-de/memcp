@@ -1686,9 +1686,9 @@ func WithAutocommit(session scm.Scmer, ss *scm.SessionState, querySeq uint64, qu
 	defer tx.endQuery(querySeq)
 	// Preserve the preexisting single-statement compatibility exception.
 	// New request executors supply a parsed, generic recovery capability.
-	return runAutocommitStatement(tx, session, strings.EqualFold(strings.TrimSpace(query), "ROLLBACK"), fn)
+	return runAutocommitStatement(tx, session, strings.EqualFold(strings.TrimSpace(query), "ROLLBACK"), TxCursorStability, fn)
 }
-func runAutocommitStatement(tx *TxContext, session scm.Scmer, recovery bool, fn scm.Scmer) scm.Scmer {
+func runAutocommitStatement(tx *TxContext, session scm.Scmer, recovery bool, implicitMode TxMode, fn scm.Scmer) scm.Scmer {
 	defer func() {
 		tx.finalizationMu.Lock()
 		defer tx.finalizationMu.Unlock()
@@ -1710,7 +1710,7 @@ func runAutocommitStatement(tx *TxContext, session scm.Scmer, recovery bool, fn 
 	}
 
 	if !explicit {
-		tx.reset(TxCursorStability)
+		tx.reset(implicitMode)
 		tx.autoCommit = true
 		tx.Session = session
 	}
@@ -1783,8 +1783,13 @@ func runAutocommitStatement(tx *TxContext, session scm.Scmer, recovery bool, fn 
 // WithQueryRequest owns cancellation/process-list state for a complete request.
 // fn receives a sequential statement executor (text, recovery, body). Recovery
 // is a trusted frontend capability derived from its parsed control statement,
-// never a SQL keyword interpreted here. Native transaction records are reused.
-func WithQueryRequest(session scm.Scmer, ss *scm.SessionState, querySeq uint64, query string, fn scm.Scmer) scm.Scmer {
+// never a SQL keyword interpreted here. implicitMode selects only the reset of
+// implicit statements; an explicit transaction retains its existing owner and
+// mode. Native transaction records are reused.
+func WithQueryRequest(session scm.Scmer, ss *scm.SessionState, querySeq uint64, query string, implicitMode TxMode, fn scm.Scmer) scm.Scmer {
+	if implicitMode != TxCursorStability && implicitMode != TxACID {
+		panic("unsupported implicit transaction strategy")
+	}
 	tx := transactionForSession(session)
 	tx.queryMu.Lock()
 	defer tx.queryMu.Unlock()
@@ -1821,7 +1826,7 @@ func WithQueryRequest(session scm.Scmer, ss *scm.SessionState, querySeq uint64, 
 		}
 		tx.beginQuery(ss, querySeq, a[0].String())
 		defer tx.endStatement()
-		return runAutocommitStatement(tx, session, a[1].Bool(), a[2])
+		return runAutocommitStatement(tx, session, a[1].Bool(), implicitMode, a[2])
 	})
 	return scm.Apply(fn, statement)
 }
@@ -1985,16 +1990,29 @@ func initTransaction(en scm.Env) {
 	scm.Declare(&en, &scm.Declaration{
 		Name: "with_query_request",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
+			if len(a) != 6 || !a[4].IsString() {
+				panic("with_query_request requires session, state, sequence, query, implicit strategy and callback")
+			}
+			var implicitMode TxMode
+			switch a[4].String() {
+			case "cursor-stability":
+				implicitMode = TxCursorStability
+			case "acid":
+				implicitMode = TxACID
+			default:
+				panic("unsupported implicit transaction strategy")
+			}
 			var ss *scm.SessionState
 			if !a[1].IsNil() {
 				ss, _ = a[1].Any().(*scm.SessionState)
 			}
-			return WithQueryRequest(a[0], ss, uint64(a[2].Int()), a[3].String(), a[4])
+			return WithQueryRequest(a[0], ss, uint64(a[2].Int()), a[3].String(), implicitMode, a[5])
 		},
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "owns one request while executing sequential statements with independent autocommit and cache lifetimes", HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
 				{Kind: "func", Label: "session"}, {Kind: "any", Label: "session_state"},
 				{Kind: "int", Label: "query_seq"}, {Kind: "string", Label: "query"},
+				{Kind: "string", Label: "implicit_strategy", Description: "native strategy for implicit statements: acid or cursor-stability; explicit transactions retain their existing mode"},
 				{Kind: "func", Label: "fn", Params: []*scm.TypeDescriptor{{Kind: "func", Label: "statement", Params: []*scm.TypeDescriptor{{Kind: "string", Label: "text"}, {Kind: "bool", Label: "recovery"}, {Kind: "func", Label: "body", Params: []*scm.TypeDescriptor{{Kind: "any", Label: "tx"}}, Return: &scm.TypeDescriptor{Kind: "any"}}}, Return: &scm.TypeDescriptor{Kind: "any"}}}, Return: &scm.TypeDescriptor{Kind: "any"}},
 			}, Return: &scm.TypeDescriptor{Kind: "any"},
 		},
