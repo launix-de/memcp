@@ -3,6 +3,7 @@
 metadata:
   syntax: tsql
   isolated: true
+  requires_tds: true
   description: Native scoped cursor rowsets, declared FETCH conversions and lexical control lifetime
 setup:
 - sql: CREATE TABLE cursor_source(id INT PRIMARY KEY, text_value NVARCHAR(40), amount DECIMAL(10,2))
@@ -14,6 +15,7 @@ setup:
 - sql: CREATE TABLE cursor_insert_counts(id INT)
 - sql: CREATE TABLE cursor_statement_calls(value INT)
 cleanup:
+- sql: DROP PROCEDURE IF EXISTS cursor_variable_child
 - sql: DROP TABLE IF EXISTS cursor_insert_counts
 - sql: DROP TABLE IF EXISTS cursor_statement_calls
 - sql: DROP TRIGGER IF EXISTS cursor_abort_guard
@@ -310,3 +312,166 @@ test_cases:
 - name: Actual UNION sink effects match the reported count
   sql: SELECT id FROM cursor_insert_counts ORDER BY id
   expect: {rows: 2, data: [{id: 101}, {id: 102}]}
+- name: Anonymous FAST_FORWARD cursor variables use the ordinary FETCH and EOF state
+  sql: |
+    DECLARE @cursor CURSOR,@id INT,@first INT,@second INT;
+    SET @cursor=CURSOR FAST_FORWARD FOR SELECT id FROM cursor_source ORDER BY id;
+    OPEN @cursor;
+    FETCH NEXT FROM @cursor INTO @first;
+    FETCH NEXT FROM @cursor INTO @second;
+    FETCH NEXT FROM @cursor INTO @id;
+    FETCH NEXT FROM @cursor INTO @id;
+    SELECT @first AS first_id,@second AS second_id,@id AS retained_id,@@FETCH_STATUS AS fetch_status;
+    CLOSE @cursor; DEALLOCATE @cursor;
+  expect: {rows: 1,data: [{first_id: 1,second_id: 2,retained_id: 3,fetch_status: -1}]}
+- name: Cursor variable assignments share position CLOSE and self assignment
+  sql: |
+    DECLARE @first CURSOR,@second CURSOR,@a INT,@b INT,@c INT,@reopened INT;
+    SET @first=CURSOR LOCAL STATIC READ_ONLY FOR SELECT id FROM cursor_source ORDER BY id;
+    OPEN @first; SET @second=@first;
+    FETCH NEXT FROM @first INTO @a; FETCH NEXT FROM @second INTO @b;
+    SET @first=@first; FETCH NEXT FROM @first INTO @c;
+    CLOSE @second;
+    DECLARE @closed SMALLINT=CURSOR_STATUS('variable','@first');
+    DEALLOCATE @first; OPEN @second; FETCH NEXT FROM @second INTO @reopened;
+    SELECT @a AS first_id,@b AS second_id,@c AS third_id,@closed AS closed_status,@reopened AS reopened_id;
+    DEALLOCATE @second;
+  expect: {rows: 1,data: [{first_id: 1,second_id: 2,third_id: 3,closed_status: -1,reopened_id: 1}]}
+- name: Deallocating a cursor name leaves an assigned variable open
+  sql: |
+    DECLARE variable_shared CURSOR GLOBAL STATIC READ_ONLY FOR SELECT id FROM cursor_source ORDER BY id;
+    DECLARE @reference CURSOR,@a INT,@b INT;
+    OPEN variable_shared; FETCH NEXT FROM variable_shared INTO @a;
+    SET @reference=variable_shared; DEALLOCATE variable_shared;
+    FETCH NEXT FROM @reference INTO @b;
+    SELECT @a AS first_id,@b AS second_id,CURSOR_STATUS('global','variable_shared') AS named_status,
+      CURSOR_STATUS('variable','@reference') AS variable_status;
+    DEALLOCATE @reference;
+  expect: {rows: 1,data: [{first_id: 1,second_id: 2,named_status: -3,variable_status: 1}]}
+- name: Deallocating a variable leaves the named cursor and position intact
+  sql: |
+    DECLARE variable_kept CURSOR LOCAL STATIC READ_ONLY FOR SELECT id FROM cursor_source ORDER BY id;
+    DECLARE @reference CURSOR,@a INT,@b INT;
+    SET @reference=variable_kept; OPEN @reference;
+    FETCH NEXT FROM @reference INTO @a; DEALLOCATE @reference;
+    FETCH NEXT FROM variable_kept INTO @b;
+    SELECT @a AS first_id,@b AS second_id,CURSOR_STATUS('local','variable_kept') AS named_status;
+    DEALLOCATE variable_kept;
+  expect: {rows: 1,data: [{first_id: 1,second_id: 2,named_status: 1}]}
+- name: Reassignment releases only its old reference and preserves another alias
+  sql: |
+    DECLARE @first CURSOR,@second CURSOR,@old INT,@new INT;
+    SET @first=CURSOR STATIC READ_ONLY FOR SELECT id FROM cursor_source ORDER BY id;
+    OPEN @first; SET @second=@first;
+    SET @first=CURSOR FAST_FORWARD FOR SELECT id FROM cursor_source WHERE id=3;
+    OPEN @first; FETCH NEXT FROM @second INTO @old; FETCH NEXT FROM @first INTO @new;
+    SELECT @old AS old_id,@new AS new_id;
+    DEALLOCATE @first; DEALLOCATE @second;
+  expect: {rows: 1,data: [{old_id: 1,new_id: 3}]}
+- name: Variable scope cleanup keeps a referenced global cursor alive
+  session_id: cursor_variable_owner
+  sql: |
+    DECLARE variable_survivor CURSOR GLOBAL STATIC READ_ONLY FOR SELECT id FROM cursor_source ORDER BY id;
+    DECLARE @reference CURSOR,@id INT;
+    SET @reference=variable_survivor; OPEN @reference; FETCH NEXT FROM @reference INTO @id;
+    SELECT @id AS id;
+  expect: {rows: 1,data: [{id: 1}]}
+- name: A later batch consumes the same global cursor after variable cleanup
+  session_id: cursor_variable_owner
+  sql: DECLARE @id INT; FETCH NEXT FROM variable_survivor INTO @id; SELECT @id AS id; DEALLOCATE variable_survivor
+  expect: {rows: 1,data: [{id: 2}]}
+- name: A procedure has an independent lexical cursor variable of the same spelling
+  sql: |
+    CREATE PROCEDURE cursor_variable_child AS
+    BEGIN
+      DECLARE @cursor CURSOR,@id INT;
+      SET @cursor=CURSOR FAST_FORWARD FOR SELECT id FROM cursor_source WHERE id=3;
+      OPEN @cursor; FETCH NEXT FROM @cursor INTO @id;
+      SELECT @id AS child_id;
+    END
+- name: Procedure cleanup does not overwrite or close the callers cursor variable
+  sql: |
+    DECLARE @cursor CURSOR,@id INT;
+    SET @cursor=CURSOR FAST_FORWARD FOR SELECT id FROM cursor_source ORDER BY id;
+    OPEN @cursor; EXEC cursor_variable_child; FETCH NEXT FROM @cursor INTO @id;
+    SELECT @id AS caller_id; DEALLOCATE @cursor;
+  expect: {data: [{child_id: 3},{caller_id: 1}]}
+- name: Scalar variables cannot acquire cursor references
+  sql: DECLARE @not_cursor INT; SET @not_cursor=CURSOR FAST_FORWARD FOR SELECT id FROM cursor_source
+  expect: {error: true,contains: CURSOR declaration}
+- name: An unassigned cursor variable cannot be opened
+  sql: DECLARE @cursor CURSOR; OPEN @cursor
+  expect: {error: true,contains: no cursor reference}
+- name: GLOBAL cannot reinterpret a variable reference as a cursor name
+  sql: DECLARE @cursor CURSOR; OPEN GLOBAL @cursor
+  expect: {error: true,contains: GLOBAL requires a cursor name}
+- name: Cursor and scalar declarations share the same duplicate name boundary
+  sql: DECLARE @cursor CURSOR; DECLARE @cursor INT
+  expect: {error: true,contains: duplicate variable declaration}
+- name: Cursor variables cannot leak opaque cursor values into a SQL projection
+  sql: DECLARE @cursor CURSOR; SELECT @cursor AS value
+  expect: {error: true,contains: cursor variable cannot be used as a scalar}
+- name: Cursor status observes open empty and closed states through the shared record
+  sql: |
+    DECLARE @cursor CURSOR;
+    SET @cursor=CURSOR STATIC READ_ONLY FOR SELECT id FROM cursor_source WHERE id>99;
+    DECLARE @before SMALLINT=CURSOR_STATUS('variable','@cursor');
+    OPEN @cursor; DECLARE @empty SMALLINT=CURSOR_STATUS('variable','@cursor');
+    CLOSE @cursor;
+    SELECT @before AS before_open,@empty AS empty_status,CURSOR_STATUS('variable','@cursor') AS after_close;
+    DEALLOCATE @cursor;
+  expect: {rows: 1,data: [{before_open: -1,empty_status: 0,after_close: -1}]}
+- name: Cleanup after a SQL failure drops only the lexical variable reference
+  session_id: cursor_variable_error_owner
+  sql: |
+    DECLARE variable_after_error CURSOR GLOBAL STATIC READ_ONLY FOR SELECT id FROM cursor_source ORDER BY id;
+    DECLARE @reference CURSOR,@id INT;
+    SET @reference=variable_after_error; OPEN @reference; FETCH NEXT FROM @reference INTO @id;
+    SELECT CAST('invalid' AS INT) AS rejected;
+  expect: {error: true}
+- name: The surviving named cursor retains its position after error cleanup
+  session_id: cursor_variable_error_owner
+  sql: DECLARE @id INT; FETCH NEXT FROM variable_after_error INTO @id; SELECT @id AS id; DEALLOCATE variable_after_error
+  expect: {rows: 1,data: [{id: 2}]}
+
+- name: Declared unassigned and detached cursor variables retain their declared status
+  sql: |
+    DECLARE @cursor CURSOR;
+    DECLARE @unassigned SMALLINT=CURSOR_STATUS('variable','@cursor');
+    SET @cursor=CURSOR FAST_FORWARD FOR SELECT id FROM cursor_source;
+    DEALLOCATE @cursor;
+    SELECT @unassigned AS unassigned_status,CURSOR_STATUS('variable','@cursor') AS detached_status,
+      CURSOR_STATUS('variable','@missing') AS missing_status;
+  expect: {rows: 1,data: [{unassigned_status: -2,detached_status: -2,missing_status: -3}]}
+- name: Warm cursor status reads expose the current shared record with SMALLINT metadata
+  tds:
+    statements:
+    - sql: |
+        DECLARE @cursor CURSOR;
+        SET @cursor=CURSOR STATIC READ_ONLY FOR SELECT id FROM cursor_source;
+        SELECT CURSOR_STATUS('variable','@cursor') AS status;
+        OPEN @cursor;
+        SELECT CURSOR_STATUS('variable','@cursor') AS status;
+        CLOSE @cursor;
+        SELECT CURSOR_STATUS('variable','@cursor') AS status;
+        DEALLOCATE @cursor;
+      expect:
+        rows: 3
+        data: [{status: -1},{status: 1},{status: -1}]
+        column_types: [{name: status,type: SMALLINT}]
+- name: Wire batch cleanup detaches variables while preserving a named global rowset
+  tds:
+    statements:
+    - connection: cursor_owner
+      sql: |
+        DECLARE wire_variable_shared CURSOR GLOBAL STATIC READ_ONLY FOR SELECT id FROM cursor_source ORDER BY id;
+        DECLARE @cursor CURSOR,@id INT;
+        SET @cursor=wire_variable_shared; OPEN @cursor; FETCH NEXT FROM @cursor INTO @id;
+        SELECT @id AS id;
+      expect: {rows: 1,data: [{id: 1}]}
+    - connection: cursor_owner
+      sql: |
+        DECLARE @id INT; FETCH NEXT FROM wire_variable_shared INTO @id;
+        SELECT @id AS id,CURSOR_STATUS('variable','@cursor') AS expired_variable;
+        DEALLOCATE wire_variable_shared;
+      expect: {rows: 1,data: [{id: 2,expired_variable: -3}]}

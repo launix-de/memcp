@@ -27,14 +27,69 @@ There is no native reader, requesting session or transaction captured by a curso
 (define tsql_cursor_key (lambda (global) (if global "__tsql_global_cursors" "__tsql_local_cursors")))
 (define tsql_cursor_entries (lambda (session global)
 	(coalesceNil ((tsql_cursor_directory session global) (tsql_cursor_key global)) '())))
-(define tsql_cursor_lookup (lambda (session name global) (begin
-	(define local (if global nil (find (tsql_cursor_entries session false) (lambda (entry) (equal? (car entry) name)) nil)))
-	(define entry (coalesceNil local (find (tsql_cursor_entries session true) (lambda (entry) (equal? (car entry) name)) nil)))
-	(if entry (cadr entry) (error "cursor does not exist: " name)))))
+/* Names and variables are references to one cursor record. Variables live in
+lexical control scope, outside enumerable SQL parameter values and plan inputs.
+https://learn.microsoft.com/sql/t-sql/language-elements/deallocate-transact-sql */
+(define tsql_cursor_variable_entries (lambda (session)
+	(coalesceNil ((tsql_identity_scope session) "__tsql_cursor_variables") '())))
+(define tsql_cursor_variable_contract (lambda (session name) (begin
+	(define declaration (find (session "__tsql_parameter_declarations")
+		(lambda (item) (equal? (car item) name)) nil))
+	(if (and declaration (expression_equal? (cadr declaration) '("CURSOR"))) declaration
+		(error "cursor variable requires a CURSOR declaration: @" name)))))
+(define tsql_cursor_variable_entry (lambda (session name) (begin
+	(tsql_cursor_variable_contract session name)
+	(coalesceNil (find (tsql_cursor_variable_entries session)
+		(lambda (entry) (equal? (car entry) name)) nil)
+		(error "cursor variable has not been declared: @" name)))))
+(define tsql_cursor_lookup (lambda (session name global) (match name
+	'("variable" variable) (begin
+		(if global (error "GLOBAL requires a cursor name, not a variable") true)
+		(coalesceNil (cadr (tsql_cursor_variable_entry session variable))
+			(error "cursor variable has no cursor reference: @" variable)))
+	_ (begin
+		(define local (if global nil (find (tsql_cursor_entries session false) (lambda (entry) (equal? (car entry) name)) nil)))
+		(define entry (coalesceNil local (find (tsql_cursor_entries session true) (lambda (entry) (equal? (car entry) name)) nil)))
+		(if entry (cadr entry) (error "cursor does not exist: " name))))))
+(define tsql_cursor_retain (lambda (cursor) (begin
+	(cursor "references" (+ (cursor "references") 1)) cursor)))
+(define tsql_cursor_release (lambda (cursor) (if (nil? cursor) true (begin
+	(define references (cursor "references"))
+	(if (> references 0) true (error "cursor reference has already been retired"))
+	/* Retain the last owner if native retirement fails, so cleanup can retry. */
+	(if (equal? references 1) (tsql_cursor_close_record cursor) true)
+	(cursor "references" (- references 1)) true))))
 (define tsql_cursor_remove (lambda (session name global) (begin
 	(define owner (tsql_cursor_directory session global))
+	(define entry (find (tsql_cursor_entries session global) (lambda (entry) (equal? (car entry) name)) nil))
+	(if entry (tsql_cursor_release (cadr entry)) true)
 	(owner (tsql_cursor_key global) (filter (tsql_cursor_entries session global) (lambda (entry) (not (equal? (car entry) name)))))
 	true)))
+(define tsql_cursor_variable_declare (lambda (session name) (begin
+	(tsql_cursor_variable_contract session name)
+	(if (find (tsql_cursor_variable_entries session) (lambda (entry) (equal? (car entry) name)) nil)
+		(error "duplicate cursor variable declaration: @" name) true)
+	((tsql_identity_scope session) "__tsql_cursor_variables"
+		(cons (list name nil) (tsql_cursor_variable_entries session))) 0)))
+(define tsql_cursor_variable_set (lambda (session name cursor) (begin
+	(define previous (tsql_cursor_variable_entry session name))
+	/* Retain before release also handles SET @a=@a without closing its rowset. */
+	(define retained (if cursor (tsql_cursor_retain cursor) nil))
+	(define outcome (try (lambda () (begin (tsql_cursor_release (cadr previous)) true))
+		(lambda (failure) (begin (if retained (tsql_cursor_release retained) true) (error failure)))))
+	(if outcome (begin
+		((tsql_identity_scope session) "__tsql_cursor_variables"
+			(cons (list name retained) (filter (tsql_cursor_variable_entries session)
+				(lambda (entry) (not (equal? (car entry) name)))))) 0)
+		(error "cursor reference retirement did not complete")))))
+(define tsql_cursor_reference_syntax (parser (or
+	(parser (define name tsql_variable_name) (list "variable" name))
+	(parser (define name tsql_identifier) (toLower name)))
+	"^(?:/\\*(?s:.*?)\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+"))
+(define tsql_cursor_assign_reference (lambda (name text statement session)
+	(statement "SET CURSOR REFERENCE" false (lambda (_tx)
+		(tsql_cursor_variable_set session name
+			(tsql_cursor_lookup session (tsql_cursor_reference_syntax text) false))))))
 (define tsql_cursor_close_record (lambda (cursor) (begin
 	(define scope (cursor "native"))
 	(cursor "closing" true)
@@ -43,20 +98,20 @@ There is no native reader, requesting session or transaction captured by a curso
 	(cursor "fields" nil) (cursor "position" 0) (cursor "count" 0)
 	true)))
 (define tsql_cursor_close_all (lambda (session) (begin
-	(map (tsql_cursor_entries session true) (lambda (entry) (tsql_cursor_close_record (cadr entry))))
-	((tsql_connection_session session) "__tsql_global_cursors" '())
+	(map (tsql_cursor_entries session true) (lambda (entry) (tsql_cursor_remove session (car entry) true)))
 	true)))
 (define tsql_cursor_with_scope (lambda (session callback) (begin
 	(define outcome (try (lambda () (list true (callback))) (lambda (failure) (list false failure))))
-	(map (tsql_cursor_entries session false) (lambda (entry) (tsql_cursor_close_record (cadr entry))))
-	((tsql_identity_scope session) "__tsql_local_cursors" '())
+	(map (tsql_cursor_entries session false) (lambda (entry) (tsql_cursor_remove session (car entry) false)))
+	(map (tsql_cursor_variable_entries session) (lambda (entry)
+		(tsql_cursor_variable_set session (car entry) nil)))
+	((tsql_identity_scope session) "__tsql_cursor_variables" '())
 	/* A dynamic transition cursor cannot escape the immutable source lifetime.
 	An ordinary GLOBAL static rowset has its normal connection lifetime. */
 	(define escaped (filter (tsql_cursor_entries session true) (lambda (entry) (begin
 		(define cursor (cadr entry))
 		(and (cursor "scoped_source") (equal? (cursor "owner_scope") (tsql_cursor_scope_id session)))))))
-	(map escaped (lambda (entry) (begin
-		(tsql_cursor_close_record (cadr entry)) (tsql_cursor_remove session (car entry) true))))
+	(map escaped (lambda (entry) (tsql_cursor_remove session (car entry) true)))
 	(if (not (car outcome)) (error (cadr outcome))
 		(not (empty_list? escaped)) (error "scope-bound cursor must be DEALLOCATEd before leaving its declaring scope")
 		(cadr outcome)))))
@@ -89,29 +144,38 @@ and no membership predicate, volatile projection, subquery, grouping or limit. *
 			(empty_list? (coalesceNil (qb_stages query) '())) (nil? (qb_limit query)) (nil? (qb_offset query))
 			(reduce (extract_assoc (expand_query_block_fields (qb_sources query) (qb_fields query)) (lambda (_name expression) (direct expression))) (lambda (ok item) (and ok item)) true)
 			(reduce (coalesceNil (qb_order query) '()) (lambda (ok item) (and ok (direct (car item)))) true))) false))))
+(define tsql_cursor_create_record (lambda (options text tx session) (begin
+	(define planning (tsql_cursor_planning session))
+	(define bindings (tsql_temporary_bindings session))
+	(define syntax (parse_tsql (session "schema") text
+		(tsql_temporary_policy (session "username") bindings) planning tx))
+	(define query (match syntax ((symbol quote) query) query _ (error "cursor requires a SELECT result")))
+	(define transition (tsql_cursor_transition_query? query session))
+	(if (and (equal? (options "kind") "dynamic") (not transition))
+		(error "dynamic cursors require an immutable direct transition source in this profile") true)
+	(define cursor (newsession))
+	(cursor "schema" (session "schema")) (cursor "text" text) (cursor "options" options)
+	(cursor "transition" transition)
+	(cursor "references" 0)
+	(cursor "scoped_source" (tsql_temporary_query? query))
+	(cursor "owner_scope" (tsql_cursor_scope_id session))
+	(cursor "contracts" (filter (coalesceNil (session "__tsql_parameter_declarations") '())
+		(lambda (declaration) (not (expression_equal? (cadr declaration) '("CURSOR"))))))
+	(cursor "open" false)
+	cursor)))
 (define tsql_cursor_declare (lambda (name options text statement session)
 	(statement "DECLARE CURSOR" false (lambda (tx) (begin
 		(define global (not (options "local")))
 		(if (find (tsql_cursor_entries session global) (lambda (entry) (equal? (car entry) name)) nil)
 			(error "cursor already exists: " name) true)
-		(define planning (tsql_cursor_planning session))
-		(define bindings (tsql_temporary_bindings session))
-		(define syntax (parse_tsql (session "schema") text
-			(tsql_temporary_policy (session "username") bindings) planning tx))
-		(define query (match syntax ((symbol quote) query) query _ (error "cursor requires a SELECT result")))
-		(define transition (tsql_cursor_transition_query? query session))
-		(if (and (equal? (options "kind") "dynamic") (not transition))
-			(error "dynamic cursors require an immutable direct transition source in this profile") true)
-		(define cursor (newsession))
-		(cursor "schema" (session "schema")) (cursor "text" text) (cursor "options" options)
-		(cursor "global" global) (cursor "name" name) (cursor "transition" transition)
-		(cursor "scoped_source" (tsql_temporary_query? query))
-		(cursor "owner_scope" (tsql_cursor_scope_id session))
-		(cursor "contracts" (coalesceNil (session "__tsql_parameter_declarations") '()))
-		(cursor "open" false)
+		(define cursor (tsql_cursor_create_record options text tx session))
+		(cursor "global" global) (cursor "name" name)
 		((tsql_cursor_directory session global) (tsql_cursor_key global)
-			(cons (list name cursor) (tsql_cursor_entries session global)))
-		0)))))
+			(cons (list name (tsql_cursor_retain cursor)) (tsql_cursor_entries session global))) 0)))))
+(define tsql_cursor_assign_query (lambda (name options text statement session)
+	(statement "SET CURSOR" false (lambda (tx) (begin
+		(tsql_cursor_variable_entry session name)
+		(tsql_cursor_variable_set session name (tsql_cursor_create_record options text tx session)))))))
 (define tsql_cursor_raw_session (lambda (parent)
 	(lambda args (match args
 		'() (merge_unique (list '("wire_metadata") (parent)))
@@ -213,6 +277,40 @@ and no membership predicate, volatile projection, subquery, grouping or limit. *
 	(statement (if deallocate "DEALLOCATE CURSOR" "CLOSE CURSOR") false (lambda (_tx) (begin
 		(define cursor (tsql_cursor_lookup session name global))
 		(if (or deallocate (cursor "open")) true (error "cursor is not open: " name))
-		(tsql_cursor_close_record cursor)
-		(if deallocate (tsql_cursor_remove session name (cursor "global")) true)
+		(if deallocate (match name
+			'("variable" variable) (tsql_cursor_variable_set session variable nil)
+			_ (tsql_cursor_remove session name (cursor "global")))
+			(tsql_cursor_close_record cursor))
 		0)))))
+
+/* Status is a declared scalar invocation input. Normal SQL session binding
+hoists it before delegated row work; cursor records never become SQL values.
+https://learn.microsoft.com/sql/t-sql/functions/cursor-status-transact-sql */
+(define tsql_cursor_status (lambda (session kind name) (begin
+	(define name (toLower name))
+	(define variable (equal? kind "variable"))
+	(define entry (if variable
+		(find (tsql_cursor_variable_entries session) (lambda (entry)
+			(equal? (concat "@" (car entry)) name)) nil)
+		(find (tsql_cursor_entries session (equal? kind "global"))
+			(lambda (entry) (equal? (car entry) name)) nil)))
+	(if (nil? entry) -3 (nil? (cadr entry)) -2 (begin
+		(define cursor (cadr entry))
+		(if (not (cursor "open")) -1
+			(equal? ((cursor "options") "kind") "dynamic") 1
+			(equal? (cursor "count") 0) 0 1))))))
+(define tsql_cursor_status_compiler (lambda (infos) (begin
+	(define kind (tryfold (sql_info_formula (car infos))))
+	(define name (tryfold (sql_info_formula (cadr infos))))
+	(if (and (string? kind) (string? name)) true
+		(error "CURSOR_STATUS requires constant source and name strings"))
+	(define kind (toLower kind))
+	(if (has? '("local" "global" "variable") kind) true (error "invalid CURSOR_STATUS source"))
+	(sql_info (list 'session (concat "__tsql_cursor_status:" (json_encode (list kind name)))) "SMALLINT" nil))))
+(define tsql_cursor_input_session (lambda (parent)
+	(lambda args (match args
+		'(key) (if (if (string? key) (strlike key "__tsql_cursor_status:%") false)
+			(begin
+				(define input (json_decode (substr key (strlen "__tsql_cursor_status:"))))
+				(tsql_cursor_status parent (car input) (cadr input))) (parent key))
+		_ (apply parent args)))))

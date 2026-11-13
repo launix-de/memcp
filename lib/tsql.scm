@@ -841,6 +841,7 @@ other execution bindings retain their existing native owners. */
 		(cons (list (quote lambda) symbols (tsql_parameter_input_expr formula bindings)) reads))))))
 
 (define tsql_execute_statement (lambda (tx schema text session resultrow resultfields) (begin
+	(define session (tsql_cursor_input_session session))
 	(if (if (session "__tsql_insert_exec")
 		(has? '("CREATE" "ALTER" "DROP" "TRUNCATE" "BACKUP" "RESTORE" "USE" "BEGIN" "COMMIT" "ROLLBACK")
 			(tsql_insert_exec_leaf_kind text)) false)
@@ -1105,6 +1106,7 @@ and query facts remain data. The caller's normal source guards own warm reuse. *
 		(sql_queryplan_compile_formula nil (sql_queryplan_bind_tx_calls
 			(sql_queryplan_bind_execution_session (sql_type_lower_annotations '() expr))))))))))
 (define tsql_scalar_value (lambda (schema text session tx mode target) (begin
+	(define session (tsql_cursor_input_session session))
 	/* Scalar control expressions use the same scope dependency as SELECT leaves.
 	Restore the caller owner before shared compilation after a child procedure. */
 	(session "__tsql_scope_identity" ((tsql_identity_scope session) "__tsql_scope_identity"))
@@ -1629,6 +1631,7 @@ native results: both module DDL and a zero-row DML may return numeric zero. */
 						(error "invalid THROW arguments") (tsql_raise_error number message state))))))
 		'("if" _condition _yes _no) (tsql_run_commands (list command) statement session resultrow resultfields)
 		'("cursor-declare" name options text) (tsql_cursor_declare name options text statement session)
+		'("cursor-assign-query" name options text) (tsql_cursor_assign_query name options text statement session)
 		'("cursor-open" name global) (tsql_cursor_open name global statement session)
 		'("cursor-fetch" name global movement targets) (tsql_cursor_fetch name global movement targets statement session)
 		'("cursor-close" name global) (tsql_cursor_close name global false statement session)
@@ -1639,19 +1642,24 @@ native results: both module DDL and a zero-row DML may return numeric zero. */
 				(define value (if (not (nil? (nth declaration 2)))
 					(statement "variable initializer" false (lambda (tx)
 						(tsql_scalar_value schema (nth declaration 2) session tx "assignment" (cadr declaration)))) nil))
-				(session (concat "__tsql_parameter:" name) value))) nil)
+				(if (expression_equal? (cadr declaration) '("CURSOR"))
+					(tsql_cursor_variable_declare session name)
+					(session (concat "__tsql_parameter:" name) value)))) nil)
 			0)
 		'("assign" name operation text) (begin
 			(define declaration (find (session "__tsql_parameter_declarations") (lambda (item) (equal? (car item) name)) nil))
 			(if declaration true (error "undeclared variable: @" name))
-			(if operation (tsql_bit_assignment_type (car (cadr declaration))) true)
-			/* Compound syntax uses the existing scalar compiler and assignment cast.
-			The parsed variable identifier is syntax, never caller-provided SQL text. */
-			(define text (if operation (concat "@" name " " operation " (" text ")") text))
-			(define value (statement text false (lambda (tx)
-				(tsql_scalar_value schema text session tx "assignment" (cadr declaration)))))
-			(session (concat "__tsql_parameter:" name) value)
-			0)
+			(if (expression_equal? (cadr declaration) '("CURSOR"))
+				(if operation (error "cursor assignment cannot use a compound operator")
+					(tsql_cursor_assign_reference name text statement session)) (begin
+					(if operation (tsql_bit_assignment_type (car (cadr declaration))) true)
+					/* Compound syntax uses the existing scalar compiler and assignment cast.
+					The parsed variable identifier is syntax, never caller-provided SQL text. */
+					(define text (if operation (concat "@" name " " operation " (" text ")") text))
+					(define value (statement text false (lambda (tx)
+						(tsql_scalar_value schema text session tx "assignment" (cadr declaration)))))
+					(session (concat "__tsql_parameter:" name) value)
+					0)))
 		'("create-scalar-function" name parameters return_type source)
 		(tsql_define_scalar_function name parameters return_type source statement session)
 		'("create-table-function" name parameters return_name columns source)

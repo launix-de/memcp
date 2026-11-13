@@ -3979,6 +3979,7 @@ that context explicitly; stored views refuse this scalar before publication. */
 			(list (quote sql_type_expr) (list (quote tsql_unbound_parameter) name spelling) "any" nil)
 			(empty_list? declaration) (error "undeclared T-SQL parameter: @" name)
 			(equal?? (car (cadr (car declaration))) "TABLE") (error "table variable cannot be used as a scalar: @" name)
+			(equal?? (car (cadr (car declaration))) "CURSOR") (error "cursor variable cannot be used as a scalar: @" name)
 			(list (quote sql_type_expr) (if function_body
 				(tsql_scalar_function_variable name) (list (quote session) (concat "__tsql_parameter:" name)))
 				(begin
@@ -4296,6 +4297,9 @@ that context explicitly; stored views refuse this scalar before publication. */
 							(tsql_cast_expr (nth args 1) "NVARCHAR" '(128)))
 						(list (quote session) "username")) "INT" nil)))
 
+		(parser '((atom "CURSOR_STATUS" true) "(" (define kind tsql_expression)
+			"," (define name tsql_expression) ")")
+			(list 'sql_compile_expr 'tsql_cursor_status_compiler kind name))
 		(parser '((atom "SESSIONPROPERTY" true) "(" (define property tsql_expression) ")")
 			(list 'sql_type_expr (list tsql_sessionproperty
 				(tsql_cast_expr property "NVARCHAR" '(128)) (tsql_ansi_warnings_formula)
@@ -6266,12 +6270,25 @@ that context explicitly; stored views refuse this scalar before publication. */
 			statement yet. Earlier DDL in a batch must publish before later DML binds.
 			Control nodes are syntax data, not another query or transaction engine. */
 			(define tsql_script_variable tsql_variable_name)
-			(define tsql_script_declaration (parser '(
-				(define name tsql_script_variable) (? (atom "AS" true))
-				(define type tsql_declared_type) (define dimensions tsql_type_dimensions)
-				(? "=" (define initializer (capture tsql_expression)))
-			) (list name (tsql_parameter_declaration schema type dimensions)
-					(if initializer (car initializer) nil))))
+			(define tsql_script_cursor_options (parser
+				(define options (* (or (atom "LOCAL" true) (atom "GLOBAL" true)
+					(atom "FORWARD_ONLY" true) (atom "SCROLL" true) (atom "STATIC" true)
+					(atom "KEYSET" true) (atom "DYNAMIC" true) (atom "FAST_FORWARD" true)
+					(atom "READ_ONLY" true) (atom "SCROLL_LOCKS" true) (atom "OPTIMISTIC" true)
+					(atom "TYPE_WARNING" true)) empty))
+				(tsql_cursor_options (map options toUpper))))
+			(define tsql_script_cursor_reference (parser (or
+				(parser (define name tsql_script_variable) (list "variable" name))
+				(parser (define name tsql_identifier) (toLower name)))))
+			(define tsql_script_declaration (parser (or
+				(parser '((define name tsql_script_variable) (atom "CURSOR" true))
+					(list name '("CURSOR") nil))
+				(parser '(
+					(define name tsql_script_variable) (? (atom "AS" true))
+					(define type tsql_declared_type) (define dimensions tsql_type_dimensions)
+					(? "=" (define initializer (capture tsql_expression)))
+				) (list name (tsql_parameter_declaration schema type dimensions)
+						(if initializer (car initializer) nil))))))
 			(define tsql_script_exec_value (parser (or
 				(parser '((define variable tsql_script_variable) (or (atom "OUTPUT" true) (atom "OUT" true)))
 					(list "output" variable))
@@ -6333,19 +6350,19 @@ that context explicitly; stored views refuse this scalar before publication. */
 				(parser '((atom "BEGIN" true) (define commands (* tsql_script_item empty)) (atom "END" true))
 					(list "block" commands))
 				(parser '((atom "DECLARE" true) (define name tsql_identifier) (atom "CURSOR" true)
-					(define options (* (or (atom "LOCAL" true) (atom "GLOBAL" true)
-						(atom "FORWARD_ONLY" true) (atom "SCROLL" true) (atom "STATIC" true)
-						(atom "KEYSET" true) (atom "DYNAMIC" true) (atom "FAST_FORWARD" true)
-						(atom "READ_ONLY" true) (atom "SCROLL_LOCKS" true) (atom "OPTIMISTIC" true)
-						(atom "TYPE_WARNING" true)) empty))
+					(define options tsql_script_cursor_options)
 					(atom "FOR" true) (define query (capture tsql_root_select)))
-					(list "cursor-declare" (toLower name) (tsql_cursor_options (map options toUpper)) (car query)))
-				(parser '((atom "OPEN" true) (define global (? (atom "GLOBAL" true))) (define name tsql_identifier))
-					(list "cursor-open" (toLower name) (if global true false)))
-				(parser '((atom "CLOSE" true) (define global (? (atom "GLOBAL" true))) (define name tsql_identifier))
-					(list "cursor-close" (toLower name) (if global true false)))
-				(parser '((atom "DEALLOCATE" true) (define global (? (atom "GLOBAL" true))) (define name tsql_identifier))
-					(list "cursor-deallocate" (toLower name) (if global true false)))
+					(list "cursor-declare" (toLower name) options (car query)))
+				(parser '((atom "SET" true) (define name tsql_script_variable) "=" (atom "CURSOR" true)
+					(define options tsql_script_cursor_options) (atom "FOR" true)
+					(define query (capture tsql_root_select)))
+					(list "cursor-assign-query" name options (car query)))
+				(parser '((atom "OPEN" true) (define global (? (atom "GLOBAL" true))) (define name tsql_script_cursor_reference))
+					(list "cursor-open" name (if global true false)))
+				(parser '((atom "CLOSE" true) (define global (? (atom "GLOBAL" true))) (define name tsql_script_cursor_reference))
+					(list "cursor-close" name (if global true false)))
+				(parser '((atom "DEALLOCATE" true) (define global (? (atom "GLOBAL" true))) (define name tsql_script_cursor_reference))
+					(list "cursor-deallocate" name (if global true false)))
 				(parser '((atom "FETCH" true)
 					(? (define movement (or
 						(parser (define direction (or (atom "NEXT" true) (atom "PRIOR" true)
@@ -6353,9 +6370,9 @@ that context explicitly; stored views refuse this scalar before publication. */
 						(parser '((define direction (or (atom "ABSOLUTE" true) (atom "RELATIVE" true)))
 							(define amount (capture (or tsql_int tsql_script_variable)))) (list (toLower direction) (car amount)))))
 						(atom "FROM" true))
-					(define global (? (atom "GLOBAL" true))) (define name tsql_identifier)
+					(define global (? (atom "GLOBAL" true))) (define name tsql_script_cursor_reference)
 					(? (atom "INTO" true) (define targets (+ tsql_script_variable ","))))
-					(list "cursor-fetch" (toLower name) (if global true false)
+					(list "cursor-fetch" name (if global true false)
 						(coalesceNil movement (list "next" nil)) targets))
 				(parser '((atom "DECLARE" true) (define name tsql_script_variable)
 					(? (atom "AS" true)) (atom "TABLE" true) "("

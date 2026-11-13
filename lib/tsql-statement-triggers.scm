@@ -89,6 +89,7 @@ The proof consumes the ordinary parser's exact setter formula, not SQL text. */
 		(error "unsupported statement-trigger SQL leaf"))
 	'("select-into" _name _query _definitions) false
 	'("cursor-declare" _name _options _text) false
+	'("cursor-assign-query" _name _options _text) false
 	'("cursor-open" _name _global) false
 	'("cursor-fetch" _name _global _movement _targets) false
 	'("cursor-close" _name _global) false
