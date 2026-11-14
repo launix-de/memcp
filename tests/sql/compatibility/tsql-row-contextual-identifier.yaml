@@ -1,0 +1,57 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  restart_after_setup: true
+  description: ROW identifiers coexist with paging and window frame clause tokens
+# ROW is a future keyword, rather than a current SQL Server reserved word.
+# https://learn.microsoft.com/sql/t-sql/language-elements/reserved-keywords-transact-sql
+setup:
+- sql: CREATE TABLE row(id INT PRIMARY KEY,row INT)
+- sql: INSERT INTO row VALUES(1,10),(2,20),(3,NULL)
+- sql: CREATE PROCEDURE row_numbered AS SELECT id,ROW_NUMBER() OVER(ORDER BY id) AS Row INTO #numbered FROM row; SELECT id,Row FROM #numbered ORDER BY id;
+test_cases:
+- name: ROW is accepted by the shared regular identifier contract
+  scm: (and (tsql_regular_identifier? "Row") (tsql_regular_identifier? "rOw") (not (tsql_regular_identifier? "SELECT")))
+  expect: {result: true}
+- name: Unquoted ROW table and column names resolve ordinary native declarations
+  sql: SELECT id,row FROM row ORDER BY id
+  expect: {rows: 3,data: [{id: 1,row: 10},{id: 2,row: 20},{id: 3,row: null}]}
+- name: An explicit ROW result alias preserves SQL NULL and the source type
+  sql: SELECT row AS Row FROM row WHERE id=3
+  expect: {rows: 1,data: [{Row: null}]}
+- name: An implicit ROW result alias retains the ordinary projection grammar
+  sql: SELECT 7 Row
+  expect: {rows: 1,data: [{Row: 7}]}
+- name: ROW table aliases qualify their own columns without special rewriting
+  sql: SELECT Row.id,Row.row FROM row AS Row WHERE Row.id=2
+  expect: {rows: 1,data: [{id: 2,row: 20}]}
+- name: A qualified ROW field and ROW_NUMBER alias work after stored source restart
+  sql: EXEC row_numbered
+  expect: {rows: 3,data: [{id: 1,Row: 1},{id: 2,Row: 2},{id: 3,Row: 3}]}
+- name: A ROW alias does not consume the CURRENT ROW window boundary
+  sql: SELECT id,row AS Row,SUM(row) OVER(ORDER BY id ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS total FROM row ORDER BY id
+  expect: {rows: 3,data: [{id: 1,Row: 10,total: 10},{id: 2,Row: 20,total: 30},{id: 3,Row: null,total: 30}]}
+- name: ROW remains an OFFSET and FETCH clause token after a ROW projection
+  sql: SELECT id,row FROM row ORDER BY id OFFSET 1 ROW FETCH NEXT 1 ROW ONLY
+  expect: {rows: 1,data: [{id: 2,row: 20}]}
+- name: A ROW_NUMBER result alias retains its declared BIGINT metadata
+  scm: |
+    (begin
+      (define session (newsession)) (session "username" "root") (session "schema" "memcp-tests")
+      (define result (newsession))
+      (tsql_execute_request "memcp-tests" "SELECT ROW_NUMBER() OVER(ORDER BY id) AS Row FROM row" session nil 0
+        (lambda (_row) true) (lambda (_names fields) (result "fields" fields)))
+      (define field (car (result "fields")))
+      (and (equal? (field "name") "Row") (equal? (field "sql_type") "BIGINT")))
+  expect: {result: true}
+- name: Bracketed ROW names keep the same native identity
+  sql: SELECT [row].id,[row].[row] FROM [row] WHERE id=1
+  expect: {rows: 1,data: [{id: 1,row: 10}]}
+- name: ROW names keep ordinary searched mutation semantics
+  sql: UPDATE row SET row=21 WHERE id=2; SELECT row FROM row WHERE id=2;
+  expect: {rows: 1,data: [{row: 21}]}
+cleanup:
+- sql: DROP PROCEDURE row_numbered
+- sql: DROP TABLE row

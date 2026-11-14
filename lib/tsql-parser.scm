@@ -190,12 +190,12 @@ Reference: https://learn.microsoft.com/sql/relational-databases/databases/databa
 patterns. Only SQL parsing constructs native parser objects; portable address
 validation closes over plain pattern strings. Statement keywords must not be
 consumed as implicit aliases when a batch omits semicolons. */
-/* OFFSET is a contextual ORDER BY clause word, not a reserved identifier.
-The ordering suffix owns that clause; aliases, fields and object names may use
-this spelling without delimiters. Reference:
+/* OFFSET and ROW are contextual ORDER BY clause words, not reserved
+identifiers. Paging and window suffixes own those clauses; aliases, fields and
+object names may use these spellings without delimiters. Reference:
 https://learn.microsoft.com/sql/t-sql/language-elements/reserved-keywords-transact-sql */
 (define tsql_regular_identifier_patterns (list "[\\p{L}\\p{Nl}_#][\\p{L}\\p{Nl}\\p{Nd}\\p{Mn}\\p{Mc}\\p{Pc}\\p{Cf}@$#]*"
-	"(?:NOT|IN|BETWEEN|AS|ON|WHERE|GROUP|BY|VALUES|FROM|LEFT|RIGHT|INNER|OUTER|CROSS|JOIN|SELECT|UNION|ALL|INSERT|INTO|SET|ORDER|LIMIT|TRIM|LTRIM|RTRIM|TOP|FETCH|ROWS|ROW|ONLY|CASE|WHEN|THEN|ELSE|END|HAVING|WITH|OPTION|IF|BEGIN|DECLARE|CURSOR|OPEN|CLOSE|DEALLOCATE|EXEC|EXECUTE|CREATE|ALTER|DROP|UPDATE|DELETE|COMMIT|ROLLBACK|WHILE|BREAK|CONTINUE|GOTO|RETURN|THROW|PRINT|RAISERROR)(?:[^\\p{L}\\p{Nl}\\p{Nd}\\p{Mn}\\p{Mc}\\p{Pc}\\p{Cf}@$#]|$)"))
+	"(?:NOT|IN|BETWEEN|AS|ON|WHERE|GROUP|BY|VALUES|FROM|LEFT|RIGHT|INNER|OUTER|CROSS|JOIN|SELECT|UNION|ALL|INSERT|INTO|SET|ORDER|LIMIT|TRIM|LTRIM|RTRIM|TOP|FETCH|ROWS|ONLY|CASE|WHEN|THEN|ELSE|END|HAVING|WITH|OPTION|IF|BEGIN|DECLARE|CURSOR|OPEN|CLOSE|DEALLOCATE|EXEC|EXECUTE|CREATE|ALTER|DROP|UPDATE|DELETE|COMMIT|ROLLBACK|WHILE|BREAK|CONTINUE|GOTO|RETURN|THROW|PRINT|RAISERROR)(?:[^\\p{L}\\p{Nl}\\p{Nd}\\p{Mn}\\p{Mc}\\p{Pc}\\p{Cf}@$#]|$)"))
 (define tsql_regular_identifier? (close_procedure ((lambda (regular keyword)
 	(lambda (name) (and
 		(regexp_test name (concat "^(?:" regular ")$"))
