@@ -21,6 +21,8 @@ setup:
   - sql: INSERT INTO operand_text_head VALUES(10,'one'),(20,'no child'),(30,NULL)
   - sql: INSERT INTO operand_text_child VALUES(100,10),(101,10),(300,30)
 cleanup:
+  - sql: DROP VIEW IF EXISTS operand_text_wrapper
+  - sql: DROP VIEW IF EXISTS operand_text_source
   - sql: DROP VIEW IF EXISTS operand_text_view
   - sql: DROP TABLE IF EXISTS operand_text_child
   - sql: DROP TABLE IF EXISTS operand_text_head
@@ -103,12 +105,31 @@ test_cases:
     sql: SELECT id,child_id,label FROM operand_text_view ORDER BY id,child_id
     expect:
       rows: 5
-      data:
+      data: &operand_text_rows
         - {id: 1,child_id: 100,label: one}
         - {id: 1,child_id: 101,label: one}
         - {id: 2,child_id: null,label: missing}
         - {id: 3,child_id: 300,label: blank}
         - {id: 4,child_id: null,label: missing}
+  - name: A stored joined source supplies declared text contracts to another view
+    setup:
+      - sql: >-
+          CREATE VIEW operand_text_source AS
+          SELECT p.id,h.id AS head_id,c.id AS child_id,h.label
+          FROM operand_text_parent p
+          LEFT JOIN (operand_text_head h
+            INNER JOIN operand_text_child c ON c.head_id=h.id)
+          ON p.head_id=h.id
+      - sql: >-
+          CREATE VIEW operand_text_wrapper AS
+          SELECT s.id,s.child_id,
+            CASE WHEN s.head_id IS NULL THEN 'missing'
+              ELSE ISNULL(s.label,'blank') END AS label
+          FROM operand_text_source s
+    sql: SELECT id,child_id,label FROM operand_text_wrapper ORDER BY id,child_id
+    expect:
+      rows: 5
+      data: *operand_text_rows
   - name: Restart after publishing the typed joined view
     action: restart
   - name: Restored grouped view text exports retain their declared wire width
@@ -117,7 +138,11 @@ test_cases:
         - sql: SELECT TOP(0) id,child_id,label FROM operand_text_view
           expect:
             rows: 0
-            column_types:
+            column_types: &operand_text_columns
               - {name: id,type: INT,nullable: false}
               - {name: child_id,type: INT,nullable: true}
               - {name: label,type: VARCHAR,length: 12}
+        - sql: SELECT TOP(0) id,child_id,label FROM operand_text_wrapper
+          expect:
+            rows: 0
+            column_types: *operand_text_columns
