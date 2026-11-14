@@ -4114,10 +4114,14 @@ that context explicitly; stored views refuse this scalar before publication. */
 
 		(parser '((define a tsql_expression3) (define op (or
 			(parser "=" "eq")
-			(parser "<>" "ne")
-			(parser "!=" "ne")
-			(parser "<=" "le")
-			(parser ">=" "ge")
+			/* SQL Server permits trivia between compound comparison tokens.
+			All spellings lower through the existing typed comparison owner. */
+			(parser '("<" ">") "ne")
+			(parser '("!" "=") "ne")
+			(parser '("<" "=") "le")
+			(parser '(">" "=") "ge")
+			(parser '("!" ">") "le")
+			(parser '("!" "<") "ge")
 			(parser "<" "lt")
 			(parser ">" "gt")
 		)) (define b tsql_expression2)) (tsql_comparison_expr_using ansi_nulls op a b))

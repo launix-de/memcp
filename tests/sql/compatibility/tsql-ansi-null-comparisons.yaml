@@ -1,6 +1,7 @@
 # Copyright (C) 2026 Carl-Philip Hänsch
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Microsoft Learn: SET ANSI_NULLS, SET statements, CREATE PROCEDURE/VIEW.
+# SQL Server comparison token references: https://dbfiddle.uk/SUaa4mGi https://dbfiddle.uk/331QkYef
 # SQL Server 2022 reference profiles:
 # https://dbfiddle.uk/0OEQL_op https://dbfiddle.uk/qTd6lR2X https://dbfiddle.uk/Oz8i_ERp
 metadata:
@@ -15,6 +16,7 @@ setup:
 cleanup:
 - sql: DROP TRIGGER IF EXISTS ansi_mode_trigger
 - sql: DROP PROCEDURE IF EXISTS ansi_mode_on
+- sql: DROP PROCEDURE IF EXISTS ansi_mode_split
 - sql: DROP PROCEDURE IF EXISTS ansi_mode_off
 - sql: DROP PROCEDURE IF EXISTS ansi_mode_dynamic
 - sql: DROP VIEW IF EXISTS ansi_mode_view_off
@@ -266,3 +268,406 @@ test_cases:
       expect: {rows: 2,data: [{id: 1},{id: 2}]}
     - sql: EXEC ansi_mode_off
       expect: {rows: 1,data: [{value: 1,option_bit: 0}]}
+
+- name: Comparison >= with adjacent tokens preserves all truth outcomes
+  sql: 'SET ANSI_NULLS ON;
+
+    SELECT id,CASE WHEN lhs >= rhs THEN 1 WHEN NOT(lhs >= rhs) THEN 0 ELSE -1 END AS truth
+
+    FROM (VALUES(1,2,1),(2,2,2),(3,2,3),(4,NULL,2),(5,2,NULL),(6,NULL,NULL)) AS v(id,lhs,rhs)
+
+    ORDER BY id'
+  expect:
+    rows: 6
+    data: [{id: 1, truth: 1}, {id: 2, truth: 1}, {id: 3, truth: 0}, {id: 4, truth: -1}, {id: 5, truth: -1}, {id: 6,
+        truth: -1}]
+- name: Comparison >= with space tokens preserves all truth outcomes
+  sql: 'SET ANSI_NULLS ON;
+
+    SELECT id,CASE WHEN lhs > = rhs THEN 1 WHEN NOT(lhs > = rhs) THEN 0 ELSE -1 END AS truth
+
+    FROM (VALUES(1,2,1),(2,2,2),(3,2,3),(4,NULL,2),(5,2,NULL),(6,NULL,NULL)) AS v(id,lhs,rhs)
+
+    ORDER BY id'
+  expect:
+    rows: 6
+    data: [{id: 1, truth: 1}, {id: 2, truth: 1}, {id: 3, truth: 0}, {id: 4, truth: -1}, {id: 5, truth: -1}, {id: 6,
+        truth: -1}]
+- name: Comparison >= with comment tokens preserves all truth outcomes
+  sql: 'SET ANSI_NULLS ON;
+
+    SELECT id,CASE WHEN lhs > /* operator trivia */ = rhs THEN 1 WHEN NOT(lhs > /* operator trivia */ = rhs) THEN
+    0 ELSE -1 END AS truth
+
+    FROM (VALUES(1,2,1),(2,2,2),(3,2,3),(4,NULL,2),(5,2,NULL),(6,NULL,NULL)) AS v(id,lhs,rhs)
+
+    ORDER BY id'
+  expect:
+    rows: 6
+    data: [{id: 1, truth: 1}, {id: 2, truth: 1}, {id: 3, truth: 0}, {id: 4, truth: -1}, {id: 5, truth: -1}, {id: 6,
+        truth: -1}]
+- name: Comparison >= with newline tokens preserves all truth outcomes
+  sql: 'SET ANSI_NULLS ON;
+
+    SELECT id,CASE WHEN lhs >
+
+    = rhs THEN 1 WHEN NOT(lhs >
+
+    = rhs) THEN 0 ELSE -1 END AS truth
+
+    FROM (VALUES(1,2,1),(2,2,2),(3,2,3),(4,NULL,2),(5,2,NULL),(6,NULL,NULL)) AS v(id,lhs,rhs)
+
+    ORDER BY id'
+  expect:
+    rows: 6
+    data: [{id: 1, truth: 1}, {id: 2, truth: 1}, {id: 3, truth: 0}, {id: 4, truth: -1}, {id: 5, truth: -1}, {id: 6,
+        truth: -1}]
+- name: Comparison <= with adjacent tokens preserves all truth outcomes
+  sql: 'SET ANSI_NULLS ON;
+
+    SELECT id,CASE WHEN lhs <= rhs THEN 1 WHEN NOT(lhs <= rhs) THEN 0 ELSE -1 END AS truth
+
+    FROM (VALUES(1,2,1),(2,2,2),(3,2,3),(4,NULL,2),(5,2,NULL),(6,NULL,NULL)) AS v(id,lhs,rhs)
+
+    ORDER BY id'
+  expect:
+    rows: 6
+    data: [{id: 1, truth: 0}, {id: 2, truth: 1}, {id: 3, truth: 1}, {id: 4, truth: -1}, {id: 5, truth: -1}, {id: 6,
+        truth: -1}]
+- name: Comparison <= with space tokens preserves all truth outcomes
+  sql: 'SET ANSI_NULLS ON;
+
+    SELECT id,CASE WHEN lhs < = rhs THEN 1 WHEN NOT(lhs < = rhs) THEN 0 ELSE -1 END AS truth
+
+    FROM (VALUES(1,2,1),(2,2,2),(3,2,3),(4,NULL,2),(5,2,NULL),(6,NULL,NULL)) AS v(id,lhs,rhs)
+
+    ORDER BY id'
+  expect:
+    rows: 6
+    data: [{id: 1, truth: 0}, {id: 2, truth: 1}, {id: 3, truth: 1}, {id: 4, truth: -1}, {id: 5, truth: -1}, {id: 6,
+        truth: -1}]
+- name: Comparison <= with comment tokens preserves all truth outcomes
+  sql: 'SET ANSI_NULLS ON;
+
+    SELECT id,CASE WHEN lhs < /* operator trivia */ = rhs THEN 1 WHEN NOT(lhs < /* operator trivia */ = rhs) THEN
+    0 ELSE -1 END AS truth
+
+    FROM (VALUES(1,2,1),(2,2,2),(3,2,3),(4,NULL,2),(5,2,NULL),(6,NULL,NULL)) AS v(id,lhs,rhs)
+
+    ORDER BY id'
+  expect:
+    rows: 6
+    data: [{id: 1, truth: 0}, {id: 2, truth: 1}, {id: 3, truth: 1}, {id: 4, truth: -1}, {id: 5, truth: -1}, {id: 6,
+        truth: -1}]
+- name: Comparison <= with newline tokens preserves all truth outcomes
+  sql: 'SET ANSI_NULLS ON;
+
+    SELECT id,CASE WHEN lhs <
+
+    = rhs THEN 1 WHEN NOT(lhs <
+
+    = rhs) THEN 0 ELSE -1 END AS truth
+
+    FROM (VALUES(1,2,1),(2,2,2),(3,2,3),(4,NULL,2),(5,2,NULL),(6,NULL,NULL)) AS v(id,lhs,rhs)
+
+    ORDER BY id'
+  expect:
+    rows: 6
+    data: [{id: 1, truth: 0}, {id: 2, truth: 1}, {id: 3, truth: 1}, {id: 4, truth: -1}, {id: 5, truth: -1}, {id: 6,
+        truth: -1}]
+- name: Comparison != with adjacent tokens preserves all truth outcomes
+  sql: 'SET ANSI_NULLS ON;
+
+    SELECT id,CASE WHEN lhs != rhs THEN 1 WHEN NOT(lhs != rhs) THEN 0 ELSE -1 END AS truth
+
+    FROM (VALUES(1,2,1),(2,2,2),(3,2,3),(4,NULL,2),(5,2,NULL),(6,NULL,NULL)) AS v(id,lhs,rhs)
+
+    ORDER BY id'
+  expect:
+    rows: 6
+    data: [{id: 1, truth: 1}, {id: 2, truth: 0}, {id: 3, truth: 1}, {id: 4, truth: -1}, {id: 5, truth: -1}, {id: 6,
+        truth: -1}]
+- name: Comparison != with space tokens preserves all truth outcomes
+  sql: 'SET ANSI_NULLS ON;
+
+    SELECT id,CASE WHEN lhs ! = rhs THEN 1 WHEN NOT(lhs ! = rhs) THEN 0 ELSE -1 END AS truth
+
+    FROM (VALUES(1,2,1),(2,2,2),(3,2,3),(4,NULL,2),(5,2,NULL),(6,NULL,NULL)) AS v(id,lhs,rhs)
+
+    ORDER BY id'
+  expect:
+    rows: 6
+    data: [{id: 1, truth: 1}, {id: 2, truth: 0}, {id: 3, truth: 1}, {id: 4, truth: -1}, {id: 5, truth: -1}, {id: 6,
+        truth: -1}]
+- name: Comparison != with comment tokens preserves all truth outcomes
+  sql: 'SET ANSI_NULLS ON;
+
+    SELECT id,CASE WHEN lhs ! /* operator trivia */ = rhs THEN 1 WHEN NOT(lhs ! /* operator trivia */ = rhs) THEN
+    0 ELSE -1 END AS truth
+
+    FROM (VALUES(1,2,1),(2,2,2),(3,2,3),(4,NULL,2),(5,2,NULL),(6,NULL,NULL)) AS v(id,lhs,rhs)
+
+    ORDER BY id'
+  expect:
+    rows: 6
+    data: [{id: 1, truth: 1}, {id: 2, truth: 0}, {id: 3, truth: 1}, {id: 4, truth: -1}, {id: 5, truth: -1}, {id: 6,
+        truth: -1}]
+- name: Comparison != with newline tokens preserves all truth outcomes
+  sql: 'SET ANSI_NULLS ON;
+
+    SELECT id,CASE WHEN lhs !
+
+    = rhs THEN 1 WHEN NOT(lhs !
+
+    = rhs) THEN 0 ELSE -1 END AS truth
+
+    FROM (VALUES(1,2,1),(2,2,2),(3,2,3),(4,NULL,2),(5,2,NULL),(6,NULL,NULL)) AS v(id,lhs,rhs)
+
+    ORDER BY id'
+  expect:
+    rows: 6
+    data: [{id: 1, truth: 1}, {id: 2, truth: 0}, {id: 3, truth: 1}, {id: 4, truth: -1}, {id: 5, truth: -1}, {id: 6,
+        truth: -1}]
+- name: Comparison <> with adjacent tokens preserves all truth outcomes
+  sql: 'SET ANSI_NULLS ON;
+
+    SELECT id,CASE WHEN lhs <> rhs THEN 1 WHEN NOT(lhs <> rhs) THEN 0 ELSE -1 END AS truth
+
+    FROM (VALUES(1,2,1),(2,2,2),(3,2,3),(4,NULL,2),(5,2,NULL),(6,NULL,NULL)) AS v(id,lhs,rhs)
+
+    ORDER BY id'
+  expect:
+    rows: 6
+    data: [{id: 1, truth: 1}, {id: 2, truth: 0}, {id: 3, truth: 1}, {id: 4, truth: -1}, {id: 5, truth: -1}, {id: 6,
+        truth: -1}]
+- name: Comparison <> with space tokens preserves all truth outcomes
+  sql: 'SET ANSI_NULLS ON;
+
+    SELECT id,CASE WHEN lhs < > rhs THEN 1 WHEN NOT(lhs < > rhs) THEN 0 ELSE -1 END AS truth
+
+    FROM (VALUES(1,2,1),(2,2,2),(3,2,3),(4,NULL,2),(5,2,NULL),(6,NULL,NULL)) AS v(id,lhs,rhs)
+
+    ORDER BY id'
+  expect:
+    rows: 6
+    data: [{id: 1, truth: 1}, {id: 2, truth: 0}, {id: 3, truth: 1}, {id: 4, truth: -1}, {id: 5, truth: -1}, {id: 6,
+        truth: -1}]
+- name: Comparison <> with comment tokens preserves all truth outcomes
+  sql: 'SET ANSI_NULLS ON;
+
+    SELECT id,CASE WHEN lhs < /* operator trivia */ > rhs THEN 1 WHEN NOT(lhs < /* operator trivia */ > rhs) THEN
+    0 ELSE -1 END AS truth
+
+    FROM (VALUES(1,2,1),(2,2,2),(3,2,3),(4,NULL,2),(5,2,NULL),(6,NULL,NULL)) AS v(id,lhs,rhs)
+
+    ORDER BY id'
+  expect:
+    rows: 6
+    data: [{id: 1, truth: 1}, {id: 2, truth: 0}, {id: 3, truth: 1}, {id: 4, truth: -1}, {id: 5, truth: -1}, {id: 6,
+        truth: -1}]
+- name: Comparison <> with newline tokens preserves all truth outcomes
+  sql: 'SET ANSI_NULLS ON;
+
+    SELECT id,CASE WHEN lhs <
+
+    > rhs THEN 1 WHEN NOT(lhs <
+
+    > rhs) THEN 0 ELSE -1 END AS truth
+
+    FROM (VALUES(1,2,1),(2,2,2),(3,2,3),(4,NULL,2),(5,2,NULL),(6,NULL,NULL)) AS v(id,lhs,rhs)
+
+    ORDER BY id'
+  expect:
+    rows: 6
+    data: [{id: 1, truth: 1}, {id: 2, truth: 0}, {id: 3, truth: 1}, {id: 4, truth: -1}, {id: 5, truth: -1}, {id: 6,
+        truth: -1}]
+- name: Comparison !> with adjacent tokens preserves all truth outcomes
+  sql: 'SET ANSI_NULLS ON;
+
+    SELECT id,CASE WHEN lhs !> rhs THEN 1 WHEN NOT(lhs !> rhs) THEN 0 ELSE -1 END AS truth
+
+    FROM (VALUES(1,2,1),(2,2,2),(3,2,3),(4,NULL,2),(5,2,NULL),(6,NULL,NULL)) AS v(id,lhs,rhs)
+
+    ORDER BY id'
+  expect:
+    rows: 6
+    data: [{id: 1, truth: 0}, {id: 2, truth: 1}, {id: 3, truth: 1}, {id: 4, truth: -1}, {id: 5, truth: -1}, {id: 6,
+        truth: -1}]
+- name: Comparison !> with space tokens preserves all truth outcomes
+  sql: 'SET ANSI_NULLS ON;
+
+    SELECT id,CASE WHEN lhs ! > rhs THEN 1 WHEN NOT(lhs ! > rhs) THEN 0 ELSE -1 END AS truth
+
+    FROM (VALUES(1,2,1),(2,2,2),(3,2,3),(4,NULL,2),(5,2,NULL),(6,NULL,NULL)) AS v(id,lhs,rhs)
+
+    ORDER BY id'
+  expect:
+    rows: 6
+    data: [{id: 1, truth: 0}, {id: 2, truth: 1}, {id: 3, truth: 1}, {id: 4, truth: -1}, {id: 5, truth: -1}, {id: 6,
+        truth: -1}]
+- name: Comparison !> with comment tokens preserves all truth outcomes
+  sql: 'SET ANSI_NULLS ON;
+
+    SELECT id,CASE WHEN lhs ! /* operator trivia */ > rhs THEN 1 WHEN NOT(lhs ! /* operator trivia */ > rhs) THEN
+    0 ELSE -1 END AS truth
+
+    FROM (VALUES(1,2,1),(2,2,2),(3,2,3),(4,NULL,2),(5,2,NULL),(6,NULL,NULL)) AS v(id,lhs,rhs)
+
+    ORDER BY id'
+  expect:
+    rows: 6
+    data: [{id: 1, truth: 0}, {id: 2, truth: 1}, {id: 3, truth: 1}, {id: 4, truth: -1}, {id: 5, truth: -1}, {id: 6,
+        truth: -1}]
+- name: Comparison !> with newline tokens preserves all truth outcomes
+  sql: 'SET ANSI_NULLS ON;
+
+    SELECT id,CASE WHEN lhs !
+
+    > rhs THEN 1 WHEN NOT(lhs !
+
+    > rhs) THEN 0 ELSE -1 END AS truth
+
+    FROM (VALUES(1,2,1),(2,2,2),(3,2,3),(4,NULL,2),(5,2,NULL),(6,NULL,NULL)) AS v(id,lhs,rhs)
+
+    ORDER BY id'
+  expect:
+    rows: 6
+    data: [{id: 1, truth: 0}, {id: 2, truth: 1}, {id: 3, truth: 1}, {id: 4, truth: -1}, {id: 5, truth: -1}, {id: 6,
+        truth: -1}]
+- name: Comparison !< with adjacent tokens preserves all truth outcomes
+  sql: 'SET ANSI_NULLS ON;
+
+    SELECT id,CASE WHEN lhs !< rhs THEN 1 WHEN NOT(lhs !< rhs) THEN 0 ELSE -1 END AS truth
+
+    FROM (VALUES(1,2,1),(2,2,2),(3,2,3),(4,NULL,2),(5,2,NULL),(6,NULL,NULL)) AS v(id,lhs,rhs)
+
+    ORDER BY id'
+  expect:
+    rows: 6
+    data: [{id: 1, truth: 1}, {id: 2, truth: 1}, {id: 3, truth: 0}, {id: 4, truth: -1}, {id: 5, truth: -1}, {id: 6,
+        truth: -1}]
+- name: Comparison !< with space tokens preserves all truth outcomes
+  sql: 'SET ANSI_NULLS ON;
+
+    SELECT id,CASE WHEN lhs ! < rhs THEN 1 WHEN NOT(lhs ! < rhs) THEN 0 ELSE -1 END AS truth
+
+    FROM (VALUES(1,2,1),(2,2,2),(3,2,3),(4,NULL,2),(5,2,NULL),(6,NULL,NULL)) AS v(id,lhs,rhs)
+
+    ORDER BY id'
+  expect:
+    rows: 6
+    data: [{id: 1, truth: 1}, {id: 2, truth: 1}, {id: 3, truth: 0}, {id: 4, truth: -1}, {id: 5, truth: -1}, {id: 6,
+        truth: -1}]
+- name: Comparison !< with comment tokens preserves all truth outcomes
+  sql: 'SET ANSI_NULLS ON;
+
+    SELECT id,CASE WHEN lhs ! /* operator trivia */ < rhs THEN 1 WHEN NOT(lhs ! /* operator trivia */ < rhs) THEN
+    0 ELSE -1 END AS truth
+
+    FROM (VALUES(1,2,1),(2,2,2),(3,2,3),(4,NULL,2),(5,2,NULL),(6,NULL,NULL)) AS v(id,lhs,rhs)
+
+    ORDER BY id'
+  expect:
+    rows: 6
+    data: [{id: 1, truth: 1}, {id: 2, truth: 1}, {id: 3, truth: 0}, {id: 4, truth: -1}, {id: 5, truth: -1}, {id: 6,
+        truth: -1}]
+- name: Comparison !< with newline tokens preserves all truth outcomes
+  sql: 'SET ANSI_NULLS ON;
+
+    SELECT id,CASE WHEN lhs !
+
+    < rhs THEN 1 WHEN NOT(lhs !
+
+    < rhs) THEN 0 ELSE -1 END AS truth
+
+    FROM (VALUES(1,2,1),(2,2,2),(3,2,3),(4,NULL,2),(5,2,NULL),(6,NULL,NULL)) AS v(id,lhs,rhs)
+
+    ORDER BY id'
+  expect:
+    rows: 6
+    data: [{id: 1, truth: 1}, {id: 2, truth: 1}, {id: 3, truth: 0}, {id: 4, truth: -1}, {id: 5, truth: -1}, {id: 6,
+        truth: -1}]
+- name: A line comment can separate comparison operator characters
+  sql: "SELECT CASE WHEN 2 > -- comparison\n = 1 THEN 1 ELSE 0 END AS truth"
+  expect:
+    rows: 1
+    data: [{truth: 1}]
+- name: Split comparisons retain arithmetic precedence in nested CASE
+  sql: SELECT CASE WHEN ISNULL(12,0) > = ISNULL(3,0)+5 THEN 5 ELSE CASE WHEN ISNULL(12,0)-ISNULL(3,0) > 0 THEN 9
+    ELSE 0 END END AS amount
+  expect:
+    rows: 1
+    data: [{amount: 5}]
+- name: Split comparisons choose the actual nested CASE fallback
+  sql: SELECT CASE WHEN ISNULL(6,0) > = ISNULL(3,0)+5 THEN 5 ELSE CASE WHEN ISNULL(6,0)-ISNULL(3,0) > 0 THEN 3 ELSE
+    0 END END AS amount
+  expect:
+    rows: 1
+    data: [{amount: 3}]
+- name: WHERE uses the split operator without changing filter semantics
+  sql: SELECT id FROM (VALUES(1,2),(2,5),(3,NULL)) AS v(id,n) WHERE n > = 3
+  expect:
+    rows: 1
+    data: [{id: 2}]
+- name: JOIN uses split not-greater with ordinary NULL extension
+  sql: SELECT l.id,r.id AS matched FROM (VALUES(1,2),(2,5),(3,NULL)) AS l(id,n) LEFT JOIN (VALUES(7,3)) AS r(id,n)
+    ON l.n ! > r.n ORDER BY l.id
+  expect:
+    rows: 3
+    data: [{id: 1, matched: 7}, {id: 2, matched: null}, {id: 3, matched: null}]
+- name: IF predicates use the same split comparison grammar
+  sql: IF 3 < = 3 SELECT 7 AS chosen ELSE SELECT 9 AS chosen
+  expect:
+    rows: 1
+    data: [{chosen: 7}]
+- name: ANSI OFF does not turn not-greater NULL into equality
+  sql: SET ANSI_NULLS OFF; SELECT CASE WHEN NULL ! > NULL THEN 1 WHEN NOT(NULL ! > NULL) THEN 0 ELSE -1 END AS truth
+  expect:
+    rows: 1
+    data: [{truth: -1}]
+- name: ANSI OFF does not turn not-less NULL into equality
+  sql: SET ANSI_NULLS OFF; SELECT CASE WHEN NULL ! < NULL THEN 1 WHEN NOT(NULL ! < NULL) THEN 0 ELSE -1 END AS truth
+  expect:
+    rows: 1
+    data: [{truth: -1}]
+- name: Malformed comparison => remains invalid SQL
+  sql: SELECT CASE WHEN 2 => 1 THEN 1 ELSE 0 END AS truth
+  expect:
+    error: true
+- name: Malformed comparison =< remains invalid SQL
+  sql: SELECT CASE WHEN 2 =< 1 THEN 1 ELSE 0 END AS truth
+  expect:
+    error: true
+- name: Malformed comparison >< remains invalid SQL
+  sql: SELECT CASE WHEN 2 >< 1 THEN 1 ELSE 0 END AS truth
+  expect:
+    error: true
+- name: Malformed comparison == remains invalid SQL
+  sql: SELECT CASE WHEN 2 == 1 THEN 1 ELSE 0 END AS truth
+  expect:
+    error: true
+- name: Malformed comparison ! remains invalid SQL
+  sql: SELECT CASE WHEN 2 ! 1 THEN 1 ELSE 0 END AS truth
+  expect:
+    error: true
+- name: Malformed comparison > = = remains invalid SQL
+  sql: SELECT CASE WHEN 2 > = = 1 THEN 1 ELSE 0 END AS truth
+  expect:
+    error: true
+- name: Operator spellings inside a string remain unchanged
+  sql: SELECT N'greater > = less < = different ! = ' AS spelling
+  expect:
+    rows: 1
+    data: [{spelling: 'greater > = less < = different ! = '}]
+- name: A stored module retains split comparisons in temporary SELECT INTO
+  setup:
+  - sql: DROP PROCEDURE IF EXISTS ansi_mode_split
+  sql: "CREATE PROCEDURE ansi_mode_split AS\nCREATE TABLE #amounts(id INT,rest INT,previous INT,amount INT);\nINSERT\
+    \ #amounts VALUES(1,12,3,5),(2,6,3,5),(3,2,3,5),(4,NULL,3,5);\nSELECT id,CASE WHEN ISNULL(rest,0) > = ISNULL(previous,0)+amount\
+    \ THEN ISNULL(amount,0)\n  ELSE CASE WHEN ISNULL(rest,0)-ISNULL(previous,0) > 0\n    THEN ISNULL(rest,0)-ISNULL(previous,0)\
+    \ ELSE 0 END END AS amount\nINTO #computed FROM #amounts;\nSELECT id,amount FROM #computed ORDER BY id;"
+- name: Stored split comparisons execute all temporary projection branches
+  sql: EXEC ansi_mode_split
+  expect:
+    rows: 4
+    data: [{id: 1, amount: 5}, {id: 2, amount: 3}, {id: 3, amount: 0}, {id: 4, amount: 0}]
