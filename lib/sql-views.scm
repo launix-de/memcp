@@ -134,7 +134,11 @@ its base branch deliberately denotes only the native metadata producer. */
 			"table_type" "VIEW" "engine" nil "table_rows" nil "data_length" nil
 			"table_collation" nil "table_comment" "VIEW")
 		true nil nil nil nil nil nil nil nil))
-	(make_union_block 'all (list native views) nil nil nil nil))))
+	/* Repeated owner composition must preserve the native metadata branch.
+	Its TABLES source deliberately excludes views; expanding it again would
+	duplicate every stored view and re-check internal catalog scan policy. */
+	(make_union_block 'all (list native views) nil nil nil
+		(list (list 'expanded_table_catalog true))))))
 
 (define sql_has_table_catalog_source? (lambda (node) (match node
 	((symbol quote) _data) false
@@ -196,9 +200,10 @@ its base branch deliberately denotes only the native metadata producer. */
 				(expand_node stages stack)
 				(expand_node facts stack))
 			((symbol union-block) mode branches order limit offset facts)
-			(list (quote union-block) mode
-				(map branches (lambda (branch) (expand_node branch stack)))
-				(expand_node order stack) limit offset (expand_node facts stack))
+			(if (qassoc_get facts 'expanded_table_catalog false) node
+				(list (quote union-block) mode
+					(map branches (lambda (branch) (expand_node branch stack)))
+					(expand_node order stack) limit offset (expand_node facts stack)))
 			(cons head tail)
 			(cons (expand_node head stack)
 				(map tail (lambda (item) (expand_node item stack))))

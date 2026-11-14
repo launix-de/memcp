@@ -707,7 +707,12 @@ native binding entries retain the real source aliases used by the query. */
 (define tsql_expand_relational_scalar_calls_scoped (lambda (node source_scopes policy planning tx) (match node
 	((symbol quote) _datum) node
 	((symbol tsql_relational_scalar_call) factory arguments)
-	(factory (tsql_relational_bind_arguments arguments source_scopes) (merge source_scopes) policy planning tx)
+	/* A factory introduces new logical sources after the enclosing query's
+	view pass. Expand those sources through the same owner before binding;
+	already expanded metadata catalogs retain their native-branch boundary. */
+	(sql_expand_views
+		(factory (tsql_relational_bind_arguments arguments source_scopes) (merge source_scopes) policy planning tx)
+		policy planning tx)
 	((symbol union-block) mode branches ordering limit offset facts)
 	(begin
 		(define expand (lambda (child)
