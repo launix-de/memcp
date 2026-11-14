@@ -1,0 +1,138 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Legacy compatibility catalogs project native object and column identities without independent rows
+setup:
+- sql: CREATE TABLE compat_items(id INT PRIMARY KEY,label NVARCHAR(20))
+- sql: INSERT INTO compat_items VALUES(1,N'kept')
+test_cases:
+- name: Unqualified compatibility objects project actual user relation identities
+  sql: SELECT name,RTRIM(xtype) AS kind FROM sysobjects WHERE id=OBJECT_ID(N'compat_items')
+  expect:
+    rows: 1
+    data:
+    - name: compat_items
+      kind: U
+- name: Qualified compatibility objects through dbo.
+  sql: SELECT COUNT(*) AS total FROM dbo.sysobjects WHERE id=OBJECT_ID(N'compat_items')
+  expect:
+    rows: 1
+    data:
+    - total: 1
+- name: Qualified compatibility objects through sys.
+  sql: SELECT COUNT(*) AS total FROM sys.sysobjects WHERE id=OBJECT_ID(N'compat_items')
+  expect:
+    rows: 1
+    data:
+    - total: 1
+- name: Qualified compatibility objects through [memcp-tests].[dbo].
+  sql: SELECT COUNT(*) AS total FROM [memcp-tests].[dbo].sysobjects WHERE id=OBJECT_ID(N'compat_items')
+  expect:
+    rows: 1
+    data:
+    - total: 1
+- name: Qualified compatibility objects through [memcp-tests].[sys].
+  sql: SELECT COUNT(*) AS total FROM [memcp-tests].[sys].sysobjects WHERE id=OBJECT_ID(N'compat_items')
+  expect:
+    rows: 1
+    data:
+    - total: 1
+- name: Legacy object and column names join through the same native object identity
+  sql: SELECT c.name,c.colid FROM syscolumns AS c INNER JOIN sysobjects AS o ON c.id=o.id WHERE o.name=N'compat_items'
+    ORDER BY c.colid
+  expect:
+    rows: 2
+    data:
+    - name: id
+      colid: 1
+    - name: label
+      colid: 2
+- name: Qualified legacy columns retain name and ordinal contracts
+  sql: SELECT name,colid FROM sys.syscolumns WHERE id=OBJECT_ID(N'compat_items') ORDER BY colid
+  expect:
+    rows: 2
+    data:
+    - name: id
+      colid: 1
+    - name: label
+      colid: 2
+- name: A lexical CTE shadows an unqualified compatibility name
+  sql: WITH sysobjects AS (SELECT 77 AS id,N'lexical' AS name) SELECT id,name FROM sysobjects
+  expect:
+    rows: 1
+    data:
+    - id: 77
+      name: lexical
+- name: A qualified compatibility view is outside the same named CTE
+  sql: WITH sysobjects AS (SELECT 77 AS id) SELECT COUNT(*) AS total FROM dbo.sysobjects WHERE id=OBJECT_ID(N'compat_items')
+  expect:
+    rows: 1
+    data:
+    - total: 1
+- name: Bare dbo and sys spellings share one compatibility declaration identity
+  sql: SELECT CASE WHEN OBJECT_ID(N'sysobjects')=OBJECT_ID(N'dbo.sysobjects') AND OBJECT_ID(N'dbo.sysobjects')=OBJECT_ID(N'sys.sysobjects')
+    THEN 1 ELSE 0 END AS same_identity
+  expect:
+    rows: 1
+    data:
+    - same_identity: 1
+- name: Legacy views classify as actual system view declarations
+  sql: SELECT OBJECTPROPERTY(OBJECT_ID(N'sys.syscolumns'),N'IsView') AS is_view,OBJECTPROPERTY(OBJECT_ID(N'sys.syscolumns'),N'IsMSShipped')
+    AS shipped
+  expect:
+    rows: 1
+    data:
+    - is_view: 1
+      shipped: 1
+- name: Legacy catalog predicate combines OBJECTPROPERTY with LIKE
+  sql: SELECT name FROM sysobjects WHERE OBJECTPROPERTY(id,N'IsUserTable')=1 AND name LIKE 'compat_%' ORDER BY name
+  expect:
+    rows: 1
+    data:
+    - name: compat_items
+- name: Legacy virtual column reflection describes the fields actually represented
+  sql: SELECT name FROM sys.all_columns WHERE object_id=OBJECT_ID(N'sys.syscolumns') ORDER BY column_id
+  expect:
+    rows: 3
+    data:
+    - name: name
+    - name: id
+    - name: colid
+- name: Create cannot mutate a system compatibility relation
+  sql: CREATE TABLE sysobjects(id INT)
+  expect:
+    error: true
+- name: Update cannot mutate a system compatibility relation
+  sql: UPDATE dbo.sysobjects SET name=N'changed'
+  expect:
+    error: true
+- name: Delete cannot mutate a system compatibility relation
+  sql: DELETE FROM syscolumns
+  expect:
+    error: true
+- name: Drop cannot mutate a system compatibility relation
+  sql: DROP TABLE dbo.sysobjects
+  expect:
+    error: true
+- name: Rejected compatibility writes preserve ordinary user data
+  sql: SELECT id,label FROM compat_items
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      label: kept
+- name: Empty compatibility results retain their SQL Server column types
+  tds:
+    statements:
+    - sql: SELECT name,id,colid FROM sys.syscolumns WHERE 1=0
+      expect:
+        data: []
+        column_types:
+        - {name: name, type: NVARCHAR}
+        - {name: id, type: INT}
+        - {name: colid, type: SMALLINT}
+cleanup:
+- sql: DROP TABLE compat_items

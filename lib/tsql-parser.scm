@@ -247,6 +247,7 @@ Only consumed name bindings enter the shared plan guards, never catalog epochs. 
 (define tsql_relation_name (lambda (database name tx)
 	(coalesceNil (show (tsql_native_relation_handle database name tx) "name") (tsql_view_name database name) name)))
 (define tsql_table_name (lambda (database name planning_session tx) (begin
+	(if (tsql_legacy_catalog_name? name) (error "system compatibility relations are read only") true)
 	(define resolved (tsql_resolve_relation database name planning_session tx))
 	(define database (car resolved))
 	(define name (cadr resolved))
@@ -256,6 +257,7 @@ Only consumed name bindings enter the shared plan guards, never catalog epochs. 
 		planning_session)
 	(coalesceNil canonical name))))
 (define tsql_create_relation (lambda (database name columns options ifnotexists tx session) (begin
+	(if (tsql_legacy_catalog_name? name) (error "system compatibility relations are read only") true)
 	(tsql_validate_row_guid_definitions columns)
 	(if (tsql_scalar_function_reserved? database name tx) (error "a scalar function already owns this object name: " name) true)
 	(if (tsql_view_name database name) (error "a view already owns this relation name: " name) true)
@@ -4672,7 +4674,9 @@ that context explicitly; stored views refuse this scalar before publication. */
 		/* The physical metadata namespace is not the requested database's
 		authority. The global databases view retains its per-row access domain. */
 		(if (and policy (not (equal?? name "databases"))) (policy owner name false) true)
-		(define query (if (has? '("columns" "all_columns") (toLower name))
+		(define query (if (tsql_legacy_catalog_name? name)
+			(tsql_legacy_catalog_query owner name planning_session tx)
+			(has? '("columns" "all_columns") (toLower name))
 			(tsql_catalog_columns_query owner (equal?? name "all_columns"))
 			(has? '("database_permissions" "database_principals" "server_principals" "database_role_members") (toLower name))
 			(tsql_security_catalog_query owner (toLower name))
@@ -4960,7 +4964,11 @@ that context explicitly; stored views refuse this scalar before publication. */
 							(and allow_local (find blocked (lambda (entry) (equal?? entry name)) nil))
 							(error "recursive or forward CTE reference is unsupported: " name)
 							(begin
-								(define native (tsql_named_source (tsql_read_source id database name) "dbo" name qualified_visible))
+								/* Compatibility names also exist through dbo and unqualified
+								lookup. A lexical CTE above retains its usual precedence. */
+								(define native (tsql_named_source
+									(if (tsql_legacy_catalog_name? name) (tsql_catalog_source id database name)
+										(tsql_read_source id database name)) "dbo" name qualified_visible))
 								(list id (source_schema native) (source_relation native) outer nil (source_declarations native)))))
 					((symbol tsql_pending_apply) inner)
 					(tsql_apply_source (tsql_finalize_sources (list id database inner outer nil nil)

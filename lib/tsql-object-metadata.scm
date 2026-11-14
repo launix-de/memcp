@@ -57,7 +57,10 @@ catalog reflection. Import this classifier before closing metadata helpers. */
 (define tsql_catalog_module_definition (lambda (database name tx)
 	(find (showprocedures database (toLower name) tx) (lambda (_definition) true) nil)))
 
-(define tsql_virtual_catalog_names '("databases" "objects" "columns" "all_columns"
+(define tsql_legacy_catalog_names '("sysobjects" "syscolumns"))
+(define tsql_legacy_catalog_name? (close_procedure ((lambda (names)
+	(lambda (name) (has? names (toLower name)))) tsql_legacy_catalog_names)))
+(define tsql_virtual_catalog_names '("databases" "objects" "columns" "all_columns" "sysobjects" "syscolumns"
 	"database_permissions" "database_principals" "server_principals" "database_role_members"))
 (define tsql_native_object_id (close_procedure ((lambda (visible relation registry)
 	(lambda (database name actor tx)
@@ -141,7 +144,7 @@ identifier boundaries using plain strings, including doubled quote escapes. */
 			(if (or (equal? (car names) "") (equal? (nth names 2) "")) (error "invalid object address")
 				(list (car names) (if (equal? (cadr names) "") "dbo" (cadr names)) (nth names 2)))))))
 	sql_private_relation? tsql_regular_identifier?)))
-(define tsql_object_id_value (close_procedure ((lambda (parse_name qualifier visible native_id view_name registry catalogs module_definition module_kind module_id)
+(define tsql_object_id_value (close_procedure ((lambda (parse_name qualifier visible native_id view_name registry catalogs module_definition module_kind module_id legacy_name?)
 	(lambda (context name kind actor tx options)
 		(if (nil? name) nil (begin
 			(define parts (try (lambda () (parse_name name)) (lambda (_invalid_address) nil)))
@@ -167,10 +170,12 @@ identifier boundaries using plain strings, including doubled quote escapes. */
 							(registry database (json_encode (list "view" view)))
 							(and (not (nil? declared_kind)) (or (nil? kind) (equal?? kind declared_kind)))
 							(module_id database (module "name") declared_kind)
+							(and (or (nil? kind) (equal?? kind "V")) (legacy_name? object))
+							(registry database (concat "catalog:sys." (toLower object)))
 							nil)))))))))
 	tsql_object_name_parts tsql_qualifier_database tsql_metadata_visible? tsql_native_object_id
 	tsql_view_name tsql_object_registry_id tsql_virtual_catalog_names tsql_catalog_module_definition
-	tsql_source_module_kind tsql_catalog_module_id)))
+	tsql_source_module_kind tsql_catalog_module_id tsql_legacy_catalog_name?)))
 
 /* SQL conversions and result contracts are selected once by the expression
 compiler. Runtime lookup receives only plain names, authority and native tx. */
@@ -201,8 +206,15 @@ current authenticated incarnation. They are descriptions, never ACL storage. */
 	(list "state" "CHAR" '(1) false) (list "state_desc" "NVARCHAR" '(60) false)))
 (define tsql_role_member_catalog_columns (list
 	(list "role_principal_id" "INT" '() false) (list "member_principal_id" "INT" '() false)))
+(define tsql_legacy_catalog_declarations
+	(list (list "sysobjects" (list
+		(list "name" "NVARCHAR" '(128) false) (list "id" "INT" '() false)
+		(list "xtype" "CHAR" '(2) false) (list "type" "CHAR" '(2) false)
+		(list "uid" "SMALLINT" '() false) (list "parent_obj" "INT" '() false)))
+		(list "syscolumns" (list (list "name" "NVARCHAR" '(128) false)
+			(list "id" "INT" '() false) (list "colid" "SMALLINT" '() false)))))
 (define tsql_virtual_catalog_declarations
-	(list (list "database_permissions" tsql_permission_catalog_columns)
+	(merge (list tsql_legacy_catalog_declarations (list (list "database_permissions" tsql_permission_catalog_columns)
 		(list "database_principals" tsql_principal_catalog_columns)
 		(list "server_principals" tsql_principal_catalog_columns)
 		(list "database_role_members" tsql_role_member_catalog_columns)
@@ -216,7 +228,7 @@ current authenticated incarnation. They are descriptions, never ACL storage. */
 		(list "databases" (list (list "name" "NVARCHAR" '(128) false)
 			(list "database_id" "INT" '() false) (list "is_auto_close_on" "BIT" '() false)
 			(list "is_auto_shrink_on" "BIT" '() false) (list "recovery_model_desc" "NVARCHAR" '(60) false)
-			(list "is_trustworthy_on" "BIT" '() false)))))
+			(list "is_trustworthy_on" "BIT" '() false)))))))
 (define tsql_catalog_columns_query (lambda (database include_system) (begin
 	(define alias "__tsql_native_columns")
 	(define column (lambda (name) (list 'get_column alias false name false)))
@@ -327,6 +339,31 @@ source modules; current time or filesystem metadata would invent a history. */
 	transaction with intrinsic lookups constructed from this same owner. */
 	(make_union_block 'all (list relations foreign sources) nil nil nil
 		(list (list 'tsql_object_catalog database))))))
+
+/* SQL Server 2000 compatibility views rename actual current catalog fields.
+Only represented declarations are exposed; native metadata and DB visibility
+remain the same producers as sys.objects/sys.columns, with no SCM row bags.
+https://learn.microsoft.com/sql/relational-databases/system-compatibility-views/sys-sysobjects-transact-sql
+https://learn.microsoft.com/sql/relational-databases/system-compatibility-views/sys-syscolumns-transact-sql */
+(define tsql_legacy_catalog_query (lambda (database name planning tx) (begin
+	(define objects (equal?? name "sysobjects"))
+	(define alias "__tsql_legacy_catalog")
+	(define column (lambda (name) (list 'get_column alias false name false)))
+	(define fields (if objects
+		(list "name" (column "name") "id" (column "object_id")
+			"xtype" (column "type")
+			"type" (list 'sql_type_expr
+				(list 'if (list 'has? (list 'quote '("PK" "UQ")) (column "type")) "K" (column "type"))
+				(list "CHAR" '(2)) nil)
+			"uid" (tsql_implicit_cast_expr (column "schema_id") "SMALLINT" '())
+			"parent_obj" (column "parent_object_id"))
+		(list "name" (column "name") "id" (column "object_id")
+			"colid" (tsql_implicit_cast_expr (column "column_id") "SMALLINT" '()))))
+	(make_query_block database
+		(list (list alias database
+			(if objects (tsql_catalog_objects_query database planning tx)
+				(tsql_catalog_columns_query database false)) false nil nil))
+		fields true nil nil nil nil nil '() '() '()))))
 
 /* This is an address implication, not a substitute for OBJECT_ID equality.
 Only a dominating positive equality and a literal address can narrow catalog

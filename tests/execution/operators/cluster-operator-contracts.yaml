@@ -225,6 +225,15 @@ cleanup:
 - scm: (dropprocedure "replica_test" "remote_catalog_proc" true)
 - scm: (dropprocedure "replica_test" "remote_default_instant" true)
 test_cases:
+- name: distributed-legacy-catalog-identity-join
+  syntax: tsql
+  sql: |
+    SELECT COUNT(*) AS n FROM dbo.big_items b
+    JOIN syscolumns c ON c.name=N'id'
+    JOIN sysobjects o ON o.id=c.id AND o.name=N'big_items'
+    WHERE OBJECTPROPERTY(o.id,N'IsUserTable')=1 AND b.id>=0
+  expect:
+    data: [{n: 320000}]
 - name: TSQL forward GOTO retains delegated relational control predicates
   syntax: tsql
   sql: |-
