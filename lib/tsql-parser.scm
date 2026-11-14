@@ -4139,6 +4139,11 @@ that context explicitly; stored views refuse this scalar before publication. */
 			(begin
 				(if policy (policy schema "objects" false) true)
 				(tsql_catalog_property_call schema object property)))
+		(parser '((atom "PERMISSIONS" true) "(" (define arguments (* tsql_expression ",")) ")")
+			(begin
+				(if (<= (count arguments) 2) true (error "PERMISSIONS accepts at most two arguments"))
+				(if policy (policy schema "database_permissions" false) true)
+				(tsql_catalog_permissions_call schema arguments)))
 		(parser '((atom "QUOTENAME" true) "(" (define value tsql_expression)
 			(? "," (define delimiter tsql_expression)) ")")
 			(list (quote sql_compile_expr) (quote tsql_compile_quotename) value

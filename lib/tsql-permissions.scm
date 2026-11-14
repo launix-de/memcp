@@ -108,3 +108,20 @@ login name never transforms an already-open connection into the replacement. */
 (define tsql_metadata_visible? (close_procedure ((lambda (permission)
 	(lambda (actor database _declarations)
 		(permission actor database "DATABASE ACCESS"))) tsql_permission?)))
+
+/* PERMISSIONS reports the native database-wide capability model. Its lower
+bits describe held capabilities, independently of per-object SQL ACL syntax.
+SQL GRANT never delegates native membership, so no grant-option bits are set.
+CREATE DATABASE remains native administration and is advertised only in master.
+https://learn.microsoft.com/en-us/sql/t-sql/functions/permissions-transact-sql */
+(define tsql_permissions_statements (close_procedure ((lambda (permission)
+	(lambda (database actor)
+		(if (permission actor database "DATABASE ACCESS")
+			(+ 254 (if (and (equal?? database "master") (permission actor database "NATIVE ADMIN")) 1 0))
+			0))) tsql_permission?)))
+(define tsql_permissions_object (lambda (kind shipped)
+	(if shipped 4097
+		(has? '("U" "V" "TF" "IF" "FT") kind) 28703
+		(has? '("FN" "FS") kind) 36
+		(has? '("P" "PC" "X" "RF") kind) 32
+		0)))

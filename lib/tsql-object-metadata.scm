@@ -600,10 +600,65 @@ current-database catalog; all computed and ordinary inputs retain lookup. */
 				database tsql_catalog_property_query tsql_catalog_property_from_row))
 			(list object property)) "INT" nil)))
 
+/* All forms use the current visible catalog. A column must exist in that
+object's real metadata; an unknown ID/name or a retired identity returns NULL.
+Native membership gives the complete database capability set. System catalog
+views remain read-only declarations, independently of the account's authority.
+SQL Server 2022 reference: https://dbfiddle.uk/ZelE9QQJ */
+(define tsql_permissions_column (close_procedure ((lambda (access)
+	(lambda (id) (begin
+		/* The visible column producer already established current existence and
+		database authority. Its registry ID has one durable namespace record. */
+		(define incarnation (scan_lookup nil (table "system" false "tsql_object_ids" false nil) access (list id)))
+		(if (regexp_test incarnation "^catalog:sys\\.") 1 7))))
+	(list (compiled_scan_access_header 1 "value" 1 -1)
+		(scan_boundary "equal" "id" 0 0 true true "" false) "incarnation"))))
+(define tsql_catalog_permissions_query (lambda (database arguments planning tx) (begin
+	(if (<= (count arguments) 2) true (error "PERMISSIONS accepts at most two arguments"))
+	(define alias (binding_fresh_alias (binding_collect_string_catalog arguments '()) "__tsql_permissions_object"))
+	(define column (lambda (name) (list 'get_column alias false name false)))
+	(if (empty_list? arguments)
+		(list 'inner_select (make_query_block database
+			(list (list alias database (tsql_security_catalog_query database "database_permissions") false nil nil))
+			(list "value" (list 'sql_type_expr
+				(list tsql_permissions_statements database (tsql_actor_formula)) "INT" nil))
+			(list 'equal? (column "permission_name") "CONTROL")
+			nil nil nil nil nil '() '() '()))
+		(equal? (count arguments) 2) (begin
+			/* Column metadata itself owns both object identity and column
+			existence. Joining it back to every object-catalog UNION branch
+			would repeat the same current metadata domain unnecessarily. */
+			(list 'inner_select (make_query_block database
+				(list (list alias database (tsql_catalog_columns_query database true) false nil nil))
+				(list "value" (list 'sql_type_expr (list tsql_permissions_column (column "object_id")) "INT" nil))
+				(list 'and
+					(list 'sql_compile_expr (list 'tsql_comparison_compiler "eq")
+						(column "object_id") (tsql_implicit_cast_expr (car arguments) "INT" '()))
+					(list 'sql_compile_expr (list 'tsql_comparison_compiler "eq")
+						(column "name") (tsql_implicit_cast_expr (cadr arguments) "NVARCHAR" '(128))))
+				nil nil nil nil nil '() '() '())))
+		(begin
+			(define objects (tsql_catalog_lookup_objects_query database planning tx))
+			(define sources (list (list alias database objects false nil nil)))
+			(define condition (list 'sql_compile_expr (list 'tsql_comparison_compiler "eq")
+				(column "object_id") (tsql_implicit_cast_expr (car arguments) "INT" '())))
+			(define expression (list tsql_permissions_object (column "type") (column "is_ms_shipped")))
+			(list 'inner_select (make_query_block database sources
+				(list "value" (list 'sql_type_expr expression "INT" nil))
+				condition nil nil nil nil nil '() '() '())))))))
+(define tsql_catalog_permissions_call (lambda (database arguments)
+	(list 'sql_type_expr
+		(list 'tsql_relational_scalar_call
+			(close_procedure ((lambda (database lookup)
+				(lambda (arguments _outer_sources _policy planning tx)
+					(lookup database arguments planning tx))) database tsql_catalog_permissions_query))
+			arguments) "INT" nil)))
+
 /* Register actual values after their lexical captures have been closed. The
 common final-code publisher owns sharing across every SQL frontend and scalar
 compiler; logical metadata expressions continue to carry real callables. */
 (register_queryplan_callables (list tsql_actor_value tsql_object_id_value
 	tsql_native_object_id tsql_metadata_visible? tsql_object_registry_id
 	tsql_catalog_relation_id tsql_catalog_foreign_id tsql_catalog_module_id
-	tsql_catalog_actor_field tsql_object_property_value))
+	tsql_catalog_actor_field tsql_object_property_value tsql_permissions_statements
+	tsql_permissions_object tsql_permissions_column))
