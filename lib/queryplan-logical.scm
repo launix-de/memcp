@@ -2838,10 +2838,16 @@ keeps a missing row distinct from a matching row whose outer value is NULL. */
 	(and (expr_refs_sources? nil outer_sources expr)
 		(not (expr_refs_sources? nil inner_sources expr)))))
 
-(define scalar_projection_lifted_input (lambda (alias expr)
+(define scalar_projection_lifted_input (lambda (alias local_sources expr)
 	(begin
 		(define inputs (scalar_projection_input_columns alias expr))
+		/* Other local stage outputs belong to the scalar's input scope too.
+		Lifting only the raw column would leave those operands in the caller
+		without their relational producers. Keep that complete value inside. */
+		(define other_sources (filter local_sources (lambda (src)
+			(not (equal? (source_alias src) alias)))))
 		(if (and (single_source? inputs)
+			(not (expr_refs_any_alias? alias (source_aliases other_sources) expr))
 			(scalar_projection_null_propagating? alias expr))
 			(car inputs)
 			nil))))
@@ -4664,7 +4670,7 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 		(define outer_values (map values_for_inner (lambda (value_expr)
 			(scalar_projection_outer_only? local_sources outer_sources value_expr))))
 		(define lifted_inputs (map values_for_inner (lambda (value_for_inner)
-			(scalar_projection_lifted_input inner_default value_for_inner))))
+			(scalar_projection_lifted_input inner_default local_sources value_for_inner))))
 		(define values_for_stage (map (produceN (count values_for_inner)) (lambda (i)
 			(begin
 				(define lifted_input (nth lifted_inputs i))
@@ -6885,6 +6891,80 @@ Only flattenable FROM relations share the latter two with their parent. */
 		((quote get_column) tblvar _ "*" _) (or (nil? tblvar) (equal? tblvar alias))
 		_ false)))
 
+/* A derived projection may introduce free aliases below another lexical
+binder. Rename only those local binders before substitution, so the inserted
+coordinate keeps its original owner. Quoted data and relation declarations
+are not executable scopes; nested rebinding shadows the renamed coordinate. */
+(define derived_projection_reads_alias? (lambda (alias expr)
+	(match expr
+		((symbol quote) _literal) false
+		((symbol query-block) _database sources _fields _condition _grouping _having _ordering _limit _offset _hidden _stages _facts)
+		(and (not (has? (source_aliases sources) alias))
+			(derived_projection_reads_alias? alias (derived_operator_reference_exprs expr)))
+		((symbol group-stage) _id input _domain _keys _aggregates _having _output _ordering _limit _offset _facts)
+		(and (not (has? (source_aliases (if (query_block? input) (qb_sources input) (list input))) alias))
+			(derived_projection_reads_alias? alias (derived_operator_reference_exprs expr)))
+		((symbol get_column) owner _owner_ic _column _column_ic) (equal? owner alias)
+		((quote get_column) owner _owner_ic _column _column_ic) (equal? owner alias)
+		(cons head tail) (or (derived_projection_reads_alias? alias head)
+			(reduce tail (lambda (found child) (or found (derived_projection_reads_alias? alias child))) false))
+		_ false)))
+(define rename_derived_capture_source (lambda (old_alias new_alias source)
+	(source_with_join_expr
+		(source_with_relation source (rename_derived_capture_reference old_alias new_alias (source_relation source)))
+		(rename_derived_capture_reference old_alias new_alias (source_join_expr source)))))
+(define rename_derived_capture_reference (lambda (old_alias new_alias expr) (begin
+	(define rename (lambda (child) (rename_derived_capture_reference old_alias new_alias child)))
+	(match expr
+		((symbol quote) _literal) expr
+		((symbol get_column) owner owner_ic column column_ic)
+		(list 'get_column (if (equal? owner old_alias) new_alias owner) owner_ic column column_ic)
+		((quote get_column) owner owner_ic column column_ic)
+		(rename (list (symbol "get_column") owner owner_ic column column_ic))
+		((symbol membership_truth) probe owner column)
+		(list 'membership_truth (rename probe) (if (equal? owner old_alias) new_alias owner) column)
+		((quote membership_truth) probe owner column)
+		(rename (list (symbol "membership_truth") probe owner column))
+		((symbol query-block) database sources fields condition grouping having ordering limit offset hidden stages facts)
+		(if (has? (source_aliases sources) old_alias) expr
+			(make_query_block database
+				(map sources (lambda (src) (rename_derived_capture_source old_alias new_alias src)))
+				(rename fields) (rename condition) (rename grouping) (rename having)
+				(rename ordering) (rename limit) (rename offset) (rename hidden) (rename stages)
+				(map facts (lambda (fact) (match fact
+					((symbol default_alias) name) (list 'default_alias (if (equal? name old_alias) new_alias name))
+					_ (rename fact))))))
+		((symbol group-stage) _id _input _domain _keys _aggregates _having _output _ordering _limit _offset _facts)
+		(if (has? (source_aliases (if (query_block? (gs_input expr)) (qb_sources (gs_input expr))
+			(list (gs_input expr)))) old_alias) expr
+			(begin
+				(define stage (freeze_group_stage_aggregate_outputs expr))
+				(make_group_stage (gs_id stage)
+					(if (source_alias (gs_input stage))
+						(rename_derived_capture_source old_alias new_alias (gs_input stage)) (rename (gs_input stage)))
+					(rename (gs_domain stage)) (rename (gs_keys stage)) (rename (gs_aggregates stage))
+					(rename (gs_having stage)) (rename (gs_output stage)) (rename (gs_order stage))
+					(rename (gs_limit stage)) (rename (gs_offset stage)) (rename (gs_facts stage)))))
+		(cons head tail) (cons (rename head) (map tail rename))
+		_ expr))))
+(define avoid_derived_projection_capture (lambda (alias projection block)
+	(reduce (filter (qb_sources block) (lambda (src)
+		(derived_projection_reads_alias? (source_alias src) projection)))
+		(lambda (current source) (begin
+			(define old_alias (source_alias source))
+			(define new_alias (binding_fresh_alias
+				(binding_collect_string_catalog (list projection current) '())
+				(concat "__binding:derived:" alias ":" old_alias)))
+			(define renamed (make_query_block (qb_schema current)
+				(map (qb_sources current) (lambda (src)
+					(if (equal? (source_alias src) old_alias)
+						(list new_alias (source_schema src) (source_relation src) (source_outer? src)
+							(source_join_expr src) (source_declarations src)) src)))
+				(qb_fields current) (qb_where current) (qb_group current) (qb_having current)
+				(qb_order current) (qb_limit current) (qb_offset current) (qb_hidden current)
+				(qb_stages current) (qb_facts current)))
+			(rename_derived_capture_reference old_alias new_alias renamed))) block)))
+
 (define rewrite_derived_ref (lambda (alias projection expr)
 	/* Operator barriers keep their own binding namespace. A derived alias in
 	the enclosing block may have the same spelling as a stage's local input;
@@ -6900,6 +6980,9 @@ Only flattenable FROM relations share the latter two with their parent. */
 					_ '()))) alias)
 		_ false)
 		expr
+		(and (query_block? expr) (derived_projection_reads_alias? alias expr)
+			(not (identical? (avoid_derived_projection_capture alias projection expr) expr)))
+		(rewrite_derived_ref alias projection (avoid_derived_projection_capture alias projection expr))
 		(match expr
 			((symbol quote) _literal) expr
 			((symbol query-block) database sources fields condition grouping having ordering limit offset hidden stages facts)
@@ -7766,6 +7849,11 @@ names in projections, predicates, and correlated subqueries. */
 				'() nil nil (qb_hidden outer) (qb_stages outer) (qb_facts outer))
 			(begin
 				(define alias (source_alias source))
+				/* Importing a UNION branch also imports its local binders. Keep
+				correlated coordinates already present in the enclosing consumer
+				free before those scopes are merged. */
+				(define inner (avoid_derived_projection_capture alias
+					(derived_operator_reference_exprs outer) inner))
 				(define projection (qb_fields inner))
 				(make_query_block (qb_schema inner) (qb_sources inner)
 					(rewrite_derived_fields alias projection (qb_fields outer))
