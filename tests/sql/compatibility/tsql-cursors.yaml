@@ -51,15 +51,68 @@ test_cases:
 - name: Conflicting cursor options are rejected before declaration
   sql: DECLARE conflict_cursor CURSOR LOCAL GLOBAL STATIC FOR SELECT id FROM cursor_source
   expect: {error: true, contains: conflicting cursor options}
-- name: Unsupported keyset semantics are not silently replaced with a snapshot
-  sql: DECLARE key_cursor CURSOR LOCAL KEYSET READ_ONLY FOR SELECT id FROM cursor_source
-  expect: {error: true, contains: unsupported cursor option}
-- name: Ordinary default dynamic cursors reject instead of hiding concurrent changes
-  sql: DECLARE dynamic_cursor CURSOR FOR SELECT id FROM cursor_source
-  expect: {error: true, contains: dynamic cursors require an immutable direct transition source}
-- name: Failed dynamic admission publishes no cursor name
-  sql: OPEN dynamic_cursor
+- name: KEYSET keeps its original membership while observing later value updates
+  noncritical: true
+  setup:
+  - sql: CREATE TABLE cursor_keyset_visibility(id INT PRIMARY KEY,value INT)
+  - sql: INSERT cursor_keyset_visibility VALUES(1,10),(2,20),(3,30)
+  cleanup:
+  - sql: DROP TABLE IF EXISTS cursor_keyset_visibility
+  sql: |
+    DECLARE key_cursor CURSOR LOCAL KEYSET READ_ONLY FOR SELECT id,value FROM cursor_keyset_visibility ORDER BY id;
+    DECLARE @first INT,@value INT,@second INT,@second_value INT,@last INT,@last_value INT;
+    OPEN key_cursor; FETCH NEXT FROM key_cursor INTO @first,@value;
+    UPDATE cursor_keyset_visibility SET value=200 WHERE id=2;
+    INSERT cursor_keyset_visibility VALUES(4,40);
+    FETCH NEXT FROM key_cursor INTO @second,@second_value;
+    FETCH NEXT FROM key_cursor INTO @last,@last_value;
+    FETCH NEXT FROM key_cursor INTO @last,@last_value;
+    DECLARE @ended INT=@@FETCH_STATUS;
+    CLOSE key_cursor; DEALLOCATE key_cursor;
+    SELECT @first AS first_id,@second AS second_id,@second_value AS second_value,
+      @last AS last_id,@last_value AS last_value,@ended AS end_status;
+  expect: {rows: 1, data: [{first_id: 1, second_id: 2, second_value: 200, last_id: 3, last_value: 30, end_status: -1}]}
+- name: Default dynamic cursors observe updates deletes and inserts after OPEN
+  noncritical: true
+  setup:
+  - sql: CREATE TABLE cursor_dynamic_visibility(id INT PRIMARY KEY,value INT)
+  - sql: INSERT cursor_dynamic_visibility VALUES(1,10),(2,20),(3,30)
+  cleanup:
+  - sql: DROP TABLE IF EXISTS cursor_dynamic_visibility
+  sql: |
+    DECLARE dynamic_cursor CURSOR LOCAL FOR SELECT id,value FROM cursor_dynamic_visibility ORDER BY id;
+    DECLARE @first INT,@first_value INT,@second INT,@second_value INT,@last INT,@last_value INT;
+    OPEN dynamic_cursor; FETCH NEXT FROM dynamic_cursor INTO @first,@first_value;
+    UPDATE cursor_dynamic_visibility SET value=200 WHERE id=2;
+    DELETE FROM cursor_dynamic_visibility WHERE id=3;
+    INSERT cursor_dynamic_visibility VALUES(4,40);
+    FETCH NEXT FROM dynamic_cursor INTO @second,@second_value;
+    FETCH NEXT FROM dynamic_cursor INTO @last,@last_value;
+    FETCH NEXT FROM dynamic_cursor INTO @last,@last_value;
+    DECLARE @ended INT=@@FETCH_STATUS;
+    CLOSE dynamic_cursor; DEALLOCATE dynamic_cursor;
+    SELECT @first AS first_id,@first_value AS first_value,@second AS second_id,@second_value AS second_value,
+      @last AS last_id,@last_value AS last_value,@ended AS end_status;
+  expect: {rows: 1, data: [{first_id: 1, first_value: 10, second_id: 2, second_value: 200, last_id: 4, last_value: 40, end_status: -1}]}
+- name: A conflicting declaration publishes no cursor name
+  sql: OPEN conflict_cursor
   expect: {error: true, contains: cursor does not exist}
+- name: A failed OPEN remains closed and can be retried before complete deallocation
+  setup:
+  - sql: CREATE TABLE cursor_open_failure(id INT PRIMARY KEY,value NVARCHAR(10))
+  - sql: INSERT cursor_open_failure VALUES(1,N'invalid')
+  cleanup:
+  - sql: DROP TABLE IF EXISTS cursor_open_failure
+  sql: |
+    DECLARE failed_open_cursor CURSOR LOCAL STATIC READ_ONLY FOR SELECT CAST(value AS INT) AS value FROM cursor_open_failure ORDER BY id;
+    DECLARE @value INT;
+    BEGIN TRY OPEN failed_open_cursor; END TRY BEGIN CATCH SET @value=-1; END CATCH;
+    DECLARE @failed_status INT=CURSOR_STATUS('local','failed_open_cursor');
+    UPDATE cursor_open_failure SET value=N'7' WHERE id=1;
+    OPEN failed_open_cursor; FETCH NEXT FROM failed_open_cursor INTO @value;
+    CLOSE failed_open_cursor; DEALLOCATE failed_open_cursor;
+    SELECT @failed_status AS failed_status,@value AS value,CURSOR_STATUS('local','failed_open_cursor') AS retired_status;
+  expect: {rows: 1, data: [{failed_status: -1, value: 7, retired_status: -3}]}
 - name: Empty STATIC fetch leaves every initialized variable unchanged
   sql: |
     DECLARE empty_cursor CURSOR LOCAL STATIC READ_ONLY FOR SELECT id,text_value FROM cursor_source WHERE id>99;
