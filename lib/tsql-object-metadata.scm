@@ -36,11 +36,13 @@ lossless namespaces in this same registry, never hash-derived integer IDs. */
 		(scan_boundary "equal" "incarnation" 1 1 true true "" false) "id"))))
 /* SQL source kinds are frontend declaration facts shared by execution and
 catalog reflection. Import this classifier before closing metadata helpers. */
-(define tsql_source_module_kind (lambda (language)
-	(if (tsql_source_language_profile "tsql-procedure" language) "P"
-		(tsql_source_language_profile "tsql-table-function" language) "TF"
-		(or (tsql_source_language_profile "tsql-scalar-function" language)
-			(tsql_source_language_profile "tsql-relational-scalar-function" language)) "FN" nil)))
+(define tsql_source_module_kind (close_procedure ((lambda (profile)
+	(lambda (language)
+		(if (profile "tsql-procedure" language) "P"
+			(profile "tsql-table-function" language) "TF"
+			(or (profile "tsql-scalar-function" language)
+				(profile "tsql-relational-scalar-function" language)) "FN" nil)))
+	tsql_source_language_profile)))
 (define tsql_source_catalog_entries (close_procedure ((lambda (classify internal_name)
 	(lambda (database tx)
 		(map (filter (showprocedures database "" tx) (lambda (definition)
@@ -320,7 +322,11 @@ source modules; current time or filesystem metadata would invent a history. */
 			"modify_date" (list 'sql_type_expr nil "DATETIME" nil))
 		(list tsql_metadata_visible? actor database false)
 		nil nil nil nil nil '() '() '()))
-	(make_union_block 'all (list relations foreign sources) nil nil nil '()))))
+	/* This contract names the authoritative row producer, not column names
+	from arbitrary SQL inputs. Its fields share the statement's native metadata
+	transaction with intrinsic lookups constructed from this same owner. */
+	(make_union_block 'all (list relations foreign sources) nil nil nil
+		(list (list 'tsql_object_catalog database))))))
 
 /* This is an address implication, not a substitute for OBJECT_ID equality.
 Only a dominating positive equality and a literal address can narrow catalog
@@ -450,14 +456,17 @@ relational SQL results are collected in Scheme or frozen into declarations. */
 /* sys.objects describes user objects. OBJECT_ID also recognizes these
 immutable virtual catalog declarations, so name lookup includes their current
 declared identities without changing the public user-object relation. */
-(define tsql_catalog_object_names_query (lambda (database planning tx) (begin
+(define tsql_catalog_lookup_objects_query (lambda (database planning tx) (begin
 	(define alias "__tsql_object_name_source")
 	(define user_objects (make_query_block database
 		(list (list alias database (tsql_catalog_objects_query database planning tx) false nil nil))
 		(list "name" (list 'get_column alias false "name" false)
-			"object_id" (list 'get_column alias false "object_id" false))
+			"object_id" (list 'get_column alias false "object_id" false)
+			"type" (list 'get_column alias false "type" false)
+			"is_ms_shipped" (list 'get_column alias false "is_ms_shipped" false))
 		true nil nil nil nil nil '() '() '()))
-	(define columns (list (list "name" "NVARCHAR" '(128) false) (list "object_id" "INT" '() false)))
+	(define columns (list (list "name" "NVARCHAR" '(128) false) (list "object_id" "INT" '() false)
+		(list "type" "CHAR" '(2) false) (list "is_ms_shipped" "BIT" '() false)))
 	/* The catalog directory is one finite native row domain, as in
 	all_columns. Its authority and identity projection belongs to that domain,
 	not a duplicated closed procedure in every constant UNION branch. */
@@ -467,7 +476,7 @@ declared identities without changing the public user-object relation. */
 		(list (list virtual_alias database (list 'literal-rows '("name")
 			(map tsql_virtual_catalog_names (lambda (name) (list "name" name)))) false nil nil))
 		(tsql_catalog_typed_fields columns
-			(list name (list tsql_object_registry_id database (list 'concat "catalog:sys." name))))
+			(list name (list tsql_object_registry_id database (list 'concat "catalog:sys." name)) "V" true))
 		(list tsql_metadata_visible? (tsql_actor_formula) database false)
 		nil nil nil nil nil '() '() (list (list 'fresh_invocation true))))
 	(make_union_block 'all (list user_objects virtuals) nil nil nil '()))))
@@ -483,7 +492,7 @@ scalar-query cardinality error. Restrict this owner to these constructions. */
 	(define principal (equal? kind "principal"))
 	(if (or principal (equal? kind "object")) true (error "unsupported catalog name intrinsic"))
 	(define query (if principal (tsql_security_catalog_query database "database_principals")
-		(tsql_catalog_object_names_query database planning tx)))
+		(tsql_catalog_lookup_objects_query database planning tx)))
 	(define key (if principal "principal_id" "object_id"))
 	(define alias (binding_fresh_alias (binding_collect_string_catalog value '()) "__tsql_name_lookup"))
 	(list 'inner_select (make_query_block database
@@ -507,3 +516,94 @@ CASE/UNION type resolution and independently of the delayed catalog query. */
 				database kind tsql_catalog_name_query))
 			(list value))
 		(list "NVARCHAR" '(128)) '("utf8mb4_general_ci" 4))))
+
+/* OBJECTPROPERTY classification reads exactly the current catalog object kind,
+including native identity, source declarations and the finite sys-view directory.
+Neither a stale registry ID nor database access alone establishes existence.
+https://learn.microsoft.com/en-us/sql/t-sql/functions/objectproperty-transact-sql
+SQL Server 2022 reference: https://dbfiddle.uk/inz585N_ */
+(define tsql_object_property_classifications
+	(list "ischeckcnst" '("C") "isconstraint" '("C" "D" "F" "PK" "UQ")
+		"isdefaultcnst" '("D") "isextendedproc" '("X")
+		"isforeignkey" '("F") "isinlinefunction" '("IF") "isprimarykey" '("PK")
+		"isprocedure" '("P" "PC" "X" "RF") "isqueue" '("SQ") "isreplproc" '("RF")
+		"isrule" '("R") "isscalarfunction" '("FN" "FS") "issystemtable" '("S")
+		"istable" '("U" "S" "IT") "istablefunction" '("IF" "TF" "FT")
+		"istrigger" '("TR" "TA") "isuniquecnst" '("UQ") "isusertable" '("U")
+		"isview" '("V") "isexecuted" '("V" "P" "PC" "X" "RF" "FN" "FS" "IF" "TF" "FT" "TR" "TA")))
+(define tsql_object_property_pending '("cnstisclustkey" "cnstiscolumn" "cnstisdeletecascade"
+	"cnstisdisabled" "cnstisnonclustkey" "cnstisnotrepl" "cnstisnottrusted" "cnstisupdatecascade"
+	"execisaftertrigger" "execisansinullson" "execisdeletetrigger" "execisfirstdeletetrigger"
+	"execisfirstinserttrigger" "execisfirstupdatetrigger" "execisinserttrigger" "execisinsteadoftrigger"
+	"execislastdeletetrigger" "execislastinserttrigger" "execislastupdatetrigger" "execisquotedidenton"
+	"execisstartup" "execistriggerdisabled" "execistriggernotforrepl" "execisupdatetrigger" "execiswithnativecompilation"
+	"hasaftertrigger" "hasdeletetrigger" "hasinserttrigger" "hasinsteadoftrigger" "hasupdatetrigger"
+	"isansinullson" "isdefault" "isdeterministic" "isencrypted" "isindexed" "isindexable" "isquotedidenton"
+	"isschemabound" "issystemverified" "ownerid" "schemaid" "tabledeletetrigger" "tabledeletetriggercount"
+	"tablefulltextmergestatus" "tablefulltextbackgroundupdateindexon" "tablefulltextcatalogid"
+	"tablefulltextchangetrackingon" "tablefulltextdocsprocessed" "tablefulltextfailcount" "tablefulltextitemcount"
+	"tablefulltextkeycolumn" "tablefulltextpendingchanges" "tablefulltextpopulatestatus" "tablehasactivefulltextindex"
+	"tablehascheckcnst" "tablehasclustindex" "tablehasdefaultcnst" "tablehasdeletetrigger" "tablehasforeignkey"
+	"tablehasforeignref" "tablehasidentity" "tablehasindex" "tablehasinserttrigger" "tablehasnonclustindex"
+	"tablehasprimarykey" "tablehasrowguidcol" "tablehastextimage" "tablehastimestamp" "tablehasuniquecnst"
+	"tablehasupdatetrigger" "tablehasvardecimalstorageformat" "tableinserttrigger" "tableinserttriggercount"
+	"tableisfake" "tableislockedonbulkload" "tableismemoryoptimized" "tableispinned" "tabletextinrowlimit"
+	"tableupdatetrigger" "tableupdatetriggercount" "tablehascolumnset" "tabletemporaltype"))
+(define tsql_object_property_value (close_procedure ((lambda (classifications pending)
+	(lambda (kind shipped property)
+		(if (nil? property) nil (begin
+			(define property (toLower (regexp_replace property " +$" "")))
+			(define kinds (classifications property))
+			(if kinds (if (has? kinds kind) 1 0)
+				(equal? property "ismsshipped") (if shipped 1 0)
+				(has? pending property) (error "OBJECTPROPERTY metadata is not implemented for " property)
+				nil))))) tsql_object_property_classifications tsql_object_property_pending)))
+(define tsql_catalog_property_query (lambda (database object property planning tx) (begin
+	(define query (tsql_catalog_lookup_objects_query database planning tx))
+	(define alias (binding_fresh_alias (binding_collect_string_catalog (list object property) '()) "__tsql_property_lookup"))
+	(define column (lambda (name) (list 'get_column alias false name false)))
+	(list 'inner_select (make_query_block database
+		(list (list alias database query false nil nil))
+		(list "value" (list 'sql_type_expr (list tsql_object_property_value
+			(column "type") (column "is_ms_shipped") (tsql_implicit_cast_expr property "NVARCHAR" '(128))) "INT" nil))
+		(list 'sql_compile_expr (list 'tsql_comparison_compiler "eq")
+			(column "object_id") (tsql_implicit_cast_expr object "INT" '()))
+		nil nil nil nil nil '() '() '())))))
+/* The producer's stable object identity functionally determines these
+classification fields. Reuse only a direct bound object_id from that exact
+current-database catalog; all computed and ordinary inputs retain lookup. */
+(define tsql_catalog_property_from_row (lambda (database object property sources)
+	(match (tsql_catalog_unwrap object)
+		((symbol get_column) owner _owner_ic "object_id" _column_ic) (begin
+			(define source (find sources (lambda (src) (equal? (source_alias src) owner)) nil))
+			(define relation (if (nil? source) nil (source_relation source)))
+			(define contract (if (union_block? relation)
+				(qassoc_get (union_facts relation) 'tsql_object_catalog nil) nil))
+			(if (equal? contract database)
+				(list 'sql_type_expr (list 'if
+					(list 'and (list 'not (list 'nil? object))
+						(list tsql_metadata_visible? (tsql_actor_formula) database false))
+					(list tsql_object_property_value
+						(list 'get_column owner false "type" false)
+						(list 'get_column owner false "is_ms_shipped" false)
+						(tsql_implicit_cast_expr property "NVARCHAR" '(128))) nil) "INT" nil) nil))
+		((quote get_column) owner owner_ic "object_id" column_ic)
+		(tsql_catalog_property_from_row database (list (symbol "get_column") owner owner_ic "object_id" column_ic) property sources)
+		_ nil)))
+(define tsql_catalog_property_call (lambda (database object property)
+	(list 'sql_type_expr
+		(list 'tsql_relational_scalar_call
+			(close_procedure ((lambda (database lookup from_row)
+				(lambda (arguments outer_sources _policy planning tx) (begin
+					(define direct (from_row database (car arguments) (cadr arguments) outer_sources))
+					(if (nil? direct) (lookup database (car arguments) (cadr arguments) planning tx) direct))))
+				database tsql_catalog_property_query tsql_catalog_property_from_row))
+			(list object property)) "INT" nil)))
+
+/* Register actual values after their lexical captures have been closed. The
+common final-code publisher owns sharing across every SQL frontend and scalar
+compiler; logical metadata expressions continue to carry real callables. */
+(register_queryplan_callables (list tsql_actor_value tsql_object_id_value
+	tsql_native_object_id tsql_metadata_visible? tsql_object_registry_id
+	tsql_catalog_relation_id tsql_catalog_foreign_id tsql_catalog_module_id
+	tsql_catalog_actor_field tsql_object_property_value))

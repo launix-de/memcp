@@ -97,6 +97,9 @@ test_cases:
       expect: {rows: 1, data: [{name: source_catalog_fn, type: FN, same_id: 1}]}
     - sql: SELECT CASE WHEN OBJECT_ID(N'dbo.source_catalog_fn',N'FN')<>OBJECT_ID(N'source_catalog_other.dbo.source_catalog_fn',N'FN') THEN 1 ELSE 0 END AS different_ids
       expect: {rows: 1, data: [{different_ids: 1}]}
+- name: Foreign database catalog identities retain the current database property context
+  sql: SELECT name,OBJECTPROPERTY(object_id,N'IsScalarFunction') AS value FROM source_catalog_other.sys.objects WHERE name=N'source_catalog_fn'
+  expect: {data: [{name: source_catalog_fn,value: null}]}
 - name: Database membership governs module enumeration and qualified OBJECT_ID lookup
   tds:
     username: source_catalog_member
@@ -128,3 +131,15 @@ test_cases:
       expect: {rows: 4, data: [{name: source_catalog_fn, same_id: 1}, {name: source_catalog_proc, same_id: 1}, {name: source_catalog_relation, same_id: 1}, {name: source_catalog_view, same_id: 1}]}
     - sql: SELECT name,type FROM sys.objects WHERE name=N'source_catalog_staged'
       expect: {rows: 1, data: [{name: source_catalog_staged, type: FN}]}
+
+- name: JSON portable module classification owns its transitive source profiles
+  scm: |
+    (begin
+      (define wire (json_encode (list (quote lambda)
+        (list (quote tsql_source_language_profile) (quote tsql_source_profiles)) tsql_source_module_kind)))
+      (define restored ((json_decode_scmer wire)
+        (lambda (_base _language) (error "ambient profile lookup")) (list "unrelated")))
+      (equal? (map (list "tsql-procedure-quoted-off" "tsql-table-function-ansi-off"
+          "tsql-scalar-function" "tsql-relational-scalar-function-quoted-off-ansi-off" "other") restored)
+        (list "P" "TF" "FN" "FN" nil)))
+  expect: {result: true}

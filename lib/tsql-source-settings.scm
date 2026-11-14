@@ -22,8 +22,10 @@ https://learn.microsoft.com/sql/t-sql/statements/set-ansi-warnings-transact-sql 
 retain ANSI_NULLS ON when reloaded. No invocation session enters the catalog. */
 (define tsql_source_profiles (list (list "" true true) (list "-quoted-off" false true)
 	(list "-ansi-off" true false) (list "-quoted-off-ansi-off" false false)))
-(define tsql_source_language_profile (lambda (base language)
-	(find tsql_source_profiles (lambda (profile) (equal? language (concat base (car profile)))) nil)))
+(define tsql_source_language_profile (close_procedure ((lambda (profiles)
+	(lambda (base language)
+		(find profiles (lambda (profile) (equal? language (concat base (car profile)))) nil)))
+	tsql_source_profiles)))
 (define tsql_source_language_settings (lambda (language) (begin
 	(define profile (find (map '("tsql-procedure" "tsql-statement" "tsql-scalar-function" "tsql-relational-scalar-function" "tsql-table-function")
 		(lambda (base) (tsql_source_language_profile base language))) (lambda (profile) profile) nil))

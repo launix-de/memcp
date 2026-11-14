@@ -4134,6 +4134,11 @@ that context explicitly; stored views refuse this scalar before publication. */
 			(? "," (define kind tsql_expression)) ")")
 			(list 'sql_compile_expr (list 'tsql_compile_object_id schema) name
 				(coalesceNil kind (list 'sql_type_expr nil "NVARCHAR" nil))))
+		(parser '((atom "OBJECTPROPERTY" true) "(" (define object tsql_expression)
+			"," (define property tsql_expression) ")")
+			(begin
+				(if policy (policy schema "objects" false) true)
+				(tsql_catalog_property_call schema object property)))
 		(parser '((atom "QUOTENAME" true) "(" (define value tsql_expression)
 			(? "," (define delimiter tsql_expression)) ")")
 			(list (quote sql_compile_expr) (quote tsql_compile_quotename) value
