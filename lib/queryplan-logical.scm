@@ -6844,7 +6844,11 @@ producer's own declaration catalog; nested producers keep their own catalog. */
 		(define remaining (merge (map (qb_sources block) (lambda (src)
 			(if (equal? (source_alias src) (source_alias first)) (list grouped)
 				(contains? sources src) '() (list src))))))
-		(list (rewrite_derived_ref_chain rewrites
+		/* This binder installed the projection's destination source above.
+		Rewrite its owned body, keeping that source as the intended owner;
+		only a nested lexical binder can capture the inserted coordinate. */
+		(list (reduce rewrites (lambda (current rewrite)
+			(rewrite_derived_block_body (car rewrite) (cadr rewrite) current))
 			(make_query_block (qb_schema block) remaining (qb_fields block) (qb_where block)
 				(qb_group block) (qb_having block) (qb_order block) (qb_limit block) (qb_offset block)
 				(qb_hidden block) (qb_stages block) (qb_facts block)))
@@ -6972,6 +6976,19 @@ are not executable scopes; nested rebinding shadows the renamed coordinate. */
 				(qb_stages current) (qb_facts current)))
 			(rename_derived_capture_reference old_alias new_alias renamed))) block)))
 
+/* A binding owner may install projection destinations in this very block.
+Its own sources deliberately bind those coordinates. Rewrite executable body
+positions through the ordinary capture-aware walker, which still protects
+every nested query/group scope before substitution. */
+(define rewrite_derived_block_body (lambda (alias projection block)
+	(make_query_block (qb_schema block)
+		(map (qb_sources block) (lambda (src) (rewrite_derived_source alias projection src)))
+		(rewrite_derived_ref alias projection (qb_fields block)) (rewrite_derived_ref alias projection (qb_where block))
+		(rewrite_derived_ref alias projection (qb_group block)) (rewrite_derived_ref alias projection (qb_having block))
+		(rewrite_derived_ref alias projection (qb_order block)) (rewrite_derived_ref alias projection (qb_limit block))
+		(rewrite_derived_ref alias projection (qb_offset block)) (rewrite_derived_ref alias projection (qb_hidden block))
+		(rewrite_derived_ref alias projection (qb_stages block)) (rewrite_derived_ref alias projection (qb_facts block)))))
+
 (define rewrite_derived_ref (lambda (alias projection expr)
 	/* Operator barriers keep their own binding namespace. A derived alias in
 	the enclosing block may have the same spelling as a stage's local input;
@@ -6993,13 +7010,7 @@ are not executable scopes; nested rebinding shadows the renamed coordinate. */
 		(match expr
 			((symbol quote) _literal) expr
 			((symbol query-block) database sources fields condition grouping having ordering limit offset hidden stages facts)
-			(make_query_block database
-				(map sources (lambda (src) (rewrite_derived_source alias projection src)))
-				(rewrite_derived_ref alias projection fields) (rewrite_derived_ref alias projection condition)
-				(rewrite_derived_ref alias projection grouping) (rewrite_derived_ref alias projection having)
-				(rewrite_derived_ref alias projection ordering) (rewrite_derived_ref alias projection limit)
-				(rewrite_derived_ref alias projection offset) (rewrite_derived_ref alias projection hidden)
-				(rewrite_derived_ref alias projection stages) (rewrite_derived_ref alias projection facts))
+			(rewrite_derived_block_body alias projection expr)
 			((symbol group-stage) id input domain keys aggregates having output ordering limit offset facts)
 			(make_group_stage id
 				(if (source_alias input) (rewrite_derived_source alias projection input)

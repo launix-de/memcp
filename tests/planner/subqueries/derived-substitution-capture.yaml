@@ -63,3 +63,16 @@ test_cases:
     WHERE d.id IN(SELECT c.id FROM capture_lookup c WHERE c.value IS NOT NULL)
       AND (SELECT c.value FROM capture_lookup c WHERE c.id=d.id)=100 ORDER BY d.token
   expect: {data: [{token: 10},{token: 40}]}
+- name: A joined operand owns its newly installed export coordinates
+  sql: |
+    SELECT p.token,l.value FROM (capture_inputs p LEFT JOIN capture_lookup l ON p.id=l.id)
+    ORDER BY p.token
+  expect:
+    data: [{token: 10,value: 100},{token: 20,value: 200},{token: 30,value: null},{token: 40,value: 100},{token: 50,value: null}]
+- name: Nested joined operand exports preserve duplicate and NULL input rows
+  sql: |
+    SELECT p.token,l.value FROM capture_inputs p LEFT JOIN
+      (capture_lookup l LEFT JOIN capture_lookup other ON l.id=other.id) ON p.id=l.id
+    ORDER BY p.token
+  expect:
+    data: [{token: 10,value: 100},{token: 20,value: 200},{token: 30,value: null},{token: 40,value: 100},{token: 50,value: null}]
