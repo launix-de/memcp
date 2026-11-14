@@ -5353,6 +5353,24 @@ that context explicitly; stored views refuse this scalar before publication. */
 				(tsql_write_declarations (source_schema target) (source_relation target) planning_session tx))
 				(lambda (column) (and (not (column "Computed")) (equal?? (column "RawType") "ROWVERSION"))))
 			(lambda (column) (list (column "Field") (tsql_rowversion_expr (source_schema target)))))))))))
+	(define tsql_cursor_reference (parser (or
+		(parser (define name tsql_variable_name) (list "variable" name))
+		(parser (define name tsql_identifier) (toLower name)))))
+	/* Positioned mutation is valid declaration syntax. Its target and SET
+	terms remain in the ordinary mutation grammar, never a searched predicate
+	reconstructed from fetched values. Native cursor row ownership is not yet
+	available, so compilation refuses execution before binding/evaluating them.
+	https://learn.microsoft.com/sql/t-sql/queries/update-transact-sql */
+	(define tsql_mutation_selection (parser (or
+		(parser '((atom "CURRENT" true) (atom "OF" true) (atom "GLOBAL" true)
+			(define name tsql_identifier)) (list "positioned" true (toLower name)))
+		(parser '((atom "CURRENT" true) (atom "OF" true) (define reference tsql_cursor_reference))
+			(list "positioned" false reference))
+		(parser (define condition tsql_expression) (list "searched" condition)))))
+	(define tsql_searched_mutation_condition (lambda (selection)
+		(if (nil? selection) nil
+			(equal? (car selection) "searched") (cadr selection)
+			(error "positioned cursor mutation requires native current-row ownership"))))
 	(define tsql_update (parser '(
 		(atom "UPDATE" true)
 		(define limit tsql_write_limit)
@@ -5360,9 +5378,10 @@ that context explicitly; stored views refuse this scalar before publication. */
 		(atom "SET" true)
 		(define cols (+ tsql_update_assignment ","))
 		(? (atom "FROM" true) (define from (+ tabledefs ",")))
-		(? (atom "WHERE" true) (define condition tsql_expression))
+		(? (atom "WHERE" true) (define selection tsql_mutation_selection))
 		(? tsql_query_hints)
 	) (lambda cte_arguments (begin
+			(define condition (tsql_searched_mutation_condition selection))
 			(define cte_bindings (if (empty_list? cte_arguments) '() (car cte_arguments)))
 			(define sources (map (merge (coalesceNil from '())) (lambda (source)
 				(tsql_finalize_sources source "source" cte_bindings '()))))
@@ -5398,9 +5417,10 @@ that context explicitly; stored views refuse this scalar before publication. */
 		(? (atom "FROM" true))
 		(define target tsql_write_target)
 		(? (atom "FROM" true) (define from (+ tabledefs ",")))
-		(? (atom "WHERE" true) (define condition tsql_expression))
+		(? (atom "WHERE" true) (define selection tsql_mutation_selection))
 		(? tsql_query_hints)
 	) (lambda cte_arguments (begin
+			(define condition (tsql_searched_mutation_condition selection))
 			(define cte_bindings (if (empty_list? cte_arguments) '() (car cte_arguments)))
 			(define sources (map (merge (coalesceNil from '())) (lambda (source)
 				(tsql_finalize_sources source "source" cte_bindings '()))))
@@ -6339,9 +6359,7 @@ that context explicitly; stored views refuse this scalar before publication. */
 					(atom "READ_ONLY" true) (atom "SCROLL_LOCKS" true) (atom "OPTIMISTIC" true)
 					(atom "TYPE_WARNING" true)) empty))
 				(tsql_cursor_options (map options toUpper))))
-			(define tsql_script_cursor_reference (parser (or
-				(parser (define name tsql_script_variable) (list "variable" name))
-				(parser (define name tsql_identifier) (toLower name)))))
+			(define tsql_script_cursor_reference tsql_cursor_reference)
 			(define tsql_script_declaration (parser (or
 				(parser '((define name tsql_script_variable) (? (atom "AS" true)) (atom "CURSOR" true))
 					(list name '("CURSOR") nil))
