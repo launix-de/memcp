@@ -27,10 +27,26 @@ func readWord(data []byte, pos *int) uint64 {
 	if *pos >= len(data) {
 		panic("truncated concat word")
 	}
+	if value := data[*pos]; value < 128 {
+		*pos++
+		return uint64(value)
+	}
 	value, n := binary.Uvarint(data[*pos:])
 	if n <= 0 {
 		panic("invalid concat word")
 	}
+	*pos += n
+	return value
+}
+
+// Published pools have already been validated. The hot cursor decoder only
+// reads words; malformed input is rejected by the loading caller's Validate.
+func poolWord(data []byte, pos *int) uint64 {
+	if value := data[*pos]; value < 128 {
+		*pos++
+		return uint64(value)
+	}
+	value, n := binary.Uvarint(data[*pos:])
 	*pos += n
 	return value
 }
@@ -47,7 +63,7 @@ func (b *Buffer) Strlen(offset uint64) int {
 		panic("concat offset out of range")
 	}
 	p := int(offset)
-	n := readWord(b.data, &p)
+	n := poolWord(b.data, &p)
 	if n > uint64(int(^uint(0)>>1)) {
 		panic("concat string too large")
 	}
@@ -67,7 +83,7 @@ type Cursor struct {
 
 func (c *Cursor) Reset(b *Buffer, offset uint64) int {
 	*c = Cursor{buffer: b, pos: int(offset)}
-	c.remaining = int(readWord(b.data, &c.pos))
+	c.remaining = int(poolWord(b.data, &c.pos))
 	if c.remaining != 0 && c.pos < len(b.data) && b.data[c.pos] == 1 {
 		c.pos++
 		c.span = b.data[c.pos : c.pos+c.remaining]
@@ -81,11 +97,15 @@ func (c *Cursor) Chunk() []byte {
 		return nil
 	}
 	if len(c.span) == 0 {
-		offset := readWord(c.buffer.data, &c.pos)
-		length := readWord(c.buffer.data, &c.pos)
-		c.span = c.buffer.data[offset : offset+length]
+		c.loadSpan()
 	}
 	return c.span
+}
+
+func (c *Cursor) loadSpan() {
+	offset := poolWord(c.buffer.data, &c.pos)
+	length := poolWord(c.buffer.data, &c.pos)
+	c.span = c.buffer.data[offset : offset+length]
 }
 
 func (c *Cursor) Advance(n int) { c.span = c.span[n:]; c.remaining -= n }

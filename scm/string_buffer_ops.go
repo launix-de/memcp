@@ -37,27 +37,12 @@ func CompareTextCursors(a, b Scmer, fold bool, left, right *TextScratch) int {
 	var av, bv TextCursor
 	av.Reset(a)
 	bv.Reset(b)
+	return comparePreparedTextCursors(&av, &bv, fold, left, right)
+}
+
+func comparePreparedTextCursors(av, bv *TextCursor, fold bool, left, right *TextScratch) int {
 	if fold {
-		for {
-			x, _, xok := av.NextRune(left)
-			y, _, yok := bv.NextRune(right)
-			if !xok || !yok {
-				if xok {
-					return 1
-				}
-				if yok {
-					return -1
-				}
-				return 0
-			}
-			x, y = unicode.ToLower(x), unicode.ToLower(y)
-			if x < y {
-				return -1
-			}
-			if x > y {
-				return 1
-			}
-		}
+		return compareFoldedTextCursors(av, bv, left, right)
 	}
 	for {
 		x, y := av.nextChunk(left), bv.nextChunk(right)
@@ -73,12 +58,135 @@ func CompareTextCursors(a, b Scmer, fold bool, left, right *TextScratch) int {
 	}
 }
 
+// Consume complete runs inside each span before touching cursor state again.
+// Only split UTF-8 runes need the general cross-span decoder.
+func compareFoldedTextCursors(a, b *TextCursor, left, right *TextScratch) int {
+	for {
+		x, y := a.nextChunk(left), b.nextChunk(right)
+		if a.pushCount == 0 && b.pushCount == 0 {
+			n := min(len(x), len(y))
+			if n == 0 {
+				return compareLength(len(x), len(y))
+			}
+			if compareTextSpans(x[:n], y[:n]) == 0 {
+				if n = completeTextPrefix(x, n); n > 0 {
+					a.advanceChunk(n)
+					b.advanceChunk(n)
+					continue
+				}
+			}
+			i, j := 0, 0
+			for i < len(x) && j < len(y) {
+				l, r := rune(x[i]), rune(y[j])
+				lw, rw := 1, 1
+				if l >= utf8.RuneSelf {
+					if !utf8.FullRune(x[i:]) {
+						break
+					}
+					l, lw = utf8.DecodeRune(x[i:])
+					l = unicode.ToLower(l)
+				} else {
+					l = rune(asciiFoldByte(byte(l)))
+				}
+				if r >= utf8.RuneSelf {
+					if !utf8.FullRune(y[j:]) {
+						break
+					}
+					r, rw = utf8.DecodeRune(y[j:])
+					r = unicode.ToLower(r)
+				} else {
+					r = rune(asciiFoldByte(byte(r)))
+				}
+				if l < r {
+					return -1
+				}
+				if l > r {
+					return 1
+				}
+				i += lw
+				j += rw
+			}
+			if i != 0 || j != 0 {
+				a.advanceChunk(i)
+				b.advanceChunk(j)
+				continue
+			}
+		}
+		xr, _, xok := a.NextRune(left)
+		yr, _, yok := b.NextRune(right)
+		if !xok || !yok {
+			if xok {
+				return 1
+			}
+			if yok {
+				return -1
+			}
+			return 0
+		}
+		xr, yr = unicode.ToLower(xr), unicode.ToLower(yr)
+		if xr < yr {
+			return -1
+		}
+		if xr > yr {
+			return 1
+		}
+	}
+}
+
+func completeTextPrefix(x []byte, n int) int {
+	if n > 0 && x[n-1] >= utf8.RuneSelf {
+		start := n - 1
+		for start > 0 && !utf8.RuneStart(x[start]) && n-start < utf8.UTFMax {
+			start--
+		}
+		if !utf8.FullRune(x[start:n]) {
+			return start
+		}
+	}
+	return n
+}
+
+// Equal UTF-8 spans need no case mapping. Stop at a complete rune so the next
+// comparison can still decode a rune split across either concat boundary.
+func skipEqualTextPrefix(a, b *TextCursor, left, right *TextScratch) bool {
+	if a.pushCount != 0 || b.pushCount != 0 {
+		return false
+	}
+	x, y := a.nextChunk(left), b.nextChunk(right)
+	n := min(len(x), len(y))
+	if n == 0 {
+		return false
+	}
+	if compareTextSpans(x[:n], y[:n]) != 0 {
+		i := 0
+		for i < n && x[i] == y[i] {
+			i++
+		}
+		n = i
+	}
+	n = completeTextPrefix(x, n)
+	if n == 0 {
+		return false
+	}
+	a.advanceChunk(n)
+	b.advanceChunk(n)
+	return true
+}
+
 func equalBufferText(a, b Scmer, fold bool) bool {
 	if !fold && compressedTextLen(a) != compressedTextLen(b) {
 		return false
 	}
 	if a.ptr == b.ptr && a.aux == b.aux {
 		return true
+	}
+	if x, ok := directText(a); ok {
+		if y, ok := directText(b); ok {
+			if fold {
+				return strings.EqualFold(x, y)
+			}
+			return x == y
+		}
 	}
 	if !fold {
 		return compareBufferText(a, b, false) == 0
@@ -87,6 +195,16 @@ func equalBufferText(a, b Scmer, fold bool) bool {
 		return equalConcatFold(a, b)
 	}
 	return equalCursorFold(a, b, nil, nil)
+}
+
+func directText(s Scmer) (string, bool) {
+	if s.IsBufferString() {
+		return bufferOf(s).Direct(auxVal(s.aux))
+	}
+	if s.GetTag() == tagString || s.GetTag() == tagSymbol {
+		return s.String(), true
+	}
+	return "", false
 }
 
 func equalConcatFold(a, b Scmer) bool {
@@ -99,6 +217,9 @@ func equalCursorFold(a, b Scmer, left, right *TextScratch) bool {
 	av.Reset(a)
 	bv.Reset(b)
 	for {
+		if skipEqualTextPrefix(&av, &bv, left, right) {
+			continue
+		}
 		x, _, xok := av.NextRune(left)
 		y, _, yok := bv.NextRune(right)
 		if !xok || !yok {
@@ -134,22 +255,30 @@ func generalBufferLess(a, b Scmer, reverse bool) bool {
 }
 
 func generalBufferLessScratch(a, b Scmer, reverse bool, x, y *TextScratch) bool {
-	classify := func(s Scmer, scratch *TextScratch) (bool, byte) {
-		var c TextCursor
-		c.Reset(s)
-		first, ok := c.NextByte(scratch)
-		if !ok {
+	classify := func(c *TextCursor, scratch *TextScratch) (bool, byte) {
+		chunk := c.nextChunk(scratch)
+		if len(chunk) == 0 {
 			return true, 0
 		}
-		first = asciiFoldByte(first)
-		second, _ := c.NextByte(scratch)
+		first := asciiFoldByte(chunk[0])
+		var second byte
+		if len(chunk) > 1 {
+			second = chunk[1]
+		} else {
+			probe := *c
+			probe.advanceChunk(1)
+			second, _ = probe.NextByte(scratch)
+		}
 		if first == 'a' && asciiFoldByte(second) == 'a' {
 			return false, 0
 		}
 		return first >= 'a' && first <= 'z', first
 	}
-	ac, ak := classify(a, x)
-	bc, bk := classify(b, y)
+	var av, bv TextCursor
+	av.Reset(a)
+	bv.Reset(b)
+	ac, ak := classify(&av, x)
+	bc, bk := classify(&bv, y)
 	if ac != bc {
 		return ac
 	}
@@ -159,7 +288,7 @@ func generalBufferLessScratch(a, b Scmer, reverse bool, x, y *TextScratch) bool 
 		}
 		return ak < bk
 	}
-	cmp := CompareTextCursors(a, b, ac, x, y)
+	cmp := comparePreparedTextCursors(&av, &bv, ac, x, y)
 	if reverse {
 		return cmp > 0
 	}
@@ -198,6 +327,15 @@ func bufferLikeScratch(s Scmer, pattern string, fold bool, scratch *TextScratch)
 
 // mode bits: 1 permits a leading arbitrary prefix; 2 permits a trailing suffix.
 func bufferLiteralLike(s Scmer, pattern string, fold bool, mode int, scratch *TextScratch) bool {
+	if len(pattern) <= 64 {
+		ascii := true
+		for i := range pattern {
+			ascii = ascii && pattern[i] < utf8.RuneSelf
+		}
+		if ascii {
+			return bufferASCIILiteralLike(s, pattern, fold, mode, scratch)
+		}
+	}
 	var symbols [1024]rune
 	var prefix [1024]int
 	n := 0
@@ -268,6 +406,98 @@ func bufferLiteralLike(s Scmer, pattern string, fold bool, mode int, scratch *Te
 			return false
 		}
 	}
+}
+
+// Keep the common short SQL search term on borrowed byte spans. Only a
+// non-ASCII rune needs decoding/case mapping, including the Kelvin sign.
+func bufferASCIILiteralLike(s Scmer, pattern string, fold bool, mode int, scratch *TextScratch) bool {
+	if len(pattern) == 0 {
+		return mode != 0 || compressedTextLen(s) == 0
+	}
+	var symbols [64]byte
+	var prefix [64]int
+	for i := range pattern {
+		symbols[i] = pattern[i]
+		if fold {
+			symbols[i] = asciiFoldByte(symbols[i])
+		}
+	}
+	for i, j := 1, 0; i < len(pattern); i++ {
+		for j > 0 && symbols[i] != symbols[j] {
+			j = prefix[j-1]
+		}
+		if symbols[i] == symbols[j] {
+			j++
+		}
+		prefix[i] = j
+	}
+	var cursor TextCursor
+	cursor.Reset(s)
+	matched, position := 0, 0
+	for cursor.Position() < cursor.length {
+		chunk := cursor.nextChunk(scratch)
+		if cursor.pushCount != 0 {
+			chunk = cursor.push[cursor.pushCount-1 : cursor.pushCount]
+		}
+		if mode == 3 && matched == 0 && cursor.pushCount == 0 && len(chunk) >= len(pattern) {
+			found, handled := false, true
+			if fold {
+				found, handled = asciiFoldContains(unsafe.String(unsafe.SliceData(chunk), len(chunk)), pattern)
+			} else {
+				found = bytes.Contains(chunk, []byte(pattern))
+			}
+			if found {
+				return true
+			}
+			if handled {
+				// Only the suffix can start a match crossing into the next span.
+				skip := len(chunk) - len(pattern) + 1
+				cursor.advanceChunk(skip)
+				position += skip
+				chunk = chunk[skip:]
+			}
+		}
+		consumed := 0
+		for consumed < len(chunk) {
+			r := rune(chunk[consumed])
+			if fold && (r >= utf8.RuneSelf || cursor.pushCount != 0) {
+				cursor.advanceChunk(consumed)
+				chunk = nil
+				consumed = 0
+				r, _, _ = cursor.NextRune(scratch)
+				r = unicode.ToLower(r)
+			} else {
+				consumed++
+				if fold {
+					r = rune(asciiFoldByte(byte(r)))
+				}
+			}
+			for matched > 0 && r != rune(symbols[matched]) {
+				matched = prefix[matched-1]
+			}
+			if r == rune(symbols[matched]) {
+				matched++
+			}
+			position++
+			if matched == len(pattern) {
+				if mode&1 == 0 && position != len(pattern) {
+					return false
+				}
+				if mode&2 != 0 || cursor.Position()+consumed == cursor.length {
+					return true
+				}
+				if mode&1 == 0 {
+					return false
+				}
+				matched = prefix[matched-1]
+			}
+			if mode&1 == 0 && position >= len(pattern) {
+				return false
+			}
+		}
+		cursor.advanceChunk(consumed)
+	}
+	return false
 }
 
 // BufferBytePrefix is used by OverlayBlob to recognize escape/reference

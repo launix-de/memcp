@@ -11,6 +11,43 @@ import "testing"
 import "runtime"
 import "strings"
 
+func TestConcatFoldedSpanBoundaries(t *testing.T) {
+	texts := []string{"lead-prefix-\xc3", "lead-prefix-é", "lead-prefix-É", "lead-prefix-\xc3x", "lead-prefix-\xe2\x82", "lead-prefix-K", "lead-prefix-k", "lead-prefix-ſ", "lead-prefix-s", "", "abc", "abc\xff\xe2\x82"}
+	pool, offsets := BuildStringConcatBuffer(texts)
+	var cursor TextCursor
+	cursor.Reset(NewBufferString(pool, offsets[1]))
+	first := cursor.nextChunk(nil)
+	if len(first) == 0 || first[len(first)-1] != 0xc3 {
+		t.Fatal("fixture must split é between literal spans")
+	}
+	for i, text := range texts {
+		value := NewBufferString(pool, offsets[i])
+		for j, other := range texts {
+			for _, right := range []Scmer{NewBufferString(pool, offsets[j]), NewString(other)} {
+				if got, want := compareBufferText(value, right, true), generalCIFoldCompare(text, other); got != want {
+					t.Fatalf("fold compare %q / %q: %d != %d", text, other, got, want)
+				}
+				if equalBufferText(value, right, true) != strings.EqualFold(text, other) {
+					t.Fatalf("fold equality %q / %q", text, other)
+				}
+			}
+		}
+		patterns := []string{"%k%", "%s%", "%x", "%prefix%", "lead%", "%abc%", "abc", "%z%", "%prefix-k%", "%prefix-s%"}
+		for start := range text {
+			for end := start + 1; end <= len(text) && end <= start+14; end++ {
+				patterns = append(patterns, "%"+text[start:end]+"%")
+			}
+		}
+		for _, pattern := range patterns {
+			for _, collation := range []string{"binary", "utf8mb4_general_ci"} {
+				if got, want := bufferLike(value, pattern, collation != "binary"), StrLikeCollation(text, pattern, collation, "\\"); got != want {
+					t.Fatalf("LIKE %q / %q (%s): %v != %v", text, pattern, collation, got, want)
+				}
+			}
+		}
+	}
+}
+
 func TestStringBufferOperators(t *testing.T) {
 	texts := []string{"", "abc", "ABC", "aa-first", "A-FIRST", "Prüfbericht Gerät K Σ ς ſ", "k σ s", "\xffx\xe2\x82!", " \tÄpfel\u00a0", strings.Repeat("Prüfbericht Inventar 10420001\n", 2600), "ab%b_c\\", "123"}
 	codec := StringCodecConcat

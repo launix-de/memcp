@@ -35,6 +35,8 @@ Binary and existing general-ci semantics use cursor comparisons. Full locale
 collations retain x/text semantics, including numeric ordering and contractions:
 single spans are borrowed; fragmented text appends into reusable collator-owned
 output. This temporary collation input is not a column/dictionary cache.
+General-ci comparisons skip equal UTF-8 spans and consume complete rune runs;
+short literal LIKE searches scan spans directly and retain only a crossing suffix.
 No-op case conversion, trimming, replacement and whole-value substrings retain
 handles where possible. A substring within one literal borrows that literal.
 
@@ -71,10 +73,10 @@ fresh identical permutation and verifies its complete result each iteration.
 
 | Metric (median) | LZ4 | Raw | Concat |
 |---|---:|---:|---:|
-| Build | 12.499 ms | 10.238 ms | 14.505 ms |
-| Random binary comparison | 4695.000 ns | 14.190 ns | 68.920 ns |
-| Append to reused output | 2387.000 ns | 2.732 ns | 79.890 ns |
-| Sort 4,096 handles | 236.557 ms | 0.668 ms | 3.486 ms |
+| Build | 12.499 ms | 10.238 ms | 12.913 ms |
+| Random binary comparison | 4695.000 ns | 14.190 ns | 59.970 ns |
+| Append to reused output | 2387.000 ns | 2.732 ns | 60.120 ns |
+| Sort 4,096 handles | 236.557 ms | 0.668 ms | 2.853 ms |
 | Resident format bytes | 69,408 | 1,986,088 | 115,720 |
 | Serialized bytes | 65,269 | 1,985,705 | 111,007 |
 | Source / serialized | 30.25× | 0.99× | 17.79× |
@@ -101,16 +103,47 @@ Values are `ns/op`; sample groups use the fixed iteration counts above.
 
 | Probe | LZ4 samples | Raw samples | Concat samples |
 |---|---|---|---|
-| read-1 | 9.654, 7.814, 7.516 | 8.881, 7.375, 7.524 | 8.269, 4.86, 4.837 |
-| read-0 | 9.975, 7.601, 7.573 | 8.327, 7.469, 7.452 | 4.873, 4.871, 5.013 |
-| read-2 | 6.447, 6.372, 6.602 | 8.083, 7.372, 7.392 | 6.892, 4.645, 4.727 |
-| build | 1.24994e+07, 1.20187e+07, 1.26757e+07 | 1.02379e+07, 1.09493e+07, 1.02102e+07 | 1.4496e+07, 2.61117e+07, 1.45051e+07 |
-| compare | 4695, 4723, 4662 | 17.66, 10.35, 14.19 | 68.92, 66.84, 80.98 |
-| append | 2387, 2375, 2439 | 2.732, 2.704, 2.733 | 74.73, 79.89, 81.82 |
-| sort | 2.39935e+08, 2.36557e+08, 2.35548e+08 | 654976, 667753, 679946 | 3.51379e+06, 3.42115e+06, 3.48629e+06 |
+| read-1 | 9.654, 7.814, 7.516 | 8.881, 7.375, 7.524 | 5.96, 4.841, 4.983 |
+| read-0 | 9.975, 7.601, 7.573 | 8.327, 7.469, 7.452 | 4.881, 4.479, 4.448 |
+| read-2 | 6.447, 6.372, 6.602 | 8.083, 7.372, 7.392 | 4.449, 5.482, 4.713 |
+| build | 1.24994e+07, 1.20187e+07, 1.26757e+07 | 1.02379e+07, 1.09493e+07, 1.02102e+07 | 1.23982e+07, 1.29128e+07, 1.39588e+07 |
+| compare | 4695, 4723, 4662 | 17.66, 10.35, 14.19 | 59.46, 60.58, 59.97 |
+| append | 2387, 2375, 2439 | 2.732, 2.704, 2.733 | 59.31, 60.34, 60.12 |
+| sort | 2.39935e+08, 2.36557e+08, 2.35548e+08 | 654976, 667753, 679946 | 2.76801e+06, 3.01574e+06, 2.85314e+06 |
 
 Build allocation samples (`bytes/op`, `allocs/op`):
 
 - lz4: (13276896, 96), (13273253, 92), (13273221, 92)
 - raw: (12802309, 69), (12804168, 71), (12804168, 71)
-- concat: (14595802, 7745), (14595840, 7745), (14593864, 7742)
+- concat: (14593869, 7742), (14593912, 7743), (14593949, 7743)
+
+## Focused SQL A/B after operator integration
+
+Baseline `bdaa313a6`; identical checked-in fixtures and existing sample counts,
+sequential runs on the same CPU with native Go and the same experimental JIT Go.
+Values are milliseconds. Unicode uses all 501 cold/reuse queries, temporal uses
+all 11 queries per fixture, and WordPress keeps its existing 10 warmups / 30 samples.
+Native temporal uses the median of three predeclared fresh fixtures on each side;
+all other rows use one fresh fixture per revision/toolchain. No forced GC, changed
+query limits or accepted-regression waivers. Every sample, including the first,
+is retained in [string-concat-sql-samples.json](string-concat-sql-samples.json).
+
+| Workload | Native master | Native concat | Change | JIT master | JIT concat | Change |
+|---|---:|---:|---:|---:|---:|---:|
+| Unicode range, 501 executions (11 + 490 grouped) | 1041.2 | 986.9 | -5.2% | 813.8 | 842.7 | +3.6% |
+| Temporal page, 11 executions | 27.8 | 31.2 | +12.1% | 23.3 | 22.4 | -4.1% |
+| WordPress rare search | 4.3 | 4.0 | -7.2% | 4.7 | 3.1 | -33.8% |
+| WordPress absent search | 3.9 | 4.0 | +2.5% | 3.1 | 3.1 | +0.1% |
+| WordPress disjoint OR search | 3.5 | 3.7 | +4.7% | 3.1 | 3.0 | -3.4% |
+
+Native temporal totals (all three retained): master 27.8 / 29.7 / 26.0 ms,
+concat 71.5 / 31.0 / 31.2 ms. The isolated slow fixture is visible in the samples;
+none of its query samples is removed from its total.
+
+The three complete focused suites pass their result checks. CI still owns the
+seven-fresh-fixture A/B verdict; these manual measurements do not replace it.
+Reproduction: set `PERF_AB_MODE=record PERF_FIXTURE_TRIAL=1 PERF_BASELINE_FILE=OUTPUT.json`
+and run `python3 run_sql_tests.py` with, one at a time,
+`tests/performance/collation-comparison.yaml`,
+`tests/performance/wordpress-search.yaml`, and
+`tests/performance/temporal-order-output.yaml` in each revision's worktree.

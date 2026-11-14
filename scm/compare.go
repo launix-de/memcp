@@ -472,7 +472,7 @@ func EqualSQL(a, b Scmer) Scmer {
 			return NewBool(float64(a.Int()) == b.Float())
 		}
 		if tb == tagString || tb == tagSymbol || tb == tagCString || tb == tagBString || tb == tagConcat {
-			return NewBool(numericStringEqualsInt(b.String(), a.Int()))
+			return NewBool(numericTextEqualsInt(b, a.Int()))
 		}
 		return NewBool(a.Int() == b.Int())
 	case tagFloat:
