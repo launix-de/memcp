@@ -1554,8 +1554,10 @@ source definitions retain their original bare parameter list. Option-bearing
 definitions carry a versioned envelope; creator identity is provenance, never
 a fabricated schema/module owner or a server administration grant. */
 (define tsql_procedure_declaration? (lambda (declaration)
-	(and (list? declaration) (not (empty_list? declaration))
-		(equal? (car declaration) "__tsql_procedure_declaration"))))
+	(if (and (list? declaration) (not (empty_list? declaration))
+		(equal? (car declaration) "__tsql_procedure_declaration"))
+		(if (expression_equal? (cadr declaration) 1) true
+			(error "unsupported procedure declaration version: " (cadr declaration))) false)))
 (define tsql_procedure_parameters (close_procedure ((lambda (envelope?)
 	(lambda (declaration) (if (envelope? declaration) (declaration "parameters") declaration)))
 	tsql_procedure_declaration?)))

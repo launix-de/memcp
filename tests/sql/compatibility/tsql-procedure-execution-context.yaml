@@ -57,6 +57,36 @@ test_cases:
         (equal? (tsql_procedure_parameters declaration) declaration)
         (equal? (tsql_procedure_execution declaration) (list "kind" "CALLER"))))
   expect: {result: true}
+- name: Portable declaration decoders retain version one and legacy parameter contracts
+  scm: |
+    (begin
+      (define names (list 'tsql_procedure_declaration?))
+      (define restore (lambda (reader)
+        ((json_decode_scmer (json_encode (list 'lambda names (close_procedure reader))))
+          (lambda (_declaration) (error "unbound declaration reader")))))
+      (define parameters (restore tsql_procedure_parameters))
+      (define execution (restore tsql_procedure_execution))
+      (define legacy (list (list "value" (list "RawType" "INT") "7" false)))
+      (define declaration (list "__tsql_procedure_declaration" 1 "parameters" legacy
+        "execute_as" (list "kind" "OWNER" "principal_id" -2)))
+      (and (equal? (parameters declaration) legacy) (equal? (parameters legacy) legacy)
+        (equal? (execution declaration) (list "kind" "OWNER" "principal_id" -2))
+        (equal? (execution legacy) (list "kind" "CALLER")))))
+  expect: {result: true}
+- name: Portable declaration decoders reject an unknown persisted envelope version
+  scm: |
+    (begin
+      (define names (list 'tsql_procedure_declaration?))
+      (define restore (lambda (reader)
+        ((json_decode_scmer (json_encode (list 'lambda names (close_procedure reader))))
+          (lambda (_declaration) (error "unbound declaration reader")))))
+      (define future (list "__tsql_procedure_declaration" 2 "parameters" '()
+        "execute_as" (list "kind" "CALLER")))
+      (define rejects (lambda (reader)
+        (try (lambda () (begin ((restore reader) future) false))
+          (lambda (cause) (strlike (string cause) "%unsupported procedure declaration version%")))))
+      (and (rejects tsql_procedure_parameters) (rejects tsql_procedure_execution))))
+  expect: {result: true}
 - name: Explicit CALLER executes with native caller identity and normal output binding
   sql: DECLARE @answer INT; EXEC context_caller @value=13,@answer=@answer OUTPUT; SELECT @answer AS answer;
   expect: {rows: 2,data: [{principal: dbo},{answer: 14}]}
