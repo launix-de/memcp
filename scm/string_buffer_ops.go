@@ -332,9 +332,7 @@ func writeBufferText(w io.Writer, s Scmer) {
 		if len(chunk) == 0 {
 			return
 		}
-		if _, err := w.Write(chunk); err != nil {
-			panic(err)
-		}
+		_, _ = w.Write(chunk)
 		cursor.advanceChunk(len(chunk))
 	}
 }

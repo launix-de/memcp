@@ -618,6 +618,12 @@ func LookupCollationKey(meta string) (CollationKeyFunc, bool, bool) {
 // That asymmetry must not enter an index (true < "3" and "3" < true).
 // Keep expression comparison itself unchanged, including numeric coercions.
 func binaryCollationLess(a, b Scmer) bool {
+	if a.IsBool() && b.IsBufferString() {
+		return compareBufferText(NewString(a.String()), b, false) < 0
+	}
+	if b.IsBool() && a.IsBufferString() {
+		return compareBufferText(a, NewString(b.String()), false) < 0
+	}
 	if (a.IsBool() && (b.IsString() || b.IsSymbol())) ||
 		(b.IsBool() && (a.IsString() || a.IsSymbol())) {
 		return String(a) < String(b)

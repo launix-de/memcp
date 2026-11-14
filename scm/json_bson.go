@@ -265,6 +265,8 @@ func bsonFromSQLScalar(value Scmer) (Scmer, error) {
 		return NewBSONValue(bson.TypeInt64, bsoncore.AppendInt64(nil, integer)), nil
 	case value.IsFloat():
 		return NewBSONValue(bson.TypeDouble, bsoncore.AppendDouble(nil, value.Float())), nil
+	case value.IsBufferString():
+		return NewBSONValue(bson.TypeString, appendBSONSQLScalarPayload(nil, value)), nil
 	case value.IsString() || value.IsSymbol():
 		return NewBSONValue(bson.TypeString, bsoncore.AppendString(nil, value.String())), nil
 	default:
@@ -314,6 +316,8 @@ func bsonSQLScalarTypeAndSize(value Scmer) (bson.Type, int) {
 		return bson.TypeInt64, 8
 	case value.IsFloat():
 		return bson.TypeDouble, 8
+	case value.IsBufferString():
+		return bson.TypeString, bufferStringLen(value) + 5
 	case value.IsString() || value.IsSymbol():
 		return bson.TypeString, 4 + len(value.String()) + 1
 	default:
