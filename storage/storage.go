@@ -431,7 +431,7 @@ func (j *storageJITFunctions) finish(owner storageJITEmitter) {
 //	12  StorageFloat   – 64-bit float
 //	13  StorageDecimal – fixed-precision decimal      (no version byte — see above)
 //	20  StorageString  – dictionary-compressed or buffer string
-//	21  StoragePrefix  – prefix-compressed string (experimental)
+//	21  Reserved (unused experimental prefix encoding; never persisted)
 //	31  OverlayBlob    – large binary/blob overlay
 //	40  StorageEnum    – rANS-entropy-coded enum         (no version byte — see above)
 //	41  StorageConst   – single constant value column
@@ -444,7 +444,6 @@ var storages = map[uint8]reflect.Type{
 	12: reflect.TypeOf(StorageFloat{}),
 	13: reflect.TypeOf(StorageDecimal{}),
 	20: reflect.TypeOf(StorageString{}),
-	21: reflect.TypeOf(StoragePrefix{}),
 	//30: reflect.TypeOf(OverlaySCMER{}),
 	31: reflect.TypeOf(OverlayBlob{}),
 	40: reflect.TypeOf(StorageEnum{}),

@@ -19,6 +19,7 @@ package scm
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -342,6 +343,10 @@ func appendBSONSQLScalarPayload(payload []byte, value Scmer) []byte {
 		return bsoncore.AppendInt64(payload, integer)
 	case value.IsFloat():
 		return bsoncore.AppendDouble(payload, value.Float())
+	case value.IsBufferString():
+		payload = binary.LittleEndian.AppendUint32(payload, uint32(bufferStringLen(value)+1))
+		_, payload = value.AppendString(payload)
+		return append(payload, 0)
 	case value.IsString() || value.IsSymbol():
 		return bsoncore.AppendString(payload, value.String())
 	default:

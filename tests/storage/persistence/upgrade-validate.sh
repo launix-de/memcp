@@ -361,6 +361,14 @@ check "Nodict: id=149"     "SELECT description FROM up_string_nodict WHERE id = 
 check "Nodict: NULL survives" "SELECT description FROM up_string_nodict WHERE id = 150" "NULL"
 check "Nodict: count total" "SELECT COUNT(*) FROM up_string_nodict"                  "151"
 
+# Repeated SQL-shaped text survives legacy LZ4 -> concat -> restart.
+check "Concat: rows" "SELECT COUNT(*) FROM up_concat_text" "152"
+check "Concat: byte length" "SELECT LENGTH(message) FROM up_concat_text WHERE id=42" "599"
+check "Concat: prefix" "SELECT SUBSTRING(message,1,16) FROM up_concat_text WHERE id=42" "trace query 0042:"
+check "Concat: repeated suffix" "SELECT COUNT(*) FROM up_concat_text WHERE message LIKE '%Prüfbericht ÄÖß'" "150"
+check "Concat: empty" "SELECT LENGTH(message) FROM up_concat_text WHERE id=151" "0"
+check "Concat: NULL" "SELECT message IS NULL FROM up_concat_text WHERE id=150" "1"
+
 # ==========================================================================
 # 4. StorageSparse
 # ==========================================================================

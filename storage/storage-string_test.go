@@ -45,14 +45,7 @@ func buildStringColumn(values []string) *StorageString {
 
 // rawStringFixture deliberately restores an unpublished raw baseline for
 // codec comparisons and historical format fixtures. Production finish uses LZ4.
-func rawStringFixture(s *StorageString) *StorageString {
-	s.dictionary = s.decodeDictionary()
-	s.textBuffer = nil
-	s.bufferHandles = false
-	s.compressedDict = nil
-	s.compressed = false
-	return s
-}
+func rawStringFixture(s *StorageString) *StorageString { s.expandConcatDictionary(); return s }
 
 // TestFormatSelection asserts that chooseBestFormat selects the expected format
 // when all input strings belong to a specific charset.
@@ -471,75 +464,22 @@ func TestCompressDictionaryRoundTrip(t *testing.T) {
 	}
 }
 
-// TestReadCountTelemetry verifies that readCount is incremented on each GetValue call.
+// Scalar probes must not publish shared telemetry from inner read loops.
 func TestReadCountTelemetry(t *testing.T) {
-	inputs := []string{"alpha", "beta", "gamma"}
-	col := buildStringColumn(inputs)
-
-	if col.ReadCount() != 0 {
-		t.Fatalf("readCount should be 0 after build, got %d", col.ReadCount())
-	}
-
-	for i := range inputs {
+	col := buildStringColumn([]string{"alpha", "beta", "gamma"})
+	for i := 0; i < 3; i++ {
 		col.GetValue(uint32(i))
 	}
-	if col.ReadCount() != 3 {
-		t.Errorf("readCount should be 3 after 3 reads, got %d", col.ReadCount())
+	if col.ReadCount() != 0 {
+		t.Fatal("scalar read wrote shared metadata")
 	}
-
-	// compress and read again
+	target := make([]scm.Scmer, 3)
+	col.GetValueRange(0, 3, target, 1)
 	col.CompressDictionary()
-	col.GetValue(0)
-	if col.ReadCount() != 4 {
-		t.Errorf("readCount should be 4 after compress+read, got %d", col.ReadCount())
+	col.GetValueMulti([]uint32{2, 0}, target, 1)
+	if col.ReadCount() != 5 {
+		t.Fatalf("batch telemetry = %d, want 5", col.ReadCount())
 	}
-}
-
-// TestEvictDictionary verifies that EvictDictionary clears the materialized
-// dictionary and that subsequent reads re-materialize it.
-func TestEvictDictionary(t *testing.T) {
-	inputs := make([]string, 200)
-	for i := range inputs {
-		inputs[i] = fmt.Sprintf("evict-test-value-%04d-padding", i)
-	}
-	col := buildStringColumn(inputs)
-	col.CompressDictionary()
-	if col.textBuffer == nil && !col.compressed {
-		t.Skip("compression did not activate")
-	}
-
-	// A sparse/default read leaves the dictionary compressed.
-	want0 := inputs[0]
-	if got := col.GetValue(0).String(); got != want0 {
-		t.Fatalf("sparse read: %q", got)
-	}
-	if col.dictCache.Load() != nil {
-		t.Fatal("sparse read materialized full dictionary")
-	}
-
-	reader := col.GetCachedReader(ReadDecoded)
-	if got := reader.GetValue(0).String(); got != want0 {
-		t.Fatalf("decoded read: %q", got)
-	}
-	if col.dictCache.Load() == nil {
-		t.Fatal("missing decoded dictionary")
-	}
-	if freed := col.EvictDictionary(); freed != 0 {
-		t.Fatal("evicted active reader")
-	}
-	ReleaseColumnReader(reader)
-	if freed := col.EvictDictionary(); freed <= 0 {
-		t.Fatalf("no release: %d", freed)
-	}
-	if col.dictCache.Load() != nil {
-		t.Fatal("dictionary not evicted")
-	}
-	reader = col.GetCachedReader(ReadDecoded)
-	defer ReleaseColumnReader(reader)
-	if got := reader.GetValue(0).String(); got != want0 {
-		t.Fatalf("after eviction: %q", got)
-	}
-
 }
 
 // TestCompressDictionaryNoopOnEmpty verifies CompressDictionary is a no-op
@@ -721,7 +661,7 @@ func TestConcurrentReadAfterCompress(t *testing.T) {
 	for round := 0; round < 4; round++ {
 		// evict between rounds to force re-materialization
 		if round > 0 {
-			col.EvictDictionary()
+
 		}
 		for i, want := range inputs {
 			wg.Add(1)
@@ -920,12 +860,12 @@ func TestLegacyLZ4DictionaryReaderHints(t *testing.T) {
 	wire.Write(payload)
 	var restored StorageString
 	restored.Deserialize(bytes.NewReader(wire.Bytes()[1:]))
-	if !restored.compressed || len(restored.dictionary) != 0 || restored.dictCache.Load() != nil {
+	if restored.compressed || len(restored.dictionary) != 0 || restored.textBuffer == nil {
 		t.Fatal("legacy file eagerly decoded")
 	}
 	var saved bytes.Buffer
 	restored.Serialize(&saved)
-	if saved.Bytes()[3] != 5 || restored.dictCache.Load() != nil || !restored.compressed {
+	if saved.Bytes()[3] != 6 || restored.compressed || restored.textBuffer == nil {
 		t.Fatal("legacy save failed private V5 conversion")
 	}
 	var migrated StorageString
@@ -940,14 +880,33 @@ func TestLegacyLZ4DictionaryReaderHints(t *testing.T) {
 			t.Fatalf("legacy row %d", i)
 		}
 	}
-	if restored.dictCache.Load() == nil || len(restored.dictionary) != 0 || len(restored.compressedDict) != len(payload) {
-		t.Fatal("legacy decode bypassed shared cache")
-	}
-	if restored.EvictDictionary() != 0 {
-		t.Fatal("legacy cache evicted while leased")
-	}
 	ReleaseColumnReader(reader)
-	if restored.EvictDictionary() <= 0 {
-		t.Fatal("legacy cache not released")
+}
+
+// expandConcatDictionary is used only to write explicit historical fixtures;
+// normal query execution never builds a decoded dictionary.
+func (s *StorageString) expandConcatDictionary() {
+	if s.textBuffer == nil {
+		s.normalizeLegacyDictionary()
+		return
 	}
+	offsets := make([]uint64, s.starts.count)
+	nulls := make([]bool, s.starts.count)
+	lengths := make([]uint64, s.starts.count)
+	var data []byte
+	for i := uint32(0); uint64(i) < s.starts.count; i++ {
+		if s.nodict && s.starts.hasNull && s.starts.GetValueUInt(i) == s.starts.null {
+			nulls[i] = true
+			continue
+		}
+		offset := uint64(int64(s.starts.GetValueUInt(i)) + s.starts.offset)
+		offsets[i] = uint64(len(data))
+		lengths[i] = uint64(s.textBuffer.Strlen(offset))
+		data = s.textBuffer.Append(offset, data)
+	}
+	s.starts = concatStarts(offsets, nulls)
+	s.lens = concatStarts(lengths, nil)
+	s.dictionary = unsafe.String(unsafe.SliceData(data), len(data))
+	s.textBuffer = nil
+	s.bufferHandles = false
 }

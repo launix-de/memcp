@@ -917,23 +917,23 @@ func TestOverlayCompressedReferenceOwnsDecodedBytes(t *testing.T) {
 		if legacy {
 			raw = "!" + string(hash[:])
 		}
-		buffer, offsets := scm.BuildCompressedStringBuffer([]string{
-			strings.Repeat("p", scm.StringBufferBlockBytes-8), raw, "!!literal",
+		buffer, offsets := scm.BuildStringConcatBuffer([]string{
+			strings.Repeat("p", 65536-8), raw, "!!literal",
 		})
 		var cursor scm.TextCursor
 		var scratch scm.TextScratch
-		value, inline := overlay.inlineBufferValue(scm.NewBufferString(buffer, offsets[1], len(raw)), &cursor, &scratch)
+		value, inline := overlay.inlineBufferValue(scm.NewBufferString(buffer, offsets[1]), &cursor, &scratch)
 		if inline || value.IsBufferString() || value.String() != raw {
 			t.Fatal("reference handoff lost its owned bytes")
 		}
-		other, _ := scm.BuildCompressedStringBuffer([]string{strings.Repeat("q", scm.StringBufferBlockBytes)})
-		cursor.Reset(scm.NewBufferString(other, 0, scm.StringBufferBlockBytes))
+		other, _ := scm.BuildStringConcatBuffer([]string{strings.Repeat("q", 65536)})
+		cursor.Reset(scm.NewBufferString(other, 0))
 		var prefix [2]byte
 		cursor.Read(prefix[:], &scratch)
 		if got := overlay.resolveBlob(value); got.String() != payload {
 			t.Fatal("scratch reuse changed the resolved reference")
 		}
-		literal, inline := overlay.inlineBufferValue(scm.NewBufferString(buffer, offsets[2], len("!!literal")), &cursor, &scratch)
+		literal, inline := overlay.inlineBufferValue(scm.NewBufferString(buffer, offsets[2]), &cursor, &scratch)
 		if !inline || !literal.IsBufferString() || literal.String() != "!literal" {
 			t.Fatal("reference preparation eagerly copied an escaped inline literal")
 		}

@@ -379,8 +379,8 @@ func TestUTF16LengthAndPrefixContracts(t *testing.T) {
 		{"😀x", 3, []string{"", "", "😀", "😀x", "😀x"}},
 		{"e\u0301", 2, []string{"", "e", "e\u0301", "e\u0301", "e\u0301"}},
 	} {
-		buffer, offsets := BuildCompressedStringBuffer([]string{test.text})
-		for _, value := range []Scmer{NewString(test.text), NewBufferString(buffer, offsets[0], len(test.text))} {
+		buffer, offsets := BuildStringConcatBuffer([]string{test.text})
+		for _, value := range []Scmer{NewString(test.text), NewBufferString(buffer, offsets[0])} {
 			if got := declarations["utf16_length"].Fn(value); !got.IsInt() || got.Int() != test.units {
 				t.Fatalf("UTF16 length of %q = %v, want %d", test.text, got, test.units)
 			}
@@ -414,8 +414,8 @@ func TestUTF16CompiledStringContracts(t *testing.T) {
 	length := CompileJIT(NewProcStruct(*calibrationProcedure("(lambda (text) (utf16_length text))")), true)
 	prefix := CompileJIT(NewProcStruct(*calibrationProcedure("(lambda (text limit) (utf16_prefix text limit))")), true)
 	text := strings.Repeat("雪😀a", 9000)
-	buffer, offsets := BuildCompressedStringBuffer([]string{text})
-	for _, value := range []Scmer{NewString(text), NewBufferString(buffer, offsets[0], len(text))} {
+	buffer, offsets := BuildStringConcatBuffer([]string{text})
+	for _, value := range []Scmer{NewString(text), NewBufferString(buffer, offsets[0])} {
 		if got := Apply(length, value); !got.IsInt() || got.Int() != 36000 {
 			t.Fatalf("compiled Unicode unit count = %v", got)
 		}
@@ -435,10 +435,10 @@ func TestUTF16CompiledStringContracts(t *testing.T) {
 // including the two compressed-text branches around the 128-byte boundary.
 func fnvHashContractInputs() []Scmer {
 	texts := []string{"", "a", "hello", "\x00\xff\x80", "äΣK", strings.Repeat("x", 127), strings.Repeat("x", 128), strings.Repeat("äΣ", 1024)}
-	buffer, offsets := BuildCompressedStringBuffer(texts)
+	buffer, offsets := BuildStringConcatBuffer(texts)
 	values := []Scmer{NewNil(), NewBool(true), NewInt(-9223372036854775808), NewFloat(1.25)}
 	for i, text := range texts {
-		values = append(values, NewString(text), NewBufferString(buffer, offsets[i], len(text)))
+		values = append(values, NewString(text), NewBufferString(buffer, offsets[i]))
 	}
 	return values
 }

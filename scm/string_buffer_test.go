@@ -5,18 +5,19 @@ SPDX-License-Identifier: GPL-3.0-or-later
 package scm
 
 import "bytes"
+import "encoding/json"
+import "unicode/utf8"
 import "testing"
 import "runtime"
 import "strings"
-import "math/rand"
 
 func TestStringBufferOperators(t *testing.T) {
 	texts := []string{"", "abc", "ABC", "aa-first", "A-FIRST", "Prüfbericht Gerät K Σ ς ſ", "k σ s", "\xffx\xe2\x82!", " \tÄpfel\u00a0", strings.Repeat("Prüfbericht Inventar 10420001\n", 2600), "ab%b_c\\", "123"}
-	codec := StringCodecLZ4
-	b, offsets := BuildCompressedStringBuffer(texts)
+	codec := StringCodecConcat
+	b, offsets := BuildStringConcatBuffer(texts)
 	values := make([]Scmer, len(texts))
-	for i, text := range texts {
-		values[i] = NewBufferString(b, offsets[i], len(text))
+	for i := range texts {
+		values[i] = NewBufferString(b, offsets[i])
 	}
 	for i, v := range values {
 		if !v.IsString() || v.String() != texts[i] {
@@ -83,9 +84,9 @@ func TestStringBufferOperators(t *testing.T) {
 	}
 	var encoded bytes.Buffer
 	b.WriteTo(&encoded)
-	restored := ReadCompressedStringBuffer(&encoded)
+	restored := ReadStringConcatBuffer(&encoded)
 	for i, text := range texts {
-		if got := NewBufferString(restored, offsets[i], len(text)).String(); got != text {
+		if got := NewBufferString(restored, offsets[i]).String(); got != text {
 			t.Fatalf("restored buffer %d %d", codec, i)
 		}
 	}
@@ -111,8 +112,8 @@ func TestStringBufferOperators(t *testing.T) {
 }
 
 func TestStringBufferRejectsMalformedPayload(t *testing.T) {
-	codec := StringCodecLZ4
-	b, _ := BuildCompressedStringBuffer([]string{"Prüfbericht repeated repeated"})
+	codec := StringCodecConcat
+	b, _ := BuildStringConcatBuffer([]string{"Prüfbericht repeated repeated"})
 	var serialized bytes.Buffer
 	b.WriteTo(&serialized)
 	for _, n := range []int{0, 1, 5, 12, len(serialized.Bytes()) - 1} {
@@ -122,15 +123,15 @@ func TestStringBufferRejectsMalformedPayload(t *testing.T) {
 					t.Errorf("codec %d truncated %d accepted", codec, n)
 				}
 			}()
-			ReadCompressedStringBuffer(bytes.NewReader(serialized.Bytes()[:n]))
+			ReadStringConcatBuffer(bytes.NewReader(serialized.Bytes()[:n]))
 		}()
 	}
 }
 
 func TestStringBufferLargeLength(t *testing.T) {
 	text := strings.Repeat("large LZ4 report\n", 150000)
-	buffer, offsets := BuildCompressedStringBuffer([]string{text})
-	value := NewBufferString(buffer, offsets[0], len(text))
+	buffer, offsets := BuildStringConcatBuffer([]string{text})
+	value := NewBufferString(buffer, offsets[0])
 	if BufferStringLength(value) != len(text) || value.String() != text {
 		t.Fatal("large handle length truncated")
 	}
@@ -142,10 +143,9 @@ func TestStringBufferLargeLength(t *testing.T) {
 // Identical immutable handles prove equality without touching encoded blocks.
 func TestStringBufferIdentityComparison(t *testing.T) {
 	text := strings.Repeat("identical dictionary group key ", 1000)
-	buffer, offsets := BuildCompressedStringBuffer([]string{text})
-	value := NewBufferString(buffer, offsets[0], len(text))
+	buffer, offsets := BuildStringConcatBuffer([]string{text})
+	value := NewBufferString(buffer, offsets[0])
 	// Make decoding observable; storage validates buffers before publication.
-	buffer.data = nil
 	if !Equal(value, value) || Less(value, value) || compareBufferText(value, value, true) != 0 || generalBufferLess(value, value, false) || generalBufferLess(value, value, true) {
 		t.Fatal("identical handle comparison decoded its payload")
 	}
@@ -154,47 +154,12 @@ func TestStringBufferIdentityComparison(t *testing.T) {
 // Literal blocks already expose immutable bytes to TextCursor. Codec scratch
 // must be required only for selected compressed blocks, including a value that
 // straddles a literal/compressed boundary.
-func TestStringBufferLiteralCursorNeedsNoScratch(t *testing.T) {
-	random := rand.New(rand.NewSource(4821))
-	literal := make([]byte, StringBufferBlockBytes)
-	if _, err := random.Read(literal); err != nil {
-		t.Fatal(err)
-	}
-	compressed := strings.Repeat("a", StringBufferBlockBytes)
-	buffer, _ := BuildCompressedStringBuffer([]string{string(literal), compressed})
-	if !buffer.rawBlocks[0] || buffer.rawBlocks[1] {
-		t.Fatal("mixed codec fixture did not retain literal and compressed blocks")
-	}
-	input := string(literal) + compressed
-	for _, span := range []struct {
-		start, length int
-		scratch       bool
-	}{
-		{0, 0, false}, {17, 34, false}, {0, StringBufferBlockBytes, false},
-		{StringBufferBlockBytes - 17, 34, true}, {StringBufferBlockBytes, StringBufferBlockBytes, true},
-	} {
-		value := NewBufferString(buffer, uint32(span.start), span.length)
-		if got := BufferStringRequiresScratch(value); got != span.scratch {
-			t.Fatalf("span (%d,%d) decoder requirement %v", span.start, span.length, got)
-		}
-		var scratch *TextScratch
-		if span.scratch {
-			scratch = new(TextScratch)
-		}
-		var cursor TextCursor
-		cursor.Reset(value)
-		output := make([]byte, span.length)
-		if cursor.Read(output, scratch) != span.length || string(output) != input[span.start:span.start+span.length] {
-			t.Fatal("cursor changed a literal or mixed-block value")
-		}
-	}
-}
 
 func TestStringBufferLikeCustomEscape(t *testing.T) {
 	texts := []string{"alpha_beta", "a%b", "a\\xb", "日本語", "Ä_b"}
-	buffer, offsets := BuildCompressedStringBuffer(texts)
+	buffer, offsets := BuildStringConcatBuffer(texts)
 	for i, text := range texts {
-		compressed := NewBufferString(buffer, offsets[i], len(text))
+		compressed := NewBufferString(buffer, offsets[i])
 		for _, pattern := range []string{"%alpha!_%", "a!%b", "a\\_b", "_本%", "Ä!_b"} {
 			for _, escape := range []string{"!", "", "Ä", "%"} {
 				for _, collation := range []string{"binary", "utf8mb4_general_ci"} {
@@ -206,5 +171,89 @@ func TestStringBufferLikeCustomEscape(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+func TestConcatJSONAndUnchangedOperators(t *testing.T) {
+	texts := []string{"prefix unchanged suffix", "prefix other suffix", "<>&\"\\\x00\b\f\n\r\t\u2028\u2029\xff Prüfen", "prefix unchanged suffix prefix unchanged suffix"}
+	pool, offsets := BuildStringConcatBuffer(texts)
+	for i, text := range texts {
+		value := NewBufferString(pool, offsets[i])
+		want, _ := json.Marshal(text)
+		got := appendBufferJSON(nil, value)
+		var gotText, wantText string
+		if err := json.Unmarshal(got, &gotText); err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(want, &wantText); err != nil {
+			t.Fatal(err)
+		}
+		if gotText != wantText || utf8.ValidString(text) && string(got) != string(want) {
+			t.Fatalf("JSON %q got %s want %s", text, got, want)
+		}
+	}
+	value := NewBufferString(pool, offsets[3])
+	if bufferTrim(value, 0) != value || bufferReplace(value, "missing", "x") != value || bufferSubstring(value, 0, bufferStringLen(value)) != value {
+		t.Fatal("unchanged operator lost handle identity")
+	}
+	lower := NewBufferString(pool, offsets[0])
+	if bufferCase(lower, false) != lower {
+		t.Fatal("unchanged lowercase materialized")
+	}
+	dst := make([]byte, 0, 1024)
+	if n := testing.AllocsPerRun(100, func() {
+		dst = appendBufferJSON(dst[:0], value)
+		if bufferCase(lower, false) != lower {
+			panic("case")
+		}
+	}); n != 0 {
+		t.Fatalf("JSON/case allocated %v", n)
+	}
+	for _, name := range []string{"utf8mb4_bin", "utf8mb4_general_ci", "utf8mb4_unicode_ci", "utf8mb4_german2_ci"} {
+		for _, reverse := range []bool{false, true} {
+			fn := Globalenv.Vars["collate"].Func()(NewString(name), NewBool(reverse)).Func()
+			for i, a := range texts {
+				for j, b := range texts {
+					if fn(NewBufferString(pool, offsets[i]), NewBufferString(pool, offsets[j])).Bool() != fn(NewString(a), NewString(b)).Bool() {
+						t.Fatalf("collation %s changed", name)
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestConcatNumericCoercions(t *testing.T) {
+	texts := []string{"", "false", "FALSE", "falſe", " false ", "\t", "  -42x", "+.5e2suffix", "1e+suffix", "1-999", "1.2.3", "0", "\u00a00\u00a0", "NaN", "-Inf", strings.Repeat("trace SELECT payload common suffix ", 10000)}
+	pool, offsets := BuildStringConcatBuffer(texts)
+	for i, text := range texts {
+		v, p := NewBufferString(pool, offsets[i]), NewString(text)
+		if v.Int() != p.Int() || v.Float() != p.Float() || v.Bool() != p.Bool() {
+			t.Fatalf("numeric coercion %q changed", text)
+		}
+	}
+	v := NewBufferString(pool, offsets[len(texts)-1])
+	if n := testing.AllocsPerRun(100, func() {
+		if v.Int() != 0 || v.Float() != 0 || !v.Bool() {
+			panic("coercion")
+		}
+	}); n != 0 {
+		t.Fatalf("nonnumeric text allocated %v", n)
+	}
+}
+
+func TestConcatLengthExceedsFormerAuxLength(t *testing.T) {
+	text := strings.Repeat("x", 1<<24+17)
+	pool, offsets := BuildStringConcatBuffer([]string{text})
+	value := NewBufferString(pool, offsets[0])
+	if BufferStringLength(value) != len(text) || Globalenv.Vars["strlen"].Func()(value).Int() != int64(len(text)) {
+		t.Fatal("header length truncated to former 24-bit length")
+	}
+	if n := testing.AllocsPerRun(10, func() {
+		if value.String() != text {
+			panic("direct cast")
+		}
+	}); n != 0 {
+		t.Fatalf("single span cast allocated %v", n)
 	}
 }

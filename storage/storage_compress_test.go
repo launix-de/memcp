@@ -676,7 +676,6 @@ func TestGetCachedReaderReturnsSelf(t *testing.T) {
 		{"StorageFloat", &StorageFloat{}},
 		{"StorageString", &StorageString{}},
 		{"StorageSeq", &StorageSeq{}},
-		// StoragePrefix omitted: Serialize/Deserialize not implemented
 		{"StorageSparse", &StorageSparse{}},
 		{"StorageDecimal", &StorageDecimal{}},
 		{"OverlayBlob", &OverlayBlob{}},

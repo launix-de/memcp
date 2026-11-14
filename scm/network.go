@@ -309,6 +309,7 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 		}),
 	}
 	var res_lock sync.Mutex
+	var jsonText []byte
 	outputResult := NewString("ok")
 	res_scm := []Scmer{
 		NewString("res"), NewAny(res),
@@ -357,6 +358,9 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 				} else {
 					if v.IsBSON() {
 						v.Write(res)
+					} else if v.IsBufferString() {
+						jsonText = appendBufferJSON(jsonText[:0], v)
+						res.Write(jsonText)
 					} else {
 						bytes, err := json.Marshal(scmerToGo(v))
 						if err != nil {

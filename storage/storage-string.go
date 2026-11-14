@@ -18,8 +18,6 @@ package storage
 
 import "io"
 import "fmt"
-import "sync"
-import "time"
 import "unsafe"
 import "strings"
 import "sync/atomic"
@@ -496,18 +494,16 @@ type StorageString struct {
 	format     StringFormat `jit:"immutable-after-finish"`
 
 	// LZ4 compression: when compressed==true, compressedDict holds the
-	// lz4-compressed dictionary; materialization belongs only to dictCache.
+	// Legacy-only LZ4 payload; normalized before publication.
 	compressedDict []byte // lz4-compressed dictionary bytes
 	compressed     bool   // true → dictionary is stored lz4-compressed
 	// Immutable post-compression payload; starts/lens retain the entry directory. Construction and
 	// cold loading exclusively own these fields before generation publication.
 	// Scmer handles retain the buffer header, never this mutable storage object.
-	textBuffer *scm.CompressedStringBuffer
-	// Immutable preparation result: only eligible raw text can expose tagLZ4.
+	textBuffer *StringConcatCompression
+	// Immutable preparation result: only eligible raw text can expose tagConcat.
 	bufferHandles bool
-	dictMu        sync.Mutex
-	dictCache     atomic.Pointer[stringDictionaryCache]
-	readCount     uint64 // atomic; incremented on each GetValue for rebuild telemetry
+	readCount     uint64 // atomic; batch-boundary telemetry, never scalar row-loop writes
 
 	// helpers (scan/build phase only)
 	sb           strings.Builder
@@ -518,123 +514,26 @@ type StorageString struct {
 	allsize      int
 	validFormats uint32
 	// prefix statistics
-	prefixstat map[string]int
-	laststr    string
+
 }
 
-func (s *StorageString) ComputeSize() uint {
-	base := s.payloadSize()
-	if cache := s.dictCache.Load(); cache != nil {
-		base += cache.computeSize()
-	}
-	return base
-}
-
-// Generation-owned bytes never change when the independently registered
-// decoded cache is admitted or evicted. Parent accounting uses this directly,
-// rather than subtracting two snapshots which may observe different caches.
+func (s *StorageString) ComputeSize() uint { return s.payloadSize() }
 func (s *StorageString) payloadSize() uint {
 	base := uint(unsafe.Sizeof(*s) - unsafe.Sizeof(s.values) - unsafe.Sizeof(s.starts) - unsafe.Sizeof(s.lens))
-	base += s.values.ComputeSize() + s.starts.ComputeSize() + s.lens.ComputeSize() + uint(len(s.dictionary))
-	base += uint(cap(s.compressedDict))
+	base += s.values.ComputeSize() + s.starts.ComputeSize() + s.lens.ComputeSize() + uint(len(s.dictionary)) + uint(cap(s.compressedDict))
 	if s.textBuffer != nil {
-		base += s.textBuffer.ComputeSize()
+		base += s.textBuffer.Size()
 	}
 	return base
 }
-
 func (s *StorageString) String() string {
 	if s.textBuffer != nil {
-		codec := "lz4-blocks"
-		return fmt.Sprintf("string-%s[%d entries; %d bytes]", codec, s.starts.count, s.textBuffer.ComputeSize())
+		return fmt.Sprintf("string-concat[%d entries; %d bytes]", s.starts.count, s.textBuffer.Size())
 	}
-	lz4Tag := ""
-	if s.compressed {
-		lz4Tag = ", lz4"
-	}
-	if s.nodict {
-		return fmt.Sprintf("string-buffer[%d bytes, format=%d%s]", len(s.dictionary)+len(s.compressedDict), s.format, lz4Tag)
-	} else {
-		return fmt.Sprintf("string-dict[%d entries; %d bytes, format=%d%s]", s.count, len(s.dictionary)+len(s.compressedDict), s.format, lz4Tag)
-	}
+	return fmt.Sprintf("string-raw[%d entries; %d bytes, format=%d]", s.starts.count, len(s.dictionary), s.format)
 }
-
-// ReadCount returns the number of GetValue calls since the last rebuild.
-func (s *StorageString) ReadCount() uint64 {
-	return atomic.LoadUint64(&s.readCount)
-}
-
-// CompressDictionary replaces the raw dictionary of an unpublished generation
-// with independent LZ4 blocks, including nibble and binary inner encodings.
-// Incompressible blocks stay literal within the same compact block container.
-func (s *StorageString) CompressDictionary() bool {
-	if s.textBuffer != nil || len(s.dictionary) == 0 && !s.compressed || uint64(len(s.dictionary)) > uint64(^uint32(0)) {
-		return false
-	}
-	s.textBuffer = scm.CompressStringBuffer(s.decodeDictionary())
-	s.bufferHandles = s.canUseBufferHandles()
-	s.dictionary = ""
-	s.compressedDict = nil
-	s.compressed = false
-	return true
-}
-
-// EvictDictionary releases an idle decoded generation through the same cache
-// callback used by pressure eviction. Active prepared readers retain their lease.
-func (s *StorageString) EvictDictionary() int64 {
-	cache := s.dictCache.Load()
-	if cache == nil {
-		return 0
-	}
-	size := int64(cache.computeSize())
-	if !s.tryEvictDictionary(cache, true) {
-		return 0
-	}
-	GlobalCache.Remove(cache)
-	return size
-}
-
-// stringDictCleanup never waits for preparation and never calls the manager.
-// A distinct registration per decoded generation prevents a delayed removal
-// from deregistering a subsequently admitted dictionary for the same storage.
-func stringDictCleanup(ptr any, freedByType *[numEvictableTypes]int64) bool {
-	cache := ptr.(*stringDictionaryCache)
-	return cache.storage.tryEvictDictionary(cache, false)
-}
-
-// Explicit eviction reports a release only for the still-attached generation.
-// The manager may also discard an already-detached registration by its distinct
-// identity, without clearing or deregistering a replacement generation.
-func (s *StorageString) tryEvictDictionary(cache *stringDictionaryCache, requireAttached bool) bool {
-	if !s.dictMu.TryLock() {
-		return false
-	}
-	defer s.dictMu.Unlock()
-	if cache.users != 0 {
-		return false
-	}
-	if s.dictCache.Load() == cache {
-		s.dictCache.Store(nil)
-		return true
-	}
-	return !requireAttached
-}
-
-func stringDictLastUsed(ptr any) time.Time {
-	return time.Unix(0, ptr.(*stringDictionaryCache).lastUsed.Load())
-}
-
-// ensureDict is the historical scalar fallback. Prepared operators acquire
-// the same cache once and avoid this lookup, admission and lock in row loops.
-func (s *StorageString) ensureDict() string {
-	if s.textBuffer == nil && !s.compressed {
-		return s.dictionary
-	}
-	cache := s.acquireDictionary(true)
-	text := cache.text
-	s.releaseDictionary(cache)
-	return text
-}
+func (s *StorageString) ReadCount() uint64  { return atomic.LoadUint64(&s.readCount) }
+func (s *StorageString) ensureDict() string { return s.dictionary }
 
 // storageStringVersion is the current binary format version for StorageString.
 // Increment this constant and add a new deserializeStringV* helper whenever the
@@ -647,9 +546,10 @@ func (s *StorageString) ensureDict() string {
 // Version 2 introduces ordered nibble IDs 11..16; version 3 adds IDs 17..20.
 // Version 4 adds immutable LZ4 buffer payloads (flag 2). Flags 0/1 retain
 // the V1 layout. Version 5 always writes a block buffer, without a flag or
-// redundant offsets. All historical readers remain unchanged.
+// redundant offsets. Version 6 replaces LZ4 with direct concat-pool references.
+// Historical readers normalize private data before publication.
 // The historical raw sentinel is exactly ASCII '1' (49), never a format range.
-const storageStringVersion = 5
+const storageStringVersion = 6
 
 // StorageString binary layout (magic byte 20 consumed by shard loader):
 //
@@ -682,24 +582,12 @@ const storageStringVersion = 5
 //	2: ordered nibble IDs 11..16; V1 body layout.
 //	3: unpadded Base64 and timestamp IDs 17..20; V1 body layout.
 //	4: immutable buffer payloads with flags 0/1/2.
-//	5 (current): block payload only; see storage-string-buffer.go.
-func (s *StorageString) Serialize(f io.Writer) {
-	// Saving an old generation must not rewrite published fields or invalidate
-	// existing handles. Its temporary conversion does not populate the cache.
-	buffer := s.textBuffer
-	if buffer == nil {
-		buffer = scm.CompressStringBuffer(s.decodeDictionary())
-	}
-	s.serializeStringBufferV5(f, buffer)
-}
-
+//	5: block payload only.
+//	6 (current): raw bytes or concat pool; see storage-string-buffer.go.
+func (s *StorageString) Serialize(f io.Writer) { s.serializeStringV6(f) }
 func (s *StorageString) Deserialize(f io.Reader) uint {
 	count := s.deserializeString(f)
-	// Cold loading exclusively owns this generation. Historical dictionaries
-	// are normalized before publication; decoded bytes are not retained.
-	if !s.compressed {
-		s.CompressDictionary()
-	}
+	s.CompressDictionary()
 	return count
 }
 
@@ -747,6 +635,8 @@ func (s *StorageString) deserializeString(f io.Reader) uint {
 		return s.deserializeStringV4(f)
 	case 5:
 		return s.deserializeStringV5(f)
+	case 6:
+		return s.deserializeStringV6(f)
 	default:
 		panic(fmt.Sprintf("StorageString: unknown version %d", version))
 	}
@@ -801,25 +691,10 @@ func (s *StorageString) deserializeStringV2(f io.Reader) uint {
 func (s *StorageString) deserializeStringV3(f io.Reader) uint { return s.deserializeStringV1(f) }
 
 func (s *StorageString) GetCachedReader(hints ColumnReadHints) ColumnReader {
-	if hints == ReadCompressed && (s.textBuffer != nil || s.compressed) && !s.bufferHandles {
-		// Inner encodings cannot expose a compressed Scmer handle. An unbound
-		// reader owns one immutable decoding workspace instead of entering the
-		// shared dictionary manager in every row probe. It needs no cache lease.
-		return &decodedStringReader{storage: s, text: s.decodeDictionary()}
-	}
-	if hints != ReadCompressed && (s.textBuffer != nil || s.compressed) {
-		if cache := s.acquireDictionary(hints == ReadDecoded || !s.bufferHandles); cache != nil {
-			return &decodedStringReader{storage: s, cache: cache, text: cache.text}
-		}
-		if s.bufferHandles {
-			return &batchStringReader{storage: s}
-		}
-	}
 	return s.storageJITFunctions.reader(s)
 }
 
 func (s *StorageString) GetValue(i uint32) scm.Scmer {
-	atomic.AddUint64(&s.readCount, 1)
 	return s.readValue(i)
 }
 
@@ -1126,7 +1001,6 @@ func (s *StorageString) prepare() {
 	s.lens.prepare()
 	s.values.prepare()
 	s.reverseMap = make(map[string][3]uint)
-	s.prefixstat = make(map[string]int)
 	s.validFormats = allFormatsValid
 }
 
@@ -1144,18 +1018,6 @@ func (s *StorageString) scan(i uint32, value scm.Scmer) {
 
 	// accumulate format compatibility
 	s.validFormats &= checkFormatBits(v)
-
-	// check if we have common prefix (for future prefix compression)
-	if s.laststr != v {
-		commonlen := 0
-		for commonlen < len(s.laststr) && commonlen < len(v) && s.laststr[commonlen] == v[commonlen] {
-			s.prefixstat[v[0:commonlen]] = s.prefixstat[v[0:commonlen]] + 1
-			commonlen++
-		}
-		if v != "" {
-			s.laststr = v
-		}
-	}
 
 	// switch to nodict after 100 items with no repetition
 	if i == 100 && len(s.reverseMap) > 99 {
@@ -1190,7 +1052,6 @@ func (s *StorageString) scan(i uint32, value scm.Scmer) {
 }
 
 func (s *StorageString) init(i uint32) {
-	s.prefixstat = nil
 	s.format = chooseBestFormat(s.validFormats)
 
 	if s.nodict {
@@ -1300,9 +1161,6 @@ func (s *StorageString) build(i uint32, value scm.Scmer) {
 }
 
 func (s *StorageString) finish() {
-	// Prefix sampling must not retain a view into a predecessor's dictionary
-	// after the new generation has compressed its own payload.
-	s.laststr = ""
 	if s.nodict {
 		s.dictionary = string(s.compBuf)
 		s.compBuf = nil
@@ -1316,13 +1174,7 @@ func (s *StorageString) finish() {
 	s.storageJITFunctions.finish(s)
 }
 
-func (s *StorageString) proposeCompression(i uint32) ColumnStorage {
-	// prefix-tree compression placeholder (see TODO below)
-	/* TODO: reactivate as soon as StoragePrefix has a proper implementation for Serialize/Deserialize
-	...
-	*/
-	return nil
-}
+func (s *StorageString) proposeCompression(i uint32) ColumnStorage { return nil }
 
 func (s *StorageString) DistinctCount() uint {
 	if s.nodict {
@@ -1346,19 +1198,6 @@ func (s *StorageString) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resul
 	} else {
 		idxInt = idx
 	}
-	d0 := scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(1)}
-	_ = d0
-	r0 := ctx.AllocReg()
-	if thisptr.Loc == scm.LocImm {
-		ctx.EmitMovRegImm64(r0, uint64(uintptr(thisptr.Imm.Int())+unsafe.Offsetof((*StorageString)(nil).readCount)))
-	} else {
-		ctx.EmitLeaRegMem(r0, thisptr.Reg, int32(unsafe.Offsetof((*StorageString)(nil).readCount)))
-	}
-	d1 := scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: r0}
-	ctx.BindReg(r0, &d1)
-	ctx.BindReg(r0, &d1)
-	d2 := ctx.EmitGoCallScalar(jitGoABI_16086756e666e1f7, []scm.JITValueDesc{d1, d0}, 1)
-	_ = d2
 	if thisptr.Loc == scm.LocRegPair || thisptr.Loc == scm.LocStackPair || thisptr.Loc == scm.LocRegTriple || thisptr.Loc == scm.LocStackTriple {
 		panic("jit: generic call arg expects 1-word value")
 	}
@@ -1367,14 +1206,14 @@ func (s *StorageString) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resul
 	}
 	ctx.SyncDesc(&thisptr)
 	ctx.SyncDesc(&idxInt)
-	d3 := ctx.EmitGoCallScalar(jitGoABI_da3ef669844c9ef3, []scm.JITValueDesc{thisptr, idxInt}, 2)
-	d3.NoHeapPointer = false
-	ctx.BindReg(d3.Reg, &d3)
-	ctx.BindReg(d3.Reg2, &d3)
+	d0 := ctx.EmitGoCallScalar(jitGoABI_da3ef669844c9ef3, []scm.JITValueDesc{thisptr, idxInt}, 2)
+	d0.NoHeapPointer = false
+	ctx.BindReg(d0.Reg, &d0)
+	ctx.BindReg(d0.Reg2, &d0)
 	ctx.FreeDesc(&idxInt)
-	if d3.Loc == scm.LocImm {
+	if d0.Loc == scm.LocImm {
 		if result.Loc == scm.LocAny {
-			return d3
+			return d0
 		}
 	}
 	if result.Loc == scm.LocAny {
@@ -1382,8 +1221,8 @@ func (s *StorageString) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resul
 		ctx.BindReg(result.Reg, &result)
 		ctx.BindReg(result.Reg2, &result)
 	}
-	ctx.EmitMovPairToResult(&d3, &result)
-	result.Type = d3.Type
+	ctx.EmitMovPairToResult(&d0, &result)
+	result.Type = d0.Type
 	return result
 	return result
 }
@@ -1413,10 +1252,8 @@ func base64Encoding(format StringFormat) *base64.Encoding {
 }
 
 // BEGIN jitgen prepared Go ABI entries
-var jitGoABI_16086756e666e1f7 uint64
 var jitGoABI_da3ef669844c9ef3 uint64
 
 func init() {
-	jitGoABI_16086756e666e1f7 = scm.GoFuncAddr(scm.JITAtomicAddUint64)
 	jitGoABI_da3ef669844c9ef3 = scm.GoFuncAddr((*StorageString).readValue)
 }

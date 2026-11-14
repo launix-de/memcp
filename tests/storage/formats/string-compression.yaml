@@ -480,12 +480,58 @@ test_cases:
     threshold_ms: 200
     expect: {rows: 4096}
 
+  - name: "Concat trace-text fixture"
+    setup:
+      - sql: "DROP TABLE IF EXISTS sc_concat"
+      - sql: "CREATE TABLE sc_concat (id INT, message TEXT)"
+      - scm: |
+          (insert (table "memcp-tests" false "sc_concat" false) '("id" "message")
+            (map (produceN 4096) (lambda (i)
+              (list i (concat "trace " (string i) " ns SELECT payload FROM fop_session WHERE id = "
+                (string i) " /* Prüfbericht ÄÖß */ " (string_repeat "abcdef0123456789" 23))))))
+      - scm: '(rebuild (table "memcp-tests" false "sc_concat" false) true false)'
+    sql: "SELECT COUNT(*) AS n FROM sc_concat"
+    expect: {data: [{n: 4096}]}
+
+  - name: "Concat compressed operators and output"
+    sql: "SELECT id, LENGTH(message) AS n, SUBSTRING(message, 1, 5) AS prefix, LOWER(message) AS folded FROM sc_concat WHERE message LIKE 'trace %SELECT payload%' ORDER BY id"
+    timing_aggregation: total
+    timing_samples: 4
+    warmup: 0
+    threshold_ms: 5000
+    expect: {rows: 4096}
+
+  - name: "Concat binary ordering"
+    sql: "SELECT id FROM sc_concat ORDER BY message COLLATE utf8mb4_bin, id LIMIT 3"
+    timing_aggregation: total
+    timing_samples: 4
+    warmup: 0
+    threshold_ms: 5000
+    expect: {data: [{id: 0}, {id: 1}, {id: 10}]}
+
+  - name: "Concat binary equality and length"
+    sql: "SELECT id, SUBSTRING(message, 1, 7) AS prefix FROM sc_concat WHERE message COLLATE utf8mb4_bin = CONCAT('trace 42 ns SELECT payload FROM fop_session WHERE id = 42 /* Prüfbericht ÄÖß */ ', REPEAT('abcdef0123456789', 23))"
+    expect: {data: [{id: 42, prefix: 'trace 4'}]}
+
+  - name: "Concat malformed base64 remains an error"
+    sql: "SELECT FROM_BASE64(message) FROM sc_concat WHERE id = 42"
+    expect: {error: true}
+
+  - name: "Concat persistent restart"
+    sql: "SHUTDOWN"
+    expect: {rows: 0}
+
+  - name: "Concat operators after reload"
+    sql: "SELECT id, SUBSTRING(message, 1, 5) AS prefix FROM sc_concat WHERE message LIKE 'trace 42 ns%'"
+    expect: {data: [{id: 42, prefix: 'trace'}]}
+
   - name: "Cleanup"
     cleanup:
       - sql: "DROP TABLE IF EXISTS sc_b64exact"
       - sql: "DROP TABLE IF EXISTS sc_b64case"
       - sql: "DROP TABLE IF EXISTS sc_b64raw"
       - sql: "DROP TABLE IF EXISTS sc_b64perf"
+      - sql: "DROP TABLE IF EXISTS sc_concat"
       - sql: "DROP TABLE IF EXISTS sc_compare_cases"
       - sql: "DROP TABLE IF EXISTS sc_compare"
       - sql: "DROP TABLE IF EXISTS `sc_uuid`"

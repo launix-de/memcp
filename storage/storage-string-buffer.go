@@ -1,35 +1,13 @@
-/*
-Copyright (C) 2026 Carl-Philip Hänsch
-SPDX-License-Identifier: GPL-3.0-or-later
-*/
+// Copyright (C) 2026 Carl-Philip Hänsch
+// SPDX-License-Identifier: GPL-3.0-or-later
 package storage
 
 import "io"
-import "time"
-import "unsafe"
-import "sync/atomic"
-import "github.com/pierrec/lz4/v4"
 import "bytes"
+import "unsafe"
 import "encoding/binary"
+import "github.com/pierrec/lz4/v4"
 import "github.com/launix-de/memcp/scm"
-
-// canUseBufferHandles is evaluated once before generation publication.
-// Special inner encodings and oversized text use the shared decoded cache.
-func (s *StorageString) canUseBufferHandles() bool {
-	if s.format != FormatRaw {
-		return false
-	}
-	for i := uint32(0); uint64(i) < s.starts.count; i++ {
-		if s.nodict && s.starts.hasNull && s.starts.GetValueUInt(i) == s.starts.null {
-			continue
-		}
-		length := int64(s.lens.GetValueUInt(i)) + s.lens.offset
-		if length < 0 || length > scm.StringBufferMaxStringBytes {
-			return false
-		}
-	}
-	return true
-}
 
 //jitgen:noinline
 func (s *StorageString) compressedAt(recid uint32) scm.Scmer {
@@ -39,22 +17,71 @@ func (s *StorageString) compressedAt(recid uint32) scm.Scmer {
 			return scm.NewNil()
 		}
 	} else {
-		value := s.values.GetValueUInt(recid)
-		if s.values.hasNull && value == s.values.null {
+		v := s.values.GetValueUInt(recid)
+		if s.values.hasNull && v == s.values.null {
 			return scm.NewNil()
 		}
-		entry = uint32(int64(value) + s.values.offset)
+		entry = uint32(int64(v) + s.values.offset)
 	}
-	length := int(int64(s.lens.GetValueUInt(entry)) + s.lens.offset)
-	return scm.NewBufferString(s.textBuffer, uint32(int64(s.starts.GetValueUInt(entry))+s.starts.offset), length)
+	return scm.NewBufferString(s.textBuffer, uint64(int64(s.starts.GetValueUInt(entry))+s.starts.offset))
 }
 
-// Version 4 preserves the V1 body for flags 0/1 and adds flag 2:
-// count, values/starts/lens, offsetCount u32, offsets u32[], buffer payload.
-// Buffer payload: codec u8 (2=LZ4), logicalBytes u32, payloadBytes u64,
-// payload;
-// LZ4: blockCount u32, boundaries[blockCount+1]u32, rawFlags[blockCount]u8.
-// LZ4 logical blocks are permanently 65536 bytes for this payload version.
+// readLegacyStringBuffer is the only block-LZ4 path. It runs during private
+// deserialization, and its decoded bytes are converted before publication.
+func readLegacyStringBuffer(r io.Reader) string {
+	read := func(v any) {
+		if err := binary.Read(r, binary.LittleEndian, v); err != nil {
+			panic(err)
+		}
+	}
+	var codec uint8
+	var size uint32
+	var length uint64
+	read(&codec)
+	read(&size)
+	read(&length)
+	if codec != 2 || length > uint64(^uint32(0)) {
+		panic("invalid legacy LZ4 buffer")
+	}
+	encoded := make([]byte, int(length))
+	if _, err := io.ReadFull(r, encoded); err != nil {
+		panic(err)
+	}
+	var count uint32
+	read(&count)
+	if uint64(count) != (uint64(size)+65535)/65536 {
+		panic("invalid legacy LZ4 block count")
+	}
+	boundaries := make([]uint32, int(count)+1)
+	read(boundaries)
+	if boundaries[0] != 0 || uint64(boundaries[count]) != length {
+		panic("invalid legacy LZ4 extent")
+	}
+	flags := make([]byte, int(count))
+	if _, err := io.ReadFull(r, flags); err != nil {
+		panic(err)
+	}
+	raw := make([]byte, int(size))
+	for i := 0; i < int(count); i++ {
+		if boundaries[i] > boundaries[i+1] || uint64(boundaries[i+1]) > length || flags[i] > 1 {
+			panic("invalid legacy LZ4 block")
+		}
+		src := encoded[boundaries[i]:boundaries[i+1]]
+		dst := raw[i*65536 : min((i+1)*65536, len(raw))]
+		if flags[i] == 1 {
+			if len(src) != len(dst) {
+				panic("invalid legacy literal block")
+			}
+			copy(dst, src)
+		} else {
+			n, err := lz4.UncompressBlock(src, dst)
+			if err != nil || n != len(dst) {
+				panic("invalid legacy LZ4 block")
+			}
+		}
+	}
+	return unsafe.String(unsafe.SliceData(raw), len(raw))
+}
 
 func (s *StorageString) deserializeStringV4(r io.Reader) uint {
 	var flag uint8
@@ -65,52 +92,50 @@ func (s *StorageString) deserializeStringV4(r io.Reader) uint {
 		return s.deserializeStringV1(io.MultiReader(bytes.NewReader([]byte{flag}), r))
 	}
 	if flag != 2 || s.format != FormatRaw {
-		panic("invalid compressed string buffer format")
-	}
-	read := func(v any) {
-		if err := binary.Read(r, binary.LittleEndian, v); err != nil {
-			panic(err)
-		}
+		panic("invalid legacy string flag")
 	}
 	var count uint64
-	read(&count)
+	mustReadString(r, &count)
 	s.values.DeserializeEx(r, true)
 	s.count = s.starts.DeserializeEx(r, true)
 	s.lens.DeserializeEx(r, true)
-	var offsets uint32
-	read(&offsets)
-	if uint64(offsets) != s.starts.count {
-		panic("invalid compressed string entry count")
+	var n uint32
+	mustReadString(r, &n)
+	if uint64(n) != s.starts.count {
+		panic("invalid legacy offset count")
 	}
-	legacyOffsets := make([]uint32, offsets)
-	read(legacyOffsets)
-	s.textBuffer = scm.ReadCompressedStringBuffer(r)
-	// Validate every extent while unpublished. Malformed data must fail before
-	// it can become a SQL-visible handle. V4 offsets are validated then discarded.
-	var scratch scm.TextScratch
-	var cursor scm.TextCursor
-	var chunk [1024]byte
-	for i := uint32(0); uint64(i) < s.starts.count; i++ {
-		if s.nodict && s.starts.hasNull && s.starts.GetValueUInt(i) == s.starts.null {
-			continue
-		}
-		length := int(int64(s.lens.GetValueUInt(i)) + s.lens.offset)
-		start := uint32(int64(s.starts.GetValueUInt(i)) + s.starts.offset)
-		if legacyOffsets[i] != start {
-			panic("invalid compressed string dictionary offset")
-		}
-		value := scm.NewBufferString(s.textBuffer, start, length)
-		cursor.Reset(value)
-		for cursor.Read(chunk[:], &scratch) > 0 {
+	offsets := make([]uint32, n)
+	mustReadString(r, offsets)
+	for i, offset := range offsets {
+		if int64(offset) != int64(s.starts.GetValueUInt(uint32(i)))+s.starts.offset {
+			panic("invalid legacy offset")
 		}
 	}
-	s.bufferHandles = true
+	s.dictionary = readLegacyStringBuffer(r)
+	return uint(count)
+}
+func mustReadString(r io.Reader, v any) {
+	if err := binary.Read(r, binary.LittleEndian, v); err != nil {
+		panic(err)
+	}
+}
+func (s *StorageString) deserializeStringV5(r io.Reader) uint {
+	var count uint64
+	mustReadString(r, &count)
+	s.values.DeserializeEx(r, true)
+	s.count = s.starts.DeserializeEx(r, true)
+	s.lens.DeserializeEx(r, true)
+	if s.lens.count != s.starts.count || s.nodict && count != s.starts.count || !s.nodict && count != s.values.count {
+		panic("invalid legacy string counts")
+	}
+	s.dictionary = readLegacyStringBuffer(r)
 	return uint(count)
 }
 
-// V5: count, values/starts/lens, block payload. No compression flag and no
-// duplicate offset directory. StringFormat still describes the inner encoding.
-func (s *StorageString) serializeStringBufferV5(w io.Writer, buffer *scm.CompressedStringBuffer) {
+// V6: count, values/starts, mode u8. Mode 0 stores lengths and raw inner-encoded
+// bytes [length u64, bytes]. Mode 1 stores a concat pool [length u64, bytes];
+// starts then contains 56-bit pool entry offsets, not logical dictionary offsets.
+func (s *StorageString) serializeStringV6(w io.Writer) {
 	write := func(v any) {
 		if err := binary.Write(w, binary.LittleEndian, v); err != nil {
 			panic(err)
@@ -132,321 +157,71 @@ func (s *StorageString) serializeStringBufferV5(w io.Writer, buffer *scm.Compres
 	write(count)
 	s.values.Serialize(w)
 	s.starts.Serialize(w)
-	s.lens.Serialize(w)
-	buffer.WriteTo(w)
+	if s.textBuffer != nil {
+		write(uint8(1))
+		s.textBuffer.WriteTo(w)
+	} else {
+		write(uint8(0))
+		s.lens.Serialize(w)
+		write(uint64(len(s.dictionary)))
+		if _, err := io.WriteString(w, s.dictionary); err != nil {
+			panic(err)
+		}
+	}
 }
-
-func (s *StorageString) deserializeStringV5(r io.Reader) uint {
-	if s.format > FormatDateTimeOffset {
-		panic("invalid compressed string inner format")
-	}
+func (s *StorageString) deserializeStringV6(r io.Reader) uint {
 	var count uint64
-	if err := binary.Read(r, binary.LittleEndian, &count); err != nil {
-		panic(err)
-	}
+	mustReadString(r, &count)
 	s.values.DeserializeEx(r, true)
 	s.count = s.starts.DeserializeEx(r, true)
-	s.lens.DeserializeEx(r, true)
-	if s.lens.count != s.starts.count || s.nodict && count != s.starts.count || !s.nodict && count != s.values.count {
-		panic("invalid compressed string entry count")
+	if s.nodict && count != s.starts.count || !s.nodict && count != s.values.count {
+		panic("invalid concat string counts")
 	}
-	s.textBuffer = scm.ReadCompressedStringBuffer(r)
-	// Check all block bytes with bounded scratch, never a full decoded cache.
-	var scratch scm.TextScratch
-	var cursor scm.TextCursor
-	var chunk [1024]byte
-	size := s.textBuffer.DecodedSize()
-	for offset := 0; offset < size; offset += scm.StringBufferBlockBytes {
-		cursor.Reset(scm.NewBufferString(s.textBuffer, uint32(offset), min(scm.StringBufferBlockBytes, size-offset)))
-		for cursor.Read(chunk[:], &scratch) > 0 {
+	var mode uint8
+	mustReadString(r, &mode)
+	switch mode {
+	case 0:
+		s.lens.DeserializeEx(r, true)
+		if s.lens.count != s.starts.count {
+			panic("invalid raw string lengths")
 		}
-	}
-	for i := uint32(0); uint64(i) < s.starts.count; i++ {
-		start := s.starts.GetValueUInt(i)
-		if s.nodict && s.starts.hasNull && start == s.starts.null {
-			continue
+		var n uint64
+		mustReadString(r, &n)
+		if n > uint64(int(^uint(0)>>1)) {
+			panic("invalid raw string size")
 		}
-		position := int64(start) + s.starts.offset
-		length := int64(s.lens.GetValueUInt(i)) + s.lens.offset
-		if position < 0 || length < 0 {
-			panic("invalid compressed string extent")
+		data := make([]byte, int(n))
+		if _, err := io.ReadFull(r, data); err != nil {
+			panic(err)
 		}
-		end := position + length
-		if nibbleCharsetFor(s.format) != nil {
-			end = (end + 1) / 2
-		} else if s.format == FormatUUIDLower || s.format == FormatUUIDUpper {
-			end = position + 16
+		s.dictionary = unsafe.String(unsafe.SliceData(data), len(data))
+	case 1:
+		if s.format != FormatRaw {
+			panic("concat pool requires raw inner encoding")
 		}
-		if end > int64(size) {
-			panic("invalid compressed string extent")
+		s.textBuffer = scm.ReadStringConcatBuffer(r)
+		for i := uint32(0); uint64(i) < s.starts.count; i++ {
+			if s.nodict && s.starts.hasNull && s.starts.GetValueUInt(i) == s.starts.null {
+				continue
+			}
+			offset := uint64(int64(s.starts.GetValueUInt(i)) + s.starts.offset)
+			s.textBuffer.Validate(offset)
 		}
+		s.bufferHandles = true
+	default:
+		panic("invalid concat string mode")
 	}
 	if !s.nodict {
 		for i := uint32(0); uint64(i) < s.values.count; i++ {
-			entry := s.values.GetValueUInt(i)
-			if s.values.hasNull && entry == s.values.null {
+			v := s.values.GetValueUInt(i)
+			if s.values.hasNull && v == s.values.null {
 				continue
 			}
-			index := int64(entry) + s.values.offset
-			if index < 0 || uint64(index) >= s.starts.count {
-				panic("invalid compressed string dictionary entry")
+			entry := int64(v) + s.values.offset
+			if entry < 0 || uint64(entry) >= s.starts.count {
+				panic("invalid string dictionary index")
 			}
 		}
 	}
-	s.bufferHandles = s.canUseBufferHandles()
 	return uint(count)
-}
-
-// stringDictionaryCache is one immutable decoded payload. StorageString.dictMu
-// owns its lease count and admission/retirement; lastUsed changes once per
-// preparation. The atomic directory never exposes a partially decoded buffer.
-// CacheManager owns the exclusive registration, separate from the column's
-// immutable compressed payload. Neither row reads nor comparisons change it.
-type stringDictionaryCache struct {
-	storage  *StorageString
-	text     string
-	users    int
-	lastUsed atomic.Int64
-}
-
-func (c *stringDictionaryCache) computeSize() uint {
-	return uint(unsafe.Sizeof(*c)) + uint(len(c.text))
-}
-
-func (s *StorageString) acquireDictionary(create bool) *stringDictionaryCache {
-	if !create && s.dictCache.Load() == nil {
-		return nil
-	}
-	if create {
-		s.dictMu.Lock()
-	} else if !s.dictMu.TryLock() {
-		// Cache reuse is optional. A point probe must not wait for another
-		// operator's cache preparation or eviction; use compressed handles.
-		return nil
-	}
-	defer s.dictMu.Unlock()
-	cache := s.dictCache.Load()
-	if cache == nil {
-		if !create {
-			return nil
-		}
-		cache = &stringDictionaryCache{storage: s, text: s.decodeDictionary()}
-		cache.users = 1
-		cache.lastUsed.Store(time.Now().UnixNano())
-		s.dictCache.Store(cache)
-		GlobalCache.AddItem(cache, int64(cache.computeSize()), TypeStringDict, stringDictCleanup, stringDictLastUsed, nil)
-		return cache
-	}
-	cache.users++
-	cache.lastUsed.Store(time.Now().UnixNano())
-	return cache
-}
-
-func (s *StorageString) releaseDictionary(cache *stringDictionaryCache) {
-	s.dictMu.Lock()
-	defer s.dictMu.Unlock()
-	cache.users--
-	if cache.users < 0 {
-		panic("string dictionary lease released twice")
-	}
-}
-
-// decodeDictionary is the only full materialization path. Legacy monolithic
-// LZ4 files and new compressed handles share admission, accounting and eviction.
-func (s *StorageString) decodeDictionary() string {
-	if s.textBuffer != nil {
-		dst := make([]byte, s.textBuffer.DecodedSize())
-		s.textBuffer.DecodeInto(dst)
-		return unsafe.String(unsafe.SliceData(dst), len(dst))
-	}
-	if !s.compressed {
-		return s.dictionary
-	}
-	if len(s.compressedDict) < 4 {
-		panic("invalid legacy LZ4 dictionary")
-	}
-	length := int(binary.LittleEndian.Uint32(s.compressedDict[:4]))
-	dst := make([]byte, length)
-	n, err := lz4.UncompressBlock(s.compressedDict[4:], dst)
-	if err != nil || n != length {
-		panic("invalid legacy LZ4 dictionary")
-	}
-	return unsafe.String(unsafe.SliceData(dst), len(dst))
-}
-
-type decodedStringReader struct {
-	storage *StorageString
-	cache   *stringDictionaryCache
-	text    string // immutable reader-owned workspace or its retained cache payload
-}
-
-// An automatic cold reader keeps scalar probes compressed. Bulk consumers
-// already selected their rows: materialize just that batch into an owned arena,
-// reusing one cursor scratch across its values instead of decoding the same
-// block again in every subsequent scalar string operation. No returned value
-// borrows the scratch, and neither preparation nor probes publish cache state.
-type batchStringReader struct {
-	storage           *StorageString
-	decoded           *decodedStringReader
-	demandedWorkBytes uint64 // invocation-local demand, updated once per consumed batch
-}
-
-func (r *batchStringReader) release() {
-	if r.decoded != nil {
-		r.decoded.release()
-		r.decoded = nil
-	}
-}
-func (r *batchStringReader) JITValueType() uint8 { return scm.JITTypeUnknown }
-
-// Only bulk preparation may use this contract: scalar probes can still return
-// compressed handles, while every non-NULL batch cell is an owned plain string.
-func (r *batchStringReader) JITBatchValueType() uint8 {
-	if r.storage.stringHasNull() {
-		return scm.JITTypeUnknown
-	}
-	return scm.TagString
-}
-func (r *batchStringReader) GetValue(row uint32) scm.Scmer {
-	if r.decoded != nil {
-		return r.decoded.GetValue(row)
-	}
-	return r.storage.GetValue(row)
-}
-
-func (r *batchStringReader) GetValueMulti(rows []uint32, target []scm.Scmer, stride int) {
-	if stride <= 0 {
-		stride = 1
-	}
-	if r.decoded != nil {
-		r.decoded.GetValueMulti(rows, target, stride)
-		return
-	}
-	for i, row := range rows {
-		target[i*stride] = r.storage.compressedAt(row)
-	}
-	total := r.prepareBatch(target, len(rows), stride)
-	if r.decoded != nil {
-		r.decoded.GetValueMulti(rows, target, stride)
-		return
-	}
-	atomic.AddUint64(&r.storage.readCount, uint64(len(rows)))
-	r.materializeBatch(target, len(rows), stride, total)
-}
-
-func (r *batchStringReader) GetValueRange(row, count uint32, target []scm.Scmer, stride int) {
-	if stride <= 0 {
-		stride = 1
-	}
-	if r.decoded != nil {
-		r.decoded.GetValueRange(row, count, target, stride)
-		return
-	}
-	for i := uint32(0); i < count; i++ {
-		target[int(i)*stride] = r.storage.compressedAt(row + i)
-	}
-	total := r.prepareBatch(target, int(count), stride)
-	if r.decoded != nil {
-		r.decoded.GetValueRange(row, count, target, stride)
-		return
-	}
-	atomic.AddUint64(&r.storage.readCount, uint64(count))
-	r.materializeBatch(target, int(count), stride, total)
-}
-
-func (r *batchStringReader) prepareBatch(target []scm.Scmer, count, stride int) int {
-	total, decodeBytes, previousBlock := 0, 0, -1
-	for i := 0; i < count; i++ {
-		if value := target[i*stride]; value.IsBufferString() {
-			length := scm.BufferStringLength(value)
-			total += length
-			start := int(scm.BufferStringOffset(value))
-			for block, last := start/scm.StringBufferBlockBytes, (start+length-1)/scm.StringBufferBlockBytes; block <= last; block++ {
-				if work := r.storage.textBuffer.BlockDecodeBytes(block); work != 0 && block != previousBlock {
-					decodeBytes += work
-					previousBlock = block
-				}
-			}
-		}
-	}
-	r.demandedWorkBytes += uint64(max(total, decodeBytes))
-	// A dictionary can be smaller than copying repeated values or decoding
-	// alternating blocks for the already demanded batch. Count exactly the
-	// compressed block transitions the single cursor scratch would perform;
-	// raw blocks contribute no codec work. Reuse a private whole workspace only
-	// after this demanded work covers it, without cache admission or waiting.
-	if total > 0 && r.demandedWorkBytes >= uint64(r.storage.textBuffer.DecodedSize()) {
-		r.decoded = &decodedStringReader{storage: r.storage, text: r.storage.decodeDictionary()}
-	}
-	return total
-}
-
-func (r *batchStringReader) materializeBatch(target []scm.Scmer, count, stride, total int) {
-	if total == 0 {
-		return
-	}
-	bytes := make([]byte, total)
-	var scratch scm.TextScratch
-	var cursor scm.TextCursor
-	offset := 0
-	for i := 0; i < count; i++ {
-		value := target[i*stride]
-		if !value.IsBufferString() {
-			continue
-		}
-		length := scm.BufferStringLength(value)
-		cursor.Reset(value)
-		cursor.Read(bytes[offset:offset+length], &scratch)
-		target[i*stride] = scm.NewString(unsafe.String(&bytes[offset], length))
-		offset += length
-	}
-}
-
-// Reader preparation can change the physical tag without changing the column
-// type. Typed JIT filters must specialize against this prepared representation.
-func (r *decodedStringReader) JITValueType() uint8 {
-	if r.storage.stringHasNull() {
-		return scm.JITTypeUnknown
-	}
-	if r.storage.format == FormatRaw {
-		return scm.TagString
-	}
-	return r.storage.JITValueType()
-}
-
-func (r *decodedStringReader) release() {
-	if r.cache != nil {
-		r.storage.releaseDictionary(r.cache)
-		r.cache = nil
-	}
-	r.text = ""
-}
-
-func (r *decodedStringReader) GetValue(row uint32) scm.Scmer {
-	text := r.text
-	return r.storage.decodeAt(row, text, unsafe.Pointer(unsafe.StringData(text)))
-}
-
-func (r *decodedStringReader) GetValueMulti(rows []uint32, target []scm.Scmer, stride int) {
-	if stride <= 0 {
-		stride = 1
-	}
-	atomic.AddUint64(&r.storage.readCount, uint64(len(rows)))
-	text := r.text
-	base := unsafe.Pointer(unsafe.StringData(text))
-	for i, row := range rows {
-		target[i*stride] = r.storage.decodeAt(row, text, base)
-	}
-}
-
-func (r *decodedStringReader) GetValueRange(row, count uint32, target []scm.Scmer, stride int) {
-	if stride <= 0 {
-		stride = 1
-	}
-	atomic.AddUint64(&r.storage.readCount, uint64(count))
-	text := r.text
-	base := unsafe.Pointer(unsafe.StringData(text))
-	for i := uint32(0); i < count; i++ {
-		target[int(i)*stride] = r.storage.decodeAt(row+i, text, base)
-	}
 }
