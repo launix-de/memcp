@@ -26,7 +26,7 @@ import "github.com/launix-de/memcp/scm"
 const mosiPacketBytes = 64 * 1024
 
 const mosiHTTPPath = "/cluster"
-const mosiSubprotocol = "memcp.channels.v9"
+const mosiSubprotocol = "memcp.channels.v10"
 const mosiMaxMessageBytes = 256 * 1024
 const maxNodeRecordBytes = 32 * 1024 * 1024
 
@@ -226,6 +226,9 @@ func encodeMosiPacket(p mosiPacket) (data []byte, err error) {
 		w.text(p.User)
 		w.text(p.Hash)
 		w.routes(p.Forwards)
+		w.text(p.State)
+		w.text(p.Owner)
+		w.readers(p.Readers)
 	case "object":
 		w.number(p.Epoch)
 		w.text(p.Content)
@@ -327,6 +330,9 @@ func decodeMosiPacket(data []byte) (packet *mosiPacket, err error) {
 		p.User = string(r.blob())
 		p.Hash = string(r.blob())
 		p.Forwards = r.routes()
+		p.State = string(r.blob())
+		p.Owner = string(r.blob())
+		p.Readers = r.readers()
 	case "object":
 		p.Epoch = r.uint()
 		p.Content = string(r.blob())

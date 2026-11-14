@@ -147,6 +147,9 @@ func TestClusterImportedTransactionRegistersItsOwnPeerLocalNumber(t *testing.T) 
 	handle := scm.ClusterHandle{View: scm.NewSlice([]scm.Scmer{
 		scm.NewInt(int64(TxACID)), scm.NewBool(false), scm.NewInt(int64(local.ID)),
 		scm.NewString("cluster/" + identity), scm.NewInt(0), scm.NewInt(0), scm.NewString(identity),
+		// The canonical native view carries five empty catalog authority fields
+		// for an ordinary transaction.
+		scm.NewString(""), scm.NewString(""), scm.NewString(""), scm.NewString(""), scm.NewString(""),
 	})}
 	first := importTransactionState(handle).Any().(*TxContext)
 	second := importTransactionState(handle).Any().(*TxContext)

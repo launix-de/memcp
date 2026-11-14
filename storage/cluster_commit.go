@@ -69,6 +69,9 @@ func (preparation *acidPreparation) projectLocked(source, target *storageShard) 
 		}
 	}
 	preparation.visibility[target] = projected
+	if len(projected) != 0 {
+		target.reserveRecoveryDecision()
+	}
 	target.prepared.Store(preparation)
 	// The producer owns this copy while WAL I/O runs outside publication locks.
 	copy := make(map[uint32]bool, len(projected))
@@ -141,12 +144,13 @@ func (tx *TxContext) writeACIDIntents(shards []*storageShard, directory map[*sto
 		st := directory[shard]
 		for _, recid := range st.DeleteRecids {
 			if st.DeleteMask.Get(uint(recid)) {
-				shard.logfile.Write(LogEntryDelete{idx: recid, txID: tx.durableID()})
+				shard.writeRecoveryEntry(LogEntryDelete{idx: recid, txID: tx.durableID()})
 			}
 		}
-		for _, recid := range st.UndeleteRecids {
+		for _, change := range st.UndeleteRecids {
+			recid := change.recid
 			if st.UndeleteMask.Get(uint(recid)) {
-				shard.logfile.Write(LogEntryUndelete{idx: recid, txID: tx.durableID()})
+				shard.writeRecoveryEntry(LogEntryUndelete{idx: recid, txID: tx.durableID()})
 			}
 		}
 	}
@@ -158,7 +162,11 @@ func (tx *TxContext) prepareACID(ctx context.Context) error {
 	tx.mu.Unlock()
 	preparation := tx.prepared
 	if preparation == nil {
-		preparation = &acidPreparation{tx: tx.transactionState, done: make(chan struct{}), backend: sharedCommitBackend(), owner: tx}
+		owner := tx
+		if tx.decisionExecutor != nil {
+			owner = tx.decisionExecutor
+		}
+		preparation = &acidPreparation{tx: tx.transactionState, done: make(chan struct{}), backend: tx.catalogDecisionBackend(), owner: owner}
 	}
 	known := make(map[*storageShard]bool, len(preparation.shards))
 	for _, shard := range preparation.shards {
@@ -198,7 +206,6 @@ func (tx *TxContext) prepareACID(ctx context.Context) error {
 			shard.mu.Unlock()
 			return err
 		}
-		shard.prepared.Store(preparation)
 		intents := make(map[uint32]bool)
 		st := directory[shard]
 		for _, recid := range st.DeleteRecids {
@@ -206,7 +213,8 @@ func (tx *TxContext) prepareACID(ctx context.Context) error {
 				intents[recid] = true
 			}
 		}
-		for _, recid := range st.UndeleteRecids {
+		for _, change := range st.UndeleteRecids {
+			recid := change.recid
 			if st.UndeleteMask.Get(uint(recid)) {
 				intents[recid] = false
 			}
@@ -216,6 +224,10 @@ func (tx *TxContext) prepareACID(ctx context.Context) error {
 			preparation.visibility = make(map[*storageShard]map[uint32]bool)
 		}
 		preparation.visibility[shard] = intents
+		if len(intents) != 0 {
+			shard.reserveRecoveryDecision()
+		}
+		shard.prepared.Store(preparation)
 		preparation.planMu.Unlock()
 		preparation.shards = append(preparation.shards, shard)
 		shard.mu.Unlock()
@@ -249,11 +261,8 @@ func (preparation *acidPreparation) completeRecordedDecision(ctx context.Context
 			err = fmt.Errorf("prepared transaction recovery: %v", failure)
 		}
 	}()
-	if preparation.backend == nil || !readDistributedDecision(preparation.backend, preparation.tx.durableID()) {
-		return false, nil
-	}
 	tx := preparation.owner
-	if tx.coordinator == nil {
+	if preparation.tx.coordinator == nil {
 		// The originating frontend owns non-atomic session/executor fields.
 		// Recovery joins that same executor instead of mutating them concurrently.
 		if !tx.queryMu.TryLock() {
@@ -261,18 +270,50 @@ func (preparation *acidPreparation) completeRecordedDecision(ctx context.Context
 		}
 		defer tx.queryMu.Unlock()
 	}
+	// Native SCM callers need not own a frontend query mutex. Join the whole
+	// native finalizer before observing its mutable state or retrying publication;
+	// a closed row-preparation channel alone does not finish catalog publication.
+	if !preparation.tx.finalizationMu.TryLock() {
+		return false, nil
+	}
+	defer preparation.tx.finalizationMu.Unlock()
 	if tx.transactionState != preparation.tx {
 		return true, nil
 	}
+	if tx.State == TxAborted || (tx.State == TxCommitted && tx.catalogCommit == nil) {
+		err = tx.finishResourceCommit()
+		return err == nil && tx.sessionClose == nil, err
+	}
+	select {
+	case <-preparation.done:
+		if (tx.catalogIdentity.Load() == nil || tx.coordinator != nil) && tx.sessionClose == nil {
+			return true, nil
+		}
+	default:
+	}
+	coordinatorRetry := tx.hasCatalogIntents() && preparation.tx.coordinator == nil && tx.decisionStarted
+	if !coordinatorRetry && (preparation.backend == nil || !readDistributedDecision(preparation.backend, preparation.tx.commitAuthorityID())) {
+		return false, nil
+	}
 	defer func() {
-		if tx.coordinator == nil && tx.State == TxCommitted && !tx.Session.IsNil() {
+		if preparation.tx.coordinator == nil && tx.State == TxCommitted && !tx.decisionPending() && !tx.Session.IsNil() {
 			tx.Session.Func()(scm.NewString("transaction"), scm.NewNil())
 		}
 	}()
+	if tx.hasCatalogIntents() && preparation.tx.coordinator == nil {
+		err = tx.commit()
+		return err == nil && tx.State == TxCommitted && tx.catalogCommit == nil && tx.sessionClose == nil, err
+	}
 	release, err := tx.lockDecision(ctx, true, nil)
 	if err != nil {
 		return false, err
 	}
+	defer func() {
+		if cleanup := tx.finishResourceCommit(); cleanup != nil && err == nil {
+			err = cleanup
+		}
+		complete = complete && err == nil && tx.sessionClose == nil
+	}()
 	defer release()
 	if tx.State != TxActive {
 		return true, nil
@@ -290,34 +331,42 @@ func (preparation *acidPreparation) followDecision() {
 		return
 	}
 	cluster := activeNodeCluster()
-	if cluster == nil || cluster.service == nil {
-		return
-	}
 	preparation.watchOnce.Do(func() {
-		cluster.service.mu.Lock()
-		if cluster.service.stopping || cluster.ctx.Err() != nil {
+		ctx := context.Background()
+		finish := func() {}
+		if cluster != nil && cluster.service != nil {
+			cluster.service.mu.Lock()
+			if cluster.service.stopping || cluster.ctx.Err() != nil {
+				cluster.service.mu.Unlock()
+				return
+			}
+			cluster.workers.Add(1)
 			cluster.service.mu.Unlock()
-			return
+			ctx = cluster.ctx
+			finish = cluster.workers.Done
 		}
-		cluster.workers.Add(1)
-		cluster.service.mu.Unlock()
 		go func() {
-			defer cluster.workers.Done()
+			defer finish()
 			ticker := time.NewTicker(time.Second)
 			defer ticker.Stop()
+			done := preparation.done
 			for {
 				select {
-				case <-preparation.done:
-					return
-				case <-cluster.ctx.Done():
+				case <-done:
+					// Row admission can finish before catalog publication. Retain
+					// the decision owner until that same finalizer releases its
+					// publication and requested close, even without a connection.
+					// Mutable completion state is inspected under that owner above.
+					done = nil
+				case <-ctx.Done():
 					return
 				case <-ticker.C:
-					complete, err := preparation.completeRecordedDecision(cluster.ctx)
-					if complete {
-						return
-					}
+					complete, err := preparation.completeRecordedDecision(ctx)
 					if err != nil {
 						fmt.Println("prepared transaction recovery:", err)
+					}
+					if complete {
+						return
 					}
 				}
 			}
@@ -346,15 +395,15 @@ func (tx *TxContext) commitDistributedACID() error {
 	if tx.State != TxActive {
 		return fmt.Errorf("transaction is not active")
 	}
-	engine := sharedCommitBackend()
+	engine := tx.catalogDecisionBackend()
 	if engine == nil {
-		return fmt.Errorf("distributed commit requires the shared cluster backend")
+		return fmt.Errorf("native commit decision backend unavailable")
 	}
 	fallback := context.Background()
 	if cluster := activeNodeCluster(); cluster != nil {
 		fallback = cluster.ctx
 	}
-	ctx := scanQueryContext(tx, fallback)
+	ctx := tx.catalogDecisionContext(fallback)
 	owners, epoch := tx.remoteParticipantSnapshot()
 	keys := make([]string, 0)
 	setKeys := func() {
@@ -373,6 +422,14 @@ func (tx *TxContext) commitDistributedACID() error {
 	if !tx.decisionStarted {
 		var failure error
 		for {
+			if tx.hasCatalogIntents() {
+				if tx.catalogCommit == nil || !tx.catalogCommit.participantsPrepared {
+					failure = fmt.Errorf("native catalog participants are not prepared")
+				} else {
+					failure = tx.prepareCatalogDecision()
+				}
+				break
+			}
 			failure = tx.prepareACID(ctx)
 			if failure == nil {
 				for _, owner := range keys {
@@ -405,7 +462,7 @@ func (tx *TxContext) commitDistributedACID() error {
 
 	if !tx.commitDecided {
 		if err := persistenceCall(func() {
-			log := engine.SwapLog(distributedDecisionLog(tx.durableID()), []any{LogEntryCommit{txID: tx.durableID()}}, true)
+			log := engine.SwapLog(distributedDecisionLog(tx.commitAuthorityID()), []any{LogEntryCommit{txID: tx.commitAuthorityID()}}, true)
 			log.Close()
 		}); err != nil {
 			return distributedOutcomeUnknown(err)

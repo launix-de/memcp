@@ -697,7 +697,7 @@ func TestClusterReferenceGrantSurvivesInvalidSuccessor(t *testing.T) {
 	RebuildTable(tbl, true, false)
 	shard := tbl.ActiveShards()[0]
 	remote := "memcp://11111111-1111-4111-8111-111111111111"
-	cluster := &nodeCluster{self: clusterMember{ID: "local"}}
+	cluster := &nodeCluster{self: clusterMember{ID: "memcp://22222222-2222-4222-8222-222222222222"}}
 	cluster.initializeManager()
 	peer := &mosiPeer{outgoing: newMosiMailbox(), done: make(chan struct{})}
 	cluster.view.Store(&clusterView{links: []*clusterLink{{member: clusterMember{ID: remote}, peer: peer}}})
@@ -1728,7 +1728,7 @@ func TestClusterLiveReferencePublishesEpochBeforePayloadCanMergeCells(t *testing
 	tbl, _ := createDurabilityTestTable(t, "t_live_reference_epoch", 4)
 	peer, client, _ := setupRemoteScanConnection(t)
 	owner := nodeScans.Load()
-	cluster := &nodeCluster{self: clusterMember{ID: client.authNodeID(), Boot: client.id}, ctx: context.Background(), service: client}
+	cluster := &nodeCluster{self: clusterMember{ID: "memcp://" + client.authNodeID(), Boot: client.id}, ctx: context.Background(), service: client}
 	cluster.initializeManager()
 	remote := peer.objectPeer.ID
 	cluster.view.Store(&clusterView{links: []*clusterLink{{member: clusterMember{ID: remote}, peer: peer}}})

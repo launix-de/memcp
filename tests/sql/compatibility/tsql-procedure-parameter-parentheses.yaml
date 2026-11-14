@@ -1,0 +1,125 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  restart_after_setup: true
+  description: Parenthesized procedure headers share ordinary parameter defaults output and body execution
+setup:
+- sql: |
+    CREATE PROCEDURE header_reference(@left INT=3,@right INT=@left,@answer INT=0 OUTPUT)
+    AS SET @answer=@right;
+- sql: |
+    CREATE PROCEDURE header_reference_chain @first INT=11,@second INT=@first,@third INT=@second
+    AS SELECT @first AS first_value,@second AS second_value,@third AS third_value;
+- sql: CREATE TABLE header_source(id INT PRIMARY KEY,value INT)
+- sql: INSERT INTO header_source VALUES(1,17)
+- sql: CREATE TABLE header_target(id INT,value INT)
+- sql: |
+    CREATE PROCEDURE dbo.header_copy(@key INT) /* header comment */ AS
+      DECLARE @value INT;
+      SELECT @value=value FROM header_source WHERE id=@key;
+      IF @value IS NOT NULL
+        INSERT INTO header_target(id,value) SELECT id,@value+1 FROM header_source WHERE id=@key;
+- sql: |
+    CREATE PROC dbo.header_defaults(
+      @left INT,
+      @right INT=5,
+      @sum INT=0 OUTPUT
+    ) AS SET @sum=@left+@right;
+- sql: CREATE PROCEDURE dbo.header_bare @value INT AS SELECT @value AS result;
+test_cases:
+# SQL Server 2022 reference: https://dbfiddle.uk/i_PTLT7v
+- name: Persisted parameter references use the preceding formal default
+  sql: DECLARE @result INT; EXEC header_reference @answer=@result OUTPUT; SELECT @result AS result;
+  expect: {rows: 1,data: [{result: 3}]}
+- name: An earlier supplied value replaces the source of a later default
+  sql: DECLARE @result INT; EXEC header_reference @left=11,@answer=@result OUTPUT; SELECT @result AS result;
+  expect: {rows: 1,data: [{result: 11}]}
+- name: Explicit DEFAULT retains the earlier formal reference
+  sql: DECLARE @result INT; EXEC header_reference @left=12,@right=DEFAULT,@answer=@result OUTPUT; SELECT @result AS result;
+  expect: {rows: 1,data: [{result: 12}]}
+- name: A supplied argument overrides the formal reference default
+  sql: DECLARE @result INT; EXEC header_reference @right=17,@answer=@result OUTPUT; SELECT @result AS result;
+  expect: {rows: 1,data: [{result: 17}]}
+- name: Caller locals do not shadow a callee formal default
+  sql: DECLARE @left INT=99,@result INT; EXEC header_reference @left=7,@answer=@result OUTPUT; SELECT @left AS caller_value,@result AS result;
+  expect: {rows: 1,data: [{caller_value: 99,result: 7}]}
+- name: Explicit argument expressions still read caller locals
+  sql: DECLARE @left INT=99,@result INT; EXEC header_reference @left=7,@right=@left,@answer=@result OUTPUT; SELECT @result AS result;
+  expect: {rows: 1,data: [{result: 99}]}
+- name: A supplied NULL remains distinct from an omitted argument
+  sql: DECLARE @result INT=99; EXEC header_reference @left=NULL,@answer=@result OUTPUT; SELECT @result AS result;
+  expect: {rows: 1,data: [{result: null}]}
+- name: Chained formal defaults bind in declaration order
+  sql: EXEC header_reference_chain
+  expect: {rows: 1,data: [{first_value: 11,second_value: 11,third_value: 11}]}
+- name: Reordered named arguments do not change declaration dependencies
+  sql: EXEC header_reference_chain @third=27,@first=13
+  expect: {rows: 1,data: [{first_value: 13,second_value: 13,third_value: 27}]}
+- name: A required preceding parameter can supply a later default
+  setup:
+  - sql: CREATE PROCEDURE header_required_reference @left INT,@right INT=@left AS SELECT @right AS result;
+  sql: EXEC header_required_reference @left=19
+  expect: {rows: 1,data: [{result: 19}]}
+  cleanup:
+  - sql: DROP PROCEDURE header_required_reference
+- name: Formal reference conversion uses the destination declaration
+  setup:
+  - sql: CREATE PROCEDURE header_width_reference @left VARCHAR(20)='abcdef',@right VARCHAR(3)=@left AS SELECT @right AS result;
+  sql: EXEC header_width_reference
+  expect: {rows: 1,data: [{result: abc}]}
+  cleanup:
+  - sql: DROP PROCEDURE header_width_reference
+- name: A forward parameter default is invalid at declaration
+  sql: CREATE PROCEDURE header_forward_reference @left INT=@right,@right INT=4 AS SELECT @left AS result;
+  expect: {error: true}
+- name: A self parameter default is invalid at declaration
+  sql: CREATE PROCEDURE header_self_reference @left INT=@left AS SELECT @left AS result;
+  expect: {error: true}
+- name: Invalid formal defaults never publish a procedure
+  sql: SELECT COUNT(*) AS total FROM sys.objects WHERE type='P' AND name IN ('header_forward_reference','header_self_reference')
+  expect: {rows: 1,data: [{total: 0}]}
+- name: A parenthesized single parameter accepts comments and a body without BEGIN
+  sql: EXEC dbo.header_copy @key=1
+- name: The conditional INSERT SELECT executes with its bound header argument
+  sql: SELECT id,value FROM header_target
+  expect: {rows: 1,data: [{id: 1,value: 18}]}
+- name: Parenthesized declarations retain ordinary defaults and output copyback
+  sql: DECLARE @answer INT=0; EXEC dbo.header_defaults @left=7,@sum=@answer OUTPUT; SELECT @answer AS result;
+  expect: {rows: 1,data: [{result: 12}]}
+- name: An explicit argument overrides the same declaration default
+  sql: DECLARE @answer INT=0; EXEC dbo.header_defaults @left=7,@right=2,@sum=@answer OUTPUT; SELECT @answer AS result;
+  expect: {rows: 1,data: [{result: 9}]}
+- name: ALTER retains a parenthesized header and ordinary BEGIN END body
+  sql: ALTER PROCEDURE dbo.header_defaults(@left INT,@right INT=7,@sum INT=0 OUTPUT) AS BEGIN SET @sum=@left+@right; END;
+- name: Altered parenthesized defaults supply current output values
+  sql: DECLARE @answer INT=0; EXEC dbo.header_defaults @left=7,@sum=@answer OUTPUT; SELECT @answer AS result;
+  expect: {rows: 1,data: [{result: 14}]}
+- name: CREATE OR ALTER uses the same header owner
+  sql: CREATE OR ALTER PROC dbo.header_defaults(@left INT,@right INT=9,@sum INT=0 OUTPUT) AS SET @sum=@left+@right;
+- name: Replaced header declarations retain output behavior
+  sql: DECLARE @answer INT=0; EXEC dbo.header_defaults @left=7,@sum=@answer OUTPUT; SELECT @answer AS result;
+  expect: {rows: 1,data: [{result: 16}]}
+- name: The original unparenthesized declaration syntax remains executable
+  sql: EXEC dbo.header_bare @value=23
+  expect: {rows: 1,data: [{result: 23}]}
+- name: A missing closing header delimiter is invalid SQL
+  sql: CREATE PROCEDURE dbo.header_unclosed(@value INT AS SELECT @value AS result;
+  expect: {error: true}
+- name: Invalid headers never publish a procedure declaration
+  scm: (empty_list? (showprocedures "memcp-tests" "header_unclosed" nil))
+  expect: {result: true}
+- name: Parenthesized headers keep duplicate parameter rejection
+  sql: CREATE PROCEDURE dbo.header_duplicate(@value INT,@value INT) AS SELECT 1 AS result;
+  expect: {error: true}
+cleanup:
+- sql: DROP PROCEDURE IF EXISTS header_reference
+- sql: DROP PROCEDURE IF EXISTS header_reference_chain
+- sql: DROP PROCEDURE IF EXISTS dbo.header_duplicate
+- sql: DROP PROCEDURE IF EXISTS dbo.header_unclosed
+- sql: DROP PROCEDURE IF EXISTS dbo.header_defaults
+- sql: DROP PROCEDURE IF EXISTS dbo.header_copy
+- sql: DROP PROCEDURE IF EXISTS dbo.header_bare
+- sql: DROP TABLE IF EXISTS header_target
+- sql: DROP TABLE IF EXISTS header_source

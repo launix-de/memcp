@@ -284,7 +284,7 @@ func match(val Scmer, pattern Scmer, en *Env, mutable bool) bool {
 			}
 			return false
 		case "cons":
-			if list, ok := scmerAsSlice(valueFromPattern(val, en)); ok {
+			if list, ok := scmerAsSlice(val); ok {
 				if len(list) == 0 {
 					return false
 				}

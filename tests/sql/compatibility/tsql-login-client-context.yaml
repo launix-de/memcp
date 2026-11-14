@@ -1,0 +1,71 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Connection metadata comes from client LOGIN7 fields and survives native pooling reset
+test_cases:
+- name: Scalar function captures the invoking application and host as explicit operands
+  sql: |
+    CREATE FUNCTION dbo.client_label() RETURNS NVARCHAR(256) AS BEGIN
+      DECLARE @app NVARCHAR(128)=APP_NAME();
+      IF PATINDEX('%#%',@app)>0
+        SET @app=SUBSTRING(@app,0,PATINDEX('%#%',@app));
+      RETURN @app+':'+HOST_NAME();
+    END
+- name: Scalar function preserves the database principal fallback
+  sql: |
+    CREATE FUNCTION dbo.client_actor() RETURNS NVARCHAR(128) AS BEGIN
+      DECLARE @actor NVARCHAR(128);
+      DECLARE @app NVARCHAR(128)=APP_NAME();
+      IF PATINDEX('%#%',@app)>0
+        SET @actor=ISNULL(SUBSTRING(@app,PATINDEX('%#%',@app)+1,LEN(@app)),USER_NAME());
+      RETURN ISNULL(@actor,USER_NAME());
+    END
+- name: Host and application names are declared by the connecting client
+  tds:
+    hostname: client-workstation
+    appname: installer-client
+    statements:
+    - sql: SELECT HOST_NAME() AS client_host,APP_NAME() AS client_app
+      expect: {rows: 1,data: [{client_host: client-workstation,client_app: installer-client}]}
+    - sql: SELECT dbo.client_label() AS label
+      expect: {rows: 1,data: [{label: 'installer-client:client-workstation'}]}
+    - sql: SELECT dbo.client_actor() AS actor
+      expect: {rows: 1,data: [{actor: dbo}]}
+    - reset: true
+      sql: SELECT HOST_NAME() AS client_host,APP_NAME() AS client_app
+      expect: {rows: 1,data: [{client_host: client-workstation,client_app: installer-client}]}
+- name: Unicode client labels retain their complete declared text
+  tds:
+    hostname: Prüfgerät
+    appname: Prüfung €
+    statements:
+    - sql: SELECT HOST_NAME() AS client_host,APP_NAME() AS client_app
+      expect: {rows: 1,data: [{client_host: Prüfgerät,client_app: Prüfung €}]}
+- name: Empty client metadata never substitutes server host or process names
+  tds:
+    hostname: ''
+    appname: ''
+    statements:
+    - sql: SELECT HOST_NAME() AS client_host,APP_NAME() AS client_app
+      expect: {rows: 1,data: [{client_host: '',client_app: ''}]}
+- name: Client contexts cannot leak between otherwise identical cached queries
+  tds:
+    hostname: other-workstation
+    appname: another-client
+    statements:
+    - sql: SELECT HOST_NAME() AS client_host,APP_NAME() AS client_app
+      expect: {rows: 1,data: [{client_host: other-workstation,client_app: another-client}]}
+    - sql: SELECT dbo.client_label() AS label
+      expect: {rows: 1,data: [{label: 'another-client:other-workstation'}]}
+- name: Application parsing inside a scalar function uses the current client context
+  tds:
+    hostname: test-workstation
+    appname: 'test-client#user'
+    statements:
+    - sql: SELECT dbo.client_label() AS label
+      expect: {rows: 1,data: [{label: 'test-client:test-workstation'}]}
+    - sql: SELECT dbo.client_actor() AS actor
+      expect: {rows: 1,data: [{actor: user}]}

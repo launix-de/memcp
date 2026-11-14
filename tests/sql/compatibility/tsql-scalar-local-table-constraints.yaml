@@ -1,0 +1,96 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  description: Function local column keys and nullability retain native enforcement
+setup:
+- sql: |
+    CREATE FUNCTION dbo.local_key_sum(@first INT,@second INT) RETURNS INT AS BEGIN
+      DECLARE @rows TABLE(id INT PRIMARY KEY,amount INT NOT NULL);
+      DECLARE @total INT;
+      INSERT INTO @rows(id,amount) SELECT @first,10;
+      INSERT INTO @rows(id,amount) SELECT @second,20;
+      SELECT @total=SUM(amount) FROM @rows;
+      RETURN @total;
+    END
+- sql: |
+    CREATE FUNCTION dbo.local_unique_count(@first INT,@second INT) RETURNS INT AS BEGIN
+      DECLARE @rows TABLE(value INT NULL UNIQUE);
+      DECLARE @total INT;
+      INSERT INTO @rows(value) SELECT @first;
+      INSERT INTO @rows(value) SELECT @second;
+      SELECT @total=COUNT(*) FROM @rows;
+      RETURN @total;
+    END
+- sql: |
+    CREATE FUNCTION dbo.local_required_value(@value INT) RETURNS INT AS BEGIN
+      DECLARE @rows TABLE(value INT NOT NULL);
+      DECLARE @result INT;
+      INSERT INTO @rows(value) SELECT @value;
+      SELECT @result=SUM(value) FROM @rows;
+      RETURN @result;
+    END
+- sql: |
+    CREATE FUNCTION dbo.local_calendar_key(@day DATE) RETURNS INT AS BEGIN
+      DECLARE @rows TABLE(dates DATE NOT NULL PRIMARY KEY);
+      DECLARE @result INT;
+      INSERT INTO @rows(dates) SELECT @day;
+      SELECT @result=COUNT(*) FROM @rows;
+      RETURN @result;
+    END
+- sql: |
+    CREATE FUNCTION dbo.local_default_sum(@explicit INT) RETURNS INT AS BEGIN
+      DECLARE @rows TABLE(id INT PRIMARY KEY,amount SMALLINT NOT NULL DEFAULT(7),enabled BIT DEFAULT(3));
+      DECLARE @result INT;
+      INSERT INTO @rows(id) SELECT 1;
+      INSERT INTO @rows(id,amount) SELECT 2,@explicit;
+      SELECT @result=SUM(amount)+SUM(CONVERT(INT,enabled))*100 FROM @rows;
+      RETURN @result;
+    END
+test_cases:
+- name: Distinct private primary keys preserve both inserted rows
+  sql: SELECT dbo.local_key_sum(1,2) AS total
+  expect: {rows: 1,data: [{total: 30}]}
+- name: Duplicate private primary keys are invalid data
+  sql: SELECT dbo.local_key_sum(1,1) AS total
+  expect: {error: true,contains: Duplicate entry}
+- name: An inline private primary key rejects NULL without explicit NOT NULL
+  sql: SELECT dbo.local_key_sum(NULL,2) AS total
+  expect: {error: true,contains: cannot be NULL}
+- name: A failed private insertion leaves the next invocation independent
+  sql: SELECT dbo.local_key_sum(1,2) AS first_total,dbo.local_key_sum(1,2) AS second_total
+  expect: {rows: 1,data: [{first_total: 30,second_total: 30}]}
+- name: A nullable private unique column accepts one NULL and one distinct value
+  sql: SELECT dbo.local_unique_count(NULL,7) AS total
+  expect: {rows: 1,data: [{total: 2}]}
+- name: Private UNIQUE enforces duplicate nonnull values
+  sql: SELECT dbo.local_unique_count(7,7) AS total
+  expect: {error: true,contains: Duplicate entry}
+- name: Private TSQL UNIQUE permits only one NULL
+  sql: SELECT dbo.local_unique_count(NULL,NULL) AS total
+  expect: {error: true,contains: Duplicate entry}
+- name: A private required column rejects an explicit NULL
+  sql: SELECT dbo.local_required_value(NULL) AS value
+  expect: {error: true,contains: cannot be NULL}
+- name: A valid private required value retains its exact result after failure
+  sql: SELECT dbo.local_required_value(17) AS value
+  expect: {rows: 1,data: [{value: 17}]}
+- name: A DATE local key retains its typed declaration
+  sql: DECLARE @day DATE; SET @day='2026-01-02'; SELECT dbo.local_calendar_key(@day) AS total
+  expect: {rows: 1,data: [{total: 1}]}
+- name: Omitted local cells consume type-normalized native literal defaults
+  sql: SELECT dbo.local_default_sum(9) AS value
+  expect: {rows: 1,data: [{value: 216}]}
+- name: Explicit NULL does not consume an omitted-cell default
+  sql: SELECT dbo.local_default_sum(NULL) AS value
+  expect: {error: true,contains: cannot be NULL}
+- name: A later local default invocation retains a clean private relation
+  sql: SELECT dbo.local_default_sum(5) AS value
+  expect: {rows: 1,data: [{value: 212}]}
+cleanup:
+- sql: DROP FUNCTION dbo.local_default_sum
+- sql: DROP FUNCTION dbo.local_key_sum
+- sql: DROP FUNCTION dbo.local_unique_count
+- sql: DROP FUNCTION dbo.local_required_value
+- sql: DROP FUNCTION dbo.local_calendar_key

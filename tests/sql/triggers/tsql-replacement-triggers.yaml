@@ -1,0 +1,137 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Replacement DELETE triggers choose actual mutation before native constraints and AFTER effects
+setup:
+- sql: CREATE TABLE replacement_input(id INT PRIMARY KEY,blocked BIT,value INT)
+- sql: INSERT replacement_input VALUES(1,0,10),(2,1,20),(3,0,30)
+- sql: CREATE TABLE replacement_dependencies(id INT PRIMARY KEY,input_id INT,CONSTRAINT FK_replacement_dependency FOREIGN KEY(input_id) REFERENCES replacement_input(id))
+- sql: INSERT replacement_dependencies VALUES(1,2)
+- sql: CREATE TABLE replacement_candidates(old_count INT)
+- sql: CREATE TABLE replacement_matches(id INT,tag INT)
+- sql: INSERT replacement_matches VALUES(10,1),(10,2),(10,3),(11,1)
+- sql: CREATE TABLE replacement_audit(id INT,value INT)
+- sql: CREATE TABLE replacement_summary(old_count INT,new_count INT)
+- sql: |
+    CREATE TRIGGER replacement_after ON replacement_input AFTER DELETE AS BEGIN
+      INSERT replacement_audit SELECT id,value FROM deleted;
+      INSERT replacement_summary SELECT (SELECT COUNT(*) FROM deleted),(SELECT COUNT(*) FROM inserted);
+    END
+- sql: |
+    CREATE TRIGGER replacement_delete ON replacement_input INSTEAD OF DELETE AS BEGIN
+      SET NOCOUNT ON;
+      IF EXISTS(SELECT id FROM deleted WHERE blocked=1)
+      BEGIN
+        RAISERROR(N'protected row retained',16,7);
+        RETURN;
+      END;
+      INSERT replacement_candidates SELECT COUNT(*) FROM deleted;
+      DELETE FROM replacement_input WHERE id IN (SELECT id FROM deleted);
+    END
+cleanup:
+- sql: DROP TRIGGER IF EXISTS replacement_delete
+- sql: DROP TRIGGER IF EXISTS replacement_after
+- sql: DROP TABLE IF EXISTS replacement_matches
+- sql: DROP TABLE IF EXISTS replacement_candidates
+- sql: DROP TABLE IF EXISTS replacement_dependencies
+- sql: DROP TABLE IF EXISTS replacement_input
+- sql: DROP TABLE IF EXISTS replacement_audit
+- sql: DROP TABLE IF EXISTS replacement_summary
+test_cases:
+- name: Replacement error returns without deleting or ending the callers transaction
+  tds:
+    statements:
+    - {connection: owner,sql: BEGIN TRANSACTION}
+    - {connection: owner,sql: 'INSERT replacement_input VALUES(99,0,99)'}
+    - connection: owner
+      sql: DELETE FROM replacement_input WHERE id=2
+      expect: {error: true,contains: ['protected row retained']}
+    - connection: owner
+      sql: SELECT id,value,@@TRANCOUNT AS open_transactions FROM replacement_input ORDER BY id
+      expect:
+        rows: 4
+        data: [{id: 1,value: 10,open_transactions: 1},{id: 2,value: 20,open_transactions: 1},{id: 3,value: 30,open_transactions: 1},{id: 99,value: 99,open_transactions: 1}]
+    - connection: owner
+      sql: SELECT id FROM replacement_audit
+      expect: {rows: 0}
+    - connection: owner
+      sql: SELECT old_count FROM replacement_summary
+      expect: {rows: 0}
+    - {connection: owner,sql: 'DELETE FROM replacement_input WHERE id IN (1,3)'}
+    - connection: owner
+      sql: SELECT id,value FROM replacement_input ORDER BY id
+      expect: {rows: 2,data: [{id: 2,value: 20},{id: 99,value: 99}]}
+    - connection: owner
+      sql: SELECT id,value FROM replacement_audit ORDER BY id
+      expect: {rows: 2,data: [{id: 1,value: 10},{id: 3,value: 30}]}
+    - connection: owner
+      sql: SELECT old_count,new_count FROM replacement_summary
+      expect: {rows: 1,data: [{old_count: 2,new_count: 0}]}
+    - {connection: owner,sql: ROLLBACK TRANSACTION}
+    - connection: observer
+      sql: SELECT id,value FROM replacement_input ORDER BY id
+      expect: {rows: 3,data: [{id: 1,value: 10},{id: 2,value: 20},{id: 3,value: 30}]}
+    - connection: observer
+      sql: SELECT id FROM replacement_audit
+      expect: {rows: 0}
+    - connection: observer
+      sql: SELECT old_count FROM replacement_summary
+      expect: {rows: 0}
+- name: The frontend propagates the exact typed error after the native replacement returns
+  scm: |
+    (begin
+      (define caller (newsession)) (caller "username" "root")
+      (define rejected (try (lambda () (begin
+        (tsql_execute_request "memcp-tests" "DELETE FROM replacement_input WHERE id=2"
+          caller nil 0 (lambda (_row) true) (lambda args true)) false))
+        (lambda (failure) (expression_equal? failure
+          '("tsql-error" 50000 "protected row retained" 7 16)))))
+      (and rejected (nil? (caller "transaction"))))
+  expect: {result: true}
+- name: Zero candidate rows still invoke replacement and its explicit zero row inner DELETE
+  sql: DELETE FROM replacement_input WHERE id=1000
+  expect: {}
+- name: Only the actual inner zero row DELETE invokes AFTER once
+  sql: SELECT old_count,new_count FROM replacement_summary
+  expect: {rows: 1,data: [{old_count: 0,new_count: 0}]}
+- name: An allowed autocommit replacement performs its explicit inner DELETE
+  sql: DELETE FROM replacement_input WHERE id=1
+  expect: {}
+- name: The original replacement does not duplicate real AFTER row effects
+  sql: SELECT id,value FROM replacement_audit
+  expect: {rows: 1,data: [{id: 1,value: 10}]}
+- name: Candidate selection leaves all other rows intact
+  sql: SELECT id,value FROM replacement_input ORDER BY id
+  expect: {rows: 2,data: [{id: 2,value: 20},{id: 3,value: 30}]}
+- name: Replacement timing and source survive native restart
+  action: restart
+- name: Restarted replacement still retains a protected row without aborting the connection
+  tds:
+    statements:
+    - sql: DELETE FROM replacement_input WHERE id=2
+      expect: {error: true,contains: ['protected row retained']}
+    - sql: SELECT id,value,@@TRANCOUNT AS open_transactions FROM replacement_input ORDER BY id
+      expect: {rows: 2,data: [{id: 2,value: 20,open_transactions: 0},{id: 3,value: 30,open_transactions: 0}]}
+    - {sql: DELETE FROM replacement_input WHERE id=3}
+    - sql: SELECT id,value FROM replacement_audit ORDER BY id
+      expect: {rows: 2,data: [{id: 1,value: 10},{id: 3,value: 30}]}
+    - sql: SELECT old_count,new_count FROM replacement_summary ORDER BY old_count
+      expect: {rows: 3,data: [{old_count: 0,new_count: 0},{old_count: 1,new_count: 0},{old_count: 1,new_count: 0}]}
+
+- name: A joined DELETE captures each target row once despite repeated matches
+  setup:
+  - sql: INSERT replacement_input VALUES(10,0,20),(11,0,21)
+  sql: DELETE target FROM replacement_input AS target INNER JOIN replacement_matches AS matched ON matched.id=target.id
+  expect: {}
+- name: Full replacement OLD contains exactly the distinct target set
+  sql: SELECT old_count FROM replacement_candidates ORDER BY old_count
+  expect: {rows: 4,data: [{old_count: 0},{old_count: 1},{old_count: 1},{old_count: 2}]}
+- name: The joined original and the inner real deletion produce one AFTER event per actual row
+  sql: SELECT id,value FROM replacement_audit ORDER BY id
+  expect: {rows: 4,data: [{id: 1,value: 10},{id: 3,value: 30},{id: 10,value: 20},{id: 11,value: 21}]}
+- name: Protected referenced input and its dependent row remain valid after all replacement decisions
+  sql: SELECT input.id,input.value,dependent.input_id FROM replacement_input AS input INNER JOIN replacement_dependencies AS dependent ON dependent.input_id=input.id
+  expect: {rows: 1,data: [{id: 2,value: 20,input_id: 2}]}

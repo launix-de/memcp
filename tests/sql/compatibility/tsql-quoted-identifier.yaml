@@ -1,0 +1,282 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Quoted identifier lexical state, batch boundaries and captured module context
+setup:
+- sql: SET QUOTED_IDENTIFIER ON
+- sql: CREATE TABLE qi_context_input(id INT PRIMARY KEY,x NVARCHAR(20),[a]]b] INT,[a"b] INT)
+- sql: INSERT INTO qi_context_input VALUES(1,N'stored',7,8)
+- sql: CREATE TABLE qi_trigger_input(id INT PRIMARY KEY)
+- sql: CREATE TABLE qi_trigger_log(label NVARCHAR(20))
+test_cases:
+- name: ON lexical context escapes identifier brackets and doubled double quotes
+  scm: |
+    (begin
+      (define parsed (tsql_parse_context "SELECT \"a]b\",\"a\"\"b\";" true false))
+      (and (identical? (parsed "quoted_identifier") true)
+        (equal? (parsed "text") "SELECT [a]]b],[a\"b];")))
+  expect: {result: true}
+- name: OFF lexical context preserves apostrophes escaped double quotes and empty strings
+  scm: |
+    (begin
+      (define parsed (tsql_parse_context "SELECT \"O'Brien\",\"a\"\"b\",\"\";" false false))
+      (and (identical? (parsed "quoted_identifier") false)
+        (equal? (parsed "text") "SELECT 'O''Brien','a\"b','';")))
+  expect: {result: true}
+- name: Comments and literal contents cannot introduce a quoted identifier setter
+  scm: |
+    (begin
+      (define parsed (tsql_parse_context "/* SET QUOTED_IDENTIFIER OFF; /** nested **/ **/ SELECT 'SET QUOTED_IDENTIFIER OFF',\"x\";" true false))
+      (and (identical? (parsed "quoted_identifier") true)
+        (strlike (parsed "text") "%SELECT 'SET QUOTED_IDENTIFIER OFF',[x];")))
+  expect: {result: true}
+- name: Lexical mode changes apply even under a false execution condition
+  scm: |
+    (begin
+      (define parsed (tsql_parse_context "IF 1=0 SET QUOTED_IDENTIFIER OFF; SELECT \"literal\";" true false))
+      (and (identical? (parsed "quoted_identifier") false)
+        (strlike (parsed "text") "%SELECT 'literal';")))
+  expect: {result: true}
+- name: Each static token uses its preceding option while the batch retains the final mode
+  scm: |
+    (begin
+      (define parsed (tsql_parse_context "SET QUOTED_IDENTIFIER OFF; SELECT \"literal\"; SET QUOTED_IDENTIFIER ON; SELECT \"column\";" true false))
+      (and (identical? (parsed "quoted_identifier") true)
+        (equal? (parsed "text") "SET QUOTED_IDENTIFIER OFF; SELECT 'literal'; SET QUOTED_IDENTIFIER ON; SELECT [column];")))
+  expect: {result: true}
+- name: Procedure header parameter AS is distinct from the original module body boundary
+  scm: |
+    (begin
+      (define parsed (tsql_parse_context "CREATE PROC p @x AS NVARCHAR(10)=N'a' AS /* body header */ SET QUOTED_IDENTIFIER ON; SELECT \"literal\";" false false))
+      (and (identical? (parsed "module_quoted_identifier") false)
+        (identical? (parsed "quoted_identifier") false)
+        (equal? (parsed "module_source") "/* body header */ SET QUOTED_IDENTIFIER ON; SELECT \"literal\";")
+        (strlike (parsed "text") "%SELECT 'literal';")))
+  expect: {result: true}
+- name: A stored static body ignores its internal setter when reparsed after restart
+  scm: |
+    (begin
+      (define parsed (tsql_parse_context "SET QUOTED_IDENTIFIER OFF; SELECT \"x\";" true true))
+      (and (identical? (parsed "quoted_identifier") true)
+        (strlike (parsed "text") "%SELECT [x];")))
+  expect: {result: true}
+- name: Parse context defaults preserve explicit false rather than treating it as absence
+  scm: |
+    (begin
+      (define session (newsession))
+      (define default_mode (tsql_quoted_identifier session))
+      (session "__tsql_quoted_identifier" false)
+      (and (identical? default_mode true) (identical? (tsql_quoted_identifier session) false)
+        (equal? (tsql_procedure_language session) "tsql-procedure-quoted-off")
+        (equal? (tsql_statement_language session) "tsql-statement-quoted-off")
+        (not (tsql_procedure_language? "scm"))))
+  expect: {result: true}
+- name: View source spans recover original bytes without matching comment or literal contents
+  scm: |
+    (begin
+      (define raw "/* CREATE VIEW q AS SELECT 'O''Brien' AS value */ CREATE VIEW q AS SELECT \"O'Brien\" AS value;")
+      (define context (tsql_parse_context raw false false))
+      (equal? (tsql_context_statement context "CREATE VIEW q AS SELECT 'O''Brien' AS value")
+        (list "statement-source" "CREATE VIEW q AS SELECT \"O'Brien\" AS value" false)))
+  expect: {result: true}
+- name: ON mode resolves real escaped identifier names through native columns
+  sql: SET QUOTED_IDENTIFIER ON; SELECT "x" AS "quoted output","a]b" AS bracket_name,"a""b" AS quote_name FROM qi_context_input
+  expect: {rows: 1, data: [{quoted output: stored, bracket_name: 7, quote_name: 8}]}
+- name: OFF mode accepts actual empty and apostrophe containing double quoted literals
+  sql: |
+    SET QUOTED_IDENTIFIER OFF;
+    SELECT "x" AS value,"" AS empty_value,"O'Brien" AS apostrophe;
+    SET QUOTED_IDENTIFIER ON;
+  expect: {rows: 1, data: [{value: x, empty_value: '', apostrophe: "O'Brien"}]}
+- name: One batch changes static lexical interpretation and preserves its final option
+  session_id: qi_context_owner
+  sql: |
+    SET QUOTED_IDENTIFIER OFF;
+    SELECT "x" AS value;
+    SET QUOTED_IDENTIFIER ON;
+    SELECT "x" AS value FROM qi_context_input;
+  expect: {rows: 2, data: [{value: x}, {value: stored}]}
+- name: An unexecuted setter still determines the batch parse context
+  session_id: qi_context_owner
+  sql: IF 1=0 SET QUOTED_IDENTIFIER OFF; SELECT "x" AS value
+  expect: {rows: 1, data: [{value: x}]}
+- name: The previous batch final mode survives a later request and cached SQL text
+  session_id: qi_context_owner
+  sql: SELECT "x" AS value FROM qi_context_input
+  expect: {rows: 1, data: [{value: x}]}
+- name: An independent connection keeps the ordinary ON default
+  session_id: qi_context_other
+  sql: SELECT "x" AS value FROM qi_context_input
+  expect: {rows: 1, data: [{value: stored}]}
+- name: GO boundaries carry the selected lexical setting without merging scopes
+  session_id: qi_context_owner
+  sql: |
+    SET QUOTED_IDENTIFIER OFF;
+    GO
+    SELECT "x" AS value;
+    GO
+    SET QUOTED_IDENTIFIER ON;
+    GO
+    SELECT "x" AS value FROM qi_context_input;
+  expect: {rows: 2, data: [{value: x}, {value: stored}]}
+- name: GO repetition reparses its first lexical prefix under the preceding iteration end mode
+  session_id: qi_context_owner
+  sql: |
+    SET QUOTED_IDENTIFIER OFF;
+    GO
+    SELECT "x" AS value FROM qi_context_input;
+    SET QUOTED_IDENTIFIER ON;
+    GO 2
+  expect: {rows: 2, data: [{value: x}, {value: stored}]}
+- name: Nested execution begins with the outer batch final parse mode
+  session_id: qi_context_owner
+  sql: |
+    SET QUOTED_IDENTIFIER OFF;
+    EXEC(N'SELECT "x" AS value FROM qi_context_input');
+    SET QUOTED_IDENTIFIER ON;
+  expect: {rows: 1, data: [{value: stored}]}
+- name: Nested batches keep their own end mode without overwriting the parent
+  session_id: qi_context_owner
+  sql: |
+    SET QUOTED_IDENTIFIER OFF;
+    EXEC(N'SET QUOTED_IDENTIFIER ON; SELECT "x" AS value FROM qi_context_input;');
+    SELECT "x" AS value;
+  expect: {rows: 2, data: [{value: stored}, {value: x}]}
+- name: An OFF procedure retains actual SQL source and captures its definition setting
+  session_id: qi_context_owner
+  sql: |
+    SET QUOTED_IDENTIFIER OFF;
+    GO
+    CREATE PROCEDURE qi_off_procedure AS
+    BEGIN
+      SET QUOTED_IDENTIFIER ON;
+      SELECT "x" AS value;
+      EXEC(N'SELECT "nested literal" AS value');
+    END
+- name: An OFF procedure ignores its static setter and initializes nested parsing from the stored context
+  session_id: qi_context_owner
+  sql: SET QUOTED_IDENTIFIER ON; EXEC qi_off_procedure
+  expect: {rows: 2, data: [{value: x}, {value: nested literal}]}
+- name: Persisted OFF procedure metadata contains the original SQL instead of a context envelope
+  scm: |
+    (begin
+      (define declaration ((procedure "memcp-tests" "qi_off_procedure" true nil) "declaration"))
+      (and (equal? (declaration "language") "tsql-procedure-quoted-off")
+        (strlike (declaration "source") "%SELECT \"x\" AS value;%")
+        (equal? (substr (declaration "source") 0 5) "BEGIN")))
+  expect: {result: true}
+- name: An ON procedure captures its original lexical rules despite a static OFF setter
+  session_id: qi_context_owner
+  sql: |
+    SET QUOTED_IDENTIFIER ON;
+    GO
+    CREATE PROCEDURE qi_on_procedure AS
+    BEGIN
+      SET QUOTED_IDENTIFIER OFF;
+      SELECT "x" AS value FROM qi_context_input;
+    END
+- name: Calling an ON procedure does not overwrite an OFF caller parse context
+  session_id: qi_context_owner
+  sql: SET QUOTED_IDENTIFIER OFF; EXEC qi_on_procedure; SELECT "x" AS value
+  expect: {rows: 2, data: [{value: stored}, {value: x}]}
+- name: ALTER PROCEDURE captures its new definition context rather than retaining the replaced mode
+  session_id: qi_context_owner
+  sql: |
+    SET QUOTED_IDENTIFIER ON;
+    GO
+    ALTER PROCEDURE qi_on_procedure AS SELECT "x" AS value FROM qi_context_input;
+    GO
+    SET QUOTED_IDENTIFIER OFF;
+    EXEC qi_on_procedure;
+  expect: {rows: 1, data: [{value: stored}]}
+- name: OFF trigger definitions use their stored context independently of an ON writer
+  session_id: qi_context_owner
+  sql: |
+    SET QUOTED_IDENTIFIER OFF;
+    GO
+    CREATE TRIGGER qi_off_trigger ON qi_trigger_input AFTER INSERT AS
+    BEGIN
+      SET QUOTED_IDENTIFIER ON;
+      INSERT INTO qi_trigger_log(label) SELECT "x" FROM inserted;
+    END
+- name: An ON multirow writer invokes the OFF trigger through actual native completion
+  session_id: qi_context_owner
+  sql: SET QUOTED_IDENTIFIER ON; INSERT INTO qi_trigger_input VALUES(1),(2)
+  expect: {rows: 1, data: [{affected_rows: 2}]}
+- name: Stored trigger lexical context preserves every actual inserted row effect
+  sql: SELECT label FROM qi_trigger_log ORDER BY label
+  expect: {rows: 2, data: [{label: x}, {label: x}]}
+- name: A view created under OFF keeps its literalized logical IR under an ON consumer
+  session_id: qi_context_owner
+  sql: |
+    SET QUOTED_IDENTIFIER OFF;
+    GO
+    CREATE VIEW qi_off_view AS SELECT "x" AS value FROM qi_context_input;
+    GO
+    SET QUOTED_IDENTIFIER ON;
+    SELECT value FROM qi_off_view;
+  expect: {rows: 1, data: [{value: x}]}
+- name: View metadata preserves its actual SQL source text
+  scm: |
+    (begin
+      (define declaration (sql_find_view "memcp-tests" "qi_off_view"))
+      (and (equal? (car declaration) "tsql")
+        (strlike (cadr declaration) "%SELECT \"x\" AS value FROM qi_context_input%")))
+  expect: {result: true}
+- name: OFF lexical literals feed real default and CHECK definition owners
+  session_id: qi_context_owner
+  sql: |
+    SET QUOTED_IDENTIFIER OFF;
+    CREATE TABLE qi_default_input(id INT PRIMARY KEY,label NVARCHAR(20) DEFAULT "allowed");
+    ALTER TABLE qi_default_input ADD CONSTRAINT qi_label_check CHECK(label<>"denied");
+    SET QUOTED_IDENTIFIER ON;
+    INSERT INTO qi_default_input(id) VALUES(1);
+    SELECT id,label FROM qi_default_input;
+  expect: {rows: 1, data: [{id: 1, label: allowed}]}
+- name: A stored CHECK created under OFF still rejects its real forbidden value
+  sql: INSERT INTO qi_default_input VALUES(2,N'denied')
+  expect: {error: true, contains: 'check constraint qi_label_check failed'}
+- name: Deferred temporal defaults retain invocation date order after lexical normalization
+  session_id: qi_context_owner
+  sql: |
+    SET QUOTED_IDENTIFIER OFF;
+    SET DATEFORMAT dmy;
+    CREATE TABLE qi_date_input(id INT PRIMARY KEY,clock DATETIME DEFAULT "02/03/2024");
+    SET QUOTED_IDENTIFIER ON;
+    SET DATEFORMAT mdy;
+    INSERT INTO qi_date_input(id) VALUES(1);
+    SELECT CONVERT(VARCHAR(10),clock,23) AS value FROM qi_date_input;
+  expect: {rows: 1, data: [{value: '2024-02-03'}]}
+- name: TDS execution and prepared description share actual lexical context and connection reset restores ON
+  tds:
+    statements:
+    - sql: SET QUOTED_IDENTIFIER OFF
+    - sql: SELECT "x" AS value
+      prepare: true
+      expect: {rows: 1, data: [{value: x}], column_types: [{name: value, type: VARCHAR}]}
+    - reset: true
+      sql: SELECT "x" AS value FROM qi_context_input
+      expect: {rows: 1, data: [{value: stored}], column_types: [{name: value, type: NVARCHAR}]}
+- name: A real SAFE restart retains definition contexts and native values
+  syntax: mysql
+  sql: SHUTDOWN
+- name: Restarted OFF procedure still uses its captured parser profile
+  sql: EXEC qi_off_procedure
+  expect: {rows: 2, data: [{value: x}, {value: nested literal}]}
+- name: Restarted stored view and CHECK preserve their compiled definition semantics
+  sql: SELECT value,(SELECT COUNT(*) FROM qi_default_input) AS retained FROM qi_off_view
+  expect: {rows: 1, data: [{value: x, retained: 1}]}
+cleanup:
+- sql: SET QUOTED_IDENTIFIER ON
+- sql: DROP TRIGGER IF EXISTS qi_off_trigger
+- sql: DROP PROCEDURE IF EXISTS qi_off_procedure
+- sql: DROP PROCEDURE IF EXISTS qi_on_procedure
+- sql: DROP VIEW IF EXISTS qi_off_view
+- sql: DROP TABLE IF EXISTS qi_date_input
+- sql: DROP TABLE IF EXISTS qi_default_input
+- sql: DROP TABLE IF EXISTS qi_trigger_log
+- sql: DROP TABLE IF EXISTS qi_trigger_input
+- sql: DROP TABLE IF EXISTS qi_context_input

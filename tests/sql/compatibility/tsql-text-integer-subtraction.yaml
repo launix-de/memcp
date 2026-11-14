@@ -1,0 +1,73 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  requires_tds: true
+  isolated: true
+  description: Character operands acquire the declared integer subtraction contract before aggregation and persistence
+setup:
+- sql: CREATE TABLE subtraction_periods(id INT PRIMARY KEY,period INT)
+- sql: INSERT INTO subtraction_periods VALUES(1,20260105),(2,20260110),(3,NULL)
+cleanup:
+- sql: DROP VIEW IF EXISTS dbo.subtraction_formatted
+- sql: DROP VIEW IF EXISTS dbo.subtraction_bounds
+- sql: DROP VIEW IF EXISTS dbo.subtraction_days
+- sql: DROP TABLE IF EXISTS subtraction_periods
+test_cases:
+- name: VARCHAR minus INT converts the character operand before subtraction
+  sql: SELECT CAST('12' AS VARCHAR(8))-CAST(3 AS INT) AS value
+  expect: {rows: 1,data: [{value: 9}]}
+- name: INT minus NVARCHAR uses the same numeric contract in reverse operand order
+  sql: SELECT CAST(3 AS INT)-CAST(N'12' AS NVARCHAR(8)) AS value
+  expect: {rows: 1,data: [{value: -9}]}
+- name: Fixed character declarations also convert through the integer operand contract
+  sql: SELECT CAST('12' AS CHAR(8))-1 AS narrow,1-CAST(N'12' AS NCHAR(8)) AS wide
+  expect: {rows: 1,data: [{narrow: 11,wide: -11}]}
+- name: Character NULL is preserved through integer conversion and subtraction
+  sql: SELECT CAST(NULL AS VARCHAR(8))-1 AS left_null,1-CAST(NULL AS NVARCHAR(8)) AS right_null
+  expect: {rows: 1,data: [{left_null: null,right_null: null}]}
+- name: Integer conversion rejects nonnumeric character data
+  sql: SELECT CAST(N'invalid' AS NVARCHAR(8))-1 AS value
+  expect: {error: true}
+- name: Integer conversion does not silently accept a fractional text spelling
+  sql: SELECT CAST('3.5' AS VARCHAR(8))-1 AS value
+  expect: {error: true}
+- name: Input conversion occurs before subtraction even when the final mathematical value would fit
+  sql: SELECT CAST('2147483648' AS VARCHAR(16))-1 AS value
+  expect: {error: true}
+- name: INT subtraction rejects a result beyond its declared range
+  sql: SELECT CAST('-2147483648' AS VARCHAR(16))-1 AS value
+  expect: {error: true}
+- name: Row-dependent RIGHT and STR feed typed integer subtraction
+  sql: SELECT id,RIGHT(STR(period),2)-1 AS boundary FROM subtraction_periods ORDER BY id
+  expect: {rows: 3,data: [{id: 1,boundary: 4},{id: 2,boundary: 9},{id: 3,boundary: null}]}
+- name: Stored character producers retain their original string declaration
+  sql: CREATE VIEW dbo.subtraction_days AS SELECT id,RIGHT(STR(period),2) AS day_text FROM subtraction_periods
+- name: A persisted MIN producer owns the integer subtraction contract
+  sql: CREATE VIEW dbo.subtraction_bounds AS SELECT MIN(day_text-1) AS boundary FROM dbo.subtraction_days
+- name: A further stored view consumes the integer producer through STR
+  sql: CREATE VIEW dbo.subtraction_formatted AS SELECT LTRIM(STR(boundary)) AS boundary_text FROM dbo.subtraction_bounds
+- name: Nested persisted subtraction and aggregate expressions read real source rows
+  sql: SELECT boundary_text FROM dbo.subtraction_formatted
+  expect: {rows: 1,data: [{boundary_text: '4'}]}
+- name: Empty results expose INT before reading any character values
+  tds:
+    statements:
+    - sql: SELECT day_text-1 AS boundary FROM dbo.subtraction_days WHERE 1=0
+      expect: {rows: 0,column_types: [{name: boundary,type: INT}]}
+    - sql: SELECT boundary FROM dbo.subtraction_bounds
+      expect: {rows: 1,data: [{boundary: 4}],column_types: [{name: boundary,type: INT}]}
+- name: Existing addition still chooses numeric INT over character data
+  sql: SELECT CAST('12' AS VARCHAR(8))+CAST(3 AS INT) AS value
+  expect: {rows: 1,data: [{value: 15}]}
+- name: Existing numeric subtraction retains its value contract
+  sql: SELECT CAST(12 AS INT)-CAST(3 AS INT) AS value
+  expect: {rows: 1,data: [{value: 9}]}
+- name: Existing temporal day subtraction retains its calendar contract
+  sql: SELECT CONVERT(DATETIME,N'20250103',112)-1 AS value
+  expect: {rows: 1,data: [{value: '2025-01-02 00:00:00'}]}
+- name: Restart rebuilds the same declaration-directed subtraction
+  action: restart
+- name: Restarted stored consumers preserve subtraction and formatting
+  sql: SELECT boundary_text FROM dbo.subtraction_formatted
+  expect: {rows: 1,data: [{boundary_text: '4'}]}

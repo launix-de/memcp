@@ -55,7 +55,7 @@ func (tx *TxContext) lockDecision(ctx context.Context, write bool, before func()
 			for shard := range protected {
 				shards = append(shards, shard)
 			}
-			releaseRights, complete = tx.claimDecisionRights(shards)
+			releaseRights, complete = tx.claimDecisionRights(shards, true)
 		}
 		tx.decisionMu.Lock()
 		if tx.migrations != 0 {
@@ -203,7 +203,7 @@ func (st *storageShardTransaction) waitAuthority(ctx context.Context) error {
 }
 
 // Decision publication and undo acquire native write rights once per shard.
-func (tx *TxContext) claimDecisionRights(shards []*storageShard) (func(), bool) {
+func (tx *TxContext) claimDecisionRights(shards []*storageShard, wait bool) (func(), bool) {
 	sort.Slice(shards, func(i, j int) bool { return shards[i].uuid.String() < shards[j].uuid.String() })
 	var releases []func()
 	complete := false
@@ -220,7 +220,7 @@ func (tx *TxContext) claimDecisionRights(shards []*storageShard) (func(), bool) 
 	for _, shard := range shards {
 		if r := activeReplication(shard.t.schema); r != nil && validReplicaDatabase(shard.t.schema.Name) && !shard.t.isEphemeralQueryTable() {
 			cell := r.shardCell(shard)
-			if r.cluster != nil {
+			if r.cluster != nil || !wait {
 				_, done, admitted := r.writeResource(*cell.resource.Load(), tx, false)
 				if !admitted {
 					// Never wait for another shard while retaining a partial set of
@@ -228,6 +228,9 @@ func (tx *TxContext) claimDecisionRights(shards []*storageShard) (func(), bool) 
 					// sorting a stale generation directory cannot prevent that cycle.
 					release()
 					releases = nil
+					if !wait {
+						return func() {}, false
+					}
 					_, done, _ := r.writeResource(*cell.resource.Load(), tx, true)
 					done()
 					return func() {}, false

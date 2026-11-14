@@ -1,0 +1,205 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  description: Pending native foreign state is genuine private metadata and cannot commit without historical validation
+setup:
+- sql: CREATE TABLE state_parent(id INT PRIMARY KEY)
+- sql: CREATE TABLE state_child(id INT PRIMARY KEY,parent_id INT)
+- sql: CREATE TABLE state_mixed(id INT PRIMARY KEY,parent_id INT)
+- sql: CREATE TABLE state_orphan(id INT PRIMARY KEY,parent_id INT)
+- sql: INSERT INTO state_parent VALUES(1)
+- sql: INSERT INTO state_child VALUES(10,1)
+- sql: INSERT INTO state_mixed VALUES(20,1)
+- sql: INSERT INTO state_orphan VALUES(30,999)
+- scm: (createforeignkey (table "memcp-tests" false "state_mixed" false nil) "FK_state_committed" '("parent_id") (table "memcp-tests" false "state_parent" false nil) '("id") "restrict" "restrict")
+- scm: (registerprocedurelanguage "pending-state-literal" (lambda (source _context) (lambda () (simplify source))))
+cleanup:
+- scm: (dropprocedure "memcp-tests" "state_source" true)
+- sql: DROP TABLE IF EXISTS state_orphan
+- sql: DROP TABLE IF EXISTS state_mixed
+- sql: DROP TABLE IF EXISTS state_child
+- sql: DROP TABLE IF EXISTS state_parent
+test_cases:
+- name: Disabling an owned pending FK changes both private endpoints without exposing it or permitting row writes
+  scm: |
+    (begin
+      (define child (table "memcp-tests" false "state_child" false nil))
+      (define parent (table "memcp-tests" false "state_parent" false nil))
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (createforeignkey child "FK_state_owned" '("parent_id") parent '("id") "restrict" "restrict" tx)
+      (constraint_state child '("FK_state_owned") false false tx owner)
+      (define own (car ((show child "constraints" tx) "ForeignKeys")))
+      (define mirror (find ((show parent "constraints" tx) "ForeignKeys") (lambda (row) (equal? (row "Id") "FK_state_owned"))))
+      (define outside (empty_list? ((show child "constraints" nil) "ForeignKeys")))
+      (define blocked (try (lambda () (begin (insert child '("id" "parent_id") (list (list 11 999)) '() nil false nil tx) false))
+        (lambda (failure) (strlike (concat failure) "%metadata-only transaction%"))))
+      (tx_rollback owner)
+      (and (not (own "Enabled")) (not (own "Trusted")) (not (mirror "Enabled"))
+        outside blocked (empty_list? ((show child "constraints") "ForeignKeys"))))
+  expect: {result: true}
+- name: A disabled pending declaration rejects the durable decision and leaves no public FK
+  scm: |
+    (begin
+      (define child (table "memcp-tests" false "state_child" false nil))
+      (define parent (table "memcp-tests" false "state_parent" false nil))
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (createforeignkey child "FK_state_disabled" '("parent_id") parent '("id") "restrict" "restrict" tx)
+      (constraint_state child true false false tx owner)
+      (define failed (try (lambda () (begin (tx_commit owner) false))
+        (lambda (failure) (strlike (concat failure) "%enabled and validated before commit%"))))
+      (tx_rollback owner)
+      (and failed (empty_list? ((show child "constraints") "ForeignKeys"))))
+  expect: {result: true}
+- name: Reenabling alone does not manufacture historical trust
+  scm: |
+    (begin
+      (define child (table "memcp-tests" false "state_child" false nil))
+      (define parent (table "memcp-tests" false "state_parent" false nil))
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (createforeignkey child "FK_state_untrusted" '("parent_id") parent '("id") "restrict" "restrict" tx)
+      (constraint_state child true false false tx owner)
+      (constraint_state child true true false tx owner)
+      (define own (car ((show child "constraints" tx) "ForeignKeys")))
+      (define failed (try (lambda () (begin (tx_commit owner) false))
+        (lambda (failure) (strlike (concat failure) "%enabled and validated before commit%"))))
+      (tx_rollback owner)
+      (and (own "Enabled") (not (own "Trusted")) failed
+        (empty_list? ((show child "constraints") "ForeignKeys"))))
+  expect: {result: true}
+- name: Interleaved source and state history restores exact nested savepoint views
+  scm: |
+    (begin
+      (define child (table "memcp-tests" false "state_child" false nil))
+      (define parent (table "memcp-tests" false "state_parent" false nil))
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (createforeignkey child "FK_state_nested" '("parent_id") parent '("id") "restrict" "restrict" tx)
+      (define first (tx_savepoint tx))
+      (constraint_state child true false false tx owner)
+      (createprocedure "memcp-tests" "state_source" "pending-state-literal" "7" nil false tx)
+      (define middle (tx_savepoint tx))
+      (constraint_state child true true true tx owner)
+      (define checked (car ((show child "constraints" tx) "ForeignKeys")))
+      (tx_rollback_to_savepoint tx middle)
+      (define disabled (car ((show child "constraints" tx) "ForeignKeys")))
+      (define value ((procedure "memcp-tests" "state_source" false tx)))
+      (tx_rollback_to_savepoint tx first)
+      (define initial (car ((show child "constraints" tx) "ForeignKeys")))
+      (define gone (empty_list? (showprocedures "memcp-tests" "state_source" tx)))
+      (tx_rollback owner)
+      (and (checked "Enabled") (checked "Trusted") (not (disabled "Enabled"))
+        (not (disabled "Trusted")) (equal? value 7) (initial "Enabled") (initial "Trusted") gone))
+  expect: {result: true}
+- name: ALL rejects a mixed committed and pending target set before changing either declaration
+  scm: |
+    (begin
+      (define child (table "memcp-tests" false "state_mixed" false nil))
+      (define parent (table "memcp-tests" false "state_parent" false nil))
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (createforeignkey child "FK_state_new" '("parent_id") parent '("id") "restrict" "restrict" tx)
+      (define before (show child "declarations" tx))
+      (define rejected (try (lambda () (begin (constraint_state child true false false tx owner) false))
+        (lambda (failure) (strlike (concat failure) "%not an owned pending declaration%"))))
+      (define unchanged (identical? before (show child "declarations" tx)))
+      (tx_rollback owner)
+      (and rejected unchanged (equal? (count ((show child "constraints") "ForeignKeys")) 1)))
+  expect: {result: true}
+- name: Named missing and incoming-mirror targets reject the whole operation without partial state
+  scm: |
+    (begin
+      (define child (table "memcp-tests" false "state_child" false nil))
+      (define parent (table "memcp-tests" false "state_parent" false nil))
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (createforeignkey child "FK_state_names" '("parent_id") parent '("id") "restrict" "restrict" tx)
+      (define before (show child "declarations" tx))
+      (define missing (try (lambda () (begin (constraint_state child '("FK_state_names" "unknown_state") false false tx owner) false))
+        (lambda (failure) (strlike (concat failure) "%not an owned pending declaration%"))))
+      (define incoming (try (lambda () (begin (constraint_state parent '("FK_state_names") false false tx owner) false))
+        (lambda (failure) (strlike (concat failure) "%not an owned pending declaration%"))))
+      (define unchanged (identical? before (show child "declarations" tx)))
+      (tx_rollback owner)
+      (and missing incoming unchanged))
+  expect: {result: true}
+- name: State history releases its private snapshots on savepoint rewind and all payloads on rollback
+  scm: |
+    (begin
+      (define child (table "memcp-tests" false "state_child" false nil))
+      (define parent (table "memcp-tests" false "state_parent" false nil))
+      (define bytes (lambda () (+ ((show child "memory") "metadata_size_bytes") ((show parent "memory") "metadata_size_bytes"))))
+      (define base (bytes))
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (createforeignkey child "FK_state_memory" '("parent_id") parent '("id") "restrict" "restrict" tx)
+      (define first (tx_savepoint tx))
+      (define staged (bytes))
+      (constraint_state child true false false tx owner)
+      (constraint_state child true true true tx owner)
+      (define grown (bytes))
+      (tx_rollback_to_savepoint tx first)
+      (define restored (bytes))
+      (tx_rollback owner)
+      (and (> grown staged) (equal? restored staged) (equal? (bytes) base)))
+  expect: {result: true}
+- name: A historical orphan rejects ADD and cannot obtain an unchecked declaration through the state API
+  scm: |
+    (begin
+      (define child (table "memcp-tests" false "state_orphan" false nil))
+      (define parent (table "memcp-tests" false "state_parent" false nil))
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (define rejected (try (lambda () (begin
+        (createforeignkey child "FK_state_orphan" '("parent_id") parent '("id") "restrict" "restrict" tx) false))
+        (lambda (failure) (strlike (concat failure) "%existing child row has no parent%"))))
+      (define state_rejected (try (lambda () (begin (constraint_state child true false false tx owner) false))
+        (lambda (failure) (strlike (concat failure) "%owned pending declaration%"))))
+      (tx_rollback owner)
+      (and rejected state_rejected (empty_list? ((show child "constraints") "ForeignKeys"))))
+  expect: {result: true}
+- name: Revalidation permits one final durable declaration and real row enforcement
+  scm: |
+    (begin
+      (define child (table "memcp-tests" false "state_child" false nil))
+      (define parent (table "memcp-tests" false "state_parent" false nil))
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (createforeignkey child "FK_state_final" '("parent_id") parent '("id") "restrict" "restrict" tx)
+      (constraint_state child true false false tx owner)
+      (constraint_state child true true true tx owner)
+      (define checked (car ((show child "constraints" tx) "ForeignKeys")))
+      (tx_commit owner)
+      (define enforced (try (lambda () (begin (insert child '("id" "parent_id") (list (list 12 999))) false))
+        (lambda (failure) (strlike (concat failure) "%foreign key constraint%"))))
+      (and (checked "Enabled") (checked "Trusted") enforced
+        (equal? (count ((show child "constraints") "ForeignKeys")) 1)))
+  expect: {result: true}
+- name: Restart uses the existing durable declaration format
+  action: restart
+- name: The final validated rows remain after restart
+  sql: SELECT parent_id FROM state_child
+  expect:
+    rows: 1
+    data: [{parent_id: 1}]
+- name: A declaration owned by another native transaction cannot be disabled through a source-only resource
+  scm: |
+    (begin
+      (define child (table "memcp-tests" false "state_child" false nil))
+      (define parent (table "memcp-tests" false "state_parent" false nil))
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define other (newsession)) (other "username" "root") (tx_begin other)
+      (define own_tx (owner "__memcp_tx"))
+      (define other_tx (other "__memcp_tx"))
+      (registerprocedurelanguage "pending-state-literal" (lambda (source _context) (lambda () (simplify source))))
+      (createforeignkey child "FK_state_foreign_owner" '("parent_id") parent '("id") "restrict" "restrict" own_tx)
+      (createprocedure "memcp-tests" "state_source" "pending-state-literal" "8" nil false other_tx)
+      (define rejected (try (lambda () (begin (constraint_state child '("FK_state_foreign_owner") false false other_tx other) false))
+        (lambda (failure) (strlike (concat failure) "%not an owned pending declaration%"))))
+      (define own (find ((show child "constraints" own_tx) "ForeignKeys") (lambda (row) (equal? (row "Id") "FK_state_foreign_owner"))))
+      (tx_rollback other) (tx_rollback owner)
+      (and rejected (own "Enabled") (own "Trusted")))
+  expect: {result: true}

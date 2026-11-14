@@ -1,0 +1,105 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  restart_after_setup: true
+  requires_tds: true
+  description: Deferred default declarations survive native recovery and private savepoint retirement
+setup:
+- sql: DROP TABLE IF EXISTS contextual_recovery
+- scm: (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS defer_recovery" nil))
+- scm: (eval (parse_sql "memcp-tests" "CREATE USER defer_recovery IDENTIFIED BY 'pw'" nil))
+- scm: (eval (parse_sql "memcp-tests" "GRANT ALL ON `memcp-tests`.* TO defer_recovery" nil))
+- sql: |
+    CREATE TABLE contextual_recovery(id INT IDENTITY(1,1) PRIMARY KEY,
+      actor NVARCHAR(128) CONSTRAINT DF_recovered_actor DEFAULT USER_NAME(), note NVARCHAR(20))
+cleanup:
+- sql: DROP TABLE IF EXISTS contextual_recovery
+- sql: DROP TABLE IF EXISTS contextual_retired
+- scm: (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS defer_recovery" nil))
+test_cases:
+- name: Recovered source and deferred mode belong to the same native declaration
+  scm: |
+    (begin
+      (define column (show (table "memcp-tests" false "contextual_recovery" false nil) "column" "actor" false))
+      (and (column "DefaultDeferred") (nil? (column "Default"))
+        (equal? (column "DefaultName") "DF_recovered_actor")
+        (regexp_test (column "DefaultExpression") "(?i)USER_NAME")))
+  expect: {result: true}
+- name: Recovered omitted default still uses the later invoking member
+  username: defer_recovery
+  password: pw
+  sql: INSERT contextual_recovery DEFAULT VALUES
+- name: A prepared real TDS statement expands the live caller default on each invocation
+  tds:
+    username: defer_recovery
+    password: pw
+    statements:
+    - sql: INSERT contextual_recovery(note) VALUES(@note)
+      prepare: true
+      parameters: [{name: note, value: explicit}]
+    - sql: INSERT contextual_recovery DEFAULT VALUES
+      prepare: true
+    - sql: INSERT contextual_recovery DEFAULT VALUES
+      prepare: true
+    - sql: SELECT actor FROM contextual_recovery ORDER BY id
+      expect:
+        rows: 4
+        data: [{actor: defer_recovery}, {actor: defer_recovery}, {actor: defer_recovery}, {actor: defer_recovery}]
+- name: Dropping deferred default and replacing a constant clears the mode atomically
+  sql: |
+    ALTER TABLE contextual_recovery DROP CONSTRAINT DF_recovered_actor;
+    ALTER TABLE contextual_recovery ADD CONSTRAINT DF_recovered_actor DEFAULT N'constant' FOR actor
+- name: Previously cached omitted insert now consumes the constant declaration
+  username: defer_recovery
+  password: pw
+  sql: INSERT contextual_recovery DEFAULT VALUES
+- name: Constant default has no deferred flag or stale source
+  scm: |
+    (begin
+      (define column (show (table "memcp-tests" false "contextual_recovery" false nil) "column" "actor" false))
+      (and (not (column "DefaultDeferred")) (equal? (column "Default") "constant")
+        (equal? (column "DefaultExpression") "")))
+  expect: {result: true}
+- name: Deferred default can replace the constant without retaining its literal value
+  sql: |
+    ALTER TABLE contextual_recovery DROP CONSTRAINT DF_recovered_actor;
+    ALTER TABLE contextual_recovery ADD CONSTRAINT DF_recovered_actor DEFAULT USER_NAME() FOR actor
+- name: Cached omitted insert is rebound after restoring the dynamic declaration
+  username: defer_recovery
+  password: pw
+  sql: INSERT contextual_recovery DEFAULT VALUES
+- name: Recovery and declaration replacement retain every inserted invocation value
+  sql: SELECT id,actor FROM contextual_recovery WHERE id>=5 ORDER BY id
+  expect: {rows: 2, data: [{id: 5, actor: constant}, {id: 6, actor: defer_recovery}]}
+- name: Private native savepoint restores the complete deferred declaration
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (createtable "memcp-tests" "contextual_retired"
+        (list (list "column" "id" "INT" '() '())) '("engine" "safe") false tx)
+      (define target (table "memcp-tests" false "contextual_retired" false tx))
+      (altercolumn target "id" "add_default" (list nil "opaque-native-source" "DF_original" true) tx)
+      (define boundary (tx_savepoint tx))
+      (altercolumn target "DF_original" "drop_default" nil tx)
+      (altercolumn target "id" "add_default" '(7 "" "DF_replacement") tx)
+      (tx_rollback_to_savepoint tx boundary)
+      (define column (show target "column" "id" false))
+      (define restored (and (column "DefaultDeferred") (nil? (column "Default"))
+        (equal? (column "DefaultExpression") "opaque-native-source") (equal? (column "DefaultName") "DF_original")))
+      (tx_rollback owner) (and restored (nil? (table "memcp-tests" false "contextual_retired" false nil))))
+  expect: {result: true}
+- name: Invalid deferred tuples are rejected before changing any published declaration
+  scm: |
+    (begin
+      (define target (table "memcp-tests" false "contextual_recovery" false nil))
+      (define before (show target "declarations"))
+      (define rejected (reduce (list (list nil "" "DF_invalid" true)
+        (list 7 "source" "DF_invalid" true) (list nil "source" "DF_invalid" "invalid"))
+        (lambda (valid value) (and valid (try
+          (lambda () (begin (altercolumn target "actor" "default_declaration" value nil) false))
+          (lambda (failure) true)))) true))
+      (and rejected (expression_equal? before (show target "declarations"))))
+  expect: {result: true}

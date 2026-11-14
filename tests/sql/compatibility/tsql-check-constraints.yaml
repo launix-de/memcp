@@ -1,0 +1,610 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Actual TDS CHECK SQL compilation, UNKNOWN, final values, contextual rejection and mixed pending FK
+    state
+setup:
+- sql: CREATE TABLE check_tds_values(id INT PRIMARY KEY,v NVARCHAR(24))
+- sql: CREATE TABLE check_tds_pending(id INT PRIMARY KEY,parent_id INT,v INT)
+- sql: CREATE TABLE check_tds_parent(id INT PRIMARY KEY)
+- sql: CREATE TABLE check_tds_bad(id INT PRIMARY KEY,v INT)
+- sql: CREATE TABLE check_tds_dates(id INT PRIMARY KEY,v NVARCHAR(24))
+- sql: CREATE TABLE check_tds_lengths(id INT PRIMARY KEY,v NVARCHAR(24),n INT)
+- sql: CREATE TABLE check_tds_date_numeric(id INT PRIMARY KEY,v INT)
+- sql: CREATE TABLE check_tds_date_runtime(id INT PRIMARY KEY,v NVARCHAR(24))
+- sql: CREATE TABLE check_tds_date_revalidate(id INT PRIMARY KEY,v NVARCHAR(24))
+- sql: CREATE TABLE check_tds_like(id INT PRIMARY KEY,v NVARCHAR(24))
+- sql: INSERT check_tds_parent VALUES(1)
+- sql: INSERT check_tds_pending VALUES(1,1,3)
+- sql: INSERT check_tds_bad VALUES(1,-1)
+- sql: CREATE TABLE check_tds_identity(id INT IDENTITY PRIMARY KEY,v INT DEFAULT 7)
+- scm: |-
+    (begin
+      (eval (parse_sql "memcp-tests" "CREATE USER check_tds_member IDENTIFIED BY 'pw'" nil))
+      (eval (parse_sql "memcp-tests" "GRANT ALL ON `memcp-tests`.* TO check_tds_member" nil)))
+cleanup:
+- sql: DROP TABLE IF EXISTS check_tds_like
+- sql: DROP PROCEDURE IF EXISTS check_tds_date_revalidate_module
+- sql: DROP PROCEDURE IF EXISTS check_tds_date_insert_module
+- sql: DROP TABLE IF EXISTS check_tds_date_revalidate
+- sql: DROP TABLE IF EXISTS check_tds_date_runtime
+- sql: DROP TABLE IF EXISTS check_tds_date_numeric
+- sql: DROP PROCEDURE IF EXISTS check_tds_context
+- sql: DROP TABLE IF EXISTS check_tds_identity
+- sql: DROP TABLE IF EXISTS check_tds_lengths
+- sql: DROP TABLE IF EXISTS check_tds_dates
+- sql: DROP TABLE IF EXISTS check_tds_bad
+- sql: DROP TABLE IF EXISTS check_tds_pending
+- sql: DROP TABLE IF EXISTS check_tds_parent
+- sql: DROP TABLE IF EXISTS check_tds_values
+- scm: (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS check_tds_member" nil))
+test_cases:
+- name: Real TDS ALTER adds and commits a historically validated CHECK
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: ALTER TABLE check_tds_values ADD CONSTRAINT CK_tds_numeric CHECK(v IS NULL OR ISNUMERIC(v)=1)
+    - connection: owner
+      sql: SELECT constraint_name FROM information_schema.check_constraints WHERE constraint_name=N'CK_tds_numeric'
+      expect:
+        rows: 1
+        data:
+        - constraint_name: CK_tds_numeric
+    - connection: observer
+      sql: SELECT constraint_name FROM information_schema.check_constraints WHERE constraint_name=N'CK_tds_numeric'
+      expect:
+        rows: 0
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT constraint_name FROM information_schema.check_constraints WHERE constraint_name=N'CK_tds_numeric'
+      expect:
+        rows: 1
+        data:
+        - constraint_name: CK_tds_numeric
+- name: TDS valid text and SQL UNKNOWN pass the stored predicate
+  tds:
+    statements:
+    - connection: owner
+      sql: INSERT check_tds_values VALUES(1,N'12'),(2,NULL)
+    - connection: owner
+      sql: SELECT id,v FROM check_tds_values ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          v: '12'
+        - id: 2
+          v: null
+- name: TDS strict batch failure publishes no candidate rows
+  tds:
+    statements:
+    - connection: owner
+      sql: INSERT check_tds_values VALUES(3,N'34'),(4,N'invalid')
+      expect:
+        error: true
+        contains:
+        - CK_tds_numeric failed
+    - connection: observer
+      sql: SELECT COUNT(*) AS n FROM check_tds_values
+      expect:
+        rows: 1
+        data:
+        - n: 2
+- name: TDS autocommit UPDATE enforces CHECK and rolls back invalid values
+  tds:
+    statements:
+    - connection: owner
+      sql: UPDATE check_tds_values SET v=N'bad' WHERE id=1
+      expect:
+        error: true
+        contains:
+        - CK_tds_numeric failed
+    - connection: observer
+      sql: SELECT v FROM check_tds_values WHERE id=1
+      expect:
+        rows: 1
+        data:
+        - v: '12'
+- name: Pending CHECK rollback is invisible to a separate authenticated session
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: ALTER TABLE check_tds_pending ADD CONSTRAINT CK_tds_pending CHECK(v>=0)
+    - connection: observer
+      sql: SELECT constraint_name FROM information_schema.check_constraints WHERE constraint_name=N'CK_tds_pending'
+      expect:
+        rows: 0
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: owner
+      sql: SELECT constraint_name FROM information_schema.check_constraints WHERE constraint_name=N'CK_tds_pending'
+      expect:
+        rows: 0
+- name: Mixed FK plus CHECK uses one ALL state and one publication
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: ALTER TABLE check_tds_pending ADD CONSTRAINT FK_tds_pending FOREIGN KEY(parent_id) REFERENCES check_tds_parent(id)
+    - connection: owner
+      sql: ALTER TABLE check_tds_pending ADD CONSTRAINT CK_tds_pending CHECK(v>=0)
+    - connection: owner
+      sql: ALTER TABLE check_tds_pending NOCHECK CONSTRAINT ALL
+    - connection: owner
+      sql: SELECT constraint_type,enforced FROM information_schema.table_constraints WHERE constraint_name IN(N'FK_tds_pending',N'CK_tds_pending')
+        ORDER BY constraint_type
+      expect:
+        rows: 2
+        data:
+        - constraint_type: CHECK
+          enforced: 'NO'
+        - constraint_type: FOREIGN KEY
+          enforced: 'NO'
+    - connection: owner
+      sql: ALTER TABLE check_tds_pending WITH CHECK CHECK CONSTRAINT ALL
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT constraint_type,enforced FROM information_schema.table_constraints WHERE constraint_name IN(N'FK_tds_pending',N'CK_tds_pending')
+        ORDER BY constraint_type
+      expect:
+        rows: 2
+        data:
+        - constraint_type: CHECK
+          enforced: 'YES'
+        - constraint_type: FOREIGN KEY
+          enforced: 'YES'
+- name: Historical false data rejects ADD and aborts without publishing a name
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: ALTER TABLE check_tds_bad ADD CONSTRAINT CK_tds_historical CHECK(v>=0)
+      expect:
+        error: true
+        contains:
+        - CK_tds_historical failed
+    - connection: owner
+      sql: COMMIT TRANSACTION
+      expect:
+        error: true
+        contains:
+        - transaction is aborted
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: observer
+      sql: SELECT constraint_name FROM information_schema.check_constraints WHERE constraint_name=N'CK_tds_historical'
+      expect:
+        rows: 0
+- name: Non-Boolean SQL CHECK rejects before native declaration publication
+  tds:
+    statements:
+    - connection: owner
+      sql: ALTER TABLE check_tds_pending ADD CONSTRAINT CK_tds_wrong CHECK(v+1)
+      expect:
+        error: true
+        contains:
+        - Boolean row-local expression
+    - connection: observer
+      sql: SELECT constraint_name FROM information_schema.check_constraints WHERE constraint_name=N'CK_tds_wrong'
+      expect:
+        rows: 0
+- name: A relational CHECK is rejected rather than executed through a fallback
+  tds:
+    statements:
+    - connection: owner
+      sql: ALTER TABLE check_tds_pending ADD CONSTRAINT CK_tds_subquery CHECK(v IN(SELECT id FROM check_tds_parent))
+      expect:
+        error: true
+    - connection: observer
+      sql: SELECT constraint_name FROM information_schema.check_constraints WHERE constraint_name=N'CK_tds_subquery'
+      expect:
+        rows: 0
+- name: Session-dependent ISDATE CHECK is rejected before native publication
+  # Historical identity: the explicit invocation contract now permits pending
+  # publication, while rollback and observer isolation remain mandatory.
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: ALTER TABLE check_tds_dates ADD CONSTRAINT CK_tds_date CHECK(ISDATE(v)=1)
+    - connection: owner
+      sql: SELECT constraint_name FROM information_schema.check_constraints WHERE constraint_name=N'CK_tds_date'
+      expect: {rows: 1, data: [{constraint_name: CK_tds_date}]}
+    - connection: observer
+      sql: SELECT constraint_name FROM information_schema.check_constraints WHERE constraint_name=N'CK_tds_date'
+      expect:
+        rows: 0
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: observer
+      sql: SELECT constraint_name FROM information_schema.check_constraints WHERE constraint_name=N'CK_tds_date'
+      expect: {rows: 0}
+- name: Changing the connection language cannot admit an unproved CHECK context
+  # The language now reaches the admitted native invocation explicitly.
+  tds:
+    statements:
+    - connection: owner
+      sql: SET LANGUAGE Deutsch
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: ALTER TABLE check_tds_dates ADD CONSTRAINT CK_tds_date CHECK(ISDATE(v)=1)
+    - connection: owner
+      sql: SELECT constraint_name FROM information_schema.check_constraints WHERE constraint_name=N'CK_tds_date'
+      expect: {rows: 1, data: [{constraint_name: CK_tds_date}]}
+    - connection: observer
+      sql: SELECT constraint_name FROM information_schema.check_constraints WHERE constraint_name=N'CK_tds_date'
+      expect:
+        rows: 0
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: owner
+      sql: SET LANGUAGE us_english
+- name: Module-local settings cannot bypass contextual CHECK admission
+  # Historical rows prove that the module's actual session is used, while the
+  # connection retains its English context after the invocation returns.
+  tds:
+    statements:
+    - connection: owner
+      sql: SET LANGUAGE us_english
+    - connection: owner
+      sql: INSERT check_tds_dates VALUES(1,N'31/12/2024')
+    - connection: owner
+      sql: CREATE PROCEDURE check_tds_context AS BEGIN SET LANGUAGE Deutsch; ALTER TABLE check_tds_dates ADD CONSTRAINT
+        CK_tds_date CHECK(ISDATE(v)=1); END
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: EXEC check_tds_context
+    - connection: owner
+      sql: SELECT @@LANGUAGE AS language
+      expect: {rows: 1, data: [{language: us_english}]}
+    - connection: owner
+      sql: SELECT constraint_name FROM information_schema.check_constraints WHERE constraint_name=N'CK_tds_date'
+      expect: {rows: 1, data: [{constraint_name: CK_tds_date}]}
+    - connection: observer
+      sql: SELECT constraint_name FROM information_schema.check_constraints WHERE constraint_name=N'CK_tds_date'
+      expect:
+        rows: 0
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: owner
+      sql: DELETE FROM check_tds_dates WHERE id=1
+    - connection: owner
+      sql: DROP PROCEDURE check_tds_context
+- name: LEN and range conditions preserve SQL NULL as UNKNOWN
+  tds:
+    statements:
+    - connection: owner
+      sql: ALTER TABLE check_tds_lengths ADD CONSTRAINT CK_tds_length CHECK(LEN(v)<=3 AND n>=0)
+    - connection: owner
+      sql: INSERT check_tds_lengths VALUES(1,N'ab',2),(2,NULL,NULL)
+    - connection: owner
+      sql: INSERT check_tds_lengths VALUES(3,N'long',1)
+      expect:
+        error: true
+        contains:
+        - CK_tds_length failed
+    - connection: observer
+      sql: SELECT id FROM check_tds_lengths ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+        - id: 2
+- name: CHECK sees actual generated IDENTITY and default values before publication
+  tds:
+    statements:
+    - connection: owner
+      sql: ALTER TABLE check_tds_identity ADD CONSTRAINT CK_tds_generated CHECK(id>0 AND v>=7)
+    - connection: owner
+      sql: INSERT check_tds_identity DEFAULT VALUES
+    - connection: owner
+      sql: SELECT id,v FROM check_tds_identity
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          v: 7
+    - connection: owner
+      sql: INSERT check_tds_identity(v) VALUES(6)
+      expect:
+        error: true
+        contains:
+        - CK_tds_generated failed
+    - connection: observer
+      sql: SELECT id,v FROM check_tds_identity
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          v: 7
+- name: Real database membership admits CHECK despite an ignored granular DENY
+  username: check_tds_member
+  password: pw
+  session_id: check-member-warm
+  sql: DENY ALTER,REFERENCES TO check_tds_member; ALTER TABLE check_tds_values ADD CONSTRAINT CK_tds_authorized
+    CHECK(id>=0)
+- name: Native membership revocation is performed by its existing owner
+  scm: (eval (parse_sql "memcp-tests" "REVOKE ALL ON `memcp-tests`.* FROM check_tds_member" nil))
+- name: A warm CHECK path rechecks actual database membership before duplicate admission
+  username: check_tds_member
+  password: pw
+  session_id: check-member-warm
+  sql: ALTER TABLE check_tds_values ADD CONSTRAINT CK_tds_authorized CHECK(id>=0)
+  expect:
+    error: true
+    contains: access denied
+- name: Denied warm execution preserves the already committed CHECK
+  sql: SELECT constraint_name FROM information_schema.check_constraints WHERE constraint_name=N'CK_tds_authorized'
+  expect:
+    rows: 1
+    data:
+    - constraint_name: CK_tds_authorized
+- name: Checked TDS bulk uses the same native final-row validator
+  tds:
+    statements:
+    - bulk:
+        table: check_tds_values
+        columns:
+        - id
+        - v
+        rows:
+        - - 20
+          - '20'
+        fire_triggers: true
+        check_constraints: true
+    - sql: SELECT v FROM check_tds_values WHERE id=20
+      expect:
+        rows: 1
+        data:
+        - v: '20'
+- name: A CHECK failure rolls back all earlier rows from the same checked bulk statement
+  tds:
+    statements:
+    - bulk:
+        table: check_tds_values
+        columns:
+        - id
+        - v
+        rows:
+        - - 21
+          - '21'
+        - - 22
+          - bad
+        fire_triggers: true
+        check_constraints: true
+      expect:
+        error: true
+        contains:
+        - CK_tds_numeric failed
+    - sql: SELECT COUNT(*) AS n FROM check_tds_values WHERE id IN(21,22)
+      expect:
+        rows: 1
+        data:
+        - n: 0
+- name: Unchecked bulk explicitly rejects the unsupported untrusted public state
+  tds:
+    statements:
+    - bulk:
+        table: check_tds_values
+        columns:
+        - id
+        - v
+        rows:
+        - - 23
+          - '23'
+        fire_triggers: true
+        check_constraints: false
+      expect:
+        error: true
+        contains:
+        - unchecked bulk into a CHECK table is not supported
+    - sql: SELECT COUNT(*) AS n FROM check_tds_values WHERE id=23
+      expect:
+        rows: 1
+        data:
+        - n: 0
+- name: Restart the native CHECK owner through actual SQL shutdown
+  sql: SHUTDOWN
+  expect:
+    rows: 0
+  syntax: mysql
+- name: Real TDS reload retains one native constraint and enforces the regenerated program
+  tds:
+    statements:
+    - connection: owner
+      sql: SELECT constraint_name FROM information_schema.check_constraints WHERE constraint_name=N'CK_tds_numeric'
+      expect:
+        rows: 1
+        data:
+        - constraint_name: CK_tds_numeric
+    - connection: owner
+      sql: INSERT check_tds_values VALUES(9,N'not-numeric')
+      expect:
+        error: true
+        contains:
+        - CK_tds_numeric failed
+    - connection: owner
+      sql: SELECT COUNT(*) AS n FROM check_tds_values
+      expect:
+        rows: 1
+        data:
+        - n: 3
+- name: Numeric ISDATE CHECK uses integral date text and preserves whole statement undo
+  tds:
+    statements:
+    - connection: owner
+      sql: ALTER TABLE check_tds_date_numeric ADD CONSTRAINT CK_tds_date_numeric CHECK(v IS NULL OR ISDATE(v)=1)
+    - connection: owner
+      sql: INSERT check_tds_date_numeric VALUES(1,20240101),(2,NULL)
+    - connection: owner
+      sql: INSERT check_tds_date_numeric VALUES(3,20240229),(4,20240230)
+      expect: {error: true, contains: [CK_tds_date_numeric failed]}
+    - connection: observer
+      sql: SELECT id,v FROM check_tds_date_numeric ORDER BY id
+      expect: {rows: 2, data: [{id: 1, v: 20240101}, {id: 2, v: null}]}
+- name: One cached CHECK program uses the executing DATEFORMAT rather than its creator
+  tds:
+    statements:
+    - connection: owner
+      sql: SET LANGUAGE us_english; SET DATEFORMAT mdy
+    - connection: owner
+      sql: ALTER TABLE check_tds_date_runtime ADD CONSTRAINT CK_tds_date_runtime CHECK(ISDATE(v)=1)
+    - connection: owner
+      sql: INSERT check_tds_date_runtime VALUES(1,N'12/31/2024')
+    - connection: owner
+      sql: SET DATEFORMAT dmy
+    - connection: owner
+      sql: INSERT check_tds_date_runtime VALUES(2,N'31/12/2024')
+    - connection: owner
+      sql: SET DATEFORMAT mdy
+    - connection: owner
+      sql: INSERT check_tds_date_runtime VALUES(3,N'31/12/2024')
+      expect: {error: true, contains: [CK_tds_date_runtime failed]}
+    - connection: owner
+      sql: INSERT check_tds_date_runtime VALUES(4,NULL)
+      expect: {error: true, contains: [CK_tds_date_runtime failed]}
+    - connection: observer
+      sql: SELECT id,v FROM check_tds_date_runtime ORDER BY id
+      expect: {rows: 2, data: [{id: 1, v: '12/31/2024'}, {id: 2, v: '31/12/2024'}]}
+- name: Module DML supplies its own language while the caller keeps its context
+  tds:
+    statements:
+    - connection: owner
+      sql: SET LANGUAGE us_english
+    - connection: owner
+      sql: CREATE PROCEDURE check_tds_date_insert_module AS BEGIN SET LANGUAGE Deutsch; INSERT check_tds_date_runtime VALUES(3,N'31/12/2024'); END
+    - connection: owner
+      sql: EXEC check_tds_date_insert_module
+    - connection: owner
+      sql: SELECT @@LANGUAGE AS language,ISDATE(N'31/12/2024') AS caller_valid
+      expect: {rows: 1, data: [{language: us_english, caller_valid: 0}]}
+    - connection: observer
+      sql: SELECT id,v FROM check_tds_date_runtime WHERE id=3
+      expect: {rows: 1, data: [{id: 3, v: '31/12/2024'}]}
+- name: Historical CHECK revalidation uses the module session instead of the parent transaction session
+  tds:
+    statements:
+    - connection: owner
+      sql: CREATE PROCEDURE check_tds_date_revalidate_module AS BEGIN SET LANGUAGE Deutsch; ALTER TABLE check_tds_date_revalidate WITH CHECK CHECK CONSTRAINT CK_tds_date_revalidate; END
+    - connection: owner
+      sql: INSERT check_tds_date_revalidate VALUES(1,N'31/12/2024')
+    - connection: owner
+      sql: SET LANGUAGE Deutsch
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: ALTER TABLE check_tds_date_revalidate ADD CONSTRAINT CK_tds_date_revalidate CHECK(ISDATE(v)=1)
+    - connection: owner
+      sql: ALTER TABLE check_tds_date_revalidate NOCHECK CONSTRAINT CK_tds_date_revalidate
+    - connection: owner
+      sql: SET LANGUAGE us_english
+    - connection: owner
+      sql: EXEC check_tds_date_revalidate_module
+    - connection: owner
+      sql: SELECT @@LANGUAGE AS language
+      expect: {rows: 1, data: [{language: us_english}]}
+    - connection: owner
+      sql: SELECT constraint_name,enforced FROM information_schema.table_constraints WHERE constraint_name=N'CK_tds_date_revalidate'
+      expect: {rows: 1, data: [{constraint_name: CK_tds_date_revalidate, enforced: 'YES'}]}
+    - connection: observer
+      sql: SELECT constraint_name FROM information_schema.check_constraints WHERE constraint_name=N'CK_tds_date_revalidate'
+      expect: {rows: 0}
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT constraint_name,enforced FROM information_schema.table_constraints WHERE constraint_name=N'CK_tds_date_revalidate'
+      expect: {rows: 1, data: [{constraint_name: CK_tds_date_revalidate, enforced: 'YES'}]}
+    - connection: owner
+      sql: INSERT check_tds_date_revalidate VALUES(2,N'31/12/2024')
+      expect: {error: true, contains: [CK_tds_date_revalidate failed]}
+    - connection: observer
+      sql: SELECT id,v FROM check_tds_date_revalidate
+      expect: {rows: 1, data: [{id: 1, v: '31/12/2024'}]}
+- name: ISDATE does not authorize arbitrary session reads inside its operand
+  tds:
+    statements:
+    - connection: owner
+      sql: ALTER TABLE check_tds_dates ADD CONSTRAINT CK_tds_date_arbitrary CHECK(ISDATE(CONVERT(VARCHAR(20),@@TRANCOUNT))=1)
+      expect: {error: true, contains: [CHECK session-dependent scalar expressions are not supported]}
+    - connection: observer
+      sql: SELECT constraint_name FROM information_schema.check_constraints WHERE constraint_name=N'CK_tds_date_arbitrary'
+      expect: {rows: 0}
+- name: Physical rebuild preserves the ISDATE recipe without retaining its creator session
+  scm: |
+    (begin
+      (define h (table "memcp-tests" false "check_tds_date_runtime" false nil))
+      (rebuild h true false)
+      (and (identical? h (table "memcp-tests" false "check_tds_date_runtime" false nil))
+        (equal? ((car ((show h "constraints") "Checks")) "Source") "ISDATE(v)=1")))
+  expect: {result: true}
+- name: ISDATE CHECK reload uses the ordinary durable server lifecycle
+  syntax: mysql
+  sql: SHUTDOWN
+  expect: {rows: 0}
+- name: Reloaded ISDATE source binds new sessions and still preserves numeric and NULL rows
+  tds:
+    statements:
+    - connection: owner
+      sql: SET LANGUAGE us_english
+    - connection: owner
+      sql: INSERT check_tds_date_runtime VALUES(4,N'31/12/2024')
+      expect: {error: true, contains: [CK_tds_date_runtime failed]}
+    - connection: owner
+      sql: SET LANGUAGE Deutsch
+    - connection: owner
+      sql: INSERT check_tds_date_runtime VALUES(4,N'31/12/2024')
+    - connection: observer
+      sql: SELECT id,v FROM check_tds_date_runtime ORDER BY id
+      expect: {rows: 4, data: [{id: 1, v: '12/31/2024'}, {id: 2, v: '31/12/2024'}, {id: 3, v: '31/12/2024'}, {id: 4, v: '31/12/2024'}]}
+    - connection: observer
+      sql: SELECT id,v FROM check_tds_date_numeric ORDER BY id
+      expect: {rows: 2, data: [{id: 1, v: 20240101}, {id: 2, v: null}]}
+    - connection: owner
+      sql: SET LANGUAGE us_english
+- name: LIKE and LEN CHECK accepts either branch and preserves SQL UNKNOWN
+  tds:
+    statements:
+    - connection: owner
+      sql: ALTER TABLE check_tds_like ADD CONSTRAINT CK_tds_like CHECK(v LIKE N'%:%' OR LEN(v)<7)
+    - connection: owner
+      sql: INSERT check_tds_like VALUES(1,N'ab'),(2,N'long:accepted'),(3,NULL)
+    - connection: observer
+      sql: SELECT id,v FROM check_tds_like ORDER BY id
+      expect: {rows: 3, data: [{id: 1, v: ab}, {id: 2, v: 'long:accepted'}, {id: 3, v: null}]}
+- name: LIKE CHECK rejects a later invalid row without keeping the earlier candidate
+  tds:
+    statements:
+    - connection: owner
+      sql: INSERT check_tds_like VALUES(4,N'next:value'),(5,N'abcdefgh')
+      expect: {error: true, contains: [CK_tds_like failed]}
+    - connection: observer
+      sql: SELECT id,v FROM check_tds_like ORDER BY id
+      expect: {rows: 3, data: [{id: 1, v: ab}, {id: 2, v: 'long:accepted'}, {id: 3, v: null}]}
+- name: LIKE CHECK enforces UPDATE without changing the rejected native row
+  tds:
+    statements:
+    - connection: owner
+      sql: UPDATE check_tds_like SET v=N'abcdefgh' WHERE id=1
+      expect: {error: true, contains: [CK_tds_like failed]}
+    - connection: observer
+      sql: SELECT v FROM check_tds_like WHERE id=1
+      expect: {rows: 1, data: [{v: ab}]}
+    - connection: owner
+      sql: UPDATE check_tds_like SET v=N'updated:value' WHERE id=1
+    - connection: observer
+      sql: SELECT id,v FROM check_tds_like ORDER BY id
+      expect: {rows: 3, data: [{id: 1, v: 'updated:value'}, {id: 2, v: 'long:accepted'}, {id: 3, v: null}]}

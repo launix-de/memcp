@@ -1,0 +1,156 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: T-SQL procedure result streams enter native INSERT with declared assignment contracts
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+setup:
+- sql: CREATE TABLE capture_source (id INT PRIMARY KEY, label NVARCHAR(20))
+- sql: INSERT capture_source VALUES (1,N'alpha'),(2,N'beta'),(3,NULL)
+- sql: CREATE TABLE capture_target (id INT PRIMARY KEY, label NVARCHAR(3), marker INT DEFAULT 8)
+- sql: CREATE TABLE capture_audit (id INT)
+- sql: CREATE PROCEDURE capture_rows @minimum INT=1 AS SELECT id,label FROM capture_source WHERE id>=@minimum ORDER BY id
+- sql: CREATE PROCEDURE capture_multiple AS BEGIN SELECT 11 AS first,N'one' AS second; SELECT 12 AS other,N'two' AS another END
+- sql: CREATE PROCEDURE capture_bad_shape AS BEGIN SELECT 21 AS first,N'ok' AS second; SELECT 22 AS first END
+- sql: CREATE PROCEDURE capture_failure AS BEGIN INSERT capture_audit VALUES(1); SELECT 31 AS first,N'ok' AS second; THROW 50001,N'capture failed',1 END
+- sql: CREATE PROCEDURE capture_output @value INT OUTPUT AS BEGIN SET @value=9; SELECT @value AS first,N'out' AS second END
+- sql: CREATE PROCEDURE capture_commit AS BEGIN SELECT 41 AS first,N'ok' AS second; COMMIT END
+- sql: CREATE PROCEDURE capture_nested AS INSERT capture_target(id,label) EXEC capture_rows
+- sql: CREATE PROCEDURE capture_reordered AS SELECT N'order' AS unrelated,61 AS another
+- sql: CREATE PROCEDURE capture_caught_shape AS BEGIN TRY SELECT 51 AS first,N'ok' AS second; SELECT 52 AS first END TRY BEGIN CATCH SELECT 53 AS first,N'end' AS second END CATCH
+- sql: CREATE PROCEDURE capture_caught_conversion AS BEGIN TRY SELECT 54 AS first,N'ok' AS second; SELECT N'not integer' AS first,N'end' AS second END TRY BEGIN CATCH SELECT 55 AS first,N'end' AS second END CATCH
+- sql: CREATE PROCEDURE capture_empty_bad AS SELECT id FROM capture_source WHERE id=999
+- sql: CREATE PROCEDURE capture_decimal AS SELECT CAST(12.345 AS DECIMAL(10,3)) AS original
+- sql: CREATE TABLE capture_amount (amount DECIMAL(7,2))
+- sql: CREATE PROCEDURE capture_ddl AS BEGIN SELECT 56 AS first,N'ok' AS second; /* guarded */ CREATE TABLE capture_forbidden(id INT) END
+- sql: CREATE TABLE capture_bulk (value INT PRIMARY KEY)
+- sql: CREATE TABLE capture_identity (id INT IDENTITY PRIMARY KEY, amount DECIMAL(7,2))
+- sql: CREATE PROCEDURE capture_many AS SELECT a.id+3*b.id+9*c.id+27*d.id+81*e.id+243*f.id AS source_name FROM capture_source a CROSS JOIN capture_source b CROSS JOIN capture_source c CROSS JOIN capture_source d CROSS JOIN capture_source e CROSS JOIN capture_source f
+cleanup:
+- sql: DROP PROCEDURE capture_many
+- sql: DROP TABLE capture_bulk
+- sql: DROP TABLE capture_identity
+- sql: DROP PROCEDURE capture_reordered
+- sql: DROP PROCEDURE capture_caught_shape
+- sql: DROP PROCEDURE capture_caught_conversion
+- sql: DROP PROCEDURE capture_empty_bad
+- sql: DROP PROCEDURE capture_decimal
+- sql: DROP PROCEDURE capture_ddl
+- sql: DROP TABLE capture_amount
+- sql: DROP PROCEDURE capture_rows
+- sql: DROP PROCEDURE capture_multiple
+- sql: DROP PROCEDURE capture_bad_shape
+- sql: DROP PROCEDURE capture_failure
+- sql: DROP PROCEDURE capture_output
+- sql: DROP PROCEDURE capture_commit
+- sql: DROP PROCEDURE capture_nested
+- sql: DROP TABLE capture_source
+- sql: DROP TABLE capture_target
+- sql: DROP TABLE capture_audit
+test_cases:
+- name: Ordinal binding rejects text assigned to an integer target
+  sql: INSERT INTO capture_target(label,id) EXEC capture_rows @minimum=2
+  expect: {error: true}
+- name: Incompatible source values roll back all admitted rows
+  sql: SELECT COUNT(*) AS total FROM capture_target
+  expect: {rows: 1, data: [{total: 0}]}
+- name: Explicit target list applies ordinary narrowing and defaults
+  sql: INSERT capture_target(id,label) EXECUTE capture_rows 2
+  expect: {affected_rows: 2}
+- name: Captured values preserve null and native defaults
+  sql: SELECT id,label,marker FROM capture_target ORDER BY id
+  expect: {rows: 2, data: [{id: 2, label: bet, marker: 8}, {id: 3, label: null, marker: 8}]}
+- name: Matching multiple result sets are all inserted by ordinal
+  sql: INSERT capture_target(id,label) EXEC capture_multiple
+  expect: {affected_rows: 2}
+- name: Multiple result names do not affect target binding
+  sql: SELECT id,label FROM capture_target WHERE id>10 ORDER BY id
+  expect: {rows: 2, data: [{id: 11, label: one}, {id: 12, label: two}]}
+- name: A later incompatible result shape rejects the whole statement
+  sql: INSERT capture_target(id,label) EXEC capture_bad_shape
+  expect: {error: true}
+- name: Shape errors leave no prefix rows
+  sql: SELECT COUNT(*) AS total FROM capture_target WHERE id>=20
+  expect: {rows: 1, data: [{total: 0}]}
+- name: Procedure errors abort captured rows and procedure writes together
+  sql: INSERT capture_target(id,label) EXEC capture_failure
+  expect: {error: true}
+- name: Failed procedure writes roll back
+  sql: SELECT COUNT(*) AS total FROM capture_audit
+  expect: {rows: 1, data: [{total: 0}]}
+- name: Failed procedure rows roll back
+  sql: SELECT COUNT(*) AS total FROM capture_target WHERE id>=30
+  expect: {rows: 1, data: [{total: 0}]}
+- name: Procedure output parameters retain ordinary binding
+  sql: DECLARE @value INT=1; INSERT capture_target(id,label) EXEC capture_output @value OUTPUT; SELECT @value AS value
+  expect: {rows: 1, data: [{value: 9}]}
+- name: Source cannot commit the enclosing statement
+  sql: INSERT capture_target(id,label) EXEC capture_commit
+  expect: {error: true}
+- name: Rejected source transaction boundary leaves no prefix row
+  sql: SELECT COUNT(*) AS total FROM capture_target WHERE id=41
+  expect: {rows: 1, data: [{total: 0}]}
+- name: Nested capture is rejected
+  sql: INSERT capture_target(id,label) EXEC capture_nested
+  expect: {error: true}
+- name: Output clause is invalid for an execute source
+  sql: INSERT capture_target(id,label) OUTPUT inserted.id EXEC capture_rows
+  expect: {error: true}
+- name: Duplicate target names fail before procedure execution
+  sql: INSERT capture_target(id,id) EXEC capture_rows
+  expect: {error: true}
+- name: Implicit writable target list also validates result arity
+  sql: INSERT capture_target EXEC capture_rows
+  expect: {error: true}
+- name: Source names are irrelevant and explicit reordered targets bind by ordinal
+  sql: INSERT capture_target(label,id) EXEC capture_reordered
+  expect: {affected_rows: 1}
+- name: Reordered insertion uses target assignment contract
+  sql: SELECT id,label FROM capture_target WHERE id=61
+  expect: {rows: 1, data: [{id: 61, label: ord}]}
+- name: Source CATCH cannot hide incompatible result shape
+  sql: INSERT capture_target(id,label) EXEC capture_caught_shape
+  expect: {error: true}
+- name: Source CATCH cannot hide target conversion failure
+  sql: INSERT capture_target(id,label) EXEC capture_caught_conversion
+  expect: {error: true}
+- name: Caught target failures roll back every prefix row
+  sql: SELECT COUNT(*) AS total FROM capture_target WHERE id BETWEEN 50 AND 59
+  expect: {rows: 1, data: [{total: 0}]}
+- name: Empty results still validate declared arity
+  sql: INSERT capture_target(id,label) EXEC capture_empty_bad
+  expect: {error: true}
+- name: Source decimal dimensions select ordinary destination rounding
+  sql: INSERT capture_amount EXEC capture_decimal
+  expect: {affected_rows: 1}
+- name: Decimal result retains destination declaration
+  sql: SELECT amount FROM capture_amount
+  expect: {rows: 1, data: [{amount: 12.35}]}
+- name: Capture participates in the caller transaction without inner commit
+  sql: BEGIN TRAN; INSERT capture_amount EXEC capture_decimal; ROLLBACK; SELECT COUNT(*) AS total FROM capture_amount
+  expect: {rows: 1, data: [{total: 1}]}
+- name: Source DDL is rejected before publishing a nontransactional definition
+  sql: INSERT capture_target(id,label) EXEC capture_ddl
+  expect: {error: true}
+- name: Unsupported source DDL leaves no prefix row
+  sql: SELECT COUNT(*) AS total FROM capture_target WHERE id=56
+  expect: {rows: 1, data: [{total: 0}]}
+- name: Native uniqueness errors roll back rows admitted before the conflict
+  sql: INSERT capture_target(id,label) EXEC capture_rows 1
+  expect: {error: true}
+- name: Constraint failure leaves no prefix insertion
+  sql: SELECT COUNT(*) AS total FROM capture_target WHERE id=1
+  expect: {rows: 1, data: [{total: 0}]}
+- name: Streaming capture shares the native identity allocator
+  sql: INSERT capture_identity EXEC capture_decimal
+  expect: {affected_rows: 1}
+- name: Generated identity and assigned decimal retain native values
+  sql: SELECT id,amount FROM capture_identity
+  expect: {rows: 1, data: [{id: 1, amount: 12.35}]}
+- name: Parallel procedure scans stream every row without a relation list
+  sql: INSERT capture_bulk EXEC capture_many
+  expect: {affected_rows: 729}
+- name: Parallel capture retains exact cardinality and unique native rows
+  sql: SELECT COUNT(*) AS total,MIN(value) AS lowest,MAX(value) AS highest FROM capture_bulk
+  expect: {rows: 1, data: [{total: 729, lowest: 364, highest: 1092}]}

@@ -1,0 +1,155 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Trigger RETURN errors transfer after native completion to the actual SQL leaf without duplicate diagnostics or transaction loss
+setup:
+- sql: CREATE TABLE diagnostic_input(id INT PRIMARY KEY,value INT)
+- sql: INSERT diagnostic_input VALUES(1,10),(2,20)
+- sql: CREATE TABLE diagnostic_suffix(id INT PRIMARY KEY)
+- sql: CREATE TABLE diagnostic_nested_input(id INT PRIMARY KEY)
+- sql: INSERT diagnostic_nested_input VALUES(1)
+- sql: |
+    CREATE TRIGGER diagnostic_guard ON diagnostic_input INSTEAD OF DELETE AS BEGIN
+      IF EXISTS(SELECT id FROM deleted WHERE id=2) BEGIN
+        RAISERROR(N'protected diagnostic row',16,7);
+        RETURN;
+      END;
+      DELETE FROM diagnostic_input WHERE id IN (SELECT id FROM deleted);
+    END
+- sql: |
+    CREATE PROCEDURE diagnostic_delete AS BEGIN
+      DELETE FROM diagnostic_input WHERE id=2;
+      INSERT diagnostic_suffix VALUES(101);
+    END
+- sql: |
+    CREATE PROCEDURE diagnostic_trigger_child AS BEGIN
+      DELETE FROM diagnostic_input WHERE id=2;
+      INSERT diagnostic_suffix VALUES(102);
+    END
+- sql: |
+    CREATE TRIGGER diagnostic_nested ON diagnostic_nested_input AFTER DELETE AS BEGIN
+      EXEC diagnostic_trigger_child;
+      INSERT diagnostic_suffix VALUES(103);
+    END
+cleanup:
+- sql: DROP TRIGGER IF EXISTS diagnostic_nested
+- sql: DROP TRIGGER IF EXISTS diagnostic_guard
+- sql: DROP PROCEDURE IF EXISTS diagnostic_trigger_child
+- sql: DROP PROCEDURE IF EXISTS diagnostic_delete
+- sql: DROP TABLE IF EXISTS diagnostic_nested_input
+- sql: DROP TABLE IF EXISTS diagnostic_suffix
+- sql: DROP TABLE IF EXISTS diagnostic_input
+test_cases:
+- name: An uncaught RETURN diagnostic is a REST SQL error
+  sql: DELETE FROM diagnostic_input WHERE id=2
+  expect: {error: true,contains: protected diagnostic row}
+- name: RETURN retains the original protected rows
+  sql: SELECT id,value FROM diagnostic_input ORDER BY id
+  expect: {rows: 2,data: [{id: 1,value: 10},{id: 2,value: 20}]}
+- name: The frontend throws the exact typed error once after native completion
+  scm: |
+    (begin
+      (define caller (newsession)) (caller "username" "root")
+      (define notices (newsession)) (notices "count" 0)
+      (define caught (try (lambda () (begin
+        (tsql_execute_request "memcp-tests" "DELETE FROM diagnostic_input WHERE id=2"
+          (tsql_message_session caller (lambda (_message) (notices "count" (+ 1 (notices "count")))))
+          nil 0 (lambda (_row) true) (lambda args true)) false)) (lambda (failure) failure)))
+      (and (expression_equal? caught '("tsql-error" 50000 "protected diagnostic row" 7 16))
+        (equal? (notices "count") 0) (nil? (caller "transaction"))))
+  expect: {result: true}
+- name: Caller CATCH consumes the error without a wire ERROR and retains prior transaction work
+  tds:
+    statements:
+    - {connection: owner,sql: BEGIN TRANSACTION}
+    - {connection: owner,sql: 'INSERT diagnostic_input VALUES(99,99)'}
+    - connection: owner
+      sql: |
+        BEGIN TRY
+          DELETE FROM diagnostic_input WHERE id=2;
+          INSERT diagnostic_suffix VALUES(104);
+        END TRY
+        BEGIN CATCH
+          SELECT ERROR_NUMBER() AS number,ERROR_SEVERITY() AS severity,ERROR_STATE() AS state,
+                 ERROR_MESSAGE() AS message,@@TRANCOUNT AS open_transactions;
+        END CATCH
+      expect:
+        rows: 1
+        data: [{number: 50000,severity: 16,state: 7,message: protected diagnostic row,open_transactions: 1}]
+    - connection: owner
+      sql: SELECT id,value FROM diagnostic_input ORDER BY id
+      expect: {rows: 3,data: [{id: 1,value: 10},{id: 2,value: 20},{id: 99,value: 99}]}
+    - connection: owner
+      sql: SELECT id FROM diagnostic_suffix
+      expect: {rows: 0}
+    - {connection: owner,sql: ROLLBACK TRANSACTION}
+    - connection: observer
+      sql: SELECT id,value FROM diagnostic_input ORDER BY id
+      expect: {rows: 2,data: [{id: 1,value: 10},{id: 2,value: 20}]}
+- name: An uncaught wire error does not consume the caller transaction or a later statement
+  tds:
+    statements:
+    - {connection: owner,sql: BEGIN TRANSACTION}
+    - {connection: owner,sql: 'INSERT diagnostic_input VALUES(98,98)'}
+    - connection: owner
+      sql: DELETE FROM diagnostic_input WHERE id=2
+      expect: {error: true,contains: [protected diagnostic row]}
+    - connection: owner
+      sql: SELECT id,value,@@TRANCOUNT AS open_transactions FROM diagnostic_input WHERE id=98
+      expect: {rows: 1,data: [{id: 98,value: 98,open_transactions: 1}]}
+    - {connection: owner,sql: ROLLBACK TRANSACTION}
+- name: EXEC lets the actual failing SQL leaf reach its caller CATCH
+  sql: |
+    BEGIN TRY
+      EXEC diagnostic_delete;
+      INSERT diagnostic_suffix VALUES(105);
+    END TRY
+    BEGIN CATCH
+      SELECT ERROR_NUMBER() AS number,ERROR_SEVERITY() AS severity,ERROR_STATE() AS state;
+    END CATCH
+  expect: {rows: 1,data: [{number: 50000,severity: 16,state: 7}]}
+- name: Dynamic module errors reach the caller CATCH without executing either suffix
+  sql: |
+    BEGIN TRY
+      EXEC(N'DELETE FROM diagnostic_input WHERE id=2; INSERT diagnostic_suffix VALUES(106);');
+      INSERT diagnostic_suffix VALUES(107);
+    END TRY
+    BEGIN CATCH
+      SELECT ERROR_NUMBER() AS number,ERROR_SEVERITY() AS severity,ERROR_STATE() AS state;
+    END CATCH
+  expect: {rows: 1,data: [{number: 50000,severity: 16,state: 7}]}
+- name: Ordinary and dynamic procedure suffixes remain unexecuted
+  sql: SELECT id FROM diagnostic_suffix
+  expect: {rows: 0}
+- name: Nested native completion drains while each trigger module unwinds its own SQL suffix
+  tds:
+    statements:
+    - {connection: owner,sql: BEGIN TRANSACTION}
+    - {connection: owner,sql: 'INSERT diagnostic_input VALUES(97,97)'}
+    - connection: owner
+      sql: |
+        BEGIN TRY
+          DELETE FROM diagnostic_nested_input WHERE id=1;
+          INSERT diagnostic_suffix VALUES(108);
+        END TRY
+        BEGIN CATCH
+          SELECT ERROR_NUMBER() AS number,ERROR_SEVERITY() AS severity,ERROR_STATE() AS state,
+                 @@TRANCOUNT AS open_transactions;
+        END CATCH
+      expect: {rows: 1,data: [{number: 50000,severity: 16,state: 7,open_transactions: 1}]}
+    - connection: owner
+      sql: SELECT id,value FROM diagnostic_input ORDER BY id
+      expect: {rows: 3,data: [{id: 1,value: 10},{id: 2,value: 20},{id: 97,value: 97}]}
+    - connection: owner
+      sql: SELECT id FROM diagnostic_suffix
+      expect: {rows: 0}
+    - {connection: owner,sql: ROLLBACK TRANSACTION}
+    - connection: observer
+      sql: SELECT id FROM diagnostic_nested_input
+      expect: {rows: 1,data: [{id: 1}]}
+- name: A subsequent ordinary statement has no stale diagnostic or module RETURN
+  sql: SELECT COUNT(*) AS remaining FROM diagnostic_input
+  expect: {rows: 1,data: [{remaining: 2}]}

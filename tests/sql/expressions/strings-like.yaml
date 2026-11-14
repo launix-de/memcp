@@ -81,7 +81,13 @@ test_cases:
     sql: |
       CREATE TABLE like_qualified (id INT PRIMARY KEY, txt VARCHAR(50))
     expect:
-      affected_rows: 1
+      affected_rows: 0
+      result_contains: '"affected_rows"'
+
+  - name: "Completed MySQL declaration is present: Qualified LIKE left-hand side"
+    syntax: mysql
+    sql: "SHOW CREATE TABLE like_qualified"
+    expect: {rows: 1,data: [{Table: "like_qualified"}]}
 
   - name: "Qualified LIKE left-hand side insert"
     sql: |

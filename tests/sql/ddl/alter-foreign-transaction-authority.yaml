@@ -1,0 +1,141 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: MySQL ALTER foreign declarations retain the executing transaction and native admission
+  isolated: true
+setup:
+  - sql: CREATE TABLE fk_tx_self(id INT PRIMARY KEY,parent_id INT) ENGINE=safe
+  - sql: CREATE TABLE fk_tx_history(id INT PRIMARY KEY,parent_id INT) ENGINE=safe
+  - sql: CREATE TABLE fk_tx_orphan(id INT PRIMARY KEY,parent_id INT) ENGINE=safe
+  - sql: CREATE TABLE fk_tx_nonunique(id INT,parent_id INT) ENGINE=safe
+  - sql: CREATE TABLE fk_tx_parent(id INT PRIMARY KEY) ENGINE=safe
+  - sql: CREATE TABLE fk_tx_child(id INT PRIMARY KEY,parent_id INT) ENGINE=safe
+  - sql: INSERT INTO fk_tx_history VALUES(10,10),(11,NULL)
+  - sql: INSERT INTO fk_tx_orphan VALUES(20,99)
+  - sql: INSERT INTO fk_tx_parent VALUES(1)
+test_cases:
+  - name: Begin the self declaration owner
+    session_id: fk_tx_owner
+    sql: BEGIN
+  - name: A named self declaration uses the real explicit transaction
+    session_id: fk_tx_owner
+    sql: ALTER TABLE fk_tx_self ADD CONSTRAINT fk_tx_rolled_back FOREIGN KEY(parent_id) REFERENCES fk_tx_self(id)
+  - name: The owner sees its pending self declaration
+    session_id: fk_tx_owner
+    sql: SELECT COUNT(*) AS n FROM information_schema.referential_constraints WHERE constraint_schema='memcp-tests' AND constraint_name='fk_tx_rolled_back'
+    expect: {data: [{n: 1}]}
+  - name: Another session does not see the pending self declaration
+    sql: SELECT COUNT(*) AS n FROM information_schema.referential_constraints WHERE constraint_schema='memcp-tests' AND constraint_name='fk_tx_rolled_back'
+    expect: {data: [{n: 0}]}
+  - name: Rollback retires the pending declaration
+    session_id: fk_tx_owner
+    sql: ROLLBACK
+  - name: Rollback leaves no public declaration
+    sql: SELECT COUNT(*) AS n FROM information_schema.referential_constraints WHERE constraint_schema='memcp-tests' AND constraint_name='fk_tx_rolled_back'
+    expect: {data: [{n: 0}]}
+  - name: Begin a fresh declaration on the same reusable session
+    session_id: fk_tx_owner
+    sql: BEGIN
+  - name: An unnamed self declaration uses the new transaction
+    session_id: fk_tx_owner
+    sql: ALTER TABLE fk_tx_self ADD FOREIGN KEY(parent_id) REFERENCES fk_tx_self(id)
+  - name: Commit publishes the self declaration
+    session_id: fk_tx_owner
+    sql: COMMIT
+  - name: A row may reference its own final key
+    sql: INSERT INTO fk_tx_self VALUES(1,1)
+    expect: {affected_rows: 1}
+  - name: Committed self enforcement rejects an orphan
+    sql: INSERT INTO fk_tx_self VALUES(2,99)
+    expect: {error: true, contains: foreign key constraint}
+  - name: A rejected orphan leaves the original row unchanged
+    sql: SELECT id,parent_id FROM fk_tx_self ORDER BY id
+    expect: {data: [{id: 1, parent_id: 1}]}
+  - name: A real shutdown persists the self declaration
+    sql: SHUTDOWN
+  - name: Reloaded self enforcement rejects an orphan
+    sql: INSERT INTO fk_tx_self VALUES(2,99)
+    expect: {error: true, contains: foreign key constraint}
+  - name: Autocommit DROP removes the generated constraint
+    sql: ALTER TABLE fk_tx_self DROP FOREIGN KEY fk_tx_self_parent_id_fk
+  - name: The removed declaration no longer rejects an orphan
+    sql: INSERT INTO fk_tx_self VALUES(2,99)
+    expect: {affected_rows: 1}
+  - name: Checked admission accepts valid historical self references and NULL
+    sql: ALTER TABLE fk_tx_history ADD CONSTRAINT fk_tx_checked FOREIGN KEY(parent_id) REFERENCES fk_tx_history(id)
+  - name: Checked admission rejects an existing orphan
+    sql: ALTER TABLE fk_tx_orphan ADD CONSTRAINT fk_tx_bad_history FOREIGN KEY(parent_id) REFERENCES fk_tx_orphan(id)
+    expect: {error: true, contains: foreign key constraint}
+  - name: Failed historical validation publishes no declaration
+    sql: SELECT COUNT(*) AS n FROM information_schema.referential_constraints WHERE constraint_schema='memcp-tests' AND constraint_name='fk_tx_bad_history'
+    expect: {data: [{n: 0}]}
+  - name: A failed admission leaves future writes free of partial enforcement
+    sql: INSERT INTO fk_tx_orphan VALUES(21,98)
+    expect: {affected_rows: 1}
+  - name: Nonunique self targets remain explicitly unsupported
+    sql: ALTER TABLE fk_tx_nonunique ADD CONSTRAINT fk_tx_no_unique FOREIGN KEY(parent_id) REFERENCES fk_tx_nonunique(id)
+    expect: {error: true, contains: existing native unique target}
+  - name: Recursive self actions retain the native guard
+    sql: ALTER TABLE fk_tx_self ADD CONSTRAINT fk_tx_no_cascade FOREIGN KEY(parent_id) REFERENCES fk_tx_self(id) ON UPDATE CASCADE
+    expect: {error: true, contains: RESTRICT}
+  - name: Rejected self profiles leave no public declaration
+    sql: SELECT COUNT(*) AS n FROM information_schema.referential_constraints WHERE constraint_schema='memcp-tests' AND constraint_name IN ('fk_tx_no_unique','fk_tx_no_cascade')
+    expect: {data: [{n: 0}]}
+  - name: Begin a nonself declaration owner
+    session_id: fk_tx_other
+    sql: BEGIN
+  - name: Nonself declarations use the same native transaction contract
+    session_id: fk_tx_other
+    sql: ALTER TABLE fk_tx_child ADD CONSTRAINT fk_tx_nonself FOREIGN KEY(parent_id) REFERENCES fk_tx_parent(id) ON UPDATE CASCADE
+  - name: Rollback also retires the nonself declaration
+    session_id: fk_tx_other
+    sql: ROLLBACK
+  - name: Nonself rollback leaves no enforcement residue
+    sql: INSERT INTO fk_tx_child VALUES(1,99)
+    expect: {affected_rows: 1}
+  - name: Compound ADD then immediate DROP cannot leak a committed declaration
+    sql: ALTER TABLE fk_tx_history ADD CONSTRAINT fk_tx_compound FOREIGN KEY(parent_id) REFERENCES fk_tx_history(id),DROP FOREIGN KEY fk_tx_compound
+    expect: {error: true, contains: native catalog retirement}
+  - name: Failed compound admission leaves no declaration
+    sql: SELECT COUNT(*) AS n FROM information_schema.referential_constraints WHERE constraint_schema='memcp-tests' AND constraint_name='fk_tx_compound'
+    expect: {data: [{n: 0}]}
+  - name: Begin an explicit removal attempt
+    session_id: fk_tx_drop
+    sql: BEGIN
+  - name: Immediate native removal is rejected inside an explicit transaction
+    session_id: fk_tx_drop
+    sql: ALTER TABLE fk_tx_history DROP CONSTRAINT fk_tx_checked
+    expect: {error: true, contains: native catalog retirement}
+  - name: Rollback clears the failed removal transaction
+    session_id: fk_tx_drop
+    sql: ROLLBACK
+  - name: Rejected explicit removal preserves committed enforcement
+    sql: INSERT INTO fk_tx_history VALUES(12,99)
+    expect: {error: true, contains: foreign key constraint}
+  - name: Begin a transaction with a real row effect
+    session_id: fk_tx_dirty
+    sql: BEGIN
+  - name: The dirty transaction owns its inserted row
+    session_id: fk_tx_dirty
+    sql: INSERT INTO fk_tx_child VALUES(2,1)
+    expect: {affected_rows: 1}
+  - name: Metadata admission cannot replace the dirty transaction owner
+    session_id: fk_tx_dirty
+    sql: ALTER TABLE fk_tx_history ADD CONSTRAINT fk_tx_after_rows FOREIGN KEY(parent_id) REFERENCES fk_tx_history(id)
+    expect: {error: true, contains: precede native row access}
+  - name: Rollback recovers the rejected mixed transaction
+    session_id: fk_tx_dirty
+    sql: ROLLBACK
+  - name: The mixed failure rolls back rows and publishes no declaration
+    sql: SELECT COUNT(*) AS n FROM fk_tx_child WHERE id=2
+    expect: {data: [{n: 0}]}
+  - name: The mixed failure leaves the catalog unchanged
+    sql: SELECT COUNT(*) AS n FROM information_schema.referential_constraints WHERE constraint_schema='memcp-tests' AND constraint_name='fk_tx_after_rows'
+    expect: {data: [{n: 0}]}
+cleanup:
+  - sql: DROP TABLE IF EXISTS fk_tx_child
+  - sql: DROP TABLE IF EXISTS fk_tx_parent
+  - sql: DROP TABLE IF EXISTS fk_tx_nonunique
+  - sql: DROP TABLE IF EXISTS fk_tx_orphan
+  - sql: DROP TABLE IF EXISTS fk_tx_history
+  - sql: DROP TABLE IF EXISTS fk_tx_self

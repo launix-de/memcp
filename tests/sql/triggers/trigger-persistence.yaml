@@ -40,6 +40,35 @@ test_cases:
     expect:
       affected_rows: 1
 
+  - name: "SQL source compilation extracts its recipe from the DDL completion"
+    scm: |
+      (begin
+        (define context (newsession))
+        (context "schema" "memcp-tests")
+        (context "table" "tp_vals")
+        (context "name" "tp_source_compile_only")
+        (context "timing" "before_insert")
+        (context "schema_only" true)
+        (define recipe (eval (sql_trigger_source_compile "SET NEW.val = NEW.val + 7" context)))
+        (match recipe
+          ((symbol deferred_trigger) body)
+          (get_assoc ((eval body) nil (list "id" 3 "val" 10) (newsession) nil) "val")
+          _ (error "expected the source compiler deferred recipe")))
+    expect: {result: 17}
+
+  - name: "Receiver owned SQL trigger source retains its schema only policy"
+    scm: |
+      (begin
+        (define context (newsession))
+        (context "schema" "memcp-tests")
+        (context "table" "tp_vals")
+        (context "name" "tp_source_scope_only")
+        (context "timing" "after_insert")
+        (context "schema_only" true)
+        (sql_trigger_source_compile
+          "INSERT INTO tp_vals(id,val) SELECT NEW.id,1 FROM system.user WHERE username='root'" context))
+    expect: {error: true, contains: "replicated trigger may only access its own schema"}
+
   - name: "Create AFTER INSERT trigger with embedded literal"
     sql: |
       CREATE TRIGGER tp_add100 AFTER INSERT ON tp_vals FOR EACH ROW
@@ -47,7 +76,10 @@ test_cases:
         UPDATE tp_vals SET val = val + 100 WHERE id = NEW.id;
       END
     expect:
-      rows: 0
+      affected_rows: 0
+      rows: 1
+      data: [{affected_rows: 0}]
+      result_contains: '"affected_rows"'
 
   - name: "Verify trigger fires before restart"
     sql: "INSERT INTO tp_vals VALUES (2, 5)"
@@ -66,7 +98,7 @@ test_cases:
   - name: "Create source-defined Scheme trigger"
     scm: |
       (createtrigger
-        (table "memcp-tests" false "tp_scheme" false)
+        (table "memcp-tests" false "tp_scheme" false nil)
         "tp_scheme_add7"
         "before_insert"
         "(lambda (OLD NEW session tx) (set_assoc NEW \"val\" (+ (get_assoc NEW \"val\") 7)))"
@@ -190,7 +222,7 @@ test_cases:
   - name: "Persist trigger source whose frontend is not loaded"
     scm: |
       (createtrigger
-        (table "memcp-tests" false "tp_unknown_language" false)
+        (table "memcp-tests" false "tp_unknown_language" false nil)
         "tp_unknown_language_trigger"
         "before_insert"
         "opaque source"

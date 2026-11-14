@@ -1,0 +1,78 @@
+# Copyright (C) 2026 Carl-Philip Haensch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  description: Relational iteration preserves each caller state and normal SQL assignment semantics
+setup:
+- sql: CREATE TABLE iteration_nodes(id INT PRIMARY KEY,parent_id INT,label VARCHAR(4))
+- sql: INSERT iteration_nodes VALUES(0,NULL,'Z'),(1,NULL,'A'),(2,1,'B'),(3,2,'C'),(4,NULL,NULL)
+- sql: CREATE TABLE iteration_callers(id INT PRIMARY KEY,start_id INT)
+- sql: INSERT iteration_callers VALUES(1,3),(2,NULL),(3,0),(4,3),(5,9),(6,4)
+- sql: CREATE TABLE iteration_guard(id INT PRIMARY KEY,denominator INT)
+- sql: INSERT iteration_guard VALUES(1,0)
+test_cases:
+- name: A hierarchy transition uses relational assignment and a scalar parent lookup
+  sql: |
+    CREATE FUNCTION dbo.iteration_depth(@start INT) RETURNS INT AS BEGIN
+      DECLARE @current INT=@start;
+      DECLARE @total INT=0;
+      WHILE @current IS NOT NULL BEGIN
+        SELECT TOP 1 @total=@total+1 FROM iteration_nodes WHERE id=@current;
+        SET @current=(SELECT TOP 1 parent_id FROM iteration_nodes WHERE id=@current);
+      END
+      RETURN @total;
+    END
+- name: NULL and zero are separate invocation bindings and a missing parent lookup terminates
+  sql: SELECT dbo.iteration_depth(NULL) AS skipped,dbo.iteration_depth(0) AS zero_key,dbo.iteration_depth(3) AS chain,dbo.iteration_depth(9) AS missing
+  expect: {rows: 1,data: [{skipped: 0,zero_key: 1,chain: 3,missing: 0}]}
+- name: Repeated outer bindings retain the caller bag rather than deduplicating output rows
+  sql: SELECT id,dbo.iteration_depth(start_id) AS depth FROM iteration_callers ORDER BY id
+  expect: {rows: 6,data: [{id: 1,depth: 3},{id: 2,depth: 0},{id: 3,depth: 1},{id: 4,depth: 3},{id: 5,depth: 0},{id: 6,depth: 1}]}
+- name: Pure state transitions remain between two relational reads of the current iteration
+  sql: |
+    CREATE FUNCTION dbo.iteration_path(@start INT) RETURNS VARCHAR(16) AS BEGIN
+      DECLARE @current INT=@start;
+      DECLARE @label VARCHAR(4);
+      DECLARE @path VARCHAR(16)='';
+      WHILE @current IS NOT NULL BEGIN
+        SELECT TOP 1 @label=label FROM iteration_nodes WHERE id=@current;
+        SET @path=@path+ISNULL(@label,'?');
+        SET @current=(SELECT TOP 1 parent_id FROM iteration_nodes WHERE id=@current);
+      END
+      RETURN @path;
+    END
+- name: Terminal states retain concatenation order NULL locals and skipped loop values
+  sql: SELECT dbo.iteration_path(3) AS chain,dbo.iteration_path(4) AS nullable,dbo.iteration_path(NULL) AS skipped,dbo.iteration_path(0) AS zero_key
+  expect: {rows: 1,data: [{chain: CBA,nullable: '?',skipped: '',zero_key: Z}]}
+- name: A false loop predicate prevents evaluation of the relational body
+  sql: |
+    CREATE FUNCTION dbo.iteration_safe(@remaining INT) RETURNS INT AS BEGIN
+      DECLARE @value INT=7;
+      WHILE @remaining>0 BEGIN
+        SELECT TOP 1 @value=10/denominator FROM iteration_guard WHERE id=1;
+        SET @remaining=@remaining-1;
+      END
+      RETURN @value;
+    END
+- name: FALSE and UNKNOWN predicates do not execute a division by a stored zero
+  sql: SELECT dbo.iteration_safe(0) AS stopped,dbo.iteration_safe(NULL) AS unknown_condition
+  expect: {rows: 1,data: [{stopped: 7,unknown_condition: 7}]}
+- name: Invocation reads observe the current transaction own hierarchy changes
+  session_id: iteration_owner
+  sql: BEGIN TRANSACTION; UPDATE iteration_nodes SET parent_id=NULL WHERE id=3
+- name: Transactional iteration uses the updated parent relationship
+  session_id: iteration_owner
+  sql: SELECT dbo.iteration_depth(3) AS depth
+  expect: {rows: 1,data: [{depth: 1}]}
+- name: Rollback retains the original hierarchy and function declaration
+  session_id: iteration_owner
+  sql: ROLLBACK TRANSACTION
+- name: A later invocation observes rollback rather than a retained terminal tuple
+  sql: SELECT dbo.iteration_depth(3) AS depth
+  expect: {rows: 1,data: [{depth: 3}]}
+- name: Restart reconstructs relational iteration from source declarations
+  action: restart
+- name: Reloaded iteration keeps NULL and zero distinct across multiple calls
+  sql: SELECT dbo.iteration_depth(NULL) AS skipped,dbo.iteration_depth(0) AS zero_key,dbo.iteration_path(3) AS chain
+  expect: {rows: 1,data: [{skipped: 0,zero_key: 1,chain: CBA}]}

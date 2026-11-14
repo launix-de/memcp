@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
 """
 Unified Scheme formatter + linter for .scm under lib/.
 
@@ -163,7 +165,7 @@ def process_file(path: Path, check_only: bool) -> tuple[bool, list[str]]:
 
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--path", default="lib", help="root path (default: lib)")
+    ap.add_argument("--path", default="lib", help="Scheme file or root directory (default: lib)")
     ap.add_argument("--check", action="store_true", help="only check; non-zero exit on issues")
     args = ap.parse_args(argv)
 
@@ -174,7 +176,7 @@ def main(argv: list[str]) -> int:
 
     had_change = False
     had_warn = False
-    for p in root.rglob("*.scm"):
+    for p in ([root] if root.is_file() else root.rglob("*.scm")):
         changed, warns = process_file(p, args.check)
         if warns:
             had_warn = True

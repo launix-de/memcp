@@ -1,0 +1,130 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  description: Joined DELETE captures distinct physical target rows before mutation
+setup:
+- sql: CREATE TABLE delete_matches(code INT,enabled INT)
+- sql: INSERT delete_matches VALUES(1,1),(1,1),(2,1),(2,0),(99,1),(NULL,1)
+- sql: CREATE TABLE delete_fanout(id INT,code INT)
+- sql: INSERT delete_fanout VALUES(1,1),(2,2),(3,NULL)
+- sql: CREATE TABLE delete_equal_rows(id INT,code INT)
+- sql: INSERT delete_equal_rows VALUES(5,1),(5,1),(6,2)
+- sql: CREATE TABLE delete_cycle(id INT,next_id INT)
+- sql: INSERT delete_cycle VALUES(1,2),(2,1),(3,NULL)
+- sql: CREATE TABLE delete_nullable(id INT,code INT)
+- sql: INSERT delete_nullable VALUES(1,1),(2,2),(3,NULL),(4,7)
+- sql: CREATE TABLE delete_optional_target(id INT,code INT)
+- sql: INSERT delete_optional_target VALUES(1,1),(2,2)
+- sql: CREATE TABLE delete_zero(id INT,code INT)
+- sql: INSERT delete_zero VALUES(1,1)
+- sql: CREATE TABLE delete_tx(id INT,code INT)
+- sql: INSERT delete_tx VALUES(1,1),(2,2)
+- sql: CREATE TABLE delete_mysql(id INT,code INT)
+- sql: INSERT delete_mysql VALUES(1,1),(2,2),(3,NULL)
+- sql: CREATE TABLE delete_psql(id INT,code INT)
+- sql: INSERT delete_psql VALUES(1,1),(2,2),(3,NULL)
+- sql: CREATE TABLE delete_audit_input(id INT,code INT)
+- sql: INSERT delete_audit_input VALUES(1,1),(2,2)
+- sql: CREATE TABLE delete_audit_log(old_count INT,old_sum INT)
+- sql: |
+    CREATE TRIGGER dbo.delete_full_set ON dbo.delete_audit_input AFTER DELETE AS
+    BEGIN
+      INSERT delete_audit_log(old_count,old_sum)
+      SELECT COUNT(*),SUM(id) FROM deleted;
+    END
+test_cases:
+- name: Duplicate join matches delete each target once without a primary key
+  sql: DELETE t FROM delete_fanout t JOIN delete_matches s ON t.code=s.code WHERE s.enabled=1
+  expect: {rows: 1, data: [{affected_rows: 2}]}
+- name: An unmatched nullable key remains visible
+  sql: SELECT id,code FROM delete_fanout ORDER BY id
+  expect: {rows: 1, data: [{id: 3, code: null}]}
+- name: Equal valued physical rows remain distinct deletion candidates
+  sql: DELETE t FROM delete_equal_rows t JOIN delete_matches s ON t.code=s.code WHERE t.id=5
+  expect: {rows: 1, data: [{affected_rows: 2}]}
+- name: Equal row deletion preserves the other target
+  sql: SELECT id,code FROM delete_equal_rows
+  expect: {rows: 1, data: [{id: 6, code: 2}]}
+- name: Self join selection observes the whole original cyclic domain
+  sql: DELETE t FROM delete_cycle t JOIN delete_cycle s ON t.next_id=s.id
+  expect: {rows: 1, data: [{affected_rows: 2}]}
+- name: Both cyclic targets were selected before either was deleted
+  sql: SELECT id,next_id FROM delete_cycle
+  expect: {rows: 1, data: [{id: 3, next_id: null}]}
+- name: LEFT JOIN preserves NULL extension in deletion selection
+  sql: DELETE t FROM delete_nullable t LEFT JOIN delete_matches s ON t.code=s.code WHERE s.code IS NULL
+  expect: {rows: 1, data: [{affected_rows: 2}]}
+- name: Matched targets survive unmatched row deletion
+  sql: SELECT id,code FROM delete_nullable ORDER BY id
+  expect: {rows: 2, data: [{id: 1, code: 1}, {id: 2, code: 2}]}
+- name: A NULL extended target supplies no physical deletion identity
+  sql: DELETE t FROM delete_optional_target t RIGHT JOIN delete_matches s ON t.code=s.code WHERE s.enabled=1
+  expect: {rows: 1, data: [{affected_rows: 2}]}
+- name: Optional target deletion leaves an empty target
+  sql: SELECT COUNT(*) AS remaining FROM delete_optional_target
+  expect: {rows: 1, data: [{remaining: 0}]}
+- name: A false joined predicate produces no mutation candidates
+  sql: DELETE t FROM delete_zero t JOIN delete_matches s ON t.code=s.code WHERE 1=0
+  expect: {rows: 1, data: [{affected_rows: 0}]}
+- name: Empty selection retains all target rows
+  sql: SELECT id,code FROM delete_zero
+  expect: {rows: 1, data: [{id: 1, code: 1}]}
+- name: Open an explicit transaction for joined deletion
+  session_id: delete_set_owner
+  sql: BEGIN TRANSACTION
+- name: Prior public work participates in the caller transaction
+  session_id: delete_set_owner
+  sql: INSERT delete_tx VALUES(3,3)
+  expect: {rows: 1, data: [{affected_rows: 1}]}
+- name: Joined deletion uses the caller transaction
+  session_id: delete_set_owner
+  sql: DELETE t FROM delete_tx t JOIN delete_matches s ON t.code=s.code
+  expect: {rows: 1, data: [{affected_rows: 2}]}
+- name: The owner sees the remaining prior insert
+  session_id: delete_set_owner
+  sql: SELECT id FROM delete_tx
+  expect: {rows: 1, data: [{id: 3}]}
+- name: Rollback reverses the complete joined deletion and prior insert
+  session_id: delete_set_owner
+  sql: ROLLBACK TRANSACTION
+- name: Rollback restores the original physical target set
+  sql: SELECT id,code FROM delete_tx ORDER BY id
+  expect: {rows: 2, data: [{id: 1, code: 1}, {id: 2, code: 2}]}
+- name: SQL frontend uses the same target set consumer
+  syntax: sql
+  sql: DELETE t FROM delete_mysql t JOIN delete_matches s ON t.code=s.code
+  expect: {affected_rows: 2}
+- name: SQL deletion retains the unmatched nullable target
+  syntax: sql
+  sql: SELECT id,code FROM delete_mysql
+  expect: {rows: 1, data: [{id: 3, code: null}]}
+- name: PostgreSQL correlated existence selects the same target set
+  syntax: psql
+  sql: DELETE FROM delete_psql WHERE EXISTS(SELECT 1 FROM delete_matches s WHERE s.code=delete_psql.code)
+  expect: {affected_rows: 2}
+- name: PostgreSQL deletion preserves the unmatched NULL key
+  syntax: psql
+  sql: SELECT id,code FROM delete_psql
+  expect: {rows: 1, data: [{id: 3, code: null}]}
+- name: Joined deletion supplies one complete distinct transition set
+  sql: DELETE t FROM delete_audit_input t JOIN delete_matches s ON t.code=s.code
+  expect: {rows: 1, data: [{affected_rows: 2}]}
+- name: AFTER completion observes target rows rather than join multiplicity
+  sql: SELECT old_count,old_sum FROM delete_audit_log
+  expect: {rows: 1, data: [{old_count: 2, old_sum: 3}]}
+cleanup:
+- sql: DROP TRIGGER IF EXISTS dbo.delete_full_set
+- sql: DROP TABLE IF EXISTS delete_audit_log
+- sql: DROP TABLE IF EXISTS delete_audit_input
+- sql: DROP TABLE IF EXISTS delete_mysql
+- sql: DROP TABLE IF EXISTS delete_psql
+- sql: DROP TABLE IF EXISTS delete_tx
+- sql: DROP TABLE IF EXISTS delete_zero
+- sql: DROP TABLE IF EXISTS delete_optional_target
+- sql: DROP TABLE IF EXISTS delete_nullable
+- sql: DROP TABLE IF EXISTS delete_cycle
+- sql: DROP TABLE IF EXISTS delete_equal_rows
+- sql: DROP TABLE IF EXISTS delete_fanout
+- sql: DROP TABLE IF EXISTS delete_matches

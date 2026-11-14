@@ -1,0 +1,401 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  syntax: tsql
+  description: Public native FK declaration deltas retain table payloads and commit ownership
+setup:
+- sql: CREATE TABLE public_fk_parent(id INT PRIMARY KEY)
+- sql: CREATE TABLE public_fk_child(id INT PRIMARY KEY,parent_id INT)
+- sql: CREATE TABLE public_fk_rollback(id INT PRIMARY KEY,parent_id INT)
+- sql: CREATE TABLE loaded_fk_parent(code INT,category VARCHAR(16) COLLATE utf8mb4_general_ci,CONSTRAINT loaded_parent_key UNIQUE(code,category))
+- sql: CREATE TABLE loaded_fk_child(id INT PRIMARY KEY,code INT,category VARCHAR(16) COLLATE utf8mb4_general_ci)
+- sql: CREATE TABLE loaded_fk_other(id INT PRIMARY KEY,code INT,category VARCHAR(16) COLLATE utf8mb4_general_ci)
+- sql: CREATE TABLE loaded_fk_orphan(id INT PRIMARY KEY,code INT,category VARCHAR(16) COLLATE utf8mb4_general_ci)
+- sql: CREATE TABLE loaded_fk_pending(id INT PRIMARY KEY,code INT,category VARCHAR(16) COLLATE utf8mb4_general_ci)
+- sql: CREATE TABLE history_fk_first(id INT PRIMARY KEY,code INT,category VARCHAR(16) COLLATE utf8mb4_general_ci)
+- sql: CREATE TABLE history_fk_second(id INT PRIMARY KEY,code INT,category VARCHAR(16) COLLATE utf8mb4_general_ci)
+- sql: CREATE TABLE history_fk_third(id INT PRIMARY KEY,code INT,category VARCHAR(16) COLLATE utf8mb4_general_ci)
+- sql: INSERT loaded_fk_parent VALUES(7,'Alpha'),(9,'Beta')
+- sql: INSERT history_fk_first VALUES(1,9,'Beta')
+- sql: INSERT history_fk_second VALUES(1,9,'beta')
+- sql: INSERT history_fk_third VALUES(1,9,'BETA')
+- sql: INSERT loaded_fk_child VALUES(1,7,'alpha'),(2,7,NULL),(3,NULL,'absent')
+- sql: INSERT loaded_fk_other VALUES(1,9,'BETA')
+- sql: INSERT loaded_fk_orphan VALUES(1,999,'missing')
+- sql: INSERT loaded_fk_pending VALUES(1,9,'beta')
+cleanup:
+- sql: DROP TABLE IF EXISTS public_fk_child
+- sql: DROP TABLE IF EXISTS public_fk_rollback
+- sql: DROP TABLE IF EXISTS public_fk_parent
+- sql: DROP TABLE IF EXISTS loaded_fk_child
+- sql: DROP TABLE IF EXISTS loaded_fk_other
+- sql: DROP TABLE IF EXISTS loaded_fk_orphan
+- sql: DROP TABLE IF EXISTS loaded_fk_pending
+- sql: DROP TABLE IF EXISTS history_fk_first
+- sql: DROP TABLE IF EXISTS history_fk_second
+- sql: DROP TABLE IF EXISTS history_fk_third
+- sql: DROP TABLE IF EXISTS loaded_fk_parent
+test_cases:
+- name: An idle native writer retains admission until rollback before public FK staging
+  scm: |
+    (begin
+      (define writer (newsession)) (writer "username" "root") (tx_begin writer)
+      (define ddl (newsession)) (ddl "username" "root") (tx_begin ddl)
+      (define child (table "memcp-tests" false "public_fk_rollback" false nil))
+      (define parent (table "memcp-tests" false "public_fk_parent" false nil))
+      (insert child '("id" "parent_id") (list (list 7 999)) '() nil false nil (writer "__memcp_tx"))
+      (define rejected (try (lambda () (begin
+        (createforeignkey child "FK_idle_writer" '("parent_id") parent '("id") "cascade" "cascade" (ddl "__memcp_tx")) false))
+        (lambda (failure) (strlike (concat failure) "%active table writer%"))))
+      (define unchanged (equal? (count ((show child "constraints") "ForeignKeys")) 0))
+      (tx_rollback ddl) (tx_rollback writer)
+      (and rejected unchanged))
+  expect: {result: true}
+- name: Pending public foreign declarations have a native transaction view and rollback cleanly
+  scm: |
+    (begin
+      (define s (newsession)) (s "username" "root") (tx_begin s)
+      (define tx (s "__memcp_tx"))
+      (define child (table "memcp-tests" false "public_fk_rollback" false nil))
+      (define parent (table "memcp-tests" false "public_fk_parent" false nil))
+      (createforeignkey child "FK_public_rollback" '("parent_id") parent '("id") "cascade" "cascade" tx)
+      (define private (and (equal? (count ((show child "constraints" tx) "ForeignKeys")) 1)
+        (equal? (count ((show child "constraints") "ForeignKeys")) 0)
+        (equal? (count ((show parent "constraints") "ForeignKeys")) 0)))
+      (tx_rollback s)
+      (and private (equal? (count ((show child "constraints") "ForeignKeys")) 0)))
+  expect: {result: true}
+- name: Public declaration savepoints retire the complete two-endpoint delta
+  scm: |
+    (begin
+      (define s (newsession)) (s "username" "root") (tx_begin s)
+      (define tx (s "__memcp_tx"))
+      (define child (table "memcp-tests" false "public_fk_rollback" false nil))
+      (define parent (table "memcp-tests" false "public_fk_parent" false nil))
+      (define boundary (tx_savepoint tx))
+      (createforeignkey child "FK_public_retired" '("parent_id") parent '("id") "cascade" "cascade" tx)
+      (tx_rollback_to_savepoint tx boundary)
+      (define clean (and (equal? (count ((show child "constraints" tx) "ForeignKeys")) 0)
+        (equal? (count ((show parent "constraints" tx) "ForeignKeys")) 0)))
+      (tx_commit s) clean)
+  expect: {result: true}
+- name: Expected native endpoint facts reject every changed field before staging
+  scm: |
+    (begin
+      (define s (newsession)) (s "username" "root") (tx_begin s)
+      (define tx (s "__memcp_tx"))
+      (define child (table "memcp-tests" false "public_fk_rollback" false nil))
+      (define parent (table "memcp-tests" false "public_fk_parent" false nil))
+      (define facts (lambda (handle name) (begin
+        (define c (show handle "column" name false))
+        (list (c "Field") (c "RawType") (c "Dimensions") (c "Collation") (c "Null") (c "Computed")))))
+      (define current (facts child "parent_id"))
+      (define target (facts parent "id"))
+      (define bad (list "other_name" "BIGINT" (list 42) "other_collation" false true))
+      (define denied (reduce (produceN 6) (lambda (valid field) (begin
+        (define changed (map (produceN 6) (lambda (index) (if (equal? index field) (nth bad index) (nth current index)))))
+        (define rejected (try (lambda () (begin
+          (createforeignkey child "FK_changed_facts" '("parent_id") parent '("id") "cascade" "cascade" tx
+            (list "expected_child" (list changed) "expected_parent" (list target))) false))
+          (lambda (failure) (strlike (concat failure) "%foreign%"))))
+        (and valid rejected))) true))
+      (define incomplete (try (lambda () (begin
+        (createforeignkey child "FK_incomplete_facts" '("parent_id") parent '("id") "cascade" "cascade" tx
+          (list "expected_child" (list current))) false)) (lambda (_failure) true)))
+      (altercolumn child "parent_id" "collation" (if (equal? (nth current 3) "binary") "utf8mb4_bin" "binary"))
+      (define changed_declaration (try (lambda () (begin
+        (createforeignkey child "FK_changed_declaration" '("parent_id") parent '("id") "cascade" "cascade" tx
+          (list "expected_child" (list current) "expected_parent" (list target))) false))
+        (lambda (failure) (strlike (concat failure) "%declaration changed%"))))
+      (altercolumn child "parent_id" "collation" (nth current 3))
+      (define added (createforeignkey child "FK_exact_facts" '("parent_id") parent '("id") "cascade" "cascade" tx
+        (list "expected_child" (list current) "expected_parent" (list target))))
+      (define private (and (equal? (count ((show child "constraints" tx) "ForeignKeys")) 1)
+        (equal? (count ((show child "constraints") "ForeignKeys")) 0)))
+      (tx_rollback s) (and denied incomplete changed_declaration added private))
+  expect: {result: true}
+- name: A later independent amendment succeeds on the savepoint-retired endpoints
+  scm: |
+    (begin
+      (define s (newsession)) (s "username" "root") (tx_begin s)
+      (define tx (s "__memcp_tx"))
+      (define child (table "memcp-tests" false "public_fk_rollback" false nil))
+      (define parent (table "memcp-tests" false "public_fk_parent" false nil))
+      (createforeignkey child "FK_after_retirement" '("parent_id") parent '("id") "cascade" "cascade" tx)
+      (tx_commit s)
+      (equal? (count ((show child "constraints") "ForeignKeys")) 1))
+  expect: {result: true}
+- name: Metadata-only public DDL rejects row writes and identity reservation before effects
+  scm: |
+    (begin
+      (define s (newsession)) (s "username" "root") (tx_begin s)
+      (define tx (s "__memcp_tx"))
+      (define child (table "memcp-tests" false "public_fk_child" false nil))
+      (define parent (table "memcp-tests" false "public_fk_parent" false nil))
+      (createforeignkey child "FK_public_cascade" '("parent_id") parent '("id") "cascade" "cascade" tx)
+      (define denied_insert (try (lambda () (begin (insert parent '("id") (list (list 99)) '() nil false nil tx) false))
+        (lambda (failure) (strlike (concat failure) "%metadata-only%"))))
+      (define denied_ids (try (lambda () (begin (reserve_ids parent 1 tx) false))
+        (lambda (failure) (strlike (concat failure) "%metadata-only%"))))
+      (tx_commit s)
+      (and denied_insert denied_ids
+        (expression_equal? parent (table "memcp-tests" false "public_fk_parent" false nil))
+        (expression_equal? child (table "memcp-tests" false "public_fk_child" false nil))))
+  expect: {result: true}
+- name: A committed public foreign declaration rejects an absent parent
+  sql: INSERT public_fk_child VALUES(1,999)
+  expect: {error: true, contains: foreign key constraint}
+- name: The ordinary parent insert remains available after native publication
+  sql: INSERT public_fk_parent VALUES(1)
+- name: The ordinary child insert uses real native FK enforcement
+  sql: INSERT public_fk_child VALUES(1,1)
+- name: A published public FK cascades a parent update through native row mutation
+  sql: UPDATE public_fk_parent SET id=2 WHERE id=1
+- name: Native update cascade changes the stored child reference
+  sql: SELECT id,parent_id FROM public_fk_child
+  expect: {rows: 1, data: [{id: 1, parent_id: 2}]}
+- name: Restart committed public declarations through the normal native loader
+  action: restart
+- name: Restart preserves actual FK enforcement
+  sql: INSERT public_fk_child VALUES(2,998)
+  expect: {error: true, contains: foreign key constraint}
+- name: Public native cascade survives restart and removes real child rows
+  sql: DELETE FROM public_fk_parent WHERE id=2
+- name: The restarted delete cascade leaves no child row
+  sql: SELECT id FROM public_fk_child
+  expect: {rows: 0}
+
+- name: Existing orphan rows reject a public declaration without changing data or metadata
+  scm: |
+    (begin
+      (define s (newsession)) (s "username" "root") (tx_begin s)
+      (define tx (s "__memcp_tx"))
+      (define child (table "memcp-tests" false "loaded_fk_orphan" false tx))
+      (define parent (table "memcp-tests" false "loaded_fk_parent" false tx))
+      (define denied (try (lambda () (begin
+        (createforeignkey child "FK_loaded_orphan" '("code" "category") parent '("code" "category") "cascade" "cascade" tx) false))
+        (lambda (failure) (strlike (concat failure) "%existing child row has no parent%"))))
+      (define unchanged (and (equal? (count ((show child "constraints" tx) "ForeignKeys")) 0)
+        (equal? (count ((show parent "constraints" tx) "ForeignKeys")) 0)))
+      (tx_rollback s) (and denied unchanged))
+  expect: {result: true}
+- name: Rejected historical validation retains every seeded row
+  sql: SELECT id,code,category FROM loaded_fk_orphan
+  expect: {rows: 1, data: [{id: 1,code: 999,category: missing}]}
+- name: Nonempty composite declarations validate native collation and partial NULLs before commit
+  scm: |
+    (begin
+      (define s (newsession)) (s "username" "root") (tx_begin s)
+      (define tx (s "__memcp_tx"))
+      (define parent (table "memcp-tests" false "loaded_fk_parent" false tx))
+      (define first (table "memcp-tests" false "loaded_fk_child" false tx))
+      (define other (table "memcp-tests" false "loaded_fk_other" false tx))
+      (createforeignkey first "FK_loaded_first" '("code" "category") parent '("code" "category") "cascade" "cascade" tx)
+      (define observed (scan tx first '() '() '() (lambda () true) '("id") (lambda (acc id) (+ acc id)) 0 +))
+      (createforeignkey other "FK_loaded_other" '("code" "category") parent '("code" "category") "cascade" "cascade" tx)
+      (define hidden (and (equal? (count ((show parent "constraints" tx) "ForeignKeys")) 2)
+        (equal? (count ((show parent "constraints") "ForeignKeys")) 0)))
+      (tx_commit s)
+      (and hidden (equal? observed 6)
+        (expression_equal? parent (table "memcp-tests" false "loaded_fk_parent" false nil))))
+  expect: {result: true}
+- name: Native enforcement after historical validation rejects new orphan keys
+  sql: INSERT loaded_fk_child VALUES(4,7,'missing')
+  expect: {error: true, contains: foreign key constraint}
+- name: Historical rows retain native case-insensitive key equality for update cascade
+  sql: UPDATE loaded_fk_parent SET code=8,category='Renamed' WHERE code=7
+- name: Native cascade changes the matching historical row and preserves partial NULL exemptions
+  sql: SELECT id,code,category FROM loaded_fk_child ORDER BY id
+  expect: {rows: 3, data: [{id: 1,code: 8,category: Renamed},{id: 2,code: 7,category: null},{id: 3,code: null,category: absent}]}
+- name: Semantic maintenance cannot mutate either pending native FK endpoint
+  scm: |
+    (begin
+      (define s (newsession)) (s "username" "root") (tx_begin s)
+      (define tx (s "__memcp_tx"))
+      (define child (table "memcp-tests" false "loaded_fk_pending" false tx))
+      (define parent (table "memcp-tests" false "loaded_fk_parent" false tx))
+      (createforeignkey child "FK_pending_maintenance" '("code" "category") parent '("code" "category") "cascade" "cascade" tx)
+      (define denied (reduce (list
+        (lambda () (altercolumn child "category" "collation" "binary"))
+        (lambda () (createcolumn child "extra" "INT" '() '()))
+        (lambda () (dropcolumn child "category"))
+        (lambda () (createkey parent "blocked_key" true '("category")))
+        (lambda () (dropkey parent "loaded_parent_key"))
+        (lambda () (droptable "memcp-tests" "loaded_fk_parent" false))
+        (lambda () (renametable "memcp-tests" "loaded_fk_parent" "loaded_fk_renamed"))
+        (lambda () (dropdatabase "memcp-tests" false)))
+        (lambda (valid operation) (and valid (try (lambda () (begin (operation) false))
+          (lambda (failure) (strlike (concat failure) "%pending declaration%"))))) true))
+      (define mixed (try (lambda () (begin
+        (createtable "memcp-tests" "loaded_fk_forbidden_private" (list (list "column" "id" "INT" '() '())) '() false tx) false))
+        (lambda (failure) (strlike (concat failure) "%public and private%"))))
+      (define clean (and (equal? ((show child "column" "category" false) "Collation") "utf8mb4_general_ci")
+        (nil? (show child "column" "extra" false))
+        (nil? (table "memcp-tests" false "loaded_fk_forbidden_private" false tx))
+        (equal? (count ((show child "constraints") "ForeignKeys")) 0)))
+      (tx_rollback s) (and denied mixed clean))
+  expect: {result: true}
+- name: Restart preserves historically validated declarations and existing rows
+  action: restart
+- name: Delete cascade uses declared equality after restart
+  sql: DELETE FROM loaded_fk_parent WHERE code=8
+- name: Only the matching historical child row is deleted after restart
+  sql: SELECT id FROM loaded_fk_child ORDER BY id
+  expect: {rows: 2,data: [{id: 2},{id: 3}]}
+
+- name: Public amendment history restores only the changed native endpoint views
+  scm: |
+    (begin
+      (define s (newsession)) (s "username" "root") (tx_begin s)
+      (define tx (s "__memcp_tx"))
+      (define parent (table "memcp-tests" false "loaded_fk_parent" false tx))
+      (define first (table "memcp-tests" false "history_fk_first" false tx))
+      (define second (table "memcp-tests" false "history_fk_second" false tx))
+      (define third (table "memcp-tests" false "history_fk_third" false tx))
+      (define initial (count ((show parent "constraints") "ForeignKeys")))
+      (createforeignkey first "FK_history_first" '("code" "category") parent '("code" "category") "restrict" "restrict" tx)
+      (define before (show parent "declarations" tx))
+      (define boundary (tx_savepoint tx))
+      (createforeignkey second "FK_history_second" '("code" "category") parent '("code" "category") "restrict" "restrict" tx)
+      (createforeignkey third "FK_history_third" '("code" "category") parent '("code" "category") "restrict" "restrict" tx)
+      (define complete (equal? (count ((show parent "constraints" tx) "ForeignKeys")) (+ initial 3)))
+      (tx_rollback_to_savepoint tx boundary)
+      (define restored (and (expression_equal? before (show parent "declarations" tx))
+        (equal? (count ((show first "constraints" tx) "ForeignKeys")) 1)
+        (equal? (count ((show second "constraints" tx) "ForeignKeys")) 0)
+        (equal? (count ((show third "constraints" tx) "ForeignKeys")) 0)))
+      (createforeignkey second "FK_history_second" '("code" "category") parent '("code" "category") "restrict" "restrict" tx)
+      (define borrowed (equal? (count ((before "constraints") "ForeignKeys")) (+ initial 1)))
+      (tx_commit s)
+      (and complete restored borrowed
+        (equal? (count ((show parent "constraints") "ForeignKeys")) (+ initial 2))
+        (equal? (count ((show third "constraints") "ForeignKeys")) 0)))
+  expect: {result: true}
+
+- name: A generated trigger collision rejects the complete FK before live effects
+  setup:
+  - sql: CREATE TABLE collision_fk_parent(id INT PRIMARY KEY)
+  - sql: CREATE TABLE collision_fk_child(id INT PRIMARY KEY,parent_id INT)
+  cleanup:
+  - sql: DROP TABLE IF EXISTS collision_fk_child
+  - sql: DROP TABLE IF EXISTS collision_fk_parent
+  scm: |
+    (begin
+      (define parent (table "memcp-tests" false "collision_fk_parent" false nil))
+      (define child (table "memcp-tests" false "collision_fk_child" false nil))
+      (createtrigger parent "__fk_collision_guard_parent_delete" "before_insert" "" ""
+        (lambda (OLD NEW session tx) (set_assoc NEW "id" (+ (get_assoc NEW "id") 100))) true)
+      (define before ((show "memcp-tests" "collision_fk_parent" true) "triggers"))
+      (define immediate_rejected (try (lambda () (begin
+        (createforeignkey child "collision_guard" '("parent_id") parent '("id") "restrict" "restrict") false))
+        (lambda (failure) (strlike (concat failure) "%trigger name already exists%"))))
+      (define s (newsession)) (s "username" "root") (tx_begin s)
+      (define tx (s "__memcp_tx"))
+      (define rejected (try (lambda () (begin
+        (createforeignkey child "collision_guard" '("parent_id") parent '("id") "restrict" "restrict" tx) false))
+        (lambda (failure) (strlike (concat failure) "%trigger name already exists%"))))
+      (define unchanged (and
+        (expression_equal? before ((show "memcp-tests" "collision_fk_parent" true) "triggers"))
+        (empty_list? ((show "memcp-tests" "collision_fk_child" true) "triggers"))
+        (empty_list? ((show child "constraints" tx) "ForeignKeys"))
+        (empty_list? ((show parent "constraints" tx) "ForeignKeys"))))
+      (insert parent '("id") (list (list 1)))
+      (define value (scan nil parent '() '() '() (lambda () true) '("id")
+        (lambda (acc id) id) nil (lambda (left right) (coalesceNil left right))))
+      (droptrigger "memcp-tests" "__fk_collision_guard_parent_delete" false)
+      (createforeignkey child "collision_guard" '("parent_id") parent '("id") "restrict" "restrict" tx)
+      (tx_commit s)
+      (define orphan (try (lambda () (begin (insert child '("id" "parent_id") (list (list 1 999))) false))
+        (lambda (failure) (strlike (concat failure) "%foreign key constraint%"))))
+      (insert child '("id" "parent_id") (list (list 2 101)))
+      (and immediate_rejected rejected unchanged (equal? value 101) orphan
+        (equal? (count ((show child "constraints") "ForeignKeys")) 1)))
+  expect: {result: true}
+
+- name: Public and hidden trigger mutations cannot race a pending FK publication
+  setup:
+  - sql: CREATE TABLE admission_fk_parent(id INT PRIMARY KEY)
+  - sql: CREATE TABLE admission_fk_child(id INT PRIMARY KEY,parent_id INT)
+  cleanup:
+  - sql: DROP TABLE IF EXISTS admission_fk_child
+  - sql: DROP TABLE IF EXISTS admission_fk_parent
+  scm: |
+    (begin
+      (define parent (table "memcp-tests" false "admission_fk_parent" false nil))
+      (define child (table "memcp-tests" false "admission_fk_child" false nil))
+      (define original (lambda (OLD NEW session tx) (set_assoc NEW "id" (+ (get_assoc NEW "id") 100))))
+      (createtrigger parent "admission_keep" "before_insert" "" "" original true)
+      (define before ((show "memcp-tests" "admission_fk_parent" true) "triggers"))
+      (define s (newsession)) (s "username" "root") (tx_begin s)
+      (define tx (s "__memcp_tx"))
+      (createforeignkey child "admission_guard" '("parent_id") parent '("id") "restrict" "restrict" tx)
+      (define denied (reduce (list
+        (lambda () (createtrigger parent "admission_visible" "after_insert" "" "" original true))
+        (lambda () (createtrigger child "admission_hidden" "after_insert" "" "" original false))
+        (lambda () (createtrigger parent "admission_keep" "before_insert" "" "" (lambda (OLD NEW session tx) NEW) true))
+        (lambda () (droptrigger "memcp-tests" "admission_keep" false)))
+        (lambda (valid operation) (and valid (try (lambda () (begin (operation) false))
+          (lambda (failure) (strlike (concat failure) "%pending declaration%"))))) true))
+      (define unchanged (expression_equal? before ((show "memcp-tests" "admission_fk_parent" true) "triggers")))
+      (tx_commit s)
+      (insert parent '("id") (list (list 1)))
+      (insert child '("id" "parent_id") (list (list 1 101)))
+      (define value (scan nil child '() '() '() (lambda () true) '("parent_id")
+        (lambda (acc id) id) nil (lambda (left right) (coalesceNil left right))))
+      (and denied unchanged (equal? value 101)
+        (equal? (count ((show child "constraints") "ForeignKeys")) 1)))
+  expect: {result: true}
+
+- name: Unrelated computed cache programs survive a pending FK decision and still invalidate
+  setup:
+  - sql: CREATE TABLE cache_fk_parent(id INT PRIMARY KEY)
+  - sql: CREATE TABLE cache_fk_child(id INT PRIMARY KEY,parent_id INT)
+  - sql: CREATE TABLE cache_fk_values(id INT)
+  - sql: INSERT cache_fk_values VALUES(1)
+  cleanup:
+  - sql: DROP TABLE IF EXISTS cache_fk_values
+  - sql: DROP TABLE IF EXISTS cache_fk_child
+  - sql: DROP TABLE IF EXISTS cache_fk_parent
+  scm: |
+    (begin
+      (define parent (table "memcp-tests" false "cache_fk_parent" false nil))
+      (define child (table "memcp-tests" false "cache_fk_child" false nil))
+      (define cache (table "memcp-tests" false "cache_fk_values" false nil))
+      (define s (newsession)) (s "username" "root") (tx_begin s)
+      (define tx (s "__memcp_tx"))
+      (createforeignkey child "cache_program_guard" '("parent_id") parent '("id") "restrict" "restrict" tx)
+      (createcolumn cache "total" "INT" '() '() '() (lambda ()
+        (scan nil (table "memcp-tests" false "cache_fk_parent" false nil)
+          '() '() '() (lambda () true) '("id") (lambda (acc id) (+ acc id)) 0 +)))
+      (define read (lambda () (scan nil cache '() '() '() (lambda () true) '("total")
+        (lambda (acc total) total) nil (lambda (left right) (coalesceNil left right)))))
+      (define before (read))
+      (define programs ((show "memcp-tests" "cache_fk_parent" true) "triggers"))
+      (tx_commit s)
+      (define published ((show "memcp-tests" "cache_fk_parent" true) "triggers"))
+      (insert parent '("id") (list (list 5)))
+      (insert child '("id" "parent_id") (list (list 1 5)))
+      (and (equal? before 0) (equal? (read) 5)
+        (reduce programs (lambda (valid program) (and valid
+          (not (nil? (find published (lambda (current) (expression_equal? program current)) nil))))) true)))
+  expect: {result: true}
+
+- name: A private declaration cannot be mixed into the shared public amendment history
+  scm: |
+    (begin
+      (define s (newsession)) (s "username" "root") (tx_begin s)
+      (define tx (s "__memcp_tx"))
+      (define private (createtable "memcp-tests" "history_private_endpoint"
+        (list (list "column" "id" "INT" '() '())) '() false tx))
+      (define child (table "memcp-tests" false "history_fk_third" false tx))
+      (define parent (table "memcp-tests" false "loaded_fk_parent" false tx))
+      (define rejected (try (lambda () (begin
+        (createforeignkey child "FK_history_mixed" '("code" "category") parent '("code" "category") "restrict" "restrict" tx) false))
+        (lambda (failure) (strlike (concat failure) "%public and private%"))))
+      (define unchanged (and (not (nil? (table "memcp-tests" false "history_private_endpoint" false tx)))
+        (nil? (table "memcp-tests" false "history_private_endpoint" false nil))
+        (empty_list? ((show child "constraints" tx) "ForeignKeys"))))
+      (tx_rollback s)
+      (and rejected unchanged (nil? (table "memcp-tests" false "history_private_endpoint" false nil))))
+  expect: {result: true}

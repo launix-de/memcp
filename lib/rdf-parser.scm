@@ -443,8 +443,8 @@ projection and BIND layers already surface as an unbound variable. */
 					true (error "SPARQL VALUES row arity mismatch"))
 				(list "tuple" vars rows)))))
 ) (match values
-	'("single" var vals) (list (list "__values__" var vals))
-	'("tuple" vars rows) (list (list "__values_tuple__" vars rows)))))
+		'("single" var vals) (list (list "__values__" var vals))
+		'("tuple" vars rows) (list (list "__values_tuple__" vars rows)))))
 (define rdf_where_graph_item (parser '(
 	(atom "GRAPH" true)
 	(define graph rdf_expression)
@@ -510,11 +510,11 @@ projection and BIND layers already surface as an unbound variable. */
 	(? (atom "OFFSET" true) (define offset (parser (define n (regex "[0-9]+" true)) (simplify n))))
 	(atom "}" true)
 ) (begin
-	(define merged_conditions (merge (coalesce conditions '())))
-	(define selected (if (equal? cols "__select_all__")
-		(merge (map (rdf_condition_vars merged_conditions) (lambda (var)
-			(list (concat var) (list (quote get_var) var)))))
-		(merge cols)))
+		(define merged_conditions (merge (coalesce conditions '())))
+		(define selected (if (equal? cols "__select_all__")
+			(merge (map (rdf_condition_vars merged_conditions) (lambda (var)
+				(list (concat var) (list (quote get_var) var)))))
+			(merge cols)))
 		(list (list "__subquery__"
 			(list "select" selected "where" merged_conditions
 				"group" (coalesce group '()) "having" having "order" ordercols
@@ -677,20 +677,20 @@ projection and BIND layers already surface as an unbound variable. */
 	(define slice (or rdf_limit_offset (parser empty '(nil nil))))
 	(? (define trailing_values rdf_where_values_item))
 ) (begin
-	(define group_items (coalesce group '()))
-	(define group_bindings (map (filter group_items
-		(lambda (item) (not (nil? (cadr item)))))
-		(lambda (item) (list "__bind__" (car item) (cadr item)))))
-	(define having (match havings
-		'() nil
-		(cons only '()) only
-		_ (cons (quote and) havings)))
-	(list "select" (if (equal? cols "__select_all__") cols (merge cols)) "where"
-		(rdf_dataset_conditions datasets
-			(merge (list (merge (coalesce conditions '())) group_bindings
-				(coalesce trailing_values '()))))
-		"group" (map group_items car) "having" having "order" ordercols
-		"limit" (car slice) "offset" (cadr slice) "distinct" distinct))
+		(define group_items (coalesce group '()))
+		(define group_bindings (map (filter group_items
+			(lambda (item) (not (nil? (cadr item)))))
+			(lambda (item) (list "__bind__" (car item) (cadr item)))))
+		(define having (match havings
+			'() nil
+			(cons only '()) only
+			_ (cons (quote and) havings)))
+		(list "select" (if (equal? cols "__select_all__") cols (merge cols)) "where"
+			(rdf_dataset_conditions datasets
+				(merge (list (merge (coalesce conditions '())) group_bindings
+					(coalesce trailing_values '()))))
+			"group" (map group_items car) "having" having "order" ordercols
+			"limit" (car slice) "offset" (cadr slice) "distinct" distinct))
 	"^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|#[^\r\n]*[\r\n]|#[^\r\n]*$|[\r\n\t ]+)+"))
 
 (define rdf_template_object (parser (or
@@ -712,10 +712,10 @@ projection and BIND layers already surface as an unbound variable. */
 	(define triples rdf_template_items)
 	(atom "}" true)
 ) (begin
-	(define merged (merge (coalesce triples '())))
-	(if (equal? (rdf_condition_vars merged) '())
-		(list "insert_data" merged)
-		(error "SPARQL INSERT DATA does not allow variables")))))
+		(define merged (merge (coalesce triples '())))
+		(if (equal? (rdf_condition_vars merged) '())
+			(list "insert_data" merged)
+			(error "SPARQL INSERT DATA does not allow variables")))))
 (define rdf_insert_graph_data (parser '(
 	(atom "INSERT" true)
 	(atom "DATA" true)
@@ -727,11 +727,11 @@ projection and BIND layers already surface as an unbound variable. */
 	(atom "}" true)
 	(atom "}" true)
 ) (begin
-	(define merged (merge (coalesce triples '())))
-	(if (and (equal? (rdf_condition_vars merged) '())
-		(not (match graph '('get_var _name) true _ false)))
-		(list "insert_graph_data" graph merged)
-		(error "SPARQL INSERT DATA does not allow variables")))))
+		(define merged (merge (coalesce triples '())))
+		(if (and (equal? (rdf_condition_vars merged) '())
+			(not (match graph '('get_var _name) true _ false)))
+			(list "insert_graph_data" graph merged)
+			(error "SPARQL INSERT DATA does not allow variables")))))
 (define rdf_delete_data (parser '(
 	(atom "DELETE" true)
 	(atom "DATA" true)
@@ -739,10 +739,10 @@ projection and BIND layers already surface as an unbound variable. */
 	(define triples rdf_template_items)
 	(atom "}" true)
 ) (begin
-	(define merged (merge (coalesce triples '())))
-	(if (equal? (rdf_condition_vars merged) '())
-		(list "delete_data" merged)
-		(error "SPARQL DELETE DATA does not allow variables")))))
+		(define merged (merge (coalesce triples '())))
+		(if (equal? (rdf_condition_vars merged) '())
+			(list "delete_data" merged)
+			(error "SPARQL DELETE DATA does not allow variables")))))
 (define rdf_delete_graph_data (parser '(
 	(atom "DELETE" true)
 	(atom "DATA" true)
@@ -754,11 +754,11 @@ projection and BIND layers already surface as an unbound variable. */
 	(atom "}" true)
 	(atom "}" true)
 ) (begin
-	(define merged (merge (coalesce triples '())))
-	(if (and (equal? (rdf_condition_vars merged) '())
-		(not (match graph '('get_var _name) true _ false)))
-		(list "delete_graph_data" graph merged)
-		(error "SPARQL DELETE DATA does not allow variables")))))
+		(define merged (merge (coalesce triples '())))
+		(if (and (equal? (rdf_condition_vars merged) '())
+			(not (match graph '('get_var _name) true _ false)))
+			(list "delete_graph_data" graph merged)
+			(error "SPARQL DELETE DATA does not allow variables")))))
 (define rdf_update_dataset_clause (parser '(
 	(atom "USING" true)
 	(? (define named (atom "NAMED" true)))
@@ -769,9 +769,9 @@ projection and BIND layers already surface as an unbound variable. */
 	(define conditions (* (parser '((define item rdf_where_item) (? (atom "." true))) item)))
 	(atom "}" true)
 ) (begin
-	(define merged (merge (coalesce conditions '())))
-	(list "modify" "graph" "__rdf_default_graph__" "delete" merged
-		"insert" '() "where" merged))))
+		(define merged (merge (coalesce conditions '())))
+		(list "modify" "graph" "__rdf_default_graph__" "delete" merged
+			"insert" '() "where" merged))))
 (define rdf_modify (parser '(
 	(? (atom "WITH" true) (define with_graph rdf_expression))
 	(define delete_part (? (parser '((atom "DELETE" true) (atom "{" true)
@@ -783,14 +783,14 @@ projection and BIND layers already surface as an unbound variable. */
 	(define conditions (* (parser '((define item rdf_where_item) (? (atom "." true))) item)))
 	(atom "}" true)
 ) (begin
-	(if (and (nil? delete_part) (nil? insert_part))
-		(error "SPARQL MODIFY requires DELETE or INSERT") true)
-	(define effective_datasets (if (and (equal? datasets '()) (not (nil? with_graph)))
-		(list (list "default" with_graph)) datasets))
-	(list "modify" "graph" (coalesce with_graph "__rdf_default_graph__")
-		"delete" (coalesce delete_part '()) "insert" (coalesce insert_part '())
-		"where" (rdf_dataset_conditions effective_datasets
-			(merge (coalesce conditions '())))))))
+		(if (and (nil? delete_part) (nil? insert_part))
+			(error "SPARQL MODIFY requires DELETE or INSERT") true)
+		(define effective_datasets (if (and (equal? datasets '()) (not (nil? with_graph)))
+			(list (list "default" with_graph)) datasets))
+		(list "modify" "graph" (coalesce with_graph "__rdf_default_graph__")
+			"delete" (coalesce delete_part '()) "insert" (coalesce insert_part '())
+			"where" (rdf_dataset_conditions effective_datasets
+				(merge (coalesce conditions '())))))))
 (define rdf_ask (parser '(
 	(atom "ASK" true)
 	(define datasets (* rdf_dataset_clause))
@@ -799,7 +799,7 @@ projection and BIND layers already surface as an unbound variable. */
 	(define conditions (* (parser '((define item rdf_where_item) (? (atom "." true))) item)))
 	(atom "}" true)
 ) (list "ask" "where"
-	(rdf_dataset_conditions datasets (merge (coalesce conditions '()))))))
+		(rdf_dataset_conditions datasets (merge (coalesce conditions '()))))))
 (define rdf_construct (parser '(
 	(atom "CONSTRUCT" true)
 	(define shorthand (or
@@ -812,8 +812,8 @@ projection and BIND layers already surface as an unbound variable. */
 	(? (atom "ORDER" true) (atom "BY" true) (define ordercols (+ rdf_order_condition)))
 	(define slice (or rdf_limit_offset (parser empty '(nil nil))))
 ) (list "construct" (coalesce (car shorthand) '()) "where"
-	(coalesce (cadr shorthand) '()) "order" ordercols
-	"limit" (car slice) "offset" (cadr slice))))
+		(coalesce (cadr shorthand) '()) "order" ordercols
+		"limit" (car slice) "offset" (cadr slice))))
 (define rdf_describe_target (parser (or
 	rdf_variable
 	(parser '((atom "<" true) (define x (regex "[^>]*" false false)) (atom ">" false false)) x)
@@ -827,16 +827,16 @@ projection and BIND layers already surface as an unbound variable. */
 		(+ rdf_describe_target)))
 	(define datasets (* rdf_dataset_clause))
 	(?
-	(atom "WHERE" true)
-	(atom "{" true)
-	(define conditions (* (parser '((define item rdf_where_item) (? (atom "." true))) item)))
-	(atom "}" true)
+		(atom "WHERE" true)
+		(atom "{" true)
+		(define conditions (* (parser '((define item rdf_where_item) (? (atom "." true))) item)))
+		(atom "}" true)
 	)
 	(? (atom "ORDER" true) (atom "BY" true) (define ordercols (+ rdf_order_condition)))
 	(define slice (or rdf_limit_offset (parser empty '(nil nil))))
 ) (list "describe" targets "where"
-	(rdf_dataset_conditions datasets (merge (coalesce conditions '())))
-	"order" ordercols "limit" (car slice) "offset" (cadr slice))))
+		(rdf_dataset_conditions datasets (merge (coalesce conditions '())))
+		"order" ordercols "limit" (car slice) "offset" (cadr slice))))
 (define rdf_create_graph (parser '(
 	(atom "CREATE" true) (? (define silent (atom "SILENT" true))) (atom "GRAPH" true)
 	(define graph rdf_expression)
@@ -893,7 +893,7 @@ projection and BIND layers already surface as an unbound variable. */
 (define rdf_query (parser '(
 	(define operations (+ rdf_query_core ";"))
 ) (if (equal? (count operations) 1) (car operations)
-	(list "update_request" operations))))
+		(list "update_request" operations))))
 
 (define ttl_header (parser '(
 	(define definitions (*
@@ -1088,7 +1088,7 @@ projection and BIND layers already surface as an unbound variable. */
 ))
 (define rdf_relation_targets (lambda (schema subj pred) (begin
 	(define out (newsession))
-	(scan nil (table schema false "rdf" false) (list 369436443803648 (scan_boundary "equal" "p" 0 0 true true "" false) (scan_boundary "equal" "s" 1 1 true true "" false)) (list pred subj) '() (lambda () true) '("o") (lambda (acc o) (begin (out o true) acc)))
+	(scan nil (table schema false "rdf" false nil) (list 369436443803648 (scan_boundary "equal" "p" 0 0 true true "" false) (scan_boundary "equal" "s" 1 1 true true "" false)) (list pred subj) '() (lambda () true) '("o") (lambda (acc o) (begin (out o true) acc)))
 	(out)
 )))
 (define rdf_path_targets (lambda (schema start pred include_self) (begin
@@ -1142,7 +1142,7 @@ projection and BIND layers already surface as an unbound variable. */
 		/* Avoid replaying idempotent DDL on every RDF read. Besides being wasted
 		work, concurrent CREATE IF NOT EXISTS requests can publish a fresh table
 		generation while a point/index plan is being compiled. */
-		(if (table schema false "rdf" false) true
+		(if (table schema false "rdf" false nil) true
 			(eval (parse_sql schema "CREATE TABLE IF NOT EXISTS rdf (s TEXT, p TEXT, o TEXT, UNIQUE KEY rdf_spo (s, p, o))" (lambda (schema tblname write) true))))
 		(define info (show schema "rdf" true))
 		(define unique_keys ((info "meta") "Unique"))
@@ -1156,14 +1156,14 @@ projection and BIND layers already surface as an unbound variable. */
 				/* Old RDF tables predate set semantics. Remove only duplicate physical
 				rows before installing the key; the first occurrence remains untouched. */
 				(define seen (newsession))
-				(scan nil (table schema false "rdf" false) '() '() '() (lambda () true)
+				(scan nil (table schema false "rdf" false nil) '() '() '() (lambda () true)
 					'("s" "p" "o" "$update")
 					(lambda (acc s p o $update) (begin
 						(define identity (json_encode (list s p o)))
 						(if (seen identity) ($update) (seen identity true))
 						acc)))
-				(createkey (table schema false "rdf" false) "rdf_spo" true '("s" "p" "o"))))
-		(define rdf_table (table schema false "rdf" false))
+				(createkey (table schema false "rdf" false nil) "rdf_spo" true '("s" "p" "o"))))
+		(define rdf_table (table schema false "rdf" false nil))
 		/* Key the one-time migration by the table handle rather than the schema
 		name, so DROP/CREATE receives a fresh migration pass in the same process. */
 		(rdf_table_migrations "get_or_compute_scoped" rdf_table "legacy-type-predicate"
@@ -1172,9 +1172,9 @@ projection and BIND layers already surface as an unbound variable. */
 ))
 (define rdf_ensure_named_table (lambda (schema)
 	(begin
-		(if (table schema false "rdf_named" false) true
+		(if (table schema false "rdf_named" false nil) true
 			(eval (parse_sql schema "CREATE TABLE IF NOT EXISTS rdf_named (g TEXT, s TEXT, p TEXT, o TEXT, UNIQUE KEY rdf_gspo (g, s, p, o))" (lambda (schema tblname write) true))))
-		(if (table schema false "rdf_graphs" false) true
+		(if (table schema false "rdf_graphs" false nil) true
 			(eval (parse_sql schema "CREATE TABLE IF NOT EXISTS rdf_graphs (g TEXT, UNIQUE KEY rdf_graph_name (g))" (lambda (schema tblname write) true)))))
 ))
 (define rdf_graph_exists (lambda (schema graph)
@@ -1182,7 +1182,7 @@ projection and BIND layers already surface as an unbound variable. */
 		(rdf_ensure_named_table schema)
 		(define found (newsession))
 		(found "value" false)
-		(scan nil (table schema false "rdf_graphs" false)
+		(scan nil (table schema false "rdf_graphs" false nil)
 			(list 369436175368192 (scan_boundary "equal" "g" 0 0 true true "" false))
 			(list graph) '() (lambda () true) '("g")
 			(lambda (acc _g) (begin (found "value" true) acc)))
@@ -1192,7 +1192,7 @@ projection and BIND layers already surface as an unbound variable. */
 	(begin
 		(rdf_ensure_named_table schema)
 		(if (rdf_graph_exists schema graph) nil
-			(insert (table schema false "rdf_graphs" false) '("g") (list (list graph)) '() (lambda () true))))
+			(insert (table schema false "rdf_graphs" false nil) '("g") (list (list graph)) '() (lambda () true))))
 ))
 (define rdf_create_graph_entry (lambda (schema graph silent)
 	(if (rdf_graph_exists schema graph)
@@ -1202,7 +1202,7 @@ projection and BIND layers already surface as an unbound variable. */
 (define rdf_unregister_graph (lambda (schema graph)
 	(begin
 		(rdf_ensure_named_table schema)
-		(scan nil (table schema false "rdf_graphs" false)
+		(scan nil (table schema false "rdf_graphs" false nil)
 			(list 369436175368192 (scan_boundary "equal" "g" 0 0 true true "" false))
 			(list graph) '() (lambda () true) '("$update")
 			(lambda (acc $update) (begin ($update) acc)))
@@ -1211,12 +1211,12 @@ projection and BIND layers already surface as an unbound variable. */
 (define rdf_insert_triples (lambda (schema triples)
 	(if (equal? triples '())
 		nil
-		(insert (table schema false "rdf" false) '("s" "p" "o") triples '() (lambda () true))
+		(insert (table schema false "rdf" false nil) '("s" "p" "o") triples '() (lambda () true))
 	)
 ))
 (define rdf_delete_triples (lambda (schema triples) (begin
 	(map triples (lambda (triple) (match triple '(subj pred obj)
-		(scan nil (table schema false "rdf" false) (list 369436712239104 (scan_boundary "equal" "o" 0 0 true true "" false) (scan_boundary "equal" "p" 1 1 true true "" false) (scan_boundary "equal" "s" 2 2 true true "" false)) (list obj pred subj) '() (lambda () true) '("$update") (lambda (acc $update) (begin ($update) acc)))
+		(scan nil (table schema false "rdf" false nil) (list 369436712239104 (scan_boundary "equal" "o" 0 0 true true "" false) (scan_boundary "equal" "p" 1 1 true true "" false) (scan_boundary "equal" "s" 2 2 true true "" false)) (list obj pred subj) '() (lambda () true) '("$update") (lambda (acc $update) (begin ($update) acc)))
 	)))
 	nil
 )))
@@ -1225,23 +1225,23 @@ projection and BIND layers already surface as an unbound variable. */
 		(rdf_ensure_named_table schema)
 		(rdf_register_graph schema graph)
 		(if (equal? triples '()) nil
-			(insert (table schema false "rdf_named" false) '("g" "s" "p" "o")
+			(insert (table schema false "rdf_named" false nil) '("g" "s" "p" "o")
 				(map triples (lambda (triple) (cons graph triple))) '() (lambda () true))))
 ))
 (define rdf_clear_default_data (lambda (schema)
 	(begin
 		(rdf_ensure_table schema)
-		(scan nil (table schema false "rdf" false) '() '() '() (lambda () true) '("$update")
+		(scan nil (table schema false "rdf" false nil) '() '() '() (lambda () true) '("$update")
 			(lambda (acc $update) (begin ($update) acc)))
 		nil)
 ))
 (define rdf_clear_all_named_data (lambda (schema drop_graphs)
 	(begin
 		(rdf_ensure_named_table schema)
-		(scan nil (table schema false "rdf_named" false) '() '() '() (lambda () true) '("$update")
+		(scan nil (table schema false "rdf_named" false nil) '() '() '() (lambda () true) '("$update")
 			(lambda (acc $update) (begin ($update) acc)))
 		(if drop_graphs
-			(scan nil (table schema false "rdf_graphs" false) '() '() '() (lambda () true) '("$update")
+			(scan nil (table schema false "rdf_graphs" false nil) '() '() '() (lambda () true) '("$update")
 				(lambda (acc $update) (begin ($update) acc))) nil)
 		nil)
 ))
@@ -1253,13 +1253,13 @@ projection and BIND layers already surface as an unbound variable. */
 		(if (equal? graph "__rdf_default_graph__")
 			(begin
 				(rdf_ensure_table schema)
-				(scan nil (table schema false "rdf" false) '() '() '() (lambda () true) '("s" "p" "o")
+				(scan nil (table schema false "rdf" false nil) '() '() '() (lambda () true) '("s" "p" "o")
 					(lambda (acc s p o) (begin
 						(rows (count_state "n") (list s p o))
 						(count_state "n" (+ (count_state "n") 1)) acc))))
 			(begin
 				(rdf_ensure_named_table schema)
-				(scan nil (table schema false "rdf_named" false)
+				(scan nil (table schema false "rdf_named" false nil)
 					(list 369436175368192 (scan_boundary "equal" "g" 0 0 true true "" false))
 					(list graph) '() (lambda () true) '("s" "p" "o")
 					(lambda (acc s p o) (begin
@@ -1295,7 +1295,7 @@ projection and BIND layers already surface as an unbound variable. */
 	(begin
 		(rdf_ensure_named_table schema)
 		(map triples (lambda (triple) (match triple '(subj pred obj)
-			(scan nil (table schema false "rdf_named" false)
+			(scan nil (table schema false "rdf_named" false nil)
 				(list 369436980674560
 					(scan_boundary "equal" "o" 0 0 true true "" false)
 					(scan_boundary "equal" "p" 1 1 true true "" false)
@@ -1308,7 +1308,7 @@ projection and BIND layers already surface as an unbound variable. */
 (define rdf_clear_graph_data (lambda (schema graph)
 	(begin
 		(rdf_ensure_named_table schema)
-		(scan nil (table schema false "rdf_named" false)
+		(scan nil (table schema false "rdf_named" false nil)
 			(list 369436175368192 (scan_boundary "equal" "g" 0 0 true true "" false))
 			(list graph) '() (lambda () true) '("$update")
 			(lambda (acc $update) (begin ($update) acc)))
@@ -1368,7 +1368,7 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 			(define alias (concat "__rdf_t" index))
 			(match (rdf_shared_add_pattern pattern alias bindings filters outer_ctx) '(next_bindings next_filters)
 				(rdf_shared_build_sources schema tail outer_ctx (rdf_shared_next_index index)
-					(append sources (list alias schema "rdf" false nil))
+					(append sources (list alias schema "rdf" false nil nil))
 					next_bindings next_filters)))
 		'() (list sources bindings filters)
 	)
@@ -1387,7 +1387,7 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 			(define alias (concat "__rdf_g" index))
 			(match (rdf_shared_add_named_pattern pattern graph alias bindings filters outer_ctx) '(next_bindings next_filters)
 				(rdf_shared_build_named_sources schema graph tail outer_ctx (rdf_shared_next_index index)
-					(append sources (list alias schema "rdf_named" false nil))
+					(append sources (list alias schema "rdf_named" false nil nil))
 					next_bindings next_filters)))
 		'() (list sources bindings filters))
 ))
@@ -1494,7 +1494,7 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 						(rdf_assoc_position cols (concat var) 1))
 					_ (rdf_shared_expr expr bindings outer_ctx)))
 				(list resolved (if (equal? dir "DESC") > <))))))
-	)))
+)))
 (define rdf_shared_complete_fields (lambda (fields bindings)
 	(match bindings
 		(cons var (cons value tail))
@@ -1693,7 +1693,7 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 		(list
 			(append (rdf_shared_state_sources state)
 				(list alias schema relation outer
-					(if (equal? joins '()) nil (rdf_shared_where joins))))
+					(if (equal? joins '()) nil (rdf_shared_where joins)) nil))
 			(rdf_shared_merge_bindings (rdf_shared_state_bindings state) right)
 			(rdf_shared_state_filters state)
 			(rdf_shared_next_index index)))
@@ -1704,7 +1704,7 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 		(list (list (source_alias source) (source_schema source) (source_relation source)
 			(source_outer? source)
 			(rdf_shared_where (filter (list (source_join_expr source) extra)
-				(lambda (expr) (not (nil? expr)))))))
+				(lambda (expr) (not (nil? expr))))) (source_declarations source)))
 		(cons source tail) (cons source (rdf_shared_add_last_source_join tail extra))
 		'() '())
 ))
@@ -1717,7 +1717,7 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 		(define relation (list (quote table-function) "array_text"
 			(list (list (quote json_encode) (list (quote quote) vals))) (list "value")))
 		(make_query_block schema
-			(list (list alias schema relation false nil))
+			(list (list alias schema relation false nil nil))
 			(list field (rdf_shared_column alias "value"))
 			true nil nil nil nil nil '() '() '())
 	)
@@ -1749,7 +1749,7 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 			(list (concat "[" (concat (rdf_shared_json_records records) "]"))
 				(list (quote quote) columns)) columns))
 		(list (make_query_block schema
-			(list (list alias schema relation false nil))
+			(list (list alias schema relation false nil nil))
 			(reduce columns (lambda (fields column)
 				(append fields column (rdf_shared_column alias column))) '())
 			true nil nil nil nil nil '() '() '())
@@ -1787,8 +1787,8 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 			(rdf_shared_filter_conditions filters bindings '()))))
 		(make_query_block schema
 			(list
-				(list left_alias schema left_query false nil)
-				(list right_alias schema right_query false (rdf_shared_where joins)))
+				(list left_alias schema left_query false nil nil)
+				(list right_alias schema right_query false (rdf_shared_where joins) nil))
 			(rdf_shared_relation_fields bindings) true nil nil nil nil nil '() '() '()))
 ))
 (define rdf_shared_optional_exists_branch (lambda (right_query right_vars left_bindings filters)
@@ -1823,7 +1823,7 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 				(rdf_shared_optional_exists_branch branch right_vars unmatched_left filters)))
 			nil nil nil '()))
 		(define unmatched (make_query_block schema
-			(list (list unmatched_alias schema left_query false nil)) unmatched_fields
+			(list (list unmatched_alias schema left_query false nil nil)) unmatched_fields
 			(list (quote not) (list (quote inner_select_exists) exists_query))
 			nil nil nil nil nil '() '() '()))
 		(list (make_union_block (quote all) (append matched unmatched) nil nil nil '()) all_vars))
@@ -1844,7 +1844,7 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 		(define grouped_fields (append (rdf_shared_relation_fields grouped_bindings)
 			presence (list (quote aggregate) 1 (quote +) 0)))
 		(define relation (make_query_block schema
-			(list (list input_alias schema query false nil)) grouped_fields true
+			(list (list input_alias schema query false nil nil)) grouped_fields true
 			(extract_assoc grouped_bindings (lambda (_var expr) expr)) nil nil nil nil '() '() '()))
 		(define right (rdf_shared_relation_refs alias shared))
 		(define joins (reduce shared (lambda (conditions var)
@@ -1860,7 +1860,7 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 				'() conditions)) '()))
 		(list
 			(append (rdf_shared_state_sources state)
-				(list alias schema relation true (rdf_shared_where joins)))
+				(list alias schema relation true (rdf_shared_where joins) nil))
 			(rdf_shared_state_bindings state)
 			(cons (list (quote nil?) (rdf_shared_column alias presence))
 				(rdf_shared_state_filters state))
@@ -1887,7 +1887,7 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 			(append bindings var (get_assoc input_bindings var))) '()))
 		(define relation (make_query_block schema
 			(if flat_input (qb_sources query)
-				(list (list input_alias schema query false nil)))
+				(list (list input_alias schema query false nil nil)))
 			(append (rdf_shared_relation_fields grouped_bindings)
 				presence (list (quote aggregate) 1 (quote +) 0))
 			(if flat_input (qb_where query) true) (if (equal? shared '()) nil
@@ -1899,7 +1899,7 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 		(if (equal? shared '())
 			(list
 				(append (rdf_shared_state_sources state)
-					(list alias schema relation false nil))
+					(list alias schema relation false nil nil))
 				(rdf_shared_state_bindings state)
 				(cons (if negate
 					(list (quote equal?) presence_expr 0)
@@ -1909,14 +1909,14 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 			(if negate
 				(list
 					(append (rdf_shared_state_sources state)
-						(list alias schema relation true (rdf_shared_where joins)))
+						(list alias schema relation true (rdf_shared_where joins) nil))
 					(rdf_shared_state_bindings state)
 					(cons (list (quote nil?) presence_expr)
 						(rdf_shared_state_filters state))
 					(rdf_shared_next_index index))
 				(list
 					(append (rdf_shared_state_sources state)
-						(list alias schema relation true (rdf_shared_where joins)))
+						(list alias schema relation true (rdf_shared_where joins) nil))
 					(rdf_shared_state_bindings state)
 					(cons (list (quote not) (list (quote nil?) presence_expr))
 						(rdf_shared_state_filters state))
@@ -1953,21 +1953,21 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 							(list (source_alias source) (source_schema source)
 								(source_relation source) true
 								(rdf_shared_where (merge (list
-									(list (qb_where query)) flattened_joins)))))
+									(list (qb_where query)) flattened_joins))) (source_declarations source)))
 						(rdf_shared_state_bindings state)
 						(cons (list (quote nil?) (get_assoc flattened_right (car shared)))
 							(rdf_shared_state_filters state))
 						(rdf_shared_next_index index)))
 				(list
 					(append (rdf_shared_state_sources state)
-						(list alias schema query true (rdf_shared_where joins)))
+						(list alias schema query true (rdf_shared_where joins) nil))
 					(rdf_shared_state_bindings state)
 					(cons (list (quote nil?) (get_assoc right (car shared)))
 						(rdf_shared_state_filters state))
 					(rdf_shared_next_index index)))
 			/* A set-unique positive operand needs no cardinality barrier. Flatten
-				its base sources into the current BGP so the common planner can cost
-				and reorder the complete semi-join as one join graph. */
+			its base sources into the current BGP so the common planner can cost
+			and reorder the complete semi-join as one join graph. */
 			(list
 				(merge (list (rdf_shared_state_sources state) (qb_sources query)))
 				(rdf_shared_state_bindings state)
@@ -2032,29 +2032,29 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 				(if negate
 					(list (append (rdf_shared_state_sources state)
 						(list probe_alias (source_schema first_src) (source_relation first_src) true
-							(rdf_shared_where (merge (list (list match_expr) joins)))))
+							(rdf_shared_where (merge (list (list match_expr) joins))) (source_declarations first_src)))
 						(rdf_shared_state_bindings state)
 						(cons (list (quote nil?) (get_assoc right (car (nth first_candidate 2))))
 							(rdf_shared_state_filters state))
 						(rdf_shared_next_index (rdf_shared_state_index state)))
 					(list (append (rdf_shared_state_sources state)
-						(list probe_alias (source_schema first_src) (source_relation first_src) false nil))
+						(list probe_alias (source_schema first_src) (source_relation first_src) false nil (source_declarations first_src)))
 						(rdf_shared_state_bindings state)
 						(merge (list (rdf_shared_state_filters state) (list match_expr) joins))
 						(rdf_shared_next_index (rdf_shared_state_index state)))))
 			(if negate
-			/* NOT EXISTS(A UNION B) = NOT EXISTS(A) AND NOT EXISTS(B). */
-			(reduce branches (lambda (current branch)
-				(apply_branch current branch true)) state)
-			(begin
-				/* EXISTS projects a UNION back onto the current mapping domain. */
-				(define queries (map branches (lambda (branch)
-					(rdf_shared_relation_query schema (apply_branch state branch false)))))
-				(define vars (rdf_shared_relation_vars (rdf_shared_state_bindings state)))
-				(define union_query (make_union_block (quote union_distinct) queries nil nil nil '()))
-				(rdf_shared_attach_relation schema
-					(list '() '() '() (rdf_shared_state_index state))
-					union_query vars false)))))
+				/* NOT EXISTS(A UNION B) = NOT EXISTS(A) AND NOT EXISTS(B). */
+				(reduce branches (lambda (current branch)
+					(apply_branch current branch true)) state)
+				(begin
+					/* EXISTS projects a UNION back onto the current mapping domain. */
+					(define queries (map branches (lambda (branch)
+						(rdf_shared_relation_query schema (apply_branch state branch false)))))
+					(define vars (rdf_shared_relation_vars (rdf_shared_state_bindings state)))
+					(define union_query (make_union_block (quote union_distinct) queries nil nil nil '()))
+					(rdf_shared_attach_relation schema
+						(list '() '() '() (rdf_shared_state_index state))
+						union_query vars false)))))
 ))
 (define rdf_shared_path_relation (lambda (schema state subject pred object include_self)
 	(begin
@@ -2072,13 +2072,13 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 			(equal? bindings '()))
 			(begin
 				(define alias (concat "__rdf_path_values" (rdf_shared_state_index state)))
-				(list (list (list alias schema relation false nil))
+				(list (list (list alias schema relation false nil nil))
 					(list var (rdf_shared_column alias "value"))
 					(rdf_shared_state_filters state)
 					(rdf_shared_next_index (rdf_shared_state_index state))))
 			(begin
 				(define query (make_query_block schema
-					(list (list "__rdf_path_values" schema relation false nil))
+					(list (list "__rdf_path_values" schema relation false nil nil))
 					(list (rdf_shared_input_field_name var)
 						(rdf_shared_column "__rdf_path_values" "value"))
 					true nil nil nil nil nil '() '() '()))
@@ -2143,23 +2143,23 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 		'("__values_tuple__" vars rows)
 		(match (rdf_shared_tuple_values_relation schema vars rows) '(query relation_vars)
 			(rdf_shared_attach_relation schema state query relation_vars false))
-			'("__optional__" inner)
-			(begin
-				(define inner_filters (filter inner rdf_shared_filter_condition?))
-				(define inner_relation_conditions (filter inner
-					(lambda (condition) (not (rdf_shared_filter_condition? condition)))))
-				(match (rdf_shared_conditions_relation schema inner_relation_conditions '()) '(query vars)
-					(if (union_block? query)
-						(match (rdf_shared_optional_union_relation schema state
-							inner_relation_conditions inner_filters query vars) '(optional_query optional_vars)
-							(rdf_shared_attach_relation schema (list '() '() '() (rdf_shared_state_index state))
-								optional_query optional_vars false))
-						(begin
+		'("__optional__" inner)
+		(begin
+			(define inner_filters (filter inner rdf_shared_filter_condition?))
+			(define inner_relation_conditions (filter inner
+				(lambda (condition) (not (rdf_shared_filter_condition? condition)))))
+			(match (rdf_shared_conditions_relation schema inner_relation_conditions '()) '(query vars)
+				(if (union_block? query)
+					(match (rdf_shared_optional_union_relation schema state
+						inner_relation_conditions inner_filters query vars) '(optional_query optional_vars)
+						(rdf_shared_attach_relation schema (list '() '() '() (rdf_shared_state_index state))
+							optional_query optional_vars false))
+					(begin
 						(define attached (rdf_shared_attach_relation schema state query vars true))
 						(define optional_filter (rdf_shared_where
 							(rdf_shared_filter_conditions inner_filters
 								(rdf_shared_state_bindings attached) outer_ctx)))
-					(list (rdf_shared_add_last_source_join
+						(list (rdf_shared_add_last_source_join
 							(rdf_shared_state_sources attached) optional_filter)
 							(rdf_shared_state_bindings attached)
 							(rdf_shared_state_filters attached)
@@ -2207,9 +2207,9 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 			(list (list "__union__" branches))
 			(rdf_shared_exists_union_relation schema state branches negate)
 			/* Build the EXISTS operand as an independent relation. Correlation is
-				represented explicitly by the semi/anti-join below; carrying outer
-				source references into a derived table would bypass normal name binding
-				and prevents the common planner from reordering the join. */
+			represented explicitly by the semi/anti-join below; carrying outer
+			source references into a derived table would bypass normal name binding
+			and prevents the common planner from reordering the join. */
 			(match (rdf_shared_conditions_relation schema inner '()) '(query vars)
 				(begin
 					(define shared (filter vars (lambda (var)
@@ -2234,7 +2234,7 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 				(list
 					(append (rdf_shared_state_sources state)
 						(list alias schema query false
-							(if (equal? joins '()) nil (rdf_shared_where joins))))
+							(if (equal? joins '()) nil (rdf_shared_where joins)) nil))
 					(rdf_shared_merge_bindings (rdf_shared_state_bindings state) right)
 					(rdf_shared_state_filters state)
 					(rdf_shared_next_index index))))
@@ -2301,12 +2301,12 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 					(reduce input_vars (lambda (acc var)
 						(append acc var (get_assoc (qb_fields input_query) (rdf_shared_input_field_name var)))) '())
 					(rdf_shared_relation_refs input_alias input_vars)))
-					(define sources (if direct_table_function (qb_sources input_query)
-						(list (list input_alias schema input_query false nil))))
-					(define input_where (if direct_table_function (qb_where input_query) true))
-					(define result_order (if (union_block? input_query)
-						(rdf_shared_union_output_order order cols bindings outer_ctx)
-						(rdf_shared_order order bindings outer_ctx)))
+				(define sources (if direct_table_function (qb_sources input_query)
+					(list (list input_alias schema input_query false nil nil))))
+				(define input_where (if direct_table_function (qb_where input_query) true))
+				(define result_order (if (union_block? input_query)
+					(rdf_shared_union_output_order order cols bindings outer_ctx)
+					(rdf_shared_order order bindings outer_ctx)))
 				(if (or (rdf_select_has_aggregates cols)
 					(or (not (equal? group '())) (not (nil? having))))
 					(begin
@@ -2317,7 +2317,7 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 							(if (equal? group '()) nil
 								(map group (lambda (expr) (rdf_shared_expr expr bindings outer_ctx))))
 							(if (nil? having) nil (rdf_shared_expr having bindings outer_ctx))
-								result_order
+							result_order
 							limit offset '() '()
 							(if (> (count (coalesceNil result_order '())) 0)
 								(list (list (quote global_order_required) true)) '())))
@@ -2332,7 +2332,7 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 						(define projected (extract_assoc selected_fields (lambda (_title expr) expr)))
 						(make_query_block schema sources fields input_where
 							(if distinct projected nil) nil
-								result_order limit offset '() '()
+							result_order limit offset '() '()
 							(merge (list
 								(if distinct (list (list (quote select_distinct) true)) '())
 								(if (> (count (coalesceNil result_order '())) 0)
@@ -2394,119 +2394,119 @@ bindings of neighbouring update alternatives. */
 		(if (equal? kind "update_request")
 			(cons (quote begin) (map (nth parsed 1) (lambda (operation)
 				(rdf_compile_sparql_ast schema operation definitions planning_session tx))))
-		(if (equal? kind "select")
-			(begin
-				(define cols (nth parsed 1))
-				(define qgroup (nth parsed 5))
-				(define qhaving (nth parsed 7))
-				(if (or (rdf_select_has_aggregates cols)
-					(or (rdf_has_aggregate qhaving) (not (equal? qgroup '()))))
-					(rdf_queryplan schema parsed definitions '() rdf_shared_resultrow_ast)
-					(rdf_queryplan schema parsed definitions '() rdf_select_resultrow_ast)))
-		(if (equal? kind "create_graph")
-			(list (quote rdf_create_graph_entry) schema (nth parsed 1) (nth parsed 2))
-		(if (equal? kind "clear_graph")
-			(begin
-				(define target (nth parsed 1))
-				(if (equal? target "default") (list (quote rdf_clear_default_data) schema)
-				(if (equal? target "named") (list (quote rdf_clear_all_named_data) schema false)
-				(if (equal? target "all") (list (quote begin)
-					(list (quote rdf_clear_default_data) schema)
-					(list (quote rdf_clear_all_named_data) schema false))
-					(list (quote rdf_clear_graph_target) schema target false)))))
-		(if (equal? kind "drop_graph")
-			(begin
-				(define target (nth parsed 1))
-				(if (equal? target "default") (list (quote rdf_clear_default_data) schema)
-				(if (equal? target "named") (list (quote rdf_clear_all_named_data) schema true)
-				(if (equal? target "all") (list (quote begin)
-					(list (quote rdf_clear_default_data) schema)
-					(list (quote rdf_clear_all_named_data) schema true))
-					(list (quote rdf_clear_graph_target) schema target true)))))
-		(if (equal? kind "load")
-			(if (nth parsed 3) (list (quote begin))
-				(list (quote error) "SPARQL LOAD failed for " (nth parsed 1) (nth parsed 2)))
-		(if (equal? kind "graph_transfer")
-			(list (quote rdf_transfer_graph) schema (nth parsed 1) (nth parsed 2) (nth parsed 3))
-		(if (equal? kind "insert_data")
-			(list (quote begin) (list (quote rdf_ensure_table) schema)
-				(list (quote rdf_insert_triples) schema (list (quote quote) (nth parsed 1))))
-		(if (equal? kind "insert_graph_data")
-			(list (quote rdf_insert_graph_triples) schema (nth parsed 1)
-				(list (quote quote) (nth parsed 2)))
-		(if (equal? kind "delete_data")
-			(list (quote begin) (list (quote rdf_ensure_table) schema)
-				(list (quote rdf_delete_triples) schema (list (quote quote) (nth parsed 1))))
-		(if (equal? kind "delete_graph_data")
-			(list (quote rdf_delete_graph_triples) schema (nth parsed 1)
-				(list (quote quote) (nth parsed 2)))
-		(if (equal? kind "ask")
-			(begin
-				(define ask_state (newsession))
-				(ask_state "matched" false)
-				(list (quote begin)
-					(list (quote rdf_ensure_table) schema)
-					(rdf_queryplan schema (rdf_update_select_query (nth parsed 2)) definitions '()
-						(lambda (_cols _ctx) (list ask_state "matched" true)))
-					(list (quote resultrow) (list (quote list) "?ask" (list ask_state "matched")))))
-		(if (equal? kind "construct")
-			(begin
-				(define triples (nth parsed 1))
-				(define conditions (nth parsed 3))
-				(define order (nth parsed 5))
-				(define limit (nth parsed 7))
-				(define offset (nth parsed 9))
-				(list (quote begin)
-					(list (quote rdf_ensure_table) schema)
-					(rdf_queryplan schema (list "select" '() "where" conditions "group" '()
-						"having" nil "order" order "limit" limit "offset" offset "distinct" nil)
-						definitions '() (lambda (_cols ctx)
-							(cons (quote begin) (map triples (lambda (triple) (match triple '(s p o)
-								(list (quote resultrow) (list (quote list)
-									"?s" (rdf_replace_ctx s ctx) "?p" (rdf_replace_ctx p ctx)
-									"?o" (rdf_replace_ctx o ctx)))))))))))
-		(if (equal? kind "describe")
-			(begin
-				(define describe_query (rdf_describe_query (nth parsed 1) (nth parsed 3)
-					(nth parsed 5) (nth parsed 7) (nth parsed 9)))
-				(list (quote begin)
-					(list (quote rdf_ensure_table) schema)
-					(rdf_queryplan schema describe_query definitions '() (lambda (_cols ctx)
-						(list (quote resultrow) (list (quote list)
-							"?s" (rdf_ctx_value ctx "?__describe_subject")
-							"?p" (rdf_ctx_value ctx "?__describe_p")
-							"?o" (rdf_ctx_value ctx "?__describe_o")))))))
-		(if (equal? kind "modify")
-			(begin
-				(define update_graph (nth parsed 2))
-				(define delete_triples (nth parsed 4))
-				(define insert_triples (nth parsed 6))
-				(define conditions (nth parsed 8))
-				(define delete_rows (newsession))
-				(define insert_rows (newsession))
-				(define update_row_count (newsession))
-				/* Allocate the namespace at template evaluation time. nanotime has a
-				straight JIT path; row and template indexes disambiguate every label
-				within an update and the persistent row counter covers plan reuse. */
-				(define update_blank_prefix
-					(list (quote concat) "urn:rdf-template:" (list (quote nanotime)) ":"))
-				(update_row_count "value" 0)
-				(list (quote begin)
-					(list (quote rdf_ensure_table) schema)
-					(rdf_queryplan schema (rdf_update_select_query conditions) definitions '()
-						(lambda (_cols ctx) (list (quote begin)
-							(list (quote set) (quote __rdf_update_row) (list update_row_count "value"))
-							(list update_row_count "value" (list (quote +) (quote __rdf_update_row) 1))
-							(list delete_rows (quote __rdf_update_row)
-								(rdf_template_expr delete_triples ctx update_blank_prefix))
-							(list insert_rows (quote __rdf_update_row)
-								(rdf_template_expr insert_triples ctx update_blank_prefix)))))
-					(list (quote rdf_delete_graph_target) schema update_graph
-						(list (quote rdf_session_merged_values) delete_rows))
-					(list (quote rdf_insert_graph_target) schema update_graph
-						(list (quote rdf_session_merged_values) insert_rows))))
-			(error "Unsupported SPARQL operation: " kind)
-		))))))))))))))))
+			(if (equal? kind "select")
+				(begin
+					(define cols (nth parsed 1))
+					(define qgroup (nth parsed 5))
+					(define qhaving (nth parsed 7))
+					(if (or (rdf_select_has_aggregates cols)
+						(or (rdf_has_aggregate qhaving) (not (equal? qgroup '()))))
+						(rdf_queryplan schema parsed definitions '() rdf_shared_resultrow_ast)
+						(rdf_queryplan schema parsed definitions '() rdf_select_resultrow_ast)))
+				(if (equal? kind "create_graph")
+					(list (quote rdf_create_graph_entry) schema (nth parsed 1) (nth parsed 2))
+					(if (equal? kind "clear_graph")
+						(begin
+							(define target (nth parsed 1))
+							(if (equal? target "default") (list (quote rdf_clear_default_data) schema)
+								(if (equal? target "named") (list (quote rdf_clear_all_named_data) schema false)
+									(if (equal? target "all") (list (quote begin)
+										(list (quote rdf_clear_default_data) schema)
+										(list (quote rdf_clear_all_named_data) schema false))
+										(list (quote rdf_clear_graph_target) schema target false)))))
+						(if (equal? kind "drop_graph")
+							(begin
+								(define target (nth parsed 1))
+								(if (equal? target "default") (list (quote rdf_clear_default_data) schema)
+									(if (equal? target "named") (list (quote rdf_clear_all_named_data) schema true)
+										(if (equal? target "all") (list (quote begin)
+											(list (quote rdf_clear_default_data) schema)
+											(list (quote rdf_clear_all_named_data) schema true))
+											(list (quote rdf_clear_graph_target) schema target true)))))
+							(if (equal? kind "load")
+								(if (nth parsed 3) (list (quote begin))
+									(list (quote error) "SPARQL LOAD failed for " (nth parsed 1) (nth parsed 2)))
+								(if (equal? kind "graph_transfer")
+									(list (quote rdf_transfer_graph) schema (nth parsed 1) (nth parsed 2) (nth parsed 3))
+									(if (equal? kind "insert_data")
+										(list (quote begin) (list (quote rdf_ensure_table) schema)
+											(list (quote rdf_insert_triples) schema (list (quote quote) (nth parsed 1))))
+										(if (equal? kind "insert_graph_data")
+											(list (quote rdf_insert_graph_triples) schema (nth parsed 1)
+												(list (quote quote) (nth parsed 2)))
+											(if (equal? kind "delete_data")
+												(list (quote begin) (list (quote rdf_ensure_table) schema)
+													(list (quote rdf_delete_triples) schema (list (quote quote) (nth parsed 1))))
+												(if (equal? kind "delete_graph_data")
+													(list (quote rdf_delete_graph_triples) schema (nth parsed 1)
+														(list (quote quote) (nth parsed 2)))
+													(if (equal? kind "ask")
+														(begin
+															(define ask_state (newsession))
+															(ask_state "matched" false)
+															(list (quote begin)
+																(list (quote rdf_ensure_table) schema)
+																(rdf_queryplan schema (rdf_update_select_query (nth parsed 2)) definitions '()
+																	(lambda (_cols _ctx) (list ask_state "matched" true)))
+																(list (quote resultrow) (list (quote list) "?ask" (list ask_state "matched")))))
+														(if (equal? kind "construct")
+															(begin
+																(define triples (nth parsed 1))
+																(define conditions (nth parsed 3))
+																(define order (nth parsed 5))
+																(define limit (nth parsed 7))
+																(define offset (nth parsed 9))
+																(list (quote begin)
+																	(list (quote rdf_ensure_table) schema)
+																	(rdf_queryplan schema (list "select" '() "where" conditions "group" '()
+																		"having" nil "order" order "limit" limit "offset" offset "distinct" nil)
+																		definitions '() (lambda (_cols ctx)
+																			(cons (quote begin) (map triples (lambda (triple) (match triple '(s p o)
+																				(list (quote resultrow) (list (quote list)
+																					"?s" (rdf_replace_ctx s ctx) "?p" (rdf_replace_ctx p ctx)
+																					"?o" (rdf_replace_ctx o ctx)))))))))))
+															(if (equal? kind "describe")
+																(begin
+																	(define describe_query (rdf_describe_query (nth parsed 1) (nth parsed 3)
+																		(nth parsed 5) (nth parsed 7) (nth parsed 9)))
+																	(list (quote begin)
+																		(list (quote rdf_ensure_table) schema)
+																		(rdf_queryplan schema describe_query definitions '() (lambda (_cols ctx)
+																			(list (quote resultrow) (list (quote list)
+																				"?s" (rdf_ctx_value ctx "?__describe_subject")
+																				"?p" (rdf_ctx_value ctx "?__describe_p")
+																				"?o" (rdf_ctx_value ctx "?__describe_o")))))))
+																(if (equal? kind "modify")
+																	(begin
+																		(define update_graph (nth parsed 2))
+																		(define delete_triples (nth parsed 4))
+																		(define insert_triples (nth parsed 6))
+																		(define conditions (nth parsed 8))
+																		(define delete_rows (newsession))
+																		(define insert_rows (newsession))
+																		(define update_row_count (newsession))
+																		/* Allocate the namespace at template evaluation time. nanotime has a
+																		straight JIT path; row and template indexes disambiguate every label
+																		within an update and the persistent row counter covers plan reuse. */
+																		(define update_blank_prefix
+																			(list (quote concat) "urn:rdf-template:" (list (quote nanotime)) ":"))
+																		(update_row_count "value" 0)
+																		(list (quote begin)
+																			(list (quote rdf_ensure_table) schema)
+																			(rdf_queryplan schema (rdf_update_select_query conditions) definitions '()
+																				(lambda (_cols ctx) (list (quote begin)
+																					(list (quote set) (quote __rdf_update_row) (list update_row_count "value"))
+																					(list update_row_count "value" (list (quote +) (quote __rdf_update_row) 1))
+																					(list delete_rows (quote __rdf_update_row)
+																						(rdf_template_expr delete_triples ctx update_blank_prefix))
+																					(list insert_rows (quote __rdf_update_row)
+																						(rdf_template_expr insert_triples ctx update_blank_prefix)))))
+																			(list (quote rdf_delete_graph_target) schema update_graph
+																				(list (quote rdf_session_merged_values) delete_rows))
+																			(list (quote rdf_insert_graph_target) schema update_graph
+																				(list (quote rdf_session_merged_values) insert_rows))))
+																	(error "Unsupported SPARQL operation: " kind)
+	))))))))))))))))
 )))
 
 (define parse_sparql (lambda (schema s _policy planning_session tx)
@@ -2628,10 +2628,10 @@ bindings of neighbouring update alternatives. */
 	'("prefixes" definitions "rest" rest)
 	(begin
 		/* blank node registry: maps _:id to urn:uuid:... per load */
-			(set _bn (newsession))
-			(define resolve_blank (lambda (val)
-				(if (not (string? val)) val
-					(match val (regex "^_:(.+)$" _ bname) (begin
+		(set _bn (newsession))
+		(define resolve_blank (lambda (val)
+			(if (not (string? val)) val
+				(match val (regex "^_:(.+)$" _ bname) (begin
 					(if (nil? (_bn bname)) (_bn bname (concat "urn:uuid:" (uuid))))
 					(_bn bname)
 				) val)
@@ -2644,9 +2644,9 @@ bindings of neighbouring update alternatives. */
 			(parser '((atom "<" true) (define iri (regex "[^>]*" false false)) (atom ">" false false)) (rdf_apply_base_iri definitions (rdf_unescape_iri iri)))
 			(parser '((atom "'''" true) (define x (regex "[^']*(?:(?:'[^']|''[^'])[^']*)*" false false)) (atom "'''" false false)) (rdf_unescape_single x))
 			(parser '((atom "'" true) (define x (regex "(?:[^'\\\\]|\\\\.)*" false false)) (atom "'" false false)) (rdf_unescape_single x))
-				(parser '((atom "\"\"\"" true) (define x (regex "[^\"]*(?:(?:\"[^\"]|\"\"[^\"])[^\"]*)*" false false)) (atom "\"\"\"" false false) (? (atom "^^" false false) (define datatype rdf_datatype_suffix))) (if (nil? datatype) x (rdf_typed_literal x datatype)))
+			(parser '((atom "\"\"\"" true) (define x (regex "[^\"]*(?:(?:\"[^\"]|\"\"[^\"])[^\"]*)*" false false)) (atom "\"\"\"" false false) (? (atom "^^" false false) (define datatype rdf_datatype_suffix))) (if (nil? datatype) x (rdf_typed_literal x datatype)))
 			(parser '((atom "\"" true) (define x (regex "(?:[^\"\\\\]|\\\\.)*" false false)) (atom "\"@" false false) (regex "[a-zA-Z_0-9]+" false)) (rdf_unescape x))
-				(parser '((atom "\"" true) (define x (regex "(?:[^\"\\\\]|\\\\.)*" false false)) (atom "\"" false false) (? (atom "^^" false false) (define datatype rdf_datatype_suffix))) (if (nil? datatype) (rdf_unescape x) (rdf_typed_literal (rdf_unescape x) datatype)))
+			(parser '((atom "\"" true) (define x (regex "(?:[^\"\\\\]|\\\\.)*" false false)) (atom "\"" false false) (? (atom "^^" false false) (define datatype rdf_datatype_suffix))) (if (nil? datatype) (rdf_unescape x) (rdf_typed_literal (rdf_unescape x) datatype)))
 			(parser '((define x (regex "[+-]?[0-9]+(?:\\.[0-9]+)?(?:[eE][+-]?[0-9]+)?" true))) (simplify x))
 			(parser '((atom "true" true)) true)
 			(parser '((atom "false" true)) false)

@@ -1,0 +1,186 @@
+# Copyright (C) 2026 Carl-Philip Haensch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  filesystem_fixture: root_ancestors
+  description: Explicit filesystem roots preserve native database containment and restart ownership
+setup:
+- scm: (createdatabase "filesystem_root_fixture" false)
+cleanup:
+- scm: (dropdatabase "filesystem_ancestor_existing" true)
+- scm: (dropdatabase "filesystem_ancestor_missing" true)
+- scm: (dropdatabase "filesystem_absolute_admin" true)
+- scm: (dropdatabase "filesystem_root_clone" true)
+- scm: (dropdatabase "filesystem_root_probe" true)
+- scm: (dropdatabase "filesystem_root_occupied_source" true)
+- scm: (dropdatabase "filesystem_root_fixture" true)
+test_cases:
+- name: Configured filesystem root owns the ordinary named database below it
+  scm: |
+    (createdatabase "filesystem_root_probe" false (list "backend" "filesystem"
+      "root" (concat (arg "data" "data" "data") "/filesystem_root_fixture")))
+  expect: {result: true}
+- name: Root selection is persisted and native data do not use the default namespace
+  scm: |
+    (begin
+      (define data (arg "data" "data" "data"))
+      (define config (json_decode (readfile (concat data "/filesystem_root_probe.json"))))
+      (and (equal? (config "backend") "filesystem")
+        (equal? (config "root") (concat data "/filesystem_root_fixture"))
+        (not (nil? (readfile (concat data "/filesystem_root_fixture/filesystem_root_probe/schema.json"))))
+        (try (lambda () (begin (readfile (concat data "/filesystem_root_probe/schema.json")) false))
+          (lambda (_failure) true))))
+  expect: {result: true}
+- name: Native writes retain ordinary safe-engine behavior in the configured root
+  scm: |
+    (begin
+      (createtable "filesystem_root_probe" "items"
+        (list (list "column" "id" "INT" '() '())) (list "engine" "safe") false nil)
+      (insert (table "filesystem_root_probe" false "items" false nil) '("id") (list (list 17))))
+  expect: {result: 1}
+- name: Clone keeps the root and allocates the distinct native target component
+  scm: (createdatabase "filesystem_root_clone" false nil "filesystem_root_probe")
+  expect: {result: true}
+- name: Configured filesystem discovery survives restart
+  sql: SHUTDOWN
+  restart_timeout: 60
+  expect: {affected_rows: 0}
+- name: Restart restores safe rows from the configured root
+  scm: |
+    (equal? (scan nil (table "filesystem_root_probe" false "items" false nil)
+      '() '() '() (lambda () true) '("id") (lambda (acc id) (+ acc id)) 0 +) 17)
+  expect: {result: true}
+- name: A clone discovers its own target directory after restart
+  scm: |
+    (begin
+      (define data (arg "data" "data" "data"))
+      (define schema (json_decode (readfile (concat data "/filesystem_root_fixture/filesystem_root_clone/schema.json"))))
+      (equal? (schema "name") "filesystem_root_clone"))
+  expect: {result: true}
+- name: Dropping one rooted target preserves the source and its data
+  scm: |
+    (begin
+      (dropdatabase "filesystem_root_clone" false)
+      (equal? (scan nil (table "filesystem_root_probe" false "items" false nil)
+        '() '() '() (lambda () true) '("id") (lambda (acc id) (+ acc id)) 0 +) 17))
+  expect: {result: true}
+- name: Filesystem factories reject unknown configuration before publication
+  scm: (createdatabase "filesystem_root_rejected" false (list "backend" "filesystem" "unknown_option" "ignored"))
+  expect: {error: true, contains: unknown field}
+- name: A numeric root cannot be coerced into a filesystem component
+  scm: (createdatabase "filesystem_root_rejected" false (list "backend" "filesystem" "root" 17))
+  expect: {error: true, contains: filesystem root must be a string}
+- name: A NULL root cannot silently choose the server data directory
+  scm: (createdatabase "filesystem_root_rejected" false (list "backend" "filesystem" "root" nil))
+  expect: {error: true, contains: filesystem root must be a string}
+- name: Empty roots are rejected before creating a database or backend file
+  scm: (createdatabase "filesystem_root_rejected" false (list "backend" "filesystem" "root" ""))
+  expect: {error: true, contains: filesystem root}
+- name: Relative roots cannot escape their declared server root
+  scm: (createdatabase "filesystem_root_rejected" false (list "backend" "filesystem" "root" "../outside_root"))
+  expect: {error: true, contains: filesystem root}
+- name: Existing non-directory entries cannot become filesystem roots
+  scm: |
+    (createdatabase "filesystem_root_rejected" false (list "backend" "filesystem"
+      "root" (concat (arg "data" "data" "data") "/filesystem_root_fixture/schema.json")))
+  expect: {error: true, contains: filesystem root must be a directory}
+- name: Rejected root configurations publish no native database identity
+  scm: (dropdatabase "filesystem_root_rejected" true)
+  expect: {result: false}
+- name: Rejected root configurations publish no backend configuration file
+  scm: |
+    (try (lambda () (begin
+      (readfile (concat (arg "data" "data" "data") "/filesystem_root_rejected.json")) false))
+      (lambda (_failure) true))
+  expect: {result: true}
+- name: Explicit roots cannot bypass reserved server settings directory validation
+  scm: |
+    (createdatabase "settings.json" false (list "backend" "filesystem"
+      "root" (concat (arg "data" "data" "data") "/filesystem_root_fixture")))
+  expect: {error: true, contains: reserved server settings}
+- name: Rooted settings databases cannot discard their configuration into global settings
+  scm: |
+    (createdatabase "settings" false (list "backend" "filesystem"
+      "root" (concat (arg "data" "data" "data") "/filesystem_root_fixture")))
+  expect: {error: true, contains: reserved server settings}
+- name: The rooted database component cannot replace the containing root schema file
+  scm: |
+    (createdatabase "schema.json" false (list "backend" "filesystem"
+      "root" (concat (arg "data" "data" "data") "/filesystem_root_fixture")))
+  expect: {error: true, contains: existing non-directory entry}
+- name: Relative root configuration resolves below the server data directory
+  scm: |
+    (begin
+      (createdatabase "filesystem_root_clone" false (list "backend" "filesystem" "root" "filesystem_root_fixture"))
+      (equal? ((json_decode (readfile (concat (arg "data" "data" "data")
+        "/filesystem_root_fixture/filesystem_root_clone/schema.json"))) "name") "filesystem_root_clone"))
+  expect: {result: true}
+
+- name: Prepare an independently owned existing native storage namespace
+  scm: |
+    (begin
+      (createdatabase "filesystem_root_occupied_source" false (list "backend" "FakeRemote"
+        "prefix" (concat (arg "data" "data" "data") "/filesystem_root_fixture/filesystem_root_occupied_target")))
+      (createtable "filesystem_root_occupied_source" "items"
+        (list (list "column" "id" "INT" '() '())) (list "engine" "safe") false nil)
+      (insert (table "filesystem_root_occupied_source" false "items" false nil)
+        '("id") (list (list 31))))
+  expect: {result: 1}
+- name: Rooted CREATE cannot overwrite a preexisting database namespace
+  scm: |
+    (createdatabase "filesystem_root_occupied_target" false (list "backend" "filesystem"
+      "root" (concat (arg "data" "data" "data") "/filesystem_root_fixture")))
+  expect: {error: true, contains: destination storage already contains a database schema}
+- name: Cloned configuration cannot overwrite a preexisting database namespace
+  scm: (createdatabase "filesystem_root_occupied_target" false nil "filesystem_root_probe")
+  expect: {error: true, contains: destination storage already contains a database schema}
+- name: Rejected CREATE and clone preserve existing schema and exact native rows
+  scm: |
+    (begin
+      (define data (arg "data" "data" "data"))
+      (define stored (json_decode (readfile (concat data
+        "/filesystem_root_fixture/filesystem_root_occupied_target/schema.json"))))
+      (and (equal? (stored "name") "filesystem_root_occupied_source")
+        (equal? (scan nil (table "filesystem_root_occupied_source" false "items" false nil)
+          '() '() '() (lambda () true) '("id") (lambda (acc id) (+ acc id)) 0 +) 31)
+        (try (lambda () (begin (readfile (concat data "/filesystem_root_occupied_target.json")) false))
+          (lambda (_failure) true))))
+  expect: {result: true}
+
+- name: A relative root cannot escape through an existing symlink ancestor
+  scm: |
+    (createdatabase "filesystem_ancestor_existing" false
+      (list "backend" "filesystem" "root" "filesystem_ancestry_link/existing"))
+  expect: {error: true, contains: symbolic links}
+- name: A missing relative suffix cannot hide an escaping symlink ancestor
+  scm: |
+    (createdatabase "filesystem_ancestor_missing" false
+      (list "backend" "filesystem" "root" "filesystem_ancestry_link/new/deep"))
+  expect: {error: true, contains: symbolic links}
+- name: Rejected relative ancestry publishes no backend config or outside schema
+  scm: |
+    (begin
+      (define data (arg "data" "data" "data"))
+      (define outside ((json_decode (readfile (concat data "/filesystem_ancestry_fixture.txt"))) "outside"))
+      (reduce (list (concat data "/filesystem_ancestor_existing.json")
+          (concat data "/filesystem_ancestor_missing.json")
+          (concat outside "/existing/filesystem_ancestor_existing/schema.json")
+          (concat outside "/new/deep/filesystem_ancestor_missing/schema.json"))
+        (lambda (valid path) (and valid
+          (try (lambda () (begin (readfile path) false)) (lambda (_failure) true)))) true))
+  expect: {result: true}
+- name: Explicit absolute administrator roots still select an outside namespace
+  scm: |
+    (begin
+      (define outside ((json_decode (readfile (concat (arg "data" "data" "data")
+        "/filesystem_ancestry_fixture.txt"))) "outside"))
+      (createdatabase "filesystem_absolute_admin" false
+        (list "backend" "filesystem" "root" (concat outside "/absolute")))
+      (createtable "filesystem_absolute_admin" "items"
+        (list (list "column" "id" "INT" '() '())) (list "engine" "safe") false nil)
+      (insert (table "filesystem_absolute_admin" false "items" false nil) '("id") (list (list 43)))
+      (and (equal? ((json_decode (readfile (concat outside
+          "/absolute/filesystem_absolute_admin/schema.json"))) "name") "filesystem_absolute_admin")
+        (equal? (scan nil (table "filesystem_absolute_admin" false "items" false nil)
+          '() '() '() (lambda () true) '("id") (lambda (acc id) (+ acc id)) 0 +) 43)))
+  expect: {result: true}

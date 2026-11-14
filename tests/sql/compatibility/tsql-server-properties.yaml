@@ -1,0 +1,140 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  description: Truthful native server properties retain SQL variant result contracts
+  syntax: tsql
+  requires_tds: true
+  isolated: true
+setup: []
+cleanup: []
+test_cases:
+- name: Edition identifies the actual engine
+  sql: SELECT SERVERPROPERTY(N'Edition') AS edition
+  expect: {rows: 1, data: [{edition: MemCP}]}
+- name: Unknown and inapplicable properties are NULL
+  sql: SELECT SERVERPROPERTY(N'UnknownProperty') AS unknown, SERVERPROPERTY(N'ProductVersion') AS version, SERVERPROPERTY(N'InstanceName') AS instance
+  expect: {rows: 1, data: [{unknown: null, version: 16.0.0.1, instance: null}]}
+- name: NULL property names produce NULL
+  sql: SELECT SERVERPROPERTY(NULL) AS missing
+  expect: {rows: 1, data: [{missing: null}]}
+- name: Property names are case insensitive
+  sql: SELECT SERVERPROPERTY(N'eDiTiOn') AS edition
+  expect: {rows: 1, data: [{edition: MemCP}]}
+- name: Dynamic SQL expressions choose server properties
+  sql: DECLARE @property NVARCHAR(128) = N'Edition'; SELECT SERVERPROPERTY(@property) AS edition
+  expect: {rows: 1, data: [{edition: MemCP}]}
+- name: Cached dynamic property output changes subtype and NULL without exposing variant carriers
+  sql: |
+    DECLARE @property NVARCHAR(128)=N'Edition';
+    SELECT SERVERPROPERTY(@property) AS value;
+    SET @property=N'IsClustered';
+    SELECT SERVERPROPERTY(@property) AS value;
+    SET @property=N'not_a_supported_property';
+    SELECT SERVERPROPERTY(@property) AS value;
+    SET @property=NULL;
+    SELECT SERVERPROPERTY(@property) AS value;
+  expect:
+    rows: 4
+    data: [{value: MemCP}, {value: 0}, {value: null}, {value: null}]
+- name: Parameter binding preserves declared variant and fractional temporal output adapters
+  sql: |
+    DECLARE @marker INT=7;
+    SELECT @marker AS marker,SERVERPROPERTY(N'Edition') AS edition,
+           CAST(N'2024-02-03T04:05:06.123' AS DATETIME2(3)) AS stamp;
+  expect:
+    rows: 1
+    data: [{marker: 7, edition: MemCP, stamp: '2024-02-03 04:05:06.123'}]
+- name: Default data path is an opaque Windows namespace label
+  sql: SELECT SERVERPROPERTY(N'InstanceDefaultDataPath') AS path
+  expect: {rows: 1, data: [{path: 'C:\MemCP\Data\'}]}
+- name: Default log path never exposes the native WAL directory
+  sql: SELECT SERVERPROPERTY(N'InstanceDefaultLogPath') AS path
+  expect: {rows: 1, data: [{path: 'C:\MemCP\Log\'}]}
+- name: Prepared TDS paths are virtual and independent of host storage configuration
+  tds:
+    statements:
+    - sql: SELECT SERVERPROPERTY(@property) AS path
+      prepare: true
+      parameters: [{name: property, value: InstanceDefaultDataPath}]
+      expect: {rows: 1, data: [{path: 'C:\MemCP\Data\'}], column_types: [{name: path, type: SQL_VARIANT}]}
+    - sql: SELECT SERVERPROPERTY(N'InstanceDefaultLogPath') AS path
+      expect: {rows: 1, data: [{path: 'C:\MemCP\Log\'}], column_types: [{name: path, type: SQL_VARIANT}]}
+- name: Instance machine identity is not disclosed
+  sql: SELECT SERVERPROPERTY(N'MachineName') AS machine, SERVERPROPERTY(N'ServerName') AS server, SERVERPROPERTY(N'ComputerNamePhysicalNetBIOS') AS host
+  expect: {rows: 1, data: [{machine: null, server: null, host: null}]}
+- name: Client database filenames cannot select host storage paths
+  sql: CREATE DATABASE [virtual_path_probe] ON PRIMARY (NAME=N'probe', FILENAME=N'C:\Windows\probe.mdf')
+  expect: {error: true}
+- name: Client restore paths cannot access host files
+  sql: RESTORE DATABASE [virtual_path_probe] FROM DISK=N'C:\MemCP\Data\probe.bak'
+  expect: {error: true}
+- name: Client backup paths cannot write host files
+  sql: BACKUP DATABASE [memcp-tests] TO DISK=N'C:\MemCP\Data\probe.bak'
+  expect: {error: true}
+- name: Server file readers are unavailable
+  sql: SELECT * FROM OPENROWSET(BULK N'C:\MemCP\Data\probe.txt', SINGLE_CLOB) AS content
+  expect: {error: true}
+- name: Explicit text conversions unwrap the intrinsic variant value
+  sql: SELECT CAST(SERVERPROPERTY(N'Edition') AS NVARCHAR(20)) AS edition, CAST(SERVERPROPERTY(NULL) AS NVARCHAR(20)) AS missing
+  expect: {rows: 1, data: [{edition: MemCP, missing: null}]}
+- name: TDS metadata remains SQL variant for values and NULL
+  scm: |
+    (begin
+      (define fields (tds_describe "memcp-tests" "SELECT SERVERPROPERTY('Edition') AS edition, SERVERPROPERTY(NULL) AS missing" "" (newsession)))
+      (reduce fields (lambda (valid field) (and valid (equal? (field "sql_type") "SQL_VARIANT") (equal? (field "kind") 98) (equal? (field "size") 8016))) true))
+  expect: {result: true}
+- name: TDS transmits intrinsic text variants and NULL with declared variant metadata
+  tds:
+    statements:
+    - sql: SELECT SERVERPROPERTY(N'Edition') AS edition, SERVERPROPERTY(NULL) AS missing
+      expect:
+        rows: 1
+        data: [{edition: MemCP, missing: null}]
+        column_types: [{name: edition, type: SQL_VARIANT}, {name: missing, type: SQL_VARIANT}]
+    - sql: SELECT SERVERPROPERTY(@property) AS edition
+      prepare: true
+      parameters: [{name: property, value: Edition}]
+      expect:
+        rows: 1
+        data: [{edition: MemCP}]
+        column_types: [{name: edition, type: SQL_VARIANT}]
+- name: Variant subtype is part of the scalar value rather than inferred from its runtime carrier
+  scm: |
+    (begin
+      (define value (tsql_serverproperty "Edition"))
+      (and (equal? ((value "variant") "kind") 231)
+        (equal? ((value "variant") "size") 256)
+        (equal? ((value "variant") "collation") (hex2bin "0904d00034"))
+        (equal? (value "value") "MemCP")))
+  expect: {result: true}
+- name: Property name argument is required
+  sql: SELECT SERVERPROPERTY()
+  expect: {error: true}
+- name: Extra server property arguments are rejected
+  sql: SELECT SERVERPROPERTY(N'Edition',N'other')
+  expect: {error: true}
+- name: Unsupported variant comparison fails instead of comparing its internal tuple
+  sql: SELECT CASE WHEN SERVERPROPERTY('Edition')=N'MemCP' THEN 1 ELSE 0 END AS value
+  expect: {error: true}
+- name: Unsupported implicit concatenation refuses internal variant stringification
+  sql: SELECT CONCAT(SERVERPROPERTY('Edition'),N'x') AS value
+  expect: {error: true}
+- name: Unsupported common type conversion from a variant fails explicitly
+  sql: SELECT COALESCE(SERVERPROPERTY('Edition'),N'x') AS value
+  expect: {error: true}
+- name: Unsupported numeric variant conversion fails
+  sql: SELECT CAST(SERVERPROPERTY('Edition') AS INT) AS value
+  expect: {error: true}
+- name: Unsupported approximate variant conversion fails
+  sql: SELECT CAST(SERVERPROPERTY('Edition') AS FLOAT) AS value
+  expect: {error: true}
+- name: Unsupported Boolean variant conversion fails
+  sql: SELECT CAST(SERVERPROPERTY('Edition') AS BIT) AS value
+  expect: {error: true}
+- name: Variant NULL inspection uses SQL NULL rather than its intrinsic payload
+  sql: SELECT CASE WHEN SERVERPROPERTY('Edition') IS NOT NULL THEN 1 ELSE 0 END AS present, CASE WHEN SERVERPROPERTY('Unknown') IS NULL THEN 1 ELSE 0 END AS missing
+  expect: {rows: 1, data: [{present: 1, missing: 1}]}
+- name: Unsupported variant ordering fails instead of ordering internal tuples
+  sql: SELECT SERVERPROPERTY('Edition') AS edition ORDER BY SERVERPROPERTY('Edition')
+  expect: {error: true}

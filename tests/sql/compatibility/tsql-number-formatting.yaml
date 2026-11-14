@@ -1,0 +1,114 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  syntax: tsql
+  requires_tds: true
+  description: Declared numeric-to-text formatting, rounding and field-width contracts
+setup:
+- sql: DROP TABLE IF EXISTS format_values
+- sql: CREATE TABLE format_values(id INT PRIMARY KEY,value FLOAT,width INT,places INT)
+- sql: INSERT format_values VALUES(1,12.5,6,1),(2,-12.5,6,0),(3,99.99,3,1),(4,NULL,6,1)
+cleanup:
+- sql: DROP TABLE IF EXISTS format_values
+test_cases:
+- name: STR defaults to a ten-character integer field
+  sql: SELECT STR(12.6) AS value
+  expect: {rows: 1, data: [{value: '        13'}]}
+- name: STR accepts an explicit field width
+  sql: SELECT STR(12.6,4) AS value
+  expect: {rows: 1, data: [{value: '  13'}]}
+- name: STR rounds halfway away from zero
+  sql: SELECT STR(1.25,5,1) AS positive,STR(-1.25,5,1) AS negative
+  expect: {rows: 1, data: [{positive: '  1.3', negative: ' -1.3'}]}
+- name: STR carries rounding into the integer part
+  sql: SELECT STR(9.999,6,2) AS value
+  expect: {rows: 1, data: [{value: ' 10.00'}]}
+- name: STR pads the fractional portion
+  sql: SELECT STR(123,8,3) AS value
+  expect: {rows: 1, data: [{value: ' 123.000'}]}
+- name: STR replaces overflowing output with width-sized asterisks
+  sql: SELECT STR(123.45,2,2) AS value, STR(-12,2) AS signed
+  expect: {rows: 1, data: [{value: '**', signed: '**'}]}
+- name: STR retains sixteen fractional positions
+  sql: SELECT STR(1.5,18,16) AS value
+  expect: {rows: 1, data: [{value: '1.5000000000000000'}]}
+- name: STR caps larger precision requests at sixteen
+  sql: SELECT STR(1.5,18,20) AS value
+  expect: {rows: 1, data: [{value: '1.5000000000000000'}]}
+- name: STR never formats finite magnitudes in exponent notation
+  sql: SELECT STR(1e20,22,0) AS value
+  expect: {rows: 1, data: [{value: ' 100000000000000000000'}]}
+- name: STR normalizes a value rounded to zero
+  sql: SELECT STR(-0.1,3,0) AS value
+  expect: {rows: 1, data: [{value: '  0'}]}
+- name: STR preserves NULL operands
+  sql: SELECT STR(NULL) AS a,STR(1,NULL) AS b,STR(1,5,NULL) AS c
+  expect: {rows: 1, data: [{a: null, b: null, c: null}]}
+- name: STR rejects nonpositive widths and negative precision as NULL
+  sql: SELECT STR(1,0) AS a,STR(1,-1) AS b,STR(1,5,-1) AS c
+  expect: {rows: 1, data: [{a: null, b: null, c: null}]}
+- name: STR consumes typed row-dependent operands
+  sql: SELECT id,STR(value,width,places) AS value FROM format_values ORDER BY id
+  expect:
+    data: [{id: 1, value: '  12.5'}, {id: 2, value: '   -13'}, {id: 3, value: '***'}, {id: 4, value: null}]
+- name: STR composes with trimming and calendar conversion
+  sql: SELECT CONVERT(DATE,LTRIM(STR(2024,4,0))+'0101',112) AS value
+  expect: {rows: 1, data: [{value: '2024-01-01'}]}
+- name: STR converts implicitly numeric text
+  sql: SELECT STR(N'12.5',5,1) AS value
+  expect: {rows: 1, data: [{value: ' 12.5'}]}
+- name: STR width includes the decimal point
+  sql: SELECT STR(0.5,3,1) AS value
+  expect: {rows: 1, data: [{value: '0.5'}]}
+- name: STR fails for nonnumeric text
+  sql: SELECT STR(N'invalid',5) AS value
+  expect: {error: true}
+- name: STR requires an operand
+  sql: SELECT STR() AS value
+  expect: {error: true}
+- name: STR rejects additional operands
+  sql: SELECT STR(1,5,0,0) AS value
+  expect: {error: true}
+- name: STR leaves unimplemented oversized fields explicit
+  sql: SELECT STR(1,8001) AS value
+  expect: {error: true}
+- name: TDS formatting type and width do not depend on result rows
+  tds:
+    statements:
+    - sql: SELECT STR(1.25,6,1) AS value
+      expect:
+        data: [{value: '   1.3'}]
+        column_types: [{name: value, type: VARCHAR, length: 6}]
+    - sql: SELECT TOP(0) STR(value,6,1) AS value FROM format_values
+      expect:
+        rows: 0
+        column_types: [{name: value, type: VARCHAR, length: 6}]
+    - sql: SELECT TOP(0) STR(value,width,places) AS value FROM format_values
+      expect:
+        rows: 0
+        column_types: [{name: value, type: VARCHAR, length: 8000}]
+- name: TDS nonnational metadata matches its character codec
+  tds:
+    statements:
+    - sql: SELECT CAST(N'café €' AS VARCHAR(12)) AS value
+      expect:
+        data: [{value: 'café €'}]
+        column_types: [{name: value, type: VARCHAR, length: 12}]
+    - sql: SELECT CAST(NULL AS VARCHAR(9)) AS value
+      expect:
+        data: [{value: null}]
+        column_types: [{name: value, type: VARCHAR, length: 9}]
+    - sql: SELECT CAST(N'😀' AS NVARCHAR(4)) AS value
+      expect:
+        data: [{value: '😀'}]
+        column_types: [{name: value, type: NVARCHAR, length: 4}]
+- name: TDS prepared formatting binds each invocation
+  tds:
+    statements:
+    - sql: SELECT STR(@value,@width,@places) AS value
+      prepare: true
+      parameters: [{name: value, value: 1.25}, {name: width, value: 6}, {name: places, value: 1}]
+      expect:
+        data: [{value: '   1.3'}]
+        column_types: [{name: value, type: VARCHAR, length: 8000}]

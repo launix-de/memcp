@@ -1,0 +1,141 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  restart_after_setup: true
+  description: Positioned cursor mutation declarations retain syntax without guessing row ownership
+# Microsoft contract: https://learn.microsoft.com/sql/t-sql/queries/update-transact-sql
+# A positioned mutation addresses the native current cursor row, including
+# duplicate/NULL projected values. This frontend does not yet own that capability.
+setup:
+- sql: CREATE TABLE positioned_target(id INT PRIMARY KEY,value INT)
+- sql: INSERT INTO positioned_target VALUES(1,NULL),(2,NULL),(3,9)
+- sql: CREATE PROCEDURE positioned_store @value INT AS UPDATE dbo.positioned_target SET value=@value WHERE CURRENT OF row_cursor;
+- sql: CREATE PROCEDURE positioned_global @value INT AS UPDATE dbo.positioned_target SET value=@value WHERE CURRENT OF GLOBAL row_cursor;
+- sql: CREATE PROCEDURE positioned_variable AS DECLARE @reference CURSOR; UPDATE dbo.positioned_target SET value=19 WHERE CURRENT OF @reference;
+- sql: CREATE PROCEDURE positioned_delete AS DELETE FROM dbo.positioned_target WHERE CURRENT OF row_cursor;
+test_cases:
+- name: Restart preserves the exact positioned target assignment and cursor reference
+  scm: |
+    (begin
+      (define declaration (car (showprocedures "memcp-tests" "positioned_store" nil)))
+      (and (equal? (declaration "source") "UPDATE dbo.positioned_target SET value=@value WHERE CURRENT OF row_cursor;")
+        (equal? (car (car (declaration "parameters"))) "value")))
+  expect: {result: true}
+- name: Global cursor selection remains part of the stored mutation source
+  scm: |
+    (equal? ((car (showprocedures "memcp-tests" "positioned_global" nil)) "source")
+      "UPDATE dbo.positioned_target SET value=@value WHERE CURRENT OF GLOBAL row_cursor;")
+  expect: {result: true}
+- name: Cursor variable selection remains lexical declaration syntax
+  scm: |
+    (equal? ((car (showprocedures "memcp-tests" "positioned_variable" nil)) "source")
+      "DECLARE @reference CURSOR; UPDATE dbo.positioned_target SET value=19 WHERE CURRENT OF @reference;")
+  expect: {result: true}
+- name: Delete uses the same positioned selector declaration owner
+  scm: |
+    (equal? ((car (showprocedures "memcp-tests" "positioned_delete" nil)) "source")
+      "DELETE FROM dbo.positioned_target WHERE CURRENT OF row_cursor;")
+  expect: {result: true}
+- name: Compound assignments and comments retain the ordinary update grammar
+  setup:
+  - sql: CREATE PROCEDURE positioned_compound AS UPDATE positioned_target SET value+=7 WHERE CURRENT /* selector */ OF GLOBAL [row_cursor];
+  scm: |
+    (equal? ((car (showprocedures "memcp-tests" "positioned_compound" nil)) "source")
+      "UPDATE positioned_target SET value+=7 WHERE CURRENT /* selector */ OF GLOBAL [row_cursor];")
+  expect: {result: true}
+  cleanup:
+  - sql: DROP PROCEDURE positioned_compound
+- name: A missing cursor reference is invalid declaration syntax
+  sql: CREATE PROCEDURE positioned_missing AS UPDATE positioned_target SET value=1 WHERE CURRENT OF;
+  expect: {error: true}
+- name: GLOBAL cannot qualify a cursor variable
+  sql: CREATE PROCEDURE positioned_invalid_global AS UPDATE positioned_target SET value=1 WHERE CURRENT OF GLOBAL @reference;
+  expect: {error: true}
+- name: Invalid positioned declarations never publish modules
+  scm: |
+    (and (empty_list? (showprocedures "memcp-tests" "positioned_missing" nil))
+      (empty_list? (showprocedures "memcp-tests" "positioned_invalid_global" nil)))
+  expect: {result: true}
+- name: Missing current cursor ownership prevents evaluation of SET operands
+  scm: |
+    (begin
+      (define session (newsession)) (session "username" "root") (session "schema" "memcp-tests")
+      (define callbacks (newsession)) (callbacks "rows" 0) (callbacks "fields" 0)
+      (define rejected (try (lambda () (begin
+        (tsql_execute_request "memcp-tests"
+          "UPDATE positioned_target SET value=(SELECT 1/0) WHERE CURRENT OF row_cursor" session nil 0
+          (lambda (_row) (callbacks "rows" (+ (callbacks "rows") 1)))
+          (lambda args (callbacks "fields" (+ (callbacks "fields") 1)))) false))
+        (lambda (cause) (strlike (string cause) "%cursor%"))))
+      (and rejected (equal? (callbacks "rows") 0) (equal? (callbacks "fields") 0)))
+  expect: {result: true}
+- name: A mutation without an open current cursor delivers no rows fields or update effects
+  scm: |
+    (begin
+      (define session (newsession)) (session "username" "root") (session "schema" "memcp-tests")
+      (define callbacks (newsession)) (callbacks "rows" 0) (callbacks "fields" 0)
+      (define rejected (try (lambda () (begin
+        (tsql_execute_request "memcp-tests" "EXEC positioned_store @value=42" session nil 0
+          (lambda (_row) (callbacks "rows" (+ (callbacks "rows") 1)))
+          (lambda args (callbacks "fields" (+ (callbacks "fields") 1)))) false))
+        (lambda (cause) (strlike (string cause) "%cursor%"))))
+      (and rejected (equal? (callbacks "rows") 0) (equal? (callbacks "fields") 0)))
+  expect: {result: true}
+- name: Refused positioned mutations leave duplicate NULL rows untouched
+  sql: SELECT id,value FROM positioned_target ORDER BY id
+  expect: {rows: 3,data: [{id: 1,value: null},{id: 2,value: null},{id: 3,value: 9}]}
+- name: Searched UPDATE still mutates its actual qualifying row
+  sql: UPDATE positioned_target SET value=11 WHERE id=3; SELECT id,value FROM positioned_target WHERE id=3;
+  expect: {rows: 1,data: [{id: 3,value: 11}]}
+- name: UPDATE without a WHERE selector retains its ordinary all-row semantics
+  setup:
+  - sql: CREATE TABLE positioned_search_control(id INT PRIMARY KEY,value INT)
+  - sql: INSERT INTO positioned_search_control VALUES(1,3),(2,7)
+  sql: UPDATE positioned_search_control SET value+=1; SELECT id,value FROM positioned_search_control ORDER BY id;
+  expect: {rows: 2,data: [{id: 1,value: 4},{id: 2,value: 8}]}
+  cleanup:
+  - sql: DROP TABLE positioned_search_control
+- name: Searched DELETE keeps ordinary predicate semantics
+  setup:
+  - sql: CREATE TABLE positioned_delete_control(id INT PRIMARY KEY)
+  - sql: INSERT INTO positioned_delete_control VALUES(1),(2)
+  sql: DELETE FROM positioned_delete_control WHERE id=2; SELECT id FROM positioned_delete_control;
+  expect: {rows: 1,data: [{id: 1}]}
+  cleanup:
+  - sql: DROP TABLE positioned_delete_control
+- name: Positioned UPDATE addresses one current row despite duplicate NULL projections
+  noncritical: true
+  sql: |
+    DECLARE @value INT;
+    DECLARE positioned_update_probe CURSOR LOCAL FOR SELECT value FROM positioned_target ORDER BY id;
+    OPEN positioned_update_probe;
+    FETCH NEXT FROM positioned_update_probe INTO @value;
+    UPDATE positioned_target SET value=42 WHERE CURRENT OF positioned_update_probe;
+    CLOSE positioned_update_probe; DEALLOCATE positioned_update_probe;
+    SELECT id,value FROM positioned_target ORDER BY id;
+  expect: {rows: 3,data: [{id: 1,value: 42},{id: 2,value: null},{id: 3,value: 11}]}
+- name: Positioned DELETE addresses the second current row despite duplicate NULL projections
+  noncritical: true
+  setup:
+  - sql: CREATE TABLE positioned_delete_probe(id INT PRIMARY KEY,value INT)
+  - sql: INSERT INTO positioned_delete_probe VALUES(1,NULL),(2,NULL),(3,9)
+  sql: |
+    DECLARE @value INT;
+    DECLARE positioned_delete_cursor CURSOR LOCAL FOR SELECT value FROM positioned_delete_probe ORDER BY id;
+    OPEN positioned_delete_cursor;
+    FETCH NEXT FROM positioned_delete_cursor INTO @value;
+    FETCH NEXT FROM positioned_delete_cursor INTO @value;
+    DELETE FROM positioned_delete_probe WHERE CURRENT OF positioned_delete_cursor;
+    CLOSE positioned_delete_cursor; DEALLOCATE positioned_delete_cursor;
+    SELECT id,value FROM positioned_delete_probe ORDER BY id;
+  expect: {rows: 2,data: [{id: 1,value: null},{id: 3,value: 9}]}
+  cleanup:
+  - sql: DROP TABLE positioned_delete_probe
+cleanup:
+- sql: DROP PROCEDURE positioned_store
+- sql: DROP PROCEDURE positioned_global
+- sql: DROP PROCEDURE positioned_variable
+- sql: DROP PROCEDURE positioned_delete
+- sql: DROP TABLE positioned_target

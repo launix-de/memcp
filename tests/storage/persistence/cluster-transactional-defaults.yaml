@@ -1,0 +1,102 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: Native default declarations retain private ownership and values across delegated row scans
+  syntax: tsql
+  cluster:
+    fixture: shared_analytics
+    rows_per_shard: 5000
+    shards: 64
+    columns: 8
+    nodes: 4
+    gomaxprocs: 2
+cleanup:
+- sql: DROP TABLE IF EXISTS cluster_default_install
+- sql: DROP TABLE IF EXISTS cluster_default_aborted
+- sql: DROP TABLE IF EXISTS cluster_context_default
+test_cases:
+- name: A private default is read through its native transaction on remote workers
+  scm: |
+    (begin
+      (define s (newsession)) (s "username" "root") (tx_begin s)
+      (define tx (s "__memcp_tx"))
+      (define result (try (lambda () (begin
+        (createtable "{database}" "cluster_default_install"
+          (list (list "column" "value" "INT" '() '())) '("engine" "safe") false tx)
+        (define target (table "{database}" false "cluster_default_install" false tx))
+        (altercolumn target "value" "add_default" '(7 "" "DF_cluster_value") tx)
+        (define amended (scan nil (table "{database}" false "big_items" false nil) '() '()
+          '("id") (lambda (id) (< id 1)) '("id")
+          (lambda (acc id) (begin
+            (altercolumn (table "{database}" false "cluster_default_install" false tx)
+              "value" "default_declaration" '(7 "" "DF_cluster_value") tx) (+ acc 1))) 0 +))
+        (if (equal? amended 1) true (error "remote default amendment was not executed"))
+        (define target (table "{database}" false "cluster_default_install" false tx))
+        (insert target '() (list '()) '() nil false nil tx)
+        (define total (scan nil (table "{database}" false "big_items" false nil) '() '()
+          '("id") (lambda (id) (< id 3)) '("id")
+          (lambda (acc id) (+ acc id (scan tx (table "{database}" false "cluster_default_install" false tx) '() '() '() (lambda () true)
+            '("value") (lambda (sum value) (+ sum value)) 0 +))) 0 +))
+        (tx_commit s) total))
+        (lambda (failure) (begin (tx_rollback s) (error failure))))) result)
+  expect: {result: 24,cluster: {min_remote_shards: 1}}
+- name: Committed defaults remain ordinary typed join input on remote workers
+  sql: SELECT b.id,d.value FROM big_items AS b CROSS JOIN cluster_default_install AS d WHERE b.id<3 ORDER BY b.id
+  expect: {rows: 3,data: [{id: 0,value: 7},{id: 1,value: 7},{id: 2,value: 7}],cluster: {min_remote_shards: 1}}
+- name: The declaration label remains with the published native column
+  scm: (equal? ((show (table "{database}" false "cluster_default_install" false nil) "column" "value" false) "DefaultName") "DF_cluster_value")
+  expect: {result: true}
+- name: An anonymous outer scan cannot commit a captured private catalog transaction
+  scm: |
+    (begin
+      (define s (newsession)) (s "username" "root") (tx_begin s)
+      (define tx (s "__memcp_tx"))
+      (define result (try (lambda () (begin
+        (createtable "{database}" "cluster_default_aborted"
+          (list (list "column" "value" "INT" '() '("default" 11))) '("engine" "safe") false tx)
+        (define failed (try (lambda () (scan nil (table "{database}" false "big_items" false nil) '() '()
+          '("id") (lambda (id) (< id 1)) '("id")
+          (lambda (acc id) (error "captured transaction callback probe: "
+            ((show (table "{database}" false "cluster_default_aborted" false tx) "column" "value" false) "Default"))) 0 +))
+          (lambda (failure) (strlike (concat failure) "%captured transaction callback probe%"))))
+        (define value (scan nil (table "{database}" false "big_items" false nil) '() '()
+          '("id") (lambda (id) (< id 1)) '("id")
+          (lambda (acc id) (+ acc ((show (table "{database}" false "cluster_default_aborted" false tx)
+            "column" "value" false) "Default"))) 0 +))
+        (define private (and failed (equal? value 11)
+          (nil? (table "{database}" false "cluster_default_aborted" false nil))
+          (not (nil? (table "{database}" false "cluster_default_aborted" false tx)))))
+        (tx_rollback s)
+        (and private (nil? (table "{database}" false "cluster_default_aborted" false nil)))))
+        (lambda (failure) (begin (tx_rollback s) (error failure))))) result)
+  expect: {result: true,cluster: {min_remote_shards: 1}}
+- name: Deferred SQL defaults bind caller metadata before delegated INSERT SELECT rows
+  scm: |
+    (begin
+      (define s (newsession)) (s "username" "root") (s "schema" "{database}")
+      (s "__tsql_client_hostname" "origin-client")
+      (tx_begin s) (define tx (s "__memcp_tx"))
+      (define result (try (lambda () (begin
+        (define run (lambda (text) (tsql_execute_statement tx "{database}" text s
+          (lambda (row) true) (lambda fields true))))
+        (run "CREATE TABLE cluster_context_default(id INT, actor NVARCHAR(128))")
+        (run "ALTER TABLE cluster_context_default ADD CONSTRAINT DF_cluster_actor DEFAULT (HOST_NAME()+N'#'+USER_NAME()) FOR actor")
+        (define checked (scan nil (table "{database}" false "big_items" false nil) '() '()
+          '("id") (lambda (id) (< id 1)) '("id")
+          (lambda (acc id) (begin
+            (define column (show (table "{database}" false "cluster_context_default" false tx) "column" "actor" false))
+            (if (and (column "DefaultDeferred") (equal? (column "DefaultName") "DF_cluster_actor"))
+              (+ acc 1) (error "remote private deferred declaration changed")))) 0 +))
+        (if (equal? checked 1) true (error "remote declaration proof did not execute"))
+        (run "INSERT cluster_context_default(id) SELECT id FROM big_items WHERE id<3")
+        (tx_commit s) true))
+        (lambda (failure) (begin (tx_rollback s) (error failure))))) result)
+  expect: {result: true,cluster: {min_remote_shards: 1}}
+- name: Remote consumers receive materialized caller defaults rather than their own connection context
+  sql: |
+    SELECT b.id,d.actor FROM big_items b JOIN cluster_context_default d ON d.id=b.id
+    WHERE b.id<3 ORDER BY b.id
+  expect:
+    rows: 3
+    data: [{id: 0,actor: 'origin-client#dbo'},{id: 1,actor: 'origin-client#dbo'},{id: 2,actor: 'origin-client#dbo'}]
+    cluster: {min_remote_shards: 1}

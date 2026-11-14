@@ -38,7 +38,10 @@ test_cases:
   - name: "Create range scan table"
     sql: "CREATE TABLE rs_data (id INT PRIMARY KEY, val INT, category VARCHAR(20), price DOUBLE)"
     expect:
-      rows: 0
+      affected_rows: 0
+      rows: 1
+      data: [{affected_rows: 0}]
+      result_contains: '"affected_rows"'
 
   - name: "Insert 200 rows for range scans"
     scm: |
@@ -48,14 +51,14 @@ test_cases:
             (* i 3)
             (nth '("alpha" "beta" "gamma" "delta") (- i (* 4 (floor (/ i 4)))))
             (+ 1.0 (* i 0.5))))))
-        (insert (table "memcp-tests" false "rs_data" false) '("id" "val" "category" "price") rows)
+        (insert (table "memcp-tests" false "rs_data" false nil) '("id" "val" "category" "price") rows)
         200)
 
   - name: "Unrebuilt column statistics remain explicitly unknown"
     scm: |
       (begin
-        (define idcol (car (get_schema "memcp-tests" "rs_data")))
-        (define categorycol (nth (get_schema "memcp-tests" "rs_data") 2))
+        (define idcol (car (get_schema "memcp-tests" "rs_data" nil)))
+        (define categorycol (nth (get_schema "memcp-tests" "rs_data" nil) 2))
         (and
           (equal? (idcol "StatisticsKnown") false)
           (equal? (idcol "StatisticsConfidence") 0)
@@ -125,7 +128,7 @@ test_cases:
     setup:
       - sql: "CREATE TABLE null_point_index (id INT PRIMARY KEY, nullable_key INT) ENGINE=memory"
       - scm: |
-          (insert (table "memcp-tests" false "null_point_index" false) '("id" "nullable_key")
+          (insert (table "memcp-tests" false "null_point_index" false nil) '("id" "nullable_key")
             (map (produceN 200) (lambda (i)
               (list i (if (equal? i 137) nil i)))))
     sql: "SELECT COUNT(*) AS cnt FROM null_point_index"
@@ -455,17 +458,26 @@ test_cases:
   - name: "Create selective join tables"
     sql: "CREATE TABLE perf_dim (cat_id INT PRIMARY KEY, label VARCHAR(20))"
     expect:
-      rows: 0
+      affected_rows: 0
+      rows: 1
+      data: [{affected_rows: 0}]
+      result_contains: '"affected_rows"'
 
   - name: "Create fact table for reorder"
     sql: "CREATE TABLE perf_main (id INT PRIMARY KEY, category INT, payload VARCHAR(20))"
     expect:
-      rows: 0
+      affected_rows: 0
+      rows: 1
+      data: [{affected_rows: 0}]
+      result_contains: '"affected_rows"'
 
   - name: "Create disconnected tiny table for reorder"
     sql: "CREATE TABLE perf_tiny (id INT PRIMARY KEY, flag INT)"
     expect:
-      rows: 0
+      affected_rows: 0
+      rows: 1
+      data: [{affected_rows: 0}]
+      result_contains: '"affected_rows"'
 
   - name: "Insert selective join dimension rows"
     sql: "INSERT INTO perf_dim VALUES (1, 'one'), (2, 'two')"
@@ -488,10 +500,10 @@ test_cases:
       - sql: "CREATE TABLE ordered_join_fact (id INT PRIMARY KEY, dim_id INT)"
     scm: |
       (begin
-        (insert (table "memcp-tests" false "ordered_join_dim" false) '("id" "filter_id")
+        (insert (table "memcp-tests" false "ordered_join_dim" false nil) '("id" "filter_id")
           (map (produceN 8192) (lambda (i)
             (list (+ i 1) (if (< i 16) 13266 (+ i 20000))))))
-        (insert (table "memcp-tests" false "ordered_join_fact" false) '("id" "dim_id")
+        (insert (table "memcp-tests" false "ordered_join_fact" false nil) '("id" "dim_id")
           (map (produceN 20000) (lambda (i)
             (list (+ i 1) (if (< i 160) (+ 1 (floor (/ i 10))) 17)))))
         (rebuild)
@@ -555,29 +567,38 @@ test_cases:
   - name: "Create selective text RecSet driver"
     sql: "CREATE TABLE selective_text_driver (id INT PRIMARY KEY, dim_id INT, search VARCHAR(40))"
     expect:
-      rows: 0
+      affected_rows: 0
+      rows: 1
+      data: [{affected_rows: 0}]
+      result_contains: '"affected_rows"'
 
   - name: "Create selective text RecSet dimension"
     sql: "CREATE TABLE selective_text_dim (id INT PRIMARY KEY, label VARCHAR(20))"
     expect:
-      rows: 0
+      affected_rows: 0
+      rows: 1
+      data: [{affected_rows: 0}]
+      result_contains: '"affected_rows"'
 
   - name: "Create text reorder peer"
     sql: "CREATE TABLE selective_text_peer (id INT PRIMARY KEY)"
     expect:
-      rows: 0
+      affected_rows: 0
+      rows: 1
+      data: [{affected_rows: 0}]
+      result_contains: '"affected_rows"'
 
   - name: "Insert selective text RecSet fixture"
     scm: |
       (begin
-        (insert (table "memcp-tests" false "selective_text_dim" false) '("id" "label")
+        (insert (table "memcp-tests" false "selective_text_dim" false nil) '("id" "label")
           (map (produceN 4) (lambda (i)
             (list i (nth '("zero" "one" "two" "three") i)))))
-        (insert (table "memcp-tests" false "selective_text_driver" false) '("id" "dim_id" "search")
+        (insert (table "memcp-tests" false "selective_text_driver" false nil) '("id" "dim_id" "search")
           (map (produceN 2048) (lambda (i)
             (list i (mod i 4)
               (if (< i 8) (concat "asset-needle-" i) (concat "asset-other-" i))))))
-        (insert (table "memcp-tests" false "selective_text_peer" false) '("id")
+        (insert (table "memcp-tests" false "selective_text_peer" false nil) '("id")
           (map (produceN 100) (lambda (i) (list i))))
         (rebuild)
         2048)
@@ -705,11 +726,11 @@ test_cases:
         (define resultrow (lambda (_row) nil))
         (define selective_query "SELECT f.id, d.label FROM selective_text_driver f LEFT JOIN selective_text_dim d ON d.id = f.dim_id WHERE f.search LIKE '%needle%' ORDER BY f.id LIMIT 4")
         (define broad_query "SELECT f.id, d.label FROM selective_text_driver f LEFT JOIN selective_text_dim d ON d.id = f.dim_id WHERE f.search LIKE '%asset%' ORDER BY f.id LIMIT 4")
-        (define first_formula (cached_parse cache (list parse_sql) "memcp-tests" selective_query nil "root" sess true))
+        (define first_formula (cached_parse cache "sql" (list parse_sql) "memcp-tests" selective_query nil "root" sess true nil))
         (sql_execute_formula sess nil first_formula resultrow (lambda (_fields) nil))
         (define entry (car (cache (car (cache)))))
         (define variants_after_first (count (entry "variants")))
-        (define second_formula (cached_parse cache (list parse_sql) "memcp-tests" broad_query nil "root" sess true))
+        (define second_formula (cached_parse cache "sql" (list parse_sql) "memcp-tests" broad_query nil "root" sess true nil))
         (sql_execute_formula sess nil second_formula resultrow (lambda (_fields) nil))
         (if (and (equal? variants_after_first 1) (equal? (count (entry "variants")) 2))
           "ok"
@@ -896,12 +917,18 @@ test_cases:
   - name: "Create physical pushdown tables"
     sql: "CREATE TABLE pushdown_main (id INT PRIMARY KEY, lookup_id INT, payload VARCHAR(20))"
     expect:
-      rows: 0
+      affected_rows: 0
+      rows: 1
+      data: [{affected_rows: 0}]
+      result_contains: '"affected_rows"'
 
   - name: "Create physical pushdown lookup"
     sql: "CREATE TABLE pushdown_lookup (id INT PRIMARY KEY, enabled BOOL, label VARCHAR(20))"
     expect:
-      rows: 0
+      affected_rows: 0
+      rows: 1
+      data: [{affected_rows: 0}]
+      result_contains: '"affected_rows"'
 
   - name: "Insert physical pushdown lookup"
     sql: |
@@ -916,7 +943,7 @@ test_cases:
   - name: "Insert physical pushdown driver rows"
     scm: |
       (insert
-        (table "memcp-tests" false "pushdown_main" false)
+        (table "memcp-tests" false "pushdown_main" false nil)
         '("id" "lookup_id" "payload")
         (map (produceN 10000) (lambda (i)
           (list (+ i 1) (+ 1 (- i (* 2 (floor (/ i 2))))) (concat "row-" i)))))
@@ -1003,11 +1030,11 @@ test_cases:
 
   - name: "Rebuild publishes confidence null fraction and min max"
     setup:
-      - scm: '(rebuild (table "memcp-tests" false "rs_data" false) true false)'
+      - scm: '(rebuild (table "memcp-tests" false "rs_data" false nil) true false)'
     scm: |
       (begin
-        (define idcol (car (get_schema "memcp-tests" "rs_data")))
-        (define categorycol (nth (get_schema "memcp-tests" "rs_data") 2))
+        (define idcol (car (get_schema "memcp-tests" "rs_data" nil)))
+        (define categorycol (nth (get_schema "memcp-tests" "rs_data" nil) 2))
         (and
           (idcol "StatisticsKnown")
           (equal? (idcol "StatisticsConfidence") 1)
@@ -1038,11 +1065,11 @@ test_cases:
 
   - name: "Planner statistics expose nullable distribution"
     setup:
-      - scm: '(rebuild (table "memcp-tests" false "stats_contract_parent" false) true false)'
-      - scm: '(rebuild (table "memcp-tests" false "stats_contract_child" false) true false)'
+      - scm: '(rebuild (table "memcp-tests" false "stats_contract_parent" false nil) true false)'
+      - scm: '(rebuild (table "memcp-tests" false "stats_contract_child" false nil) true false)'
     scm: |
       (begin
-        (define nullablecol (nth (get_schema "memcp-tests" "stats_contract_child") 3))
+        (define nullablecol (nth (get_schema "memcp-tests" "stats_contract_child" nil) 3))
         (and
           (nullablecol "StatisticsKnown")
           (> (nullablecol "NullFraction") 0.33)
@@ -1073,14 +1100,17 @@ test_cases:
   - name: "Create multi-column table"
     sql: "CREATE TABLE rs_multi (a INT, b INT, c INT, PRIMARY KEY(a, b))"
     expect:
-      rows: 0
+      affected_rows: 0
+      rows: 1
+      data: [{affected_rows: 0}]
+      result_contains: '"affected_rows"'
 
   - name: "Insert multi-column data"
     scm: |
       (begin
         (set rows (map (produceN 100) (lambda (i)
           (list (floor (/ i 10)) (- i (* 10 (floor (/ i 10)))) (* i i)))))
-        (insert (table "memcp-tests" false "rs_multi" false) '("a" "b" "c") rows)
+        (insert (table "memcp-tests" false "rs_multi" false nil) '("a" "b" "c") rows)
         100)
 
   - name: "Multi-col: range on first key"
@@ -1124,12 +1154,18 @@ test_cases:
   - name: "Create left table"
     sql: "CREATE TABLE rs_left (id INT, name VARCHAR(20))"
     expect:
-      rows: 0
+      affected_rows: 0
+      rows: 1
+      data: [{affected_rows: 0}]
+      result_contains: '"affected_rows"'
 
   - name: "Create right table (empty)"
     sql: "CREATE TABLE rs_right (id INT, ref_id INT, score INT)"
     expect:
-      rows: 0
+      affected_rows: 0
+      rows: 1
+      data: [{affected_rows: 0}]
+      result_contains: '"affected_rows"'
 
   - name: "Insert left data"
     sql: "INSERT INTO rs_left VALUES (1, 'Alice'), (2, 'Bob'), (3, 'Charlie')"

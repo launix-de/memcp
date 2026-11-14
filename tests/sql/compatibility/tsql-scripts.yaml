@@ -215,12 +215,10 @@ test_cases:
 - name: REST rejects a scalar IF value without a predicate contract
   sql: IF 1 SELECT 7 AS value
   expect: {error: true}
+# Historical case IDs remain stable; relational predicates now use the common planner.
 - name: REST rejects a relational scalar fallback in IF
-  sql: |
-    IF EXISTS(SELECT 1) SELECT 7 AS value
-  # Valid SQL implementation gap: check behavior, warn until implemented.
-  expect: {"rows": 1, "data": [{"value": 7}]}
-  noncritical: true
+  sql: IF EXISTS(SELECT 1) SELECT 7 AS value
+  expect: {rows: 1, data: [{value: 7}]}
 - name: REST source procedures bind named positional and default arguments
   sql: |
     CREATE PROCEDURE dbo.script_rest_proc @value INT, @amount INT=3 AS
@@ -506,10 +504,10 @@ test_cases:
               "SELECT @value+100 AS value" (list (list "value" (list "INT") nil false)) true)))
           _ true)
         (apply base args))))
-      (with_query_request base nil 0 "snapshot invocation" (lambda (statement)
+      (with_query_request base nil 0 "snapshot invocation" "acid" (lambda (statement)
         (tsql_invoke_procedure "memcp-tests" "script_snapshot_binding" (list (list "" "@argument"))
           statement caller (lambda (row) (results "first" (row "value"))) (lambda args true))))
-      (with_query_request base nil 0 "replacement invocation" (lambda (statement)
+      (with_query_request base nil 0 "replacement invocation" "acid" (lambda (statement)
         (tsql_invoke_procedure "memcp-tests" "script_snapshot_binding" (list (list "" "7"))
           statement base (lambda (row) (results "second" (row "value"))) (lambda args true))))
       (dropprocedure "memcp-tests" "script_snapshot_binding")
@@ -578,12 +576,10 @@ test_cases:
 - name: WHILE requires a Boolean expression contract
   sql: WHILE 0 BREAK
   expect: {error: true}
+# This formerly rejected shape now terminates through the ordinary loop path.
 - name: WHILE rejects relational scalar fallback
-  sql: |
-    WHILE EXISTS(SELECT 1) BREAK; SELECT 7 AS value
-  # Valid SQL implementation gap: check behavior, warn until implemented.
-  expect: {"rows": 1, "data": [{"value": 7}]}
-  noncritical: true
+  sql: WHILE EXISTS(SELECT 1) BREAK; SELECT 7 AS value
+  expect: {rows: 1, data: [{value: 7}]}
 - name: Loop writes use the same native explicit transaction
   setup:
   - sql: DROP TABLE IF EXISTS dbo.script_loop_rows
@@ -1169,7 +1165,6 @@ test_cases:
     rows: 1
     data:
     - value: 4
-  noncritical: true
 - name: RAISERROR supports width and zero padding in message substitutions
   sql: BEGIN TRY RAISERROR(N'%05d',16,1,3); END TRY BEGIN CATCH SELECT ERROR_MESSAGE() AS message; END CATCH
   expect:
@@ -2038,4 +2033,50 @@ test_cases:
     \   (equal? (session \"__tsql_datefirst\") 2)))"
   expect:
     result: true
+- name: Decorative block comment terminators preserve every odd and even star run
+  scm: |
+    (reduce (list "/**/" "/***/" "/****/" "/*****/" "/******/" "/*******/"
+      "/* alpha**/" "/* beta***/" "/* slash / star * slash / end****/")
+      (lambda (valid header) (begin
+        (define text (concat header "\nSELECT 7\n"))
+        (and valid (expression_equal? (tsql_script_batches (concat text "GO\n"))
+          (list (list "text" text "repeat" 1)))))) true)
+  expect: {result: true}
+- name: Adjacent decorative headers remain complete lexical comment tokens
+  scm: |
+    (begin
+      (define headers (list "/****** first******/" "/*** second***/" "/**** third****/"
+        "/** fourth**/" "/***** fifth*****/"))
+      (define prefix (apply concat headers))
+      (and (expression_equal? (map (tsql_script_tokens prefix) cadr) headers)
+        (expression_equal? (tsql_script_batches (concat prefix "\nSELECT 8\nGO\n"))
+          (list (list "text" (concat prefix "\nSELECT 8\n") "repeat" 1)))))
+  expect: {result: true}
+- name: Nested decorative comments keep separator text and punctuation inside their token
+  scm: |
+    (begin
+      (define header "/****** outer\n/* inner**/\nGO\n/* next***/\nouter******/")
+      (and (expression_equal? (tsql_script_tokens header) (list (list "comment" header)))
+        (expression_equal? (tsql_script_batches (concat header "\nSELECT 9\nGO\n"))
+          (list (list "text" (concat header "\nSELECT 9\n") "repeat" 1)))))
+  expect: {result: true}
+- name: A nested comment cannot borrow the outer decorative terminator
+  scm: (tsql_script_batches "/****** outer /* still nested******/\nSELECT 9\nGO\n")
+  expect: {error: true}
+- name: A decorative unterminated comment remains a syntax error
+  scm: (tsql_script_batches "/****** missing close******\nSELECT 9\nGO\n")
+  expect: {error: true}
+- name: A procedure with adjacent decorative headers executes its real body
+  setup:
+  - sql: DROP PROCEDURE IF EXISTS dbo.script_comment_proc
+  - sql: |
+      /****** declaration******/ /** second**/ /**** third****/
+      CREATE PROCEDURE dbo.script_comment_proc @value INT AS
+      /* ordinary multiline
+         body header */
+      BEGIN SELECT @value+1 AS value END
+  sql: EXEC dbo.script_comment_proc 8
+  cleanup:
+  - sql: DROP PROCEDURE IF EXISTS dbo.script_comment_proc
+  expect: {rows: 1, data: [{value: 9}]}
 cleanup: []

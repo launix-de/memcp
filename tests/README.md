@@ -115,9 +115,71 @@ DDL remains visible without preventing the remaining specifications from running
 All suites remain enabled in CI and use exclusive scheduling. A suite with
 `metadata.requires_tds: true` starts the native listener at HTTP port + 2000.
 Its `tds` cases run `tools/tdsprobe` against that listener using a real client
-driver. Each probe keeps one connection for its statements, supports named
-parameters and prepared calls, and checks rows, values, column names and errors.
-Unsupported frontend features remain noncritical specifications.
+driver. Each probe keeps its default connection across statements; an optional
+statement `connection` label selects an independent connection. `reset: true`
+requests the driver's native session reset before SQL, and `close: true` without
+SQL closes that label's socket. Probes support named parameters and prepared
+calls, and check rows, values, column names and errors. `expect.messages` checks
+real TDS INFO tokens in order; `messages: []` asserts that none were received.
+Message assertions may specify number, state, severity, text, server, procedure
+and line independently. They remain active when an error is also expected, so
+completed rows and informational messages before a later failure are verified.
+`sql/compatibility/tsql-print-messages.yaml` covers PRINT, informational RAISERROR,
+multiple resultsets, transaction state and database ENVCHANGE on error. HTTP
+streams carry notices as comments rather than relational result rows.
+Unsupported frontend features retain explicit rejection tests; implemented
+regressions are critical.
+
+`sql/compatibility/tsql-server-properties.yaml` covers the isolated server-property
+profile: `Edition` identifies MemCP; `InstanceDefaultDataPath` and
+`InstanceDefaultLogPath` report the virtual Windows labels `C:\MemCP\Data\` and
+`C:\MemCP\Log\`. These labels never map to host files or disclose physical
+locations, even for administrators. Client-supplied filesystem operations remain
+unsupported and must not resolve these labels into host paths. Other
+properties use the documented bounded virtual server profile: the compatibility
+version matches the advertised TDS login version; host identity and unknown
+physical resources remain NULL. This profile does not promise support for
+unimplemented SQL features. Property expressions are resolved at execution time,
+and TDS declares SQL_VARIANT even for NULL results. Each property retains its
+declared intrinsic subtype, including NVARCHAR and INT.
+HTTP output unwraps that scalar at the result edge; explicit text casts are
+supported. General SQL_VARIANT column storage, implicit conversions, comparisons,
+and non-text subtype conversions are outside this property profile.
+
+
+`sql/compatibility/tsql-database-options.yaml` covers native database creation
+with virtual data/log file labels. Every label is validated before creation;
+SIZE remains a compatibility hint and does not reserve host disk space. The
+bounded option profile accepts RECOVERY SIMPLE, AUTO_CLOSE OFF and AUTO_SHRINK
+OFF. TRUSTWORTHY ON/OFF is persisted frontend catalog state only: no native
+permission, impersonation, registry, process or host operation consults it.
+Unsupported recovery and resource modes fail explicitly. Database DROP/recreation
+retires the previous frontend state.
+
+`sql/compatibility/tsql-row-guid-declarations.yaml` covers CREATE TABLE
+ROWGUIDCOL as immutable column declaration metadata, restricted to one direct
+UNIQUEIDENTIFIER column per table. It introduces no default, uniqueness or
+nullability constraint. Native `show` exposes generic scalar `Properties`; the
+T-SQL metadata wrapper derives `IsRowGuidCol`. Marked ALTER ADD, `$ROWGUID` and
+COLUMNPROPERTY remain explicitly unsupported pending atomic declaration or
+logical binding support. Permanent CREATE inside an explicit transaction is
+rejected natively until transactional catalog publication exists.
+
+`sql/compatibility/tsql-virtual-filesystem.yaml` covers the frontend-owned
+virtual filesystem interface. `xp_fileexist` and `SERVERPROPERTY` share the
+same logical roots (`C:\MemCP\Data\`, `C:\MemCP\Log\`) and ancestors.
+The interface performs no host file, network, shell or backend-directory I/O.
+Only declared virtual directories exist; no physical database files or free
+space are fabricated. Unknown virtual entries report absent. Windows case and
+separators normalize consistently; UNC/device paths, unsupported drives,
+drive-relative paths, escaping traversal, alternate streams, control bytes,
+wildcards and ambiguous/reserved Windows names are rejected. URL escapes are
+not decoded. SQL administrator privileges never authorize host filesystem
+access. `xp_fileexist` supports the ordinary three INT result columns, typed
+input variables and an optional declared OUTPUT variable for file existence.
+Directory listing, free-space reporting, file writes/deletion, executable
+loading and shell execution remain unsupported rather than reporting success.
+
 
 Place a regression at the layer that owns its root cause, not at the layer
 where an application happened to expose it. Use `integration/query-shapes`
@@ -148,6 +210,20 @@ Run it with:
 ```sh
 python3 tools/replication_cluster_stress.py --cluster-operators-only
 ```
+
+CI partitions the complete discovered suites across two jobs; each job runs
+both normal and race-instrumented servers with the original standalone oracle,
+fixture and distributed-execution assertions. The required aggregate check
+passes only when both jobs succeed. Local `--cluster-suites` still runs every
+suite; reproduce one CI partition with:
+
+```sh
+python3 tools/replication_cluster_stress.py --cluster-suites --suite-shard-index 0 --suite-shard-count 2
+```
+
+The artifact manifest records the complete discovered suite list, selected
+suite paths and zero-based partition index/count. Empty or invalid partitions
+fail before starting processes.
 
 Each cluster query must increase the coordinator's remote-execution counter;
 correct local results alone do not pass. Reports retain the SQL, EXPLAIN, oracle
@@ -194,15 +270,59 @@ Requested fields in `expect.data` must actually exist in each result object.
 An explicit SQL NULL is represented by a present field with a null value;
 `{}` does not satisfy an expectation for `{"value": null}`.
 
-The existing `affected_rows` path remains unchanged for compatibility with the
-current SQL endpoints. It compares a supplied completion count, but an absent
-count is not yet rejected. Therefore an `affected_rows` expectation alone does
-not prove the result of a command returning an empty response. Keep state and
-schema readback assertions; do not describe these legacy checks as complete
-completion-protocol coverage. Strict completion validation and its additional
-runner contracts must land together with the corresponding frontend/API output
-contract. This limitation does not justify inventing a count, replaying a write,
-or demoting a SQL specification.
+`expect.affected_rows` validates one numeric HTTP completion object. The
+legacy empty-body exception applies only to an expected zero completion; it is
+not evidence of successful schema installation. Keep schema and data readback
+assertions alongside the completion check.
+
+Ordinary MySQL CREATE/DROP TABLE and CREATE/DROP TRIGGER report zero affected
+rows, including successful schema changes. Both REST and the MySQL wire execute
+the same dialect-owned completion formula. Native Scheme DDL boolean results
+remain separate from this SQL protocol contract. See the official
+[MySQL ROW_COUNT documentation](https://dev.mysql.com/doc/refman/8.0/en/information-functions.html#function_row-count).
+CREATE TABLE AS and ALTER TABLE have separate row-count rules and are not
+covered by this ordinary declaration rule.
+
+MySQL probe statements can specify `expect.affected_rows`; the probe compares
+the driver's actual `RowsAffected()` result. It does not infer a count from an
+empty result set. PostgreSQL command tags and TDS count-validity flags have their
+own dialect contracts; this MySQL rule does not define their completion values.
+
+Ordinary PostgreSQL CREATE/DROP TABLE completes with `command_tag` metadata and
+no `affected_rows` field, including successful conditional reuse/removal. This
+preserves the distinction between an absent row count and a valid zero. See the
+[PostgreSQL libpq completion contract](https://www.postgresql.org/docs/current/libpq-exec.html#LIBPQ-PQCMDTUPLES)
+and [CommandComplete protocol](https://www.postgresql.org/docs/current/protocol-message-formats.html).
+The HTTP adapter renders that same frontend completion as an object such as
+`{"command_tag":"CREATE TABLE"}`. There is currently no native PostgreSQL wire
+server. PostgreSQL syntax tunneled through the existing MySQL connection is
+still MySQL transport: its required OK-packet count is mapped to zero only in
+that access adapter. It is not a PostgreSQL affected-row count. Numeric DML
+completions remain unchanged.
+
+T-SQL CREATE/DROP TABLE, CREATE/ALTER/DROP VIEW and source module declaration
+commands complete without an affected-row count. Their HTTP response omits
+`affected_rows`; the TDS completion clears `DONE_COUNT` and uses an unsigned
+zero placeholder. A genuine zero-row UPDATE/DELETE still has a present zero
+count. SET NOCOUNT additionally suppresses DML count publication, without
+changing the native write or its internal count. See Microsoft's
+[DONE validity flag](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-tds/3c06f110-98bd-4d5b-b836-b1ba66452cb7)
+and [ExecuteNonQuery contract](https://learn.microsoft.com/en-us/dotnet/api/system.data.sqlclient.sqlcommand.executenonquery).
+The client's -1 sentinel for missing counts is never placed in the unsigned
+TDS count field. Raw TDS probe packets can assert `done_count` (the final
+DONE_COUNT bit) and `done_rows` (its unsigned count slot) separately.
+The released go-mssqldb v0.12.3 driver's `ColumnTypePrecisionScale` returns
+unknown for DATETIME2, TIME and DATETIMEOFFSET. Temporal scale assertions
+therefore use raw `contains_hex` TYPEINFO fixtures, including the column name
+immediately after the type/scale bytes; ordinary client probes retain result
+names/types, nullability and values. Decimal/numeric `precision` and `scale`
+assertions remain strict and never infer missing metadata from expectations.
+
+This bounded declaration contract does not yet classify ALTER TABLE/INDEX or
+transaction-control completions, and does not implement the complete sequence
+of intermediate DONE/DONEINPROC/DONEPROC counts for mixed batches and stored
+procedure execution. Existing statement execution and result sets remain shared
+between HTTP and TDS; this is not a complete MSSQL completion implementation.
 
 ## Performance trade-offs between startup and repeated execution
 
@@ -564,6 +684,32 @@ cancels and joins outstanding delay timers. Existing application deadlines still
 apply under extremely slow profiles. Go timer granularity can exceed a requested
 sub-millisecond delay; diagnostics record actual wait, not the requested duration.
 
+The native `filesystem` backend accepts an optional administrator-configured
+`root` directory. Its default is the server's `-data` directory. Absolute roots
+select that explicit namespace; relative roots stay below `-data`. Each database
+still occupies its own validated name below the root. Configuration discovery,
+clone and DROP use that same namespace; database-directory symlinks and global
+settings collisions remain rejected. Unknown options, non-string/empty roots
+and escaping relative roots fail before a configuration is published.
+
+```sql
+CREATE DATABASE `memcp-tests` SET backend='filesystem', root='/srv/shared-data';
+```
+
+The equivalent backend JSON is `{"backend":"filesystem","root":"/srv/shared-data"}`.
+Relative roots reject symbolic links in every existing path component, including
+when later components do not exist. Absolute roots remain an explicit administrator
+choice of namespace.
+
+The filesystem-root YAML suite declares `filesystem_fixture: root_ancestors`
+with `isolated: true`. This bounded runner preset owns one temporary outside
+directory and fixed symlink/description names inside `MEMCP_TEST_DATA_DIR`;
+YAML cannot supply paths or shell commands. It refuses preexisting fixture names,
+retains the fixture through suite restarts and cleans up only its own artifacts.
+Cluster participants keep independent private `-data` directories and configure
+the same real filesystem root for their shared database; they do not use
+per-database symlinks or change the selected storage backend.
+
 `FakeRemote` is a filesystem-backed persistence backend using the ordinary
 backend declaration, independently of table ENGINE durability:
 
@@ -601,3 +747,70 @@ or change shard sizing. Larger shards amortize fixed per-job costs, while
 batching amortizes per-message costs; per-byte transfer/serialization costs do
 not disappear with larger shards. Later comparisons should keep fixture,
 shard count, concurrency and repetitions fixed and retain cold and warm phases.
+
+
+`sql/compatibility/tsql-virtual-commands.yaml` covers the restricted command
+adapter for legacy `xp_cmdshell` calls. It is not a process runner. Fully
+anchored, case-insensitive Scheme patterns recognize only `DIR <path>`,
+`COPY <source> <target>` and `DEL <path>` with bounded quoted or unquoted
+arguments. Expansion, chaining, redirection and control bytes are rejected.
+Each path goes through the shared virtual path parser. The dispatcher takes
+concrete engine operations as an explicit argument; no command registry or
+host fallback exists. Currently only DIR has an implementation and lists the
+actual declared virtual children with NVARCHAR output. It reports no disk
+capacity, volume identity, physical files or German free-byte summary. The
+compatibility call requires SQL administrative permission. COPY and DEL fail
+because no native snapshot/artifact capability is available; they do not
+create or remove files and never return hollow success. SQL BACKUP/RESTORE
+remain unsupported until a coherent native backup/clone contract is supplied.
+
+`storage/persistence/replicated-catalog-authority.yaml` runs the same assertions
+standalone and through the two-process replication regression harness. Its
+`replication_client: master|slave` hint selects the owning endpoint only in that
+harness; the ordinary runner executes every case against its single server.
+The harness uses its ordinary `replica_test` domain so frontend startup's
+`memcp-tests` planner fixtures never access a replica before its manager starts.
+SQL selects that domain through the runner's existing database argument; native
+SCM uses its existing `{database}` fixture placeholder. The ordinary runner uses
+`memcp-tests`. Query shapes and assertions remain identical.
+The harness additionally checks the persisted database incarnation and native
+catalog decision watermark after authenticated schema return and restart.
+
+### T-SQL unary plus vendor compatibility
+
+The neutral [SQL Server 2022 CU26 reference](https://dbfiddle.uk/DLSkEqAN)
+(version 16.0.4265.3 Express on Linux) preserves DATETIME, SMALLDATETIME,
+DATETIME2(6), NVARCHAR(8), and typed NULL operands under unary plus. The same
+reference creates and invokes a scalar function assigning `+DATEADD(...)` to a
+local DATETIME and returns the expected difference. This observed identity
+behavior is broader than the numeric-only argument description in the
+[Microsoft unary-plus reference](https://learn.microsoft.com/en-us/sql/t-sql/language-elements/unary-operators-positive).
+The frontend retains the operand formula, declared type/dimensions and collation;
+it does not coerce temporal values to numeric carriers or reinterpret text.
+Other nonnumeric families and unary minus are not established by this reference
+and are not expanded by this compatibility change.
+
+### Relational scalar source planning
+
+Read-only straight-line scalar modules with DECLARE, SET, SELECT assignments and
+RETURN use a separate frontend language whose native callable is a planning
+factory. An authorized immutable source/declaration snapshot expands to ordinary
+query blocks before shared binding and decorrelation. No SQL executes in a row
+callback and no request session or transaction is retained in the factory.
+
+The compiler exports one bounded parameter/local/context tuple per logical
+state, behind an ordinary global aggregate boundary. SELECT assignment projects
+one presence-and-values packet per actual input row and reduces whole packets
+with an unordered last-value aggregate; nil is the identity for empty partials.
+An empty stream retains the previous locals; a present packet containing NULL
+overwrites them. An actual TOP 1 retains its original window directly. A scalar
+aggregate such as COUNT(*) supplies a present row even on empty input. Native
+source scans, joins, own-transaction visibility and row limits stay in the
+shared planner, rather than a procedural per-row query executor.
+
+The initial invocation profile admits already compatible immutable column,
+parameter and literal arguments. Compound or volatile argument domains,
+unbounded ordered assignment, larger TOP windows, relational control flow and
+nested source-function calls need further logical operators/proofs; this does
+not claim their language syntax is invalid. The declared SQL signature remains
+unchanged and DATEFORMAT/LANGUAGE are explicit scalar callsite operands.

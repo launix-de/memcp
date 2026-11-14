@@ -21,7 +21,7 @@ setup:
   - sql: "DROP TABLE IF EXISTS cg_decl_contract"
   - sql: "CREATE TABLE cg_rows (id INT PRIMARY KEY, label TEXT)"
   - sql: "INSERT INTO cg_rows VALUES (1, 'needle-a'), (2, 'needle-b'), (3, 'other-a'), (4, 'other-b')"
-  - scm: "(rebuild (table \"memcp-tests\" false \"cg_rows\" false) true false)"
+  - scm: "(rebuild (table \"memcp-tests\" false \"cg_rows\" false nil) true false)"
 test_cases:
   - name: Literal IN arrays share one shape across lengths and whitespace
     scm: |-
@@ -93,8 +93,8 @@ test_cases:
           (lambda (fixture) (begin
             (define result (newsession)) (result "sum" 0)
             (sql_execute_formula sess nil
-              (cached_parse cache (list parse_sql) "memcp-tests"
-                (concat "SELECT id FROM cg_rows WHERE id IN (" (car fixture) ")") nil "root" sess true)
+              (cached_parse cache "sql" (list parse_sql) "memcp-tests"
+                (concat "SELECT id FROM cg_rows WHERE id IN (" (car fixture) ")") nil "root" sess true nil)
               (lambda (row) (result "sum" (+ (result "sum") (cadr row)))) (lambda (_fields) nil))
             (if (equal? (result "sum") (cadr fixture)) true (error (concat "stale array: " fixture))))))
         (if (equal? (count (cache)) 1) "ok" (error "IN lengths made distinct cache entries")))
@@ -109,8 +109,8 @@ test_cases:
         (map (list 1 4 2) (lambda (id) (begin
           (define result (newsession))
           (sql_execute_formula sess nil
-            (cached_parse cache (list parse_sql) "memcp-tests"
-              (concat "SELECT id FROM cg_rows WHERE id = " id) nil "root" sess true)
+            (cached_parse cache "sql" (list parse_sql) "memcp-tests"
+              (concat "SELECT id FROM cg_rows WHERE id = " id) nil "root" sess true nil)
             (lambda (row) (result "id" (cadr row))) (lambda (_fields) nil))
           (if (equal? (result "id") id) true (error "stale point binding")))))
         (if (equal? (count (cache)) 1) "ok" (error "point template was not reused")))
@@ -122,8 +122,8 @@ test_cases:
         (define cache (newcachemap))
         (define sess (newsession))
         (map (produceN 2) (lambda (_)
-          (cached_parse cache (list parse_sql) "memcp-tests"
-            "EXPLAIN COMPILE SELECT id FROM cg_rows WHERE id IN (1,2,3)" nil "root" sess true)))
+          (cached_parse cache "sql" (list parse_sql) "memcp-tests"
+            "EXPLAIN COMPILE SELECT id FROM cg_rows WHERE id IN (1,2,3)" nil "root" sess true nil)))
         (if (equal? (count (cache)) 0) "ok" (error "compile diagnostic entered query cache")))
     expect:
       data: ["ok"]
@@ -258,8 +258,8 @@ test_cases:
         (define cache (newcachemap)) (define sess (newsession))
         (map (list "1,2,3" "1,2,3,4" "2,3" "4") (lambda (rhs)
           (begin
-            (define formula (cached_parse cache (list parse_sql) "memcp-tests"
-              (concat "SELECT id FROM cg_rows WHERE id IN (" rhs ")") nil "root" sess true))
+            (define formula (cached_parse cache "sql" (list parse_sql) "memcp-tests"
+              (concat "SELECT id FROM cg_rows WHERE id IN (" rhs ")") nil "root" sess true nil))
             (sql_execute_formula sess nil formula (lambda (_row) nil) (lambda (_fields) nil)))))
         (define entry (car (cache (car (cache)))))
         (if (equal? (count (entry "variants")) 1) "ok"
@@ -274,8 +274,8 @@ test_cases:
         (define result (newsession)) (result "sum" 0)
         (map '("1,2" "3,4,4") (lambda (rhs)
           (sql_execute_formula sess nil
-            (cached_parse cache (list parse_psql) "memcp-tests"
-              (concat "SELECT id FROM cg_rows WHERE id IN (" rhs ")") nil "root" sess true)
+            (cached_parse cache "sql" (list parse_psql) "memcp-tests"
+              (concat "SELECT id FROM cg_rows WHERE id IN (" rhs ")") nil "root" sess true nil)
             (lambda (row) (result "sum" (+ (result "sum") (cadr row)))) (lambda (_fields) nil))))
         (if (and (equal? (result "sum") 10) (equal? (count (cache)) 1)) "ok"
           (error "PostgreSQL array binding mismatch")))
@@ -299,8 +299,8 @@ test_cases:
         (define result (newsession)) (result "sum" 0)
         (map '("1,2" "3,4" "2,4" "4,4,NULL" "1") (lambda (rhs)
           (sql_execute_formula sess nil
-            (cached_parse cache (list parse_sql) "memcp-tests"
-              (concat "SELECT id FROM cg_rows WHERE (id IN (" rhs "))+1 = 2") nil "root" sess true)
+            (cached_parse cache "sql" (list parse_sql) "memcp-tests"
+              (concat "SELECT id FROM cg_rows WHERE (id IN (" rhs "))+1 = 2") nil "root" sess true nil)
             (lambda (row) (result "sum" (+ (result "sum") (cadr row)))) (lambda (_fields) nil))))
         (if (and (equal? (result "sum") 21) (equal? (count (cache)) 1)) "ok"
           (error "computed IN formula retained an earlier array")))
@@ -323,18 +323,18 @@ test_cases:
           (results "count" (+ (results "count") 1))
           (results "sum" (+ (results "sum") (cadr row))))))
         (define query "SELECT id FROM cg_rows WHERE label LIKE '%needle%' ORDER BY id LIMIT 4")
-        (define first_formula (cached_parse cache (list parse_sql) "memcp-tests" query nil "root" sess true))
+        (define first_formula (cached_parse cache "sql" (list parse_sql) "memcp-tests" query nil "root" sess true nil))
         (sql_execute_formula sess nil first_formula resultrow (lambda (_fields) nil))
         (define entry (car (cache (car (cache)))))
         (define first_variants (count (entry "variants")))
-        (define first_guard (car (car (entry "variants"))))
-        (insert (table "memcp-tests" false "cg_rows" false) '("id" "label")
+        (define first_variant (car (entry "variants")))
+        (insert (table "memcp-tests" false "cg_rows" false nil) '("id" "label")
           (map (produceN 4096) (lambda (i) (list (+ i 10) (concat "other-" i)))))
-        (rebuild (table "memcp-tests" false "cg_rows" false) true false)
+        (rebuild (table "memcp-tests" false "cg_rows" false nil) true false)
         (define guard_after_growth
-          ((sql_queryplan_compile_formula nil first_guard)
-            sess nil (lambda (_row) nil) (lambda (_fields) nil)))
-        (define second_formula (cached_parse cache (list parse_sql) "memcp-tests" query nil "root" sess true))
+          (not (nil? (sql_queryplan_matching_variant (list first_variant)
+            sess nil (lambda (_row) nil) (lambda (_fields) nil)))))
+        (define second_formula (cached_parse cache "sql" (list parse_sql) "memcp-tests" query nil "root" sess true nil))
         (sql_execute_formula sess nil second_formula resultrow (lambda (_fields) nil))
         (if (and (equal? first_variants 1) (not guard_after_growth)
           (equal? (count (entry "variants")) 2)
@@ -359,18 +359,18 @@ test_cases:
           (results "count" (+ (results "count") 1))
           (results "sum" (+ (results "sum") (cadr row))))))
         (define query "SELECT id FROM cg_rows WHERE id IN (SELECT id FROM cg_rows WHERE label IN ('needle-a', 'needle-b')) ORDER BY id LIMIT 4")
-        (define first_formula (cached_parse cache (list parse_sql) "memcp-tests" query nil "root" sess true))
+        (define first_formula (cached_parse cache "sql" (list parse_sql) "memcp-tests" query nil "root" sess true nil))
         (sql_execute_formula sess nil first_formula resultrow (lambda (_fields) nil))
         (define entry (car (cache (car (cache)))))
         (define first_variants (count (entry "variants")))
-        (define first_guard (car (car (entry "variants"))))
-        (insert (table "memcp-tests" false "cg_rows" false) '("id" "label")
+        (define first_variant (car (entry "variants")))
+        (insert (table "memcp-tests" false "cg_rows" false nil) '("id" "label")
           (map (produceN 4096) (lambda (i) (list (+ i 10000) (concat "other-" i)))))
-        (rebuild (table "memcp-tests" false "cg_rows" false) true false)
+        (rebuild (table "memcp-tests" false "cg_rows" false nil) true false)
         (define guard_after_growth
-          ((sql_queryplan_compile_formula nil first_guard)
-            sess nil (lambda (_row) nil) (lambda (_fields) nil)))
-        (define second_formula (cached_parse cache (list parse_sql) "memcp-tests" query nil "root" sess true))
+          (not (nil? (sql_queryplan_matching_variant (list first_variant)
+            sess nil (lambda (_row) nil) (lambda (_fields) nil)))))
+        (define second_formula (cached_parse cache "sql" (list parse_sql) "memcp-tests" query nil "root" sess true nil))
         (sql_execute_formula sess nil second_formula resultrow (lambda (_fields) nil))
         (if (and (>= first_variants 1) (not guard_after_growth)
           (> (count (entry "variants")) first_variants)
@@ -392,8 +392,8 @@ test_cases:
         (counts "sum" 0)
         (map '(2 4 2 4) (lambda (minimum)
           (sql_execute_formula sess nil
-            (cached_parse cache (list parse_sql) "memcp-tests"
-              (concat "SELECT COUNT(*) AS n FROM cg_rows WHERE id < 10 AND id >= " minimum) nil "root" sess true)
+            (cached_parse cache "sql" (list parse_sql) "memcp-tests"
+              (concat "SELECT COUNT(*) AS n FROM cg_rows WHERE id < 10 AND id >= " minimum) nil "root" sess true nil)
             (lambda (row) (counts "sum" (+ (counts "sum") (cadr row))))
             (lambda (_fields) nil))))
         (if (and (equal? (counts "sum") 8) (equal? (count (cache)) 2))
@@ -531,9 +531,9 @@ test_cases:
         (results "value" "")
         (map (list "0x32" "0x33") (lambda (hex)
           (sql_execute_formula sess nil
-            (cached_parse cache (list parse_sql) "memcp-tests"
+            (cached_parse cache "sql" (list parse_sql) "memcp-tests"
               (concat "SELECT h.i FROM (SELECT " hex " AS i) h WHERE h.i = " hex)
-              nil "root" sess true)
+              nil "root" sess true nil)
             (lambda (row) (results "value" (concat (results "value") (cadr row))))
             (lambda (_fields) nil))))
         (if (and (equal? (count (cache)) 1) (equal? (results "value") "23"))
@@ -553,9 +553,9 @@ test_cases:
         (map (list "30" "31" "32" "33" "34" "35" "36" "37" "38" "39"
           "41" "42" "43" "44" "45" "46" "47" "48" "49" "4a")
           (lambda (hex)
-            (cached_parse cache (list parse_sql) "memcp-tests"
+            (cached_parse cache "sql" (list parse_sql) "memcp-tests"
               (concat "SELECT h.i FROM (SELECT 0x" hex " AS i, 1704067200 AS s UNION SELECT 0x30 AS i, 1672531200 AS s) h WHERE h.i = 0x" hex)
-              nil "root" sess true)))
+              nil "root" sess true nil)))
         "ok")
     expect:
       data: ["ok"]
@@ -578,7 +578,7 @@ test_cases:
     setup:
       - sql: "DROP TABLE IF EXISTS cg_dml_rows"
       - sql: "CREATE TABLE cg_dml_rows (id INT PRIMARY KEY, col INT) ENGINE=sloppy"
-      - scm: '(rebuild (table "memcp-tests" false "cg_dml_rows" false) true false)'
+      - scm: '(rebuild (table "memcp-tests" false "cg_dml_rows" false nil) true false)'
     scm: |
       (begin
         (define sess (newsession))
@@ -586,13 +586,13 @@ test_cases:
         (sess "schema" "memcp-tests")
         (define cache (newcachemap))
         (define exec (lambda (q) (sql_execute_formula sess nil
-          (cached_parse cache (list parse_sql) "memcp-tests" q nil "root" sess true)
+          (cached_parse cache "sql" (list parse_sql) "memcp-tests" q nil "root" sess true nil)
           (lambda (row) nil) (lambda (_fields) nil))))
         (map (produceN 500) (lambda (i)
           (exec (concat "INSERT INTO cg_dml_rows VALUES (" (string i) ", " (string (* i 2)) ")"))))
         (define acc (newsession)) (acc "n" 0)
         (sql_execute_formula sess nil
-          (cached_parse cache (list parse_sql) "memcp-tests" "SELECT COUNT(*) AS n FROM cg_dml_rows" nil "root" sess true)
+          (cached_parse cache "sql" (list parse_sql) "memcp-tests" "SELECT COUNT(*) AS n FROM cg_dml_rows" nil "root" sess true nil)
           (lambda (row) (acc "n" (get_assoc row "n"))) (lambda (_fields) nil))
         (if (and (<= (count (cache)) 2) (equal? (acc "n") 500))
           true
@@ -607,9 +607,9 @@ test_cases:
       - sql: "CREATE TABLE cg_dml_rows (id INT PRIMARY KEY, col INT) ENGINE=sloppy"
       - scm: |
           (begin
-            (insert (table "memcp-tests" false "cg_dml_rows" false) '("id" "col")
+            (insert (table "memcp-tests" false "cg_dml_rows" false nil) '("id" "col")
               (map (produceN 500) (lambda (i) (list i (* i 2)))))
-            (rebuild (table "memcp-tests" false "cg_dml_rows" false) true false)
+            (rebuild (table "memcp-tests" false "cg_dml_rows" false nil) true false)
             true)
     scm: |
       (begin
@@ -619,13 +619,13 @@ test_cases:
         (define cache (newcachemap))
         (map (produceN 500) (lambda (i)
           (sql_execute_formula sess nil
-            (cached_parse cache (list parse_sql) "memcp-tests"
+            (cached_parse cache "sql" (list parse_sql) "memcp-tests"
               (concat "UPDATE cg_dml_rows SET col = col + 1 WHERE id = " (string i))
-              nil "root" sess true)
+              nil "root" sess true nil)
             (lambda (row) nil) (lambda (_fields) nil))))
         (define acc (newsession)) (acc "s" 0)
         (sql_execute_formula sess nil
-          (cached_parse cache (list parse_sql) "memcp-tests" "SELECT SUM(col) AS s FROM cg_dml_rows" nil "root" sess true)
+          (cached_parse cache "sql" (list parse_sql) "memcp-tests" "SELECT SUM(col) AS s FROM cg_dml_rows" nil "root" sess true nil)
           (lambda (row) (acc "s" (get_assoc row "s"))) (lambda (_fields) nil))
         /* every row's col was 2*id, then incremented by exactly 1 once each:
         sum(2*id for id in [0,500)) + 500 = 2*124750 + 500 = 250000 */
@@ -646,9 +646,9 @@ test_cases:
       - sql: "CREATE TABLE cg_dml_rows (id INT PRIMARY KEY, col INT) ENGINE=sloppy"
       - scm: |
           (begin
-            (insert (table "memcp-tests" false "cg_dml_rows" false) '("id" "col")
+            (insert (table "memcp-tests" false "cg_dml_rows" false nil) '("id" "col")
               (map (produceN 250) (lambda (i) (list i i))))
-            (rebuild (table "memcp-tests" false "cg_dml_rows" false) true false)
+            (rebuild (table "memcp-tests" false "cg_dml_rows" false nil) true false)
             true)
     scm: |
       (begin
@@ -659,11 +659,11 @@ test_cases:
         (define q "DELETE FROM cg_dml_rows WHERE TRUE LIMIT 1")
         (map (produceN 250) (lambda (i)
           (sql_execute_formula sess nil
-            (cached_parse cache (list parse_sql) "memcp-tests" q nil "root" sess true)
+            (cached_parse cache "sql" (list parse_sql) "memcp-tests" q nil "root" sess true nil)
             (lambda (row) nil) (lambda (_fields) nil))))
         (define acc (newsession)) (acc "n" 0)
         (sql_execute_formula sess nil
-          (cached_parse cache (list parse_sql) "memcp-tests" "SELECT COUNT(*) AS n FROM cg_dml_rows" nil "root" sess true)
+          (cached_parse cache "sql" (list parse_sql) "memcp-tests" "SELECT COUNT(*) AS n FROM cg_dml_rows" nil "root" sess true nil)
           (lambda (row) (acc "n" (get_assoc row "n"))) (lambda (_fields) nil))
         (if (and (<= (count (cache)) 2) (equal? (acc "n") 0))
           true
@@ -686,7 +686,7 @@ test_cases:
             (list (quote expression_equal?) (list state "contract") value) planning)
           (list (quote quote) value))))
         (define execute (lambda () (sql_execute_formula sess nil
-          (cached_parse cache (list parser (list "exact_guards" true)) "memcp-tests"
+          (cached_parse cache "sql" (list parser (list "exact_guards" true)) "memcp-tests"
             "exact contract probe" nil "root" sess false nil)
           (lambda (_row) nil) (lambda (_fields) nil))))
         (define first (execute)) (define warm (execute))
@@ -704,9 +704,9 @@ test_cases:
         (state "compiles" 0)
         (define parser (lambda (_schema _sql _policy _planning _tx) (begin
           (state "compiles" (+ (state "compiles") 1)) (list (quote quote) 42))))
-        (define formula (cached_parse cache (list parser (list "exact_guards" true))
+        (define formula (cached_parse cache "sql" (list parser (list "exact_guards" true))
           "memcp-tests" "exact unguarded probe" nil "root" sess false nil))
-        (define warm (cached_parse cache (list parser (list "exact_guards" true))
+        (define warm (cached_parse cache "sql" (list parser (list "exact_guards" true))
           "memcp-tests" "exact unguarded probe" nil "root" sess false nil))
         (and (not (list? (cache (car (cache))))) (equal? (state "compiles") 1)
           (equal? (sql_execute_formula sess nil formula (lambda (_row) nil) (lambda (_fields) nil)) 42)
@@ -719,8 +719,8 @@ test_cases:
         (state "compiles" 0)
         (define parser (lambda (_schema _sql _policy _planning _tx) (begin
           (state "compiles" (+ (state "compiles") 1)) (list (quote quote) 23))))
-        (define formula (cached_parse cache (list parser) "memcp-tests" "existing exact probe" nil "root" sess false nil))
-        (define warm (cached_parse cache (list parser) "memcp-tests" "existing exact probe" nil "root" sess false nil))
+        (define formula (cached_parse cache "sql" (list parser) "memcp-tests" "existing exact probe" nil "root" sess false nil))
+        (define warm (cached_parse cache "sql" (list parser) "memcp-tests" "existing exact probe" nil "root" sess false nil))
         (and (not (list? (cache (car (cache))))) (equal? (state "compiles") 1)
           (equal? (sql_execute_formula sess nil formula (lambda (_row) nil) (lambda (_fields) nil)) 23)
           (equal? (sql_execute_formula sess nil warm (lambda (_row) nil) (lambda (_fields) nil)) 23)))
@@ -733,20 +733,20 @@ test_cases:
         (eval (parse_tsql "memcp-tests" "INSERT INTO cg_decl_contract VALUES (1,N'old')" nil (newsession) nil))
         (define cache (newcachemap)) (define sess (newsession))
         (define parser (lambda (schema text policy planning tx) (begin
-          (define dimensions ((nth (show (table schema false "cg_decl_contract" false)) 1) "Dimensions"))
+          (define dimensions ((nth (show (table schema false "cg_decl_contract" false tx)) 1) "Dimensions"))
           (planner_record_guard_condition
             (list (quote expression_equal?)
-              (list (quote get_assoc) (list (quote nth) (list (quote show) (list (quote table) schema false "cg_decl_contract" false)) 1) "Dimensions")
+              (list (quote get_assoc) (list (quote nth) (list (quote show) (list (quote table) schema false "cg_decl_contract" false nil)) 1) "Dimensions")
               (list (quote quote) dimensions)) planning)
           (parse_tsql schema text policy planning tx))))
         (define execute (lambda () (sql_execute_formula sess nil
-          (cached_parse cache (list parser (list "exact_guards" true)) "memcp-tests"
+          (cached_parse cache "sql" (list parser (list "exact_guards" true)) "memcp-tests"
             "UPDATE cg_decl_contract SET value=N'longer' WHERE id=1" nil "root" sess false nil)
           (lambda (_row) nil) (lambda (_fields) nil))))
         (execute)
-        (altercolumn (table "memcp-tests" false "cg_decl_contract" false) "value" "dimensions" '(8))
+        (altercolumn (table "memcp-tests" false "cg_decl_contract" false nil) "value" "dimensions" '(8))
         (execute)
-        (define value (scan_lookup nil (table "memcp-tests" false "cg_decl_contract" false)
+        (define value (scan_lookup nil (table "memcp-tests" false "cg_decl_contract" false nil)
           (list 372734710317056 (scan_boundary "equal" "id" 0 0 true true "" false) "value") '(1)))
         (droptable "memcp-tests" "cg_decl_contract" true)
         (equal? value "longer"))

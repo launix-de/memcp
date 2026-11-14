@@ -22,7 +22,1133 @@ metadata:
     storage_backend: FakeRemote
     storage_bandwidth_mbps: 1000
     storage_latency_ms: 5
+setup:
+- sql: DROP TABLE IF EXISTS operator_insert_counts
+- sql: CREATE TABLE operator_insert_counts(id INT PRIMARY KEY) ENGINE=memory
+- sql: CREATE TABLE operator_join_probe(id INT NOT NULL PRIMARY KEY,peer_id INT,label VARCHAR(12)) ENGINE=memory
+- sql: INSERT INTO operator_join_probe VALUES(245000,2,'entry'),(2,1,'grouped')
+- sql: CREATE TABLE operator_large_text(id INT NOT NULL PRIMARY KEY,payload TEXT) ENGINE=memory
+- sql: INSERT INTO operator_large_text VALUES(245000,'remote-text')
+- scm: "(begin\n (eval (parse_sql \"replica_test\" \"DROP USER IF EXISTS permission_remote_reader\" nil))\n (eval (parse_sql \"replica_test\" \"CREATE USER permission_remote_reader IDENTIFIED BY 'pw'\" nil))\n (define s (newsession)) (s \"username\" \"root\") (s \"schema\" \"replica_test\")\n (eval (parse_sql \"replica_test\" \"GRANT ALL ON `replica_test`.* TO permission_remote_reader\" nil))\n (tsql_execute_request \"replica_test\" \"CREATE TABLE IF NOT EXISTS permission_metadata_probe(id NVARCHAR(7))\" s nil 0\n  (lambda (_row) true) (lambda fields true))\n (tsql_temporary_close s))"
+- scm: |
+    (begin
+      (define s (newsession))
+      (s "username" "root")
+      (s "schema" "replica_test")
+      (tsql_execute_request "replica_test"
+        "CREATE FUNCTION dbo.remote_shift_marker(@value INT) RETURNS INT AS BEGIN
+          DECLARE @incremented INT=@value+3;
+          SET @value=@incremented+2;
+          RETURN @value;
+        END"
+        s nil 0 (lambda (_row) true) (lambda fields true))
+      (tsql_temporary_close s))
+- scm: |
+    (begin
+      (define s (newsession))
+      (s "username" "root")
+      (s "schema" "replica_test")
+      (define execute (lambda (text)
+        (tsql_execute_request "replica_test" text s nil 0
+          (lambda (_row) true) (lambda fields true))))
+      (execute "CREATE TABLE operator_temporal_values(id INT PRIMARY KEY,first_instant DATETIME,second_instant DATETIME)")
+      (execute "INSERT operator_temporal_values VALUES
+        (245000,CONVERT(DATETIME,N'20250101',112),CONVERT(DATETIME,N'20250102',112)),
+        (245001,CONVERT(DATETIME,N'20250103',112),CONVERT(DATETIME,N'20250102',112)),
+        (245002,CONVERT(DATETIME,N'20250101',112),NULL)")
+      (execute "CREATE FUNCTION dbo.remote_choose_branch(@first DATETIME,@second DATETIME) RETURNS DATETIME
+        AS BEGIN
+          DECLARE @chosen DATETIME;
+          IF @first>@second BEGIN SET @chosen=@second; END
+          ELSE BEGIN SET @chosen=@first; END
+          RETURN @chosen;
+        END")
+      (execute "SET QUOTED_IDENTIFIER OFF")
+      (execute "CREATE FUNCTION dbo.remote_branch_label(@value INT) RETURNS NVARCHAR(8)
+        AS BEGIN IF @value%2=0 RETURN \"even\"; RETURN \"odd\"; END")
+      (execute "SET QUOTED_IDENTIFIER ON")
+      (tsql_temporary_close s))
+- scm: |
+    (begin
+      (define s (newsession))
+      (s "username" "root")
+      (s "schema" "replica_test")
+      (tsql_execute_request "replica_test"
+        "CREATE FUNCTION dbo.remote_repeat_marker(@count INT) RETURNS VARCHAR(4)
+        AS BEGIN
+          DECLARE @value VARCHAR(4)='';
+          WHILE @count>0
+          BEGIN
+            SET @value=@value+'x';
+            SET @count=@count-1;
+          END
+          RETURN @value;
+        END"
+        s nil 0 (lambda (_row) true) (lambda fields true))
+      (tsql_temporary_close s))
+- scm: |
+    (begin
+      (define s (newsession))
+      (s "username" "root")
+      (s "schema" "replica_test")
+      (tsql_execute_request "replica_test"
+        "CREATE PROCEDURE dbo.remote_catalog_proc AS SELECT 1 AS value"
+        s nil 0 (lambda (_row) true) (lambda fields true))
+      (tsql_temporary_close s))
+- scm: |
+    (begin
+      (define s (newsession))
+      (s "username" "root")
+      (s "schema" "replica_test")
+      (tsql_execute_request "replica_test"
+        "CREATE FUNCTION dbo.remote_default_instant(@year SMALLINT,@month SMALLINT,@day SMALLINT=1) RETURNS DATETIME
+        AS BEGIN
+          DECLARE @text VARCHAR(10),@value DATETIME;
+          SET @text='1.'+LTRIM(@month)+'.'+LTRIM(@year);
+          SET @value=CONVERT(DATETIME,@text,104);
+          IF @day>1 SET @value=DATEADD(day,@day-1,@value);
+          RETURN @value;
+        END"
+        s nil 0 (lambda (_row) true) (lambda fields true))
+      (tsql_temporary_close s))
+- scm: |
+    (begin
+      (define s (newsession))
+      (s "username" "root")
+      (s "schema" "replica_test")
+      (define execute (lambda (text)
+        (tsql_execute_request "replica_test" text s nil 0
+          (lambda (_row) true) (lambda fields true))))
+      (execute "CREATE VIEW dbo.operator_subtraction_days AS
+        SELECT id,RIGHT(STR(id),2) AS day_text FROM big_items WHERE id>=245005 AND id<245008")
+      (execute "CREATE VIEW dbo.operator_subtraction_bounds AS
+        SELECT MIN(day_text-1) AS boundary FROM dbo.operator_subtraction_days")
+      (execute "CREATE VIEW dbo.operator_subtraction_formatted AS
+        SELECT LTRIM(STR(boundary)) AS boundary_text FROM dbo.operator_subtraction_bounds")
+      (tsql_temporary_close s))
+- scm: |
+    (begin
+      (define s (newsession))
+      (s "username" "root")
+      (s "schema" "replica_test")
+      (tsql_execute_request "replica_test"
+        "CREATE FUNCTION dbo.remote_positive_calendar(@shift INT,@target DATETIME) RETURNS INT AS
+        BEGIN
+          DECLARE @origin DATETIME;
+          SET @origin=+DATEADD(day,@shift,CONVERT(DATETIME,N'20000103',112));
+          RETURN DATEDIFF(day,@origin,@target);
+        END"
+        s nil 0 (lambda (_row) true) (lambda fields true))
+      (tsql_temporary_close s))
+- scm: |
+    (begin
+      (define s (newsession))
+      (s "username" "root")
+      (s "schema" "replica_test")
+      (tsql_execute_request "replica_test" "SET LANGUAGE Deutsch; SET DATEFORMAT dmy" s nil 0
+        (lambda (_row) true) (lambda fields true))
+      (tsql_execute_request "replica_test"
+        "CREATE FUNCTION dbo.remote_caller_calendar(@text VARCHAR(30)) RETURNS DATETIME AS
+        BEGIN
+          IF ISDATE(@text)=0 RETURN NULL;
+          RETURN @text;
+        END"
+        s nil 0 (lambda (_row) true) (lambda fields true))
+      (tsql_temporary_close s))
+- scm: |
+    (begin
+      (define s (newsession))
+      (s "username" "root")
+      (s "schema" "replica_test")
+      (tsql_execute_request "replica_test"
+        "CREATE FUNCTION dbo.remote_relational_label(@id INT) RETURNS VARCHAR(12) AS
+        BEGIN
+          DECLARE @label VARCHAR(12)='missing';
+          SELECT @label=label FROM operator_join_probe WHERE id=@id;
+          RETURN @label;
+        END"
+        s nil 0 (lambda (_row) true) (lambda fields true))
+      (tsql_temporary_close s))
+- scm: |
+    (begin
+      (define s (newsession)) (s "username" "root") (s "schema" "replica_test")
+      (tsql_execute_request "replica_test"
+        "CREATE FUNCTION dbo.remote_iteration_sum(@start INT) RETURNS INT AS BEGIN
+          DECLARE @current INT=@start;
+          DECLARE @value INT;
+          DECLARE @total INT=0;
+          DECLARE @ticks INT=0;
+          WHILE @ticks<2 BEGIN
+            SELECT TOP 1 @value=id FROM big_items WHERE id=@current;
+            SET @total=@total+ISNULL(@value,0);
+            SET @current=@current-1;
+            SET @ticks=@ticks+1;
+          END
+          RETURN @total;
+        END"
+        s nil 0 (lambda (_row) true) (lambda fields true))
+      (tsql_temporary_close s))
+- scm: |
+    (begin
+      (define s (newsession)) (s "username" "root") (s "schema" "replica_test")
+      (tsql_execute_request "replica_test"
+        "CREATE FUNCTION dbo.remote_local_sum(@value INT) RETURNS INT AS BEGIN
+          DECLARE @rows TABLE(amount INT NULL);
+          DECLARE @i INT=0;
+          DECLARE @result INT;
+          WHILE @i<2 BEGIN
+            IF @value IS NOT NULL BEGIN
+              INSERT INTO @rows(amount) SELECT @value;
+            END
+            SET @i=@i+1;
+          END
+          SELECT @result=SUM(amount) FROM @rows;
+          RETURN @result;
+        END"
+        s nil 0 (lambda (_row) true) (lambda fields true))
+      (tsql_temporary_close s))
+cleanup:
+- sql: DROP VIEW IF EXISTS operator_subtraction_formatted
+- sql: DROP VIEW IF EXISTS operator_subtraction_bounds
+- sql: DROP VIEW IF EXISTS operator_subtraction_days
+- sql: DROP TABLE IF EXISTS operator_insert_counts
+- sql: DROP TABLE IF EXISTS operator_join_probe
+- sql: DROP TABLE IF EXISTS operator_large_text
+- sql: DROP VIEW IF EXISTS operator_qualified_view
+- scm: (eval (parse_sql "replica_test" "DROP USER IF EXISTS permission_remote_reader" nil))
+- scm: (droptable "replica_test" "permission_metadata_probe" true)
+- scm: (dropprocedure "replica_test" "remote_shift_marker" true)
+- sql: DROP TABLE IF EXISTS operator_temporal_values
+- scm: (dropprocedure "replica_test" "remote_choose_branch" true)
+- scm: (dropprocedure "replica_test" "remote_branch_label" true)
+- scm: (dropprocedure "replica_test" "remote_repeat_marker" true)
+- scm: (dropprocedure "replica_test" "remote_catalog_proc" true)
+- scm: (dropprocedure "replica_test" "remote_default_instant" true)
 test_cases:
+- name: distributed-legacy-catalog-identity-join
+  syntax: tsql
+  sql: |
+    SELECT COUNT(*) AS n FROM dbo.big_items b
+    JOIN syscolumns c ON c.name=N'id'
+    JOIN sysobjects o ON o.id=c.id AND o.name=N'big_items'
+    WHERE OBJECTPROPERTY(o.id,N'IsUserTable')=1 AND b.id>=0
+  expect:
+    data: [{n: 320000}]
+- name: TSQL forward GOTO retains delegated relational control predicates
+  syntax: tsql
+  sql: |-
+    DECLARE @wanted INT=245000; GOTO selected_probe; SELECT * FROM unused_control_source; selected_probe: IF EXISTS(SELECT id FROM big_items WHERE id=@wanted) SELECT id FROM big_items WHERE id=@wanted ELSE SELECT 0 AS id
+  expect:
+    rows: 1
+    data: [{id: 245000}]
+    cluster: {min_remote_shards: 1}
+- name: TSQL backward GOTO binds invocation values into delegated leaves
+  syntax: tsql
+  sql: |-
+    DECLARE @wanted INT=0; repeat_probe: SET @wanted=@wanted+1; IF @wanted<2 GOTO repeat_probe; SELECT id FROM big_items WHERE id=@wanted
+  expect:
+    rows: 1
+    data: [{id: 2}]
+    cluster: {min_remote_shards: 1}
+- name: A stored view declares qualified references to its native producer
+  syntax: tsql
+  sql: CREATE VIEW dbo.operator_qualified_view AS SELECT dbo.big_items.id AS id FROM dbo.big_items WHERE dbo.big_items.id=245000
+- name: A restored qualified view uses the ordinary delegated native scan
+  syntax: tsql
+  sql: SELECT dbo.operator_qualified_view.id FROM dbo.operator_qualified_view
+  expect:
+    rows: 1
+    data: [{id: 245000}]
+    cluster: {min_remote_shards: 1}
+- name: Remove the qualified view before the remaining operator checks
+  syntax: tsql
+  sql: DROP VIEW IF EXISTS dbo.operator_qualified_view
+- name: A derived full-percent TOP preserves the delegated rows and consuming order
+  syntax: tsql
+  sql: SELECT d.id FROM (SELECT TOP 100 PERCENT id FROM dbo.big_items WHERE id IN(175000,245000) ORDER BY v7) AS d ORDER BY d.id DESC
+  expect:
+    rows: 2
+    data: [{id: 245000},{id: 175000}]
+    cluster: {min_remote_shards: 1}
+- name: A parenthesized inner join retains native delegation and exposed aliases
+  syntax: tsql
+  sql: |
+    SELECT b.id, p.label FROM (dbo.big_items AS b
+      INNER JOIN dbo.operator_join_probe AS v ON b.id=v.id)
+    INNER JOIN dbo.operator_join_probe AS p ON v.peer_id=p.id
+    WHERE b.id=245000
+  expect: {rows: 1,data: [{id: 245000,label: grouped}],cluster: {min_remote_shards: 1}}
+- name: A nested LEFT JOIN preserves its complete null row while probing a delegated head
+  syntax: tsql
+  sql: |
+    SELECT a.id AS aid,b.id AS bid,c.id AS cid FROM dbo.operator_join_probe AS a
+    LEFT JOIN dbo.operator_join_probe AS b LEFT JOIN dbo.big_items AS c
+      ON b.id=c.id OR b.id IS NULL ON a.id=b.id AND b.id>100000
+    ORDER BY a.id
+  expect:
+    rows: 2
+    data: [{aid: 2,bid: null,cid: null},{aid: 245000,bid: 245000,cid: 245000}]
+    cluster: {min_remote_shards: 1}
+- name: A nested LEFT chain retains remote matches and the head presence for every child
+  syntax: tsql
+  sql: |
+    SELECT a.id AS aid,b.id AS bid,c.id AS cid,d.label
+    FROM dbo.operator_join_probe AS a LEFT JOIN dbo.operator_join_probe AS b
+      LEFT JOIN dbo.big_items AS c ON b.id=c.id OR b.id IS NULL
+      LEFT JOIN dbo.operator_join_probe AS d ON d.id=b.peer_id OR c.id IS NULL
+      ON a.id=b.id AND b.id>100000
+    ORDER BY a.id
+  expect:
+    rows: 2
+    data: [{aid: 2,bid: null,cid: null,label: null},
+      {aid: 245000,bid: 245000,cid: 245000,label: grouped}]
+    cluster: {min_remote_shards: 1}
+- name: A delegated CASE keeps the large text common declaration
+  syntax: tsql
+  sql: |
+    SELECT CASE WHEN b.id=245000 THEN t.payload ELSE '' END AS value
+    FROM dbo.big_items AS b INNER JOIN dbo.operator_large_text AS t ON b.id=t.id
+    WHERE b.id=245000
+  expect: {rows: 1,data: [{value: remote-text}],cluster: {min_remote_shards: 1}}
+- name: A delegated ISNULL truncates only to its declared first argument width
+  syntax: tsql
+  sql: |
+    SELECT ISNULL(CAST(NULL AS VARCHAR(3)),t.payload) AS value
+    FROM dbo.big_items AS b INNER JOIN dbo.operator_large_text AS t ON b.id=t.id
+    WHERE b.id=245000
+  expect: {rows: 1,data: [{value: rem}],cluster: {min_remote_shards: 1}}
+- name: A complete nullable INNER operand retains its remote match and synthetic tuple
+  syntax: tsql
+  sql: |
+    SELECT a.id AS aid,b.id AS bid,c.id AS cid FROM dbo.operator_join_probe a
+    LEFT JOIN dbo.operator_join_probe b INNER JOIN dbo.big_items c
+      ON b.id=c.id AND c.id>100000 ON a.id=b.id
+    ORDER BY a.id
+  expect:
+    rows: 2
+    data: [{aid: 2,bid: null,cid: null},{aid: 245000,bid: 245000,cid: 245000}]
+    cluster: {min_remote_shards: 1}
+- name: Complete nullable operand counts combine remote partial states
+  syntax: tsql
+  sql: |
+    SELECT COUNT(*) AS total,COUNT(b.id) AS heads,COUNT(c.id) AS children
+    FROM dbo.operator_join_probe a LEFT JOIN dbo.operator_join_probe b INNER JOIN dbo.big_items c
+      ON b.id=c.id AND c.id>100000 ON a.id=b.id
+  expect:
+    rows: 1
+    data: [{total: 2,heads: 1,children: 1}]
+    cluster: {min_remote_shards: 1}
+- name: Native result sorting retains the invocation of a delegated joined producer
+  syntax: tsql
+  sql: |
+    SELECT a.id AS aid,b.id AS bid,c.id AS cid FROM dbo.operator_join_probe a
+    LEFT JOIN dbo.operator_join_probe b INNER JOIN dbo.big_items c
+      ON b.id=c.id AND c.id>100000 ON a.id=b.id
+    ORDER BY c.id DESC,a.id
+  expect:
+    rows: 2
+    data: [{aid: 245000,bid: 245000,cid: 245000},{aid: 2,bid: null,cid: null}]
+    cluster: {min_remote_shards: 1}
+- name: Chained RIGHT units preserve a delegated earlier relation and whole missing tuples
+  syntax: tsql
+  sql: |
+    SELECT a.id AS aid,b.id AS bid,c.id AS cid FROM dbo.big_items a
+    RIGHT JOIN dbo.operator_join_probe b ON a.id=b.id AND a.id>100000
+    RIGHT JOIN dbo.operator_join_probe c ON b.id=c.id ORDER BY c.id
+  expect:
+    rows: 2
+    data: [{aid: null,bid: 2,cid: 2},{aid: 245000,bid: 245000,cid: 245000}]
+    cluster: {min_remote_shards: 1}
+- name: An uncertified nested LEFT retains the complete delegated nullable unit
+  syntax: tsql
+  sql: |
+    SELECT a.id AS aid,b.id AS bid,c.id AS cid FROM dbo.operator_join_probe a
+    LEFT JOIN dbo.operator_join_probe b LEFT JOIN dbo.big_items c ON b.id=c.id
+      ON a.id=b.id AND c.id>100000 ORDER BY a.id
+  expect:
+    rows: 2
+    data: [{aid: 2,bid: null,cid: null},{aid: 245000,bid: 245000,cid: 245000}]
+    cluster: {min_remote_shards: 1}
+- name: Unicode aliases and wire names survive delegated native execution
+  syntax: tsql
+  sql: SELECT данные.id AS Größe FROM dbo.big_items AS данные WHERE данные.id=245000
+  expect:
+    rows: 1
+    data: [{Größe: 245000}]
+    cluster: {min_remote_shards: 1}
+- name: Recursive nullable operands preserve delegated match and complete child extension
+  syntax: tsql
+  sql: |
+    SELECT a.id AS aid,b.id AS bid,d.id AS did,c.id AS cid,e.id AS eid
+    FROM dbo.operator_join_probe a LEFT JOIN dbo.operator_join_probe b
+      LEFT JOIN dbo.operator_join_probe d ON b.peer_id=d.id
+      LEFT JOIN dbo.operator_join_probe c LEFT JOIN dbo.big_items e ON c.id=e.id
+        ON b.id=c.id AND e.id>100000 ON a.id=b.id
+    ORDER BY a.id
+  expect:
+    rows: 2
+    data: [{aid: 2,bid: 2,did: null,cid: null,eid: null},
+      {aid: 245000,bid: 245000,did: 2,cid: 245000,eid: 245000}]
+    cluster: {min_remote_shards: 1}
+- name: Recursive nullable reducers combine delegated whole-operand counts
+  syntax: tsql
+  sql: |
+    SELECT COUNT(*) AS total,COUNT(b.id) AS heads,COUNT(d.id) AS details,
+      COUNT(c.id) AS children,COUNT(e.id) AS extras
+    FROM dbo.operator_join_probe a LEFT JOIN dbo.operator_join_probe b
+      LEFT JOIN dbo.operator_join_probe d ON b.peer_id=d.id
+      LEFT JOIN dbo.operator_join_probe c LEFT JOIN dbo.big_items e ON c.id=e.id
+        ON b.id=c.id AND e.id>100000 ON a.id=b.id
+  expect:
+    rows: 1
+    data: [{total: 2,heads: 2,details: 1,children: 1,extras: 1}]
+    cluster: {min_remote_shards: 1}
+- name: RIGHT INNER clouds retain delegated nullable leaf values and complete preserved tuples
+  syntax: tsql
+  sql: |
+    SELECT a.id AS aid,b.id AS bid,c.id AS cid,d.id AS did,f.id AS fid
+    FROM dbo.operator_join_probe a INNER JOIN dbo.operator_join_probe b ON a.id=b.id
+      INNER JOIN dbo.big_items c ON b.id=c.id AND c.id>100000
+    RIGHT JOIN dbo.operator_join_probe d INNER JOIN dbo.operator_join_probe e ON d.id=e.id
+      INNER JOIN dbo.operator_join_probe f ON e.id=f.id ON a.id=d.id AND c.id=f.id
+    ORDER BY d.id
+  expect:
+    rows: 2
+    data: [{aid: null,bid: null,cid: null,did: 2,fid: 2},
+      {aid: 245000,bid: 245000,cid: 245000,did: 245000,fid: 245000}]
+    cluster: {min_remote_shards: 1}
+- name: RIGHT INNER cloud reducers combine complete delegated matches
+  syntax: tsql
+  sql: |
+    SELECT COUNT(*) AS total,COUNT(a.id) AS left_heads,COUNT(c.id) AS left_children,COUNT(f.id) AS right_children
+    FROM dbo.operator_join_probe a INNER JOIN dbo.operator_join_probe b ON a.id=b.id
+      INNER JOIN dbo.big_items c ON b.id=c.id AND c.id>100000
+    RIGHT JOIN dbo.operator_join_probe d INNER JOIN dbo.operator_join_probe e ON d.id=e.id
+      INNER JOIN dbo.operator_join_probe f ON e.id=f.id ON a.id=d.id AND c.id=f.id
+  expect:
+    rows: 1
+    data: [{total: 2,left_heads: 1,left_children: 1,right_children: 2}]
+    cluster: {min_remote_shards: 1}
+- name: Declared legacy temporal day arithmetic runs inside delegated callbacks
+  syntax: tsql
+  sql: |
+    SELECT CONVERT(VARCHAR(30),CAST(N'2026-01-03T12:00:00.003' AS DATETIME)
+      -CAST(id-244999 AS INT),121) AS value FROM dbo.big_items WHERE id=245000
+  expect:
+    rows: 1
+    data: [{value: '2026-01-02 12:00:00.003'}]
+    cluster: {min_remote_shards: 1}
+- name: Delegated CASE arithmetic retains its calendar contract through grouped reduction
+  syntax: tsql
+  sql: |
+    SELECT CAST(id-245000 AS INT) AS bucket,SUM(DATEDIFF(day,CAST(N'2026-01-01' AS DATETIME),
+      CASE WHEN id=245000 THEN CAST(N'2026-01-05' AS DATETIME)-CAST(id-244999 AS INT)
+        ELSE DATEADD(day,1,CAST(N'2026-01-01' AS DATETIME)) END)) AS total
+    FROM dbo.big_items WHERE id IN(245000,245001) GROUP BY CAST(id-245000 AS INT) ORDER BY bucket
+  expect:
+    rows: 2
+    data: [{bucket: 0,total: 3},{bucket: 1,total: 1}]
+    cluster: {min_remote_shards: 1}
+- name: Delegated numeric calendar fields preserve default and explicit style ordering
+  syntax: tsql
+  sql: |
+    SELECT CONVERT(VARCHAR(30),CONVERT(DATETIME,STR(CAST(id-244999 AS INT))+'.'+STR(2)+'.'+STR(2026)),121) AS default_value,
+      CONVERT(VARCHAR(30),CONVERT(DATETIME,STR(CAST(id-244999 AS INT))+'.'+STR(2)+'.'+STR(2026),104),121) AS styled_value
+    FROM dbo.big_items WHERE id=245000
+  expect:
+    rows: 1
+    data: [{default_value: '2026-01-02 00:00:00.000',styled_value: '2026-02-01 00:00:00.000'}]
+    cluster: {min_remote_shards: 1}
+- name: Delegated STR retains its closed rounding and field-width helpers
+  syntax: tsql
+  sql: |
+    SELECT id,STR(CAST(id-245001 AS FLOAT)*1.25,5,1) AS rounded,
+      STR(CAST(id AS FLOAT),2,0) AS overflowed
+    FROM dbo.big_items WHERE id IN(245000,245001,245002) ORDER BY id
+  expect:
+    rows: 3
+    data: [{id: 245000,rounded: ' -1.3',overflowed: '**'},
+      {id: 245001,rounded: '  0.0',overflowed: '**'},
+      {id: 245002,rounded: '  1.3',overflowed: '**'}]
+    cluster: {min_remote_shards: 1}
+- name: INNER over a mixed nullable operand retains delegated complete matches
+  syntax: tsql
+  sql: |
+    SELECT a.id AS aid,b.id AS bid,c.id AS cid,e.id AS eid FROM dbo.operator_join_probe a
+    INNER JOIN dbo.operator_join_probe b INNER JOIN dbo.big_items c ON b.id=c.id AND c.id>100000
+      LEFT JOIN dbo.operator_join_probe e ON c.id=e.id AND e.id=2 ON a.id=b.id
+  expect:
+    rows: 1
+    data: [{aid: 245000,bid: 245000,cid: 245000,eid: null}]
+    cluster: {min_remote_shards: 1}
+- name: Delegated mixed INNER operand reducers never synthesize unmatched heads
+  syntax: tsql
+  sql: |
+    SELECT COUNT(*) AS total,COUNT(c.id) AS children,COUNT(e.id) AS extras
+    FROM dbo.operator_join_probe a INNER JOIN dbo.operator_join_probe b
+      INNER JOIN dbo.big_items c ON b.id=c.id AND c.id>100000
+      LEFT JOIN dbo.operator_join_probe e ON c.id=e.id AND e.id=2 ON a.id=b.id
+  expect:
+    rows: 1
+    data: [{total: 1,children: 1,extras: 0}]
+    cluster: {min_remote_shards: 1}
+- name: UNION numeric widening compiles delegated calendar CASE in its branch scope
+  syntax: tsql
+  sql: |
+    SELECT CAST(id AS INT) AS id,CAST(4 AS FLOAT) AS quantity FROM dbo.big_items WHERE id=245000
+    UNION ALL SELECT CAST(id AS INT),CASE WHEN id=245001 THEN DATEDIFF(day,
+      CAST(N'2026-01-01' AS SMALLDATETIME),DATEADD(day,CAST(id-245000 AS INT),CAST(N'2026-01-01' AS DATETIME)))
+      ELSE NULL END FROM dbo.big_items WHERE id=245001 ORDER BY id
+  expect:
+    rows: 2
+    data: [{id: 245000,quantity: 4},{id: 245001,quantity: 1}]
+    cluster: {min_remote_shards: 1}
+- name: UNION coercion retains delegated aggregate and scalar expression contracts
+  syntax: tsql
+  sql: |
+    SELECT CAST(id-245000 AS INT) AS bucket,SUM(CAST(0.5 AS FLOAT)) AS quantity
+      FROM dbo.big_items WHERE id IN(245000,245001) GROUP BY CAST(id-245000 AS INT)
+    UNION SELECT CAST(id-245000 AS INT),CASE WHEN id=245000 THEN DATEDIFF(day,
+      CAST(N'2026-01-01' AS DATETIME),CAST(N'2026-01-03' AS DATETIME)) ELSE NULL END
+      FROM dbo.big_items WHERE id IN(245000,245001) ORDER BY bucket,quantity
+  expect:
+    rows: 4
+    data: [{bucket: 0,quantity: 0.5},{bucket: 0,quantity: 2},
+      {bucket: 1,quantity: null},{bucket: 1,quantity: 0.5}]
+    cluster: {min_remote_shards: 1}
+- name: Delegated grouped scalar keys are rebound after native aggregation
+  syntax: tsql
+  sql: |
+    SELECT b.id,SUM(CAST(1 AS INT)) AS total,
+      (SELECT label FROM dbo.operator_join_probe p WHERE p.id=b.id) AS label
+    FROM dbo.big_items b WHERE b.id IN(245000,245001) GROUP BY b.id ORDER BY b.id
+  expect:
+    rows: 2
+    data: [{id: 245000,total: 1,label: entry},{id: 245001,total: 1,label: null}]
+    cluster: {min_remote_shards: 1}
+- name: Delegated grouped HAVING uses the same scalar cardinality key contract
+  syntax: tsql
+  sql: |
+    SELECT b.id,SUM(CAST(1 AS INT)) AS total FROM dbo.big_items b
+    WHERE b.id IN(245000,245001) GROUP BY b.id
+    HAVING (SELECT label FROM dbo.operator_join_probe p WHERE p.id=b.id)=N'entry'
+  expect:
+    rows: 1
+    data: [{id: 245000,total: 1}]
+    cluster: {min_remote_shards: 1}
+- name: Delegated UNION DISTINCT sorts complete unique tuples before its final window
+  syntax: tsql
+  sql: |
+    SELECT CAST(id-245000 AS INT) AS value FROM dbo.big_items WHERE id IN(245000,245001)
+    UNION SELECT CASE WHEN id=245002 THEN NULL ELSE CAST(id-245000 AS INT) END
+      FROM dbo.big_items WHERE id IN(245000,245001,245002)
+    ORDER BY value OFFSET 1 ROWS FETCH NEXT 1 ROWS ONLY
+  expect:
+    rows: 1
+    data: [{value: 0}]
+    cluster: {min_remote_shards: 1}
+- name: Delegated UNION DISTINCT null keys merge across complete branches
+  syntax: tsql
+  sql: |
+    SELECT CASE WHEN id=245000 THEN NULL ELSE CAST(id-245000 AS INT) END AS value
+      FROM dbo.big_items WHERE id IN(245000,245001)
+    UNION SELECT CASE WHEN id=245000 THEN NULL ELSE CAST(id-245000 AS INT) END
+      FROM dbo.big_items WHERE id IN(245000,245001)
+    ORDER BY value DESC
+  expect:
+    rows: 2
+    data: [{value: 1},{value: null}]
+    cluster: {min_remote_shards: 1}
+- name: Portable calendar callbacks preserve explicit executing dateformat values
+  syntax: tsql
+  sql: |
+    SET DATEFORMAT dmy;
+    SELECT CONVERT(VARCHAR(30),CONVERT(DATETIME,STR(CAST(id-244999 AS INT))+'.'+STR(2)+'.'+STR(2026)),121) AS value
+      FROM dbo.big_items WHERE id=245000;
+    SET DATEFORMAT mdy
+  expect:
+    rows: 1
+    data: [{value: '2026-02-01 00:00:00.000'}]
+    cluster: {min_remote_shards: 1}
+- name: Portable named calendar callbacks preserve language and authenticated context
+  syntax: tsql
+  sql: |
+    SET LANGUAGE Deutsch;
+    SELECT CONVERT(VARCHAR(30),DATEADD(day,CAST(id-244999 AS INT),CONVERT(DATETIME,N'1 Januar 2026')),121) AS value,
+      USER_NAME() AS principal FROM dbo.big_items WHERE id=245000;
+    SET LANGUAGE us_english
+  expect:
+    rows: 1
+    data: [{value: '2026-01-02 00:00:00.000',principal: dbo}]
+    cluster: {min_remote_shards: 1}
+- name: Distinct extrema use ordinary delegated native aggregate reduction
+  syntax: tsql
+  sql: SELECT MIN(DISTINCT id) AS earliest,MAX(DISTINCT id) AS latest,COUNT(*) AS n FROM dbo.big_items WHERE id IN(245000,245001)
+  expect:
+    rows: 1
+    data: [{earliest: 245000,latest: 245001,n: 2}]
+    cluster: {min_remote_shards: 1}
+- name: Grouped distinct extrema retain delegated grouping and HAVING scopes
+  syntax: tsql
+  sql: |
+    SELECT CAST(id-245000 AS INT) AS bucket,MIN(ALL id) AS earliest,MAX(DISTINCT id) AS latest
+    FROM dbo.big_items WHERE id IN(245000,245001) GROUP BY CAST(id-245000 AS INT)
+    HAVING MAX(DISTINCT id)>=245000 ORDER BY bucket
+  expect:
+    rows: 2
+    data: [{bucket: 0,earliest: 245000,latest: 245000},{bucket: 1,earliest: 245001,latest: 245001}]
+    cluster: {min_remote_shards: 1}
+- name: Delegated native INSERT SELECT reduces every actual successful count
+  sql: INSERT INTO operator_insert_counts SELECT id FROM big_items WHERE id IN (42000,90000,175000,245000)
+  expect:
+    rows: 1
+    data: [{affected_rows: 4}]
+    cluster: {min_remote_shards: 1}
+- name: Delegated insertion data is complete before returning its count
+  sql: SELECT id FROM operator_insert_counts ORDER BY id
+  expect:
+    rows: 4
+    data: [{id: 42000}, {id: 90000}, {id: 175000}, {id: 245000}]
+- name: Actor-only metadata policy remains portable across delegated scans
+  syntax: tsql
+  sql: SELECT id,COL_LENGTH(CASE WHEN id=0 THEN N'big_items' ELSE N'permission_metadata_probe' END,N'id') AS byte_width FROM big_items WHERE id<2 ORDER BY id
+  expect:
+    data:
+    - id: 0
+      byte_width: 4
+    - id: 1
+      byte_width: 14
+    cluster:
+      min_remote_shards: 1
+- name: Coordinator authorization becomes an immutable operator invocation input
+  scm: "(begin\n (define actor (list \"permission_remote_reader\" (tsql_account_id \"permission_remote_reader\")))\n (define admitted (tsql_require_permission actor \"{database}\" \"SELECT\"))\n (scan nil (table \"{database}\" false \"big_items\" false nil) '() '()\n  '(\"id\") (lambda (id) (< id 3)) '(\"id\")\n  (close_procedure (lambda (count _id) (+ count (if admitted 1 0)))) 0 +))"
+  expect:
+    result: 3
+    cluster:
+      min_remote_shards: 1
+- name: Frontend granular reader executes delegated native SQL sources
+  # Historical case name: the reader now has real coordinator DB membership.
+  syntax: tsql
+  username: permission_remote_reader
+  password: pw
+  sql: SELECT id FROM big_items WHERE id<2 ORDER BY id
+  expect:
+    data:
+    - id: 0
+    - id: 1
+    cluster:
+      min_remote_shards: 1
+  session_id: remote-permission-cache
+- name: Coordinator revokes only the frontend reader action
+  syntax: tsql
+  sql: REVOKE SELECT FROM permission_remote_reader
+  expect:
+    affected_rows: 0
+- name: Ignored frontend revoke preserves delegated native database membership
+  syntax: tsql
+  username: permission_remote_reader
+  password: pw
+  session_id: remote-permission-cache
+  sql: SELECT id FROM big_items WHERE id<2 ORDER BY id
+  expect:
+    data: [{id: 0}, {id: 1}]
+    cluster: {min_remote_shards: 1}
+- name: Typed scalar source callable travels in delegated projection and sort
+  syntax: tsql
+  username: permission_remote_reader
+  password: pw
+  session_id: remote-scalar-module
+  sql: >-
+    SELECT id,dbo.remote_shift_marker(id) AS shifted FROM big_items
+    WHERE id>=245000 AND id<245003 ORDER BY dbo.remote_shift_marker(id) DESC
+  expect:
+    data: [{id: 245002, shifted: 245007}, {id: 245001, shifted: 245006}, {id: 245000, shifted: 245005}]
+    cluster: {min_remote_shards: 1}
+- name: Temporal scalar branches and saved source quoting survive delegated joined sorting
+  syntax: tsql
+  username: permission_remote_reader
+  password: pw
+  sql: >-
+    SELECT b.id,DATEPART(day,dbo.remote_choose_branch(t.first_instant,t.second_instant)) AS selected_day,
+    dbo.remote_branch_label(b.id) AS label
+    FROM big_items b INNER JOIN operator_temporal_values t ON b.id=t.id
+    WHERE b.id>=245000 AND b.id<245003
+    ORDER BY dbo.remote_choose_branch(t.first_instant,t.second_instant) DESC,b.id
+  expect:
+    data: [{id: 245001, selected_day: 2, label: odd}, {id: 245000, selected_day: 1, label: even}, {id: 245002, selected_day: 1, label: even}]
+    cluster: {min_remote_shards: 1}
+- name: Scalar character loops retain plain iteration values on remote workers
+  syntax: tsql
+  username: permission_remote_reader
+  password: pw
+  sql: >-
+    SELECT id,dbo.remote_repeat_marker(id%3+1) AS label,
+    dbo.remote_repeat_marker(CASE WHEN id%2=0 THEN NULL ELSE id%3+1 END) AS nullable_label
+    FROM big_items WHERE id>=245000 AND id<245003
+    ORDER BY dbo.remote_repeat_marker(id%3+1) DESC,id
+  expect:
+    data: [{id: 245000, label: xxx, nullable_label: ''}, {id: 245002, label: xx, nullable_label: ''}, {id: 245001, label: x, nullable_label: x}]
+    cluster: {min_remote_shards: 1}
+- name: Source catalog kinds and dynamic OBJECT_ID headers agree on remote workers
+  syntax: tsql
+  username: permission_remote_reader
+  password: pw
+  session_id: remote-source-catalog
+  sql: >-
+    SELECT b.id,o.name,o.type,o.is_ms_shipped,
+    CASE WHEN o.object_id=OBJECT_ID(N'dbo.'+o.name,o.type) THEN 1 ELSE 0 END AS same_id
+    FROM big_items b INNER JOIN sys.objects o ON o.name IN(N'remote_catalog_proc',N'remote_shift_marker')
+    WHERE b.id>=245000 AND b.id<245002 ORDER BY b.id,o.name
+  expect:
+    data: [{id: 245000, name: remote_catalog_proc, type: P, is_ms_shipped: false, same_id: 1}, {id: 245000, name: remote_shift_marker, type: FN, is_ms_shipped: false, same_id: 1}, {id: 245001, name: remote_catalog_proc, type: P, is_ms_shipped: false, same_id: 1}, {id: 245001, name: remote_shift_marker, type: FN, is_ms_shipped: false, same_id: 1}]
+    cluster: {min_remote_shards: 1}
+- name: Delegated character equality and literal IN preserve significant spaces and NULL truth
+  syntax: tsql
+  sql: |
+    SELECT id FROM big_items
+    WHERE id IN(245000,245001,245002)
+      AND CAST(id AS NVARCHAR(12))+N' ' IN(N'245000',N'245002  ')
+      AND CAST(id AS NVARCHAR(12))=CAST(id AS NVARCHAR(12))+N' '
+    ORDER BY id
+  expect:
+    rows: 2
+    data: [{id: 245000},{id: 245002}]
+    cluster: {min_remote_shards: 1}
+- name: Delegated literal NOT IN preserves UNKNOWN instead of a padded false negative
+  syntax: tsql
+  sql: |
+    SELECT COUNT(*) AS total FROM big_items
+    WHERE id IN(245000,245001)
+      AND CAST(id AS NVARCHAR(12)) NOT IN(N'245000 ',NULL)
+  expect:
+    rows: 1
+    data: [{total: 0}]
+    cluster: {min_remote_shards: 1}
+- name: Literal defaults and explicit numeric date styles execute in remote scalar callables
+  syntax: tsql
+  username: permission_remote_reader
+  password: pw
+  sql: >-
+    SELECT id,DAY(dbo.remote_default_instant(2025,2,DEFAULT)) AS default_day,
+    DAY(dbo.remote_default_instant(2025,2,id%3+1)) AS explicit_day
+    FROM big_items WHERE id>=245000 AND id<245003
+    ORDER BY dbo.remote_default_instant(2025,2,id%3+1) DESC,id
+  expect:
+    data: [{id: 245000, default_day: 1, explicit_day: 3}, {id: 245002, default_day: 1, explicit_day: 2}, {id: 245001, default_day: 1, explicit_day: 1}]
+    cluster: {min_remote_shards: 1}
+- name: Persisted text integer subtraction retains its numeric MIN contract on remote workers
+  syntax: tsql
+  username: permission_remote_reader
+  password: pw
+  sql: SELECT boundary_text FROM dbo.operator_subtraction_formatted
+  expect:
+    rows: 1
+    data: [{boundary_text: '4'}]
+    cluster: {min_remote_shards: 1}
+- name: Vendor identity unary plus retains temporal and national text contracts remotely
+  syntax: tsql
+  username: permission_remote_reader
+  password: pw
+  sql: >-
+    SELECT id,dbo.remote_positive_calendar(id%3,CONVERT(DATETIME,N'20000110',112)) AS offset_days,
+    +CAST(id AS NVARCHAR(12)) AS label
+    FROM big_items WHERE id>=245000 AND id<245003 ORDER BY id
+  expect:
+    rows: 3
+    data: [{id: 245000,offset_days: 5,label: '245000'},
+      {id: 245001,offset_days: 7,label: '245001'},{id: 245002,offset_days: 6,label: '245002'}]
+    cluster: {min_remote_shards: 1}
+- name: Remote caller selects mdy independently of the modules creating session
+  syntax: tsql
+  username: permission_remote_reader
+  password: pw
+  session_id: calendar_remote
+  sql: SET LANGUAGE us_english; SET DATEFORMAT mdy
+- name: Remote scalar callable receives current caller dateformat and language operands
+  syntax: tsql
+  username: permission_remote_reader
+  password: pw
+  session_id: calendar_remote
+  sql: SELECT id,MONTH(dbo.remote_caller_calendar(CASE WHEN id=245000 THEN '02/03/2025' ELSE NULL END)) AS month_number FROM big_items WHERE id>=245000 AND id<245002 ORDER BY id
+  expect: {rows: 2,data: [{id: 245000,month_number: 2},{id: 245001,month_number: null}],cluster: {min_remote_shards: 1}}
+- name: Remote caller changes the dateformat cache domain
+  syntax: tsql
+  username: permission_remote_reader
+  password: pw
+  session_id: calendar_remote
+  sql: SET DATEFORMAT dmy
+- name: Identical delegated SQL consumes the changed caller dateformat domain
+  syntax: tsql
+  username: permission_remote_reader
+  password: pw
+  session_id: calendar_remote
+  sql: SELECT id,MONTH(dbo.remote_caller_calendar(CASE WHEN id=245000 THEN '02/03/2025' ELSE NULL END)) AS month_number FROM big_items WHERE id>=245000 AND id<245002 ORDER BY id
+  expect: {rows: 2,data: [{id: 245000,month_number: 3},{id: 245001,month_number: null}],cluster: {min_remote_shards: 1}}
+- name: Relational scalar source remains a native remote scan with caller input domains
+  syntax: tsql
+  username: permission_remote_reader
+  password: pw
+  sql: SELECT id,dbo.remote_relational_label(id) AS label FROM big_items WHERE id IN(2,245000,245001) ORDER BY id
+  expect:
+    rows: 3
+    data: [{id: 2,label: grouped},{id: 245000,label: entry},{id: 245001,label: missing}]
+    cluster: {min_remote_shards: 1}
+- name: Relational iteration keeps transition state and native reads on remote workers
+  syntax: tsql
+  username: permission_remote_reader
+  password: pw
+  sql: SELECT id,dbo.remote_iteration_sum(id) AS total FROM big_items WHERE id IN(2,245000,245001) ORDER BY id
+  expect:
+    rows: 3
+    data: [{id: 2,total: 3},{id: 245000,total: 489999},{id: 245001,total: 490001}]
+    cluster: {min_remote_shards: 1}
+- name: Scalar local rows and conditional insert effects remain invocation scoped on remote workers
+  syntax: tsql
+  username: permission_remote_reader
+  password: pw
+  sql: SELECT id,dbo.remote_local_sum(id) AS total,dbo.remote_local_sum(NULL) AS absent FROM big_items WHERE id IN(2,245000,245001) ORDER BY id
+  expect:
+    rows: 3
+    data: [{id: 2,total: 4,absent: null},{id: 245000,total: 490000,absent: null},{id: 245001,total: 490002,absent: null}]
+    cluster: {min_remote_shards: 1}
+- name: Coordinator revokes actual native database membership
+  scm: (eval (parse_sql "replica_test" "REVOKE ALL ON `replica_test`.* FROM permission_remote_reader" nil))
+- name: A previously delegated SQL statement is denied after coordinator revocation
+  syntax: tsql
+  username: permission_remote_reader
+  password: pw
+  session_id: remote-permission-cache
+  sql: SELECT id FROM big_items WHERE id<2 ORDER BY id
+  expect:
+    error: true
+    contains: access denied
+- name: Warm scalar module plan still requires native database access
+  syntax: tsql
+  username: permission_remote_reader
+  password: pw
+  session_id: remote-scalar-module
+  sql: >-
+    SELECT id,dbo.remote_shift_marker(id) AS shifted FROM big_items
+    WHERE id>=245000 AND id<245003 ORDER BY dbo.remote_shift_marker(id) DESC
+  expect: {error: true, contains: 'access denied'}
+- name: Native database revocation still denies a warm source catalog plan
+  syntax: tsql
+  username: permission_remote_reader
+  password: pw
+  session_id: remote-source-catalog
+  sql: >-
+    SELECT b.id,o.name,o.type,o.is_ms_shipped,
+    CASE WHEN o.object_id=OBJECT_ID(N'dbo.'+o.name,o.type) THEN 1 ELSE 0 END AS same_id
+    FROM big_items b INNER JOIN sys.objects o ON o.name IN(N'remote_catalog_proc',N'remote_shift_marker')
+    WHERE b.id>=245000 AND b.id<245002 ORDER BY b.id,o.name
+  expect: {error: true, contains: 'access denied'}
+- name: Coordinator restores actual native database membership
+  scm: (eval (parse_sql "replica_test" "GRANT ALL ON `replica_test`.* TO permission_remote_reader" nil))
+- name: Native regrant restores the previously delegated cached statement
+  syntax: tsql
+  username: permission_remote_reader
+  password: pw
+  session_id: remote-permission-cache
+  sql: SELECT id FROM big_items WHERE id<2 ORDER BY id
+  expect:
+    data: [{id: 0}, {id: 1}]
+    cluster: {min_remote_shards: 1}
+- name: native-scoped-memory-reference-survives-delegated-scan
+  # A delegated callback serializes the native table handle by catalog identity.
+  # Its runtime declaration and MEMORY rows must reach the remote holder without
+  # becoming backend recovery state or an evictable planner cache.
+  scm: |
+    (begin
+      (define owner (newsession)) (define scope (new_relation_scope owner))
+      (createtable "{database}" ".scope_remote"
+        (list (list "column" "key" "INT" (list) (list)) (list "column" "value" "INT" (list) (list)))
+        (list "engine" "memory" "ephemeral" true "scope" scope) false nil)
+      (define source (table "{database}" false ".scope_remote" false nil))
+      (insert source '("key" "value") (list (list 1 11)))
+      (define result (scan nil (table "{database}" false "big_items" false nil) '() '()
+        '("id") (lambda (id) (< id 3)) '("id")
+        (lambda (acc id)
+          (+ acc id (scan_lookup nil source
+            (list 372734710317056 (scan_boundary "equal" "key" 0 0 true true "" false) "value")
+            (list 1)))) 0 +))
+      (close_relation_scope scope) result)
+  expect:
+    result: 36
+    cluster:
+      min_remote_shards: 1
+
+- name: native-column-properties-survive-delegated-metadata-lookup
+  scm: |
+    (begin
+      (define owner (newsession)) (define scope (new_relation_scope owner))
+      (createtable "{database}" ".properties_remote"
+        (list (list "column" "key" "INT" (list) (list "properties" (list "client.marker" 11))))
+        (list "engine" "memory" "ephemeral" true "scope" scope) false nil)
+      (define source (table "{database}" false ".properties_remote" false nil))
+      (define result (scan nil (table "{database}" false "big_items" false nil) '() '()
+        '("id") (lambda (id) (< id 3)) '("id")
+        (lambda (acc id)
+          (+ acc id (((show source "column" "key" false) "Properties") "client.marker"))) 0 +))
+      (close_relation_scope scope) result)
+  expect: {result: 36,cluster: {min_remote_shards: 1}}
+
+- name: limited-typed-projection-keeps-canonical-aggregate-columns-on-workers
+  syntax: tsql
+  sql: >-
+    SELECT short_note,full_note FROM
+    (SELECT TOP 1 CAST(CONCAT(N'label-',id) AS NVARCHAR(2)) AS short_note,
+    CAST(CONCAT(N'label-',id) AS NVARCHAR(8)) AS full_note
+    FROM big_items WHERE id<3 ORDER BY id DESC) AS limited_contract
+  expect:
+    data: [{short_note: la, full_note: label-2}]
+    cluster: {min_remote_shards: 1}
+- name: tsql-unicode-result-metadata-survives-delegation
+  syntax: tsql
+  sql: SELECT id,CAST(N'Grüße € 😀' AS NVARCHAR(128)) AS label FROM big_items WHERE id<2 ORDER BY id
+  expect:
+    data: [{id: 0, label: 'Grüße € 😀'}, {id: 1, label: 'Grüße € 😀'}]
+    cluster: {min_remote_shards: 1}
+- name: tsql-database-catalog-and-remote-source-share-the-planner
+  syntax: tsql
+  sql: >-
+    SELECT name,CASE WHEN database_id>0 THEN 1 ELSE 0 END AS valid
+    FROM sys.databases WHERE name=DB_NAME()
+    UNION ALL SELECT CAST(N'remote_probe' AS NVARCHAR(128)) AS name,1 AS valid
+    FROM big_items WHERE id=0 ORDER BY name
+  expect:
+    data: [{name: remote_probe, valid: 1}, {name: replica_test, valid: 1}]
+    cluster: {min_remote_shards: 1}
+- name: tsql-object-catalog-and-remote-source-share-the-planner
+  syntax: tsql
+  sql: >-
+    SELECT name,type_desc FROM sys.objects WHERE name=N'big_items'
+    UNION ALL SELECT CAST(N'remote_probe' AS NVARCHAR(128)) AS name,
+    CAST(N'REMOTE_ROW' AS NVARCHAR(60)) AS type_desc FROM big_items WHERE id=0
+    ORDER BY name
+  expect:
+    data: [{name: big_items, type_desc: USER_TABLE}, {name: remote_probe, type_desc: REMOTE_ROW}]
+    cluster: {min_remote_shards: 1}
+- name: tsql-relational-control-predicates-survive-delegation
+  syntax: tsql
+  sql: IF EXISTS(SELECT id FROM big_items WHERE id=0) SELECT id FROM big_items WHERE id<2 ORDER BY id ELSE SELECT -1 AS id
+  expect:
+    data: [{id: 0}, {id: 1}]
+    cluster: {min_remote_shards: 1}
+- name: tsql-date-validation-and-names-survive-delegation
+  syntax: tsql
+  sql: >-
+    SELECT id,ISDATE(CASE WHEN id=0 THEN N'20240229'
+    WHEN id=1 THEN N'20230229' ELSE NULL END) AS valid,
+    DATENAME(month,DATEADD(month,id,CONVERT(DATE,N'20240101',112))) AS month,
+    DATENAME(weekday,CASE WHEN id=0 THEN N'2024-01-01'
+    WHEN id=1 THEN N'2024-01-02' ELSE NULL END) AS weekday
+    FROM big_items WHERE id<3 ORDER BY id
+  expect:
+    data: [{id: 0, valid: 1, month: January, weekday: Monday}, {id: 1, valid: 0, month: February, weekday: Tuesday}, {id: 2, valid: 0, month: March, weekday: null}]
+    cluster: {min_remote_shards: 1}
+- name: tsql-calendar-names-preserve-delegated-datefirst-input
+  syntax: tsql
+  sql: >-
+    SET DATEFIRST 1;
+    SELECT id,DATENAME(week,DATEADD(day,id,CONVERT(DATE,N'20240107',112))) AS week,
+    DATENAME(weekday,DATEADD(day,id,CONVERT(DATE,N'20240107',112))) AS weekday
+    FROM big_items WHERE id<3 ORDER BY id
+  expect:
+    data: [{id: 0, week: '1', weekday: Sunday}, {id: 1, week: '2', weekday: Monday}, {id: 2, week: '2', weekday: Tuesday}]
+    cluster: {min_remote_shards: 1}
+- name: tsql-select-assignment-survives-delegation
+  syntax: tsql
+  sql: >-
+    DECLARE @value BIGINT=99,@offset BIGINT=7;
+    SELECT @value=SUM(id+@offset) FROM big_items WHERE id<5000;
+    SELECT @value AS value
+  expect:
+    data: [{value: 12532500}]
+    cluster: {min_remote_shards: 1}
+- name: tsql-assignment-input-view-refreshes-per-invocation
+  syntax: tsql
+  sql: >-
+    DECLARE @value BIGINT=99,@offset BIGINT=11;
+    SELECT @value=SUM(id+@offset) FROM big_items WHERE id<5000;
+    SET @offset=13;
+    SELECT @value=SUM(id+@offset) FROM big_items WHERE id<5000;
+    SELECT @value AS value
+  expect:
+    data: [{value: 12562500}]
+    cluster: {min_remote_shards: 1}
+- name: tsql-ordered-row-assignment-survives-delegation
+  syntax: tsql
+  sql: >-
+    DECLARE @value BIGINT=99;
+    SELECT @value=id FROM big_items WHERE id<3 ORDER BY id DESC;
+    SELECT @value AS value
+  expect:
+    data: [{value: 0}]
+    cluster: {min_remote_shards: 1}
+- name: tsql-character-codecs-and-lengths-survive-delegation
+  syntax: tsql
+  sql: SELECT id,CHAR(CASE WHEN id=0 THEN 233 WHEN id=1 THEN 128 ELSE 65 END) AS character_value,ASCII(CASE WHEN
+    id=0 THEN N'é' WHEN id=1 THEN N'€' ELSE N'A' END) AS byte_value,DATALENGTH(CASE WHEN id=0 THEN N'😀' ELSE N'é'
+    END) AS byte_length,LEN(CASE WHEN id=0 THEN N'😀 ' ELSE N'é ' END) AS character_length FROM big_items WHERE id<3
+    ORDER BY id
+  expect:
+    data:
+    - id: 0
+      character_value: é
+      byte_value: 233
+      byte_length: 4
+      character_length: 2
+    - id: 1
+      character_value: €
+      byte_value: 128
+      byte_length: 2
+      character_length: 1
+    - id: 2
+      character_value: A
+      byte_value: 65
+      byte_length: 2
+      character_length: 1
+    cluster:
+      min_remote_shards: 1
+- name: tsql-numeric-validation-and-powers-survive-delegation
+  syntax: tsql
+  sql: >-
+    SELECT id,POWER(id+2,3) AS cubed,SIGN(id-1) AS direction,
+    ISNUMERIC(CASE WHEN id=1 THEN N'invalid' ELSE CONVERT(NVARCHAR(20),id) END) AS valid_number
+    FROM big_items WHERE id<3 ORDER BY id
+  expect:
+    data: [{id: 0, cubed: 8, direction: -1, valid_number: 1}, {id: 1, cubed: 27, direction: 0, valid_number: 0}, {id: 2, cubed: 64, direction: 1, valid_number: 1}]
+    cluster: {min_remote_shards: 1}
+- name: tsql-fixed-number-formatting-survives-delegation
+  syntax: tsql
+  sql: SELECT id,STR(id+0.25,6,1) AS formatted FROM big_items WHERE id<3 ORDER BY id
+  expect:
+    data: [{id: 0, formatted: '   0.3'}, {id: 1, formatted: '   1.3'}, {id: 2, formatted: '   2.3'}]
+    cluster: {min_remote_shards: 1}
+- name: tsql-custom-format-values-and-locale-captures-survive-delegation
+  syntax: tsql
+  sql: >-
+    SELECT id,FORMAT(id-1,'0000','en-US') AS number_value,
+    FORMAT(DATEADD(day,id,CONVERT(DATE,N'20240309',112)),N'ddd MMM MM\/yyyy','de-DE') AS date_value,
+    FORMAT(CASE WHEN id=2 THEN NULL ELSE id END,'000') AS nullable_value
+    FROM big_items WHERE id<3 ORDER BY id
+  expect:
+    data: [{id: 0, number_value: '-0001', date_value: 'Sa Mrz 03/2024', nullable_value: '000'},
+      {id: 1, number_value: '0000', date_value: 'So Mrz 03/2024', nullable_value: '001'},
+      {id: 2, number_value: '0001', date_value: 'Mo Mrz 03/2024', nullable_value: null}]
+    cluster: {min_remote_shards: 1}
+# Search probes use the original fixture, before the bulk DELETE cases below.
+- name: integer-cast-dynamic-text-parser
+  syntax: tsql
+  sql: SELECT id FROM big_items WHERE id<3 ORDER BY CAST(CAST(id AS NVARCHAR(20))
+    AS BIGINT) DESC
+  expect:
+    data:
+    - id: 2
+    - id: 1
+    - id: 0
+    cluster:
+      min_remote_shards: 1
+- name: decimal-cast-dynamic-text-parser
+  syntax: tsql
+  sql: SELECT id FROM big_items WHERE id<3 ORDER BY CAST(CAST(id AS NVARCHAR(20))
+    AS DECIMAL(10,2)) DESC
+  expect:
+    data:
+    - id: 2
+    - id: 1
+    - id: 0
+    cluster:
+      min_remote_shards: 1
+- name: dynamic-numeric-text-callback
+  syntax: tsql
+  sql: SELECT id FROM big_items WHERE id<3 ORDER BY CAST(id AS NVARCHAR(20)) DESC
+  expect:
+    data:
+    - id: 2
+    - id: 1
+    - id: 0
+    cluster:
+      min_remote_shards: 1
+- name: fixed-national-dynamic-sort-helper
+  syntax: tsql
+  sql: SELECT id,CAST(CAST(id AS NVARCHAR(20)) AS NCHAR(4)) AS label FROM big_items
+    WHERE id<3 ORDER BY CAST(CAST(id AS NVARCHAR(20)) AS NCHAR(4)) DESC
+  expect:
+    data:
+    - id: 2
+      label: '2   '
+    - id: 1
+      label: '1   '
+    - id: 0
+      label: '0   '
+    cluster:
+      min_remote_shards: 1
+- name: money-national-dynamic-sort-helper
+  syntax: tsql
+  sql: SELECT id FROM big_items WHERE id<3 ORDER BY CAST(CAST(id AS MONEY) AS NVARCHAR(20))
+    DESC
+  expect:
+    data:
+    - id: 2
+    - id: 1
+    - id: 0
+    cluster:
+      min_remote_shards: 1
+- name: ordered-tsql-frontend-helper-producer
+  syntax: tsql
+  sql: SELECT CAST(N'catalog_probe' AS NVARCHAR(128)) AS name FROM information_schema.tables
+    WHERE table_catalog=N'replica_test' AND table_name=N'big_items' UNION ALL SELECT
+    CAST(N'remote_probe' AS NVARCHAR(128)) AS name FROM big_items WHERE id=0 ORDER
+    BY name
+  expect:
+    data:
+    - name: catalog_probe
+    - name: remote_probe
+    cluster:
+      min_remote_shards: 1
+- name: tsql-text-editing-survives-delegation
+  syntax: tsql
+  sql: >-
+    SELECT id,STUFF(N'a😀bc',2,2,CONVERT(NVARCHAR(20),id)) AS edited,
+    REPLICATE(CAST('é' AS VARCHAR(20)),id+1) AS repeated
+    FROM big_items WHERE id<3 ORDER BY id
+  expect:
+    data: [{id: 0, edited: a0bc, repeated: 'é'}, {id: 1, edited: a1bc, repeated: 'éé'}, {id: 2, edited: a2bc, repeated: 'ééé'}]
+    cluster: {min_remote_shards: 1}
+- name: tsql-ordered-text-editing-captures-helper-procedures
+  syntax: tsql
+  sql: >-
+    SELECT id,STUFF(N'abc',2,1,CONCAT(N'n',id)) AS edited,
+    REPLICATE(N'q',id+1) AS repeated FROM big_items WHERE id<3 ORDER BY edited,id
+  expect:
+    data: [{id: 0, edited: an0c, repeated: q}, {id: 1, edited: an1c, repeated: qq}, {id: 2, edited: an2c, repeated: qqq}]
+    cluster: {min_remote_shards: 1}
+- name: virtual-catalog-ordered-union-and-native-row-delegation
+  sql: >-
+    SELECT table_name AS name FROM information_schema.tables
+    WHERE table_schema='replica_test' AND table_name LIKE 'big_i%'
+    UNION ALL SELECT CONCAT('row-',id) AS name FROM big_items WHERE id<2 ORDER BY name
+  expect:
+    data: [{name: big_items}, {name: row-0}, {name: row-1}]
+    cluster: {min_remote_shards: 1}
+- name: runtime-metadata-scalar-and-native-aggregate-delegation
+  syntax: tsql
+  sql: >-
+    SELECT N'catalog' AS kind,COUNT(*) AS total FROM information_schema.schemata WHERE schema_name=N'replica_test'
+    UNION ALL SELECT N'rows' AS kind,COUNT(*) AS total FROM big_items WHERE id<3
+  expect:
+    data: [{kind: catalog, total: 1}, {kind: rows, total: 3}]
+    cluster: {min_remote_shards: 1}
+- name: catalog-source-boundaries-compose-with-remote-native-scan
+  sql: SELECT schema_name FROM information_schema.schemata WHERE schema_name='replica_test'
+    UNION ALL SELECT 'native_shard' AS schema_name FROM big_items WHERE id=0
+  expect:
+    data:
+    - schema_name: replica_test
+    - schema_name: native_shard
+    cluster:
+      min_remote_shards: 1
 - name: tsql-database-access-probe-survives-delegation
   syntax: tsql
   sql: >-
@@ -31,6 +1157,15 @@ test_cases:
     FROM big_items WHERE id<3 ORDER BY id
   expect:
     data: [{id: 0, allowed: 1}, {id: 1, allowed: null}, {id: 2, allowed: null}]
+    cluster: {min_remote_shards: 1}
+- name: tsql-text-search-survives-delegation
+  syntax: tsql
+  sql: >-
+    SELECT id,CHARINDEX(N'x',CONCAT(N'😀x',id)) AS literal_position,
+    PATINDEX(N'%[0-9]%',CONCAT(N'😀x',id) COLLATE Latin1_General_100_CI_AS_SC) AS wildcard_position
+    FROM big_items WHERE id<3 ORDER BY id
+  expect:
+    data: [{id: 0, literal_position: 3, wildcard_position: 3}, {id: 1, literal_position: 3, wildcard_position: 3}, {id: 2, literal_position: 3, wildcard_position: 3}]
     cluster: {min_remote_shards: 1}
 # Search probes use the original fixture, before the bulk DELETE cases below.
 - name: boolean-fulltext-filter-and-score
@@ -287,11 +1422,11 @@ test_cases:
   - sql: CREATE TABLE filtered_operator_keys(id INT PRIMARY KEY) ENGINE=memory
   - sql: INSERT INTO filtered_operator_keys VALUES(42000),(90000),(175000),(245000)
   scm: |
-    (createcolumn (table "{database}" false "filtered_operator_keys" false)
+    (createcolumn (table "{database}" false "filtered_operator_keys" false nil)
       "prepared_v0" "BIGINT" '()
       (list "temp" true "filtercols" '("id") "filter" (lambda (id) (equal? id 42000)))
       '("id") (lambda (key)
-        (scan nil (table "{database}" false "big_items" false)
+        (scan nil (table "{database}" false "big_items" false nil)
           (list 369436175368192 (scan_boundary "equal" "id" 0 0 true true "" false)) (list key)
           '("id") (lambda (id) (equal? id (outer 1 key)))
           '("v0") (lambda (acc value) value) nil (lambda (old value) value) false)))
@@ -301,22 +1436,22 @@ test_cases:
 
 - name: repeat-valid-remote-lookup
   scm: |
-    (createcolumn (table "{database}" false "filtered_operator_keys" false)
+    (createcolumn (table "{database}" false "filtered_operator_keys" false nil)
       "prepared_v0" "BIGINT" '()
       (list "temp" true "filtercols" '("id") "filter" (lambda (id) (equal? id 42000)))
       '("id") (lambda (key)
-        (scan nil (table "{database}" false "big_items" false)
+        (scan nil (table "{database}" false "big_items" false nil)
           (list 369436175368192 (scan_boundary "equal" "id" 0 0 true true "" false)) (list key)
           '("id") (lambda (id) (equal? id (outer 1 key)))
           '("v0") (lambda (acc value) value) nil (lambda (old value) value) false)))
 
 - name: prepare-second-remote-lookup
   scm: |
-    (createcolumn (table "{database}" false "filtered_operator_keys" false)
+    (createcolumn (table "{database}" false "filtered_operator_keys" false nil)
       "prepared_v0" "BIGINT" '()
       (list "temp" true "filtercols" '("id") "filter" (lambda (id) (equal? id 245000)))
       '("id") (lambda (key)
-        (scan nil (table "{database}" false "big_items" false)
+        (scan nil (table "{database}" false "big_items" false nil)
           (list 369436175368192 (scan_boundary "equal" "id" 0 0 true true "" false)) (list key)
           '("id") (lambda (id) (equal? id (outer 1 key)))
           '("v0") (lambda (acc value) value) nil (lambda (old value) value) false)))
@@ -396,6 +1531,32 @@ test_cases:
       min_remote_shards: 2
       min_remote_nodes: 2
       data_exceeds_node_ram: true
+
+# Calendar probes require the original rows 0..2, before the remote DELETE cases.
+- name: Subsecond native calendar captures retain their values on delegated workers
+  scm: |
+    (begin
+      (define first (parse_date "9999-12-31 23:59:59.1234567"))
+      (define second (parse_date "9999-12-31 23:59:59.1234568"))
+      (scan nil (table "{database}" false "big_items" false nil) '() '()
+        '("id") (lambda (id) (< id 3)) '("id")
+        (close_procedure (lambda (total id)
+          (if (and (< first second) (not (equal? first second))
+              (equal? (cadr (date_parts first)) 123456700)
+              (equal? (cadr (date_parts second)) 123456800))
+            (+ total 1) (error "delegated calendar capture lost its fractional clock")))) 0 +))
+  expect: {result: 3, cluster: {min_remote_shards: 1}}
+- name: Worker-created native calendar values retain nanoseconds in mapped arrays
+  scm: |
+    (scan nil (table "{database}" false "big_items" false nil) '() '()
+      '("id") (lambda (id) (< id 3)) '("id")
+      (lambda (total id) (begin
+        (define clocks (map '(0 1 2) (lambda (offset)
+          (date_from_parts 253402300799 (+ 100 id offset) 0))))
+        (if (and (< (car clocks) (cadr clocks)) (< (cadr clocks) (nth clocks 2)))
+          (+ total (cadr (date_parts (car clocks))))
+          (error "worker calendar array lost subsecond precision")))) 0 +)
+  expect: {result: 303, cluster: {min_remote_shards: 1}}
 
 # Oracle and cluster start with independent copies of the committed fixture.
 # These require native remote mutations; an unsupported-operation error must

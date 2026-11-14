@@ -22,6 +22,7 @@ Copyright (C) 2024-2026  Carl-Philip Hänsch
 package scm
 
 import "regexp"
+import "slices"
 import "strconv"
 import "strings"
 import "time"
@@ -92,9 +93,20 @@ type lambdaBindingProof struct {
 	body         Scmer
 	numVars      int
 	numberedOnly bool
+	syntaxSize   *procSyntaxSize
 }
 
 func (lambdaBindingProof) String() string { return "nil" }
+
+// Only the optimizer can issue this transfer proof. Code identity is checked
+// after that ownership fact, never used as an independent immutability claim.
+func matchingLambdaBindingProof(params, body Scmer, numVars int, value Scmer) (lambdaBindingProof, bool) {
+	if value.GetTag() != tagAny {
+		return lambdaBindingProof{}, false
+	}
+	proof, ok := value.Any().(lambdaBindingProof)
+	return proof, ok && proof.params == params && proof.body == body && proof.numVars == numVars
+}
 
 // Validation and persistence consume the ordinary lambda syntax. The binding
 // proof is private optimizer metadata, never another source-language operand.
@@ -108,15 +120,26 @@ func lambdaSyntaxOperands(items []Scmer) []Scmer {
 }
 
 func prepareLambdaBindings(lambda []Scmer) []Scmer {
-	if len(lambda) < 4 {
+	return prepareLambdaBindingsOwned(lambda, false)
+}
+
+func prepareLambdaBindingsOwned(lambda []Scmer, moduleOwned bool) []Scmer {
+	if len(lambda) < 3 || (!moduleOwned && len(lambda) < 4) {
 		return lambda
+	}
+	if len(lambda) == 3 {
+		lambda = append(lambda[:3:3], NewInt(0))
 	}
 	params := lambda[1]
 	if stripped, ok := scmerStripSourceInfo(params); ok {
 		params = stripped
 	}
 	numVars := int(ToInt(lambda[3]))
-	proof := lambdaBindingProof{params, lambda[2], numVars, procCanUseNumberedOnly(params, lambda[2], numVars)}
+	var syntaxSize *procSyntaxSize
+	if moduleOwned {
+		syntaxSize = newProcSyntaxSize(params, lambda[2])
+	}
+	proof := lambdaBindingProof{params, lambda[2], numVars, procCanUseNumberedOnly(params, lambda[2], numVars), syntaxSize}
 	return append(lambda[:4:4], NewAny(proof))
 }
 
@@ -125,11 +148,18 @@ func prepareLambdaBindings(lambda []Scmer) []Scmer {
 // telemetryCallback is non-nil, it is called exactly once after the optimizer
 // has finished. The callback itself is excluded from compile_ns.
 func Optimize(val Scmer, env *Env, telemetryCallback func(Scmer)) Scmer {
+	return optimizeWithSyntaxOwner(val, env, telemetryCallback, false)
+}
+
+// Only the module loader owns both parsing and evaluation without exposing the
+// intervening syntax. Public optimize/eval retain caller-owned AST aliases.
+func optimizeWithSyntaxOwner(val Scmer, env *Env, telemetryCallback func(Scmer), moduleOwned bool) Scmer {
 	var started time.Time
 	if telemetryCallback != nil {
 		started = time.Now()
 	}
 	ome := newOptimizerMetainfo()
+	ome.moduleSyntaxOwned = moduleOwned
 	// Recursive hook guards still need the original tree size. This walk goes
 	// away with OptimizeRewrite; it is not performed for telemetry alone.
 	ome.rewrite.inputNodes = optimizerNodeCount(val)
@@ -231,6 +261,7 @@ type optimizerMetainfo struct {
 	specializationOwnedVars   map[Symbol]bool
 	specializationOwnedSlots  map[NthLocalVar]bool
 	rewrite                   *optimizerRewriteState
+	moduleSyntaxOwned         bool
 	captureArgumentTypes      bool
 	argumentTypes             []TypeInfo
 }
@@ -649,6 +680,7 @@ func (ome *optimizerMetainfo) Copy() (result optimizerMetainfo) {
 		replacement.outerDepth++
 		result.variableReplacement[k] = replacement
 	}
+	result.moduleSyntaxOwned = ome.moduleSyntaxOwned
 	result.setBlacklist = ome.setBlacklist
 	result.loopDepth = ome.loopDepth
 	result.callbackAnalysisDepth = ome.callbackAnalysisDepth
@@ -672,6 +704,7 @@ func (ome *optimizerMetainfo) Copy() (result optimizerMetainfo) {
 // their parent (begin, match). NthLocalVar entries are kept as-is instead of
 // being wrapped in (outer ...) since they access the same VarsNumbered array.
 func (ome *optimizerMetainfo) CopySharedScope() (result optimizerMetainfo) {
+	result.moduleSyntaxOwned = ome.moduleSyntaxOwned
 	result.variableReplacement = make(map[Symbol]optimizerReplacement)
 	result.variableTypes = ome.variableTypes
 	result.numberedTypes = ome.numberedTypes
@@ -1336,6 +1369,7 @@ func buildProcSpecialization(proc *Proc, key procSpecializationKey, paramTypes [
 	specialized := proc.Snapshot()
 	specialized.Params = parts[1]
 	specialized.Body = parts[2]
+	specialized.syntaxSize = nil
 	if len(parts) > 3 {
 		specialized.NumVars = int(ToInt(parts[3]))
 	}
@@ -1796,6 +1830,7 @@ func canEliminateFromBegin(val Scmer) bool {
 }
 
 type localBindingFacts struct {
+	namedLookup     bool // a nested local shadow still needs this runtime fallback before publication
 	defineIdx       int
 	firstUse        int
 	count           int
@@ -2229,6 +2264,15 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 		}
 		var leafScan *bool
 		var leafScanRoot bool
+		// These compile-time facts follow the same lexical traversal as binding
+		// uses. true means a fallback read before publication; false means the
+		// inner frame already owns the name and hides more distant fallbacks.
+		type prefixBindingReads struct {
+			parent  *prefixBindingReads
+			reads   map[Symbol]bool
+			dynamic bool
+		}
+		var prefixReads *prefixBindingReads
 		var visitNode func(x Scmer, depth int, captured bool, captureOnce bool, lambdaOnce bool, region *conditionalSinkRegion, blacklist []Symbol)
 		visitNode = func(x Scmer, depth int, captured bool, captureOnce bool, lambdaOnce bool, region *conditionalSinkRegion, blacklist []Symbol) {
 			if stripped, ok := scmerStripSourceInfo(x); ok {
@@ -2240,6 +2284,17 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 					subHeadExpr = stripped
 				}
 				subHead, subHeadOk := scmerSymbol(subHeadExpr)
+				// Quoted values contain no binding uses or executable branches.
+				// In particular, never retain a sinking target inside borrowed data.
+				if subHeadOk && subHead == Symbol("quote") {
+					return
+				}
+				// Dynamic syntax can resolve names absent from the symbol walk.
+				if subHeadOk && (subHead == Symbol("eval") || subHead == Symbol("import") || subHead == Symbol("parser")) {
+					for prefix := prefixReads; prefix != nil; prefix = prefix.parent {
+						prefix.dynamic = true
+					}
+				}
 				if leafScan != nil {
 					if leafScanRoot {
 						leafScanRoot = false
@@ -2301,9 +2356,25 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 					if subHead == Symbol("begin_mut") {
 						start = 2
 					}
+					previousPrefix := prefixReads
+					prefixReads = &prefixBindingReads{parent: previousPrefix}
 					for i := start; i < len(sub); i++ {
 						visitNode(sub[i], depth+1, captured, captureOnce, false, region, blacklist)
+						child, childOK := scmerSlice(sub[i])
+						if childOK && len(child) == 3 && (scmerIsSymbol(child[0], "define") || scmerIsSymbol(child[0], "set")) {
+							if sym, named := scmerSymbol(child[1]); named && !slices.Contains(blacklist, sym) {
+								if facts, tracked := bindings[sym]; tracked {
+									facts.namedLookup = facts.namedLookup || prefixReads.reads[sym] || prefixReads.dynamic
+									bindings[sym] = facts
+									if prefixReads.reads == nil {
+										prefixReads.reads = make(map[Symbol]bool)
+									}
+									prefixReads.reads[sym] = false
+								}
+							}
+						}
 					}
+					prefixReads = previousPrefix
 				} else if subHeadOk && subHead == Symbol("!begin") {
 					for i := 1; i < len(sub); i++ {
 						visitNode(sub[i], depth, captured, captureOnce, false, region, blacklist)
@@ -2356,6 +2427,15 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 				}
 				if !isBlacklisted {
 					if facts, tracked := bindings[sym]; tracked {
+						for prefix := prefixReads; prefix != nil; prefix = prefix.parent {
+							if read, seen := prefix.reads[sym]; seen && !read {
+								break
+							}
+							if prefix.reads == nil {
+								prefix.reads = make(map[Symbol]bool)
+							}
+							prefix.reads[sym] = true
+						}
 						facts.useCount++
 						if !facts.sinkRegionSeen {
 							facts.sinkRegion = region
@@ -2397,7 +2477,7 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 				sym := bindingOrder[i]
 				facts := bindings[sym]
 				content, exists := variableContent[sym]
-				if !exists || facts.count != 1 || facts.useCount < 2 || !facts.used ||
+				if !exists || facts.namedLookup || facts.count != 1 || facts.useCount < 2 || !facts.used ||
 					facts.firstUse <= facts.defineIdx || facts.sinkConflict || facts.sinkRegion == nil ||
 					facts.sinkRegion.target == nil || facts.sinkRegion.hasBinding || facts.repeatedCapture ||
 					!optimizerIsLambda(content) {
@@ -2425,7 +2505,7 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 		for sym, facts := range bindings {
 			delete(ownedLocalBindings, sym)
 			if earliestDynamicSyntax < 0 {
-				if facts.count == 1 && facts.used && facts.firstUse > facts.defineIdx &&
+				if !facts.namedLookup && facts.count == 1 && facts.used && facts.firstUse > facts.defineIdx &&
 					facts.useCount == 1 && !facts.captured {
 					ownedLocalBindings[sym] = true
 				}
@@ -2454,6 +2534,9 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 				if ome.specializationUsed != nil {
 					*ome.specializationUsed = true
 				}
+			}
+			if facts, tracked := bindings[sym]; tracked && facts.namedLookup {
+				shouldReplace = false
 			}
 			// Convention: symbols starting with "tbl:" are pre-resolved table
 			// pointers that must not be inlined back into inner loops.
@@ -2495,7 +2578,7 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 					continue
 				}
 				facts := bindings[sym]
-				if facts.count != 1 || (facts.used && facts.firstUse <= facts.defineIdx) || *ome2.nextSlot >= 256 {
+				if facts.namedLookup || facts.count != 1 || (facts.used && facts.firstUse <= facts.defineIdx) || *ome2.nextSlot >= 256 {
 					continue
 				}
 				if numberedLocals == nil {
@@ -2519,6 +2602,36 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 			for i := bodyStart; i < len(v); i++ {
 				v[i] = rebaseOuterReferencesAfterScopeRemoval(v[i], 0)
 			}
+		}
+		// A local used before its DEFINE must keep ordinary lexical lookup:
+		// before publication it finds the outer binding, afterwards this begin's
+		// own binding. An inherited outer/parameter slot would bypass the latter.
+		// Install this for the whole scope so earlier closures also see a later
+		// local publication, rather than capturing the inherited slot forever.
+		var localTypes map[Symbol]*TypeDescriptor
+		if len(variableContent) > 0 {
+			localBlacklist := make([]Symbol, 0, len(ome2.setBlacklist))
+			for _, sym := range ome2.setBlacklist {
+				if _, local := variableContent[sym]; !local {
+					localBlacklist = append(localBlacklist, sym)
+				}
+			}
+			ome2.setBlacklist = localBlacklist
+		}
+		for sym := range variableContent {
+			if _, numbered := numberedLocals[sym]; numbered {
+				continue
+			}
+			ome2.variableReplacement[sym] = optimizerReplacement{value: NewSymbol(string(sym))}
+			if _, typed := ome2.variableTypes[sym]; typed {
+				if localTypes == nil {
+					localTypes = cloneDescriptorMap(ome2.variableTypes)
+				}
+				delete(localTypes, sym)
+			}
+		}
+		if localTypes != nil {
+			ome2.variableTypes = localTypes
 		}
 		for i := bodyStart; i < len(v); i++ {
 			expr := v[i]
@@ -2617,7 +2730,13 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 				delete(ome2.variableReplacement, sym)
 			}
 			v[2], _, _ = optimizeExCompat(v[2], env, &ome2, true)
-			return NewSlice(v), tiZero
+			if !ome.moduleSyntaxOwned {
+				// Public optimization preserves its original ordinary operands.
+				// A body rewrite cannot retain a private proof from an input AST.
+				return NewSlice(lambdaSyntaxOperands(v)), tiZero
+			}
+			// The private module owner may attach a fresh proof after rewriting.
+			return NewSlice(prepareLambdaBindingsOwned(v, true)), tiZero
 		}
 		/* Lambdas with explicit NumVars still execute in numbered-call frames at
 		runtime. Some generated plans keep symbolic parameter references in the
@@ -2659,7 +2778,7 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 			if slotIndex != declaredNumVars {
 				v[3] = NewInt(int64(slotIndex))
 			}
-			return NewSlice(prepareLambdaBindings(v)), bodyType.WithoutConst()
+			return NewSlice(prepareLambdaBindingsOwned(v, ome.moduleSyntaxOwned)), bodyType.WithoutConst()
 		}
 		// Auto-number parameters
 		ome2 := ome.Copy()
@@ -2695,7 +2814,7 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 		if slotIndex > 0 {
 			v = append(v[:len(v):len(v)], NewInt(int64(slotIndex)))
 		}
-		return NewSlice(prepareLambdaBindings(v)), bodyType.WithoutConst()
+		return NewSlice(prepareLambdaBindingsOwned(v, ome.moduleSyntaxOwned)), bodyType.WithoutConst()
 	}
 
 	switch {

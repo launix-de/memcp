@@ -41,10 +41,10 @@ this is how rdf works:
 				(if (int? value)
 					(json_object "type" "literal" "value" (concat value)
 						"datatype" "http://www.w3.org/2001/XMLSchema#integer")
-				(if (number? value)
-					(json_object "type" "literal" "value" (concat value)
-						"datatype" "http://www.w3.org/2001/XMLSchema#decimal")
-					(json_object "type" "literal" "value" value))))))
+					(if (number? value)
+						(json_object "type" "literal" "value" (concat value)
+							"datatype" "http://www.w3.org/2001/XMLSchema#decimal")
+						(json_object "type" "literal" "value" value))))))
 ))
 (define rdf_sparql_json_binding (lambda (row)
 	(apply json_object (reduce_assoc row (lambda (acc key value)
@@ -155,8 +155,16 @@ this is how rdf works:
 	(set old_handler (coalesce http_handler handler_404))
 	(define handle_query (lambda (req res schema query) (begin
 		/* check for password */
-		(set pw (scan_lookup nil (table "system" false "user" false) (list 372734710317056 (scan_boundary "equal" "username" 0 0 true true "" false) "password") (list (req "username"))))
-		(if (and pw (equal? pw (password (req "password")))) (time (begin
+		(define account (sql_authenticate_account (req "username") (req "password")))
+		(if account (time (begin
+			(define session (sql_bind_http_session req account))
+			(define session_state (req "__session_state"))
+			(define query_seq (req "__query_seq"))
+			(session "username" (account "username"))
+			(session "schema" schema)
+			/* Match SQL prepared-query semantics for URL parameters and execute the RDF
+			plan through the same closed, session-bound query-plan infrastructure. */
+			(sql_http_query_parameters req session)
 			(define accept (coalesceNil (get_assoc (req "header") "Accept") ""))
 			(define accept_lower (toLower accept))
 			(define standard_json (rdf_contains accept_lower "application/sparql-results+json"))
@@ -168,11 +176,11 @@ this is how rdf works:
 				(or standard_csv (or standard_tsv graph_turtle)))))
 			((res "header") "Content-Type"
 				(if standard_json "application/sparql-results+json; charset=utf-8"
-				(if standard_xml "application/sparql-results+xml; charset=utf-8"
-				(if standard_csv "text/csv; charset=utf-8"
-				(if standard_tsv "text/tab-separated-values; charset=utf-8"
-				(if graph_turtle "text/turtle; charset=utf-8"
-					"application/x-ndjson; charset=utf-8"))))))
+					(if standard_xml "application/sparql-results+xml; charset=utf-8"
+						(if standard_csv "text/csv; charset=utf-8"
+							(if standard_tsv "text/tab-separated-values; charset=utf-8"
+								(if graph_turtle "text/turtle; charset=utf-8"
+									"application/x-ndjson; charset=utf-8"))))))
 			((res "status") 200)
 			(define row_store (if buffered (newsession) nil))
 			(define resultrow (if buffered
@@ -180,16 +188,8 @@ this is how rdf works:
 					(row_store (concat "row:" (coalesceNil (row_store "count") 0)) row)
 					(row_store "count" (+ (coalesceNil (row_store "count") 0) 1))))
 				(res "jsonl")))
-			(define session (req "__session"))
-			(define session_state (req "__session_state"))
-			(define query_seq (req "__query_seq"))
-			(session "username" (req "username"))
-			(session "schema" schema)
-			/* Match SQL prepared-query semantics for URL parameters and execute the RDF
-			plan through the same closed, session-bound query-plan infrastructure. */
-			(extract_assoc (req "query") (lambda (k v) (session k v)))
 			(with_autocommit session session_state query_seq query (lambda (tx) (begin
-				(define formula (cached_parse sparql_queryplan_cache (list parse_sparql)
+				(define formula (cached_parse sparql_queryplan_cache "sparql" (list parse_sparql)
 					schema query (lambda (_schema _table _write) true)
 					(req "username") session false tx))
 				(sql_execute_formula session tx formula resultrow (lambda (_fields) true))
@@ -202,10 +202,10 @@ this is how rdf works:
 					(define vars (rdf_sparql_query_vars query))
 					((res "print")
 						(if standard_json (json_encode (rdf_sparql_results_json rows ask_query vars))
-						(if standard_xml (rdf_sparql_results_xml rows ask_query vars)
-						(if standard_csv (rdf_sparql_delimited_results rows vars "," "")
-						(if standard_tsv (rdf_sparql_delimited_results rows vars "\t" "?")
-							(rdf_turtle_results rows)))))))
+							(if standard_xml (rdf_sparql_results_xml rows ask_query vars)
+								(if standard_csv (rdf_sparql_delimited_results rows vars "," "")
+									(if standard_tsv (rdf_sparql_delimited_results rows vars "\t" "?")
+										(rdf_turtle_results rows)))))))
 				nil)
 		) query) (begin
 				((res "header") "Content-Type" "text/plain")
@@ -216,8 +216,9 @@ this is how rdf works:
 	)))
 	(define handle_ttl_load (lambda (req res schema ttl_data) (begin
 		/* check for password */
-		(set pw (scan_lookup nil (table "system" false "user" false) (list 372734710317056 (scan_boundary "equal" "username" 0 0 true true "" false) "password") (list (req "username"))))
-		(if (and pw (equal? pw (password (req "password")))) (begin
+		(define account (sql_authenticate_account (req "username") (req "password")))
+		(if account (begin
+			(sql_bind_http_session req account)
 			((res "header") "Content-Type" "text/plain")
 			((res "status") 200)
 			/*(print "Loading TTL data into: " schema)*/

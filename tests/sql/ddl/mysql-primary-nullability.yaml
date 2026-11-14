@@ -1,0 +1,142 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: mysql
+  isolated: true
+  description: MySQL primary declarations publish native non-null columns without rewriting legacy schemas
+setup:
+- sql: DROP TABLE IF EXISTS mysql_pk_inline
+- sql: DROP TABLE IF EXISTS mysql_pk_composite
+- sql: DROP TABLE IF EXISTS mysql_pk_unique
+- sql: DROP TABLE IF EXISTS mysql_pk_auto
+- sql: DROP TABLE IF EXISTS mysql_pk_legacy
+- sql: DROP TABLE IF EXISTS mysql_pk_added
+- sql: CREATE TABLE mysql_pk_inline(id INT NULL PRIMARY KEY,value INT)
+- sql: CREATE TABLE mysql_pk_composite(tenant INT NULL,id INT,value INT,PRIMARY KEY(tenant,id))
+- sql: CREATE TABLE mysql_pk_unique(id INT PRIMARY KEY,value INT UNIQUE)
+- sql: CREATE TABLE mysql_pk_auto(id INT PRIMARY KEY AUTO_INCREMENT,value INT)
+- sql: CREATE TABLE mysql_pk_added(value INT)
+- scm: |
+    (createtable "memcp-tests" "mysql_pk_legacy"
+      (list (list "column" "id" "INT" (list) (list "primary" true "null" true)))
+      (list) false nil)
+test_cases:
+- name: Only a genuine primary declaration changes the parsed nullability
+  scm: |
+    (begin
+      (define column (list 'list "column" "id" "INT" (list 'list) (list 'list "null" true)))
+      (define ordinary (list 'list "unique" "PRIMARY" (list 'list "id")
+        (list 'list "nulls_not_distinct" false)))
+      (define primary (list 'list "unique" "PRIMARY" (list 'list "id")))
+      (and (expression_equal? (mysql_primary_columns (list column ordinary)) (list column ordinary))
+        (expression_equal? (mysql_primary_columns (list column primary))
+          (list (list 'list "column" "id" "INT" (list 'list) (list 'list "null" false)) primary))))
+  expect: {result: true}
+- name: Inline and composite primary declarations publish real native nullability
+  scm: |
+    (begin
+      (define column (lambda (relation name)
+        (show (table "memcp-tests" false relation false nil) "column" name true)))
+      (and (not ((column "mysql_pk_inline" "id") "Null"))
+        (not ((column "mysql_pk_composite" "tenant") "Null"))
+        (not ((column "mysql_pk_composite" "id") "Null"))
+        ((column "mysql_pk_composite" "value") "Null")
+        ((column "mysql_pk_unique" "value") "Null")
+        ((column "mysql_pk_legacy" "id") "Null")))
+  expect: {result: true}
+- name: An inline primary key rejects explicit SQL NULL
+  sql: INSERT INTO mysql_pk_inline VALUES(NULL,10)
+  expect: {error: true}
+- name: An omitted ordinary primary column cannot receive an implicit NULL
+  sql: INSERT INTO mysql_pk_inline(value) VALUES(10)
+  expect: {error: true}
+- name: An actual primary value remains writable
+  sql: INSERT INTO mysql_pk_inline VALUES(1,10)
+  expect: {affected_rows: 1,rows: 1,data: [{affected_rows: 1}]}
+- name: Primary updates preserve the native non-null contract
+  sql: UPDATE mysql_pk_inline SET id=NULL WHERE id=1
+  expect: {error: true}
+- name: Rejected primary writes preserve all original values
+  sql: SELECT id,value FROM mysql_pk_inline
+  expect: {rows: 1,data: [{id: 1,value: 10}]}
+- name: Every composite primary member rejects NULL
+  sql: INSERT INTO mysql_pk_composite VALUES(1,NULL,10)
+  expect: {error: true}
+- name: The first composite primary member also rejects NULL
+  sql: INSERT INTO mysql_pk_composite VALUES(NULL,1,10)
+  expect: {error: true}
+- name: Distinct composite primary tuples retain their complete data
+  sql: INSERT INTO mysql_pk_composite VALUES(1,1,11),(1,2,12)
+  expect: {affected_rows: 2,rows: 1,data: [{affected_rows: 2}]}
+- name: Ordinary UNIQUE columns remain nullable
+  sql: INSERT INTO mysql_pk_unique VALUES(1,NULL),(2,NULL)
+  expect: {affected_rows: 2,rows: 1,data: [{affected_rows: 2}]}
+- name: Nullable UNIQUE rows remain distinct and observable
+  sql: SELECT id,value FROM mysql_pk_unique ORDER BY id
+  expect: {rows: 2,data: [{id: 1,value: null},{id: 2,value: null}]}
+- name: A native bulk insert observes the same primary column sanitizer
+  scm: |
+    (begin
+      (define session (newsession))
+      (session "username" "root") (session "schema" "memcp-tests")
+      (with_autocommit session nil 0 "primary batch" (lambda (tx)
+        (insert (table "memcp-tests" false "mysql_pk_inline" false tx)
+          (list "id" "value") (list (list 3 30) (list nil 40))
+          (list) nil false nil tx))))
+  expect: {error: true}
+- name: A failed native batch cannot leave an earlier accepted tuple
+  sql: SELECT id,value FROM mysql_pk_inline ORDER BY id
+  expect: {rows: 1,data: [{id: 1,value: 10}]}
+- name: AUTO_INCREMENT still supplies the native value for a NULL input
+  sql: INSERT INTO mysql_pk_auto VALUES(NULL,7)
+  expect: {affected_rows: 1,rows: 1,data: [{affected_rows: 1}]}
+- name: AUTO_INCREMENT still supplies an omitted primary value
+  sql: INSERT INTO mysql_pk_auto(value) VALUES(8)
+  expect: {affected_rows: 1,rows: 1,data: [{affected_rows: 1}]}
+- name: Generated non-null identities retain their payloads
+  sql: SELECT id,value FROM mysql_pk_auto ORDER BY id
+  expect: {rows: 2,data: [{id: 1,value: 7},{id: 2,value: 8}]}
+- name: ADD COLUMN carries an actual inline primary declaration to the same column owner
+  sql: ALTER TABLE mysql_pk_added ADD COLUMN id INT PRIMARY KEY
+- name: A newly added primary column rejects SQL NULL
+  sql: INSERT INTO mysql_pk_added VALUES(7,NULL)
+  expect: {error: true}
+- name: IF NOT EXISTS preserves a pre-existing nullable native primary declaration
+  sql: CREATE TABLE IF NOT EXISTS mysql_pk_legacy(id INT PRIMARY KEY)
+- name: Preserved legacy native metadata still governs its NULL input
+  sql: INSERT INTO mysql_pk_legacy VALUES(NULL)
+  expect: {affected_rows: 1,rows: 1,data: [{affected_rows: 1}]}
+- name: Legacy native NULL rows and declaration remain untouched
+  scm: |
+    (begin
+      (define handle (table "memcp-tests" false "mysql_pk_legacy" false nil))
+      (and ((show handle "column" "id" true) "Null")
+        (equal? (scan nil handle (list 369435906932736) (list)
+          (list "id") (lambda (id) (nil? id)) (list)
+          (lambda (count) (+ count 1)) 0 +) 1)))
+  expect: {result: true}
+- name: Restart restores actual primary nullability rather than a planner assumption
+  sql: SHUTDOWN
+- name: Reloaded primary columns remain non-null and ordinary UNIQUE remains nullable
+  scm: |
+    (and (not ((show (table "memcp-tests" false "mysql_pk_inline" false nil) "column" "id" true) "Null"))
+      (not ((show (table "memcp-tests" false "mysql_pk_composite" false nil) "column" "tenant" true) "Null"))
+      ((show (table "memcp-tests" false "mysql_pk_unique" false nil) "column" "value" true) "Null")
+      ((show (table "memcp-tests" false "mysql_pk_legacy" false nil) "column" "id" true) "Null"))
+  expect: {result: true}
+- name: Reloaded primary columns reject NULL inserts
+  sql: INSERT INTO mysql_pk_inline VALUES(NULL,20)
+  expect: {error: true}
+- name: Reloaded composite primary columns reject NULL updates
+  sql: UPDATE mysql_pk_composite SET tenant=NULL WHERE id=2
+  expect: {error: true}
+- name: Complete primary tuples survive restart and rejected updates
+  sql: SELECT tenant,id,value FROM mysql_pk_composite ORDER BY tenant,id
+  expect: {rows: 2,data: [{tenant: 1,id: 1,value: 11},{tenant: 1,id: 2,value: 12}]}
+cleanup:
+- sql: DROP TABLE IF EXISTS mysql_pk_inline
+- sql: DROP TABLE IF EXISTS mysql_pk_composite
+- sql: DROP TABLE IF EXISTS mysql_pk_unique
+- sql: DROP TABLE IF EXISTS mysql_pk_auto
+- sql: DROP TABLE IF EXISTS mysql_pk_legacy
+- sql: DROP TABLE IF EXISTS mysql_pk_added

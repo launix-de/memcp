@@ -1,0 +1,242 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  requires_tds: true
+  description: Public column defaults share native transactional declaration visibility, row defaults and durable source publication
+setup:
+- sql: CREATE TABLE public_default_native(id INT PRIMARY KEY,value INT DEFAULT 3)
+- sql: CREATE TABLE public_default_mysql(id INT PRIMARY KEY,value INT DEFAULT 3)
+- sql: CREATE TABLE public_default_psql(id INT PRIMARY KEY,value INT DEFAULT 3)
+- sql: CREATE TABLE public_default_tds(id INT PRIMARY KEY,value INT)
+- sql: CREATE TABLE public_default_named(id INT PRIMARY KEY,value INT)
+- sql: CREATE TABLE public_default_deferred(id INT PRIMARY KEY,value INT DEFAULT 3)
+- sql: CREATE TABLE public_default_acid(id INT PRIMARY KEY,value INT,label VARCHAR(3))
+cleanup:
+- sql: DROP TABLE IF EXISTS public_default_acid
+- scm: (dropprocedure "memcp-tests" "public_default_source" true)
+- sql: DROP TABLE IF EXISTS public_default_native
+- sql: DROP TABLE IF EXISTS public_default_mysql
+- sql: DROP TABLE IF EXISTS public_default_psql
+- sql: DROP TABLE IF EXISTS public_default_tds
+- sql: DROP TABLE IF EXISTS public_default_named
+- sql: DROP TABLE IF EXISTS public_default_deferred
+test_cases:
+- name: A native public default and its inserted row remain private and roll back together
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (define target (table "memcp-tests" false "public_default_native" false tx))
+      (altercolumn target "value" "default" 9 tx)
+      (define own_column (find ((show target "declarations" tx) "columns") (lambda (column) (equal? (column "Field") "value")) nil))
+      (define private (and (equal? (own_column "Default") 9)
+        (equal? ((show target "column" "value" false) "Default") 3)))
+      (insert target '("id") (list (list 1)) '() nil false nil tx)
+      (define own_sum (scan tx target '() '() '() (lambda () true) '("value") (lambda (acc value) (+ acc value)) 0 +))
+      (define outside_count (scan nil target '() '() '() (lambda () true) '() (lambda (acc) (+ acc 1)) 0 +))
+      (tx_rollback owner)
+      (and private (equal? own_sum 9) (equal? outside_count 0)
+        (equal? ((show target "column" "value" false) "Default") 3)
+        (equal? (scan nil target '() '() '() (lambda () true) '() (lambda (acc) (+ acc 1)) 0 +) 0)))
+  expect: {result: true}
+- name: Savepoint restoration restores the actual native default consumed by INSERT
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (define target (table "memcp-tests" false "public_default_native" false tx))
+      (altercolumn target "value" "default_declaration" '(5 "" "DF_public_native") tx)
+      (define boundary (tx_savepoint tx))
+      (altercolumn target "DF_public_native" "drop_default" nil tx)
+      (altercolumn target "value" "add_default" '(7 "" "DF_public_retired") tx)
+      (tx_rollback_to_savepoint tx boundary)
+      (define own_column (find ((show target "declarations" tx) "columns") (lambda (column) (equal? (column "Field") "value")) nil))
+      (insert target '("id") (list (list 2)) '() nil false nil tx)
+      (tx_commit owner)
+      (insert target '("id") (list (list 3)))
+      (and (equal? (own_column "Default") 5) (equal? (own_column "DefaultName") "DF_public_native")
+        (equal? ((show target "column" "value" false) "DefaultName") "DF_public_native")
+        (equal? (scan nil target '() '() '() (lambda () true) '("value") (lambda (acc value) (+ acc value)) 0 +) 10)))
+  expect: {result: true}
+- name: Deferred native defaults require explicit frontend input before any row effects
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (define target (table "memcp-tests" false "public_default_deferred" false tx))
+      (altercolumn target "value" "default_declaration" '(nil "invocation-owned-default" "DF_public_deferred" true) tx)
+      (define denied (try (lambda () (begin (insert target '("id") (list (list 1)) '() nil false nil tx) false))
+        (lambda (failure) (strlike (concat failure) "%frontend%"))))
+      (insert target '("id" "value") (list (list 2 17)) '() nil false nil tx)
+      (tx_rollback owner)
+      (and denied (equal? ((show target "column" "value" false) "Default") 3)
+        (equal? (scan nil target '() '() '() (lambda () true) '() (lambda (acc) (+ acc 1)) 0 +) 0)))
+  expect: {result: true}
+- name: A concurrent disjoint declaration cannot steal a staged default name at commit
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (define target (table "memcp-tests" false "public_default_native" false tx))
+      (define other (table "memcp-tests" false "public_default_named" false nil))
+      (altercolumn target "value" "default_declaration" '(31 "" "DF_public_race") tx)
+      (altercolumn other "value" "add_default" '(37 "" "DF_public_race"))
+      (define rejected (try (lambda () (begin (tx_commit owner) false))
+        (lambda (failure) (strlike (concat failure) "%declaration name already exists%"))))
+      (tx_rollback owner)
+      (altercolumn other "value" "default" nil)
+      (and rejected (equal? ((show target "column" "value" false) "Default") 5)
+        (equal? ((show target "column" "value" false) "DefaultName") "DF_public_native")))
+  expect: {result: true}
+- name: MySQL begins a default metadata transaction
+  syntax: mysql
+  session_id: public-default-mysql
+  sql: BEGIN
+- name: MySQL changes its owned public default before row production
+  syntax: mysql
+  session_id: public-default-mysql
+  sql: ALTER TABLE public_default_mysql ALTER COLUMN value SET DEFAULT 11
+- name: MySQL omitted native values consume the pending default
+  syntax: mysql
+  session_id: public-default-mysql
+  sql: INSERT INTO public_default_mysql(id) VALUES(1)
+- name: MySQL reads its own pending row and default
+  syntax: mysql
+  session_id: public-default-mysql
+  sql: SELECT id,value FROM public_default_mysql
+  expect: {rows: 1,data: [{id: 1,value: 11}]}
+- name: An independent MySQL observer cannot see the pending row
+  syntax: mysql
+  sql: SELECT id,value FROM public_default_mysql
+  expect: {rows: 0}
+- name: MySQL rolls back both native rows and the pending default
+  syntax: mysql
+  session_id: public-default-mysql
+  sql: ROLLBACK
+- name: MySQL uses the predecessor default after rollback
+  syntax: mysql
+  sql: INSERT INTO public_default_mysql(id) VALUES(2)
+- name: MySQL rollback preserves the predecessor declaration
+  syntax: mysql
+  sql: SELECT id,value FROM public_default_mysql
+  expect: {rows: 1,data: [{id: 2,value: 3}]}
+- name: PostgreSQL begins a default metadata transaction
+  syntax: psql
+  session_id: public-default-psql
+  sql: BEGIN
+- name: PostgreSQL changes its owned public default before row production
+  syntax: psql
+  session_id: public-default-psql
+  sql: ALTER TABLE public_default_psql ALTER COLUMN value SET DEFAULT 13
+- name: PostgreSQL omitted native values consume the pending default
+  syntax: psql
+  session_id: public-default-psql
+  sql: INSERT INTO public_default_psql(id) VALUES(1)
+- name: PostgreSQL reads its own pending row and default
+  syntax: psql
+  session_id: public-default-psql
+  sql: SELECT id,value FROM public_default_psql
+  expect: {rows: 1,data: [{id: 1,value: 13}]}
+- name: An independent PostgreSQL observer cannot see the pending row
+  syntax: psql
+  sql: SELECT id,value FROM public_default_psql
+  expect: {rows: 0}
+- name: PostgreSQL commits its pending default and row
+  syntax: psql
+  session_id: public-default-psql
+  sql: COMMIT
+- name: A PostgreSQL observer sees the committed row and future default
+  syntax: psql
+  sql: INSERT INTO public_default_psql(id) VALUES(2)
+- name: PostgreSQL publication preserves both native default consumers
+  syntax: psql
+  sql: SELECT id,value FROM public_default_psql ORDER BY id
+  expect: {rows: 2,data: [{id: 1,value: 13},{id: 2,value: 13}]}
+- name: TDS source and public default declarations publish atomically with their row
+  tds:
+    statements:
+    - {connection: owner, sql: BEGIN TRANSACTION}
+    - {connection: owner, sql: 'ALTER TABLE public_default_tds ADD CONSTRAINT DF_public_tds DEFAULT 19 FOR value'}
+    - {connection: owner, sql: 'CREATE PROCEDURE dbo.public_default_source AS SELECT 23 AS value'}
+    - connection: owner
+      sql: EXEC dbo.public_default_source
+      expect: {rows: 1,data: [{value: 23}]}
+    - connection: observer
+      sql: SELECT id,value FROM public_default_tds
+      expect: {rows: 0}
+    - {connection: owner, sql: 'INSERT public_default_tds(id) VALUES(1)'}
+    - connection: owner
+      sql: SELECT id,value FROM public_default_tds
+      expect: {rows: 1,data: [{id: 1,value: 19}]}
+    - connection: observer
+      sql: SELECT id,value FROM public_default_tds
+      expect: {rows: 0}
+    - connection: observer
+      sql: EXEC dbo.public_default_source
+      expect: {error: true,contains: ['procedure does not exist']}
+    - {connection: owner, sql: COMMIT TRANSACTION}
+    - connection: observer
+      sql: EXEC dbo.public_default_source
+      expect: {rows: 1,data: [{value: 23}]}
+    - connection: observer
+      sql: SELECT id,value FROM public_default_tds
+      expect: {rows: 1,data: [{id: 1,value: 19}]}
+- name: TDS rollback retires a named default without publishing a constraint
+  tds:
+    statements:
+    - {connection: owner, sql: BEGIN TRANSACTION}
+    - {connection: owner, sql: 'ALTER TABLE public_default_named ADD CONSTRAINT DF_public_rollback DEFAULT 29 FOR value'}
+    - {connection: owner, sql: 'INSERT public_default_named(id) VALUES(1)'}
+    - {connection: owner, sql: ROLLBACK TRANSACTION}
+    - connection: observer
+      sql: INSERT public_default_named(id) VALUES(2)
+    - connection: observer
+      sql: SELECT id,value FROM public_default_named
+      expect: {rows: 1,data: [{id: 2,value: null}]}
+- name: Restart retains only the committed default and source decisions
+  action: restart
+- name: Native committed defaults survive restart
+  sql: SELECT id,value FROM public_default_native ORDER BY id
+  expect: {rows: 2,data: [{id: 2,value: 5},{id: 3,value: 5}]}
+- name: PostgreSQL committed defaults apply to a new row after restart
+  syntax: psql
+  sql: INSERT INTO public_default_psql(id) VALUES(3)
+- name: PostgreSQL durable defaults preserve all three rows
+  syntax: psql
+  sql: SELECT id,value FROM public_default_psql ORDER BY id
+  expect: {rows: 3,data: [{id: 1,value: 13},{id: 2,value: 13},{id: 3,value: 13}]}
+- name: Restarted TDS source and default remain jointly executable
+  tds:
+    statements:
+    - sql: EXEC dbo.public_default_source
+      expect: {rows: 1,data: [{value: 23}]}
+    - sql: INSERT public_default_tds(id) VALUES(2)
+    - sql: SELECT id,value FROM public_default_tds ORDER BY id
+      expect: {rows: 2,data: [{id: 1,value: 19},{id: 2,value: 19}]}
+
+- name: The ACID checked statement borrows its own default only declaration lease
+  tds:
+    statements:
+    - connection: acid_owner
+      sql: SET ANSI_WARNINGS ON; BEGIN TRANSACTION; ALTER TABLE public_default_acid ADD CONSTRAINT DF_public_acid DEFAULT 29 FOR value; INSERT public_default_acid(id,label) VALUES(1,'abc'),(2,'def')
+    - connection: acid_owner
+      sql: BEGIN TRY UPDATE public_default_acid SET label=CASE WHEN id=1 THEN 'xy' ELSE 'long' END; END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS code,@@TRANCOUNT AS depth; END CATCH; SELECT id,value,label FROM public_default_acid ORDER BY id
+      expect:
+        data: [{code: 8152,depth: 1},{id: 1,value: 29,label: abc},{id: 2,value: 29,label: def}]
+    - connection: acid_owner
+      sql: INSERT public_default_acid(id,label) VALUES(3,'end'); COMMIT TRANSACTION
+    - connection: acid_observer
+      sql: SELECT id,value,label FROM public_default_acid ORDER BY id
+      expect:
+        rows: 3
+        data: [{id: 1,value: 29,label: abc},{id: 2,value: 29,label: def},{id: 3,value: 29,label: end}]
+- name: The same ACID default and statement ownership rolls back together
+  tds:
+    statements:
+    - connection: acid_owner
+      sql: BEGIN TRANSACTION; ALTER TABLE public_default_acid DROP CONSTRAINT DF_public_acid; ALTER TABLE public_default_acid ADD CONSTRAINT DF_public_acid_retired DEFAULT 31 FOR value; INSERT public_default_acid(id,label) VALUES(4,'new'); ROLLBACK TRANSACTION
+    - connection: acid_observer
+      sql: INSERT public_default_acid(id,label) VALUES(5,'old'); SELECT id,value,label FROM public_default_acid ORDER BY id
+      expect:
+        data: [{id: 1,value: 29,label: abc},{id: 2,value: 29,label: def},{id: 3,value: 29,label: end},{id: 5,value: 29,label: old}]

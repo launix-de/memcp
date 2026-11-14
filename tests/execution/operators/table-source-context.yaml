@@ -1,0 +1,82 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  description: Native source-expression context preserves computed dependency invalidation
+setup:
+- sql: CREATE TABLE source_context_input(id INT PRIMARY KEY)
+- sql: CREATE TABLE source_context_cache(id INT PRIMARY KEY)
+- sql: CREATE TABLE source_context_old_short(id INT PRIMARY KEY)
+- sql: CREATE TABLE source_context_old_exact(id INT PRIMARY KEY)
+- sql: INSERT INTO source_context_cache VALUES(1)
+- scm: |
+    (begin
+      (define target (table "memcp-tests" false "source_context_cache" false nil))
+      (createcolumn target "explicit_context" "INT" '() '() '() (lambda ()
+        (scan nil (table "memcp-tests" false "source_context_input" false nil)
+          '() '() '() (lambda () true) '("id") (lambda (acc id) (+ acc id)) 0 +)))
+      (createcolumn target "folded_context" "INT" '() '() '() (lambda ()
+        (scan nil (table "MEMCP-TESTS" true "SOURCE_CONTEXT_INPUT" true nil)
+          '() '() '() (lambda () true) '("id") (lambda (acc id) (+ acc id)) 0 +))))
+# Deliberate legacy source is persisted but not executed before decoding on restart.
+- scm: |
+    (begin
+      (define source (table "memcp-tests" false "source_context_input" false nil))
+      (createtrigger source "decode_old_short" "after_insert"
+        "(lambda (OLD NEW session tx) (insert (table \"memcp-tests\" \"source_context_old_short\") '(\"id\") (list (list (NEW \"id\"))) '() nil false nil tx))"
+        "scheme" (lambda (OLD NEW session tx)
+          (insert (table "memcp-tests" false "source_context_old_short" false nil) '("id") (list (list (NEW "id"))) '() nil false nil tx)) false)
+      (createtrigger source "decode_old_exact" "after_insert"
+        "(lambda (OLD NEW session tx) (insert (table \"memcp-tests\" false \"source_context_old_exact\" false) '(\"id\") (list (list (NEW \"id\"))) '() nil false nil tx))"
+        "scheme" (lambda (OLD NEW session tx)
+          (insert (table "memcp-tests" false "source_context_old_exact" false nil) '("id") (list (list (NEW "id"))) '() nil false nil tx)) false))
+cleanup:
+- sql: DROP TABLE IF EXISTS source_context_cache
+- sql: DROP TABLE IF EXISTS source_context_input
+- sql: DROP TABLE IF EXISTS source_context_old_short
+- sql: DROP TABLE IF EXISTS source_context_old_exact
+test_cases:
+- name: Explicit native source contexts warm an empty computed value
+  sql: SELECT explicit_context,folded_context FROM source_context_cache
+  expect: {rows: 1,data: [{explicit_context: 0,folded_context: 0}]}
+- name: Insert values after source dependencies have been registered
+  sql: INSERT INTO source_context_input VALUES(1),(2),(3)
+  expect: {affected_rows: 3}
+- name: Exact and folded identifiers invalidate warmed values
+  sql: SELECT explicit_context,folded_context FROM source_context_cache
+  expect: {rows: 1,data: [{explicit_context: 6,folded_context: 6}]}
+- name: Update a source value after warming
+  sql: UPDATE source_context_input SET id=4 WHERE id=3
+  expect: {affected_rows: 1}
+- name: Updated source values reach every computed dependency
+  sql: SELECT explicit_context,folded_context FROM source_context_cache
+  expect: {rows: 1,data: [{explicit_context: 7,folded_context: 7}]}
+- name: Delete a source value after warming
+  sql: DELETE FROM source_context_input WHERE id=2
+  expect: {affected_rows: 1}
+- name: Deleted source values invalidate every computed dependency
+  sql: SELECT explicit_context,folded_context FROM source_context_cache
+  expect: {rows: 1,data: [{explicit_context: 5,folded_context: 5}]}
+- name: Restart preserves stateless definitions with explicit committed context
+  sql: SHUTDOWN
+  restart_timeout: 60
+  expect: {rows: 0}
+- name: Restarted source dependencies retain their values
+  sql: SELECT explicit_context,folded_context FROM source_context_cache
+  expect: {rows: 1,data: [{explicit_context: 5,folded_context: 5}]}
+
+- name: Legacy persisted trigger lookups execute only after decode normalization
+  sql: INSERT INTO source_context_input VALUES(5)
+  expect: {affected_rows: 1}
+- name: Legacy short source retained its decoded native meaning
+  sql: SELECT id FROM source_context_old_short ORDER BY id
+  expect: {rows: 4,data: [{id: 1},{id: 2},{id: 3},{id: 5}]}
+- name: Legacy explicit-policy source retained its decoded native meaning
+  sql: SELECT id FROM source_context_old_exact ORDER BY id
+  expect: {rows: 4,data: [{id: 1},{id: 2},{id: 3},{id: 5}]}
+- name: Runtime native table calls require an explicit transaction argument
+  scm: '(table "memcp-tests" false "source_context_input" false)'
+  expect: {error: true,contains: [table,'5',argument]}
+- name: Native table contexts reject a fabricated transaction identity
+  scm: '(table "memcp-tests" false "source_context_input" false "not-a-capability")'
+  expect: {error: true,contains: native transaction capability}

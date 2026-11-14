@@ -1,0 +1,96 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: "1.0"
+  isolated: true
+  description: Database sequence authority survives filesystem-backed storage movement and rejection
+setup:
+  - sql: DROP TABLE IF EXISTS native_sequence_move
+  - sql: CREATE TABLE native_sequence_move (id INT PRIMARY KEY, sequence_name TEXT, relation_identity TEXT, high BIGINT) ENGINE=SAFE
+  - scm: (createdatabase "sequence_occupied_destination" false)
+cleanup:
+  # Isolated means serialized, not a fresh server/data directory. Restore the
+  # ordinary backend before any neighboring suite can reuse memcp-tests.
+  - sql: ALTER DATABASE `memcp-tests` SET STORAGE backend='filesystem'
+  - sql: DROP TABLE IF EXISTS native_sequence_move
+  - scm: (dropdatabase "sequence_occupied_destination" true)
+test_cases:
+  - name: Reserve a durable interval and preserve its logical table identity in a real row
+    scm: |
+      (begin
+        (define name (concat "sequence-move:" (uuid)))
+        (define target (table "memcp-tests" false "native_sequence_move" false nil))
+        (define interval (sequence_reserve "memcp-tests" name 5 nil))
+        (and (equal? interval (list 1 5))
+          (equal? (insert target '("id" "sequence_name" "relation_identity" "high")
+            (list (list 1 name (show target "identity" nil) (cadr interval)))) 1)))
+    expect: {result: true}
+  - name: Move ordinary database storage through the native filesystem-backed remote owner
+    # The existing fixture database owns this containing directory. Immediate
+    # child directories of the server root are also native discovery inputs;
+    # putting this physical leaf below an owned container avoids an alias.
+    sql: ALTER DATABASE `memcp-tests` SET STORAGE backend='FakeRemote',prefix='sequence_occupied_destination/.sequence_move_destination'
+  - name: Destination publication retains exact row values logical identity and sequence authority
+    scm: |
+      (begin
+        (define data (arg "data" "data" "data"))
+        (define config (json_decode (readfile (concat data "/memcp-tests.json"))))
+        (define target (table "memcp-tests" false "native_sequence_move" false nil))
+        (and (equal? (config "backend") "FakeRemote")
+          (equal? (config "prefix") "sequence_occupied_destination/.sequence_move_destination")
+          (not (nil? (readfile (concat data "/sequence_occupied_destination/.sequence_move_destination/schema.json"))))
+          (not (nil? (readfile (concat data "/sequence_occupied_destination/.sequence_move_destination/.transactions.log"))))
+          (equal? (scan nil target '() '() '() (lambda () true)
+            '("id" "sequence_name" "relation_identity" "high")
+            (lambda (count id name identity high) (begin
+              (if (and (equal? id 1) (equal? high 5)
+                  (equal? identity (show target "identity" nil))
+                  (equal? (sequence_current "memcp-tests" name nil) high)) true
+                (error "storage move changed row identity or sequence authority"))
+              (+ count 1))) 0 +) 1)))
+    expect: {result: true}
+  - name: A reservation after movement continues the existing interval
+    scm: |
+      (equal? (scan nil (table "memcp-tests" false "native_sequence_move" false nil)
+        '() '() '() (lambda () true) '("sequence_name" "high")
+        (lambda (count name high) (begin
+          (if (equal? (sequence_reserve "memcp-tests" name 2 nil) (list (+ high 1) (+ high 2))) true
+            (error "storage move reused a reserved interval"))
+          (+ count 1))) 0 +) 1)
+    expect: {result: true}
+  - name: An occupied native destination rejects before replacing sequence authority
+    sql: ALTER DATABASE `memcp-tests` SET STORAGE backend='FakeRemote',prefix='sequence_occupied_destination'
+    expect: {error: true, contains: destination storage already contains a database schema}
+  - name: Rejected movement preserves current backend exact row and next reservation
+    scm: |
+      (begin
+        (define config (json_decode (readfile (concat (arg "data" "data" "data") "/memcp-tests.json"))))
+        (and (equal? (config "prefix") "sequence_occupied_destination/.sequence_move_destination")
+          (equal? (scan nil (table "memcp-tests" false "native_sequence_move" false nil)
+            '() '() '() (lambda () true) '("id" "sequence_name" "high")
+            (lambda (count id name high) (begin
+              (if (and (equal? id 1) (equal? high 5)
+                  (equal? (sequence_current "memcp-tests" name nil) 7)
+                  (equal? (sequence_reserve "memcp-tests" name 1 nil) (list 8 8))) true
+                (error "rejected storage move changed data or authority"))
+              (+ count 1))) 0 +) 1)))
+    expect: {result: true}
+  - name: Crash after a successful destination reservation
+    scm: (crash)
+    expect: {interrupted_ok: true}
+  - name: Restart the moved backend after the crash
+    action: restart
+  - name: Destination replay retains exact row identity and continues above every acknowledged interval
+    scm: |
+      (begin
+        (define target (table "memcp-tests" false "native_sequence_move" false nil))
+        (equal? (scan nil target '() '() '() (lambda () true)
+          '("id" "sequence_name" "relation_identity" "high")
+          (lambda (count id name identity high) (begin
+            (if (and (equal? id 1) (equal? high 5)
+                (equal? identity (show target "identity" nil))
+                (equal? (sequence_current "memcp-tests" name nil) 8)
+                (equal? (sequence_reserve "memcp-tests" name 1 nil) (list 9 9))) true
+              (error "destination restart lost row identity or reused sequence values"))
+            (+ count 1))) 0 +) 1))
+    expect: {result: true}

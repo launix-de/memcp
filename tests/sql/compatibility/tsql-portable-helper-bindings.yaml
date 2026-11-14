@@ -1,0 +1,135 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  description: Portable frontend helpers retain explicit scalar and permission bindings
+# Use the existing Scmer JSON procedure codec: it restores numbered locals.
+# Decode an outer lambda whose body is the closed procedure, then invoke it
+# with hostile helper bindings. Nested lambda syntax is reconstructed in that
+# actual lexical frame, so a missing explicit capture cannot use Globalenv as
+# a fallback. Actual worker transport remains covered by cluster contracts.
+setup: []
+cleanup: []
+test_cases:
+- name: Cursor input adapters preserve the bare caller connection and identity scope owners
+  scm: |
+    (begin
+      (define parent (newsession))
+      (define request (tsql_cursor_input_session parent))
+      (define nested (tsql_cursor_input_session request))
+      (and (identical? (tsql_connection_session request) parent)
+        (identical? (tsql_identity_scope request) parent)
+        (identical? (tsql_connection_session nested) parent)
+        (identical? (tsql_identity_scope nested) parent)
+        (empty_list? (request)) (empty_list? (parent))))
+  expect: {result: true}
+- name: Cursor input sessions retain their complete status binding chain after serialization
+  scm: |
+    (begin
+      (define names (list 'tsql_cursor_status 'tsql_cursor_variable_entries 'tsql_cursor_entries
+        'tsql_cursor_directory 'tsql_cursor_key 'tsql_connection_session 'tsql_identity_scope))
+      (define wire (json_encode (list 'lambda names (close_procedure tsql_cursor_input_session))))
+      (define restored (apply (json_decode_scmer wire)
+        (map names (lambda (_name) (lambda args (error "unbound cursor helper"))))))
+      (define parent (newsession)) (parent "ordinary" 41)
+      (define scope (newsession)) (parent "__tsql_scope" scope)
+      (define connection (newsession)) (parent "__tsql_connection_session" connection)
+      (define cursor (newsession)) (cursor "open" true) (cursor "count" 2)
+      (cursor "options" (list "kind" "static"))
+      (scope "__tsql_local_cursors" (list (list "local_probe" cursor)))
+      (connection "__tsql_global_cursors" (list (list "global_probe" cursor)))
+      (scope "__tsql_cursor_variables" (list (list "probe" cursor)))
+      (define request (restored parent))
+      (define status (lambda (kind name)
+        (request (concat "__tsql_cursor_status:" (json_encode (list kind name))))))
+      (request "ordinary" 42)
+      (and (equal? (request "ordinary") 42) (equal? (parent "ordinary") 42)
+        (equal? (count (request)) (count (parent)))
+        (equal? (status "local" "LOCAL_PROBE") 1)
+        (equal? (status "global" "GLOBAL_PROBE") 1)
+        (equal? (status "variable" "@PROBE") 1)
+        (equal? (status "local" "absent") -3))))
+  expect: {result: true}
+- name: Message session factory retains its explicit connection helper after serialization
+  scm: |
+    (begin
+      (define wire (json_encode (list 'lambda (list 'tsql_connection_session) (close_procedure tsql_message_session))))
+      (define restored ((json_decode_scmer wire)
+        (lambda (_session) (error "unbound connection helper"))))
+      (define parent (newsession)) (parent "username" "root") (parent "__tsql_language" "Deutsch")
+      (define output (newsession))
+      (define scoped (restored parent (lambda (message) (output "message" message))))
+      ((scoped "__tsql_message") (list "text" "notice"))
+      (and (identical? (scoped "__tsql_connection_session") parent)
+        (equal? (scoped "username") "root") (equal? (scoped "__tsql_language") "Deutsch")
+        (not (has? (scoped) "__tsql_message")) (equal? ((output "message") "text") "notice")))
+  expect: {result: true}
+- name: Portable permission expressions retain the native database check
+  scm: |
+    (begin
+      (define planning (newsession))
+      (planning "__tsql_database_access_requirements"
+        (list (list (list "root" (tsql_account_id "root")) "memcp-tests" "DATABASE ACCESS")))
+      (define formula (tsql_permission_formula (list (list '+ 1 2)) planning))
+      (define wire (json_encode (list 'lambda (list 'tsql_require_permission)
+        (close_procedure (eval (list 'lambda '() formula))))))
+      (define restored ((json_decode_scmer wire)
+        (lambda args (error "unbound permission helper"))))
+      (equal? (restored) 3))
+  expect: {result: true}
+- name: Portable permission checks still reject stale account identities
+  scm: |
+    (begin
+      (define planning (newsession))
+      (planning "__tsql_database_access_requirements"
+        (list (list (list "root" "stale-account-incarnation") "memcp-tests" "DATABASE ACCESS")))
+      (define formula (tsql_permission_formula (list true) planning))
+      (define restored (json_decode_scmer (json_encode (close_procedure (eval (list 'lambda '() formula))))))
+      (try (lambda () (begin (restored) false)) (lambda (_cause) true)))
+  expect: {result: true}
+- name: Temporal style output retains its fractional formatter binding
+  scm: |
+    (begin
+      (define wire (json_encode (list 'lambda (list 'tsql_temporal_fraction_text) (close_procedure tsql_temporal_style_output))))
+      (define restored ((json_decode_scmer wire)
+        (lambda args (error "unbound fractional helper"))))
+      (equal? (restored (date_from_parts 1767268800 3000000 0) "%Y-%m-%d %H:%i:%s" 3 true false)
+        "2026-01-01 12:00:00.003"))
+  expect: {result: true}
+- name: Numeric calendar text retains its complete parser closure and dateformat argument
+  scm: |
+    (begin
+      (define wire (json_encode (list 'lambda (list 'tsql_datetime_text 'tsql_raise_error) (close_procedure tsql_calendar_text))))
+      (define restored ((json_decode_scmer wire)
+        (lambda args (error "unbound parser helper")) (lambda args (error "unbound error helper"))))
+      (and (equal? (format_date (restored " 1 . 2 . 2026 " "mdy" "us_english" true) "%Y-%m-%d") "2026-01-02")
+        (equal? (format_date (restored " 1 . 2 . 2026 " "dmy" "Deutsch" true) "%Y-%m-%d") "2026-02-01")))
+  expect: {result: true}
+- name: Named calendar parser retains language data and clock helpers transitively
+  scm: |
+    (begin
+      (define wire (json_encode (list 'lambda
+        (list 'tsql_named_date 'tsql_numeric_date 'tsql_english_clock 'tsql_english_date_parts)
+        (close_procedure tsql_datetime_text))))
+      (define restored ((json_decode_scmer wire) (lambda args (error "unbound named helper"))
+        (lambda args (error "unbound numeric helper")) (lambda args (error "unbound clock helper"))
+        (lambda args (error "unbound date field helper"))))
+      (and (equal? (restored "1 Januar 2026 12:03:04" "dmy" "Deutsch" true) "2026-01-01 12:03:04")
+        (equal? (restored "Jan 1 2026 1:03PM" "mdy" "us_english" true) "2026-01-01 13:03:00")))
+  expect: {result: true}
+- name: Closed calendar conversion retains its original SQL error on invalid dates
+  scm: |
+    (begin
+      (define restored (json_decode_scmer (json_encode (close_procedure tsql_calendar_text))))
+      (try (lambda () (begin (restored "31.02.2026" "dmy" "Deutsch" true) false))
+        (lambda (cause) (equal? (car cause) "tsql-error"))))
+  expect: {result: true}
+- name: Closed legacy day shift retains its fractional carry and overflow raiser
+  scm: |
+    (begin
+      (define restored (json_decode_scmer (json_encode (close_procedure tsql_shift_numeric_days))))
+      (and (equal? (format_date (restored (parse_date "2026-01-02 12:00:00") 0.5 -1) "%Y-%m-%d %H:%i:%s")
+          "2026-01-02 00:00:00")
+        (try (lambda () (begin (restored (parse_date "2026-01-01") 7000000 1) false))
+          (lambda (cause) (equal? (car cause) "tsql-error")))))
+  expect: {result: true}

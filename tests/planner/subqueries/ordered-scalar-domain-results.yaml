@@ -1,0 +1,185 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  description: Nested ordered scalar probes retain moving bounds independent predicates and nullable caller keys
+setup:
+- sql: CREATE TABLE ordered_domain_entity(id INT PRIMARY KEY,category INT)
+- sql: CREATE TABLE ordered_domain_history(id INT PRIMARY KEY,entity_id INT,coordinate INT,quantity INT,end_value INT,kind VARCHAR(8),UNIQUE KEY entity_coordinate(entity_id,coordinate))
+- sql: CREATE TABLE ordered_domain_kind(name VARCHAR(8) PRIMARY KEY,active INT)
+- sql: CREATE TABLE ordered_domain_axis(x INT PRIMARY KEY)
+- sql: CREATE TABLE ordered_domain_category(category INT)
+- sql: INSERT INTO ordered_domain_entity VALUES(1,0),(2,1),(3,0),(4,1)
+- sql: INSERT INTO ordered_domain_history VALUES(1,1,0,2,NULL,'P'),(2,2,0,3,NULL,'P'),(3,3,0,5,NULL,'T'),(4,4,0,NULL,NULL,'P'),(5,1,10,7,20,'P'),(6,2,20,11,NULL,'T'),(7,3,20,13,NULL,'P')
+- sql: INSERT INTO ordered_domain_kind VALUES('P',1),('T',0)
+- sql: INSERT INTO ordered_domain_axis VALUES(5),(15),(25)
+- sql: INSERT INTO ordered_domain_category VALUES(NULL),(0),(1)
+cleanup:
+- sql: DROP TABLE IF EXISTS ordered_domain_category
+- sql: DROP TABLE IF EXISTS ordered_domain_axis
+- sql: DROP TABLE IF EXISTS ordered_domain_kind
+- sql: DROP TABLE IF EXISTS ordered_domain_history
+- sql: DROP TABLE IF EXISTS ordered_domain_entity
+test_cases:
+- name: mysql ordered SUM retains moving and fixed caller coordinates
+  syntax: mysql
+  sql: |
+    SELECT d.x,p.category,
+      COALESCE((SELECT SUM((SELECT h.quantity FROM ordered_domain_history h
+          WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1)) FROM ordered_domain_entity e WHERE (p.category IS NULL OR e.category=p.category)
+          AND (SELECT k.active FROM ordered_domain_kind k WHERE k.name=(SELECT h.kind FROM ordered_domain_history h
+            WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1) LIMIT 1)=1
+          AND COALESCE((SELECT h.end_value FROM ordered_domain_history h
+            WHERE h.entity_id=e.id AND h.coordinate<=60 ORDER BY h.coordinate DESC LIMIT 1),d.x)>=d.x),0) AS total
+    FROM (SELECT 5 AS x UNION SELECT 15 UNION SELECT 25) d
+    CROSS JOIN (SELECT NULL AS category UNION SELECT 0 UNION SELECT 1) p
+    ORDER BY d.x,COALESCE(p.category,-1)
+  expect: {"rows":9,"data":[{"x":5,"category":null,"total":5},{"x":5,"category":0,"total":2},{"x":5,"category":1,"total":3},{"x":15,"category":null,"total":10},{"x":15,"category":0,"total":7},{"x":15,"category":1,"total":3},{"x":25,"category":null,"total":13},{"x":25,"category":0,"total":13},{"x":25,"category":1,"total":0}]}
+- name: mysql ordered COUNT and SUM retain independent NULL semantics
+  syntax: mysql
+  sql: |
+    SELECT d.x,p.category,
+      COALESCE((SELECT SUM((SELECT h.quantity FROM ordered_domain_history h
+          WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1)) FROM ordered_domain_entity e WHERE (p.category IS NULL OR e.category=p.category)
+          AND (SELECT k.active FROM ordered_domain_kind k WHERE k.name=(SELECT h.kind FROM ordered_domain_history h
+            WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1) LIMIT 1)=1
+          AND COALESCE((SELECT h.end_value FROM ordered_domain_history h
+            WHERE h.entity_id=e.id AND h.coordinate<=60 ORDER BY h.coordinate DESC LIMIT 1),d.x)>=d.x),0) AS total,
+      (SELECT COUNT(*) FROM ordered_domain_entity e WHERE (p.category IS NULL OR e.category=p.category)
+          AND (SELECT k.active FROM ordered_domain_kind k WHERE k.name=(SELECT h.kind FROM ordered_domain_history h
+            WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1) LIMIT 1)=1
+          AND COALESCE((SELECT h.end_value FROM ordered_domain_history h
+            WHERE h.entity_id=e.id AND h.coordinate<=60 ORDER BY h.coordinate DESC LIMIT 1),d.x)>=d.x) AS matched_rows,
+      (SELECT COUNT((SELECT h.quantity FROM ordered_domain_history h
+          WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1)) FROM ordered_domain_entity e WHERE (p.category IS NULL OR e.category=p.category)
+          AND (SELECT k.active FROM ordered_domain_kind k WHERE k.name=(SELECT h.kind FROM ordered_domain_history h
+            WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1) LIMIT 1)=1
+          AND COALESCE((SELECT h.end_value FROM ordered_domain_history h
+            WHERE h.entity_id=e.id AND h.coordinate<=60 ORDER BY h.coordinate DESC LIMIT 1),d.x)>=d.x) AS valued_rows
+    FROM (SELECT 5 AS x UNION SELECT 15 UNION SELECT 25) d
+    CROSS JOIN (SELECT NULL AS category UNION SELECT 0 UNION SELECT 1) p
+    ORDER BY d.x,COALESCE(p.category,-1)
+  expect: {"rows":9,"data":[{"x":5,"category":null,"total":5,"matched_rows":3,"valued_rows":2},{"x":5,"category":0,"total":2,"matched_rows":1,"valued_rows":1},{"x":5,"category":1,"total":3,"matched_rows":2,"valued_rows":1},{"x":15,"category":null,"total":10,"matched_rows":3,"valued_rows":2},{"x":15,"category":0,"total":7,"matched_rows":1,"valued_rows":1},{"x":15,"category":1,"total":3,"matched_rows":2,"valued_rows":1},{"x":25,"category":null,"total":13,"matched_rows":2,"valued_rows":1},{"x":25,"category":0,"total":13,"matched_rows":1,"valued_rows":1},{"x":25,"category":1,"total":0,"matched_rows":1,"valued_rows":0}]}
+- name: psql ordered SUM retains moving and fixed caller coordinates
+  syntax: psql
+  sql: |
+    SELECT d.x,p.category,
+      COALESCE((SELECT SUM((SELECT h.quantity FROM ordered_domain_history h
+          WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1)) FROM ordered_domain_entity e WHERE (p.category IS NULL OR e.category=p.category)
+          AND (SELECT k.active FROM ordered_domain_kind k WHERE k.name=(SELECT h.kind FROM ordered_domain_history h
+            WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1) LIMIT 1)=1
+          AND COALESCE((SELECT h.end_value FROM ordered_domain_history h
+            WHERE h.entity_id=e.id AND h.coordinate<=60 ORDER BY h.coordinate DESC LIMIT 1),d.x)>=d.x),0) AS total
+    FROM (SELECT 5 AS x UNION SELECT 15 UNION SELECT 25) d
+    CROSS JOIN (SELECT NULL AS category UNION SELECT 0 UNION SELECT 1) p
+    ORDER BY d.x,COALESCE(p.category,-1)
+  expect: {"rows":9,"data":[{"x":5,"category":null,"total":5},{"x":5,"category":0,"total":2},{"x":5,"category":1,"total":3},{"x":15,"category":null,"total":10},{"x":15,"category":0,"total":7},{"x":15,"category":1,"total":3},{"x":25,"category":null,"total":13},{"x":25,"category":0,"total":13},{"x":25,"category":1,"total":0}]}
+- name: psql ordered COUNT and SUM retain independent NULL semantics
+  syntax: psql
+  sql: |
+    SELECT d.x,p.category,
+      COALESCE((SELECT SUM((SELECT h.quantity FROM ordered_domain_history h
+          WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1)) FROM ordered_domain_entity e WHERE (p.category IS NULL OR e.category=p.category)
+          AND (SELECT k.active FROM ordered_domain_kind k WHERE k.name=(SELECT h.kind FROM ordered_domain_history h
+            WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1) LIMIT 1)=1
+          AND COALESCE((SELECT h.end_value FROM ordered_domain_history h
+            WHERE h.entity_id=e.id AND h.coordinate<=60 ORDER BY h.coordinate DESC LIMIT 1),d.x)>=d.x),0) AS total,
+      (SELECT COUNT(*) FROM ordered_domain_entity e WHERE (p.category IS NULL OR e.category=p.category)
+          AND (SELECT k.active FROM ordered_domain_kind k WHERE k.name=(SELECT h.kind FROM ordered_domain_history h
+            WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1) LIMIT 1)=1
+          AND COALESCE((SELECT h.end_value FROM ordered_domain_history h
+            WHERE h.entity_id=e.id AND h.coordinate<=60 ORDER BY h.coordinate DESC LIMIT 1),d.x)>=d.x) AS matched_rows,
+      (SELECT COUNT((SELECT h.quantity FROM ordered_domain_history h
+          WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1)) FROM ordered_domain_entity e WHERE (p.category IS NULL OR e.category=p.category)
+          AND (SELECT k.active FROM ordered_domain_kind k WHERE k.name=(SELECT h.kind FROM ordered_domain_history h
+            WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1) LIMIT 1)=1
+          AND COALESCE((SELECT h.end_value FROM ordered_domain_history h
+            WHERE h.entity_id=e.id AND h.coordinate<=60 ORDER BY h.coordinate DESC LIMIT 1),d.x)>=d.x) AS valued_rows
+    FROM (SELECT 5 AS x UNION SELECT 15 UNION SELECT 25) d
+    CROSS JOIN (SELECT NULL AS category UNION SELECT 0 UNION SELECT 1) p
+    ORDER BY d.x,COALESCE(p.category,-1)
+  expect: {"rows":9,"data":[{"x":5,"category":null,"total":5,"matched_rows":3,"valued_rows":2},{"x":5,"category":0,"total":2,"matched_rows":1,"valued_rows":1},{"x":5,"category":1,"total":3,"matched_rows":2,"valued_rows":1},{"x":15,"category":null,"total":10,"matched_rows":3,"valued_rows":2},{"x":15,"category":0,"total":7,"matched_rows":1,"valued_rows":1},{"x":15,"category":1,"total":3,"matched_rows":2,"valued_rows":1},{"x":25,"category":null,"total":13,"matched_rows":2,"valued_rows":1},{"x":25,"category":0,"total":13,"matched_rows":1,"valued_rows":1},{"x":25,"category":1,"total":0,"matched_rows":1,"valued_rows":0}]}
+- name: tsql ordered SUM retains moving and fixed caller coordinates
+  syntax: tsql
+  sql: |
+    SELECT d.x,p.category,
+      COALESCE((SELECT SUM(selected.quantity) FROM (SELECT e.category,
+          (SELECT TOP 1 h.quantity FROM ordered_domain_history h
+            WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC) AS quantity,
+          (SELECT TOP 1 k.active FROM ordered_domain_kind k
+            WHERE k.name=(SELECT TOP 1 h.kind FROM ordered_domain_history h
+              WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC)) AS active,
+          (SELECT TOP 1 h.end_value FROM ordered_domain_history h
+            WHERE h.entity_id=e.id AND h.coordinate<=60 ORDER BY h.coordinate DESC) AS end_value
+        FROM ordered_domain_entity e) selected
+        WHERE (p.category IS NULL OR selected.category=p.category)
+          AND selected.active=1 AND COALESCE(selected.end_value,d.x)>=d.x),0) AS total
+    FROM (SELECT 5 AS x UNION SELECT 15 UNION SELECT 25) d
+    CROSS JOIN (SELECT NULL AS category UNION SELECT 0 UNION SELECT 1) p
+    ORDER BY d.x,COALESCE(p.category,-1)
+  expect: {"rows":9,"data":[{"x":5,"category":null,"total":5},{"x":5,"category":0,"total":2},{"x":5,"category":1,"total":3},{"x":15,"category":null,"total":10},{"x":15,"category":0,"total":7},{"x":15,"category":1,"total":3},{"x":25,"category":null,"total":13},{"x":25,"category":0,"total":13},{"x":25,"category":1,"total":0}]}
+- name: tsql ordered COUNT and SUM retain independent NULL semantics
+  syntax: tsql
+  sql: |
+    SELECT d.x,p.category,
+      COALESCE((SELECT SUM(selected.quantity) FROM (SELECT e.category,
+          (SELECT TOP 1 h.quantity FROM ordered_domain_history h
+            WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC) AS quantity,
+          (SELECT TOP 1 k.active FROM ordered_domain_kind k
+            WHERE k.name=(SELECT TOP 1 h.kind FROM ordered_domain_history h
+              WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC)) AS active,
+          (SELECT TOP 1 h.end_value FROM ordered_domain_history h
+            WHERE h.entity_id=e.id AND h.coordinate<=60 ORDER BY h.coordinate DESC) AS end_value
+        FROM ordered_domain_entity e) selected
+        WHERE (p.category IS NULL OR selected.category=p.category)
+          AND selected.active=1 AND COALESCE(selected.end_value,d.x)>=d.x),0) AS total,
+      (SELECT COUNT(*) FROM (SELECT e.category,
+          (SELECT TOP 1 h.quantity FROM ordered_domain_history h
+            WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC) AS quantity,
+          (SELECT TOP 1 k.active FROM ordered_domain_kind k
+            WHERE k.name=(SELECT TOP 1 h.kind FROM ordered_domain_history h
+              WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC)) AS active,
+          (SELECT TOP 1 h.end_value FROM ordered_domain_history h
+            WHERE h.entity_id=e.id AND h.coordinate<=60 ORDER BY h.coordinate DESC) AS end_value
+        FROM ordered_domain_entity e) selected
+        WHERE (p.category IS NULL OR selected.category=p.category)
+          AND selected.active=1 AND COALESCE(selected.end_value,d.x)>=d.x) AS matched_rows,
+      (SELECT COUNT(selected.quantity) FROM (SELECT e.category,
+          (SELECT TOP 1 h.quantity FROM ordered_domain_history h
+            WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC) AS quantity,
+          (SELECT TOP 1 k.active FROM ordered_domain_kind k
+            WHERE k.name=(SELECT TOP 1 h.kind FROM ordered_domain_history h
+              WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC)) AS active,
+          (SELECT TOP 1 h.end_value FROM ordered_domain_history h
+            WHERE h.entity_id=e.id AND h.coordinate<=60 ORDER BY h.coordinate DESC) AS end_value
+        FROM ordered_domain_entity e) selected
+        WHERE (p.category IS NULL OR selected.category=p.category)
+          AND selected.active=1 AND COALESCE(selected.end_value,d.x)>=d.x) AS valued_rows
+    FROM (SELECT 5 AS x UNION SELECT 15 UNION SELECT 25) d
+    CROSS JOIN (SELECT NULL AS category UNION SELECT 0 UNION SELECT 1) p
+    ORDER BY d.x,COALESCE(p.category,-1)
+  expect: {"rows":9,"data":[{"x":5,"category":null,"total":5,"matched_rows":3,"valued_rows":2},{"x":5,"category":0,"total":2,"matched_rows":1,"valued_rows":1},{"x":5,"category":1,"total":3,"matched_rows":2,"valued_rows":1},{"x":15,"category":null,"total":10,"matched_rows":3,"valued_rows":2},{"x":15,"category":0,"total":7,"matched_rows":1,"valued_rows":1},{"x":15,"category":1,"total":3,"matched_rows":2,"valued_rows":1},{"x":25,"category":null,"total":13,"matched_rows":2,"valued_rows":1},{"x":25,"category":0,"total":13,"matched_rows":1,"valued_rows":1},{"x":25,"category":1,"total":0,"matched_rows":1,"valued_rows":0}]}
+- name: Native table domains retain the same aggregate coordinates
+  syntax: mysql
+  sql: |
+    SELECT d.x,p.category,
+      COALESCE((SELECT SUM((SELECT h.quantity FROM ordered_domain_history h
+          WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1)) FROM ordered_domain_entity e WHERE (p.category IS NULL OR e.category=p.category)
+          AND (SELECT k.active FROM ordered_domain_kind k WHERE k.name=(SELECT h.kind FROM ordered_domain_history h
+            WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1) LIMIT 1)=1
+          AND COALESCE((SELECT h.end_value FROM ordered_domain_history h
+            WHERE h.entity_id=e.id AND h.coordinate<=60 ORDER BY h.coordinate DESC LIMIT 1),d.x)>=d.x),0) AS total,
+      (SELECT COUNT(*) FROM ordered_domain_entity e WHERE (p.category IS NULL OR e.category=p.category)
+          AND (SELECT k.active FROM ordered_domain_kind k WHERE k.name=(SELECT h.kind FROM ordered_domain_history h
+            WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1) LIMIT 1)=1
+          AND COALESCE((SELECT h.end_value FROM ordered_domain_history h
+            WHERE h.entity_id=e.id AND h.coordinate<=60 ORDER BY h.coordinate DESC LIMIT 1),d.x)>=d.x) AS matched_rows,
+      (SELECT COUNT((SELECT h.quantity FROM ordered_domain_history h
+          WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1)) FROM ordered_domain_entity e WHERE (p.category IS NULL OR e.category=p.category)
+          AND (SELECT k.active FROM ordered_domain_kind k WHERE k.name=(SELECT h.kind FROM ordered_domain_history h
+            WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1) LIMIT 1)=1
+          AND COALESCE((SELECT h.end_value FROM ordered_domain_history h
+            WHERE h.entity_id=e.id AND h.coordinate<=60 ORDER BY h.coordinate DESC LIMIT 1),d.x)>=d.x) AS valued_rows
+    FROM ordered_domain_axis d CROSS JOIN ordered_domain_category p
+    ORDER BY d.x,COALESCE(p.category,-1)
+  expect: {"rows":9,"data":[{"x":5,"category":null,"total":5,"matched_rows":3,"valued_rows":2},{"x":5,"category":0,"total":2,"matched_rows":1,"valued_rows":1},{"x":5,"category":1,"total":3,"matched_rows":2,"valued_rows":1},{"x":15,"category":null,"total":10,"matched_rows":3,"valued_rows":2},{"x":15,"category":0,"total":7,"matched_rows":1,"valued_rows":1},{"x":15,"category":1,"total":3,"matched_rows":2,"valued_rows":1},{"x":25,"category":null,"total":13,"matched_rows":2,"valued_rows":1},{"x":25,"category":0,"total":13,"matched_rows":1,"valued_rows":1},{"x":25,"category":1,"total":0,"matched_rows":1,"valued_rows":0}]}

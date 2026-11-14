@@ -206,7 +206,7 @@ test_cases:
       amount: 9
       unlimited: -1
 - name: Alias length metadata preserves native declarations
-  scm: "(begin\n  (define handle (table \"memcp-tests\" false \"catalog_items\" false))\n  (define before (show\
+  scm: "(begin\n  (define handle (table \"memcp-tests\" false \"catalog_items\" false nil))\n  (define before (show\
     \ handle \"column\" \"title\" false))\n  (define length (tsql_column_length \"memcp-tests\" (sql_policy\
     \ \"root\") \"dbo.catalog_items\" \"title\"))\n  (define after (show handle \"column\" \"title\" false))\n\
     \  (list length (before \"Dimensions\")\n    (equal? (before \"RawType\") \"[memcp-tests].[dbo].[catalog_text]\"\
@@ -332,7 +332,6 @@ test_cases:
     data:
     - edition: MemCP
       missing: null
-  noncritical: true
 - name: Named column DEFAULT is a real catalog object
   sql: SELECT name,type_desc,definition,is_system_named FROM sys.default_constraints WHERE parent_object_id=OBJECT_ID(N'dbo.catalog_constraints')
   expect:
@@ -452,13 +451,17 @@ test_cases:
   - sql: DROP TABLE IF EXISTS dbo.catalog_stale_alias
   - sql: DROP TYPE IF EXISTS dbo.catalog_transient_alias
   - sql: CREATE TYPE dbo.catalog_transient_alias FROM INT
-  scm: "(begin\n  (define session (newsession))\n  (define formula (sql_queryplan_compile_formula nil\n    (parse_tsql\
-    \ \"memcp-tests\" \"CREATE TABLE dbo.catalog_stale_alias(value dbo.catalog_transient_alias)\" nil session nil)))\n\
-    \  (drop_sql_type_alias \"memcp-tests\" \"catalog_transient_alias\" false nil)\n  (create_sql_type_alias \"memcp-tests\"\
-    \ \"catalog_transient_alias\" \"INT\" '() true nil)\n  (define rejected (try (lambda () (begin\n    (sql_execute_formula\
-    \ session nil formula (lambda row true) (lambda fields true)) false)) (lambda (_) true)))\n  (if (and rejected\
-    \ (nil? (table \"memcp-tests\" false \"catalog_stale_alias\" false))) true\n    (error \"cached CREATE published\
-    \ an obsolete alias declaration\")))\n"
+  scm: |
+    (begin
+      (define session (newsession))
+      (define formula (sql_queryplan_compile_formula nil
+        (parse_tsql "memcp-tests" "CREATE TABLE dbo.catalog_stale_alias(value dbo.catalog_transient_alias)" nil session nil)))
+      (drop_sql_type_alias "memcp-tests" "catalog_transient_alias" false nil (newsession))
+      (create_sql_type_alias "memcp-tests" "catalog_transient_alias" "INT" '() true nil (newsession))
+      (define rejected (try (lambda () (begin
+        (sql_execute_formula session nil formula (lambda row true) (lambda fields true)) false)) (lambda (_) true)))
+      (if (and rejected (nil? (table "memcp-tests" false "catalog_stale_alias" false nil))) true
+        (error "cached CREATE published an obsolete alias declaration")))
   expect:
     result: true
 - sql: DROP TABLE IF EXISTS dbo.catalog_stale_alias
@@ -496,7 +499,7 @@ test_cases:
 - name: Named default is part of the existing column snapshot
   scm: |
     (begin
-      (define c (show (table "memcp-tests" false "ddl_native_defaults" false) "column" "value" false))
+      (define c (show (table "memcp-tests" false "ddl_native_defaults" false nil) "column" "value" false))
       (and (equal? (c "DefaultName") "DF value]native") (equal? (c "Default") 10)))
   expect: {result: true}
 - name: Qualified INSERT consumes the native defaults
@@ -539,8 +542,10 @@ test_cases:
 - name: Duplicate defaults fail before table publication
   sql: CREATE TABLE dbo.ddl_duplicate_defaults(id INT DEFAULT 1 DEFAULT 2)
   expect: {error: true}
+# Ordinary row-free volatile scalar defaults are deferred rather than sampled.
+# A relational input remains outside that scalar declaration contract.
 - name: Volatile compound defaults are not frozen during CREATE
-  sql: CREATE TABLE dbo.ddl_duplicate_defaults(id DATETIME DEFAULT DATEADD(day,1,GETDATE()))
+  sql: CREATE TABLE dbo.ddl_duplicate_defaults(id DATETIME DEFAULT DATEADD(day,1,(SELECT GETDATE())))
   expect: {error: true}
 - name: Remove previous view alteration fixture
   sql: DROP VIEW IF EXISTS dbo.DdlNativeView
@@ -572,7 +577,7 @@ test_cases:
   setup:
   - sql: DROP TABLE IF EXISTS dbo.ddl_alias_primary
   - sql: CREATE TABLE dbo.ddl_alias_primary(value dbo.ddl_alias_text,PRIMARY KEY(value))
-  scm: (not ((show (table "memcp-tests" false "ddl_alias_primary" false) "column" "value" false) "Null"))
+  scm: (not ((show (table "memcp-tests" false "ddl_alias_primary" false nil) "column" "value" false) "Null"))
   expect: {result: true}
   cleanup:
   - sql: DROP TABLE dbo.ddl_alias_primary
@@ -586,7 +591,7 @@ test_cases:
 - name: Native metadata preserves the original qualified alias
   scm: |
     (begin
-      (define column (show (table "memcp-tests" false "ddl_alias_values" false) "column" "label" false))
+      (define column (show (table "memcp-tests" false "ddl_alias_values" false nil) "column" "label" false))
       (and (equal? (column "RawType") "[memcp-tests].[dbo].[ddl_alias_text]")
         (expression_equal? (column "Dimensions") '(8)) (column "Null")))
   expect: {result: true}
@@ -675,10 +680,14 @@ test_cases:
 - name: In-use text alias cannot be dropped
   sql: DROP TYPE dbo.ddl_alias_text
   expect: {error: true}
+- name: Remove previous nested alias view fixture
+  sql: DROP VIEW IF EXISTS dbo.DdlNestedAliasView
 - name: Remove previous alias view fixture
   sql: DROP VIEW IF EXISTS dbo.DdlAliasView
 - name: Alias view persists logical SQL through the existing view catalog
   sql: CREATE VIEW dbo.DdlAliasView AS SELECT number,label FROM dbo.ddl_alias_values
+- name: Nested alias view persists its qualified source declaration
+  sql: CREATE VIEW dbo.DdlNestedAliasView AS SELECT dbo.DdlAliasView.number,dbo.DdlAliasView.label FROM dbo.DdlAliasView
 - name: Alias declarations survive a graceful restart
   sql: SHUTDOWN
   syntax: mysql
@@ -688,6 +697,11 @@ test_cases:
 - name: Restored alias view resolves the producer contract
   sql: SELECT number+1 AS number,label+N'!' AS text FROM dbo.DDLALIASVIEW WHERE number=6
   expect: {rows: 1, data: [{number: 7, text: 'text!'}]}
+- name: Restored nested alias view resolves its saved qualified producer
+  sql: SELECT dbo.DdlNestedAliasView.number+1 AS number,dbo.DdlNestedAliasView.label+N'!' AS text FROM dbo.DdlNestedAliasView WHERE dbo.DdlNestedAliasView.number=6
+  expect: {rows: 1,data: [{number: 7,text: 'text!'}]}
+- name: Remove restored nested alias view
+  sql: DROP VIEW dbo.DdlNestedAliasView
 - name: Remove restored alias view
   sql: DROP VIEW dbo.ddlaliasview
 - name: Restored alias defaults remain native defaults
@@ -814,16 +828,16 @@ test_cases:
 - name: Alias lookup caches one compiler session and reloads in the next
   scm: |
     (begin
-      (drop_sql_type_alias "memcp-tests" "ddl_session_alias" true nil)
-      (create_sql_type_alias "memcp-tests" "ddl_session_alias" "INT" '() true nil)
+      (drop_sql_type_alias "memcp-tests" "ddl_session_alias" true nil (newsession))
+      (create_sql_type_alias "memcp-tests" "ddl_session_alias" "INT" '() true nil (newsession))
       (define first (newsession))
       (define initial (tsql_find_type_alias "memcp-tests" "ddl_session_alias" first))
-      (drop_sql_type_alias "memcp-tests" "ddl_session_alias" false nil)
-      (create_sql_type_alias "memcp-tests" "ddl_session_alias" "FLOAT" '() true nil)
+      (drop_sql_type_alias "memcp-tests" "ddl_session_alias" false nil (newsession))
+      (create_sql_type_alias "memcp-tests" "ddl_session_alias" "FLOAT" '() true nil (newsession))
       (define retained (tsql_find_type_alias "memcp-tests" "ddl_session_alias" first))
       (define second (sql_queryplan_compile_session first nil))
       (define refreshed (tsql_find_type_alias "memcp-tests" "ddl_session_alias" second))
-      (drop_sql_type_alias "memcp-tests" "ddl_session_alias" false nil)
+      (drop_sql_type_alias "memcp-tests" "ddl_session_alias" false nil (newsession))
       (and (equal? (initial "id") (retained "id"))
         (equal? (retained "base_type") "INT")
         (not (equal? (initial "id") (refreshed "id")))
@@ -832,32 +846,34 @@ test_cases:
 - name: Absent alias is cached locally and discovered by a new compiler session
   scm: |
     (begin
-      (drop_sql_type_alias "memcp-tests" "ddl_session_missing" true nil)
+      (drop_sql_type_alias "memcp-tests" "ddl_session_missing" true nil (newsession))
       (define first (newsession))
       (define absent (tsql_find_type_alias "memcp-tests" "ddl_session_missing" first))
-      (create_sql_type_alias "memcp-tests" "ddl_session_missing" "SMALLINT" '() true nil)
+      (create_sql_type_alias "memcp-tests" "ddl_session_missing" "SMALLINT" '() true nil (newsession))
       (define retained (tsql_find_type_alias "memcp-tests" "ddl_session_missing" first))
       (define fresh (tsql_find_type_alias "memcp-tests" "ddl_session_missing" (newsession)))
-      (drop_sql_type_alias "memcp-tests" "ddl_session_missing" false nil)
+      (drop_sql_type_alias "memcp-tests" "ddl_session_missing" false nil (newsession))
       (and (nil? absent) (nil? retained) (equal? (fresh "base_type") "SMALLINT")))
   expect: {result: true}
 - name: Alias cache keys preserve Unicode identifier spelling
   scm: |
     (begin
-      (drop_sql_type_alias "memcp-tests" "ddl_İ" true nil)
-      (create_sql_type_alias "memcp-tests" "ddl_İ" "INT" '() true nil)
+      (drop_sql_type_alias "memcp-tests" "ddl_İ" true nil (newsession))
+      (create_sql_type_alias "memcp-tests" "ddl_İ" "INT" '() true nil (newsession))
       (define declaration (tsql_find_type_alias "memcp-tests" "ddl_İ" (newsession)))
-      (drop_sql_type_alias "memcp-tests" "ddl_İ" false nil)
+      (drop_sql_type_alias "memcp-tests" "ddl_İ" false nil (newsession))
       (equal? (declaration "name") "ddl_İ"))
   expect: {result: true}
 - name: Alias creation rejects an absent database context
-  scm: (create_sql_type_alias "" "ddl_absent_owner" "INT" '() true nil)
+  scm: |
+    (create_sql_type_alias "" "ddl_absent_owner" "INT" '() true nil (newsession))
   expect: {error: true, contains: "database does not exist"}
 - name: Rejected alias creation leaves no catalog entry
   scm: (nil? (tsql_find_type_alias "" "ddl_absent_owner" nil))
   expect: {result: true}
 - name: Conditional alias removal still requires an existing database
-  scm: (drop_sql_type_alias "" "ddl_absent_owner" true nil)
+  scm: |
+    (drop_sql_type_alias "" "ddl_absent_owner" true nil (newsession))
   expect: {error: true, contains: "database does not exist"}
 - name: Transactional alias creation is rejected before publishing metadata
   scm: |
@@ -875,7 +891,7 @@ test_cases:
 - name: Transactional alias removal preserves the committed declaration
   scm: |
     (begin
-      (create_sql_type_alias "memcp-tests" "ddl_tx_removal" "INT" '() true nil)
+      (create_sql_type_alias "memcp-tests" "ddl_tx_removal" "INT" '() true nil (newsession))
       (define session (newsession))
       (session "username" "root")
       (tx_begin session)
@@ -885,7 +901,7 @@ test_cases:
         false)) (lambda (failure) (strlike (concat failure) "%alias DDL inside explicit transactions%"))))
       (tx_rollback session)
       (define retained (tsql_find_type_alias "memcp-tests" "ddl_tx_removal" nil))
-      (drop_sql_type_alias "memcp-tests" "ddl_tx_removal" false nil)
+      (drop_sql_type_alias "memcp-tests" "ddl_tx_removal" false nil (newsession))
       (and rejected (not (nil? retained))))
   expect: {result: true}
 # This isolated suite ends by replacing only its own database. Restore that
@@ -895,12 +911,13 @@ test_cases:
     (begin
       (define tx nil)
       (define session (newsession))
+    (session "username" "root")
       (define outcome (try (lambda () (begin
         (map (list (list parse_sql "`memcp-tests`") (list parse_psql "\"memcp-tests\"")
           (list parse_tsql "[memcp-tests]")) (lambda (frontend) (begin
           (define parse (car frontend))
           (define quoted_name (cadr frontend))
-          (create_sql_type_alias "memcp-tests" "ddl_lifecycle_alias" "INT" '() true nil)
+          (create_sql_type_alias "memcp-tests" "ddl_lifecycle_alias" "INT" '() true nil (newsession))
           (eval (parse "memcp-tests" (concat "CREATE DATABASE IF NOT EXISTS " quoted_name) nil (newsession) nil))
           (if (tsql_find_type_alias "memcp-tests" "ddl_lifecycle_alias" nil) true
             (error "existing-database create removed its alias"))
@@ -913,7 +930,7 @@ test_cases:
           (if (nil? (tsql_find_type_alias "memcp-tests" "ddl_lifecycle_alias" nil)) true
             (error "database drop retained its alias"))
           (eval (parse "memcp-tests" (concat "CREATE DATABASE " quoted_name) nil (newsession) nil))
-          (create_sql_type_alias "memcp-tests" "ddl_lifecycle_alias" "INT" '() true nil)
+          (create_sql_type_alias "memcp-tests" "ddl_lifecycle_alias" "INT" '() true nil (newsession))
           /* Model a crash between physical DROP and frontend catalog cleanup.
           Privileged native DDL intentionally bypasses the SQL lifecycle. */
           (dropdatabase "memcp-tests" false)
@@ -927,7 +944,7 @@ test_cases:
             (error "database recreation inherited an orphan alias")))))
         true)) (lambda (failure) (list failure))))
       (createdatabase "memcp-tests" true)
-      (drop_sql_type_alias "memcp-tests" "ddl_lifecycle_alias" true nil)
+      (drop_sql_type_alias "memcp-tests" "ddl_lifecycle_alias" true nil (newsession))
       (if (equal? outcome true) true (error (car outcome))))
   expect: {result: true}
 

@@ -1,0 +1,36 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  description: Lifted scalar projections retain every locally produced operand
+setup:
+- sql: CREATE TABLE projection_inputs(id INT,token INT)
+- sql: CREATE TABLE projection_values(id INT PRIMARY KEY,value INT)
+- sql: CREATE TABLE projection_empty(value INT)
+- sql: INSERT INTO projection_inputs VALUES(1,10),(2,20),(3,30),(1,40),(NULL,50)
+- sql: INSERT INTO projection_values VALUES(1,100),(2,200),(3,NULL)
+cleanup:
+- sql: DROP TABLE IF EXISTS projection_inputs
+- sql: DROP TABLE IF EXISTS projection_values
+- sql: DROP TABLE IF EXISTS projection_empty
+test_cases:
+- name: A nested MAX remains in the scalar input rather than escaping its producer
+  sql: SELECT q.token,(SELECT c.value+(SELECT MAX(z.value) FROM projection_values z) FROM projection_values c WHERE c.id=q.id) AS found FROM projection_inputs q ORDER BY q.token
+  expect:
+    data: [{token: 10,found: 300},{token: 20,found: 400},{token: 30,found: null},{token: 40,found: 300},{token: 50,found: null}]
+- name: A nested MAX retains lexical shadowing across a duplicate preserving UNION
+  sql: SELECT q.token,(SELECT c.value+(SELECT MAX(c.value) FROM projection_values c) FROM projection_values c WHERE c.id=q.id) AS found FROM(SELECT id,token FROM projection_inputs WHERE token<=20 UNION ALL SELECT id,token FROM projection_inputs WHERE token>20)q ORDER BY q.token
+  expect:
+    data: [{token: 10,found: 300},{token: 20,found: 400},{token: 30,found: null},{token: 40,found: 300},{token: 50,found: null}]
+- name: An empty nested aggregate keeps NULL inside each matching scalar row
+  sql: SELECT q.token,(SELECT c.value+(SELECT MAX(z.value) FROM projection_empty z) FROM projection_values c WHERE c.id=q.id) AS found FROM projection_inputs q ORDER BY q.token
+  expect:
+    data: [{token: 10,found: null},{token: 20,found: null},{token: 30,found: null},{token: 40,found: null},{token: 50,found: null}]
+- name: Outer coordinates remain available to a safe strict raw column projection
+  sql: SELECT q.token,(SELECT c.value+q.token FROM projection_values c WHERE c.id=q.id) AS found FROM projection_inputs q ORDER BY q.token
+  expect:
+    data: [{token: 10,found: 110},{token: 20,found: 220},{token: 30,found: null},{token: 40,found: 140},{token: 50,found: null}]
+- name: A nested existence operand retains its local producer and SQL Boolean value
+  sql: SELECT q.token,(SELECT c.value+EXISTS(SELECT 1 FROM projection_values z WHERE z.id=2) FROM projection_values c WHERE c.id=q.id) AS found FROM projection_inputs q ORDER BY q.token
+  expect:
+    data: [{token: 10,found: 101},{token: 20,found: 201},{token: 30,found: null},{token: 40,found: 101},{token: 50,found: null}]

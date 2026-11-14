@@ -430,6 +430,7 @@ func compileLambdaTemplate(expression Scmer) Scmer {
 		}
 		prepared := original
 		prepared.Body = jitBindLambdaCaptures(original.Body, bindings, nil, nil)
+		prepared.syntaxSize = nil
 		prepared.NumVars = base + len(symbols)
 		prepared.En = &Globalenv
 		prepared.Compiled = &JITEntryPoint{CaptureBase: base, CaptureCount: len(symbols), CaptureKeys: keys, CaptureSymbols: symbols}

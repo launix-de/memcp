@@ -1,0 +1,449 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  description: T-SQL object existence probes consume native table and view declarations
+  syntax: tsql
+  requires_tds: true
+  isolated: true
+setup:
+- scm: (eval (parse_sql "memcp-tests" "CREATE USER object_catalog_reader IDENTIFIED BY 'pw'" nil))
+- sql: CREATE DATABASE object_other
+- sql: CREATE TABLE object_probe(id INT)
+- sql: CREATE TABLE object_other.object_probe(id INT)
+- sql: CREATE VIEW object_view AS SELECT id FROM object_probe
+- sql: CREATE VIEW object_other.hidden_catalog_view AS SELECT id FROM object_other.object_probe
+- scm: (eval (parse_sql "memcp-tests" "GRANT ALL ON `memcp-tests`.* TO object_catalog_reader" nil))
+cleanup:
+- sql: DROP TABLE IF EXISTS fobj_child
+- sql: DROP TABLE IF EXISTS fobj_self
+- sql: DROP TABLE IF EXISTS fobj_long
+- sql: DROP TABLE IF EXISTS fobj_pending
+- sql: DROP TABLE IF EXISTS fobj_parent
+- scm: (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS object_catalog_reader" nil))
+- sql: DROP VIEW IF EXISTS object_view
+- sql: DROP VIEW IF EXISTS object_live_view
+- sql: DROP TABLE IF EXISTS object_probe
+- sql: DROP DATABASE IF EXISTS object_other
+test_cases:
+- name: Object names and kinds come from table and view declarations
+  sql: SELECT name,type_desc FROM sys.objects WHERE name LIKE N'object_%' ORDER BY name
+  expect: {rows: 2, data: [{name: object_probe, type_desc: USER_TABLE}, {name: object_view, type_desc: VIEW}]}
+- name: Qualified object catalog is confined to the selected database
+  sql: SELECT name FROM object_other.sys.objects WHERE name LIKE N'object_%' ORDER BY name
+  expect: {rows: 1, data: [{name: object_probe}]}
+- name: Bracketed catalog and owner keep the same source semantics
+  sql: SELECT name FROM [memcp-tests].[sys].[objects] WHERE name=N'object_probe'
+  expect: {rows: 1, data: [{name: object_probe}]}
+- name: Existing metadata object selects the positive conditional branch
+  sql: IF EXISTS(SELECT * FROM [memcp-tests].sys.objects WHERE name=N'object_probe') BEGIN SELECT 1 AS present END ELSE BEGIN SELECT 0 AS present END
+  expect: {rows: 1, data: [{present: 1}]}
+- name: Missing metadata object selects the negative conditional branch
+  sql: IF EXISTS(SELECT * FROM [memcp-tests].sys.objects WHERE name=N'object_missing') BEGIN SELECT 1 AS present END ELSE BEGIN SELECT 0 AS present END
+  expect: {rows: 1, data: [{present: 0}]}
+- name: Double-quoted catalog owner uses identifier grammar
+  sql: SELECT name FROM "memcp-tests"."sys"."objects" WHERE name=N'object_probe'
+  expect: {rows: 1, data: [{name: object_probe}]}
+- name: Stored views are also visible through the shared metadata adapter
+  # Catalog sources are logical queries; consume one boolean, never collect
+  # the native view-declaration relation into a Scheme row list.
+  scm: |
+    (begin
+      (define session (newsession)) (session "username" "root")
+      (define found (newsession))
+      (sql_execute_formula session nil
+        (cached_parse (newcachemap) "sql" (list parse_sql) "memcp-tests"
+          "SELECT table_schema,table_name,table_type FROM information_schema.tables WHERE table_schema='memcp-tests' AND table_name='object_view'"
+          nil "root" session false nil)
+        (lambda (row) (if (and (equal? (row "table_schema") "memcp-tests")
+          (equal? (row "table_name") "object_view") (equal? (row "table_type") "VIEW"))
+          (found "value" true) nil)) (lambda fields true))
+      (if (found "value") true (error "stored view is missing from the metadata adapter")))
+  expect: {result: true}
+- name: Object names retain national Unicode wire metadata
+  tds:
+    statements:
+    - sql: SELECT name FROM sys.objects WHERE name=N'object_probe'
+      expect:
+        rows: 1
+        data: [{name: object_probe}]
+        column_types: [{name: name, type: NVARCHAR, length: 128}]
+- name: MySQL catalog sources expose native tables and stored views together
+  syntax: mysql
+  sql: SELECT table_name,table_type FROM information_schema.tables WHERE table_schema='memcp-tests' AND table_name IN('object_probe','object_view') ORDER BY table_name
+  expect: {data: [{table_name: object_probe,table_type: BASE TABLE},{table_name: object_view,table_type: VIEW}]}
+- name: PostgreSQL catalog sources expose the same stored view declaration
+  syntax: psql
+  sql: SELECT table_name,table_type FROM information_schema.tables WHERE table_schema='memcp-tests' AND table_name='object_view'
+  expect: {data: [{table_name: object_view,table_type: VIEW}]}
+- name: Catalog counts include both native and stored relation declarations
+  sql: SELECT COUNT(*) AS total FROM information_schema.tables WHERE table_catalog=N'memcp-tests' AND table_name IN(N'object_probe',N'object_view')
+  expect: {data: [{total: 2}]}
+- name: Catalog DISTINCT merges complete names across both declaration producers
+  sql: SELECT COUNT(DISTINCT table_type) AS kinds FROM information_schema.tables WHERE table_catalog=N'memcp-tests' AND table_name IN(N'object_probe',N'object_view')
+  expect: {data: [{kinds: 2}]}
+- name: Catalog grouping retains the complete declaration union
+  sql: SELECT table_type,COUNT(*) AS total FROM information_schema.tables WHERE table_catalog=N'memcp-tests' AND table_name IN(N'object_probe',N'object_view') GROUP BY table_type ORDER BY table_type
+  expect: {data: [{table_type: BASE TABLE,total: 1},{table_type: VIEW,total: 1}]}
+- name: View definitions are not exported as catalog table columns
+  sql: SELECT sql FROM information_schema.tables WHERE table_name=N'object_view'
+  expect: {error: true}
+- name: Catalog source plans retain logical declaration producers
+  sql: EXPLAIN IR SELECT table_name FROM information_schema.tables WHERE table_catalog=N'memcp-tests' AND table_name=N'object_view'
+  expect: {contains: [union-block, views],not_contains: [materialized-subquery, legacy_materialized]}
+- name: Warm an absent stored view catalog predicate
+  sql: SELECT COUNT(*) AS total FROM information_schema.tables WHERE table_catalog=N'memcp-tests' AND table_name=N'object_live_view'
+  expect: {data: [{total: 0}]}
+- name: Warm a view catalog predicate independent of any exact stored view name
+  sql: SELECT COUNT(*) AS total FROM information_schema.tables WHERE table_catalog=N'memcp-tests' AND table_type=N'VIEW' AND table_name LIKE N'object_%'
+  expect: {data: [{total: 1}]}
+- name: Publish a stored view after the catalog plan was cached
+  sql: CREATE VIEW object_live_view AS SELECT id FROM object_probe
+- name: Cached catalog plans observe a newly published stored view
+  sql: SELECT COUNT(*) AS total FROM information_schema.tables WHERE table_catalog=N'memcp-tests' AND table_name=N'object_live_view'
+  expect: {data: [{total: 1}]}
+- name: A name independent catalog cache observes newly published stored views
+  sql: SELECT COUNT(*) AS total FROM information_schema.tables WHERE table_catalog=N'memcp-tests' AND table_type=N'VIEW' AND table_name LIKE N'object_%'
+  expect: {data: [{total: 2}]}
+- name: Retire the stored view declaration
+  sql: DROP VIEW object_live_view
+- name: Cached catalog plans observe retirement of a stored view
+  sql: SELECT COUNT(*) AS total FROM information_schema.tables WHERE table_catalog=N'memcp-tests' AND table_name=N'object_live_view'
+  expect: {data: [{total: 0}]}
+- name: A name independent catalog cache observes retirement of stored views
+  sql: SELECT COUNT(*) AS total FROM information_schema.tables WHERE table_catalog=N'memcp-tests' AND table_type=N'VIEW' AND table_name LIKE N'object_%'
+  expect: {data: [{total: 1}]}
+- name: Authorized catalog reads include both native and stored declarations
+  username: object_catalog_reader
+  password: pw
+  session_id: object-catalog-authority
+  sql: SELECT COUNT(*) AS total FROM sys.objects WHERE name IN(N'object_probe',N'object_view')
+  expect: {data: [{total: 2}]}
+- name: Stored view catalog rows remain hidden without database connection authority
+  username: object_catalog_reader
+  password: pw
+  sql: SELECT COUNT(*) AS total FROM information_schema.tables WHERE table_catalog=N'object_other' AND table_name=N'hidden_catalog_view'
+  expect: {data: [{total: 0}]}
+- name: Revoke catalog reader source visibility while retaining CONNECT
+  # This compatibility request cannot revoke a native database membership.
+  sql: REVOKE SELECT FROM object_catalog_reader
+  expect: {affected_rows: 0}
+- name: Warm catalog plans recheck authority for both declaration producers
+  username: object_catalog_reader
+  password: pw
+  session_id: object-catalog-authority
+  sql: SELECT COUNT(*) AS total FROM sys.objects WHERE name IN(N'object_probe',N'object_view')
+  expect: {data: [{total: 2}]}
+- name: Revoke real native catalog database membership
+  scm: (eval (parse_sql "memcp-tests" "REVOKE ALL ON `memcp-tests`.* FROM object_catalog_reader" nil))
+- name: Warm catalog plans reject a caller after real database access revocation
+  username: object_catalog_reader
+  password: pw
+  session_id: object-catalog-authority
+  sql: SELECT COUNT(*) AS total FROM sys.objects WHERE name IN(N'object_probe',N'object_view')
+  expect: {error: true, contains: access denied}
+- name: Stored object catalog branches compose with an outer native UNION
+  setup:
+  - sql: INSERT object_probe VALUES(1)
+  sql: SELECT name,type_desc FROM sys.objects WHERE name=N'object_probe' UNION ALL SELECT CAST(N'row_probe' AS NVARCHAR(128)) AS name,CAST(N'REMOTE_ROW' AS NVARCHAR(60)) AS type_desc FROM object_probe WHERE id=1 ORDER BY name
+  expect: {data: [{name: object_probe,type_desc: USER_TABLE},{name: row_probe,type_desc: REMOTE_ROW}]}
+  cleanup:
+  - sql: DELETE FROM object_probe WHERE id=1
+- name: Ordered catalog source projections compose with an outer native UNION
+  setup:
+  - sql: INSERT object_probe VALUES(1)
+  sql: SELECT CAST(N'catalog_probe' AS NVARCHAR(128)) AS name FROM information_schema.tables WHERE table_catalog=N'memcp-tests' AND table_name=N'object_probe' UNION ALL SELECT CAST(N'row_probe' AS NVARCHAR(128)) AS name FROM object_probe WHERE id=1 ORDER BY name
+  expect: {data: [{name: catalog_probe},{name: row_probe}]}
+  cleanup:
+  - sql: DELETE FROM object_probe WHERE id=1
+
+- name: TSQL table metadata projects the selected database and dbo without peer duplicates
+  sql: SELECT table_catalog,table_schema,table_name FROM information_schema.tables WHERE table_name=N'object_probe'
+  expect: {rows: 1, data: [{table_catalog: memcp-tests, table_schema: dbo, table_name: object_probe}]}
+- name: TSQL column metadata is confined to the same selected catalog
+  sql: SELECT table_catalog,table_schema,table_name,column_name FROM information_schema.columns WHERE table_name=N'object_probe'
+  expect: {rows: 1, data: [{table_catalog: memcp-tests, table_schema: dbo, table_name: object_probe, column_name: id}]}
+- name: A table only in a peer database cannot satisfy a local existence probe
+  setup:
+  - sql: CREATE TABLE object_other.object_peer_only(id INT)
+  tds:
+    statements:
+    - sql: IF EXISTS (SELECT * FROM information_schema.tables WHERE table_name=N'object_peer_only') SELECT 1 AS present ELSE SELECT 0 AS present
+      expect: {rows: 1, data: [{present: 0}]}
+    - sql: SELECT column_name FROM information_schema.columns WHERE table_name=N'object_peer_only'
+      expect: {rows: 0}
+    - sql: SELECT table_name FROM information_schema.tables WHERE table_catalog=N'object_other' AND table_name=N'object_probe'
+      expect: {rows: 0}
+  cleanup:
+  - sql: DROP TABLE IF EXISTS object_other.object_peer_only
+- name: dbo is the SQL schema and a database name is never a schema alias
+  tds:
+    statements:
+    - sql: SELECT table_name FROM information_schema.tables WHERE table_schema=N'dbo' AND table_catalog=N'memcp-tests' AND table_name=N'object_probe'
+      expect: {rows: 1, data: [{table_name: object_probe}]}
+    - sql: SELECT table_name FROM information_schema.tables WHERE table_schema=N'memcp-tests' AND table_name=N'object_probe'
+      expect: {rows: 0}
+- name: Three part table metadata selects an explicit catalog with national descriptor fields
+  tds:
+    statements:
+    - sql: SELECT table_catalog,table_schema FROM [object_other].[information_schema].[tables] AS metadata WHERE metadata.table_name=N'object_probe'
+      expect:
+        rows: 1
+        data: [{table_catalog: object_other, table_schema: dbo}]
+        column_types:
+        - {name: table_catalog, type: NVARCHAR, length: 128}
+        - {name: table_schema, type: NVARCHAR, length: 128}
+- name: Quoted three part column metadata keeps the explicit selected catalog
+  sql: SELECT metadata.table_catalog,metadata.table_schema,metadata.column_name FROM "object_other"."information_schema"."columns" metadata WHERE metadata.table_name=N'object_probe'
+  expect: {rows: 1, data: [{table_catalog: object_other, table_schema: dbo, column_name: id}]}
+- name: Unqualified metadata follows the TDS login database instead of another visible catalog
+  tds:
+    database: object_other
+    statements:
+    - sql: SELECT table_catalog,table_schema,table_name FROM information_schema.tables WHERE table_name=N'object_probe'
+      expect: {rows: 1, data: [{table_catalog: object_other, table_schema: dbo, table_name: object_probe}]}
+- name: Imported catalog qualifiers reject references outside the mapped source and destination
+  scm: |
+    (begin
+      (define owner (newsession))
+      (owner "username" "root")
+      (owner "tsql_import_source" "catalog_source_alias")
+      (owner "tsql_import_target" "memcp-tests")
+      (try (lambda () (begin
+        (parse_tsql "memcp-tests"
+          "SELECT table_name FROM object_other.INFORMATION_SCHEMA.TABLES WHERE table_name=N'object_probe'"
+          nil owner nil)
+        false))
+        (lambda (failure) (regexp_test (string failure) "import reference outside destination and source alias"))))
+  expect: {result: true}
+- name: Native database membership admits local information schema projections
+  setup:
+  - scm: (eval (parse_sql "memcp-tests" "GRANT ALL ON `memcp-tests`.* TO object_catalog_reader" nil))
+  username: object_catalog_reader
+  password: pw
+  session_id: information-schema-authority
+  sql: SELECT table_catalog,table_schema,table_name FROM information_schema.tables WHERE table_name=N'object_probe'
+  expect: {rows: 1, data: [{table_catalog: memcp-tests, table_schema: dbo, table_name: object_probe}]}
+- name: Qualified metadata cannot acquire access to a peer database
+  username: object_catalog_reader
+  password: pw
+  sql: SELECT table_name FROM object_other.INFORMATION_SCHEMA.TABLES WHERE table_name=N'object_probe'
+  expect: {error: true, contains: access denied}
+- name: Retire actual information schema database authority
+  scm: (eval (parse_sql "memcp-tests" "REVOKE ALL ON `memcp-tests`.* FROM object_catalog_reader" nil))
+  expect: {}
+- name: Warm information schema plans recheck the actual database member
+  username: object_catalog_reader
+  password: pw
+  session_id: information-schema-authority
+  sql: SELECT table_catalog,table_schema,table_name FROM information_schema.tables WHERE table_name=N'object_probe'
+  expect: {error: true, contains: access denied}
+- name: MySQL keeps its global metadata domain and native database schema names
+  syntax: mysql
+  sql: SELECT table_catalog,table_schema,table_name FROM information_schema.tables WHERE table_name='object_probe' AND table_schema IN('memcp-tests','object_other') ORDER BY table_schema
+  expect: {rows: 2, data: [{table_catalog: def, table_schema: memcp-tests, table_name: object_probe}, {table_catalog: def, table_schema: object_other, table_name: object_probe}]}
+- name: PostgreSQL keeps the existing shared metadata domain unchanged
+  syntax: psql
+  sql: SELECT table_catalog,table_schema,table_name FROM information_schema.tables WHERE table_name='object_probe' AND table_schema IN('memcp-tests','object_other') ORDER BY table_schema
+  expect: {rows: 2, data: [{table_catalog: def, table_schema: memcp-tests, table_name: object_probe}, {table_catalog: def, table_schema: object_other, table_name: object_probe}]}
+
+- name: Object registry widens its legacy key bound without changing assigned native IDs
+  scm: |
+    (begin
+      (define actor (list "root" (tsql_account_id "root")))
+      (define before (tsql_native_object_id "memcp-tests" "object_probe" actor nil))
+      (define registry (table "system" false "tsql_object_ids" false nil))
+      (migratealtercolumn registry "incarnation"
+        (list "VARCHAR" '(80) false "utf8mb4_bin")
+        (list "VARCHAR" '() false "utf8mb4_bin"))
+      (tsql_initialize_object_ids)
+      (tsql_initialize_object_ids)
+      (define column (show registry "column" "incarnation" true))
+      (and (equal? (column "RawType") "VARCHAR")
+        (equal? (column "Collation") "utf8mb4_bin")
+        (empty_list? (column "Dimensions"))
+        (equal? before (tsql_native_object_id "memcp-tests" "object_probe" actor nil))))
+  expect: {result: true}
+- name: Public alteration of the protected registry remains forbidden
+  scm: |
+    (begin
+      (define registry (table "system" false "tsql_object_ids" false nil))
+      (define before (show registry "column" "incarnation" true))
+      (define rejected (try (lambda () (begin
+        (altercolumn registry "incarnation" "declaration"
+          (list (list "VARCHAR" '(80) false "utf8mb4_bin")
+            (list "VARCHAR" '() false "utf8mb4_bin")) nil)
+        false)) (lambda (_failure) true)))
+      (and rejected (equal? before (show registry "column" "incarnation" true))))
+  expect: {result: true}
+- name: Trusted declaration migration rejects a stale predecessor without changing the registry
+  scm: |
+    (begin
+      (define registry (table "system" false "tsql_object_ids" false nil))
+      (define before (show registry "column" "incarnation" true))
+      (define rejected (try (lambda () (begin
+        (migratealtercolumn registry "incarnation"
+          (list "VARCHAR" '(80) false "utf8mb4_bin")
+          (list "VARCHAR" '(40) false "utf8mb4_bin"))
+        false)) (lambda (_failure) true)))
+      (and rejected (equal? before (show registry "column" "incarnation" true))))
+  expect: {result: true}
+- name: Schema names use the supported default and preserve null or unknown IDs
+  sql: SELECT SCHEMA_NAME() AS implicit_owner,SCHEMA_NAME(1) AS explicit_owner,SCHEMA_NAME(NULL) AS null_owner,SCHEMA_NAME(987654321) AS missing_owner
+  expect: {rows: 1, data: [{implicit_owner: dbo, explicit_owner: dbo, null_owner: null, missing_owner: null}]}
+- name: Schema name reads variable values at execution
+  tds:
+    statements:
+    - sql: DECLARE @owner INT=1; SELECT SCHEMA_NAME(@owner) AS owner; SET @owner=NULL; SELECT SCHEMA_NAME(@owner) AS owner
+      expect:
+        result_sets:
+        - {rows: 1, data: [{owner: dbo}]}
+        - {rows: 1, data: [{owner: null}]}
+- name: Native and view catalog IDs have real owner fields
+  sql: SELECT name,CASE WHEN object_id>0 THEN 1 ELSE 0 END AS identified,parent_object_id,SCHEMA_NAME(schema_id) AS owner FROM sys.objects WHERE name IN(N'object_probe',N'object_view') ORDER BY name
+  expect: {rows: 2, data: [{name: object_probe, identified: 1, parent_object_id: 0, owner: dbo}, {name: object_view, identified: 1, parent_object_id: 0, owner: dbo}]}
+- name: Create a referenced table for foreign object ownership
+  sql: CREATE TABLE fobj_parent(id INT PRIMARY KEY)
+- name: Create the containing table with a named declaration
+  sql: CREATE TABLE fobj_child(id INT PRIMARY KEY,parent_id INT,CONSTRAINT fobj_child_ref FOREIGN KEY(parent_id) REFERENCES fobj_parent(id))
+- name: Create a self endpoint before declaring the self foreign object
+  sql: CREATE TABLE fobj_self(id INT PRIMARY KEY,parent_id INT)
+- name: Declare the self foreign object through the supported public owner
+  sql: ALTER TABLE fobj_self ADD CONSTRAINT fobj_self_ref FOREIGN KEY(parent_id) REFERENCES fobj_self(id)
+- name: Create two long declaration slots with an identical first key prefix
+  sql: CREATE TABLE fobj_long(id INT PRIMARY KEY,p INT,q INT,CONSTRAINT fobj_long_long_long_long_long_long_long_long_long_long_long_long_long_long_long_long_long_long_long_long_long_alpha FOREIGN KEY(p) REFERENCES fobj_parent(id),CONSTRAINT fobj_long_long_long_long_long_long_long_long_long_long_long_long_long_long_long_long_long_long_long_long_long_omega FOREIGN KEY(q) REFERENCES fobj_parent(id))
+- name: Foreign objects join to their containing tables rather than the referenced endpoint
+  sql: SELECT f.name,t.name AS containing,SCHEMA_NAME(f.schema_id) AS owner,CASE WHEN f.object_id<>t.object_id THEN 1 ELSE 0 END AS separate_id FROM sys.objects f JOIN sys.objects t ON t.object_id=f.parent_object_id WHERE f.type=N'F' AND f.name IN(N'fobj_child_ref',N'fobj_self_ref') ORDER BY f.name
+  expect: {rows: 2, data: [{name: fobj_child_ref, containing: fobj_child, owner: dbo, separate_id: 1}, {name: fobj_self_ref, containing: fobj_self, owner: dbo, separate_id: 1}]}
+- name: Long foreign names remain distinct registry keys without mirror or self duplicates
+  sql: SELECT COUNT(*) AS total,COUNT(DISTINCT object_id) AS identities FROM sys.objects WHERE type=N'F' AND name LIKE N'fobj_%'
+  expect: {rows: 1, data: [{total: 4, identities: 4}]}
+- name: Check objects are absent when no native check declaration was published
+  sql: SELECT COUNT(*) AS total FROM sys.objects WHERE type=N'C' AND name LIKE N'fobj_%'
+  expect: {rows: 1, data: [{total: 0}]}
+- name: Foreign catalog IDs retain ordinary national and integer TDS descriptors
+  tds:
+    statements:
+    - sql: SELECT name,type_desc,object_id,parent_object_id,schema_id FROM sys.objects WHERE name=N'fobj_child_ref' AND type=N'F'
+      expect:
+        rows: 1
+        column_types:
+        - {name: name, type: NVARCHAR, length: 128}
+        - {name: type_desc, type: NVARCHAR, length: 60}
+        - {name: object_id, type: INT}
+        - {name: parent_object_id, type: INT}
+        - {name: schema_id, type: INT}
+- name: Prepare an endpoint for transaction-visible foreign objects
+  sql: CREATE TABLE fobj_pending(id INT PRIMARY KEY,parent_id INT)
+- name: Pending foreign object is own-visible and observer-hidden then rolls back
+  scm: |
+    (begin
+      (define run (lambda (owner text) (begin
+        (define value (newsession))
+        (tsql_execute_request "memcp-tests" text owner nil 0
+          (lambda (row) (value "n" (row "n"))) (lambda fields true))
+        (value "n"))))
+      (define owner (newsession)) (owner "username" "root")
+      (define observer (newsession)) (observer "username" "root")
+      (run owner "BEGIN TRANSACTION")
+      (run owner "ALTER TABLE fobj_pending ADD CONSTRAINT fobj_pending_ref FOREIGN KEY(parent_id) REFERENCES fobj_parent(id)")
+      (define own (run owner "SELECT COUNT(*) AS n FROM sys.objects WHERE type=N'F' AND name=N'fobj_pending_ref'"))
+      (define other (run observer "SELECT COUNT(*) AS n FROM sys.objects WHERE type=N'F' AND name=N'fobj_pending_ref'"))
+      (run owner "ROLLBACK")
+      (and (equal? own 1) (equal? other 0)
+        (equal? (run observer "SELECT COUNT(*) AS n FROM sys.objects WHERE type=N'F' AND name=N'fobj_pending_ref'") 0)))
+  expect: {result: true}
+- name: Committed foreign object becomes visible to a separate observer
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root")
+      (define result (newsession))
+      (define run (lambda (text) (tsql_execute_request "memcp-tests" text owner nil 0
+        (lambda (row) (result "n" (row "n"))) (lambda fields true))))
+      (run "BEGIN TRANSACTION")
+      (run "ALTER TABLE fobj_pending ADD CONSTRAINT fobj_pending_ref FOREIGN KEY(parent_id) REFERENCES fobj_parent(id)")
+      (run "COMMIT")
+      (define observer (newsession)) (observer "username" "root")
+      (tsql_execute_request "memcp-tests" "SELECT COUNT(*) AS n FROM sys.objects WHERE name=N'fobj_pending_ref' AND type=N'F'"
+        observer nil 0 (lambda (row) (result "n" (row "n"))) (lambda fields true))
+      (equal? (result "n") 1))
+  expect: {result: true}
+- name: Dropping a real foreign declaration removes its object row
+  sql: ALTER TABLE fobj_pending DROP CONSTRAINT fobj_pending_ref
+- name: Dropped declaration is absent from the catalog while its containing table remains
+  sql: SELECT type,COUNT(*) AS total FROM sys.objects WHERE name IN(N'fobj_pending',N'fobj_pending_ref') GROUP BY type
+  expect: {rows: 1, data: [{type: U, total: 1}]}
+- name: Recreated containing table gets new native and foreign identities
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root")
+      (define value (newsession))
+      (define run (lambda (text) (tsql_execute_request "memcp-tests" text owner nil 0
+        (lambda (row) (value "id" (row "id"))) (lambda fields true))))
+      (run "SELECT object_id AS id FROM sys.objects WHERE name=N'fobj_child_ref' AND type=N'F'")
+      (define before (value "id"))
+      (run "DROP TABLE fobj_child")
+      (run "CREATE TABLE fobj_child(id INT PRIMARY KEY,parent_id INT,CONSTRAINT fobj_child_ref FOREIGN KEY(parent_id) REFERENCES fobj_parent(id))")
+      (run "SELECT object_id AS id FROM sys.objects WHERE name=N'fobj_child_ref' AND type=N'F'")
+      (and (> before 0) (> (value "id") 0) (not (equal? before (value "id")))))
+  expect: {result: true}
+- name: A peer catalog can own the same constraint name independently
+  sql: CREATE TABLE object_other.fobj_parent(id INT PRIMARY KEY)
+- name: Declare the peer foreign endpoint without a cross database reference
+  sql: CREATE TABLE object_other.fobj_child(id INT PRIMARY KEY,parent_id INT,CONSTRAINT fobj_child_ref FOREIGN KEY(parent_id) REFERENCES dbo.fobj_parent(id))
+- name: Qualified foreign object catalogs keep one selected database
+  sql: SELECT f.name,t.name AS containing FROM object_other.sys.objects f JOIN object_other.sys.objects t ON f.parent_object_id=t.object_id WHERE f.name=N'fobj_child_ref' AND f.type=N'F'
+  expect: {rows: 1, data: [{name: fobj_child_ref, containing: fobj_child}]}
+- name: Actual foreign metadata producer receives the selected database before building rows
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root")
+      (define code (parse_tsql "memcp-tests"
+        "SELECT COUNT(*) AS n FROM sys.objects WHERE type=N'F' AND name LIKE N'fobj_%'" nil owner nil))
+      (define observed (newsession))
+      (define native_source information_schema_rows)
+      (define provider (lambda (database relation tx selection) (begin
+        (define rows (native_source database relation tx selection))
+        (if (and (equal?? database "information_schema") (equal?? relation "referential_constraints")) (begin
+          (if (expression_equal? (get_assoc selection "schema" nil) '("exact" "memcp-tests")) true
+            (error "foreign metadata lost selected database admission"))
+          (if (reduce rows (lambda (ok row) (and ok (equal? (row "constraint_schema") "memcp-tests"))) true)
+            true (error "foreign metadata produced another database"))
+          (observed "produced" (count rows))) true)
+        rows)))
+      (define execute (eval (optimize (list (symbol "lambda")
+        (map (list "information_schema_rows" "session" "tx" "resultrow" "resultfields") symbol) code))))
+      (execute provider owner nil (lambda (row) (observed "row" row)) (lambda fields true))
+      (and (> (observed "produced") 0) (equal? ((observed "row") "n") 4)))
+  expect: {result: true}
+- name: Native database writer can read its foreign object metadata
+  setup:
+  - scm: (eval (parse_sql "memcp-tests" "GRANT ALL ON `memcp-tests`.* TO object_catalog_reader" nil))
+  username: object_catalog_reader
+  password: pw
+  session_id: foreign-object-authority
+  sql: SELECT COUNT(*) AS n FROM sys.objects WHERE type=N'F' AND name=N'fobj_child_ref'
+  expect: {rows: 1, data: [{n: 1}]}
+- name: Foreign object metadata does not grant access to a peer database
+  username: object_catalog_reader
+  password: pw
+  sql: SELECT name FROM object_other.sys.objects WHERE type=N'F' AND name=N'fobj_child_ref'
+  expect: {error: true, contains: access denied}
+- name: Retire the actual native foreign metadata authority
+  scm: (eval (parse_sql "memcp-tests" "REVOKE ALL ON `memcp-tests`.* FROM object_catalog_reader" nil))
+  expect: {}
+- name: Held foreign object plans recheck actual database membership
+  username: object_catalog_reader
+  password: pw
+  session_id: foreign-object-authority
+  sql: SELECT COUNT(*) AS n FROM sys.objects WHERE type=N'F' AND name=N'fobj_child_ref'
+  expect: {error: true, contains: access denied}
+- name: Checkpoint foreign catalog identities through a clean restart
+  syntax: mysql
+  sql: SHUTDOWN
+- name: Recovered foreign objects retain containing relation and schema identities
+  sql: SELECT f.name,t.name AS containing,SCHEMA_NAME(f.schema_id) AS owner FROM sys.objects f JOIN sys.objects t ON t.object_id=f.parent_object_id WHERE f.type=N'F' AND f.name IN(N'fobj_child_ref',N'fobj_self_ref') ORDER BY f.name
+  expect: {rows: 2, data: [{name: fobj_child_ref, containing: fobj_child, owner: dbo}, {name: fobj_self_ref, containing: fobj_self, owner: dbo}]}
+- name: Recovered native object ID is the same ID used by OBJECT_ID
+  sql: SELECT CASE WHEN object_id=OBJECT_ID(N'dbo.fobj_child',N'U') THEN 1 ELSE 0 END AS same_id FROM sys.objects WHERE name=N'fobj_child' AND type=N'U'
+  expect: {rows: 1, data: [{same_id: 1}]}

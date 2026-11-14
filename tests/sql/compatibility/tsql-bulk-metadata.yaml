@@ -1,0 +1,146 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: TSQL metadata-only execution binds declarations without data effects
+setup:
+- sql: CREATE TABLE bulk_metadata_target(id INT,label NVARCHAR(9))
+- scm: (eval (parse_sql "memcp-tests" "CREATE USER bulk_metadata_reader IDENTIFIED BY 'pw'" nil))
+- sql: GRANT CONNECT TO bulk_metadata_reader
+cleanup:
+- sql: DROP TABLE IF EXISTS bulk_metadata_target
+- sql: DROP TABLE IF EXISTS bulk_metadata_forbidden
+- scm: (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS bulk_metadata_reader" nil))
+test_cases:
+- name: Autocommit statements do not pretend to be explicit transactions
+  sql: SELECT @@TRANCOUNT AS depth
+  expect:
+    rows: 1
+    data:
+    - depth: 0
+- name: Native TDS transaction edges expose the supported explicit depth
+  tds:
+    statements:
+    - sql: BEGIN TRANSACTION
+    - sql: SELECT @@TRANCOUNT AS depth
+      expect:
+        rows: 1
+        data:
+        - depth: 1
+    - sql: ROLLBACK TRANSACTION
+    - sql: SELECT @@TRANCOUNT AS depth
+      expect:
+        rows: 1
+        data:
+        - depth: 0
+- name: Nested BEGIN rejects before committing or resetting the existing transaction
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION; INSERT bulk_metadata_target VALUES(7,N'private')
+    - connection: owner
+      sql: BEGIN TRANSACTION
+      expect:
+        error: true
+        contains:
+        - nested
+    - connection: observer
+      sql: SELECT COUNT(*) AS n FROM bulk_metadata_target
+      expect:
+        rows: 1
+        data:
+        - n: 0
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: observer
+      sql: SELECT COUNT(*) AS n FROM bulk_metadata_target
+      expect:
+        rows: 1
+        data:
+        - n: 0
+- name: FMTONLY sends typed result metadata without reading table rows
+  tds:
+    statements:
+    - sql: SET FMTONLY ON; SELECT id,label FROM bulk_metadata_target; SET FMTONLY OFF
+      expect:
+        rows: 0
+        column_types:
+        - name: id
+          type: INT
+        - name: label
+          type: NVARCHAR
+- name: Dynamic SQL inherits metadata-only execution from its caller
+  tds:
+    statements:
+    - sql: SET FMTONLY ON; EXEC(N'SELECT id,label FROM bulk_metadata_target'); SET FMTONLY OFF
+      expect:
+        rows: 0
+        column_types:
+        - name: id
+          type: INT
+        - name: label
+          type: NVARCHAR
+- name: Described INSERT does not publish any data
+  sql: SET FMTONLY ON; INSERT bulk_metadata_target VALUES(1,N'ignored'); SET FMTONLY OFF; SELECT COUNT(*) AS n FROM
+    bulk_metadata_target
+  expect:
+    rows: 1
+    data:
+    - n: 0
+- name: Metadata-only declaration rejects unsupported DDL before constructor effects
+  session_id: format-only-ddl
+  sql: SET FMTONLY ON; CREATE TABLE bulk_metadata_forbidden(id INT)
+  expect:
+    error: true
+- name: OFF leaves the connection able to execute ordinary queries after a rejected description
+  session_id: format-only-ddl
+  sql: SET FMTONLY OFF; SELECT 2 AS value
+  expect:
+    rows: 1
+    data:
+    - value: 2
+- name: A rejected metadata-only constructor is absent from the native catalog
+  sql: SELECT name FROM sys.objects WHERE name=N'bulk_metadata_forbidden'
+  expect:
+    rows: 0
+- name: FMTONLY preserves SELECT authority before exposing column declarations
+  username: bulk_metadata_reader
+  password: pw
+  sql: SET FMTONLY ON; SELECT id,label FROM bulk_metadata_target
+  expect:
+    error: true
+    contains: access denied
+- name: FMTONLY still binds source names and rejects an absent relation
+  session_id: format-only-missing
+  sql: SET FMTONLY ON; SELECT id FROM missing_metadata_source
+  expect:
+    error: true
+- name: Metadata-only errors do not prevent explicitly restoring ordinary execution
+  session_id: format-only-missing
+  sql: SET FMTONLY OFF; SELECT 3 AS value
+  expect:
+    rows: 1
+    data:
+    - value: 3
+- name: An invalid setting tail cannot enable metadata-only execution
+  scm: "(begin\n (define caller (newsession)) (caller \"username\" \"root\") (caller \"schema\" \"memcp-tests\")\n\
+    \ (define failed (try (lambda () (begin\n   (tsql_execute_statement nil \"memcp-tests\" \"SET FMTONLY ON invalid_tail\"\
+    \ caller\n     (lambda (_row) true) (lambda args true)) false)) (lambda (_failure) true)))\n (and failed (not\
+    \ (caller \"__tsql_fmtonly\"))))"
+  expect:
+    result: true
+- name: Complete setting grammar accepts a trailing semicolon and SQL comments
+  scm: "(begin\n (define caller (newsession)) (caller \"username\" \"root\") (caller \"schema\" \"memcp-tests\")\n\
+    \ (tsql_execute_statement nil \"memcp-tests\" \"/* setting */ SET FMTONLY ON; -- end\" caller\n   (lambda (_row)\
+    \ true) (lambda args true))\n (define enabled (caller \"__tsql_fmtonly\"))\n (tsql_execute_statement nil \"memcp-tests\"\
+    \ \"SET FMTONLY OFF; /* end */\" caller\n   (lambda (_row) true) (lambda args true))\n (and enabled (not (caller\
+    \ \"__tsql_fmtonly\"))))"
+  expect:
+    result: true
+- name: Ordinary EXPLAIN emits its code row through the actual result callback
+  sql: EXPLAIN SELECT 17 AS n
+  expect:
+    rows: 1
+    contains: resultrow

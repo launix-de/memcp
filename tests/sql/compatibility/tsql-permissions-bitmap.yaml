@@ -1,0 +1,94 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: PERMISSIONS reflects native database authority without creating object ACLs
+setup:
+  - sql: CREATE TABLE bitmap_probe(id INT PRIMARY KEY,value INT)
+  - sql: CREATE VIEW bitmap_view AS SELECT id FROM bitmap_probe
+  - sql: CREATE PROCEDURE bitmap_procedure AS SELECT 1 AS value
+  - sql: CREATE FUNCTION bitmap_scalar() RETURNS INT AS BEGIN RETURN 1; END
+  - sql: CREATE TABLE bitmap_saved(object_id INT,column_name NVARCHAR(128))
+  - sql: INSERT bitmap_saved SELECT OBJECT_ID(N'bitmap_probe'),N'id'
+  - scm: (eval (parse_sql "memcp-tests" "CREATE USER bitmap_reader IDENTIFIED BY 'pw'" nil))
+  - scm: (eval (parse_sql "memcp-tests" "CREATE USER bitmap_hidden IDENTIFIED BY 'pw'" nil))
+  - scm: (eval (parse_sql "memcp-tests" "GRANT ALL ON `memcp-tests`.* TO bitmap_reader" nil))
+cleanup:
+  - sql: DROP FUNCTION IF EXISTS bitmap_scalar
+  - sql: DROP PROCEDURE IF EXISTS bitmap_procedure
+  - sql: DROP VIEW IF EXISTS bitmap_view
+  - sql: DROP TABLE IF EXISTS bitmap_probe
+  - sql: DROP TABLE IF EXISTS bitmap_saved
+  - scm: (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS bitmap_reader" nil))
+  - scm: (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS bitmap_hidden" nil))
+test_cases:
+  - name: Database statement capabilities include supported schema creation rights
+    sql: SELECT PERMISSIONS()&14 AS schema_rights
+    expect: {data: [{schema_rights: 14}]}
+  - name: Native members hold complete database statement capabilities
+    username: bitmap_reader
+    password: pw
+    sql: SELECT PERMISSIONS() AS rights
+    expect: {data: [{rights: 254}]}
+  - name: Database membership does not grant native server administration
+    username: bitmap_reader
+    password: pw
+    sql: SELECT PERMISSIONS()&1 AS create_database
+    expect: {data: [{create_database: 0}]}
+  - name: Table capability bits derive from a current visible native object
+    sql: SELECT PERMISSIONS(OBJECT_ID(N'bitmap_probe'))&28703 AS rights
+    expect: {data: [{rights: 28703}]}
+  - name: Database members have the same full table capabilities
+    username: bitmap_reader
+    password: pw
+    sql: SELECT PERMISSIONS(OBJECT_ID(N'bitmap_probe'))&28703 AS rights
+    expect: {data: [{rights: 28703}]}
+  - name: Compatibility object DENY does not introduce table ACL restrictions
+    setup:
+      - sql: DENY UPDATE ON bitmap_probe TO bitmap_reader
+    username: bitmap_reader
+    password: pw
+    sql: SELECT PERMISSIONS(OBJECT_ID(N'bitmap_probe'))&2 AS update_right
+    expect: {data: [{update_right: 2}]}
+  - name: Procedure and scalar function bits reflect their actual object kind
+    sql: SELECT PERMISSIONS(OBJECT_ID(N'bitmap_procedure'))&32 AS procedure_execute,PERMISSIONS(OBJECT_ID(N'bitmap_scalar'))&36 AS scalar_rights
+    expect: {data: [{procedure_execute: 32,scalar_rights: 36}]}
+  - name: Object and column inputs bind before the metadata lookup source
+    sql: SELECT PERMISSIONS(object_id)&28703 AS object_rights,PERMISSIONS(object_id,column_name)&7 AS column_rights FROM bitmap_saved
+    expect: {data: [{object_rights: 28703,column_rights: 7}]}
+  - name: Invalid object and column inputs retain NULL
+    sql: SELECT PERMISSIONS(NULL) AS null_object,PERMISSIONS(-1) AS missing_object,PERMISSIONS(OBJECT_ID(N'bitmap_probe'),NULL) AS null_column,PERMISSIONS(OBJECT_ID(N'bitmap_probe'),N'missing') AS missing_column
+    expect: {data: [{null_object: null,missing_object: null,null_column: null,missing_column: null}]}
+  - name: Defined virtual catalog columns expose read access from their declarations
+    sql: SELECT PERMISSIONS(OBJECT_ID(N'sys.objects'))&1 AS read_object,PERMISSIONS(OBJECT_ID(N'sys.objects'),N'object_id')&1 AS read_column
+    expect: {data: [{read_object: 1,read_column: 1}]}
+  - name: Bitmap queries cannot grant native access to another account
+    sql: SELECT PERMISSIONS()&65536 AS grant_database,PERMISSIONS(OBJECT_ID(N'bitmap_probe'))&524288 AS grant_insert
+    expect: {data: [{grant_database: 0,grant_insert: 0}]}
+  - name: An actor without database membership has no database capabilities
+    scm: (tsql_permissions_statements "memcp-tests" (list "bitmap_hidden" (tsql_account_id "bitmap_hidden")))
+    expect: {result: 0}
+  - name: A database member cannot query another database without native membership
+    username: bitmap_hidden
+    password: pw
+    sql: SELECT PERMISSIONS(OBJECT_ID(N'bitmap_probe'))
+    expect: {error: true}
+  - name: The bitmap has an INT result contract over TDS
+    tds:
+      statements:
+        - sql: SELECT PERMISSIONS(OBJECT_ID(N'bitmap_probe'))&2 AS update_right
+          expect: {data: [{update_right: 2}],column_types: [{name: update_right,type: INT}]}
+  - name: Permissions validates its SQL object ID conversion
+    sql: SELECT PERMISSIONS(N'not-an-integer')
+    expect: {error: true}
+  - name: Permissions accepts at most an object and column
+    sql: SELECT PERMISSIONS(1,N'id',3)
+    expect: {error: true}
+  - name: View column metadata retains its positive permissions target
+    # The current shared column catalog exposes native tables and declared sys
+    # views; stored view column declarations are a genuine metadata gap.
+    noncritical: true
+    sql: SELECT PERMISSIONS(OBJECT_ID(N'bitmap_view'),N'id')&7 AS rights
+    expect: {data: [{rights: 7}]}

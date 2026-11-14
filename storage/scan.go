@@ -148,6 +148,15 @@ func (s scanError) Error() string {
 	return fmt.Sprint(s.r)
 }
 
+// OriginalFailure preserves callback language values through native scan
+// diagnostics. Only a language handler boundary consumes this payload.
+func (s scanError) OriginalFailure() any { return s.r }
+
+func (s scanError) Unwrap() error {
+	cause, _ := s.r.(error)
+	return cause
+}
+
 func buildOuterNullCallbackRow(callbackCols []string) []scm.Scmer {
 	return make([]scm.Scmer, len(callbackCols))
 }
@@ -1434,6 +1443,9 @@ func (t *table) scanExists(currentTx *TxContext, accessSchema scm.Scmer, accessV
 }
 
 func (t *table) scanExistsFrom(currentTx *TxContext, source *recSet, accessSchema scm.Scmer, accessValues []scm.Scmer, conditionCols []string, condition scm.Scmer) bool {
+	currentTx, finishData := t.readDataContext(currentTx)
+	defer finishData()
+
 	ss := SessionStateFromTx(currentTx)
 	querySeq := querySeqFromTx(currentTx)
 	touchTempColumns(t, conditionCols, nil)
@@ -1586,6 +1598,14 @@ func runDirectSingleShardScan(currentTx *TxContext, topology *tableShardTopology
 }
 
 func (t *table) scanWithBatchFrom(currentTx *TxContext, source *recSet, accessSchema scm.Scmer, accessValues []scm.Scmer, requiredAccess scanAccess, conditionCols []string, condition scm.Scmer, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, combine scm.Scmer, isOuter bool, stride int, batchdata []scm.Scmer) scm.Scmer {
+	var finishData func()
+	if scanMutates(callbackCols) {
+		currentTx, finishData = t.writeDataContext(currentTx)
+	} else {
+		currentTx, finishData = t.readDataContext(currentTx)
+	}
+	defer finishData()
+
 	ss := SessionStateFromTx(currentTx)
 	querySeq := querySeqFromTx(currentTx)
 	hasMutationCallback := false
@@ -1596,6 +1616,16 @@ func (t *table) scanWithBatchFrom(currentTx *TxContext, source *recSet, accessSc
 		}
 	}
 	if hasMutationCallback {
+		// Native computed-cache increments do not change a stored base row.
+		// Keep their existing admission; CHECK protects the $update sink only.
+		for _, column := range callbackCols {
+			if column == "$update" {
+				t.admitCheckMutation(currentTx, "UPDATE/DELETE")
+				break
+			}
+		}
+		releaseAdmission := t.admitNativeWrite(currentTx)
+		defer releaseAdmission()
 		t.beginContributionMutation()
 		defer t.endContributionMutation()
 		t.mutationMu.Lock()

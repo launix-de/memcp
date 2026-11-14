@@ -1,0 +1,51 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Stored function views expose their actual result contracts through REST FMTONLY and describe without running their scalar bodies
+setup:
+- sql: CREATE TABLE view_function_metadata_input(id INT PRIMARY KEY)
+- sql: INSERT INTO view_function_metadata_input VALUES(0)
+- sql: |
+    CREATE FUNCTION dbo.view_metadata_ratio(@value INT) RETURNS INT AS BEGIN
+      RETURN 1/@value;
+    END
+- sql: CREATE VIEW view_function_metadata_result AS SELECT dbo.view_metadata_ratio(id) AS ratio_value FROM view_function_metadata_input
+cleanup:
+- sql: DROP VIEW IF EXISTS view_function_metadata_result
+- sql: DROP FUNCTION IF EXISTS dbo.view_metadata_ratio
+- sql: DROP TABLE IF EXISTS view_function_metadata_input
+test_cases:
+- name: The ordinary function view really executes the invalid arithmetic input
+  sql: SELECT ratio_value FROM view_function_metadata_result
+  expect: {error: true,contains: division by zero}
+- name: REST FMTONLY describes the view without evaluating its zero input
+  session_id: view-function-fmtonly
+  sql: SET FMTONLY ON; SELECT ratio_value FROM view_function_metadata_result; SET FMTONLY OFF
+  expect: {rows: 0}
+- name: Leaving FMTONLY restores actual evaluation in the same REST session
+  session_id: view-function-fmtonly
+  sql: SELECT ratio_value FROM view_function_metadata_result
+  expect: {error: true,contains: division by zero}
+- name: Describe exposes the function return declaration independently of its row value
+  scm: |
+    (begin
+      (define columns (tds_describe "memcp-tests"
+        "SELECT ratio_value FROM view_function_metadata_result" "" (newsession)))
+      (and (equal? (count columns) 1) (equal? ((car columns) "name") "ratio_value")
+        (equal? ((car columns) "sql_type") "INT")))
+  expect: {result: true}
+- name: Pure wire preparation does not evaluate the function view
+  tds:
+    statements:
+    - connection: reader
+      prepare_only: true
+      sql: SELECT ratio_value FROM view_function_metadata_result
+    - connection: reader
+      sql: SELECT 17 AS value
+      expect: {rows: 1,data: [{value: 17}]}
+    - connection: reader
+      sql: SELECT ratio_value FROM view_function_metadata_result
+      expect: {error: true,contains: [division by zero]}

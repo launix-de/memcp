@@ -1,0 +1,142 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Historical case names remain stable. Authority now means native database
+# membership; TSQL access/owner requests are compatibility no-ops.
+metadata:
+  syntax: tsql
+  isolated: true
+  description: Invocation and target admission follow current native database membership
+setup:
+- scm: (eval (parse_sql "memcp-tests" "CREATE USER review_invoker IDENTIFIED BY 'pw'" nil))
+- sql: CREATE TABLE review_invoker_rows(id INT PRIMARY KEY, protected_value NVARCHAR(73)); INSERT review_invoker_rows
+    VALUES(1,N'secret')
+- sql: CREATE PROCEDURE review_invoker_proc AS SELECT protected_value FROM review_invoker_rows
+- sql: CREATE VIEW review_invoker_view AS SELECT protected_value FROM review_invoker_rows
+- scm: (eval (parse_sql "memcp-tests" "GRANT ALL ON `memcp-tests`.* TO review_invoker" nil))
+cleanup:
+- sql: DROP VIEW IF EXISTS review_invoker_view; DROP PROCEDURE IF EXISTS review_invoker_proc; DROP TABLE
+    IF EXISTS review_invoker_rows
+- scm: (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS review_invoker" nil))
+test_cases:
+- name: 'Native member: Explicit procedure retains invoker source permissions'
+  username: review_invoker
+  password: pw
+  sql: EXEC review_invoker_proc
+  expect:
+    data:
+    - protected_value: secret
+- name: 'Native member: Unqualified procedure retains invoker source permissions'
+  username: review_invoker
+  password: pw
+  sql: review_invoker_proc
+  expect:
+    data:
+    - protected_value: secret
+- name: 'Native member: Dynamic execution retains invoker source permissions'
+  username: review_invoker
+  password: pw
+  sql: EXEC(N'SELECT protected_value FROM review_invoker_rows')
+  expect:
+    data:
+    - protected_value: secret
+- name: 'Native member: Parameterized execution retains invoker source permissions'
+  username: review_invoker
+  password: pw
+  sql: EXEC sp_executesql N'SELECT protected_value FROM review_invoker_rows'
+  expect:
+    data:
+    - protected_value: secret
+- name: 'Native member: Stored view expansion retains consuming source permissions'
+  username: review_invoker
+  password: pw
+  sql: SELECT protected_value FROM review_invoker_view
+  expect:
+    data:
+    - protected_value: secret
+- scm: (eval (parse_sql "memcp-tests" "GRANT ALL ON `memcp-tests`.* TO review_invoker" nil))
+  name: Native membership setup is idempotent
+- name: Native member may insert through a shared source
+  username: review_invoker
+  password: pw
+  sql: INSERT review_invoker_rows SELECT 2,protected_value FROM review_invoker_rows WHERE id=1
+  expect:
+    affected_rows: 1
+- name: Native member may update its database rows
+  username: review_invoker
+  password: pw
+  sql: UPDATE review_invoker_rows SET protected_value=N'updated' WHERE id=2
+  expect:
+    affected_rows: 1
+- name: Native member may delete its database rows
+  username: review_invoker
+  password: pw
+  sql: DELETE FROM review_invoker_rows WHERE id=2
+  expect:
+    affected_rows: 1
+- scm: (eval (parse_sql "memcp-tests" "REVOKE ALL ON `memcp-tests`.* FROM review_invoker" nil))
+  name: Revoke native membership before checking every invocation boundary
+- name: Explicit procedure retains invoker source permissions
+  username: review_invoker
+  password: pw
+  sql: EXEC review_invoker_proc
+  expect:
+    error: true
+    contains: access denied
+- name: Unqualified procedure retains invoker source permissions
+  username: review_invoker
+  password: pw
+  sql: review_invoker_proc
+  expect:
+    error: true
+    contains: access denied
+- name: Dynamic execution retains invoker source permissions
+  username: review_invoker
+  password: pw
+  sql: EXEC(N'SELECT protected_value FROM review_invoker_rows')
+  expect:
+    error: true
+    contains: access denied
+- name: Parameterized execution retains invoker source permissions
+  username: review_invoker
+  password: pw
+  sql: EXEC sp_executesql N'SELECT protected_value FROM review_invoker_rows'
+  expect:
+    error: true
+    contains: access denied
+- name: Stored view expansion retains consuming source permissions
+  username: review_invoker
+  password: pw
+  sql: SELECT protected_value FROM review_invoker_view
+  expect:
+    error: true
+    contains: access denied
+- name: INSERT source cannot bind before target admission
+  username: review_invoker
+  password: pw
+  sql: INSERT review_invoker_rows(id,protected_value) SELECT 2,protected_value FROM review_invoker_rows
+  expect:
+    error: true
+    contains: access denied
+- name: Denied UPDATE cannot infer target declarations
+  username: review_invoker
+  password: pw
+  sql: UPDATE review_invoker_rows SET protected_value=1
+  expect:
+    error: true
+    contains: access denied
+- name: Denied DELETE cannot bind source declarations
+  username: review_invoker
+  password: pw
+  sql: DELETE FROM review_invoker_rows WHERE protected_value=N'secret'
+  expect:
+    error: true
+    contains: access denied
+- scm: (eval (parse_sql "memcp-tests" "GRANT ALL ON `memcp-tests`.* TO review_invoker" nil))
+  name: Native regrant restores invocation authority
+- name: Regranted member executes the stored procedure
+  username: review_invoker
+  password: pw
+  sql: EXEC review_invoker_proc
+  expect:
+    data:
+    - protected_value: secret

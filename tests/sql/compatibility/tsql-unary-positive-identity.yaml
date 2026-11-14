@@ -1,0 +1,105 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  requires_tds: true
+  isolated: true
+  description: Vendor-observed unary plus preserves declared temporal and national character operands
+setup:
+- sql: CREATE TABLE positive_values(id INT PRIMARY KEY,stamp DATETIME,label NVARCHAR(8))
+- sql: INSERT INTO positive_values VALUES(1,CONVERT(DATETIME,N'20000103',112),N'alpha'),(2,NULL,NULL)
+cleanup:
+- sql: DROP VIEW IF EXISTS dbo.positive_source
+- sql: DROP TABLE IF EXISTS positive_values
+test_cases:
+- name: Unary plus preserves nonnumeric VARCHAR data and typed NULL
+  sql: SELECT +CAST('alpha' AS VARCHAR(8)) AS value,+CAST(NULL AS VARCHAR(8)) AS missing
+  expect: {rows: 1,data: [{value: alpha,missing: null}]}
+- name: Adjacent concatenation and unary positive CASE preserve character output
+  sql: SELECT '01'+'.'++CASE WHEN 2<3 THEN RIGHT('0'+LTRIM(STR(2)),2) ELSE '00' END+'.' AS value
+  expect: {rows: 1,data: [{value: '01.02.'}]}
+- name: Repeated unary signs preserve VARCHAR trailing blanks
+  sql: SELECT DATALENGTH(++CAST('x  ' AS VARCHAR(8))) AS bytes
+  expect: {rows: 1,data: [{bytes: 3}]}
+- name: Unary VARCHAR identity preserves the declared column NULL and character data
+  sql: SELECT id,+CAST(label AS VARCHAR(8)) AS label FROM positive_values ORDER BY id
+  expect: {rows: 2,data: [{id: 1,label: alpha},{id: 2,label: null}]}
+- name: Unary positive VARCHAR preserves its explicit collation
+  sql: SELECT CASE WHEN (+CAST('alpha' AS VARCHAR(8)) COLLATE utf8mb4_general_ci)='ALPHA' THEN 1 ELSE 0 END AS matched
+  expect: {rows: 1,data: [{matched: 1}]}
+- name: Empty unary positive VARCHAR wire output preserves declared width
+  tds:
+    statements:
+    - sql: SELECT +CAST(NULL AS VARCHAR(8)) AS label WHERE 1=0
+      expect: {rows: 0,column_types: [{name: label,type: VARCHAR,length: 8}]}
+- name: Unary plus keeps a DATETIME value unchanged
+  sql: SELECT +CONVERT(DATETIME,N'20000103',112) AS value
+  expect: {rows: 1,data: [{value: '2000-01-03 00:00:00'}]}
+- name: Unary plus keeps a SMALLDATETIME value unchanged
+  sql: SELECT +CONVERT(SMALLDATETIME,N'20000103',112) AS value
+  expect: {rows: 1,data: [{value: '2000-01-03 00:00:00'}]}
+- name: Unary plus keeps a DATETIME2 value unchanged
+  sql: SELECT +CONVERT(DATETIME2(6),N'20000103',112) AS value
+  expect: {rows: 1,data: [{value: '2000-01-03 00:00:00'}]}
+- name: Unary plus preserves national character data without numeric conversion
+  sql: SELECT +CAST(N'alpha' AS NVARCHAR(8)) AS value
+  expect: {rows: 1,data: [{value: alpha}]}
+- name: Unary plus preserves typed temporal and text NULLs
+  sql: SELECT +CAST(NULL AS DATETIME) AS stamp,+CAST(NULL AS NVARCHAR(8)) AS label
+  expect: {rows: 1,data: [{stamp: null,label: null}]}
+- name: Unary plus preserves an explicit character collation contract
+  sql: SELECT CASE WHEN (+CAST(N'alpha' AS NVARCHAR(8)) COLLATE utf8mb4_general_ci)=N'ALPHA' THEN 1 ELSE 0 END AS matched
+  expect: {rows: 1,data: [{matched: 1}]}
+- name: A scalar module can assign unary positive DATEADD to a local DATETIME
+  sql: |
+    CREATE FUNCTION dbo.positive_calendar(@shift INT,@target DATETIME) RETURNS INT AS
+    BEGIN
+      DECLARE @origin DATETIME;
+      SET @origin=+DATEADD(day,@shift,CONVERT(DATETIME,N'20000103',112));
+      RETURN DATEDIFF(day,@origin,@target);
+    END
+- name: Created scalar source really executes the identity calendar expression
+  sql: SELECT dbo.positive_calendar(0,CONVERT(DATETIME,N'20000110',112)) AS first_value,dbo.positive_calendar(2,CONVERT(DATETIME,N'20000110',112)) AS shifted_value,dbo.positive_calendar(0,NULL) AS null_value
+  expect: {rows: 1,data: [{first_value: 7,shifted_value: 5,null_value: null}]}
+- name: Stored view retains unary operand declarations
+  sql: CREATE VIEW dbo.positive_source AS SELECT id,+stamp AS stamp,+label AS label FROM positive_values
+- name: Stored identity view retains temporal and national character NULL values
+  sql: SELECT id,stamp,label FROM dbo.positive_source ORDER BY id
+  expect: {rows: 2,data: [{id: 1,stamp: '2000-01-03 00:00:00',label: alpha},{id: 2,stamp: null,label: null}]}
+- name: Empty wire results retain temporal types and national character width
+  tds:
+    statements:
+    - sql: SELECT +CAST(NULL AS DATETIME) AS stamp,+CAST(NULL AS SMALLDATETIME) AS small_stamp,+CAST(NULL AS DATETIME2(6)) AS precise_stamp,+CAST(NULL AS NVARCHAR(8)) AS label WHERE 1=0
+      expect:
+        rows: 0
+        column_types: [{name: stamp,type: DATETIME},{name: small_stamp,type: SMALLDATETIME},{name: precise_stamp,type: DATETIME2},{name: label,type: NVARCHAR,length: 8}]
+    - sql: SELECT id,stamp,label FROM dbo.positive_source ORDER BY id
+      expect:
+        rows: 2
+        data: [{id: 1,stamp: {temporal_type: datetime,value: '2000-01-03T00:00:00Z'},label: alpha},{id: 2,stamp: null,label: null}]
+        column_types: [{name: id,type: INT},{name: stamp,type: DATETIME},{name: label,type: NVARCHAR,length: 8}]
+- name: Unary plus keeps existing numeric identity behavior
+  sql: SELECT +CAST(-5 AS INT) AS value
+  expect: {rows: 1,data: [{value: -5}]}
+- name: Unary minus retains numeric negation
+  sql: SELECT -CAST(5 AS INT) AS value
+  expect: {rows: 1,data: [{value: -5}]}
+- name: Unary plus does not change numeric unary minus ordering
+  sql: SELECT +(-CAST(5 AS INT)) AS value
+  expect: {rows: 1,data: [{value: -5}]}
+- name: Identity source declarations survive restart
+  action: restart
+- name: Restarted scalar source still executes unary positive calendar assignment
+  sql: SELECT dbo.positive_calendar(0,CONVERT(DATETIME,N'20000110',112)) AS value
+  expect: {rows: 1,data: [{value: 7}]}
+- name: Restarted stored view preserves identity values and NULLs
+  sql: SELECT id,stamp,label FROM dbo.positive_source ORDER BY id
+  expect: {rows: 2,data: [{id: 1,stamp: '2000-01-03 00:00:00',label: alpha},{id: 2,stamp: null,label: null}]}
+- name: Unary plus preserves temporal scale in actual TDS TYPEINFO
+  # The driver has no temporal DecimalSize API. Assert type + scale + column name.
+  tds:
+    rpc_packets:
+    - packet_type: 1
+      payload_hex: 16000000120000000200000000000000000001000000530045004c0045004300540020002b00430041005300540028004e0055004c004c0020004100530020004400410054004500540049004d00450032002800360029002900200041005300200070007200650063006900730065005f007300740061006d007000200057004800450052004500200031003d003000
+      contains_hex: ['2a060d70007200650063006900730065005f007300740061006d007000']
+      done_rows: 0

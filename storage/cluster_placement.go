@@ -40,6 +40,9 @@ func scanQueryContext(tx *TxContext, fallback context.Context) context.Context {
 			return ctx
 		}
 	}
+	if tx != nil && tx.invocationContext != nil {
+		return tx.invocationContext
+	}
 	return fallback
 }
 

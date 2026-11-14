@@ -1,0 +1,76 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  syntax: tsql
+  requires_tds: true
+  description: Catalog intrinsic arguments bind in the caller before introducing lookup sources
+setup:
+- sql: CREATE TABLE intrinsic_binding_probe(id INT)
+- sql: CREATE TABLE intrinsic_binding_saved(object_id INT)
+- sql: INSERT intrinsic_binding_saved SELECT OBJECT_ID(N'intrinsic_binding_probe')
+test_cases:
+- name: An unqualified object argument retains its calling table identity
+  sql: SELECT OBJECT_NAME(object_id) AS name FROM intrinsic_binding_saved
+  expect: {rows: 1,data: [{name: intrinsic_binding_probe}]}
+- name: A qualified object argument has the same lookup semantics
+  sql: SELECT OBJECT_NAME(s.object_id) AS name FROM intrinsic_binding_saved s
+  expect: {rows: 1,data: [{name: intrinsic_binding_probe}]}
+- name: A cast object argument resolves its column before catalog expansion
+  sql: SELECT OBJECT_NAME(CAST(object_id AS INT)) AS name FROM intrinsic_binding_saved
+  expect: {rows: 1,data: [{name: intrinsic_binding_probe}]}
+- name: A computed object argument keeps its original caller scope
+  sql: SELECT OBJECT_NAME(CASE WHEN object_id IS NOT NULL THEN object_id ELSE 0 END) AS name FROM intrinsic_binding_saved
+  expect: {rows: 1,data: [{name: intrinsic_binding_probe}]}
+- name: Unqualified principal arguments cannot capture the lookup principal column
+  sql: SELECT q.principal_id,USER_NAME(principal_id) AS name FROM (SELECT 0 AS principal_id UNION ALL SELECT 1 AS principal_id) q ORDER BY q.principal_id
+  expect: {rows: 2,data: [{principal_id: 0,name: public},{principal_id: 1,name: dbo}]}
+- name: Catalog name results retain their declared national text contract in CASE
+  sql: SELECT CASE WHEN object_id IS NOT NULL THEN OBJECT_NAME(object_id) ELSE N'missing' END AS object_name,CASE WHEN object_id IS NOT NULL THEN USER_NAME(1) ELSE N'missing' END AS principal_name FROM intrinsic_binding_saved
+  expect: {rows: 1,data: [{object_name: intrinsic_binding_probe,principal_name: dbo}]}
+- name: Catalog name results compose with CONCAT without losing their caller binding
+  sql: SELECT CONCAT(N'[',OBJECT_NAME(object_id),N']/',USER_NAME(1)) AS label FROM intrinsic_binding_saved
+  expect: {rows: 1,data: [{label: '[intrinsic_binding_probe]/dbo'}]}
+- name: An object lookup in the first UNION branch retains its national text contract
+  sql: |
+    SELECT object_name FROM (
+      SELECT OBJECT_NAME(object_id) AS object_name FROM intrinsic_binding_saved
+      UNION SELECT N'constant'
+    ) names ORDER BY object_name
+  expect: {rows: 2,data: [{object_name: constant},{object_name: intrinsic_binding_probe}]}
+- name: A principal lookup in the second UNION branch retains its national text contract
+  sql: SELECT principal_name FROM (SELECT N'constant' AS principal_name UNION SELECT USER_NAME(1)) names ORDER BY principal_name
+  expect: {rows: 2,data: [{principal_name: constant},{principal_name: dbo}]}
+- name: A missing object name retains NULL when composed with typed CASE branches
+  sql: SELECT CASE WHEN object_id IS NOT NULL THEN OBJECT_NAME(-1) ELSE N'missing' END AS object_name FROM intrinsic_binding_saved
+  expect: {rows: 1,data: [{object_name: null}]}
+- name: A saved identity metadata report composes name lookups with declared catalog columns
+  sql: |
+    WITH reported AS (
+      SELECT OBJECT_NAME(s.object_id) AS object_name,
+        USER_NAME(d.principal_id) AS principal_name,d.type_desc
+      FROM intrinsic_binding_saved s
+      LEFT JOIN sys.database_principals d ON d.principal_id=1
+    )
+    SELECT object_name,principal_name,type_desc FROM (
+      SELECT object_name,principal_name,type_desc FROM reported
+      UNION SELECT N'missing',N'public',N'DATABASE_ROLE' WHERE 1=0
+    ) names
+  expect: {rows: 1,data: [{object_name: intrinsic_binding_probe,principal_name: dbo,type_desc: SQL_USER}]}
+- name: Delayed catalog names expose their sysname width through the SQL wire contract
+  tds:
+    statements:
+    - sql: SELECT OBJECT_NAME(object_id) AS object_name,USER_NAME(1) AS principal_name FROM intrinsic_binding_saved
+      expect:
+        rows: 1
+        data: [{object_name: intrinsic_binding_probe,principal_name: dbo}]
+        column_types: [{name: object_name,type: NVARCHAR,length: 128},{name: principal_name,type: NVARCHAR,length: 128}]
+- name: A saved retired object identity remains absent after same named replacement
+  setup:
+  - sql: DROP TABLE intrinsic_binding_probe
+  - sql: CREATE TABLE intrinsic_binding_probe(id INT)
+  sql: SELECT OBJECT_NAME(object_id) AS name FROM intrinsic_binding_saved
+  expect: {rows: 1,data: [{name: null}]}
+cleanup:
+- sql: DROP TABLE IF EXISTS intrinsic_binding_probe
+- sql: DROP TABLE IF EXISTS intrinsic_binding_saved

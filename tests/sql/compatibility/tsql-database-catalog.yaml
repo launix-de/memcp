@@ -1,0 +1,93 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  description: T-SQL database catalog uses live native metadata and durable identifiers
+  syntax: tsql
+  requires_tds: true
+  isolated: true
+setup:
+- sql: CREATE DATABASE catalog_alpha
+- sql: CREATE DATABASE catalog_bravo
+- sql: CREATE TABLE catalog_ids (name NVARCHAR(128), database_id INT)
+- scm: (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS catalog_reader" nil (newsession) nil))
+- scm: (eval (parse_sql "memcp-tests" "CREATE USER catalog_reader IDENTIFIED BY 'pw'" nil (newsession) nil))
+- scm: (eval (parse_sql "memcp-tests" "GRANT ALL ON `memcp-tests`.* TO catalog_reader" nil))
+cleanup:
+- sql: DROP DATABASE IF EXISTS catalog_alpha
+- sql: DROP DATABASE IF EXISTS catalog_bravo
+- sql: DROP DATABASE IF EXISTS catalog_charlie
+- sql: DROP TABLE IF EXISTS catalog_ids
+- scm: (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS catalog_reader" nil (newsession) nil))
+test_cases:
+- name: Database-qualified catalog filters and orders native names
+  sql: SELECT name FROM [memcp-tests].sys.databases WHERE name LIKE N'catalog_%' ORDER BY name
+  expect: {rows: 2, data: [{name: catalog_alpha}, {name: catalog_bravo}]}
+- name: Default catalog supports aliases and numeric identifiers
+  sql: SELECT d.name FROM sys.databases AS d WHERE d.name LIKE N'catalog_%' AND d.database_id>0 ORDER BY d.name DESC
+  expect: {rows: 2, data: [{name: catalog_bravo}, {name: catalog_alpha}]}
+- name: Database identifiers are unique
+  sql: SELECT COUNT(*) AS total, COUNT(DISTINCT database_id) AS distinct_ids FROM sys.databases WHERE name LIKE N'catalog_%'
+  expect: {rows: 1, data: [{total: 2, distinct_ids: 2}]}
+- name: Preserve the identifiers for later catalog queries
+  sql: INSERT INTO catalog_ids (name,database_id) SELECT name,database_id FROM sys.databases WHERE name LIKE N'catalog_%'
+- name: New databases appear in a previously used catalog shape
+  sql: CREATE DATABASE catalog_charlie
+- name: Catalog membership is evaluated at execution time
+  sql: SELECT name FROM [memcp-tests].sys.databases WHERE name LIKE N'catalog_%' ORDER BY name
+  expect: {rows: 3, data: [{name: catalog_alpha}, {name: catalog_bravo}, {name: catalog_charlie}]}
+- name: Adding a database does not renumber existing identities
+  sql: SELECT d.name FROM sys.databases d JOIN catalog_ids c ON c.name=d.name AND c.database_id=d.database_id ORDER BY d.name
+  expect: {rows: 2, data: [{name: catalog_alpha}, {name: catalog_bravo}]}
+- name: Persist the identity mapping and restart the server
+  syntax: mysql
+  sql: SHUTDOWN
+  restart_timeout: 60
+  expect: {rows: 0}
+- name: Native database identifiers remain stable after restart
+  sql: SELECT d.name FROM sys.databases d JOIN catalog_ids c ON c.name=d.name AND c.database_id=d.database_id ORDER BY d.name
+  expect: {rows: 2, data: [{name: catalog_alpha}, {name: catalog_bravo}]}
+- name: Catalog is a typed TDS result with a prepared path
+  tds:
+    statements:
+    - sql: SELECT database_id,name FROM sys.databases WHERE name=N'catalog_alpha'
+      expect:
+        rows: 1
+        column_types: [{name: database_id, type: INT}, {name: name, type: NVARCHAR, length: 128}]
+    - sql: SELECT name FROM sys.databases WHERE name=@db
+      prepare: true
+      parameters: [{name: db, value: catalog_bravo}]
+      expect: {rows: 1, data: [{name: catalog_bravo}]}
+- name: Ungranted databases are not visible through a cached catalog
+  username: catalog_reader
+  password: pw
+  sql: SELECT name FROM sys.databases WHERE name LIKE N'catalog_%' ORDER BY name
+  expect: {rows: 0}
+- name: Distinct catalog aggregates retain the caller visibility filter
+  username: catalog_reader
+  password: pw
+  sql: SELECT COUNT(DISTINCT name) AS total FROM sys.databases WHERE name LIKE N'catalog_%'
+  expect: {data: [{total: 0}]}
+- name: Grant access to a native database
+  scm: (eval (parse_sql "memcp-tests" "GRANT ALL ON catalog_alpha.* TO catalog_reader" nil (newsession) nil))
+- name: A new grant is reflected by the cached catalog
+  username: catalog_reader
+  password: pw
+  sql: SELECT name FROM sys.databases WHERE name LIKE N'catalog_%' ORDER BY name
+  expect: {rows: 1, data: [{name: catalog_alpha}]}
+- name: Cached DISTINCT aggregates observe newly granted catalog membership
+  username: catalog_reader
+  password: pw
+  sql: SELECT COUNT(DISTINCT name) AS total FROM sys.databases WHERE name LIKE N'catalog_%'
+  expect: {data: [{total: 1}]}
+- name: Drop a database through the native lifecycle
+  sql: DROP DATABASE catalog_bravo
+- name: Dropped databases disappear from the cached query
+  sql: SELECT name FROM [memcp-tests].sys.databases WHERE name LIKE N'catalog_%' ORDER BY name
+  expect: {rows: 2, data: [{name: catalog_alpha}, {name: catalog_charlie}]}
+- name: Unsupported system relations fail explicitly
+  sql: SELECT * FROM sys.unsupported_catalog
+  expect: {error: true}
+- name: A missing qualifier cannot be substituted by the current database
+  sql: SELECT * FROM catalog_missing.sys.databases
+  expect: {error: true}

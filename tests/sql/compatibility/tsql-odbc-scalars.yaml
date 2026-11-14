@@ -1,0 +1,48 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  description: ODBC scalar function escapes reuse authoritative T-SQL expression compilers
+setup: []
+cleanup:
+- sql: DROP VIEW IF EXISTS odbc_scalar_view
+test_cases:
+- name: ODBC replacement is an ordinary typed scalar inside nested conversions
+  sql: SELECT {fn REPLACE(N'12.34',N'.',N',')} AS text_value,CONVERT(INT,CONVERT(MONEY,{fn REPLACE(N'12.34',N'.',N',')})) AS number_value
+  expect: {rows: 1,data: [{text_value: '12,34',number_value: 1234}]}
+- name: ODBC case aliases use the existing Unicode string compiler
+  sql: SELECT {fn UCASE(N'ab')} AS upper_value,{fn LCASE(N'CD')} AS lower_value
+  expect: {rows: 1,data: [{upper_value: AB,lower_value: cd}]}
+- name: Nested ODBC calls preserve argument expression boundaries and case insensitive syntax
+  sql: SELECT {Fn rEpLaCe({fn UCASE(N'a.b')},N'.',N'-')} AS value
+  expect: {rows: 1,data: [{value: A-B}]}
+- name: ODBC scalar NULL arguments retain normal SQL NULL semantics
+  sql: SELECT {fn REPLACE(NULL,N'.',N',')} AS text_value,{fn ABS(CAST(NULL AS INT))} AS number_value
+  expect: {rows: 1,data: [{text_value: null,number_value: null}]}
+- name: ODBC numeric scalars use the existing declared numeric compiler
+  sql: SELECT {fn ABS(-2)} AS value
+  expect: {rows: 1,data: [{value: 2}]}
+- name: Stored view definitions accept ODBC scalars without rewriting their source
+  sql: CREATE VIEW odbc_scalar_view AS SELECT CONVERT(INT,CONVERT(MONEY,{fn REPLACE(N'12.34',N'.',N',')})) AS amount
+- name: A stored ODBC scalar view executes through the common view planner
+  sql: SELECT amount FROM odbc_scalar_view
+  expect: {rows: 1,data: [{amount: 1234}]}
+- name: Non scalar escape bodies cannot smuggle arbitrary expression grammar
+  sql: SELECT {fn 1+1} AS value
+  expect: {error: true}
+- name: Unsupported ODBC function contracts are explicit rather than native function guesses
+  sql: SELECT {fn unknown_odbc_function(N'a')} AS value
+  expect: {error: true}
+- name: Other ODBC escape categories do not become scalar function syntax
+  sql: SELECT {unknown REPLACE(N'x',N'x',N'y')} AS value
+  expect: {error: true}
+- name: ODBC calendar escapes use declared temporal types and preserve NULL
+  sql: |
+    SELECT {fn YEAR(CAST(N'2026-03-15' AS DATE))} AS calendar_year,
+      {fn MONTH(CAST(N'2026-03-15T12:00:00' AS SMALLDATETIME))} AS calendar_month,
+      {fn YEAR(CAST(NULL AS DATETIME))} AS missing_year
+  expect: {rows: 1,data: [{calendar_year: 2026,calendar_month: 3,missing_year: null}]}
+- name: ODBC calendar escape arity is explicit
+  sql: SELECT {fn MONTH(N'2026-03-15',1)} AS value
+  expect: {error: true,contains: 'MONTH requires one argument'}

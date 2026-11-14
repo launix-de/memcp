@@ -42,7 +42,10 @@ test_cases:
         birthdate DATE
       )
     expect:
-      rows: 0
+      affected_rows: 0
+      rows: 1
+      data: [{affected_rows: 0}]
+      result_contains: '"affected_rows"'
 
   - name: "Insert customer data"
     setup:
@@ -69,7 +72,7 @@ test_cases:
               (list 18 "Herbert" "Krause" "1976-11-13")
               (list 19 "Ute" "Schulze" "1989-09-21")
               (list 20 "Dieter" "Huber" "1972-02-08")))
-            (insert (table "memcp-tests" false "ft_customers" false) '("id" "vorname" "nachname" "birthdate") rows))
+            (insert (table "memcp-tests" false "ft_customers" false nil) '("id" "vorname" "nachname" "birthdate") rows))
       - scm: "(rebuild)"
     sql: "SELECT COUNT(*) AS cnt FROM ft_customers"
     expect:
@@ -104,7 +107,7 @@ test_cases:
   - name: "Exact point probes keep LIKE as a residual filter"
     scm: |
       (begin
-        (define tbl (table "memcp-tests" false "ft_customers" false))
+        (define tbl (table "memcp-tests" false "ft_customers" false nil))
         (define probe (lambda (id)
           (begin
             (define condition (eval (list
@@ -168,7 +171,10 @@ test_cases:
         name TEXT
       )
     expect:
-      rows: 0
+      affected_rows: 0
+      rows: 1
+      data: [{affected_rows: 0}]
+      result_contains: '"affected_rows"'
 
   - name: "Insert 30000 rows (needle-in-a-haystack)"
     setup:
@@ -183,7 +189,7 @@ test_cases:
                   22777 "Hans Klausner"
                   29999 "Klausmüller Gerd"
                   _ (concat "Person_" i))))))
-            (insert (table "memcp-tests" false "ft_large" false) '("id" "name") rows))
+            (insert (table "memcp-tests" false "ft_large" false nil) '("id" "name") rows))
       - scm: "(rebuild)"
     sql: "SELECT COUNT(*) AS cnt FROM ft_large"
     expect:
@@ -564,7 +570,10 @@ test_cases:
         name TEXT
       )
     expect:
-      rows: 0
+      affected_rows: 0
+      rows: 1
+      data: [{affected_rows: 0}]
+      result_contains: '"affected_rows"'
 
   - name: "Insert alternating data"
     setup:
@@ -575,7 +584,7 @@ test_cases:
                 0 "Animal"
                 1 "Person"
                 _ "Object")))))
-            (insert (table "memcp-tests" false "ft_alternating" false) '("id" "name") rows))
+            (insert (table "memcp-tests" false "ft_alternating" false nil) '("id" "name") rows))
       - scm: "(rebuild)"
     sql: "SELECT COUNT(*) AS cnt FROM ft_alternating"
     expect:
@@ -624,7 +633,7 @@ test_cases:
         name TEXT,
         tag TEXT
       )
-    expect: { rows: 0 }
+    expect: { affected_rows: 0 , result_contains: '"affected_rows"', rows: 1, data: [{affected_rows: 0}]}
 
   - name: "Insert exact match-set data"
     scm: |
@@ -635,7 +644,7 @@ test_cases:
               (concat "!Klaus-" i)
               (if (< i 105) (concat "Klaus-" i) (concat "Person-" i)))
             (concat "!zzzz-" i)))))
-        (insert (table "memcp-tests" false "ft_matchset" false) (list "id" "name" "tag") rows)
+        (insert (table "memcp-tests" false "ft_matchset" false nil) (list "id" "name" "tag") rows)
         (rebuild)
         30000)
 
@@ -646,7 +655,7 @@ test_cases:
   - name: "LIKE match set remains exact through warmup"
     scm: |
       (begin
-        (set tbl (table "memcp-tests" false "ft_matchset" false))
+        (set tbl (table "memcp-tests" false "ft_matchset" false nil))
         (set condition (eval (list
           'lambda (list 'search)
           (list 'strlike 'search "%zzzz%" "utf8mb4_general_ci"))))
@@ -662,7 +671,7 @@ test_cases:
   - name: "LIKE match sets keep collation semantics separate"
     scm: |
       (begin
-        (set tbl (table "memcp-tests" false "ft_matchset" false))
+        (set tbl (table "memcp-tests" false "ft_matchset" false nil))
         (set binary-condition (eval (list
           'lambda (list 'name)
           (list 'strlike 'name "%klaus%" "utf8mb4_bin"))))
@@ -680,7 +689,7 @@ test_cases:
       - sql: "INSERT INTO ft_matchset (id, name, tag) VALUES (30000, 'klaus-delta', 'delta')"
     scm: |
       (begin
-        (set tbl (table "memcp-tests" false "ft_matchset" false))
+        (set tbl (table "memcp-tests" false "ft_matchset" false nil))
         (set binary-condition (eval (list
           'lambda (list 'name)
           (list 'strlike 'name "%klaus%" "utf8mb4_bin"))))
@@ -704,12 +713,12 @@ test_cases:
     setup:
       - scm: '(settings "ShardSize" 32)'
     sql: "CREATE TABLE ft_multishard (id INT PRIMARY KEY, search TEXT)"
-    expect: { rows: 0 }
+    expect: { affected_rows: 0 , result_contains: '"affected_rows"', rows: 1, data: [{affected_rows: 0}]}
 
   - name: "Insert multi-shard LIKE candidate data"
     setup:
       - scm: |
-          (insert (table "memcp-tests" false "ft_multishard" false) '("id" "search")
+          (insert (table "memcp-tests" false "ft_multishard" false nil) '("id" "search")
             (map (produceN 96) (lambda (i)
               (list i (if (equal? (mod i 31) 0)
                 (concat "Casino hit " i)
@@ -747,11 +756,11 @@ test_cases:
       - sql: CREATE TABLE ft_boolean (id INT PRIMARY KEY, title TEXT, body TEXT) ENGINE=sloppy
       - scm: |
           (begin
-            (insert (table "memcp-tests" false "ft_boolean" false) '("id" "title" "body")
+            (insert (table "memcp-tests" false "ft_boolean" false nil) '("id" "title" "body")
               (map (produceN 512) (lambda (i)
                 (list i (match i 3 "alpha" 7 "alpha needle" 11 "alpha manual manual manual" 15 "alpha_beta" _ "ordinary text")
                   (if (equal? i 3) "needle" (equal? i 7) "manual" "other text")))))
-            (rebuild (table "memcp-tests" false "ft_boolean" false) true false))
+            (rebuild (table "memcp-tests" false "ft_boolean" false nil) true false))
     sql: SELECT COUNT(*) AS n FROM ft_boolean
     expect: {data: [{n: 512}]}
   - name: Required words may occur in different indexed columns
@@ -805,7 +814,7 @@ test_cases:
     expect: {data: [{id: 7}, {id: 512}]}
   - name: Rebuilt text rows retain search semantics
     setup:
-      - scm: '(rebuild (table "memcp-tests" false "ft_boolean" false) true false)'
+      - scm: '(rebuild (table "memcp-tests" false "ft_boolean" false nil) true false)'
     sql: SELECT id FROM ft_boolean WHERE MATCH(title,body) AGAINST('+alpha +needle' IN BOOLEAN MODE)>0 ORDER BY id
     expect: {data: [{id: 7}, {id: 512}]}
   - name: Row-dependent search programs are explicitly rejected

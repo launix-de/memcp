@@ -1,0 +1,68 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Metadata requests preserve the executing native transaction and its explicit completion
+setup:
+- sql: CREATE TABLE metadata_transaction_rows(id INT PRIMARY KEY, value NVARCHAR(37))
+cleanup:
+- sql: DROP TABLE IF EXISTS metadata_transaction_rows
+test_cases:
+- name: Direct metadata RPC retains the caller transaction through explicit commit
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: INSERT metadata_transaction_rows VALUES(1,N'pending')
+    - connection: owner
+      sql: sp_columns
+      parameters: [{name: table_name, value: metadata_transaction_rows}]
+      expect: {rows: 2}
+    - connection: owner
+      sql: SELECT id FROM metadata_transaction_rows
+      expect: {rows: 1, data: [{id: 1}]}
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT id FROM metadata_transaction_rows
+      expect: {rows: 1, data: [{id: 1}]}
+- name: Metadata EXEC and key RPC preserve rollback of the caller's writes
+  tds:
+    statements:
+    - connection: rollback_owner
+      sql: BEGIN TRANSACTION
+    - connection: rollback_owner
+      sql: INSERT metadata_transaction_rows VALUES(2,N'aborted')
+    - connection: rollback_owner
+      sql: EXEC sp_columns @table_name=N'metadata_transaction_rows'
+      expect: {rows: 2}
+    - connection: rollback_owner
+      sql: sp_pkeys
+      parameters: [{name: table_name, value: metadata_transaction_rows}]
+      expect: {rows: 1}
+    - connection: rollback_owner
+      sql: ROLLBACK TRANSACTION
+    - connection: observer
+      sql: SELECT id FROM metadata_transaction_rows WHERE id=2
+      expect: {rows: 0}
+- name: Parameter inference and metadata scalars preserve the caller's rollback
+  tds:
+    statements:
+    - connection: description_owner
+      sql: BEGIN TRANSACTION
+    - connection: description_owner
+      sql: INSERT metadata_transaction_rows VALUES(3,N'described')
+    - connection: description_owner
+      sql: EXEC sp_describe_undeclared_parameters @tsql=N'SELECT id FROM metadata_transaction_rows WHERE value=@input'
+      expect: {rows: 1, data: [{name: '@input', suggested_system_type_name: 'nvarchar(37)'}]}
+    - connection: description_owner
+      sql: SELECT COL_LENGTH(N'metadata_transaction_rows',N'value') AS width
+      expect: {rows: 1, data: [{width: 74}]}
+    - connection: description_owner
+      sql: ROLLBACK TRANSACTION
+    - connection: observer
+      sql: SELECT id FROM metadata_transaction_rows WHERE id=3
+      expect: {rows: 0}

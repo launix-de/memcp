@@ -186,7 +186,7 @@ func countCollapsedComputor() scm.Scmer {
 		Body: scm.NewSlice([]scm.Scmer{
 			scm.NewSymbol("scan"),
 			scm.NewNil(),
-			scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString("compconc"), scm.NewBool(false), scm.NewString("feature"), scm.NewBool(false)}),
+			scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString("compconc"), scm.NewBool(false), scm.NewString("feature"), scm.NewBool(false), scm.NewNil()}),
 			scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), accessSchema}),
 			accessValues,
 			filterColumns,

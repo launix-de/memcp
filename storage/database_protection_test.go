@@ -112,7 +112,7 @@ func TestDropRefusesInternalObjectsBeforeMutation(t *testing.T) {
 func TestPublishedFoldedTableNames(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "tfoldednames", 0)
 	db := tbl.schema
-	before := db.foldedTableNames.Load()
+	before := db.catalogView().folded
 	created, _ := CreateTable(db.Name, "MixedName", Safe, false)
 	if db.GetTable("mIXEDnAME", true) != created {
 		t.Fatal("shared table lookup did not resolve its folded spelling")
@@ -120,7 +120,7 @@ func TestPublishedFoldedTableNames(t *testing.T) {
 	if db.GetTable("mixedname", false) != nil {
 		t.Fatal("folded lookup changed exact-case namespace semantics")
 	}
-	if _, exists := (*before)["mixedname"]; exists {
+	if _, exists := before["mixedname"]; exists {
 		t.Fatal("namespace publication mutated a retained snapshot")
 	}
 	RenameTable(db.Name, "MixedName", "Renamed")
@@ -233,7 +233,7 @@ func TestIdentifierDirectoriesKeepDottedIDistinct(t *testing.T) {
 	columns := showColumnsTestTable(1)
 	columns.Columns[0].Name = "Identifierİ"
 	columns.publishShowColumnsSnapshot(false)
-	if !columns.ShowColumn("identifieri", true).IsNil() {
+	if !columns.ShowColumn("identifieri", true, nil).IsNil() {
 		t.Fatal("column metadata lookup merged dotted I with ASCII i")
 	}
 	if _, exists := columns.ResolveColumnName("identifieri", true); exists {
@@ -242,7 +242,7 @@ func TestIdentifierDirectoriesKeepDottedIDistinct(t *testing.T) {
 	columns.Columns = append(columns.Columns, &column{Name: "Identifieri", Typ: "VARCHAR", AllowNull: true})
 	columns.publishShowColumnsSnapshot(false)
 	for _, name := range []string{"Identifierİ", "Identifieri"} {
-		if got := showColumnProperty(columns.ShowColumn(strings.ToUpper(name), true), "Field"); got.IsNil() || got.String() != name {
+		if got := showColumnProperty(columns.ShowColumn(strings.ToUpper(name), true, nil), "Field"); got.IsNil() || got.String() != name {
 			t.Fatalf("distinct column fold classes collided: lookup %q returned %v", name, got)
 		}
 		if got, exists := columns.ResolveColumnName(strings.ToUpper(name), true); !exists || got != name {
@@ -261,7 +261,7 @@ func TestPersistedTableCallABIUpgradePreservesData(t *testing.T) {
 	original := scm.NewProcStruct(scm.Proc{Params: scm.NewSlice(nil), Body: legacy, En: &scm.Globalenv})
 	restored := upgradePersistedTableCalls(original)
 	body := restored.Proc().Body.Slice()
-	if len(body) != 5 || body[2].Bool() || body[4].Bool() || scm.String(body[3]) != "items" {
+	if len(body) != 6 || body[2].Bool() || body[4].Bool() || !body[5].IsNil() || scm.String(body[3]) != "items" {
 		t.Fatal("stored executable table reference did not migrate to explicit policies")
 	}
 	if len(original.Proc().Body.Slice()) != 3 {
@@ -280,11 +280,11 @@ func TestPersistedTableCallABIUpgradePreservesData(t *testing.T) {
 		Triggers: []TriggerDescription{{Language: "scheme", Source: "(lambda () (table \"memcp-tests\" \"items\"))"}}}
 	definition.OnInit.Store(&original)
 	invalidatePersistedPlannerCodeAfterLoad(definition)
-	if len(definition.OnInit.Load().Proc().Body.Slice()) != 5 {
+	if len(definition.OnInit.Load().Proc().Body.Slice()) != 6 {
 		t.Fatal("load did not upgrade the existing initialization callback")
 	}
 	source := scm.Read("upgraded trigger", definition.Triggers[0].Source, true).WithoutSourceInfo().Slice()
-	if len(source[2].WithoutSourceInfo().Slice()) != 5 {
+	if len(source[2].WithoutSourceInfo().Slice()) != 6 {
 		t.Fatal("load did not upgrade the authoritative Scheme trigger source")
 	}
 }
@@ -309,7 +309,7 @@ func TestPersistedTableCallABIUpgradeRespectsLocalBindings(t *testing.T) {
 
 func TestPersistedTableCallABIUpgradeRetainsNativeBindings(t *testing.T) {
 	en := scm.Env{Vars: scm.Vars{scm.Symbol("table"): scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
-		if len(args) != 4 || args[1].Bool() || args[3].Bool() {
+		if len(args) != 5 || args[1].Bool() || args[3].Bool() || !args[4].IsNil() {
 			t.Fatal("native reference did not receive explicit exact-name policies")
 		}
 		return scm.NewInt(42)

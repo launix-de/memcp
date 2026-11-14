@@ -1,0 +1,190 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  description: T-SQL numeric validation, sign and power contracts
+  syntax: tsql
+  requires_tds: true
+setup:
+- sql: DROP TABLE IF EXISTS numeric_samples
+- sql: CREATE TABLE numeric_samples (id INT PRIMARY KEY, amount INT, spelling NVARCHAR(50))
+- sql: INSERT INTO numeric_samples VALUES (1,-3,N'12.5'),(2,0,N'invalid'),(3,4,NULL)
+cleanup:
+- sql: DROP PROCEDURE IF EXISTS numeric_precision_temporary
+- sql: DROP PROCEDURE IF EXISTS numeric_precision_invalid_parameter
+- sql: DROP PROCEDURE IF EXISTS numeric_precision_invalid_variable
+- sql: DROP TABLE IF EXISTS numeric_precision_invalid_column
+- sql: DROP TABLE numeric_samples
+test_cases:
+- name: Single precision CONVERT follows the SQL Server maximum result contract
+  sql: SELECT CONVERT(NUMERIC(50),'123') AS numeric_value,CONVERT(DECIMAL(50),'456') AS decimal_value
+  expect: {data: [{numeric_value: 123,decimal_value: 456}]}
+- name: Single precision CAST uses the same conversion contract
+  sql: SELECT CAST('123' AS NUMERIC(50)) AS numeric_value,CAST('456' AS DECIMAL(50)) AS decimal_value
+  expect: {data: [{numeric_value: 123,decimal_value: 456}]}
+- name: Conversion precision normalization applies beyond the storage boundary
+  sql: SELECT CAST('12' AS NUMERIC(39)) AS lower_value,CAST('34' AS NUMERIC(256)) AS upper_value
+  expect: {data: [{lower_value: 12,upper_value: 34}]}
+- name: TRY conversions normalize their declared target before evaluating input
+  sql: SELECT TRY_CONVERT(NUMERIC(50),'123') AS numeric_value,TRY_CAST('456' AS DECIMAL(50)) AS decimal_value,TRY_CONVERT(NUMERIC(50),'invalid') AS invalid_value
+  expect: {data: [{numeric_value: 123,decimal_value: 456,invalid_value: null}]}
+- name: Native conversion metadata reports effective precision and scale
+  tds:
+    statements:
+    - sql: SELECT CONVERT(NUMERIC(50),'123') AS numeric_value,CAST('456' AS DECIMAL(50)) AS decimal_value
+      expect:
+        data: [{numeric_value: '123',decimal_value: '456'}]
+        column_types: [{name: numeric_value,type: DECIMAL,precision: 38,scale: 0},{name: decimal_value,type: DECIMAL,precision: 38,scale: 0}]
+- name: Stored conversion syntax retains its original precision spelling
+  sql: |
+    CREATE PROCEDURE numeric_precision_temporary AS BEGIN
+      CREATE TABLE #precision_input(value VARCHAR(30));
+      INSERT #precision_input VALUES('12'),('30');
+      SELECT SUM(CONVERT(NUMERIC(50),value)) AS total FROM #precision_input;
+    END
+  expect: {rows: 0}
+- name: Stored conversions execute over actual temporary source rows
+  sql: EXEC numeric_precision_temporary
+  expect: {data: [{total: 42}]}
+- name: Explicit zero scale does not use single precision normalization
+  sql: SELECT CONVERT(NUMERIC(50,0),'123')
+  expect: {error: true}
+- name: Explicit nonzero scale retains the declared precision limit
+  sql: SELECT CAST('123.45' AS DECIMAL(50,2))
+  expect: {error: true}
+- name: TRY cannot hide an invalid explicit target declaration
+  sql: SELECT TRY_CONVERT(NUMERIC(50,0),'123')
+  expect: {error: true}
+- name: Zero conversion precision remains invalid
+  sql: SELECT CONVERT(NUMERIC(0),'123')
+  expect: {error: true}
+- name: Normal small precision still rejects overflowing input
+  sql: SELECT CONVERT(NUMERIC(2),'123')
+  expect: {error: true}
+- name: Column declarations do not inherit conversion normalization
+  sql: CREATE TABLE numeric_precision_invalid_column(value NUMERIC(50))
+  expect: {error: true}
+- name: Parameter declarations retain their own precision validation
+  sql: CREATE PROCEDURE numeric_precision_invalid_parameter @value NUMERIC(50) AS SELECT @value AS value
+  expect: {error: true}
+- name: Local declarations retain their own precision validation
+  sql: CREATE PROCEDURE numeric_precision_invalid_variable AS BEGIN DECLARE @value NUMERIC(50); SELECT 1 AS value; END
+  expect: {error: true}
+- name: Conversion normalization preserves omitted character length
+  sql: SELECT CAST(REPLICATE('x',40) AS VARCHAR) AS value
+  expect: {data: [{value: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx}]}
+- name: Numeric validation accepts integer decimal and exponent spellings
+  sql: SELECT ISNUMERIC(N'12') AS integral, ISNUMERIC(N'-.25') AS fractional, ISNUMERIC(N'1e3') AS exponential, ISNUMERIC(N'1D2') AS alternate
+  expect: {data: [{integral: 1, fractional: 1, exponential: 1, alternate: 1}]}
+- name: Numeric validation rejects malformed spellings and NULL
+  sql: SELECT ISNUMERIC(N'12x') AS letters, ISNUMERIC(N'1.2.3') AS points, ISNUMERIC(N'') AS empty_text, ISNUMERIC(N'   ') AS blanks, ISNUMERIC(NULL) AS missing
+  expect: {data: [{letters: 0, points: 0, empty_text: 0, blanks: 0, missing: 0}]}
+- name: Numeric validation recognizes monetary text and standalone signs
+  sql: SELECT ISNUMERIC(N'$12.50') AS dollar, ISNUMERIC(N'£1,234.56') AS pounds, ISNUMERIC(N'€') AS symbol, ISNUMERIC(N'+') AS plus, ISNUMERIC(N'-') AS minus
+  expect: {data: [{dollar: 1, pounds: 1, symbol: 1, plus: 1, minus: 1}]}
+- name: Numeric validation rejects overflow and nonfinite spellings
+  sql: SELECT ISNUMERIC(N'1e309') AS excessive, ISNUMERIC(N'NaN') AS nan_text, ISNUMERIC(N'Infinity') AS infinity, ISNUMERIC(N'$1e3') AS currency_exponent
+  expect: {data: [{excessive: 0, nan_text: 0, infinity: 0, currency_exponent: 0}]}
+- name: Numeric validation does not require an integer conversion
+  sql: SELECT ISNUMERIC(N'12345678901234567890123456789012345678') AS wide_decimal, ISNUMERIC(CAST(0 AS BIT)) AS bit_value, ISNUMERIC(CAST(NULL AS FLOAT)) AS missing
+  expect: {data: [{wide_decimal: 1, bit_value: 1, missing: 0}]}
+- name: Numeric validation runs in filters against declared columns
+  sql: SELECT id FROM numeric_samples WHERE ISNUMERIC(spelling)=1 ORDER BY id
+  expect: {data: [{id: 1}]}
+- name: Numeric validation arity is checked
+  sql: SELECT ISNUMERIC(1,2)
+  expect: {error: true}
+- name: Sign preserves all three signs and NULL
+  sql: SELECT SIGN(-5) AS negative, SIGN(0) AS zero_value, SIGN(42) AS positive, SIGN(NULL) AS missing
+  expect: {data: [{negative: -1, zero_value: 0, positive: 1, missing: null}]}
+- name: Sign handles the minimum bigint without negating it
+  sql: SELECT SIGN(CAST('-9223372036854775808' AS BIGINT)) AS negative
+  expect: {data: [{negative: -1}]}
+- name: Sign converts text and accepts exact fractional values
+  sql: SELECT SIGN(N'-0.2') AS text_value, SIGN(CAST(0.25 AS DECIMAL(8,2))) AS exact_value, SIGN(CAST(-0.25 AS MONEY)) AS currency_value
+  expect: {data: [{text_value: -1, exact_value: 1, currency_value: -1}]}
+- name: Sign rejects bit declarations
+  sql: SELECT SIGN(CAST(1 AS BIT))
+  expect: {error: true}
+- name: Sign rejects invalid numeric text
+  sql: SELECT SIGN(N'invalid')
+  expect: {error: true}
+- name: Power handles integer fractional and negative exponents
+  sql: SELECT POWER(2,3) AS cube, POWER(9,0.5) AS root_value, POWER(2,-3) AS integer_fraction, POWER(CAST(2 AS FLOAT),-3) AS float_fraction
+  expect: {data: [{cube: 8, root_value: 3, integer_fraction: 0, float_fraction: 0.125}]}
+- name: Power preserves exact bigint results beyond binary float precision
+  sql: SELECT POWER(CAST(3 AS BIGINT),39) AS exact_value
+  expect: {data: [{exact_value: 4052555153018976267}]}
+- name: Power accepts a negative base with an integral exponent
+  sql: SELECT POWER(-2,3) AS odd_value, POWER(-2,4) AS even_value, POWER(0,0) AS zero_exponent
+  expect: {data: [{odd_value: -8, even_value: 16, zero_exponent: 1}]}
+- name: Power returns typed NULL for either missing operand
+  sql: SELECT POWER(CAST(NULL AS INT),2) AS no_base, POWER(2,NULL) AS no_exponent
+  expect: {data: [{no_base: null, no_exponent: null}]}
+- name: Power applies decimal and monetary return scales
+  sql: SELECT POWER(CAST(1.25 AS DECIMAL(8,2)),2) AS exact_value, POWER(CAST(1.25 AS MONEY),2) AS money_value
+  expect: {data: [{exact_value: 1.56, money_value: 1.5625}]}
+- name: Power checks declared integer overflow
+  sql: SELECT POWER(2,31)
+  expect: {error: true}
+- name: Power checks bigint overflow before a floating conversion wraps
+  sql: SELECT POWER(CAST(2 AS BIGINT),63)
+  expect: {error: true}
+- name: Power rejects fractional powers outside the real domain
+  sql: SELECT POWER(-2,0.5)
+  expect: {error: true}
+- name: Power rejects floating overflow
+  sql: SELECT POWER(CAST(10 AS FLOAT),400)
+  expect: {error: true}
+- name: Power exponent cannot have a bit declaration
+  sql: SELECT POWER(2,CAST(1 AS BIT))
+  expect: {error: true}
+- name: Numeric functions compose with scans and aggregate projection
+  sql: SELECT SUM(POWER(amount,2)) AS squares, SUM(SIGN(amount)) AS signs FROM numeric_samples
+  expect: {data: [{squares: 25, signs: 0}]}
+- name: Numeric function wire types follow SQL declarations
+  tds:
+    statements:
+    - sql: SELECT ISNUMERIC(N'1') AS validity, SIGN(CAST(-2 AS BIGINT)) AS sign_bigint, POWER(CAST(2 AS BIGINT),3) AS power_bigint, POWER(CAST(2 AS FLOAT),3) AS power_float
+      expect:
+        data: [{validity: 1, sign_bigint: -1, power_bigint: 8, power_float: 8}]
+        column_types: [{name: validity, type: INT}, {name: sign_bigint, type: BIGINT}, {name: power_bigint, type: BIGINT}, {name: power_float, type: FLOAT}]
+    - sql: SELECT SIGN(CAST(-1.25 AS DECIMAL(8,2))) AS sign_decimal, POWER(CAST(1.25 AS DECIMAL(8,2)),2) AS power_decimal
+      expect:
+        data: [{sign_decimal: '-1.00', power_decimal: '1.56'}]
+        column_types: [{name: sign_decimal, type: DECIMAL, precision: 8, scale: 2}, {name: power_decimal, type: DECIMAL, precision: 38, scale: 2}]
+    - sql: SELECT POWER(@base,3) AS result
+      prepare: true
+      parameters: [{name: base, value: 4}]
+      expect: {data: [{result: 64}]}
+
+- name: Decimal variable contracts preserve scale in power results
+  sql: DECLARE @amount DECIMAL(8,2)=1.25; SELECT POWER(@amount,2) AS result
+  expect: {data: [{result: 1.56}]}
+- name: Numeric function arity is validated before execution
+  sql: SELECT POWER(2)
+  expect: {error: true}
+- name: Sign function arity is validated before execution
+  sql: SELECT SIGN(1,2)
+  expect: {error: true}
+
+- name: Monetary products retain declared width scale and NULL semantics
+  sql: SELECT CAST(1.25 AS MONEY)*CAST(2 AS SMALLMONEY) AS amount,CAST(2 AS SMALLMONEY)*CAST(3 AS SMALLMONEY) AS small_amount,CAST(NULL AS MONEY)*CAST(3 AS MONEY) AS missing
+  expect: {rows: 1,data: [{amount: 2.5,small_amount: 6,missing: null}]}
+- name: Monetary multiplication preserves SQL byte lengths before an enclosing scalar
+  sql: SELECT DATALENGTH(CAST(1.25 AS MONEY)*CAST(2 AS SMALLMONEY)) AS money_bytes,DATALENGTH(CAST(2 AS SMALLMONEY)*CAST(3 AS SMALLMONEY)) AS small_bytes,CEILING(CAST(1.2345 AS MONEY)*CAST(100 AS SMALLMONEY)) AS rounded
+  expect: {rows: 1,data: [{money_bytes: 8,small_bytes: 4,rounded: 124}]}
+- name: Monetary product narrowing uses the existing four decimal place cast
+  sql: SELECT CAST(0.3333 AS MONEY)*CAST(0.3333 AS MONEY) AS rounded,CAST(-0.3333 AS MONEY)*CAST(0.3333 AS MONEY) AS negative
+  expect: {rows: 1,data: [{rounded: 0.1111,negative: -0.1111}]}
+- name: Stored numeric formulas compose currency POWER multiplication and CEILING
+  tds:
+    statements:
+    - sql: |
+        CREATE FUNCTION dbo.ceiling_currency(@amount MONEY,@digits SMALLINT=2) RETURNS FLOAT AS BEGIN
+          DECLARE @value FLOAT;
+          SET @value=CEILING(@amount*POWER(CAST(10 AS SMALLMONEY),@digits))*POWER(CAST(10 AS SMALLMONEY),-1*@digits);
+          RETURN @value;
+        END
+    - sql: SELECT dbo.ceiling_currency(1.2345,DEFAULT) AS amount,dbo.ceiling_currency(-1.2345,DEFAULT) AS negative,dbo.ceiling_currency(NULL,DEFAULT) AS missing
+      expect: {rows: 1,data: [{amount: 1.24,negative: -1.23,missing: null}]}

@@ -906,7 +906,7 @@ func TestTableStatisticsReadsPublishedSnapshotWithoutShardLock(t *testing.T) {
 	}
 	shard.mu.Unlock()
 
-	tbl.ShowColumns()
+	tbl.ShowColumns(nil)
 	if stats := tbl.statistics(); stats.rowCount != 1 {
 		t.Fatalf("SHOW COLUMNS replaced collected row count with %d, want 1", stats.rowCount)
 	}

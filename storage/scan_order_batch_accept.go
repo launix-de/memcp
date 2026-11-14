@@ -295,6 +295,14 @@ func scanOrderBatchAccept(currentTx *TxContext, source scanOrderTableSpec, batch
 		panic("scan_order_batch_accept: offset plus limit overflows")
 	}
 
+	var finishData func()
+	if scanMutates(callbackCols) {
+		currentTx, finishData = source.backingTable().writeDataContext(currentTx)
+	} else {
+		currentTx, finishData = source.backingTable().readDataContext(currentTx)
+	}
+	defer finishData()
+
 	result := scm.ApplyOnce(neutral, nil)
 	hadValue := false
 	if limit == 0 {

@@ -64,7 +64,13 @@ func (r *parserResult) addVariable(key Symbol, value Scmer) {
 
 func (r *parserResult) variables() map[Symbol]Scmer {
 	if r.env != nil {
-		return r.env
+		// Match payloads can be memoized or shared by grammar branches. The
+		// semantic action owns its bindings and any local DEFINE/SET updates.
+		variables := make(map[Symbol]Scmer, len(r.env))
+		for name, value := range r.env {
+			variables[name] = value
+		}
+		return variables
 	}
 	if r.hasVariable {
 		return map[Symbol]Scmer{r.variable: r.variableValue}
@@ -169,9 +175,10 @@ func (b *ScmParser) Match(s *packrat.Scanner[*parserResult]) (packrat.Node[*pars
 	} else {
 		var en2 Env
 		// evaluate parser
-		en2.Vars = m.Payload.variables() // take variable assignments
+		en2.Vars = m.Payload.variables()
 		en2.Outer = b.Outer
-		en2.Nodefine = true
+		// The action is a fresh lexical invocation, not a definition proxy for
+		// the grammar's creation frame. Keep the existing lexical depth.
 		return packrat.Node[*parserResult]{Payload: &parserResult{value: Eval(b.Generator, &en2), env: nil}}, true
 	}
 }

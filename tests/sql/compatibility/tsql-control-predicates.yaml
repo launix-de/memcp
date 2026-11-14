@@ -1,0 +1,280 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  syntax: tsql
+  description: Relational control predicates use the ordinary SQL planner
+  isolated: true
+setup:
+- sql: CREATE TABLE control_probe(id INT PRIMARY KEY, value INT)
+- sql: INSERT INTO control_probe VALUES(1,10),(2,NULL)
+- sql: CREATE TABLE control_goto_effect(id INT PRIMARY KEY)
+cleanup:
+- sql: DROP TABLE IF EXISTS control_probe
+- sql: DROP TABLE IF EXISTS control_goto_effect
+- sql: DROP PROCEDURE IF EXISTS control_goto_proc
+test_cases:
+- name: Existing relation rows select the true branch
+  sql: IF EXISTS(SELECT id FROM control_probe WHERE id=1) SELECT 1 AS chosen ELSE SELECT 0 AS chosen
+  expect:
+    rows: 1
+    data:
+    - chosen: 1
+- name: Missing relation rows select the false branch
+  sql: IF EXISTS(SELECT id FROM control_probe WHERE id=3) SELECT 1 AS chosen ELSE SELECT 0 AS chosen
+  expect:
+    rows: 1
+    data:
+    - chosen: 0
+- name: NOT EXISTS retains SQL negation
+  sql: IF NOT EXISTS(SELECT id FROM control_probe WHERE id=3) SELECT 1 AS chosen ELSE SELECT 0 AS chosen
+  expect:
+    rows: 1
+    data:
+    - chosen: 1
+- name: One-row scalar subqueries use their value
+  sql: IF (SELECT value FROM control_probe WHERE id=1)=10 SELECT 1 AS chosen ELSE SELECT 0 AS chosen
+  expect:
+    rows: 1
+    data:
+    - chosen: 1
+- name: Empty scalar subqueries produce unknown predicates
+  sql: IF (SELECT value FROM control_probe WHERE id=3)=10 SELECT 1 AS chosen ELSE SELECT 0 AS chosen
+  expect:
+    rows: 1
+    data:
+    - chosen: 0
+- name: Scalar subquery cardinality remains checked
+  sql: IF (SELECT id FROM control_probe)=1 SELECT 1 AS chosen
+  expect:
+    error: true
+- name: Membership predicates use relational lowering
+  sql: IF 1 IN(SELECT id FROM control_probe) SELECT 1 AS chosen ELSE SELECT 0 AS chosen
+  expect:
+    rows: 1
+    data:
+    - chosen: 1
+- name: NOT IN retains unknown from a NULL right side
+  sql: IF 20 NOT IN(SELECT value FROM control_probe) SELECT 1 AS chosen ELSE SELECT 0 AS chosen
+  expect:
+    rows: 1
+    data:
+    - chosen: 0
+- name: Earlier statements can change a cached control predicate
+  sql: INSERT INTO control_probe VALUES(3,30)
+- name: Reused predicate observes inserted rows
+  sql: IF EXISTS(SELECT id FROM control_probe WHERE id=3) SELECT 1 AS chosen ELSE SELECT 0 AS chosen
+  expect:
+    rows: 1
+    data:
+    - chosen: 1
+- name: Control parameters stay lexical SQL inputs
+  sql: DECLARE @wanted INT=3; IF EXISTS(SELECT id FROM control_probe WHERE id=@wanted) SELECT 1 AS chosen ELSE SELECT
+    0 AS chosen
+  expect:
+    rows: 1
+    data:
+    - chosen: 1
+- name: Unselected branch is not physically compiled
+  sql: IF EXISTS(SELECT id FROM control_probe WHERE id=1) SELECT 1 AS chosen ELSE SELECT * FROM control_missing
+  expect:
+    rows: 1
+    data:
+    - chosen: 1
+- name: WHILE predicates observe lexical values through the relational planner
+  sql: DECLARE @n INT=1; WHILE EXISTS(SELECT id FROM control_probe WHERE id=@n) BEGIN SET @n=@n+1 END; SELECT @n
+    AS final_value
+  expect:
+    rows: 1
+    data:
+    - final_value: 4
+- name: Correlated EXISTS is decorrelated inside a control predicate
+  sql: IF EXISTS(SELECT p.id FROM control_probe p WHERE EXISTS(SELECT q.id FROM control_probe q WHERE q.id=p.id))
+    SELECT 1 AS chosen ELSE SELECT 0 AS chosen
+  expect:
+    rows: 1
+    data:
+    - chosen: 1
+- name: Forward GOTO skips intervening SQL without binding it
+  sql: 'GOTO done; SELECT * FROM control_missing; done: SELECT 7 AS chosen'
+  expect:
+    rows: 1
+    data:
+    - chosen: 7
+- name: Backward GOTO reuses the lexical variable scope
+  sql: 'DECLARE @n INT=0; again: SET @n=@n+1; IF @n<4 GOTO again; SELECT @n AS final_value'
+  expect:
+    rows: 1
+    data:
+    - final_value: 4
+- name: Labels are case insensitive in the default identifier profile
+  sql: 'GOTO FiNiSh; finish: SELECT 8 AS chosen'
+  expect:
+    rows: 1
+    data:
+    - chosen: 8
+- name: A label at the end of a batch is a valid exit
+  sql: 'GOTO done; SELECT 0 AS chosen; done:'
+  expect:
+    rows: 1
+    data:
+    - affected_rows: 0
+- name: Consecutive labels share their continuation
+  sql: 'GOTO second; first: second: SELECT 9 AS chosen'
+  expect:
+    rows: 1
+    data:
+    - chosen: 9
+- name: GOTO leaves nested blocks and a loop without running their suffix
+  sql: 'DECLARE @n INT=0; WHILE @n<5 BEGIN BEGIN SET @n=@n+1; IF @n=2 GOTO finished; END; CONTINUE; SET @n=99; END;
+    finished: SELECT @n AS final_value'
+  expect:
+    rows: 1
+    data:
+    - final_value: 2
+- name: GOTO may enter an ordinary block inside an unselected IF
+  sql: 'DECLARE @n INT=0; GOTO inside_block; IF 1=0 BEGIN SET @n=99; inside_block: SET @n=@n+3; END; SELECT @n AS
+    final_value'
+  expect:
+    rows: 1
+    data:
+    - final_value: 3
+- name: GOTO entering a loop body resumes at its normal condition
+  sql: 'DECLARE @n INT=0; GOTO inside_loop; WHILE @n<3 BEGIN SET @n=99; inside_loop: SET @n=@n+1; GOTO condition_check;
+    condition_check: CONTINUE; END; SELECT @n AS final_value'
+  expect:
+    rows: 1
+    data:
+    - final_value: 100
+- name: Ordinary nested BREAK and CONTINUE retain their loop owner
+  sql: DECLARE @n INT=0,@total INT=0; WHILE @n<5 BEGIN SET @n=@n+1; IF @n=2 CONTINUE; IF @n=4 BREAK; SET @total=@total+@n;
+    END; SELECT @n AS final_value,@total AS total
+  expect:
+    rows: 1
+    data:
+    - final_value: 4
+      total: 4
+- name: GOTO remains inside its TRY region
+  sql: 'DECLARE @n INT=0; BEGIN TRY GOTO inside_try; SET @n=99; inside_try: SET @n=4; END TRY BEGIN CATCH SET @n=88;
+    END CATCH; SELECT @n AS final_value'
+  expect:
+    rows: 1
+    data:
+    - final_value: 4
+- name: GOTO can leave a TRY region without entering CATCH
+  sql: 'DECLARE @n INT=0; BEGIN TRY SET @n=5; GOTO outside_try; SET @n=99; END TRY BEGIN CATCH SET @n=88; END CATCH;
+    outside_try: SELECT @n AS final_value'
+  expect:
+    rows: 1
+    data:
+    - final_value: 5
+- name: GOTO can leave CATCH and restores its outer error context
+  sql: 'DECLARE @n INT=0; BEGIN TRY THROW 50001,N''sample'',1; END TRY BEGIN CATCH SET @n=6; GOTO outside_catch;
+    SET @n=99; END CATCH; outside_catch: SELECT @n AS final_value,ERROR_NUMBER() AS error_number'
+  expect:
+    rows: 1
+    data:
+    - final_value: 6
+      error_number: null
+- name: BREAK crosses a TRY region to its lexical WHILE
+  sql: DECLARE @n INT=0; WHILE @n<5 BEGIN BEGIN TRY SET @n=@n+1; BREAK; END TRY BEGIN CATCH SET @n=99; END CATCH;
+    END; SELECT @n AS final_value
+  expect:
+    rows: 1
+    data:
+    - final_value: 1
+- name: CONTINUE crosses a TRY region to its lexical WHILE
+  sql: DECLARE @n INT=0; WHILE @n<3 BEGIN BEGIN TRY SET @n=@n+1; CONTINUE; END TRY BEGIN CATCH SET @n=99; END CATCH;
+    SET @n=88; END; SELECT @n AS final_value
+  expect:
+    rows: 1
+    data:
+    - final_value: 3
+- name: Unknown GOTO targets reject the batch before SQL effects
+  sql: INSERT control_goto_effect VALUES(1); GOTO missing_label
+  expect:
+    error: true
+- name: Duplicate labels reject the batch before SQL effects
+  sql: 'INSERT control_goto_effect VALUES(2); same_label: same_label:'
+  expect:
+    error: true
+- name: GOTO cannot enter TRY from outside its region
+  sql: 'INSERT control_goto_effect VALUES(3); GOTO protected_label; BEGIN TRY protected_label: SELECT 1 AS chosen;
+    END TRY BEGIN CATCH SELECT 0 AS chosen; END CATCH'
+  expect:
+    error: true
+- name: GOTO cannot enter CATCH from outside its region
+  sql: 'INSERT control_goto_effect VALUES(4); GOTO protected_label; BEGIN TRY SELECT 1 AS chosen; END TRY BEGIN
+    CATCH protected_label: SELECT 0 AS chosen; END CATCH'
+  expect:
+    error: true
+- name: GOTO cannot jump from TRY into its sibling CATCH
+  sql: 'INSERT control_goto_effect VALUES(5); BEGIN TRY GOTO protected_label; END TRY BEGIN CATCH protected_label:
+    SELECT 0 AS chosen; END CATCH'
+  expect:
+    error: true
+- name: A GOTO before RETURN still validates its target
+  sql: RETURN; GOTO missing_label
+  expect:
+    error: true
+- name: Invalid control flow performed no earlier writes
+  sql: SELECT COUNT(*) AS total FROM control_goto_effect
+  expect:
+    rows: 1
+    data:
+    - total: 0
+- name: Stored procedures retain real GOTO recipes
+  sql: 'CREATE PROCEDURE control_goto_proc AS BEGIN DECLARE @n INT=0; increment: SET @n=@n+1; IF @n<3 GOTO increment;
+    SELECT @n AS final_value; END'
+- name: Stored procedure GOTO uses a fresh invocation scope
+  sql: EXEC control_goto_proc
+  expect:
+    rows: 1
+    data:
+    - final_value: 3
+- name: Labels do not escape into a dynamic batch
+  sql: 'outside_dynamic: EXEC(N''GOTO outside_dynamic'')'
+  expect:
+    error: true
+- name: GOTO leaves an inner TRY for a label in its enclosing TRY
+  sql: 'BEGIN TRY BEGIN TRY GOTO outer_try; END TRY BEGIN CATCH SELECT 9 AS chosen; END CATCH; outer_try: SELECT
+    2 AS chosen; END TRY BEGIN CATCH SELECT 8 AS chosen; END CATCH'
+  expect:
+    rows: 1
+    data:
+    - chosen: 2
+- name: Loop completion retains the last executed SQL count
+  sql: DECLARE @n INT=10; WHILE @n<12 BEGIN SET @n=@n+1; INSERT control_goto_effect VALUES(@n); END
+  expect:
+    rows: 1
+    data:
+    - affected_rows: 1
+- name: An unentered loop resets its own completion count
+  sql: INSERT control_goto_effect VALUES(13); WHILE 1=0 INSERT control_goto_effect VALUES(14)
+  expect:
+    rows: 1
+    data:
+    - affected_rows: 0
+- name: GOTO skips SQL effects and resumes its selected suffix
+  sql: 'GOTO chosen_write; INSERT control_goto_effect VALUES(14); chosen_write: INSERT control_goto_effect VALUES(15)'
+  expect:
+    rows: 1
+    data:
+    - affected_rows: 1
+- name: Control transfers preserve exactly the selected native writes
+  sql: SELECT id FROM control_goto_effect ORDER BY id
+  expect:
+    rows: 4
+    data:
+    - id: 11
+    - id: 12
+    - id: 13
+    - id: 15
+- name: Restart discards executable control cache and retains source recipes
+  action: restart
+- name: Restored GOTO procedures regenerate source-only flow recipes
+  sql: EXEC control_goto_proc
+  expect:
+    rows: 1
+    data:
+    - final_value: 3

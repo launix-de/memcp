@@ -1,0 +1,82 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: Shared emitted callables preserve lexical captures and explicit execution inputs
+
+test_cases:
+  - name: Published callbacks receive every execution input and retain captures
+    scm: |
+      (begin
+        (define callback (close_procedure ((lambda (increment)
+          (lambda (value) (+ increment value))) 7)))
+        (register_queryplan_callables (list callback))
+        (define code (publish_queryplan_callables
+          (list (quote resultfields) (list (quote resultrow)
+            (list callback (list (quote +) (quote session) (quote tx)))))))
+        (define run (close_procedure (eval (optimize (list (quote lambda)
+          (list (quote session) (quote tx) (quote resultrow) (quote resultfields)) code)))))
+        (equal? (run 2 5 (lambda (value) (+ value 1)) (lambda (value) (* value 3))) 45))
+    expect: {result: true}
+
+  - name: Nested callbacks keep their own shadowed lexical bindings
+    scm: |
+      (begin
+        (define callback (close_procedure (lambda (value) (+ value 4))))
+        (register_queryplan_callables (list callback))
+        (define code (publish_queryplan_callables
+          (list (list (quote lambda) (list (quote __published_callables_0))
+            (list callback (quote __published_callables_0))) 9)))
+        (define run (close_procedure (eval (optimize (list (quote lambda)
+          (list (quote session) (quote tx) (quote resultrow) (quote resultfields)) code)))))
+        (equal? (run nil nil nil nil) 13))
+    expect: {result: true}
+
+  - name: Publication keeps callable identity and quoted symbols unchanged
+    scm: |
+      (begin
+        (define callback (close_procedure (lambda (value) (+ value 4))))
+        (register_queryplan_callables (list callback))
+        (define code (publish_queryplan_callables
+          (list (quote list) (list (quote identical?) callback callback)
+            (list (quote quote) (list (quote __published_callables_0) (quote session))))))
+        (define run (close_procedure (eval (optimize (list (quote lambda)
+          (list (quote session) (quote tx) (quote resultrow) (quote resultfields)) code)))))
+        (equal? (run nil nil nil nil) (list true (list (quote __published_callables_0) (quote session)))))
+    expect: {result: true}
+
+  - name: Published closed programs survive portable procedure serialization
+    scm: |
+      (begin
+        (define callback (close_procedure ((lambda (increment)
+          (lambda (value) (+ increment value))) 7)))
+        (register_queryplan_callables (list callback))
+        (define code (publish_queryplan_callables
+          (list (quote resultfields) (list callback (quote tx)))))
+        (define run (close_procedure (eval (optimize (list (quote lambda)
+          (list (quote session) (quote tx) (quote resultrow) (quote resultfields)) code)))))
+        (define restored (eval (scheme (serialize run))))
+        (equal? (restored nil 5 nil (lambda (value) (* value 3))) 36))
+    expect: {result: true}
+
+  - name: Composed publishers preserve invocation count and stateful captures
+    scm: |
+      (begin
+        (define counter (newsession))
+        (counter "count" 0)
+        (define callback (close_procedure ((lambda (state)
+          (lambda () (begin (state "count" (+ (state "count") 1)) (state "count")))) counter)))
+        (register_queryplan_callables (list callback))
+        (define once (publish_queryplan_callables (list (quote +) (list callback) (list callback))))
+        (define twice (publish_queryplan_callables once))
+        (define run (close_procedure (eval (optimize (list (quote lambda)
+          (list (quote session) (quote tx) (quote resultrow) (quote resultfields)) twice)))))
+        (and (equal? (run nil nil nil nil) 3) (equal? (counter "count") 2)))
+    expect: {result: true}
+
+  - name: Quoted source symbols and list forms remain inert through the text codec
+    scm: |
+      (begin
+        (define value (list (quote list) (quote session) (list (quote lambda) (list (quote tx)) (quote tx))))
+        (define restored (eval (scheme (serialize (list (quote quote) value)))))
+        (expression_equal? value restored))
+    expect: {result: true}

@@ -16,7 +16,7 @@ setup:
 test_cases:
   - name: "Insert enough rows to create multiple free shards"
     scm: |
-      (insert (table "memcp-tests" false "safe_rollover" false) '("id" "note")
+      (insert (table "memcp-tests" false "safe_rollover" false nil) '("id" "note")
         (map (produceN 8) (lambda (i)
           (list (+ i 1) (concat "row-" i)))))
 
@@ -29,7 +29,7 @@ test_cases:
 
   - name: "Seed a multi-shard table that stays cold after restart"
     scm: |
-      (insert (table "memcp-tests" false "safe_cold_rebuild" false) '("id" "note")
+      (insert (table "memcp-tests" false "safe_cold_rebuild" false nil) '("id" "note")
         (map (produceN 8) (lambda (i)
           (list (+ i 1) (concat "cold-" i)))))
 
@@ -98,7 +98,7 @@ test_cases:
         - note: "copy-7"
 
   - name: "Incremental rebuild preserves cold persisted shards"
-    scm: '(rebuild (table "memcp-tests" false "safe_cold_rebuild" false) false false)'
+    scm: '(rebuild (table "memcp-tests" false "safe_cold_rebuild" false nil) false false)'
 
   - name: "All cold-shard rows remain visible after rebuild"
     sql: "SELECT COUNT(*) AS cnt, SUM(id) AS checksum FROM safe_cold_rebuild"
@@ -112,7 +112,7 @@ test_cases:
     sql: "SHUTDOWN"
 
   - name: "Forced rebuild loads cold shards before repartition"
-    scm: '(rebuild (table "memcp-tests" false "safe_cold_rebuild" false) true true)'
+    scm: '(rebuild (table "memcp-tests" false "safe_cold_rebuild" false nil) true true)'
 
   - name: "Forced cold-shard repartition preserves every row"
     sql: "SELECT COUNT(*) AS cnt, SUM(id) AS checksum FROM safe_cold_rebuild"

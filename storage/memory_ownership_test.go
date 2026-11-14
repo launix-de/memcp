@@ -19,6 +19,7 @@ package storage
 import (
 	"bytes"
 	"io"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -62,25 +63,93 @@ func TestRebuildMemoryTransferPrecedesCommitForwarding(t *testing.T) {
 	done := make(chan *storageShard, 1)
 	go func() { done <- shard.rebuild(true) }()
 	<-p.manifestReached
-	// This is the source lock held by commit's syncNextVisibilityLocked.
-	// Once nextReady is published, commit may wait for the successor lock;
-	// rebuild must release that lock without ever reacquiring this one.
-	shard.mu.Lock()
-	if !shard.nextReady.Load() {
-		t.Error("fixture did not reach commit-forwarding publication")
+	var resumeManifest sync.Once
+	resume := func() { resumeManifest.Do(func() { close(p.resume) }) }
+	defer resume()
+
+	// Manifest I/O belongs to the private successor, before writer handoff.
+	// Real source access must finish while that I/O remains blocked.
+	accessDone := make(chan struct{})
+	go func() {
+		defer close(accessDone)
+		read := shard.GetRead(nil, false)
+		read.Release()
+		shard.mu.Lock()
+		if shard.nextReady.Load() || shard.nextForMaintenanceLocked(nil) != nil {
+			t.Error("unfinished manifest exposed a consumable successor")
+		}
+		if shard.tempColumnBytes[col] != 128 {
+			t.Error("private successor took source accounting before handoff")
+		}
+		shard.mu.Unlock()
+		tbl.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(2)}}, nil, scm.NewNil(), false, nil)
+	}()
+	select {
+	case <-accessDone:
+	case <-time.After(time.Second):
+		resume()
+		<-accessDone
+		<-done
+		t.Fatal("private manifest I/O blocked source read/write access")
 	}
-	close(p.resume)
+
+	// Observe the actual writer handoff rather than treating manifest I/O as
+	// its signal. This may observe an already-completed successor; parallel
+	// commit/rebuild result tests additionally cover the contested interleaving.
+	forwardingReached := make(chan struct{})
+	observerDone := make(chan struct{})
+	stopObserver := make(chan struct{})
+	defer close(stopObserver)
+	release := make(chan struct{})
+	var releaseSource sync.Once
+	unlock := func() { releaseSource.Do(func() { close(release) }) }
+	defer unlock()
+	go func() {
+		defer close(observerDone)
+		for !shard.nextReady.Load() {
+			select {
+			case <-stopObserver:
+				return
+			default:
+				runtime.Gosched()
+			}
+		}
+		shard.mu.Lock()
+		defer shard.mu.Unlock()
+		next := shard.nextForMaintenanceLocked(nil)
+		if next == nil || next.tempColumnBytes[col] != 128 || len(shard.tempColumnBytes) != 0 {
+			t.Error("writer handoff did not transfer complete temporary-column accounting")
+		}
+		close(forwardingReached)
+		<-release
+	}()
+	resume()
+	deadline := time.After(time.Second)
+	select {
+	case <-forwardingReached:
+	case <-deadline:
+		unlock()
+		<-done
+		t.Fatal("rebuild did not publish its writer handoff")
+	}
 	select {
 	case rebuilt := <-done:
-		shard.mu.Unlock()
+		unlock()
+		<-observerDone
 		rebuilt.mu.RLock()
 		got := rebuilt.tempColumnBytes[col]
+		rows := rebuilt.deltaRows()
+		caughtUp := len(rows) == 1 && rows[0][rebuilt.deltaColumns["id"]].Int() == 2
 		rebuilt.mu.RUnlock()
 		if got != 128 {
 			t.Fatalf("successor lost temporary-column accounting: %d", got)
 		}
-	case <-time.After(time.Second):
-		shard.mu.Unlock()
+		if rebuilt.Count() != 2 || !caughtUp {
+			t.Fatal("successor lost the source row inserted during private manifest I/O")
+		}
+	case <-deadline:
+		unlock()
+		<-observerDone
 		<-done
 		t.Fatal("rebuild reacquired source lock after enabling commit forwarding")
 	}

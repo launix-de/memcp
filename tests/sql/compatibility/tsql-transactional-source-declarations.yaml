@@ -1,0 +1,401 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Real TDS source definitions compose atomically with public foreign declarations
+setup:
+- sql: CREATE TABLE source_tds_parent(id INT PRIMARY KEY)
+- sql: CREATE TABLE source_tds_child(id INT PRIMARY KEY,parent_id INT)
+- sql: INSERT source_tds_parent VALUES(1)
+- sql: INSERT source_tds_child VALUES(2,1)
+cleanup:
+- sql: DROP PROCEDURE IF EXISTS source_tds_alter_committed
+- sql: DROP PROCEDURE IF EXISTS source_tds_owned
+- sql: DROP PROCEDURE IF EXISTS source_tds_rolledback
+- sql: DROP PROCEDURE IF EXISTS source_tds_rejected
+- sql: DROP TABLE IF EXISTS source_tds_child
+- sql: DROP TABLE IF EXISTS source_tds_parent
+test_cases:
+- name: A source-only native transaction invokes its own definition while an observer cannot see it
+  tds:
+    statements:
+    - {connection: owner, sql: BEGIN TRANSACTION}
+    - {connection: owner, sql: 'CREATE PROCEDURE dbo.source_tds_rolledback AS SELECT 7 AS value'}
+    - connection: owner
+      sql: EXEC dbo.source_tds_rolledback
+      expect: {rows: 1, data: [{value: 7}]}
+    - connection: observer
+      sql: EXEC dbo.source_tds_rolledback
+      expect: {error: true, contains: ['procedure does not exist']}
+    - {connection: owner, sql: ROLLBACK TRANSACTION}
+    - connection: observer
+      sql: EXEC dbo.source_tds_rolledback
+      expect: {error: true, contains: ['procedure does not exist']}
+- name: Source-only COMMIT publishes an executable definition without a preceding foreign key
+  tds:
+    statements:
+    - {connection: owner, sql: BEGIN TRANSACTION}
+    - {connection: owner, sql: 'CREATE PROCEDURE dbo.source_tds_owned AS SELECT 11 AS value'}
+    - {connection: owner, sql: COMMIT TRANSACTION}
+    - connection: observer
+      sql: EXEC dbo.source_tds_owned
+      expect: {rows: 1, data: [{value: 11}]}
+- name: A transactional replacement leaves the observer on its previous source until rollback
+  tds:
+    statements:
+    - {connection: owner, sql: BEGIN TRANSACTION}
+    - {connection: owner, sql: 'CREATE OR ALTER PROCEDURE dbo.source_tds_owned AS SELECT 12 AS value'}
+    - connection: owner
+      sql: EXEC dbo.source_tds_owned
+      expect: {rows: 1, data: [{value: 12}]}
+    - connection: observer
+      sql: EXEC dbo.source_tds_owned
+      expect: {rows: 1, data: [{value: 11}]}
+    - {connection: owner, sql: ROLLBACK TRANSACTION}
+    - connection: observer
+      sql: EXEC dbo.source_tds_owned
+      expect: {rows: 1, data: [{value: 11}]}
+- name: A rolled-back real source DROP restores its prior executable definition
+  tds:
+    statements:
+    - {connection: owner, sql: BEGIN TRANSACTION}
+    - {connection: owner, sql: DROP PROCEDURE dbo.source_tds_owned}
+    - connection: observer
+      sql: EXEC dbo.source_tds_owned
+      expect: {rows: 1, data: [{value: 11}]}
+    - {connection: owner, sql: ROLLBACK TRANSACTION}
+    - connection: owner
+      sql: EXEC dbo.source_tds_owned
+      expect: {rows: 1, data: [{value: 11}]}
+- name: Historical FK and source replacement publish together through the same TDS transaction
+  tds:
+    statements:
+    - {connection: owner, sql: BEGIN TRANSACTION}
+    - {connection: owner, sql: 'ALTER TABLE source_tds_child ADD CONSTRAINT FK_source_tds FOREIGN KEY(parent_id) REFERENCES source_tds_parent(id)'}
+    - {connection: owner, sql: 'CREATE OR ALTER PROCEDURE dbo.source_tds_owned AS SELECT 21 AS value'}
+    - connection: observer
+      sql: SELECT constraint_name AS name FROM information_schema.referential_constraints WHERE constraint_name=N'FK_source_tds'
+      expect: {rows: 0}
+    - connection: observer
+      sql: EXEC dbo.source_tds_owned
+      expect: {rows: 1, data: [{value: 11}]}
+    - {connection: owner, sql: COMMIT TRANSACTION}
+    - connection: observer
+      sql: EXEC dbo.source_tds_owned
+      expect: {rows: 1, data: [{value: 21}]}
+    - connection: observer
+      sql: SELECT constraint_name AS name FROM information_schema.referential_constraints WHERE constraint_name=N'FK_source_tds'
+      expect: {rows: 1, data: [{name: FK_source_tds}]}
+    - connection: observer
+      sql: INSERT source_tds_child VALUES(3,999)
+      expect: {error: true, contains: ['foreign key constraint']}
+- name: Source declaration ownership still rejects meaningful public row writes before their effects
+  tds:
+    statements:
+    - {connection: owner, sql: BEGIN TRANSACTION}
+    - {connection: owner, sql: 'CREATE PROCEDURE dbo.source_tds_rejected AS INSERT source_tds_parent VALUES(999)'}
+    - connection: owner
+      sql: EXEC dbo.source_tds_rejected
+      expect: {error: true, contains: ['metadata-only transaction']}
+    - {connection: owner, sql: ROLLBACK TRANSACTION}
+    - connection: observer
+      sql: SELECT id FROM source_tds_parent ORDER BY id
+      expect: {rows: 1, data: [{id: 1}]}
+    - connection: observer
+      sql: EXEC dbo.source_tds_rejected
+      expect: {error: true, contains: ['procedure does not exist']}
+- name: Native source and foreign declarations reload after a clean server restart
+  action: restart
+- name: Restarted actual TDS source execution retains the committed definition
+  tds:
+    statements:
+    - connection: observer
+      sql: EXEC dbo.source_tds_owned
+      expect: {rows: 1, data: [{value: 21}]}
+    - connection: observer
+      sql: INSERT source_tds_child VALUES(4,998)
+      expect: {error: true, contains: ['foreign key constraint']}
+- name: Plain ALTER PROCEDURE replaces both executable source and parameter declarations
+  tds:
+    statements:
+    - sql: CREATE PROCEDURE dbo.source_tds_alter_params @prior INT=1 AS SELECT @prior+10 AS value
+    - sql: ALTER PROCEDURE dbo.source_tds_alter_params @input INT=2 AS SELECT @input+20 AS value
+    - sql: EXEC dbo.source_tds_alter_params
+      expect:
+        rows: 1
+        data:
+        - value: 22
+    - sql: EXEC dbo.source_tds_alter_params @input=7
+      expect:
+        rows: 1
+        data:
+        - value: 27
+    - sql: CREATE PROCEDURE dbo.source_tds_alter_params AS SELECT 99 AS value
+      expect:
+        error: true
+        contains:
+        - procedure already exists
+    - sql: EXEC dbo.source_tds_alter_params
+      expect:
+        rows: 1
+        data:
+        - value: 22
+  cleanup:
+  - sql: DROP PROCEDURE IF EXISTS source_tds_alter_params
+- name: ALTER PROC retains declared OUTPUT binding through the replaced source
+  tds:
+    statements:
+    - sql: CREATE PROC dbo.source_tds_alter_output @input INT,@result INT OUTPUT AS SET @result=@input+1
+    - sql: ALTER PROC dbo.source_tds_alter_output @input INT,@result INT OUTPUT AS BEGIN SET @result=@input+5; END
+    - sql: DECLARE @result INT; EXEC dbo.source_tds_alter_output @input=7,@result=@result OUTPUT; SELECT @result
+        AS value
+      expect:
+        rows: 1
+        data:
+        - value: 12
+  cleanup:
+  - sql: DROP PROCEDURE IF EXISTS source_tds_alter_output
+- name: ALTER PROC executes its replacement through real row mutation
+  tds:
+    statements:
+    - sql: CREATE PROC dbo.source_tds_alter_write AS UPDATE source_tds_alter_rows SET value=value+1 WHERE id=1
+    - sql: ALTER PROC dbo.source_tds_alter_write AS UPDATE source_tds_alter_rows SET value=value+5 WHERE id=1
+    - sql: EXEC dbo.source_tds_alter_write
+    - sql: SELECT value FROM source_tds_alter_rows WHERE id=1
+      expect:
+        rows: 1
+        data:
+        - value: 6
+  setup:
+  - sql: CREATE TABLE source_tds_alter_rows(id INT PRIMARY KEY,value INT)
+  - sql: INSERT source_tds_alter_rows VALUES(1,1)
+  cleanup:
+  - sql: DROP PROCEDURE IF EXISTS source_tds_alter_write
+  - sql: DROP TABLE IF EXISTS source_tds_alter_rows
+- name: Plain ALTER refuses a missing source while CREATE OR ALTER retains its upsert contract
+  tds:
+    statements:
+    - sql: ALTER PROCEDURE dbo.source_tds_alter_missing AS SELECT 91 AS value
+      expect:
+        error: true
+        contains:
+        - procedure does not exist
+    - sql: EXEC dbo.source_tds_alter_missing
+      expect:
+        error: true
+        contains:
+        - procedure does not exist
+    - sql: CREATE OR ALTER PROC dbo.source_tds_alter_missing AS SELECT 71 AS value
+    - sql: EXEC dbo.source_tds_alter_missing
+      expect:
+        rows: 1
+        data:
+        - value: 71
+    - sql: ALTER PROC dbo.source_tds_alter_missing AS SELECT 72 AS value
+    - sql: EXEC dbo.source_tds_alter_missing
+      expect:
+        rows: 1
+        data:
+        - value: 72
+  cleanup:
+  - sql: DROP PROCEDURE IF EXISTS source_tds_alter_missing
+- name: Transactional ALTER is visible to its owner and rollback restores the previous source
+  tds:
+    statements:
+    - sql: CREATE PROC dbo.source_tds_alter_rollback AS SELECT 31 AS value
+      connection: owner
+    - sql: BEGIN TRANSACTION
+      connection: owner
+    - sql: ALTER PROC dbo.source_tds_alter_rollback AS SELECT 32 AS value
+      connection: owner
+    - sql: EXEC dbo.source_tds_alter_rollback
+      connection: owner
+      expect:
+        rows: 1
+        data:
+        - value: 32
+    - sql: EXEC dbo.source_tds_alter_rollback
+      connection: observer
+      expect:
+        rows: 1
+        data:
+        - value: 31
+    - sql: ROLLBACK TRANSACTION
+      connection: owner
+    - sql: EXEC dbo.source_tds_alter_rollback
+      connection: owner
+      expect:
+        rows: 1
+        data:
+        - value: 31
+    - sql: EXEC dbo.source_tds_alter_rollback
+      connection: observer
+      expect:
+        rows: 1
+        data:
+        - value: 31
+  cleanup:
+  - sql: DROP PROCEDURE IF EXISTS source_tds_alter_rollback
+- name: Transactional ALTER publishes the replacement only after its real COMMIT
+  tds:
+    statements:
+    - sql: CREATE PROC dbo.source_tds_alter_committed AS SELECT 41 AS value
+      connection: owner
+    - sql: BEGIN TRANSACTION
+      connection: owner
+    - sql: ALTER PROCEDURE dbo.source_tds_alter_committed AS SELECT 42 AS value
+      connection: owner
+    - sql: EXEC dbo.source_tds_alter_committed
+      connection: owner
+      expect:
+        rows: 1
+        data:
+        - value: 42
+    - sql: EXEC dbo.source_tds_alter_committed
+      connection: observer
+      expect:
+        rows: 1
+        data:
+        - value: 41
+    - sql: COMMIT TRANSACTION
+      connection: owner
+    - sql: EXEC dbo.source_tds_alter_committed
+      connection: observer
+      expect:
+        rows: 1
+        data:
+        - value: 42
+- name: ALTER resolves an earlier CREATE in the same transaction through the native source owner
+  tds:
+    statements:
+    - sql: BEGIN TRANSACTION
+      connection: owner
+    - sql: CREATE PROC dbo.source_tds_alter_created AS SELECT 51 AS value
+      connection: owner
+    - sql: ALTER PROC dbo.source_tds_alter_created AS SELECT 52 AS value
+      connection: owner
+    - sql: EXEC dbo.source_tds_alter_created
+      connection: owner
+      expect:
+        rows: 1
+        data:
+        - value: 52
+    - sql: EXEC dbo.source_tds_alter_created
+      connection: observer
+      expect:
+        error: true
+        contains:
+        - procedure does not exist
+    - sql: COMMIT TRANSACTION
+      connection: owner
+    - sql: EXEC dbo.source_tds_alter_created
+      connection: observer
+      expect:
+        rows: 1
+        data:
+        - value: 52
+  cleanup:
+  - sql: DROP PROCEDURE IF EXISTS source_tds_alter_created
+- name: ALTER cannot recreate a source already dropped in its own transaction
+  tds:
+    statements:
+    - sql: CREATE PROC dbo.source_tds_alter_dropped AS SELECT 61 AS value
+      connection: owner
+    - sql: BEGIN TRANSACTION
+      connection: owner
+    - sql: DROP PROCEDURE dbo.source_tds_alter_dropped
+      connection: owner
+    - sql: ALTER PROC dbo.source_tds_alter_dropped AS SELECT 62 AS value
+      connection: owner
+      expect:
+        error: true
+        contains:
+        - procedure does not exist
+    - sql: EXEC dbo.source_tds_alter_dropped
+      connection: observer
+      expect:
+        rows: 1
+        data:
+        - value: 61
+    - sql: ROLLBACK TRANSACTION
+      connection: owner
+    - sql: EXEC dbo.source_tds_alter_dropped
+      connection: owner
+      expect:
+        rows: 1
+        data:
+        - value: 61
+  cleanup:
+  - sql: DROP PROCEDURE IF EXISTS source_tds_alter_dropped
+- name: A missing transactional ALTER leaves no source after rollback
+  tds:
+    statements:
+    - sql: BEGIN TRANSACTION
+      connection: owner
+    - sql: ALTER PROC dbo.source_tds_alter_absent_tx AS SELECT 81 AS value
+      connection: owner
+      expect:
+        error: true
+        contains:
+        - procedure does not exist
+    - sql: ROLLBACK TRANSACTION
+      connection: owner
+    - sql: EXEC dbo.source_tds_alter_absent_tx
+      connection: observer
+      expect:
+        error: true
+        contains:
+        - procedure does not exist
+  cleanup:
+  - sql: DROP PROCEDURE IF EXISTS source_tds_alter_absent_tx
+- name: Native database membership permits ALTER even after an ignored granular DENY
+  tds:
+    statements:
+    - sql: CREATE PROC dbo.source_tds_alter_member AS SELECT 91 AS value
+    - sql: DENY ALTER ON OBJECT::dbo.source_tds_alter_member TO source_tds_alter_member
+    - sql: ALTER PROC dbo.source_tds_alter_member AS SELECT 92 AS value
+    - sql: EXEC dbo.source_tds_alter_member
+      expect:
+        rows: 1
+        data:
+        - value: 92
+    username: source_tds_alter_member
+    password: pw
+  setup:
+  - scm: (eval (parse_sql "memcp-tests" "CREATE USER source_tds_alter_member IDENTIFIED BY 'pw'" nil))
+  - scm: (eval (parse_sql "memcp-tests" "GRANT ALL ON `memcp-tests`.* TO source_tds_alter_member" nil))
+  cleanup:
+  - sql: DROP PROCEDURE IF EXISTS source_tds_alter_member
+  - scm: (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS source_tds_alter_member" nil))
+- name: An account without native database access cannot replace an existing source
+  username: source_tds_alter_outsider
+  password: pw
+  setup:
+  - scm: (eval (parse_sql "memcp-tests" "CREATE USER source_tds_alter_outsider IDENTIFIED BY 'pw'" nil))
+  - sql: CREATE PROC dbo.source_tds_alter_protected AS SELECT 101 AS value
+  sql: ALTER PROCEDURE dbo.source_tds_alter_protected AS SELECT 102 AS value
+  expect:
+    error: true
+    contains: access denied
+  cleanup:
+  - scm: (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS source_tds_alter_outsider" nil))
+- name: Rejected ALTER preserves the prior executable definition
+  sql: EXEC dbo.source_tds_alter_protected
+  expect:
+    rows: 1
+    data:
+    - value: 101
+  cleanup:
+  - sql: DROP PROCEDURE IF EXISTS source_tds_alter_protected
+- name: Committed plain ALTER source survives a real server restart
+  action: restart
+- name: Restarted plain ALTER uses the committed replacement
+  tds:
+    statements:
+    - sql: EXEC dbo.source_tds_alter_committed
+      expect:
+        rows: 1
+        data:
+        - value: 42

@@ -76,7 +76,7 @@ func HashKey(k Scmer) uint64 {
 			} else {
 				h.WriteByte(0)
 			}
-		case tagInt, tagFloat:
+		case tagInt, tagFloat, tagDate:
 			// Compressed columns can expose the same numeric group key as an
 			// int or float. Hash both representations alike; Equal still
 			// distinguishes large int/int values sharing a rounded hash.
@@ -198,8 +198,10 @@ func hashStructuralScalar(value Scmer) uint64 {
 			return hashStructuralFloat(1)
 		}
 		return hashStructuralFloat(0)
-	case tagInt, tagDate:
+	case tagInt:
 		return hashStructuralFloat(float64(value.Int()))
+	case tagDate:
+		return hashStructuralFloat(value.Float())
 	case tagFloat:
 		return hashStructuralFloat(value.Float())
 	case tagString, tagSymbol, tagCString, tagBString, tagLZ4:
@@ -207,8 +209,8 @@ func hashStructuralScalar(value Scmer) uint64 {
 		if text == "" || strings.EqualFold(text, "false") {
 			return hashStructuralFloat(0)
 		}
-		if timestamp, ok := ParseDateString(text); ok {
-			return hashStructuralFloat(float64(timestamp))
+		if timestamp, ok := ParseDateValue(text); ok {
+			return hashStructuralFloat(timestamp.Float())
 		}
 		if numericPrefix(text) != "" {
 			return hashStructuralFloat(value.Float())
@@ -336,13 +338,28 @@ func astStructuralEqual(a, b Scmer) bool {
 			return astStructuralEqual(a, source.value)
 		}
 	}
-	if a.GetTag() != b.GetTag() {
+	tag := a.GetTag()
+	if tag != b.GetTag() {
 		return false
 	}
-	if a.GetTag() == tagNthLocalVar {
+	// Matching primitive tags already establish the representation. Compare
+	// those values directly instead of re-entering coercive scalar dispatch.
+	// Float equality deliberately retains IEEE NaN and signed-zero behavior.
+	switch tag {
+	case tagNil:
+		return true
+	case tagBool:
+		return (auxVal(a.aux) != 0) == (auxVal(b.aux) != 0)
+	case tagInt:
+		return a.aux == b.aux
+	case tagFloat:
+		return math.Float64frombits(a.aux) == math.Float64frombits(b.aux)
+	case tagString:
+		return unsafe.String(a.ptr, int(auxVal(a.aux))) == unsafe.String(b.ptr, int(auxVal(b.aux)))
+	case tagNthLocalVar:
 		return a.NthLocalVar() == b.NthLocalVar()
 	}
-	if a.GetTag() != tagSlice {
+	if tag != tagSlice {
 		return Equal(a, b)
 	}
 	left := a.Slice()

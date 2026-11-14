@@ -8,25 +8,25 @@ setup:
   - sql: "DROP TABLE IF EXISTS qfi_access"
   - sql: "CREATE TABLE qfi_access (viewer INT, domain_id INT) ENGINE=sloppy"
   - sql: "INSERT INTO qfi_access VALUES (999,NULL),(998,998),(997,999)"
-  - scm: '(rebuild (table "memcp-tests" false "qfi_access" false) true false)'
+  - scm: '(rebuild (table "memcp-tests" false "qfi_access" false nil) true false)'
   - sql: "DROP TABLE IF EXISTS qfi_single"
   - sql: "CREATE TABLE qfi_single (id INT PRIMARY KEY) ENGINE=sloppy"
   - sql: "INSERT INTO qfi_single VALUES (999)"
-  - scm: '(rebuild (table "memcp-tests" false "qfi_single" false) true false)'
+  - scm: '(rebuild (table "memcp-tests" false "qfi_single" false nil) true false)'
   - sql: "DROP TABLE IF EXISTS qfi_document"
   - sql: "CREATE TABLE qfi_document (id INT PRIMARY KEY, label TEXT) ENGINE=sloppy"
   - scm: |
       (begin
-        (insert (table "memcp-tests" false "qfi_document" false) '("id" "label")
+        (insert (table "memcp-tests" false "qfi_document" false nil) '("id" "label")
           (map (produceN 1000) (lambda (i) (list i (if (< i 10) "needle" "ordinary")))))
-        (rebuild (table "memcp-tests" false "qfi_document" false) true false))
+        (rebuild (table "memcp-tests" false "qfi_document" false nil) true false))
   - sql: "DROP TABLE IF EXISTS qfi_frequency"
   - sql: "CREATE TABLE qfi_frequency (owner_id INT) ENGINE=sloppy"
   - scm: |
       (begin
-        (insert (table "memcp-tests" false "qfi_frequency" false) '("owner_id")
+        (insert (table "memcp-tests" false "qfi_frequency" false nil) '("owner_id")
           (map (produceN 6000) (lambda (i) (list (if (< i 4500) 1 2)))))
-        (rebuild (table "memcp-tests" false "qfi_frequency" false) true false))
+        (rebuild (table "memcp-tests" false "qfi_frequency" false nil) true false))
 test_cases:
   - name: "Rejected parameter-domain specialization leaves the ordinary plan reusable"
     scm: |
@@ -88,7 +88,7 @@ test_cases:
           (sess "clock" clock)
           (rows "n" -1)
           (sql_execute_formula sess nil
-            (cached_parse cache (list parse_sql) "memcp-tests" q nil "root" sess true)
+            (cached_parse cache "sql" (list parse_sql) "memcp-tests" q nil "root" sess true nil)
             (lambda (row) (rows "n" (cadr row))) (lambda (_fields) nil))
           (rows "n"))))
         (define first (run 999 0))
@@ -188,7 +188,7 @@ test_cases:
           (sess "viewer" viewer)
           (rows "n" 0)
           (sql_execute_formula sess nil
-            (cached_parse cache (list parse_sql) "memcp-tests" q nil "root" sess true)
+            (cached_parse cache "sql" (list parse_sql) "memcp-tests" q nil "root" sess true nil)
             (lambda (row) (rows "n" (+ (rows "n") 1))) (lambda (_fields) nil))
           (rows "n"))))
         (define first (run 999))
@@ -220,7 +220,7 @@ test_cases:
           (sess "viewer" viewer)
           (rows "n" -1)
           (sql_execute_formula sess nil
-            (cached_parse cache (list parse_sql) "memcp-tests" q nil "root" sess true)
+            (cached_parse cache "sql" (list parse_sql) "memcp-tests" q nil "root" sess true nil)
             (lambda (row) (rows "n" (cadr row))) (lambda (_fields) nil))
           (rows "n"))))
         (define first (run 999))
@@ -277,7 +277,7 @@ test_cases:
             (sess "cutoff" cutoff)
             (rows "n" 0)
             (sql_execute_formula sess nil
-              (cached_parse cache (list parse_sql) "memcp-tests" q nil "root" sess true)
+              (cached_parse cache "sql" (list parse_sql) "memcp-tests" q nil "root" sess true nil)
               (lambda (_row) (rows "n" (+ (rows "n") 1)))
               (lambda (_fields) nil))
             (rows "n"))))
@@ -310,7 +310,7 @@ test_cases:
             (sess "bound" bound)
             (rows "n" 0)
             (sql_execute_formula sess nil
-              (cached_parse cache (list parse_sql) "memcp-tests" q nil "root" sess true)
+              (cached_parse cache "sql" (list parse_sql) "memcp-tests" q nil "root" sess true nil)
               (lambda (_row) (rows "n" (+ (rows "n") 1))) (lambda (_fields) nil))
             (rows "n"))))
         (if (equal? (list (run 998) (run 0) (run 999)) (list 1 0 0))
@@ -325,7 +325,7 @@ test_cases:
         (sess "username" "root")
         (sess "schema" "memcp-tests")
         (define q "SELECT a.id FROM qfi_document a LEFT JOIN qfi_document b ON b.id=a.id ORDER BY a.id LIMIT 2")
-        (define first (cached_parse cache (list parse_sql) "memcp-tests" q nil "root" sess true))
+        (define first (cached_parse cache "sql" (list parse_sql) "memcp-tests" q nil "root" sess true))
         (define rows (newsession))
         (rows "n" 0)
         (define emit (lambda (_row) (rows "n" (+ (rows "n") 1))))
@@ -334,10 +334,10 @@ test_cases:
         (define variants (count (entry "variants")))
         (define pred (list 'lambda (list 'x) (list 'strlike 'x "%needle%" "utf8mb4_general_ci")))
         (define access (eval (compile_scan_access '("label") pred)))
-        (scan_recset nil (table "memcp-tests" false "qfi_document" false) (car access)
+        (scan_recset nil (table "memcp-tests" false "qfi_document" false nil) (car access)
           (map (cadr access) (lambda (v) (eval v))) '("label") (eval pred))
         (sql_execute_formula sess nil
-          (cached_parse cache (list parse_sql) "memcp-tests" q nil "root" sess true)
+          (cached_parse cache "sql" (list parse_sql) "memcp-tests" q nil "root" sess true)
           emit (lambda (_fields) nil))
         (if (and (equal? (rows "n") 4) (equal? (count (entry "variants")) variants))
           true
@@ -357,7 +357,7 @@ test_cases:
         (rows "n" 0)
         (define emit (lambda (_row) (rows "n" (+ (rows "n") 1))))
         (sql_execute_formula sess nil
-          (cached_parse cache (list parse_sql) "memcp-tests" q nil "root" sess true)
+          (cached_parse cache "sql" (list parse_sql) "memcp-tests" q nil "root" sess true)
           emit (lambda (_fields) nil))
         (define entry (car (cache (car (cache)))))
         (define before (count (entry "variants")))
@@ -365,14 +365,14 @@ test_cases:
            literal representation. Feedback identifies the bound predicate. */
         (define pred (list 'lambda (list 'x) (list '< 'x (sess "v1"))))
         (define access (eval (compile_scan_access '("id") pred)))
-        (scan_recset nil (table "memcp-tests" false "qfi_document" false) (car access)
+        (scan_recset nil (table "memcp-tests" false "qfi_document" false nil) (car access)
           (map (cadr access) (lambda (v) (eval v))) '("id") (eval pred))
         (sql_execute_formula sess nil
-          (cached_parse cache (list parse_sql) "memcp-tests" q nil "root" sess true)
+          (cached_parse cache "sql" (list parse_sql) "memcp-tests" q nil "root" sess true)
           emit (lambda (_fields) nil))
         (define after (count (entry "variants")))
         (sql_execute_formula sess nil
-          (cached_parse cache (list parse_sql) "memcp-tests" q nil "root" sess true)
+          (cached_parse cache "sql" (list parse_sql) "memcp-tests" q nil "root" sess true)
           emit (lambda (_fields) nil))
         (if (and (> after before) (equal? after (count (entry "variants")))
           (equal? (rows "n") 6)) true
@@ -395,7 +395,7 @@ test_cases:
           (begin
             (sess "cutoff" cutoff)
             (sql_execute_formula sess nil
-              (cached_parse cache (list parse_sql) "memcp-tests" q nil "root" sess true)
+              (cached_parse cache "sql" (list parse_sql) "memcp-tests" q nil "root" sess true)
               (lambda (row) (rows "n" (+ (rows "n") (cadr row))))
               (lambda (_fields) nil)))) nil)
         (define entry (car (cache (car (cache)))))
@@ -417,15 +417,15 @@ test_cases:
           (begin
             (rows "n" 0)
             (sql_execute_formula sess nil
-              (cached_parse cache (list parse_sql) "memcp-tests" q nil "root" sess true)
+              (cached_parse cache "sql" (list parse_sql) "memcp-tests" q nil "root" sess true)
               (lambda (_row) (rows "n" (+ (rows "n") 1))) (lambda (_fields) nil))
             (rows "n"))))
         (define first (run))
         (define entry (car (cache (car (cache)))))
         (define before (count (entry "variants")))
-        (insert (table "memcp-tests" false "qfi_single" false) '("id")
+        (insert (table "memcp-tests" false "qfi_single" false nil) '("id")
           (map (produceN 256) (lambda (i) (list i))))
-        (rebuild (table "memcp-tests" false "qfi_single" false) true false)
+        (rebuild (table "memcp-tests" false "qfi_single" false nil) true false)
         (define second (run))
         (if (and (equal? first 1) (equal? second 2)
           (> (count (entry "variants")) before)) true
@@ -438,7 +438,7 @@ test_cases:
         (define sess (newsession))
         (sess "owner" 1)
         (define planning (sql_queryplan_compile_session sess nil))
-        (define src (list "f" "memcp-tests" "qfi_frequency" false nil))
+        (define src (list "f" "memcp-tests" "qfi_frequency" false nil (sql_relation_declarations "memcp-tests" "qfi_frequency" nil)))
         (define pred (list 'lambda (list 'x) (list 'equal?? 'x (list 'session "owner"))))
         (planner_record_filter_feedback_guard src '("owner_id") pred planning)
         (define guard (sql_queryplan_compile_formula nil (sql_queryplan_guard_from_session planning)))
@@ -447,9 +447,9 @@ test_cases:
         (define other (guard sess nil nil nil))
         (sess "owner" 1)
         (define restored (guard sess nil nil nil))
-        (insert (table "memcp-tests" false "qfi_frequency" false) '("owner_id")
+        (insert (table "memcp-tests" false "qfi_frequency" false nil) '("owner_id")
           (map (produceN 6000) (lambda (i) (list 3))))
-        (rebuild (table "memcp-tests" false "qfi_frequency" false) true false)
+        (rebuild (table "memcp-tests" false "qfi_frequency" false nil) true false)
         (define changed (guard sess nil nil nil))
         (if (and original (not other) restored (not changed)) true
           (error (concat "frequency guard ignored binding or rebuild: "
@@ -465,15 +465,15 @@ test_cases:
       (begin
         (define sess (newsession))
         (define planning (sql_queryplan_compile_session sess nil))
-        (define src '("cache" "memcp-tests" "qfi_cardinality" false true))
+        (define src '("cache" "memcp-tests" "qfi_cardinality" false true (sql_relation_declarations "memcp-tests" "qfi_cardinality" nil)))
         (planner_record_source_row_count_guard src (planner_source_row_count src) planning)
         (define guard (sql_queryplan_compile_formula nil
           (sql_queryplan_guard_from_session planning)))
         (define original (guard sess nil nil nil))
-        (createcolumn (table "memcp-tests" false "qfi_cardinality" false)
+        (createcolumn (table "memcp-tests" false "qfi_cardinality" false nil)
           "extra_aggregate" "INT" '() '("temp" true) '("id") (lambda (id) (+ id 1)))
         (define published (guard sess nil nil nil))
-        (insert (table "memcp-tests" false "qfi_cardinality" false) '("id") (list (list 4)))
+        (insert (table "memcp-tests" false "qfi_cardinality" false nil) '("id") (list (list 4)))
         (define changed (guard sess nil nil nil))
         (if (and original published (not changed)) true
           (error (concat "cardinality guard followed unrelated schema or missed rows: "

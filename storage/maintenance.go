@@ -62,6 +62,11 @@ func databaseMaintenanceCapabilities(schema string) maintenanceCapabilities {
 }
 
 func tableMaintenanceCapabilities(schema, name string) maintenanceCapabilities {
+	if db := GetDatabase(schema); db != nil {
+		if table := db.tables.Get(name); table != nil && !table.committedAt(db.catalogView().version) {
+			return maintenanceCapabilities{class: "unpublished_catalog"}
+		}
+	}
 	if strings.EqualFold(name, ".blobs") {
 		return maintenanceCapabilities{class: "engine_internal"}
 	}

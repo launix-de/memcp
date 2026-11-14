@@ -54,12 +54,13 @@ type parameter struct {
 }
 
 type expectation struct {
-	Error       bool             `json:"error"`
-	Contains    []string         `json:"contains"`
-	NotContains []string         `json:"not_contains"`
-	Columns     []string         `json:"columns"`
-	Rows        *int             `json:"rows"`
-	Data        []map[string]any `json:"data"`
+	AffectedRows *int64           `json:"affected_rows"`
+	Error        bool             `json:"error"`
+	Contains     []string         `json:"contains"`
+	NotContains  []string         `json:"not_contains"`
+	Columns      []string         `json:"columns"`
+	Rows         *int             `json:"rows"`
+	Data         []map[string]any `json:"data"`
 }
 
 func main() {
@@ -113,15 +114,27 @@ func runStatement(conn *sql.Conn, cfg probe, stmt statement) error {
 				return fmt.Errorf("parameter %d requires mysql_type when any parameter is typed", i+1)
 			}
 		}
-		if stmt.Expect.Error || stmt.Expect.Rows != nil || stmt.Expect.Columns != nil || len(stmt.Expect.Data) != 0 {
+		if stmt.Expect.Error || stmt.Expect.AffectedRows != nil || stmt.Expect.Rows != nil || stmt.Expect.Columns != nil || len(stmt.Expect.Data) != 0 {
 			return fmt.Errorf("typed parameters currently support statements without result expectations")
 		}
 		return runTypedStatement(cfg, stmt, args)
 	}
-	rows, err := conn.QueryContext(context.Background(), stmt.SQL, args...)
+	var rows *sql.Rows
+	var completion sql.Result
+	var err error
+	if stmt.Expect.AffectedRows != nil {
+		if *stmt.Expect.AffectedRows < 0 || stmt.Expect.Rows != nil || stmt.Expect.Columns != nil || len(stmt.Expect.Data) != 0 {
+			return fmt.Errorf("affected_rows requires a nonnegative count without result-set expectations")
+		}
+		completion, err = conn.ExecContext(context.Background(), stmt.SQL, args...)
+	} else {
+		rows, err = conn.QueryContext(context.Background(), stmt.SQL, args...)
+	}
 	if stmt.Expect.Error {
 		if err == nil {
-			rows.Close()
+			if rows != nil {
+				rows.Close()
+			}
 			return fmt.Errorf("expected error, got success")
 		}
 		msg := err.Error()
@@ -139,6 +152,16 @@ func runStatement(conn *sql.Conn, cfg probe, stmt statement) error {
 	}
 	if err != nil {
 		return err
+	}
+	if stmt.Expect.AffectedRows != nil {
+		count, err := completion.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("read native completion: %w", err)
+		}
+		if count != *stmt.Expect.AffectedRows {
+			return fmt.Errorf("expected affected_rows %d, got %d", *stmt.Expect.AffectedRows, count)
+		}
+		return nil
 	}
 	defer rows.Close()
 	if stmt.Expect.Columns != nil {

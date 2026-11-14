@@ -1,0 +1,70 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  description: Schema return preserves native committed catalog identity and decision watermarks
+setup: []
+cleanup:
+- sql: DROP TABLE IF EXISTS replicated_catalog_origin
+- sql: DROP TABLE IF EXISTS replicated_catalog_return
+- sql: DROP TABLE IF EXISTS replicated_catalog_followup
+test_cases:
+- name: A native catalog decision establishes the original committed generation
+  replication_client: master
+  scm: |
+    (begin
+      (define fixture_schema "{database}")
+      (define s (newsession)) (s "username" "root") (tx_begin s)
+      (define tx (s "__memcp_tx"))
+      (createtable fixture_schema "replicated_catalog_origin" (list (list "column" "id" "INT" (list) (list)))
+        (list "engine" "safe") false tx)
+      (insert (table fixture_schema false "replicated_catalog_origin" false tx) '("id")
+        (list (list 17) (list 23)) '() nil false nil tx)
+      (tx_commit s))
+  expect: {result: true}
+- name: A replica owner adds an ordinary declaration
+  replication_client: slave
+  sql: CREATE TABLE replicated_catalog_return(id INT)
+  expect: {affected_rows: 0, result_contains: '"affected_rows"'}
+- name: Replica-owned ordinary rows enter the current generation
+  replication_client: slave
+  sql: INSERT INTO replicated_catalog_return(id) VALUES(9)
+  expect: {affected_rows: 1}
+- name: Returning replica schema preserves the original committed catalog declaration
+  replication_client: master
+  sql: SELECT COUNT(*) AS n,SUM(id) AS total FROM replicated_catalog_origin
+  expect: {data: [{n: 2,total: 40}]}
+- name: Ordinary replica rows survive schema return
+  replication_client: master
+  sql: SELECT id FROM replicated_catalog_return
+  expect: {data: [{id: 9}]}
+- name: A later native catalog decision continues the same database incarnation
+  replication_client: master
+  scm: |
+    (begin
+      (define fixture_schema "{database}")
+      (define s (newsession)) (s "username" "root") (tx_begin s)
+      (define tx (s "__memcp_tx"))
+      (createtable fixture_schema "replicated_catalog_followup" (list (list "column" "id" "INT" (list) (list)))
+        (list "engine" "safe") false tx)
+      (insert (table fixture_schema false "replicated_catalog_followup" false tx) '("id")
+        (list (list 13)) '() nil false nil tx)
+      (tx_commit s))
+  expect: {result: true}
+- name: A replica reads the later catalog generation through the same schema authority
+  replication_client: slave
+  sql: SELECT id FROM replicated_catalog_followup
+  expect: {data: [{id: 13}]}
+- name: Restart retains the returned schema and native decision ancestry
+  replication_client: master
+  sql: SHUTDOWN
+  restart_timeout: 60
+  expect: {rows: 0}
+- name: The original committed rows remain visible after restart
+  replication_client: master
+  sql: SELECT COUNT(*) AS n,SUM(id) AS total FROM replicated_catalog_origin
+  expect: {data: [{n: 2,total: 40}]}
+- name: The later committed rows remain visible after restart
+  replication_client: master
+  sql: SELECT id FROM replicated_catalog_followup
+  expect: {data: [{id: 13}]}

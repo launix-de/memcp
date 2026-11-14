@@ -1,0 +1,428 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  requires_tds: true
+  description: Complete joined operands match before nullable extension and outer selection
+setup:
+- sql: CREATE TABLE unit_parent(id INT PRIMARY KEY,code INT)
+- sql: CREATE TABLE unit_head(id INT,code INT)
+- sql: CREATE TABLE unit_child(id INT PRIMARY KEY,code INT,enabled INT,label NVARCHAR(12))
+- sql: CREATE TABLE unit_rule(code INT,rule_id INT)
+- sql: CREATE TABLE unit_label(rule_id INT,label NVARCHAR(12))
+- sql: CREATE TABLE unit_enabled(rule_id INT)
+- sql: INSERT INTO unit_parent VALUES(1,7),(2,8),(3,NULL),(4,9)
+- sql: INSERT INTO unit_head VALUES(10,7),(11,7),(12,8),(NULL,9),(NULL,9)
+- sql: INSERT INTO unit_child VALUES(20,7,1,N'twenty'),(21,7,1,N'twenty-one'),(22,8,0,N'disabled'),(23,9,1,N'other')
+- sql: INSERT INTO unit_rule VALUES(7,100),(9,200)
+- sql: INSERT INTO unit_label VALUES(100,N'open'),(200,N'hidden')
+- sql: INSERT INTO unit_enabled VALUES(100)
+cleanup:
+- sql: DROP VIEW IF EXISTS dbo.unit_join_view
+- sql: DROP TABLE IF EXISTS unit_enabled
+- sql: DROP TABLE IF EXISTS unit_label
+- sql: DROP TABLE IF EXISTS unit_rule
+- sql: DROP TABLE IF EXISTS unit_child
+- sql: DROP TABLE IF EXISTS unit_head
+- sql: DROP TABLE IF EXISTS unit_parent
+test_cases:
+- name: An incomplete INNER operand produces one completely null right tuple
+  sql: |
+    SELECT a.id AS aid,b.id AS bid,c.id AS cid FROM unit_parent a
+    LEFT JOIN unit_head b INNER JOIN unit_child c ON b.code=c.code AND c.enabled=1
+    ON a.code=b.code WHERE a.id=2
+  expect: {rows: 1,data: [{aid: 2,bid: null,cid: null}]}
+- name: Complete operand matches retain duplicates and real nullable head values
+  sql: |
+    SELECT a.id AS aid,b.id AS bid,c.id AS cid FROM unit_parent a
+    LEFT JOIN unit_head b INNER JOIN unit_child c ON b.code=c.code AND c.enabled=1
+    ON a.code=b.code ORDER BY a.id,b.id,c.id
+  expect:
+    rows: 8
+    data: [{aid: 1,bid: 10,cid: 20},{aid: 1,bid: 10,cid: 21},
+      {aid: 1,bid: 11,cid: 20},{aid: 1,bid: 11,cid: 21},
+      {aid: 2,bid: null,cid: null},{aid: 3,bid: null,cid: null},
+      {aid: 4,bid: null,cid: 23},{aid: 4,bid: null,cid: 23}]
+- name: The nullable boundary ON may read its final child
+  sql: |
+    SELECT a.id AS aid,b.id AS bid,c.id AS cid FROM unit_parent a
+    LEFT JOIN unit_head b INNER JOIN unit_child c ON b.code=c.code AND c.enabled=1
+    ON a.code=b.code AND c.id=21 ORDER BY a.id,b.id
+  expect: {rows: 5,data: [{aid: 1,bid: 10,cid: 21},{aid: 1,bid: 11,cid: 21},
+      {aid: 2,bid: null,cid: null},{aid: 3,bid: null,cid: null},{aid: 4,bid: null,cid: null}]}
+- name: Outer WHERE rejection of all real matches cannot manufacture a null tuple
+  sql: |
+    SELECT a.id FROM unit_parent a LEFT JOIN unit_head b INNER JOIN unit_child c
+      ON b.code=c.code AND c.enabled=1 ON a.code=b.code
+    WHERE a.id=1 AND c.id IS NULL
+  expect: {rows: 0}
+- name: Outer WHERE can select an actual unmatched complete operand
+  sql: |
+    SELECT a.id FROM unit_parent a LEFT JOIN unit_head b INNER JOIN unit_child c
+      ON b.code=c.code AND c.enabled=1 ON a.code=b.code
+    WHERE c.id IS NULL ORDER BY a.id
+  expect: {rows: 2,data: [{id: 2},{id: 3}]}
+- name: Scalar counts distinguish null fields from absent joined tuples
+  sql: |
+    SELECT COUNT(*) AS total,COUNT(b.id) AS heads,COUNT(c.id) AS children
+    FROM unit_parent a LEFT JOIN unit_head b INNER JOIN unit_child c
+      ON b.code=c.code AND c.enabled=1 ON a.code=b.code
+  expect: {rows: 1,data: [{total: 8,heads: 4,children: 6}]}
+- name: A completely empty joined producer extends every preserved input once
+  sql: |
+    SELECT COUNT(*) AS total,COUNT(c.id) AS children
+    FROM unit_parent a LEFT JOIN unit_head b INNER JOIN unit_child c
+      ON b.code=c.code AND c.enabled=2 ON a.code=b.code
+  expect: {rows: 1,data: [{total: 4,children: 0}]}
+- name: Duplicate preserved input rows retain complete joined multiplicity
+  sql: |
+    SELECT COUNT(*) AS total FROM unit_head a
+    LEFT JOIN unit_head b INNER JOIN unit_child c ON b.code=c.code
+    ON a.code=b.code WHERE a.code=9
+  expect: {rows: 1,data: [{total: 4}]}
+- name: A local INNER ON cannot see the enclosing left operand
+  sql: |
+    SELECT a.id FROM unit_parent a LEFT JOIN unit_head b INNER JOIN unit_child c
+    ON a.code=c.code ON a.code=b.code
+  expect: {error: true,contains: unknown relation alias}
+- name: A RIGHT preserved join can feed another complete nullable INNER chain
+  sql: |
+    SELECT a.id AS aid,b.id AS bid,c.id AS cid,e.label
+    FROM unit_parent a RIGHT JOIN unit_head b INNER JOIN unit_child c
+      ON b.code=c.code AND c.enabled=1 ON a.code=b.code
+    LEFT JOIN unit_rule d INNER JOIN unit_label e ON d.rule_id=e.rule_id
+      INNER JOIN unit_enabled f ON d.rule_id=f.rule_id
+      ON b.code=d.code ORDER BY a.id,b.id,c.id
+  expect:
+    rows: 6
+    data: [{aid: 1,bid: 10,cid: 20,label: open},{aid: 1,bid: 10,cid: 21,label: open},
+      {aid: 1,bid: 11,cid: 20,label: open},{aid: 1,bid: 11,cid: 21,label: open},
+      {aid: 4,bid: null,cid: 23,label: null},{aid: 4,bid: null,cid: 23,label: null}]
+- name: A named derived JOIN uses the same complete operand semantics
+  syntax: mysql
+  sql: |
+    SELECT a.id AS aid,d.bid,d.cid FROM unit_parent a
+    LEFT JOIN (SELECT b.id AS bid,b.code,c.id AS cid FROM unit_head b
+      INNER JOIN unit_child c ON b.code=c.code AND c.enabled=1) d
+    ON a.code=d.code WHERE a.id=2
+  expect: {rows: 1,data: [{aid: 2,bid: null,cid: null}]}
+- name: The complete JOIN source is shared by the PostgreSQL frontend
+  syntax: psql
+  sql: |
+    SELECT a.id AS aid,d.bid,d.cid FROM unit_parent a
+    LEFT JOIN (SELECT b.id AS bid,b.code,c.id AS cid FROM unit_head b
+      INNER JOIN unit_child c ON b.code=c.code AND c.enabled=1) d
+    ON a.code=d.code WHERE a.id=2
+  expect: {rows: 1,data: [{aid: 2,bid: null,cid: null}]}
+- name: A stored view retains typed complete-operand declarations
+  sql: |
+    CREATE VIEW dbo.unit_join_view AS
+    SELECT dbo.unit_parent.id AS aid,dbo.unit_head.id AS bid,dbo.unit_child.label AS label
+    FROM dbo.unit_parent LEFT JOIN dbo.unit_head INNER JOIN dbo.unit_child
+      ON dbo.unit_head.code=dbo.unit_child.code AND dbo.unit_child.enabled=1
+      ON dbo.unit_parent.code=dbo.unit_head.code
+- name: Restored view outputs retain nullable national text metadata
+  tds:
+    statements:
+    - sql: SELECT aid,bid,label FROM dbo.unit_join_view WHERE aid=2
+      expect:
+        rows: 1
+        data: [{aid: 2,bid: null,label: null}]
+        column_types: [{name: aid,type: INT},{name: bid,type: INT},{name: label,type: NVARCHAR,length: 12}]
+- name: A native output window counts complete joined rows before braking
+  sql: |
+    SELECT a.id FROM unit_parent a LEFT JOIN unit_head b INNER JOIN unit_child c
+      ON b.code=c.code AND c.enabled=1 ON a.code=b.code
+    ORDER BY a.id OFFSET 4 ROWS FETCH NEXT 2 ROWS ONLY
+  expect: {rows: 2,data: [{id: 2},{id: 3}]}
+- name: A finite sorted window preserves complete operand multiplicity
+  sql: |
+    SELECT TOP(2) a.id AS aid,b.id AS bid,c.id AS cid
+    FROM unit_parent a LEFT JOIN unit_head b INNER JOIN unit_child c
+      ON b.code=c.code AND c.enabled=1 ON a.code=b.code
+    ORDER BY c.id DESC,a.id,b.id
+  expect: {rows: 2,data: [{aid: 4,bid: null,cid: 23},{aid: 4,bid: null,cid: 23}]}
+- name: Begin a transaction before an unbounded native result sort
+  session_id: operand-transaction
+  sql: BEGIN TRANSACTION
+- name: The active transaction writes the original input
+  session_id: operand-transaction
+  sql: INSERT INTO unit_parent VALUES(5,7)
+- name: Scratch sorting sees writes in the caller transaction
+  session_id: operand-transaction
+  sql: |
+    SELECT a.id AS aid,b.id AS bid,c.id AS cid FROM unit_parent a
+    LEFT JOIN unit_head b INNER JOIN unit_child c ON b.code=c.code AND c.enabled=1
+    ON a.code=b.code WHERE a.id=5 ORDER BY c.id,b.id
+  expect: {rows: 4,data: [{aid: 5,bid: 10,cid: 20},{aid: 5,bid: 11,cid: 20},
+      {aid: 5,bid: 10,cid: 21},{aid: 5,bid: 11,cid: 21}]}
+- name: Rollback retires the scratch and original input writes through one owner
+  session_id: operand-transaction
+  sql: ROLLBACK TRANSACTION
+- name: The transaction rollback removed its input mutation
+  sql: SELECT COUNT(*) AS total FROM unit_parent WHERE id=5
+  expect: {rows: 1,data: [{total: 0}]}
+- name: Successful native result sorting retires its actual hidden native identity
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root")
+      (define observed (newsession)) (define native_create createtable)
+      (with_autocommit owner nil 0 "native result retirement" (lambda (tx) (begin
+        (define code (parse_tsql "memcp-tests"
+          "SELECT a.id,b.id AS bid,c.id AS cid FROM unit_parent a LEFT JOIN unit_head b INNER JOIN unit_child c ON b.code=c.code AND c.enabled=1 ON a.code=b.code ORDER BY c.id,b.id,a.id"
+          nil owner tx))
+        (define execute (eval (list 'lambda (list 'session 'tx 'resultrow 'resultfields 'createtable) code)))
+        (execute owner tx (lambda (row) true) (lambda fields true)
+          (lambda args (begin
+            (if (regexp_test (nth args 1) "#join-order$") (observed "name" (nth args 1)) true)
+            (apply native_create args)))))))
+      (and (not (nil? (observed "name")))
+        (nil? (table "memcp-tests" false (observed "name") false nil))))
+  expect: {result: true}
+- name: A producer conversion error unwinds an unbounded result sort
+  sql: |
+    SELECT CONVERT(INT,c.label) AS value FROM unit_parent a
+    LEFT JOIN unit_head b INNER JOIN unit_child c ON b.code=c.code AND c.enabled=1
+    ON a.code=b.code ORDER BY c.id
+  expect: {error: true}
+- name: Failed native result sorting retires its actual hidden native identity
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root")
+      (define observed (newsession)) (define native_create createtable)
+      (define failed (try (lambda () (begin
+        (with_autocommit owner nil 0 "failed native result retirement" (lambda (tx) (begin
+          (define code (parse_tsql "memcp-tests"
+            "SELECT CONVERT(INT,c.label) AS value FROM unit_parent a LEFT JOIN unit_head b INNER JOIN unit_child c ON b.code=c.code AND c.enabled=1 ON a.code=b.code ORDER BY c.id"
+            nil owner tx))
+          (define execute (eval (list 'lambda (list 'session 'tx 'resultrow 'resultfields 'createtable) code)))
+          (execute owner tx (lambda (row) true) (lambda fields true)
+            (lambda args (begin
+              (if (regexp_test (nth args 1) "#join-order$") (observed "name" (nth args 1)) true)
+              (apply native_create args))))))) false)) (lambda (failure) true)))
+      (and failed (not (nil? (observed "name")))
+        (nil? (table "memcp-tests" false (observed "name") false nil))))
+  expect: {result: true}
+- name: A limited nullable joined producer is still an explicit unsupported profile
+  syntax: mysql
+  sql: |
+    SELECT a.id,d.bid FROM unit_parent a
+    LEFT JOIN (SELECT b.id AS bid,b.code FROM unit_head b INNER JOIN unit_child c
+      ON b.code=c.code ORDER BY c.id LIMIT 1) d ON a.code=d.code
+  expect: {error: true,contains: derived relation stage with outer join}
+- name: An explicit cursor-stability transaction retains native scratch until rollback
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root")
+      (define observed (newsession)) (define native_create createtable)
+      (tx_begin owner)
+      (with_autocommit owner nil 0 "explicit native result lifetime" (lambda (tx) (begin
+        (define code (parse_tsql "memcp-tests"
+          "SELECT a.id,c.id AS cid FROM unit_parent a LEFT JOIN unit_head b INNER JOIN unit_child c ON b.code=c.code ON a.code=b.code ORDER BY c.id,a.id"
+          nil owner tx))
+        (define execute (eval (list 'lambda (list 'session 'tx 'resultrow 'resultfields 'createtable) code)))
+        (execute owner tx (lambda (row) true) (lambda fields true)
+          (lambda args (begin
+            (if (regexp_test (nth args 1) "#join-order$") (observed "name" (nth args 1)) true)
+            (apply native_create args)))))))
+      (define live (and (not (nil? (observed "name")))
+        (not (nil? (table "memcp-tests" false (observed "name") false (owner "__memcp_tx"))))))
+      (tx_rollback owner)
+      (and live (nil? (table "memcp-tests" false (observed "name") false nil))))
+  expect: {result: true}
+- name: An explicit ACID transaction retains native scratch until commit
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root")
+      (define observed (newsession)) (define native_create createtable)
+      (tx_begin_acid owner)
+      (with_autocommit owner nil 0 "ACID native result lifetime" (lambda (tx) (begin
+        (define code (parse_tsql "memcp-tests"
+          "SELECT a.id,c.id AS cid FROM unit_parent a LEFT JOIN unit_head b INNER JOIN unit_child c ON b.code=c.code ON a.code=b.code ORDER BY c.id,a.id"
+          nil owner tx))
+        (define execute (eval (list 'lambda (list 'session 'tx 'resultrow 'resultfields 'createtable) code)))
+        (execute owner tx (lambda (row) true) (lambda fields true)
+          (lambda args (begin
+            (if (regexp_test (nth args 1) "#join-order$") (observed "name" (nth args 1)) true)
+            (apply native_create args)))))))
+      (define live (and (not (nil? (observed "name")))
+        (not (nil? (table "memcp-tests" false (observed "name") false (owner "__memcp_tx"))))))
+      (tx_commit owner)
+      (and live (nil? (table "memcp-tests" false (observed "name") false nil))))
+  expect: {result: true}
+- name: An ordinary INNER derived JOIN cannot gain an unnecessary retained boundary
+  syntax: mysql
+  sql: |
+    SELECT a.id,d.bid FROM unit_parent a INNER JOIN
+      (SELECT b.id AS bid,b.code FROM unit_head b INNER JOIN unit_child c
+        ON b.code=c.code) d ON a.code=d.code ORDER BY a.id,d.bid
+  expect: {rows: 7,data: [{id: 1,bid: 10},{id: 1,bid: 10},{id: 1,bid: 11},{id: 1,bid: 11},
+      {id: 2,bid: 12},{id: 4,bid: null},{id: 4,bid: null}]}
+- name: An INNER derived predicate filters after its internal nullable operand
+  sql: |
+    SELECT a.id,d.bid,d.cid FROM unit_parent a INNER JOIN
+      (SELECT b.id AS bid,b.code,c.id AS cid FROM unit_head b LEFT JOIN unit_child c
+        ON b.code=c.code AND c.enabled=1) d ON a.code=d.code AND d.cid IS NULL ORDER BY a.id,d.bid
+  expect: {rows: 1,data: [{id: 2,bid: 12,cid: null}]}
+- name: An INNER derived operand preserves actual nullable projected values
+  sql: |
+    SELECT a.id,d.bid FROM unit_parent a INNER JOIN
+      (SELECT b.id AS bid,b.code,c.id AS cid FROM unit_head b LEFT JOIN unit_child c
+        ON b.code=c.code AND c.enabled=1) d ON a.code=d.code WHERE d.bid IS NULL ORDER BY a.id
+  expect: {rows: 2,data: [{id: 4,bid: null},{id: 4,bid: null}]}
+- name: Computed FROM-less INNER operands retain repeated projection values through mysql
+  syntax: mysql
+  sql: |
+    SELECT a.id,d.payload AS first_value,d.payload AS second_value
+    FROM unit_parent a INNER JOIN (SELECT CAST(7 AS SIGNED)+3 AS payload) d ON 1=1
+    WHERE a.id IN(1,2) ORDER BY a.id
+  expect: {"rows":2,"data":[{"id":1,"first_value":10,"second_value":10},{"id":2,"first_value":10,"second_value":10}]}
+  max_time: 5
+- name: Computed FROM-less CROSS operands preserve duplicate caller rows through mysql
+  syntax: mysql
+  sql: |
+    SELECT a.code,d.payload FROM unit_head a
+    CROSS JOIN (SELECT CAST(7 AS SIGNED)+3 AS payload) d
+    WHERE a.code=9
+  expect: {"rows":2,"data":[{"code":9,"payload":10},{"code":9,"payload":10}]}
+  max_time: 5
+- name: False ON null extends a computed FROM-less LEFT operand through mysql
+  syntax: mysql
+  sql: |
+    SELECT a.id,d.payload FROM unit_parent a
+    LEFT JOIN (SELECT CAST(7 AS SIGNED)+3 AS payload) d ON 1=0 WHERE a.id=1
+  expect: {"rows":1,"data":[{"id":1,"payload":null}]}
+  max_time: 5
+- name: False WHERE removes the one candidate of a FROM-less INNER operand through mysql
+  syntax: mysql
+  sql: |
+    SELECT a.id,d.payload FROM unit_parent a
+    INNER JOIN (SELECT CAST(7 AS SIGNED)+3 AS payload WHERE 1=0) d ON 1=1
+  expect: {"rows":0}
+  max_time: 5
+- name: False WHERE leaves one null tuple at a FROM-less LEFT boundary through mysql
+  syntax: mysql
+  sql: |
+    SELECT a.id,d.payload FROM unit_parent a
+    LEFT JOIN (SELECT CAST(7 AS SIGNED)+3 AS payload WHERE 1=0) d ON 1=1 WHERE a.id=1
+  expect: {"rows":1,"data":[{"id":1,"payload":null}]}
+  max_time: 5
+- name: Repeated reads use the value exported by a volatile FROM-less operand through mysql
+  syntax: mysql
+  sql: |
+    SELECT a.id,CASE WHEN d.payload=d.payload THEN 1 ELSE 0 END AS consistent
+    FROM unit_parent a INNER JOIN (SELECT RAND() AS payload) d ON 1=1
+    WHERE a.id IN(1,2) ORDER BY a.id
+  expect: {"rows":2,"data":[{"id":1,"consistent":1},{"id":2,"consistent":1}]}
+  max_time: 5
+- name: Computed FROM-less INNER operands retain repeated projection values through psql
+  syntax: psql
+  sql: |
+    SELECT a.id,d.payload AS first_value,d.payload AS second_value
+    FROM unit_parent a INNER JOIN (SELECT CAST(7 AS INTEGER)+3 AS payload) d ON 1=1
+    WHERE a.id IN(1,2) ORDER BY a.id
+  expect: {"rows":2,"data":[{"id":1,"first_value":10,"second_value":10},{"id":2,"first_value":10,"second_value":10}]}
+  max_time: 5
+- name: Computed FROM-less CROSS operands preserve duplicate caller rows through psql
+  syntax: psql
+  sql: |
+    SELECT a.code,d.payload FROM unit_head a
+    CROSS JOIN (SELECT CAST(7 AS INTEGER)+3 AS payload) d
+    WHERE a.code=9
+  expect: {"rows":2,"data":[{"code":9,"payload":10},{"code":9,"payload":10}]}
+  max_time: 5
+- name: False ON null extends a computed FROM-less LEFT operand through psql
+  syntax: psql
+  sql: |
+    SELECT a.id,d.payload FROM unit_parent a
+    LEFT JOIN (SELECT CAST(7 AS INTEGER)+3 AS payload) d ON 1=0 WHERE a.id=1
+  expect: {"rows":1,"data":[{"id":1,"payload":null}]}
+  max_time: 5
+- name: False WHERE removes the one candidate of a FROM-less INNER operand through psql
+  syntax: psql
+  sql: |
+    SELECT a.id,d.payload FROM unit_parent a
+    INNER JOIN (SELECT CAST(7 AS INTEGER)+3 AS payload WHERE 1=0) d ON 1=1
+  expect: {"rows":0}
+  max_time: 5
+- name: False WHERE leaves one null tuple at a FROM-less LEFT boundary through psql
+  syntax: psql
+  sql: |
+    SELECT a.id,d.payload FROM unit_parent a
+    LEFT JOIN (SELECT CAST(7 AS INTEGER)+3 AS payload WHERE 1=0) d ON 1=1 WHERE a.id=1
+  expect: {"rows":1,"data":[{"id":1,"payload":null}]}
+  max_time: 5
+- name: Repeated reads use the value exported by a volatile FROM-less operand through psql
+  syntax: psql
+  sql: |
+    SELECT a.id,CASE WHEN d.payload=d.payload THEN 1 ELSE 0 END AS consistent
+    FROM unit_parent a INNER JOIN (SELECT RANDOM() AS payload) d ON 1=1
+    WHERE a.id IN(1,2) ORDER BY a.id
+  expect: {"rows":2,"data":[{"id":1,"consistent":1},{"id":2,"consistent":1}]}
+  max_time: 5
+- name: Computed FROM-less INNER operands retain repeated projection values through tsql
+  syntax: tsql
+  sql: |
+    SELECT a.id,d.payload AS first_value,d.payload AS second_value
+    FROM unit_parent a INNER JOIN (SELECT CAST(7 AS INT)+3 AS payload) d ON 1=1
+    WHERE a.id IN(1,2) ORDER BY a.id
+  expect: {"rows":2,"data":[{"id":1,"first_value":10,"second_value":10},{"id":2,"first_value":10,"second_value":10}]}
+  max_time: 5
+- name: Computed FROM-less CROSS operands preserve duplicate caller rows through tsql
+  syntax: tsql
+  sql: |
+    SELECT a.code,d.payload FROM unit_head a
+    CROSS JOIN (SELECT CAST(7 AS INT)+3 AS payload) d
+    WHERE a.code=9
+  expect: {"rows":2,"data":[{"code":9,"payload":10},{"code":9,"payload":10}]}
+  max_time: 5
+- name: False ON null extends a computed FROM-less LEFT operand through tsql
+  syntax: tsql
+  sql: |
+    SELECT a.id,d.payload FROM unit_parent a
+    LEFT JOIN (SELECT CAST(7 AS INT)+3 AS payload) d ON 1=0 WHERE a.id=1
+  expect: {"rows":1,"data":[{"id":1,"payload":null}]}
+  max_time: 5
+- name: False WHERE removes the one candidate of a FROM-less INNER operand through tsql
+  syntax: tsql
+  sql: |
+    SELECT a.id,d.payload FROM unit_parent a
+    INNER JOIN (SELECT CAST(7 AS INT)+3 AS payload WHERE 1=0) d ON 1=1
+  expect: {"rows":0}
+  max_time: 5
+- name: False WHERE leaves one null tuple at a FROM-less LEFT boundary through tsql
+  syntax: tsql
+  sql: |
+    SELECT a.id,d.payload FROM unit_parent a
+    LEFT JOIN (SELECT CAST(7 AS INT)+3 AS payload WHERE 1=0) d ON 1=1 WHERE a.id=1
+  expect: {"rows":1,"data":[{"id":1,"payload":null}]}
+  max_time: 5
+- name: Repeated reads use the value exported by a volatile FROM-less operand through tsql
+  syntax: tsql
+  sql: |
+    SELECT a.id,CASE WHEN d.payload=d.payload THEN 1 ELSE 0 END AS consistent
+    FROM unit_parent a INNER JOIN (SELECT NEWID() AS payload) d ON 1=1
+    WHERE a.id IN(1,2) ORDER BY a.id
+  expect: {"rows":2,"data":[{"id":1,"consistent":1},{"id":2,"consistent":1}]}
+  max_time: 5
+- name: Volatile FROM-less CROSS projections export one consistent value through mysql
+  syntax: mysql
+  sql: |
+    SELECT CASE WHEN d.payload=d.payload THEN 1 ELSE 0 END AS consistent
+    FROM (SELECT RAND() AS payload) d CROSS JOIN (SELECT 1 AS unit) u
+  expect: {rows: 1,data: [{consistent: 1}]}
+  max_time: 5
+- name: Volatile FROM-less CROSS projections export one consistent value through psql
+  syntax: psql
+  sql: |
+    SELECT CASE WHEN d.payload=d.payload THEN 1 ELSE 0 END AS consistent
+    FROM (SELECT RANDOM() AS payload) d CROSS JOIN (SELECT 1 AS unit) u
+  expect: {rows: 1,data: [{consistent: 1}]}
+  max_time: 5
+- name: Volatile FROM-less CROSS projections export one consistent value through tsql
+  syntax: tsql
+  sql: |
+    SELECT CASE WHEN d.payload=d.payload THEN 1 ELSE 0 END AS consistent
+    FROM (SELECT NEWID() AS payload) d CROSS JOIN (SELECT 1 AS unit) u
+  expect: {rows: 1,data: [{consistent: 1}]}
+  max_time: 5

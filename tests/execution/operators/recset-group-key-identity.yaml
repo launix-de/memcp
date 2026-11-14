@@ -1,0 +1,54 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  description: Native relation key identities preserve NULL zero and declared collations
+setup:
+- sql: CREATE TABLE native_group_keys(id INT PRIMARY KEY,value INT,label TEXT COLLATE utf8mb4_general_ci)
+- sql: INSERT INTO native_group_keys VALUES(1,NULL,'Alpha'),(2,0,'Beta'),(3,1,'Alpha'),(4,NULL,'ALPHA')
+test_cases:
+- name: Native group membership separates NULL from zero in complete composite keys
+  scm: |-
+    (begin
+      (define tx nil)
+      (define source (table "memcp-tests" false "native_group_keys" false tx))
+      (define access (eval (compile_scan_access '() '(lambda () true))))
+      (define rows (scan_recset tx source (car access) (cadr access) '() (lambda () true)))
+      (define lookup (recset_key_index tx rows '("value" "label") "group"))
+      (if (and (lookup nil "alpha") (lookup 0 "BETA") (lookup 1 "alpha")
+               (not (lookup 0 "alpha")) (not (lookup nil "beta"))
+               (not (lookup 1 "beta"))) "ok"
+        (error "native group key identity merged distinct NULL or zero tuples")))
+- name: Native group membership retains an all NULL key without inventing zero
+  scm: |-
+    (begin
+      (define tx nil)
+      (define source (table "memcp-tests" false "native_group_keys" false tx))
+      (define access (eval (compile_scan_access '("id") (list 'lambda (list 'id) (list 'equal?? 'id 1)))))
+      (define rows (scan_recset tx source (car access) (cadr access) '("id") (lambda (id) (equal?? id 1))))
+      (define lookup (recset_key_index tx rows '("value") "group"))
+      (if (and (lookup nil) (not (lookup 0)) (not (lookup 1))) "ok"
+        (error "NULL-only native group key index admitted a numeric key")))
+- name: Explicit native join identity still rejects NULL tuples
+  scm: |-
+    (begin
+      (define tx nil)
+      (define source (table "memcp-tests" false "native_group_keys" false tx))
+      (define access (eval (compile_scan_access '() '(lambda () true))))
+      (define rows (scan_recset tx source (car access) (cadr access) '() (lambda () true)))
+      (define lookup (recset_key_index tx rows '("value") "join"))
+      (if (and (not (lookup nil)) (lookup 0) (lookup 1)) "ok"
+        (error "group key support changed native join NULL semantics")))
+- name: Native group membership owns an immutable source key snapshot
+  scm: |-
+    (begin
+      (define tx nil)
+      (define source (table "memcp-tests" false "native_group_keys" false tx))
+      (define access (eval (compile_scan_access '() '(lambda () true))))
+      (define rows (scan_recset tx source (car access) (cadr access) '() (lambda () true)))
+      (define lookup (recset_key_index tx rows '("value" "label") "group"))
+      (insert source '("id" "value" "label") (list (list 5 2 "Later")))
+      (if (and (lookup nil "alpha") (not (lookup 2 "later"))) "ok"
+        (error "native key index retained a mutable source cursor")))
+cleanup:
+- sql: DROP TABLE IF EXISTS native_group_keys

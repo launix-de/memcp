@@ -1,0 +1,98 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Neutral SQL Server category probes: https://dbfiddle.uk/X1zZMX9g
+# https://dbfiddle.uk/yTtYF_-P
+# Category membership uses the runtime Unicode version, not an age-frozen 3.2 table.
+metadata:
+  syntax: tsql
+  requires_tds: true
+  description: Unicode regular identifiers retain lexical categories and wire names
+setup:
+- sql: CREATE TABLE Bücher(id INT PRIMARY KEY,Änderung NVARCHAR(12),字段 INT,näme INT)
+- sql: INSERT INTO Bücher VALUES(1,N'Größe',9,11)
+cleanup:
+- sql: DROP VIEW IF EXISTS dbo.Übersicht
+- sql: DROP TABLE IF EXISTS Bücher
+test_cases:
+- name: National letters name columns and aliases without delimiters
+  sql: SELECT Änderung AS Größe,字段 AS 中文,näme AS результат FROM Bücher
+  expect: {rows: 1,data: [{Größe: Größe,中文: 9,результат: 11}]}
+- name: A Unicode relation alias shares the normal qualified binder
+  sql: SELECT данные.Änderung AS Ergebnis FROM dbo.Bücher AS данные
+  expect: {rows: 1,data: [{Ergebnis: Größe}]}
+- name: Unicode letter numbers may start an identifier
+  sql: SELECT 7 AS Ⅻwert
+  expect: {rows: 1,data: [{Ⅻwert: 7}]}
+- name: National decimal digits are valid continuation characters
+  sql: SELECT 7 AS count٢,8 AS value१
+  expect: {rows: 1,data: [{count٢: 7,value१: 8}]}
+- name: Combining nonspacing and spacing marks may continue identifiers
+  sql: SELECT 7 AS valuë,8 AS valueा
+  expect: {rows: 1,data: [{valuë: 7,valueा: 8}]}
+- name: Connector and format characters may continue identifiers
+  sql: SELECT 7 AS value‿,8 AS value‌
+  expect: {rows: 1,data: [{value‿: 7,value‌: 8}]}
+- name: A Unicode continuation prevents a keyword prefix from becoming a reserved token
+  sql: SELECT 7 AS from̈,8 AS select‌
+  expect: {rows: 1,data: [{from̈: 7,select‌: 8}]}
+- name: Existing identifier symbols may continue a regular name
+  sql: SELECT 7 AS value$part,8 AS value@part,9 AS value#part
+  expect: {rows: 1,data: [{value$part: 7,value@part: 8,value#part: 9}]}
+- name: A number sign can precede a decimal digit in an alias
+  sql: 'SELECT 7 AS #1'
+  expect: {rows: 1,data: [{'#1': 7}]}
+- name: Local variable tokens retain Unicode letters and national decimals
+  sql: DECLARE @Übung INT=7,@count٢ INT=8; SELECT @Übung AS first_value,@count٢ AS second_value
+  expect: {rows: 1,data: [{first_value: 7,second_value: 8}]}
+- name: A decimal variable suffix follows the leading at sign
+  sql: DECLARE @1 INT=7; SELECT @1 AS value
+  expect: {rows: 1,data: [{value: 7}]}
+- name: An unquoted Unicode view keeps its ordinary declared outputs
+  sql: CREATE VIEW dbo.Übersicht AS SELECT id,Änderung AS Bezeichnung,字段 AS Anzahl FROM dbo.Bücher
+- name: Unicode wire column names retain declared scalar and national text types
+  tds:
+    statements:
+    - sql: SELECT id,Änderung AS Größe,字段 AS 中文,näme AS значение FROM Bücher
+      expect:
+        rows: 1
+        data: [{id: 1,Größe: Größe,中文: 9,значение: 11}]
+        column_types: [{name: id,type: INT},{name: Größe,type: NVARCHAR,length: 12},
+          {name: 中文,type: INT},{name: значение,type: INT}]
+- name: A restored Unicode view exposes the same typed names
+  tds:
+    statements:
+    - sql: SELECT Bezeichnung AS Änderung,Anzahl FROM dbo.Übersicht WHERE id=1
+      expect:
+        rows: 1
+        data: [{Änderung: Größe,Anzahl: 9}]
+        column_types: [{name: Änderung,type: NVARCHAR,length: 12},{name: Anzahl,type: INT}]
+- name: A leading decimal digit is not a regular alias
+  sql: SELECT 7 AS ٢value
+  expect: {error: true}
+- name: A combining mark cannot start a regular identifier
+  sql: SELECT 7 AS ̈value
+  expect: {error: true}
+- name: A connector other than underscore cannot start a regular identifier
+  sql: SELECT 7 AS ‿value
+  expect: {error: true}
+- name: A format character cannot start a regular identifier
+  sql: SELECT 7 AS ‌value
+  expect: {error: true}
+- name: Other-number characters are not identifier decimal digits
+  sql: SELECT 7 AS value²
+  expect: {error: true}
+- name: Enclosing marks are not valid identifier continuation characters
+  sql: SELECT 7 AS value⃝
+  expect: {error: true}
+- name: Currency symbols are not arbitrary identifier continuation characters
+  sql: SELECT 7 AS value€
+  expect: {error: true}
+- name: Supplementary letters are rejected in regular identifiers
+  sql: SELECT 7 AS value𐐀
+  expect: {error: true,contains: supplementary characters}
+- name: Supplementary initial letters are rejected in regular identifiers
+  sql: SELECT 7 AS 𐐀value
+  expect: {error: true,contains: supplementary characters}
+- name: Existing bracket escaping retains punctuation and spaces
+  sql: SELECT 7 AS [̈ value]],name]
+  expect: {rows: 1,data: [{'̈ value],name': 7}]}

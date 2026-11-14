@@ -1,0 +1,118 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: Child retirement removes only its native foreign programs and preserves endpoint ownership
+  isolated: true
+setup:
+  - sql: CREATE TABLE drop_fk_parent(id INT PRIMARY KEY) ENGINE=safe
+  - sql: CREATE TABLE drop_fk_child(id INT PRIMARY KEY,parent_id INT) ENGINE=logged
+  - sql: CREATE TABLE drop_fk_survivor(id INT PRIMARY KEY,parent_id INT) ENGINE=safe
+  - sql: CREATE TABLE drop_fk_self(id INT PRIMARY KEY,parent_id INT) ENGINE=safe
+  - sql: CREATE TABLE drop_fk_pending(id INT PRIMARY KEY,parent_id INT) ENGINE=safe
+  - sql: INSERT INTO drop_fk_parent VALUES(1)
+  - sql: ALTER TABLE drop_fk_child ADD CONSTRAINT drop_fk_reused FOREIGN KEY(parent_id) REFERENCES drop_fk_parent(id)
+  - sql: ALTER TABLE drop_fk_survivor ADD CONSTRAINT drop_fk_retained FOREIGN KEY(parent_id) REFERENCES drop_fk_parent(id)
+  - sql: ALTER TABLE drop_fk_self ADD CONSTRAINT drop_fk_self_ref FOREIGN KEY(parent_id) REFERENCES drop_fk_self(id)
+  - scm: |
+      (createtrigger (table "memcp-tests" false "drop_fk_parent" false nil)
+        "drop_fk_user_after" "after_update" "" ""
+        (close_procedure (lambda (OLD NEW session tx) NEW)) true)
+test_cases:
+  - name: A referenced parent cannot retire while its child survives
+    scm: |
+      (begin
+        (define parent (table "memcp-tests" false "drop_fk_parent" false nil))
+        (define before (show parent "declarations"))
+        (define rejected (try (lambda () (begin
+          (droptable "memcp-tests" "drop_fk_parent" false) false))
+          (lambda (failure) (strlike (concat failure) "%required by foreign key%"))))
+        (and rejected (identical? before (show parent "declarations"))
+          (equal? (count ((show parent "constraints") "ForeignKeys")) 2)))
+    expect: {result: true}
+  - name: A pending parent amendment rejects child retirement before any endpoint changes
+    scm: |
+      (begin
+        (define parent (table "memcp-tests" false "drop_fk_parent" false nil))
+        (define child (table "memcp-tests" false "drop_fk_child" false nil))
+        (define before_parent (show parent "declarations"))
+        (define before_child (show child "declarations"))
+        (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+        (createforeignkey (table "memcp-tests" false "drop_fk_pending" false nil)
+          "drop_fk_pending_ref" '("parent_id") parent '("id") "restrict" "restrict" (owner "__memcp_tx"))
+        (define rejected (try (lambda () (begin
+          (droptable "memcp-tests" "drop_fk_child" false) false))
+          (lambda (failure) (strlike (concat failure) "%pending declaration%"))))
+        (tx_rollback owner)
+        (and rejected (identical? before_parent (show parent "declarations"))
+          (identical? before_child (show child "declarations"))
+          (identical? child (table "memcp-tests" false "drop_fk_child" false nil))))
+    expect: {result: true}
+  - name: A target trigger-lease rejection releases its native writer admission
+    scm: |
+      (begin
+        (define child (table "memcp-tests" false "drop_fk_child" false nil))
+        (define parent (table "memcp-tests" false "drop_fk_parent" false nil))
+        (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+        (retain_table_trigger_declarations child (owner "__memcp_tx"))
+        (define rejected (try (lambda () (begin
+          (droptable "memcp-tests" "drop_fk_child" false) false))
+          (lambda (failure) (strlike (concat failure) "%trigger declarations are in use%"))))
+        (tx_rollback owner)
+        (tx_begin owner)
+        (define staged (createforeignkey child "drop_fk_retry_admission" '("parent_id")
+          parent '("id") "restrict" "restrict" (owner "__memcp_tx")))
+        (tx_rollback owner)
+        (and rejected staged))
+    expect: {result: true}
+  - name: Child retirement preserves a surviving parent user-definition lease
+    scm: |
+      (begin
+        (define parent (table "memcp-tests" false "drop_fk_parent" false nil))
+        (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+        (define definitions (retain_table_trigger_declarations parent (owner "__memcp_tx")))
+        (define dropped (droptable "memcp-tests" "drop_fk_child" false))
+        (tx_rollback owner)
+        (and dropped (equal? (count definitions) 1)
+          (equal? ((car definitions) "name") "drop_fk_user_after")))
+    expect: {result: true}
+  - name: Parent metadata retains only the other child and its user trigger
+    scm: |
+      (begin
+        (define parent (table "memcp-tests" false "drop_fk_parent" false nil))
+        (define foreign ((show parent "constraints") "ForeignKeys"))
+        (define triggers ((show "memcp-tests" "drop_fk_parent" true) "triggers"))
+        (and (equal? (count foreign) 1) (equal? ((car foreign) "Id") "drop_fk_retained")
+          (equal? (count triggers) 3)
+          (equal? (count (filter triggers (lambda (trigger)
+            (and (equal? (trigger "name") "drop_fk_user_after") (not (trigger "system")))))) 1)))
+    expect: {result: true}
+  - name: A real restart persists retirement at the surviving safe endpoint
+    sql: SHUTDOWN
+  - name: A removed child name can be recreated
+    sql: CREATE TABLE drop_fk_child(id INT PRIMARY KEY,parent_id INT) ENGINE=logged
+  - name: A recreated child can reuse its original native foreign name
+    sql: ALTER TABLE drop_fk_child ADD CONSTRAINT drop_fk_reused FOREIGN KEY(parent_id) REFERENCES drop_fk_parent(id)
+  - name: Recreated enforcement rejects an orphan
+    sql: INSERT INTO drop_fk_child VALUES(1,99)
+    expect: {error: true, contains: foreign key constraint}
+  - name: Recreated enforcement accepts a real reference
+    sql: INSERT INTO drop_fk_child VALUES(1,1)
+    expect: {affected_rows: 1}
+  - name: The independent child retains its original enforcement
+    sql: INSERT INTO drop_fk_survivor VALUES(1,99)
+    expect: {error: true, contains: foreign key constraint}
+  - name: A self endpoint retires each generated role once
+    sql: DROP TABLE drop_fk_self
+  - name: A self table name can be recreated
+    sql: CREATE TABLE drop_fk_self(id INT PRIMARY KEY,parent_id INT) ENGINE=safe
+  - name: A self declaration name can be reused without duplicate programs
+    sql: ALTER TABLE drop_fk_self ADD CONSTRAINT drop_fk_self_ref FOREIGN KEY(parent_id) REFERENCES drop_fk_self(id)
+  - name: Recreated self enforcement uses the final new row
+    sql: INSERT INTO drop_fk_self VALUES(1,1)
+    expect: {affected_rows: 1}
+cleanup:
+  - sql: DROP TABLE IF EXISTS drop_fk_pending
+  - sql: DROP TABLE IF EXISTS drop_fk_child
+  - sql: DROP TABLE IF EXISTS drop_fk_survivor
+  - sql: DROP TABLE IF EXISTS drop_fk_self
+  - sql: DROP TABLE IF EXISTS drop_fk_parent

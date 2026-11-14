@@ -1,0 +1,90 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  description: Ordered recursive SELECT assignment folds bounded scalar state after native ordering and limits
+setup:
+- sql: CREATE TABLE ordered_assignment_source(id INT PRIMARY KEY,label NVARCHAR(9))
+- sql: INSERT ordered_assignment_source VALUES(1,N'alpha'),(2,N'beta'),(3,N'gamma')
+cleanup:
+- sql: DROP TABLE IF EXISTS ordered_assignment_source
+test_cases:
+- name: Ordered name concatenation consumes every source row in engine order
+  sql: DECLARE @names NVARCHAR(MAX)=NULL; SELECT @names=COALESCE(@names+N', ',N'')+QUOTENAME(label) FROM ordered_assignment_source
+    ORDER BY id; SELECT @names AS names
+  expect:
+    rows: 1
+    data:
+    - names: '[alpha], [beta], [gamma]'
+- name: Descending order reaches the same scalar reducer without a client row list
+  sql: DECLARE @names NVARCHAR(MAX)=N''; SELECT @names=@names+label FROM ordered_assignment_source ORDER BY id DESC;
+    SELECT @names AS names
+  expect:
+    rows: 1
+    data:
+    - names: gammabetaalpha
+- name: TOP applies to source rows before recursive assignment
+  sql: DECLARE @sum INT=0; SELECT TOP(2) @sum=@sum+id FROM ordered_assignment_source ORDER BY id; SELECT @sum AS
+    total
+  expect:
+    rows: 1
+    data:
+    - total: 3
+- name: TOP zero retains the existing scalar value
+  sql: DECLARE @sum INT=7; SELECT TOP(0) @sum=@sum+id FROM ordered_assignment_source ORDER BY id; SELECT @sum AS
+    total
+  expect:
+    rows: 1
+    data:
+    - total: 7
+- name: OFFSET selects the emitted window before scalar folding
+  sql: DECLARE @sum INT=0; SELECT @sum=@sum+id FROM ordered_assignment_source ORDER BY id OFFSET 1 ROWS FETCH NEXT
+    2 ROWS ONLY; SELECT @sum AS total
+  expect:
+    rows: 1
+    data:
+    - total: 5
+- name: Multiple independent recursive targets retain bounded per-row state
+  sql: DECLARE @sum INT=0,@names NVARCHAR(MAX)=N''; SELECT @sum=@sum+id,@names=@names+label FROM ordered_assignment_source
+    ORDER BY id; SELECT @sum AS total,@names AS names
+  expect:
+    rows: 1
+    data:
+    - total: 6
+      names: alphabetagamma
+- name: Other scalar inputs are rebound once for each invocation
+  sql: DECLARE @sum INT=0,@extra INT=1; SELECT @sum=@sum+id+@extra FROM ordered_assignment_source ORDER BY id; SET
+    @sum=0; SET @extra=10; SELECT @sum=@sum+id+@extra FROM ordered_assignment_source ORDER BY id; SELECT @sum AS
+    total
+  expect:
+    rows: 1
+    data:
+    - total: 36
+- name: Recursive assignment cannot move through DISTINCT
+  sql: DECLARE @names NVARCHAR(MAX)=N''; SELECT DISTINCT @names=@names+label FROM ordered_assignment_source ORDER
+    BY label
+  expect:
+    error: true
+- name: Recursive assignment cannot borrow an unrepresented joined-row order
+  sql: DECLARE @sum INT=0; SELECT @sum=@sum+a.id FROM ordered_assignment_source a JOIN ordered_assignment_source
+    b ON b.id=a.id ORDER BY a.id
+  expect:
+    error: true
+- name: A derived UNION retains an unconsumed ordering column for the scalar fold
+  tds:
+    statements:
+    - sql: DECLARE @names NVARCHAR(MAX)=N''; SELECT @names=@names+name FROM (SELECT N'b' AS name,2 AS ordinal UNION
+        ALL SELECT N'a' AS name,1 AS ordinal) u ORDER BY ordinal; SELECT @names AS names
+      expect:
+        rows: 1
+        data:
+        - names: ab
+- name: Ordered folding combines native and scalar UNION branches without losing sort inputs
+  sql: DECLARE @names NVARCHAR(MAX)=N''; SELECT @names=@names+name FROM (SELECT label AS name,id AS ordinal FROM
+    ordered_assignment_source WHERE id=1 UNION ALL SELECT N'head' AS name,0 AS ordinal) u ORDER BY ordinal; SELECT
+    @names AS names
+  expect:
+    rows: 1
+    data:
+    - names: headalpha

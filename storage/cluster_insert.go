@@ -357,7 +357,7 @@ func (database *database) executeInsertTask(ctx context.Context, session *scanRP
 	defer invocation.close()
 	lease := database.GetRead(invocation.tx)
 	defer lease.Release()
-	table := database.GetTable(request.Table)
+	table := database.GetTableForTx(request.Table, false, invocation.tx)
 	if table == nil || table.filterSchemaFingerprint() != request.Schema {
 		return nil, fmt.Errorf("remote INSERT schema changed")
 	}

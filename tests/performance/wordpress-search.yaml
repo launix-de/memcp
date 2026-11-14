@@ -20,7 +20,7 @@ setup:
     post_excerpt TEXT, post_content TEXT, post_status VARCHAR(20), post_type VARCHAR(20),
     post_password VARCHAR(20), post_date BIGINT) ENGINE=sloppy
 - scm: |-
-    (insert (table "memcp-tests" false "wordpress_search_posts" false)
+    (insert (table "memcp-tests" false "wordpress_search_posts" false nil)
       '("ID" "post_title" "post_excerpt" "post_content" "post_status" "post_type" "post_password" "post_date")
       (map (produceN 22000) (lambda (i)
         (begin
@@ -110,7 +110,7 @@ test_cases:
       (define sess (newsession))
       (sess "username" "root")
       (sess "schema" "memcp-tests")
-      (define formula (cached_parse cache (list parse_sql) "memcp-tests"
+      (define formula (cached_parse cache "sql" (list parse_sql) "memcp-tests"
         "SELECT SQL_CALC_FOUND_ROWS ID FROM wordpress_search_posts\nWHERE ((post_title LIKE '%nightjar%') OR (post_excerpt LIKE '%nightjar%') OR (post_content LIKE '%nightjar%'))\n  AND post_password = ''\n  AND ((post_type = 'attachment' AND post_status = 'publish')\n    OR (post_type = 'page' AND post_status = 'publish')\n    OR (post_type = 'post' AND post_status = 'publish'))\nORDER BY post_title LIKE '%nightjar%' DESC, post_date DESC LIMIT 10" nil "root" sess true nil))
       (sql_execute_formula sess nil formula (lambda (_row) true) (lambda (_fields) nil))
       (if (equal? (sess "found_rows") 10) "ok"
@@ -125,7 +125,7 @@ test_cases:
       (define sess (newsession))
       (sess "username" "root")
       (sess "schema" "memcp-tests")
-      (define formula (cached_parse cache (list parse_sql) "memcp-tests"
+      (define formula (cached_parse cache "sql" (list parse_sql) "memcp-tests"
         "SELECT SQL_CALC_FOUND_ROWS ID FROM wordpress_search_posts\nWHERE ((post_title LIKE '%performance%') OR (post_excerpt LIKE '%performance%') OR (post_content LIKE '%performance%'))\n  AND post_password = ''\n  AND ((post_type = 'attachment' AND post_status = 'publish')\n    OR (post_type = 'page' AND post_status = 'publish')\n    OR (post_type = 'post' AND post_status = 'publish'))\nORDER BY post_title LIKE '%performance%' DESC, post_date DESC LIMIT 10" nil "root" sess true nil))
       (sql_execute_formula sess nil formula (lambda (_row) true) (lambda (_fields) nil))
       (if (equal? (sess "found_rows") 612) "ok"
@@ -140,7 +140,7 @@ test_cases:
       (define sess (newsession))
       (sess "username" "root")
       (sess "schema" "memcp-tests")
-      (define formula (cached_parse cache (list parse_sql) "memcp-tests"
+      (define formula (cached_parse cache "sql" (list parse_sql) "memcp-tests"
         "SELECT SQL_CALC_FOUND_ROWS ID FROM wordpress_search_posts\nWHERE ((post_title LIKE '%quasarless%') OR (post_excerpt LIKE '%quasarless%') OR (post_content LIKE '%quasarless%'))\n  AND post_password = ''\n  AND ((post_type = 'attachment' AND post_status = 'publish')\n    OR (post_type = 'page' AND post_status = 'publish')\n    OR (post_type = 'post' AND post_status = 'publish'))\nORDER BY post_title LIKE '%quasarless%' DESC, post_date DESC LIMIT 10" nil "root" sess true nil))
       (sql_execute_formula sess nil formula (lambda (_row) true) (lambda (_fields) nil))
       (if (equal? (sess "found_rows") 0) "ok"
@@ -190,8 +190,8 @@ test_cases:
     \ 'post' AND post_status = 'publish'))\\nORDER BY post_title LIKE '%nightjar%'\
     \ DESC, post_date DESC LIMIT 10\")\n  (define run (lambda (kind) (begin\n    (sess\
     \ \"kind\" kind)\n    (sess \"ids\" \"\")\n    (sql_execute_formula sess nil\n\
-    \      (cached_parse cache (list parse_sql) \"memcp-tests\" query nil \"root\"\
-    \ sess true)\n      (lambda (row) (sess \"ids\" (concat (sess \"ids\") (cadr row)\
+    \      (cached_parse cache \"sql\" (list parse_sql) \"memcp-tests\" query nil \"root\"\
+    \ sess true nil)\n      (lambda (row) (sess \"ids\" (concat (sess \"ids\") (cadr row)\
     \ \",\")))\n      (lambda (_fields) nil))\n    (sess \"ids\"))))\n  (define first\
     \ (run \"attachment\"))\n  (define overlap (run \"post\"))\n  (define restored\
     \ (run \"attachment\"))\n  (if (and (equal? first \"1774,1183,592,1971,1577,1380,986,789,395,198,\"\

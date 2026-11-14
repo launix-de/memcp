@@ -1,0 +1,59 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: Implicit and explicit one-row relations remain real aggregate inputs
+
+test_cases:
+- name: MySQL aggregate over the implicit single row uses ordinary grouping
+  sql: SELECT SUM(1) AS total
+  expect: {rows: 1,data: [{total: 1}]}
+- name: TSQL aggregate over the implicit single row uses ordinary grouping
+  syntax: tsql
+  sql: SELECT SUM(1) AS total
+  expect: {rows: 1,data: [{total: 1}]}
+- name: PostgreSQL aggregate over the implicit single row uses ordinary grouping
+  syntax: psql
+  sql: SELECT SUM(1) AS total
+  expect: {rows: 1,data: [{total: 1}]}
+- name: Implicit single-row COUNT and nullable SUM retain their own empty semantics
+  sql: SELECT COUNT(*) AS row_count,COUNT(NULL) AS null_count,SUM(NULL) AS total
+  expect: {rows: 1,data: [{row_count: 1,null_count: 0,total: null}]}
+- name: A false WHERE removes the unit before scalar aggregation
+  syntax: tsql
+  sql: SELECT COUNT(*) AS row_count,SUM(1) AS total WHERE 1=0
+  expect: {rows: 1,data: [{row_count: 0,total: null}]}
+- name: A derived implicit aggregate exports its completed scalar result
+  sql: SELECT total FROM (SELECT SUM(1) AS total) q
+  expect: {rows: 1,data: [{total: 1}]}
+- name: TSQL explicit VALUES unit remains a derived aggregate input
+  syntax: tsql
+  sql: SELECT total FROM (SELECT COUNT(*) AS total FROM (VALUES(1)) q(unit)) s
+  expect: {rows: 1,data: [{total: 1}]}
+- name: A constant SELECT unit retains one row after its projected bindings are substituted
+  sql: SELECT SUM(q.unit) AS total,COUNT(*) AS row_count FROM (SELECT 1 AS unit) q
+  expect: {rows: 1,data: [{total: 1,row_count: 1}]}
+- name: PostgreSQL multiple VALUES rows remain a bag rather than a unit
+  # Valid SQL; the independent PostgreSQL derived-VALUES alias gap currently
+  # reports unknown q. Keep the positive bag oracle until that frontend lands.
+  noncritical: true
+  syntax: psql
+  sql: SELECT COUNT(*) AS row_count,SUM(q.unit) AS total FROM (VALUES(1),(1),(2)) q(unit)
+  expect: {rows: 1,data: [{row_count: 3,total: 4}]}
+- name: TSQL multiple VALUES rows remain a bag rather than a unit
+  syntax: tsql
+  sql: SELECT COUNT(*) AS row_count,SUM(q.unit) AS total FROM (VALUES(1),(1),(2)) q(unit)
+  expect: {rows: 1,data: [{row_count: 3,total: 4}]}
+- name: An explicit group over a filtered unit has no empty scalar group
+  syntax: tsql
+  sql: SELECT q.unit,COUNT(*) AS row_count FROM (VALUES(1)) q(unit) WHERE 1=0 GROUP BY q.unit
+  expect: {rows: 0,data: []}
+- name: An explicit group over a matched unit keeps its declared key
+  syntax: tsql
+  sql: SELECT q.unit,COUNT(*) AS row_count FROM (VALUES(1)) q(unit) GROUP BY q.unit
+  expect: {rows: 1,data: [{unit: 1,row_count: 1}]}
+- name: HAVING sees the scalar aggregate row after a false WHERE
+  sql: SELECT COUNT(*) AS row_count WHERE 1=0 HAVING COUNT(*)=0
+  expect: {rows: 1,data: [{row_count: 0}]}
+- name: A zero final limit removes the completed aggregate row
+  sql: SELECT SUM(1) AS total LIMIT 0
+  expect: {rows: 0,data: []}

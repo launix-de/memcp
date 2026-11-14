@@ -1,0 +1,153 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  description: Runtime metadata and literal row sources use bounded scalar reductions
+  syntax: tsql
+  requires_tds: true
+  isolated: true
+# isolated serializes scheduling; other suites may retain their own objects.
+# Count this fixture's table names and the three bootstrapped schema names.
+setup:
+- sql: DROP TABLE IF EXISTS metadata_scalar_first
+- sql: DROP TABLE IF EXISTS metadata_scalar_second
+- sql: CREATE TABLE metadata_scalar_first(id INT PRIMARY KEY)
+cleanup:
+- sql: DROP TABLE IF EXISTS metadata_scalar_first
+- sql: DROP TABLE IF EXISTS metadata_scalar_second
+test_cases:
+- name: Scalar catalog count applies its point predicate
+  sql: SELECT COUNT(*) AS total FROM information_schema.schemata WHERE schema_name=N'memcp-tests'
+  expect: {data: [{total: 1}]}
+- name: Scalar catalog count excludes NULL inputs
+  sql: SELECT COUNT(sql_path) AS total FROM information_schema.schemata WHERE schema_name=N'memcp-tests'
+  expect: {data: [{total: 0}]}
+- name: Scalar catalog aggregates compose with arithmetic
+  sql: SELECT COUNT(*)+4 AS total FROM information_schema.schemata WHERE schema_name=N'memcp-tests'
+  expect: {data: [{total: 5}]}
+- name: Multiple scalar states retain independent aggregate contracts
+  sql: SELECT COUNT(*) AS total,SUM(2) AS amount,MIN(CONVERT(NVARCHAR(128),schema_name)) AS first_name,MAX(CONVERT(NVARCHAR(128),schema_name)) AS last_name,AVG(2) AS average FROM information_schema.schemata WHERE schema_name=N'memcp-tests'
+  expect: {data: [{total: 1, amount: 2, first_name: memcp-tests, last_name: memcp-tests, average: 2}]}
+- name: Empty catalog inputs retain the scalar aggregate row
+  sql: SELECT COUNT(*) AS total,SUM(2) AS amount,MIN(CONVERT(NVARCHAR(128),schema_name)) AS first_name,MAX(CONVERT(NVARCHAR(128),schema_name)) AS last_name,AVG(2) AS average FROM information_schema.schemata WHERE schema_name=N'metadata_missing'
+  expect: {data: [{total: 0, amount: null, first_name: null, last_name: null, average: null}]}
+- name: HAVING accepts a qualifying scalar catalog group
+  sql: SELECT COUNT(*) AS total FROM information_schema.schemata WHERE schema_name=N'memcp-tests' HAVING COUNT(*)>0
+  expect: {data: [{total: 1}]}
+- name: HAVING rejects a nonqualifying empty scalar catalog group
+  sql: SELECT COUNT(*) AS total FROM information_schema.schemata WHERE schema_name=N'metadata_missing' HAVING COUNT(*)>0
+  expect: {rows: 0}
+- name: TOP zero suppresses the scalar aggregate output
+  sql: SELECT TOP(0) COUNT(*) AS total FROM information_schema.schemata
+  expect: {rows: 0}
+- name: Literal row scalar aggregates do not require a native cache owner
+  sql: SELECT COUNT(*) AS total,SUM(value) AS amount,MIN(value) AS minimum,MAX(value) AS maximum,AVG(value) AS average FROM (VALUES(1),(2),(NULL)) AS source_rows(value)
+  expect: {data: [{total: 3, amount: 3, minimum: 1, maximum: 2, average: 1}]}
+- name: Empty literal row scalar aggregates retain NULL and zero contracts
+  sql: SELECT COUNT(*) AS total,SUM(value) AS amount FROM (VALUES(1),(2)) AS source_rows(value) WHERE value>10
+  expect: {data: [{total: 0, amount: null}]}
+- name: Native metadata source starts with one matching table
+  sql: SELECT COUNT(*) AS total FROM information_schema.tables WHERE table_catalog=N'memcp-tests' AND table_name IN(N'metadata_scalar_first',N'metadata_scalar_second')
+  expect: {data: [{total: 1}]}
+- name: Publish another matching table
+  sql: CREATE TABLE metadata_scalar_second(id INT PRIMARY KEY)
+- name: Cached scalar plan observes newly published native catalog rows
+  sql: SELECT COUNT(*) AS total FROM information_schema.tables WHERE table_catalog=N'memcp-tests' AND table_name IN(N'metadata_scalar_first',N'metadata_scalar_second')
+  expect: {data: [{total: 2}]}
+- name: Native DISTINCT catalog plans observe additions before helper allocation
+  sql: SELECT COUNT(DISTINCT table_name) AS total FROM information_schema.tables WHERE table_catalog=N'memcp-tests' AND table_name IN(N'metadata_scalar_first',N'metadata_scalar_second')
+  expect: {data: [{total: 2}]}
+- name: Remove the second matching table
+  sql: DROP TABLE metadata_scalar_second
+- name: Cached scalar plan observes removed native catalog rows
+  sql: SELECT COUNT(*) AS total FROM information_schema.tables WHERE table_catalog=N'memcp-tests' AND table_name IN(N'metadata_scalar_first',N'metadata_scalar_second')
+  expect: {data: [{total: 1}]}
+- name: Runtime row GROUP BY requires a native temporary group carrier
+  sql: SELECT schema_name,COUNT(*) AS total FROM information_schema.schemata WHERE schema_name IN('system','system_statistic','memcp-tests') GROUP BY schema_name
+  expect: {rows: 3}
+- name: Runtime row COUNT DISTINCT requires a native temporary group carrier
+  sql: SELECT COUNT(DISTINCT schema_name) AS total FROM information_schema.schemata WHERE schema_name IN('system','system_statistic','memcp-tests')
+  expect: {data: [{total: 3}]}
+- name: Real TDS metadata remains declared for scalar catalog output
+  tds:
+    statements:
+    - sql: SELECT COUNT(*) AS total FROM information_schema.schemata WHERE schema_name=N'memcp-tests'
+      prepare: true
+      expect:
+        data: [{total: 1}]
+        column_types: [{name: total, type: INT}]
+- name: Literal duplicate values use native DISTINCT keys and exclude NULL
+  sql: SELECT COUNT(*) AS total,COUNT(DISTINCT value) AS distinct_values,SUM(value) AS amount FROM (VALUES(1),(1),(2),(NULL)) AS source_rows(value)
+  expect: {data: [{total: 4,distinct_values: 2,amount: 4}]}
+- name: Empty DISTINCT scalar inputs retain zero and NULL aggregate results
+  sql: SELECT COUNT(DISTINCT value) AS total,SUM(value) AS amount FROM (VALUES(1),(NULL)) AS source_rows(value) WHERE value>10
+  expect: {data: [{total: 0,amount: null}]}
+- name: Grouped runtime domains preserve NULL grouping and duplicate multiplicity
+  sql: SELECT bucket,COUNT(*) AS total,COUNT(DISTINCT value) AS distinct_values,SUM(value) AS amount FROM (VALUES(1,2),(1,2),(1,NULL),(2,3),(NULL,4),(NULL,4)) AS source_rows(bucket,value) GROUP BY bucket ORDER BY bucket
+  expect: {data: [{bucket: null,total: 2,distinct_values: 1,amount: 8},{bucket: 1,total: 3,distinct_values: 1,amount: 4},{bucket: 2,total: 1,distinct_values: 1,amount: 3}]}
+- name: Empty explicit groups produce no aggregate rows
+  sql: SELECT value,COUNT(DISTINCT value) AS total FROM (VALUES(1),(2)) AS source_rows(value) WHERE value>10 GROUP BY value
+  expect: {rows: 0}
+- name: HAVING and ordering consume native DISTINCT cardinalities
+  sql: SELECT bucket,COUNT(DISTINCT value) AS total FROM (VALUES(1,2),(1,2),(2,3),(2,4)) AS source_rows(bucket,value) GROUP BY bucket HAVING COUNT(DISTINCT value)>1 ORDER BY COUNT(DISTINCT value) DESC
+  expect: {data: [{bucket: 2,total: 2}]}
+- name: Multiple DISTINCT descriptors retain independent native keys
+  sql: SELECT COUNT(DISTINCT left_value) AS left_count,COUNT(DISTINCT right_value) AS right_count FROM (VALUES(1,3),(1,4),(NULL,4),(2,NULL)) AS source_rows(left_value,right_value)
+  expect: {data: [{left_count: 2,right_count: 2}]}
+- name: Native metadata DISTINCT sees no own helper relations
+  # Include internal helper names so fixture scoping cannot conceal their leakage.
+  sql: SELECT COUNT(DISTINCT table_name) AS total FROM information_schema.tables WHERE table_catalog=N'memcp-tests' AND (table_name IN(N'metadata_scalar_first',N'metadata_scalar_second') OR table_name LIKE N'.%' OR table_name LIKE N'$%')
+  expect: {data: [{total: 1}]}
+- name: Explicit transactions can execute query-local catalog grouping repeatedly
+  tds:
+    statements:
+    - sql: BEGIN TRAN
+    - sql: SELECT COUNT(DISTINCT table_name) AS total FROM information_schema.tables WHERE table_catalog=N'memcp-tests' AND table_name IN(N'metadata_scalar_first',N'metadata_scalar_second')
+      expect: {data: [{total: 1}]}
+    - sql: SELECT COUNT(DISTINCT table_name) AS total FROM information_schema.tables WHERE table_catalog=N'memcp-tests' AND table_name IN(N'metadata_scalar_first',N'metadata_scalar_second')
+      expect: {data: [{total: 1}]}
+    - sql: ROLLBACK TRANSACTION
+- name: Native scoped group helper cleanup leaves no catalog residue
+  scm: (filter (show "memcp-tests") (lambda (name) (regexp_test name "#query-group")))
+  expect: {result: []}
+- name: Runtime conversion failures retire their scoped native helpers
+  sql: SELECT COUNT(DISTINCT CONVERT(INT,value)) AS total FROM (VALUES(N'1'),(N'invalid')) AS source_rows(value)
+  expect: {error: true}
+- name: Failed grouping leaves no native scoped relations
+  scm: (filter (show "memcp-tests") (lambda (name) (regexp_test name "#query-group")))
+  expect: {result: []}
+- name: Native DISTINCT string keys retain source collation
+  sql: SELECT COUNT(DISTINCT default_character_set_name) AS character_sets FROM information_schema.schemata
+  expect: {data: [{character_sets: 1}]}
+- name: Runtime DISTINCT keys honor explicit case insensitive collation
+  sql: SELECT COUNT(DISTINCT CASE WHEN schema_name=N'memcp-tests' THEN N'Alpha' ELSE N'alpha' END COLLATE utf8mb4_general_ci) AS total FROM information_schema.schemata
+  expect: {data: [{total: 1}]}
+- name: Runtime DISTINCT keys honor explicit binary collation
+  sql: SELECT COUNT(DISTINCT CASE WHEN schema_name=N'memcp-tests' THEN N'Alpha' ELSE N'alpha' END COLLATE bin) AS total FROM information_schema.schemata
+  expect: {data: [{total: 2}]}
+- name: Runtime group keys retain explicit case insensitive equality
+  sql: SELECT CASE WHEN schema_name=N'memcp-tests' THEN N'Alpha' ELSE N'alpha' END COLLATE utf8mb4_general_ci AS bucket,COUNT(*) AS total FROM information_schema.schemata GROUP BY CASE WHEN schema_name=N'memcp-tests' THEN N'Alpha' ELSE N'alpha' END COLLATE utf8mb4_general_ci
+  expect: {rows: 1}
+- name: Runtime grouping rejects conflicting equality contracts before storage mutation
+  sql: SELECT COUNT(DISTINCT schema_name COLLATE bin) AS exact_count,COUNT(DISTINCT schema_name COLLATE utf8mb4_general_ci) AS folded_count FROM information_schema.schemata
+  expect: {error: true, contains: conflicting collations}
+- name: A rejected grouping contract creates no temporary relations
+  scm: (filter (show "memcp-tests") (lambda (name) (regexp_test name "#query-group")))
+  expect: {result: []}
+- name: Runtime native group carriers also implement duplicate projection removal
+  sql: SELECT DISTINCT default_character_set_name AS character_set FROM information_schema.schemata
+  expect: {data: [{character_set: utf8mb4}]}
+- name: Shared MySQL physical lowering uses native runtime DISTINCT keys
+  syntax: mysql
+  sql: SELECT COUNT(DISTINCT default_character_set_name) AS total FROM information_schema.schemata
+  expect: {data: [{total: 1}]}
+- name: Shared PostgreSQL physical lowering uses native runtime group keys
+  syntax: psql
+  sql: SELECT default_character_set_name AS charset,COUNT(*) AS total FROM information_schema.schemata WHERE schema_name IN('system','system_statistic','memcp-tests') GROUP BY default_character_set_name
+  expect: {data: [{charset: utf8mb4,total: 3}]}
+- name: Empty scalar grouping retains the current session domain tuple
+  sql: DECLARE @expected INT=100; SELECT @expected AS expected,COUNT(DISTINCT table_name) AS total FROM information_schema.tables WHERE table_catalog=N'metadata_missing' AND @expected=100
+  expect: {data: [{expected: 100,total: 0}]}
+- name: Explicit empty grouping does not create a group for a session binding
+  sql: DECLARE @expected INT=100; SELECT table_name,COUNT(DISTINCT table_name) AS total FROM information_schema.tables WHERE table_catalog=N'metadata_missing' AND @expected=100 GROUP BY table_name
+  expect: {rows: 0}

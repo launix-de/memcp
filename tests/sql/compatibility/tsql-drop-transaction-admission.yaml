@@ -1,0 +1,273 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  requires_tds: true
+  isolated: true
+  description: Public DROP fails before irreversible native DDL in explicit TSQL transactions
+setup:
+- sql: CREATE TABLE drop_admission_rows(id INT NOT NULL PRIMARY KEY)
+- sql: INSERT INTO drop_admission_rows VALUES(37)
+- sql: CREATE DATABASE drop_admission_database
+- sql: CREATE TABLE drop_admission_database.dbo.payload(id INT)
+- sql: INSERT INTO drop_admission_database.dbo.payload VALUES(41)
+cleanup:
+- sql: DROP TABLE IF EXISTS drop_admission_rows
+- sql: DROP TABLE IF EXISTS drop_admission_cached
+- sql: DROP TABLE IF EXISTS drop_admission_private
+- sql: DROP TABLE IF EXISTS drop_admission_auto
+- sql: DROP DATABASE IF EXISTS drop_admission_database
+- sql: DROP DATABASE IF EXISTS drop_admission_auto_database
+- sql: DROP DATABASE IF EXISTS drop_admission_missing
+test_cases:
+- name: Public DROP rejects before effects in a connection transaction
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: DROP TABLE drop_admission_rows
+      expect:
+        error: true
+        contains:
+        - DROP TABLE inside explicit transactions is not supported
+    - connection: observer
+      sql: SELECT id FROM drop_admission_rows
+      expect:
+        rows: 1
+        data:
+        - id: 37
+    - &id001
+      connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: observer
+      sql: SELECT id FROM drop_admission_rows
+      expect:
+        rows: 1
+        data:
+        - id: 37
+- name: BEGIN and public DROP in one batch preserve the committed row
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION; DROP TABLE drop_admission_rows
+      expect:
+        error: true
+        contains:
+        - DROP TABLE inside explicit transactions is not supported
+    - connection: observer
+      sql: SELECT id FROM drop_admission_rows
+      expect:
+        rows: 1
+        data:
+        - id: 37
+    - *id001
+    - connection: observer
+      sql: SELECT id FROM drop_admission_rows
+      expect:
+        rows: 1
+        data:
+        - id: 37
+- name: Dynamic public DROP uses the caller transaction admission
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: EXEC sp_executesql N'DROP TABLE drop_admission_rows'
+      expect:
+        error: true
+        contains:
+        - DROP TABLE inside explicit transactions is not supported
+    - connection: observer
+      sql: SELECT id FROM drop_admission_rows
+      expect:
+        rows: 1
+        data:
+        - id: 37
+    - *id001
+    - connection: observer
+      sql: SELECT id FROM drop_admission_rows
+      expect:
+        rows: 1
+        data:
+        - id: 37
+- name: Cached missing DROP cannot delete a later table inside a transaction
+  tds:
+    statements:
+    - connection: owner
+      sql: DROP TABLE IF EXISTS drop_admission_cached
+    - connection: owner
+      sql: CREATE TABLE drop_admission_cached(id INT)
+    - connection: owner
+      sql: INSERT INTO drop_admission_cached VALUES(17)
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: DROP TABLE IF EXISTS drop_admission_cached
+      expect:
+        error: true
+        contains:
+        - DROP TABLE inside explicit transactions is not supported
+    - *id001
+    - connection: observer
+      sql: SELECT id FROM drop_admission_cached
+      expect:
+        rows: 1
+        data:
+        - id: 17
+- name: Private CREATE retains its native rollback ownership after refused DROP
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: CREATE TABLE drop_admission_private(id INT)
+    - connection: owner
+      sql: DROP TABLE drop_admission_private
+      expect:
+        error: true
+        contains:
+        - DROP TABLE inside explicit transactions is not supported
+    - *id001
+    - connection: observer
+      sql: SELECT name FROM sys.objects WHERE name=N'drop_admission_private'
+      expect:
+        rows: 0
+- name: Database DROP in a connection transaction preserves namespace and rows
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: DROP DATABASE drop_admission_database
+      expect:
+        error: true
+        contains:
+        - DROP DATABASE inside explicit transactions is not supported
+    - connection: observer
+      sql: SELECT id FROM drop_admission_database.dbo.payload
+      expect:
+        rows: 1
+        data:
+        - id: 41
+    - *id001
+    - connection: observer
+      sql: SELECT name FROM sys.databases WHERE name=N'drop_admission_database'
+      expect:
+        rows: 1
+        data:
+        - name: drop_admission_database
+- name: BEGIN and database DROP in one batch reject before the DDL gate
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION; DROP DATABASE drop_admission_database
+      expect:
+        error: true
+        contains:
+        - DROP DATABASE inside explicit transactions is not supported
+    - *id001
+    - connection: observer
+      sql: SELECT id FROM drop_admission_database.dbo.payload
+      expect:
+        rows: 1
+        data:
+        - id: 41
+- name: Dynamic database DROP retains the caller transaction boundary
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: EXEC sp_executesql N'DROP DATABASE drop_admission_database'
+      expect:
+        error: true
+        contains:
+        - DROP DATABASE inside explicit transactions is not supported
+    - *id001
+    - connection: observer
+      sql: SELECT id FROM drop_admission_database.dbo.payload
+      expect:
+        rows: 1
+        data:
+        - id: 41
+- name: Missing IF EXISTS DROP still rejects an explicit database transaction
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: DROP DATABASE IF EXISTS drop_admission_missing
+      expect:
+        error: true
+        contains:
+        - DROP DATABASE inside explicit transactions is not supported
+    - *id001
+- name: Autocommit table DROP and same-name recreation retain no predecessor rows
+  tds:
+    statements:
+    - connection: owner
+      sql: CREATE TABLE drop_admission_auto(id INT)
+    - connection: owner
+      sql: INSERT INTO drop_admission_auto VALUES(11)
+    - connection: owner
+      sql: DROP TABLE drop_admission_auto
+    - connection: owner
+      sql: CREATE TABLE drop_admission_auto(id INT)
+    - connection: owner
+      sql: SELECT COUNT(*) AS n FROM drop_admission_auto
+      expect:
+        rows: 1
+        data:
+        - n: 0
+    - connection: owner
+      sql: DROP TABLE drop_admission_auto
+- name: Autocommit database DROP and same-name recreation use the native namespace
+  tds:
+    statements:
+    - connection: owner
+      sql: CREATE DATABASE drop_admission_auto_database
+    - connection: owner
+      sql: DROP DATABASE drop_admission_auto_database
+    - connection: owner
+      sql: SELECT name FROM sys.databases WHERE name=N'drop_admission_auto_database'
+      expect:
+        rows: 0
+    - connection: owner
+      sql: CREATE DATABASE drop_admission_auto_database
+    - connection: owner
+      sql: DROP DATABASE drop_admission_auto_database
+- name: Autocommit local temporary DROP keeps its existing lifetime contract
+  tds:
+    statements:
+    - connection: owner
+      sql: 'CREATE TABLE #drop_admission_temp(id INT)'
+    - connection: owner
+      sql: 'INSERT INTO #drop_admission_temp VALUES(13)'
+    - connection: owner
+      sql: 'DROP TABLE #drop_admission_temp'
+    - connection: owner
+      sql: 'SELECT id FROM #drop_admission_temp'
+      expect:
+        error: true
+        contains:
+        - local temporary table does not exist
+- name: Restart retains rows protected by refused public DROP
+  action: restart
+- name: Protected public table row survives restart
+  sql: SELECT id FROM drop_admission_rows
+  expect:
+    rows: 1
+    data:
+    - id: 37
+- name: Protected database payload survives restart
+  sql: SELECT id FROM drop_admission_database.dbo.payload
+  expect:
+    rows: 1
+    data:
+    - id: 41
+- name: Rolled-back private declaration stays absent after restart
+  sql: SELECT name FROM sys.objects WHERE name=N'drop_admission_private'
+  expect:
+    rows: 0

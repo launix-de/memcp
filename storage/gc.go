@@ -165,11 +165,8 @@ func activeBlobReferences(db *database, persistManifests bool) (map[string]struc
 				continue
 			}
 			reader := db.persistence.ReadColumn(shard.uuid.String(), blobManifestColumn)
-			if readErr, failed := reader.(ErrorReader); failed {
+			if missing, known := reader.(interface{ Missing() bool }); known && missing.Missing() {
 				reader.Close()
-				if !readErr.Missing() {
-					return nil, false
-				}
 				legacyReferences, ok := backfillBlobManifest(shard, persistManifests)
 				if !ok {
 					return nil, false
@@ -256,14 +253,12 @@ func backfillBlobManifest(shard *storageShard, persistManifest bool) (references
 			continue
 		}
 		reader := shard.t.schema.persistence.ReadColumn(shard.uuid.String(), column.Name)
-		if readErr, failed := reader.(ErrorReader); failed {
+		if missing, known := reader.(interface{ Missing() bool }); known && missing.Missing() {
 			reader.Close()
-			if readErr.Missing() {
-				// The ordinary column loader represents an absent committed column
-				// as sparse NULLs, so it cannot own an external blob.
-				continue
-			}
-			return nil, false
+			// Backends may wrap the reader for metering or transport. Their
+			// native missing-object contract still represents sparse NULLs;
+			// a concrete reader type must not change manifest ownership.
+			continue
 		}
 		var magic uint8
 		if err := binary.Read(reader, binary.LittleEndian, &magic); err != nil {

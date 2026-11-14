@@ -1,0 +1,70 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: Scalar and presence stages retain full logical inputs for row domains
+
+test_cases:
+- name: An independent scalar aggregate keeps its implicit logical input block
+  sql: SELECT (SELECT SUM(1)) AS total
+  expect: {rows: 1,data: [{total: 1}]}
+- name: A scalar aggregate over a literal relation retains its input filter
+  syntax: tsql
+  sql: SELECT (SELECT COUNT(*) FROM (VALUES(1)) v(unit) WHERE v.unit=2) AS total
+  expect: {rows: 1,data: [{total: 0}]}
+- name: APPLY aggregate retains its outer binding across a literal input boundary
+  syntax: tsql
+  sql: |
+    SELECT q.id,s.total FROM (VALUES(2),(3)) q(id)
+    CROSS APPLY (SELECT SUM(v.unit+q.id) AS total FROM (VALUES(1)) v(unit)) s ORDER BY q.id
+  expect: {rows: 2,data: [{id: 2,total: 3},{id: 3,total: 4}]}
+- name: Empty correlated unit input produces the scalar COUNT row
+  syntax: tsql
+  sql: |
+    SELECT q.id,s.total FROM (VALUES(2),(3)) q(id)
+    CROSS APPLY (SELECT COUNT(*) AS total FROM (VALUES(1)) v(unit) WHERE v.unit=q.id) s ORDER BY q.id
+  expect: {rows: 2,data: [{id: 2,total: 0},{id: 3,total: 0}]}
+- name: Derived closure preserves each aggregate output and duplicate caller rows
+  syntax: tsql
+  sql: |
+    SELECT q.id,s.total,s.largest,s.present FROM (VALUES(2),(2),(3)) q(id)
+    CROSS APPLY (SELECT SUM(v.unit+q.id) AS total,MAX(v.unit+q.id) AS largest,
+      COUNT(v.unit+q.id) AS present FROM (VALUES(1)) v(unit)) s ORDER BY q.id
+  expect:
+    rows: 3
+    data:
+    - {id: 2,total: 3,largest: 3,present: 1}
+    - {id: 2,total: 3,largest: 3,present: 1}
+    - {id: 3,total: 4,largest: 4,present: 1}
+- name: Derived aggregate closure retains NULL caller operands
+  syntax: tsql
+  sql: |
+    SELECT q.id,s.total,s.present FROM (VALUES(CAST(NULL AS INT)),(2)) q(id)
+    CROSS APPLY (SELECT SUM(v.unit+q.id) AS total,COUNT(v.unit+q.id) AS present
+      FROM (VALUES(1)) v(unit)) s ORDER BY q.id
+  expect:
+    rows: 2
+    data:
+    - {id: null,total: null,present: 0}
+    - {id: 2,total: 3,present: 1}
+- name: A correlated multirow literal aggregate keeps bag multiplicity
+  syntax: tsql
+  sql: |
+    SELECT q.id,(SELECT COUNT(*) FROM (VALUES(1),(2),(2)) v(unit) WHERE v.unit<=q.id) AS total
+    FROM (VALUES(1),(2)) q(id) ORDER BY q.id
+  expect: {rows: 2,data: [{id: 1,total: 1},{id: 2,total: 3}]}
+- name: A real scalar TOP window remains owned by its row domain
+  syntax: tsql
+  sql: |
+    SELECT q.id,(SELECT TOP 1 v.unit+q.id FROM (VALUES(1),(2)) v(unit) ORDER BY v.unit DESC) AS total
+    FROM (VALUES(2),(3)) q(id) ORDER BY q.id
+  expect: {rows: 2,data: [{id: 2,total: 4},{id: 3,total: 5}]}
+- name: A logical row domain scalar preserves its multiple row error
+  syntax: tsql
+  sql: SELECT (SELECT v.unit FROM (VALUES(1),(2)) v(unit)) AS total
+  expect: {error: true,contains: ['scalar subselect returned more than one row']}
+- name: Presence stages retain correlation independently of projected NULL
+  syntax: tsql
+  sql: |
+    SELECT q.id,CASE WHEN EXISTS(SELECT NULL FROM (VALUES(1),(2)) v(unit) WHERE v.unit=q.id)
+      THEN 1 ELSE 0 END AS present FROM (VALUES(1),(3)) q(id) ORDER BY q.id
+  expect: {rows: 2,data: [{id: 1,present: 1},{id: 3,present: 0}]}

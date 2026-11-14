@@ -44,6 +44,30 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS nr_inner"
   - sql: "DROP TABLE IF EXISTS nr_outer"
 test_cases:
+  - name: MySQL predicate typing retains the nearest unqualified SQL scope
+    syntax: mysql
+    sql: |
+      SELECT o.ID,
+        CASE WHEN NOT EXISTS(SELECT shared FROM nr_inner i WHERE shared=2001) THEN 7 ELSE 3 END AS branch_value,
+        (SELECT SUM(inner_only) FROM nr_inner i WHERE shared=2001 AND outer_only=101) AS amount
+      FROM nr_outer o ORDER BY o.ID
+    expect: {rows: 2,data: [{ID: 1,branch_value: 3,amount: 201},{ID: 2,branch_value: 3,amount: null}]}
+  - name: PostgreSQL predicate typing retains the nearest unqualified SQL scope
+    syntax: psql
+    sql: |
+      SELECT o.ID,
+        CASE WHEN NOT EXISTS(SELECT shared FROM nr_inner i WHERE shared=2001) THEN 7 ELSE 3 END AS branch_value,
+        (SELECT SUM(inner_only) FROM nr_inner i WHERE shared=2001 AND outer_only=101) AS amount
+      FROM nr_outer o ORDER BY o.ID
+    expect: {rows: 2,data: [{ID: 1,branch_value: 3,amount: 201},{ID: 2,branch_value: 3,amount: null}]}
+  - name: T-SQL predicate typing retains the nearest unqualified SQL scope
+    syntax: tsql
+    sql: |
+      SELECT o.ID,
+        CASE WHEN NOT EXISTS(SELECT shared FROM nr_inner i WHERE shared=2001) THEN 7 ELSE 3 END AS branch_value,
+        (SELECT SUM(inner_only) FROM nr_inner i WHERE shared=2001 AND outer_only=101) AS amount
+      FROM nr_outer o ORDER BY o.ID
+    expect: {rows: 2,data: [{ID: 1,branch_value: 3,amount: 201},{ID: 2,branch_value: 3,amount: null}]}
   - name: "Column identifiers remain case-insensitive when quoted"
     sql: "SELECT `id` FROM nr_outer ORDER BY `Id`"
     expect:
@@ -593,7 +617,7 @@ test_cases:
   - name: Compiled derived wildcards preserve declaration callbacks and folded qualifiers
     scm: |
       (begin
-        (define sources (list (list "o" "memcp-tests" "nr_outer" false nil)))
+        (define sources (list (list "o" "memcp-tests" "nr_outer" false nil (sql_relation_declarations "memcp-tests" "nr_outer" nil))))
         (define compiler (list (quote lambda) (list (quote info) (quote declaration))
           (list (quote sql_info) (list (quote sql_info_formula) (quote info)) "DECIMAL" nil)))
         (define star (list (quote sql_compile_column) compiler
@@ -609,7 +633,7 @@ test_cases:
   - name: Compiled derived wildcards retain exact qualifier contracts
     scm: |
       (begin
-        (define sources (list (list "o" "memcp-tests" "nr_outer" false nil)))
+        (define sources (list (list "o" "memcp-tests" "nr_outer" false nil (sql_relation_declarations "memcp-tests" "nr_outer" nil))))
         (define star (list (quote sql_compile_column) (lambda (info declaration) info)
           (list (quote get_column) "O" false "*" false)))
         (empty_list? (expand_query_block_fields sources (list "" star))))

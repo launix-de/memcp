@@ -1,0 +1,608 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  description: Session-local temporary relations use native typed DDL and DML
+  requires_tds: true
+  isolated: true
+test_cases:
+  # Deferred SQL Server procedure binding: https://dbfiddle.uk/L0Aw28Pn
+  - name: Procedure declaration defers qualified references to its future temporary relation
+    sql: |
+      CREATE PROCEDURE qualified_own_temporary AS
+        CREATE TABLE #qualified_items (id INT);
+        INSERT #qualified_items VALUES (7);
+        SELECT id FROM dbo.#qualified_items;
+    expect: {rows: 0}
+  - name: Procedure execution binds its qualified temporary source after creation
+    sql: EXEC qualified_own_temporary
+    expect: {rows: 1, data: [{id: 7}]}
+  - name: Procedure declaration does not require its caller temporary relation
+    sql: |
+      CREATE PROCEDURE qualified_caller_temporary AS
+        SELECT a.id FROM dbo.#qualified_caller AS a
+        JOIN dbo.#qualified_caller b ON a.id=b.id;
+    expect: {rows: 0}
+  - name: A qualified caller reference still fails when actually executed without its relation
+    sql: EXEC qualified_caller_temporary
+    expect: {error: true}
+  - name: First caller creates its own qualified procedure input
+    session_id: qualified-caller-a
+    sql: "CREATE TABLE #qualified_caller (id INT); INSERT #qualified_caller VALUES (11);"
+    expect: {affected_rows: 1}
+  - name: Second caller independently creates the same qualified procedure input
+    session_id: qualified-caller-b
+    sql: "CREATE TABLE #qualified_caller (id INT); INSERT #qualified_caller VALUES (23);"
+    expect: {affected_rows: 1}
+  - name: First execution resolves the qualified aliases through the current caller
+    session_id: qualified-caller-a
+    sql: EXEC qualified_caller_temporary
+    expect: {rows: 1, data: [{id: 11}]}
+  - name: Reused procedure resolves both qualified aliases through another caller
+    session_id: qualified-caller-b
+    sql: EXEC qualified_caller_temporary
+    expect: {rows: 1, data: [{id: 23}]}
+  - name: A schema-qualified public source is not shadowed by an equal CTE name
+    setup:
+      - sql: CREATE TABLE qualified_shadow (id INT)
+      - sql: INSERT qualified_shadow VALUES (100)
+    sql: WITH qualified_shadow AS (SELECT 1 AS id) SELECT id FROM dbo.qualified_shadow
+    expect: {rows: 1, data: [{id: 100}]}
+    cleanup:
+      - sql: DROP TABLE qualified_shadow
+  - name: An unqualified source retains ordinary CTE shadowing
+    sql: WITH qualified_shadow AS (SELECT 1 AS id) SELECT id FROM qualified_shadow
+    expect: {rows: 1, data: [{id: 1}]}
+  - name: A deferred public declaration binds a table created after the procedure
+    setup:
+      - sql: CREATE PROCEDURE qualified_public_later AS SELECT id FROM dbo.qualified_later
+      - sql: CREATE TABLE qualified_later (id INT)
+      - sql: INSERT qualified_later VALUES (42)
+    sql: EXEC qualified_public_later
+    expect: {rows: 1, data: [{id: 42}]}
+    cleanup:
+      - sql: DROP PROCEDURE qualified_public_later
+      - sql: DROP TABLE qualified_later
+  # Ordered DROP TABLE target-list reference: https://dbfiddle.uk/0RtgktJM
+  - name: DROP TABLE resolves every persistent target with its own qualifier
+    setup:
+      - sql: CREATE TABLE drop_list_first (id INT)
+      - sql: CREATE TABLE drop_list_second (id INT)
+    sql: |
+      DROP TABLE drop_list_first,dbo.drop_list_second;
+      SELECT OBJECT_ID('drop_list_first') AS first_id,OBJECT_ID('drop_list_second') AS second_id;
+    expect: {rows: 1, data: [{first_id: null, second_id: null}]}
+    cleanup:
+      - sql: DROP TABLE IF EXISTS drop_list_first
+      - sql: DROP TABLE IF EXISTS drop_list_second
+  - name: IF EXISTS applies to every DROP TABLE target
+    setup:
+      - sql: CREATE TABLE drop_list_optional (id INT)
+    sql: |
+      DROP TABLE IF EXISTS drop_list_absent,dbo.drop_list_optional,drop_list_also_absent;
+      SELECT OBJECT_ID('drop_list_optional') AS optional_id;
+    expect: {rows: 1, data: [{optional_id: null}]}
+    cleanup:
+      - sql: DROP TABLE IF EXISTS drop_list_optional
+  - name: Ordered DROP TABLE removes the referencing relation before its parent
+    setup:
+      - sql: CREATE TABLE drop_list_parent (id INT PRIMARY KEY)
+      - sql: CREATE TABLE drop_list_child (id INT, FOREIGN KEY (id) REFERENCES drop_list_parent(id))
+    sql: |
+      DROP TABLE drop_list_child,drop_list_parent;
+      SELECT OBJECT_ID('drop_list_child') AS child_id,OBJECT_ID('drop_list_parent') AS parent_id;
+    expect: {rows: 1, data: [{child_id: null, parent_id: null}]}
+    cleanup:
+      - sql: DROP TABLE IF EXISTS drop_list_child
+      - sql: DROP TABLE IF EXISTS drop_list_parent
+  - name: DROP TABLE target lists retain missing-relation errors
+    sql: DROP TABLE drop_list_absent,drop_list_also_absent
+    expect: {error: true}
+  - name: DROP TABLE target lists do not accept a final separator
+    sql: DROP TABLE IF EXISTS drop_list_absent,
+    expect: {error: true}
+  - name: Native TDS can recreate every local name after a multiple-target DROP
+    tds:
+      statements:
+        - sql: "CREATE TABLE #drop_a (id INT)"
+        - sql: "CREATE TABLE #drop_b (id INT)"
+        - sql: "DROP TABLE #drop_a,#drop_b"
+        - sql: "CREATE TABLE #drop_a (id INT)"
+        - sql: "CREATE TABLE #drop_b (id INT)"
+        - sql: "INSERT #drop_a VALUES (17)"
+        - sql: "INSERT #drop_b VALUES (23)"
+        - sql: "SELECT a.id AS first_id,b.id AS second_id FROM #drop_a a CROSS JOIN #drop_b b"
+          expect: {rows: 1, data: [{first_id: 17, second_id: 23}]}
+        - sql: "DROP TABLE #drop_a,#drop_b"
+  # SQL Server 2022 reference: https://dbfiddle.uk/l3TQJdic
+  - name: Persistent CREATE TABLE accepts one final column separator
+    setup:
+      - sql: CREATE TABLE comma_persistent (id INT,)
+      - sql: INSERT comma_persistent VALUES (7)
+    sql: SELECT id FROM comma_persistent
+    expect: {rows: 1, data: [{id: 7}]}
+    cleanup:
+      - sql: DROP TABLE IF EXISTS comma_persistent
+  - name: Consecutive temporary declarations retain every column after a final separator
+    sql: |
+      CREATE TABLE #comma_first (id INT);
+      CREATE TABLE #comma_second (id INT, amount FLOAT, /* final column */);
+      INSERT #comma_first VALUES (4);
+      INSERT #comma_second VALUES (4,2.5);
+      SELECT a.id,b.amount FROM #comma_first a JOIN #comma_second b ON a.id=b.id;
+    expect: {rows: 1, data: [{id: 4, amount: 2.5}]}
+  - name: Final separator after a table constraint preserves primary key enforcement
+    setup:
+      - sql: CREATE TABLE comma_constrained (id INT, CONSTRAINT pk_comma_constrained PRIMARY KEY (id),)
+      - sql: INSERT comma_constrained VALUES (9)
+    sql: INSERT comma_constrained VALUES (9)
+    expect: {error: true}
+    cleanup:
+      - sql: DROP TABLE IF EXISTS comma_constrained
+  - name: Stored procedure executes a temporary declaration ending with a separator
+    setup:
+      - sql: |
+          CREATE PROCEDURE comma_temporary_procedure AS
+          CREATE TABLE #items (id INT, amount FLOAT,);
+          INSERT #items VALUES (2,3.5);
+          SELECT id,amount FROM #items;
+    sql: EXEC comma_temporary_procedure
+    expect: {rows: 1, data: [{id: 2, amount: 3.5}]}
+    cleanup:
+      - sql: DROP PROCEDURE IF EXISTS comma_temporary_procedure
+  - name: A repeated final separator remains invalid CREATE TABLE syntax
+    sql: CREATE TABLE comma_invalid (id INT,,)
+    expect: {error: true}
+  - name: A final separator cannot replace a required column declaration
+    sql: CREATE TABLE comma_empty (,)
+    expect: {error: true}
+  - name: Table variable declarations retain their stricter separator grammar
+    sql: DECLARE @items TABLE (id INT,)
+    expect: {error: true}
+  - name: Native TDS executes final separators in ordinary and temporary declarations
+    tds:
+      statements:
+        - sql: "CREATE TABLE #wire_comma (id INT, amount FLOAT,)"
+        - sql: "INSERT #wire_comma VALUES (5,6.5)"
+        - sql: "SELECT id,amount FROM #wire_comma"
+          expect: {rows: 1, data: [{id: 5, amount: 6.5}]}
+        - sql: "DROP TABLE #wire_comma"
+  - name: Local temporary table accepts the native system-name alias
+    session_id: local-temporary-a
+    sql: "CREATE TABLE #probe (id INT PRIMARY KEY, label SYSNAME, amount INT NOT NULL DEFAULT 7)"
+    expect: {rows: 0, result_not_contains: '"affected_rows"'}
+  - name: Local temporary rows survive the next request
+    session_id: local-temporary-a
+    sql: "INSERT #probe (id,label) VALUES (1,N'first'),(2,N'second')"
+    expect: {affected_rows: 2}
+  - name: Local temporary source uses case-insensitive relation binding
+    session_id: local-temporary-a
+    sql: "SELECT id,label,amount FROM #PROBE ORDER BY id"
+    expect:
+      rows: 2
+      data: [{id: 1,label: first,amount: 7},{id: 2,label: second,amount: 7}]
+  - name: Independent connection cannot read another connection's local name
+    session_id: local-temporary-b
+    sql: "SELECT id FROM #probe"
+    expect: {error: true}
+  - name: Independent connection can create the same local name
+    session_id: local-temporary-b
+    sql: "CREATE TABLE #probe (id INT PRIMARY KEY, label NVARCHAR(20), amount INT)"
+    expect: {rows: 0, result_not_contains: '"affected_rows"'}
+  - name: Independent temporary relation has independent storage
+    session_id: local-temporary-b
+    sql: "INSERT #probe VALUES (9,N'other',20)"
+    expect: {affected_rows: 1}
+  - name: Identical SQL binds to the first connection's relation
+    session_id: local-temporary-a
+    sql: "SELECT id,label,amount FROM #PROBE ORDER BY id"
+    expect:
+      rows: 2
+      data: [{id: 1,label: first,amount: 7},{id: 2,label: second,amount: 7}]
+  - name: Identical SQL binds to the second connection's relation
+    session_id: local-temporary-b
+    sql: "SELECT id,label,amount FROM #PROBE ORDER BY id"
+    expect: {rows: 1,data: [{id: 9,label: other,amount: 20}]}
+  - name: Temporary relation uses the common update operator
+    session_id: local-temporary-a
+    sql: "UPDATE #probe SET amount=amount+5 WHERE id=1"
+    expect: {affected_rows: 1}
+  - name: Temporary relation uses the common delete operator
+    session_id: local-temporary-a
+    sql: "DELETE FROM #probe WHERE id=2"
+    expect: {affected_rows: 1}
+  - name: Temporary relation retains native declaration constraints
+    session_id: local-temporary-a
+    sql: "INSERT #probe VALUES (1,N'duplicate',30)"
+    expect: {error: true}
+  - name: Temporary relation participates in native transactions
+    session_id: local-temporary-a
+    sql: BEGIN TRANSACTION
+    expect: {affected_rows: 0}
+  - name: Temporary transaction sees its own mutation
+    session_id: local-temporary-a
+    sql: "UPDATE #probe SET amount=99 WHERE id=1"
+    expect: {affected_rows: 1}
+  - name: Temporary mutation rolls back through the common transaction
+    session_id: local-temporary-a
+    sql: ROLLBACK TRANSACTION
+    expect: {affected_rows: 0}
+  - name: Rolled-back temporary mutation restores the preceding value
+    session_id: local-temporary-a
+    sql: "SELECT id,label,amount FROM #PROBE ORDER BY id"
+    expect: {rows: 1,data: [{id: 1,label: first,amount: 12}]}
+  - name: Dropping one local relation preserves the other connection's relation
+    session_id: local-temporary-a
+    sql: "DROP TABLE #probe"
+    expect: {rows: 0, result_not_contains: '"affected_rows"'}
+  - name: Dropped local relation does not leave a reusable cached source
+    session_id: local-temporary-a
+    sql: "SELECT id,label,amount FROM #PROBE ORDER BY id"
+    expect: {error: true}
+  - name: Remaining connection keeps its own temporary rows
+    session_id: local-temporary-b
+    sql: "SELECT id,label,amount FROM #PROBE ORDER BY id"
+    expect: {rows: 1,data: [{id: 9,label: other,amount: 20}]}
+  - name: Recreated local name starts with empty native storage
+    session_id: local-temporary-a
+    sql: "CREATE TABLE #probe (id INT PRIMARY KEY,label SYSNAME,amount INT)"
+    expect: {rows: 0, result_not_contains: '"affected_rows"'}
+  - name: Cached query rebinds after drop and recreation
+    session_id: local-temporary-a
+    sql: "SELECT id,label,amount FROM #PROBE ORDER BY id"
+    expect: {rows: 0,data: []}
+  - name: Global temporary tables require their own explicit lifetime contract
+    session_id: local-temporary-a
+    sql: "CREATE TABLE ##shared_probe (id INT)"
+    expect: {error: true}
+  - name: Local temporary names cannot be published by a persistent view
+    session_id: local-temporary-a
+    sql: "CREATE VIEW local_temporary_view AS SELECT id FROM #probe"
+    expect: {error: true}
+  - name: Real TDS connection keeps temporary rows across batches
+    tds:
+      statements:
+        - sql: "CREATE TABLE #wire_probe (id INT PRIMARY KEY,label SYSNAME)"
+        - sql: "INSERT #wire_probe VALUES (1,N'wire')"
+        - sql: "SELECT id,label FROM #wire_probe"
+          expect: {rows: 1,data: [{id: 1,label: wire}]}
+        - sql: "UPDATE #wire_probe SET label=N'updated' WHERE id=1"
+        - sql: "SELECT id,label FROM #wire_probe"
+          expect: {rows: 1,data: [{id: 1,label: updated}]}
+        - sql: "DROP TABLE #wire_probe"
+        - sql: "SELECT id,label FROM #wire_probe"
+          expect: {error: true}
+  - name: Real TDS sessions isolate local names and clean up reset and socket close
+    tds:
+      statements:
+        - {connection: first,sql: "CREATE TABLE #wire_shared(id INT PRIMARY KEY)"}
+        - {connection: first,sql: "INSERT #wire_shared VALUES(1)"}
+        - connection: second
+          sql: "SELECT id FROM #wire_shared"
+          expect: {error: true}
+        - {connection: second,sql: "CREATE TABLE #wire_shared(id INT PRIMARY KEY)"}
+        - {connection: second,sql: "INSERT #wire_shared VALUES(2)"}
+        - connection: first
+          sql: "SELECT id FROM #wire_shared"
+          expect: {rows: 1,data: [{id: 1}]}
+        - connection: second
+          sql: "SELECT id FROM #wire_shared"
+          expect: {rows: 1,data: [{id: 2}]}
+        - {connection: first,sql: BEGIN TRANSACTION}
+        - {connection: first,sql: "INSERT #wire_shared VALUES(3)"}
+        - connection: first
+          reset: true
+          sql: "SELECT id FROM #wire_shared"
+          expect: {error: true}
+        - connection: second
+          sql: "SELECT id FROM #wire_shared"
+          expect: {rows: 1,data: [{id: 2}]}
+        - {connection: first,sql: "CREATE TABLE #wire_shared(id INT PRIMARY KEY)"}
+        - {connection: first,sql: "INSERT #wire_shared VALUES(4)"}
+        - {connection: first,close: true}
+        - connection: second
+          sql: "SELECT id FROM #wire_shared"
+          expect: {rows: 1,data: [{id: 2}]}
+        - connection: first
+          sql: "SELECT id FROM #wire_shared"
+          expect: {error: true}
+        - {connection: second,sql: "DROP TABLE #wire_shared"}
+  - name: First connection explicitly retires its recreated local relation
+    session_id: local-temporary-a
+    sql: "DROP TABLE #probe"
+    expect: {rows: 0, result_not_contains: '"affected_rows"'}
+  - name: Second connection explicitly retires its independent local relation
+    session_id: local-temporary-b
+    sql: "DROP TABLE #probe"
+    expect: {rows: 0, result_not_contains: '"affected_rows"'}
+  - name: Caller temporary relation survives batch separators
+    session_id: local-module
+    sql: |
+      CREATE TABLE #caller(id INT PRIMARY KEY);
+      INSERT #caller VALUES(1);
+      GO
+      SELECT id FROM #caller;
+    expect: {rows: 1,data: [{id: 1}]}
+  - name: Nested procedure reads caller temporary relations and its own relation
+    session_id: local-module
+    sql: |
+      CREATE PROCEDURE local_temporary_child AS BEGIN
+        SELECT id FROM #caller;
+        CREATE TABLE #child(id INT);
+        INSERT #child VALUES(2);
+        SELECT id FROM #child;
+      END;
+      GO
+      EXEC local_temporary_child;
+    expect: {rows: 2,data: [{id: 1},{id: 2}]}
+  - name: Procedure-created temporary relation is not visible after return
+    session_id: local-module
+    sql: "SELECT id FROM #child"
+    expect: {error: true}
+  - name: Parent temporary storage remains intact after child teardown
+    session_id: local-module
+    sql: "SELECT id FROM #caller"
+    expect: {rows: 1,data: [{id: 1}]}
+  - name: Procedure temporary name can shadow the caller binding
+    session_id: local-module
+    sql: |
+      CREATE PROCEDURE local_temporary_shadow AS BEGIN
+        CREATE TABLE #caller(id INT PRIMARY KEY);
+        INSERT #caller VALUES(9);
+        SELECT id FROM #caller;
+      END;
+      GO
+      EXEC local_temporary_shadow;
+    expect: {rows: 1,data: [{id: 9}]}
+  - name: Returning from a shadow scope restores the caller relation
+    session_id: local-module
+    sql: "SELECT id FROM #caller"
+    expect: {rows: 1,data: [{id: 1}]}
+  - name: Dynamic SQL reads inherited temporary storage and owns new local tables
+    session_id: local-module
+    sql: |
+      EXEC sp_executesql N'SELECT id FROM #caller; CREATE TABLE #dynamic_child(id INT); INSERT #dynamic_child VALUES(3); SELECT id FROM #dynamic_child;';
+    expect: {rows: 2,data: [{id: 1},{id: 3}]}
+  - name: Dynamic SQL temporary relation ends with the dynamic scope
+    session_id: local-module
+    sql: "SELECT id FROM #dynamic_child"
+    expect: {error: true}
+  - name: Procedure failure unwinds its local temporary namespace
+    session_id: local-module
+    sql: |
+      CREATE PROCEDURE local_temporary_failure AS BEGIN
+        CREATE TABLE #failed_child(id INT);
+        INSERT #failed_child VALUES(4);
+        THROW 50001,N'expected module failure',1;
+      END;
+      GO
+      EXEC local_temporary_failure;
+    expect: {error: true,contains: expected module failure}
+  - name: Failed procedure leaves no accessible local relation
+    session_id: local-module
+    sql: "SELECT id FROM #failed_child"
+    expect: {error: true}
+  - name: Module tests retire the caller relation
+    session_id: local-module
+    sql: "DROP TABLE #caller"
+    expect: {rows: 0, result_not_contains: '"affected_rows"'}
+  - name: Temporary insertion and joined mutation use common logical sources
+    session_id: local-joined
+    sql: |
+      CREATE TABLE #target(id INT PRIMARY KEY,amount INT DEFAULT 7);
+      CREATE TABLE #source(id INT PRIMARY KEY,amount INT);
+      INSERT #source VALUES(1,10),(2,20);
+      INSERT #target(id) SELECT id FROM #source;
+      UPDATE #target SET amount=s.amount FROM #target t JOIN #source s ON t.id=s.id WHERE t.id=1;
+      DELETE #target FROM #target t JOIN #source s ON t.id=s.id WHERE t.id=2;
+      SELECT id,amount FROM #target;
+    expect: {rows: 1,data: [{id: 1,amount: 10}]}
+  - name: Temporary maintenance targets bind their native relation
+    session_id: local-joined
+    sql: |
+      TRUNCATE TABLE #target
+    expect: {error: true, contains: 'TRUNCATE TABLE is not supported'}
+  - name: Unsupported temporary truncation preserves the owned rows
+    session_id: local-joined
+    sql: |
+      SELECT id,amount FROM #target
+    expect: {rows: 1, data: [{id: 1, amount: 10}]}
+  - name: Temporary DELETE and DROP bind their native relation
+    session_id: local-joined
+    sql: |
+      DELETE FROM #target;
+      SELECT COUNT(*) AS n FROM #target;
+      DROP TABLE #target;
+      DROP TABLE #source;
+    expect: {rows: 1, data: [{n: 0}]}
+  - name: Temporary identity insertion uses the owned relation capability
+    session_id: local-identity
+    sql: |
+      CREATE TABLE #identity_target(id INT IDENTITY PRIMARY KEY,amount INT);
+      SET IDENTITY_INSERT #identity_target ON;
+      INSERT #identity_target(id,amount) VALUES(10,7);
+      SET IDENTITY_INSERT #identity_target OFF;
+      SELECT id,amount FROM #identity_target;
+      DROP TABLE #identity_target;
+    expect: {rows: 1,data: [{id: 10,amount: 7}]}
+  - name: Temporary DDL starts a normal explicit transaction
+    session_id: local-ddl-owner
+    sql: BEGIN TRANSACTION
+    expect: {affected_rows: 0}
+  - name: Transactional temporary creation publishes to its native owner
+    session_id: local-ddl-owner
+    sql: "CREATE TABLE #transactional_ddl(id INT)"
+    expect: {rows: 0, result_not_contains: '"affected_rows"'}
+  - name: Creating transaction writes its temporary relation
+    session_id: local-ddl-owner
+    sql: "INSERT #transactional_ddl VALUES(1)"
+    expect: {affected_rows: 1}
+  - name: Creating transaction reads its own temporary rows
+    session_id: local-ddl-owner
+    sql: "SELECT id FROM #transactional_ddl"
+    expect: {rows: 1, data: [{id: 1}]}
+  - name: Another connection cannot resolve an uncommitted local name
+    session_id: local-ddl-other
+    sql: "SELECT id FROM #transactional_ddl"
+    expect: {error: true}
+  - name: Another connection can create the same temporary name independently
+    session_id: local-ddl-other
+    sql: "CREATE TABLE #transactional_ddl(id INT)"
+    expect: {rows: 0, result_not_contains: '"affected_rows"'}
+  - name: Independent temporary relation retains its own rows
+    session_id: local-ddl-other
+    sql: "INSERT #transactional_ddl VALUES(2)"
+    expect: {affected_rows: 1}
+  - name: Temporary CREATE rolls back through the native transaction
+    session_id: local-ddl-owner
+    sql: ROLLBACK TRANSACTION
+    expect: {affected_rows: 0}
+  - name: Rolled-back temporary CREATE leaves no binding
+    session_id: local-ddl-owner
+    sql: "SELECT id FROM #transactional_ddl"
+    expect: {error: true}
+  - name: Temporary CREATE rollback preserves another connection's relation
+    session_id: local-ddl-other
+    sql: "SELECT id FROM #transactional_ddl"
+    expect: {rows: 1, data: [{id: 2}]}
+  - name: A second native transaction can reuse the rolled-back local name
+    session_id: local-ddl-owner
+    sql: BEGIN TRANSACTION
+    expect: {affected_rows: 0}
+  - name: Recreated temporary relation has a fresh native generation
+    session_id: local-ddl-owner
+    sql: "CREATE TABLE #transactional_ddl(id INT)"
+    expect: {rows: 0, result_not_contains: '"affected_rows"'}
+  - name: Recreated temporary relation starts empty
+    session_id: local-ddl-owner
+    sql: "SELECT id FROM #transactional_ddl"
+    expect: {rows: 0, data: []}
+  - name: Recreated temporary relation accepts different rows
+    session_id: local-ddl-owner
+    sql: "INSERT #transactional_ddl VALUES(3)"
+    expect: {affected_rows: 1}
+  - name: Temporary CREATE commits through the native transaction
+    session_id: local-ddl-owner
+    sql: COMMIT TRANSACTION
+    expect: {affected_rows: 0}
+  - name: Committed temporary relation survives the creating transaction
+    session_id: local-ddl-owner
+    sql: "SELECT id FROM #transactional_ddl"
+    expect: {rows: 1, data: [{id: 3}]}
+  - name: Commit preserves the other connection's independent rows
+    session_id: local-ddl-other
+    sql: "SELECT id FROM #transactional_ddl"
+    expect: {rows: 1, data: [{id: 2}]}
+  - name: Temporary DROP starts a normal explicit transaction
+    session_id: local-ddl-owner
+    sql: BEGIN TRANSACTION
+    expect: {affected_rows: 0}
+  - name: Temporary DROP stages removal in its native transaction
+    session_id: local-ddl-owner
+    sql: "DROP TABLE #transactional_ddl"
+    expect: {rows: 0, result_not_contains: '"affected_rows"'}
+  - name: Temporary DROP rolls back through the native transaction
+    session_id: local-ddl-owner
+    sql: ROLLBACK TRANSACTION
+    expect: {affected_rows: 0}
+  - name: Rolled-back temporary DROP restores the committed generation and rows
+    session_id: local-ddl-owner
+    sql: "SELECT id FROM #transactional_ddl"
+    expect: {rows: 1, data: [{id: 3}]}
+  - name: Temporary DROP rollback preserves the other connection's relation
+    session_id: local-ddl-other
+    sql: "SELECT id FROM #transactional_ddl"
+    expect: {rows: 1, data: [{id: 2}]}
+  - name: Temporary DROP commit starts a normal explicit transaction
+    session_id: local-ddl-owner
+    sql: BEGIN TRANSACTION
+    expect: {affected_rows: 0}
+  - name: Committing temporary DROP stages the owned relation only
+    session_id: local-ddl-owner
+    sql: "DROP TABLE #transactional_ddl"
+    expect: {rows: 0, result_not_contains: '"affected_rows"'}
+  - name: Temporary DROP commits through the native transaction
+    session_id: local-ddl-owner
+    sql: COMMIT TRANSACTION
+    expect: {affected_rows: 0}
+  - name: Committed temporary DROP removes the local binding
+    session_id: local-ddl-owner
+    sql: "SELECT id FROM #transactional_ddl"
+    expect: {error: true}
+  - name: Temporary DROP commit preserves the other connection's rows
+    session_id: local-ddl-other
+    sql: "SELECT id FROM #transactional_ddl"
+    expect: {rows: 1, data: [{id: 2}]}
+  - name: Independent temporary relation can be dropped by its owner
+    session_id: local-ddl-other
+    sql: "DROP TABLE #transactional_ddl"
+    expect: {rows: 0, result_not_contains: '"affected_rows"'}
+  - name: Closing a TDS session retires its native temporary relation
+    scm: |
+      (begin
+        (define s (newsession))
+        (s "username" "root")
+        (s "schema" "memcp-tests")
+        (tsql_execute_request "memcp-tests" "CREATE TABLE #close_probe(id INT)" s nil 0
+          (lambda (_row) true) (lambda args true))
+        (define relation (tsql_resolve_relation "memcp-tests" "#close_probe" s))
+        (tds_frontend "close" s nil nil nil nil nil nil)
+        (nil? (table (car relation) false (cadr relation) false nil)))
+    expect: {result: true}
+  - name: Resetting a pooled TDS connection retires the old native relation
+    scm: |
+      (begin
+        (define s (newsession))
+        (s "username" "root")
+        (s "schema" "memcp-tests")
+        (tsql_execute_request "memcp-tests" "CREATE TABLE #reset_probe(id INT)" s nil 0
+          (lambda (_row) true) (lambda args true))
+        (define relation (tsql_resolve_relation "memcp-tests" "#reset_probe" s))
+        (define replacement (tds_frontend "reset" s nil nil nil nil nil nil))
+        (and (nil? (table (car relation) false (cadr relation) false nil))
+          (equal? (replacement "username") "root")
+          (equal? (replacement "schema") "memcp-tests")))
+    expect: {result: true}
+  - name: An administrator cannot read a guessed native temporary identity through another dialect
+    scm: |
+      (begin
+        (define s (newsession))
+        (s "username" "root")
+        (s "schema" "memcp-tests")
+        (tsql_execute_request "memcp-tests" "CREATE TABLE #security_probe(id INT)" s nil 0
+          (lambda (_row) true) (lambda args true))
+        (define relation (tsql_resolve_relation "memcp-tests" "#security_probe" s))
+        (define denied (try (lambda () (begin
+          (parse_sql (car relation) (concat "SELECT id FROM `" (cadr relation) "`")
+            (sql_policy "root")) false)) (lambda (_error) true)))
+        (tds_frontend "close" s nil nil nil nil nil nil)
+        denied)
+    expect: {result: true}
+
+  - name: Temporary scope exports keep logical bindings without native lifetime controls
+    scm: |
+      (begin
+        (define owner (newsession))
+        (define parent (tsql_temporary_new_scope nil owner))
+        (define bindings (list (list "#kept" "memcp-tests" ".kept-logical-name")))
+        (parent "bindings" bindings)
+        (define child (tsql_temporary_new_scope parent owner))
+        (define native (tsql_temporary_native_scope child nil))
+        (define valid (and (nil? (parent "native")) (nil? (child "native"))
+          (identical? (child "parent") parent)
+          (expression_equal? (tsql_temporary_visible child nil) bindings)
+          (identical? native (tsql_temporary_native_scope child nil))))
+        (tsql_temporary_cleanup_scope child)
+        (define retained (and (identical? native (tsql_temporary_native_scope child nil))
+          (expression_equal? (parent "bindings") bindings)))
+        (tsql_temporary_cleanup_scope parent)
+        (and valid retained))
+    expect: {result: true}
+  - name: A missing temporary lifetime cannot manufacture a replacement capability
+    scm: (tsql_temporary_native_scope (newsession) nil)
+    expect: {error: true,contains: temporary scope has no native lifetime}
+
+cleanup:
+  - sql: DROP PROCEDURE IF EXISTS local_temporary_child
+  - sql: DROP PROCEDURE IF EXISTS local_temporary_shadow
+  - sql: DROP PROCEDURE IF EXISTS local_temporary_failure

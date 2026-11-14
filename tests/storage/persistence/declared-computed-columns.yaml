@@ -1,0 +1,228 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  description: Native declared computations are immutable schema rather than prepared cache payloads
+cleanup:
+- sql: DROP TABLE IF EXISTS declared_compute_data
+- sql: DROP TABLE IF EXISTS declared_compute_empty
+- sql: DROP TABLE IF EXISTS declared_compute_aborted
+- sql: DROP TABLE IF EXISTS declared_compute_invalid
+- sql: DROP TABLE IF EXISTS declared_compute_collation
+- sql: DROP TABLE IF EXISTS declared_compute_locals
+test_cases:
+- name: Private CREATE binds a lazy computation without publishing or reading row data
+  scm: |
+    (begin
+      (define s (newsession)) (s "username" "root") (tx_begin s)
+      (define tx (s "__memcp_tx"))
+      (createtable "memcp-tests" "declared_compute_data"
+        (list (list "column" "id" "INT" '() '("null" false))
+          (list "column" "base" "INT" '() '())
+          (list "column" "derived" "INT" '() '("null" false)
+            '("base") (lambda (base) (if (nil? base) 0 (+ base 10))))
+          (list "unique" "PRIMARY" '("id")))
+        '("engine" "safe") false tx)
+      (define target (table "memcp-tests" false "declared_compute_data" false tx))
+      (define descriptor (show target "column" "derived"))
+      (define private (and (descriptor "Computed") (equal? (descriptor "RawType") "INT")
+        (nil? (table "memcp-tests" false "declared_compute_data" false nil))))
+      (insert target '("id" "base") (list (list 1 2) (list 2 nil)) '() nil false nil tx)
+      (define result (scan tx target '() '() '() (lambda () true) '("derived")
+        (lambda (acc derived) (+ acc derived)) 0 +))
+      (tx_commit s) (and private (equal? result 12)))
+  expect: {result: true}
+- name: Fresh rows read every computed value even without a preparation pass
+  sql: SELECT id,derived FROM declared_compute_data ORDER BY id
+  expect: {data: [{id: 1,derived: 12},{id: 2,derived: 0}]}
+- name: A base update exposes the recomputed value on its new row generation
+  sql: UPDATE declared_compute_data SET base=7 WHERE id=1
+  expect: {affected_rows: 1}
+- name: Updated source values invalidate previously read computation payloads
+  sql: SELECT id,derived FROM declared_compute_data ORDER BY id
+  expect: {data: [{id: 1,derived: 17},{id: 2,derived: 0}]}
+- name: Declared computations cannot be overwritten through native INSERT
+  scm: |
+    (try (lambda () (insert (table "memcp-tests" false "declared_compute_data" false nil)
+      '("id" "base" "derived") (list (list 3 8 99))))
+      (lambda (failure) (strlike (concat failure) "%cannot write declared computed column%")))
+  expect: {result: true}
+- name: Native UPDATE cannot overwrite the computation through a stored row slot
+  sql: UPDATE declared_compute_data SET derived=99 WHERE id=1
+  expect: {error: true}
+- name: A rejected computed write preserves both the source and derived row values
+  sql: SELECT id,base,derived FROM declared_compute_data ORDER BY id
+  expect: {data: [{id: 1,base: 7,derived: 17},{id: 2,base: null,derived: 0}]}
+- name: An empty declaration persists its definition before a first computed read
+  scm: |
+    (createtable "memcp-tests" "declared_compute_empty"
+      (list (list "column" "base" "INT" '() '())
+        (list "column" "derived" "INT" '() '() '("base") (lambda (base) (+ base 1))))
+      '("engine" "safe") false nil)
+  expect: {result: true}
+- name: Scalar ALTER cannot reinterpret a declared computation as stored or temporary state
+  scm: |
+    (begin
+      (define target (table "memcp-tests" false "declared_compute_data" false nil))
+      (define before (show target "column" "derived"))
+      (define denied (map (list (list "default" 1) (list "default_expression" "1")
+        (list "default_declaration" (list 1 "" "derived_default"))
+        (list "add_default" (list 1 "" "derived_default"))
+        (list "auto_increment" true) (list "auto_increment" 9)
+        (list "temp" true) (list "update" (lambda () 1)))
+        (lambda (change) (try (lambda () (begin (altercolumn target "derived" (car change) (cadr change)) false))
+          (lambda (failure) (strlike (concat failure) "%declared computation cannot also have%"))))))
+      (and (reduce denied (lambda (ok value) (and ok value)) true)
+        (equal? before (show target "column" "derived"))
+        (before "Computed") (nil? (before "Default")) (equal? (before "DefaultName") "")))
+  expect: {result: true}
+- name: Rolling back an entire computed declaration leaves no public relation
+  scm: |
+    (begin
+      (define s (newsession)) (s "username" "root") (tx_begin s)
+      (createtable "memcp-tests" "declared_compute_aborted"
+        (list (list "column" "base" "INT" '() '())
+          (list "column" "derived" "INT" '() '() '("base") (lambda (base) (+ base 1))))
+        '("engine" "safe") false (s "__memcp_tx"))
+      (tx_rollback s)
+      (nil? (table "memcp-tests" false "declared_compute_aborted" false nil)))
+  expect: {result: true}
+- name: Invalid native computed definitions fail before namespace publication
+  scm: |
+    (begin
+      (define denied (map (list
+        (list '("missing") (lambda (value) value) '())
+        (list '("base" "base") (lambda (left right) (+ left right)) '())
+        (list '("derived") (lambda (value) value) '())
+        (list '("base") (lambda (value) value) '("default" 3))
+        (list '("base") (lambda (value) value) '("auto_increment" true))
+        (list '("base") (lambda (value) (session "value")) '()))
+        (lambda (case) (try (lambda () (begin
+          (createtable "memcp-tests" "declared_compute_invalid"
+            (list (list "column" "base" "INT" '() '())
+              (list "column" "derived" "INT" '() (nth case 2) (car case) (cadr case)))
+            '("engine" "safe") false nil) false)) (lambda (_failure) true)))))
+      (and (reduce denied (lambda (ok value) (and ok value)) true)
+        (nil? (table "memcp-tests" false "declared_compute_invalid" false nil))))
+  expect: {result: true}
+- name: A stored unique key cannot silently treat a declared computation as an omitted NULL
+  scm: |
+    (begin
+      (define target (table "memcp-tests" false "declared_compute_data" false nil))
+      (define denied (try (lambda () (begin (createkey target "derived_unique" true '("derived") nil) false))
+        (lambda (failure) (strlike (concat failure) "%unique keys on declared computed columns%"))))
+      (and denied (equal? (count ((show target "constraints") "Unique")) 1)))
+  expect: {result: true}
+- name: Private key declarations reject unsupported computed extraction without publishing a key
+  scm: |
+    (begin
+      (define s (newsession)) (s "username" "root") (tx_begin s)
+      (define tx (s "__memcp_tx"))
+      (createtable "memcp-tests" "declared_compute_invalid"
+        (list (list "column" "base" "INT" '() '())
+          (list "column" "derived" "INT" '() '() '("base") (lambda (base) (+ base 1))))
+        '("engine" "safe") false tx)
+      (define target (table "memcp-tests" false "declared_compute_invalid" false tx))
+      (define denied (try (lambda () (begin (createkey target "derived_unique" true '("derived") tx) false))
+        (lambda (failure) (strlike (concat failure) "%unique keys on declared computed columns%"))))
+      (define unchanged (empty_list? ((show target "constraints") "Unique")))
+      (tx_rollback s) (and denied unchanged))
+  expect: {result: true}
+- name: Native collation captures use the same owning code serializer as distributed callbacks
+  scm: |
+    (begin
+      (define less (collate "utf8mb4_general_ci" false))
+      (createtable "memcp-tests" "declared_compute_collation"
+        (list (list "column" "value" "VARCHAR" '(20) '())
+          (list "column" "derived" "INT" '() '() '("value")
+            (lambda (value) (if (and (not (less value "alpha")) (not (less "alpha" value))) 7 3))))
+        '("engine" "safe") false nil)
+      (insert (table "memcp-tests" false "declared_compute_collation" false nil)
+        '("value") (list (list "ALPHA") (list "beta"))) true)
+  expect: {result: true}
+- name: Constructor unique declarations reject unsupported computed key extraction before publication
+  scm: |
+    (begin
+      (define denied (try (lambda () (begin
+        (createtable "memcp-tests" "declared_compute_invalid"
+          (list (list "column" "base" "INT" '() '())
+            (list "column" "derived" "INT" '() '() '("base") (lambda (base) (+ base 1)))
+            (list "unique" "derived_unique" '("derived")))
+          '("engine" "safe") false nil) false))
+        (lambda (failure) (strlike (concat failure) "%unique keys on declared computed columns%"))))
+      (and denied (nil? (table "memcp-tests" false "declared_compute_invalid" false nil))))
+  expect: {result: true}
+- name: Dropping a recipe input is rejected before changing schema or row storage
+  scm: |
+    (try (lambda () (begin (dropcolumn (table "memcp-tests" false "declared_compute_data" false nil) "base") false))
+      (lambda (failure) (strlike (concat failure) "%input of a declared computation%")))
+  expect: {result: true}
+- name: Scalar input declaration changes require an atomic recipe replacement
+  scm: |
+    (begin
+      (define target (table "memcp-tests" false "declared_compute_data" false nil))
+      (define denied (map (list (list "type" "BIGINT") (list "dimensions" (list 12))
+        (list "null" false) (list "collation" "utf8mb4_general_ci"))
+        (lambda (change) (try (lambda () (begin (altercolumn target "base" (car change) (cadr change)) false))
+          (lambda (failure) (strlike (concat failure) "%input of a declared computation%"))))))
+      (reduce denied (lambda (ok value) (and ok value)) true))
+  expect: {result: true}
+- name: Complete input declarations reject changes while exact replay stays idempotent
+  scm: |
+    (begin
+      (define target (table "memcp-tests" false "declared_compute_data" false nil))
+      (define descriptor (show target "column" "base"))
+      (define original (list "INT" '() true (descriptor "Collation")))
+      (define denied (try (lambda () (begin
+        (altercolumn target "base" "declaration" (list (list "BIGINT" '() true (descriptor "Collation")) original)) false))
+        (lambda (failure) (strlike (concat failure) "%input of a declared computation%"))))
+      (and denied (altercolumn target "base" "declaration" (list original original))))
+  expect: {result: true}
+- name: Rejected input changes preserve the stored declaration
+  scm: |
+    (begin
+      (define descriptor (show (table "memcp-tests" false "declared_compute_data" false nil) "column" "base"))
+      (and (equal? (descriptor "RawType") "INT") (empty_list? (descriptor "Dimensions"))
+        (equal? (descriptor "Collation") "utf8mb4") (descriptor "Null")))
+  expect: {result: true}
+- name: Rejected input schema changes preserve ordinary and computed row values
+  sql: SELECT id,base,derived FROM declared_compute_data ORDER BY id
+  expect: {data: [{id: 1,base: 7,derived: 17},{id: 2,base: null,derived: 0}]}
+- name: A declared computation binds nested local values before persistence
+  scm: |
+    (begin
+      (createtable "memcp-tests" "declared_compute_locals"
+        (list (list "column" "base" "INT" '() '())
+          (list "column" "derived" "INT" '() '() '("base")
+            (eval (optimize (scheme
+              "(lambda (base) (begin (define shifted (+ base 7)) ((lambda (value) (begin (define doubled (* value 2)) (+ doubled shifted))) base)))")))))
+        '("engine" "safe") false nil)
+      (insert (table "memcp-tests" false "declared_compute_locals" false nil)
+        '("base") (list (list 2))) true)
+  expect: {result: true}
+- name: Nested computation locals evaluate with their actual source input
+  sql: SELECT base,derived FROM declared_compute_locals
+  expect: {data: [{base: 2,derived: 13}]}
+- name: Restart recovers the computation definition without a persisted cache prerequisite
+  action: restart
+- name: WAL row values retain declared computations after restart
+  sql: SELECT id,derived FROM declared_compute_data ORDER BY id
+  expect: {data: [{id: 1,derived: 17},{id: 2,derived: 0}]}
+- name: Recovered nested local bindings retain both inner and outer values
+  sql: SELECT base,derived FROM declared_compute_locals
+  expect: {data: [{base: 2,derived: 13}]}
+- name: Recovered nested computations respond to a new source generation
+  sql: UPDATE declared_compute_locals SET base=3
+  expect: {affected_rows: 1}
+- name: Recomputed local values use the updated input after recovery
+  sql: SELECT base,derived FROM declared_compute_locals
+  expect: {data: [{base: 3,derived: 16}]}
+- name: A post-restart row in an empty table evaluates its persisted recipe
+  sql: INSERT INTO declared_compute_empty(base) VALUES(6)
+  expect: {affected_rows: 1}
+- name: The previously empty relation computes from its new source row
+  sql: SELECT derived FROM declared_compute_empty
+  expect: {data: [{derived: 7}]}
+- name: Serialized collation callables retain their comparison contract after restart
+  sql: SELECT value,derived FROM declared_compute_collation ORDER BY value
+  expect: {data: [{value: ALPHA,derived: 7},{value: beta,derived: 3}]}

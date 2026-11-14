@@ -1,0 +1,98 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  description: Cursor-stability savepoint and full rollback keep transaction-created row versions hidden
+setup:
+- sql: CREATE TABLE cs_undo_versions(id INT PRIMARY KEY,v INT)
+cleanup:
+- sql: DROP TABLE IF EXISTS cs_undo_versions
+test_cases:
+- name: Savepoint removes a row inserted then updated while preserving earlier transaction work
+  scm: |
+    (begin
+          (define cs_version_total (lambda (tx handle)
+            (scan tx handle '() '() '() (lambda () true) '("id" "v")
+              (lambda (acc id v) (+ acc (* id 100) v)) 0 +)))
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (try (lambda () (begin
+            (define tx (owner "__memcp_tx"))
+      (define h (table "memcp-tests" false "cs_undo_versions" false tx))
+      (insert h '("id" "v") (list (list 1 10)) '() nil false nil tx)
+      (define sp (tx_savepoint tx))
+      (insert h '("id" "v") (list (list 2 20)) '() nil false nil tx)
+      (define changed (scan tx h '() '() '("id") (lambda (id) (equal? id 2)) '("$update")
+        (lambda (acc update) (begin (update '("v" 21)) (+ acc 1))) 0 +))
+      (tx_rollback_to_savepoint tx sp)
+      (define total (cs_version_total tx h))
+      (tx_commit owner)
+      (and (equal? changed 1) (equal? total 110))
+          ))
+          (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect: {result: true}
+- name: Committed output contains only the pre-savepoint row
+  sql: SELECT id,v FROM cs_undo_versions ORDER BY id
+  expect: {rows: 1, data: [{id: 1, v: 10}]}
+- name: Full rollback never resurrects a transaction-created row replaced by UPDATE
+  scm: |
+    (begin
+          (define cs_version_total (lambda (tx handle)
+            (scan tx handle '() '() '() (lambda () true) '("id" "v")
+              (lambda (acc id v) (+ acc (* id 100) v)) 0 +)))
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (try (lambda () (begin
+            (define tx (owner "__memcp_tx"))
+      (define h (table "memcp-tests" false "cs_undo_versions" false tx))
+      (insert h '("id" "v") (list (list 2 20)) '() nil false nil tx)
+      (scan tx h '() '() '("id") (lambda (id) (equal? id 2)) '("$update")
+        (lambda (acc update) (begin (update '("v" 21)) (+ acc 1))) 0 +)
+      (tx_rollback owner)
+      (equal? (cs_version_total nil h) 110)
+          ))
+          (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect: {result: true}
+- name: Savepoint removes a row inserted and then deleted within its own suffix
+  scm: |
+    (begin
+          (define cs_version_total (lambda (tx handle)
+            (scan tx handle '() '() '() (lambda () true) '("id" "v")
+              (lambda (acc id v) (+ acc (* id 100) v)) 0 +)))
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (try (lambda () (begin
+            (define tx (owner "__memcp_tx"))
+      (define h (table "memcp-tests" false "cs_undo_versions" false tx))
+      (define sp (tx_savepoint tx))
+      (insert h '("id" "v") (list (list 3 30)) '() nil false nil tx)
+      (scan tx h '() '() '("id") (lambda (id) (equal? id 3)) '("$update")
+        (lambda (acc update) (begin (update) (+ acc 1))) 0 +)
+      (tx_rollback_to_savepoint tx sp)
+      (define total (cs_version_total tx h))
+      (tx_commit owner)
+      (equal? total 110)
+          ))
+          (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect: {result: true}
+- name: A pre-savepoint inserted row survives statement undo and disappears on whole rollback
+  scm: |
+    (begin
+          (define cs_version_total (lambda (tx handle)
+            (scan tx handle '() '() '() (lambda () true) '("id" "v")
+              (lambda (acc id v) (+ acc (* id 100) v)) 0 +)))
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (try (lambda () (begin
+            (define tx (owner "__memcp_tx"))
+      (define h (table "memcp-tests" false "cs_undo_versions" false tx))
+      (insert h '("id" "v") (list (list 4 40)) '() nil false nil tx)
+      (define sp (tx_savepoint tx))
+      (scan tx h '() '() '("id") (lambda (id) (equal? id 4)) '("$update")
+        (lambda (acc update) (begin (update '("v" 41)) (+ acc 1))) 0 +)
+      (tx_rollback_to_savepoint tx sp)
+      (define total (cs_version_total tx h))
+      (tx_rollback owner)
+      (and (equal? total 550) (equal? (cs_version_total nil h) 110))
+          ))
+          (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect: {result: true}
+- name: Final public rows retain neither inserted nor updated rolled-back versions
+  sql: SELECT id,v FROM cs_undo_versions ORDER BY id
+  expect: {rows: 1, data: [{id: 1, v: 10}]}

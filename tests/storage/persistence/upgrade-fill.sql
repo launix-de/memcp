@@ -11,6 +11,8 @@
 -- proposeCompression is a disabled TODO placeholder that nothing in the
 -- current codebase ever constructs.
 
+DROP TABLE IF EXISTS up_calendar_const;
+DROP TABLE IF EXISTS up_calendar_variable;
 DROP TABLE IF EXISTS up_float;
 DROP TABLE IF EXISTS up_string_dict;
 DROP TABLE IF EXISTS up_string_nodict;
@@ -26,6 +28,8 @@ DROP TABLE IF EXISTS up_blob;
 DROP TABLE IF EXISTS up_compute;
 DROP TABLE IF EXISTS up_group_events;
 DROP TABLE IF EXISTS up_group_windows;
+DROP TABLE IF EXISTS up_fk_abi_child;
+DROP TABLE IF EXISTS up_fk_abi_parent;
 
 -- 1. StorageFloat: non-aligned floating point values
 CREATE TABLE up_float (id INT, val DOUBLE);
@@ -1022,3 +1026,40 @@ CREATE TABLE up_helper_parent (id INT PRIMARY KEY);
 INSERT INTO up_helper_parent VALUES (1),(2);
 CREATE TABLE up_helper_file (id INT PRIMARY KEY, stamp INT NOT NULL);
 CREATE TABLE up_helper_driver (id INT PRIMARY KEY, file_id INT);
+
+-- Native foreign metadata owns these legacy callback implementations. The old
+-- writer installs the pre-transaction ABI in upgrade-run.sh after its original oracle.
+CREATE TABLE up_fk_abi_parent(id INT PRIMARY KEY);
+CREATE TABLE up_fk_abi_child(id INT PRIMARY KEY,parent_id INT,omitted_value VARCHAR(40),
+  CONSTRAINT up_fk_abi_ref FOREIGN KEY(parent_id) REFERENCES up_fk_abi_parent(id)
+  ON DELETE CASCADE ON UPDATE CASCADE);
+INSERT INTO up_fk_abi_parent VALUES(7),(9);
+INSERT INTO up_fk_abi_child(id,parent_id) VALUES(1,7);
+
+
+-- Calendar values use only whole-second native SQL understood by every pin.
+-- Keep one non-NULL constant independently of nullable calendar columns, and
+-- vary dates, times and duplicate multiplicity in the second table. The old
+-- writer's normal rebuild and restart own the resulting physical encodings.
+CREATE TABLE up_calendar_const (
+  id INT PRIMARY KEY,
+  moment DATETIME NOT NULL,
+  optional_moment DATETIME,
+  day DATE,
+  stamp TIMESTAMP
+);
+INSERT INTO up_calendar_const VALUES
+  (1, '2024-02-29 12:34:56', '2024-02-29 12:34:56', '2024-02-29', '2024-02-29 12:34:56'),
+  (2, '2024-02-29 12:34:56', '2024-02-29 12:34:56', '2024-02-29', '2024-02-29 12:34:56'),
+  (3, '2024-02-29 12:34:56', NULL, '2024-02-29', '2024-02-29 12:34:56'),
+  (4, '2024-02-29 12:34:56', '2024-02-29 12:34:56', '2024-02-29', '2024-02-29 12:34:56'),
+  (5, '2024-02-29 12:34:56', NULL, NULL, NULL);
+
+CREATE TABLE up_calendar_variable (id INT PRIMARY KEY, moment DATETIME, day DATE, stamp TIMESTAMP);
+INSERT INTO up_calendar_variable VALUES
+  (1, '2000-01-01 00:00:00', '2000-01-01', '2000-01-01 00:00:00'),
+  (2, '2024-02-29 12:34:56', '2024-02-29', '2024-02-29 12:34:56'),
+  (3, '2030-12-31 23:59:59', '2030-12-31', '2030-12-31 23:59:59'),
+  (4, '2000-01-01 00:00:00', '2000-01-01', '2000-01-01 00:00:00'),
+  (5, '2024-02-29 00:00:01', '2024-02-29', '2024-02-29 00:00:01'),
+  (6, NULL, NULL, NULL);

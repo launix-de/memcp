@@ -1,0 +1,277 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  description: Exact physical access constraints on virtual catalog sources
+setup:
+- scm: |
+    (begin
+      (createtable "memcp-tests" "metadata_point_case" (list (list "column" "lower_column" "INT" '() '())) '() false nil)
+      (createtable "memcp-tests" "METADATA_POINT_CASE" (list (list "column" "upper_column" "INT" '() '())) '() false nil)
+      (createtable "memcp-tests" "metadata_point_xİ" (list (list "column" "dotted_column" "INT" '() '())) '() false nil)
+      (createtable "memcp-tests" "metadata_point_other" (list (list "column" "other_column" "INT" '() '())) '() false nil))
+cleanup:
+- scm: (droptable "memcp-tests" "metadata_point_case" true)
+- scm: (droptable "memcp-tests" "METADATA_POINT_CASE" true)
+- scm: (droptable "memcp-tests" "metadata_point_other" true)
+- scm: (droptable "memcp-tests" "metadata_point_xİ" true)
+test_cases:
+- name: Catalog equality remains effective after residual pruning
+  sql: SELECT schema_name FROM information_schema.schemata WHERE schema_name='memcp-tests'
+  expect: {rows: 1, data: [{schema_name: memcp-tests}]}
+- name: Missing catalog equality returns no rows
+  sql: SELECT schema_name FROM information_schema.schemata WHERE schema_name='missing_catalog_source'
+  expect: {rows: 0}
+- name: Ordered catalog equality filters before taking a window
+  sql: SELECT schema_name FROM information_schema.schemata WHERE schema_name='memcp-tests' ORDER BY schema_name LIMIT 1
+  expect: {rows: 1, data: [{schema_name: memcp-tests}]}
+- name: Ordered missing equality does not return the first catalog row
+  sql: SELECT schema_name FROM information_schema.schemata WHERE schema_name='missing_catalog_source' ORDER BY schema_name LIMIT 1
+  expect: {rows: 0}
+- name: Catalog range endpoints are enforced
+  sql: SELECT schema_name FROM information_schema.schemata WHERE schema_name>='memcp-tests' AND schema_name<'memcp-testt' ORDER BY schema_name
+  expect: {rows: 1, data: [{schema_name: memcp-tests}]}
+- name: Catalog strict range excludes its endpoint
+  sql: SELECT schema_name FROM information_schema.schemata WHERE schema_name>'memcp-tests' AND schema_name<'memcp-testt'
+  expect: {rows: 0}
+- name: Catalog case insensitive equality keeps its comparison contract
+  sql: SELECT schema_name FROM information_schema.schemata WHERE schema_name='MEMCP-TESTS' ORDER BY schema_name
+  expect: {rows: 1, data: [{schema_name: memcp-tests}]}
+- name: Computed catalog equality evaluates the computed access column
+  sql: SELECT schema_name FROM information_schema.schemata WHERE LOWER(schema_name)='memcp-tests' ORDER BY schema_name
+  expect: {rows: 1, data: [{schema_name: memcp-tests}]}
+- name: Catalog residual callback still rejects candidate-only predicates
+  sql: SELECT schema_name FROM information_schema.schemata WHERE schema_name='memcp-tests' AND schema_name LIKE 'absent%'
+  expect: {rows: 0}
+- name: Catalog equality and offset do not skip into an unrelated row
+  sql: SELECT schema_name FROM information_schema.schemata WHERE schema_name='memcp-tests' ORDER BY schema_name LIMIT 1 OFFSET 1
+  expect: {rows: 0}
+- name: Literal row equality also uses the common source access contract
+  sql: SELECT n FROM (SELECT 1 AS n UNION ALL SELECT 2 UNION ALL SELECT NULL) AS literals WHERE n=2 ORDER BY n
+  expect: {rows: 1, data: [{n: 2}]}
+- name: Literal row NULL access keeps only missing values
+  sql: SELECT n FROM (SELECT 1 AS n UNION ALL SELECT 2 UNION ALL SELECT NULL) AS literals WHERE n IS NULL
+  expect: {rows: 1, data: [{n: null}]}
+- name: Literal row range retains SQL NULL rejection
+  sql: SELECT n FROM (SELECT 1 AS n UNION ALL SELECT 2 UNION ALL SELECT NULL) AS literals WHERE n<2 ORDER BY n
+  expect: {rows: 1, data: [{n: 1}]}
+- name: Literal computed access filters before its limit
+  sql: SELECT n FROM (SELECT 1 AS n UNION ALL SELECT 2 UNION ALL SELECT NULL) AS literals WHERE n+1=3 ORDER BY n LIMIT 1
+  expect: {rows: 1, data: [{n: 2}]}
+- name: Missing catalog row makes EXISTS false
+  sql: SELECT CASE WHEN EXISTS(SELECT 1 FROM information_schema.schemata WHERE schema_name='missing_catalog_source') THEN 1 ELSE 0 END AS present
+  expect: {data: [{present: 0}]}
+- name: Existing catalog row makes EXISTS true
+  sql: SELECT CASE WHEN EXISTS(SELECT 1 FROM information_schema.schemata WHERE schema_name='memcp-tests') THEN 1 ELSE 0 END AS present
+  expect: {data: [{present: 1}]}
+- name: Negative catalog EXISTS preserves its range boundary
+  sql: SELECT CASE WHEN EXISTS(SELECT 1 FROM information_schema.schemata WHERE schema_name>'memcp-tests' AND schema_name<'memcp-testt') THEN 1 ELSE 0 END AS present
+  expect: {data: [{present: 0}]}
+- name: Catalog join access binds each requested database independently
+  setup:
+  - sql: DROP TABLE IF EXISTS requested_databases
+  - sql: CREATE TABLE requested_databases(id INT PRIMARY KEY, name VARCHAR(128))
+  - sql: INSERT INTO requested_databases VALUES(1,'memcp-tests'),(2,'missing_catalog_source'),(3,NULL)
+  sql: SELECT r.id FROM requested_databases AS r JOIN information_schema.schemata AS s ON s.schema_name=r.name WHERE r.id<4 ORDER BY r.id
+  expect: {data: [{id: 1}]}
+  cleanup:
+  - sql: DROP TABLE requested_databases
+
+- name: Column source name equality keeps both case-distinct native tables
+  sql: SELECT column_name FROM information_schema.columns WHERE table_schema='memcp-tests' AND table_name='metadata_point_case' ORDER BY column_name
+  expect: {rows: 2, data: [{column_name: lower_column}, {column_name: upper_column}]}
+- name: Native table metadata preserves all SQL case-insensitive matches
+  sql: SELECT table_name FROM information_schema.tables WHERE table_schema='memcp-tests' AND table_name='metadata_point_case'
+  expect: {rows: 2}
+- name: Metadata name selection preserves SQL Unicode equality rather than ordering equivalence
+  sql: SELECT column_name FROM information_schema.columns WHERE table_schema='memcp-tests' AND table_name='metadata_point_xi'
+  expect: {rows: 0}
+- name: Exact Unicode metadata names remain accessible
+  sql: SELECT column_name FROM information_schema.columns WHERE table_schema='memcp-tests' AND table_name='metadata_point_xİ'
+  expect: {rows: 1, data: [{column_name: dotted_column}]}
+- name: Restricting the source keeps unrelated column predicates effective
+  sql: SELECT column_name FROM information_schema.columns WHERE table_schema='memcp-tests' AND table_name='metadata_point_case' AND column_name='absent'
+  expect: {rows: 0}
+- name: Reversed literal equality uses the same metadata source restriction
+  sql: SELECT column_name FROM information_schema.columns WHERE 'memcp-tests'=table_schema AND 'metadata_point_other'=table_name
+  expect: {rows: 1, data: [{column_name: other_column}]}
+- name: OR does not restrict away its alternative metadata table
+  sql: SELECT column_name FROM information_schema.columns WHERE table_schema='memcp-tests' AND (table_name='metadata_point_case' OR table_name='metadata_point_other') ORDER BY column_name
+  expect: {rows: 3, data: [{column_name: lower_column}, {column_name: other_column}, {column_name: upper_column}]}
+- name: Conflicting necessary equalities keep the residual rejection
+  sql: SELECT column_name FROM information_schema.columns WHERE table_schema='memcp-tests' AND table_name='metadata_point_case' AND table_name='metadata_point_other'
+  expect: {rows: 0}
+- name: Metadata name NULL equality retains SQL rejection
+  sql: SELECT column_name FROM information_schema.columns WHERE table_schema='memcp-tests' AND table_name=NULL
+  expect: {rows: 0}
+- name: Unsupported metadata predicate shapes remain unrestricted producers
+  scm: |
+    (begin
+      (define src (list "m" "information_schema" "columns" false nil nil))
+      (define column (list 'get_column "m" false "table_name" false))
+      (define equality (list 'equal?? column "metadata_point_other"))
+      (and
+        (reduce (list
+          (list 'or equality (list 'equal?? column "metadata_point_case"))
+          (list 'not equality)
+          (list 'equal?? (list 'toLower column) "metadata_point_other")
+          (list 'equal?? column (list 'session "name"))
+          (list 'equal?? column nil)
+          (list 'equal?? (list 'get_column "other_alias" false "table_name" false) "metadata_point_other")
+          (list 'sql_compare column "metadata_point_other" (collate "utf8mb4_bin" false) "equal??"))
+          (lambda (valid condition) (and valid (nil? (metadata_source_selection_expr src condition)))) true)
+        (not (nil? (metadata_source_selection_expr src equality)))
+        (expression_equal? (metadata_source_selection_expr src false) false)
+        (expression_equal? src (list "m" "information_schema" "columns" false nil nil))))
+  expect: {result: true}
+- name: Exact metadata selectors resolve absence and native case without ambiguity
+  scm: |
+    (begin
+      (define selected (list "schema" (list "exact" "memcp-tests") "table" (list "exact" "metadata_point_case")))
+      (define rows (information_schema_rows "information_schema" "columns" nil selected))
+      (and (equal? (count rows) 1) (equal? ((car rows) "column_name") "lower_column")
+        (empty_list? (information_schema_rows "information_schema" "columns" nil
+          (list "schema" (list "exact" "memcp-tests") "table" (list "exact" "metadata_point_missing"))))))
+  expect: {result: true}
+- name: Native transaction visibility is preserved by point metadata production
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (try (lambda () (begin
+        (createtable "memcp-tests" "metadata_point_private" (list (list "column" "id" "INT" '() '())) '() false tx)
+        (define selection (list "schema" (list "exact" "memcp-tests") "table" (list "exact" "metadata_point_private")))
+        (define answer (and
+          (equal? (count (information_schema_rows "information_schema" "columns" tx selection)) 1)
+          (empty_list? (information_schema_rows "information_schema" "columns" nil selection))))
+        (tx_rollback owner) answer))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect: {result: true}
+- name: Metadata source restrictions invoke only the requested native column builder among 2500 tables
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (try (lambda () (begin
+        (define columns (list (list "column" "id" "INT" '() '())))
+        (map (produceN 2500) (lambda (i)
+          (createtable "memcp-tests" (concat "metadata_scale_" i) columns '() false tx)))
+        (define all_calls (newsession))
+        (define selected_calls (newsession))
+        (define all_rows (info_schema_table_rows tx (list "schema" (list "exact" "memcp-tests"))
+          (lambda (db name context) (begin (all_calls name true) (info_schema_columns_for_table db name context)))))
+        (define src (list "m" "information_schema" "columns" false nil nil))
+        (define condition (list 'and (list 'equal?? (list 'get_column "m" false "table_schema" false) "memcp-tests")
+          (list 'equal?? (list 'get_column "m" false "table_name" false) "metadata_scale_1739")))
+        (define selection (eval (metadata_source_selection_expr src condition)))
+        (define selected (info_schema_table_rows tx selection
+          (lambda (db name context) (begin (selected_calls name true) (info_schema_columns_for_table db name context)))))
+        (define empty_calls (newsession))
+        (define none (info_schema_table_rows tx false
+          (lambda (db name context) (begin (empty_calls name true) (info_schema_columns_for_table db name context)))))
+        (define actual (eval (metadata_source_table_expr src condition)))
+        (define block (make_query_block "memcp-tests" (list src)
+          (list "column_name" (list 'get_column "m" false "column_name" false))
+          condition nil nil nil nil nil nil nil nil))
+        (define code (lower_single_source_scan_plan_core block nil))
+        (define source_rows (newsession))
+        (define result (newsession))
+        (define native_source information_schema_rows)
+        (define observed_source (lambda args (begin
+          (define rows (apply native_source args))
+          (source_rows "count" (count rows)) rows)))
+        (define execute (eval (list 'lambda (list 'information_schema_rows 'tx 'session 'resultrow) code)))
+        (execute observed_source tx owner (lambda (row) (result "row" row)))
+        (define answer (and (>= (count (all_calls)) 2500) (>= (count all_rows) 2500)
+          (equal? ((result "row") "column_name") "id")
+          (equal? (count (selected_calls)) 1) (equal? (count selected) 1)
+          (equal? ((car selected) "table_name") "metadata_scale_1739")
+          (expression_equal? actual selected) (empty_list? none) (equal? (count (empty_calls)) 0)))
+        (tx_rollback owner) (list answer (source_rows "count"))))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect: {result: [true, 1]}
+- name: A missing table has no column metadata rows
+  scm: |
+    (empty_list? (info_schema_columns_for_table "memcp-tests" "metadata_disappeared_columns" nil))
+  expect: {result: true}
+- name: A listed table can disappear before column production and be recreated independently
+  scm: |
+    (begin
+      (droptable "memcp-tests" "metadata_disappeared_columns" true)
+      (createtable "memcp-tests" "metadata_disappeared_columns"
+        (list (list "column" "id" "INT" '() '())) '() false nil)
+      (define names (filter (show "memcp-tests" false nil)
+        (lambda (name) (equal?? name "metadata_disappeared_columns"))))
+      (define held (table "memcp-tests" false "metadata_disappeared_columns" false nil))
+      (droptable "memcp-tests" "metadata_disappeared_columns" false)
+      (define removed (info_schema_columns_for_table "memcp-tests" (car names) nil))
+      (createtable "memcp-tests" "metadata_disappeared_columns"
+        (list (list "column" "replacement" "INT" '() '())
+              (list "column" "description" "TEXT" '() '())) '() false nil)
+      (define replacement (info_schema_columns_for_table "memcp-tests" (car names) nil))
+      (define answer (and (equal? (count names) 1) (empty_list? removed)
+        (equal? (count (show held)) 1) (equal? ((car (show held)) "Field") "id")
+        (equal? (map replacement (lambda (row) (row "column_name"))) '("replacement" "description"))))
+      (droptable "memcp-tests" "metadata_disappeared_columns" false)
+      answer)
+  expect: {result: true}
+
+- name: A necessary nested FALSE conjunct excludes metadata before any native column builder
+  scm: |
+    (begin
+      (define src (list "m" "information_schema" "columns" false nil nil))
+      (define condition (list 'and
+        (list 'equal? (list 'get_column "m" false "table_schema" false) "memcp-tests")
+        (list 'and (list 'equal?? (list 'get_column "m" false "table_name" false) "metadata_point_case") false)))
+      (define selection (eval (metadata_source_selection_expr src condition)))
+      (define rows (info_schema_table_rows nil selection
+        (lambda (_db _name _tx) (error "excluded native column builder was invoked"))))
+      (and (expression_equal? selection false) (empty_list? rows)))
+  expect: {result: true}
+- name: FALSE inside OR preserves the possible metadata domain
+  scm: |
+    (begin
+      (define src (list "m" "information_schema" "columns" false nil nil))
+      (define condition (list 'and
+        (list 'equal? (list 'get_column "m" false "table_schema" false) "memcp-tests")
+        (list 'or false (list 'equal?? (list 'get_column "m" false "table_name" false) "metadata_point_case"))))
+      (define selection (eval (metadata_source_selection_expr src condition)))
+      (define rows (info_schema_table_rows nil selection info_schema_columns_for_table))
+      (and (not (expression_equal? selection false))
+        (not (nil? (find rows (lambda (row) (equal? (row "column_name") "lower_column")) nil)))))
+  expect: {result: true}
+- name: FALSE inside NOT does not exclude metadata production
+  scm: |
+    (begin
+      (define src (list "m" "information_schema" "columns" false nil nil))
+      (define condition (list 'and
+        (list 'equal? (list 'get_column "m" false "table_schema" false) "memcp-tests")
+        (list 'not false)))
+      (define selection (eval (metadata_source_selection_expr src condition)))
+      (define rows (info_schema_table_rows nil selection info_schema_columns_for_table))
+      (and (not (expression_equal? selection false))
+        (not (nil? (find rows (lambda (row) (equal? (row "column_name") "lower_column")) nil)))))
+  expect: {result: true}
+- name: NULL remains a residual predicate rather than a FALSE production selector
+  scm: |
+    (begin
+      (define src (list "m" "information_schema" "columns" false nil nil))
+      (define condition (list 'and
+        (list 'equal? (list 'get_column "m" false "table_schema" false) "memcp-tests") nil))
+      (define selection (eval (metadata_source_selection_expr src condition)))
+      (and (not (expression_equal? selection false))
+        (not (empty_list? (info_schema_table_rows nil selection info_schema_columns_for_table)))))
+  expect: {result: true}
+- name: Virtual self catalog restriction never invokes an excluded native column builder
+  scm: |
+    (begin
+      (define original (tsql_catalog_columns_query "memcp-tests" true))
+      (define restricted (tsql_catalog_restrict_branch original "memcp-tests"
+        (list "memcp-tests" "sys" "all_columns")))
+      (define native (car (union_branches restricted)))
+      (define selection (eval (metadata_source_selection_expr (car (qb_sources native)) (qb_where native))))
+      (define rows (info_schema_table_rows nil selection
+        (lambda (_db _name _tx) (error "self catalog restriction invoked native column production"))))
+      (and (expression_equal? selection false) (empty_list? rows)
+        (equal? (count (union_branches restricted)) (count (union_branches original)))))
+  expect: {result: true}

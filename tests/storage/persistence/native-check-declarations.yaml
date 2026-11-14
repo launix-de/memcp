@@ -1,0 +1,706 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  description: Native scalar CHECK declaration identity, final row validation, shared catalog history and durable
+    reload
+setup:
+- sql: CREATE TABLE check_native_values(id INT PRIMARY KEY,v INT,other_value INT)
+- sql: CREATE TABLE check_native_log(id INT,kind VARCHAR(8))
+- sql: CREATE TABLE check_native_bad(id INT PRIMARY KEY,v INT)
+- sql: CREATE TABLE check_native_unknown(id INT PRIMARY KEY,v INT)
+- sql: CREATE TABLE check_native_parent(id INT PRIMARY KEY)
+- sql: CREATE TABLE check_native_pending(id INT PRIMARY KEY,parent_id INT,v INT)
+- sql: INSERT INTO check_native_values VALUES(1,4,10),(2,5,20)
+- sql: INSERT INTO check_native_bad VALUES(1,-1)
+- sql: INSERT INTO check_native_unknown VALUES(1,NULL)
+- sql: INSERT INTO check_native_parent VALUES(1)
+- sql: INSERT INTO check_native_pending VALUES(1,1,3)
+- sql: CREATE TABLE check_native_missing(id INT PRIMARY KEY,v INT NOT NULL)
+- sql: CREATE TABLE check_native_null(id INT PRIMARY KEY)
+- sql: CREATE TABLE check_native_context(id INT PRIMARY KEY,v INT)
+- sql: CREATE TABLE check_stream_source(id INT PRIMARY KEY,v INT)
+- sql: INSERT INTO check_stream_source VALUES(50,50),(51,-1)
+- sql: CREATE TABLE check_stream_target(id INT PRIMARY KEY,v INT)
+- scm: |-
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (try (lambda () (begin
+        (createcheck (table "memcp-tests" false "check_stream_target" false (owner "__memcp_tx"))
+          "CK_stream_range" "tsql-check" "v >= 0" '("v") (owner "__memcp_tx") owner)
+        (tx_commit owner)))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+- sql: CREATE TABLE check_statement_versions(id INT PRIMARY KEY,v INT)
+- scm: |-
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (try (lambda () (begin
+        (createcheck (table "memcp-tests" false "check_statement_versions" false (owner "__memcp_tx"))
+          "CK_statement_versions" "tsql-check" "v >= 0" '("v") (owner "__memcp_tx") owner)
+        (tx_commit owner)))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+- sql: CREATE TABLE check_acid_versions(id INT PRIMARY KEY,v INT)
+- sql: INSERT INTO check_acid_versions VALUES(0,5)
+- scm: |-
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (createcheck (table "memcp-tests" false "check_acid_versions" false (owner "__memcp_tx"))
+        "CK_acid_versions" "tsql-check" "v >= 0" '("v") (owner "__memcp_tx") owner)
+      (tx_commit owner))
+cleanup:
+- sql: DROP TABLE IF EXISTS check_acid_versions
+- sql: DROP TABLE IF EXISTS check_statement_versions
+- sql: DROP TABLE IF EXISTS check_stream_target
+- sql: DROP TABLE IF EXISTS check_stream_source
+- sql: DROP TABLE IF EXISTS check_native_context
+- sql: DROP TABLE IF EXISTS check_native_null
+- sql: DROP TABLE IF EXISTS check_native_missing
+- sql: DROP TABLE IF EXISTS check_native_pending
+- sql: DROP TABLE IF EXISTS check_native_parent
+- sql: DROP TABLE IF EXISTS check_native_unknown
+- sql: DROP TABLE IF EXISTS check_native_bad
+- sql: DROP TABLE IF EXISTS check_native_log
+- sql: DROP TABLE IF EXISTS check_native_values
+test_cases:
+- name: Pending CHECK has one owner-only native declaration and rollback removes it
+  scm: |-
+    (begin
+      (define h (table "memcp-tests" false "check_native_values" false nil))
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (createcheck h "CK_native_rollback" "tsql-check" "v >= 0" '("v") tx owner)
+      (define own ((show h "constraints" tx) "Checks"))
+      (define outsider (coalesceNil ((show h "constraints") "Checks") '()))
+      (tx_rollback owner)
+      (and (equal? (count own) 1) (equal? ((car own) "Id") "CK_native_rollback")
+        (equal? (count outsider) 0) (equal? (count (coalesceNil ((show h "constraints") "Checks") '())) 0)))
+  expect:
+    result: true
+- name: Native CHECK historically validates and commits on the existing table handle
+  scm: |-
+    (begin
+      (define native_check_add (lambda (name id source columns) (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (try (lambda () (begin
+        (createcheck (table "memcp-tests" false name false tx) id "tsql-check" source columns tx owner)
+        (tx_commit owner)))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))))
+      (define before (table "memcp-tests" false "check_native_values" false nil))
+      (native_check_add "check_native_values" "CK_native_range" "v >= 0" '("v"))
+      (and (identical? before (table "memcp-tests" false "check_native_values" false nil))
+        (equal? (count ((show before "constraints") "Checks")) 1)))
+  expect:
+    result: true
+- name: UNKNOWN from a NULL input passes the native CHECK
+  sql: INSERT INTO check_native_values VALUES(3,NULL,30)
+  expect:
+    affected_rows: 1
+- name: A false INSERT predicate fails before row publication
+  sql: INSERT INTO check_native_values VALUES(4,-1,40)
+  expect:
+    error: true
+    contains: check constraint CK_native_range failed
+- name: Strict multirow INSERT rejects all rows when a later candidate fails
+  sql: INSERT INTO check_native_values VALUES(5,5,50),(6,-1,60)
+  expect:
+    error: true
+    contains: check constraint CK_native_range failed
+- name: Rejected INSERT statements preserve exact original rows
+  sql: SELECT id,v,other_value FROM check_native_values ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - id: 1
+      v: 4
+      other_value: 10
+    - id: 2
+      v: 5
+      other_value: 20
+    - id: 3
+      v: null
+      other_value: 30
+- name: Ordinary autocommit UPDATE uses its actual statement transaction
+  sql: UPDATE check_native_values SET v=6 WHERE id=1
+  expect:
+    affected_rows: 1
+- name: Install real BEFORE and AFTER UPDATE side effects
+  sql: CREATE TRIGGER check_native_before BEFORE UPDATE ON check_native_values FOR EACH ROW INSERT INTO check_native_log(id,kind)
+    VALUES(NEW.id,'before')
+- name: Install the AFTER UPDATE side effect
+  sql: CREATE TRIGGER check_native_after AFTER UPDATE ON check_native_values FOR EACH ROW INSERT INTO check_native_log(id,kind)
+    VALUES(NEW.id,'after')
+- name: A failing multirow UPDATE aborts the complete statement and trigger effects
+  sql: UPDATE check_native_values SET v=CASE WHEN id=1 THEN 8 ELSE -1 END WHERE id<=2
+  expect:
+    error: true
+    contains: check constraint CK_native_range failed
+- name: All preexisting row values survive the failed UPDATE
+  sql: SELECT id,v FROM check_native_values ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - id: 1
+      v: 6
+    - id: 2
+      v: 5
+    - id: 3
+      v: null
+- name: The same statement transaction undoes both trigger event streams
+  sql: SELECT COUNT(*) AS n FROM check_native_log
+  expect:
+    rows: 1
+    data:
+    - n: 0
+- name: Remove the BEFORE event callback
+  sql: DROP TRIGGER check_native_before
+- name: Remove the AFTER event callback
+  sql: DROP TRIGGER check_native_after
+- name: Install an ordinary BEFORE INSERT mutation
+  sql: CREATE TRIGGER check_native_insert BEFORE INSERT ON check_native_values FOR EACH ROW SET NEW.v=-1
+- name: CHECK sees user BEFORE INSERT output rather than supplied values
+  sql: INSERT INTO check_native_values VALUES(7,7,70)
+  expect:
+    error: true
+    contains: check constraint CK_native_range failed
+- name: Remove the ordinary BEFORE INSERT mutation
+  sql: DROP TRIGGER check_native_insert
+- name: Install an ordinary BEFORE UPDATE normalizer
+  sql: CREATE TRIGGER check_native_update BEFORE UPDATE ON check_native_values FOR EACH ROW SET NEW.v=9
+- name: Final UPDATE validation accepts valid user-normalized NEW
+  sql: UPDATE check_native_values SET v=-100 WHERE id=1
+  expect:
+    affected_rows: 1
+- name: The actual normalized UPDATE value is stored
+  sql: SELECT v FROM check_native_values WHERE id=1
+  expect:
+    rows: 1
+    data:
+    - v: 9
+- name: Remove the ordinary BEFORE UPDATE normalizer
+  sql: DROP TRIGGER check_native_update
+- name: A real CHECK row transaction retains standalone mode admission through decision
+  scm: |-
+    (begin
+      (define h (table "memcp-tests" false "check_native_values" false nil))
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (try (lambda () (begin
+        (with_table_mutation (list h) (list "insert" '()) tx owner (lambda (tx) (begin
+    (insert h '("id" "v" "other_value") (list (list 18 18 180)) '() nil false nil tx)
+        (scan tx h '() '() '("id") (lambda (id) (equal? id 18)) '("$update")
+          (lambda (acc update) (begin (update (list "v" 19)) acc)) 0 +)
+        )))
+    (define rejected (try (lambda () (begin (replication_start "listen" (lambda () true)) false))
+          (lambda (failure) (regexp_test (string failure) "pending declarations|pending declaration"))))
+        (tx_rollback owner)
+        (and rejected (nil? (owner "transaction")))))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect:
+    result: true
+- name: Rolling back the mode-pinned CHECK transaction restores the actual row set
+  sql: SELECT COUNT(*) AS n FROM check_native_values WHERE id=18
+  expect:
+    rows: 1
+    data:
+    - n: 0
+- name: Direct native NoTx INSERT rejects before defaults or row effects
+  scm: |-
+    (begin
+      (define h (table "memcp-tests" false "check_native_values" false nil))
+      (try (lambda () (begin (insert h '("id" "v" "other_value") (list (list 8 8 80))) false))
+        (lambda (failure) (regexp_test (string failure) "requires a native statement transaction"))))
+  expect:
+    result: true
+- name: Direct native NoTx UPDATE rejects before its user callback boundary
+  scm: |-
+    (begin
+      (define h (table "memcp-tests" false "check_native_values" false nil))
+      (try (lambda () (begin
+        (scan nil h '() '() '("id") (lambda (id) (equal? id 1)) '("$update")
+          (lambda (acc update) (begin (update (list "v" 10)) acc)) 0 +) false))
+        (lambda (failure) (regexp_test (string failure) "requires a native statement transaction"))))
+  expect:
+    result: true
+- name: A native same-value UPDATE validates the actual supplied invocation again
+  scm: |-
+    (begin
+      (registertriggerlanguage "check-fixture-context" (lambda (source context)
+        (lambda (OLD NEW session tx) (session "check_allowed"))) false true)
+      (define owner (newsession)) (owner "username" "root") (owner "check_allowed" true)
+      (define h (table "memcp-tests" false "check_native_context" false nil))
+      (tx_begin owner)
+      (createcheck h "CK_native_context" "check-fixture-context" "scalar" '("v") (owner "__memcp_tx") owner)
+      (tx_commit owner)
+      (with_autocommit owner nil 0 "native CHECK insert" (lambda (tx)
+        (with_table_mutation (list h) (list "insert" '()) tx owner (lambda (tx) (insert h '("id" "v") (list (list 1 7)) '() nil false nil tx)))))
+      (owner "check_allowed" false)
+      (define rejected (try (lambda () (begin
+        (with_autocommit owner nil 0 "native same-value CHECK update" (lambda (tx)
+          (with_table_mutation (list h) (list "update" '("v")) tx owner (lambda (tx) (scan tx h '() '() '("id") (lambda (id) (equal? id 1)) '("$update")
+            (lambda (acc update) (begin (update (list "v" 7)) acc)) 0 +))))) false))
+        (lambda (failure) (regexp_test (string failure) "CK_native_context failed"))))
+      (owner "check_allowed" true)
+      (with_autocommit owner nil 0 "native valid same-value CHECK update" (lambda (tx)
+        (with_table_mutation (list h) (list "update" '("v")) tx owner (lambda (tx) (scan tx h '() '() '("id") (lambda (id) (equal? id 1)) '("$update")
+          (lambda (acc update) (begin (update (list "v" 7)) acc)) 0 +)))))
+      rejected)
+  expect:
+    result: true
+- name: The failed same-value UPDATE preserves the exact stored row
+  sql: SELECT id,v FROM check_native_context ORDER BY id
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      v: 7
+- name: Historical false rows reject ADD without publishing a partial CHECK
+  scm: |-
+    (begin
+      (define native_check_add (lambda (name id source columns) (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (try (lambda () (begin
+        (createcheck (table "memcp-tests" false name false tx) id "tsql-check" source columns tx owner)
+        (tx_commit owner)))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))))
+      (define h (table "memcp-tests" false "check_native_bad" false nil))
+      (define rejected (try (lambda () (begin
+        (native_check_add "check_native_bad" "CK_native_bad" "v >= 0" '("v")) false))
+        (lambda (failure) (regexp_test (string failure) "CK_native_bad failed"))))
+      (and rejected (equal? (count (coalesceNil ((show h "constraints") "Checks") '())) 0)))
+  expect:
+    result: true
+- name: Existing UNKNOWN rows pass historical validation
+  scm: |-
+    (begin
+      (define native_check_add (lambda (name id source columns) (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (try (lambda () (begin
+        (createcheck (table "memcp-tests" false name false tx) id "tsql-check" source columns tx owner)
+        (tx_commit owner)))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))))
+      (native_check_add "check_native_unknown" "CK_native_unknown" "v > 0" '("v")))
+  expect:
+    result: true
+- name: A DML-capable compiler cannot acquire CHECK authority from replication_safe alone
+  scm: |-
+    (begin
+      (define called (newsession))
+      (registertriggerlanguage "check-no-predicate-role" (lambda (source context) (begin
+        (called "compiler" true) (lambda (OLD NEW session tx) true))) true)
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define rejected (try (lambda () (begin
+        (createcheck (table "memcp-tests" false "check_native_bad" false nil) "CK_native_role"
+          "check-no-predicate-role" "source" '("v") (owner "__memcp_tx") owner) false))
+        (lambda (failure) (regexp_test (string failure) "registered row-predicate source language"))))
+      (tx_rollback owner) (and rejected (nil? (called "compiler"))))
+  expect:
+    result: true
+- name: Non-Boolean predicate results are rejected as a native contract error
+  scm: |-
+    (begin
+      (registertriggerlanguage "check-invalid-result" (lambda (source context) (lambda (OLD NEW session tx) 1)) false true)
+      (define h (table "memcp-tests" false "check_native_bad" false nil))
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define rejected (try (lambda () (begin (createcheck h "CK_native_nonbool" "check-invalid-result" "data" '("v") (owner "__memcp_tx") owner) false))
+        (lambda (failure) (regexp_test (string failure) "predicate must return BOOL"))))
+      (tx_rollback owner)
+      (and rejected (equal? (count (coalesceNil ((show h "constraints") "Checks") '())) 0)))
+  expect:
+    result: true
+- name: Savepoint rewind restores both mixed FK and CHECK state snapshots atomically
+  scm: |-
+    (begin
+      (define h (table "memcp-tests" false "check_native_pending" false nil))
+      (define p (table "memcp-tests" false "check_native_parent" false nil))
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (createforeignkey h "FK_native_pending" '("parent_id") p '("id") "restrict" "restrict" tx)
+      (createcheck h "CK_native_pending" "tsql-check" "v >= 0" '("v") tx owner)
+      (define first (tx_savepoint tx))
+      (define original (show h "declarations" tx))
+      (constraint_state h true false false tx owner)
+      (define changed (show h "constraints" tx))
+      (define disabled (and (not ((car (changed "Checks")) "Enabled")) (not ((car (changed "ForeignKeys")) "Enabled"))))
+      (constraint_state h true true true tx owner)
+      (tx_rollback_to_savepoint tx first)
+      (define restored (identical? original (show h "declarations" tx)))
+      (tx_rollback owner)
+      (and disabled restored (equal? (count (coalesceNil ((show h "constraints") "Checks") '())) 0)))
+  expect:
+    result: true
+- name: ALL resolves committed plus pending targets before changing either kind
+  scm: |-
+    (begin
+      (define h (table "memcp-tests" false "check_native_values" false nil))
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (createcheck h "CK_native_additional" "tsql-check" "other_value >= 0" '("other_value") tx owner)
+      (define before (show h "declarations" tx))
+      (define rejected (try (lambda () (begin (constraint_state h true false false tx owner) false))
+        (lambda (failure) (regexp_test (string failure) "not an owned pending declaration"))))
+      (define unchanged (identical? before (show h "declarations" tx)))
+      (tx_rollback owner) (and rejected unchanged))
+  expect:
+    result: true
+- name: Pending CHECK payload and state history release their retained memory on rollback
+  scm: |-
+    (begin
+      (define h (table "memcp-tests" false "check_native_pending" false nil))
+      (define memory (lambda () ((show h "memory") "metadata_size_bytes")))
+      (define base (memory))
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (createcheck h "CK_native_memory" "tsql-check" "v >= 0" '("v") tx owner)
+      (define staged (memory)) (define first (tx_savepoint tx))
+      (constraint_state h true false false tx owner) (constraint_state h true true true tx owner)
+      (define grown (memory)) (tx_rollback_to_savepoint tx first)
+      (define restored (memory)) (tx_rollback owner)
+      (and (> staged base) (> grown staged) (equal? restored staged) (equal? (memory) base)))
+  expect:
+    result: true
+- name: A dependent input cannot change its native comparison contract
+  expect:
+    error: true
+    contains: required by check constraint CK_native_range
+  scm: (altercolumn (table "memcp-tests" false "check_native_values" false nil) "v" "type" "VARCHAR")
+- name: An unrelated column remains editable
+  sql: ALTER TABLE check_native_values ADD unrelated_value INT
+- name: The CHECK input cannot be dropped
+  sql: ALTER TABLE check_native_values DROP COLUMN v
+  expect:
+    error: true
+    contains: required by check constraint CK_native_range
+- name: Native SQL NULL constant is a valid UNKNOWN predicate with no dependency columns
+  scm: |-
+    (begin
+      (define native_check_add (lambda (name id source columns) (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (try (lambda () (begin
+        (createcheck (table "memcp-tests" false name false tx) id "tsql-check" source columns tx owner)
+        (tx_commit owner)))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))))
+      (native_check_add "check_native_null" "CK_native_null" "NULL" '()))
+  expect:
+    result: true
+- name: A zero-column UNKNOWN predicate passes a real row insertion
+  sql: INSERT INTO check_native_null VALUES(1)
+  expect:
+    affected_rows: 1
+- name: A native CHECK compiler and real row are published before restart
+  scm: |-
+    (begin
+      (registertriggerlanguage "check-fixture-predicate" (lambda (source context)
+        (lambda (OLD NEW session tx) (>= (NEW "v") 0))) false true)
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (createcheck (table "memcp-tests" false "check_native_missing" false nil) "CK_native_missing"
+        "check-fixture-predicate" "scalar" '("v") (owner "__memcp_tx") owner)
+      (tx_commit owner))
+  expect:
+    result: true
+- name: The actual fixture source compiler initially permits a valid SQL write
+  sql: INSERT INTO check_native_missing VALUES(1,2)
+  expect:
+    affected_rows: 1
+- name: Computed upgrade cannot replace a stored CHECK dependency
+  scm: (createcolumn (table "memcp-tests" false "check_native_values" false nil) "v" "INT" '() '() '("id") (lambda
+    (id) (+ id 1)))
+  expect:
+    error: true
+    contains: required by check constraint CK_native_range
+- name: CHECK input properties cannot silently alter the compiled SQL type
+  scm: (altercolumn (table "memcp-tests" false "check_native_values" false nil) "v" "properties" '("type_override"
+    "new"))
+  expect:
+    error: true
+    contains: check input declaration properties require joint replacement
+- name: An unrelated computed cache remains available on a CHECK table
+  scm: |-
+    (begin
+      (createcolumn (table "memcp-tests" false "check_native_values" false nil)
+        "check_native_derived" "INT" '() '() '("other_value")
+        (lambda (other_value) (+ other_value 1)))
+      true)
+  expect:
+    result: true
+- name: A real read prepares the derived cache without a base-row CHECK mutation
+  sql: SELECT id,check_native_derived FROM check_native_values WHERE id=1
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      check_native_derived: 11
+- name: Ordinary committed physical rebuild preserves the CHECK declaration identity
+  scm: |-
+    (begin
+      (define h (table "memcp-tests" false "check_native_values" false nil))
+      (rebuild h true false)
+      (and (identical? h (table "memcp-tests" false "check_native_values" false nil))
+        (equal? ((car ((show h "constraints") "Checks")) "Id") "CK_native_range")))
+  expect:
+    result: true
+- name: Restart through the existing real server lifecycle
+  sql: SHUTDOWN
+  expect:
+    rows: 0
+- name: The actual CHECK recipe remains listed after reload
+  sql: SELECT constraint_name,check_clause FROM information_schema.check_constraints WHERE constraint_name='CK_native_range'
+  expect:
+    rows: 1
+    data:
+    - constraint_name: CK_native_range
+      check_clause: v >= 0
+- name: Reloaded inert headers compile before allowing invalid INSERT
+  sql: INSERT INTO check_native_values(id,v,other_value) VALUES(9,-1,90)
+  expect:
+    error: true
+    contains: check constraint CK_native_range failed
+- name: Reloaded inert headers compile before allowing invalid UPDATE
+  sql: UPDATE check_native_values SET v=-1 WHERE id=1
+  expect:
+    error: true
+    contains: check constraint CK_native_range failed
+- name: Reload preserves exact rows and legitimate final values
+  sql: SELECT id,v FROM check_native_values ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - id: 1
+      v: 9
+    - id: 2
+      v: 5
+    - id: 3
+      v: null
+- name: A missing receiver compiler leaves durable rows readable
+  sql: SELECT id,v FROM check_native_missing
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      v: 2
+- name: Inert receiver headers reject writes before any unchecked row is published
+  sql: INSERT INTO check_native_missing VALUES(2,3)
+  expect:
+    error: true
+    contains: registered row-predicate source language
+- name: A receiver compilation failure preserves the exact original row set
+  sql: SELECT id,v FROM check_native_missing
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      v: 2
+- name: Committed CHECK permits normal replication mode activation after its pending lease retires
+  scm: (replication_start "listen" (lambda () true))
+  expect:
+    result: true
+- name: Mode activation rejects CHECK mutation before executing a valid candidate
+  sql: INSERT INTO check_native_values(id,v,other_value) VALUES(10,10,100)
+  expect:
+    error: true
+    contains: public foreign declaration requires distributed table admission
+- name: Mode activation cannot bypass the standalone CHECK admission boundary
+  sql: INSERT INTO check_native_values(id,v,other_value) VALUES(11,-1,110)
+  expect:
+    error: true
+    contains: public foreign declaration requires distributed table admission
+- name: Mode activation retains actual constraint metadata and rows
+  sql: SELECT COUNT(*) AS n FROM information_schema.check_constraints WHERE constraint_name='CK_native_range'
+  expect:
+    rows: 1
+    data:
+    - n: 1
+- name: The real restart retires the test-only replication listener
+  sql: SHUTDOWN
+  expect:
+    rows: 0
+- name: Rows and CHECK enforcement survive the activation checkpoint and restart
+  sql: SELECT id,v FROM check_native_values ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - id: 1
+      v: 9
+    - id: 2
+      v: 5
+    - id: 3
+      v: null
+- name: The INSERT SELECT source contains both actual candidate rows
+  sql: SELECT id,v FROM check_stream_source ORDER BY id
+  expect:
+    rows: 2
+    data: [{id: 50, v: 50}, {id: 51, v: -1}]
+- name: A later invalid INSERT SELECT candidate rewinds the whole earlier sink
+  sql: INSERT INTO check_stream_target(id,v) SELECT id,v FROM check_stream_source ORDER BY id
+  expect:
+    error: true
+    contains: check constraint CK_stream_range failed
+- name: Failed INSERT SELECT leaves the exact target empty
+  sql: SELECT id,v FROM check_stream_target ORDER BY id
+  expect: {rows: 0, data: []}
+- name: A filtered valid INSERT SELECT reports its real inserted count
+  sql: INSERT INTO check_stream_target(id,v) SELECT id,v FROM check_stream_source WHERE v>=0 ORDER BY id
+  expect: {affected_rows: 1}
+- name: Successful INSERT SELECT publishes exactly its valid source row
+  sql: SELECT id,v FROM check_stream_target ORDER BY id
+  expect:
+    rows: 1
+    data: [{id: 50, v: 50}]
+- name: Ordinary DELETE cleans up the streamed CHECK row
+  sql: DELETE FROM check_stream_target WHERE id=50
+  expect: {affected_rows: 1}
+- name: A generic native predicate cannot treat a NULL return as SQL UNKNOWN
+  scm: |-
+    (begin
+      (registertriggerlanguage "check-null-result" (lambda (source context)
+        (lambda (OLD NEW session tx) nil)) false true)
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define target (table "memcp-tests" false "check_native_bad" false nil))
+      (define rejected (try (lambda () (begin
+        (createcheck target "CK_native_null_result" "check-null-result" "scalar" '("v") (owner "__memcp_tx") owner)
+        false)) (lambda (failure) (regexp_test (string failure) "predicate must return BOOL"))))
+      (tx_rollback owner)
+      (and rejected (empty_list? (coalesceNil ((show target "constraints") "Checks") '()))))
+  expect: {result: true}
+- name: A failing checked statement removes all its inserted and updated versions but preserves earlier transaction work
+  scm: |-
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define h (table "memcp-tests" false "check_statement_versions" false nil))
+      (try (lambda () (begin
+        (with_autocommit owner nil 0 "earlier explicit work" (lambda (tx)
+          (with_table_mutation (list h) (list "insert" '()) tx owner (lambda (tx)
+            (insert h '("id" "v") (list (list 90 9)) '() nil false nil tx)))))
+        (define rejected (try (lambda () (begin
+          (with_autocommit owner nil 0 "checked version undo" (lambda (tx)
+            (with_table_mutation (list h) (list "insert" '()) tx owner (lambda (tx) (begin
+              (insert h '("id" "v") (list (list 2 1)) '() nil false nil tx)
+              (scan tx h '() '() '("id") (lambda (id) (equal? id 2)) '("$update")
+                (lambda (acc update) (begin (update (list "v" 2)) (+ acc 1))) 0 +)
+              (insert h '("id" "v") (list (list 3 -1)) '() nil false nil tx))))))
+          false)) (lambda (failure) (regexp_test (string failure) "check constraint CK_statement_versions failed"))))
+        (define tx (owner "__memcp_tx"))
+        (define count (scan tx h '() '() '() (lambda () true) '("id") (lambda (acc id) (+ acc 1)) 0 +))
+        (define total (scan tx h '() '() '() (lambda () true) '("id" "v") (lambda (acc id v) (+ acc (* id 100) v)) 0 +))
+        (define active (not (nil? (owner "transaction"))))
+        (tx_commit owner)
+        (and rejected active (equal? count 1) (equal? total 9009))))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect: {result: true}
+- name: COMMIT contains the earlier row and no resurrected statement version
+  sql: SELECT id,v FROM check_statement_versions ORDER BY id
+  expect:
+    rows: 1
+    data: [{id: 90, v: 9}]
+- name: Restart the committed cursor-stability statement outcome through real SQL shutdown
+  sql: SHUTDOWN
+  expect: {rows: 0}
+- name: SAFE replay retains neither of the rolled-back statement row versions
+  sql: SELECT id,v FROM check_statement_versions ORDER BY id
+  expect:
+    rows: 1
+    data: [{id: 90, v: 9}]
+
+- name: ACID checked failure restores previously staged UPDATE and DELETE versions
+  scm: |-
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define h (table "memcp-tests" false "check_acid_versions" false nil))
+      (try (lambda () (begin
+        (with_autocommit owner nil 0 "prior ACID inserts" (lambda (tx)
+          (with_table_mutation (list h) (list "insert" '()) tx owner (lambda (tx)
+            (insert h '("id" "v") (list (list 1 10) (list 2 20)) '() nil false nil tx)))))
+        (with_autocommit owner nil 0 "prior ACID update" (lambda (tx)
+          (with_table_mutation (list h) (list "update" '("v")) tx owner (lambda (tx)
+            (scan tx h '() '() '("id") (lambda (id) (equal? id 0)) '("$update")
+              (lambda (acc update) (begin (update (list "v" 6)) (+ acc 1))) 0 +)))))
+        (define rejected (try (lambda () (begin
+          (with_autocommit owner nil 0 "failed ACID statement" (lambda (tx)
+            (try (lambda ()
+              (with_table_mutation (list h) (list "insert" '()) tx owner (lambda (tx) (begin
+              (scan tx h '() '() '() (lambda () true) '("v" "$update")
+                (lambda (acc v update) (begin (update (list "v" (+ v 1))) (+ acc 1))) 0 +)
+              (scan tx h '() '() '("id") (lambda (id) (equal? id 1)) '("$update")
+                (lambda (acc update) (begin (update) (+ acc 1))) 0 +)
+              (insert h '("id" "v") (list (list 3 -1)) '() nil false nil tx))))) (lambda (failure) (error failure)))))
+          false)) (lambda (failure) (strlike (string failure) "%check constraint CK_acid_versions failed%"))))
+        (define tx (owner "__memcp_tx"))
+        (define count_rows (lambda (reader)
+          (scan reader h '() '() '() (lambda () true) '("id") (lambda (acc id) (+ acc 1)) 0 +)))
+        (define total_rows (lambda (reader)
+          (scan reader h '() '() '() (lambda () true) '("id" "v")
+            (lambda (acc id v) (+ acc (* id 100) v)) 0 +)))
+        (define restored (and rejected (equal? (owner "transaction") true)
+          (equal? (count_rows tx) 3) (equal? (total_rows tx) 336)
+          (equal? (count_rows nil) 1) (equal? (total_rows nil) 5)))
+        (tx_commit owner) restored))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect: {result: true}
+- name: ACID statement COMMIT publishes exactly the preserved pre-statement versions
+  sql: SELECT id,v FROM check_acid_versions ORDER BY id
+  expect:
+    rows: 3
+    data: [{id: 0, v: 6}, {id: 1, v: 10}, {id: 2, v: 20}]
+- name: ACID nested savepoints restore staged versions repeatedly and retain earlier work
+  scm: |-
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (define h (table "memcp-tests" false "check_acid_versions" false nil))
+      (try (lambda () (begin
+        (with_table_mutation (list h) (list "insert" '()) tx owner (lambda (tx)
+          (insert h '("id" "v") (list (list 4 40)) '() nil false nil tx)))
+        (define outer (tx_savepoint tx))
+        (with_table_mutation (list h) (list "update" '("v")) tx owner (lambda (tx)
+          (scan tx h '() '() '("id") (lambda (id) (equal? id 4)) '("$update")
+            (lambda (acc update) (begin (update (list "v" 41)) (+ acc 1))) 0 +)))
+        (define inner (tx_savepoint tx))
+        (with_table_mutation (list h) (list "delete" '()) tx owner (lambda (tx)
+          (scan tx h '() '() '("id") (lambda (id) (equal? id 4)) '("$update")
+            (lambda (acc update) (begin (update) (+ acc 1))) 0 +)))
+        (tx_rollback_to_savepoint tx inner)
+        (define restored_inner (scan tx h '() '() '("id") (lambda (id) (equal? id 4)) '("v") + 0 +))
+        (tx_rollback_to_savepoint tx inner)
+        (tx_rollback_to_savepoint tx outer)
+        (define restored_outer (scan tx h '() '() '("id") (lambda (id) (equal? id 4)) '("v") + 0 +))
+        (tx_commit owner)
+        (and (equal? restored_inner 41) (equal? restored_outer 40))))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect: {result: true}
+- name: A terminal statement completion uses the existing whole ACID transaction rollback
+  scm: |-
+    (begin
+      (registertriggerlanguage "acid-statement-abort"
+        (lambda (source context) (lambda (OLD NEW session tx) (request_transaction_abort tx))) false false true)
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define h (table "memcp-tests" false "check_acid_versions" false nil))
+      (createstatementtrigger h "acid_statement_abort" "after_statement" "acid-statement-abort" "abort"
+        '("delete") false false (owner "__memcp_tx"))
+      (tx_commit owner)
+      (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (with_table_mutation (list h) (list "insert" '()) tx owner (lambda (tx)
+        (insert h '("id" "v") (list (list 9 90)) '() nil false nil tx)))
+      (define transferred (try (lambda () (begin
+        (with_table_mutation (list h) (list "delete" '()) tx owner (lambda (tx)
+          (scan tx h '() '() '("id") (lambda (id) (equal? id 1)) '("$update")
+            (lambda (acc update) (begin (update) (+ acc 1))) 0 +)))
+        false)) (lambda (failure) (transaction_abort_transfer? failure))))
+      (and transferred (nil? (owner "transaction"))))
+  expect: {result: true}
+- name: ACID terminal rollback preserves committed rows and removes earlier pending inserts
+  sql: SELECT id,v FROM check_acid_versions ORDER BY id
+  expect:
+    rows: 4
+    data: [{id: 0, v: 6}, {id: 1, v: 10}, {id: 2, v: 20}, {id: 4, v: 40}]
+- name: Restart the checked ACID decision through ordinary server shutdown
+  sql: SHUTDOWN
+  expect: {rows: 0}
+- name: SAFE replay preserves the exact ACID savepoint and terminal rollback outcomes
+  sql: SELECT id,v FROM check_acid_versions ORDER BY id
+  expect:
+    rows: 4
+    data: [{id: 0, v: 6}, {id: 1, v: 10}, {id: 2, v: 20}, {id: 4, v: 40}]

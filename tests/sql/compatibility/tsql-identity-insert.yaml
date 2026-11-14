@@ -100,7 +100,7 @@ test_cases:
       (list (failure "DECLARE @bad NVARCHAR(10)=N'bad'; INSERT identity_mode_a(value) VALUES(CAST(@bad AS INT))")
         (failure "INSERT identity_mode_a DEFAULT VALUES")
         ((run "SELECT COUNT(*) AS n FROM identity_mode_a") "n")
-        (reserve_ids (table "memcp-tests" false "identity_mode_a" false) 1))
+        (reserve_ids (table "memcp-tests" false "identity_mode_a" false nil) 1))
     )
   expect:
     result:
@@ -137,7 +137,7 @@ test_cases:
       (list (failure "INSERT identity_mode_a(value) SELECT value FROM identity_mode_plain")
         (failure "INSERT TOP(0) identity_mode_a(value) VALUES(3)")
         (failure "INSERT TOP(0) identity_mode_a DEFAULT VALUES")
-        (reserve_ids (table "memcp-tests" false "identity_mode_a" false) 1))
+        (reserve_ids (table "memcp-tests" false "identity_mode_a" false nil) 1))
     )
   expect:
     result:
@@ -172,7 +172,7 @@ test_cases:
           _ (error "unexpected failure" cause))))))
       (list (failure "INSERT identity_mode_a(id,value) SELECT value,value FROM identity_mode_plain")
         (failure "INSERT TOP(0) identity_mode_a(id,value) VALUES(40,3)")
-        (reserve_ids (table "memcp-tests" false "identity_mode_a" false) 1))
+        (reserve_ids (table "memcp-tests" false "identity_mode_a" false nil) 1))
     )
   expect:
     result:
@@ -732,7 +732,7 @@ test_cases:
         (run "INSERT identity_mode_a(id,value) VALUES(18,3),(NULL,4)") false))
         (lambda (cause) (strlike (string cause) "%IDENTITY cannot be assigned NULL%"))))
       (list rejected ((run "SELECT COUNT(*) AS n FROM identity_mode_a") "n")
-        (reserve_ids (table "memcp-tests" false "identity_mode_a" false) 1))
+        (reserve_ids (table "memcp-tests" false "identity_mode_a" false nil) 1))
     )
   expect:
     result:
@@ -769,7 +769,7 @@ test_cases:
         (run "INSERT identity_mode_a(id,value) VALUES(DEFAULT,3)") false))
         (lambda (_cause) true)))
       (list rejected ((run "SELECT COUNT(*) AS n FROM identity_mode_a") "n")
-        (reserve_ids (table "memcp-tests" false "identity_mode_a" false) 1))
+        (reserve_ids (table "memcp-tests" false "identity_mode_a" false nil) 1))
     )
   expect:
     result:
@@ -1100,7 +1100,7 @@ test_cases:
       (run "CREATE TABLE identity_mode_a(id TINYINT IDENTITY(255,1),value INT)")
       (run "SET IDENTITY_INSERT identity_mode_a ON")
       (list (failure text) ((run "SELECT COUNT(*) AS n FROM identity_mode_a") "n")
-        (reserve_ids (table "memcp-tests" false "identity_mode_a" false) 1))
+        (reserve_ids (table "memcp-tests" false "identity_mode_a" false nil) 1))
     )
   expect:
     result:

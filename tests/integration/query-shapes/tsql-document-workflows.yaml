@@ -1067,12 +1067,15 @@ test_cases:
     - id: 10
       line: 1004
       label: Beta
+# Historical identity retained: the operand is now represented logically.
+# The original SQL bag is unchanged; ORDER BY only makes its visible ids deterministic.
 - name: A right nested outer join boundary is rejected until represented logically
   sql: |
     SELECT d.id FROM day_docs d JOIN day_lines l LEFT JOIN day_items i ON l.tenant=i.tenant AND l.article=i.article ON d.tenant=l.tenant AND d.id=l.doc_id ORDER BY d.id
-  # Valid SQL implementation gap: check behavior, warn until implemented.
-  expect: {"rows": 12, "data": [{"id": 10}, {"id": 10}, {"id": 10}, {"id": 10}, {"id": 10}, {"id": 10}, {"id": 11}, {"id": 11}, {"id": 12}, {"id": 14}, {"id": 15}, {"id": 16}]}
-  noncritical: true
+  expect:
+    rows: 12
+    data: [{id: 10}, {id: 10}, {id: 10}, {id: 10}, {id: 10}, {id: 10},
+      {id: 11}, {id: 11}, {id: 12}, {id: 14}, {id: 15}, {id: 16}]
 - name: A bound zero TOP suppresses a source free projection
   sql: DECLARE @cap INT=0; SELECT TOP (@cap) 42 AS value
   expect:

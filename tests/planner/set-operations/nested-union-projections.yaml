@@ -1,0 +1,133 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  description: Nested unbounded projection and filter wrappers preserve native UNION ALL bags
+setup:
+- sql: CREATE TABLE nested_union_left(value INT)
+- sql: CREATE TABLE nested_union_right(value INT)
+- sql: INSERT INTO nested_union_left VALUES(1),(1),(NULL)
+- sql: INSERT INTO nested_union_right VALUES(1),(2)
+cleanup:
+- sql: DROP TABLE IF EXISTS nested_union_left
+- sql: DROP TABLE IF EXISTS nested_union_right
+test_cases:
+- name: Nested UNION projections preserve duplicate native rows
+  sql: SELECT n FROM (SELECT n FROM (SELECT value AS n FROM nested_union_left UNION ALL SELECT value AS n FROM nested_union_right) AS bag) AS projected WHERE n=1 ORDER BY n
+  expect: {data: [{n: 1},{n: 1},{n: 1}]}
+- name: Nested UNION projections resolve expressions before applying parent filters
+  sql: SELECT n FROM (SELECT n+1 AS n FROM (SELECT value AS n FROM nested_union_left UNION ALL SELECT value AS n FROM nested_union_right) AS bag) AS projected WHERE n>=2 ORDER BY n
+  expect: {data: [{n: 2},{n: 2},{n: 2},{n: 3}]}
+- name: Nested UNION projections preserve NULL values and the outer window
+  sql: SELECT n FROM (SELECT n FROM (SELECT value AS n FROM nested_union_left UNION ALL SELECT value AS n FROM nested_union_right) AS bag) AS projected ORDER BY n LIMIT 2
+  expect: {data: [{n: null},{n: 1}]}
+- name: A scalar aggregate counts the complete projected UNION bag
+  sql: SELECT COUNT(*) AS total FROM (SELECT n FROM (SELECT value AS n FROM nested_union_left UNION ALL SELECT value AS n FROM nested_union_right) AS bag) AS projected WHERE n=1
+  expect: {data: [{total: 3}]}
+- name: Grouping the projected UNION retains NULL and duplicate multiplicity
+  sql: SELECT n,COUNT(*) AS total FROM (SELECT n FROM (SELECT value AS n FROM nested_union_left UNION ALL SELECT value AS n FROM nested_union_right) AS bag) AS projected GROUP BY n ORDER BY n
+  expect: {data: [{n: null,total: 1},{n: 1,total: 3},{n: 2,total: 1}]}
+- name: A bounded nested UNION remains an explicit relation-unit gap
+  sql: SELECT n FROM (SELECT n FROM (SELECT value AS n FROM nested_union_left UNION ALL SELECT value AS n FROM nested_union_right ORDER BY n DESC LIMIT 2) AS bag) AS projected WHERE n=1
+  expect: {error: true}
+- name: An inner join distributes its ON condition over a native UNION ALL
+  sql: SELECT d.value AS lhs,u.n AS rhs FROM nested_union_right d JOIN (SELECT value AS n FROM nested_union_left UNION ALL SELECT value AS n FROM nested_union_right) u ON d.value=u.n ORDER BY lhs,rhs
+  expect: {data: [{lhs: 1,rhs: 1},{lhs: 1,rhs: 1},{lhs: 1,rhs: 1},{lhs: 2,rhs: 2}]}
+- name: Distribution preserves duplicate driver rows and rejects NULL equality
+  sql: SELECT d.value AS lhs,u.n AS rhs FROM nested_union_left d JOIN (SELECT value AS n FROM nested_union_left UNION ALL SELECT value AS n FROM nested_union_right) u ON d.value=u.n ORDER BY lhs,rhs
+  expect: {data: [{lhs: 1,rhs: 1},{lhs: 1,rhs: 1},{lhs: 1,rhs: 1},{lhs: 1,rhs: 1},{lhs: 1,rhs: 1},{lhs: 1,rhs: 1}]}
+- name: An additional ON predicate remains attached to every union branch
+  sql: SELECT d.value AS lhs,u.n AS rhs FROM nested_union_right d JOIN (SELECT value AS n FROM nested_union_left UNION ALL SELECT value AS n FROM nested_union_right) u ON d.value=u.n AND u.n>1
+  expect: {data: [{lhs: 2,rhs: 2}]}
+- name: Both inputs may be native union bags without losing multiplicity
+  sql: SELECT a.n,b.n AS m FROM (SELECT value AS n FROM nested_union_left UNION ALL SELECT value AS n FROM nested_union_right) a JOIN (SELECT value AS n FROM nested_union_left UNION ALL SELECT value AS n FROM nested_union_right) b ON a.n=b.n WHERE a.n=2
+  expect: {data: [{n: 2,m: 2}]}
+- name: A nullable UNION input retains its unsupported outer join boundary
+  sql: SELECT d.value,u.n FROM nested_union_right d LEFT JOIN (SELECT value AS n FROM nested_union_left UNION ALL SELECT value AS n FROM nested_union_right) u ON d.value=u.n
+  expect: {error: true}
+- name: An inner DISTINCT union requires a relation unit before distribution
+  sql: SELECT d.value,u.n FROM nested_union_left d JOIN (SELECT value AS n FROM nested_union_left UNION SELECT value AS n FROM nested_union_right) u ON d.value=u.n
+  expect: {error: true}
+- name: The enclosing join sorts the complete UNION bag before applying its limit
+  sql: SELECT d.value AS lhs,u.n AS rhs FROM nested_union_right d JOIN (SELECT value AS n FROM nested_union_right WHERE value=2 UNION ALL SELECT value AS n FROM nested_union_left WHERE value=1) u ON d.value=u.n ORDER BY lhs,rhs LIMIT 1
+  expect: {data: [{lhs: 1,rhs: 1}]}
+- name: The enclosing join offset applies once across all UNION branches
+  sql: SELECT d.value AS lhs,u.n AS rhs FROM nested_union_right d JOIN (SELECT value AS n FROM nested_union_right WHERE value=2 UNION ALL SELECT value AS n FROM nested_union_left WHERE value=1) u ON d.value=u.n ORDER BY lhs,rhs LIMIT 1 OFFSET 2
+  expect: {data: [{lhs: 2,rhs: 2}]}
+- name: An enclosing zero limit emits no row from any UNION branch
+  sql: SELECT d.value AS lhs,u.n AS rhs FROM nested_union_right d JOIN (SELECT value AS n FROM nested_union_right WHERE value=2 UNION ALL SELECT value AS n FROM nested_union_left WHERE value=1) u ON d.value=u.n LIMIT 0
+  expect: {rows: 0}
+- name: A bounded inner UNION retains its explicit relation unit barrier
+  sql: SELECT d.value AS lhs,u.n AS rhs FROM nested_union_right d JOIN (SELECT value AS n FROM nested_union_right UNION ALL SELECT value AS n FROM nested_union_left LIMIT 1) u ON d.value=u.n
+  expect: {error: true}
+- name: A constant union discriminator removes an unreachable native scan
+  sql: EXPLAIN SELECT v FROM (SELECT value AS v,'kept' AS kind FROM nested_union_left UNION ALL SELECT value AS v,'removed' AS kind FROM nested_union_right) bag WHERE kind='kept'
+  expect: {not_contains: [nested_union_right]}
+- name: Constant discriminator filtering preserves the selected duplicate and NULL rows
+  sql: SELECT v FROM (SELECT value AS v,'kept' AS kind FROM nested_union_left UNION ALL SELECT value AS v,'removed' AS kind FROM nested_union_right) bag WHERE kind='kept' ORDER BY v
+  expect: {data: [{v: null},{v: 1},{v: 1}]}
+- name: A scalar aggregate keeps its empty input result
+  sql: SELECT COUNT(*) AS total FROM nested_union_left WHERE 1=0
+  expect: {data: [{total: 0}]}
+- name: Empty result lowering still validates the requested column
+  sql: SELECT missing_column FROM nested_union_left WHERE 1=0
+  expect: {error: true}
+- name: An unprojected source order cannot be mistaken for a same named UNION output
+  sql: SELECT -d.value AS value FROM nested_union_right d JOIN (SELECT value AS n FROM nested_union_left UNION ALL SELECT value AS n FROM nested_union_right) u ON d.value=u.n ORDER BY d.value LIMIT 1
+  expect: {rows: 1,data: [{value: -1}],contains: "-1"}
+- name: A pure conditional discriminator excludes an unreachable native scan
+  sql: EXPLAIN SELECT value FROM nested_union_left WHERE (CASE WHEN value IS NULL THEN 'alpha' ELSE 'beta' END)='gamma'
+  expect: {not_contains: [nested_union_left]}
+- name: Conditional discriminator folding retains arms with different comparison results
+  sql: SELECT value FROM nested_union_left WHERE (CASE WHEN value IS NULL THEN 'alpha' ELSE 'beta' END)='alpha'
+  expect: {data: [{value: null}]}
+- name: Distributed UNION join ordering retains valid output ordinals
+  sql: SELECT d.value AS lhs,u.n AS rhs FROM nested_union_right d JOIN (SELECT value AS n FROM nested_union_left UNION ALL SELECT value AS n FROM nested_union_right) u ON d.value=u.n ORDER BY 2 DESC,1 LIMIT 1
+  expect: {data: [{lhs: 2,rhs: 2}]}
+- name: Distributed UNION join ordering rejects an ordinal outside its output
+  sql: SELECT d.value AS lhs,u.n AS rhs FROM nested_union_right d JOIN (SELECT value AS n FROM nested_union_left UNION ALL SELECT value AS n FROM nested_union_right) u ON d.value=u.n ORDER BY 3 LIMIT 1
+  expect: {error: true}
+- name: An invalid ordinal cannot fall back to an equal projected numeric literal
+  sql: SELECT 3 AS n FROM nested_union_right d JOIN (SELECT value AS n FROM nested_union_left UNION ALL SELECT value AS n FROM nested_union_right) u ON d.value=u.n ORDER BY 3 LIMIT 1
+  expect: {error: true,contains: position is outside}
+- name: Zero cannot become an ordinal by matching a projected zero literal
+  sql: SELECT 0 AS n FROM nested_union_right d JOIN (SELECT value AS n FROM nested_union_left UNION ALL SELECT value AS n FROM nested_union_right) u ON d.value=u.n ORDER BY 0 LIMIT 1
+  expect: {error: true,contains: position is outside}
+- name: A projected numeric literal retains its valid first output ordinal
+  sql: SELECT 3 AS n FROM nested_union_right d JOIN (SELECT value AS n FROM nested_union_left UNION ALL SELECT value AS n FROM nested_union_right) u ON d.value=u.n ORDER BY 1 LIMIT 1
+  expect: {data: [{n: 3}]}
+- name: An eliminated native SELECT returns an empty result without a mutation count
+  sql: SELECT value FROM nested_union_left WHERE FALSE
+  expect: {rows: 0, data: []}
+- name: An eliminated scalar SELECT retains the empty result contract
+  sql: SELECT 1 AS n WHERE FALSE
+  expect: {rows: 0, data: []}
+- name: A final empty UNION branch cannot append a mutation count to a NULL row
+  sql: SELECT NULL AS n UNION ALL SELECT 2 AS n WHERE FALSE
+  expect: {rows: 1, data: [{n: null}]}
+- name: An initial empty UNION branch cannot append a mutation count to a NULL row
+  sql: SELECT 2 AS n WHERE FALSE UNION ALL SELECT NULL AS n
+  expect: {rows: 1, data: [{n: null}]}
+- name: An INSERT SELECT owns a zero affected count for an eliminated native input
+  setup:
+  - sql: CREATE TABLE empty_select_sink(n INT)
+  sql: INSERT INTO empty_select_sink SELECT value FROM nested_union_left WHERE FALSE
+  expect: {rows: 1, data: [{affected_rows: 0}]}
+  cleanup:
+  - sql: DROP TABLE empty_select_sink
+- name: An INSERT SELECT owns a zero affected count for an eliminated scalar input
+  setup:
+  - sql: CREATE TABLE empty_scalar_sink(n INT)
+  sql: INSERT INTO empty_scalar_sink SELECT 1 AS n WHERE FALSE
+  expect: {rows: 1, data: [{affected_rows: 0}]}
+  cleanup:
+  - sql: DROP TABLE empty_scalar_sink
+- name: Empty INSERT SELECT inputs leave the actual native target unchanged
+  setup:
+  - sql: CREATE TABLE empty_insert_sink(n INT)
+  - sql: INSERT INTO empty_insert_sink SELECT value FROM nested_union_left WHERE FALSE
+  - sql: INSERT INTO empty_insert_sink SELECT 1 AS n WHERE FALSE
+  sql: SELECT COUNT(*) AS n FROM empty_insert_sink
+  expect: {rows: 1, data: [{n: 0}]}
+  cleanup:
+  - sql: DROP TABLE empty_insert_sink

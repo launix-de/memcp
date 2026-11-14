@@ -429,14 +429,20 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 		}),
 	}
 	if sid := req.Header.Get("X-Session-Id"); sid != "" {
-		// Persistent HTTP session: reuse or create a long-lived SessionState.
-		if v, ok := httpStates.Load(sid); ok {
+		// A client-selected identifier alone is not session authority. Separate
+		// credential scopes before request admission; the authenticated frontend
+		// also binds its stable principal incarnation before accessing state.
+		key := httpCredentialSessionKey(sid, user, pass, req.Header.Get("Authorization"))
+		if v, ok := httpStates.Load(key); ok {
 			ss = v.(*SessionState)
 		} else {
-			ss = RegisterSession(user, req.RemoteAddr, "")
-			httpStates.Store(sid, ss)
-			if httpSessionAddHook != nil {
-				httpSessionAddHook(sid, ss)
+			candidate := RegisterSession(user, req.RemoteAddr, "")
+			actual, loaded := httpStates.LoadOrStore(key, candidate)
+			ss = actual.(*SessionState)
+			if loaded {
+				UnregisterSession(candidate.ID)
+			} else if httpSessionAddHook != nil {
+				httpSessionAddHook(key, ss)
 			}
 		}
 	} else {

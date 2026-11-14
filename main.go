@@ -1063,9 +1063,15 @@ func setupIO(wd string) {
 		},
 	})
 	scm.Declare(&IOEnv, &scm.Declaration{
+		Name: "tds_diagnostic_error", Fn: scm.TDSDiagnosticError,
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "Constructs an opaque error from explicit transport diagnostic fields; error throws it without changing native identity",
+			Params: []*scm.TypeDescriptor{{Kind: "list", Label: "message", Description: "Explicit number/state/severity/text/server/procedure/line fields"}},
+			Return: &scm.TypeDescriptor{Kind: "any"}},
+	})
+	scm.Declare(&IOEnv, &scm.Declaration{
 		Name: "tds", Fn: scm.TDSServe,
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "Starts a TDS listener with frontend callbacks", HasSideEffects: true,
-			Params: []*scm.TypeDescriptor{{Kind: "number|string", Label: "port"}, {Kind: "func", Label: "handler"}, {Kind: "string", Label: "database"}},
+			Params: []*scm.TypeDescriptor{{Kind: "number|string", Label: "port"}, {Kind: "func", Label: "handler"}, {Kind: "string", Label: "database"}, {Kind: "string", Label: "collation", Description: "Five-byte protocol collation selected by the frontend"}},
 			Return: &scm.TypeDescriptor{Kind: "bool"}},
 	})
 	scm.Declare(&IOEnv, &scm.Declaration{
@@ -1293,6 +1299,68 @@ func expandRootPasswordFileArgs(args []string) ([]string, error) {
 	return result, nil
 }
 
+// Publish owner-only snapshots without exposing partially written profiles.
+func writeProfileSnapshot(filename string, write func(io.Writer) error) error {
+	file, err := os.CreateTemp(filepath.Dir(filename), ".memcp-profile-")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(file.Name())
+	if err := write(file); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	return os.Rename(file.Name(), filename)
+}
+
+func startHeapProfiler(filename string) func() {
+	if filename == "" {
+		return func() {}
+	}
+	write := func() {
+		// Preserve the running load: neither snapshot forces a collection.
+		if err := writeProfileSnapshot(filename, pprof.WriteHeapProfile); err != nil {
+			fmt.Fprintf(os.Stderr, "heap profile: %v\n", err)
+		}
+		goroutines := pprof.Lookup("goroutine")
+		if goroutines == nil {
+			fmt.Fprintln(os.Stderr, "goroutine profile: unavailable")
+			return
+		}
+		if err := writeProfileSnapshot(filename+".goroutines.txt", func(writer io.Writer) error {
+			return goroutines.WriteTo(writer, 2)
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "goroutine profile: %v\n", err)
+		}
+	}
+	requests := make(chan os.Signal, 1)
+	signal.Notify(requests, syscall.SIGUSR1)
+	stop, done := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-requests:
+				write()
+			case <-stop:
+				return
+			}
+		}
+	}()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			signal.Stop(requests)
+			close(stop)
+			<-done
+			write()
+		})
+	}
+}
+
 func main() {
 	scm.SettingsTrackSourceCoverage = os.Getenv("MEMCP_SCM_COVERAGE") == "1"
 	fmt.Print(`memcp Copyright (C) 2023 - 2026   Carl-Philip Hänsch
@@ -1353,7 +1421,9 @@ func main() {
 	flag.Float64Var(&clusterLatencyMS, "cluster-latency-ms", 0, "One-way /cluster message dispatch latency in milliseconds; 0 disables")
 
 	profile := ""
-	flag.StringVar(&profile, "profile", "", "Data folder for persistence")
+	flag.StringVar(&profile, "profile", "", "Write CPU profile to this file")
+	heapProfile := ""
+	flag.StringVar(&heapProfile, "heap-profile", "", "Write heap/allocation profile and <path>.goroutines.txt on SIGUSR1 and shutdown (owner-only files, no forced GC)")
 
 	wd, _ := os.Getwd() // libraries are relative to working directory... or change with -wd PATH
 	flag.StringVar(&wd, "wd", wd, "Working Directory for (import) and (load) (Default: .)")
@@ -1412,7 +1482,7 @@ func main() {
 				knownArgs = append(knownArgs, os.Args[i+2])
 				skipNext = true
 			}
-		} else if arg == "-c" || arg == "-data" || arg == "-profile" || arg == "-wd" || arg == "-write-docu" {
+		} else if arg == "-c" || arg == "-data" || arg == "-profile" || arg == "-heap-profile" || arg == "-wd" || arg == "-write-docu" {
 			knownArgs = append(knownArgs, arg)
 			if i+1 < len(os.Args[1:]) {
 				knownArgs = append(knownArgs, os.Args[i+2])
@@ -1465,6 +1535,10 @@ func main() {
 		scm.WriteDocumentation(writeDocu)
 		os.Exit(0)
 	}
+	// Imports start network listeners. Install the opt-in signal handler before
+	// any listener can report readiness to a profiling client.
+	stopHeapProfiler := startHeapProfiler(heapProfile)
+	defer stopHeapProfiler()
 	scm.CalibrateJITCosts()
 
 	if err := storage.PrepareNodeCluster(fullArgs); err != nil {
@@ -1538,12 +1612,14 @@ func main() {
 	if !initialize {
 		if err := startPHP(os.Args[1:]); err != nil {
 			fmt.Fprintln(os.Stderr, "PHP:", err)
+			stopHeapProfiler()
 			exitroutine()
 			os.Exit(1)
 		}
 	}
 	if initialize {
 		fmt.Println(storage.Clean())
+		stopHeapProfiler()
 		exitroutine()
 		return
 	}
@@ -1558,6 +1634,7 @@ func main() {
 	signal.Notify(cancelChan, syscall.SIGTERM, syscall.SIGINT)
 	go (func() {
 		<-cancelChan
+		stopHeapProfiler()
 		exitroutine()
 		pprof.StopCPUProfile() // flush profile before exit (os.Exit skips defers)
 		os.Exit(1)
@@ -1605,6 +1682,7 @@ func main() {
 	}
 
 	// flush CPU profile before shutdown (exitroutine may block, and os.Exit skips defers)
+	stopHeapProfiler()
 	pprof.StopCPUProfile()
 	// normal shutdown
 	exitroutine()

@@ -1,0 +1,183 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Batch table variables retain lexical scope and independent transactional data
+
+setup:
+- sql: CREATE TABLE variable_inputs(id INT PRIMARY KEY, label VARCHAR(8))
+- sql: INSERT variable_inputs VALUES(3,'third')
+- sql: CREATE TABLE variable_calls(kind VARCHAR(8), total INT)
+
+test_cases:
+- name: VALUES and SELECT populate one typed batch-local table
+  tds:
+    statements:
+    - sql: |
+        DECLARE @rows TABLE(id INT NOT NULL,label VARCHAR(8) NULL);
+        INSERT INTO @rows(id,label) VALUES(1,'first'),(2,NULL);
+        INSERT INTO @rows(id,label) SELECT id,label FROM variable_inputs;
+        SELECT id,label FROM @rows ORDER BY id;
+      expect: {rows: 3, data: [{id: 1, label: first}, {id: 2, label: null}, {id: 3, label: third}]}
+- name: COMMIT leaves the lexical variable available to subsequent statements
+  tds:
+    statements:
+    - sql: |
+        DECLARE @rows TABLE(id INT);
+        BEGIN TRANSACTION;
+        INSERT INTO @rows VALUES(1);
+        COMMIT TRANSACTION;
+        INSERT INTO @rows VALUES(2);
+        SELECT id FROM @rows ORDER BY id;
+      expect: {rows: 2, data: [{id: 1}, {id: 2}]}
+- name: A streaming private INSERT retains all rows across the caller rollback
+  tds:
+    statements:
+    - sql: |
+        DECLARE @rows TABLE(id INT NOT NULL PRIMARY KEY);
+        BEGIN TRANSACTION;
+        INSERT INTO @rows(id)
+          SELECT 100*a.n+10*b.n+c.n
+          FROM (VALUES(0),(1),(2),(3),(4),(5),(6),(7),(8),(9)) AS a(n)
+          CROSS JOIN (VALUES(0),(1),(2),(3),(4),(5),(6),(7),(8),(9)) AS b(n)
+          CROSS JOIN (VALUES(0),(1),(2),(3),(4),(5),(6),(7),(8),(9)) AS c(n);
+        ROLLBACK TRANSACTION;
+        SELECT COUNT(*) AS total,SUM(id) AS checksum,MIN(id) AS first_id,MAX(id) AS last_id FROM @rows;
+      expect: {rows: 1, data: [{total: 1000, checksum: 499500, first_id: 0, last_id: 999}]}
+- name: Private inserts read the caller transaction and survive its rollback
+  tds:
+    statements:
+    - sql: |
+        DECLARE @rows TABLE(id INT);
+        BEGIN TRANSACTION;
+        INSERT variable_inputs VALUES(99,'pending');
+        INSERT INTO @rows SELECT id FROM variable_inputs WHERE id=99;
+        ROLLBACK TRANSACTION;
+        SELECT id,(SELECT COUNT(*) FROM variable_inputs WHERE id=99) AS public_count FROM @rows;
+      expect: {rows: 1, data: [{id: 99, public_count: 0}]}
+- name: Rollback preserves a variable declared inside the transaction
+  tds:
+    statements:
+    - sql: |
+        BEGIN TRANSACTION;
+        DECLARE @rows TABLE(id INT);
+        INSERT INTO @rows VALUES(7);
+        ROLLBACK TRANSACTION;
+        SELECT id FROM @rows;
+      expect: {rows: 1, data: [{id: 7}]}
+- name: Nested procedure declarations are independent from their caller and earlier invocations
+  tds:
+    statements:
+    - sql: |
+        CREATE PROCEDURE dbo.variable_inner AS BEGIN
+          DECLARE @rows TABLE(id INT);
+          INSERT INTO @rows VALUES(2);
+          INSERT variable_calls(kind,total) SELECT 'inner',SUM(id) FROM @rows;
+        END
+    - sql: |
+        DECLARE @rows TABLE(id INT);
+        INSERT INTO @rows VALUES(1);
+        EXEC dbo.variable_inner;
+        EXEC dbo.variable_inner;
+        SELECT (SELECT SUM(id) FROM @rows) AS outer_total,
+               (SELECT COUNT(*) FROM variable_calls WHERE kind='inner') AS calls,
+               (SELECT SUM(total) FROM variable_calls WHERE kind='inner') AS inner_total;
+      expect: {rows: 1, data: [{outer_total: 1, calls: 2, inner_total: 4}]}
+- name: Dynamic execution owns its declaration without replacing the caller variable
+  tds:
+    statements:
+    - sql: |
+        DECLARE @rows TABLE(id INT);
+        INSERT INTO @rows VALUES(1);
+        EXEC(N'DECLARE @rows TABLE(id INT); INSERT INTO @rows VALUES(5); INSERT variable_calls(kind,total) SELECT ''dynamic'',SUM(id) FROM @rows;');
+        SELECT (SELECT SUM(id) FROM @rows) AS outer_total,
+               (SELECT SUM(total) FROM variable_calls WHERE kind='dynamic') AS dynamic_total;
+      expect: {rows: 1, data: [{outer_total: 1, dynamic_total: 5}]}
+- name: Error cleanup leaves later procedure invocations usable with fresh local rows
+  tds:
+    statements:
+    - sql: |
+        CREATE PROCEDURE dbo.variable_retry @fail BIT AS BEGIN
+          DECLARE @rows TABLE(id INT);
+          INSERT INTO @rows VALUES(7);
+          IF @fail=1 RAISERROR(N'rejected invocation',16,1);
+          INSERT variable_calls(kind,total) SELECT 'retry',COUNT(*) FROM @rows;
+        END
+    - sql: EXEC dbo.variable_retry 1
+      expect: {error: true, contains: [rejected invocation]}
+    - sql: EXEC dbo.variable_retry 0
+    - sql: EXEC dbo.variable_retry 0
+    - sql: SELECT total FROM variable_calls WHERE kind='retry' ORDER BY total
+      expect: {rows: 2, data: [{total: 1}, {total: 1}]}
+- name: A later batch can declare the same name with a different SQL schema
+  tds:
+    statements:
+    - sql: |
+        DECLARE @rows TABLE(text_value NVARCHAR(12));
+        INSERT INTO @rows VALUES(N'rebound');
+        SELECT text_value FROM @rows;
+      expect: {rows: 1, data: [{text_value: rebound}]}
+
+- name: Native keys defaults and declared string widths use the ordinary INSERT sink
+  tds:
+    statements:
+    - sql: |
+        DECLARE @rows TABLE(id INT NOT NULL PRIMARY KEY,label VARCHAR(3) DEFAULT('abcde'));
+        INSERT INTO @rows(id) VALUES(1);
+        INSERT INTO @rows VALUES(2,'longer');
+        BEGIN TRY
+          INSERT INTO @rows VALUES(2,'bad');
+        END TRY BEGIN CATCH
+          PRINT N'duplicate rejected';
+        END CATCH;
+        SELECT id,label FROM @rows ORDER BY id;
+      expect: {rows: 2, data: [{id: 1, label: abc}, {id: 2, label: lon}]}
+- name: Local sources bind through control predicates scalar assignment and declaration names
+  tds:
+    statements:
+    - sql: |
+        DECLARE @scope TABLE(id INT);
+        DECLARE @total INT=0;
+        INSERT @scope VALUES(2),(3);
+        IF EXISTS(SELECT id FROM @scope WHERE id=3)
+          SELECT @total=SUM(id) FROM @scope;
+        SELECT @total AS total;
+      expect: {rows: 1, data: [{total: 5}]}
+- name: Scalar and table declarations share one lexical variable namespace
+  tds:
+    statements:
+    - sql: |
+        DECLARE @rows INT;
+        DECLARE @rows TABLE(id INT);
+      expect: {error: true, contains: [duplicate variable declaration]}
+
+- name: A returned private frame releases independently of an active caller transaction
+  tds:
+    statements:
+    - sql: |
+        CREATE PROCEDURE dbo.variable_pending AS BEGIN
+          DECLARE @rows TABLE(id INT);
+          INSERT @rows SELECT id FROM variable_inputs WHERE id=88;
+          INSERT variable_calls(kind,total) SELECT 'pending',SUM(id) FROM @rows;
+        END
+    - sql: |
+        BEGIN TRANSACTION;
+        INSERT variable_inputs VALUES(88,'pending');
+        EXEC dbo.variable_pending;
+    - sql: |
+        SELECT @@TRANCOUNT AS depth,(SELECT SUM(total) FROM variable_calls WHERE kind='pending') AS total;
+        ROLLBACK TRANSACTION;
+      expect: {rows: 1, data: [{depth: 1, total: 88}]}
+    - sql: |
+        SELECT (SELECT COUNT(*) FROM variable_inputs WHERE id=88) AS public_count,
+               (SELECT COUNT(*) FROM variable_calls WHERE kind='pending') AS call_count;
+      expect: {rows: 1, data: [{public_count: 0, call_count: 0}]}
+
+cleanup:
+- sql: DROP PROCEDURE IF EXISTS dbo.variable_pending
+- sql: DROP PROCEDURE IF EXISTS dbo.variable_inner
+- sql: DROP PROCEDURE IF EXISTS dbo.variable_retry
+- sql: DROP TABLE IF EXISTS variable_calls
+- sql: DROP TABLE IF EXISTS variable_inputs

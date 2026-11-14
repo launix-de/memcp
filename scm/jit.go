@@ -20,6 +20,7 @@ package scm
 import (
 	"context"
 	"fmt"
+	"maps"
 	"math"
 	"math/bits"
 	"os"
@@ -2620,7 +2621,7 @@ func jitAddLambdaBoundParams(params Scmer, bound map[Symbol]struct{}) {
 }
 
 func jitSyntaxKind(value Scmer) SyntaxKind {
-	declaration := DeclarationForValue(value)
+	declaration := DeclarationForValue(value.WithoutSourceInfo())
 	if declaration == nil || !declaration.IsSpecialForm {
 		return SyntaxOrdinary
 	}
@@ -2699,14 +2700,18 @@ func jitCollectLambdaFreeSymbols(expr Scmer, bound map[Symbol]struct{}, seen map
 		switch jitSyntaxKind(list[0]) {
 		case SyntaxQuote:
 			return
+		case SyntaxParser:
+			// Keep generator captures without treating grammar definitions
+			// as publications in the surrounding Scheme scope.
+			for _, item := range list[1:] {
+				jitCollectLambdaFreeSymbols(item, maps.Clone(bound), seen, out)
+			}
+			return
 		case SyntaxLambda:
 			if len(list) < 3 {
 				return
 			}
-			innerBound := make(map[Symbol]struct{}, len(bound)+4)
-			for k := range bound {
-				innerBound[k] = struct{}{}
-			}
+			innerBound := maps.Clone(bound)
 			jitAddLambdaBoundParams(list[1], innerBound)
 			jitCollectLambdaFreeSymbols(list[2], innerBound, seen, out)
 			return
@@ -2716,10 +2721,7 @@ func jitCollectLambdaFreeSymbols(expr Scmer, bound map[Symbol]struct{}, seen map
 			}
 			index := 2
 			for index+1 < len(list) {
-				branchBound := make(map[Symbol]struct{}, len(bound)+4)
-				for symbol := range bound {
-					branchBound[symbol] = struct{}{}
-				}
+				branchBound := maps.Clone(bound)
 				jitAddMatchPatternBoundSymbols(list[index], branchBound)
 				jitCollectLambdaFreeSymbols(list[index+1], branchBound, seen, out)
 				index += 2
@@ -2727,6 +2729,28 @@ func jitCollectLambdaFreeSymbols(expr Scmer, bound map[Symbol]struct{}, seen map
 			if index < len(list) {
 				jitCollectLambdaFreeSymbols(list[index], bound, seen, out)
 			}
+			return
+		}
+		if start, scoped := jitLexicalSequence(list[0]); start != 0 {
+			if start == 2 && len(list) > 1 {
+				jitCollectLambdaFreeSymbols(list[1], bound, seen, out)
+			}
+			if scoped {
+				bound = maps.Clone(bound)
+			}
+			for index := start; index < len(list); index++ {
+				jitCollectLambdaFreeSymbols(list[index], bound, seen, out)
+			}
+			return
+		}
+		if name, defined := jitNamedDefinition(list); defined {
+			rhsBound := bound
+			if jitIsLambdaForm(list[2]) {
+				rhsBound = maps.Clone(bound)
+				rhsBound[name] = struct{}{}
+			}
+			jitCollectLambdaFreeSymbols(list[2], rhsBound, seen, out)
+			bound[name] = struct{}{}
 			return
 		}
 		for _, item := range list {
@@ -2827,8 +2851,13 @@ func jitCollectLambdaOuterCaptures(expr Scmer, lambdaDepth int, countScopes bool
 			if len(list) > 1 {
 				jitCollectLambdaOuterCaptures(list[1], lambdaDepth, countScopes, seen, out, namedSeen, namedOut)
 			}
-			for index := 3; index < len(list); index += 2 {
-				jitCollectLambdaOuterCaptures(list[index], lambdaDepth+1, countScopes, seen, out, namedSeen, namedOut)
+			index := 2
+			for index+1 < len(list) {
+				jitCollectLambdaOuterCaptures(list[index+1], lambdaDepth+1, countScopes, seen, out, namedSeen, namedOut)
+				index += 2
+			}
+			if index < len(list) {
+				jitCollectLambdaOuterCaptures(list[index], lambdaDepth, countScopes, seen, out, namedSeen, namedOut)
 			}
 			return
 		}
@@ -2872,10 +2901,6 @@ func jitLambdaOuterCaptures(body Scmer, countScopes bool) ([]jitLambdaOuterCaptu
 	return out, namedOut
 }
 
-// jitBindLambdaCaptures turns lexical symbol and outer-slot reads into hidden
-// native parameters. The closure builder binds those parameters once when the
-// lambda value is created, so its machine code can be compiled with its
-// enclosing procedure instead of invoking the compiler from the hot path.
 func jitLambdaCaptureReference(index NthLocalVar, depth int) Scmer {
 	local := NewNthLocalVar(index)
 	if depth == 0 {
@@ -2892,102 +2917,32 @@ func jitLambdaNamedCaptureReference(symbol Symbol, depth int) Scmer {
 	return NewSlice([]Scmer{NewSymbol("outer"), NewInt(int64(depth)), value})
 }
 
+// jitBindLambdaCaptures turns lexical symbol and outer-slot reads into hidden
+// native parameters. The closure builder binds those parameters once when the
+// lambda value is created, so its machine code can be compiled with its
+// enclosing procedure instead of invoking the compiler from the hot path.
 func jitBindLambdaCaptures(expr Scmer, symbols map[Symbol]NthLocalVar, outerVars map[jitLambdaOuterCapture]NthLocalVar, namedOuterVars map[jitLambdaNamedOuterCapture]NthLocalVar) Scmer {
-	return jitBindLambdaCapturesAtDepth(expr, symbols, outerVars, namedOuterVars, 0)
+	bindings := jitLambdaBindings{outer: outerVars, namedOuter: namedOuterVars}
+	return bindings.rewrite(expr, maps.Clone(symbols), 0, 0)
 }
 
-// jitBindLambdaSelfValues routes a named recursive closure used as a value
-// through a hidden bound parameter. Direct calls in the procedure itself keep
-// their symbolic head so the emitter can lower them to a loop or native
-// recursion. A reference passed as a callback must instead name the concrete
-// closure, because the shared template's lexical environment has no per-
-// instance BoundArgs.
+// A named recursive closure used as a value needs its concrete instance.
+// Direct calls in that procedure retain their symbolic head for native recursion.
 func jitBindLambdaSelfValues(expr Scmer, self Symbol, param NthLocalVar) Scmer {
-	return jitBindLambdaSelfValuesAtDepth(expr, self, param, 0, 0)
+	bindings := jitLambdaBindings{self: self}
+	return bindings.rewrite(expr, map[Symbol]NthLocalVar{self: param}, 0, 0)
 }
 
-// Lexical scopes affect outer references even when they share one invocation.
-// Only lambda boundaries decide whether a call can use native self recursion.
-func jitBindLambdaSelfValuesAtDepth(expr Scmer, self Symbol, param NthLocalVar, depth, lambdaDepth int) Scmer {
-	if expr.IsSourceInfo() {
-		source := *expr.SourceInfo()
-		source.value = jitBindLambdaSelfValuesAtDepth(source.value, self, param, depth, lambdaDepth)
-		return NewSourceInfo(source)
-	}
-	if expr.IsSymbol() {
-		if expr.Symbol() == self {
-			return jitLambdaCaptureReference(param, depth)
-		}
-		return expr
-	}
-	if !expr.IsSlice() {
-		return expr
-	}
-	items := expr.Slice()
-	if len(items) == 0 {
-		return expr
-	}
-	head, hasHead := scmerSymbol(items[0])
-	if hasHead && string(head) == "quote" {
-		return expr
-	}
-	if hasHead && string(head) == "lambda" && len(items) >= 3 {
-		boundParams := make(map[Symbol]struct{})
-		jitAddLambdaBoundParams(items[1], boundParams)
-		if _, shadowed := boundParams[self]; shadowed {
-			return expr
-		}
-		bound := append([]Scmer(nil), items...)
-		bound[2] = jitBindLambdaSelfValuesAtDepth(items[2], self, param, depth+1, lambdaDepth+1)
-		return NewSlice(bound)
-	}
-	if hasHead && (head == "begin" || head == "begin_mut") {
-		bound := append([]Scmer(nil), items...)
-		start := 1
-		if head == "begin_mut" {
-			start = 2
-		}
-		for index := start; index < len(items); index++ {
-			bound[index] = jitBindLambdaSelfValuesAtDepth(items[index], self, param, depth+1, lambdaDepth)
-		}
-		return NewSlice(bound)
-	}
-	if hasHead && (head == "match" || head == "match_mut") {
-		bound := append([]Scmer(nil), items...)
-		if len(items) > 1 {
-			bound[1] = jitBindLambdaSelfValuesAtDepth(items[1], self, param, depth, lambdaDepth)
-		}
-		for index := 3; index < len(items); index += 2 {
-			patternSymbols := make(map[Symbol]struct{})
-			jitAddMatchPatternBoundSymbols(items[index-1], patternSymbols)
-			if _, shadowed := patternSymbols[self]; !shadowed {
-				bound[index] = jitBindLambdaSelfValuesAtDepth(items[index], self, param, depth+1, lambdaDepth)
-			}
-		}
-		return NewSlice(bound)
-	}
-	if hasHead && (head == "define" || head == "set" || head == "setN") && len(items) == 3 {
-		bound := append([]Scmer(nil), items...)
-		bound[2] = jitBindLambdaSelfValuesAtDepth(items[2], self, param, depth, lambdaDepth)
-		return NewSlice(bound)
-	}
-	bound := make([]Scmer, len(items))
-	for index, item := range items {
-		// Only a direct call in the recursive procedure itself can use the
-		// native self-call lowering. Nested lambdas require the bound closure.
-		if index == 0 && lambdaDepth == 0 && hasHead && head == self {
-			bound[index] = item
-			continue
-		}
-		bound[index] = jitBindLambdaSelfValuesAtDepth(item, self, param, depth, lambdaDepth)
-	}
-	return NewSlice(bound)
+type jitLambdaBindings struct {
+	self       Symbol
+	outer      map[jitLambdaOuterCapture]NthLocalVar
+	namedOuter map[jitLambdaNamedOuterCapture]NthLocalVar
 }
 
-func jitBindLambdaCapturesAtDepth(expr Scmer, symbols map[Symbol]NthLocalVar, outerVars map[jitLambdaOuterCapture]NthLocalVar, namedOuterVars map[jitLambdaNamedOuterCapture]NthLocalVar, depth int) Scmer {
+func (bindings jitLambdaBindings) rewrite(expr Scmer, symbols map[Symbol]NthLocalVar, depth, lambdaDepth int) Scmer {
 	if expr.IsSourceInfo() {
 		source := *expr.SourceInfo()
-		source.value = jitBindLambdaCapturesAtDepth(source.value, symbols, outerVars, namedOuterVars, depth)
+		source.value = bindings.rewrite(source.value, symbols, depth, lambdaDepth)
 		return NewSourceInfo(source)
 	}
 	if expr.IsSymbol() {
@@ -2996,105 +2951,118 @@ func jitBindLambdaCapturesAtDepth(expr Scmer, symbols map[Symbol]NthLocalVar, ou
 		}
 		return expr
 	}
-	if !expr.IsSlice() {
+	if !expr.IsSlice() || len(expr.Slice()) == 0 {
 		return expr
 	}
 	items := expr.Slice()
-	if len(items) == 0 {
+	switch jitSyntaxKind(items[0]) {
+	case SyntaxQuote, SyntaxParser:
 		return expr
-	}
-	if head, ok := scmerSymbol(items[0]); ok {
-		if string(head) == "quote" {
-			return expr
-		}
-		if string(head) == "outer" && len(items) == 3 {
+	case SyntaxOuter:
+		if len(items) == 3 {
 			key := items[2].WithoutSourceInfo()
 			outerDepth, validDepth := outerDepthLiteral(items[1])
-			if validDepth && int(outerDepth) > depth && key.IsNthLocalVar() {
-				capture := jitLambdaOuterCapture{depth: int(outerDepth) - depth - 1, index: key.NthLocalVar()}
-				if param, exists := outerVars[capture]; exists {
-					return jitLambdaCaptureReference(param, depth)
-				}
-			}
-			if validDepth && int(outerDepth) > depth && key.IsSymbol() {
-				capture := jitLambdaNamedOuterCapture{depth: int(outerDepth) - depth - 1, symbol: key.Symbol()}
-				if param, exists := namedOuterVars[capture]; exists {
-					return jitLambdaCaptureReference(param, depth)
-				}
-			}
-		}
-		if string(head) == "lambda" && len(items) >= 3 {
-			bound := append([]Scmer(nil), items...)
-			innerSymbols := symbols
-			if len(symbols) != 0 {
-				innerSymbols = make(map[Symbol]NthLocalVar, len(symbols))
-				for symbol, index := range symbols {
-					innerSymbols[symbol] = index
-				}
-				params := make(map[Symbol]struct{})
-				jitAddLambdaBoundParams(items[1], params)
-				for symbol := range params {
-					delete(innerSymbols, symbol)
-				}
-			}
-			bound[2] = jitBindLambdaCapturesAtDepth(items[2], innerSymbols, outerVars, namedOuterVars, depth+1)
-			return NewSlice(bound)
-		}
-		if string(head) == "begin" {
-			bound := append([]Scmer(nil), items...)
-			for index := 1; index < len(items); index++ {
-				bound[index] = jitBindLambdaCapturesAtDepth(items[index], symbols, outerVars, namedOuterVars, depth+1)
-			}
-			return NewSlice(bound)
-		}
-		if string(head) == "begin_mut" {
-			bound := append([]Scmer(nil), items...)
-			if len(items) > 1 {
-				bound[1] = jitBindLambdaCapturesAtDepth(items[1], symbols, outerVars, namedOuterVars, depth)
-			}
-			for index := 2; index < len(items); index++ {
-				bound[index] = jitBindLambdaCapturesAtDepth(items[index], symbols, outerVars, namedOuterVars, depth+1)
-			}
-			return NewSlice(bound)
-		}
-		if string(head) == "match" || string(head) == "match_mut" {
-			bound := append([]Scmer(nil), items...)
-			if len(items) > 1 {
-				bound[1] = jitBindLambdaCapturesAtDepth(items[1], symbols, outerVars, namedOuterVars, depth)
-			}
-			for index := 3; index < len(items); index += 2 {
-				branchSymbols := symbols
-				if len(symbols) != 0 {
-					branchSymbols = make(map[Symbol]NthLocalVar, len(symbols))
-					for symbol, slot := range symbols {
-						branchSymbols[symbol] = slot
-					}
-					patternSymbols := make(map[Symbol]struct{})
-					jitAddMatchPatternBoundSymbols(items[index-1], patternSymbols)
-					for symbol := range patternSymbols {
-						delete(branchSymbols, symbol)
+			if validDepth && int(outerDepth) > depth {
+				captureDepth := int(outerDepth) - depth - 1
+				if key.IsNthLocalVar() {
+					capture := jitLambdaOuterCapture{depth: captureDepth, index: key.NthLocalVar()}
+					if param, exists := bindings.outer[capture]; exists {
+						return jitLambdaCaptureReference(param, depth)
 					}
 				}
-				bound[index] = jitBindLambdaCapturesAtDepth(items[index], branchSymbols, outerVars, namedOuterVars, depth+1)
+				if key.IsSymbol() {
+					capture := jitLambdaNamedOuterCapture{depth: captureDepth, symbol: key.Symbol()}
+					if param, exists := bindings.namedOuter[capture]; exists {
+						return jitLambdaCaptureReference(param, depth)
+					}
+				}
 			}
-			return NewSlice(bound)
 		}
-		if (string(head) == "define" || string(head) == "set" || string(head) == "setN") && len(items) == 3 {
-			bound := append([]Scmer(nil), items...)
-			bound[2] = jitBindLambdaCapturesAtDepth(items[2], symbols, outerVars, namedOuterVars, depth)
-			return NewSlice(bound)
+		return expr
+	case SyntaxLambda:
+		if len(items) < 3 {
+			return expr
 		}
+		params := make(map[Symbol]struct{})
+		jitAddLambdaBoundParams(items[1], params)
+		body := append([]Scmer(nil), items...)
+		body[2] = bindings.rewrite(items[2], jitMaskLambdaBindings(symbols, params), depth+1, lambdaDepth+1)
+		return NewSlice(body)
+	case SyntaxMatch:
+		result := append([]Scmer(nil), items...)
+		if len(items) > 1 {
+			result[1] = bindings.rewrite(items[1], symbols, depth, lambdaDepth)
+		}
+		index := 2
+		for index+1 < len(items) {
+			pattern := make(map[Symbol]struct{})
+			jitAddMatchPatternBoundSymbols(items[index], pattern)
+			result[index+1] = bindings.rewrite(items[index+1], jitMaskLambdaBindings(symbols, pattern), depth+1, lambdaDepth)
+			index += 2
+		}
+		if index < len(items) {
+			result[index] = bindings.rewrite(items[index], symbols, depth, lambdaDepth)
+		}
+		return NewSlice(result)
 	}
+	if start, scoped := jitLexicalSequence(items[0]); start != 0 {
+		result := append([]Scmer(nil), items...)
+		if start == 2 && len(items) > 1 {
+			result[1] = bindings.rewrite(items[1], symbols, depth, lambdaDepth)
+		}
+		if scoped {
+			symbols = maps.Clone(symbols)
+			depth++
+		}
+		for index := start; index < len(items); index++ {
+			result[index] = bindings.rewrite(items[index], symbols, depth, lambdaDepth)
+		}
+		return NewSlice(result)
+	}
+	if name, defined := jitNamedDefinition(items); defined {
+		result := append([]Scmer(nil), items...)
+		rhsSymbols := symbols
+		if jitIsLambdaForm(items[2]) {
+			// The initializer creates the recursive procedure. Its body sees
+			// the procedure's own binding when invoked after publication.
+			rhsSymbols = maps.Clone(symbols)
+			delete(rhsSymbols, name)
+		}
+		result[2] = bindings.rewrite(items[2], rhsSymbols, depth, lambdaDepth)
+		delete(symbols, name)
+		return NewSlice(result)
+	}
+	if len(items) == 3 && scmerIsSymbol(items[0], "setN") {
+		result := append([]Scmer(nil), items...)
+		result[2] = bindings.rewrite(items[2], symbols, depth, lambdaDepth)
+		return NewSlice(result)
+	}
+	result := make([]Scmer, len(items))
 	changed := false
-	bound := make([]Scmer, len(items))
 	for index, item := range items {
-		bound[index] = jitBindLambdaCapturesAtDepth(item, symbols, outerVars, namedOuterVars, depth)
-		changed = changed || bound[index] != item
+		if index == 0 && lambdaDepth == 0 && bindings.self != "" {
+			if name, ok := scmerSymbol(item); ok && name == bindings.self {
+				result[index] = item
+				continue
+			}
+		}
+		result[index] = bindings.rewrite(item, symbols, depth, lambdaDepth)
+		changed = changed || result[index] != item
 	}
 	if !changed {
 		return expr
 	}
-	return NewSlice(bound)
+	return NewSlice(result)
+}
+
+func jitMaskLambdaBindings(symbols map[Symbol]NthLocalVar, names map[Symbol]struct{}) map[Symbol]NthLocalVar {
+	// A nested lambda owns its definitions even when no parameters shadow an
+	// incoming capture.
+	masked := maps.Clone(symbols)
+	for name := range names {
+		delete(masked, name)
+	}
+	return masked
 }
 
 func jitRebindProcCapture(proc *Proc, env *Env, key, previous Scmer, hasPrevious bool, value Scmer) *Proc {

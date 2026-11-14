@@ -1,0 +1,134 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Real TDS CHECK and NOCHECK act only on this transaction's unpublished foreign declarations
+setup:
+- sql: CREATE TABLE state_tds_parent(id INT PRIMARY KEY)
+- sql: CREATE TABLE state_tds_child(id INT PRIMARY KEY,parent_id INT)
+- sql: INSERT state_tds_parent VALUES(1)
+- sql: INSERT state_tds_child VALUES(10,1)
+cleanup:
+- sql: DROP TABLE IF EXISTS state_tds_child
+- sql: DROP TABLE IF EXISTS state_tds_parent
+test_cases:
+- name: Pending NOCHECK remains invisible and rollback removes the declaration
+  tds:
+    statements:
+    - {connection: owner, sql: BEGIN TRANSACTION}
+    - {connection: owner, sql: 'ALTER TABLE state_tds_child ADD CONSTRAINT FK_state_tds_rollback FOREIGN KEY(parent_id) REFERENCES state_tds_parent(id)'}
+    - {connection: owner, sql: ALTER TABLE state_tds_child NOCHECK CONSTRAINT FK_state_tds_rollback}
+    - connection: owner
+      sql: SELECT constraint_name AS name FROM information_schema.referential_constraints WHERE constraint_name=N'FK_state_tds_rollback'
+      expect: {rows: 1, data: [{name: FK_state_tds_rollback}]}
+    - connection: observer
+      sql: SELECT constraint_name AS name FROM information_schema.referential_constraints WHERE constraint_name=N'FK_state_tds_rollback'
+      expect: {rows: 0}
+    - {connection: owner, sql: ROLLBACK TRANSACTION}
+    - connection: observer
+      sql: SELECT COUNT(*) AS count FROM state_tds_child
+      expect: {rows: 1, data: [{count: 1}]}
+- name: A disabled declaration cannot publish a durable decision
+  tds:
+    statements:
+    - {connection: owner, sql: BEGIN TRANSACTION}
+    - {connection: owner, sql: 'ALTER TABLE state_tds_child ADD CONSTRAINT FK_state_tds_disabled FOREIGN KEY(parent_id) REFERENCES state_tds_parent(id)'}
+    - {connection: owner, sql: ALTER TABLE state_tds_child NOCHECK CONSTRAINT ALL}
+    - connection: owner
+      sql: COMMIT TRANSACTION
+      expect: {error: true, contains: ['enabled and validated before commit']}
+    - {connection: owner, sql: ROLLBACK TRANSACTION}
+    - connection: observer
+      sql: SELECT constraint_name FROM information_schema.referential_constraints WHERE constraint_name=N'FK_state_tds_disabled'
+      expect: {rows: 0}
+- name: CHECK without historical validation leaves an untrusted declaration uncommittable
+  tds:
+    statements:
+    - {connection: owner, sql: BEGIN TRANSACTION}
+    - {connection: owner, sql: 'ALTER TABLE state_tds_child ADD CONSTRAINT FK_state_tds_untrusted FOREIGN KEY(parent_id) REFERENCES state_tds_parent(id)'}
+    - {connection: owner, sql: ALTER TABLE state_tds_child NOCHECK CONSTRAINT FK_state_tds_untrusted}
+    - {connection: owner, sql: ALTER TABLE state_tds_child WITH NOCHECK CHECK CONSTRAINT FK_state_tds_untrusted}
+    - connection: owner
+      sql: COMMIT TRANSACTION
+      expect: {error: true, contains: ['enabled and validated before commit']}
+    - {connection: owner, sql: ROLLBACK TRANSACTION}
+- name: An independently committed FK supplies the actual public baseline for mixed ALL rejection
+  tds:
+    statements:
+    - {connection: owner, sql: BEGIN TRANSACTION}
+    - {connection: owner, sql: 'ALTER TABLE state_tds_child ADD CONSTRAINT FK_state_tds_existing FOREIGN KEY(parent_id) REFERENCES state_tds_parent(id)'}
+    - {connection: owner, sql: COMMIT TRANSACTION}
+    - connection: observer
+      sql: SELECT constraint_name AS name FROM information_schema.referential_constraints WHERE constraint_name=N'FK_state_tds_existing'
+      expect: {rows: 1, data: [{name: FK_state_tds_existing}]}
+- name: An unknown second target aborts the transaction without publishing the pending declaration
+  tds:
+    statements:
+    - {connection: owner, sql: BEGIN TRANSACTION}
+    - {connection: owner, sql: 'ALTER TABLE state_tds_child ADD CONSTRAINT FK_state_tds_named FOREIGN KEY(parent_id) REFERENCES state_tds_parent(id)'}
+    - connection: owner
+      sql: ALTER TABLE state_tds_child NOCHECK CONSTRAINT FK_state_tds_named, unknown_constraint
+      expect: {error: true, contains: ['constraint is not a pending foreign declaration']}
+    - connection: owner
+      sql: COMMIT TRANSACTION
+      expect: {error: true, contains: ['transaction is aborted; ROLLBACK required']}
+    - {connection: owner, sql: ROLLBACK TRANSACTION}
+    - connection: observer
+      sql: SELECT constraint_name AS name FROM information_schema.referential_constraints WHERE constraint_name=N'FK_state_tds_named'
+      expect: {rows: 0}
+- name: ALL cannot silently ignore a committed constraint while disabling a new pending declaration
+  tds:
+    statements:
+    - {connection: owner, sql: BEGIN TRANSACTION}
+    - {connection: owner, sql: 'ALTER TABLE state_tds_child ADD CONSTRAINT FK_state_tds_all FOREIGN KEY(parent_id) REFERENCES state_tds_parent(id)'}
+    - connection: owner
+      sql: ALTER TABLE state_tds_child NOCHECK CONSTRAINT ALL
+      expect: {error: true, contains: ['not an owned pending declaration']}
+    - connection: owner
+      sql: COMMIT TRANSACTION
+      expect: {error: true, contains: ['transaction is aborted; ROLLBACK required']}
+    - {connection: owner, sql: ROLLBACK TRANSACTION}
+    - connection: observer
+      sql: SELECT constraint_name AS name FROM information_schema.referential_constraints WHERE constraint_name=N'FK_state_tds_all'
+      expect: {rows: 0}
+    - connection: observer
+      sql: SELECT constraint_name AS name FROM information_schema.referential_constraints WHERE constraint_name=N'FK_state_tds_existing'
+      expect: {rows: 1, data: [{name: FK_state_tds_existing}]}
+- name: An unsupported CHECK name is rejected instead of skipped
+  tds:
+    statements:
+    - {connection: owner, sql: BEGIN TRANSACTION}
+    - connection: owner
+      sql: ALTER TABLE state_tds_child WITH CHECK CHECK CONSTRAINT missing_check
+      expect: {error: true, contains: ['constraint is not a pending foreign declaration']}
+    - {connection: owner, sql: ROLLBACK TRANSACTION}
+    - connection: observer
+      sql: SELECT parent_id FROM state_tds_child
+      expect: {rows: 1, data: [{parent_id: 1}]}
+- name: Actual historical validation permits a durable FK and retains real insert enforcement
+  tds:
+    statements:
+    - {connection: owner, sql: BEGIN TRANSACTION}
+    - {connection: owner, sql: 'ALTER TABLE state_tds_child ADD CONSTRAINT FK_state_tds_checked FOREIGN KEY(parent_id) REFERENCES state_tds_parent(id)'}
+    - {connection: owner, sql: ALTER TABLE state_tds_child NOCHECK CONSTRAINT FK_state_tds_checked}
+    - {connection: owner, sql: ALTER TABLE state_tds_child WITH CHECK CHECK CONSTRAINT fk_STATE_tds_CHECKED}
+    - {connection: owner, sql: COMMIT TRANSACTION}
+    - connection: observer
+      sql: INSERT state_tds_child VALUES(11,999)
+      expect: {error: true, contains: ['foreign key constraint']}
+    - connection: observer
+      sql: INSERT state_tds_child VALUES(12,1)
+    - connection: observer
+      sql: SELECT id,parent_id FROM state_tds_child WHERE id=12
+      expect: {rows: 1, data: [{id: 12, parent_id: 1}]}
+- name: Restart replays only final enabled and validated declarations
+  action: restart
+- name: Replayed actual rows and native enforcement remain visible over TDS
+  tds:
+    statements:
+    - sql: SELECT id,parent_id FROM state_tds_child ORDER BY id
+      expect: {rows: 2, data: [{id: 10, parent_id: 1}, {id: 12, parent_id: 1}]}
+    - sql: INSERT state_tds_child VALUES(13,999)
+      expect: {error: true, contains: ['foreign key constraint']}

@@ -1,0 +1,113 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  syntax: tsql
+  description: Volatile UNION groups reject unsupported consumers and unwind runtime scope failures
+setup:
+- sql: CREATE TABLE volatile_consumer_marker(id INT)
+- sql: CREATE TABLE volatile_consumer_values(id INT,category NVARCHAR(12),amount INT)
+- sql: INSERT volatile_consumer_values VALUES(1,N'alpha',10),(2,N'alpha',20),(3,N'beta',5)
+cleanup:
+- sql: DROP TABLE IF EXISTS volatile_consumer_marker
+- sql: DROP TABLE IF EXISTS volatile_consumer_values
+test_cases:
+- name: Derived outer projection cannot be silently replaced by the producer output
+  sql: SELECT total+1 AS adjusted FROM (SELECT category,SUM(amount) AS total FROM (SELECT category,amount
+    FROM volatile_consumer_values UNION ALL SELECT CAST(N'beta' AS NVARCHAR(12)),7 FROM information_schema.tables
+    WHERE table_catalog=N'memcp-tests' AND table_name=N'volatile_consumer_marker') AS items GROUP BY category)
+    AS d
+  expect:
+    error: true
+    contains:
+    - volatile UNION grouping
+- name: Derived outer filter cannot be silently discarded
+  sql: SELECT category,total FROM (SELECT category,SUM(amount) AS total FROM (SELECT category,amount FROM
+    volatile_consumer_values UNION ALL SELECT CAST(N'beta' AS NVARCHAR(12)),7 FROM information_schema.tables
+    WHERE table_catalog=N'memcp-tests' AND table_name=N'volatile_consumer_marker') AS items GROUP BY category)
+    AS d WHERE total>20
+  expect:
+    error: true
+    contains:
+    - volatile UNION grouping
+- name: Derived outer ordering and window require a separate consumer boundary
+  sql: SELECT category,total FROM (SELECT category,SUM(amount) AS total FROM (SELECT category,amount FROM
+    volatile_consumer_values UNION ALL SELECT CAST(N'beta' AS NVARCHAR(12)),7 FROM information_schema.tables
+    WHERE table_catalog=N'memcp-tests' AND table_name=N'volatile_consumer_marker') AS items GROUP BY category)
+    AS d ORDER BY total DESC OFFSET 1 ROWS FETCH NEXT 1 ROWS ONLY
+  expect:
+    error: true
+    contains:
+    - volatile UNION grouping
+- name: Hidden outer order expressions cannot expose the producer projection
+  sql: SELECT category FROM (SELECT category,SUM(amount) AS total FROM (SELECT category,amount FROM volatile_consumer_values
+    UNION ALL SELECT CAST(N'beta' AS NVARCHAR(12)),7 FROM information_schema.tables WHERE table_catalog=N'memcp-tests'
+    AND table_name=N'volatile_consumer_marker') AS items GROUP BY category) AS d ORDER BY total DESC
+  expect:
+    error: true
+    contains:
+    - volatile UNION grouping
+- name: Bounded producer and outer windows fail at the existing derived-stage boundary
+  sql: SELECT category,total FROM (SELECT TOP(1) category,SUM(amount) AS total FROM (SELECT category,amount
+    FROM volatile_consumer_values UNION ALL SELECT CAST(N'beta' AS NVARCHAR(12)),7 FROM information_schema.tables
+    WHERE table_catalog=N'memcp-tests' AND table_name=N'volatile_consumer_marker') AS items GROUP BY category
+    ORDER BY SUM(amount) DESC) AS d WHERE total<20 ORDER BY total OFFSET 1 ROWS FETCH NEXT 1 ROWS ONLY
+  expect:
+    error: true
+    contains:
+    - derived relation stage requires a base inner source
+- name: A pre-group UNION WHERE condition filters the whole input bag
+  sql: SELECT COUNT(*) AS n,COUNT(DISTINCT category) AS kinds,SUM(amount) AS total FROM (SELECT category,amount
+    FROM volatile_consumer_values UNION ALL SELECT CAST(N'beta' AS NVARCHAR(12)),7 FROM information_schema.tables
+    WHERE table_catalog=N'memcp-tests' AND table_name=N'volatile_consumer_marker') AS items WHERE amount>=10
+  expect:
+    data:
+    - n: 2
+      kinds: 1
+      total: 30
+- name: Canonical consumer ordering retains its declared text collation
+  sql: |
+    SELECT TOP(1) category,SUM(amount) AS total
+    FROM (SELECT CASE WHEN id=1 THEN N'Zulu' ELSE N'alpha' END COLLATE utf8mb4_general_ci AS category,amount
+      FROM volatile_consumer_values WHERE id<=2 UNION ALL
+      SELECT CAST(N'beta' AS NVARCHAR(12)),7 FROM information_schema.tables
+      WHERE table_catalog=N'memcp-tests' AND table_name=N'volatile_consumer_marker') AS items
+    GROUP BY category ORDER BY COALESCE(category,N'')
+  expect:
+    data: [{category: alpha,total: 20}]
+- name: Domain inputs used only inside a branch predicate bind per invocation
+  sql: DECLARE @cutoff INT=1,@value INT; SELECT @value=COUNT(*) FROM (SELECT amount FROM volatile_consumer_values
+    WHERE id<=@cutoff UNION ALL SELECT 7 FROM information_schema.tables WHERE table_catalog=N'memcp-tests'
+    AND table_name=N'volatile_consumer_marker') AS items; SET @cutoff=3; SELECT @value=COUNT(*) FROM (SELECT
+    amount FROM volatile_consumer_values WHERE id<=@cutoff UNION ALL SELECT 7 FROM information_schema.tables
+    WHERE table_catalog=N'memcp-tests' AND table_name=N'volatile_consumer_marker') AS items; SELECT @value
+    AS n
+  expect:
+    data:
+    - n: 4
+- name: Successful UNION grouping leaves no native helper residue
+  scm: (filter (show "memcp-tests") (lambda (name) (regexp_test name "#query-group")))
+  expect:
+    result: []
+- name: A real result consumer failure unwinds the scoped native UNION execution
+  scm: |-
+    (begin
+      (define s (newsession)) (s "username" "root") (s "schema" "memcp-tests")
+      (try (lambda () (begin
+        (tsql_execute_request "memcp-tests" "SELECT COUNT(DISTINCT category) AS kinds,SUM(amount) AS total FROM (SELECT category,amount FROM volatile_consumer_values UNION ALL SELECT CAST(N'beta' AS NVARCHAR(12)),7 FROM information_schema.tables WHERE table_schema=N'memcp-tests' AND table_name=N'volatile_consumer_marker') AS items" s nil 0
+          (lambda (row) (error "volatile consumer failed")) (lambda args true)) false))
+        (lambda (failure) (strlike (concat failure) "%volatile consumer failed%"))))
+  expect:
+    result: true
+- name: Failed UNION result delivery leaves no native group or DISTINCT helper
+  scm: (filter (show "memcp-tests") (lambda (name) (regexp_test name "#query-group")))
+  expect:
+    result: []
+- name: A later execution remains valid after consumer failure
+  sql: SELECT COUNT(DISTINCT category) AS kinds,SUM(amount) AS total FROM (SELECT category,amount FROM
+    volatile_consumer_values UNION ALL SELECT CAST(N'beta' AS NVARCHAR(12)),7 FROM information_schema.tables
+    WHERE table_catalog=N'memcp-tests' AND table_name=N'volatile_consumer_marker') AS items
+  expect:
+    data:
+    - kinds: 2
+      total: 42

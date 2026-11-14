@@ -1,0 +1,125 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  description: Derived ordered windows preserve executable count expressions and evaluate a volatile limit once before scanning
+setup:
+- sql: CREATE TABLE invocation_window_rows(id INT PRIMARY KEY)
+- sql: INSERT INTO invocation_window_rows VALUES(1),(2),(3),(4),(5)
+cleanup:
+- sql: DROP TABLE IF EXISTS invocation_window_rows
+test_cases:
+- name: MySQL derives the exact ordered window from a typed limit expression
+  syntax: mysql
+  sql: SELECT id FROM (SELECT id FROM invocation_window_rows ORDER BY id LIMIT CAST(2 AS INTEGER)) d ORDER BY id
+  expect: {rows: 2,data: [{id: 1},{id: 2}]}
+- name: PostgreSQL derives the exact ordered window from a typed limit expression
+  syntax: psql
+  sql: SELECT id FROM (SELECT id FROM invocation_window_rows ORDER BY id LIMIT CAST(2 AS INTEGER)) d ORDER BY id
+  expect: {rows: 2,data: [{id: 1},{id: 2}]}
+- name: MySQL combines limit and offset values instead of coercing their syntax
+  syntax: mysql
+  sql: SELECT id FROM (SELECT id FROM invocation_window_rows ORDER BY id LIMIT CAST(2 AS INTEGER) OFFSET CAST(1 AS INTEGER)) d ORDER BY id
+  expect: {rows: 2,data: [{id: 2},{id: 3}]}
+- name: PostgreSQL combines limit and offset values instead of coercing their syntax
+  syntax: psql
+  sql: SELECT id FROM (SELECT id FROM invocation_window_rows ORDER BY id LIMIT CAST(2 AS INTEGER) OFFSET CAST(1 AS INTEGER)) d ORDER BY id
+  expect: {rows: 2,data: [{id: 2},{id: 3}]}
+- name: A parent predicate applies after the complete MySQL derived window
+  syntax: mysql
+  sql: SELECT id FROM (SELECT id FROM invocation_window_rows ORDER BY id LIMIT CAST(3 AS INTEGER)) d WHERE id>1 ORDER BY id
+  expect: {rows: 2,data: [{id: 2},{id: 3}]}
+- name: A parent predicate applies after the complete PostgreSQL derived window
+  syntax: psql
+  sql: SELECT id FROM (SELECT id FROM invocation_window_rows ORDER BY id LIMIT CAST(3 AS INTEGER)) d WHERE id>1 ORDER BY id
+  expect: {rows: 2,data: [{id: 2},{id: 3}]}
+- name: A zero MySQL limit expression still yields no candidates
+  syntax: mysql
+  sql: SELECT id FROM (SELECT id FROM invocation_window_rows ORDER BY id LIMIT CAST(0 AS INTEGER)) d ORDER BY id
+  expect: {rows: 0}
+- name: A zero PostgreSQL limit expression still yields no candidates
+  syntax: psql
+  sql: SELECT id FROM (SELECT id FROM invocation_window_rows ORDER BY id LIMIT CAST(0 AS INTEGER)) d ORDER BY id
+  expect: {rows: 0}
+- name: TSQL derived TOP consumes its typed arithmetic value
+  syntax: tsql
+  sql: SELECT id FROM (SELECT TOP(1+1) id FROM invocation_window_rows ORDER BY id) d ORDER BY id
+  expect: {rows: 2,data: [{id: 1},{id: 2}]}
+- name: TSQL variable bounds remain values of this invocation
+  syntax: tsql
+  sql: DECLARE @count INT=3; SELECT id FROM (SELECT TOP(@count) id FROM invocation_window_rows ORDER BY id DESC) d ORDER BY id
+  expect: {rows: 3,data: [{id: 3},{id: 4},{id: 5}]}
+- name: Literal ordered windows retain their existing exact results
+  sql: SELECT id FROM (SELECT id FROM invocation_window_rows ORDER BY id LIMIT 2 OFFSET 1) d ORDER BY id
+  expect: {rows: 2,data: [{id: 2},{id: 3}]}
+- name: A parent predicate follows the complete literal MySQL window
+  syntax: mysql
+  sql: SELECT id FROM (SELECT id FROM invocation_window_rows ORDER BY id LIMIT 3) d WHERE id>1 ORDER BY id
+  expect: {rows: 2,data: [{id: 2},{id: 3}]}
+- name: A parent predicate follows the complete literal PostgreSQL window
+  syntax: psql
+  sql: SELECT id FROM (SELECT id FROM invocation_window_rows ORDER BY id LIMIT 3) d WHERE id>1 ORDER BY id
+  expect: {rows: 2,data: [{id: 2},{id: 3}]}
+- name: A parent join condition follows the complete inner window
+  sql: SELECT d.id FROM (SELECT id FROM invocation_window_rows ORDER BY id LIMIT 3) d INNER JOIN invocation_window_rows r ON r.id=d.id AND d.id>1 ORDER BY d.id
+  expect: {rows: 2,data: [{id: 2},{id: 3}]}
+- name: A volatile native count expression is evaluated once for the complete derived window
+  scm: |
+    (begin
+      (define calls (newsession)) (calls "count" 0)
+      (define bound (lambda () (begin
+        (calls "count" (+ 1 (calls "count")))
+        (if (equal? (calls "count") 1) 2 0))))
+      (define column (list 'get_column "r" false "id" false))
+      (define inner (make_query_block "memcp-tests"
+        (list (list "r" "memcp-tests" "invocation_window_rows" false true nil))
+        (list "id" column) true nil nil (list (list column <))
+        (list 'sql_type_expr (list bound) "BIGINT" nil) nil nil nil nil))
+      (define projected (list 'get_column "d" false "id" false))
+      (define query (make_query_block "memcp-tests"
+        (list (list "d" "memcp-tests" inner false true nil))
+        (list "id" projected) true nil nil (list (list projected <)) nil nil nil nil nil))
+      (define session (newsession)) (session "username" "root")
+      (define output (newsession)) (output "count" 0) (output "sum" 0)
+      (with_session session (lambda ()
+        (with_autocommit session nil 0 "derived window bounds" (lambda (tx) (begin
+          (define planning (newsession))
+          (define plan (sql_queryplan_compile_formula tx
+            (build_queryplan_term (sql_expand_views query nil planning tx) planning tx)))
+          (sql_execute_formula session tx plan (lambda (row) (begin
+            (output "count" (+ 1 (output "count")))
+            (output "sum" (+ (output "sum") (row "id"))))) (lambda args true)))))))
+      (and (equal? (calls "count") 1) (equal? (output "count") 2) (equal? (output "sum") 3)))
+  expect: {result: true}
+- name: Volatile native count and offset each evaluate once for the complete derived window
+  scm: |
+    (begin
+      (define calls (newsession)) (calls "count" 0)
+      (define bound (lambda () (begin
+        (calls "count" (+ 1 (calls "count")))
+        (if (equal? (calls "count") 1) 2 0))))
+      (define skips (newsession)) (skips "count" 0)
+      (define offset (lambda () (begin
+        (skips "count" (+ 1 (skips "count")))
+        (if (equal? (skips "count") 1) 1 0))))
+      (define column (list 'get_column "r" false "id" false))
+      (define inner (make_query_block "memcp-tests"
+        (list (list "r" "memcp-tests" "invocation_window_rows" false true nil))
+        (list "id" column) true nil nil (list (list column <))
+        (list 'sql_type_expr (list bound) "BIGINT" nil) (list 'sql_type_expr (list offset) "BIGINT" nil) nil nil nil))
+      (define projected (list 'get_column "d" false "id" false))
+      (define query (make_query_block "memcp-tests"
+        (list (list "d" "memcp-tests" inner false true nil))
+        (list "id" projected) true nil nil (list (list projected <)) nil nil nil nil nil))
+      (define session (newsession)) (session "username" "root")
+      (define output (newsession)) (output "count" 0) (output "sum" 0)
+      (with_session session (lambda ()
+        (with_autocommit session nil 0 "derived window bounds" (lambda (tx) (begin
+          (define planning (newsession))
+          (define plan (sql_queryplan_compile_formula tx
+            (build_queryplan_term (sql_expand_views query nil planning tx) planning tx)))
+          (sql_execute_formula session tx plan (lambda (row) (begin
+            (output "count" (+ 1 (output "count")))
+            (output "sum" (+ (output "sum") (row "id"))))) (lambda args true)))))))
+      (and (equal? (calls "count") 1) (equal? (skips "count") 1) (equal? (output "count") 2) (equal? (output "sum") 5)))
+  expect: {result: true}

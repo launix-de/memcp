@@ -132,7 +132,13 @@ test_cases:
         VALUES (NEW.id, CONCAT('[', JSON_QUOTE(NEW.payload), ']'));
       END
     expect:
-      affected_rows: 1
+      affected_rows: 0
+      result_contains: '"affected_rows"'
+
+  - name: "Completed MySQL declaration is present: CREATE TRIGGER containing JSON_QUOTE"
+    syntax: mysql
+    sql: "SHOW CREATE TRIGGER json_quote_src_ai"
+    expect: {rows: 1,data: [{Trigger: "json_quote_src_ai"}]}
 
   - name: "Trigger executes JSON_QUOTE"
     sql: "INSERT INTO json_quote_src (id, payload) VALUES (1, 'a\"b')"
@@ -166,7 +172,13 @@ test_cases:
         WHERE kind = 'changed';
       END
     expect:
-      affected_rows: 1
+      affected_rows: 0
+      result_contains: '"affected_rows"'
+
+  - name: "Completed MySQL declaration is present: CREATE event trigger with empty UNION ALL alternatives"
+    syntax: mysql
+    sql: "SHOW CREATE TRIGGER trigger_union_src_ai"
+    expect: {rows: 1,data: [{Trigger: "trigger_union_src_ai"}]}
 
   - name: "Fire event trigger without matching events"
     sql: "INSERT INTO trigger_union_src (id) VALUES (7)"
@@ -190,7 +202,13 @@ test_cases:
         SELECT 'literal', CONCAT('[', NEW.id, ']');
       END
     expect:
-      affected_rows: 1
+      affected_rows: 0
+      result_contains: '"affected_rows"'
+
+  - name: "Completed MySQL declaration is present: CREATE trigger with SELECT literals without FROM"
+    syntax: mysql
+    sql: "SHOW CREATE TRIGGER trigger_literal_src_ai"
+    expect: {rows: 1,data: [{Trigger: "trigger_literal_src_ai"}]}
 
   - name: "SELECT literals trigger emits exactly one row"
     setup:
@@ -212,7 +230,13 @@ test_cases:
         INSERT INTO trig_log (id, msg) VALUES (NEW.id, NEW.name);
       END
     expect:
-      affected_rows: 1
+      affected_rows: 0
+      result_contains: '"affected_rows"'
+
+  - name: "Completed MySQL declaration is present: CREATE TRIGGER with backtick-quoted source table"
+    syntax: mysql
+    sql: "SHOW CREATE TRIGGER after_items_insert"
+    expect: {rows: 1,data: [{Trigger: "after_items_insert"}]}
 
   - name: "INSERT triggers after_items_insert"
     sql: "INSERT INTO trig_items (id, name, val) VALUES (1, 'alpha', 10.0)"
@@ -237,7 +261,13 @@ test_cases:
         INSERT INTO `fop_journal` (id, ref, amount) VALUES (NEW.id, 'journal', NEW.betrag);
       END
     expect:
-      affected_rows: 1
+      affected_rows: 0
+      result_contains: '"affected_rows"'
+
+  - name: "Completed MySQL declaration is present: CREATE TRIGGER inserting into backtick-quoted table"
+    syntax: mysql
+    sql: "SHOW CREATE TRIGGER after_billelement_insert"
+    expect: {rows: 1,data: [{Trigger: "after_billelement_insert"}]}
 
   - name: "INSERT into bill fires trigger to fop_journal"
     sql: "INSERT INTO `bill` (id, betrag, ist) VALUES (10, 99.5, 80.0)"
@@ -262,7 +292,13 @@ test_cases:
         DELETE FROM `fop_journal` WHERE id = NEW.id;
       END
     expect:
-      affected_rows: 1
+      affected_rows: 0
+      result_contains: '"affected_rows"'
+
+  - name: "Completed MySQL declaration is present: CREATE TRIGGER with DELETE in body referencing another table"
+    syntax: mysql
+    sql: "SHOW CREATE TRIGGER after_bill_insert"
+    expect: {rows: 1,data: [{Trigger: "after_bill_insert"}]}
 
   - name: "Pre-insert journal entry for deletion test"
     sql: "INSERT INTO `fop_journal` (id, ref, amount) VALUES (42, 'to-delete', 1.0)"
@@ -284,7 +320,13 @@ test_cases:
   - name: "CREATE TRIGGER without BEGIN/END (single INSERT statement)"
     sql: "CREATE TRIGGER trig_no_begin AFTER INSERT ON trig_items FOR EACH ROW INSERT INTO trig_log (id, msg) VALUES (NEW.id, NEW.name)"
     expect:
-      affected_rows: 1
+      affected_rows: 0
+      result_contains: '"affected_rows"'
+
+  - name: "Completed MySQL declaration is present: CREATE TRIGGER without BEGIN/END (single INSERT statement)"
+    syntax: mysql
+    sql: "SHOW CREATE TRIGGER trig_no_begin"
+    expect: {rows: 1,data: [{Trigger: "trig_no_begin"}]}
 
   - name: "INSERT fires BEGIN-less trigger"
     sql: "INSERT INTO trig_items (id, name, val) VALUES (99, 'beta', 5.0)"
@@ -303,7 +345,13 @@ test_cases:
   - name: "CREATE TRIGGER with DELETE USING and INSERT IGNORE SELECT"
     sql: "CREATE TRIGGER `trig_main.ia` AFTER INSERT ON `trig_main` FOR EACH ROW BEGIN DELETE FROM `trig_history` USING `trig_history`, `trig_assoc` AS `ASSOCIATED` WHERE `trig_history`.`ref` = `ASSOCIATED`.`id` AND NEW.`id` = `ASSOCIATED`.`mainid`; INSERT IGNORE INTO `trig_history`(`ref`, `note`) SELECT `id`, 'created' FROM `trig_assoc` AS `ASSOCIATED` WHERE NEW.`id` = `ASSOCIATED`.`mainid`; END"
     expect:
-      affected_rows: 1
+      affected_rows: 0
+      result_contains: '"affected_rows"'
+
+  - name: "Completed MySQL declaration is present: CREATE TRIGGER with DELETE USING and INSERT IGNORE SELECT"
+    syntax: mysql
+    sql: "SHOW CREATE TRIGGER `trig_main.ia`"
+    expect: {rows: 1,data: [{Trigger: "trig_main.ia"}]}
 
   - name: "Setup assoc row for DELETE USING trigger test"
     sql: "INSERT INTO trig_assoc (mainid, val) VALUES (1, 42)"
@@ -335,7 +383,13 @@ test_cases:
         END IF;
       END
     expect:
-      affected_rows: 1
+      affected_rows: 0
+      result_contains: '"affected_rows"'
+
+  - name: "Completed MySQL declaration is present: CREATE TRIGGER with colon-containing aliases in INSERT SELECT"
+    syntax: mysql
+    sql: "SHOW CREATE TRIGGER `trig_year.ia`"
+    expect: {rows: 1,data: [{Trigger: "trig_year.ia"}]}
 
   - name: "Setup invoice for colon-alias trigger"
     sql: "INSERT INTO trig_invoice (rnr, rdate) VALUES ('INV-001', 50)"
@@ -372,7 +426,13 @@ test_cases:
           AND `a`.`id` = `parents`.`parent_id`;
       END
     expect:
-      affected_rows: 1
+      affected_rows: 0
+      result_contains: '"affected_rows"'
+
+  - name: "Completed MySQL declaration is present: CREATE trigger with derived table in DELETE USING without union"
+    syntax: mysql
+    sql: "SHOW CREATE TRIGGER `derived_src.au`"
+    expect: {rows: 1,data: [{Trigger: "derived_src.au"}]}
 
   - name: "CREATE trigger with derived table in DELETE USING"
     sql: |
@@ -387,7 +447,13 @@ test_cases:
           AND `a`.`id` = `parents`.`parent_id`;
       END
     expect:
-      affected_rows: 1
+      affected_rows: 0
+      result_contains: '"affected_rows"'
+
+  - name: "Completed MySQL declaration is present: CREATE trigger with derived table in DELETE USING"
+    syntax: mysql
+    sql: "SHOW CREATE TRIGGER `derived_src.ai`"
+    expect: {rows: 1,data: [{Trigger: "derived_src.ai"}]}
 
   - name: "Derived DELETE USING trigger fires"
     sql: "INSERT INTO derived_src (id, group_id) VALUES (1, 99)"

@@ -123,7 +123,18 @@ func (r *replicationManager) applyResourcePacket(source string, packet *mosiPack
 		if err := r.validateForwards(source, *packet); err != nil {
 			return err
 		}
-		if r.master {
+		if r.cluster != nil && packet.Resource.Shard == "" {
+			cell := r.resourceCell(packet.Resource)
+			cell.acquire.Lock()
+			r.mu.Lock()
+			record := r.directory.Records[r.resourceKey(packet.Resource)]
+			r.mu.Unlock()
+			_, err := r.cluster.referenceSource(source, *packet, cell, record)
+			cell.acquire.Unlock()
+			if err != nil {
+				return err
+			}
+		} else if r.master {
 			if value, expected := r.steps.Load(packet.ID); expected {
 				step := value.(*replicaStep)
 				if !step.matches(source, *packet) {
@@ -180,6 +191,14 @@ func (r *replicationManager) applyResourcePacket(source string, packet *mosiPack
 		}
 		if packet.Kind != "end" {
 			return transfer.packet(*packet)
+		}
+		if r.cluster != nil && packet.Resource.Shard == "" {
+			defer r.imports.Delete(key)
+			defer transfer.abort()
+			if transfer.objectKind != "" {
+				return fmt.Errorf("incomplete resource transfer")
+			}
+			return r.cluster.installReferenceSchema(source, transfer.header, transfer.schema.Bytes())
 		}
 		if err := func() error {
 			if packet.Resource.Shard != "" {

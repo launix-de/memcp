@@ -27,6 +27,7 @@ import "github.com/launix-de/memcp/scm"
 // nodeScanService is startup-owned. Its secret never enters replication auth or
 // an HTTP response. Incarnations and connection/replay state are process-local.
 var nodeScans atomic.Pointer[nodeScanService]
+var nodeServiceConstructing bool // guarded by the existing database namespace owner
 
 type nodeScanService struct {
 	channelOnce sync.Once
@@ -219,13 +220,16 @@ func (service *nodeScanService) accept(w http.ResponseWriter, req *http.Request)
 		peer.operationPrefix = remote.OperationPrefix
 		peer.objectPeer = clusterObjectPeer{remote.Node, remote.Boot}
 		session.bindPeer(peer)
+		// Application decoding can resolve callback handles immediately after
+		// initialization. Publish this authenticated connection before the
+		// transport starts its permanent reader, not after its constructor returns.
+		if !service.track(peer) {
+			peer.close()
+		}
 	})
 	if authErr != nil {
 		peer.wait()
 		return
-	}
-	if !service.track(peer) {
-		peer.close()
 	}
 	handedOff = true
 	defer service.forget(peer)
@@ -279,6 +283,7 @@ func (service *nodeScanService) connect(ctx context.Context, address string) (*m
 	}
 	var remote scanChallenge
 	var authErr error
+	tracked := false
 	remoteID := ""
 	session := newScanRPCSession()
 	session.service = service
@@ -304,12 +309,18 @@ func (service *nodeScanService) connect(ctx context.Context, address string) (*m
 		peer.operationPrefix = remote.OperationPrefix
 		peer.objectPeer = clusterObjectPeer{remote.Node, remote.Boot}
 		session.bindPeer(peer)
+		// Inbound callback decoding must see the same published connection
+		// before newMosiPeer admits its first application frame.
+		tracked = service.track(peer)
+		if !tracked {
+			peer.close()
+		}
 	})
 	if authErr != nil {
 		peer.wait()
 		return nil, "", authErr
 	}
-	if !service.track(peer) {
+	if !tracked {
 		peer.close()
 		peer.wait()
 		return nil, "", fmt.Errorf("node stopping")
@@ -346,6 +357,11 @@ func publishNodeScanService(service *nodeScanService) error {
 	return nil
 }
 func startNodeScans(secret string) error {
+	finishStart, err := beginNodeServiceStart()
+	if err != nil {
+		return err
+	}
+	defer finishStart()
 	service, err := newNodeScanService(secret)
 	if err != nil {
 		return err

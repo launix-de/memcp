@@ -1,0 +1,111 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: OBJECTPROPERTY classifications derive from current visible object declarations
+setup:
+  - sql: CREATE TABLE property_probe(id INT PRIMARY KEY)
+  - sql: CREATE TABLE property_child(id INT,parent_id INT,CONSTRAINT property_fk FOREIGN KEY(parent_id) REFERENCES property_probe(id))
+  - sql: CREATE VIEW property_view AS SELECT id FROM property_probe
+  - sql: CREATE PROCEDURE property_procedure AS SELECT 1 AS value
+  - sql: CREATE FUNCTION property_scalar() RETURNS INT AS BEGIN RETURN 1; END
+  - sql: CREATE TABLE property_saved(object_id INT,property NVARCHAR(128))
+  - sql: INSERT property_saved SELECT OBJECT_ID(N'property_probe'),N'IsUserTable'
+  - scm: (eval (parse_sql "memcp-tests" "CREATE USER property_reader IDENTIFIED BY 'pw'" nil))
+  - scm: (eval (parse_sql "memcp-tests" "CREATE USER property_hidden IDENTIFIED BY 'pw'" nil))
+  - scm: (eval (parse_sql "memcp-tests" "GRANT ALL ON `memcp-tests`.* TO property_reader" nil))
+cleanup:
+  - sql: DROP FUNCTION IF EXISTS property_scalar
+  - sql: DROP PROCEDURE IF EXISTS property_procedure
+  - sql: DROP VIEW IF EXISTS property_view
+  - sql: DROP TABLE IF EXISTS property_child
+  - sql: DROP TABLE IF EXISTS property_probe
+  - sql: DROP TABLE IF EXISTS property_saved
+  - scm: (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS property_reader" nil))
+  - scm: (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS property_hidden" nil))
+test_cases:
+  - name: Native table classification uses its actual catalog kind
+    sql: SELECT OBJECTPROPERTY(OBJECT_ID(N'property_probe'),N'IsUserTable') AS user_table,OBJECTPROPERTY(OBJECT_ID(N'property_probe'),N'IsView') AS view_flag
+    expect: {data: [{user_table: 1,view_flag: 0}]}
+  - name: Views do not become user tables
+    sql: SELECT OBJECTPROPERTY(OBJECT_ID(N'property_view'),N'IsView') AS view_flag,OBJECTPROPERTY(OBJECT_ID(N'property_view'),N'IsTable') AS table_flag
+    expect: {data: [{view_flag: 1,table_flag: 0}]}
+  - name: Stored procedure declarations retain their object kind
+    sql: SELECT OBJECTPROPERTY(OBJECT_ID(N'property_procedure'),N'IsProcedure') AS procedure_flag
+    expect: {data: [{procedure_flag: 1}]}
+  - name: Scalar function declarations retain their object kind
+    sql: SELECT OBJECTPROPERTY(OBJECT_ID(N'property_scalar'),N'IsScalarFunction') AS scalar_flag,OBJECTPROPERTY(OBJECT_ID(N'property_scalar'),N'IsTableFunction') AS table_function
+    expect: {data: [{scalar_flag: 1,table_function: 0}]}
+  - name: Foreign key classification consumes the constraint catalog identity
+    sql: SELECT name,OBJECTPROPERTY(object_id,N'IsForeignKey') AS foreign_flag,OBJECTPROPERTY(object_id,N'IsConstraint') AS constraint_flag FROM sys.objects WHERE name=N'property_fk'
+    expect: {data: [{name: property_fk,foreign_flag: 1,constraint_flag: 1}]}
+  - name: Executable classifications distinguish tables and views
+    sql: SELECT name,OBJECTPROPERTY(object_id,N'IsExecuted') AS executable_flag FROM sys.objects WHERE name IN(N'property_probe',N'property_view') ORDER BY name
+    expect: {data: [{name: property_probe,executable_flag: 0},{name: property_view,executable_flag: 1}]}
+  - name: Declared system views report their existing system classification
+    sql: SELECT OBJECTPROPERTY(OBJECT_ID(N'sys.objects'),N'IsMSShipped') AS shipped,OBJECTPROPERTY(OBJECT_ID(N'sys.objects'),N'IsView') AS view_flag,OBJECTPROPERTY(OBJECT_ID(N'sys.objects'),N'IsUserTable') AS user_table
+    expect: {data: [{shipped: 1,view_flag: 1,user_table: 0}]}
+  - name: Object and property arguments bind in their calling scope
+    sql: SELECT OBJECTPROPERTY(object_id,property) AS value FROM property_saved
+    expect: {data: [{value: 1}]}
+  - name: Catalog filtering preserves actual table membership
+    sql: SELECT name FROM sys.objects WHERE name LIKE N'property_%' AND OBJECTPROPERTY(object_id,N'IsUserTable')=1 ORDER BY name
+    expect: {data: [{name: property_child},{name: property_probe},{name: property_saved}]}
+  - name: Null extended catalog rows keep NULL property results
+    sql: SELECT OBJECTPROPERTY(o.object_id,N'IsUserTable') AS value FROM(SELECT 1 AS unit) seed LEFT JOIN sys.objects o ON o.object_id=-1
+    expect: {data: [{value: null}]}
+  - name: Lookalike user columns do not become an authoritative metadata producer
+    sql: SELECT OBJECTPROPERTY(object_id,N'IsUserTable') AS value FROM(SELECT -1 AS object_id,N'U' AS type,CAST(0 AS BIT) AS is_ms_shipped) spoof
+    expect: {data: [{value: null}]}
+  - name: Computed catalog identities retain the ordinary lookup semantics
+    sql: SELECT name,OBJECTPROPERTY(object_id+0,N'IsForeignKey') AS value FROM sys.objects WHERE name=N'property_fk'
+    expect: {data: [{name: property_fk,value: 1}]}
+  - name: Property spelling ignores case and trailing spaces
+    sql: SELECT OBJECTPROPERTY(OBJECT_ID(N'property_probe'),N'isusertable  ') AS value
+    expect: {data: [{value: 1}]}
+  - name: Unknown property names and leading spaces return NULL
+    sql: SELECT OBJECTPROPERTY(OBJECT_ID(N'property_probe'),N'UnknownProperty') AS missing_property,OBJECTPROPERTY(OBJECT_ID(N'property_probe'),N' IsUserTable') AS leading_property
+    expect: {data: [{missing_property: null,leading_property: null}]}
+  - name: Missing IDs and NULL arguments return NULL
+    sql: SELECT OBJECTPROPERTY(-1,N'IsUserTable') AS missing_object,OBJECTPROPERTY(NULL,N'IsUserTable') AS null_object,OBJECTPROPERTY(OBJECT_ID(N'property_probe'),NULL) AS null_property
+    expect: {data: [{missing_object: null,null_object: null,null_property: null}]}
+  - name: SQL result metadata retains an INT contract over TDS
+    tds:
+      statements:
+        - sql: SELECT OBJECTPROPERTY(OBJECT_ID(N'property_probe'),N'IsUserTable') AS value
+          expect: {data: [{value: 1}],column_types: [{name: value,type: INT}]}
+  - name: Scalar declarations and assignments publish their actual metadata callables
+    tds:
+      statements:
+        - sql: DECLARE @table_id INT=OBJECT_ID(N'property_probe'),@view_id INT; SET @view_id=OBJECT_ID(N'property_view'); SELECT OBJECTPROPERTY(@table_id,N'IsUserTable') AS table_flag,OBJECTPROPERTY(@view_id,N'IsView') AS view_flag
+          expect: {data: [{table_flag: 1,view_flag: 1}]}
+  - name: Native database members see the same classification without object ACLs
+    username: property_reader
+    password: pw
+    sql: SELECT OBJECTPROPERTY(OBJECT_ID(N'property_probe'),N'IsUserTable') AS value
+    expect: {data: [{value: 1}]}
+  - name: Missing native database access cannot disclose object metadata
+    username: property_hidden
+    password: pw
+    sql: SELECT OBJECTPROPERTY(OBJECT_ID(N'property_probe'),N'IsUserTable') AS value
+    expect: {error: true}
+  - name: Object IDs use the SQL integer conversion contract
+    sql: SELECT OBJECTPROPERTY('not-an-integer',N'IsUserTable')
+    expect: {error: true}
+  - name: The property intrinsic requires both arguments
+    sql: SELECT OBJECTPROPERTY(1)
+    expect: {error: true}
+  - name: Additional native table property metadata remains a positive implementation target
+    noncritical: true
+    sql: SELECT OBJECTPROPERTY(OBJECT_ID(N'property_probe'),N'TableHasPrimaryKey') AS value
+    expect: {data: [{value: 1}]}
+  - name: A retired native identity does not classify its replacement
+    setup:
+      - sql: DROP VIEW property_view
+      - sql: DROP TABLE property_child
+      - sql: DROP TABLE property_probe
+      - sql: CREATE TABLE property_probe(id INT PRIMARY KEY)
+    sql: SELECT OBJECTPROPERTY(object_id,property) AS value FROM property_saved
+    expect: {data: [{value: null}]}

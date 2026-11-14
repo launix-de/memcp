@@ -17,16 +17,16 @@ setup:
       (begin
         (define hit (string_repeat "commonneedle-" 512))
         (define miss (string_repeat "co--om--mm--mo--on--nn--ne--ee--ed--dl--le--" 170))
-        (insert (table "memcp-tests" false "boc_file" false) '("id" "filename" "body")
+        (insert (table "memcp-tests" false "boc_file" false nil) '("id" "filename" "body")
           (map (produceN 20000) (lambda (i)
             (list i "file" (if (equal? (mod i 2) 0) hit miss)))))
-        (insert (table "memcp-tests" false "boc_document" false) '("id" "file_id" "rank_value" "domain_id")
+        (insert (table "memcp-tests" false "boc_document" false nil) '("id" "file_id" "rank_value" "domain_id")
           (map (produceN 20000) (lambda (i) (list i i i (mod i 16)))))
-        (insert (table "memcp-tests" false "boc_acl" false) '("id" "allowed")
+        (insert (table "memcp-tests" false "boc_acl" false nil) '("id" "allowed")
           (map (produceN 16) (lambda (i) (list i 1))))
-        (rebuild (table "memcp-tests" false "boc_file" false) true false)
-        (rebuild (table "memcp-tests" false "boc_document" false) true false)
-        (rebuild (table "memcp-tests" false "boc_acl" false) true false))
+        (rebuild (table "memcp-tests" false "boc_file" false nil) true false)
+        (rebuild (table "memcp-tests" false "boc_document" false nil) true false)
+        (rebuild (table "memcp-tests" false "boc_acl" false nil) true false))
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS boc_document"
@@ -55,7 +55,7 @@ test_cases:
         (define sess (newsession))
         (define query "SELECT d.id, label.allowed FROM boc_document d LEFT JOIN boc_acl label ON label.id = d.domain_id WHERE d.file_id IN (SELECT id FROM boc_file WHERE filename LIKE '%alternate%' UNION SELECT id FROM boc_file WHERE body LIKE '%commonneedle%') AND EXISTS (SELECT 1 FROM boc_acl a WHERE a.id = d.domain_id AND a.allowed = 1) ORDER BY d.rank_value DESC LIMIT 5")
         (define formula (with_autocommit sess nil 1 query (lambda (tx)
-          (cached_parse cache (list parse_sql) "memcp-tests" query
+          (cached_parse cache "sql" (list parse_sql) "memcp-tests" query
             (sql_policy "root") "root" sess true tx))))
         (define code (serialize formula))
         (if (and (strlike code "%scan_order_batch_accept%")
@@ -120,7 +120,7 @@ test_cases:
   - name: "A complete scan learns the source LIKE selectivity"
     scm: |
       (begin
-        (define tbl (table "memcp-tests" false "boc_file" false))
+        (define tbl (table "memcp-tests" false "boc_file" false nil))
         (define callback (list 'lambda (list 'x)
           (list 'strlike 'x "%commonneedle%" "utf8mb4_general_ci")))
         (define access (eval (cons (quote list) (slice (compile_scan_plan (quote scan) nil nil '("body") callback '()) 3 5))))

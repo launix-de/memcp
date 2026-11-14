@@ -31,6 +31,9 @@ setup:
   - sql: "INSERT INTO dns_b (id, ref_c) VALUES (1000, 100), (2000, 200), (3000, 300)"
   - sql: "INSERT INTO dns_a (id, ref_b) VALUES (1, 1000), (2, 2000), (3, 3000)"
 
+  - sql: "CREATE TABLE dns_probe_driver (id INT, ref_b INT)"
+  - sql: "INSERT INTO dns_probe_driver VALUES (1,1000),(1,1000),(2,2000),(3,3000),(4,NULL),(5,9999)"
+
 test_cases:
 
   # === Depth 3: a -> b -> c ===
@@ -261,7 +264,170 @@ test_cases:
       data:
         - id: 2
 
+  - name: "mysql nested lookup keys survive inherited domain reads"
+    syntax: mysql
+    sql: |
+      SELECT bounds.lo, category.wanted,
+        (SELECT COUNT(*) FROM dns_a a
+          WHERE a.id BETWEEN bounds.lo AND bounds.lo + 1 AND (
+            SELECT e.val FROM dns_e e WHERE e.id = (
+              SELECT d.ref_e FROM dns_d d WHERE d.id = (
+                SELECT c.ref_d FROM dns_c c WHERE c.id = (
+                  SELECT b.ref_c FROM dns_b b WHERE b.id = a.ref_b LIMIT 1
+                ) LIMIT 1
+              ) LIMIT 1
+            ) LIMIT 1
+          ) = category.wanted) AS matched
+      FROM (SELECT 1 AS lo UNION ALL SELECT 3 UNION ALL SELECT 5) bounds
+      CROSS JOIN (SELECT 'alpha' AS wanted UNION ALL SELECT 'gamma') category
+      ORDER BY bounds.lo, category.wanted
+    expect:
+      rows: 6
+      data:
+        - {lo: 1, wanted: alpha, matched: 1}
+        - {lo: 1, wanted: gamma, matched: 0}
+        - {lo: 3, wanted: alpha, matched: 0}
+        - {lo: 3, wanted: gamma, matched: 1}
+        - {lo: 5, wanted: alpha, matched: 0}
+        - {lo: 5, wanted: gamma, matched: 0}
+
+  - name: "psql nested lookup keys survive inherited domain reads"
+    syntax: psql
+    sql: |
+      SELECT bounds.lo, category.wanted,
+        (SELECT COUNT(*) FROM dns_a a
+          WHERE a.id BETWEEN bounds.lo AND bounds.lo + 1 AND (
+            SELECT e.val FROM dns_e e WHERE e.id = (
+              SELECT d.ref_e FROM dns_d d WHERE d.id = (
+                SELECT c.ref_d FROM dns_c c WHERE c.id = (
+                  SELECT b.ref_c FROM dns_b b WHERE b.id = a.ref_b LIMIT 1
+                ) LIMIT 1
+              ) LIMIT 1
+            ) LIMIT 1
+          ) = category.wanted) AS matched
+      FROM (SELECT 1 AS lo UNION ALL SELECT 3 UNION ALL SELECT 5) bounds
+      CROSS JOIN (SELECT 'alpha' AS wanted UNION ALL SELECT 'gamma') category
+      ORDER BY bounds.lo, category.wanted
+    expect:
+      rows: 6
+      data:
+        - {lo: 1, wanted: alpha, matched: 1}
+        - {lo: 1, wanted: gamma, matched: 0}
+        - {lo: 3, wanted: alpha, matched: 0}
+        - {lo: 3, wanted: gamma, matched: 1}
+        - {lo: 5, wanted: alpha, matched: 0}
+        - {lo: 5, wanted: gamma, matched: 0}
+
+  - name: "tsql nested lookup keys survive inherited domain reads"
+    syntax: tsql
+    sql: |
+      SELECT bounds.lo, category.wanted,
+        (SELECT COUNT(*) FROM dns_a a
+          WHERE a.id BETWEEN bounds.lo AND bounds.lo + 1 AND (
+            SELECT TOP 1 e.val FROM dns_e e WHERE e.id = (
+              SELECT TOP 1 d.ref_e FROM dns_d d WHERE d.id = (
+                SELECT TOP 1 c.ref_d FROM dns_c c WHERE c.id = (
+                  SELECT TOP 1 b.ref_c FROM dns_b b WHERE b.id = a.ref_b
+                )
+              )
+            )
+          ) = category.wanted) AS matched
+      FROM (SELECT 1 AS lo UNION ALL SELECT 3 UNION ALL SELECT 5) bounds
+      CROSS JOIN (SELECT 'alpha' AS wanted UNION ALL SELECT 'gamma') category
+      ORDER BY bounds.lo, category.wanted
+    expect:
+      rows: 6
+      data:
+        - {lo: 1, wanted: alpha, matched: 1}
+        - {lo: 1, wanted: gamma, matched: 0}
+        - {lo: 3, wanted: alpha, matched: 0}
+        - {lo: 3, wanted: gamma, matched: 1}
+        - {lo: 5, wanted: alpha, matched: 0}
+        - {lo: 5, wanted: gamma, matched: 0}
+
+  - name: "mysql nested lookup keys preserve duplicate and missing input paths"
+    syntax: mysql
+    sql: |
+      SELECT bounds.lo, category.wanted,
+        (SELECT COUNT(*) FROM dns_probe_driver a
+          WHERE a.id BETWEEN bounds.lo AND bounds.lo + 1 AND (
+            SELECT e.val FROM dns_e e WHERE e.id = (
+              SELECT d.ref_e FROM dns_d d WHERE d.id = (
+                SELECT c.ref_d FROM dns_c c WHERE c.id = (
+                  SELECT b.ref_c FROM dns_b b WHERE b.id = a.ref_b LIMIT 1
+                ) LIMIT 1
+              ) LIMIT 1
+            ) LIMIT 1
+          ) = category.wanted) AS matched
+      FROM (SELECT 1 AS lo UNION ALL SELECT 3 UNION ALL SELECT 5) bounds
+      CROSS JOIN (SELECT 'alpha' AS wanted UNION ALL SELECT 'gamma') category
+      ORDER BY bounds.lo, category.wanted
+    expect:
+      rows: 6
+      data:
+        - {lo: 1, wanted: alpha, matched: 2}
+        - {lo: 1, wanted: gamma, matched: 0}
+        - {lo: 3, wanted: alpha, matched: 0}
+        - {lo: 3, wanted: gamma, matched: 1}
+        - {lo: 5, wanted: alpha, matched: 0}
+        - {lo: 5, wanted: gamma, matched: 0}
+
+  - name: "psql nested lookup keys preserve duplicate and missing input paths"
+    syntax: psql
+    sql: |
+      SELECT bounds.lo, category.wanted,
+        (SELECT COUNT(*) FROM dns_probe_driver a
+          WHERE a.id BETWEEN bounds.lo AND bounds.lo + 1 AND (
+            SELECT e.val FROM dns_e e WHERE e.id = (
+              SELECT d.ref_e FROM dns_d d WHERE d.id = (
+                SELECT c.ref_d FROM dns_c c WHERE c.id = (
+                  SELECT b.ref_c FROM dns_b b WHERE b.id = a.ref_b LIMIT 1
+                ) LIMIT 1
+              ) LIMIT 1
+            ) LIMIT 1
+          ) = category.wanted) AS matched
+      FROM (SELECT 1 AS lo UNION ALL SELECT 3 UNION ALL SELECT 5) bounds
+      CROSS JOIN (SELECT 'alpha' AS wanted UNION ALL SELECT 'gamma') category
+      ORDER BY bounds.lo, category.wanted
+    expect:
+      rows: 6
+      data:
+        - {lo: 1, wanted: alpha, matched: 2}
+        - {lo: 1, wanted: gamma, matched: 0}
+        - {lo: 3, wanted: alpha, matched: 0}
+        - {lo: 3, wanted: gamma, matched: 1}
+        - {lo: 5, wanted: alpha, matched: 0}
+        - {lo: 5, wanted: gamma, matched: 0}
+
+  - name: "tsql nested lookup keys preserve duplicate and missing input paths"
+    syntax: tsql
+    sql: |
+      SELECT bounds.lo, category.wanted,
+        (SELECT COUNT(*) FROM dns_probe_driver a
+          WHERE a.id BETWEEN bounds.lo AND bounds.lo + 1 AND (
+            SELECT TOP 1 e.val FROM dns_e e WHERE e.id = (
+              SELECT TOP 1 d.ref_e FROM dns_d d WHERE d.id = (
+                SELECT TOP 1 c.ref_d FROM dns_c c WHERE c.id = (
+                  SELECT TOP 1 b.ref_c FROM dns_b b WHERE b.id = a.ref_b
+                )
+              )
+            )
+          ) = category.wanted) AS matched
+      FROM (SELECT 1 AS lo UNION ALL SELECT 3 UNION ALL SELECT 5) bounds
+      CROSS JOIN (SELECT 'alpha' AS wanted UNION ALL SELECT 'gamma') category
+      ORDER BY bounds.lo, category.wanted
+    expect:
+      rows: 6
+      data:
+        - {lo: 1, wanted: alpha, matched: 2}
+        - {lo: 1, wanted: gamma, matched: 0}
+        - {lo: 3, wanted: alpha, matched: 0}
+        - {lo: 3, wanted: gamma, matched: 1}
+        - {lo: 5, wanted: alpha, matched: 0}
+        - {lo: 5, wanted: gamma, matched: 0}
+
 cleanup:
+  - sql: "DROP TABLE IF EXISTS dns_probe_driver"
   - sql: "DROP TABLE IF EXISTS dns_a"
   - sql: "DROP TABLE IF EXISTS dns_b"
   - sql: "DROP TABLE IF EXISTS dns_c"

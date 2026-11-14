@@ -1,3 +1,5 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
 # DDL Operations Test Suite
 # Data Definition Language: CREATE, DROP, ALTER operations with affected_rows
 
@@ -28,27 +30,57 @@ test_cases:
   - name: "CREATE TABLE basic structure"
     sql: "CREATE TABLE users (id INT, name VARCHAR(50))"
     expect:
-      affected_rows: 1
+      affected_rows: 0
+      result_contains: '"affected_rows"'
+
+  - name: "Completed MySQL declaration is present: CREATE TABLE basic structure"
+    syntax: mysql
+    sql: "SHOW CREATE TABLE users"
+    expect: {rows: 1,data: [{Table: "users"}]}
 
   - name: "CREATE TABLE with multiple columns"
     sql: "CREATE TABLE products (id INT, name VARCHAR(100), price DECIMAL(10,2), description TEXT)"
     expect:
-      affected_rows: 1
+      affected_rows: 0
+      result_contains: '"affected_rows"'
+
+  - name: "Completed MySQL declaration is present: CREATE TABLE with multiple columns"
+    syntax: mysql
+    sql: "SHOW CREATE TABLE products"
+    expect: {rows: 1,data: [{Table: "products"}]}
 
   - name: "CREATE TABLE with constraints"
     sql: "CREATE TABLE orders (id INT PRIMARY KEY, user_id INT, total DECIMAL(10,2), status VARCHAR(20))"
     expect:
-      affected_rows: 1
+      affected_rows: 0
+      result_contains: '"affected_rows"'
+
+  - name: "Completed MySQL declaration is present: CREATE TABLE with constraints"
+    syntax: mysql
+    sql: "SHOW CREATE TABLE orders"
+    expect: {rows: 1,data: [{Table: "orders"}]}
 
   - name: "CREATE TABLE with IF NOT EXISTS"
     sql: "CREATE TABLE IF NOT EXISTS customers (id INT, name VARCHAR(100))"
     expect:
-      affected_rows: 1
+      affected_rows: 0
+      result_contains: '"affected_rows"'
+
+  - name: "Completed MySQL declaration is present: CREATE TABLE with IF NOT EXISTS"
+    syntax: mysql
+    sql: "SHOW CREATE TABLE customers"
+    expect: {rows: 1,data: [{Table: "customers"}]}
 
   - name: "CREATE TABLE with IF NOT EXISTS (already exists)"
     sql: "CREATE TABLE IF NOT EXISTS users (id INT, email VARCHAR(200))"
     expect:
-      affected_rows: 1
+      affected_rows: 0
+      result_contains: '"affected_rows"'
+
+  - name: "Completed MySQL declaration is present: CREATE TABLE with IF NOT EXISTS (already exists)"
+    syntax: mysql
+    sql: "SHOW CREATE TABLE users"
+    expect: {rows: 1,data: [{Table: "users"}]}
 
   - name: "CREATE TABLE with various data types"
     sql: |
@@ -61,14 +93,27 @@ test_cases:
         notes TEXT
       )
     expect:
-      affected_rows: 1
+      affected_rows: 0
+      result_contains: '"affected_rows"'
+
+  - name: "Completed MySQL declaration is present: CREATE TABLE with various data types"
+    syntax: mysql
+    sql: "SHOW CREATE TABLE test_types"
+    expect: {rows: 1,data: [{Table: "test_types"}]}
 
   - name: "CREATE TABLE with ENGINE specification"
     sql: "CREATE TABLE memory_table (id INT, data VARCHAR(100)) ENGINE=MEMORY"
     expect:
-      affected_rows: 1
+      affected_rows: 0
+      result_contains: '"affected_rows"'
 
   # === SHOW OPERATIONS ===
+
+  - name: "Completed MySQL declaration is present: CREATE TABLE with ENGINE specification"
+    syntax: mysql
+    sql: "SHOW CREATE TABLE memory_table"
+    expect: {rows: 1,data: [{Table: "memory_table"}]}
+
   - name: "SHOW DATABASES"
     sql: "SHOW DATABASES"
     expect: {}  # Environment dependent, just check it runs
@@ -228,7 +273,13 @@ test_cases:
 
   - name: "ALTER TABLE ADD FOREIGN KEY"
     sql: "ALTER TABLE users ADD FOREIGN KEY (id) REFERENCES users(id) ON UPDATE CASCADE ON DELETE RESTRICT"
-    expect: {}
+    # Preserve the historical input and identity: MySQL forbids a column's
+    # reference to itself, and users.id has no referenced index either.
+    # Legal cross-column self references have positive transaction coverage.
+    # https://dev.mysql.com/doc/refman/8.4/en/create-table-foreign-keys.html
+    expect:
+      error: true
+      contains: foreign
 
   - name: "ALTER TABLE DROP FOREIGN KEY noop"
     sql: "ALTER TABLE users DROP FOREIGN KEY fk_dummy"

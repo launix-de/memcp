@@ -268,12 +268,12 @@ test_cases:
       (begin
         (define cache (newcachemap))
         (define sess (newsession))
-        (cached_parse cache (lambda (_schema _query _policy) 7)
+        (cached_parse cache "sql" (lambda (_schema _query _policy) 7)
           "memcp-tests" "SELECT id FROM ps_test WHERE id = 1 LIMIT 1 OFFSET 0"
-          nil "root" sess true)
-        (cached_parse cache (lambda (_schema _query _policy) 7)
+          nil "root" sess true nil)
+        (cached_parse cache "sql" (lambda (_schema _query _policy) 7)
           "memcp-tests" "SELECT id FROM ps_test WHERE id = 2 LIMIT 2 OFFSET 1"
-          nil "root" sess true)
+          nil "root" sess true nil)
         (if (and
           (equal? (count (cache)) 1)
           (equal? (sess "v1") 2)
@@ -377,12 +377,12 @@ test_cases:
       (begin
         (define cache (newcachemap))
         (define sess (newsession))
-        (cached_parse cache (lambda (_schema _query _policy) 7)
+        (cached_parse cache "sql" (lambda (_schema _query _policy) 7)
           "memcp-tests" "SELECT wrapped.id FROM (SELECT inner_row.id FROM ps_test inner_row WHERE inner_row.score >= 6) wrapped WHERE wrapped.id >= 1 LIMIT 2"
-          nil "root" sess true)
-        (cached_parse cache (lambda (_schema _query _policy) 7)
+          nil "root" sess true nil)
+        (cached_parse cache "sql" (lambda (_schema _query _policy) 7)
           "memcp-tests" "SELECT wrapped.id FROM (SELECT inner_row.id FROM ps_test inner_row WHERE inner_row.score >= 7) wrapped WHERE wrapped.id >= 2 LIMIT 4"
-          nil "root" sess true)
+          nil "root" sess true nil)
         (if (and
           (equal? (count (cache)) 1)
           (equal? (sess "v1") 7)
@@ -407,18 +407,18 @@ test_cases:
           (compiles (string (count (compiles))) value)
           (list (quote quote) (if broad "broad" "selective")))))
         (sess "v1" "%C%")
-        (define first_formula (cached_parse cache (list parser) "memcp-tests"
-          "SELECT id FROM ps_test WHERE name LIKE ?" nil "root" sess true))
+        (define first_formula (cached_parse cache "sql" (list parser) "memcp-tests"
+          "SELECT id FROM ps_test WHERE name LIKE ?" nil "root" sess true nil))
         (define first_result (sql_execute_formula sess nil first_formula
           (lambda (_row) nil) (lambda (_fields) nil)))
         (sess "v1" "%Needle389%")
-        (define second_formula (cached_parse cache (list parser) "memcp-tests"
-          "SELECT id FROM ps_test WHERE name LIKE ?" nil "root" sess true))
+        (define second_formula (cached_parse cache "sql" (list parser) "memcp-tests"
+          "SELECT id FROM ps_test WHERE name LIKE ?" nil "root" sess true nil))
         (define second_result (sql_execute_formula sess nil second_formula
           (lambda (_row) nil) (lambda (_fields) nil)))
         (sess "v1" "%AnotherSelectiveValue%")
-        (define third_formula (cached_parse cache (list parser) "memcp-tests"
-          "SELECT id FROM ps_test WHERE name LIKE ?" nil "root" sess true))
+        (define third_formula (cached_parse cache "sql" (list parser) "memcp-tests"
+          "SELECT id FROM ps_test WHERE name LIKE ?" nil "root" sess true nil))
         (define third_result (sql_execute_formula sess nil third_formula
           (lambda (_row) nil) (lambda (_fields) nil)))
         (define entry (car (cache (car (cache)))))
@@ -430,8 +430,8 @@ test_cases:
           (equal? (count (compiles)) 2)
           (equal? (count (entry "variants")) 2)
           (strlike (pretty_print latest_formula 120) "%(lambda (session tx resultrow resultfields)%")
-          ((sql_queryplan_compile_formula nil (car (car (entry "variants"))))
-            sess nil (lambda (_row) nil) (lambda (_fields) nil)))
+          (not (nil? (sql_queryplan_matching_variant (list (car (entry "variants")))
+            sess nil (lambda (_row) nil) (lambda (_fields) nil)))))
           "ok"
           (error (concat "unexpected guarded cache state: " first_result "/" second_result "/" third_result
             " compiles=" (count (compiles)) " values=" (string (map (compiles) (lambda (key) (compiles key))))
@@ -456,13 +456,13 @@ test_cases:
         (define results (map (produceN 12) (lambda (value) (begin
           (sess "v1" value)
           (sql_execute_formula sess nil
-            (cached_parse cache (list parser) "memcp-tests" query nil "root" sess true)
+            (cached_parse cache "sql" (list parser) "memcp-tests" query nil "root" sess true nil)
             (lambda (_row) nil) (lambda (_fields) nil))))))
         (define entry (car (cache (car (cache)))))
         (define bounded_count (count (entry "variants")))
         (sess "v1" 0)
         (define revisited (sql_execute_formula sess nil
-          (cached_parse cache (list parser) "memcp-tests" query nil "root" sess true)
+          (cached_parse cache "sql" (list parser) "memcp-tests" query nil "root" sess true nil)
           (lambda (_row) nil) (lambda (_fields) nil)))
         (if (and
           (equal? results (produceN 12))
@@ -484,7 +484,8 @@ test_cases:
             (define entry (newsession))
             (define state (newsession))
             (entry "compile_lock" (mutex))
-            (entry "variants" (list (list false nil)))
+            (entry "variants" (list (list
+              (lambda (_session _tx _resultrow _resultfields) false) nil '())))
             (globalvars "guarded_plan_cancel_cache" cache)
             (globalvars "guarded_plan_cancel_entry" entry)
             (globalvars "guarded_plan_cancel_state" state)
@@ -568,13 +569,13 @@ test_cases:
           (compiles (string value) true)
           (list (quote quote) value))))
         (sess "v1" "first")
-        (define first_formula (cached_parse cache (list parser) "memcp-tests"
-          "SELECT id FROM ps_test WHERE name LIKE ?" nil "root" sess true))
+        (define first_formula (cached_parse cache "sql" (list parser) "memcp-tests"
+          "SELECT id FROM ps_test WHERE name LIKE ?" nil "root" sess true nil))
         (define first_result (sql_execute_formula sess nil first_formula
           (lambda (_row) nil) (lambda (_fields) nil)))
         (sess "v1" "second")
-        (define second_formula (cached_parse cache (list parser) "memcp-tests"
-          "SELECT id FROM ps_test WHERE name LIKE ?" nil "root" sess true))
+        (define second_formula (cached_parse cache "sql" (list parser) "memcp-tests"
+          "SELECT id FROM ps_test WHERE name LIKE ?" nil "root" sess true nil))
         (define second_result (sql_execute_formula sess nil second_formula
           (lambda (_row) nil) (lambda (_fields) nil)))
         (define entry (car (cache (car (cache)))))
@@ -605,7 +606,7 @@ test_cases:
               (list "left" (planning "left") (list (quote session) "left"))
               (list "right" (planning "right") (list (quote session) "right")))
             (list (list '("left" "right") 0.01 nil nil true nil 0.01))
-            '() planning))))
+            '() planning nil))))
         (define guard (sql_queryplan_compile_formula nil
           (sql_queryplan_bind_execution_session (sql_queryplan_guard_from_session planning))))
         (define initially_valid (guard planning nil (lambda (_row) nil) (lambda (_fields) nil)))
@@ -684,9 +685,9 @@ test_cases:
         (define execution_session (newsession))
         (execution_session "v1" 7)
         (define formula
-          (cached_parse (newcachemap) (list parse_sql) "memcp-tests" "SELECT ?"
+          (cached_parse (newcachemap) "sql" (list parse_sql) "memcp-tests" "SELECT ?"
             (lambda (_schema _table _write) true)
-            "root" execution_session false))
+            "root" execution_session false nil))
         (define resultrow (lambda (row) (cadr row)))
         (define first (sql_execute_formula execution_session nil formula resultrow (lambda (_fields) nil)))
         (execution_session "v1" 9)
@@ -707,14 +708,14 @@ test_cases:
         (sess "schema" "memcp-tests")
         (define resultrow (lambda (_row) nil))
         (define query "SELECT l.id FROM ps_guard_left l JOIN ps_guard_right r ON r.id = l.rhs ORDER BY l.id")
-        (define first_formula (cached_parse cache (list parse_sql) "memcp-tests" query nil "root" sess true))
+        (define first_formula (cached_parse cache "sql" (list parse_sql) "memcp-tests" query nil "root" sess true nil))
         (sql_execute_formula sess nil first_formula resultrow (lambda (_fields) nil))
         (define entry (car (cache (car (cache)))))
         (define variants_after_first (count (entry "variants")))
-        (insert (table "memcp-tests" false "ps_guard_right" false) '("id")
+        (insert (table "memcp-tests" false "ps_guard_right" false nil) '("id")
           (map (produceN 500) (lambda (i) (list (+ i 2)))))
-        (rebuild (table "memcp-tests" false "ps_guard_right" false) true false)
-        (define second_formula (cached_parse cache (list parse_sql) "memcp-tests" query nil "root" sess true))
+        (rebuild (table "memcp-tests" false "ps_guard_right" false nil) true false)
+        (define second_formula (cached_parse cache "sql" (list parse_sql) "memcp-tests" query nil "root" sess true nil))
         (sql_execute_formula sess nil second_formula resultrow (lambda (_fields) nil))
         (if (and (equal? variants_after_first 1) (equal? (count (entry "variants")) 2))
           "ok"
@@ -734,23 +735,23 @@ test_cases:
         /* ORDER BY fixes the left driver here. Rebuilding the right table changes
         its physical generation, but cannot change the winning plan. */
         (define query "SELECT l.id FROM ps_guard_left l JOIN ps_guard_right r ON r.id = l.rhs ORDER BY l.id")
-        (define right_table (table "memcp-tests" false "ps_guard_right" false))
+        (define right_table (table "memcp-tests" false "ps_guard_right" false nil))
         (rebuild right_table true false)
         (define first_statistics (table_planner_statistics right_table))
         (sql_execute_formula sess nil
-          (cached_parse cache (list parse_sql) "memcp-tests" query nil "root" sess true)
+          (cached_parse cache "sql" (list parse_sql) "memcp-tests" query nil "root" sess true nil)
           resultrow (lambda (_fields) nil))
         (define entry (car (cache (car (cache)))))
         (rebuild right_table true false)
         (define second_statistics (table_planner_statistics right_table))
         (sql_execute_formula sess nil
-          (cached_parse cache (list parse_sql) "memcp-tests" query nil "root" sess true)
+          (cached_parse cache "sql" (list parse_sql) "memcp-tests" query nil "root" sess true nil)
           resultrow (lambda (_fields) nil))
         /* Rebuilding unchanged rows must preserve concrete statistics and must
         not accumulate plan variants. No generation or hash is consulted. */
         (rebuild right_table true false)
         (sql_execute_formula sess nil
-          (cached_parse cache (list parse_sql) "memcp-tests" query nil "root" sess true)
+          (cached_parse cache "sql" (list parse_sql) "memcp-tests" query nil "root" sess true nil)
           resultrow (lambda (_fields) nil))
         (if (and
           (equal? first_statistics second_statistics)
@@ -770,14 +771,14 @@ test_cases:
         (sess "schema" "memcp-tests")
         (define resultrow (lambda (_row) nil))
         (define query "SELECT l.id FROM ps_guard_left l JOIN ps_guard_many r ON r.id = l.rhs")
-        (define first_formula (cached_parse cache (list parse_sql) "memcp-tests" query nil "root" sess true))
+        (define first_formula (cached_parse cache "sql" (list parse_sql) "memcp-tests" query nil "root" sess true))
         (sql_execute_formula sess nil first_formula resultrow (lambda (_fields) nil))
         (define entry (car (cache (car (cache)))))
         (define variants_after_first (count (entry "variants")))
-        (insert (table "memcp-tests" false "ps_guard_many" false) '("id")
+        (insert (table "memcp-tests" false "ps_guard_many" false nil) '("id")
           (map (produceN 500) (lambda (i) (list (+ i 2)))))
-        (rebuild (table "memcp-tests" false "ps_guard_many" false) true false)
-        (define second_formula (cached_parse cache (list parse_sql) "memcp-tests" query nil "root" sess true))
+        (rebuild (table "memcp-tests" false "ps_guard_many" false nil) true false)
+        (define second_formula (cached_parse cache "sql" (list parse_sql) "memcp-tests" query nil "root" sess true))
         (sql_execute_formula sess nil second_formula resultrow (lambda (_fields) nil))
         (if (and (equal? variants_after_first 1) (equal? (count (entry "variants")) 2))
           "ok"
@@ -818,15 +819,15 @@ test_cases:
           (compiles (string (count (compiles))) direct)
           (list (quote quote) (if direct "probe" "carrier")))))
         (sess "v1" 5)
-        (define first_formula (cached_parse cache (list parser) "memcp-tests"
+        (define first_formula (cached_parse cache "sql" (list parser) "memcp-tests"
           "SELECT EXISTS (SELECT id FROM ps_test LIMIT 1) FROM ps_test LIMIT ?"
-          nil "root" sess true))
+          nil "root" sess true nil))
         (define first_result (sql_execute_formula sess nil first_formula
           (lambda (_row) nil) (lambda (_fields) nil)))
         (sess "v1" 10000)
-        (define second_formula (cached_parse cache (list parser) "memcp-tests"
+        (define second_formula (cached_parse cache "sql" (list parser) "memcp-tests"
           "SELECT EXISTS (SELECT id FROM ps_test LIMIT 1) FROM ps_test LIMIT ?"
-          nil "root" sess true))
+          nil "root" sess true nil))
         (define second_result (sql_execute_formula sess nil second_formula
           (lambda (_row) nil) (lambda (_fields) nil)))
         (define entry (car (cache (car (cache)))))
@@ -936,7 +937,13 @@ test_cases:
   - name: "setup ps_unique table"
     sql: "CREATE TABLE ps_unique (id int, val text, UNIQUE KEY id_unique (id))"
     expect:
-      affected_rows: 1
+      affected_rows: 0
+      result_contains: '"affected_rows"'
+
+  - name: "Completed MySQL declaration is present: setup ps_unique table"
+    syntax: mysql
+    sql: "SHOW CREATE TABLE ps_unique"
+    expect: {rows: 1,data: [{Table: "ps_unique"}]}
 
   - name: "INSERT IGNORE with ? placeholders"
     sql: "INSERT IGNORE INTO ps_unique (id, val) VALUES (?, ?)"
@@ -985,3 +992,94 @@ test_cases:
     sql: "SELECT id FROM ps_test WHERE id = ?"
     expect:
       rows: 0
+
+  - name: "Canonical compiler binds nested native metadata callbacks to their request"
+    scm: |
+      (begin
+        (define s (newsession)) (s "username" "root") (tx_begin s)
+        (define tx (s "__memcp_tx"))
+        (createtable "memcp-tests" "ps_private_callback"
+          (list (list "column" "id" "INT" '() '())) '() false tx)
+        (define literal (list (quote show) "memcp-tests" "ps_private_callback"))
+        (define body (list (quote lambda) '()
+          (list (quote list) literal
+            (list (quote show) "memcp-tests" "ps_private_callback" "constraints")
+            (list (quote connection_id)) (list (quote quote) literal))))
+        (define compiled (sql_queryplan_compile_formula tx body))
+        (define callback (compiled s tx (lambda (_row) nil) (lambda (_fields) nil)))
+        (define values (callback))
+        (define result (and
+          (nil? (table "memcp-tests" false "ps_private_callback" false nil))
+          (equal? ((car (nth values 0)) "Field") "id")
+          (has_assoc? (nth values 1) "Unique")
+          (equal? (nth values 2) (tx_connection_id tx))
+          (expression_equal? (nth values 3) literal)))
+        (tx_rollback s) result)
+    expect: {result: true}
+
+  - name: "Canonical compiler preserves nil contexts and quoted search program values"
+    scm: |
+      (begin
+        (define literal (list (quote connection_id)))
+        (define program (list sql_text_search_prepare
+          (list (quote concat) "term" (list (quote connection_id)))))
+        (define body (list (quote list) (list (quote connection_id))
+          program program (list (quote quote) literal)))
+        (define compiled (sql_queryplan_compile_formula nil body))
+        (define values (compiled (newsession) nil (lambda (_row) nil) (lambda (_fields) nil)))
+        (and (equal? (nth values 0) 0)
+          (expression_equal? (nth values 1) (sql_text_search_prepare "term0"))
+          (expression_equal? (nth values 1) (nth values 2))
+          (expression_equal? (nth values 3) literal)))
+    expect: {result: true}
+
+  - name: "Search preparation in a callable lambda head retains its lexical parameter"
+    scm: |
+      (begin
+        (define s (newsession))
+        (define body (list
+          (list (quote lambda) (list (quote term)) (list sql_text_search_prepare (quote term)))
+          (list (quote session) "term")))
+        (define compiled (sql_queryplan_compile_formula nil body))
+        (s "term" "alpha")
+        (define first (compiled s nil (lambda (_row) nil) (lambda (_fields) nil)))
+        (s "term" "beta")
+        (define second (compiled s nil (lambda (_row) nil) (lambda (_fields) nil)))
+        (and (expression_equal? first (sql_text_search_prepare "alpha"))
+          (expression_equal? second (sql_text_search_prepare "beta"))))
+    expect: {result: true}
+
+  - name: "Annotated callable heads retain request primitives and quoted data"
+    scm: |
+      (begin
+        (define s (newsession)) (s "username" "root") (tx_begin s)
+        (define tx (s "__memcp_tx"))
+        (define literal (source "literal" 1 1 (list (quote connection_id))))
+        (define callable (source "callback" 2 1
+          (list (quote lambda) '()
+            (list (quote list)
+              (source "request" 3 1 (list (quote connection_id)))
+              (source "quoted" 4 1 (list (quote quote) literal))))))
+        (define compiled (sql_queryplan_compile_formula tx (list callable)))
+        (define values (compiled s tx (lambda (_row) nil) (lambda (_fields) nil)))
+        (define result (and (equal? (car values) (tx_connection_id tx))
+          (expression_equal? (cadr values) literal)))
+        (tx_rollback s) result)
+    expect: {result: true}
+
+  - name: "Invalid boolean call heads remain errors in compiled request formulas"
+    scm: |
+      (try (lambda () (begin
+        (define compiled (sql_queryplan_compile_formula nil (list true)))
+        (compiled (newsession) nil (lambda (_row) nil) (lambda (_fields) nil)) false))
+        (lambda (_error) true))
+    expect: {result: true}
+
+  - name: "String call heads cannot become session capabilities during binding"
+    scm: |
+      (try (lambda () (begin
+        (define bound (sql_queryplan_bind_execution_session (list "context" "session")))
+        (define compiled (sql_queryplan_compile_formula nil bound))
+        (compiled (newsession) nil (lambda (_row) nil) (lambda (_fields) nil)) false))
+        (lambda (_error) true))
+    expect: {result: true}

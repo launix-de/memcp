@@ -1,0 +1,106 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  requires_tds: true
+  description: Full-percent TOP and the binding scope of nested ORDER BY
+setup:
+- sql: CREATE TABLE percent_scores(id INT PRIMARY KEY,score INT)
+- sql: INSERT INTO percent_scores VALUES(1,70),(2,10),(3,90),(4,30)
+cleanup:
+- sql: DROP VIEW IF EXISTS dbo.percent_union
+- sql: DROP VIEW IF EXISTS dbo.percent_invalid
+- sql: DROP TABLE IF EXISTS percent_scores
+test_cases:
+- name: Full-percent TOP retains all rows and honors a result ORDER BY
+  sql: SELECT TOP 100 PERCENT id FROM percent_scores ORDER BY score DESC
+  expect: {rows: 4,data: [{id: 3},{id: 1},{id: 4},{id: 2}]}
+- name: Parenthesized decimal 100 percent is also a full result
+  sql: SELECT TOP (100.0) PERCENT id FROM percent_scores ORDER BY id DESC
+  expect: {rows: 4,data: [{id: 4},{id: 3},{id: 2},{id: 1}]}
+- name: Counted TOP still chooses the requested number of ordered rows
+  sql: SELECT TOP (2) id FROM percent_scores ORDER BY score DESC
+  expect: {rows: 2,data: [{id: 3},{id: 1}]}
+- name: Fractional percentage selection reports its unsupported profile
+  sql: SELECT TOP (37.5) PERCENT id FROM percent_scores ORDER BY id
+  expect: {error: true,contains: TOP PERCENT currently requires a literal 100}
+- name: TOP PERCENT and OFFSET are incompatible within one SELECT
+  sql: SELECT TOP 100 PERCENT id FROM percent_scores ORDER BY id OFFSET 0 ROWS
+  expect: {error: true,contains: TOP cannot be combined with OFFSET}
+- name: A derived TOP PERCENT exposes all rows to the consuming order
+  sql: SELECT d.id FROM (SELECT TOP (100) PERCENT id FROM percent_scores ORDER BY score DESC) AS d WHERE d.id>1 ORDER BY d.id
+  expect: {rows: 3,data: [{id: 2},{id: 3},{id: 4}]}
+- name: A valid qualified wildcard contributes all positions to nested ORDER BY
+  sql: SELECT d.id FROM (SELECT TOP 100 PERCENT s.* FROM dbo.percent_scores AS s ORDER BY 2 DESC) AS d WHERE d.id=3
+  expect: {rows: 1,data: [{id: 3}]}
+- name: A bare wildcard contributes all positions to nested ORDER BY
+  sql: SELECT d.id FROM (SELECT TOP 100 PERCENT * FROM percent_scores ORDER BY 2 DESC) AS d WHERE d.id=3
+  expect: {rows: 1,data: [{id: 3}]}
+- name: An out-of-range position in a nested full-percent order still fails binding
+  sql: SELECT d.id FROM (SELECT TOP 100 PERCENT * FROM percent_scores ORDER BY 3) AS d
+  expect: {error: true,contains: ORDER BY position is out of range}
+- name: A nested full-percent order still checks declared cast compatibility
+  sql: SELECT d.id FROM (SELECT TOP 100 PERCENT id FROM percent_scores ORDER BY CAST(score AS DATE)) AS d
+  expect: {error: true,contains: numeric input is not convertible to DATE}
+- name: A derived ORDER BY without a row window is rejected
+  sql: SELECT d.id FROM (SELECT id FROM percent_scores ORDER BY id) AS d
+  expect: {error: true,contains: requires TOP or OFFSET}
+- name: A view ORDER BY without a row window is rejected
+  sql: CREATE VIEW dbo.percent_invalid AS SELECT id FROM percent_scores ORDER BY id
+  expect: {error: true,contains: requires TOP or OFFSET}
+- name: A persisted UNION accepts the final branch TOP PERCENT and its output alias
+  sql: |
+    CREATE VIEW dbo.percent_union AS
+    SELECT TOP 100 PERCENT id AS id FROM dbo.percent_scores WHERE id<=3
+    UNION
+    SELECT TOP 100 PERCENT id AS sort_id FROM dbo.percent_scores WHERE id>=2
+    ORDER BY sort_id DESC
+- name: Reading the view preserves DISTINCT and lets the consumer choose its ordering
+  sql: SELECT id FROM dbo.percent_union ORDER BY id
+  expect: {rows: 4,data: [{id: 1},{id: 2},{id: 3},{id: 4}]}
+- name: TOP in an earlier branch cannot authorize a nested set ORDER BY
+  sql: |
+    SELECT d.id FROM (SELECT TOP 100 PERCENT id FROM percent_scores WHERE id=1
+      UNION ALL SELECT id FROM percent_scores WHERE id=2 ORDER BY id) AS d
+  expect: {error: true,contains: requires TOP or OFFSET}
+- name: A nested set ORDER BY cannot bind the first branch's private output alias
+  sql: |
+    CREATE VIEW dbo.percent_invalid AS
+    SELECT id AS first_id FROM percent_scores WHERE id=1
+    UNION ALL SELECT TOP 100 PERCENT id AS last_id FROM percent_scores WHERE id=2
+    ORDER BY first_id
+  expect: {error: true,contains: Column does not exist}
+- name: The final counted TOP in a nested set chooses rows by its own hidden sort key
+  sql: |
+    SELECT d.id FROM (SELECT 0 AS id UNION ALL
+      SELECT TOP (1) id FROM percent_scores ORDER BY score DESC) AS d
+    ORDER BY d.id DESC
+  expect: {rows: 2,data: [{id: 3},{id: 0}]}
+- name: The consuming filter runs after the final branch selects its counted TOP
+  sql: |
+    SELECT d.id FROM (SELECT 0 AS id UNION ALL
+      SELECT TOP (1) id FROM percent_scores ORDER BY score DESC) AS d
+    WHERE d.id<3 ORDER BY d.id DESC
+  expect: {rows: 1,data: [{id: 0}]}
+- name: A result set ORDER BY binds the first branch output and retains its OFFSET
+  sql: |
+    SELECT 0 AS id UNION ALL SELECT TOP 100 PERCENT id AS branch_id FROM percent_scores
+    ORDER BY id DESC OFFSET 1 ROWS FETCH NEXT 2 ROWS ONLY
+  expect: {rows: 2,data: [{id: 3},{id: 2}]}
+- name: Nested final TOP and OFFSET are incompatible
+  sql: |
+    SELECT d.id FROM (SELECT 0 AS id UNION ALL SELECT TOP 100 PERCENT id FROM percent_scores
+      ORDER BY id OFFSET 0 ROWS) AS d
+  expect: {error: true,contains: TOP cannot be combined with OFFSET}
+- name: A CTE validates the final full-percent order within its own branch
+  sql: |
+    WITH d AS (SELECT 0 AS id UNION ALL SELECT TOP 100 PERCENT id FROM percent_scores
+      WHERE id=3 ORDER BY score DESC)
+    SELECT id FROM d ORDER BY id
+  expect: {rows: 2,data: [{id: 0},{id: 3}]}
+- name: Validating a full-percent derived order leaves no sort in the logical plan
+  scm: |
+    (expression_equal?
+      (parse_tsql "memcp-tests" "EXPLAIN IR SELECT d.id FROM (SELECT TOP 100 PERCENT id FROM percent_scores ORDER BY score DESC) AS d" nil nil nil)
+      (parse_tsql "memcp-tests" "EXPLAIN IR SELECT d.id FROM (SELECT id FROM percent_scores) AS d" nil nil nil))
+  expect: {result: true}

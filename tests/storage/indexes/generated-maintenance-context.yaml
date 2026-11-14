@@ -1,0 +1,477 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  description: Generated compute maintenance retains native transaction and batch invocation arguments
+  isolated: true
+setup:
+- sql: DROP TABLE IF EXISTS maintenance_vector_source
+- sql: DROP TABLE IF EXISTS maintenance_vector_target
+- sql: DROP TABLE IF EXISTS maintenance_target
+- sql: DROP TABLE IF EXISTS maintenance_source
+- sql: CREATE TABLE maintenance_source(id INT PRIMARY KEY,grp INT,value INT)
+- sql: CREATE TABLE maintenance_target(id INT PRIMARY KEY,grp INT,running INT)
+- sql: INSERT INTO maintenance_source VALUES(1,1,10),(2,1,20),(3,2,7)
+- sql: INSERT INTO maintenance_target(id,grp) VALUES(10,1),(20,2)
+- sql: CREATE TABLE maintenance_vector_source(id INT PRIMARY KEY,payload INT)
+- sql: CREATE TABLE maintenance_vector_target(id INT PRIMARY KEY,source_id INT,value INT)
+- sql: INSERT INTO maintenance_vector_source VALUES(1,101),(2,202)
+- sql: INSERT INTO maintenance_vector_target(id,source_id) VALUES(11,1),(12,2),(13,3)
+test_cases:
+- name: Register the native sum_value dependency
+  scm: |-
+    (createcolumn (table "memcp-tests" false "maintenance_target" false nil)
+      "sum_value" "INT" '() '("temp" true) '("grp")
+      (lambda (grp)
+        (scan nil (table "memcp-tests" false "maintenance_source" false nil)
+          (list 369436175368192 (scan_boundary "equal" "grp" 0 0 true true "" false)) (list grp)
+          '("grp") (lambda (source.grp) (equal? source.grp (outer 1 grp)))
+          '("value") (lambda (acc value) (+ acc value)) 0 + false)))
+  expect:
+    result: true
+- name: Register the native max_value dependency
+  scm: |-
+    (createcolumn (table "memcp-tests" false "maintenance_target" false nil)
+      "max_value" "INT" '() '("temp" true) '("grp")
+      (lambda (grp)
+        (scan nil (table "memcp-tests" false "maintenance_source" false nil)
+          (list 369436175368192 (scan_boundary "equal" "grp" 0 0 true true "" false)) (list grp)
+          '("grp") (lambda (source.grp) (equal? source.grp (outer 1 grp)))
+          '("value") (lambda (acc value) (max acc value)) 0 max false)))
+  expect:
+    result: true
+- name: Register an ORC with an actual nested dependency
+  scm: |-
+    (createcolumn (table "memcp-tests" false "maintenance_target" false nil) "running" "INT" '()
+      (list "sortcols" '("id") "sortdirs" (list false) "partitioncount" 0
+        "mapcols" '("grp")
+        "mapreducefn" (lambda (acc set_value grp)
+          (begin
+            (define subtotal (scan nil (table "memcp-tests" false "maintenance_source" false nil)
+              (list 369436175368192 (scan_boundary "equal" "grp" 0 0 true true "" false)) (list grp)
+              '("grp") (lambda (source.grp) (equal? source.grp (outer 1 grp)))
+              '("value") (lambda (inner value) (+ inner value)) 0 + false))
+            (define total (+ acc subtotal)) (set_value total) total))
+        "reduceinit" 0))
+  expect:
+    result: true
+- name: Warm incremental selective and ORC caches before mutation
+  sql: SELECT id,sum_value,max_value,running FROM maintenance_target ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 10
+      sum_value: 30
+      max_value: 20
+      running: 30
+    - id: 20
+      sum_value: 7
+      max_value: 7
+      running: 37
+- name: Native dependency headers exist before the write
+  scm: |-
+    (begin
+      (define headers (get_assoc (show "memcp-tests" "maintenance_source" true) "triggers"))
+      (and (>= (count (filter headers (lambda (h) (strlike (get_assoc h "name") ".cache:%")))) 3)
+           (>= (count (filter headers (lambda (h) (strlike (get_assoc h "name") ".orcdep:%")))) 3)))
+  expect:
+    result: true
+- name: An invalidation wave must retain the actual native transaction
+  scm: |-
+    (createtrigger (table "memcp-tests" false "maintenance_target" false nil)
+      "maintenance_context_wave" "after_invalidate" "" ""
+      (lambda (OLD NEW session tx)
+        (if (nil? tx) (error "generated maintenance lost its native transaction") true)) false)
+  expect:
+    result: true
+- name: Warm native incremental UPDATE completes under its writer owner
+  sql: UPDATE maintenance_source SET value=value+5 WHERE grp=1
+  expect:
+    affected_rows: 2
+- name: Increment and selective invalidation preserve all exact values
+  sql: SELECT id,sum_value,max_value,running FROM maintenance_target ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 10
+      sum_value: 40
+      max_value: 25
+      running: 40
+    - id: 20
+      sum_value: 7
+      max_value: 7
+      running: 47
+- name: Moving a dependency key uses full invalidation with the same transaction
+  sql: UPDATE maintenance_source SET grp=2 WHERE id=1
+  expect:
+    affected_rows: 1
+- name: Full invalidation keeps both groups and the ORC correct
+  sql: SELECT id,sum_value,max_value,running FROM maintenance_target ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 10
+      sum_value: 25
+      max_value: 25
+      running: 25
+    - id: 20
+      sum_value: 22
+      max_value: 15
+      running: 47
+- name: Begin the cache rollback transaction
+  sql: BEGIN
+  session_id: maintenance_rollback
+- name: Mutate a warmed dependency in the transaction
+  sql: UPDATE maintenance_source SET value=50 WHERE id=2
+  expect:
+    affected_rows: 1
+  session_id: maintenance_rollback
+- name: The transaction observes its updated native caches
+  sql: SELECT id,sum_value,max_value,running FROM maintenance_target ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 10
+      sum_value: 50
+      max_value: 50
+      running: 50
+    - id: 20
+      sum_value: 22
+      max_value: 15
+      running: 72
+  session_id: maintenance_rollback
+- name: Rollback the actual source and invalidate derived state
+  sql: ROLLBACK
+  session_id: maintenance_rollback
+- name: Rollback restores exact source-dependent values
+  sql: SELECT id,sum_value,max_value,running FROM maintenance_target ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 10
+      sum_value: 25
+      max_value: 25
+      running: 25
+    - id: 20
+      sum_value: 22
+      max_value: 15
+      running: 47
+- name: Deleting a source row updates native cache dependencies
+  sql: DELETE FROM maintenance_source WHERE id=3
+  expect:
+    affected_rows: 1
+- name: DELETE keeps incremental selective and ORC values coherent
+  sql: SELECT id,sum_value,max_value,running FROM maintenance_target ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 10
+      sum_value: 25
+      max_value: 25
+      running: 25
+    - id: 20
+      sum_value: 15
+      max_value: 15
+      running: 40
+- name: Register a batchable trigger with the native four argument frame
+  scm: |-
+    (begin
+      (createtrigger (table "memcp-tests" false "maintenance_vector_target" false nil)
+        "maintenance_batch_context" "before_delete" "" ""
+        (lambda (OLD NEW session tx)
+          (if (and (not (nil? tx)) (equal? (session "maintenance_batch_marker") 73))
+            true (error "generated batch lost native invocation arguments"))) false)
+      (createtrigger (table "memcp-tests" false "maintenance_vector_source" false nil)
+        "maintenance_vector_delete" "after_delete" "" ""
+        (lambda (OLD NEW session tx)
+          (scan tx (table "memcp-tests" false "maintenance_vector_target" false tx)
+            '() '() '("source_id") (lambda (source_id) (equal? source_id (get_assoc OLD "id")))
+            '("$update") (lambda (acc update) (begin (update) (+ acc 1))) 0 + false)) false))
+  expect:
+    result: true
+- name: A real native batch delete binds session and tx for its trigger
+  scm: |-
+    (begin
+      (define owner (newsession)) (owner "username" "root") (owner "maintenance_batch_marker" 73)
+      (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (define removed (try (lambda ()
+        (scan tx (table "memcp-tests" false "maintenance_vector_source" false tx)
+          '() '() '() (lambda () true) '("$update")
+          (lambda (acc update) (begin (update) (+ acc 1))) 0 + false))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+      (tx_commit owner)
+      (equal? removed 2))
+  expect:
+    result: true
+- name: The batched target has exactly its unmatched row
+  sql: SELECT id,source_id FROM maintenance_vector_target ORDER BY id
+  expect:
+    rows: 1
+    data:
+    - id: 13
+      source_id: 3
+- name: Composite batch predicates retain their residual filter
+  scm: |-
+    (begin
+      (droptrigger "memcp-tests" "maintenance_vector_delete" false)
+      (createtrigger (table "memcp-tests" false "maintenance_vector_source" false nil)
+        "maintenance_composite_delete" "after_delete" "" ""
+        (lambda (OLD NEW session tx)
+          (scan tx (table "memcp-tests" false "maintenance_vector_target" false tx)
+            '() '() '("source_id" "id")
+            (lambda (source_id row_id) (and (equal? source_id (get_assoc OLD "id")) (>= row_id 15)))
+            '("$update") (lambda (acc update) (begin (update) (+ acc 1))) 0 + false)) false))
+  expect:
+    result: true
+  setup:
+  - sql: INSERT INTO maintenance_vector_source VALUES(4,404),(5,505)
+  - sql: INSERT INTO maintenance_vector_target(id,source_id) VALUES(14,4),(15,4),(16,5),(17,5)
+- name: A native multirow delete preserves the full composite predicate
+  scm: |-
+    (begin
+      (define owner (newsession)) (owner "username" "root") (owner "maintenance_batch_marker" 73) (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (define removed (try (lambda ()
+        (scan tx (table "memcp-tests" false "maintenance_vector_source" false tx)
+          '() '() '() (lambda () true) '("$update")
+          (lambda (acc update) (begin (update) (+ acc 1))) 0 + false))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+      (tx_commit owner) (equal? removed 2))
+  expect:
+    result: true
+- name: Composite fallback never deletes the excluded matching target
+  sql: SELECT id,source_id FROM maintenance_vector_target ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 13
+      source_id: 3
+    - id: 14
+      source_id: 4
+- name: Retain ordinary row execution for OLD payload mapper
+  scm: |-
+    (begin
+      (droptrigger "memcp-tests" "maintenance_composite_delete" false)
+      (createtrigger (table "memcp-tests" false "maintenance_vector_source" false nil)
+        "maintenance_payload_update" "after_delete" "" ""
+        (lambda (OLD NEW session tx)
+          (scan tx (table "memcp-tests" false "maintenance_vector_target" false tx)
+            '() '() '("source_id") (lambda (source_id) (equal? source_id (get_assoc OLD "id")))
+            (list "$update") (lambda (acc update) (begin (update (list "value" (get_assoc OLD "payload"))) (+ acc 1))) 0 + false)) false))
+  expect:
+    result: true
+  setup:
+  - sql: INSERT INTO maintenance_vector_source VALUES(8,808),(9,909)
+  - sql: INSERT INTO maintenance_vector_target VALUES(18,8,0),(19,9,0)
+- name: A native batch keeps OLD payload mapper values scalar
+  scm: |-
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (define removed (try (lambda ()
+        (scan tx (table "memcp-tests" false "maintenance_vector_source" false tx)
+          '() '() '() (lambda () true) '("$update")
+          (lambda (acc update) (begin (update) (+ acc 1))) 0 + false))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+      (tx_commit owner) (equal? removed 2))
+  expect:
+    result: true
+- name: Exact target data preserves OLD payload mapper
+  sql: SELECT id,source_id,value FROM maintenance_vector_target WHERE id IN (18,19) ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 18
+      source_id: 8
+      value: 808
+    - id: 19
+      source_id: 9
+      value: 909
+- name: Retain ordinary row execution for additional callback
+  scm: |-
+    (begin
+      (droptrigger "memcp-tests" "maintenance_payload_update" false)
+      (createtrigger (table "memcp-tests" false "maintenance_vector_source" false nil)
+        "maintenance_multiple_update" "after_delete" "" ""
+        (lambda (OLD NEW session tx)
+          (scan tx (table "memcp-tests" false "maintenance_vector_target" false tx)
+            '() '() '("source_id") (lambda (source_id) (equal? source_id (get_assoc OLD "id")))
+            (list "$update" "$update") (lambda (acc unused update) (begin (update (list "value" 700)) (+ acc 1))) 0 + false)) false))
+  expect:
+    result: true
+  setup:
+  - sql: INSERT INTO maintenance_vector_source VALUES(10,1010),(11,1111)
+  - sql: INSERT INTO maintenance_vector_target VALUES(20,10,0),(21,11,0)
+- name: A native batch keeps additional callback values scalar
+  scm: |-
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (define removed (try (lambda ()
+        (scan tx (table "memcp-tests" false "maintenance_vector_source" false tx)
+          '() '() '() (lambda () true) '("$update")
+          (lambda (acc update) (begin (update) (+ acc 1))) 0 + false))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+      (tx_commit owner) (equal? removed 2))
+  expect:
+    result: true
+- name: Exact target data preserves additional callback
+  sql: SELECT id,source_id,value FROM maintenance_vector_target WHERE id IN (20,21) ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 20
+      source_id: 10
+      value: 700
+    - id: 21
+      source_id: 11
+      value: 700
+- name: A dynamic dictionary key retains ordinary row execution
+  scm: |-
+    (begin
+      (droptrigger "memcp-tests" "maintenance_multiple_update" false)
+      (createtrigger (table "memcp-tests" false "maintenance_vector_source" false nil)
+        "maintenance_dynamic_key" "after_delete" "" ""
+        (lambda (OLD NEW session tx)
+          (scan tx (table "memcp-tests" false "maintenance_vector_target" false tx)
+            '() '() '("source_id" "lookup_key")
+            (lambda (source_id key) (equal? source_id (get_assoc OLD key)))
+            '("$update") (lambda (acc update) (begin (update) (+ acc 1))) 0 + false)) false))
+  expect:
+    result: true
+  setup:
+  - sql: ALTER TABLE maintenance_vector_target ADD lookup_key VARCHAR(20)
+  - sql: INSERT INTO maintenance_vector_source VALUES(12,1212),(13,1313)
+  - sql: INSERT INTO maintenance_vector_target(id,source_id,value,lookup_key) VALUES(22,1212,0,'payload'),(23,1313,0,'payload'),(24,12,0,'id'),(25,13,0,'id')
+- name: Native batched OLD dictionaries use the actual dynamic key
+  scm: |-
+    (begin
+      (define owner (newsession)) (owner "username" "root") (owner "maintenance_batch_marker" 73) (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (define removed (try (lambda ()
+        (scan tx (table "memcp-tests" false "maintenance_vector_source" false tx)
+          '() '() '() (lambda () true) '("$update")
+          (lambda (acc update) (begin (update) (+ acc 1))) 0 + false))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+      (tx_commit owner) (equal? removed 2))
+  expect:
+    result: true
+- name: Dynamic key lookup removes both payload and id matches
+  sql: SELECT id FROM maintenance_vector_target WHERE id BETWEEN 22 AND 25 ORDER BY id
+  expect:
+    rows: 0
+    data: []
+- name: A filter-local OLD binding is not the trigger ABI argument
+  scm: |-
+    (begin
+      (droptrigger "memcp-tests" "maintenance_dynamic_key" false)
+      (createcolumn (table "memcp-tests" false "maintenance_vector_target" false nil) "row_dictionary" "ANY" '() '())
+      (insert (table "memcp-tests" false "maintenance_vector_target" false nil) '("id" "source_id" "value" "row_dictionary")
+        (list (list 26 100 0 (list "id" 100)) (list 27 200 0 (list "id" 999))))
+      (createtrigger (table "memcp-tests" false "maintenance_vector_source" false nil)
+        "maintenance_shadowed_old" "after_delete" "" ""
+        (lambda (OLD NEW session tx)
+          (scan tx (table "memcp-tests" false "maintenance_vector_target" false tx)
+            '() '() '("row_dictionary" "source_id")
+            (lambda (OLD source_id) (equal? source_id (get_assoc OLD "id")))
+            '("$update") (lambda (acc update) (begin (update) (+ acc 1))) 0 + false)) false))
+  expect:
+    result: true
+  setup:
+  - sql: INSERT INTO maintenance_vector_source VALUES(14,1414),(15,1515)
+- name: The batched trigger preserves its filter-local dictionary
+  scm: |-
+    (begin
+      (define owner (newsession)) (owner "username" "root") (owner "maintenance_batch_marker" 73) (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (define removed (try (lambda ()
+        (scan tx (table "memcp-tests" false "maintenance_vector_source" false tx)
+          '() '() '() (lambda () true) '("$update")
+          (lambda (acc update) (begin (update) (+ acc 1))) 0 + false))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+      (tx_commit owner) (equal? removed 2))
+  expect:
+    result: true
+- name: Filter shadowing deletes only its own dictionary match
+  sql: SELECT id,source_id,value FROM maintenance_vector_target WHERE id BETWEEN 26 AND 27 ORDER BY id
+  expect:
+    rows: 1
+    data:
+    - id: 27
+      source_id: 200
+      value: 0
+- name: A real restart exercises regenerated maintenance recipes
+  sql: SHUTDOWN
+- name: Reacquire register the native sum_value dependency after reload
+  scm: |-
+    (createcolumn (table "memcp-tests" false "maintenance_target" false nil)
+      "sum_value" "INT" '() '("temp" true) '("grp")
+      (lambda (grp)
+        (scan nil (table "memcp-tests" false "maintenance_source" false nil)
+          (list 369436175368192 (scan_boundary "equal" "grp" 0 0 true true "" false)) (list grp)
+          '("grp") (lambda (source.grp) (equal? source.grp (outer 1 grp)))
+          '("value") (lambda (acc value) (+ acc value)) 0 + false)))
+  expect:
+    result: true
+- name: Reacquire register the native max_value dependency after reload
+  scm: |-
+    (createcolumn (table "memcp-tests" false "maintenance_target" false nil)
+      "max_value" "INT" '() '("temp" true) '("grp")
+      (lambda (grp)
+        (scan nil (table "memcp-tests" false "maintenance_source" false nil)
+          (list 369436175368192 (scan_boundary "equal" "grp" 0 0 true true "" false)) (list grp)
+          '("grp") (lambda (source.grp) (equal? source.grp (outer 1 grp)))
+          '("value") (lambda (acc value) (max acc value)) 0 max false)))
+  expect:
+    result: true
+- name: Reacquire register an orc with an actual nested dependency after reload
+  scm: |-
+    (createcolumn (table "memcp-tests" false "maintenance_target" false nil) "running" "INT" '()
+      (list "sortcols" '("id") "sortdirs" (list false) "partitioncount" 0
+        "mapcols" '("grp")
+        "mapreducefn" (lambda (acc set_value grp)
+          (begin
+            (define subtotal (scan nil (table "memcp-tests" false "maintenance_source" false nil)
+              (list 369436175368192 (scan_boundary "equal" "grp" 0 0 true true "" false)) (list grp)
+              '("grp") (lambda (source.grp) (equal? source.grp (outer 1 grp)))
+              '("value") (lambda (inner value) (+ inner value)) 0 + false))
+            (define total (+ acc subtotal)) (set_value total) total))
+        "reduceinit" 0))
+  expect:
+    result: true
+- name: Reloaded derived columns recompute their original definition
+  sql: SELECT id,sum_value,max_value,running FROM maintenance_target ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 10
+      sum_value: 25
+      max_value: 25
+      running: 25
+    - id: 20
+      sum_value: 15
+      max_value: 15
+      running: 40
+- name: Regenerated dependencies retain the actual transaction
+  sql: UPDATE maintenance_source SET value=16 WHERE id=1
+  expect:
+    affected_rows: 1
+- name: Post-reload dependency update retains all exact values
+  sql: SELECT id,sum_value,max_value,running FROM maintenance_target ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 10
+      sum_value: 25
+      max_value: 25
+      running: 25
+    - id: 20
+      sum_value: 16
+      max_value: 16
+      running: 41
+cleanup:
+- sql: DROP TABLE IF EXISTS maintenance_vector_source
+- sql: DROP TABLE IF EXISTS maintenance_vector_target
+- sql: DROP TABLE IF EXISTS maintenance_target
+- sql: DROP TABLE IF EXISTS maintenance_source

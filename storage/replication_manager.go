@@ -37,9 +37,16 @@ import "github.com/launix-de/memcp/storage/mosi"
 var replication atomic.Pointer[replicationManager]
 var replicationStarting atomic.Bool
 
+// Guarded by the existing namespace owner; never held as a lock across I/O.
+var replicationConstructing bool
+
 // PrepareReplication prevents startup GC from deleting safety copies before
 // runtime ownership is reconstructed. Called before catalog discovery starts.
-func PrepareReplication() { replicationStarting.Store(true) }
+func PrepareReplication() {
+	if err := prepareReplicationMode(); err != nil {
+		panic(err)
+	}
+}
 
 // Session getters borrow immutable arguments; reusing the key avoids a
 // variadic argument allocation at every statement boundary.
@@ -114,7 +121,11 @@ func StartReplication(address string, shutdown func()) error {
 	if r.password.IsNil() || r.policy.IsNil() {
 		return fmt.Errorf("replication requires the SQL authentication frontend")
 	}
-	PrepareReplication()
+	finishStart, err := beginReplicationStart()
+	if err != nil {
+		return err
+	}
+	defer finishStart()
 	var identityErr error
 	r.id, identityErr = localNodeIdentity()
 	if identityErr != nil {

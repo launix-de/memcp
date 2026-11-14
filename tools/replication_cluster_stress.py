@@ -55,6 +55,21 @@ IO_KEYS = ("cluster_bandwidth_mbps", "cluster_latency_ms", "storage_backend",
            "storage_bandwidth_mbps", "storage_latency_ms")
 
 
+def discover_cluster_suites(directory):
+    return [path for path in sorted(Path(directory).rglob("*.yaml"))
+            if suite_requires_cluster((yaml.safe_load(path.read_text()) or {}).get("metadata", {}))]
+
+
+def select_cluster_suite_shard(suites, index=0, count=1):
+    """Partition complete suites; each keeps its oracle, lifecycle and profile."""
+    if count < 1 or not 0 <= index < count:
+        raise DrillFailure("suite shard count must be positive and index must be in [0, count)")
+    selected = sorted(suites)[index::count]
+    if not selected:
+        raise DrillFailure(f"suite shard {index}/{count} selects no cluster suites")
+    return selected
+
+
 def validate_io_config(config):
     import math
     for key in IO_KEYS:
@@ -88,9 +103,14 @@ def configure_cluster_io(node, config, shared):
     node.node_args += [f"--cluster-bandwidth-mbps={config['cluster_bandwidth_mbps']}",
                        f"--cluster-latency-ms={config['cluster_latency_ms']}"]
     backend = {"backend": config["storage_backend"]}
+    shared = shared.resolve()
     if config["storage_backend"] == "FakeRemote":
-        backend.update(prefix=str(shared.resolve()), latency_ms=config["storage_latency_ms"],
+        backend.update(prefix=str(shared), latency_ms=config["storage_latency_ms"],
                        bandwidth_mbps=config["storage_bandwidth_mbps"])
+    else:
+        if shared.name != node.database:
+            raise DrillFailure("shared filesystem directory must retain its native database name")
+        backend["root"] = str(shared.parent)
     (node.data_dir / f"{node.database}.json").write_text(json.dumps(backend))
 
 
@@ -432,6 +452,21 @@ class Node(OwnedServer):
         self.startup_timeout = args.startup_timeout
         self.client = Client(self.port, self.timeout, database=self.database)
 
+    def database_directory(self, name=None):
+        """Observe the same explicit backend namespace that this owned server uses."""
+        name = self.database if name is None else name
+        config_path = self.data_dir / f"{name}.json"
+        config = json.loads(config_path.read_text()) if config_path.exists() else {}
+        if config.get("backend", "filesystem") == "filesystem":
+            base = Path(config.get("root", self.data_dir))
+            if not base.is_absolute():
+                base = self.data_dir / base
+            return base / name
+        if config["backend"] == "FakeRemote":
+            path = Path(config.get("prefix", name))
+            return path if path.is_absolute() else self.data_dir / path
+        raise DrillFailure("filesystem observations require a filesystem-backed test backend")
+
     def start(self, *, retired=False, probe_sql=True):
         if self.process is not None:
             raise DrillFailure(f"{self.name} already has an owned process")
@@ -509,7 +544,7 @@ class Node(OwnedServer):
         return json.loads(result)
 
     def records(self, table):
-        schema = json.loads((self.data_dir / self.database / "schema.json").read_text())["tables"][table]
+        schema = json.loads((self.database_directory() / "schema.json").read_text())["tables"][table]
         shards = schema.get("PShards" if schema["ShardMode"] == "partition" else "Shards") or []
         snapshot = self.snapshot()
         resources = database_records(self.database, {"tables": {table: schema}}, snapshot)
@@ -525,7 +560,7 @@ class Node(OwnedServer):
 
     def database_records(self, database=None):
         name = self.database if database is None else database
-        schema = json.loads((self.data_dir / name / "schema.json").read_text())
+        schema = json.loads((self.database_directory(name) / "schema.json").read_text())
         return database_records(name, schema, self.snapshot())
 
     def assert_exclusive(self, database=None, owner=None, state="M"):
@@ -637,7 +672,7 @@ def run_replication_source_security(master, slave):
     m.sql("INSERT INTO replica_source_security VALUES(1,10)")
     expect(m.number("SELECT value AS n FROM replica_source_security WHERE id=1"), 17,
            "SQL trigger regenerated on master")
-    stored = json.loads((master.data_dir / master.database / "schema.json").read_text())
+    stored = json.loads((master.database_directory() / "schema.json").read_text())
     trigger = stored["tables"]["replica_source_security"]["Triggers"][0]
     expect((trigger["language"], trigger.get("schema_only")), ("sql", True),
            "receiver-owned trigger restriction persisted")
@@ -663,7 +698,56 @@ def run_replication_source_security(master, slave):
     slave.reclaim()
 
 
+
+def run_replication_catalog_authority(args, artifacts, journal):
+    """The ordinary YAML assertions also run across an actual replica recall."""
+    path = ROOT / "tests/storage/persistence/replicated-catalog-authority.yaml"
+    specification = yaml.safe_load(path.read_text())
+    with Cluster(args, artifacts, "catalog-authority") as cluster:
+        master, slave = cluster.master, cluster.slave
+        # Startup SCM planner tests own memcp-tests. The actual replica fixture
+        # uses the harness's normal separate domain without rewriting SQL/SCM.
+        master.start().sql(f"CREATE DATABASE IF NOT EXISTS `{DATABASE}`", "system")
+        nodes = {"master": master, "slave": slave}
+        runners = {}
+        for label, node in nodes.items():
+            runner = SQLTestRunner(f"http://127.0.0.1:{node.port}", password=PASSWORD,
+                                   default_database=DATABASE)
+            runner.suite_metadata = specification.get("metadata", {})
+            runners[label] = runner
+        def restart_master():
+            master.wait_offline()
+            master.kill()
+            master.start()
+            eventually(master.connected, "schema-authority replica did not reconnect")
+            return True
+        runners["master"].set_restart_handler(restart_master)
+        established = None
+        for index, case in enumerate(specification["test_cases"]):
+            label = case.get("replication_client", "master")
+            if label not in nodes:
+                raise DrillFailure("unknown replication_client in schema-authority YAML")
+            if not runners[label].run_test_case(case, DATABASE):
+                raise DrillFailure("schema-authority YAML assertion failed: " + case["name"])
+            schema = json.loads((master.database_directory() / "schema.json").read_text())
+            if index == 0:
+                established = schema["incarnation"]
+                expect(schema["catalog_version"], 1, "first native catalog decision watermark")
+                slave.start()
+                eventually(master.connected, "schema-authority replica did not connect")
+            expect(schema["incarnation"], established, "schema recall retains native database incarnation")
+            expected_version = 1 if index < 5 else 2
+            expect(schema["catalog_version"], expected_version, "schema recall retains native decision watermark")
+        for case in specification.get("cleanup", []):
+            if not runners["master"].run_test_case({"name": "schema-authority cleanup", **case}, DATABASE):
+                raise DrillFailure("schema-authority cleanup failed")
+    journal.append({"scenario": "replicated-catalog-authority", "yaml": str(path),
+                    "cases": len(specification["test_cases"]), "master_restart": True})
+
+
 def run_regressions(args, artifacts, journal):
+    print("SCENARIO: replicated catalog authority", flush=True)
+    run_replication_catalog_authority(args, artifacts, journal)
     print("SCENARIO: source-only replication security", flush=True)
     with Cluster(args, artifacts, "source-security") as security:
         security.initialize(["CREATE TABLE items(id INT PRIMARY KEY, value INT)"])
@@ -890,7 +974,7 @@ def run_partitions(args, artifacts, journal):
         m.sql(f"CREATE DATABASE {DATABASE}", "system")
         m.sql("CREATE TABLE items(id INT PRIMARY KEY, value INT) ENGINE=SAFE")
         m.sql("INSERT INTO items VALUES(1,10),(9,90)")
-        expect(m.scm(f'(partitiontable (table "{DATABASE}" false "items" false) (list "id" (list 5)))').strip(),
+        expect(m.scm(f'(partitiontable (table "{DATABASE}" false "items" false nil) (list "id" (list 5)))').strip(),
                "true", "range partition setup")
         m.sql("CREATE TABLE volatile_items(id INT, value TEXT) ENGINE=MEMORY")
         m.sql("INSERT INTO volatile_items VALUES(1,'streamed-memory-generation')")
@@ -1127,7 +1211,7 @@ def setup_stress_database(master, name):
                       "INSERT INTO stress_aux VALUES(1,100),(9,900)",
                       "CREATE TABLE stress_empty(id INT PRIMARY KEY, value INT) ENGINE=SAFE"):
         master.sql(statement, name)
-    expect(master.scm(f'(partitiontable (table "{name}" false "stress_aux" false) (list "id" (list 5)))').strip(),
+    expect(master.scm(f'(partitiontable (table "{name}" false "stress_aux" false nil) (list "id" (list 5)))').strip(),
            "true", "partitioned auxiliary table")
 
 
@@ -1417,7 +1501,7 @@ def run_remote_scans(args, artifacts, journal):
         m.sql(f"CREATE DATABASE {DATABASE}", "system")
         m.sql("CREATE TABLE remote_items(id INT PRIMARY KEY, bucket TEXT, value INT) ENGINE=SAFE")
         m.sql("INSERT INTO remote_items VALUES(1,'a',10),(2,'a',20),(3,'b',30),(4,'b',40)")
-        m.scm(f'(partitiontable (table "{DATABASE}" false "remote_items" false) (list (list "id" (list 3))))')
+        m.scm(f'(partitiontable (table "{DATABASE}" false "remote_items" false nil) (list (list "id" (list 3))))')
         w = worker.start()
         expect(w.number("SELECT COUNT(*) AS n FROM remote_items"), 4, "remote source bootstrap")
         eventually(lambda: worker.snapshot().get("initialized", {}).get(DATABASE), "worker initial claims")
@@ -1510,8 +1594,8 @@ def run_retained_generation(master, worker, args, journal):
                 expect(len(old_ids), 2, "two physical old-generation handles")
                 # Collect while the peer is paused outside its element loop.
                 object_status(master, True)
-                w.scm(f'(rebuild (table "{DATABASE}" false "remote_items" false) true false)')
-                schema = json.loads((worker.data_dir / DATABASE / "schema.json").read_text())["tables"]["remote_items"]
+                w.scm(f'(rebuild (table "{DATABASE}" false "remote_items" false nil) true false)')
+                schema = json.loads((worker.database_directory() / "schema.json").read_text())["tables"]["remote_items"]
                 active = [part for part in (schema.get("Shards") or []) + (schema.get("PShards") or []) if part]
                 active_ids = {part["uuid"] if isinstance(part, dict) else part for part in active}
                 if old_ids & active_ids:
@@ -1682,7 +1766,7 @@ def run_cluster_sql_contexts(nodes, reference, journal, report_path, status=None
                 # different warm owner. Establish the documented local fixture
                 # through ordinary schema M/write acquisition before BEGIN.
                 host.client.scm(
-                    f'(createcolumn (table "{DATABASE}" false "context_items" false) "n" "INT" (list) (list))')
+                    f'(createcolumn (table "{DATABASE}" false "context_items" false nil) "n" "INT" (list) (list))')
                 ownership = json.loads(host.client.scm("(cluster_status true)"))
                 if isinstance(ownership, str):
                     ownership = json.loads(ownership)
@@ -1743,7 +1827,7 @@ def run_cluster_sql_contexts(nodes, reference, journal, report_path, status=None
             return
         host = writer
         session = "cluster-live-mosi-overlay"
-        host.client.scm(f'(createcolumn (table "{DATABASE}" false "context_items" false) "n" "INT" (list) (list))')
+        host.client.scm(f'(createcolumn (table "{DATABASE}" false "context_items" false nil) "n" "INT" (list) (list))')
         sql(host, begin, session)
         stopped = None
         try:
@@ -1842,7 +1926,7 @@ def run_cluster_inserts(args, artifacts, journal, hash_partitioned=False):
         source.sql("CREATE TABLE uuid_items(id UUID DEFAULT UUID_V7() PRIMARY KEY, writer INT, value INT) ENGINE=SAFE")
         source.sql("CREATE TABLE integer_items(id BIGINT AUTO_INCREMENT PRIMARY KEY, writer INT, value INT) ENGINE=SAFE")
         source.sql("INSERT INTO integer_items VALUES(10000,-1,-1)")
-        source.scm(f'(rebuild (table "{DATABASE}" false "integer_items" false) true false)')
+        source.scm(f'(rebuild (table "{DATABASE}" false "integer_items" false nil) true false)')
         if hash_partitioned:
             for table, method in (("uuid_items", "hash-uuid-v1"), ("integer_items", "hash-int-v1")):
                 # Independent point inserts provide real per-column demand.
@@ -1850,7 +1934,7 @@ def run_cluster_inserts(args, artifacts, journal, hash_partitioned=False):
                     key = "UUID_V7()" if table == "uuid_items" else str(10001+i)
                     source.sql(f"INSERT INTO {table}(id,writer,value) VALUES({key},-2,{i})")
                 def hash_ready():
-                    source.scm(f'(rebuild (table "{DATABASE}" false "{table}" false) true true)')
+                    source.scm(f'(rebuild (table "{DATABASE}" false "{table}" false nil) true true)')
                     saved = json.loads((builder.data_dir / DATABASE / "schema.json").read_text())["tables"][table]
                     dims = saved.get("PDimensions") or []
                     return saved["ShardMode"] == "partition" and len(dims) == 1 and dims[0]["Column"] == "id" and dims[0].get("Method") == method and dims[0]["NumPartitions"] >= 2
@@ -1876,8 +1960,6 @@ def run_cluster_inserts(args, artifacts, journal, hash_partitioned=False):
         nodes = [Node(args, directory, f"node-{i}", "listen") for i in range(3)]
         for index, node in enumerate(nodes):
             cleanup.callback(lambda node=node: node.kill() if node.process is not None else None)
-            (node.data_dir / DATABASE).symlink_to(shared, target_is_directory=True)
-            (node.data_dir / f"{DATABASE}.json").write_text(json.dumps({"backend": "filesystem"}))
             node.process_env["GOMAXPROCS"] = "2"
             (node.data_dir / "settings.json").write_text(json.dumps({"UniqueScaleFactor": 0}))
             seed = "" if index == 0 else f"http://127.0.0.1:{nodes[0].port}/cluster"
@@ -2071,14 +2153,14 @@ def run_cluster_inserts(args, artifacts, journal, hash_partitioned=False):
                     for _ in range(repetitions):
                         native_key = json.dumps(key[1:-1]) if key.startswith("'") else key
                         if mixed and index % 2:
-                            expression = (f'(scan nil (table "{DATABASE}" false "{table}" false) '
+                            expression = (f'(scan nil (table "{DATABASE}" false "{table}" false nil) '
                                           '(list) (list) (list "id") '
                                           f'(lambda (id) (equal? id {native_key})) '
                                           f'(list "{counter_column}" "$update") '
                                           '(lambda (acc previous update) '
                                           f'(begin (update (list "{counter_column}" (+ previous 1))) acc)) 0 +)')
                         else:
-                            expression = (f'(insert (table "{DATABASE}" false "{table}" false) '
+                            expression = (f'(insert (table "{DATABASE}" false "{table}" false nil) '
                                           '(list "id" "writer" "value") '
                                           f'(list (list {native_key} 99 777)) '
                                           f'(list "{counter_column}" "$update") '
@@ -2173,39 +2255,40 @@ def run_cluster_placement(args, artifacts, journal):
             source.sql("INSERT INTO big_items VALUES" + ','.join(values), timeout=120)
         if config["unique_columns"]:
             unique_columns = " ".join(json.dumps(column) for column in config["unique_columns"])
-            source.scm(f'(createkey (table "{DATABASE}" false "big_items" false) '
+            source.scm(f'(createkey (table "{DATABASE}" false "big_items" false nil) '
                        f'"fixture_unique" true (list {unique_columns}))', timeout=120)
         pivots = ' '.join(str(rows_per_shard * i) for i in range(1, shards))
-        source.scm(f'(partitiontable (table "{DATABASE}" false "big_items" false) (list (list "id" (list {pivots}))))', timeout=120)
-        source.scm(f'(rebuild (table "{DATABASE}" false "big_items" false) true false)', timeout=120)
+        source.scm(f'(partitiontable (table "{DATABASE}" false "big_items" false nil) (list (list "id" (list {pivots}))))', timeout=120)
+        source.scm(f'(rebuild (table "{DATABASE}" false "big_items" false nil) true false)', timeout=120)
         query = "SELECT SUM(" + '+'.join(f"v{i}" for i in range(columns)) + ") AS total FROM big_items"
         expect(source.number(query, "total"), expected, "standalone reference sum")
         standalone_contexts = []
         if args.cluster_context_only:
             source.sql("CREATE TABLE context_items(id INT PRIMARY KEY,n INT) ENGINE=SAFE")
             source.sql("INSERT INTO context_items VALUES(0,10),(1,20),(2,30),(3,40),(4,50),(5,60),(6,70),(7,80)")
-            source.scm(f'(partitiontable (table "{DATABASE}" false "context_items" false) (list (list "id" (list 2 4 6))))')
+            source.scm(f'(partitiontable (table "{DATABASE}" false "context_items" false nil) (list (list "id" (list 2 4 6))))')
             standalone_contexts = run_cluster_sql_contexts(
                 [builder], reference, journal, directory / "standalone-contexts.json")
             # Restore the committed control fixture through normal SQL, then
             # seal its generations before sharing the backend with other nodes.
             source.sql("DELETE FROM context_items")
             source.sql("INSERT INTO context_items VALUES(0,10),(1,20),(2,30),(3,40),(4,50),(5,60),(6,70),(7,80)")
-            source.scm(f'(rebuild (table "{DATABASE}" false "context_items" false) true false)')
-            source.scm(f'(rebuild (table "{DATABASE}" false "big_items" false) true false)')
+            source.scm(f'(rebuild (table "{DATABASE}" false "context_items" false nil) true false)')
+            source.scm(f'(rebuild (table "{DATABASE}" false "big_items" false nil) true false)')
         standalone_operators = []
         operator_shared = None
         # The placement/co-location preflight also runs in the generic cluster
         # and SQL-context scenarios, not just the operator YAML profile.
         source.sql("CREATE TABLE operator_keys(id INT PRIMARY KEY) ENGINE=SAFE")
         source.sql("INSERT INTO operator_keys VALUES(42000),(90000),(175000),(245000)")
-        source.scm(f'(rebuild (table "{DATABASE}" false "operator_keys" false) true false)')
+        source.scm(f'(rebuild (table "{DATABASE}" false "operator_keys" false nil) true false)')
         if args.cluster_operators_only:
             # Both executions must start from the same committed fixture.
             # Rollback restores visibility, but not physical delta generations;
             # copying after the oracle would also propagate committed changes.
             builder.kill()
-            operator_shared = directory / "shared-operator-fixture"
+            operator_shared = directory / "shared-operator-fixture" / DATABASE
+            operator_shared.parent.mkdir()
             shutil.copytree(builder.data_dir / DATABASE, operator_shared)
             source = builder.start()
             standalone_operators = run_cluster_yaml_cases(
@@ -2241,8 +2324,6 @@ def run_cluster_placement(args, artifacts, journal):
             # would never test simultaneous RAM admission or remote overflow.
             node.process_env["GOMAXPROCS"] = str(config["gomaxprocs"])
             cleanup.callback(lambda node=node: node.kill() if node.process is not None else None)
-            (node.data_dir / DATABASE).symlink_to(shared, target_is_directory=True)
-            (node.data_dir / f"{DATABASE}.json").write_text(json.dumps({"backend": "filesystem"}))
             # The coordinator uses a deliberately tiny shard share below its
             # native system-data baseline; workers retain the default 50%.
             # No payload/header estimate or overlap timing forces delegation.
@@ -2289,7 +2370,7 @@ def run_cluster_placement(args, artifacts, journal):
         # aggregate cache. Peers warmed by the first SUM should attract work.
         params = ' '.join(f"x{i}" for i in range(columns))
         names = ' '.join(json.dumps(f"v{i}") for i in range(columns))
-        expression = f'(scan nil (table "{DATABASE}" false "big_items" false) (list) (list) (list) (lambda () true) (list {names}) (lambda (acc {params}) (+ acc {params})) 0 +)'
+        expression = f'(scan nil (table "{DATABASE}" false "big_items" false nil) (list) (list) (list) (lambda () true) (list {names}) (lambda (acc {params}) (+ acc {params})) 0 +)'
         before = [status(node) for node in nodes]
         cold_worker = min(range(1, len(nodes)), key=lambda i: before[i]["state"]["received"])
         expect(int(nodes[cold_worker].client.scm(expression).strip()), expected, "warm-holder automatic placement")
@@ -2430,7 +2511,7 @@ def run_cluster_placement(args, artifacts, journal):
         # DDL write boundary to move this table's M rights to the survivor;
         # re-declaring the existing column leaves its logical shape unchanged.
         nodes[1].client.scm(
-            f'(createcolumn (table "{DATABASE}" false "contact_route_probe" false) "n" "INT" (list) (list))')
+            f'(createcolumn (table "{DATABASE}" false "contact_route_probe" false nil) "n" "INT" (list) (list))')
         handover = json.loads(nodes[1].client.scm("(cluster_status true)"))
         if isinstance(handover, str):
             handover = json.loads(handover)
@@ -2513,8 +2594,6 @@ def run_cluster_suite(args, path, artifacts, journal):
         protocol_ports = [free_port() for _ in nodes]
         for index, node in enumerate(nodes):
             cleanup.callback(lambda node=node: node.kill() if node.process is not None else None)
-            (node.data_dir / database).symlink_to(shared, target_is_directory=True)
-            (node.data_dir / f"{database}.json").write_text(json.dumps({"backend": "filesystem"}))
             ram = config["coordinator_ram_limit_bytes"] if index == 0 else config["ram_limit_bytes"]
             fraction = config["coordinator_shard_ram_percent"] if index == 0 else config["shard_ram_percent"]
             (node.data_dir / "settings.json").write_text(json.dumps({
@@ -2546,6 +2625,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("suites", nargs="*", type=Path, help="ordinary YAML suites with metadata.cluster")
     parser.add_argument("--cluster-suites", action="store_true", help="discover every cluster YAML suite under tests/")
+    parser.add_argument("--suite-shard-index", type=int, default=0,
+                        help="zero-based partition of discovered cluster suites (default: 0)")
+    parser.add_argument("--suite-shard-count", type=int, default=1,
+                        help="partition discovered suites into this many complete-suite shards (default: 1)")
     parser.add_argument("--binary", type=Path, default=ROOT / "memcp")
     parser.add_argument("--artifacts", type=Path)
     parser.add_argument("--rounds", type=int, default=5)
@@ -2576,19 +2659,27 @@ def main():
     parser.add_argument("--storage-latency-ms", type=float, default=None, help="FakeRemote request latency in milliseconds")
     parser.add_argument("--storage-bandwidth-mbps", type=float, default=None, help="aggregate FakeRemote bandwidth per backend instance")
     args = parser.parse_args()
+    if args.suite_shard_count < 1 or not 0 <= args.suite_shard_index < args.suite_shard_count:
+        parser.error("suite shard count must be positive and index must be in [0, count)")
+    if not args.cluster_suites and (args.suite_shard_index != 0 or args.suite_shard_count != 1):
+        parser.error("suite sharding requires --cluster-suites discovery")
     cli_io = {key: ("FakeRemote" if key == "storage_backend" else 0) for key in IO_KEYS}
     cli_io.update({key: getattr(args, key) for key in IO_KEYS if getattr(args, key) is not None})
     try:
         validate_io_config(cli_io)
     except DrillFailure as error:
         parser.error(str(error))
+    discovered_suites = []
     if args.cluster_suites:
         if args.suites:
             parser.error("--cluster-suites discovers its suites; do not pass paths")
-        args.suites = [path for path in sorted((ROOT / "tests").rglob("*.yaml"))
-                       if suite_requires_cluster((yaml.safe_load(path.read_text()) or {}).get("metadata", {}))]
-        if not args.suites:
+        discovered_suites = discover_cluster_suites(ROOT / "tests")
+        if not discovered_suites:
             parser.error("no cluster suites found")
+        try:
+            args.suites = select_cluster_suite_shard(discovered_suites, args.suite_shard_index, args.suite_shard_count)
+        except DrillFailure as error:
+            parser.error(str(error))
     for path in args.suites:
         effective_cluster_config(args, path)
     if args.suites and any((args.cluster_only, args.remote_scans_only, args.cluster_inserts_only,
@@ -2617,6 +2708,14 @@ def main():
                 "timeout": args.timeout, "startup_timeout": args.startup_timeout,
                 "dedicated_replication_port": args.dedicated_replication_port,
                 "io_overrides": {key: getattr(args, key) for key in IO_KEYS}}]
+    if args.cluster_suites:
+        journal[0]["suite_selection"] = {
+            "index": args.suite_shard_index, "count": args.suite_shard_count,
+            "discovered": [str(path.relative_to(ROOT)) for path in discovered_suites],
+            "selected": [str(path.relative_to(ROOT)) for path in args.suites],
+        }
+    # Retain the selected coverage even if CI cancels a fixture mid-run.
+    write_manifest(artifacts / "manifest.json", args.seed, "running", journal)
     print(f"Replication cluster stress artifacts: {artifacts}\nSeed: {args.seed}", flush=True)
     try:
         if args.suites:

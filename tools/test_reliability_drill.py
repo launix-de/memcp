@@ -11,7 +11,10 @@
 from __future__ import annotations
 
 import importlib.util
+import io
+import json
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -275,6 +278,7 @@ class ReplicationCatalogTests(unittest.TestCase):
 			node.snapshot.return_value = snapshot
 			path = node.data_dir / "db"
 			path.mkdir()
+			node.database_directory.return_value = path
 			(path / "schema.json").write_text(replication.json.dumps(schema))
 			self.assertEqual(replication.Node.records(node, "empty"), [{"resource": current}])
 
@@ -314,6 +318,120 @@ class ClusterSQLContextRunnerTests(unittest.TestCase):
 		self.assertEqual(cases[0]["name"], "literal-capture")
 		self.assertEqual(cases[0]["status"], "failed")
 		self.assertIn("without executing a remote shard", cases[0]["error"])
+
+
+class ClusterSuiteSelectionTests(unittest.TestCase):
+	def fixture(self, root):
+		paths = []
+		for name in ("z-last", "a-first", "nested/c-middle", "nested/b-next", "d-more"):
+			path = root / "tests" / (name + ".yaml")
+			path.parent.mkdir(parents=True, exist_ok=True)
+			path.write_text("metadata: {cluster: true}\ntest_cases: [{name: complete, sql: SELECT 1}]\n")
+			paths.append(path)
+		(root / "tests" / "ordinary.yaml").write_text("metadata: {cluster: false}\n")
+		return sorted(paths)
+
+	def test_discovery_and_default_selection_retain_every_complete_suite(self):
+		with tempfile.TemporaryDirectory() as temp:
+			root = Path(temp)
+			paths = self.fixture(root)
+			contents = {path: path.read_bytes() for path in paths}
+			discovered = replication.discover_cluster_suites(root / "tests")
+			self.assertEqual(discovered, paths)
+			self.assertEqual(replication.select_cluster_suite_shard(discovered), paths)
+			self.assertEqual({path: path.read_bytes() for path in paths}, contents)
+
+	def test_partitions_cover_each_suite_once_independently_of_input_order(self):
+		paths = [Path(f"suite-{i}.yaml") for i in range(7)]
+		for count in range(1, len(paths) + 1):
+			parts = [replication.select_cluster_suite_shard(reversed(paths), index, count)
+				for index in range(count)]
+			self.assertEqual(sorted(path for part in parts for path in part), paths)
+			self.assertEqual(sum(map(len, parts)), len(paths))
+			for index, part in enumerate(parts):
+				self.assertEqual(part, replication.select_cluster_suite_shard(paths, index, count))
+
+	def test_invalid_or_empty_partitions_cannot_fall_back_to_process_scenarios(self):
+		for index, count in ((0, 0), (-1, 2), (2, 2), (1, 3)):
+			with self.subTest(index=index, count=count), self.assertRaises(replication.DrillFailure):
+				replication.select_cluster_suite_shard([Path("one.yaml")], index, count)
+		for options in (("--suite-shard-count", "0"), ("--suite-shard-index", "-1"),
+			("--suite-shard-count", "2"), ("--suite-shard-index", "1")):
+			with mock.patch.object(sys, "argv", ["runner", *options]), \
+					mock.patch.object(replication, "make_artifact_dir") as artifacts, \
+					mock.patch.object(replication, "run_remote_scans") as legacy, \
+					mock.patch("sys.stderr", new=io.StringIO()), self.assertRaises(SystemExit) as error:
+				replication.main()
+			self.assertEqual(error.exception.code, 2)
+			artifacts.assert_not_called()
+			legacy.assert_not_called()
+		with mock.patch.object(sys, "argv", ["runner", "--cluster-suites", "--suite-shard-count", "2",
+				"--suite-shard-index", "1"]), \
+				mock.patch.object(replication, "discover_cluster_suites", return_value=[Path("one.yaml")]), \
+				mock.patch.object(replication, "make_artifact_dir") as artifacts, \
+				mock.patch.object(replication, "run_remote_scans") as legacy, \
+				mock.patch("sys.stderr", new=io.StringIO()), self.assertRaises(SystemExit) as error:
+			replication.main()
+		self.assertEqual(error.exception.code, 2)
+		artifacts.assert_not_called()
+		legacy.assert_not_called()
+
+	def test_cli_runs_only_selected_suites_and_retains_full_coverage_manifest(self):
+		with tempfile.TemporaryDirectory() as temp:
+			root = Path(temp)
+			paths = self.fixture(root)
+			for index in (0, 1):
+				artifacts = root / f"artifacts-{index}"
+				argv = ["runner", "--cluster-suites", "--suite-shard-index", str(index),
+					"--suite-shard-count", "2", "--seed", "20261028", "--binary", sys.executable,
+					"--artifacts", str(artifacts)]
+				def observe_selection(args, suite, directory, journal):
+					manifest = json.loads((directory / "manifest.json").read_text())
+					self.assertEqual(manifest["status"], "running")
+				with mock.patch.object(sys, "argv", argv), mock.patch.object(replication, "ROOT", root), \
+						mock.patch.object(replication.shutil, "which", return_value="mysql"), \
+						mock.patch.object(replication, "run_cluster_suite", side_effect=observe_selection) as run, \
+						mock.patch.object(replication, "run_remote_scans") as legacy, mock.patch("builtins.print"):
+					self.assertEqual(replication.main(), 0)
+				self.assertEqual([call.args[1] for call in run.call_args_list], paths[index::2])
+				legacy.assert_not_called()
+				manifest = json.loads((artifacts / "manifest.json").read_text())
+				self.assertEqual(manifest["status"], "passed")
+				self.assertEqual(manifest["scenarios"][0]["suite_selection"], {
+					"index": index, "count": 2,
+					"discovered": [str(path.relative_to(root)) for path in paths],
+					"selected": [str(path.relative_to(root)) for path in paths[index::2]],
+				})
+
+	def test_ci_matrix_covers_current_suites_in_both_instrumentations(self):
+		workflow = replication.yaml.safe_load((replication.ROOT / ".github/workflows/replication-cluster-stress.yml").read_text())
+		gate = workflow["jobs"]["cluster-operators"]
+		job = workflow["jobs"]["cluster-operator-shards"]
+		self.assertEqual(gate["name"], "Cluster SQL operator contracts")
+		self.assertIn("cluster-operator-shards", gate["needs"])
+		self.assertIn("always()", gate["if"])
+		self.assertEqual(gate["steps"][0]["run"], 'test "$SHARD_RESULT" = success')
+		for result in ("success", "failure", "cancelled", "skipped", ""):
+			check = replication.subprocess.run(["sh", "-c", gate["steps"][0]["run"]],
+				env={**replication.os.environ, "SHARD_RESULT": result})
+			self.assertEqual(check.returncode == 0, result == "success")
+		self.assertEqual(job["timeout-minutes"], 15)
+		self.assertFalse(job["strategy"]["fail-fast"])
+		shards = job["strategy"]["matrix"]["shard"]
+		self.assertEqual(shards, [0, 1])
+		discovered = replication.discover_cluster_suites(replication.ROOT / "tests")
+		parts = [replication.select_cluster_suite_shard(discovered, index, len(shards)) for index in shards]
+		self.assertEqual(sorted(path for part in parts for path in part), discovered)
+		runs = [step for step in job["steps"] if "--cluster-suites" in step.get("run", "")]
+		self.assertEqual(len(runs), 2)
+		for step in runs:
+			self.assertIn("--suite-shard-index ${{ matrix.shard }} --suite-shard-count 2", step["run"])
+			self.assertIn("--seed 20261028", step["run"])
+		self.assertEqual(runs[1]["env"]["GORACE"], "halt_on_error=1 exitcode=66")
+		self.assertIn('--binary "$RUNNER_TEMP/memcp-cluster-operators"', runs[0]["run"])
+		self.assertIn('--binary "$RUNNER_TEMP/memcp-cluster-operators-race"', runs[1]["run"])
+		self.assertIn('--fixture-binary "$RUNNER_TEMP/memcp-cluster-operators"', runs[1]["run"])
+		self.assertIn("matrix.shard", job["steps"][-1]["with"]["name"])
 
 
 class ClusterSuiteTests(unittest.TestCase):
