@@ -60,11 +60,16 @@ test_cases:
   expect: {result: true}
 - name: Missing current cursor ownership prevents evaluation of SET operands
   scm: |
-    (try (lambda () (begin
-      (parse_tsql "memcp-tests"
-        "UPDATE positioned_target SET value=(SELECT 1/0) WHERE CURRENT OF row_cursor" nil (newsession) nil)
-      false)) (lambda (cause)
-        (strlike (string cause) "%cursor%")))
+    (begin
+      (define session (newsession)) (session "username" "root") (session "schema" "memcp-tests")
+      (define callbacks (newsession)) (callbacks "rows" 0) (callbacks "fields" 0)
+      (define rejected (try (lambda () (begin
+        (tsql_execute_request "memcp-tests"
+          "UPDATE positioned_target SET value=(SELECT 1/0) WHERE CURRENT OF row_cursor" session nil 0
+          (lambda (_row) (callbacks "rows" (+ (callbacks "rows") 1)))
+          (lambda args (callbacks "fields" (+ (callbacks "fields") 1)))) false))
+        (lambda (cause) (strlike (string cause) "%cursor%"))))
+      (and rejected (equal? (callbacks "rows") 0) (equal? (callbacks "fields") 0)))
   expect: {result: true}
 - name: A mutation without an open current cursor delivers no rows fields or update effects
   scm: |
