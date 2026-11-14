@@ -1,3 +1,5 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
 metadata:
   version: "1.0"
   description: "Math and date functions: ABS, GREATEST, LEAST, FROM_UNIXTIME"
@@ -173,6 +175,24 @@ test_cases:
     sql: "SELECT id FROM fn_math_test ORDER BY RAND() LIMIT 2"
     expect:
       rows: 2
+
+  - name: "Optimized random scalar procedures produce fresh bounded values on repeated calls"
+    scm: |
+      (begin
+        (define sample (eval (optimize (quote (lambda () (sql_rand))))))
+        (define values (map (produceN 16) (lambda (_index) (sample))))
+        (and (reduce values (lambda (valid value) (and valid (>= value 0) (< value 1))) true)
+          (> (count (merge_unique (list values))) 1)))
+    expect: {result: true}
+
+  - name: "Optimized random byte procedures preserve fresh entropy across repeated calls"
+    scm: |
+      (begin
+        (define sample (eval (optimize (quote (lambda () (randomBytes 16))))))
+        (define values (map (produceN 8) (lambda (_index) (sample))))
+        (and (reduce values (lambda (valid value) (and valid (equal? (strlen value) 16))) true)
+          (> (count (merge_unique (list values))) 1)))
+    expect: {result: true}
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS fn_math_test"

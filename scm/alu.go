@@ -29160,7 +29160,7 @@ func init_alu() {
 		},
 		Type: &TypeDescriptor{Kind: "func", Description: "SQL RAND(): returns a random float in [0,1)",
 			Return: &TypeDescriptor{Kind: "number"},
-			Const:  true,
+			Const:  false,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 				ctx.Coverage.NativeCalls++

@@ -23641,7 +23641,7 @@ func init_strings() {
 		Type: &TypeDescriptor{Kind: "func", Description: "returns a string with numBytes cryptographically secure random bytes",
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "number", Label: "numBytes", Description: "number of random bytes"}},
 			Return: &TypeDescriptor{Kind: "string"},
-			Const:  true,
+			Const:  false,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 				declaration := declarations["randomBytes"]
