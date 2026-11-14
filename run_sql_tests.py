@@ -2916,7 +2916,7 @@ def start_memcp_process(
         logfile = open(_memcp_log_file, 'w')
         cmd = [
             memcp_bin, "-data", datadir,
-            f"--api-port={port}", f"--mysql-port={port+1000}",
+            f"--api-port={port}", f"--mysql-port={port+1000}", "--mysql-socket=",
         ]
         if not enable_mysql:
             cmd.append("--disable-mysql")
