@@ -13857,9 +13857,10 @@ prepare bindings; no key enumeration or storage artifact enters logical IR. */
 				(<= (count (qb_sources (ir_root ir))) 1)))
 			memoized_plan (lower_ordered_keyset_scans memoized_plan)))
 		(define checked (bind_invocation_group_lifetimes (require_physical_scan_relations fused_plan)))
-		(if (and (not (nil? carrier)) (and (not (nth carrier 5))
-			(qassoc_get (qb_facts (ir_root ir)) (quote sql_calc_found_rows) false)))
-			(list (quote found_rows_result) checked) checked))))
+		(publish_queryplan_callables
+			(if (and (not (nil? carrier)) (and (not (nth carrier 5))
+				(qassoc_get (qb_facts (ir_root ir)) (quote sql_calc_found_rows) false)))
+				(list (quote found_rows_result) checked) checked)))))
 
 (define build_queryplan (lambda (ir)
 	(emit_physical_queryplan (prepare_physical_queryplan ir nil nil))))

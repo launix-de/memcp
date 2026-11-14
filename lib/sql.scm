@@ -420,7 +420,7 @@ identical programs once outside row closures, including parameterized plans. */
 	(jit (close_procedure (eval (optimize (list
 		(quote lambda)
 		(list (quote session) (quote tx) (quote resultrow) (quote resultfields))
-		(source "SQL Query" 1 1 (sql_queryplan_prepare_search formula)))))) compile_tx)))
+		(source "SQL Query" 1 1 (publish_queryplan_callables (sql_queryplan_prepare_search formula))))))) compile_tx)))
 
 (define sql_compile_queryplan_variant (lambda (parse_fn schema parse_query policy source_session tx)
 	(begin
