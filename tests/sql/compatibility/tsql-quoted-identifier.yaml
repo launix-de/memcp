@@ -12,6 +12,26 @@ setup:
 - sql: CREATE TABLE qi_trigger_input(id INT PRIMARY KEY)
 - sql: CREATE TABLE qi_trigger_log(label NVARCHAR(20))
 test_cases:
+- name: Empty lexical input preserves its supplied mode without output spans
+  scm: |
+    (begin
+      (define parsed (tsql_parse_context "" false false))
+      (and (equal? (parsed "text") "")
+        (equal? (parsed "source") "")
+        (equal? (parsed "spans") '())
+        (identical? (parsed "quoted_identifier") false)
+        (nil? (parsed "module_source"))))
+  expect: {result: true}
+- name: The final token publishes its updated lexical mode and original source boundary
+  scm: |
+    (begin
+      (define parsed (tsql_parse_context "SET QUOTED_IDENTIFIER OFF" true false))
+      (define spans (parsed "spans"))
+      (define last (nth spans (- (count spans) 1)))
+      (and (identical? (parsed "quoted_identifier") false)
+        (equal? (+ (cadr last) (nth last 3)) 25)
+        (equal? (tsql_context_source_offset parsed 25) 25)))
+  expect: {result: true}
 - name: ON lexical context escapes identifier brackets and doubled double quotes
   scm: |
     (begin
