@@ -583,7 +583,7 @@ func rolling(limit int) int {
 	}
 }
 
-func TestStoragePrefixIncludesRegisterPlanTypes(t *testing.T) {
+func TestStorageIncludesRegisterPlanTypes(t *testing.T) {
 	input := "plan := JITRegisterPlan{Slots: [16]JITRegisterSlot{}}\nvalue := JITValueDesc{Reg: r}\n"
 	want := "plan := scm.JITRegisterPlan{Slots: [16]scm.JITRegisterSlot{}}\nvalue := scm.JITValueDesc{Reg: r}\n"
 	if got := addScmPrefix(input); got != want {

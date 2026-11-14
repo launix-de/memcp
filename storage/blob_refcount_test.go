@@ -27,6 +27,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"unsafe"
 
 	"github.com/launix-de/memcp/scm"
 )
@@ -902,9 +903,9 @@ func TestBlobRefcountPanicReleasesRowsLock(t *testing.T) {
 	db.IncrBlobRefcount(strings.Repeat("cd", 32))
 }
 
-// References crossing codec blocks retain their bytes when the next row reuses
-// the cursor scratch; inline literals continue to expose their lazy handle.
-func TestOverlayCompressedReferenceOwnsDecodedBytes(t *testing.T) {
+// References retain their bytes across cursor reuse; single-span escaped
+// literals borrow the pool bytes without copying or retaining a slice handle.
+func TestOverlayConcatReferenceAndLiteralLifetime(t *testing.T) {
 	payload := blobBangPayload()
 	hash := sha256.Sum256([]byte(payload))
 	var compressed bytes.Buffer
@@ -917,25 +918,29 @@ func TestOverlayCompressedReferenceOwnsDecodedBytes(t *testing.T) {
 		if legacy {
 			raw = "!" + string(hash[:])
 		}
-		buffer, offsets := scm.BuildCompressedStringBuffer([]string{
-			strings.Repeat("p", scm.StringBufferBlockBytes-8), raw, "!!literal",
+		buffer, offsets := scm.BuildStringConcatBuffer([]string{
+			strings.Repeat("p", 65536-8), raw, "!!literal",
 		})
 		var cursor scm.TextCursor
 		var scratch scm.TextScratch
-		value, inline := overlay.inlineBufferValue(scm.NewBufferString(buffer, offsets[1], len(raw)), &cursor, &scratch)
+		value, inline := overlay.inlineBufferValue(scm.NewBufferString(buffer, offsets[1]), &cursor, &scratch)
 		if inline || value.IsBufferString() || value.String() != raw {
 			t.Fatal("reference handoff lost its owned bytes")
 		}
-		other, _ := scm.BuildCompressedStringBuffer([]string{strings.Repeat("q", scm.StringBufferBlockBytes)})
-		cursor.Reset(scm.NewBufferString(other, 0, scm.StringBufferBlockBytes))
+		other, _ := scm.BuildStringConcatBuffer([]string{strings.Repeat("q", 65536)})
+		cursor.Reset(scm.NewBufferString(other, 0))
 		var prefix [2]byte
 		cursor.Read(prefix[:], &scratch)
 		if got := overlay.resolveBlob(value); got.String() != payload {
 			t.Fatal("scratch reuse changed the resolved reference")
 		}
-		literal, inline := overlay.inlineBufferValue(scm.NewBufferString(buffer, offsets[2], len("!!literal")), &cursor, &scratch)
-		if !inline || !literal.IsBufferString() || literal.String() != "!literal" {
-			t.Fatal("reference preparation eagerly copied an escaped inline literal")
+		literal, inline := overlay.inlineBufferValue(scm.NewBufferString(buffer, offsets[2]), &cursor, &scratch)
+		if !inline || literal.String() != "!literal" {
+			t.Fatal("reference preparation changed an escaped inline literal")
+		}
+		original, direct := buffer.Direct(offsets[2])
+		if !direct || unsafe.StringData(literal.String()) != unsafe.StringData(original[1:]) {
+			t.Fatal("single-span escaped literal no longer borrows its pool bytes")
 		}
 	}
 }

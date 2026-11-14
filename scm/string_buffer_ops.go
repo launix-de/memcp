@@ -9,6 +9,7 @@ import "io"
 import "fmt"
 import "unsafe"
 import "strings"
+import "strconv"
 import "unicode"
 import "unicode/utf8"
 import "hash/maphash"
@@ -19,20 +20,19 @@ func compareBufferText(a, b Scmer, fold bool) int {
 	if a.ptr == b.ptr && a.aux == b.aux {
 		return 0
 	}
-	if a.GetTag() == tagLZ4 || b.GetTag() == tagLZ4 {
-		return compareLZ4Text(a, b, fold)
+	if a.GetTag() == tagConcat || b.GetTag() == tagConcat {
+		return compareConcatText(a, b, fold)
 	}
 	return CompareTextCursors(a, b, fold, nil, nil)
 }
 
-func compareLZ4Text(a, b Scmer, fold bool) int {
+func compareConcatText(a, b Scmer, fold bool) int {
 	var left, right TextScratch
 	return CompareTextCursors(a, b, fold, &left, &right)
 }
 
-// CompareTextCursors compares represented text using caller-owned decoder
-// scratch. Compressed operands require their own scratch; retaining it across
-// comparisons reuses decoded blocks without materializing a whole dictionary.
+// CompareTextCursors compares borrowed literal spans without decoding a pool.
+// Shared spans compare by identity; otherwise comparison stops at the first mismatch.
 func CompareTextCursors(a, b Scmer, fold bool, left, right *TextScratch) int {
 	var av, bv TextCursor
 	av.Reset(a)
@@ -62,7 +62,7 @@ func CompareTextCursors(a, b Scmer, fold bool, left, right *TextScratch) int {
 	for {
 		x, y := av.nextChunk(left), bv.nextChunk(right)
 		n := min(len(x), len(y))
-		if c := bytes.Compare(x[:n], y[:n]); c != 0 {
+		if c := compareTextSpans(x[:n], y[:n]); c != 0 {
 			return c
 		}
 		if n == 0 {
@@ -74,19 +74,22 @@ func CompareTextCursors(a, b Scmer, fold bool, left, right *TextScratch) int {
 }
 
 func equalBufferText(a, b Scmer, fold bool) bool {
+	if !fold && compressedTextLen(a) != compressedTextLen(b) {
+		return false
+	}
 	if a.ptr == b.ptr && a.aux == b.aux {
 		return true
 	}
 	if !fold {
 		return compareBufferText(a, b, false) == 0
 	}
-	if a.GetTag() == tagLZ4 || b.GetTag() == tagLZ4 {
-		return equalLZ4Fold(a, b)
+	if a.GetTag() == tagConcat || b.GetTag() == tagConcat {
+		return equalConcatFold(a, b)
 	}
 	return equalCursorFold(a, b, nil, nil)
 }
 
-func equalLZ4Fold(a, b Scmer) bool {
+func equalConcatFold(a, b Scmer) bool {
 	var left, right TextScratch
 	return equalCursorFold(a, b, &left, &right)
 }
@@ -123,7 +126,7 @@ func generalBufferLess(a, b Scmer, reverse bool) bool {
 	if a.ptr == b.ptr && a.aux == b.aux {
 		return false
 	}
-	if a.GetTag() == tagLZ4 || b.GetTag() == tagLZ4 {
+	if a.GetTag() == tagConcat || b.GetTag() == tagConcat {
 		var x, y TextScratch
 		return generalBufferLessScratch(a, b, reverse, &x, &y)
 	}
@@ -165,7 +168,7 @@ func generalBufferLessScratch(a, b Scmer, reverse bool, x, y *TextScratch) bool 
 
 func bufferLike(s Scmer, pattern string, fold bool) bool {
 	fold = fold && likePatternNeedsCaseFold(pattern)
-	if s.GetTag() == tagLZ4 {
+	if s.GetTag() == tagConcat {
 		var scratch TextScratch
 		return bufferLikeScratch(s, pattern, fold, &scratch)
 	}
@@ -270,7 +273,7 @@ func bufferLiteralLike(s Scmer, pattern string, fold bool, mode int, scratch *Te
 // BufferBytePrefix is used by OverlayBlob to recognize escape/reference
 // markers without materializing an ordinary inline value.
 func BufferBytePrefix(s Scmer, dst []byte) int {
-	if s.GetTag() == tagLZ4 {
+	if s.GetTag() == tagConcat {
 		var scratch TextScratch
 		var c TextCursor
 		c.Reset(s)
@@ -282,7 +285,7 @@ func BufferBytePrefix(s Scmer, dst []byte) int {
 }
 
 func bufferCase(s Scmer, upper bool) Scmer {
-	if s.GetTag() == tagLZ4 {
+	if s.GetTag() == tagConcat {
 		var scratch TextScratch
 		return bufferCaseScratch(s, upper, &scratch)
 	}
@@ -290,37 +293,47 @@ func bufferCase(s Scmer, upper bool) Scmer {
 }
 
 func bufferCaseScratch(s Scmer, upper bool, scratch *TextScratch) Scmer {
-	var c TextCursor
-	c.Reset(s)
-	result := make([]byte, 0, compressedTextLen(s))
+	var cursor TextCursor
+	cursor.Reset(s)
+	var out []byte
 	for {
-		r, _, ok := c.NextRune(scratch)
+		before := cursor.Position()
+		r, width, ok := cursor.NextRune(scratch)
 		if !ok {
 			break
 		}
+		mapped := unicode.ToLower(r)
 		if upper {
-			r = unicode.ToUpper(r)
-		} else {
-			r = unicode.ToLower(r)
+			mapped = unicode.ToUpper(r)
 		}
-		result = utf8.AppendRune(result, r)
+		changed := mapped != r || r == utf8.RuneError && width == 1
+		if out == nil && !changed {
+			continue
+		}
+		if out == nil {
+			out = make([]byte, before, compressedTextLen(s))
+			var prefix TextCursor
+			prefix.Reset(s)
+			prefix.Read(out, scratch)
+		}
+		out = utf8.AppendRune(out, mapped)
 	}
-	return NewString(unsafe.String(unsafe.SliceData(result), len(result)))
+	if out == nil {
+		return s
+	}
+	return NewString(unsafe.String(unsafe.SliceData(out), len(out)))
 }
 
 func writeBufferText(w io.Writer, s Scmer) {
-	var scratch TextScratch
 	var cursor TextCursor
-	var chunk [768]byte
 	cursor.Reset(s)
 	for {
-		n := cursor.Read(chunk[:], &scratch)
-		if n == 0 {
+		chunk := cursor.nextChunk(nil)
+		if len(chunk) == 0 {
 			return
 		}
-		if _, err := w.Write(chunk[:n]); err != nil {
-			panic(err)
-		}
+		_, _ = w.Write(chunk)
+		cursor.advanceChunk(len(chunk))
 	}
 }
 
@@ -486,6 +499,9 @@ func serializeBufferString(w *schemeTextWriter, s Scmer) {
 }
 
 func bufferReplace(s Scmer, find, replacement string) Scmer {
+	if find == replacement {
+		return s
+	}
 	var cursor, output TextCursor
 	var scratch TextScratch
 	cursor.Reset(s)
@@ -597,7 +613,7 @@ func nextBufferMatch(cursor *TextCursor, find string, prefix []int, scratch *Tex
 func BufferSlice(s Scmer, start, end int) Scmer { return bufferSubstring(s, start, end) }
 
 func bufferTrim(s Scmer, direction int) Scmer {
-	if s.GetTag() == tagLZ4 {
+	if s.GetTag() == tagConcat {
 		var scratch TextScratch
 		return bufferTrimScratch(s, direction, &scratch)
 	}
@@ -685,4 +701,150 @@ func bufferLikeTokens(value Scmer, tokens []LikeToken, fold bool) bool {
 		cursor = star
 		p = starPattern
 	}
+}
+
+func compareTextSpans(a, b []byte) int {
+	if unsafe.SliceData(a) == unsafe.SliceData(b) {
+		return 0
+	}
+	return bytes.Compare(a, b)
+}
+
+// appendBufferJSON renders encoding/json-compatible strings straight from
+// pool spans. UTF-8 runes may cross span boundaries; ASCII runs copy at once.
+func appendBufferJSON(dst []byte, s Scmer) []byte {
+	dst = append(dst, '"')
+	var cursor TextCursor
+	cursor.Reset(s)
+	for {
+		chunk := cursor.nextChunk(nil)
+		if len(chunk) == 0 {
+			break
+		}
+		n := 0
+		for n < len(chunk) {
+			c := chunk[n]
+			if c < 32 || c >= 128 || c == '"' || c == '\\' || c == '<' || c == '>' || c == '&' {
+				break
+			}
+			n++
+		}
+		if n > 0 {
+			dst = append(dst, chunk[:n]...)
+			cursor.advanceChunk(n)
+			continue
+		}
+		r, width, _ := cursor.NextRune(nil)
+		switch r {
+		case '\\', '"':
+			dst = append(dst, '\\', byte(r))
+		case '\b':
+			dst = append(dst, `\b`...)
+		case '\f':
+			dst = append(dst, `\f`...)
+		case '\n':
+			dst = append(dst, `\n`...)
+		case '\r':
+			dst = append(dst, `\r`...)
+		case '\t':
+			dst = append(dst, `\t`...)
+		case '\u2028':
+			dst = append(dst, `\u2028`...)
+		case '\u2029':
+			dst = append(dst, `\u2029`...)
+		default:
+			if r < 32 || r == '<' || r == '>' || r == '&' {
+				const hex = "0123456789abcdef"
+				dst = append(dst, `\u00`...)
+				dst = append(dst, hex[byte(r)>>4], hex[byte(r)&15])
+			} else if r == utf8.RuneError && width == 1 {
+				dst = append(dst, `\ufffd`...)
+			} else {
+				dst = utf8.AppendRune(dst, r)
+			}
+		}
+	}
+	return append(dst, '"')
+}
+
+// Numeric coercions inspect only the leading numeric token, never a complete
+// report/query value. The ordinary stack buffer grows only for long numbers.
+func bufferNumericToken(s Scmer, dst []byte) []byte {
+	start := len(dst)
+	var cursor TextCursor
+	cursor.Reset(s)
+	ch, ok := cursor.NextByte(nil)
+	for ok && (ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' || ch == '\f' || ch == '\v') {
+		ch, ok = cursor.NextByte(nil)
+	}
+	if ok && (ch == '+' || ch == '-') {
+		dst = append(dst, ch)
+		ch, ok = cursor.NextByte(nil)
+	}
+	digits := 0
+	for ok && ch >= '0' && ch <= '9' {
+		dst = append(dst, ch)
+		digits++
+		ch, ok = cursor.NextByte(nil)
+	}
+	if ok && ch == '.' {
+		dst = append(dst, ch)
+		ch, ok = cursor.NextByte(nil)
+		for ok && ch >= '0' && ch <= '9' {
+			dst = append(dst, ch)
+			digits++
+			ch, ok = cursor.NextByte(nil)
+		}
+	}
+	if digits == 0 {
+		return dst[:start]
+	}
+	if ok && (ch == 'e' || ch == 'E') {
+		exponent := len(dst)
+		dst = append(dst, ch)
+		ch, ok = cursor.NextByte(nil)
+		if ok && (ch == '+' || ch == '-') {
+			dst = append(dst, ch)
+			ch, ok = cursor.NextByte(nil)
+		}
+		firstDigit := len(dst)
+		for ok && ch >= '0' && ch <= '9' {
+			dst = append(dst, ch)
+			ch, ok = cursor.NextByte(nil)
+		}
+		if firstDigit == len(dst) {
+			dst = dst[:exponent]
+		}
+	}
+	return dst
+}
+func bufferBool(s Scmer) bool {
+	if bufferStringLen(s) == 0 || equalBufferText(s, NewString("false"), true) {
+		return false
+	}
+	var cursor TextCursor
+	cursor.Reset(s)
+	for {
+		r, _, ok := cursor.NextRune(nil)
+		if !ok {
+			return true
+		}
+		if unicode.IsSpace(r) {
+			continue
+		}
+		if !(r >= '0' && r <= '9') && r != '+' && r != '-' && r != '.' && r != 'N' && r != 'I' {
+			return true
+		}
+		break
+	}
+	number, err := strconv.ParseFloat(strings.TrimSpace(s.String()), 64)
+	return err != nil || number != 0
+}
+func numericTextEqualsInt(value Scmer, integer int64) bool {
+	if !value.IsBufferString() {
+		return numericStringEqualsInt(value.String(), integer)
+	}
+	var local [128]byte
+	token := bufferNumericToken(value, local[:0])
+	return numericStringEqualsInt(unsafe.String(unsafe.SliceData(token), len(token)), integer)
 }

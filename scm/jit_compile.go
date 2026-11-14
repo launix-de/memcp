@@ -1635,7 +1635,7 @@ func (ctx *JITContext) StabilizeDescForControlFlow(desc *JITValueDesc) {
 // insufficient for compressed and binary string values produced by storages.
 func (ctx *JITContext) EmitIsStringBorrowed(src *JITValueDesc, result JITValueDesc) JITValueDesc {
 	isStringTag := func(tag uint8) bool {
-		return tag == tagString || tag == tagCString || tag == tagBString || tag == tagLZ4
+		return tag == tagString || tag == tagCString || tag == tagBString || tag == tagConcat
 	}
 	if src.Loc == LocImm {
 		value := JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(isStringTag(src.Imm.GetTag()))}
@@ -1672,7 +1672,7 @@ func (ctx *JITContext) EmitIsStringBorrowed(src *JITValueDesc, result JITValueDe
 	ctx.EmitSetcc(tagReg, CondEqual)
 	ctx.EmitOrInt64(tagReg, rangeReg)
 	ctx.EmitGetTagRegs(rangeReg, tmp.Reg, tmp.Reg2)
-	ctx.EmitCmpRegImm32(rangeReg, int32(tagLZ4))
+	ctx.EmitCmpRegImm32(rangeReg, int32(tagConcat))
 	ctx.EmitSetcc(rangeReg, CondEqual)
 	ctx.EmitOrInt64(tagReg, rangeReg)
 	ctx.FreeReg(rangeReg)
@@ -3394,7 +3394,7 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 		expr = si.value
 	}
 	switch expr.GetTag() {
-	case tagNil, tagBool, tagInt, tagFloat, tagDate, tagString, tagCString, tagBString, tagLZ4, tagRegex, tagVector,
+	case tagNil, tagBool, tagInt, tagFloat, tagDate, tagString, tagCString, tagBString, tagConcat, tagRegex, tagVector,
 		tagFunc, tagFuncEnv, tagJIT, tagParser, tagFastDict, tagAny,
 		tagClosure, tagPromise, tagSpecialForm:
 		// Keep Eval's self-evaluating literal contract. Pointer-bearing constants

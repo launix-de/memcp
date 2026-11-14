@@ -81,8 +81,8 @@ const (
 	tagPromise     // tagPromise Scmer; ptr points to cells[0] of a [2]Scmer backing (auxVal==0 heap, auxVal==1 list-backed)
 	tagBSON        // raw BSON value; ptr=payload bytes, aux packs BSON type and payload length
 	tagSpecialForm // optimizer-resolved form receiving unevaluated operands and environment
-	_              // reserved experimental tag; keep tagLZ4 at 26
-	tagLZ4         // ptr=immutable compressed buffer header; aux=logical byte offset, length
+	_              // reserved experimental tag; keep tagConcat at 26
+	tagConcat      // ptr=immutable compressed buffer header; aux=56-bit concat entry offset
 	// custom tags >= 100
 )
 
@@ -100,7 +100,7 @@ const (
 	TagCString  = tagCString
 	TagBString  = tagBString
 	TagBSON     = tagBSON
-	TagLZ4      = tagLZ4
+	TagConcat   = tagConcat
 )
 
 // CStringDecompress is set by the storage package to materialize a compressed string.
@@ -593,7 +593,7 @@ func (s Scmer) IsString() bool {
 		return false
 	}
 	t := auxTag(s.aux)
-	return t == tagString || t == tagCString || t == tagBString || t == tagLZ4
+	return t == tagString || t == tagCString || t == tagBString || t == tagConcat
 }
 
 func (s Scmer) IsCString() bool {
@@ -674,7 +674,9 @@ func (s Scmer) Bool() bool {
 		return int64(s.aux) != 0
 	case tagFloat:
 		return math.Float64frombits(s.aux) != 0.0
-	case tagString, tagSymbol, tagCString, tagBString, tagLZ4:
+	case tagConcat:
+		return bufferBool(s)
+	case tagString, tagSymbol, tagCString, tagBString:
 		str := s.String()
 		if str == "" || strings.EqualFold(str, "false") {
 			return false
@@ -781,7 +783,14 @@ func (s Scmer) Int() int64 {
 		return int64(s.aux)
 	case tagFloat:
 		return int64(math.Float64frombits(s.aux))
-	case tagString, tagSymbol, tagCString, tagBString, tagLZ4:
+	case tagConcat:
+		var local [128]byte
+		token := bufferNumericToken(s, local[:0])
+		if len(token) == 0 {
+			return 0
+		}
+		return numericPrefixInt(unsafe.String(unsafe.SliceData(token), len(token)))
+	case tagString, tagSymbol, tagCString, tagBString:
 		return numericPrefixInt(s.String())
 	case tagBSON:
 		return bsonInt(s)
@@ -808,7 +817,14 @@ func (s Scmer) Float() float64 {
 		return math.Float64frombits(s.aux)
 	case tagInt:
 		return float64(int64(s.aux))
-	case tagString, tagSymbol, tagCString, tagBString, tagLZ4:
+	case tagConcat:
+		var local [128]byte
+		token := bufferNumericToken(s, local[:0])
+		if len(token) == 0 {
+			return 0
+		}
+		return numericPrefixFloat(unsafe.String(unsafe.SliceData(token), len(token)))
+	case tagString, tagSymbol, tagCString, tagBString:
 		return numericPrefixFloat(s.String())
 	case tagBSON:
 		return bsonFloat(s)
@@ -842,7 +858,7 @@ func (s Scmer) Float() float64 {
 //	return sa < sb
 func (s Scmer) AppendString(dst []byte) (string, []byte) {
 	switch s.GetTag() {
-	case tagLZ4:
+	case tagConcat:
 		return appendBufferString(dst, s)
 	case tagString, tagSymbol:
 		return unsafe.String(s.ptr, int(auxVal(s.aux))), dst
@@ -938,6 +954,9 @@ func (s Scmer) AppendString(dst []byte) (string, []byte) {
 }
 
 func (s Scmer) String() string {
+	if s.IsBufferString() {
+		return bufferOf(s).Extract(auxVal(s.aux))
+	}
 	str, _ := s.AppendString(nil)
 	return str
 }
@@ -1176,7 +1195,7 @@ func (s Scmer) Any() any {
 		return s.Parser()
 	case tagRegex:
 		return s.Regex()
-	case tagCString, tagLZ4:
+	case tagCString, tagConcat:
 		return s.String()
 	case tagBString:
 		return s.String()
@@ -1219,7 +1238,7 @@ func (s Scmer) MarshalJSON() ([]byte, error) {
 			return v.Float()
 		case tagDate:
 			return DateToDisplay(v, time.UTC)
-		case tagString, tagLZ4:
+		case tagString, tagConcat:
 			s := v.String()
 			if !utf8.ValidString(s) {
 				return map[string]any{"bytes": base64.StdEncoding.EncodeToString([]byte(s))}

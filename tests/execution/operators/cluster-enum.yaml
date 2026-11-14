@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 metadata:
   version: '1.0'
-  description: ENUM declaration values and order callbacks across delegated joins
+  description: String encodings, declaration order and text operators across delegated joins
   cluster:
     fixture: shared_analytics
     rows_per_shard: 5000
@@ -16,9 +16,17 @@ metadata:
 setup:
   - sql: DROP TABLE IF EXISTS enum_labels
   - sql: CREATE TABLE enum_labels (id INT PRIMARY KEY, kind ENUM('z','a','m') NOT NULL)
+  - sql: DROP TABLE IF EXISTS concat_labels
+  - sql: CREATE TABLE concat_labels (id INT PRIMARY KEY, label TEXT)
+  - sql: >-
+      INSERT INTO concat_labels SELECT id,
+      CONCAT('shared-',id,'-Prüfbericht-',REPEAT('abc',128))
+      FROM big_items WHERE id<256
+  - scm: "(rebuild)"
   - sql: INSERT INTO enum_labels VALUES (0,'z'),(1,'a'),(2,'m')
 cleanup:
   - sql: DROP TABLE IF EXISTS enum_labels
+  - sql: DROP TABLE IF EXISTS concat_labels
 test_cases:
   - name: ENUM projection and declaration order survive a distributed join
     sql: SELECT e.kind,b.id FROM big_items b JOIN enum_labels e ON b.id%3=e.id WHERE b.id<3 ORDER BY e.kind
@@ -29,3 +37,12 @@ test_cases:
   - name: Enum domain validation remains active with a shared schema
     sql: INSERT INTO enum_labels VALUES (3,'invalid')
     expect: {error: true}
+
+  - name: Concat handles preserve comparison and text operators across delegated joins
+    sql: >-
+      SELECT b.id,SUBSTRING(e.label,1,6) AS prefix,LENGTH(e.label)>300 AS long_text,
+      e.label LIKE 'shared-%' AS matched FROM big_items b JOIN concat_labels e
+      ON b.id%256=e.id WHERE b.id<3 ORDER BY e.label COLLATE utf8mb4_bin
+    expect:
+      data: [{id: 0, prefix: shared, long_text: true, matched: true}, {id: 1, prefix: shared, long_text: true, matched: true}, {id: 2, prefix: shared, long_text: true, matched: true}]
+      cluster: {min_remote_shards: 1}

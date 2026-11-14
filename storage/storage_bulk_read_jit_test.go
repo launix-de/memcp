@@ -126,14 +126,6 @@ func exactJITStorageFixtures() []struct {
 			}
 			return scm.NewFloat(float64(index-50) / 100)
 		}},
-		{"StoragePrefix", func() exactJITStorage {
-			return &StoragePrefix{prefixdictionary: []string{"", "https://example.test/common/path/"}}
-		}, func(index int) scm.Scmer {
-			if index%31 == 0 {
-				return scm.NewNil()
-			}
-			return scm.NewString("https://example.test/common/path/" + scm.String(scm.NewInt(int64(index))))
-		}},
 		{"StorageEnum", func() exactJITStorage { return &StorageEnum{} }, func(index int) scm.Scmer {
 			values := [...]scm.Scmer{scm.NewNil(), scm.NewString("a"), scm.NewString("beta"), scm.NewString("gamma")}
 			return values[index%len(values)]
