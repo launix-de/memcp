@@ -38,3 +38,28 @@ test_cases:
       SELECT c.id,c.token FROM capture_inputs c WHERE c.token>20)d
     WHERE (SELECT c.value FROM capture_lookup c WHERE c.id=d.id)=100 ORDER BY d.token
   expect: {data: [{token: 10},{token: 40}]}
+- name: Membership projection dependencies remain free across a colliding derived binder
+  scm: |
+    (begin
+      (define membership (list 'membership_truth 1 "helper" "matches"))
+      (define input (make_query_block "memcp-tests"
+        (list (list "helper" "memcp-tests" "capture_lookup" false nil nil))
+        (list "found" (list 'get_column "d" false "eligible" false))
+        (list 'equal? (list 'get_column "helper" false "id" false) 1)
+        nil nil nil nil nil '() '() '()))
+      (define rewritten (rewrite_derived_ref "d" (list "eligible" membership) input))
+      (and (derived_projection_reads_alias? "helper" rewritten)
+        (derived_projection_reads_alias? "probe"
+          (list 'membership_truth (list 'get_column "probe" false "id" false) "helper" "matches"))
+        (not (derived_projection_reads_alias? "helper" (list 'quote membership)))
+        (not (derived_projection_reads_alias? "helper"
+          (make_query_block "memcp-tests" (qb_sources input)
+            (list "found" membership) true nil nil nil nil nil '() '() '())))))
+  expect: {result: true}
+- name: Membership filters retain duplicate outer rows and SQL NULL behavior through UNION projections
+  sql: |
+    SELECT d.token FROM(SELECT c.id,c.token FROM capture_inputs c WHERE c.token<=20 UNION ALL
+      SELECT c.id,c.token FROM capture_inputs c WHERE c.token>20)d
+    WHERE d.id IN(SELECT c.id FROM capture_lookup c WHERE c.value IS NOT NULL)
+      AND (SELECT c.value FROM capture_lookup c WHERE c.id=d.id)=100 ORDER BY d.token
+  expect: {data: [{token: 10},{token: 40}]}
