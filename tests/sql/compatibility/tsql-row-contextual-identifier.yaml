@@ -10,7 +10,8 @@ metadata:
 setup:
 - sql: CREATE TABLE row(id INT PRIMARY KEY,row INT)
 - sql: INSERT INTO row VALUES(1,10),(2,20),(3,NULL)
-- sql: CREATE PROCEDURE row_numbered AS SELECT id,ROW_NUMBER() OVER(ORDER BY id) AS Row INTO #numbered FROM row; SELECT id,Row FROM #numbered ORDER BY id;
+- sql: |
+    CREATE PROCEDURE row_numbered AS SELECT id,ROW_NUMBER() OVER(ORDER BY id) AS Row INTO #numbered FROM row; SELECT id,Row FROM #numbered ORDER BY id;
 test_cases:
 - name: ROW is accepted by the shared regular identifier contract
   scm: (and (tsql_regular_identifier? "Row") (tsql_regular_identifier? "rOw") (not (tsql_regular_identifier? "SELECT")))
