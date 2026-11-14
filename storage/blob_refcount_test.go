@@ -27,6 +27,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"unsafe"
 
 	"github.com/launix-de/memcp/scm"
 )
@@ -902,9 +903,9 @@ func TestBlobRefcountPanicReleasesRowsLock(t *testing.T) {
 	db.IncrBlobRefcount(strings.Repeat("cd", 32))
 }
 
-// References crossing codec blocks retain their bytes when the next row reuses
-// the cursor scratch; inline literals continue to expose their lazy handle.
-func TestOverlayCompressedReferenceOwnsDecodedBytes(t *testing.T) {
+// References retain their bytes across cursor reuse; single-span escaped
+// literals borrow the pool bytes without copying or retaining a slice handle.
+func TestOverlayConcatReferenceAndLiteralLifetime(t *testing.T) {
 	payload := blobBangPayload()
 	hash := sha256.Sum256([]byte(payload))
 	var compressed bytes.Buffer
@@ -934,8 +935,12 @@ func TestOverlayCompressedReferenceOwnsDecodedBytes(t *testing.T) {
 			t.Fatal("scratch reuse changed the resolved reference")
 		}
 		literal, inline := overlay.inlineBufferValue(scm.NewBufferString(buffer, offsets[2]), &cursor, &scratch)
-		if !inline || !literal.IsBufferString() || literal.String() != "!literal" {
-			t.Fatal("reference preparation eagerly copied an escaped inline literal")
+		if !inline || literal.String() != "!literal" {
+			t.Fatal("reference preparation changed an escaped inline literal")
+		}
+		original, direct := buffer.Direct(offsets[2])
+		if !direct || unsafe.StringData(literal.String()) != unsafe.StringData(original[1:]) {
+			t.Fatal("single-span escaped literal no longer borrows its pool bytes")
 		}
 	}
 }

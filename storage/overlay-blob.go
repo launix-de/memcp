@@ -533,13 +533,9 @@ func (s *OverlayBlob) inlineBufferValue(v scm.Scmer, cursor *scm.TextCursor, scr
 	if n == 2 && prefix[1] == '!' && (!s.legacy || scm.BufferStringLength(v) != 33) {
 		return scm.BufferSlice(v, 1, scm.BufferStringLength(v)), true
 	}
-	// A reference candidate must be read by the existing blob resolver. Keep
-	// its owned bytes across that scalar/batch handoff, reusing the block that
-	// the prefix probe already decoded. Inline payloads above stay lazy.
-	text := make([]byte, scm.BufferStringLength(v))
-	cursor.Reset(v)
-	cursor.Read(text, scratch)
-	return scm.NewString(unsafe.String(unsafe.SliceData(text), len(text))), false
+	// The resolver expects a Go string. Single spans borrow immutable pool
+	// bytes; fragmented references allocate once and survive cursor reuse.
+	return scm.NewString(v.String()), false
 }
 
 func (s *OverlayBlob) prepare() {
