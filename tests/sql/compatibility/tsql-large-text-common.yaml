@@ -67,3 +67,92 @@ test_cases:
         rows: 1
         data: [{a: alp,n: om}]
         column_types: [{name: a,type: VARCHAR,length: 3},{name: n,type: NVARCHAR,length: 2}]
+- name: Conditional character contracts retain the longest declared input
+  scm: |
+    (sql_info_datatype (tsql_common_value_contract
+      (list (sql_info '(get_column "s" false "label" false) (list "VARCHAR" (list 12)) nil)
+        (sql_info "missing" "VARCHAR" nil)) nil))
+  expect: {result: [VARCHAR,[12]]}
+- name: COALESCE includes a longer literal syntax contract
+  scm: |
+    (sql_info_datatype (tsql_compile_coalesce
+      (list (sql_info '(get_column "s" false "label" false) (list "VARCHAR" (list 4)) nil)
+        (sql_info "long fallback" "VARCHAR" nil))))
+  expect: {result: [VARCHAR,[13]]}
+- name: National conditional widths retain UTF16 literal units and declared inputs
+  scm: |
+    (sql_info_datatype (tsql_common_value_contract
+      (list (sql_info "😀" "NVARCHAR" nil)
+        (sql_info '(get_column "s" false "label" false) (list "VARCHAR" (list 4)) nil)
+        (sql_info nil "NULL" nil)) nil))
+  expect: {result: [NVARCHAR,[4]]}
+- name: Conditional MAX dimensions remain unbounded
+  scm: |
+    (sql_info_datatype (tsql_common_value_contract
+      (list (sql_info '(get_column "s" false "label" false) (list "VARCHAR" (list -1)) nil)
+        (sql_info "short" "VARCHAR" nil)) nil))
+  expect: {result: [VARCHAR,[-1]]}
+- name: Unknown character expression dimensions are not inferred from runtime values
+  scm: |
+    (sql_info_datatype (tsql_common_value_contract
+      (list (sql_info '(session "value") "VARCHAR" nil)
+        (sql_info '(get_column "s" false "label" false) (list "VARCHAR" (list 12)) nil)) nil))
+  expect: {result: VARCHAR}
+- name: TDS describes conditional declared widths before reading any row
+  tds:
+    statements:
+    - sql: >-
+        SELECT TOP(0)
+          CASE WHEN id=1 THEN ISNULL(CAST(s AS VARCHAR(12)),'blank') ELSE 'missing' END AS a,
+          COALESCE(CAST(s AS VARCHAR(4)),'long fallback') AS b,
+          CASE WHEN id=1 THEN CAST(s AS NVARCHAR(12)) ELSE N'other' END AS n
+        FROM large_character_values
+      expect:
+        rows: 0
+        column_types:
+        - {name: a,type: VARCHAR,length: 12}
+        - {name: b,type: VARCHAR,length: 13}
+        - {name: n,type: NVARCHAR,length: 12}
+- name: An explicit MAX dominates an otherwise unknown character dimension
+  scm: |
+    (sql_info_datatype (tsql_common_value_contract
+      (list (sql_info '(get_column "s" false "label" false) (list "VARCHAR" (list -1)) nil)
+        (sql_info '(session "value") "VARCHAR" nil)) nil))
+  expect: {result: [VARCHAR,[-1]]}
+- name: Mixed ANSI and national bounded contracts use the national domain limit
+  scm: |
+    (sql_info_datatype (tsql_common_value_contract
+      (list (sql_info '(get_column "s" false "a" false) (list "VARCHAR" (list 8000)) nil)
+        (sql_info '(get_column "s" false "n" false) (list "NVARCHAR" (list 12)) nil)) nil))
+  expect: {result: [NVARCHAR,[4000]]}
+- name: A variable ANSI MAX branch makes a fixed national contract variable and unbounded
+  scm: |
+    (sql_info_datatype (tsql_common_value_contract
+      (list (sql_info '(get_column "s" false "a" false) (list "VARCHAR" (list -1)) nil)
+        (sql_info '(get_column "s" false "n" false) (list "NCHAR" (list 12)) nil)) nil))
+  expect: {result: [NVARCHAR,[-1]]}
+- name: TDS retains the actual bounded mixed national declaration
+  tds:
+    statements:
+    - sql: >-
+        SELECT TOP(0)
+          CASE WHEN id=1 THEN CAST(s AS VARCHAR(8000)) ELSE CAST(n AS NVARCHAR(12)) END AS mixed,
+          CASE WHEN id=1 THEN CAST(s AS VARCHAR(8000)) ELSE CAST(n AS NCHAR(12)) END AS variable
+        FROM large_character_values
+      expect:
+        rows: 0
+        column_types:
+        - {name: mixed,type: NVARCHAR,length: 4000}
+        - {name: variable,type: NVARCHAR,length: 4000}
+- name: Fixed ANSI and national common contracts retain the fixed national datatype
+  scm: |
+    (sql_info_datatype (tsql_common_value_contract
+      (list (sql_info '(get_column "s" false "a" false) (list "CHAR" (list 8000)) nil)
+        (sql_info '(get_column "s" false "n" false) (list "NCHAR" (list 12)) nil)) nil))
+  expect: {result: [NCHAR,[4000]]}
+- name: The national common domain narrows actual ANSI values as well as metadata
+  sql: >-
+    SELECT LEN(CASE WHEN id=3 THEN CAST(s AS VARCHAR(8000))
+      ELSE CAST(n AS NVARCHAR(12)) END) AS width
+    FROM large_character_values WHERE id=3
+  expect: {rows: 1,data: [{width: 4000}]}

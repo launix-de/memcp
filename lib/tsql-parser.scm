@@ -2632,6 +2632,17 @@ https://learn.microsoft.com/en-us/sql/t-sql/language-elements/multiply-transact-
 	'("sub" value) (tsql_sub_expr acc value)
 	'(operation value) (if (has? '("and" "or" "xor" "left" "right") operation)
 		(tsql_bit_expr operation (list acc value)) (sql_fold_additive_term acc term)))))
+/* A sized character declaration or a literal syntax terminal supplies a
+compile-time width. This helper never evaluates an arbitrary expression. */
+(define tsql_character_info_dimensions (lambda (info)
+	(if (equal? (count (sql_info_dimensions info)) 1) (sql_info_dimensions info)
+		(and (has? '("CHAR" "VARCHAR" "NCHAR" "NVARCHAR") (sql_info_type info))
+			(string? (sql_info_formula info)))
+		(begin
+			(define national (has? '("NCHAR" "NVARCHAR") (sql_info_type info)))
+			(define width (if national (utf16_length (sql_info_formula info))
+				(strlen (tsql_encode_character (sql_info_formula info) (tsql_character_encoding info) -1))))
+			(list (if (> width (if national 4000 8000)) -1 width))) '())))
 /* Implicit conversions consume declared contracts, including BIT's Boolean
 carrier. Width/scale are not reconstructed from runtime values; unresolved
 character dimensions retain the existing unbounded text conversion contract. */
@@ -2652,7 +2663,16 @@ character dimensions retain the existing unbounded text conversion contract. */
 	(define converted (if (or (equal? source "NULL")
 		(and (equal? source target) (or (not (tsql_temporal_type? target))
 			(expression_equal? dimensions (sql_info_dimensions info))))) formula
-		(and (has? tsql_common_text_types target) (has? tsql_common_text_types source)) formula
+		(and (has? tsql_common_text_types target) (has? tsql_common_text_types source))
+		/* An ANSI input can exceed the bounded national result domain.
+		Its declared narrowing must affect the value, not just wire metadata. */
+		(if (and (has? '("NCHAR" "NVARCHAR") target) (has? '("CHAR" "VARCHAR") source)
+			(equal? (count dimensions) 1) (>= (car dimensions) 0))
+			(begin
+				(define previous (tsql_character_info_dimensions info))
+				(if (and (equal? (count previous) 1)
+					(or (equal? (car previous) -1) (> (car previous) (car dimensions))))
+					(list tsql_cast_text formula (car dimensions) true "windows-1252") formula)) formula)
 		(and (has? tsql_addition_text_types target) (has? tsql_addition_numeric_types source))
 		(list tsql_cast_text formula -1 (has? '("NVARCHAR" "NCHAR") target) "windows-1252")
 		(and (has? tsql_addition_numeric_types target)
@@ -2680,6 +2700,20 @@ Character widths and native value carriers never infer calendar precision. */
 				(has? '("DATETIME2" "TIME") type)
 				(if (empty_list? (sql_info_dimensions info)) 7 (car (sql_info_dimensions info))) 0)))) 0)))
 		target)))
+/* Conditional character values retain the longest declared input. Unknown
+expression dimensions stay unknown; a proven MAX remains unbounded. */
+(define tsql_common_character_datatype (lambda (target infos) (begin
+	/* A variable ANSI branch makes a fixed national contract variable. */
+	(define target (if (and (equal? target "NCHAR")
+		(find infos (lambda (info) (equal? (sql_info_type info) "VARCHAR")) nil)) "NVARCHAR" target))
+	(define dimensions (map (filter infos (lambda (info)
+		(not (equal? (sql_info_type info) "NULL")))) tsql_character_info_dimensions))
+	(if (reduce dimensions (lambda (unbounded dimension)
+		(or unbounded (equal? dimension '(-1)))) false) (list target '(-1))
+		(and (not (empty_list? dimensions))
+			(reduce dimensions (lambda (known dimension) (and known (equal? (count dimension) 1))) true))
+		(list target (list (min (if (has? '("NCHAR" "NVARCHAR") target) 4000 8000)
+			(reduce dimensions (lambda (width dimension) (max width (car dimension))) 0)))) target))))
 /* A common SQL contract for bounded syntax values. This is compile-time
 metadata, shared by COALESCE and inline row constructors. It neither samples
 runtime values nor stores a second relational representation. */
@@ -2695,30 +2729,13 @@ runtime values nor stores a second relational representation. */
 	(define collation (if (has? tsql_common_text_types target)
 		(reduce infos (lambda (collation info)
 			(sql_merge_collation collation (sql_info_collation info))) nil) nil))
-	(sql_info nil (tsql_common_temporal_datatype target infos) collation))))
+	(sql_info nil (if (has? '("CHAR" "VARCHAR" "NCHAR" "NVARCHAR") target)
+		(tsql_common_character_datatype target infos)
+		(tsql_common_temporal_datatype target infos)) collation))))
 (define tsql_common_value_infos (lambda (infos null_type) (begin
 	(define contract (tsql_common_value_contract infos null_type))
 	(map infos (lambda (info) (tsql_convert_value_info info
 		(sql_info_datatype contract) (sql_info_collation contract)))))))
-/* UNION chooses column contracts from declarations, just like CASE and
-inline values. Coercions become ordinary expressions before the shared planner;
-no runtime value tag determines a SQL type. A nested set keeps its boundary. */
-(define tsql_union_value_contract (lambda (infos) (begin
-	(define contract (tsql_common_value_contract infos "INT"))
-	(define type (sql_info_type contract))
-	(define active (filter infos (lambda (info) (not (equal? (sql_info_type info) "NULL")))))
-	/* Equal character types choose the longest declared input, including
-	MAX. Unknown dimensions stay unknown; values never determine a width. */
-	(define known (and (has? '("CHAR" "VARCHAR" "NCHAR" "NVARCHAR") type)
-		(not (empty_list? active))
-		(reduce active (lambda (same info)
-			(and same (equal? (sql_info_type info) type) (equal? (count (sql_info_dimensions info)) 1))) true)))
-	(define datatype (if known
-		(list type (list (reduce active (lambda (width info) (begin
-			(define next (car (sql_info_dimensions info)))
-			(if (or (equal? width -1) (equal? next -1)) -1 (max width next)))) 0))) (sql_info_datatype contract)))
-	(sql_info nil datatype (sql_info_collation contract)))))
-
 /* Set metadata selects a target declaration, not an expression compiler scope.
 The original branch expression compiles once in its producing lexical scope;
 only then can the existing implicit-conversion owner consume its triple. */
@@ -2748,8 +2765,8 @@ only then can the existing implicit-conversion owner consume its triple. */
 	(if (reduce fields (lambda (valid field) (and valid (equal? (count field) (* width 2)))) true)
 		true (error "UNION branch column count mismatch"))
 	(define contracts (map (produceN width) (lambda (column)
-		(tsql_union_value_contract (mapIndex recipes (lambda (index branch)
-			(sql_expr_info (qb_sources branch) (nth (nth fields index) (+ (* column 2) 1)))))))))
+		(tsql_common_value_contract (mapIndex recipes (lambda (index branch)
+			(sql_expr_info (qb_sources branch) (nth (nth fields index) (+ (* column 2) 1))))) "INT"))))
 	(mapIndex recipes (lambda (index branch)
 		(begin
 			(define original (nth templates index))
