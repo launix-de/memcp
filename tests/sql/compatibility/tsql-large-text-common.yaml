@@ -9,6 +9,7 @@ setup:
 - sql: INSERT large_character_values VALUES(1,'alpha',N'omega'),(2,NULL,NULL)
 - sql: INSERT large_character_values VALUES(3,REPLICATE(CAST('q' AS VARCHAR(MAX)),9001),N'long')
 cleanup:
+- sql: DROP TABLE IF EXISTS common_fixed_utf8
 - sql: DROP TABLE IF EXISTS large_character_values
 test_cases:
 - name: CASE converts a bounded fallback to the TEXT declaration
@@ -156,3 +157,33 @@ test_cases:
       ELSE CAST(n AS NVARCHAR(12)) END) AS width
     FROM large_character_values WHERE id=3
   expect: {rows: 1,data: [{width: 4000}]}
+- name: CASE pads a selected shorter fixed branch to the common declaration
+  sql: >-
+    SELECT CASE WHEN id=1 THEN CAST('a' AS CHAR(2)) ELSE CAST('b' AS CHAR(3)) END AS value,
+      DATALENGTH(CASE WHEN id=1 THEN CAST('a' AS CHAR(2)) ELSE CAST('b' AS CHAR(3)) END) AS bytes
+    FROM large_character_values WHERE id=1
+  expect: {rows: 1,data: [{value: 'a  ',bytes: 3}]}
+- name: COALESCE pads fixed national branches in UTF16 units
+  sql: >-
+    SELECT COALESCE(CAST(N'a' AS NCHAR(2)),CAST(N'b' AS NCHAR(3))) AS value,
+      DATALENGTH(COALESCE(CAST(N'a' AS NCHAR(2)),CAST(N'b' AS NCHAR(3)))) AS bytes
+  expect: {rows: 1,data: [{value: 'a  ',bytes: 6}]}
+- name: Fixed common declarations retain a selected NULL replacement width
+  sql: >-
+    SELECT COALESCE(CAST(NULL AS CHAR(2)),CAST('b' AS CHAR(3))) AS value,
+      DATALENGTH(COALESCE(CAST(NULL AS CHAR(2)),CAST('b' AS CHAR(3)))) AS bytes
+  expect: {rows: 1,data: [{value: 'b  ',bytes: 3}]}
+- name: ISNULL retains its shorter first fixed width rather than the common width
+  sql: >-
+    SELECT ISNULL(CAST(NULL AS CHAR(2)),CAST('abc' AS CHAR(3))) AS value,
+      DATALENGTH(ISNULL(CAST(NULL AS CHAR(2)),CAST('abc' AS CHAR(3)))) AS bytes
+  expect: {rows: 1,data: [{value: ab,bytes: 2}]}
+- name: Equal numeric widths still convert ANSI bytes to fixed national units
+  setup:
+  - sql: CREATE TABLE common_fixed_utf8(id INT,a CHAR(3) COLLATE Latin1_General_100_CI_AS_SC_UTF8,n NCHAR(3) COLLATE Latin1_General_100_CI_AS_SC_UTF8)
+  - sql: INSERT common_fixed_utf8 VALUES(1,N'é',N'n')
+  sql: >-
+    SELECT CASE WHEN id=1 THEN a ELSE n END AS value,
+      DATALENGTH(CASE WHEN id=1 THEN a ELSE n END) AS bytes
+    FROM common_fixed_utf8
+  expect: {rows: 1,data: [{value: 'é  ',bytes: 6}]}

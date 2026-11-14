@@ -2661,13 +2661,18 @@ character dimensions retain the existing unbounded text conversion contract. */
 	(define typed (list (quote sql_type_expr) formula
 		(if (equal? source "BIT") "INT" (sql_info_datatype info)) (sql_info_collation info)))
 	(define converted (if (or (equal? source "NULL")
-		(and (equal? source target) (or (not (tsql_temporal_type? target))
-			(expression_equal? dimensions (sql_info_dimensions info))))) formula
+		(and (equal? source target)
+			(or (and (not (tsql_temporal_type? target)) (not (has? '("CHAR" "NCHAR") target)))
+				(expression_equal? dimensions (sql_info_dimensions info))))) formula
 		(and (has? tsql_common_text_types target) (has? tsql_common_text_types source))
-		/* An ANSI input can exceed the bounded national result domain.
-		Its declared narrowing must affect the value, not just wire metadata. */
-		(if (and (has? '("NCHAR" "NVARCHAR") target) (has? '("CHAR" "VARCHAR") source)
-			(equal? (count dimensions) 1) (>= (car dimensions) 0))
+		/* Fixed common contracts pad the shorter branch to their declared
+		width; ANSI inputs can also exceed a bounded national result domain. */
+		(if (and (has? '("CHAR" "NCHAR") target) (equal? (count dimensions) 1)
+			(>= (car dimensions) 0))
+			(list tsql_cast_fixed_text formula (car dimensions) (equal? target "NCHAR")
+				(tsql_character_encoding (sql_info nil type collation)))
+			(and (has? '("NCHAR" "NVARCHAR") target) (has? '("CHAR" "VARCHAR") source)
+				(equal? (count dimensions) 1) (>= (car dimensions) 0))
 			(begin
 				(define previous (tsql_character_info_dimensions info))
 				(if (and (equal? (count previous) 1)
