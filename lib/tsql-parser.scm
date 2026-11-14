@@ -3108,7 +3108,7 @@ Only compile-time SQL declarations choose the five-byte collation. */
 		(map_assoc wire (lambda (key value)
 			(if (equal? key "collation") (hex2bin "0904000400") value))) wire))))
 (define tsql_result_columns (lambda (query parameters) (match query
-	((symbol query-block) _schema sources fields _where _group _having _order _limit _offset _hidden _stages _facts)
+	((symbol query-block) _schema sources fields _where _group _having _order _limit _offset _hidden _stages facts)
 	(begin
 		(define entries (tsql_result_entries query false))
 		(define origins (map entries (lambda (entry) (nth entry 3))))
@@ -3128,7 +3128,7 @@ Only compile-time SQL declarations choose the five-byte collation. */
 			(define flags (tsql_result_flags origin editable))
 			/* Keep native origin, identity, editability and user type on their
 			existing direct-result path. Only bit zero follows derived declarations. */
-			(define nullable (tsql_result_nullable? sources _facts info))
+			(define nullable (tsql_result_nullable? sources facts info))
 			(define flags (list (+ (- (car flags) (mod (car flags) 2)) (if nullable 1 0)) (cadr flags)))
 			(define type (sql_info_type info))
 			(define dimensions (if (empty_list? (sql_info_dimensions info))
