@@ -6543,6 +6543,17 @@ that context explicitly; stored views refuse this scalar before publication. */
 					(list "batch" (list (list "create-table-function" name parameters return_name columns
 						(coalesceNil (lexical_context "module_source") (strtrim (car body)))))))))
 
+			/* The declaration retains the execution principal independently of its
+			database qualifier. Non-CALLER execution has an explicit runtime gap.
+			https://learn.microsoft.com/sql/t-sql/statements/execute-as-clause-transact-sql */
+			(define tsql_script_execution_context (parser '(
+				(atom "WITH" true) (or (atom "EXEC" true) (atom "EXECUTE" true)) (atom "AS" true)
+				(define principal (or
+					(parser (atom "CALLER" true) (list "kind" "CALLER"))
+					(parser (atom "SELF" true) (list "kind" "SELF"))
+					(parser (atom "OWNER" true) (list "kind" "OWNER"))
+					(parser (define name tsql_string) (list "kind" "USER" "name" name))))
+			) principal))
 			(define tsql_script_procedure (parser '(
 				(define operation (or
 					(parser '((atom "CREATE" true) (define replace (? (atom "OR" true) (atom "ALTER" true))))
@@ -6556,12 +6567,16 @@ that context explicitly; stored views refuse this scalar before publication. */
 				(define parameters (or
 					(parser '("(" (define declarations (* tsql_script_procedure_parameter ",")) ")") declarations)
 					(* tsql_script_procedure_parameter ",")))
+				(define execution (? tsql_script_execution_context))
 				(atom "AS" true) (define body (capture (+ tsql_script_item empty)))
 			) (begin
 					/* Plain ALTER retains its native must-exist operation; it is not
 					an upsert or a frontend catalog check followed by CREATE. */
 					(define definition (list (car operation) (tsql_qualifier_database owner schema frontend_options) name
-						(tsql_unique_parameters parameters) (coalesceNil (lexical_context "module_source") (strtrim (car body)))))
+						(if execution (list "__tsql_procedure_declaration" 1
+							"parameters" (tsql_unique_parameters parameters) "execute_as" execution
+							"source" (lexical_context "source")) (tsql_unique_parameters parameters))
+						(coalesceNil (lexical_context "module_source") (strtrim (car body)))))
 					(list "batch" (list (if (equal? (car operation) "create-procedure")
 						(append definition (cadr operation)) definition))))))
 			/* Statement triggers retain validated SQL commands, not a row-trigger

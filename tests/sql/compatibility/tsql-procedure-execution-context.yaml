@@ -1,0 +1,166 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  restart_after_setup: true
+  description: Procedure execution context declarations persist without granting impersonation
+# Microsoft contracts:
+# https://learn.microsoft.com/sql/t-sql/statements/execute-as-clause-transact-sql
+# https://learn.microsoft.com/sql/relational-databases/system-catalog-views/sys-sql-modules-transact-sql
+# Non-CALLER execution is a genuine gap. Positive SQL results below remain NC;
+# the critical safety controls separately prove no body/output admission.
+setup:
+- sql: CREATE TABLE context_effects(value INT)
+- sql: CREATE PROCEDURE context_owner @value INT=7 OUTPUT WITH EXECUTE AS OWNER AS INSERT context_effects VALUES(1); SET @value=99; SELECT 99 AS value;
+- sql: CREATE PROCEDURE context_dbo WITH EXECUTE AS 'dbo' AS SELECT USER_NAME() AS principal;
+- sql: CREATE PROCEDURE context_self WITH EXEC AS SELF AS SELECT USER_NAME() AS principal;
+- sql: CREATE PROCEDURE context_caller @value INT=3,@answer INT=0 OUTPUT WITH EXECUTE AS CALLER AS SET @answer=@value+1; SELECT USER_NAME() AS principal;
+- sql: CREATE PROCEDURE context_legacy @value INT=5 AS SELECT @value AS value;
+test_cases:
+- name: Owner declaration retains its symbolic context source signature and creator after restart
+  scm: |
+    (begin
+      (define stored (car (showprocedures "memcp-tests" "context_owner" nil)))
+      (define declaration (stored "parameters"))
+      (define execution (tsql_procedure_execution declaration))
+      (and (equal? (declaration "__tsql_procedure_declaration") 1)
+        (equal? (declaration "database") "memcp-tests")
+        (equal? (declaration "creator") (list "root" (tsql_account_id "root")))
+        (equal? execution (list "kind" "OWNER" "principal_id" -2))
+        (equal? (count (tsql_procedure_parameters declaration)) 1)
+        (equal? (declaration "source") "CREATE PROCEDURE context_owner @value INT=7 OUTPUT WITH EXECUTE AS OWNER AS INSERT context_effects VALUES(1); SET @value=99; SELECT 99 AS value;")
+        (equal? (stored "source") "INSERT context_effects VALUES(1); SET @value=99; SELECT 99 AS value;")))
+  expect: {result: true}
+- name: Named dbo execution records a database principal and never a native login grant
+  scm: |
+    (begin
+      (define stored (car (showprocedures "memcp-tests" "context_dbo" nil)))
+      (equal? (tsql_procedure_execution (stored "parameters"))
+        (list "kind" "USER" "name" "dbo" "principal_id" 1)))
+  expect: {result: true}
+- name: Self records the actual defining principal separately from creator provenance
+  scm: |
+    (begin
+      (define stored (car (showprocedures "memcp-tests" "context_self" nil)))
+      (define declaration (stored "parameters"))
+      (and (equal? (tsql_procedure_execution declaration) (list "kind" "SELF" "principal_id" 1))
+        (equal? (declaration "creator") (list "root" (tsql_account_id "root")))))
+  expect: {result: true}
+- name: Optionless legacy declarations retain the original bare parameter-list contract
+  scm: |
+    (begin
+      (define stored (car (showprocedures "memcp-tests" "context_legacy" nil)))
+      (define declaration (stored "parameters"))
+      (and (not (tsql_procedure_declaration? declaration))
+        (equal? (car (car declaration)) "value")
+        (equal? (tsql_procedure_parameters declaration) declaration)
+        (equal? (tsql_procedure_execution declaration) (list "kind" "CALLER"))))
+  expect: {result: true}
+- name: Explicit CALLER executes with native caller identity and normal output binding
+  sql: DECLARE @answer INT; EXEC context_caller @value=13,@answer=@answer OUTPUT; SELECT @answer AS answer;
+  expect: {rows: 2,data: [{principal: dbo},{answer: 14}]}
+- name: Restored legacy procedures still bind ordinary parameters
+  sql: EXEC context_legacy @value=19
+  expect: {rows: 1,data: [{value: 19}]}
+- name: Header lexer skips security AS and parameter type AS across comments
+  scm: |
+    (begin
+      (define source "CREATE PROC lexical_context @value AS INT WITH EXECUTE /* context */ AS /* principal */ OWNER AS /* body */ SELECT @value AS value;")
+      (define parsed (tsql_parse_context source true false))
+      (equal? (parsed "module_source") "/* body */ SELECT @value AS value;"))
+  expect: {result: true}
+- name: A procedure named execute still has an ordinary body boundary
+  scm: |
+    (equal? ((tsql_parse_context "CREATE PROC execute AS SELECT 11 AS value;" true false) "module_source") "SELECT 11 AS value;")
+  expect: {result: true}
+- name: Quoted principal spelling and comments remain in the exact source declaration
+  setup:
+  - sql: CREATE PROC context_quoted WITH EXEC /* request */ AS 'dBo' AS /* body */ SELECT 11 AS value;
+  scm: |
+    (begin
+      (define stored (car (showprocedures "memcp-tests" "context_quoted" nil)))
+      (define declaration (stored "parameters"))
+      (and (equal? (declaration "source") "CREATE PROC context_quoted WITH EXEC /* request */ AS 'dBo' AS /* body */ SELECT 11 AS value;")
+        (equal? ((tsql_procedure_execution declaration) "name") "dBo")
+        (equal? (stored "source") "/* body */ SELECT 11 AS value;")))
+  expect: {result: true}
+  cleanup:
+  - sql: DROP PROCEDURE context_quoted
+- name: Non-CALLER native invocation cannot enter the statement body or output callbacks
+  scm: |
+    (begin
+      (define snapshot (procedure "memcp-tests" "context_owner" true nil))
+      (define session (newsession)) (session "username" "root") (session "schema" "memcp-tests")
+      (define activity (newsession))
+      (activity "statements" 0) (activity "rows" 0) (activity "fields" 0) (activity "finish" 0)
+      (define rejected (try (lambda () (begin
+        ((snapshot "callable")
+          (lambda (_text _recovery body) (begin (activity "statements" (+ (activity "statements") 1)) (body nil)))
+          session (list (list "value" 7))
+          (lambda (_row) (activity "rows" (+ (activity "rows") 1)))
+          (lambda args (activity "fields" (+ (activity "fields") 1)))
+          (lambda (_status _scope) (activity "finish" (+ (activity "finish") 1)))) false))
+        (lambda (_unsupported) true)))
+      (and rejected (equal? (activity "statements") 0) (equal? (activity "rows") 0)
+        (equal? (activity "fields") 0) (equal? (activity "finish") 0)
+        (equal? (session "username") "root")))
+  expect: {result: true}
+- name: SQL invocation cannot update output arguments or admit body effects under unsupported context
+  sql: |
+    DECLARE @value INT=23;
+    BEGIN TRY EXEC context_owner @value=@value OUTPUT; END TRY
+    BEGIN CATCH SELECT @value AS unchanged; END CATCH;
+    SELECT COUNT(*) AS effects FROM context_effects;
+  expect: {rows: 2,data: [{unchanged: 23},{effects: 0}]}
+- name: ALTER replaces the declared execution context with actual CALLER semantics
+  setup:
+  - sql: CREATE PROCEDURE context_alter WITH EXECUTE AS OWNER AS SELECT 1 AS value;
+  - sql: ALTER PROCEDURE context_alter @value INT=17 WITH EXECUTE AS CALLER AS SELECT @value AS value;
+  sql: EXEC context_alter
+  expect: {rows: 1,data: [{value: 17}]}
+  cleanup:
+  - sql: DROP PROCEDURE context_alter
+- name: ALTER without an execution option restores the default caller declaration
+  setup:
+  - sql: CREATE PROCEDURE context_reset WITH EXECUTE AS OWNER AS SELECT 1 AS value;
+  - sql: ALTER PROCEDURE context_reset @value INT=29 AS SELECT @value AS value;
+  scm: |
+    (begin
+      (define stored (car (showprocedures "memcp-tests" "context_reset" nil)))
+      (and (not (tsql_procedure_declaration? (stored "parameters")))
+        (equal? (tsql_procedure_execution (stored "parameters")) (list "kind" "CALLER"))))
+  expect: {result: true}
+  cleanup:
+  - sql: DROP PROCEDURE context_reset
+- name: CREATE OR ALTER changes a caller declaration into the retained owner option
+  setup:
+  - sql: CREATE PROCEDURE context_replace AS SELECT 1 AS value;
+  - sql: CREATE OR ALTER PROCEDURE context_replace WITH EXECUTE AS OWNER AS SELECT 2 AS value;
+  scm: |
+    (begin
+      (define stored (car (showprocedures "memcp-tests" "context_replace" nil)))
+      (and (equal? (tsql_procedure_execution (stored "parameters")) (list "kind" "OWNER" "principal_id" -2))
+        (equal? (stored "source") "SELECT 2 AS value;")))
+  expect: {result: true}
+  cleanup:
+  - sql: DROP PROCEDURE context_replace
+- name: Owner execution returns its database principal once impersonation is implemented
+  noncritical: true
+  sql: EXEC context_owner
+  expect: {rows: 1,data: [{value: 99}]}
+- name: Named dbo execution returns its database principal once impersonation is implemented
+  noncritical: true
+  sql: EXEC context_dbo
+  expect: {rows: 1,data: [{principal: dbo}]}
+- name: Self execution returns its defining database principal once impersonation is implemented
+  noncritical: true
+  sql: EXEC context_self
+  expect: {rows: 1,data: [{principal: dbo}]}
+cleanup:
+- sql: DROP PROCEDURE context_owner
+- sql: DROP PROCEDURE context_dbo
+- sql: DROP PROCEDURE context_self
+- sql: DROP PROCEDURE context_caller
+- sql: DROP PROCEDURE context_legacy
+- sql: DROP TABLE context_effects

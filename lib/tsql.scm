@@ -1549,6 +1549,41 @@ the storage engine owns rollback, partitioning, constraints and durability. */
 					(session "__tsql_identity" nil))
 				(state "count")))))))
 		_ (error "INSERT EXEC requires a procedure invocation without a return-status assignment")))))
+/* Procedure parameters are opaque language-owned declaration data. Legacy
+source definitions retain their original bare parameter list. Option-bearing
+definitions carry a versioned envelope; creator identity is provenance, never
+a fabricated schema/module owner or a server administration grant. */
+(define tsql_procedure_declaration? (lambda (declaration)
+	(and (list? declaration) (not (empty_list? declaration))
+		(equal? (car declaration) "__tsql_procedure_declaration"))))
+(define tsql_procedure_parameters (close_procedure ((lambda (envelope?)
+	(lambda (declaration) (if (envelope? declaration) (declaration "parameters") declaration)))
+	tsql_procedure_declaration?)))
+(define tsql_procedure_execution (close_procedure ((lambda (envelope?)
+	(lambda (declaration) (if (envelope? declaration) (declaration "execute_as") (list "kind" "CALLER"))))
+	tsql_procedure_declaration?)))
+(define tsql_require_procedure_context (close_procedure ((lambda (execution)
+	(lambda (declaration) (begin
+		(define context (execution declaration))
+		(if (equal? (context "kind") "CALLER") true
+			(error "database execution context is not supported: " (context "kind"))))))
+	tsql_procedure_execution)))
+(define tsql_procedure_declare_context (lambda (declaration database session)
+	(if (not (tsql_procedure_declaration? declaration)) declaration (begin
+		(define creator (tsql_session_actor session))
+		(define execution (declaration "execute_as"))
+		(define kind (execution "kind"))
+		(define principal (if (equal? kind "CALLER") nil (equal? kind "OWNER") -2
+			(equal? kind "SELF") (tsql_catalog_actor_field database creator "database_id")
+			(equal? kind "USER") (begin
+				(define name (execution "name"))
+				(if (equal?? name "dbo") 1 (begin
+					(define actor (tsql_actor_value name nil))
+					(tsql_require_database_access actor database)
+					(tsql_catalog_actor_field database actor "database_id"))))
+			(error "invalid procedure execution context")))
+		(set_assoc (set_assoc (set_assoc declaration "creator" creator) "database" database)
+			"execute_as" (set_assoc execution "principal_id" principal))))))
 (define tsql_define_procedure (lambda (owner name parameters source replace must_exist statement session)
 	(statement "procedure definition" false (lambda (tx) (begin
 		/* Stored procedure source is not yet normalized for import aliases or
@@ -1562,7 +1597,8 @@ the storage engine owns rollback, partitioning, constraints and durability. */
 			(tsql_require_permission (tsql_session_actor session) owner "ALTER")
 			(if (tsql_scalar_function_reserved? owner name tx)
 				(error "a scalar function already owns this object name: " name) true)) true)
-		(createprocedure owner (toLower name) (tsql_procedure_language session) source parameters replace tx must_exist)
+		(createprocedure owner (toLower name) (tsql_procedure_language session) source
+			(tsql_procedure_declare_context parameters owner session) replace tx must_exist)
 		0)))))
 /* Source commands already carry their declaration kind. Do not infer it from
 native results: both module DDL and a zero-row DML may return numeric zero. */
@@ -1809,7 +1845,8 @@ statement owner, account, transaction session, arguments and output callbacks. *
 (define tsql_procedure_compile (lambda (source context quoted) (begin
 	(define ansi (coalesceNil (context "__tsql_ansi_nulls") true))
 	(define schema (context "schema"))
-	(define parameters (tsql_unique_parameters (context "parameters")))
+	(define declaration (context "parameters"))
+	(define parameters (tsql_unique_parameters (tsql_procedure_parameters declaration)))
 	(define commands (cadr ((tsql_parse_batch_context schema source quoted true ansi) "syntax")))
 	(define contracts (tsql_batch_contracts commands (map parameters (lambda (parameter)
 		(list (car parameter) (cadr parameter))))))
@@ -1817,9 +1854,10 @@ statement owner, account, transaction session, arguments and output callbacks. *
 	owners are explicit call inputs and never become persisted procedure code. */
 	(eval (list (quote lambda)
 		(list (quote statement) (quote caller) (quote values) (quote resultrow) (quote resultfields) (quote finish))
-		(list (quote tsql_run_procedure_recipe) (list (quote quote) commands)
-			(list (quote quote) contracts) schema quoted ansi (quote statement) (quote caller) (quote values)
-			(quote resultrow) (quote resultfields) (quote finish)))))))
+		(list (quote !begin) (list tsql_require_procedure_context (list (quote quote) declaration))
+			(list (quote tsql_run_procedure_recipe) (list (quote quote) commands)
+				(list (quote quote) contracts) schema quoted ansi (quote statement) (quote caller) (quote values)
+				(quote resultrow) (quote resultfields) (quote finish))))))))
 
 (tsql_register_source_profiles "tsql-procedure" tsql_procedure_compile registerprocedurelanguage)
 (define tsql_execute_dynamic (lambda (schema text declarations values statement caller resultrow resultfields finish) (begin
@@ -2032,7 +2070,11 @@ System procedure arguments use the ordinary declaration and OUTPUT contracts. */
 			(define definition (snapshot "declaration"))
 			(if (tsql_procedure_language? (definition "language")) true
 				(error "procedure language cannot execute in this frontend"))
-			(define binding (tsql_bind_call arguments (definition "parameters") statement caller))
+			/* Reject unsupported impersonation before default/argument binding or
+			any output callback can execute. The compiled callable also owns this
+			admission for direct native invocations of the stored definition. */
+			(tsql_require_procedure_context (definition "parameters"))
+			(define binding (tsql_bind_call arguments (tsql_procedure_parameters (definition "parameters")) statement caller))
 			((snapshot "callable") statement caller (car binding) resultrow resultfields
 				(lambda (status scoped) (begin (tsql_copy_outputs (cadr binding) scoped statement caller) status))))))))
 

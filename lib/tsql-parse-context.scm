@@ -67,7 +67,10 @@ Unsupported header options still go through the real declaration grammar. */
 		(define fixed (or static_module (not (nil? module_mode))))
 		(define body (if (and (not (nil? module_mode)) (nil? (state "body"))
 			(equal? word "AS") (equal? (state "depth") 0)
-			(not (regexp_test (coalesceNil (state "previous") "") "^@")))
+			(not (regexp_test (coalesceNil (state "previous") "") "^@"))
+			/* Security AS selects an execution principal, not the body. */
+			(not (and (state "header_options")
+				(has? '("EXEC" "EXECUTE") (toUpper (coalesceNil (state "previous") ""))))))
 			(+ (state "offset") (strlen raw)) (state "body")))
 		(define setting (state "setting"))
 		(define has_quoted (state "has_quoted"))
@@ -87,6 +90,8 @@ Unsupported header options still go through the real declaration grammar. */
 			"module_kind" (if (and (equal? header "module") (nil? (state "module_kind"))) word (state "module_kind"))
 			"depth" (+ (state "depth") (if (equal? raw "(") 1 (equal? raw ")") -1 0))
 			"previous" (if trivia (state "previous") raw)
+			"header_options" (or (state "header_options")
+				(and (not (nil? module_mode)) (nil? body) (equal? (state "depth") 0) (equal? word "WITH")))
 			"setting" (car next) "has_quoted" (cadr next)
 			"offset" (+ (state "offset") (strlen raw))
 			"canonical_offset" (+ (state "canonical_offset") (strlen cooked))
@@ -94,7 +99,7 @@ Unsupported header options still go through the real declaration grammar. */
 				(strlen cooked) (strlen raw) kind mode word) (state "spans"))
 			"parts" (cons cooked (state "parts")))))
 		(list "mode" initial "header" "first" "module" nil "body" nil "depth" 0
-			"previous" nil "setting" "none" "has_quoted" false "offset" 0
+			"previous" nil "header_options" false "setting" "none" "has_quoted" false "offset" 0
 			"canonical_offset" 0 "spans" '() "parts" '())))
 	(list "text" (apply concat (reverse (state "parts"))) "quoted_identifier" (state "mode")
 		"source" text "spans" (reverse (state "spans"))
