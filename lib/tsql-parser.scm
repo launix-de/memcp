@@ -3028,6 +3028,15 @@ editability or keys for a derived result. */
 		(define info (sql_expr_info sources expression))
 		(list name expression info (tsql_result_origin sources facts info follow_derived)))))
 	_ (error "unsupported result projection contract"))))
+/* Nullability is a declaration property independent of editability and
+native result provenance. Follow direct derived exports only to read this one
+property; a preserved LEFT/RIGHT side keeps its declaration while each absent
+operand makes every exported member nullable. Unknown expressions stay nullable.
+https://learn.microsoft.com/sql/relational-databases/system-dynamic-management-views/sys-dm-exec-describe-first-result-set-transact-sql */
+(define tsql_result_nullable? (lambda (sources facts info) (begin
+	(define declaration (tsql_result_origin sources facts info true))
+	(if (nil? declaration) true
+		(if (or (source_outer? (car declaration)) ((cadr declaration) "Null")) true false)))))
 (define tsql_result_flags (lambda (origin editable) (if (nil? origin) '(1 nil) (begin
 	(define source (car origin))
 	(define column (cadr origin))
@@ -3117,6 +3126,10 @@ Only compile-time SQL declarations choose the five-byte collation. */
 			(define info (nth entry 2))
 			(define origin (nth entry 3))
 			(define flags (tsql_result_flags origin editable))
+			/* Keep native origin, identity, editability and user type on their
+			existing direct-result path. Only bit zero follows derived declarations. */
+			(define nullable (tsql_result_nullable? sources _facts info))
+			(define flags (list (+ (- (car flags) (mod (car flags) 2)) (if nullable 1 0)) (cadr flags)))
 			(define type (sql_info_type info))
 			(define dimensions (if (empty_list? (sql_info_dimensions info))
 				(coalesceNil (tsql_result_dimensions sources expression parameters)
