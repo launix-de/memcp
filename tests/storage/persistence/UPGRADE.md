@@ -35,6 +35,12 @@ helper structures before the candidate opens the same data directory. The test
 harness must not remove or rewrite those structures to prepare the upgrade;
 the engine owns compatibility with historical optimization state.
 
+The `upgrade-release-before-concat-buffers-2026-11-14` pin identifies
+`bdaa313a6`, before version 6 replaces runtime LZ4 dictionaries with immutable
+concat pools. `up_concat_text` exercises repeated SQL-shaped fragments,
+unique parameters, Unicode, empty values and NULL through legacy loading,
+candidate writes and restarts.
+
 ## What each matrix job proves
 
 The predecessor binary creates the complete fixture and supplies two oracles:

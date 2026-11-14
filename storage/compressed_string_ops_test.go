@@ -51,9 +51,9 @@ func compressedOpValues() []scm.Scmer {
 	for i, v := range values {
 		plainTexts[i] = v.String()
 	}
-	buffer, offsets := scm.BuildCompressedStringBuffer(plainTexts)
-	for i, text := range plainTexts {
-		values = append(values, scm.NewBufferString(buffer, offsets[i], len(text)))
+	buffer, offsets := scm.BuildStringConcatBuffer(plainTexts)
+	for i := range plainTexts {
+		values = append(values, scm.NewBufferString(buffer, offsets[i]))
 	}
 	return values
 }

@@ -451,16 +451,10 @@ func Collate(a ...Scmer) Scmer {
 				}
 				return collate.New(tag, collate.Numeric)
 			}
-			var c *collate.Collator
-			// the following options are available:
-			// IgnoreCase -> when string ends with _ci
-			// IgnoreDiacritics -> o == ö
-			// IgnoreWidth: half width == width
-			// Numeric -> sort numbers correctly
-			c = newCollator()
 			type keyWorker struct {
-				collator *collate.Collator
-				buffer   collate.Buffer
+				collator    *collate.Collator
+				buffer      collate.Buffer
+				left, right []byte
 			}
 			var keyPool sync.Pool
 			keyPool.New = func() any { return &keyWorker{collator: newCollator()} }
@@ -477,11 +471,19 @@ func Collate(a ...Scmer) Scmer {
 				}
 				worker := keyPool.Get().(*keyWorker)
 				worker.buffer.Reset()
-				key := string(worker.collator.KeyFromString(&worker.buffer, String(value)))
+				key := string(worker.collator.Key(&worker.buffer, collationText(value, &worker.left)))
 				keyPool.Put(worker)
 				return key, true
 			}
 
+			compareText := func(left, right Scmer) int {
+				if left.IsBufferString() && right.IsBufferString() && left == right {
+					return 0
+				}
+				worker := keyPool.Get().(*keyWorker)
+				defer keyPool.Put(worker)
+				return worker.collator.Compare(collationText(left, &worker.left), collationText(right, &worker.right))
+			}
 			// return a LESS function specialized to that language and register for serialization
 			reverse := len(a) > 1 && ToBool(a[1])
 			if reverse {
@@ -492,7 +494,7 @@ func Collate(a ...Scmer) Scmer {
 						res = ToFloat(a[0]) > ToFloat(a[1])
 					}
 					if !res {
-						res = c.CompareString(String(a[0]), String(a[1])) == 1
+						res = compareText(a[0], a[1]) == 1
 					}
 					return NewBool(res)
 				}
@@ -507,7 +509,7 @@ func Collate(a ...Scmer) Scmer {
 				if (a[0].IsInt() || a[0].IsFloat()) && (a[1].IsInt() || a[1].IsFloat()) {
 					return NewBool(ToFloat(a[0]) < ToFloat(a[1]))
 				}
-				return NewBool(c.CompareString(String(a[0]), String(a[1])) == -1)
+				return NewBool(compareText(a[0], a[1]) == -1)
 			}
 			collateRegistry.Store(FunctionIdentity(f), struct {
 				Collation string
@@ -1789,6 +1791,9 @@ func init_strings() {
 		Name: "concat",
 
 		Fn: func(a ...Scmer) Scmer {
+			if len(a) == 1 && a[0].IsString() {
+				return a[0]
+			}
 			var sb strings.Builder
 			for _, s := range a {
 				if s.IsNil() {

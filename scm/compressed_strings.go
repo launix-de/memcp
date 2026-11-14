@@ -30,7 +30,7 @@ import "encoding/binary"
 
 func isCompressedText(s Scmer) bool {
 	tag := s.GetTag()
-	return tag == tagCString || tag == tagBString || tag == tagLZ4
+	return tag == tagCString || tag == tagBString || tag == tagConcat
 }
 
 func compressedTextLen(s Scmer) int {

@@ -423,15 +423,13 @@ func TestOrderedComparisonReaderLifetime(t *testing.T) {
 			sortcols, sortdirs, 0, 0, 2, nil, nil, nil)
 	}
 	queue := run()
-	if source.EvictDictionary() != 0 || queue.scols[0](queue.items[0]).String() != inputs[1] {
+	if queue.scols[0](queue.items[0]).String() != inputs[1] {
 		t.Fatal("shard return released the queue's comparison reader")
 	}
 	consumeDirectScanOrder(queue, &scanOrderTableSpec{callback: scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
 		return scm.NewInt(1)
 	})}, nil, 0, 0, 1, scm.NewInt(0), false, scm.NewInt(0))
-	if source.EvictDictionary() <= 0 {
-		t.Fatal("early direct LIMIT retained the completed queue reader")
-	}
+
 	queue = run()
 	func() {
 		defer func() {
@@ -443,9 +441,7 @@ func TestOrderedComparisonReaderLifetime(t *testing.T) {
 			panic("consumer failed")
 		})}, nil, 0, 0, 1, scm.NewInt(0), false, scm.NewInt(0))
 	}()
-	if source.EvictDictionary() <= 0 {
-		t.Fatal("consumer panic leaked the queue reader")
-	}
+
 	func() {
 		defer func() {
 			if recover() == nil {
@@ -456,9 +452,7 @@ func TestOrderedComparisonReaderLifetime(t *testing.T) {
 			[]func(...scm.Scmer) scm.Scmer{func(...scm.Scmer) scm.Scmer { panic("comparison failed") }},
 			0, 0, 2, nil, nil, nil)
 	}()
-	if source.EvictDictionary() <= 0 {
-		t.Fatal("comparison panic leaked the queue reader")
-	}
+
 	// Exercise the cross-shard consumer too: its heap may discard an exhausted
 	// queue before completion, so release ownership cannot live only in the heap.
 	for _, fail := range []bool{false, true} {
@@ -480,9 +474,7 @@ func TestOrderedComparisonReaderLifetime(t *testing.T) {
 			scanOrderMulti(nil, []scanOrderTableSpec{spec}, sortdirs, 0, 0, 1,
 				scm.NewInt(0), false, scm.NewInt(0))
 		}()
-		if source.EvictDictionary() <= 0 {
-			t.Fatal("global consumer completion retained its queue reader")
-		}
+
 	}
 }
 

@@ -98,7 +98,7 @@ func String(v Scmer) string {
 		return "nil"
 	case tagBool, tagInt, tagFloat, tagDate:
 		return v.String()
-	case tagString, tagCString, tagBString, tagLZ4, tagBSON:
+	case tagString, tagCString, tagBString, tagConcat, tagBSON:
 		return v.String()
 	case tagSymbol:
 		return v.String()
@@ -177,7 +177,7 @@ func WriteStringValue(w *schemeTextWriter, v Scmer) {
 	switch v.GetTag() {
 	case tagNil:
 		w.WriteString("nil")
-	case tagCString, tagBString, tagLZ4:
+	case tagCString, tagBString, tagConcat:
 		w.writeCompressedText(v)
 	case tagBool, tagString, tagSymbol, tagDate:
 		w.WriteString(v.String())
@@ -439,7 +439,7 @@ func serializeEx(b *schemeTextWriter, v Scmer, en *Env, glob *Env, p *Proc) {
 		if b.objects != nil && !bytes.ContainsAny(value, ".eE") {
 			b.WriteString(".0")
 		}
-	case tagString, tagCString, tagBString, tagLZ4:
+	case tagString, tagCString, tagBString, tagConcat:
 		if b.cacheCaptures && b.objects != nil && b.objects.Peer != nil && v.IsString() {
 			if expression, ok, err := b.objects.cachedValue(v); err != nil {
 				panic(err)

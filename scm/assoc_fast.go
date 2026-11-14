@@ -110,7 +110,7 @@ func HashKey(k Scmer) uint64 {
 				view.decodeInto(scratch[:n], start, false)
 				h.Write(scratch[:n])
 			}
-		case tagLZ4:
+		case tagConcat:
 			h.WriteByte(4)
 			hashBufferMap(&h, v)
 		case tagSymbol:
@@ -202,7 +202,7 @@ func hashStructuralScalar(value Scmer) uint64 {
 		return hashStructuralFloat(float64(value.Int()))
 	case tagFloat:
 		return hashStructuralFloat(value.Float())
-	case tagString, tagSymbol, tagCString, tagBString, tagLZ4:
+	case tagString, tagSymbol, tagCString, tagBString, tagConcat:
 		text := value.String()
 		if text == "" || strings.EqualFold(text, "false") {
 			return hashStructuralFloat(0)
@@ -251,7 +251,7 @@ func hashStructuralKey(key Scmer, memo map[Scmer]uint64) uint64 {
 		return hash
 	case tagFastDict:
 		panic("make_structural_index requires immutable list expressions")
-	case tagNil, tagBool, tagInt, tagFloat, tagDate, tagString, tagSymbol, tagCString, tagBString, tagLZ4:
+	case tagNil, tagBool, tagInt, tagFloat, tagDate, tagString, tagSymbol, tagCString, tagBString, tagConcat:
 		// Equal accepts numerically equal int/float/date values across tags.
 		return hashStructuralScalar(key)
 	default:
@@ -279,7 +279,7 @@ func hashStructuralReadonly(key Scmer) uint64 {
 		return hash
 	case tagFastDict:
 		panic("structural hashing rejects mutable FastDict expressions")
-	case tagNil, tagBool, tagInt, tagFloat, tagDate, tagString, tagSymbol, tagCString, tagBString, tagLZ4:
+	case tagNil, tagBool, tagInt, tagFloat, tagDate, tagString, tagSymbol, tagCString, tagBString, tagConcat:
 		return hashStructuralScalar(key)
 	default:
 		return HashKey(key)
@@ -360,7 +360,7 @@ func astStructuralEqual(a, b Scmer) bool {
 
 func structuralScalarTag(tag uint8) bool {
 	switch tag {
-	case tagNil, tagBool, tagInt, tagFloat, tagDate, tagString, tagSymbol, tagCString, tagBString, tagLZ4:
+	case tagNil, tagBool, tagInt, tagFloat, tagDate, tagString, tagSymbol, tagCString, tagBString, tagConcat:
 		return true
 	default:
 		return false

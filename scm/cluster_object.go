@@ -545,7 +545,7 @@ func plainClusterLiteral(value Scmer, depth int) bool {
 		return false
 	}
 	switch value.GetTag() {
-	case tagNil, tagBool, tagInt, tagFloat, tagDate, tagString, tagCString, tagBString, tagLZ4, tagSymbol:
+	case tagNil, tagBool, tagInt, tagFloat, tagDate, tagString, tagCString, tagBString, tagConcat, tagSymbol:
 		return true
 	case tagSlice:
 		for _, item := range value.Slice() {
