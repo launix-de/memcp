@@ -11,6 +11,33 @@ metadata:
 setup: []
 cleanup: []
 test_cases:
+- name: Cursor input sessions retain their complete status binding chain after serialization
+  scm: |
+    (begin
+      (define names (list 'tsql_cursor_status 'tsql_cursor_variable_entries 'tsql_cursor_entries
+        'tsql_cursor_directory 'tsql_cursor_key 'tsql_connection_session 'tsql_identity_scope))
+      (define wire (json_encode (list 'lambda names (close_procedure tsql_cursor_input_session))))
+      (define restored (apply (json_decode_scmer wire)
+        (map names (lambda (_name) (lambda args (error "unbound cursor helper"))))))
+      (define parent (newsession)) (parent "ordinary" 41)
+      (define scope (newsession)) (parent "__tsql_scope" scope)
+      (define connection (newsession)) (parent "__tsql_connection_session" connection)
+      (define cursor (newsession)) (cursor "open" true) (cursor "count" 2)
+      (cursor "options" (list "kind" "static"))
+      (scope "__tsql_local_cursors" (list (list "local_probe" cursor)))
+      (connection "__tsql_global_cursors" (list (list "global_probe" cursor)))
+      (scope "__tsql_cursor_variables" (list (list "probe" cursor)))
+      (define request (restored parent))
+      (define status (lambda (kind name)
+        (request (concat "__tsql_cursor_status:" (json_encode (list kind name))))))
+      (request "ordinary" 42)
+      (and (equal? (request "ordinary") 42) (equal? (parent "ordinary") 42)
+        (equal? (count (request)) (count (parent)))
+        (equal? (status "local" "LOCAL_PROBE") 1)
+        (equal? (status "global" "GLOBAL_PROBE") 1)
+        (equal? (status "variable" "@PROBE") 1)
+        (equal? (status "local" "absent") -3))))
+  expect: {result: true}
 - name: Message session factory retains its explicit connection helper after serialization
   scm: |
     (begin

@@ -22,16 +22,21 @@ There is no native reader, requesting session or transaction captured by a curso
 	(define scope (tsql_identity_scope session))
 	(coalesceNil (scope "__tsql_cursor_scope_id") (begin
 		(define id (uuid)) (scope "__tsql_cursor_scope_id" id) id)))))
-(define tsql_cursor_directory (lambda (session global)
-	(if global (tsql_connection_session session) (tsql_identity_scope session))))
+(define tsql_cursor_directory (close_procedure ((lambda (tsql_connection_session tsql_identity_scope)
+	(lambda (session global)
+		(if global (tsql_connection_session session) (tsql_identity_scope session))))
+	tsql_connection_session tsql_identity_scope)))
 (define tsql_cursor_key (lambda (global) (if global "__tsql_global_cursors" "__tsql_local_cursors")))
-(define tsql_cursor_entries (lambda (session global)
-	(coalesceNil ((tsql_cursor_directory session global) (tsql_cursor_key global)) '())))
+(define tsql_cursor_entries (close_procedure ((lambda (tsql_cursor_directory tsql_cursor_key)
+	(lambda (session global)
+		(coalesceNil ((tsql_cursor_directory session global) (tsql_cursor_key global)) '())))
+	tsql_cursor_directory tsql_cursor_key)))
 /* Names and variables are references to one cursor record. Variables live in
 lexical control scope, outside enumerable SQL parameter values and plan inputs.
 https://learn.microsoft.com/sql/t-sql/language-elements/deallocate-transact-sql */
-(define tsql_cursor_variable_entries (lambda (session)
-	(coalesceNil ((tsql_identity_scope session) "__tsql_cursor_variables") '())))
+(define tsql_cursor_variable_entries (close_procedure ((lambda (tsql_identity_scope)
+	(lambda (session)
+		(coalesceNil ((tsql_identity_scope session) "__tsql_cursor_variables") '()))) tsql_identity_scope)))
 (define tsql_cursor_variable_contract (lambda (session name) (begin
 	(define declaration (find (session "__tsql_parameter_declarations")
 		(lambda (item) (equal? (car item) name)) nil))
@@ -286,19 +291,20 @@ and no membership predicate, volatile projection, subquery, grouping or limit. *
 /* Status is a declared scalar invocation input. Normal SQL session binding
 hoists it before delegated row work; cursor records never become SQL values.
 https://learn.microsoft.com/sql/t-sql/functions/cursor-status-transact-sql */
-(define tsql_cursor_status (lambda (session kind name) (begin
-	(define name (toLower name))
-	(define variable (equal? kind "variable"))
-	(define entry (if variable
-		(find (tsql_cursor_variable_entries session) (lambda (entry)
-			(equal? (concat "@" (car entry)) name)) nil)
-		(find (tsql_cursor_entries session (equal? kind "global"))
-			(lambda (entry) (equal? (car entry) name)) nil)))
-	(if (nil? entry) -3 (nil? (cadr entry)) -2 (begin
-		(define cursor (cadr entry))
-		(if (not (cursor "open")) -1
-			(equal? ((cursor "options") "kind") "dynamic") 1
-			(equal? (cursor "count") 0) 0 1))))))
+(define tsql_cursor_status (close_procedure ((lambda (tsql_cursor_variable_entries tsql_cursor_entries)
+	(lambda (session kind name) (begin
+		(define name (toLower name))
+		(define variable (equal? kind "variable"))
+		(define entry (if variable
+			(find (tsql_cursor_variable_entries session) (lambda (entry)
+				(equal? (concat "@" (car entry)) name)) nil)
+			(find (tsql_cursor_entries session (equal? kind "global"))
+				(lambda (entry) (equal? (car entry) name)) nil)))
+		(if (nil? entry) -3 (nil? (cadr entry)) -2 (begin
+			(define cursor (cadr entry))
+			(if (not (cursor "open")) -1
+				(equal? ((cursor "options") "kind") "dynamic") 1
+				(equal? (cursor "count") 0) 0 1)))))) tsql_cursor_variable_entries tsql_cursor_entries)))
 (define tsql_cursor_status_compiler (lambda (infos) (begin
 	(define kind (tryfold (sql_info_formula (car infos))))
 	(define name (tryfold (sql_info_formula (cadr infos))))
@@ -307,10 +313,13 @@ https://learn.microsoft.com/sql/t-sql/functions/cursor-status-transact-sql */
 	(define kind (toLower kind))
 	(if (has? '("local" "global" "variable") kind) true (error "invalid CURSOR_STATUS source"))
 	(sql_info (list 'session (concat "__tsql_cursor_status:" (json_encode (list kind name)))) "SMALLINT" nil))))
-(define tsql_cursor_input_session (lambda (parent)
-	(lambda args (match args
-		'(key) (if (if (string? key) (strlike key "__tsql_cursor_status:%") false)
-			(begin
-				(define input (json_decode (substr key (strlen "__tsql_cursor_status:"))))
-				(tsql_cursor_status parent (car input) (cadr input))) (parent key))
-		_ (apply parent args)))))
+/* This adapter can be captured by delegated parameter readers even when SQL
+does not use a cursor. Publish its complete helper chain as lexical values. */
+(define tsql_cursor_input_session (close_procedure ((lambda (tsql_cursor_status)
+	(lambda (parent)
+		(lambda args (match args
+			'(key) (if (if (string? key) (strlike key "__tsql_cursor_status:%") false)
+				(begin
+					(define input (json_decode (substr key (strlen "__tsql_cursor_status:"))))
+					(tsql_cursor_status parent (car input) (cadr input))) (parent key))
+			_ (apply parent args))))) tsql_cursor_status)))
