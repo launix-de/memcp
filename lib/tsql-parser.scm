@@ -6316,13 +6316,12 @@ that context explicitly; stored views refuse this scalar before publication. */
 					(define remainder (capture (parser '(tsql_select_tail tsql_select_set_terms
 						tsql_select_order tsql_select_suffix (? tsql_query_hints)) true))))
 					(begin
-						(if (and (nil? owner) (tsql_temporary_name? name)) true
-							(error "SELECT INTO currently requires an unqualified local temporary target"))
-						(tsql_temporary_check_name name)
+						(if (tsql_temporary_name? name) (tsql_temporary_check_name name)
+							(sql_private_relation? name) (error "private SQL relation names cannot be created directly") true)
 						(if (find (nth (cadr projection) 2) (lambda (column) (not (equal? (count column) 2))) nil)
 							(error "SELECT INTO requires named result columns without variable assignments") true)
 						(list "select-into" name (concat (car projection) " " (car remainder))
-							(if definitions (concat (car definitions) " ") ""))))
+							(if definitions (concat (car definitions) " ") "") owner)))
 				(parser (define statement (capture (or tsql_rollback tsql_commit))) (list "recovery" (strtrim (car statement))))
 				(parser '((atom "BEGIN" true) (atom "TRY" true) (define body (* tsql_script_item empty))
 					(atom "END" true) (atom "TRY" true) (atom "BEGIN" true) (atom "CATCH" true)

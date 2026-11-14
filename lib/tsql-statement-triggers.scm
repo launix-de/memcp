@@ -87,7 +87,8 @@ The proof consumes the ordinary parser's exact setter formula, not SQL text. */
 		(and (equal? (tsql_insert_exec_leaf_kind text) "DROP")
 			(tsql_trigger_temporary_drop? schema text)) false
 		(error "unsupported statement-trigger SQL leaf"))
-	'("select-into" _name _query _definitions) false
+	'("select-into" name _query _definitions _owner)
+	(if (tsql_temporary_name? name) false (error "persistent SELECT INTO is unsupported inside a statement trigger"))
 	'("cursor-declare" _name _options _text) false
 	'("cursor-assign-query" _name _options _text) false
 	'("cursor-open" _name _global) false

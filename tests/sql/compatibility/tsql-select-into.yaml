@@ -178,10 +178,11 @@ test_cases:
   scm: |
     (parse_tsql_batch "memcp-tests" "SELECT id INTO ##global FROM deleted")
   expect: {error: true, contains: global temporary tables are not supported}
-- name: Persistent SELECT INTO is rejected rather than bypass native catalog decisions
-  scm: |
-    (parse_tsql_batch "memcp-tests" "SELECT id INTO persistent_result FROM deleted")
-  expect: {error: true, contains: 'local temporary target'}
+- name: Persistent SELECT INTO uses ordinary native catalog decisions
+  sql: SELECT CAST(17 AS INT) AS id INTO persistent_result; SELECT id FROM persistent_result;
+  expect: {rows: 1,data: [{id: 17}]}
+  cleanup:
+    - sql: DROP TABLE persistent_result
 - name: Unnamed result expressions cannot become guessed native declarations
   scm: |
     (parse_tsql_batch "memcp-tests" "SELECT id+1 INTO #unnamed FROM deleted")
