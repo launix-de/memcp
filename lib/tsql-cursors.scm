@@ -314,12 +314,15 @@ https://learn.microsoft.com/sql/t-sql/functions/cursor-status-transact-sql */
 	(if (has? '("local" "global" "variable") kind) true (error "invalid CURSOR_STATUS source"))
 	(sql_info (list 'session (concat "__tsql_cursor_status:" (json_encode (list kind name)))) "SMALLINT" nil))))
 /* This adapter can be captured by delegated parameter readers even when SQL
-does not use a cursor. Publish its complete helper chain as lexical values. */
-(define tsql_cursor_input_session (close_procedure ((lambda (tsql_cursor_status)
+does not use a cursor. Publish its helper chain as lexical values and retain
+the caller's actual connection and scope owners across every adapter. */
+(define tsql_cursor_input_session (close_procedure ((lambda (tsql_cursor_status tsql_connection_session tsql_identity_scope)
 	(lambda (parent)
 		(lambda args (match args
-			'(key) (if (if (string? key) (strlike key "__tsql_cursor_status:%") false)
+			'(key) (if (equal? key "__tsql_connection_session") (tsql_connection_session parent)
+				(equal? key "__tsql_scope") (tsql_identity_scope parent)
+				(if (string? key) (strlike key "__tsql_cursor_status:%") false)
 				(begin
 					(define input (json_decode (substr key (strlen "__tsql_cursor_status:"))))
 					(tsql_cursor_status parent (car input) (cadr input))) (parent key))
-			_ (apply parent args))))) tsql_cursor_status)))
+			_ (apply parent args))))) tsql_cursor_status tsql_connection_session tsql_identity_scope)))

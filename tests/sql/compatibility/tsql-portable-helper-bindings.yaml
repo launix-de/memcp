@@ -11,6 +11,18 @@ metadata:
 setup: []
 cleanup: []
 test_cases:
+- name: Cursor input adapters preserve the bare caller connection and identity scope owners
+  scm: |
+    (begin
+      (define parent (newsession))
+      (define request (tsql_cursor_input_session parent))
+      (define nested (tsql_cursor_input_session request))
+      (and (identical? (tsql_connection_session request) parent)
+        (identical? (tsql_identity_scope request) parent)
+        (identical? (tsql_connection_session nested) parent)
+        (identical? (tsql_identity_scope nested) parent)
+        (empty_list? (request)) (empty_list? (parent))))
+  expect: {result: true}
 - name: Cursor input sessions retain their complete status binding chain after serialization
   scm: |
     (begin
