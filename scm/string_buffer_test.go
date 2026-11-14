@@ -10,6 +10,32 @@ import "unicode/utf8"
 import "testing"
 import "runtime"
 import "strings"
+import "unsafe"
+
+func TestConcatStringCastAndAppend(t *testing.T) {
+	texts := []string{strings.Repeat("shared-prefix-", 20) + "first-tail", strings.Repeat("shared-prefix-", 20) + "second-tail"}
+	pool, offsets := BuildStringConcatBuffer(texts)
+	single := NewBufferString(pool, offsets[0])
+	fragmented := NewBufferString(pool, offsets[1])
+	borrowed, ok := pool.Direct(offsets[0])
+	if !ok {
+		t.Fatal("first value must be a single borrowed span")
+	}
+	if _, ok := pool.Direct(offsets[1]); ok {
+		t.Fatal("second value must exercise a fragmented cast")
+	}
+	var cast string
+	if n := testing.AllocsPerRun(30, func() { cast = single.String() }); n != 0 || unsafe.StringData(cast) != unsafe.StringData(borrowed) {
+		t.Fatalf("single-span cast copied bytes: allocations=%v", n)
+	}
+	if n := testing.AllocsPerRun(30, func() { cast = fragmented.String() }); n != 1 || cast != texts[1] {
+		t.Fatalf("fragmented cast must allocate exactly its output: allocations=%v", n)
+	}
+	dst := make([]byte, 0, len(texts[1]))
+	if n := testing.AllocsPerRun(30, func() { cast, dst = fragmented.AppendString(dst[:0]) }); n != 0 || cast != texts[1] {
+		t.Fatalf("append did not reuse output: allocations=%v", n)
+	}
+}
 
 func TestConcatFoldedSpanBoundaries(t *testing.T) {
 	texts := []string{"lead-prefix-\xc3", "lead-prefix-é", "lead-prefix-É", "lead-prefix-\xc3x", "lead-prefix-\xe2\x82", "lead-prefix-K", "lead-prefix-k", "lead-prefix-ſ", "lead-prefix-s", "", "abc", "abc\xff\xe2\x82"}

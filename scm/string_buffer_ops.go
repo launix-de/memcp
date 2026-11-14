@@ -1070,6 +1070,26 @@ func bufferBool(s Scmer) bool {
 	number, err := strconv.ParseFloat(strings.TrimSpace(s.String()), 64)
 	return err != nil || number != 0
 }
+
+// Keep concat scratch out of ordinary numeric coercion stack frames.
+func bufferInt(s Scmer) int64 {
+	var local [128]byte
+	token := bufferNumericToken(s, local[:0])
+	if len(token) == 0 {
+		return 0
+	}
+	return numericPrefixInt(unsafe.String(unsafe.SliceData(token), len(token)))
+}
+
+func bufferFloat(s Scmer) float64 {
+	var local [128]byte
+	token := bufferNumericToken(s, local[:0])
+	if len(token) == 0 {
+		return 0
+	}
+	return numericPrefixFloat(unsafe.String(unsafe.SliceData(token), len(token)))
+}
+
 func numericTextEqualsInt(value Scmer, integer int64) bool {
 	if !value.IsBufferString() {
 		return numericStringEqualsInt(value.String(), integer)

@@ -35,8 +35,6 @@ Binary and existing general-ci semantics use cursor comparisons. Full locale
 collations retain x/text semantics, including numeric ordering and contractions:
 single spans are borrowed; fragmented text appends into reusable collator-owned
 output. This temporary collation input is not a column/dictionary cache.
-General-ci comparisons skip equal UTF-8 spans and consume complete rune runs;
-short literal LIKE searches scan spans directly and retain only a crossing suffix.
 No-op case conversion, trimming, replacement and whole-value substrings retain
 handles where possible. A substring within one literal borrows that literal.
 
@@ -73,10 +71,10 @@ fresh identical permutation and verifies its complete result each iteration.
 
 | Metric (median) | LZ4 | Raw | Concat |
 |---|---:|---:|---:|
-| Build | 12.499 ms | 10.238 ms | 12.913 ms |
+| Build | 12.499 ms | 10.238 ms | 14.013 ms |
 | Random binary comparison | 4695.000 ns | 14.190 ns | 59.970 ns |
 | Append to reused output | 2387.000 ns | 2.732 ns | 60.120 ns |
-| Sort 4,096 handles | 236.557 ms | 0.668 ms | 2.853 ms |
+| Sort 4,096 handles | 236.557 ms | 0.668 ms | 3.131 ms |
 | Resident format bytes | 69,408 | 1,986,088 | 115,720 |
 | Serialized bytes | 65,269 | 1,985,705 | 111,007 |
 | Source / serialized | 30.25× | 0.99× | 17.79× |
@@ -106,16 +104,16 @@ Values are `ns/op`; sample groups use the fixed iteration counts above.
 | read-1 | 9.654, 7.814, 7.516 | 8.881, 7.375, 7.524 | 5.96, 4.841, 4.983 |
 | read-0 | 9.975, 7.601, 7.573 | 8.327, 7.469, 7.452 | 4.881, 4.479, 4.448 |
 | read-2 | 6.447, 6.372, 6.602 | 8.083, 7.372, 7.392 | 4.449, 5.482, 4.713 |
-| build | 1.24994e+07, 1.20187e+07, 1.26757e+07 | 1.02379e+07, 1.09493e+07, 1.02102e+07 | 1.23982e+07, 1.29128e+07, 1.39588e+07 |
+| build | 1.24994e+07, 1.20187e+07, 1.26757e+07 | 1.02379e+07, 1.09493e+07, 1.02102e+07 | 1.40134e+07, 1.35778e+07, 1.48248e+07 |
 | compare | 4695, 4723, 4662 | 17.66, 10.35, 14.19 | 59.46, 60.58, 59.97 |
 | append | 2387, 2375, 2439 | 2.732, 2.704, 2.733 | 59.31, 60.34, 60.12 |
-| sort | 2.39935e+08, 2.36557e+08, 2.35548e+08 | 654976, 667753, 679946 | 2.76801e+06, 3.01574e+06, 2.85314e+06 |
+| sort | 2.39935e+08, 2.36557e+08, 2.35548e+08 | 654976, 667753, 679946 | 3.13071e+06, 3.23314e+06, 3.01162e+06 |
 
 Build allocation samples (`bytes/op`, `allocs/op`):
 
 - lz4: (13276896, 96), (13273253, 92), (13273221, 92)
 - raw: (12802309, 69), (12804168, 71), (12804168, 71)
-- concat: (14593869, 7742), (14593912, 7743), (14593949, 7743)
+- concat: (14597634, 7748), (14595733, 7745), (14593901, 7742)
 
 ## Focused SQL A/B after operator integration
 
@@ -147,3 +145,25 @@ and run `python3 run_sql_tests.py` with, one at a time,
 `tests/performance/collation-comparison.yaml`,
 `tests/performance/wordpress-search.yaml`, and
 `tests/performance/temporal-order-output.yaml` in each revision's worktree.
+
+### Final cast inlining probe
+
+The broader SQL table above was captured at `38ab4857b`. Final cast integration
+restores the baseline inlineable `Scmer.String` wrapper (compiler cost 174 → 67),
+keeps one-span casts zero-copy in the append helper, and isolates concat numeric
+scratch from ordinary coercion frames. No emitter is edited by hand.
+
+The remaining CI cold-temporal regression was checked with three predeclared
+fresh A/B pairs, alternating master then concat, using JIT and `GOMAXPROCS=4`.
+Every fixture includes its first query plus ten reuses and unchanged results.
+
+| Temporal workload, milliseconds | Master | Final concat | Change |
+|---|---:|---:|---:|
+| Median of three complete 11-query fixtures | 20.585 | 23.158 | +12.5% |
+| Fixture 1 | 20.585 | 23.158 | |
+| Fixture 2 | 20.526 | 23.442 | |
+| Fixture 3 | 21.883 | 22.294 | |
+
+All samples, including contemporaneous unpaired diagnostic runs under changing
+host load, are retained in the JSON artifact. CI remains the authoritative
+seven-fixture performance gate; no threshold or assertion is relaxed.

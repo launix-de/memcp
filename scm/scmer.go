@@ -784,12 +784,7 @@ func (s Scmer) Int() int64 {
 	case tagFloat:
 		return int64(math.Float64frombits(s.aux))
 	case tagConcat:
-		var local [128]byte
-		token := bufferNumericToken(s, local[:0])
-		if len(token) == 0 {
-			return 0
-		}
-		return numericPrefixInt(unsafe.String(unsafe.SliceData(token), len(token)))
+		return bufferInt(s)
 	case tagString, tagSymbol, tagCString, tagBString:
 		return numericPrefixInt(s.String())
 	case tagBSON:
@@ -818,12 +813,7 @@ func (s Scmer) Float() float64 {
 	case tagInt:
 		return float64(int64(s.aux))
 	case tagConcat:
-		var local [128]byte
-		token := bufferNumericToken(s, local[:0])
-		if len(token) == 0 {
-			return 0
-		}
-		return numericPrefixFloat(unsafe.String(unsafe.SliceData(token), len(token)))
+		return bufferFloat(s)
 	case tagString, tagSymbol, tagCString, tagBString:
 		return numericPrefixFloat(s.String())
 	case tagBSON:
@@ -954,9 +944,6 @@ func (s Scmer) AppendString(dst []byte) (string, []byte) {
 }
 
 func (s Scmer) String() string {
-	if s.IsBufferString() {
-		return bufferOf(s).Extract(auxVal(s.aux))
-	}
 	str, _ := s.AppendString(nil)
 	return str
 }

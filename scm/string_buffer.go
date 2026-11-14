@@ -190,6 +190,13 @@ func bufferSubstring(s Scmer, start, end int) Scmer {
 	return NewString(unsafe.String(unsafe.SliceData(out), len(out)))
 }
 func appendBufferString(dst []byte, s Scmer) (string, []byte) {
+	// Keep Scmer.String small enough to inline for ordinary runtime values.
+	// Its nil destination also enables a zero-copy cast of a single pool span.
+	if dst == nil {
+		if text, ok := bufferOf(s).Direct(auxVal(s.aux)); ok {
+			return text, dst
+		}
+	}
 	start := len(dst)
 	dst = bufferOf(s).Append(auxVal(s.aux), dst)
 	return unsafe.String(unsafe.SliceData(dst[start:]), len(dst)-start), dst
