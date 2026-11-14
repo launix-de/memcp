@@ -925,11 +925,19 @@ requires the SQL user to request it explicitly. */
 		(if (equal? target "IMAGE") (tsql_binary_type? (sql_info_type input))
 			(has? '("CHAR" "VARCHAR" "NCHAR" "NVARCHAR" "TEXT" "NTEXT") (sql_info_type input))))))
 		(tsql_raise_error 257 (concat "unsupported implicit conversion from " (sql_info_type input) " to " target) 3) true)
-	(define converted (sql_expr_info '() (tsql_cast_expr
-		(list 'sql_type_expr (sql_info_formula input) (sql_info_datatype input) (sql_info_collation input))
-		(match target "TEXT" "VARCHAR" "NTEXT" "NVARCHAR" "IMAGE" "VARBINARY" _ type)
-		(if large '(-1) dimensions))))
-	(if large (sql_info (sql_info_formula converted) target (sql_info_collation converted)) converted)))))
+	/* An identical declared integral domain is already admitted by its
+	producer. Keep that complete formula, including its arithmetic/error
+	boundary; another checked conversion cannot change this domain. */
+	(if (and (has? '("INT" "INTEGER" "SMALLINT" "TINYINT" "BIGINT") target)
+		(equal? (sql_info_type input) target)
+		(equal? (sql_info_dimensions input) (coalesceNil dimensions '()))
+		(nil? (sql_info_collation input))) input
+		(begin
+			(define converted (sql_expr_info '() (tsql_cast_expr
+				(list 'sql_type_expr (sql_info_formula input) (sql_info_datatype input) (sql_info_collation input))
+				(match target "TEXT" "VARCHAR" "NTEXT" "NVARCHAR" "IMAGE" "VARBINARY" _ type)
+				(if large '(-1) dimensions))))
+			(if large (sql_info (sql_info_formula converted) target (sql_info_collation converted)) converted)))))))
 (define tsql_implicit_cast_expr (lambda (value type dimensions)
 	(list 'sql_compile_expr (list 'tsql_implicit_cast_compiler type (list 'quote dimensions)) value)))
 (define tsql_decimal_compiler (lambda (type dims) (lambda (infos) (begin

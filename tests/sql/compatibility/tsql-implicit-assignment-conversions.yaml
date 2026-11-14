@@ -127,3 +127,26 @@ test_cases:
 - name: Explicitly converted arguments reach both scalar execution kinds
   sql: SELECT dbo.implicit_assignment_scalar(CONVERT(INT,CAST('1900-01-03' AS DATETIME))) AS pure_value,dbo.implicit_assignment_relational(CONVERT(INT,CAST('1900-01-03' AS DATETIME))) AS relational_value
   expect: {rows: 1,data: [{pure_value: 2,relational_value: 4}]}
+
+- name: Identical integral assignments retain their values and exact declared metadata
+  tds:
+    statements:
+    - sql: DECLARE @wide BIGINT=9223372036854775807,@integer INT=-2147483648,@small SMALLINT=-32768,@tiny TINYINT=255; SET @wide=@wide; SET @integer=@integer; SET @small=@small; SET @tiny=@tiny; SELECT @wide AS wide_value,@integer AS integer_value,@small AS small_value,@tiny AS tiny_value
+      expect:
+        data: [{wide_value: 9223372036854775807,integer_value: -2147483648,small_value: -32768,tiny_value: 255}]
+        column_types: [{name: wide_value,type: BIGINT},{name: integer_value,type: INT},{name: small_value,type: SMALLINT},{name: tiny_value,type: TINYINT}]
+- name: An identical integral NULL assignment remains typed and nullable
+  tds:
+    statements:
+    - sql: DECLARE @value INT=CAST(NULL AS INT); SET @value=@value; SELECT @value AS value
+      expect: {data: [{value: null}],column_types: [{name: value,type: INT}]}
+- name: Identical assignment preserves its producing arithmetic overflow condition
+  tds:
+    statements:
+    - sql: DECLARE @value INT=2147483647; SET @value=@value+1; SELECT @value AS value
+      expect: {error: true,contains: [arithmetic integer overflow]}
+- name: A different integral source domain still validates narrowing overflow
+  tds:
+    statements:
+    - sql: DECLARE @wide BIGINT=2147483648,@narrow INT; SET @narrow=@wide; SELECT @narrow AS value
+      expect: {error: true,contains: [integer conversion overflow]}
