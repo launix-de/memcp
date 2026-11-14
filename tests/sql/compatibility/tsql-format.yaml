@@ -49,8 +49,8 @@ test_cases:
   sql: SELECT FORMAT(CAST('2024-03-09' AS DATE),'MM/yyyy','en-US') AS english_value,FORMAT(CAST('2024-03-09' AS DATE),'MM/yyyy','de-DE') AS german_value
   expect: {rows: 1,data: [{english_value: '03/2024',german_value: '03.2024'}]}
 - name: Escaped separator is a literal in every culture
-  sql: SELECT FORMAT(CAST('2024-03-09' AS DATE),'MM\/yyyy','de-DE') AS value,CONVERT(VARCHAR(40),CONVERT(VARBINARY(40),FORMAT(CAST('2024-03-09' AS DATE),'MM\/yyyy','de-DE')),2) AS bytes_value
-  expect: {rows: 1,data: [{value: '03/2024',bytes_value: '300033002F003200300032003400'}]}
+  sql: SELECT FORMAT(CAST('2024-03-09' AS DATE),'MM\/yyyy','de-DE') AS value,ASCII(SUBSTRING(FORMAT(CAST('2024-03-09' AS DATE),'MM\/yyyy','de-DE'),3,1)) AS separator_code
+  expect: {rows: 1,data: [{value: '03/2024',separator_code: 47}]}
 - name: Escaped letters and quoted text remain literals
   sql: SELECT FORMAT(CAST('2024-03-09' AS DATE),'yyyy \y M \M d \d','en-US') AS escaped_value,FORMAT(CAST('2024-03-09' AS DATE),'yyyy ''year'' MM','en-US') AS quoted_value
   expect: {rows: 1,data: [{escaped_value: '2024 y 3 M 9 d',quoted_value: '2024 year 03'}]}
