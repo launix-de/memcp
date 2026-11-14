@@ -226,6 +226,17 @@ The probe returns a tagged value so OFF is distinct from an unrelated leaf. */
 (define tsql_identifier (close_procedure ((lambda (tsql_identifier_quoted tsql_identifier_unquoted sql_private_relation?)
 	(parser (define name (or tsql_identifier_quoted tsql_identifier_unquoted))
 		(if (sql_private_relation? name) (error "private SQL relation names cannot be referenced directly") name))) tsql_identifier_quoted tsql_identifier_unquoted sql_private_relation?)))
+/* A label is one regular identifier immediately followed by a colon, not a
+quoted name or two tokens separated by trivia. The script parser and optional
+alias lookahead share that lexical boundary. Explicit AS and mandatory derived
+aliases keep their own identifier rules. */
+(define tsql_label (parser '((define name tsql_identifier_unquoted)
+	(atom ":" false false)) (toLower name)))
+(define tsql_implicit_alias (parser (define name
+	(not tsql_identifier tsql_label)) name))
+(define tsql_optional_alias (parser (or
+	(parser '((atom "AS" true) (define name tsql_identifier)) name)
+	tsql_implicit_alias)))
 /* Resolve spelling at the frontend boundary. Native metadata owns table and
 column names; views remain definitions in the existing system.views table.
 Only consumed name bindings enter the shared plan guards, never catalog epochs. */
@@ -4750,14 +4761,14 @@ that context explicitly; stored views refuse this scalar before publication. */
 		(parser '((define owner tsql_identifier) "." (define fn tsql_identifier)
 			"(" (define arguments (* (or
 				(parser (atom "DEFAULT" true) (list "scalar-parameter-default")) tsql_expression) ",")) ")"
-			(? (atom "AS" true)) (? (define alias tsql_identifier)))
+			(? (define alias tsql_optional_alias)))
 			(begin
 				(if (equal?? owner "dbo") true
 					(error "unsupported table function schema: " owner))
 				(list (coalesceNil alias fn) schema
 					(list 'tsql_pending_table_call fn arguments (coalesceNil alias fn)) false nil nil)))
 		(parser '((define variable tsql_variable_name)
-			(? (atom "AS" true)) (? (define alias tsql_identifier)))
+			(? (define alias tsql_optional_alias)))
 			(if script_syntax
 				(list (coalesceNil alias variable) schema (list 'tsql_local_relation_name variable) false nil nil)
 				(tsql_relational_table_source schema variable alias frontend_options)))
@@ -4765,14 +4776,14 @@ that context explicitly; stored views refuse this scalar before publication. */
 		(parser '((define catalog tsql_information_schema_prefix) (define name tsql_identifier)
 			(atom "AS" true) (define alias tsql_identifier)) (tsql_named_source (tsql_information_schema_read_source alias catalog name) "information_schema" name false))
 		(parser '((define catalog tsql_information_schema_prefix) (define name tsql_identifier)
-			(define alias tsql_identifier)) (tsql_named_source (tsql_information_schema_read_source alias catalog name) "information_schema" name false))
+			(define alias tsql_implicit_alias)) (tsql_named_source (tsql_information_schema_read_source alias catalog name) "information_schema" name false))
 		(parser '((define catalog tsql_information_schema_prefix) (define name tsql_identifier))
 			(tsql_named_source (tsql_information_schema_read_source name catalog name) "information_schema" name true))
 
 		(parser '((define catalog tsql_catalog_prefix) (define name tsql_identifier)
 			(atom "AS" true) (define alias tsql_identifier)) (tsql_named_source (tsql_catalog_source alias catalog name) "sys" name false))
 		(parser '((define catalog tsql_catalog_prefix) (define name tsql_identifier)
-			(define alias tsql_identifier)) (tsql_named_source (tsql_catalog_source alias catalog name) "sys" name false))
+			(define alias tsql_implicit_alias)) (tsql_named_source (tsql_catalog_source alias catalog name) "sys" name false))
 		(parser '((define catalog tsql_catalog_prefix) (define name tsql_identifier))
 			(tsql_named_source (tsql_catalog_source name catalog name) "sys" name true))
 
@@ -4796,10 +4807,10 @@ that context explicitly; stored views refuse this scalar before publication. */
 		compilation. CREATE PROCEDURE must not look up its future #temp tables.
 		Only an unqualified name can resolve to a lexical CTE definition. */
 		(parser '((define owner tsql_schema_identifier) (define tbl tsql_identifier) (atom "AS" true) (define id tsql_identifier) (? tsql_table_hints)) (list id (tsql_qualifier_database owner database frontend_options) (list (quote tsql_source_name) tbl false false) false nil nil))
-		(parser '((define owner tsql_schema_identifier) (define tbl tsql_identifier) (define id tsql_identifier) (? tsql_table_hints)) (list id (tsql_qualifier_database owner database frontend_options) (list (quote tsql_source_name) tbl false false) false nil nil))
+		(parser '((define owner tsql_schema_identifier) (define tbl tsql_identifier) (define id tsql_implicit_alias) (? tsql_table_hints)) (list id (tsql_qualifier_database owner database frontend_options) (list (quote tsql_source_name) tbl false false) false nil nil))
 		(parser '((define owner tsql_schema_identifier) (define tbl tsql_identifier) (? tsql_table_hints)) (list tbl (tsql_qualifier_database owner database frontend_options) (list (quote tsql_source_name) tbl true false) false nil nil))
 		(parser '((define tbl tsql_identifier) (atom "AS" true) (define id tsql_identifier) (? tsql_table_hints)) (list id schema (list (quote tsql_source_name) tbl false true) false nil nil))
-		(parser '((define tbl tsql_identifier) (define id tsql_identifier) (? tsql_table_hints)) (list id schema (list (quote tsql_source_name) tbl false true) false nil nil))
+		(parser '((define tbl tsql_identifier) (define id tsql_implicit_alias) (? tsql_table_hints)) (list id schema (list (quote tsql_source_name) tbl false true) false nil nil))
 		(parser '((define tbl tsql_identifier) (? tsql_table_hints)) (list tbl schema (list (quote tsql_source_name) tbl true true) false nil nil))
 	)))
 
@@ -5129,7 +5140,7 @@ that context explicitly; stored views refuse this scalar before publication. */
 			(parser '((define e tsql_expression) (atom "AS" true) (define title tsql_identifier)) '(title e))
 			(parser '((define e tsql_expression) (atom "AS" true) (define title tsql_string)) '(title e))
 
-			(parser '((define e tsql_expression) (define title tsql_identifier)) '(title e))
+			(parser '((define e tsql_expression) (define title tsql_implicit_alias)) '(title e))
 			(parser '((define e tsql_expression) (define title tsql_string)) '(title e))
 
 			(parser (define captured (capture tsql_expression)) (begin
@@ -6446,8 +6457,8 @@ that context explicitly; stored views refuse this scalar before publication. */
 					(define body tsql_script_command)) (list "while" (car condition) body))
 				(parser (atom "BREAK" true) (list "break"))
 				(parser (atom "CONTINUE" true) (list "continue"))
-				(parser '((atom "GOTO" true) (define name tsql_identifier)) (list "goto" (toLower name)))
-				(parser '((define name tsql_identifier) ":") (list "label" (toLower name)))
+				(parser '((atom "GOTO" true) (define name tsql_identifier_unquoted)) (list "goto" (toLower name)))
+				(parser (define name tsql_label) (list "label" name))
 				(parser '((atom "RETURN" true) (? (define value (capture tsql_expression))))
 					(list "return" (if value (car value) nil)))
 				(parser '((atom "PRINT" true) (define value (capture tsql_expression)))

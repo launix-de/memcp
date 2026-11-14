@@ -1,5 +1,7 @@
 # Copyright (C) 2026 Carl-Philip Hänsch
 # SPDX-License-Identifier: GPL-3.0-or-later
+# SQL Server references for label token boundaries and quoted aliases:
+# https://dbfiddle.uk/sy0i84q_ https://dbfiddle.uk/FRaYPfAn https://dbfiddle.uk/RRIwHXp1
 metadata:
   version: '1.0'
   syntax: tsql
@@ -9,10 +11,16 @@ setup:
 - sql: CREATE TABLE control_probe(id INT PRIMARY KEY, value INT)
 - sql: INSERT INTO control_probe VALUES(1,10),(2,NULL)
 - sql: CREATE TABLE control_goto_effect(id INT PRIMARY KEY)
+- sql: |
+    CREATE FUNCTION dbo.control_label_rows(@value INT) RETURNS @rows TABLE(id INT) AS BEGIN
+      INSERT INTO @rows(id) SELECT @value; RETURN;
+    END
 cleanup:
 - sql: DROP TABLE IF EXISTS control_probe
 - sql: DROP TABLE IF EXISTS control_goto_effect
 - sql: DROP PROCEDURE IF EXISTS control_goto_proc
+- sql: DROP PROCEDURE IF EXISTS control_label_proc
+- sql: DROP FUNCTION IF EXISTS dbo.control_label_rows
 test_cases:
 - name: Existing relation rows select the true branch
   sql: IF EXISTS(SELECT id FROM control_probe WHERE id=1) SELECT 1 AS chosen ELSE SELECT 0 AS chosen
@@ -278,3 +286,258 @@ test_cases:
     rows: 1
     data:
     - final_value: 3
+
+- name: A terminal label after an unaliased table is not consumed as its alias
+  sql: 'SELECT id FROM control_probe
+
+    WHERE id=1
+
+    finished:'
+  expect:
+    rows: 1
+    data:
+    - id: 1
+- name: A terminal label directly after FROM is not an implicit table alias
+  sql: 'SELECT id FROM control_probe
+
+    finished:'
+  expect:
+    rows: 3
+    data:
+    - id: 1
+    - id: 2
+    - id: 3
+- name: A label after a qualified table preserves the preceding SELECT
+  sql: 'SELECT id FROM dbo.control_probe
+
+    finished:'
+  expect:
+    rows: 3
+    data:
+    - id: 1
+    - id: 2
+    - id: 3
+- name: A comment before a terminal label preserves its statement boundary
+  sql: 'SELECT id FROM control_probe
+
+    -- ordinary SQL comment
+
+    finished:'
+  expect:
+    rows: 3
+    data:
+    - id: 1
+    - id: 2
+    - id: 3
+- name: A comment between identifier and colon does not form a label
+  sql: 'SELECT id FROM control_probe
+
+    finished /* label trivia */ :'
+  expect:
+    error: true
+- name: A delimited identifier cannot declare a label
+  sql: 'SELECT id FROM control_probe
+
+    [finished]:'
+  expect:
+    error: true
+- name: An explicit table alias remains valid before a terminal label
+  sql: 'SELECT p.id FROM control_probe AS p
+
+    finished:'
+  expect:
+    rows: 3
+    data:
+    - id: 1
+    - id: 2
+    - id: 3
+- name: An implicit table alias remains valid before a terminal label
+  sql: 'SELECT p.id FROM control_probe p
+
+    finished:'
+  expect:
+    rows: 3
+    data:
+    - id: 1
+    - id: 2
+    - id: 3
+- name: An implicit projection alias remains valid before a terminal label
+  sql: 'SELECT 11 chosen
+
+    finished:'
+  expect:
+    rows: 1
+    data:
+    - chosen: 11
+- name: An explicit projection alias remains valid before a terminal label
+  sql: 'SELECT 13 AS chosen
+
+    finished:'
+  expect:
+    rows: 1
+    data:
+    - chosen: 13
+- name: A scalar SELECT leaves its terminal label unconsumed
+  sql: 'SELECT 11
+
+    finished:'
+  expect:
+    rows: 1
+    data:
+    - '11': 11
+- name: A label after a catalog source is not an implicit alias
+  sql: 'SELECT MAX(CASE WHEN name=''control_probe'' THEN 1 ELSE 0 END) AS found FROM sys.objects
+
+    finished:'
+  expect:
+    rows: 1
+    data:
+    - found: 1
+- name: A label after an information schema source is not an implicit alias
+  sql: 'SELECT MAX(CASE WHEN TABLE_NAME=''control_probe'' THEN 1 ELSE 0 END) AS found FROM INFORMATION_SCHEMA.TABLES
+
+    finished:'
+  expect:
+    rows: 1
+    data:
+    - found: 1
+- name: A table variable source leaves a terminal label unconsumed
+  sql: 'DECLARE @values TABLE(id INT); INSERT @values VALUES(19); SELECT id FROM @values
+
+    finished:'
+  expect:
+    rows: 1
+    data:
+    - id: 19
+- name: A terminal label inside BEGIN END preserves query results
+  sql: 'BEGIN SELECT id FROM control_probe
+
+    finished:
+
+    END'
+  expect:
+    rows: 3
+    data:
+    - id: 1
+    - id: 2
+    - id: 3
+- name: Colons within an alias spelling do not introduce a label
+  sql: SELECT p.id AS [chosen:alias] FROM control_probe AS p WHERE id=1
+  expect:
+    rows: 1
+    data:
+    - chosen:alias: 1
+- name: Stored procedure creation accepts an exit label directly after a temporary source
+  setup:
+  - sql: DROP PROCEDURE IF EXISTS control_label_proc
+  sql: 'CREATE PROCEDURE control_label_proc AS
+
+    CREATE TABLE #label_rows(id INT);
+
+    INSERT #label_rows VALUES(23);
+
+    SELECT id FROM #label_rows
+
+    -- source ends before the exit label
+
+    finished:
+
+    '
+- name: Stored procedure execution preserves SELECT before the exit label
+  sql: EXEC control_label_proc
+  expect:
+    rows: 1
+    data:
+    - id: 23
+- name: GOTO skips a SELECT ending directly before its target label
+  sql: 'GOTO finished
+
+    SELECT id FROM control_probe
+
+    finished:
+
+    SELECT 29 AS chosen
+
+    last_label:
+
+    '
+  expect:
+    rows: 1
+    data:
+    - chosen: 29
+- name: An explicit AS still requires a source alias
+  sql: 'SELECT id FROM control_probe AS :'
+  expect:
+    error: true
+- name: A table function source leaves its terminal label unconsumed
+  sql: 'SELECT id FROM dbo.control_label_rows(31)
+
+    finished:'
+  expect:
+    rows: 1
+    data:
+    - id: 31
+- name: An explicit table function alias remains valid before a label
+  sql: 'SELECT r.id FROM dbo.control_label_rows(37) AS r
+
+    finished:'
+  expect:
+    rows: 1
+    data:
+    - id: 37
+- name: An implicit table function alias remains valid before a label
+  sql: 'SELECT r.id FROM dbo.control_label_rows(41) r
+
+    finished:'
+  expect:
+    rows: 1
+    data:
+    - id: 41
+- name: A table variable AS cannot omit its mandatory alias
+  sql: DECLARE @rows TABLE(id INT); SELECT id FROM @rows AS
+  expect:
+    error: true
+- name: A table function AS cannot omit its mandatory alias
+  sql: SELECT id FROM dbo.control_label_rows(43) AS
+  expect:
+    error: true
+- name: A derived table still requires an alias before a following label
+  sql: 'SELECT id FROM (SELECT 47 AS id)
+
+    finished:'
+  expect:
+    error: true
+- name: Bare delimited aliases retain their embedded colons
+  sql: 'SELECT [p:q].id [chosen:alias] FROM control_probe [p:q] WHERE id=1
+
+    finished:'
+  expect:
+    rows: 1
+    data:
+    - chosen:alias: 1
+- name: A regular Unicode label is a valid GOTO target
+  sql: 'GOTO fertigä
+
+    SELECT 99 AS chosen
+
+    fertigä:
+
+    SELECT 53 AS chosen'
+  expect:
+    rows: 1
+    data:
+    - chosen: 53
+- name: Whitespace before the colon does not form a label
+  sql: 'SELECT 59 AS chosen
+
+    finished :'
+  expect:
+    error: true
+- name: A GOTO target cannot use a delimited identifier
+  sql: 'GOTO [finished]
+
+    finished:
+
+    SELECT 61 AS chosen'
+  expect:
+    error: true
