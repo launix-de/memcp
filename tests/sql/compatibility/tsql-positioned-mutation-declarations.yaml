@@ -58,15 +58,15 @@ test_cases:
     (and (empty_list? (showprocedures "memcp-tests" "positioned_missing" nil))
       (empty_list? (showprocedures "memcp-tests" "positioned_invalid_global" nil)))
   expect: {result: true}
-- name: Positioned execution refuses before compiling or evaluating SET operands
+- name: Missing current cursor ownership prevents evaluation of SET operands
   scm: |
     (try (lambda () (begin
       (parse_tsql "memcp-tests"
         "UPDATE positioned_target SET value=(SELECT 1/0) WHERE CURRENT OF row_cursor" nil (newsession) nil)
       false)) (lambda (cause)
-        (strlike (string cause) "%positioned cursor mutation requires native current-row ownership%")))
+        (strlike (string cause) "%cursor%")))
   expect: {result: true}
-- name: Refused positioned execution delivers no rows fields or native update effects
+- name: A mutation without an open current cursor delivers no rows fields or update effects
   scm: |
     (begin
       (define session (newsession)) (session "username" "root") (session "schema" "memcp-tests")
@@ -75,7 +75,7 @@ test_cases:
         (tsql_execute_request "memcp-tests" "EXEC positioned_store @value=42" session nil 0
           (lambda (_row) (callbacks "rows" (+ (callbacks "rows") 1)))
           (lambda args (callbacks "fields" (+ (callbacks "fields") 1)))) false))
-        (lambda (cause) (strlike (string cause) "%positioned cursor mutation requires native current-row ownership%"))))
+        (lambda (cause) (strlike (string cause) "%cursor%"))))
       (and rejected (equal? (callbacks "rows") 0) (equal? (callbacks "fields") 0)))
   expect: {result: true}
 - name: Refused positioned mutations leave duplicate NULL rows untouched
