@@ -14,7 +14,17 @@ setup:
   - sql: INSERT INTO operand_metadata_head VALUES(10,1)
   - sql: INSERT INTO operand_metadata_middle VALUES(20,10)
   - sql: INSERT INTO operand_metadata_tail VALUES(30,20)
+  - sql: CREATE TABLE operand_text_parent(id INT NOT NULL PRIMARY KEY,head_id INT)
+  - sql: CREATE TABLE operand_text_head(id INT NOT NULL PRIMARY KEY,label VARCHAR(12))
+  - sql: CREATE TABLE operand_text_child(id INT NOT NULL PRIMARY KEY,head_id INT)
+  - sql: INSERT INTO operand_text_parent VALUES(1,10),(2,20),(3,30),(4,90)
+  - sql: INSERT INTO operand_text_head VALUES(10,'one'),(20,'no child'),(30,NULL)
+  - sql: INSERT INTO operand_text_child VALUES(100,10),(101,10),(300,30)
 cleanup:
+  - sql: DROP VIEW IF EXISTS operand_text_view
+  - sql: DROP TABLE IF EXISTS operand_text_child
+  - sql: DROP TABLE IF EXISTS operand_text_head
+  - sql: DROP TABLE IF EXISTS operand_text_parent
   - sql: DROP TABLE IF EXISTS operand_metadata_tail
   - sql: DROP TABLE IF EXISTS operand_metadata_middle
   - sql: DROP TABLE IF EXISTS operand_metadata_head
@@ -79,3 +89,34 @@ test_cases:
               - {name: hid,type: INT,nullable: false}
               - {name: mid,type: INT,nullable: false}
               - {name: tid,type: INT,nullable: false}
+  - name: Grouped view text exports retain declared ISNULL and CASE contracts
+    setup:
+      - sql: >-
+          CREATE VIEW operand_text_view AS
+          SELECT p.id,c.id AS child_id,
+            CASE WHEN h.id IS NULL THEN 'missing'
+              ELSE ISNULL(h.label,'blank') END AS label
+          FROM operand_text_parent p
+          LEFT JOIN (operand_text_head h
+            INNER JOIN operand_text_child c ON c.head_id=h.id)
+          ON p.head_id=h.id
+    sql: SELECT id,child_id,label FROM operand_text_view ORDER BY id,child_id
+    expect:
+      rows: 5
+      data:
+        - {id: 1,child_id: 100,label: one}
+        - {id: 1,child_id: 101,label: one}
+        - {id: 2,child_id: null,label: missing}
+        - {id: 3,child_id: 300,label: blank}
+        - {id: 4,child_id: null,label: missing}
+  - name: Restored grouped view text exports retain their declared wire width
+    restart_server: true
+    tds:
+      statements:
+        - sql: SELECT TOP(0) id,child_id,label FROM operand_text_view
+          expect:
+            rows: 0
+            column_types:
+              - {name: id,type: INT,nullable: false}
+              - {name: child_id,type: INT,nullable: true}
+              - {name: label,type: VARCHAR,length: 12}
