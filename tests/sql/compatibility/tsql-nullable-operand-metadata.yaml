@@ -109,8 +109,9 @@ test_cases:
         - {id: 2,child_id: null,label: missing}
         - {id: 3,child_id: 300,label: blank}
         - {id: 4,child_id: null,label: missing}
+  - name: Restart after publishing the typed joined view
+    action: restart
   - name: Restored grouped view text exports retain their declared wire width
-    restart_server: true
     tds:
       statements:
         - sql: SELECT TOP(0) id,child_id,label FROM operand_text_view
