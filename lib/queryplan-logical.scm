@@ -489,13 +489,16 @@ domains (for example dashboard time windows). */
 			(and (not (source_outer? src))
 				(or (nil? (source_join_expr src)) (equal? (source_join_expr src) true)))))))
 
-/* Grouping needs a relational input even when constant CROSS bindings have
-been substituted. Preserve one existing unit if possible; an implicit FROM is
-its canonical one-row literal relation, introduced after SQL name binding. */
+/* Grouping and invocation-volatile producers need a relational input even when
+constant CROSS bindings have been substituted. Dropping a volatile producer's
+last unit would inline its expression into every consumer row, changing its
+evaluation multiplicity. Preserve one existing unit if possible; an implicit
+FROM uses the canonical one-row literal relation after SQL name binding. */
 (define group_input_unit_sources (lambda (block sources original_sources ctx)
 	(if (or (not (empty_list? sources))
 		(not (or (not (empty_list? (qb_group block))) (not (nil? (qb_having block)))
-			(query_block_has_local_aggregates? block))))
+			(query_block_has_local_aggregates? block)
+			(query_requires_fresh_invocation? block nil))))
 		sources
 		(not (empty_list? original_sources)) (list (car original_sources))
 		(begin

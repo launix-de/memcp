@@ -3455,6 +3455,28 @@ https://dbfiddle.uk/qVU206sE */
 		(list tsql_encode_character (sql_info_formula input) (tsql_character_encoding input) -1)
 		(sql_info_formula input)))
 	(sql_info (list tsql_hashbytes (sql_info_formula algorithm) bytes) (list "VARBINARY" '(8000)) nil))))
+/* Unseeded RAND is one volatile scalar value per syntactic occurrence and
+statement, rather than a row randomizer. Its singleton logical producer goes
+through ordinary decorrelation and invocation lifetime, so scan workers consume
+the same scalar value. The occurrence is a stable parser slot, never a UUID.
+https://learn.microsoft.com/en-us/sql/t-sql/functions/rand-transact-sql
+SQL Server 2022 reference: https://dbfiddle.uk/inz585N_ */
+(define tsql_rand_expression (lambda (database occurrence scalar function_body)
+	(if function_body (error "RAND is not permitted in a scalar function")
+		scalar (list 'sql_type_expr (list 'sql_rand) "FLOAT" nil)
+		(list 'sql_type_expr
+			(list 'inner_select (make_query_block database
+				(list (list "__tsql_rand_input" database
+					(list 'literal-rows '("occurrence") (list (list "occurrence" occurrence))) false nil nil))
+				(list "value" (list 'sql_type_expr (list 'sql_rand) "FLOAT" nil))
+				true nil nil nil nil nil '() '()
+				(list (list 'fresh_invocation true) (list 'volatile_occurrence occurrence)))) "FLOAT" nil))))
+(define tsql_rand_seed (lambda (seed)
+	(if (nil? seed) nil (error "seeded RAND sequence is not implemented"))))
+(define tsql_compile_rand_seed (lambda (infos) (begin
+	(if (equal? (count infos) 1) true (error "RAND accepts at most one seed"))
+	(define seed (tsql_convert_value_info (car infos) "INT" '()))
+	(sql_info (list tsql_rand_seed (sql_info_formula seed)) "FLOAT" nil))))
 (define tsql_compile_datalength (lambda (infos) (begin
 	(if (equal? (count infos) 1) true (error "DATALENGTH requires one argument"))
 	(define input (car infos))
@@ -3998,6 +4020,8 @@ that context explicitly; stored views refuse this scalar before publication. */
 
 	(define placeholder_counter (newsession))
 	(placeholder_counter "n" 0)
+	(define random_occurrences (newsession))
+	(random_occurrences "count" 0)
 
 	(define extract_title_or_sql (lambda (captured_result)
 		(match (car (cdr captured_result))
@@ -4144,6 +4168,14 @@ that context explicitly; stored views refuse this scalar before publication. */
 				(if (<= (count arguments) 2) true (error "PERMISSIONS accepts at most two arguments"))
 				(if policy (policy schema "database_permissions" false) true)
 				(tsql_catalog_permissions_call schema arguments)))
+		(parser '((atom "RAND" true) "(" (? (define seed tsql_expression)) ")")
+			(begin
+				(if function_body (error "RAND is not permitted in a scalar function") true)
+				(if seed (list 'sql_compile_expr 'tsql_compile_rand_seed seed)
+					(begin
+						(define occurrence (random_occurrences "count"))
+						(random_occurrences "count" (+ occurrence 1))
+						(tsql_rand_expression schema occurrence expression_only function_body)))))
 		(parser '((atom "QUOTENAME" true) "(" (define value tsql_expression)
 			(? "," (define delimiter tsql_expression)) ")")
 			(list (quote sql_compile_expr) (quote tsql_compile_quotename) value

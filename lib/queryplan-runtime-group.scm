@@ -132,11 +132,14 @@ session forwarding closure. Other calls remain at their original row boundary. *
 				(merge (mapIndex keys (lambda (i expression) (list (nth key_names i) expression))))
 				(merge (mapIndex ags (lambda (i ag) (list (concat "__runtime_operand_" i) (car ag))))))))
 			(define catalog (invocation_group_catalog '() stage))
-			/* An executable stage-output source may be declared by this stage's
-			catalog rather than its input QB. Its native preparation still belongs
-			to this input boundary, before the dataset reducer consumes that source. */
+			/* A source may already name its invocation carrier rather than its
+			logical stage-output. Recover its producer from the same catalog before
+			consumption, unless the enclosing preparation already owns that packet. */
 			(define input_stages (unique_stages_by_id (merge (list (qb_stages src)
-				(stage_outputs_from_sources_using catalog (qb_sources src))))))
+				(stage_outputs_from_sources_using catalog (qb_sources src))
+				(filter (group_cache_stages_from_sources catalog (qb_sources src))
+					(lambda (dependency) (and (invocation_group_stage? catalog dependency)
+						(not (qassoc_get (gs_facts dependency) 'eager_prepared false)))))))))
 			(define input (make_query_block (qb_schema src) (qb_sources src) input_fields
 				(combine_where (qb_where src) condition) (qb_group src) (qb_having src)
 				(qb_order src) (qb_limit src) (qb_offset src) (qb_hidden src) input_stages
