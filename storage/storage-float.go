@@ -88,13 +88,15 @@ func (s *StorageFloat) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result
 	} else {
 		idxInt = idx
 	}
-	idxPinned := idxInt.Loc == scm.LocReg
-	idxPinnedReg := idxInt.Reg
-	if idxPinned {
-		ctx.ProtectReg(idxPinnedReg)
-		defer ctx.UnprotectReg(idxPinnedReg)
-	}
 	var bbs [3]scm.BBDescriptor
+	var storageIdxIntHome scm.JITValueDesc
+	storageInputsProtected := ctx.StorageInputsInRegisters
+	storageIdxIntHome = idxInt
+	if storageInputsProtected {
+		ctx.ProtectDescRegisters(&storageIdxIntHome)
+	} else {
+		ctx.StabilizeDescForControlFlow(&storageIdxIntHome)
+	}
 	if result.Loc == scm.LocAny {
 		result = scm.JITValueDesc{Loc: scm.LocRegPair, Type: scm.JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 		ctx.BindReg(result.Reg, &result)
@@ -128,6 +130,7 @@ func (s *StorageFloat) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result
 		bbpos_0_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 		ctx.MarkLabel(lbl1)
 		ctx.ResolveFixups()
+		idxInt = storageIdxIntHome
 		ctx.ReclaimUntrackedRegs()
 		if thisptr.Loc == scm.LocImm {
 			fieldAddr := uintptr(thisptr.Imm.Int()) + unsafe.Offsetof((*StorageFloat)(nil).values)
@@ -214,6 +217,7 @@ func (s *StorageFloat) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result
 		bbpos_0_1 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 		ctx.MarkLabel(lbl2)
 		ctx.ResolveFixups()
+		idxInt = storageIdxIntHome
 		ctx.ReclaimUntrackedRegs()
 		d10 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagNil, Imm: scm.NewNil()}
 		d11 = result
@@ -247,6 +251,7 @@ func (s *StorageFloat) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result
 		bbpos_0_2 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 		ctx.MarkLabel(lbl3)
 		ctx.ResolveFixups()
+		idxInt = storageIdxIntHome
 		ctx.ReclaimUntrackedRegs()
 		ctx.EnsureDesc(&d1)
 		d12 = result
@@ -264,6 +269,9 @@ func (s *StorageFloat) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result
 	if resultRegsProtected {
 		ctx.UnprotectReg(result.Reg2)
 		ctx.UnprotectReg(result.Reg)
+	}
+	if storageInputsProtected {
+		ctx.UnprotectDescRegisters(&storageIdxIntHome)
 	}
 	ctx.EndStandaloneFrame(standaloneFrame)
 	return result

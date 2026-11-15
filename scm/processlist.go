@@ -1210,9 +1210,12 @@ func init_processlist() {
 					ctx.EnsureDesc(&d52)
 					ctx.EnsureDesc(&d102)
 					ctx.EnsureDesc(&d103)
+					ctx.EnsureDescsTogether(&d103, &d102)
 					if d103.Loc == LocImm && d102.Loc == LocImm {
 						d105 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d103.Imm.Int() - d102.Imm.Int())}
 					} else {
+						ctx.ProtectDescRegisters(&d103)
+						ctx.ProtectDescRegisters(&d102)
 						r4 := ctx.AllocReg()
 						if d103.Loc == LocImm {
 							ctx.EmitMovRegImm64(r4, uint64(d103.Imm.Int()))
@@ -1225,6 +1228,8 @@ func init_processlist() {
 						} else {
 							ctx.EmitSubInt64(r4, d102.Reg)
 						}
+						ctx.UnprotectDescRegisters(&d102)
+						ctx.UnprotectDescRegisters(&d103)
 						d105 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r4}
 						ctx.BindReg(r4, &d105)
 					}
@@ -1321,6 +1326,7 @@ func init_processlist() {
 					d111 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString("Id")}
 					ctx.SyncDesc(&d111)
 					ctx.EmitStoreScmerToStack(d111, int32(stackArray110)+int32(0))
+					ctx.FreeDesc(&d111)
 					ctx.EnsureDesc(&d51)
 					if d51.Loc == LocImm {
 						fieldAddr := uintptr(d51.Imm.Int()) + 0
@@ -1354,32 +1360,27 @@ func init_processlist() {
 					d114 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString("User")}
 					ctx.SyncDesc(&d114)
 					ctx.EmitStoreScmerToStack(d114, int32(stackArray110)+int32(32))
+					ctx.FreeDesc(&d114)
 					ctx.EnsureDesc(&d51)
 					if d51.Loc == LocImm {
 						fieldAddr := uintptr(d51.Imm.Int()) + 8
 						r11 := ctx.AllocReg()
 						r12 := ctx.AllocRegExcept(r11)
-						r13 := ctx.AllocRegExcept(r11, r12)
 						ctx.EmitMovRegMem64(r11, fieldAddr)
 						ctx.EmitMovRegMem64(r12, fieldAddr+8)
-						ctx.EmitMovRegMem64(r13, fieldAddr+16)
-						d115 = JITValueDesc{Loc: LocRegTriple, Reg: r11, Reg2: r12, Reg3: r13}
+						d115 = JITValueDesc{Loc: LocRegPair, Reg: r11, Reg2: r12}
 						ctx.BindReg(r11, &d115)
 						ctx.BindReg(r12, &d115)
-						ctx.BindReg(r13, &d115)
 					} else {
 						off := int32(8)
 						baseReg := d51.Reg
-						r14 := ctx.AllocRegExcept(baseReg)
-						r15 := ctx.AllocRegExcept(baseReg, r14)
-						r16 := ctx.AllocRegExcept(baseReg, r14, r15)
-						ctx.EmitMovRegMem(r14, baseReg, off)
-						ctx.EmitMovRegMem(r15, baseReg, off+8)
-						ctx.EmitMovRegMem(r16, baseReg, off+16)
-						d115 = JITValueDesc{Loc: LocRegTriple, Reg: r14, Reg2: r15, Reg3: r16}
+						r13 := ctx.AllocRegExcept(baseReg)
+						r14 := ctx.AllocRegExcept(baseReg, r13)
+						ctx.EmitMovRegMem(r13, baseReg, off)
+						ctx.EmitMovRegMem(r14, baseReg, off+8)
+						d115 = JITValueDesc{Loc: LocRegPair, Reg: r13, Reg2: r14}
+						ctx.BindReg(r13, &d115)
 						ctx.BindReg(r14, &d115)
-						ctx.BindReg(r15, &d115)
-						ctx.BindReg(r16, &d115)
 					}
 					ctx.EnsureDesc(&d115)
 					ctx.SyncDesc(&d115)
@@ -1387,32 +1388,27 @@ func init_processlist() {
 					d116 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString("Host")}
 					ctx.SyncDesc(&d116)
 					ctx.EmitStoreScmerToStack(d116, int32(stackArray110)+int32(64))
+					ctx.FreeDesc(&d116)
 					ctx.EnsureDesc(&d51)
 					if d51.Loc == LocImm {
 						fieldAddr := uintptr(d51.Imm.Int()) + 24
-						r17 := ctx.AllocReg()
-						r18 := ctx.AllocRegExcept(r17)
-						r19 := ctx.AllocRegExcept(r17, r18)
-						ctx.EmitMovRegMem64(r17, fieldAddr)
-						ctx.EmitMovRegMem64(r18, fieldAddr+8)
-						ctx.EmitMovRegMem64(r19, fieldAddr+16)
-						d117 = JITValueDesc{Loc: LocRegTriple, Reg: r17, Reg2: r18, Reg3: r19}
-						ctx.BindReg(r17, &d117)
-						ctx.BindReg(r18, &d117)
-						ctx.BindReg(r19, &d117)
+						r15 := ctx.AllocReg()
+						r16 := ctx.AllocRegExcept(r15)
+						ctx.EmitMovRegMem64(r15, fieldAddr)
+						ctx.EmitMovRegMem64(r16, fieldAddr+8)
+						d117 = JITValueDesc{Loc: LocRegPair, Reg: r15, Reg2: r16}
+						ctx.BindReg(r15, &d117)
+						ctx.BindReg(r16, &d117)
 					} else {
 						off := int32(24)
 						baseReg := d51.Reg
-						r20 := ctx.AllocRegExcept(baseReg)
-						r21 := ctx.AllocRegExcept(baseReg, r20)
-						r22 := ctx.AllocRegExcept(baseReg, r20, r21)
-						ctx.EmitMovRegMem(r20, baseReg, off)
-						ctx.EmitMovRegMem(r21, baseReg, off+8)
-						ctx.EmitMovRegMem(r22, baseReg, off+16)
-						d117 = JITValueDesc{Loc: LocRegTriple, Reg: r20, Reg2: r21, Reg3: r22}
-						ctx.BindReg(r20, &d117)
-						ctx.BindReg(r21, &d117)
-						ctx.BindReg(r22, &d117)
+						r17 := ctx.AllocRegExcept(baseReg)
+						r18 := ctx.AllocRegExcept(baseReg, r17)
+						ctx.EmitMovRegMem(r17, baseReg, off)
+						ctx.EmitMovRegMem(r18, baseReg, off+8)
+						d117 = JITValueDesc{Loc: LocRegPair, Reg: r17, Reg2: r18}
+						ctx.BindReg(r17, &d117)
+						ctx.BindReg(r18, &d117)
 					}
 					ctx.EnsureDesc(&d117)
 					ctx.SyncDesc(&d117)
@@ -1420,6 +1416,7 @@ func init_processlist() {
 					d118 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString("db")}
 					ctx.SyncDesc(&d118)
 					ctx.EmitStoreScmerToStack(d118, int32(stackArray110)+int32(96))
+					ctx.FreeDesc(&d118)
 					if d51.Loc == LocRegPair || d51.Loc == LocStackPair || d51.Loc == LocRegTriple || d51.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
 					}
@@ -1433,6 +1430,7 @@ func init_processlist() {
 					d120 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString("Command")}
 					ctx.SyncDesc(&d120)
 					ctx.EmitStoreScmerToStack(d120, int32(stackArray110)+int32(128))
+					ctx.FreeDesc(&d120)
 					if d51.Loc == LocRegPair || d51.Loc == LocStackPair || d51.Loc == LocRegTriple || d51.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
 					}
@@ -1446,6 +1444,7 @@ func init_processlist() {
 					d122 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString("Time")}
 					ctx.SyncDesc(&d122)
 					ctx.EmitStoreScmerToStack(d122, int32(stackArray110)+int32(160))
+					ctx.FreeDesc(&d122)
 					if d51.Loc == LocRegPair || d51.Loc == LocStackPair || d51.Loc == LocRegTriple || d51.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
 					}
@@ -1460,27 +1459,29 @@ func init_processlist() {
 					d124 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString("State")}
 					ctx.SyncDesc(&d124)
 					ctx.EmitStoreScmerToStack(d124, int32(stackArray110)+int32(192))
+					ctx.FreeDesc(&d124)
 					ctx.EnsureDesc(&d109)
 					ctx.SyncDesc(&d109)
 					ctx.EmitStoreScmerToStack(d109, int32(stackArray110)+int32(208))
 					d125 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString("Info")}
 					ctx.SyncDesc(&d125)
 					ctx.EmitStoreScmerToStack(d125, int32(stackArray110)+int32(224))
+					ctx.FreeDesc(&d125)
 					ctx.EnsureDesc(&d3)
 					ctx.SyncDesc(&d3)
 					ctx.EmitStoreScmerToStack(d3, int32(stackArray110)+int32(240))
 					d126 = JITValueDesc{Loc: LocVirtualSlice, Type: tagSlice, KnownSliceLen: int32(16), KnownSliceCap: int32(16), SliceSizeKnown: true}
 					_ = d126
-					r23 := ctx.AllocReg()
-					r24 := ctx.AllocRegExcept(r23)
-					r25 := ctx.AllocRegExcept(r23, r24)
-					d127 = JITValueDesc{Loc: LocRegTriple, Type: JITTypeUnknown, Reg: r23, Reg2: r24, Reg3: r25}
-					ctx.BindReg(r23, &d127)
-					ctx.BindReg(r24, &d127)
-					ctx.BindReg(r25, &d127)
-					ctx.BindReg(r23, &d127)
-					ctx.BindReg(r24, &d127)
-					ctx.BindReg(r25, &d127)
+					r19 := ctx.AllocReg()
+					r20 := ctx.AllocRegExcept(r19)
+					r21 := ctx.AllocRegExcept(r19, r20)
+					d127 = JITValueDesc{Loc: LocRegTriple, Type: JITTypeUnknown, Reg: r19, Reg2: r20, Reg3: r21}
+					ctx.BindReg(r19, &d127)
+					ctx.BindReg(r20, &d127)
+					ctx.BindReg(r21, &d127)
+					ctx.BindReg(r19, &d127)
+					ctx.BindReg(r20, &d127)
+					ctx.BindReg(r21, &d127)
 					ctx.EmitLeaRegMem(d127.Reg, ctx.StackReg, int32(stackArray110))
 					ctx.EmitMovRegImm64(d127.Reg2, uint64(16))
 					ctx.EmitMovRegImm64(d127.Reg3, uint64(16))
@@ -1561,10 +1562,10 @@ func init_processlist() {
 					if d133.Loc == LocImm {
 						d134 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d133.Imm.Int() > 100)}
 					} else {
-						r26 := ctx.AllocReg()
+						r22 := ctx.AllocReg()
 						ctx.EmitCmpRegImm32(d133.Reg, 100)
-						d134 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r26, Condition: CondSignedGreater}
-						ctx.BindReg(r26, &d134)
+						d134 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r22, Condition: CondSignedGreater}
+						ctx.BindReg(r22, &d134)
 					}
 					ctx.FreeDesc(&d133)
 					d135 = d134

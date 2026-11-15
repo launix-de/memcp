@@ -680,6 +680,18 @@ func init_list_assoc_extra() {
 				ctx.BindReg(d48.Reg, &d47)
 				ctx.BindReg(r4, &d47)
 				ctx.ReclaimUntrackedRegs()
+				d9 = ctx.StabilizeForNested(d9)
+				d12 = ctx.StabilizeForNested(d12)
+				d14 = ctx.StabilizeForNested(d14)
+				d26 = ctx.StabilizeForNested(d26)
+				d29 = ctx.StabilizeForNested(d29)
+				d35 = ctx.StabilizeForNested(d35)
+				d36 = ctx.StabilizeForNested(d36)
+				d38 = ctx.StabilizeForNested(d38)
+				d40 = ctx.StabilizeForNested(d40)
+				d43 = ctx.StabilizeForNested(d43)
+				d45 = ctx.StabilizeForNested(d45)
+				d46 = ctx.StabilizeForNested(d46)
 				ctx.EnsureDesc(&d47)
 				d49 := d47
 				_ = d49
@@ -890,9 +902,12 @@ func init_list_assoc_extra() {
 				ctx.EnsureDesc(&d64)
 				ctx.EnsureDesc(&d46)
 				var d66 JITValueDesc
+				ctx.EnsureDescsTogether(&d46, &d64)
 				if d46.Loc == LocImm && d64.Loc == LocImm {
 					d66 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d46.Imm.Int() - d64.Imm.Int())}
 				} else {
+					ctx.ProtectDescRegisters(&d46)
+					ctx.ProtectDescRegisters(&d64)
 					r11 := ctx.AllocReg()
 					if d46.Loc == LocImm {
 						ctx.EmitMovRegImm64(r11, uint64(d46.Imm.Int()))
@@ -905,6 +920,8 @@ func init_list_assoc_extra() {
 					} else {
 						ctx.EmitSubInt64(r11, d64.Reg)
 					}
+					ctx.UnprotectDescRegisters(&d64)
+					ctx.UnprotectDescRegisters(&d46)
 					d66 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r11}
 					ctx.BindReg(r11, &d66)
 				}
@@ -1699,6 +1716,36 @@ func init_list_assoc_extra() {
 				ctx.BindReg(d114.Reg, &d113)
 				ctx.BindReg(r28, &d113)
 				ctx.ReclaimUntrackedRegs()
+				d9 = ctx.StabilizeForNested(d9)
+				d12 = ctx.StabilizeForNested(d12)
+				d14 = ctx.StabilizeForNested(d14)
+				d26 = ctx.StabilizeForNested(d26)
+				d29 = ctx.StabilizeForNested(d29)
+				d35 = ctx.StabilizeForNested(d35)
+				d36 = ctx.StabilizeForNested(d36)
+				d38 = ctx.StabilizeForNested(d38)
+				d40 = ctx.StabilizeForNested(d40)
+				d43 = ctx.StabilizeForNested(d43)
+				d45 = ctx.StabilizeForNested(d45)
+				d46 = ctx.StabilizeForNested(d46)
+				d47 = ctx.StabilizeForNested(d47)
+				d62 = ctx.StabilizeForNested(d62)
+				d68 = ctx.StabilizeForNested(d68)
+				d70 = ctx.StabilizeForNested(d70)
+				d75 = ctx.StabilizeForNested(d75)
+				d77 = ctx.StabilizeForNested(d77)
+				d78 = ctx.StabilizeForNested(d78)
+				d81 = ctx.StabilizeForNested(d81)
+				d82 = ctx.StabilizeForNested(d82)
+				d87 = ctx.StabilizeForNested(d87)
+				d93 = ctx.StabilizeForNested(d93)
+				d95 = ctx.StabilizeForNested(d95)
+				d97 = ctx.StabilizeForNested(d97)
+				d100 = ctx.StabilizeForNested(d100)
+				d103 = ctx.StabilizeForNested(d103)
+				d106 = ctx.StabilizeForNested(d106)
+				d108 = ctx.StabilizeForNested(d108)
+				d109 = ctx.StabilizeForNested(d109)
 				ctx.EnsureDesc(&d113)
 				d115 := d113
 				_ = d115
@@ -2899,6 +2946,15 @@ func init_list_assoc_extra() {
 				ctx.BindReg(d39.Reg, &d38)
 				ctx.BindReg(r3, &d38)
 				ctx.ReclaimUntrackedRegs()
+				d11 = ctx.StabilizeForNested(d11)
+				d13 = ctx.StabilizeForNested(d13)
+				d15 = ctx.StabilizeForNested(d15)
+				d17 = ctx.StabilizeForNested(d17)
+				d28 = ctx.StabilizeForNested(d28)
+				d32 = ctx.StabilizeForNested(d32)
+				d33 = ctx.StabilizeForNested(d33)
+				d36 = ctx.StabilizeForNested(d36)
+				d37 = ctx.StabilizeForNested(d37)
 				ctx.EnsureDesc(&d38)
 				d40 := d38
 				_ = d40
@@ -3109,9 +3165,12 @@ func init_list_assoc_extra() {
 				ctx.EnsureDesc(&d55)
 				ctx.EnsureDesc(&d37)
 				var d57 JITValueDesc
+				ctx.EnsureDescsTogether(&d37, &d55)
 				if d37.Loc == LocImm && d55.Loc == LocImm {
 					d57 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d37.Imm.Int() - d55.Imm.Int())}
 				} else {
+					ctx.ProtectDescRegisters(&d37)
+					ctx.ProtectDescRegisters(&d55)
 					r10 := ctx.AllocReg()
 					if d37.Loc == LocImm {
 						ctx.EmitMovRegImm64(r10, uint64(d37.Imm.Int()))
@@ -3124,6 +3183,8 @@ func init_list_assoc_extra() {
 					} else {
 						ctx.EmitSubInt64(r10, d55.Reg)
 					}
+					ctx.UnprotectDescRegisters(&d55)
+					ctx.UnprotectDescRegisters(&d37)
 					d57 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r10}
 					ctx.BindReg(r10, &d57)
 				}
@@ -3877,6 +3938,33 @@ func init_list_assoc_extra() {
 				ctx.BindReg(d103.Reg, &d102)
 				ctx.BindReg(r25, &d102)
 				ctx.ReclaimUntrackedRegs()
+				d11 = ctx.StabilizeForNested(d11)
+				d13 = ctx.StabilizeForNested(d13)
+				d15 = ctx.StabilizeForNested(d15)
+				d17 = ctx.StabilizeForNested(d17)
+				d28 = ctx.StabilizeForNested(d28)
+				d32 = ctx.StabilizeForNested(d32)
+				d33 = ctx.StabilizeForNested(d33)
+				d36 = ctx.StabilizeForNested(d36)
+				d37 = ctx.StabilizeForNested(d37)
+				d38 = ctx.StabilizeForNested(d38)
+				d53 = ctx.StabilizeForNested(d53)
+				d59 = ctx.StabilizeForNested(d59)
+				d61 = ctx.StabilizeForNested(d61)
+				d66 = ctx.StabilizeForNested(d66)
+				d68 = ctx.StabilizeForNested(d68)
+				d69 = ctx.StabilizeForNested(d69)
+				d71 = ctx.StabilizeForNested(d71)
+				d72 = ctx.StabilizeForNested(d72)
+				d77 = ctx.StabilizeForNested(d77)
+				d82 = ctx.StabilizeForNested(d82)
+				d84 = ctx.StabilizeForNested(d84)
+				d86 = ctx.StabilizeForNested(d86)
+				d89 = ctx.StabilizeForNested(d89)
+				d92 = ctx.StabilizeForNested(d92)
+				d95 = ctx.StabilizeForNested(d95)
+				d97 = ctx.StabilizeForNested(d97)
+				d98 = ctx.StabilizeForNested(d98)
 				ctx.EnsureDesc(&d102)
 				d104 := d102
 				_ = d104
@@ -4843,6 +4931,10 @@ func init_list_assoc_extra() {
 						}
 					}
 					_ = d15
+					d3 = ctx.StabilizeForNested(d3)
+					d5 = ctx.StabilizeForNested(d5)
+					d8 = ctx.StabilizeForNested(d8)
+					d11 = ctx.StabilizeForNested(d11)
 					ctx.EnsureDesc(&d15)
 					d16 = d15
 					_ = d16
@@ -5488,6 +5580,9 @@ func init_list_assoc_extra() {
 						}
 					}
 					_ = d12
+					d3 = ctx.StabilizeForNested(d3)
+					d5 = ctx.StabilizeForNested(d5)
+					d8 = ctx.StabilizeForNested(d8)
 					ctx.EnsureDesc(&d12)
 					d13 = d12
 					_ = d13
@@ -6147,6 +6242,9 @@ func init_list_assoc_extra() {
 						}
 					}
 					_ = d12
+					d3 = ctx.StabilizeForNested(d3)
+					d5 = ctx.StabilizeForNested(d5)
+					d8 = ctx.StabilizeForNested(d8)
 					ctx.EnsureDesc(&d12)
 					d13 = d12
 					_ = d13
@@ -6846,6 +6944,8 @@ func init_list_assoc_extra() {
 						}
 					}
 					_ = d8
+					d3 = ctx.StabilizeForNested(d3)
+					d5 = ctx.StabilizeForNested(d5)
 					ctx.EnsureDesc(&d8)
 					d9 = d8
 					_ = d9
@@ -7425,6 +7525,8 @@ func init_list_assoc_extra() {
 						}
 					}
 					_ = d8
+					d3 = ctx.StabilizeForNested(d3)
+					d5 = ctx.StabilizeForNested(d5)
 					ctx.EnsureDesc(&d8)
 					d9 = d8
 					_ = d9

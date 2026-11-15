@@ -2827,6 +2827,15 @@ func init() {
 					ctx.BindReg(r59, &d97)
 				}
 				ctx.ReclaimUntrackedRegs()
+				d11 = ctx.StabilizeForNested(d11)
+				d29 = ctx.StabilizeForNested(d29)
+				d32 = ctx.StabilizeForNested(d32)
+				d41 = ctx.StabilizeForNested(d41)
+				d42 = ctx.StabilizeForNested(d42)
+				d50 = ctx.StabilizeForNested(d50)
+				d54 = ctx.StabilizeForNested(d54)
+				d55 = ctx.StabilizeForNested(d55)
+				d59 = ctx.StabilizeForNested(d59)
 				ctx.EnsureDesc(&d97)
 				d98 := d97
 				_ = d98
@@ -3618,6 +3627,27 @@ func init() {
 				d92 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase3) + int32(32)}
 				ctx.ReclaimUntrackedRegs()
 				ctx.ReclaimUntrackedRegs()
+				d11 = ctx.StabilizeForNested(d11)
+				d29 = ctx.StabilizeForNested(d29)
+				d32 = ctx.StabilizeForNested(d32)
+				d41 = ctx.StabilizeForNested(d41)
+				d42 = ctx.StabilizeForNested(d42)
+				d50 = ctx.StabilizeForNested(d50)
+				d54 = ctx.StabilizeForNested(d54)
+				d55 = ctx.StabilizeForNested(d55)
+				d59 = ctx.StabilizeForNested(d59)
+				d88 = ctx.StabilizeForNested(d88)
+				d90 = ctx.StabilizeForNested(d90)
+				d93 = ctx.StabilizeForNested(d93)
+				d95 = ctx.StabilizeForNested(d95)
+				d109 = ctx.StabilizeForNested(d109)
+				d110 = ctx.StabilizeForNested(d110)
+				d111 = ctx.StabilizeForNested(d111)
+				d112 = ctx.StabilizeForNested(d112)
+				d113 = ctx.StabilizeForNested(d113)
+				d114 = ctx.StabilizeForNested(d114)
+				d115 = ctx.StabilizeForNested(d115)
+				d138 = ctx.StabilizeForNested(d138)
 				ctx.EnsureDesc(&d135)
 				d147 := d135
 				_ = d147

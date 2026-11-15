@@ -16,7 +16,7 @@ func TestPoolRoundtripAndSeek(t *testing.T) {
 		random.Read(data)
 		texts = append(texts, string(data), "common report prefix "+string(data[:10])+" common report suffix")
 	}
-	builder := NewBuilder()
+	builder := NewBuilder(0)
 	offsets := make([]uint64, len(texts))
 	for i, text := range texts {
 		offsets[i] = builder.Add(text)
@@ -50,7 +50,7 @@ func TestPoolRoundtripAndSeek(t *testing.T) {
 }
 
 func TestPoolNoReadAllocations(t *testing.T) {
-	b := NewBuilder()
+	b := NewBuilder(0)
 	a := b.Add("common prefix long literal common suffix")
 	c := b.Add("common prefix another literal common suffix")
 	pool := b.Finish()
@@ -104,5 +104,48 @@ func TestWordsAndMalformedEntries(t *testing.T) {
 			}()
 			(&Buffer{data: data}).Validate(0)
 		}()
+	}
+}
+
+func TestPoolLongestLiteralMatch(t *testing.T) {
+	b := NewBuilder(4)
+	b.Add("initial reserved payload")
+	text := "abc-common-1234567890-tail!"
+	b.literal("abc-common-1234567890-tail?")
+	b.literal("abc-common-XYZ4567890-tail!")
+	want := b.literal(text)
+	got := b.match(text)
+	if got != want {
+		t.Fatalf("longest literal = %v, want %v", got, want)
+	}
+}
+
+func TestPoolConcatScratchOverflow(t *testing.T) {
+	random := rand.New(rand.NewSource(38012))
+	b := NewBuilder(81)
+	parts := make([]string, 80)
+	for i := range parts {
+		data := make([]byte, 24)
+		random.Read(data)
+		parts[i] = string(data)
+		b.Add(parts[i])
+	}
+	for i, j := 0, len(parts)-1; i < j; i, j = i+1, j-1 {
+		parts[i], parts[j] = parts[j], parts[i]
+	}
+	text := strings.Join(parts, "")
+	offset := b.Add(text)
+	pool := b.Finish()
+	pool.Validate(offset)
+	var cursor Cursor
+	cursor.Reset(pool, offset)
+	spans := 0
+	for len(cursor.Chunk()) > 0 {
+		chunk := cursor.Chunk()
+		cursor.Advance(len(chunk))
+		spans++
+	}
+	if spans <= 16 || pool.Extract(offset) != text {
+		t.Fatalf("concat scratch overflow did not roundtrip: spans=%d", spans)
 	}
 }

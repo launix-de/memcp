@@ -167,3 +167,77 @@ Every fixture includes its first query plus ten reuses and unchanged results.
 All samples, including contemporaneous unpaired diagnostic runs under changing
 host load, are retained in the JSON artifact. CI remains the authoritative
 seven-fixture performance gate; no threshold or assertion is relaxed.
+
+
+### Generated storage-reader fusion
+
+The scalar reader no longer calls a `readValue` wrapper. Branching Scmer readers
+and their constructors are lowered from their Go SSA by `make jitgen`, including
+concat offsets, NULL paths and the pool handle. Scalar search helpers keep the
+existing leaf-helper inlining policy. The generated emitters are not hand edited.
+
+The generator now preserves scalar row-ID homes across sibling CFGs, distinguishes
+Go string pairs from slice triples, and keeps operands live while allocating
+slice-length and aggregate-field results. Descriptor-owned constructors no longer
+look like variadic arguments. Pointer-conversion aliases share the canonical
+lifetime. Fusion also exposed a filter compaction bug: a computed slice address
+can be stack-backed under pressure and must be materialized before using its
+register. The regression checks selected record IDs as well as their count.
+
+The fused storage-to-filter test covers NULL, empty and fragmented Unicode
+strings, `strlen(concat ...)`, no-op lowercase plus LIKE, and general-ci comparison.
+It verifies identical results and zero allocations for all three predicates.
+
+The existing CI A/B runner compared PR revision `891029576` with the initial reader-fusion fixes, before
+pool-capacity reservation, using
+one fresh prepared fixture per role. The fixture contains 22,000 temporal rows;
+no samples, result assertions or timing limits were changed. Times are milliseconds.
+
+| Workload | Previous PR JIT | Reader fusion fixes | Change |
+|---|---:|---:|---:|
+| First temporal page plus ten repetitions (total) | 24.199 | 22.705 | -6.2% |
+| Warm temporal page (20 warmups, 100 samples, median) | 0.597 | 0.587 | -1.6% |
+| Mixed decimal/temporal UNION (31 executions, total) | 40.165 | 41.694 | +3.8% |
+
+These are development measurements against the previous PR, not a replacement
+for CI's comparison with master. Full results and binary identities are retained
+in `string-concat-sql-samples.json` under `jit_fusion_fix`.
+
+
+### Cold-load headroom and retained repetitions
+
+Legacy normalization no longer compiles three unused standalone readers for its
+private offset directory. That directory is consumed through `GetValueUInt` or
+its SSA in the parent. The builder reserves a small pool capacity from entry count,
+uses smaller stack scratch with ordinary append on overflow, and avoids a duplicate
+trigram-map lookup. The format and compression ratio are unchanged.
+
+| 22,000 short strings, complete pool build | Previous PR | Reserved pool | Change |
+|---|---:|---:|---:|
+| Median time of three fixed 50-build probes | 4.672 ms | 3.776 ms | -19.2% |
+| Temporary allocation per build | 3,557,364 B | 2,723,084 B | -23.5% |
+
+All three probe results are retained, including the slower candidate probe. The
+4096-row trace fixture still occupies 115,720 bytes resident and 111,007 bytes on
+disk for 1,974,272 source bytes (17.785x).
+
+Seven predeclared invocations of the unchanged temporal CI runner retained their
+initial pairs and its automatic diagnostic repetitions: 37 fresh fixtures per
+role. The complete cold total contains the first query and ten reuses; warm and
+UNION counts stay at 100 samples/20 warmups and 31 total queries, respectively.
+
+| All 37 fresh fixtures, median per role | LZ4 baseline | Final concat | Change |
+|---|---:|---:|---:|
+| First temporal page plus ten repetitions | 24.506 ms | 28.845 ms | +17.7% |
+| Warm temporal page | 0.804 ms | 0.886 ms | +10.2% |
+| Mixed decimal/temporal UNION | 54.082 ms | 51.484 ms | -4.8% |
+
+Host timings vary substantially: two individual seven-fixture batches still
+failed the cold gate (+45.9% and +26.4%); one also failed UNION (+25.5%). They are
+not excluded or waived. The aggregate above is a development measurement; required
+CI still applies its unchanged 20% gate to the latest commit against master.
+Every batch result and every raw fixture sample is included in the JSON artifact.
+
+Raw-format test fixtures now build their private payload before finalization,
+rather than recoding a finished column behind its immutable specialized readers.
+Production-finished concat columns retain direct JIT, bulk and fused-filter checks.

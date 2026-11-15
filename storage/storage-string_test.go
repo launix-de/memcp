@@ -39,13 +39,21 @@ func buildStringColumn(values []string) *StorageString {
 	for i, v := range values {
 		s.build(uint32(i), scm.NewString(v))
 	}
-	s.finish()
 	return rawStringFixture(s)
 }
 
-// rawStringFixture deliberately restores an unpublished raw baseline for
-// codec comparisons and historical format fixtures. Production finish uses LZ4.
-func rawStringFixture(s *StorageString) *StorageString { s.expandConcatDictionary(); return s }
+// rawStringFixture completes the payload of a private scan/build fixture.
+// Historical raw layouts must be prepared before finish publishes specialized
+// readers; changing an already finished concat storage would invalidate them.
+func rawStringFixture(s *StorageString) *StorageString {
+	if s.nodict {
+		s.dictionary = string(s.compBuf)
+		s.compBuf = nil
+	} else {
+		s.reverseMap = nil
+	}
+	return s
+}
 
 // TestFormatSelection asserts that chooseBestFormat selects the expected format
 // when all input strings belong to a specific charset.

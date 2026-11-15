@@ -9,7 +9,6 @@ import "encoding/binary"
 import "github.com/pierrec/lz4/v4"
 import "github.com/launix-de/memcp/scm"
 
-//jitgen:noinline
 func (s *StorageString) compressedAt(recid uint32) scm.Scmer {
 	entry := recid
 	if s.nodict {

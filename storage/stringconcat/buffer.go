@@ -169,7 +169,10 @@ type Builder struct {
 
 func Raw(text string) *Buffer { builder := new(Builder); builder.Add(text); return builder.Finish() }
 
-func NewBuilder() *Builder { return &Builder{grams: make(map[uint32][]span)} }
+// NewBuilder reserves a small entry directory without reserving the full text.
+func NewBuilder(entries int) *Builder {
+	return &Builder{buffer: Buffer{data: make([]byte, 0, entries*16)}, grams: make(map[uint32][]span)}
+}
 func gram(s string) uint32 { return uint32(s[0])<<16 | uint32(s[1])<<8 | uint32(s[2]) }
 
 func (b *Builder) literal(s string) span {
@@ -189,7 +192,7 @@ func (b *Builder) literal(s string) span {
 
 func (b *Builder) match(s string) span {
 	best := span{}
-	if len(s) < 3 || len(b.grams[gram(s)]) == 0 {
+	if len(s) < 3 {
 		return best
 	}
 	for _, candidate := range b.grams[gram(s)] {
@@ -228,7 +231,7 @@ func (b *Builder) Add(s string) uint64 {
 		b.buffer.data = append(b.buffer.data, 0)
 		return 0
 	}
-	var local [128]span
+	var local [16]span
 	parts := local[:0]
 	literalStart := 0
 	for i := 0; i < len(s); {
@@ -261,7 +264,7 @@ func (b *Builder) Add(s string) uint64 {
 	if offset > MaxOffset {
 		panic("concat pool exceeds 56-bit offset")
 	}
-	var scratch [512]byte
+	var scratch [128]byte
 	sequence := word(scratch[:0], uint64(len(s)))
 	for _, p := range parts {
 		sequence = word(sequence, uint64(p.offset))

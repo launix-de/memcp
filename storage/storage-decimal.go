@@ -321,13 +321,15 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resu
 	} else {
 		idxInt = idx
 	}
-	idxPinned := idxInt.Loc == scm.LocReg
-	idxPinnedReg := idxInt.Reg
-	if idxPinned {
-		ctx.ProtectReg(idxPinnedReg)
-		defer ctx.UnprotectReg(idxPinnedReg)
-	}
 	var bbs [6]scm.BBDescriptor
+	var storageIdxIntHome scm.JITValueDesc
+	storageInputsProtected := ctx.StorageInputsInRegisters
+	storageIdxIntHome = idxInt
+	if storageInputsProtected {
+		ctx.ProtectDescRegisters(&storageIdxIntHome)
+	} else {
+		ctx.StabilizeDescForControlFlow(&storageIdxIntHome)
+	}
 	if result.Loc == scm.LocAny {
 		result = scm.JITValueDesc{Loc: scm.LocRegPair, Type: scm.JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 		ctx.BindReg(result.Reg, &result)
@@ -373,6 +375,7 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resu
 		bbpos_0_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 		ctx.MarkLabel(lbl1)
 		ctx.ResolveFixups()
+		idxInt = storageIdxIntHome
 		ctx.ReclaimUntrackedRegs()
 		ctx.EnsureDesc(&idxInt)
 		d0 = idxInt
@@ -830,6 +833,7 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resu
 		bbpos_0_1 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 		ctx.MarkLabel(lbl2)
 		ctx.ResolveFixups()
+		idxInt = storageIdxIntHome
 		ctx.ReclaimUntrackedRegs()
 		d43 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagNil, Imm: scm.NewNil()}
 		d44 = result
@@ -863,6 +867,7 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resu
 		bbpos_0_2 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 		ctx.MarkLabel(lbl3)
 		ctx.ResolveFixups()
+		idxInt = storageIdxIntHome
 		ctx.ReclaimUntrackedRegs()
 		ctx.EnsureDesc(&d18)
 		ctx.EnsureDesc(&d18)
@@ -1047,6 +1052,7 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resu
 		bbpos_0_3 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 		ctx.MarkLabel(lbl4)
 		ctx.ResolveFixups()
+		idxInt = storageIdxIntHome
 		ctx.ReclaimUntrackedRegs()
 		if thisptr.Loc == scm.LocImm {
 			fieldAddr := uintptr(thisptr.Imm.Int()) + unsafe.Offsetof((*StorageDecimal)(nil).inner) + 88
@@ -1189,6 +1195,7 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resu
 		bbpos_0_4 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 		ctx.MarkLabel(lbl5)
 		ctx.ResolveFixups()
+		idxInt = storageIdxIntHome
 		ctx.ReclaimUntrackedRegs()
 		if thisptr.Loc == scm.LocImm {
 			fieldAddr := uintptr(thisptr.Imm.Int()) + unsafe.Offsetof((*StorageDecimal)(nil).scaleExp)
@@ -1295,6 +1302,7 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resu
 		bbpos_0_5 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 		ctx.MarkLabel(lbl6)
 		ctx.ResolveFixups()
+		idxInt = storageIdxIntHome
 		ctx.ReclaimUntrackedRegs()
 		ctx.EnsureDesc(&d47)
 		ctx.EnsureDesc(&d47)
@@ -1438,6 +1446,9 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resu
 	if resultRegsProtected {
 		ctx.UnprotectReg(result.Reg2)
 		ctx.UnprotectReg(result.Reg)
+	}
+	if storageInputsProtected {
+		ctx.UnprotectDescRegisters(&storageIdxIntHome)
 	}
 	ctx.EndStandaloneFrame(standaloneFrame)
 	return result

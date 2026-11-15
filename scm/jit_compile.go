@@ -681,6 +681,9 @@ func (ctx *JITContext) EmitSliceElementAddress(slice, index *JITValueDesc, eleme
 			ctx.ProtectReg(slicePtr)
 		}
 	}
+	if loadedPtr {
+		ctx.ProtectReg(slicePtr)
+	}
 	ctx.EnsureDesc(index)
 	excluded := []Reg{slicePtr}
 	if index.Loc == LocReg {
@@ -691,9 +694,10 @@ func (ctx *JITContext) EmitSliceElementAddress(slice, index *JITValueDesc, eleme
 		available &^= 1 << uint(reg)
 	}
 	if available == 0 {
-		stableSlice := ctx.stabilizeForNested(*slice)
-		stableIndex := ctx.stabilizeForNested(*index)
+		stableSlice := ctx.StabilizeForNested(*slice)
+		stableIndex := ctx.StabilizeForNested(*index)
 		if loadedPtr {
+			ctx.UnprotectReg(slicePtr)
 			ctx.FreeReg(slicePtr)
 		} else {
 			ctx.UnprotectReg(slicePtr)
@@ -733,6 +737,7 @@ func (ctx *JITContext) EmitSliceElementAddress(slice, index *JITValueDesc, eleme
 	}
 	ctx.EmitAddInt64(address, slicePtr)
 	if loadedPtr {
+		ctx.UnprotectReg(slicePtr)
 		ctx.FreeReg(slicePtr)
 	} else {
 		ctx.UnprotectReg(slicePtr)
@@ -1350,7 +1355,9 @@ func (ctx *JITContext) EmitLoadScmerToStack(address *JITValueDesc, targetOff int
 	ctx.setStackPointer(jitStackRootFrameSP, targetOff-ctx.DynamicSP, true)
 }
 
-func (ctx *JITContext) stabilizeForNested(value JITValueDesc) JITValueDesc {
+// StabilizeForNested preserves a live value across a nested emitter while
+// retaining its canonical descriptor identity for all existing aliases.
+func (ctx *JITContext) StabilizeForNested(value JITValueDesc) JITValueDesc {
 	if value.Loc == LocFlags && value.FlagsID != 0 {
 		ctx.EnsureDesc(&value)
 	}
@@ -2077,7 +2084,7 @@ func jitMaterializeVirtualSlice(ctx *JITContext, virtual JITValueDesc, result JI
 		// Spill each producer as soon as it is complete. Descriptor spill metadata
 		// preserves aliases used by later arguments while keeping register pressure
 		// independent of the virtual list length.
-		stable[i] = ctx.stabilizeForNested(src)
+		stable[i] = ctx.StabilizeForNested(src)
 	}
 	if builder := jitDirectSliceBuilder(len(stable)); builder != 0 {
 		callArgs := stable
@@ -3592,7 +3599,7 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 					} else {
 						args[i-1] = jitCompileExpr(ctx, argExpr, sliceBase, JITValueDesc{Loc: LocAny})
 					}
-					args[i-1] = ctx.stabilizeForNested(args[i-1])
+					args[i-1] = ctx.StabilizeForNested(args[i-1])
 				}
 				ctx.ReclaimUntrackedRegs()
 				if decl.Type.JITInlineCost == 0 {

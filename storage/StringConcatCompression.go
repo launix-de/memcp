@@ -41,7 +41,7 @@ func (s *StorageString) CompressDictionary() bool {
 	if s.format != FormatRaw {
 		return false
 	}
-	builder := stringconcat.NewBuilder()
+	builder := stringconcat.NewBuilder(int(s.starts.count))
 	offsets := make([]uint64, s.starts.count)
 	nulls := make([]bool, s.starts.count)
 	for i := uint32(0); uint64(i) < s.starts.count; i++ {
@@ -81,6 +81,7 @@ func concatStarts(offsets []uint64, nulls []bool) StorageInt {
 			result.build(uint32(i), scm.NewInt(int64(v)))
 		}
 	}
-	result.finish()
+	// This private directory is read through GetValueUInt or fused into the
+	// parent reader. It does not publish standalone scalar/range/multi readers.
 	return result
 }

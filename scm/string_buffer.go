@@ -16,7 +16,7 @@ func BuildStringConcatBuffer(entries []string) (*StringConcatCompression, []uint
 	if len(entries) == 1 {
 		return stringconcat.Raw(entries[0]), []uint64{0}
 	}
-	builder := stringconcat.NewBuilder()
+	builder := stringconcat.NewBuilder(len(entries))
 	offsets := make([]uint64, len(entries))
 	for i, text := range entries {
 		offsets[i] = builder.Add(text)

@@ -159,7 +159,7 @@ func jitEmitConstantRegexpReplaceFunc(ctx *JITContext, pattern *regexp.Regexp, r
 	}
 	program := jitCompileRegexProgram(pattern)
 
-	input := ctx.stabilizeForNested(args[2])
+	input := ctx.StabilizeForNested(args[2])
 
 	// A dedicated frame slot for the input string pair - the callbacks run
 	// inside PreserveOuterRegs windows where the stabilized `input` desc's

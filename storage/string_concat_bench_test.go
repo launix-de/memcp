@@ -114,3 +114,24 @@ func TestStringCompressionFootprint(t *testing.T) {
 	}
 	t.Logf("rows=%d source_bytes=%d resident_bytes=%d serialized_bytes=%d source_to_disk=%.3f", len(values), source, s.ComputeSize(), disk.Len(), float64(source)/float64(disk.Len()))
 }
+
+var concatBenchPool *scm.StringConcatCompression
+var concatBenchOffsets []uint64
+
+func BenchmarkStringConcatShortDictionary(b *testing.B) {
+	texts := make([]string, 22000)
+	for i := range texts {
+		texts[i] = fmt.Sprintf("Article %d", i)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		concatBenchPool, concatBenchOffsets = scm.BuildStringConcatBuffer(texts)
+	}
+	b.StopTimer()
+	for i, offset := range concatBenchOffsets {
+		if concatBenchPool.Extract(offset) != texts[i] {
+			b.Fatal("short dictionary roundtrip", i)
+		}
+	}
+}
