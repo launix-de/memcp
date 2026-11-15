@@ -241,3 +241,46 @@ Every batch result and every raw fixture sample is included in the JSON artifact
 Raw-format test fixtures now build their private payload before finalization,
 rather than recoding a finished column behind its immutable specialized readers.
 Production-finished concat columns retain direct JIT, bulk and fused-filter checks.
+
+### Typed integer accessor after CI profile analysis
+
+Revision `b077eb262` passes every functional, cross-JIT, upgrade, cluster and
+packaging check. Its formerly failing temporal JIT workload passes seven fresh
+fixtures at 33.103 → 38.694 ms (+16.9%); warm and UNION improve 1.3% and 2.3%.
+Two different cases failed: native computed delta keys (+30.5%) and the JIT
+single dynamic equality prefix (+38.8%). The native automatic profiled diagnostic
+measured +3.6%; this does not replace the original failed verdict.
+
+The ordered-prefix profile spends about 9–11% of CPU in `Scmer.Int`, on both
+revisions. Its disassembly routed already typed integers through `GetTag` and
+a jump table. `Int` now returns the sentinel-backed integer payload directly
+through an inlineable wrapper; the full coercion switch remains for other types.
+`Less` no longer calls `Int` on its typed integer path. `make jitgen` was rerun;
+it produces no further emitter changes for this source change.
+
+| Fixed 10,000,000-access probe, median of three | Before | After | Change |
+|---|---:|---:|---:|
+| Typed integer access | 2.602 ns | 0.424 ns | -83.7% |
+
+Three predeclared unchanged CI-runner invocations per affected SQL workload
+retain nine fresh fixtures per role, including automatic verification pairs.
+
+| Complete cold workload, pooled median | LZ4 baseline | Integer accessor | Change |
+|---|---:|---:|---:|
+| Native computed delta keys, 11 queries | 36.330 ms | 44.668 ms | +23.0% |
+| JIT one dynamic equality prefix, 10 queries | 154.217 ms | 118.602 ms | -23.1% |
+| JIT three prefixes with residual acceptance, 10 queries | 385.637 ms | 322.084 ms | -16.5% |
+| JIT forty prefixes, 10 queries | 113.808 ms | 117.835 ms | +3.5% |
+| JIT broad keyset, 10 queries | 115.961 ms | 113.906 ms | -1.8% |
+| JIT skewed hot prefix, 10 queries | 394.647 ms | 372.819 ms | -5.5% |
+| JIT skewed rare prefix, 10 queries | 230.417 ms | 218.210 ms | -5.3% |
+
+All three JIT batches pass. Native delta batches measure +37.4% (failed), -11.1%
+and -5.9%; the first contains seven verification pairs and the others one each.
+The aggregate native result is still above 20%, so it is explicitly unresolved
+pending CI. Seven merged CI diagnostic profiles show 790 ms sampled CPU on the
+baseline and 680 ms on the candidate, principally interpreter, environment maps,
+parsing and B-tree construction; they do not establish increased CPU work or
+identify a new concat allocation hot spot. No gate is waived or weakened.
+All raw fixtures and the negative before/after results are preserved under
+`integer_accessor_followup` in `string-concat-sql-samples.json`.

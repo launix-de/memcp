@@ -776,6 +776,15 @@ func numericStringEqualsInt(value string, integer int64) bool {
 }
 
 func (s Scmer) Int() int64 {
+	// Integer payloads already contain the complete signed value. Keep this
+	// accessor inlineable instead of routing typed index keys through coercion.
+	if s.ptr == &scmerIntSentinel {
+		return int64(s.aux)
+	}
+	return s.intCoerce()
+}
+
+func (s Scmer) intCoerce() int64 {
 	switch s.GetTag() {
 	case tagNil:
 		return 0
