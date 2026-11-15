@@ -258,11 +258,12 @@ arithmetic; leave expressions containing columns or functions untouched. */
 	(parser (define col sql_identifier) col)
 )))
 
-/* SET accepts unquoted names such as character_set_client=utf8mb4. */
+/* SET accepts unquoted names such as character_set_client=utf8mb4. Compile
+frontend expression contracts before publishing executable assignment code. */
 (define sql_set_value (lambda (value)
-	(match value
+	(sql_type_lower_annotations (match value
 		'('get_column nil _ name _) name
-		_ value)))
+		_ value))))
 
 (define parse_sql (lambda (schema s policy planning_session tx) (begin
 	(define parse_started_ns (nanotime))

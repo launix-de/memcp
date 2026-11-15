@@ -1,0 +1,60 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  description: SET compiles frontend expression contracts before execution
+  isolated: true
+test_cases:
+- name: Assign CAST and CONVERT values to a session
+  session_id: set-contract-a
+  sql: SET SESSION group_concat_max_len=CAST('321' AS INTEGER), @set_contract_clock=CONVERT('42',SIGNED)
+  expect: {}
+- name: Read compiled session assignment values
+  session_id: set-contract-a
+  sql: SELECT @@group_concat_max_len AS maximum, @set_contract_clock AS clock
+  expect: {rows: 1, data: [{maximum: 321, clock: 42}]}
+- name: Assign separate values in another session
+  session_id: set-contract-b
+  sql: SET SESSION group_concat_max_len=CONVERT('654',INTEGER), @set_contract_clock=CAST('9' AS SIGNED)
+  expect: {}
+- name: Read the second session values
+  session_id: set-contract-b
+  sql: SELECT @@group_concat_max_len AS maximum, @set_contract_clock AS clock
+  expect: {rows: 1, data: [{maximum: 654, clock: 9}]}
+- name: Cached assignments retain the first session state
+  session_id: set-contract-a
+  sql: SELECT @@group_concat_max_len AS maximum, @set_contract_clock AS clock
+  expect: {rows: 1, data: [{maximum: 321, clock: 42}]}
+- name: Compile nested conversions and preserve bareword and NULL inputs
+  session_id: set-contract-a
+  sql: >-
+    SET SESSION character_set_client=utf8mb4,
+    @set_contract_copy=CAST(@set_contract_clock AS INTEGER)+1,
+    @set_contract_nested=CONVERT(CAST(COALESCE(NULL,'7') AS INTEGER),SIGNED),
+    @set_contract_optional=NULL,
+    @set_contract_fallback=COALESCE(NULL,'fallback')
+  expect: {}
+- name: Read nested conversion results and unchanged NULL semantics
+  session_id: set-contract-a
+  sql: >-
+    SELECT @@character_set_client AS charset, @set_contract_copy AS copied,
+    @set_contract_nested AS nested_value, @set_contract_optional AS optional_value,
+    @set_contract_fallback AS fallback_value
+  expect:
+    rows: 1
+    data:
+    - {charset: utf8mb4, copied: 43, nested_value: 7, optional_value: null, fallback_value: fallback}
+- name: Compile a global assignment value
+  session_id: set-contract-a
+  sql: SET GLOBAL set_expression_contract_global=CONVERT(CAST('211' AS INTEGER),INTEGER)
+  expect: {}
+- name: Read the compiled global value in its assigning session
+  session_id: set-contract-a
+  sql: SELECT @@GLOBAL.set_expression_contract_global AS value
+  expect: {rows: 1, data: [{value: 211}]}
+- name: Read the compiled global value from another session
+  session_id: set-contract-b
+  sql: SELECT @@GLOBAL.set_expression_contract_global AS value
+  expect: {rows: 1, data: [{value: 211}]}
+cleanup:
+- scm: (globalvars "set_expression_contract_global" nil)
