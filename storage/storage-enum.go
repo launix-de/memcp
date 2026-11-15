@@ -725,17 +725,19 @@ func (s *StorageEnum) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result 
 	} else {
 		idxInt = idx
 	}
-	idxPinned := idxInt.Loc == scm.LocReg
-	idxPinnedReg := idxInt.Reg
-	if idxPinned {
-		ctx.ProtectReg(idxPinnedReg)
-		defer ctx.UnprotectReg(idxPinnedReg)
-	}
 	phiBase0 := ctx.AllocStack(int32(80))
 	var bbs [12]scm.BBDescriptor
 	bbs[6].PhiBase = int32(phiBase0) + int32(0)
 	bbs[7].PhiBase = int32(phiBase0) + int32(16)
 	bbs[9].PhiBase = int32(phiBase0) + int32(64)
+	var storageIdxIntHome scm.JITValueDesc
+	storageInputsProtected := ctx.StorageInputsInRegisters
+	storageIdxIntHome = idxInt
+	if storageInputsProtected {
+		ctx.ProtectDescRegisters(&storageIdxIntHome)
+	} else {
+		ctx.StabilizeDescForControlFlow(&storageIdxIntHome)
+	}
 	registerHomes1 := ctx.AllocRegisterHomes(scm.JITRegisterPlan{Slots: [16]scm.JITRegisterSlot{{Color: 0, Width: 1, Cost: 17}, {Color: 1, Width: 1, Cost: 17}}, Count: 2})
 	defer ctx.ReleaseRegisterHomes(registerHomes1)
 	var r0 scm.Reg
@@ -852,6 +854,7 @@ func (s *StorageEnum) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result 
 			d7 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(phiBase0) + int32(48)}
 		}
 		d8 = scm.JITValueDesc{Loc: scm.LocStackPair, Type: scm.JITTypeUnknown, StackOff: int32(phiBase0) + int32(64)}
+		idxInt = storageIdxIntHome
 		ctx.ReclaimUntrackedRegs()
 		ctx.EnsureDesc(&idxInt)
 		ctx.EnsureDesc(&idxInt)
@@ -963,6 +966,7 @@ func (s *StorageEnum) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result 
 			d7 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(phiBase0) + int32(48)}
 		}
 		d8 = scm.JITValueDesc{Loc: scm.LocStackPair, Type: scm.JITTypeUnknown, StackOff: int32(phiBase0) + int32(64)}
+		idxInt = storageIdxIntHome
 		ctx.ReclaimUntrackedRegs()
 		d23 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagNil, Imm: scm.NewNil()}
 		d24 = result
@@ -1009,6 +1013,7 @@ func (s *StorageEnum) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result 
 			d7 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(phiBase0) + int32(48)}
 		}
 		d8 = scm.JITValueDesc{Loc: scm.LocStackPair, Type: scm.JITTypeUnknown, StackOff: int32(phiBase0) + int32(64)}
+		idxInt = storageIdxIntHome
 		ctx.ReclaimUntrackedRegs()
 		ctx.EnsureDesc(&idxInt)
 		ctx.EnsureDesc(&idxInt)
@@ -1177,6 +1182,7 @@ func (s *StorageEnum) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result 
 			d7 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(phiBase0) + int32(48)}
 		}
 		d8 = scm.JITValueDesc{Loc: scm.LocStackPair, Type: scm.JITTypeUnknown, StackOff: int32(phiBase0) + int32(64)}
+		idxInt = storageIdxIntHome
 		ctx.ReclaimUntrackedRegs()
 		d49 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagNil, Imm: scm.NewNil()}
 		d50 = result
@@ -1223,6 +1229,7 @@ func (s *StorageEnum) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result 
 			d7 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(phiBase0) + int32(48)}
 		}
 		d8 = scm.JITValueDesc{Loc: scm.LocStackPair, Type: scm.JITTypeUnknown, StackOff: int32(phiBase0) + int32(64)}
+		idxInt = storageIdxIntHome
 		ctx.ReclaimUntrackedRegs()
 		ctx.EnsureDesc(&d26)
 		if d26.Loc == scm.LocImm {
@@ -1372,6 +1379,7 @@ func (s *StorageEnum) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result 
 			d7 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(phiBase0) + int32(48)}
 		}
 		d8 = scm.JITValueDesc{Loc: scm.LocStackPair, Type: scm.JITTypeUnknown, StackOff: int32(phiBase0) + int32(64)}
+		idxInt = storageIdxIntHome
 		ctx.ReclaimUntrackedRegs()
 		ctx.EnsureDesc(&d26)
 		ctx.EnsureDesc(&d26)
@@ -1446,6 +1454,7 @@ func (s *StorageEnum) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result 
 			d7 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(phiBase0) + int32(48)}
 		}
 		d8 = scm.JITValueDesc{Loc: scm.LocStackPair, Type: scm.JITTypeUnknown, StackOff: int32(phiBase0) + int32(64)}
+		idxInt = storageIdxIntHome
 		ctx.ReclaimUntrackedRegs()
 		if thisptr.Loc == scm.LocImm {
 			fieldAddr := uintptr(thisptr.Imm.Int()) + unsafe.Offsetof((*StorageEnum)(nil).data)
@@ -1642,6 +1651,7 @@ func (s *StorageEnum) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result 
 			d7 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(phiBase0) + int32(48)}
 		}
 		d8 = scm.JITValueDesc{Loc: scm.LocStackPair, Type: scm.JITTypeUnknown, StackOff: int32(phiBase0) + int32(64)}
+		idxInt = storageIdxIntHome
 		if phiHomeOK2 && d5.Loc == scm.LocReg {
 			ctx.BindReg(r0, &d5)
 		}
@@ -1928,6 +1938,7 @@ func (s *StorageEnum) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result 
 			d7 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(phiBase0) + int32(48)}
 		}
 		d8 = scm.JITValueDesc{Loc: scm.LocStackPair, Type: scm.JITTypeUnknown, StackOff: int32(phiBase0) + int32(64)}
+		idxInt = storageIdxIntHome
 		ctx.ReclaimUntrackedRegs()
 		d182 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(0)}
 		r23 := ctx.AllocReg()
@@ -2099,6 +2110,7 @@ func (s *StorageEnum) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result 
 			d7 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(phiBase0) + int32(48)}
 		}
 		d8 = scm.JITValueDesc{Loc: scm.LocStackPair, Type: scm.JITTypeUnknown, StackOff: int32(phiBase0) + int32(64)}
+		idxInt = storageIdxIntHome
 		ctx.ReclaimUntrackedRegs()
 		d228 = result
 		ctx.EnsureDesc(&d8)
@@ -2144,6 +2156,7 @@ func (s *StorageEnum) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result 
 			d7 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(phiBase0) + int32(48)}
 		}
 		d8 = scm.JITValueDesc{Loc: scm.LocStackPair, Type: scm.JITTypeUnknown, StackOff: int32(phiBase0) + int32(64)}
+		idxInt = storageIdxIntHome
 		ctx.ReclaimUntrackedRegs()
 		d229 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(0)}
 		r27 := ctx.AllocReg()
@@ -2216,6 +2229,7 @@ func (s *StorageEnum) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result 
 			d7 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(phiBase0) + int32(48)}
 		}
 		d8 = scm.JITValueDesc{Loc: scm.LocStackPair, Type: scm.JITTypeUnknown, StackOff: int32(phiBase0) + int32(64)}
+		idxInt = storageIdxIntHome
 		ctx.ReclaimUntrackedRegs()
 		ctx.EnsureDesc(&thisptr)
 		ctx.EnsureDesc(&d5)
@@ -2551,6 +2565,9 @@ func (s *StorageEnum) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result 
 	if resultRegsProtected {
 		ctx.UnprotectReg(result.Reg2)
 		ctx.UnprotectReg(result.Reg)
+	}
+	if storageInputsProtected {
+		ctx.UnprotectDescRegisters(&storageIdxIntHome)
 	}
 	ctx.EndStandaloneFrame(standaloneFrame)
 	return result

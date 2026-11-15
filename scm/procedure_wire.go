@@ -296,7 +296,7 @@ func validateProcedureWire(value Scmer, bound map[Symbol]struct{}, origin *Env, 
 		return nil
 	}
 	switch value.GetTag() {
-	case tagNil, tagBool, tagInt, tagFloat, tagDate, tagString, tagCString, tagBString, tagLZ4, tagNthLocalVar:
+	case tagNil, tagBool, tagInt, tagFloat, tagDate, tagString, tagCString, tagBString, tagConcat, tagNthLocalVar:
 		return nil
 	case tagSymbol:
 		if !literal {

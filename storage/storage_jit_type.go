@@ -84,13 +84,9 @@ func (s *StorageString) JITValueType() uint8 {
 		return scm.JITTypeUnknown
 	}
 	if s.bufferHandles {
-		// Empty entries retain TagString. A positive minimum length proves
-		// that every main-row value uses the selected compressed handle tag.
-		if s.lens.offset <= 0 {
-			return scm.JITTypeUnknown
-		}
-		return scm.TagLZ4
+		return scm.TagConcat
 	}
+
 	switch s.format {
 	case FormatRaw:
 		return scm.TagString
@@ -118,15 +114,6 @@ func (s *StorageString) stringHasNull() bool {
 	return s.values.hasNull
 }
 
-func (s *StoragePrefix) JITValueType() uint8 {
-	if s.values.stringHasNull() {
-		return scm.JITTypeUnknown
-	}
-	// Prefix concatenation always materializes a plain Go string, regardless
-	// of the suffix storage's physical string representation.
-	return scm.TagString
-}
-
 func (s *StorageSparse) JITValueType() uint8 {
 	if s.count > 0 && s.i == 0 {
 		return scm.TagNil
@@ -146,7 +133,7 @@ func (s *OverlayBlob) JITValueType() uint8 {
 	}
 	tag := s.Base.JITValueType()
 	switch tag {
-	case scm.TagCString, scm.TagBString, scm.TagLZ4:
+	case scm.TagCString, scm.TagBString, scm.TagConcat:
 		// Resolving a blob marker materializes TagString, whereas an ordinary
 		// compressed value passes through unchanged.
 		return scm.JITTypeUnknown

@@ -232,6 +232,7 @@ func emitJITFilterBuffer(ctx *JITContext, proc *Proc, valueTypes []uint8, reader
 			index := JITValueDesc{Loc: LocReg, Type: tagInt, Reg: reg, NoHeapPointer: true}
 			ctx.BindReg(reg, &index)
 			address := ctx.EmitSliceElementAddress(&recids, &index, 4)
+			ctx.EnsureDesc(&address)
 			ctx.FreeDesc(&index)
 			idReg := ctx.AllocRegExcept(address.Reg)
 			ctx.EmitMovRegMemL(idReg, address.Reg, 0)
@@ -274,6 +275,7 @@ func emitJITFilterBuffer(ctx *JITContext, proc *Proc, valueTypes []uint8, reader
 	row := JITValueDesc{Loc: LocReg, Type: tagInt, Reg: rowReg, NoHeapPointer: true}
 	ctx.BindReg(rowReg, &row)
 	readAddress := ctx.EmitSliceElementAddress(&recids, &row, 4)
+	ctx.EnsureDesc(&readAddress)
 	ctx.FreeDesc(&row)
 	recidReg := ctx.AllocRegExcept(readAddress.Reg)
 	ctx.EmitMovRegMemL(recidReg, readAddress.Reg, 0)
@@ -286,6 +288,7 @@ func emitJITFilterBuffer(ctx *JITContext, proc *Proc, valueTypes []uint8, reader
 	outIndex := JITValueDesc{Loc: LocReg, Type: tagInt, Reg: outReg, NoHeapPointer: true}
 	ctx.BindReg(outReg, &outIndex)
 	writeAddress := ctx.EmitSliceElementAddress(&recids, &outIndex, 4)
+	ctx.EnsureDesc(&writeAddress)
 	ctx.FreeDesc(&outIndex)
 	ctx.EmitStoreRegMemL(recidReg, writeAddress.Reg, 0)
 	ctx.UnprotectReg(recidReg)

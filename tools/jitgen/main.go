@@ -606,6 +606,36 @@ func generatedEmitterOverlay(pkgDir string) (map[string][]byte, map[string]map[i
 			changed = true
 			return false
 		})
+		// Storage emitters must also be hidden: regeneration consumes the Go
+		// reader bodies, even when the previous generated code does not compile.
+		for _, decl := range file.Decls {
+			method, ok := decl.(*ast.FuncDecl)
+			if !ok || method.Recv == nil || method.Body == nil {
+				continue
+			}
+			switch method.Name.Name {
+			case "JITEmit", "JITEmitGetValueRange", "JITEmitGetValueMulti":
+			default:
+				continue
+			}
+			start := fset.Position(method.Body.Lbrace).Offset + 1
+			end := fset.Position(method.Body.Rbrace).Offset
+			if !bytes.Contains(source[start:end], []byte(generatedBanner)) {
+				continue
+			}
+			body := "panic(0)"
+			if strings.Contains(stub, "unsafe.Pointer") {
+				body = "_ = unsafe.Pointer(nil); panic(0)"
+			}
+			span := patched[start:end]
+			for index := range span {
+				if span[index] != '\n' && span[index] != '\r' {
+					span[index] = ' '
+				}
+			}
+			copy(span, body)
+			changed = true
+		}
 		// Reusable helper emitters are ordinary functions rather than Declaration
 		// fields. Hide their generated bodies from SSA for the same reason: only
 		// the annotated semantic source function must participate in generation.
@@ -1304,8 +1334,6 @@ type codeGen struct {
 	topLevelPkgPath  string
 	importedPkgAlias map[string]string
 	opName           string
-	// True for storage GetValue emitters that materialize idxInt/idxPinned vars.
-	hasStorageIdx bool
 
 	// Phi register protection: tracks registers protected during phi loads
 	// at a block header. Cleared when the first non-Phi instruction is emitted.
@@ -1537,7 +1565,7 @@ func (g *codeGen) normalizeDescVarList(names []string) []string {
 	seen := make(map[string]struct{}, len(names))
 	out := make([]string, 0, len(names))
 	for _, n := range names {
-		if n == "" || !strings.HasPrefix(n, "d") {
+		if n == "" || !strings.HasPrefix(n, "d") && !g.storageMode {
 			continue
 		}
 		if _, ok := seen[n]; ok {
@@ -1637,7 +1665,7 @@ func (g *codeGen) emitRestoreClosureDescState(snaps []descSnapshot) {
 
 func (g *codeGen) emitProtectIncomingArgRegs() string {
 	if g.storageMode {
-		// Bulk storage readers contain loops. The optimistic, call-free emission
+		// Scalar and bulk storage readers can cross CFG edges. Call-free emission
 		// keeps their ABI descriptors resident; the conservative retry gives each
 		// descriptor a rooted stack home. In either case the home descriptor owns
 		// the location: generated blocks reset their working copies from it, so it
@@ -3945,8 +3973,67 @@ func (g *codeGen) inlineCall(callee *ssa.Function, callArgs []ssa.Value, proof *
 	return g.inlineCallCaptured(callee, callArgs, nil, proof)
 }
 
+// stabilizeLiveAcrossInlineCFG gives caller values one home shared by every
+// callee branch. A spill emitted in only one arm cannot define the caller's
+// location after the join, including for live values not passed as arguments.
+func (g *codeGen) stabilizeLiveAcrossInlineCFG(arguments []ssa.Value) {
+	argumentNames := map[string]bool{}
+	for _, argument := range arguments {
+		argumentNames[argument.Name()] = true
+	}
+	seen := map[string]bool{}
+	var descriptors []string
+	consider := func(value ssa.Value) {
+		if argumentNames[value.Name()] {
+			return
+		}
+		// Phi locations are owned by the caller register plan and its edge moves.
+		if _, phi := value.(*ssa.Phi); phi {
+			return
+		}
+		if !ssaValueNeededAfterInstruction(g.currentInstr, value) {
+			return
+		}
+		name := value.Name()
+		if alias, ok := g.ssaAliases[name]; ok {
+			name = alias
+		}
+		generated, ok := g.vals[name]
+		if !ok || !generated.isDesc || generated.goVar == "" || generated.goVar == "thisptr" || generated.marker == "_storage_recv" || seen[generated.goVar] {
+			return
+		}
+		for _, input := range g.storageInputHomeNames() {
+			if input.name == generated.goVar {
+				return
+			}
+		}
+		seen[generated.goVar] = true
+		descriptors = append(descriptors, generated.goVar)
+	}
+	for _, parameter := range g.fn.Params {
+		consider(parameter)
+	}
+	for _, capture := range g.fn.FreeVars {
+		consider(capture)
+	}
+	for _, block := range g.fn.Blocks {
+		for _, instruction := range block.Instrs {
+			if value, ok := instruction.(ssa.Value); ok {
+				consider(value)
+			}
+		}
+	}
+	sortDescNames(descriptors)
+	for _, descriptor := range descriptors {
+		g.emit("%s = ctx.StabilizeForNested(%s)", descriptor, descriptor)
+	}
+}
+
 func (g *codeGen) inlineCallCaptured(callee *ssa.Function, callArgs []ssa.Value, captures []closureBinding, proof *ssaReachability) genVal {
 	callerInstruction := g.currentInstr
+	if len(callee.Blocks) > 1 {
+		g.stabilizeLiveAcrossInlineCFG(callArgs)
+	}
 	// Resolve caller's arguments BEFORE switching state
 	resolvedArgs := make([]genVal, len(callArgs))
 	for i, arg := range callArgs {
@@ -4147,7 +4234,7 @@ func (g *codeGen) inlineCallCaptured(callee *ssa.Function, callArgs []ssa.Value,
 		// Nested multi-result calls share the register allocator. Their caller's
 		// Scmer return must own a stable join home, rather than untracked raw
 		// registers which sibling blocks or nested return values can reuse.
-		stackBackedSingleResult := results.Len() == 1 && goCallWordCount(results.At(0).Type()) > 1 && (!returnsScmer || functionCallsMultipleResults(callee, g.reachability))
+		stackBackedSingleResult := results.Len() == 1 && goCallWordCount(results.At(0).Type()) > 0 && (g.storageMode || goCallWordCount(results.At(0).Type()) > 1 && (!returnsScmer || functionCallsMultipleResults(callee, g.reachability)))
 		if results.Len() > 1 || stackBackedSingleResult {
 			g.inlineReturnTuple = make([]genVal, results.Len())
 			for i := 0; i < results.Len(); i++ {
@@ -4403,9 +4490,9 @@ func inlineInstructionCount(fn *ssa.Function, reachability *ssaReachability) int
 }
 
 // functionBuildsScmerStruct reports helpers which assemble Scmer through a
-// local aggregate and FieldAddr stores. Those stores need a descriptor owned
-// by the caller's register namespace; keeping the helper as a native Go call
-// is both smaller and safer than expanding its allocation graph inline.
+// local aggregate and FieldAddr stores. Storage lowering supports these
+// descriptor-owned constructors; builtin inlining retains its existing budget
+// policy for expanding aggregate construction.
 func functionBuildsScmerStruct(fn *ssa.Function, reachability *ssaReachability) bool {
 	for _, block := range fn.Blocks {
 		if !reachability.blocks[block] {
@@ -4576,7 +4663,8 @@ func (g *codeGen) tryInlineCall(callee *ssa.Function, callArgs []ssa.Value, assu
 	if callee.Signature.Results().Len() == 1 && goCallWordCount(callee.Signature.Results().At(0).Type()) == 0 {
 		return genVal{}, false
 	}
-	if functionBuildsScmerStruct(callee, reachability) {
+
+	if !g.storageMode && functionBuildsScmerStruct(callee, reachability) {
 		return genVal{}, false
 	}
 
@@ -4736,7 +4824,13 @@ func (g *codeGen) tryInlineStorageMethod(callee *ssa.Function, callArgs []ssa.Va
 	if callee == nil || callee.Blocks == nil || callee.Pkg != g.fn.Pkg || callee.Signature == nil || callee.Signature.Recv() == nil {
 		return genVal{}, false
 	}
-	if len(reachability.blocks) != 1 || functionWritesMemory(callee, reachability) {
+	if functionHasJITGenAnnotation(callee, "jitgen:noinline") || functionWritesMemory(callee, reachability) {
+		return genVal{}, false
+	}
+	// Extend the existing leaf-helper policy to branching Scmer readers. Their
+	// joined value can flow directly into an operator. Scalar searches and
+	// multi-result decoders retain the existing leaf-helper policy.
+	if len(reachability.blocks) != 1 && (callee.Signature.Results().Len() != 1 || !isScmerType(callee.Signature.Results().At(0).Type())) {
 		return genVal{}, false
 	}
 	// Wide tuples use Go's native multi-result ABI. Keeping them behind one
@@ -5301,13 +5395,10 @@ func (g *codeGen) mapStorageScalarIndex(fn *ssa.Function) {
 		g.emit("\tidxInt = idx")
 		g.emit("}")
 		if g.multiBlock {
-			g.emit("idxPinned := idxInt.Loc == LocReg")
-			g.emit("idxPinnedReg := idxInt.Reg")
-			g.emit("if idxPinned {")
-			g.emit("\tctx.ProtectReg(idxPinnedReg)")
-			g.emit("\tdefer ctx.UnprotectReg(idxPinnedReg)")
-			g.emit("}")
-			g.hasStorageIdx = true
+			// Scalar readers can branch before the last use of their row ID, too.
+			// Share the stable ABI home protocol with bulk readers: a sibling
+			// renderer must never inherit an input released by another arm.
+			g.storageInputHomes = append(g.storageInputHomes, storageInputHome{name: "idxInt"})
 		}
 		g.vals[fn.Params[1].Name()] = genVal{goVar: "idxInt", isDesc: true, canonicalIntBits: 32}
 	}
@@ -6242,7 +6333,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		ptrType := v.X.Type().Underlying().(*types.Pointer)
 		structType := ptrType.Elem().Underlying().(*types.Struct)
 		field := structType.Field(v.Field)
-		if field.Pkg() != nil && field.Pkg().Path() != g.topLevelPkgPath && !field.Exported() {
+		if field.Pkg() != nil && field.Pkg().Path() != g.topLevelPkgPath && !field.Exported() && !isScmerType(ptrType.Elem()) {
 			panic(fmt.Sprintf("FieldAddr cannot name unexported external field: %s", v))
 		}
 		fieldName := field.Name()
@@ -6257,7 +6348,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		if globalExpr != "" {
 			// Package globals are resolved by the generated emitter itself. This
 			// preserves the symbolic field expression for constant map lookups.
-		} else if (src.argIdx >= 0 || src.argIdxVar != "") && (fieldName == "ptr" || fieldName == "aux") {
+		} else if !src.isDesc && (src.argIdx >= 0 || src.argIdxVar != "") && (fieldName == "ptr" || fieldName == "aux") {
 			if src.argIdx < 0 {
 				panic(fmt.Sprintf("dynamic variadic Scmer field address: %s", v))
 			}
@@ -6316,8 +6407,8 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				goTypeName = t.Name()
 				switch t.Kind() {
 				case types.String:
-					// Go strings are two words: data pointer + length.
-					sizeStr = "slice"
+					// Go strings have no capacity word.
+					sizeStr = "string"
 				case types.Bool, types.Uint8, types.Int8:
 					sizeStr = "1"
 				case types.Uint16, types.Int16:
@@ -6571,10 +6662,9 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 					g.emit("\tctx.EmitMovRegMem64(%s, fieldAddr+8)", lenReg)
 					g.emit("\tctx.EmitMovRegMem64(%s, fieldAddr+16)", capReg)
 					g.emit("\t%s = JITValueDesc{Loc: LocRegTriple, Reg: %s, Reg2: %s, Reg3: %s}", dv, ptrReg, lenReg, capReg)
-				case "interface":
+				case "interface", "string":
 					itabReg := g.allocReg()
 					dataReg := g.allocReg()
-					g.emit("\tfieldAddr := uintptr(thisptr.Imm.Int()) + %s", src.offsetExpr)
 					g.emit("\t%s := ctx.AllocReg()", itabReg)
 					g.emit("\t%s := ctx.AllocRegExcept(%s)", dataReg, itabReg)
 					g.emit("\tctx.EmitMovRegMem64(%s, fieldAddr)", itabReg)
@@ -6629,6 +6719,14 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 					g.emit("\tctx.EmitMovRegMem(%s, baseReg, off+8)", lenReg)
 					g.emit("\tctx.EmitMovRegMem(%s, baseReg, off+16)", capReg)
 					g.emit("\t%s = JITValueDesc{Loc: LocRegTriple, Reg: %s, Reg2: %s, Reg3: %s}", dv, ptrReg, lenReg, capReg)
+				case "interface", "string":
+					ptrReg := g.allocReg()
+					lenReg := g.allocReg()
+					g.emit("\t%s := ctx.AllocRegExcept(baseReg)", ptrReg)
+					g.emit("\t%s := ctx.AllocRegExcept(baseReg, %s)", lenReg, ptrReg)
+					g.emit("\tctx.EmitMovRegMem(%s, baseReg, off)", ptrReg)
+					g.emit("\tctx.EmitMovRegMem(%s, baseReg, off+8)", lenReg)
+					g.emit("\t%s = JITValueDesc{Loc: LocRegPair, Reg: %s, Reg2: %s}", dv, ptrReg, lenReg)
 				case "array":
 					ptrReg := g.allocReg()
 					g.emit("\t%s := ctx.AllocRegExcept(baseReg)", ptrReg)
@@ -6639,6 +6737,8 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				g.emit("}")
 				if sizeStr == "slice" || sizeStr == "array" {
 					g.vals[name] = genVal{goVar: dv, isDesc: true, marker: "_slice"}
+				} else if sizeStr == "string" {
+					g.vals[name] = genVal{goVar: dv, isDesc: true, marker: "_gostring", pinAcrossBlock: true}
 				} else {
 					g.vals[name] = genVal{goVar: dv, isDesc: true}
 				}
@@ -6844,7 +6944,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 					g.emit("\tctx.EmitMovRegMem64(%s, fieldAddr+8)", lenReg)
 					g.emit("\tctx.EmitMovRegMem64(%s, fieldAddr+16)", capReg)
 					g.emit("\t%s = JITValueDesc{Loc: LocRegTriple, Reg: %s, Reg2: %s, Reg3: %s}", dv, ptrReg, lenReg, capReg)
-				case "interface":
+				case "interface", "string":
 					itabReg := g.allocReg()
 					dataReg := g.allocReg()
 					g.emit("\tfieldAddr := uintptr(thisptr.Imm.Int()) + %s", src.offsetExpr)
@@ -6895,7 +6995,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 					g.emit("\tctx.EmitMovRegMem(%s, thisptr.Reg, off+8)", lenReg2)  // length
 					g.emit("\tctx.EmitMovRegMem(%s, thisptr.Reg, off+16)", capReg2) // capacity
 					g.emit("\t%s = JITValueDesc{Loc: LocRegTriple, Reg: %s, Reg2: %s, Reg3: %s}", dv, ptrReg2, lenReg2, capReg2)
-				case "interface":
+				case "interface", "string":
 					itabReg2 := g.allocReg()
 					dataReg2 := g.allocReg()
 					g.emit("\t%s := ctx.AllocReg()", itabReg2)
@@ -6915,8 +7015,12 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 					gv := genVal{goVar: dv, isDesc: true, marker: "_slice"}
 					g.vals[name] = gv
 					g.fieldCache[cacheKey] = gv
-				} else if sizeStr == "interface" {
-					gv := genVal{goVar: dv, isDesc: true, marker: "_goiface", pinAcrossBlock: true}
+				} else if sizeStr == "interface" || sizeStr == "string" {
+					marker := "_goiface"
+					if sizeStr == "string" {
+						marker = "_gostring"
+					}
+					gv := genVal{goVar: dv, isDesc: true, marker: marker, pinAcrossBlock: true}
 					g.vals[name] = gv
 					g.fieldCache[cacheKey] = gv
 				} else {
@@ -7755,6 +7859,10 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			}
 			g.vals[name] = genVal{goVar: dv, isDesc: true}
 		case "NewString":
+			if literal, ok := v.Call.Args[0].(*ssa.Const); ok && literal.Value != nil && literal.Value.Kind() == constant.String {
+				g.vals[name] = g.resolveValue(literal)
+				break
+			}
 			// NewString(s string) Scmer — arg is a Go string (2 words: ptr+len), result is Scmer (2 words)
 			arg := g.resolveValue(v.Call.Args[0])
 			g.keepAliveForMarker(v.Call.Args[0])
@@ -9361,6 +9469,13 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		dstBasic, dstOk := dstType.(*types.Basic)
 		if isNoopPointerConvert(v.X.Type(), v.Type()) {
 			srcName := v.X.Name()
+			for {
+				alias, ok := g.ssaAliases[srcName]
+				if !ok {
+					break
+				}
+				srcName = alias
+			}
 			if _, isConst := v.X.(*ssa.Const); !isConst {
 				g.ssaAliases[name] = srcName
 				// Merge convert result's uses into source's refcount
@@ -9379,6 +9494,13 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			if src.canonicalIntBits == srcBits && src.canonicalIntSigned == srcSigned &&
 				canonicalIntegerConversionIsNoop(srcSigned, srcBits, dstSigned, dstBits) {
 				srcName := v.X.Name()
+				for {
+					alias, ok := g.ssaAliases[srcName]
+					if !ok {
+						break
+					}
+					srcName = alias
+				}
 				if _, isConst := v.X.(*ssa.Const); !isConst {
 					g.ssaAliases[name] = srcName
 					g.refCounts[srcName] += g.refCounts[name]
@@ -9393,6 +9515,13 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			// Exact same integer representation: alias source.
 			if srcSigned == dstSigned && srcBits == dstBits {
 				srcName := v.X.Name()
+				for {
+					alias, ok := g.ssaAliases[srcName]
+					if !ok {
+						break
+					}
+					srcName = alias
+				}
 				if _, isConst := v.X.(*ssa.Const); !isConst {
 					g.ssaAliases[name] = srcName
 					// Merge convert result's uses into source's refcount
@@ -9500,7 +9629,21 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 	case *ssa.ChangeType:
 		// ChangeType preserves the machine representation (for example
 		// time.Month -> int); only the Go static type changes.
-		g.vals[name] = g.resolveValue(v.X)
+		src := g.resolveValue(v.X)
+		srcName := v.X.Name()
+		for {
+			alias, ok := g.ssaAliases[srcName]
+			if !ok {
+				break
+			}
+			srcName = alias
+		}
+		if _, isConst := v.X.(*ssa.Const); !isConst {
+			g.ssaAliases[name] = srcName
+			g.refCounts[srcName] += g.refCounts[name]
+			delete(g.refCounts, name)
+		}
+		g.vals[name] = src
 
 	case *ssa.Alloc:
 		if ptr, ok := v.Type().Underlying().(*types.Pointer); ok {
@@ -9619,7 +9762,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			if src.goVar == "" || !src.isDesc {
 				panic(fmt.Sprintf("descriptor field Store has unresolved source %s (marker=%q desc=%t)", v.Val, src.marker, src.isDesc))
 			}
-			g.emit("ctx.EnsureDesc(&%s)", src.goVar)
+			g.emit("ctx.EnsureDescsTogether(&%s, &%s)", base, src.goVar)
 			if fieldName == "ptr" {
 				g.emit("ctx.EmitMovToReg(%s.Reg, %s)", base, src.goVar)
 			} else {
@@ -10120,10 +10263,13 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		// Compute new length: high - low
 		lenDesc := g.allocDesc()
 		g.emit("var %s JITValueDesc", lenDesc)
+		g.emit("ctx.EnsureDescsTogether(&%s, &%s)", high.goVar, low.goVar)
 		g.emit("if %s.Loc == LocImm && %s.Loc == LocImm {", high.goVar, low.goVar)
 		g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(%s.Imm.Int() - %s.Imm.Int())}", lenDesc, high.goVar, low.goVar)
 		g.emit("} else {")
 		lenReg := g.allocReg()
+		g.emit("\tctx.ProtectDescRegisters(&%s)", high.goVar)
+		g.emit("\tctx.ProtectDescRegisters(&%s)", low.goVar)
 		g.emit("\t%s := ctx.AllocReg()", lenReg)
 		g.emit("\tif %s.Loc == LocImm {", high.goVar)
 		g.emit("\t\tctx.EmitMovRegImm64(%s, uint64(%s.Imm.Int()))", lenReg, high.goVar)
@@ -10136,6 +10282,8 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		g.emit("\t} else {")
 		g.emit("\t\tctx.EmitSubInt64(%s, %s.Reg)", lenReg, low.goVar)
 		g.emit("\t}")
+		g.emit("\tctx.UnprotectDescRegisters(&%s)", low.goVar)
+		g.emit("\tctx.UnprotectDescRegisters(&%s)", high.goVar)
 		g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s}", lenDesc, lenReg)
 		g.emit("}")
 		// Compute new data pointer: x.ptr + low*element-size.

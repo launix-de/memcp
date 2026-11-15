@@ -902,9 +902,12 @@ func init_window() {
 					ctx.EnsureDesc(&d3)
 					ctx.EnsureDesc(&d35)
 					ctx.EnsureDesc(&d36)
+					ctx.EnsureDescsTogether(&d36, &d35)
 					if d36.Loc == LocImm && d35.Loc == LocImm {
 						d38 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d36.Imm.Int() - d35.Imm.Int())}
 					} else {
+						ctx.ProtectDescRegisters(&d36)
+						ctx.ProtectDescRegisters(&d35)
 						r4 := ctx.AllocReg()
 						if d36.Loc == LocImm {
 							ctx.EmitMovRegImm64(r4, uint64(d36.Imm.Int()))
@@ -917,6 +920,8 @@ func init_window() {
 						} else {
 							ctx.EmitSubInt64(r4, d35.Reg)
 						}
+						ctx.UnprotectDescRegisters(&d35)
+						ctx.UnprotectDescRegisters(&d36)
 						d38 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r4}
 						ctx.BindReg(r4, &d38)
 					}
@@ -1095,9 +1100,12 @@ func init_window() {
 					ctx.EnsureDesc(&d40)
 					ctx.EnsureDesc(&d33)
 					ctx.EnsureDesc(&d76)
+					ctx.EnsureDescsTogether(&d76, &d33)
 					if d76.Loc == LocImm && d33.Loc == LocImm {
 						d78 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d76.Imm.Int() - d33.Imm.Int())}
 					} else {
+						ctx.ProtectDescRegisters(&d76)
+						ctx.ProtectDescRegisters(&d33)
 						r10 := ctx.AllocReg()
 						if d76.Loc == LocImm {
 							ctx.EmitMovRegImm64(r10, uint64(d76.Imm.Int()))
@@ -1110,6 +1118,8 @@ func init_window() {
 						} else {
 							ctx.EmitSubInt64(r10, d33.Reg)
 						}
+						ctx.UnprotectDescRegisters(&d33)
+						ctx.UnprotectDescRegisters(&d76)
 						d78 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r10}
 						ctx.BindReg(r10, &d78)
 					}
@@ -1220,9 +1230,12 @@ func init_window() {
 					ctx.EnsureDesc(&d40)
 					ctx.EnsureDesc(&d84)
 					ctx.EnsureDesc(&d85)
+					ctx.EnsureDescsTogether(&d85, &d84)
 					if d85.Loc == LocImm && d84.Loc == LocImm {
 						d87 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d85.Imm.Int() - d84.Imm.Int())}
 					} else {
+						ctx.ProtectDescRegisters(&d85)
+						ctx.ProtectDescRegisters(&d84)
 						r17 := ctx.AllocReg()
 						if d85.Loc == LocImm {
 							ctx.EmitMovRegImm64(r17, uint64(d85.Imm.Int()))
@@ -1235,6 +1248,8 @@ func init_window() {
 						} else {
 							ctx.EmitSubInt64(r17, d84.Reg)
 						}
+						ctx.UnprotectDescRegisters(&d84)
+						ctx.UnprotectDescRegisters(&d85)
 						d87 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r17}
 						ctx.BindReg(r17, &d87)
 					}
@@ -2967,9 +2982,12 @@ func init_window() {
 					ctx.EnsureDesc(&d4)
 					ctx.EnsureDesc(&d29)
 					ctx.EnsureDesc(&d30)
+					ctx.EnsureDescsTogether(&d30, &d29)
 					if d30.Loc == LocImm && d29.Loc == LocImm {
 						d32 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d30.Imm.Int() - d29.Imm.Int())}
 					} else {
+						ctx.ProtectDescRegisters(&d30)
+						ctx.ProtectDescRegisters(&d29)
 						r2 := ctx.AllocReg()
 						if d30.Loc == LocImm {
 							ctx.EmitMovRegImm64(r2, uint64(d30.Imm.Int()))
@@ -2982,6 +3000,8 @@ func init_window() {
 						} else {
 							ctx.EmitSubInt64(r2, d29.Reg)
 						}
+						ctx.UnprotectDescRegisters(&d29)
+						ctx.UnprotectDescRegisters(&d30)
 						d32 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r2}
 						ctx.BindReg(r2, &d32)
 					}
@@ -3566,9 +3586,12 @@ func init_window() {
 					ctx.EnsureDesc(&d34)
 					ctx.EnsureDesc(&d27)
 					ctx.EnsureDesc(&d166)
+					ctx.EnsureDescsTogether(&d166, &d27)
 					if d166.Loc == LocImm && d27.Loc == LocImm {
 						d168 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d166.Imm.Int() - d27.Imm.Int())}
 					} else {
+						ctx.ProtectDescRegisters(&d166)
+						ctx.ProtectDescRegisters(&d27)
 						r13 := ctx.AllocReg()
 						if d166.Loc == LocImm {
 							ctx.EmitMovRegImm64(r13, uint64(d166.Imm.Int()))
@@ -3581,6 +3604,8 @@ func init_window() {
 						} else {
 							ctx.EmitSubInt64(r13, d27.Reg)
 						}
+						ctx.UnprotectDescRegisters(&d27)
+						ctx.UnprotectDescRegisters(&d166)
 						d168 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r13}
 						ctx.BindReg(r13, &d168)
 					}

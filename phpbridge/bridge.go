@@ -123,12 +123,18 @@ func (b *resultBuffer) appendValue(value scm.Scmer) C.memcp_cell {
 	case value.IsFloat():
 		v.kind, v.number = 2, C.double(value.Float())
 	default:
-		s := value.String()
-		if len(s) > resultLimit-len(b.data)-len(b.cells)*int(unsafe.Sizeof(v)) {
+		offset := len(b.data)
+ if value.IsBufferString() && scm.BufferStringLength(value)>resultLimit-offset-len(b.cells)*int(unsafe.Sizeof(v)) {panic("PDO result exceeds 64 MiB; use SQL LIMIT or pagination")}
+		s, appended := value.AppendString(b.data)
+		if len(s) > resultLimit-offset-len(b.cells)*int(unsafe.Sizeof(v)) {
 			panic("PDO result exceeds 64 MiB; use SQL LIMIT or pagination")
 		}
-		v.kind, v.offset, v.length = 3, C.size_t(len(b.data)), C.size_t(len(s))
-		b.data = append(b.data, s...)
+		v.kind, v.offset, v.length = 3, C.size_t(offset), C.size_t(len(s))
+		if len(appended) > offset {
+			b.data = appended
+		} else {
+			b.data = append(b.data, s...)
+		}
 	}
 	return v
 }

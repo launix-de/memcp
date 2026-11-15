@@ -74,7 +74,7 @@ func toTime(v Scmer) (time.Time, bool) {
 		return time.Unix(v.Int(), 0).UTC(), true
 	case tagFloat:
 		return time.Unix(int64(v.Float()), 0).UTC(), true
-	case tagString, tagSymbol, tagCString, tagBString, tagLZ4:
+	case tagString, tagSymbol, tagCString, tagBString, tagConcat:
 		if ts, ok := ParseDateString(v.String()); ok {
 			return time.Unix(ts, 0).UTC(), true
 		}
@@ -5304,7 +5304,6 @@ func init_date() {
 					d521.NoHeapPointer = true
 					ctx.BindReg(d521.Reg, &d521)
 					ctx.EnsureDesc(&d521)
-					ctx.FreeDesc(&d521)
 					ctx.EnsureDesc(&d521)
 					ctx.EnsureDesc(&d521)
 					if d521.Loc == LocImm {
@@ -7560,9 +7559,11 @@ func init_date() {
 					if d73.Loc == LocImm {
 						d117 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d73.Imm.Int() * 1000000000)}
 					} else {
-						ctx.EmitIntBinaryImm(JITIntMul, 64, d73.Reg, 1000000000)
-						d117 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d73.Reg}
-						ctx.BindReg(d73.Reg, &d117)
+						scratch := ctx.AllocRegExcept(d73.Reg)
+						ctx.EmitMovRegReg(scratch, d73.Reg)
+						ctx.EmitIntBinaryImm(JITIntMul, 64, scratch, 1000000000)
+						d117 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: scratch}
+						ctx.BindReg(scratch, &d117)
 					}
 					if d117.Loc == LocReg && d73.Loc == LocReg && d117.Reg == d73.Reg {
 						ctx.TransferReg(d73.Reg)

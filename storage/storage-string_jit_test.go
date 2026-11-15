@@ -18,18 +18,15 @@ package storage
 
 import (
 	"fmt"
+	"reflect"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/launix-de/memcp/scm"
 )
 
 func buildStorageString(values []scm.Scmer) *StorageString {
-	col := buildViaCompression(len(values), func(i int) scm.Scmer { return values[i] })
-	if ss, ok := col.(*StorageString); ok {
-		return rawStringFixture(ss)
-	}
-	// If compression chose a different type, force StorageString
 	s := new(StorageString)
 	s.prepare()
 	for i, v := range values {
@@ -39,7 +36,6 @@ func buildStorageString(values []scm.Scmer) *StorageString {
 	for i, v := range values {
 		s.build(uint32(i), v)
 	}
-	s.finish()
 	return rawStringFixture(s)
 }
 
@@ -217,4 +213,74 @@ func BenchmarkStorageStringGetValue(b *testing.B) {
 			}
 		}
 	})
+}
+
+// The storage reader and predicate share one generated loop. Exercise both
+// nullable and fragmented entries so constructor spills cannot hide behind a
+// materialized string or a separately compiled native storage reader.
+func TestStorageStringFusedConcatFilter(t *testing.T) {
+	if !scm.JITEnabled() {
+		t.Skip("requires the JIT experiment")
+	}
+	values := make([]scm.Scmer, 137)
+	for i := range values {
+		if i%11 == 0 {
+			values[i] = scm.NewNil()
+		} else if i%17 == 0 {
+			values[i] = scm.NewString("")
+		} else {
+			values[i] = scm.NewString(strings.Repeat("report geräteprüfung ", 25) + fmt.Sprint(i))
+		}
+	}
+	column := buildStringCompressionFixture(values)
+	fragmented := false
+	for i, want := range values {
+		got := column.GetJITGetValue()(uint32(i))
+		if !scm.Equal(got, want) || (!want.IsNil() && got.GetTag() != scm.TagConcat) {
+			t.Fatalf("scalar row %d: got %v (tag %d), want %v", i, got, got.GetTag(), want)
+		}
+		if !got.IsNil() {
+			_, direct := column.textBuffer.Direct(scm.BufferStringOffset(got))
+			fragmented = fragmented || !direct
+		}
+	}
+	if !fragmented {
+		t.Fatal("fixture did not create fragmented concat entries")
+	}
+	for _, source := range []string{
+		`(lambda (label) (if (nil? label) false (> (strlen (concat label)) 100)))`,
+		`(lambda (label) (if (nil? label) false (strlike (toLower label) "%report%")))`,
+		`(lambda (label) (if (nil? label) false ((collate "utf8mb4_general_ci") label "zzzzz")))`,
+	} {
+		t.Run(source, func(t *testing.T) {
+			procedure := scm.Eval(scm.Optimize(scm.Read(t.Name(), source, true), &scm.Globalenv, nil), &scm.Globalenv)
+			if !procedure.IsProc() {
+				t.Fatal("predicate is not a procedure")
+			}
+			filter := scm.CompileJITFilterStorage(procedure.Proc(), []uint8{scm.JITTypeUnknown}, []scm.JITStorageGetValueEmitter{column.JITEmit})
+			if filter == nil {
+				t.Fatal("fused storage filter did not compile")
+			}
+			var want []uint32
+			for i, value := range values {
+				if scm.Apply(procedure, value).Bool() {
+					want = append(want, uint32(i))
+				}
+			}
+			ids := make([]uint32, len(values))
+			reset := func() {
+				for i := range ids {
+					ids[i] = uint32(i)
+				}
+			}
+			reset()
+			count := filter(ids, nil)
+			if count != len(want) || !reflect.DeepEqual(ids[:count], want) {
+				t.Fatalf("selected %v, want %v", ids[:count], want)
+			}
+			if allocations := testing.AllocsPerRun(20, func() { reset(); filter(ids, nil) }); allocations != 0 {
+				t.Fatalf("fused concat predicate allocates %g times", allocations)
+			}
+		})
+	}
 }

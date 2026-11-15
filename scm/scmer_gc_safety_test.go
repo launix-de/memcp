@@ -22,6 +22,33 @@ import (
 	"testing"
 )
 
+var scmerIntegerBenchmarkResult int64
+
+func BenchmarkScmerIntegerAccess(b *testing.B) {
+	values := [...]Scmer{NewInt(0), NewInt(-1), NewInt(1 << 62), NewInt(-1 << 63)}
+	var total int64
+	for i := 0; i < b.N; i++ {
+		total += values[i&3].Int()
+	}
+	scmerIntegerBenchmarkResult = total
+}
+
+func TestScmerIntegerAccess(t *testing.T) {
+	for _, value := range []int64{0, -1, 1, 1 << 62, -1 << 63, 1<<63 - 1} {
+		if got := NewInt(value).Int(); got != value {
+			t.Fatalf("integer %d: got %d", value, got)
+		}
+	}
+	for _, tc := range []struct {
+		value Scmer
+		want  int64
+	}{{NewNil(), 0}, {NewBool(true), 1}, {NewBool(false), 0}, {NewFloat(-3.5), -3}, {NewString("42tail"), 42}, {NewString("invalid"), 0}} {
+		if got := tc.value.Int(); got != tc.want {
+			t.Fatalf("%v: got %d, want %d", tc.value, got, tc.want)
+		}
+	}
+}
+
 func stackGrow(depth int, v Scmer) {
 	var scratch [64]byte
 	scratch[0] = byte(depth)

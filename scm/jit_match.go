@@ -537,7 +537,7 @@ func jitMatchCons(ctx *JITContext, value JITValueDesc, patterns []Scmer, env *JI
 		listOutcome.always = false
 	}
 	head := jitMatchLoadElement(ctx, &header, 0)
-	head = ctx.stabilizeForNested(head)
+	head = ctx.StabilizeForNested(head)
 	tail := jitMatchSliceTail(ctx, &header)
 	first := jitCompileMatchPattern(ctx, head, patterns[0], env, failLabel)
 	second := jitCompileMatchPattern(ctx, tail, patterns[1], env, failLabel)

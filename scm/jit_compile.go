@@ -681,6 +681,9 @@ func (ctx *JITContext) EmitSliceElementAddress(slice, index *JITValueDesc, eleme
 			ctx.ProtectReg(slicePtr)
 		}
 	}
+	if loadedPtr {
+		ctx.ProtectReg(slicePtr)
+	}
 	ctx.EnsureDesc(index)
 	excluded := []Reg{slicePtr}
 	if index.Loc == LocReg {
@@ -691,9 +694,10 @@ func (ctx *JITContext) EmitSliceElementAddress(slice, index *JITValueDesc, eleme
 		available &^= 1 << uint(reg)
 	}
 	if available == 0 {
-		stableSlice := ctx.stabilizeForNested(*slice)
-		stableIndex := ctx.stabilizeForNested(*index)
+		stableSlice := ctx.StabilizeForNested(*slice)
+		stableIndex := ctx.StabilizeForNested(*index)
 		if loadedPtr {
+			ctx.UnprotectReg(slicePtr)
 			ctx.FreeReg(slicePtr)
 		} else {
 			ctx.UnprotectReg(slicePtr)
@@ -733,6 +737,7 @@ func (ctx *JITContext) EmitSliceElementAddress(slice, index *JITValueDesc, eleme
 	}
 	ctx.EmitAddInt64(address, slicePtr)
 	if loadedPtr {
+		ctx.UnprotectReg(slicePtr)
 		ctx.FreeReg(slicePtr)
 	} else {
 		ctx.UnprotectReg(slicePtr)
@@ -1350,7 +1355,9 @@ func (ctx *JITContext) EmitLoadScmerToStack(address *JITValueDesc, targetOff int
 	ctx.setStackPointer(jitStackRootFrameSP, targetOff-ctx.DynamicSP, true)
 }
 
-func (ctx *JITContext) stabilizeForNested(value JITValueDesc) JITValueDesc {
+// StabilizeForNested preserves a live value across a nested emitter while
+// retaining its canonical descriptor identity for all existing aliases.
+func (ctx *JITContext) StabilizeForNested(value JITValueDesc) JITValueDesc {
 	if value.Loc == LocFlags && value.FlagsID != 0 {
 		ctx.EnsureDesc(&value)
 	}
@@ -1635,7 +1642,7 @@ func (ctx *JITContext) StabilizeDescForControlFlow(desc *JITValueDesc) {
 // insufficient for compressed and binary string values produced by storages.
 func (ctx *JITContext) EmitIsStringBorrowed(src *JITValueDesc, result JITValueDesc) JITValueDesc {
 	isStringTag := func(tag uint8) bool {
-		return tag == tagString || tag == tagCString || tag == tagBString || tag == tagLZ4
+		return tag == tagString || tag == tagCString || tag == tagBString || tag == tagConcat
 	}
 	if src.Loc == LocImm {
 		value := JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(isStringTag(src.Imm.GetTag()))}
@@ -1672,7 +1679,7 @@ func (ctx *JITContext) EmitIsStringBorrowed(src *JITValueDesc, result JITValueDe
 	ctx.EmitSetcc(tagReg, CondEqual)
 	ctx.EmitOrInt64(tagReg, rangeReg)
 	ctx.EmitGetTagRegs(rangeReg, tmp.Reg, tmp.Reg2)
-	ctx.EmitCmpRegImm32(rangeReg, int32(tagLZ4))
+	ctx.EmitCmpRegImm32(rangeReg, int32(tagConcat))
 	ctx.EmitSetcc(rangeReg, CondEqual)
 	ctx.EmitOrInt64(tagReg, rangeReg)
 	ctx.FreeReg(rangeReg)
@@ -2077,7 +2084,7 @@ func jitMaterializeVirtualSlice(ctx *JITContext, virtual JITValueDesc, result JI
 		// Spill each producer as soon as it is complete. Descriptor spill metadata
 		// preserves aliases used by later arguments while keeping register pressure
 		// independent of the virtual list length.
-		stable[i] = ctx.stabilizeForNested(src)
+		stable[i] = ctx.StabilizeForNested(src)
 	}
 	if builder := jitDirectSliceBuilder(len(stable)); builder != 0 {
 		callArgs := stable
@@ -3394,7 +3401,7 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 		expr = si.value
 	}
 	switch expr.GetTag() {
-	case tagNil, tagBool, tagInt, tagFloat, tagDate, tagString, tagCString, tagBString, tagLZ4, tagRegex, tagVector,
+	case tagNil, tagBool, tagInt, tagFloat, tagDate, tagString, tagCString, tagBString, tagConcat, tagRegex, tagVector,
 		tagFunc, tagFuncEnv, tagJIT, tagParser, tagFastDict, tagAny,
 		tagClosure, tagPromise, tagSpecialForm:
 		// Keep Eval's self-evaluating literal contract. Pointer-bearing constants
@@ -3592,7 +3599,7 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 					} else {
 						args[i-1] = jitCompileExpr(ctx, argExpr, sliceBase, JITValueDesc{Loc: LocAny})
 					}
-					args[i-1] = ctx.stabilizeForNested(args[i-1])
+					args[i-1] = ctx.StabilizeForNested(args[i-1])
 				}
 				ctx.ReclaimUntrackedRegs()
 				if decl.Type.JITInlineCost == 0 {

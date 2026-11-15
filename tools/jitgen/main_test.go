@@ -583,7 +583,7 @@ func rolling(limit int) int {
 	}
 }
 
-func TestStoragePrefixIncludesRegisterPlanTypes(t *testing.T) {
+func TestStorageIncludesRegisterPlanTypes(t *testing.T) {
 	input := "plan := JITRegisterPlan{Slots: [16]JITRegisterSlot{}}\nvalue := JITValueDesc{Reg: r}\n"
 	want := "plan := scm.JITRegisterPlan{Slots: [16]scm.JITRegisterSlot{}}\nvalue := scm.JITValueDesc{Reg: r}\n"
 	if got := addScmPrefix(input); got != want {
@@ -1315,5 +1315,73 @@ func emitter(captured int) {
 		if len(fn.Body.List) != 2 {
 			t.Fatalf("prepared %d functions, want two closed expressions", len(fn.Body.List))
 		}
+	}
+}
+
+func TestStorageConstructorKeepsDescriptorFieldsAndScalarInput(t *testing.T) {
+	fn := buildTestSSAFunction(t, `package sample
+import "unsafe"
+type Scmer struct { ptr *byte; aux uint64 }
+type payloadByte byte
+type StorageTest struct { data *byte }
+func construct(p *byte, offset uint64) Scmer {
+	first := (*payloadByte)(unsafe.Pointer(p))
+	second := (*byte)(unsafe.Pointer(first))
+	return Scmer{second, offset<<8 | 26}
+}
+func GetValue(s *StorageTest, index uint32) Scmer {
+	if index & 1 == 0 { return construct(s.data, uint64(index)) }
+	return construct(s.data, uint64(index)+4)
+}
+`, "GetValue")
+	code, failure := generateStorageBody("StorageTest", fn, nil, nil)
+	if failure != "" {
+		t.Fatal(failure)
+	}
+	if strings.Contains(code, "args[") || strings.Contains(code, "GoFuncAddr(construct)") {
+		t.Fatalf("constructor lost its descriptor-owned fields or remained native:\n%s", code)
+	}
+	if !strings.Contains(code, "storageIdxIntHome") || !strings.Contains(code, "ctx.EnsureDescsTogether(") {
+		t.Fatalf("missing stable row-ID home or aggregate-store operand ownership:\n%s", code)
+	}
+}
+
+func TestStorageStringFieldHasOnlyTwoABIWords(t *testing.T) {
+	fn := buildTestSSAFunction(t, `package sample
+type Scmer struct{}
+type StorageTest struct { text string }
+func NewString(string) Scmer
+func GetValue(s *StorageTest, index uint32) Scmer { return NewString(s.text[index:index+1]) }
+`, "GetValue")
+	code, failure := generateStorageBody("StorageTest", fn, nil, nil)
+	if failure != "" {
+		t.Fatal(failure)
+	}
+	if strings.Contains(code, "fieldAddr+16") || strings.Contains(code, "off+16") || strings.Contains(code, "LocRegTriple") {
+		t.Fatalf("string field was loaded as a slice with a capacity word:\n%s", code)
+	}
+	if !strings.Contains(code, "ctx.ProtectDescRegisters(") {
+		t.Fatalf("slice bounds are not kept live while allocating their difference:\n%s", code)
+	}
+}
+
+func TestGeneratedEmitterOverlayHidesStorageReaders(t *testing.T) {
+	overlay, _, err := generatedEmitterOverlay("../../storage")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, err := filepath.Abs("../../storage/storage-string.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	generated, ok := overlay[path]
+	if !ok {
+		t.Fatal("storage string emitter missing from overlay")
+	}
+	if bytes.Contains(generated, []byte(generatedBanner)) {
+		t.Fatal("storage emitter implementation remained visible to SSA")
+	}
+	if !bytes.Contains(generated, []byte("func (s *StorageString) GetValue(")) {
+		t.Fatal("semantic storage reader disappeared from overlay")
 	}
 }

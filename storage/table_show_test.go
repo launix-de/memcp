@@ -1011,16 +1011,7 @@ func TestRebuiltStringStatisticsOwnTheirBoundsAndReleaseReaders(t *testing.T) {
 			if stats.MinEstimate.GetTag() != scm.TagString || stats.MaxEstimate.GetTag() != scm.TagString {
 				t.Fatal("published bounds retain compressed column handles")
 			}
-			if warm {
-				if cache := column.dictCache.Load(); cache == nil || cache.users != 0 {
-					t.Fatal("statistics did not release the decoded reader lease")
-				}
-				if column.EvictDictionary() == 0 {
-					t.Fatal("statistics prevented dictionary reclamation")
-				}
-			} else if column.dictCache.Load() != nil {
-				t.Fatal("cold statistics unnecessarily published a decoded dictionary")
-			}
+
 			if stats.MinEstimate.String() != "" || stats.MaxEstimate.String() != values[rows-1].String() {
 				t.Fatal("bounds changed after releasing the source reader")
 			}

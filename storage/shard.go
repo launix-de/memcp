@@ -371,7 +371,6 @@ func (s *storageShard) residentMemoryLocked() memoryOwnerSnapshot {
 		if !s.ownsColumnMemory(name) {
 			m.tempColumns += ownedColumnMemory(column)
 		}
-		m.stringDictionaries += materializedDictionaryMemory(column)
 		visitColumnCaches(column, false, func(owner any) bool {
 			if blob, ok := owner.(*blobRAMCache); ok {
 				m.blobCaches += blob.cachedBytes()
@@ -391,10 +390,6 @@ func (s *storageShard) residentMemoryLocked() memoryOwnerSnapshot {
 // These callbacks must not acquire a shard lock or call the public manager API.
 func visitColumnCaches(column any, nonblocking bool, visit func(any) bool) bool {
 	switch c := column.(type) {
-	case *StorageString:
-		if cache := c.dictCache.Load(); cache != nil {
-			return visit(cache)
-		}
 	case *OverlayBlob:
 		if c.ram != nil && !visit(c.ram) {
 			return false
@@ -402,8 +397,6 @@ func visitColumnCaches(column any, nonblocking bool, visit func(any) bool) bool 
 		if c.Base != nil {
 			return visitColumnCaches(c.Base, nonblocking, visit)
 		}
-	case *StoragePrefix:
-		return visitColumnCaches(&c.values, nonblocking, visit)
 	case *StorageComputeProxy:
 		if nonblocking {
 			if !c.mu.TryRLock() {
@@ -454,7 +447,7 @@ func ownedColumnMemory(storage ColumnStorage) uint {
 		return size + ownedColumnMemory(column.Base)
 	}
 	size := storage.ComputeSize()
-	materialized := materializedDictionaryMemory(storage)
+	materialized := uint(0)
 	visitColumnCaches(storage, false, func(owner any) bool {
 		if blob, ok := owner.(*blobRAMCache); ok {
 			materialized += blob.cachedBytes()
@@ -465,38 +458,6 @@ func ownedColumnMemory(storage ColumnStorage) uint {
 		size -= materialized
 	}
 	return size
-}
-
-// materializedDictionaryMemory follows storage wrappers because a compressed
-// StorageString may be nested below OverlayBlob, StoragePrefix, or a computed
-// column proxy. Every materialized dictionary is a separately weighted
-// TypeStringDict cache owner and must therefore be excluded from its parent's
-// bytes at every nesting depth.
-func materializedDictionaryMemory(storage any) uint {
-	switch typed := storage.(type) {
-	case *StorageString:
-		if cache := typed.dictCache.Load(); cache != nil {
-			return cache.computeSize()
-		}
-		return 0
-	case *OverlayBlob:
-		if typed.Base == nil {
-			return 0
-		}
-		return materializedDictionaryMemory(typed.Base)
-	case *StoragePrefix:
-		return materializedDictionaryMemory(&typed.values)
-	case *StorageComputeProxy:
-		var size uint
-		typed.mu.RLock()
-		if typed.main != nil {
-			size += materializedDictionaryMemory(typed.main)
-		}
-		typed.mu.RUnlock()
-		return size
-	default:
-		return 0
-	}
 }
 
 type shardStatsSnapshot struct {

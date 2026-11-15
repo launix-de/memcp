@@ -74,7 +74,7 @@ func jitRegexMatchesFinishNative(acc Scmer) Scmer {
 // closing delimiter share a leading byte. Stored values are raw cursor
 // pointers into the string being matched. The stack holds no live reference
 // to that string and needs none: Go's GC does not relocate heap memory, and
-// the caller (jitMatchStableValue / stabilizeForNested) already keeps the
+// the caller (jitMatchStableValue / StabilizeForNested) already keeps the
 // string's backing array alive as a properly rooted Scmer for the whole
 // match, so a plain int64 alias of one of its addresses stays valid.
 type jitRegexBacktrackStack struct {
@@ -1446,7 +1446,7 @@ func jitEmitConstantRegexpTest(ctx *JITContext, pattern *regexp.Regexp, value JI
 		out.Type, out.Rooted = JITTypeUnknown, true
 		return jitPlaceScmerIntoTarget(ctx, out, result)
 	}
-	value = ctx.stabilizeForNested(value)
+	value = ctx.StabilizeForNested(value)
 	// Regex state competes with enclosing branch results and planned homes.
 	// Commit bool/nil to a pointer-free slot before restoring those registers.
 	// The matcher owns scratch registers until its control flow has joined.
@@ -1489,7 +1489,7 @@ func jitEmitConstantRegexpPredicate(ctx *JITContext, pattern *regexp.Regexp, val
 	program := jitCompileRegexProgram(pattern)
 	result := JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: ctx.AllocStack(8), NoHeapPointer: true}
 	ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(false), NoHeapPointer: true}, result.StackOff)
-	value = ctx.stabilizeForNested(value)
+	value = ctx.StabilizeForNested(value)
 	// Word-boundary and character-class branches can need more than six
 	// scratch registers. Spill outer owners before any conditional branch;
 	// otherwise a skipped spill can later be reintroduced as a stale GC root.
@@ -1524,7 +1524,7 @@ func jitEmitConstantRegexpCaptures(ctx *JITContext, pattern *regexp.Regexp, valu
 	// A regex is a branching register-allocation region, independently of the
 	// apparent free-register count. Captures are rooted before the snapshot;
 	// restore all outer owners on every outgoing edge.
-	value = ctx.stabilizeForNested(value)
+	value = ctx.StabilizeForNested(value)
 	outer := ctx.PreserveRegisters(JITRegisterBoundaryOptions{ReleaseHomes: true})
 	success := ctx.ReserveLabel()
 	failed := ctx.ReserveLabel()
@@ -1561,7 +1561,7 @@ func jitEmitConstantRegexpMatches(ctx *JITContext, pattern *regexp.Regexp, value
 		return jitPlaceScmerIntoTarget(ctx, out, result)
 	}
 
-	input := ctx.stabilizeForNested(value)
+	input := ctx.StabilizeForNested(value)
 	inputOff := ctx.AllocStack(16)
 	accOff := ctx.AllocStack(16)
 	{

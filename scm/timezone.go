@@ -7694,7 +7694,6 @@ func init_timezone() {
 					ctx.FreeDesc(&d355)
 					ctx.FreeDesc(&d351)
 					ctx.EnsureDesc(&d359)
-					ctx.FreeDesc(&d359)
 					ctx.EnsureDesc(&d358)
 					ctx.EnsureDesc(&d359)
 					ctx.SyncDesc(&d358)
