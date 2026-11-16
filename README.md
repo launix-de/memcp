@@ -129,6 +129,14 @@ remain client policy. These options configure only TDS; they do not enable HTTPS
 or change the HTTP/MySQL listeners. Changing them requires an operator-managed
 restart; they are never activated by SQL commands.
 
+The privileged Scheme interface keeps its existing three-argument form
+`(tds port handler database)`. Optional argument four is a five-byte transport
+collation or `nil`; omission/`nil` preserves the existing absence of a collation
+announcement. TLS configuration is optional argument five, a flat dictionary
+with `policy`, `certificate` and `private_key` PEM values. Scheme startup owns
+file loading; the Go bridge receives no paths. Existing frontend callbacks and
+SQL type/collation decisions are unchanged.
+
 Schema DDL retains declared identifier spelling while resolving table, view and
 column references without case sensitivity. Named defaults use the existing
 native column defaults, including ALTER ADD/DROP. CREATE TYPE ... FROM stores
