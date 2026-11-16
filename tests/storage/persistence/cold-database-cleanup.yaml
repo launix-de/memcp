@@ -1,0 +1,130 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Runner readiness opens memcp-tests. These cases check persisted data safety;
+# cold-database admission additionally needs a startup probe before SQL access.
+metadata:
+  version: '1.0'
+  description: Payloads, constraints and triggers survive startup and explicit database cleanup
+  isolated: true
+
+setup:
+  - sql: DROP TABLE IF EXISTS cold_cleanup_child
+  - sql: DROP TABLE IF EXISTS cold_cleanup_audit
+  - sql: DROP TABLE IF EXISTS cold_cleanup_parent
+  - sql: CREATE TABLE cold_cleanup_parent (id INT PRIMARY KEY) ENGINE=safe
+  - sql: >
+      CREATE TABLE cold_cleanup_child (
+        id INT PRIMARY KEY, parent_id INT, payload LONGTEXT, marker INT DEFAULT 7,
+        CONSTRAINT cold_cleanup_fk FOREIGN KEY (parent_id)
+          REFERENCES cold_cleanup_parent(id) ON DELETE RESTRICT
+      ) ENGINE=safe
+  - sql: CREATE TABLE cold_cleanup_audit (id INT, marker INT) ENGINE=safe
+  - sql: >
+      CREATE TRIGGER cold_cleanup_insert AFTER INSERT ON cold_cleanup_child
+      FOR EACH ROW INSERT INTO cold_cleanup_audit (id, marker) VALUES (NEW.id, NEW.marker)
+  - sql: INSERT INTO cold_cleanup_parent VALUES (1)
+  - sql: >
+      INSERT INTO cold_cleanup_child (id, parent_id, payload)
+      VALUES (1, 1, REPEAT('persisted-payload-', 4096)),
+             (3, 1, REPEAT('third-payload-', 4096)),
+             (4, 1, REPEAT('fourth-payload-', 4096))
+
+test_cases:
+  - name: Persist the database before startup cleanup
+    sql: SHUTDOWN
+
+  - name: First table access recovers the complete payload and default
+    sql: >
+      SELECT id, parent_id, marker, LENGTH(payload) AS payload_length,
+        payload = REPEAT(CASE id WHEN 1 THEN 'persisted-payload-'
+                                 WHEN 3 THEN 'third-payload-'
+                                 ELSE 'fourth-payload-' END, 4096) AS intact
+      FROM cold_cleanup_child ORDER BY id
+    expect:
+      rows: 3
+      data:
+        - {id: 1, parent_id: 1, marker: 7, payload_length: 73728, intact: true}
+        - {id: 3, parent_id: 1, marker: 7, payload_length: 57344, intact: true}
+        - {id: 4, parent_id: 1, marker: 7, payload_length: 61440, intact: true}
+
+  - name: Persisted payloads have real blob references and no missing objects
+    scm: |
+      (begin
+        (define report (blob_inventory "memcp-tests"))
+        (and (>= (get_assoc report "referenced_blobs") 3)
+             (equal? (get_assoc report "missing_blobs") (list))))
+    expect:
+      result: true
+
+  - name: Restored foreign key still rejects an orphan
+    sql: INSERT INTO cold_cleanup_child (id, parent_id, payload) VALUES (2, 99, 'invalid')
+    expect:
+      error: true
+
+  - name: Restored trigger and default handle a new valid row
+    sql: >
+      INSERT INTO cold_cleanup_child (id, parent_id, payload)
+      VALUES (2, 1, REPEAT('second-payload-', 4096))
+
+  - name: Trigger history contains exactly the successful inserts
+    sql: SELECT id, marker FROM cold_cleanup_audit ORDER BY id
+    expect:
+      rows: 4
+      data:
+        - {id: 1, marker: 7}
+        - {id: 2, marker: 7}
+        - {id: 3, marker: 7}
+        - {id: 4, marker: 7}
+
+  - name: Persist the additional row before explicit cleanup
+    sql: SHUTDOWN
+
+  - name: Explicit cleanup proves ownership before deleting any objects
+    scm: (get_assoc (blob_cleanup "memcp-tests") "complete")
+    expect:
+      result: true
+
+  - name: Explicit cleanup preserves all complete payloads
+    sql: >
+      SELECT id, parent_id, marker, LENGTH(payload) AS payload_length,
+        payload = REPEAT(CASE id WHEN 1 THEN 'persisted-payload-'
+                                 WHEN 2 THEN 'second-payload-'
+                                 WHEN 3 THEN 'third-payload-'
+                                 ELSE 'fourth-payload-' END, 4096) AS intact
+      FROM cold_cleanup_child ORDER BY id
+    expect:
+      rows: 4
+      data:
+        - {id: 1, parent_id: 1, marker: 7, payload_length: 73728, intact: true}
+        - {id: 2, parent_id: 1, marker: 7, payload_length: 61440, intact: true}
+        - {id: 3, parent_id: 1, marker: 7, payload_length: 57344, intact: true}
+        - {id: 4, parent_id: 1, marker: 7, payload_length: 61440, intact: true}
+
+  - name: Blob inventory has no missing referenced objects after cleanup
+    scm: (get_assoc (blob_inventory "memcp-tests") "missing_blobs")
+    expect:
+      result: []
+
+  - name: Publish the cleaned database and restart once more
+    sql: SHUTDOWN
+
+  - name: Lazy recovery after explicit cleanup keeps every payload
+    sql: >
+      SELECT id, parent_id, marker, LENGTH(payload) AS payload_length,
+        payload = REPEAT(CASE id WHEN 1 THEN 'persisted-payload-'
+                                 WHEN 2 THEN 'second-payload-'
+                                 WHEN 3 THEN 'third-payload-'
+                                 ELSE 'fourth-payload-' END, 4096) AS intact
+      FROM cold_cleanup_child ORDER BY id
+    expect:
+      rows: 4
+      data:
+        - {id: 1, parent_id: 1, marker: 7, payload_length: 73728, intact: true}
+        - {id: 2, parent_id: 1, marker: 7, payload_length: 61440, intact: true}
+        - {id: 3, parent_id: 1, marker: 7, payload_length: 57344, intact: true}
+        - {id: 4, parent_id: 1, marker: 7, payload_length: 61440, intact: true}
+
+cleanup:
+  - sql: DROP TABLE IF EXISTS cold_cleanup_child
+  - sql: DROP TABLE IF EXISTS cold_cleanup_audit
+  - sql: DROP TABLE IF EXISTS cold_cleanup_parent
