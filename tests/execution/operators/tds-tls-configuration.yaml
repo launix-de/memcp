@@ -30,7 +30,8 @@ test_cases:
     (equal? (map (list (list "unknown" "chain.pem" "key.pem")
       (list "optional" nil nil) (list "required" nil nil)
       (list "default" "chain.pem" nil) (list "default" nil "key.pem")
-      (list "optional" "" "key.pem") (list "optional" true "key.pem"))
+      (list "optional" "" "key.pem") (list "optional" true "key.pem")
+      (list 'optional "chain.pem" "key.pem"))
       (lambda (input) (begin
         (define reads (newsession))
         (reads "count" 0)
@@ -40,7 +41,7 @@ test_cases:
           false)) (lambda (failure) (strlike (string (failure_value failure)) "%TDS TLS%"))))
         (list rejected (reads "count")))))
       (list (list true 0) (list true 0) (list true 0) (list true 0)
-        (list true 0) (list true 0) (list true 0)))
+        (list true 0) (list true 0) (list true 0) (list true 0)))
   expect: {result: true}
 - name: Native bridge rejects malformed TLS payloads before opening a listener
   scm: |

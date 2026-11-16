@@ -1504,7 +1504,7 @@ path as the other frontends. Wire actions are interpreted here, never in scm/. *
 /* The operator supplies files only at startup. The transport receives PEM
 values, and no certificate/key path enters frontend sessions or SQL metadata. */
 (define tds_tls_cli_config (lambda (policy certificate_path private_key_path load_file) (begin
-	(if (not (has? '("default" "optional" "required") policy))
+	(if (or (not (string? policy)) (not (has? '("default" "optional" "required") policy)))
 		(error "unknown TDS TLS policy"))
 	(if (and (nil? certificate_path) (nil? private_key_path))
 		(if (equal? policy "default") nil
