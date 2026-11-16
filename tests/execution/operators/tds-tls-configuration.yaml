@@ -34,10 +34,10 @@ test_cases:
       (lambda (input) (begin
         (define reads (newsession))
         (reads "count" 0)
-        (define rejected (try (begin
+        (define rejected (try (lambda () (begin
           (tds_tls_cli_config (nth input 0) (nth input 1) (nth input 2)
             (lambda (filename) (begin (reads "count" (+ (reads "count") 1)) "unused")))
-          false) (lambda (failure) (strlike (string (failure_value failure)) "%TDS TLS%"))))
+          false)) (lambda (failure) (strlike (string (failure_value failure)) "%TDS TLS%"))))
         (list rejected (reads "count")))))
       (list (list true 0) (list true 0) (list true 0) (list true 0)
         (list true 0) (list true 0) (list true 0)))
@@ -52,10 +52,10 @@ test_cases:
       (list (list "policy" "default" "certificate" "x" "certificate" "y") "%duplicate TDS TLS configuration field%")
       (list (list "policy" "optional" "certificate" "x" "private_key" true) "%TDS TLS configuration fields must be strings%")
       (list (list "policy" "optional" "certificate" "x" "filename" "y") "%unknown TDS TLS configuration field%"))
-      (lambda (fixture) (try (begin
+      (lambda (fixture) (try (lambda () (begin
         (tds 0 (lambda args (error "invalid TLS must not invoke frontend"))
           "memcp-tests" tsql_session_collation (car fixture))
-        false) (lambda (failure) (strlike (string (failure_value failure)) (cadr fixture))))))
+        false)) (lambda (failure) (strlike (string (failure_value failure)) (cadr fixture))))))
       (list true true true true true true true))
   expect: {result: true}
 - name: Loader failures retain the original exception without retry
@@ -64,11 +64,11 @@ test_cases:
       (define reads (newsession))
       (reads "count" 0)
       (define cause (list "fixture certificate unavailable"))
-      (define caught (try (begin
+      (define caught (try (lambda () (begin
         (tds_tls_cli_config "optional" "chain.pem" "key.pem"
           (lambda (filename) (begin
             (reads "count" (+ (reads "count") 1))
             (error cause))))
-        false) (lambda (failure) (equal? (failure_value failure) cause))))
+        false)) (lambda (failure) (equal? (failure_value failure) cause))))
       (and caught (equal? (reads "count") 1)))
   expect: {result: true}
