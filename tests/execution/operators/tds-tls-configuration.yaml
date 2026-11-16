@@ -1,0 +1,74 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: TDS startup TLS policy and certificate payload validation
+  isolated: true
+setup: []
+cleanup: []
+test_cases:
+- name: Unconfigured default retains plaintext without reading files
+  scm: |
+    (nil? (tds_tls_cli_config "default" nil nil
+      (lambda (filename) (error "unconfigured TLS must not read files"))))
+  expect: {result: true}
+- name: All configured policies load each PEM input exactly once
+  scm: |
+    (equal? (map '("default" "optional" "required") (lambda (policy) (begin
+      (define reads (newsession))
+      (reads "paths" (list))
+      (define config (tds_tls_cli_config policy "chain.pem" "key.pem"
+        (lambda (filename) (begin
+          (reads "paths" (append (reads "paths") filename))
+          (concat "fixture:" filename)))))
+      (list config (reads "paths")))))
+      (map '("default" "optional" "required") (lambda (policy)
+        (list (list "policy" policy "certificate" "fixture:chain.pem" "private_key" "fixture:key.pem")
+          (list "chain.pem" "key.pem")))))
+  expect: {result: true}
+- name: Invalid and incomplete startup options fail before loading files
+  scm: |
+    (equal? (map (list (list "unknown" "chain.pem" "key.pem")
+      (list "optional" nil nil) (list "required" nil nil)
+      (list "default" "chain.pem" nil) (list "default" nil "key.pem")
+      (list "optional" "" "key.pem") (list "optional" true "key.pem"))
+      (lambda (input) (begin
+        (define reads (newsession))
+        (reads "count" 0)
+        (define rejected (try (begin
+          (tds_tls_cli_config (nth input 0) (nth input 1) (nth input 2)
+            (lambda (filename) (begin (reads "count" (+ (reads "count") 1)) "unused")))
+          false) (lambda (failure) (strlike (string (failure_value failure)) "%TDS TLS%"))))
+        (list rejected (reads "count")))))
+      (list (list true 0) (list true 0) (list true 0) (list true 0)
+        (list true 0) (list true 0) (list true 0)))
+  expect: {result: true}
+- name: Native bridge rejects malformed TLS payloads before opening a listener
+  scm: |
+    (equal? (map (list
+      (list (list "policy" "unknown" "certificate" "x" "private_key" "y") "%unknown TDS TLS policy%")
+      (list (list "policy" "optional" "certificate" "x" "private_key" "y") "%invalid TDS TLS certificate/key pair%")
+      (list (list "policy" "required" "certificate" "x" "private_key" "y") "%invalid TDS TLS certificate/key pair%")
+      (list (list "policy" "default" "certificate" "x") "%TDS TLS configuration requires%")
+      (list (list "policy" "default" "certificate" "x" "certificate" "y") "%duplicate TDS TLS configuration field%")
+      (list (list "policy" "optional" "certificate" "x" "private_key" true) "%TDS TLS configuration fields must be strings%")
+      (list (list "policy" "optional" "certificate" "x" "filename" "y") "%unknown TDS TLS configuration field%"))
+      (lambda (fixture) (try (begin
+        (tds 0 (lambda args (error "invalid TLS must not invoke frontend"))
+          "memcp-tests" tsql_session_collation (car fixture))
+        false) (lambda (failure) (strlike (string (failure_value failure)) (cadr fixture))))))
+      (list true true true true true true true))
+  expect: {result: true}
+- name: Loader failures retain the original exception without retry
+  scm: |
+    (begin
+      (define reads (newsession))
+      (reads "count" 0)
+      (define cause (list "fixture certificate unavailable"))
+      (define caught (try (begin
+        (tds_tls_cli_config "optional" "chain.pem" "key.pem"
+          (lambda (filename) (begin
+            (reads "count" (+ (reads "count") 1))
+            (error cause))))
+        false) (lambda (failure) (equal? (failure_value failure) cause))))
+      (and caught (equal? (reads "count") 1)))
+  expect: {result: true}

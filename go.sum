@@ -145,6 +145,8 @@ github.com/launix-de/go-tdsstack v0.1.0 h1:jZhBReF7sm/B+Gvk5jyeqUPhyZ4sLkvrmJzJ0
 github.com/launix-de/go-tdsstack v0.1.0/go.mod h1:152MPGqR7nLPZxiFc7INb/yth0j+n/YKigsImfO8KRo=
 github.com/launix-de/go-tdsstack v0.1.1 h1:uW5LUBOtKE83OprHBvo6LwFq/u1JIEK/C/NOFJM67o8=
 github.com/launix-de/go-tdsstack v0.1.1/go.mod h1:152MPGqR7nLPZxiFc7INb/yth0j+n/YKigsImfO8KRo=
+github.com/launix-de/go-tdsstack v0.1.11 h1:9GhJGnZdHqsQKdGfG4PhT2OsVbpMP/6jymj0e0xw+ic=
+github.com/launix-de/go-tdsstack v0.1.11/go.mod h1:152MPGqR7nLPZxiFc7INb/yth0j+n/YKigsImfO8KRo=
 github.com/leonelquinteros/gotext v1.7.2 h1:bDPndU8nt+/kRo1m4l/1OXiiy2v7Z7dfPQ9+YP7G1Mc=
 github.com/leonelquinteros/gotext v1.7.2/go.mod h1:9/haCkm5P7Jay1sxKDGJ5WIg4zkz8oZKw4ekNpALob8=
 github.com/lib/pq v1.11.2 h1:x6gxUeu39V0BHZiugWe8LXZYZ+Utk7hSJGThs8sdzfs=

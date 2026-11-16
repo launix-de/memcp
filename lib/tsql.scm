@@ -1501,8 +1501,28 @@ path as the other frontends. Wire actions are interpreted here, never in scm/. *
 				(if (nil? value) nil (equal? (column "kind") 231) (string value) (intdiv value 1))))))))
 		(list "rows" (count (result "rows"))))
 	_ (error "unknown TDS frontend callback"))))
+/* The operator supplies files only at startup. The transport receives PEM
+values, and no certificate/key path enters frontend sessions or SQL metadata. */
+(define tds_tls_cli_config (lambda (policy certificate_path private_key_path load_file) (begin
+	(if (not (has? '("default" "optional" "required") policy))
+		(error "unknown TDS TLS policy"))
+	(if (and (nil? certificate_path) (nil? private_key_path))
+		(if (equal? policy "default") nil
+			(error "TDS TLS policy requires certificate and private key files"))
+		(begin
+			(if (or (nil? certificate_path) (nil? private_key_path))
+				(error "TDS TLS requires both certificate and private key files"))
+			(if (or (not (string? certificate_path)) (not (string? private_key_path))
+				(equal? certificate_path "") (equal? private_key_path ""))
+				(error "TDS TLS certificate and key paths must be nonempty strings"))
+			(list "policy" policy "certificate" (load_file certificate_path)
+				"private_key" (load_file private_key_path)))))))
 (if (arg "tds-port" nil) (begin
 	(define port (arg "tds-port" nil))
-	(tds port tds_frontend (arg "tds-database" "memcp-tests"))
+	(define tls_options (tds_tls_cli_config (arg "tds-tls-policy" "default")
+		(arg "tds-tls-cert" nil) (arg "tds-tls-key" nil)
+		(lambda (filename) (readfile (if (equal? (substr filename 0 1) "/")
+			filename (concat __CWD__ "/" filename))))))
+	(tds port tds_frontend (arg "tds-database" "memcp-tests") nil tls_options)
 	(service_registry "T-SQL protocol" (list port "" "TDS"))
 	(print "TDS listener on port " port)))
