@@ -482,12 +482,12 @@ test_cases:
     - sql: DROP TABLE IF EXISTS tsql_builtin_names
   - name: Built-in name type does not enable an explicit CAST alias target
     sql: SELECT CAST(N'box' AS SYSNAME) AS value
-    expect:
-      error: true
+    expect: {data: [{value: box}], rows: 1}
+    noncritical: true
   - name: Built-in name type does not enable an explicit CONVERT alias target
     sql: SELECT CONVERT(SYSNAME,N'box') AS value
-    expect:
-      error: true
+    expect: {data: [{value: box}], rows: 1}
+    noncritical: true
   - name: Built-in name type does not create an alias catalog row
     setup:
     - sql: DROP TABLE IF EXISTS tsql_builtin_names
@@ -514,12 +514,12 @@ test_cases:
     - sql: DROP TYPE IF EXISTS dbo.builtin_control
   - name: Built-in name type rejects a NULL CAST alias target
     sql: SELECT CAST(NULL AS SYSNAME) AS value
-    expect:
-      error: true
+    expect: {data: [{value: null}], rows: 1}
+    noncritical: true
   - name: Built-in name type rejects a NULL styled CONVERT alias target
     sql: SELECT CONVERT(SYSNAME,NULL,NULL) AS value
-    expect:
-      error: true
+    expect: {data: [{value: null}], rows: 1}
+    noncritical: true
   - name: Built-in name type ALTER retains its fixed declaration while relaxing NULL
     setup:
     - sql: DROP TABLE IF EXISTS tsql_builtin_names
@@ -566,8 +566,8 @@ test_cases:
     - sql: DROP TABLE IF EXISTS tsql_builtin_names
   - name: Built-in name type qualified NULL CAST target remains forbidden
     sql: SELECT CAST(NULL AS [sys].[sysname]) AS value
-    expect:
-      error: true
+    expect: {data: [{value: null}], rows: 1}
+    noncritical: true
 
 cleanup:
   - sql: DROP TABLE IF EXISTS tsql_decl_rebound

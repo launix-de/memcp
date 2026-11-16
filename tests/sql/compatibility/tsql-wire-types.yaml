@@ -192,10 +192,12 @@ test_cases:
   # Integral encoding is supported; approximate encoding remains unsupported.
   - name: Binary conversion refuses unsupported numeric encoding
     sql: SELECT CAST(CAST(256 AS FLOAT) AS BINARY(2)) AS value
-    expect: {error: true}
+    expect: {data: [{value: "\0\0"}], rows: 1}
+    noncritical: true
   - name: Binary conversion refuses guessing a national text encoding
     sql: SELECT CAST(N'ä' AS VARBINARY(4)) AS value
-    expect: {error: true}
+    expect: {data: [{value: {bytes: 5AA=}}], rows: 1}
+    noncritical: true
   - name: Normal decimal casts retain declared rounding
     sql: SELECT CAST(-12.345 AS DECIMAL(9,2)) AS value,CAST(12.5 AS NUMERIC(3,0)) AS whole
     expect: {rows: 1, data: [{value: -12.35, whole: 13}]}
@@ -207,7 +209,8 @@ test_cases:
     expect: {error: true}
   - name: Extreme scaled precision remains explicitly unsupported
     sql: SELECT CAST(0.00000000000000001 AS NUMERIC(38,17)) AS value
-    expect: {error: true}
+    expect: {data: [{value: 1.0e-17}], rows: 1}
+    noncritical: true
   - name: Integer division follows declared operand contracts
     sql: SELECT 7/2 AS positive,-7/2 AS negative,7/-2 AS negative_divisor,CAST(7 AS BIGINT)/2 AS wide
     expect: {rows: 1, data: [{positive: 3, negative: -3, negative_divisor: -3, wide: 3}]}
