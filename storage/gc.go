@@ -421,6 +421,12 @@ func Clean() string {
 	totalBlobs, totalShards := 0, 0
 	incomplete := 0
 	for _, db := range databases.GetAll() {
+		// Background cleanup must not load an unused database just to reclaim
+		// disk space. A published namespace is only an admission hint:
+		// CleanDatabase still joins the load barrier and proves ownership.
+		if db.foldedTableNames.Load() == nil {
+			continue
+		}
 		b, s, complete := CleanDatabase(db)
 		totalBlobs += b
 		totalShards += s
