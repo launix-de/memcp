@@ -25,6 +25,44 @@ import (
 	"unsafe"
 )
 
+func TestJITParserEnvironmentRootOrderIsStable(t *testing.T) {
+	if !jitEnabled {
+		t.Skip("requires GOEXPERIMENT=jit")
+	}
+	codeLength := 0
+	for attempt := 0; attempt < 16; attempt++ {
+		environment := &Env{Vars: make(Vars), Outer: &Globalenv}
+		alpha := Eval(Read(t.Name(), `(parser "alpha" "first")`, true), environment)
+		beta := Eval(Read(t.Name(), `(parser "beta" "second")`, true), environment)
+		// The earliest binding determines root order, including aliases.
+		environment.Vars["z_alpha"] = alpha
+		environment.Vars["b_beta"] = beta
+		environment.Vars["a_alpha_alias"] = alpha
+		jitCompileEnvironmentParsers(environment)
+		if alpha.Parser().JITRule != 0 || beta.Parser().JITRule != 1 {
+			t.Fatalf("attempt %d: root IDs alpha=%d beta=%d", attempt, alpha.Parser().JITRule, beta.Parser().JITRule)
+		}
+		entry := alpha.Parser().Compiled
+		if entry == nil || entry != beta.Parser().Compiled {
+			t.Fatal("roots do not share one compiled grammar")
+		}
+		if attempt == 0 {
+			codeLength = entry.CodeLen
+		} else if entry.CodeLen != codeLength {
+			t.Fatalf("attempt %d: grammar bytes %d, want %d", attempt, entry.CodeLen, codeLength)
+		}
+		for _, test := range []struct {
+			parser *ScmParser
+			input  string
+			want   string
+		}{{alpha.Parser(), "alpha", "first"}, {beta.Parser(), "beta", "second"}} {
+			if got := test.parser.Execute(test.input, environment).String(); got != test.want {
+				t.Fatalf("parse %q = %q, want %q", test.input, got, test.want)
+			}
+		}
+	}
+}
+
 func TestJITParserDiscardedRuleValuesSurviveGC(t *testing.T) {
 	if !jitEnabled {
 		t.Skip("requires GOEXPERIMENT=jit")

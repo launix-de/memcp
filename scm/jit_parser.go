@@ -368,11 +368,20 @@ func jitCompileEnvironmentParsers(environment *Env) {
 	groups := make(map[string][]*ScmParser)
 	seen := make(map[*ScmParser]struct{})
 	defaultSkipper := packratDefaultSkipper().String()
-	for _, value := range environment.Vars {
+	// Root discovery assigns rule IDs and therefore native layout, memo slots
+	// and inlining order. Map iteration must not randomize those decisions.
+	// Sort bindings before deduplicating aliases so each parser's earliest
+	// name determines its stable position within its whitespace group.
+	names := make([]Symbol, 0)
+	for name, value := range environment.Vars {
 		if !value.IsParser() || value.Parser() == nil || value.Parser().Compiled != nil {
 			continue
 		}
-		parser := value.Parser()
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	for _, name := range names {
+		parser := environment.Vars[name].Parser()
 		if _, exists := seen[parser]; exists {
 			continue
 		}

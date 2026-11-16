@@ -402,12 +402,52 @@ GOMAXPROCS=4 go test -tags=nophp ./storage -run '^$' -bench '^BenchmarkAdaptiveB
 Use the same input, compiler and counts on both revisions. Neither the CI
 regression budget nor an existing assertion is relaxed by this feature.
 
-The complete focused SQL string-compression suite passes 88/88 on both the
-rebuilt master and candidate (Go JIT 1.27.3; master PHP build, candidate nophp).
+The complete focused SQL string-compression suite passes 88/88 on both builds.
+Subsequent build-info verification found master was Go 1.26 without JIT, while
+the candidate used Go JIT 1.27.3 (nophp). The original compiler label was wrong.
 The new post-restart workload checks 512 long escaped documents, a mix of inline
 text and blob fallback, with four total LIKE queries and zero warmup:
-167.952 → 126.999 ms (−24.4%). All QUERY_TIME records, including other queries
+167.952 → 126.999 ms, but this is **not a valid JIT A/B comparison** and the
+claimed speedup is withdrawn. All QUERY_TIME records, including other queries
 that became slower in this individual run, are retained in the JSON. These are
 one suite run per side, not a replacement for CI A/B. Focused native, race,
 JIT scalar/range/multi and fused-filter checks also pass; emitters are generated
 by `make jitgen`. Upgrade fixtures add 150 long documents without a format bump.
+
+### CI failure investigation and parser root ordering
+
+The original head `b547a1045` had four red checks: a dependency-download failure,
+two JIT performance shards and their aggregate. Actual seven-fixture failures
+were nested scalar sums 135.489 → 163.330 ms (+20.5%; 0.744 ms above the 20%
+limit) and a filtered scalar binder 166.291 → 203.379 ms (+22.3%; 3.830 ms above
+the limit). Subsequent profiled diagnostics also received SIGSEGV, including
+in the baseline binary. Native performance, correctness and upgrade CI passed.
+
+An independent CI repeat on the **same source commit**, with no assertion or
+budget changes, passed every check: nested sums 204.316 → 207.993 ms (+1.8%,
+seven fixtures), filtered scalar binder 189.630 → 188.672 ms (−0.5%, one fixture),
+negated snapshots 58.259 → 58.549 ms (+0.5%, seven fixtures). The original failing
+measurements remain in the JSON; a passing repeat does not make them disappear.
+
+The correctly rebuilt local JIT/PHP comparison also changes which case loses:
+nested sums 208.886 → 189.434 ms (−9.3%), filtered scalar binder
+237.711 → 237.123 ms (−0.2%), but negated snapshots 39.950 → 54.338 ms (+36.0%),
+each across seven fresh fixtures with the unchanged CI configuration. Four
+separate GC diagnostic pairs show overlapping concurrent GC on some slow calls;
+they do not prove that GC explains every difference. No GC is forced or disabled.
+
+For nested sums and negated snapshots, EXPLAIN, IR, PHYSICAL and REORDER outputs
+match byte for byte across the diagnostic processes. JIT import statistics
+(8,239 records per side) and non-parser named code sizes match (8,592 named
+functions per side). One 1,761-byte storage reader has 406 identical instructions
+after normalizing absolute addresses. There is no observed loss of operator
+fusion in that comparison.
+
+Native **parser grammar** code sizes do differ. Environment roots were compiled
+in Go map iteration order, changing rule IDs, memo layout and generated code.
+The correction sorts eligible binding names before alias deduplication, retaining
+whitespace grouping and the original order of alternatives inside each parser.
+A focused test reproduces unstable IDs before the fix and verifies stable IDs,
+code length, shared grammar publication and results over 16 independent builds
+afterwards. All focused JIT parser tests pass. This closes a concrete source of
+layout variation; it is not proof that parser order caused all CI fluctuations.

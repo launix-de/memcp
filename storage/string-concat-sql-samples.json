@@ -35740,7 +35740,7 @@
     "focused_sql": {
       "master": {
         "results": "88/88 pass",
-        "compiler": "Go JIT 1.27.3; master PHP enabled, candidate nophp; same storage paths",
+        "compiler": "go1.26.0, PHP enabled, no JIT experiment (verified after original measurement)",
         "samples": [
           "QUERY_TIME total_ns=1257810 n=1 measurement_ns=1257810 aggregation=median time_per_repetition_ns=1257810 warmup=0 name=Setup: drop tables if exist",
           "QUERY_TIME total_ns=3247956 n=1 measurement_ns=3247956 aggregation=median time_per_repetition_ns=3247956 warmup=0 name=Create UUID table",
@@ -35919,6 +35919,949 @@
           "QUERY_TIME total_ns=2720970 n=1 measurement_ns=2720970 aggregation=median time_per_repetition_ns=2720970 warmup=0 name=Adaptive blob fallback retains materialization errors",
           "QUERY_TIME total_ns=751733 n=1 measurement_ns=751733 aggregation=median time_per_repetition_ns=751733 warmup=0 name=Cleanup"
         ]
+      },
+      "valid_ab_comparison": false,
+      "correction": "Build-info verification on 2026-11-16 found master was go1.26.0 without GOEXPERIMENT=jit, while candidate used go1.27.3-X:jit. The 167.952 -> 126.999 ms result is not a valid JIT A/B comparison and is withdrawn. Retained for audit only; native Go 1.26 representation probes remain separate."
+    },
+    "ci_failure_analysis": {
+      "initial_domain_ci": {
+        "tests/performance/domain-snapshot.yaml::Negated selected values preserve their projection in cold and retained snapshots": {
+          "time_ms": 62.172909,
+          "time_per_repetition_ms": 31.0864545,
+          "timing_aggregation": "total",
+          "timing_group": null,
+          "repetitions": 2,
+          "warmup": 0,
+          "rows": 1000,
+          "max_regression_pct": 20.0,
+          "workload_sha256": "450d1fccb796c38fe43e5d06c692c06bfc7640db01c5eba7f43fa8c831a11e19",
+          "baseline_failures": [],
+          "status": "compared",
+          "candidate_ms": 41.360486,
+          "fixture_trials": 7,
+          "a_samples_ms": [
+            67.207469,
+            62.172909,
+            69.026499,
+            45.964113,
+            66.512925,
+            55.164992,
+            40.81222
+          ],
+          "candidate_total_repetitions": 14,
+          "b_samples_ms": [
+            41.360486,
+            41.15796,
+            55.431826,
+            41.642404,
+            48.721356,
+            41.032748,
+            40.918825
+          ],
+          "threshold_ms": 74.6074908,
+          "waiver_reason": null,
+          "passed": true,
+          "verification_pending": false
+        },
+        "tests/performance/domain-snapshot.yaml::Nested scalar sums retain the complete aggregate domain": {
+          "time_ms": 135.488724,
+          "time_per_repetition_ms": 67.744362,
+          "timing_aggregation": "total",
+          "timing_group": null,
+          "repetitions": 2,
+          "warmup": 0,
+          "rows": 1000,
+          "max_regression_pct": 20.0,
+          "workload_sha256": "518181c77d646759e0ab1b4c32ed66d7e03adde631de9a842b1668874f6bef21",
+          "baseline_failures": [],
+          "status": "compared",
+          "candidate_ms": 163.330234,
+          "fixture_trials": 7,
+          "a_samples_ms": [
+            135.149485,
+            133.971467,
+            135.639379,
+            136.814771,
+            135.488724,
+            134.581621,
+            158.930172
+          ],
+          "candidate_total_repetitions": 14,
+          "b_samples_ms": [
+            164.023872,
+            132.927191,
+            135.878456,
+            164.619832,
+            135.751504,
+            166.039011,
+            163.330234
+          ],
+          "threshold_ms": 162.58646879999998,
+          "waiver_reason": null,
+          "passed": false,
+          "verification_pending": false
+        }
+      },
+      "initial_tenant_ci": {
+        "tests/performance/tenant-document-navigation.yaml::Perf: scalar predicate with a later filtered comparison relation": {
+          "time_ms": 166.290614,
+          "time_per_repetition_ms": 41.5726535,
+          "timing_aggregation": "total",
+          "timing_group": null,
+          "repetitions": 4,
+          "warmup": 0,
+          "rows": 800000,
+          "max_regression_pct": 20.0,
+          "workload_sha256": "c4449b22478860f268fa3ea256221377aa56f0965d43e2e52188843445a82b44",
+          "baseline_failures": [],
+          "status": "compared",
+          "candidate_ms": 203.379161,
+          "fixture_trials": 7,
+          "a_samples_ms": [
+            167.895026,
+            162.06531,
+            162.778455,
+            162.914586,
+            203.06858,
+            206.160641,
+            166.290614
+          ],
+          "candidate_total_repetitions": 28,
+          "b_samples_ms": [
+            203.379161,
+            208.041,
+            167.935429,
+            200.365801,
+            204.03973,
+            201.842457,
+            209.987617
+          ],
+          "threshold_ms": 199.5487368,
+          "waiver_reason": null,
+          "passed": false,
+          "verification_pending": false
+        }
+      },
+      "correct_jit_reproduction_before_parser_fix": {
+        "schema_version": 1,
+        "tests/performance/domain-snapshot.yaml::Moving snapshot plateau one cold board and ten later boards": {
+          "time_ms": 600.973287,
+          "time_per_repetition_ms": 54.63393518181818,
+          "timing_aggregation": "total",
+          "timing_group": null,
+          "repetitions": 11,
+          "warmup": 0,
+          "rows": 1000,
+          "max_regression_pct": 20.0,
+          "workload_sha256": "3c91bf49f4159d3e8bc929390f34b5c72fab2dae5d136a6b12910c912a6d0646",
+          "baseline_failures": [],
+          "status": "compared",
+          "candidate_ms": 631.801559,
+          "fixture_trials": 7,
+          "a_samples_ms": [
+            661.640944,
+            600.973287,
+            574.17932,
+            643.612682,
+            582.195845,
+            529.266476,
+            654.41448
+          ],
+          "candidate_total_repetitions": 77,
+          "b_samples_ms": [
+            571.324638,
+            790.968072,
+            506.571226,
+            631.801559,
+            656.591313,
+            878.908121,
+            546.2153
+          ],
+          "threshold_ms": 721.1679444,
+          "waiver_reason": null,
+          "passed": true,
+          "verification_pending": false
+        },
+        "tests/performance/domain-snapshot.yaml::One cold board and ten alias-renamed boards share snapshot cells": {
+          "time_ms": 618.894765,
+          "time_per_repetition_ms": 56.263160454545456,
+          "timing_aggregation": "total",
+          "timing_group": null,
+          "repetitions": 11,
+          "warmup": 0,
+          "rows": 1000,
+          "max_regression_pct": 20.0,
+          "workload_sha256": "06be0a847c563c03c4fc1b59831037a29c55236c4459e40d345b96034cecd37b",
+          "baseline_failures": [],
+          "status": "compared",
+          "candidate_ms": 604.388504,
+          "fixture_trials": 7,
+          "a_samples_ms": [
+            574.029712,
+            839.442746,
+            618.894765,
+            573.868408,
+            999.166218,
+            556.457201,
+            628.754372
+          ],
+          "candidate_total_repetitions": 77,
+          "b_samples_ms": [
+            619.565673,
+            563.734521,
+            578.115658,
+            577.245034,
+            684.719616,
+            983.619468,
+            604.388504
+          ],
+          "threshold_ms": 742.673718,
+          "waiver_reason": null,
+          "passed": true,
+          "verification_pending": false
+        },
+        "tests/performance/domain-snapshot.yaml::Ordered domain shares quantity, classification and independent predicate state": {
+          "time_ms": 349.767855,
+          "time_per_repetition_ms": 174.8839275,
+          "timing_aggregation": "total",
+          "timing_group": null,
+          "repetitions": 2,
+          "warmup": 0,
+          "rows": 1000,
+          "max_regression_pct": 20.0,
+          "workload_sha256": "76cf1615eccda4047b6539385539cd16e2b1b5dc388a89c5182e0cb6be026aa8",
+          "baseline_failures": [],
+          "status": "compared",
+          "candidate_ms": 353.425909,
+          "fixture_trials": 7,
+          "a_samples_ms": [
+            382.639812,
+            349.767855,
+            379.287298,
+            333.203065,
+            402.974044,
+            330.675337,
+            332.023875
+          ],
+          "candidate_total_repetitions": 14,
+          "b_samples_ms": [
+            339.951364,
+            402.631702,
+            359.336668,
+            353.425909,
+            343.552537,
+            384.130841,
+            326.796025
+          ],
+          "threshold_ms": 419.721426,
+          "waiver_reason": null,
+          "passed": true,
+          "verification_pending": false
+        },
+        "tests/performance/domain-snapshot.yaml::Many snapshot coordinates share one invariant ordered cut": {
+          "time_ms": 487.46146,
+          "time_per_repetition_ms": 81.24357666666667,
+          "timing_aggregation": "total",
+          "timing_group": null,
+          "repetitions": 6,
+          "warmup": 0,
+          "rows": 1000,
+          "max_regression_pct": 20.0,
+          "workload_sha256": "61b8f28e7a43666a786b5aa104655c095a7ce9b7169aafdcd5d83ecbf8dcad96",
+          "baseline_failures": [],
+          "status": "compared",
+          "candidate_ms": 496.839424,
+          "fixture_trials": 7,
+          "a_samples_ms": [
+            462.389921,
+            452.605542,
+            494.130961,
+            436.90066,
+            487.46146,
+            536.58959,
+            519.209809
+          ],
+          "candidate_total_repetitions": 42,
+          "b_samples_ms": [
+            463.404833,
+            575.534563,
+            496.839424,
+            472.465574,
+            476.947206,
+            555.495241,
+            508.489593
+          ],
+          "threshold_ms": 584.953752,
+          "waiver_reason": null,
+          "passed": true,
+          "verification_pending": false
+        },
+        "tests/performance/domain-snapshot.yaml::Selected property boundaries share the moving selection domain": {
+          "time_ms": 120.153255,
+          "time_per_repetition_ms": 20.0255425,
+          "timing_aggregation": "total",
+          "timing_group": null,
+          "repetitions": 6,
+          "warmup": 0,
+          "rows": 1000,
+          "max_regression_pct": 20.0,
+          "workload_sha256": "ae8349de2d2da839ee24d62e3969c4a07d5bb76b08f1efe1f91e6261744fd799",
+          "baseline_failures": [],
+          "status": "compared",
+          "candidate_ms": 94.810976,
+          "fixture_trials": 7,
+          "a_samples_ms": [
+            104.460648,
+            127.752844,
+            126.259756,
+            108.551342,
+            120.153255,
+            105.721224,
+            176.474284
+          ],
+          "candidate_total_repetitions": 42,
+          "b_samples_ms": [
+            145.309726,
+            119.198749,
+            82.360714,
+            76.955555,
+            157.348633,
+            94.810976,
+            73.550978
+          ],
+          "threshold_ms": 144.183906,
+          "waiver_reason": null,
+          "passed": true,
+          "verification_pending": false
+        },
+        "tests/performance/domain-snapshot.yaml::Negated selected values preserve their projection in cold and retained snapshots": {
+          "time_ms": 39.95033,
+          "time_per_repetition_ms": 19.975165,
+          "timing_aggregation": "total",
+          "timing_group": null,
+          "repetitions": 2,
+          "warmup": 0,
+          "rows": 1000,
+          "max_regression_pct": 20.0,
+          "workload_sha256": "450d1fccb796c38fe43e5d06c692c06bfc7640db01c5eba7f43fa8c831a11e19",
+          "baseline_failures": [],
+          "status": "compared",
+          "candidate_ms": 54.338194,
+          "fixture_trials": 7,
+          "a_samples_ms": [
+            41.42705,
+            37.185949,
+            43.235748,
+            46.502005,
+            39.95033,
+            35.409,
+            36.818297
+          ],
+          "candidate_total_repetitions": 14,
+          "b_samples_ms": [
+            54.338194,
+            64.450377,
+            86.373857,
+            52.982865,
+            34.631506,
+            69.493412,
+            43.948715
+          ],
+          "threshold_ms": 47.940396,
+          "waiver_reason": null,
+          "passed": false,
+          "verification_pending": false
+        },
+        "tests/performance/domain-snapshot.yaml::Nested scalar sums retain the complete aggregate domain": {
+          "time_ms": 208.886089,
+          "time_per_repetition_ms": 104.4430445,
+          "timing_aggregation": "total",
+          "timing_group": null,
+          "repetitions": 2,
+          "warmup": 0,
+          "rows": 1000,
+          "max_regression_pct": 20.0,
+          "workload_sha256": "518181c77d646759e0ab1b4c32ed66d7e03adde631de9a842b1668874f6bef21",
+          "baseline_failures": [],
+          "status": "compared",
+          "candidate_ms": 189.43435,
+          "fixture_trials": 7,
+          "a_samples_ms": [
+            218.187598,
+            208.886089,
+            169.484412,
+            244.248024,
+            216.943308,
+            176.222197,
+            148.658998
+          ],
+          "candidate_total_repetitions": 14,
+          "b_samples_ms": [
+            190.496224,
+            189.43435,
+            172.827547,
+            166.280749,
+            195.241279,
+            264.79334,
+            174.255454
+          ],
+          "threshold_ms": 250.6633068,
+          "waiver_reason": null,
+          "passed": true,
+          "verification_pending": false
+        },
+        "tests/performance/domain-snapshot.yaml::First-event intervals combine with dynamic state predicates": {
+          "time_ms": 1288.009423,
+          "time_per_repetition_ms": 644.0047115,
+          "timing_aggregation": "total",
+          "timing_group": null,
+          "repetitions": 2,
+          "warmup": 0,
+          "rows": 1000,
+          "max_regression_pct": 20.0,
+          "workload_sha256": "d7578c44ebb8d867c8f41c4d82f608e2c622cd4784521da6ece7591b72931a5b",
+          "baseline_failures": [],
+          "status": "compared",
+          "candidate_ms": 1270.685111,
+          "fixture_trials": 7,
+          "a_samples_ms": [
+            1333.77116,
+            1328.233125,
+            1222.966939,
+            1253.010914,
+            1226.242138,
+            1370.192056,
+            1288.009423
+          ],
+          "candidate_total_repetitions": 14,
+          "b_samples_ms": [
+            1409.419574,
+            1305.614959,
+            1269.077421,
+            1326.128381,
+            1270.685111,
+            1245.56868,
+            1264.512025
+          ],
+          "threshold_ms": 1545.6113076,
+          "waiver_reason": null,
+          "passed": true,
+          "verification_pending": false
+        },
+        "tests/performance/tenant-document-navigation.yaml::Perf: document navigation counts in a present year": {
+          "time_ms": 462.612216,
+          "time_per_repetition_ms": 115.653054,
+          "timing_aggregation": "total",
+          "timing_group": null,
+          "repetitions": 4,
+          "warmup": 0,
+          "rows": 800000,
+          "max_regression_pct": 20.0,
+          "workload_sha256": "1228e8185fbeabaa12bd7730135b932053e90ea247563904530598214a0120b7",
+          "baseline_failures": [],
+          "status": "compared",
+          "candidate_ms": 419.403647,
+          "fixture_trials": 7,
+          "a_samples_ms": [
+            555.047665,
+            500.86925,
+            462.612216,
+            510.893861,
+            433.629468,
+            375.362085,
+            392.389884
+          ],
+          "candidate_total_repetitions": 28,
+          "b_samples_ms": [
+            414.016892,
+            445.224065,
+            417.120637,
+            440.559725,
+            419.403647,
+            406.68609,
+            424.223364
+          ],
+          "threshold_ms": 555.1346592,
+          "waiver_reason": null,
+          "passed": true,
+          "verification_pending": false
+        },
+        "tests/performance/tenant-document-navigation.yaml::Perf: full tenant hierarchy across populated years": {
+          "time_ms": 2805.846239,
+          "time_per_repetition_ms": 701.46155975,
+          "timing_aggregation": "total",
+          "timing_group": null,
+          "repetitions": 4,
+          "warmup": 0,
+          "rows": 800000,
+          "max_regression_pct": 20.0,
+          "workload_sha256": "23fd7f843506c9ac74493455995febde703fa9ff59f3324662d51596d32aee9c",
+          "baseline_failures": [],
+          "status": "compared",
+          "candidate_ms": 2788.858699,
+          "fixture_trials": 7,
+          "a_samples_ms": [
+            2916.27815,
+            2776.910131,
+            2708.434601,
+            2883.96658,
+            2696.859273,
+            2805.846239,
+            2884.835332
+          ],
+          "candidate_total_repetitions": 28,
+          "b_samples_ms": [
+            2930.087717,
+            2962.406791,
+            2788.858699,
+            3109.537965,
+            2631.528597,
+            2770.339335,
+            2589.602574
+          ],
+          "threshold_ms": 3367.0154868,
+          "waiver_reason": null,
+          "passed": true,
+          "verification_pending": false
+        },
+        "tests/performance/tenant-document-navigation.yaml::Perf: full tenant hierarchy across sparse years": {
+          "time_ms": 1093.737847,
+          "time_per_repetition_ms": 273.43446175,
+          "timing_aggregation": "total",
+          "timing_group": null,
+          "repetitions": 4,
+          "warmup": 0,
+          "rows": 800000,
+          "max_regression_pct": 20.0,
+          "workload_sha256": "2f4eee7f24c9aeae85adcb90a18fd6a896cf9519c1980bdec53f1e68bd390e1e",
+          "baseline_failures": [],
+          "status": "compared",
+          "candidate_ms": 1113.408569,
+          "fixture_trials": 7,
+          "a_samples_ms": [
+            1154.057222,
+            1036.480084,
+            1113.049731,
+            1006.592952,
+            1138.79737,
+            1078.998112,
+            1093.737847
+          ],
+          "candidate_total_repetitions": 28,
+          "b_samples_ms": [
+            1113.408569,
+            1243.299333,
+            1089.060168,
+            1168.47895,
+            1044.429791,
+            1086.760783,
+            1118.509176
+          ],
+          "threshold_ms": 1312.4854164,
+          "waiver_reason": null,
+          "passed": true,
+          "verification_pending": false
+        },
+        "tests/performance/tenant-document-navigation.yaml::Perf: unrestricted hierarchy retains correlated membership": {
+          "time_ms": 4876.01976,
+          "time_per_repetition_ms": 1219.00494,
+          "timing_aggregation": "total",
+          "timing_group": null,
+          "repetitions": 4,
+          "warmup": 0,
+          "rows": 800000,
+          "max_regression_pct": 20.0,
+          "workload_sha256": "94d8c19392950abe90fcf872309b1d440cb20e8c57ed206f1ad3bcd725d71562",
+          "baseline_failures": [],
+          "status": "compared",
+          "candidate_ms": 5044.041783,
+          "fixture_trials": 7,
+          "a_samples_ms": [
+            5089.015206,
+            5005.184392,
+            4874.32169,
+            4844.232366,
+            4919.299299,
+            4873.480242,
+            4876.01976
+          ],
+          "candidate_total_repetitions": 28,
+          "b_samples_ms": [
+            5151.766221,
+            5133.292871,
+            5021.568791,
+            5172.908737,
+            4947.372492,
+            5044.041783,
+            4882.930117
+          ],
+          "threshold_ms": 5851.223712,
+          "waiver_reason": null,
+          "passed": true,
+          "verification_pending": false
+        },
+        "tests/performance/tenant-document-navigation.yaml::timing group: selective-unique-point": {
+          "time_ms": 950.242431,
+          "time_per_repetition_ms": 0.950242431,
+          "timing_aggregation": "total",
+          "timing_group": "selective-unique-point",
+          "repetitions": 1000,
+          "warmup": 0,
+          "rows": 800000,
+          "max_regression_pct": 20.0,
+          "workload_sha256": "ac672f87a7a370d78347740580921d99a0174d1f3b21194b2f4912fc44d592f7",
+          "group_members": {
+            "tests/performance/tenant-document-navigation.yaml::Perf: selective point before unique scalar lookup": 20.332638,
+            "tests/performance/tenant-document-navigation.yaml::Perf: selective unique scalar point steady reuses": 927.033812
+          },
+          "baseline_failures": [],
+          "status": "compared",
+          "candidate_ms": 958.1346030000001,
+          "fixture_trials": 7,
+          "a_samples_ms": [
+            947.36645,
+            999.130581,
+            941.083229,
+            973.7775,
+            886.709896,
+            950.242431,
+            992.51123
+          ],
+          "candidate_total_repetitions": 7000,
+          "b_samples_ms": [
+            1110.6935319999998,
+            985.735889,
+            953.263587,
+            979.847175,
+            940.243276,
+            950.3612129999999,
+            958.1346030000001
+          ],
+          "threshold_ms": 1140.2909172,
+          "waiver_reason": null,
+          "passed": true,
+          "verification_pending": false
+        },
+        "tests/performance/tenant-document-navigation.yaml::Perf: broad unique scalar predicate keeps late lookup": {
+          "time_ms": 1577.568059,
+          "time_per_repetition_ms": 30.932707039215686,
+          "timing_aggregation": "total",
+          "timing_group": null,
+          "repetitions": 51,
+          "warmup": 0,
+          "rows": 800000,
+          "max_regression_pct": 20.0,
+          "workload_sha256": "e2ecf473fd67c7f8e9d8af876aedbcc5423c03160b6289d30cd04b7670bda6e8",
+          "baseline_failures": [],
+          "status": "compared",
+          "candidate_ms": 1567.387524,
+          "fixture_trials": 7,
+          "a_samples_ms": [
+            1755.080961,
+            1625.754654,
+            1501.527446,
+            1577.568059,
+            1585.130513,
+            1551.49133,
+            1504.214144
+          ],
+          "candidate_total_repetitions": 357,
+          "b_samples_ms": [
+            1529.890118,
+            1583.19851,
+            1627.429794,
+            1592.034781,
+            1567.387524,
+            1469.061141,
+            1524.809178
+          ],
+          "threshold_ms": 1893.0816707999998,
+          "waiver_reason": null,
+          "passed": true,
+          "verification_pending": false
+        },
+        "tests/performance/tenant-document-navigation.yaml::Perf: scalar predicate with a later filtered comparison relation": {
+          "time_ms": 237.710513,
+          "time_per_repetition_ms": 59.42762825,
+          "timing_aggregation": "total",
+          "timing_group": null,
+          "repetitions": 4,
+          "warmup": 0,
+          "rows": 800000,
+          "max_regression_pct": 20.0,
+          "workload_sha256": "c4449b22478860f268fa3ea256221377aa56f0965d43e2e52188843445a82b44",
+          "baseline_failures": [],
+          "status": "compared",
+          "candidate_ms": 237.123377,
+          "fixture_trials": 7,
+          "a_samples_ms": [
+            229.74856,
+            251.272783,
+            230.1088,
+            237.710513,
+            251.375874,
+            264.701476,
+            230.19026
+          ],
+          "candidate_total_repetitions": 28,
+          "b_samples_ms": [
+            293.25665,
+            237.123377,
+            241.243534,
+            226.780951,
+            234.808559,
+            218.761343,
+            244.691865
+          ],
+          "threshold_ms": 285.25261559999996,
+          "waiver_reason": null,
+          "passed": true,
+          "verification_pending": false
+        }
+      },
+      "gc_diagnostic_method": "Four predeclared AB pairs, unchanged workload counts, GODEBUG=gctrace=1, no forced GC. EXPLAIN/IR/PHYSICAL/REORDER are captured after all timed queries. Diagnostic timings are not performance-gate measurements.",
+      "gc_diagnostics": {
+        "gc-domain-1-A": {
+          "query_times_ms": {
+            "negated": [
+              48.845721,
+              1.256899
+            ],
+            "nested": [
+              196.426051,
+              1.929252
+            ]
+          },
+          "gc_overlaps": {
+            "negated": [],
+            "nested": [
+              {
+                "cycle": 82,
+                "overlap_ms": 44.813815999997786,
+                "clock_ms": "0.057+49+0.079"
+              }
+            ]
+          }
+        },
+        "gc-domain-1-B": {
+          "query_times_ms": {
+            "negated": [
+              38.510714,
+              1.174702
+            ],
+            "nested": [
+              207.840917,
+              1.204629
+            ]
+          },
+          "gc_overlaps": {
+            "negated": [],
+            "nested": [
+              {
+                "cycle": 86,
+                "overlap_ms": 55.08100000000127,
+                "clock_ms": "0.063+55+0.018"
+              }
+            ]
+          }
+        },
+        "gc-domain-2-A": {
+          "query_times_ms": {
+            "negated": [
+              58.438944,
+              1.981442
+            ],
+            "nested": [
+              155.251007,
+              2.158589
+            ]
+          },
+          "gc_overlaps": {
+            "negated": [],
+            "nested": []
+          }
+        },
+        "gc-domain-2-B": {
+          "query_times_ms": {
+            "negated": [
+              97.502257,
+              2.88246
+            ],
+            "nested": [
+              187.746233,
+              1.297156
+            ]
+          },
+          "gc_overlaps": {
+            "negated": [
+              {
+                "cycle": 89,
+                "overlap_ms": 76.07900000000001,
+                "clock_ms": "0.075+76+0.004"
+              }
+            ],
+            "nested": []
+          }
+        },
+        "gc-domain-3-A": {
+          "query_times_ms": {
+            "negated": [
+              55.180821,
+              1.658776
+            ],
+            "nested": [
+              165.519982,
+              1.616374
+            ]
+          },
+          "gc_overlaps": {
+            "negated": [],
+            "nested": [
+              {
+                "cycle": 88,
+                "overlap_ms": 21.04399999999984,
+                "clock_ms": "0.032+21+0.012"
+              }
+            ]
+          }
+        },
+        "gc-domain-3-B": {
+          "query_times_ms": {
+            "negated": [
+              37.882611,
+              1.495925
+            ],
+            "nested": [
+              162.577871,
+              1.831896
+            ]
+          },
+          "gc_overlaps": {
+            "negated": [
+              {
+                "cycle": 89,
+                "overlap_ms": 24.034000000000333,
+                "clock_ms": "0.031+24+0.003"
+              }
+            ],
+            "nested": []
+          }
+        },
+        "gc-domain-4-A": {
+          "query_times_ms": {
+            "negated": [
+              85.114978,
+              2.235395
+            ],
+            "nested": [
+              149.573058,
+              1.84469
+            ]
+          },
+          "gc_overlaps": {
+            "negated": [
+              {
+                "cycle": 89,
+                "overlap_ms": 60.51757100000188,
+                "clock_ms": "0.065+69+0.005"
+              },
+              {
+                "cycle": 89,
+                "overlap_ms": 2.235394999999585,
+                "clock_ms": "0.065+69+0.005"
+              }
+            ],
+            "nested": []
+          }
+        },
+        "gc-domain-4-B": {
+          "query_times_ms": {
+            "negated": [
+              54.767196,
+              2.11732
+            ],
+            "nested": [
+              148.189183,
+              1.685606
+            ]
+          },
+          "gc_overlaps": {
+            "negated": [
+              {
+                "cycle": 87,
+                "overlap_ms": 39.04800000000108,
+                "clock_ms": "0.027+39+0.021"
+              }
+            ],
+            "nested": []
+          }
+        }
+      },
+      "explain_hashes_across_eight_processes": {
+        "negated ": [
+          "dd07f11c92fd6e14c93e027b2fd4e5aeb9e3d9b73c2c74ea4c22e38cbcf24e4d"
+        ],
+        "negated IR ": [
+          "d3f5e5d6881baf2e97b3ec5bb661b66292f5562d8b31e5bbd0d65634303f1dc1"
+        ],
+        "negated PHYSICAL ": [
+          "568883e6f96ba42115ea6a6e1d77ef197ff4cdba688a28315e55471176d554f0"
+        ],
+        "negated REORDER ": [
+          "35ed7db2849c3ff4c4d628f76affe282af15d2b9192d72d5055aa8d2f47500ce"
+        ],
+        "nested ": [
+          "5512fee20d406f16616240a3ef827166775caa203923ad5c41757b07f3492bcc"
+        ],
+        "nested IR ": [
+          "b32b107da75dbf9dfa85ea29d92bb6589021c9172bf91973a2a330dceb23b36a"
+        ],
+        "nested PHYSICAL ": [
+          "c44b6158115d256ce890e21b70ed3536899c59ed03f5774e4f45d84d4b7ffc3e"
+        ],
+        "nested REORDER ": [
+          "c50dc058a6641b697cea6c9525e58e914faf755823b71975daa279b475ee08bf"
+        ]
+      },
+      "jit_probe": {
+        "import_statistics_identical": true,
+        "import_records_per_side": 8239,
+        "named_functions_per_side": 8592,
+        "changed_code_sizes_only": "parser grammar; environment parser roots were traversed in Go map iteration order",
+        "storage_getvalue_disassembly": {
+          "instruction_count": {
+            "A": 406,
+            "B": 406
+          },
+          "identical_after_address_normalization": true
+        }
+      },
+      "parser_root_order_test": {
+        "before": "FAIL attempt 5: alpha rule 1, beta rule 0",
+        "after": "PASS; all TestJITParser* tests pass",
+        "method": "Sort eligible environment binding names before deduplicating parser aliases and grouping by whitespace; parser choice alternative order is preserved."
+      },
+      "ci_repeat_same_head_b547a1045": {
+        "all_checks": "success after one failed-job repeat and isolated download retry; no source or gate changes",
+        "nested_sum": {
+          "baseline_ms": 204.316,
+          "candidate_ms": 207.993,
+          "fixtures": 7,
+          "change_pct": 1.8
+        },
+        "later_filtered_scalar_binder": {
+          "baseline_ms": 189.63,
+          "candidate_ms": 188.672,
+          "fixtures": 1,
+          "change_pct": -0.5
+        },
+        "negated_snapshot": {
+          "baseline_ms": 58.259,
+          "candidate_ms": 58.549,
+          "fixtures": 7,
+          "change_pct": 0.5
+        },
+        "caveat": "The repeat does not erase original failing measurements or prove that root ordering explains all timing variance. Diagnostic SIGSEGV also occurred in baseline."
       }
     }
   }
