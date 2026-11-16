@@ -39,12 +39,17 @@ type OverlayBlob struct {
 	refs   map[string]bool // hex-hashes referenced in this build()
 	legacy bool            // v0/ASCII-49 base encoding; preserved until the next rebuild
 	ram    *blobRAMCache   // generation-local; its mutex protects decoded contents and admission
+	// Private build decisions: never serialized or retained by published readers.
+	inlineLimit      int
+	extraInline      []uint64
+	extraInlineBytes int
 }
 
 // Keep ordinary text values in the columnar string storage. Small text values
 // are cheap to scan in place, while externalizing them turns every
 // substring scan into hundreds of thousands of small file reads and gzip
-// initializations. Truly large values remain deduplicated external blobs.
+// initializations. Strong shared text can raise this private build threshold
+// using a bounded sample. Larger/unrelated values remain external blobs.
 const maxInlineBlobBytes = 2 * 1024
 
 func (s *OverlayBlob) ComputeSize() uint {
@@ -540,12 +545,35 @@ func (s *OverlayBlob) inlineBufferValue(v scm.Scmer, cursor *scm.TextCursor, scr
 
 func (s *OverlayBlob) prepare() {
 	// set up scan
+	s.extraInline = nil
+	s.extraInlineBytes = 0
 	s.Base.prepare()
 }
+
+func (s *OverlayBlob) scanInline(row uint32, text string) bool {
+	if len(text) <= maxInlineBlobBytes {
+		return true
+	}
+	if len(text) > s.inlineLimit || len(text) > blobExtraInlineBudget-s.extraInlineBytes {
+		return false
+	}
+	word := int(row / 64)
+	for len(s.extraInline) <= word {
+		s.extraInline = append(s.extraInline, 0)
+	}
+	s.extraInline[word] |= uint64(1) << (row % 64)
+	s.extraInlineBytes += len(text)
+	return true
+}
+
+func (s *OverlayBlob) buildInline(row uint32, text string) bool {
+	return len(text) <= maxInlineBlobBytes || int(row/64) < len(s.extraInline) && s.extraInline[row/64]&(uint64(1)<<(row%64)) != 0
+}
+
 func (s *OverlayBlob) scan(i uint32, value scm.Scmer) {
 	if value.IsString() {
 		vs := value.String()
-		if len(vs) > maxInlineBlobBytes {
+		if !s.scanInline(i, vs) {
 			h := sha256.New()
 			io.WriteString(h, vs)
 			s.Base.scan(i, scm.NewString("!b"+string(h.Sum(nil))))
@@ -575,7 +603,7 @@ func (s *OverlayBlob) build(i uint32, value scm.Scmer) {
 	// compressed blob file directly, avoiding the gzip round-trip entirely.
 	if value.IsString() {
 		vs := value.String()
-		if len(vs) > maxInlineBlobBytes {
+		if !s.buildInline(i, vs) {
 			h := sha256.New()
 			io.WriteString(h, vs)
 			hashsum := h.Sum(nil)
@@ -618,6 +646,9 @@ func (s *OverlayBlob) finish() {
 		s.values = nil
 		s.size = 0
 	}
+	s.extraInline = nil
+	s.extraInlineBytes = 0
+	s.inlineLimit = 0
 	s.Base.finish()
 	s.storageJITFunctions.finish(s)
 }

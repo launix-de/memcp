@@ -8,6 +8,36 @@ import "testing"
 import "strings"
 import "math/rand"
 
+func TestSamplingPoolBoundsAndRoundtrip(t *testing.T) {
+	random := rand.New(rand.NewSource(1729))
+	builder := NewSamplingBuilder(8)
+	texts := []string{strings.Repeat("common report ÄÖß\n", 300), strings.Repeat("common report ÄÖß\n", 299) + "changed"}
+	for i := 0; i < 8; i++ {
+		data := make([]byte, 32768)
+		random.Read(data)
+		texts = append(texts, string(data))
+	}
+	offsets := make([]uint64, len(texts))
+	for i, text := range texts {
+		offsets[i] = builder.Add(text)
+		if len(builder.grams) > 8192 {
+			t.Fatal("sampling index exceeded key budget")
+		}
+		for _, candidates := range builder.grams {
+			if len(candidates) > 4 {
+				t.Fatal("sampling index exceeded candidate budget")
+			}
+		}
+	}
+	pool := builder.Finish()
+	for i, text := range texts {
+		pool.Validate(offsets[i])
+		if pool.Extract(offsets[i]) != text {
+			t.Fatal("bounded index changed text", i)
+		}
+	}
+}
+
 func TestPoolRoundtripAndSeek(t *testing.T) {
 	random := rand.New(rand.NewSource(94013))
 	texts := []string{"", "a", "ab", "\x00\xff", "Prüfbericht ÄÖß ΣςK", strings.Repeat("long literal\x00", 10000)}
