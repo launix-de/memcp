@@ -402,7 +402,7 @@ func (capture *liveShardTransfer) write(writer io.Writer) error {
 			if !isRuntimeComputedColumn(column) && column.OrcMapReduceFn.IsNil() {
 				header.Columns = append(header.Columns, column.Name)
 				if shard.t.PersistencyMode == Safe || shard.t.PersistencyMode == Logged {
-					reader := shard.t.schema.persistence.ReadColumn(shard.uuid.String(), column.Name)
+					reader := shard.home().persistence.ReadColumn(shard.uuid.String(), column.Name)
 					missing, known := reader.(interface{ Missing() bool })
 					header.ColumnReferences[column.Name] = !known || !missing.Missing()
 					reader.Close()

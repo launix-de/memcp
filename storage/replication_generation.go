@@ -417,7 +417,7 @@ func (r *replicationManager) captureResource(resource mosiResource, content stri
 		}
 	}()
 	if resource.Shard == "" {
-		transfer.schema = append([]byte(nil), db.persistence.ReadSchema()...)
+		transfer.schema = stripCatalogRoot(append([]byte(nil), db.persistence.ReadSchema()...))
 		actual, err := r.schemaDigest(transfer.schema)
 		if err != nil {
 			return nil, err
@@ -867,6 +867,14 @@ func (r *replicationManager) finishImport(source string, transfer *replicaImport
 }
 
 func (r *replicationManager) installSchema(source, name string, engine PersistenceEngine, data []byte) error {
+	// A catalog root names the sender's node-local system_schema shards.
+	// The receiver derives its own catalog from the declarations.
+	data = stripCatalogRoot(data)
+	defer func() {
+		if db := databases.Get(name); db != nil {
+			db.catalogStale.Store(true)
+		}
+	}()
 	// Cluster peers and the upstream master are trusted code authorities. A
 	// replication slave is not: validate before decoding any runtime values or
 	// publishing schema bytes, including after a solicited ownership recall.
@@ -1317,6 +1325,8 @@ func (r *replicationManager) schemaDigest(data []byte) (string, error) {
 	if err := json.Unmarshal(data, &document); err != nil {
 		return "", err
 	}
+	// The catalog root is node-local storage topology, not declarations.
+	delete(document, "catalog")
 	var tables map[string]json.RawMessage
 	if err := json.Unmarshal(document["tables"], &tables); err != nil {
 		return "", err

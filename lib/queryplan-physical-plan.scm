@@ -5647,11 +5647,6 @@ chooses the producer/driver implementation from canonical stage facts. */
 (define source_is_base_table? (lambda (src)
 	(string? (source_relation src))))
 
-(define information_schema_source? (lambda (schema relation)
-	(and (string? schema)
-		(and (string? relation)
-			(equal?? schema "information_schema")))))
-
 /* A literal-rows source (see lib/queryplan-logical.scm) is compiled once and
 scanned via the plain-list branch scan/scan_order already support -- no
 per-branch recompilation, no temporary storage table. Its rows are already
@@ -5671,9 +5666,7 @@ fix). */
 					(lambda (row) (cons (quote list) row)))))
 				(if (equal? (nth (source_relation src) 3) (quote distinct))
 					(list (quote literal_union_dedupe_rows) rows) rows))
-			(if (information_schema_source? (source_schema src) (source_relation src))
-				(list (quote information_schema_rows) (source_schema src) (source_relation src))
-				(list (quote table) (source_schema src) false (source_relation src) false))))))
+			(list (quote table) (source_schema src) false (source_relation src) false)))))
 
 (define source_table_expr_using (lambda (stages src)
 	(begin
