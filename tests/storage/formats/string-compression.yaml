@@ -518,12 +518,37 @@ test_cases:
     expect: {error: true}
 
   - name: "Concat persistent restart"
+    setup:
+      - sql: "DROP TABLE IF EXISTS sc_adaptive"
+      - sql: "CREATE TABLE sc_adaptive (id INT, message TEXT)"
+      - scm: |
+          (insert (table "memcp-tests" false "sc_adaptive" false) '("id" "message")
+            (map (produceN 512) (lambda (i)
+              (list i (concat "!Dokument " (string i) ": "
+                (string_repeat "Prüfbericht wartung Gerät 0123456789abcdefghijklmnopqrstuvwxyz " 100))))))
+      - scm: '(rebuild (table "memcp-tests" false "sc_adaptive" false) true false)'
     sql: "SHUTDOWN"
     expect: {rows: 0}
 
   - name: "Concat operators after reload"
     sql: "SELECT id, SUBSTRING(message, 1, 5) AS prefix FROM sc_concat WHERE message LIKE 'trace 42 ns%'"
     expect: {data: [{id: 42, prefix: 'trace'}]}
+
+  - name: "Adaptive long text and blob fallback survive reload"
+    sql: "SELECT COUNT(*) AS n FROM sc_adaptive WHERE message LIKE '!Dokument %Prüfbericht%wartung%'"
+    timing_aggregation: total
+    timing_samples: 4
+    warmup: 0
+    threshold_ms: 5000
+    expect: {data: [{n: 512}]}
+
+  - name: "Adaptive long text retains escaping and collation"
+    sql: "SELECT id, SUBSTRING(message, 1, 13) AS prefix FROM sc_adaptive WHERE message COLLATE utf8mb4_general_ci LIKE '!dokument 42:%' ORDER BY message COLLATE utf8mb4_general_ci"
+    expect: {data: [{id: 42, prefix: '!Dokument 42:'}]}
+
+  - name: "Adaptive blob fallback retains materialization errors"
+    sql: "SELECT FROM_BASE64(message) FROM sc_adaptive WHERE id = 511"
+    expect: {error: true}
 
   - name: "Cleanup"
     cleanup:
@@ -532,6 +557,7 @@ test_cases:
       - sql: "DROP TABLE IF EXISTS sc_b64raw"
       - sql: "DROP TABLE IF EXISTS sc_b64perf"
       - sql: "DROP TABLE IF EXISTS sc_concat"
+      - sql: "DROP TABLE IF EXISTS sc_adaptive"
       - sql: "DROP TABLE IF EXISTS sc_compare_cases"
       - sql: "DROP TABLE IF EXISTS sc_compare"
       - sql: "DROP TABLE IF EXISTS `sc_uuid`"

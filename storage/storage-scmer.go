@@ -36,6 +36,7 @@ type StorageSCMER struct {
 	hasString    bool
 	hasBSON      bool
 	longStrings  int
+	longSample   *longTextSample
 	null         uint  // amount of NULL values (sparse map!)
 	numSeq       uint  // sequence statistics
 	last1, last2 int64 // sequence statistics
@@ -333,8 +334,18 @@ func (s *StorageSCMER) scan(i uint32, value scm.Scmer) {
 	s.minIntScale = math.MinInt8
 	if value.IsString() {
 		s.hasString = true
-		if len(value.String()) > maxInlineBlobBytes {
+		text := value.String()
+		if len(text) > maxInlineBlobBytes {
 			s.longStrings++
+			// Low-cardinality columns already deduplicate whole blob values.
+			// Start the cross-document probe only after enum analysis has seen
+			// enough distinct values; identical documents need no sample copies.
+			if len(text) <= blobSampleValueLimit && s.enumK == 0xFF && !s.hasBSON {
+				if s.longSample == nil {
+					s.longSample = new(longTextSample)
+				}
+				s.longSample.offer(text)
+			}
 		}
 	}
 }
@@ -343,6 +354,8 @@ func (s *StorageSCMER) prepare() {
 	s.hasString = false
 	s.hasBSON = false
 	s.enumK = 0
+	s.longStrings = 0
+	s.longSample = nil
 }
 func (s *StorageSCMER) init(i uint32) {
 	// allocate
@@ -353,6 +366,7 @@ func (s *StorageSCMER) build(i uint32, value scm.Scmer) {
 	s.values[i] = value
 }
 func (s *StorageSCMER) finish() {
+	s.longSample = nil
 	s.storageJITFunctions.finish(s)
 }
 
@@ -372,6 +386,7 @@ func (s *StorageSCMER) proposeCompression(i uint32) ColumnStorage {
 		if s.longStrings > 2 {
 			b := new(OverlayBlob)
 			b.Base = new(StorageSparse)
+			b.inlineLimit = s.longSample.inlineLimit()
 			return b
 		}
 		return new(StorageSparse)
@@ -400,6 +415,7 @@ func (s *StorageSCMER) proposeCompression(i uint32) ColumnStorage {
 		if s.longStrings > 2 {
 			b := new(OverlayBlob)
 			b.Base = new(StorageString)
+			b.inlineLimit = s.longSample.inlineLimit()
 			return b
 		}
 		return new(StorageString)

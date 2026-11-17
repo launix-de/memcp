@@ -165,6 +165,7 @@ type Builder struct {
 	buffer   Buffer
 	grams    map[uint32][]span
 	inserted []uint32
+	sampling bool
 }
 
 func Raw(text string) *Buffer { builder := new(Builder); builder.Add(text); return builder.Finish() }
@@ -173,6 +174,19 @@ func Raw(text string) *Buffer { builder := new(Builder); builder.Add(text); retu
 func NewBuilder(entries int) *Builder {
 	return &Builder{buffer: Buffer{data: make([]byte, 0, entries*16)}, grams: make(map[uint32][]span)}
 }
+
+// NewSamplingBuilder uses the ordinary wire format with a bounded search index.
+// At most 8192 trigrams and four offsets per trigram participate in matching.
+// Its conservative matches are suitable for a small compression-choice probe.
+func NewSamplingBuilder(entries int) *Builder {
+	b := NewBuilder(entries)
+	b.sampling = true
+	return b
+}
+
+// Len returns encoded bytes built so far, excluding the temporary search index.
+func (b *Builder) Len() int { return len(b.buffer.data) }
+
 func gram(s string) uint32 { return uint32(s[0])<<16 | uint32(s[1])<<8 | uint32(s[2]) }
 
 func (b *Builder) literal(s string) span {
@@ -180,6 +194,18 @@ func (b *Builder) literal(s string) span {
 	b.buffer.data = append(b.buffer.data, s...)
 	end := len(b.buffer.data)
 	if b.grams == nil {
+		return span{off, end}
+	}
+	if b.sampling {
+		for i := 0; i+3 <= len(s); i++ {
+			key := gram(s[i:])
+			items := b.grams[key]
+			if len(items) >= 4 || len(items) == 0 && len(b.grams) >= 8192 {
+				continue
+			}
+			b.grams[key] = append(items, span{off + i, end})
+			b.inserted = append(b.inserted, key)
+		}
 		return span{off, end}
 	}
 	for i := 0; i+3 <= len(s); i++ {
