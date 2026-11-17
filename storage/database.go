@@ -487,6 +487,12 @@ func RebuildTable(tbl *table, all bool, repartition bool) string {
 		panic("cannot rebuild a stale table handle")
 	}
 
+	if tbl.schema == systemSchemaDB {
+		// system_schema partitions are memory shards owned by their databases'
+		// catalogs, which compact them after each change; there is no storage
+		// generation, blob store or schema.json to rebuild here.
+		return fmt.Sprint(time.Since(start))
+	}
 	tbl.schema.persistenceLifecycle.RLock()
 	defer tbl.schema.persistenceLifecycle.RUnlock()
 	result := tbl.schema.rebuildWithLifecycle(all, repartition, true, tbl)
