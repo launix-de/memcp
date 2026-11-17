@@ -84,6 +84,15 @@ type database struct {
 
 	// lazy-loading/shared-resource state (not serialized)
 	srState SharedState `json:"-"`
+
+	// catalog is this database's system_schema partition. catalogMu orders
+	// catalog generations; it is taken after schemalock. catalogStale marks
+	// declarations not yet derived into catalog rows (buffered saves, loads).
+	catalogMu       sync.Mutex      `json:"-"`
+	catalogLiveMu   sync.Mutex      `json:"-"`
+	catalog         databaseCatalog `json:"-"`
+	catalogStale    atomic.Bool     `json:"-"`
+	catalogSnapshot atomic.Uint64   `json:"-"`
 }
 
 // blobRefLock occupies one cache line so unrelated hash stripes do not
@@ -734,12 +743,16 @@ func (db *database) commitSchemaSnapshot(jsonbytes []byte, durable bool, release
 }
 
 func (db *database) save(counterOwner ...*replicaCell) {
+	if db == systemSchemaDB {
+		return // fixed, never persisted
+	}
 	if len(counterOwner) > 1 {
 		panic("invalid counter checkpoint ownership")
 	}
 	if sharedClusterDatabase(db.Name) {
 		cluster := activeNodeCluster()
 		if cluster == nil {
+			db.catalogStale.Store(true)
 			return
 		}
 		cell := cluster.manager.resourceCell(mosiResource{Database: db.Name})
@@ -759,6 +772,7 @@ func (db *database) save(counterOwner ...*replicaCell) {
 				panic("counter checkpoint lost its owner")
 			}
 		} else if phase != mosi.M {
+			db.catalogStale.Store(true)
 			return
 		}
 	}
@@ -767,19 +781,7 @@ func (db *database) save(counterOwner ...*replicaCell) {
 		return
 	}
 	db.schemalock.RLock()
-	jsonbytes, _ := db.marshalSchemaSnapshot()
-	// Buffered mutations after this snapshot must leave the catalog dirty.
-	// They need the exclusive schema lock and therefore cannot race this store.
-	db.schemaDirty.Store(false)
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				db.schemaDirty.Store(true)
-				panic(r)
-			}
-		}()
-		db.commitSchemaSnapshot(jsonbytes, true, db.schemalock.RUnlock)
-	}()
+	db.commitSchemaLocked(true, db.schemalock.RUnlock)
 	// shards are written while rebuild
 }
 
@@ -787,9 +789,14 @@ func (db *database) save(counterOwner ...*replicaCell) {
 // schemalock. Buffered temp metadata is immediately visible in memory; a later
 // synchronous schema save or rebuild includes it in its complete snapshot.
 func (db *database) saveLockedAndUnlock(mode schemaSaveMode) {
+	if db == systemSchemaDB {
+		db.schemalock.Unlock()
+		return // fixed, never persisted; its cache triggers are runtime state
+	}
 	if sharedClusterDatabase(db.Name) {
 		cluster := activeNodeCluster()
 		if cluster == nil || cluster.manager.resourceCell(mosiResource{Database: db.Name}).ownstate.Phase() != mosi.M {
+			db.catalogStale.Store(true)
 			db.schemalock.Unlock()
 			return
 		}
@@ -800,20 +807,11 @@ func (db *database) saveLockedAndUnlock(mode schemaSaveMode) {
 	}
 	if mode == schemaSaveBuffered {
 		db.schemaDirty.Store(true)
+		db.catalogStale.Store(true)
 		db.schemalock.Unlock()
 		return
 	}
-	jsonbytes, _ := db.marshalSchemaSnapshot()
-	// Clear while the snapshot is protected. A later buffered mutation takes
-	// schemalock exclusively and sets dirty again after this generation.
-	db.schemaDirty.Store(false)
-	defer func() {
-		if r := recover(); r != nil {
-			db.schemaDirty.Store(true)
-			panic(r)
-		}
-	}()
-	db.commitSchemaSnapshot(jsonbytes, mode == schemaSaveFsync, db.schemalock.Unlock)
+	db.commitSchemaLocked(mode == schemaSaveFsync, db.schemalock.Unlock)
 }
 
 // ensureLoaded loads schema.json into the database struct exactly once.
@@ -831,6 +829,19 @@ func (db *database) ensureLoaded() {
 			db.srState = SHARED
 			return
 		}
+		// The system_schema catalog takes precedence over the legacy document
+		// stored next to its root. Both describe the same commit; an unreadable
+		// catalog falls back to the legacy declarations.
+		if root := readCatalogRoot(jsonbytes); root != nil {
+			if document, err := db.loadCatalogDocument(root); err == nil {
+				jsonbytes = document
+			} else {
+				fmt.Println("warning: system_schema catalog of database", db.Name, "is unreadable, using the legacy schema:", err)
+			}
+		}
+		// Loaded declarations may differ from their stored rows (for example
+		// regenerated FK triggers); the next catalog read derives them again.
+		db.catalogStale.Store(true)
 		tmp := new(database)
 		if err := json.Unmarshal(jsonbytes, tmp); err != nil {
 			panic(err)
@@ -1154,6 +1165,10 @@ func invalidatePersistedPlannerCodeAfterLoad(t *table) {
 // SharedResource impl for database
 func (db *database) GetState() SharedState { return db.srState }
 func (db *database) GetRead(tx *TxContext) ReadAccess {
+	if db == systemSchemaDB {
+		refreshSystemSchema()
+		return ReadAccess{}
+	}
 	if r := activeReplication(db); r != nil && validReplicaDatabase(db.Name) {
 		resource := mosiResource{Database: db.Name}
 		// An authorized schema read only samples its local permission. User
@@ -1685,6 +1700,9 @@ func (db *database) rebuildWithLifecycle(all bool, repartition bool, includeEphe
 }
 
 func GetDatabase(schema string, ignoreCase ...bool) *database {
+	if isSystemSchemaName(schema, len(ignoreCase) != 0 && ignoreCase[0]) {
+		return systemSchema()
+	}
 	if len(ignoreCase) != 0 && ignoreCase[0] {
 		names := databases.folded.Load()
 		if names == nil {
@@ -1703,6 +1721,9 @@ func GetDatabase(schema string, ignoreCase ...bool) *database {
 }
 
 func CreateDatabase(schema string, ignoreexists bool /*, persistence PersistenceFactory*/) bool {
+	if isSystemSchemaName(schema, true) {
+		panic("Database " + schema + " is reserved for the system catalog")
+	}
 	db := databases.Get(schema)
 	if db != nil {
 		if ignoreexists {
@@ -2075,6 +2096,7 @@ func publishStorageMoveGenerations(db *database, dst PersistenceEngine, generati
 	}
 	writeDatabaseBackendConfig(db.Name, targetConfig)
 	db.persistence = dst
+	db.resetCatalogPersistence()
 
 	for _, generation := range generations {
 		generation.table.mu.Lock()
@@ -2172,6 +2194,7 @@ func AlterDatabaseStorage(schema string, targetConfig json.RawMessage, currentTx
 		defer db.schemalock.Unlock()
 		writeDatabaseBackendConfig(schema, targetConfig)
 		db.persistence = dst
+		db.resetCatalogPersistence()
 		return true
 	}
 
@@ -2260,6 +2283,7 @@ func DropDatabase(schema string, ifexists bool) bool {
 		}
 		panic("Database " + schema + " does not exist")
 	}
+	db.detachCatalog()
 
 	// clean up shards/indexes/temp columns from GlobalCache
 	db.ensureLoaded()

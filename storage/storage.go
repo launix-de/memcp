@@ -794,6 +794,7 @@ func invalidateComputedRows(proxy *StorageComputeProxy, recids map[uint32]struct
 
 func Init(en scm.Env) {
 	initIOInstrumentation(&en)
+	declareCatalogBuiltins(&en)
 	scm.HTTPAuthenticationHook = replicationHTTPAuthentication
 	scm.MySQLAuthenticationHook = replicationMySQLAuthentication
 	scm.MySQLDatabaseHook = replicationOpenDatabase

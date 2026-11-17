@@ -79,6 +79,10 @@ derived SELECT before untangle_query sees the complete query. */
 								(if (string? relation)
 									(begin
 										(if policy (policy source_schema relation false) true)
+										(if (equal?? source_schema "information_schema")
+											/* built-in catalog views run with definer rights */
+											(sql_expand_views (information_schema_rehome (information_schema_view relation)
+												(if (equal?? query_schema "information_schema") "system" query_schema)) nil)
 										(if (table source_schema false relation false)
 											relation
 											(begin
@@ -93,7 +97,7 @@ derived SELECT before untangle_query sees the complete query. */
 														(define stored_ir (nth view 2))
 														(if (nil? stored_ir)
 															(error (concat "view " key " has no parsed IR"))
-															(expand_node (restore_storage_code (json_decode_scmer stored_ir)) (cons key stack))))))))
+															(expand_node (restore_storage_code (json_decode_scmer stored_ir)) (cons key stack)))))))))
 									(expand_node relation stack)))
 							(list alias source_schema expanded_relation outer (expand_node join_condition stack)))
 						_ (error "invalid query source while expanding views"))))
@@ -114,9 +118,7 @@ derived SELECT before untangle_query sees the complete query. */
 			(cons (expand_node head stack)
 				(map tail (lambda (item) (expand_node item stack))))
 			_ node)))
-	(if (> (sql_view_catalog_state "count") 0)
-		(expand_node query '())
-		query))))
+	(expand_node query '()))))
 
 (define create_sql_view (lambda (tx schema name dialect sql ir mode) (begin
 	(define serialized_ir (json_encode ir))

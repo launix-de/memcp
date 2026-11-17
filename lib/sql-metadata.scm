@@ -188,384 +188,171 @@ table, timing, and event around that language-neutral persisted source. */
 			"Created" NULL))
 )))
 
-(define info_schema_column_default (lambda (col)
-	(if (not (equal? (col "DefaultExpression") ""))
-		(if (equal? (toUpper (col "DefaultExpression")) "CURRENT_TIMESTAMP")
-			"current_timestamp()" (col "DefaultExpression"))
-		(if (nil? (col "Default"))
-			(if (col "Null") "NULL" NULL)
-			(if (string? (col "Default"))
-				(quote_mysql_string (col "Default"))
-				(concat (col "Default")))))))
+/* INFORMATION_SCHEMA is a set of built-in views over the relational catalog
+system_schema (see storage/catalog.go). They expand like user views before
+untangle_query, so filters, joins and ordering on catalog queries are planned
+like on any other table. The views run with definer rights: users who may read
+INFORMATION_SCHEMA need no access to system_schema itself. */
 
-(define info_schema_columns_for_table (lambda (schema table_name) (begin
-	(define columns (show schema table_name))
-	(map (produceN (count columns)) (lambda (ordinal) (begin
-		(define col (nth columns ordinal))
-		(list
-			"table_catalog" "def"
-			"table_schema" schema
-			"table_name" table_name
-			"column_name" (col "Field")
-			"ordinal_position" (+ ordinal 1)
-			"column_default" (info_schema_column_default col)
-			"is_nullable" (if (col "Null") "YES" "NO")
-			"data_type" (col "RawType")
-			"column_type" (col "Type")
-			"column_key" (col "Key")
-			"extra" (col "Extra")
-			"privileges" (col "Privileges")
-			"column_comment" (col "Comment")
-			"is_generated" "NEVER"
-			"generation_expression" "")
-	)))
-)))
+/* Runtime values that are not declarations: statistics come from the RAM table
+behind the transient system_schema.tables.handle column. */
+(sql_builtins "MEMCP_TABLE_STATISTIC" (lambda (handle key)
+	(if (nil? handle) nil ((table_statistics handle) key))))
+(sql_builtins "MEMCP_COLUMN_TYPE" (lambda (typ dimensions enum_values)
+	(column_type_display typ dimensions enum_values)))
+/* COLUMN_DEFAULT of a catalog row; default_json is the stored Scheme value. */
+(sql_builtins "MEMCP_COLUMN_DEFAULT" (lambda (default_json default_expression allow_null) (begin
+	(define value (if (nil? default_json) nil (json_decode_scmer default_json)))
+	(if (and (not (nil? default_expression)) (not (equal? default_expression "")))
+		(if (equal? (toUpper default_expression) "CURRENT_TIMESTAMP")
+			"current_timestamp()" default_expression)
+		(if (nil? value)
+			(if allow_null "NULL" NULL)
+			(if (string? value)
+				(quote_mysql_string value)
+				(concat value)))))))
 
-(define info_schema_trigger_rows (lambda ()
-	(merge (map (show) (lambda (schema)
-		(map (show_triggers schema) (lambda (tr)
-			(list
-				"trigger_catalog" "def"
-				"trigger_schema" schema
-				"trigger_name" (tr "Trigger")
-				"event_manipulation" (tr "Event")
-				"event_object_catalog" "def"
-				"event_object_schema" schema
-				"event_object_table" (tr "Table")
-				"action_order" 1
-				"action_condition" NULL
-				"action_statement" (tr "Statement")
-				"action_orientation" "ROW"
-				"action_timing" (tr "Timing")
-				"created" (tr "Created")
-				"sql_mode" (tr "sql_mode")
-				"definer" (tr "Definer")
-				"character_set_client" (tr "character_set_client")
-				"collation_connection" (tr "collation_connection")
-				"database_collation" (tr "Database Collation")))))))))
+(define information_schema_view_sql (lambda (name) (match (toLower name)
+	"schemata" "SELECT 'def' AS catalog_name, d.schema_name AS schema_name,
+		'utf8mb4' AS default_character_set_name, 'utf8mb3_general_ci' AS default_collation_name,
+		NULL AS sql_path, '' AS schema_comment
+		FROM system_schema.databases d"
+	"tables" "SELECT 'def' AS table_catalog, t.schema_name AS table_schema, t.name AS table_name,
+		'BASE TABLE' AS table_type,
+		CASE WHEN t.persistency_mode IN ('logged', 'sloppy', 'memory') THEN t.persistency_mode ELSE 'safe' END AS engine,
+		MEMCP_TABLE_STATISTIC(t.handle, 'row_count') AS table_rows,
+		MEMCP_TABLE_STATISTIC(t.handle, 'size_bytes') AS data_length,
+		t.`collation` AS table_collation, t.`comment` AS table_comment
+		FROM system_schema.tables t WHERE t.name NOT LIKE '.%'"
+	"columns" "SELECT 'def' AS table_catalog, c.schema_name AS table_schema, c.table_name AS table_name,
+		c.name AS column_name, c.ordinal + 1 AS ordinal_position,
+		MEMCP_COLUMN_DEFAULT(c.`default`, c.default_expression, c.allow_null) AS column_default,
+		CASE WHEN c.allow_null THEN 'YES' ELSE 'NO' END AS is_nullable,
+		c.typ AS data_type,
+		MEMCP_COLUMN_TYPE(c.typ, c.typdimensions, c.enum_values) AS column_type,
+		CASE WHEN k.key_rank = 2 THEN 'PRI' WHEN k.key_rank = 1 THEN 'UNI' ELSE '' END AS column_key,
+		CASE WHEN c.auto_increment THEN 'auto_increment' ELSE '' END AS extra,
+		'select,insert,update,references' AS privileges,
+		c.`comment` AS column_comment, 'NEVER' AS is_generated, '' AS generation_expression
+		FROM system_schema.columns c
+		LEFT JOIN (SELECT kc.schema_name AS schema_name, kc.table_name AS table_name, kc.column_name AS column_name,
+				MAX(CASE WHEN ky.id = 'PRIMARY' THEN 2 ELSE 1 END) AS key_rank
+			FROM system_schema.key_columns kc
+			JOIN system_schema.`keys` ky ON ky.schema_name = kc.schema_name AND ky.table_name = kc.table_name AND ky.ordinal = kc.key_ordinal
+			GROUP BY kc.schema_name, kc.table_name, kc.column_name) k
+			ON k.schema_name = c.schema_name AND k.table_name = c.table_name AND k.column_name = c.name
+		WHERE c.table_name NOT LIKE '.%'"
+	"key_column_usage" "SELECT 'def' AS constraint_catalog, ky.schema_name AS constraint_schema,
+			CASE WHEN ky.constraint_name IS NULL OR ky.constraint_name = '' THEN ky.id ELSE ky.constraint_name END AS constraint_name,
+			'def' AS table_catalog, ky.schema_name AS table_schema, ky.table_name AS table_name,
+			kc.column_name AS column_name, kc.ordinal + 1 AS ordinal_position,
+			NULL AS position_in_unique_constraint, NULL AS referenced_table_schema,
+			NULL AS referenced_table_name, NULL AS referenced_column_name
+		FROM system_schema.`keys` ky
+		JOIN system_schema.key_columns kc ON kc.schema_name = ky.schema_name AND kc.table_name = ky.table_name AND kc.key_ordinal = ky.ordinal
+		WHERE ky.table_name NOT LIKE '.%'
+		UNION ALL
+		SELECT 'def' AS constraint_catalog, f.schema_name AS constraint_schema, f.id AS constraint_name,
+			'def' AS table_catalog, f.schema_name AS table_schema, f.table_name AS table_name,
+			fc.column1 AS column_name, fc.ordinal + 1 AS ordinal_position, fc.ordinal + 1 AS position_in_unique_constraint,
+			f.schema_name AS referenced_table_schema, f.tbl2 AS referenced_table_name, fc.column2 AS referenced_column_name
+		FROM system_schema.foreign_keys f
+		JOIN system_schema.foreign_key_columns fc ON fc.schema_name = f.schema_name AND fc.table_name = f.table_name AND fc.foreign_key_ordinal = f.ordinal
+		WHERE f.table_name = f.tbl1 AND f.table_name NOT LIKE '.%'"
+	/* unique_constraint_name names the first key of the referenced table whose
+	column list equals the foreign key's referenced columns. */
+	"referential_constraints" "SELECT 'def' AS constraint_catalog, f.schema_name AS constraint_schema, f.id AS constraint_name,
+			'def' AS unique_constraint_catalog, f.schema_name AS unique_constraint_schema,
+			CASE WHEN uk.constraint_name IS NULL OR uk.constraint_name = '' THEN uk.id ELSE uk.constraint_name END AS unique_constraint_name,
+			'NONE' AS match_option,
+			CASE f.updatemode WHEN 1 THEN 'CASCADE' WHEN 2 THEN 'SET NULL' ELSE 'RESTRICT' END AS update_rule,
+			CASE f.deletemode WHEN 1 THEN 'CASCADE' WHEN 2 THEN 'SET NULL' ELSE 'RESTRICT' END AS delete_rule,
+			f.table_name AS table_name, f.tbl2 AS referenced_table_name
+		FROM system_schema.foreign_keys f
+		LEFT JOIN (SELECT m.schema_name AS schema_name, m.table_name AS table_name, m.foreign_key_ordinal AS foreign_key_ordinal,
+				m.key_table AS key_table, MIN(m.key_ordinal) AS key_ordinal
+			FROM (SELECT fc.schema_name AS schema_name, fc.table_name AS table_name, fc.foreign_key_ordinal AS foreign_key_ordinal,
+					f2.tbl2 AS key_table, kc.key_ordinal AS key_ordinal, COUNT(*) AS matched
+				FROM system_schema.foreign_key_columns fc
+				JOIN system_schema.foreign_keys f2 ON f2.schema_name = fc.schema_name AND f2.table_name = fc.table_name AND f2.ordinal = fc.foreign_key_ordinal
+				JOIN system_schema.key_columns kc ON kc.schema_name = fc.schema_name AND kc.table_name = f2.tbl2 AND kc.ordinal = fc.ordinal AND kc.column_name = fc.column2
+				GROUP BY fc.schema_name, fc.table_name, fc.foreign_key_ordinal, f2.tbl2, kc.key_ordinal) m
+			JOIN (SELECT fc.schema_name AS schema_name, fc.table_name AS table_name, fc.foreign_key_ordinal AS foreign_key_ordinal, COUNT(*) AS width
+				FROM system_schema.foreign_key_columns fc GROUP BY fc.schema_name, fc.table_name, fc.foreign_key_ordinal) fw
+				ON fw.schema_name = m.schema_name AND fw.table_name = m.table_name AND fw.foreign_key_ordinal = m.foreign_key_ordinal AND fw.width = m.matched
+			JOIN (SELECT kc.schema_name AS schema_name, kc.table_name AS table_name, kc.key_ordinal AS key_ordinal, COUNT(*) AS width
+				FROM system_schema.key_columns kc GROUP BY kc.schema_name, kc.table_name, kc.key_ordinal) kw
+				ON kw.schema_name = m.schema_name AND kw.table_name = m.key_table AND kw.key_ordinal = m.key_ordinal AND kw.width = m.matched
+			GROUP BY m.schema_name, m.table_name, m.foreign_key_ordinal, m.key_table) km
+			ON km.schema_name = f.schema_name AND km.table_name = f.table_name AND km.foreign_key_ordinal = f.ordinal
+		LEFT JOIN system_schema.`keys` uk ON uk.schema_name = km.schema_name AND uk.table_name = km.key_table AND uk.ordinal = km.key_ordinal
+		WHERE f.table_name = f.tbl1 AND f.table_name NOT LIKE '.%'"
+	"statistics" "SELECT 'def' AS table_catalog, ky.schema_name AS table_schema, ky.table_name AS table_name,
+			0 AS non_unique, ky.schema_name AS index_schema, ky.id AS index_name,
+			kc.ordinal + 1 AS seq_in_index, kc.column_name AS column_name, 'A' AS `collation`,
+			NULL AS cardinality, NULL AS sub_part, NULL AS packed, '' AS nullable,
+			'BTREE' AS index_type, '' AS `comment`, '' AS index_comment
+		FROM system_schema.`keys` ky
+		JOIN system_schema.key_columns kc ON kc.schema_name = ky.schema_name AND kc.table_name = ky.table_name AND kc.key_ordinal = ky.ordinal
+		WHERE ky.table_name NOT LIKE '.%'"
+	"triggers" "SELECT 'def' AS trigger_catalog, tr.schema_name AS trigger_schema, tr.name AS trigger_name,
+			CASE WHEN tr.timing IN ('before_update', 'after_update') THEN 'UPDATE'
+				WHEN tr.timing IN ('before_delete', 'after_delete') THEN 'DELETE' ELSE 'INSERT' END AS event_manipulation,
+			'def' AS event_object_catalog, tr.schema_name AS event_object_schema, tr.table_name AS event_object_table,
+			1 AS action_order, NULL AS action_condition,
+			CASE WHEN tr.language = 'sql' THEN tr.source ELSE '' END AS action_statement,
+			'ROW' AS action_orientation,
+			CASE WHEN tr.timing IN ('after_insert', 'after_update', 'after_delete') THEN 'AFTER' ELSE 'BEFORE' END AS action_timing,
+			NULL AS created, '' AS sql_mode, '' AS definer, 'utf8mb4' AS character_set_client,
+			'utf8mb4_general_ci' AS collation_connection, 'utf8mb4_general_ci' AS database_collation
+		FROM system_schema.triggers tr
+		WHERE NOT COALESCE(tr.is_system, FALSE) AND NOT COALESCE(tr.hidden, FALSE)"
+	/* MemCP has no tablespaces, undo logs or MySQL partitions */
+	"files" "SELECT NULL AS file_name, NULL AS file_type, NULL AS tablespace_name, NULL AS logfile_group_name,
+			NULL AS total_extents, NULL AS extent_size, NULL AS initial_size, NULL AS engine, NULL AS extra
+		FROM system_schema.databases d WHERE FALSE"
+	"partitions" "SELECT NULL AS table_schema, NULL AS table_name, NULL AS partition_name, NULL AS tablespace_name
+		FROM system_schema.databases d WHERE FALSE"
+	nil)))
 
-(define info_schema_fk_column_rows (lambda (schema tbl fk local_columns other_columns ordinal)
-	(if (empty_list? local_columns)
-		(if (empty_list? other_columns) '()
-			(error (concat "foreign key " (fk "Id") " has mismatched column lists")))
-		(if (empty_list? other_columns)
-			(error (concat "foreign key " (fk "Id") " has mismatched column lists"))
-			(cons (list "constraint_catalog" "def" "constraint_schema" schema
-				"constraint_name" (fk "Id") "table_catalog" "def"
-				"table_schema" schema "table_name" tbl
-				"column_name" (car local_columns)
-				"ordinal_position" ordinal
-				"position_in_unique_constraint" ordinal
-				"referenced_table_schema" schema
-				"referenced_table_name" (fk "OtherTable")
-				"referenced_column_name" (car other_columns))
-				(info_schema_fk_column_rows schema tbl fk
-					(cdr local_columns) (cdr other_columns) (+ ordinal 1)))))))
+/* Parsed once per process: the IR of a built-in view never changes. */
+(define information_schema_view_ir (newsession))
+(define information_schema_view (lambda (name) (begin
+	(define key (toLower name))
+	(define cached (information_schema_view_ir key))
+	(if (nil? cached)
+		(begin
+			(define sql (information_schema_view_sql key))
+			(if (nil? sql) (error (concat "INFORMATION_SCHEMA." name " is not supported yet")) true)
+			(define parsed (parse_sql "information_schema"
+				(concat "CREATE VIEW information_schema." key " AS " sql) nil (newsession) nil))
+			(define ir (cadr (nth parsed 6)))
+			(information_schema_view_ir key ir)
+			ir)
+		cached))))
 
-/* A public constraint name is native key metadata; legacy keys use their ID. */
-(define sql_key_constraint_name (lambda (key)
-	(if (or (nil? (key "constraint_name")) (equal? (key "constraint_name") ""))
-		(key "Id") (key "constraint_name"))))
+/* The view's query blocks belong to the database of the query that reads
+them: the planner places helper tables (keytables, group caches) there.
+Catalog tables are fully qualified, so only that placement changes. A query
+whose own database is INFORMATION_SCHEMA uses "system". */
+(define information_schema_rehome (lambda (node schema)
+	(match node
+		(cons head _) (begin
+			(define mapped (map node (lambda (item) (information_schema_rehome item schema))))
+			(if (and (equal? head (quote query-block)) (equal?? (cadr mapped) "information_schema"))
+				(cons head (cons schema (cdr (cdr mapped))))
+				mapped))
+		_ node)))
 
-(define info_schema_unique_column_rows (lambda (schema tbl key columns ordinal)
-	(if (empty_list? columns) '()
-		(cons (list "constraint_catalog" "def" "constraint_schema" schema
-			"constraint_name" (sql_key_constraint_name key) "table_catalog" "def"
-			"table_schema" schema "table_name" tbl
-			"column_name" (car columns)
-			"ordinal_position" ordinal
-			"position_in_unique_constraint" NULL
-			"referenced_table_schema" NULL
-			"referenced_table_name" NULL
-			"referenced_column_name" NULL)
-			(info_schema_unique_column_rows schema tbl key (cdr columns) (+ ordinal 1))))))
-
-(define info_schema_fk_unique_name (lambda (schema fk) (begin
-	(define referenced_info (show schema (fk "OtherTable") true))
-	(define referenced_meta (referenced_info "meta"))
-	(define referenced_key (find (referenced_meta "Unique") (lambda (key)
-		(equal? (key "Cols") (fk "OtherColumns")))))
-	(if (nil? referenced_key) NULL (sql_key_constraint_name referenced_key))
-)))
-
-(define info_schema_key_column_usage_rows (lambda ()
-	(merge (map (show) (lambda (schema)
-		(merge (map (show schema) (lambda (tbl) (begin
-			(define tblinfo (show schema tbl true))
-			(define meta (tblinfo "meta"))
-			(define unique_rows (merge (map (meta "Unique") (lambda (key)
-				(info_schema_unique_column_rows schema tbl key (key "Cols") 1)))))
-			(define foreign_rows (merge (map (filter (meta "ForeignKeys") (lambda (fk)
-				(equal? (fk "Role") "referencing"))) (lambda (fk)
-					(info_schema_fk_column_rows schema tbl fk
-						(fk "LocalColumns") (fk "OtherColumns") 1)))))
-			(merge unique_rows foreign_rows)
-)))))))))
-
-(define info_schema_referential_constraint_rows (lambda ()
-	(merge (map (show) (lambda (schema)
-		(merge (map (show schema) (lambda (tbl) (begin
-			(define tblinfo (show schema tbl true))
-			(define meta (tblinfo "meta"))
-			(map (filter (meta "ForeignKeys") (lambda (fk)
-				(equal? (fk "Role") "referencing"))) (lambda (fk)
-					(list "constraint_catalog" "def" "constraint_schema" schema
-						"constraint_name" (fk "Id")
-						"unique_constraint_catalog" "def"
-						"unique_constraint_schema" schema
-						"unique_constraint_name" (info_schema_fk_unique_name schema fk)
-						"match_option" "NONE"
-						"update_rule" (toUpper (fk "UpdateMode"))
-						"delete_rule" (toUpper (fk "DeleteMode"))
-						"table_name" tbl
-						"referenced_table_name" (fk "OtherTable"))))
-)))))))))
-
-/* build one INFORMATION_SCHEMA.TABLES row from the catalog snapshot returned
-by (show schema true).  Keeping table discovery and metadata collection in one
-storage call avoids a DROP racing the second per-table lookup. */
-(define info_schema_table_row (lambda (schema tblinfo) (begin
-	(list
-		"table_catalog" "def"
-		"table_schema" schema
-		"table_name" (tblinfo "name")
-		"table_type" "BASE TABLE"
-		"engine" (tblinfo "engine")
-		"table_rows" (tblinfo "row_count")
-		"data_length" (tblinfo "size_bytes")
-		"table_collation" (tblinfo "collation")
-		"table_comment" (tblinfo "comment")
-	)
-)))
-
-/* Column catalog for virtual INFORMATION_SCHEMA relations. Storage-backed
-relations are deliberately resolved by the single public get_schema dispatcher. */
-(define information_schema_column_catalog (lambda (schema tbl) (match '(schema tbl)
-	/* special tables */
-	'((ignorecase "information_schema") (ignorecase "schemata")) '(
-		'("Field" "catalog_name")
-		'("Field" "schema_name")
-		'("Field" "default_character_set_name")
-		'("Field" "default_collation_name")
-		'("Field" "sql_path")
-		'("Field" "schema_comment")
-	)
-
-	'((ignorecase "information_schema") (ignorecase "tables")) '(
-		'("Field" "table_catalog")
-		'("Field" "table_schema")
-		'("Field" "table_name")
-		'("Field" "table_type")
-		'("Field" "engine")
-		'("Field" "table_rows" "Type" "bigint")
-		'("Field" "data_length" "Type" "bigint")
-		'("Field" "table_collation")
-		'("Field" "table_comment")
-	)
-	'((ignorecase "information_schema") (ignorecase "columns")) '(
-		'("Field" "table_catalog")
-		'("Field" "table_schema")
-		'("Field" "table_name")
-		'("Field" "column_name")
-		'("Field" "ordinal_position")
-		'("Field" "column_default")
-		'("Field" "is_nullable")
-		'("Field" "data_type")
-		/* TODO: CHARACTER_MAXIMUM_LENGTH CHARACTER_OCTET_LENGTH NUMERIC_PRECISION NUMERIC_SCALE DATETIME_PRECISION CHARACTER_SET_NAME COLLATION_NAME  */
-		'("Field" "column_type")
-		'("Field" "column_key")
-		'("Field" "extra")
-		'("Field" "privileges")
-		'("Field" "column_comment")
-		'("Field" "is_generated")
-		'("Field" "generation_expression")
-	)
-	'((ignorecase "information_schema") (ignorecase "key_column_usage")) '(
-		'("Field" "constraint_catalog")
-		'("Field" "constraint_schema")
-		'("Field" "constraint_name")
-		'("Field" "table_catalog")
-		'("Field" "table_schema")
-		'("Field" "table_name")
-		'("Field" "column_name")
-		'("Field" "ordinal_position")
-		'("Field" "position_in_unique_constraint")
-		'("Field" "referenced_table_schema")
-		'("Field" "referenced_table_name")
-		'("Field" "referenced_column_name")
-	)
-	'((ignorecase "information_schema") (ignorecase "referential_constraints")) '(
-		'("Field" "constraint_catalog")
-		'("Field" "constraint_schema")
-		'("Field" "constraint_name")
-		'("Field" "unique_constraint_catalog")
-		'("Field" "unique_constraint_schema")
-		'("Field" "unique_constraint_name")
-		'("Field" "match_option")
-		'("Field" "update_rule")
-		'("Field" "delete_rule")
-		'("Field" "table_name")
-		'("Field" "referenced_table_name")
-	)
-
-	/* Minimal compatibility for mysqldump probes */
-	'((ignorecase "information_schema") (ignorecase "files")) '(
-		'("Field" "file_name")
-		'("Field" "file_type")
-		'("Field" "tablespace_name")
-		'("Field" "logfile_group_name")
-		'("Field" "total_extents")
-		'("Field" "extent_size")
-		'("Field" "initial_size")
-		'("Field" "engine")
-		'("Field" "extra")
-	)
-	'((ignorecase "information_schema") (ignorecase "partitions")) '(
-		'("Field" "table_schema")
-		'("Field" "table_name")
-		'("Field" "partition_name")
-		'("Field" "tablespace_name")
-	)
-
-	'((ignorecase "information_schema") (ignorecase "statistics")) '(
-		'("Field" "table_catalog")
-		'("Field" "table_schema")
-		'("Field" "table_name")
-		'("Field" "non_unique")
-		'("Field" "index_schema")
-		'("Field" "index_name")
-		'("Field" "seq_in_index")
-		'("Field" "column_name")
-		'("Field" "collation")
-		'("Field" "cardinality")
-		'("Field" "sub_part")
-		'("Field" "packed")
-		'("Field" "nullable")
-		'("Field" "index_type")
-		'("Field" "comment")
-		'("Field" "index_comment")
-	)
-	'((ignorecase "information_schema") (ignorecase "triggers")) '(
-		'("Field" "trigger_catalog")
-		'("Field" "trigger_schema")
-		'("Field" "trigger_name")
-		'("Field" "event_manipulation")
-		'("Field" "event_object_catalog")
-		'("Field" "event_object_schema")
-		'("Field" "event_object_table")
-		'("Field" "action_order" "Type" "bigint")
-		'("Field" "action_condition")
-		'("Field" "action_statement")
-		'("Field" "action_orientation")
-		'("Field" "action_timing")
-		'("Field" "created")
-		'("Field" "sql_mode")
-		'("Field" "definer")
-		'("Field" "character_set_client")
-		'("Field" "collation_connection")
-		'("Field" "database_collation")
-	)
-
-	/* Unknown INFORMATION_SCHEMA table → clear SCM-side error */
-	'((ignorecase "information_schema") _)
-	(error (concat "INFORMATION_SCHEMA." tbl " is not supported yet"))
-)))
-
-/* runtime row source for virtual INFORMATION_SCHEMA tables */
-(define information_schema_rows (lambda (schema tbl) (match '(schema tbl)
-	'((ignorecase "information_schema") (ignorecase "schemata"))
-	(map (show) (lambda (db)
-		(list
-			"catalog_name" "def"
-			"schema_name" db
-			"default_character_set_name" "utf8mb4"
-			"default_collation_name" "utf8mb3_general_ci"
-			"sql_path" NULL
-			"schema_comment" "")))
-
-	'((ignorecase "information_schema") (ignorecase "tables"))
-	(merge (map (show) (lambda (db)
-		(map (show db true) (lambda (table_info)
-			(info_schema_table_row db table_info))))))
-
-	'((ignorecase "information_schema") (ignorecase "columns"))
-	(merge (map (show) (lambda (db)
-		(merge (map (show db) (lambda (table_name)
-			(info_schema_columns_for_table db table_name)))))))
-
-	'((ignorecase "information_schema") (ignorecase "key_column_usage"))
-	(info_schema_key_column_usage_rows)
-
-	'((ignorecase "information_schema") (ignorecase "referential_constraints"))
-	(info_schema_referential_constraint_rows)
-
-	'((ignorecase "information_schema") (ignorecase "statistics"))
-	(merge (map (show) (lambda (db)
-		(merge (map (show db) (lambda (table_name)
-			(show db table_name (sql_metadata_identity "statistics"))))))))
-
-	'((ignorecase "information_schema") (ignorecase "triggers"))
-	(info_schema_trigger_rows)
-
-	'((ignorecase "information_schema") (ignorecase "files"))
-	(list)
-
-	'((ignorecase "information_schema") (ignorecase "partitions"))
-	(list)
-
-	'((ignorecase "information_schema") _)
-	(error (concat "INFORMATION_SCHEMA." tbl " is not supported yet"))
-
-	(show schema tbl)
-)))
-
-(define scan_wrapper (lambda args (match args (merge '(scanfn schema tbl) rest) (match '(schema tbl)
-	'((ignorecase "information_schema") (ignorecase "schemata"))
-	(merge '(scanfn '(session "__memcp_tx")
-		'('map '('show) '('lambda '('schema) '('list "catalog_name" "def" "schema_name" 'schema "default_character_set_name" "utf8mb4" "default_collation_name" "utf8mb3_general_ci" "sql_path" NULL "schema_comment" "")))
-	) rest)
-	'((ignorecase "information_schema") (ignorecase "tables"))
-	(list 'begin
-		/* TODO(planner-scalability): expose catalog metadata as a physical
-		relation instead of constructing a cardinality-dependent SCM list. */
-		/* Materialize a complete catalog snapshot at runtime but BEFORE the scan
-		starts.  The single (show schema true) call also keeps concurrent DROP from
-		invalidating names between table discovery and metadata collection. */
-		'('define '__info_tables_data '('merge '('map '('show) '('lambda '('s) '('map '('show 's true) '('lambda '('t) '('info_schema_table_row 's 't)))))))
-		(merge '(scanfn '(session "__memcp_tx") '__info_tables_data) rest))
-	'((ignorecase "information_schema") (ignorecase "columns"))
-	(merge '(scanfn '(session "__memcp_tx")
-		'((quote merge) '((quote map) '((quote show)) '((quote lambda) '((quote schema)) '((quote merge) '((quote map) '((quote show) (quote schema)) '((quote lambda) '((quote tbl)) '((quote info_schema_columns_for_table) (quote schema) (quote tbl))))))))
-	) rest)
-	'((ignorecase "information_schema") (ignorecase "key_column_usage"))
-	(merge '(scanfn '(session "__memcp_tx") '('info_schema_key_column_usage_rows)) rest)
-	'((ignorecase "information_schema") (ignorecase "referential_constraints"))
-	(merge '(scanfn '(session "__memcp_tx") '('info_schema_referential_constraint_rows)) rest)
-	'((ignorecase "information_schema") (ignorecase "statistics"))
-	(merge '(scanfn '(session "__memcp_tx") '('merge '('map '('show) '('lambda '('schema) '('merge '('map '('show 'schema) '('lambda '('tbl) '('show 'schema 'tbl "statistics")))))))) rest)
-	'((ignorecase "information_schema") (ignorecase "triggers"))
-	(merge '(scanfn '(session "__memcp_tx") '('info_schema_trigger_rows)) rest)
-	'((ignorecase "information_schema") (ignorecase "files"))
-	(merge '(scanfn '(session "__memcp_tx") '(list)) rest) /* empty: MemCP has no tablespaces/undo logs */
-	'((ignorecase "information_schema") (ignorecase "partitions"))
-	(merge '(scanfn '(session "__memcp_tx") '(list)) rest) /* empty: no MySQL partitions */
-	'(schema tbl) /* normal case */
-	(begin
-		/* scan helpers receive a runtime source as their table argument.
-		Materialized subqueries are stored in the session and therefore must be
-		lowered to (session key) before scan/scan_order/scan_batch
-		see them. Do not stringify this source and do not add table-name
-		fallbacks in Go for it. */
-		(define scan-table-source (lambda (table_source) (match table_source
-			'(scan-tagged-table base _ _ _ _ _) (scan-table-source base)
-			'((symbol scan-tagged-table) base _ _ _ _ _) (scan-table-source base)
-			'((quote scan-tagged-table) base _ _ _ _ _) (scan-table-source base)
-			'(materialized-subquery key) (list (quote session) key)
-			'((symbol materialized-subquery) key) (list (quote session) key)
-			'((quote materialized-subquery) key) (list (quote session) key)
-			table_source)))
-		(define tbl_resolved (scan-table-source tbl))
-		/* materialized subqueries produce list expressions — pass as-is; real tables get (table schema name) */
-		(define tbl_arg (if (string? tbl_resolved) (list 'table schema false tbl_resolved false) tbl_resolved))
-		(merge (list scanfn '(session "__memcp_tx") tbl_arg) rest))
-))))
+/* Column catalog of an INFORMATION_SCHEMA relation, derived from its view. */
+(define information_schema_column_catalog (lambda (schema tbl) (begin
+	(define block_fields (lambda (block) (match block
+		((symbol query-block) _ _ fields _ _ _ _ _ _ _ _ _) fields
+		((symbol union-block) _ branches _ _ _ _) (block_fields (car branches))
+		_ (error "INFORMATION_SCHEMA view has no query block"))))
+	(define fields (block_fields (information_schema_view tbl)))
+	(map (produceN (/ (count fields) 2)) (lambda (i) (begin
+		(define name (nth fields (* i 2)))
+		(if (has? '("table_rows" "data_length" "action_order") name)
+			(list "Field" name "Type" "bigint")
+			(list "Field" name))))))))

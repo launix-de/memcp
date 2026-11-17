@@ -255,7 +255,7 @@ func backfillBlobManifest(shard *storageShard, persistManifest bool) (references
 		if column.IsTemp {
 			continue
 		}
-		reader := shard.t.schema.persistence.ReadColumn(shard.uuid.String(), column.Name)
+		reader := shard.home().persistence.ReadColumn(shard.uuid.String(), column.Name)
 		if readErr, failed := reader.(ErrorReader); failed {
 			reader.Close()
 			if readErr.Missing() {
@@ -357,7 +357,7 @@ func writeBlobManifestReferences(shard *storageShard, references map[string]stru
 		body = strings.Join(hashes, "\n") + "\n"
 	}
 	checksum := sha256.Sum256([]byte(body))
-	writer := shard.t.schema.persistence.WriteColumn(shard.uuid.String(), blobManifestColumn)
+	writer := shard.home().persistence.WriteColumn(shard.uuid.String(), blobManifestColumn)
 	manifest := blobManifestHeader + hex.EncodeToString(checksum[:]) + "\n" + body
 	if _, err := writer.Write([]byte(manifest)); err != nil {
 		_ = writer.Close()
@@ -385,6 +385,9 @@ func cleanShards(db *database) int {
 	}
 	for _, shard := range registeredClusterShards(db.Name) {
 		activeUUIDs[shard.uuid.String()] = true
+	}
+	for _, id := range db.catalogShardIDs() {
+		activeUUIDs[id] = true
 	}
 	db.schemalock.RUnlock()
 
