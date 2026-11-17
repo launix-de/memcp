@@ -370,6 +370,8 @@ func writeBlobManifestReferences(shard *storageShard, references map[string]stru
 // Reads the active UUID set from in-memory table structures (always current),
 // under schemalock.RLock to prevent concurrent DDL from modifying the table map.
 func cleanShards(db *database) int {
+	catalogPersistenceMu.Lock()
+	defer catalogPersistenceMu.Unlock()
 	// Collect active UUIDs from in-memory shards under read-lock.
 	db.schemalock.RLock()
 	activeUUIDs := map[string]bool{}

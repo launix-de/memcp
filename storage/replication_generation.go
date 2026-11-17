@@ -870,11 +870,6 @@ func (r *replicationManager) installSchema(source, name string, engine Persisten
 	// A catalog root names the sender's node-local system_schema shards.
 	// The receiver derives its own catalog from the declarations.
 	data = stripCatalogRoot(data)
-	defer func() {
-		if db := databases.Get(name); db != nil {
-			db.catalogStale.Store(true)
-		}
-	}()
 	// Cluster peers and the upstream master are trusted code authorities. A
 	// replication slave is not: validate before decoding any runtime values or
 	// publishing schema bytes, including after a solicited ownership recall.
@@ -932,6 +927,8 @@ func (r *replicationManager) installSchema(source, name string, engine Persisten
 		db = replacement
 	} else {
 		defer replacement.closeTransactionLog()
+		rows := replacement.catalogRowsLocked()
+		db.editCatalogLocked(&rows)
 		for _, table := range db.tables.GetAll() {
 			if r.cluster != nil && table.isEphemeralQueryTable() {
 				continue

@@ -2720,7 +2720,7 @@ func Init(en scm.Env) {
 					closedOnInit := scm.CloseProcedure(oninit)
 					existing.OnInit.Store(&closedOnInit)
 					existing.publishReadProgramSnapshot()
-					db.saveLockedAndUnlock(schemaSaveBuffered)
+					db.saveLockedAndUnlock(schemaSaveBuffered, existing)
 				} else {
 					db.schemalock.Unlock()
 				}
@@ -2783,7 +2783,7 @@ func Init(en scm.Env) {
 			if newTable.isEphemeralQueryTable() {
 				mode = schemaSaveBuffered
 			}
-			db.saveLockedAndUnlock(mode)
+			db.saveLockedAndUnlock(mode, append([]*table{newTable}, foreignCatalogTables(newTable)...)...)
 			// Dependency/oninit callbacks acquire their own schema rights.
 			// End publication ownership before invoking nested DDL.
 			schemaAccess.Release()
@@ -3040,7 +3040,7 @@ func Init(en scm.Env) {
 				if key.matchesName(name) {
 					t.Unique = append(t.Unique[:i], t.Unique[i+1:]...)
 					t.publishShowColumnsSnapshot(true)
-					t.schema.saveLockedAndUnlock(t.schemaSaveMode())
+					t.schema.saveLockedAndUnlock(t.schemaSaveMode(), t)
 					return scm.NewBool(true)
 				}
 			}
@@ -3088,7 +3088,7 @@ func Init(en scm.Env) {
 				if parent != nil && parent != t {
 					removeMetadata(parent)
 				}
-				db.saveLockedAndUnlock(schemaSaveModeForDurability(t.PersistencyMode == Safe || (parent != nil && parent.PersistencyMode == Safe)))
+				db.saveLockedAndUnlock(schemaSaveModeForDurability(t.PersistencyMode == Safe || (parent != nil && parent.PersistencyMode == Safe)), t, parent)
 				return scm.NewBool(true)
 			}
 			db.schemalock.Unlock()
@@ -3138,7 +3138,7 @@ func Init(en scm.Env) {
 				t2.publishShowColumnsSnapshot(true)
 			}
 
-			db.saveLockedAndUnlock(schemaSaveModeForDurability(t1.PersistencyMode == Safe || t2.PersistencyMode == Safe))
+			db.saveLockedAndUnlock(schemaSaveModeForDurability(t1.PersistencyMode == Safe || t2.PersistencyMode == Safe), t1, t2)
 
 			return scm.NewBool(true)
 		},
@@ -3332,7 +3332,8 @@ func Init(en scm.Env) {
 					t.mu.Unlock()
 				}
 
-				db.save()
+				db.schemalock.Lock()
+				db.saveLockedAndUnlock(schemaSaveFsync, t)
 				return scm.NewBool(true)
 			case "owner":
 				return scm.NewBool(false) // ignore
@@ -4765,7 +4766,7 @@ func Init(en scm.Env) {
 			// Idempotent: replace any existing trigger with the same name
 			t.RemoveTrigger(name)
 			t.AddTrigger(trigger)
-			db.saveLockedAndUnlock(t.schemaSaveMode())
+			db.saveLockedAndUnlock(t.schemaSaveMode(), t)
 			return scm.NewBool(true)
 		},
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "creates a new trigger on a table", HasSideEffects: true,
@@ -5804,6 +5805,6 @@ func createTableKey(t *table, key uniqueKey, currentTx *TxContext) bool {
 	}
 	t.Unique = append(t.Unique, key)
 	t.publishShowColumnsSnapshot(true)
-	t.schema.saveLockedAndUnlock(t.schemaSaveMode())
+	t.schema.saveLockedAndUnlock(t.schemaSaveMode(), t)
 	return true
 }

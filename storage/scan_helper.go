@@ -94,7 +94,8 @@ func ensureSystemStatistic() {
 	// ensure persistency mode is Sloppy even if table pre-existed
 	if t.PersistencyMode != Sloppy {
 		t.PersistencyMode = Sloppy
-		t.schema.save()
+		t.schema.schemalock.Lock()
+		t.schema.saveLockedAndUnlock(schemaSaveNoFsync, t)
 	}
 	// ensure columns exist
 	need := []struct {

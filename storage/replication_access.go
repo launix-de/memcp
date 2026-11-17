@@ -115,6 +115,9 @@ func (c *replicaCell) forwardingDone() <-chan struct{} {
 }
 
 func (table *table) schemaWrite() (*table, WriteAccess) {
+	if nativeCatalogRelation(table) {
+		panic("schema catalog declarations are read-only; use native DDL")
+	}
 	if table.isEphemeralQueryTable() {
 		return table, WriteAccess{}
 	}

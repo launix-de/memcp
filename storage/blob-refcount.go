@@ -92,7 +92,7 @@ func (db *database) ensureBlobTable() *table {
 	// table becomes visible to INSERT and UPDATE batches.
 	t.publishShowColumnsSnapshot(true)
 	db.tables.Set(t.Name, t)
-	db.saveLockedAndUnlock(schemaSaveFsync)
+	db.saveLockedAndUnlock(schemaSaveFsync, t)
 	state.table.Store(t)
 	registerCreatedTable(t)
 	return t

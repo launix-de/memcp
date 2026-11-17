@@ -86,13 +86,11 @@ type database struct {
 	srState SharedState `json:"-"`
 
 	// catalog is this database's system_schema partition. catalogMu orders
-	// catalog generations; it is taken after schemalock. catalogStale marks
-	// declarations not yet derived into catalog rows (buffered saves, loads).
-	catalogMu       sync.Mutex      `json:"-"`
-	catalogLiveMu   sync.Mutex      `json:"-"`
-	catalog         databaseCatalog `json:"-"`
-	catalogStale    atomic.Bool     `json:"-"`
-	catalogSnapshot atomic.Uint64   `json:"-"`
+	// catalog generations; it is taken after schemalock. Catalog rows are the
+	// definition authority; runtime metadata is never refreshed into them.
+	catalogBootstrap sync.Once       `json:"-"`
+	catalogMu        sync.Mutex      `json:"-"`
+	catalog          databaseCatalog `json:"-"`
 }
 
 // blobRefLock occupies one cache line so unrelated hash stripes do not
@@ -667,6 +665,11 @@ func LoadDatabases() {
 		}
 	}
 
+	// Attach catalog partitions without materializing any Go table definitions.
+	for _, db := range databases.GetAll() {
+		db.bootstrapCatalog()
+	}
+
 	// Ensure system_statistic.scans exists for scan logging
 	ensureSystemStatistic()
 }
@@ -758,7 +761,6 @@ func (db *database) save(counterOwner ...*replicaCell) {
 	if sharedClusterDatabase(db.Name) {
 		cluster := activeNodeCluster()
 		if cluster == nil {
-			db.catalogStale.Store(true)
 			return
 		}
 		cell := cluster.manager.resourceCell(mosiResource{Database: db.Name})
@@ -778,7 +780,6 @@ func (db *database) save(counterOwner ...*replicaCell) {
 				panic("counter checkpoint lost its owner")
 			}
 		} else if phase != mosi.M {
-			db.catalogStale.Store(true)
 			return
 		}
 	}
@@ -786,37 +787,55 @@ func (db *database) save(counterOwner ...*replicaCell) {
 		// Do not serialize a cold database; keep existing schema.json intact
 		return
 	}
-	db.schemalock.RLock()
-	db.commitSchemaLocked(true, db.schemalock.RUnlock)
+	db.schemalock.Lock()
+	owned := true
+	defer func() {
+		if owned {
+			db.schemalock.Unlock()
+		}
+	}()
+	db.checkpointCatalogLocked()
+	owned = false
+	db.commitSchemaLocked(true, db.schemalock.Unlock)
 	// shards are written while rebuild
 }
 
 // saveLockedAndUnlock publishes according to mode and always releases
 // schemalock. Buffered temp metadata is immediately visible in memory; a later
 // synchronous schema save or rebuild includes it in its complete snapshot.
-func (db *database) saveLockedAndUnlock(mode schemaSaveMode) {
+func (db *database) saveLockedAndUnlock(mode schemaSaveMode, proposals ...*table) {
+	owned := true
+	defer func() {
+		if owned {
+			db.schemalock.Unlock()
+		}
+	}()
 	if db == systemSchemaDB {
+		owned = false
 		db.schemalock.Unlock()
 		return // fixed, never persisted; its cache triggers are runtime state
 	}
 	if sharedClusterDatabase(db.Name) {
 		cluster := activeNodeCluster()
 		if cluster == nil || cluster.manager.resourceCell(mosiResource{Database: db.Name}).ownstate.Phase() != mosi.M {
-			db.catalogStale.Store(true)
+			owned = false
 			db.schemalock.Unlock()
 			return
 		}
 	}
 	if db.srState == COLD {
+		owned = false
 		db.schemalock.Unlock()
 		return
 	}
+	db.proposeCatalogTablesLocked(proposals...)
 	if mode == schemaSaveBuffered {
 		db.schemaDirty.Store(true)
-		db.catalogStale.Store(true)
+		owned = false
 		db.schemalock.Unlock()
 		return
 	}
+	owned = false
 	db.commitSchemaLocked(mode == schemaSaveFsync, db.schemalock.Unlock)
 }
 
@@ -842,12 +861,14 @@ func (db *database) ensureLoaded() {
 			if document, err := db.loadCatalogDocument(root); err == nil {
 				jsonbytes = document
 			} else {
-				fmt.Println("warning: system_schema catalog of database", db.Name, "is unreadable, using the legacy schema:", err)
+				panic(fmt.Errorf("authoritative catalog of database %s is unreadable: %w", db.Name, err))
 			}
 		}
-		// Loaded declarations may differ from their stored rows (for example
-		// regenerated FK triggers); the next catalog read derives them again.
-		db.catalogStale.Store(true)
+		// Legacy import occurs once, before runtime definitions are materialized.
+		if db.catalog.live[0] == nil {
+			rows := catalogRowsFromDocument(jsonbytes)
+			db.editCatalogLocked(&rows)
+		}
 		tmp := new(database)
 		if err := json.Unmarshal(jsonbytes, tmp); err != nil {
 			panic(err)
@@ -1172,7 +1193,6 @@ func invalidatePersistedPlannerCodeAfterLoad(t *table) {
 func (db *database) GetState() SharedState { return db.srState }
 func (db *database) GetRead(tx *TxContext) ReadAccess {
 	if db == systemSchemaDB {
-		refreshSystemSchema()
 		return ReadAccess{}
 	}
 	if r := activeReplication(db); r != nil && validReplicaDatabase(db.Name) {
@@ -1753,6 +1773,7 @@ func CreateDatabase(schema string, ignoreexists bool /*, persistence Persistence
 		panic("Database " + schema + " already exists")
 	}
 
+	db.initializeEmptyCatalog()
 	db.save()
 	return true
 }
@@ -1807,6 +1828,7 @@ func CreateDatabaseWithBackend(schema string, ignoreexists bool, options map[str
 		panic("Database " + schema + " already exists")
 	}
 
+	db.initializeEmptyCatalog()
 	db.save()
 	return true
 }
@@ -1941,6 +1963,7 @@ func CreateDatabaseFrom(schema string, ignoreexists bool, sourceDB string) bool 
 		panic("Database " + schema + " already exists")
 	}
 
+	db.initializeEmptyCatalog()
 	db.save()
 	return true
 }
@@ -2345,7 +2368,7 @@ func CreateTable(schema, name string, pm PersistencyMode, ifnotexists bool) (*ta
 	if t.isEphemeralQueryTable() {
 		mode = schemaSaveBuffered
 	}
-	db.saveLockedAndUnlock(mode)
+	db.saveLockedAndUnlock(mode, t)
 	registerCreatedTable(t)
 	return t, true
 }
@@ -2434,6 +2457,7 @@ func DropTable(schema, name string, ifexists bool) {
 		db.schemalock.Unlock()
 		requireTableMaintenance(schema, name, maintenanceDrop)
 	}
+	db.dropCatalogTableLocked(name)
 	db.tables.Remove(name)
 	if !t.isHiddenFromShowTables() {
 		db.publishTableNamesLocked()
@@ -2508,12 +2532,13 @@ func RenameTable(schema, oldname, newname string) {
 		db.schemalock.Unlock()
 		panic("Table " + schema + "." + newname + " already exists")
 	}
+	db.dropCatalogTableLocked(oldname)
 	db.tables.Remove(oldname)
 	t.Name = newname
 	t.publishedName.Store(&newname)
 	db.tables.Set(newname, t)
 	db.publishTableNamesLocked()
-	db.saveLockedAndUnlock(t.schemaSaveMode())
+	db.saveLockedAndUnlock(t.schemaSaveMode(), t)
 }
 
 // keytableCleanup retires a planner-owned in-memory cache on the manager
