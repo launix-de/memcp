@@ -593,7 +593,7 @@ func (db *database) dropTrigger(name string) bool {
 			}
 		}
 		if t.RemoveTrigger(name) {
-			db.saveLockedAndUnlock(t.schemaSaveMode())
+			db.saveLockedAndUnlock(t.schemaSaveMode(), t)
 			t.ddlMu.Unlock()
 			return true
 		}

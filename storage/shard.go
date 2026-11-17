@@ -1501,10 +1501,19 @@ func isRuntimeComputedColumn(colDesc *column) bool {
 }
 
 func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, alreadyLocked bool, batch *triggerBatch, deletedRows *uint64, currentTx *TxContext, uniqueGuard *uniqueWriteGuard) func(...scm.Scmer) scm.Scmer {
+	return t.updateFunctionBatch(idx, withTrigger, alreadyLocked, batch, deletedRows, currentTx, uniqueGuard, false)
+}
+
+// The final capability is private to the native catalog editor. Public callbacks
+// retain their read-only check when invoked, including after being retained.
+func (t *storageShard) updateFunctionBatch(idx uint32, withTrigger bool, alreadyLocked bool, batch *triggerBatch, deletedRows *uint64, currentTx *TxContext, uniqueGuard *uniqueWriteGuard, catalogWrite bool) func(...scm.Scmer) scm.Scmer {
 	declarations := t.t.columnDeclarations() // one immutable declaration contract for this callback
 	initialUniqueGuard := uniqueGuard
 	// returns a callback with which you can delete or update an item
 	return func(a ...scm.Scmer) scm.Scmer {
+		if !catalogWrite {
+			requireCatalogDML(t.t)
+		}
 		uniqueGuard := initialUniqueGuard
 		var retainedUnique *uniqueWriteGuard
 		completed := false
@@ -3304,6 +3313,13 @@ func (m *ShardMapReducer) FlushSideEffects() {
 }
 
 func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLocked bool, validatedSchema *tableColumnNamesSnapshot, onFirstInsertId func(int64), isIgnore bool, currentTx *TxContext, uniqueGuard *uniqueWriteGuard) uint32 {
+	return t.insertValues(columns, values, alreadyLocked, validatedSchema, onFirstInsertId, isIgnore, currentTx, uniqueGuard, false)
+}
+
+func (t *storageShard) insertValues(columns []string, values [][]scm.Scmer, alreadyLocked bool, validatedSchema *tableColumnNamesSnapshot, onFirstInsertId func(int64), isIgnore bool, currentTx *TxContext, uniqueGuard *uniqueWriteGuard, catalogWrite bool) uint32 {
+	if !catalogWrite {
+		requireCatalogDML(t.t)
+	}
 	t.t.beginContributionMutation()
 	defer t.t.endContributionMutation()
 	ss := SessionStateFromTx(currentTx)

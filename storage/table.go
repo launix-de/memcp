@@ -1608,7 +1608,7 @@ func (t *table) schemaSaveMode() schemaSaveMode {
 }
 
 func (t *table) finishSchemaMutationLocked(mode schemaSaveMode) {
-	t.schema.saveLockedAndUnlock(mode)
+	t.schema.saveLockedAndUnlock(mode, t)
 }
 
 // isHiddenFromShowTables implements the SQL metadata contract for internal
@@ -3850,6 +3850,7 @@ func (t *table) reserveLocalAutoIncrement(explicit, generated uint64) uint64 {
 // Insert chooses the native execution site before evaluating defaults, allocating
 // IDs or taking UNIQUE guards. A delegated command is never replayed after send.
 func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols []string, onCollision scm.Scmer, mergeNull bool, onFirstInsertId func(int64), currentTxArgs ...*TxContext) int {
+	requireCatalogDML(t)
 	var tx *TxContext
 	if len(currentTxArgs) != 0 {
 		tx = currentTxArgs[0]

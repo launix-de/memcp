@@ -221,3 +221,51 @@ func TestCatalogPersistsAndTakesPrecedenceOverLegacySchema(t *testing.T) {
 	}
 	db.persistence.WriteSchema(stored)
 }
+
+func TestCatalogCheckpointCannotOverwriteDefinitionsFromRuntime(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "catalog-checkpoint-authority", 1)
+	db := tbl.schema
+	// Deliberately corrupt only the derived runtime view. A maintenance save
+	// must export the admitted definition, rather than silently adopting this.
+	tbl.Comment = "runtime-only divergence"
+	tbl.Columns[1].Comment = "runtime column divergence"
+	db.save()
+	root := readCatalogRoot(db.persistence.ReadSchema())
+	if root == nil || root.Version != catalogFormatVersion {
+		t.Fatal("checkpoint did not preserve its catalog root")
+	}
+	restored := newDatabase()
+	restored.Name, restored.persistence, restored.srState = db.Name, db.persistence, COLD
+	restored.ensureLoaded()
+	definition := restored.tables.Get(tbl.Name)
+	if definition.Comment != "" || definition.Columns[1].Comment != "" {
+		t.Fatal("checkpoint adopted runtime declarations as catalog authority")
+	}
+	// Reconstructing a runtime projection repairs it from the tables as well.
+	db.schemalock.Lock()
+	rows := db.catalogRowsLocked()
+	db.materializeCatalogTableLocked(tbl, &rows)
+	db.schemalock.Unlock()
+	if tbl.Comment != "" || tbl.Columns[1].Comment != "" {
+		t.Fatal("runtime projection did not follow the catalog")
+	}
+}
+
+func TestCatalogRejectsRetainedMutationCallback(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "catalog-callback-authority", 0)
+	shard := tbl.schema.catalog.live[catalogColumns]
+	_, before := catalogShardRecords(shard, catalogRelationColumns(catalogColumns))
+	callback := shard.UpdateFunction(0, true, false, nil, nil)
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Error("a retained catalog mutation callback was writable")
+			}
+		}()
+		callback()
+	}()
+	_, after := catalogShardRecords(shard, catalogRelationColumns(catalogColumns))
+	if !reflect.DeepEqual(before, after) {
+		t.Fatal("rejected callback changed catalog definitions")
+	}
+}
