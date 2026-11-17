@@ -296,3 +296,25 @@ through the PostgreSQL table-function rules. */
 (sql_builtins "KILL_QUERY" kill_query)
 
 /* management: use SQL statements instead (REBUILD, SHOW SHARDS, etc.) */
+
+/* Finalizer of GROUP_CONCAT(... ORDER BY ...): rows are (keys text) pairs and
+directions holds < (ASC) or > (DESC) per key. NULL keys sort first in ascending
+and last in descending order, as in MySQL. DISTINCT keeps the first text. */
+(define sql_group_concat_ordered (lambda (rows separator directions distinct) (begin
+	(define key_less (lambda (left right directions)
+		(if (empty_list? directions) false (begin
+			(define a (car left))
+			(define b (car right))
+			(define ascending ((car directions) 0 1))
+			(if (equal? a b)
+				(key_less (cdr left) (cdr right) (cdr directions))
+				(if (nil? a) ascending
+					(if (nil? b) (not ascending)
+						((car directions) a b))))))))
+	(define sorted (map (sort (coalesce rows '()) (lambda (left right)
+		(key_less (car left) (car right) directions))) cadr))
+	(define texts (if distinct
+		(reduce sorted (lambda (kept text) (if (has? kept text) kept (append kept text))) '())
+		sorted))
+	(if (empty_list? texts) nil
+		(reduce (cdr texts) (lambda (joined text) (concat joined separator text)) (car texts))))))

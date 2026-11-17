@@ -96,6 +96,24 @@ row, avoiding a copy of the complete prefix for each input value. */
 		nil
 		(quote json_arrayagg_finalize))))
 
+/* An ordered GROUP_CONCAT keeps the rows of its group as (keys text) pairs.
+NULL values are skipped like in the unordered form; the finalizer sorts by
+the ORDER BY keys and joins the texts with the separator. */
+(define sql_group_concat_ordered_expr (lambda (value order separator distinct)
+	(list (quote aggregate)
+		(list (quote if) (list (quote nil?) value) nil
+			(list (quote list) (list (quote list)
+				(cons (quote list) (map order car))
+				(list (quote concat) value))))
+		(list (quote lambda) (list (quote a) (quote b))
+			(list (quote if) (list (quote nil?) (quote a)) (quote b)
+				(list (quote if) (list (quote nil?) (quote b)) (quote a)
+					(list (quote merge) (quote a) (quote b)))))
+		nil
+		(list (quote lambda) (list (quote rows))
+			(list (quote sql_group_concat_ordered) (quote rows) separator
+				(cons (quote list) (map order cadr)) distinct)))))
+
 (define sql_identifier_unquoted (parser (not
 	(regex "[a-zA-Z_][a-zA-Z0-9_]*")
 	/* One lexical choice lets the parser dispatch by the first byte instead of
@@ -947,6 +965,12 @@ frontend expression contracts before publishing executable assignment code. */
 		/* GROUP_CONCAT with OVER: window function (must precede plain rules) */
 		(parser '((atom "GROUP_CONCAT" true) "(" (define s sql_expression) (atom "SEPARATOR" true) (define sep sql_expression) ")" (atom "OVER" true) "(" (define _over sql_window_spec) ")") '('window_func "GROUP_CONCAT" (list s sep) _over))
 		(parser '((atom "GROUP_CONCAT" true) "(" (define s sql_expression) ")" (atom "OVER" true) "(" (define _over sql_window_spec) ")") '('window_func "GROUP_CONCAT" (list s ",") _over))
+		/* GROUP_CONCAT([DISTINCT] expr ORDER BY ... [SEPARATOR sep]) collects
+		(sort keys, value) pairs and concatenates them in order when finalized. */
+		(parser '((atom "GROUP_CONCAT" true) "(" (define distinct (? (atom "DISTINCT" true))) (define s sql_expression)
+			(atom "ORDER" true) (atom "BY" true) (define order (+ sql_window_orderby_item ","))
+			(define sep (or (parser '((atom "SEPARATOR" true) (define sep sql_expression)) sep) (parser empty ","))) ")")
+			(sql_group_concat_ordered_expr s order sep (not (nil? distinct))))
 		/* plain GROUP_CONCAT */
 		(parser '((atom "GROUP_CONCAT" true) "(" (atom "DISTINCT" true) (define s sql_expression) (atom "SEPARATOR" true) (define sep sql_expression) ")") '('group_concat_distinct s sep))
 		(parser '((atom "GROUP_CONCAT" true) "(" (atom "DISTINCT" true) (define s sql_expression) ")") '('group_concat_distinct s ","))
