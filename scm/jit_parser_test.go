@@ -522,3 +522,52 @@ func TestJITParserManyUnicodeTerminalsReleaseInput(t *testing.T) {
 		}
 	}
 }
+
+var benchmarkParserRootEnvironment *Env
+var benchmarkParserRootValue Scmer
+
+// Keep the fixture and fixed counts identical in the baseline checkout.
+func BenchmarkJITParserEnvironmentRoots(b *testing.B) {
+	if !jitEnabled {
+		b.Skip("requires GOEXPERIMENT=jit")
+	}
+	var syntax [16]Scmer
+	var input [16]string
+	for i := range syntax {
+		syntax[i] = Read(b.Name(), fmt.Sprintf(`(parser '("token%d" (define value (regex "[0-9]+" false true)) $) value)`, i), true)
+		input[i] = fmt.Sprintf("token%d 12345", i)
+	}
+	build := func() (*Env, [16]*ScmParser) {
+		environment := &Env{Vars: make(Vars), Outer: &Globalenv}
+		var parsers [16]*ScmParser
+		for i := len(syntax) - 1; i >= 0; i-- {
+			value := Eval(syntax[i], environment)
+			parsers[i] = value.Parser()
+			environment.Vars[Symbol(fmt.Sprintf("root_%02d", i))] = value
+		}
+		environment.Vars["alias"] = NewScmParser(parsers[7])
+		jitCompileEnvironmentParsers(environment)
+		return environment, parsers
+	}
+	environment, parsers := build()
+	for i, parser := range parsers {
+		if parser.Compiled == nil || parser.Execute(input[i], environment).String() != "12345" {
+			b.Fatalf("parser %d did not compile/parse", i)
+		}
+	}
+	b.Run("build", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			benchmarkParserRootEnvironment, _ = build()
+		}
+	})
+	b.Run("parse", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			index := i % len(parsers)
+			benchmarkParserRootValue = parsers[index].Execute(input[index], environment)
+		}
+	})
+}

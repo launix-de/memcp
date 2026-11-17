@@ -467,3 +467,21 @@ adaptive case measures **103.161 → 93.473 ms (−9.4%)**. This replaces the wi
 mixed-compiler SQL comparison. Binary hashes and every QUERY_TIME record are
 retained under `adaptive_blob.focused_sql_verified_jit`; no speedup from one suite
 run is substituted for the CI A/B gate.
+
+PR #1266 was merged while this investigation was in progress. The parser-order
+correction is therefore a follow-up against merged master `d3a330101`, reusing
+the existing feature worktree. An independent JIT microbenchmark on that baseline
+measures 16 parser roots plus an alias, checking every result. Build uses 100
+iterations × five samples; parse uses 200,000 × five, fixed before measurement.
+Both use Go 1.27.3-X:jit (nophp), GOMAXPROCS=4, with all samples and first execution
+retained and no forced GC.
+
+| Parser root benchmark (median) | Master d3a330101 | Stable roots | Change |
+|---|---:|---:|---:|
+| Construct and compile grammar | 2.449 ms | 2.369 ms | −3.3% |
+| Parse short input | 334.8 ns | 365.1 ns | +9.1% |
+| Build allocation bytes | 1,051,591 B | 1,052,653 B | +0.1% |
+| Parse allocations | 80 B / 3 objects | 80 B / 3 objects | unchanged |
+
+The objective is stable code generation, not a universal parsing speedup. Raw
+samples and binary hashes are retained in the JSON.

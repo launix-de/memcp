@@ -37360,6 +37360,76 @@
             "verification_pending": false
           }
         }
+      },
+      "postmerge_parser_root_benchmark": {
+        "baseline_revision": "d3a330101ddf3389d1de13bddd64f29447f39f4a",
+        "compiler": "both go1.27.3-X:jit, nophp; GOMAXPROCS=4",
+        "fixture": "16 native parser roots, one alias, token + captured decimal string; all roots checked for exact result before timing",
+        "counts": {
+          "build": {
+            "iterations": 100,
+            "samples": 5
+          },
+          "parse": {
+            "iterations": 200000,
+            "samples": 5
+          }
+        },
+        "method": "Fixed counts declared before measurement, all samples retained including first execution, no forced GC. Same instrumentation copied temporarily to main; actual master test binary built with go -C main. This measures the parser root-order change independently of the already merged adaptive storage policy.",
+        "logs": {
+          "parser-root-build-master.log": [
+            "goos: linux",
+            "goarch: amd64",
+            "pkg: github.com/launix-de/memcp/scm",
+            "cpu: AMD Ryzen 9 7900X3D 12-Core Processor          ",
+            "BenchmarkJITParserEnvironmentRoots/build-4         \t     100\t   2706377 ns/op\t 1053576 B/op\t    8463 allocs/op",
+            "BenchmarkJITParserEnvironmentRoots/build-4         \t     100\t   1823804 ns/op\t 1051567 B/op\t    8462 allocs/op",
+            "BenchmarkJITParserEnvironmentRoots/build-4         \t     100\t   2332492 ns/op\t 1049815 B/op\t    8462 allocs/op",
+            "BenchmarkJITParserEnvironmentRoots/build-4         \t     100\t   2461824 ns/op\t 1047866 B/op\t    8462 allocs/op",
+            "BenchmarkJITParserEnvironmentRoots/build-4         \t     100\t   2449383 ns/op\t 1051591 B/op\t    8462 allocs/op",
+            "PASS"
+          ],
+          "parser-root-build-candidate.log": [
+            "goos: linux",
+            "goarch: amd64",
+            "pkg: github.com/launix-de/memcp/scm",
+            "cpu: AMD Ryzen 9 7900X3D 12-Core Processor          ",
+            "BenchmarkJITParserEnvironmentRoots/build-4         \t     100\t   1951987 ns/op\t 1054519 B/op\t    8468 allocs/op",
+            "BenchmarkJITParserEnvironmentRoots/build-4         \t     100\t   2481889 ns/op\t 1052693 B/op\t    8468 allocs/op",
+            "BenchmarkJITParserEnvironmentRoots/build-4         \t     100\t   2674213 ns/op\t 1050867 B/op\t    8468 allocs/op",
+            "BenchmarkJITParserEnvironmentRoots/build-4         \t     100\t   1595600 ns/op\t 1048924 B/op\t    8468 allocs/op",
+            "BenchmarkJITParserEnvironmentRoots/build-4         \t     100\t   2369000 ns/op\t 1052653 B/op\t    8468 allocs/op",
+            "PASS"
+          ],
+          "parser-root-parse-master.log": [
+            "goos: linux",
+            "goarch: amd64",
+            "pkg: github.com/launix-de/memcp/scm",
+            "cpu: AMD Ryzen 9 7900X3D 12-Core Processor          ",
+            "BenchmarkJITParserEnvironmentRoots/parse-4         \t  200000\t       247.1 ns/op\t      80 B/op\t       3 allocs/op",
+            "BenchmarkJITParserEnvironmentRoots/parse-4         \t  200000\t       456.5 ns/op\t      80 B/op\t       3 allocs/op",
+            "BenchmarkJITParserEnvironmentRoots/parse-4         \t  200000\t       499.7 ns/op\t      80 B/op\t       3 allocs/op",
+            "BenchmarkJITParserEnvironmentRoots/parse-4         \t  200000\t       334.8 ns/op\t      80 B/op\t       3 allocs/op",
+            "BenchmarkJITParserEnvironmentRoots/parse-4         \t  200000\t       267.3 ns/op\t      80 B/op\t       3 allocs/op",
+            "PASS"
+          ],
+          "parser-root-parse-candidate.log": [
+            "goos: linux",
+            "goarch: amd64",
+            "pkg: github.com/launix-de/memcp/scm",
+            "cpu: AMD Ryzen 9 7900X3D 12-Core Processor          ",
+            "BenchmarkJITParserEnvironmentRoots/parse-4         \t  200000\t       365.1 ns/op\t      80 B/op\t       3 allocs/op",
+            "BenchmarkJITParserEnvironmentRoots/parse-4         \t  200000\t       513.3 ns/op\t      80 B/op\t       3 allocs/op",
+            "BenchmarkJITParserEnvironmentRoots/parse-4         \t  200000\t       398.3 ns/op\t      80 B/op\t       3 allocs/op",
+            "BenchmarkJITParserEnvironmentRoots/parse-4         \t  200000\t       245.3 ns/op\t      80 B/op\t       3 allocs/op",
+            "BenchmarkJITParserEnvironmentRoots/parse-4         \t  200000\t       355.4 ns/op\t      80 B/op\t       3 allocs/op",
+            "PASS"
+          ]
+        },
+        "binary_sha256": {
+          "master": "68db7ac1a256e5d309d90733b95f65f5cf91a9b1f49e0ca3f890da38e87ae2be",
+          "candidate": "a5ea6eff699f30e5775c8492326dda465924b800257f314ee09352e5fbba1f64"
+        }
       }
     },
     "focused_sql_verified_jit": {
