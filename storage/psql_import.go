@@ -480,7 +480,6 @@ ORDER BY tc.constraint_name, kcu.ordinal_position`, srcSchema, srcTable)
 	}
 
 	t.schema.schemalock.Lock()
-	defer t.schema.schemalock.Unlock()
 
 existingLoop:
 	for k, cols := range keys {
@@ -496,7 +495,7 @@ existingLoop:
 		t.Unique = append(t.Unique, uniqueKey{Id: k.name, Cols: colNames})
 	}
 	t.publishShowColumnsSnapshot(true)
-	t.schema.save()
+	t.schema.saveLockedAndUnlock(schemaSaveFsync, t)
 	return nil
 }
 

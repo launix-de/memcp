@@ -139,6 +139,7 @@ func CreateProcedure(schema, name, language, source string, parameters scm.Scmer
 		panic("procedure already exists: " + name)
 	}
 	db.procedures.Set(name, definition)
+	db.proposeCatalogProceduresLocked()
 	db.saveLockedAndUnlock(schemaSaveFsync)
 	return true
 }
@@ -164,6 +165,7 @@ func DropProcedure(schema, name string, ifexists bool) bool {
 		panic("procedure does not exist: " + name)
 	}
 	db.procedures.Remove(name)
+	db.proposeCatalogProceduresLocked()
 	db.saveLockedAndUnlock(schemaSaveFsync)
 	return true
 }

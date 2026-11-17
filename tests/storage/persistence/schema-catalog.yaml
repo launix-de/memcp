@@ -60,6 +60,23 @@ test_cases:
         - {ordinal: 1, name: code, typ: varchar, comment: business code}
         - {ordinal: 2, name: kind, typ: enum, comment: ''}
         - {ordinal: 3, name: amount, typ: decimal, comment: ''}
+  - name: SQL cannot delete authoritative column declarations
+    sql: DELETE FROM system_schema.columns WHERE schema_name = 'memcp-tests' AND table_name = 'sc_parent'
+    expect: {error: true}
+  - name: SQL cannot update authoritative table declarations
+    sql: UPDATE system_schema.tables SET comment = 'forged' WHERE schema_name = 'memcp-tests' AND name = 'sc_parent'
+    expect: {error: true}
+  - name: SQL cannot insert authoritative table declarations
+    sql: INSERT INTO system_schema.tables (schema_name, name) VALUES ('memcp-tests', 'forged')
+    expect: {error: true}
+  - name: Native catalog declarations cannot be altered through SQL
+    sql: ALTER TABLE system_schema.columns ADD COLUMN forged INT
+    expect: {error: true}
+  - name: Rejected writes leave the admitted definition intact
+    sql: SELECT comment FROM system_schema.tables WHERE schema_name = 'memcp-tests' AND name = 'sc_parent'
+    expect:
+      rows: 1
+      data: [{comment: parent rows}]
   - name: Key columns join their keys
     sql: >-
       SELECT k.id, kc.column_name FROM system_schema.`keys` k
