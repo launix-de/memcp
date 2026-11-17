@@ -63,6 +63,57 @@ test_cases:
       rows: 5
 
   # ==========================================================================
+  # GROUP_CONCAT(... ORDER BY ...) — deterministic order inside each group
+  # ==========================================================================
+
+  - name: "Insert rows with NULL and duplicate names"
+    sql: "INSERT INTO gc_test VALUES (6, 1, NULL, 60), (7, 2, 'dave', 70)"
+
+  - name: "GROUP_CONCAT ORDER BY descending key with SEPARATOR"
+    sql: "SELECT g.grp, GROUP_CONCAT(g.name ORDER BY g.val DESC SEPARATOR '|') AS names FROM gc_test g GROUP BY g.grp ORDER BY g.grp"
+    expect:
+      rows: 2
+      data:
+        - grp: 1
+          names: "charlie|bob|alice"
+        - grp: 2
+          names: "dave|eve|dave"
+
+  - name: "GROUP_CONCAT ORDER BY the concatenated value"
+    sql: "SELECT grp, GROUP_CONCAT(name ORDER BY name) AS names FROM gc_test GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 2
+      data:
+        - grp: 1
+          names: "alice,bob,charlie"
+        - grp: 2
+          names: "dave,dave,eve"
+
+  - name: "GROUP_CONCAT DISTINCT ORDER BY keeps each value once"
+    sql: "SELECT grp, GROUP_CONCAT(DISTINCT name ORDER BY name DESC) AS names FROM gc_test GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 2
+      data:
+        - grp: 1
+          names: "charlie,bob,alice"
+        - grp: 2
+          names: "eve,dave"
+
+  - name: "GROUP_CONCAT ORDER BY several keys sorts NULL keys last when descending"
+    sql: "SELECT GROUP_CONCAT(id ORDER BY name DESC, id DESC) AS ids FROM gc_test"
+    expect:
+      rows: 1
+      data:
+        - ids: "5,7,4,3,2,1,6"
+
+  - name: "GROUP_CONCAT ORDER BY over only NULL values is NULL"
+    sql: "SELECT GROUP_CONCAT(name ORDER BY id) AS names FROM gc_test WHERE name IS NULL"
+    expect:
+      rows: 1
+      data:
+        - names: null
+
+  # ==========================================================================
   # Cleanup
   # ==========================================================================
 
