@@ -451,3 +451,19 @@ A focused test reproduces unstable IDs before the fix and verifies stable IDs,
 code length, shared grammar publication and results over 16 independent builds
 afterwards. All focused JIT parser tests pass. This closes a concrete source of
 layout variation; it is not proof that parser order caused all CI fluctuations.
+
+With stable parser root ordering, the unchanged focused A/B configuration passes
+both affected suites: negated snapshots 53.782 → 50.057 ms (−6.9%, seven
+fixtures), nested scalar sums 172.333 → 169.985 ms (−1.4%, seven fixtures),
+and filtered scalar binder 256.880 → 247.785 ms (−3.5%, one fixture). All cases
+in each suite pass. These are local measurements against `762a2cf1a`, before
+rebasing onto `9cb71ca8b` (the latter adds a guard against loading unused catalogs
+during global cleanup). No workload or regression budget is changed.
+
+After rebasing, both main and feature checkouts were explicitly built and their
+build info verified as `go1.27.3-X:jit`, with identical PHP tags. The complete
+focused SQL suite passes **88/88 on each side**. Its four-query post-restart
+adaptive case measures **103.161 → 93.473 ms (−9.4%)**. This replaces the withdrawn
+mixed-compiler SQL comparison. Binary hashes and every QUERY_TIME record are
+retained under `adaptive_blob.focused_sql_verified_jit`; no speedup from one suite
+run is substituted for the CI A/B gate.
