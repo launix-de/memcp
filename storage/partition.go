@@ -175,6 +175,9 @@ func (d *shardDimension) UnmarshalJSON(data []byte) error {
 
 // computes the index of a datapoint in PShards -> if item == pivot, sort left
 func computeShardDimensionIndex(sd shardDimension, value scm.Scmer) int {
+	if sd.Method == catalogPartitionMethod {
+		return catalogPartitionIndex(sd, value)
+	}
 	if sd.Method != "" {
 		hash, ok := partitionHash(sd.Method, value)
 		if !ok {
@@ -648,6 +651,9 @@ func partitionHash(method string, value scm.Scmer) (uint64, bool) {
 }
 
 func validPartitionDimension(d shardDimension) bool {
+	if d.Method == catalogPartitionMethod {
+		return len(d.Pivots) == d.NumPartitions
+	}
 	if d.Method == "" {
 		return len(d.Pivots) == d.NumPartitions-1
 	}
@@ -656,6 +662,19 @@ func validPartitionDimension(d shardDimension) bool {
 
 func partitionAccessInterval(d shardDimension, access scanAccess, i int) (minimum, maximum int, usable bool) {
 	lower, upper := access.boundValue(i, false), access.boundValue(i, true)
+	if d.Method == catalogPartitionMethod {
+		// Database names prune only on equality; the case-folded interval
+		// keeps the pruning valid under case-insensitive collations.
+		if access.boundaryAnalyzer(i) != EqualMatcher &&
+			(lower.IsNil() || upper.IsNil() || !access.boundaryLowerInclusive(i) || !access.boundaryUpperInclusive(i) || !boundaryValueEqual(lower, upper)) {
+			return 0, 0, false
+		}
+		if !lower.IsString() {
+			return 0, 0, false
+		}
+		minimum, maximum = catalogPartitionInterval(d, lower)
+		return minimum, maximum, true
+	}
 	if d.Method != "" {
 		// A hash bucket says nothing about ranges or ordering. Numeric coercion
 		// outside the immutable domain also scans all buckets conservatively.
@@ -1225,7 +1244,7 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension, maint
 					built.columns[col.Name] = newcol
 					// Write to disk
 					if s.t.PersistencyMode != Memory {
-						f := s.t.schema.persistence.WriteColumn(s.uuid.String(), col.Name)
+						f := s.home().persistence.WriteColumn(s.uuid.String(), col.Name)
 						newcol.Serialize(f)
 						finishColumnWrite(f, s.t.PersistencyMode == Safe)
 					}

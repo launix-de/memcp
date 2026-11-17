@@ -799,7 +799,7 @@ func (cluster *nodeCluster) installReference(source string, packet mosiPacket) e
 			return err
 		}
 	} else if packet.Resource.Shard == "" {
-		data = db.persistence.ReadSchema()
+		data = stripCatalogRoot(db.persistence.ReadSchema())
 		content, err := r.schemaDigest(data)
 		if err != nil || content != packet.Content {
 			return fmt.Errorf("shared schema changed")
@@ -878,7 +878,7 @@ func (cluster *nodeCluster) prepareBootstrap(fresh bool) error {
 		schema := mosiResource{Database: name}
 		cluster.bootstrapResources[schema.key()] = schema
 		var snapshot database
-		data := db.persistence.ReadSchema()
+		data := stripCatalogRoot(db.persistence.ReadSchema())
 		if len(data) == 0 {
 			continue
 		}

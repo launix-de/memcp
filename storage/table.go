@@ -1065,6 +1065,39 @@ func (t *table) publishSchemaTopology(mode ShardMode, shards []*storageShard, di
 	return t.schemaTopology.Swap(next)
 }
 
+// persistedColumn and persistedTable are the declaration records of the
+// legacy schema.json format. The system_schema catalog derives its columns
+// from exactly these records, so every persisted field has a catalog cell.
+type persistedColumn struct {
+	*column
+	PartitioningScore int
+	InitialValue      *scm.Scmer                     `json:"initial_value,omitempty"`
+	InitialValues     map[string]columnInitialExtent `json:"initial_values,omitempty"`
+}
+
+type persistedTable struct {
+	ShardForwards      map[string]string `json:"shard_forwards,omitempty"`
+	Name               string
+	Columns            []persistedColumn
+	DroppedColumns     map[string]bool `json:"dropped_columns"`
+	Unique             []uniqueKey
+	Foreign            []foreignKey
+	Triggers           []TriggerDescription
+	PersistencyMode    PersistencyMode
+	OnInit             *scm.Scmer `json:"oninit,omitempty"`
+	AutoIncrement      uint64     `json:"Auto_increment"`
+	Collation          string
+	Charset            string
+	Comment            string
+	PlannerRowEstimate uint64                   `json:"planner_row_estimate"`
+	KeyFrequencies     *persistedKeyFrequencies `json:"key_frequencies,omitempty"`
+	FilterFeedback     *persistedFilterFeedback `json:"filter_feedback,omitempty"`
+	ShardMode          ShardMode
+	Shards             []*storageShard
+	PShards            []*storageShard
+	PDimensions        []shardDimension
+}
+
 // MarshalJSON reads topology only from an immutable, atomically published
 // generation. Database schema locking keeps the remaining DDL fields stable.
 func (t *table) MarshalJSON() ([]byte, error) {
@@ -1094,12 +1127,6 @@ func (t *table) MarshalJSON() ([]byte, error) {
 	// topology. A rebuilt generation has materialized its column values before
 	// publication. Filter only the serialized view: failed schema publication
 	// can restore its previous topology without losing the original extents.
-	type persistedColumn struct {
-		*column
-		PartitioningScore int
-		InitialValue      *scm.Scmer                     `json:"initial_value,omitempty"`
-		InitialValues     map[string]columnInitialExtent `json:"initial_values,omitempty"`
-	}
 	columns := make([]persistedColumn, len(t.Columns))
 	for i, c := range t.Columns {
 		columns[i].column = c
@@ -1120,28 +1147,6 @@ func (t *table) MarshalJSON() ([]byte, error) {
 				columns[i].InitialValues[id] = extent
 			}
 		}
-	}
-	type persistedTable struct {
-		ShardForwards      map[string]string `json:"shard_forwards,omitempty"`
-		Name               string
-		Columns            []persistedColumn
-		DroppedColumns     map[string]bool `json:"dropped_columns"`
-		Unique             []uniqueKey
-		Foreign            []foreignKey
-		Triggers           []TriggerDescription
-		PersistencyMode    PersistencyMode
-		OnInit             *scm.Scmer `json:"oninit,omitempty"`
-		AutoIncrement      uint64     `json:"Auto_increment"`
-		Collation          string
-		Charset            string
-		Comment            string
-		PlannerRowEstimate uint64                   `json:"planner_row_estimate"`
-		KeyFrequencies     *persistedKeyFrequencies `json:"key_frequencies,omitempty"`
-		FilterFeedback     *persistedFilterFeedback `json:"filter_feedback,omitempty"`
-		ShardMode          ShardMode
-		Shards             []*storageShard
-		PShards            []*storageShard
-		PDimensions        []shardDimension
 	}
 	// Lazy compilation updates runtime trigger fields under t.mu, independently
 	// of schema ownership. Copy the declarations before encoding outside the lock.
@@ -2506,32 +2511,39 @@ func (c *column) Show(keyType string, t *table) scm.Scmer {
 	return c.show(keyType, uint64(c.distinctEstimateFor(t)), t.CountEstimate(), c.PlannerStats.Load())
 }
 
-func (c *column) show(keyType string, distinctEstimate uint64, rowEstimate uint, plannerStats *columnPlannerStatistics) scm.Scmer {
-	dims := make([]scm.Scmer, len(c.Typdimensions))
-	for i, v := range c.Typdimensions {
-		dims[i] = scm.NewInt(int64(v))
-	}
-	typ := c.Typ
-	if len(c.Typdimensions) > 0 {
+// columnTypeDisplay renders a declaration as SHOW COLUMNS and
+// INFORMATION_SCHEMA spell it: DECIMAL(12,2) or ENUM('a','b').
+func columnTypeDisplay(typ string, dimensions []int, enumValues []string) string {
+	result := typ
+	if len(dimensions) > 0 {
 		var b strings.Builder
-		b.WriteString(c.Typ)
+		b.WriteString(typ)
 		b.WriteByte('(')
-		for i, v := range c.Typdimensions {
+		for i, v := range dimensions {
 			if i > 0 {
 				b.WriteByte(',')
 			}
 			b.WriteString(strconv.Itoa(v))
 		}
 		b.WriteByte(')')
-		typ = b.String()
+		result = b.String()
 	}
-	if strings.EqualFold(c.Typ, "ENUM") && len(c.EnumValues) != 0 {
-		labels := make([]string, len(c.EnumValues))
-		for i, label := range c.EnumValues {
+	if strings.EqualFold(typ, "ENUM") && len(enumValues) != 0 {
+		labels := make([]string, len(enumValues))
+		for i, label := range enumValues {
 			labels[i] = "'" + strings.ReplaceAll(strings.ReplaceAll(label, "\\", "\\\\"), "'", "''") + "'"
 		}
-		typ = c.Typ + "(" + strings.Join(labels, ",") + ")"
+		result = typ + "(" + strings.Join(labels, ",") + ")"
 	}
+	return result
+}
+
+func (c *column) show(keyType string, distinctEstimate uint64, rowEstimate uint, plannerStats *columnPlannerStatistics) scm.Scmer {
+	dims := make([]scm.Scmer, len(c.Typdimensions))
+	for i, v := range c.Typdimensions {
+		dims[i] = scm.NewInt(int64(v))
+	}
+	typ := columnTypeDisplay(c.Typ, c.Typdimensions, c.EnumValues)
 	extra := ""
 	if c.AutoIncrement {
 		extra = "auto_increment"
