@@ -2511,39 +2511,32 @@ func (c *column) Show(keyType string, t *table) scm.Scmer {
 	return c.show(keyType, uint64(c.distinctEstimateFor(t)), t.CountEstimate(), c.PlannerStats.Load())
 }
 
-// columnTypeDisplay renders a declaration as SHOW COLUMNS and
-// INFORMATION_SCHEMA spell it: DECIMAL(12,2) or ENUM('a','b').
-func columnTypeDisplay(typ string, dimensions []int, enumValues []string) string {
-	result := typ
-	if len(dimensions) > 0 {
+func (c *column) show(keyType string, distinctEstimate uint64, rowEstimate uint, plannerStats *columnPlannerStatistics) scm.Scmer {
+	dims := make([]scm.Scmer, len(c.Typdimensions))
+	for i, v := range c.Typdimensions {
+		dims[i] = scm.NewInt(int64(v))
+	}
+	typ := c.Typ
+	if len(c.Typdimensions) > 0 {
 		var b strings.Builder
-		b.WriteString(typ)
+		b.WriteString(c.Typ)
 		b.WriteByte('(')
-		for i, v := range dimensions {
+		for i, v := range c.Typdimensions {
 			if i > 0 {
 				b.WriteByte(',')
 			}
 			b.WriteString(strconv.Itoa(v))
 		}
 		b.WriteByte(')')
-		result = b.String()
+		typ = b.String()
 	}
-	if strings.EqualFold(typ, "ENUM") && len(enumValues) != 0 {
-		labels := make([]string, len(enumValues))
-		for i, label := range enumValues {
+	if strings.EqualFold(c.Typ, "ENUM") && len(c.EnumValues) != 0 {
+		labels := make([]string, len(c.EnumValues))
+		for i, label := range c.EnumValues {
 			labels[i] = "'" + strings.ReplaceAll(strings.ReplaceAll(label, "\\", "\\\\"), "'", "''") + "'"
 		}
-		result = typ + "(" + strings.Join(labels, ",") + ")"
+		typ = c.Typ + "(" + strings.Join(labels, ",") + ")"
 	}
-	return result
-}
-
-func (c *column) show(keyType string, distinctEstimate uint64, rowEstimate uint, plannerStats *columnPlannerStatistics) scm.Scmer {
-	dims := make([]scm.Scmer, len(c.Typdimensions))
-	for i, v := range c.Typdimensions {
-		dims[i] = scm.NewInt(int64(v))
-	}
-	typ := columnTypeDisplay(c.Typ, c.Typdimensions, c.EnumValues)
 	extra := ""
 	if c.AutoIncrement {
 		extra = "auto_increment"
