@@ -932,6 +932,34 @@ func TestStorageSCMERKeepsBSONUncompressed(t *testing.T) {
 	}
 }
 
+// Lists have neither a string nor a numeric encoding. A list column used to
+// be proposed as StorageFloat and lost every value.
+func TestCompressionKeepsListValues(t *testing.T) {
+	list := func(items ...string) scm.Scmer {
+		values := make([]scm.Scmer, len(items))
+		for i, item := range items {
+			values[i] = scm.NewString(item)
+		}
+		return scm.NewSlice(values)
+	}
+	for name, values := range map[string][]scm.Scmer{
+		"distinct": {list("a"), list("b", "c"), list(), list("d"), list("e"), list("f"), list("g"), list("h"), list("i"), list("j")},
+		"mixed":    {list("a"), scm.NewString("text"), scm.NewInt(3), list("b")},
+		"sparse":   {list("a"), scm.NewNil(), scm.NewNil(), scm.NewNil()},
+	} {
+		t.Run(name, func(t *testing.T) {
+			col := buildViaCompression(len(values), func(i int) scm.Scmer { return values[i] })
+			for _, stored := range []ColumnStorage{col, serializeDeserialize(col)} {
+				for i, want := range values {
+					if got := stored.GetValue(uint32(i)); !scm.Equal(got, want) || got.IsSlice() != want.IsSlice() {
+						t.Fatalf("%T row %d = %s, want %s", stored, i, scm.String(got), scm.String(want))
+					}
+				}
+			}
+		})
+	}
+}
+
 // The upgrade fixture must survive compression and reopening bit for bit,
 // including the sign of zero. Numeric equality alone cannot assert this.
 func TestCompressionDecimalSignedZeroRoundtrip(t *testing.T) {
