@@ -1177,3 +1177,10 @@ INSERT INTO up_concat_text VALUES
   (149, 'trace query 0149: SELECT payload FROM fop_session WHERE id = 149 -- abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789 Prüfbericht ÄÖß'),
   (150, NULL),
   (151, '');
+
+-- Long shared report bodies exercise blob -> adaptive inline selection on rebuild.
+-- This policy uses the existing inline/reference encodings; no new wire layout.
+INSERT INTO up_concat_text (id, message)
+SELECT id + 1000, CONCAT('extended document ', id, ': ',
+  REPEAT('Pruefbericht wartung Geraet 0123456789abcdefghijklmnopqrstuvwxyz ', 100))
+FROM up_concat_text WHERE id < 150;

@@ -21,10 +21,139 @@ import (
 	"fmt"
 	"math"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/launix-de/memcp/scm"
 )
+
+func TestAdaptiveBlobChoice(t *testing.T) {
+	shared := blobChoiceText(17, 6000)
+	for _, tc := range []struct {
+		name string
+		text func(int) string
+		want int
+	}{
+		{"shared paragraphs", func(i int) string { return fmt.Sprintf("document %04d\n%s", i, shared) }, blobSampleValueLimit},
+		{"shifted common paragraphs", func(i int) string { return strings.Repeat(" ", i%11) + fmt.Sprintf("document %04d\n%s", i, shared) }, blobSampleValueLimit},
+		{"unrelated", func(i int) string { return blobChoiceText(uint64(i+1), 6000) }, maxInlineBlobBytes},
+		{"only within-document repetition", func(i int) string { return strings.Repeat(blobChoiceText(uint64(i+1), 512), 12) }, maxInlineBlobBytes},
+		{"identical blobs already deduplicate", func(int) string { return shared }, maxInlineBlobBytes},
+		{"too large", func(int) string { return strings.Repeat(shared, 8) }, maxInlineBlobBytes},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var sample longTextSample
+			for i := 0; i < 256; i++ {
+				sample.offer(tc.text(i))
+			}
+			if got := sample.inlineLimit(); got != tc.want {
+				t.Fatalf("inline limit %d, want %d", got, tc.want)
+			}
+			if sample.copied > blobSampleCopyLimit {
+				t.Fatal("sample exceeded copy budget")
+			}
+		})
+	}
+}
+
+func TestAdaptiveBlobSampleBudget(t *testing.T) {
+	var sample longTextSample
+	text := blobChoiceText(101, blobSampleValueLimit)
+	for i := 0; i < 100000; i++ {
+		sample.offer(text)
+	}
+	retained := 0
+	for _, text := range sample.values {
+		retained += len(text)
+	}
+	if retained > blobSampleSlots*blobSampleValueLimit || sample.copied > blobSampleCopyLimit {
+		t.Fatal("reservoir exceeded its retained/copy budget")
+	}
+	if sample.seen != 100000 {
+		t.Fatal("bounded copying stopped population accounting")
+	}
+}
+
+func TestAdaptiveBlobAnalysisReleasedForMixedBSON(t *testing.T) {
+	object, err := scm.NewBSONFromJSON(`{"a":1}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gen := func(i int) scm.Scmer {
+		if i == 128 {
+			return object
+		}
+		return scm.NewString(fmt.Sprintf("document %04d %s", i, strings.Repeat("shared paragraph ", 200)))
+	}
+	column := buildViaCompression(129, gen)
+	storage, ok := column.(*StorageSCMER)
+	if !ok {
+		t.Fatalf("mixed BSON changed storage type: %T", column)
+	}
+	if storage.longSample != nil {
+		t.Fatal("published mixed column retained sampling text")
+	}
+	verifyStorage(t, column, 129, gen)
+}
+
+func TestAdaptiveBlobSparseRoundtrip(t *testing.T) {
+	shared := blobChoiceText(39, 6000)
+	gen := func(i int) scm.Scmer {
+		if i%3 != 0 {
+			return scm.NewNil()
+		}
+		return scm.NewString(fmt.Sprintf("!sparse document %04d\n%s", i, shared))
+	}
+	column := buildViaCompression(300, gen)
+	verifyStorage(t, column, 300, gen)
+	verifyStorage(t, serializeDeserialize(column), 300, gen)
+}
+
+func TestAdaptiveBlobPipelineAndRoundtrip(t *testing.T) {
+	shared := blobChoiceText(31, 6000)
+	values := make([]scm.Scmer, 256)
+	for i := range values {
+		values[i] = scm.NewString(fmt.Sprintf("!document %04d\n%s", i, shared))
+	}
+	values[17] = scm.NewNil()
+	column := buildViaCompression(len(values), func(i int) scm.Scmer { return values[i] })
+	overlay, ok := column.(*OverlayBlob)
+	if !ok {
+		t.Fatalf("got %T", column)
+	}
+	if len(overlay.values) != 0 {
+		t.Fatalf("shared documents still externalized: %d", len(overlay.values))
+	}
+	if overlay.extraInline != nil || overlay.inlineLimit != 0 {
+		t.Fatal("published column retained analysis decisions")
+	}
+	for _, stored := range []ColumnStorage{column, serializeDeserialize(column)} {
+		verifyStorage(t, stored, len(values), func(i int) scm.Scmer { return values[i] })
+	}
+}
+
+func TestAdaptiveBlobInlineBudget(t *testing.T) {
+	column := &OverlayBlob{Base: new(StorageString), inlineLimit: blobSampleValueLimit}
+	values := make([]scm.Scmer, 300)
+	shared := blobChoiceText(71, 16000)
+	column.prepare()
+	for i := range values {
+		values[i] = scm.NewString(fmt.Sprintf("document %04d\n%s", i, shared))
+		column.scan(uint32(i), values[i])
+	}
+	if column.extraInlineBytes > blobExtraInlineBudget {
+		t.Fatal("additional inline bytes exceeded budget")
+	}
+	column.init(uint32(len(values)))
+	for i, value := range values {
+		column.build(uint32(i), value)
+	}
+	column.finish()
+	if len(column.values) == 0 {
+		t.Fatal("values beyond inline budget were not externalized")
+	}
+	verifyStorage(t, serializeDeserialize(column), len(values), func(i int) scm.Scmer { return values[i] })
+}
 
 // buildViaCompression runs the full compression pipeline:
 // StorageSCMER.prepare → scan → proposeCompression → (new type).prepare → scan → init → build → finish

@@ -19,10 +19,67 @@ Copyright (C) 2026  Carl-Philip Hänsch
 package storage
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/launix-de/memcp/scm"
 )
+
+func TestAdaptiveBlobJITReadersAndFusion(t *testing.T) {
+	shared := blobChoiceText(271, 6000)
+	values := make([]scm.Scmer, 512)
+	for i := range values {
+		values[i] = scm.NewString(fmt.Sprintf("document %04d\n%s", i, shared))
+	}
+	values[17] = scm.NewNil()
+	column := buildViaCompression(len(values), func(i int) scm.Scmer { return values[i] })
+	overlay := column.(*OverlayBlob)
+	if len(overlay.values) == 0 || !column.GetValue(0).IsBufferString() {
+		t.Fatal("fixture must mix concat entries and external blobs")
+	}
+	reader := directJITStorageReader{column.GetJITGetValue(), column.GetJITGetValueRange(), column.GetJITGetValueMulti()}
+	if reader.getValue == nil || reader.getValueRange == nil || reader.getValueMulti == nil {
+		t.Fatal("adaptive column missing generated readers")
+	}
+	for i, want := range values {
+		if !scm.Equal(reader.GetValue(uint32(i)), want) {
+			t.Fatalf("scalar row %d", i)
+		}
+	}
+	got := make([]scm.Scmer, len(values)*2)
+	reader.GetValueRange(0, uint32(len(values)), got, 2)
+	for i, want := range values {
+		if !scm.Equal(got[i*2], want) {
+			t.Fatalf("range row %d", i)
+		}
+	}
+	rows := []uint32{511, 0, 17, 350, 349, 349, 1}
+	reader.GetValueMulti(rows, got, 2)
+	for i, row := range rows {
+		if !scm.Equal(got[i*2], values[row]) {
+			t.Fatalf("multi row %d", row)
+		}
+	}
+	source := `(lambda (text) (if (nil? text) false (> (strlen text) 100)))`
+	predicate := scm.Eval(scm.Optimize(scm.Read(t.Name(), source, true), &scm.Globalenv, nil), &scm.Globalenv)
+	filter := scm.CompileJITFilterStorage(predicate.Proc(), []uint8{scm.JITTypeUnknown}, []scm.JITStorageGetValueEmitter{overlay.JITEmit})
+	if filter == nil {
+		t.Fatal("adaptive column did not fuse with string predicate")
+	}
+	ids := make([]uint32, len(values))
+	for i := range ids {
+		ids[i] = uint32(i)
+	}
+	count := filter(ids, nil)
+	if count != len(values)-1 {
+		t.Fatalf("selected %d rows", count)
+	}
+	for _, row := range ids[:count] {
+		if values[row].IsNil() {
+			t.Fatal("fused predicate selected NULL")
+		}
+	}
+}
 
 type directJITStorageReader struct {
 	getValue      scm.JITStorageGetValueFunc

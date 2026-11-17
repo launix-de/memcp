@@ -284,3 +284,130 @@ parsing and B-tree construction; they do not establish increased CPU work or
 identify a new concat allocation hot spot. No gate is waived or weakened.
 All raw fixtures and the negative before/after results are preserved under
 `integer_accessor_followup` in `string-concat-sql-samples.json`.
+
+## Adaptive long-text placement (November 2026)
+
+The development baseline is the pulled and rebuilt main checkout at
+`762a2cf1a95923914249b14e1174e647df9cf592`. One feature worktree contains the
+candidate. This changes compression choice, not the persisted wire format:
+existing inline strings and blob references already support these lengths.
+Historical readers, escaping, NULLs, and external blob ownership remain intact.
+
+During the ordinary analysis scan, columns with more than eight distinct values
+collect a deterministic reservoir of eight strings between 2 and 32 KiB.
+Owned sample text is capped at 256 KiB, replacement copying at 1 MiB per column.
+Values over 32 KiB stay blobs. Exact duplicate samples retain gzip, since whole
+blob deduplication already shares them. A fixed 32-KiB fingerprint table tests
+shared 16-byte windows; at least half the sample documents must have 75% shared
+coverage. Sliding lookups tolerate shifted prefixes. Common PDF headers alone
+are insufficient. A fingerprint hit only enables a real cost probe, so hash
+collisions cannot change decoded content.
+
+The subsequent concat probe limits its index to 8,192 trigrams and four offsets
+per trigram. It reuses one gzip writer and counts output without retaining it.
+The estimate charges the first pool seed plus the **worst** observed incremental
+bytes per source byte, directory bytes and gzip reference overhead. A 20% space
+margin is required. At most 2 MiB of additional source text is then inlined per
+column build; excess rows keep gzip. A private row bitmap keeps scan/build
+choices identical. Sample, bitmap and codec indexes are discarded before
+publication. This is a bounded heuristic, not a guarantee of optimal size or
+query speed for every unsampled row. In particular, large or heterogeneous
+shared document families can be false negatives.
+
+### Fixed manual A/B measurements
+
+Native Go 1.26, AMD Ryzen 9 7900X3D, `GOMAXPROCS=4`. Identical 128-row synthetic
+fixtures, including first execution and without forced GC. Build uses five
+iterations per sample and five samples; operators use 10,000 iterations and
+three samples; bigrams use 30 iterations and five samples. Targeted longer
+unchanged-path controls use 100 build iterations for duplicates and 50 for PDF
+shards 7/9, each with five samples. All earlier short/noisy and rejected-policy
+measurements are retained in `string-concat-sql-samples.json` under
+`adaptive_blob`. Table entries are medians, not end-to-end workload gates.
+
+| Fixture | Master build | Adaptive build | Change | Master serialized | Adaptive serialized |
+|---|---:|---:|---:|---:|---:|
+| Shared high-entropy paragraph, distinct document prefixes | 36.197 ms | 10.331 ms | −71.5% | 655,185 B | 8,020 B |
+| Shared repetitive template, distinct prefixes | 22.774 ms | 7.113 ms | −68.8% | 23,412 B | 9,228 B |
+| Unrelated random text, unchanged gzip | 50.598 ms | 31.562 ms | −37.6%* | 652,002 B | 652,002 B |
+| Identical whole documents, unchanged deduplication (longer probe) | 1.491 ms | 1.579 ms | +5.9% | 5,271 B | 5,271 B |
+| Real PDF shard 7, unchanged gzip (longer probe) | 13.773 ms | 15.137 ms | +9.9% | unchanged | unchanged |
+| Real PDF shard 9, unchanged gzip (longer probe) | 27.334 ms | 30.573 ms | +11.9% | unchanged | unchanged |
+
+*The unchanged representation cannot explain the unrelated-text timing gain;
+process scheduling/GC noise is visible in the retained samples. Do not attribute
+this number to a new gzip optimization. The short duplicate probe initially
+reported +26.7%; the predeclared longer identical A/B probe above resolves it.
+
+For the shared high-entropy fixture, build allocation bytes fall from 109.67 MB
+to 10.89 MB (−90.1%). Stored resident bytes fall from 650,736 to 9,112, while a
+warm gzip cache additionally retains 770,816 decoded text bytes. The concat
+column has no decoded cache. Counts exclude the source fixture, map overhead and
+OS page cache. Serialized size includes detached gzip contents, so filesystem
+block rounding is not credited to concat.
+
+| Operation, shared high-entropy fixture | Master | Adaptive | Allocation consequence |
+|---|---:|---:|---|
+| Uncached row access | 49,263 ns | 28.67 ns | gzip decode disappears |
+| Warm string materialization | 6.982 ns | 935.6 ns | fragmented concat allocates its result |
+| Warm append to reused output | 3.510 ns | 82.54 ns | both allocation-free |
+| Byte length | 4.973 ns | 6.664 ns | both allocation-free |
+| Equality | 7.899 ns | 81.28 ns | both allocation-free |
+| Binary less | 9.775 ns | 56.93 ns | both allocation-free |
+| General-ci less | 60.70 ns | 105.7 ns | both allocation-free |
+| Hash | 383.8 ns | 613.8 ns | both allocation-free |
+| LIKE `%wartung%`, general-ci | 3,541 ns | 4,839 ns | cursor traversal versus cached text |
+| Bigram build, cold | 11.488 ms | 8.930 ms | reduced gzip allocation |
+| Bigram build, warm | 5.447 ms | 9.068 ms | +66.5% CPU despite less decoded RAM |
+
+“Cold” uses the actual uncached blob reader and includes gzip decoding. “Warm”
+uses retained, content-deduplicated decoded blob handles versus concat handles;
+it excludes initial decoding and separately counts its retained RAM. This is
+an operator comparison, not a simulation of production blob-cache admission.
+The repetitive-template bigram probe also loses: cold 5.432 → 9.412 ms (+73.3%),
+warm 4.465 → 8.964 ms (+100.8%). Concat therefore does **not** universally improve
+bigram construction. Warm native string operations can be substantially faster
+than cursor operations, paid for with a decoded cache. Query workload matters.
+
+### Actual PDF extracts and rejected choices
+
+The private corpus contains 1,102 distinct UTF-8 PDF extracts (13,565,905 bytes)
+from 12 actual `fop_files` shard groups. Values are sampled only within their
+original shard, using seed 1729, and restricted to this policy's 2–32 KiB window.
+Corpus SHA-256:
+`c86a9488546d5f2412fa32e1ff2b73535c68286333517a1cb68f6ed4a092bb61`.
+Document contents and individual hashes are omitted from the repository.
+
+An initial mean-growth estimator selected two shards: serialized bytes changed
+299,733 → 259,656 (−13.4%) and 63,643 → 126,674 (+99.0%). That false positive
+motivated the worst-growth estimate and stronger fingerprint gate. The final
+heuristic retains gzip on **all 12** groups: no measured PDF storage saving and
+no serialized growth. It does not infer a benefit from the synthetic examples.
+The longer final bigram controls on unchanged PDF shards are approximately
+unchanged: shard 0 cold −1.8%/warm +2.2%, shard 9 +1.5%/+2.3%, shard 11
++3.7%/+5.1%. Earlier three-iteration controls varied widely and remain available.
+
+To reproduce the public synthetic measurements in each checkout, install the
+identical `BenchmarkAdaptiveBlob` instrumentation, build the test binary, and run
+these fixed probes sequentially on an otherwise idle machine:
+
+```sh
+GOMAXPROCS=4 go test -tags=nophp ./storage -run '^$' -bench '^BenchmarkAdaptiveBlob/.*/pipeline/build$' -benchtime=5x -count=5 -benchmem
+GOMAXPROCS=4 go test -tags=nophp ./storage -run '^$' -bench '^BenchmarkAdaptiveBlob/.*/pipeline/(read-cold|materialize-warm|append-warm|strlen-warm|equal-warm|less-warm|less-ci-warm|hash-warm|like-warm)$' -benchtime=10000x -count=3 -benchmem
+GOMAXPROCS=4 go test -tags=nophp ./storage -run '^$' -bench '^BenchmarkAdaptiveBlob/.*/pipeline/bigram-(cold|warm)$' -benchtime=30x -count=5 -benchmem
+```
+
+`MEMCP_BLOB_CORPUS` optionally supplies a local JSON array of
+`{"name": "shard-group", "texts": ["..."]}` without changing the public fixtures.
+Use the same input, compiler and counts on both revisions. Neither the CI
+regression budget nor an existing assertion is relaxed by this feature.
+
+The complete focused SQL string-compression suite passes 88/88 on both the
+rebuilt master and candidate (Go JIT 1.27.3; master PHP build, candidate nophp).
+The new post-restart workload checks 512 long escaped documents, a mix of inline
+text and blob fallback, with four total LIKE queries and zero warmup:
+167.952 → 126.999 ms (−24.4%). All QUERY_TIME records, including other queries
+that became slower in this individual run, are retained in the JSON. These are
+one suite run per side, not a replacement for CI A/B. Focused native, race,
+JIT scalar/range/multi and fused-filter checks also pass; emitters are generated
+by `make jitgen`. Upgrade fixtures add 150 long documents without a format bump.
