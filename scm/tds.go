@@ -6,6 +6,7 @@ package scm
 import "fmt"
 import "net"
 import "context"
+import "crypto/tls"
 import tds "github.com/launix-de/go-tdsstack"
 
 // This file only bridges native transport payloads and Scheme callbacks. SQL,
@@ -131,11 +132,71 @@ func tdsCatch(fn func()) (err error) {
 	return
 }
 
+// This payload contains PEM values, never filesystem paths or SQL settings.
+// Only the privileged Scheme startup owner loads operator-selected files.
+func tdsConfigureTLS(server *tds.Server, data Scmer) {
+	if data.IsNil() {
+		return
+	}
+	pairs, dict := asAssoc(data, "TDS TLS configuration")
+	if dict != nil {
+		pairs = dict.ToList()
+	}
+	if len(pairs) != 6 {
+		panic("TDS TLS configuration requires policy, certificate and private_key")
+	}
+	values := make(map[string]string, 3)
+	for i := 0; i < len(pairs); i += 2 {
+		if !pairs[i].IsString() || !pairs[i+1].IsString() {
+			panic("TDS TLS configuration fields must be strings")
+		}
+		key, value := pairs[i].String(), pairs[i+1].String()
+		if key != "policy" && key != "certificate" && key != "private_key" {
+			panic("unknown TDS TLS configuration field")
+		}
+		if _, exists := values[key]; exists {
+			panic("duplicate TDS TLS configuration field")
+		}
+		if len(value) > 1<<20 {
+			panic("TDS TLS configuration field exceeds one MiB")
+		}
+		values[key] = value
+	}
+	switch values["policy"] {
+	case "default":
+		server.EncryptionPolicy = tds.EncryptionDefault
+	case "optional":
+		server.EncryptionPolicy = tds.EncryptionOptional
+	case "required":
+		server.EncryptionPolicy = tds.EncryptionRequired
+	default:
+		panic("unknown TDS TLS policy")
+	}
+	certificate, err := tls.X509KeyPair([]byte(values["certificate"]), []byte(values["private_key"]))
+	if err != nil {
+		panic(fmt.Errorf("invalid TDS TLS certificate/key pair: %w", err))
+	}
+	server.TLSConfig = &tls.Config{Certificates: []tls.Certificate{certificate}, MinVersion: tls.VersionTLS12}
+}
+
 // TDSServe invokes one frontend callback with (event, session, payload, row,
 // fields, state, query_seq). All descriptor/conversion decisions stay in Scheme.
 func TDSServe(a ...Scmer) Scmer {
+	if len(a) < 3 || len(a) > 5 {
+		panic("tds requires port, handler, database and optional collation/TLS configuration")
+	}
 	callback := a[1]
 	server := &tds.Server{Product: "MemCP", Database: a[2].String()}
+	if len(a) == 5 {
+		tdsConfigureTLS(server, a[4])
+	}
+	// Omitted/nil collation preserves the original three-argument listener.
+	if len(a) >= 4 && !a[3].IsNil() {
+		if !a[3].IsString() || len(a[3].String()) != len(server.Collation) {
+			panic("TDS session collation must be nil or five bytes")
+		}
+		copy(server.Collation[:], a[3].String())
+	}
 	call := func(ctx context.Context, event string, s *tdsSession, payload, row, fields Scmer) Scmer {
 		ctx, cancel := context.WithCancel(ctx)
 		defer cancel()
@@ -210,6 +271,9 @@ func TDSServe(a ...Scmer) Scmer {
 		defer UnregisterSession(ss.state.ID)
 		defer ss.state.ReleaseAllLocks()
 		_ = tdsCatch(func() { Apply(callback, NewString("close"), ss.value) })
+	}
+	if err := server.ValidateConfig(); err != nil {
+		panic(err)
 	}
 	listener, err := net.Listen("tcp", ":"+a[0].String())
 	if err != nil {

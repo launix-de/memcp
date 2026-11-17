@@ -111,6 +111,32 @@ parameter contracts without executing the query. National character declarations
 retain their original schema types; assignment and cast width uses UTF-16 units.
 Integer division uses the declared operand types and rejects zero divisors.
 
+TDS encryption is configured at startup with `--tds-tls-policy=optional` or
+`--tds-tls-policy=required`, together with `--tds-tls-cert=PATH` and
+`--tds-tls-key=PATH`. Paths are resolved from the process working directory;
+use operator-protected PEM files, keeping private keys outside SQL metadata.
+The default policy without files preserves plaintext behavior. Supplying both
+files with the default policy requires full TLS, preserving the transport's
+configured-certificate behavior. Missing, mismatched or invalid credentials and
+unknown policies fail before opening the TDS listener.
+
+Optional encrypts the full connection when the client requests encryption.
+For encryption-capable clients requesting OFF it encrypts only the first LOGIN7
+packet; further login packets, replies and requests are plaintext. TLS-incapable
+clients use plaintext. Required rejects TLS-incapable clients and encrypts all
+login and application traffic. Client certificate trust and hostname checks
+remain client policy. These options configure only TDS; they do not enable HTTPS
+or change the HTTP/MySQL listeners. Changing them requires an operator-managed
+restart; they are never activated by SQL commands.
+
+The privileged Scheme interface keeps its existing three-argument form
+`(tds port handler database)`. Optional argument four is a five-byte transport
+collation or `nil`; omission/`nil` preserves the existing absence of a collation
+announcement. TLS configuration is optional argument five, a flat dictionary
+with `policy`, `certificate` and `private_key` PEM values. Scheme startup owns
+file loading; the Go bridge receives no paths. Existing frontend callbacks and
+SQL type/collation decisions are unchanged.
+
 Schema DDL retains declared identifier spelling while resolving table, view and
 column references without case sensitivity. Named defaults use the existing
 native column defaults, including ALTER ADD/DROP. CREATE TYPE ... FROM stores
@@ -870,6 +896,11 @@ does not compile or activate the experimental runtime integration.
 | `--api-port=PORT` | `4321` | HTTP API listen port |
 | `--mysql-port=PORT` | `3307` | MySQL protocol listen port |
 | `--mysql-socket=PATH` | `/tmp/memcp.sock` | MySQL Unix socket path |
+| `--tds-port=PORT` | — | Enable TDS protocol listener |
+| `--tds-database=NAME` | `memcp-tests` | Default existing TDS database |
+| `--tds-tls-policy=MODE` | `default` | `default`, `optional` or `required` TDS encryption |
+| `--tds-tls-cert=PATH` | — | PEM certificate chain for TDS |
+| `--tds-tls-key=PATH` | — | PEM private key for TDS |
 | `--root-password=PASSWORD` | `admin` | Initial root password (first run only) |
 | `--root-password-file=PATH` | — | Read the initial root password from a file |
 | `--disable-api` | — | Disable HTTP API server |
