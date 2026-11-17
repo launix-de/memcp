@@ -5658,6 +5658,188 @@ Overlapping/unknown bounds retain both complete searches and the usual choice. *
 								(list (quote composite_presence_choice) (if bound_domain_wins "bound_domain" "joined_domain"))
 								(list (quote composite_presence_joined_search) "searched"))))))))))
 
+/* Expose CONCAT components before join ordering and scan/index analysis.
+Only positive WHERE/ON truth contexts are rewritten: FALSE and UNKNOWN both
+reject a candidate there. All comparisons stay in string space. */
+(define concat_lookup_parts (lambda (expr)
+	(match expr
+		(cons head args) (if (has? '(concat sql_concat) head)
+			(merge (map args concat_lookup_parts)) (list expr))
+		_ (list expr))))
+
+/* CONCAT formats mixed COALESCE branches even when the merged SQL type is
+text. Elide its unary formatting only when every possible value is text/NULL. */
+(define concat_lookup_string_value? (lambda (sources expr)
+	(match expr
+		(cons (symbol coalesceNil) args)
+		(reduce args (lambda (text arg) (and text (concat_lookup_string_value? sources arg))) true)
+		_ (or (string? expr) (nil? expr)
+			(and (sql_column_ref? expr) (sql_text_type? (sql_info_type (sql_expr_info sources expr))))))))
+
+(define concat_lookup_text (lambda (sources expr)
+	(if (concat_lookup_string_value? sources expr) expr (list (quote concat) expr))))
+
+/* SimpleFold has width-preserving ASCII classes except
+K/S (Kelvin sign, long S). Binary comparisons have no restriction.
+Unknown collations retain the original comparison. */
+(define concat_lookup_fold_safe? (lambda (text)
+	(and (string? text)
+		(reduce (produceN (strlen text)) (lambda (safe i)
+			(begin
+				(define ch (substr text i 1))
+				(and safe (<= ch "~") (not (has? '("k" "K" "s" "S") ch))))) true))))
+
+(define concat_lookup_pure? (lambda (expr)
+	(match expr
+		((symbol get_column) _alias _ci _column _cci) true
+		(cons head args) (and (expression_foldable? head)
+			(reduce args (lambda (pure arg) (and pure (concat_lookup_pure? arg))) true))
+		_ (not (symbol? expr)))))
+
+(define concat_lookup_compare (lambda (comparison left right)
+	(if (equal? (count comparison) 1)
+		(list (car comparison) left right)
+		(list (quote sql_compare) left right (car comparison) (cadr comparison)))))
+
+/* Bounds-safe substrings preserve NULL and reject overlapping affixes without
+allocating the full concatenation. A singleton numeric component is formatted
+as text, never parsed back into a number. */
+(define concat_lookup_peel (lambda (sources comparison text parts binary)
+	(begin
+		(define first (car parts))
+		(define last (nth parts (- (count parts) 1)))
+		(define prefix (and (> (count parts) 1) (string? first)
+			(or binary (concat_lookup_fold_safe? first))))
+		(define suffix (and (> (count parts) 1) (string? last)
+			(or binary (concat_lookup_fold_safe? last))))
+		(if prefix
+			(list (quote and)
+				(concat_lookup_compare comparison (list (quote sql_substr) text 1 (strlen first)) first)
+				(concat_lookup_peel sources comparison
+					(list (quote sql_substr) text (+ (strlen first) 1)) (cdr parts) binary))
+			suffix
+			(begin
+				(define rest (slice parts 0 (- (count parts) 1)))
+				(define remaining (list (quote -) (list (quote strlen) text) (strlen last)))
+				(list (quote and)
+					(list (quote >=) (list (quote strlen) text) (strlen last))
+					(concat_lookup_compare comparison (list (quote sql_substr) text
+						(list (quote +) remaining 1)) last)
+					(concat_lookup_peel sources comparison
+						(list (quote sql_substr) text 1 remaining) rest binary)))
+			(concat_lookup_compare comparison text
+				(if (equal? (count parts) 1) (concat_lookup_text sources first)
+					(cons (quote concat) parts)))))))
+
+(define concat_lookup_split_affixes (lambda (sources comparison left right binary)
+	(begin
+		(define parts (concat_lookup_parts right))
+		(if (or (< (count parts) 2)
+			(not (sql_text_type? (sql_info_type (sql_expr_info sources left))))
+			(not (concat_lookup_pure? left))
+			(not (reduce parts (lambda (pure part) (and pure (concat_lookup_pure? part))) true))) nil
+			(begin
+				/* Fold frontend spellings such as COALESCE(literal,'') only
+				when closed; captured or session expressions are never folded. */
+				(define parts (map parts (lambda (part)
+					(if (empty_list? (query_expr_alias_set "" part '()))
+						(match part
+							((symbol coalesceNil) value "") (if (string? value) value part)
+							_ (try (lambda () (tryfold part)) (lambda (_error) part))) part))))
+				(if (or (and (string? (car parts)) (or binary (concat_lookup_fold_safe? (car parts))))
+					(and (string? (nth parts (- (count parts) 1)))
+						(or binary (concat_lookup_fold_safe? (nth parts (- (count parts) 1))))))
+					(concat_lookup_peel sources comparison left parts binary) nil))))))
+
+/* Cancel matching pure components on both sides, including variable components.
+The NULL guard is essential: CONCAT(NULL,a)=CONCAT(NULL,b) rejects every row.
+Cancellation is independent of byte widths because the removed components are
+identical. Keep at least one component per side for the final string comparison. */
+(define concat_lookup_join (lambda (sources parts)
+	(if (equal? (count parts) 1) (concat_lookup_text sources (car parts))
+		(cons (quote concat) parts))))
+
+(define concat_lookup_common_end (lambda (left right)
+	(if (or (< (count left) 2) (< (count right) 2)) nil
+		(expression_equal? (car left) (car right)) (quote prefix)
+		(expression_equal? (nth left (- (count left) 1)) (nth right (- (count right) 1))) (quote suffix)
+		nil)))
+
+(define concat_lookup_cancel (lambda (sources comparison left right binary)
+	(begin
+		(define common (concat_lookup_common_end left right))
+		(if (nil? common)
+			(coalesceNil (concat_lookup_split_affixes sources comparison
+				(concat_lookup_join sources left) (concat_lookup_join sources right) binary)
+				(concat_lookup_compare comparison (concat_lookup_join sources left) (concat_lookup_join sources right)))
+			(begin
+				(define prefix (equal? common (quote prefix)))
+				(define removed (if prefix (car left) (nth left (- (count left) 1))))
+				(list (quote and) (list (quote not) (list (quote nil?) removed))
+					(concat_lookup_cancel sources comparison
+						(if prefix (cdr left) (slice left 0 (- (count left) 1)))
+						(if prefix (cdr right) (slice right 0 (- (count right) 1))) binary)))))))
+
+(define concat_lookup_split (lambda (sources comparison left right binary)
+	(begin
+		(define left_parts (concat_lookup_parts left))
+		(define right_parts (concat_lookup_parts right))
+		(if (and (not (nil? (concat_lookup_common_end left_parts right_parts)))
+			(concat_lookup_pure? left) (concat_lookup_pure? right))
+			(concat_lookup_cancel sources comparison left_parts right_parts binary)
+			(concat_lookup_split_affixes sources comparison left right binary)))))
+
+(define concat_lookup_binary_names '("bin" "binary" "utf8" "utf8mb4" "utf8_bin" "utf8mb4_bin" "latin1_bin" "ascii_bin"))
+(define concat_lookup_binary_relations (map concat_lookup_binary_names (lambda (name) (collate name false))))
+
+
+/* Numeric text has a fixed ASCII representation. Unannotated text equality
+does not supply a compositional collation proof; text components require the
+explicit binary relation handled below. */
+(define concat_lookup_raw_side_safe? (lambda (sources expr)
+	(begin
+		(define parts (concat_lookup_parts expr))
+		(or (< (count parts) 2)
+			(reduce parts (lambda (safe part)
+				(and safe (or (string? part)
+					(has? '("INT" "INTEGER" "BIGINT" "SMALLINT" "TINYINT" "MEDIUMINT" "DECIMAL" "NUMERIC" "FLOAT" "DOUBLE" "REAL")
+						(sql_info_type (sql_expr_info sources part)))))) true)))))
+
+(define concat_lookup_term (lambda (sources term)
+	(match term
+		(cons (symbol or) terms) (cons (quote or) (map terms (lambda (item) (concat_lookup_term sources item))))
+		(cons (symbol and) terms) (boolean_fold_and_terms (map terms (lambda (item) (concat_lookup_term sources item))))
+		'(operator left right) (if (or (not (has? '(equal? equal??) operator))
+			(and (equal? operator (quote equal??))
+				(not (and (concat_lookup_raw_side_safe? sources left)
+					(concat_lookup_raw_side_safe? sources right))))) term
+			(coalesceNil
+				(concat_lookup_split sources (list operator) left right (equal? operator (quote equal?)))
+				(concat_lookup_split sources (list operator) right left (equal? operator (quote equal?))) term))
+		((symbol equal_collate) left right name)
+		(if (has? concat_lookup_binary_names name)
+			(concat_lookup_term sources (list (quote sql_compare) left right (collate name false) "equal??")) term)
+		((symbol sql_compare) left right less operator)
+		(if (and (has? '("equal?" "equal??") operator)
+			(has? concat_lookup_binary_relations less))
+			(coalesceNil (concat_lookup_split sources (list less operator) left right true)
+				(concat_lookup_split sources (list less operator) right left true) term) term)
+		_ term)))
+
+(define concat_lookup_condition (lambda (sources condition)
+	(if (nil? condition) nil
+		(boolean_fold_and_terms (map (split_and_terms condition) (lambda (term)
+			(concat_lookup_term sources term)))))))
+
+(define expose_concat_lookup_keys (lambda (block)
+	(make_query_block
+		(qb_schema block)
+		(map (qb_sources block) (lambda (src)
+			(source_with_join_expr src (concat_lookup_condition (qb_sources block) (source_join_expr src)))))
+		(qb_fields block) (concat_lookup_condition (qb_sources block) (qb_where block))
+		(qb_group block) (qb_having block) (qb_order block) (qb_limit block)
+		(qb_offset block) (qb_hidden block) (qb_stages block) (qb_facts block))))
+
 /* A null-rejected composite presence join has two legal implementations:
 an indexed lookup over the bound outer domain, or a reusable tuple relation.
 Retain both searches only for blocks whose composite edge changes. The
@@ -5676,6 +5858,7 @@ ordinary binary-edge promotion and every original predicate stay intact. */
 					(join_reorder_stage_using stage_catalog stage planning_session tx)))
 				(qb_facts node)))
 			(define node (normalize_logical_membership node planning_session tx))
+			(define node (expose_concat_lookup_keys node))
 			(define exposed (expose_null_rejected_join_edges node true))
 			(define has_composite_presence (reduce (qb_sources node) (lambda (found src)
 				(or found (and (source_outer? src)

@@ -23,6 +23,33 @@ metadata:
     storage_bandwidth_mbps: 1000
     storage_latency_ms: 5
 test_cases:
+- name: concat-string-comparison-survives-delegation-mysql
+  syntax: mysql
+  sql: SELECT id FROM big_items WHERE id<3 AND CONCAT('doc:',id)='doc:2' ORDER BY
+    id
+  expect:
+    data:
+    - id: 2
+    cluster:
+      min_remote_shards: 1
+- name: concat-string-comparison-survives-delegation-postgresql
+  syntax: postgresql
+  sql: SELECT id FROM big_items WHERE id<3 AND CONCAT('doc:',id)='doc:2' ORDER BY
+    id
+  expect:
+    data:
+    - id: 2
+    cluster:
+      min_remote_shards: 1
+- name: concat-string-comparison-survives-delegation-tsql
+  syntax: tsql
+  sql: SELECT id FROM big_items WHERE id<3 AND CONCAT('doc:',id)='doc:2' ORDER BY
+    id
+  expect:
+    data:
+    - id: 2
+    cluster:
+      min_remote_shards: 1
 - name: tsql-database-access-probe-survives-delegation
   syntax: tsql
   sql: >-

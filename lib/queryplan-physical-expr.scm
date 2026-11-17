@@ -160,6 +160,12 @@ an unbound symbol in the callback when costing selects the probe alternative. */
 				(cons head tail) (merge_unique (map tail (lambda (item) (extract_columns_for_alias src item))))
 				_ '())))))
 
+/* SQL comparison is a Scheme procedure, not a native declaration. Bind its
+value at execution lowering so delegated callbacks carry a closed procedure
+instead of relying on a process-global symbol at the receiving node. */
+(define physical_scalar_call_head (lambda (head)
+	(if (equal? head (quote sql_compare)) sql_compare head)))
+
 (define lower_column_expr_for_alias_in_context (lambda (src expr probe_work_rows)
 	(match expr
 		/* Emit the ordinary membership call so scan access extraction sees
@@ -207,7 +213,7 @@ an unbound symbol in the callback when costing selects the probe alternative. */
 			(list (symbol "coalesceNil") inner default) probe_work_rows)
 		((symbol get_column) tblvar tbl_ignorecase col col_ignorecase) (scan_callback_symbol_for_alias (resolve_column_alias tblvar (source_alias src)) (resolve_physical_column_name src col col_ignorecase))
 		((quote get_column) tblvar tbl_ignorecase col col_ignorecase) (scan_callback_symbol_for_alias (resolve_column_alias tblvar (source_alias src)) (resolve_physical_column_name src col col_ignorecase))
-		(cons head tail) (cons head (map tail (lambda (item)
+		(cons head tail) (cons (physical_scalar_call_head head) (map tail (lambda (item)
 			(lower_column_expr_for_alias_in_context src item probe_work_rows))))
 		_ expr)))
 
@@ -3925,7 +3931,7 @@ probe. */
 			(if (nil? src)
 				(symbol (concat (resolve_column_alias tblvar default_alias) "." col))
 				(scan_callback_symbol_for_alias (source_alias src) (resolve_physical_column_name src col col_ignorecase))))
-		(cons head tail) (cons head (map tail (lambda (item)
+		(cons head tail) (cons (physical_scalar_call_head head) (map tail (lambda (item)
 			(lower_column_expr_for_join_in_context sources default_alias item probe_work_rows))))
 		_ expr)))
 
@@ -6237,7 +6243,7 @@ candidate-keyset choice replaces the marker with a projected RecSet carrier. */
 		(lower_scalar_first_probe_expr '() nil stage requested_col stages 1 (quote value))
 		((symbol union_count) block) (lower_union_count_expr block)
 		((quote union_count) block) (lower_union_count_expr block)
-		(cons head tail) (cons head (map tail lower_scalar_marker_expr))
+		(cons head tail) (cons (physical_scalar_call_head head) (map tail lower_scalar_marker_expr))
 		_ expr)))
 
 (define aggregate_expr? (lambda (expr)
