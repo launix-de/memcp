@@ -665,6 +665,28 @@ test_cases:
     data:
     - id: 1
     - id: 2
+- name: Native NULL-safe equality keeps its original expression
+  scm: |-
+    (begin
+     (define sources (list
+       (list "e" "{database}" "cr_encoded" false nil)
+       (list "v" "{database}" "cr_values" false nil)))
+     (define expr (list (quote equal?)
+       (list (quote get_column) "e" false "encoded" false)
+       (list (quote sql_concat) "doc:"
+         (list (quote get_column) "v" false "text_value" false))))
+     (expression_equal? (concat_lookup_term sources expr) expr))
+  expect:
+    result: true
+- name: Unrelated collated equality keeps its original expression
+  scm: |-
+    (begin
+     (define sources (list (list "v" "{database}" "cr_values" false nil)))
+     (define expr (list (quote equal_collate)
+       (list (quote get_column) "v" false "number_value" false) 0 "bin"))
+     (expression_equal? (concat_lookup_term sources expr) expr))
+  expect:
+    result: true
 cleanup:
 - sql: DROP TABLE IF EXISTS cr_locale
 - sql: DROP TABLE IF EXISTS cr_encoded

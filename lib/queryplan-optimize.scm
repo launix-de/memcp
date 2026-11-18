@@ -5809,16 +5809,19 @@ explicit binary relation handled below. */
 	(match term
 		(cons (symbol or) terms) (cons (quote or) (map terms (lambda (item) (concat_lookup_term sources item))))
 		(cons (symbol and) terms) (boolean_fold_and_terms (map terms (lambda (item) (concat_lookup_term sources item))))
-		'(operator left right) (if (or (not (has? '(equal? equal??) operator))
-			(and (equal? operator (quote equal??))
-				(not (and (concat_lookup_raw_side_safe? sources left)
-					(concat_lookup_raw_side_safe? sources right))))) term
+		/* Native equal? can match two NULL values; it is not a SQL truth
+		context equality and must retain its original expression. */
+		'(operator left right) (if (or (not (equal? operator (quote equal??)))
+			(not (and (concat_lookup_raw_side_safe? sources left)
+				(concat_lookup_raw_side_safe? sources right)))) term
 			(coalesceNil
-				(concat_lookup_split sources (list operator) left right (equal? operator (quote equal?)))
-				(concat_lookup_split sources (list operator) right left (equal? operator (quote equal?))) term))
+				(concat_lookup_split sources (list operator) left right false)
+				(concat_lookup_split sources (list operator) right left false) term))
 		((symbol equal_collate) left right name)
 		(if (has? concat_lookup_binary_names name)
-			(concat_lookup_term sources (list (quote sql_compare) left right (collate name false) "equal??")) term)
+			(coalesceNil
+				(concat_lookup_split sources (list (collate name false) "equal??") left right true)
+				(concat_lookup_split sources (list (collate name false) "equal??") right left true) term) term)
 		((symbol sql_compare) left right less operator)
 		(if (and (has? '("equal?" "equal??") operator)
 			(has? concat_lookup_binary_relations less))
