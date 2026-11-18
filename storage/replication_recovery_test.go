@@ -497,7 +497,7 @@ func TestReplicationSchemaTransferPreservesLocalPhysicalGeneration(t *testing.T)
 	}
 	localGeneration, err := r.schemaDigest(engine.ReadSchema())
 	if err != nil || localGeneration != remoteGeneration {
-		t.Fatal("local physical UUID mapping changed semantic schema identity", err)
+		t.Fatalf("local physical UUID mapping changed semantic schema identity: %v\nremote %s\nlocal %s", err, remoteSchema, engine.ReadSchema())
 	}
 }
 
@@ -1457,5 +1457,29 @@ func TestReplicationConnectionReadyAfterAllCachedBindings(t *testing.T) {
 		if peer.outgoing.len() != 0 {
 			t.Fatal("completed binding was sent again")
 		}
+	}
+}
+
+func TestReplicationSchemaDigestPreservesJSONDefaultValues(t *testing.T) {
+	r := replicaRecoveryFixture()
+	absent := []byte(`{"name":"tenant","tables":{"items":{"Columns":[{"Name":"value"}]}}}`)
+	explicitNull := []byte(`{"name":"tenant","tables":{"items":{"PShards":null,"Columns":[{"Name":"value","Default":null}]}}}`)
+	first, err := r.schemaDigest(absent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := r.schemaDigest(explicitNull)
+	if err != nil || first != second {
+		t.Fatal("equivalent legacy and native declarations have different identities", err)
+	}
+	objectNull := []byte(`{"name":"tenant","tables":{"items":{"Columns":[{"Name":"value","Default":{"member":null}}]}}}`)
+	emptyObject := []byte(`{"name":"tenant","tables":{"items":{"Columns":[{"Name":"value","Default":{}}]}}}`)
+	first, err = r.schemaDigest(objectNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err = r.schemaDigest(emptyObject)
+	if err != nil || first == second {
+		t.Fatal("different JSON defaults lost their schema identity", err)
 	}
 }
