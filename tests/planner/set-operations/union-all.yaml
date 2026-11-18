@@ -1202,6 +1202,12 @@ test_cases:
       data: [{name: same}, {name: middle}]
 
 
+  - name: Derived UNION ALL keeps positional ordering on its visible projection
+    sql: SELECT d.name FROM (SELECT ID AS rank, name FROM ua_fop_files WHERE ID=2 UNION ALL SELECT ID AS rank, name FROM ua_fop_files WHERE ID=1) d ORDER BY 1
+    expect:
+      rows: 2
+      data: [{name: image1.png}, {name: image2.png}]
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS ua_period"
   - sql: "DROP TABLE IF EXISTS ua_site"

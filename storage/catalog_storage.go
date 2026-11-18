@@ -421,7 +421,7 @@ func newCatalogShard(db *database, relation catalogRelationID, rows [][]scm.Scme
 // editCatalogLocked atomically applies definition edits through the native
 // transaction owner. It never rebuilds definitions from the runtime directory.
 // The caller owns schemalock.
-func (db *database) editCatalogLocked(rows *catalogRows) {
+func (db *database) editCatalogLocked(rows *catalogRows) bool {
 	tx := NewTxContext(TxACID)
 	defer func() {
 		if tx.State == TxActive {
@@ -476,15 +476,14 @@ func (db *database) editCatalogLocked(rows *catalogRows) {
 		fingerprints[i] = fp
 	}
 	if !changed {
-		return
+		return false
 	}
 	if err := tx.Commit(); err != nil {
 		panic(err)
 	}
 	db.catalog.liveFP = fingerprints
-	if changed {
-		db.catalog.liveVersion++
-	}
+	db.catalog.liveVersion++
+	return true
 }
 
 // proposeCatalogTablesLocked admits explicit DDL proposals for named tables.
@@ -519,7 +518,11 @@ func (db *database) proposeCatalogTablesLocked(tables ...*table) {
 			rows[i] = append(kept, proposal[i]...)
 		}
 	}
-	db.editCatalogLocked(&rows)
+	// A new compiled callback can share an unchanged persisted declaration.
+	// Keep that runtime state without decoding the same canonical rows again.
+	if !db.editCatalogLocked(&rows) {
+		return
+	}
 	for _, t := range tables {
 		if t != nil && t.schema == db {
 			db.materializeCatalogTableLocked(t, &rows)
@@ -691,7 +694,9 @@ func (db *database) materializeCatalogTableLocked(t *table, rows *catalogRows) {
 	t.Columns = definition.Columns
 	t.Unique, t.Foreign = definition.Unique, definition.Foreign
 	t.DroppedColumns = definition.DroppedColumns
-	t.PersistencyMode = definition.PersistencyMode
+	if t.PersistencyMode != definition.PersistencyMode {
+		t.PersistencyMode = definition.PersistencyMode
+	}
 	t.Collation, t.Charset, t.Comment = definition.Collation, definition.Charset, definition.Comment
 	if !bytes.Equal(marshalCatalogValue(t.OnInit.Load()), marshalCatalogValue(definition.OnInit.Load())) {
 		t.OnInit.Store(definition.OnInit.Load())

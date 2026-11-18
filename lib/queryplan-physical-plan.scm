@@ -12730,7 +12730,8 @@ while result-only callbacks may return nil instead of an affected-row count. */
 (define lower_union_all_successive (lambda (block) (begin
 	(define branches (union_branches block))
 	(if (empty_list? branches) nil (begin
-		(define titles (projection_titles (union_canonical_fields block)))
+		(define titles (if (nil? (qassoc_get (union_facts block) (quote result_titles) nil))
+			(queryplan_result_titles block) (projection_titles (union_canonical_fields block))))
 		(define width (* 2 (count titles)))
 		(if (or (not (empty_list? (union_order block)))
 			(not (nil? (union_limit block))) (not (nil? (union_offset block))))
