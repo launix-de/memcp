@@ -1189,6 +1189,19 @@ test_cases:
       - next_n: 3
     noncritical: true
 
+  - name: Derived UNION ALL retains an unselected sort column
+    sql: SELECT d.name FROM (SELECT ID AS rank, name FROM ua_fop_files WHERE ID=2 UNION ALL SELECT ID AS rank, name FROM ua_fop_files WHERE ID=1) d ORDER BY d.rank
+    expect:
+      rows: 2
+      data: [{name: image1.png}, {name: image2.png}]
+
+  - name: Hidden UNION sort values retain duplicate output rows and LIMIT
+    sql: SELECT d.name FROM (SELECT ID AS rank, 'same' AS name FROM ua_fop_files WHERE ID IN (1,3) UNION ALL SELECT ID AS rank, 'middle' AS name FROM ua_fop_files WHERE ID=2) d ORDER BY d.rank LIMIT 2
+    expect:
+      rows: 2
+      data: [{name: same}, {name: middle}]
+
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS ua_period"
   - sql: "DROP TABLE IF EXISTS ua_site"

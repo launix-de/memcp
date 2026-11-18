@@ -304,7 +304,7 @@ func runSingleShardScan(currentTx *TxContext, topology *tableShardTopology, shar
 // to execute without an escaping callback frame.
 func (t *table) pinSingleShardForScan(access scanAccess) (*tableShardTopology, *storageShard, bool) {
 	for {
-		topology := t.activeTopology()
+		topology := t.scanTopology(access)
 		shard, single := singleRelevantShard(topology.dimensions, access, topology.shards)
 		if !single {
 			return nil, nil, false
@@ -396,7 +396,7 @@ func (t *table) iterateShardsParallel(currentTx *TxContext, access scanAccess, p
 	// the whole shard-local scan pipeline to a remote holder; row readers must not
 	// perform another resource acquisition from inside the callback.
 	for {
-		topology := t.activeTopology()
+		topology := t.scanTopology(access)
 		var relevant []*storageShard
 		if topology.mode == ShardModeFree {
 			relevant = topology.shards

@@ -753,6 +753,10 @@ func (u *storageShard) ensureColumnLoaded(colName string, alreadyLocked bool, cu
 		f := u.home().persistence.ReadColumn(u.uuid.String(), colName)
 		var magicbyte uint8
 		if err := binary.Read(f, binary.LittleEndian, &magicbyte); err != nil {
+			f.Close()
+			if u.catalogHome != nil {
+				panic(fmt.Errorf("catalog shard %s column %s is unreadable: %w", u.uuid, colName, err))
+			}
 			u.columns[colName] = new(StorageSparse)
 			return u.columns[colName]
 		}

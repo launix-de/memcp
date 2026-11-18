@@ -12218,10 +12218,10 @@ stars through the same catalog-aware path used by physical lowering. */
 		(queryplan_result_titles (normalize_query_ast query))
 		((symbol query-block) _schema sources fields _where _group _having _order _limit _offset _hidden _stages _facts)
 		(projection_titles (expand_query_block_fields sources fields))
-		((symbol union-block) _mode branches _order _limit _offset _facts)
-		(match branches
+		((symbol union-block) _mode branches _order _limit _offset facts)
+		(qassoc_get facts (quote result_titles) (match branches
 			(cons first_branch _rest) (queryplan_result_titles first_branch)
-			_ '())
+			_ '()))
 		_ '())))
 
 (define projection_exprs (lambda (fields)
@@ -12730,7 +12730,7 @@ while result-only callbacks may return nil instead of an affected-row count. */
 (define lower_union_all_successive (lambda (block) (begin
 	(define branches (union_branches block))
 	(if (empty_list? branches) nil (begin
-		(define titles (queryplan_result_titles block))
+		(define titles (projection_titles (union_canonical_fields block)))
 		(define width (* 2 (count titles)))
 		(if (or (not (empty_list? (union_order block)))
 			(not (nil? (union_limit block))) (not (nil? (union_offset block))))
@@ -12762,7 +12762,17 @@ while result-only callbacks may return nil instead of an affected-row count. */
 					(list (quote if) (list seen key) nil
 						(list (quote begin) (list seen key true) (list emit row))))))))))
 
-(define lower_union_block (lambda (block)
+(define lower_union_block (lambda (block) (begin
+	(define plan (lower_union_block_core block))
+	(define visible (qassoc_get (union_facts block) (quote result_titles) nil))
+	(if (nil? visible) plan
+		(list (list (quote lambda) (list (quote resultrow)) plan)
+			(list (quote lambda) (list (quote __union_visible_row))
+				(list (quote resultrow) (cons (quote list)
+					(merge (map visible (lambda (title)
+						(list title (list (quote get_assoc) (quote __union_visible_row) title)))))))))))))
+
+(define lower_union_block_core (lambda (block)
 	(if (equal? (union_mode block) (quote all))
 		(lower_union_all_successive block)
 		(if (or (equal? (union_mode block) (quote distinct)) (equal? (union_mode block) (quote union_distinct)))

@@ -24,6 +24,16 @@ DROP TABLE IF EXISTS up_blob;
 DROP TABLE IF EXISTS up_compute;
 DROP TABLE IF EXISTS up_group_events;
 DROP TABLE IF EXISTS up_group_windows;
+DROP TABLE IF EXISTS up_catalog_child;
+DROP TABLE IF EXISTS up_catalog_parent;
+
+-- Legacy schema.json definitions must migrate into the relational catalog,
+-- including key membership, foreign-key endpoints, defaults and type dimensions.
+CREATE TABLE up_catalog_parent (id INT PRIMARY KEY, code VARCHAR(32) DEFAULT 'catalog', UNIQUE KEY up_catalog_code (code));
+CREATE TABLE up_catalog_child (id INT PRIMARY KEY, parent_id INT, label VARCHAR(24) DEFAULT 'inherited',
+  FOREIGN KEY (parent_id) REFERENCES up_catalog_parent (id) ON DELETE CASCADE);
+INSERT INTO up_catalog_parent (id) VALUES (1);
+INSERT INTO up_catalog_child (id, parent_id) VALUES (2, 1);
 
 -- 1. StorageFloat: non-aligned floating point values
 CREATE TABLE up_float (id INT, val DOUBLE);
