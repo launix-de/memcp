@@ -789,9 +789,7 @@ func TestInsertAutoIncrementWALReplayPreservesSignedIDs(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			name := "tautoidreplay" + test.name
 			tbl, persistence := createDurabilityTestTable(t, name, 0)
-			tbl.Columns[0].AutoIncrement = true
-			tbl.publishShowColumnsSnapshot(false)
-			tbl.schema.save()
+			tbl.AlterColumn("id", "auto_increment", scm.NewBool(true))
 			rows := make([][]scm.Scmer, len(test.ids))
 			for i, id := range test.ids {
 				rows[i] = []scm.Scmer{scm.NewInt(id), scm.NewString("explicit")}
