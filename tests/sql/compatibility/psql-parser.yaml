@@ -732,6 +732,23 @@ test_cases:
     sql: SELECT RANK() OVER () FROM psql_data
     expect: {error: true}
 
+  - name: PostgreSQL catalog table and column queries share native logical views
+    sql: >-
+      SELECT c.column_name FROM information_schema.tables t
+      JOIN information_schema.columns c ON c.table_schema=t.table_schema AND c.table_name=t.table_name
+      WHERE t.table_schema='memcp-tests' AND t.table_name='psql_data' ORDER BY c.ordinal_position
+    expect:
+      rows: 3
+      data: [{column_name: id}, {column_name: name}, {column_name: val}]
+
+  - name: PostgreSQL key metadata uses native catalog declarations
+    sql: >-
+      SELECT constraint_name, column_name FROM information_schema.key_column_usage
+      WHERE table_schema='memcp-tests' AND table_name='psql_data' ORDER BY ordinal_position
+    expect:
+      rows: 1
+      data: [{constraint_name: PRIMARY, column_name: id}]
+
 cleanup:
   - sql: "DROP VIEW IF EXISTS psql_data_view"
   - sql: "DROP TABLE IF EXISTS psql_group_item"

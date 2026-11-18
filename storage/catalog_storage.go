@@ -20,7 +20,7 @@ import (
 
 // catalogPartitionMethod partitions system_schema relations by database.
 // Pivots hold every attached database name ordered by (case fold, name);
-// partition i lives on the backend of database Pivots[i].
+// partition i belongs to database Pivots[i], with files on the system backend.
 const catalogPartitionMethod = "database-v1"
 
 func catalogPivotLess(a, b string) bool {
@@ -70,16 +70,17 @@ type databaseCatalog struct {
 	generation  uint64
 	retired     []retiredCatalogShard
 
-	// Guarded by database.catalogLiveMu: the queryable partition. It changes
+	// Guarded by database.schemalock: the queryable partition. It changes
 	// by DML, so triggers of planner caches over system_schema observe it.
-	live         [catalogRelationCount]*storageShard
-	liveFP       [catalogRelationCount][32]byte
-	liveSnapshot uint64
+	live        [catalogRelationCount]*storageShard
+	liveFP      [catalogRelationCount][32]byte
+	liveVersion uint64
 }
 
 type retiredCatalogShard struct {
 	shard      *storageShard
 	generation uint64
+	drained    <-chan struct{}
 }
 
 var systemSchemaOnce sync.Once
@@ -87,6 +88,9 @@ var systemSchemaDB *database
 
 // Serializes orphan collection with publication of cross-database catalog files.
 var catalogPersistenceMu sync.RWMutex
+
+// Retiring generations remain GC roots until native topology readers drain.
+var retiringCatalogGenerations sync.Map // UUID -> *storageShard
 
 // systemSchemaTables are the native catalog relations. Each database contributes
 // one isolated partition to each relation; checkpoints use these same tables.
@@ -181,7 +185,7 @@ func publishCatalogShards(name string, shards *[catalogRelationCount]*storageSha
 	}
 }
 
-// buildDiskShard writes rows as a new shard of relation on db's backend.
+// buildDiskShard writes rows as a new relation shard on the system backend.
 func buildDiskShard(db *database, relation catalogRelationID, rows [][]scm.Scmer, durable bool) *storageShard {
 	shard := newCatalogShard(db, relation, rows)
 	shard.catalogHome = catalogBackendDatabase()
@@ -204,7 +208,8 @@ func loadDiskShard(db *database, relation catalogRelationID, id uuid.UUID) *stor
 // catalogShardRecords reads the visible rows of a catalog shard with their
 // record ids, in recid order.
 func catalogShardRecords(shard *storageShard, columns []string) (recids []uint32, rows [][]scm.Scmer) {
-	shard.ensureLoaded()
+	access := shard.GetRead(nil, false)
+	defer access.Release()
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
 	shard.ensureMainCount(true, nil)
@@ -224,30 +229,22 @@ func catalogShardRecords(shard *storageShard, columns []string) (recids []uint32
 }
 
 // catalogRowKey identifies a row by its kind-normalized encoding, so rows
-// read back from compressed storage compare equal to generated ones. A
-// handle takes part by identity: a replaced RAM table needs a new row.
-func catalogRowKey(fields []catalogField, row []scm.Scmer, handle scm.Scmer) string {
+// read back from compressed storage compare equal to declaration edits.
+func catalogRowKey(fields []catalogField, row []scm.Scmer) string {
 	var b strings.Builder
 	for i, field := range fields {
 		raw := catalogRaw(field.kind, row[i])
 		fmt.Fprintf(&b, "%d:", len(raw))
 		b.Write(raw)
 	}
-	if !handle.IsNil() {
-		fmt.Fprintf(&b, "%p", TableFromScmer(handle))
-	}
 	return b.String()
 }
 
-func catalogFingerprint(relation catalogRelationID, rows [][]scm.Scmer, handles []scm.Scmer) [32]byte {
+func catalogFingerprint(relation catalogRelationID, rows [][]scm.Scmer) [32]byte {
 	fields := catalogRelations[relation].columns()
 	hash := sha256.New()
-	for i, row := range rows {
-		handle := scm.NewNil()
-		if handles != nil {
-			handle = handles[i]
-		}
-		key := catalogRowKey(fields, row, handle)
+	for _, row := range rows {
+		key := catalogRowKey(fields, row)
 		fmt.Fprintf(hash, "%d:%s", len(key), key)
 	}
 	var result [32]byte
@@ -320,14 +317,20 @@ func (db *database) loadCatalogDocument(root *catalogRoot) (document []byte, err
 		if root.Version >= 2 {
 			home = catalogBackendDatabase()
 		}
-		committed[i] = loadDiskShard(home, relation, id)
+		committed[i] = db.catalog.live[i]
+		if committed[i] == nil || committed[i].uuid != id || committed[i].home() != home {
+			committed[i] = loadDiskShard(home, relation, id)
+		}
 		_, rows[i] = catalogShardRecords(committed[i], catalogRelationColumns(relation))
 		for _, row := range rows[i] {
 			if scm.String(row[0]) != db.Name {
 				return nil, fmt.Errorf("catalog relation %s holds rows of database %s", catalogRelations[i].name, scm.String(row[0]))
 			}
 		}
-		fingerprints[i] = catalogFingerprint(relation, rows[i], nil)
+		fingerprints[i] = catalogFingerprint(relation, rows[i])
+	}
+	if len(rows[catalogDatabases]) != 1 {
+		return nil, fmt.Errorf("catalog of %s lacks its database declaration", db.Name)
 	}
 	document = catalogDocumentFromRows(db.Name, &rows)
 	db.catalogMu.Lock()
@@ -350,11 +353,15 @@ func (db *database) commitCatalog(rows *catalogRows, durable bool) (*catalogRoot
 	root := &catalogRoot{Version: catalogFormatVersion, Shards: make(map[string]string, catalogRelationCount)}
 	for i := range catalogRelations {
 		relation := catalogRelationID(i)
-		fingerprint := catalogFingerprint(relation, rows[i], nil)
+		fingerprint := catalogFingerprint(relation, rows[i])
 		if state.committed[i] == nil || state.committed[i].home() != catalogBackendDatabase() || fingerprint != state.committedFP[i] {
 			shard := buildDiskShard(db, relation, rows[i], durable)
 			if previous := state.committed[i]; previous != nil {
-				state.retired = append(state.retired, retiredCatalogShard{shard: previous, generation: state.generation})
+				drained := closedCatalogGeneration
+				if topology := previous.generation.Load(); topology != nil {
+					drained = topology.drained
+				}
+				state.retired = append(state.retired, retiredCatalogShard{shard: previous, generation: state.generation, drained: drained})
 			}
 			state.committed[i] = shard
 			state.committedFP[i] = fingerprint
@@ -372,16 +379,15 @@ func (db *database) catalogCommitted(generation uint64) {
 	kept := db.catalog.retired[:0]
 	for _, retired := range db.catalog.retired {
 		if retired.generation <= generation {
-			drained := make(chan struct{})
-			close(drained) // disk shards are never published for scans
-			removable = append(removable, replacedShardGeneration{shard: retired.shard, drained: drained})
+			retiringCatalogGenerations.Store(retired.shard.uuid.String(), retired.shard)
+			removable = append(removable, replacedShardGeneration{shard: retired.shard, drained: retired.drained})
 		} else {
 			kept = append(kept, retired)
 		}
 	}
 	db.catalog.retired = kept
 	db.catalogMu.Unlock()
-	cleanupReplacedShardGenerations(removable, "system_schema of "+db.Name)
+	retireCatalogGenerations(removable)
 }
 
 // catalogRowsLocked reads the authoritative catalog partition. The schema owner
@@ -412,10 +418,18 @@ func newCatalogShard(db *database, relation catalogRelationID, rows [][]scm.Scme
 	return shard
 }
 
-// editCatalogLocked is the sole definition publication path. It publishes new
-// generations of affected relations; it never rebuilds definitions from the
-// runtime directory. The caller owns schemalock.
+// editCatalogLocked atomically applies definition edits through the native
+// transaction owner. It never rebuilds definitions from the runtime directory.
+// The caller owns schemalock.
 func (db *database) editCatalogLocked(rows *catalogRows) {
+	tx := NewTxContext(TxACID)
+	defer func() {
+		if tx.State == TxActive {
+			tx.Rollback()
+		}
+	}()
+	fingerprints := db.catalog.liveFP
+	changed := false
 	var created [catalogRelationCount]*storageShard
 	for i := range catalogRelations {
 		if db.catalog.live[i] == nil {
@@ -426,29 +440,30 @@ func (db *database) editCatalogLocked(rows *catalogRows) {
 	publishCatalogShards(db.Name, &created)
 	for i := range catalogRelations {
 		relation := catalogRelationID(i)
-		fp := catalogFingerprint(relation, rows[i], nil)
+		fp := catalogFingerprint(relation, rows[i])
 		if fp == db.catalog.liveFP[i] {
 			continue
 		}
+		changed = true
 		shard := db.catalog.live[i]
 		fields := catalogRelations[i].columns()
 		columns := catalogRelationColumns(relation)
 		wanted := make(map[string]int, len(rows[i]))
 		for _, row := range rows[i] {
-			wanted[catalogRowKey(fields, row, scm.NewNil())]++
+			wanted[catalogRowKey(fields, row)]++
 		}
 		recids, existing := catalogShardRecords(shard, columns)
 		for j, row := range existing {
-			key := catalogRowKey(fields, row, scm.NewNil())
+			key := catalogRowKey(fields, row)
 			if wanted[key] > 0 {
 				wanted[key]--
 				continue
 			}
-			shard.updateFunctionBatch(recids[j], true, false, nil, nil, nil, nil, true)()
+			shard.updateFunctionBatch(recids[j], true, false, nil, nil, tx, nil, true)()
 		}
 		var inserts [][]scm.Scmer
 		for _, row := range rows[i] {
-			key := catalogRowKey(fields, row, scm.NewNil())
+			key := catalogRowKey(fields, row)
 			if wanted[key] == 0 {
 				continue
 			}
@@ -456,9 +471,19 @@ func (db *database) editCatalogLocked(rows *catalogRows) {
 			inserts = append(inserts, row)
 		}
 		if len(inserts) > 0 {
-			shard.insertValues(columns, inserts, false, nil, nil, false, nil, nil, true)
+			shard.insertValues(columns, inserts, false, nil, nil, false, tx, nil, true)
 		}
-		db.catalog.liveFP[i] = fp
+		fingerprints[i] = fp
+	}
+	if !changed {
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		panic(err)
+	}
+	db.catalog.liveFP = fingerprints
+	if changed {
+		db.catalog.liveVersion++
 	}
 }
 
@@ -529,19 +554,48 @@ func (db *database) dropCatalogTableLocked(name string) {
 	db.editCatalogLocked(&rows)
 }
 
-func (db *database) proposeCatalogProceduresLocked() {
+func (db *database) editCatalogProcedureLocked(name string, proposal *ProcedureDescription) *ProcedureDescription {
 	rows := db.catalogRowsLocked()
-	definitions := db.procedures.GetAll()
-	sort.Slice(definitions, func(i, j int) bool { return definitions[i].Name < definitions[j].Name })
-	rows[catalogProcedures] = nil
-	for i, definition := range definitions {
-		var record map[string]json.RawMessage
-		if err := json.Unmarshal(marshalCatalogValue(definition), &record); err != nil {
+	definitions := make([]map[string]json.RawMessage, 0, len(rows[catalogProcedures])+1)
+	for _, row := range rows[catalogProcedures] {
+		record := catalogRecord(catalogProcedures, row)
+		var existing string
+		if err := json.Unmarshal(record["name"], &existing); err != nil {
 			panic(err)
 		}
-		rows.add(catalogProcedures, db.Name, []scm.Scmer{scm.NewInt(int64(i))}, record)
+		if existing != name {
+			definitions = append(definitions, record)
+		}
+	}
+	if proposal != nil {
+		var record map[string]json.RawMessage
+		if err := json.Unmarshal(marshalCatalogValue(proposal), &record); err != nil {
+			panic(err)
+		}
+		definitions = append(definitions, record)
+	}
+	sort.Slice(definitions, func(i, j int) bool { return string(definitions[i]["name"]) < string(definitions[j]["name"]) })
+	rows[catalogProcedures] = nil
+	for i, definition := range definitions {
+		rows.add(catalogProcedures, db.Name, []scm.Scmer{scm.NewInt(int64(i))}, definition)
 	}
 	db.editCatalogLocked(&rows)
+	if proposal == nil {
+		return nil
+	}
+	// Materialize the definition from the admitted row, retaining validated
+	// process-local compiled code on this equivalent immutable declaration.
+	for _, row := range rows[catalogProcedures] {
+		var definition ProcedureDescription
+		if err := json.Unmarshal(marshalCatalogValue(catalogRecord(catalogProcedures, row)), &definition); err != nil {
+			panic(err)
+		}
+		if definition.Name == name {
+			definition.compiled.Store(proposal.compiled.Load())
+			return &definition
+		}
+	}
+	panic("admitted procedure is missing")
 }
 
 // checkpointCatalogLocked updates only physical generations, advisory statistics
@@ -617,26 +671,57 @@ func (db *database) materializeCatalogTableLocked(t *table, rows *catalogRows) {
 		panic(err)
 	}
 	for i, c := range definition.Columns {
+		reused := false
 		for _, candidate := range t.Columns {
 			if candidate.Name != c.Name {
 				continue
 			}
 			// Encoding compares declaration data only, never atomics, pointers,
 			// runtime computors or compiled code ownership.
-			if bytes.Equal(marshalCatalogValue(candidate), marshalCatalogValue(c)) {
+			if catalogColumnDefinitionEqual(candidate, c) {
 				definition.Columns[i] = candidate
+				reused = true
 			}
 			break
 		}
-		definition.Columns[i].UpdateSanitizer()
+		if !reused {
+			definition.Columns[i].UpdateSanitizer()
+		}
 	}
 	t.Columns = definition.Columns
 	t.Unique, t.Foreign = definition.Unique, definition.Foreign
 	t.DroppedColumns = definition.DroppedColumns
 	t.PersistencyMode = definition.PersistencyMode
 	t.Collation, t.Charset, t.Comment = definition.Collation, definition.Charset, definition.Comment
-	// Procedure bodies, compiled triggers and physical shard generations keep
-	// their native owners; their portable declarations live in the catalog.
+	if !bytes.Equal(marshalCatalogValue(t.OnInit.Load()), marshalCatalogValue(definition.OnInit.Load())) {
+		t.OnInit.Store(definition.OnInit.Load())
+	}
+	t.mu.Lock()
+	for i, declaration := range definition.Triggers {
+		for _, candidate := range t.Triggers {
+			if candidate.Name == declaration.Name && bytes.Equal(marshalCatalogValue(candidate), marshalCatalogValue(declaration)) {
+				definition.Triggers[i] = candidate
+				break
+			}
+		}
+	}
+	for _, candidate := range t.Triggers {
+		if candidate.cacheTarget == nil && candidate.Acquire == nil {
+			continue
+		}
+		found := false
+		for _, declared := range definition.Triggers {
+			if declared.Name == candidate.Name {
+				found = true
+				break
+			}
+		}
+		if !found {
+			definition.Triggers = append(definition.Triggers, candidate)
+		}
+	}
+	t.Triggers = definition.Triggers
+	t.mu.Unlock()
 	t.publishShowColumnsSnapshot(true)
 }
 
@@ -650,6 +735,7 @@ func (db *database) commitSchemaLocked(durable bool, release func()) {
 		}
 	}()
 	rows := db.catalogRowsLocked()
+	version := db.catalog.liveVersion
 	jsonbytes := catalogDocumentFromRows(db.Name, &rows)
 	catalogPersistenceMu.RLock()
 	defer catalogPersistenceMu.RUnlock()
@@ -658,6 +744,7 @@ func (db *database) commitSchemaLocked(durable bool, release func()) {
 	release()
 	var root *catalogRoot
 	var generation uint64
+	var committed [catalogRelationCount]*storageShard
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -666,10 +753,17 @@ func (db *database) commitSchemaLocked(durable bool, release func()) {
 			}
 		}()
 		root, generation = db.commitCatalog(&rows, durable)
+		committed = db.catalog.committed
 		jsonbytes = attachCatalogRoot(jsonbytes, root)
 	}()
 	db.commitSchemaSnapshot(jsonbytes, durable, db.catalogMu.Unlock)
-	db.schemaDirty.Store(false)
+	db.schemalock.Lock()
+	if db.catalog.liveVersion == version {
+		db.catalog.live = committed
+		publishCatalogShards(db.Name, &committed)
+		db.schemaDirty.Store(false)
+	}
+	db.schemalock.Unlock()
 	db.catalogCommitted(generation)
 }
 
@@ -702,8 +796,25 @@ func attachCatalogRoot(document []byte, root *catalogRoot) []byte {
 func (db *database) detachCatalog() {
 	db.schemalock.Lock()
 	defer db.schemalock.Unlock()
+	var retired []replacedShardGeneration
+	db.catalogMu.Lock()
+	seen := make(map[*storageShard]bool)
+	for _, shard := range db.catalog.committed {
+		if shard == nil || seen[shard] {
+			continue
+		}
+		seen[shard] = true
+		drained := closedCatalogGeneration
+		if topology := shard.generation.Load(); topology != nil {
+			drained = topology.drained
+		}
+		retiringCatalogGenerations.Store(shard.uuid.String(), shard)
+		retired = append(retired, replacedShardGeneration{shard, drained})
+	}
+	db.catalogMu.Unlock()
 	db.catalog.live = [catalogRelationCount]*storageShard{}
 	publishCatalogShards(db.Name, nil)
+	retireCatalogGenerations(retired)
 }
 
 // resetCatalogPersistence follows a backend switch: the next save writes
@@ -719,7 +830,16 @@ func (db *database) resetCatalogPersistence() {
 // committed generation and every retired one whose removal is pending.
 func (db *database) catalogShardIDs() []string {
 	var ids []string
-	for _, owner := range databases.GetAll() {
+	owners := []*database{db}
+	if db.Name == "system" {
+		owners = databases.GetAll()
+	}
+	for _, owner := range owners {
+		// System-backend deletion needs every tenant anchor as a proof. Opening
+		// those roots creates only shard stubs, never Go runtime definitions.
+		if db.Name == "system" && owner.srState == COLD {
+			owner.bootstrapCatalog()
+		}
 		owner.catalogMu.Lock()
 		for _, shard := range owner.catalog.committed {
 			if shard != nil && shard.home() == db {
@@ -733,6 +853,12 @@ func (db *database) catalogShardIDs() []string {
 		}
 		owner.catalogMu.Unlock()
 	}
+	retiringCatalogGenerations.Range(func(key, value any) bool {
+		if value.(*storageShard).home() == db {
+			ids = append(ids, key.(string))
+		}
+		return true
+	})
 	return ids
 }
 
@@ -765,6 +891,9 @@ func requireCatalogDML(t *table) {
 // definitions or user-data columns. A legacy document is imported once.
 func (db *database) bootstrapCatalog() {
 	db.catalogBootstrap.Do(func() {
+		if db.catalog.live[0] != nil {
+			return
+		}
 		systemSchema()
 		data := db.persistence.ReadSchema()
 		if root := readCatalogRoot(data); root != nil {
@@ -813,4 +942,102 @@ func catalogBackendDatabase() *database {
 	}
 	CreateDatabase("system", true)
 	return databases.Get("system")
+}
+
+var closedCatalogGeneration <-chan struct{} = func() <-chan struct{} {
+	closed := make(chan struct{})
+	close(closed)
+	return closed
+}()
+
+func retireCatalogGenerations(generations []replacedShardGeneration) {
+	for _, generation := range generations {
+		retiringCatalogGenerations.Store(generation.shard.uuid.String(), generation.shard)
+		cleanup := func() {
+			if failures := cleanupReplacedShardGenerations([]replacedShardGeneration{generation}, "schema catalog"); len(failures) == 0 {
+				retiringCatalogGenerations.Delete(generation.shard.uuid.String())
+			} else {
+				for _, failure := range failures {
+					fmt.Println(failure)
+				}
+			}
+		}
+		select {
+		case <-generation.drained:
+			cleanup()
+		default:
+			go func() { <-generation.drained; cleanup() }()
+		}
+	}
+}
+
+// publishCatalogDatabaseName reserves a keyed routing slot without reading a
+// tenant's schema.json. Nil slots are resolved at the native scan boundary.
+func publishCatalogDatabaseName(name string) {
+	systemSchema()
+	for _, t := range systemSchemaTables {
+		t.mu.Lock()
+		dimension := t.PDimensions[0]
+		position := sort.Search(len(dimension.Pivots), func(j int) bool { return !catalogPivotLess(scm.String(dimension.Pivots[j]), name) })
+		if position == len(dimension.Pivots) || scm.String(dimension.Pivots[position]) != name {
+			pivots := append([]scm.Scmer(nil), dimension.Pivots...)
+			pivots = append(pivots, scm.NewNil())
+			copy(pivots[position+1:], pivots[position:])
+			pivots[position] = scm.NewString(name)
+			shards := append([]*storageShard(nil), t.PShards...)
+			shards = append(shards, nil)
+			copy(shards[position+1:], shards[position:])
+			shards[position] = nil
+			dimension.Pivots, dimension.NumPartitions = pivots, len(pivots)
+			t.PDimensions, t.PShards = []shardDimension{dimension}, shards
+			// Unknown cold cardinality is an estimate, never proof of emptiness.
+			t.PlannerRowEstimate.value.Store(max(t.PlannerRowEstimate.value.Load(), uint64(256*len(pivots))))
+			t.publishTopologyLocked()
+		}
+		t.mu.Unlock()
+	}
+}
+
+// scanTopology resolves only the selected database keys before pinning native
+// shard generations. All scan variants retain their existing access schema.
+func (t *table) scanTopology(access scanAccess) *tableShardTopology {
+	if !nativeCatalogRelation(t) {
+		return t.activeTopology()
+	}
+	topology := t.activeTopology()
+	dimension := topology.dimensions[0]
+	minimum, maximum := 0, len(dimension.Pivots)-1
+	for i := 0; i < access.len(); i++ {
+		if access.boundaryColumn(i) != "schema_name" {
+			continue
+		}
+		if lo, hi, usable := partitionAccessInterval(dimension, access, i); usable {
+			minimum, maximum = lo, hi
+			break
+		}
+	}
+	for i := minimum; i <= maximum; i++ {
+		if topology.shards[i] != nil {
+			continue
+		}
+		if db := databases.Get(dimension.Pivots[i].String()); db != nil {
+			db.bootstrapCatalog()
+		}
+	}
+	return t.activeTopology()
+}
+
+// Partition traffic is advisory runtime state. Equal declaration projections
+// retain their native computed-column lifetimes and compiled value recipes.
+func catalogColumnDefinitionEqual(a, b *column) bool {
+	var left, right map[string]json.RawMessage
+	if err := json.Unmarshal(marshalCatalogValue(a), &left); err != nil {
+		panic(err)
+	}
+	if err := json.Unmarshal(marshalCatalogValue(b), &right); err != nil {
+		panic(err)
+	}
+	delete(left, "PartitioningScore")
+	delete(right, "PartitioningScore")
+	return bytes.Equal(marshalCatalogValue(left), marshalCatalogValue(right))
 }

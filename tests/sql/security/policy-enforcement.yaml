@@ -1,3 +1,4 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
 # Policy enforcement across SELECT/INSERT/UPDATE/DELETE
 
 metadata:
@@ -61,9 +62,27 @@ test_cases:
     sql: "INSERT INTO policy_t(id, name) VALUES (1, 'x')"
     expect: { error: true }
 
+  - name: Catalog views hide databases without a grant
+    username: alice
+    password: pw
+    sql: SELECT COUNT(*) AS n FROM information_schema.tables WHERE table_schema='memcp-tests' AND table_name='policy_t'
+    expect: {rows: 1, data: [{n: 0}]}
+
   - name: "grant ALL on db to alice"
     sql: "GRANT ALL ON `memcp-tests`.* TO alice"
     expect: {}
+
+  - name: Catalog views expose the granted database
+    username: alice
+    password: pw
+    sql: SELECT COUNT(*) AS n FROM information_schema.tables WHERE table_schema='memcp-tests' AND table_name='policy_t'
+    expect: {rows: 1, data: [{n: 1}]}
+
+  - name: Catalog views still hide unrelated system definitions
+    username: alice
+    password: pw
+    sql: SELECT COUNT(*) AS n FROM information_schema.tables WHERE table_schema='system' AND table_name='user'
+    expect: {rows: 1, data: [{n: 0}]}
 
   - name: "alice INSERT allowed after grant"
     username: "alice"
@@ -86,6 +105,12 @@ test_cases:
   - name: "revoke ALL on db from alice"
     sql: "REVOKE ALL ON `memcp-tests`.* FROM alice"
     expect: {}
+
+  - name: Reused catalog plans observe revoked database rights
+    username: alice
+    password: pw
+    sql: SELECT COUNT(*) AS n FROM information_schema.tables WHERE table_schema='memcp-tests' AND table_name='policy_t'
+    expect: {rows: 1, data: [{n: 0}]}
 
   - name: "alice cannot SELECT after revoke"
     username: "alice"

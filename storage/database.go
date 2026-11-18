@@ -665,9 +665,10 @@ func LoadDatabases() {
 		}
 	}
 
-	// Attach catalog partitions without materializing any Go table definitions.
+	// Register database keys only. The first selected catalog scan opens
+	// that database's anchor; unrelated tenant schemas remain untouched.
 	for _, db := range databases.GetAll() {
-		db.bootstrapCatalog()
+		publishCatalogDatabaseName(db.Name)
 	}
 
 	// Ensure system_statistic.scans exists for scan logging
@@ -854,6 +855,7 @@ func (db *database) ensureLoaded() {
 			db.srState = SHARED
 			return
 		}
+		db.bootstrapCatalog()
 		// The system_schema catalog takes precedence over the legacy document
 		// stored next to its root. Both describe the same commit; an unreadable
 		// catalog falls back to the legacy declarations.
@@ -2305,6 +2307,7 @@ func DropDatabase(schema string, ifexists bool) bool {
 		panic("database has active replication transfers; retry DROP DATABASE")
 	}
 	requireDatabaseMaintenance(schema, maintenanceDrop)
+	db.ensureLoaded()
 	db = databases.Remove(schema)
 	if db == nil {
 		if ifexists {
@@ -2397,6 +2400,9 @@ func (db *database) createTableLocked(name string, pm PersistencyMode, ifnotexis
 // newTable builds a complete table object without publishing it in db.tables.
 // Callers may add internal columns before publication while holding schemalock.
 func (db *database) newTable(name string, pm PersistencyMode) *table {
+	if db == systemSchemaDB && !(pm == Cache && strings.HasPrefix(name, ".")) {
+		panic("schema catalog namespace is read-only")
+	}
 	t := new(table)
 	t.DroppedColumns = make(map[string]bool)
 	t.schema = db

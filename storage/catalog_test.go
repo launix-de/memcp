@@ -6,9 +6,11 @@ package storage
 
 import (
 	"encoding/json"
+	"io"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/launix-de/memcp/scm"
 )
@@ -267,5 +269,167 @@ func TestCatalogRejectsRetainedMutationCallback(t *testing.T) {
 	_, after := catalogShardRecords(shard, catalogRelationColumns(catalogColumns))
 	if !reflect.DeepEqual(before, after) {
 		t.Fatal("rejected callback changed catalog definitions")
+	}
+}
+
+func TestCatalogRootNamesTheQueryableShards(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "catalog-queryable-generation", 0)
+	db := tbl.schema
+	root := readCatalogRoot(db.persistence.ReadSchema())
+	for i, relation := range catalogRelations {
+		shard := db.catalog.live[i]
+		if shard.uuid.String() != root.Shards[relation.name] {
+			t.Fatalf("%s query and disk roots name different generations", relation.name)
+		}
+		if shard.t != systemSchemaTables[i] || shard.home() != catalogBackendDatabase() {
+			t.Fatalf("%s is not a native relation in the system backend", relation.name)
+		}
+	}
+}
+
+func TestCatalogScanLeavesRuntimeDefinitionsCold(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "catalog-lazy-runtime", 0)
+	db := tbl.schema
+	cold := newDatabase()
+	cold.Name, cold.persistence, cold.srState = db.Name, db.persistence, COLD
+	cold.bootstrapCatalog()
+	_, rows := catalogShardRecords(cold.catalog.live[catalogColumns], catalogRelationColumns(catalogColumns))
+	if len(rows) != 2 {
+		t.Fatalf("catalog contains %d columns, want 2", len(rows))
+	}
+	if cold.srState != COLD || len(cold.tables.GetAll()) != 0 {
+		t.Fatal("reading catalog rows materialized the database runtime")
+	}
+}
+
+func TestCatalogRoutingOpensOnlySelectedAnchor(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "catalog-route-selected", 0)
+	db := tbl.schema
+	otherName := "catalog-route-unselected"
+	CreateDatabase(otherName, false)
+	other := GetDatabase(otherName)
+	defer DropDatabase(otherName, true)
+	selected := newDatabase()
+	selected.Name, selected.persistence, selected.srState = db.Name, db.persistence, COLD
+	unselected := newDatabase()
+	unselected.Name, unselected.persistence, unselected.srState = other.Name, other.persistence, COLD
+	databases.Set(db.Name, selected)
+	databases.Set(other.Name, unselected)
+	defer func() {
+		databases.Set(db.Name, db)
+		databases.Set(other.Name, other)
+	}()
+	for _, name := range []string{db.Name, other.Name} {
+		publishCatalogShards(name, nil)
+		publishCatalogDatabaseName(name)
+	}
+	value := scm.NewString(db.Name)
+	access := runtimeScanAccess(analyzedBoundaries{{col: "schema_name", matcher: EqualMatcher,
+		lower: value, upper: value, lowerInclusive: true, upperInclusive: true}})
+	systemSchemaTables[catalogColumns].scanTopology(access)
+	if selected.catalog.live[catalogColumns] == nil {
+		t.Fatal("selected catalog partition was not opened")
+	}
+	if unselected.catalog.live[catalogColumns] != nil || unselected.srState != COLD {
+		t.Fatal("a selective catalog scan opened an unrelated tenant")
+	}
+	if selected.srState != COLD || len(selected.tables.GetAll()) != 0 {
+		t.Fatal("catalog routing materialized runtime table definitions")
+	}
+}
+
+func TestCatalogCleanupRetainsPinnedGeneration(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "catalog-generation-reader", 0)
+	db := tbl.schema
+	old := db.catalog.live[catalogColumns]
+	topology := systemSchemaTables[catalogColumns].activeTopology()
+	if !topology.acquireOperation() {
+		t.Fatal("could not retain the current catalog generation")
+	}
+	released := false
+	defer func() {
+		if !released {
+			topology.releaseOperation()
+		}
+	}()
+	tbl.CreateColumn("later", "INT", nil, nil)
+	if db.catalog.live[catalogColumns].uuid == old.uuid {
+		t.Fatal("DDL did not publish a new queryable catalog generation")
+	}
+	CleanDatabase(catalogBackendDatabase())
+	reader := old.home().persistence.ReadColumn(old.uuid.String(), "schema_name")
+	if missing, ok := reader.(interface{ Missing() bool }); ok && missing.Missing() {
+		t.Fatal("cleanup removed a catalog file before its reader drained")
+	}
+	reader.Close()
+	topology.releaseOperation()
+	released = true
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, retained := retiringCatalogGenerations.Load(old.uuid.String()); !retained {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("retired generation was not released after its reader drained")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestCatalogDoesNotFallbackToLegacyAfterMissingShardColumn(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "catalog-missing-column", 0)
+	db := tbl.schema
+	root := readCatalogRoot(db.persistence.ReadSchema())
+	id := root.Shards["tables"]
+	backend := catalogBackendDatabase().persistence
+	reader := backend.ReadColumn(id, "schema_name")
+	contents, err := io.ReadAll(reader)
+	reader.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend.RemoveColumn(id, "schema_name")
+	defer func() {
+		writer := backend.WriteColumn(id, "schema_name")
+		writer.Write(contents)
+		writer.Close()
+	}()
+	cold := newDatabase()
+	cold.Name, cold.persistence, cold.srState = db.Name, db.persistence, COLD
+	defer cold.closeTransactionLog()
+	defer func() {
+		if recover() == nil {
+			t.Fatal("missing authoritative catalog silently fell back to schema.json")
+		}
+	}()
+	cold.ensureLoaded()
+}
+
+// Version 1 catalog roots used each tenant's backend. Reading those roots
+// must not accidentally resolve their UUIDs on the new system backend.
+func TestCatalogReadsTenantBackendRoot(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "catalog-v1-root", 1)
+	db := tbl.schema
+	db.schemalock.Lock()
+	rows := db.catalogRowsLocked()
+	db.schemalock.Unlock()
+	root := &catalogRoot{Version: 1, Shards: make(map[string]string)}
+	for i := range catalogRelations {
+		shard := newCatalogShard(db, catalogRelationID(i), rows[i])
+		persisted := shard.rebuild(true)
+		root.Shards[catalogRelations[i].name] = persisted.uuid.String()
+	}
+	// A disagreeing compatibility document makes accidental fallback visible.
+	db.persistence.WriteSchema(attachCatalogRoot([]byte(`{"name":"`+db.Name+`","tables":{}}`), root))
+	restored := newDatabase()
+	restored.Name, restored.persistence, restored.srState = db.Name, db.persistence, COLD
+	restored.ensureLoaded()
+	if restored.tables.Get(tbl.Name) == nil {
+		t.Fatal("tenant-backend catalog was not loaded")
+	}
+	restored.save()
+	rewritten := readCatalogRoot(db.persistence.ReadSchema())
+	if rewritten == nil || rewritten.Version != catalogFormatVersion {
+		t.Fatal("legacy catalog root was not upgraded on save")
 	}
 }
