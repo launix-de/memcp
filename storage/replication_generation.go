@@ -892,7 +892,11 @@ func (r *replicationManager) installSchema(source, name string, engine Persisten
 	// database, preserving ongoing DML and runtime content ownership.
 	db := databases.Get(name)
 	if db != nil {
-		db.ensureLoaded()
+		if r.cluster != nil {
+			db.loadOnce.Do(func() { db.initializeSchemaSnapshot(data) })
+		} else {
+			db.ensureLoaded()
+		}
 		db.persistenceLifecycle.Lock()
 		defer db.persistenceLifecycle.Unlock()
 		db.schemalock.Lock()
@@ -929,6 +933,7 @@ func (r *replicationManager) installSchema(source, name string, engine Persisten
 		defer replacement.closeTransactionLog()
 		rows := replacement.catalogRowsLocked()
 		db.editCatalogLocked(&rows)
+		publishCatalogShards(db.Name, &db.catalog.live)
 		for _, table := range db.tables.GetAll() {
 			if r.cluster != nil && table.isEphemeralQueryTable() {
 				continue

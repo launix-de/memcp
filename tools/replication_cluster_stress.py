@@ -1876,6 +1876,10 @@ def run_cluster_inserts(args, artifacts, journal, hash_partitioned=False):
         nodes = [Node(args, directory, f"node-{i}", "listen") for i in range(3)]
         for index, node in enumerate(nodes):
             cleanup.callback(lambda node=node: node.kill() if node.process is not None else None)
+            # The snapshot's database anchor also references immutable catalog
+            # generations in the system backend. Seed that backend privately;
+            # only ordinary tenant payload remains shared between live nodes.
+            shutil.copytree(builder.data_dir / "system", node.data_dir / "system", dirs_exist_ok=True)
             (node.data_dir / DATABASE).symlink_to(shared, target_is_directory=True)
             (node.data_dir / f"{DATABASE}.json").write_text(json.dumps({"backend": "filesystem"}))
             node.process_env["GOMAXPROCS"] = "2"
@@ -2195,6 +2199,7 @@ def run_cluster_placement(args, artifacts, journal):
             source.scm(f'(rebuild (table "{DATABASE}" false "big_items" false) true false)')
         standalone_operators = []
         operator_shared = None
+        operator_system = None
         # The placement/co-location preflight also runs in the generic cluster
         # and SQL-context scenarios, not just the operator YAML profile.
         source.sql("CREATE TABLE operator_keys(id INT PRIMARY KEY) ENGINE=SAFE")
@@ -2207,12 +2212,15 @@ def run_cluster_placement(args, artifacts, journal):
             builder.kill()
             operator_shared = directory / "shared-operator-fixture"
             shutil.copytree(builder.data_dir / DATABASE, operator_shared)
+            operator_system = directory / "system-operator-fixture"
+            shutil.copytree(builder.data_dir / "system", operator_system)
             source = builder.start()
             standalone_operators = run_cluster_yaml_cases(
                 suite or OPERATOR_SUITE, builder, [builder], builder.data_dir / DATABASE,
                 journal, directory / "standalone-operators.json")
         builder.kill()
         shared = operator_shared or builder.data_dir / DATABASE
+        system_fixture = operator_system or builder.data_dir / "system"
         catalog = json.loads((shared / "schema.json").read_text())["tables"]
         if args.cluster_context_only:
             context_schema = catalog["context_items"]
@@ -2241,6 +2249,10 @@ def run_cluster_placement(args, artifacts, journal):
             # would never test simultaneous RAM admission or remote overflow.
             node.process_env["GOMAXPROCS"] = str(config["gomaxprocs"])
             cleanup.callback(lambda node=node: node.kill() if node.process is not None else None)
+            # The snapshot's database anchor also references immutable catalog
+            # generations in the system backend. Seed that backend privately;
+            # only ordinary tenant payload remains shared between live nodes.
+            shutil.copytree(system_fixture, node.data_dir / "system", dirs_exist_ok=True)
             (node.data_dir / DATABASE).symlink_to(shared, target_is_directory=True)
             (node.data_dir / f"{DATABASE}.json").write_text(json.dumps({"backend": "filesystem"}))
             # The coordinator uses a deliberately tiny shard share below its
@@ -2513,6 +2525,7 @@ def run_cluster_suite(args, path, artifacts, journal):
         protocol_ports = [free_port() for _ in nodes]
         for index, node in enumerate(nodes):
             cleanup.callback(lambda node=node: node.kill() if node.process is not None else None)
+            shutil.copytree(catalog.data_dir / "system", node.data_dir / "system", dirs_exist_ok=True)
             (node.data_dir / database).symlink_to(shared, target_is_directory=True)
             (node.data_dir / f"{database}.json").write_text(json.dumps({"backend": "filesystem"}))
             ram = config["coordinator_ram_limit_bytes"] if index == 0 else config["ram_limit_bytes"]
