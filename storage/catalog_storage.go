@@ -1027,6 +1027,10 @@ func (t *table) scanTopology(access scanAccess) *tableShardTopology {
 		}
 	}
 	for i := minimum; i <= maximum; i++ {
+		if db := databases.Get(dimension.Pivots[i].String()); db != nil && sharedClusterDatabase(db.Name) {
+			db.GetRead(nil).Release()
+			continue
+		}
 		if topology.shards[i] != nil {
 			continue
 		}

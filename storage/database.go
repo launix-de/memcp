@@ -843,19 +843,48 @@ func (db *database) saveLockedAndUnlock(mode schemaSaveMode, proposals ...*table
 
 // ensureLoaded loads schema.json into the database struct exactly once.
 func (db *database) ensureLoaded() {
-	db.loadOnce.Do(func() {
-		defer db.publishTableNamesLocked()
-		db.initializeTransactionLog()
-		if db.srState != COLD {
-			return
+	db.loadOnce.Do(func() { db.initializeSchemaSnapshot(nil) })
+}
+
+// initializeSchemaSnapshot owns the unpublished database behind loadOnce.
+// A non-nil document is an accepted peer handover; nil opens the local anchor.
+func (db *database) initializeSchemaSnapshot(document []byte) {
+	defer db.publishTableNamesLocked()
+	db.initializeTransactionLog()
+	if db.srState != COLD {
+		return
+	}
+	jsonbytes := document
+	if jsonbytes == nil {
+		jsonbytes = db.persistence.ReadSchema()
+	}
+	if len(jsonbytes) == 0 {
+		// fresh/empty database
+		db.tables = NonLockingReadMap.NewReadMap[string, *table]()
+		db.srState = SHARED
+		return
+	}
+	if document != nil {
+		// A cold cluster receiver initializes from the owner's accepted schema
+		// handover, rather than opening a foreign node's anchor/root first.
+		// This is an explicit protocol publication, never a JSON fallback for
+		// an unreadable locally authoritative root.
+		db.catalogBootstrap.Do(func() {})
+		systemSchema()
+		rows := catalogRowsFromDocument(jsonbytes)
+		var live [catalogRelationCount]*storageShard
+		var fingerprints [catalogRelationCount][32]byte
+		for i := range catalogRelations {
+			live[i] = newCatalogShard(db, catalogRelationID(i), rows[i])
+			fingerprints[i] = catalogFingerprint(catalogRelationID(i), rows[i])
 		}
-		jsonbytes := db.persistence.ReadSchema()
-		if len(jsonbytes) == 0 {
-			// fresh/empty database
-			db.tables = NonLockingReadMap.NewReadMap[string, *table]()
-			db.srState = SHARED
-			return
-		}
+		db.catalogMu.Lock()
+		db.catalog.live, db.catalog.liveFP = live, fingerprints
+		db.catalog.liveVersion++
+		publishCatalogShards(db.Name, &live)
+		db.catalogMu.Unlock()
+		jsonbytes = catalogDocumentFromRows(db.Name, &rows)
+	} else {
 		db.bootstrapCatalog(jsonbytes)
 		// The system_schema catalog takes precedence over the legacy document
 		// stored next to its root. A recognized root must be readable.
@@ -871,65 +900,66 @@ func (db *database) ensureLoaded() {
 			rows := catalogRowsFromDocument(jsonbytes)
 			db.editCatalogLocked(&rows)
 		}
-		tmp := new(database)
-		if err := json.Unmarshal(jsonbytes, tmp); err != nil {
-			panic(err)
+	}
+
+	tmp := new(database)
+	if err := json.Unmarshal(jsonbytes, tmp); err != nil {
+		panic(err)
+	}
+	db.tables = tmp.tables
+	db.procedures = tmp.procedures
+	// restore back-references; do not touch on-disk columns yet
+	for _, t := range db.tables.GetAll() {
+		t.schema = db
+		invalidatePersistedPlannerCodeAfterLoad(t)
+		if t.Name == ".blobs" {
+			db.blobRefState().table.Store(t)
 		}
-		db.tables = tmp.tables
-		db.procedures = tmp.procedures
-		// restore back-references; do not touch on-disk columns yet
-		for _, t := range db.tables.GetAll() {
-			t.schema = db
-			invalidatePersistedPlannerCodeAfterLoad(t)
-			if t.Name == ".blobs" {
-				db.blobRefState().table.Store(t)
-			}
-			for _, col := range t.Columns {
-				col.UpdateSanitizer()
-			}
-			// attach table pointer to existing shard stubs without loading them
-			if t.Shards != nil {
-				for _, s := range t.Shards {
-					if s != nil {
-						s.t = t
-					}
+		for _, col := range t.Columns {
+			col.UpdateSanitizer()
+		}
+		// attach table pointer to existing shard stubs without loading them
+		if t.Shards != nil {
+			for _, s := range t.Shards {
+				if s != nil {
+					s.t = t
 				}
 			}
-			if t.PShards != nil {
-				for _, s := range t.PShards {
-					if s != nil {
-						s.t = t
-					}
+		}
+		if t.PShards != nil {
+			for _, s := range t.PShards {
+				if s != nil {
+					s.t = t
 				}
 			}
-			// Derive ShardMode from shard presence for backward compatibility
-			// with schemas that don't yet have ShardMode persisted.
-			if t.PShards != nil && t.Shards == nil {
-				t.ShardMode = ShardModePartition
-			} else {
-				t.ShardMode = ShardModeFree
-			}
-			t.publishTopologyLocked()
-			t.initializeLegacyPlannerRowEstimate()
-			t.publishShowColumnsSnapshot(true)
-			t.restoreKeyFrequencies()
-			t.restoreFilterFeedback()
 		}
-		// FK declarations are authoritative, while their system triggers are
-		// generated code. Rebuild that code at the persistence boundary so schema
-		// files written by older binaries cannot retain an obsolete builtin ABI.
-		rebuildFKTriggersAfterLoad(db)
-		db.srState = SHARED
-		// Dot-prefixed cache tables are planner-owned and persisted only so a
-		// warm query cache can survive restart. Re-register their table-level
-		// owner after loading; durable internal tables such as .blobs remain
-		// ordinary shard-owned storage.
-		for _, table := range db.tables.GetAll() {
-			if table.isEphemeralQueryTable() {
-				registerCreatedTable(table)
-			}
+		// Derive ShardMode from shard presence for backward compatibility
+		// with schemas that don't yet have ShardMode persisted.
+		if t.PShards != nil && t.Shards == nil {
+			t.ShardMode = ShardModePartition
+		} else {
+			t.ShardMode = ShardModeFree
 		}
-	})
+		t.publishTopologyLocked()
+		t.initializeLegacyPlannerRowEstimate()
+		t.publishShowColumnsSnapshot(true)
+		t.restoreKeyFrequencies()
+		t.restoreFilterFeedback()
+	}
+	// FK declarations are authoritative, while their system triggers are
+	// generated code. Rebuild that code at the persistence boundary so schema
+	// files written by older binaries cannot retain an obsolete builtin ABI.
+	rebuildFKTriggersAfterLoad(db)
+	db.srState = SHARED
+	// Dot-prefixed cache tables are planner-owned and persisted only so a
+	// warm query cache can survive restart. Re-register their table-level
+	// owner after loading; durable internal tables such as .blobs remain
+	// ordinary shard-owned storage.
+	for _, table := range db.tables.GetAll() {
+		if table.isEphemeralQueryTable() {
+			registerCreatedTable(table)
+		}
+	}
 }
 
 // publishTableNamesLocked owns schema membership (or an unpublished database).
