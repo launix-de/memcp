@@ -124,9 +124,17 @@ func TestPersistedInternalTableIsNotRegisteredAsTempKeytable(t *testing.T) {
 		t.Fatalf("persisted internal table registered as temp keytable: before=%d after=%d",
 			before.CountByType[TypeTempKeytable], after.CountByType[TypeTempKeytable])
 	}
-	if after.CountByType[TypeShard] != before.CountByType[TypeShard]+1 {
-		t.Fatalf("persisted internal shard has no durable owner: before=%d after=%d",
-			before.CountByType[TypeShard], after.CountByType[TypeShard])
+	// Catalog publication can also register and retire metadata shards.
+	// Inspect the actual blob owners, rather than a global count delta.
+	GlobalCache.Stop()
+	defer resumeOwnershipTestCache()
+	if owner := GlobalCache.itemMap[blobs]; owner != nil {
+		t.Fatal("persisted blob table has a redundant table-level owner")
+	}
+	for _, shard := range blobs.ActiveShards() {
+		if owner := GlobalCache.itemMap[shard]; owner == nil || owner.evictType != TypeShard {
+			t.Fatal("persisted internal shard has no durable owner")
+		}
 	}
 }
 

@@ -1322,6 +1322,27 @@ func (r *replicationManager) schemaDigest(data []byte) (string, error) {
 	if err := json.Unmarshal(data, &document); err != nil {
 		return "", err
 	}
+	// Catalog exports omit nil declaration cells; legacy writers spell them
+	// as null. Normalize only record fields, preserving JSON values inside
+	// defaults and executable code without changing their meaning.
+	omitNullFields := func(fields map[string]json.RawMessage) {
+		for key, value := range fields {
+			if string(value) == "null" {
+				delete(fields, key)
+			}
+		}
+	}
+	omitNullFields(document)
+	if encoded := document["procedures"]; len(encoded) != 0 {
+		var procedures []map[string]json.RawMessage
+		if err := json.Unmarshal(encoded, &procedures); err != nil {
+			return "", err
+		}
+		for _, procedure := range procedures {
+			omitNullFields(procedure)
+		}
+		document["procedures"], _ = json.Marshal(procedures)
+	}
 	// The catalog root is node-local storage topology, not declarations.
 	delete(document, "catalog")
 	var tables map[string]json.RawMessage
@@ -1333,6 +1354,7 @@ func (r *replicationManager) schemaDigest(data []byte) (string, error) {
 		if err := json.Unmarshal(encoded, &fields); err != nil {
 			return "", err
 		}
+		omitNullFields(fields)
 		for _, key := range []string{"Auto_increment", "planner_row_estimate", "key_frequencies", "filter_feedback", "shard_forwards"} {
 			delete(fields, key)
 		}
@@ -1358,8 +1380,10 @@ func (r *replicationManager) schemaDigest(data []byte) (string, error) {
 		}
 		for _, column := range columns {
 			delete(column, "PartitioningScore")
+			omitNullFields(column)
 		}
 		fields["Columns"], _ = json.Marshal(columns)
+		omitNullFields(fields)
 		tables[name], _ = json.Marshal(fields)
 	}
 	document["tables"], _ = json.Marshal(tables)

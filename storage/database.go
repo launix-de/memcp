@@ -836,6 +836,7 @@ func (db *database) saveLockedAndUnlock(mode schemaSaveMode, proposals ...*table
 		db.schemalock.Unlock()
 		return
 	}
+	db.checkpointCatalogLocked()
 	owned = false
 	db.commitSchemaLocked(mode == schemaSaveFsync, db.schemalock.Unlock)
 }
@@ -855,10 +856,9 @@ func (db *database) ensureLoaded() {
 			db.srState = SHARED
 			return
 		}
-		db.bootstrapCatalog()
+		db.bootstrapCatalog(jsonbytes)
 		// The system_schema catalog takes precedence over the legacy document
-		// stored next to its root. Both describe the same commit; an unreadable
-		// catalog falls back to the legacy declarations.
+		// stored next to its root. A recognized root must be readable.
 		if root := readCatalogRoot(jsonbytes); root != nil {
 			if document, err := db.loadCatalogDocument(root); err == nil {
 				jsonbytes = document

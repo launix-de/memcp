@@ -423,7 +423,7 @@ func TestConcurrentFirstDatabaseReadersShareOneSchemaLoad(t *testing.T) {
 		release:           make(chan struct{}),
 	}
 	db := newDatabase()
-	db.Name = "tconcurrentload"
+	db.Name = "tconcurrentloadsource"
 	db.persistence = blocking
 	db.srState = COLD
 

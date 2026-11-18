@@ -292,7 +292,7 @@ func TestCatalogScanLeavesRuntimeDefinitionsCold(t *testing.T) {
 	db := tbl.schema
 	cold := newDatabase()
 	cold.Name, cold.persistence, cold.srState = db.Name, db.persistence, COLD
-	cold.bootstrapCatalog()
+	cold.bootstrapCatalog(nil)
 	_, rows := catalogShardRecords(cold.catalog.live[catalogColumns], catalogRelationColumns(catalogColumns))
 	if len(rows) != 2 {
 		t.Fatalf("catalog contains %d columns, want 2", len(rows))
@@ -431,5 +431,25 @@ func TestCatalogReadsTenantBackendRoot(t *testing.T) {
 	rewritten := readCatalogRoot(db.persistence.ReadSchema())
 	if rewritten == nil || rewritten.Version != catalogFormatVersion {
 		t.Fatal("legacy catalog root was not upgraded on save")
+	}
+}
+
+func TestCatalogMaterializationPreservesTriggerBeforeTargetBinding(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "catalog-trigger-binding", 0)
+	called := false
+	trigger := TriggerDescription{Name: ".prejoin:catalog-test", Timing: AfterInsert, Hidden: true,
+		Func: scm.NewFunc(func(...scm.Scmer) scm.Scmer { called = true; return scm.NewNil() })}
+	tbl.AddTrigger(trigger)
+	tbl.schema.schemalock.Lock()
+	tbl.schema.saveLockedAndUnlock(schemaSaveFsync, tbl)
+	tbl.mu.Lock()
+	restored := tbl.Triggers[0]
+	tbl.mu.Unlock()
+	if restored.Acquire != nil || restored.needsRegeneration {
+		t.Fatal("materialization replaced a live trigger with a cold recovery stub")
+	}
+	scm.Apply(restored.Func)
+	if !called {
+		t.Fatal("materialization lost the live compiled callback")
 	}
 }

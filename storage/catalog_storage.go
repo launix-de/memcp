@@ -699,7 +699,7 @@ func (db *database) materializeCatalogTableLocked(t *table, rows *catalogRows) {
 	t.mu.Lock()
 	for i, declaration := range definition.Triggers {
 		for _, candidate := range t.Triggers {
-			if candidate.Name == declaration.Name && bytes.Equal(marshalCatalogValue(candidate), marshalCatalogValue(declaration)) {
+			if candidate.Name == declaration.Name && catalogTriggerDefinitionEqual(candidate, declaration) {
 				definition.Triggers[i] = candidate
 				break
 			}
@@ -838,7 +838,7 @@ func (db *database) catalogShardIDs() []string {
 		// System-backend deletion needs every tenant anchor as a proof. Opening
 		// those roots creates only shard stubs, never Go runtime definitions.
 		if db.Name == "system" && owner.srState == COLD {
-			owner.bootstrapCatalog()
+			owner.bootstrapCatalog(nil)
 		}
 		owner.catalogMu.Lock()
 		for _, shard := range owner.catalog.committed {
@@ -889,13 +889,18 @@ func requireCatalogDML(t *table) {
 
 // bootstrapCatalog attaches persisted shard stubs without loading runtime table
 // definitions or user-data columns. A legacy document is imported once.
-func (db *database) bootstrapCatalog() {
+func (db *database) bootstrapCatalog(document []byte) {
 	db.catalogBootstrap.Do(func() {
 		if db.catalog.live[0] != nil {
 			return
 		}
 		systemSchema()
-		data := db.persistence.ReadSchema()
+		var data []byte
+		if document != nil {
+			data = document
+		} else {
+			data = db.persistence.ReadSchema()
+		}
 		if root := readCatalogRoot(data); root != nil {
 			for i, relation := range catalogRelations {
 				id, err := uuid.Parse(root.Shards[relation.name])
@@ -1021,7 +1026,7 @@ func (t *table) scanTopology(access scanAccess) *tableShardTopology {
 			continue
 		}
 		if db := databases.Get(dimension.Pivots[i].String()); db != nil {
-			db.bootstrapCatalog()
+			db.bootstrapCatalog(nil)
 		}
 	}
 	return t.activeTopology()
@@ -1039,5 +1044,22 @@ func catalogColumnDefinitionEqual(a, b *column) bool {
 	}
 	delete(left, "PartitioningScore")
 	delete(right, "PartitioningScore")
+	return bytes.Equal(marshalCatalogValue(left), marshalCatalogValue(right))
+}
+
+// requires_target describes a process-local pin, not the trigger body. The
+// legacy loader installs an unavailable pin for cache families, even while a
+// new live trigger is still waiting for SetTriggerTarget. Keep its compiled
+// callback and current lifecycle state when the admitted declaration matches.
+func catalogTriggerDefinitionEqual(a, b TriggerDescription) bool {
+	var left, right map[string]json.RawMessage
+	if err := json.Unmarshal(marshalCatalogValue(a), &left); err != nil {
+		panic(err)
+	}
+	if err := json.Unmarshal(marshalCatalogValue(b), &right); err != nil {
+		panic(err)
+	}
+	delete(left, "requires_target")
+	delete(right, "requires_target")
 	return bytes.Equal(marshalCatalogValue(left), marshalCatalogValue(right))
 }

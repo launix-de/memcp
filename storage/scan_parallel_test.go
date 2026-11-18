@@ -1148,9 +1148,7 @@ func TestReserveIDsExplicitInsertAndCallback(t *testing.T) {
 
 func TestReserveIDsRestartContract(t *testing.T) {
 	tbl, persistence := createDurabilityTestTable(t, "treserveidrestart", 0)
-	tbl.Columns[0].AutoIncrement = true
-	tbl.publishShowColumnsSnapshot(false)
-	tbl.schema.save()
+	tbl.AlterColumn("id", "auto_increment", scm.NewBool(true))
 	reserve := scm.Globalenv.Vars["reserve_ids"]
 	block := scm.Apply(reserve, NewTableScmer(tbl), scm.NewInt(3)).Slice()
 	tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{{block[1], scm.NewString("durable reserved ID")}}, nil, scm.NewNil(), false, nil)
@@ -1222,9 +1220,7 @@ func TestReserveIDsConcurrentWithNativeInsert(t *testing.T) {
 
 func TestReserveIDsPersistedPrefixRecovery(t *testing.T) {
 	tbl, persistence := createDurabilityTestTable(t, "treserveidprefix", 0)
-	tbl.Columns[0].AutoIncrement = true
-	tbl.publishShowColumnsSnapshot(false)
-	tbl.schema.save()
+	tbl.AlterColumn("id", "auto_increment", scm.NewBool(true))
 	reserve := scm.Globalenv.Vars["reserve_ids"]
 	block := scm.Apply(reserve, NewTableScmer(tbl), scm.NewInt(100)).Slice()
 	tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{{block[0], scm.NewString("only first ID persisted")}}, nil, scm.NewNil(), false, nil)
