@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/launix-de/memcp/scm"
 )
 
@@ -451,5 +452,35 @@ func TestCatalogMaterializationPreservesTriggerBeforeTargetBinding(t *testing.T)
 	scm.Apply(restored.Func)
 	if !called {
 		t.Fatal("materialization lost the live compiled callback")
+	}
+}
+
+func TestCatalogPeerPublicationInitializesColdForeignAnchor(t *testing.T) {
+	tbl, engine := createDurabilityTestTable(t, "catalog-peer-publication", 0)
+	accepted := stripCatalogRoot(engine.ReadSchema())
+	// A shared tenant anchor may have been checkpointed by another node.
+	// Its system-backend generations are intentionally absent on this node.
+	root := &catalogRoot{Version: catalogFormatVersion, Shards: make(map[string]string)}
+	for _, relation := range catalogRelations {
+		root.Shards[relation.name] = uuid.NewString()
+	}
+	engine.WriteSchema(attachCatalogRoot(accepted, root))
+	cold := newDatabase()
+	cold.Name, cold.persistence, cold.srState = tbl.schema.Name, engine, COLD
+	databases.Set(cold.Name, cold)
+	defer databases.Set(tbl.schema.Name, tbl.schema)
+	r := replicaRecoveryFixture()
+	r.cluster = &nodeCluster{manager: r, self: clusterMember{ID: r.id}}
+	if err := r.installSchema(uuid.NewString(), cold.Name, engine, accepted); err != nil {
+		t.Fatal(err)
+	}
+	if cold.GetTable(tbl.Name) == nil {
+		t.Fatal("accepted peer schema did not initialize the cold database")
+	}
+	cold.schemalock.Lock()
+	rows := cold.catalogRowsLocked()
+	cold.schemalock.Unlock()
+	if len(rows[catalogTables]) == 0 {
+		t.Fatal("peer publication did not establish canonical catalog rows")
 	}
 }
