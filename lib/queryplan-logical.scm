@@ -7065,15 +7065,16 @@ consumed it; the union's result_titles fact retains the public projection. */
 (define union_wrapper_with_sort_outputs (lambda (block) (begin
 	(define fields (reduce (coalesceNil (qb_order block) '()) (lambda (fields item)
 		(match item '(expr _direction) (begin
-			(define present (reduce (map (projection_exprs fields) (lambda (projected)
-				(expression_equal? (sql_type_lower_annotations expr) (sql_type_lower_annotations projected)))) (lambda (a b) (or a b)) false))
+			(define present (or (number? expr) (reduce (map (projection_exprs fields) (lambda (projected)
+				(expression_equal? (sql_type_lower_annotations expr) (sql_type_lower_annotations projected)))) (lambda (a b) (or a b)) false)))
 			(if present fields (begin
 				(define names (map (projection_titles fields) (lambda (title) (list title true))))
 				(define title (binding_fresh_alias (merge names) (concat "__union_order:" (count fields))))
 				(merge fields (list title expr))))) _ fields)) (qb_fields block)))
-	(make_query_block (qb_schema block) (qb_sources block) fields (qb_where block)
-		(qb_group block) (qb_having block) (qb_order block) (qb_limit block) (qb_offset block)
-		(qb_hidden block) (qb_stages block) (qb_facts block)))))
+	(if (equal? (count fields) (count (qb_fields block))) block
+		(make_query_block (qb_schema block) (qb_sources block) fields (qb_where block)
+			(qb_group block) (qb_having block) (qb_order block) (qb_limit block) (qb_offset block)
+			(qb_hidden block) (qb_stages block) (qb_facts block))))))
 
 (define rewrite_query_block_over_union_source (lambda (block src)
 	(begin

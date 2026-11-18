@@ -18,6 +18,7 @@ package storage
 
 import "sync"
 import "time"
+import "reflect"
 import "strings"
 import "strconv"
 import "runtime/debug"
@@ -130,6 +131,13 @@ func (t *table) computeColumnDDLLocked(tx *TxContext, name string, inputCols []s
 			// - shard-level ComputeColumn still runs afterwards so dirty proxies can
 			//   repair themselves even on the DDL no-op path
 			metadataChanged := !computeColumnSignatureEqual(c, inputCols, computor) || !slicesEqual(c.ComputorDependencies, dependencies)
+			// Compiled callbacks are process-local. Rebinding an equivalent temp
+			// recipe must not propose the whole table to the catalog on every
+			// query. Persist actual input/dependency changes and changed source
+			// edges; retain ordinary DDL's publication contract.
+			declarationChanged := metadataChanged && (!c.IsTemp || c.Computor.IsNil() ||
+				!slicesEqual(c.ComputorInputCols, inputCols) || !slicesEqual(c.ComputorDependencies, dependencies) ||
+				!reflect.DeepEqual(extractScanJoinInfo(c.Computor), extractScanJoinInfo(computor)))
 			if metadataChanged {
 				t.Columns[i].Computor = computor // set formula so delta storages and rebuild algo know how to recompute
 				t.Columns[i].ComputorInputCols = inputCols
@@ -179,7 +187,7 @@ func (t *table) computeColumnDDLLocked(tx *TxContext, name string, inputCols []s
 			if c.IsTemp {
 				t.updateTempColumnMemory(c, shardlist)
 			}
-			if metadataChanged {
+			if declarationChanged {
 				t.ddlMu.Lock()
 				ddlLocked = true
 				t.schema.schemalock.Lock()
