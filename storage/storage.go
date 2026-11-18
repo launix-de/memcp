@@ -2541,6 +2541,9 @@ func Init(en scm.Env) {
 			}
 			db.ensureLoaded()
 			tblName := scm.String(a[1])
+			if db == systemSchemaDB && !strings.HasPrefix(tblName, ".") {
+				panic("schema catalog namespace is read-only")
+			}
 
 			// Software contract:
 			// createtable(..., ifnotexists=true) is the hot-path guard used by

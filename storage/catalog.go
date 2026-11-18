@@ -18,12 +18,12 @@ import (
 
 // system_schema is the relational form of every database's declarations.
 // Each catalog relation is one table, partitioned by database with the
-// "database-v1" method: partition i is database Pivots[i], and that
-// database's backend stores the shard. There is no central shard list; a
+// "database-v1" method: partition i is database Pivots[i]. Catalog files
+// use the system backend. There is no central shard list; a
 // database's schema.json root names its own catalog shards.
 //
-// Rows are derived from the declaration records of the legacy schema.json
-// format (persistedTable, persistedColumn, ...). Scalars keep their native
+// Catalog rows are authoritative. Legacy schema.json records are imported
+// once and exported for old readers. Scalars keep their native
 // type, scalar lists become list cells and everything else, including code,
 // is one JSON value per cell. A database document reconstructed from the rows
 // is decoded by the same loader as a legacy schema.json.
@@ -84,9 +84,6 @@ type catalogRelation struct {
 	name     string
 	identity []catalogField
 	fields   []catalogField
-	// handle adds the transient "handle" column: a node-local pointer to the
-	// RAM table object of the row. It is never written or fingerprinted.
-	handle bool
 }
 
 func (r *catalogRelation) columns() []catalogField {

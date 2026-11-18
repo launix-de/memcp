@@ -65,6 +65,9 @@ func tableMaintenanceCapabilities(schema, name string) maintenanceCapabilities {
 	if strings.EqualFold(name, ".blobs") {
 		return maintenanceCapabilities{class: "engine_internal"}
 	}
+	if isSystemSchemaName(schema, true) && strings.HasPrefix(name, ".") {
+		return unrestrictedMaintenanceCapabilities()
+	}
 	switch strings.ToLower(schema) {
 	case "system", "system_schema":
 		return maintenanceCapabilities{class: "system_catalog"}

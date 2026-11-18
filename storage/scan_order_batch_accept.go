@@ -122,7 +122,7 @@ func collectPartitionOrderedCandidateBatch(currentTx *TxContext, source scanOrde
 	table := source.table
 	for {
 		topology := table.activeTopology()
-		if topology.mode != ShardModePartition || len(topology.dimensions) != 1 ||
+		if topology.mode != ShardModePartition || len(topology.dimensions) != 1 || topology.dimensions[0].Method != "" ||
 			topology.dimensions[0].Column != sortcols[0].String() ||
 			len(topology.shards) != topology.dimensions[0].NumPartitions {
 			return nil, nil, false

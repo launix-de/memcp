@@ -114,6 +114,9 @@ func freezeProcedureParameters(value scm.Scmer) scm.Scmer {
 }
 
 func CreateProcedure(schema, name, language, source string, parameters scm.Scmer, replace bool) bool {
+	if isSystemSchemaName(schema, true) {
+		panic("schema catalog namespace is read-only")
+	}
 	db := GetDatabase(schema)
 	if db == nil {
 		panic("database does not exist: " + schema)
@@ -138,8 +141,8 @@ func CreateProcedure(schema, name, language, source string, parameters scm.Scmer
 		db.schemalock.Unlock()
 		panic("procedure already exists: " + name)
 	}
+	definition = db.editCatalogProcedureLocked(name, definition)
 	db.procedures.Set(name, definition)
-	db.proposeCatalogProceduresLocked()
 	db.saveLockedAndUnlock(schemaSaveFsync)
 	return true
 }
@@ -164,8 +167,8 @@ func DropProcedure(schema, name string, ifexists bool) bool {
 		}
 		panic("procedure does not exist: " + name)
 	}
+	db.editCatalogProcedureLocked(name, nil)
 	db.procedures.Remove(name)
-	db.proposeCatalogProceduresLocked()
 	db.saveLockedAndUnlock(schemaSaveFsync)
 	return true
 }

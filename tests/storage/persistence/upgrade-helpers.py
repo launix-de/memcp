@@ -30,6 +30,10 @@ def query(sql):
 def cases(changed=False):
     unchanged = not changed
     return [
+        ('catalog definitions and defaults', 3,
+         'SELECT p.id, p.code, c.id, c.label FROM up_catalog_parent p '
+         'JOIN up_catalog_child c ON c.parent_id=p.id ORDER BY c.id',
+         '1\tcatalog\t2\tinherited'),
         ('group aggregate', 12,
          'SELECT bucket, COUNT(*), SUM(value) FROM up_helper GROUP BY bucket ORDER BY bucket',
          '1\t2\t30\n2\t2\t70' if unchanged else '1\t2\t35\n2\t2\t70'),
