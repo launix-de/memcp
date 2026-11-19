@@ -32,10 +32,15 @@ func (shard *storageShard) replicationResource() mosiResource {
 }
 
 func (shard *storageShard) replicationManager() *replicationManager {
-	if shard.catalogPrivate || !validReplicaDatabase(shard.authorityDatabase().Name) {
+	if shard.catalogPrivate {
 		return nil
 	}
-	return activeReplication(shard.authorityDatabase())
+	owner := shard.authorityDatabase()
+	// Unpublished/synthetic native descriptors have no database MOSI domain.
+	if owner == nil || !validReplicaDatabase(owner.Name) {
+		return nil
+	}
+	return activeReplication(owner)
 }
 
 func declareCatalogShard(shard *storageShard) {
