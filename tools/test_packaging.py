@@ -39,7 +39,9 @@ def run(*args: str, cwd: Path = ROOT, env: dict[str, str] | None = None) -> str:
 
 
 class ReleaseSourceTests(unittest.TestCase):
-	def apt_setup(self, scenario: str, packages: str = "mariadb-client rpm"):
+	def apt_setup(self, scenario: str, packages: str = "mariadb-client rpm", *,
+		mirror_host: str = "azure.archive.ubuntu.com", mirrorlist: bool = False,
+		extra_uri: bool = False):
 		# Execute the action's actual shell body against private source files and
 		# a fake privileged package client. GNU timeout still runs for real.
 		action = (ROOT / ".github/actions/setup-apt/action.yml").read_text()
@@ -48,17 +50,24 @@ class ReleaseSourceTests(unittest.TestCase):
 			root = Path(tmp)
 			sources = root / "sources"
 			(sources / "sources.list.d").mkdir(parents=True)
-			legacy = "deb http://azure.archive.ubuntu.com/ubuntu noble main\n"
-			deb822 = ("URIs: https://azure.archive.ubuntu.com/ubuntu\n"
+			legacy = f"deb http://{mirror_host}/ubuntu noble main\n"
+			uris = f"https://{mirror_host}/ubuntu" + (f" http://{mirror_host}/ubuntu/" if extra_uri else "")
+			deb822 = (f"URIs: {uris}\n"
 				"Suites: noble-updates\nComponents: main universe\n"
 				"Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n")
-			unrelated = "deb https://example.invalid/ubuntu noble main\n"
+			unrelated = ("deb https://example.invalid/ubuntu noble main\n"
+				"deb https://us-east-2.ec2.archive.ubuntu.com.example.invalid/ubuntu noble main\n"
+				"deb https://example.invalid/us-east-2.ec2.archive.ubuntu.com/ubuntu noble main\n"
+				"deb https://example.invalid/http://us-east-2.ec2.archive.ubuntu.com/ubuntu noble main\n"
+				"deb http://us-east-2.ec2.archive.ubuntu.com/ubuntu-extra noble main\n"
+				"deb http://us-east-2.ec2.archive.ubuntu.com/ubuntu/other noble main\n"
+				"deb http://security.ubuntu.com/ubuntu noble-security main\n")
 			(sources / "sources.list").write_text(legacy)
 			(sources / "sources.list.d/ubuntu.sources").write_text(deb822)
 			(sources / "sources.list.d/other.list").write_text(unrelated)
-			if scenario == "mirrorlist":
-				(sources / "apt-mirrors.txt").write_text("http://azure.archive.ubuntu.com/ubuntu/\n")
-				deb822 = deb822.replace("https://azure.archive.ubuntu.com/ubuntu",
+			if scenario == "mirrorlist" or mirrorlist:
+				(sources / "apt-mirrors.txt").write_text(f"http://{mirror_host}/ubuntu/\n")
+				deb822 = deb822.replace(f"https://{mirror_host}/ubuntu",
 					"mirror+file:" + str(sources / "apt-mirrors.txt"))
 				(sources / "sources.list.d/ubuntu.sources").write_text(deb822)
 			fake = root / "sudo"
@@ -79,12 +88,16 @@ class ReleaseSourceTests(unittest.TestCase):
 				        sys.exit(100)
 				    if scenario == 'mirrorlist':
 				        mirrors = pathlib.Path(os.environ['APT_SOURCES_DIRECTORY']) / 'apt-mirrors.txt'
-				        if 'azure.archive.ubuntu.com' in mirrors.read_text():
+				        if os.environ['FAKE_APT_MIRROR_HOST'] in mirrors.read_text():
 				            sys.exit(100)
 				elif scenario == 'install-transient-timeout':
 				    count = sum('install' in json.loads(line) for line in (root / 'calls.jsonl').read_text().splitlines())
 				    if count == 1:
 				        time.sleep(10)
+				    if os.environ['FAKE_APT_MIRRORLIST'] == '1':
+				        mirrors = pathlib.Path(os.environ['APT_SOURCES_DIRECTORY']) / 'apt-mirrors.txt'
+				        if os.environ['FAKE_APT_MIRROR_HOST'] in mirrors.read_text():
+				            sys.exit(100)
 				elif scenario in {'install-hang','update-then-install-timeout'}:
 				    time.sleep(10)
 				elif scenario == 'install-fail':
@@ -97,7 +110,8 @@ class ReleaseSourceTests(unittest.TestCase):
 				GITHUB_ACTION_PATH=str(ROOT / ".github/actions/setup-apt"),
 				INDEX_TIMEOUT_SECONDS="0.5" if scenario == "hang" else "2",
 				INSTALL_TIMEOUT_SECONDS="0.5" if scenario in {"install-hang", "install-transient-timeout", "update-then-install-timeout"} else "2",
-				FAKE_APT_ROOT=str(root), FAKE_APT_SCENARIO=scenario)
+				FAKE_APT_ROOT=str(root), FAKE_APT_SCENARIO=scenario,
+				FAKE_APT_MIRROR_HOST=mirror_host, FAKE_APT_MIRRORLIST='1' if mirrorlist else '0')
 			result = subprocess.run(["bash", "-c", body], env=env, text=True,
 				stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=5)
 			log = root / "calls.jsonl"
@@ -146,6 +160,41 @@ class ReleaseSourceTests(unittest.TestCase):
 		self.assertNotIn("apt-get", php)
 		self.assertIn('$GITHUB_ACTION_PATH/../setup-apt/install.sh', php)
 		self.assertNotIn("continue-on-error", php)
+
+	def test_regional_mirror_recovery_preserves_signed_sources_and_unrelated_repositories(self):
+		result, calls, legacy, deb822, unrelated, old_legacy, old_deb822, old_unrelated = self.apt_setup(
+			"transient", mirror_host="us-east-2.ec2.archive.ubuntu.com")
+		self.assertEqual(result.returncode, 0, result.stdout)
+		self.assertEqual(len(calls), 3)
+		self.assertEqual(legacy, old_legacy.replace("http://us-east-2.ec2.archive.ubuntu.com", "https://archive.ubuntu.com"))
+		self.assertEqual(deb822, old_deb822.replace("https://us-east-2.ec2.archive.ubuntu.com", "https://archive.ubuntu.com"))
+		self.assertEqual(unrelated, old_unrelated)
+		self.assertIn("Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg", deb822)
+
+	def test_regional_runner_mirrorlist_switches_after_index_failure(self):
+		result, calls, _, deb822, unrelated, _, old_deb822, old_unrelated = self.apt_setup(
+			"mirrorlist", mirror_host="us-east-2.ec2.archive.ubuntu.com")
+		self.assertEqual(result.returncode, 0, result.stdout)
+		self.assertEqual(len(calls), 3)
+		self.assertEqual(deb822, old_deb822)
+		self.assertEqual(unrelated, old_unrelated)
+
+	def test_regional_runner_mirrorlist_switches_after_bounded_install_timeout(self):
+		result, calls, _, deb822, unrelated, _, old_deb822, old_unrelated = self.apt_setup(
+			"install-transient-timeout", mirror_host="us-east-2.ec2.archive.ubuntu.com", mirrorlist=True)
+		self.assertEqual(result.returncode, 0, result.stdout)
+		self.assertEqual(len(calls), 4)
+		self.assertEqual(deb822, old_deb822)
+		self.assertEqual(unrelated, old_unrelated)
+
+	def test_regional_recovery_handles_adjacent_modern_uri_tokens(self):
+		result, calls, _, deb822, unrelated, _, old_deb822, old_unrelated = self.apt_setup(
+			"transient", mirror_host="us-east-2.ec2.archive.ubuntu.com", extra_uri=True)
+		self.assertEqual(result.returncode, 0, result.stdout)
+		self.assertEqual(len(calls), 3)
+		self.assertEqual(deb822, old_deb822.replace("https://us-east-2.ec2.archive.ubuntu.com", "https://archive.ubuntu.com")
+			.replace("http://us-east-2.ec2.archive.ubuntu.com", "https://archive.ubuntu.com"))
+		self.assertEqual(unrelated, old_unrelated)
 
 	def test_persistent_apt_failure_stops_before_installation(self):
 		result, calls, *_ = self.apt_setup("persistent")

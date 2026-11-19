@@ -45,10 +45,13 @@ select_archive_mirror() {
   done
   for source_file in "${source_files[@]}"; do
     if [ -f "$source_file" ]; then
-      # Preserve suites, components, Signed-By and unrelated repositories.
-      sudo sed -i \
-        -e 's#http://azure\.archive\.ubuntu\.com/ubuntu#https://archive.ubuntu.com/ubuntu#g' \
-        -e 's#https://azure\.archive\.ubuntu\.com/ubuntu#https://archive.ubuntu.com/ubuntu#g' \
+      # Runner images use Azure or regional EC2 mirrors. Rewrite whole URI
+      # tokens only, preserving trust fields and unrelated repository paths.
+      # Repeat for adjacent tokens whose shared separator was consumed.
+      sudo sed -i -E \
+        -e ':recover' \
+        -e 's#(^|[[:space:]])https?://(azure|[a-z0-9-]+\.ec2)\.archive\.ubuntu\.com/ubuntu(/?)([[:space:]]|$)#\1https://archive.ubuntu.com/ubuntu\3\4#g' \
+        -e 't recover' \
         "$source_file" || return 1
     fi
   done

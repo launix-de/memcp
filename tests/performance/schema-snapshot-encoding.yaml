@@ -1,0 +1,41 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: Complete readable schema snapshots after small catalog mutations
+  isolated: true
+  performance_rows: 192
+setup:
+- scm: |
+    (begin
+      (define payload (concat "<catalog>&\"\\\nGröße " (string_repeat "x" 96)))
+      (map (produceN 192) (lambda (i)
+        (createtable "memcp-tests" (concat "snapshot_catalog_" i)
+          (map (produceN 16) (lambda (column)
+            (list "column" (concat "value_" column) "varchar" '(256)
+              (list "default" payload "comment" payload))))
+          '("engine" "logged") false))))
+test_cases:
+- name: Small metadata mutations serialize the complete wide catalog
+  scm: |
+    (list
+      (count (map (produceN 80) (lambda (i)
+        (altercolumn (table "memcp-tests" false "snapshot_catalog_0" false)
+          "value_0" "comment" (concat "snapshot-" i)))))
+      ((show (table "memcp-tests" false "snapshot_catalog_0" false)
+        "column" "value_0") "Comment"))
+  expect:
+    result: [80, snapshot-79]
+  timing_samples: 1
+  warmup: 0
+  timing_aggregation: total
+  threshold_ms: 30000
+- name: Unrelated defaults preserve JSON escapes and Unicode
+  scm: |
+    ((show (table "memcp-tests" false "snapshot_catalog_191" false)
+      "column" "value_15") "Default")
+  expect:
+    result: "<catalog>&\"\\\nGröße xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+cleanup:
+- scm: |
+    (map (produceN 192) (lambda (i)
+      (droptable "memcp-tests" (concat "snapshot_catalog_" i) true)))
