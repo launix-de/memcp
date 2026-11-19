@@ -48,6 +48,10 @@ type storageShard struct {
 	// a database, and that database's backend stores the shard. Rebuild
 	// successors inherit it; ordinary shards persist through their table.
 	catalogHome *database
+	// catalogOwner owns the logical schema partition, independently of storage.
+	catalogOwner string
+	// A private rebuild/import generation has no published MOSI resource yet.
+	catalogPrivate bool
 	// catalogDurable requests synced column files from the next rebuild of a
 	// system_schema shard, matching the durability of its schema.json commit.
 	catalogDurable bool
@@ -990,7 +994,7 @@ func (s *storageShard) getRead(currentTx *TxContext, options shardReadOptions) R
 		panic(activeNodeCluster().shardRAMUnavailable(s, origin))
 	}
 	if !options.snapshot && s.t != nil {
-		if r := activeReplication(s.t.schema); r != nil && validReplicaDatabase(s.t.schema.Name) && !s.t.isEphemeralQueryTable() {
+		if r := s.replicationManager(); r != nil && validReplicaDatabase(s.authorityDatabase().Name) && !s.t.isEphemeralQueryTable() {
 			s = r.readShard(s, currentTx)
 		}
 	}
@@ -1058,7 +1062,7 @@ func (s *storageShard) getWrite(currentTx *TxContext, blocking bool) (WriteAcces
 		}
 	}()
 	if s.t != nil {
-		if r := activeReplication(s.t.schema); r != nil && validReplicaDatabase(s.t.schema.Name) && !s.t.isEphemeralQueryTable() {
+		if r := s.replicationManager(); r != nil && validReplicaDatabase(s.authorityDatabase().Name) && !s.t.isEphemeralQueryTable() {
 			cell := r.shardCell(s)
 			var admitted bool
 			cell, release, admitted = r.writeResource(*cell.resource.Load(), currentTx, blocking)
@@ -4365,6 +4369,8 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 	result := new(storageShard)
 	result.t = t.t
 	result.catalogHome = t.catalogHome
+	result.catalogOwner = t.catalogOwner
+	result.catalogPrivate = t.catalogOwner != ""
 	result.coherence.Store(t.coherence.Load())
 	result.localMutations.Store(t.localMutationState())
 	result.setState(WRITE) // mark as live so ensureLoaded() won't reset columns

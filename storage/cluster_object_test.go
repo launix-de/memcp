@@ -575,6 +575,7 @@ func TestClusterPacketSchemaPublicationPrecedesDependentShard(t *testing.T) {
 	resume := make(chan struct{})
 	data := make(chan struct{})
 	other := make(chan struct{})
+	catalog := make(chan struct{})
 	p := &mosiPeer{done: make(chan struct{}), packet: func(packet *mosiPacket) error {
 		switch packet.ID {
 		case "schema":
@@ -589,6 +590,8 @@ func TestClusterPacketSchemaPublicationPrecedesDependentShard(t *testing.T) {
 			close(data)
 		case "independent":
 			close(other)
+		case "catalog":
+			close(catalog)
 		}
 		return nil
 	}}
@@ -596,6 +599,16 @@ func TestClusterPacketSchemaPublicationPrecedesDependentShard(t *testing.T) {
 		t.Fatal("schema dispatch failed")
 	}
 	<-entered
+	if !p.dispatchPacket(&mosiPacket{ID: "catalog", Resource: mosiResource{Database: "dependent", Table: catalogResourcePrefix + "columns", Shard: uuid.NewString()}}, 1, time.Time{}) {
+		t.Fatal("catalog dispatch failed")
+	}
+	select {
+	case <-catalog:
+	case <-time.After(time.Second):
+		close(resume)
+		p.packets.Wait()
+		t.Fatal("schema installation blocked the catalog shard supplying its definitions")
+	}
 	if !p.dispatchPacket(&mosiPacket{ID: "data", Resource: mosiResource{Database: "dependent", Table: "t", Shard: uuid.NewString()}}, 1, time.Time{}) ||
 		!p.dispatchPacket(&mosiPacket{ID: "independent", Resource: mosiResource{Database: "independent"}}, 1, time.Time{}) {
 		t.Fatal("data dispatch failed")

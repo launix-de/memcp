@@ -1101,6 +1101,10 @@ type persistedTable struct {
 // MarshalJSON reads topology only from an immutable, atomically published
 // generation. Database schema locking keeps the remaining DDL fields stable.
 func (t *table) MarshalJSON() ([]byte, error) {
+	return json.Marshal(t.persistedDeclaration())
+}
+
+func (t *table) persistedDeclaration() *persistedTable {
 	// Reservations publish once per batch; snapshot the same counter without
 	// acquiring the topology mutex during schema persistence.
 	autoIncrement := atomic.LoadUint64(&t.Auto_increment)
@@ -1165,7 +1169,7 @@ func (t *table) MarshalJSON() ([]byte, error) {
 			}
 		}
 	}
-	return json.Marshal(&persistedTable{
+	return &persistedTable{
 		ShardForwards:      topology.forwards,
 		Name:               t.Name,
 		Columns:            columns,
@@ -1186,7 +1190,7 @@ func (t *table) MarshalJSON() ([]byte, error) {
 		Shards:             shards,
 		PShards:            partitionedShards,
 		PDimensions:        topology.dimensions,
-	})
+	}
 }
 
 // contributionTableID distinguishes replacement tables with the same SQL name.

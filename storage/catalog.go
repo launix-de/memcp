@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"unicode"
 
@@ -58,9 +59,11 @@ func (kind catalogKind) sqlType() string {
 
 // catalogField maps one key of a legacy JSON record to a catalog column.
 type catalogField struct {
-	key    string
-	column string
-	kind   catalogKind
+	key       string
+	column    string
+	kind      catalogKind
+	index     []int
+	omitEmpty bool
 }
 
 type catalogRelationID int
@@ -77,6 +80,8 @@ const (
 	catalogProcedures
 	catalogRelationCount
 )
+
+const catalogAllRelations uint16 = (1 << catalogRelationCount) - 1
 
 // catalogRelation describes one system_schema table. Identity columns follow
 // schema_name; they order child records and are not part of the record.
@@ -123,11 +128,16 @@ func catalogRecordFields(record reflect.Type, kinds map[string]catalogKind, chil
 	}
 	var result []catalogField
 	seen := make(map[string]bool)
-	var visit func(reflect.Type, bool)
-	visit = func(record reflect.Type, embedded bool) {
-		var nested []reflect.Type
+	var visit func(reflect.Type, []int)
+	visit = func(record reflect.Type, prefix []int) {
+		type embeddedRecord struct {
+			typ   reflect.Type
+			index []int
+		}
+		var nested []embeddedRecord
 		for i := 0; i < record.NumField(); i++ {
 			field := record.Field(i)
+			index := append(append([]int(nil), prefix...), i)
 			tag := field.Tag.Get("json")
 			name, _, _ := strings.Cut(tag, ",")
 			if tag == "-" {
@@ -139,7 +149,7 @@ func catalogRecordFields(record reflect.Type, kinds map[string]catalogKind, chil
 					embeddedType = embeddedType.Elem()
 				}
 				if embeddedType.Kind() == reflect.Struct {
-					nested = append(nested, embeddedType)
+					nested = append(nested, embeddedRecord{embeddedType, index})
 					continue
 				}
 			}
@@ -160,14 +170,14 @@ func catalogRecordFields(record reflect.Type, kinds map[string]catalogKind, chil
 			if !overridden {
 				kind = catalogKindOf(field.Type)
 			}
-			result = append(result, catalogField{key: name, column: catalogColumnName(name), kind: kind})
+			result = append(result, catalogField{key: name, column: catalogColumnName(name), kind: kind, index: index, omitEmpty: strings.Contains(tag, ",omitempty")})
 		}
 		// encoding/json gives shallower fields precedence over embedded ones.
-		for _, embeddedType := range nested {
-			visit(embeddedType, true)
+		for _, embedded := range nested {
+			visit(embedded.typ, embedded.index)
 		}
 	}
-	visit(record, false)
+	visit(record, nil)
 	return result
 }
 
@@ -287,9 +297,12 @@ func catalogRaw(kind catalogKind, cell scm.Scmer) json.RawMessage {
 	case catalogText:
 		value = cell.String()
 	case catalogInt:
-		value = scm.ToInt(cell)
+		return strconv.AppendInt(nil, cell.Int(), 10)
 	case catalogBool:
-		value = scm.ToBool(cell)
+		if scm.ToBool(cell) {
+			return json.RawMessage("true")
+		}
+		return json.RawMessage("false")
 	case catalogFloat:
 		value = cell.Float()
 	case catalogList:
@@ -325,6 +338,100 @@ func (rows *catalogRows) add(relation catalogRelationID, schema string, identity
 		row = append(row, catalogCell(field.kind, record[field.key]))
 	}
 	rows[relation] = append(rows[relation], row)
+}
+
+// Native DDL proposals encode scalar fields directly. Only complex cells use
+// their existing JSON codec; importing an old schema remains a separate path.
+func catalogFieldValue(field catalogField, record reflect.Value) scm.Scmer {
+	value := record
+	for _, index := range field.index {
+		if value.Kind() == reflect.Pointer {
+			if value.IsNil() {
+				return scm.NewNil()
+			}
+			value = value.Elem()
+		}
+		value = value.Field(index)
+	}
+	if field.omitEmpty {
+		switch value.Kind() {
+		case reflect.Array, reflect.Map, reflect.Slice, reflect.String:
+			if value.Len() == 0 {
+				return scm.NewNil()
+			}
+		case reflect.Bool, reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+			reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
+			reflect.Float32, reflect.Float64, reflect.Pointer, reflect.Interface:
+			if value.IsZero() {
+				return scm.NewNil()
+			}
+		}
+	}
+	switch {
+	case field.kind == catalogText && value.Kind() == reflect.String:
+		return scm.NewString(value.String())
+	case field.kind == catalogInt && value.Kind() >= reflect.Int && value.Kind() <= reflect.Int64:
+		return scm.NewInt(value.Int())
+	case field.kind == catalogBool && value.Kind() == reflect.Bool:
+		return scm.NewBool(value.Bool())
+	case field.kind == catalogFloat && (value.Kind() == reflect.Float32 || value.Kind() == reflect.Float64):
+		return scm.NewFloat(value.Float())
+	}
+	if _, custom := reflect.New(value.Type()).Interface().(json.Marshaler); custom {
+		copy := reflect.New(value.Type())
+		copy.Elem().Set(value)
+		return catalogCell(field.kind, marshalCatalogValue(copy.Interface()))
+	}
+	return catalogCell(field.kind, marshalCatalogValue(value.Interface()))
+}
+
+func (rows *catalogRows) addRecord(relation catalogRelationID, schema string, identity []scm.Scmer, record any) {
+	r := &catalogRelations[relation]
+	row := append([]scm.Scmer{scm.NewString(schema)}, identity...)
+	value := reflect.ValueOf(record)
+	for _, field := range r.fields {
+		row = append(row, catalogFieldValue(field, value))
+	}
+	rows[relation] = append(rows[relation], row)
+}
+
+func catalogRowsFromTable(t *table) (rows catalogRows) {
+	definition := t.persistedDeclaration()
+	schema, owner := t.schema.Name, scm.NewString(t.Name)
+	rows.addRecord(catalogTables, schema, nil, definition)
+	identity := func(i int) []scm.Scmer { return []scm.Scmer{owner, scm.NewInt(int64(i))} }
+	for i, column := range definition.Columns {
+		rows.addRecord(catalogColumns, schema, identity(i), column)
+	}
+	for i, key := range definition.Unique {
+		rows.addRecord(catalogKeys, schema, identity(i), key)
+		for j, column := range key.Cols {
+			rows.add(catalogKeyColumns, schema, []scm.Scmer{owner, scm.NewInt(int64(i)), scm.NewInt(int64(j)), scm.NewString(column)}, nil)
+		}
+	}
+	for i, key := range definition.Foreign {
+		rows.addRecord(catalogForeignKeys, schema, identity(i), key)
+		for j := 0; j < max(len(key.Cols1), len(key.Cols2)); j++ {
+			local, remote := scm.NewNil(), scm.NewNil()
+			if j < len(key.Cols1) {
+				local = scm.NewString(key.Cols1[j])
+			}
+			if j < len(key.Cols2) {
+				remote = scm.NewString(key.Cols2[j])
+			}
+			rows.add(catalogForeignKeyColumns, schema, []scm.Scmer{owner, scm.NewInt(int64(i)), scm.NewInt(int64(j)), local, remote}, nil)
+		}
+	}
+	for i, trigger := range definition.Triggers {
+		// Trigger persistence chooses source or compiled code and restores its
+		// lifecycle pin. Keep that existing codec at this record boundary.
+		var record map[string]json.RawMessage
+		if err := json.Unmarshal(marshalCatalogValue(trigger), &record); err != nil {
+			panic(err)
+		}
+		rows.add(catalogTriggers, schema, identity(i), record)
+	}
+	return rows
 }
 
 type catalogDocument struct {
@@ -414,12 +521,30 @@ func catalogRowsFromDocument(document []byte) (rows catalogRows) {
 }
 
 // catalogRecord rebuilds the JSON record of one row.
-func catalogRecord(relation catalogRelationID, row []scm.Scmer) map[string]json.RawMessage {
+type catalogJSONEncoder struct{ strings map[string]json.RawMessage }
+
+func (encoder *catalogJSONEncoder) string(value string) json.RawMessage {
+	if raw, present := encoder.strings[value]; present {
+		return raw
+	}
+	raw := marshalCatalogValue(value)
+	encoder.strings[value] = raw
+	return raw
+}
+
+func (encoder *catalogJSONEncoder) cell(kind catalogKind, value scm.Scmer) json.RawMessage {
+	if kind == catalogText && !value.IsNil() {
+		return encoder.string(value.String())
+	}
+	return catalogRaw(kind, value)
+}
+
+func (encoder *catalogJSONEncoder) record(relation catalogRelationID, row []scm.Scmer) map[string]json.RawMessage {
 	r := &catalogRelations[relation]
 	record := make(map[string]json.RawMessage, len(r.fields))
 	offset := 1 + len(r.identity)
 	for i, field := range r.fields {
-		if raw := catalogRaw(field.kind, row[offset+i]); raw != nil {
+		if raw := encoder.cell(field.kind, row[offset+i]); raw != nil {
 			record[field.key] = raw
 		}
 	}
@@ -438,12 +563,90 @@ func marshalCatalogValue(value any) json.RawMessage {
 	return encoded
 }
 
+// Each cell is already encoded JSON. Compose those values without sending
+// every enclosing record through encoding/json again. This keeps the legacy
+// export from repeatedly validating and escaping strings and code cells.
+func (encoder *catalogJSONEncoder) appendRecord(dst []byte, record map[string]json.RawMessage) []byte {
+	if record == nil {
+		return append(dst, "null"...)
+	}
+	keys := make([]string, 0, len(record))
+	for key := range record {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	dst = append(dst, '{')
+	for i, key := range keys {
+		if i != 0 {
+			dst = append(dst, ',')
+		}
+		dst = append(dst, encoder.string(key)...)
+		dst = append(dst, ':')
+		if value := record[key]; len(value) != 0 {
+			dst = append(dst, value...)
+		} else {
+			dst = append(dst, "null"...)
+		}
+	}
+	return append(dst, '}')
+}
+
+func (encoder *catalogJSONEncoder) records(records []map[string]json.RawMessage) json.RawMessage {
+	if records == nil {
+		return json.RawMessage("null")
+	}
+	result := []byte{'['}
+	for i, record := range records {
+		if i != 0 {
+			result = append(result, ',')
+		}
+		result = encoder.appendRecord(result, record)
+	}
+	return append(result, ']')
+}
+
+func (encoder *catalogJSONEncoder) appendRow(relation catalogRelationID, row []scm.Scmer) json.RawMessage {
+	r := &catalogRelations[relation]
+	offset := 1 + len(r.identity)
+	result := []byte{'{'}
+	for i, field := range r.fields {
+		if raw := encoder.cell(field.kind, row[offset+i]); raw != nil {
+			if len(result) != 1 {
+				result = append(result, ',')
+			}
+			result = append(result, encoder.string(field.key)...)
+			result = append(result, ':')
+			result = append(result, raw...)
+		}
+	}
+	return append(result, '}')
+}
+
+func marshalCatalogRecords(records []json.RawMessage) json.RawMessage {
+	if records == nil {
+		return json.RawMessage("null")
+	}
+	result := []byte{'['}
+	for i, record := range records {
+		if record == nil {
+			panic("catalog misses a child record")
+		}
+		if i != 0 {
+			result = append(result, ',')
+		}
+		result = append(result, record...)
+	}
+	return append(result, ']')
+}
+
 // catalogDocumentFromRows is the inverse of catalogRowsFromDocument. Child
 // records are placed by their ordinals, independent of row order.
 func catalogDocumentFromRows(schema string, rows *catalogRows) []byte {
+	encoder := catalogJSONEncoder{strings: make(map[string]json.RawMessage)}
 	type tableRecords struct {
 		record   map[string]json.RawMessage
 		children [4][]map[string]json.RawMessage
+		encoded  [4][]json.RawMessage
 		keyCols  map[int][]string
 		fkCols   map[int][2][]string
 	}
@@ -456,11 +659,8 @@ func catalogDocumentFromRows(schema string, rows *catalogRows) []byte {
 		return entry
 	}
 	for _, row := range rows[catalogTables] {
-		record := catalogRecord(catalogTables, row)
-		var name string
-		if err := json.Unmarshal(record["Name"], &name); err != nil {
-			panic(err)
-		}
+		record := encoder.record(catalogTables, row)
+		name := catalogTableName(row)
 		tables[name] = &tableRecords{record: record, keyCols: map[int][]string{}, fkCols: map[int][2][]string{}}
 	}
 	place := func(list *[]map[string]json.RawMessage, ordinal int, record map[string]json.RawMessage) {
@@ -473,7 +673,15 @@ func catalogDocumentFromRows(schema string, rows *catalogRows) []byte {
 	for slot, relation := range children {
 		for _, row := range rows[relation] {
 			entry := lookup(row[1].String())
-			place(&entry.children[slot], catalogOrdinal(row, 2), catalogRecord(relation, row))
+			if slot == 0 || slot == 3 {
+				ordinal := catalogOrdinal(row, 2)
+				for len(entry.encoded[slot]) <= ordinal {
+					entry.encoded[slot] = append(entry.encoded[slot], nil)
+				}
+				entry.encoded[slot][ordinal] = encoder.appendRow(relation, row)
+			} else {
+				place(&entry.children[slot], catalogOrdinal(row, 2), encoder.record(relation, row))
+			}
 		}
 	}
 	setList := func(cols []string, ordinal int, value string) []string {
@@ -515,24 +723,42 @@ func catalogDocumentFromRows(schema string, rows *catalogRows) []byte {
 			}
 		}
 		for slot, key := range childKeys {
+			if slot == 0 || slot == 3 {
+				entry.record[key] = marshalCatalogRecords(entry.encoded[slot])
+				continue
+			}
 			for i, child := range entry.children[slot] {
 				if child == nil {
 					panic(fmt.Sprintf("catalog of %s.%s misses %s record %d", schema, name, key, i))
 				}
 			}
-			entry.record[key] = marshalCatalogValue(entry.children[slot])
+			entry.record[key] = encoder.records(entry.children[slot])
 		}
-		doc.Tables[name] = marshalCatalogValue(entry.record)
+		doc.Tables[name] = encoder.appendRecord(nil, entry.record)
 	}
 	procedures := make([]map[string]json.RawMessage, 0)
 	for _, row := range rows[catalogProcedures] {
-		place(&procedures, catalogOrdinal(row, 1), catalogRecord(catalogProcedures, row))
+		place(&procedures, catalogOrdinal(row, 1), encoder.record(catalogProcedures, row))
 	}
 	for _, procedure := range procedures {
 		if procedure == nil {
 			panic("catalog of " + schema + " misses a procedure record")
 		}
-		doc.Procedures = append(doc.Procedures, marshalCatalogValue(procedure))
+		doc.Procedures = append(doc.Procedures, encoder.appendRecord(nil, procedure))
 	}
-	return marshalCatalogValue(doc)
+	document := map[string]json.RawMessage{
+		"name":   marshalCatalogValue(doc.Name),
+		"tables": encoder.appendRecord(nil, doc.Tables),
+	}
+	if len(doc.Procedures) != 0 {
+		result := []byte{'['}
+		for i, procedure := range doc.Procedures {
+			if i != 0 {
+				result = append(result, ',')
+			}
+			result = append(result, procedure...)
+		}
+		document["procedures"] = append(result, ']')
+	}
+	return encoder.appendRecord(nil, document)
 }
