@@ -21,6 +21,7 @@ import "fmt"
 import "sort"
 import "sync"
 import "time"
+import "bytes"
 import "runtime"
 import "strings"
 import "reflect"
@@ -361,6 +362,21 @@ func (d *database) MarshalJSON() ([]byte, error) {
 		}
 	}
 	return json.Marshal(persist{Name: d.Name, Tables: tables, Procedures: definitions})
+}
+
+// marshalSchemaSnapshot retains the readable schema encoding without passing
+// the complete document through another json.Marshaler wrapper. The caller
+// retains the same schema ownership through encoding as before.
+func (d *database) marshalSchemaSnapshot() ([]byte, error) {
+	compact, err := d.MarshalJSON()
+	if err != nil {
+		return nil, err
+	}
+	var snapshot bytes.Buffer
+	if err := json.Indent(&snapshot, compact, "", "  "); err != nil {
+		return nil, err
+	}
+	return snapshot.Bytes(), nil
 }
 
 func (d *database) UnmarshalJSON(data []byte) error {
@@ -751,7 +767,7 @@ func (db *database) save(counterOwner ...*replicaCell) {
 		return
 	}
 	db.schemalock.RLock()
-	jsonbytes, _ := json.MarshalIndent(db, "", "  ")
+	jsonbytes, _ := db.marshalSchemaSnapshot()
 	// Buffered mutations after this snapshot must leave the catalog dirty.
 	// They need the exclusive schema lock and therefore cannot race this store.
 	db.schemaDirty.Store(false)
@@ -787,7 +803,7 @@ func (db *database) saveLockedAndUnlock(mode schemaSaveMode) {
 		db.schemalock.Unlock()
 		return
 	}
-	jsonbytes, _ := json.MarshalIndent(db, "", "  ")
+	jsonbytes, _ := db.marshalSchemaSnapshot()
 	// Clear while the snapshot is protected. A later buffered mutation takes
 	// schemalock exclusively and sets dirty again after this generation.
 	db.schemaDirty.Store(false)
@@ -2037,7 +2053,7 @@ func publishStorageMoveGenerations(db *database, dst PersistenceEngine, generati
 		generation.table.mu.Unlock()
 	}
 
-	snapshot, err := json.MarshalIndent(db, "", "  ")
+	snapshot, err := db.marshalSchemaSnapshot()
 	for index := len(generations) - 1; index >= 0; index-- {
 		generation := generations[index]
 		generation.table.mu.Lock()
