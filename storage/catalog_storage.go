@@ -202,6 +202,24 @@ func buildDiskShard(db *database, relation catalogRelationID, rows [][]scm.Scmer
 
 // loadDiskShard opens a persisted catalog shard of db.
 func loadDiskShard(owner, db *database, relation catalogRelationID, id uuid.UUID) *storageShard {
+	// Opening a historical root must not publish a stale stub over an already
+	// installed native successor. Bootstrap resolves identity only; GetRead
+	// below still acquires the existing MOSI permission before reading payload.
+	r := replication.Load()
+	if sharedClusterDatabase(owner.Name) {
+		r = nil
+		if cluster := activeNodeCluster(); cluster != nil {
+			r = cluster.manager
+		}
+	}
+	if r != nil && validReplicaDatabase(owner.Name) {
+		resource := mosiResource{Database: owner.Name, Table: catalogResourcePrefix + catalogRelations[relation].name, Shard: id.String()}
+		if cell := r.lookupCell(resource); cell != nil {
+			if current := cell.publishedShard(); current != nil && current.catalogOwner == owner.Name {
+				return current
+			}
+		}
+	}
 	shard := &storageShard{t: systemSchemaTables[relation], uuid: id, catalogHome: db, catalogOwner: owner.Name}
 	shard.columns = make(map[string]ColumnStorage)
 	shard.deltaColumns = make(map[string]int)

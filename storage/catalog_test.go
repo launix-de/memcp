@@ -567,6 +567,7 @@ func TestCatalogCheckpointPreservesNativeAuthority(t *testing.T) {
 	previous := db.catalog.live[catalogColumns]
 	cell := r.shardCell(previous)
 	resource := previous.replicationResource()
+	historical := append([]byte(nil), db.persistence.ReadSchema()...)
 	tbl.CreateColumn("added", "INT", nil, nil)
 	current := db.catalog.live[catalogColumns]
 	if previous.uuid == current.uuid {
@@ -585,5 +586,11 @@ func TestCatalogCheckpointPreservesNativeAuthority(t *testing.T) {
 	_, visible := catalogShardRecords(previous, catalogRelationColumns(catalogColumns))
 	if len(visible) != len(tbl.Columns) {
 		t.Fatal("old catalog stub did not read the new definition")
+	}
+	cold := newDatabase()
+	cold.Name, cold.persistence, cold.srState = db.Name, db.persistence, COLD
+	cold.bootstrapCatalog(historical)
+	if installed := cell.resolved().publishedShard(); installed != current || cold.catalog.live[catalogColumns] != current {
+		t.Fatal("historical root republished a predecessor over the acquired catalog generation")
 	}
 }
