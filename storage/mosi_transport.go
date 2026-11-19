@@ -450,7 +450,7 @@ func (p *mosiPeer) dispatchPacket(packet *mosiPacket, size int, readyAt time.Tim
 	}
 	previous := p.packetOrder[key]
 	var namespaceReady <-chan struct{}
-	if packet.Resource.Shard != "" {
+	if packet.Resource.Shard != "" && !isCatalogResource(packet.Resource) {
 		namespaceReady = p.packetOrder[packet.Resource.Database]
 	}
 	p.packetOrder[key] = done
@@ -481,6 +481,8 @@ func (p *mosiPeer) dispatchPacket(packet *mosiPacket, size int, readyAt time.Tim
 		}
 		// A preceding schema publication introduces this data object's identity.
 		// Independent shard queues must not overtake that namespace barrier.
+		// Fixed catalog relations already exist and supply that publication's
+		// definitions; their own resource queue orders their generations.
 		if namespaceReady != nil {
 			select {
 			case <-namespaceReady:

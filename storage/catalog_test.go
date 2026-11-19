@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"io"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -106,6 +107,35 @@ const catalogRoundTripDocument = `{
     {"name": "audit", "schema_only": true, "source": "(lambda () 1)", "language": "scm", "parameters": null}
   ]
 }`
+
+func TestCatalogNativeProposalsMatchLegacyDefinitions(t *testing.T) {
+	db := newDatabase()
+	if err := json.Unmarshal([]byte(catalogRoundTripDocument), db); err != nil {
+		t.Fatal(err)
+	}
+	legacy := catalogRowsFromDocument(marshalCatalogValue(db))
+	var native catalogRows
+	for _, table := range db.tables.GetAll() {
+		table.schema = db
+		proposal := catalogRowsFromTable(table)
+		for i := catalogTables; i < catalogProcedures; i++ {
+			native[i] = append(native[i], proposal[i]...)
+		}
+	}
+	for i := catalogTables; i < catalogProcedures; i++ {
+		keys := func(rows [][]scm.Scmer) []string {
+			result := make([]string, len(rows))
+			for j, row := range rows {
+				result[j] = catalogRowKey(catalogRelations[i].columns(), row)
+			}
+			sort.Strings(result)
+			return result
+		}
+		if !reflect.DeepEqual(keys(legacy[i]), keys(native[i])) {
+			t.Fatalf("native %s proposals differ from legacy definitions", catalogRelations[i].name)
+		}
+	}
+}
 
 func TestCatalogRowsRoundTripLegacyDocument(t *testing.T) {
 	rows := catalogRowsFromDocument([]byte(catalogRoundTripDocument))
@@ -482,5 +512,78 @@ func TestCatalogPeerPublicationInitializesColdForeignAnchor(t *testing.T) {
 	cold.schemalock.Unlock()
 	if len(rows[catalogTables]) == 0 {
 		t.Fatal("peer publication did not establish canonical catalog rows")
+	}
+}
+
+func TestCatalogMosiReadUsesPublishedNativeGeneration(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "catalog-native-mosi", 0)
+	db := tbl.schema
+	db.schemalock.Lock()
+	rows := db.catalogRowsLocked()
+	db.schemalock.Unlock()
+	source := db.catalog.live[catalogColumns]
+	nameIndex := -1
+	for i, field := range catalogRelations[catalogColumns].columns() {
+		if field.key == "Name" {
+			nameIndex = i
+			break
+		}
+	}
+	if nameIndex < 0 {
+		t.Fatal("catalog column name field missing")
+	}
+	rows[catalogColumns][0][nameIndex] = scm.NewString("from-peer")
+	received := newCatalogShard(db, catalogColumns, rows[catalogColumns])
+	received.uuid = source.uuid
+	received.catalogPrivate = false
+	received.catalogHome = catalogBackendDatabase()
+	r := replicaRecoveryFixture()
+	cell := r.declareShard(source, r.id, true)
+	if resource := *cell.resource.Load(); resource.Database != db.Name || resource.Table != catalogResourcePrefix+"columns" {
+		t.Fatalf("catalog shard was registered outside its logical database: %+v", resource)
+	}
+	if source.home().Name != "system" {
+		t.Fatal("catalog storage moved out of the system backend")
+	}
+	if err := r.replaceShard(source.replicationResource(), source, received); err != nil {
+		t.Fatal(err)
+	}
+	cell.current.Store(received)
+	old := replication.Swap(r)
+	defer replication.Store(old)
+	_, visible := catalogShardRecords(source, catalogRelationColumns(catalogColumns))
+	if len(visible) == 0 || visible[0][nameIndex].String() != "from-peer" {
+		t.Fatalf("native catalog scan ignored MOSI generation: private=%v owner=%q manager=%v current=%p wanted=%p visible=%v", source.catalogPrivate, source.catalogOwner, source.replicationManager() != nil, cell.current.Load(), received, visible)
+	}
+}
+
+func TestCatalogCheckpointPreservesNativeAuthority(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "catalog-native-checkpoint", 0)
+	db := tbl.schema
+	r := replicaRecoveryFixture()
+	r.schemaShards(db, r.id, true)
+	old := replication.Swap(r)
+	defer replication.Store(old)
+	previous := db.catalog.live[catalogColumns]
+	cell := r.shardCell(previous)
+	resource := previous.replicationResource()
+	tbl.CreateColumn("added", "INT", nil, nil)
+	current := db.catalog.live[catalogColumns]
+	if previous.uuid == current.uuid {
+		t.Fatal("checkpoint did not create a new catalog generation")
+	}
+	if r.resourceCell(current.replicationResource()) != cell.resolved() || cell.resolved().current.Load() != current {
+		t.Fatal("checkpoint detached the native shard authority")
+	}
+	if r.canonicalResource(resource) != current.replicationResource() {
+		t.Fatal("old catalog UUID did not forward to its checkpoint")
+	}
+	root := readCatalogRoot(db.persistence.ReadSchema())
+	if root.Forwards[previous.uuid.String()] != current.uuid.String() {
+		t.Fatal("checkpoint did not persist the native UUID forwarding edge")
+	}
+	_, visible := catalogShardRecords(previous, catalogRelationColumns(catalogColumns))
+	if len(visible) != len(tbl.Columns) {
+		t.Fatal("old catalog stub did not read the new definition")
 	}
 }

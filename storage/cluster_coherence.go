@@ -94,7 +94,7 @@ func (cluster *nodeCluster) tryRead(ctx context.Context, resource mosiResource) 
 	resource = *c.resource.Load()
 	publication, action := c.ownstate.Request(mosi.S)
 	if action == mosi.Ready {
-		if restoreCommits && resource.Shard != "" {
+		if restoreCommits && resource.Shard != "" && !isCatalogResource(resource) {
 			db := GetDatabase(resource.Database)
 			if db == nil {
 				panic(mosi.NetworkError)
@@ -362,10 +362,15 @@ func (cluster *nodeCluster) locate(ctx context.Context, resource mosiResource) (
 			if db == nil {
 				return "", fmt.Errorf("recovery schema disappeared")
 			}
-			if err := db.importClusterCommits(r.id); err != nil {
-				return "", err
+			engine := db.persistence
+			if isCatalogResource(resource) {
+				engine = catalogBackendDatabase().persistence
+			} else {
+				if err := db.importClusterCommits(r.id); err != nil {
+					return "", err
+				}
 			}
-			if err := r.finishImport(r.id, &replicaImport{header: mosiPacket{Resource: resource, Content: content}, engine: db.persistence}); err != nil {
+			if err := r.finishImport(r.id, &replicaImport{header: mosiPacket{Resource: resource, Content: content}, engine: engine}); err != nil {
 				return "", err
 			}
 			resource = r.canonicalResource(resource)
@@ -481,7 +486,7 @@ func (cluster *nodeCluster) obtain(parent context.Context, resource mosiResource
 		}
 		publication, action := c.ownstate.Request(wanted)
 		if action == mosi.Ready {
-			if restoreCommits && resource.Shard != "" {
+			if restoreCommits && resource.Shard != "" && !isCatalogResource(resource) {
 				// Restart recovery may establish local authority without a new
 				// reference packet. Restore native WAL commit proofs here too,
 				// before any backend content can be materialized.
@@ -678,7 +683,7 @@ func (cluster *nodeCluster) receive(source string, packet *mosiPacket, connectio
 }
 func (cluster *nodeCluster) declareShard(shard *storageShard, local bool) *replicaCell {
 	r := cluster.manager
-	resource := mosiResource{Database: shard.t.schema.Name, Table: shard.t.Name, Shard: shard.uuid.String()}
+	resource := shard.replicationResource()
 	c := r.resourceCell(resource)
 	c.current.CompareAndSwap(nil, shard)
 	shard.coherence.CompareAndSwap(nil, c)
@@ -799,7 +804,7 @@ func (cluster *nodeCluster) installReference(source string, packet mosiPacket) e
 			return err
 		}
 	} else if packet.Resource.Shard == "" {
-		data = stripCatalogRoot(db.persistence.ReadSchema())
+		data = db.persistence.ReadSchema()
 		content, err := r.schemaDigest(data)
 		if err != nil || content != packet.Content {
 			return fmt.Errorf("shared schema changed")
@@ -807,11 +812,13 @@ func (cluster *nodeCluster) installReference(source string, packet mosiPacket) e
 	} else {
 		actual := packet.Resource
 		actual.Shard = packet.Content
-		if !actual.valid() || db.tables.Get(packet.Resource.Table) == nil {
+		if !actual.valid() || (!isCatalogResource(packet.Resource) && db.tables.Get(packet.Resource.Table) == nil) {
 			return fmt.Errorf("invalid shared shard reference")
 		}
-		if err := db.importClusterCommits(source); err != nil {
-			return err
+		if !isCatalogResource(packet.Resource) {
+			if err := db.importClusterCommits(source); err != nil {
+				return err
+			}
 		}
 	}
 	// Only the validated reference may publish its advertised UUID edges.
@@ -878,7 +885,13 @@ func (cluster *nodeCluster) prepareBootstrap(fresh bool) error {
 		schema := mosiResource{Database: name}
 		cluster.bootstrapResources[schema.key()] = schema
 		var snapshot database
-		data := stripCatalogRoot(db.persistence.ReadSchema())
+		data := db.persistence.ReadSchema()
+		if root := readCatalogRoot(data); root != nil {
+			for _, relation := range catalogRelations {
+				resource := mosiResource{Database: name, Table: catalogResourcePrefix + relation.name, Shard: root.Shards[relation.name]}
+				cluster.bootstrapResources[resource.key()] = resource
+			}
+		}
 		if len(data) == 0 {
 			continue
 		}
