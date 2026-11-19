@@ -1642,13 +1642,15 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 					// Both paths hold shard.mu here: either the mapper supplied
 					// it or this callback acquired it above. Trigger lookup and
 					// execution must release it before taking any table locks.
-					if uniqueGuard != nil {
-						uniqueGuard.releaseKeys()
-					}
 					// TODO: validate the original row after a BEFORE trigger
 					// performs nested DML on the same target. Do not replay
 					// trigger effects when that validation detects a conflict.
 					t.runWithWriteLockReleased(currentTx, func() {
+						// Releasing distributed keys can wait for peer callbacks.
+						// Keep the native writer, but never wait under shard.mu.
+						if uniqueGuard != nil {
+							uniqueGuard.releaseKeys()
+						}
 						newSchemaRow = t.t.ExecuteBeforeUpdateTriggers(triggerOldRow, newSchemaRow, currentTx)
 					})
 					// Write trigger-mutated schema values back to delta row layout.
