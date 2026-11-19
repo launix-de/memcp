@@ -851,7 +851,12 @@ func (db *database) commitSchemaLocked(durable bool, release func()) {
 	live := db.catalog.live
 	jsonbytes := catalogDocumentFromRows(db.Name, &rows)
 	catalogPersistenceMu.RLock()
-	defer catalogPersistenceMu.RUnlock()
+	persistenceOwned := true
+	defer func() {
+		if persistenceOwned {
+			catalogPersistenceMu.RUnlock()
+		}
+	}()
 	db.catalogMu.Lock()
 	released = true
 	release()
@@ -870,6 +875,10 @@ func (db *database) commitSchemaLocked(durable bool, release func()) {
 		jsonbytes = attachCatalogRoot(jsonbytes, root)
 	}()
 	db.commitSchemaSnapshot(jsonbytes, durable, db.catalogMu.Unlock)
+	// The root now owns its committed files. Release the GC publication gate
+	// before reacquiring schema ownership: cleanup uses schema -> persistence.
+	catalogPersistenceMu.RUnlock()
+	persistenceOwned = false
 	db.schemalock.Lock()
 	if db.catalog.liveVersion == version {
 		for i, shard := range committed {

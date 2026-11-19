@@ -370,10 +370,12 @@ func writeBlobManifestReferences(shard *storageShard, references map[string]stru
 // Reads the active UUID set from in-memory table structures (always current),
 // under schemalock.RLock to prevent concurrent DDL from modifying the table map.
 func cleanShards(db *database) int {
+	// Checkpoint capture owns schema before the catalog publication gate.
+	// Acquire in that same order, never hold the gate waiting for schema.
+	db.schemalock.RLock()
 	catalogPersistenceMu.Lock()
 	defer catalogPersistenceMu.Unlock()
 	// Collect active UUIDs from in-memory shards under read-lock.
-	db.schemalock.RLock()
 	activeUUIDs := map[string]bool{}
 	for _, t := range db.tables.GetAll() {
 		for _, s := range t.ActiveShards() {

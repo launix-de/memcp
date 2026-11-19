@@ -871,6 +871,7 @@ func TestReplicationSnapshotKeepsGenerationAndFiles(t *testing.T) {
 	}
 	cell := r.resourceCell(resource)
 	original := cell.current.Load()
+	r.schemaShards(table.schema, r.id, true)
 	cell.ownstate.Initialize(mosi.S)
 	previous := replication.Swap(r)
 	defer replication.Store(previous)
