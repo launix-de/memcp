@@ -486,6 +486,7 @@ func TestClusterCounterReservationKeepsSharedSchemaOwner(t *testing.T) {
 	cluster := &nodeCluster{self: clusterMember{ID: "local"}, ctx: context.Background(), databases: map[string]bool{tbl.schema.Name: true}}
 	cluster.initializeManager()
 	r := cluster.manager
+	r.schemaShards(tbl.schema, r.id, true)
 	resource := mosiResource{Database: tbl.schema.Name}
 	cell := r.resourceCell(resource)
 	cell.ownstate.Initialize(mosi.O)
@@ -527,6 +528,7 @@ func TestClusterCounterCheckpointDuringLocalSchemaUpgrade(t *testing.T) {
 	cluster := &nodeCluster{self: clusterMember{ID: "local"}, ctx: context.Background(), databases: map[string]bool{tbl.schema.Name: true}}
 	cluster.initializeManager()
 	r := cluster.manager
+	r.schemaShards(tbl.schema, r.id, true)
 	resource := mosiResource{Database: tbl.schema.Name}
 	cell := r.resourceCell(resource)
 	cell.ownstate.Initialize(mosi.O)

@@ -164,7 +164,7 @@ func (r *replicationManager) forwardResource(from, to mosiResource) {
 		return
 	}
 	if !from.valid() || !to.valid() || from.Shard == "" || to.Shard == "" || from.Database != to.Database {
-		panic("invalid shard forwarding")
+		panic(fmt.Sprintf("invalid shard forwarding: %+v -> %+v", from, to))
 	}
 	cell := r.resourceCell(from)
 	r.mu.Lock()
@@ -339,7 +339,7 @@ func authorityRank(phase mosi.Phase) int {
 }
 
 func (r *replicationManager) shardResource(shard *storageShard) mosiResource {
-	return mosiResource{Database: shard.t.schema.Name, Table: shard.t.Name, Shard: shard.uuid.String()}
+	return shard.replicationResource()
 }
 func (r *replicationManager) lookupCell(resource mosiResource) *replicaCell {
 	if snapshot := r.cellSnapshot.Load(); snapshot != nil {
@@ -365,13 +365,15 @@ func (r *replicationManager) restoreTableRoutes(table *table) {
 	})
 }
 func (r *replicationManager) restoreResourceRoutes(resource mosiResource) {
+	// Schema and fixed catalog identities exist before runtime tables can be
+	// loaded. Asking for Go table routes here would recursively load the very
+	// catalog shard whose authority is being acquired.
+	if resource.Shard == "" || isCatalogResource(resource) {
+		return
+	}
 	if db := databases.Get(resource.Database); db != nil {
 		db.ensureLoaded()
-		if resource.Shard == "" {
-			for _, table := range db.tables.GetAll() {
-				r.restoreTableRoutes(table)
-			}
-		} else if table := db.tables.Get(resource.Table); table != nil {
+		if table := db.tables.Get(resource.Table); table != nil {
 			r.restoreTableRoutes(table)
 		}
 	}

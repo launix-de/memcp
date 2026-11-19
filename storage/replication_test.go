@@ -1530,6 +1530,7 @@ func TestReplicationSharedSchemaKeepsNewerShard(t *testing.T) {
 	older := append([]byte(nil), engine.ReadSchema()...)
 	r := replicaRecoveryFixture()
 	r.cluster = &nodeCluster{manager: r, self: clusterMember{ID: r.id}}
+	r.schemaShards(tbl.schema, r.id, true)
 	previous := replication.Swap(r)
 	defer replication.Store(previous)
 	source := tbl.ActiveShards()[0]

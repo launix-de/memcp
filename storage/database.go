@@ -864,7 +864,7 @@ func (db *database) initializeSchemaSnapshot(document []byte) {
 		db.srState = SHARED
 		return
 	}
-	if document != nil {
+	if document != nil && readCatalogRoot(document) == nil {
 		// A cold cluster receiver initializes from the owner's accepted schema
 		// handover, rather than opening a foreign node's anchor/root first.
 		// This is an explicit protocol publication, never a JSON fallback for
@@ -898,7 +898,7 @@ func (db *database) initializeSchemaSnapshot(document []byte) {
 		// Legacy import occurs once, before runtime definitions are materialized.
 		if db.catalog.live[0] == nil {
 			rows := catalogRowsFromDocument(jsonbytes)
-			db.editCatalogLocked(&rows)
+			db.editCatalogLocked(&rows, catalogAllRelations)
 		}
 	}
 

@@ -498,7 +498,9 @@ func (c *replicaCell) transactionContinues(tx *TxContext) bool {
 // acquire a lease and network streaming never retains an active writer.
 func (r *replicationManager) writeResource(resource mosiResource, tx *TxContext, blocking bool) (*replicaCell, func(), bool) {
 	c := r.resourceCell(resource)
-	if resource.Shard != "" && tx != nil {
+	// Fixed catalog declarations precede the database schema and are also
+	// edited while preparing its handover. Their own shard M admits writes.
+	if resource.Shard != "" && tx != nil && !isCatalogResource(resource) {
 		schema := mosiResource{Database: resource.Database}
 		// A foreign DDL owner may already hold schema M while waiting for our
 		// native data transaction. Its continuation retains its old declarations
