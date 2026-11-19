@@ -5,9 +5,13 @@ SPDX-License-Identifier: GPL-3.0-or-later
 package storage
 
 import (
+	"context"
 	"encoding/json"
 	"io"
+	"os"
+	"os/exec"
 	"reflect"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -383,6 +387,8 @@ func TestCatalogCleanupRetainsPinnedGeneration(t *testing.T) {
 			topology.releaseOperation()
 		}
 	}()
+	CreateDatabase("catalog-generation-other", false)
+	defer DropDatabase("catalog-generation-other", true)
 	tbl.CreateColumn("later", "INT", nil, nil)
 	if db.catalog.live[catalogColumns].uuid == old.uuid {
 		t.Fatal("DDL did not publish a new queryable catalog generation")
@@ -405,6 +411,39 @@ func TestCatalogCleanupRetainsPinnedGeneration(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
+}
+
+func TestCatalogCleanupAndCheckpointMakeProgress(t *testing.T) {
+	if os.Getenv("MEMCP_CATALOG_LOCK_CHILD") != "1" {
+		binary, err := os.Executable()
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		defer cancel()
+		command := exec.CommandContext(ctx, binary, "-test.run=^TestCatalogCleanupAndCheckpointMakeProgress$", "-test.count=1")
+		command.Env = append(os.Environ(), "MEMCP_CATALOG_LOCK_CHILD=1")
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("cleanup/checkpoint failed to finish: %v (context: %v)\n%s", err, ctx.Err(), output)
+		}
+		return
+	}
+	tbl, _ := createDurabilityTestTable(t, "catalog-clean-checkpoint", 0)
+	db := tbl.schema
+	db.schemalock.Lock()
+	done := make(chan struct{})
+	go func() { cleanShards(db); close(done) }()
+	// Let cleanup reach the held schema boundary. With the reversed order it
+	// takes the persistence gate first; with the correct order it waits here.
+	for range 256 {
+		runtime.Gosched()
+		if !catalogPersistenceMu.TryRLock() {
+			break
+		}
+		catalogPersistenceMu.RUnlock()
+	}
+	db.commitSchemaLocked(true, db.schemalock.Unlock)
+	<-done
 }
 
 func TestCatalogDoesNotFallbackToLegacyAfterMissingShardColumn(t *testing.T) {

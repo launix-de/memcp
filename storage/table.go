@@ -355,6 +355,7 @@ type tableShardTopology struct {
 	retired            atomic.Bool
 	operationsDrained  chan struct{}
 	drained            chan struct{}
+	previousDrained    <-chan struct{}
 	operationDrainOnce sync.Once
 	drainOnce          sync.Once
 }
@@ -399,7 +400,20 @@ func (topology *tableShardTopology) closeDrains() {
 	if topology.operations.Load() == 0 {
 		topology.operationDrainOnce.Do(func() { close(topology.operationsDrained) })
 		if topology.transactions.Load() == 0 {
-			topology.drainOnce.Do(func() { close(topology.drained) })
+			topology.drainOnce.Do(func() {
+				// A publication can retain shards from older generations. Its
+				// retirement proof includes those readers, even after a retained
+				// shard's generation pointer advances to this newer publication.
+				if previous := topology.previousDrained; previous != nil {
+					select {
+					case <-previous:
+					default:
+						go func() { <-previous; close(topology.drained) }()
+						return
+					}
+				}
+				close(topology.drained)
+			})
 		}
 	}
 }
@@ -949,6 +963,9 @@ func (t *table) publishTopologyLocked() *tableShardTopology {
 		dimensions:        append([]shardDimension(nil), t.PDimensions...),
 		operationsDrained: make(chan struct{}),
 		drained:           make(chan struct{}),
+	}
+	if previous := t.topology.Load(); previous != nil {
+		topology.previousDrained = previous.drained
 	}
 	for _, shard := range topology.shards {
 		if shard != nil {
