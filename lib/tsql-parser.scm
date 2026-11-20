@@ -7009,7 +7009,8 @@ that context explicitly; stored views refuse this scalar before publication. */
 					(if compile_only (tsql_command_binding 'alter-table (list database name) '()) (list (quote createkey) (list (quote table) database false name false (quote tx)) key true
 						(cons (quote list) columns) (quote tx)
 						(list (quote list) "nulls_not_distinct" true "constraint_name" key)))))
-			(parser '(tsql_keyword_add (define definition foreign_key_definition))
+			(parser '((define validation (? (parser '(tsql_keyword_with (define mode (or tsql_keyword_check tsql_keyword_nocheck))) mode)))
+				tsql_keyword_add (define definition foreign_key_definition))
 				(lambda (database name) (if compile_only (tsql_command_binding 'alter-table (list database name) '()) (match definition
 					((symbol list) "foreign" key key_columns target target_columns update_mode delete_mode target_schema)
 					(begin
@@ -7035,7 +7036,8 @@ that context explicitly; stored views refuse this scalar before publication. */
 							(list (quote quote) (map parent (lambda (column) (column "Field"))))
 							update_mode delete_mode (quote tx)
 							(list (quote quote) (list "expected_child" (map child tsql_foreign_column_facts)
-								"expected_parent" (map parent tsql_foreign_column_facts))))
+								"expected_parent" (map parent tsql_foreign_column_facts)
+								"validate_existing" (not (equal?? validation "NOCHECK")))))
 							true (list (quote error) "foreign key already exists: " key)))))))
 			(parser '(tsql_keyword_add (? tsql_keyword_constraint (define key tsql_identifier))
 				tsql_keyword_default (define default tsql_default_value)

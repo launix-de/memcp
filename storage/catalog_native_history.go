@@ -21,17 +21,38 @@ type catalogNativeDeclaration struct {
 
 func (tx *TxContext) publicNativeDeclarations() []catalogNativeDeclaration {
 	var result []catalogNativeDeclaration
-	for _, entry := range tx.publicForeignAmendments() {
+	history := tx.publicForeignAmendments()
+	// Pending state transitions belong to this same amendment history. Freeze
+	// each addition's accepted validation fact once, including its matching DROP;
+	// recovery never publishes a transient pending state or a second projection.
+	trusted := make(map[*catalogForeignAmendment]bool)
+	for _, entry := range history {
+		if add := entry.foreign; add != nil {
+			trusted[add] = !add.declaration.Foreign.Untrusted
+		}
+		if state := entry.constraintState; state != nil {
+			for _, current := range state.current {
+				if current.addition != nil {
+					trusted[current.addition] = current.trusted
+				}
+			}
+		}
+	}
+	for _, entry := range history {
 		if key := entry.publicKey; key != nil {
 			d := key.declaration
 			result = append(result, catalogNativeDeclaration{Operation: "key_" + key.operation, Key: &d})
 		}
 		if add := entry.foreign; add != nil {
 			d := add.declaration
+			d.Foreign.Untrusted = !trusted[add]
 			result = append(result, catalogNativeDeclaration{Operation: "foreign_add", Foreign: &d})
 		}
 		if drop := entry.foreignDrop; drop != nil {
 			d := drop.declaration
+			if drop.addition != nil {
+				d.Foreign.Untrusted = !trusted[drop.addition]
+			}
 			result = append(result, catalogNativeDeclaration{Operation: "foreign_drop", Foreign: &d})
 		}
 	}

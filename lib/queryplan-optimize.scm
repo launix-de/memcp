@@ -3372,6 +3372,8 @@ The ordinary NDV estimate remains preferable when it is tighter. */
 					(define foreign_keys (coalesceNil (info "ForeignKeys") '()))
 					(filter (map foreign_keys (lambda (foreign_key)
 						(if (and (equal? (foreign_key "Role") "referencing")
+							(not (expression_equal? (foreign_key "Trusted") false))
+							(not (expression_equal? (foreign_key "Enabled") false))
 							(equal? (foreign_key "LocalColumns") columns))
 							(begin
 								(define target (list "__aggregate_pushdown_fk_target"

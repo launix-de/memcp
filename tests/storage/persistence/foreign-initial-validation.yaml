@@ -1,0 +1,603 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Native foreign additions can skip historical proof while retaining enabled write enforcement and
+    durable trust state
+setup:
+- sql: DROP VIEW IF EXISTS trust_fk_participant
+- sql: DROP TABLE IF EXISTS trust_fk_private
+- sql: DROP TABLE IF EXISTS trust_fk_commit
+- sql: DROP TABLE IF EXISTS trust_fk_savepoint
+- sql: DROP TABLE IF EXISTS trust_fk_validated
+- sql: DROP TABLE IF EXISTS trust_fk_roundtrip
+- sql: DROP TABLE IF EXISTS trust_fk_zero
+- sql: DROP TABLE IF EXISTS trust_fk_parent
+- sql: CREATE TABLE trust_fk_parent(id INT NOT NULL PRIMARY KEY)
+- sql: INSERT trust_fk_parent VALUES(1)
+- sql: CREATE TABLE trust_fk_private(id INT NOT NULL PRIMARY KEY,parent_id INT NULL,value INT)
+- sql: INSERT trust_fk_private VALUES(1,99,7),(2,1,8),(3,NULL,9)
+- sql: CREATE TABLE trust_fk_commit(id INT NOT NULL PRIMARY KEY,parent_id INT NULL,value INT)
+- sql: INSERT trust_fk_commit VALUES(1,99,7),(2,1,8),(3,NULL,9)
+- sql: CREATE TABLE trust_fk_savepoint(id INT NOT NULL PRIMARY KEY,parent_id INT NULL,value INT)
+- sql: INSERT trust_fk_savepoint VALUES(1,99,7),(2,1,8),(3,NULL,9)
+- sql: CREATE TABLE trust_fk_roundtrip(id INT NOT NULL PRIMARY KEY,parent_id INT NULL,value INT)
+- sql: INSERT trust_fk_roundtrip VALUES(1,99,7),(2,1,8),(3,NULL,9)
+- sql: CREATE TABLE trust_fk_zero(id INT NOT NULL PRIMARY KEY,parent_id INT NULL,value INT)
+- sql: INSERT trust_fk_zero VALUES(1,99,7),(2,1,8),(3,NULL,9)
+- sql: CREATE TABLE trust_fk_validated(id INT NOT NULL PRIMARY KEY,parent_id INT NULL,value INT)
+- sql: INSERT trust_fk_validated VALUES(1,1,7),(2,NULL,8)
+cleanup:
+- sql: DROP VIEW IF EXISTS trust_fk_participant
+- sql: DROP TABLE IF EXISTS trust_fk_private
+- sql: DROP TABLE IF EXISTS trust_fk_commit
+- sql: DROP TABLE IF EXISTS trust_fk_savepoint
+- sql: DROP TABLE IF EXISTS trust_fk_validated
+- sql: DROP TABLE IF EXISTS trust_fk_roundtrip
+- sql: DROP TABLE IF EXISTS trust_fk_zero
+- sql: DROP TABLE IF EXISTS trust_fk_parent
+test_cases:
+- name: WITH NOCHECK publishes only an enabled untrusted private declaration until rollback
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: ALTER TABLE trust_fk_private WITH NOCHECK ADD CONSTRAINT trust_fk_private_rule FOREIGN KEY(parent_id)
+        REFERENCES trust_fk_parent(id)
+    - connection: owner
+      sql: SELECT name,is_disabled,is_not_trusted FROM sys.foreign_keys WHERE name=N'trust_fk_private_rule'
+      expect:
+        rows: 1
+        data:
+        - name: trust_fk_private_rule
+          is_disabled: 0
+          is_not_trusted: 1
+    - connection: observer
+      sql: SELECT COUNT(*) AS n FROM sys.foreign_keys WHERE name=N'trust_fk_private_rule'
+      expect:
+        rows: 1
+        data:
+        - n: 0
+    - connection: owner
+      sql: SELECT id,parent_id,value FROM trust_fk_private ORDER BY id
+      expect:
+        rows: 3
+        data:
+        - id: 1
+          parent_id: 99
+          value: 7
+        - id: 2
+          parent_id: 1
+          value: 8
+        - id: 3
+          parent_id: null
+          value: 9
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: observer
+      sql: SELECT COUNT(*) AS n FROM sys.foreign_keys WHERE name=N'trust_fk_private_rule'
+      expect:
+        rows: 1
+        data:
+        - n: 0
+- name: Rollback retained every preexisting orphan NULL and valid value
+  sql: SELECT id,parent_id,value FROM trust_fk_private ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - id: 1
+      parent_id: 99
+      value: 7
+    - id: 2
+      parent_id: 1
+      value: 8
+    - id: 3
+      parent_id: null
+      value: 9
+- name: Rollback removed future write enforcement along with the declaration
+  sql: INSERT trust_fk_private VALUES(10,100,10)
+  expect:
+    affected_rows: 1
+- name: Remove the rollback control row
+  sql: DELETE FROM trust_fk_private WHERE id=10
+  expect:
+    affected_rows: 1
+- name: Explicit historical validation still rejects actual existing orphan rows
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: ALTER TABLE trust_fk_private WITH CHECK ADD CONSTRAINT trust_fk_explicit_reject FOREIGN KEY(parent_id)
+        REFERENCES trust_fk_parent(id)
+      expect:
+        error: true
+        contains: foreign key constraint
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: observer
+      sql: SELECT COUNT(*) AS n FROM sys.foreign_keys WHERE name=N'trust_fk_explicit_reject'
+      expect:
+        rows: 1
+        data:
+        - n: 0
+    - connection: observer
+      sql: SELECT id,parent_id,value FROM trust_fk_private ORDER BY id
+      expect:
+        rows: 3
+        data:
+        - id: 1
+          parent_id: 99
+          value: 7
+        - id: 2
+          parent_id: 1
+          value: 8
+        - id: 3
+          parent_id: null
+          value: 9
+- name: Default historical validation still rejects actual existing orphan rows
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: ALTER TABLE trust_fk_private ADD CONSTRAINT trust_fk_default_reject FOREIGN KEY(parent_id) REFERENCES
+        trust_fk_parent(id)
+      expect:
+        error: true
+        contains: foreign key constraint
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: observer
+      sql: SELECT COUNT(*) AS n FROM sys.foreign_keys WHERE name=N'trust_fk_default_reject'
+      expect:
+        rows: 1
+        data:
+        - n: 0
+    - connection: observer
+      sql: SELECT id,parent_id,value FROM trust_fk_private ORDER BY id
+      expect:
+        rows: 3
+        data:
+        - id: 1
+          parent_id: 99
+          value: 7
+        - id: 2
+          parent_id: 1
+          value: 8
+        - id: 3
+          parent_id: null
+          value: 9
+- name: An enabled untrusted FK commits without modifying or deleting historical rows
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: ALTER TABLE trust_fk_commit WITH NOCHECK ADD CONSTRAINT trust_fk_commit_rule FOREIGN KEY(parent_id) REFERENCES
+        trust_fk_parent(id)
+    - connection: owner
+      sql: SELECT name,is_disabled,is_not_trusted FROM sys.foreign_keys WHERE name=N'trust_fk_commit_rule'
+      expect:
+        rows: 1
+        data:
+        - name: trust_fk_commit_rule
+          is_disabled: 0
+          is_not_trusted: 1
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT name,is_disabled,is_not_trusted FROM sys.foreign_keys WHERE name=N'trust_fk_commit_rule'
+      expect:
+        rows: 1
+        data:
+        - name: trust_fk_commit_rule
+          is_disabled: 0
+          is_not_trusted: 1
+    - connection: observer
+      sql: SELECT id,parent_id,value FROM trust_fk_commit ORDER BY id
+      expect:
+        rows: 3
+        data:
+        - id: 1
+          parent_id: 99
+          value: 7
+        - id: 2
+          parent_id: 1
+          value: 8
+        - id: 3
+          parent_id: null
+          value: 9
+- name: The untrusted declaration rejects a new orphan INSERT
+  sql: INSERT trust_fk_commit VALUES(10,123,10)
+  expect:
+    error: true
+    contains: foreign key constraint
+- name: The untrusted declaration rejects a new invalid FK UPDATE
+  sql: UPDATE trust_fk_commit SET parent_id=123 WHERE id=2
+  expect:
+    error: true
+    contains: foreign key constraint
+- name: Enabled future enforcement accepts a referenced value
+  sql: INSERT trust_fk_commit VALUES(10,1,10)
+  expect:
+    affected_rows: 1
+- name: Parent protection remains enabled for an untrusted FK
+  sql: DELETE FROM trust_fk_parent WHERE id=1
+  expect:
+    error: true
+    contains: foreign key constraint
+- name: An untrusted FK supplies no historical cardinality bound
+  scm: |-
+    (begin
+      (define src (list "child" "memcp-tests" "trust_fk_commit" false nil
+        (sql_relation_declarations "memcp-tests" "trust_fk_commit" nil)))
+      (list (nil? (planner_foreign_key_group_bound src '("parent_id")))
+        (scan nil (table "memcp-tests" false "trust_fk_commit" false nil)
+          '() '() '() (lambda () true) '() (lambda () 1) 0 +)))
+  expect:
+    result:
+    - true
+    - 4
+- name: Actual grouped results retain every historical orphan and NULL group
+  sql: SELECT parent_id,COUNT(*) AS n FROM trust_fk_commit GROUP BY parent_id ORDER BY parent_id
+  expect:
+    rows: 3
+    data:
+    - parent_id: null
+      n: 1
+    - parent_id: 1
+      n: 2
+    - parent_id: 99
+      n: 1
+- name: Savepoint restore recovers the exact enabled untrusted pending status
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: ALTER TABLE trust_fk_savepoint WITH NOCHECK ADD CONSTRAINT trust_fk_savepoint_rule FOREIGN KEY(parent_id)
+        REFERENCES trust_fk_parent(id)
+    - connection: owner
+      sql: SAVE TRANSACTION enabled_state
+    - connection: owner
+      sql: ALTER TABLE trust_fk_savepoint NOCHECK CONSTRAINT trust_fk_savepoint_rule
+    - connection: owner
+      sql: SELECT name,is_disabled,is_not_trusted FROM sys.foreign_keys WHERE name=N'trust_fk_savepoint_rule'
+      expect:
+        rows: 1
+        data:
+        - name: trust_fk_savepoint_rule
+          is_disabled: 1
+          is_not_trusted: 1
+    - connection: owner
+      sql: ROLLBACK TRANSACTION enabled_state
+    - connection: owner
+      sql: SELECT name,is_disabled,is_not_trusted FROM sys.foreign_keys WHERE name=N'trust_fk_savepoint_rule'
+      expect:
+        rows: 1
+        data:
+        - name: trust_fk_savepoint_rule
+          is_disabled: 0
+          is_not_trusted: 1
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT name,is_disabled,is_not_trusted FROM sys.foreign_keys WHERE name=N'trust_fk_savepoint_rule'
+      expect:
+        rows: 1
+        data:
+        - name: trust_fk_savepoint_rule
+          is_disabled: 0
+          is_not_trusted: 1
+- name: Completed pending historical validation restores trust before the same decision
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: ALTER TABLE trust_fk_validated WITH NOCHECK ADD CONSTRAINT trust_fk_validated_rule FOREIGN KEY(parent_id)
+        REFERENCES trust_fk_parent(id)
+    - connection: owner
+      sql: SELECT name,is_disabled,is_not_trusted FROM sys.foreign_keys WHERE name=N'trust_fk_validated_rule'
+      expect:
+        rows: 1
+        data:
+        - name: trust_fk_validated_rule
+          is_disabled: 0
+          is_not_trusted: 1
+    - connection: owner
+      sql: ALTER TABLE trust_fk_validated WITH CHECK CHECK CONSTRAINT trust_fk_validated_rule
+    - connection: owner
+      sql: SELECT name,is_disabled,is_not_trusted FROM sys.foreign_keys WHERE name=N'trust_fk_validated_rule'
+      expect:
+        rows: 1
+        data:
+        - name: trust_fk_validated_rule
+          is_disabled: 0
+          is_not_trusted: 0
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT name,is_disabled,is_not_trusted FROM sys.foreign_keys WHERE name=N'trust_fk_validated_rule'
+      expect:
+        rows: 1
+        data:
+        - name: trust_fk_validated_rule
+          is_disabled: 0
+          is_not_trusted: 0
+- name: A completed validation restores the native trusted FK planner fact
+  scm: |-
+    (begin
+      (define src (list "child" "memcp-tests" "trust_fk_validated" false nil
+        (sql_relation_declarations "memcp-tests" "trust_fk_validated" nil)))
+      (list (planner_foreign_key_group_bound src '("parent_id"))
+        (count ((show (table "memcp-tests" false "trust_fk_validated" false nil) "constraints" nil) "ForeignKeys"))))
+  expect:
+    result:
+    - 2
+    - 1
+- name: Validated pending ADD and matching DROP freeze the same recipe before untrusted replacement
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: ALTER TABLE trust_fk_validated WITH NOCHECK ADD CONSTRAINT trust_fk_canonical_rule FOREIGN KEY(parent_id)
+        REFERENCES trust_fk_parent(id)
+    - connection: owner
+      sql: ALTER TABLE trust_fk_validated WITH CHECK CHECK CONSTRAINT trust_fk_canonical_rule
+    - connection: owner
+      sql: SELECT name,is_disabled,is_not_trusted FROM sys.foreign_keys WHERE name=N'trust_fk_canonical_rule'
+      expect:
+        rows: 1
+        data:
+        - name: trust_fk_canonical_rule
+          is_disabled: 0
+          is_not_trusted: 0
+    - connection: owner
+      sql: ALTER TABLE trust_fk_validated DROP CONSTRAINT trust_fk_canonical_rule
+    - connection: owner
+      sql: ALTER TABLE trust_fk_validated WITH NOCHECK ADD CONSTRAINT trust_fk_canonical_rule FOREIGN KEY(parent_id)
+        REFERENCES trust_fk_parent(id)
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT name,is_disabled,is_not_trusted FROM sys.foreign_keys WHERE name=N'trust_fk_canonical_rule'
+      expect:
+        rows: 1
+        data:
+        - name: trust_fk_canonical_rule
+          is_disabled: 0
+          is_not_trusted: 1
+- name: Rollback before the initial ADD retires the entire validation-state history
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: SAVE TRANSACTION before_add
+    - connection: owner
+      sql: ALTER TABLE trust_fk_private WITH NOCHECK ADD CONSTRAINT trust_fk_rewound FOREIGN KEY(parent_id) REFERENCES
+        trust_fk_parent(id)
+    - connection: owner
+      sql: ROLLBACK TRANSACTION before_add
+    - connection: owner
+      sql: SELECT COUNT(*) AS n FROM sys.foreign_keys WHERE name=N'trust_fk_rewound'
+      expect:
+        rows: 1
+        data:
+        - n: 0
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT COUNT(*) AS n FROM sys.foreign_keys WHERE name=N'trust_fk_rewound'
+      expect:
+        rows: 1
+        data:
+        - n: 0
+- name: The ordered stream retains skipped-validation ADD then DROP as a net-zero decision
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: ALTER TABLE trust_fk_zero WITH NOCHECK ADD CONSTRAINT trust_fk_zero_rule FOREIGN KEY(parent_id) REFERENCES
+        trust_fk_parent(id)
+    - connection: owner
+      sql: ALTER TABLE trust_fk_zero DROP CONSTRAINT trust_fk_zero_rule
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT COUNT(*) AS n FROM sys.foreign_keys WHERE name=N'trust_fk_zero_rule'
+      expect:
+        rows: 1
+        data:
+        - n: 0
+- name: Replacement carries its own validation state without inheriting a predecessor proof
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: ALTER TABLE trust_fk_roundtrip WITH NOCHECK ADD CONSTRAINT trust_fk_roundtrip_rule FOREIGN KEY(parent_id)
+        REFERENCES trust_fk_parent(id)
+    - connection: owner
+      sql: ALTER TABLE trust_fk_roundtrip DROP CONSTRAINT trust_fk_roundtrip_rule
+    - connection: owner
+      sql: ALTER TABLE trust_fk_roundtrip WITH NOCHECK ADD CONSTRAINT trust_fk_roundtrip_rule FOREIGN KEY(parent_id)
+        REFERENCES trust_fk_parent(id)
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT name,is_disabled,is_not_trusted FROM sys.foreign_keys WHERE name=N'trust_fk_roundtrip_rule'
+      expect:
+        rows: 1
+        data:
+        - name: trust_fk_roundtrip_rule
+          is_disabled: 0
+          is_not_trusted: 1
+- name: Committed untrusted retirement rolls back to its exact prior recipe and enforcement
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: ALTER TABLE trust_fk_commit DROP CONSTRAINT trust_fk_commit_rule
+    - connection: owner
+      sql: SELECT COUNT(*) AS n FROM sys.foreign_keys WHERE name=N'trust_fk_commit_rule'
+      expect:
+        rows: 1
+        data:
+        - n: 0
+    - connection: observer
+      sql: SELECT name,is_disabled,is_not_trusted FROM sys.foreign_keys WHERE name=N'trust_fk_commit_rule'
+      expect:
+        rows: 1
+        data:
+        - name: trust_fk_commit_rule
+          is_disabled: 0
+          is_not_trusted: 1
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: observer
+      sql: SELECT name,is_disabled,is_not_trusted FROM sys.foreign_keys WHERE name=N'trust_fk_commit_rule'
+      expect:
+        rows: 1
+        data:
+        - name: trust_fk_commit_rule
+          is_disabled: 0
+          is_not_trusted: 1
+- name: Rollback of untrusted retirement preserved real write rejection
+  sql: INSERT trust_fk_commit VALUES(11,321,11)
+  expect:
+    error: true
+    contains: foreign key constraint
+- name: Untrusted declaration and ordinary SQL view rows share the original durable participant decision
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: ALTER TABLE trust_fk_zero WITH NOCHECK ADD CONSTRAINT trust_fk_participant_rule FOREIGN KEY(parent_id)
+        REFERENCES trust_fk_parent(id)
+    - connection: owner
+      sql: CREATE VIEW trust_fk_participant AS SELECT id,parent_id FROM trust_fk_zero
+    - connection: owner
+      sql: SELECT id,parent_id FROM trust_fk_participant ORDER BY id
+      expect:
+        rows: 3
+        data:
+        - id: 1
+          parent_id: 99
+        - id: 2
+          parent_id: 1
+        - id: 3
+          parent_id: null
+    - connection: observer
+      sql: SELECT COUNT(*) AS n FROM sys.objects WHERE type=N'V' AND name=N'trust_fk_participant'
+      expect:
+        rows: 1
+        data:
+        - n: 0
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT id,parent_id FROM trust_fk_participant ORDER BY id
+      expect:
+        rows: 3
+        data:
+        - id: 1
+          parent_id: 99
+        - id: 2
+          parent_id: 1
+        - id: 3
+          parent_id: null
+- name: Crash after accepted untrusted and trusted catalog decisions
+  scm: (crash)
+  expect:
+    interrupted_ok: true
+- name: Recover the same store after the crash
+  action: restart
+- name: Restart retains the untrusted semantic state
+  sql: SELECT name,is_disabled,is_not_trusted FROM sys.foreign_keys WHERE name=N'trust_fk_commit_rule'
+  expect:
+    rows: 1
+    data:
+    - name: trust_fk_commit_rule
+      is_disabled: 0
+      is_not_trusted: 1
+- name: Restart retains an actually validated trusted state
+  sql: SELECT name,is_disabled,is_not_trusted FROM sys.foreign_keys WHERE name=N'trust_fk_validated_rule'
+  expect:
+    rows: 1
+    data:
+    - name: trust_fk_validated_rule
+      is_disabled: 0
+      is_not_trusted: 0
+- name: Restart retains all committed historical and new values
+  sql: SELECT id,parent_id,value FROM trust_fk_commit ORDER BY id
+  expect:
+    rows: 4
+    data:
+    - id: 1
+      parent_id: 99
+      value: 7
+    - id: 2
+      parent_id: 1
+      value: 8
+    - id: 3
+      parent_id: null
+      value: 9
+    - id: 10
+      parent_id: 1
+      value: 10
+- name: Recovered untrusted enforcement still rejects a real orphan
+  sql: INSERT trust_fk_commit VALUES(11,456,11)
+  expect:
+    error: true
+    contains: foreign key constraint
+- name: Recovered net-zero declaration stays absent
+  sql: SELECT COUNT(*) AS n FROM sys.foreign_keys WHERE name=N'trust_fk_zero_rule'
+  expect:
+    rows: 1
+    data:
+    - n: 0
+- name: Recovered replacement remains enabled and untrusted
+  sql: SELECT name,is_disabled,is_not_trusted FROM sys.foreign_keys WHERE name=N'trust_fk_roundtrip_rule'
+  expect:
+    rows: 1
+    data:
+    - name: trust_fk_roundtrip_rule
+      is_disabled: 0
+      is_not_trusted: 1
+- name: Recovered canonical replacement keeps its independent validation state
+  sql: SELECT name,is_disabled,is_not_trusted FROM sys.foreign_keys WHERE name=N'trust_fk_canonical_rule'
+  expect:
+    rows: 1
+    data:
+    - name: trust_fk_canonical_rule
+      is_disabled: 0
+      is_not_trusted: 1
+- name: Restart resolves the same view participant rows and their original values
+  sql: SELECT id,parent_id FROM trust_fk_participant ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - id: 1
+      parent_id: 99
+    - id: 2
+      parent_id: 1
+    - id: 3
+      parent_id: null
+- name: Restart preserves trust state for the mixed row participant decision
+  sql: SELECT name,is_disabled,is_not_trusted FROM sys.foreign_keys WHERE name=N'trust_fk_participant_rule'
+  expect:
+    rows: 1
+    data:
+    - name: trust_fk_participant_rule
+      is_disabled: 0
+      is_not_trusted: 1
