@@ -16,7 +16,7 @@ test_cases:
       (define stored (((json_decode (readfile (concat (arg "data" "data" "data")
         "/memcp-tests/schema.json"))) "tables") "column_history_fresh"))
       (define history (stored "dropped_columns"))
-      (and (not (nil? history)) (equal? (json_encode history) "{}")))
+      (and (list? history) (equal? (count history) 0)))
   expect: {result: true}
 - name: Restart the new table without changing its history provenance
   action: restart
@@ -26,7 +26,7 @@ test_cases:
       (define stored (((json_decode (readfile (concat (arg "data" "data" "data")
         "/memcp-tests/schema.json"))) "tables") "column_history_fresh"))
       (define history (stored "dropped_columns"))
-      (and (not (nil? history)) (equal? (json_encode history) "{}")))
+      (and (list? history) (equal? (count history) 0)))
   expect: {result: true}
 - name: Stored values remain unchanged across the provenance round trip
   sql: SELECT id,value FROM column_history_fresh
