@@ -260,7 +260,7 @@ identifiers. Paging and window suffixes own those clauses; aliases, fields and
 object names may use these spellings without delimiters. Reference:
 https://learn.microsoft.com/sql/t-sql/language-elements/reserved-keywords-transact-sql */
 (define tsql_regular_identifier_patterns (list "[\\p{L}\\p{Nl}_#][\\p{L}\\p{Nl}\\p{Nd}\\p{Mn}\\p{Mc}\\p{Pc}\\p{Cf}@$#]*"
-	"(?:NOT|IN|BETWEEN|AS|ON|WHERE|GROUP|BY|VALUES|FROM|FOR|PIVOT|FULL|LEFT|RIGHT|INNER|OUTER|CROSS|JOIN|SELECT|UNION|ALL|INSERT|INTO|SET|ORDER|LIMIT|TRIM|LTRIM|RTRIM|TOP|FETCH|ROWS|ONLY|CASE|WHEN|THEN|ELSE|END|HAVING|WITH|OPTION|IF|BEGIN|DECLARE|CURSOR|OPEN|CLOSE|DEALLOCATE|EXEC|EXECUTE|CREATE|ALTER|DROP|UPDATE|DELETE|TRUNCATE|COMMIT|ROLLBACK|SAVE|WHILE|BREAK|CONTINUE|GOTO|RETURN|THROW|PRINT|RAISERROR)(?:[^\\p{L}\\p{Nl}\\p{Nd}\\p{Mn}\\p{Mc}\\p{Pc}\\p{Cf}@$#]|$)"))
+	"(?:NOT|IN|BETWEEN|AS|ON|WHERE|GROUP|BY|VALUES|FROM|FOR|PIVOT|UNPIVOT|FULL|LEFT|RIGHT|INNER|OUTER|CROSS|JOIN|SELECT|UNION|ALL|INSERT|INTO|SET|ORDER|LIMIT|TRIM|LTRIM|RTRIM|TOP|FETCH|ROWS|ONLY|CASE|WHEN|THEN|ELSE|END|HAVING|WITH|OPTION|IF|BEGIN|DECLARE|CURSOR|OPEN|CLOSE|DEALLOCATE|EXEC|EXECUTE|CREATE|ALTER|DROP|UPDATE|DELETE|TRUNCATE|COMMIT|ROLLBACK|SAVE|WHILE|BREAK|CONTINUE|GOTO|RETURN|THROW|PRINT|RAISERROR)(?:[^\\p{L}\\p{Nl}\\p{Nd}\\p{Mn}\\p{Mc}\\p{Pc}\\p{Cf}@$#]|$)"))
 (define tsql_regular_identifier? (close_procedure ((lambda (regular keyword)
 	(lambda (name) (and
 		(regexp_test name (concat "^(?:" regular ")$"))
@@ -296,6 +296,38 @@ The tagged tuple retains every member, including an explicit OFF value. */
 (define tsql_identifier (close_procedure ((lambda (tsql_identifier_quoted tsql_identifier_unquoted sql_private_relation?)
 	(parser (define name (or tsql_identifier_quoted tsql_identifier_unquoted))
 		(if (sql_private_relation? name) (error "private SQL relation names cannot be referenced directly") name))) tsql_identifier_quoted tsql_identifier_unquoted sql_private_relation?)))
+/* SQL source names share the native folded identifier relation. Sorting once
+keeps export validation linear after sorting without approximating Unicode
+folding through lowercase strings. */
+(define tsql_unique_source_names? (lambda (names)
+	(cadr (reduce (sort names (collate "unicode-simple-fold" false))
+		(lambda (state name) (list name (and (cadr state)
+			(or (nil? (car state)) (not (equal?? (car state) name)))))) (list nil true)))))
+/* Resolve finite generated-source directories with the actual folded name
+relation. Each lookup is logarithmic, including wide UNPIVOT input lists. */
+(define tsql_source_name_directory (lambda (names) (begin
+	(define less (collate "unicode-simple-fold" false))
+	(define ordered (sort names less))
+	(define lookup (lambda (name low high)
+		(if (>= low high) nil (begin
+			(define middle (floor (/ (+ low high) 2)))
+			(define candidate (nth ordered middle))
+			(if (equal?? name candidate)
+				(if (or (and (> middle 0) (equal?? name (nth ordered (- middle 1))))
+					(and (< (+ middle 1) (count ordered)) (equal?? name (nth ordered (+ middle 1)))))
+					(error "ambiguous generated-source column: " name) candidate)
+				(less name candidate) (lookup name low middle)
+				(lookup name (+ middle 1) high))))))
+	(lambda (name) (lookup name 0 (count ordered))))))
+/* UNPIVOT requires identical input declarations, rather than UNION's ordinary
+common-type promotion. The second direct input reference is a type witness;
+only the selected value's formula survives annotation lowering. */
+(define tsql_unpivot_value_compiler (lambda (infos) (begin
+	(define selected (car infos))
+	(define reference (cadr infos))
+	(if (and (expression_equal? (sql_info_datatype selected) (sql_info_datatype reference))
+		(expression_equal? (sql_info_collation selected) (sql_info_collation reference))) selected
+		(tsql_raise_error 8167 "conflicting column types in the UNPIVOT list" 1)))))
 /* INSERT target columns bind only their final identifier. Prefix components
 are syntax, not relation addresses or grants. Each prefix consumes a dot, so
 empty components are valid while a final name is mandatory. Delimited dots
@@ -5098,6 +5130,8 @@ that context explicitly; stored views refuse this scalar before publication. */
 				_ (source_relation src))))))
 	(define tsql_attach_join_suffix (lambda (left suffix)
 		(match suffix
+			'((symbol tsql_pending_unpivot_suffix) value pivot columns alias)
+			(list (list alias schema (list 'tsql_pending_unpivot left value pivot columns) false nil nil))
 			'((symbol tsql_pending_pivot_suffix) aggregate value pivot columns alias)
 			(list (list alias schema (list 'tsql_pending_pivot left aggregate value pivot columns) false nil nil))
 			'((symbol tsql_pending_full_suffix) right predicate)
@@ -5135,6 +5169,11 @@ that context explicitly; stored views refuse this scalar before publication. */
 	that operand; they do not turn its aliases into a derived SELECT scope. */
 	(define tsql_join_input (parser (define input tabledefs) input))
 	(define tsql_join_suffix (parser (or
+		(parser '(tsql_keyword_unpivot "(" (define value tsql_identifier)
+			tsql_keyword_for (define pivot tsql_identifier) tsql_keyword_in
+			"(" (define columns (+ tsql_identifier ",")) ")" ")"
+			(? tsql_keyword_as) (define alias tsql_identifier))
+			(list 'tsql_pending_unpivot_suffix value pivot columns alias))
 		(parser '(tsql_keyword_pivot "("
 			(define aggregate tsql_identifier_unquoted) "(" (define value tsql_identifier) ")"
 			tsql_keyword_for (define pivot tsql_identifier) tsql_keyword_in
@@ -5616,18 +5655,21 @@ that context explicitly; stored views refuse this scalar before publication. */
 		(map (list value pivot) (lambda (name)
 			(if (equal? (count (filter names (lambda (candidate) (equal?? candidate name)))) 1) true
 				(error "PIVOT requires one input column named " name))))
+		(define value (find names (lambda (name) (equal?? name value)) nil))
+		(define pivot (find names (lambda (name) (equal?? name pivot)) nil))
 		(define groups (filter names (lambda (name) (not (or (equal?? name value) (equal?? name pivot))))))
 		(define outputs (merge (list groups columns)))
-		(if (equal? (count outputs) (count (merge_unique (list (map outputs toLower))))) true
+		(if (tsql_unique_source_names? outputs) true
 			(error "duplicate PIVOT output column"))
 		(define alias "__tsql_pivot_input")
 		(define column (lambda (name) (list 'sql_compile_column 'tsql_compile_column
 			(list 'get_column alias false name false))))
 		(define grouped_fields (merge (map groups (lambda (name) (list name (column name))))))
 		(define pivot_fields (merge (map columns (lambda (name) (begin
-			/* Convert the source discriminator to text, not the output name to
-			its numeric type: numeric 1 must not also populate an output [01]. */
-			(define matches (tsql_comparison_expr "eq" (tsql_cast_expr (column pivot) "NVARCHAR" '(-1))
+			/* SQL Server compares each output name after conversion to the
+			discriminator's datatype. Reuse the frontend's declared comparison
+			conversion, including numeric discriminator values and collation. */
+			(define matches (tsql_comparison_expr "eq" (column pivot)
 				(list 'sql_type_expr name (list "NVARCHAR" '(128)) nil)))
 			(define selected (tsql_case_expr (list (list matches (column value))) nil))
 			(define expression (if (has? '("COUNT" "COUNT_BIG") aggregate)
@@ -5640,6 +5682,36 @@ that context explicitly; stored views refuse this scalar before publication. */
 			(list name expression))))))
 		(make_query_block schema (list (list alias schema input false nil nil))
 			(merge (list grouped_fields pivot_fields)) true (map groups column) nil nil nil nil nil nil nil))))
+	/* Narrowing is ordinary UNION ALL over projections. NULL source values
+	disappear; duplicates remain duplicates. The common multi-scan planner can
+	choose execution without a frontend materialization or row callback. */
+	(define tsql_unpivot_query (lambda (input value pivot columns) (begin
+		(define input (sql_expand_views input policy planning_session tx))
+		(define names (queryplan_result_titles input))
+		(if (and (not (equal?? value pivot))
+			(nil? (find names (lambda (name) (or (equal?? name value) (equal?? name pivot))) nil))) true
+			(error "UNPIVOT output column already exists"))
+		(if (tsql_unique_source_names? columns) true (error "duplicate UNPIVOT input column"))
+		(define directory (tsql_source_name_directory names))
+		(define selected (map columns (lambda (name) (begin
+			(define actual (directory name))
+			(if actual actual
+				(error "UNPIVOT requires one input column named " name))))))
+		(define selected_directory (tsql_source_name_directory selected))
+		(define remaining (filter names (lambda (name)
+			(nil? (selected_directory name)))))
+		(define alias "__tsql_unpivot_input")
+		(define column (lambda (name) (list 'sql_compile_column 'tsql_compile_column
+			(list 'get_column alias false name false))))
+		(define fields (merge (map remaining (lambda (name) (list name (column name))))))
+		(make_union_block 'all (mapIndex selected (lambda (index name)
+			(make_query_block schema (list (list alias schema input false nil nil))
+				(merge (list fields (list value
+					(list 'sql_compile_expr 'tsql_unpivot_value_compiler (column name) (column (car selected)))
+					pivot (list 'sql_type_expr (nth columns index) (list "NVARCHAR" '(128))
+						(list (tsql_resolve_collation "DATABASE_DEFAULT") 2)))))
+				(tsql_predicate_expr (list 'not (list 'nil? (column name))))
+				nil nil nil nil nil nil nil nil))) nil nil nil nil))))
 
 	/* Parser-only source recipes are bound once at the statement's compile
 	boundary. Local definitions become ordinary derived logical queries; native
@@ -5675,10 +5747,17 @@ that context explicitly; stored views refuse this scalar before publication. */
 							(tsql_apply_derived_column_aliases exported aliases))) available)))) bindings))
 			"source" (match node '(id database relation outer join declarations) (begin
 				(define resolved (match relation
+					((symbol tsql_pending_unpivot) sources value pivot columns)
+					(list id database (tsql_unpivot_query
+						(tsql_finalize_sources (make_query_block database sources
+							(list "*" (list 'sql_compile_column 'tsql_compile_column
+								(list 'get_column nil false "*" false))) true nil nil nil nil nil nil nil nil)
+							relation_kind bindings blocked) value pivot columns) outer nil nil)
 					((symbol tsql_pending_pivot) sources aggregate value pivot columns)
 					(list id database (tsql_pivot_query
 						(tsql_finalize_sources (make_query_block database sources
-							(list "*" (list 'get_column nil false "*" false)) true nil nil nil nil nil nil nil nil)
+							(list "*" (list 'sql_compile_column 'tsql_compile_column
+								(list 'get_column nil false "*" false))) true nil nil nil nil nil nil nil nil)
 							relation_kind bindings blocked) aggregate value pivot columns) outer nil nil)
 					((symbol tsql_pending_xml_nodes) document path alias column)
 					(list id database
