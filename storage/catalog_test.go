@@ -1012,6 +1012,39 @@ func TestCatalogCheckpointPreservesNativeAuthority(t *testing.T) {
 	}
 }
 
+func TestCatalogCheckpointDoesNotReactivateHistoricalUUID(t *testing.T) {
+	tbl, engine := createDurabilityTestTable(t, "catalog-historical-checkpoint-uuid", 0)
+	db := tbl.schema
+	r := replicaRecoveryFixture()
+	r.schemaShards(db, r.id, true)
+	r.resourceCell(mosiResource{Database: db.Name}).ownstate.Initialize(mosi.M)
+	previous := replication.Swap(r)
+	defer replication.Store(previous)
+	rows := db.catalogRowsLocked()
+	initial := db.catalog.live[catalogColumns]
+	cell := r.shardCell(initial)
+	// A handover can advance immutable storage while retaining exactly the
+	// same declarations. The last durable root still names its predecessor.
+	successor := buildDiskShard(db, catalogColumns, rows[catalogColumns], true)
+	if err := r.replaceCatalogShard(initial.replicationResource(), initial, successor); err != nil {
+		t.Fatal(err)
+	}
+	db.save()
+	current := cell.resolved().current.Load()
+	canonical := r.canonicalResource(initial.replicationResource())
+	if current.uuid.String() != canonical.Shard {
+		t.Fatalf("checkpoint reused historical payload %s under newer authority %s", current.uuid, canonical.Shard)
+	}
+	root := readCatalogRoot(engine.ReadSchema())
+	if root.Shards[catalogRelations[catalogColumns].name] != current.uuid.String() {
+		t.Fatal("durable root and native current publication disagree")
+	}
+	_, visible := catalogShardRecords(current, catalogRelationColumns(catalogColumns), nil)
+	if catalogFingerprint(catalogColumns, visible) != catalogFingerprint(catalogColumns, rows[catalogColumns]) {
+		t.Fatal("checkpoint changed equal declarations while advancing immutable identity")
+	}
+}
+
 func TestCatalogCheckpointCannotReplaceReceivedGenerationDuringIO(t *testing.T) {
 	tbl, engine := createDurabilityTestTable(t, "catalog-received-during-checkpoint", 0)
 	db := tbl.schema
