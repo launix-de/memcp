@@ -2137,7 +2137,7 @@ func (t *table) buildShowColumnsSnapshot(rowEstimate uint, columnNames *tableCol
 	columns := columnNames.declarations
 	// Costing may price native rows without inspecting or invoking opaque
 	// callbacks. Publish their declaration presence with the same snapshot.
-	hasReadProgram := t.OnInit.Load() != nil
+	hasReadProgram := t.hasReadProgram(columns)
 	result := make([]scm.Scmer, len(columns))
 	plannerColumns := scm.NewFastDictValue(len(columns))
 	plannerColumnsFingerprint := uint64(0x6a09e667f3bcc909)
@@ -2146,7 +2146,6 @@ func (t *table) buildShowColumnsSnapshot(rowEstimate uint, columnNames *tableCol
 	plannerStatistics := make([]*columnPlannerStatistics, len(columns))
 	filterSchema := plannerFingerprintString(0x1d26d8e71, t.Collation)
 	for i, c := range columns {
-		hasReadProgram = hasReadProgram || isRuntimeComputedColumn(c) || !c.OrcMapReduceFn.IsNil()
 		names[i] = c.Name
 		filterSchema = plannerFingerprintString(filterSchema, c.Name)
 		filterSchema = plannerFingerprintString(filterSchema, c.Typ)
@@ -2215,6 +2214,33 @@ func (t *table) buildShowColumnsSnapshot(rowEstimate uint, columnNames *tableCol
 		snapshot.metadata.constraints = current.metadata.constraints
 	}
 	return snapshot
+}
+
+func (t *table) hasReadProgram(columns []*column) bool {
+	if t.OnInit.Load() != nil {
+		return true
+	}
+	for _, c := range columns {
+		if isRuntimeComputedColumn(c) || !c.OrcMapReduceFn.IsNil() {
+			return true
+		}
+	}
+	return false
+}
+
+// Program constructors own declaration mutation here, before invoking callbacks.
+// A fresh callback identity can change its recipe without changing this fact.
+// Retain the complete immutable snapshot when the published fact is unchanged;
+// transitions still use the existing full publication and statistics CAS owner.
+func (t *table) publishReadProgramSnapshot() {
+	hasReadProgram := t.hasReadProgram(t.Columns)
+	if current := t.showColumnsSnapshot.Load(); current != nil && !current.plannerValue.IsNil() {
+		published, exists := current.plannerValue.FastDict().Get(scm.NewString("has_read_program"))
+		if exists && published.IsBool() && published.Bool() == hasReadProgram {
+			return
+		}
+	}
+	t.publishShowColumnsSnapshot(false)
 }
 
 func (t *table) buildColumnNamesSnapshot() *tableColumnNamesSnapshot {

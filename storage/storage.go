@@ -2719,7 +2719,7 @@ func Init(en scm.Env) {
 				if existing.OnInit.Load() == nil && !oninit.IsNil() {
 					closedOnInit := scm.CloseProcedure(oninit)
 					existing.OnInit.Store(&closedOnInit)
-					existing.publishShowColumnsSnapshot(false)
+					existing.publishReadProgramSnapshot()
 					db.saveLockedAndUnlock(schemaSaveBuffered)
 				} else {
 					db.schemalock.Unlock()
