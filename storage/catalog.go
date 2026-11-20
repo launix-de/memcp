@@ -639,9 +639,9 @@ func marshalCatalogRecords(records []json.RawMessage) json.RawMessage {
 	return append(result, ']')
 }
 
-// catalogDocumentFromRows is the inverse of catalogRowsFromDocument. Child
+// catalogRecordsFromRows is the inverse of catalogRowsFromDocument. Child
 // records are placed by their ordinals, independent of row order.
-func catalogDocumentFromRows(schema string, rows *catalogRows) []byte {
+func catalogRecordsFromRows(schema string, rows *catalogRows) catalogDocument {
 	encoder := catalogJSONEncoder{strings: make(map[string]json.RawMessage)}
 	type tableRecords struct {
 		record   map[string]json.RawMessage
@@ -746,6 +746,12 @@ func catalogDocumentFromRows(schema string, rows *catalogRows) []byte {
 		}
 		doc.Procedures = append(doc.Procedures, encoder.appendRecord(nil, procedure))
 	}
+	return doc
+}
+
+func catalogDocumentFromRows(schema string, rows *catalogRows) []byte {
+	doc := catalogRecordsFromRows(schema, rows)
+	encoder := catalogJSONEncoder{strings: make(map[string]json.RawMessage)}
 	document := map[string]json.RawMessage{
 		"name":   marshalCatalogValue(doc.Name),
 		"tables": encoder.appendRecord(nil, doc.Tables),
