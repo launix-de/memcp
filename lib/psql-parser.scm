@@ -27,6 +27,90 @@ list builder would be evaluated as a binding while constructing the formula. */
 
 (define sql_builtins (coalesce sql_builtins (newsession)))
 
+/* PostgreSQL chooses omitted FK names at CREATE execution, against the current
+namespace plus every explicit name in this command. Keep SQL naming here;
+native publication still atomically rejects a concurrent namespace collision.
+There is no typed native name-conflict witness to support a selective retry.
+https://github.com/postgres/postgres/blob/REL_18_STABLE/src/backend/catalog/pg_constraint.c
+https://github.com/postgres/postgres/blob/REL_18_STABLE/src/backend/commands/indexcmds.c */
+(define psql_constraint_object_name (lambda (table addition label) (begin
+	(define first (strlen table))
+	(define second (strlen addition))
+	(define available (- 61 (strlen label)))
+	/* Equivalent to makeObjectName's longest-component-first byte reduction;
+	on a tie the second component loses a byte first. Clip scalars afterwards. */
+	(define lengths (if (<= (+ first second) available) (list first second)
+		(and (> first second) (>= available (* 2 second))) (list (- available second) second)
+		(and (> second first) (>= available (* 2 first))) (list first (- available first))
+		(list (ceil (/ available 2)) (floor (/ available 2)))))
+	(concat (utf8_prefix table (car lengths)) "_"
+		(utf8_prefix addition (cadr lengths)) "_" label))))
+
+(define psql_foreign_name_addition (lambda (columns) (begin
+	/* ChooseForeignKeyConstraintNameAddition needs at most NAMEDATALEN bytes
+	before final object-name clipping. Identifier prefixes remain whole UTF-8. */
+	(define collect (lambda (remaining result)
+		(if (or (equal? remaining '()) (>= (strlen result) 64)) result
+			(collect (cdr remaining) (concat result (if (equal? result "") "" "_")
+				(utf8_prefix (car remaining) 63))))))
+	(collect columns ""))))
+
+(define psql_foreign_definitions (lambda (schema table_name definitions tx)
+	(if (nil? (find definitions (lambda (definition) (match definition
+		(cons "foreign" (cons name _)) (nil? name)
+		_ false)) nil)) definitions
+		(begin
+			/* SHOW is an immutable declaration read with the executing transaction,
+			including its pending names. No row/catalog query or parse-time lookup. */
+			(define existing (merge (map (show schema false tx) (lambda (name) (begin
+				(define declarations (show (table schema false name false tx) "declarations" tx))
+				(define constraints (declarations "constraints"))
+				(merge
+					(map (declarations "columns") (lambda (column) (column "DefaultName")))
+					(map (constraints "Unique") (lambda (key) (sql_key_constraint_name key)))
+					(map (constraints "ForeignKeys") (lambda (key) (key "Id")))
+					(map (constraints "Checks") (lambda (check) (check "Id")))))))))
+			(define explicit (merge (map definitions (lambda (definition) (match definition
+				(cons "foreign" (cons name _)) (if (nil? name) '() (list name))
+				(cons "unique" (cons name _)) (list name)
+				_ '())))))
+			/* The native SimpleFold relation also covers Kelvin/long-s. Sort the
+			cold namespace once; suffix trials must not walk every declaration. */
+			(define less (collate "unicode-simple-fold" false))
+			(define namespace (sort (filter (merge existing explicit) string?) less))
+			(define contains (lambda (candidate low high)
+				(if (>= low high) false (begin
+					(define middle (floor (/ (+ low high) 2)))
+					(define current (nth namespace middle))
+					(if (equal?? candidate current) true
+						(less candidate current) (contains candidate low middle)
+						(contains candidate (+ middle 1) high))))))
+			(define next_suffix (newsession))
+			(define available (lambda (addition reserved number) (begin
+				(define candidate (psql_constraint_object_name table_name addition
+					(concat "fkey" (if (equal? number 0) "" (concat number)))))
+				(if (or (contains candidate 0 (count namespace))
+					(not (nil? (find reserved (lambda (name) (equal?? name candidate)) nil))))
+					(available addition reserved (+ number 1))
+					(begin (next_suffix addition (+ number 1)) candidate)))))
+			(define result (reduce definitions (lambda (state definition) (match definition
+				(cons "foreign" (cons name (cons columns rest)))
+				(if (nil? name) (begin
+					(define addition (psql_foreign_name_addition columns))
+					(define generated (available addition (car state) (coalesce (next_suffix addition) 0)))
+					(list (cons generated (car state))
+						(cons (cons "foreign" (cons generated (cons columns rest))) (cadr state))))
+					(list (car state) (cons definition (cadr state))))
+				_ (list (car state) (cons definition (cadr state))))) (list '() '())))
+			(reverse (cadr result))))))
+
+(define psql_create_relation (lambda (schema name definitions options ifnotexists tx)
+	/* Preserve the native IF NOT EXISTS fast path, including its initialization
+	barrier, without preparing declarations for a relation already present. */
+	(createtable schema name
+		(if (and ifnotexists (table schema false name false tx)) definitions
+			(psql_foreign_definitions schema name definitions tx)) options ifnotexists tx)))
+
 (define psql_identifier_unquoted (parser (not
 	(regex "[a-zA-Z_][a-zA-Z0-9_]*")
 	/* exceptions for things that can't be identifiers */
@@ -991,7 +1075,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			(parser '((atom "COLLATE" true) (define collation (regex "[a-zA-Z0-9_]+"))) '("collation" collation))
 			(parser '((atom "AUTO_INCREMENT" true) "=" (define collation (regex "[0-9]+"))) '("auto_increment" collation))
 		)))
-	) (list '!begin '((quote createtable) (coalesce schema2 schema) id (cons (quote list) cols) (cons (quote list) (merge options)) ifnotexists (quote tx)) (list 'quote '("psql-command-complete" "CREATE TABLE")))))
+	) (list '!begin '((quote psql_create_relation) (coalesce schema2 schema) id (cons (quote list) cols) (cons (quote list) (merge options)) ifnotexists (quote tx)) (list 'quote '("psql-command-complete" "CREATE TABLE")))))
 
 	(define psql_column_attributes (psql_make_column_attributes psql_expression))
 	(define psql_alter_table (parser '(
