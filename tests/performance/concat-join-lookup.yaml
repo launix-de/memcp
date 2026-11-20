@@ -1,0 +1,168 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+metadata:
+  version: '1.0'
+  description: Prefixed identifier equality exposes native lookup keys before auto indexing
+  isolated: true
+  max_regression_pct: 20
+  performance_rows: 120000
+setup:
+- sql: DROP TABLE IF EXISTS cj_changes
+- sql: DROP TABLE IF EXISTS cj_doc
+- sql: DROP TABLE IF EXISTS cj_doc_text
+- sql: DROP TABLE IF EXISTS cj_scalar
+- sql: CREATE TABLE cj_doc (id INT PRIMARY KEY, mandant INT) ENGINE=memory
+- sql: CREATE TABLE cj_changes (id INT PRIMARY KEY, item VARCHAR(100), selected INT) ENGINE=memory
+- sql: CREATE TABLE cj_doc_text (id VARCHAR(30) PRIMARY KEY, mandant INT) ENGINE=memory
+- sql: CREATE TABLE cj_scalar (id INT PRIMARY KEY, encoded VARCHAR(500), payload VARCHAR(30)) ENGINE=memory
+- scm: |-
+    (begin
+     (insert (table "memcp-tests" false "cj_doc" false) '("id" "mandant")
+      (map (produceN 40000) (lambda (i) (list i (mod i 20)))))
+     (insert (table "memcp-tests" false "cj_changes" false) '("id" "item" "selected")
+      (map (produceN 120000) (lambda (i) (list i
+       (concat (if (< i 40000) "doc:" "other:") (mod i 40000))
+       (if (< i 194) 1 0)))))
+     (insert (table "memcp-tests" false "cj_doc_text" false) '("id" "mandant")
+      (map (produceN 40000) (lambda (i) (list (concat i) (mod i 20)))))
+     (insert (table "memcp-tests" false "cj_scalar" false) '("id" "encoded" "payload")
+      (map (produceN 120000) (lambda (i) (list i (concat (if (< i 40000) "document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-" "other:") i) (concat i)))))
+     (rebuild true false) true)
+test_cases:
+- name: Prefixed document identifier join
+  sql: SELECT d.mandant, COUNT(DISTINCT d.id) AS n FROM cj_changes c JOIN cj_doc d ON c.item = CONCAT('doc:', d.id)
+    WHERE c.selected = 1 GROUP BY d.mandant ORDER BY d.mandant
+  warmup: 0
+  timing_samples: 101
+  timing_aggregation: total
+  threshold_ms: 5000
+  expect:
+    rows: 20
+    data:
+    - mandant: 0
+      n: 10
+    - mandant: 1
+      n: 10
+    - mandant: 2
+      n: 10
+    - mandant: 3
+      n: 10
+    - mandant: 4
+      n: 10
+    - mandant: 5
+      n: 10
+    - mandant: 6
+      n: 10
+    - mandant: 7
+      n: 10
+    - mandant: 8
+      n: 10
+    - mandant: 9
+      n: 10
+    - mandant: 10
+      n: 10
+    - mandant: 11
+      n: 10
+    - mandant: 12
+      n: 10
+    - mandant: 13
+      n: 10
+    - mandant: 14
+      n: 9
+    - mandant: 15
+      n: 9
+    - mandant: 16
+      n: 9
+    - mandant: 17
+      n: 9
+    - mandant: 18
+      n: 9
+    - mandant: 19
+      n: 9
+- name: Prefixed text identifier join
+  sql: SELECT d.mandant, COUNT(DISTINCT d.id) AS n FROM cj_changes c JOIN cj_doc_text d ON c.item = CONCAT('doc:',
+    d.id) WHERE c.selected = 1 GROUP BY d.mandant ORDER BY d.mandant
+  warmup: 0
+  timing_samples: 101
+  timing_aggregation: total
+  threshold_ms: 5000
+  expect:
+    rows: 20
+    data:
+    - mandant: 0
+      n: 10
+    - mandant: 1
+      n: 10
+    - mandant: 2
+      n: 10
+    - mandant: 3
+      n: 10
+    - mandant: 4
+      n: 10
+    - mandant: 5
+      n: 10
+    - mandant: 6
+      n: 10
+    - mandant: 7
+      n: 10
+    - mandant: 8
+      n: 10
+    - mandant: 9
+      n: 10
+    - mandant: 10
+      n: 10
+    - mandant: 11
+      n: 10
+    - mandant: 12
+      n: 10
+    - mandant: 13
+      n: 10
+    - mandant: 14
+      n: 9
+    - mandant: 15
+      n: 9
+    - mandant: 16
+      n: 9
+    - mandant: 17
+      n: 9
+    - mandant: 18
+      n: 9
+    - mandant: 19
+      n: 9
+- name: Shared concat affixes text join control
+  sql: SELECT COUNT(*) AS n FROM cj_doc_text a JOIN cj_doc_text b ON CONCAT('urn:document:',a.id,'#v1')=CONCAT('urn:document:',b.id,'#v1')
+    WHERE a.mandant=0
+  warmup: 0
+  timing_samples: 101
+  timing_aggregation: total
+  threshold_ms: 10000
+  expect:
+    rows: 1
+    data:
+    - n: 2000
+- name: Scalar concat equality avoids repeated large string allocation
+  sql: SELECT COUNT(*) AS n FROM cj_scalar WHERE encoded=CONCAT('document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-',payload)
+  warmup: 0
+  timing_samples: 101
+  timing_aggregation: total
+  threshold_ms: 30000
+  expect:
+    rows: 1
+    data:
+    - n: 40000
+- name: Computed text input keeps its original evaluation count
+  sql: SELECT COUNT(*) AS n FROM cj_scalar WHERE LOWER(encoded)=CONCAT('document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-',payload)
+  warmup: 0
+  timing_samples: 101
+  timing_aggregation: total
+  threshold_ms: 30000
+  expect:
+    rows: 1
+    data:
+    - n: 40000
+cleanup:
+- sql: DROP TABLE IF EXISTS cj_scalar
+- sql: DROP TABLE IF EXISTS cj_doc_text
+- sql: DROP TABLE IF EXISTS cj_changes
+- sql: DROP TABLE IF EXISTS cj_doc

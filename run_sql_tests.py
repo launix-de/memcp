@@ -1357,7 +1357,7 @@ class SQLTestRunner:
                 port = int(self.base_url.rsplit(':', 1)[1])
             except (ValueError, IndexError):
                 port = 4321
-            data_dir = Path(os.environ.get("MEMCP_TEST_DATA_DIR", f"/tmp/memcp-sql-tests-{port}"))
+            data_dir = Path(os.environ.get("MEMCP_TEST_DATA_DIR", os.path.join(tempfile.gettempdir(), f"memcp-sql-tests-{port}")))
             duration = float(test_case.get("duration", 1.0))
             reads, error = observe_atomic_json(data_dir / database / "schema.json", duration)
             if error is None:
@@ -2794,9 +2794,9 @@ def start_memcp_process(
         # all suites in this process, so restart/shutdown scenarios keep state
         # without depending on a developer's persistent ./data credentials.
         datadir = data_dir or os.environ.get(
-            "MEMCP_TEST_DATA_DIR", f"/tmp/memcp-sql-tests-{port}"
+            "MEMCP_TEST_DATA_DIR", os.path.join(tempfile.gettempdir(), f"memcp-sql-tests-{port}")
         )
-        _memcp_log_file = f"/tmp/memcp-test-{port}.log"
+        _memcp_log_file = os.path.join(tempfile.gettempdir(), f"memcp-test-{port}.log")
         env = os.environ.copy()
         memcp_bin = os.environ.get("MEMCP_BINARY", "./memcp")
         logfile = open(_memcp_log_file, 'w')

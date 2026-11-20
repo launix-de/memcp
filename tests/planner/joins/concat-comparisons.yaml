@@ -1,0 +1,864 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+metadata:
+  version: '1.0'
+  description: String-space CONCAT equality decomposition across SQL frontends
+  isolated: true
+setup:
+- sql: DROP TABLE IF EXISTS cr_values
+- sql: DROP TABLE IF EXISTS cr_encoded
+- sql: CREATE TABLE cr_values (id INT PRIMARY KEY, text_value VARCHAR(100) COLLATE
+    utf8mb4_bin, number_value BIGINT)
+- sql: CREATE TABLE cr_encoded (id INT PRIMARY KEY, encoded VARCHAR(200) COLLATE utf8mb4_bin)
+- sql: INSERT INTO cr_values VALUES (1,'123',123),(2,'00123',123),(3,'0',0),(4,'',NULL),(5,NULL,NULL),(6,'body',-1),(7,'9007199254740993',9007199254740993)
+- sql: INSERT INTO cr_encoded VALUES (1,'doc:123'),(2,'doc:00123'),(3,'doc:0'),(4,'doc:'),(5,NULL),(6,'pre:body:end'),(7,'doc:9007199254740993'),(8,'doc:123tail'),(9,'pre:end'),(10,'d'),(11,'end'),(12,'é:body')
+- sql: DROP TABLE IF EXISTS cr_locale
+- sql: CREATE TABLE cr_locale (id INT PRIMARY KEY, value VARCHAR(30) COLLATE utf8mb4_general_ci)
+- sql: INSERT INTO cr_locale VALUES (1,'K'),(2,'K')
+test_cases:
+- name: Text identifier join mysql
+  syntax: mysql
+  sql: SELECT e.id AS encoded_id,v.id AS value_id FROM cr_encoded e JOIN cr_values
+    v ON e.encoded=CONCAT('doc:',v.text_value) ORDER BY e.id,v.id
+  expect:
+    rows: 5
+    data:
+    - encoded_id: 1
+      value_id: 1
+    - encoded_id: 2
+      value_id: 2
+    - encoded_id: 3
+      value_id: 3
+    - encoded_id: 4
+      value_id: 4
+    - encoded_id: 7
+      value_id: 7
+- name: Numeric rendering stays textual mysql
+  syntax: mysql
+  sql: SELECT e.id AS encoded_id,v.id AS value_id FROM cr_encoded e JOIN cr_values
+    v ON e.encoded=CONCAT('doc:',v.number_value) ORDER BY e.id,v.id
+  expect:
+    rows: 4
+    data:
+    - encoded_id: 1
+      value_id: 1
+    - encoded_id: 1
+      value_id: 2
+    - encoded_id: 3
+      value_id: 3
+    - encoded_id: 7
+      value_id: 7
+- name: Prefix and suffix mysql
+  syntax: mysql
+  sql: SELECT e.id AS encoded_id,v.id AS value_id FROM cr_encoded e JOIN cr_values
+    v ON e.encoded=CONCAT('pre:',v.text_value,':end') ORDER BY e.id,v.id
+  expect:
+    rows: 1
+    data:
+    - encoded_id: 6
+      value_id: 6
+- name: Nested variadic prefix mysql
+  syntax: mysql
+  sql: SELECT e.id AS encoded_id,v.id AS value_id FROM cr_encoded e JOIN cr_values
+    v ON CONCAT('d','oc:',CONCAT(v.text_value,''))=e.encoded ORDER BY e.id,v.id
+  expect:
+    rows: 5
+    data:
+    - encoded_id: 1
+      value_id: 1
+    - encoded_id: 2
+      value_id: 2
+    - encoded_id: 3
+      value_id: 3
+    - encoded_id: 4
+      value_id: 4
+    - encoded_id: 7
+      value_id: 7
+- name: Suffix only mysql
+  syntax: mysql
+  sql: SELECT e.id AS encoded_id,v.id AS value_id FROM cr_encoded e JOIN cr_values
+    v ON e.encoded=CONCAT(v.text_value,'end') ORDER BY e.id,v.id
+  expect:
+    rows: 1
+    data:
+    - encoded_id: 11
+      value_id: 4
+- name: Empty prefix mysql
+  syntax: mysql
+  sql: SELECT v.id FROM cr_values v WHERE v.text_value=CONCAT('',v.text_value) ORDER
+    BY v.id
+  expect:
+    rows: 6
+    data:
+    - id: 1
+    - id: 2
+    - id: 3
+    - id: 4
+    - id: 6
+    - id: 7
+- name: Common affixes mysql
+  syntax: mysql
+  sql: SELECT a.id AS aid,b.id AS bid FROM cr_values a JOIN cr_values b ON CONCAT('pre:',a.text_value,':end')=CONCAT('pre:',b.text_value,':end')
+    WHERE a.id<=3 ORDER BY a.id,b.id
+  expect:
+    rows: 3
+    data:
+    - aid: 1
+      bid: 1
+    - aid: 2
+      bid: 2
+    - aid: 3
+      bid: 3
+- name: Outer join keeps unmatched rows mysql
+  syntax: mysql
+  sql: SELECT e.id AS encoded_id,v.id AS value_id FROM cr_encoded e LEFT JOIN cr_values
+    v ON e.encoded=CONCAT('doc:',v.text_value) WHERE e.id IN (1,2,8,10) ORDER BY e.id,v.id
+  expect:
+    rows: 4
+    data:
+    - encoded_id: 1
+      value_id: 1
+    - encoded_id: 2
+      value_id: 2
+    - encoded_id: 8
+      value_id: null
+    - encoded_id: 10
+      value_id: null
+- name: Negation retains NULL semantics mysql
+  syntax: mysql
+  sql: SELECT v.id FROM cr_values v WHERE NOT (CONCAT('doc:',v.text_value)='doc:123')
+    ORDER BY v.id
+  expect:
+    rows: 5
+    data:
+    - id: 2
+    - id: 3
+    - id: 4
+    - id: 6
+    - id: 7
+- name: Unicode prefix retains its comparison mysql
+  syntax: mysql
+  sql: SELECT e.id AS encoded_id,v.id AS value_id FROM cr_encoded e JOIN cr_values
+    v ON e.encoded=CONCAT('é:',v.text_value) ORDER BY e.id,v.id
+  expect:
+    rows: 1
+    data:
+    - encoded_id: 12
+      value_id: 6
+- name: Text identifier join postgresql
+  syntax: postgresql
+  sql: SELECT e.id AS encoded_id,v.id AS value_id FROM cr_encoded e JOIN cr_values
+    v ON e.encoded=CONCAT('doc:',v.text_value) ORDER BY e.id,v.id
+  expect:
+    rows: 5
+    data:
+    - encoded_id: 1
+      value_id: 1
+    - encoded_id: 2
+      value_id: 2
+    - encoded_id: 3
+      value_id: 3
+    - encoded_id: 4
+      value_id: 4
+    - encoded_id: 7
+      value_id: 7
+- name: Numeric rendering stays textual postgresql
+  syntax: postgresql
+  sql: SELECT e.id AS encoded_id,v.id AS value_id FROM cr_encoded e JOIN cr_values
+    v ON e.encoded=CONCAT('doc:',v.number_value) ORDER BY e.id,v.id
+  expect:
+    rows: 4
+    data:
+    - encoded_id: 1
+      value_id: 1
+    - encoded_id: 1
+      value_id: 2
+    - encoded_id: 3
+      value_id: 3
+    - encoded_id: 7
+      value_id: 7
+- name: Prefix and suffix postgresql
+  syntax: postgresql
+  sql: SELECT e.id AS encoded_id,v.id AS value_id FROM cr_encoded e JOIN cr_values
+    v ON e.encoded=CONCAT('pre:',v.text_value,':end') ORDER BY e.id,v.id
+  expect:
+    rows: 1
+    data:
+    - encoded_id: 6
+      value_id: 6
+- name: Nested variadic prefix postgresql
+  syntax: postgresql
+  sql: SELECT e.id AS encoded_id,v.id AS value_id FROM cr_encoded e JOIN cr_values
+    v ON CONCAT('d','oc:',CONCAT(v.text_value,''))=e.encoded ORDER BY e.id,v.id
+  expect:
+    rows: 5
+    data:
+    - encoded_id: 1
+      value_id: 1
+    - encoded_id: 2
+      value_id: 2
+    - encoded_id: 3
+      value_id: 3
+    - encoded_id: 4
+      value_id: 4
+    - encoded_id: 7
+      value_id: 7
+- name: Suffix only postgresql
+  syntax: postgresql
+  sql: SELECT e.id AS encoded_id,v.id AS value_id FROM cr_encoded e JOIN cr_values
+    v ON e.encoded=CONCAT(v.text_value,'end') ORDER BY e.id,v.id
+  expect:
+    rows: 1
+    data:
+    - encoded_id: 11
+      value_id: 4
+- name: Empty prefix postgresql
+  syntax: postgresql
+  sql: SELECT v.id FROM cr_values v WHERE v.text_value=CONCAT('',v.text_value) ORDER
+    BY v.id
+  expect:
+    rows: 6
+    data:
+    - id: 1
+    - id: 2
+    - id: 3
+    - id: 4
+    - id: 6
+    - id: 7
+- name: Common affixes postgresql
+  syntax: postgresql
+  sql: SELECT a.id AS aid,b.id AS bid FROM cr_values a JOIN cr_values b ON CONCAT('pre:',a.text_value,':end')=CONCAT('pre:',b.text_value,':end')
+    WHERE a.id<=3 ORDER BY a.id,b.id
+  expect:
+    rows: 3
+    data:
+    - aid: 1
+      bid: 1
+    - aid: 2
+      bid: 2
+    - aid: 3
+      bid: 3
+- name: Outer join keeps unmatched rows postgresql
+  syntax: postgresql
+  sql: SELECT e.id AS encoded_id,v.id AS value_id FROM cr_encoded e LEFT JOIN cr_values
+    v ON e.encoded=CONCAT('doc:',v.text_value) WHERE e.id IN (1,2,8,10) ORDER BY e.id,v.id
+  expect:
+    rows: 4
+    data:
+    - encoded_id: 1
+      value_id: 1
+    - encoded_id: 2
+      value_id: 2
+    - encoded_id: 8
+      value_id: null
+    - encoded_id: 10
+      value_id: null
+- name: Negation retains NULL semantics postgresql
+  syntax: postgresql
+  sql: SELECT v.id FROM cr_values v WHERE NOT (CONCAT('doc:',v.text_value)='doc:123')
+    ORDER BY v.id
+  expect:
+    rows: 5
+    data:
+    - id: 2
+    - id: 3
+    - id: 4
+    - id: 6
+    - id: 7
+- name: Unicode prefix retains its comparison postgresql
+  syntax: postgresql
+  sql: SELECT e.id AS encoded_id,v.id AS value_id FROM cr_encoded e JOIN cr_values
+    v ON e.encoded=CONCAT('é:',v.text_value) ORDER BY e.id,v.id
+  expect:
+    rows: 1
+    data:
+    - encoded_id: 12
+      value_id: 6
+- name: Text identifier join tsql
+  syntax: tsql
+  sql: SELECT e.id AS encoded_id,v.id AS value_id FROM cr_encoded e JOIN cr_values
+    v ON e.encoded=CONCAT('doc:',v.text_value) ORDER BY e.id,v.id
+  expect:
+    rows: 6
+    data:
+    - encoded_id: 1
+      value_id: 1
+    - encoded_id: 2
+      value_id: 2
+    - encoded_id: 3
+      value_id: 3
+    - encoded_id: 4
+      value_id: 4
+    - encoded_id: 4
+      value_id: 5
+    - encoded_id: 7
+      value_id: 7
+- name: Numeric rendering stays textual tsql
+  syntax: tsql
+  sql: SELECT e.id AS encoded_id,v.id AS value_id FROM cr_encoded e JOIN cr_values
+    v ON e.encoded=CONCAT('doc:',v.number_value) ORDER BY e.id,v.id
+  expect:
+    rows: 6
+    data:
+    - encoded_id: 1
+      value_id: 1
+    - encoded_id: 1
+      value_id: 2
+    - encoded_id: 3
+      value_id: 3
+    - encoded_id: 4
+      value_id: 4
+    - encoded_id: 4
+      value_id: 5
+    - encoded_id: 7
+      value_id: 7
+- name: Prefix and suffix tsql
+  syntax: tsql
+  sql: SELECT e.id AS encoded_id,v.id AS value_id FROM cr_encoded e JOIN cr_values
+    v ON e.encoded=CONCAT('pre:',v.text_value,':end') ORDER BY e.id,v.id
+  expect:
+    rows: 1
+    data:
+    - encoded_id: 6
+      value_id: 6
+- name: Nested variadic prefix tsql
+  syntax: tsql
+  sql: SELECT e.id AS encoded_id,v.id AS value_id FROM cr_encoded e JOIN cr_values
+    v ON CONCAT('d','oc:',CONCAT(v.text_value,''))=e.encoded ORDER BY e.id,v.id
+  expect:
+    rows: 6
+    data:
+    - encoded_id: 1
+      value_id: 1
+    - encoded_id: 2
+      value_id: 2
+    - encoded_id: 3
+      value_id: 3
+    - encoded_id: 4
+      value_id: 4
+    - encoded_id: 4
+      value_id: 5
+    - encoded_id: 7
+      value_id: 7
+- name: Suffix only tsql
+  syntax: tsql
+  sql: SELECT e.id AS encoded_id,v.id AS value_id FROM cr_encoded e JOIN cr_values
+    v ON e.encoded=CONCAT(v.text_value,'end') ORDER BY e.id,v.id
+  expect:
+    rows: 2
+    data:
+    - encoded_id: 11
+      value_id: 4
+    - encoded_id: 11
+      value_id: 5
+- name: Empty prefix tsql
+  syntax: tsql
+  sql: SELECT v.id FROM cr_values v WHERE v.text_value=CONCAT('',v.text_value) ORDER
+    BY v.id
+  expect:
+    rows: 6
+    data:
+    - id: 1
+    - id: 2
+    - id: 3
+    - id: 4
+    - id: 6
+    - id: 7
+- name: Common affixes tsql
+  syntax: tsql
+  sql: SELECT a.id AS aid,b.id AS bid FROM cr_values a JOIN cr_values b ON CONCAT('pre:',a.text_value,':end')=CONCAT('pre:',b.text_value,':end')
+    WHERE a.id<=3 ORDER BY a.id,b.id
+  expect:
+    rows: 3
+    data:
+    - aid: 1
+      bid: 1
+    - aid: 2
+      bid: 2
+    - aid: 3
+      bid: 3
+- name: Outer join keeps unmatched rows tsql
+  syntax: tsql
+  sql: SELECT e.id AS encoded_id,v.id AS value_id FROM cr_encoded e LEFT JOIN cr_values
+    v ON e.encoded=CONCAT('doc:',v.text_value) WHERE e.id IN (1,2,8,10) ORDER BY e.id,v.id
+  expect:
+    rows: 4
+    data:
+    - encoded_id: 1
+      value_id: 1
+    - encoded_id: 2
+      value_id: 2
+    - encoded_id: 8
+      value_id: null
+    - encoded_id: 10
+      value_id: null
+- name: Negation retains NULL semantics tsql
+  syntax: tsql
+  sql: SELECT v.id FROM cr_values v WHERE NOT (CONCAT('doc:',v.text_value)='doc:123')
+    ORDER BY v.id
+  expect:
+    rows: 6
+    data:
+    - id: 2
+    - id: 3
+    - id: 4
+    - id: 5
+    - id: 6
+    - id: 7
+- name: Unicode prefix retains its comparison tsql
+  syntax: tsql
+  sql: SELECT e.id AS encoded_id,v.id AS value_id FROM cr_encoded e JOIN cr_values
+    v ON e.encoded=CONCAT('é:',v.text_value) ORDER BY e.id,v.id
+  expect:
+    rows: 1
+    data:
+    - encoded_id: 12
+      value_id: 6
+- name: Unknown payload column is rejected
+  sql: SELECT e.id FROM cr_encoded e JOIN cr_values v ON e.encoded=CONCAT('doc:',v.missing)
+  expect:
+    error: true
+- name: Shared variable prefix remains NULL rejecting mysql
+  syntax: mysql
+  sql: SELECT v.id FROM cr_values v WHERE CONCAT(v.text_value,'abc')=CONCAT(v.text_value,'abc')
+    ORDER BY v.id
+  expect:
+    rows: 6
+    data:
+    - id: 1
+    - id: 2
+    - id: 3
+    - id: 4
+    - id: 6
+    - id: 7
+- name: Shared variable suffix remains NULL rejecting mysql
+  syntax: mysql
+  sql: SELECT v.id FROM cr_values v WHERE CONCAT('abc',v.text_value)=CONCAT('abc',v.text_value)
+    ORDER BY v.id
+  expect:
+    rows: 6
+    data:
+    - id: 1
+    - id: 2
+    - id: 3
+    - id: 4
+    - id: 6
+    - id: 7
+- name: Positive disjunction mysql
+  syntax: mysql
+  sql: SELECT v.id FROM cr_values v WHERE CONCAT('doc:',v.text_value)='doc:123' OR
+    CONCAT('doc:',v.text_value)='doc:00123' ORDER BY v.id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+    - id: 2
+- name: Literal wildcard characters stay literal mysql
+  syntax: mysql
+  sql: SELECT v.id FROM cr_values v WHERE CONCAT('a%_',v.text_value)=CONCAT('a%_',v.text_value)
+    ORDER BY v.id
+  expect:
+    rows: 6
+    data:
+    - id: 1
+    - id: 2
+    - id: 3
+    - id: 4
+    - id: 6
+    - id: 7
+- name: Rewrite precedes join ordering mysql
+  syntax: mysql
+  sql: EXPLAIN REORDER SELECT e.id FROM cr_encoded e CROSS JOIN cr_values v WHERE
+    e.encoded=CONCAT('doc:',v.text_value)
+  expect:
+    rows: 1
+    result_contains:
+    - sql_substr
+- name: Shared affixes avoid composite computed keys mysql
+  syntax: mysql
+  sql: EXPLAIN REORDER SELECT a.id FROM cr_values a CROSS JOIN cr_values b WHERE CONCAT('pre:',a.text_value,':end')=CONCAT('pre:',b.text_value,':end')
+  expect:
+    rows: 1
+    result_not_contains:
+    - concat
+- name: Shared variable prefix remains NULL rejecting postgresql
+  syntax: postgresql
+  sql: SELECT v.id FROM cr_values v WHERE CONCAT(v.text_value,'abc')=CONCAT(v.text_value,'abc')
+    ORDER BY v.id
+  expect:
+    rows: 6
+    data:
+    - id: 1
+    - id: 2
+    - id: 3
+    - id: 4
+    - id: 6
+    - id: 7
+- name: Shared variable suffix remains NULL rejecting postgresql
+  syntax: postgresql
+  sql: SELECT v.id FROM cr_values v WHERE CONCAT('abc',v.text_value)=CONCAT('abc',v.text_value)
+    ORDER BY v.id
+  expect:
+    rows: 6
+    data:
+    - id: 1
+    - id: 2
+    - id: 3
+    - id: 4
+    - id: 6
+    - id: 7
+- name: Positive disjunction postgresql
+  syntax: postgresql
+  sql: SELECT v.id FROM cr_values v WHERE CONCAT('doc:',v.text_value)='doc:123' OR
+    CONCAT('doc:',v.text_value)='doc:00123' ORDER BY v.id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+    - id: 2
+- name: Literal wildcard characters stay literal postgresql
+  syntax: postgresql
+  sql: SELECT v.id FROM cr_values v WHERE CONCAT('a%_',v.text_value)=CONCAT('a%_',v.text_value)
+    ORDER BY v.id
+  expect:
+    rows: 6
+    data:
+    - id: 1
+    - id: 2
+    - id: 3
+    - id: 4
+    - id: 6
+    - id: 7
+- name: Rewrite precedes join ordering postgresql
+  syntax: postgresql
+  sql: EXPLAIN REORDER SELECT e.id FROM cr_encoded e CROSS JOIN cr_values v WHERE
+    e.encoded=CONCAT('doc:',v.text_value)
+  expect:
+    rows: 1
+    result_contains:
+    - sql_substr
+- name: Shared affixes avoid composite computed keys postgresql
+  syntax: postgresql
+  sql: EXPLAIN REORDER SELECT a.id FROM cr_values a CROSS JOIN cr_values b WHERE CONCAT('pre:',a.text_value,':end')=CONCAT('pre:',b.text_value,':end')
+  expect:
+    rows: 1
+    result_not_contains:
+    - concat
+- name: Shared variable prefix remains NULL rejecting tsql
+  syntax: tsql
+  sql: SELECT v.id FROM cr_values v WHERE CONCAT(v.text_value,'abc')=CONCAT(v.text_value,'abc')
+    ORDER BY v.id
+  expect:
+    rows: 7
+    data:
+    - id: 1
+    - id: 2
+    - id: 3
+    - id: 4
+    - id: 5
+    - id: 6
+    - id: 7
+- name: Shared variable suffix remains NULL rejecting tsql
+  syntax: tsql
+  sql: SELECT v.id FROM cr_values v WHERE CONCAT('abc',v.text_value)=CONCAT('abc',v.text_value)
+    ORDER BY v.id
+  expect:
+    rows: 7
+    data:
+    - id: 1
+    - id: 2
+    - id: 3
+    - id: 4
+    - id: 5
+    - id: 6
+    - id: 7
+- name: Positive disjunction tsql
+  syntax: tsql
+  sql: SELECT v.id FROM cr_values v WHERE CONCAT('doc:',v.text_value)='doc:123' OR
+    CONCAT('doc:',v.text_value)='doc:00123' ORDER BY v.id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+    - id: 2
+- name: Literal wildcard characters stay literal tsql
+  syntax: tsql
+  sql: SELECT v.id FROM cr_values v WHERE CONCAT('a%_',v.text_value)=CONCAT('a%_',v.text_value)
+    ORDER BY v.id
+  expect:
+    rows: 7
+    data:
+    - id: 1
+    - id: 2
+    - id: 3
+    - id: 4
+    - id: 5
+    - id: 6
+    - id: 7
+- name: Rewrite precedes join ordering tsql
+  syntax: tsql
+  sql: EXPLAIN REORDER SELECT e.id FROM cr_encoded e CROSS JOIN cr_values v WHERE
+    e.encoded=CONCAT('doc:',v.text_value)
+  expect:
+    rows: 1
+    result_contains:
+    - sql_substr
+- name: Shared affixes avoid composite computed keys tsql
+  syntax: tsql
+  sql: EXPLAIN REORDER SELECT a.id FROM cr_values a CROSS JOIN cr_values b WHERE CONCAT('pre:',a.text_value,':end')=CONCAT('pre:',b.text_value,':end')
+  expect:
+    rows: 1
+    result_not_contains:
+    - concat
+- name: Contextual collation preserves full comparison mysql
+  syntax: mysql
+  sql: SELECT id FROM cr_locale WHERE CONCAT('doc:',value)=CONCAT('doc:','K') ORDER
+    BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+    - id: 2
+- name: Contextual collation avoids invalid cancellation mysql
+  syntax: mysql
+  sql: SELECT b.id FROM cr_locale a CROSS JOIN cr_locale b WHERE a.id=1 AND CONCAT('doc:',a.value)=CONCAT('doc:',b.value)
+    ORDER BY b.id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+    - id: 2
+- name: Contextual collation preserves full comparison postgresql
+  syntax: postgresql
+  sql: SELECT id FROM cr_locale WHERE CONCAT('doc:',value)=CONCAT('doc:','K') ORDER
+    BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+    - id: 2
+- name: Contextual collation avoids invalid cancellation postgresql
+  syntax: postgresql
+  sql: SELECT b.id FROM cr_locale a CROSS JOIN cr_locale b WHERE a.id=1 AND CONCAT('doc:',a.value)=CONCAT('doc:',b.value)
+    ORDER BY b.id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+    - id: 2
+- name: Contextual collation preserves full comparison tsql
+  syntax: tsql
+  sql: SELECT id FROM cr_locale WHERE CONCAT('doc:',value)=CONCAT('doc:','K') ORDER
+    BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+    - id: 2
+- name: Contextual collation avoids invalid cancellation tsql
+  syntax: tsql
+  sql: SELECT b.id FROM cr_locale a CROSS JOIN cr_locale b WHERE a.id=1 AND CONCAT('doc:',a.value)=CONCAT('doc:',b.value)
+    ORDER BY b.id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+    - id: 2
+- name: Native NULL-safe equality keeps its original expression
+  scm: |-
+    (begin
+     (define sources (list
+       (list "e" "{database}" "cr_encoded" false nil)
+       (list "v" "{database}" "cr_values" false nil)))
+     (define expr (list (quote equal?)
+       (list (quote get_column) "e" false "encoded" false)
+       (list (quote sql_concat) "doc:"
+         (list (quote get_column) "v" false "text_value" false))))
+     (expression_equal? (concat_lookup_term sources expr) expr))
+  expect:
+    result: true
+- name: Unrelated collated equality keeps its original expression
+  scm: |-
+    (begin
+     (define sources (list (list "v" "{database}" "cr_values" false nil)))
+     (define expr (list (quote equal_collate)
+       (list (quote get_column) "v" false "number_value" false) 0 "bin"))
+     (expression_equal? (concat_lookup_term sources expr) expr))
+  expect:
+    result: true
+- name: Shared literal prefix preserves NULL behavior mysql
+  syntax: mysql
+  sql: SELECT id FROM cr_values WHERE CONCAT('pre:',text_value)=CONCAT('pre:',text_value)
+    ORDER BY id
+  expect:
+    rows: 6
+    data:
+    - id: 1
+    - id: 2
+    - id: 3
+    - id: 4
+    - id: 6
+    - id: 7
+- name: Shared literal prefix preserves NULL behavior postgresql
+  syntax: postgresql
+  sql: SELECT id FROM cr_values WHERE CONCAT('pre:',text_value)=CONCAT('pre:',text_value)
+    ORDER BY id
+  expect:
+    rows: 6
+    data:
+    - id: 1
+    - id: 2
+    - id: 3
+    - id: 4
+    - id: 6
+    - id: 7
+- name: Shared literal prefix preserves NULL behavior tsql
+  syntax: tsql
+  sql: SELECT id FROM cr_values WHERE CONCAT('pre:',text_value)=CONCAT('pre:',text_value)
+    ORDER BY id
+  expect:
+    rows: 7
+    data:
+    - id: 1
+    - id: 2
+    - id: 3
+    - id: 4
+    - id: 5
+    - id: 6
+    - id: 7
+- name: Binary prefix rejects nullable residual mysql
+  syntax: mysql
+  sql: SELECT e.id AS encoded_id,v.id AS value_id FROM cr_encoded e CROSS JOIN cr_values
+    v WHERE e.encoded=CONCAT('doc:',v.text_value) ORDER BY e.id,v.id
+  expect:
+    rows: 5
+    data:
+    - encoded_id: 1
+      value_id: 1
+    - encoded_id: 2
+      value_id: 2
+    - encoded_id: 3
+      value_id: 3
+    - encoded_id: 4
+      value_id: 4
+    - encoded_id: 7
+      value_id: 7
+- name: False-like binary prefix rejects NULL input mysql
+  syntax: mysql
+  sql: SELECT COUNT(*) AS n FROM cr_encoded e CROSS JOIN cr_values v WHERE e.encoded=CONCAT('0',v.text_value)
+  expect:
+    data:
+    - n: 0
+- name: Binary prefix rejects nullable residual postgresql
+  syntax: postgresql
+  sql: SELECT e.id AS encoded_id,v.id AS value_id FROM cr_encoded e CROSS JOIN cr_values
+    v WHERE e.encoded=CONCAT('doc:',v.text_value) ORDER BY e.id,v.id
+  expect:
+    rows: 5
+    data:
+    - encoded_id: 1
+      value_id: 1
+    - encoded_id: 2
+      value_id: 2
+    - encoded_id: 3
+      value_id: 3
+    - encoded_id: 4
+      value_id: 4
+    - encoded_id: 7
+      value_id: 7
+- name: False-like binary prefix rejects NULL input postgresql
+  syntax: postgresql
+  sql: SELECT COUNT(*) AS n FROM cr_encoded e CROSS JOIN cr_values v WHERE e.encoded=CONCAT('0',v.text_value)
+  expect:
+    data:
+    - n: 0
+- name: Binary prefix rejects nullable residual tsql
+  syntax: tsql
+  sql: SELECT e.id AS encoded_id,v.id AS value_id FROM cr_encoded e CROSS JOIN cr_values
+    v WHERE e.encoded=CONCAT('doc:',v.text_value) ORDER BY e.id,v.id
+  expect:
+    rows: 6
+    data:
+    - encoded_id: 1
+      value_id: 1
+    - encoded_id: 2
+      value_id: 2
+    - encoded_id: 3
+      value_id: 3
+    - encoded_id: 4
+      value_id: 4
+    - encoded_id: 4
+      value_id: 5
+    - encoded_id: 7
+      value_id: 7
+- name: False-like binary prefix rejects NULL input tsql
+  syntax: tsql
+  sql: SELECT COUNT(*) AS n FROM cr_encoded e CROSS JOIN cr_values v WHERE e.encoded=CONCAT('0',v.text_value)
+  expect:
+    data:
+    - n: 0
+- name: Computed input is not duplicated mysql
+  syntax: mysql
+  sql: EXPLAIN REORDER SELECT e.id FROM cr_encoded e CROSS JOIN cr_values v WHERE
+    LOWER(e.encoded)=CONCAT('doc:',v.text_value)
+  expect:
+    rows: 1
+    result_contains:
+    - concat
+    result_not_contains:
+    - sql_substr
+- name: Computed component is not duplicated mysql
+  syntax: mysql
+  sql: EXPLAIN REORDER SELECT e.id FROM cr_encoded e CROSS JOIN cr_values v WHERE
+    e.encoded=CONCAT('doc:',LOWER(v.text_value))
+  expect:
+    rows: 1
+    result_contains:
+    - concat
+    result_not_contains:
+    - sql_substr
+- name: Computed input is not duplicated postgresql
+  syntax: postgresql
+  sql: EXPLAIN REORDER SELECT e.id FROM cr_encoded e CROSS JOIN cr_values v WHERE
+    LOWER(e.encoded)=CONCAT('doc:',v.text_value)
+  expect:
+    rows: 1
+    result_contains:
+    - concat
+    result_not_contains:
+    - sql_substr
+- name: Computed component is not duplicated postgresql
+  syntax: postgresql
+  sql: EXPLAIN REORDER SELECT e.id FROM cr_encoded e CROSS JOIN cr_values v WHERE
+    e.encoded=CONCAT('doc:',LOWER(v.text_value))
+  expect:
+    rows: 1
+    result_contains:
+    - concat
+    result_not_contains:
+    - sql_substr
+- name: Computed input is not duplicated tsql
+  syntax: tsql
+  sql: EXPLAIN REORDER SELECT e.id FROM cr_encoded e CROSS JOIN cr_values v WHERE
+    LOWER(e.encoded)=CONCAT('doc:',v.text_value)
+  expect:
+    rows: 1
+    result_contains:
+    - concat
+    result_not_contains:
+    - sql_substr
+- name: Computed component is not duplicated tsql
+  syntax: tsql
+  sql: EXPLAIN REORDER SELECT e.id FROM cr_encoded e CROSS JOIN cr_values v WHERE
+    e.encoded=CONCAT('doc:',LOWER(v.text_value))
+  expect:
+    rows: 1
+    result_contains:
+    - concat
+    result_not_contains:
+    - sql_substr
+cleanup:
+- sql: DROP TABLE IF EXISTS cr_locale
+- sql: DROP TABLE IF EXISTS cr_encoded
+- sql: DROP TABLE IF EXISTS cr_values
