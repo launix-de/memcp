@@ -7,8 +7,12 @@ Unknown execution work cannot establish a specialization benefit. */
 (define sql_parameter_candidate_cost (lambda (variant reused)
 	(begin
 		(define info (nth variant 3))
-		(define execution (qassoc_get (qassoc_get info (quote execution_cost) nil)
+		(define modeled (qassoc_get (qassoc_get info (quote execution_cost) nil)
 			(quote execution_ns) nil))
+		(define observation (qassoc_get info (quote observation) nil))
+		(define observed (if (nil? observation) nil (observation "execution_ns")))
+		(define execution (if (and (number? modeled) (number? observed))
+			(max modeled observed) modeled))
 		(if (not (number? execution)) nil
 			(planner_cost 0 execution 0 0 0 0 0
 				(if reused 0 (qassoc_get info (quote compile_ns) 0)) nil 0.5)))))
@@ -23,3 +27,60 @@ Unknown execution work cannot establish a specialization benefit. */
 			(< (qassoc_get specialized_cost (quote execution_ns) 0)
 				(qassoc_get generic_cost (quote execution_ns) 0))
 			(planner_cost_better? specialized_cost generic_cost)))))
+
+/* Only parameterized entries pay query-boundary timing. The dispatch closure
+retains scalar observations, never the executing request, transaction or rows.
+An observed model miss revokes reuse on the next boundary; it cannot authorize
+specialization without a fresh candidate cost comparison. */
+(define sql_parameter_generic? (lambda (variant)
+	(equal? (qassoc_get (nth variant 3) (quote parameter_mode) nil) "generic")))
+
+(define sql_parameter_reusable? (lambda (info)
+	(begin
+		(define budget (qassoc_get info (quote recompile_ns) nil))
+		(define work (parameter_plan_reuse_work (qassoc_get info (quote work_profile) nil)))
+		(define observation (qassoc_get info (quote observation) nil))
+		(and (number? budget) (number? work) (<= work budget)
+			(<= (coalesceNil (observation "execution_ns") 0) budget)))))
+
+(define sql_parameter_execute (lambda (info plan session tx resultrow resultfields)
+	(begin
+		(define started (nanotime))
+		(define result (plan session tx resultrow resultfields))
+		((qassoc_get info (quote observation) nil) "execution_ns" (- (nanotime) started))
+		result)))
+
+(define sql_parameter_choose_candidate (lambda (specialized entry variants parse_fn schema parse_query policy session tx)
+	(begin
+		(define specialized_info (nth specialized 3))
+		/* A miss only permits evaluation. Neither miss count nor the existing
+		variant cap participates in the cost decision. Unknown work declines. */
+		(define prior_compiles (map (filter variants (lambda (variant)
+			(not (sql_parameter_generic? variant))))
+			(lambda (variant) (qassoc_get (nth variant 3) (quote compile_ns) 0))))
+		(define budget (reduce prior_compiles min
+			(qassoc_get specialized_info (quote compile_ns) 0)))
+		(define work (parameter_plan_reuse_work (qassoc_get specialized_info (quote work_profile) nil)))
+		/* Decline an unpriced or already expensive domain before compiling a
+		second candidate. Large flat scans retain the original miss cost too. */
+		(if (or (empty_list? (qassoc_get specialized_info (quote parameters) '()))
+			(not (number? work)) (> work budget)
+			(nil? (sql_parameter_candidate_cost specialized false))) specialized
+			(begin
+				(define generic (sql_compile_queryplan_variant parse_fn schema parse_query policy session tx "generic"))
+				/* Carry actual generic execution evidence across recompilation. A
+				fresh scalar cell must not erase the observation which caused this
+				miss and select the same demonstrably expensive work again. */
+				(define previous_observation (entry "parameter_observation"))
+				(define observation (if (nil? previous_observation) (newsession) previous_observation))
+				(entry "parameter_observation" observation)
+				(define info (qassoc_set (qassoc_set (nth generic 3)
+					(quote recompile_ns) budget) (quote observation) observation))
+				(define candidate (list (car generic) (cadr generic) (nth generic 2) info))
+				(if (and (not (nil? (sql_parameter_candidate_cost candidate false)))
+					(sql_parameter_reusable? info)
+					(not (sql_parameter_specialization_preferred? specialized candidate false)))
+					(list (list (quote and) (car generic)
+						(list (quote sql_parameter_reusable?) (list (quote quote) info)))
+						(cadr generic) (nth generic 2) info)
+					specialized))))))

@@ -13430,25 +13430,81 @@ compile repeats Scheme closure optimization even when no domain was changed. */
 		(and (or (ir_has_contribution_domain? candidate) (ir_has_invariant_property_cover? candidate))
 			(not (ir_has_unproved_query_aggregate? candidate))))))
 
-/* Candidate comparison consumes the chosen logical work profile. Unknown
-execution work stays unknown; it is never a zero-cost specialization benefit.
-Single-source scans have the same calibrated base profile used by join DP. */
-(define parameter_plan_execution_cost (lambda (ir)
+/* A reusable candidate needs a priced, closed work domain. This initial
+profile covers flat native joins and scalar column/Boolean work, not opaque
+procedures, grouped carriers or relation-free arbitrary projections. Count the
+full Cartesian domain deliberately: parameter selectivity cannot make this
+compilation break-even estimate smaller and hide a later specialization. */
+(define parameter_plan_scalar_work (lambda (expr)
+	(if (or (query_session_read? expr) (sql_column_ref? expr)) 1
+		(match expr
+			((symbol quote) _value) 0
+			(cons head tail)
+			(if (and (symbol? head) (contains? (list (quote and) (quote or) (quote not) (quote if)
+				(quote equal?) (quote equal??) (quote <) (quote >) (quote <=) (quote >=) (quote nil?)
+				(quote sql_is_null) (quote sql_is_not_null) (quote sql_not) (quote sql_and)
+				(quote sql_or) (quote sql_compare)) head))
+				(reduce tail (lambda (total part) (begin
+					(define cost (parameter_plan_scalar_work part))
+					(if (and (number? total) (number? cost)) (+ total cost 1) nil))) 0)
+				nil)
+			_ (if (or (nil? expr) (string? expr) (number? expr)
+				(expression_equal? expr true) (expression_equal? expr false)) 0 nil)))))
+
+(define parameter_plan_work_profile (lambda (ir)
 	(begin
 		(define root (ir_root ir))
 		(if (or (not (query_block? root)) (not (empty_list? (ir_stages ir)))) nil
 			(begin
-				(define chosen (qassoc_get (qb_facts root) (quote join_cost) nil))
-				(if (number? (qassoc_get chosen (quote execution_ns) nil)) chosen
-					(empty_list? (qb_sources root)) (planner_zero_cost 1 1)
-					(begin
-						(define rows (map (qb_sources root) planner_source_row_count))
-						(if (reduce rows (lambda (known count) (and known (number? count))) true)
-							(planner_scan_cost (reduce rows + 0) 0.5) nil))))))))
+				(define sources (qb_sources root))
+				(define expressions (merge (list
+					(extract_assoc (qb_fields root) (lambda (_title expr) expr))
+					(extract_assoc (qb_hidden root) (lambda (_title expr) expr))
+					(map (qb_order root) car)
+					(map sources source_join_expr)
+					(list (qb_where root) (qb_limit root) (qb_offset root)))))
+				(define scalar_work (reduce expressions (lambda (total expr) (begin
+					(define cost (parameter_plan_scalar_work expr))
+					(if (and (number? total) (number? cost)) (+ total cost) nil))) 0))
+				(if (and (not (empty_list? sources)) (<= (count sources) 5)
+					(empty_list? (qb_group root)) (not (query_block_has_aggregates? root))
+					(number? scalar_work)
+					(reduce sources (lambda (known src) (and known (source_is_base_table? src))) true))
+					(list sources scalar_work (count (qb_order root))) nil))))))
+
+(define parameter_plan_reuse_work (lambda (profile)
+	(if (nil? profile) nil
+		(begin
+			(define statistics (map (car profile) (lambda (src)
+				(table_planner_statistics (table (source_schema src) false (source_relation src) false)))))
+			(define rows (map statistics (lambda (stats) (stats "row_count"))))
+			(if (or (not (reduce statistics (lambda (known stats)
+				(and known (expression_equal? (stats "has_read_program") false))) true))
+				(not (reduce rows (lambda (known value) (and known (number? value))) true))) nil
+				(begin
+					(define domain (reduce rows (lambda (total value) (* total (max 1 (+ 0.0 value)))) 1.0))
+					(+ (* (count rows) 4000)
+						(* (reduce rows + 0) 54.0)
+						(* domain (count rows) 1240.0)
+						(* domain (cadr profile) planner_membership_expression_operation_row_ns)
+						(if (equal? (nth profile 2) 0) 0
+							(+ planner_membership_ordered_scan_invocation_ns
+								(* (nth profile 2) (membership_ordered_recset_sort_work domain)
+									planner_membership_ordered_recset_sort_unit_ns))))))))))
+
+(define parameter_plan_execution_cost (lambda (ir)
+	(begin
+		(define root (ir_root ir))
+		(if (or (not (query_block? root)) (not (empty_list? (ir_stages ir)))) nil
+			/* A join's chosen work profile is authoritative. Neither summing
+			unrelated scans nor a relation-free projection proves its full cost. */
+			(qassoc_get (qb_facts root) (quote join_cost) nil)))))
 
 (define record_parameter_plan_execution_cost (lambda (ir planning_session)
 	(if (nil? planning_session) nil
-		(planning_session "__memcp_queryplan_candidate_cost" (parameter_plan_execution_cost ir)))))
+		(begin
+			(planning_session "__memcp_queryplan_candidate_cost" (parameter_plan_execution_cost ir))
+			(planning_session "__memcp_queryplan_parameter_work" (parameter_plan_work_profile ir))))))
 
 (define neumann_compile_pipeline (lambda (ast planning_session tx)
 	(begin

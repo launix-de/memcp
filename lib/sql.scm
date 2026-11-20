@@ -27,6 +27,7 @@ execution shadows it with the concrete session captured by the frontend. */
 (import "sql-metadata.scm")
 (import "queryplan.scm")
 (import "sql-views.scm")
+(import "sql-parameter-cost.scm")
 
 /* Root is the recovery identity for a fresh/local installation. User-facing
 maintenance commands may change its password, but may not remove the account
@@ -410,6 +411,7 @@ identical programs once outside row closures, including parameterized plans. */
 				(list (quote parameter_mode) parameter_mode)
 				(list (quote compile_ns) (- (nanotime) compile_started))
 				(list (quote execution_cost) (planning_session "__memcp_queryplan_candidate_cost"))
+				(list (quote work_profile) (planning_session "__memcp_queryplan_parameter_work"))
 				(list (quote parameters) (merge_unique (list
 					(query_expr_session_reads raw_plan)
 					(query_expr_session_reads guard)))))))))
@@ -453,8 +455,10 @@ otherwise side-effect-free guard. */
 					false
 					(begin (prepared_catalog (car preparation) true) true)))))
 			(define tail_expr (sql_queryplan_formula_dispatch rest prepared_catalog miss_expr))
-			(define bound_plan (list (cadr variant)
-				(quote session) (quote tx) (quote resultrow) (quote resultfields)))
+			(define bound_plan (if (sql_parameter_generic? variant)
+				(list (quote sql_parameter_execute) (list (quote quote) (nth variant 3))
+					(cadr variant) (quote session) (quote tx) (quote resultrow) (quote resultfields))
+				(list (cadr variant) (quote session) (quote tx) (quote resultrow) (quote resultfields))))
 			(define dispatch (if (equal? (car variant) true)
 				bound_plan
 				(list (quote if)
@@ -546,7 +550,9 @@ the common guard-dispatch path. */
 				(if (not (nil? matching))
 					matching
 					(begin
-						(define variant (sql_compile_queryplan_variant parse_fn schema parse_query policy session tx "specialized"))
+						(define specialized (sql_compile_queryplan_variant parse_fn schema parse_query policy session tx "specialized"))
+						(define variant (sql_parameter_choose_candidate specialized entry current_variants
+							parse_fn schema parse_query policy session tx))
 						(define formula (sql_queryplan_install_variants queryplan_cache cache_key entry parse_fn schema parse_query policy
 							(cons variant current_variants) tx))
 						(queryplan_cache cache_key (list entry formula))
@@ -558,7 +564,9 @@ the common guard-dispatch path. */
 			((sql_queryplan_compile_formula tx
 				(sql_queryplan_preparation_expr preparation))
 				session tx resultrow resultfields)))
-		((cadr chosen_variant) session tx resultrow resultfields))))
+		(if (sql_parameter_generic? chosen_variant)
+			(sql_parameter_execute (nth chosen_variant 3) (cadr chosen_variant) session tx resultrow resultfields)
+			((cadr chosen_variant) session tx resultrow resultfields)))))
 
 /* cached_parse: wraps SELECT planning with a lazy polymorphic Scheme plan
 cache. DDL, DML and transaction-control formulas retain the original exact

@@ -1888,14 +1888,21 @@ particular star shape. */
 		(quote dphyp)
 		(if hypergraph (quote goo-dphyp) (quote decomposed-dphyp)))))
 
+(define planner_parameterized_costing? (lambda (planning_session)
+	(begin
+		(define planning_session (planner_effective_session planning_session))
+		(and (not (nil? planning_session))
+			(equal? (planning_session "__memcp_queryplan_parameter_mode") "generic")))))
+
 (define planner_record_table_statistics_guards (lambda (sources planning_session)
-	(reduce (filter sources source_is_base_table?) (lambda (_ src)
-		(begin
-			(define table_value (table (source_schema src) false (source_relation src) false))
-			(define table_expr
-				(list (quote table) (source_schema src) false (source_relation src) false))
-			(planner_record_statistics_dependency
-				table_expr (table_planner_statistics table_value) planning_session))) nil)))
+	(if (planner_parameterized_costing? planning_session) nil
+		(reduce (filter sources source_is_base_table?) (lambda (_ src)
+			(begin
+				(define table_value (table (source_schema src) false (source_relation src) false))
+				(define table_expr
+					(list (quote table) (source_schema src) false (source_relation src) false))
+				(planner_record_statistics_dependency
+					table_expr (table_planner_statistics table_value) planning_session))) nil))))
 
 /* Cardinality-only physical decisions must not depend on unrelated columns
 or their NDV. Canonical caches can add aggregate columns while retaining the
@@ -1914,27 +1921,31 @@ their own bound filter estimates instead of invalidating on unrelated learning.
 Guard cost inputs, not the SQL values used only to obtain those inputs. Exact
 value guards remain necessary for sampled or executable specialization. */
 (define join_order_record_cost_dependencies (lambda (sources nodes predicates planning_session)
-	(begin
-		(planner_record_table_statistics_guards sources planning_session)
-		(define table_aliases (planner_table_statistics_aliases sources))
-		/* Derived and synthetic nodes have no table snapshot whose token can cover
-		their runtime cardinality. Preserve the exact guard for those nodes. */
-		(reduce nodes (lambda (_ node)
-			(if (contains? table_aliases (car node))
-				nil
-				(planner_record_guard_condition
-					(list (quote equal?)
-						(if (> (count node) 2) (nth node 2) (cadr node))
-						(cadr node)) planning_session))) nil)
-		(reduce predicates (lambda (_ predicate)
-			(begin
-				/* A changed SQL value is not itself a changed cost input. Keep the
-				chosen input regime using the compiled metadata expression. This is
-				still conservative where no crossover inequality is available, but
-				does not force recompilation for every clock tick/range threshold. */
-				(planner_record_guard_condition
-					(list (quote equal?) (join_order_pred_selectivity_expr predicate)
-						(join_order_pred_selectivity predicate)) planning_session))) nil))))
+	/* Generic admission supplies a compilation break-even inequality over the
+	whole flat row domain. Exact input equalities would defeat that reusable
+	candidate. This does not suppress semantic or physical-choice guards. */
+	(if (planner_parameterized_costing? planning_session) nil
+		(begin
+			(planner_record_table_statistics_guards sources planning_session)
+			(define table_aliases (planner_table_statistics_aliases sources))
+			/* Derived and synthetic nodes have no table snapshot whose token can cover
+			their runtime cardinality. Preserve the exact guard for those nodes. */
+			(reduce nodes (lambda (_ node)
+				(if (contains? table_aliases (car node))
+					nil
+					(planner_record_guard_condition
+						(list (quote equal?)
+							(if (> (count node) 2) (nth node 2) (cadr node))
+							(cadr node)) planning_session))) nil)
+			(reduce predicates (lambda (_ predicate)
+				(begin
+					/* A changed SQL value is not itself a changed cost input. Keep the
+					chosen input regime using the compiled metadata expression. This is
+					still conservative where no crossover inequality is available, but
+					does not force recompilation for every clock tick/range threshold. */
+					(planner_record_guard_condition
+						(list (quote equal?) (join_order_pred_selectivity_expr predicate)
+							(join_order_pred_selectivity predicate)) planning_session))) nil)))))
 
 /* Every subset containing one vertex and any selection of its regular-edge
 neighbors is connected. A degree d therefore proves at least 2^d connected
