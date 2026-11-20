@@ -9,7 +9,7 @@ metadata:
 setup:
 - sql: DROP TABLE IF EXISTS property_marker_rows
 - sql: DROP TABLE IF EXISTS property_marker_prefix
-- sql: CREATE TABLE property_marker_rows(id INT PRIMARY KEY,guid UNIQUEIDENTIFIER ROWGUIDCOL NULL,plain_guid UNIQUEIDENTIFIER NULL)
+- sql: CREATE TABLE property_marker_rows(id INT PRIMARY KEY,guid UNIQUEIDENTIFIER ROWGUIDCOL NULL DEFAULT('00000000-0000-0000-0000-000000000009'),plain_guid UNIQUEIDENTIFIER NULL)
 - sql: INSERT property_marker_rows(id,guid) VALUES(1,'00000000-0000-0000-0000-000000000001'),(2,'00000000-0000-0000-0000-000000000001'),(3,NULL)
 - sql: CREATE TABLE property_marker_prefix(id INT PRIMARY KEY,value INT)
 - sql: INSERT property_marker_prefix VALUES(1,0)
@@ -120,3 +120,9 @@ test_cases:
 - name: Recovery retains unrelated scalar declaration properties
   scm: (equal? (((show (table "memcp-tests" false "property_marker_rows" false nil) "column" "guid" false) "Properties") "client.marker") 7)
   expect: {result: true}
+- name: Removing a marker retains the independently declared default
+  sql: INSERT property_marker_rows(id) VALUES(4)
+  expect: {affected_rows: 1}
+- name: A recovered default still supplies its actual declared value
+  sql: SELECT id,guid,label FROM property_marker_rows WHERE id=4
+  expect: {rows: 1, data: [{id: 4, guid: '00000000-0000-0000-0000-000000000009', label: null}]}
