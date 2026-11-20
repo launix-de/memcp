@@ -34,12 +34,14 @@ test_cases:
     - connection: owner
       sql: UPDATE constant_append_rows SET value=12 WHERE id=1
     - connection: owner
+      sql: INSERT constant_append_rows VALUES(5,55)
+    - connection: owner
       sql: UPDATE constant_append_other SET value=8 WHERE id=1
     - connection: owner
       sql: ALTER TABLE constant_append_rows ADD amount FLOAT NOT NULL CONSTRAINT constant_amount_default DEFAULT ((0))
     - connection: owner
       sql: SELECT id,value,amount FROM constant_append_rows ORDER BY id
-      expect: {rows: 3,data: [{id: 1,value: 12,amount: 0},{id: 2,value: 22,amount: 0},{id: 3,value: 33,amount: 0}]}
+      expect: {rows: 4,data: [{id: 1,value: 12,amount: 0},{id: 2,value: 22,amount: 0},{id: 3,value: 33,amount: 0},{id: 5,value: 55,amount: 0}]}
     - connection: observer
       sql: SELECT id,value FROM constant_append_rows ORDER BY id
       expect: {rows: 3,data: [{id: 1,value: 11},{id: 2,value: 22},{id: 3,value: 33}]}
@@ -54,7 +56,7 @@ test_cases:
       sql: COMMIT TRANSACTION
     - connection: observer
       sql: SELECT id,value,amount FROM constant_append_rows ORDER BY id
-      expect: {rows: 4,data: [{id: 1,value: 12,amount: 0},{id: 2,value: 22,amount: 7},{id: 3,value: 33,amount: 0},{id: 4,value: 44,amount: 0}]}
+      expect: {rows: 5,data: [{id: 1,value: 12,amount: 0},{id: 2,value: 22,amount: 7},{id: 3,value: 33,amount: 0},{id: 4,value: 44,amount: 0},{id: 5,value: 55,amount: 0}]}
     - connection: observer
       sql: SELECT value FROM constant_append_other
       expect: {rows: 1,data: [{value: 8}]}
@@ -131,7 +133,7 @@ test_cases:
   sql: INSERT constant_append_rows(id,value) VALUES(14,144)
 - name: Actual initial values and later writes remain independent of the new default
   sql: SELECT id,value,amount FROM constant_append_rows ORDER BY id
-  expect: {rows: 5,data: [{id: 1,value: 12,amount: 0},{id: 2,value: 22,amount: 7},{id: 3,value: 33,amount: 0},{id: 4,value: 44,amount: 0},{id: 14,value: 144,amount: 9}]}
+  expect: {rows: 6,data: [{id: 1,value: 12,amount: 0},{id: 2,value: 22,amount: 7},{id: 3,value: 33,amount: 0},{id: 4,value: 44,amount: 0},{id: 5,value: 55,amount: 0},{id: 14,value: 144,amount: 9}]}
 - name: Removing a future default preserves all historical cells
   sql: ALTER TABLE constant_append_rows DROP CONSTRAINT constant_amount_replacement
 - name: Explicit later values remain admissible after default removal
@@ -140,7 +142,7 @@ test_cases:
   scm: (rebuild (table "memcp-tests" false "constant_append_rows" false nil) true false)
 - name: Complete rebuilt values do not depend on a still-declared default
   sql: SELECT id,value,amount FROM constant_append_rows ORDER BY id
-  expect: {rows: 6,data: [{id: 1,value: 12,amount: 0},{id: 2,value: 22,amount: 7},{id: 3,value: 33,amount: 0},{id: 4,value: 44,amount: 0},{id: 14,value: 144,amount: 9},{id: 24,value: 244,amount: 12}]}
+  expect: {rows: 7,data: [{id: 1,value: 12,amount: 0},{id: 2,value: 22,amount: 7},{id: 3,value: 33,amount: 0},{id: 4,value: 44,amount: 0},{id: 5,value: 55,amount: 0},{id: 14,value: 144,amount: 9},{id: 24,value: 244,amount: 12}]}
 - name: PostgreSQL append preserves prior DML and the original SQL transaction
   syntax: postgresql
   sql: BEGIN; UPDATE constant_append_pg SET value=91 WHERE id=9; ALTER TABLE constant_append_pg ADD COLUMN flag INTEGER NOT NULL DEFAULT 4; COMMIT
@@ -161,7 +163,7 @@ test_cases:
   action: restart
 - name: Recovered complete cells retain all historical and explicit values
   sql: SELECT id,value,amount FROM constant_append_rows ORDER BY id
-  expect: {rows: 6,data: [{id: 1,value: 12,amount: 0},{id: 2,value: 22,amount: 7},{id: 3,value: 33,amount: 0},{id: 4,value: 44,amount: 0},{id: 14,value: 144,amount: 9},{id: 24,value: 244,amount: 12}]}
+  expect: {rows: 7,data: [{id: 1,value: 12,amount: 0},{id: 2,value: 22,amount: 7},{id: 3,value: 33,amount: 0},{id: 4,value: 44,amount: 0},{id: 5,value: 55,amount: 0},{id: 14,value: 144,amount: 9},{id: 24,value: 244,amount: 12}]}
 - name: Recovery retains nullable historical and future defaults separately
   sql: SELECT id,flag FROM constant_append_nullable ORDER BY id
   expect: {rows: 2,data: [{id: 7,flag: null},{id: 17,flag: 5}]}
