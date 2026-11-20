@@ -2927,8 +2927,11 @@ fully symbolic generic mode keeps every input unknown. */
 						(qb_hidden block) (qb_stages block) (qb_facts block))))))))
 
 (define planner_symbolic_inputs? (lambda (expr planning_session)
-	(reduce (query_expr_session_reads expr) (lambda (found read)
-		(or found (planner_symbolic_parameter? read planning_session))) false)))
+	/* Specialized cost guards run on cache hits too. Only parameterized
+	costing needs to inspect the expression for symbolic invocation inputs. */
+	(and (planner_parameterized_costing? planning_session)
+		(reduce (query_expr_session_reads expr) (lambda (found read)
+			(or found (planner_symbolic_parameter? read planning_session))) false))))
 
 (define planner_literal_value (lambda (expr planning_session)
 	(begin
