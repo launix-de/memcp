@@ -33,8 +33,11 @@ type StorageSCMER struct {
 	minIntScale int8        // power-of-ten exponent of finest granularity
 	//   0 = pure ints, -2 = 2 decimal places, 2 = multiples of 100
 	//   math.MinInt8 = not representable as scaled int
-	hasString    bool
-	hasBSON      bool
+	hasString bool
+	hasBSON   bool
+	// hasComposite marks lists, dictionaries and other non-scalar values.
+	// They have no string or numeric encoding and must keep a value storage.
+	hasComposite bool
 	longStrings  int
 	longSample   *longTextSample
 	null         uint  // amount of NULL values (sparse map!)
@@ -332,6 +335,9 @@ func (s *StorageSCMER) scan(i uint32, value scm.Scmer) {
 	}
 	// non-numeric → no integer scaling possible
 	s.minIntScale = math.MinInt8
+	if !value.IsString() && !value.IsBool() {
+		s.hasComposite = true
+	}
 	if value.IsString() {
 		s.hasString = true
 		text := value.String()
@@ -353,6 +359,7 @@ func (s *StorageSCMER) prepare() {
 	s.minIntScale = math.MaxInt8 // neutral, gets driven down by scan
 	s.hasString = false
 	s.hasBSON = false
+	s.hasComposite = false
 	s.enumK = 0
 	s.longStrings = 0
 	s.longSample = nil
@@ -410,6 +417,12 @@ func (s *StorageSCMER) proposeCompression(i uint32) ColumnStorage {
 		if entropy < pforBits*0.8 {
 			return new(StorageEnum)
 		}
+	}
+	if s.hasComposite {
+		if s.null*2 > uint(i) {
+			return new(StorageSparse)
+		}
+		return nil
 	}
 	if s.hasString {
 		if s.longStrings > 2 {
