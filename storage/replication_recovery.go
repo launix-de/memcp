@@ -59,24 +59,20 @@ func (r *replicationManager) recoveryInventory(auth replicaAuth) []replicaRecord
 			panic(err)
 		}
 		resources[schema.key()] = replicaRecord{Resource: schema, Content: content}
-		for _, table := range db.tables.GetAll() {
-			if table.isEphemeralQueryTable() {
-				continue
+		// Native catalog partitions live on the system backend but belong to
+		// this tenant's authority domain, including during reconnect recovery.
+		for _, shard := range db.replicationShards() {
+			if shard.catalogOwner == "" {
+				r.restoreTableRoutes(shard.t)
 			}
-			r.restoreTableRoutes(table)
-			for _, shard := range table.ActiveShards() {
-				if shard == nil {
-					continue
+			resource := shard.replicationResource()
+			if shard.catalogOwner == "" {
+				if published := shard.t.publishedName.Load(); published != nil {
+					resource.Table = *published
 				}
-				name := ""
-				if published := table.publishedName.Load(); published != nil {
-					name = *published
-				} else {
-					name = table.Name
-				}
-				resource := r.canonicalResource(mosiResource{Database: db.Name, Table: name, Shard: shard.uuid.String()})
-				resources[resource.key()] = replicaRecord{Resource: resource, Content: shard.uuid.String()}
 			}
+			resource = r.canonicalResource(resource)
+			resources[resource.key()] = replicaRecord{Resource: resource, Content: shard.uuid.String()}
 		}
 	}
 	r.mu.Lock()
@@ -374,7 +370,7 @@ func (r *replicationManager) recoverResource(ctx context.Context, id string, rep
 		// Bind a readable recovered slot to its completed local copy before publishing
 		// authority; ordinary COLD loading then uses the correct native content.
 		if local.Readable() && resource.Shard != "" && record.Content != "" {
-			if db := databases.Get(resource.Database); db != nil {
+			if db := databases.Get(resource.Database); db != nil && !isCatalogResource(resource) {
 				db.ensureLoaded()
 			}
 			if err := r.restoreBackup(record); err != nil {
