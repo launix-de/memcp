@@ -4090,7 +4090,7 @@ func (t *storageShard) RemoveFromDisk() {
 	if t.t.schema != nil && clusterRetainsShard(t) {
 		return
 	}
-	if t.t.schema != nil && replicationRetainsCatalogs(t.t.schema.Name) {
+	if t.t.schema != nil && (replicationRetainsCatalogs(t.home().Name) || t.catalogOwner != "" && replicationRetainsCatalogs(t.catalogOwner)) {
 		return
 	}
 	t.cleanupOnce.Do(func() {
