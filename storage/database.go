@@ -1334,7 +1334,11 @@ func (db *database) rebuildWithLifecycle(all bool, repartition bool, includeEphe
 	}
 	// Blob-producing table rebuilds run in parallel. Publish their shared
 	// refcount table before workers start so no worker mutates the catalog.
-	db.ensureBlobTable()
+	// Memory/cache compaction never writes external blob payloads. A focused
+	// rebuild of such a table needs no durable blob catalog as a side effect.
+	if len(only) == 0 || only[0].PersistencyMode != Memory && only[0].PersistencyMode != Cache {
+		db.ensureBlobTable()
+	}
 	var done sync.WaitGroup
 	// Collect pre-rebuild shards that were superseded. Their cleanup
 	// (RemoveFromDisk → ReleaseBlobs → DecrBlobRefcount) must run after
