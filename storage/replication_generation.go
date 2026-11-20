@@ -25,6 +25,7 @@ import "crypto/sha256"
 import "encoding/json"
 import "encoding/binary"
 import "github.com/google/uuid"
+import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/memcp/storage/mosi"
 
 // The receiver owns one private backend writer per active transfer. Packet
@@ -169,9 +170,16 @@ func (r *replicationManager) declareShard(shard *storageShard, owner string, loc
 		return r.cluster.declareShard(shard, local)
 	}
 	resource := r.shardResource(shard)
-	c := r.resourceCell(resource)
+	c := r.declareShardResource(resource, owner, local)
 	c.current.CompareAndSwap(nil, shard)
 	shard.coherence.CompareAndSwap(nil, c)
+	return c
+}
+
+// A native table declaration introduces its data UUIDs before runtime columns
+// need to be materialized. Registration supplies authority, never a payload.
+func (r *replicationManager) declareShardResource(resource mosiResource, owner string, local bool) *replicaCell {
+	c := r.resourceCell(resource)
 	initialized := false
 	record := r.updateRecord(resource, func(record *replicaRecord) bool {
 		// Schema loading may retain predecessor files while data is in flight.
@@ -195,7 +203,7 @@ func (r *replicationManager) declareShard(shard *storageShard, owner string, loc
 		record.Resource, record.Owner, record.Epoch = resource, owner, 1
 		record.State = "IO"
 		if local {
-			record.State, record.Content = "M", shard.uuid.String()
+			record.State, record.Content = "M", resource.Shard
 		}
 		if r.master {
 			schemaKey := mosiResource{Database: resource.Database}.key()
@@ -258,7 +266,7 @@ func (r *replicationManager) findShard(resource mosiResource) *storageShard {
 		return nil
 	}
 	db.ensureLoaded()
-	table := db.tables.Get(resource.Table)
+	table := db.loadCatalogTable(resource.Table)
 	if table == nil {
 		return nil
 	}
@@ -306,6 +314,9 @@ func (r *replicationManager) prepareResource(resource mosiResource) (content str
 	if resource.Shard == "" {
 		if r.cluster == nil {
 			r.schemaShards(db, r.id, true)
+			if !r.master {
+				db.prepareReplicaCatalog()
+			}
 		}
 		db.save()
 		return r.schemaDigest(db.persistence.ReadSchema())
@@ -455,7 +466,7 @@ func (r *replicationManager) captureResource(resource mosiResource, content stri
 		}
 	}()
 	if resource.Shard == "" {
-		transfer.schema = stripCatalogRoot(append([]byte(nil), db.persistence.ReadSchema()...))
+		transfer.schema = append([]byte(nil), db.persistence.ReadSchema()...)
 		actual, err := r.schemaDigest(transfer.schema)
 		if err != nil {
 			return nil, err
@@ -641,6 +652,7 @@ func (r *replicationManager) startImport(packet mosiPacket) (*replicaImport, err
 			// acquiring importPublication at completion. Startup GC may own the
 			// same loadOnce; a discovered database is not yet a loaded schema.
 			db.ensureLoaded()
+			db.loadCatalogTable(packet.Resource.Table)
 		}
 		engine = db.persistence
 	} else {
@@ -877,13 +889,16 @@ func (r *replicationManager) finishImport(source string, transfer *replicaImport
 		return err
 	}
 	shard.t = table
+	var nativeRows [][]scm.Scmer
 	if isCatalogResource(resource) {
 		shard.catalogOwner, shard.catalogHome = db.Name, catalogBackendDatabase()
 		shard.catalogPrivate = true
+		relation, _ := catalogResourceRelation(resource)
+		if transfer.untrusted || relation == catalogTables {
+			_, nativeRows = catalogShardRecords(shard, catalogRelationColumns(relation), nil)
+		}
 		if transfer.untrusted {
-			relation, _ := catalogResourceRelation(resource)
-			_, rows := catalogShardRecords(shard, catalogRelationColumns(relation), nil)
-			if err := validateReplicaCatalogRows(db.Name, relation, rows); err != nil {
+			if err := validateReplicaCatalogRows(db.Name, relation, nativeRows); err != nil {
 				return err
 			}
 		}
@@ -939,11 +954,35 @@ func (r *replicationManager) finishImport(source string, transfer *replicaImport
 		return err
 	}
 	c.current.Store(shard)
+	if relation, native := catalogResourceRelation(resource); native && relation == catalogTables && transfer.untrusted && r.master && r.cluster == nil {
+		var declarations catalogRows
+		declarations[catalogTables] = nativeRows
+		for name, raw := range catalogRecordsFromRows(db.Name, &declarations).Tables {
+			var topology struct {
+				Shards, PShards []*storageShard
+				Forwards        map[string]string `json:"shard_forwards"`
+			}
+			if err := json.Unmarshal(raw, &topology); err != nil {
+				return err
+			}
+			for from := range topology.Forwards {
+				// Announce previously unknown history without redirecting an
+				// existing data authority. The data transfer validates its own
+				// ownership before any forwarding edge can be installed.
+				r.declareShardResource(mosiResource{Database: db.Name, Table: name, Shard: from}, source, false)
+			}
+			for _, data := range append(topology.Shards, topology.PShards...) {
+				if data != nil {
+					r.declareShardResource(mosiResource{Database: db.Name, Table: name, Shard: data.uuid.String()}, source, false)
+				}
+			}
+		}
+	}
 	return nil
 }
 
 func (r *replicationManager) installSchema(source, name string, engine PersistenceEngine, data []byte) error {
-	native := r.cluster != nil && readCatalogRoot(data) != nil
+	native := readCatalogRoot(data) != nil
 	if !native {
 		data = stripCatalogRoot(data)
 	}
@@ -951,7 +990,7 @@ func (r *replicationManager) installSchema(source, name string, engine Persisten
 	// Cluster peers and the upstream master are trusted code authorities. A
 	// replication slave is not: validate before decoding any runtime values or
 	// publishing schema bytes, including after a solicited ownership recall.
-	if r.master && r.cluster == nil && source != r.id {
+	if !native && r.master && r.cluster == nil && source != r.id {
 		var err error
 		data, err = validateReplicaSchema(data)
 		if err != nil {
@@ -971,8 +1010,27 @@ func (r *replicationManager) installSchema(source, name string, engine Persisten
 	// are read at this boundary. Existing unchanged tables stay in their live
 	// database, preserving ongoing DML and runtime content ownership.
 	db := databases.Get(name)
+	schemaOwned := false
+	defer func() {
+		if schemaOwned {
+			db.schemalock.Unlock()
+		}
+	}()
+	var initial *database
+	if native && db == nil {
+		// Fixed catalog partitions need their logical tenant while the schema
+		// flight is still pending. No runtime table directory is published yet.
+		initial = newDatabase()
+		initial.Name, initial.persistence, initial.srState = name, clusterSchemaView{engine, data}, COLD
+		databases.Set(name, initial)
+		defer func() {
+			if initial != nil {
+				databases.Remove(name)
+			}
+		}()
+	}
 	if db != nil {
-		if r.cluster != nil {
+		if native || r.cluster != nil {
 			db.loadOnce.Do(func() { db.initializeSchemaSnapshot(data) })
 		} else {
 			db.ensureLoaded()
@@ -980,7 +1038,7 @@ func (r *replicationManager) installSchema(source, name string, engine Persisten
 		db.persistenceLifecycle.Lock()
 		defer db.persistenceLifecycle.Unlock()
 		db.schemalock.Lock()
-		defer db.schemalock.Unlock()
+		schemaOwned = true
 		// A queued local checkpoint must finish before the incoming schema is
 		// installed. Schema ownership prevents another old snapshot registering.
 		db.saveMu.Lock()
@@ -989,25 +1047,32 @@ func (r *replicationManager) installSchema(source, name string, engine Persisten
 		}
 		db.saveMu.Unlock()
 	}
-	if db != nil && r.cluster == nil {
+	if db != nil && r.cluster == nil && !native {
 		var err error
 		data, err = r.replicaSchemaForLocalData(db, data)
 		if err != nil {
 			return err
 		}
 	}
-	if r.cluster == nil {
+	if r.cluster == nil && !native {
 		engine.WriteSchema(data)
 	}
 	replacement := newDatabase()
 	replacement.Name, replacement.persistence, replacement.srState = name, engine, COLD
-	if r.cluster != nil {
+	if native || r.cluster != nil {
 		replacement.persistence = clusterSchemaView{engine, data}
 	}
 	replacement.ensureLoaded()
 	replacement.persistence = engine
+	if native && r.master && r.cluster == nil && source != r.id {
+		rows := replacement.catalogRowsLocked()
+		if _, err := validateReplicaSchema(catalogDocumentFromRows(name, &rows)); err != nil {
+			return err
+		}
+	}
 	if db == nil {
 		databases.Set(name, replacement)
+		initial = nil
 		db = replacement
 	} else {
 		defer replacement.closeTransactionLog()
@@ -1018,7 +1083,7 @@ func (r *replicationManager) installSchema(source, name string, engine Persisten
 			db.catalog.committed = replacement.catalog.committed
 			db.catalog.committedFP = replacement.catalog.committedFP
 			db.catalog.forwards = replacement.catalog.forwards
-			db.catalog.liveVersion++
+			db.catalog.liveVersion.Add(1)
 			publishCatalogShards(db.Name, &db.catalog.live)
 			db.catalogMu.Unlock()
 		} else {
@@ -1027,7 +1092,7 @@ func (r *replicationManager) installSchema(source, name string, engine Persisten
 			publishCatalogShards(db.Name, &db.catalog.live)
 		}
 		for _, table := range db.tables.GetAll() {
-			if r.cluster != nil && table.isEphemeralQueryTable() {
+			if (native || r.cluster != nil) && table.isEphemeralQueryTable() {
 				continue
 			}
 			if replacement.tables.Get(table.Name) == nil {
@@ -1045,6 +1110,33 @@ func (r *replicationManager) installSchema(source, name string, engine Persisten
 		for _, table := range replacement.tables.GetAll() {
 			r.restoreTableRoutes(table)
 			previous := db.tables.Get(table.Name)
+			if previous != nil && native && r.cluster == nil {
+				rows := replacement.catalogRowsLocked()
+				db.materializeCatalogTableLocked(previous, &rows)
+				previous.reserveLocalAutoIncrement(atomic.LoadUint64(&table.Auto_increment), 0)
+				resolve := func(shards []*storageShard) []*storageShard {
+					result := append([]*storageShard(nil), shards...)
+					for i, incoming := range result {
+						if incoming == nil {
+							continue
+						}
+						cell := r.shardCell(incoming)
+						if current := cell.publishedShard(); current != nil && current.t == previous {
+							result[i] = current
+						} else {
+							incoming.t = previous
+							incoming.coherence.Store(cell)
+						}
+					}
+					return result
+				}
+				previous.mu.Lock()
+				previous.ShardMode, previous.PDimensions = table.ShardMode, table.PDimensions
+				previous.Shards, previous.PShards = resolve(table.Shards), resolve(table.PShards)
+				previous.publishTopologyLocked()
+				previous.mu.Unlock()
+				continue
+			}
 			if previous != nil && r.cluster != nil {
 				merged, err := r.mergeClusterInsertTopology(previous, table)
 				if err != nil {
@@ -1126,6 +1218,15 @@ func (r *replicationManager) installSchema(source, name string, engine Persisten
 		db.publishTableNamesLocked()
 	}
 	r.schemaShards(db, source, false)
+	if native && r.cluster == nil {
+		if !schemaOwned {
+			db.schemalock.Lock()
+			schemaOwned = true
+		}
+		db.checkpointCatalogLocked()
+		schemaOwned = false
+		db.commitSchemaLocked(true, db.schemalock.Unlock)
+	}
 	return nil
 }
 
