@@ -471,9 +471,18 @@ func (db *database) commitCatalog(rows *catalogRows, live [catalogRelationCount]
 	}
 	for i := range catalogRelations {
 		relation := catalogRelationID(i)
-		distributed := live[i] != nil && live[i].replicationManager() != nil
+		var manager *replicationManager
+		if live[i] != nil {
+			manager = live[i].replicationManager()
+		}
+		distributed := manager != nil
 		fingerprint := catalogFingerprint(relation, rows[i])
-		if state.committed[i] == nil || state.committed[i].home() != catalogBackendDatabase() || fingerprint != state.committedFP[i] {
+		// Equal rows can still belong to a newer native generation, for example
+		// after a remote handover. A retained checkpoint's UUID is immutable
+		// history, not an available successor identity. Reusing it for active
+		// publication would disagree with its already-forwarded MOSI resource.
+		historical := distributed && state.committed[i] != nil && manager.canonicalResource(state.committed[i].replicationResource()) != state.committed[i].replicationResource()
+		if state.committed[i] == nil || state.committed[i].home() != catalogBackendDatabase() || fingerprint != state.committedFP[i] || historical {
 			shard := buildDiskShard(db, relation, rows[i], durable)
 			if previous := state.committed[i]; previous != nil {
 				if distributed {
