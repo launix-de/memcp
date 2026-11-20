@@ -404,6 +404,9 @@ func (s *S3Storage) BackendName() string {
 	return "s3"
 }
 
+// Completed PUTs already acknowledge durable object names and contents.
+func (s *S3Storage) SyncNamespace() {}
+
 func (s *S3Storage) StorageIdentity() string {
 	return "s3:" + s.factory.Endpoint + ":" + s.factory.Bucket + ":" + s.prefix
 }

@@ -905,6 +905,7 @@ func (r *replicationManager) finishImport(source string, transfer *replicaImport
 		}
 		// Client bytes are admitted before their UUID edges can redirect a
 		// previously accepted catalog root to this new physical generation.
+		shard.home().persistence.SyncNamespace()
 		for _, route := range transfer.header.Forwards {
 			r.forwardResource(route.From, route.To)
 		}
