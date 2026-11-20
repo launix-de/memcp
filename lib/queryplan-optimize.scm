@@ -5850,6 +5850,16 @@ predicates keep their original tree and do not enter CONCAT analysis. */
 		(cons (symbol sql_concat) _args) true
 		_ false)))
 
+/* Preflight only positive Boolean branches and direct operands. Do not walk
+embedded stage plans or prepare the rewrite machinery for unrelated queries. */
+(define concat_lookup_candidate? (lambda (expr)
+	(match expr
+		(cons head args)
+		(if (has? '(and or) head)
+			(reduce args (lambda (found arg) (or found (concat_lookup_candidate? arg))) false)
+			(reduce args (lambda (found arg) (or found (concat_lookup_call? arg))) false))
+		_ false)))
+
 (define concat_lookup_term (lambda (sources term)
 	(match term
 		(cons (symbol or) terms) (cons (quote or) (map terms (lambda (item) (concat_lookup_term sources item))))
@@ -5916,7 +5926,10 @@ ordinary binary-edge promotion and every original predicate stay intact. */
 					(join_reorder_stage_using stage_catalog stage planning_session tx)))
 				(qb_facts node)))
 			(define node (normalize_logical_membership node planning_session tx))
-			(define node (expose_concat_lookup_keys node))
+			(define node (if (or (concat_lookup_candidate? (qb_where node))
+				(reduce (qb_sources node) (lambda (found src)
+					(or found (concat_lookup_candidate? (source_join_expr src)))) false))
+				(expose_concat_lookup_keys node) node))
 			(define exposed (expose_null_rejected_join_edges node true))
 			(define has_composite_presence (reduce (qb_sources node) (lambda (found src)
 				(or found (and (source_outer? src)
