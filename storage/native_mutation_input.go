@@ -74,6 +74,9 @@ func checkedCatalogWriters(history []catalogDeclarationAmendment) map[*table]str
 		if c := entry.column; c != nil && c.declaration != nil {
 			result[c.table] = struct{}{}
 		}
+		if c := entry.column; c != nil && c.appendDeclaration != nil {
+			blocked[c.table] = struct{}{}
+		}
 		if c := entry.check; c != nil {
 			blocked[c.table] = struct{}{}
 		}
