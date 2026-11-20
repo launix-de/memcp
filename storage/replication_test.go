@@ -1533,6 +1533,34 @@ func TestReplicationRequestLearnsOnlyOwnerForwarding(t *testing.T) {
 	}
 }
 
+func TestReplicationDeclaredSuccessorRetainsExistingReaderAuthority(t *testing.T) {
+	r := replicaRecoveryFixture()
+	from := mosiResource{Database: "tenant", Table: "items", Shard: uuid.NewString()}
+	to := from
+	to.Shard = uuid.NewString()
+	cell := r.resourceCell(from)
+	cell.ownstate.Initialize(mosi.S)
+	r.updateRecord(from, func(record *replicaRecord) bool {
+		record.Owner, record.State, record.Epoch = "client", "S", 9
+		record.Readers = map[string]bool{r.id: true}
+		return true
+	})
+	// A catalog declaration can introduce the successor's UUID before its
+	// first write request. It must still share its predecessor's revocation
+	// directory, including readers which already hold the predecessor payload.
+	r.declareShardResource(to, "client", false)
+	if err := r.acceptRequestRoutes("client", mosiPacket{Kind: "write", Resource: to, Forwards: []shardForward{{from, to}}}); err != nil {
+		t.Fatal(err)
+	}
+	if r.resourceCell(from) != r.resourceCell(to) || r.canonicalResource(from) != to {
+		t.Fatal("declared successor split the existing native authority")
+	}
+	record := r.directory.Records[to.key()]
+	if record.Epoch != 9 || !record.Readers[r.id] || cell.resolved().ownstate.Phase() != mosi.S {
+		t.Fatal("successor publication lost existing reader revocation rights or changed permission")
+	}
+}
+
 func TestReplicationRevokesReadsBeforeInvalidatingDependentCaches(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "replica-revocation-cache-order", 0)
 	r := replicaRecoveryFixture()

@@ -627,10 +627,12 @@ func (r *replicationManager) acceptRequestRoutes(source string, packet mosiPacke
 	}
 	r.mu.Lock()
 	target := r.canonicalResource(packet.Resource)
-	known := r.directory.Records[target.key()].Owner != ""
+	targetRecord := r.directory.Records[target.key()]
+	known := targetRecord.Owner != ""
+	targetCell := r.lookupCell(target)
 	var authority *replicaCell
 	var retained *replicaCell
-	if !known {
+	if !known || targetRecord.Owner == source {
 		for _, route := range packet.Forwards {
 			from := r.canonicalResource(route.From)
 			record := r.directory.Records[from.key()]
@@ -649,7 +651,7 @@ func (r *replicationManager) acceptRequestRoutes(source string, packet mosiPacke
 		}
 	}
 	r.mu.Unlock()
-	if known {
+	if known && authority == nil {
 		return nil // an old request cannot reverse an already learned successor
 	}
 	if authority == nil {
@@ -668,7 +670,7 @@ func (r *replicationManager) acceptRequestRoutes(source string, packet mosiPacke
 		return fmt.Errorf("request forwarding from non-owner: %s table %s, routes %v, canonical %v", packet.Resource.key(), packet.Resource.Table, packet.Forwards, target)
 	}
 	for _, route := range packet.Forwards {
-		if cell := r.lookupCell(route.From); cell != nil && cell != authority {
+		if cell := r.lookupCell(route.From); cell != nil && cell != authority && cell != targetCell {
 			return fmt.Errorf("request forwarding crosses shard authorities")
 		}
 	}
