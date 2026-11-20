@@ -37,10 +37,10 @@ ordering. The inherited value is stored, so ADD COLUMN and restart agree. */
 					(sql_column_collation_defaults typ attributes (get_assoc options "collation")) inputs computor)
 				_ definition))) options ifnotexists tx)))
 
-(define sql_create_column (lambda (relation name typ dimensions attributes)
+(define sql_create_column (lambda (relation name typ dimensions attributes tx)
 	(createcolumn relation name typ dimensions
 		(sql_column_collation_defaults typ attributes
-			(get_assoc (show relation true) "Collation")))))
+			(get_assoc (show relation true) "Collation")) nil nil tx)))
 
 /* ADD freezes one value for historical rows. Keep the existing evaluation
 path for literal arithmetic and casts; reject volatile or relational defaults

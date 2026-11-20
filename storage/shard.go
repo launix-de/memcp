@@ -887,7 +887,10 @@ func (u *storageShard) ensureColumnLoaded(colName string, alreadyLocked bool, cu
 // deadlock that occurs when a concurrent writer is waiting for mu.Lock()
 // (Go's write-preferring RWMutex queues new readers behind pending writers).
 // Panics if the column is missing or not yet loaded from disk.
-func (u *storageShard) getColumnStorageRLocked(colName string) ColumnStorage {
+func (u *storageShard) getColumnStorageRLocked(colName string, tx *TxContext) ColumnStorage {
+	if tx.pendingNullColumn(u.t, colName) {
+		return new(StorageSparse)
+	}
 	cs, present := u.columns[colName]
 	if !present {
 		panic("Column does not exist: `" + u.t.schema.Name + "`.`" + u.t.Name + "`.`" + colName + "`")
@@ -901,6 +904,9 @@ func (u *storageShard) getColumnStorageRLocked(colName string) ColumnStorage {
 // getColumnStorageOrPanic returns a stable column storage. Callers must state
 // whether they already hold u.mu; lock ownership is never inferred implicitly.
 func (u *storageShard) getColumnStorageOrPanic(colName string, alreadyLocked bool, currentTx *TxContext) ColumnStorage {
+	if currentTx.pendingNullColumn(u.t, colName) {
+		return new(StorageSparse)
+	}
 	if alreadyLocked {
 		cs, present := u.columns[colName]
 		if !present {
@@ -2375,7 +2381,7 @@ func (t *storageShard) ColumnReaderTx(tx *TxContext, col string, alreadyLocked b
 	writeLocked := tx != nil && tx.HasShardWrite(t)
 	var cstorage ColumnStorage
 	if alreadyLocked && !writeLocked {
-		cstorage = t.getColumnStorageRLocked(col)
+		cstorage = t.getColumnStorageRLocked(col, tx)
 	} else {
 		cstorage = t.getColumnStorageOrPanic(col, writeLocked, tx)
 	}

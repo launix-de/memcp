@@ -2001,7 +2001,7 @@ https://dev.mysql.com/doc/refman/8.4/en/create-table-foreign-keys.html */
 				))
 				(define typeparams sql_column_attributes)
 			) (lambda (id) '((quote sql_create_column) '((quote table) schema false id false (quote tx)) col type dimensions
-					(cons 'list (mysql_primary_column_attributes (sql_add_column_attributes typeparams) (if (typeparams "primary") true false))))))
+					(cons 'list (mysql_primary_column_attributes (sql_add_column_attributes typeparams) (if (typeparams "primary") true false))) nil)))
 			(parser '((atom "MODIFY" true) (?(atom "COLUMN" true))
 				(define col sql_identifier)
 				(define type sql_column_type)

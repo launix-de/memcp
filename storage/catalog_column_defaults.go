@@ -28,6 +28,7 @@ type catalogStoredColumnAmendment struct {
 	defaultDeclaration catalogColumnDefaultDeclaration
 	declaration        *catalogColumnDeclaration
 	propertyRemoval    *catalogColumnPropertyRemoval
+	appendDeclaration  *catalogColumnAppend
 	table              *table
 	columns            []*column
 	previous           *tableShowColumnsSnapshot
@@ -46,6 +47,9 @@ func columnDefaultOperation(operation string) bool {
 func (tx *TxContext) alterPublicStoredColumn(t *table, name, operation string, value scm.Scmer) scm.Scmer {
 	if tx == nil || tx.transactionState == nil {
 		panic("default declaration requires an active native transaction")
+	}
+	if tx.pendingNullColumn(t, name) {
+		panic("a pending nullable append cannot be altered before its decision")
 	}
 	if operation == "drop_default" {
 		requireTableMaintenance(t.schema.Name, t.Name, maintenanceAlter)
@@ -86,15 +90,13 @@ func (tx *TxContext) alterPublicStoredColumn(t *table, name, operation string, v
 	return result
 }
 
-func (changes *publicCatalogChanges) stageStoredColumn(tx *TxContext, t *table, name, operation string, value scm.Scmer) scm.Scmer {
-	changes.mu.Lock()
-	defer changes.mu.Unlock()
-	defer changes.refreshMemoryLocked()
-	accepted := false
+// Both stored-column profiles retain the same endpoint/declaration lease.
+// Caller owns changes.mu; an unsuccessful first amendment retires only its lease.
+func (changes *publicCatalogChanges) acquireStoredColumnLease(tx *TxContext, t *table, validated bool) func(bool) {
 	acquired := changes.leases[t] == nil
 	if acquired {
 		admission := tableCatalogDeclarationAdmission
-		if operation == "declaration" {
+		if validated {
 			admission = tableValidatedDeclarationAdmission
 		}
 		lease, err := t.writeAdmission.admit(scanQueryContext(tx, context.Background()), tx.transactionState, admission, false)
@@ -109,7 +111,7 @@ func (changes *publicCatalogChanges) stageStoredColumn(tx *TxContext, t *table, 
 			changes.anchor = lease
 		}
 	}
-	defer func() {
+	return func(accepted bool) {
 		if !accepted && acquired {
 			if changes.anchor == changes.leases[t] {
 				changes.anchor = nil
@@ -118,7 +120,16 @@ func (changes *publicCatalogChanges) stageStoredColumn(tx *TxContext, t *table, 
 			delete(changes.leases, t)
 			delete(changes.baselines, t)
 		}
-	}()
+	}
+}
+
+func (changes *publicCatalogChanges) stageStoredColumn(tx *TxContext, t *table, name, operation string, value scm.Scmer) scm.Scmer {
+	changes.mu.Lock()
+	defer changes.mu.Unlock()
+	defer changes.refreshMemoryLocked()
+	accepted := false
+	finishLease := changes.acquireStoredColumnLease(tx, t, operation == "declaration")
+	defer func() { finishLease(accepted) }()
 	db := changes.db
 	var columns []*column
 	var observed *tableShowColumnsSnapshot
@@ -298,6 +309,7 @@ func (changes *publicCatalogChanges) publishViews(history []catalogDeclarationAm
 	guarded := make(map[*table]bool)
 	writers := make(map[*table]struct{})
 	blocked := make(map[*table]struct{})
+	nullColumns := make(map[*table]map[string]struct{})
 	dropped := make(map[*table]struct{})
 	for _, entry := range history {
 		if key := entry.publicKey; key != nil {
@@ -334,8 +346,16 @@ func (changes *publicCatalogChanges) publishViews(history []catalogDeclarationAm
 			blocked[amendment.slot.table] = struct{}{}
 		}
 		if amendment := entry.column; amendment != nil {
-			writers[amendment.table] = struct{}{}
-			if amendment.declaration != nil {
+			if amendment.appendDeclaration != nil {
+				blocked[amendment.table] = struct{}{}
+				if nullColumns[amendment.table] == nil {
+					nullColumns[amendment.table] = make(map[string]struct{})
+				}
+				nullColumns[amendment.table][amendment.appendDeclaration.Name] = struct{}{}
+			} else {
+				writers[amendment.table] = struct{}{}
+			}
+			if amendment.declaration != nil || amendment.appendDeclaration != nil {
 				guarded[amendment.table] = true
 			}
 		}
@@ -357,10 +377,29 @@ func (changes *publicCatalogChanges) publishViews(history []catalogDeclarationAm
 	for t := range changes.leases {
 		t.setGuardedCatalogDeclarationInput(changes.owner, guarded[t])
 	}
-	changes.views.Store(&publicCatalogViews{keys: keys, tables: tables, columnWriters: writers, blockedWriters: blocked, dropped: dropped, checkedWriters: checked, history: history})
+	changes.views.Store(&publicCatalogViews{keys: keys, tables: tables, columnWriters: writers, nullColumns: nullColumns, blockedWriters: blocked, dropped: dropped, checkedWriters: checked, history: history})
 }
 
 func replaceStoredColumnMetadata(t *table, base *tableShowColumnsSnapshot, columns []*column) (*tableShowColumnsSnapshot, uint) {
+	if len(columns) != len(base.metadata.columnNames.declarations) {
+		// Preserve earlier private key/default/type descriptions on the prefix;
+		// build only the actual newly appended columns beyond that predecessor.
+		prefix, prefixBytes := replaceStoredColumnMetadata(t, base, columns[:len(base.metadata.columnNames.declarations)])
+		names := t.buildColumnNamesSnapshot(columns)
+		result := t.buildShowColumnsSnapshot(base.rowEstimate, names)
+		result.metadata.catalogVersion, result.metadata.catalogPrevious = base.metadata.catalogVersion, base.metadata.catalogPrevious
+		result.metadata.statistics = base.metadata.statistics
+		rows := append([]scm.Scmer(nil), result.metadata.columnRows.Slice()...)
+		copy(rows, prefix.metadata.columnRows.Slice())
+		result.metadata.columnRows = scm.NewSlice(rows)
+		result.value = result.metadata.columnRows
+		result.metadata.constraints, result.metadata.foreignByID = base.metadata.constraints, base.metadata.foreignByID
+		result.metadata.declarations = buildTableDeclarations(result.metadata.columnRows, result.metadata.constraints)
+		bytes := prefixBytes + uint(unsafe.Sizeof(*result)) + uint(unsafe.Sizeof(*result.metadata)) + uint(unsafe.Sizeof(*names))
+		bytes += scm.ComputeSize(result.value) + scm.ComputeSize(result.plannerValue) + scm.ComputeSize(result.metadata.declarations)
+		bytes += uint(cap(names.declarations))*uint(unsafe.Sizeof((*column)(nil))) + uint(len(names.exact)+len(names.folded))*uint(unsafe.Sizeof(tableColumnName{}))
+		return result, bytes
+	}
 	render := base
 	if render.metadata.columnNames == nil {
 		render = t.showColumnsSnapshot.Load()
@@ -410,7 +449,7 @@ func storedColumnBytes(c *column) uint {
 func (tx *TxContext) publicColumnDefaultDeclarations() []catalogColumnDefaultDeclaration {
 	latest := make(map[string]catalogColumnDefaultDeclaration)
 	for _, entry := range tx.publicForeignAmendments() {
-		if amendment := entry.column; amendment != nil && amendment.declaration == nil && amendment.propertyRemoval == nil && !tx.ownsTableDrop(amendment.table) {
+		if amendment := entry.column; amendment != nil && amendment.declaration == nil && amendment.propertyRemoval == nil && amendment.appendDeclaration == nil && !tx.ownsTableDrop(amendment.table) {
 			latest[amendment.defaultDeclaration.Table+"\x00"+amendment.defaultDeclaration.Column] = amendment.defaultDeclaration
 		}
 	}
@@ -449,7 +488,11 @@ func publicStoredColumnInputs(history []catalogDeclarationAmendment) map[*table]
 			if payloads[amendment.table] == nil {
 				payloads[amendment.table] = make(map[string]uint)
 			}
-			payloads[amendment.table][amendment.defaultDeclaration.Column] = amendment.columnBytes
+			name := amendment.defaultDeclaration.Column
+			if amendment.appendDeclaration != nil {
+				name = amendment.appendDeclaration.Name
+			}
+			payloads[amendment.table][name] = amendment.columnBytes
 		}
 	}
 	for t, input := range result {

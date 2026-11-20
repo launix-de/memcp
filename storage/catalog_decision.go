@@ -46,6 +46,7 @@ type catalogCommit struct {
 	prepared             bool
 	participantsPrepared bool
 	publicPublication    *publicForeignPublication
+	appendDDL            []*table
 }
 
 func (tx *transactionState) commitAuthorityID() string {
@@ -334,17 +335,43 @@ func (tx *TxContext) acquireCatalogPublication() {
 	if db == nil || db != identity.database || db.incarnationID() != identity.Incarnation {
 		panic("transaction catalog database was removed or replaced")
 	}
+	var appendDDL []*table
+	retained := false
+	defer func() {
+		if !retained {
+			for _, held := range appendDDL {
+				held.ddlMu.Unlock()
+			}
+		}
+	}()
+	for _, d := range tx.publicColumnAppends() {
+		t := db.tables.Get(d.Table)
+		if t == nil {
+			panic("nullable append endpoint was removed")
+		}
+		if len(appendDDL) != 0 && appendDDL[len(appendDDL)-1] == t {
+			continue
+		}
+		if !t.ddlMu.TryLock() {
+			panic("nullable append conflicts with native maintenance; retry transaction")
+		}
+		appendDDL = append(appendDDL, t)
+	}
 	access := db.GetWrite(tx)
 	if GetDatabase(identity.Database) != db || db.incarnationID() != identity.Incarnation {
 		access.Release()
 		panic("transaction catalog database was replaced")
 	}
-	tx.catalogCommit = &catalogCommit{database: db, access: access}
+	tx.catalogCommit = &catalogCommit{database: db, access: access, appendDDL: appendDDL}
+	retained = true
 }
 func (tx *TxContext) releaseCatalogPublication() {
 	if commit := tx.catalogCommit; commit != nil {
 		tx.catalogCommit = nil
 		commit.access.Release()
+		for _, held := range commit.appendDDL {
+			held.ddlMu.Unlock()
+		}
 	}
 }
 
@@ -401,6 +428,7 @@ func (tx *TxContext) prepareCatalogDecision() error {
 	record.ColumnDefaults = tx.publicColumnDefaultDeclarations()
 	record.ColumnDeclarations = tx.publicColumnDeclarations()
 	record.ColumnPropertyRemovals = tx.publicColumnPropertyRemovals()
+	record.ColumnAppends = tx.publicColumnAppends()
 	if len(record.Sources) != 0 {
 		record.Format = 3
 	}
@@ -444,11 +472,14 @@ func (tx *TxContext) prepareCatalogDecision() error {
 	if len(record.NativeDeclarations) > 0 {
 		record.Format = 15
 	}
+	if len(record.ColumnAppends) > 0 {
+		record.Format = 16
+	}
 	if len(record.ColumnPropertyRemovals) > 0 {
 		record.Format = 17
 	}
-	if len(record.NativeDeclarations) != 0 || len(record.ColumnDeclarations) != 0 || len(record.ColumnPropertyRemovals) != 0 || len(record.Checks) != 0 || len(record.ColumnDefaults) != 0 || len(record.CheckDrops) != 0 {
-		commit.publicPublication = db.preparePublicConstraintPublication(record.Checks, record.ColumnDefaults, record.ColumnDeclarations, record.ColumnPropertyRemovals, record.CheckDrops, record.NativeDeclarations, record.Version, tx.publicConstraintPrograms(), tx.publicCatalogChanges())
+	if len(record.ColumnAppends) != 0 || len(record.NativeDeclarations) != 0 || len(record.ColumnDeclarations) != 0 || len(record.ColumnPropertyRemovals) != 0 || len(record.Checks) != 0 || len(record.ColumnDefaults) != 0 || len(record.CheckDrops) != 0 {
+		commit.publicPublication = db.preparePublicConstraintPublication(record.Checks, record.ColumnDefaults, record.ColumnDeclarations, record.ColumnAppends, record.ColumnPropertyRemovals, record.CheckDrops, record.NativeDeclarations, record.Version, tx.publicConstraintPrograms(), tx.publicCatalogChanges())
 	}
 
 	encoded := encodeCatalogDecision(record)
@@ -579,6 +610,11 @@ func (tx *TxContext) admitCatalogMutation(table *table) {
 		return
 	}
 	tx.requireMutationBinding()
+	// Append has no private physical slot. This veto precedes every native
+	// writer grant, including a checked KEY/FK input on the same endpoint.
+	if len(tx.pendingNullColumns(table)) != 0 {
+		panic("pending nullable append does not admit endpoint row mutation")
+	}
 	if tx.decisionStarted {
 		panic("transaction commit outcome is unknown; retry COMMIT")
 	}

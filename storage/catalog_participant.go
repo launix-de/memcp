@@ -272,7 +272,7 @@ func (db *database) verifyCatalogEnrollment(enrollment *catalogParticipantRecord
 	var failure error
 	for frame := range frames {
 		commit, ok := frame.(LogEntryCommit)
-		if !ok || (!strings.HasPrefix(commit.txID, catalogParticipantJournalPrefix) && !strings.HasPrefix(commit.txID, catalogEnforcementParticipantJournalPrefix) && !strings.HasPrefix(commit.txID, catalogForeignDropJournalPrefix) && !strings.HasPrefix(commit.txID, catalogForeignHistoryJournalPrefix) && !strings.HasPrefix(commit.txID, catalogColumnDeclarationJournalPrefix) && !strings.HasPrefix(commit.txID, catalogNativeDeclarationJournalPrefix) && !strings.HasPrefix(commit.txID, catalogColumnPropertyJournalPrefix)) {
+		if !ok || (!strings.HasPrefix(commit.txID, catalogParticipantJournalPrefix) && !strings.HasPrefix(commit.txID, catalogEnforcementParticipantJournalPrefix) && !strings.HasPrefix(commit.txID, catalogForeignDropJournalPrefix) && !strings.HasPrefix(commit.txID, catalogForeignHistoryJournalPrefix) && !strings.HasPrefix(commit.txID, catalogColumnDeclarationJournalPrefix) && !strings.HasPrefix(commit.txID, catalogNativeDeclarationJournalPrefix) && !strings.HasPrefix(commit.txID, catalogColumnPropertyJournalPrefix) && !strings.HasPrefix(commit.txID, catalogColumnAppendJournalPrefix)) {
 			continue
 		}
 		record, err := decodeCatalogDecision(commit.txID)

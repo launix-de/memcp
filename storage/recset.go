@@ -1293,7 +1293,7 @@ func (t *storageShard) projectJoinKeysPart(currentTx *TxContext, targetKeyCols [
 	targetCols := make([]ColumnStorage, len(targetKeyCols))
 	for i, col := range targetKeyCols {
 		if alreadyLocked {
-			targetCols[i] = t.getColumnStorageRLocked(col)
+			targetCols[i] = t.getColumnStorageRLocked(col, currentTx)
 		} else {
 			targetCols[i] = t.getColumnStorageOrPanic(col, skipShardReadLock, currentTx)
 		}
