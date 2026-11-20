@@ -204,6 +204,7 @@ Their values preserve the grammar's declared spelling. */
 (define tsql_keyword_permissions (tsql_keyword_parser "PERMISSIONS"))
 (define tsql_keyword_persisted (tsql_keyword_parser "PERSISTED"))
 (define tsql_keyword_physical (tsql_keyword_parser "PHYSICAL"))
+(define tsql_keyword_pivot (tsql_keyword_parser "PIVOT"))
 (define tsql_keyword_primary (tsql_keyword_parser "PRIMARY"))
 (define tsql_keyword_print (tsql_keyword_parser "PRINT"))
 (define tsql_keyword_prior (tsql_keyword_parser "PRIOR"))
