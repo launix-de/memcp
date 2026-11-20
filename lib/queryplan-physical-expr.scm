@@ -3979,7 +3979,7 @@ coercion and collations do not have the same ordering proof. */
 				(not (reduce terms (lambda (conflict other)
 					(or conflict (and (not (equal? other term))
 						(contains? (extract_columns_for_alias src other) col)))) false))))
-			(if (not eligible) term (begin
+			(if (or (not eligible) (planner_symbolic_inputs? rhs planning_session)) term (begin
 				(define numeric (lambda (value) (and (number? value) (<= value value))))
 				(define bound_values (if array_binding (planner_literal_value rhs planning_session)
 					(map values (lambda (value) (planner_literal_value value planning_session)))))

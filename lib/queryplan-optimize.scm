@@ -350,6 +350,7 @@ bounded scalar metadata; this lookup never scans, loads columns or builds indexe
 	(begin
 		(define planning_session (planner_effective_session planning_session))
 		(if (or (nil? planning_session)
+			(planner_symbolic_inputs? callback planning_session)
 			(nil? (planning_session "__memcp_queryplan_guard_conditions"))) nil
 			(begin
 				/* Keep the predicate unbound while generating metadata. Its slots must
@@ -385,7 +386,7 @@ bounded scalar metadata; this lookup never scans, loads columns or builds indexe
 (define planner_filter_feedback (lambda (sources default_alias expr planning_session)
 	(begin
 		(define aliases (join_hypergraph_expr_aliases default_alias (source_aliases sources) expr))
-		(if (not (single_source? aliases)) nil
+		(if (or (not (single_source? aliases)) (planner_symbolic_inputs? expr planning_session)) nil
 			(begin
 				(define src (join_optimizer_source_by_alias sources (car aliases)))
 				(if (not (source_is_base_table? src)) nil
@@ -2873,10 +2874,26 @@ Both searches already register the same bounded statistics/parameter guards. */
 
 (define hybrid_reorder_query_block (lambda (block planning_session tx)
 	(hybrid_reorder_query_block_using (qb_stages block) block planning_session tx)))
+
+/* A parameterized candidate has declarations, but no observed parameter values.
+Keep an unknown input as its original expression: SQL NULL is a known value and
+must never stand in for an unbound input during pruning, sampling or costing. */
+(define planner_symbolic_parameter? (lambda (expr planning_session)
+	(begin
+		(define planning_session (planner_effective_session planning_session))
+		(and (not (nil? planning_session))
+			(equal? (planning_session "__memcp_queryplan_parameter_mode") "generic")
+			(query_session_read? expr)
+			(not (planner_stage_preparation_read? expr))))))
+
+(define planner_symbolic_inputs? (lambda (expr planning_session)
+	(reduce (query_expr_session_reads expr) (lambda (found read)
+		(or found (planner_symbolic_parameter? read planning_session))) false)))
+
 (define planner_literal_value (lambda (expr planning_session)
 	(begin
 		(define planning_session (planner_effective_session planning_session))
-		(match expr
+		(if (planner_symbolic_parameter? expr planning_session) expr (match expr
 			((symbol session) key) (try
 				(lambda () (begin
 					(define compile_bindings (if (nil? planning_session) nil (planning_session "__memcp_queryplan_compile_bindings")))
@@ -2903,13 +2920,13 @@ Both searches already register the same bounded statistics/parameter guards. */
 				(globalvars key))
 			((quote session_globalvar) key) (planner_literal_value
 				(list (quote session_globalvar) key) planning_session)
-			_ expr))))
+			_ expr)))))
 
 /* Sampling callbacks run outside the generated query closure. Replace only
 the session reads observed in the isolated compile scope; the corresponding
 runtime guards keep the cached choice valid for those exact values. */
 (define planner_bind_session_values (lambda (expr planning_session)
-	(if (nil? planning_session)
+	(if (or (nil? planning_session) (planner_symbolic_parameter? expr planning_session))
 		expr
 		(match expr
 			/* Quoted recipes are metadata, not executable session reads. Sampling
@@ -2934,7 +2951,8 @@ runtime guards keep the cached choice valid for those exact values. */
 guarded by the values observed while compiling the cached plan. */
 (define planner_record_session_value_guards (lambda (node planning_session)
 	(reduce (filter (query_expr_session_reads node) (lambda (expr)
-		(not (planner_stage_preparation_read? expr)))) (lambda (_ expr)
+		(and (not (planner_stage_preparation_read? expr))
+			(not (planner_symbolic_parameter? expr planning_session))))) (lambda (_ expr)
 			(begin
 				(define value (planner_literal_value expr planning_session))
 				(planner_record_guard_condition
@@ -3093,7 +3111,7 @@ floor avoids pretending that an unseen word is impossible. */
 		(if (nil? stats) nil (stats "row_count")))))
 
 (define planner_source_filter_estimate (lambda (src condition max_rows tx planning_session)
-	(if (not (source_is_base_table? src))
+	(if (or (not (source_is_base_table? src)) (planner_symbolic_inputs? condition planning_session))
 		nil
 		(try
 			(lambda ()
@@ -8276,6 +8294,7 @@ intact: they own the outer domain of sibling aggregates. */
 						(list name expr '())
 						(match expr ((symbol session) key)
 							(if (and (not (nil? planning_session)) (string? key)
+								(not (planner_symbolic_parameter? expr planning_session))
 								(regexp_test key "^v[0-9]+$"))
 								(list name (planning_session key) (list expr)) nil)
 							_ nil)))) '())))))
