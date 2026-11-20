@@ -61,6 +61,14 @@ test_cases:
       sql: SELECT amount,COUNT(*) AS n FROM constant_append_rows GROUP BY amount ORDER BY amount
       expect: {rows: 2,data: [{amount: 0,n: 4},{amount: 7,n: 1}]}
     - connection: owner
+      sql: CREATE VIEW constant_append_view AS SELECT id,amount FROM constant_append_rows
+    - connection: owner
+      sql: SELECT id,amount FROM constant_append_view ORDER BY id
+      expect: {rows: 5,data: [{id: 1,amount: 0},{id: 2,amount: 7},{id: 3,amount: 0},{id: 4,amount: 0},{id: 5,amount: 0}]}
+    - connection: observer
+      sql: SELECT OBJECT_ID(N'constant_append_view',N'V') AS id
+      expect: {rows: 1,data: [{id: null}]}
+    - connection: owner
       sql: COMMIT TRANSACTION
     - connection: observer
       sql: SELECT id,value,amount FROM constant_append_rows ORDER BY id
@@ -189,7 +197,11 @@ test_cases:
 - name: Recovery retains an actual empty constant and its named default
   sql: SELECT id,label FROM constant_append_text
   expect: {rows: 1,data: [{id: 11,label: ''}]}
+- name: The same original decision recovered the consuming SQL view participant
+  sql: SELECT id,amount FROM constant_append_view ORDER BY id
+  expect: {rows: 7,data: [{id: 1,amount: 0},{id: 2,amount: 7},{id: 3,amount: 0},{id: 4,amount: 0},{id: 5,amount: 0},{id: 14,amount: 9},{id: 24,amount: 12}]}
 cleanup:
+- sql: DROP VIEW IF EXISTS constant_append_view
 - sql: DROP TABLE IF EXISTS constant_append_rows
 - sql: DROP TABLE IF EXISTS constant_append_other
 - sql: DROP TABLE IF EXISTS constant_append_rollback
