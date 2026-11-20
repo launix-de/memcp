@@ -1,0 +1,104 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: "1.0"
+  description: "Native collision and scan updates retain BEFORE trigger effects and release failed callbacks"
+
+setup:
+  - sql: DROP TABLE IF EXISTS before_collision_target
+  - sql: DROP TABLE IF EXISTS before_collision_audit
+  - sql: CREATE TABLE before_collision_target (id INT PRIMARY KEY, value INT NOT NULL) ENGINE=safe
+  - sql: CREATE TABLE before_collision_audit (old_value INT PRIMARY KEY, proposed_value INT NOT NULL) ENGINE=safe
+  - sql: INSERT INTO before_collision_target VALUES (1,0)
+  - sql: |
+      CREATE TRIGGER before_collision_update BEFORE UPDATE ON before_collision_target FOR EACH ROW
+      BEGIN
+        INSERT INTO before_collision_audit (old_value,proposed_value) VALUES (OLD.value,NEW.value);
+        SET NEW.value=OLD.value+1;
+      END
+
+test_cases:
+  - name: Native collision callbacks acknowledge each triggered update once
+    timeout: 5
+    scm: |
+      (begin
+        (define target (table "memcp-tests" false "before_collision_target" false))
+        (list (reduce (produceN 4) (lambda (count i)
+          (+ count (insert target '("id" "value") (list (list 1 99)) '("value" "$update")
+            (lambda (previous update) (begin
+              (if (equal? previous i) true (error "collision observed an incorrect previous value"))
+              (update '("value" 99)) true)) false nil nil))) 0)))
+    expect: {data: [[8]]}
+
+  - name: BEFORE values replace the collision assignment
+    sql: SELECT id,value FROM before_collision_target
+    expect: {rows: 1, data: [{id: 1, value: 4}]}
+
+  - name: Trigger side effects retain every previous value without replay
+    sql: SELECT old_value,proposed_value FROM before_collision_audit ORDER BY old_value
+    expect:
+      rows: 4
+      data:
+        - {old_value: 0, proposed_value: 99}
+        - {old_value: 1, proposed_value: 99}
+        - {old_value: 2, proposed_value: 99}
+        - {old_value: 3, proposed_value: 99}
+
+  - name: The scan-owned update path runs the same BEFORE callback
+    sql: UPDATE before_collision_target SET value=99 WHERE id=1
+    expect: {affected_rows: 1}
+
+  - name: The scan and collision paths preserve the same row identity
+    sql: SELECT id,value FROM before_collision_target
+    expect: {rows: 1, data: [{id: 1, value: 5}]}
+
+  - name: The scan trigger publishes exactly one additional effect
+    sql: SELECT old_value,proposed_value FROM before_collision_audit ORDER BY old_value
+    expect:
+      rows: 5
+      data:
+        - {old_value: 0, proposed_value: 99}
+        - {old_value: 1, proposed_value: 99}
+        - {old_value: 2, proposed_value: 99}
+        - {old_value: 3, proposed_value: 99}
+        - {old_value: 4, proposed_value: 99}
+
+  - name: Reserve a conflicting key for the trigger failure control
+    sql: INSERT INTO before_collision_audit VALUES (5,17)
+    expect: {affected_rows: 1}
+
+  - name: A genuine trigger UNIQUE failure unwinds the native collision callback
+    timeout: 5
+    scm: |
+      (insert (table "memcp-tests" false "before_collision_target" false)
+        '("id" "value") (list (list 1 99)) '("value" "$update")
+        (lambda (previous update) (update '("value" 99))) false nil nil)
+    expect: {error: true, contains: "Duplicate entry"}
+
+  - name: Rejected trigger leaves the target row unchanged
+    sql: SELECT id,value FROM before_collision_target
+    expect: {rows: 1, data: [{id: 1, value: 5}]}
+
+  - name: Release the deliberate trigger conflict
+    sql: DELETE FROM before_collision_audit WHERE old_value=5
+    expect: {affected_rows: 1}
+
+  - name: Reuse the failed collision keys without retaining writer ownership
+    timeout: 5
+    scm: |
+      (list (insert (table "memcp-tests" false "before_collision_target" false)
+        '("id" "value") (list (list 1 99)) '("value" "$update")
+        (lambda (previous update) (update '("value" 99))) false nil nil))
+    expect: {data: [[2]]}
+
+  - name: Successful retry changes the target once
+    sql: SELECT id,value FROM before_collision_target
+    expect: {rows: 1, data: [{id: 1, value: 6}]}
+
+  - name: The recovered trigger effect is exact
+    sql: SELECT old_value,proposed_value FROM before_collision_audit WHERE old_value=5
+    expect: {rows: 1, data: [{old_value: 5, proposed_value: 99}]}
+
+cleanup:
+  - sql: DROP TABLE IF EXISTS before_collision_target
+  - sql: DROP TABLE IF EXISTS before_collision_audit
