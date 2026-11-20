@@ -79,6 +79,13 @@ test_cases:
 - name: The named default and new ordinal are actual catalog declarations
   sql: SELECT name,parent_column_id FROM sys.default_constraints WHERE parent_object_id=OBJECT_ID(N'constant_append_rows')
   expect: {rows: 1,data: [{name: constant_amount_default,parent_column_id: 3}]}
+- name: A later ordinary UPDATE copies a historical initialized cell correctly
+  sql: UPDATE constant_append_rows SET value=34 WHERE id=3
+- name: Replacement of another field preserves the complete initialized row
+  sql: SELECT id,value,amount FROM constant_append_rows WHERE id=3
+  expect: {rows: 1,data: [{id: 3,value: 34,amount: 0}]}
+- name: Restore the original payload independently of the historical cell
+  sql: UPDATE constant_append_rows SET value=33 WHERE id=3
 - name: NOT NULL remains enforced for later explicit assignments
   sql: UPDATE constant_append_rows SET amount=NULL WHERE id=1
   expect: {error: true}
