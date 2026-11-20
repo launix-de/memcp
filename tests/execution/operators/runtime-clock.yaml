@@ -1,0 +1,29 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  isolated: true
+  description: Elapsed-time reads preserve execution order through scalar optimization
+setup: []
+test_cases:
+- name: An elapsed-time origin stays before delayed work after optimization
+  scm: |
+    (begin
+      (define body (quote (lambda () (begin
+        (define started (nanotime))
+        (if (sleep 0.02) (>= (- (nanotime) started) 15000000) false)))))
+      (define compiled (eval (optimize (clone_optimizer_expression body))))
+      (list ((eval (clone_optimizer_expression body))) (compiled) ((jit compiled)))))
+  expect:
+    result: [true, true, true]
+- name: Consecutive elapsed-time intervals preserve each completed value
+  scm: |
+    (begin
+      (define operation (eval (optimize (quote (lambda (value) (begin
+        (define started (nanotime))
+        (define completed (if (sleep 0.01) (+ value 1) value))
+        (list completed (>= (- (nanotime) started) 7000000))))))))
+      (map (list 0 7 41) operation))
+  expect:
+    result: [[1, true], [8, true], [42, true]]
+cleanup: []

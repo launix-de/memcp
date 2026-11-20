@@ -21,6 +21,14 @@ import (
 	"time"
 )
 
+// nanotimeOrigin retains Go's monotonic clock component. The public primitive
+// is an elapsed-time clock; its values have no wall-clock or persistent epoch.
+var nanotimeOrigin = time.Now()
+
+func monotonicNanoseconds() int64 {
+	return time.Since(nanotimeOrigin).Nanoseconds()
+}
+
 var allowedDateFormats = []string{
 	"2006-01-02 15:04:05.000000",
 	"2006-01-02 15:04:05",
@@ -332,10 +340,11 @@ func init_date() {
 		Name: "nanotime",
 
 		Fn: func(a ...Scmer) Scmer {
-			return NewInt(time.Now().UnixNano())
+			return NewInt(monotonicNanoseconds())
 		},
 		Type: &TypeDescriptor{Kind: "func", Description: "returns a monotonic nanosecond timestamp for benchmarking (not wall-clock)",
-			Return: &TypeDescriptor{Kind: "int"},
+			HasSideEffects: true,
+			Return:         &TypeDescriptor{Kind: "int"},
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 				declaration := declarations["nanotime"]
@@ -347,38 +356,55 @@ func init_date() {
 				for i := range args {
 					ctx.StabilizeDescForControlFlow(&args[i])
 				}
-				d0 := ctx.EmitGoCallScalar(jitGoABI_4f490bf5df3fd456, []JITValueDesc{}, 3)
-				d0.NoHeapPointer = false
-				ctx.BindReg(d0.Reg, &d0)
-				ctx.BindReg(d0.Reg2, &d0)
-				ctx.BindReg(d0.Reg3, &d0)
+				bbpos_1_0 := int32(-1)
+				_ = bbpos_1_0
+				lbl0 := ctx.ReserveLabel()
+				_ = lbl0
+				bbpos_1_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
+				ctx.MarkLabel(lbl0)
+				ctx.ResolveFixups()
+				ctx.ReclaimUntrackedRegs()
+				ctx.ReclaimUntrackedRegs()
+				d0 := ctx.EmitGoCallScalar(jitGoABI_5bddf2d541d24574, nil, 3)
+				ctx.ReclaimUntrackedRegs()
 				d0 = JITPrepareGoSliceArg(ctx, d0)
 				if d0.Loc != LocRegTriple && d0.Loc != LocStackTriple {
-					panic("jit: generic call arg expects 3-word Go slice ((time.Time).UnixNano arg0)")
+					panic("jit: generic call arg expects 3-word Go slice (time.Since arg0)")
 				}
 				ctx.SyncDesc(&d0)
-				d1 := ctx.EmitGoCallScalar(jitGoABI_fdc8d21f1d8da832, []JITValueDesc{d0}, 1)
+				d1 := ctx.EmitGoCallScalar(jitGoABI_1b22beee3026f5f3, []JITValueDesc{d0}, 1)
 				d1.NoHeapPointer = true
 				ctx.BindReg(d1.Reg, &d1)
 				ctx.FreeDesc(&d0)
-				ctx.EnsureDesc(&d1)
+				ctx.ReclaimUntrackedRegs()
+				if d1.Loc == LocRegPair || d1.Loc == LocStackPair || d1.Loc == LocRegTriple || d1.Loc == LocStackTriple {
+					panic("jit: generic call arg expects 1-word value")
+				}
+				ctx.SyncDesc(&d1)
+				d2 := ctx.EmitGoCallScalar(jitGoABI_f16e9b76883b55b4, []JITValueDesc{d1}, 1)
+				d2.NoHeapPointer = true
+				ctx.BindReg(d2.Reg, &d2)
+				ctx.FreeDesc(&d1)
+				ctx.ReclaimUntrackedRegs()
+				ctx.EnsureDesc(&d2)
+				ctx.EnsureDesc(&d2)
 				if result.Loc == LocAny {
 					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 					ctx.BindReg(result.Reg, &result)
 					ctx.BindReg(result.Reg2, &result)
 				}
-				if d1.Loc == LocImm {
-					ctx.EmitMakeInt(result, d1)
+				if d2.Loc == LocImm {
+					ctx.EmitMakeInt(result, d2)
 				} else {
-					ctx.EmitMakeInt(result, d1)
-					ctx.FreeReg(d1.Reg)
+					ctx.EmitMakeInt(result, d2)
+					ctx.FreeReg(d2.Reg)
 				}
 				result.Type = tagInt
 				return result
 				return result
 			},
 			JITVirtualArgs: true,
-			JITInlineCost:  4,
+			JITInlineCost:  7,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -22046,11 +22072,13 @@ var jitGoABI_018216abe5715ca6 uint64
 var jitGoABI_0a71f60ab5e6273a uint64
 var jitGoABI_0f52acdd8948f308 uint64
 var jitGoABI_17b9f4ef5555208d uint64
+var jitGoABI_1b22beee3026f5f3 uint64
 var jitGoABI_245bf550fc4c8473 uint64
 var jitGoABI_38029b4f8d9d8087 uint64
 var jitGoABI_4c53c0f0c0048dd2 uint64
 var jitGoABI_4f490bf5df3fd456 uint64
 var jitGoABI_58ce0da281b36be9 uint64
+var jitGoABI_5bddf2d541d24574 uint64
 var jitGoABI_7b61a37ea6e7a64d uint64
 var jitGoABI_895aea8843d13f6b uint64
 var jitGoABI_8cadbc50f9fffb6c uint64
@@ -22065,10 +22093,10 @@ var jitGoABI_c5e9b088af74086e uint64
 var jitGoABI_cf8263e725dcb88a uint64
 var jitGoABI_d275db90b3e6ecc4 uint64
 var jitGoABI_e5db09892da97d6b uint64
+var jitGoABI_f16e9b76883b55b4 uint64
 var jitGoABI_f429d0d16ac0ec73 uint64
 var jitGoABI_f71e73875d14615d uint64
 var jitGoABI_f912ae72be7a8fe9 uint64
-var jitGoABI_fdc8d21f1d8da832 uint64
 var jitGoABI_fedaac2e6b41ec93 uint64
 
 func init() {
@@ -22078,11 +22106,13 @@ func init() {
 	jitGoABI_0a71f60ab5e6273a = GoFuncAddr(ResolveLocation)
 	jitGoABI_0f52acdd8948f308 = GoFuncAddr(JITStringEqual)
 	jitGoABI_17b9f4ef5555208d = GoFuncAddr(NewDate)
+	jitGoABI_1b22beee3026f5f3 = GoFuncAddr(time.Since)
 	jitGoABI_245bf550fc4c8473 = GoFuncAddr((time.Time).Month)
 	jitGoABI_38029b4f8d9d8087 = GoFuncAddr(formatDateMySQL)
 	jitGoABI_4c53c0f0c0048dd2 = GoFuncAddr((time.Time).Minute)
 	jitGoABI_4f490bf5df3fd456 = GoFuncAddr(time.Now)
 	jitGoABI_58ce0da281b36be9 = GoFuncAddr((time.Duration).Minutes)
+	jitGoABI_5bddf2d541d24574 = GoFuncAddr(func() time.Time { return nanotimeOrigin })
 	jitGoABI_7b61a37ea6e7a64d = GoFuncAddr(time.Parse)
 	jitGoABI_895aea8843d13f6b = GoFuncAddr((time.Time).Add)
 	jitGoABI_8cadbc50f9fffb6c = GoFuncAddr((time.Duration).Hours)
@@ -22097,9 +22127,9 @@ func init() {
 	jitGoABI_cf8263e725dcb88a = GoFuncAddr(time.Date)
 	jitGoABI_d275db90b3e6ecc4 = GoFuncAddr(NewString)
 	jitGoABI_e5db09892da97d6b = GoFuncAddr((time.Time).Sub)
+	jitGoABI_f16e9b76883b55b4 = GoFuncAddr((time.Duration).Nanoseconds)
 	jitGoABI_f429d0d16ac0ec73 = GoFuncAddr((time.Time).Weekday)
 	jitGoABI_f71e73875d14615d = GoFuncAddr((time.Time).Unix)
 	jitGoABI_f912ae72be7a8fe9 = GoFuncAddr(Scmer.String)
-	jitGoABI_fdc8d21f1d8da832 = GoFuncAddr((time.Time).UnixNano)
 	jitGoABI_fedaac2e6b41ec93 = GoFuncAddr((time.Time).ISOWeek)
 }

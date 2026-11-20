@@ -2485,13 +2485,14 @@ bindings of neighbouring update alternatives. */
 				(define delete_rows (newsession))
 				(define insert_rows (newsession))
 				(define update_row_count (newsession))
-				/* Allocate the namespace at template evaluation time. nanotime has a
-				straight JIT path; row and template indexes disambiguate every label
-				within an update and the persistent row counter covers plan reuse. */
-				(define update_blank_prefix
-					(list (quote concat) "urn:rdf-template:" (list (quote nanotime)) ":"))
+				/* Bind one durable namespace per execution, before any solution-row
+				callbacks. Clock readings are neither persistent identities nor a
+				shared value for repeated fields in a blank-node template. */
+				(define update_blank_prefix (symbol "__rdf_update_blank_prefix"))
 				(update_row_count "value" 0)
 				(list (quote begin)
+					(list (quote define) update_blank_prefix
+						(list (quote concat) "urn:rdf-template:" (list (quote uuid)) ":"))
 					(list (quote rdf_ensure_table) schema)
 					(rdf_queryplan schema (rdf_update_select_query conditions) definitions '()
 						(lambda (_cols ctx) (list (quote begin)
