@@ -5805,34 +5805,45 @@ explicit binary relation handled below. */
 					(has? '("INT" "INTEGER" "BIGINT" "SMALLINT" "TINYINT" "MEDIUMINT" "DECIMAL" "NUMERIC" "FLOAT" "DOUBLE" "REAL")
 						(sql_info_type (sql_expr_info sources part)))))) true)))))
 
+/* Test the call shape before resolving types or collations. Unrelated
+predicates keep their original tree and do not enter CONCAT analysis. */
+(define concat_lookup_call? (lambda (expr)
+	(match expr
+		(cons (symbol concat) _args) true
+		(cons (symbol sql_concat) _args) true
+		_ false)))
+
 (define concat_lookup_term (lambda (sources term)
 	(match term
 		(cons (symbol or) terms) (cons (quote or) (map terms (lambda (item) (concat_lookup_term sources item))))
-		(cons (symbol and) terms) (boolean_fold_and_terms (map terms (lambda (item) (concat_lookup_term sources item))))
+		(cons (symbol and) terms) (begin
+			(define rewritten (map terms (lambda (item) (concat_lookup_term sources item))))
+			(if (expression_equal? terms rewritten) term (boolean_fold_and_terms rewritten)))
 		/* Native equal? can match two NULL values; it is not a SQL truth
 		context equality and must retain its original expression. */
 		'(operator left right) (if (or (not (equal? operator (quote equal??)))
+			(not (or (concat_lookup_call? left) (concat_lookup_call? right)))
 			(not (and (concat_lookup_raw_side_safe? sources left)
 				(concat_lookup_raw_side_safe? sources right)))) term
 			(coalesceNil
 				(concat_lookup_split sources (list operator) left right false)
 				(concat_lookup_split sources (list operator) right left false) term))
 		((symbol equal_collate) left right name)
-		(if (has? concat_lookup_binary_names name)
+		(if (and (or (concat_lookup_call? left) (concat_lookup_call? right))
+			(has? concat_lookup_binary_names name))
 			(coalesceNil
 				(concat_lookup_split sources (list (collate name false) "equal??") left right true)
 				(concat_lookup_split sources (list (collate name false) "equal??") right left true) term) term)
 		((symbol sql_compare) left right less operator)
-		(if (and (has? '("equal?" "equal??") operator)
+		(if (and (or (concat_lookup_call? left) (concat_lookup_call? right))
+			(has? '("equal?" "equal??") operator)
 			(has? concat_lookup_binary_relations less))
 			(coalesceNil (concat_lookup_split sources (list less operator) left right true)
 				(concat_lookup_split sources (list less operator) right left true) term) term)
 		_ term)))
 
 (define concat_lookup_condition (lambda (sources condition)
-	(if (nil? condition) nil
-		(boolean_fold_and_terms (map (split_and_terms condition) (lambda (term)
-			(concat_lookup_term sources term)))))))
+	(if (nil? condition) nil (concat_lookup_term sources condition))))
 
 (define expose_concat_lookup_keys (lambda (block)
 	(make_query_block
