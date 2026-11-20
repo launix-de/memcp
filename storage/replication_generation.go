@@ -210,22 +210,34 @@ func (r *replicationManager) declareShard(shard *storageShard, owner string, loc
 	return c
 }
 
-func (r *replicationManager) schemaShards(db *database, owner string, local bool) {
-	for _, shard := range db.catalog.live {
-		if shard != nil {
-			r.declareShard(shard, owner, local)
+// replicationShards snapshots the tenant's native partitions, irrespective of
+// their physical backend or whether Go declarations have caught up with MOSI.
+func (db *database) replicationShards() (shards []*storageShard) {
+	for _, relation := range systemSchemaTables {
+		if relation != nil {
+			for _, shard := range relation.activeTopology().shards {
+				if shard != nil && shard.catalogOwner == db.Name {
+					shards = append(shards, shard)
+				}
+			}
 		}
 	}
-
 	for _, table := range db.tables.GetAll() {
 		if table.isEphemeralQueryTable() {
 			continue
 		}
 		for _, shard := range table.ActiveShards() {
 			if shard != nil {
-				r.declareShard(shard, owner, local)
+				shards = append(shards, shard)
 			}
 		}
+	}
+	return
+}
+
+func (r *replicationManager) schemaShards(db *database, owner string, local bool) {
+	for _, shard := range db.replicationShards() {
+		r.declareShard(shard, owner, local)
 	}
 }
 
@@ -1181,10 +1193,15 @@ func (r *replicationManager) transmitResource(ctx context.Context, peerID string
 			if err := r.cluster.transferSchemaLocations(ctx, peerID, header); err != nil {
 				return err
 			}
-		} else if header.State == "M" || header.Resource.Shard != header.Content {
+		} else if header.Resource.Shard != header.Content || header.State == "M" && !isCatalogResource(header.Resource) {
 			// Preparation may have published a new physical UUID. Make its
 			// current owner routable before the reference wakes the requester;
 			// the final post-handover update alone leaves an observable gap.
+			// Fixed catalog row edits retain their UUID and can be required by
+			// the schema handover's checkpoint itself. Their native cell already
+			// routes the handoff; registering at the enclosing schema before its
+			// reference is admitted would wait on that checkpoint. The ordinary
+			// post-handover registration still publishes the new location.
 			r.mu.Lock()
 			entry := r.directory.Records[r.resourceKey(header.Resource)]
 			r.mu.Unlock()

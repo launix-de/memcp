@@ -493,6 +493,9 @@ func TestReplicationReclaimIncludesEmptyAndColdShards(t *testing.T) {
 	schema := mosiResource{Database: table.schema.Name}
 	r.resourceCell(schema).ownstate.Initialize(mosi.M)
 	r.schemaShards(table.schema, r.id, true)
+	for _, shard := range table.schema.catalog.live {
+		r.shardCell(shard).ownstate.RestoreBackend(mosi.M)
+	}
 	for _, item := range table.schema.tables.GetAll() {
 		for _, shard := range item.ActiveShards() {
 			r.shardCell(shard).ownstate.RestoreBackend(mosi.M)
@@ -500,6 +503,11 @@ func TestReplicationReclaimIncludesEmptyAndColdShards(t *testing.T) {
 	}
 	if !r.reclaimDatabase(table.schema.Name) {
 		t.Fatal("current backend-only exclusive generations were not reclaimed")
+	}
+	for _, shard := range table.schema.catalog.live {
+		if r.shardCell(shard).ownstate.Phase() != mosi.M {
+			t.Fatalf("catalog %s: native partition was not acquired", shard.t.Name)
+		}
 	}
 	for _, item := range table.schema.tables.GetAll() {
 		for _, shard := range item.ActiveShards() {
