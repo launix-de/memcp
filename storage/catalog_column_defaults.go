@@ -113,6 +113,15 @@ func (changes *publicCatalogChanges) acquireStoredColumnLease(tx *TxContext, t *
 	}
 	return func(accepted bool) {
 		if !accepted && acquired {
+			// A waiting append releases changes.mu. A successful sibling may then
+			// publish an amendment borrowing this same lease. The actual accepted
+			// view/blocked root owns it now; a failed prefix must not retire it.
+			if views := changes.views.Load(); views != nil {
+				_, blocked := views.blockedWriters[t]
+				if views.tables[t] != nil || blocked {
+					return
+				}
+			}
 			if changes.anchor == changes.leases[t] {
 				changes.anchor = nil
 			}

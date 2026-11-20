@@ -352,9 +352,10 @@ func (tx *TxContext) acquireCatalogPublication() {
 		if len(appendDDL) != 0 && appendDDL[len(appendDDL)-1] == t {
 			continue
 		}
-		if !t.ddlMu.TryLock() {
-			panic("nullable append conflicts with native maintenance; retry transaction")
-		}
+		// Successful staging retained the validated lease and proved no own
+		// endpoint rows. Decision admission has drained builders/producers, so this
+		// wait holds no input that maintenance needs in order to finish.
+		t.ddlMu.Lock()
 		appendDDL = append(appendDDL, t)
 	}
 	access := db.GetWrite(tx)

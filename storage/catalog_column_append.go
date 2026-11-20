@@ -32,15 +32,37 @@ func (d catalogColumnAppend) column() *column {
 	return c
 }
 
+// Fresh declarations own these scalar strings; same-slot clones normally
+// borrow them. This finite payload walk never traverses executable values.
+func columnAppendStrings(name, typ, collation, comment string, labels []string, properties columnDeclarationProperties) uint {
+	bytes := uint(len(name) + len(typ) + len(collation) + len(comment))
+	for _, label := range labels {
+		bytes += uint(len(label))
+	}
+	for key, value := range properties {
+		bytes += uint(len(key)) + scm.ComputeSize(value) - uint(unsafe.Sizeof(scm.Scmer{}))
+	}
+	return bytes
+}
+
+func (d *catalogColumnAppend) containers() uint {
+	bytes := uint(unsafe.Sizeof(*d)) + uint(cap(d.Type.Dimensions))*uint(unsafe.Sizeof(int(0))) + uint(cap(d.EnumValues))*uint(unsafe.Sizeof(""))
+	if d.Properties != nil {
+		bytes += 64 + 64*uint(len(d.Properties))
+	}
+	return bytes
+}
+
 func (d *catalogColumnAppend) memory() uint {
 	if d == nil {
 		return 0
 	}
-	return uint(unsafe.Sizeof(*d)) + storedColumnBytes(d.column()) + uint(len(d.Table)+len(d.Identity))
+	// A decoded durable envelope owns independent scalar payloads as well.
+	return d.containers() + uint(len(d.Table)+len(d.Identity)) + columnAppendStrings(d.Name, d.Type.Type, d.Type.Collation, d.Comment, d.EnumValues, d.Properties)
 }
 
 func (tx *TxContext) appendPublicColumn(t *table, name, typ string, dimensions []int, options []scm.Scmer) bool {
-	finish := tx.beginCatalogConstruction(catalogValidationConstruction)
+	finish := tx.beginCatalogConstruction(catalogValidationConstruction, t)
 	defer func() { finish(); tx.retireUnacceptedPublicCatalogPhase() }()
 	if tx.State != TxActive || tx.decisionStarted || tx.coordinator != nil || tx.remoteObject != nil || tx.remoteInvocation || tx.catalogIntents.Load() != nil || tx.hasTableDrops() || t.Ephemeral || t.ScopedSchema || t.PersistencyMode == Cache || !localCatalogRowDatabase(t.schema) {
 		panic("nullable append requires a local committed native table")
@@ -58,11 +80,6 @@ func (tx *TxContext) appendPublicColumn(t *table, name, typ string, dimensions [
 		panic("transactional append requires a fresh nullable column without a default")
 	}
 	requireTableMaintenance(t.schema.Name, t.Name, maintenanceAlter)
-	// DDL ownership precedes database/schema publication, just as rebuild does.
-	if !t.ddlMu.TryLock() {
-		panic("nullable append conflicts with native maintenance; retry statement")
-	}
-	defer t.ddlMu.Unlock()
 	return tx.stagePublicCatalogDeclaration(t.schema, catalogColumnKind, func(changes *publicCatalogChanges) bool {
 		return changes.stageColumnAppend(tx, t, c)
 	})
@@ -79,8 +96,23 @@ func (changes *publicCatalogChanges) stageColumnAppend(tx *TxContext, t *table, 
 	defer func() {
 		if !accepted {
 			restore()
+			// Another constructor may have published history while DDL was waiting.
+			// Recompute from that actual history rather than restoring a stale guard.
+			changes.publishViews(tx.publicForeignAmendments(), changes.views.Load().tables)
 		}
 	}()
+	tx.requireNoColumnAppendRows(t)
+	// The validated lease rejects old raw callbacks and closes new writer input
+	// before waiting for a rebuild's existing DDL owner. No schema, decision,
+	// shard or amendment mutex is retained during the wait. Construction still
+	// excludes rewind/decision, and every actual row entry checks that owner.
+	changes.mu.Unlock()
+	t.ddlMu.Lock()
+	changes.mu.Lock()
+	defer t.ddlMu.Unlock()
+	// Metadata/generations and retained guards can change during maintenance or
+	// another same-T constructor. Re-attest before publishing the private input.
+	t.guardCatalogDeclarationInput(tx.transactionState)
 	tx.requireNoColumnAppendRows(t)
 	access := changes.db.GetWrite(tx)
 	defer access.Release()
@@ -112,8 +144,8 @@ func (changes *publicCatalogChanges) stageColumnAppend(tx *TxContext, t *table, 
 	d := &catalogColumnAppend{Table: t.Name, Identity: t.RuntimeIdentity, Ordinal: len(columns), Name: c.Name, Type: storedColumnTypeOf(c), EnumValues: append([]string(nil), c.EnumValues...), Properties: maps.Clone(c.DeclarationProperties), Comment: c.Comment}
 	columns = append(append([]*column(nil), columns...), c)
 	view, bytes := replaceStoredColumnMetadata(t, base, columns)
-	amendment := &catalogStoredColumnAmendment{appendDeclaration: d, table: t, columns: columns, previous: changes.views.Load().tables[t], columnBytes: storedColumnBytes(c)}
-	amendment.retainedBytes = uint(unsafe.Sizeof(*amendment)) + uint(cap(columns))*uint(unsafe.Sizeof((*column)(nil))) + amendment.columnBytes + bytes + d.memory() + 128
+	amendment := &catalogStoredColumnAmendment{appendDeclaration: d, table: t, columns: columns, previous: changes.views.Load().tables[t], columnBytes: storedColumnBytes(c) + columnAppendStrings(c.Name, c.Typ, c.Collation, c.Comment, c.EnumValues, c.DeclarationProperties)}
+	amendment.retainedBytes = uint(unsafe.Sizeof(*amendment)) + uint(cap(columns))*uint(unsafe.Sizeof((*column)(nil))) + amendment.columnBytes + bytes + d.containers() + 128
 	history := appendCatalogDeclarationHistory(tx.publicForeignAmendments(), catalogDeclarationAmendment{column: amendment})
 	views := maps.Clone(changes.views.Load().tables)
 	views[t] = view

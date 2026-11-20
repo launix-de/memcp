@@ -293,7 +293,7 @@ func keyNameConflict(db *database, t *table, key uniqueKey, keys map[*table][]un
 		if c := entry.check; c != nil && ((c.table == t && strings.EqualFold(c.declaration.Check.Id, key.Id)) || key.ConstraintName != "" && strings.EqualFold(c.declaration.Check.Id, key.ConstraintName)) {
 			return true
 		}
-		if d := entry.column; d != nil && d.declaration == nil {
+		if d := entry.column; d != nil && d.declaration == nil && d.propertyRemoval == nil && d.appendDeclaration == nil {
 			latestDefaults[d.defaultDeclaration.Table+"/"+d.defaultDeclaration.Column] = d
 		}
 	}
