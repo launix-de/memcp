@@ -745,7 +745,9 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			(define tbl (car tables))
 			(if policy (policy schema tbl true) true)
 			(define all_defs (map tables (lambda (t) (list t schema t false nil))))
-			(build_dml_plan schema tbl nil all_defs (merge cols) (coalesceNil condition true) nil nil nil planning_session tx)
+			(build_dml_plan tbl nil
+				(make_query_block schema all_defs (merge cols) (coalesceNil condition true)
+					nil nil nil nil nil nil nil nil) planning_session tx)
 	)))
 
 	(define psql_delete (parser '(
@@ -785,7 +787,9 @@ arithmetic; leave expressions containing columns or functions untouched. */
 	) (begin
 			(if policy (policy (coalesce schema2 schema) tbl true) true)
 			(define del_schema (coalesce schema2 schema))
-			(build_dml_plan del_schema tbl nil (list (list tbl del_schema tbl false nil)) nil (coalesceNil condition true) order limit offset planning_session tx)
+			(build_dml_plan tbl nil
+				(make_query_block del_schema (list (list tbl del_schema tbl false nil)) nil (coalesceNil condition true)
+					nil nil order limit offset nil nil nil) planning_session tx)
 	)))
 
 	/* TRUNCATE [TABLE] tbl — alias for DELETE FROM tbl without WHERE */
@@ -798,7 +802,9 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			(define trunc_schema (coalesce schema2 schema))
 			(cons '!begin (list
 				(list (quote checktablemaintenance) trunc_schema tbl "truncate")
-				(build_dml_plan trunc_schema tbl nil (list (list tbl trunc_schema tbl false nil)) nil true nil nil nil planning_session tx)))
+				(build_dml_plan tbl nil
+				(make_query_block trunc_schema (list (list tbl trunc_schema tbl false nil)) nil true
+					nil nil nil nil nil nil nil nil) planning_session tx)))
 	)))
 
 	(define psql_insert_into (parser '(

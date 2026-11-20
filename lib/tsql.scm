@@ -100,13 +100,9 @@ the common binder consumes the temporary callback before planning. */
 	((symbol sql_compile_column) _previous expression) (list (quote sql_compile_column) compiler expression)
 	(cons _head _tail) (map node (lambda (item) (tsql_bind_column_compilers item compiler)))
 	_ node)))
-(define tsql_build_dml_plan (lambda (schema name alias sources columns condition order limit offset planning_session tx) (begin
+(define tsql_build_dml_plan (lambda (name alias query planning_session tx) (begin
 	(define compiler (tsql_column_compiler planning_session))
-	(build_dml_plan schema name alias
-		(tsql_bind_column_compilers sources compiler)
-		(tsql_bind_column_compilers columns compiler)
-		(tsql_bind_column_compilers condition compiler)
-		(tsql_bind_column_compilers order compiler) limit offset planning_session tx))))
+	(build_dml_plan name alias (tsql_bind_column_compilers query compiler) planning_session tx))))
 (define create_sql_type_alias (lambda (database name base dimensions nullable tx)
 	(tsql_type_ddl database tx (lambda () (begin
 		/* Until colliding user aliases have a bound precedence contract, reject

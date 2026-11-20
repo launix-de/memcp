@@ -554,7 +554,9 @@ frontend expression contracts before publishing executable assignment code. */
 							expr)))
 						(define t_cond (if (nil? where_raw) true (fix_expr where_raw)))
 						(define t_cols (map_assoc assignments (lambda (col expr) (fix_expr expr))))
-						(list (build_dml_plan schema tbl nil (list (list tbl schema tbl false nil)) t_cols t_cond nil nil nil planning_session tx)))
+						(list (build_dml_plan tbl nil
+				(make_query_block schema (list (list tbl schema tbl false nil)) t_cols t_cond
+					nil nil nil nil nil nil nil nil) planning_session tx)))
 
 					/* DELETE FROM table WHERE ... - stmt is (!delete tbl where) */
 					'!delete
@@ -567,7 +569,9 @@ frontend expression contracts before publishing executable assignment code. */
 							(cons h t) (cons (fix_expr h) (map t fix_expr))
 							expr)))
 						(define t_cond (if (nil? where_raw) true (fix_expr where_raw)))
-						(list (build_dml_plan schema tbl nil (list (list tbl schema tbl false nil)) nil t_cond nil nil nil planning_session tx)))
+						(list (build_dml_plan tbl nil
+				(make_query_block schema (list (list tbl schema tbl false nil)) nil t_cond
+					nil nil nil nil nil nil nil nil) planning_session tx)))
 
 					/* DELETE FROM target USING target, other [AS alias] WHERE condition */
 					/* stmt is (!delete_using target tabledefs where) */
@@ -589,7 +593,9 @@ frontend expression contracts before publishing executable assignment code. */
 						(define target_alias (match target_def '(id _ _ _ _) id))
 						(define target_tbl (match target_def '(_ _ tbl _ _) tbl))
 						(define t_where (if (nil? where_raw) true (transform_dml where_raw)))
-						(list (build_dml_plan schema target_tbl target_alias all_defs nil t_where nil nil nil planning_session tx)))
+						(list (build_dml_plan target_tbl target_alias
+				(make_query_block schema all_defs nil t_where
+					nil nil nil nil nil nil nil nil) planning_session tx)))
 
 					/* UPDATE tbl1, tbl2 [AS alias], ... SET tbl1.col = expr WHERE condition; */
 					/* stmt is (!update_multi tbls assignments where) */
@@ -610,7 +616,9 @@ frontend expression contracts before publishing executable assignment code. */
 						(define target_tbl (match target_def '(_ _ tbl _ _) tbl))
 						(define t_where (if (nil? where_raw) true (transform_dml where_raw)))
 						(define t_cols (map_assoc assignments_raw (lambda (col expr) (transform_dml expr))))
-						(list (build_dml_plan schema target_tbl target_alias all_defs t_cols t_where nil nil nil planning_session tx)))
+						(list (build_dml_plan target_tbl target_alias
+				(make_query_block schema all_defs t_cols t_where
+					nil nil nil nil nil nil nil nil) planning_session tx)))
 
 					/* No-op statement (e.g. SET @var) - return empty list */
 					'!nop
@@ -1501,7 +1509,9 @@ frontend expression contracts before publishing executable assignment code. */
 			(if policy (policy schema tbl true) true)
 			/* Route ALL UPDATE (single + multi-table) through the query planner.
 			The planner handles column resolution, inner_selects, joins. */
-			(build_dml_plan schema tbl tblalias all_defs (merge cols) (coalesceNil condition true) order limit offset planning_session tx)
+			(build_dml_plan tbl tblalias
+				(make_query_block schema all_defs (merge cols) (coalesceNil condition true)
+					nil nil order limit offset nil nil nil) planning_session tx)
 	)))
 
 	(define sql_delete (parser '(
@@ -1545,7 +1555,9 @@ frontend expression contracts before publishing executable assignment code. */
 			cols = nil signals DELETE mode. */
 			(define del_schema (coalesce schema2 schema))
 			(define del_defs (list (list tbl del_schema tbl false nil)))
-			(build_dml_plan del_schema tbl nil del_defs nil (coalesceNil condition true) order limit offset planning_session tx)
+			(build_dml_plan tbl nil
+				(make_query_block del_schema del_defs nil (coalesceNil condition true)
+					nil nil order limit offset nil nil nil) planning_session tx)
 	)))
 
 	/* TRUNCATE [TABLE] tbl — alias for DELETE FROM tbl without WHERE */
@@ -1558,7 +1570,9 @@ frontend expression contracts before publishing executable assignment code. */
 			(define trunc_schema (coalesce schema2 schema))
 			(cons '!begin (list
 				(list (quote checktablemaintenance) trunc_schema tbl "truncate")
-				(build_dml_plan trunc_schema tbl nil (list (list tbl trunc_schema tbl false nil)) nil true nil nil nil planning_session tx)))
+				(build_dml_plan tbl nil
+				(make_query_block trunc_schema (list (list tbl trunc_schema tbl false nil)) nil true
+					nil nil nil nil nil nil nil nil) planning_session tx)))
 	)))
 
 	/* Multi-table DELETE: retain every target alias through physical lowering. */
