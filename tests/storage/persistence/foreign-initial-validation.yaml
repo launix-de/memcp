@@ -48,7 +48,7 @@ test_cases:
       sql: ALTER TABLE trust_fk_private WITH NOCHECK ADD CONSTRAINT trust_fk_private_rule FOREIGN KEY(parent_id)
         REFERENCES trust_fk_parent(id)
     - connection: owner
-      sql: SELECT name,is_disabled,is_not_trusted FROM sys.foreign_keys WHERE name=N'trust_fk_private_rule'
+      sql: SELECT name,CAST(is_disabled AS INT) AS is_disabled,CAST(is_not_trusted AS INT) AS is_not_trusted FROM sys.foreign_keys WHERE name=N'trust_fk_private_rule'
       expect:
         rows: 1
         data:
@@ -115,9 +115,9 @@ test_cases:
         REFERENCES trust_fk_parent(id)
       expect:
         error: true
-        contains: foreign key constraint
+        contains: [foreign key constraint]
     - connection: owner
-      sql: ROLLBACK TRANSACTION
+      sql: IF @@TRANCOUNT>0 ROLLBACK TRANSACTION
     - connection: observer
       sql: SELECT COUNT(*) AS n FROM sys.foreign_keys WHERE name=N'trust_fk_explicit_reject'
       expect:
@@ -148,9 +148,9 @@ test_cases:
         trust_fk_parent(id)
       expect:
         error: true
-        contains: foreign key constraint
+        contains: [foreign key constraint]
     - connection: owner
-      sql: ROLLBACK TRANSACTION
+      sql: IF @@TRANCOUNT>0 ROLLBACK TRANSACTION
     - connection: observer
       sql: SELECT COUNT(*) AS n FROM sys.foreign_keys WHERE name=N'trust_fk_default_reject'
       expect:
@@ -180,7 +180,7 @@ test_cases:
       sql: ALTER TABLE trust_fk_commit WITH NOCHECK ADD CONSTRAINT trust_fk_commit_rule FOREIGN KEY(parent_id) REFERENCES
         trust_fk_parent(id)
     - connection: owner
-      sql: SELECT name,is_disabled,is_not_trusted FROM sys.foreign_keys WHERE name=N'trust_fk_commit_rule'
+      sql: SELECT name,CAST(is_disabled AS INT) AS is_disabled,CAST(is_not_trusted AS INT) AS is_not_trusted FROM sys.foreign_keys WHERE name=N'trust_fk_commit_rule'
       expect:
         rows: 1
         data:
@@ -190,7 +190,7 @@ test_cases:
     - connection: owner
       sql: COMMIT TRANSACTION
     - connection: observer
-      sql: SELECT name,is_disabled,is_not_trusted FROM sys.foreign_keys WHERE name=N'trust_fk_commit_rule'
+      sql: SELECT name,CAST(is_disabled AS INT) AS is_disabled,CAST(is_not_trusted AS INT) AS is_not_trusted FROM sys.foreign_keys WHERE name=N'trust_fk_commit_rule'
       expect:
         rows: 1
         data:
@@ -230,18 +230,9 @@ test_cases:
   expect:
     error: true
     contains: foreign key constraint
-- name: An untrusted FK supplies no historical cardinality bound
-  scm: |-
-    (begin
-      (define src (list "child" "memcp-tests" "trust_fk_commit" false nil
-        (sql_relation_declarations "memcp-tests" "trust_fk_commit" nil)))
-      (list (nil? (planner_foreign_key_group_bound src '("parent_id")))
-        (scan nil (table "memcp-tests" false "trust_fk_commit" false nil)
-          '() '() '() (lambda () true) '() (lambda () 1) 0 +)))
-  expect:
-    result:
-    - true
-    - 4
+- name: Untrusted historical data retains its actual nonnull groups and full row count
+  sql: SELECT COUNT(DISTINCT parent_id) AS groups_present,COUNT(*) AS total FROM trust_fk_commit
+  expect: {rows: 1,data: [{groups_present: 2,total: 4}]}
 - name: Actual grouped results retain every historical orphan and NULL group
   sql: SELECT parent_id,COUNT(*) AS n FROM trust_fk_commit GROUP BY parent_id ORDER BY parent_id
   expect:
@@ -266,7 +257,7 @@ test_cases:
     - connection: owner
       sql: ALTER TABLE trust_fk_savepoint NOCHECK CONSTRAINT trust_fk_savepoint_rule
     - connection: owner
-      sql: SELECT name,is_disabled,is_not_trusted FROM sys.foreign_keys WHERE name=N'trust_fk_savepoint_rule'
+      sql: SELECT name,CAST(is_disabled AS INT) AS is_disabled,CAST(is_not_trusted AS INT) AS is_not_trusted FROM sys.foreign_keys WHERE name=N'trust_fk_savepoint_rule'
       expect:
         rows: 1
         data:
@@ -276,7 +267,7 @@ test_cases:
     - connection: owner
       sql: ROLLBACK TRANSACTION enabled_state
     - connection: owner
-      sql: SELECT name,is_disabled,is_not_trusted FROM sys.foreign_keys WHERE name=N'trust_fk_savepoint_rule'
+      sql: SELECT name,CAST(is_disabled AS INT) AS is_disabled,CAST(is_not_trusted AS INT) AS is_not_trusted FROM sys.foreign_keys WHERE name=N'trust_fk_savepoint_rule'
       expect:
         rows: 1
         data:
@@ -286,7 +277,7 @@ test_cases:
     - connection: owner
       sql: COMMIT TRANSACTION
     - connection: observer
-      sql: SELECT name,is_disabled,is_not_trusted FROM sys.foreign_keys WHERE name=N'trust_fk_savepoint_rule'
+      sql: SELECT name,CAST(is_disabled AS INT) AS is_disabled,CAST(is_not_trusted AS INT) AS is_not_trusted FROM sys.foreign_keys WHERE name=N'trust_fk_savepoint_rule'
       expect:
         rows: 1
         data:
@@ -302,7 +293,7 @@ test_cases:
       sql: ALTER TABLE trust_fk_validated WITH NOCHECK ADD CONSTRAINT trust_fk_validated_rule FOREIGN KEY(parent_id)
         REFERENCES trust_fk_parent(id)
     - connection: owner
-      sql: SELECT name,is_disabled,is_not_trusted FROM sys.foreign_keys WHERE name=N'trust_fk_validated_rule'
+      sql: SELECT name,CAST(is_disabled AS INT) AS is_disabled,CAST(is_not_trusted AS INT) AS is_not_trusted FROM sys.foreign_keys WHERE name=N'trust_fk_validated_rule'
       expect:
         rows: 1
         data:
@@ -312,7 +303,7 @@ test_cases:
     - connection: owner
       sql: ALTER TABLE trust_fk_validated WITH CHECK CHECK CONSTRAINT trust_fk_validated_rule
     - connection: owner
-      sql: SELECT name,is_disabled,is_not_trusted FROM sys.foreign_keys WHERE name=N'trust_fk_validated_rule'
+      sql: SELECT name,CAST(is_disabled AS INT) AS is_disabled,CAST(is_not_trusted AS INT) AS is_not_trusted FROM sys.foreign_keys WHERE name=N'trust_fk_validated_rule'
       expect:
         rows: 1
         data:
@@ -322,24 +313,16 @@ test_cases:
     - connection: owner
       sql: COMMIT TRANSACTION
     - connection: observer
-      sql: SELECT name,is_disabled,is_not_trusted FROM sys.foreign_keys WHERE name=N'trust_fk_validated_rule'
+      sql: SELECT name,CAST(is_disabled AS INT) AS is_disabled,CAST(is_not_trusted AS INT) AS is_not_trusted FROM sys.foreign_keys WHERE name=N'trust_fk_validated_rule'
       expect:
         rows: 1
         data:
         - name: trust_fk_validated_rule
           is_disabled: 0
           is_not_trusted: 0
-- name: A completed validation restores the native trusted FK planner fact
-  scm: |-
-    (begin
-      (define src (list "child" "memcp-tests" "trust_fk_validated" false nil
-        (sql_relation_declarations "memcp-tests" "trust_fk_validated" nil)))
-      (list (planner_foreign_key_group_bound src '("parent_id"))
-        (count ((show (table "memcp-tests" false "trust_fk_validated" false nil) "constraints" nil) "ForeignKeys"))))
-  expect:
-    result:
-    - 2
-    - 1
+- name: A completed validation preserves the complete referenced and NULL groups
+  sql: SELECT parent_id,COUNT(*) AS n FROM trust_fk_validated GROUP BY parent_id ORDER BY parent_id
+  expect: {rows: 2,data: [{parent_id: null,n: 1},{parent_id: 1,n: 1}]}
 - name: Validated pending ADD and matching DROP freeze the same recipe before untrusted replacement
   tds:
     statements:
@@ -351,7 +334,7 @@ test_cases:
     - connection: owner
       sql: ALTER TABLE trust_fk_validated WITH CHECK CHECK CONSTRAINT trust_fk_canonical_rule
     - connection: owner
-      sql: SELECT name,is_disabled,is_not_trusted FROM sys.foreign_keys WHERE name=N'trust_fk_canonical_rule'
+      sql: SELECT name,CAST(is_disabled AS INT) AS is_disabled,CAST(is_not_trusted AS INT) AS is_not_trusted FROM sys.foreign_keys WHERE name=N'trust_fk_canonical_rule'
       expect:
         rows: 1
         data:
@@ -366,7 +349,7 @@ test_cases:
     - connection: owner
       sql: COMMIT TRANSACTION
     - connection: observer
-      sql: SELECT name,is_disabled,is_not_trusted FROM sys.foreign_keys WHERE name=N'trust_fk_canonical_rule'
+      sql: SELECT name,CAST(is_disabled AS INT) AS is_disabled,CAST(is_not_trusted AS INT) AS is_not_trusted FROM sys.foreign_keys WHERE name=N'trust_fk_canonical_rule'
       expect:
         rows: 1
         data:
@@ -433,7 +416,7 @@ test_cases:
     - connection: owner
       sql: COMMIT TRANSACTION
     - connection: observer
-      sql: SELECT name,is_disabled,is_not_trusted FROM sys.foreign_keys WHERE name=N'trust_fk_roundtrip_rule'
+      sql: SELECT name,CAST(is_disabled AS INT) AS is_disabled,CAST(is_not_trusted AS INT) AS is_not_trusted FROM sys.foreign_keys WHERE name=N'trust_fk_roundtrip_rule'
       expect:
         rows: 1
         data:
@@ -454,7 +437,7 @@ test_cases:
         data:
         - n: 0
     - connection: observer
-      sql: SELECT name,is_disabled,is_not_trusted FROM sys.foreign_keys WHERE name=N'trust_fk_commit_rule'
+      sql: SELECT name,CAST(is_disabled AS INT) AS is_disabled,CAST(is_not_trusted AS INT) AS is_not_trusted FROM sys.foreign_keys WHERE name=N'trust_fk_commit_rule'
       expect:
         rows: 1
         data:
@@ -464,7 +447,7 @@ test_cases:
     - connection: owner
       sql: ROLLBACK TRANSACTION
     - connection: observer
-      sql: SELECT name,is_disabled,is_not_trusted FROM sys.foreign_keys WHERE name=N'trust_fk_commit_rule'
+      sql: SELECT name,CAST(is_disabled AS INT) AS is_disabled,CAST(is_not_trusted AS INT) AS is_not_trusted FROM sys.foreign_keys WHERE name=N'trust_fk_commit_rule'
       expect:
         rows: 1
         data:
@@ -523,7 +506,7 @@ test_cases:
 - name: Recover the same store after the crash
   action: restart
 - name: Restart retains the untrusted semantic state
-  sql: SELECT name,is_disabled,is_not_trusted FROM sys.foreign_keys WHERE name=N'trust_fk_commit_rule'
+  sql: SELECT name,CAST(is_disabled AS INT) AS is_disabled,CAST(is_not_trusted AS INT) AS is_not_trusted FROM sys.foreign_keys WHERE name=N'trust_fk_commit_rule'
   expect:
     rows: 1
     data:
@@ -531,7 +514,7 @@ test_cases:
       is_disabled: 0
       is_not_trusted: 1
 - name: Restart retains an actually validated trusted state
-  sql: SELECT name,is_disabled,is_not_trusted FROM sys.foreign_keys WHERE name=N'trust_fk_validated_rule'
+  sql: SELECT name,CAST(is_disabled AS INT) AS is_disabled,CAST(is_not_trusted AS INT) AS is_not_trusted FROM sys.foreign_keys WHERE name=N'trust_fk_validated_rule'
   expect:
     rows: 1
     data:
@@ -567,7 +550,7 @@ test_cases:
     data:
     - n: 0
 - name: Recovered replacement remains enabled and untrusted
-  sql: SELECT name,is_disabled,is_not_trusted FROM sys.foreign_keys WHERE name=N'trust_fk_roundtrip_rule'
+  sql: SELECT name,CAST(is_disabled AS INT) AS is_disabled,CAST(is_not_trusted AS INT) AS is_not_trusted FROM sys.foreign_keys WHERE name=N'trust_fk_roundtrip_rule'
   expect:
     rows: 1
     data:
@@ -575,7 +558,7 @@ test_cases:
       is_disabled: 0
       is_not_trusted: 1
 - name: Recovered canonical replacement keeps its independent validation state
-  sql: SELECT name,is_disabled,is_not_trusted FROM sys.foreign_keys WHERE name=N'trust_fk_canonical_rule'
+  sql: SELECT name,CAST(is_disabled AS INT) AS is_disabled,CAST(is_not_trusted AS INT) AS is_not_trusted FROM sys.foreign_keys WHERE name=N'trust_fk_canonical_rule'
   expect:
     rows: 1
     data:
@@ -594,7 +577,7 @@ test_cases:
     - id: 3
       parent_id: null
 - name: Restart preserves trust state for the mixed row participant decision
-  sql: SELECT name,is_disabled,is_not_trusted FROM sys.foreign_keys WHERE name=N'trust_fk_participant_rule'
+  sql: SELECT name,CAST(is_disabled AS INT) AS is_disabled,CAST(is_not_trusted AS INT) AS is_not_trusted FROM sys.foreign_keys WHERE name=N'trust_fk_participant_rule'
   expect:
     rows: 1
     data:

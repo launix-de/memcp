@@ -5397,7 +5397,8 @@ that context explicitly; stored views refuse this scalar before publication. */
 			(tsql_security_catalog_query owner (toLower name))
 			(has? '("foreign_keys" "key_constraints" "check_constraints" "indexes") (toLower name))
 			(tsql_catalog_public_projection owner (tsql_catalog_constraints_query owner (toLower name) nil)
-				(if (equal?? name "indexes") tsql_index_catalog_columns tsql_constraint_catalog_columns))
+				(if (equal?? name "indexes") tsql_index_catalog_columns
+					(equal?? name "foreign_keys") tsql_foreign_catalog_columns tsql_constraint_catalog_columns))
 			(equal?? name "default_constraints")
 			(tsql_catalog_public_projection owner (tsql_catalog_defaults_query owner nil) tsql_default_catalog_columns)
 			(equal?? name "triggers")

@@ -12,7 +12,7 @@ test_cases:
       (define helper (lambda (items)
         (reduce (sort items <) (lambda (acc item) (+ acc item)) 0)))
       (define caller (eval (optimize
-        (list 'lambda '(groups columns)
+        (list 'lambda (list 'groups 'columns)
           (list helper (list 'merge (list 'list 'groups 'columns)) )))))
       (caller '(3 1) '(2)))
   expect:
@@ -25,7 +25,7 @@ test_cases:
           (lambda (state name) (list name (and (cadr state)
             (or (nil? (car state)) (not (equal?? (car state) name)))))) (list nil true)))))
       (define caller (eval (optimize
-        (list 'lambda '(groups columns)
+        (list 'lambda (list 'groups 'columns)
           (list helper (list 'merge (list 'list 'groups 'columns)) )))))
       (caller '("grp") '("grp")))
   expect:
@@ -37,7 +37,7 @@ test_cases:
         (reduce (sort items <) (lambda (acc item) (begin
           (define delta (+ item 1)) (+ acc delta))) seed)))
       (define caller (eval (optimize
-        (list 'lambda '(groups columns)
+        (list 'lambda (list 'groups 'columns)
           (list helper (list 'merge (list 'list 'groups 'columns)) 0 true)))))
       (caller '(3 1) '(2)))
   expect:
@@ -49,7 +49,7 @@ test_cases:
         (define offset (apply (lambda () 7) '()))
         (reduce (sort items <) (lambda (acc item) (+ acc item offset)) 0))))
       (define caller (eval (optimize
-        (list 'lambda '(groups columns)
+        (list 'lambda (list 'groups 'columns)
           (list helper (list 'merge (list 'list 'groups 'columns)) )))))
       (caller '(3 1) '(2)))
   expect:
@@ -62,7 +62,7 @@ test_cases:
         (reduce (sort items <) (lambda (acc item)
           (match item 1 (+ acc offset) _ (+ acc item))) 0))))
       (define caller (eval (optimize
-        (list 'lambda '(groups columns)
+        (list 'lambda (list 'groups 'columns)
           (list helper (list 'merge (list 'list 'groups 'columns)) )))))
       (caller '(3 1) '(2)))
   expect:
@@ -74,7 +74,7 @@ test_cases:
         (map (sort items <) (lambda values (begin
           (define value (car values)) (+ value 1))))))
       (define caller (eval (optimize
-        (list 'lambda '(groups columns)
+        (list 'lambda (list 'groups 'columns)
           (list helper (list 'merge (list 'list 'groups 'columns)) true)))))
       (caller '(3 1) '(2)))
   expect:
@@ -85,11 +85,11 @@ test_cases:
 - name: Quoted numbered-slot data is preserved exactly
   scm: |-
     (begin
-      (define marker (nth (optimize '(lambda (left right) right)) 2))
+      (define marker (nth (optimize (list 'lambda (list 'left 'right) 'right)) 2))
       (define data marker)
-      (define helper (eval (optimize (list 'lambda '(items)
+      (define helper (eval (optimize (list 'lambda (list 'items)
         (list 'begin (list 'sort 'items '<) (list 'quote data))))))
-      (define caller (eval (optimize (list 'lambda '(groups columns)
+      (define caller (eval (optimize (list 'lambda (list 'groups 'columns)
         (list helper (list 'merge (list 'list 'groups 'columns)))))))
       (expression_equal? (caller '(3 1) '(2)) data))
   expect:
@@ -97,11 +97,11 @@ test_cases:
 - name: Quoted lambda AST remains inert through specialization
   scm: |-
     (begin
-      (define marker (nth (optimize '(lambda (left right) right)) 2))
-      (define data (list 'lambda '(left right) marker 2))
-      (define helper (eval (optimize (list 'lambda '(items)
+      (define marker (nth (optimize (list 'lambda (list 'left 'right) 'right)) 2))
+      (define data (list 'lambda (list 'left 'right) marker 2))
+      (define helper (eval (optimize (list 'lambda (list 'items)
         (list 'begin (list 'sort 'items '<) (list 'quote data))))))
-      (define caller (eval (optimize (list 'lambda '(groups columns)
+      (define caller (eval (optimize (list 'lambda (list 'groups 'columns)
         (list helper (list 'merge (list 'list 'groups 'columns)))))))
       (expression_equal? (caller '(3 1) '(2)) data))
   expect:
@@ -112,7 +112,7 @@ test_cases:
       (define helper ((lambda (external)
           (lambda (items) (begin (sort items <) (lambda () external)))) 11))
       (define caller (eval (optimize
-        (list 'lambda '(groups columns)
+        (list 'lambda (list 'groups 'columns)
           (list helper (list 'merge (list 'list 'groups 'columns)) )))))
       ((caller '(3 1) '(2))))
   expect:
@@ -125,7 +125,7 @@ test_cases:
         (map (sort items <) (lambda (item) (begin
           (calls "n" (+ (calls "n") 1)) item)))))
       (define caller (eval (optimize
-        (list 'lambda '(groups columns)
+        (list 'lambda (list 'groups 'columns)
           (list helper (list 'merge (list 'list 'groups 'columns)) )))))
       (list (caller '(3 1) '(2)) (calls "n")))
   expect:
