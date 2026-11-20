@@ -7614,6 +7614,24 @@ that context explicitly; stored views refuse this scalar before publication. */
 					(list "batch" (list (list operation name parameters return_name columns
 						(coalesceNil (lexical_context "module_source") (strtrim (car body)))))))))
 
+			(define tsql_script_inline_table_function (parser '(
+				(define operation (or
+					(parser '(tsql_keyword_create (define replace (? tsql_keyword_or tsql_keyword_alter)))
+						(list "create-inline-table-function" (if replace true false)))
+					(parser tsql_keyword_alter (list "alter-inline-table-function")))) tsql_keyword_function
+				(? (define owner tsql_identifier) ".") (define name tsql_identifier)
+				"(" (define parameters (* tsql_script_scalar_parameter ",")) ")"
+				tsql_keyword_returns tsql_keyword_table tsql_keyword_as tsql_keyword_return
+				(define query (or (parser '("(" (define query (capture tsql_root_select)) ")") query)
+					(capture tsql_root_select))) (* ";")
+			) (begin
+					(if (or (nil? owner) (equal?? owner "dbo")) true
+						(error "unsupported table function schema: " owner))
+					/* This source profile owns the returned query, not a statement body. */
+					(define declaration (list (car operation) name parameters (strtrim (car query))))
+					(list "batch" (list (if (equal? (car operation) "create-inline-table-function")
+						(append declaration (cadr operation)) declaration))))))
+
 			/* The declaration retains the execution principal independently of its
 			database qualifier. Non-CALLER execution has an explicit runtime gap.
 			https://learn.microsoft.com/sql/t-sql/statements/execute-as-clause-transact-sql */
@@ -7676,7 +7694,7 @@ that context explicitly; stored views refuse this scalar before publication. */
 						events (coalesceNil (lexical_context "module_source") (strtrim (car body))) timing))
 					(list "batch" (list (if (equal? (car operation) "create-trigger")
 						(append definition (cadr operation)) definition))))))
-			(define script_parser (parser (define batch (or tsql_script_trigger tsql_script_procedure tsql_script_table_function tsql_script_scalar_function
+			(define script_parser (parser (define batch (or tsql_script_trigger tsql_script_procedure tsql_script_inline_table_function tsql_script_table_function tsql_script_scalar_function
 				(parser '((* ";") (? (define first (or tsql_script_command tsql_script_invocation)))
 					(define commands (* tsql_script_item empty)) (* ";"))
 					(list "batch" (if first (cons first commands) commands))))) batch "^(?:/\\*(?s:.*?)\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\\x{0009}-\\x{000D}\\x{0085}\\p{Z}]+)+"))

@@ -80,7 +80,7 @@ retain ANSI_NULLS ON when reloaded. No invocation session enters the catalog. */
 		(find profiles (lambda (profile) (equal? language (concat base (car profile)))) nil)))
 	tsql_source_profiles)))
 (define tsql_source_language_settings (lambda (language) (begin
-	(define profile (find (map '("tsql-procedure" "tsql-statement" "tsql-scalar-function" "tsql-relational-scalar-function" "tsql-table-function")
+	(define profile (find (map '("tsql-procedure" "tsql-statement" "tsql-scalar-function" "tsql-relational-scalar-function" "tsql-table-function" "tsql-inline-table-function")
 		(lambda (base) (tsql_source_language_profile base language))) (lambda (profile) profile) nil))
 	(if profile (cdr profile) (error "unsupported T-SQL source language")))))
 (define tsql_source_language (lambda (base session)

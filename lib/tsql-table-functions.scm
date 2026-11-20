@@ -5,7 +5,7 @@ SPDX-License-Identifier: GPL-3.0-or-later */
 compiler. Only their result contract differs: initialization forwards bounded
 state, while the declared return table exposes its complete native multiset. */
 (define tsql_table_function_language? (lambda (language)
-	(equal? (tsql_source_module_kind language) "TF")))
+	(has? '("TF" "IF") (tsql_source_module_kind language))))
 /* Query-once initialization requires an actual immutable invocation input.
 Do not infer that property from absence of column references: feedback symbols,
 iteration markers and opaque callable/source values are not literal inputs. */
@@ -111,6 +111,84 @@ iteration markers and opaque callable/source values are not literal inputs. */
 		(createprocedure database (toLower name)
 			(tsql_source_language "tsql-table-function" session)
 			source (list parameters return_name (nth declaration 2) (nth declaration 3)) replace tx must_exist)
+		0)))))
+
+/* Inline functions retain a logical query, not an invocation return table.
+Parameter projections use the common capture-aware derived rewrite, so a local
+source alias cannot capture an argument owned by the caller's APPLY scope. */
+(define tsql_inline_table_function_recipe (lambda (source context quoted) (begin
+	(define database (context "schema"))
+	(define parameters (tsql_unique_parameters (car (context "parameters"))))
+	(define contracts (map parameters (lambda (parameter) (begin
+		(define contract (tsql_scalar_function_declaration (cadr parameter)))
+		(if (> (count parameter) 2)
+			(tsql_scalar_function_convert (tsql_scalar_function_default_info parameter) contract) true)
+		(list (car parameter) contract)))))
+	(define ansi (coalesceNil (context "__tsql_ansi_nulls") true))
+	(define query (parse_tsql database source nil
+		(tsql_relational_query_scope (tsql_ansi_planning_scope nil ansi) contracts quoted '()) nil))
+	(list "identity" (list database (context "name")) "database" database
+		"parameters" parameters "ansi_nulls" ansi "query" query))))
+(define tsql_inline_table_function_expand (lambda (recipe arguments alias policy planning tx) (begin
+	(define planning (tsql_ansi_planning_scope planning (recipe "ansi_nulls")))
+	(define planning (tsql_scalar_function_binding_scope planning (recipe "identity")))
+	(define parameters (recipe "parameters"))
+	/* Bind the function's own names before inserting caller expressions.
+	No argument is evaluated while expanding or describing its query. */
+	(define query (tsql_describe_query
+		(tsql_expand_view_functions
+			(sql_expand_views (recipe "query") policy planning tx) policy planning tx)
+		policy planning tx))
+	(define projection (merge (mapIndex arguments (lambda (index argument) (begin
+		(define target (tsql_scalar_function_declaration (cadr (nth parameters index))))
+		(list (car (nth parameters index))
+			(tsql_implicit_cast_expr argument (car target) (cdr target))))))))
+	(define aliases (extract_assoc (query_exprs_alias_set nil arguments) (lambda (name _present) name)))
+	/* An unqualified column still needs its caller's lexical binding owner;
+	do not accidentally resolve it against a function-local same-named input. */
+	(if (has? aliases nil) (error "unqualified inline function argument requires its caller column binding") true)
+	(define parameter_alias (binding_fresh_alias
+		(binding_collect_string_catalog (list query arguments alias) '()) "__inline_function_parameters"))
+	(define bindings (merge (map parameters (lambda (parameter)
+		(list (string (tsql_scalar_function_variable (car parameter)))
+			(list 'get_column parameter_alias false (car parameter) false))))))
+	(define query (rewrite_derived_ref parameter_alias projection
+		(tsql_relational_substitute query bindings)))
+	(define query (tsql_relational_mark_capture_scopes query aliases))
+	(tsql_relational_authorize query policy)
+	(sql_bind_catalog_declarations query tx planning))))
+(define tsql_inline_table_function_compile (lambda (source context quoted) (begin
+	(define recipe (tsql_inline_table_function_recipe source context quoted))
+	(close_procedure ((lambda (recipe expand)
+		(lambda (arguments alias policy planning tx) (expand recipe arguments alias policy planning tx)))
+		recipe tsql_inline_table_function_expand)))))
+(tsql_register_source_profiles "tsql-inline-table-function" tsql_inline_table_function_compile registerprocedurelanguage)
+/* Compile-only binding reads the durable header and expands syntax directly.
+It never asks procedure() to instantiate an executable source snapshot. */
+(define tsql_inline_table_function_declaration_call (lambda (database name definition arguments alias policy planning tx) (begin
+	(if policy (policy database name false) (error "table function requires an authorized SQL plan"))
+	(define parameters (car (definition "parameters")))
+	(if (equal? (count arguments) (count parameters)) true (error "wrong number of table function arguments"))
+	(planner_record_guard_condition
+		(list 'expression_equal? (list 'showprocedures database (toLower name) 'tx) (list 'quote (list definition))) planning)
+	(define settings (tsql_source_language_settings (definition "language")))
+	(define context (list "schema" database "name" (toLower name) "parameters" (definition "parameters")
+		"__tsql_ansi_nulls" (cadr settings)))
+	(tsql_inline_table_function_expand
+		(tsql_inline_table_function_recipe (definition "source") context (car settings))
+		(tsql_scalar_function_resolve_arguments arguments parameters) alias policy planning tx))))
+(define tsql_define_inline_table_function (lambda (name parameters source replace must_exist statement session)
+	(tsql_statement_call statement session "inline table function definition" false (lambda (tx) (begin
+		(if (or (session "__tsql_insert_exec") (session "__tsql_trigger_event"))
+			(error "function DDL is unsupported inside a native mutation") true)
+		(define database (session "schema"))
+		(tsql_require_database_access (tsql_session_actor session) database)
+		(if (or (show (table database false name true tx) "name") (tsql_view_name database name tx))
+			(tsql_raise_error 2714 (concat "a relation already owns this object name: " name) 1) true)
+		(if replace (tsql_require_function_kind database name "IF" tx) true)
+		(createprocedure database (toLower name)
+			(tsql_source_language "tsql-inline-table-function" session)
+			source (list parameters) replace tx must_exist)
 		0)))))
 
 (define tsql_table_function_call (lambda (database name arguments alias policy planning tx) (begin

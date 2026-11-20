@@ -93,26 +93,29 @@ physical lowering path and cannot allocate or scan that relation. */
 	((symbol tsql_view_table_call) database name arguments alias) (begin
 		(define definition (tsql_scalar_function_definition database name tx))
 		(if (tsql_table_function_language? (definition "language")) true (error "object is not a table-valued function: " name))
-		(define signature (definition "parameters"))
-		(define parameters (car signature))
-		(if (equal? (count parameters) (count arguments)) true (error "wrong number of table function arguments"))
-		(define resolved (tsql_scalar_function_resolve_arguments arguments parameters))
-		/* Argument expressions still belong to this query scope. The typed
-		contract is represented in hidden projections, so the ordinary binder
-		checks every column without evaluating an invocation or its defaults. */
-		(define hidden (merge (mapIndex resolved (lambda (index argument)
-			(list (concat "__compile_argument_" index)
-				(list 'sql_compile_expr
-					(list 'tsql_compile_function_argument (list 'quote (cadr (nth parameters index))))
-					(tsql_compile_function_references argument policy planning tx)))))))
-		(define columns (nth signature 3))
-		(define source (list alias database
-			(make_local_relation_reference (symbol (concat "__compile_function_" name)) columns)
-			false nil (list "columns" columns "constraints" '("Unique" () "ForeignKeys" ()))))
-		(make_query_block database (list source)
-			(merge (map columns (lambda (column)
-				(list (column "Field") (list 'get_column alias false (column "Field") false)))))
-			true nil nil nil nil nil hidden nil nil))
+		(if (equal? (tsql_source_module_kind (definition "language")) "IF")
+			(tsql_inline_table_function_declaration_call database name definition arguments alias policy planning tx)
+			(begin
+				(define signature (definition "parameters"))
+				(define parameters (car signature))
+				(if (equal? (count parameters) (count arguments)) true (error "wrong number of table function arguments"))
+				(define resolved (tsql_scalar_function_resolve_arguments arguments parameters))
+				/* Argument expressions still belong to this query scope. The typed
+				contract is represented in hidden projections, so the ordinary binder
+				checks every column without evaluating an invocation or its defaults. */
+				(define hidden (merge (mapIndex resolved (lambda (index argument)
+					(list (concat "__compile_argument_" index)
+						(list 'sql_compile_expr
+							(list 'tsql_compile_function_argument (list 'quote (cadr (nth parameters index))))
+							(tsql_compile_function_references argument policy planning tx)))))))
+				(define columns (nth signature 3))
+				(define source (list alias database
+					(make_local_relation_reference (symbol (concat "__compile_function_" name)) columns)
+					false nil (list "columns" columns "constraints" '("Unique" () "ForeignKeys" ()))))
+				(make_query_block database (list source)
+					(merge (map columns (lambda (column)
+						(list (column "Field") (list 'get_column alias false (column "Field") false)))))
+					true nil nil nil nil nil hidden nil nil))))
 	(cons head tail) (cons (tsql_compile_function_references head policy planning tx)
 		(map tail (lambda (child) (tsql_compile_function_references child policy planning tx))))
 	_ node)))

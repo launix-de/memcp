@@ -43,6 +43,7 @@ catalog reflection. Import this classifier before closing metadata helpers. */
 	(lambda (language)
 		(if (profile "tsql-procedure" language) "P"
 			(profile "tsql-table-function" language) "TF"
+			(profile "tsql-inline-table-function" language) "IF"
 			(or (profile "tsql-scalar-function" language)
 				(profile "tsql-relational-scalar-function" language)) "FN" nil)))))
 (define tsql_source_module_kind (close_procedure (tsql_source_module_kind_factory tsql_source_language_profile)))
@@ -197,7 +198,7 @@ and delimiter boundaries using plain strings, including doubled quote escapes. *
 								(native_id database object actor tx) nil))
 							(define view (if (or (nil? kind) (equal?? kind "V"))
 								(view_name database object tx) nil))
-							(define module (if (or (nil? kind) (equal?? kind "P") (equal?? kind "FN") (equal?? kind "TF"))
+							(define module (if (or (nil? kind) (equal?? kind "P") (equal?? kind "FN") (equal?? kind "TF") (equal?? kind "IF"))
 								(module_definition database object tx) nil))
 							(define declared_kind (if (nil? module) nil (module_kind (module "language"))))
 							(define builtin (system_procedure object))
@@ -552,14 +553,15 @@ use the general profile. Neither profile caches metadata rows or authority. */
 					(tsql_native_object_id database (row "table_name") actor tx) (tsql_schema_id_value "dbo") false nil)))))
 		(define defaults (map (tsql_catalog_default_tuples database actor tx selection definition_none)
 			(lambda (row) (list (nth row 0) (nth row 4) (nth row 5) (nth row 1) (nth row 2) (nth row 3) false nil))))
-		(define modules (if (not (find '("P" "TF" "FN") (lambda (kind)
+		(define modules (if (not (find '("P" "TF" "IF" "FN") (lambda (kind)
 			(tsql_catalog_kind_selected? selection kind)) nil)) '()
 			(map (filter (tsql_source_catalog_entries database tx)
 				(lambda (definition) (and (tsql_catalog_object_name_matches? selection (definition "name"))
 					(tsql_catalog_kind_selected? selection (tsql_source_module_kind (definition "language")))))) (lambda (definition) (begin
 					(define kind (tsql_source_module_kind (definition "language")))
 					(list (definition "name") kind
-						(if (equal? kind "P") "SQL_STORED_PROCEDURE" (equal? kind "TF") "SQL_TABLE_VALUED_FUNCTION" "SQL_SCALAR_FUNCTION")
+						(if (equal? kind "P") "SQL_STORED_PROCEDURE" (equal? kind "TF") "SQL_TABLE_VALUED_FUNCTION"
+							(equal? kind "IF") "SQL_INLINE_TABLE_VALUED_FUNCTION" "SQL_SCALAR_FUNCTION")
 						(tsql_catalog_module_id database (definition "name") kind)
 						0 (tsql_schema_id_value "dbo") false nil))))))
 		(define triggers (map (tsql_catalog_trigger_tuples database actor tx selection)
