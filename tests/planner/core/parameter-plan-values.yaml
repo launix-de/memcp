@@ -1,0 +1,114 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  isolated: true
+  description: Symbolic query inputs retain SQL NULL, row domains, windows and scalar cardinality
+setup:
+- sql: DROP TABLE IF EXISTS parameter_values_child
+- sql: DROP TABLE IF EXISTS parameter_values_base
+- sql: CREATE TABLE parameter_values_base(id INT PRIMARY KEY,value INT)
+- sql: INSERT INTO parameter_values_base VALUES(0,7),(1,11),(2,NULL)
+- sql: CREATE TABLE parameter_values_child(parent_id INT,value INT)
+- sql: INSERT INTO parameter_values_child VALUES(0,3),(0,8),(1,2),(2,NULL)
+test_cases:
+- name: A NULL compiling value does not replace an unknown predicate input
+  scm: |
+    (begin
+      (define session (newsession))
+      (session "needle" nil)
+      (define variant (sql_compile_queryplan_variant (list parse_sql) "memcp-tests"
+        "SELECT id,value FROM parameter_values_base WHERE id=@needle ORDER BY id"
+        nil session nil "generic"))
+      (map (list nil 0 1 9 nil 2) (lambda (needle) (begin
+        (session "needle" needle)
+        (define answer (newsession)) (answer "rows" '())
+        (sql_execute_formula session nil (cadr variant)
+          (lambda (row) (answer "rows" (append (answer "rows") row))) (lambda args true))
+        (answer "rows")))))
+  expect:
+    result: [[], [[id, 0, value, 7]], [[id, 1, value, 11]], [], [], [[id, 2, value, null]]]
+- name: Unknown LIMIT and OFFSET retain each invocation window including zero
+  scm: |
+    (begin
+      (define session (newsession)) (session "take" 2) (session "skip" 0)
+      (define variant (sql_compile_queryplan_variant (list parse_sql) "memcp-tests"
+        "SELECT id,value FROM parameter_values_base ORDER BY id LIMIT @take OFFSET @skip"
+        nil session nil "generic"))
+      (map (list (list 0 0) (list 1 0) (list 1 1) (list 3 0)) (lambda (window) (begin
+        (session "take" (car window)) (session "skip" (cadr window))
+        (define answer (newsession)) (answer "rows" '())
+        (sql_execute_formula session nil (cadr variant)
+          (lambda (row) (answer "rows" (append (answer "rows") row))) (lambda args true))
+        (answer "rows")))))
+  expect:
+    result: [[], [[id, 0, value, 7]], [[id, 1, value, 11]], [[id, 0, value, 7], [id, 1, value, 11], [id, 2, value, null]]]
+- name: Symbolic IN inputs do not claim a negative numeric regime
+  scm: |
+    (begin
+      (define session (newsession)) (session "left" nil) (session "right" nil)
+      (define variant (sql_compile_queryplan_variant (list parse_sql) "memcp-tests"
+        "SELECT id FROM parameter_values_base WHERE id IN (@left,@right) ORDER BY id"
+        nil session nil "generic"))
+      (map (list (list nil nil) (list 0 2) (list nil 1) (list 1 1)) (lambda (values) (begin
+        (session "left" (car values)) (session "right" (cadr values))
+        (define answer (newsession)) (answer "rows" '())
+        (sql_execute_formula session nil (cadr variant)
+          (lambda (row) (answer "rows" (append (answer "rows") row))) (lambda args true))
+        (answer "rows")))))
+  expect:
+    result: [[], [[id, 0], [id, 2]], [[id, 1]], [[id, 1]]]
+- name: A symbolic aggregate retains every outer row and its empty input value
+  scm: |
+    (begin
+      (define session (newsession)) (session "cutoff" nil)
+      (define variant (sql_compile_queryplan_variant (list parse_sql) "memcp-tests"
+        "SELECT b.id,(SELECT COUNT(*) FROM parameter_values_child c WHERE c.parent_id=b.id AND c.value>@cutoff) AS n FROM parameter_values_base b ORDER BY b.id"
+        nil session nil "generic"))
+      (map (list nil 0 3 nil) (lambda (cutoff) (begin
+        (session "cutoff" cutoff)
+        (define answer (newsession)) (answer "rows" '())
+        (sql_execute_formula session nil (cadr variant)
+          (lambda (row) (answer "rows" (append (answer "rows") row))) (lambda args true))
+        (answer "rows")))))
+  expect:
+    result:
+    - [[id, 0, n, 0], [id, 1, n, 0], [id, 2, n, 0]]
+    - [[id, 0, n, 2], [id, 1, n, 1], [id, 2, n, 0]]
+    - [[id, 0, n, 1], [id, 1, n, 0], [id, 2, n, 0]]
+    - [[id, 0, n, 0], [id, 1, n, 0], [id, 2, n, 0]]
+- name: Declared text payloads retain NULL case and trailing spaces
+  scm: |
+    (begin
+      (define session (newsession)) (session "payload" nil)
+      (define variant (sql_compile_queryplan_variant (list parse_sql) "memcp-tests"
+        "SELECT CAST(@payload AS CHAR(16)) AS payload FROM parameter_values_base WHERE id=0"
+        nil session nil "generic"))
+      (map (list nil "A" "a" "A " "a ") (lambda (payload) (begin
+        (session "payload" payload)
+        (define answer (newsession))
+        (sql_execute_formula session nil (cadr variant)
+          (lambda (row) (answer "value" row)) (lambda args true))
+        (answer "value")))))
+  expect:
+    result: [[payload, null], [payload, A], [payload, a], [payload, 'A '], [payload, 'a ']]
+- name: A changing scalar input still raises genuine multiple row cardinality failure
+  scm: |
+    (begin
+      (define session (newsession)) (session "needle" 1)
+      (define variant (sql_compile_queryplan_variant (list parse_sql) "memcp-tests"
+        "SELECT (SELECT value FROM parameter_values_child WHERE parent_id=@needle) AS value"
+        nil session nil "generic"))
+      (define answer (newsession))
+      (sql_execute_formula session nil (cadr variant)
+        (lambda (row) (answer "value" row)) (lambda args true))
+      (if (expression_equal? (answer "value") (list "value" 2)) true
+        (error "single-row scalar value changed before the cardinality check"))
+      (session "needle" 0)
+      (sql_execute_formula session nil (cadr variant) (lambda args true) (lambda args true)))
+  expect:
+    error: true
+    contains: more than one row
+cleanup:
+- sql: DROP TABLE IF EXISTS parameter_values_child
+- sql: DROP TABLE IF EXISTS parameter_values_base

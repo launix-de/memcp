@@ -13430,6 +13430,26 @@ compile repeats Scheme closure optimization even when no domain was changed. */
 		(and (or (ir_has_contribution_domain? candidate) (ir_has_invariant_property_cover? candidate))
 			(not (ir_has_unproved_query_aggregate? candidate))))))
 
+/* Candidate comparison consumes the chosen logical work profile. Unknown
+execution work stays unknown; it is never a zero-cost specialization benefit.
+Single-source scans have the same calibrated base profile used by join DP. */
+(define parameter_plan_execution_cost (lambda (ir)
+	(begin
+		(define root (ir_root ir))
+		(if (or (not (query_block? root)) (not (empty_list? (ir_stages ir)))) nil
+			(begin
+				(define chosen (qassoc_get (qb_facts root) (quote join_cost) nil))
+				(if (number? (qassoc_get chosen (quote execution_ns) nil)) chosen
+					(empty_list? (qb_sources root)) (planner_zero_cost 1 1)
+					(begin
+						(define rows (map (qb_sources root) planner_source_row_count))
+						(if (reduce rows (lambda (known count) (and known (number? count))) true)
+							(planner_scan_cost (reduce rows + 0) 0.5) nil))))))))
+
+(define record_parameter_plan_execution_cost (lambda (ir planning_session)
+	(if (nil? planning_session) nil
+		(planning_session "__memcp_queryplan_candidate_cost" (parameter_plan_execution_cost ir)))))
+
 (define neumann_compile_pipeline (lambda (ast planning_session tx)
 	(begin
 		(tx_check tx)
@@ -13475,6 +13495,7 @@ compile repeats Scheme closure optimization even when no domain was changed. */
 		(define prepared (prepare_physical_queryplan reordered planning_session tx))
 		(tx_check tx)
 		(define plan (emit_physical_queryplan prepared))
+		(record_parameter_plan_execution_cost reordered planning_session)
 		(tx_check tx)
 		plan)))
 
@@ -13488,6 +13509,7 @@ compile repeats Scheme closure optimization even when no domain was changed. */
 		(define prepared (prepare_physical_queryplan reordered planning_session tx))
 		(tx_check tx)
 		(define plan (emit_physical_queryplan prepared))
+		(record_parameter_plan_execution_cost reordered planning_session)
 		(tx_check tx)
 		plan)))
 

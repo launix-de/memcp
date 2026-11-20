@@ -372,10 +372,12 @@ identical programs once outside row closures, including parameterized plans. */
 		(list (quote session) (quote tx) (quote resultrow) (quote resultfields))
 		(source "SQL Query" 1 1 (sql_queryplan_prepare_search formula)))))) compile_tx)))
 
-(define sql_compile_queryplan_variant (lambda (parse_fn schema parse_query policy source_session tx)
+(define sql_compile_queryplan_variant (lambda (parse_fn schema parse_query policy source_session tx parameter_mode)
 	(begin
 		(tx_check tx)
+		(define compile_started (nanotime))
 		(define planning_session (sql_queryplan_compile_session source_session tx))
+		(planning_session "__memcp_queryplan_parameter_mode" parameter_mode)
 		(define statistics_diagnostic (match (toUpper parse_query)
 			(regex "^\\s*EXPLAIN\\b" _) true
 			_ false))
@@ -396,13 +398,21 @@ identical programs once outside row closures, including parameterized plans. */
 		(tx_check tx)
 		/* Diagnostics must refresh their captured estimates when table statistics
 		change, but checking their cache must never execute candidate preparations. */
+		(define guard (if statistics_diagnostic
+			(sql_queryplan_statistics_guard_from_session planning_session)
+			(sql_queryplan_guard_from_session planning_session)))
 		(list
-			(if statistics_diagnostic
-				(sql_queryplan_statistics_guard_from_session planning_session)
-				(sql_queryplan_guard_from_session planning_session))
+			guard
 			plan
 			(if statistics_diagnostic '()
-				(sql_queryplan_preparations_from_session planning_session))))))
+				(sql_queryplan_preparations_from_session planning_session))
+			(list
+				(list (quote parameter_mode) parameter_mode)
+				(list (quote compile_ns) (- (nanotime) compile_started))
+				(list (quote execution_cost) (planning_session "__memcp_queryplan_candidate_cost"))
+				(list (quote parameters) (merge_unique (list
+					(query_expr_session_reads raw_plan)
+					(query_expr_session_reads guard)))))))))
 
 (define sql_queryplan_preparation_expr (lambda (preparation)
 	(match preparation '(decision_id producer metric_expr) (begin
@@ -485,7 +495,8 @@ otherwise side-effect-free guard. */
 		(entry "variants" (map recent_variants (lambda (variant) (list
 			(clone_optimizer_expression (car variant))
 			(cadr variant)
-			(nth variant 2)))))
+			(nth variant 2)
+			(nth variant 3)))))
 		(entry "formula" (sql_queryplan_compile_formula tx
 			(sql_queryplan_formula queryplan_cache cache_key entry parse_fn schema parse_query policy recent_variants)))
 		(entry "formula"))))
@@ -495,7 +506,7 @@ otherwise side-effect-free guard. */
 		(define entry (newsession))
 		(entry "compile_lock" (mutex))
 		(define formula (sql_queryplan_install_variants queryplan_cache cache_key entry parse_fn schema parse_query policy
-			(list (if (nil? initial_variant) (sql_compile_queryplan_variant parse_fn schema parse_query policy source_session tx) initial_variant)) tx))
+			(list (if (nil? initial_variant) (sql_compile_queryplan_variant parse_fn schema parse_query policy source_session tx "specialized") initial_variant)) tx))
 		(list entry formula))))
 
 (define sql_queryplan_matching_variant (lambda (variants session tx resultrow resultfields)
@@ -535,7 +546,7 @@ the common guard-dispatch path. */
 				(if (not (nil? matching))
 					matching
 					(begin
-						(define variant (sql_compile_queryplan_variant parse_fn schema parse_query policy session tx))
+						(define variant (sql_compile_queryplan_variant parse_fn schema parse_query policy session tx "specialized"))
 						(define formula (sql_queryplan_install_variants queryplan_cache cache_key entry parse_fn schema parse_query policy
 							(cons variant current_variants) tx))
 						(queryplan_cache cache_key (list entry formula))
@@ -631,7 +642,7 @@ user table merely to discard a newly constructed policy closure. */
 							(begin
 								(define exact_compile (lambda (compile_tx) (begin
 									(define resolved_policy (sql_policy_spec_resolve policy))
-									(define variant (sql_compile_queryplan_variant parse_fn schema parse_query resolved_policy session compile_tx))
+									(define variant (sql_compile_queryplan_variant parse_fn schema parse_query resolved_policy session compile_tx "specialized"))
 									(if (and (equal? (car variant) true) (empty_list? (nth variant 2)))
 										(cadr variant)
 										(sql_queryplan_new_entry queryplan_cache cache_key parse_fn schema parse_query resolved_policy session compile_tx variant)))))
