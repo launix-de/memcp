@@ -11,13 +11,13 @@ setup:
 - sql: CREATE TABLE parameter_plan_current(object_name VARCHAR(100) COLLATE utf8mb4_bin,permission_name VARCHAR(100) COLLATE utf8mb4_bin,PRIMARY KEY(object_name,permission_name)) ENGINE=sloppy
 - scm: |
     (begin
-      (insert (table "memcp-tests" false "parameter_plan_driver" false)
+      (insert (table "memcp-tests" false "parameter_plan_driver" false nil)
         '("object_name" "permission_name")
         (map (produceN 512) (lambda (index)
           (list (concat "O" (+ 1000000 (intdiv index 8)))
             (concat "P" (+ 100 (mod index 8)))))))
-      (rebuild (table "memcp-tests" false "parameter_plan_driver" false) true false)
-      (rebuild (table "memcp-tests" false "parameter_plan_current" false) true false))
+      (rebuild (table "memcp-tests" false "parameter_plan_driver" false nil) true false)
+      (rebuild (table "memcp-tests" false "parameter_plan_current" false nil) true false))
 test_cases:
 - name: Changing composite parameters preserve every complete ordered tuple
   performance_rows: 512
