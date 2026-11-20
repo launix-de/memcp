@@ -898,7 +898,7 @@ func (db *database) initializeSchemaSnapshot(document []byte) {
 		// Legacy import occurs once, before runtime definitions are materialized.
 		if db.catalog.live[0] == nil {
 			rows := catalogRowsFromDocument(jsonbytes)
-			db.editCatalogLocked(&rows, catalogAllRelations)
+			db.editCatalogLocked(&rows, catalogAllRelations, nil)
 		}
 	}
 

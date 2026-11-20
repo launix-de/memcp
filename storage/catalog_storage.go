@@ -230,41 +230,78 @@ func loadDiskShard(owner, db *database, relation catalogRelationID, id uuid.UUID
 
 // catalogShardRecords reads the visible rows of a catalog shard with their
 // record ids, in recid order.
-func catalogShardRecords(shard *storageShard, columns []string) (recids []uint32, rows [][]scm.Scmer) {
+func catalogShardRecords(shard *storageShard, columns []string, tableOwners []string) (recids []uint32, rows [][]scm.Scmer) {
 	access := shard.GetRead(nil, false)
 	defer access.Release()
 	shard = access.shard
-	shard.mu.Lock()
-	defer shard.mu.Unlock()
-	shard.ensureMainCount(true, nil)
+	if tableOwners != nil {
+		ownerColumn := "table_name"
+		if shard.t.Name == catalogRelations[catalogTables].name {
+			ownerColumn = "name"
+		}
+		selected := make(map[uint32]bool)
+		for _, owner := range tableOwners {
+			value := scm.NewString(owner)
+			bounds := runtimeScanAccess(analyzedBoundaries{{col: ownerColumn, matcher: EqualMatcher, lower: value, upper: value, lowerInclusive: true, upperInclusive: true}})
+			part := shard.collectRecSet(bounds, []string{ownerColumn}, scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
+				return scm.NewBool(values[0].String() == owner)
+			}), nil, nil)
+			part.forEachRange(func(base, count uint32) bool {
+				for id := base; id < base+count; id++ {
+					selected[id] = true
+				}
+				return true
+			})
+		}
+		for id := range selected {
+			recids = append(recids, id)
+		}
+		sort.Slice(recids, func(i, j int) bool { return recids[i] < recids[j] })
+	} else {
+		total := shard.main_count + uint32(len(shard.deltaRows()))
+		for id := uint32(0); id < total; id++ {
+			if !shard.deletions.Get(uint(id)) {
+				recids = append(recids, id)
+			}
+		}
+	}
+	if len(recids) == 0 {
+		return
+	}
+	mainRows := shard.main_count
 	delta := shard.deltaRows()
-	total := shard.main_count + uint32(len(delta))
 	width := len(columns)
-	values := make([]scm.Scmer, int(total)*width)
+	values := make([]scm.Scmer, len(recids)*width)
+	mainEnd := sort.Search(len(recids), func(i int) bool { return recids[i] >= mainRows })
 	readers := make([]ColumnReader, width)
 	defer releaseColumnReaders(readers)
+	deltaPositions := make([]int, width)
+	shard.mu.RLock()
 	for i, name := range columns {
-		if shard.main_count != 0 {
-			storage := shard.getColumnStorageOrPanic(name, true, nil)
-			readers[i] = newCachedColumnReaderTx(storage, nil, true, ReadCompressed)
-			readers[i].GetValueRange(0, shard.main_count, values[i:], width)
-		}
 		position, present := shard.deltaColumns[name]
+		deltaPositions[i] = -1
 		if present {
-			for j, row := range delta {
+			deltaPositions[i] = position
+		}
+	}
+	shard.mu.RUnlock()
+	for i, name := range columns {
+		if mainEnd != 0 {
+			storage := shard.getColumnStorageOrPanic(name, false, nil)
+			readers[i] = newCachedColumnReaderTx(storage, nil, false, ReadCompressed)
+			readers[i].GetValueMulti(recids[:mainEnd], values[i:], width)
+		}
+		if position := deltaPositions[i]; position >= 0 {
+			for j := mainEnd; j < len(recids); j++ {
+				row := delta[recids[j]-mainRows]
 				if position < len(row) {
-					values[(int(shard.main_count)+j)*width+i] = row[position]
+					values[j*width+i] = row[position]
 				}
 			}
 		}
 	}
-	for recid := uint32(0); recid < total; recid++ {
-		if shard.deletions.Get(uint(recid)) {
-			continue
-		}
-		row := values[int(recid)*width : (int(recid)+1)*width]
-		recids = append(recids, recid)
-		rows = append(rows, row)
+	for i := range recids {
+		rows = append(rows, values[i*width:(i+1)*width])
 	}
 	return
 }
@@ -394,7 +431,7 @@ func (db *database) loadCatalogDocument(root *catalogRoot) (document []byte, err
 		if committed[i] == nil || committed[i].uuid != id || committed[i].home() != home {
 			committed[i] = loadDiskShard(db, home, relation, id)
 		}
-		_, rows[i] = catalogShardRecords(committed[i], catalogRelationColumns(relation))
+		_, rows[i] = catalogShardRecords(committed[i], catalogRelationColumns(relation), nil)
 		if cell := committed[i].coherence.Load(); cell != nil {
 			committed[i] = cell.resolved().publishedShard()
 		}
@@ -487,7 +524,7 @@ func (db *database) catalogCommitted(generation uint64) {
 func (db *database) catalogRowsLocked() (rows catalogRows) {
 	for i, shard := range db.catalog.live {
 		if shard != nil {
-			_, rows[i] = catalogShardRecords(shard, catalogRelationColumns(catalogRelationID(i)))
+			_, rows[i] = catalogShardRecords(shard, catalogRelationColumns(catalogRelationID(i)), nil)
 		}
 	}
 	return
@@ -515,7 +552,7 @@ func newCatalogShard(db *database, relation catalogRelationID, rows [][]scm.Scme
 // editCatalogLocked atomically applies definition edits through the native
 // transaction owner. It never rebuilds definitions from the runtime directory.
 // The caller owns schemalock.
-func (db *database) editCatalogLocked(rows *catalogRows, relations uint16) bool {
+func (db *database) editCatalogLocked(rows *catalogRows, relations uint16, tableOwners []string) bool {
 	tx := NewTxContext(TxACID)
 	var writes []WriteAccess
 	defer func() {
@@ -544,11 +581,14 @@ func (db *database) editCatalogLocked(rows *catalogRows, relations uint16) bool 
 			continue
 		}
 		relation := catalogRelationID(i)
-		fp := catalogFingerprint(relation, rows[i])
-		if fp == db.catalog.liveFP[i] {
-			continue
+		var fp [32]byte
+		if tableOwners == nil {
+			fp = catalogFingerprint(relation, rows[i])
+			if fp == db.catalog.liveFP[i] {
+				continue
+			}
 		}
-		changed = true
+		relationChanged := false
 		access := db.catalog.live[i].GetWrite(tx)
 		writes = append(writes, access)
 		shard := access.shard
@@ -559,7 +599,7 @@ func (db *database) editCatalogLocked(rows *catalogRows, relations uint16) bool 
 		for _, row := range rows[i] {
 			wanted[catalogRowKey(fields, row)]++
 		}
-		recids, existing := catalogShardRecords(shard, columns)
+		recids, existing := catalogShardRecords(shard, columns, tableOwners)
 		for j, row := range existing {
 			key := catalogRowKey(fields, row)
 			if wanted[key] > 0 {
@@ -567,6 +607,7 @@ func (db *database) editCatalogLocked(rows *catalogRows, relations uint16) bool 
 				continue
 			}
 			shard.updateFunctionBatch(recids[j], true, false, nil, nil, tx, nil, true)()
+			relationChanged = true
 		}
 		var inserts [][]scm.Scmer
 		for _, row := range rows[i] {
@@ -579,10 +620,15 @@ func (db *database) editCatalogLocked(rows *catalogRows, relations uint16) bool 
 		}
 		if len(inserts) > 0 {
 			shard.insertValues(columns, inserts, false, nil, nil, false, tx, nil, true)
+			relationChanged = true
 		}
-		fingerprints[i] = fp
+		if relationChanged || tableOwners == nil {
+			fingerprints[i] = fp
+		}
+		changed = changed || relationChanged
 	}
 	if !changed {
+		db.catalog.liveFP = fingerprints
 		return false
 	}
 	if err := tx.Commit(); err != nil {
@@ -600,29 +646,26 @@ func (db *database) proposeCatalogTablesLocked(tables ...*table) {
 	if db == systemSchemaDB {
 		return
 	}
-	rows := db.catalogRowsLocked()
+	var rows catalogRows
+	var owners []string
+	seen := make(map[string]bool)
 	for _, t := range tables {
-		if t == nil || t.schema != db {
+		if t == nil || t.schema != db || seen[t.Name] {
 			continue
 		}
+		seen[t.Name] = true
+		owners = append(owners, t.Name)
 		proposal := catalogRowsFromTable(t)
 		for i := catalogTables; i < catalogProcedures; i++ {
-			kept := make([][]scm.Scmer, 0, len(rows[i])+len(proposal[i]))
-			for _, row := range rows[i] {
-				name := row[1].String()
-				if i == catalogTables {
-					name = catalogTableName(row)
-				}
-				if name != t.Name {
-					kept = append(kept, row)
-				}
-			}
-			rows[i] = append(kept, proposal[i]...)
+			rows[i] = append(rows[i], proposal[i]...)
 		}
+	}
+	if len(owners) == 0 {
+		return
 	}
 	// A new compiled callback can share an unchanged persisted declaration.
 	// Keep that runtime state without decoding the same canonical rows again.
-	if !db.editCatalogLocked(&rows, catalogAllRelations) {
+	if !db.editCatalogLocked(&rows, catalogAllRelations&^(1<<catalogDatabases|1<<catalogProcedures), owners) {
 		return
 	}
 	for _, t := range tables {
@@ -656,7 +699,7 @@ func (db *database) dropCatalogTableLocked(name string) {
 		}
 		rows[i] = kept
 	}
-	db.editCatalogLocked(&rows, catalogAllRelations)
+	db.editCatalogLocked(&rows, catalogAllRelations, nil)
 }
 
 func (db *database) editCatalogProcedureLocked(name string, proposal *ProcedureDescription) *ProcedureDescription {
@@ -685,7 +728,7 @@ func (db *database) editCatalogProcedureLocked(name string, proposal *ProcedureD
 	for i, definition := range definitions {
 		rows.add(catalogProcedures, db.Name, []scm.Scmer{scm.NewInt(int64(i))}, definition)
 	}
-	db.editCatalogLocked(&rows, catalogAllRelations)
+	db.editCatalogLocked(&rows, catalogAllRelations, nil)
 	if proposal == nil {
 		return nil
 	}
@@ -710,7 +753,7 @@ func (db *database) editCatalogProcedureLocked(name string, proposal *ProcedureD
 func (db *database) checkpointCatalogLocked() {
 	var rows catalogRows
 	if shard := db.catalog.live[catalogTables]; shard != nil {
-		_, rows[catalogTables] = catalogShardRecords(shard, catalogRelationColumns(catalogTables))
+		_, rows[catalogTables] = catalogShardRecords(shard, catalogRelationColumns(catalogTables), nil)
 	}
 	for _, row := range rows[catalogTables] {
 		t := db.tables.Get(catalogTableName(row))
@@ -753,7 +796,7 @@ func (db *database) checkpointCatalogLocked() {
 			row[i] = catalogCell(field.kind, marshalCatalogValue(value))
 		}
 	}
-	db.editCatalogLocked(&rows, 1<<catalogTables)
+	db.editCatalogLocked(&rows, 1<<catalogTables, nil)
 }
 
 // materializeCatalogTableLocked publishes a local runtime projection of the
@@ -881,6 +924,7 @@ func (db *database) commitSchemaLocked(durable bool, release func()) {
 	persistenceOwned = false
 	db.schemalock.Lock()
 	if db.catalog.liveVersion == version {
+		db.catalog.liveFP = db.catalog.committedFP
 		for i, shard := range committed {
 			if previous := db.catalog.live[i]; previous != shard {
 				if r := previous.replicationManager(); r != nil {
@@ -1014,7 +1058,7 @@ func (db *database) initializeEmptyCatalog() {
 	systemSchema()
 	var rows catalogRows
 	rows.add(catalogDatabases, db.Name, nil, nil)
-	db.editCatalogLocked(&rows, catalogAllRelations)
+	db.editCatalogLocked(&rows, catalogAllRelations, nil)
 }
 
 func foreignCatalogTables(t *table) []*table {
@@ -1070,7 +1114,7 @@ func (db *database) bootstrapCatalog(document []byte) {
 			return
 		}
 		rows := catalogRowsFromDocument(data)
-		db.editCatalogLocked(&rows, catalogAllRelations)
+		db.editCatalogLocked(&rows, catalogAllRelations, nil)
 	})
 }
 

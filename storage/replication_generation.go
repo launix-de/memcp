@@ -975,7 +975,7 @@ func (r *replicationManager) installSchema(source, name string, engine Persisten
 			db.catalogMu.Unlock()
 		} else {
 			rows := replacement.catalogRowsLocked()
-			db.editCatalogLocked(&rows, catalogAllRelations)
+			db.editCatalogLocked(&rows, catalogAllRelations, nil)
 			publishCatalogShards(db.Name, &db.catalog.live)
 		}
 		for _, table := range db.tables.GetAll() {

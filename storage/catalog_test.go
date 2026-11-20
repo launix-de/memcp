@@ -291,7 +291,7 @@ func TestCatalogCheckpointCannotOverwriteDefinitionsFromRuntime(t *testing.T) {
 func TestCatalogRejectsRetainedMutationCallback(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "catalog-callback-authority", 0)
 	shard := tbl.schema.catalog.live[catalogColumns]
-	_, before := catalogShardRecords(shard, catalogRelationColumns(catalogColumns))
+	_, before := catalogShardRecords(shard, catalogRelationColumns(catalogColumns), nil)
 	callback := shard.UpdateFunction(0, true, false, nil, nil)
 	func() {
 		defer func() {
@@ -301,7 +301,7 @@ func TestCatalogRejectsRetainedMutationCallback(t *testing.T) {
 		}()
 		callback()
 	}()
-	_, after := catalogShardRecords(shard, catalogRelationColumns(catalogColumns))
+	_, after := catalogShardRecords(shard, catalogRelationColumns(catalogColumns), nil)
 	if !reflect.DeepEqual(before, after) {
 		t.Fatal("rejected callback changed catalog definitions")
 	}
@@ -328,7 +328,7 @@ func TestCatalogScanLeavesRuntimeDefinitionsCold(t *testing.T) {
 	cold := newDatabase()
 	cold.Name, cold.persistence, cold.srState = db.Name, db.persistence, COLD
 	cold.bootstrapCatalog(nil)
-	_, rows := catalogShardRecords(cold.catalog.live[catalogColumns], catalogRelationColumns(catalogColumns))
+	_, rows := catalogShardRecords(cold.catalog.live[catalogColumns], catalogRelationColumns(catalogColumns), nil)
 	if len(rows) != 2 {
 		t.Fatalf("catalog contains %d columns, want 2", len(rows))
 	}
@@ -590,7 +590,7 @@ func TestCatalogMosiReadUsesPublishedNativeGeneration(t *testing.T) {
 	cell.current.Store(received)
 	old := replication.Swap(r)
 	defer replication.Store(old)
-	_, visible := catalogShardRecords(source, catalogRelationColumns(catalogColumns))
+	_, visible := catalogShardRecords(source, catalogRelationColumns(catalogColumns), nil)
 	if len(visible) == 0 || visible[0][nameIndex].String() != "from-peer" {
 		t.Fatalf("native catalog scan ignored MOSI generation: private=%v owner=%q manager=%v current=%p wanted=%p visible=%v", source.catalogPrivate, source.catalogOwner, source.replicationManager() != nil, cell.current.Load(), received, visible)
 	}
@@ -622,7 +622,7 @@ func TestCatalogCheckpointPreservesNativeAuthority(t *testing.T) {
 	if root.Forwards[previous.uuid.String()] != current.uuid.String() {
 		t.Fatal("checkpoint did not persist the native UUID forwarding edge")
 	}
-	_, visible := catalogShardRecords(previous, catalogRelationColumns(catalogColumns))
+	_, visible := catalogShardRecords(previous, catalogRelationColumns(catalogColumns), nil)
 	if len(visible) != len(tbl.Columns) {
 		t.Fatal("old catalog stub did not read the new definition")
 	}
@@ -631,5 +631,34 @@ func TestCatalogCheckpointPreservesNativeAuthority(t *testing.T) {
 	cold.bootstrapCatalog(historical)
 	if installed := cell.resolved().publishedShard(); installed != current || cold.catalog.live[catalogColumns] != current {
 		t.Fatal("historical root republished a predecessor over the acquired catalog generation")
+	}
+}
+
+func TestCatalogScopedEditsPreserveUnrelatedDefinitions(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "catalog-scoped-edits", 0)
+	db := tbl.schema
+	other, _ := CreateTable(db.Name, "unrelated", Safe, false)
+	other.CreateColumn("kept", "TEXT", nil, []scm.Scmer{scm.NewString("default"), scm.NewString("unchanged <&> Gröẞe")})
+	read := func() []string {
+		var keys []string
+		for i := catalogTables; i < catalogProcedures; i++ {
+			_, rows := catalogShardRecords(db.catalog.live[i], catalogRelationColumns(i), []string{other.Name})
+			for _, row := range rows {
+				keys = append(keys, catalogRowKey(catalogRelations[i].columns(), row))
+			}
+		}
+		sort.Strings(keys)
+		return keys
+	}
+	before := read()
+	tbl.AlterColumn("payload", "comment", scm.NewString("changed"))
+	tbl.CreateColumn("temporary", "INT", nil, nil)
+	tbl.DropColumn("temporary")
+	if after := read(); len(before) == 0 || !reflect.DeepEqual(before, after) {
+		t.Fatal("scoped catalog edits changed another table's authoritative rows")
+	}
+	_, rows := catalogShardRecords(db.catalog.live[catalogColumns], catalogRelationColumns(catalogColumns), []string{tbl.Name})
+	if len(rows) != 2 {
+		t.Fatalf("scoped add/drop left %d columns, want 2", len(rows))
 	}
 }
