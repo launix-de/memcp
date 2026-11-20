@@ -1142,9 +1142,7 @@ func TestClusterUniqueChannelSerializesNativeCollisionUpdates(t *testing.T) {
 	service := nodeScans.Swap(&nodeScanService{cluster: cluster})
 	defer nodeScans.Store(service)
 	cluster.manager.resourceCell(mosiResource{Database: tbl.schema.Name}).ownstate.Initialize(mosi.M)
-	for _, shard := range tbl.ActiveShards() {
-		cluster.declareShard(shard, true)
-	}
+	cluster.manager.schemaShards(tbl.schema, cluster.self.ID, true)
 	const workers, repetitions = 8, 8
 	start := make(chan struct{})
 	failures := make(chan any, workers)
