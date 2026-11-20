@@ -9,6 +9,123 @@ import "bytes"
 import "strings"
 import "encoding/json"
 import "encoding/binary"
+import "github.com/launix-de/memcp/scm"
+
+// validateReplicaCatalogRows applies the existing client declaration admission
+// before an imported native partition becomes visible. JSON-valued catalog
+// cells remain inert until validateReplicaSchema has checked them. A client
+// must supply the canonical, receiver-restricted declaration: filtering or
+// rewriting after publishing a shard would leave unsafe bytes in its root.
+func validateReplicaCatalogRows(schema string, relation catalogRelationID, rows [][]scm.Scmer) error {
+	r := &catalogRelations[relation]
+	fields := r.columns()
+	encoder := catalogJSONEncoder{strings: make(map[string]json.RawMessage)}
+	ordinalIndex := -1
+	for i, field := range r.identity {
+		if field.kind == catalogInt {
+			ordinalIndex = i + 1
+		}
+	}
+	type ordinalGroup struct{ count, maximum int64 }
+	groups := make(map[string]ordinalGroup)
+	identities := make(map[string]bool)
+	for _, row := range rows {
+		if len(row) != len(fields) || !row[0].IsString() || row[0].String() != schema {
+			return fmt.Errorf("invalid replicated catalog row identity in %s", r.name)
+		}
+		for i, field := range fields {
+			value := row[i]
+			if value.IsNil() {
+				if field.key == "" {
+					return fmt.Errorf("missing replicated catalog identity in %s", r.name)
+				}
+				continue
+			}
+			valid := false
+			switch field.kind {
+			case catalogText:
+				valid = value.IsString()
+			case catalogInt:
+				valid = value.IsInt()
+				if valid && field.key == "" {
+					valid = value.Int() >= 0 && value.Int() < int64(len(rows))
+				}
+			case catalogBool:
+				valid = value.IsBool()
+			case catalogFloat:
+				valid = value.IsFloat() || value.IsInt()
+			case catalogList:
+				valid = value.IsSlice()
+			case catalogJSON:
+				valid = value.IsString() && json.Valid([]byte(value.String()))
+			}
+			if !valid {
+				return fmt.Errorf("invalid replicated catalog cell %s.%s", r.name, field.column)
+			}
+		}
+		if ordinalIndex >= 0 {
+			key := catalogRowKey(fields[:ordinalIndex+1], row[:ordinalIndex+1])
+			if identities[key] {
+				return fmt.Errorf("duplicate replicated catalog ordinal in %s", r.name)
+			}
+			identities[key] = true
+			parent := catalogRowKey(fields[:ordinalIndex], row[:ordinalIndex])
+			group := groups[parent]
+			group.count++
+			group.maximum = max(group.maximum, row[ordinalIndex].Int())
+			groups[parent] = group
+		}
+		switch relation {
+		case catalogDatabases, catalogKeyColumns, catalogForeignKeyColumns:
+			continue // identity/scalar cells only; no runtime declaration codec
+		}
+		record := encoder.record(relation, row)
+		document := catalogDocument{Name: schema, Tables: make(map[string]json.RawMessage)}
+		if relation == catalogProcedures {
+			document.Procedures = []json.RawMessage{encoder.appendRecord(nil, record)}
+		} else {
+			name := row[1].String()
+			if relation == catalogTables {
+				name = catalogTableName(row)
+				document.Tables[name] = encoder.appendRecord(nil, record)
+			} else {
+				child := map[catalogRelationID]string{catalogColumns: "Columns", catalogKeys: "Unique", catalogForeignKeys: "Foreign", catalogTriggers: "Triggers"}[relation]
+				table := map[string]json.RawMessage{
+					"Name": marshalCatalogValue(name),
+					child:  marshalCatalogRecords([]json.RawMessage{encoder.appendRecord(nil, record)}),
+				}
+				document.Tables[name] = encoder.appendRecord(nil, table)
+			}
+		}
+		encoded, err := json.Marshal(document)
+		if err != nil {
+			return err
+		}
+		admitted, err := validateReplicaSchema(encoded)
+		if err != nil {
+			return err
+		}
+		normalized := catalogRowsFromDocument(admitted)
+		if len(normalized[relation]) != 1 {
+			return fmt.Errorf("replicated catalog %s contains a local cache declaration", r.name)
+		}
+		offset := 1 + len(r.identity)
+		for i, field := range r.fields {
+			if field.key == "schema_only" && scm.ToBool(row[offset+i]) != scm.ToBool(normalized[relation][0][offset+i]) {
+				return fmt.Errorf("replicated catalog %s requires receiver-restricted declarations", r.name)
+			}
+		}
+	}
+	for _, group := range groups {
+		if group.maximum+1 != group.count {
+			return fmt.Errorf("replicated catalog %s has incomplete child ordinals", r.name)
+		}
+	}
+	if relation == catalogDatabases && len(rows) != 1 {
+		return fmt.Errorf("replicated catalog lacks its database declaration")
+	}
+	return nil
+}
 
 // validateReplicaSchema admits declarations from clients, never executable
 // runtime artifacts. Inspect inert JSON first: Scmer decoding restores callable

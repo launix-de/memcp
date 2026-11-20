@@ -160,10 +160,16 @@ func (r *replicationManager) applyResourcePacket(source string, packet *mosiPack
 			return err
 		}
 		transfer.untrusted = r.master && r.cluster == nil && source != r.id
-		for _, route := range packet.Forwards {
-			r.forwardResource(route.From, route.To)
+		if !isCatalogResource(packet.Resource) {
+			for _, route := range packet.Forwards {
+				r.forwardResource(route.From, route.To)
+			}
 		}
-		publication := r.resourceCell(mosiResource{Database: packet.Resource.Database})
+		publicationName := packet.Resource.Database
+		if transfer.home != nil {
+			publicationName = transfer.home.Name
+		}
+		publication := r.resourceCell(mosiResource{Database: publicationName})
 		publication.importPublication.Lock()
 		r.imports.Store(key, transfer)
 		publication.importPublication.Unlock()
@@ -182,20 +188,6 @@ func (r *replicationManager) applyResourcePacket(source string, packet *mosiPack
 			return transfer.packet(*packet)
 		}
 		if err := func() error {
-			if packet.Resource.Shard != "" {
-				// All bytes are received. Final data publication shares existing cold
-				// lifecycle ownership with schema installation; no lease spans a stream
-				// or a network wait, and granted query reads never acquire this lease.
-				db := databases.Get(packet.Resource.Database)
-				if db == nil {
-					return fmt.Errorf("missing import database")
-				}
-				db.persistenceLifecycle.RLock()
-				defer db.persistenceLifecycle.RUnlock()
-				publication := r.resourceCell(mosiResource{Database: packet.Resource.Database})
-				publication.importPublication.Lock()
-				defer publication.importPublication.Unlock()
-			}
 			defer r.imports.Delete(key)
 			defer transfer.abort()
 			if r.master {
@@ -220,7 +212,26 @@ func (r *replicationManager) applyResourcePacket(source string, packet *mosiPack
 						return fmt.Errorf("stale transfer epoch")
 					}
 				}
-				if err := r.finishImport(source, transfer); err != nil {
+				if err := func() error {
+					if packet.Resource.Shard != "" {
+						// Only final payload publication owns the physical lifecycle.
+						// Backup registration may write to that same system backend;
+						// release this reader before it acquires storage ownership again.
+						db := transfer.home
+						if db == nil {
+							db = replicaPersistenceDatabase(packet.Resource)
+						}
+						if db == nil {
+							return fmt.Errorf("missing import database")
+						}
+						db.persistenceLifecycle.RLock()
+						defer db.persistenceLifecycle.RUnlock()
+						publication := r.resourceCell(mosiResource{Database: db.Name})
+						publication.importPublication.Lock()
+						defer publication.importPublication.Unlock()
+					}
+					return r.finishImport(source, transfer)
+				}(); err != nil {
 					return err
 				}
 				if !transfer.superseded {
