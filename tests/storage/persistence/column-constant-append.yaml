@@ -25,6 +25,8 @@ setup:
 - sql: INSERT constant_append_pg VALUES(9,90)
 - sql: CREATE TABLE constant_append_mysql(id INT PRIMARY KEY,value INT)
 - sql: INSERT constant_append_mysql VALUES(10,100)
+- sql: CREATE TABLE constant_append_text(id INT PRIMARY KEY)
+- sql: INSERT constant_append_text VALUES(11)
 test_cases:
 - name: Prior writes main and delta prefixes and later writes share the original decision
   tds:
@@ -127,6 +129,11 @@ test_cases:
 - name: WITH VALUES retains the complete historical row
   sql: SELECT id,flag FROM constant_append_values
   expect: {rows: 1,data: [{id: 8,flag: 6}]}
+- name: An empty string remains an actual nonnull constant default
+  sql: BEGIN TRANSACTION; ALTER TABLE constant_append_text ADD label VARCHAR(4) NOT NULL CONSTRAINT constant_label_default DEFAULT (''); COMMIT TRANSACTION
+- name: Empty historical values are distinct from SQL NULL and absent defaults
+  sql: SELECT id,label,CASE WHEN label IS NULL THEN 1 ELSE 0 END AS null_flag FROM constant_append_text
+  expect: {rows: 1,data: [{id: 11,label: '',null_flag: 0}]}
 - name: Replacing the future default does not rewrite historical initial values
   sql: ALTER TABLE constant_append_rows DROP CONSTRAINT constant_amount_default; ALTER TABLE constant_append_rows ADD CONSTRAINT constant_amount_replacement DEFAULT (9) FOR amount
 - name: Future inserts use the replacement default
@@ -173,6 +180,9 @@ test_cases:
 - name: Recovery does not restore the removed default declaration
   sql: SELECT COUNT(*) AS n FROM sys.default_constraints WHERE parent_object_id=OBJECT_ID(N'constant_append_rows')
   expect: {rows: 1,data: [{n: 0}]}
+- name: Recovery retains an actual empty constant and its named default
+  sql: SELECT id,label FROM constant_append_text
+  expect: {rows: 1,data: [{id: 11,label: ''}]}
 cleanup:
 - sql: DROP TABLE IF EXISTS constant_append_rows
 - sql: DROP TABLE IF EXISTS constant_append_other
@@ -182,3 +192,4 @@ cleanup:
 - sql: DROP TABLE IF EXISTS constant_append_values
 - sql: DROP TABLE IF EXISTS constant_append_pg
 - sql: DROP TABLE IF EXISTS constant_append_mysql
+- sql: DROP TABLE IF EXISTS constant_append_text
