@@ -5790,7 +5790,11 @@ identical. Keep at least one component per side for the final string comparison.
 			(concat_lookup_split_affixes sources comparison left right binary)))))
 
 (define concat_lookup_binary_names '("bin" "binary" "utf8" "utf8mb4" "utf8_bin" "utf8mb4_bin" "latin1_bin" "ascii_bin"))
-(define concat_lookup_binary_relations (map concat_lookup_binary_names (lambda (name) (collate name false))))
+/* Resolve candidate relations only for a matching CONCAT comparison. Loading
+this rule must not populate collation caches for unrelated queries. */
+(define concat_lookup_binary_relation? (lambda (less)
+	(reduce concat_lookup_binary_names (lambda (found name)
+		(or found (equal? less (collate name false)))) false)))
 
 
 /* Numeric text has a fixed ASCII representation. Unannotated text equality
@@ -5837,7 +5841,7 @@ predicates keep their original tree and do not enter CONCAT analysis. */
 		((symbol sql_compare) left right less operator)
 		(if (and (or (concat_lookup_call? left) (concat_lookup_call? right))
 			(has? '("equal?" "equal??") operator)
-			(has? concat_lookup_binary_relations less))
+			(concat_lookup_binary_relation? less))
 			(coalesceNil (concat_lookup_split sources (list less operator) left right true)
 				(concat_lookup_split sources (list less operator) right left true) term) term)
 		_ term)))
