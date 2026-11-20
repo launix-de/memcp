@@ -151,8 +151,8 @@ test_cases:
 - name: Normalization preserves complete preexisting referential action fields
   scm: |-
     (psql_foreign_definitions "memcp-tests" "pg_auto_actions"
-      '( ("foreign" nil ("left" "right") "pg_auto_parent" ("a" "b") "cascade" "set null")
-         ("foreign" "explicit_action" ("left") "pg_auto_single" ("id") "restrict" "cascade")) nil)
+      (list (list "foreign" nil '("left" "right") "pg_auto_parent" '("a" "b") "cascade" "set null")
+        (list "foreign" "explicit_action" '("left") "pg_auto_single" '("id") "restrict" "cascade")) nil)
   expect:
     result:
     - - foreign
@@ -178,10 +178,10 @@ test_cases:
       (define tx (owner "__memcp_tx"))
       (try (lambda () (begin
         (createtable "memcp-tests" "pg_auto_pending_names"
-          '(("column" "id" "int" () ("null" false))
-            ("unique" "pending_key" ("id") ("constraint_name" "pg_auto_pending_parent_id_fkey")))
+          (list (list "column" "id" "int" '() (list "null" false))
+            (list "unique" "pending_key" '("id") '("constraint_name" "pg_auto_pending_parent_id_fkey")))
           '() false tx)
-        (define definitions '(("foreign" nil ("parent_id") "pg_auto_single" ("id"))))
+        (define definitions (list (list "foreign" nil '("parent_id") "pg_auto_single" '("id"))))
         (define actual (list
           (cadr (car (psql_foreign_definitions "memcp-tests" "pg_auto_pending" definitions tx)))
           (cadr (car (psql_foreign_definitions "memcp-tests" "pg_auto_pending" definitions nil)))))
@@ -220,8 +220,8 @@ test_cases:
 - name: Persist generated foreign declarations
   action: restart
 - name: Restart preserves every generated and explicit composite name
-  scm: (map ((show (table "memcp-tests" false "pg_auto_child" false nil) "constraints" nil) "ForeignKeys") (lambda
-    (key) (key "Id")))
+  scm: (map (filter ((show (table "memcp-tests" false "pg_auto_child" false nil) "constraints" nil) "ForeignKeys")
+    (lambda (key) (equal? (key "Role") "referencing"))) (lambda (key) (key "Id")))
   expect:
     result:
     - pg_auto_child_a_b_fkey2

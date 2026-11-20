@@ -108,7 +108,7 @@ https://github.com/postgres/postgres/blob/REL_18_STABLE/src/backend/commands/ind
 	/* Preserve the native IF NOT EXISTS fast path, including its initialization
 	barrier, without preparing declarations for a relation already present. */
 	(createtable schema name
-		(if (and ifnotexists (table schema false name false tx)) definitions
+		(if (and ifnotexists (not (nil? (table schema false name false tx)))) definitions
 			(psql_foreign_definitions schema name definitions tx)) options ifnotexists tx)))
 
 (define psql_identifier_unquoted (parser (not
