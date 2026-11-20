@@ -4,6 +4,7 @@ metadata:
   isolated: true
   description: New native SQL tables persist complete empty column retirement history
 setup:
+- sql: DROP TABLE IF EXISTS column_history_fresh
 - sql: CREATE TABLE column_history_fresh(id INT PRIMARY KEY,value INT)
 - sql: INSERT INTO column_history_fresh VALUES(1,17)
 cleanup:
