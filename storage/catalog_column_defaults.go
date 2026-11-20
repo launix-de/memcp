@@ -548,7 +548,7 @@ func (changes *publicCatalogChanges) validateColumnDefaultsLocked() error {
 	}
 	latest := make(map[string]*catalogStoredColumnAmendment)
 	for _, entry := range *history {
-		if amendment := entry.column; amendment != nil && amendment.declaration == nil && amendment.propertyRemoval == nil {
+		if amendment := entry.column; amendment != nil && amendment.declaration == nil && amendment.propertyRemoval == nil && amendment.appendDeclaration == nil {
 			if changes.db.tables.Get(amendment.defaultDeclaration.Table) != amendment.table || amendment.table.RuntimeIdentity != amendment.defaultDeclaration.Identity {
 				return fmt.Errorf("default declaration endpoint generation was replaced")
 			}
