@@ -8,7 +8,8 @@ metadata:
   description: Inline table functions expand typed parameterized queries with native source visibility and no return-table initialization
 setup:
 - sql: DROP VIEW IF EXISTS inline_function_view
-- sql: DROP FUNCTION IF EXISTS inline_rows,inline_echo,inline_typed,inline_pending,inline_skipped
+- sql: DROP FUNCTION IF EXISTS inline_rows,inline_echo,inline_typed,inline_pending,inline_skipped,inline_private
+- sql: DROP TABLE IF EXISTS inline_private_inputs
 - sql: DROP TABLE IF EXISTS inline_function_inputs
 - scm: (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS inline_function_member" nil))
 - sql: CREATE TABLE inline_function_inputs(id INT PRIMARY KEY,amount INT NULL)
@@ -123,6 +124,38 @@ test_cases:
 - name: The replaced inline query returns its complete current value
   sql: SELECT value FROM dbo.inline_echo(7)
   expect: {rows: 1,data: [{value: 27}]}
+- name: Explicit module kind lookup distinguishes IF from TF
+  sql: SELECT CASE WHEN OBJECT_ID('dbo.inline_rows','IF') IS NOT NULL AND OBJECT_ID('dbo.inline_rows','TF') IS NULL THEN 1 ELSE 0 END AS correct_kind
+  expect: {rows: 1,data: [{correct_kind: 1}]}
+- name: The inline property consumes the actual current module classification
+  sql: SELECT OBJECTPROPERTY(OBJECT_ID('dbo.inline_rows'),'IsInlineFunction') AS is_inline
+  expect: {rows: 1,data: [{is_inline: 1}]}
+- name: The table function property includes the IF module kind
+  sql: SELECT OBJECTPROPERTY(OBJECT_ID('dbo.inline_rows'),'IsTableFunction') AS is_table
+  expect: {rows: 1,data: [{is_table: 1}]}
+- name: A pending base relation binds only in the consuming original transaction
+  tds:
+    statements:
+    - {connection: owner,sql: 'CREATE FUNCTION dbo.inline_private(@minimum INT) RETURNS TABLE AS RETURN (WITH chosen AS (SELECT id,amount FROM inline_private_inputs WHERE id>=@minimum) SELECT id,amount FROM chosen)'}
+    - {connection: owner,sql: BEGIN TRANSACTION}
+    - {connection: owner,sql: 'CREATE TABLE inline_private_inputs(id INT PRIMARY KEY,amount INT NULL)'}
+    - {connection: owner,sql: 'INSERT inline_private_inputs VALUES(1,17),(2,NULL)'}
+    - connection: owner
+      sql: SELECT id,amount FROM dbo.inline_private(1) ORDER BY id
+      expect: {rows: 2,data: [{id: 1,amount: 17},{id: 2,amount: null}]}
+    - connection: observer
+      sql: SELECT CASE WHEN OBJECT_ID('dbo.inline_private','IF') IS NOT NULL THEN 1 ELSE 0 END AS module_present
+      expect: {rows: 1,data: [{module_present: 1}]}
+    - connection: observer
+      sql: SELECT OBJECT_ID('dbo.inline_private_inputs','U') AS table_id
+      expect: {rows: 1,data: [{table_id: null}]}
+    - {connection: owner,sql: ROLLBACK TRANSACTION}
+    - connection: owner
+      sql: SELECT CASE WHEN OBJECT_ID('dbo.inline_private','IF') IS NOT NULL THEN 1 ELSE 0 END AS module_present
+      expect: {rows: 1,data: [{module_present: 1}]}
+    - connection: owner
+      sql: SELECT OBJECT_ID('dbo.inline_private_inputs','U') AS table_id
+      expect: {rows: 1,data: [{table_id: null}]}
 - name: Committed inline declarations survive restart
   action: restart
 - name: Restored CTE and DEFAULT declarations retain exact row and wire contracts
@@ -134,5 +167,6 @@ test_cases:
 cleanup:
 - scm: (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS inline_function_member" nil))
 - sql: DROP VIEW IF EXISTS inline_function_view
-- sql: DROP FUNCTION IF EXISTS inline_rows,inline_echo,inline_typed,inline_pending,inline_skipped
+- sql: DROP FUNCTION IF EXISTS inline_rows,inline_echo,inline_typed,inline_pending,inline_skipped,inline_private
+- sql: DROP TABLE IF EXISTS inline_private_inputs
 - sql: DROP TABLE IF EXISTS inline_function_inputs
