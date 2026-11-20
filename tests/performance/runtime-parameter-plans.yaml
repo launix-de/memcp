@@ -38,7 +38,7 @@ test_cases:
       (define verified (reduce (produceN 64) (lambda (count index) (begin
         (define answer (newsession))
         (sql_execute_formula session nil
-          (cached_parse cache (list parse_sql) "memcp-tests" query nil "root" session true)
+          (cached_parse cache "parameter-plan-runtime" (list parse_sql) "memcp-tests" query nil "root" session true nil)
           (lambda (row) (begin
             (if (answer "seen") (error "ordered query returned more than one row") true)
             (answer "seen" true)

@@ -121,7 +121,7 @@ test_cases:
         (session "needle" (car input)) (session "take" (cadr input)) (session "skip" (nth input 2))
         (define answer (newsession)) (answer "rows" '())
         (sql_execute_formula session nil
-          (cached_parse cache (list parse_sql) "memcp-tests" query nil "root" session false nil)
+          (cached_parse cache "parameter-values-window" (list parse_sql) "memcp-tests" query nil "root" session false nil)
           (lambda (row) (answer "rows" (append (answer "rows") row))) (lambda args true))
         (answer "rows")))))
   expect:
