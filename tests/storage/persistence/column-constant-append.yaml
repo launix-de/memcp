@@ -51,9 +51,15 @@ test_cases:
       sql: SELECT COUNT(*) AS n FROM sys.columns WHERE object_id=OBJECT_ID(N'constant_append_rows') AND name=N'amount'
       expect: {rows: 1,data: [{n: 0}]}
     - connection: owner
+      sql: SELECT COUNT(*) AS n,SUM(value) AS total FROM constant_append_rows WHERE amount=0
+      expect: {rows: 1,data: [{n: 4,total: 122}]}
+    - connection: owner
       sql: UPDATE constant_append_rows SET amount=7 WHERE id=2
     - connection: owner
       sql: INSERT constant_append_rows(id,value) VALUES(4,44)
+    - connection: owner
+      sql: SELECT amount,COUNT(*) AS n FROM constant_append_rows GROUP BY amount ORDER BY amount
+      expect: {rows: 2,data: [{amount: 0,n: 4},{amount: 7,n: 1}]}
     - connection: owner
       sql: COMMIT TRANSACTION
     - connection: observer
