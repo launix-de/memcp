@@ -398,7 +398,7 @@ func (s *StorageIndex) buildGetters(tx *TxContext, storage []colGetter) []colGet
 					mapColReaders[j] = ColumnReaderFunc(func(uint32) scm.Scmer { return scm.NewNil() })
 					continue
 				}
-				cs := s.t.getColumnStorageRLocked(mc)
+				cs := s.t.getColumnStorageRLocked(mc, tx)
 				mapSources[j] = cs
 				deltaSlots[j] = s.deltaReaderSlot(mc, cs)
 				mapColReaders[j] = newCachedColumnReaderTx(cs, tx, true, ReadAuto|readOperatorOwned)
@@ -407,7 +407,7 @@ func (s *StorageIndex) buildGetters(tx *TxContext, storage []colGetter) []colGet
 			fn := scm.PrepareSerialProc(mapFn)
 			getters[i] = colGetter{mapSources: mapSources, mapCols: mapColReaders, mapFn: &fn, mapArgs: make([]scm.Scmer, len(mapColReaders)), deltaSlots: deltaSlots}
 		} else {
-			cs := s.t.getColumnStorageRLocked(col)
+			cs := s.t.getColumnStorageRLocked(col, tx)
 			hints := ReadAuto
 			if !s.columnIsSorted(i) {
 				hints = ReadCompressed
@@ -421,13 +421,13 @@ func (s *StorageIndex) buildGetters(tx *TxContext, storage []colGetter) []colGet
 
 // computedRevisionsRLocked snapshots the logical generations of computed
 // columns used as index keys. The caller already owns the shard read lock.
-func (s *StorageIndex) computedRevisionsRLocked() []computedRevision {
+func (s *StorageIndex) computedRevisionsRLocked(tx *TxContext) []computedRevision {
 	result := make([]computedRevision, 0)
 	add := func(col string) {
 		if isScanPseudoColName(col) {
 			return
 		}
-		proxy, ok := s.t.getColumnStorageRLocked(col).(*StorageComputeProxy)
+		proxy, ok := s.t.getColumnStorageRLocked(col, tx).(*StorageComputeProxy)
 		if !ok {
 			return
 		}
@@ -840,6 +840,18 @@ func effectiveBoundaryInclusiveness(cols scanAccess, indexBounds *scanIndexBound
 }
 
 func (t *storageShard) iterateIndexEx(tx *TxContext, cols scanAccess, maxInsertIndex int, buf []uint32, usageWeight float64, forceBuild bool, exactMain *bool, options *indexIterationOptions, candidateSpan *int64, selected func(*StorageIndex, bool), callback func([]uint32) bool) {
+	privateInput := false
+	if columns := tx.pendingNullColumns(t.t); len(columns) != 0 {
+		for i := 0; i < cols.len(); i++ {
+			_, direct := columns[cols.boundaryColumn(i)]
+			privateInput = privateInput || direct
+			inputs, _ := cols.boundaryMap(i)
+			for _, input := range inputs {
+				_, used := columns[input]
+				privateInput = privateInput || used
+			}
+		}
+	}
 	indexBounds := newScanIndexBounds(cols)
 	if exactMain != nil {
 		*exactMain = false
@@ -875,78 +887,80 @@ func (t *storageShard) iterateIndexEx(tx *TxContext, cols scanAccess, maxInsertI
 
 	// check if we found conditions
 	if indexBounds.len() > 0 {
-		// find an index that has at least the columns in that order we're searching for
-		// if the index is inactive, use the other one
-	retry_indexscan:
-		// Concurrent read-side scans may both discover a missing index. The
-		// shard read lock permits that concurrency, so indexMutex owns publication
-		// of the slice header independently of shard mutation state.
-		t.indexMutex.Lock()
-		old_indexes := t.Indexes
-		oldIndexCount := len(old_indexes)
-		t.indexMutex.Unlock()
-		for _, index := range old_indexes {
-			// naive index search algo; TODO: improve
-			if len(index.Cols) >= indexCols {
-				for i := 0; i < indexCols; i++ {
-					if cols.boundaryColumn(i) != index.Cols[i] {
-						goto skip_index // column mismatch
-					}
-					var indexedMatcher IndexAnalyzer
-					if len(index.ColMatchers) > i {
-						indexedMatcher = index.ColMatchers[i]
-					}
-					if !indexMatcherCompatible(cols.boundaryAnalyzer(i), indexedMatcher) {
-						goto skip_index // matcher kind mismatch
-					}
-					if cols.boundaryAnalyzer(i).IsSorted() {
-						if !indexOrderMatchesScanAccess(t.t, index, i, cols) {
-							goto skip_index
+		if !privateInput {
+			// find an index that has at least the columns in that order we're searching for
+			// if the index is inactive, use the other one
+		retry_indexscan:
+			// Concurrent read-side scans may both discover a missing index. The
+			// shard read lock permits that concurrency, so indexMutex owns publication
+			// of the slice header independently of shard mutation state.
+			t.indexMutex.Lock()
+			old_indexes := t.Indexes
+			oldIndexCount := len(old_indexes)
+			t.indexMutex.Unlock()
+			for _, index := range old_indexes {
+				// naive index search algo; TODO: improve
+				if len(index.Cols) >= indexCols {
+					for i := 0; i < indexCols; i++ {
+						if cols.boundaryColumn(i) != index.Cols[i] {
+							goto skip_index // column mismatch
+						}
+						var indexedMatcher IndexAnalyzer
+						if len(index.ColMatchers) > i {
+							indexedMatcher = index.ColMatchers[i]
+						}
+						if !indexMatcherCompatible(cols.boundaryAnalyzer(i), indexedMatcher) {
+							goto skip_index // matcher kind mismatch
+						}
+						if cols.boundaryAnalyzer(i).IsSorted() {
+							if !indexOrderMatchesScanAccess(t.t, index, i, cols) {
+								goto skip_index
+							}
 						}
 					}
+					// this index fits!
+					index.iterate(tx, cols, indexBounds, lowerIncl, upperIncl, maxInsertIndex, buf, usageWeight, forceBuild, exactMain, options, candidateSpan, selected, callback)
+					return
 				}
-				// this index fits!
-				index.iterate(tx, cols, indexBounds, lowerIncl, upperIncl, maxInsertIndex, buf, usageWeight, forceBuild, exactMain, options, candidateSpan, selected, callback)
-				return
+			skip_index:
 			}
-		skip_index:
-		}
 
-		// otherwise: create new index (but first check for prefix coverage)
-		t.indexMutex.Lock()
-		if oldIndexCount != len(t.Indexes) {
-			t.indexMutex.Unlock()
-			goto retry_indexscan // someone has added a index in the meantime: recheck
-		}
-		// check if an existing longer index already covers these columns as a prefix
-		for _, index := range t.Indexes {
-			if len(index.Cols) >= indexCols {
-				covered := true
-				for i := 0; i < indexCols; i++ {
-					if cols.boundaryColumn(i) != index.Cols[i] {
-						covered = false
-						break
-					}
-					var indexedMatcher IndexAnalyzer
-					if len(index.ColMatchers) > i {
-						indexedMatcher = index.ColMatchers[i]
-					}
-					if !indexMatcherCompatible(cols.boundaryAnalyzer(i), indexedMatcher) {
-						covered = false
-						break
-					}
-					if cols.boundaryAnalyzer(i).IsSorted() {
-						if !indexOrderMatchesScanAccess(t.t, index, i, cols) {
+			// otherwise: create new index (but first check for prefix coverage)
+			t.indexMutex.Lock()
+			if oldIndexCount != len(t.Indexes) {
+				t.indexMutex.Unlock()
+				goto retry_indexscan // someone has added a index in the meantime: recheck
+			}
+			// check if an existing longer index already covers these columns as a prefix
+			for _, index := range t.Indexes {
+				if len(index.Cols) >= indexCols {
+					covered := true
+					for i := 0; i < indexCols; i++ {
+						if cols.boundaryColumn(i) != index.Cols[i] {
 							covered = false
 							break
 						}
+						var indexedMatcher IndexAnalyzer
+						if len(index.ColMatchers) > i {
+							indexedMatcher = index.ColMatchers[i]
+						}
+						if !indexMatcherCompatible(cols.boundaryAnalyzer(i), indexedMatcher) {
+							covered = false
+							break
+						}
+						if cols.boundaryAnalyzer(i).IsSorted() {
+							if !indexOrderMatchesScanAccess(t.t, index, i, cols) {
+								covered = false
+								break
+							}
+						}
 					}
-				}
-				if covered {
-					// longer index covers this query; use it instead of creating a shorter one
-					t.indexMutex.Unlock()
-					index.iterate(tx, cols, indexBounds, lowerIncl, upperIncl, maxInsertIndex, buf, usageWeight, forceBuild, exactMain, options, candidateSpan, selected, callback)
-					return
+					if covered {
+						// longer index covers this query; use it instead of creating a shorter one
+						t.indexMutex.Unlock()
+						index.iterate(tx, cols, indexBounds, lowerIncl, upperIncl, maxInsertIndex, buf, usageWeight, forceBuild, exactMain, options, candidateSpan, selected, callback)
+						return
+					}
 				}
 			}
 		}
@@ -977,6 +991,13 @@ func (t *storageShard) iterateIndexEx(tx *TxContext, cols scanAccess, maxInsertI
 				index.Native = false
 				break
 			}
+		}
+		if privateInput {
+			// The existing inactive-index matcher performs the native full scan and
+			// reports unsorted input to the existing ordered consumer. It cannot build,
+			// register, or retain a private declaration in a public shard/cache owner.
+			index.iterate(tx, cols, indexBounds, lowerIncl, upperIncl, maxInsertIndex, buf, 0, false, exactMain, options, candidateSpan, selected, callback)
+			return
 		}
 		t.Indexes = append(t.Indexes, index)
 		t.indexMutex.Unlock()
@@ -1334,7 +1355,7 @@ func (s *StorageIndex) buildIndex(cols []colGetter, tx *TxContext) {
 			state.collationKeyReverse[colIdx] = reverse
 		}
 	}
-	startRevisions := s.computedRevisionsRLocked()
+	startRevisions := s.computedRevisionsRLocked(tx)
 	state.directDelta = len(startRevisions) == 0
 	for _, col := range cols {
 		state.directDelta = state.directDelta && col.mapFn == nil
@@ -1634,7 +1655,7 @@ func (s *StorageIndex) buildIndex(cols []colGetter, tx *TxContext) {
 		state.deltaBtree.ReplaceOrInsert(pair)
 	}
 
-	endRevisions := s.computedRevisionsRLocked()
+	endRevisions := s.computedRevisionsRLocked(tx)
 	state.computedRevisions = endRevisions
 	state.active = sameComputedRevisions(startRevisions, endRevisions)
 	s.baseState = state
@@ -1948,7 +1969,7 @@ func (s *StorageIndex) bindRowMatchers(tx *TxContext, bounds scanAccess, indexBo
 			if alignedWithIndex && colIdx < len(cols) {
 				reader = cols[colIdx].raw
 			} else if _, mapFn := bounds.boundaryMap(colIdx); !isScanPseudoColName(column) && mapFn.IsNil() {
-				reader = newCachedColumnReaderTx(s.t.getColumnStorageRLocked(column), tx, true, ReadCompressed)
+				reader = newCachedColumnReaderTx(s.t.getColumnStorageRLocked(column, tx), tx, true, ReadCompressed)
 			}
 			hook = analyzer.Deploy(IndexDeployContext{
 				MainCount: s.t.main_count,
@@ -2091,7 +2112,7 @@ func (s *StorageIndex) iterate(tx *TxContext, bounds scanAccess, indexBoundsValu
 		getterScratch.indexBounds = scanIndexBounds{}
 		indexGetterScratchPool.Put(getterScratch)
 	}()
-	currentRevisions := s.computedRevisionsRLocked()
+	currentRevisions := s.computedRevisionsRLocked(tx)
 	s.mu.Lock()
 	state := s.baseState
 	if state != nil && state.active && !sameComputedRevisions(state.computedRevisions, currentRevisions) {

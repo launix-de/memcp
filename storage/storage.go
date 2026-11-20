@@ -2679,6 +2679,16 @@ func Init(en scm.Env) {
 					temporary = true
 				}
 			}
+			var queryTx *TxContext
+			if len(a) > 7 {
+				queryTx = scmerToTxContext(a[7])
+			}
+			if !temporary && queryTx != nil && queryTx.transactionState != nil && !queryTx.autoCommit && !queryTx.ownsPendingTable(t) && !t.Ephemeral && !t.ScopedSchema {
+				if len(orcSortCols) != 0 || len(a) > 6 && !a[6].IsNil() {
+					panic("transactional append does not admit a computation")
+				}
+				return scm.NewBool(queryTx.appendPublicColumn(t, colname, typename, dimensions, typeparams))
+			}
 			var schemaAccess WriteAccess
 			if !temporary {
 				t, schemaAccess = t.schemaWrite()
@@ -2686,10 +2696,6 @@ func Init(en scm.Env) {
 				defer t.admitNativeMaintenance()()
 			}
 
-			var queryTx *TxContext
-			if len(a) > 7 {
-				queryTx = scmerToTxContext(a[7])
-			}
 			// A staged removal owns ddlMu until its decision. Reject that
 			// caller's stale handle before attempting to borrow its own lock.
 			t.requireCatalogDataVisibility(queryTx)
@@ -2761,7 +2767,7 @@ func Init(en scm.Env) {
 					value.Optional = true
 					return value
 				}(),
-				{Kind: "any", Label: "queryTx", Optional: true, Description: "owning statement which retains a temporary column through query completion"},
+				{Kind: "any", Label: "queryTx", Optional: true, Description: "actual native execution context; explicit public ADD stages a fresh nullable declaration, temporary preparation retains its existing query lifetime"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},

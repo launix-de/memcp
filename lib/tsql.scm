@@ -605,7 +605,7 @@ Restore only those exact data encodings before applying the pure recipe checks. 
 			(list column_name type dimensions (tsql_publish_alias_attributes type attributes))))))
 		(reduce published_columns (lambda (_ column) (match column '(column_name type dimensions attributes)
 			(if (sql_create_column (table database false name false tx) column_name type dimensions
-				(merge (sql_add_column_attributes attributes) '("name_ignorecase" true))) true
+				(merge (sql_add_column_attributes attributes) '("name_ignorecase" true)) tx) true
 				(error "column already exists: " column_name)))) true))))
 	(if (find columns (lambda (column) (has_assoc? (nth column 4) "__tsql_alias_id")))
 		(tsql_type_ddl database tx session publish) (publish)))))

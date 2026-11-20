@@ -221,6 +221,7 @@ func (changes *publicCatalogChanges) refreshMemoryLocked() {
 	views := changes.views.Load()
 	directories += allocatedMap(changes.viewsHighWater, views != nil && views.tables != nil)
 	directories += allocatedMap(changes.viewsHighWater, views != nil && views.keys != nil)
+	directories += allocatedMap(changes.viewsHighWater, views != nil && views.nullColumns != nil)
 	directories += allocatedMap(changes.columnWritersHighWater, views != nil && views.columnWriters != nil)
 	directories += allocatedMap(changes.checkedWritersHighWater, views != nil && views.checkedWriters != nil)
 	directories += allocatedMap(changes.blockedWritersHighWater, views != nil && views.blockedWriters != nil)

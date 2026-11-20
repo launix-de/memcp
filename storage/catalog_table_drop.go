@@ -123,6 +123,9 @@ func (tx *TxContext) dropCatalogTable(db *database, name string, ifexists bool) 
 		}
 		panic("Table " + db.Name + "." + name + " does not exist")
 	}
+	if len(tx.publicColumnAppends()) != 0 {
+		panic("nullable append cannot share a table retirement decision")
+	}
 	requireTableMaintenance(db.Name, name, maintenanceDrop)
 	if t.Ephemeral || t.ScopedSchema || tx.ownsPendingTable(t) || tx.catalogIntents.Load() != nil ||
 		tx.coordinator != nil || sharedClusterDatabase(db.Name) || activeReplication(db) != nil {

@@ -108,6 +108,7 @@ type publicCatalogViews struct {
 	blockedWriters map[*table]struct{}
 	tables         map[*table]*tableShowColumnsSnapshot
 	columnWriters  map[*table]struct{}
+	nullColumns    map[*table]map[string]struct{}
 	dropped        map[*table]struct{}
 }
 
@@ -676,6 +677,9 @@ func (tx *TxContext) validatePublicDeclarations(db *database) error {
 	if err := changes.validateColumnDefaultsLocked(); err != nil {
 		return err
 	}
+	if err := changes.validateColumnAppendsLocked(); err != nil {
+		return err
+	}
 	if err := changes.validateColumnDeclarationsLocked(); err != nil {
 		return err
 	}
@@ -801,7 +805,7 @@ func appendConstraintMetadata(t *table, base *tableShowColumnsSnapshot, addition
 	return &result, bytes
 }
 
-func (db *database) preparePublicConstraintPublication(checks []catalogCheckDeclaration, defaults []catalogColumnDefaultDeclaration, columns []catalogColumnDeclaration, properties []catalogColumnPropertyRemoval, drops []catalogCheckDeclaration, nativeDeclarations []catalogNativeDeclaration, version uint64, programs map[string][]foreignKeyTrigger, changes *publicCatalogChanges) *publicForeignPublication {
+func (db *database) preparePublicConstraintPublication(checks []catalogCheckDeclaration, defaults []catalogColumnDefaultDeclaration, columns []catalogColumnDeclaration, appends []catalogColumnAppend, properties []catalogColumnPropertyRemoval, drops []catalogCheckDeclaration, nativeDeclarations []catalogNativeDeclaration, version uint64, programs map[string][]foreignKeyTrigger, changes *publicCatalogChanges) *publicForeignPublication {
 	var declarations, foreignDrops []catalogForeignDeclaration
 	var keyProjection map[*table][]uniqueKey
 	if len(nativeDeclarations) > 0 {
@@ -923,6 +927,14 @@ func (db *database) preparePublicConstraintPublication(checks []catalogCheckDecl
 	}
 	for _, declaration := range properties {
 		t, _ := validateCatalogColumnPropertyRemoval(db, declaration, false)
+		if endpoints[t] == nil {
+			endpoint := &publicForeignEndpoint{table: t, checks: append([]*checkDeclaration(nil), t.Checks...), foreign: append([]foreignKey(nil), t.Foreign...), baselineWrapperBytes: changes.baselines[t].wrapperBytes}
+			endpoints[t] = endpoint
+			publication.endpoints = append(publication.endpoints, endpoint)
+		}
+	}
+	for _, d := range appends {
+		t := db.tables.Get(d.Table)
 		if endpoints[t] == nil {
 			endpoint := &publicForeignEndpoint{table: t, checks: append([]*checkDeclaration(nil), t.Checks...), foreign: append([]foreignKey(nil), t.Foreign...), baselineWrapperBytes: changes.baselines[t].wrapperBytes}
 			endpoints[t] = endpoint

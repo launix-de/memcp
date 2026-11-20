@@ -1020,7 +1020,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 					(parser empty '((quote list)))
 				))
 				(define typeparams psql_column_attributes)
-			) (lambda (id) '((quote createcolumn) '('table schema false id false (quote tx)) col type dimensions (cons 'list (sql_add_column_attributes typeparams)))))
+			) (lambda (id) '((quote createcolumn) '('table schema false id false (quote tx)) col type dimensions (cons 'list (sql_add_column_attributes typeparams)) nil nil (quote tx))))
 			(parser '((atom "OWNER" true) (atom "TO" true) (define owner psql_identifier)) (lambda (id) true))
 			(parser '((atom "DROP" true) (atom "CONSTRAINT" true) (define cname psql_identifier)) (lambda (id) true))
 			(parser '((atom "DROP" true) (? (atom "COLUMN" true)) (define col psql_identifier)) (lambda (id) '((quote altertable) '('table schema false id false (quote tx)) "drop" col)))

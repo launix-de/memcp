@@ -2271,7 +2271,7 @@ type tableColumnName struct {
 
 func (t *table) buildShowColumnsSnapshot(rowEstimate uint, columnNames *tableColumnNamesSnapshot) *tableShowColumnsSnapshot {
 	if columnNames == nil {
-		columnNames = t.buildColumnNamesSnapshot() // unpublished constructor or schema mutation owner
+		columnNames = t.buildColumnNamesSnapshot(t.Columns) // unpublished constructor or schema mutation owner
 	}
 	columns := columnNames.declarations
 	// Costing may price native rows without inspecting or invoking opaque
@@ -2415,17 +2415,17 @@ func columnDescriptionStatistic(name string) bool {
 	}
 }
 
-func (t *table) buildColumnNamesSnapshot() *tableColumnNamesSnapshot {
+func (t *table) buildColumnNamesSnapshot(columns []*column) *tableColumnNamesSnapshot {
 	if t.publishedName.Load() == nil {
 		// The first column-directory publication belongs to the unpublished
 		// constructor/load. Later publications retain RENAME's immutable name.
 		name := t.Name
 		t.publishedName.CompareAndSwap(nil, &name)
 	}
-	exact := make(map[string]tableColumnName, len(t.Columns))
-	folded := make(map[string]tableColumnName, len(t.Columns))
+	exact := make(map[string]tableColumnName, len(columns))
+	folded := make(map[string]tableColumnName, len(columns))
 	hasDeclaredComputations := false
-	for i, c := range t.Columns {
+	for i, c := range columns {
 		computed := c.ComputorDefinition != nil
 		hasDeclaredComputations = hasDeclaredComputations || computed
 		entry := tableColumnName{name: c.Name, ordinal: i, computed: computed}
@@ -2438,12 +2438,12 @@ func (t *table) buildColumnNamesSnapshot() *tableColumnNamesSnapshot {
 			folded[foldedName] = entry
 		}
 	}
-	return &tableColumnNamesSnapshot{declarations: append([]*column(nil), t.Columns...), exact: exact, folded: folded, hasDeclaredComputations: hasDeclaredComputations}
+	return &tableColumnNamesSnapshot{declarations: append([]*column(nil), columns...), exact: exact, folded: folded, hasDeclaredComputations: hasDeclaredComputations}
 }
 
 func (t *table) publishColumnNamesSnapshot() *tableColumnNamesSnapshot {
 
-	snapshot := t.buildColumnNamesSnapshot()
+	snapshot := t.buildColumnNamesSnapshot(t.Columns)
 	t.columnNamesSnapshot.Store(snapshot)
 	return snapshot
 }
@@ -3377,23 +3377,21 @@ func (t *table) initializeColumnRowsLocked(c *column, fillExisting, unique, null
 	return release
 }
 
-// createColumnLocked mutates table metadata while the database schemalock is
-// held. It does not persist schema.json yet; callers must follow up with a
-// single saveLockedAndUnlock once the whole DDL mutation is complete.
-func (t *table) createColumnLocked(name string, typ string, typdimensions []int, extrainfo []scm.Scmer, initializeExisting bool) (*column, bool) {
-	ignoreCase := false
-	for i := 0; i+1 < len(extrainfo); i += 2 {
-		if scm.String(extrainfo[i]) == "name_ignorecase" {
-			ignoreCase = scm.ToBool(extrainfo[i+1])
-		}
-	}
-	for _, c := range t.Columns {
-		if c.Name == name || (ignoreCase && strings.EqualFold(c.Name, name)) {
-			return nil, false // column already exists
-		}
-	}
+type decodedColumnDefinition struct {
+	column           *column
+	unique           []uniqueKey
+	fillExisting     bool
+	hasDefault       bool
+	nullsNotDistinct bool
+}
 
-	var c column
+// Decode declaration data before either immediate or original-T publication.
+// This owner performs no table, shard, catalog or row mutation.
+func decodeColumnDefinition(name, typ string, typdimensions []int, extrainfo []scm.Scmer) decodedColumnDefinition {
+	if len(extrainfo)%2 != 0 {
+		panic("column attributes must be key/value pairs")
+	}
+	c := new(column)
 	var uniqueKeys []uniqueKey
 	constraintName := ""
 	nullsNotDistinct := false
@@ -3464,6 +3462,35 @@ func (t *table) createColumnLocked(name string, typ string, typdimensions []int,
 		uniqueKeys[i].NullsNotDistinct = nullsNotDistinct
 		uniqueKeys[i].ConstraintName = constraintName
 	}
+	if strings.EqualFold(c.Typ, "ENUM") && !c.AllowNull && !hasDefault && len(c.EnumValues) > 0 {
+		c.Default = scm.NewString(c.EnumValues[0])
+	}
+	if c.DefaultDeferred && (!c.Default.IsNil() || c.DefaultExpression == "") {
+		panic("deferred default requires an opaque source and no constant value")
+	}
+	c.UpdateSanitizer()
+	return decodedColumnDefinition{c, uniqueKeys, fillExisting, hasDefault, nullsNotDistinct}
+}
+
+// createColumnLocked mutates table metadata while the database schemalock is
+// held. It does not persist schema.json yet; callers must follow up with a
+// single saveLockedAndUnlock once the whole DDL mutation is complete.
+func (t *table) createColumnLocked(name string, typ string, typdimensions []int, extrainfo []scm.Scmer, initializeExisting bool) (*column, bool) {
+	ignoreCase := false
+	for i := 0; i+1 < len(extrainfo); i += 2 {
+		if scm.String(extrainfo[i]) == "name_ignorecase" {
+			ignoreCase = scm.ToBool(extrainfo[i+1])
+		}
+	}
+	for _, c := range t.Columns {
+		if c.Name == name || (ignoreCase && strings.EqualFold(c.Name, name)) {
+			return nil, false // column already exists
+		}
+	}
+
+	definition := decodeColumnDefinition(name, typ, typdimensions, extrainfo)
+	c, uniqueKeys, fillExisting := definition.column, definition.unique, definition.fillExisting
+	nullsNotDistinct := definition.nullsNotDistinct
 	if len(uniqueKeys) != 0 {
 		validateUniqueConstraintNames(append(append([]uniqueKey(nil), t.Unique...), uniqueKeys...))
 	}
@@ -3481,13 +3508,6 @@ func (t *table) createColumnLocked(name string, typ string, typdimensions []int,
 			panic("declaration name already exists: " + c.DefaultName)
 		}
 	}
-	if strings.EqualFold(c.Typ, "ENUM") && !c.AllowNull && !hasDefault && len(c.EnumValues) > 0 {
-		c.Default = scm.NewString(c.EnumValues[0])
-	}
-	if c.DefaultDeferred && (!c.Default.IsNil() || c.DefaultExpression == "") {
-		panic("deferred default requires an opaque source and no constant value")
-	}
-	c.UpdateSanitizer()
 	if !initializeExisting && !c.IsTemp && c.hasDefault() && !c.DefaultDeferred {
 		declared := c.defaultValue()
 		if c.sanitizer != nil {
@@ -3497,7 +3517,7 @@ func (t *table) createColumnLocked(name string, typ string, typdimensions []int,
 			c.Default = declared
 		}
 	}
-	cp := &c
+	cp := c
 	if initializeExisting && !c.IsTemp && !c.AutoIncrement {
 		release := t.initializeColumnRowsLocked(cp, fillExisting, len(uniqueKeys) != 0, nullsNotDistinct)
 		defer release()
@@ -4290,7 +4310,7 @@ func (t *table) insertLocal(columns []string, values [][]scm.Scmer, onCollisionC
 	// rechecks only if DDL replaces it while this INSERT is in flight.
 	validatedSchema := t.columnNamesForTx(currentTx)
 	if validatedSchema == nil {
-		validatedSchema = t.buildColumnNamesSnapshot()
+		validatedSchema = t.buildColumnNamesSnapshot(t.Columns)
 	}
 
 	t.beginContributionMutation()

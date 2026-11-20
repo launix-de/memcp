@@ -608,7 +608,7 @@ func (p *StorageComputeProxy) getValueRLocked(_ *TxContext, idx uint32) scm.Scme
 
 	values := make([]scm.Scmer, len(p.inputCols))
 	for i, col := range p.inputCols {
-		cs := p.shard.getColumnStorageRLocked(col)
+		cs := p.shard.getColumnStorageRLocked(col, nil)
 		if dependency, ok := cs.(*StorageComputeProxy); ok && !dependency.isOrdered {
 			values[i] = dependency.getValueRLocked(nil, idx)
 			continue
