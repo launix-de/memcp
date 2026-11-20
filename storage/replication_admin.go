@@ -86,28 +86,17 @@ func (r *replicationManager) reclaimDatabase(name string) bool {
 	if r.cluster == nil {
 		r.schemaShards(db, r.id, true)
 	}
-	for _, table := range db.tables.GetAll() {
-		if table.isEphemeralQueryTable() {
-			continue
-		}
-		for _, shard := range table.ActiveShards() {
-			if shard != nil {
-				r.obtain(*r.shardCell(shard).resource.Load(), mosi.M, "", nil)
-			}
-		}
+	shards := db.replicationShards()
+	for _, shard := range shards {
+		r.obtain(*r.shardCell(shard).resource.Load(), mosi.M, "", nil)
 	}
 	ownsM := func(cell *replicaCell) bool {
 		state := cell.ownstate.Snapshot()
 		return state.Phase() == mosi.M || state.Phase() == mosi.IS && state.Backend() == mosi.M
 	}
-	for _, table := range db.tables.GetAll() {
-		if table.isEphemeralQueryTable() {
-			continue
-		}
-		for _, shard := range table.ActiveShards() {
-			if shard != nil && !ownsM(r.shardCell(shard)) {
-				return false
-			}
+	for _, shard := range shards {
+		if !ownsM(r.shardCell(shard)) {
+			return false
 		}
 	}
 	return ownsM(schema)
