@@ -1,0 +1,138 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# https://learn.microsoft.com/sql/t-sql/statements/create-function-transact-sql
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Inline table functions expand typed parameterized queries with native source visibility and no return-table initialization
+setup:
+- sql: DROP VIEW IF EXISTS inline_function_view
+- sql: DROP FUNCTION IF EXISTS inline_rows,inline_echo,inline_typed,inline_pending,inline_skipped
+- sql: DROP TABLE IF EXISTS inline_function_inputs
+- scm: (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS inline_function_member" nil))
+- sql: CREATE TABLE inline_function_inputs(id INT PRIMARY KEY,amount INT NULL)
+- sql: INSERT inline_function_inputs VALUES(1,10),(2,NULL),(3,-3),(4,10)
+- sql: |
+    CREATE FUNCTION dbo.inline_rows(@minimum INT=1) RETURNS TABLE AS RETURN (
+      WITH selected_rows AS (
+        SELECT id,amount FROM inline_function_inputs WHERE id>=@minimum
+      ) SELECT id,amount FROM selected_rows
+    );
+- sql: |
+    CREATE FUNCTION dbo.inline_echo(@value INT) RETURNS TABLE AS RETURN
+      SELECT @value AS value FROM inline_function_inputs b WHERE b.id=1;
+- sql: |
+    CREATE FUNCTION dbo.inline_typed(@value NVARCHAR(12)=N'kept') RETURNS TABLE AS RETURN (
+      SELECT @value AS label
+    );
+- sql: CREATE VIEW inline_function_view AS SELECT id,amount FROM dbo.inline_rows(DEFAULT)
+- scm: (eval (parse_sql "memcp-tests" "CREATE USER inline_function_member IDENTIFIED BY 'pw'" nil))
+- scm: (eval (parse_sql "memcp-tests" "GRANT SELECT ON `memcp-tests`.* TO inline_function_member" nil))
+test_cases:
+- name: Parenthesized CTE return exposes every original row including NULL and duplicate amounts
+  sql: SELECT id,amount FROM dbo.inline_rows(DEFAULT) ORDER BY id
+  expect: {rows: 4,data: [{id: 1,amount: 10},{id: 2,amount: null},{id: 3,amount: -3},{id: 4,amount: 10}]}
+- name: Independent arguments reuse the query with their current filter values
+  sql: SELECT id,amount FROM dbo.inline_rows(3) ORDER BY id
+  expect: {rows: 2,data: [{id: 3,amount: -3},{id: 4,amount: 10}]}
+- name: NULL argument retains SQL predicate semantics and aggregate empty identities
+  sql: SELECT COUNT(*) AS rows_found,SUM(amount) AS total FROM dbo.inline_rows(NULL)
+  expect: {rows: 1,data: [{rows_found: 0,total: null}]}
+- name: Expanded output retains the complete multiset for aggregate inputs
+  sql: SELECT COUNT(*) AS rows_found,COUNT(amount) AS nonnull_count,COUNT(DISTINCT amount) AS distinct_count,SUM(amount) AS total FROM dbo.inline_rows(1)
+  expect: {rows: 1,data: [{rows_found: 4,nonnull_count: 3,distinct_count: 2,total: 17}]}
+- name: CROSS APPLY keeps caller columns outside a colliding function-local alias
+  sql: SELECT b.id,r.value FROM inline_function_inputs b CROSS APPLY dbo.inline_echo(b.id) r ORDER BY b.id
+  expect: {rows: 4,data: [{id: 1,value: 1},{id: 2,value: 2},{id: 3,value: 3},{id: 4,value: 4}]}
+- name: A compound caller argument remains in its original APPLY scope
+  sql: SELECT b.id,r.value FROM inline_function_inputs b CROSS APPLY dbo.inline_echo(b.amount+2) r ORDER BY b.id
+  expect: {rows: 4,data: [{id: 1,value: 12},{id: 2,value: null},{id: 3,value: -1},{id: 4,value: 12}]}
+- name: OUTER APPLY preserves an unmatched caller and exact matching rows
+  sql: SELECT b.id,r.id AS returned_id FROM inline_function_inputs b OUTER APPLY dbo.inline_rows(b.id+3) r ORDER BY b.id,r.id
+  expect: {rows: 4,data: [{id: 1,returned_id: 4},{id: 2,returned_id: null},{id: 3,returned_id: null},{id: 4,returned_id: null}]}
+- name: Explicit caller parameters keep their declared conversion and current values
+  sql: DECLARE @start INT=2; SELECT id,amount FROM dbo.inline_rows(@start) ORDER BY id
+  expect: {rows: 3,data: [{id: 2,amount: null},{id: 3,amount: -3},{id: 4,amount: 10}]}
+- name: Literal and DEFAULT text arguments preserve typed result metadata even when empty
+  tds:
+    statements:
+    - sql: SELECT label FROM dbo.inline_typed(DEFAULT)
+      expect: {rows: 1,data: [{label: kept}],column_types: [{name: label,type: NVARCHAR,length: 12}]}
+    - sql: SELECT label FROM dbo.inline_typed(N'A ') WHERE 1=0
+      expect: {rows: 0,data: [],column_types: [{name: label,type: NVARCHAR,length: 12}]}
+- name: Source reflection distinguishes inline functions from multistatement functions
+  sql: SELECT name,type,type_desc FROM sys.objects WHERE name='inline_rows'
+  expect: {rows: 1,data: [{name: inline_rows,type: IF,type_desc: SQL_INLINE_TABLE_VALUED_FUNCTION}]}
+- name: Object identity and function properties retain the IF classification
+  sql: SELECT CASE WHEN OBJECT_ID('dbo.inline_rows','IF') IS NOT NULL AND OBJECT_ID('dbo.inline_rows','TF') IS NULL THEN 1 ELSE 0 END AS correct_kind,OBJECTPROPERTY(OBJECT_ID('dbo.inline_rows'),'IsInlineFunction') AS is_inline,OBJECTPROPERTY(OBJECT_ID('dbo.inline_rows'),'IsTableFunction') AS is_table
+  expect: {rows: 1,data: [{correct_kind: 1,is_inline: 1,is_table: 1}]}
+- name: Database SELECT authority permits the ordinary inline source read
+  username: inline_function_member
+  password: pw
+  sql: SELECT id,amount FROM dbo.inline_rows(3) ORDER BY id
+  expect: {rows: 2,data: [{id: 3,amount: -3},{id: 4,amount: 10}]}
+- name: An owner invocation sees pending input rows and rollback preserves observer data
+  tds:
+    statements:
+    - {connection: owner,sql: BEGIN TRANSACTION}
+    - {connection: owner,sql: 'INSERT inline_function_inputs VALUES(5,7)'}
+    - connection: owner
+      sql: SELECT id,amount FROM dbo.inline_rows(4) ORDER BY id
+      expect: {rows: 2,data: [{id: 4,amount: 10},{id: 5,amount: 7}]}
+    - connection: observer
+      sql: SELECT id,amount FROM dbo.inline_rows(4) ORDER BY id
+      expect: {rows: 1,data: [{id: 4,amount: 10}]}
+    - {connection: owner,sql: ROLLBACK TRANSACTION}
+    - connection: observer
+      sql: SELECT id,amount FROM dbo.inline_rows(4) ORDER BY id
+      expect: {rows: 1,data: [{id: 4,amount: 10}]}
+- name: Pending module visibility belongs to the original catalog transaction
+  tds:
+    statements:
+    - {connection: owner,sql: BEGIN TRANSACTION}
+    - {connection: owner,sql: 'CREATE FUNCTION dbo.inline_pending(@value INT) RETURNS TABLE AS RETURN (SELECT @value AS value)'}
+    - connection: owner
+      sql: SELECT value FROM dbo.inline_pending(17)
+      expect: {rows: 1,data: [{value: 17}]}
+    - connection: observer
+      sql: SELECT OBJECT_ID('dbo.inline_pending','IF') AS module_id
+      expect: {rows: 1,data: [{module_id: null}]}
+    - {connection: owner,sql: ROLLBACK TRANSACTION}
+    - connection: observer
+      sql: SELECT OBJECT_ID('dbo.inline_pending','IF') AS module_id
+      expect: {rows: 1,data: [{module_id: null}]}
+- name: NOEXEC validates a returned query without creating the inline module
+  tds:
+    statements:
+    - {sql: SET NOEXEC ON}
+    - {sql: 'CREATE FUNCTION dbo.inline_skipped(@value INT) RETURNS TABLE AS RETURN (WITH selected_value AS (SELECT @value AS value) SELECT value FROM selected_value)'}
+    - {sql: SET NOEXEC OFF}
+    - sql: SELECT OBJECT_ID('dbo.inline_skipped','IF') AS module_id
+      expect: {rows: 1,data: [{module_id: null}]}
+- name: A stored view resolves the current inline declaration without executing a return-table initializer
+  sql: SELECT id,amount FROM inline_function_view WHERE id>=3 ORDER BY id
+  expect: {rows: 2,data: [{id: 3,amount: -3},{id: 4,amount: 10}]}
+- name: ALTER retains inline function kind and changes the real query source
+  sql: ALTER FUNCTION dbo.inline_echo(@value INT) RETURNS TABLE AS RETURN (SELECT @value+10 AS value)
+- name: A warm call binds the replacement query declaration
+  sql: SELECT value FROM dbo.inline_echo(7)
+  expect: {rows: 1,data: [{value: 17}]}
+- name: CREATE OR ALTER uses the same immutable inline source replacement owner
+  sql: CREATE OR ALTER FUNCTION dbo.inline_echo(@value INT) RETURNS TABLE AS RETURN SELECT @value+20 AS value
+- name: The replaced inline query returns its complete current value
+  sql: SELECT value FROM dbo.inline_echo(7)
+  expect: {rows: 1,data: [{value: 27}]}
+- name: Committed inline declarations survive restart
+  action: restart
+- name: Restored CTE and DEFAULT declarations retain exact row and wire contracts
+  sql: SELECT id,amount FROM dbo.inline_rows(DEFAULT) ORDER BY id
+  expect: {rows: 4,data: [{id: 1,amount: 10},{id: 2,amount: null},{id: 3,amount: -3},{id: 4,amount: 10}]}
+- name: The restored replacement retains its changed formula
+  sql: SELECT value FROM dbo.inline_echo(7)
+  expect: {rows: 1,data: [{value: 27}]}
+cleanup:
+- scm: (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS inline_function_member" nil))
+- sql: DROP VIEW IF EXISTS inline_function_view
+- sql: DROP FUNCTION IF EXISTS inline_rows,inline_echo,inline_typed,inline_pending,inline_skipped
+- sql: DROP TABLE IF EXISTS inline_function_inputs

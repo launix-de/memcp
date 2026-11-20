@@ -300,7 +300,7 @@ but neither that object nor its creation frame belongs in this cache. */
 (define tsql_scalar_function_reserved? (lambda (database name tx) (begin
 	(define definition (tsql_scalar_function_definition database name tx))
 	(if (nil? definition) false
-		(has? '("FN" "TF") (tsql_source_module_kind (definition "language")))))))
+		(has? '("FN" "TF" "IF") (tsql_source_module_kind (definition "language")))))))
 /* SQL kinds remain frontend declarations. The native replacement retains its
 own must-exist check, catalog reservation, source version and decision lifetime.
 Scalar and table-valued function kinds cannot replace one another.
@@ -336,7 +336,7 @@ object kind. Validate every declared target before issuing native deletions. */
 			(define definition (tsql_scalar_function_definition database name tx))
 			(if (nil? definition)
 				(if ignore nil (error "function does not exist: " name))
-				(has? '("FN" "TF") (tsql_source_module_kind (definition "language"))) definition
+				(has? '("FN" "TF" "IF") (tsql_source_module_kind (definition "language"))) definition
 				(error "object is not a scalar function: " name))))))
 		(reduce definitions (lambda (_result definition)
 			(if (nil? definition) false (dropprocedure database (definition "name") ignore tx))) false)

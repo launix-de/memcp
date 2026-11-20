@@ -185,6 +185,10 @@ No source snapshot/compiler or stored callable is instantiated here. */
 	'("alter-scalar-function" _name parameters return_type source) (begin
 		(tsql_effective_parameter_contract return_type)
 		(tsql_compile_module_body (session "schema") parameters source '() '() session tx))
+	'("create-inline-table-function" _name parameters source _replace)
+	(tsql_compile_module_body (session "schema") parameters source '() '() session tx)
+	'("alter-inline-table-function" _name parameters source)
+	(tsql_compile_module_body (session "schema") parameters source '() '() session tx)
 	'("create-table-function" _name parameters return_name columns source)
 	(tsql_compile_module_body (session "schema") parameters source (list (list return_name columns)) '() session tx)
 	'("alter-table-function" _name parameters return_name columns source)
