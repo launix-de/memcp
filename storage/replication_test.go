@@ -1533,6 +1533,31 @@ func TestReplicationRequestLearnsOnlyOwnerForwarding(t *testing.T) {
 	}
 }
 
+func TestReplicationRevokesReadsBeforeInvalidatingDependentCaches(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "replica-revocation-cache-order", 0)
+	r := replicaRecoveryFixture()
+	resource := tbl.ActiveShards()[0].replicationResource()
+	cell := r.declareShard(tbl.ActiveShards()[0], r.id, true)
+	cell.ownstate.Initialize(mosi.S)
+	generation := tbl.cacheGeneration.Load()
+	// Hold dependency traversal after its generation publication, allowing a
+	// reader to inspect the exact cache-invalidation/permission boundary.
+	tbl.mu.Lock()
+	done := make(chan struct{})
+	go func() { defer close(done); r.publishLocal(resource, mosi.IO) }()
+	defer func() { tbl.mu.Unlock(); <-done }()
+	deadline := time.Now().Add(time.Second)
+	for tbl.cacheGeneration.Load() == generation {
+		if time.Now().After(deadline) {
+			t.Fatal("cache invalidation did not reach its dependency traversal")
+		}
+		runtime.Gosched()
+	}
+	if cell.ownstate.Phase() != mosi.IO {
+		t.Fatal("cache invalidation still allowed reinitialization from revoked local payload")
+	}
+}
+
 func TestReplicationRequestResolvesRetainedCheckpointWithoutReversingCurrent(t *testing.T) {
 	r := replicaRecoveryFixture()
 	old := mosiResource{Database: "example", Table: "items", Shard: uuid.NewString()}

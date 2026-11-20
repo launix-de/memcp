@@ -284,7 +284,7 @@ func (r *replicationManager) validateForwards(source string, packet mosiPacket) 
 	}
 	for _, route := range packet.Forwards {
 		if !route.From.valid() || !route.To.valid() || route.From.Shard == "" || route.To.Shard == "" || route.From.Database != packet.Resource.Database || route.From.Table != packet.Resource.Table || route.To.Database != packet.Resource.Database || route.To.Table != packet.Resource.Table || route.To.Shard != packet.Content {
-			return fmt.Errorf("invalid transfer forwarding")
+			return fmt.Errorf("invalid transfer forwarding for %s table %s content %s: %v", packet.Resource.key(), packet.Resource.Table, packet.Content, route)
 		}
 	}
 	// Cluster references validate their pending flight/owner in installReference;

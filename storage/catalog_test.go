@@ -1067,6 +1067,50 @@ func TestCatalogCheckpointCannotReplaceReceivedGenerationDuringIO(t *testing.T) 
 	}
 }
 
+func TestCatalogCheckpointDoesNotPublishDuringNativeHandover(t *testing.T) {
+	tbl, engine := createDurabilityTestTable(t, "catalog-checkpoint-during-handover", 0)
+	db := tbl.schema
+	r := replicaRecoveryFixture()
+	r.schemaShards(db, r.id, true)
+	r.resourceCell(mosiResource{Database: db.Name}).ownstate.Initialize(mosi.M)
+	previous := replication.Swap(r)
+	defer replication.Store(previous)
+	rows := db.catalogRowsLocked()
+	for index, field := range catalogRelations[catalogColumns].columns() {
+		if field.key == "Name" {
+			rows[catalogColumns][0][index] = scm.NewString("checkpoint_definition")
+		}
+	}
+	db.schemalock.Lock()
+	db.editCatalogLocked(&rows, 1<<catalogColumns, nil)
+	live := db.catalog.live[catalogColumns]
+	cell := r.shardCell(live)
+	handover, err := cell.ownstate.BeginHandover(context.Background(), cell.drainWrites)
+	if err != nil {
+		db.schemalock.Unlock()
+		t.Fatal(err)
+	}
+	defer handover.Release()
+	db.commitSchemaLocked(true, db.schemalock.Unlock)
+	if cell.resolved().current.Load() != live {
+		t.Fatal("checkpoint changed the UUID/payload binding of an active native handover")
+	}
+	root := readCatalogRoot(engine.ReadSchema())
+	if root.Shards[catalogRelations[catalogColumns].name] == live.uuid.String() {
+		t.Fatal("fixture did not persist a distinct checkpoint generation")
+	}
+	transfer, err := r.captureResource(live.replicationResource(), live.uuid.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer transfer.release()
+	for _, route := range transfer.routes {
+		if route.To.Shard != transfer.content {
+			t.Fatal("checkpoint changed advertised UUID routes away from the bound handover content")
+		}
+	}
+}
+
 func TestCatalogScopedEditsPreserveUnrelatedDefinitions(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "catalog-scoped-edits", 0)
 	db := tbl.schema
