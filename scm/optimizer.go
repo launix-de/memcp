@@ -1784,15 +1784,105 @@ func canEliminateFromBegin(val Scmer) bool {
 	// we can safely eliminate it — the fold already executed the side effect.
 	// But if it was NOT foldable and still appears as a call, check the decl.
 	if slice, ok := scmerSlice(val); ok && len(slice) > 0 {
-		if d := DeclarationForValue(slice[0]); d != nil {
-			if d.Type == nil {
-				return false // no type info → conservative, keep
-			}
-			return !d.Type.HasSideEffects
-		}
-		return false // unknown function → conservative, keep
+		return declarationHasNoEffects(DeclarationForValue(slice[0]))
 	}
 	return true // constant value, safe to eliminate
+}
+
+func declarationHasNoEffects(d *Declaration) bool {
+	return d != nil && d.Type != nil && !d.Type.HasSideEffects
+}
+
+// Relocation needs stable evaluated operands in addition to the unused-result
+// effect contract. Resolve the actual lexical callable; a local name must not
+// borrow the declaration of a same-spelled global operator. Inspect arguments,
+// not quoted data, lambda bodies or any runtime procedure implementation.
+func canRelocateFromBegin(value Scmer, env *Env, ome *optimizerMetainfo, bindings map[Symbol]localBindingFacts) bool {
+	for {
+		stripped, ok := scmerStripSourceInfo(value)
+		if !ok {
+			break
+		}
+		value = stripped
+	}
+	if value.IsNthLocalVar() || value.IsSymbol() {
+		// Neither the frame metadata nor a lexical type descriptor proves that
+		// an intervening callback cannot change the value. Keep such reads at
+		// their definition until an actual immutable-binding proof is available.
+		return false
+	}
+	items, call := scmerSlice(value)
+	if !call || len(items) == 0 {
+		return true
+	}
+	callable := items[0]
+	if symbol, named := scmerSymbol(callable); named {
+		if _, local := bindings[symbol]; local {
+			return false
+		}
+		if _, local := ome.variableTypes[symbol]; local {
+			return false
+		}
+		if _, replaced := ome.variableReplacement[symbol]; replaced {
+			return false
+		}
+		if env == nil {
+			return false
+		}
+		owner := env.FindRead(symbol)
+		var bound bool
+		callable, bound = owner.Vars[symbol]
+		if !bound || callable.IsSymbol() {
+			return false
+		}
+	}
+	declaration := DeclarationForValue(callable)
+	if !declarationHasNoEffects(declaration) {
+		return false
+	}
+	if len(items)-1 < declaration.MinParams() || len(items)-1 > declaration.MaxParams() {
+		return false
+	}
+	if declaration.IsSpecialForm {
+		switch declaration.Name {
+		case "quote":
+			return true
+		case "lambda":
+			if len(items) > 3 {
+				slots := items[3]
+				for {
+					stripped, wrapped := scmerStripSourceInfo(slots)
+					if !wrapped {
+						break
+					}
+					slots = stripped
+				}
+				if !slots.IsInt() || slots.Int() < 0 {
+					return false
+				}
+			}
+			return true
+		case "if", "and", "or", "coalesce", "coalesceNil":
+			// Conservatively require every potentially evaluated branch to be stable.
+		default:
+			return false
+		}
+	}
+	if !declaration.IsFoldable() {
+		return false
+	}
+	for index, argument := range items[1:] {
+		parameter := declaration.Type.Parameter(index, len(items)-1)
+		if parameter != nil && strings.Contains(parameter.Kind, "func") {
+			// A pure native combinator can still invoke an effectful callback.
+			// Its argument's construction is not an effect proof for invocation.
+			return false
+		}
+		if !canRelocateFromBegin(argument, env, ome, bindings) {
+			return false
+		}
+	}
+	return true
 }
 
 type localBindingFacts struct {
@@ -2478,6 +2568,12 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 			// keep all bindings explicit. eval can resolve dynamically-built symbols
 			// against lexical scope, so partial inlining is unsafe.
 			if earliestDynamicSyntax >= 0 {
+				shouldReplace = false
+			}
+			// Replacing a binding evaluates its RHS at the use, after intervening
+			// statements. Require the declaration's effect contract, actual lexical
+			// identity and stable operands before relocating its evaluation.
+			if shouldReplace && !canRelocateFromBegin(content, env, &ome2, bindings) {
 				shouldReplace = false
 			}
 			if shouldReplace {

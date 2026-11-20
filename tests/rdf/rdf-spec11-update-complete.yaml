@@ -175,4 +175,52 @@ test_cases:
       SELECT (COUNT(DISTINCT ?node) AS ?count) WHERE { ?s ex:generated ?node }
     expect: {rows: 1, data: [{"?count": 2}]}
 
+  - name: "Compiled template reuse starts with two complete source values"
+    sparql: |
+      PREFIX ex: <http://elapsed-template-reuse.example/>
+      INSERT DATA { ex:a ex:value "A" . ex:b ex:value "B" }
+    expect: {rows: 0}
+
+  - name: "Template blank nodes retain linked values when one compiled update is reused"
+    scm: |
+      (begin
+        (define session (newsession))
+        (define operation (sql_queryplan_compile_formula nil
+          (parse_sparql "memcp-tests"
+            "PREFIX ex: <http://elapsed-template-reuse.example/> INSERT { ?s ex:generated [ ex:copy ?value ] } WHERE { ?s ex:value ?value }"
+            nil session nil)))
+        (operation session nil (lambda args true) (lambda args true))
+        (operation session nil (lambda args true) (lambda args true))
+        true)
+    expect: {result: true}
+
+  - name: "Reused template invocations allocate distinct nodes with complete linked values"
+    sparql: |
+      PREFIX ex: <http://elapsed-template-reuse.example/>
+      SELECT ?value (COUNT(DISTINCT ?node) AS ?count)
+      WHERE { ?s ex:generated ?node . ?node ex:copy ?value }
+      GROUP BY ?value ORDER BY ?value
+    expect:
+      rows: 2
+      data: [{"?value": "A", "?count": 2}, {"?value": "B", "?count": 2}]
+
+  - name: "Template-generated RDF identities survive a new process clock origin"
+    action: restart
+
+  - name: "A new invocation after restart preserves earlier generated nodes"
+    sparql: |
+      PREFIX ex: <http://elapsed-template-reuse.example/>
+      INSERT { ?s ex:generated [ ex:copy ?value ] } WHERE { ?s ex:value ?value }
+    expect: {rows: 0}
+
+  - name: "Restarted template invocations retain all three linked identities per value"
+    sparql: |
+      PREFIX ex: <http://elapsed-template-reuse.example/>
+      SELECT ?value (COUNT(DISTINCT ?node) AS ?count)
+      WHERE { ?s ex:generated ?node . ?node ex:copy ?value }
+      GROUP BY ?value ORDER BY ?value
+    expect:
+      rows: 2
+      data: [{"?value": "A", "?count": 3}, {"?value": "B", "?count": 3}]
+
 cleanup: []

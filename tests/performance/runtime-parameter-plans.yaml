@@ -1,0 +1,61 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  isolated: true
+  description: Complete changing-parameter requests retain correct ordered anti-join results
+setup:
+- sql: DROP TABLE IF EXISTS parameter_plan_current
+- sql: DROP TABLE IF EXISTS parameter_plan_driver
+- sql: CREATE TABLE parameter_plan_driver(object_name VARCHAR(100) COLLATE utf8mb4_bin,permission_name VARCHAR(100) COLLATE utf8mb4_bin,PRIMARY KEY(object_name,permission_name)) ENGINE=sloppy
+- sql: CREATE TABLE parameter_plan_current(object_name VARCHAR(100) COLLATE utf8mb4_bin,permission_name VARCHAR(100) COLLATE utf8mb4_bin,PRIMARY KEY(object_name,permission_name)) ENGINE=sloppy
+- scm: |
+    (begin
+      (insert (table "memcp-tests" false "parameter_plan_driver" false)
+        '("object_name" "permission_name")
+        (map (produceN 512) (lambda (index)
+          (list (concat "O" (+ 1000000 (intdiv index 8)))
+            (concat "P" (+ 100 (mod index 8)))))))
+      (rebuild (table "memcp-tests" false "parameter_plan_driver" false) true false)
+      (rebuild (table "memcp-tests" false "parameter_plan_current" false) true false))
+test_cases:
+- name: Changing composite parameters preserve every complete ordered tuple
+  performance_rows: 512
+  timing_samples: 3
+  timing_aggregation: total
+  warmup: 0
+  threshold_ms: 3000
+  scm: |
+    (begin
+      (define cache (newcachemap))
+      (define session (newsession))
+      (session "username" "root")
+      (session "schema" "memcp-tests")
+      (session "started" 0)
+      (session "key_name" nil)
+      (session "key_permission" nil)
+      (define query "SELECT d.object_name,d.permission_name FROM parameter_plan_driver d LEFT JOIN parameter_plan_current r ON d.object_name=r.object_name AND d.permission_name=r.permission_name WHERE r.object_name IS NULL AND (@started=0 OR d.object_name>@key_name OR (d.object_name=@key_name AND d.permission_name>@key_permission)) ORDER BY d.object_name,d.permission_name LIMIT 1")
+      (define verified (reduce (produceN 64) (lambda (count index) (begin
+        (define answer (newsession))
+        (sql_execute_formula session nil
+          (cached_parse cache (list parse_sql) "memcp-tests" query nil "root" session true)
+          (lambda (row) (begin
+            (if (answer "seen") (error "ordered query returned more than one row") true)
+            (answer "seen" true)
+            (answer "row" row))) (lambda args true))
+        (define expected_name (concat "O" (+ 1000000 (intdiv index 8))))
+        (define expected_permission (concat "P" (+ 100 (mod index 8))))
+        (if (and (answer "seen") (expression_equal? (answer "row")
+          (list "object_name" expected_name "permission_name" expected_permission))) true
+          (error (concat "changing tuple at " index " actual=" (json_encode (answer "row")) " expected=" expected_name "/" expected_permission)))
+        (session "started" 1)
+        (session "key_name" expected_name)
+        (session "key_permission" expected_permission)
+        (+ count 1))) 0))
+      (equal? verified 64))
+  expect:
+    rows: 1
+    result_contains: ['true']
+cleanup:
+- sql: DROP TABLE IF EXISTS parameter_plan_current
+- sql: DROP TABLE IF EXISTS parameter_plan_driver

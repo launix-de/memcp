@@ -234,7 +234,7 @@ test_cases:
   - name: "Snapshot anchor choice minimizes changed keys rather than coordinate distance"
     scm: |
       (begin
-        (define name (concat "snapshot-work-choice:" (nanotime)))
+        (define name (concat "snapshot-work-choice:" (uuid)))
         (define cache (make_group_cache "memcp-tests" (concat ".grp:" name) (list (list 'snapshot 0))))
         (group_cache_ensure_cells cache "agg_sum" nil '())
         (define observed (newsession))

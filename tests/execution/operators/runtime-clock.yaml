@@ -1,0 +1,94 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  isolated: true
+  description: Elapsed-time reads preserve execution order through scalar optimization
+setup: []
+test_cases:
+- name: An elapsed-time origin stays before delayed work after optimization
+  scm: |
+    (begin
+      (define body (quote (lambda () (begin
+        (define started (nanotime))
+        (if (sleep 0.02) (>= (- (nanotime) started) 15000000) false)))))
+      (define compiled (eval (optimize (clone_optimizer_expression body))))
+      (list ((eval (clone_optimizer_expression body))) (compiled) ((jit compiled)))))
+  expect:
+    result: [true, true, true]
+- name: Consecutive elapsed-time intervals preserve each completed value
+  scm: |
+    (begin
+      (define operation (eval (optimize (quote (lambda (value) (begin
+        (define started (nanotime))
+        (define completed (if (sleep 0.01) (+ value 1) value))
+        (list completed (>= (- (nanotime) started) 7000000))))))))
+      (map (list 0 7 41) operation))
+  expect:
+    result: [[1, true], [8, true], [42, true]]
+- name: A dynamic callback completes before the following observable marker
+  scm: |
+    (begin
+      (define state (newsession)) (state "calls" 0)
+      (state "operation" (lambda (value) (begin
+        (state "calls" (+ (state "calls") 1)) (+ value 1))))
+      (define caller (eval (optimize (quote (lambda (operation state) (begin
+        (define result (operation 7))
+        (state "observed" (state "calls"))
+        result))))))
+      (list (caller (state "operation") state) (state "observed") (state "calls")))
+  expect:
+    result: [8, 1, 1]
+- name: A timed dynamic callback finishes before elapsed time is published
+  scm: |
+    (begin
+      (define state (newsession)) (state "calls" 0)
+      (state "operation" (lambda (value)
+        (if (sleep 0.02) (begin (state "calls" (+ (state "calls") 1)) (+ value 1)) value)))
+      (define caller (eval (optimize (quote (lambda (operation state) (begin
+        (define started (nanotime))
+        (define result (operation 7))
+        (state "elapsed" (- (nanotime) started))
+        result))))))
+      (list (caller (state "operation") state) (>= (state "elapsed") 15000000) (state "calls")))
+  expect:
+    result: [8, true, 1]
+- name: A pure native wrapper cannot hide an effectful evaluated operand
+  scm: |
+    (begin
+      (define state (newsession)) (state "calls" 0)
+      (state "operation" (lambda (value) (begin
+        (state "calls" (+ (state "calls") 1)) (+ value 1))))
+      (define caller (eval (optimize (quote (lambda (operation state) (begin
+        (define result (+ (operation 7) 1))
+        (state "observed" (state "calls"))
+        result))))))
+      (list (caller (state "operation") state) (state "observed") (state "calls")))
+  expect:
+    result: [9, 1, 1]
+- name: A shadowed operator keeps the actual callback execution order
+  scm: |
+    (begin
+      (define state (newsession)) (state "calls" 0)
+      (state "operation" (lambda (value) (begin
+        (state "calls" (+ (state "calls") 1)) (+ value 1))))
+      (define caller (eval (optimize (quote (lambda (+ state) (begin
+        (define result (+ 7))
+        (state "observed" (state "calls"))
+        result))))))
+      (list (caller (state "operation") state) (state "observed") (state "calls")))
+  expect:
+    result: [8, 1, 1]
+- name: A native higher order callback retains its actual execution effects
+  scm: |
+    (begin
+      (define state (newsession)) (state "calls" 0)
+      (define caller (eval (optimize (quote (lambda (state) (begin
+        (define result (map (list 7) (lambda (value) (begin
+          (state "calls" (+ (state "calls") 1)) (+ value 1)))))
+        (state "observed" (state "calls"))
+        result))))))
+      (list (caller state) (state "observed") (state "calls")))
+  expect:
+    result: [[8], 1, 1]
+cleanup: []

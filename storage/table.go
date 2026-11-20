@@ -1793,9 +1793,11 @@ func (t *table) adjustPlannerRows(delta int64) {
 			t.publishPlannerStatsToken()
 			return
 		}
-		plannerRoot := scm.NewFastDictValue(2)
+		plannerRoot := scm.NewFastDictValue(3)
 		plannerRoot.Set(scm.NewString("row_count"), scm.NewInt(int64(rowEstimate)), nil)
 		plannerRoot.Set(scm.NewString("columns"), columns, nil)
+		readProgram, _ := current.plannerValue.FastDict().Get(scm.NewString("has_read_program"))
+		plannerRoot.Set(scm.NewString("has_read_program"), readProgram, nil)
 		replacement := *current
 		replacement.plannerValue = scm.NewFastDict(plannerRoot)
 		replacement.plannerFingerprint = plannerStatisticsFingerprint(
@@ -2133,6 +2135,9 @@ func (t *table) buildShowColumnsSnapshot(rowEstimate uint, columnNames *tableCol
 		columnNames = t.buildColumnNamesSnapshot() // unpublished constructor or schema mutation owner
 	}
 	columns := columnNames.declarations
+	// Costing may price native rows without inspecting or invoking opaque
+	// callbacks. Publish their declaration presence with the same snapshot.
+	hasReadProgram := t.hasReadProgram(columns)
 	result := make([]scm.Scmer, len(columns))
 	plannerColumns := scm.NewFastDictValue(len(columns))
 	plannerColumnsFingerprint := uint64(0x6a09e667f3bcc909)
@@ -2181,9 +2186,10 @@ func (t *table) buildShowColumnsSnapshot(rowEstimate uint, columnNames *tableCol
 		}
 	}
 	plannerColumnsValue := scm.NewFastDict(plannerColumns)
-	plannerRoot := scm.NewFastDictValue(2)
+	plannerRoot := scm.NewFastDictValue(3)
 	plannerRoot.Set(scm.NewString("row_count"), scm.NewInt(int64(rowEstimate)), nil)
 	plannerRoot.Set(scm.NewString("columns"), plannerColumnsValue, nil)
+	plannerRoot.Set(scm.NewString("has_read_program"), scm.NewBool(hasReadProgram), nil)
 	plannerValue := scm.NewFastDict(plannerRoot)
 	snapshot := &tableShowColumnsSnapshot{
 		value:              scm.NewSlice(result),
@@ -2208,6 +2214,33 @@ func (t *table) buildShowColumnsSnapshot(rowEstimate uint, columnNames *tableCol
 		snapshot.metadata.constraints = current.metadata.constraints
 	}
 	return snapshot
+}
+
+func (t *table) hasReadProgram(columns []*column) bool {
+	if t.OnInit.Load() != nil {
+		return true
+	}
+	for _, c := range columns {
+		if isRuntimeComputedColumn(c) || !c.OrcMapReduceFn.IsNil() {
+			return true
+		}
+	}
+	return false
+}
+
+// Program constructors own declaration mutation here, before invoking callbacks.
+// A fresh callback identity can change its recipe without changing this fact.
+// Retain the complete immutable snapshot when the published fact is unchanged;
+// transitions still use the existing full publication and statistics CAS owner.
+func (t *table) publishReadProgramSnapshot() {
+	hasReadProgram := t.hasReadProgram(t.Columns)
+	if current := t.showColumnsSnapshot.Load(); current != nil && !current.plannerValue.IsNil() {
+		published, exists := current.plannerValue.FastDict().Get(scm.NewString("has_read_program"))
+		if exists && published.IsBool() && published.Bool() == hasReadProgram {
+			return
+		}
+	}
+	t.publishShowColumnsSnapshot(false)
 }
 
 func (t *table) buildColumnNamesSnapshot() *tableColumnNamesSnapshot {

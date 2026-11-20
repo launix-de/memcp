@@ -134,6 +134,7 @@ func (t *table) computeColumnDDLLocked(tx *TxContext, name string, inputCols []s
 				t.Columns[i].Computor = computor // set formula so delta storages and rebuild algo know how to recompute
 				t.Columns[i].ComputorInputCols = inputCols
 				t.Columns[i].ComputorDependencies = append([]string(nil), dependencies...)
+				t.publishReadProgramSnapshot()
 				refs := extractScanJoinInfo(computor)
 				for i := 0; i+1 < len(dependencies); i += 2 {
 					refs = append(refs, scanJoinInfo{schema: dependencies[i], table: dependencies[i+1], unknownReads: true})
@@ -340,6 +341,7 @@ func (t *table) computeOrderedColumnDDLLocked(name string, sortCols []string, so
 			t.Columns[i].OrcMapCols = mapCols
 			t.Columns[i].OrcMapReduceFn = mapReduceFn
 			t.Columns[i].OrcReduceInit = reduceInit
+			t.publishReadProgramSnapshot()
 			isTemp = c.IsTemp
 			found = true
 			break

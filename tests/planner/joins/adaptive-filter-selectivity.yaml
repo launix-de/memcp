@@ -300,7 +300,7 @@ test_cases:
             (list 'error "diagnostic prepared a candidate") 0))
           (list 'quote true))))
         (define variant (sql_compile_queryplan_variant (list parser) "memcp-tests"
-          "EXPLAIN SELECT id FROM afs_check WHERE id < 321" nil (newsession) nil))
+          "EXPLAIN SELECT id FROM afs_check WHERE id < 321" nil (newsession) nil "specialized"))
         (define guard (car variant))
         (define before (eval guard))
         (define access (eval (compile_scan_access '("id") callback)))
