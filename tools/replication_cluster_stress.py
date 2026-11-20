@@ -663,12 +663,16 @@ def run_replication_source_security(master, slave):
     slave.reclaim()
 
 
-def run_regressions(args, artifacts, journal):
+def run_source_security(args, artifacts, journal):
     print("SCENARIO: source-only replication security", flush=True)
     with Cluster(args, artifacts, "source-security") as security:
         security.initialize(["CREATE TABLE items(id INT PRIMARY KEY, value INT)"])
         run_replication_source_security(security.master, security.slave)
     journal.append({"scenario": "source-only-security", "master_restart": True})
+
+
+def run_regressions(args, artifacts, journal):
+    run_source_security(args, artifacts, journal)
     print("SCENARIO: alternating crashes, authentication, DDL, sharing and retirement", flush=True)
     with Cluster(args, artifacts, "regressions") as cluster:
         master, slave = cluster.master, cluster.slave
@@ -2585,6 +2589,8 @@ def main():
     parser.add_argument("--dedicated-replication-port", action="store_true",
                         help="exercise the optional dedicated listener instead of the normal HTTP /cluster route")
     parser.add_argument("--remote-scans-only", action="store_true", help="run only the focused two-process remote scan scenario")
+    parser.add_argument("--replica-scenario", choices=("source-security", "regressions", "partitions", "stress", "multiple-slaves"),
+                        help="run one plain-replication scenario without the complete stress sequence")
     parser.add_argument("--cluster-context-only", action="store_true",
                         help="run SQL session/transaction contracts against standalone and clustered processes")
     parser.add_argument("--cluster-inserts-only", action="store_true", help="run focused concurrent shared-storage INSERT scenario")
@@ -2656,9 +2662,13 @@ def main():
                 run_cluster_inserts(args, artifacts, journal, hash_partitioned=True)
         elif args.cluster_only:
             run_cluster_placement(args, artifacts, journal)
+        elif args.replica_scenario:
+            {"source-security": run_source_security, "regressions": run_regressions,
+             "partitions": run_partitions, "stress": run_stress,
+             "multiple-slaves": run_multiple_slaves}[args.replica_scenario](args, artifacts, journal)
         else:
             run_remote_scans(args, artifacts, journal)
-        if not args.suites and not args.remote_scans_only and not args.cluster_only and not args.cluster_inserts_only:
+        if not args.suites and not args.remote_scans_only and not args.replica_scenario and not args.cluster_only and not args.cluster_inserts_only:
             run_regressions(args, artifacts, journal)
             run_partitions(args, artifacts, journal)
             run_stress(args, artifacts, journal)
@@ -2683,6 +2693,8 @@ def main():
         replay.extend(str(path) for path in args.suites)
         if args.remote_scans_only:
             replay.append("--remote-scans-only")
+        if args.replica_scenario:
+            replay.extend(("--replica-scenario", args.replica_scenario))
         if args.cluster_inserts_only:
             replay.extend(("--cluster-inserts-only", "--cluster-inserts-layout", args.cluster_inserts_layout))
         if args.cluster_context_only:
