@@ -1,0 +1,182 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# https://learn.microsoft.com/sql/t-sql/statements/alter-table-transact-sql
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Constant column append preserves historical values and the original transaction decision
+setup:
+- sql: CREATE TABLE constant_append_rows(id INT PRIMARY KEY,value INT)
+- sql: INSERT constant_append_rows VALUES(1,11),(2,22)
+- scm: (rebuild (table "memcp-tests" false "constant_append_rows" false nil) true false)
+- sql: INSERT constant_append_rows VALUES(3,33)
+- sql: CREATE TABLE constant_append_other(id INT PRIMARY KEY,value INT)
+- sql: INSERT constant_append_other VALUES(1,7)
+- sql: CREATE TABLE constant_append_rollback(id INT PRIMARY KEY)
+- sql: INSERT constant_append_rollback VALUES(5)
+- sql: CREATE TABLE constant_append_savepoint(id INT PRIMARY KEY)
+- sql: INSERT constant_append_savepoint VALUES(6)
+- sql: CREATE TABLE constant_append_nullable(id INT PRIMARY KEY)
+- sql: INSERT constant_append_nullable VALUES(7)
+- sql: CREATE TABLE constant_append_values(id INT PRIMARY KEY)
+- sql: INSERT constant_append_values VALUES(8)
+- sql: CREATE TABLE constant_append_pg(id INT PRIMARY KEY,value INT)
+- sql: INSERT constant_append_pg VALUES(9,90)
+- sql: CREATE TABLE constant_append_mysql(id INT PRIMARY KEY,value INT)
+- sql: INSERT constant_append_mysql VALUES(10,100)
+test_cases:
+- name: Prior writes main and delta prefixes and later writes share the original decision
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: UPDATE constant_append_rows SET value=12 WHERE id=1
+    - connection: owner
+      sql: UPDATE constant_append_other SET value=8 WHERE id=1
+    - connection: owner
+      sql: ALTER TABLE constant_append_rows ADD amount FLOAT NOT NULL CONSTRAINT constant_amount_default DEFAULT ((0))
+    - connection: owner
+      sql: SELECT id,value,amount FROM constant_append_rows ORDER BY id
+      expect: {rows: 3,data: [{id: 1,value: 12,amount: 0},{id: 2,value: 22,amount: 0},{id: 3,value: 33,amount: 0}]}
+    - connection: observer
+      sql: SELECT id,value FROM constant_append_rows ORDER BY id
+      expect: {rows: 3,data: [{id: 1,value: 11},{id: 2,value: 22},{id: 3,value: 33}]}
+    - connection: observer
+      sql: SELECT COUNT(*) AS n FROM sys.columns WHERE object_id=OBJECT_ID(N'constant_append_rows') AND name=N'amount'
+      expect: {rows: 1,data: [{n: 0}]}
+    - connection: owner
+      sql: UPDATE constant_append_rows SET amount=7 WHERE id=2
+    - connection: owner
+      sql: INSERT constant_append_rows(id,value) VALUES(4,44)
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT id,value,amount FROM constant_append_rows ORDER BY id
+      expect: {rows: 4,data: [{id: 1,value: 12,amount: 0},{id: 2,value: 22,amount: 7},{id: 3,value: 33,amount: 0},{id: 4,value: 44,amount: 0}]}
+    - connection: observer
+      sql: SELECT value FROM constant_append_other
+      expect: {rows: 1,data: [{value: 8}]}
+- name: The named default and new ordinal are actual catalog declarations
+  sql: SELECT name,parent_column_id FROM sys.default_constraints WHERE parent_object_id=OBJECT_ID(N'constant_append_rows')
+  expect: {rows: 1,data: [{name: constant_amount_default,parent_column_id: 3}]}
+- name: NOT NULL remains enforced for later explicit assignments
+  sql: UPDATE constant_append_rows SET amount=NULL WHERE id=1
+  expect: {error: true}
+- name: Rollback removes both the constant column and original endpoint writes
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: INSERT constant_append_rollback VALUES(15)
+    - connection: owner
+      sql: ALTER TABLE constant_append_rollback ADD flag INT NOT NULL DEFAULT (3)
+    - connection: owner
+      sql: UPDATE constant_append_rollback SET flag=4 WHERE id=5
+    - connection: owner
+      sql: SELECT id,flag FROM constant_append_rollback ORDER BY id
+      expect: {rows: 2,data: [{id: 5,flag: 4},{id: 15,flag: 3}]}
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: observer
+      sql: SELECT id FROM constant_append_rollback ORDER BY id
+      expect: {rows: 1,data: [{id: 5}]}
+    - connection: observer
+      sql: SELECT COUNT(*) AS n FROM sys.columns WHERE object_id=OBJECT_ID(N'constant_append_rollback') AND name=N'flag'
+      expect: {rows: 1,data: [{n: 0}]}
+- name: Savepoint rewind retains the first constant and retires only the suffix
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: ALTER TABLE constant_append_savepoint ADD retained INT NOT NULL DEFAULT (2)
+    - connection: owner
+      sql: SAVE TRANSACTION constant_prefix
+    - connection: owner
+      sql: ALTER TABLE constant_append_savepoint ADD discarded INT NOT NULL DEFAULT (9)
+    - connection: owner
+      sql: SELECT id,retained,discarded FROM constant_append_savepoint
+      expect: {rows: 1,data: [{id: 6,retained: 2,discarded: 9}]}
+    - connection: owner
+      sql: ROLLBACK TRANSACTION constant_prefix
+    - connection: owner
+      sql: SELECT id,retained FROM constant_append_savepoint
+      expect: {rows: 1,data: [{id: 6,retained: 2}]}
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT id,retained FROM constant_append_savepoint
+      expect: {rows: 1,data: [{id: 6,retained: 2}]}
+    - connection: observer
+      sql: SELECT COUNT(*) AS n FROM sys.columns WHERE object_id=OBJECT_ID(N'constant_append_savepoint') AND name=N'discarded'
+      expect: {rows: 1,data: [{n: 0}]}
+- name: Nullable default without WITH VALUES retains historical NULL
+  sql: BEGIN TRANSACTION; ALTER TABLE constant_append_nullable ADD flag INT NULL DEFAULT (5); COMMIT TRANSACTION
+- name: Future nullable rows still receive their actual default
+  sql: INSERT constant_append_nullable(id) VALUES(17)
+- name: Historical NULL and future default are distinct stored values
+  sql: SELECT id,flag FROM constant_append_nullable ORDER BY id
+  expect: {rows: 2,data: [{id: 7,flag: null},{id: 17,flag: 5}]}
+- name: WITH VALUES initializes historical nullable rows
+  sql: BEGIN TRANSACTION; ALTER TABLE constant_append_values ADD flag INT NULL DEFAULT (6) WITH VALUES; COMMIT TRANSACTION
+- name: WITH VALUES retains the complete historical row
+  sql: SELECT id,flag FROM constant_append_values
+  expect: {rows: 1,data: [{id: 8,flag: 6}]}
+- name: Replacing the future default does not rewrite historical initial values
+  sql: ALTER TABLE constant_append_rows DROP CONSTRAINT constant_amount_default; ALTER TABLE constant_append_rows ADD CONSTRAINT constant_amount_replacement DEFAULT (9) FOR amount
+- name: Future inserts use the replacement default
+  sql: INSERT constant_append_rows(id,value) VALUES(14,144)
+- name: Actual initial values and later writes remain independent of the new default
+  sql: SELECT id,value,amount FROM constant_append_rows ORDER BY id
+  expect: {rows: 5,data: [{id: 1,value: 12,amount: 0},{id: 2,value: 22,amount: 7},{id: 3,value: 33,amount: 0},{id: 4,value: 44,amount: 0},{id: 14,value: 144,amount: 9}]}
+- name: Removing a future default preserves all historical cells
+  sql: ALTER TABLE constant_append_rows DROP CONSTRAINT constant_amount_replacement
+- name: Explicit later values remain admissible after default removal
+  sql: INSERT constant_append_rows(id,value,amount) VALUES(24,244,12)
+- name: The native physical rebuild retains initial prefixes and later explicit values
+  scm: (rebuild (table "memcp-tests" false "constant_append_rows" false nil) true false)
+- name: Complete rebuilt values do not depend on a still-declared default
+  sql: SELECT id,value,amount FROM constant_append_rows ORDER BY id
+  expect: {rows: 6,data: [{id: 1,value: 12,amount: 0},{id: 2,value: 22,amount: 7},{id: 3,value: 33,amount: 0},{id: 4,value: 44,amount: 0},{id: 14,value: 144,amount: 9},{id: 24,value: 244,amount: 12}]}
+- name: PostgreSQL append preserves prior DML and the original SQL transaction
+  syntax: postgresql
+  sql: BEGIN; UPDATE constant_append_pg SET value=91 WHERE id=9; ALTER TABLE constant_append_pg ADD COLUMN flag INTEGER NOT NULL DEFAULT 4; COMMIT
+- name: PostgreSQL sees its complete committed data and declaration
+  syntax: postgresql
+  sql: SELECT id,value,flag FROM constant_append_pg
+  expect: {rows: 1,data: [{id: 9,value: 91,flag: 4}]}
+- name: MySQL append preserves preceding DML and the declared default
+  syntax: mysql
+  sql: BEGIN; UPDATE constant_append_mysql SET value=101 WHERE id=10; ALTER TABLE constant_append_mysql ADD COLUMN flag INT NOT NULL DEFAULT 6; COMMIT
+- name: MySQL sees its complete committed data and declaration
+  syntax: mysql
+  sql: SELECT id,value,flag FROM constant_append_mysql
+  expect: {rows: 1,data: [{id: 10,value: 101,flag: 6}]}
+- name: Crash after committed append retains its actual decision
+  action: crash
+- name: Recover original committed declarations and initial values
+  action: restart
+- name: Recovered complete cells retain all historical and explicit values
+  sql: SELECT id,value,amount FROM constant_append_rows ORDER BY id
+  expect: {rows: 6,data: [{id: 1,value: 12,amount: 0},{id: 2,value: 22,amount: 7},{id: 3,value: 33,amount: 0},{id: 4,value: 44,amount: 0},{id: 14,value: 144,amount: 9},{id: 24,value: 244,amount: 12}]}
+- name: Recovery retains nullable historical and future defaults separately
+  sql: SELECT id,flag FROM constant_append_nullable ORDER BY id
+  expect: {rows: 2,data: [{id: 7,flag: null},{id: 17,flag: 5}]}
+- name: Recovery retains the historical constant without an explicit rebuild
+  sql: SELECT id,flag FROM constant_append_values
+  expect: {rows: 1,data: [{id: 8,flag: 6}]}
+- name: Recovery does not restore the removed default declaration
+  sql: SELECT COUNT(*) AS n FROM sys.default_constraints WHERE parent_object_id=OBJECT_ID(N'constant_append_rows')
+  expect: {rows: 1,data: [{n: 0}]}
+cleanup:
+- sql: DROP TABLE IF EXISTS constant_append_rows
+- sql: DROP TABLE IF EXISTS constant_append_other
+- sql: DROP TABLE IF EXISTS constant_append_rollback
+- sql: DROP TABLE IF EXISTS constant_append_savepoint
+- sql: DROP TABLE IF EXISTS constant_append_nullable
+- sql: DROP TABLE IF EXISTS constant_append_values
+- sql: DROP TABLE IF EXISTS constant_append_pg
+- sql: DROP TABLE IF EXISTS constant_append_mysql
