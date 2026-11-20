@@ -1531,7 +1531,21 @@ def run_retained_generation(master, worker, args, journal):
 
         eventually(released, "peer GC did not deregister old owner generations", timeout=args.timeout)
         w.sql("UPDATE remote_items SET value=value+1 WHERE id=1")
-        expect(m.number("SELECT SUM(value) AS n FROM remote_items"), expected + 1,
+        actual = m.number("SELECT SUM(value) AS n FROM remote_items")
+        if actual != expected + 1:
+            diagnostic = {"expected": expected + 1, "actual": actual}
+            for name, node in (("master", master), ("worker", worker)):
+                try:
+                    diagnostic[name] = {
+                        "rows": node.client.sql("SELECT id,value FROM remote_items ORDER BY id"),
+                        "state": node.snapshot(),
+                        "plan": node.client.sql("EXPLAIN SELECT SUM(value) AS n FROM remote_items"),
+                    }
+                except Exception as error:
+                    diagnostic[name] = {"error": str(error)}
+            (worker.data_dir.parent / "retained-generation-failure.json").write_text(
+                json.dumps(diagnostic, indent=2) + "\n")
+        expect(actual, expected + 1,
                "new generation remained coherent after old-reference release")
         journal.append({"scenario": "retained-generation", "old_uuids": sorted(old_ids),
                         "new_uuids": sorted(active_ids), "old_sum": expected,
