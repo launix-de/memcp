@@ -1793,9 +1793,11 @@ func (t *table) adjustPlannerRows(delta int64) {
 			t.publishPlannerStatsToken()
 			return
 		}
-		plannerRoot := scm.NewFastDictValue(2)
+		plannerRoot := scm.NewFastDictValue(3)
 		plannerRoot.Set(scm.NewString("row_count"), scm.NewInt(int64(rowEstimate)), nil)
 		plannerRoot.Set(scm.NewString("columns"), columns, nil)
+		readProgram, _ := current.plannerValue.FastDict().Get(scm.NewString("has_read_program"))
+		plannerRoot.Set(scm.NewString("has_read_program"), readProgram, nil)
 		replacement := *current
 		replacement.plannerValue = scm.NewFastDict(plannerRoot)
 		replacement.plannerFingerprint = plannerStatisticsFingerprint(
@@ -2133,6 +2135,9 @@ func (t *table) buildShowColumnsSnapshot(rowEstimate uint, columnNames *tableCol
 		columnNames = t.buildColumnNamesSnapshot() // unpublished constructor or schema mutation owner
 	}
 	columns := columnNames.declarations
+	// Costing may price native rows without inspecting or invoking opaque
+	// callbacks. Publish their declaration presence with the same snapshot.
+	hasReadProgram := t.OnInit.Load() != nil
 	result := make([]scm.Scmer, len(columns))
 	plannerColumns := scm.NewFastDictValue(len(columns))
 	plannerColumnsFingerprint := uint64(0x6a09e667f3bcc909)
@@ -2141,6 +2146,7 @@ func (t *table) buildShowColumnsSnapshot(rowEstimate uint, columnNames *tableCol
 	plannerStatistics := make([]*columnPlannerStatistics, len(columns))
 	filterSchema := plannerFingerprintString(0x1d26d8e71, t.Collation)
 	for i, c := range columns {
+		hasReadProgram = hasReadProgram || isRuntimeComputedColumn(c) || !c.OrcMapReduceFn.IsNil()
 		names[i] = c.Name
 		filterSchema = plannerFingerprintString(filterSchema, c.Name)
 		filterSchema = plannerFingerprintString(filterSchema, c.Typ)
@@ -2181,9 +2187,10 @@ func (t *table) buildShowColumnsSnapshot(rowEstimate uint, columnNames *tableCol
 		}
 	}
 	plannerColumnsValue := scm.NewFastDict(plannerColumns)
-	plannerRoot := scm.NewFastDictValue(2)
+	plannerRoot := scm.NewFastDictValue(3)
 	plannerRoot.Set(scm.NewString("row_count"), scm.NewInt(int64(rowEstimate)), nil)
 	plannerRoot.Set(scm.NewString("columns"), plannerColumnsValue, nil)
+	plannerRoot.Set(scm.NewString("has_read_program"), scm.NewBool(hasReadProgram), nil)
 	plannerValue := scm.NewFastDict(plannerRoot)
 	snapshot := &tableShowColumnsSnapshot{
 		value:              scm.NewSlice(result),

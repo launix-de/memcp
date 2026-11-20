@@ -5,6 +5,7 @@ metadata:
   isolated: true
   description: Symbolic query inputs retain SQL NULL, row domains, windows and scalar cardinality
 setup:
+- sql: DROP TABLE IF EXISTS parameter_values_initialized
 - sql: DROP TABLE IF EXISTS parameter_values_child
 - sql: DROP TABLE IF EXISTS parameter_values_base
 - sql: CREATE TABLE parameter_values_base(id INT PRIMARY KEY,value INT)
@@ -46,12 +47,12 @@ test_cases:
 - name: Symbolic IN inputs do not claim a negative numeric regime
   scm: |
     (begin
-      (define session (newsession)) (session "left" nil) (session "right" nil)
+      (define session (newsession)) (session "v1" (list nil nil))
       (define variant (sql_compile_queryplan_variant (list parse_sql) "memcp-tests"
-        "SELECT id FROM parameter_values_base WHERE id IN (@left,@right) ORDER BY id"
+        "SELECT id FROM parameter_values_base WHERE id IN (?*) ORDER BY id"
         nil session nil "generic"))
       (map (list (list nil nil) (list 0 2) (list nil 1) (list 1 1)) (lambda (values) (begin
-        (session "left" (car values)) (session "right" (cadr values))
+        (session "v1" values)
         (define answer (newsession)) (answer "rows" '())
         (sql_execute_formula session nil (cadr variant)
           (lambda (row) (answer "rows" (append (answer "rows") row))) (lambda args true))
@@ -82,7 +83,7 @@ test_cases:
     (begin
       (define session (newsession)) (session "payload" nil)
       (define variant (sql_compile_queryplan_variant (list parse_sql) "memcp-tests"
-        "SELECT CAST(@payload AS CHAR(16)) AS payload FROM parameter_values_base WHERE id=0"
+        "SELECT CAST(@payload AS VARCHAR(16)) AS payload FROM parameter_values_base WHERE id=0"
         nil session nil "generic"))
       (map (list nil "A" "a" "A " "a ") (lambda (payload) (begin
         (session "payload" payload)
@@ -109,6 +110,42 @@ test_cases:
   expect:
     error: true
     contains: more than one row
+- name: Computed source work remains opaque across row count publication
+  scm: |
+    (begin
+      (define target (table "memcp-tests" false "parameter_values_base" false))
+      (define original (table_planner_statistics target))
+      (createcolumn target "incremented" "INT" '() '() '("value")
+        (lambda (value) (if (nil? value) nil (+ value 1))))
+      (define installed (table_planner_statistics target))
+      (insert target '("id" "value") (list (list 3 19)))
+      (define published (table_planner_statistics target))
+      (define session (newsession)) (define answer (newsession))
+      (sql_execute_formula session nil
+        (sql_queryplan_compile_formula nil
+          (parse_sql "memcp-tests" "SELECT id,incremented FROM parameter_values_base ORDER BY id" nil session nil))
+        (lambda (row) (answer "rows" (append (coalesceNil (answer "rows") '()) row))) (lambda args true))
+      (list (original "has_read_program") (installed "has_read_program")
+        (published "has_read_program") (published "row_count") (answer "rows"))))
+  expect:
+    result: [false, true, true, 4, [[id, 0, incremented, 8], [id, 1, incremented, 12], [id, 2, incremented, null], [id, 3, incremented, 20]]]
+- name: Initializer-backed native sources retain their declared opaque work and rows
+  scm: |
+    (begin
+      (createtable "memcp-tests" "parameter_values_initialized"
+        (list (list "column" "id" "INT" '() '()))
+        (list "oninit" (lambda (_tx)
+          (insert (table "memcp-tests" false "parameter_values_initialized" false)
+            '("id") (list (list 7))))) false)
+      (define target (table "memcp-tests" false "parameter_values_initialized" false))
+      (define session (newsession)) (define answer (newsession))
+      (sql_execute_formula session nil (sql_queryplan_compile_formula nil
+        (parse_sql "memcp-tests" "SELECT id FROM parameter_values_initialized" nil session nil))
+        (lambda (row) (answer "row" row)) (lambda args true))
+      (list ((table_planner_statistics target) "has_read_program") (answer "row"))))
+  expect:
+    result: [true, [id, 7]]
 cleanup:
+- sql: DROP TABLE IF EXISTS parameter_values_initialized
 - sql: DROP TABLE IF EXISTS parameter_values_child
 - sql: DROP TABLE IF EXISTS parameter_values_base
