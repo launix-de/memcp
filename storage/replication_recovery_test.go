@@ -1026,6 +1026,45 @@ func TestReplicationRecoveryInventoryReportsOutwardAuthority(t *testing.T) {
 	}
 }
 
+func TestReplicationRecoveryInventoryIncludesTenantCatalogAuthority(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "catalog_recovery_inventory", 0)
+	db := tbl.schema
+	r := replicaRecoveryFixture()
+	r.master = false
+	r.schemaShards(db, r.id, true)
+	want := make(map[string]mosiResource)
+	for _, shard := range db.replicationShards() {
+		if shard.catalogOwner == "" {
+			continue
+		}
+		resource := shard.replicationResource()
+		want[resource.key()] = resource
+		r.updateRecord(resource, func(record *replicaRecord) bool {
+			record.Epoch = 7
+			return true
+		})
+	}
+	if len(want) != int(catalogRelationCount) {
+		t.Fatalf("fixture has %d catalog partitions", len(want))
+	}
+	for _, record := range r.recoveryInventory(replicaAuth{Databases: map[string]bool{db.Name: true}}) {
+		if resource, exists := want[record.Resource.key()]; exists {
+			if record.Resource != resource || record.Owner != r.id || record.State != "M" || record.Epoch != 7 {
+				t.Fatalf("lost tenant catalog authority: %+v", record)
+			}
+			delete(want, resource.key())
+		}
+	}
+	if len(want) != 0 {
+		t.Fatalf("reconnect omitted tenant catalog partitions: %v", want)
+	}
+	for _, record := range r.recoveryInventory(replicaAuth{Databases: map[string]bool{"other_tenant": true}}) {
+		if record.Resource.Database == db.Name {
+			t.Fatal("catalog inventory escaped its tenant authorization")
+		}
+	}
+}
+
 func TestReplicationUnconfirmedReaderCannotRaiseOwnAuthority(t *testing.T) {
 	r := replicaRecoveryFixture()
 	resource := mosiResource{Database: "tenant"}

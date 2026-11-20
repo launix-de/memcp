@@ -1620,6 +1620,32 @@ func (r *replicationManager) completeLocalShard(resource mosiResource) (string, 
 	if db == nil {
 		return "", nil
 	}
+	if isCatalogResource(resource) {
+		// Recovery already owns this partition's coordination boundary. Loading
+		// the tenant's declarations here would scan and acquire the same catalog
+		// again. Verify its immutable local files on the physical backend only.
+		shard := r.findCatalogShard(resource)
+		if shard == nil {
+			return "", nil
+		}
+		home := shard.home()
+		home.persistenceLifecycle.RLock()
+		defer home.persistenceLifecycle.RUnlock()
+		relation, _ := catalogResourceRelation(resource)
+		for _, name := range catalogRelationColumns(relation) {
+			reader := home.persistence.ReadColumn(shard.uuid.String(), name)
+			var marker [1]byte
+			n, err := reader.Read(marker[:])
+			reader.Close()
+			if err != nil && err != io.EOF {
+				return "", err
+			}
+			if n == 0 {
+				return "", nil
+			}
+		}
+		return shard.uuid.String(), nil
+	}
 	db.ensureLoaded()
 	db.persistenceLifecycle.RLock()
 	defer db.persistenceLifecycle.RUnlock()
