@@ -6038,6 +6038,12 @@ that context explicitly; stored views refuse this scalar before publication. */
 	(define tsql_write_limit (parser (or
 		(parser '(tsql_keyword_top "(" (define n tsql_int) ")")
 			(if (< n 0) (error "DML TOP must be nonnegative") n))
+		(parser '(tsql_keyword_top "(" (define amount tsql_expression) ")")
+			/* DML counts use the same invocation-scalar conversion as SELECT;
+			the shared mutation planner still owns target deduplication and TOP. */
+			(if (tsql_scalar_expression_allowed? amount)
+				(list 'sql_compile_expr 'tsql_compile_row_count amount)
+				(error "DML TOP requires an invocation scalar")))
 		(parser empty nil))))
 	(define tsql_update_assignment (parser '(
 		(define column tsql_column)
