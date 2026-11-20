@@ -1474,7 +1474,7 @@ func buildProcSpecialization(proc *Proc, key procSpecializationKey, paramTypes [
 	lambda := []Scmer{
 		NewSymbol("lambda"),
 		CloneOptimizerExpression(proc.Params),
-		deoptimizeProcSpecializationExpr(CloneOptimizerExpression(proc.Body), len(params)),
+		deoptimizeProcSpecializationExpr(CloneOptimizerExpression(proc.Body), []int{len(params)}),
 	}
 	if proc.NumVars > 0 {
 		lambda = append(lambda, NewInt(int64(proc.NumVars)))
@@ -4718,7 +4718,19 @@ func specializationSlotSymbol(slot NthLocalVar) Scmer {
 // visible to the existing usage walk so type-driven rewrites can fire again.
 // This replaces the ordinary DeoptimizeExpr traversal rather than adding a
 // second analysis pass over the body.
-func deoptimizeProcSpecializationExpr(expr Scmer, paramCount int) Scmer {
+func deoptimizeProcSpecializationExpr(expr Scmer, scopes []int) Scmer {
+	if expr.IsSourceInfo() {
+		source := *expr.SourceInfo()
+		source.value = deoptimizeProcSpecializationExpr(source.value, scopes)
+		return NewSourceInfo(source)
+	}
+	if expr.GetTag() == tagAny {
+		if source, ok := expr.Any().(SourceInfo); ok {
+			source.value = deoptimizeProcSpecializationExpr(source.value, scopes)
+			return NewSourceInfo(source)
+		}
+	}
+	paramCount := scopes[len(scopes)-1]
 	if expr.IsNthLocalVar() {
 		slot := expr.NthLocalVar()
 		if int(slot) >= paramCount {
@@ -4733,13 +4745,46 @@ func deoptimizeProcSpecializationExpr(expr Scmer, paramCount int) Scmer {
 		return expr
 	}
 	items := expr.Slice()
+	if len(items) == 0 || scmerIsSymbol(items[0], "quote") {
+		return expr // literal runtime data has no numbered-frame authority
+	}
+	if len(items) >= 3 && scmerIsSymbol(items[0], "lambda") {
+		// Each lambda creates its OWN numbered frame. An outer procedure's
+		// arity cannot classify this callback's parameters as local bindings.
+		params := items[1]
+		for {
+			stripped, wrapped := scmerStripSourceInfo(params)
+			if !wrapped {
+				break
+			}
+			params = stripped
+		}
+		count := 1 // a variadic symbol occupies one parameter slot
+		if values, fixed := scmerSlice(params); fixed {
+			count = len(values)
+		} else if !params.IsSymbol() {
+			return expr // preserve malformed/opaque syntax for its own validator
+		}
+		result := append([]Scmer(nil), items...)
+		result[0] = NewSymbol("lambda")
+		result[2] = deoptimizeProcSpecializationExpr(items[2], append(scopes[:len(scopes):len(scopes)], count))
+		return NewSlice(result) // parameters and optional frame/proof data are inert
+	}
+	if len(items) == 3 && scmerIsSymbol(items[0], "outer") {
+		depth, valid := outerDepthLiteral(items[1])
+		if !valid || depth >= int64(len(scopes)) {
+			return expr // the referenced frame belongs outside the rebuilt Proc
+		}
+		return NewSlice([]Scmer{NewSymbol("outer"), items[1],
+			deoptimizeProcSpecializationExpr(items[2], scopes[:len(scopes)-int(depth)])})
+	}
 	if len(items) >= 3 && scmerIsSymbol(items[0], "!list") {
 		count := int(ToInt(items[2]))
 		if count == len(items)-3 {
 			newItems := make([]Scmer, 1+count)
 			newItems[0] = NewSymbol("list")
 			for i := 0; i < count; i++ {
-				newItems[1+i] = deoptimizeProcSpecializationExpr(items[3+i], paramCount)
+				newItems[1+i] = deoptimizeProcSpecializationExpr(items[3+i], scopes)
 			}
 			return NewSlice(newItems)
 		}
@@ -4748,11 +4793,53 @@ func deoptimizeProcSpecializationExpr(expr Scmer, paramCount int) Scmer {
 		return NewSlice([]Scmer{NewSymbol("list")})
 	}
 	newItems := make([]Scmer, len(items))
-	for i, item := range items {
-		newItems[i] = deoptimizeProcSpecializationExpr(item, paramCount)
+	copy(newItems, items)
+	switch {
+	case scmerIsSymbol(items[0], "begin"):
+		shared := append(scopes[:len(scopes):len(scopes)], paramCount)
+		newItems[0] = NewSymbol("begin")
+		for i := 1; i < len(items); i++ {
+			newItems[i] = deoptimizeProcSpecializationExpr(items[i], shared)
+		}
+	case scmerIsSymbol(items[0], "begin_mut"):
+		shared := append(scopes[:len(scopes):len(scopes)], paramCount)
+		newItems[0] = NewSymbol("begin_mut")
+		if len(items) > 1 {
+			newItems[1] = deoptimizeProcSpecializationExpr(items[1], scopes)
+		}
+		for i := 2; i < len(items); i++ {
+			newItems[i] = deoptimizeProcSpecializationExpr(items[i], shared)
+		}
+	case scmerIsSymbol(items[0], "match") || scmerIsSymbol(items[0], "match_mut"):
+		shared := append(scopes[:len(scopes):len(scopes)], paramCount)
+		newItems[0] = deoptimizeProcSpecializationExpr(items[0], scopes)
+		if len(items) > 1 {
+			newItems[1] = deoptimizeProcSpecializationExpr(items[1], scopes)
+		}
+		for i := 2; i+1 < len(items); i += 2 {
+			newItems[i] = deoptimizeProcSpecializationExpr(items[i], shared)
+			newItems[i+1] = deoptimizeProcSpecializationExpr(items[i+1], shared)
+		}
+		if len(items)%2 == 1 {
+			newItems[len(items)-1] = deoptimizeProcSpecializationExpr(items[len(items)-1], scopes)
+		}
+	default:
+		for i, item := range items {
+			newItems[i] = deoptimizeProcSpecializationExpr(item, scopes)
+		}
 	}
-	if len(newItems) == 3 && scmerIsSymbol(newItems[0], "setN") && items[1].IsNthLocalVar() && int(items[1].NthLocalVar()) >= paramCount {
-		newItems[0] = NewSymbol("define")
+	if len(newItems) == 3 && scmerIsSymbol(newItems[0], "setN") {
+		target := items[1]
+		for {
+			stripped, wrapped := scmerStripSourceInfo(target)
+			if !wrapped {
+				break
+			}
+			target = stripped
+		}
+		if target.IsNthLocalVar() && int(target.NthLocalVar()) >= paramCount {
+			newItems[0] = NewSymbol("define")
+		}
 	}
 	return NewSlice(newItems)
 }
