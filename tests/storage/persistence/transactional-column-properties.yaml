@@ -63,6 +63,14 @@ test_cases:
     - connection: owner
       sql: BEGIN TRANSACTION; UPDATE property_marker_prefix SET value=12 WHERE id=1
     - connection: owner
+      sql: ALTER TABLE property_marker_rows ADD label VARCHAR(8) NULL
+    - connection: owner
+      sql: SELECT COUNT(*) AS visible_columns FROM sys.columns WHERE object_id=OBJECT_ID(N'property_marker_rows') AND name=N'label'
+      expect: {rows: 1, data: [{visible_columns: 1}]}
+    - connection: observer
+      sql: SELECT COUNT(*) AS visible_columns FROM sys.columns WHERE object_id=OBJECT_ID(N'property_marker_rows') AND name=N'label'
+      expect: {rows: 1, data: [{visible_columns: 0}]}
+    - connection: owner
       sql: ALTER TABLE property_marker_rows ALTER COLUMN guid DROP ROWGUIDCOL
     - connection: observer
       sql: SELECT CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_marker_rows') AND name=N'guid'
@@ -96,8 +104,8 @@ test_cases:
 - name: Recovered metadata retains the committed marker removal
   sql: SELECT name,CAST(is_rowguidcol AS INT) AS marked FROM sys.all_columns WHERE object_id=OBJECT_ID(N'property_marker_rows',N'U') ORDER BY column_id
   expect:
-    rows: 3
-    data: [{name: id, marked: 0}, {name: guid, marked: 0}, {name: plain_guid, marked: 0}]
+    rows: 4
+    data: [{name: id, marked: 0}, {name: guid, marked: 0}, {name: plain_guid, marked: 0}, {name: label, marked: 0}]
 - name: Recovery retains all actual values and duplicate GUIDs
   sql: SELECT id,guid FROM property_marker_rows ORDER BY id
   expect:
