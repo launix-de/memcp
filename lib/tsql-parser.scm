@@ -328,6 +328,12 @@ only the selected value's formula survives annotation lowering. */
 	(if (and (expression_equal? (sql_info_datatype selected) (sql_info_datatype reference))
 		(expression_equal? (sql_info_collation selected) (sql_info_collation reference))) selected
 		(tsql_raise_error 8167 "conflicting column types in the UNPIVOT list" 1)))))
+/* A PIVOT discriminator has its own documented type restriction, independent
+of whether the ordinary comparison operator could compare its native bytes. */
+(define tsql_pivot_comparison_compiler (lambda (infos)
+	(if (has? '("IMAGE" "ROWVERSION" "TIMESTAMP") (sql_info_type (car infos)))
+		(error "PIVOT discriminator cannot be image or rowversion")
+		((tsql_comparison_compiler "eq") infos))))
 /* INSERT target columns bind only their final identifier. Prefix components
 are syntax, not relation addresses or grants. Each prefix consumes a dot, so
 empty components are valid while a final name is mandatory. Delimited dots
@@ -5669,7 +5675,7 @@ that context explicitly; stored views refuse this scalar before publication. */
 			/* SQL Server compares each output name after conversion to the
 			discriminator's datatype. Reuse the frontend's declared comparison
 			conversion, including numeric discriminator values and collation. */
-			(define matches (tsql_comparison_expr "eq" (column pivot)
+			(define matches (list 'sql_compile_expr 'tsql_pivot_comparison_compiler (column pivot)
 				(list 'sql_type_expr name (list "NVARCHAR" '(128)) nil)))
 			(define selected (tsql_case_expr (list (list matches (column value))) nil))
 			(define expression (if (has? '("COUNT" "COUNT_BIG") aggregate)
