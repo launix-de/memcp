@@ -270,7 +270,7 @@ func appendScanJoinColumn(cols []string, indexes map[string]int, col string) ([]
 	return cols, indexes
 }
 
-func prepareScanJoinOrderSpec(spec *scanJoinOrderSpec) {
+func prepareScanJoinOrderSpec(currentTx *TxContext, spec *scanJoinOrderSpec) {
 	if len(spec.inputs) == 0 {
 		panic("scan_join_order: at least one input table is required")
 	}
@@ -291,6 +291,8 @@ func prepareScanJoinOrderSpec(spec *scanJoinOrderSpec) {
 		if input.table == nil {
 			panic("scan_join_order: input table is nil")
 		}
+		input.table.enterPendingCatalogData(currentTx)
+		input.table.recordSerializableRead(currentTx)
 		if input.filter.IsNil() {
 			input.filter = scanJoinTrue()
 		}
@@ -1008,7 +1010,7 @@ func probeScanJoinOrderInput(currentTx *TxContext, spec *scanJoinOrderSpec, tupl
 }
 
 func scanJoinOrderBatchedProbe(currentTx *TxContext, spec scanJoinOrderSpec) scm.Scmer {
-	prepareScanJoinOrderSpec(&spec)
+	prepareScanJoinOrderSpec(currentTx, &spec)
 	if spec.limit == 0 {
 		return scm.ApplyOnce(spec.notFoundValue, nil)
 	}
@@ -1093,7 +1095,7 @@ func scanJoinOrderBatchedProbe(currentTx *TxContext, spec scanJoinOrderSpec) scm
 }
 
 func scanJoinOrderMaterialized(currentTx *TxContext, spec scanJoinOrderSpec) scm.Scmer {
-	prepareScanJoinOrderSpec(&spec)
+	prepareScanJoinOrderSpec(currentTx, &spec)
 	if spec.limit == 0 {
 		return scm.ApplyOnce(spec.notFoundValue, nil)
 	}
@@ -1610,7 +1612,7 @@ func scanJoinOrder(currentTx *TxContext, spec scanJoinOrderSpec) scm.Scmer {
 		}
 		return scanJoinOrderMaterialized(currentTx, spec)
 	}
-	prepareScanJoinOrderSpec(&spec)
+	prepareScanJoinOrderSpec(currentTx, &spec)
 	if spec.limit == 0 {
 		return scm.ApplyOnce(spec.notFoundValue, nil)
 	}

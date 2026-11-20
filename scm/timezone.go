@@ -153,7 +153,7 @@ func DateToDisplay(v Scmer, sessionLoc *time.Location) string {
 		// TODO: look up zone by ID from zone registry
 		loc = time.UTC
 	}
-	return time.Unix(unix, 0).In(loc).Format("2006-01-02 15:04:05")
+	return time.Unix(unix, int64(v.DateNanosecond())).In(loc).Format("2006-01-02 15:04:05.999999999")
 }
 
 func init_timezone() {

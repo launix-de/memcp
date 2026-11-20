@@ -1,0 +1,168 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  description: Ordinary object identity lookup enters the constraint catalog only after an actual missing native result
+setup:
+# The lazy identity cases consume existing CHECK metadata; its current supported
+# creation owner is ALTER. Inline CREATE CHECK remains a separate positive target.
+- sql: CREATE TABLE lazy_object_parent(id INT PRIMARY KEY,value INT CONSTRAINT lazy_object_default DEFAULT 8)
+- sql: ALTER TABLE lazy_object_parent ADD CONSTRAINT lazy_object_check CHECK(value>=0)
+- sql: CREATE TABLE lazy_object_child(id INT PRIMARY KEY,parent_id INT,CONSTRAINT lazy_object_fk FOREIGN KEY(parent_id) REFERENCES lazy_object_parent(id))
+- sql: CREATE TABLE lazy_object_recreated(id INT)
+- sql: CREATE TABLE lazy_object_receipts(old_id INT)
+cleanup:
+- sql: DROP TABLE IF EXISTS lazy_object_child
+- sql: DROP TABLE IF EXISTS lazy_object_parent
+- sql: DROP TABLE IF EXISTS lazy_object_recreated
+- sql: DROP TABLE IF EXISTS lazy_object_receipts
+test_cases:
+- name: A native value evaluates its supplier once and leaves a failing constraint arm inert
+  scm: |
+    (begin
+      (define seen (newsession))
+      (seen "native" 0) (seen "fallback" 0)
+      (define native (lambda () (begin (seen "native" (+ (seen "native") 1)) 7)))
+      (define fallback (lambda () (begin
+        (seen "fallback" (+ (seen "fallback") 1))
+        (error (cardinality_failure "unused identity fallback")))))
+      (define info (tsql_catalog_object_id_choice_compiler
+        (list (sql_info (list native) "INT" nil) (sql_info (list fallback) "INT" nil))))
+      (and (equal? (eval (sql_info_formula info)) 7)
+        (equal? (seen "native") 1) (equal? (seen "fallback") 0)))
+  expect: {result: true}
+- name: SQL NULL enters its fallback once while numeric zero remains a native result
+  scm: |
+    (begin
+      (define seen (newsession)) (seen "fallback" 0)
+      (define fallback (lambda () (begin (seen "fallback" (+ (seen "fallback") 1)) 13)))
+      (define run (lambda (value)
+        (eval (sql_info_formula (tsql_catalog_object_id_choice_compiler
+          (list (sql_info value "INT" nil) (sql_info (list fallback) "INT" nil)))))))
+      (and (equal? (run nil) 13) (equal? (run 0) 0) (equal? (seen "fallback") 1)))
+  expect: {result: true}
+- name: A chosen fallback preserves the original typed cardinality diagnostic
+  scm: |
+    (begin
+      (define failure (cardinality_failure "chosen identity fallback"))
+      (define formula (sql_info_formula (tsql_catalog_object_id_choice_compiler
+        (list (sql_info nil "INT" nil) (sql_info (list 'error (list 'quote failure)) "INT" nil)))))
+      (try (lambda () (begin (eval formula) false))
+        (lambda (cause) (expression_equal? (failure_value cause)
+          (list "cardinality-error" "chosen identity fallback")))))
+  expect: {result: true}
+- name: A native failure retains its original cause and never enters the fallback
+  scm: |
+    (begin
+      (define seen (newsession)) (seen "fallback" 0)
+      (define failure (cardinality_failure "native identity failure"))
+      (define fallback (lambda () (begin (seen "fallback" 1) 13)))
+      (define formula (sql_info_formula (tsql_catalog_object_id_choice_compiler
+        (list (sql_info (list 'error (list 'quote failure)) "INT" nil) (sql_info (list fallback) "INT" nil)))))
+      (and (try (lambda () (begin (eval formula) false))
+          (lambda (cause) (expression_equal? (failure_value cause)
+            (list "cardinality-error" "native identity failure"))))
+        (equal? (seen "fallback") 0)))
+  expect: {result: true}
+- name: The internal binding cannot capture an existing scalar operand
+  scm: |
+    (begin
+      (define formula (sql_info_formula (tsql_catalog_object_id_choice_compiler
+        (list (sql_info nil "INT" nil) (sql_info '__published_callables_0 "INT" nil)))))
+      (define run (eval (list 'lambda (list '__published_callables_0) formula)))
+      (equal? (run 19) 19))
+  expect: {result: true}
+- name: Two caller names retain native identity and name through nested scalar factories
+  sql: |
+    SELECT source.name,OBJECT_NAME(OBJECT_ID(source.name)) AS resolved
+    FROM (VALUES(N'lazy_object_parent'),(N'lazy_object_child')) source(name)
+    ORDER BY source.name
+  expect:
+    rows: 2
+    data:
+    - {name: lazy_object_child, resolved: lazy_object_child}
+    - {name: lazy_object_parent, resolved: lazy_object_parent}
+- name: CHECK DEFAULT and FOREIGN KEY still enter the real constraint fallback
+  sql: |
+    SELECT source.name,OBJECT_NAME(OBJECT_ID(source.name)) AS resolved
+    FROM (VALUES(N'lazy_object_check'),(N'lazy_object_default'),(N'lazy_object_fk')) source(name)
+    ORDER BY source.name
+  expect:
+    rows: 3
+    data:
+    - {name: lazy_object_check, resolved: lazy_object_check}
+    - {name: lazy_object_default, resolved: lazy_object_default}
+    - {name: lazy_object_fk, resolved: lazy_object_fk}
+- name: Missing and SQL NULL addresses preserve the declared nullable INT result
+  sql: |
+    SELECT source.name,OBJECT_ID(source.name) AS object_id
+    FROM (VALUES(CAST(NULL AS NVARCHAR(128))),(N'lazy_object_absent')) source(name)
+    ORDER BY source.name
+  expect:
+    rows: 2
+    data:
+    - {name: null, object_id: null}
+    - {name: lazy_object_absent, object_id: null}
+- name: A genuine kind mismatch does not return an existing object of another kind
+  sql: SELECT OBJECT_ID(N'lazy_object_parent',N'C') AS object_id,OBJECT_ID(N'lazy_object_check',N'U') AS native_id
+  expect: {rows: 1, data: [{object_id: null, native_id: null}]}
+- name: Typed constraint probes retain their matching declaration families
+  sql: |
+    SELECT OBJECT_NAME(OBJECT_ID(N'lazy_object_fk',N'F')) AS foreign_name,
+      OBJECT_NAME(OBJECT_ID(N'lazy_object_check',N'C')) AS check_name,
+      OBJECT_NAME(OBJECT_ID(N'lazy_object_default',N'D')) AS default_name,
+      OBJECT_ID(N'lazy_object_fk',N'D') AS wrong_kind
+  expect:
+    rows: 1
+    data:
+    - {foreign_name: lazy_object_fk, check_name: lazy_object_check, default_name: lazy_object_default, wrong_kind: null}
+- name: A foreign existence probe retains both declaration and containing-table identity
+  sql: |
+    SELECT CASE WHEN EXISTS (
+      SELECT 1 FROM sys.foreign_keys
+      WHERE object_id=OBJECT_ID(N'dbo.lazy_object_fk',N'F')
+        AND parent_object_id=OBJECT_ID(N'dbo.lazy_object_child',N'U'))
+      THEN 1 ELSE 0 END AS present
+  expect: {rows: 1, data: [{present: 1}]}
+- name: Capture the original native identity before a namespace replacement
+  sql: INSERT lazy_object_receipts VALUES(OBJECT_ID(N'lazy_object_recreated'))
+  expect: {affected_rows: 1}
+- name: Cached nested lookup initially observes its current native generation
+  session_id: lazy_object_identity_reader
+  sql: SELECT OBJECT_NAME(OBJECT_ID(N'lazy_object_recreated')) AS resolved
+  expect: {rows: 1, data: [{resolved: lazy_object_recreated}]}
+- name: Drop the old native declaration
+  sql: DROP TABLE lazy_object_recreated
+  expect: {rows: 0}
+- name: Identical nested lookup observes absence after DROP
+  session_id: lazy_object_identity_reader
+  sql: SELECT OBJECT_NAME(OBJECT_ID(N'lazy_object_recreated')) AS resolved
+  expect: {rows: 1, data: [{resolved: null}]}
+- name: Create a distinct native generation under the same address
+  sql: CREATE TABLE lazy_object_recreated(id INT,value INT)
+  expect: {rows: 0}
+- name: Identical nested lookup resolves the recreated current declaration
+  session_id: lazy_object_identity_reader
+  sql: SELECT OBJECT_NAME(OBJECT_ID(N'lazy_object_recreated')) AS resolved
+  expect: {rows: 1, data: [{resolved: lazy_object_recreated}]}
+- name: A recreated address receives a fresh native identity
+  sql: SELECT CASE WHEN OBJECT_ID(N'lazy_object_recreated')<>old_id THEN 1 ELSE 0 END AS fresh FROM lazy_object_receipts
+  expect: {rows: 1, data: [{fresh: 1}]}
+
+- name: Inline CREATE CHECK retains named DEFAULT SQL UNKNOWN and rejected-row semantics
+  noncritical: true
+  cleanup:
+  - sql: DROP TABLE IF EXISTS lazy_inline_check_future
+  sql: |
+    CREATE TABLE lazy_inline_check_future(id INT PRIMARY KEY,value INT CONSTRAINT lazy_inline_default_future DEFAULT 8,CONSTRAINT lazy_inline_check_future_ck CHECK(value>=0));
+    INSERT lazy_inline_check_future VALUES(1,DEFAULT),(2,NULL);
+    DECLARE @rejected INT=0;
+    BEGIN TRY INSERT lazy_inline_check_future VALUES(3,-1); END TRY
+    BEGIN CATCH SET @rejected=1; END CATCH;
+    SELECT id,value,@rejected AS rejected FROM lazy_inline_check_future ORDER BY id;
+  expect:
+    rows: 2
+    data:
+    - {id: 1, value: 8, rejected: 1}
+    - {id: 2, value: null, rejected: 1}

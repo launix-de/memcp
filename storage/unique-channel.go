@@ -196,7 +196,7 @@ func (t *table) uniqueReadOnlyPrefix(columns []string, rows [][]scm.Scmer, merge
 		found := false
 		func() {
 			defer topology.releaseOperation()
-			for constraintIndex := t.nextUniqueConstraint(columns, 0); constraintIndex < len(t.Unique); constraintIndex = t.nextUniqueConstraint(columns, constraintIndex+1) {
+			for constraintIndex := t.nextUniqueConstraint(columns, 0, nil); constraintIndex < len(t.Unique); constraintIndex = t.nextUniqueConstraint(columns, constraintIndex+1, nil) {
 				constraint := t.Unique[constraintIndex]
 				key, comparable := uniqueKeyValues(columns, row, constraint, mergeNull)
 				if !comparable {
@@ -513,7 +513,7 @@ func (t *table) uniqueProbeDomain(topology *tableShardTopology, columns []string
 		}
 	}
 	add(targets)
-	for index := t.nextUniqueConstraint(columns, 0); index < len(t.Unique); index = t.nextUniqueConstraint(columns, index+1) {
+	for index := t.nextUniqueConstraint(columns, 0, nil); index < len(t.Unique); index = t.nextUniqueConstraint(columns, index+1, nil) {
 		for _, row := range rows {
 			if key, comparable := uniqueKeyValues(columns, row, t.Unique[index], mergeNull); comparable {
 				add(t.uniqueProbeShards(topology, t.Unique[index].Cols, key))
@@ -885,7 +885,7 @@ func (s *storageShard) serveUniqueScan(ctx context.Context, input shardScanInvoc
 		// native nil-TX mutation keeps its immediate publication semantics.
 		tx = nil
 	}
-	guard := s.t.guardUniqueWrites(columns, rows, parameters[3].Bool(), 0, tx)
+	guard := s.t.guardUniqueWrites(columns, rows, parameters[3].Bool(), 0, tx, nil)
 	guardPointer := &guard
 	if input.uniqueGuard != nil {
 		guardPointer = input.uniqueGuard

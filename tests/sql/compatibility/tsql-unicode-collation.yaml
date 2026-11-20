@@ -1,0 +1,33 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  description: Unicode TDS descriptors include the default SQL collation
+  syntax: tsql
+  requires_tds: true
+test_cases:
+- name: Unicode descriptors include a valid code page even without rows
+  scm: >-
+    (if (and
+      (equal? ((tsql_wire_contract "NVARCHAR" (list 128)) "collation") (hex2bin "0904d00034"))
+      (equal? ((tsql_wire_contract "NCHAR" (list 8)) "collation") (hex2bin "0904d00034"))
+      (equal? ((tsql_wire_contract "NVARCHAR" (list -1)) "collation") (hex2bin "0904d00034")))
+      true (error "Unicode TDS metadata has no valid default collation"))
+- name: Numeric descriptors do not receive text collation metadata
+  scm: (if (nil? ((tsql_wire_contract "INT" (list)) "collation")) true (error "numeric descriptor has a text collation"))
+- name: National Unicode values remain UTF16 on the wire
+  tds:
+    statements:
+    - sql: SELECT CAST(N'Grüße € 😀' AS NVARCHAR(128)) AS label
+      expect:
+        rows: 1
+        data: [{label: 'Grüße € 😀'}]
+        column_types: [{name: label, type: NVARCHAR, length: 128}]
+    - sql: SELECT CAST(N'' AS NCHAR(4)) AS label WHERE 1=0
+      expect:
+        rows: 0
+        column_types: [{name: label, type: NVARCHAR, length: 4}]
+    - sql: SELECT CAST(@text AS NVARCHAR(128)) AS label
+      prepare: true
+      parameters: [{name: text, value: 'Grüße € 😀'}]
+      expect: {rows: 1, data: [{label: 'Grüße € 😀'}]}

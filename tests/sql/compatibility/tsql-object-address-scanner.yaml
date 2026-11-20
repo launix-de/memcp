@@ -1,0 +1,136 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: Portable object address scanning preserves existing identifier syntax
+  syntax: tsql
+  isolated: true
+setup:
+  - sql: CREATE TABLE object_address_target(id INT PRIMARY KEY)
+  - sql: CREATE TABLE [object_address-name](id INT)
+  - sql: CREATE TABLE [object address space](id INT)
+  - sql: CREATE TABLE [object.address.dot](id INT)
+  - sql: CREATE TABLE [SELECT](id INT)
+  - sql: CREATE TABLE [1name](id INT)
+cleanup:
+  - sql: DROP TABLE IF EXISTS object_address_target
+  - sql: DROP TABLE IF EXISTS [object_address-name]
+  - sql: DROP TABLE IF EXISTS [object address space]
+  - sql: DROP TABLE IF EXISTS [object.address.dot]
+  - sql: DROP TABLE IF EXISTS [SELECT]
+  - sql: DROP TABLE IF EXISTS [1name]
+test_cases:
+  - name: Metadata values keep ordinary SQL token validation separate
+    scm: |
+      (and
+        (expression_equal? (tsql_object_name_parts "dbo.Änderung") (list nil "dbo" "Änderung"))
+        (expression_equal? (tsql_object_name_parts "dbo.SELECT_suffix") (list nil "dbo" "SELECT_suffix"))
+        (not (tsql_regular_identifier? "SELECT"))
+        (not (tsql_regular_identifier? "1name"))
+        (not (tsql_regular_identifier? "𐐀name")))
+    expect: {result: true}
+  - name: Bracket and double quote escapes preserve dots within each address part
+    scm: |
+      (and
+        (expression_equal? (tsql_object_name_parts "[db.name].[owner]]name].[leaf.name]")
+          '("db.name" "owner]name" "leaf.name"))
+        (expression_equal? (tsql_object_name_parts "\"db.name\".\"dbo\".\"leaf\"\"name\"")
+          '("db.name" "dbo" "leaf\"name")))
+    expect: {result: true}
+  - name: Optional middle owner keeps its existing database default
+    scm: |
+      (and
+        (expression_equal? (tsql_object_name_parts "[memcp-tests]..[object_address_target]")
+          '("memcp-tests" "dbo" "object_address_target"))
+        (expression_equal? (tsql_object_name_parts "object_address_target")
+          (list nil "dbo" "object_address_target")))
+    expect: {result: true}
+  - name: Delimited reserved names retain their existing identifier contract
+    scm: (expression_equal? (tsql_object_name_parts "dbo.[SELECT]") (list nil "dbo" "SELECT"))
+    expect: {result: true}
+  - name: Reserved names are complete metadata values without SQL token parsing
+    scm: (expression_equal? (tsql_object_name_parts "dbo.SELECT") (list nil "dbo" "SELECT"))
+    expect: {result: true}
+  - name: Empty bracket names remain invalid
+    scm: (tsql_object_name_parts "dbo.[]")
+    expect: {error: true}
+  - name: An unterminated quoted name remains invalid
+    scm: (tsql_object_name_parts "dbo.[object_address_target")
+    expect: {error: true}
+  - name: A quoted identifier suffix must be consumed completely
+    scm: (tsql_object_name_parts "dbo.[object_address_target]suffix")
+    expect: {error: true}
+  - name: Spaces belong to the complete unquoted metadata name
+    scm: (expression_equal? (tsql_object_name_parts "dbo.object_address_target suffix")
+      (list nil "dbo" "object_address_target suffix"))
+    expect: {result: true}
+  - name: A fourth address component remains unsupported
+    scm: (tsql_object_name_parts "server.database.dbo.object_address_target")
+    expect: {error: true}
+  - name: A leading empty owner remains unsupported
+    scm: (tsql_object_name_parts ".object_address_target")
+    expect: {error: true}
+  - name: An empty final identifier remains unsupported
+    scm: (tsql_object_name_parts "dbo.")
+    expect: {error: true}
+  - name: Private native relation addresses remain inaccessible even when quoted
+    scm: (tsql_object_name_parts "dbo.[.##private]")
+    expect: {error: true}
+  - name: Quoted and relative object addresses resolve the same native declaration
+    sql: >-
+      SELECT CASE WHEN OBJECT_ID(N'[dbo].[object_address_target]',N'U')=OBJECT_ID(N'object_address_target',N'U')
+      AND OBJECT_ID(N'"dbo"."object_address_target"',N'U')=OBJECT_ID(N'dbo.object_address_target',N'U')
+      AND OBJECT_ID(N'[memcp-tests]..[object_address_target]',N'U')=OBJECT_ID(N'dbo.object_address_target',N'U')
+      THEN 1 ELSE 0 END AS same_id
+    expect: {rows: 1,data: [{same_id: 1}]}
+  - name: Invalid address comments and trailing statements never resolve a prefix
+    sql: >-
+      SELECT OBJECT_ID(N'dbo.object_address_target--suffix') AS line_comment,
+      OBJECT_ID(N'dbo.object_address_target/*suffix*/') AS block_comment,
+      OBJECT_ID(N'dbo.object_address_target;SELECT 1') AS statement,
+      OBJECT_ID(N'dbo.[object_address_target]suffix') AS quoted_suffix
+    expect: {rows: 1,data: [{line_comment: null,block_comment: null,statement: null,quoted_suffix: null}]}
+  - name: Hyphens and spaces resolve the same real object through metadata APIs
+    sql: SELECT CASE WHEN OBJECT_ID(N'dbo.object_address-name',N'U') IS NOT NULL THEN 1 ELSE 0 END AS dash_object,HAS_PERMS_BY_NAME(N'dbo.object_address-name',N'OBJECT',N'SELECT')
+      AS dash_right,CASE WHEN OBJECT_ID(N'dbo.object address space',N'U') IS NOT NULL THEN 1 ELSE 0 END AS space_object,HAS_PERMS_BY_NAME(N'dbo.object
+      address space',N'OBJECT',N'SELECT') AS space_right
+    expect:
+      rows: 1
+      data:
+      - dash_object: 1
+        dash_right: 1
+        space_object: 1
+        space_right: 1
+  - name: Metadata values accept reserved words and initial digits
+    sql: SELECT CASE WHEN OBJECT_ID(N'dbo.SELECT',N'U') IS NOT NULL THEN 1 ELSE 0 END AS keyword_object,CASE WHEN OBJECT_ID(N'dbo.1name',N'U')
+      IS NOT NULL THEN 1 ELSE 0 END AS digit_object
+    expect:
+      rows: 1
+      data:
+      - keyword_object: 1
+        digit_object: 1
+  - name: Unquoted dots remain multipart while delimiters keep a literal dot
+    sql: SELECT CASE WHEN OBJECT_ID(N'dbo.[object.address.dot]',N'U') IS NOT NULL THEN 1 ELSE 0 END AS quoted_object,HAS_PERMS_BY_NAME(N'dbo.[object.address.dot]',N'OBJECT',N'SELECT')
+      AS quoted_right,OBJECT_ID(N'dbo.object.address.dot',N'U') AS multipart_object,HAS_PERMS_BY_NAME(N'dbo.object.address.dot',N'OBJECT',N'SELECT')
+      AS multipart_right
+    expect:
+      rows: 1
+      data:
+      - quoted_object: 1
+        quoted_right: 1
+        multipart_object: null
+        multipart_right: 0
+  - name: Metadata address whitespace does not resolve a different name
+    sql: SELECT OBJECT_ID(N' dbo.object_address-name',N'U') AS leading_name,HAS_PERMS_BY_NAME(N' dbo.object_address-name',N'OBJECT',N'SELECT')
+      AS leading_right,CASE WHEN OBJECT_ID(N'dbo.object_address-name ',N'U') IS NOT NULL THEN 1 ELSE 0 END AS trailing_name,OBJECT_ID(N'dbo.[object_address-name]
+      ',N'U') AS quote_space
+    expect:
+      rows: 1
+      data:
+      - leading_name: null
+        leading_right: 0
+        trailing_name: 1
+        quote_space: null
+  - name: Whitespace outside a completed quoted part remains invalid
+    scm: (tsql_object_name_parts "dbo.[object_address_target] ")
+    expect:
+      error: true

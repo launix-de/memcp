@@ -1,0 +1,141 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# https://learn.microsoft.com/sql/t-sql/statements/set-arithabort-transact-sql
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Explicit arithmetic abort profiles preserve runtime state and existing strict arithmetic
+setup:
+  - sql: |
+      CREATE PROCEDURE arithmetic_option_module AS BEGIN
+        SET ANSI_WARNINGS,ARITHABORT ON;
+        SELECT SESSIONPROPERTY('ARITHABORT') AS abort_setting,@@OPTIONS&64 AS option_bit;
+      END;
+cleanup:
+  - sql: DROP FUNCTION IF EXISTS arithmetic_option_value
+  - sql: DROP PROCEDURE IF EXISTS arithmetic_option_module
+test_cases:
+  - name: An application connection reports its default arithmetic abort state
+    sql: SELECT SESSIONPROPERTY('ARITHABORT') AS abort_setting,@@OPTIONS&64 AS option_bit
+    expect: {rows: 1, data: [{abort_setting: 0, option_bit: 0}]}
+  - name: A deployment list sets every declared option and retains arithmetic abort
+    sql: |
+
+      SET ANSI_PADDING, ANSI_WARNINGS, CONCAT_NULL_YIELDS_NULL, ARITHABORT, QUOTED_IDENTIFIER, ANSI_NULLS ON;
+      SELECT SESSIONPROPERTY('ARITHABORT') AS abort_setting,@@OPTIONS&64 AS option_bit,
+        SESSIONPROPERTY('ANSI_WARNINGS') AS warnings,SESSIONPROPERTY('ANSI_PADDING') AS padding,
+        SESSIONPROPERTY('QUOTED_IDENTIFIER') AS quoted,SESSIONPROPERTY('ANSI_NULLS') AS ansi,
+        SESSIONPROPERTY('CONCAT_NULL_YIELDS_NULL') AS concat_null;
+    expect: {rows: 1, data: [{abort_setting: 1, option_bit: 64, warnings: 1, padding: 1, quoted: 1, ansi: 1, concat_null: 1}]}
+  - name: Reordered shared lists validate their complete prospective profile
+    sql: |
+      SET ANSI_WARNINGS,ARITHABORT OFF;
+      SET ARITHABORT /* same shared value */, ANSI_WARNINGS ON;
+      SELECT SESSIONPROPERTY('ARITHABORT') AS abort_setting,@@OPTIONS&64 AS option_bit,8/2 AS value;
+    expect: {rows: 1, data: [{abort_setting: 1, option_bit: 64, value: 4}]}
+  - name: Strict arithmetic still raises divide by zero with arithmetic abort enabled
+    sql: |
+      SET ANSI_WARNINGS,ARITHABORT ON;
+      BEGIN TRY SELECT 8/0 AS value; END TRY
+      BEGIN CATCH SELECT ERROR_NUMBER() AS number; END CATCH;
+    expect: {rows: 1, data: [{number: 8134}]}
+  - name: Strict arithmetic still checks declared integer overflow
+    sql: |
+      SET ANSI_WARNINGS,ARITHABORT ON;
+      BEGIN TRY SELECT 2147483647+1 AS value; END TRY
+      BEGIN CATCH SELECT ERROR_NUMBER() AS number; END CATCH;
+    expect: {rows: 1, data: [{number: 8115}]}
+  - name: Disabling arithmetic abort cannot disable ANSI warnings errors
+    sql: |
+      SET ANSI_WARNINGS ON; SET ARITHABORT OFF;
+      BEGIN TRY SELECT 8/0 AS value; END TRY
+      BEGIN CATCH SELECT ERROR_NUMBER() AS number; END CATCH;
+    expect: {rows: 1, data: [{number: 8134}]}
+  - name: Both disabled options retain the existing arithmetic NULL result
+    sql: |
+      SET ARITHABORT,ANSI_WARNINGS OFF;
+      SELECT 8/0 AS divided,2147483647+1 AS overflowed,
+        SESSIONPROPERTY('ARITHABORT') AS abort_setting,@@OPTIONS&64 AS option_bit;
+    expect: {rows: 1, data: [{divided: null, overflowed: null, abort_setting: 0, option_bit: 0}]}
+  - name: Procedure runtime options restore their caller on return
+    sql: |
+      SET ARITHABORT OFF;
+      EXEC arithmetic_option_module;
+      SELECT SESSIONPROPERTY('ARITHABORT') AS abort_setting,@@OPTIONS&64 AS option_bit;
+    expect: {rows: 2, data: [{abort_setting: 1, option_bit: 64}, {abort_setting: 0, option_bit: 0}]}
+  - name: Dynamic runtime options restore their caller on return
+    sql: |
+      SET ARITHABORT OFF;
+      EXEC(N'SET ANSI_WARNINGS,ARITHABORT ON; SELECT SESSIONPROPERTY(''ARITHABORT'') AS abort_setting,@@OPTIONS&64 AS option_bit;');
+      SELECT SESSIONPROPERTY('ARITHABORT') AS abort_setting,@@OPTIONS&64 AS option_bit;
+    expect: {rows: 2, data: [{abort_setting: 1, option_bit: 64}, {abort_setting: 0, option_bit: 0}]}
+  - name: Skipped statements do not change arithmetic abort at parse time
+    sql: |
+      SET ARITHABORT OFF;
+      IF 1=0 SET ARITHABORT ON;
+      SELECT SESSIONPROPERTY('ARITHABORT') AS abort_setting,@@OPTIONS&64 AS option_bit;
+    expect: {rows: 1, data: [{abort_setting: 0, option_bit: 0}]}
+  - name: Compilation does not execute an unentered arithmetic profile
+    sql: |
+      SET ARITHABORT OFF;
+      SET NOEXEC ON;
+      SET ANSI_WARNINGS OFF;
+      SET ARITHABORT ON;
+      SET NOEXEC OFF;
+      SELECT SESSIONPROPERTY('ARITHABORT') AS abort_setting,SESSIONPROPERTY('ANSI_WARNINGS') AS warnings;
+    expect: {rows: 1, data: [{abort_setting: 0, warnings: 1}]}
+  - name: Arithmetic abort persists across GO on its connection
+    session_id: arithmetic-option-shared
+    sql: |
+      SET ANSI_WARNINGS,ARITHABORT ON;
+      GO
+      SELECT SESSIONPROPERTY('ARITHABORT') AS abort_setting,@@OPTIONS&64 AS option_bit;
+    expect: {rows: 1, data: [{abort_setting: 1, option_bit: 64}]}
+  - name: A later request reads the actual connection option
+    session_id: arithmetic-option-shared
+    sql: SELECT SESSIONPROPERTY('ARITHABORT') AS abort_setting,@@OPTIONS&64 AS option_bit
+    expect: {rows: 1, data: [{abort_setting: 1, option_bit: 64}]}
+  - name: Scalar modules receive arithmetic abort as an explicit invocation input
+    sql: |
+      CREATE FUNCTION arithmetic_option_value() RETURNS INT AS BEGIN
+        RETURN CASE WHEN SESSIONPROPERTY('ARITHABORT')=1 THEN 1 ELSE 0 END;
+      END;
+      GO
+      SET ANSI_WARNINGS,ARITHABORT ON;
+      SELECT dbo.arithmetic_option_value() AS enabled;
+      SET ARITHABORT OFF;
+      SELECT dbo.arithmetic_option_value() AS disabled;
+    expect: {rows: 2, data: [{enabled: 1}, {disabled: 0}]}
+  - name: An independent connection retains its default arithmetic abort state
+    sql: SELECT SESSIONPROPERTY('ARITHABORT') AS abort_setting,@@OPTIONS&64 AS option_bit
+    expect: {rows: 1, data: [{abort_setting: 0, option_bit: 0}]}
+  - name: Native clients retain arithmetic abort metadata on their actual connection
+    tds:
+      statements:
+        - sql: SET ANSI_PADDING,ANSI_WARNINGS,CONCAT_NULL_YIELDS_NULL,ARITHABORT,QUOTED_IDENTIFIER,ANSI_NULLS ON
+        - sql: SELECT SESSIONPROPERTY('ARITHABORT') AS abort_setting,@@OPTIONS&64 AS option_bit
+          expect: {rows: 1, data: [{abort_setting: 1, option_bit: 64}]}
+        - sql: SET ARITHABORT OFF
+        - sql: SELECT SESSIONPROPERTY('ARITHABORT') AS abort_setting,@@OPTIONS&64 AS option_bit
+          expect: {rows: 1, data: [{abort_setting: 0, option_bit: 0}]}
+  - name: Arithmetic abort with warnings disabled stops the batch and clears its transaction
+    session_id: arithmetic-abort-transaction
+    steps:
+      - sql: SET ANSI_WARNINGS OFF; SET ARITHABORT ON; BEGIN TRANSACTION; SELECT 8/0 AS value
+        session_id: arithmetic-abort-transaction
+        expect: {error: true, contains: '8134'}
+      - sql: SELECT XACT_STATE() AS state,@@TRANCOUNT AS depth
+        session_id: arithmetic-abort-transaction
+        expect: {rows: 1, data: [{state: 0, depth: 0}]}
+  - name: A warning-free arithmetic abort profile can execute ordinary arithmetic
+    sql: |
+      SET ANSI_WARNINGS OFF; SET ARITHABORT ON;
+      SELECT 8/2 AS value,SESSIONPROPERTY('ARITHABORT') AS abort_setting;
+    expect: {rows: 1, data: [{value: 4, abort_setting: 1}]}
+  - name: A numeric session property supports its declared explicit integer conversion
+    noncritical: true
+    sql: |
+      SET ANSI_WARNINGS,ARITHABORT ON;
+      SELECT CAST(SESSIONPROPERTY('ARITHABORT') AS INT) AS abort_setting;
+    expect: {rows: 1, data: [{abort_setting: 1}]}

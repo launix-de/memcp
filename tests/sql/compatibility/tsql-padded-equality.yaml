@@ -1,0 +1,281 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Character equality and literal IN ignore only trailing U+0020 with existing collation; ranges, LIKE
+    and native uniqueness remain separate
+setup:
+- sql: CREATE TABLE pad_eq_rows(id INT PRIMARY KEY,label NVARCHAR(8) COLLATE utf8mb4_bin)
+- sql: INSERT pad_eq_rows VALUES(1,N'P'),(2,N'P '),(3,N'P  '),(4,N'FN'),(5,N'P'+CHAR(9)),(6,N''),(7,N' '),(8,NULL),(9,N'Q')
+cleanup:
+- sql: DROP TABLE IF EXISTS pad_eq_check
+- sql: DROP TABLE IF EXISTS pad_in_check
+- sql: DROP TABLE IF EXISTS pad_eq_rows
+test_cases:
+- name: Character equality pads only trailing U+0020 and preserves SQL UNKNOWN
+  sql: SELECT CASE WHEN N'P'=N'P  ' THEN 1 ELSE 0 END AS padded,CASE WHEN N'P'<>N'P ' THEN 1 ELSE 0 END AS different,CASE
+    WHEN N'P '!=N'P' THEN 1 ELSE 0 END AS unequal,CASE WHEN N''=N'   ' THEN 1 ELSE 0 END AS empty_equal,CASE WHEN
+    NULL=N'P ' THEN 1 WHEN NULL<>N'P ' THEN 2 ELSE 3 END AS unknown_value
+  expect:
+    rows: 1
+    data:
+    - padded: 1
+      different: 0
+      unequal: 0
+      empty_equal: 1
+      unknown_value: 3
+- name: Character padding does not remove tabs or leading spaces
+  sql: SELECT CASE WHEN N'P'+CHAR(9)=N'P ' THEN 1 ELSE 0 END AS tab_equal,CASE WHEN N' P'=N'P' THEN 1 ELSE 0 END
+    AS leading_equal
+  expect:
+    rows: 1
+    data:
+    - tab_equal: 0
+      leading_equal: 0
+- name: Selected binary character collation still pads spaces but preserves case
+  sql: SELECT CASE WHEN N'P' COLLATE Latin1_General_BIN2=N'P ' THEN 1 ELSE 0 END AS padded,CASE WHEN N'p ' COLLATE
+    Latin1_General_BIN2=N'P' THEN 1 ELSE 0 END AS different_case
+  expect:
+    rows: 1
+    data:
+    - padded: 1
+      different_case: 0
+- name: Existing case-insensitive character collation and padding compose
+  sql: SELECT CASE WHEN N'p ' COLLATE utf8mb4_general_ci=N'P' THEN 1 ELSE 0 END AS matched
+  expect:
+    rows: 1
+    data:
+    - matched: 1
+- name: Binary payload equality retains significant space bytes
+  sql: SELECT CASE WHEN 0x50=0x5020 THEN 1 ELSE 0 END AS padded_binary,CASE WHEN 0x50=0x50 THEN 1 ELSE 0 END AS
+    identical_binary
+  expect:
+    rows: 1
+    data:
+    - padded_binary: 0
+      identical_binary: 1
+- name: LIKE retains its independent significant trailing pattern space
+  sql: SELECT CASE WHEN N'P' LIKE N'P ' THEN 1 ELSE 0 END AS matched
+  expect:
+    rows: 1
+    data:
+    - matched: 0
+- name: Direct equality finds every padded spelling without a raw equality bound
+  sql: SELECT id FROM pad_eq_rows WHERE label=N'P ' ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - id: 1
+    - id: 2
+    - id: 3
+- name: Computed equality shares the character comparison owner
+  sql: SELECT id FROM pad_eq_rows WHERE CONCAT(label,N' ')=N'P' ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - id: 1
+    - id: 2
+    - id: 3
+- name: Literal character IN includes padded values and exact metadata-style codes
+  sql: SELECT id FROM pad_eq_rows WHERE label IN(N'P ',N'FN') ORDER BY id
+  expect:
+    rows: 4
+    data:
+    - id: 1
+    - id: 2
+    - id: 3
+    - id: 4
+- name: Literal NOT IN preserves UNKNOWN when a NULL option is present
+  sql: SELECT id FROM pad_eq_rows WHERE label NOT IN(N'P ',NULL) ORDER BY id
+  expect:
+    rows: 0
+    data: []
+- name: Literal IN can find a true match after a NULL option
+  sql: SELECT CASE WHEN N'P' IN(NULL,N'P ') THEN 1 ELSE 0 END AS found,CASE WHEN N'Q' IN(N'P ',NULL) THEN 1 WHEN
+    N'Q' NOT IN(N'P ',NULL) THEN 2 ELSE 3 END AS unknown_value,CASE WHEN NULL IN(N'P ') THEN 1 WHEN NULL NOT IN(N'P
+    ') THEN 2 ELSE 3 END AS null_probe
+  expect:
+    rows: 1
+    data:
+    - found: 1
+      unknown_value: 3
+      null_probe: 3
+- name: Literal NOT IN without NULL excludes only the padded equality class
+  sql: SELECT id FROM pad_eq_rows WHERE label NOT IN(N'P ',N'FN') ORDER BY id
+  expect:
+    rows: 4
+    data:
+    - id: 5
+    - id: 6
+    - id: 7
+    - id: 9
+- name: Comparison normalization leaves stored text bytes unchanged
+  sql: SELECT id,label FROM pad_eq_rows WHERE id<=3 ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - id: 1
+      label: P
+    - id: 2
+      label: 'P '
+    - id: 3
+      label: 'P  '
+- name: Native numeric IN and numeric subquery domains remain unchanged
+  sql: SELECT id FROM pad_eq_rows WHERE id IN(SELECT id FROM pad_eq_rows WHERE id IN(1,3,NULL)) ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+    - id: 3
+- name: Metadata object type list matches its real U declaration through padding
+  sql: SELECT name,type FROM sys.objects WHERE name=N'pad_eq_rows' AND type IN(N'U ',N'FN')
+  expect:
+    rows: 1
+    data:
+    - name: pad_eq_rows
+      type: U
+- name: Prepared character probes use each actual invocation value
+  tds:
+    statements:
+    - sql: SELECT id FROM pad_eq_rows WHERE label=@value ORDER BY id
+      prepare: true
+      parameters:
+      - name: value
+        value: 'P '
+      expect:
+        rows: 3
+        data:
+        - id: 1
+        - id: 2
+        - id: 3
+    - sql: SELECT id FROM pad_eq_rows WHERE label=@value ORDER BY id
+      prepare: true
+      parameters:
+      - name: value
+        value: FN
+      expect:
+        rows: 1
+        data:
+        - id: 4
+- name: Declared CHAR2 metadata literal uses the same padding compiler
+  scm: |-
+    (begin
+      (define code (sql_info "P" (list "CHAR" (list 2)) (list "utf8mb4_bin" 2)))
+      (define literal (sql_info "P " "NVARCHAR" (list "utf8mb4_bin" 4)))
+      (define info (tsql_literal_in_compiler (list code literal)))
+      (eval (sql_info_formula info)))
+  expect:
+    result: true
+- name: Equality and literal IN evaluate every scalar input only once
+  scm: |-
+    (begin
+      (define calls (newsession))
+      (calls "n" 0)
+      (define tick (lambda () (begin (calls "n" (+ 1 (calls "n"))) "P ")))
+      (define probe (sql_info (list tick) "NVARCHAR" (list "utf8mb4_bin" 2)))
+      (define literal (sql_info "P" "NVARCHAR" (list "utf8mb4_bin" 4)))
+      (define equality ((tsql_comparison_compiler "eq") (list probe probe)))
+      (define same (eval (sql_info_formula equality)))
+      (define equality_calls (calls "n"))
+      (calls "n" 0)
+      (define member (eval (sql_info_formula (tsql_literal_in_compiler
+        (list probe literal probe (sql_info nil "NULL" nil))))))
+      (and same member (equal? equality_calls 2) (equal? (calls "n") 2)))
+  expect:
+    result: true
+- name: Numeric literal and dynamic array membership retain native SQL IN formulas
+  scm: |-
+    (begin
+      (define probe (sql_info 2 "INT" nil))
+      (define literal (sql_info 2 "INT" nil))
+      (define compiled (sql_info_formula (tsql_literal_in_compiler (list probe literal))))
+      (define dynamic (list 'session "values"))
+      (define raw_probe (list 'sql_type_expr 2 "INT" nil))
+      (and (expression_equal? (car compiled) 'sql_in)
+        (eval compiled)
+        (expression_equal? (tsql_in_expr dynamic raw_probe)
+          (tsql_predicate_expr (list 'sql_in dynamic raw_probe)))))
+  expect:
+    result: true
+- name: Native access compilation keeps the padded residual and cannot create a raw text bound
+  scm: |-
+    (begin
+      (define input (sql_info 'value "NVARCHAR" (list "utf8mb4_bin" 2)))
+      (define literal (sql_info "P " "NVARCHAR" (list "utf8mb4_bin" 4)))
+      (define formula (sql_info_formula ((tsql_comparison_compiler "eq") (list input literal))))
+      (define params (list 'value))
+      (define columns (list "label"))
+      (define predicate (list 'lambda params formula))
+      (define bounds (coalesceNil (scan_plan_collect formula params columns (list)) (list)))
+      (define compiled (scan_plan_compile_filter (list 'quote columns) predicate))
+      (define target (table "memcp-tests" false "pad_eq_rows" false nil))
+      (define plan (compile_scan_plan 'scan nil target (list 'quote columns) predicate
+        (list 'quote (list "id")) (list 'lambda (list 'acc 'id) (list '+ 'acc 'id)) 0 + false))
+      (and (empty_list? bounds) (not (scan_plan_covered (nth compiled 3)))
+        (equal? (eval plan) 6)))
+  expect:
+    result: true
+- name: CHECK equality and IN reuse only the admitted pure character owners
+  tds:
+    statements:
+    - sql: CREATE TABLE pad_eq_check(label NVARCHAR(8))
+    - sql: ALTER TABLE pad_eq_check ADD CONSTRAINT pad_equal_rule CHECK(label=N'P ')
+    - sql: INSERT pad_eq_check VALUES(N'P'),(N'P  '),(NULL)
+    - sql: INSERT pad_eq_check VALUES(N'Q')
+      expect:
+        error: true
+    - sql: SELECT COUNT(*) AS n FROM pad_eq_check
+      expect:
+        rows: 1
+        data:
+        - n: 3
+    - sql: CREATE TABLE pad_in_check(label NVARCHAR(8))
+    - sql: ALTER TABLE pad_in_check ADD CONSTRAINT pad_in_rule CHECK(label IN(N'P ',N'FN'))
+    - sql: INSERT pad_in_check VALUES(N'P'),(N'FN'),(NULL)
+    - sql: INSERT pad_in_check VALUES(N'Q')
+      expect:
+        error: true
+    - sql: SELECT COUNT(*) AS n FROM pad_in_check
+      expect:
+        rows: 1
+        data:
+        - n: 3
+- name: MySQL literal comparisons keep their previous unpadded semantics
+  sql: SELECT CASE WHEN 'P'='P ' THEN 1 ELSE 0 END AS matched
+  expect:
+    rows: 1
+    data:
+    - matched: 0
+  syntax: mysql
+- name: PostgreSQL literal comparisons keep their previous unpadded semantics
+  sql: SELECT CASE WHEN 'P'='P ' THEN 1 ELSE 0 END AS matched
+  expect:
+    rows: 1
+    data:
+    - matched: 0
+  syntax: postgresql
+- name: Restart regenerates padded predicates from their real stored recipes
+  action: restart
+- name: Restarted CHECK and source data preserve padded equality semantics
+  sql: SELECT id FROM pad_eq_rows WHERE label IN(N'P ',N'FN') ORDER BY id
+  expect:
+    rows: 4
+    data:
+    - id: 1
+    - id: 2
+    - id: 3
+    - id: 4
+- name: Reloaded CHECK enforcement retains the same character policy
+  tds:
+    statements:
+    - sql: INSERT pad_eq_check VALUES(N'P ')
+    - sql: INSERT pad_in_check VALUES(N'Q')
+      expect:
+        error: true
+    - sql: SELECT COUNT(*) AS n FROM pad_eq_check
+      expect:
+        rows: 1
+        data:
+        - n: 4

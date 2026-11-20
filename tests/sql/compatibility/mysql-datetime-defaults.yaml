@@ -14,7 +14,13 @@ test_cases:
   - name: "CREATE TABLE with default CURRENT_TIMESTAMP"
     sql: "CREATE TABLE tstamp (id INT PRIMARY KEY, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
     expect:
-      affected_rows: 1
+      affected_rows: 0
+      result_contains: '"affected_rows"'
+
+  - name: "Completed MySQL declaration is present: CREATE TABLE with default CURRENT_TIMESTAMP"
+    syntax: mysql
+    sql: "SHOW CREATE TABLE tstamp"
+    expect: {rows: 1,data: [{Table: "tstamp"}]}
 
   - name: "INSERT row without timestamp uses default"
     sql: "INSERT INTO tstamp (id) VALUES (1)"

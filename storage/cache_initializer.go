@@ -130,7 +130,11 @@ func (t *table) prepareCache(key string, domainSources, dataSources []scm.Scmer,
 	defer t.cachePreparationMu.Unlock()
 	cache := t.cachePreparations.Load()
 	if cache == nil {
-		cache = &cacheMap{entries: make(map[string]*cacheMapEntry), flights: make(map[string]*cacheMapFlight)}
+		cache = &cacheMap{
+			entries:   make(map[string]*cacheMapEntry),
+			flights:   make(map[string]*cacheMapFlight),
+			factories: processCacheMapFactories,
+		}
 		t.cachePreparations.Store(cache)
 	}
 	stamp := make([]scm.Scmer, 2, 2+2*len(sources))

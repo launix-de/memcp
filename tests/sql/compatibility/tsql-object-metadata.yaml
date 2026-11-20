@@ -1,0 +1,137 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  description: Numeric object identities and system column metadata use actual native declaration incarnations
+setup:
+- sql: CREATE TABLE object_metadata_target(id INT,label NVARCHAR(9))
+- sql: CREATE TABLE object_metadata_saved(id INT)
+- sql: CREATE TABLE object_metadata_noise(unrelated_column INT)
+- scm: (eval (parse_sql "memcp-tests" "CREATE USER object_metadata_reader IDENTIFIED BY 'pw'" nil))
+- sql: GRANT CONNECT TO object_metadata_reader
+cleanup:
+- sql: DROP TABLE IF EXISTS object_metadata_target
+- sql: DROP TABLE IF EXISTS object_metadata_saved
+- sql: DROP TABLE IF EXISTS object_metadata_noise
+- scm: (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS object_metadata_reader" nil))
+test_cases:
+- name: Object lookup returns a positive typed numeric identity for an ordinary native constructor
+  sql: SELECT CASE WHEN OBJECT_ID(N'dbo.object_metadata_target')>0 THEN 1 ELSE 0 END AS valid
+  expect:
+    rows: 1
+    data:
+    - valid: 1
+- name: Folded native spelling refers to the same object incarnation
+  sql: SELECT CASE WHEN OBJECT_ID(N'dbo.OBJECT_METADATA_TARGET')=OBJECT_ID(N'dbo.object_metadata_target',N'U') THEN
+    1 ELSE 0 END AS same_object
+  expect:
+    rows: 1
+    data:
+    - same_object: 1
+- name: Absent and wrong-kind objects retain SQL NULL
+  sql: SELECT OBJECT_ID(N'dbo.object_metadata_missing') AS absent,OBJECT_ID(N'dbo.object_metadata_target',N'V') AS
+    wrong_kind
+  expect:
+    rows: 1
+    data:
+    - absent: null
+      wrong_kind: null
+- name: Virtual all-columns metadata declares its real graph-type field
+  sql: SELECT name,column_id FROM sys.all_columns WHERE object_id=OBJECT_ID(N'sys.all_columns') AND name=N'graph_type'
+  expect:
+    rows: 1
+    data:
+    - name: graph_type
+      column_id: 4
+- name: User columns retain actual native ordinals and names
+  sql: SELECT name,column_id,graph_type FROM sys.all_columns WHERE object_id=OBJECT_ID(N'dbo.object_metadata_target')
+    ORDER BY column_id
+  expect:
+    rows: 2
+    data:
+    - name: id
+      column_id: 1
+      graph_type: null
+    - name: label
+      column_id: 2
+      graph_type: null
+- name: The ordinary columns catalog uses the same native identity space
+  sql: SELECT name FROM sys.columns WHERE object_id=OBJECT_ID(N'dbo.object_metadata_target') ORDER BY column_id
+  expect:
+    rows: 2
+    data:
+    - name: id
+    - name: label
+- name: CONNECT alone does not reveal object identities
+  username: object_metadata_reader
+  password: pw
+  sql: SELECT OBJECT_ID(N'dbo.object_metadata_target') AS hidden
+  # The compatibility CONNECT request above is ignored; this is not a native member.
+  expect:
+    error: true
+    contains: access denied
+- name: CONNECT alone does not reveal native declaration columns
+  username: object_metadata_reader
+  password: pw
+  sql: SELECT name FROM sys.columns WHERE object_id=OBJECT_ID(N'dbo.object_metadata_target')
+  expect:
+    error: true
+    contains: access denied
+- name: A positive conjunction keeps the original object identity predicate
+  sql: SELECT name FROM sys.all_columns WHERE name=N'label' AND object_id=OBJECT_ID(N'dbo.OBJECT_METADATA_TARGET')
+  expect:
+    rows: 1
+    data:
+    - name: label
+- name: A dominating literal equality cannot turn an unknown identity into metadata rows
+  sql: SELECT name FROM sys.all_columns WHERE object_id=OBJECT_ID(N'dbo.missing_point_metadata')
+  expect:
+    rows: 0
+- name: NULL identity equality remains UNKNOWN rather than an address restriction
+  sql: SELECT name FROM sys.columns WHERE object_id=OBJECT_ID(NULL)
+  expect:
+    rows: 0
+- name: An OR branch retains metadata outside the literal target address
+  sql: SELECT COUNT(*) AS n FROM sys.columns WHERE object_id=OBJECT_ID(N'dbo.object_metadata_target') OR object_id=OBJECT_ID(N'dbo.object_metadata_saved')
+  expect:
+    rows: 1
+    data:
+    - n: 3
+- name: Negation retains its own SQL truth domain
+  sql: SELECT name FROM sys.columns WHERE (object_id=OBJECT_ID(N'dbo.object_metadata_target') OR object_id=OBJECT_ID(N'dbo.object_metadata_saved')) AND NOT(object_id=OBJECT_ID(N'dbo.object_metadata_target')) ORDER BY name
+  expect:
+    rows: 1
+    data:
+    - name: id
+- name: A valid target plus invalid address suffix never resolves by prefix
+  sql: SELECT CASE WHEN OBJECT_ID(N'dbo.object_metadata_target')>0 AND OBJECT_ID(N'dbo.object_metadata_target unexpected')
+    IS NULL THEN 1 ELSE 0 END AS exact_address
+  expect:
+    rows: 1
+    data:
+    - exact_address: 1
+- name: Invalid literal address cannot narrow into prefix metadata rows
+  sql: SELECT name FROM sys.columns WHERE object_id=OBJECT_ID(N'dbo.object_metadata_target unexpected')
+  expect:
+    rows: 0
+- name: Save the real incarnation identity as ordinary SQL data
+  sql: INSERT object_metadata_saved SELECT OBJECT_ID(N'dbo.object_metadata_target')
+- name: Restart native schema and frontend identity records
+  action: restart
+- name: Restart preserves the actual object identity
+  sql: SELECT CASE WHEN id=OBJECT_ID(N'dbo.object_metadata_target') THEN 1 ELSE 0 END AS preserved FROM object_metadata_saved
+  expect:
+    rows: 1
+    data:
+    - preserved: 1
+- name: Drop the identified relation through its native owner
+  sql: DROP TABLE object_metadata_target
+- name: Recreate an equal spelling as a different native incarnation
+  sql: CREATE TABLE object_metadata_target(id INT,label NVARCHAR(9))
+- name: Name reuse never acquires the removed object identity
+  sql: SELECT CASE WHEN id<>OBJECT_ID(N'dbo.object_metadata_target') THEN 1 ELSE 0 END AS replaced FROM object_metadata_saved
+  expect:
+    rows: 1
+    data:
+    - replaced: 1

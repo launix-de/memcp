@@ -604,7 +604,9 @@ func TestClusterReferenceKeepsAcquisitionID(t *testing.T) {
 	select {
 	case <-peer.outgoing.ready:
 		message := takeMosi(peer.outgoing)
-		if message.Packet == nil || message.Packet.Kind != "reference" || message.Packet.ID != request.ID {
+		// Schema content and its grant now share one streamed envelope. Its
+		// opening packet must retain the original pending acquisition ID.
+		if message.Packet == nil || message.Packet.Kind != "begin" || message.Packet.ID != request.ID {
 			t.Fatal("reference lost the pending acquisition identity", message.Packet)
 		}
 		step, ok := r.steps.Load(request.ID)

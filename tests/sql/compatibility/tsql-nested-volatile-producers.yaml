@@ -1,0 +1,21 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  description: Nested aggregate consumers retain a statement-owned volatile producer
+setup:
+  - sql: CREATE TABLE nested_random_rows(id INT PRIMARY KEY)
+  - sql: INSERT nested_random_rows VALUES(1),(2),(3)
+cleanup:
+  - sql: DROP TABLE IF EXISTS nested_random_rows
+test_cases:
+  - name: Aggregate consumers preserve every row and one statement sample
+    sql: SELECT COUNT(*) AS rows_seen,COUNT(DISTINCT sample) AS samples FROM(SELECT RAND() AS sample FROM nested_random_rows) values_seen
+    expect: {data: [{rows_seen: 3,samples: 1}]}
+  - name: Independent aggregate operands consume the same nested sample
+    sql: SELECT COUNT(*) AS rows_seen,CASE WHEN MIN(sample)=MAX(sample) AND MIN(sample)>=0 AND MAX(sample)<1 THEN 1 ELSE 0 END AS valid FROM(SELECT RAND() AS sample FROM nested_random_rows) values_seen
+    expect: {data: [{rows_seen: 3,valid: 1}]}
+  - name: A second aggregate boundary retains the producer across groups
+    sql: SELECT SUM(rows_seen) AS rows_seen,COUNT(*) AS groups_seen,COUNT(DISTINCT sample) AS samples FROM(SELECT id%2 AS parity,COUNT(*) AS rows_seen,MIN(sample) AS sample FROM(SELECT id,RAND() AS sample FROM nested_random_rows) values_seen GROUP BY id%2) groups_seen
+    expect: {data: [{rows_seen: 3,groups_seen: 2,samples: 1}]}

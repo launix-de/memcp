@@ -1,0 +1,90 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# SQL Server references: https://dbfiddle.uk/GmtTRq-M and https://dbfiddle.uk/kt0DVnH4
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Legacy temporal operands preserve epoch arithmetic and explicit integer conversion
+setup:
+- sql: CREATE TABLE legacy_interval_rows(id INT PRIMARY KEY,category INT,began DATETIME,ended DATETIME)
+- sql: |
+    INSERT legacy_interval_rows VALUES
+      (1,1,'2026-01-01','2026-01-03T12:00:00.003'),
+      (2,1,'2026-01-01',NULL),(3,2,'2026-01-05','2026-01-01')
+test_cases:
+- name: Two DATETIME operands subtract in the legacy epoch and retain clock precision
+  sql: SELECT CONVERT(VARCHAR(30),ended-began,121) AS elapsed FROM legacy_interval_rows WHERE id=1
+  expect: {rows: 1,data: [{elapsed: '1900-01-03 12:00:00.003'}]}
+- name: Two legacy dates add their epoch offsets
+  sql: SELECT CONVERT(VARCHAR(30),CAST('1900-01-03T06:00:00' AS DATETIME)+CAST('1900-01-02T12:00:00' AS DATETIME),121) AS value
+  expect: {rows: 1,data: [{value: '1900-01-04 18:00:00.000'}]}
+- name: Subsecond borrowing retains the DATETIME tick on the preceding day
+  sql: SELECT CONVERT(VARCHAR(30),CAST('1900-01-01T00:00:00.003' AS DATETIME)-CAST('1900-01-01T00:00:00.007' AS DATETIME),121) AS value
+  expect: {rows: 1,data: [{value: '1899-12-31 23:59:59.997'}]}
+- name: Two SMALLDATETIME operands preserve minute precision
+  sql: SELECT CONVERT(VARCHAR(30),CAST('1900-01-03T06:00:00' AS SMALLDATETIME)-CAST('1900-01-02T12:00:00' AS SMALLDATETIME),121) AS value
+  expect: {rows: 1,data: [{value: '1900-01-01 18:00:00.000'}]}
+- name: Mixed legacy declarations select DATETIME before fractional subtraction
+  sql: SELECT CONVERT(VARCHAR(30),CAST('1900-01-03T06:00:00' AS SMALLDATETIME)-CAST('1900-01-02T12:00:00.003' AS DATETIME),121) AS value
+  expect: {rows: 1,data: [{value: '1900-01-01 17:59:59.997'}]}
+- name: A NULL operand preserves a NULL arithmetic result
+  sql: SELECT ended-began AS elapsed FROM legacy_interval_rows WHERE id=2
+  expect: {rows: 1,data: [{elapsed: null}]}
+- name: Explicit integer conversion rounds day counts on both sides of the epoch
+  sql: |
+    SELECT CONVERT(INT,CAST('1900-01-01T11:59:59.997' AS DATETIME)) AS below_half,
+      CONVERT(INT,CAST('1900-01-01T12:00:00' AS DATETIME)) AS at_half,
+      CONVERT(INT,CAST('1899-12-31T12:00:00' AS DATETIME)) AS negative_half,
+      CONVERT(INT,CAST('1899-12-31T12:00:00.003' AS DATETIME)) AS above_negative_half
+  expect: {rows: 1,data: [{below_half: 0,at_half: 1,negative_half: -1,above_negative_half: 0}]}
+- name: Explicit integer widths share the signed day conversion contract
+  sql: SELECT CONVERT(BIGINT,ended-began) AS wide,CONVERT(SMALLINT,ended-began) AS small,CONVERT(TINYINT,ended-began) AS tiny FROM legacy_interval_rows WHERE id=1
+  expect: {rows: 1,data: [{wide: 3,small: 3,tiny: 3}]}
+- name: Explicit conversion retains negative whole day differences
+  sql: SELECT CONVERT(INT,ended-began) AS elapsed FROM legacy_interval_rows WHERE id=3
+  expect: {rows: 1,data: [{elapsed: -4}]}
+- name: A temporal CASE followed by explicit integer conversion preserves aggregate results
+  sql: |
+    SELECT category,SUM(CONVERT(INT,CASE WHEN id<>3 THEN
+      CASE WHEN ended IS NULL THEN CAST('2026-01-04' AS DATETIME) ELSE ended END-began
+      ELSE 0 END)) AS total FROM legacy_interval_rows GROUP BY category ORDER BY category
+  expect: {rows: 2,data: [{category: 1,total: 6},{category: 2,total: 0}]}
+- name: Stored expressions retain temporal result and explicit conversion contracts
+  sql: |
+    CREATE VIEW dbo.legacy_interval_totals AS
+    SELECT category,SUM(CONVERT(INT,
+      CASE WHEN ended IS NULL THEN CAST('2026-01-04' AS DATETIME) ELSE ended END-began)) AS total
+    FROM legacy_interval_rows GROUP BY category
+- name: MySQL consumes stored temporal arithmetic through the declared view
+  syntax: mysql
+  sql: SELECT category,total FROM legacy_interval_totals ORDER BY category
+  expect: {rows: 2,data: [{category: 1,total: 6},{category: 2,total: -4}]}
+- name: PostgreSQL consumes the same stored temporal arithmetic
+  syntax: psql
+  sql: SELECT category,total FROM legacy_interval_totals ORDER BY category
+  expect: {rows: 2,data: [{category: 1,total: 6},{category: 2,total: -4}]}
+- name: Empty TDS output retains legacy arithmetic result types
+  tds:
+    statements:
+    - sql: SELECT CAST(NULL AS SMALLDATETIME)-CAST(NULL AS DATETIME) AS precise,CAST(NULL AS SMALLDATETIME)-CAST(NULL AS SMALLDATETIME) AS minute,CONVERT(INT,CAST(NULL AS DATETIME)) AS days WHERE 1=0
+      expect: {rows: 0,column_types: [{name: precise,type: DATETIME},{name: minute,type: SMALLDATETIME},{name: days,type: INT}]}
+- name: An invalid implicit temporal to integer assignment remains rejected
+  tds:
+    statements:
+    - sql: DECLARE @days INT; SET @days=CAST('1900-01-03' AS DATETIME); SELECT @days AS value
+      expect: {error: true,contains: [unsupported implicit conversion]}
+- name: Result range remains validated for two otherwise valid temporal inputs
+  sql: SELECT CAST('9999-12-31' AS DATETIME)+CAST('1900-01-02' AS DATETIME) AS value
+  expect: {error: true,contains: overflow}
+- name: Native date input cannot enter legacy DATETIME arithmetic
+  sql: SELECT CAST('2026-01-03' AS DATE)-CAST('2026-01-01' AS DATE) AS value
+  expect: {error: true,contains: day arithmetic is only supported}
+- name: Explicit integer day conversions remain valid after catalog reload
+  action: restart
+- name: A restored stored expression retains its exact aggregate output
+  sql: SELECT category,total FROM dbo.legacy_interval_totals ORDER BY category
+  expect: {rows: 2,data: [{category: 1,total: 6},{category: 2,total: -4}]}
+cleanup:
+- sql: DROP VIEW IF EXISTS dbo.legacy_interval_totals
+- sql: DROP TABLE IF EXISTS legacy_interval_rows

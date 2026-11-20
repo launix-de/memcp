@@ -1,0 +1,229 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  description: Scalar single-row consumers retain complete residual caller bindings and NULL identity
+setup:
+- sql: CREATE TABLE ssr_callers(id INT PRIMARY KEY,group_key INT,needle VARCHAR(8))
+- sql: CREATE TABLE ssr_values(id INT PRIMARY KEY,group_key INT,code VARCHAR(8),amount INT)
+- sql: INSERT INTO ssr_callers VALUES(1,1,'a'),(2,1,'b'),(3,1,NULL),(4,2,'c'),(5,9,'z'),(6,1,'a'),(7,NULL,'a')
+- sql: INSERT INTO ssr_values VALUES(1,1,'A',10),(2,1,'B',20),(3,2,'C',NULL)
+cleanup:
+- sql: DROP TABLE IF EXISTS ssr_values
+- sql: DROP TABLE IF EXISTS ssr_callers
+test_cases:
+- name: MySQL scalar wrapped predicate keeps complete caller identity
+  syntax: mysql
+  sql: SELECT o.id,(SELECT i.amount FROM ssr_values i WHERE i.group_key=o.group_key AND UPPER(i.code)=UPPER(COALESCE(o.needle,'a')))
+    AS amount FROM ssr_callers o ORDER BY o.id
+  expect:
+    rows: 7
+    data:
+    - id: 1
+      amount: 10
+    - id: 2
+      amount: 20
+    - id: 3
+      amount: 10
+    - id: 4
+      amount: null
+    - id: 5
+      amount: null
+    - id: 6
+      amount: 10
+    - id: 7
+      amount: null
+- name: MySQL scalar nullable residual branch keeps complete caller identity
+  syntax: mysql
+  sql: SELECT o.id,(SELECT i.amount FROM ssr_values i WHERE (o.needle IS NULL AND i.id=1) OR (o.needle IS NOT NULL AND i.id=o.id))
+    AS amount FROM ssr_callers o ORDER BY o.id
+  expect:
+    rows: 7
+    data:
+    - id: 1
+      amount: 10
+    - id: 2
+      amount: 20
+    - id: 3
+      amount: 10
+    - id: 4
+      amount: null
+    - id: 5
+      amount: null
+    - id: 6
+      amount: null
+    - id: 7
+      amount: null
+- name: PostgreSQL scalar wrapped predicate keeps complete caller identity
+  syntax: psql
+  sql: SELECT o.id,(SELECT i.amount FROM ssr_values i WHERE i.group_key=o.group_key AND UPPER(i.code)=UPPER(COALESCE(o.needle,'a')))
+    AS amount FROM ssr_callers o ORDER BY o.id
+  expect:
+    rows: 7
+    data:
+    - id: 1
+      amount: 10
+    - id: 2
+      amount: 20
+    - id: 3
+      amount: 10
+    - id: 4
+      amount: null
+    - id: 5
+      amount: null
+    - id: 6
+      amount: 10
+    - id: 7
+      amount: null
+- name: PostgreSQL scalar nullable residual branch keeps complete caller identity
+  syntax: psql
+  sql: SELECT o.id,(SELECT i.amount FROM ssr_values i WHERE (o.needle IS NULL AND i.id=1) OR (o.needle IS NOT NULL AND i.id=o.id))
+    AS amount FROM ssr_callers o ORDER BY o.id
+  expect:
+    rows: 7
+    data:
+    - id: 1
+      amount: 10
+    - id: 2
+      amount: 20
+    - id: 3
+      amount: 10
+    - id: 4
+      amount: null
+    - id: 5
+      amount: null
+    - id: 6
+      amount: null
+    - id: 7
+      amount: null
+- name: TSQL scalar wrapped predicate keeps complete caller identity
+  syntax: tsql
+  sql: SELECT o.id,(SELECT i.amount FROM ssr_values i WHERE i.group_key=o.group_key AND UPPER(i.code)=UPPER(COALESCE(o.needle,'a')))
+    AS amount FROM ssr_callers o ORDER BY o.id
+  expect:
+    rows: 7
+    data:
+    - id: 1
+      amount: 10
+    - id: 2
+      amount: 20
+    - id: 3
+      amount: 10
+    - id: 4
+      amount: null
+    - id: 5
+      amount: null
+    - id: 6
+      amount: 10
+    - id: 7
+      amount: null
+- name: TSQL scalar nullable residual branch keeps complete caller identity
+  syntax: tsql
+  sql: SELECT o.id,(SELECT i.amount FROM ssr_values i WHERE (o.needle IS NULL AND i.id=1) OR (o.needle IS NOT NULL AND i.id=o.id))
+    AS amount FROM ssr_callers o ORDER BY o.id
+  expect:
+    rows: 7
+    data:
+    - id: 1
+      amount: 10
+    - id: 2
+      amount: 20
+    - id: 3
+      amount: 10
+    - id: 4
+      amount: null
+    - id: 5
+      amount: null
+    - id: 6
+      amount: null
+    - id: 7
+      amount: null
+- name: Changing an inner value invalidates every residual lookup
+  sql: UPDATE ssr_values SET amount=99 WHERE id=1
+  expect:
+    affected_rows: 1
+- name: MySQL repeated wrapped predicate reads updated values
+  syntax: mysql
+  sql: SELECT o.id,(SELECT i.amount FROM ssr_values i WHERE i.group_key=o.group_key AND UPPER(i.code)=UPPER(COALESCE(o.needle,'a')))
+    AS amount FROM ssr_callers o ORDER BY o.id
+  expect:
+    rows: 7
+    data:
+    - id: 1
+      amount: 99
+    - id: 2
+      amount: 20
+    - id: 3
+      amount: 99
+    - id: 4
+      amount: null
+    - id: 5
+      amount: null
+    - id: 6
+      amount: 99
+    - id: 7
+      amount: null
+- name: PostgreSQL repeated wrapped predicate reads updated values
+  syntax: psql
+  sql: SELECT o.id,(SELECT i.amount FROM ssr_values i WHERE i.group_key=o.group_key AND UPPER(i.code)=UPPER(COALESCE(o.needle,'a')))
+    AS amount FROM ssr_callers o ORDER BY o.id
+  expect:
+    rows: 7
+    data:
+    - id: 1
+      amount: 99
+    - id: 2
+      amount: 20
+    - id: 3
+      amount: 99
+    - id: 4
+      amount: null
+    - id: 5
+      amount: null
+    - id: 6
+      amount: 99
+    - id: 7
+      amount: null
+- name: TSQL repeated wrapped predicate reads updated values
+  syntax: tsql
+  sql: SELECT o.id,(SELECT i.amount FROM ssr_values i WHERE i.group_key=o.group_key AND UPPER(i.code)=UPPER(COALESCE(o.needle,'a')))
+    AS amount FROM ssr_callers o ORDER BY o.id
+  expect:
+    rows: 7
+    data:
+    - id: 1
+      amount: 99
+    - id: 2
+      amount: 20
+    - id: 3
+      amount: 99
+    - id: 4
+      amount: null
+    - id: 5
+      amount: null
+    - id: 6
+      amount: 99
+    - id: 7
+      amount: null
+- name: Add a second result in one residual scalar partition
+  sql: INSERT INTO ssr_values VALUES(4,1,'A',11)
+  expect:
+    affected_rows: 1
+- name: MySQL residual scalar preserves cardinality overflow
+  syntax: mysql
+  sql: SELECT o.id,(SELECT i.amount FROM ssr_values i WHERE i.group_key=o.group_key AND UPPER(i.code)=UPPER(COALESCE(o.needle,'a')))
+    AS amount FROM ssr_callers o WHERE o.id=1
+  expect:
+    error: true
+- name: PostgreSQL residual scalar preserves cardinality overflow
+  syntax: psql
+  sql: SELECT o.id,(SELECT i.amount FROM ssr_values i WHERE i.group_key=o.group_key AND UPPER(i.code)=UPPER(COALESCE(o.needle,'a')))
+    AS amount FROM ssr_callers o WHERE o.id=1
+  expect:
+    error: true
+- name: TSQL residual scalar preserves cardinality overflow
+  syntax: tsql
+  sql: SELECT o.id,(SELECT i.amount FROM ssr_values i WHERE i.group_key=o.group_key AND UPPER(i.code)=UPPER(COALESCE(o.needle,'a')))
+    AS amount FROM ssr_callers o WHERE o.id=1
+  expect:
+    error: true

@@ -1,0 +1,97 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# SQL Server 2022 reference vectors: bMdlywsT, G0QN8-7w, oB6YaLaQ, kob9GJbV.
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: CHECKSUM declared integral types and explicit CP1 ANSI or BIN2 text weights
+setup:
+  - sql: DROP TABLE IF EXISTS checksum_bits
+  - sql: DROP TABLE IF EXISTS checksum_samples
+  - sql: CREATE TABLE checksum_samples(id INT PRIMARY KEY,payload TEXT,part VARCHAR(80) COLLATE SQL_Latin1_General_CP1_CI_AS)
+  - sql: INSERT checksum_samples VALUES(1,'Ab10-Ab10','Ab10'),(2,'',''),(3,NULL,NULL)
+  - sql: CREATE TABLE checksum_bits(id INT PRIMARY KEY,flag BIT NULL)
+  - sql: INSERT checksum_bits VALUES(1,1),(2,0),(3,NULL)
+cleanup:
+  - sql: DROP TABLE IF EXISTS checksum_bits
+  - sql: DROP TABLE IF EXISTS checksum_samples
+test_cases:
+  - name: Explicit CP1 character weights preserve case equivalence
+    sql: SELECT CHECKSUM('a' COLLATE SQL_Latin1_General_CP1_CI_AS) AS lower_value,CHECKSUM('A' COLLATE SQL_Latin1_General_CP1_CI_AS) AS upper_value
+    expect: {rows: 1,data: [{lower_value: 142,upper_value: 142}]}
+  - name: CP1 expansions consume their complete character weights
+    sql: SELECT CHECKSUM((CHAR(198)+CHAR(223)+CHAR(230)) COLLATE SQL_Latin1_General_CP1_CI_AS) AS expanded,CHECKSUM(('Ab10'+CHAR(198)+'xyz'+CHAR(223)+' ') COLLATE SQL_Latin1_General_CP1_CI_AS) AS mixed
+    expect: {rows: 1,data: [{expanded: 426359154,mixed: -678470948}]}
+  - name: CP1 trailing spaces and fixed declaration padding do not change checksums
+    sql: SELECT CHECKSUM('ab' COLLATE SQL_Latin1_General_CP1_CI_AS) AS plain,CHECKSUM(CAST('ab' AS CHAR(8)) COLLATE SQL_Latin1_General_CP1_CI_AS) AS padded,CHECKSUM('       ' COLLATE SQL_Latin1_General_CP1_CI_AS) AS spaces
+    expect: {rows: 1,data: [{plain: 2159,padded: 2159,spaces: 0}]}
+  - name: Interior and leading spaces retain their CP1 contributions
+    sql: SELECT CHECKSUM('a b' COLLATE SQL_Latin1_General_CP1_CI_AS) AS one_space,CHECKSUM('a  b' COLLATE SQL_Latin1_General_CP1_CI_AS) AS two_spaces,CHECKSUM(' a' COLLATE SQL_Latin1_General_CP1_CI_AS) AS leading
+    expect: {rows: 1,data: [{one_space: 35983,two_spaces: 574095,leading: 654}]}
+  - name: Nonnational hyphens and punctuation contribute to CP1 checksums
+    sql: SELECT CHECKSUM('-' COLLATE SQL_Latin1_General_CP1_CI_AS) AS dash,CHECKSUM('ABC-123xyz' COLLATE SQL_Latin1_General_CP1_CI_AS) AS compound,CHECKSUM('x-y_z!' COLLATE SQL_Latin1_General_CP1_CI_AS) AS punctuation
+    expect: {rows: 1,data: [{dash: 45,compound: 635361185,punctuation: 175591761}]}
+  - name: Long CP1 inputs retain exact 32 bit rotation and signed results
+    sql: SELECT CHECKSUM('0123456789012345678901234567890123456789' COLLATE SQL_Latin1_General_CP1_CI_AS) AS digits,CHECKSUM('Ab10Ab10' COLLATE SQL_Latin1_General_CP1_CI_AS) AS repeated,CHECKSUM('Ab10Ab10Ab10Ab10Ab10Ab10Ab10Ab10Ab10Ab10' COLLATE SQL_Latin1_General_CP1_CI_AS) AS longer
+    expect: {rows: 1,data: [{digits: 1162167621,repeated: 1742497756,longer: 1742497756}]}
+  - name: MAX character declarations retain the complete input beyond 8000 bytes
+    sql: DECLARE @value VARCHAR(MAX)=REPLICATE(CAST('Ab10' AS VARCHAR(MAX)),2500); SELECT CHECKSUM(@value COLLATE SQL_Latin1_General_CP1_CI_AS) AS complete_value,CHECKSUM(LEFT(@value,8000) COLLATE SQL_Latin1_General_CP1_CI_AS) AS prefix_value
+    expect: {rows: 1,data: [{complete_value: 0,prefix_value: 0}]}
+  - name: BIN2 uses declared national UTF16 units including a supplementary pair
+    sql: SELECT CHECKSUM(N'a' COLLATE Latin1_General_100_BIN2) AS lower_value,CHECKSUM(N'😀' COLLATE Latin1_General_100_BIN2) AS supplementary,CHECKSUM(N'ABC-123xyz' COLLATE Latin1_General_100_BIN2) AS compound
+    expect: {rows: 1,data: [{lower_value: 97,supplementary: 875984,compound: 505498556}]}
+  - name: BIN2 national hyphens remain significant and trailing spaces are trimmed
+    sql: SELECT CHECKSUM(N'a-b' COLLATE Latin1_General_100_BIN2) AS with_dash,CHECKSUM(N'ab' COLLATE Latin1_General_100_BIN2) AS without_dash,CHECKSUM(N'a-' COLLATE Latin1_General_100_BIN2) AS suffix_dash,CHECKSUM(CAST(N'a' AS NCHAR(4)) COLLATE Latin1_General_100_BIN2) AS padded
+    expect: {rows: 1,data: [{with_dash: 25522,without_dash: 1650,suffix_dash: 1597,padded: 97}]}
+  - name: BIN2 nonnational text retains the declared single byte encoding
+    sql: SELECT CHECKSUM('a' COLLATE Latin1_General_100_BIN2) AS lower_value,CHECKSUM(CHAR(233) COLLATE Latin1_General_100_BIN2) AS accented
+    expect: {rows: 1,data: [{lower_value: 97,accented: 233}]}
+  - name: Typed NULL and empty character expressions have distinct checksum values
+    sql: SELECT CHECKSUM(CAST(NULL AS INT)) AS integral,CHECKSUM(CAST(NULL AS VARCHAR(8)) COLLATE SQL_Latin1_General_CP1_CI_AS) AS ansi,CHECKSUM(CAST(NULL AS NVARCHAR(8)) COLLATE Latin1_General_100_BIN2) AS national,CHECKSUM('' COLLATE SQL_Latin1_General_CP1_CI_AS) AS empty_value
+    expect: {rows: 1,data: [{integral: 2147483647,ansi: 2147483647,national: 2147483647,empty_value: 0}]}
+  - name: INT extrema retain their signed checksum bit patterns
+    sql: SELECT CHECKSUM(CAST(-2147483648 AS INT)) AS minimum,CHECKSUM(CAST(-1 AS INT)) AS negative,CHECKSUM(CAST(0 AS INT)) AS zero_value,CHECKSUM(CAST(2147483647 AS INT)) AS maximum
+    expect: {rows: 1,data: [{minimum: -2147483648,negative: -1,zero_value: 0,maximum: 2147483647}]}
+  - name: BIGINT checksums fold both exact integer words
+    sql: SELECT CHECKSUM(CAST(4294967296 AS BIGINT)) AS high_word,CHECKSUM(CAST(-1 AS BIGINT)) AS negative,CHECKSUM(CAST(9223372036854775807 AS BIGINT)) AS maximum,CHECKSUM(CAST('-9223372036854775808' AS BIGINT)) AS minimum,CHECKSUM(CAST(4294967295 AS BIGINT)) AS low_word
+    expect: {rows: 1,data: [{high_word: 1,negative: 0,maximum: -2147483648,minimum: -2147483648,low_word: -1}]}
+  - name: Integral declaration families share their actual value checksum
+    sql: SELECT CHECKSUM(CAST(1 AS TINYINT)) AS tiny,CHECKSUM(CAST(1 AS SMALLINT)) AS small,CHECKSUM(CAST(1 AS INT)) AS regular,CHECKSUM(CAST(1 AS BIGINT)) AS wide,CHECKSUM(CAST(1 AS BIT)) AS bit_value
+    expect: {rows: 1,data: [{tiny: 1,small: 1,regular: 1,wide: 1,bit_value: 1}]}
+  - name: Bound BIT columns retain their declared checksum domain including NULL
+    sql: SELECT id,CHECKSUM(flag) AS value FROM checksum_bits ORDER BY id
+    expect: {rows: 3,data: [{id: 1,value: 1},{id: 2,value: 0},{id: 3,value: 2147483647}]}
+  - name: A derived BIT column keeps the same kernel after alias substitution
+    sql: SELECT id,CHECKSUM(renamed) AS value FROM (SELECT id,flag AS renamed FROM checksum_bits) b ORDER BY id
+    expect: {rows: 3,data: [{id: 1,value: 1},{id: 2,value: 0},{id: 3,value: 2147483647}]}
+  - name: Empty BIT input still declares the integral checksum result
+    tds:
+      statements:
+        - sql: SELECT CHECKSUM(flag) AS value FROM checksum_bits WHERE id<0
+          expect: {rows: 0,column_types: [{name: value,type: INT}]}
+  - name: Expression order and NULL positions affect the combined checksum
+    sql: SELECT CHECKSUM(1,2) AS forward_value,CHECKSUM(2,1) AS reverse_value,CHECKSUM(CAST(NULL AS INT),1) AS null_first,CHECKSUM(1,CAST(NULL AS INT)) AS null_last
+    expect: {rows: 1,data: [{forward_value: 18,reverse_value: 33,null_first: -10,null_last: 2147483631}]}
+  - name: Text and integral arguments preserve their ordered expression boundaries
+    sql: SELECT CHECKSUM('a' COLLATE SQL_Latin1_General_CP1_CI_AS,'b' COLLATE SQL_Latin1_General_CP1_CI_AS) AS text_pair,CHECKSUM('AB10' COLLATE SQL_Latin1_General_CP1_CI_AS,1) AS text_first,CHECKSUM(1,'AB10' COLLATE SQL_Latin1_General_CP1_CI_AS) AS int_first
+    expect: {rows: 1,data: [{text_pair: 2159,text_first: 8813889,int_first: 550852}]}
+  - name: Native column declarations select weights without sampling row values
+    sql: SELECT id,CHECKSUM(part) AS value FROM checksum_samples ORDER BY id
+    expect: {rows: 3,data: [{id: 1,value: 550868},{id: 2,value: 0},{id: 3,value: 2147483647}]}
+  - name: SUBSTRING of TEXT supplies the comparable VARCHAR declaration
+    sql: SELECT CHECKSUM(SUBSTRING(payload,1,4) COLLATE SQL_Latin1_General_CP1_CI_AS) AS value FROM checksum_samples WHERE id=1
+    expect: {rows: 1,data: [{value: 550868}]}
+  - name: Concatenated source slices keep their complete character sequence
+    sql: SELECT CHECKSUM((SUBSTRING(payload,1,4)+SUBSTRING(payload,6,4)) COLLATE SQL_Latin1_General_CP1_CI_AS) AS value FROM checksum_samples WHERE id=1
+    expect: {rows: 1,data: [{value: 1742497756}]}
+  - name: Checksum results remain ordinary integer join keys
+    sql: SELECT a.id FROM checksum_samples a JOIN (SELECT 550868 AS value) b ON CHECKSUM(SUBSTRING(a.payload,1,4) COLLATE SQL_Latin1_General_CP1_CI_AS)=b.value ORDER BY a.id
+    expect: {rows: 1,data: [{id: 1}]}
+  - name: CHECKSUM exposes INT metadata even on an empty result
+    tds:
+      statements:
+        - sql: SELECT CHECKSUM(part) AS value FROM checksum_samples WHERE id=1
+          expect: {rows: 1,data: [{value: 550868}],column_types: [{name: value,type: INT}]}
+        - sql: SELECT CHECKSUM(part) AS value FROM checksum_samples WHERE id<0
+          expect: {rows: 0,column_types: [{name: value,type: INT}]}

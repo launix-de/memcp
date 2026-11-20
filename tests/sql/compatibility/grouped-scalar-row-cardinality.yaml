@@ -1,0 +1,190 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  description: Scalar cardinality counts grouped result rows after GROUP BY and HAVING
+setup:
+- sql: CREATE TABLE grouped_scalar_values(id INT PRIMARY KEY,owner_id INT,value INT)
+- sql: INSERT grouped_scalar_values VALUES(1,1,10),(2,1,20),(3,2,NULL),(4,3,7),(5,3,7)
+cleanup:
+- sql: DROP TABLE IF EXISTS grouped_scalar_values
+test_cases:
+- name: TSQL scalar MIN rejects three grouped result rows
+  sql: SELECT (SELECT MIN(value) FROM grouped_scalar_values GROUP BY owner_id) AS value
+  expect: {error: true,contains: ['512','scalar subselect returned more than one row']}
+- name: MySQL scalar MIN rejects three grouped result rows
+  syntax: sql
+  sql: SELECT (SELECT MIN(value) FROM grouped_scalar_values GROUP BY owner_id) AS value
+  expect: {error: true,contains: 'scalar subselect returned more than one row'}
+- name: PostgreSQL scalar MIN rejects three grouped result rows
+  syntax: postgresql
+  sql: SELECT (SELECT MIN(value) FROM grouped_scalar_values GROUP BY owner_id) AS value
+  expect: {error: true,contains: 'scalar subselect returned more than one row'}
+- name: A single actual group retains its minimum and count
+  sql: |
+    SELECT (SELECT MIN(value) FROM grouped_scalar_values WHERE owner_id=1 GROUP BY owner_id) AS minimum,
+      (SELECT COUNT(*) FROM grouped_scalar_values WHERE owner_id=1 GROUP BY owner_id) AS total;
+  expect: {rows: 1,data: [{minimum: 10,total: 2}]}
+- name: Empty grouped input yields NULL even when its grouped expression is COUNT
+  sql: |
+    SELECT (SELECT MIN(value) FROM grouped_scalar_values WHERE id<0 GROUP BY owner_id) AS minimum,
+      (SELECT COUNT(*) FROM grouped_scalar_values WHERE id<0 GROUP BY owner_id) AS total;
+  expect: {rows: 1,data: [{minimum: null,total: null}]}
+- name: One group containing only NULL values is still one scalar result row
+  sql: SELECT (SELECT MIN(value) FROM grouped_scalar_values WHERE owner_id=2 GROUP BY owner_id) AS value
+  expect: {rows: 1,data: [{value: null}]}
+- name: Equal aggregate values from distinct groups do not collapse cardinality
+  sql: SELECT (SELECT MIN(1) FROM grouped_scalar_values GROUP BY owner_id) AS value
+  expect: {error: true,contains: ['512']}
+- name: DISTINCT collapses equal grouped result values before scalar cardinality
+  sql: SELECT (SELECT DISTINCT MIN(1) FROM grouped_scalar_values GROUP BY owner_id) AS value
+  expect: {rows: 1,data: [{value: 1}]}
+- name: One actual NULL-only group retains its zero COUNT of non-NULL values
+  sql: SELECT (SELECT COUNT(value) FROM grouped_scalar_values WHERE owner_id=2 GROUP BY owner_id) AS value
+  expect: {rows: 1,data: [{value: 0}]}
+- name: HAVING removes other groups before scalar cardinality is checked
+  sql: SELECT (SELECT MIN(value) FROM grouped_scalar_values GROUP BY owner_id HAVING SUM(value)>20) AS value
+  expect: {rows: 1,data: [{value: 10}]}
+- name: Two groups surviving HAVING still violate scalar cardinality
+  sql: SELECT (SELECT MIN(value) FROM grouped_scalar_values GROUP BY owner_id HAVING COUNT(*)>1) AS value
+  expect: {error: true,contains: ['512']}
+- name: Correlated grouped results retain the complete outer domain and NULL result
+  sql: |
+    SELECT outer_values.id,
+      (SELECT MIN(inner_values.value) FROM grouped_scalar_values inner_values
+       WHERE inner_values.owner_id=outer_values.owner_id GROUP BY inner_values.owner_id) AS value
+    FROM grouped_scalar_values outer_values WHERE outer_values.id IN(1,3,4) ORDER BY outer_values.id;
+  expect: {rows: 3,data: [{id: 1,value: 10},{id: 3,value: null},{id: 4,value: 7}]}
+- name: A residual correlated cut does not hide multiple result groups
+  sql: |
+    DECLARE @value INT=77,@failure INT=0;
+    BEGIN TRY
+      SELECT @value=(SELECT MIN(inner_values.value) FROM grouped_scalar_values inner_values
+        WHERE inner_values.id<=outer_values.id GROUP BY inner_values.owner_id)
+      FROM grouped_scalar_values outer_values WHERE outer_values.id=3;
+    END TRY BEGIN CATCH SET @failure=ERROR_NUMBER(); END CATCH;
+    SELECT @value AS value,@failure AS failure;
+  expect: {rows: 1,data: [{value: 77,failure: 512}]}
+- name: Session coordinates remain bound before counting grouped result rows
+  sql: |
+    DECLARE @cut INT=2,@first INT,@value INT=77,@failure INT=0;
+    SET @first=(SELECT MIN(value) FROM grouped_scalar_values WHERE id<=@cut GROUP BY owner_id);
+    SET @cut=5;
+    BEGIN TRY SET @value=(SELECT MIN(value) FROM grouped_scalar_values WHERE id<=@cut GROUP BY owner_id); END TRY
+    BEGIN CATCH SET @failure=ERROR_NUMBER(); END CATCH;
+    SELECT @first AS first_value,@value AS value,@failure AS failure;
+  expect: {rows: 1,data: [{first_value: 10,value: 77,failure: 512}]}
+- name: An empty explicit constant-valued group never gains a synthetic aggregate row
+  sql: |
+    SELECT (SELECT COUNT(*) FROM grouped_scalar_values WHERE id<0
+      GROUP BY CASE WHEN id>=0 THEN 1 ELSE 1 END) AS value;
+  expect: {rows: 1,data: [{value: null}]}
+- name: An ungrouped global COUNT retains its empty-input zero result
+  sql: SELECT (SELECT COUNT(*) FROM grouped_scalar_values WHERE id<0) AS value
+  expect: {rows: 1,data: [{value: 0}]}
+- name: Global HAVING removes the aggregate result before scalar empty-row semantics
+  sql: SELECT (SELECT COUNT(*) FROM grouped_scalar_values WHERE id<0 HAVING COUNT(*)>0) AS value
+  expect: {rows: 1,data: [{value: null}]}
+- name: Global HAVING retains the real empty-input COUNT result when it passes
+  sql: SELECT (SELECT COUNT(*) FROM grouped_scalar_values WHERE id<0 HAVING COUNT(*)=0) AS value
+  expect: {rows: 1,data: [{value: 0}]}
+- name: Three empty grouped scalar value slots retain one outer NULL row
+  sql: SELECT (SELECT MIN(value) FROM grouped_scalar_values WHERE id<0 GROUP BY owner_id) AS a,(SELECT COUNT(*) FROM
+    grouped_scalar_values WHERE id<0 GROUP BY owner_id) AS b,(SELECT MAX(value) FROM grouped_scalar_values WHERE id<0
+    GROUP BY owner_id) AS c
+  expect:
+    rows: 1
+    data:
+    - a: null
+      b: null
+      c: null
+- name: An empty grouped scalar does not discard a separate nonempty scalar result
+  sql: SELECT (SELECT MIN(value) FROM grouped_scalar_values WHERE owner_id=1 GROUP BY owner_id) AS a,(SELECT COUNT(*)
+    FROM grouped_scalar_values WHERE id<0 GROUP BY owner_id) AS b
+  expect:
+    rows: 1
+    data:
+    - a: 10
+      b: null
+- name: Repeated real outer domains retain the same grouped scalar value
+  sql: SELECT o.id,(SELECT MIN(i.value) FROM grouped_scalar_values i WHERE i.owner_id=o.owner_id GROUP BY i.owner_id)
+    AS value FROM grouped_scalar_values o ORDER BY o.id
+  expect:
+    rows: 5
+    data:
+    - id: 1
+      value: 10
+    - id: 2
+      value: 10
+    - id: 3
+      value: null
+    - id: 4
+      value: 7
+    - id: 5
+      value: 7
+- name: A NULL caller coordinate keeps original SQL equality nonmatching
+  setup:
+  - sql: INSERT grouped_scalar_values VALUES(6,NULL,99)
+  cleanup:
+  - sql: DELETE grouped_scalar_values WHERE id=6
+  sql: SELECT o.id,(SELECT MIN(i.value) FROM grouped_scalar_values i WHERE i.owner_id=o.owner_id GROUP BY i.owner_id)
+    AS value FROM grouped_scalar_values o WHERE o.id IN(1,6) ORDER BY o.id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      value: 10
+    - id: 6
+      value: null
+- name: Distinct caller coordinates sharing one inner key retain the full domain tuple
+  setup:
+  - sql: INSERT grouped_scalar_values VALUES(6,NULL,99),(7,7,30)
+  cleanup:
+  - sql: DELETE grouped_scalar_values WHERE id IN(6,7)
+  sql: SELECT o.id,(SELECT MIN(i.value) FROM grouped_scalar_values i WHERE i.owner_id=o.owner_id AND i.owner_id=o.id
+    GROUP BY i.owner_id) AS value FROM grouped_scalar_values o WHERE o.id IN(1,2,6,7) ORDER BY o.id
+  expect:
+    rows: 4
+    data:
+    - id: 1
+      value: 10
+    - id: 2
+      value: null
+    - id: 6
+      value: null
+    - id: 7
+      value: 30
+- name: Residual grouped packets keep empty and populated caller domains separate
+  sql: SELECT o.id,(SELECT MIN(i.value) FROM grouped_scalar_values i WHERE i.id<o.id GROUP BY i.owner_id) AS value FROM grouped_scalar_values o WHERE o.id<=3 ORDER BY o.id
+  expect:
+    rows: 3
+    data:
+    - id: 1
+      value: null
+    - id: 2
+      value: 10
+    - id: 3
+      value: 10
+- name: A real NULL-only residual group retains its COUNT value
+  sql: SELECT o.id,(SELECT COUNT(i.value) FROM grouped_scalar_values i WHERE i.id<=o.id AND i.owner_id=2 GROUP BY i.owner_id) AS value FROM grouped_scalar_values o WHERE o.id IN(3,4) ORDER BY o.id
+  expect:
+    rows: 2
+    data:
+    - id: 3
+      value: 0
+    - id: 4
+      value: 0
+- name: A NULL residual cutoff creates no result group
+  setup:
+  - sql: INSERT grouped_scalar_values VALUES(6,NULL,99)
+  cleanup:
+  - sql: DELETE grouped_scalar_values WHERE id=6
+  sql: SELECT o.id,(SELECT MIN(i.value) FROM grouped_scalar_values i WHERE i.id<=o.owner_id GROUP BY i.owner_id) AS value FROM grouped_scalar_values o WHERE o.id IN(1,6) ORDER BY o.id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      value: 10
+    - id: 6
+      value: null

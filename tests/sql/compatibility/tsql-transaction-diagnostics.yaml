@@ -1,0 +1,89 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# SQL Server diagnostic and transaction-state contracts:
+# https://learn.microsoft.com/sql/t-sql/language-elements/try-catch-transact-sql
+# https://learn.microsoft.com/sql/t-sql/functions/xact-state-transact-sql
+# https://learn.microsoft.com/sql/t-sql/functions/trancount-transact-sql
+metadata:
+  syntax: tsql
+  isolated: true
+  description: Transaction diagnostics remain readable before rollback without admitting native writes
+setup:
+- sql: CREATE TABLE transaction_diagnostics(id INT PRIMARY KEY, value INT)
+- sql: INSERT transaction_diagnostics VALUES(1,10)
+cleanup:
+- sql: DROP TABLE IF EXISTS transaction_diagnostics
+test_cases:
+- name: No explicit transaction has zero SQL state and nesting depth
+  sql: SELECT XACT_STATE() AS state,@@TRANCOUNT AS depth
+  expect: {rows: 1,data: [{state: 0,depth: 0}]}
+- name: Active transaction diagnostics observe nesting and rollback
+  sql: |
+    BEGIN TRANSACTION;
+    BEGIN TRANSACTION;
+    SELECT XACT_STATE() AS state,@@TRANCOUNT AS depth;
+    ROLLBACK TRANSACTION;
+    SELECT XACT_STATE() AS state,@@TRANCOUNT AS depth;
+  expect: {rows: 2,data: [{state: 1,depth: 2},{state: 0,depth: 0}]}
+- name: CATCH retains its primary diagnostic and can conditionally roll back
+  sql: |
+    BEGIN TRANSACTION;
+    BEGIN TRY
+      INSERT transaction_diagnostics VALUES(2,20);
+      THROW 51001,N'primary diagnostic',7;
+    END TRY
+    BEGIN CATCH
+      SELECT ERROR_NUMBER() AS number,ERROR_MESSAGE() AS message,
+             ERROR_STATE() AS error_state,ERROR_SEVERITY() AS severity,@@TRANCOUNT AS depth;
+      IF @@TRANCOUNT>0 AND XACT_STATE()<>0 ROLLBACK TRANSACTION;
+    END CATCH;
+    SELECT COUNT(*) AS stored_rows,XACT_STATE() AS state FROM transaction_diagnostics;
+  expect:
+    rows: 2
+    data:
+    - {number: 51001,message: primary diagnostic,error_state: 7,severity: 16,depth: 1}
+    - {stored_rows: 1,state: 0}
+- name: Native status inspection preserves an existing aborted decision
+  scm: |
+    (begin
+      (define caller (newsession)) (caller "username" "root")
+      (define execute (lambda (text)
+        (tsql_execute_request "memcp-tests" text caller nil 0 (lambda (_row) true) (lambda args true))))
+      (execute "BEGIN TRANSACTION")
+      (define tx (caller "__memcp_tx"))
+      (define active (equal? (tx_state tx) "active"))
+      /* Exercise native abort independently of SQL's XACT_ABORT OFF policy. */
+      (try (lambda () (with_query_request caller nil 0 "controlled native failure" "acid"
+        (lambda (statement) (statement "controlled native failure" false
+          (lambda (_tx) (error "controlled native failure")))))) (lambda (_cause) true))
+      (define aborted (equal? (tx_state tx) "aborted"))
+      (define values (newsession))
+      (tsql_execute_request "memcp-tests" "SELECT XACT_STATE() AS state,@@TRANCOUNT AS depth"
+        caller nil 0 (lambda (row) (values "row" row)) (lambda args true))
+      (define retained (equal? (tx_state tx) "aborted"))
+      (define rejected (reduce
+        '("INSERT transaction_diagnostics VALUES(3,30)"
+          "UPDATE transaction_diagnostics SET value=99 WHERE id=1"
+          "DELETE FROM transaction_diagnostics WHERE id=1"
+          "ALTER TABLE transaction_diagnostics ADD forbidden INT")
+        (lambda (valid text) (and valid (try (lambda () (begin (execute text) false)) (lambda (_cause) true)))) true))
+      (define still_aborted (equal? (tx_state tx) "aborted"))
+      (execute "ROLLBACK TRANSACTION")
+      (and active aborted retained rejected still_aborted
+        (equal? ((values "row") "state") -1) (equal? ((values "row") "depth") 1)))
+  expect: {result: true}
+- name: Recovery diagnostics leave public rows unchanged
+  sql: SELECT id,value FROM transaction_diagnostics ORDER BY id
+  expect: {rows: 1,data: [{id: 1,value: 10}]}
+- name: Recovery diagnostics do not publish rejected schema effects
+  sql: SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME=N'transaction_diagnostics' ORDER BY ORDINAL_POSITION
+  expect: {rows: 2,data: [{COLUMN_NAME: id},{COLUMN_NAME: value}]}
+- name: THROW with default XACT_ABORT OFF retains a committable SQL transaction
+  noncritical: true
+  # The native exception owner currently aborts this transaction. Keep the SQL
+  # Server result as the target; a frontend diagnostic must not fake state 1.
+  sql: |
+    BEGIN TRANSACTION;
+    BEGIN TRY THROW 51003,N'committable SQL diagnostic',1; END TRY
+    BEGIN CATCH SELECT XACT_STATE() AS state,@@TRANCOUNT AS depth; ROLLBACK TRANSACTION; END CATCH;
+  expect: {rows: 1,data: [{state: 1,depth: 1}]}

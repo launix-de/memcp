@@ -21,14 +21,20 @@ import (
 // compiled is a process-local artifact published once, outside catalog locks.
 // An invocation owns its session, transaction and result callbacks separately.
 type ProcedureDescription struct {
-	Name       string    `json:"name"`
-	SchemaOnly bool      `json:"schema_only,omitempty"`
-	Source     string    `json:"source"`
-	Language   string    `json:"language"`
-	Parameters scm.Scmer `json:"parameters"`
-	compile    sync.Once
-	compiled   atomic.Pointer[scm.Scmer]
-	compileErr any
+	Name               string    `json:"name"`
+	SchemaOnly         bool      `json:"schema_only,omitempty"`
+	Source             string    `json:"source"`
+	Language           string    `json:"language"`
+	Parameters         scm.Scmer `json:"parameters"`
+	compile            sync.Once
+	compiled           atomic.Pointer[scm.Scmer]
+	compileErr         any
+	memory             sourceDefinitionMemory
+	pendingDecision    string
+	publicationVersion atomic.Uint64
+	previousCommitted  atomic.Pointer[ProcedureDescription]
+	removed            bool
+	sourceReservation  bool
 }
 
 // ComputeSize includes the retained declaration and its transient callable.
@@ -65,6 +71,7 @@ func (p *ProcedureDescription) callable(schema string) scm.Scmer {
 		// Compiler-generated callables must use the ordinary plan/schema guards;
 		// they may retain source, never request-owned bindings or physical rows.
 		fn = scm.CompileJIT(scm.CloseProcedure(fn), true)
+		p.publishInitialCallableMemory(fn)
 		p.compiled.Store(&fn)
 	})
 	if p.compileErr != nil {
@@ -113,40 +120,68 @@ func freezeProcedureParameters(value scm.Scmer) scm.Scmer {
 	return frozen
 }
 
-func CreateProcedure(schema, name, language, source string, parameters scm.Scmer, replace bool) bool {
+func CreateProcedure(schema, name, language, source string, parameters scm.Scmer, replace bool, options ...sourceProcedureOptions) bool {
+	option := sourceCreationOptions(options)
+	if option.mustExist && !replace {
+		panic("must-exist source update requires replacement")
+	}
 	db := GetDatabase(schema)
 	if db == nil {
 		panic("database does not exist: " + schema)
 	}
-	defer db.GetWrite(nil).Release()
 	db.ensureLoaded()
 	if name == "" || language == "" || source == "" {
 		panic("procedure name, language and source must not be empty")
 	}
 	definition := &ProcedureDescription{Name: name, Language: language, Source: source,
 		Parameters: freezeProcedureParameters(parameters)}
+	if err := definition.initializeSourceMemory(); err != nil {
+		panic(err)
+	}
 	// Validate and compile before publication, without catalog ownership. A
 	// compiler may inspect the existing schema through ordinary metadata APIs.
 	definition.callable(schema)
+	if tx := option.transaction; tx != nil && !tx.autoCommit {
+		return tx.stageCatalogSource(db, definition, name, replace, option.mustExist, false)
+	}
+	// The callback may have changed the catalog or replaced the database.
+	// Acquire publication ownership only after it returns, then validate the
+	// original database identity before installing its immutable declaration.
+	defer db.GetWrite(nil).Release()
 	db.persistenceLifecycle.RLock()
 	defer db.persistenceLifecycle.RUnlock()
 	if GetDatabase(schema) != db {
 		panic("database was replaced before procedure publication: " + schema)
 	}
 	db.schemalock.Lock()
+	if db.procedures.Get(name).pendingSource(db.catalogView().version) {
+		db.schemalock.Unlock()
+		panic("source declaration name is reserved by a native transaction: " + name)
+	}
+	if option.mustExist && db.procedures.Get(name) == nil {
+		db.schemalock.Unlock()
+		panic("procedure does not exist: " + name)
+	}
 	if db.procedures.Get(name) != nil && !replace {
 		db.schemalock.Unlock()
 		panic("procedure already exists: " + name)
 	}
-	db.procedures.Set(name, definition)
+	definition.retainSourceMemory(db)
+	if previous := db.procedures.Set(name, definition); previous != nil {
+		previous.releaseSourceMemory(db)
+	}
 	db.saveLockedAndUnlock(schemaSaveFsync)
 	return true
 }
 
-func DropProcedure(schema, name string, ifexists bool) bool {
+func DropProcedure(schema, name string, ifexists bool, transactions ...*TxContext) bool {
 	db := GetDatabase(schema)
 	if db == nil {
 		panic("database does not exist: " + schema)
+	}
+	if tx := sourceTransaction(transactions); tx != nil && !tx.autoCommit {
+		db.GetRead(tx)
+		return tx.stageCatalogSource(db, nil, name, false, false, ifexists)
 	}
 	defer db.GetWrite(nil).Release()
 	db.ensureLoaded()
@@ -156,6 +191,10 @@ func DropProcedure(schema, name string, ifexists bool) bool {
 		panic("database was replaced before procedure publication: " + schema)
 	}
 	db.schemalock.Lock()
+	if db.procedures.Get(name).pendingSource(db.catalogView().version) {
+		db.schemalock.Unlock()
+		panic("source declaration name is reserved by a native transaction: " + name)
+	}
 	if db.procedures.Get(name) == nil {
 		db.schemalock.Unlock()
 		if ifexists {
@@ -163,7 +202,8 @@ func DropProcedure(schema, name string, ifexists bool) bool {
 		}
 		panic("procedure does not exist: " + name)
 	}
-	db.procedures.Remove(name)
+	definition := db.procedures.Remove(name)
+	definition.releaseSourceMemory(db)
 	db.saveLockedAndUnlock(schemaSaveFsync)
 	return true
 }
@@ -179,14 +219,14 @@ func procedureDeclaration(definition *ProcedureDescription) scm.Scmer {
 	})
 }
 
-func Procedure(schema, name string, withDeclaration bool) scm.Scmer {
+func Procedure(schema, name string, withDeclaration bool, transactions ...*TxContext) scm.Scmer {
 	db := GetDatabase(schema)
 	if db == nil {
 		panic("database does not exist: " + schema)
 	}
-	db.GetRead(nil)
+	db.GetRead(sourceTransaction(transactions))
 	db.ensureLoaded()
-	definition := db.procedures.Get(name)
+	definition := db.visibleProcedure(name, sourceTransaction(transactions))
 	if definition == nil {
 		panic("procedure does not exist: " + name)
 	}
@@ -200,17 +240,21 @@ func Procedure(schema, name string, withDeclaration bool) scm.Scmer {
 	return callable
 }
 
-func ShowProcedures(schema, name string) scm.Scmer {
+func ShowProcedures(schema, name string, transactions ...*TxContext) scm.Scmer {
 	db := GetDatabase(schema)
 	if db == nil {
 		panic("database does not exist: " + schema)
 	}
-	db.GetRead(nil)
+	db.GetRead(sourceTransaction(transactions))
 	db.ensureLoaded()
 	var definitions []*ProcedureDescription
 	if name == "" {
-		definitions = db.procedures.GetAll()
-	} else if definition := db.procedures.Get(name); definition != nil {
+		for _, stored := range db.procedures.GetAll() {
+			if visible := db.visibleProcedure(stored.Name, sourceTransaction(transactions)); visible != nil {
+				definitions = append(definitions, visible)
+			}
+		}
+	} else if definition := db.visibleProcedure(name, sourceTransaction(transactions)); definition != nil {
 		definitions = []*ProcedureDescription{definition}
 	}
 	rows := make([]scm.Scmer, 0, len(definitions))
@@ -229,23 +273,23 @@ func initProcedureBuiltins(en *scm.Env) {
 	}, Type: &scm.TypeDescriptor{Kind: "func", Description: "registers a source compiler (source context) for stored procedures", HasSideEffects: true,
 		Params: []*scm.TypeDescriptor{{Kind: "string", Label: "language"}, {Kind: "func", Label: "compiler"}}, Return: &scm.TypeDescriptor{Kind: "bool"}}})
 	scm.Declare(en, &scm.Declaration{Name: "createprocedure", Fn: func(a ...scm.Scmer) scm.Scmer {
-		return scm.NewBool(CreateProcedure(a[0].String(), a[1].String(), a[2].String(), a[3].String(), a[4], len(a) > 5 && a[5].Bool()))
+		return scm.NewBool(CreateProcedure(a[0].String(), a[1].String(), a[2].String(), a[3].String(), a[4], len(a) > 5 && a[5].Bool(), sourceSCMCreationOptions(a)))
 	}, Type: &scm.TypeDescriptor{Kind: "func", Description: "persists a language-owned procedure source definition", HasSideEffects: true,
-		Params: []*scm.TypeDescriptor{{Kind: "string", Label: "schema"}, {Kind: "string", Label: "name"}, {Kind: "string", Label: "language"}, {Kind: "string", Label: "source"}, {Kind: "any", Label: "parameters"}, {Kind: "bool", Label: "replace", Optional: true}}, Return: &scm.TypeDescriptor{Kind: "bool"}}})
+		Params: []*scm.TypeDescriptor{{Kind: "string", Label: "schema"}, {Kind: "string", Label: "name"}, {Kind: "string", Label: "language"}, {Kind: "string", Label: "source"}, {Kind: "any", Label: "parameters"}, {Kind: "bool", Label: "replace", Optional: true}, {Kind: "any", Label: "transaction", Optional: true}, {Kind: "bool", Label: "must_exist", Optional: true}}, Return: &scm.TypeDescriptor{Kind: "bool"}}})
 	scm.Declare(en, &scm.Declaration{Name: "dropprocedure", Fn: func(a ...scm.Scmer) scm.Scmer {
-		return scm.NewBool(DropProcedure(a[0].String(), a[1].String(), len(a) > 2 && a[2].Bool()))
+		return scm.NewBool(DropProcedure(a[0].String(), a[1].String(), len(a) > 2 && a[2].Bool(), sourceSCMTransaction(a, 3)))
 	}, Type: &scm.TypeDescriptor{Kind: "func", Description: "drops a stored procedure definition", HasSideEffects: true,
-		Params: []*scm.TypeDescriptor{{Kind: "string", Label: "schema"}, {Kind: "string", Label: "name"}, {Kind: "bool", Label: "if_exists", Optional: true}}, Return: &scm.TypeDescriptor{Kind: "bool"}}})
+		Params: []*scm.TypeDescriptor{{Kind: "string", Label: "schema"}, {Kind: "string", Label: "name"}, {Kind: "bool", Label: "if_exists", Optional: true}, {Kind: "any", Label: "transaction", Optional: true}}, Return: &scm.TypeDescriptor{Kind: "bool"}}})
 	scm.Declare(en, &scm.Declaration{Name: "procedure", Fn: func(a ...scm.Scmer) scm.Scmer {
-		return Procedure(a[0].String(), a[1].String(), len(a) > 2 && a[2].Bool())
+		return Procedure(a[0].String(), a[1].String(), len(a) > 2 && a[2].Bool(), sourceSCMTransaction(a, 3))
 	}, Type: &scm.TypeDescriptor{Kind: "func", Description: "resolves and regenerates a stored source procedure", HasSideEffects: true,
-		Params: []*scm.TypeDescriptor{{Kind: "string", Label: "schema"}, {Kind: "string", Label: "name"}, {Kind: "bool", Label: "with_declaration", Optional: true}}, Return: &scm.TypeDescriptor{Kind: "any"}}})
+		Params: []*scm.TypeDescriptor{{Kind: "string", Label: "schema"}, {Kind: "string", Label: "name"}, {Kind: "bool", Label: "with_declaration", Optional: true}, {Kind: "any", Label: "transaction", Optional: true}}, Return: &scm.TypeDescriptor{Kind: "any"}}})
 	scm.Declare(en, &scm.Declaration{Name: "showprocedures", Fn: func(a ...scm.Scmer) scm.Scmer {
 		name := ""
 		if len(a) > 1 {
 			name = a[1].String()
 		}
-		return ShowProcedures(a[0].String(), name)
+		return ShowProcedures(a[0].String(), name, sourceSCMTransaction(a, 2))
 	}, Type: &scm.TypeDescriptor{Kind: "func", Description: "lists native source declarations or looks up one named definition",
-		Params: []*scm.TypeDescriptor{{Kind: "string", Label: "schema"}, {Kind: "string", Label: "name", Optional: true}}, Return: &scm.TypeDescriptor{Kind: "list"}}})
+		Params: []*scm.TypeDescriptor{{Kind: "string", Label: "schema"}, {Kind: "string", Label: "name", Optional: true}, {Kind: "any", Label: "transaction", Optional: true}}, Return: &scm.TypeDescriptor{Kind: "list"}}})
 }

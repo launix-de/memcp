@@ -1,0 +1,163 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Multi-statement table functions stream typed native multisets with invocation scope
+setup:
+- sql: CREATE TABLE table_function_inputs(id INT PRIMARY KEY,amount INT NULL)
+- sql: INSERT table_function_inputs VALUES(1,10),(2,NULL)
+- sql: |
+    CREATE FUNCTION dbo.repeated_rows(@times INT,@include BIT=1)
+    RETURNS @result TABLE(slot_number INT,amount INT NULL,label NVARCHAR(8)) AS BEGIN
+      DECLARE @copy TABLE(amount INT NULL);
+      DECLARE @i INT=0;
+      IF @include=1 INSERT INTO @copy(amount) SELECT amount FROM table_function_inputs;
+      WHILE @i<@times BEGIN
+        INSERT INTO @result(slot_number,amount,label) SELECT @i,amount,N'copy' FROM @copy;
+        SET @i=@i+1;
+      END
+      RETURN;
+    END
+- sql: |
+    CREATE FUNCTION dbo.required_row(@value INT) RETURNS @result TABLE(amount INT NOT NULL) AS BEGIN
+      INSERT INTO @result(amount) SELECT @value;
+      RETURN;
+    END
+- sql: |
+    CREATE FUNCTION dbo.nullable_rows(@times INT,@include BIT)
+    RETURNS @result TABLE(amount INT NULL) AS BEGIN
+      DECLARE @copy TABLE(amount INT NULL);
+      DECLARE @i INT=0;
+      IF @include=1 INSERT INTO @copy(amount) SELECT amount FROM table_function_inputs WHERE amount IS NULL;
+      WHILE @i<@times BEGIN
+        INSERT INTO @result(amount) SELECT amount FROM @copy;
+        SET @i=@i+1;
+      END
+      RETURN;
+    END
+test_cases:
+- name: A loop returns every row including duplicate values and NULL
+  sql: SELECT slot_number,amount,label FROM dbo.repeated_rows(2,DEFAULT) AS returned ORDER BY slot_number,amount
+  expect:
+    rows: 4
+    data:
+    - {slot_number: 0,amount: null,label: copy}
+    - {slot_number: 0,amount: 10,label: copy}
+    - {slot_number: 1,amount: null,label: copy}
+    - {slot_number: 1,amount: 10,label: copy}
+- name: Return relation aggregation distinguishes COUNT and SUM
+  sql: SELECT COUNT(*) AS row_count,COUNT(amount) AS nonnull_count,SUM(amount) AS total FROM dbo.repeated_rows(2,1) AS returned
+  expect: {rows: 1,data: [{row_count: 4,nonnull_count: 2,total: 20}]}
+- name: Empty invocation aggregation preserves COUNT zero and SUM NULL
+  sql: SELECT COUNT(*) AS row_count,COUNT(amount) AS nonnull_count,SUM(amount) AS total FROM dbo.repeated_rows(0,1) AS returned
+  expect: {rows: 1,data: [{row_count: 0,nonnull_count: 0,total: null}]}
+- name: Distinct values and nullable aggregate input retain the returned multiset
+  sql: SELECT COUNT(DISTINCT amount) AS distinct_count,COUNT(*) AS row_count,SUM(amount) AS total FROM dbo.repeated_rows(2,1) AS returned
+  expect: {rows: 1,data: [{distinct_count: 1,row_count: 4,total: 20}]}
+- name: Zero iterations expose an empty multiset
+  sql: SELECT slot_number,amount,label FROM dbo.repeated_rows(0,1) AS returned
+  expect: {rows: 0,data: []}
+- name: A branch that skips local initialization returns no rows
+  sql: SELECT slot_number,amount,label FROM dbo.repeated_rows(3,0) AS returned
+  expect: {rows: 0,data: []}
+- name: Actual all-NULL input rows retain their duplicate multiset
+  sql: SELECT amount FROM dbo.nullable_rows(2,1) AS returned
+  expect: {rows: 2,data: [{amount: null},{amount: null}]}
+- name: Actual all-NULL rows contribute cardinality without nonnull values
+  sql: SELECT COUNT(*) AS row_count,COUNT(amount) AS nonnull_count,SUM(amount) AS total FROM dbo.nullable_rows(2,1) AS returned
+  expect: {rows: 1,data: [{row_count: 2,nonnull_count: 0,total: null}]}
+- name: Warm invocations own separate local table contents
+  sql: SELECT slot_number,amount,label FROM dbo.repeated_rows(2,DEFAULT) AS returned ORDER BY slot_number,amount
+  expect:
+    rows: 4
+    data:
+    - {slot_number: 0,amount: null,label: copy}
+    - {slot_number: 0,amount: 10,label: copy}
+    - {slot_number: 1,amount: null,label: copy}
+    - {slot_number: 1,amount: 10,label: copy}
+- name: Two function operands keep independent native relation handles
+  sql: SELECT first_row.amount AS first_value,second_row.amount AS second_value FROM dbo.required_row(2) first_row JOIN dbo.required_row(3) second_row ON first_row.amount<second_row.amount
+  expect: {rows: 1,data: [{first_value: 2,second_value: 3}]}
+- name: Empty return metadata comes from the declared SQL types
+  tds:
+    statements:
+    - sql: SELECT slot_number,amount,label FROM dbo.repeated_rows(0,1) AS returned
+      expect:
+        rows: 0
+        data: []
+        column_types: [{name: slot_number,type: INT},{name: amount,type: INT},{name: label,type: NVARCHAR}]
+- name: Public reads retain pending caller writes through the complete function
+  tds:
+    statements:
+    - {connection: owner,sql: BEGIN TRANSACTION}
+    - {connection: owner,sql: 'INSERT table_function_inputs VALUES(3,7)'}
+    - connection: owner
+      sql: SELECT amount FROM dbo.repeated_rows(1,1) AS returned ORDER BY amount
+      expect: {rows: 3,data: [{amount: null},{amount: 7},{amount: 10}]}
+    - {connection: owner,sql: ROLLBACK TRANSACTION}
+    - connection: observer
+      sql: SELECT amount FROM dbo.repeated_rows(1,1) AS returned ORDER BY amount
+      expect: {rows: 2,data: [{amount: null},{amount: 10}]}
+- name: Invalid required output data rejects the initialization
+  sql: SELECT amount FROM dbo.required_row(NULL) AS returned
+  expect: {error: true,contains: cannot be NULL}
+- name: A failed initializer leaves the next native output scope independent
+  sql: SELECT amount FROM dbo.required_row(7) AS returned
+  expect: {rows: 1,data: [{amount: 7}]}
+- name: Catalog reflection retains the table-valued module kind
+  sql: SELECT name,type,type_desc FROM sys.objects WHERE name='repeated_rows'
+  expect: {rows: 1,data: [{name: repeated_rows,type: TF,type_desc: SQL_TABLE_VALUED_FUNCTION}]}
+- name: OBJECT_ID recognizes the table function and excludes a scalar kind
+  sql: SELECT CASE WHEN OBJECT_ID('dbo.repeated_rows','TF') IS NOT NULL AND OBJECT_ID('dbo.repeated_rows','FN') IS NULL THEN 1 ELSE 0 END AS correct_kind
+  expect: {rows: 1,data: [{correct_kind: 1}]}
+- name: Staged source definitions bind and execute in their owning catalog transaction
+  tds:
+    statements:
+    - {connection: owner,sql: BEGIN TRANSACTION}
+    - connection: owner
+      sql: |
+        CREATE FUNCTION dbo.transaction_row(@value INT) RETURNS @result TABLE(amount INT) AS BEGIN
+          INSERT INTO @result(amount) SELECT @value;
+          RETURN;
+        END
+    - connection: owner
+      sql: SELECT amount FROM dbo.transaction_row(17) AS returned
+      expect: {rows: 1,data: [{amount: 17}]}
+    - {connection: owner,sql: ROLLBACK TRANSACTION}
+    - connection: observer
+      sql: SELECT OBJECT_ID('dbo.transaction_row','TF') AS module_id
+      expect: {rows: 1,data: [{module_id: null}]}
+- name: A source definition can be recreated through its normal object owner
+  tds:
+    statements:
+    - sql: DROP FUNCTION dbo.required_row
+    - sql: |
+        CREATE FUNCTION dbo.required_row(@value INT) RETURNS @result TABLE(amount INT NOT NULL) AS BEGIN
+          INSERT INTO @result(amount) SELECT @value+1;
+          RETURN;
+        END
+- name: An existing warm query resolves the new immutable source snapshot
+  sql: SELECT amount FROM dbo.required_row(7) AS returned
+  expect: {rows: 1,data: [{amount: 8}]}
+- name: Catalog definitions survive restart
+  action: restart
+- name: A restored definition initializes and streams its actual rows
+  sql: SELECT slot_number,amount,label FROM dbo.repeated_rows(2,DEFAULT) AS returned ORDER BY slot_number,amount
+  expect:
+    rows: 4
+    data:
+    - {slot_number: 0,amount: null,label: copy}
+    - {slot_number: 0,amount: 10,label: copy}
+    - {slot_number: 1,amount: null,label: copy}
+    - {slot_number: 1,amount: 10,label: copy}
+- name: Restored replacement source retains its changed calculation
+  sql: SELECT amount FROM dbo.required_row(7) AS returned
+  expect: {rows: 1,data: [{amount: 8}]}
+cleanup:
+- sql: DROP FUNCTION IF EXISTS dbo.nullable_rows
+- sql: DROP FUNCTION IF EXISTS dbo.transaction_row
+- sql: DROP FUNCTION IF EXISTS dbo.required_row
+- sql: DROP FUNCTION IF EXISTS dbo.repeated_rows
+- sql: DROP TABLE IF EXISTS table_function_inputs

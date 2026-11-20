@@ -1,3 +1,5 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
 metadata:
   version: "1.0"
   description: "Timezone: SET time_zone, CONVERT_TZ, UNIX_TIMESTAMP, FROM_UNIXTIME, UTC_*, TIMESTAMP vs DATETIME, DST"
@@ -300,7 +302,10 @@ test_cases:
   - name: "Create DATETIME table"
     sql: "CREATE TABLE tz_dt (id INT, dt DATETIME)"
     expect:
-      rows: 0
+      affected_rows: 0
+      rows: 1
+      data: [{affected_rows: 0}]
+      result_contains: '"affected_rows"'
 
   - name: "Insert datetime"
     sql: "INSERT INTO tz_dt VALUES (1, '2024-06-15 12:00:00')"

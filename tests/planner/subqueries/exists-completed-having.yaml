@@ -1,0 +1,366 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# https://learn.microsoft.com/en-us/sql/t-sql/queries/select-having-transact-sql
+metadata:
+  description: EXISTS observes completed global aggregate rows after HAVING across
+    SQL dialects
+setup:
+- sql: CREATE TABLE exists_having_outer(id INT)
+- sql: CREATE TABLE exists_having_inner(id INT,owner INT,amount INT)
+- sql: CREATE TABLE exists_having_tags(id INT)
+- sql: INSERT INTO exists_having_outer VALUES(NULL),(1),(1),(2),(3)
+- sql: INSERT INTO exists_having_inner VALUES(10,1,5),(11,1,NULL),(20,2,NULL),(30,NULL,9)
+- sql: INSERT INTO exists_having_tags VALUES(10),(11),(20),(30)
+cleanup:
+- sql: DROP TABLE exists_having_tags
+- sql: DROP TABLE exists_having_inner
+- sql: DROP TABLE exists_having_outer
+test_cases:
+- name: mysql nonempty_count observes completed group rows
+  syntax: mysql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM exists_having_outer o WHERE EXISTS(SELECT
+    COUNT(*) AS n FROM exists_having_inner i WHERE i.owner=o.id HAVING COUNT(*)>0)
+    ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - id: 1
+    - id: 1
+    - id: 2
+- name: mysql empty_count observes completed group rows
+  syntax: mysql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM exists_having_outer o WHERE EXISTS(SELECT
+    COUNT(*) AS n FROM exists_having_inner i WHERE i.owner=o.id HAVING COUNT(*)=0)
+    ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: -1
+    - id: 3
+- name: mysql nullable_sum observes completed group rows
+  syntax: mysql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM exists_having_outer o WHERE EXISTS(SELECT
+    SUM(i.amount) AS n FROM exists_having_inner i WHERE i.owner=o.id HAVING SUM(i.amount)
+    IS NULL) ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - id: -1
+    - id: 2
+    - id: 3
+- name: mysql caller_having_coordinate observes completed group rows
+  syntax: mysql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM exists_having_outer o WHERE EXISTS(SELECT
+    COUNT(*) AS n FROM exists_having_inner i WHERE i.owner=o.id HAVING COUNT(*)>=o.id)
+    ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+    - id: 1
+- name: mysql negated_nonempty_count observes completed group rows
+  syntax: mysql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM exists_having_outer o WHERE NOT EXISTS(SELECT
+    COUNT(*) AS n FROM exists_having_inner i WHERE i.owner=o.id HAVING COUNT(*)>0)
+    ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: -1
+    - id: 3
+- name: mysql having_rejects_every_group observes completed group rows
+  syntax: mysql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM exists_having_outer o WHERE EXISTS(SELECT
+    COUNT(*) AS n FROM exists_having_inner i WHERE i.owner=o.id HAVING COUNT(*)>100)
+    ORDER BY id
+  expect:
+    rows: 0
+    data: []
+- name: tsql nonempty_count observes completed group rows
+  syntax: tsql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM exists_having_outer o WHERE EXISTS(SELECT
+    COUNT(*) AS n FROM exists_having_inner i WHERE i.owner=o.id HAVING COUNT(*)>0)
+    ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - id: 1
+    - id: 1
+    - id: 2
+- name: tsql empty_count observes completed group rows
+  syntax: tsql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM exists_having_outer o WHERE EXISTS(SELECT
+    COUNT(*) AS n FROM exists_having_inner i WHERE i.owner=o.id HAVING COUNT(*)=0)
+    ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: -1
+    - id: 3
+- name: tsql nullable_sum observes completed group rows
+  syntax: tsql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM exists_having_outer o WHERE EXISTS(SELECT
+    SUM(i.amount) AS n FROM exists_having_inner i WHERE i.owner=o.id HAVING SUM(i.amount)
+    IS NULL) ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - id: -1
+    - id: 2
+    - id: 3
+- name: tsql caller_having_coordinate observes completed group rows
+  syntax: tsql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM exists_having_outer o WHERE EXISTS(SELECT
+    COUNT(*) AS n FROM exists_having_inner i WHERE i.owner=o.id HAVING COUNT(*)>=o.id)
+    ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+    - id: 1
+- name: tsql negated_nonempty_count observes completed group rows
+  syntax: tsql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM exists_having_outer o WHERE NOT EXISTS(SELECT
+    COUNT(*) AS n FROM exists_having_inner i WHERE i.owner=o.id HAVING COUNT(*)>0)
+    ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: -1
+    - id: 3
+- name: tsql having_rejects_every_group observes completed group rows
+  syntax: tsql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM exists_having_outer o WHERE EXISTS(SELECT
+    COUNT(*) AS n FROM exists_having_inner i WHERE i.owner=o.id HAVING COUNT(*)>100)
+    ORDER BY id
+  expect:
+    rows: 0
+    data: []
+- name: psql nonempty_count observes completed group rows
+  syntax: psql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM exists_having_outer o WHERE EXISTS(SELECT
+    COUNT(*) AS n FROM exists_having_inner i WHERE i.owner=o.id HAVING COUNT(*)>0)
+    ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - id: 1
+    - id: 1
+    - id: 2
+- name: psql empty_count observes completed group rows
+  syntax: psql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM exists_having_outer o WHERE EXISTS(SELECT
+    COUNT(*) AS n FROM exists_having_inner i WHERE i.owner=o.id HAVING COUNT(*)=0)
+    ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: -1
+    - id: 3
+- name: psql nullable_sum observes completed group rows
+  syntax: psql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM exists_having_outer o WHERE EXISTS(SELECT
+    SUM(i.amount) AS n FROM exists_having_inner i WHERE i.owner=o.id HAVING SUM(i.amount)
+    IS NULL) ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - id: -1
+    - id: 2
+    - id: 3
+- name: psql caller_having_coordinate observes completed group rows
+  syntax: psql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM exists_having_outer o WHERE EXISTS(SELECT
+    COUNT(*) AS n FROM exists_having_inner i WHERE i.owner=o.id HAVING COUNT(*)>=o.id)
+    ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+    - id: 1
+- name: psql negated_nonempty_count observes completed group rows
+  syntax: psql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM exists_having_outer o WHERE NOT EXISTS(SELECT
+    COUNT(*) AS n FROM exists_having_inner i WHERE i.owner=o.id HAVING COUNT(*)>0)
+    ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: -1
+    - id: 3
+- name: psql having_rejects_every_group observes completed group rows
+  syntax: psql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM exists_having_outer o WHERE EXISTS(SELECT
+    COUNT(*) AS n FROM exists_having_inner i WHERE i.owner=o.id HAVING COUNT(*)>100)
+    ORDER BY id
+  expect:
+    rows: 0
+    data: []
+- name: mysql a positive cap preserves the filtered global group
+  syntax: mysql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM exists_having_outer o WHERE EXISTS(SELECT
+    COUNT(*) AS n FROM exists_having_inner i WHERE i.owner=o.id HAVING COUNT(*)>0
+    ORDER BY n DESC LIMIT 2) ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - id: 1
+    - id: 1
+    - id: 2
+- name: tsql a positive cap preserves the filtered global group
+  syntax: tsql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM exists_having_outer o WHERE EXISTS(SELECT
+    TOP(2) COUNT(*) AS n FROM exists_having_inner i WHERE i.owner=o.id HAVING COUNT(*)>0
+    ORDER BY n DESC) ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - id: 1
+    - id: 1
+    - id: 2
+- name: psql a positive cap preserves the filtered global group
+  syntax: psql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM exists_having_outer o WHERE EXISTS(SELECT
+    COUNT(*) AS n FROM exists_having_inner i WHERE i.owner=o.id HAVING COUNT(*)>0
+    ORDER BY n DESC LIMIT 2) ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - id: 1
+    - id: 1
+    - id: 2
+- name: mysql a global COUNT group is present for every caller
+  syntax: mysql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM exists_having_outer o WHERE EXISTS(SELECT
+    COUNT(*) AS n FROM exists_having_inner i WHERE i.owner=o.id HAVING COUNT(*)>=0)
+    ORDER BY id
+  expect:
+    rows: 5
+    data:
+    - id: -1
+    - id: 1
+    - id: 1
+    - id: 2
+    - id: 3
+- name: mysql ON correlations remain inside the global group input
+  syntax: mysql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM exists_having_outer o WHERE EXISTS(SELECT
+    COUNT(*) AS n FROM exists_having_inner i INNER JOIN exists_having_tags t ON t.id=i.id
+    AND i.owner=o.id HAVING COUNT(*)=0) ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: -1
+    - id: 3
+- name: tsql a global COUNT group is present for every caller
+  syntax: tsql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM exists_having_outer o WHERE EXISTS(SELECT
+    COUNT(*) AS n FROM exists_having_inner i WHERE i.owner=o.id HAVING COUNT(*)>=0)
+    ORDER BY id
+  expect:
+    rows: 5
+    data:
+    - id: -1
+    - id: 1
+    - id: 1
+    - id: 2
+    - id: 3
+- name: tsql ON correlations remain inside the global group input
+  syntax: tsql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM exists_having_outer o WHERE EXISTS(SELECT
+    COUNT(*) AS n FROM exists_having_inner i INNER JOIN exists_having_tags t ON t.id=i.id
+    AND i.owner=o.id HAVING COUNT(*)=0) ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: -1
+    - id: 3
+- name: psql a global COUNT group is present for every caller
+  syntax: psql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM exists_having_outer o WHERE EXISTS(SELECT
+    COUNT(*) AS n FROM exists_having_inner i WHERE i.owner=o.id HAVING COUNT(*)>=0)
+    ORDER BY id
+  expect:
+    rows: 5
+    data:
+    - id: -1
+    - id: 1
+    - id: 1
+    - id: 2
+    - id: 3
+- name: psql ON correlations remain inside the global group input
+  syntax: psql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM exists_having_outer o WHERE EXISTS(SELECT
+    COUNT(*) AS n FROM exists_having_inner i INNER JOIN exists_having_tags t ON t.id=i.id
+    AND i.owner=o.id HAVING COUNT(*)=0) ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: -1
+    - id: 3
+- name: mysql an empty distinct aggregate retains its global row
+  syntax: mysql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM exists_having_outer o WHERE EXISTS(SELECT
+    COUNT(DISTINCT i.amount) AS n FROM exists_having_inner i WHERE i.owner=o.id HAVING
+    COUNT(DISTINCT i.amount)=0) ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - id: -1
+    - id: 2
+    - id: 3
+- name: mysql an empty average retains its global row
+  syntax: mysql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM exists_having_outer o WHERE EXISTS(SELECT
+    AVG(i.amount) AS n FROM exists_having_inner i WHERE i.owner=o.id HAVING AVG(i.amount)
+    IS NULL) ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - id: -1
+    - id: 2
+    - id: 3
+- name: tsql an empty distinct aggregate retains its global row
+  syntax: tsql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM exists_having_outer o WHERE EXISTS(SELECT
+    COUNT(DISTINCT i.amount) AS n FROM exists_having_inner i WHERE i.owner=o.id HAVING
+    COUNT(DISTINCT i.amount)=0) ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - id: -1
+    - id: 2
+    - id: 3
+- name: tsql an empty average retains its global row
+  syntax: tsql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM exists_having_outer o WHERE EXISTS(SELECT
+    AVG(i.amount) AS n FROM exists_having_inner i WHERE i.owner=o.id HAVING AVG(i.amount)
+    IS NULL) ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - id: -1
+    - id: 2
+    - id: 3
+- name: psql an empty distinct aggregate retains its global row
+  syntax: psql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM exists_having_outer o WHERE EXISTS(SELECT
+    COUNT(DISTINCT i.amount) AS n FROM exists_having_inner i WHERE i.owner=o.id HAVING
+    COUNT(DISTINCT i.amount)=0) ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - id: -1
+    - id: 2
+    - id: 3
+- name: psql an empty average retains its global row
+  syntax: psql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM exists_having_outer o WHERE EXISTS(SELECT
+    AVG(i.amount) AS n FROM exists_having_inner i WHERE i.owner=o.id HAVING AVG(i.amount)
+    IS NULL) ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - id: -1
+    - id: 2
+    - id: 3

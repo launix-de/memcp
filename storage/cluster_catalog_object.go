@@ -78,12 +78,25 @@ func (t *table) clusterPublishedName() string {
 	return t.Name
 }
 
-func (t *table) Serialize(*scm.SerializationContext) (scm.Scmer, error) {
+func (t *table) Serialize(ctx *scm.SerializationContext) (scm.Scmer, error) {
 	// Catalog identity is a portable name lookup, not a retained remote object.
 	// This also serves ordinary local plan/cache serialization without a node
 	// transport. The generic capture marker resolves it once on wire import;
 	// native schema GetRead still guards lookup, never each mapped row.
-	return scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(t.schema.Name), scm.NewBool(false), scm.NewString(t.clusterPublishedName()), scm.NewBool(false)}), nil
+	value := []scm.Scmer{scm.NewSymbol("table"), scm.NewString(t.schema.Name), scm.NewBool(false), scm.NewString(t.clusterPublishedName()), scm.NewBool(false), scm.NewNil()}
+	if !t.committedAt(t.schema.catalogView().version) {
+		creator := t.creator.Load()
+		if ctx != nil {
+			if tx := scmerToTxContext(ctx.InvocationScope()); tx != nil && (tx.ownsPendingTable(t) || tx.ownsScopedTable(t)) {
+				creator = tx.transactionState
+			}
+		}
+		if creator == nil || creator.State != TxActive || !(creator.ownsPendingTable(t) || creator.ownsScopedTable(t)) {
+			return scm.NewNil(), fmt.Errorf("pending catalog reference requires its native transaction capability")
+		}
+		value[5] = scm.NewAny(creator)
+	}
+	return scm.NewSlice(value), nil
 }
 
 func (t *table) HandleClusterRequest(ctx context.Context, payload []byte) {

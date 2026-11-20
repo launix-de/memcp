@@ -1,0 +1,186 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  description: Execute-time ANSI_WARNINGS controls arithmetic and column assignment
+  requires_tds: true
+  isolated: true
+setup:
+  - sql: CREATE TABLE ansi_warning_rows(id INT PRIMARY KEY,label VARCHAR(3),national NVARCHAR(3),value INT)
+  - sql: CREATE TABLE ansi_statement_rows(id INT PRIMARY KEY,label VARCHAR(3))
+  - sql: INSERT ansi_statement_rows VALUES(1,'abc'),(2,'def')
+cleanup:
+  - sql: DROP TABLE IF EXISTS ansi_statement_rows
+  - sql: DROP FUNCTION IF EXISTS ansi_warning_scalar
+  - sql: DROP TABLE IF EXISTS ansi_warning_principal_default
+  - sql: DROP TABLE IF EXISTS ansi_warning_defaults
+  - sql: DROP TABLE IF EXISTS ansi_warning_computed
+  - sql: DROP TABLE IF EXISTS ansi_warning_checked
+  - sql: DROP PROCEDURE IF EXISTS ansi_warning_scope
+  - sql: DROP TABLE IF EXISTS ansi_warning_rows
+test_cases:
+  - name: Runtime option controls session metadata
+    sql: SET ANSI_WARNINGS OFF; SELECT SESSIONPROPERTY('ANSI_WARNINGS') AS disabled,@@OPTIONS & 8 AS option_bit; SET ANSI_WARNINGS ON
+    expect: {data: [{disabled: 0,option_bit: 0}]}
+  - name: Enabled option appears in metadata
+    sql: SET ANSI_WARNINGS ON; SELECT SESSIONPROPERTY('ANSI_WARNINGS') AS enabled,@@OPTIONS & 8 AS option_bit
+    expect: {data: [{enabled: 1,option_bit: 8}]}
+  - name: Stored procedure retains execute time settings and restores its caller
+    sql: CREATE PROCEDURE ansi_warning_scope AS BEGIN SET ANSI_WARNINGS OFF; SELECT 9/0 AS value; SET ANSI_WARNINGS ON; END
+    expect: {rows: 0}
+  - name: Procedure executes its setting before arithmetic
+    sql: SET ANSI_WARNINGS ON; EXEC ansi_warning_scope; SELECT SESSIONPROPERTY('ANSI_WARNINGS') AS enabled
+    expect: {data: [{value: null},{enabled: 1}]}
+  - name: Procedure restores an OFF caller after its final ON statement
+    sql: SET ANSI_WARNINGS OFF; EXEC ansi_warning_scope; SELECT SESSIONPROPERTY('ANSI_WARNINGS') AS enabled; SET ANSI_WARNINGS ON
+    expect: {data: [{value: null},{enabled: 0}]}
+  - name: Disabled integer arithmetic returns null
+    sql: SET ANSI_WARNINGS OFF; SELECT 9/0 AS divide_value,2147483647+1 AS add_value,50000*50000 AS multiply_value; SET ANSI_WARNINGS ON
+    expect: {data: [{divide_value: null,add_value: null,multiply_value: null}]}
+  - name: Enabled arithmetic raises its SQL error
+    sql: SET ANSI_WARNINGS ON; BEGIN TRY SELECT 9/0 AS value; END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS code; END CATCH
+    expect: {data: [{code: 8134}]}
+  - name: Enabled column truncation is rejected
+    sql: SET ANSI_WARNINGS ON; BEGIN TRY INSERT ansi_warning_rows VALUES(1,'long',N'long',1); END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS code; END CATCH
+    expect: {data: [{code: 8152}]}
+  - name: Disabled column assignment truncates both text domains
+    sql: SET ANSI_WARNINGS OFF; INSERT ansi_warning_rows VALUES(2,'long',N'long',9/0); SELECT label,national,value FROM ansi_warning_rows WHERE id=2; SET ANSI_WARNINGS ON
+    expect: {data: [{label: lon,national: lon,value: null}]}
+  - name: Trailing spaces do not cause truncation errors
+    sql: SET ANSI_WARNINGS ON; INSERT ansi_warning_rows VALUES(3,'abc   ',N'abc   ',3); SELECT label,national FROM ansi_warning_rows WHERE id=3
+    expect: {data: [{label: abc,national: abc}]}
+  - name: Variable and explicit casts keep their own truncation rules
+    sql: SET ANSI_WARNINGS ON; DECLARE @text VARCHAR(3)='long'; SELECT @text AS variable,CAST(N'long' AS NVARCHAR(3)) AS converted
+    expect: {data: [{variable: lon,converted: lon}]}
+  - name: Numeric conversion overflow returns null when disabled
+    sql: SET ANSI_WARNINGS OFF; SELECT CAST(256 AS TINYINT) AS narrowed,CAST(1000 AS DECIMAL(2,0)) AS decimal_value; SET ANSI_WARNINGS ON
+    expect: {data: [{narrowed: null,decimal_value: null}]}
+  - name: Disabled arithmetic policy preserves invalid numeric text errors
+    sql: SET ANSI_WARNINGS OFF; BEGIN TRY SELECT CAST('invalid' AS INT) AS value; END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS code; END CATCH; SET ANSI_WARNINGS ON
+    expect: {data: [{code: 245}]}
+  - name: Truncating UPDATE rolls back the complete statement
+    sql: SET ANSI_WARNINGS ON; BEGIN TRY UPDATE ansi_warning_rows SET label=CASE WHEN id=2 THEN 'xy' ELSE 'too long' END WHERE id IN(2,3); END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS code; END CATCH; SELECT id,label FROM ansi_warning_rows WHERE id IN(2,3) ORDER BY id
+    expect: {data: [{code: 8152},{id: 2,label: lon},{id: 3,label: abc}]}
+  - name: NULL predicates bind after arithmetic and retain Boolean CASE contracts
+    sql: SET ANSI_WARNINGS OFF; SELECT CASE WHEN 8/0 IS NULL THEN 77 ELSE 5 END AS missing,CASE WHEN 8/2 IS NOT NULL THEN 4 ELSE 9 END AS present; SET ANSI_WARNINGS ON
+    expect: {data: [{missing: 77,present: 4}]}
+  - name: BIGINT overflow is checked before the native carrier wraps
+    sql: SET ANSI_WARNINGS OFF; SELECT CAST(9223372036854775807 AS BIGINT)+CAST(1 AS BIGINT) AS added,CAST(-9223372036854775808 AS BIGINT)-CAST(1 AS BIGINT) AS subtracted,CAST(-9223372036854775808 AS BIGINT)*CAST(-1 AS BIGINT) AS multiplied; SET ANSI_WARNINGS ON
+    expect: {data: [{added: null,subtracted: null,multiplied: null}]}
+  - name: BIGINT boundary arithmetic preserves exact valid values
+    sql: SET ANSI_WARNINGS ON; SELECT CAST(9223372036854775807 AS BIGINT)+CAST(0 AS BIGINT) AS maximum,CAST(-9223372036854775808 AS BIGINT)*CAST(1 AS BIGINT) AS minimum
+    expect: {data: [{maximum: 9223372036854775807,minimum: -9223372036854775808}]}
+  - name: Scalar module declares its arithmetic context as an invocation input
+    sql: CREATE FUNCTION ansi_warning_scalar(@denominator INT) RETURNS INT AS BEGIN RETURN 8/@denominator; END
+    expect: {rows: 0}
+  - name: Scalar module consumes current option without retaining a creator
+    sql: SET ANSI_WARNINGS OFF; SELECT dbo.ansi_warning_scalar(0) AS value; SET ANSI_WARNINGS ON
+    expect: {data: [{value: null}]}
+  - name: CHECK arithmetic fixture has a declared integer input
+    sql: CREATE TABLE ansi_warning_checked(value INT)
+    expect: {rows: 0}
+  - name: CHECK arithmetic compiles with the actual native row invocation
+    sql: ALTER TABLE ansi_warning_checked ADD CONSTRAINT ansi_warning_nonzero CHECK(10/value>1)
+    expect: {rows: 0}
+  - name: Disabled arithmetic UNKNOWN satisfies CHECK
+    sql: SET ANSI_WARNINGS OFF; INSERT ansi_warning_checked VALUES(0); SELECT value FROM ansi_warning_checked; SET ANSI_WARNINGS ON
+    expect: {data: [{value: 0}]}
+  - name: Declared computed arithmetic remains a pure stored recipe
+    sql: CREATE TABLE ansi_warning_computed(id INT PRIMARY KEY,denominator INT,value AS (8/denominator),shifted AS (denominator+1),fallback AS (COALESCE(8/denominator,99)),chosen AS (CASE WHEN 8/denominator IS NULL THEN 77 ELSE 8/denominator END))
+    expect: {rows: 0}
+  - name: Computed inputs retain their ordinary declared values
+    sql: INSERT ansi_warning_computed(id,denominator) VALUES(1,2),(2,0)
+    expect: {affected_rows: 2}
+  - name: Enabled computed values use the native cache
+    sql: SET ANSI_WARNINGS ON; SELECT value,shifted FROM ansi_warning_computed WHERE id=1
+    expect: {data: [{value: 4,shifted: 3}]}
+  - name: Disabled computed arithmetic receives current scalar inputs
+    sql: SET ANSI_WARNINGS OFF; SELECT id,value,shifted FROM ansi_warning_computed ORDER BY id; SET ANSI_WARNINGS ON
+    expect: {data: [{id: 1,value: 4,shifted: 3},{id: 2,value: null,shifted: 1}]}
+  - name: OFF computed COALESCE consumes an inner arithmetic null
+    sql: SET ANSI_WARNINGS OFF; SELECT id,fallback FROM ansi_warning_computed ORDER BY id; SET ANSI_WARNINGS ON
+    expect: {data: [{id: 1,fallback: 4},{id: 2,fallback: 99}]}
+  - name: OFF computed CASE observes each arithmetic boundary
+    sql: SET ANSI_WARNINGS OFF; SELECT id,chosen FROM ansi_warning_computed ORDER BY id; SET ANSI_WARNINGS ON
+    expect: {data: [{id: 1,chosen: 4},{id: 2,chosen: 77}]}
+  - name: Enabled computed error keeps its typed diagnostic
+    sql: SET ANSI_WARNINGS ON; BEGIN TRY SELECT value FROM ansi_warning_computed WHERE id=2; END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS code; END CATCH
+    expect: {data: [{code: 8134}]}
+  - name: Computed OFF filter and update share the declared expression
+    sql: SET ANSI_WARNINGS OFF; UPDATE ansi_warning_computed SET denominator=4 WHERE value IS NULL; SELECT id,value FROM ansi_warning_computed ORDER BY id; SET ANSI_WARNINGS ON
+    expect: {data: [{id: 1,value: 4},{id: 2,value: 2}]}
+  - name: Computed cache remains valid across finite option profiles
+    tds:
+      statements:
+        - sql: SET ANSI_WARNINGS ON; SELECT value FROM ansi_warning_computed WHERE id=1
+          expect: {data: [{value: 4}]}
+        - sql: SET ANSI_WARNINGS OFF; SELECT value FROM ansi_warning_computed WHERE id=1
+          expect: {data: [{value: 4}]}
+        - sql: SET ANSI_WARNINGS ON; SELECT value FROM ansi_warning_computed WHERE id=1
+          expect: {data: [{value: 4}]}
+  - name: Static integer default conversion requires no invocation session
+    sql: CREATE TABLE ansi_warning_defaults(id INT PRIMARY KEY,value INT NOT NULL DEFAULT 10)
+    expect: {rows: 0}
+  - name: Static defaults retain exact values across the option
+    sql: SET ANSI_WARNINGS OFF; INSERT ansi_warning_defaults(id) VALUES(1); SELECT value FROM ansi_warning_defaults; SET ANSI_WARNINGS ON
+    expect: {data: [{value: 10}]}
+  - name: Context default retains its full source before column assignment
+    sql: CREATE TABLE ansi_warning_principal_default(label NVARCHAR(2) DEFAULT USER_NAME())
+    expect: {rows: 0}
+  - name: Enabled contextual default truncation cancels insertion
+    sql: SET ANSI_WARNINGS ON; BEGIN TRY INSERT ansi_warning_principal_default DEFAULT VALUES; END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS code; END CATCH; SELECT COUNT(*) AS total FROM ansi_warning_principal_default
+    expect: {data: [{code: 8152},{total: 0}]}
+  - name: Disabled contextual default truncates at the destination
+    sql: SET ANSI_WARNINGS OFF; INSERT ansi_warning_principal_default DEFAULT VALUES; SELECT label FROM ansi_warning_principal_default; SET ANSI_WARNINGS ON
+    expect: {data: [{label: db}]}
+  - name: Native connection reuses a warm arithmetic plan with current setting
+    tds:
+      statements:
+        - sql: SET ANSI_WARNINGS OFF; SELECT 7/0 AS value
+          expect: {data: [{value: null}],messages: []}
+        - sql: SET ANSI_WARNINGS ON; SELECT 7/0 AS value
+          expect: {error: true,contains: ['division by zero']}
+        - sql: SET ANSI_WARNINGS OFF; SELECT 7/0 AS value
+          expect: {data: [{value: null}],messages: []}
+
+  - name: Plain explicit statement truncation preserves earlier work and transaction depth
+    tds:
+      statements:
+        - connection: owner
+          sql: SET ANSI_WARNINGS ON; BEGIN TRANSACTION; INSERT ansi_statement_rows VALUES(3,'ok'); BEGIN TRY UPDATE ansi_statement_rows SET label=CASE WHEN id=1 THEN 'xy' ELSE 'long' END WHERE id IN(1,2); END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS code,@@TRANCOUNT AS depth; END CATCH; SELECT id,label FROM ansi_statement_rows ORDER BY id; COMMIT TRANSACTION
+          expect:
+            data: [{code: 8152,depth: 1},{id: 1,label: abc},{id: 2,label: def},{id: 3,label: ok}]
+        - connection: observer
+          sql: SELECT id,label FROM ansi_statement_rows ORDER BY id
+          expect:
+            data: [{id: 1,label: abc},{id: 2,label: def},{id: 3,label: ok}]
+  - name: Nested THROW preserves the native completion cause and earlier explicit work
+    tds:
+      statements:
+        - connection: owner
+          sql: SET ANSI_WARNINGS ON; BEGIN TRANSACTION; INSERT ansi_statement_rows VALUES(4,'win'); BEGIN TRY BEGIN TRY UPDATE ansi_statement_rows SET label='long' WHERE id=1; END TRY BEGIN CATCH THROW; END CATCH; END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS code,@@TRANCOUNT AS depth; END CATCH; SELECT id,label FROM ansi_statement_rows ORDER BY id; COMMIT TRANSACTION
+          expect:
+            data: [{code: 8152,depth: 1},{id: 1,label: abc},{id: 2,label: def},{id: 3,label: ok},{id: 4,label: win}]
+  - name: Uncached source row supplies the persisted OFF profile fixture
+    sql: INSERT ansi_warning_computed(id,denominator) VALUES(3,0)
+    expect: {affected_rows: 1}
+  - name: OFF profile is warm before restart without changing the pure ON cache
+    sql: SET ANSI_WARNINGS OFF; SELECT value,fallback,chosen FROM ansi_warning_computed WHERE id=3; SET ANSI_WARNINGS ON
+    expect: {data: [{value: null,fallback: 99,chosen: 77}]}
+  - name: Restart reloads declared computation inputs and scalar profile properties
+    action: restart
+  - name: Recovered ON cache retains its declared pure function
+    sql: SET ANSI_WARNINGS ON; SELECT value,shifted,fallback,chosen FROM ansi_warning_computed WHERE id=1
+    expect: {data: [{value: 4,shifted: 3,fallback: 4,chosen: 4}]}
+  - name: Recovered OFF operation boundaries retain COALESCE and CASE results
+    sql: SET ANSI_WARNINGS OFF; SELECT id,value,fallback,chosen FROM ansi_warning_computed ORDER BY id; SET ANSI_WARNINGS ON
+    expect: {data: [{id: 1,value: 4,fallback: 4,chosen: 4},{id: 2,value: 2,fallback: 2,chosen: 2},{id: 3,value: null,fallback: 99,chosen: 77}]}
+  - name: Recovered native connection switches between warmed immutable profiles
+    tds:
+      statements:
+        - sql: SET ANSI_WARNINGS OFF; SELECT value,fallback,chosen FROM ansi_warning_computed WHERE id=3
+          expect: {data: [{value: null,fallback: 99,chosen: 77}]}
+        - sql: SET ANSI_WARNINGS ON; SELECT value,fallback,chosen FROM ansi_warning_computed WHERE id=3
+          expect: {error: true,contains: ['division by zero']}
+        - sql: SET ANSI_WARNINGS OFF; SELECT value,fallback,chosen FROM ansi_warning_computed WHERE id=3
+          expect: {data: [{value: null,fallback: 99,chosen: 77}]}

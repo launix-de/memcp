@@ -1628,7 +1628,7 @@ func asSlice(v Scmer, ctx string) []Scmer {
 	if v.IsSlice() {
 		return v.Slice()
 	}
-	panic(fmt.Sprintf("%s expects a list, got %s", ctx, v.String()))
+	panic(fmt.Sprintf("%s expects a list, got %s (tag=%d) (pointer=%t)", ctx, v.String(), v.GetTag(), v.ptr != nil))
 }
 
 // jitAsSlice keeps the generated Go-call ABI compact. The surrounding builtin

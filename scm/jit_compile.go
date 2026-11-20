@@ -1079,7 +1079,7 @@ func (ctx *JITContext) EmitStoreScmerSliceElement(slice, index, value *JITValueD
 // ordinary Go-call bridge preserves live values and roots on the slow path.
 func (ctx *JITContext) TryEmitStoreScmerSliceElement(slice, index, value *JITValueDesc, elementSize int32) bool {
 	switch value.Type {
-	case tagNil, tagFloat, tagInt, tagBool, tagDate, tagNthLocalVar:
+	case tagNil, tagFloat, tagInt, tagBool, tagNthLocalVar:
 		value.NoHeapPointer = true
 	}
 	if !value.NoHeapPointer {
@@ -2032,7 +2032,7 @@ func jitReturnHasNoHeapPointer(td *TypeDescriptor) bool {
 		return false
 	}
 	switch td.Kind {
-	case "bool", "date", "int", "int|nil", "nil", "number", "number|nil":
+	case "bool", "int", "int|nil", "nil":
 		return true
 	default:
 		return false
@@ -2802,6 +2802,24 @@ func jitStaticProcForExpr(ctx *JITContext, expr Scmer) (Scmer, *Proc, bool) {
 	return value, proc, proc != nil && proc.nativeCode() != 0 && proc.compiled() != nil && proc.compiled().JITDirect != 0
 }
 
+// A symbolic call head reads the same lexical binding as a symbolic value.
+// Native declarations describe global builtins, not same-spelled parameters
+// or captures. Actual native callable values do not use this lookup.
+func jitCallHeadHasLexicalBinding(ctx *JITContext, symbol Symbol) bool {
+	if ctx.Env != nil {
+		if _, exists := ctx.Env.Lookup(symbol); exists {
+			return true
+		}
+	}
+	if runtimeEnv, ok := ctx.RuntimeEnv.Any().(*Env); ok && runtimeEnv != nil {
+		if binding := runtimeEnv.FindRead(symbol); binding != nil && binding != &Globalenv {
+			_, exists := binding.Vars[symbol]
+			return exists
+		}
+	}
+	return false
+}
+
 func jitCompileStaticProcCall(ctx *JITContext, callable Scmer, proc *Proc, operands []Scmer, sliceBase Reg, result JITValueDesc) JITValueDesc {
 	stackStart := ctx.BPOffset
 	operandOff := ctx.AllocStack(int32(len(operands) * 16))
@@ -3547,7 +3565,7 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 		}
 		// Resolve operator
 		head, headOK := scmerSymbol(list[0])
-		decl := DeclarationForValue(list[0])
+		decl := DeclarationForValue(list[0].WithoutSourceInfo())
 		if !headOK {
 			// The optimizer resolves ordinary call heads to their native function
 			// values. Keep using the declaration emitter in that representation as
@@ -3557,6 +3575,9 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 				return jitCompileDynamicCall(ctx, list[0], list[1:], nil, sliceBase, result)
 			}
 			head = Symbol(decl.Name)
+		}
+		if headOK && decl != nil && !decl.IsSpecialForm && jitCallHeadHasLexicalBinding(ctx, head) {
+			return jitCompileDynamicCall(ctx, list[0], list[1:], nil, sliceBase, result)
 		}
 		if decl != nil && decl.IsSpecialForm {
 			if decl.Type == nil || decl.Type.JITEmit == nil {
@@ -3774,6 +3795,9 @@ func JITEmitProcInlineWithOuter(ctx *JITContext, proc *Proc, outer *JITEnv, args
 
 // Share lexical binding between value-producing and truth-filtering callbacks.
 func jitProcInlineEnv(ctx *JITContext, proc *Proc, outer *JITEnv, args []JITValueDesc) *JITEnv {
+	if jitLexicalPublicationNeedsRuntime(proc.Params, proc.Body) {
+		panic("jit: named binding publication requires a runtime lexical frame")
+	}
 	localCount, firstAssignment := jitRequiredLocalSlots(proc.Body, proc.NumVars)
 	if localCount < len(args) {
 		localCount = len(args)
@@ -3837,6 +3861,9 @@ func jitProcInlineEnv(ctx *JITContext, proc *Proc, outer *JITEnv, args []JITValu
 // form so explicit outer-depth references see exactly one environment per
 // Scheme scope.
 func JITEmitProcInlineWithEnv(ctx *JITContext, proc *Proc, env *JITEnv, sliceBase Reg, result JITValueDesc) JITValueDesc {
+	if jitLexicalPublicationNeedsRuntime(proc.Params, proc.Body) {
+		panic("jit: named binding publication requires a runtime lexical frame")
+	}
 	oldEnv := ctx.Env
 	ctx.Env = env
 	defer func() { ctx.Env = oldEnv }()
@@ -3906,6 +3933,11 @@ func jitLambdaTemplate(expr Scmer, outer *JITEnv) (*JITLambdaTemplate, bool) {
 		JITLambdaTemplate
 		procedure Proc
 	}{procedure: Proc{Params: params, Body: parts[2], NumVars: numVars, NumberedOnly: procCanUseNumberedOnly(params, parts[2], numVars)}}
+	if len(parts) > 4 && parts[4].GetTag() == tagAny {
+		if proof, ok := matchingLambdaBindingProof(params, parts[2], numVars, parts[4]); ok {
+			owned.procedure.syntaxSize = proof.syntaxSize
+		}
+	}
 	owned.Proc, owned.Outer = &owned.procedure, outer
 	return &owned.JITLambdaTemplate, true
 }

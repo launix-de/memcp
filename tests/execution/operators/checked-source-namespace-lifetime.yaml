@@ -1,0 +1,181 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  description: Checked public producers retain scoped MEMORY source authority across namespaces without admitting
+    foreign public targets
+setup:
+- sql: CREATE TABLE source_admission_public(id INT)
+- sql: INSERT INTO source_admission_public VALUES(1)
+- sql: CREATE DATABASE source_admission_other
+- scm: (createtable "source_admission_other" "public_rows" (list (list "column" "id" "INT" (list) (list))) (list
+    "engine" "safe") false nil)
+- scm: (createtable "source_admission_other" "memory_rows" (list (list "column" "id" "INT" (list) (list))) (list
+    "engine" "memory") false nil)
+- scm: (createtable "source_admission_other" ".source_admission_cache" (list (list "column" "id" "INT" (list) (list)))
+    (list "engine" "cache") false nil)
+- scm: "(begin\n\t(define run_source_admission (lambda (mode) (begin\n\t\t(define owner (newsession)) (owner \"\
+    username\" \"root\")\n\t\t(define events (newsession))\n\t\t(define public (table \"memcp-tests\" false \"source_admission_public\"\
+    \ false nil))\n\t\t(define summary (lambda (tx source)\n\t\t\t(scan tx source '() '() '() (lambda () true) '(\"\
+    id\")\n\t\t\t\t(lambda (acc id) (list (+ (car acc) 1) (+ (cadr acc) id))) (list 0 0)\n\t\t\t\t(lambda (left\
+    \ right) (list (+ (car left) (car right)) (+ (cadr left) (cadr right)))) false)))\n\t\t(define request (lambda\
+    \ (text body)\n\t\t\t(with_query_request owner nil 0 text \"acid\" (lambda (statement)\n\t\t\t\t(statement text\
+    \ false body (lambda (_cause _completion) \"preserve\"))))))\n\t\t(try (lambda () (begin\n\t\t\t(tx_begin_acid\
+    \ owner)\n\t\t\t(request \"prior public data\" (lambda (tx)\n\t\t\t\t(with_table_mutation (list public) (list\
+    \ \"insert\" '()) tx owner\n\t\t\t\t\t(lambda (bound) (insert public '(\"id\") (list (list 7)) '() nil false\
+    \ nil bound)))))\n\t\t\t(if (has? '(\"foreign-owner\" \"scoped\" \"closed-scope\") mode)\n\t\t\t\t(request \"\
+    prepare owned source\" (lambda (tx) (begin\n\t\t\t\t\t(define controller (if (equal? mode \"foreign-owner\"\
+    ) (newsession) owner))\n\t\t\t\t\t(controller \"username\" \"root\")\n\t\t\t\t\t(define scope (if (equal? mode\
+    \ \"scoped\") (new_relation_scope controller nil \"transactional\")\n\t\t\t\t\t\t(new_relation_scope controller)))\n\
+    \t\t\t\t\t(define name (concat \".source-admission:\" (uuid)))\n\t\t\t\t\t(define options (list \"engine\" \"\
+    memory\" \"ephemeral\" true \"scope\" scope))\n\t\t\t\t\t(createtable \"source_admission_other\" name (list\
+    \ (list \"column\" \"id\" \"INT\" '() '()))\n\t\t\t\t\t\t(if (equal? mode \"scoped\") (merge (list options (list\
+    \ \"scope_key\" \"input\"))) options) false tx)\n\t\t\t\t\t(events \"scope\" scope)\n\t\t\t\t\t(events \"source\"\
+    \ (table \"source_admission_other\" false name false tx))\n\t\t\t\t\t(if (equal? mode \"closed-scope\") (close_relation_scope\
+    \ scope) true)))) true)\n\t\t\t(define result (try (lambda ()\n\t\t\t\t(request \"checked outer mutation\" (lambda\
+    \ (tx)\n\t\t\t\t\t(with_table_mutation (list public) (list \"insert\" '()) tx owner (lambda (bound) (begin\n\
+    \t\t\t\t\t\t(insert public '(\"id\") (list (list 2)) '() nil false nil bound)\n\t\t\t\t\t\t(define source (if\
+    \ (has? '(\"generated\" \"late-failure\") mode)\n\t\t\t\t\t\t\t(runtime_generated_source \"system\" '(\"id\"\
+    ) (list nil) (list (list 13)) owner bound (newsession))\n\t\t\t\t\t\t\t(equal? mode \"public\") (table \"source_admission_other\"\
+    \ false \"public_rows\" false bound)\n\t\t\t\t\t\t\t(equal? mode \"memory\") (table \"source_admission_other\"\
+    \ false \"memory_rows\" false bound)\n\t\t\t\t\t\t\t(equal? mode \"cache\") (table \"source_admission_other\"\
+    \ false \".source_admission_cache\" false bound)\n\t\t\t\t\t\t\t(events \"source\")))\n\t\t\t\t\t\t(events \"\
+    source\" source)\n\t\t\t\t\t\t(if (has? '(\"generated\" \"late-failure\") mode) true\n\t\t\t\t\t\t\t(with_table_mutation\
+    \ (list source) (list \"insert\" '()) bound owner\n\t\t\t\t\t\t\t\t(lambda (sink) (insert source '(\"id\") (list\
+    \ (list 13)) '() nil false nil sink))))\n\t\t\t\t\t\t(if (equal? mode \"late-failure\") (error \"checked-source-consumer-failed\"\
+    ) (summary bound source))))))))\n\t\t\t\t(lambda (cause) (failure_value cause))))\n\t\t\t(define source (events\
+    \ \"source\"))\n\t\t\t(define database (if (has? '(\"generated\" \"late-failure\") mode) \"system\" \"source_admission_other\"\
+    ))\n\t\t\t(define name (show source \"name\"))\n\t\t\t(define state (tx_state (owner \"__memcp_tx\")))\n\t\t\
+    \t(define own (summary (owner \"__memcp_tx\") public))\n\t\t\t(define observed (summary nil public))\n\t\t\t\
+    (define input (summary (owner \"__memcp_tx\") source))\n\t\t\t(tx_rollback owner)\n\t\t\t(if (events \"scope\"\
+    ) (close_relation_scope (events \"scope\")) true)\n\t\t\t(define absent (nil? (table database false name false\
+    \ nil)))\n\t\t\t(list result state own observed input (summary nil public) absent)))\n\t\t\t(lambda (cause)\
+    \ (begin\n\t\t\t\t(if (owner \"transaction\") (tx_rollback owner) true)\n\t\t\t\t(if (events \"scope\") (close_relation_scope\
+    \ (events \"scope\")) true)\n\t\t\t\t(error cause)))))))\n\t(globalvars \"__run_source_admission\" (close_procedure\
+    \ run_source_admission))\n\ttrue)"
+cleanup:
+- scm: (globalvars "__run_source_admission" nil)
+- sql: DROP DATABASE source_admission_other
+- sql: DROP TABLE source_admission_public
+test_cases:
+- name: Checked producer reads caller-owned generated MEMORY in another namespace
+  scm: ((globalvars "__run_source_admission") "generated")
+  expect:
+    result:
+    - - 1
+      - 13
+    - active
+    - - 3
+      - 10
+    - - 1
+      - 1
+    - - 1
+      - 13
+    - - 1
+      - 1
+    - true
+- name: Late source consumer failure restores the same outer statement and preserves prior private work
+  scm: ((globalvars "__run_source_admission") "late-failure")
+  expect:
+    result:
+    - checked-source-consumer-failed
+    - active
+    - - 2
+      - 8
+    - - 1
+      - 1
+    - - 0
+      - 0
+    - - 1
+      - 1
+    - true
+- name: Checked producer rejects a second public database before its first foreign row effect
+  scm: ((globalvars "__run_source_admission") "public")
+  expect:
+    result:
+    - native statement target is outside its admitted database
+    - active
+    - - 2
+      - 8
+    - - 1
+      - 1
+    - - 0
+      - 0
+    - - 1
+      - 1
+    - false
+- name: Ordinary public MEMORY does not acquire query-scratch authority
+  scm: ((globalvars "__run_source_admission") "memory")
+  expect:
+    result:
+    - native statement target is outside its admitted database
+    - active
+    - - 2
+      - 8
+    - - 1
+      - 1
+    - - 0
+      - 0
+    - - 1
+      - 1
+    - false
+- name: Dot CACHE tables do not acquire cross-database scratch authority
+  scm: ((globalvars "__run_source_admission") "cache")
+  expect:
+    result:
+    - native statement target is outside its admitted database
+    - active
+    - - 2
+      - 8
+    - - 1
+      - 1
+    - - 0
+      - 0
+    - - 1
+      - 1
+    - false
+- name: SQL temporary schema generations retain their own declaration authority
+  scm: ((globalvars "__run_source_admission") "scoped")
+  expect:
+    result:
+    - native statement target is outside its admitted database
+    - active
+    - - 2
+      - 8
+    - - 1
+      - 1
+    - - 0
+      - 0
+    - - 1
+      - 1
+    - true
+- name: Another connection scope does not acquire the current producer authority
+  scm: ((globalvars "__run_source_admission") "foreign-owner")
+  expect:
+    result:
+    - native statement scratch belongs to another scope owner
+    - active
+    - - 2
+      - 8
+    - - 1
+      - 1
+    - - 0
+      - 0
+    - - 1
+      - 1
+    - true
+- name: A retired scope cannot re-admit its former source generation to a checked producer
+  scm: ((globalvars "__run_source_admission") "closed-scope")
+  expect:
+    result:
+    - native statement scratch belongs to another scope owner
+    - active
+    - - 2
+      - 8
+    - - 1
+      - 1
+    - - 0
+      - 0
+    - - 1
+      - 1
+    - true

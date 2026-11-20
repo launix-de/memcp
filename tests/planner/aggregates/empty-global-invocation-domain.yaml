@@ -1,0 +1,125 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  description: Global aggregates seed invocation domains before finalization without
+    inventing explicit groups
+setup:
+- sql: CREATE TABLE global_domain_rows(id INT PRIMARY KEY,amount INT)
+- sql: CREATE TABLE global_domain_keys(id INT PRIMARY KEY)
+- sql: INSERT global_domain_keys VALUES(1),(2)
+test_cases:
+- name: An empty global aggregate retains all neutral results
+  sql: SELECT COUNT(*) AS n,SUM(a.amount) AS total,MIN(a.amount) AS minimum,MAX(a.amount)
+    AS maximum,AVG(a.amount) AS average FROM global_domain_rows a
+  expect:
+    rows: 1
+    data:
+    - &id001
+      n: 0
+      total: null
+      minimum: null
+      maximum: null
+      average: null
+- name: A nonNULL invocation marker preserves the empty COUNT row
+  sql: DECLARE @marker INT=7; SELECT @marker AS marker,COUNT(*) AS n FROM global_domain_rows
+  expect:
+    rows: 1
+    data:
+    - marker: 7
+      n: 0
+- name: A NULL invocation marker preserves the empty COUNT row
+  sql: DECLARE @marker INT=NULL; SELECT @marker AS marker,COUNT(*) AS n FROM global_domain_rows
+  expect:
+    rows: 1
+    data:
+    - marker: null
+      n: 0
+- name: A joined empty global aggregate retains its neutral results
+  sql: DECLARE @marker INT=9; SELECT @marker AS marker,COUNT(*) AS n,SUM(a.amount)
+    AS total,MIN(a.amount) AS minimum,MAX(a.amount) AS maximum,AVG(a.amount) AS average
+    FROM global_domain_rows a INNER JOIN global_domain_keys b ON a.id=b.id
+  expect:
+    rows: 1
+    data:
+    - marker: 9
+      n: 0
+      total: null
+      minimum: null
+      maximum: null
+      average: null
+- name: A joined empty COUNT preserves the invocation marker
+  sql: DECLARE @marker INT=11; SELECT @marker AS marker,COUNT(*) AS n FROM global_domain_rows
+    a INNER JOIN global_domain_keys b ON a.id=b.id
+  expect:
+    rows: 1
+    data:
+    - marker: 11
+      n: 0
+- name: An explicit column group stays absent on empty input
+  sql: SELECT a.id,COUNT(*) AS n FROM global_domain_rows a GROUP BY a.id
+  expect:
+    rows: 0
+    data: []
+- name: An explicit joined column group stays absent on empty input
+  sql: SELECT b.id,COUNT(*) AS n FROM global_domain_rows a INNER JOIN global_domain_keys
+    b ON a.id=b.id GROUP BY b.id
+  expect:
+    rows: 0
+    data: []
+- name: HAVING can retain the empty global domain
+  sql: SELECT COUNT(*) AS n,AVG(amount) AS average FROM global_domain_rows HAVING
+    COUNT(*)=0
+  expect:
+    rows: 1
+    data:
+    - n: 0
+      average: null
+- name: HAVING can remove the empty global domain
+  sql: SELECT COUNT(*) AS n,AVG(amount) AS average FROM global_domain_rows HAVING
+    COUNT(*)>0
+  expect:
+    rows: 0
+    data: []
+- name: Populate the same aggregate source
+  sql: INSERT global_domain_rows VALUES(1,4),(2,8),(3,NULL)
+  expect:
+    affected_rows: 3
+- name: Populated input uses actual values instead of neutral states
+  sql: SELECT COUNT(*) AS n,SUM(a.amount) AS total,MIN(a.amount) AS minimum,MAX(a.amount)
+    AS maximum,AVG(a.amount) AS average FROM global_domain_rows a
+  expect:
+    rows: 1
+    data:
+    - n: 3
+      total: 12
+      minimum: 4
+      maximum: 8
+      average: 6
+- name: A joined populated aggregate retains its joined cardinality
+  sql: SELECT COUNT(*) AS n,SUM(a.amount) AS total,MIN(a.amount) AS minimum,MAX(a.amount)
+    AS maximum,AVG(a.amount) AS average FROM global_domain_rows a INNER JOIN global_domain_keys
+    b ON a.id=b.id
+  expect:
+    rows: 1
+    data:
+    - n: 2
+      total: 12
+      minimum: 4
+      maximum: 8
+      average: 6
+- name: Remove all aggregate source rows
+  sql: DELETE FROM global_domain_rows
+  expect:
+    affected_rows: 3
+- name: The same global aggregate returns its empty domain after deletion
+  sql: SELECT COUNT(*) AS n,SUM(a.amount) AS total,MIN(a.amount) AS minimum,MAX(a.amount)
+    AS maximum,AVG(a.amount) AS average FROM global_domain_rows a
+  expect:
+    rows: 1
+    data:
+    - *id001
+cleanup:
+- sql: DROP TABLE IF EXISTS global_domain_rows
+- sql: DROP TABLE IF EXISTS global_domain_keys

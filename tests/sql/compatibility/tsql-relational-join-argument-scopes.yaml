@@ -1,0 +1,88 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  description: Relational function arguments use their JOIN operand scope
+setup:
+- sql: CREATE TABLE join_argument_left(left_id INT PRIMARY KEY)
+- sql: CREATE TABLE join_argument_right(join_key INT PRIMARY KEY)
+- sql: CREATE TABLE join_argument_later(join_key INT PRIMARY KEY)
+- sql: INSERT join_argument_left VALUES(1),(2),(3)
+- sql: INSERT join_argument_right VALUES(1),(2)
+- sql: INSERT join_argument_later VALUES(1),(2)
+- sql: |
+    CREATE FUNCTION dbo.join_argument_lookup(@key INT) RETURNS INT AS BEGIN
+      DECLARE @value INT;
+      SELECT @value=join_key FROM join_argument_right WHERE join_key=@key;
+      RETURN @value;
+    END
+test_cases:
+- name: An early ON argument sees its right operand before a later duplicate column
+  sql: |
+    SELECT l.left_id,r.join_key
+    FROM join_argument_left AS l
+    INNER JOIN join_argument_right AS r ON l.left_id=dbo.join_argument_lookup(join_key)
+    INNER JOIN join_argument_later AS later ON later.join_key=r.join_key
+    ORDER BY l.left_id
+  expect: {rows: 2,data: [{left_id: 1,join_key: 1},{left_id: 2,join_key: 2}]}
+- name: Stored view validation and consumption use the same ON argument scope
+  setup:
+  - sql: |
+      CREATE VIEW join_argument_view AS
+      SELECT l.left_id,r.join_key
+      FROM join_argument_left AS l
+      INNER JOIN join_argument_right AS r ON l.left_id=dbo.join_argument_lookup(join_key)
+      INNER JOIN join_argument_later AS later ON later.join_key=r.join_key
+  sql: SELECT left_id,join_key FROM join_argument_view ORDER BY left_id
+  expect: {rows: 2,data: [{left_id: 1,join_key: 1},{left_id: 2,join_key: 2}]}
+  cleanup:
+  - sql: DROP VIEW IF EXISTS join_argument_view
+- name: An early LEFT ON retains unmatched rows beside a later nullable operand
+  sql: |
+    SELECT l.left_id,r.join_key
+    FROM join_argument_left AS l
+    LEFT JOIN join_argument_right AS r ON l.left_id=dbo.join_argument_lookup(join_key)
+    LEFT JOIN join_argument_later AS later ON later.join_key=r.join_key
+    ORDER BY l.left_id
+  expect: {rows: 3,data: [{left_id: 1,join_key: 1},{left_id: 2,join_key: 2},{left_id: 3,join_key: null}]}
+- name: The enclosing projection still rejects a genuinely ambiguous function argument
+  sql: |
+    SELECT dbo.join_argument_lookup(join_key) AS value
+    FROM join_argument_right AS r
+    INNER JOIN join_argument_later AS later ON later.join_key=r.join_key
+  expect: {error: true}
+- name: An enclosing ON sees the complete nested right operand
+  sql: |
+    SELECT l.left_id,r.join_key
+    FROM join_argument_left AS l
+    INNER JOIN (join_argument_right AS r
+      INNER JOIN join_argument_later AS later ON later.join_key=r.join_key)
+      ON l.left_id=dbo.join_argument_lookup(later.join_key)
+    ORDER BY l.left_id
+  expect: {rows: 2,data: [{left_id: 1,join_key: 1},{left_id: 2,join_key: 2}]}
+- name: An inner joined operand cannot capture an enclosing source
+  sql: |
+    SELECT l.left_id FROM join_argument_left AS l
+    INNER JOIN (join_argument_right AS r
+      INNER JOIN join_argument_later AS later ON later.join_key=dbo.join_argument_lookup(l.left_id))
+      ON l.left_id=r.join_key
+  expect: {error: true}
+- name: WHERE still sees both duplicate columns instead of inheriting the early ON scope
+  sql: |
+    SELECT r.join_key FROM join_argument_right AS r
+    INNER JOIN join_argument_later AS later ON later.join_key=r.join_key
+    WHERE dbo.join_argument_lookup(join_key)=1
+  expect: {error: true}
+- name: An early ON argument cannot capture a qualified later source
+  sql: |
+    SELECT l.left_id FROM join_argument_left AS l
+    INNER JOIN join_argument_right AS r ON l.left_id=dbo.join_argument_lookup(later.join_key)
+    INNER JOIN join_argument_later AS later ON later.join_key=r.join_key
+  expect: {error: true}
+cleanup:
+- sql: DROP VIEW IF EXISTS join_argument_view
+- sql: DROP FUNCTION IF EXISTS dbo.join_argument_lookup
+- sql: DROP TABLE IF EXISTS join_argument_later
+- sql: DROP TABLE IF EXISTS join_argument_right
+- sql: DROP TABLE IF EXISTS join_argument_left

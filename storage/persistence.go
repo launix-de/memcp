@@ -280,3 +280,65 @@ func (e ErrorReader) Close() error {
 	// closes without problem
 	return nil
 }
+
+// persistedRows is a versioned-storage boundary, never a public JSON datatype.
+// Native values nested in procedure recipes and arrays use the same codec.
+type persistedRows [][]scm.Scmer
+
+type persistedValue struct{ value scm.Scmer }
+
+func (value persistedValue) MarshalJSON() ([]byte, error) {
+	return scm.MarshalPersistentJSON(value.value)
+}
+func (rows persistedRows) MarshalJSON() ([]byte, error) {
+	if rows == nil {
+		return []byte("null"), nil
+	}
+	values := make([][]persistedValue, len(rows))
+	for rowIndex, row := range rows {
+		values[rowIndex] = make([]persistedValue, len(row))
+		for column, value := range row {
+			values[rowIndex][column] = persistedValue{value}
+		}
+	}
+	return json.Marshal(values)
+}
+
+func (rows *persistedRows) UnmarshalJSON(data []byte) error {
+	var raw [][]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	values := make(persistedRows, len(raw))
+	for rowIndex, row := range raw {
+		values[rowIndex] = make([]scm.Scmer, len(row))
+		for index, field := range row {
+			if err := scm.UnmarshalPersistentJSON(field, &values[rowIndex][index]); err != nil {
+				return err
+			}
+		}
+	}
+	*rows = values
+	return nil
+}
+func marshalPersistedRows(rows [][]scm.Scmer) json.RawMessage {
+	value, err := json.Marshal(persistedRows(rows))
+	if err != nil {
+		panic(err)
+	}
+	return value
+}
+func unmarshalPersistedRows(payload json.RawMessage, precise bool) [][]scm.Scmer {
+	if precise {
+		var rows persistedRows
+		if err := json.Unmarshal(payload, &rows); err != nil {
+			panic(err)
+		}
+		return [][]scm.Scmer(rows)
+	}
+	var rows [][]scm.Scmer
+	if err := json.Unmarshal(payload, &rows); err != nil {
+		panic(err)
+	}
+	return rows
+}

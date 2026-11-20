@@ -1,0 +1,62 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  description: Trigger cleanup recognizes complete legacy option leaves through the shared SET grammar
+setup:
+- sql: CREATE TABLE trigger_option_cleanup_input (id INT PRIMARY KEY, value INT)
+- sql: INSERT INTO trigger_option_cleanup_input VALUES (1,7)
+cleanup:
+- sql: DROP TABLE trigger_option_cleanup_input
+test_cases:
+- name: Legacy cleanup recognizes complete NOCOUNT source and excludes unrelated effects
+  scm: |
+    (map (list "SET NOCOUNT ON" "SET NOCOUNT OFF;" "/* option */ set nocount off; -- end"
+      "SET DATEFIRST 2" "SET NOCOUNT,ANSI_WARNINGS OFF" "SET NOCOUNT OFF; PRINT N'observed'"
+      "SET @local=1" "SELECT N'SET NOCOUNT OFF'" "SET NOCOUNT" "SET NOCOUNT OFF; SET NOCOUNT ON;")
+      (lambda (text) (tsql_trigger_option_cleanup? "memcp-tests" (list "statement" text))))
+  expect:
+    result: [true, true, true, false, false, false, false, false, false, false]
+- name: A legacy NOCOUNT tail is admitted without executing its option during validation
+  scm: |
+    (context (lambda (session) (begin
+      (session "__tsql_nocount" true)
+      (define body (list (list "recovery" "ROLLBACK") (list "statement" "SET NOCOUNT OFF")))
+      (tsql_validate_trigger_body "memcp-tests" body false)
+      (tsql_prepare_trigger_body "memcp-tests" body false)
+      (session "__tsql_nocount"))))
+  expect: {result: true}
+- name: A legacy write or assignment is not classified as option cleanup
+  scm: |
+    (map (list (list "statement" "INSERT INTO trigger_option_cleanup_input VALUES(2,8)")
+      (list "statement" "SET NOCOUNT OFF; INSERT INTO trigger_option_cleanup_input VALUES(2,8)")
+      (list "assign" "local" nil "1") (list "print" "N'observed'"))
+      (lambda (command) (tsql_trigger_option_cleanup? "memcp-tests" command)))
+  expect: {result: [false, false, false, false]}
+- name: Retained option members distinguish NOCOUNT from mixed session settings
+  scm: |
+    (map (list (list "set-options" (list "NOCOUNT") true)
+      (list "set-options" (list "NOCOUNT") false)
+      (list "set-options" (list "NOCOUNT" "ANSI_WARNINGS") false)
+      (list "set-options" (list "ANSI_WARNINGS") true))
+      (lambda (command) (tsql_trigger_option_cleanup? "memcp-tests" command)))
+  expect: {result: [true, true, false, false]}
+- name: Current option grammar installs a real conditional rollback trigger
+  sql: |
+    CREATE TRIGGER trigger_option_cleanup_guard ON trigger_option_cleanup_input AFTER DELETE AS
+    BEGIN
+      SET NOCOUNT ON;
+      IF EXISTS(SELECT 1 FROM deleted WHERE value>5)
+      BEGIN
+        RAISERROR(N'blocked-delete',16,1);
+        ROLLBACK;
+      END;
+      SET NOCOUNT OFF;
+    END
+  expect: {rows: 0}
+- name: Cleanup does not suppress the trigger diagnostic or permit its delete
+  sql: DELETE FROM trigger_option_cleanup_input WHERE id=1
+  expect: {error: true, contains: blocked-delete}
+- name: Terminal rollback retains the row and leaves no open transaction
+  sql: SELECT id,value,@@TRANCOUNT AS open_transactions FROM trigger_option_cleanup_input ORDER BY id
+  expect: {rows: 1, data: [{id: 1, value: 7, open_transactions: 0}]}

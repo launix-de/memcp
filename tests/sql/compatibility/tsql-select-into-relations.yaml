@@ -1,0 +1,104 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Persistent SELECT INTO uses native declaration population and transaction owners
+setup:
+  - sql: CREATE TABLE into_relation_source(id INT NOT NULL,label NVARCHAR(8),amount DECIMAL(10,2))
+  - sql: INSERT into_relation_source VALUES(1,N'first',1.25),(1,N'first',1.25),(2,NULL,NULL)
+test_cases:
+  - name: Persistent SELECT INTO reports its inserted row count
+    sql: SELECT id,label,amount INTO into_relation_copy FROM into_relation_source
+    expect: {affected_rows: 3}
+  - name: Persistent population retains duplicates Unicode and NULL values
+    sql: SELECT id,label,amount FROM into_relation_copy ORDER BY id
+    expect:
+      rows: 3
+      data: [{id: 1,label: first,amount: 1.25},{id: 1,label: first,amount: 1.25},{id: 2,label: null,amount: null}]
+  - name: The native declaration retains source byte widths
+    sql: SELECT COL_LENGTH('into_relation_copy','id') AS id_bytes,COL_LENGTH('into_relation_copy','label') AS label_bytes,COL_LENGTH('into_relation_copy','amount') AS amount_bytes
+    expect: {rows: 1,data: [{id_bytes: 4,label_bytes: 16,amount_bytes: 9}]}
+  - name: An existing destination cannot be silently reused
+    sql: SELECT id,label,amount INTO into_relation_copy FROM into_relation_source
+    expect: {error: true}
+  - name: Failed recreation preserves the original rows
+    sql: SELECT COUNT(*) AS total,SUM(id) AS checksum FROM into_relation_copy
+    expect: {rows: 1,data: [{total: 3,checksum: 4}]}
+  - name: A CTE can populate a schema-qualified persistent destination
+    sql: WITH chosen AS (SELECT id,label FROM into_relation_source WHERE id=2) SELECT * INTO dbo.into_relation_cte FROM chosen
+    expect: {affected_rows: 1}
+  - name: The qualified destination remains a regular visible table
+    sql: SELECT id,label FROM dbo.into_relation_cte
+    expect: {rows: 1,data: [{id: 2,label: null}]}
+  - name: An empty population retains a writable destination declaration
+    sql: SELECT id,label INTO into_relation_empty FROM into_relation_source WHERE id<0
+    expect: {affected_rows: 0}
+  - name: Future writes use the selected declaration
+    sql: INSERT into_relation_empty VALUES(7,N'later')
+    expect: {affected_rows: 1}
+  - name: The formerly empty destination retains its inserted row
+    sql: SELECT id,label FROM into_relation_empty
+    expect: {rows: 1,data: [{id: 7,label: later}]}
+  - name: Persistent destinations survive the creating TDS connection
+    tds:
+      statements:
+        - connection: creator
+          sql: SELECT CAST(41 AS INT) AS id INTO into_relation_wire
+        - {connection: creator,close: true}
+        - connection: reader
+          sql: SELECT id FROM into_relation_wire
+          expect: {rows: 1,data: [{id: 41}]}
+  - name: Explicit rollback removes the pending destination and its rows
+    tds:
+      statements:
+        - sql: BEGIN TRANSACTION
+        - sql: SELECT CAST(17 AS INT) AS id INTO into_relation_rollback
+        - sql: SELECT id FROM into_relation_rollback
+          expect: {rows: 1,data: [{id: 17}]}
+        - sql: ROLLBACK TRANSACTION
+        - sql: SELECT id FROM into_relation_rollback
+          expect: {error: true}
+  - name: Explicit commit publishes the regular destination to another connection
+    tds:
+      statements:
+        - connection: owner
+          sql: BEGIN TRANSACTION
+        - connection: owner
+          sql: SELECT CAST(23 AS INT) AS id INTO into_relation_commit
+        - connection: owner
+          sql: COMMIT TRANSACTION
+        - connection: observer
+          sql: SELECT id FROM into_relation_commit
+          expect: {rows: 1,data: [{id: 23}]}
+  - name: Qualified temporary destinations keep their local lifetime
+    tds:
+      statements:
+        - connection: owner
+          sql: "SELECT CAST(29 AS INT) AS id INTO dbo.#qualified_into"
+        - connection: owner
+          sql: "SELECT id FROM #qualified_into"
+          expect: {rows: 1,data: [{id: 29}]}
+        - connection: observer
+          sql: "SELECT id FROM #qualified_into"
+          expect: {error: true}
+  - name: Stored modules retain persistent population commands without executing them at declaration
+    setup:
+      - sql: CREATE PROCEDURE into_relation_procedure AS SELECT id,label INTO dbo.into_relation_module FROM into_relation_source;
+    sql: EXEC into_relation_procedure; SELECT COUNT(*) AS total FROM into_relation_module;
+    expect: {rows: 1,data: [{total: 3}]}
+    cleanup:
+      - sql: DROP PROCEDURE into_relation_procedure
+  - name: The stored module populated the regular destination
+    sql: SELECT id,label FROM into_relation_module ORDER BY id
+    expect: {rows: 3,data: [{id: 1,label: first},{id: 1,label: first},{id: 2,label: null}]}
+cleanup:
+  - sql: DROP TABLE IF EXISTS into_relation_module
+  - sql: DROP TABLE IF EXISTS into_relation_commit
+  - sql: DROP TABLE IF EXISTS into_relation_rollback
+  - sql: DROP TABLE IF EXISTS into_relation_wire
+  - sql: DROP TABLE IF EXISTS into_relation_empty
+  - sql: DROP TABLE IF EXISTS into_relation_cte
+  - sql: DROP TABLE IF EXISTS into_relation_copy
+  - sql: DROP TABLE IF EXISTS into_relation_source

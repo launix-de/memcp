@@ -1,0 +1,98 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: Correlated UPDATE consumes the selected lazy scalar source in its actual statement
+  syntax: mysql
+setup:
+- sql: DROP TABLE IF EXISTS dml_stage_targets
+- sql: DROP TABLE IF EXISTS dml_stage_links
+- sql: DROP TABLE IF EXISTS dml_stage_values
+- sql: DROP TABLE IF EXISTS dml_stage_required
+- sql: CREATE TABLE dml_stage_targets(id INT PRIMARY KEY,ref_id INT,payload VARCHAR(32))
+- sql: CREATE TABLE dml_stage_links(id INT PRIMARY KEY,source_id INT)
+- sql: CREATE TABLE dml_stage_values(id INT PRIMARY KEY,value VARCHAR(32))
+- sql: CREATE TABLE dml_stage_required(id INT PRIMARY KEY,ref_id INT,payload VARCHAR(32) NOT NULL)
+- sql: INSERT INTO dml_stage_targets VALUES(1,1,'old1'),(2,2,'old2'),(3,9,'old3')
+- sql: INSERT INTO dml_stage_links VALUES(1,1),(2,2),(3,9)
+- sql: INSERT INTO dml_stage_values VALUES(1,'one'),(2,NULL)
+- sql: INSERT INTO dml_stage_required VALUES(1,1,'old1'),(2,2,'old2')
+test_cases:
+- name: A joined UPDATE prepares its correlated scalar source before reading it
+  session_id: lazy_update
+  sql: |
+    UPDATE dml_stage_targets t,dml_stage_links l
+    SET t.payload=(SELECT v.value FROM dml_stage_values v WHERE v.id=l.source_id LIMIT 1)
+    WHERE t.id=l.id AND l.id<=2
+  expect:
+    rows_affected: 2
+- name: The scalar NULL value does not remove its target row
+  sql: SELECT id,ref_id,payload FROM dml_stage_targets ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - {id: 1, ref_id: 1, payload: one}
+    - {id: 2, ref_id: 2, payload: null}
+    - {id: 3, ref_id: 9, payload: old3}
+- name: A committed source update changes the next scalar input
+  sql: UPDATE dml_stage_values SET value='two' WHERE id=1
+  expect:
+    rows_affected: 1
+- name: The same UPDATE and connection consume the new source value
+  session_id: lazy_update
+  sql: |
+    UPDATE dml_stage_targets t,dml_stage_links l
+    SET t.payload=(SELECT v.value FROM dml_stage_values v WHERE v.id=l.source_id LIMIT 1)
+    WHERE t.id=l.id AND l.id<=2
+- name: Reused scalar preparation preserves every complete target value
+  sql: SELECT id,ref_id,payload FROM dml_stage_targets ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - {id: 1, ref_id: 1, payload: two}
+    - {id: 2, ref_id: 2, payload: null}
+    - {id: 3, ref_id: 9, payload: old3}
+- name: An empty ordered scalar source assigns NULL to its existing target
+  sql: |
+    UPDATE dml_stage_targets t
+    SET payload=(SELECT v.value FROM dml_stage_values v WHERE v.id=t.ref_id ORDER BY v.id LIMIT 1)
+    WHERE t.id=3
+  expect:
+    rows_affected: 1
+- name: Empty and nullable scalar results retain the full target relation
+  sql: SELECT id,ref_id,payload FROM dml_stage_targets ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - {id: 1, ref_id: 1, payload: two}
+    - {id: 2, ref_id: 2, payload: null}
+    - {id: 3, ref_id: 9, payload: null}
+- name: Prior committed work remains outside a later failed statement
+  sql: UPDATE dml_stage_values SET value='doomed' WHERE id=1
+  expect:
+    rows_affected: 1
+- name: A failed scalar assignment restores the whole UPDATE statement
+  sql: |
+    UPDATE dml_stage_required t
+    SET payload=(SELECT v.value FROM dml_stage_values v WHERE v.id=t.ref_id LIMIT 1)
+    WHERE t.id IN (1,2)
+  expect:
+    error: true
+- name: No partial target update survives the NOT NULL failure
+  sql: SELECT id,ref_id,payload FROM dml_stage_required ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - {id: 1, ref_id: 1, payload: old1}
+    - {id: 2, ref_id: 2, payload: old2}
+- name: Statement restoration preserves the earlier committed source update
+  sql: SELECT id,value FROM dml_stage_values ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - {id: 1, value: doomed}
+    - {id: 2, value: null}
+cleanup:
+- sql: DROP TABLE IF EXISTS dml_stage_targets
+- sql: DROP TABLE IF EXISTS dml_stage_links
+- sql: DROP TABLE IF EXISTS dml_stage_values
+- sql: DROP TABLE IF EXISTS dml_stage_required

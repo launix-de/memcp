@@ -1,0 +1,54 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: Native closure captures respect the publication of named lexical bindings
+setup: []
+test_cases:
+- name: Native code uses the local callback after saving the outer callback
+  scm: |
+    (begin
+      (define syntax (scheme "(lambda (callback) (list ((lambda (value) (begin (define original callback) (define callback (lambda (n) (+ 10 (original n)))) (callback value))) 3) (callback 3)))"))
+      (define proc (eval (optimize (clone_optimizer_expression syntax))))
+      (define compiled (jit proc))
+      (define callback (lambda (n) (+ n 1)))
+      (list (equal? (jit? compiled) (jit-enabled?)) (compiled callback)))
+  expect: {result: [true,[14,4]]}
+- name: Native code distinguishes the earlier outer callback from the recursive local callback
+  scm: |
+    (begin
+      (define syntax (scheme "(lambda (callback) (list ((lambda (value) (begin (define original callback) (define callback (lambda (n) (if (<= n 0) (original 0) (+ 10 (callback (- n 1)))))) (callback value))) 3) (callback 3)))"))
+      (define proc (eval (optimize (clone_optimizer_expression syntax))))
+      (define compiled (jit proc))
+      (define callback (lambda (n) (+ n 1)))
+      (list (equal? (jit? compiled) (jit-enabled?)) (compiled callback)))
+  expect: {result: [true,[31,4]]}
+- name: An unscoped sequence publishes into its caller's frame
+  scm: |
+    (begin
+      (define proc (eval (scheme "(lambda (value) (begin_mut 0 (!begin (define previous value) (set value (+ value 10))) (list previous value)))")))
+      (define compiled (jit proc))
+      (list (equal? (jit? compiled) (jit-enabled?)) (compiled 4)))
+  expect: {result: [true,[4,14]]}
+- name: A conditional publication into the enclosing frame preserves both outcomes
+  scm: |
+    (begin
+      (define proc (eval (scheme "(lambda (flag value) (!begin (if flag (define value (+ value 10)) nil) value))")))
+      (define compiled (jit proc))
+      (list (jit? compiled) (compiled true 4) (compiled false 4)))
+  expect: {result: [false,14,4]}
+- name: A branch with its own lexical frame still compiles
+  scm: |
+    (begin
+      (define proc (eval (scheme "(lambda (flag value) (if flag (begin (define value (+ value 10)) value) value))")))
+      (define compiled (jit proc))
+      (list (equal? (jit? compiled) (jit-enabled?)) (compiled true 4) (compiled false 4)))
+  expect: {result: [true,14,4]}
+- name: An escaped closure reads the same frame after its binding changes
+  scm: |
+    (begin
+      (define proc (eval (scheme "(lambda (value) (begin (define value (+ value 10)) (define read-value (lambda () value)) (set value (+ value 20)) read-value))")))
+      (define compiled (jit proc))
+      (define read-value (compiled 4))
+      (list (jit? compiled) (read-value)))
+  expect: {result: [false,34]}
+cleanup: []

@@ -1,3 +1,5 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Storage type coverage test suite
 # Exercises StorageFloat, StorageInt, StorageSeq, StorageString, StorageSCMER
 # by inserting typed data, forcing compression via SHUTDOWN, and verifying after restart.
@@ -22,7 +24,10 @@ test_cases:
   - name: "Create float table"
     sql: "CREATE TABLE st_float (id INT, temperature DOUBLE, ratio FLOAT)"
     expect:
-      rows: 0
+      affected_rows: 0
+      rows: 1
+      data: [{affected_rows: 0}]
+      result_contains: '"affected_rows"'
 
   - name: "Insert float data (8 rows for compression)"
     sql: |
@@ -63,7 +68,10 @@ test_cases:
   - name: "Create int table"
     sql: "CREATE TABLE st_int (id INT, score INT, flags INT)"
     expect:
-      rows: 0
+      affected_rows: 0
+      rows: 1
+      data: [{affected_rows: 0}]
+      result_contains: '"affected_rows"'
 
   - name: "Insert integer data (non-sequential for StorageInt)"
     sql: |
@@ -103,7 +111,10 @@ test_cases:
   - name: "Create sequence table"
     sql: "CREATE TABLE st_seq (id INT PRIMARY KEY AUTO_INCREMENT, label VARCHAR(20))"
     expect:
-      rows: 0
+      affected_rows: 0
+      rows: 1
+      data: [{affected_rows: 0}]
+      result_contains: '"affected_rows"'
 
   - name: "Insert sequential data (AUTO_INCREMENT triggers StorageSeq)"
     sql: |
@@ -136,7 +147,10 @@ test_cases:
   - name: "Create string table"
     sql: "CREATE TABLE st_string (id INT, category VARCHAR(30), tag VARCHAR(20))"
     expect:
-      rows: 0
+      affected_rows: 0
+      rows: 1
+      data: [{affected_rows: 0}]
+      result_contains: '"affected_rows"'
 
   - name: "Insert string data (low cardinality for dictionary mode)"
     sql: |
@@ -183,7 +197,10 @@ test_cases:
   - name: "Create mixed table"
     sql: "CREATE TABLE st_mixed (id INT, data TEXT)"
     expect:
-      rows: 0
+      affected_rows: 0
+      rows: 1
+      data: [{affected_rows: 0}]
+      result_contains: '"affected_rows"'
 
   - name: "Insert mixed data"
     sql: |
@@ -203,7 +220,10 @@ test_cases:
   - name: "Create seq edge table"
     sql: "CREATE TABLE st_seq_edge (pos INT, val INT)"
     expect:
-      rows: 0
+      affected_rows: 0
+      rows: 1
+      data: [{affected_rows: 0}]
+      result_contains: '"affected_rows"'
 
   - name: "Insert seq edge data: NULLs, gaps, multiple strides"
     sql: |
@@ -226,7 +246,10 @@ test_cases:
   - name: "Create string buffer table"
     sql: "CREATE TABLE st_str_buf (id INT, data VARCHAR(20))"
     expect:
-      rows: 0
+      affected_rows: 0
+      rows: 1
+      data: [{affected_rows: 0}]
+      result_contains: '"affected_rows"'
 
   - name: "Insert 60 unique strings batch 1"
     sql: |

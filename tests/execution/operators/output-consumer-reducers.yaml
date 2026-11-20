@@ -1,0 +1,157 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: Generic serial output reductions preserve the effect-only ABI and actual callback values
+  isolated: true
+test_cases:
+- name: The existing seven argument ordered merge retains its effect-only result
+  scm: |
+    (begin
+      (define seen (newsession))
+      (define result (scan_order_merge nil
+        (list (lambda (emit) (begin (emit (list 1)) (emit (list 3))))
+              (lambda (emit) (begin (emit (list 2)) (emit (list 4)))))
+        (list 0) (list <) 0 -1
+        (lambda (row) (begin (seen (car row) true) 99))))
+      (and (nil? result) (seen 1) (seen 2) (seen 3) (seen 4)))
+  expect:
+    result: true
+- name: The reducing ordered merge folds only accepted rows and preserves nonnumeric state
+  scm: |
+    (begin
+      (define merged (scan_order_merge_reduce nil
+        (list (lambda (emit) (begin (emit (list 1)) (emit (list 3))))
+              (lambda (emit) (begin (emit (list 2)) (emit (list 4)))))
+        (list 0) (list <) 1 2 (lambda (row) (string (car row))) concat ""))
+      (define empty (scan_order_merge_reduce nil
+        (list (lambda (_emit) (error "a zero limit started its producer")))
+        (list 0) (list <) 0 0 (lambda (_row) (error "a zero limit emitted a row")) + 104))
+      (and (equal? merged "23") (equal? empty 104)))
+  expect:
+    result: true
+- name: Initializer factories run at execution rather than during constant compilation
+  scm: |
+    (begin
+      (define starts (newsession)) (starts "n" 0)
+      (define factory (lambda () (begin
+        (starts "n" (+ (starts "n") 1)) (list (starts "n")))))
+      (define code (optimize (list 'reducer_initial_value (list 'quote factory))))
+      (define inert (equal? (starts "n") 0))
+      (define first (eval code)) (define second (eval code))
+      (and inert (expression_equal? first (list 1)) (expression_equal? second (list 2)) (equal? (starts "n") 2)))
+  expect:
+    result: true
+- name: Window step and flush share the existing skip and slot ownership
+  scm: |-
+    (begin
+      (define window (list 1 0 1 nil nil))
+      (define emit (lambda (oldest _latest) (coalesceNil oldest 0)))
+      (define first (window_reduce window emit (list 2) + 100))
+      (define second (window_reduce (car first) emit (list 3) + (cadr first)))
+      (define final (window_flush_reduce (car second) emit 2 + (cadr second)))
+      (and (equal? (cadr first) 100) (equal? (cadr second) 102)
+        (equal? (cadr final) 105) (equal? (nth (car final) 1) 4)))
+  expect:
+    result: true
+- name: A single emission retains each escaping callback frame
+  scm: |-
+    (begin
+      (define window (list 0 0 1 nil))
+      (define emit (lambda (value) (lambda () value)))
+      (define latest (lambda (_old value) value))
+      (define first (window_reduce window emit (list 11) latest nil))
+      (define second (window_reduce (car first) emit (list 22) latest (cadr first)))
+      (and (equal? ((cadr first)) 11) (equal? ((cadr second)) 22)))
+  expect:
+    result: true
+- name: Consumer failures precede reduction and keep the original error through merge drain and window unwind
+  scm: |
+    (begin
+      (define producer (lambda (emit)
+        (reduce (produceN 300) (lambda (_last value) (emit (list value))) nil)))
+      (define merged (try (lambda () (begin
+        (scan_order_merge_reduce nil (list producer producer) (list 0) (list <) 0 -1
+          (lambda (_row) (error "ordered consumer failure"))
+          (lambda (_acc _value) (error "reducer ran after a failed consumer")) 0)
+        false)) (lambda (cause) (equal? (failure_value cause) "ordered consumer failure"))))
+      (define window (list 0 0 1 nil))
+      (define flushed (try (lambda () (begin
+        (window_flush_reduce window (lambda (_value) (error "window consumer failure")) 2
+          (lambda (_acc _value) (error "reducer ran after a failed consumer")) 0)
+        false)) (lambda (cause) (equal? (failure_value cause) "window consumer failure"))))
+      (and merged flushed))
+  expect:
+    result: true
+- name: A reducing ordered merge drains every producer before propagating a reducer failure
+  scm: |
+    (begin
+      (define done (newsession))
+      (define producer (lambda (key) (lambda (emit) (begin
+        (reduce (produceN 300) (lambda (_previous value) (emit (list value))) nil)
+        (done key true)))))
+      (define failed (try (lambda () (begin
+        (scan_order_merge_reduce nil (list (producer "first") (producer "second"))
+          (list 0) (list <) 0 -1 (lambda (_row) 1)
+          (lambda (_acc _value) (error "ordered reducer failure")) 0)
+        false)) (lambda (cause) (equal? (failure_value cause) "ordered reducer failure"))))
+      (and failed (done "first") (done "second")))
+  expect:
+    result: true
+- name: A window reducer failure stops after its first completed emission
+  scm: |-
+    (begin
+      (define window (list 0 0 1 nil))
+      (define seen (newsession)) (seen "emissions" 0)
+      (define failed (try (lambda () (begin
+        (window_flush_reduce window (lambda (value) (begin
+          (seen "emissions" (+ (seen "emissions") 1)) value)) 3
+          (lambda (_acc _value) (error "window reducer failure")) 0)
+        false)) (lambda (cause) (equal? (failure_value cause) "window reducer failure"))))
+      (and failed (equal? (seen "emissions") 1) (equal? (nth window 1) 0)))
+  expect:
+    result: true
+- name: A borrowed window remains unchanged after a functional shift and flush
+  scm: |-
+    (begin
+      (define original (list 0 0 1 nil))
+      (define first (window_reduce original (lambda (value) value) (list 7) + 10))
+      (define second (window_flush_reduce (car first) (lambda (value) (coalesceNil value 0)) 2 + (cadr first)))
+      (and (expression_equal? original (list 0 0 1 nil))
+        (expression_equal? (car first) (list 0 1 1 7))
+        (expression_equal? (car second) (list 0 3 1 nil))
+        (equal? (cadr first) 17) (equal? (cadr second) 17)))
+  expect:
+    result: true
+- name: An emitter failure preserves every borrowed window slot
+  scm: |-
+    (begin
+      (define original (list 0 4 1 2 3))
+      (define failed (try (lambda () (begin
+        (window_reduce original (lambda args (error "functional emitter failure")) (list 9) + 11)
+        false)) (lambda (cause) (equal? (failure_value cause) "functional emitter failure"))))
+      (and failed (expression_equal? original (list 0 4 1 2 3))))
+  expect:
+    result: true
+- name: The effect-only functional window returns next state without consuming a sink result
+  scm: |-
+    (begin
+      (define original (list 0 0 1 nil))
+      (define seen (newsession))
+      (define next (window_reduce original (lambda (value) (begin (seen "value" value) 99))
+        (list 7) nil "kept"))
+      (and (equal? (seen "value") 7) (equal? (cadr next) "kept")
+        (expression_equal? (car next) (list 0 1 1 7))
+        (expression_equal? original (list 0 0 1 nil))))
+  expect:
+    result: true
+- name: A callback may retain its variadic frame across later functional shifts
+  scm: |-
+    (begin
+      (define first (window_reduce (list 0 0 1 nil nil) (lambda args args) (list 7)
+        (lambda (_old value) value) nil))
+      (define second (window_reduce (car first) (lambda args args) (list 9)
+        (lambda (_old value) value) (cadr first)))
+      (and (expression_equal? (cadr first) (list nil 7))
+        (expression_equal? (cadr second) (list 7 9))))
+  expect:
+    result: true

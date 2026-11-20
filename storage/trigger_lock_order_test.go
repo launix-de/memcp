@@ -608,7 +608,7 @@ func TestKeytableEvictionDoesNotWaitForDependencyRebuild(t *testing.T) {
 	db.schemalock.Lock()
 	target.registerComputeTriggersWithRefs("cached", scm.NewNil(), []scanJoinInfo{{schema: "gcdb", table: "source"}})
 	db.schemalock.Unlock()
-	if len(source.Triggers) == 0 || len(target.GetTriggers(AfterDropTable)) == 0 {
+	if len(source.Triggers) == 0 || len(target.GetTriggers(AfterDropTable, nil)) == 0 {
 		t.Fatal("fixture has no dependency/self-cleanup triggers")
 	}
 	GlobalCache.Stop()
@@ -754,7 +754,10 @@ func TestKeytableEvictionKeepsLiveDependentInvalidationPath(t *testing.T) {
 }
 
 func TestForeignKeyTriggerRestoresFinalValuePriority(t *testing.T) {
+	oldBasepath := Basepath
+	defer func() { Basepath = oldBasepath }()
 	for _, mode := range []foreignKeyMode{RESTRICT, CASCADE, SETNULL} {
+		Basepath = t.TempDir()
 		Init(scm.Globalenv)
 		const name = "fk_final_value_priority_upgrade"
 		defer databases.Remove(name)
@@ -799,23 +802,23 @@ func TestForeignKeyTriggerRestoresFinalValuePriority(t *testing.T) {
 				tbl.AddTrigger(trigger)
 			}
 		}
-		if first := child.GetTriggers(BeforeInsert)[0]; first.Priority != -100 {
+		if first := child.GetTriggers(BeforeInsert, nil)[0]; first.Priority != -100 {
 			t.Fatal("fixture did not restore the earlier FK-before-user ordering")
 		}
 		rebuildFKTriggersAfterLoad(db)
-		triggers := child.GetTriggers(BeforeInsert)
+		triggers := child.GetTriggers(BeforeInsert, nil)
 		if len(triggers) != 2 || triggers[0].Name != "user_mutates_reference" || triggers[0].Priority != 0 || triggers[1].Priority != 100 {
 			t.Fatalf("regenerated child priority did not preserve user-before-FK order: %v", triggers)
 		}
 		for _, timing := range []TriggerTiming{BeforeUpdate, BeforeDelete} {
-			for _, trigger := range parent.GetTriggers(timing) {
+			for _, trigger := range parent.GetTriggers(timing, nil) {
 				if trigger.Priority != 100 {
 					t.Fatalf("regenerated parent BEFORE priority: %v", trigger)
 				}
 			}
 		}
 		if mode != RESTRICT {
-			if triggers := parent.GetTriggers(AfterUpdate); len(triggers) != 1 || triggers[0].Priority != -100 {
+			if triggers := parent.GetTriggers(AfterUpdate, nil); len(triggers) != 1 || triggers[0].Priority != -100 {
 				t.Fatal("regeneration changed the existing AFTER cascade/set-null ordering")
 			}
 		}
@@ -893,7 +896,7 @@ func TestTriggerCompilationConcurrentSchemaSnapshot(t *testing.T) {
 	go func() {
 		defer close(done)
 		<-start
-		tbl.GetTriggers(BeforeUpdate)
+		tbl.GetTriggers(BeforeUpdate, nil)
 	}()
 	defer func() { <-done }()
 	close(start)

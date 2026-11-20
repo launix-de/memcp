@@ -64,6 +64,9 @@ type scanLookupParallelMapState struct {
 }
 
 func executeCompiledScanLookup(t *table, currentTx *TxContext, schemaValue, valuesValue scm.Scmer) scm.Scmer {
+	currentTx, finishData := t.readDataContext(currentTx)
+	defer finishData()
+
 	schema := mustScmerSlice(schemaValue, "scan_lookup schema")
 	values := mustScmerSlice(valuesValue, "scan_lookup values")
 	meta := scanAccessSchemaMeta{}
@@ -159,6 +162,9 @@ func parseScanLookupPlanSlices(schema, values []scm.Scmer) scanLookupPlan {
 }
 
 func (t *table) executeScanLookup(currentTx *TxContext, plan scanLookupPlan) scm.Scmer {
+	currentTx, finishData := t.readDataContext(currentTx)
+	defer finishData()
+
 	matchCount := plan.access.len()
 	for i := 0; i < matchCount; i++ {
 		value := plan.access.boundValue(i, false)
@@ -183,7 +189,7 @@ func (t *table) executeScanLookup(currentTx *TxContext, plan scanLookupPlan) scm
 		mappedValues, matches := t.scanLookupMapOne(
 			currentTx, plan.access, mapCols)
 		if matches > 1 {
-			panic(scalarSubselectOverflow)
+			panic(scm.NewCardinalityFailure(scalarSubselectOverflow))
 		}
 		if matches == 0 {
 			return scm.NewNil()
@@ -273,7 +279,7 @@ func (t *table) scanLookupMap(currentTx *TxContext, access scanAccess, mapCols [
 		values, matches = t.scanLookupMapMany(currentTx, access, mapCols)
 	}
 	if matches > 1 {
-		panic(scalarSubselectOverflow)
+		panic(scm.NewCardinalityFailure(scalarSubselectOverflow))
 	}
 	if matches == 0 {
 		return scm.NewNil()
@@ -283,6 +289,9 @@ func (t *table) scanLookupMap(currentTx *TxContext, access scanAccess, mapCols [
 }
 
 func (t *table) scanLookupMapOne(currentTx *TxContext, access scanAccess, mapCols []string) ([]scm.Scmer, int) {
+	currentTx, finishData := t.readDataContext(currentTx)
+	defer finishData()
+
 	if t.hasTableLock() {
 		t.waitTableLock(SessionStateFromTx(currentTx), querySeqFromTx(currentTx), false)
 	}
@@ -421,6 +430,9 @@ func (t *storageShard) scanLookupMapValues(recid, mainCount uint32, mapCols []st
 }
 
 func (t *table) scanLookupOne(currentTx *TxContext, access scanAccess, resultCol string, returnValue bool) scm.Scmer {
+	currentTx, finishData := t.readDataContext(currentTx)
+	defer finishData()
+
 	if t.hasTableLock() {
 		t.waitTableLock(SessionStateFromTx(currentTx), querySeqFromTx(currentTx), false)
 	}
@@ -489,7 +501,7 @@ func (t *table) scanLookupOne(currentTx *TxContext, access scanAccess, resultCol
 		return scm.NewBool(state.matches != 0)
 	}
 	if state.matches > 1 {
-		panic(scalarSubselectOverflow)
+		panic(scm.NewCardinalityFailure(scalarSubselectOverflow))
 	}
 	return state.result
 }
@@ -578,6 +590,9 @@ func scanLookupColumns(access scanAccess, inline []string) []string {
 }
 
 func (t *table) scanLookupMany(currentTx *TxContext, access scanAccess, resultCol string, returnValue bool) scm.Scmer {
+	currentTx, finishData := t.readDataContext(currentTx)
+	defer finishData()
+
 	if t.hasTableLock() {
 		t.waitTableLock(SessionStateFromTx(currentTx), querySeqFromTx(currentTx), false)
 	}
@@ -649,7 +664,7 @@ func (t *table) scanLookupMany(currentTx *TxContext, access scanAccess, resultCo
 		return scm.NewBool(state.matches != 0)
 	}
 	if state.matches > 1 {
-		panic(scalarSubselectOverflow)
+		panic(scm.NewCardinalityFailure(scalarSubselectOverflow))
 	}
 	if state.matches == 0 {
 		return scm.NewNil()
@@ -739,6 +754,9 @@ func (t *storageShard) scanLookupMany(access scanAccess, resultCol string, retur
 }
 
 func (t *table) scanLookupMapMany(currentTx *TxContext, access scanAccess, mapCols []string) ([]scm.Scmer, int) {
+	currentTx, finishData := t.readDataContext(currentTx)
+	defer finishData()
+
 	if t.hasTableLock() {
 		t.waitTableLock(SessionStateFromTx(currentTx), querySeqFromTx(currentTx), false)
 	}

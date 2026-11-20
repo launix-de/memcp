@@ -1,0 +1,147 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# https://learn.microsoft.com/sql/t-sql/statements/set-numeric-roundabort-transact-sql
+# SQL Server 2022: https://dbfiddle.uk/wJ45_XlK
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Explicit numeric rounding OFF retains declared destination conversions; ON goals retain real error semantics
+setup:
+- sql: CREATE TABLE roundabort_values(id INT PRIMARY KEY,amount DECIMAL(5,2))
+- sql: |
+    CREATE FUNCTION dbo.roundabort_sum(@left DECIMAL(5,4),@right DECIMAL(5,4)) RETURNS DECIMAL(5,2) AS BEGIN
+      RETURN @left+@right;
+    END;
+- sql: |
+    CREATE PROCEDURE dbo.roundabort_proc AS BEGIN
+      SET NUMERIC_ROUNDABORT OFF;
+      DECLARE @left DECIMAL(5,4)=1.1234,@right DECIMAL(5,4)=1.1234,@result DECIMAL(5,2);
+      SET @result=@left+@right;
+      SELECT @result AS value,SESSIONPROPERTY('NUMERIC_ROUNDABORT') AS setting,@@OPTIONS&8192 AS option_bit;
+    END;
+cleanup:
+- sql: DROP PROCEDURE IF EXISTS dbo.roundabort_unentered
+- sql: DROP PROCEDURE IF EXISTS dbo.roundabort_proc
+- sql: DROP FUNCTION IF EXISTS dbo.roundabort_sum
+- sql: DROP TABLE IF EXISTS roundabort_values
+test_cases:
+- name: OFF reports the profile already implemented by declared decimal conversion
+  sql: |
+    SET NUMERIC_ROUNDABORT OFF;
+    DECLARE @left DECIMAL(5,4)=1.1234,@right DECIMAL(5,4)=1.1234,@result DECIMAL(5,2);
+    SET @result=@left+@right;
+    SELECT @result AS value,SESSIONPROPERTY('NUMERIC_ROUNDABORT') AS setting,@@OPTIONS&8192 AS option_bit;
+  expect: {rows: 1,data: [{value: 2.25,setting: 0,option_bit: 0}]}
+- name: Signed and whole destination scales retain their actual rounding rules
+  sql: |
+    SET NUMERIC_ROUNDABORT OFF;
+    SELECT CAST(1.235 AS DECIMAL(5,2)) AS positive,CAST(-1.235 AS DECIMAL(5,2)) AS negative,
+      CAST(1.6 AS DECIMAL(5,0)) AS whole;
+  expect: {rows: 1,data: [{positive: 1.24,negative: -1.24,whole: 2}]}
+- name: OFF list admission preserves other existing runtime effects
+  sql: |
+    SET ANSI_WARNINGS,NOCOUNT,NUMERIC_ROUNDABORT OFF;
+    SELECT CAST(1.235 AS DECIMAL(5,2)) AS rounded,9/0 AS missing,
+      SESSIONPROPERTY('ANSI_WARNINGS') AS warnings,SESSIONPROPERTY('NUMERIC_ROUNDABORT') AS setting,
+      @@OPTIONS&512 AS nocount,@@OPTIONS&8192 AS roundabort;
+  expect: {rows: 1,data: [{rounded: 1.24,missing: null,warnings: 0,setting: 0,nocount: 0,roundabort: 0}]}
+- name: Actual table destinations round values while retaining NULL
+  sql: |
+    SET NUMERIC_ROUNDABORT OFF;
+    INSERT roundabort_values VALUES(1,1.235),(2,-1.235),(3,NULL);
+    SELECT id,amount FROM roundabort_values ORDER BY id;
+    DELETE FROM roundabort_values;
+  expect: {rows: 3,data: [{id: 1,amount: 1.24},{id: 2,amount: -1.24},{id: 3,amount: null}]}
+- name: SELECT assignment and scalar return use their existing destination contracts
+  sql: |
+    SET NUMERIC_ROUNDABORT OFF;
+    DECLARE @left DECIMAL(5,4)=1.1234,@right DECIMAL(5,4)=1.1234,@result DECIMAL(5,2);
+    SELECT @result=@left+@right;
+    SELECT @result AS assigned,dbo.roundabort_sum(@left,@right) AS returned;
+  expect: {rows: 1,data: [{assigned: 2.25,returned: 2.25}]}
+- name: Module and dynamic OFF forms preserve the existing actual rounding owner
+  sql: |
+    EXEC dbo.roundabort_proc;
+    EXEC(N'SET NUMERIC_ROUNDABORT OFF; SELECT CAST(1.235 AS DECIMAL(5,2)) AS value,SESSIONPROPERTY(''NUMERIC_ROUNDABORT'') AS setting,@@OPTIONS&8192 AS option_bit;');
+  expect: {rows: 2,data: [{value: 2.25,setting: 0,option_bit: 0},{value: 1.24,setting: 0,option_bit: 0}]}
+- name: OFF cannot disable an actual declared precision overflow
+  sql: |
+    SET NUMERIC_ROUNDABORT OFF;
+    SET ANSI_WARNINGS ON;
+    DECLARE @value DECIMAL(5,2)=7;
+    BEGIN TRY SET @value=CAST(999.995 AS DECIMAL(5,2)); END TRY
+    BEGIN CATCH SELECT ERROR_NUMBER() AS number,@value AS retained; END CATCH;
+  expect: {rows: 1,data: [{number: 8115,retained: 7}]}
+- name: Native destination and observation metadata remain declared without rows
+  tds:
+    statements:
+    - sql: SET NUMERIC_ROUNDABORT OFF
+    - sql: SELECT amount,SESSIONPROPERTY('NUMERIC_ROUNDABORT') AS setting,@@OPTIONS&8192 AS option_bit FROM roundabort_values WHERE id<0
+      expect:
+        rows: 0
+        column_types: [{name: amount,type: DECIMAL,precision: 5,scale: 2},{name: setting,type: SQL_VARIANT},{name: option_bit,type: INT}]
+- name: An unexecuted ON list cannot change any admitted runtime option
+  sql: |
+    SET NOCOUNT,NUMERIC_ROUNDABORT OFF;
+    IF 1=0 SET NOCOUNT,NUMERIC_ROUNDABORT ON;
+    SELECT CAST(1.235 AS DECIMAL(5,2)) AS value,
+      SESSIONPROPERTY('NUMERIC_ROUNDABORT') AS setting,@@OPTIONS&8192 AS option_bit,
+      @@OPTIONS&512 AS nocount;
+  expect: {rows: 1,data: [{value: 1.24,setting: 0,option_bit: 0,nocount: 0}]}
+- name: An uncalled module can declare valid ON syntax without executing its effects
+  sql: |
+    CREATE PROCEDURE dbo.roundabort_unentered AS BEGIN
+      SET NUMERIC_ROUNDABORT ON;
+      INSERT roundabort_values VALUES(99,12.345);
+    END;
+    GO
+    SELECT CASE WHEN OBJECT_ID(N'dbo.roundabort_unentered',N'P') IS NOT NULL THEN 1 ELSE 0 END AS declared,
+      SESSIONPROPERTY('NUMERIC_ROUNDABORT') AS setting,@@OPTIONS&8192 AS option_bit,
+      (SELECT COUNT(*) FROM roundabort_values) AS untouched_rows;
+    DROP PROCEDURE dbo.roundabort_unentered;
+  expect: {rows: 1,data: [{declared: 1,setting: 0,option_bit: 0,untouched_rows: 0}]}
+- name: ON with warnings and abort enabled preserves the destination after precision loss
+  noncritical: true
+  sql: |
+    SET NUMERIC_ROUNDABORT ON; SET ANSI_WARNINGS ON; SET ARITHABORT ON;
+    DECLARE @left DECIMAL(5,4)=1.1234,@right DECIMAL(5,4)=1.1234,@result DECIMAL(5,2)=7;
+    BEGIN TRY SET @result=@left+@right;
+      SELECT @result AS value,CAST(NULL AS INT) AS number,SESSIONPROPERTY('NUMERIC_ROUNDABORT') AS setting,@@OPTIONS&8192 AS option_bit;
+    END TRY BEGIN CATCH
+      SELECT @result AS value,ERROR_NUMBER() AS number,SESSIONPROPERTY('NUMERIC_ROUNDABORT') AS setting,@@OPTIONS&8192 AS option_bit;
+    END CATCH;
+  expect: {rows: 1,data: [{value: 7,number: 8115,setting: 1,option_bit: 8192}]}
+- name: ON precision loss remains an error with warnings enabled even when abort is OFF
+  noncritical: true
+  sql: |
+    SET NUMERIC_ROUNDABORT ON; SET ANSI_WARNINGS ON; SET ARITHABORT OFF;
+    DECLARE @left DECIMAL(5,4)=1.1234,@right DECIMAL(5,4)=1.1234,@result DECIMAL(5,2)=7;
+    BEGIN TRY SET @result=@left+@right;
+      SELECT @result AS value,CAST(NULL AS INT) AS number,SESSIONPROPERTY('NUMERIC_ROUNDABORT') AS setting,@@OPTIONS&8192 AS option_bit;
+    END TRY BEGIN CATCH
+      SELECT @result AS value,ERROR_NUMBER() AS number,SESSIONPROPERTY('NUMERIC_ROUNDABORT') AS setting,@@OPTIONS&8192 AS option_bit;
+    END CATCH;
+  expect: {rows: 1,data: [{value: 7,number: 8115,setting: 1,option_bit: 8192}]}
+- name: ON precision loss remains an error when abort is enabled without warnings
+  noncritical: true
+  sql: |
+    SET NUMERIC_ROUNDABORT ON; SET ANSI_WARNINGS OFF; SET ARITHABORT ON;
+    DECLARE @left DECIMAL(5,4)=1.1234,@right DECIMAL(5,4)=1.1234,@result DECIMAL(5,2)=7;
+    BEGIN TRY SET @result=@left+@right;
+      SELECT @result AS value,CAST(NULL AS INT) AS number,SESSIONPROPERTY('NUMERIC_ROUNDABORT') AS setting,@@OPTIONS&8192 AS option_bit;
+    END TRY BEGIN CATCH
+      SELECT @result AS value,ERROR_NUMBER() AS number,SESSIONPROPERTY('NUMERIC_ROUNDABORT') AS setting,@@OPTIONS&8192 AS option_bit;
+    END CATCH;
+  expect: {rows: 1,data: [{value: 7,number: 8115,setting: 1,option_bit: 8192}]}
+- name: ON precision loss yields NULL when both warnings and abort are OFF
+  noncritical: true
+  sql: |
+    SET NUMERIC_ROUNDABORT ON; SET ANSI_WARNINGS OFF; SET ARITHABORT OFF;
+    DECLARE @left DECIMAL(5,4)=1.1234,@right DECIMAL(5,4)=1.1234,@result DECIMAL(5,2)=7;
+    BEGIN TRY SET @result=@left+@right;
+      SELECT @result AS value,CAST(NULL AS INT) AS number,SESSIONPROPERTY('NUMERIC_ROUNDABORT') AS setting,@@OPTIONS&8192 AS option_bit;
+    END TRY BEGIN CATCH
+      SELECT @result AS value,ERROR_NUMBER() AS number,SESSIONPROPERTY('NUMERIC_ROUNDABORT') AS setting,@@OPTIONS&8192 AS option_bit;
+    END CATCH;
+  expect: {rows: 1,data: [{value: null,number: null,setting: 1,option_bit: 8192}]}

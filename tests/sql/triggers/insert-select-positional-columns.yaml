@@ -1,0 +1,48 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  description: Trigger INSERT SELECT preserves source positions with repeated output titles
+setup:
+- sql: CREATE TABLE positional_event(id INT PRIMARY KEY,choice INT)
+- sql: CREATE TABLE positional_values(id INT PRIMARY KEY,amount INT)
+- sql: INSERT INTO positional_values VALUES(1,100),(2,200)
+- sql: CREATE TABLE positional_sink(event_id INT,selected_id INT,amount INT)
+- sql: |
+    CREATE TRIGGER positional_insert AFTER INSERT ON positional_event FOR EACH ROW BEGIN
+      INSERT INTO positional_sink(event_id,selected_id,amount)
+        SELECT NEW.id,v.id,v.amount FROM positional_values v WHERE v.id=NEW.choice;
+    END
+test_cases:
+- name: Trigger SELECT sources retain both id positions
+  sql: INSERT INTO positional_event VALUES(11,1),(22,2)
+  expect: {affected_rows: 2}
+- name: Repeated output titles keep their distinct values
+  sql: SELECT event_id,selected_id,amount FROM positional_sink ORDER BY event_id
+  expect: &values
+    data: [{event_id: 11, selected_id: 1, amount: 100}, {event_id: 22, selected_id: 2, amount: 200}]
+- name: A NULL choice emits no positional source row
+  sql: INSERT INTO positional_event VALUES(33,NULL)
+  expect: {affected_rows: 1}
+- name: A missing source retains both existing tuples
+  sql: SELECT event_id,selected_id,amount FROM positional_sink ORDER BY event_id
+  expect: *values
+- name: The positional sink uses the existing transaction owner
+  syntax: tsql
+  session_id: positional_rollback
+  cleanup:
+  - sql: IF @@TRANCOUNT>0 ROLLBACK TRANSACTION
+  sql: |
+    BEGIN TRANSACTION;
+    INSERT INTO positional_event VALUES(44,2);
+    SELECT event_id,selected_id,amount FROM positional_sink WHERE event_id=44;
+    ROLLBACK TRANSACTION;
+    SELECT COUNT(*) AS restored FROM positional_sink WHERE event_id=44;
+    SELECT COUNT(*) AS unchanged FROM positional_sink;
+  expect:
+    data: [{event_id: 44, selected_id: 2, amount: 200}, {restored: 0}, {unchanged: 2}]
+cleanup:
+- sql: DROP TRIGGER positional_insert
+- sql: DROP TABLE positional_sink
+- sql: DROP TABLE positional_values
+- sql: DROP TABLE positional_event

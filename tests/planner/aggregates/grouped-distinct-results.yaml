@@ -1,0 +1,180 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  description: DISTINCT consumes completed grouped rows before its own order and window
+setup:
+- sql: CREATE TABLE grouped_distinct_values(id INT PRIMARY KEY,owner_id INT,value INT)
+- sql: INSERT grouped_distinct_values VALUES(1,1,10),(2,1,20),(3,2,NULL),(4,3,10),(5,4,NULL)
+cleanup:
+- sql: DROP TABLE IF EXISTS grouped_distinct_values
+test_cases:
+- name: Grouped MIN values are deduplicated after original grouping
+  sql: SELECT DISTINCT MIN(value) AS value FROM grouped_distinct_values GROUP BY owner_id ORDER BY MIN(value)
+  expect:
+    rows: 2
+    data:
+    - value: null
+    - value: 10
+- name: MySQL uses the same grouped DISTINCT boundary
+  sql: SELECT DISTINCT MIN(value) AS value FROM grouped_distinct_values GROUP BY owner_id ORDER BY MIN(value)
+  expect:
+    rows: 2
+    data:
+    - value: null
+    - value: 10
+  syntax: sql
+- name: An output alias orders completed DISTINCT rows
+  sql: SELECT DISTINCT MIN(value) AS value FROM grouped_distinct_values GROUP BY owner_id ORDER BY value DESC
+  expect:
+    rows: 2
+    data:
+    - value: 10
+    - value: null
+- name: TOP follows grouped deduplication and order
+  sql: SELECT DISTINCT TOP(1) MIN(value) AS value FROM grouped_distinct_values GROUP BY owner_id ORDER BY MIN(value)
+    DESC
+  expect:
+    rows: 1
+    data:
+    - value: 10
+- name: MySQL offset follows grouped deduplication and order
+  sql: SELECT DISTINCT MIN(value) AS value FROM grouped_distinct_values GROUP BY owner_id ORDER BY MIN(value) LIMIT 1
+    OFFSET 1
+  expect:
+    rows: 1
+    data:
+    - value: 10
+  syntax: sql
+- name: Equal grouped constants become one scalar result row
+  sql: SELECT (SELECT DISTINCT MIN(1) FROM grouped_distinct_values GROUP BY owner_id) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: HAVING filters original groups before DISTINCT
+  sql: SELECT DISTINCT MIN(value) AS value FROM grouped_distinct_values GROUP BY owner_id HAVING COUNT(*)>1
+  expect:
+    rows: 1
+    data:
+    - value: 10
+- name: COUNT of nullable values retains distinct group counts
+  sql: SELECT DISTINCT COUNT(value) AS value FROM grouped_distinct_values GROUP BY owner_id ORDER BY COUNT(value)
+  expect:
+    rows: 3
+    data:
+    - value: 0
+    - value: 1
+    - value: 2
+- name: An empty explicit group produces no DISTINCT rows
+  sql: SELECT DISTINCT MIN(value) AS value FROM grouped_distinct_values WHERE id<0 GROUP BY owner_id
+  expect:
+    rows: 0
+    data: []
+- name: A global aggregate remains one row before DISTINCT
+  sql: SELECT DISTINCT MIN(value) AS value FROM grouped_distinct_values
+  expect:
+    rows: 1
+    data:
+    - value: 10
+- name: An empty global aggregate retains its NULL row before DISTINCT
+  sql: SELECT DISTINCT MIN(value) AS value FROM grouped_distinct_values WHERE id<0
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: Projected group keys retain the existing uniqueness proof
+  sql: SELECT DISTINCT owner_id,COUNT(*) AS total FROM grouped_distinct_values GROUP BY owner_id ORDER BY owner_id
+  expect:
+    rows: 4
+    data:
+    - owner_id: 1
+      total: 2
+    - owner_id: 2
+      total: 1
+    - owner_id: 3
+      total: 1
+    - owner_id: 4
+      total: 1
+- name: MySQL found-row count observes completed DISTINCT constant groups
+  syntax: sql
+  session_id: grouped_distinct_found_rows_constant
+  sql: SELECT SQL_CALC_FOUND_ROWS DISTINCT 1 AS value FROM grouped_distinct_values GROUP BY owner_id ORDER BY value LIMIT
+    1
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: MySQL found-row count retains deduplication before the limit for constant
+  syntax: sql
+  session_id: grouped_distinct_found_rows_constant
+  sql: SELECT FOUND_ROWS() AS total
+  expect:
+    rows: 1
+    data:
+    - total: 1
+- name: MySQL found-row count observes completed DISTINCT minimum groups
+  syntax: sql
+  session_id: grouped_distinct_found_rows_minimum
+  sql: SELECT SQL_CALC_FOUND_ROWS DISTINCT MIN(value) AS value FROM grouped_distinct_values GROUP BY owner_id ORDER BY
+    value LIMIT 1
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: MySQL found-row count retains deduplication before the limit for minimum
+  syntax: sql
+  session_id: grouped_distinct_found_rows_minimum
+  sql: SELECT FOUND_ROWS() AS total
+  expect:
+    rows: 1
+    data:
+    - total: 2
+- name: TSQL ordinary MIN order operands remain in the input scope
+  sql: SELECT MIN(value) AS value FROM grouped_distinct_values GROUP BY owner_id ORDER BY MIN(value)
+  expect:
+    rows: 4
+    data:
+    - value: null
+    - value: null
+    - value: 10
+    - value: 10
+- name: MySQL ordinary COUNT order operands remain in the input scope
+  syntax: sql
+  sql: SELECT COUNT(value) AS value FROM grouped_distinct_values GROUP BY owner_id ORDER BY COUNT(value)
+  expect:
+    rows: 4
+    data:
+    - value: 0
+    - value: 0
+    - value: 1
+    - value: 2
+- name: TSQL standalone ORDER alias takes precedence over the input column
+  sql: SELECT -value AS value FROM grouped_distinct_values WHERE id<=2 ORDER BY value
+  expect:
+    rows: 2
+    data:
+    - value: -20
+    - value: -10
+- name: TSQL ORDER expression reads the input column instead of the output alias
+  sql: SELECT -value AS value FROM grouped_distinct_values WHERE id<=2 ORDER BY value+0
+  expect:
+    rows: 2
+    data:
+    - value: -10
+    - value: -20
+- name: MySQL ORDER expression retains output alias resolution
+  syntax: sql
+  sql: SELECT -value AS value FROM grouped_distinct_values WHERE id<=2 ORDER BY value+0
+  expect:
+    rows: 2
+    data:
+    - value: -20
+    - value: -10
+- name: TSQL output-only alias is unavailable inside an ORDER expression
+  sql: SELECT id AS output_only FROM grouped_distinct_values ORDER BY output_only+0
+  expect:
+    error: true
+    contains:
+    - 'Column does not exist: output_only'

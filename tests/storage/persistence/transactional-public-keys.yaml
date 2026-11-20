@@ -1,0 +1,573 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  requires_tds: true
+  description: Public native key and foreign declarations retain one ordered transaction history and decision
+setup:
+- sql: DROP VIEW IF EXISTS public_key_participant_view
+- sql: CREATE TABLE public_key_rows(id INT NOT NULL,code INT,value INT) ENGINE=safe
+- sql: INSERT INTO public_key_rows VALUES(1,10,7),(2,20,11)
+- syntax: tsql
+  sql: CREATE TABLE public_key_drop(id INT NOT NULL,code INT,CONSTRAINT public_key_drop_pk PRIMARY KEY(id),CONSTRAINT public_key_drop_uq UNIQUE(code))
+- sql: INSERT INTO public_key_drop VALUES(1,10),(2,20)
+- sql: CREATE TABLE public_key_duplicates(id INT,value INT) ENGINE=safe
+- sql: INSERT INTO public_key_duplicates VALUES(1,7),(2,7)
+- scm: (rebuild (table "memcp-tests" false "public_key_duplicates" false nil) true false)
+- sql: INSERT INTO public_key_duplicates VALUES(3,7)
+- sql: CREATE TABLE public_key_nulls(id INT,value INT) ENGINE=safe
+- sql: INSERT INTO public_key_nulls VALUES(1,NULL),(2,NULL),(3,7)
+- sql: CREATE TABLE public_key_equal_nulls(id INT,value INT) ENGINE=safe
+- sql: INSERT INTO public_key_equal_nulls VALUES(1,NULL),(2,NULL)
+- syntax: tsql
+  sql: CREATE TABLE public_key_parent(id INT NOT NULL,code INT NOT NULL,CONSTRAINT public_key_parent_pk PRIMARY KEY(id))
+- sql: INSERT INTO public_key_parent VALUES(1,1),(2,7)
+- sql: CREATE TABLE public_key_child(id INT PRIMARY KEY,parent_id INT) ENGINE=safe
+- sql: INSERT INTO public_key_child VALUES(1,1)
+- sql: ALTER TABLE public_key_child ADD CONSTRAINT public_key_reference FOREIGN KEY(parent_id) REFERENCES public_key_parent(id)
+- sql: CREATE TABLE public_key_progress(id INT PRIMARY KEY,value INT) ENGINE=safe
+- sql: INSERT INTO public_key_progress VALUES(1,1)
+- sql: CREATE TABLE public_key_durable(id INT NOT NULL,code INT) ENGINE=safe
+- sql: INSERT INTO public_key_durable VALUES(1,10),(2,20)
+- sql: CREATE TABLE public_key_index(id INT NOT NULL,code INT) ENGINE=safe
+- sql: INSERT INTO public_key_index VALUES(1,10),(2,20)
+- sql: CREATE TABLE public_key_empty(id INT NOT NULL,value INT) ENGINE=safe
+- sql: CREATE TABLE public_key_prefix(id INT NOT NULL,value INT) ENGINE=safe
+- sql: CREATE TABLE public_key_unicode(id INT NOT NULL) ENGINE=safe
+- sql: INSERT INTO public_key_unicode VALUES(1),(2)
+- sql: CREATE TABLE public_key_raw(id INT NOT NULL,value INT) ENGINE=safe
+- sql: INSERT INTO public_key_raw VALUES(1,7)
+- sql: CREATE TABLE public_key_checked(id INT NOT NULL,value INT) ENGINE=safe
+- sql: INSERT INTO public_key_checked VALUES(1,7)
+- sql: CREATE TABLE public_key_other_raw(id INT NOT NULL,value INT) ENGINE=safe
+- sql: INSERT INTO public_key_other_raw VALUES(1,7)
+- sql: CREATE TABLE public_key_other_target(id INT NOT NULL,value INT) ENGINE=safe
+- sql: INSERT INTO public_key_other_target VALUES(1,7)
+- sql: CREATE TABLE public_key_heartbeat(id INT PRIMARY KEY,value INT) ENGINE=safe
+- sql: INSERT INTO public_key_heartbeat VALUES(1,1)
+- sql: CREATE TABLE public_key_late_unique(id INT NOT NULL,code INT) ENGINE=safe
+- sql: INSERT INTO public_key_late_unique VALUES(1,5),(2,7)
+- sql: CREATE TABLE public_key_default_raw(id INT NOT NULL,value INT) ENGINE=safe
+- sql: INSERT INTO public_key_default_raw VALUES(1,7)
+- sql: CREATE TABLE public_key_rewind_raw(id INT NOT NULL,value INT) ENGINE=safe
+- sql: INSERT INTO public_key_rewind_raw VALUES(1,7)
+- sql: CREATE TABLE public_key_participant(id INT PRIMARY KEY,value INT) ENGINE=safe
+test_cases:
+- name: An added public key is private and rollback preserves rows and the old declaration
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (define target (table "memcp-tests" false "public_key_rows" false tx))
+      (try (lambda () (begin
+        (define added (createkey target "PRIMARY" true '("id") tx '("constraint_name" "public_key_rows_pk")))
+        (define pending (list added (count ((show target "constraints" tx) "Unique"))
+          (count ((show target "constraints" nil) "Unique"))
+          (map (show target "columns" tx) (lambda (c) (list (c "Field") (c "Key"))))))
+        (tx_rollback owner)
+        (list pending (count ((show target "constraints" nil) "Unique"))
+          (scan nil target '() '() '() (lambda () true) '("value") + 0 +))))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect: {result: [[true, 1, 0, [[id, PRI], [code, ''], [value, '']]], 0, 18]}
+- name: TSQL primary addition is absent to an observer and remains absent after rollback
+  tds:
+    statements:
+    - {connection: owner, sql: BEGIN TRANSACTION}
+    - {connection: owner, sql: 'ALTER TABLE dbo.public_key_rows ADD CONSTRAINT public_key_rows_pk PRIMARY KEY(id)'}
+    - connection: owner
+      sql: SELECT COUNT(*) AS n FROM sys.key_constraints WHERE name=N'public_key_rows_pk'
+      expect: {rows: 1, data: [{n: 1}]}
+    - connection: observer
+      sql: SELECT COUNT(*) AS n FROM sys.key_constraints WHERE name=N'public_key_rows_pk'
+      expect: {rows: 1, data: [{n: 0}]}
+    - {connection: owner, sql: ROLLBACK TRANSACTION}
+    - connection: observer
+      sql: SELECT COUNT(*) AS n FROM sys.key_constraints WHERE name=N'public_key_rows_pk'
+      expect: {rows: 1, data: [{n: 0}]}
+- name: Savepoints restore exact key columns and allow a fresh declaration attempt
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx")) (define target (table "memcp-tests" false "public_key_drop" false tx))
+      (try (lambda () (begin
+        (define before (tx_savepoint tx))
+        (dropkey target "public_key_drop_pk" tx)
+        (createkey target "PRIMARY" true '("code") tx '("constraint_name" "public_key_drop_pk"))
+        (define replaced ((car ((show target "constraints" tx) "Unique")) "Cols"))
+        (tx_rollback_to_savepoint tx before)
+        (define restored (map ((show target "constraints" tx) "Unique") (lambda (k) (list (k "Id") (k "Cols")))))
+        (define retry (dropkey target "public_key_drop_pk" tx))
+        (tx_rollback owner)
+        (list replaced restored retry (map ((show target "constraints" nil) "Unique") (lambda (k) (list (k "Id") (k "Cols")))))))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect: {result: [[code], [[PRIMARY, [id]], [public_key_drop_uq, [code]]], true, [[PRIMARY, [id]], [public_key_drop_uq, [code]]]]}
+- name: Historical duplicate values reject the addition without changing earlier private rows
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx")) (define target (table "memcp-tests" false "public_key_duplicates" false tx))
+      (define progress (table "memcp-tests" false "public_key_progress" false tx))
+      (try (lambda () (begin
+        (insert progress '("id" "value") (list (list 2 7)) '() nil false nil tx)
+        (define denied (try (lambda () (createkey target "duplicate_value" true '("value") tx)) (lambda (failure) true)))
+        (define before (list denied (count ((show target "constraints" tx) "Unique"))
+          (scan tx progress '() '() '() (lambda () true) '("value") + 0 +)
+          (scan nil progress '() '() '() (lambda () true) '("value") + 0 +)))
+        (tx_rollback owner)
+        (list before (scan nil progress '() '() '() (lambda () true) '("value") + 0 +))))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect: {result: [[true, 0, 8, 1], 1]}
+- name: NULL-distinct keys validate historical NULLs and enforce nonNULL uniqueness after commit
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx")) (define target (table "memcp-tests" false "public_key_nulls" false tx))
+      (try (lambda () (begin
+        (createkey target "nullable_value" true '("value") tx)
+        (tx_commit owner)
+        (define duplicate (try (lambda () (begin (insert target '("id" "value") (list (list 4 7))) false)) (lambda (failure) true)))
+        (insert target '("id" "value") (list (list 5 nil)))
+        (list duplicate (scan nil target '() '() '() (lambda () true) '() (lambda (n) (+ n 1)) 0 +))))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect: {result: [true, 4]}
+- name: NULL-not-distinct historical validation rejects an identical NULL tuple
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx")) (define target (table "memcp-tests" false "public_key_equal_nulls" false tx))
+      (define denied (try (lambda () (createkey target "equal_nulls" true '("value") tx '("nulls_not_distinct" true))) (lambda (failure) true)))
+      (tx_rollback owner)
+      (list denied (count ((show target "constraints" nil) "Unique"))
+        (scan nil target '() '() '() (lambda () true) '() (lambda (n) (+ n 1)) 0 +)))
+  expect: {result: [true, 0, 2]}
+- name: An effective foreign dependency prevents retiring its final supporting parent key
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx")) (define target (table "memcp-tests" false "public_key_parent" false tx))
+      (define denied (try (lambda () (dropkey target "public_key_parent_pk" tx)) (lambda (failure) true)))
+      (tx_rollback owner)
+      (list denied (count ((show target "constraints" nil) "Unique"))
+        (count ((show target "constraints" nil) "ForeignKeys"))))
+  expect: {result: [true, 1, 1]}
+- name: The same warm join text has its original result before ordered replacement
+  sql: SELECT c.id FROM public_key_child c JOIN public_key_parent p ON p.id=c.parent_id ORDER BY c.id
+  expect: {rows: 1, data: [{id: 1}]}
+- name: DROP foreign DROP key ADD key ADD foreign uses one private ordered history and rollback
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx")) (define parent (table "memcp-tests" false "public_key_parent" false tx))
+      (define child (table "memcp-tests" false "public_key_child" false tx))
+      (try (lambda () (begin
+        (define boundary (tx_savepoint tx))
+        (dropforeignkey child "public_key_reference" tx)
+        (dropkey parent "public_key_parent_pk" tx)
+        (createkey parent "PRIMARY" true '("code") tx '("constraint_name" "public_key_parent_pk"))
+        (createforeignkey child "public_key_reference" '("parent_id") parent '("code") "restrict" "restrict" tx)
+        (define own (list ((car ((show parent "constraints" tx) "Unique")) "Cols")
+          ((car ((show child "constraints" tx) "ForeignKeys")) "OtherColumns")))
+        (define observed (list ((car ((show parent "constraints" nil) "Unique")) "Cols")
+          ((car ((show child "constraints" nil) "ForeignKeys")) "OtherColumns")))
+        (tx_rollback_to_savepoint tx boundary)
+        (define restored (list ((car ((show parent "constraints" tx) "Unique")) "Cols")
+          ((car ((show child "constraints" tx) "ForeignKeys")) "OtherColumns")))
+        (tx_rollback owner)
+        (list own observed restored)))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect: {result: [[[code], [code]], [[id], [id]], [[id], [id]]]}
+- name: Committed replacement retains earlier row writes and a foreign row participant
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx")) (define parent (table "memcp-tests" false "public_key_parent" false tx))
+      (define child (table "memcp-tests" false "public_key_child" false tx))
+      (define progress (table "memcp-tests" false "public_key_progress" false tx))
+      (define participant (table "memcp-tests" false "public_key_participant" false tx))
+      (try (lambda () (begin
+        (insert progress '("id" "value") (list (list 3 11)) '() nil false nil tx)
+        (insert participant '("id" "value") (list (list 1 13)) '() nil false nil tx)
+        /* A normal SQL view enlists the actual system.views owner without
+           creating fixture tables outside the owned test database. */
+        (define create_view (sql_queryplan_compile_formula tx
+          (parse_sql "memcp-tests"
+            "CREATE VIEW public_key_participant_view AS SELECT id,value FROM public_key_participant"
+            (lambda (_schema _table _write) true) (newsession) tx)))
+        (sql_execute_formula owner tx create_view (lambda (_row) true) (lambda (_fields) true))
+        (if (and (not (nil? (sql_find_view tx "memcp-tests" "public_key_participant_view")))
+          (nil? (sql_find_view nil "memcp-tests" "public_key_participant_view"))) true
+          (error "the actual metadata participant lost private view visibility"))
+        (dropforeignkey child "public_key_reference" tx)
+        (dropkey parent "public_key_parent_pk" tx)
+        (createkey parent "PRIMARY" true '("code") tx '("constraint_name" "public_key_parent_pk"))
+        (createforeignkey child "public_key_reference" '("parent_id") parent '("code") "restrict" "restrict" tx)
+        (define hidden (list (scan nil progress '() '() '() (lambda () true) '("value") + 0 +)
+          (scan nil participant '() '() '() (lambda () true) '("value") + 0 +)))
+        (tx_commit owner)
+        (list hidden ((car ((show parent "constraints" nil) "Unique")) "Cols")
+          ((car ((show child "constraints" nil) "ForeignKeys")) "OtherColumns")
+          (scan nil progress '() '() '() (lambda () true) '("value") + 0 +)
+          (scan nil participant '() '() '() (lambda () true) '("value") + 0 +))))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect: {result: [[1, 0], [code], [code], 12, 13]}
+- name: The new parent key rejects a historical old-only foreign reference
+  sql: INSERT INTO public_key_child VALUES(2,2)
+  expect: {error: true, contains: foreign key constraint}
+- name: The new parent key accepts a new-only foreign reference
+  sql: INSERT INTO public_key_child VALUES(2,7)
+  expect: {affected_rows: 1}
+- name: The original warm join text retains full row semantics with the replacement
+  sql: SELECT c.id FROM public_key_child c JOIN public_key_parent p ON p.id=c.parent_id ORDER BY c.id
+  expect: {rows: 1, data: [{id: 1}]}
+- name: Retired primary columns no longer constrain rows or old parent update programs
+  sql: UPDATE public_key_parent SET id=11 WHERE id=1
+  expect: {affected_rows: 1}
+- name: The same warm join observes the retired native uniqueness and foreign proof
+  sql: SELECT c.id FROM public_key_child c JOIN public_key_parent p ON p.id=c.parent_id ORDER BY c.id
+  expect: {rows: 0, data: []}
+- name: Replacement parent columns retain reference enforcement
+  sql: DELETE FROM public_key_parent WHERE code=1
+  expect: {error: true, contains: foreign key constraint}
+- name: TSQL CREATE UNIQUE INDEX shares private native key lifetime and rollback
+  tds:
+    statements:
+    - {connection: owner, sql: BEGIN TRANSACTION}
+    - {connection: owner, sql: 'CREATE UNIQUE INDEX public_key_index_code ON dbo.public_key_index(code)'}
+    - connection: owner
+      sql: SELECT COUNT(*) AS n FROM sys.indexes WHERE name=N'public_key_index_code'
+      expect: {rows: 1, data: [{n: 1}]}
+    - connection: observer
+      sql: SELECT COUNT(*) AS n FROM sys.indexes WHERE name=N'public_key_index_code'
+      expect: {rows: 1, data: [{n: 0}]}
+    - {connection: owner, sql: ROLLBACK TRANSACTION}
+    - connection: observer
+      sql: SELECT COUNT(*) AS n FROM sys.indexes WHERE name=N'public_key_index_code'
+      expect: {rows: 1, data: [{n: 0}]}
+- name: Index and information-schema renders use the exact private key declaration
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx")) (define target (table "memcp-tests" false "public_key_index" false tx))
+      (try (lambda () (begin
+        (createkey target "code_index" true '("code") tx)
+        (define own (map (show target "indexes" tx) (lambda (row) (list (row "Key_name") (row "Column_name")))))
+        (define observer (map (show target "indexes" nil) (lambda (row) (list (row "Key_name") (row "Column_name")))))
+        (tx_rollback owner) (list own observer (count (show target "indexes" nil)))))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect: {result: [[[code_index, code]], [], 0]}
+- name: A key-only ADD DROP netzero stream commits without an empty invalid catalog authority
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx")) (define target (table "memcp-tests" false "public_key_rows" false tx))
+      (try (lambda () (begin
+        (createkey target "temporary_key" true '("id") tx)
+        (dropkey target "temporary_key" tx)
+        (tx_commit owner)
+        (list (count ((show target "constraints" nil) "Unique"))
+          (scan nil target '() '() '() (lambda () true) '("value") + 0 +))))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect: {result: [0, 18]}
+- name: A committed public addition and removal publish all key metadata atomically
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx")) (define target (table "memcp-tests" false "public_key_durable" false tx))
+      (try (lambda () (begin
+        (createkey target "PRIMARY" true '("id") tx '("constraint_name" "public_key_durable_pk"))
+        (createkey target "durable_code" true '("code") tx)
+        (dropkey target "durable_code" tx)
+        (tx_commit owner)
+        (list (map ((show target "constraints" nil) "Unique") (lambda (key) (list (key "Id") (key "Cols"))))
+          (map (show target "columns" nil) (lambda (column) (list (column "Field") (column "Key")))))))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect: {result: [[[PRIMARY, [id]]], [[id, PRI], [code, '']]]}
+- name: Committed uniqueness rejects an actual duplicate
+  sql: INSERT INTO public_key_durable VALUES(1,99)
+  expect: {error: true}
+- name: Rolling back the only public amendment retires its unused authority before an ordinary row commit
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx")) (define target (table "memcp-tests" false "public_key_empty" false tx))
+      (try (lambda () (begin
+        (define boundary (tx_savepoint tx))
+        (createkey target "empty_phase" true '("id") tx)
+        (tx_rollback_to_savepoint tx boundary)
+        (insert target '("id" "value") (list (list 1 17)) '() nil false nil tx)
+        (define observed (scan nil target '() '() '() (lambda () true) '("value") + 0 +))
+        (tx_commit owner)
+        (list observed (count ((show target "constraints" nil) "Unique"))
+          (scan nil target '() '() '() (lambda () true) '("value") + 0 +))))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect: {result: [0, 0, 17]}
+- name: An existing key is an ordinary no-op and preserves an earlier row transaction
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx")) (define target (table "memcp-tests" false "public_key_drop" false tx))
+      (define rows (table "memcp-tests" false "public_key_empty" false tx))
+      (try (lambda () (begin
+        (insert rows '("id" "value") (list (list 2 19)) '() nil false nil tx)
+        (define unchanged (createkey target "PRIMARY" true '("id") tx))
+        (tx_commit owner)
+        (list unchanged (count ((show target "constraints" nil) "Unique"))
+          (scan nil rows '() '() '() (lambda () true) '("value") + 0 +))))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect: {result: [false, 2, 36]}
+- name: A public key addition retains prior writes on that exact stored endpoint
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx")) (define target (table "memcp-tests" false "public_key_prefix" false tx))
+      (try (lambda () (begin
+        (insert target '("id" "value") (list (list 1 23)) '() nil false nil tx)
+        (createkey target "PRIMARY" true '("id") tx)
+        (define observed (scan nil target '() '() '() (lambda () true) '("value") + 0 +))
+        (tx_commit owner)
+        (list observed (count ((show target "constraints" nil) "Unique"))
+          (scan nil target '() '() '() (lambda () true) '("value") + 0 +))))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect: {result: [0, 1, 23]}
+- name: Committed UQ retirement preserves the primary key and removes actual duplicate rejection
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx")) (define target (table "memcp-tests" false "public_key_drop" false tx))
+      (try (lambda () (begin
+        (dropkey target "public_key_drop_uq" tx)
+        (define hidden (list (count ((show target "constraints" tx) "Unique")) (count ((show target "constraints" nil) "Unique"))))
+        (tx_commit owner)
+        (insert target '("id" "code") (list (list 3 10)))
+        (define primary_denied (try (lambda () (begin (insert target '("id" "code") (list (list 1 30))) false)) (lambda (failure) true)))
+        (list hidden primary_denied (count ((show target "constraints" nil) "Unique"))
+          (scan nil target '() '() '() (lambda () true) '("code") + 0 +))))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect: {result: [[1, 2], true, 1, 40]}
+- name: Long-s and S native key names share exact ordered predecessor semantics
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx")) (define target (table "memcp-tests" false "public_key_unicode" false tx))
+      (try (lambda () (begin
+        (createkey target "ſtored_key" true '("id") tx)
+        (dropkey target "Stored_key" tx)
+        (createkey target "Stored_key" true '("id") tx)
+        (tx_commit owner)
+        (map ((show target "constraints" nil) "Unique") (lambda (key) (list (key "Id") (key "Cols"))))))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect: {result: [[Stored_key, [id]]]}
+- name: TSQL primary declarations retain the existing nullable-column admission rule
+  syntax: tsql
+  sql: ALTER TABLE dbo.public_key_equal_nulls ADD CONSTRAINT public_key_nullable_pk PRIMARY KEY(id)
+  expect: {error: true}
+- name: Rejected nullable primary declarations leave every original row and metadata field intact
+  sql: SELECT id,value FROM public_key_equal_nulls ORDER BY id
+  expect: {rows: 2, data: [{id: 1, value: null}, {id: 2, value: null}]}
+- name: A retained raw callback capability rejects only the conflicting declaration and preserves its original row owner
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx")) (define target (table "memcp-tests" false "public_key_raw" false tx))
+      (define receipt (newsession))
+      (try (lambda () (begin
+        (scan tx target '() '() '() (lambda () true) '("$update")
+          (lambda (n update) (begin
+            (receipt "denied" (try (lambda () (begin (createkey target "raw_key" true '("id") tx) false)) (lambda (failure) true)))
+            (update '("value" 13)) (+ n 1))) 0 +)
+        (define values (list (receipt "denied") (count ((show target "constraints" tx) "Unique"))
+          (scan tx target '() '() '() (lambda () true) '("value") + 0 +)
+          (scan nil target '() '() '() (lambda () true) '("value") + 0 +)))
+        (tx_rollback owner)
+        (list values (scan nil target '() '() '() (lambda () true) '("value") + 0 +))))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect: {result: [[true, 0, 13, 7], 7]}
+- name: Ending the original raw capability permits the same key under a new transaction
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx")) (define target (table "memcp-tests" false "public_key_raw" false tx))
+      (try (lambda () (begin
+        (createkey target "raw_key" true '("id") tx)
+        (tx_commit owner)
+        (list (count ((show target "constraints" nil) "Unique"))
+          (scan nil target '() '() '() (lambda () true) '("value") + 0 +))))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect: {result: [1, 7]}
+- name: A checked producer drains old callbacks before a same-target key addition
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx")) (define target (table "memcp-tests" false "public_key_checked" false tx))
+      (define saved (newsession))
+      (try (lambda () (begin
+        (with_table_mutation (list target) (list "update" '("value")) tx owner (lambda (bound)
+          (scan bound target '() '() '() (lambda () true) '("$update")
+            (lambda (n update) (begin (saved "update" update) (update '("value" 13)) (+ n 1))) 0 +)))
+        (createkey target "checked_key" true '("id") tx)
+        (define retired (try (lambda () (begin ((saved "update") '("value" 99)) false)) (lambda (failure) true)))
+        (define observed (scan nil target '() '() '() (lambda () true) '("value") + 0 +))
+        (tx_commit owner)
+        (list retired observed (count ((show target "constraints" nil) "Unique"))
+          (scan nil target '() '() '() (lambda () true) '("value") + 0 +))))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect: {result: [true, 7, 1, 13]}
+- name: An unrelated raw writer keeps its transaction while a new target validates UNIQUE
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx")) (define rows (table "memcp-tests" false "public_key_other_raw" false tx))
+      (define target (table "memcp-tests" false "public_key_other_target" false tx))
+      (try (lambda () (begin
+        (scan tx rows '() '() '() (lambda () true) '("$update")
+          (lambda (n update) (begin (update '("value" 11)) (+ n 1))) 0 +)
+        (createkey target "other_key" true '("id") tx)
+        (define observed (scan nil rows '() '() '() (lambda () true) '("value") + 0 +))
+        (tx_commit owner)
+        (list observed (count ((show target "constraints" nil) "Unique"))
+          (scan nil rows '() '() '() (lambda () true) '("value") + 0 +))))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect: {result: [7, 1, 11]}
+- name: SDK-shaped earlier heartbeat rows and a new target UNIQUE share the original TSQL decision
+  tds:
+    statements:
+    - {connection: owner, sql: BEGIN TRANSACTION}
+    - {connection: owner, sql: UPDATE dbo.public_key_heartbeat SET value=13 WHERE id=1}
+    - {connection: owner, sql: CREATE UNIQUE INDEX public_key_late_code ON dbo.public_key_late_unique(code)}
+    - connection: owner
+      sql: SELECT COUNT(*) AS n FROM sys.indexes WHERE name=N'public_key_late_code'
+      expect: {rows: 1, data: [{n: 1}]}
+    - connection: observer
+      sql: SELECT COUNT(*) AS n FROM sys.indexes WHERE name=N'public_key_late_code'
+      expect: {rows: 1, data: [{n: 0}]}
+    - connection: owner
+      sql: SELECT id,value FROM dbo.public_key_heartbeat
+      expect: {rows: 1, data: [{id: 1, value: 13}]}
+    - connection: observer
+      sql: SELECT id,value FROM dbo.public_key_heartbeat
+      expect: {rows: 1, data: [{id: 1, value: 1}]}
+    - {connection: owner, sql: COMMIT TRANSACTION}
+    - connection: observer
+      sql: SELECT id,value FROM dbo.public_key_heartbeat
+      expect: {rows: 1, data: [{id: 1, value: 13}]}
+    - connection: observer
+      sql: SELECT COUNT(*) AS n FROM sys.indexes WHERE name=N'public_key_late_code'
+      expect: {rows: 1, data: [{n: 1}]}
+- name: The SDK-shaped committed new UNIQUE enforces real rows
+  sql: INSERT INTO public_key_late_unique VALUES(3,5)
+  expect: {error: true}
+- name: A missing MySQL SHOW INDEX target retains its actual failure instead of an empty success
+  syntax: mysql
+  sql: SHOW INDEX FROM public_key_missing_relation
+  expect: {error: true}
+- name: Default-borrowed raw callbacks retain their actual capability without blocking unrelated native row semantics
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx")) (define target (table "memcp-tests" false "public_key_default_raw" false tx))
+      (define receipt (newsession))
+      (try (lambda () (begin
+        (altercolumn target "value" "default" 9 tx)
+        (scan tx target '() '() '() (lambda () true) '("$update")
+          (lambda (n update) (begin
+            (receipt "denied" (try (lambda () (begin (createkey target "default_raw_key" true '("id") tx) false)) (lambda (failure) true)))
+            (update '("value" 13)) (+ n 1))) 0 +)
+        (define values (list (receipt "denied") (count ((show target "constraints" tx) "Unique"))
+          (scan tx target '() '() '() (lambda () true) '("value") + 0 +)
+          (scan nil target '() '() '() (lambda () true) '("value") + 0 +)))
+        (tx_rollback owner)
+        (list values (scan nil target '() '() '() (lambda () true) '("value") + 0 +))))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect: {result: [[true, 0, 13, 7], 7]}
+- name: Rewinding an empty default phase cannot erase a raw capability from the same active transaction
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx")) (define target (table "memcp-tests" false "public_key_rewind_raw" false tx))
+      (define escaped (newsession))
+      (try (lambda () (begin
+        (define boundary (tx_savepoint tx))
+        (altercolumn target "value" "default" 9 tx)
+        (scan tx target '() '() '() (lambda () true) '("$update")
+          (lambda (n update) (begin (escaped "update" update) (+ n 1))) 0 +)
+        (tx_rollback_to_savepoint tx boundary)
+        (define denied (try (lambda () (begin (createkey target "rewind_raw_key" true '("id") tx) false)) (lambda (failure) true)))
+        (define before (list denied (count ((show target "constraints" tx) "Unique"))
+          (scan tx target '() '() '() (lambda () true) '("value") + 0 +)
+          (scan nil target '() '() '() (lambda () true) '("value") + 0 +)))
+        (tx_rollback owner)
+        (tx_begin_acid owner)
+        (createkey target "rewind_raw_key" true '("id") (owner "__memcp_tx"))
+        (tx_commit owner)
+        (list before (count ((show target "constraints" nil) "Unique"))
+          (scan nil target '() '() '() (lambda () true) '("value") + 0 +))))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect: {result: [[true, 0, 7, 7], 1, 7]}
+- name: A hard crash retains the committed ordered key and foreign decisions
+  scm: (crash)
+  expect: {interrupted_ok: true}
+- name: Restart the same store after the native crash
+  action: restart
+- name: Participant-first recovery retains its complete committed row
+  sql: SELECT id,value FROM public_key_participant
+  expect: {rows: 1, data: [{id: 1, value: 13}]}
+- name: Recovery retains the actual view metadata participant and its committed row
+  sql: SELECT id,value FROM public_key_participant_view
+  expect: {rows: 1, data: [{id: 1, value: 13}]}
+- name: Restart preserves the replacement parent and child values
+  sql: SELECT c.id,c.parent_id,p.id AS parent_id_value,p.code FROM public_key_child c JOIN public_key_parent p ON p.code=c.parent_id ORDER BY c.id
+  expect: {rows: 2, data: [{id: 1, parent_id: 1, parent_id_value: 11, code: 1}, {id: 2, parent_id: 7, parent_id_value: 2, code: 7}]}
+- name: Restart preserves final native keys and descriptive primary flags
+  scm: |
+    (begin (define target (table "memcp-tests" false "public_key_durable" false nil))
+      (list (map ((show target "constraints" nil) "Unique") (lambda (key) (list (key "Id") (key "Cols"))))
+        (map (show target "columns" nil) (lambda (column) (list (column "Field") (column "Key"))))))
+  expect: {result: [[[PRIMARY, [id]]], [[id, PRI], [code, '']]]}
+- name: Restart retains rows committed after complete public-phase savepoint retirement
+  sql: SELECT id,value FROM public_key_empty ORDER BY id
+  expect: {rows: 2, data: [{id: 1, value: 17}, {id: 2, value: 19}]}
+- name: Restart retains rows written before the original key declaration
+  sql: SELECT id,value FROM public_key_prefix ORDER BY id
+  expect: {rows: 1, data: [{id: 1, value: 23}]}
+- name: Restart keeps UQ retirement while preserving its complete committed rows
+  sql: SELECT id,code FROM public_key_drop ORDER BY id
+  expect: {rows: 3, data: [{id: 1, code: 10}, {id: 2, code: 20}, {id: 3, code: 10}]}
+- name: Restart retains the checked producer and unrelated writer values from the original decisions
+  sql: SELECT c.value AS checked_value,r.value AS other_value FROM public_key_checked c CROSS JOIN public_key_other_raw r
+  expect: {rows: 1, data: [{checked_value: 13, other_value: 11}]}
+- name: Restart retains the exact heartbeat and new target rows from one TSQL decision
+  sql: SELECT h.value AS heartbeat,k.id,k.code FROM public_key_heartbeat h CROSS JOIN public_key_late_unique k ORDER BY k.id
+  expect: {rows: 2, data: [{heartbeat: 13, id: 1, code: 5}, {heartbeat: 13, id: 2, code: 7}]}
+- name: Restart retains the SDK-shaped unique enforcement
+  sql: INSERT INTO public_key_late_unique VALUES(3,5)
+  expect: {error: true}
+- name: Restart enforces the replacement foreign endpoint
+  sql: INSERT INTO public_key_child VALUES(3,2)
+  expect: {error: true, contains: foreign key constraint}
+- name: Restart enforces the committed key independently of metadata reads
+  sql: INSERT INTO public_key_durable VALUES(1,99)
+  expect: {error: true}
+cleanup:
+- sql: DROP VIEW IF EXISTS public_key_participant_view
+- sql: DROP TABLE IF EXISTS public_key_child
+- sql: DROP TABLE IF EXISTS public_key_parent
+- sql: DROP TABLE IF EXISTS public_key_rows
+- sql: DROP TABLE IF EXISTS public_key_drop
+- sql: DROP TABLE IF EXISTS public_key_duplicates
+- sql: DROP TABLE IF EXISTS public_key_nulls
+- sql: DROP TABLE IF EXISTS public_key_equal_nulls
+- sql: DROP TABLE IF EXISTS public_key_progress
+- sql: DROP TABLE IF EXISTS public_key_durable
+- sql: DROP TABLE IF EXISTS public_key_index
+- sql: DROP TABLE IF EXISTS public_key_participant
+- sql: DROP TABLE IF EXISTS public_key_empty
+- sql: DROP TABLE IF EXISTS public_key_prefix
+- sql: DROP TABLE IF EXISTS public_key_unicode
+- sql: DROP TABLE IF EXISTS public_key_raw
+- sql: DROP TABLE IF EXISTS public_key_checked
+- sql: DROP TABLE IF EXISTS public_key_other_raw
+- sql: DROP TABLE IF EXISTS public_key_other_target
+- sql: DROP TABLE IF EXISTS public_key_heartbeat
+- sql: DROP TABLE IF EXISTS public_key_late_unique
+- sql: DROP TABLE IF EXISTS public_key_default_raw
+- sql: DROP TABLE IF EXISTS public_key_rewind_raw

@@ -1,0 +1,64 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  description: Partition window aggregates retain their native grouping coordinates
+setup:
+- sql: CREATE TABLE partition_totals(id INT PRIMARY KEY,bucket INT,value INT)
+- sql: INSERT INTO partition_totals VALUES(1,1,10),(2,1,20),(3,2,30),(4,2,40)
+test_cases:
+- name: A partition SUM uses its grouping coordinate on a fresh database
+  syntax: mysql
+  sql: SELECT id,SUM(value) OVER(PARTITION BY bucket) AS total FROM partition_totals ORDER BY id
+  expect: &initial
+    rows: 4
+    data:
+    - {id: 1, total: 30}
+    - {id: 2, total: 30}
+    - {id: 3, total: 70}
+    - {id: 4, total: 70}
+- name: PostgreSQL partition SUM consumes the same declared native key
+  syntax: psql
+  sql: SELECT id,SUM(value) OVER(PARTITION BY bucket) AS total FROM partition_totals ORDER BY id
+  expect: *initial
+- name: TSQL partition SUM consumes the same declared native key
+  syntax: tsql
+  sql: SELECT id,SUM(value) OVER(PARTITION BY bucket) AS total FROM partition_totals ORDER BY id
+  expect: *initial
+- name: Add a NULL partition without merging it into an existing key
+  sql: INSERT INTO partition_totals VALUES(5,NULL,50),(6,NULL,60)
+  expect: {affected_rows: 2}
+- name: NULL partition aggregate identities match only their own rows
+  sql: SELECT id,SUM(value) OVER(PARTITION BY bucket) AS total FROM partition_totals ORDER BY id
+  expect:
+    rows: 6
+    data:
+    - {id: 1, total: 30}
+    - {id: 2, total: 30}
+    - {id: 3, total: 70}
+    - {id: 4, total: 70}
+    - {id: 5, total: 110}
+    - {id: 6, total: 110}
+- name: Source DML invalidates only the changed partition state
+  sql: UPDATE partition_totals SET value=15 WHERE id=1
+  expect: {affected_rows: 1}
+- name: Warm native partition aggregates retain their grouping key after DML
+  sql: SELECT id,SUM(value) OVER(PARTITION BY bucket) AS total FROM partition_totals ORDER BY id
+  expect: &updated
+    rows: 6
+    data:
+    - {id: 1, total: 35}
+    - {id: 2, total: 35}
+    - {id: 3, total: 70}
+    - {id: 4, total: 70}
+    - {id: 5, total: 110}
+    - {id: 6, total: 110}
+- name: Restart with maintained partition definitions
+  sql: SHUTDOWN
+  restart_timeout: 60
+  expect: {rows: 0}
+- name: Recovered partition aggregate definitions retain their complete domain
+  sql: SELECT id,SUM(value) OVER(PARTITION BY bucket) AS total FROM partition_totals ORDER BY id
+  expect: *updated
+cleanup:
+- sql: DROP TABLE IF EXISTS partition_totals

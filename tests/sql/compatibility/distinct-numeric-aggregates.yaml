@@ -1,0 +1,245 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# https://learn.microsoft.com/sql/t-sql/functions/sum-transact-sql/
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Numeric DISTINCT aggregates use native value uniqueness and ordinary
+    bounded reductions
+setup:
+- sql: CREATE TABLE distinct_numbers(id INT PRIMARY KEY,g INT,x INT,y INT)
+- sql: INSERT distinct_numbers VALUES(1,1,2,10),(2,1,2,20),(3,1,3,20),(4,1,NULL,10),(5,1,-1,NULL),(6,2,0,30),(7,2,0,30),(8,2,NULL,NULL),(9,3,NULL,NULL),(10,3,NULL,NULL)
+- sql: CREATE TABLE distinct_fanout(id INT)
+- sql: INSERT distinct_fanout VALUES(1),(2)
+- sql: CREATE TABLE distinct_domains(g INT)
+- sql: INSERT distinct_domains VALUES(1),(2),(3),(4)
+- sql: CREATE TABLE distinct_amounts(amount DECIMAL(10,2))
+- sql: INSERT distinct_amounts VALUES(1.25),(1.25),(2.50),(NULL)
+test_cases:
+- name: tsql distinct reductions preserve independent operand sets and ordinary bags
+  syntax: tsql
+  sql: SELECT g,SUM(DISTINCT x) AS distinct_total,SUM(x) AS bag_total,SUM(DISTINCT
+    y) AS second_total,COUNT(DISTINCT x) AS unique_count FROM distinct_numbers GROUP
+    BY g ORDER BY g
+  expect:
+    rows: 3
+    data: &id001
+    - g: 1
+      distinct_total: 4
+      bag_total: 6
+      second_total: 30
+      unique_count: 3
+    - g: 2
+      distinct_total: 0
+      bag_total: 0
+      second_total: 30
+      unique_count: 1
+    - g: 3
+      distinct_total: null
+      bag_total: null
+      second_total: null
+      unique_count: 0
+- name: sql distinct reductions preserve independent operand sets and ordinary bags
+  syntax: sql
+  sql: SELECT g,SUM(DISTINCT x) AS distinct_total,SUM(x) AS bag_total,SUM(DISTINCT
+    y) AS second_total,COUNT(DISTINCT x) AS unique_count FROM distinct_numbers GROUP
+    BY g ORDER BY g
+  expect:
+    rows: 3
+    data: *id001
+- name: psql distinct reductions preserve independent operand sets and ordinary bags
+  syntax: psql
+  sql: SELECT g,SUM(DISTINCT x) AS distinct_total,SUM(x) AS bag_total,SUM(DISTINCT
+    y) AS second_total,COUNT(DISTINCT x) AS unique_count FROM distinct_numbers GROUP
+    BY g ORDER BY g
+  expect:
+    rows: 3
+    data: *id001
+- name: Global distinct numeric reduction ignores NULL and duplicate inputs
+  sql: SELECT SUM(DISTINCT x) AS total,SUM(DISTINCT y) AS other_total,COUNT(*) AS
+    rows_seen FROM distinct_numbers
+  expect:
+    rows: 1
+    data:
+    - total: 4
+      other_total: 60
+      rows_seen: 10
+- name: An empty global distinct sum retains the scalar NULL row
+  sql: SELECT SUM(DISTINCT x) AS total,COUNT(DISTINCT x) AS unique_count FROM distinct_numbers
+    WHERE id<0
+  expect:
+    rows: 1
+    data:
+    - total: null
+      unique_count: 0
+- name: An empty explicit group produces no fabricated group
+  sql: SELECT g,SUM(DISTINCT x) AS total FROM distinct_numbers WHERE id<0 GROUP BY
+    g
+  expect:
+    rows: 0
+    data: []
+- name: HAVING and ORDER consume finished distinct sums
+  sql: SELECT g,SUM(DISTINCT x) AS total FROM distinct_numbers GROUP BY g HAVING SUM(DISTINCT
+    x)>=0 ORDER BY SUM(DISTINCT x) DESC,g
+  expect:
+    rows: 2
+    data:
+    - g: 1
+      total: 4
+    - g: 2
+      total: 0
+- name: Different expressions retain their own distinct value domains
+  sql: SELECT SUM(DISTINCT CASE WHEN g=1 THEN x ELSE 0 END) AS selected_total,SUM(DISTINCT
+    x*x) AS squared_total FROM distinct_numbers
+  expect:
+    rows: 1
+    data:
+    - selected_total: 4
+      squared_total: 14
+- name: Join multiplicity affects ordinary SUM and does not duplicate distinct values
+  sql: SELECT a.g,SUM(DISTINCT a.x) AS distinct_total,SUM(a.x) AS bag_total FROM distinct_numbers
+    a CROSS JOIN distinct_fanout b WHERE a.g=1 GROUP BY a.g
+  expect:
+    rows: 1
+    data:
+    - g: 1
+      distinct_total: 4
+      bag_total: 12
+- name: Outer joins retain NULL extended groups and independent numeric state
+  sql: SELECT d.g,SUM(DISTINCT n.x) AS total FROM distinct_domains d LEFT JOIN distinct_numbers
+    n ON n.g=d.g GROUP BY d.g ORDER BY d.g
+  expect:
+    rows: 4
+    data:
+    - g: 1
+      total: 4
+    - g: 2
+      total: 0
+    - g: 3
+      total: null
+    - g: 4
+      total: null
+- name: A repeated scalar lookup retains complete correlated group domains
+  sql: SELECT d.g,(SELECT SUM(DISTINCT n.x) FROM distinct_numbers n WHERE n.g=d.g)
+    AS total FROM distinct_domains d ORDER BY d.g
+  expect:
+    rows: 4
+    data:
+    - g: 1
+      total: 4
+    - g: 2
+      total: 0
+    - g: 3
+      total: null
+    - g: 4
+      total: null
+- name: UNION ALL input deduplicates values across complete branch bags
+  sql: SELECT SUM(DISTINCT value) AS total FROM (SELECT x AS value FROM distinct_numbers
+    WHERE g=1 UNION ALL SELECT x AS value FROM distinct_numbers WHERE g=2) inputs
+  expect:
+    rows: 1
+    data:
+    - total: 4
+- name: Literal row input uses the same distinct numeric semantics
+  sql: SELECT SUM(DISTINCT v.x) AS total FROM (VALUES(2),(2),(3),(NULL)) v(x)
+  expect:
+    rows: 1
+    data:
+    - total: 5
+- name: NULL group keys remain one distinct domain with SQL empty-value identity
+  sql: SELECT v.g,SUM(DISTINCT v.x) AS total FROM (VALUES(NULL,2),(NULL,2),(1,NULL))
+    v(g,x) GROUP BY v.g ORDER BY CASE WHEN v.g IS NULL THEN 0 ELSE 1 END,v.g
+  expect:
+    rows: 2
+    data:
+    - g: null
+      total: 2
+    - g: 1
+      total: null
+- name: Explicit ALL retains ordinary aggregate multiplicity
+  sql: SELECT SUM(ALL x) AS total FROM distinct_numbers WHERE g=1
+  expect:
+    rows: 1
+    data:
+    - total: 6
+- name: A stored procedure executes the distinct aggregate normally
+  sql: CREATE PROCEDURE distinct_sum_module AS SELECT SUM(DISTINCT x) AS total FROM
+    distinct_numbers WHERE g=1
+- name: Stored module result includes completed distinct numeric state
+  sql: EXEC distinct_sum_module
+  expect:
+    rows: 1
+    data:
+    - total: 4
+- name: Native mutations are visible to the next distinct reduction
+  sql: UPDATE distinct_numbers SET x=4 WHERE id=3
+- name: Distinct reduction observes committed changes without stale state
+  sql: SELECT SUM(DISTINCT x) AS total FROM distinct_numbers WHERE g=1
+  expect:
+    rows: 1
+    data:
+    - total: 5
+- name: Successful decimal values retain distinct numerical equality
+  sql: SELECT SUM(DISTINCT amount) AS total FROM distinct_amounts
+  expect:
+    rows: 1
+    data:
+    - total: 3.75
+- name: Declared integer and decimal result types survive native distinct state
+  tds:
+    statements:
+    - sql: SELECT SUM(DISTINCT x) AS total FROM distinct_numbers WHERE g=1
+      expect:
+        rows: 1
+        data:
+        - total: 5
+        column_types:
+        - name: total
+          type: INT
+          nullable: true
+    - sql: SELECT SUM(DISTINCT amount) AS total,SUM(amount) AS bag_total FROM distinct_amounts
+      expect:
+        rows: 1
+        data:
+        - total: '3.75'
+          bag_total: '5.00'
+        column_types:
+        - name: total
+          type: DECIMAL
+          precision: 38
+          scale: 2
+        - name: bag_total
+          type: DECIMAL
+          precision: 38
+          scale: 2
+- name: A distinct reducer sees transaction-local writes and discards its invocation
+    state after rollback
+  tds:
+    statements:
+    - sql: BEGIN TRANSACTION; INSERT distinct_numbers VALUES(11,1,8,10); SELECT SUM(DISTINCT
+        x) AS total FROM distinct_numbers WHERE g=1
+      expect:
+        rows: 1
+        data:
+        - total: 13
+    - sql: ROLLBACK TRANSACTION; SELECT SUM(DISTINCT x) AS total FROM distinct_numbers
+        WHERE g=1
+      expect:
+        rows: 1
+        data:
+        - total: 5
+- name: DISTINCT does not admit aggregate window syntax forbidden by TSQL
+  sql: SELECT SUM(DISTINCT x) OVER() AS total FROM distinct_numbers
+  expect:
+    error: true
+- name: Distinct sums require a declared numeric operand
+  sql: SELECT SUM(DISTINCT CAST(x AS VARCHAR(10))) AS total FROM distinct_numbers
+  expect:
+    error: true
+cleanup:
+- sql: DROP PROCEDURE IF EXISTS distinct_sum_module
+- sql: DROP TABLE IF EXISTS distinct_amounts
+- sql: DROP TABLE IF EXISTS distinct_domains
+- sql: DROP TABLE IF EXISTS distinct_fanout
+- sql: DROP TABLE IF EXISTS distinct_numbers

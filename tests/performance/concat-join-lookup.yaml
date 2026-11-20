@@ -18,15 +18,22 @@ setup:
 - sql: CREATE TABLE cj_scalar (id INT PRIMARY KEY, encoded VARCHAR(500), payload VARCHAR(30)) ENGINE=memory
 - scm: |-
     (begin
-     (insert (table "memcp-tests" false "cj_doc" false) '("id" "mandant")
+     (define native_table (lambda (name) (try
+      (lambda () (table "memcp-tests" false name false nil))
+      (lambda (cause)
+       (if (and (string? cause)
+         (equal? cause "table expects database, database_ignorecase, name, name_ignorecase"))
+        (table "memcp-tests" false name false)
+        (error cause))))))
+     (insert (native_table "cj_doc") '("id" "mandant")
       (map (produceN 40000) (lambda (i) (list i (mod i 20)))))
-     (insert (table "memcp-tests" false "cj_changes" false) '("id" "item" "selected")
+     (insert (native_table "cj_changes") '("id" "item" "selected")
       (map (produceN 120000) (lambda (i) (list i
        (concat (if (< i 40000) "doc:" "other:") (mod i 40000))
        (if (< i 194) 1 0)))))
-     (insert (table "memcp-tests" false "cj_doc_text" false) '("id" "mandant")
+     (insert (native_table "cj_doc_text") '("id" "mandant")
       (map (produceN 40000) (lambda (i) (list (concat i) (mod i 20)))))
-     (insert (table "memcp-tests" false "cj_scalar" false) '("id" "encoded" "payload")
+     (insert (native_table "cj_scalar") '("id" "encoded" "payload")
       (map (produceN 120000) (lambda (i) (list i (concat (if (< i 40000) "document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-" "other:") i) (concat i)))))
      (rebuild true false) true)
 test_cases:

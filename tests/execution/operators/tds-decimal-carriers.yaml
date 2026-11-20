@@ -1,0 +1,100 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  requires_tds: true
+  isolated: true
+  description: Actual TDS decimal metadata grants exact numeric carrier comparison
+test_cases:
+- name: Decimal scales and fractional signs retain complete numeric values
+  tds:
+    statements:
+    - sql: SELECT CAST(0.1 AS DECIMAL(18,4)) AS positive,CAST(-12.375 AS NUMERIC(18,3)) AS negative,CAST(14 AS DECIMAL(18,4)) AS integral
+      expect:
+        rows: 1
+        data:
+        - positive: 0.1
+          negative: -12.375
+          integral: 14
+        column_types:
+        - {name: positive, type: DECIMAL, precision: 18, scale: 4}
+        - {name: negative, type: DECIMAL, precision: 18, scale: 3}
+        - {name: integral, type: DECIMAL, precision: 18, scale: 4}
+- name: Large signed decimals and exact BIGINT expectations do not use float tolerance
+  tds:
+    statements:
+    - sql: SELECT CAST(123456789012.125 AS DECIMAL(18,3)) AS positive,CAST(-123456789012.125 AS DECIMAL(18,3)) AS negative,CAST('9007199254740993' AS BIGINT) AS exact_integer
+      expect:
+        rows: 1
+        data:
+        - positive: 123456789012.125
+          negative: -123456789012.125
+          exact_integer: 9007199254740993
+        column_types:
+        - {name: positive, type: DECIMAL, precision: 18, scale: 3}
+        - {name: negative, type: DECIMAL, precision: 18, scale: 3}
+        - {name: exact_integer, type: BIGINT}
+- name: Decimal NULL and zero remain different values
+  tds:
+    statements:
+    - sql: SELECT CAST(NULL AS DECIMAL(18,4)) AS missing,CAST(0 AS DECIMAL(18,4)) AS zero_value
+      expect:
+        rows: 1
+        data:
+        - missing: null
+          zero_value: 0
+        column_types:
+        - {name: missing, type: DECIMAL, precision: 18, scale: 4}
+        - {name: zero_value, type: DECIMAL, precision: 18, scale: 4}
+- name: Decimal metadata does not reinterpret neighboring text or binary lookalikes
+  tds:
+    statements:
+    - sql: SELECT CAST(14 AS DECIMAL(18,4)) AS amount,CAST('14.0000' AS VARCHAR(7)) AS text_value,CAST(0x31342e30303030 AS VARBINARY(7)) AS binary_value
+      expect:
+        rows: 1
+        data:
+        - amount: 14
+          text_value: '14.0000'
+          binary_value: {binary_hex: '31342e30303030'}
+        column_types:
+        - {name: amount, type: DECIMAL, precision: 18, scale: 4}
+        - {name: text_value, type: VARCHAR, length: 7}
+        - {name: binary_value, type: VARBINARY, length: 7}
+- name: Repeated result column names retain each result sets actual wire type
+  tds:
+    statements:
+    - sql: SELECT CAST(14 AS DECIMAL(18,4)) AS value; SELECT CAST('14.0000' AS VARCHAR(7)) AS value; SELECT CAST(NULL AS DECIMAL(18,4)) AS value WHERE 1=0
+      expect:
+        result_sets:
+        - rows: 1
+          data: [{value: 14}]
+          column_types: [{name: value, type: DECIMAL, precision: 18, scale: 4}]
+        - rows: 1
+          data: [{value: '14.0000'}]
+          column_types: [{name: value, type: VARCHAR, length: 7}]
+        - rows: 0
+          data: []
+          column_types: [{name: value, type: DECIMAL, precision: 18, scale: 4}]
+- name: Existing exact textual decimal assertions retain their driver text
+  tds:
+    statements:
+    - sql: SELECT CAST(14 AS DECIMAL(18,4)) AS amount
+      expect:
+        rows: 1
+        data: [{amount: '14.0000'}]
+        column_types: [{name: amount, type: DECIMAL, precision: 18, scale: 4}]
+- name: Duplicate aliases bind decimal metadata by ordinal rather than visible name
+  tds:
+    statements:
+    - sql: SELECT CAST(1.5 AS DECIMAL(18,4)) AS value,CAST('1.5000' AS VARCHAR(6)) AS value
+      expect:
+        rows: 1
+        row_values: [[1.5, '1.5000']]
+        column_types:
+        - {name: value, type: DECIMAL, precision: 18, scale: 4}
+        - {name: value, type: VARCHAR, length: 6}
+- name: Invalid decimal source text remains an actual SQL conversion failure
+  tds:
+    statements:
+    - sql: SELECT CAST('not-a-number' AS DECIMAL(18,4)) AS amount
+      expect:
+        error: true

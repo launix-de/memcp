@@ -1,0 +1,328 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: Native declared FK, CHECK, PRIMARY/UNIQUE and named DEFAULT catalogs share current identities and normal relational
+    scalar lookup; ordinary indexes and complete module comments remain explicit gaps
+  syntax: tsql
+  isolated: true
+setup:
+- sql: CREATE TABLE catalog_bundle_parent(id INT NOT NULL,code INT,CONSTRAINT PK_catalog_bundle_parent PRIMARY KEY(id),CONSTRAINT
+    UQ_catalog_bundle_code UNIQUE(code))
+- sql: CREATE TABLE catalog_bundle_child(id INT PRIMARY KEY,parent_id INT,label NVARCHAR(20) CONSTRAINT DF_catalog_bundle_label
+    DEFAULT N'O''Brien',amount INT CONSTRAINT DF_catalog_bundle_amount DEFAULT 7,empty_value INT CONSTRAINT DF_catalog_bundle_null
+    DEFAULT NULL)
+- sql: ALTER TABLE catalog_bundle_child ADD CONSTRAINT FK_catalog_bundle_parent FOREIGN KEY(parent_id) REFERENCES catalog_bundle_parent(id)
+- sql: ALTER TABLE catalog_bundle_child ADD CONSTRAINT CK_catalog_bundle_amount CHECK(amount>=0)
+- sql: CREATE UNIQUE INDEX IX_catalog_bundle_label ON catalog_bundle_child(label)
+- sql: INSERT catalog_bundle_parent VALUES(1,10)
+- sql: INSERT catalog_bundle_child(id,parent_id) VALUES(1,1)
+- sql: CREATE TABLE catalog_bundle_late(id INT PRIMARY KEY,parent_id INT,value INT)
+- sql: CREATE DATABASE catalog_bundle_visible
+- sql: CREATE TABLE catalog_bundle_visible.dbo.catalog_bundle_other(id INT CONSTRAINT DF_catalog_bundle_visible DEFAULT 11)
+- scm: (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS catalog_bundle_reader" nil (newsession) nil))
+- scm: (eval (parse_sql "memcp-tests" "CREATE USER catalog_bundle_reader IDENTIFIED BY 'pw'" nil (newsession) nil))
+- scm: (eval (parse_sql "memcp-tests" "GRANT ALL ON `memcp-tests`.* TO catalog_bundle_reader" nil))
+- scm: (eval (parse_sql "memcp-tests" "GRANT ALL ON catalog_bundle_visible.* TO catalog_bundle_reader" nil))
+- sql: CREATE TABLE catalog_bundle_unnamed(id INT DEFAULT 1)
+- sql: CREATE PROCEDURE catalog_bundle_comment_source AS SELECT 1 AS value;
+cleanup:
+- sql: DROP TABLE IF EXISTS catalog_bundle_child
+- sql: DROP TABLE IF EXISTS catalog_bundle_late
+- sql: DROP TABLE IF EXISTS catalog_bundle_parent
+- sql: DROP DATABASE IF EXISTS catalog_bundle_visible
+- scm: (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS catalog_bundle_reader" nil (newsession) nil))
+- sql: DROP TABLE IF EXISTS catalog_bundle_unnamed
+- sql: DROP PROCEDURE IF EXISTS catalog_bundle_comment_source
+test_cases:
+- name: Foreign keys share actual object identity and containing relation
+  sql: SELECT f.name,CASE WHEN f.object_id=o.object_id AND f.parent_object_id=OBJECT_ID(N'dbo.catalog_bundle_child',N'U')
+    THEN 1 ELSE 0 END AS same_identity,RTRIM(f.type) AS kind FROM sys.foreign_keys f JOIN sys.objects o ON o.object_id=f.object_id
+    WHERE f.name=N'FK_catalog_bundle_parent'
+  expect:
+    rows: 1
+    data:
+    - name: FK_catalog_bundle_parent
+      same_identity: 1
+      kind: F
+- name: Original FK existence shape uses current declaration lookup
+  sql: DECLARE @found INT=0; IF EXISTS(SELECT 1 FROM sys.foreign_keys WHERE object_id=OBJECT_ID(N'[dbo].[FK_catalog_bundle_parent]',N'F')
+    AND parent_object_id=OBJECT_ID(N'[dbo].[catalog_bundle_child]',N'U')) SET @found=1; SELECT @found AS found;
+  expect:
+    rows: 1
+    data:
+    - found: 1
+- name: Original CHECK existence shape uses current declaration lookup
+  sql: DECLARE @found INT=0; IF EXISTS(SELECT 1 FROM sys.check_constraints WHERE object_id=OBJECT_ID(N'[dbo].[CK_catalog_bundle_amount]',N'C')
+    AND parent_object_id=OBJECT_ID(N'[dbo].[catalog_bundle_child]',N'U')) SET @found=1; SELECT @found AS found;
+  expect:
+    rows: 1
+    data:
+    - found: 1
+- name: Constraint kinds do not alias the same-named relation owner
+  sql: SELECT CASE WHEN OBJECT_ID(N'FK_catalog_bundle_parent',N'C') IS NULL AND OBJECT_ID(N'CK_catalog_bundle_amount',N'F')
+    IS NULL AND OBJECT_ID(N'catalog_bundle_child',N'F') IS NULL THEN 1 ELSE 0 END AS separated
+  expect:
+    rows: 1
+    data:
+    - separated: 1
+- name: Untyped OBJECT_ID resolves actual constraint declarations
+  sql: SELECT CASE WHEN OBJECT_ID(N'FK_catalog_bundle_parent')=OBJECT_ID(N'FK_catalog_bundle_parent',N'F') AND OBJECT_ID(N'CK_catalog_bundle_amount')=OBJECT_ID(N'CK_catalog_bundle_amount',N'C')
+    THEN 1 ELSE 0 END AS same_identity
+  expect:
+    rows: 1
+    data:
+    - same_identity: 1
+- name: Declared PRIMARY and UNIQUE names are visible without scan indexes
+  sql: SELECT name FROM sys.indexes WHERE object_id=OBJECT_ID(N'catalog_bundle_parent',N'U') ORDER BY name
+  expect:
+    rows: 2
+    data:
+    - name: PK_catalog_bundle_parent
+    - name: UQ_catalog_bundle_code
+- name: A declared unique index retains its native declaration name
+  sql: SELECT name FROM sys.indexes WHERE object_id=OBJECT_ID(N'catalog_bundle_child',N'U') AND name=N'IX_catalog_bundle_label'
+  expect:
+    rows: 1
+    data:
+    - name: IX_catalog_bundle_label
+- name: Declared key metadata is not multiplied by data rows
+  sql: SELECT COUNT(*) AS total FROM sys.indexes WHERE object_id=OBJECT_ID(N'catalog_bundle_parent',N'U')
+  expect:
+    rows: 1
+    data:
+    - total: 2
+- name: Named DEFAULT definitions and ordinal IDs use actual column declarations
+  sql: SELECT name,parent_column_id,CASE WHEN object_id=OBJECT_ID(name,N'D') AND parent_object_id=OBJECT_ID(N'catalog_bundle_child',N'U')
+    THEN 1 ELSE 0 END AS same_identity FROM sys.default_constraints WHERE parent_object_id=OBJECT_ID(N'catalog_bundle_child',N'U')
+    ORDER BY name
+  expect:
+    rows: 3
+    data:
+    - name: DF_catalog_bundle_amount
+      parent_column_id: 4
+      same_identity: 1
+    - name: DF_catalog_bundle_label
+      parent_column_id: 3
+      same_identity: 1
+    - name: DF_catalog_bundle_null
+      parent_column_id: 5
+      same_identity: 1
+- name: Named DEFAULT objects share D classification
+  sql: SELECT d.name,RTRIM(o.type) AS kind,CASE WHEN d.object_id=o.object_id AND d.parent_object_id=o.parent_object_id THEN
+    1 ELSE 0 END AS same_identity FROM sys.default_constraints d JOIN sys.objects o ON o.object_id=d.object_id WHERE d.name=N'DF_catalog_bundle_amount'
+  expect:
+    rows: 1
+    data:
+    - name: DF_catalog_bundle_amount
+      kind: D
+      same_identity: 1
+- name: Default values remain owned by normal insertion and assignment
+  sql: SELECT id,label,amount,empty_value FROM catalog_bundle_child
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      label: O'Brien
+      amount: 7
+      empty_value: null
+- name: Legacy default join uses the same actual IDs and definition
+  sql: SELECT t.name AS table_name,c.name AS column_name,d.name AS constraint_name,CASE WHEN d.object_id=c.cdefault AND d.object_id=s.id
+    AND s.text IN(N'7',N'(7)',N'((7))') THEN 1 ELSE 0 END AS source_matches FROM sys.objects d JOIN sys.objects t ON t.object_id=d.parent_object_id
+    JOIN sys.syscomments s ON s.id=d.object_id JOIN sys.syscolumns c ON c.cdefault=d.object_id WHERE d.name=N'DF_catalog_bundle_amount'
+    AND d.type=N'D'
+  expect:
+    rows: 1
+    data:
+    - table_name: catalog_bundle_child
+      column_name: amount
+      constraint_name: DF_catalog_bundle_amount
+      source_matches: 1
+- name: Columns without a named default have zero cdefault
+  sql: SELECT name,cdefault FROM sys.syscolumns WHERE id=OBJECT_ID(N'catalog_bundle_child',N'U') AND name IN(N'id',N'parent_id')
+    ORDER BY name
+  expect:
+    rows: 2
+    data:
+    - name: id
+      cdefault: 0
+    - name: parent_id
+      cdefault: 0
+- name: Modern and legacy column default identities agree
+  sql: SELECT c.name,CASE WHEN c.default_object_id=l.cdefault AND c.default_object_id=d.object_id THEN 1 ELSE 0 END AS same_identity
+    FROM sys.columns c JOIN sys.syscolumns l ON l.id=c.object_id AND l.name=c.name JOIN sys.default_constraints d ON d.object_id=c.default_object_id
+    WHERE c.object_id=OBJECT_ID(N'catalog_bundle_child',N'U') ORDER BY c.name
+  expect:
+    rows: 3
+    data:
+    - name: amount
+      same_identity: 1
+    - name: empty_value
+      same_identity: 1
+    - name: label
+      same_identity: 1
+- name: Malformed and absent metadata addresses do not allocate existence
+  sql: SELECT OBJECT_ID(N'[unterminated',N'F') AS malformed,OBJECT_ID(N'dbo.catalog_bundle_missing',N'D') AS missing,OBJECT_ID(NULL,N'C')
+    AS null_name
+  expect:
+    rows: 1
+    data:
+    - malformed: null
+      missing: null
+      null_name: null
+- name: Same catalog SQL sees a newly added foreign declaration
+  sql: DECLARE @before INT; SELECT @before=COUNT(*) FROM sys.foreign_keys WHERE name=N'FK_catalog_bundle_late'; ALTER TABLE
+    catalog_bundle_late ADD CONSTRAINT FK_catalog_bundle_late FOREIGN KEY(parent_id) REFERENCES catalog_bundle_parent(id);
+    SELECT @before AS total; SELECT COUNT(*) AS total FROM sys.foreign_keys WHERE name=N'FK_catalog_bundle_late';
+  expect:
+    rows: 2
+    data:
+    - total: 0
+    - total: 1
+- name: A dropped foreign key no longer exists despite its old registry slot
+  sql: DECLARE @old INT=OBJECT_ID(N'FK_catalog_bundle_late',N'F'); ALTER TABLE catalog_bundle_late DROP CONSTRAINT FK_catalog_bundle_late;
+    SELECT COUNT(*) AS total FROM sys.foreign_keys WHERE name=N'FK_catalog_bundle_late'; SELECT OBJECT_ID(N'FK_catalog_bundle_late',N'F')
+    AS current_id,CASE WHEN @old>0 THEN 1 ELSE 0 END AS had_id;
+  expect:
+    rows: 2
+    data:
+    - total: 0
+    - current_id: null
+      had_id: 1
+- name: Current DEFAULT metadata observes ALTER ADD in the same query shape
+  sql: DECLARE @before INT; SELECT @before=COUNT(*) FROM sys.default_constraints WHERE name=N'DF_catalog_bundle_late'; ALTER
+    TABLE catalog_bundle_late ADD CONSTRAINT DF_catalog_bundle_late DEFAULT 9 FOR value; SELECT @before AS total; SELECT COUNT(*)
+    AS total FROM sys.default_constraints WHERE name=N'DF_catalog_bundle_late';
+  expect:
+    rows: 2
+    data:
+    - total: 0
+    - total: 1
+- name: Dropped DEFAULT removes modern legacy and intrinsic existence together
+  sql: DECLARE @old INT=OBJECT_ID(N'DF_catalog_bundle_late',N'D'); ALTER TABLE catalog_bundle_late DROP CONSTRAINT DF_catalog_bundle_late;
+    SELECT OBJECT_ID(N'DF_catalog_bundle_late',N'D') AS current_id,c.cdefault,CASE WHEN @old>0 THEN 1 ELSE 0 END AS had_id
+    FROM sys.syscolumns c WHERE c.id=OBJECT_ID(N'catalog_bundle_late',N'U') AND c.name=N'value';
+  expect:
+    rows: 1
+    data:
+    - current_id: null
+      cdefault: 0
+      had_id: 1
+- name: A nonexistent catalog column remains a real binding error
+  sql: SELECT not_a_catalog_column FROM sys.indexes
+  expect:
+    error: true
+- name: Ordinary nonunique indexes require an actual durable declaration owner
+  sql: DECLARE @marker INT=1; CREATE INDEX IX_catalog_bundle_untracked ON catalog_bundle_late(value); SELECT name FROM sys.indexes
+    WHERE object_id=OBJECT_ID(N'catalog_bundle_late',N'U') AND name=N'IX_catalog_bundle_untracked'
+  expect:
+    rows: 1
+    data:
+    - name: IX_catalog_bundle_untracked
+  noncritical: true
+- name: A qualified declaration uses the actual database grant
+  session_id: catalog-bundle-authority
+  username: catalog_bundle_reader
+  password: pw
+  sql: SELECT CASE WHEN OBJECT_ID(N'catalog_bundle_visible.dbo.DF_catalog_bundle_visible',N'D') IS NULL THEN 0 ELSE 1 END
+    AS visible
+  expect:
+    rows: 1
+    data:
+    - visible: 1
+- name: Revoke the native grant without replacing the authenticated actor
+  scm: (eval (parse_sql "memcp-tests" "REVOKE ALL ON catalog_bundle_visible.* FROM catalog_bundle_reader" nil))
+- name: The same SQL and actor observe revoked declaration visibility
+  session_id: catalog-bundle-authority
+  username: catalog_bundle_reader
+  password: pw
+  sql: SELECT CASE WHEN OBJECT_ID(N'catalog_bundle_visible.dbo.DF_catalog_bundle_visible',N'D') IS NULL THEN 0 ELSE 1 END
+    AS visible
+  expect:
+    rows: 1
+    data:
+    - visible: 0
+- name: Restore the native database grant
+  scm: (eval (parse_sql "memcp-tests" "GRANT ALL ON catalog_bundle_visible.* TO catalog_bundle_reader" nil))
+- name: The same SQL and actor observe restored declaration visibility
+  session_id: catalog-bundle-authority
+  username: catalog_bundle_reader
+  password: pw
+  sql: SELECT CASE WHEN OBJECT_ID(N'catalog_bundle_visible.dbo.DF_catalog_bundle_visible',N'D') IS NULL THEN 0 ELSE 1 END
+    AS visible
+  expect:
+    rows: 1
+    data:
+    - visible: 1
+- name: Pending DEFAULT metadata uses the borrowed transaction and disappears on rollback
+  sql: BEGIN TRANSACTION; ALTER TABLE catalog_bundle_late ADD CONSTRAINT DF_catalog_bundle_private DEFAULT 13 FOR value; SELECT
+    CASE WHEN OBJECT_ID(N'DF_catalog_bundle_private',N'D')>0 THEN 1 ELSE 0 END AS present; ROLLBACK; SELECT OBJECT_ID(N'DF_catalog_bundle_private',N'D')
+    AS current_id;
+  expect:
+    rows: 2
+    data:
+    - present: 1
+    - current_id: null
+- name: FK identical cached catalog SQL starts absent
+  session_id: catalog-bundle-cache-fk
+  sql: SELECT COUNT(*) AS total FROM sys.foreign_keys WHERE name=N'FK_catalog_bundle_cached'
+  expect:
+    rows: 1
+    data:
+    - total: 0
+- name: Publish the actual FK declaration
+  sql: ALTER TABLE catalog_bundle_late ADD CONSTRAINT FK_catalog_bundle_cached FOREIGN KEY(parent_id) REFERENCES catalog_bundle_parent(id)
+- name: FK identical cached catalog SQL observes native publication
+  session_id: catalog-bundle-cache-fk
+  sql: SELECT COUNT(*) AS total FROM sys.foreign_keys WHERE name=N'FK_catalog_bundle_cached'
+  expect:
+    rows: 1
+    data:
+    - total: 1
+- name: Remove the actual FK declaration
+  sql: ALTER TABLE catalog_bundle_late DROP CONSTRAINT FK_catalog_bundle_cached
+- name: FK identical cached catalog SQL observes native removal
+  session_id: catalog-bundle-cache-fk
+  sql: SELECT COUNT(*) AS total FROM sys.foreign_keys WHERE name=N'FK_catalog_bundle_cached'
+  expect:
+    rows: 1
+    data:
+    - total: 0
+- name: DF identical cached catalog SQL starts absent
+  session_id: catalog-bundle-cache-df
+  sql: SELECT COUNT(*) AS total FROM sys.default_constraints WHERE name=N'DF_catalog_bundle_cached'
+  expect:
+    rows: 1
+    data:
+    - total: 0
+- name: Publish the actual DF declaration
+  sql: ALTER TABLE catalog_bundle_late ADD CONSTRAINT DF_catalog_bundle_cached DEFAULT 17 FOR value
+- name: DF identical cached catalog SQL observes native publication
+  session_id: catalog-bundle-cache-df
+  sql: SELECT COUNT(*) AS total FROM sys.default_constraints WHERE name=N'DF_catalog_bundle_cached'
+  expect:
+    rows: 1
+    data:
+    - total: 1
+- name: Remove the actual DF declaration
+  sql: ALTER TABLE catalog_bundle_late DROP CONSTRAINT DF_catalog_bundle_cached
+- name: DF identical cached catalog SQL observes native removal
+  session_id: catalog-bundle-cache-df
+  sql: SELECT COUNT(*) AS total FROM sys.default_constraints WHERE name=N'DF_catalog_bundle_cached'
+  expect:
+    rows: 1
+    data:
+    - total: 0
+- name: Unnamed DEFAULT naming needs a durable generated declaration name
+  noncritical: true
+  sql: SELECT COUNT(*) AS total FROM sys.default_constraints WHERE parent_object_id=OBJECT_ID(N'catalog_bundle_unnamed',N'U')
+  expect:
+    rows: 1
+    data:
+    - total: 1
+- name: Full module syscomments text needs an actual SQL source chunk producer
+  noncritical: true
+  sql: SELECT COUNT(*) AS total FROM sys.syscomments WHERE id=OBJECT_ID(N'catalog_bundle_comment_source',N'P')
+  expect:
+    rows: 1
+    data:
+    - total: 1

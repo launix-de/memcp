@@ -11,7 +11,10 @@
 from __future__ import annotations
 
 import importlib.util
+import io
+import json
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -275,6 +278,7 @@ class ReplicationCatalogTests(unittest.TestCase):
 			node.snapshot.return_value = snapshot
 			path = node.data_dir / "db"
 			path.mkdir()
+			node.database_directory.return_value = path
 			(path / "schema.json").write_text(replication.json.dumps(schema))
 			self.assertEqual(replication.Node.records(node, "empty"), [{"resource": current}])
 
@@ -314,6 +318,120 @@ class ClusterSQLContextRunnerTests(unittest.TestCase):
 		self.assertEqual(cases[0]["name"], "literal-capture")
 		self.assertEqual(cases[0]["status"], "failed")
 		self.assertIn("without executing a remote shard", cases[0]["error"])
+
+
+class ClusterSuiteSelectionTests(unittest.TestCase):
+	def fixture(self, root):
+		paths = []
+		for name in ("z-last", "a-first", "nested/c-middle", "nested/b-next", "d-more"):
+			path = root / "tests" / (name + ".yaml")
+			path.parent.mkdir(parents=True, exist_ok=True)
+			path.write_text("metadata: {cluster: true}\ntest_cases: [{name: complete, sql: SELECT 1}]\n")
+			paths.append(path)
+		(root / "tests" / "ordinary.yaml").write_text("metadata: {cluster: false}\n")
+		return sorted(paths)
+
+	def test_discovery_and_default_selection_retain_every_complete_suite(self):
+		with tempfile.TemporaryDirectory() as temp:
+			root = Path(temp)
+			paths = self.fixture(root)
+			contents = {path: path.read_bytes() for path in paths}
+			discovered = replication.discover_cluster_suites(root / "tests")
+			self.assertEqual(discovered, paths)
+			self.assertEqual(replication.select_cluster_suite_shard(discovered), paths)
+			self.assertEqual({path: path.read_bytes() for path in paths}, contents)
+
+	def test_partitions_cover_each_suite_once_independently_of_input_order(self):
+		paths = [Path(f"suite-{i}.yaml") for i in range(7)]
+		for count in range(1, len(paths) + 1):
+			parts = [replication.select_cluster_suite_shard(reversed(paths), index, count)
+				for index in range(count)]
+			self.assertEqual(sorted(path for part in parts for path in part), paths)
+			self.assertEqual(sum(map(len, parts)), len(paths))
+			for index, part in enumerate(parts):
+				self.assertEqual(part, replication.select_cluster_suite_shard(paths, index, count))
+
+	def test_invalid_or_empty_partitions_cannot_fall_back_to_process_scenarios(self):
+		for index, count in ((0, 0), (-1, 2), (2, 2), (1, 3)):
+			with self.subTest(index=index, count=count), self.assertRaises(replication.DrillFailure):
+				replication.select_cluster_suite_shard([Path("one.yaml")], index, count)
+		for options in (("--suite-shard-count", "0"), ("--suite-shard-index", "-1"),
+			("--suite-shard-count", "2"), ("--suite-shard-index", "1")):
+			with mock.patch.object(sys, "argv", ["runner", *options]), \
+					mock.patch.object(replication, "make_artifact_dir") as artifacts, \
+					mock.patch.object(replication, "run_remote_scans") as legacy, \
+					mock.patch("sys.stderr", new=io.StringIO()), self.assertRaises(SystemExit) as error:
+				replication.main()
+			self.assertEqual(error.exception.code, 2)
+			artifacts.assert_not_called()
+			legacy.assert_not_called()
+		with mock.patch.object(sys, "argv", ["runner", "--cluster-suites", "--suite-shard-count", "2",
+				"--suite-shard-index", "1"]), \
+				mock.patch.object(replication, "discover_cluster_suites", return_value=[Path("one.yaml")]), \
+				mock.patch.object(replication, "make_artifact_dir") as artifacts, \
+				mock.patch.object(replication, "run_remote_scans") as legacy, \
+				mock.patch("sys.stderr", new=io.StringIO()), self.assertRaises(SystemExit) as error:
+			replication.main()
+		self.assertEqual(error.exception.code, 2)
+		artifacts.assert_not_called()
+		legacy.assert_not_called()
+
+	def test_cli_runs_only_selected_suites_and_retains_full_coverage_manifest(self):
+		with tempfile.TemporaryDirectory() as temp:
+			root = Path(temp)
+			paths = self.fixture(root)
+			for index in (0, 1):
+				artifacts = root / f"artifacts-{index}"
+				argv = ["runner", "--cluster-suites", "--suite-shard-index", str(index),
+					"--suite-shard-count", "2", "--seed", "20261028", "--binary", sys.executable,
+					"--artifacts", str(artifacts)]
+				def observe_selection(args, suite, directory, journal):
+					manifest = json.loads((directory / "manifest.json").read_text())
+					self.assertEqual(manifest["status"], "running")
+				with mock.patch.object(sys, "argv", argv), mock.patch.object(replication, "ROOT", root), \
+						mock.patch.object(replication.shutil, "which", return_value="mysql"), \
+						mock.patch.object(replication, "run_cluster_suite", side_effect=observe_selection) as run, \
+						mock.patch.object(replication, "run_remote_scans") as legacy, mock.patch("builtins.print"):
+					self.assertEqual(replication.main(), 0)
+				self.assertEqual([call.args[1] for call in run.call_args_list], paths[index::2])
+				legacy.assert_not_called()
+				manifest = json.loads((artifacts / "manifest.json").read_text())
+				self.assertEqual(manifest["status"], "passed")
+				self.assertEqual(manifest["scenarios"][0]["suite_selection"], {
+					"index": index, "count": 2,
+					"discovered": [str(path.relative_to(root)) for path in paths],
+					"selected": [str(path.relative_to(root)) for path in paths[index::2]],
+				})
+
+	def test_ci_matrix_covers_current_suites_in_both_instrumentations(self):
+		workflow = replication.yaml.safe_load((replication.ROOT / ".github/workflows/replication-cluster-stress.yml").read_text())
+		gate = workflow["jobs"]["cluster-operators"]
+		job = workflow["jobs"]["cluster-operator-shards"]
+		self.assertEqual(gate["name"], "Cluster SQL operator contracts")
+		self.assertIn("cluster-operator-shards", gate["needs"])
+		self.assertIn("always()", gate["if"])
+		self.assertEqual(gate["steps"][0]["run"], 'test "$SHARD_RESULT" = success')
+		for result in ("success", "failure", "cancelled", "skipped", ""):
+			check = replication.subprocess.run(["sh", "-c", gate["steps"][0]["run"]],
+				env={**replication.os.environ, "SHARD_RESULT": result})
+			self.assertEqual(check.returncode == 0, result == "success")
+		self.assertEqual(job["timeout-minutes"], 15)
+		self.assertFalse(job["strategy"]["fail-fast"])
+		shards = job["strategy"]["matrix"]["shard"]
+		self.assertEqual(shards, [0, 1])
+		discovered = replication.discover_cluster_suites(replication.ROOT / "tests")
+		parts = [replication.select_cluster_suite_shard(discovered, index, len(shards)) for index in shards]
+		self.assertEqual(sorted(path for part in parts for path in part), discovered)
+		runs = [step for step in job["steps"] if "--cluster-suites" in step.get("run", "")]
+		self.assertEqual(len(runs), 2)
+		for step in runs:
+			self.assertIn("--suite-shard-index ${{ matrix.shard }} --suite-shard-count 2", step["run"])
+			self.assertIn("--seed 20261028", step["run"])
+		self.assertEqual(runs[1]["env"]["GORACE"], "halt_on_error=1 exitcode=66")
+		self.assertIn('--binary "$RUNNER_TEMP/memcp-cluster-operators"', runs[0]["run"])
+		self.assertIn('--binary "$RUNNER_TEMP/memcp-cluster-operators-race"', runs[1]["run"])
+		self.assertIn('--fixture-binary "$RUNNER_TEMP/memcp-cluster-operators"', runs[1]["run"])
+		self.assertIn("matrix.shard", job["steps"][-1]["with"]["name"])
 
 
 class ClusterSuiteTests(unittest.TestCase):
@@ -465,6 +583,105 @@ class ClusterSuiteTests(unittest.TestCase):
 						mock.patch.object(runner, "execute_sql", return_value=response), \
 						mock.patch("builtins.print"):
 					self.assertEqual(runner.run_test_case(case, "memcp-tests"), passed)
+
+
+class ClusterFailurePlanTests(unittest.TestCase):
+	def runner(self, directory, status=True):
+		from types import SimpleNamespace
+		nodes = [SimpleNamespace(index=i, port=i+1, password="admin", database="memcp-tests")
+			for i in range(2)]
+		snapshot = lambda node: {"state": {"self": {"id": f"node-{node.index}"}, "received": 0, "delegated": 0},
+			"budget": {"MemoryBudget": 100}}
+		return replication.ClusterSQLTestRunner(nodes[0], nodes, directory, [],
+			directory / "report.json", snapshot if status else None)
+
+	def test_only_failed_cluster_cases_capture_bounded_same_context_plans(self):
+		from types import SimpleNamespace
+		for syntax in (None, "mysql", "psql"):
+			for passed, cluster in ((True, True), (False, True), (False, False)):
+				with self.subTest(syntax=syntax, passed=passed, cluster=cluster), tempfile.TemporaryDirectory() as temp:
+					runner = self.runner(Path(temp), cluster)
+					runner.suite_syntax = "tsql"
+					calls = []
+					def execute(database, query, *args, **kwargs):
+						calls.append((query, args, kwargs))
+						if query.startswith("EXPLAIN"):
+							return SimpleNamespace(status_code=200, text='{"code":"retained"}', headers={})
+						return SimpleNamespace(status_code=200, text='{"n":1}' if passed else '{"n":0}', headers={})
+					case = {"name": "original result", "syntax": syntax, "username": "member",
+						"password": "fixture-only", "headers": {"X-Probe": "retained"},
+						"session_id": "same-session", "params": [7], "sql": "SELECT 1 AS n",
+						"capture_failure_plans": True, "expect": {"data": [{"n": 1}]}}
+					with mock.patch.object(replication, "io_stats", return_value={}), \
+							mock.patch.object(runner, "ensure_database"), \
+							mock.patch.object(runner, "execute_sql", side_effect=execute), mock.patch("builtins.print"):
+						self.assertEqual(runner.run_test_case(case, "memcp-tests"), passed)
+					result = json.loads((Path(temp) / "report.json").read_text())[-1]
+					self.assertEqual(result["status"], "passed" if passed else "failed")
+					self.assertEqual(result["phase"], "cluster" if cluster else "standalone")
+					self.assertEqual(result["rows"], [{"n": int(passed)}])
+					diagnostics = [call for call in calls if call[0].startswith(("EXPLAIN IR ", "EXPLAIN PHYSICAL "))]
+					self.assertEqual(len(diagnostics), 0 if passed else 2)
+					if diagnostics:
+						self.assertEqual([item["phase"] for item in result["failure_plans"]], ["IR", "PHYSICAL"])
+						self.assertTrue(all(item["body"] == '{"code":"retained"}' for item in result["failure_plans"]))
+						for _query, args, kwargs in diagnostics:
+							self.assertEqual(args[0]["X-Probe"], "retained")
+							self.assertEqual(args[0]["Authorization"], "Basic bWVtYmVyOmZpeHR1cmUtb25seQ==")
+							self.assertEqual(kwargs, {"syntax": syntax or "tsql", "session_id": "same-session",
+								"params": [7], "timeout": 5, "retry_on_connection_failure": False})
+					else:
+						self.assertNotIn("failure_plans", result)
+
+
+	def test_diagnostic_remote_activity_cannot_satisfy_the_original_case(self):
+		from types import SimpleNamespace
+		with tempfile.TemporaryDirectory() as temp:
+			runner = self.runner(Path(temp))
+			counter = [0]
+			runner.status = lambda node: {"state": {"self": {"id": f"node-{node.index}"},
+				"received": counter[0] if node.index else 0,
+				"delegated": counter[0] if node.index == 0 else 0}, "budget": {"MemoryBudget": 100}}
+			def execute(_database, query, *args, **kwargs):
+				if query.startswith(("EXPLAIN IR ", "EXPLAIN PHYSICAL ")):
+					counter[0] += 1
+				return SimpleNamespace(status_code=200,
+					text='{"code":"retained"}' if query.startswith("EXPLAIN") else '{"n":1}', headers={})
+			case = {"name": "correct local rows are insufficient", "sql": "SELECT 1 AS n",
+				"capture_failure_plans": True,
+				"expect": {"data": [{"n": 1}], "cluster": {"min_remote_shards": 1}}}
+			with mock.patch.object(replication, "io_stats", return_value={}), \
+					mock.patch.object(runner, "ensure_database"), \
+					mock.patch.object(runner, "execute_sql", side_effect=execute), mock.patch("builtins.print"):
+				self.assertFalse(runner.run_test_case(case, "memcp-tests"))
+			self.assertEqual(counter[0], 2)
+			self.assertEqual(runner.results[-1]["cluster"]["remote_shards"], 0)
+			self.assertEqual(runner.results[-1]["rows"], [{"n": 1}])
+			self.assertEqual(runner.results[-1]["status"], "failed")
+
+	def test_large_or_failed_diagnostics_do_not_publish_unbounded_or_secret_details(self):
+		from types import SimpleNamespace
+		with tempfile.TemporaryDirectory() as temp:
+			runner = self.runner(Path(temp))
+			response = SimpleNamespace(status_code=200, text="é" * (1024 * 1024))
+			with mock.patch.object(runner, "execute_sql", return_value=response):
+				plans = runner.capture_failure_plans({"sql": "SELECT 1"}, "memcp-tests")
+			self.assertTrue(all(item["omitted"] == "diagnostic response budget" for item in plans))
+			self.assertTrue(all("body" not in item for item in plans))
+			self.assertLess(len(json.dumps(plans).encode()), 4096)
+			with mock.patch.object(runner, "execute_sql", side_effect=RuntimeError("fixture-secret")):
+				plans = runner.capture_failure_plans({"sql": "SELECT 1"}, "memcp-tests")
+			self.assertEqual([item["error"] for item in plans], ["RuntimeError", "RuntimeError"])
+			self.assertNotIn("fixture-secret", json.dumps(plans))
+
+	def test_nonselect_and_explicit_batch_inputs_are_declined(self):
+		with tempfile.TemporaryDirectory() as temp:
+			runner = self.runner(Path(temp))
+			for query in ("SELECT 1; DELETE FROM items", "UPDATE items SET n=1", "-- comment\nSELECT 1", None):
+				with self.subTest(query=query), mock.patch.object(runner, "execute_sql") as execute:
+					result = runner.capture_failure_plans({"sql": query}, "memcp-tests")
+					execute.assert_not_called()
+					self.assertIn("omitted", result[0])
 
 
 if __name__ == "__main__":

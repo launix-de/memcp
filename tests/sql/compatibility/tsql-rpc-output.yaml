@@ -1,0 +1,244 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Named and prepared RPC OUTPUT values use declared caller scalar variables, existing copy-out, original
+    wire ordinals and final transport completion
+setup:
+- sql: CREATE TABLE rpc_output_effects(value INT)
+- sql: CREATE PROCEDURE rpc_output_int @step INT,@value INT OUTPUT AS BEGIN SET @value=@value+@step; SELECT @value
+    AS value; RETURN 17; END
+- sql: CREATE PROCEDURE rpc_output_text @value NVARCHAR(20) OUTPUT AS SET @value=N'abcdefgh'
+- sql: CREATE PROCEDURE rpc_output_null @value INT OUTPUT AS SET @value=NULL
+- sql: CREATE PROCEDURE rpc_output_binary @value VARBINARY(8) OUTPUT AS SET @value=0x0080FFEECC
+- sql: CREATE PROCEDURE rpc_output_numeric @value DECIMAL(10,2) OUTPUT AS SET @value=12.75
+- sql: CREATE PROCEDURE rpc_output_datetime @value DATETIME OUTPUT AS SET @value=CONVERT(DATETIME,'20240229',112)
+- sql: CREATE PROCEDURE rpc_output_bigint @value BIGINT OUTPUT AS SET @value=9007199254740993
+- sql: CREATE PROCEDURE rpc_output_bit @value BIT OUTPUT AS SET @value=0
+- sql: CREATE PROCEDURE rpc_output_in_only @value INT AS INSERT rpc_output_effects VALUES(@value)
+- sql: CREATE PROCEDURE rpc_output_lob @large VARCHAR(MAX) OUTPUT,@small INT OUTPUT AS BEGIN SET @large='abcdefgh';
+    SET @small=7; END
+test_cases:
+- name: Named OUTPUT copy-in and copy-out retain original ordinals current values and caller isolation
+  scm: |-
+    (begin
+      (define s (newsession)) (s "username" "root") (s "schema" "memcp-tests")
+      (define invoke (lambda (procedure parameters)
+        (tds_frontend "metadata" s
+          (list "is_rpc" true "database" "memcp-tests" "procedure" procedure "parameters" parameters)
+          (lambda (values) true) (lambda (descriptors) true) nil nil nil)))
+      (s "__tsql_parameter_declarations" (list (list "__tds_rpc_output_0" (list "INT"))))
+      (s "__tsql_parameter:__tds_rpc_output_0" 333)
+      (define wire (list "kind" 38 "size" 4 "precision" 0 "scale" 0))
+      (define run (lambda (initial step) (invoke "dbo.rpc_output_int" (list
+        (list "name" "@value" "ordinal" 0 "flags" 1 "type" wire "value" initial)
+        (list "name" "@step" "ordinal" 1 "flags" 0 "type" wire "value" step)))))
+      (define first (run 5 3)) (define second (run 20 -2))
+      (and (equal? (first "return_status") 17) (equal? (second "return_status") 17)
+        (expression_equal? (first "return_values") (list
+          (list "ordinal" 0 "name" "@value" "status" 1 "user_type" 0 "flags" 0 "type" wire "value" 8)))
+        (equal? ((car (second "return_values")) "value") 18)
+        (equal? (s "__tsql_parameter:__tds_rpc_output_0") 333)
+        (expression_equal? (s "__tsql_parameter_declarations") (list (list "__tds_rpc_output_0" (list "INT")))))
+    )
+  expect:
+    result: true
+- name: OUTPUT narrowing follows the caller NVARCHAR width with ANSI_WARNINGS ON and OFF
+  scm: |-
+    (begin
+      (define s (newsession)) (s "username" "root") (s "schema" "memcp-tests")
+      (define invoke (lambda (procedure parameters)
+        (tds_frontend "metadata" s
+          (list "is_rpc" true "database" "memcp-tests" "procedure" procedure "parameters" parameters)
+          (lambda (values) true) (lambda (descriptors) true) nil nil nil)))
+      (define wire (list "kind" 231 "size" 8 "precision" 0 "scale" 0 "collation" tsql_session_collation))
+      (define run (lambda (warnings) (begin
+        (s "__tsql_ansi_warnings" warnings)
+        (define completion (invoke "rpc_output_text" (list
+          (list "name" "@value" "ordinal" 0 "flags" 1 "type" wire "value" nil))))
+        (completion "return_values"))))
+      (define expected (list (list "ordinal" 0 "name" "@value" "status" 1 "user_type" 0 "flags" 0 "type" wire "value" "abcd")))
+      (and (expression_equal? (run true) expected) (expression_equal? (run false) expected))
+    )
+  expect:
+    result: true
+- name: A NULL OUTPUT retains its declared integer type and complete return descriptor
+  scm: |-
+    (begin
+      (define s (newsession)) (s "username" "root") (s "schema" "memcp-tests")
+      (define invoke (lambda (procedure parameters)
+        (tds_frontend "metadata" s
+          (list "is_rpc" true "database" "memcp-tests" "procedure" procedure "parameters" parameters)
+          (lambda (values) true) (lambda (descriptors) true) nil nil nil)))
+      (define wire (list "kind" 38 "size" 4 "precision" 0 "scale" 0))
+      (define completion (invoke "rpc_output_null" (list
+        (list "name" "@value" "ordinal" 0 "flags" 1 "type" wire "value" 9))))
+      (expression_equal? (completion "return_values") (list
+        (list "ordinal" 0 "name" "@value" "status" 1 "user_type" 0 "flags" 0 "type" wire "value" nil)))
+    )
+  expect:
+    result: true
+- name: Binary OUTPUT uses the ordinary declared destination width before wire encoding
+  scm: |-
+    (begin
+      (define s (newsession)) (s "username" "root") (s "schema" "memcp-tests")
+      (define invoke (lambda (procedure parameters)
+        (tds_frontend "metadata" s
+          (list "is_rpc" true "database" "memcp-tests" "procedure" procedure "parameters" parameters)
+          (lambda (values) true) (lambda (descriptors) true) nil nil nil)))
+      (define completion (invoke "rpc_output_binary" (list
+        (list "name" "@value" "ordinal" 0 "flags" 1 "type" (list "kind" 165 "size" 3) "value" nil))))
+      (define returned (car (completion "return_values")))
+      (and (equal? (returned "ordinal") 0) (equal? ((returned "type") "size") 3)
+        (equal? (bin2hex ((returned "value") "bytes")) "0080ff"))
+    )
+  expect:
+    result: true
+- name: Numeric OUTPUT preserves precision scale and coefficient payload
+  scm: |-
+    (begin
+      (define s (newsession)) (s "username" "root") (s "schema" "memcp-tests")
+      (define invoke (lambda (procedure parameters)
+        (tds_frontend "metadata" s
+          (list "is_rpc" true "database" "memcp-tests" "procedure" procedure "parameters" parameters)
+          (lambda (values) true) (lambda (descriptors) true) nil nil nil)))
+      (define wire (list "kind" 108 "size" 5 "precision" 8 "scale" 2))
+      (define completion (invoke "rpc_output_numeric" (list
+        (list "name" "@value" "ordinal" 0 "flags" 1 "type" wire "value" nil))))
+      (expression_equal? (completion "return_values") (list
+        (list "ordinal" 0 "name" "@value" "status" 1 "user_type" 0 "flags" 0 "type" wire
+          "value" (list "coefficient" "1275"))))
+    )
+  expect:
+    result: true
+- name: Legacy DATETIME OUTPUT preserves calendar day and 300-tick clock transport units
+  scm: |-
+    (begin
+      (define s (newsession)) (s "username" "root") (s "schema" "memcp-tests")
+      (define invoke (lambda (procedure parameters)
+        (tds_frontend "metadata" s
+          (list "is_rpc" true "database" "memcp-tests" "procedure" procedure "parameters" parameters)
+          (lambda (values) true) (lambda (descriptors) true) nil nil nil)))
+      (define completion (invoke "rpc_output_datetime" (list
+        (list "name" "@value" "ordinal" 0 "flags" 1 "type" (list "kind" 111 "size" 8) "value" nil))))
+      (expression_equal? ((car (completion "return_values")) "value") (list "days" 45349 "ticks" 0 "offset" 0))
+    )
+  expect:
+    result: true
+- name: BIGINT OUTPUT retains integers above floating point exactness
+  scm: |-
+    (begin
+      (define s (newsession)) (s "username" "root") (s "schema" "memcp-tests")
+      (define invoke (lambda (procedure parameters)
+        (tds_frontend "metadata" s
+          (list "is_rpc" true "database" "memcp-tests" "procedure" procedure "parameters" parameters)
+          (lambda (values) true) (lambda (descriptors) true) nil nil nil)))
+      (define completion (invoke "rpc_output_bigint" (list
+        (list "name" "@value" "ordinal" 0 "flags" 1 "type" (list "kind" 38 "size" 8) "value" nil))))
+      (equal? ((car (completion "return_values")) "value") (tsql_parse_integer "9007199254740993"))
+    )
+  expect:
+    result: true
+- name: False BIT OUTPUT is an actual returned value
+  scm: |-
+    (begin
+      (define s (newsession)) (s "username" "root") (s "schema" "memcp-tests")
+      (define invoke (lambda (procedure parameters)
+        (tds_frontend "metadata" s
+          (list "is_rpc" true "database" "memcp-tests" "procedure" procedure "parameters" parameters)
+          (lambda (values) true) (lambda (descriptors) true) nil nil nil)))
+      (define completion (invoke "rpc_output_bit" (list
+        (list "name" "@value" "ordinal" 0 "flags" 1 "type" (list "kind" 104 "size" 1) "value" true))))
+      (expression_equal? ((car (completion "return_values")) "value") false)
+    )
+  expect:
+    result: true
+- name: Prepared OUTPUT keeps original wire positions after control parameters and permuted names
+  scm: |-
+    (begin
+      (define s (newsession)) (s "username" "root") (s "schema" "memcp-tests")
+      (define out (newsession))
+      (define wire (list "kind" 38 "size" 4))
+      (define completion (tds_frontend "execute" s
+        (list "is_rpc" true "database" "memcp-tests" "text" "SET @value=@value+@step; SELECT @value AS value"
+          "declarations" "@step INT,@value INT OUTPUT" "parameters" (list
+            (list "name" "@value" "ordinal" 2 "flags" 1 "type" wire "value" 5)
+            (list "name" "@step" "ordinal" 3 "flags" 0 "type" wire "value" 3)))
+        (lambda (values) (out "row" values)) (lambda (descriptors) true) nil nil nil))
+      (and (expression_equal? (out "row") '(8)) (equal? (completion "return_status") 0)
+        (expression_equal? (completion "return_values") (list
+          (list "ordinal" 2 "name" "@value" "status" 1 "user_type" 0 "flags" 0 "type" wire "value" 8)))))
+  expect:
+    result: true
+- name: Only requested OUTPUT parameters return and the frontend preserves original wire order
+  scm: |-
+    (begin
+      (define s (newsession)) (s "username" "root") (s "schema" "memcp-tests")
+      (define invoke (lambda (procedure parameters)
+        (tds_frontend "metadata" s
+          (list "is_rpc" true "database" "memcp-tests" "procedure" procedure "parameters" parameters)
+          (lambda (values) true) (lambda (descriptors) true) nil nil nil)))
+      (define completion (invoke "rpc_output_lob" (list
+        (list "name" "@large" "ordinal" 0 "flags" 1 "type" (list "kind" 167 "size" 65535 "collation" tsql_session_collation) "value" nil)
+        (list "name" "@small" "ordinal" 1 "flags" 1 "type" (list "kind" 38 "size" 4) "value" nil))))
+      (define returned (completion "return_values"))
+      (define input_only (invoke "rpc_output_bit" (list
+        (list "name" "@value" "ordinal" 0 "flags" 0 "type" (list "kind" 104 "size" 1) "value" true))))
+      (and (equal? (map returned (lambda (item) (item "ordinal"))) '(0 1))
+        (equal? ((car returned) "value") "abcdefgh") (equal? ((cadr returned) "value") 7)
+        (empty_list? (input_only "return_values")))
+    )
+  expect:
+    result: true
+- name: TCP named RPC returns typed output and the genuine nonzero procedure status
+  tds:
+    rpc_packets:
+    - packet_type: 3
+      payload_hex: 160000001200000002000000000000000000010000001200640062006f002e007200700063005f006f00750074007000750074005f0069006e0074000000064000760061006c0075006500012604040500000005400073007400650070000026040403000000
+      contains_hex:
+      - d10408000000
+      - '7911000000'
+      - ac0000064000760061006c00750065000100000000000026040408000000
+- name: TCP sp_executesql returns a typed OUTPUT at its original ordinal after control slots
+  tds:
+    rpc_packets:
+    - packet_type: 3
+      payload_hex: 160000001200000002000000000000000000010000000d00730070005f006500780065006300750074006500730071006c000000054000730074006d00740000e756000904d00034560053004500540020004000760061006c00750065003d004000760061006c00750065002b0032003b002000530045004c0045004300540020004000760061006c00750065002000410053002000760061006c007500650007400070006100720061006d00730000e722000904d0003422004000760061006c0075006500200049004e00540020004f0055005400500055005400064000760061006c00750065000126040405000000
+      contains_hex:
+      - d10407000000
+      - '7900000000'
+      - ac0200064000760061006c00750065000100000000000026040407000000
+- name: Requested OUTPUT on a nonOUTPUT formal fails before stored procedure effects
+  tds:
+    rpc_packets:
+    - packet_type: 3
+      payload_hex: 160000001200000002000000000000000000010000001600640062006f002e007200700063005f006f00750074007000750074005f0069006e005f006f006e006c0079000000064000760061006c00750065000126040407000000
+      error: true
+    - packet_type: 1
+      payload_hex: 16000000120000000200000000000000000001000000530045004c00450043005400200043004f0055004e00540028002a002900200041005300200063006f0075006e0074002000460052004f004d0020007200700063005f006f00750074007000750074005f006500660066006500630074007300
+      contains_hex:
+      - d10400000000
+- name: Prepared OUTPUT requires an OUTPUT declaration before executing dynamic SQL effects
+  tds:
+    rpc_packets:
+    - packet_type: 3
+      payload_hex: 160000001200000002000000000000000000010000000d00730070005f006500780065006300750074006500730071006c000000054000730074006d00740000e750000904d00034500049004e00530045005200540020007200700063005f006f00750074007000750074005f0065006600660065006300740073002000560041004c0055004500530028004000760061006c0075006500290007400070006100720061006d00730000e714000904d0003414004000760061006c0075006500200049004e005400064000760061006c00750065000126040407000000
+      error: true
+    - packet_type: 1
+      payload_hex: 16000000120000000200000000000000000001000000530045004c00450043005400200043004f0055004e00540028002a002900200041005300200063006f0075006e0074002000460052004f004d0020007200700063005f006f00750074007000750074005f006500660066006500630074007300
+      contains_hex:
+      - d10400000000
+cleanup:
+- sql: DROP PROCEDURE IF EXISTS rpc_output_lob
+- sql: DROP PROCEDURE IF EXISTS rpc_output_in_only
+- sql: DROP PROCEDURE IF EXISTS rpc_output_bit
+- sql: DROP PROCEDURE IF EXISTS rpc_output_bigint
+- sql: DROP PROCEDURE IF EXISTS rpc_output_datetime
+- sql: DROP PROCEDURE IF EXISTS rpc_output_numeric
+- sql: DROP PROCEDURE IF EXISTS rpc_output_binary
+- sql: DROP PROCEDURE IF EXISTS rpc_output_null
+- sql: DROP PROCEDURE IF EXISTS rpc_output_text
+- sql: DROP PROCEDURE IF EXISTS rpc_output_int
+- sql: DROP TABLE IF EXISTS rpc_output_effects

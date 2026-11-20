@@ -1,0 +1,204 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  description: Nullable derived operands preserve actual row presence independently
+    of SQL payload values
+setup:
+- sql: CREATE TABLE presence_left(id INT PRIMARY KEY)
+- sql: INSERT INTO presence_left VALUES(1),(2)
+- sql: CREATE TABLE presence_nullable(owner_id INT NULL,payload INT NULL)
+- sql: INSERT INTO presence_nullable VALUES(1,NULL),(1,NULL)
+- sql: CREATE TABLE presence_required(owner_id INT NOT NULL,payload INT NULL)
+- sql: INSERT INTO presence_required VALUES(1,NULL)
+test_cases:
+- name: mysql A missing nullable operand NULL extends constant and computed fields
+  syntax: mysql
+  sql: SELECT l.id,p.marker,p.display FROM presence_left l LEFT JOIN (SELECT 1 AS
+    marker,n.owner_id,COALESCE(n.payload,7) AS display FROM presence_nullable n WHERE
+    n.owner_id=99) p ON p.owner_id=l.id ORDER BY l.id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      marker: null
+      display: null
+    - id: 2
+      marker: null
+      display: null
+- name: mysql Actual duplicate NULL payload rows retain their constant projection
+  syntax: mysql
+  sql: SELECT l.id,p.marker,p.payload FROM presence_left l LEFT JOIN (SELECT 1 AS
+    marker,n.owner_id,n.payload FROM presence_nullable n) p ON p.owner_id=l.id ORDER
+    BY l.id
+  expect:
+    rows: 3
+    data:
+    - id: 1
+      marker: 1
+      payload: null
+    - id: 1
+      marker: 1
+      payload: null
+    - id: 2
+      marker: null
+      payload: null
+- name: mysql Presence counts actual nullable rows and excludes a synthetic missing
+    row
+  syntax: mysql
+  sql: SELECT l.id,COUNT(p.marker) AS matched_count,COUNT(p.payload) AS nonnull_count,SUM(p.marker)
+    AS total FROM presence_left l LEFT JOIN (SELECT 1 AS marker,n.owner_id,n.payload
+    FROM presence_nullable n) p ON p.owner_id=l.id GROUP BY l.id ORDER BY l.id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      matched_count: 2
+      nonnull_count: 0
+      total: 2
+    - id: 2
+      matched_count: 0
+      nonnull_count: 0
+      total: null
+- name: mysql A declared nonnull nonkey column supplies row presence before projection
+  syntax: mysql
+  sql: SELECT l.id,p.marker,p.payload FROM presence_left l LEFT JOIN (SELECT 1 AS
+    marker,n.owner_id,n.payload FROM presence_required n) p ON p.owner_id=l.id ORDER
+    BY l.id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      marker: 1
+      payload: null
+    - id: 2
+      marker: null
+      payload: null
+- name: psql A missing nullable operand NULL extends constant and computed fields
+  syntax: psql
+  sql: SELECT l.id,p.marker,p.display FROM presence_left l LEFT JOIN (SELECT 1 AS
+    marker,n.owner_id,COALESCE(n.payload,7) AS display FROM presence_nullable n WHERE
+    n.owner_id=99) p ON p.owner_id=l.id ORDER BY l.id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      marker: null
+      display: null
+    - id: 2
+      marker: null
+      display: null
+- name: psql Actual duplicate NULL payload rows retain their constant projection
+  syntax: psql
+  sql: SELECT l.id,p.marker,p.payload FROM presence_left l LEFT JOIN (SELECT 1 AS
+    marker,n.owner_id,n.payload FROM presence_nullable n) p ON p.owner_id=l.id ORDER
+    BY l.id
+  expect:
+    rows: 3
+    data:
+    - id: 1
+      marker: 1
+      payload: null
+    - id: 1
+      marker: 1
+      payload: null
+    - id: 2
+      marker: null
+      payload: null
+- name: psql Presence counts actual nullable rows and excludes a synthetic missing
+    row
+  syntax: psql
+  sql: SELECT l.id,COUNT(p.marker) AS matched_count,COUNT(p.payload) AS nonnull_count,SUM(p.marker)
+    AS total FROM presence_left l LEFT JOIN (SELECT 1 AS marker,n.owner_id,n.payload
+    FROM presence_nullable n) p ON p.owner_id=l.id GROUP BY l.id ORDER BY l.id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      matched_count: 2
+      nonnull_count: 0
+      total: 2
+    - id: 2
+      matched_count: 0
+      nonnull_count: 0
+      total: null
+- name: psql A declared nonnull nonkey column supplies row presence before projection
+  syntax: psql
+  sql: SELECT l.id,p.marker,p.payload FROM presence_left l LEFT JOIN (SELECT 1 AS
+    marker,n.owner_id,n.payload FROM presence_required n) p ON p.owner_id=l.id ORDER
+    BY l.id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      marker: 1
+      payload: null
+    - id: 2
+      marker: null
+      payload: null
+- name: tsql A missing nullable operand NULL extends constant and computed fields
+  syntax: tsql
+  sql: SELECT l.id,p.marker,p.display FROM presence_left l LEFT JOIN (SELECT 1 AS
+    marker,n.owner_id,COALESCE(n.payload,7) AS display FROM presence_nullable n WHERE
+    n.owner_id=99) p ON p.owner_id=l.id ORDER BY l.id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      marker: null
+      display: null
+    - id: 2
+      marker: null
+      display: null
+- name: tsql Actual duplicate NULL payload rows retain their constant projection
+  syntax: tsql
+  sql: SELECT l.id,p.marker,p.payload FROM presence_left l LEFT JOIN (SELECT 1 AS
+    marker,n.owner_id,n.payload FROM presence_nullable n) p ON p.owner_id=l.id ORDER
+    BY l.id
+  expect:
+    rows: 3
+    data:
+    - id: 1
+      marker: 1
+      payload: null
+    - id: 1
+      marker: 1
+      payload: null
+    - id: 2
+      marker: null
+      payload: null
+- name: tsql Presence counts actual nullable rows and excludes a synthetic missing
+    row
+  syntax: tsql
+  sql: SELECT l.id,COUNT(p.marker) AS matched_count,COUNT(p.payload) AS nonnull_count,SUM(p.marker)
+    AS total FROM presence_left l LEFT JOIN (SELECT 1 AS marker,n.owner_id,n.payload
+    FROM presence_nullable n) p ON p.owner_id=l.id GROUP BY l.id ORDER BY l.id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      matched_count: 2
+      nonnull_count: 0
+      total: 2
+    - id: 2
+      matched_count: 0
+      nonnull_count: 0
+      total: null
+- name: tsql A declared nonnull nonkey column supplies row presence before projection
+  syntax: tsql
+  sql: SELECT l.id,p.marker,p.payload FROM presence_left l LEFT JOIN (SELECT 1 AS
+    marker,n.owner_id,n.payload FROM presence_required n) p ON p.owner_id=l.id ORDER
+    BY l.id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      marker: 1
+      payload: null
+    - id: 2
+      marker: null
+      payload: null
+cleanup:
+- sql: DROP TABLE presence_required
+- sql: DROP TABLE presence_nullable
+- sql: DROP TABLE presence_left

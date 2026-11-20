@@ -1,0 +1,155 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: Completed grouped scalar rows retain every free caller coordinate
+setup:
+- sql: CREATE TABLE grouped_domain_outer(id INT,ceiling INT)
+- sql: CREATE TABLE grouped_domain_inner(owner INT,val INT)
+- sql: INSERT INTO grouped_domain_outer VALUES(0,10),(1,10),(1,20),(2,10),(2,20),(NULL,10)
+- sql: INSERT INTO grouped_domain_inner VALUES(1,10),(1,10),(2,20)
+cleanup:
+- sql: DROP TABLE grouped_domain_inner
+- sql: DROP TABLE grouped_domain_outer
+test_cases:
+- name: A single completed correlated group retains its value and caller multiplicity
+  sql: >-
+    SELECT id,ceiling,(SELECT owner FROM grouped_domain_inner
+      WHERE owner<=o.id GROUP BY owner ORDER BY owner) AS value
+    FROM grouped_domain_outer o WHERE id=1 ORDER BY ceiling
+  expect: {rows: 2,data: [{id: 1,ceiling: 10,value: 1},{id: 1,ceiling: 20,value: 1}]}
+- name: TSQL observes the same completed single group after decorrelation
+  syntax: tsql
+  sql: >-
+    SELECT id,ceiling,(SELECT TOP(100) owner FROM grouped_domain_inner
+      WHERE owner<=o.id GROUP BY owner ORDER BY owner) AS value
+    FROM grouped_domain_outer o WHERE id=1 ORDER BY ceiling
+  expect: {rows: 2,data: [{id: 1,ceiling: 10,value: 1},{id: 1,ceiling: 20,value: 1}]}
+- name: PostgreSQL observes the same completed single group after decorrelation
+  syntax: psql
+  sql: >-
+    SELECT id,ceiling,(SELECT owner FROM grouped_domain_inner
+      WHERE owner<=o.id GROUP BY owner ORDER BY owner) AS value
+    FROM grouped_domain_outer o WHERE id=1 ORDER BY ceiling
+  expect: {rows: 2,data: [{id: 1,ceiling: 10,value: 1},{id: 1,ceiling: 20,value: 1}]}
+- name: Two actual groups violate scalar cardinality
+  sql: >-
+    SELECT (SELECT owner FROM grouped_domain_inner WHERE owner<=o.id GROUP BY owner ORDER BY owner) AS value
+    FROM grouped_domain_outer o WHERE id=2 AND ceiling=20
+  expect: {error: true,contains: scalar subselect returned more than one row}
+- name: TSQL rejects multiple completed groups rather than inventing a NULL row
+  syntax: tsql
+  sql: >-
+    SELECT (SELECT TOP(100) owner FROM grouped_domain_inner WHERE owner<=o.id GROUP BY owner ORDER BY owner) AS value
+    FROM grouped_domain_outer o WHERE id=2 AND ceiling=20
+  expect: {error: true,contains: scalar subselect returned more than one row}
+- name: PostgreSQL rejects multiple completed groups rather than inventing a NULL row
+  syntax: psql
+  sql: >-
+    SELECT (SELECT owner FROM grouped_domain_inner WHERE owner<=o.id GROUP BY owner ORDER BY owner) AS value
+    FROM grouped_domain_outer o WHERE id=2 AND ceiling=20
+  expect: {error: true,contains: scalar subselect returned more than one row}
+- name: An empty grouped domain and a NULL caller both produce scalar NULL
+  sql: >-
+    SELECT id,(SELECT owner FROM grouped_domain_inner WHERE owner<=o.id GROUP BY owner) AS value
+    FROM grouped_domain_outer o WHERE id=0 OR id IS NULL ORDER BY id
+  expect: {rows: 2,data: [{id: null,value: null},{id: 0,value: null}]}
+- name: Both free coordinates retain independent completed-group domains
+  sql: >-
+    SELECT id,ceiling,(SELECT owner FROM grouped_domain_inner
+      WHERE owner<=o.id AND val<=o.ceiling GROUP BY owner ORDER BY owner) AS value
+    FROM grouped_domain_outer o WHERE id=1 OR ceiling=10 ORDER BY id,ceiling
+  expect:
+    rows: 5
+    data:
+    - {id: null,ceiling: 10,value: null}
+    - {id: 0,ceiling: 10,value: null}
+    - {id: 1,ceiling: 10,value: 1}
+    - {id: 1,ceiling: 20,value: 1}
+    - {id: 2,ceiling: 10,value: 1}
+- name: Equality correlation retains its existing one-group result
+  sql: >-
+    SELECT id,ceiling,(SELECT owner FROM grouped_domain_inner
+      WHERE owner=o.id GROUP BY owner) AS value
+    FROM grouped_domain_outer o WHERE id=2 ORDER BY ceiling
+  expect: {rows: 2,data: [{id: 2,ceiling: 10,value: 2},{id: 2,ceiling: 20,value: 2}]}
+- name: sql grouping-only caller input can collapse every inner row
+  syntax: sql
+  sql: SELECT (SELECT COUNT(*) FROM grouped_domain_inner i GROUP BY i.owner*o.id) AS value FROM grouped_domain_outer
+    o WHERE id=0
+  expect:
+    rows: 1
+    data:
+    - value: 3
+- name: sql grouping-only caller input retains actual multiple groups
+  syntax: sql
+  sql: SELECT (SELECT COUNT(*) FROM grouped_domain_inner i GROUP BY i.owner*o.id) AS value FROM grouped_domain_outer
+    o WHERE id=1 AND ceiling=10
+  expect:
+    error: true
+    contains: scalar subselect returned more than one row
+- name: sql a computed ordering-only coordinate selects the nearest row
+  noncritical: true
+  syntax: sql
+  sql: SELECT id,(SELECT owner FROM grouped_domain_inner i ORDER BY ABS(i.owner-o.id),i.owner LIMIT 1) AS value
+    FROM grouped_domain_outer o WHERE ceiling=10 AND (id=1 OR id=2) ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      value: 1
+    - id: 2
+      value: 2
+- name: tsql grouping-only caller input can collapse every inner row
+  syntax: tsql
+  sql: SELECT (SELECT COUNT(*) FROM grouped_domain_inner i GROUP BY i.owner*o.id) AS value FROM grouped_domain_outer
+    o WHERE id=0
+  expect:
+    rows: 1
+    data:
+    - value: 3
+- name: tsql grouping-only caller input retains actual multiple groups
+  syntax: tsql
+  sql: SELECT (SELECT COUNT(*) FROM grouped_domain_inner i GROUP BY i.owner*o.id) AS value FROM grouped_domain_outer
+    o WHERE id=1 AND ceiling=10
+  expect:
+    error: true
+    contains: scalar subselect returned more than one row
+- name: tsql a computed ordering-only coordinate selects the nearest row
+  noncritical: true
+  syntax: tsql
+  sql: SELECT id,(SELECT TOP(1) owner FROM grouped_domain_inner i ORDER BY ABS(i.owner-o.id),i.owner) AS value FROM
+    grouped_domain_outer o WHERE ceiling=10 AND (id=1 OR id=2) ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      value: 1
+    - id: 2
+      value: 2
+- name: psql grouping-only caller input can collapse every inner row
+  syntax: psql
+  sql: SELECT (SELECT COUNT(*) FROM grouped_domain_inner i GROUP BY i.owner*o.id) AS value FROM grouped_domain_outer
+    o WHERE id=0
+  expect:
+    rows: 1
+    data:
+    - value: 3
+- name: psql grouping-only caller input retains actual multiple groups
+  syntax: psql
+  sql: SELECT (SELECT COUNT(*) FROM grouped_domain_inner i GROUP BY i.owner*o.id) AS value FROM grouped_domain_outer
+    o WHERE id=1 AND ceiling=10
+  expect:
+    error: true
+    contains: scalar subselect returned more than one row
+- name: psql a computed ordering-only coordinate selects the nearest row
+  noncritical: true
+  syntax: psql
+  sql: SELECT id,(SELECT owner FROM grouped_domain_inner i ORDER BY ABS(i.owner-o.id),i.owner LIMIT 1) AS value
+    FROM grouped_domain_outer o WHERE ceiling=10 AND (id=1 OR id=2) ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      value: 1
+    - id: 2
+      value: 2

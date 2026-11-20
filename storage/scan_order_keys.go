@@ -91,7 +91,7 @@ func declareScanOrderKeys(en *scm.Env, ordinary *scm.Declaration) {
 		distinct := rows
 		integer := false
 		// Metadata only: no shard load, index build, or statistics traversal here.
-		for _, row := range target.ShowColumns().Slice() {
+		for _, row := range target.ShowColumns(tx).Slice() {
 			fields := row.Slice()
 			name, typ := "", ""
 			ndv := float64(0)

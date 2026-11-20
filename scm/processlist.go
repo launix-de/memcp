@@ -56,7 +56,7 @@ type SessionState struct {
 
 	scmSession     Scmer     // persistent Scheme session for HTTP connections
 	scmSessionOnce sync.Once // ensures scmSession is initialized exactly once
-
+	principal      atomic.Pointer[sessionPrincipal]
 }
 
 // GetOrCreateScmSession returns the persistent Scheme session for this SessionState,
@@ -413,6 +413,7 @@ func querySessionState(value Scmer) (*SessionState, uint64) {
 }
 
 func init_processlist() {
+	initHTTPSessionAuthority()
 	nextSessionID.Store(1)
 	Declare(&Globalenv, &Declaration{
 		Name: "show_processlist",

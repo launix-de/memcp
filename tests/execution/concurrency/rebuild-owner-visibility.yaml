@@ -1,0 +1,478 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+metadata:
+  version: '1.0'
+  description: Rebuild generations preserve an active transaction's private rows and UNIQUE ownership
+  isolated: true
+setup:
+- sql: CREATE TABLE rebuild_owner_rows(id INT PRIMARY KEY,value INT) ENGINE=MEMORY
+cleanup:
+- sql: DROP TABLE IF EXISTS rebuild_owner_rows
+- sql: DROP TABLE IF EXISTS rebuild_insert_commit
+- sql: DROP TABLE IF EXISTS rebuild_update_commit
+- sql: DROP TABLE IF EXISTS rebuild_delete_rollback
+- sql: DROP TABLE IF EXISTS rebuild_staged_delete
+- sql: DROP TABLE IF EXISTS rebuild_savepoint_before
+- sql: DROP TABLE IF EXISTS rebuild_savepoint_after
+- sql: DROP TABLE IF EXISTS rebuild_update_rollback
+- sql: DROP TABLE IF EXISTS rebuild_delete_commit
+- sql: DROP TABLE IF EXISTS rebuild_cursor_unique
+- sql: DROP TABLE IF EXISTS rebuild_concurrent_writes
+test_cases:
+- name: An ACID insert remains visible only to its owner across repeated rebuilds
+  scm: |
+    (begin
+      (define owner (newsession))
+      (owner "username" "root") (owner "schema" "memcp-tests")
+      (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (define target (table "memcp-tests" false "rebuild_owner_rows" false tx))
+      (define read_rows (lambda (context)
+        (scan context target (list) (list) (list) (lambda () true)
+          (list "id" "value") (lambda (acc id value) (append acc (list id value)))
+          (list) (lambda (left right) (merge (list left right))) false)))
+      (insert target (list "id" "value") (list (list 1 10)) (list) nil false nil tx)
+      (define before (and (equal? (read_rows tx) (list (list 1 10))) (equal? (read_rows nil) (list))))
+      (rebuild target true false)
+      (define first (and (equal? (read_rows tx) (list (list 1 10))) (equal? (read_rows nil) (list))))
+      (rebuild target true false)
+      (define second (and (equal? (read_rows tx) (list (list 1 10))) (equal? (read_rows nil) (list))))
+      (tx_rollback owner)
+      (and before first second (equal? (read_rows nil) (list))))
+  expect:
+    result: true
+  timeout: 10
+- name: An ACID owner can update its retained UNIQUE key after a rebuild
+  scm: |
+    (begin
+      (define owner (newsession))
+      (owner "username" "root") (owner "schema" "memcp-tests")
+      (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (define target (table "memcp-tests" false "rebuild_owner_rows" false tx))
+      (try (lambda () (begin
+        (insert target (list "id" "value") (list (list 2 20)) (list) nil false nil tx)
+        (rebuild target true false)
+        (insert target (list "id" "value") (list (list 2 30)) (list "$update")
+          (lambda (update) (update (list "value" 30))) false nil tx)
+        (rebuild target true false)
+        (define actual (scan tx target (list) (list) (list) (lambda () true)
+          (list "id" "value") (lambda (acc id value) (append acc (list id value)))
+          (list) (lambda (left right) (merge (list left right))) false))
+        (tx_rollback owner)
+        (equal? actual (list (list 2 30)))))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect:
+    result: true
+  timeout: 10
+- name: A staged insert survives repeated rebuilds and becomes public only at commit
+  timeout: 10
+  scm: |
+    (begin
+      (define name "rebuild_insert_commit")
+      (createtable "memcp-tests" name
+        (list (list "column" "id" "INT" (list) (list))
+          (list "column" "value" "INT" (list) (list))
+          (list "unique" "primary" (list "id"))) (list "engine" "memory"))
+      (define target (table "memcp-tests" false name false nil))
+      (define read_rows (lambda (context)
+        (sort (scan context target (list) (list) (list) (lambda () true)
+          (list "id" "value") (lambda (acc id value) (append acc (list id value)))
+          (list) (lambda (left right) (merge (list left right))) false)
+          (lambda (left right) (< (car left) (car right))))))
+      (define owner (newsession))
+      (owner "username" "root") (owner "schema" "memcp-tests")
+
+      (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (define put (lambda (id value)
+        (insert target (list "id" "value") (list (list id value)) (list "$update")
+          (lambda (update) (update (list "value" value))) false nil tx)))
+      (define remove (lambda (key)
+        (scan tx target (list) (list) (list "id") (lambda (id) (equal? id key))
+          (list "$update") (lambda (acc update) (begin (update) nil))
+          nil (lambda (left right) nil) false)))
+      (try (lambda () (begin
+        (put 1 10)
+        (rebuild target true false)
+        (rebuild target true false)
+        (define private (and (equal? (read_rows tx) (list (list 1 10)))
+          (equal? (read_rows nil) (list))))
+        (tx_commit owner)
+        (define result (and private (equal? (read_rows nil) (list (list 1 10)))))
+        result))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect:
+    result: true
+- name: An owner sees its replacement after rebuild while an observer sees the committed row
+  timeout: 10
+  scm: |
+    (begin
+      (define name "rebuild_update_commit")
+      (createtable "memcp-tests" name
+        (list (list "column" "id" "INT" (list) (list))
+          (list "column" "value" "INT" (list) (list))
+          (list "unique" "primary" (list "id"))) (list "engine" "memory"))
+      (define target (table "memcp-tests" false name false nil))
+      (define read_rows (lambda (context)
+        (sort (scan context target (list) (list) (list) (lambda () true)
+          (list "id" "value") (lambda (acc id value) (append acc (list id value)))
+          (list) (lambda (left right) (merge (list left right))) false)
+          (lambda (left right) (< (car left) (car right))))))
+      (define owner (newsession))
+      (owner "username" "root") (owner "schema" "memcp-tests")
+      (insert target (list "id" "value") (list (list 1 10)) (list) nil false nil nil)
+      (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (define put (lambda (id value)
+        (insert target (list "id" "value") (list (list id value)) (list "$update")
+          (lambda (update) (update (list "value" value))) false nil tx)))
+      (define remove (lambda (key)
+        (scan tx target (list) (list) (list "id") (lambda (id) (equal? id key))
+          (list "$update") (lambda (acc update) (begin (update) nil))
+          nil (lambda (left right) nil) false)))
+      (try (lambda () (begin
+        (put 1 20)
+        (rebuild target true false)
+        (rebuild target true false)
+        (define private (and (equal? (read_rows tx) (list (list 1 20)))
+          (equal? (read_rows nil) (list (list 1 10)))))
+        (tx_commit owner)
+        (define result (and private (equal? (read_rows nil) (list (list 1 20)))))
+        result))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect:
+    result: true
+- name: An owner delete stays private across rebuilds and full rollback restores the row
+  timeout: 10
+  scm: |
+    (begin
+      (define name "rebuild_delete_rollback")
+      (createtable "memcp-tests" name
+        (list (list "column" "id" "INT" (list) (list))
+          (list "column" "value" "INT" (list) (list))
+          (list "unique" "primary" (list "id"))) (list "engine" "memory"))
+      (define target (table "memcp-tests" false name false nil))
+      (define read_rows (lambda (context)
+        (sort (scan context target (list) (list) (list) (lambda () true)
+          (list "id" "value") (lambda (acc id value) (append acc (list id value)))
+          (list) (lambda (left right) (merge (list left right))) false)
+          (lambda (left right) (< (car left) (car right))))))
+      (define owner (newsession))
+      (owner "username" "root") (owner "schema" "memcp-tests")
+      (insert target (list "id" "value") (list (list 1 10)) (list) nil false nil nil)
+      (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (define put (lambda (id value)
+        (insert target (list "id" "value") (list (list id value)) (list "$update")
+          (lambda (update) (update (list "value" value))) false nil tx)))
+      (define remove (lambda (key)
+        (scan tx target (list) (list) (list "id") (lambda (id) (equal? id key))
+          (list "$update") (lambda (acc update) (begin (update) nil))
+          nil (lambda (left right) nil) false)))
+      (try (lambda () (begin
+        (remove 1)
+        (rebuild target true false)
+        (rebuild target true false)
+        (define private (and (equal? (read_rows tx) (list))
+          (equal? (read_rows nil) (list (list 1 10)))))
+        (tx_rollback owner)
+        (define result (and private (equal? (read_rows nil) (list (list 1 10)))))
+        result))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect:
+    result: true
+- name: A staged row deleted after rebuild releases its own key without exposing a row
+  timeout: 10
+  scm: |
+    (begin
+      (define name "rebuild_staged_delete")
+      (createtable "memcp-tests" name
+        (list (list "column" "id" "INT" (list) (list))
+          (list "column" "value" "INT" (list) (list))
+          (list "unique" "primary" (list "id"))) (list "engine" "memory"))
+      (define target (table "memcp-tests" false name false nil))
+      (define read_rows (lambda (context)
+        (sort (scan context target (list) (list) (list) (lambda () true)
+          (list "id" "value") (lambda (acc id value) (append acc (list id value)))
+          (list) (lambda (left right) (merge (list left right))) false)
+          (lambda (left right) (< (car left) (car right))))))
+      (define owner (newsession))
+      (owner "username" "root") (owner "schema" "memcp-tests")
+
+      (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (define put (lambda (id value)
+        (insert target (list "id" "value") (list (list id value)) (list "$update")
+          (lambda (update) (update (list "value" value))) false nil tx)))
+      (define remove (lambda (key)
+        (scan tx target (list) (list) (list "id") (lambda (id) (equal? id key))
+          (list "$update") (lambda (acc update) (begin (update) nil))
+          nil (lambda (left right) nil) false)))
+      (try (lambda () (begin
+        (put 1 10)
+        (rebuild target true false)
+        (remove 1)
+        (define removed (and (equal? (read_rows tx) (list)) (equal? (read_rows nil) (list))))
+        (put 1 30)
+        (rebuild target true false)
+        (define replaced (and (equal? (read_rows tx) (list (list 1 30)))
+          (equal? (read_rows nil) (list))))
+        (tx_rollback owner)
+        (define result (and removed replaced (equal? (read_rows nil) (list))))
+        result))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect:
+    result: true
+- name: A savepoint created before rebuild preserves its earlier staged row
+  timeout: 10
+  scm: |
+    (begin
+      (define name "rebuild_savepoint_before")
+      (createtable "memcp-tests" name
+        (list (list "column" "id" "INT" (list) (list))
+          (list "column" "value" "INT" (list) (list))
+          (list "unique" "primary" (list "id"))) (list "engine" "memory"))
+      (define target (table "memcp-tests" false name false nil))
+      (define read_rows (lambda (context)
+        (sort (scan context target (list) (list) (list) (lambda () true)
+          (list "id" "value") (lambda (acc id value) (append acc (list id value)))
+          (list) (lambda (left right) (merge (list left right))) false)
+          (lambda (left right) (< (car left) (car right))))))
+      (define owner (newsession))
+      (owner "username" "root") (owner "schema" "memcp-tests")
+
+      (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (define put (lambda (id value)
+        (insert target (list "id" "value") (list (list id value)) (list "$update")
+          (lambda (update) (update (list "value" value))) false nil tx)))
+      (define remove (lambda (key)
+        (scan tx target (list) (list) (list "id") (lambda (id) (equal? id key))
+          (list "$update") (lambda (acc update) (begin (update) nil))
+          nil (lambda (left right) nil) false)))
+      (try (lambda () (begin
+        (put 1 10)
+        (define saved (tx_savepoint tx))
+        (rebuild target true false)
+        (put 1 20)
+        (put 2 30)
+        (rebuild target true false)
+        (tx_rollback_to_savepoint tx saved)
+        (define restored (and (equal? (read_rows tx) (list (list 1 10)))
+          (equal? (read_rows nil) (list))))
+        (rebuild target true false)
+        (define repeated (equal? (read_rows tx) (list (list 1 10))))
+        (tx_commit owner)
+        (define result (and restored repeated (equal? (read_rows nil) (list (list 1 10)))))
+        result))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect:
+    result: true
+- name: A savepoint created after rebuild can restore a deleted staged row
+  timeout: 10
+  scm: |
+    (begin
+      (define name "rebuild_savepoint_after")
+      (createtable "memcp-tests" name
+        (list (list "column" "id" "INT" (list) (list))
+          (list "column" "value" "INT" (list) (list))
+          (list "unique" "primary" (list "id"))) (list "engine" "memory"))
+      (define target (table "memcp-tests" false name false nil))
+      (define read_rows (lambda (context)
+        (sort (scan context target (list) (list) (list) (lambda () true)
+          (list "id" "value") (lambda (acc id value) (append acc (list id value)))
+          (list) (lambda (left right) (merge (list left right))) false)
+          (lambda (left right) (< (car left) (car right))))))
+      (define owner (newsession))
+      (owner "username" "root") (owner "schema" "memcp-tests")
+
+      (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (define put (lambda (id value)
+        (insert target (list "id" "value") (list (list id value)) (list "$update")
+          (lambda (update) (update (list "value" value))) false nil tx)))
+      (define remove (lambda (key)
+        (scan tx target (list) (list) (list "id") (lambda (id) (equal? id key))
+          (list "$update") (lambda (acc update) (begin (update) nil))
+          nil (lambda (left right) nil) false)))
+      (try (lambda () (begin
+        (put 1 10)
+        (rebuild target true false)
+        (define saved (tx_savepoint tx))
+        (remove 1)
+        (put 2 20)
+        (rebuild target true false)
+        (tx_rollback_to_savepoint tx saved)
+        (define restored (and (equal? (read_rows tx) (list (list 1 10)))
+          (equal? (read_rows nil) (list))))
+        (rebuild target true false)
+        (define repeated (equal? (read_rows tx) (list (list 1 10))))
+        (tx_commit owner)
+        (define result (and restored repeated (equal? (read_rows nil) (list (list 1 10)))))
+        result))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect:
+    result: true
+- name: Rollback restores committed rows changed after an earlier rebuilt replacement
+  timeout: 10
+  scm: |
+    (begin
+      (define name "rebuild_update_rollback")
+      (createtable "memcp-tests" name
+        (list (list "column" "id" "INT" (list) (list))
+          (list "column" "value" "INT" (list) (list))
+          (list "unique" "primary" (list "id"))) (list "engine" "memory"))
+      (define target (table "memcp-tests" false name false nil))
+      (define read_rows (lambda (context)
+        (sort (scan context target (list) (list) (list) (lambda () true)
+          (list "id" "value") (lambda (acc id value) (append acc (list id value)))
+          (list) (lambda (left right) (merge (list left right))) false)
+          (lambda (left right) (< (car left) (car right))))))
+      (define owner (newsession))
+      (owner "username" "root") (owner "schema" "memcp-tests")
+      (insert target (list "id" "value") (list (list 1 10) (list 2 20)) (list) nil false nil nil)
+      (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (define put (lambda (id value)
+        (insert target (list "id" "value") (list (list id value)) (list "$update")
+          (lambda (update) (update (list "value" value))) false nil tx)))
+      (define remove (lambda (key)
+        (scan tx target (list) (list) (list "id") (lambda (id) (equal? id key))
+          (list "$update") (lambda (acc update) (begin (update) nil))
+          nil (lambda (left right) nil) false)))
+      (try (lambda () (begin
+        (put 1 30)
+        (rebuild target true false)
+        (put 1 40)
+        (remove 2)
+        (rebuild target true false)
+        (define private (and (equal? (read_rows tx) (list (list 1 40)))
+          (equal? (read_rows nil) (list (list 1 10) (list 2 20)))))
+        (tx_rollback owner)
+        (define result (and private (equal? (read_rows nil) (list (list 1 10) (list 2 20)))))
+        result))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect:
+    result: true
+- name: A committed owner delete removes the retained row after repeated rebuilds
+  timeout: 10
+  scm: |
+    (begin
+      (define name "rebuild_delete_commit")
+      (createtable "memcp-tests" name
+        (list (list "column" "id" "INT" (list) (list))
+          (list "column" "value" "INT" (list) (list))
+          (list "unique" "primary" (list "id"))) (list "engine" "memory"))
+      (define target (table "memcp-tests" false name false nil))
+      (define read_rows (lambda (context)
+        (sort (scan context target (list) (list) (list) (lambda () true)
+          (list "id" "value") (lambda (acc id value) (append acc (list id value)))
+          (list) (lambda (left right) (merge (list left right))) false)
+          (lambda (left right) (< (car left) (car right))))))
+      (define owner (newsession))
+      (owner "username" "root") (owner "schema" "memcp-tests")
+      (insert target (list "id" "value") (list (list 1 10)) (list) nil false nil nil)
+      (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (define put (lambda (id value)
+        (insert target (list "id" "value") (list (list id value)) (list "$update")
+          (lambda (update) (update (list "value" value))) false nil tx)))
+      (define remove (lambda (key)
+        (scan tx target (list) (list) (list "id") (lambda (id) (equal? id key))
+          (list "$update") (lambda (acc update) (begin (update) nil))
+          nil (lambda (left right) nil) false)))
+      (try (lambda () (begin
+        (remove 1)
+        (rebuild target true false)
+        (rebuild target true false)
+        (define private (and (equal? (read_rows tx) (list))
+          (equal? (read_rows nil) (list (list 1 10)))))
+        (tx_commit owner)
+        (define result (and private (equal? (read_rows nil) (list))))
+        result))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect:
+    result: true
+- name: A cursor-stability owner retains its deleted UNIQUE key across rebuilds
+  timeout: 10
+  scm: |
+    (begin
+      (define name "rebuild_cursor_unique")
+      (createtable "memcp-tests" name
+        (list (list "column" "id" "INT" (list) (list))
+          (list "column" "value" "INT" (list) (list))
+          (list "unique" "primary" (list "id"))) (list "engine" "memory"))
+      (define target (table "memcp-tests" false name false nil))
+      (define read_rows (lambda (context)
+        (sort (scan context target (list) (list) (list) (lambda () true)
+          (list "id" "value") (lambda (acc id value) (append acc (list id value)))
+          (list) (lambda (left right) (merge (list left right))) false)
+          (lambda (left right) (< (car left) (car right))))))
+      (define owner (newsession))
+      (owner "username" "root") (owner "schema" "memcp-tests")
+      (insert target (list "id" "value") (list (list 1 10)) (list) nil false nil nil)
+      (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (define put (lambda (id value)
+        (insert target (list "id" "value") (list (list id value)) (list "$update")
+          (lambda (update) (update (list "value" value))) false nil tx)))
+      (define remove (lambda (key)
+        (scan tx target (list) (list) (list "id") (lambda (id) (equal? id key))
+          (list "$update") (lambda (acc update) (begin (update) nil))
+          nil (lambda (left right) nil) false)))
+      (try (lambda () (begin
+        (remove 1)
+        (rebuild target true false)
+        (put 1 20)
+        (rebuild target true false)
+        (define changed (and (equal? (read_rows tx) (list (list 1 20)))
+          (equal? (read_rows nil) (list (list 1 20)))))
+        (tx_rollback owner)
+        (define result (and changed (equal? (read_rows nil) (list (list 1 10)))))
+        result))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect:
+    result: true
+- name: Joined native writes and rebuilds retain exact private rows and commit once
+  timeout: 10
+  scm: |
+    (begin
+      (define name "rebuild_concurrent_writes")
+      (createtable "memcp-tests" name
+        (list (list "column" "id" "INT" (list) (list))
+          (list "column" "value" "INT" (list) (list))
+          (list "unique" "primary" (list "id"))) (list "engine" "memory"))
+      (define target (table "memcp-tests" false name false nil))
+      (define read_rows (lambda (context)
+        (sort (scan context target (list) (list) (list) (lambda () true)
+          (list "id" "value") (lambda (acc id value) (append acc (list id value)))
+          (list) (lambda (left right) (merge (list left right))) false)
+          (lambda (left right) (< (car left) (car right))))))
+      (define owner (newsession))
+      (owner "username" "root") (owner "schema" "memcp-tests")
+
+      (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (define put (lambda (id value)
+        (insert target (list "id" "value") (list (list id value)) (list "$update")
+          (lambda (update) (update (list "value" value))) false nil tx)))
+      (define remove (lambda (key)
+        (scan tx target (list) (list) (list "id") (lambda (id) (equal? id key))
+          (list "$update") (lambda (acc update) (begin (update) nil))
+          nil (lambda (left right) nil) false)))
+      (try (lambda () (begin
+        (insert target (list "id" "value")
+          (map (produceN 64) (lambda (key) (list key key))) (list) nil false nil tx)
+        (parallel
+          (reduce (produceN 8) (lambda (ignored index) (rebuild target true false)) nil)
+          (reduce (produceN 64) (lambda (ignored key) (put key (+ key 100))) nil))
+        (define expected (map (produceN 64) (lambda (key) (list key (+ key 100)))))
+        (define private (and (equal? (read_rows tx) expected) (equal? (read_rows nil) (list))))
+        (tx_commit owner)
+        (define result (and private (equal? (read_rows nil) expected)))
+        result))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect:
+    result: true

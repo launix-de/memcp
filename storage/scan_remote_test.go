@@ -995,7 +995,7 @@ func TestRemoteUniqueChannelRetainsGuardThroughUpdateAndFinish(t *testing.T) {
 	tbl.Insert([]string{"id", "label"}, [][]scm.Scmer{{scm.NewInt(5), scm.NewString("ſail")}}, nil, scm.NewNil(), false, nil)
 	var triggerCalls atomic.Int32
 	tbl.AddTrigger(TriggerDescription{Name: "observe_unlocked_key", Timing: AfterUpdate, Func: scm.NewFunc(func(...scm.Scmer) scm.Scmer {
-		guard := tbl.guardUniqueWrites([]string{"id"}, [][]scm.Scmer{{scm.NewInt(2)}}, false, 0, nil)
+		guard := tbl.guardUniqueWrites([]string{"id"}, [][]scm.Scmer{{scm.NewInt(2)}}, false, 0, nil, nil)
 		if !guard.tryLock() {
 			panic("AFTER trigger retained the UNIQUE stripe")
 		}
@@ -1051,7 +1051,7 @@ func TestRemoteUniqueChannelRetainsGuardThroughUpdateAndFinish(t *testing.T) {
 			t.Error("reservation did not join after cancellation")
 		}
 	}()
-	guard := tbl.guardUniqueWrites([]string{"id"}, [][]scm.Scmer{{scm.NewInt(2)}}, false, 0, nil)
+	guard := tbl.guardUniqueWrites([]string{"id"}, [][]scm.Scmer{{scm.NewInt(2)}}, false, 0, nil, nil)
 	if guard.tryLock() {
 		guard.unlock()
 		t.Fatal("remote worker released its UNIQUE guard after ready")
@@ -1104,7 +1104,7 @@ func TestRemoteUniqueChannelRetainsGuardThroughUpdateAndFinish(t *testing.T) {
 	guard.lock()
 	guard.unlock()
 	for _, event := range afterEvents {
-		event.table.ExecuteTriggers(event.timing, event.old, event.new, event.tx)
+		event.table.ExecuteTriggers(event.timing, event.old, event.new, event.tx, nil)
 	}
 	if triggerCalls.Load() != 2 {
 		t.Fatalf("AFTER calls = %d, want 2", triggerCalls.Load())

@@ -28,7 +28,7 @@ test_cases:
 
   - name: "Create persistent scalar computed column"
     scm: |
-      (createcolumn (table "memcp-tests" false "sr_data" false) "doubled" "INT" '() '()
+      (createcolumn (table "memcp-tests" false "sr_data" false nil) "doubled" "INT" '() '()
         '("amount") (lambda (amount) (* amount 2)))
 
   - name: "Baseline: scalar computed values are cached"
@@ -207,3 +207,94 @@ test_cases:
     sql: "DROP TABLE IF EXISTS sr_data"
   - name: "Cleanup hidden sloppy table"
     scm: '(droptable "memcp-tests" ".sr_hidden" true)'
+
+  - name: Create mixed native scalar computation fixture
+    sql: CREATE TABLE sr_mixed_clock (id INT PRIMARY KEY, base INT)
+
+  - name: Seed mixed computation inputs
+    sql: INSERT INTO sr_mixed_clock VALUES (1,1),(2,2),(3,3)
+
+  - name: Declare mixed calendar text and NULL computation
+    scm: |
+      (createcolumn (table "memcp-tests" false "sr_mixed_clock" false nil) "derived" "ANY" '() '()
+        '("base") (lambda (base)
+          (if (equal? base 1) (parse_date "9999-12-31 23:59:59.1234567")
+            (equal? base 2) "ordinary text" nil)))
+
+  - name: Warm and check mixed computed scalar values
+    scm: |
+      (scan nil (table "memcp-tests" false "sr_mixed_clock" false nil) '() '() '() (lambda () true)
+        '("base" "derived") (lambda (total base derived)
+          (if (if (equal? base 1) (and (number? derived) (equal? (date_parts derived) '(253402300799 123456700 0)))
+                (equal? base 2) (equal? derived "ordinary text") (nil? derived))
+            (+ total 1) (error "mixed computed value changed"))) 0 +)
+    expect: {result: 3}
+
+  - name: Rebuild warmed mixed computation
+    scm: (rebuild (table "memcp-tests" false "sr_mixed_clock" false nil) true false)
+
+  - name: Persist mixed computation and its enclosing validity state
+    sql: SHUTDOWN
+
+  - name: Restart retains mixed calendar text NULL and enclosing validity
+    scm: |
+      (scan nil (table "memcp-tests" false "sr_mixed_clock" false nil) '() '() '() (lambda () true)
+        '("base" "derived") (lambda (total base derived)
+          (if (if (equal? base 1) (and (number? derived) (equal? (date_parts derived) '(253402300799 123456700 0)))
+                (equal? base 2) (equal? derived "ordinary text") (nil? derived))
+            (+ total 1) (error "reloaded mixed computation changed"))) 0 +)
+    expect: {result: 3}
+
+  - name: Invalidate a reloaded mixed computation
+    sql: UPDATE sr_mixed_clock SET base=2 WHERE id=1
+    expect: {affected_rows: 1}
+
+  - name: Reloaded recipe recomputes after its source changes
+    sql: SELECT derived FROM sr_mixed_clock WHERE id=1
+    expect: {data: [{derived: ordinary text}]}
+
+  - name: Drop mixed computation fixture
+    sql: DROP TABLE sr_mixed_clock
+
+  - name: Create bounded computed tuple inputs
+    sql: CREATE TABLE sr_tuple_data (id INT PRIMARY KEY, value INT)
+
+  - name: Seed distinct bounded tuple inputs
+    sql: INSERT INTO sr_tuple_data VALUES (1,10),(2,20)
+
+  - name: Rebuild scalar inputs before declaring the tuple computation
+    scm: (rebuild (table "memcp-tests" false "sr_tuple_data" false nil) true false)
+
+  - name: Declare a computed tuple with a nullable field
+    scm: |
+      (createcolumn (table "memcp-tests" false "sr_tuple_data" false nil) "packet" "ANY" '() '()
+        '("value") (lambda (value) (list true value (if (equal? value 10) "ten" nil))))
+
+  - name: Computed tuple values preserve all fields before rebuild
+    sql: SELECT id,packet FROM sr_tuple_data ORDER BY id
+    expect: {rows: 2,data: [{id: 1,packet: [true,10,ten]},{id: 2,packet: [true,20,null]}]}
+
+  - name: Rebuild the warmed computed tuples
+    scm: (rebuild (table "memcp-tests" false "sr_tuple_data" false nil) true false)
+
+  - name: Rebuilt computed tuples preserve complete values and NULL fields
+    sql: SELECT id,packet FROM sr_tuple_data ORDER BY id
+    expect: {rows: 2,data: [{id: 1,packet: [true,10,ten]},{id: 2,packet: [true,20,null]}]}
+
+  - name: Persist the rebuilt computed tuples
+    sql: SHUTDOWN
+
+  - name: Reloaded computed tuples preserve complete values and NULL fields
+    sql: SELECT id,packet FROM sr_tuple_data ORDER BY id
+    expect: {rows: 2,data: [{id: 1,packet: [true,10,ten]},{id: 2,packet: [true,20,null]}]}
+
+  - name: Invalidate one reloaded computed tuple
+    sql: UPDATE sr_tuple_data SET value=30 WHERE id=1
+    expect: {affected_rows: 1}
+
+  - name: Updated tuples preserve recomputed values and untouched tuple fields
+    sql: SELECT id,packet FROM sr_tuple_data ORDER BY id
+    expect: {rows: 2,data: [{id: 1,packet: [true,30,null]},{id: 2,packet: [true,20,null]}]}
+
+  - name: Drop the computed tuple fixture
+    sql: DROP TABLE sr_tuple_data

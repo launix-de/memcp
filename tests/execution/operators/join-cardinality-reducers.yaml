@@ -1,0 +1,164 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: Shared physical scalar reducers preserve cardinality, match state, and custom row/shard algebras
+setup:
+  - sql: CREATE TABLE join_scalar_values(id INT PRIMARY KEY,owner_id INT,value INT)
+  - sql: INSERT INTO join_scalar_values VALUES(1,1,NULL),(2,1,7),(3,2,NULL),(4,3,9)
+cleanup:
+  - sql: DROP TABLE IF EXISTS join_scalar_values
+
+test_cases:
+  - name: The first scalar row retains every bounded value including NULL and false
+    scm: |
+      (begin
+        (define mode (list 'reduce (scalar_query_probe_reduce_cardinality) nil nil))
+        (define run (eval (join_scan_reduce_expr mode false)))
+        (reduce (list nil false 0 "" (list) 'ordinary "__scalar_query_probe_empty")
+          (lambda (ok value) (and ok (expression_equal? (run scalar_query_probe_empty value) value))) true))
+    expect: {result: true}
+
+  - name: A second row after a NULL carries the typed cardinality failure
+    scm: |
+      (begin
+        (define run (eval (join_scan_reduce_expr
+          (list 'reduce (scalar_query_probe_reduce_cardinality) nil nil) false)))
+        (try (lambda () (begin (run (run scalar_query_probe_empty nil) 7) false))
+          (lambda (cause) (expression_equal? (failure_value cause)
+            (list "cardinality-error" "scalar subselect returned more than one row")))))
+    expect: {result: true}
+
+  - name: A string spelling of the empty marker is a real first-row value
+    scm: |
+      (begin
+        (define run (eval (join_scan_reduce_expr
+          (list 'reduce (scalar_query_probe_reduce_cardinality) nil nil) false)))
+        (try (lambda () (begin (run (run scalar_query_probe_empty "__scalar_query_probe_empty") nil) false))
+          (lambda (cause) (expression_equal? (failure_value cause)
+            (list "cardinality-error" "scalar subselect returned more than one row")))))
+    expect: {result: true}
+
+  - name: A skipped consumer row retains the exact prior scalar state
+    scm: |
+      (begin
+        (define run (eval (join_scan_reduce_expr
+          (list 'reduce (scalar_query_probe_reduce_cardinality) nil nil) false)))
+        (reduce (list scalar_query_probe_empty nil false (list 1 2))
+          (lambda (ok state) (and ok (identical? (run state join_scan_reduce_skip) state))) true))
+    expect: {result: true}
+
+  - name: Unmatched tuples retain state and a matched NULL records its ON match
+    scm: |
+      (begin
+        (define mode (list 'reduce (scalar_query_probe_reduce_cardinality) nil nil))
+        (define run (eval (join_operand_tuple_reduce_expr (join_scan_reduce_expr mode false) true)))
+        (define empty (list false scalar_query_probe_empty))
+        (and (identical? (run empty (list false 7)) empty)
+          (expression_equal? (run empty (list true nil)) (list true nil))
+          (expression_equal? (run empty (list true join_scan_reduce_skip))
+            (list true scalar_query_probe_empty))))
+    expect: {result: true}
+
+  - name: Shard tuple combination preserves empty and one NULL but rejects two matched rows
+    scm: |
+      (begin
+        (define mode (list 'reduce (scalar_query_probe_reduce_cardinality) nil nil))
+        (define run (eval (join_operand_tuple_reduce_expr (join_scan_shard_reduce_expr mode) true)))
+        (define empty (list false scalar_query_probe_empty))
+        (define one (run empty (list true nil)))
+        (and (expression_equal? one (list true nil))
+          (identical? (run one empty) one)
+          (try (lambda () (begin (run one (list true 9)) false))
+            (lambda (cause) (expression_equal? (failure_value cause)
+              (list "cardinality-error" "scalar subselect returned more than one row"))))))
+    expect: {result: true}
+
+  - name: Custom noncommutative row reduction and separate shard combination retain their algebra
+    scm: |
+      (begin
+        (define row (list 'lambda (list 'acc 'value) (list '+ (list '* 'acc 10) 'value)))
+        (define shard (list 'lambda (list 'acc 'value) (list '+ 'acc 'value)))
+        (define mode (list 'reduce row 0 shard))
+        (define row_run (eval (join_scan_reduce_expr mode false)))
+        (define shard_run (eval (join_scan_shard_reduce_expr mode)))
+        (define tuple_run (eval (join_operand_tuple_reduce_expr (join_scan_reduce_expr mode false) true)))
+        (and (equal? (row_run (row_run 0 1) 2) 12)
+          (equal? (shard_run 12 3) 15)
+          (equal? (row_run 12 join_scan_reduce_skip) 12)
+          (expression_equal? (tuple_run (list true 1) (list true 2)) (list true 12))))
+    expect: {result: true}
+
+  - name: An explicit custom shard algebra is retained beside the standard scalar row reducer
+    scm: |
+      (begin
+        (define combine (list 'lambda (list 'acc 'value) (list '+ 'acc 'value)))
+        (define mode (list 'reduce (scalar_query_probe_reduce_cardinality) nil combine))
+        (define row_run (eval (join_scan_reduce_expr mode false)))
+        (define shard_run (eval (join_scan_reduce_expr mode true)))
+        (and (equal? (shard_run 12 5) 17)
+          (try (lambda () (begin (row_run (row_run scalar_query_probe_empty 12) 5) false))
+            (lambda (cause) (expression_equal? (failure_value cause)
+              (list "cardinality-error" "scalar subselect returned more than one row"))))))
+    expect: {result: true}
+
+  - name: Non-reducing joined operands keep only their bounded ON-match state
+    scm: |
+      (begin
+        (define run (eval (join_operand_tuple_reduce_expr nil false)))
+        (define empty (list false nil))
+        (and (identical? (run empty (list false 7)) empty)
+          (expression_equal? (run empty (list true 7)) (list true nil))))
+    expect: {result: true}
+
+  - name: A custom cardinality diagnostic is preserved rather than replaced by the standard helper
+    scm: |
+      (begin
+        (define failure (cardinality_failure "custom cardinality"))
+        (define raw (list 'lambda (list 'acc 'value)
+          (list 'if (list 'equal? 'acc (list 'quote scalar_query_probe_empty)) 'value
+            (list 'error (list 'quote failure)))))
+        (define run (eval (join_scan_reduce_expr (list 'reduce raw nil nil) false)))
+        (try (lambda () (begin (run (run scalar_query_probe_empty nil) 7) false))
+          (lambda (cause) (expression_equal? (failure_value cause)
+            (list "cardinality-error" "custom cardinality")))))
+    expect: {result: true}
+
+  - name: Published tuple reducers survive serialization and retain typed failures
+    scm: |
+      (begin
+        (define mode (list 'reduce (scalar_query_probe_reduce_cardinality) nil nil))
+        (define reducer (join_operand_tuple_reduce_expr (join_scan_reduce_expr mode false) true))
+        (define code (publish_queryplan_callables
+          (list 'lambda (list 'acc 'value) (list reducer 'acc 'value)) '()))
+        (define run (eval (scheme (serialize (close_procedure (eval code))))))
+        (define scalar_restored (eval (scheme (serialize join_scalar_cardinality_reduce))))
+        (define tuple_restored (eval (scheme (serialize join_scalar_cardinality_tuple_reduce))))
+        (define one (run (list false scalar_query_probe_empty) (list true nil)))
+        (and (expression_equal? (scalar_restored scalar_query_probe_empty nil) nil)
+          (expression_equal? (tuple_restored (list false scalar_query_probe_empty) (list true 7)) (list true 7))
+          (expression_equal? one (list true nil))
+          (try (lambda () (begin (run one (list true 9)) false))
+            (lambda (cause) (expression_equal? (failure_value cause)
+              (list "cardinality-error" "scalar subselect returned more than one row"))))))
+    expect: {result: true}
+
+  - name: MySQL scalar joined producers retain zero and one-row NULL results
+    sql: |
+      SELECT (SELECT value FROM join_scalar_values WHERE id=99) AS empty_value,
+        (SELECT value FROM join_scalar_values WHERE id=3) AS null_value,
+        (SELECT value FROM join_scalar_values WHERE id=4) AS value
+    expect: {rows: 1,data: [{empty_value: null,null_value: null,value: 9}]}
+
+  - name: PostgreSQL scalar cardinality includes an actual first NULL row
+    syntax: postgresql
+    sql: SELECT (SELECT value FROM join_scalar_values WHERE owner_id=1) AS value
+    expect: {error: true,contains: 'scalar subselect returned more than one row'}
+
+  - name: TSQL maps two scalar rows including NULL to number 512 without assignment
+    syntax: tsql
+    sql: |
+      DECLARE @value INT=77,@number INT=0;
+      BEGIN TRY SELECT @value=(SELECT value FROM join_scalar_values WHERE owner_id=1); END TRY
+      BEGIN CATCH SET @number=ERROR_NUMBER(); END CATCH;
+      SELECT @value AS value,@number AS number;
+    expect: {rows: 1,data: [{value: 77,number: 512}]}

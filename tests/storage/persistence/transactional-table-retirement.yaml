@@ -1,0 +1,406 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# https://learn.microsoft.com/sql/t-sql/statements/drop-table-transact-sql
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Public table retirement shares the caller data and declaration decision
+setup:
+- sql: CREATE TABLE retirement_progress(id INT PRIMARY KEY,value INT)
+- sql: INSERT retirement_progress VALUES(1,10)
+- sql: CREATE TABLE retirement_rollback(id INT)
+- sql: INSERT retirement_rollback VALUES(37)
+- sql: CREATE TABLE retirement_savepoint(id INT)
+- sql: INSERT retirement_savepoint VALUES(43)
+- sql: CREATE TABLE retirement_mixed(id INT,value INT CONSTRAINT DF_retirement_mixed DEFAULT 7)
+- sql: INSERT retirement_mixed(id) VALUES(1)
+- sql: CREATE TABLE retirement_accepted(id INT)
+- sql: INSERT retirement_accepted VALUES(55)
+- sql: CREATE TABLE retirement_abandoned(id INT)
+- sql: INSERT retirement_abandoned VALUES(77)
+- sql: CREATE TABLE retirement_defaults(id INT PRIMARY KEY,value INT CONSTRAINT DF_retirement_before DEFAULT 3)
+- sql: INSERT retirement_defaults(id) VALUES(1)
+- sql: CREATE PROCEDURE retirement_module AS SELECT 1 AS value
+- sql: CREATE TABLE retirement_reader(id INT)
+- sql: CREATE TABLE retirement_pair_a(id INT)
+- sql: CREATE TABLE retirement_pair_b(id INT)
+- scm: "(begin\n  (define target (table \"memcp-tests\" false \"retirement_reader\" false nil))\n  (insert target '(\"id\"\
+    ) (produceN 64 (lambda (id) (list id))) '() nil false nil nil)\n  (partitiontable target (list (list \"id\" (list 16 32\
+    \ 48)))) true)"
+- scm: "(begin\n  (createtable \"memcp-tests\" \".retirement_fixture_state\"\n    (list (list \"column\" \"holder\" \"ANY\"\
+    \ (list) (list))) (list \"engine\" \"memory\") false nil)\n  (insert (table \"memcp-tests\" false \".retirement_fixture_state\"\
+    \ false nil)\n    '(\"holder\") (list (list (newsession)))) true)"
+test_cases:
+- name: Prior row effects and a public DROP remain private and roll back together
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: UPDATE retirement_progress SET value=11 WHERE id=1
+    - connection: owner
+      sql: DROP TABLE retirement_rollback
+    - connection: owner
+      sql: SELECT OBJECT_ID(N'retirement_rollback',N'U') AS object_id
+      expect:
+        rows: 1
+        data:
+        - object_id: null
+    - connection: observer
+      sql: SELECT id FROM retirement_rollback
+      expect:
+        rows: 1
+        data:
+        - id: 37
+    - connection: observer
+      sql: SELECT value FROM retirement_progress WHERE id=1
+      expect:
+        rows: 1
+        data:
+        - value: 10
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: owner
+      sql: SELECT id FROM retirement_rollback
+      expect:
+        rows: 1
+        data:
+        - id: 37
+    - connection: owner
+      sql: SELECT value FROM retirement_progress WHERE id=1
+      expect:
+        rows: 1
+        data:
+        - value: 10
+- name: Repeated missing IF EXISTS DROP preserves the original transaction and prefix
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: UPDATE retirement_progress SET value=21 WHERE id=1
+    - connection: owner
+      sql: SAVE TRANSACTION before_retirement
+    - connection: owner
+      sql: DROP TABLE retirement_savepoint
+    - connection: owner
+      sql: DROP TABLE IF EXISTS retirement_savepoint
+    - connection: owner
+      sql: DROP TABLE IF EXISTS retirement_absent
+    - connection: owner
+      sql: SELECT XACT_STATE() AS state,@@TRANCOUNT AS depth
+      expect:
+        rows: 1
+        data:
+        - state: 1
+          depth: 1
+    - connection: owner
+      sql: ROLLBACK TRANSACTION before_retirement
+    - connection: owner
+      sql: SELECT id FROM retirement_savepoint
+      expect:
+        rows: 1
+        data:
+        - id: 43
+    - connection: owner
+      sql: SELECT value FROM retirement_progress WHERE id=1
+      expect:
+        rows: 1
+        data:
+        - value: 21
+    - connection: owner
+      sql: UPDATE retirement_progress SET value=22 WHERE id=1
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT value FROM retirement_progress WHERE id=1
+      expect:
+        rows: 1
+        data:
+        - value: 22
+- name: Defaults and source changes compose with retirement of their table in one commit
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: UPDATE retirement_progress SET value=31 WHERE id=1
+    - connection: owner
+      sql: ALTER TABLE retirement_mixed DROP CONSTRAINT DF_retirement_mixed
+    - connection: owner
+      sql: ALTER TABLE retirement_mixed ADD CONSTRAINT DF_retirement_replaced DEFAULT 9 FOR value
+    - connection: owner
+      sql: ALTER PROCEDURE retirement_module AS SELECT 5 AS value
+    - connection: owner
+      sql: DROP TABLE retirement_mixed
+    - connection: observer
+      sql: SELECT id,value FROM retirement_mixed
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 7
+    - connection: observer
+      sql: EXEC retirement_module
+      expect:
+        rows: 1
+        data:
+        - value: 1
+    - connection: owner
+      sql: UPDATE retirement_progress SET value=32 WHERE id=1
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT OBJECT_ID(N'retirement_mixed',N'U') AS object_id
+      expect:
+        rows: 1
+        data:
+        - object_id: null
+    - connection: observer
+      sql: EXEC retirement_module
+      expect:
+        rows: 1
+        data:
+        - value: 5
+    - connection: observer
+      sql: SELECT value FROM retirement_progress WHERE id=1
+      expect:
+        rows: 1
+        data:
+        - value: 32
+- name: A later same-name generation never inherits predecessor rows
+  sql: CREATE TABLE retirement_mixed(id INT,value INT DEFAULT 17)
+- name: The replacement starts empty
+  sql: SELECT COUNT(*) AS n FROM retirement_mixed
+  expect:
+    rows: 1
+    data:
+    - n: 0
+- name: Populate the replacement through its own declaration
+  sql: INSERT retirement_mixed(id) VALUES(2)
+  expect:
+    affected_rows: 1
+- name: Only the replacement row and default are visible
+  sql: SELECT id,value FROM retirement_mixed
+  expect:
+    rows: 1
+    data:
+    - id: 2
+      value: 17
+- name: A pinned reader completes while retirement commits and explicit cleanup overlaps
+  timeout: 15
+  steps:
+  - scm: "(begin\n  (define h (scan nil (table \"memcp-tests\" false \".retirement_fixture_state\" false nil)\n  '() '() '()\
+      \ (lambda () true) '(\"holder\") (lambda (_ h) h) nil (lambda (_ h) h)))\n  (h \"entered\" (newpromise)) (h \"release\"\
+      \ (newpromise))\n  (h \"cleanup_entered\" (newpromise)) true)"
+    timeout: 10
+    expect:
+      result: true
+  - scm: "(begin\n  (define h (scan nil (table \"memcp-tests\" false \".retirement_fixture_state\" false nil)\n  '() '() '()\
+      \ (lambda () true) '(\"holder\") (lambda (_ h) h) nil (lambda (_ h) h)))\n  (define await (lambda (promise remaining)\n\
+      \  (if (promise \"state\") true\n    (> remaining 0) (begin (sleep 0.001) (await promise (- remaining 1)))\n    true\
+      \ (error \"retirement synchronization timeout\"))))\n  (scan nil (table \"memcp-tests\" false \"retirement_reader\"\
+      \ false nil)\n    '() '() '() (lambda () true) '(\"id\")\n    (lambda (sum id) (begin ((h \"entered\") \"value\" true)\n\
+      \      (await (h \"release\") 5000) (+ sum id))) 0 +))"
+    timeout: 10
+    expect:
+      result: 2016
+    background: true
+  - scm: "(begin\n  (define h (scan nil (table \"memcp-tests\" false \".retirement_fixture_state\" false nil)\n  '() '() '()\
+      \ (lambda () true) '(\"holder\") (lambda (_ h) h) nil (lambda (_ h) h)))\n  (define await (lambda (promise remaining)\n\
+      \  (if (promise \"state\") true\n    (> remaining 0) (begin (sleep 0.001) (await promise (- remaining 1)))\n    true\
+      \ (error \"retirement synchronization timeout\"))))\n  (await (h \"entered\") 5000)\n  (define owner (newsession)) (owner\
+      \ \"username\" \"root\") (tx_begin_acid owner)\n  (droptable \"memcp-tests\" \"retirement_reader\" false (owner \"__memcp_tx\"\
+      ))\n  (tx_commit owner) true)"
+    timeout: 10
+    expect:
+      result: true
+  - scm: "(begin\n  (define h (scan nil (table \"memcp-tests\" false \".retirement_fixture_state\" false nil)\n  '() '() '()\
+      \ (lambda () true) '(\"holder\") (lambda (_ h) h) nil (lambda (_ h) h)))\n  ((h \"cleanup_entered\") \"once\" true)\n\
+      \  (get_assoc (blob_cleanup \"memcp-tests\") \"complete\"))"
+    timeout: 10
+    expect:
+      result: true
+    background: true
+  - scm: "(begin\n  (define h (scan nil (table \"memcp-tests\" false \".retirement_fixture_state\" false nil)\n  '() '() '()\
+      \ (lambda () true) '(\"holder\") (lambda (_ h) h) nil (lambda (_ h) h)))\n  (define await (lambda (promise remaining)\n\
+      \  (if (promise \"state\") true\n    (> remaining 0) (begin (sleep 0.001) (await promise (- remaining 1)))\n    true\
+      \ (error \"retirement synchronization timeout\"))))\n  (await (h \"cleanup_entered\") 5000) ((h \"release\") \"once\"\
+      \ true))"
+    timeout: 10
+    expect:
+      result: true
+  - wait_for_background: true
+- name: The completed reader does not restore the retired public name
+  sql: SELECT OBJECT_ID(N'retirement_reader',N'U') AS object_id
+  expect:
+    rows: 1
+    data:
+    - object_id: null
+- name: Multiple staged table retirements finish while explicit cleanup is queued
+  timeout: 15
+  steps:
+  - scm: "(begin\n  (define h (scan nil (table \"memcp-tests\" false \".retirement_fixture_state\" false nil)\n  '() '() '()\
+      \ (lambda () true) '(\"holder\") (lambda (_ h) h) nil (lambda (_ h) h)))\n  (define owner (newsession)) (owner \"username\"\
+      \ \"root\") (tx_begin_acid owner)\n  (h \"owner\" owner) (h \"pair_cleanup_entered\" (newpromise))\n  (droptable \"\
+      memcp-tests\" \"retirement_pair_a\" false (owner \"__memcp_tx\")) true)"
+    timeout: 10
+    expect:
+      result: true
+  - scm: "(begin\n  (define h (scan nil (table \"memcp-tests\" false \".retirement_fixture_state\" false nil)\n  '() '() '()\
+      \ (lambda () true) '(\"holder\") (lambda (_ h) h) nil (lambda (_ h) h)))\n  ((h \"pair_cleanup_entered\") \"once\" true)\n\
+      \  (get_assoc (blob_cleanup \"memcp-tests\") \"complete\"))"
+    timeout: 10
+    expect:
+      result: true
+    background: true
+  - scm: "(begin\n  (define h (scan nil (table \"memcp-tests\" false \".retirement_fixture_state\" false nil)\n  '() '() '()\
+      \ (lambda () true) '(\"holder\") (lambda (_ h) h) nil (lambda (_ h) h)))\n  (define await (lambda (promise remaining)\n\
+      \  (if (promise \"state\") true\n    (> remaining 0) (begin (sleep 0.001) (await promise (- remaining 1)))\n    true\
+      \ (error \"retirement synchronization timeout\"))))\n  (await (h \"pair_cleanup_entered\") 5000) (sleep 0.02)\n  (droptable\
+      \ \"memcp-tests\" \"retirement_pair_b\" false ((h \"owner\") \"__memcp_tx\"))\n  (tx_commit (h \"owner\")) true)"
+    timeout: 10
+    expect:
+      result: true
+  - wait_for_background: true
+- name: Both retired names remain absent after the queued cleanup
+  sql: SELECT OBJECT_ID(N'retirement_pair_a',N'U') AS first_id,OBJECT_ID(N'retirement_pair_b',N'U') AS second_id
+  expect:
+    rows: 1
+    data:
+    - first_id: null
+      second_id: null
+- name: A staged removal rejects native temporary column writes without waiting on its own declaration
+  timeout: 5
+  scm: "(begin\n  (define old (table \"memcp-tests\" false \"retirement_abandoned\" false nil))\n  (define owner (newsession))\
+    \ (owner \"username\" \"root\") (tx_begin_acid owner)\n  (define tx (owner \"__memcp_tx\"))\n  (droptable \"memcp-tests\"\
+    \ \"retirement_abandoned\" false tx)\n  (define rejected (try (lambda () (begin\n    (createcolumn old \".retirement_probe\"\
+    \ \"INT\" '() '(\"temp\" true) '() nil tx) false))\n    (lambda (failure) (strlike (concat failure) \"%outside its native\
+    \ catalog lifetime%\"))))\n  (tx_rollback owner)\n  (and rejected (equal? (scan nil old '() '() '() (lambda () true) '(\"\
+    id\")\n    (lambda (acc id) (+ acc id)) 0 +) 77)))"
+  expect:
+    result: true
+- name: Old native handles cannot address a later same-name generation
+  scm: "(begin\n  (define old (table \"memcp-tests\" false \"retirement_rollback\" false nil))\n  (define owner (newsession))\
+    \ (owner \"username\" \"root\") (tx_begin_acid owner)\n  (droptable \"memcp-tests\" \"retirement_rollback\" false (owner\
+    \ \"__memcp_tx\"))\n  (tx_commit owner)\n  (createtable \"memcp-tests\" \"retirement_rollback\"\n    (list (list \"column\"\
+    \ \"id\" \"INT\" (list) (list))) (list) false nil)\n  (define fresh (table \"memcp-tests\" false \"retirement_rollback\"\
+    \ false nil))\n  (insert fresh '(\"id\") (list (list 99)) '() nil false nil nil)\n  (define rejected (try (lambda () (begin\n\
+    \    (insert old '(\"id\") (list (list 101)) '() nil false nil nil) false))\n    (lambda (_failure) true)))\n  (and rejected\
+    \ (equal? (scan nil fresh '() '() '() (lambda () true) '(\"id\")\n    (lambda (acc id) (+ acc id)) 0 +) 99)))"
+  expect:
+    result: true
+- name: PostgreSQL table DROP uses the same native rollback ownership
+  steps:
+  - syntax: postgresql
+    session_id: retirement-postgresql
+    sql: BEGIN
+  - syntax: postgresql
+    session_id: retirement-postgresql
+    sql: DROP TABLE retirement_rollback
+  - syntax: postgresql
+    session_id: retirement-postgresql
+    sql: ROLLBACK
+  - syntax: postgresql
+    session_id: retirement-postgresql
+    sql: SELECT id FROM retirement_rollback
+    expect:
+      rows: 1
+      data:
+      - id: 99
+  session_id: retirement-postgresql
+- name: PostgreSQL DROP commit publishes the actual schema effect
+  steps:
+  - syntax: postgresql
+    session_id: retirement-postgresql
+    sql: BEGIN
+  - syntax: postgresql
+    session_id: retirement-postgresql
+    sql: DROP TABLE retirement_savepoint
+  - syntax: postgresql
+    session_id: retirement-postgresql
+    sql: COMMIT
+  - syntax: tsql
+    session_id: retirement-postgresql
+    sql: SELECT OBJECT_ID(N'retirement_savepoint',N'U') AS object_id
+    expect:
+      rows: 1
+      data:
+      - object_id: null
+  session_id: retirement-postgresql
+- name: An accepted DROP retains other source default and row declarations across recovery
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: UPDATE retirement_progress SET value=41 WHERE id=1
+    - connection: owner
+      sql: ALTER TABLE retirement_defaults DROP CONSTRAINT DF_retirement_before
+    - connection: owner
+      sql: ALTER TABLE retirement_defaults ADD CONSTRAINT DF_retirement_after DEFAULT 19 FOR value
+    - connection: owner
+      sql: INSERT retirement_defaults(id) VALUES(2)
+    - connection: owner
+      sql: ALTER PROCEDURE retirement_module AS SELECT 11 AS value
+    - connection: owner
+      sql: DROP TABLE retirement_accepted
+    - connection: owner
+      sql: COMMIT TRANSACTION
+- name: Crash after accepting the common decision
+  scm: (crash)
+  expect:
+    interrupted_ok: true
+- name: Restart with the accepted retirement
+  action: restart
+- name: Accepted names rows defaults and callable sources recover together
+  sql: SELECT OBJECT_ID(N'retirement_accepted',N'U') AS object_id; SELECT value FROM retirement_progress WHERE id=1; SELECT
+    id,value FROM retirement_defaults ORDER BY id; SELECT id,value FROM retirement_mixed; EXEC retirement_module
+  expect:
+    rows: 6
+    data:
+    - object_id: null
+    - value: 41
+    - id: 1
+      value: 3
+    - id: 2
+      value: 19
+    - id: 2
+      value: 17
+    - value: 11
+- name: Unaccepted retirement stays private in its actual surviving request owner
+  session_id: retirement-abandoned
+  sql: BEGIN TRANSACTION; UPDATE retirement_progress SET value=51 WHERE id=1; EXEC sp_executesql N'ALTER PROCEDURE retirement_module
+    AS SELECT 13 AS value'; DROP TABLE retirement_abandoned; SELECT OBJECT_ID(N'retirement_abandoned',N'U') AS object_id
+  expect:
+    rows: 1
+    data:
+    - object_id: null
+- name: Crash before accepting that retirement
+  scm: (crash)
+  expect:
+    interrupted_ok: true
+- name: Restart without accepting the private retirement
+  action: restart
+- name: Unaccepted row and source changes and DROP all recover their predecessor
+  sql: SELECT id FROM retirement_abandoned; SELECT value FROM retirement_progress WHERE id=1; EXEC retirement_module
+  expect:
+    rows: 3
+    data:
+    - id: 77
+    - value: 41
+    - value: 11
+cleanup:
+- sql: DROP PROCEDURE IF EXISTS retirement_module
+- sql: DROP TABLE IF EXISTS retirement_progress
+- sql: DROP TABLE IF EXISTS retirement_rollback
+- sql: DROP TABLE IF EXISTS retirement_savepoint
+- sql: DROP TABLE IF EXISTS retirement_mixed
+- sql: DROP TABLE IF EXISTS retirement_accepted
+- sql: DROP TABLE IF EXISTS retirement_abandoned
+- sql: DROP TABLE IF EXISTS retirement_defaults
+- sql: DROP TABLE IF EXISTS retirement_reader
+- sql: DROP TABLE IF EXISTS retirement_pair_a
+- sql: DROP TABLE IF EXISTS retirement_pair_b
+- scm: (droptable "memcp-tests" ".retirement_fixture_state" true)

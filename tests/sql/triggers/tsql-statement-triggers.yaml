@@ -1,0 +1,165 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  syntax: tsql
+  description: T-SQL statement trigger declarations validate their real SQL command recipes
+
+test_cases:
+- name: Statement delete trigger retains its real conditional error and rollback recipe
+  scm: |
+    (begin
+      (define command (car (cadr (parse_tsql_batch "memcp-tests"
+        "CREATE TRIGGER dbo.statement_guard ON dbo.statement_input FOR DELETE AS BEGIN IF EXISTS(SELECT value FROM deleted WHERE value>5) BEGIN RAISERROR(N'rejected',16,1); ROLLBACK; END END"))))
+      (and (equal? (count command) 9)
+        (equal? (car command) "create-trigger")
+        (equal? (nth command 1) "memcp-tests") (equal? (nth command 2) "statement_guard")
+        (equal? (nth command 3) "memcp-tests") (equal? (nth command 4) "statement_input")
+        (expression_equal? (nth command 5) (list "delete"))
+        (equal? (nth command 6) "BEGIN IF EXISTS(SELECT value FROM deleted WHERE value>5) BEGIN RAISERROR(N'rejected',16,1); ROLLBACK; END END")
+        (equal? (nth command 7) "after_statement")
+        (expression_equal? (nth command 8) false)))
+  expect: {result: true}
+- name: Statement trigger accepts multiple events and a body without an outer block
+  scm: |
+    (begin
+      (define body "DECLARE @n INT; SET @n=(SELECT COUNT(*) FROM inserted); IF @n>0 PRINT N'accepted';")
+      (define command (car (cadr (parse_tsql_batch "memcp-tests"
+        (concat "CREATE TRIGGER dbo.statement_guard ON dbo.statement_input AFTER INSERT,UPDATE AS " body)))))
+      (and (expression_equal? (nth command 5) (list "insert" "update"))
+        (equal? (nth command 6) body)))
+  expect: {result: true}
+- name: Plain ALTER trigger keeps its distinct must exist operation
+  scm: |
+    (begin
+      (define plain (car (cadr (parse_tsql_batch "memcp-tests"
+        "ALTER TRIGGER dbo.statement_guard ON dbo.statement_input AFTER DELETE AS PRINT N'changed';"))))
+      (define replace (car (cadr (parse_tsql_batch "memcp-tests"
+        "CREATE OR ALTER TRIGGER dbo.statement_guard ON dbo.statement_input AFTER DELETE AS PRINT N'changed';"))))
+      (and (equal? (car plain) "alter-trigger") (equal? (count plain) 8)
+        (equal? (car replace) "create-trigger") (equal? (count replace) 9)
+        (expression_equal? (nth replace 8) true)
+        (expression_equal? (nth plain 5) (nth replace 5))
+        (equal? (nth plain 6) (nth replace 6))))
+  expect: {result: true}
+- name: Trigger deletion preserves its database qualifier and if exists admission data
+  scm: |
+    (expression_equal? (parse_tsql_batch "memcp-tests" "DROP TRIGGER IF EXISTS dbo.statement_guard")
+      (list "batch" (list (list "drop-trigger" "memcp-tests" "statement_guard" true))))
+  expect: {result: true}
+- name: Trigger declarations reject duplicated events before publication
+  scm: (parse_tsql_batch "memcp-tests" "CREATE TRIGGER dbo.statement_guard ON dbo.statement_input AFTER INSERT,INSERT AS PRINT N'invalid';")
+  expect: {error: true, contains: duplicate trigger event}
+- name: Trigger declaration cannot hide an invalid body behind source capture
+  scm: (parse_tsql_batch "memcp-tests" "CREATE TRIGGER dbo.statement_guard ON dbo.statement_input FOR DELETE AS BEGIN IF EXISTS(SELECT 1 FROM deleted) INVALID COMMAND; END")
+  expect: {error: true}
+- name: Trigger admission accepts the actual conditional terminal rollback control shape
+  scm: |
+    (begin
+      (define commands (cadr (parse_tsql_batch "memcp-tests"
+        "BEGIN IF EXISTS(SELECT value FROM deleted WHERE value>5) BEGIN RAISERROR(N'rejected',16,1); ROLLBACK; END END")))
+      (expression_equal? (tsql_validate_trigger_body "memcp-tests" commands false) commands))
+  expect: {result: true}
+- name: Trigger admission rejects an executable suffix instead of pretending post rollback DML is transactional
+  scm: |
+    (begin
+      (tsql_validate_trigger_body "memcp-tests" (cadr (parse_tsql_batch "memcp-tests"
+        "BEGIN ROLLBACK; INSERT INTO statement_input VALUES(1); END")) false))
+  expect: {error: true, contains: executable trigger suffix after ROLLBACK}
+- name: Trigger recovery admission distinguishes the real COMMIT semantic recipe
+  scm: |
+    (begin
+      (tsql_validate_trigger_body "memcp-tests" (cadr (parse_tsql_batch "memcp-tests" "COMMIT;")) false))
+  expect: {error: true, contains: only terminal ROLLBACK}
+- name: Trigger admission validates the second branch even when the first already aborts
+  scm: |
+    (begin
+      (tsql_validate_trigger_body "memcp-tests" (cadr (parse_tsql_batch "memcp-tests"
+        "IF 1=1 ROLLBACK ELSE COMMIT;")) false))
+  expect: {error: true, contains: only terminal ROLLBACK}
+- name: Trigger admission rejects loop abort without reopening a drained native operation
+  scm: |
+    (begin
+      (tsql_validate_trigger_body "memcp-tests" (cadr (parse_tsql_batch "memcp-tests"
+        "WHILE 1=1 BEGIN ROLLBACK; END")) false))
+  expect: {error: true, contains: ROLLBACK inside a trigger loop}
+- name: Trigger UPDATE predicate preserves a quoted column identifier as syntax data
+  scm: |
+    (begin
+      (define planning (newsession)) (planning "__tsql_expression_only" true)
+      (define info (parse_tsql "memcp-tests" "UPDATE([value.with.dot])" nil planning nil))
+      (define scoped (newsession))
+      (scoped "__tsql_trigger_event" "update")
+      (scoped "__tsql_trigger_columns" '("value.with.dot"))
+      (scoped "__tsql_trigger_target_columns" '("value.with.dot"))
+      (define held (tsql_scalar_formula "memcp-tests" "UPDATE([value.with.dot])" '() "value" nil nil))
+      (define first (held scoped nil (lambda (_row) true) (lambda args true)))
+      (scoped "__tsql_trigger_columns" '())
+      (and (equal? (sql_info_type info) "BOOLEAN") first
+        (not (held scoped nil (lambda (_row) true) (lambda args true)))))
+  expect: {result: true}
+- name: Trigger UPDATE predicate uses declared assignments and handles zero named columns explicitly
+  scm: |
+    (begin
+      (and (tsql_trigger_column_updated "insert" '() '("value" "0") "value")
+        (tsql_trigger_column_updated "update" '("VALUE" "0") '("value" "0") "value")
+        (tsql_trigger_column_updated "update" '("0") '("value" "0") "0")
+        (not (tsql_trigger_column_updated "update" '() '("value") "value"))
+        (not (tsql_trigger_column_updated "delete" '() '("value") "value"))))
+  expect: {result: true}
+- name: Trigger UPDATE predicate rejects a missing invocation instead of returning SQL NULL
+  scm: |
+    (begin
+      (tsql_trigger_column_updated nil '() '("value") "value"))
+  expect: {error: true, contains: requires a statement trigger invocation}
+- name: Trigger UPDATE predicate rejects an unknown target name instead of reading a row value
+  scm: |
+    (begin
+      (tsql_trigger_column_updated "update" '("missing") '("value") "missing"))
+  expect: {error: true, contains: unknown UPDATE(column) target}
+- name: Trigger control preparation preserves both the diagnostic and actual terminal abort leaves
+  scm: |
+    (begin
+      (define body (tsql_prepare_trigger_body "memcp-tests" (cadr (parse_tsql_batch "memcp-tests"
+        "BEGIN RAISERROR(N'rejected',16,1); ROLLBACK; END")) false))
+      (define commands (cadr (car body)))
+      (and (equal? (count commands) 2)
+        (equal? (car (car commands)) "trigger-raiserror")
+        (expression_equal? (nth commands 1) (list "trigger-rollback"))))
+  expect: {result: true}
+- name: Trigger admission does not fake an unsupported standalone severity sixteen raise
+  scm: |
+    (begin
+      (tsql_prepare_trigger_body "memcp-tests" (cadr (parse_tsql_batch "memcp-tests"
+        "RAISERROR(N'rejected',16,1);")) false))
+  expect: {error: true, contains: immediately following terminal ROLLBACK}
+- name: A literal module local NOCOUNT tail is preserved after a conditional terminal abort
+  scm: |
+    (begin
+      (define commands (cadr (parse_tsql_batch "memcp-tests"
+        "BEGIN SET NOCOUNT ON; IF 1=1 BEGIN RAISERROR(N'rejected',16,1); ROLLBACK; END; SET NOCOUNT OFF; END")))
+      (define prepared (tsql_prepare_trigger_body "memcp-tests" commands false))
+      (equal? (car (reverse (cadr (car prepared)))) (list "statement" "SET NOCOUNT OFF")))
+  expect: {result: true}
+- name: Both static NOCOUNT values have the exact ordinary parser setter contract
+  scm: |
+    (and (tsql_trigger_option_cleanup? "memcp-tests" (list "statement" "SET NOCOUNT ON"))
+      (tsql_trigger_option_cleanup? "memcp-tests" (list "statement" "SET NOCOUNT OFF"))
+      (not (tsql_trigger_option_cleanup? "memcp-tests" (list "statement" "SET DATEFIRST 2")))
+      (not (tsql_trigger_option_cleanup? "memcp-tests" (list "assign" "local" nil "1"))))
+  expect: {result: true}
+- name: A later observable PRINT still rejects after an option cleanup tail
+  scm: (tsql_prepare_trigger_body "memcp-tests" (cadr (parse_tsql_batch "memcp-tests" "ROLLBACK; SET NOCOUNT OFF; PRINT N'observed';")) false)
+  expect: {error: true, contains: executable trigger suffix after ROLLBACK}
+- name: Post rollback row effects are not reclassified as option cleanup
+  scm: (tsql_prepare_trigger_body "memcp-tests" (cadr (parse_tsql_batch "memcp-tests" "ROLLBACK; SET NOCOUNT OFF; INSERT INTO statement_input VALUES(1);")) false)
+  expect: {error: true, contains: executable trigger suffix after ROLLBACK}
+- name: A local variable assignment after abort is not option cleanup
+  scm: (tsql_prepare_trigger_body "memcp-tests" (cadr (parse_tsql_batch "memcp-tests" "ROLLBACK; SET @local=1;")) false)
+  expect: {error: true, contains: executable trigger suffix after ROLLBACK}
+- name: Other SET options do not inherit the exact NOCOUNT proof
+  scm: (tsql_prepare_trigger_body "memcp-tests" (cadr (parse_tsql_batch "memcp-tests" "ROLLBACK; SET DATEFIRST 2;")) false)
+  expect: {error: true, contains: executable trigger suffix after ROLLBACK}
+- name: NOCOUNT cleanup does not permit rollback inside a trigger invoked dynamic module
+  scm: (tsql_prepare_trigger_body "memcp-tests" (cadr (parse_tsql_batch "memcp-tests" "ROLLBACK; SET NOCOUNT OFF;")) true)
+  expect: {error: true, contains: transaction control in a trigger-invoked module is not supported}

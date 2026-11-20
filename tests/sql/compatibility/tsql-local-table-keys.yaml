@@ -1,0 +1,124 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# SQL Server reference: https://dbfiddle.uk/siKnroEi
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Local table schemas use shared native composite key declarations
+setup: []
+cleanup:
+- sql: DROP FUNCTION IF EXISTS dbo.local_pair_rows
+- sql: DROP FUNCTION IF EXISTS dbo.local_pair_sum
+- sql: DROP TABLE IF EXISTS local_key_persistent
+test_cases:
+- name: Composite UNIQUE preserves distinct combinations
+  sql: DECLARE @t TABLE(a INT,b INT,UNIQUE CLUSTERED(a,b)); INSERT @t VALUES(1,2),(1,3),(2,2); SELECT a,b FROM @t
+    ORDER BY a,b
+  expect:
+    rows: 3
+    data: [{a: 1, b: 2}, {a: 1, b: 3}, {a: 2, b: 2}]
+- name: Duplicate composite keys reject the write and preserve prior rows
+  sql: DECLARE @t TABLE(a INT,b INT,UNIQUE(a,b)); INSERT @t VALUES(1,2); BEGIN TRY INSERT @t VALUES(1,2); END TRY
+    BEGIN CATCH PRINT N'duplicate rejected'; END CATCH; SELECT a,b FROM @t
+  expect:
+    rows: 1
+    data: [{a: 1, b: 2}]
+- name: Composite UNIQUE treats equal NULL coordinates as one key
+  sql: DECLARE @t TABLE(a INT,b INT,UNIQUE(a,b)); INSERT @t VALUES(NULL,2),(NULL,3),(1,NULL); BEGIN TRY INSERT @t
+    VALUES(NULL,2); END TRY BEGIN CATCH PRINT N'duplicate rejected'; END CATCH; SELECT a,b FROM @t ORDER BY a,b
+  expect:
+    rows: 3
+    data: [{a: null, b: 2}, {a: null, b: 3}, {a: 1, b: null}]
+- name: Composite PRIMARY KEY publishes nonnullable destination columns
+  sql: DECLARE @t TABLE(a INT,b INT,PRIMARY KEY NONCLUSTERED(a DESC,b ASC)); INSERT @t VALUES(1,2),(1,3); SELECT
+    a,b FROM @t ORDER BY a,b
+  expect:
+    rows: 2
+    data: [{a: 1, b: 2}, {a: 1, b: 3}]
+- name: Composite PRIMARY KEY rejects NULL before publishing a row
+  sql: DECLARE @t TABLE(a INT,b INT,PRIMARY KEY(a,b)); BEGIN TRY INSERT @t VALUES(NULL,2); END TRY BEGIN CATCH PRINT
+    N'null rejected'; END CATCH; SELECT COUNT(*) AS total FROM @t
+  expect:
+    rows: 1
+    data: [{total: 0}]
+- name: Multiple local unique constraints retain their own domains
+  sql: DECLARE @t TABLE(a INT,b INT,c INT,UNIQUE(a,b),UNIQUE(b,c)); INSERT @t VALUES(1,2,3); BEGIN TRY INSERT @t
+    VALUES(2,2,3); END TRY BEGIN CATCH PRINT N'duplicate rejected'; END CATCH; SELECT a,b,c FROM @t
+  expect:
+    rows: 1
+    data: [{a: 1, b: 2, c: 3}]
+- name: Table keys resolve declaration spelling before native binding
+  sql: DECLARE @t TABLE([PartA] INT,[PartB] INT,UNIQUE(parta,PARTB)); INSERT @t VALUES(1,2); SELECT PartA,PartB
+    FROM @t
+  expect:
+    rows: 1
+    data: [{PartA: 1, PartB: 2}]
+- name: An independent table key retains values across caller rollback
+  sql: DECLARE @t TABLE(a INT,b INT,UNIQUE(a,b)); BEGIN TRAN; INSERT @t VALUES(1,2); ROLLBACK; BEGIN TRY INSERT
+    @t VALUES(1,2); END TRY BEGIN CATCH PRINT N'duplicate rejected'; END CATCH; SELECT a,b FROM @t
+  expect:
+    rows: 1
+    data: [{a: 1, b: 2}]
+- name: Key columns must exist in the local declaration
+  sql: DECLARE @t TABLE(a INT,UNIQUE(a,missing));
+  expect:
+    error: true
+- name: Table primary keys cannot include explicitly nullable columns
+  sql: DECLARE @t TABLE(a INT NULL,b INT,PRIMARY KEY(a,b));
+  expect:
+    error: true
+- name: Named table constraints are invalid in table-variable syntax
+  sql: DECLARE @t TABLE(a INT,b INT,CONSTRAINT uq UNIQUE(a,b));
+  expect:
+    error: true
+- name: Named inline key constraints are invalid in table variables
+  sql: DECLARE @t TABLE(a INT CONSTRAINT uq UNIQUE);
+  expect:
+    error: true
+- name: Delimited keyword column names remain ordinary columns
+  sql: DECLARE @t TABLE([unique] INT,b INT,UNIQUE([unique],b)); INSERT @t VALUES(1,2); SELECT [unique],b FROM @t
+  expect:
+    rows: 1
+    data: [{unique: 1, b: 2}]
+- name: A TVF return schema retains its composite native key
+  sql: CREATE FUNCTION dbo.local_pair_rows() RETURNS @r TABLE(a INT,b INT,UNIQUE CLUSTERED(a,b)) AS BEGIN INSERT
+    INTO @r SELECT 1,2; INSERT INTO @r SELECT 1,3; RETURN; END
+- name: A TVF with a declared composite key returns complete rows
+  sql: SELECT a,b FROM dbo.local_pair_rows() ORDER BY a,b
+  expect:
+    rows: 2
+    data: [{a: 1, b: 2}, {a: 1, b: 3}]
+- name: A scalar function can declare a composite-key local table
+  sql: CREATE FUNCTION dbo.local_pair_sum() RETURNS INT AS BEGIN DECLARE @t TABLE(a INT,b INT,PRIMARY KEY(a,b));
+    INSERT INTO @t SELECT 1,2; INSERT INTO @t SELECT 1,3; DECLARE @n INT; SELECT @n=SUM(b) FROM @t; RETURN @n; END
+- name: A scalar function local key uses the normal invocation owner
+  sql: SELECT dbo.local_pair_sum() AS total
+  expect:
+    rows: 1
+    data: [{total: 5}]
+- name: Persistent table named constraints still use the common grammar
+  sql: CREATE TABLE local_key_persistent(a INT,b INT,CONSTRAINT pk_local_key PRIMARY KEY(a),CONSTRAINT uq_local_key
+    UNIQUE(a,b))
+- name: Persistent table constraints still reject duplicates
+  sql: INSERT local_key_persistent VALUES(1,2); BEGIN TRY INSERT local_key_persistent VALUES(1,3); END TRY BEGIN
+    CATCH PRINT N'duplicate rejected'; END CATCH; SELECT a,b FROM local_key_persistent
+  expect:
+    rows: 1
+    data: [{a: 1, b: 2}]
+- name: Native TDS exposes composite PRIMARY KEY nullability
+  tds:
+    statements:
+    - sql: DECLARE @t TABLE(a INT,b INT,PRIMARY KEY(a,b)); INSERT @t VALUES(1,2); SELECT a,b FROM @t
+      expect:
+        rows: 1
+        data:
+        - a: 1
+          b: 2
+        column_types:
+        - name: a
+          type: INT
+          nullable: false
+        - name: b
+          type: INT
+          nullable: false

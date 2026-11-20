@@ -1,0 +1,168 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Catalog column/permission contracts: Microsoft Learn sys.database_permissions,
+# sys.database_principals, sys.server_principals, sys.database_role_members.
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Security catalogs describe current native database authority without object ACLs
+setup:
+- scm: (eval (parse_sql "memcp-tests" "CREATE USER permission_reader IDENTIFIED BY 'pw'" nil))
+- scm: (eval (parse_sql "memcp-tests" "CREATE USER permission_hidden IDENTIFIED BY 'pw'" nil))
+- scm: (eval (parse_sql "memcp-tests" "GRANT ALL ON `memcp-tests`.* TO permission_reader" nil))
+- sql: CREATE TABLE permission_probe(id INT PRIMARY KEY)
+- sql: CREATE TABLE permission_child(id INT,probe_id INT,CONSTRAINT permission_fk FOREIGN KEY(probe_id) REFERENCES permission_probe(id))
+- sql: CREATE VIEW permission_view AS SELECT id FROM permission_probe
+- sql: CREATE PROCEDURE permission_procedure AS SELECT 1 AS value
+- sql: CREATE TABLE permission_saved_object_ids(object_id INT)
+- sql: INSERT permission_saved_object_ids SELECT OBJECT_ID(N'permission_probe')
+- sql: CREATE TABLE permission_saved_principals(principal_id INT,sid VARBINARY(85))
+cleanup:
+- sql: DROP PROCEDURE IF EXISTS permission_procedure
+- sql: DROP VIEW IF EXISTS permission_view
+- sql: DROP TABLE IF EXISTS permission_child
+- sql: DROP TABLE IF EXISTS permission_probe
+- sql: DROP TABLE IF EXISTS permission_pending
+- sql: DROP TABLE IF EXISTS permission_saved_object_ids
+- sql: DROP TABLE IF EXISTS permission_saved_principals
+- scm: (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS permission_reader" nil))
+- scm: (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS permission_hidden" nil))
+test_cases:
+- name: Administrators see only their current login and supported database principals
+  sql: SELECT name,type_desc FROM sys.database_principals ORDER BY principal_id
+  expect: {rows: 2,data: [{name: public,type_desc: DATABASE_ROLE},{name: dbo,type_desc: SQL_USER}]}
+- name: Native database authority is described only at database scope
+  sql: SELECT class,class_desc,major_id,minor_id,permission_name,state_desc FROM sys.database_permissions ORDER BY permission_name
+  expect:
+    rows: 2
+    data:
+    - {class: 0,class_desc: DATABASE,major_id: 0,minor_id: 0,permission_name: CONNECT,state_desc: GRANT}
+    - {class: 0,class_desc: DATABASE,major_id: 0,minor_id: 0,permission_name: CONTROL,state_desc: GRANT}
+- name: Object grant compatibility commands do not create object permission records
+  setup:
+  - sql: GRANT SELECT ON permission_probe TO public
+  - sql: DENY UPDATE ON permission_probe TO permission_reader
+  sql: SELECT COUNT(*) AS total FROM sys.database_permissions WHERE class_desc=N'OBJECT_OR_COLUMN'
+  expect: {rows: 1,data: [{total: 0}]}
+- name: Native roles are not invented to represent direct database membership
+  sql: SELECT role_principal_id,member_principal_id FROM sys.database_role_members
+  expect: {rows: 0}
+- name: Database members see their own SQL principal and no other account names
+  username: permission_reader
+  password: pw
+  session_id: permission-catalog-member
+  sql: SELECT name,type_desc FROM sys.database_principals ORDER BY principal_id
+  expect: {rows: 3,data: [{name: public,type_desc: DATABASE_ROLE},{name: dbo,type_desc: SQL_USER},{name: permission_reader,type_desc: SQL_USER}]}
+- name: Visible principal IDs are unique and resolve each current row
+  username: permission_reader
+  password: pw
+  sql: SELECT p.name,USER_NAME(p.principal_id) AS resolved_name FROM sys.database_principals p ORDER BY p.principal_id
+  expect: {rows: 3,data: [{name: public,resolved_name: public},{name: dbo,resolved_name: dbo},{name: permission_reader,resolved_name: permission_reader}]}
+- name: Server principal projection is confined to the authenticated login
+  username: permission_reader
+  password: pw
+  sql: SELECT name,type_desc FROM sys.server_principals
+  expect: {rows: 1,data: [{name: permission_reader,type_desc: SQL_LOGIN}]}
+- name: Database and server principal SIDs refer to the same current native account
+  username: permission_reader
+  password: pw
+  sql: SELECT p.name,s.name AS login_name,USER_NAME(p.principal_id) AS resolved_name FROM sys.database_permissions a INNER JOIN sys.database_principals p ON a.grantee_principal_id=p.principal_id INNER JOIN sys.server_principals s ON p.sid=s.sid WHERE a.permission_name=N'CONTROL'
+  expect: {rows: 1,data: [{name: permission_reader,login_name: permission_reader,resolved_name: permission_reader}]}
+- name: Supported and missing principal IDs retain scalar NULL semantics
+  sql: SELECT USER_NAME(0) AS public_name,USER_NAME(1) AS owner_name,USER_NAME(-1) AS missing_name,USER_NAME(NULL) AS null_name
+  expect: {rows: 1,data: [{public_name: public,owner_name: dbo,missing_name: null,null_name: null}]}
+- name: Principal and empty membership metadata retain their SQL wire types
+  tds:
+    statements:
+    - sql: SELECT principal_id,name,sid FROM sys.server_principals WHERE 1=0
+      expect: {rows: 0,column_types: [{name: principal_id,type: INT},{name: name,type: NVARCHAR,length: 128},{name: sid,type: VARBINARY,length: 85}]}
+    - sql: SELECT role_principal_id,member_principal_id FROM sys.database_role_members
+      expect: {rows: 0,column_types: [{name: role_principal_id,type: INT},{name: member_principal_id,type: INT}]}
+- name: Object name lookup uses current relation constraint view and source declarations
+  sql: SELECT OBJECT_NAME(OBJECT_ID(N'permission_probe')) AS table_name,OBJECT_NAME(OBJECT_ID(N'permission_fk')) AS constraint_name,OBJECT_NAME(OBJECT_ID(N'permission_view')) AS view_name,OBJECT_NAME(OBJECT_ID(N'permission_procedure')) AS procedure_name,OBJECT_NAME(-1) AS missing_name,OBJECT_NAME(NULL) AS null_name
+  expect: {rows: 1,data: [{table_name: permission_probe,constraint_name: permission_fk,view_name: permission_view,procedure_name: permission_procedure,missing_name: null,null_name: null}]}
+- name: Declared virtual catalogs retain object ID and name roundtrips
+  sql: SELECT OBJECT_NAME(OBJECT_ID(N'sys.objects')) AS objects_name,OBJECT_NAME(OBJECT_ID(N'sys.database_permissions')) AS permissions_name
+  expect: {rows: 1,data: [{objects_name: objects,permissions_name: database_permissions}]}
+- name: Correlated name lookups compose with ordinary catalog joins
+  sql: SELECT c.name,OBJECT_NAME(c.parent_object_id) AS parent_name FROM sys.objects c WHERE c.name=N'permission_fk'
+  expect: {rows: 1,data: [{name: permission_fk,parent_name: permission_child}]}
+- name: Permission reporting joins preserve an empty object scope
+  sql: |
+    WITH reported AS (
+      SELECT USER_NAME(p.grantee_principal_id) AS principal_name,
+        d.principal_id,d.type_desc,p.class_desc,OBJECT_NAME(p.major_id) AS object_name,
+        p.permission_name,p.state_desc,s.name AS login_name
+      FROM sys.database_permissions p
+      LEFT JOIN sys.database_principals d ON p.grantee_principal_id=d.principal_id
+      LEFT JOIN sys.server_principals s ON d.sid=s.sid
+    )
+    SELECT object_name,permission_name FROM (
+      SELECT p.object_name,p.permission_name FROM reported p WHERE p.class_desc=N'OBJECT_OR_COLUMN'
+      UNION
+      SELECT p.object_name,p.permission_name FROM reported p
+      RIGHT JOIN (
+        SELECT r.role_principal_id,USER_NAME(r.member_principal_id) AS member_name
+        FROM sys.database_role_members r
+        INNER JOIN sys.database_principals d ON r.member_principal_id=d.principal_id
+        LEFT JOIN sys.server_principals s ON d.sid=s.sid
+      ) m ON m.role_principal_id=p.principal_id
+    ) rights_report WHERE object_name IS NOT NULL AND permission_name IS NOT NULL
+  expect: {rows: 0}
+- name: Object name lookups observe the requesting transaction
+  tds:
+    statements:
+    - {connection: owner,sql: BEGIN TRANSACTION}
+    - {connection: owner,sql: CREATE TABLE permission_pending(id INT)}
+    - connection: owner
+      sql: SELECT OBJECT_NAME(OBJECT_ID(N'permission_pending')) AS name
+      expect: {rows: 1,data: [{name: permission_pending}]}
+    - sql: SELECT OBJECT_NAME(OBJECT_ID(N'permission_pending')) AS name
+      expect: {rows: 1,data: [{name: null}]}
+    - {connection: owner,sql: ROLLBACK TRANSACTION}
+- name: Warm name lookups first resolve the original durable object identity
+  sql: SELECT OBJECT_NAME(object_id) AS name FROM permission_saved_object_ids
+  expect: {rows: 1,data: [{name: permission_probe}]}
+- name: Dropped object IDs cannot resolve through registry tombstones
+  setup:
+  - sql: DROP TABLE permission_child
+  - sql: DROP VIEW permission_view
+  - sql: DROP TABLE permission_probe
+  - sql: CREATE TABLE permission_probe(id INT PRIMARY KEY)
+  sql: SELECT OBJECT_NAME(object_id) AS name FROM permission_saved_object_ids
+  expect: {rows: 1,data: [{name: null}]}
+- name: Capture the current native login incarnation through its metadata
+  username: permission_reader
+  password: pw
+  session_id: permission-catalog-incarnation
+  sql: INSERT permission_saved_principals SELECT principal_id,sid FROM sys.server_principals
+- name: Dropping and replacing an account changes its exposed principal identity
+  setup:
+  - scm: (eval (parse_sql "memcp-tests" "DROP USER permission_reader" nil))
+  - scm: (eval (parse_sql "memcp-tests" "CREATE USER permission_reader IDENTIFIED BY 'pw'" nil))
+  - scm: (eval (parse_sql "memcp-tests" "GRANT ALL ON `memcp-tests`.* TO permission_reader" nil))
+  username: permission_reader
+  password: pw
+  session_id: permission-catalog-new-incarnation
+  sql: SELECT CASE WHEN p.principal_id<>b.principal_id THEN 1 ELSE 0 END AS changed_id,CASE WHEN p.sid<>b.sid THEN 1 ELSE 0 END AS changed_sid FROM sys.server_principals p CROSS JOIN permission_saved_principals b
+  expect: {rows: 1,data: [{changed_id: 1,changed_sid: 1}]}
+- name: A session authenticated before replacement cannot borrow the new account
+  username: permission_reader
+  password: pw
+  session_id: permission-catalog-incarnation
+  sql: SELECT name FROM sys.server_principals
+  expect: {error: true,contains: session authority changed}
+- name: Native membership revocation invalidates a warmed security catalog plan
+  setup:
+  - scm: (eval (parse_sql "memcp-tests" "REVOKE ALL ON `memcp-tests`.* FROM permission_reader" nil))
+  username: permission_reader
+  password: pw
+  session_id: permission-catalog-new-incarnation
+  sql: SELECT name FROM sys.server_principals
+  expect: {error: true,contains: access denied}
+- name: Security metadata survives restart without persistent object ACLs
+  action: restart
+- name: Restored metadata still describes database authority and current objects
+  sql: SELECT USER_NAME(1) AS owner_name,OBJECT_NAME(OBJECT_ID(N'permission_probe')) AS table_name,(SELECT COUNT(*) FROM sys.database_permissions WHERE class=0) AS database_grants,(SELECT COUNT(*) FROM sys.database_permissions WHERE class<>0) AS object_grants
+  expect: {rows: 1,data: [{owner_name: dbo,table_name: permission_probe,database_grants: 2,object_grants: 0}]}

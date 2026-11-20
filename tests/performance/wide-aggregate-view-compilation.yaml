@@ -1,0 +1,669 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Fixed before A/B: 5 samples, no warmup, total measurement includes cold compilation.
+# Recipes are generated in setup; declaration timing does not include SQL generation.
+# Separate result queries validate positive, negative and all-NULL HAVING semantics.
+# Target views also exist when ordinary correctness mode skips timed cases.
+metadata:
+  description: Wide native declarations and nested views scale across SQL frontend compilation
+  isolated: true
+  perf_ci: true
+  performance_shard_weight: 12
+  max_regression_pct: 20
+setup:
+- scm: |
+    (begin
+      (define columns (merge (list
+        (list (list "unique" "PRIMARY" (list "id"))
+          (list "column" "id" "INT" (list) (list))
+          (list "column" "bucket" "INT" (list) (list)))
+        (map (produceN 192) (lambda (index)
+          (list "column" (concat "c" index) "INT" (list) (list)))))))
+      (sql_create_table "memcp-tests" "wide_compile_input" columns (list "engine" "memory") false nil)
+      (define names (merge (list (list "id" "bucket")
+        (map (produceN 192) (lambda (index) (concat "c" index))))))
+      (define rows (map (produceN 6) (lambda (index) (begin
+        (define bucket (+ 1 (intdiv index 2)))
+        (define factor (* (+ 1 (mod index 2)) (if (equal? bucket 2) -1 1)))
+        (merge (list (list (+ index 1) bucket)
+          (map (produceN 192) (lambda (column)
+            (if (equal? bucket 3) nil (* factor (+ column 1)))))))))))
+      (if (and (equal? (count columns) 195) (equal? (count names) 194)
+        (reduce rows (lambda (valid row) (and valid (equal? (count row) 194))) true))
+        true (error "wide input fixture has a nested column or row list"))
+      /* Keep native table ABI differences outside the shared data setup. */
+      (define csv (lambda (items) (reduce items (lambda (text item)
+        (concat text (if (equal? text "") "" ",") (if (nil? item) "NULL" item))) "")))
+      (define tuples (reduce rows (lambda (text row)
+        (concat text (if (equal? text "") "" ",") "(" (csv row) ")")) ""))
+      (define text (concat "INSERT INTO wide_compile_input(" (csv names) ") VALUES" tuples))
+      (define session (newsession)) (session "schema" "memcp-tests") (session "username" "root")
+      (with_autocommit session nil nil text (lambda (tx)
+        (sql_execute_formula session tx
+          (sql_queryplan_compile_formula tx (parse_sql "memcp-tests" text nil session tx))
+          (lambda (_row) (error "fixture insert emitted a result row")) (lambda (_fields) true))))
+      (globalvars "__wide_compile_frontends" (list "mysql" parse_sql "psql" parse_psql "tsql" parse_tsql))
+      true)
+- syntax: mysql
+  sql: CREATE VIEW wide_compile_inner_mysql AS SELECT * FROM wide_compile_input
+- syntax: mysql
+  sql: CREATE VIEW wide_compile_outer_mysql AS SELECT * FROM wide_compile_inner_mysql
+- syntax: psql
+  sql: CREATE VIEW wide_compile_inner_psql AS SELECT * FROM wide_compile_input
+- syntax: psql
+  sql: CREATE VIEW wide_compile_outer_psql AS SELECT * FROM wide_compile_inner_psql
+- syntax: tsql
+  sql: CREATE VIEW wide_compile_inner_tsql AS SELECT * FROM wide_compile_input
+- syntax: tsql
+  sql: CREATE VIEW wide_compile_outer_tsql AS SELECT * FROM wide_compile_inner_tsql
+- scm: |
+    (begin
+      (define case_expression (lambda (index)
+        (concat "CASE WHEN ABS(a.c" index "-b.c" index ")>0 OR ABS(c.c" index "-d.c" index
+          ")>0 THEN e.c" index " ELSE f.c" index " END")))
+      (define source_clause (lambda (dialect)
+        (concat "FROM wide_compile_outer_" dialect " a "
+          "INNER JOIN wide_compile_input b ON b.id=a.id "
+          "INNER JOIN wide_compile_outer_" dialect " c ON c.id=a.id "
+          "INNER JOIN wide_compile_input d ON d.id=a.id "
+          "INNER JOIN wide_compile_inner_" dialect " e ON e.id=a.id "
+          "INNER JOIN wide_compile_input f ON f.id=a.id "
+          "INNER JOIN wide_compile_inner_" dialect " g ON g.id=a.id")))
+      (define declarations (reduce (list "mysql" "psql" "tsql") (lambda (recipes dialect)
+        (reduce (list 8 32 128) (lambda (recipes width) (begin
+          (define projection (reduce (produceN width) (lambda (sql index)
+            (concat sql (if (equal? index 0) "" ",\n  ")
+              "SUM(" (case_expression index) ") AS s" index)) ""))
+          (define having (reduce (produceN width) (lambda (sql index)
+            (concat sql (if (equal? index 0) "" " OR\n  ")
+              "SUM(" (case_expression index) ")>0")) ""))
+          (define text (concat (if (equal? dialect "tsql") "CREATE OR ALTER VIEW " "CREATE OR REPLACE VIEW ")
+            "wide_compile_result_" dialect "_" width " AS\nSELECT a.bucket,\n  " projection "\n"
+            (source_clause dialect) "\nGROUP BY a.bucket\nHAVING " having))
+          (set_assoc recipes (concat dialect "_" width) text))) recipes)) (list)))
+      (globalvars "__wide_compile_declarations" declarations)
+      true)
+- scm: |
+    (begin
+      (map (list "mysql" "psql" "tsql") (lambda (dialect)
+        (map (list 8 32 128) (lambda (width) (begin
+          (define parser ((globalvars "__wide_compile_frontends") dialect))
+          (define text ((globalvars "__wide_compile_declarations") (concat dialect "_" width)))
+          (define session (newsession))
+          (session "schema" "memcp-tests")
+          (session "username" "root")
+          (with_autocommit session nil nil text (lambda (tx)
+            (sql_execute_formula session tx
+              (sql_queryplan_compile_formula tx (parser "memcp-tests" text nil session tx))
+              (lambda (row) (error "declaration emitted a relational result")) (lambda (fields) true))))
+          true)))))
+      true)
+test_cases:
+- name: mysql declaration compilation with 8 aggregate projections
+  scm: |
+    (begin
+      (define parser ((globalvars "__wide_compile_frontends") "mysql"))
+      (define text ((globalvars "__wide_compile_declarations") "mysql_8"))
+      (define session (newsession))
+      (session "schema" "memcp-tests")
+      (session "username" "root")
+      (with_autocommit session nil nil text (lambda (tx)
+        (sql_execute_formula session tx
+          (sql_queryplan_compile_formula tx (parser "memcp-tests" text nil session tx))
+          (lambda (row) (error "declaration emitted a relational result")) (lambda (fields) true))))
+      true)
+  expect:
+    data:
+    - true
+  performance_rows: 6
+  threshold_ms: 10000
+  timeout: 120
+  warmup: 0
+  timing_samples: 5
+  timing_aggregation: total
+- name: mysql 8 projected aggregate view preserves positive HAVING totals
+  syntax: mysql
+  sql: SELECT bucket,s0 AS first_total,s7 AS last_total FROM wide_compile_result_mysql_8 ORDER BY bucket
+  expect:
+    rows: 1
+    data:
+    - bucket: 1
+      first_total: 3
+      last_total: 24
+- name: mysql 8 aggregate input preserves negative HAVING totals
+  syntax: mysql
+  sql: |
+    SELECT a.bucket,SUM(CASE WHEN ABS(a.c0-b.c0)>0 OR ABS(c.c0-d.c0)>0 THEN e.c0 ELSE f.c0 END) AS first_total,SUM(CASE WHEN ABS(a.c7-b.c7)>0 OR ABS(c.c7-d.c7)>0 THEN e.c7 ELSE f.c7 END) AS last_total
+    FROM wide_compile_outer_mysql a INNER JOIN wide_compile_input b ON b.id=a.id INNER JOIN wide_compile_outer_mysql c ON c.id=a.id INNER JOIN wide_compile_input d ON d.id=a.id INNER JOIN wide_compile_inner_mysql e ON e.id=a.id INNER JOIN wide_compile_input f ON f.id=a.id INNER JOIN wide_compile_inner_mysql g ON g.id=a.id
+    GROUP BY a.bucket
+    HAVING SUM(CASE WHEN ABS(a.c0-b.c0)>0 OR ABS(c.c0-d.c0)>0 THEN e.c0 ELSE f.c0 END)<0 OR SUM(CASE WHEN ABS(a.c7-b.c7)>0 OR ABS(c.c7-d.c7)>0 THEN e.c7 ELSE f.c7 END)<0
+    ORDER BY a.bucket
+  expect:
+    rows: 1
+    data:
+    - bucket: 2
+      first_total: -3
+      last_total: -24
+- name: mysql 8 aggregate input preserves NULL HAVING totals
+  syntax: mysql
+  sql: |
+    SELECT a.bucket,SUM(CASE WHEN ABS(a.c0-b.c0)>0 OR ABS(c.c0-d.c0)>0 THEN e.c0 ELSE f.c0 END) AS first_total,SUM(CASE WHEN ABS(a.c7-b.c7)>0 OR ABS(c.c7-d.c7)>0 THEN e.c7 ELSE f.c7 END) AS last_total
+    FROM wide_compile_outer_mysql a INNER JOIN wide_compile_input b ON b.id=a.id INNER JOIN wide_compile_outer_mysql c ON c.id=a.id INNER JOIN wide_compile_input d ON d.id=a.id INNER JOIN wide_compile_inner_mysql e ON e.id=a.id INNER JOIN wide_compile_input f ON f.id=a.id INNER JOIN wide_compile_inner_mysql g ON g.id=a.id
+    GROUP BY a.bucket
+    HAVING SUM(CASE WHEN ABS(a.c0-b.c0)>0 OR ABS(c.c0-d.c0)>0 THEN e.c0 ELSE f.c0 END) IS NULL AND SUM(CASE WHEN ABS(a.c7-b.c7)>0 OR ABS(c.c7-d.c7)>0 THEN e.c7 ELSE f.c7 END) IS NULL
+    ORDER BY a.bucket
+  expect:
+    rows: 1
+    data:
+    - bucket: 3
+      first_total: null
+      last_total: null
+- name: mysql declaration compilation with 32 aggregate projections
+  scm: |
+    (begin
+      (define parser ((globalvars "__wide_compile_frontends") "mysql"))
+      (define text ((globalvars "__wide_compile_declarations") "mysql_32"))
+      (define session (newsession))
+      (session "schema" "memcp-tests")
+      (session "username" "root")
+      (with_autocommit session nil nil text (lambda (tx)
+        (sql_execute_formula session tx
+          (sql_queryplan_compile_formula tx (parser "memcp-tests" text nil session tx))
+          (lambda (row) (error "declaration emitted a relational result")) (lambda (fields) true))))
+      true)
+  expect:
+    data:
+    - true
+  performance_rows: 6
+  threshold_ms: 10000
+  timeout: 120
+  warmup: 0
+  timing_samples: 5
+  timing_aggregation: total
+- name: mysql 32 projected aggregate view preserves positive HAVING totals
+  syntax: mysql
+  sql: SELECT bucket,s0 AS first_total,s31 AS last_total FROM wide_compile_result_mysql_32 ORDER BY bucket
+  expect:
+    rows: 1
+    data:
+    - bucket: 1
+      first_total: 3
+      last_total: 96
+- name: mysql 32 aggregate input preserves negative HAVING totals
+  syntax: mysql
+  sql: |
+    SELECT a.bucket,SUM(CASE WHEN ABS(a.c0-b.c0)>0 OR ABS(c.c0-d.c0)>0 THEN e.c0 ELSE f.c0 END) AS first_total,SUM(CASE WHEN ABS(a.c31-b.c31)>0 OR ABS(c.c31-d.c31)>0 THEN e.c31 ELSE f.c31 END) AS last_total
+    FROM wide_compile_outer_mysql a INNER JOIN wide_compile_input b ON b.id=a.id INNER JOIN wide_compile_outer_mysql c ON c.id=a.id INNER JOIN wide_compile_input d ON d.id=a.id INNER JOIN wide_compile_inner_mysql e ON e.id=a.id INNER JOIN wide_compile_input f ON f.id=a.id INNER JOIN wide_compile_inner_mysql g ON g.id=a.id
+    GROUP BY a.bucket
+    HAVING SUM(CASE WHEN ABS(a.c0-b.c0)>0 OR ABS(c.c0-d.c0)>0 THEN e.c0 ELSE f.c0 END)<0 OR SUM(CASE WHEN ABS(a.c31-b.c31)>0 OR ABS(c.c31-d.c31)>0 THEN e.c31 ELSE f.c31 END)<0
+    ORDER BY a.bucket
+  expect:
+    rows: 1
+    data:
+    - bucket: 2
+      first_total: -3
+      last_total: -96
+- name: mysql 32 aggregate input preserves NULL HAVING totals
+  syntax: mysql
+  sql: |
+    SELECT a.bucket,SUM(CASE WHEN ABS(a.c0-b.c0)>0 OR ABS(c.c0-d.c0)>0 THEN e.c0 ELSE f.c0 END) AS first_total,SUM(CASE WHEN ABS(a.c31-b.c31)>0 OR ABS(c.c31-d.c31)>0 THEN e.c31 ELSE f.c31 END) AS last_total
+    FROM wide_compile_outer_mysql a INNER JOIN wide_compile_input b ON b.id=a.id INNER JOIN wide_compile_outer_mysql c ON c.id=a.id INNER JOIN wide_compile_input d ON d.id=a.id INNER JOIN wide_compile_inner_mysql e ON e.id=a.id INNER JOIN wide_compile_input f ON f.id=a.id INNER JOIN wide_compile_inner_mysql g ON g.id=a.id
+    GROUP BY a.bucket
+    HAVING SUM(CASE WHEN ABS(a.c0-b.c0)>0 OR ABS(c.c0-d.c0)>0 THEN e.c0 ELSE f.c0 END) IS NULL AND SUM(CASE WHEN ABS(a.c31-b.c31)>0 OR ABS(c.c31-d.c31)>0 THEN e.c31 ELSE f.c31 END) IS NULL
+    ORDER BY a.bucket
+  expect:
+    rows: 1
+    data:
+    - bucket: 3
+      first_total: null
+      last_total: null
+- name: mysql declaration compilation with 128 aggregate projections
+  scm: |
+    (begin
+      (define parser ((globalvars "__wide_compile_frontends") "mysql"))
+      (define text ((globalvars "__wide_compile_declarations") "mysql_128"))
+      (define session (newsession))
+      (session "schema" "memcp-tests")
+      (session "username" "root")
+      (with_autocommit session nil nil text (lambda (tx)
+        (sql_execute_formula session tx
+          (sql_queryplan_compile_formula tx (parser "memcp-tests" text nil session tx))
+          (lambda (row) (error "declaration emitted a relational result")) (lambda (fields) true))))
+      true)
+  expect:
+    data:
+    - true
+  performance_rows: 6
+  threshold_ms: 10000
+  timeout: 120
+  warmup: 0
+  timing_samples: 5
+  timing_aggregation: total
+- name: mysql 128 projected aggregate view preserves positive HAVING totals
+  syntax: mysql
+  sql: SELECT bucket,s0 AS first_total,s127 AS last_total FROM wide_compile_result_mysql_128 ORDER BY bucket
+  expect:
+    rows: 1
+    data:
+    - bucket: 1
+      first_total: 3
+      last_total: 384
+- name: mysql 128 aggregate input preserves negative HAVING totals
+  syntax: mysql
+  sql: |
+    SELECT a.bucket,SUM(CASE WHEN ABS(a.c0-b.c0)>0 OR ABS(c.c0-d.c0)>0 THEN e.c0 ELSE f.c0 END) AS first_total,SUM(CASE WHEN ABS(a.c127-b.c127)>0 OR ABS(c.c127-d.c127)>0 THEN e.c127 ELSE f.c127 END) AS last_total
+    FROM wide_compile_outer_mysql a INNER JOIN wide_compile_input b ON b.id=a.id INNER JOIN wide_compile_outer_mysql c ON c.id=a.id INNER JOIN wide_compile_input d ON d.id=a.id INNER JOIN wide_compile_inner_mysql e ON e.id=a.id INNER JOIN wide_compile_input f ON f.id=a.id INNER JOIN wide_compile_inner_mysql g ON g.id=a.id
+    GROUP BY a.bucket
+    HAVING SUM(CASE WHEN ABS(a.c0-b.c0)>0 OR ABS(c.c0-d.c0)>0 THEN e.c0 ELSE f.c0 END)<0 OR SUM(CASE WHEN ABS(a.c127-b.c127)>0 OR ABS(c.c127-d.c127)>0 THEN e.c127 ELSE f.c127 END)<0
+    ORDER BY a.bucket
+  expect:
+    rows: 1
+    data:
+    - bucket: 2
+      first_total: -3
+      last_total: -384
+- name: mysql 128 aggregate input preserves NULL HAVING totals
+  syntax: mysql
+  sql: |
+    SELECT a.bucket,SUM(CASE WHEN ABS(a.c0-b.c0)>0 OR ABS(c.c0-d.c0)>0 THEN e.c0 ELSE f.c0 END) AS first_total,SUM(CASE WHEN ABS(a.c127-b.c127)>0 OR ABS(c.c127-d.c127)>0 THEN e.c127 ELSE f.c127 END) AS last_total
+    FROM wide_compile_outer_mysql a INNER JOIN wide_compile_input b ON b.id=a.id INNER JOIN wide_compile_outer_mysql c ON c.id=a.id INNER JOIN wide_compile_input d ON d.id=a.id INNER JOIN wide_compile_inner_mysql e ON e.id=a.id INNER JOIN wide_compile_input f ON f.id=a.id INNER JOIN wide_compile_inner_mysql g ON g.id=a.id
+    GROUP BY a.bucket
+    HAVING SUM(CASE WHEN ABS(a.c0-b.c0)>0 OR ABS(c.c0-d.c0)>0 THEN e.c0 ELSE f.c0 END) IS NULL AND SUM(CASE WHEN ABS(a.c127-b.c127)>0 OR ABS(c.c127-d.c127)>0 THEN e.c127 ELSE f.c127 END) IS NULL
+    ORDER BY a.bucket
+  expect:
+    rows: 1
+    data:
+    - bucket: 3
+      first_total: null
+      last_total: null
+- name: psql declaration compilation with 8 aggregate projections
+  scm: |
+    (begin
+      (define parser ((globalvars "__wide_compile_frontends") "psql"))
+      (define text ((globalvars "__wide_compile_declarations") "psql_8"))
+      (define session (newsession))
+      (session "schema" "memcp-tests")
+      (session "username" "root")
+      (with_autocommit session nil nil text (lambda (tx)
+        (sql_execute_formula session tx
+          (sql_queryplan_compile_formula tx (parser "memcp-tests" text nil session tx))
+          (lambda (row) (error "declaration emitted a relational result")) (lambda (fields) true))))
+      true)
+  expect:
+    data:
+    - true
+  performance_rows: 6
+  threshold_ms: 10000
+  timeout: 120
+  warmup: 0
+  timing_samples: 5
+  timing_aggregation: total
+- name: psql 8 projected aggregate view preserves positive HAVING totals
+  syntax: psql
+  sql: SELECT bucket,s0 AS first_total,s7 AS last_total FROM wide_compile_result_psql_8 ORDER BY bucket
+  expect:
+    rows: 1
+    data:
+    - bucket: 1
+      first_total: 3
+      last_total: 24
+- name: psql 8 aggregate input preserves negative HAVING totals
+  syntax: psql
+  sql: |
+    SELECT a.bucket,SUM(CASE WHEN ABS(a.c0-b.c0)>0 OR ABS(c.c0-d.c0)>0 THEN e.c0 ELSE f.c0 END) AS first_total,SUM(CASE WHEN ABS(a.c7-b.c7)>0 OR ABS(c.c7-d.c7)>0 THEN e.c7 ELSE f.c7 END) AS last_total
+    FROM wide_compile_outer_psql a INNER JOIN wide_compile_input b ON b.id=a.id INNER JOIN wide_compile_outer_psql c ON c.id=a.id INNER JOIN wide_compile_input d ON d.id=a.id INNER JOIN wide_compile_inner_psql e ON e.id=a.id INNER JOIN wide_compile_input f ON f.id=a.id INNER JOIN wide_compile_inner_psql g ON g.id=a.id
+    GROUP BY a.bucket
+    HAVING SUM(CASE WHEN ABS(a.c0-b.c0)>0 OR ABS(c.c0-d.c0)>0 THEN e.c0 ELSE f.c0 END)<0 OR SUM(CASE WHEN ABS(a.c7-b.c7)>0 OR ABS(c.c7-d.c7)>0 THEN e.c7 ELSE f.c7 END)<0
+    ORDER BY a.bucket
+  expect:
+    rows: 1
+    data:
+    - bucket: 2
+      first_total: -3
+      last_total: -24
+- name: psql 8 aggregate input preserves NULL HAVING totals
+  syntax: psql
+  sql: |
+    SELECT a.bucket,SUM(CASE WHEN ABS(a.c0-b.c0)>0 OR ABS(c.c0-d.c0)>0 THEN e.c0 ELSE f.c0 END) AS first_total,SUM(CASE WHEN ABS(a.c7-b.c7)>0 OR ABS(c.c7-d.c7)>0 THEN e.c7 ELSE f.c7 END) AS last_total
+    FROM wide_compile_outer_psql a INNER JOIN wide_compile_input b ON b.id=a.id INNER JOIN wide_compile_outer_psql c ON c.id=a.id INNER JOIN wide_compile_input d ON d.id=a.id INNER JOIN wide_compile_inner_psql e ON e.id=a.id INNER JOIN wide_compile_input f ON f.id=a.id INNER JOIN wide_compile_inner_psql g ON g.id=a.id
+    GROUP BY a.bucket
+    HAVING SUM(CASE WHEN ABS(a.c0-b.c0)>0 OR ABS(c.c0-d.c0)>0 THEN e.c0 ELSE f.c0 END) IS NULL AND SUM(CASE WHEN ABS(a.c7-b.c7)>0 OR ABS(c.c7-d.c7)>0 THEN e.c7 ELSE f.c7 END) IS NULL
+    ORDER BY a.bucket
+  expect:
+    rows: 1
+    data:
+    - bucket: 3
+      first_total: null
+      last_total: null
+- name: psql declaration compilation with 32 aggregate projections
+  scm: |
+    (begin
+      (define parser ((globalvars "__wide_compile_frontends") "psql"))
+      (define text ((globalvars "__wide_compile_declarations") "psql_32"))
+      (define session (newsession))
+      (session "schema" "memcp-tests")
+      (session "username" "root")
+      (with_autocommit session nil nil text (lambda (tx)
+        (sql_execute_formula session tx
+          (sql_queryplan_compile_formula tx (parser "memcp-tests" text nil session tx))
+          (lambda (row) (error "declaration emitted a relational result")) (lambda (fields) true))))
+      true)
+  expect:
+    data:
+    - true
+  performance_rows: 6
+  threshold_ms: 10000
+  timeout: 120
+  warmup: 0
+  timing_samples: 5
+  timing_aggregation: total
+- name: psql 32 projected aggregate view preserves positive HAVING totals
+  syntax: psql
+  sql: SELECT bucket,s0 AS first_total,s31 AS last_total FROM wide_compile_result_psql_32 ORDER BY bucket
+  expect:
+    rows: 1
+    data:
+    - bucket: 1
+      first_total: 3
+      last_total: 96
+- name: psql 32 aggregate input preserves negative HAVING totals
+  syntax: psql
+  sql: |
+    SELECT a.bucket,SUM(CASE WHEN ABS(a.c0-b.c0)>0 OR ABS(c.c0-d.c0)>0 THEN e.c0 ELSE f.c0 END) AS first_total,SUM(CASE WHEN ABS(a.c31-b.c31)>0 OR ABS(c.c31-d.c31)>0 THEN e.c31 ELSE f.c31 END) AS last_total
+    FROM wide_compile_outer_psql a INNER JOIN wide_compile_input b ON b.id=a.id INNER JOIN wide_compile_outer_psql c ON c.id=a.id INNER JOIN wide_compile_input d ON d.id=a.id INNER JOIN wide_compile_inner_psql e ON e.id=a.id INNER JOIN wide_compile_input f ON f.id=a.id INNER JOIN wide_compile_inner_psql g ON g.id=a.id
+    GROUP BY a.bucket
+    HAVING SUM(CASE WHEN ABS(a.c0-b.c0)>0 OR ABS(c.c0-d.c0)>0 THEN e.c0 ELSE f.c0 END)<0 OR SUM(CASE WHEN ABS(a.c31-b.c31)>0 OR ABS(c.c31-d.c31)>0 THEN e.c31 ELSE f.c31 END)<0
+    ORDER BY a.bucket
+  expect:
+    rows: 1
+    data:
+    - bucket: 2
+      first_total: -3
+      last_total: -96
+- name: psql 32 aggregate input preserves NULL HAVING totals
+  syntax: psql
+  sql: |
+    SELECT a.bucket,SUM(CASE WHEN ABS(a.c0-b.c0)>0 OR ABS(c.c0-d.c0)>0 THEN e.c0 ELSE f.c0 END) AS first_total,SUM(CASE WHEN ABS(a.c31-b.c31)>0 OR ABS(c.c31-d.c31)>0 THEN e.c31 ELSE f.c31 END) AS last_total
+    FROM wide_compile_outer_psql a INNER JOIN wide_compile_input b ON b.id=a.id INNER JOIN wide_compile_outer_psql c ON c.id=a.id INNER JOIN wide_compile_input d ON d.id=a.id INNER JOIN wide_compile_inner_psql e ON e.id=a.id INNER JOIN wide_compile_input f ON f.id=a.id INNER JOIN wide_compile_inner_psql g ON g.id=a.id
+    GROUP BY a.bucket
+    HAVING SUM(CASE WHEN ABS(a.c0-b.c0)>0 OR ABS(c.c0-d.c0)>0 THEN e.c0 ELSE f.c0 END) IS NULL AND SUM(CASE WHEN ABS(a.c31-b.c31)>0 OR ABS(c.c31-d.c31)>0 THEN e.c31 ELSE f.c31 END) IS NULL
+    ORDER BY a.bucket
+  expect:
+    rows: 1
+    data:
+    - bucket: 3
+      first_total: null
+      last_total: null
+- name: psql declaration compilation with 128 aggregate projections
+  scm: |
+    (begin
+      (define parser ((globalvars "__wide_compile_frontends") "psql"))
+      (define text ((globalvars "__wide_compile_declarations") "psql_128"))
+      (define session (newsession))
+      (session "schema" "memcp-tests")
+      (session "username" "root")
+      (with_autocommit session nil nil text (lambda (tx)
+        (sql_execute_formula session tx
+          (sql_queryplan_compile_formula tx (parser "memcp-tests" text nil session tx))
+          (lambda (row) (error "declaration emitted a relational result")) (lambda (fields) true))))
+      true)
+  expect:
+    data:
+    - true
+  performance_rows: 6
+  threshold_ms: 10000
+  timeout: 120
+  warmup: 0
+  timing_samples: 5
+  timing_aggregation: total
+- name: psql 128 projected aggregate view preserves positive HAVING totals
+  syntax: psql
+  sql: SELECT bucket,s0 AS first_total,s127 AS last_total FROM wide_compile_result_psql_128 ORDER BY bucket
+  expect:
+    rows: 1
+    data:
+    - bucket: 1
+      first_total: 3
+      last_total: 384
+- name: psql 128 aggregate input preserves negative HAVING totals
+  syntax: psql
+  sql: |
+    SELECT a.bucket,SUM(CASE WHEN ABS(a.c0-b.c0)>0 OR ABS(c.c0-d.c0)>0 THEN e.c0 ELSE f.c0 END) AS first_total,SUM(CASE WHEN ABS(a.c127-b.c127)>0 OR ABS(c.c127-d.c127)>0 THEN e.c127 ELSE f.c127 END) AS last_total
+    FROM wide_compile_outer_psql a INNER JOIN wide_compile_input b ON b.id=a.id INNER JOIN wide_compile_outer_psql c ON c.id=a.id INNER JOIN wide_compile_input d ON d.id=a.id INNER JOIN wide_compile_inner_psql e ON e.id=a.id INNER JOIN wide_compile_input f ON f.id=a.id INNER JOIN wide_compile_inner_psql g ON g.id=a.id
+    GROUP BY a.bucket
+    HAVING SUM(CASE WHEN ABS(a.c0-b.c0)>0 OR ABS(c.c0-d.c0)>0 THEN e.c0 ELSE f.c0 END)<0 OR SUM(CASE WHEN ABS(a.c127-b.c127)>0 OR ABS(c.c127-d.c127)>0 THEN e.c127 ELSE f.c127 END)<0
+    ORDER BY a.bucket
+  expect:
+    rows: 1
+    data:
+    - bucket: 2
+      first_total: -3
+      last_total: -384
+- name: psql 128 aggregate input preserves NULL HAVING totals
+  syntax: psql
+  sql: |
+    SELECT a.bucket,SUM(CASE WHEN ABS(a.c0-b.c0)>0 OR ABS(c.c0-d.c0)>0 THEN e.c0 ELSE f.c0 END) AS first_total,SUM(CASE WHEN ABS(a.c127-b.c127)>0 OR ABS(c.c127-d.c127)>0 THEN e.c127 ELSE f.c127 END) AS last_total
+    FROM wide_compile_outer_psql a INNER JOIN wide_compile_input b ON b.id=a.id INNER JOIN wide_compile_outer_psql c ON c.id=a.id INNER JOIN wide_compile_input d ON d.id=a.id INNER JOIN wide_compile_inner_psql e ON e.id=a.id INNER JOIN wide_compile_input f ON f.id=a.id INNER JOIN wide_compile_inner_psql g ON g.id=a.id
+    GROUP BY a.bucket
+    HAVING SUM(CASE WHEN ABS(a.c0-b.c0)>0 OR ABS(c.c0-d.c0)>0 THEN e.c0 ELSE f.c0 END) IS NULL AND SUM(CASE WHEN ABS(a.c127-b.c127)>0 OR ABS(c.c127-d.c127)>0 THEN e.c127 ELSE f.c127 END) IS NULL
+    ORDER BY a.bucket
+  expect:
+    rows: 1
+    data:
+    - bucket: 3
+      first_total: null
+      last_total: null
+- name: tsql declaration compilation with 8 aggregate projections
+  scm: |
+    (begin
+      (define parser ((globalvars "__wide_compile_frontends") "tsql"))
+      (define text ((globalvars "__wide_compile_declarations") "tsql_8"))
+      (define session (newsession))
+      (session "schema" "memcp-tests")
+      (session "username" "root")
+      (with_autocommit session nil nil text (lambda (tx)
+        (sql_execute_formula session tx
+          (sql_queryplan_compile_formula tx (parser "memcp-tests" text nil session tx))
+          (lambda (row) (error "declaration emitted a relational result")) (lambda (fields) true))))
+      true)
+  expect:
+    data:
+    - true
+  performance_rows: 6
+  threshold_ms: 10000
+  timeout: 120
+  warmup: 0
+  timing_samples: 5
+  timing_aggregation: total
+- name: tsql 8 projected aggregate view preserves positive HAVING totals
+  syntax: tsql
+  sql: SELECT bucket,s0 AS first_total,s7 AS last_total FROM wide_compile_result_tsql_8 ORDER BY bucket
+  expect:
+    rows: 1
+    data:
+    - bucket: 1
+      first_total: 3
+      last_total: 24
+- name: tsql 8 aggregate input preserves negative HAVING totals
+  syntax: tsql
+  sql: |
+    SELECT a.bucket,SUM(CASE WHEN ABS(a.c0-b.c0)>0 OR ABS(c.c0-d.c0)>0 THEN e.c0 ELSE f.c0 END) AS first_total,SUM(CASE WHEN ABS(a.c7-b.c7)>0 OR ABS(c.c7-d.c7)>0 THEN e.c7 ELSE f.c7 END) AS last_total
+    FROM wide_compile_outer_tsql a INNER JOIN wide_compile_input b ON b.id=a.id INNER JOIN wide_compile_outer_tsql c ON c.id=a.id INNER JOIN wide_compile_input d ON d.id=a.id INNER JOIN wide_compile_inner_tsql e ON e.id=a.id INNER JOIN wide_compile_input f ON f.id=a.id INNER JOIN wide_compile_inner_tsql g ON g.id=a.id
+    GROUP BY a.bucket
+    HAVING SUM(CASE WHEN ABS(a.c0-b.c0)>0 OR ABS(c.c0-d.c0)>0 THEN e.c0 ELSE f.c0 END)<0 OR SUM(CASE WHEN ABS(a.c7-b.c7)>0 OR ABS(c.c7-d.c7)>0 THEN e.c7 ELSE f.c7 END)<0
+    ORDER BY a.bucket
+  expect:
+    rows: 1
+    data:
+    - bucket: 2
+      first_total: -3
+      last_total: -24
+- name: tsql 8 aggregate input preserves NULL HAVING totals
+  syntax: tsql
+  sql: |
+    SELECT a.bucket,SUM(CASE WHEN ABS(a.c0-b.c0)>0 OR ABS(c.c0-d.c0)>0 THEN e.c0 ELSE f.c0 END) AS first_total,SUM(CASE WHEN ABS(a.c7-b.c7)>0 OR ABS(c.c7-d.c7)>0 THEN e.c7 ELSE f.c7 END) AS last_total
+    FROM wide_compile_outer_tsql a INNER JOIN wide_compile_input b ON b.id=a.id INNER JOIN wide_compile_outer_tsql c ON c.id=a.id INNER JOIN wide_compile_input d ON d.id=a.id INNER JOIN wide_compile_inner_tsql e ON e.id=a.id INNER JOIN wide_compile_input f ON f.id=a.id INNER JOIN wide_compile_inner_tsql g ON g.id=a.id
+    GROUP BY a.bucket
+    HAVING SUM(CASE WHEN ABS(a.c0-b.c0)>0 OR ABS(c.c0-d.c0)>0 THEN e.c0 ELSE f.c0 END) IS NULL AND SUM(CASE WHEN ABS(a.c7-b.c7)>0 OR ABS(c.c7-d.c7)>0 THEN e.c7 ELSE f.c7 END) IS NULL
+    ORDER BY a.bucket
+  expect:
+    rows: 1
+    data:
+    - bucket: 3
+      first_total: null
+      last_total: null
+- name: tsql declaration compilation with 32 aggregate projections
+  scm: |
+    (begin
+      (define parser ((globalvars "__wide_compile_frontends") "tsql"))
+      (define text ((globalvars "__wide_compile_declarations") "tsql_32"))
+      (define session (newsession))
+      (session "schema" "memcp-tests")
+      (session "username" "root")
+      (with_autocommit session nil nil text (lambda (tx)
+        (sql_execute_formula session tx
+          (sql_queryplan_compile_formula tx (parser "memcp-tests" text nil session tx))
+          (lambda (row) (error "declaration emitted a relational result")) (lambda (fields) true))))
+      true)
+  expect:
+    data:
+    - true
+  performance_rows: 6
+  threshold_ms: 10000
+  timeout: 120
+  warmup: 0
+  timing_samples: 5
+  timing_aggregation: total
+- name: tsql 32 projected aggregate view preserves positive HAVING totals
+  syntax: tsql
+  sql: SELECT bucket,s0 AS first_total,s31 AS last_total FROM wide_compile_result_tsql_32 ORDER BY bucket
+  expect:
+    rows: 1
+    data:
+    - bucket: 1
+      first_total: 3
+      last_total: 96
+- name: tsql 32 aggregate input preserves negative HAVING totals
+  syntax: tsql
+  sql: |
+    SELECT a.bucket,SUM(CASE WHEN ABS(a.c0-b.c0)>0 OR ABS(c.c0-d.c0)>0 THEN e.c0 ELSE f.c0 END) AS first_total,SUM(CASE WHEN ABS(a.c31-b.c31)>0 OR ABS(c.c31-d.c31)>0 THEN e.c31 ELSE f.c31 END) AS last_total
+    FROM wide_compile_outer_tsql a INNER JOIN wide_compile_input b ON b.id=a.id INNER JOIN wide_compile_outer_tsql c ON c.id=a.id INNER JOIN wide_compile_input d ON d.id=a.id INNER JOIN wide_compile_inner_tsql e ON e.id=a.id INNER JOIN wide_compile_input f ON f.id=a.id INNER JOIN wide_compile_inner_tsql g ON g.id=a.id
+    GROUP BY a.bucket
+    HAVING SUM(CASE WHEN ABS(a.c0-b.c0)>0 OR ABS(c.c0-d.c0)>0 THEN e.c0 ELSE f.c0 END)<0 OR SUM(CASE WHEN ABS(a.c31-b.c31)>0 OR ABS(c.c31-d.c31)>0 THEN e.c31 ELSE f.c31 END)<0
+    ORDER BY a.bucket
+  expect:
+    rows: 1
+    data:
+    - bucket: 2
+      first_total: -3
+      last_total: -96
+- name: tsql 32 aggregate input preserves NULL HAVING totals
+  syntax: tsql
+  sql: |
+    SELECT a.bucket,SUM(CASE WHEN ABS(a.c0-b.c0)>0 OR ABS(c.c0-d.c0)>0 THEN e.c0 ELSE f.c0 END) AS first_total,SUM(CASE WHEN ABS(a.c31-b.c31)>0 OR ABS(c.c31-d.c31)>0 THEN e.c31 ELSE f.c31 END) AS last_total
+    FROM wide_compile_outer_tsql a INNER JOIN wide_compile_input b ON b.id=a.id INNER JOIN wide_compile_outer_tsql c ON c.id=a.id INNER JOIN wide_compile_input d ON d.id=a.id INNER JOIN wide_compile_inner_tsql e ON e.id=a.id INNER JOIN wide_compile_input f ON f.id=a.id INNER JOIN wide_compile_inner_tsql g ON g.id=a.id
+    GROUP BY a.bucket
+    HAVING SUM(CASE WHEN ABS(a.c0-b.c0)>0 OR ABS(c.c0-d.c0)>0 THEN e.c0 ELSE f.c0 END) IS NULL AND SUM(CASE WHEN ABS(a.c31-b.c31)>0 OR ABS(c.c31-d.c31)>0 THEN e.c31 ELSE f.c31 END) IS NULL
+    ORDER BY a.bucket
+  expect:
+    rows: 1
+    data:
+    - bucket: 3
+      first_total: null
+      last_total: null
+- name: tsql declaration compilation with 128 aggregate projections
+  scm: |
+    (begin
+      (define parser ((globalvars "__wide_compile_frontends") "tsql"))
+      (define text ((globalvars "__wide_compile_declarations") "tsql_128"))
+      (define session (newsession))
+      (session "schema" "memcp-tests")
+      (session "username" "root")
+      (with_autocommit session nil nil text (lambda (tx)
+        (sql_execute_formula session tx
+          (sql_queryplan_compile_formula tx (parser "memcp-tests" text nil session tx))
+          (lambda (row) (error "declaration emitted a relational result")) (lambda (fields) true))))
+      true)
+  expect:
+    data:
+    - true
+  performance_rows: 6
+  threshold_ms: 10000
+  timeout: 120
+  warmup: 0
+  timing_samples: 5
+  timing_aggregation: total
+- name: tsql 128 projected aggregate view preserves positive HAVING totals
+  syntax: tsql
+  sql: SELECT bucket,s0 AS first_total,s127 AS last_total FROM wide_compile_result_tsql_128 ORDER BY bucket
+  expect:
+    rows: 1
+    data:
+    - bucket: 1
+      first_total: 3
+      last_total: 384
+- name: tsql 128 aggregate input preserves negative HAVING totals
+  syntax: tsql
+  sql: |
+    SELECT a.bucket,SUM(CASE WHEN ABS(a.c0-b.c0)>0 OR ABS(c.c0-d.c0)>0 THEN e.c0 ELSE f.c0 END) AS first_total,SUM(CASE WHEN ABS(a.c127-b.c127)>0 OR ABS(c.c127-d.c127)>0 THEN e.c127 ELSE f.c127 END) AS last_total
+    FROM wide_compile_outer_tsql a INNER JOIN wide_compile_input b ON b.id=a.id INNER JOIN wide_compile_outer_tsql c ON c.id=a.id INNER JOIN wide_compile_input d ON d.id=a.id INNER JOIN wide_compile_inner_tsql e ON e.id=a.id INNER JOIN wide_compile_input f ON f.id=a.id INNER JOIN wide_compile_inner_tsql g ON g.id=a.id
+    GROUP BY a.bucket
+    HAVING SUM(CASE WHEN ABS(a.c0-b.c0)>0 OR ABS(c.c0-d.c0)>0 THEN e.c0 ELSE f.c0 END)<0 OR SUM(CASE WHEN ABS(a.c127-b.c127)>0 OR ABS(c.c127-d.c127)>0 THEN e.c127 ELSE f.c127 END)<0
+    ORDER BY a.bucket
+  expect:
+    rows: 1
+    data:
+    - bucket: 2
+      first_total: -3
+      last_total: -384
+- name: tsql 128 aggregate input preserves NULL HAVING totals
+  syntax: tsql
+  sql: |
+    SELECT a.bucket,SUM(CASE WHEN ABS(a.c0-b.c0)>0 OR ABS(c.c0-d.c0)>0 THEN e.c0 ELSE f.c0 END) AS first_total,SUM(CASE WHEN ABS(a.c127-b.c127)>0 OR ABS(c.c127-d.c127)>0 THEN e.c127 ELSE f.c127 END) AS last_total
+    FROM wide_compile_outer_tsql a INNER JOIN wide_compile_input b ON b.id=a.id INNER JOIN wide_compile_outer_tsql c ON c.id=a.id INNER JOIN wide_compile_input d ON d.id=a.id INNER JOIN wide_compile_inner_tsql e ON e.id=a.id INNER JOIN wide_compile_input f ON f.id=a.id INNER JOIN wide_compile_inner_tsql g ON g.id=a.id
+    GROUP BY a.bucket
+    HAVING SUM(CASE WHEN ABS(a.c0-b.c0)>0 OR ABS(c.c0-d.c0)>0 THEN e.c0 ELSE f.c0 END) IS NULL AND SUM(CASE WHEN ABS(a.c127-b.c127)>0 OR ABS(c.c127-d.c127)>0 THEN e.c127 ELSE f.c127 END) IS NULL
+    ORDER BY a.bucket
+  expect:
+    rows: 1
+    data:
+    - bucket: 3
+      first_total: null
+      last_total: null
+cleanup:
+- syntax: mysql
+  sql: DROP VIEW IF EXISTS wide_compile_result_mysql_8
+- syntax: mysql
+  sql: DROP VIEW IF EXISTS wide_compile_result_mysql_32
+- syntax: mysql
+  sql: DROP VIEW IF EXISTS wide_compile_result_mysql_128
+- syntax: mysql
+  sql: DROP VIEW IF EXISTS wide_compile_outer_mysql
+- syntax: mysql
+  sql: DROP VIEW IF EXISTS wide_compile_inner_mysql
+- syntax: psql
+  sql: DROP VIEW IF EXISTS wide_compile_result_psql_8
+- syntax: psql
+  sql: DROP VIEW IF EXISTS wide_compile_result_psql_32
+- syntax: psql
+  sql: DROP VIEW IF EXISTS wide_compile_result_psql_128
+- syntax: psql
+  sql: DROP VIEW IF EXISTS wide_compile_outer_psql
+- syntax: psql
+  sql: DROP VIEW IF EXISTS wide_compile_inner_psql
+- syntax: tsql
+  sql: DROP VIEW IF EXISTS wide_compile_result_tsql_8
+- syntax: tsql
+  sql: DROP VIEW IF EXISTS wide_compile_result_tsql_32
+- syntax: tsql
+  sql: DROP VIEW IF EXISTS wide_compile_result_tsql_128
+- syntax: tsql
+  sql: DROP VIEW IF EXISTS wide_compile_outer_tsql
+- syntax: tsql
+  sql: DROP VIEW IF EXISTS wide_compile_inner_tsql
+- sql: DROP TABLE IF EXISTS wide_compile_input
+- scm: |
+    (begin
+      (globalvars "__wide_compile_frontends" nil)
+      (globalvars "__wide_compile_declarations" nil)
+      true)

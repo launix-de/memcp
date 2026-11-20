@@ -1,0 +1,75 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  description: Nested relational scalar arguments finish in the caller scope before catalog factories add sources
+setup:
+  - sql: CREATE TABLE nested_catalog_input(id INT PRIMARY KEY)
+  - sql: INSERT nested_catalog_input VALUES(1)
+cleanup:
+  - sql: DROP TABLE IF EXISTS nested_catalog_input
+test_cases:
+  - name: Nested factory arguments expand before their enclosing expression
+    scm: |-
+      (begin
+        (define add (close_procedure (lambda (arguments _sources _policy _planning _tx)
+          (list '+ (car arguments) 1))))
+        (define twice (close_procedure (lambda (arguments _sources _policy _planning _tx)
+          (list '* (car arguments) 2))))
+        (define expression (list 'tsql_relational_scalar_call twice
+          (list (list 'tsql_relational_scalar_call add (list 3)))))
+        (eval (tsql_expand_relational_scalar_calls expression '() nil (newsession) nil)))
+    expect: {result: 8}
+  - name: Three nested factories retain the complete value expression
+    scm: |-
+      (begin
+        (define add (close_procedure (lambda (arguments _sources _policy _planning _tx)
+          (list '+ (car arguments) 1))))
+        (define twice (close_procedure (lambda (arguments _sources _policy _planning _tx)
+          (list '* (car arguments) 2))))
+        (define inner (list 'tsql_relational_scalar_call add (list 3)))
+        (define middle (list 'tsql_relational_scalar_call twice (list inner)))
+        (eval (tsql_expand_relational_scalar_calls
+          (list 'tsql_relational_scalar_call twice (list middle)) '() nil (newsession) nil)))
+    expect: {result: 16}
+  - name: Quoted relational call descriptors remain ordinary data
+    scm: |-
+      (begin
+        (define factory (close_procedure (lambda (_arguments _sources _policy _planning _tx)
+          (error "quoted factory must not execute"))))
+        (define datum (list 'tsql_relational_scalar_call factory (list 3)))
+        (expression_equal? datum (eval (tsql_expand_relational_scalar_calls
+          (list 'quote datum) '() nil (newsession) nil))))
+    expect: {result: true}
+  - name: Object names consume the actual nested object identity
+    sql: SELECT OBJECT_NAME(OBJECT_ID(N'dbo.nested_catalog_input')) AS name
+    expect: {rows: 1, data: [{name: nested_catalog_input}]}
+  - name: Object classification consumes the actual nested object identity
+    sql: SELECT OBJECTPROPERTY(OBJECT_ID(N'dbo.nested_catalog_input'),N'IsUserTable') AS value
+    expect: {rows: 1, data: [{value: 1}]}
+  - name: Nested argument columns bind before catalog aliases are introduced
+    sql: SELECT source.id,OBJECT_NAME(OBJECT_ID(source.name)) AS object_name FROM(VALUES(1,N'nested_catalog_input'),(2,N'nested_catalog_missing')) source(id,name) ORDER BY source.id
+    expect: {rows: 2, data: [{id: 1, object_name: nested_catalog_input}, {id: 2, object_name: null}]}
+  - name: NULL and missing nested identities remain NULL
+    sql: SELECT OBJECT_NAME(OBJECT_ID(NULL)) AS null_name,OBJECT_NAME(OBJECT_ID(N'nested_catalog_missing')) AS missing_name
+    expect: {rows: 1, data: [{null_name: null, missing_name: null}]}
+  - name: A missing caller alias remains a genuine binding failure
+    sql: SELECT OBJECT_NAME(OBJECT_ID(missing.name)) AS name FROM nested_catalog_input source
+    expect: {error: true, contains: 'unknown relation alias: missing'}
+  - name: The original nested lookup observes the current declaration
+    session_id: nested-catalog-freshness
+    sql: SELECT OBJECTPROPERTY(OBJECT_ID(N'nested_catalog_input'),N'IsUserTable') AS value
+    expect: {rows: 1, data: [{value: 1}]}
+  - name: Retire the actual declaration without changing the lookup text
+    sql: DROP TABLE nested_catalog_input
+  - name: The same nested lookup observes the retired declaration
+    session_id: nested-catalog-freshness
+    sql: SELECT OBJECTPROPERTY(OBJECT_ID(N'nested_catalog_input'),N'IsUserTable') AS value
+    expect: {rows: 1, data: [{value: null}]}
+  - name: Recreate an actual fresh table declaration
+    sql: CREATE TABLE nested_catalog_input(id INT PRIMARY KEY)
+  - name: The same nested lookup observes the recreated declaration
+    session_id: nested-catalog-freshness
+    sql: SELECT OBJECTPROPERTY(OBJECT_ID(N'nested_catalog_input'),N'IsUserTable') AS value
+    expect: {rows: 1, data: [{value: 1}]}

@@ -1,0 +1,74 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# https://learn.microsoft.com/sql/t-sql/functions/format-transact-sql
+# https://learn.microsoft.com/dotnet/standard/base-types/custom-numeric-format-strings
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Numeric FORMAT fractional zero placeholders preserve declarations and assignment effects
+setup:
+  - sql: CREATE TABLE fractional_format_rows(id INT PRIMARY KEY,amount DECIMAL(12,3),mask NVARCHAR(20),culture NVARCHAR(10),label NVARCHAR(40))
+  - sql: INSERT fractional_format_rows VALUES(1,11.995,'00.00','en-US',N'original'),(2,-0.004,'0.00','de-DE',N'original'),(3,NULL,'000.000','en-US',N'original')
+cleanup:
+  - sql: DROP TABLE IF EXISTS fractional_format_rows
+test_cases:
+  - name: Integer inputs retain every digit while fractional placeholders append zeros
+    sql: SELECT FORMAT(CAST(9223372036854775807 AS BIGINT),'0.00','en-US') AS maximum_value,FORMAT(CAST(-9223372036854775808 AS BIGINT),'0.00','en-US') AS minimum_value
+    expect: {rows: 1, data: [{maximum_value: '9223372036854775807.00',minimum_value: '-9223372036854775808.00'}]}
+  - name: Integral DECIMAL carriers do not pass through floating point formatting
+    sql: SELECT FORMAT(CAST(9007199254740993 AS DECIMAL(18,0)),'00000000000000000000.00','en-US') AS value
+    expect: {rows: 1, data: [{value: '00009007199254740993.00'}]}
+  - name: Decimal and monetary fractional halves round away from zero
+    sql: SELECT FORMAT(CAST(12.345 AS DECIMAL(8,3)),'0.00','en-US') AS decimal_value,FORMAT(CAST(-12.345 AS MONEY),'0.00','en-US') AS money_value,FORMAT(CAST(0.125 AS SMALLMONEY),'0.00','en-US') AS smallmoney_value
+    expect: {rows: 1, data: [{decimal_value: '12.35',money_value: '-12.35',smallmoney_value: '0.13'}]}
+  - name: Rounding carry crosses the decimal point before minimum width padding
+    sql: SELECT FORMAT(CAST(99.995 AS DECIMAL(8,3)),'0000.00','en-US') AS positive_value,FORMAT(CAST(-99.995 AS DECIMAL(8,3)),'00.00','en-US') AS negative_value
+    expect: {rows: 1, data: [{positive_value: '0100.00',negative_value: '-100.00'}]}
+  - name: Rounded decimal zero has no negative sign and retains mandatory fractional zeros
+    sql: SELECT FORMAT(CAST(-0.004 AS DECIMAL(8,3)),'000.00','en-US') AS rounded_zero,FORMAT(0,'0.000','en-US') AS integer_zero
+    expect: {rows: 1, data: [{rounded_zero: '000.00',integer_zero: '0.000'}]}
+  - name: Fractional separator follows the requested culture independently of pattern punctuation
+    sql: SELECT FORMAT(CAST(1234.5 AS MONEY),'0.00','de-DE') AS german_value,FORMAT(CAST(1234.5 AS MONEY),'0.00','en-US') AS english_value
+    expect: {rows: 1, data: [{german_value: '1234,50',english_value: '1234.50'}]}
+  - name: Approximate numeric inputs retain fractions until final mask rounding
+    sql: SELECT FORMAT(CAST(12.345 AS FLOAT),'0.00','en-US') AS floating_value,FORMAT(CAST(0.125 AS REAL),'0.00','en-US') AS real_value,FORMAT(CAST(-2.5 AS FLOAT),'000','en-US') AS integral_mask
+    expect: {rows: 1, data: [{floating_value: '12.35',real_value: '0.13',integral_mask: '-003'}]}
+  - name: Scientific approximate inputs expand into fractional zero masks without integer conversion
+    sql: SELECT FORMAT(CAST(1e-9 AS FLOAT),'0.000000000000','en-US') AS tiny_value,FORMAT(CAST(1e20 AS FLOAT),'0.00','en-US') AS large_value
+    expect: {rows: 1, data: [{tiny_value: '0.000000001000',large_value: '100000000000000000000.00'}]}
+  - name: Approximate declarations retain Framework Double and Single formatting precision
+    sql: SELECT FORMAT(CAST(1234567890123456 AS FLOAT),'0.00','en-US') AS floating_value,FORMAT(CAST(1.23456789 AS REAL),'0.000000000','en-US') AS real_value
+    expect: {rows: 1, data: [{floating_value: '1234567890123460.00',real_value: '1.234568000'}]}
+  - name: Nullable declared columns may supply the numeric value mask and culture
+    sql: SELECT id,FORMAT(amount,mask,culture) AS value FROM fractional_format_rows ORDER BY id
+    expect: {rows: 3, data: [{id: 1,value: '12.00'},{id: 2,value: '0,00'},{id: 3,value: null}]}
+  - name: Typed numeric NULL values propagate through fractional masks
+    sql: SELECT FORMAT(CAST(NULL AS DECIMAL(8,3)),'0.00','en-US') AS decimal_value,FORMAT(CAST(NULL AS FLOAT),'0.00','de-DE') AS floating_value
+    expect: {rows: 1, data: [{decimal_value: null,floating_value: null}]}
+  - name: Long fractional masks preserve their exact padded result
+    sql: |
+      DECLARE @mask NVARCHAR(4000)=N'0.'+REPLICATE(N'0',3000);
+      DECLARE @formatted NVARCHAR(4000)=FORMAT(CAST(0.123 AS DECIMAL(5,3)),@mask,'en-US');
+      SELECT DATALENGTH(@formatted) AS bytes,LEFT(@formatted,10) AS prefix,RIGHT(@formatted,8) AS suffix;
+    expect: {rows: 1, data: [{bytes: 6004,prefix: '0.12300000',suffix: '00000000'}]}
+  - name: Numeric formatting composes with text replacement in real UPDATE assignments and rolls back
+    sql: |
+      BEGIN TRANSACTION;
+      UPDATE fractional_format_rows SET label=REPLACE(FORMAT(amount,'0.00','en-US'),'.',',');
+      SELECT id,label FROM fractional_format_rows ORDER BY id;
+      ROLLBACK TRANSACTION;
+      SELECT id,label FROM fractional_format_rows ORDER BY id;
+    expect: {rows: 6, data: [{id: 1,label: '12,00'},{id: 2,label: '0,00'},{id: 3,label: null},{id: 1,label: original},{id: 2,label: original},{id: 3,label: original}]}
+  - name: Calendar masks retain their existing distinct token and culture semantics
+    sql: SELECT FORMAT(DATEFROMPARTS(2024,3,1),'MMMM yyyy','de-DE') AS value
+    expect: {rows: 1, data: [{value: 'März 2024'}]}
+  - name: The current session supplies the default decimal separator and stable result metadata
+    tds:
+      statements:
+        - sql: SET LANGUAGE us_english; SELECT FORMAT(CAST(1.5 AS MONEY),'0.00') AS value
+          expect: {rows: 1, data: [{value: '1.50'}],column_types: [{name: value,type: NVARCHAR,length: 4000}]}
+        - sql: SET LANGUAGE Deutsch; SELECT FORMAT(CAST(1.5 AS MONEY),'0.00') AS value
+          expect: {rows: 1, data: [{value: '1,50'}],column_types: [{name: value,type: NVARCHAR,length: 4000}]}
+        - sql: SET LANGUAGE us_english; SELECT FORMAT(CAST(1.5 AS MONEY),'0.00') AS value
+          expect: {rows: 1, data: [{value: '1.50'}],column_types: [{name: value,type: NVARCHAR,length: 4000}]}

@@ -25,14 +25,14 @@ test_cases:
   scm: |-
     (begin
       (define session (newsession))
-      (with_query_request session nil 0 "complete query mutation" (lambda (statement)
+      (with_query_request session nil 0 "complete query mutation" "cursor-stability" (lambda (statement)
         (statement "complete query mutation" false (lambda (tx) (begin
           (define ag (list 1 (quote +) 0))
-          (define stage (make_group_stage "write-count" (list "rows" "memcp-tests" "qb_write_source" false nil)
+          (define stage (make_group_stage "write-count" (list "rows" "memcp-tests" "qb_write_source" false nil nil)
             '() '(1) (list ag) nil '() '() nil nil '()))
-          (define query (make_query_block "memcp-tests" (list (list "t" "memcp-tests" "qb_write_values" false nil)
+          (define query (make_query_block "memcp-tests" (list (list "t" "memcp-tests" "qb_write_values" false nil nil)
             (list "totals" "memcp-tests" (make_stage_output_relation "write-count") false
-              (list (quote equal??) (list (quote get_column) "totals" false "k0" false) 1)))
+              (list (quote equal??) (list (quote get_column) "totals" false "k0" false) 1) nil))
             (list "value" (list (quote get_column) "totals" false (aggregate_col_name ag) false))
             (list (quote <) (list (quote get_column) "t" false "id" false) 3) nil nil nil nil nil '() (list stage) '()))
           (eval (build_dml_plan "qb_write_values" "t" query (newsession) tx))))))))
@@ -57,14 +57,14 @@ test_cases:
       (define session (newsession))
       (tx_begin session)
       (define affected
-        (with_query_request session nil 0 "complete query mutation" (lambda (statement)
+        (with_query_request session nil 0 "complete query mutation" "cursor-stability" (lambda (statement)
           (statement "complete query mutation" false (lambda (tx) (begin
             (define ag (list 1 (quote +) 0))
-            (define stage (make_group_stage "write-count" (list "rows" "memcp-tests" "qb_write_source" false nil)
+            (define stage (make_group_stage "write-count" (list "rows" "memcp-tests" "qb_write_source" false nil nil)
               '() '(1) (list ag) nil '() '() nil nil '()))
-            (define query (make_query_block "memcp-tests" (list (list "t" "memcp-tests" "qb_write_values" false nil)
+            (define query (make_query_block "memcp-tests" (list (list "t" "memcp-tests" "qb_write_values" false nil nil)
               (list "totals" "memcp-tests" (make_stage_output_relation "write-count") false
-                (list (quote equal??) (list (quote get_column) "totals" false "k0" false) 1)))
+                (list (quote equal??) (list (quote get_column) "totals" false "k0" false) 1) nil))
               (list "value" (list (quote +) 6 (list (quote get_column) "totals" false (aggregate_col_name ag) false)))
               (list (quote <) (list (quote get_column) "t" false "id" false) 3) nil nil nil nil nil '() (list stage) '()))
             (eval (build_dml_plan "qb_write_values" "t" query (newsession) tx))))))))
@@ -79,14 +79,14 @@ test_cases:
   scm: |-
     (begin
       (define session (newsession))
-      (with_query_request session nil 0 "complete query mutation" (lambda (statement)
+      (with_query_request session nil 0 "complete query mutation" "cursor-stability" (lambda (statement)
         (statement "complete query mutation" false (lambda (tx) (begin
           (define ag (list 1 (quote +) 0))
-          (define stage (make_group_stage "write-count" (list "rows" "memcp-tests" "qb_write_source" false nil)
+          (define stage (make_group_stage "write-count" (list "rows" "memcp-tests" "qb_write_source" false nil nil)
             '() '(1) (list ag) nil '() '() nil nil '()))
-          (define query (make_query_block "memcp-tests" (list (list "t" "memcp-tests" "qb_write_values" false nil)
+          (define query (make_query_block "memcp-tests" (list (list "t" "memcp-tests" "qb_write_values" false nil nil)
             (list "totals" "memcp-tests" (make_stage_output_relation "write-count") false
-              (list (quote equal??) (list (quote get_column) "totals" false "k0" false) 1)))
+              (list (quote equal??) (list (quote get_column) "totals" false "k0" false) 1) nil))
             nil
             (list (quote and) (list (quote >) (list (quote get_column) "t" false "id" false) 2) (list (quote equal??) (list (quote get_column) "totals" false (aggregate_col_name ag) false) 4)) nil nil nil nil nil '() (list stage) '()))
           (eval (build_dml_plan "qb_write_values" "t" query (newsession) tx))))))))

@@ -1,0 +1,651 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  description: One logical native statement-trigger recipe uses the existing catalog decision and savepoint history
+setup:
+- sql: CREATE TABLE statement_decl_input(id INT PRIMARY KEY, value INT)
+- sql: CREATE TABLE statement_decl_other(id INT PRIMARY KEY)
+- sql: CREATE TABLE statement_decl_origin(id INT PRIMARY KEY, value INT)
+- sql: CREATE TABLE statement_decl_parent(id INT PRIMARY KEY)
+- sql: CREATE TABLE statement_decl_child(id INT PRIMARY KEY, parent_id INT, value INT)
+- sql: CREATE TABLE statement_decl_large(id INT, value INT) ENGINE=MEMORY
+- scm: |
+    (registertriggerlanguage "statement-declaration-literal"
+      (lambda (source _context) (lambda (OLD NEW session tx) source)) false false true)
+cleanup:
+- sql: DROP TABLE IF EXISTS collision_undo_origin
+- sql: DROP TABLE IF EXISTS collision_undo_input
+- sql: DROP TABLE IF EXISTS collision_undo_audit
+- sql: DROP TABLE IF EXISTS collision_undo_target
+- sql: DROP TABLE IF EXISTS collision_undo_gate
+- sql: DROP TABLE IF EXISTS collision_undo_statement
+- sql: DROP TABLE IF EXISTS statement_event_delete_child
+- sql: DROP TABLE IF EXISTS statement_event_delete_parent
+- sql: DROP TABLE IF EXISTS statement_event_update_child
+- sql: DROP TABLE IF EXISTS statement_event_update_parent
+- sql: DROP TABLE IF EXISTS statement_decl_large
+- sql: DROP TABLE IF EXISTS statement_decl_child
+- sql: DROP TABLE IF EXISTS statement_decl_parent
+- sql: DROP TABLE IF EXISTS statement_decl_origin
+- sql: DROP TABLE IF EXISTS statement_decl_input
+- sql: DROP TABLE IF EXISTS statement_decl_other
+test_cases:
+- name: Pending statement recipe has owner visibility and one complete event mask without public leakage
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (define input (table "memcp-tests" false "statement_decl_input" false tx))
+      (createstatementtrigger input "statement_decl_kept" "after_statement" "statement-declaration-literal" "11" '("insert" "update") false false tx)
+      (define own (show input "statement_triggers" tx))
+      (define outside (show input "statement_triggers"))
+      (tx_rollback owner)
+      (and (equal? (count own) 1)
+        (expression_equal? ((car own) "events") '("insert" "update"))
+        (equal? ((car own) "source") "11") (empty_list? outside)
+        (empty_list? (show input "statement_triggers"))))
+  expect: {result: true}
+- name: Committed multi event trigger remains one logical visible declaration
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (define input (table "memcp-tests" false "statement_decl_input" false tx))
+      (createstatementtrigger input "statement_decl_kept" "after_statement" "statement-declaration-literal" "11" '("insert" "update") false false tx)
+      (tx_commit owner)
+      (define rows (show input "statement_triggers"))
+      (define visible (show_triggers "memcp-tests" "statement_decl_input"))
+      (and (equal? (count rows) 1) (equal? (count visible) 1)
+        (equal? ((car rows) "name") "statement_decl_kept")
+        (equal? ((car rows) "timing") "after_statement")
+        (expression_equal? ((car visible) "StatementEvents") '("insert" "update"))))
+  expect: {result: true}
+- name: Statement replacement and deletion rewind through the same native savepoint history
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (define input (table "memcp-tests" false "statement_decl_input" false tx))
+      (define zero (tx_savepoint tx))
+      (createstatementtrigger input "statement_decl_kept" "after_statement" "statement-declaration-literal" "12" '("delete") true true tx)
+      (define middle (tx_savepoint tx))
+      (dropstatementtrigger "memcp-tests" "statement_decl_kept" false tx)
+      (define absent (empty_list? (show input "statement_triggers" tx)))
+      (define outside ((car (show input "statement_triggers")) "source"))
+      (tx_rollback_to_savepoint tx middle)
+      (define restored (car (show input "statement_triggers" tx)))
+      (tx_rollback_to_savepoint tx zero)
+      (define original (car (show input "statement_triggers" tx)))
+      (tx_commit owner)
+      (and absent (equal? outside "11") (equal? (restored "source") "12")
+        (expression_equal? (restored "events") '("delete"))
+        (equal? (original "source") "11")
+        (equal? ((car (show input "statement_triggers")) "source") "11")))
+  expect: {result: true}
+- name: Missing ALTER and duplicate event admission preserve the real preceding recipe
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (define input (table "memcp-tests" false "statement_decl_input" false tx))
+      (define missing (try (lambda () (begin
+        (createstatementtrigger input "statement_decl_absent" "after_statement" "statement-declaration-literal" "13" '("delete") true true tx) false))
+        (lambda (failure) (strlike (string failure) "%statement trigger does not exist%"))))
+      (define duplicate (try (lambda () (begin
+        (createstatementtrigger input "statement_decl_kept" "after_statement" "statement-declaration-literal" "13" '("insert" "insert") true false tx) false))
+        (lambda (failure) (strlike (string failure) "%duplicate native statement trigger event%"))))
+      (tx_rollback owner)
+      (and missing duplicate (equal? ((car (show input "statement_triggers")) "source") "11")))
+  expect: {result: true}
+- name: A competing native owner cannot replace a reserved statement trigger
+  scm: |
+    (begin
+      (define first (newsession)) (first "username" "root") (tx_begin first)
+      (define second (newsession)) (second "username" "root") (tx_begin second)
+      (define input (table "memcp-tests" false "statement_decl_input" false nil))
+      (createstatementtrigger input "statement_decl_kept" "after_statement" "statement-declaration-literal" "14" '("delete") true true (first "__memcp_tx"))
+      (define blocked (try (lambda () (begin
+        (createstatementtrigger input "statement_decl_kept" "after_statement" "statement-declaration-literal" "15" '("delete") true true (second "__memcp_tx")) false))
+        (lambda (failure) (strlike (string failure) "%native declaration conflict%"))))
+      (define own ((car (show input "statement_triggers" (first "__memcp_tx"))) "source"))
+      (tx_rollback second) (tx_rollback first)
+      (and blocked (equal? own "14")
+        (equal? ((car (show input "statement_triggers")) "source") "11")))
+  expect: {result: true}
+- name: Native trigger names cannot silently move to a different containing table
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define other (table "memcp-tests" false "statement_decl_other" false (owner "__memcp_tx")))
+      (define rejected (try (lambda () (begin
+        (createstatementtrigger other "statement_decl_kept" "after_statement" "statement-declaration-literal" "16" '("delete") true false (owner "__memcp_tx")) false))
+        (lambda (failure) (strlike (string failure) "%trigger name belongs to another native table%"))))
+      (tx_rollback owner)
+      (and rejected (empty_list? (show other "statement_triggers"))))
+  expect: {result: true}
+- name: Real schema rebuild and restart preserve one source recipe and its event mask
+  scm: |
+    (begin (rebuild (table "memcp-tests" false "statement_decl_input" false nil) true false)
+      (equal? ((car (show (table "memcp-tests" false "statement_decl_input" false nil) "statement_triggers")) "source") "11"))
+  expect: {result: true}
+- name: Trigger declaration persistence uses a real process restart
+  sql: SHUTDOWN
+- name: Reloaded trigger metadata keeps source and events without persisting a callable
+  scm: |
+    (begin
+      (define input (table "memcp-tests" false "statement_decl_input" false nil))
+      (define rows (show input "statement_triggers"))
+      (and (equal? (count rows) 1) (equal? ((car rows) "source") "11")
+        (equal? ((car rows) "language") "statement-declaration-literal")
+        (expression_equal? ((car rows) "events") '("insert" "update"))
+        (equal? (count (show_triggers "memcp-tests" "statement_decl_input")) 1)))
+  expect: {result: true}
+- name: Install a native event observer through the actual recipe compiler
+  scm: |
+    (begin
+      (registertriggerlanguage "statement-event-observer"
+        (close_procedure (lambda (source _context)
+          (if (equal? source "abort")
+            (lambda (OLD NEW session tx) (request_transaction_abort tx))
+            (lambda (OLD NEW session tx) (begin
+              (define row_count (lambda (handle)
+                (scan tx handle '() '() '() (lambda () true) '("id") (lambda (acc id) (+ acc 1)) 0 +)))
+              (define value_total (lambda (handle)
+                (scan tx handle '() '() '() (lambda () true) '("value") (lambda (acc value) (+ acc value)) 0 +)))
+              (session "calls" (+ (coalesceNil (session "calls") 0) 1))
+              (session "old_count" (row_count OLD)) (session "new_count" (row_count NEW))
+              (session "old_total" (value_total OLD)) (session "new_total" (value_total NEW))
+              (session "columns" (mutation_columns tx))
+              (session "held_new" NEW)))))) false false true)
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define input (table "memcp-tests" false "statement_decl_input" false (owner "__memcp_tx")))
+      (createstatementtrigger input "statement_decl_kept" "after_statement" "statement-event-observer" "observe"
+        '("insert" "update" "delete") true true (owner "__memcp_tx"))
+      (tx_commit owner)
+      (equal? (count (show input "statement_triggers")) 1))
+  expect: {result: true}
+- name: Multirow INSERT completes once with exactly its admitted NEW rows
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root")
+      (define input (table "memcp-tests" false "statement_decl_input" false nil))
+      (define inserted (with_autocommit owner nil 0 "native statement insert" (lambda (tx)
+        (with_table_mutation (list input) (list "insert" '()) tx owner (lambda (tx)
+          (insert input '("id" "value") (list (list 1 10) (list 2 20)) '() nil false nil tx))))))
+      (define stale (try (lambda () (begin
+        (scan nil (owner "held_new") '() '() '() (lambda () true) '("id") (lambda (acc id) (+ acc 1)) 0 +)
+        false)) (lambda (failure) (strlike (string failure) "%outside its completion scope%"))))
+      (and (equal? inserted 2) (equal? (owner "calls") 1)
+        (equal? (owner "old_count") 0) (equal? (owner "new_count") 2)
+        (equal? (owner "old_total") 0) (equal? (owner "new_total") 30)
+        (empty_list? (owner "columns")) stale))
+  expect: {result: true}
+- name: Same-value UPDATE reports matched OLD and NEW despite no physical replacement
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root")
+      (define input (table "memcp-tests" false "statement_decl_input" false nil))
+      (define matched (with_autocommit owner nil 0 "native unchanged update" (lambda (tx)
+        (with_table_mutation (list input) (list "update" '("value")) tx owner (lambda (tx)
+          (scan tx input '() '() '("id") (lambda (id) (equal? id 1)) '("$update")
+            (lambda (acc update) (begin (update '("value" 10)) (+ acc 1))) 0 +))))))
+      (and (equal? matched 1) (equal? (owner "calls") 1)
+        (equal? (owner "old_count") 1) (equal? (owner "new_count") 1)
+        (equal? (owner "old_total") 10) (equal? (owner "new_total") 10)
+        (expression_equal? (owner "columns") '("value"))))
+  expect: {result: true}
+- name: Zero-row UPDATE still completes once with declared assignments and two empty native relations
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root")
+      (define input (table "memcp-tests" false "statement_decl_input" false nil))
+      (define matched (with_autocommit owner nil 0 "native empty update" (lambda (tx)
+        (with_table_mutation (list input) (list "update" '("value")) tx owner (lambda (tx)
+          (scan tx input '() '() '("id") (lambda (id) (equal? id 99)) '("$update")
+            (lambda (acc update) (begin (update '("value" 7)) (+ acc 1))) 0 +))))))
+      (and (equal? matched 0) (equal? (owner "calls") 1)
+        (equal? (owner "old_count") 0) (equal? (owner "new_count") 0)
+        (expression_equal? (owner "columns") '("value"))))
+  expect: {result: true}
+- name: A real row trigger performs distinct nested INSERT statements on the same target
+  sql: CREATE TRIGGER statement_decl_nested AFTER DELETE ON statement_decl_input FOR EACH ROW INSERT INTO statement_decl_input (id,value) VALUES (OLD.id+10,OLD.value+1)
+- name: DELETE transitions exclude nested row-trigger INSERT effects and fire once after their drain
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root")
+      (define input (table "memcp-tests" false "statement_decl_input" false nil))
+      (define removed (with_autocommit owner nil 0 "native delete with nested row effects" (lambda (tx)
+        (with_table_mutation (list input) (list "delete" '()) tx owner (lambda (tx)
+          (scan tx input '() '() '("id") (lambda (id) (< id 3)) '("$update")
+            (lambda (acc update) (begin (update) (+ acc 1))) 0 +))))))
+      (and (equal? removed 2) (equal? (owner "calls") 3)
+        (equal? (owner "old_count") 2) (equal? (owner "new_count") 0)
+        (equal? (owner "old_total") 30) (equal? (owner "new_total") 0)))
+  expect: {result: true}
+- name: Only the two nested INSERT rows remain after the actual DELETE
+  sql: SELECT id,value FROM statement_decl_input ORDER BY id
+  expect:
+    rows: 2
+    data: [{id: 11, value: 11}, {id: 12, value: 21}]
+- name: Remove the row callback before testing terminal native transaction abort
+  sql: DROP TRIGGER statement_decl_nested
+- name: Terminal completion abort rolls back earlier explicit transaction work as well as the DELETE
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define input (table "memcp-tests" false "statement_decl_input" false nil))
+      (createstatementtrigger input "statement_decl_kept" "after_statement" "statement-event-observer" "abort"
+        '("delete") true true (owner "__memcp_tx"))
+      (tx_commit owner)
+      (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (with_table_mutation (list input) (list "insert" '()) tx owner (lambda (tx)
+        (insert input '("id" "value") (list (list 90 900)) '() nil false nil tx)))
+      (define transferred (try (lambda () (begin
+        (with_table_mutation (list input) (list "delete" '()) tx owner (lambda (tx)
+          (scan tx input '() '() '("id") (lambda (id) (< id 50)) '("$update")
+            (lambda (acc update) (begin (update) (+ acc 1))) 0 +)))
+        false)) (lambda (failure) (transaction_abort_transfer? failure))))
+      (and transferred (nil? (owner "transaction"))))
+  expect: {result: true}
+- name: Full transaction abort restores committed rows and removes the earlier insert
+  sql: SELECT id,value FROM statement_decl_input ORDER BY id
+  expect:
+    rows: 2
+    data: [{id: 11, value: 11}, {id: 12, value: 21}]
+- name: Install a failing child completion without adding a handler to the outer target
+  scm: |
+    (begin
+      (registertriggerlanguage "statement-child-rejection"
+        (close_procedure (lambda (_source _context)
+          (lambda (OLD NEW session tx) (error "native child completion rejected")))) false false true)
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (createstatementtrigger (table "memcp-tests" false "statement_decl_input" false tx)
+        "statement_decl_child_reject" "after_statement" "statement-child-rejection" "reject" '("insert") false false tx)
+      (tx_commit owner)
+      (empty_list? (show (table "memcp-tests" false "statement_decl_origin" false nil) "statement_triggers")))
+  expect: {result: true}
+- name: A real cross-target row callback writes the statement-triggered child
+  sql: CREATE TRIGGER statement_decl_cross AFTER INSERT ON statement_decl_origin FOR EACH ROW INSERT INTO statement_decl_input (id,value) VALUES (NEW.id+100,NEW.value)
+- name: Failed cross-target completion rewinds the whole outer command and preserves earlier transaction work
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (try (lambda () (begin
+        (define tx (owner "__memcp_tx"))
+        (define origin (table "memcp-tests" false "statement_decl_origin" false tx))
+        (define input (table "memcp-tests" false "statement_decl_input" false tx))
+        (define prior (table "memcp-tests" false "statement_decl_other" false tx))
+        (with_table_mutation (list prior) (list "insert" '()) tx owner (lambda (tx)
+          (insert prior '("id") (list (list 90)) '() nil false nil tx)))
+        (define rejected (try (lambda () (begin
+          (with_autocommit owner nil 0 "cross-target native completion" (lambda (tx)
+            (with_table_mutation (list origin) (list "insert" '()) tx owner (lambda (tx)
+              (insert origin '("id" "value") (list (list 1 7)) '() nil false nil tx)))))
+          false)) (lambda (failure) (strlike (string failure) "%native child completion rejected%"))))
+        (define count_id (lambda (handle wanted)
+          (scan tx handle '() '() '("id") (lambda (id) (equal? id wanted)) '("id")
+            (lambda (acc id) (+ acc 1)) 0 +)))
+        (define result (and rejected (equal? (owner "transaction") true)
+          (equal? (count_id origin 1) 0) (equal? (count_id input 101) 0)
+          (equal? (count_id prior 90) 1)))
+        (tx_rollback owner) result))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect: {result: true}
+- name: The ordinary native FK owner declares a real cascading dependency
+  scm: |
+    (createforeignkey (table "memcp-tests" false "statement_decl_child" false nil)
+      "statement_decl_cascade" '("parent_id")
+      (table "memcp-tests" false "statement_decl_parent" false nil) '("id") "cascade" "cascade")
+  expect: {result: true}
+- name: Two actual parent rows seed the cascade preflight control
+  sql: INSERT INTO statement_decl_parent (id) VALUES (1),(2)
+  expect: {affected_rows: 2}
+- name: Two actual referencing rows seed the cascade preflight control
+  sql: INSERT INTO statement_decl_child (id,parent_id,value) VALUES (1,1,10),(2,2,20)
+  expect: {affected_rows: 2}
+- name: Install one child DELETE handler before the outer statement begins
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (createstatementtrigger (table "memcp-tests" false "statement_decl_child" false (owner "__memcp_tx"))
+        "statement_decl_child_observe" "after_statement" "statement-event-observer" "observe" '("delete") false false (owner "__memcp_tx"))
+      (tx_commit owner) true)
+  expect: {result: true}
+- name: Cascading statement handlers reject before either parent row or child handler and preserve earlier transaction work
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (try (lambda () (begin
+        (define tx (owner "__memcp_tx"))
+        (define parent (table "memcp-tests" false "statement_decl_parent" false tx))
+        (define child (table "memcp-tests" false "statement_decl_child" false tx))
+        (define prior (table "memcp-tests" false "statement_decl_other" false tx))
+        (with_table_mutation (list prior) (list "insert" '()) tx owner (lambda (tx)
+          (insert prior '("id") (list (list 90)) '() nil false nil tx)))
+        (define rejected (try (lambda () (begin
+          (with_autocommit owner nil 0 "native multi-parent cascade preflight" (lambda (tx)
+            (with_table_mutation (list parent) (list "delete" '()) tx owner (lambda (tx)
+              (scan tx parent '() '() '() (lambda () true) '("$update")
+                (lambda (acc update) (begin (update) (+ acc 1))) 0 +)))))
+          false)) (lambda (failure)
+            (strlike (string failure) "%native cascading action on a statement-triggered child is not supported%"))))
+        (define count_rows (lambda (handle)
+          (scan tx handle '() '() '() (lambda () true) '("id") (lambda (acc id) (+ acc 1)) 0 +)))
+        (define result (and rejected (equal? (owner "transaction") true)
+          (equal? (count_rows parent) 2) (equal? (count_rows child) 2)
+          (equal? (count_rows prior) 1) (nil? (owner "calls"))))
+        (tx_rollback owner) result))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect: {result: true}
+- name: Removing the child statement declaration restores the ordinary cascade profile
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (dropstatementtrigger "memcp-tests" "statement_decl_child_observe" false (owner "__memcp_tx"))
+      (tx_commit owner) true)
+  expect: {result: true}
+- name: The unchanged native cascade deletes both matching children
+  sql: DELETE FROM statement_decl_parent
+  expect: {affected_rows: 2}
+- name: Ordinary cascades leave neither parent nor child rows
+  scm: |
+    (begin
+      (define count_rows (lambda (name)
+        (scan nil (table "memcp-tests" false name false nil) '() '() '() (lambda () true)
+          '("id") (lambda (acc id) (+ acc 1)) 0 +)))
+      (and (equal? (count_rows "statement_decl_parent") 0) (equal? (count_rows "statement_decl_child") 0)))
+  expect: {result: true}
+- name: Large streamed NEW transitions use compressed native main generations after writer drain
+  scm: |
+    (begin
+      (define previous_size (settings "ShardSize"))
+      (settings "ShardSize" 60000)
+      (try (lambda () (begin
+        (registertriggerlanguage "statement-transition-compression"
+          (close_procedure (lambda (_source _context)
+            (lambda (OLD NEW session tx) (begin
+              (define description (show "memcp-tests" (show NEW "name") true))
+              (session "main_rows" (reduce (description "shards") (lambda (acc shard) (+ acc (shard "main_count"))) 0))
+              (session "delta_rows" (reduce (description "shards") (lambda (acc shard) (+ acc (shard "delta"))) 0))
+              (define first_shard (show "memcp-tests" (show NEW "name") 0 true))
+              (session "compressed" (not (strlike ((car (first_shard "columns")) "compression") "%SCMER%")))
+              (session "new_rows" (scan tx NEW '() '() '() (lambda () true) '("id")
+                (lambda (acc id) (+ acc 1)) 0 +))
+              (session "new_total" (scan tx NEW '() '() '() (lambda () true) '("value")
+                (lambda (acc value) (+ acc value)) 0 +)))))) false false true)
+        (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+        (define large (table "memcp-tests" false "statement_decl_large" false (owner "__memcp_tx")))
+        (createstatementtrigger large "statement_decl_large_observe" "after_statement" "statement-transition-compression" "observe"
+          '("insert") false false (owner "__memcp_tx"))
+        (tx_commit owner)
+        (define produced (with_autocommit owner nil 0 "native streamed transition compression" (lambda (tx)
+          (with_table_mutation (list large) (list "insert" '()) tx owner (lambda (tx)
+            (for '(0 0) (lambda (batch total) (< batch 471)) (lambda (batch total)
+              (list (+ batch 1) (+ total
+                (insert large '("id" "value")
+                  (map (produceN 128) (lambda (i) (list (+ (* batch 128) i) 7))) '() nil false nil tx))))))))))
+        (define result (and (equal? (cadr produced) 60288)
+          (equal? (owner "new_rows") 60288) (equal? (owner "new_total") 422016)
+          (equal? (owner "main_rows") 60288) (equal? (owner "delta_rows") 0) (owner "compressed")))
+        (settings "ShardSize" previous_size) result))
+        (lambda (failure) (begin (settings "ShardSize" previous_size) (error failure)))))
+  expect: {result: true}
+- name: Pending statement CREATE stays owner visible while row DML rejects before effects and savepoint rewind preserves phase
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (try (lambda () (begin
+        (define tx (owner "__memcp_tx"))
+        (define target (table "memcp-tests" false "statement_decl_other" false tx))
+        (define zero (tx_savepoint tx))
+        (createstatementtrigger target "statement_decl_pending" "after_statement" "statement-event-observer" "observe"
+          '("insert") false false tx)
+        (define own (equal? (count (show target "statement_triggers" tx)) 1))
+        (define hidden (empty_list? (show target "statement_triggers")))
+        (define attempt (lambda () (try (lambda () (begin
+          (with_table_mutation (list target) (list "insert" '()) tx owner (lambda (tx)
+            (insert target '("id") (list (list 91)) '() nil false nil tx))) false))
+          (lambda (failure) (strlike (string failure) "%native metadata-only transaction does not admit row mutation%")))))
+        (define first (attempt))
+        (tx_rollback_to_savepoint tx zero)
+        (define second (attempt))
+        (define result (and own hidden first second (nil? (owner "calls"))
+          (empty_list? (show target "statement_triggers" tx))
+          (equal? (scan nil target '() '() '() (lambda () true) '("id") (lambda (acc id) (+ acc 1)) 0 +) 0)))
+        (tx_rollback owner) result))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect: {result: true}
+- name: Pending statement ALTER has distinct owner and observer recipes but cannot silently use the committed DML program
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (try (lambda () (begin
+        (define tx (owner "__memcp_tx"))
+        (define target (table "memcp-tests" false "statement_decl_large" false tx))
+        (define zero (tx_savepoint tx))
+        (createstatementtrigger target "statement_decl_large_observe" "after_statement" "statement-event-observer" "observe"
+          '("update") true true tx)
+        (define own (car (show target "statement_triggers" tx)))
+        (define outside (car (show target "statement_triggers")))
+        (define rejected (try (lambda () (begin
+          (with_table_mutation (list target) (list "update" '("value")) tx owner (lambda (tx)
+            (scan tx target '() '() '("id") (lambda (id) (equal? id 0)) '("$update")
+              (lambda (acc update) (begin (update '("value" 99)) (+ acc 1))) 0 +))) false))
+          (lambda (failure) (strlike (string failure) "%native metadata-only transaction does not admit row mutation%"))))
+        (tx_rollback_to_savepoint tx zero)
+        (define restored (car (show target "statement_triggers" tx)))
+        (define result (and rejected (nil? (owner "calls"))
+          (equal? (own "language") "statement-event-observer")
+          (equal? (outside "language") "statement-transition-compression")
+          (equal? (restored "language") "statement-transition-compression")
+          (equal? (scan nil target '() '() '("id") (lambda (id) (equal? id 0)) '("value")
+            (lambda (acc value) (+ acc value)) 0 +) 7)))
+        (tx_rollback owner) result))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect: {result: true}
+- name: Pending statement DROP remains observer hidden only to its owner and rejects row effects
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (try (lambda () (begin
+        (define tx (owner "__memcp_tx"))
+        (define target (table "memcp-tests" false "statement_decl_large" false tx))
+        (dropstatementtrigger "memcp-tests" "statement_decl_large_observe" false tx)
+        (define hidden (empty_list? (show target "statement_triggers" tx)))
+        (define visible (equal? (count (show target "statement_triggers")) 1))
+        (define rejected (try (lambda () (begin
+          (with_table_mutation (list target) (list "delete" '()) tx owner (lambda (tx)
+            (scan tx target '() '() '("id") (lambda (id) (equal? id 0)) '("$update")
+              (lambda (acc update) (begin (update) (+ acc 1))) 0 +))) false))
+          (lambda (failure) (strlike (string failure) "%native metadata-only transaction does not admit row mutation%"))))
+        (define result (and hidden visible rejected (nil? (owner "calls"))
+          (equal? (scan nil target '() '() '("id") (lambda (id) (equal? id 0)) '("value")
+            (lambda (acc value) (+ acc value)) 0 +) 7)))
+        (tx_rollback owner) result))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect: {result: true}
+- name: DELETE cascade preserves an unrelated child UPDATE statement declaration without invoking it
+  setup:
+  - sql: CREATE TABLE statement_event_delete_parent(id INT PRIMARY KEY)
+  - sql: CREATE TABLE statement_event_delete_child(id INT PRIMARY KEY,parent_id INT,value INT)
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root")
+      (registertriggerlanguage "statement-unrelated-event-observer"
+        (close_procedure (lambda (_source _context) (lambda (OLD NEW session tx)
+          (session "calls" (+ (coalesceNil (session "calls") 0) 1))))) false false true)
+      (createforeignkey (table "memcp-tests" false "statement_event_delete_child" false nil)
+        "statement_event_delete_ref" '("parent_id") (table "memcp-tests" false "statement_event_delete_parent" false nil)
+        '("id") "cascade" "cascade")
+      (tx_begin owner)
+      (try (lambda () (begin
+        (define tx (owner "__memcp_tx"))
+        (define parent (table "memcp-tests" false "statement_event_delete_parent" false tx))
+        (define child (table "memcp-tests" false "statement_event_delete_child" false tx))
+        (createstatementtrigger child "statement_decl_unrelated_update" "after_statement" "statement-unrelated-event-observer" "observe"
+          '("update") false false tx)
+        (tx_commit owner)
+        (with_autocommit owner nil 0 "seed unrelated cascade parent" (lambda (tx)
+          (with_table_mutation (list parent) (list "insert" '()) tx owner (lambda (tx)
+            (insert parent '("id") (list (list 11) (list 12)) '() nil false nil tx)))))
+        (with_autocommit owner nil 0 "seed unrelated cascade child" (lambda (tx)
+          (with_table_mutation (list child) (list "insert" '()) tx owner (lambda (tx)
+            (insert child '("id" "parent_id" "value") (list (list 11 11 110) (list 12 12 120)) '() nil false nil tx)))))
+        (define removed (with_autocommit owner nil 0 "delete unrelated child event" (lambda (tx)
+          (with_table_mutation (list parent) (list "delete" '()) tx owner (lambda (tx)
+            (scan tx parent '() '() '() (lambda () true) '("$update")
+              (lambda (acc update) (begin (update) (+ acc 1))) 0 +))))))
+        (define count_rows (lambda (handle)
+          (scan nil handle '() '() '() (lambda () true) '("id") (lambda (acc id) (+ acc 1)) 0 +)))
+        (define headers (show child "statement_triggers"))
+        (define result (and (equal? removed 2) (equal? (count_rows parent) 0)
+          (equal? (count_rows child) 0) (nil? (owner "calls"))
+          (equal? (count headers) 1) (expression_equal? ((car headers) "events") '("update"))))
+        (tx_begin owner)
+        (dropstatementtrigger "memcp-tests" "statement_decl_unrelated_update" false (owner "__memcp_tx"))
+        (tx_commit owner) result))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect: {result: true}
+- name: UPDATE cascade preserves an unrelated child DELETE statement declaration and exact native values
+  setup:
+  - sql: CREATE TABLE statement_event_update_parent(id INT PRIMARY KEY)
+  - sql: CREATE TABLE statement_event_update_child(id INT PRIMARY KEY,parent_id INT,value INT)
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root")
+      (registertriggerlanguage "statement-unrelated-event-observer"
+        (close_procedure (lambda (_source _context) (lambda (OLD NEW session tx)
+          (session "calls" (+ (coalesceNil (session "calls") 0) 1))))) false false true)
+      (createforeignkey (table "memcp-tests" false "statement_event_update_child" false nil)
+        "statement_event_update_ref" '("parent_id") (table "memcp-tests" false "statement_event_update_parent" false nil)
+        '("id") "cascade" "cascade")
+      (tx_begin owner)
+      (try (lambda () (begin
+        (define tx (owner "__memcp_tx"))
+        (define parent (table "memcp-tests" false "statement_event_update_parent" false tx))
+        (define child (table "memcp-tests" false "statement_event_update_child" false tx))
+        (createstatementtrigger child "statement_decl_unrelated_delete" "after_statement" "statement-unrelated-event-observer" "observe"
+          '("delete") false false tx)
+        (tx_commit owner)
+        (with_autocommit owner nil 0 "seed unrelated update parent" (lambda (tx)
+          (with_table_mutation (list parent) (list "insert" '()) tx owner (lambda (tx)
+            (insert parent '("id") (list (list 21) (list 22)) '() nil false nil tx)))))
+        (with_autocommit owner nil 0 "seed unrelated update child" (lambda (tx)
+          (with_table_mutation (list child) (list "insert" '()) tx owner (lambda (tx)
+            (insert child '("id" "parent_id" "value") (list (list 21 21 210) (list 22 22 220)) '() nil false nil tx)))))
+        (define changed (with_autocommit owner nil 0 "update unrelated child event" (lambda (tx)
+          (with_table_mutation (list parent) (list "update" '("id")) tx owner (lambda (tx)
+            (scan tx parent '() '() '() (lambda () true) '("id" "$update")
+              (lambda (acc id update) (begin (update (list "id" (+ id 100))) (+ acc 1))) 0 +))))))
+        (define count_rows (lambda (handle)
+          (scan nil handle '() '() '() (lambda () true) '("id") (lambda (acc id) (+ acc 1)) 0 +)))
+        (define exact_rows (scan nil child '() '() '() (lambda () true) '("id" "parent_id" "value")
+          (lambda (valid id parent_id value) (and valid
+            (or (and (equal? id 21) (equal? parent_id 121) (equal? value 210))
+                (and (equal? id 22) (equal? parent_id 122) (equal? value 220)))))
+          true (lambda (left right) (and left right))))
+        (define headers (show child "statement_triggers"))
+        (define result (and (equal? changed 2) (equal? (count_rows parent) 2)
+          (equal? (count_rows child) 2) exact_rows (nil? (owner "calls"))
+          (equal? (scan nil parent '() '() '() (lambda () true) '("id") (lambda (acc id) (+ acc id)) 0 +) 243)
+          (equal? (count headers) 1) (expression_equal? ((car headers) "events") '("delete"))))
+        (tx_begin owner)
+        (dropstatementtrigger "memcp-tests" "statement_decl_unrelated_delete" false (owner "__memcp_tx"))
+        (tx_commit owner) result))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect: {result: true}
+
+- name: Ordinary row-trigger targets preserve collision updates and insert only new audit rows
+  setup:
+  - sql: CREATE TABLE collision_undo_input(id INT PRIMARY KEY, val INT)
+  - sql: CREATE TABLE collision_undo_audit(id INT PRIMARY KEY)
+  - sql: INSERT INTO collision_undo_input VALUES(1,10)
+  - sql: |
+      CREATE TRIGGER collision_undo_log AFTER INSERT ON collision_undo_input FOR EACH ROW
+      BEGIN
+        INSERT INTO collision_undo_audit(id) VALUES(NEW.id);
+      END
+  sql: INSERT INTO collision_undo_input VALUES(1,20),(2,30) ON DUPLICATE KEY UPDATE val=VALUES(val)
+  expect: {rows: 1, data: [{affected_rows: 3}]}
+- name: Collision update values and one actual AFTER INSERT effect remain exact
+  sql: SELECT id,val,(SELECT COUNT(*) FROM collision_undo_audit) AS audit_rows FROM collision_undo_input ORDER BY id
+  expect:
+    rows: 2
+    data: [{id: 1, val: 20, audit_rows: 1}, {id: 2, val: 30, audit_rows: 1}]
+- name: A later checked target failure rolls back both the origin and nested ordinary collision effects
+  setup:
+  - sql: CREATE TABLE collision_undo_origin(id INT PRIMARY KEY)
+  - sql: CREATE TABLE collision_undo_target(id INT PRIMARY KEY, val INT)
+  - sql: CREATE TABLE collision_undo_gate(id INT PRIMARY KEY)
+  - sql: INSERT INTO collision_undo_target VALUES(1,10)
+  - sql: SELECT id,val,(SELECT SUM(val) FROM collision_undo_target) AS total,(SELECT COUNT(*) FROM collision_undo_origin) AS origin_rows,(SELECT COUNT(*) FROM collision_undo_gate) AS gate_rows FROM collision_undo_target
+  - scm: |
+      (begin
+        (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+        (try (lambda () (begin
+          (createcheck (table "memcp-tests" false "collision_undo_gate" false (owner "__memcp_tx"))
+            "collision_undo_negative" "tsql-check" "id < 0" '("id") (owner "__memcp_tx") owner)
+          (tx_commit owner) true))
+          (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  - scm: |
+      (createtrigger (table "memcp-tests" false "collision_undo_origin" false nil)
+        "collision_undo_nested" "after_insert" "" ""
+        (close_procedure (lambda (_old new session tx) (begin
+          (define target (table "memcp-tests" false "collision_undo_target" false tx))
+          (define gate (table "memcp-tests" false "collision_undo_gate" false tx))
+          (define id (new "id"))
+          (define changed (with_table_mutation (list target) (list "insert" '()) tx session (lambda (mutation_tx)
+            (insert target '("id" "val") (list (list 1 id)) '("$update" "val" "NEW.val")
+              (lambda (update existing incoming) (update (list "val" (+ existing incoming))))
+              false nil mutation_tx))))
+          (if (equal? changed 2) true (error "fixture expected one changed collision row"))
+          (with_table_mutation (list gate) (list "insert" '()) tx session (lambda (mutation_tx)
+            (insert gate '("id") (list (list id)) '() nil false nil mutation_tx)))))) true)
+  sql: INSERT INTO collision_undo_origin VALUES(3)
+  expect: {error: true, contains: 'check constraint collision_undo_negative failed'}
+- name: Failed nested collision preserves the previous row and removes all new statement rows
+  sql: SELECT id,val,(SELECT SUM(val) FROM collision_undo_target) AS total,(SELECT COUNT(*) FROM collision_undo_origin) AS origin_rows,(SELECT COUNT(*) FROM collision_undo_gate) AS gate_rows FROM collision_undo_target
+  expect: {rows: 1, data: [{id: 1, val: 10, total: 10, origin_rows: 0, gate_rows: 0}]}
+- name: Actual check constrained targets still reject collision handlers before effects
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root")
+      (define target (table "memcp-tests" false "collision_undo_gate" false nil))
+      (define rejected (try (lambda () (begin
+        (with_autocommit owner nil 0 "native collision capability" (lambda (tx)
+          (with_table_mutation (list target) (list "insert" '()) tx owner (lambda (tx)
+            (insert target '("id") (list (list -1)) '() (lambda () 0) false nil tx)))))
+        false))
+        (lambda (failure) (strlike (string failure) "%checked statement does not support INSERT collision handlers%"))))
+      (and rejected (equal? (scan nil target '() '() '() (lambda () true)
+        '("id") (lambda (acc id) (+ acc 1)) 0 +) 0)))
+  expect: {result: true}
+- name: Actual statement triggered targets still reject collision handlers before effects
+  setup:
+  - sql: CREATE TABLE collision_undo_statement(id INT PRIMARY KEY)
+  - scm: |
+      (begin
+        (registertriggerlanguage "collision-undo-statement-literal"
+          (lambda (source _context) (lambda (OLD NEW session tx) source)) false false true)
+        (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+        (try (lambda () (begin
+          (createstatementtrigger (table "memcp-tests" false "collision_undo_statement" false (owner "__memcp_tx"))
+            "collision_undo_statement_observer" "after_statement" "collision-undo-statement-literal" "11" '("insert") false false (owner "__memcp_tx"))
+          (tx_commit owner) true))
+          (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root")
+      (define target (table "memcp-tests" false "collision_undo_statement" false nil))
+      (define rejected (try (lambda () (begin
+        (with_autocommit owner nil 0 "native collision capability" (lambda (tx)
+          (with_table_mutation (list target) (list "insert" '()) tx owner (lambda (tx)
+            (insert target '("id") (list (list 1)) '() (lambda () 0) false nil tx)))))
+        false))
+        (lambda (failure) (strlike (string failure) "%checked statement does not support INSERT collision handlers%"))))
+      (and rejected (equal? (scan nil target '() '() '() (lambda () true)
+        '("id") (lambda (acc id) (+ acc 1)) 0 +) 0)))
+  expect: {result: true}

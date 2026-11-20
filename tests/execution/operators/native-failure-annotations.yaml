@@ -1,0 +1,54 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  description: Native first failures retain only metadata attached to the identical causal datum
+setup:
+  - sql: CREATE TABLE annotation_failure_rows(id INT)
+  - scm: |
+      (begin
+        (define run_case (lambda (kind) (begin
+          (define target (table "memcp-tests" false "annotation_failure_rows" false nil))
+          (define first (if (equal? kind "text") "same failure" (list "same failure" 7)))
+          (define owner (newsession)) (owner "username" "root")
+          (tx_begin_acid owner)
+          (define observed (newsession))
+          (define failure (try (lambda ()
+            (with_query_request owner nil 0 "annotated producer failure" "acid" (lambda (statement)
+              (statement "annotated producer failure" false (lambda (tx)
+                (with_table_mutation (list target) (list "insert" '()) tx owner
+                  (lambda (bound)
+                    (try (lambda ()
+                      (with_table_mutation (list target) (list "insert" '()) bound owner
+                        (lambda (child) (begin
+                          (insert target '("id") (list (list 1)) '() nil false nil child)
+                          (error first)))))
+                      (lambda (cause)
+                        (error (failure_annotate
+                          (if (equal? kind "different") (list "same failure" 7) cause)
+                          "language phase" "inner producer")))))))
+                (lambda (cause completion) (begin
+                  (observed "annotation" (failure_annotation cause "language phase"))
+                  (observed "completion" completion)
+                  "preserve"))))))
+            (lambda (cause) (failure_value cause))))
+          (define result (list failure (observed "annotation") (observed "completion")
+            (tx_state (owner "__memcp_tx"))
+            (scan (owner "__memcp_tx") target '() '() '() (lambda () true) '() (lambda (n) (+ n 1)) 0 +)))
+          (tx_rollback owner)
+          result)))
+        (globalvars "__test_native_failure_annotations" (close_procedure run_case))
+        true)
+cleanup:
+  - scm: (globalvars "__test_native_failure_annotations" nil)
+  - sql: DROP TABLE annotation_failure_rows
+test_cases:
+  - name: The same causal datum retains inner producer metadata after complete undo
+    scm: ((globalvars "__test_native_failure_annotations") "same")
+    expect: {result: [[same failure, 7], inner producer, restored, active, 0]}
+  - name: An equal-looking different failure cannot replace the first native cause or its metadata
+    scm: ((globalvars "__test_native_failure_annotations") "different")
+    expect: {result: [[same failure, 7], null, restored, active, 0]}
+  - name: A textual failure has no opaque identity for later metadata adoption
+    scm: ((globalvars "__test_native_failure_annotations") "text")
+    expect: {result: [same failure, null, restored, active, 0]}

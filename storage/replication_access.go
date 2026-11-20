@@ -115,6 +115,7 @@ func (c *replicaCell) forwardingDone() <-chan struct{} {
 }
 
 func (table *table) schemaWrite() (*table, WriteAccess) {
+	table.requireCatalogDataVisibility(nil)
 	if table.isEphemeralQueryTable() {
 		return table, WriteAccess{}
 	}

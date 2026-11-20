@@ -1,0 +1,346 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Named transaction nesting and savepoints retain native visibility, Undo and completion ownership
+setup:
+- sql: CREATE TABLE transaction_name_values(id INT PRIMARY KEY,value INT)
+- sql: INSERT transaction_name_values VALUES(1,10)
+- sql: CREATE PROCEDURE transaction_nested_writer AS BEGIN TRANSACTION InnerWriter; INSERT transaction_name_values VALUES(2,20); COMMIT TRANSACTION DocumentationOnly
+- sql: CREATE PROCEDURE transaction_named_boundary AS SAVE TRANSACTION ModuleBoundary
+cleanup:
+- sql: DROP PROCEDURE IF EXISTS transaction_named_boundary
+- sql: DROP PROCEDURE IF EXISTS transaction_nested_writer
+- sql: DROP TABLE IF EXISTS transaction_name_values
+test_cases:
+- name: An outer transaction name rolls back its actual row effects
+  sql: |
+    BEGIN TRANSACTION OuterWork;
+    INSERT transaction_name_values VALUES(2,20);
+    DECLARE @during INT=@@TRANCOUNT;
+    ROLLBACK TRANSACTION OuterWork;
+    SELECT @during AS during_count,@@TRANCOUNT AS after_count,
+      (SELECT COUNT(*) FROM transaction_name_values WHERE id=2) AS retained;
+  expect: {data: [{during_count: 1,after_count: 0,retained: 0}]}
+- name: The final commit accepts its documentary name and publishes the outer row
+  sql: |
+    BEGIN TRANSACTION ActualName;
+    INSERT transaction_name_values VALUES(2,20);
+    COMMIT TRANSACTION DifferentDocumentaryName;
+    SELECT @@TRANCOUNT AS after_count,(SELECT value FROM transaction_name_values WHERE id=2) AS value;
+  expect: {data: [{after_count: 0,value: 20}]}
+  cleanup:
+  - sql: DELETE transaction_name_values WHERE id=2
+- name: Inner commits decrement SQL nesting without deciding the outer transaction
+  sql: |
+    BEGIN TRANSACTION OuterWork;
+    INSERT transaction_name_values VALUES(2,20);
+    BEGIN TRANSACTION InnerWork;
+    DECLARE @nested INT=@@TRANCOUNT;
+    COMMIT TRANSACTION OuterWork;
+    DECLARE @remaining INT=@@TRANCOUNT;
+    ROLLBACK TRANSACTION OuterWork;
+    SELECT @nested AS nested_count,@remaining AS remaining_count,@@TRANCOUNT AS after_count,
+      (SELECT COUNT(*) FROM transaction_name_values WHERE id=2) AS retained;
+  expect: {data: [{nested_count: 2,remaining_count: 1,after_count: 0,retained: 0}]}
+- name: An unnamed rollback cancels every nesting level
+  sql: |
+    BEGIN TRANSACTION OuterWork;
+    BEGIN TRANSACTION InnerWork;
+    INSERT transaction_name_values VALUES(2,20);
+    ROLLBACK;
+    SELECT @@TRANCOUNT AS after_count,(SELECT COUNT(*) FROM transaction_name_values WHERE id=2) AS retained;
+  expect: {data: [{after_count: 0,retained: 0}]}
+- name: An inner transaction name cannot select an independent rollback
+  sql: |
+    DECLARE @failure INT=0;
+    BEGIN TRANSACTION OuterWork;
+    INSERT transaction_name_values VALUES(2,20);
+    BEGIN TRANSACTION InnerWork;
+    BEGIN TRY ROLLBACK TRANSACTION InnerWork; END TRY
+    BEGIN CATCH SET @failure=ERROR_NUMBER(); END CATCH;
+    DECLARE @depth INT=@@TRANCOUNT,@visible INT=(SELECT COUNT(*) FROM transaction_name_values WHERE id=2);
+    ROLLBACK TRANSACTION OuterWork;
+    SELECT @failure AS failure,@depth AS active_count,@visible AS visible_before_rollback,
+      (SELECT COUNT(*) FROM transaction_name_values WHERE id=2) AS retained;
+  expect: {data: [{failure: 6401,active_count: 2,visible_before_rollback: 1,retained: 0}]}
+- name: Transaction names remain case sensitive under a case insensitive database profile
+  sql: |
+    DECLARE @failure INT=0;
+    BEGIN TRANSACTION MixedCase;
+    INSERT transaction_name_values VALUES(2,20);
+    BEGIN TRY ROLLBACK TRANSACTION mixedcase; END TRY
+    BEGIN CATCH SET @failure=ERROR_NUMBER(); END CATCH;
+    DECLARE @depth INT=@@TRANCOUNT;
+    ROLLBACK TRANSACTION MixedCase;
+    SELECT @failure AS failure,@depth AS active_count,@@TRANCOUNT AS after_count;
+  expect: {data: [{failure: 6401,active_count: 1,after_count: 0}]}
+- name: A savepoint rewinds updates and inserts while retaining preceding work
+  sql: |
+    BEGIN TRANSACTION OuterWork;
+    INSERT transaction_name_values VALUES(2,20);
+    SAVE TRANSACTION BeforeChanges;
+    UPDATE transaction_name_values SET value=99 WHERE id=1;
+    INSERT transaction_name_values VALUES(3,30);
+    ROLLBACK TRANSACTION BeforeChanges;
+    DECLARE @depth INT=@@TRANCOUNT;
+    COMMIT TRANSACTION OuterWork;
+    SELECT @depth AS saved_count,@@TRANCOUNT AS after_count,
+      (SELECT value FROM transaction_name_values WHERE id=1) AS first_value,
+      (SELECT value FROM transaction_name_values WHERE id=2) AS second_value,
+      (SELECT COUNT(*) FROM transaction_name_values WHERE id=3) AS third_rows;
+  expect: {data: [{saved_count: 1,after_count: 0,first_value: 10,second_value: 20,third_rows: 0}]}
+  cleanup:
+  - sql: DELETE transaction_name_values WHERE id=2
+- name: Duplicate savepoint names select the most recently established boundary
+  sql: |
+    BEGIN TRANSACTION OuterWork;
+    SAVE TRANSACTION Repeated;
+    INSERT transaction_name_values VALUES(2,20);
+    SAVE TRANSACTION Repeated;
+    INSERT transaction_name_values VALUES(3,30);
+    ROLLBACK TRANSACTION Repeated;
+    DECLARE @second INT=(SELECT COUNT(*) FROM transaction_name_values WHERE id=2),
+      @third INT=(SELECT COUNT(*) FROM transaction_name_values WHERE id=3);
+    ROLLBACK TRANSACTION OuterWork;
+    SELECT @second AS second_rows,@third AS third_rows,@@TRANCOUNT AS after_count;
+  expect: {data: [{second_rows: 1,third_rows: 0,after_count: 0}]}
+- name: Rewinding a savepoint removes later boundaries but retains the selected boundary
+  sql: |
+    DECLARE @failure INT=0;
+    BEGIN TRANSACTION OuterWork;
+    SAVE TRANSACTION Earlier;
+    INSERT transaction_name_values VALUES(2,20);
+    SAVE TRANSACTION Later;
+    INSERT transaction_name_values VALUES(3,30);
+    ROLLBACK TRANSACTION Earlier;
+    BEGIN TRY ROLLBACK TRANSACTION Later; END TRY
+    BEGIN CATCH SET @failure=ERROR_NUMBER(); END CATCH;
+    INSERT transaction_name_values VALUES(4,40);
+    ROLLBACK TRANSACTION Earlier;
+    COMMIT TRANSACTION OuterWork;
+    SELECT @failure AS failure,@@TRANCOUNT AS after_count,
+      (SELECT COUNT(*) FROM transaction_name_values WHERE id>1) AS retained;
+  expect: {data: [{failure: 6401,after_count: 0,retained: 0}]}
+- name: Savepoint names remain case sensitive and failed lookup preserves the active work
+  sql: |
+    DECLARE @failure INT=0;
+    BEGIN TRANSACTION OuterWork;
+    SAVE TRANSACTION MixedCase;
+    INSERT transaction_name_values VALUES(2,20);
+    BEGIN TRY ROLLBACK TRANSACTION mixedcase; END TRY
+    BEGIN CATCH SET @failure=ERROR_NUMBER(); END CATCH;
+    DECLARE @visible INT=(SELECT COUNT(*) FROM transaction_name_values WHERE id=2);
+    ROLLBACK TRANSACTION MixedCase;
+    DECLARE @depth INT=@@TRANCOUNT;
+    COMMIT TRANSACTION OuterWork;
+    SELECT @failure AS failure,@visible AS before_rewind,@depth AS saved_count,
+      (SELECT COUNT(*) FROM transaction_name_values WHERE id=2) AS retained;
+  expect: {data: [{failure: 6401,before_rewind: 1,saved_count: 1,retained: 0}]}
+- name: Character variables supply transaction names with the documented 32 character prefix
+  sql: |
+    DECLARE @name NVARCHAR(60)=N'abcdefghijklmnopqrstuvwxyz123456suffix';
+    BEGIN TRANSACTION @name;
+    INSERT transaction_name_values VALUES(2,20);
+    ROLLBACK TRANSACTION [abcdefghijklmnopqrstuvwxyz123456];
+    SELECT @@TRANCOUNT AS after_count,(SELECT COUNT(*) FROM transaction_name_values WHERE id=2) AS retained;
+  expect: {data: [{after_count: 0,retained: 0}]}
+- name: Character variables supply the same savepoint boundary after truncation
+  sql: |
+    DECLARE @name VARCHAR(60)='abcdefghijklmnopqrstuvwxyz123456suffix';
+    BEGIN TRANSACTION OuterWork;
+    SAVE TRANSACTION @name;
+    INSERT transaction_name_values VALUES(2,20);
+    ROLLBACK TRANSACTION [abcdefghijklmnopqrstuvwxyz123456];
+    DECLARE @depth INT=@@TRANCOUNT;
+    COMMIT TRANSACTION OuterWork;
+    SELECT @depth AS saved_count,@@TRANCOUNT AS after_count,
+      (SELECT COUNT(*) FROM transaction_name_values WHERE id=2) AS retained;
+  expect: {data: [{saved_count: 1,after_count: 0,retained: 0}]}
+- name: Delimited transaction and savepoint names retain literal dots and reserved words
+  sql: |
+    BEGIN TRANSACTION [literal.transaction];
+    SAVE TRANSACTION [SAVE];
+    INSERT transaction_name_values VALUES(2,20);
+    ROLLBACK TRANSACTION [SAVE];
+    COMMIT TRANSACTION [ignored.name];
+    SELECT @@TRANCOUNT AS after_count,(SELECT COUNT(*) FROM transaction_name_values WHERE id=2) AS retained;
+  expect: {data: [{after_count: 0,retained: 0}]}
+- name: Semicolonless SAVE starts its own statement after an unnamed BEGIN
+  sql: |
+    BEGIN TRAN
+    SAVE TRAN checkpoint
+    INSERT transaction_name_values VALUES(2,20)
+    ROLLBACK TRAN checkpoint
+    COMMIT TRAN
+    SELECT @@TRANCOUNT AS after_count,(SELECT COUNT(*) FROM transaction_name_values WHERE id=2) AS retained
+  expect: {data: [{after_count: 0,retained: 0}]}
+- name: Savepoints require an explicitly active transaction
+  sql: |
+    DECLARE @failure INT=0;
+    BEGIN TRY SAVE TRANSACTION MissingTransaction; END TRY
+    BEGIN CATCH SET @failure=ERROR_NUMBER(); END CATCH;
+    SELECT @failure AS failure,@@TRANCOUNT AS active_count;
+  expect: {data: [{failure: 628,active_count: 0}]}
+- name: A NULL savepoint argument never becomes an unnamed full rollback
+  sql: |
+    DECLARE @name NVARCHAR(32)=NULL,@save_error INT=0,@rollback_error INT=0;
+    BEGIN TRANSACTION OuterWork;
+    INSERT transaction_name_values VALUES(2,20);
+    BEGIN TRY SAVE TRANSACTION @name; END TRY
+    BEGIN CATCH SET @save_error=ERROR_NUMBER(); END CATCH;
+    BEGIN TRY ROLLBACK TRANSACTION @name; END TRY
+    BEGIN CATCH SET @rollback_error=ERROR_NUMBER(); END CATCH;
+    DECLARE @depth INT=@@TRANCOUNT,@visible INT=(SELECT COUNT(*) FROM transaction_name_values WHERE id=2);
+    ROLLBACK TRANSACTION OuterWork;
+    SELECT @save_error AS save_error,@rollback_error AS rollback_error,
+      @depth AS active_count,@visible AS visible_before_rollback,
+      (SELECT COUNT(*) FROM transaction_name_values WHERE id=2) AS retained;
+  expect: {data: [{save_error: 3977,rollback_error: 3977,active_count: 1,visible_before_rollback: 1,retained: 0}]}
+- name: COMMIT without a corresponding BEGIN reports its SQL diagnostic
+  sql: |
+    DECLARE @failure INT=0;
+    BEGIN TRY COMMIT TRANSACTION DocumentaryName; END TRY
+    BEGIN CATCH SET @failure=ERROR_NUMBER(); END CATCH;
+    SELECT @failure AS failure,@@TRANCOUNT AS active_count;
+  expect: {data: [{failure: 3902,active_count: 0}]}
+- name: ROLLBACK without a corresponding BEGIN reports its SQL diagnostic
+  sql: |
+    DECLARE @failure INT=0;
+    BEGIN TRY ROLLBACK TRANSACTION MissingTransaction; END TRY
+    BEGIN CATCH SET @failure=ERROR_NUMBER(); END CATCH;
+    SELECT @failure AS failure,@@TRANCOUNT AS active_count;
+  expect: {data: [{failure: 3903,active_count: 0}]}
+- name: A numeric variable cannot supply a transaction name
+  sql: DECLARE @name INT=17; BEGIN TRANSACTION @name;
+  expect: {error: true,contains: ["3914"]}
+- name: An overlength literal transaction identifier is rejected
+  sql: BEGIN TRANSACTION [abcdefghijklmnopqrstuvwxyz1234567]
+  expect: {error: true}
+- name: A balanced procedure shares the caller transaction depth without committing it
+  sql: |
+    BEGIN TRANSACTION OuterWork;
+    EXEC transaction_nested_writer;
+    DECLARE @depth INT=@@TRANCOUNT,@visible INT=(SELECT COUNT(*) FROM transaction_name_values WHERE id=2);
+    ROLLBACK TRANSACTION OuterWork;
+    SELECT @depth AS active_count,@visible AS visible_before_rollback,
+      (SELECT COUNT(*) FROM transaction_name_values WHERE id=2) AS retained;
+  expect: {data: [{active_count: 1,visible_before_rollback: 1,retained: 0}]}
+- name: A dynamic batch shares the caller transaction depth without committing it
+  sql: |
+    BEGIN TRANSACTION OuterWork;
+    EXEC(N'BEGIN TRANSACTION InnerWork; INSERT transaction_name_values VALUES(2,20); COMMIT TRANSACTION DocumentaryName;');
+    DECLARE @depth INT=@@TRANCOUNT;
+    ROLLBACK TRANSACTION OuterWork;
+    SELECT @depth AS active_count,(SELECT COUNT(*) FROM transaction_name_values WHERE id=2) AS retained;
+  expect: {data: [{active_count: 1,retained: 0}]}
+- name: A procedure savepoint remains a capability of the actual caller transaction
+  sql: |
+    BEGIN TRANSACTION OuterWork;
+    EXEC transaction_named_boundary;
+    INSERT transaction_name_values VALUES(2,20);
+    ROLLBACK TRANSACTION ModuleBoundary;
+    DECLARE @depth INT=@@TRANCOUNT;
+    COMMIT TRANSACTION OuterWork;
+    SELECT @depth AS saved_count,@@TRANCOUNT AS after_count,
+      (SELECT COUNT(*) FROM transaction_name_values WHERE id=2) AS retained;
+  expect: {data: [{saved_count: 1,after_count: 0,retained: 0}]}
+- name: A nested TDS commit preserves owner visibility until the real outer decision
+  tds:
+    statements:
+    - {connection: owner,sql: BEGIN TRANSACTION OuterWork}
+    - connection: owner
+      sql: INSERT transaction_name_values VALUES(2,20)
+    - {connection: owner,sql: BEGIN TRANSACTION InnerWork}
+    - connection: owner
+      sql: SELECT SUM(value)+@@TRANCOUNT AS total FROM transaction_name_values WHERE id=1
+      expect: {data: [{total: 12}]}
+    - {connection: owner,sql: COMMIT TRANSACTION DocumentaryName}
+    - connection: owner
+      sql: SELECT SUM(value)+@@TRANCOUNT AS total FROM transaction_name_values WHERE id=1
+      expect: {data: [{total: 11}]}
+    - connection: owner
+      sql: SELECT @@TRANCOUNT AS active_count,(SELECT COUNT(*) FROM transaction_name_values WHERE id=2) AS visible
+      expect: {data: [{active_count: 1,visible: 1}]}
+    - connection: observer
+      sql: SELECT COUNT(*) AS visible FROM transaction_name_values WHERE id=2
+      expect: {data: [{visible: 0}]}
+    - {connection: owner,sql: COMMIT TRANSACTION OuterWork}
+    - connection: observer
+      sql: SELECT value FROM transaction_name_values WHERE id=2
+      expect: {data: [{value: 20}]}
+    - connection: owner
+      sql: SELECT @@TRANCOUNT AS active_count
+      expect: {data: [{active_count: 0}],column_types: [{name: active_count,type: INT}]}
+  cleanup:
+  - sql: DELETE transaction_name_values WHERE id=2
+- name: A TDS savepoint rewind retains the transaction and restores its private write set
+  tds:
+    statements:
+    - {connection: owner,sql: BEGIN TRANSACTION OuterWork}
+    - {connection: owner,sql: SAVE TRANSACTION BeforeChange}
+    - {connection: owner,sql: UPDATE transaction_name_values SET value=99 WHERE id=1}
+    - {connection: owner,sql: ROLLBACK TRANSACTION BeforeChange}
+    - connection: owner
+      sql: SELECT value,@@TRANCOUNT AS active_count FROM transaction_name_values WHERE id=1
+      expect: {data: [{value: 10,active_count: 1}]}
+    - connection: observer
+      sql: SELECT value FROM transaction_name_values WHERE id=1
+      expect: {data: [{value: 10}]}
+    - {connection: owner,sql: ROLLBACK TRANSACTION OuterWork}
+- name: A completed named transaction publishes durable data
+  sql: |
+    BEGIN TRANSACTION DurableWork;
+    INSERT transaction_name_values VALUES(90,900);
+    COMMIT TRANSACTION DurableWork;
+    SELECT value,@@TRANCOUNT AS active_count FROM transaction_name_values WHERE id=90;
+  expect: {data: [{value: 900,active_count: 0}]}
+- name: Restart after the completed named transaction
+  action: restart
+- name: Restart retains committed data and starts with no SQL transaction nesting
+  sql: SELECT value,@@TRANCOUNT AS active_count FROM transaction_name_values WHERE id=90
+  expect: {data: [{value: 900,active_count: 0}]}
+
+- name: An unnamed commit leaves the following regular label to the script owner
+  sql: |-
+    DECLARE @visited INT=0;
+    BEGIN TRANSACTION;
+    COMMIT TRANSACTION
+    commit_exit:
+    SET @visited=7;
+    SELECT @visited AS visited,@@TRANCOUNT AS active_count;
+  expect: {rows: 1,data: [{visited: 7,active_count: 0}]}
+- name: An unnamed rollback never consumes the next label as a savepoint
+  sql: |-
+    BEGIN TRANSACTION;
+    ROLLBACK TRANSACTION
+    rollback_exit:
+    SELECT @@TRANCOUNT AS active_count;
+  expect: {rows: 1,data: [{active_count: 0}]}
+- name: An unnamed begin leaves the following label outside its transaction name
+  sql: |-
+    BEGIN TRANSACTION
+    begin_entry:
+    DECLARE @observed INT=@@TRANCOUNT;
+    ROLLBACK TRANSACTION;
+    SELECT @observed AS observed,@@TRANCOUNT AS active_count;
+  expect: {rows: 1,data: [{observed: 1,active_count: 0}]}
+- name: A real documentary commit name remains distinct from the following label
+  sql: |-
+    BEGIN TRANSACTION OuterWork;
+    COMMIT TRANSACTION commit_exit
+    commit_exit:
+    SELECT @@TRANCOUNT AS active_count;
+  expect: {rows: 1,data: [{active_count: 0}]}
+- name: GOTO can still reach a label immediately after an unnamed commit
+  sql: |-
+    DECLARE @visited INT=0;
+    BEGIN TRANSACTION;
+    COMMIT TRANSACTION
+    finished:
+    SET @visited=@visited+1;
+    IF @visited<2 GOTO finished;
+    SELECT @visited AS visited,@@TRANCOUNT AS active_count;
+  expect: {rows: 1,data: [{visited: 2,active_count: 0}]}

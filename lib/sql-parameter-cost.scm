@@ -37,10 +37,10 @@ specialization without a fresh candidate cost comparison. */
 		(define mode (qassoc_get (nth variant 3) (quote parameter_mode) nil))
 		(or (equal? mode "generic") (equal? mode "parameterized")))))
 
-(define sql_parameter_reusable? (lambda (info)
+(define sql_parameter_reusable? (lambda (info tx)
 	(begin
 		(define budget (qassoc_get info (quote recompile_ns) nil))
-		(define work (parameter_plan_reuse_work (qassoc_get info (quote work_profile) nil)))
+		(define work (parameter_plan_reuse_work (qassoc_get info (quote work_profile) nil) tx))
 		(define observation (qassoc_get info (quote observation) nil))
 		(and (number? budget) (number? work) (<= work budget)
 			(<= (coalesceNil (observation "execution_ns") 0) budget)))))
@@ -62,7 +62,7 @@ specialization without a fresh candidate cost comparison. */
 			(lambda (variant) (qassoc_get (nth variant 3) (quote compile_ns) 0))))
 		(define budget (reduce prior_compiles min
 			(qassoc_get specialized_info (quote compile_ns) 0)))
-		(define work (parameter_plan_reuse_work (qassoc_get specialized_info (quote work_profile) nil)))
+		(define work (parameter_plan_reuse_work (qassoc_get specialized_info (quote work_profile) nil) tx))
 		(define previous_observation (entry "parameter_observation"))
 		(define observed (if (nil? previous_observation) 0
 			(coalesceNil (previous_observation "execution_ns") 0)))
@@ -82,9 +82,13 @@ specialization without a fresh candidate cost comparison. */
 					(quote recompile_ns) budget) (quote observation) observation))
 				(define candidate (list (car generic) (cadr generic) (nth generic 2) info))
 				(if (and (not (nil? (sql_parameter_candidate_cost candidate false)))
-					(sql_parameter_reusable? info)
+					(sql_parameter_reusable? info tx)
 					(not (sql_parameter_specialization_preferred? specialized candidate false)))
-					(list (list (quote and) (car generic)
-						(list (quote sql_parameter_reusable?) (list (quote quote) info)))
+					(list (sql_queryplan_compile_formula tx
+						(list (quote and)
+							(if (expression_equal? (car generic) true) true
+								(list (quote apply) (car generic)
+									(list (quote list) (quote session) (quote tx) (quote resultrow) (quote resultfields))))
+							(list (quote sql_parameter_reusable?) (list (quote quote) info) (quote tx))))
 						(cadr generic) (nth generic 2) info)
 					specialized))))))

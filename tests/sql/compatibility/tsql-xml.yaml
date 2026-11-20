@@ -1,0 +1,440 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# SQL Server 2022 references: https://dbfiddle.uk/qn2me7Lf and https://dbfiddle.uk/VxZXpnIS
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: XML CONTENT scalar conversion and scoped child-node relations
+setup:
+- sql: CREATE TABLE xml_prototype_output(value NVARCHAR(100))
+cleanup:
+- sql: DROP TABLE IF EXISTS xml_prototype_output
+test_cases:
+- name: A handcrafted XML producer emits directly into a scoped native relation
+  scm: |-
+    (begin
+      (define document (list 'xml_parse "<root><i>7</i><i>7</i><i>8</i><i/><i>A&amp;B</i><i>&lt;x&gt;</i><i>Grüße</i><i>a<b>7</b>b</i></root>" false 'tx))
+      (define input (make_query_block "memcp-tests" '()
+        (list "document" document "steps" (list 'quote (list (list "" "root") (list "" "i"))))
+        true nil nil nil nil nil nil nil nil))
+      (define relation '__xml_prototype)
+      (define native (list (list "column" "fragment" "any" '() '())))
+      (define columns (list (list "Field" "fragment" "Type" "XML_NODE" "RawType" "XML_NODE" "Dimensions" '() "Null" false "Collation" "")))
+      (define source (list "n" "memcp-tests" (make_local_relation_reference relation columns) false nil
+        (list "lifetime" "invocation" "columns" columns "constraints" (list "Unique" '() "ForeignKeys" '()))))
+      (define value (list 'sql_type_expr
+        (list 'xml_string_value (list 'get_column "n" false "fragment" false) 'tx) (list "NVARCHAR" '(100)) nil))
+      (define output (make_query_block "memcp-tests" (list source) (list "value" value)
+        true nil nil nil nil nil nil nil nil))
+      (define initializer (car (qb_stages (make_local_relation_emit input relation '("fragment") 'xml_children_each '()))))
+      (define query (make_invocation_relation_query output (list (list relation "memcp-tests" native columns)) initializer))
+      (define request (newsession)) (request "username" "root")
+      (with_session request (lambda ()
+        (with_autocommit request nil 0 "XML producer prototype" (lambda (tx) (begin
+          (define target (table "memcp-tests" false "xml_prototype_output" false tx))
+          (define plan (sql_queryplan_compile_formula tx (build_queryplan_term query (newsession) tx)))
+          (sql_execute_formula request tx plan (lambda (row)
+            (insert target '("value") (list (list (row "value"))) '() nil false nil tx)) (lambda args true)))))))
+      true)
+  expect:
+    result: true
+- name: The producer retains every emitted row in the native output bag
+  syntax: mysql
+  sql: SELECT value FROM xml_prototype_output ORDER BY value COLLATE utf8mb4_bin
+  expect:
+    rows: 8
+    data:
+    - value: ''
+    - value: '7'
+    - value: '7'
+    - value: '8'
+    - value: <x>
+    - value: A&B
+    - value: Grüße
+    - value: a7b
+- name: Child nodes retain duplicate rows and cast the bound context to INT
+  sql: DECLARE @doc XML=CONVERT(XML,N'<root><i>7</i><i>7</i><i>8</i></root>'); SELECT n.item.value('.','int') AS value
+    FROM @doc.nodes('/root/i') AS n(item) ORDER BY value
+  expect:
+    rows: 3
+    data:
+    - value: 7
+    - value: 7
+    - value: 8
+- name: A declared NULL XML value produces an empty relation
+  sql: DECLARE @doc XML; SELECT COUNT(*) AS count_value FROM @doc.nodes('/root/i') AS n(item)
+  expect:
+    rows: 1
+    data:
+    - count_value: 0
+- name: An empty XML CONTENT scalar produces an empty relation
+  sql: DECLARE @doc XML=CAST(N'' AS XML); SELECT COUNT(*) AS count_value FROM @doc.nodes('/root/i') n(item)
+  expect:
+    rows: 1
+    data:
+    - count_value: 0
+- name: No matching child path produces zero rows
+  sql: DECLARE @doc XML=N'<root><other>1</other></root>'; SELECT COUNT(*) AS count_value FROM @doc.nodes('/root/i') n(item)
+  expect:
+    rows: 1
+    data:
+    - count_value: 0
+- name: Sibling XML CONTENT roots are retained
+  sql: DECLARE @doc XML=CAST(N'<i>1</i><i>2</i>' AS XML); SELECT n.item.value('.','int') AS value FROM @doc.nodes('/i')
+    n(item) ORDER BY value
+  expect:
+    rows: 2
+    data:
+    - value: 1
+    - value: 2
+- name: Entity decoding and Unicode belong to the XML codec
+  sql: DECLARE @doc XML=N'<root><i>A&amp;B</i><i>&lt;x&gt;</i><i>Grüße</i></root>'; SELECT n.item.value('.','nvarchar(20)')
+    AS value FROM @doc.nodes('/root/i') n(item) ORDER BY n.item.value('.','nvarchar(20)') COLLATE Latin1_General_BIN2
+  expect:
+    rows: 3
+    data:
+    - value: <x>
+    - value: A&B
+    - value: Grüße
+- name: The context string value concatenates descendant text without attribute text
+  sql: DECLARE @doc XML=N'<root><i a="ignored">a<b>7</b>b<!--ignored--><?hint ignored?></i></root>'; SELECT n.item.value('.','varchar(20)')
+    AS value FROM @doc.nodes('/root/i') n(item)
+  expect:
+    rows: 1
+    data:
+    - value: a7b
+- name: Style zero strips insignificant whitespace but retains nonempty text
+  sql: DECLARE @doc XML=CONVERT(XML,N'<root><i> </i><i> a </i><i/></root>',0); SELECT '['+n.item.value('.','varchar(20)')+']'
+    AS value FROM @doc.nodes('/root/i') n(item) ORDER BY value
+  expect:
+    rows: 3
+    data:
+    - value: '[ a ]'
+    - value: '[]'
+    - value: '[]'
+- name: Style one preserves whitespace only text
+  sql: DECLARE @doc XML=CONVERT(XML,N'<root><i> </i><i> a </i><i/></root>',1); SELECT '['+n.item.value('.','varchar(20)')+']'
+    AS value FROM @doc.nodes('/root/i') n(item) ORDER BY value
+  expect:
+    rows: 3
+    data:
+    - value: '[ ]'
+    - value: '[ a ]'
+    - value: '[]'
+- name: xml space preserve is inherited in style zero
+  sql: DECLARE @doc XML=CONVERT(XML,N'<root xml:space="preserve"><i> </i></root>',0); SELECT '['+n.item.value('.','varchar(20)')+']'
+    AS value FROM @doc.nodes('/root/i') n(item)
+  expect:
+    rows: 1
+    data:
+    - value: '[ ]'
+- name: Unprefixed child names do not match a default XML namespace
+  sql: DECLARE @doc XML=N'<root xmlns="urn:test"><i>1</i></root>'; SELECT COUNT(*) AS count_value FROM @doc.nodes('/root/i')
+    n(item)
+  expect:
+    rows: 1
+    data:
+    - count_value: 0
+- name: Namespace reset does not change an ancestor's expanded name
+  sql: DECLARE @doc XML=N'<outer xmlns="urn:test"><root xmlns=""><i>4</i></root></outer>'; SELECT COUNT(*) AS count_value
+    FROM @doc.nodes('/outer/root/i') n(item)
+  expect:
+    rows: 1
+    data:
+    - count_value: 0
+- name: Nonmatching namespaced siblings do not alter unqualified nodes
+  sql: DECLARE @doc XML=N'<root xmlns:p="urn:test"><p:i>1</p:i><i>2</i><i>2</i></root>'; SELECT n.item.value('.','int')
+    AS value FROM @doc.nodes('/root/i') n(item) ORDER BY value
+  expect:
+    rows: 2
+    data:
+    - value: 2
+    - value: 2
+- name: Changing an XML variable initializes the next invocation from its own scalar
+  sql: DECLARE @doc XML=N'<root><i>1</i></root>'; SELECT n.item.value('.','int') AS value FROM @doc.nodes('/root/i')
+    n(item); SET @doc=N'<root><i>2</i><i>3</i></root>'; SELECT n.item.value('.','int') AS value FROM @doc.nodes('/root/i')
+    n(item) ORDER BY value
+  expect:
+    rows: 3
+    data:
+    - value: 1
+    - value: 2
+    - value: 3
+- name: Ordinary WHERE and aggregates consume XML nodes as relational rows
+  sql: DECLARE @doc XML=N'<root><i>1</i><i>2</i><i>2</i><i>3</i></root>'; SELECT n.value,COUNT(*) AS count_value FROM
+    (SELECT q.item.value('.','int') AS value FROM @doc.nodes('/root/i') q(item)) n WHERE n.value>=2 GROUP BY n.value
+    ORDER BY n.value
+  expect:
+    rows: 2
+    data:
+    - value: 2
+      count_value: 2
+    - value: 3
+      count_value: 1
+- name: A derived XML node relation is inlined before joining an ordinary input
+  sql: DECLARE @doc XML=N'<root><i>2</i><i>2</i><i>3</i></root>'; SELECT v.id,n.value FROM (VALUES(2),(4)) v(id) LEFT
+    JOIN (SELECT q.item.value('.','int') AS value FROM @doc.nodes('/root/i') q(item)) n ON n.value=v.id ORDER BY v.id,n.value
+  expect:
+    rows: 3
+    data:
+    - id: 2
+      value: 2
+    - id: 2
+      value: 2
+    - id: 4
+      value: null
+- name: Two independent XML sources preserve Cartesian multiplicity
+  sql: DECLARE @a XML=N'<root><i>1</i><i>1</i></root>',@b XML=N'<root><i>2</i><i>3</i></root>'; SELECT a.item.value('.','int')
+    AS left_value,b.item.value('.','int') AS right_value FROM @a.nodes('/root/i') a(item) CROSS JOIN @b.nodes('/root/i')
+    b(item) ORDER BY left_value,right_value
+  expect:
+    rows: 4
+    data:
+    - left_value: 1
+      right_value: 2
+    - left_value: 1
+      right_value: 2
+    - left_value: 1
+      right_value: 3
+    - left_value: 1
+      right_value: 3
+- name: The scalar value method preserves a typed NULL input
+  sql: DECLARE @doc XML; SELECT @doc.value('.','int') AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: A scalar XML document string value uses its declared numeric conversion
+  sql: DECLARE @doc XML=N'<i>42</i>'; SELECT @doc.value('.','int') AS value
+  expect:
+    rows: 1
+    data:
+    - value: 42
+- name: A node alias and column may use delimited identifiers
+  sql: DECLARE @doc XML=N'<root><i>9</i></root>'; SELECT [node alias].[node value].value(N'.',N'int') AS value FROM @doc.nodes(N'/root/i')
+    AS [node alias]([node value])
+  expect:
+    rows: 1
+    data:
+    - value: 9
+- name: Unicode XML accepts a compatible UTF16 declaration
+  sql: DECLARE @doc XML=CONVERT(XML,N'<?xml version="1.0" encoding="UTF-16"?><root><i>7</i></root>'); SELECT n.item.value('.','int')
+    AS value FROM @doc.nodes('/root/i') n(item)
+  expect:
+    rows: 1
+    data:
+    - value: 7
+- name: Mismatched end tags are conversion failures
+  sql: BEGIN TRY DECLARE @doc XML=CONVERT(XML,N'<root><i></root>'); END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS error_number
+    END CATCH
+  expect:
+    rows: 1
+    data:
+    - error_number: 9436
+- name: Undeclared entities are conversion failures
+  sql: DECLARE @doc XML=CONVERT(XML,N'<root>&missing;</root>'); SELECT 1 AS value
+  expect:
+    error: true
+- name: Duplicate attributes are conversion failures
+  sql: BEGIN TRY DECLARE @doc XML=CONVERT(XML,N'<root a="1" a="2"/>'); END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS error_number
+    END CATCH
+  expect:
+    rows: 1
+    data:
+    - error_number: 9437
+- name: Unbound namespace prefixes are conversion failures
+  sql: BEGIN TRY DECLARE @doc XML=CONVERT(XML,N'<p:root/>'); END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS error_number
+    END CATCH
+  expect:
+    rows: 1
+    data:
+    - error_number: 9459
+- name: Style zero rejects document type declarations
+  sql: DECLARE @doc XML=CONVERT(XML,N'<!DOCTYPE root [<!ELEMENT root ANY>]><root/>'); SELECT 1 AS value
+  expect:
+    error: true
+- name: Unicode XML rejects a UTF8 encoding declaration
+  sql: DECLARE @doc XML=CONVERT(XML,N'<?xml version="1.0" encoding="UTF-8"?><root/>'); SELECT 1 AS value
+  expect:
+    error: true
+- name: Direct INT to XML conversion is not permitted
+  sql: DECLARE @doc XML=CAST(7 AS XML); SELECT 1 AS value
+  expect:
+    error: true
+- name: XML values cannot be compared using their string carrier
+  sql: DECLARE @a XML=N'<i/>',@b XML=N'<i/>'; SELECT CASE WHEN @a=@b THEN 1 ELSE 0 END AS value
+  expect:
+    error: true
+- name: A nodes context column cannot be selected directly
+  sql: DECLARE @doc XML=N'<root><i>1</i></root>'; SELECT n.item FROM @doc.nodes('/root/i') n(item)
+  expect:
+    error: true
+- name: SQL XML serialization uses its own empty element profile
+  sql: DECLARE @doc XML=N'<root><i/></root>'; SELECT CAST(@doc AS NVARCHAR(MAX)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: <root><i/></root>
+  noncritical: true
+- name: General XQuery singleton paths remain a positive result target
+  sql: DECLARE @doc XML=N'<root><i>7</i></root>'; SELECT @doc.value('(/root/i)[1]','int') AS value
+  expect:
+    rows: 1
+    data:
+    - value: 7
+  noncritical: true
+- name: Default namespace declarations in XQuery retain expanded name semantics
+  sql: DECLARE @doc XML=N'<root xmlns="urn:test"><i>7</i></root>'; SELECT n.item.value('.','int') AS value FROM @doc.nodes('declare
+    default element namespace "urn:test"; /root/i') n(item)
+  expect:
+    rows: 1
+    data:
+    - value: 7
+  noncritical: true
+- name: A direct XML method in GROUP BY is not a valid SQL grouping key
+  sql: DECLARE @doc XML=N'<root><i>1</i></root>'; SELECT COUNT(*) FROM @doc.nodes('/root/i') n(item) GROUP BY n.item.value('.','int')
+  expect:
+    error: true
+- name: The value SQLType parameter determines TDS numeric and character metadata
+  tds:
+    statements:
+    - sql: DECLARE @doc XML=N'<root><i>7</i></root>'; SELECT n.item.value('.','int') AS number_value,n.item.value('.','varchar(20)')
+        AS text_value FROM @doc.nodes('/root/i') n(item)
+      expect:
+        rows: 1
+        data:
+        - number_value: 7
+          text_value: '7'
+        column_types:
+        - name: number_value
+          type: INT
+        - name: text_value
+          type: VARCHAR
+          length: 20
+- name: XML nodes method names preserve case-sensitive identifiers
+  sql: DECLARE @doc XML=N'<root><i>1</i></root>'; SELECT COUNT(*) FROM @doc.NODES('/root/i') n(item)
+  expect:
+    error: true
+- name: XML value method names preserve case-sensitive identifiers
+  sql: DECLARE @doc XML=N'<root><i>1</i></root>'; SELECT n.item.Value('.','int') AS value FROM @doc.nodes('/root/i')
+    n(item)
+  expect:
+    error: true
+- name: Binary XML conversion remains an exact positive target
+  noncritical: true
+  sql: DECLARE @doc XML=CONVERT(XML,0x3c693e373c2f693e); SELECT @doc.value('.','int') AS value
+  expect:
+    rows: 1
+    data:
+    - value: 7
+- name: XML protocol metadata remains XML rather than national text
+  noncritical: true
+  tds:
+    statements:
+    - sql: DECLARE @doc XML=N'<root><i/></root>'; SELECT @doc AS value
+      expect:
+        rows: 1
+        data:
+        - value: <root><i/></root>
+        column_types:
+        - name: value
+          type: XML
+- name: A deferred procedure body binds its XML declaration when executed
+  setup:
+  - sql: CREATE PROCEDURE xml_context_values @text NVARCHAR(MAX) AS BEGIN DECLARE @doc XML; SET @doc=CONVERT(XML,@text);
+      SELECT n.item.value('.','varchar(20)') AS value FROM @doc.nodes('/root/i') n(item) ORDER BY value END
+  cleanup:
+  - sql: DROP PROCEDURE IF EXISTS xml_context_values
+  sql: EXEC xml_context_values N'<root><i>b</i><i>a</i><i>a</i></root>'
+  expect:
+    rows: 3
+    data:
+    - value: a
+    - value: a
+    - value: b
+- name: An XML column retains its declared type and NULL scalar method behavior
+  setup:
+  - sql: CREATE TABLE xml_scalar_values(id INT,document XML)
+  - sql: INSERT xml_scalar_values VALUES(1,N'<i>7</i>'),(2,NULL)
+  cleanup:
+  - sql: DROP TABLE IF EXISTS xml_scalar_values
+  sql: SELECT id,v.document.value('.','int') AS value FROM xml_scalar_values v ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      value: 7
+    - id: 2
+      value: null
+- name: A correlated XML source remains an exact positive result target
+  noncritical: true
+  setup:
+  - sql: CREATE TABLE xml_correlated_values(id INT,document XML)
+  - sql: INSERT xml_correlated_values VALUES(1,N'<r><i>7</i><i>7</i></r>'),(2,NULL)
+  cleanup:
+  - sql: DROP TABLE IF EXISTS xml_correlated_values
+  sql: SELECT v.id,n.item.value('.','int') AS value FROM xml_correlated_values v CROSS APPLY v.document.nodes('/r/i')
+    n(item) ORDER BY v.id,value
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      value: 7
+    - id: 1
+      value: 7
+- name: Relative document child paths and an unqualified context column retain each row
+  sql: DECLARE @doc XML=N'<i>1</i><i>2</i><i>2</i>'; SELECT item.value('.','int') AS value FROM @doc.nodes(' i ') n(item)
+    ORDER BY value
+  expect:
+    rows: 3
+    data:
+    - value: 1
+    - value: 2
+    - value: 2
+- name: Limited internal DTD conversion remains an exact positive target
+  noncritical: true
+  sql: DECLARE @doc XML=CONVERT(XML,N'<!DOCTYPE r [<!ENTITY v "ok">]><r>&v;</r>',2); SELECT @doc.value('.','varchar(20)')
+    AS value
+  expect:
+    rows: 1
+    data:
+    - value: ok
+- name: An unfinished XML element reports the end of input conversion error
+  sql: BEGIN TRY DECLARE @doc XML=CONVERT(XML,N'<r>'); END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS error_number END
+    CATCH
+  expect:
+    rows: 1
+    data:
+    - error_number: 9400
+- name: The reserved xml namespace binding reports its actual conversion error
+  sql: BEGIN TRY DECLARE @doc XML=CONVERT(XML,N'<r xmlns:xml="urn:wrong"/>'); END TRY BEGIN CATCH SELECT ERROR_NUMBER()
+    AS error_number END CATCH
+  expect:
+    rows: 1
+    data:
+    - error_number: 9464
+- name: A shadowed default namespace is retired before the next sibling
+  sql: DECLARE @doc XML=N'<r><i>1</i><i xmlns="urn:other">2</i><i>3</i></r>'; SELECT n.item.value('.','int') AS value
+    FROM @doc.nodes('/r/i') n(item) ORDER BY value
+  expect:
+    rows: 2
+    data:
+    - value: 1
+    - value: 3
+- name: An emitted fragment retains inherited prefix bindings after sibling shadowing
+  sql: DECLARE @doc XML=N'<r xmlns:p="urn:first"><i><p:x>A</p:x></i><skip xmlns:p="urn:second"><p:x>B</p:x></skip><i><p:x>C</p:x></i></r>';
+    SELECT n.item.value('.','varchar(20)') AS value FROM @doc.nodes('/r/i') n(item) ORDER BY value
+  expect:
+    rows: 2
+    data:
+    - value: A
+    - value: C
+- name: An xml space policy is scoped to its own element subtree
+  sql: DECLARE @doc XML=CONVERT(XML,N'<r><i xml:space="preserve"> </i><i> </i></r>',0); SELECT '['+n.item.value('.','varchar(20)')+']'
+    AS value FROM @doc.nodes('/r/i') n(item) ORDER BY value
+  expect:
+    rows: 2
+    data:
+    - value: '[ ]'
+    - value: '[]'

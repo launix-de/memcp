@@ -1,0 +1,100 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  description: Restricted command spellings dispatch only explicit virtual operations
+  syntax: tsql
+  requires_tds: true
+  isolated: true
+setup:
+- scm: (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS virtual_command_reader" nil (newsession) nil))
+- scm: (eval (parse_sql "memcp-tests" "CREATE USER virtual_command_reader IDENTIFIED BY 'pw'" nil (newsession) nil))
+- scm: (eval (parse_sql "memcp-tests" "GRANT ALL ON `memcp-tests`.* TO virtual_command_reader" nil (newsession) nil))
+cleanup:
+- scm: (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS virtual_command_reader" nil (newsession) nil))
+test_cases:
+- name: DIR lists actual declared virtual drive entries
+  sql: EXEC xp_cmdshell N'DIR C:\'
+  expect: {rows: 1, data: [{output: '<DIR> memcp'}]}
+- name: DIR lists only immediate declared virtual children
+  sql: EXEC xp_cmdshell N'dIr "C:\MemCP"'
+  expect: {rows: 2, data: [{output: '<DIR> data'}, {output: '<DIR> log'}]}
+- name: Empty virtual directory produces an empty declared result
+  sql: EXEC master..xp_cmdshell N'DIR C:\MemCP\Data'
+  expect: {rows: 0}
+- name: NO_OUTPUT suppresses output without executing a process
+  sql: DECLARE @status INT=99; EXEC @status=xp_cmdshell N'DIR C:\MemCP', N'NO_OUTPUT'; SELECT @status AS status
+  expect: {rows: 1, data: [{status: 0}]}
+- name: DIR output has declared national text TDS metadata
+  tds:
+    statements:
+    - sql: EXEC sys.xp_cmdshell N'DIR C:\MemCP'
+      expect:
+        rows: 2
+        data: [{output: '<DIR> data'}, {output: '<DIR> log'}]
+        column_types: [{name: output, type: NVARCHAR}]
+- name: Missing virtual directory cannot be discovered on the host
+  sql: EXEC xp_cmdshell N'DIR C:\Windows'
+  expect: {error: true}
+- name: COPY requires a real engine capability before any success
+  sql: EXEC xp_cmdshell N'COPY C:\MemCP\Data\source.mdf C:\MemCP\Data\target.mdf'
+  expect: {error: true}
+- name: Quoted COPY paths do not invent a database backup
+  sql: EXEC xp_cmdshell N'copy "C:\MemCP\Data\source db.mdf" "C:\MemCP\Data\target db.mdf"'
+  expect: {error: true}
+- name: DEL requires an owned engine artifact rather than deleting host files
+  sql: EXEC xp_cmdshell N'DEL "C:\MemCP\Data\temporary.bak"'
+  expect: {error: true}
+- name: Failed COPY creates no virtual target entry
+  sql: EXEC xp_fileexist N'C:\MemCP\Data\target.mdf'
+  expect: {rows: 1, data: [{'File Exists': 0, 'File is a Directory': 0, 'Parent Directory Exists': 1}]}
+- name: Command chaining is rejected
+  sql: EXEC xp_cmdshell N'DIR C:\MemCP & DEL C:\MemCP\Data\file.bak'
+  expect: {error: true}
+- name: Pipes are rejected
+  sql: EXEC xp_cmdshell N'DIR C:\MemCP | cmd.exe'
+  expect: {error: true}
+- name: Output redirection is rejected
+  sql: EXEC xp_cmdshell N'DIR C:\MemCP > C:\MemCP\Data\file.txt'
+  expect: {error: true}
+- name: Environment expansion is rejected
+  sql: EXEC xp_cmdshell N'DIR %TEMP%'
+  expect: {error: true}
+- name: Delayed environment expansion is rejected
+  sql: EXEC xp_cmdshell N'DIR !TEMP!'
+  expect: {error: true}
+- name: Shell escaping is rejected
+  sql: EXEC xp_cmdshell N'DIR C:\Mem^CP'
+  expect: {error: true}
+- name: Additional command flags are not interpreted by a shell
+  sql: EXEC xp_cmdshell N'DIR /S C:\MemCP'
+  expect: {error: true}
+- name: Executable programs are rejected
+  sql: EXEC xp_cmdshell N'cmd.exe /c DIR C:\MemCP'
+  expect: {error: true}
+- name: UNC command arguments cannot contact network shares
+  sql: EXEC xp_cmdshell N'COPY \\server\share\source.mdf C:\MemCP\Data\target.mdf'
+  expect: {error: true}
+- name: Traversal cannot escape virtual roots through command arguments
+  sql: EXEC xp_cmdshell N'DEL C:\MemCP\..\secret.bak'
+  expect: {error: true}
+- name: Embedded quotes cannot terminate one argument into another command
+  sql: EXEC xp_cmdshell N'DIR "C:\MemCP"evil'
+  expect: {error: true}
+- name: NULL commands do not select an implicit shell
+  sql: EXEC xp_cmdshell NULL
+  expect: {error: true}
+- name: Unmodeled options are rejected
+  sql: EXEC xp_cmdshell N'DIR C:\MemCP', N'OTHER'
+  expect: {error: true}
+- name: Additional arguments are rejected
+  sql: EXEC xp_cmdshell N'DIR C:\MemCP', N'NO_OUTPUT', 1
+  expect: {error: true}
+- name: Newlines cannot introduce a second command
+  sql: DECLARE @command NVARCHAR(4000)=N'DIR C:\MemCP'+NCHAR(10)+N'DEL C:\MemCP\Data\file'; EXEC xp_cmdshell @command
+  expect: {error: true}
+- name: SQL database privileges do not grant the administrative compatibility operation
+  username: virtual_command_reader
+  password: pw
+  sql: EXEC xp_cmdshell N'DIR C:\MemCP'
+  expect: {error: true}

@@ -1,0 +1,225 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# SQL Server 2022: https://dbfiddle.uk/vQ6ky6sW https://dbfiddle.uk/IG7TC2wU https://dbfiddle.uk/dEifa52p
+metadata:
+  version: '1.0'
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Forward dynamic cursors resume declared primary keys against current native rows
+setup:
+- sql: CREATE TABLE forward_dynamic_public(id INT PRIMARY KEY,value INT)
+- sql: INSERT forward_dynamic_public VALUES(1,10),(3,30)
+cleanup:
+- sql: DROP TABLE IF EXISTS forward_dynamic_public
+- sql: DROP TABLE IF EXISTS forward_dynamic_replaced
+test_cases:
+- name: Compiled bookmark callbacks carry scalar values without unrelated cursor context
+  scm: |
+    (begin
+      (define source (list "d" "memcp-tests" "forward_dynamic_public" false nil
+        (sql_relation_declarations "memcp-tests" "forward_dynamic_public" nil)))
+      (define columns (list (list 'get_column "d" false "id" false)))
+      (define condition (list 'or (list 'not (list 'session "__tsql_parameter:__cursor:started"))
+        (tsql_cursor_dynamic_after (list source) columns 0)))
+      (define callback (list 'lambda
+        (map columns (lambda (column) (lower_column_expr_for_alias source column)))
+        (lower_column_expr_for_alias source (sql_type_lower_annotations (list source) condition))))
+      (define formula (publish_queryplan_callables (tsql_bind_parameter_inputs callback
+        (list (list "__cursor:started" '("BIT")) (list "__cursor:key:0" '("INT")))) '()))
+      (define factory (eval (optimize (list 'lambda (list 'session) formula))))
+      (define parent (newsession))
+      (parent "unused_compiler" (lambda (item) (source_schema item)))
+      (map (list (list false nil) (list true 1) (list true 2)) (lambda (position) (begin
+        (define input (tsql_cursor_dynamic_input parent (car position) (list (cadr position))))
+        (define restored (json_decode_scmer (json_encode (close_procedure (factory input)))))
+        (map '(0 1 2 3) restored)))))
+  expect:
+    result: [[true, true, true, true], [false, false, true, true], [false, false, false, true]]
+- name: Query compilation finalizes bookmark inputs before publishing row callbacks
+  scm: |
+    (begin
+      (define source (list "d" "memcp-tests" "forward_dynamic_public" false nil
+        (sql_relation_declarations "memcp-tests" "forward_dynamic_public" nil)))
+      (define column (list 'get_column "d" false "id" false))
+      (define condition (list 'or (list 'not (list 'session "__tsql_parameter:__cursor:started"))
+        (tsql_cursor_dynamic_after (list source) (list column) 0)))
+      (define query (make_query_block "memcp-tests" (list source) (list "id" column "after" condition)
+        true nil nil (list (list column <)) nil nil '() '() '()))
+      (define contracts (list (list "__cursor:started" '("BIT")) (list "__cursor:key:0" '("INT"))))
+      (define formula (build_queryplan_term_using_result query (newsession) nil nil
+        (lambda (formula) (tsql_bind_parameter_inputs formula contracts))))
+      (define run (sql_queryplan_compile_formula nil formula))
+      (define parent (newsession))
+      (parent "unused_compiler" (lambda (item) (source_schema item)))
+      (map (list (list false nil) (list true 1) (list true 3)) (lambda (position) (begin
+        (define answer (newsession)) (answer "rows" '())
+        (define input (tsql_cursor_dynamic_input parent (car position) (list (cadr position))))
+        (run input nil (lambda (row) (answer "rows" (append (answer "rows") row))) (lambda args true))
+        (answer "rows")))))
+  expect:
+    result:
+    - [[id, 1, after, true], [id, 3, after, true]]
+    - [[id, 1, after, false], [id, 3, after, true]]
+    - [[id, 1, after, false], [id, 3, after, false]]
+- name: Composite text keys and LEFT anti membership observe current values and inserts
+  sql: |
+    CREATE TABLE #declared(object_name VARCHAR(20),permission_name VARCHAR(20),value INT,PRIMARY KEY(object_name,permission_name));
+    CREATE TABLE #current(object_name VARCHAR(20),permission_name VARCHAR(20),PRIMARY KEY(object_name,permission_name));
+    INSERT #declared VALUES('alpha','SELECT',7),('beta','SELECT',9);
+    INSERT #current VALUES('beta','SELECT');
+    DECLARE c CURSOR FOR SELECT d.object_name,d.permission_name,d.value FROM #declared d
+      LEFT JOIN #current r ON d.object_name COLLATE Latin1_General_CI_AS=r.object_name
+        AND d.permission_name COLLATE Latin1_General_CI_AS=r.permission_name
+      WHERE r.object_name IS NULL ORDER BY d.object_name,d.permission_name;
+    DECLARE @a VARCHAR(20),@ap VARCHAR(20),@av INT,@b VARCHAR(20),@bp VARCHAR(20),@bv INT,@c VARCHAR(20),@cp VARCHAR(20),@cv INT;
+    OPEN c; FETCH NEXT FROM c INTO @a,@ap,@av;
+    INSERT #declared VALUES('alpha','UPDATE',7);
+    FETCH NEXT FROM c INTO @b,@bp,@bv;
+    DELETE #current WHERE object_name='beta'; UPDATE #declared SET value=NULL WHERE object_name='beta';
+    FETCH NEXT FROM c INTO @c,@cp,@cv;
+    FETCH NEXT FROM c INTO @c,@cp,@cv;
+    DECLARE @ended INT=@@FETCH_STATUS,@rows INT=@@CURSOR_ROWS;
+    CLOSE c; DEALLOCATE c;
+    SELECT @a AS first_name,@ap AS first_permission,@av AS first_value,@b AS second_name,@bp AS second_permission,@bv AS second_value,
+      @c AS third_name,@cp AS third_permission,@cv AS third_value,@ended AS end_status,@rows AS dynamic_rows;
+  expect:
+    rows: 1
+    data: [{first_name: alpha, first_permission: SELECT, first_value: 7, second_name: alpha, second_permission: UPDATE, second_value: 7, third_name: beta, third_permission: SELECT, third_value: null, end_status: -1, dynamic_rows: -1}]
+- name: Default dynamic base cursor sees updates deletions and inserted next keys
+  sql: |
+    CREATE TABLE #visibility(id INT PRIMARY KEY,value INT);
+    INSERT #visibility VALUES(1,10),(3,30),(5,50);
+    DECLARE c CURSOR FOR SELECT id,value FROM #visibility ORDER BY id;
+    DECLARE @first INT,@fv INT,@second INT,@sv INT,@last INT,@lv INT;
+    OPEN c; FETCH NEXT FROM c INTO @first,@fv;
+    INSERT #visibility VALUES(2,20); DELETE #visibility WHERE id=3; UPDATE #visibility SET value=500 WHERE id=5;
+    FETCH NEXT FROM c INTO @second,@sv; FETCH NEXT FROM c INTO @last,@lv;
+    CLOSE c; DEALLOCATE c;
+    SELECT @first AS first_id,@fv AS first_value,@second AS second_id,@sv AS second_value,@last AS last_id,@lv AS last_value;
+  expect: {rows: 1, data: [{first_id: 1, first_value: 10, second_id: 2, second_value: 20, last_id: 5, last_value: 500}]}
+- name: Composite numeric key suffixes resume without skipping a newly inserted middle key
+  sql: |
+    CREATE TABLE #pairs(a INT,b INT,PRIMARY KEY(a,b)); INSERT #pairs VALUES(1,1),(1,3),(2,0);
+    DECLARE c CURSOR FOR SELECT a,b FROM #pairs ORDER BY a,b;
+    DECLARE @a INT,@first INT,@middle INT,@last INT,@tail_a INT,@tail_b INT;
+    OPEN c; FETCH NEXT FROM c INTO @a,@first; INSERT #pairs VALUES(1,2);
+    FETCH NEXT FROM c INTO @a,@middle; FETCH NEXT FROM c INTO @a,@last; FETCH NEXT FROM c INTO @tail_a,@tail_b;
+    DEALLOCATE c;
+    SELECT @first AS first_suffix,@middle AS middle_suffix,@last AS last_suffix,@tail_a AS tail_prefix,@tail_b AS tail_suffix;
+  expect: {rows: 1, data: [{first_suffix: 1, middle_suffix: 2, last_suffix: 3, tail_prefix: 2, tail_suffix: 0}]}
+- name: OPEN does not freeze an initially empty relation before its first FETCH
+  sql: |
+    CREATE TABLE #initially_empty(id INT PRIMARY KEY); DECLARE c CURSOR FOR SELECT id FROM #initially_empty ORDER BY id;
+    DECLARE @value INT; OPEN c; INSERT #initially_empty VALUES(7); FETCH NEXT FROM c INTO @value;
+    SELECT @value AS value,@@FETCH_STATUS AS status,@@CURSOR_ROWS AS dynamic_rows;
+    DEALLOCATE c;
+  expect: {rows: 1, data: [{value: 7, status: 0, dynamic_rows: -1}]}
+- name: Direct DECLARE and SET status reads share the live dynamic cursor binding
+  sql: |
+    CREATE TABLE #status_probe(id INT PRIMARY KEY);
+    DECLARE c CURSOR FOR SELECT id FROM #status_probe ORDER BY id;
+    SELECT CURSOR_STATUS('global','c') AS direct;
+    OPEN c; SELECT CURSOR_STATUS('global','c') AS direct;
+    DECLARE @initial INT=CURSOR_STATUS('global','c'); SELECT @initial AS initial;
+    DECLARE @value INT; FETCH NEXT FROM c INTO @value;
+    SELECT CURSOR_STATUS('global','c') AS direct;
+    DECLARE @later INT=CURSOR_STATUS('global','c'); SELECT @later AS later;
+    SET @later=CURSOR_STATUS('global','c'); SELECT @later AS later;
+    DEALLOCATE c;
+  expect: {rows: 6, data: [{direct: -1}, {direct: 1}, {initial: 1}, {direct: 1}, {later: 1}, {later: 1}]}
+- name: Failed dynamic FETCH is sticky until CLOSE and OPEN reset traversal
+  sql: |
+    CREATE TABLE #empty(id INT PRIMARY KEY); DECLARE c CURSOR FOR SELECT id FROM #empty ORDER BY id;
+    DECLARE @value INT=9; OPEN c; FETCH NEXT FROM c INTO @value;
+    DECLARE @empty_status INT=@@FETCH_STATUS,@opened_rows INT=@@CURSOR_ROWS,@opened_status INT=CURSOR_STATUS('global','c');
+    INSERT #empty VALUES(1); FETCH NEXT FROM c INTO @value;
+    DECLARE @sticky_status INT=@@FETCH_STATUS;
+    CLOSE c; DECLARE @closed_rows INT=@@CURSOR_ROWS; OPEN c; FETCH NEXT FROM c INTO @value;
+    DEALLOCATE c;
+    SELECT @empty_status AS empty_status,@opened_rows AS dynamic_rows,@opened_status AS open_status,@sticky_status AS sticky_status,@closed_rows AS closed_rows,@value AS reopened_value;
+  expect: {rows: 1, data: [{empty_status: -1, dynamic_rows: -1, open_status: 1, sticky_status: -1, closed_rows: 0, reopened_value: 1}]}
+- name: A current primary key moved forward may be encountered again at its new location
+  sql: |
+    CREATE TABLE #move(id INT PRIMARY KEY); INSERT #move VALUES(1),(3);
+    DECLARE c CURSOR FOR SELECT id FROM #move ORDER BY id; DECLARE @first INT,@second INT,@third INT;
+    OPEN c; FETCH NEXT FROM c INTO @first; UPDATE #move SET id=4 WHERE id=1;
+    FETCH NEXT FROM c INTO @second; FETCH NEXT FROM c INTO @third; DEALLOCATE c;
+    SELECT @first AS first_id,@second AS second_id,@third AS third_id;
+  expect: {rows: 1, data: [{first_id: 1, second_id: 3, third_id: 4}]}
+- name: Declared collations order the complete text bookmark tuple
+  sql: |
+    CREATE TABLE #collated(a VARCHAR(10) COLLATE utf8mb4_general_ci,b INT,PRIMARY KEY(a,b));
+    INSERT #collated VALUES('a',1),('B',1),('B',2);
+    DECLARE c CURSOR FOR SELECT a,b FROM #collated ORDER BY a,b;
+    DECLARE @first VARCHAR(10),@second VARCHAR(10),@third VARCHAR(10),@b INT,@last_suffix INT;
+    OPEN c; FETCH NEXT FROM c INTO @first,@b; FETCH NEXT FROM c INTO @second,@b; FETCH NEXT FROM c INTO @third,@last_suffix;
+    DEALLOCATE c;
+    SELECT @first AS first_name,@second AS second_name,@third AS third_name,@last_suffix AS last_suffix;
+  expect: {rows: 1, data: [{first_name: a, second_name: B, third_name: B, last_suffix: 2}]}
+- name: Anti membership hides a future left key added to the right after OPEN
+  sql: |
+    CREATE TABLE #left_keys(id INT PRIMARY KEY,value INT); CREATE TABLE #right_keys(id INT PRIMARY KEY);
+    INSERT #left_keys VALUES(1,11),(2,22),(3,33);
+    DECLARE c CURSOR FOR SELECT l.id,l.value FROM #left_keys l LEFT JOIN #right_keys r ON l.id=r.id WHERE r.id IS NULL ORDER BY l.id;
+    DECLARE @first INT,@fv INT,@last INT,@lv INT;
+    OPEN c; FETCH NEXT FROM c INTO @first,@fv; INSERT #right_keys VALUES(2);
+    FETCH NEXT FROM c INTO @last,@lv; DEALLOCATE c;
+    SELECT @first AS first_id,@last AS last_id,@lv AS last_value;
+  expect: {rows: 1, data: [{first_id: 1, last_id: 3, last_value: 33}]}
+- name: Dynamic FETCH resultsets retain duplicate NULL projections and typed hidden status
+  tds:
+    statements:
+    - sql: |
+        CREATE TABLE #output(id INT PRIMARY KEY,value INT); INSERT #output VALUES(1,NULL),(2,NULL);
+        DECLARE c CURSOR FOR SELECT value AS ROWSTAT,value AS value FROM #output ORDER BY id;
+        OPEN c; FETCH NEXT FROM c; FETCH NEXT FROM c; FETCH NEXT FROM c; DEALLOCATE c;
+      expect:
+        rows: 2
+        columns: [ROWSTAT, value, ROWSTAT]
+        row_values: [[null, null, 1], [null, null, 1]]
+        column_types: [{name: ROWSTAT, type: INT}, {name: value, type: INT}, {name: ROWSTAT, type: INT}]
+- name: Open a connection cursor before another statement changes its public source
+  session_id: forward-dynamic-rebuild
+  sql: DECLARE c CURSOR GLOBAL FOR SELECT id,value FROM forward_dynamic_public ORDER BY id; DECLARE @id INT,@value INT; OPEN c; FETCH NEXT FROM c INTO @id,@value; SELECT @id AS id,@value AS value
+  expect: {rows: 1, data: [{id: 1, value: 10}]}
+- name: A separately committed insert is visible to the already opened cursor
+  sql: INSERT forward_dynamic_public VALUES(2,20)
+- name: Native rebuild changes physical generations without changing cursor identity
+  scm: (begin (rebuild) true)
+  expect: {result: true}
+- name: The same cursor resumes current keys after the native rebuild
+  session_id: forward-dynamic-rebuild
+  sql: DECLARE @id INT,@value INT; FETCH NEXT FROM c INTO @id,@value; SELECT @id AS id,@value AS value; DEALLOCATE c
+  expect: {rows: 1, data: [{id: 2, value: 20}]}
+- name: Replacing an identically declared source cannot retarget an already open cursor
+  sql: |
+    CREATE TABLE forward_dynamic_replaced(id INT PRIMARY KEY); INSERT forward_dynamic_replaced VALUES(1);
+    DECLARE c CURSOR FOR SELECT id FROM forward_dynamic_replaced ORDER BY id; OPEN c;
+    DROP TABLE forward_dynamic_replaced; CREATE TABLE forward_dynamic_replaced(id INT PRIMARY KEY); INSERT forward_dynamic_replaced VALUES(9);
+    BEGIN TRY FETCH NEXT FROM c; END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS error_number; END CATCH;
+    DEALLOCATE c;
+  expect: {rows: 1, data: [{error_number: 16943}]}
+- name: Scrollable dynamic cursors still need a bidirectional position owner
+  noncritical: true
+  sql: |
+    CREATE TABLE #scrolling(id INT PRIMARY KEY); INSERT #scrolling VALUES(1),(2);
+    DECLARE c CURSOR LOCAL SCROLL DYNAMIC READ_ONLY FOR SELECT id FROM #scrolling ORDER BY id;
+    DECLARE @value INT; OPEN c; FETCH LAST FROM c INTO @value; DEALLOCATE c; SELECT @value AS value;
+  expect: {rows: 1, data: [{value: 2}]}
+- name: Nonanti joined dynamic cursors need their own complete result identity proof
+  noncritical: true
+  sql: |
+    CREATE TABLE #join_left(id INT PRIMARY KEY); CREATE TABLE #join_right(id INT PRIMARY KEY,value INT);
+    INSERT #join_left VALUES(1); INSERT #join_right VALUES(1,7);
+    DECLARE c CURSOR FOR SELECT r.value FROM #join_left l LEFT JOIN #join_right r ON l.id=r.id ORDER BY l.id;
+    DECLARE @value INT; OPEN c; UPDATE #join_right SET value=9; FETCH NEXT FROM c INTO @value; DEALLOCATE c; SELECT @value AS value;
+  expect: {rows: 1, data: [{value: 9}]}
+- name: A nullable right-side IS NULL predicate is not an anti-semijoin identity proof
+  noncritical: true
+  sql: |
+    CREATE TABLE #nullable_left(id INT PRIMARY KEY); CREATE TABLE #nullable_right(id INT PRIMARY KEY,parent INT,value INT);
+    INSERT #nullable_left VALUES(1); INSERT #nullable_right VALUES(1,1,NULL),(2,1,NULL);
+    DECLARE c CURSOR FOR SELECT r.value FROM #nullable_left l LEFT JOIN #nullable_right r ON l.id=r.parent WHERE r.value IS NULL ORDER BY l.id;
+    OPEN c; FETCH NEXT FROM c; FETCH NEXT FROM c; DEALLOCATE c;
+  expect: {rows: 2, data: [{value: null, ROWSTAT: 1}, {value: null, ROWSTAT: 1}]}

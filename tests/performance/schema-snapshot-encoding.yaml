@@ -19,9 +19,9 @@ test_cases:
   scm: |
     (list
       (count (map (produceN 80) (lambda (i)
-        (altercolumn (table "memcp-tests" false "snapshot_catalog_0" false)
+        (altercolumn (table "memcp-tests" false "snapshot_catalog_0" false nil)
           "value_0" "comment" (concat "snapshot-" i)))))
-      ((show (table "memcp-tests" false "snapshot_catalog_0" false)
+      ((show (table "memcp-tests" false "snapshot_catalog_0" false nil)
         "column" "value_0") "Comment"))
   expect:
     result: [80, snapshot-79]
@@ -31,7 +31,7 @@ test_cases:
   threshold_ms: 30000
 - name: Unrelated defaults preserve JSON escapes and Unicode
   scm: |
-    ((show (table "memcp-tests" false "snapshot_catalog_191" false)
+    ((show (table "memcp-tests" false "snapshot_catalog_191" false nil)
       "column" "value_15") "Default")
   expect:
     result: "<catalog>&\"\\\nGröße xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"

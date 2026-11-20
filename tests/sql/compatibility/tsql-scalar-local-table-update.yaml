@@ -1,0 +1,109 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  description: Local function UPDATE preserves its normal relational selection and lexical state
+setup:
+- sql: CREATE TABLE local_update_inputs(id INT PRIMARY KEY)
+- sql: INSERT local_update_inputs VALUES(1),(2),(3),(4)
+- sql: CREATE TABLE local_update_windows(id INT PRIMARY KEY,group_id INT,first_id INT,last_id INT)
+- sql: INSERT local_update_windows VALUES(1,1,2,3),(2,2,1,4)
+- sql: |
+    CREATE FUNCTION dbo.local_active_total(@group INT) RETURNS INT AS BEGIN
+      DECLARE @rows TABLE(id INT PRIMARY KEY,active SMALLINT);
+      DECLARE @total INT;
+      INSERT INTO @rows(id,active) SELECT id,1 FROM local_update_inputs;
+      UPDATE t SET active=0 FROM @rows t WHERE NOT EXISTS(
+        SELECT w.id FROM local_update_windows w
+        WHERE w.group_id=@group AND t.id BETWEEN w.first_id AND w.last_id);
+      SELECT @total=SUM(active) FROM @rows;
+      RETURN @total;
+    END
+- sql: |
+    CREATE FUNCTION dbo.local_increment(@times INT) RETURNS INT AS BEGIN
+      DECLARE @rows TABLE(id INT PRIMARY KEY,amount INT NOT NULL);
+      DECLARE @i INT=0;
+      DECLARE @total INT;
+      INSERT INTO @rows(id,amount) SELECT id,1 FROM local_update_inputs WHERE id<=2;
+      WHILE @i<@times BEGIN
+        UPDATE @rows SET amount=amount+1 WHERE id=1;
+        SET @i=@i+1;
+      END
+      SELECT @total=SUM(amount) FROM @rows;
+      RETURN @total;
+    END
+- sql: |
+    CREATE FUNCTION dbo.local_chosen_update(@choose BIT,@divisor INT) RETURNS INT AS BEGIN
+      DECLARE @rows TABLE(amount INT);
+      DECLARE @total INT;
+      INSERT INTO @rows(amount) SELECT 9;
+      IF @choose=1 UPDATE @rows SET amount=amount/@divisor;
+      SELECT @total=SUM(amount) FROM @rows;
+      RETURN @total;
+    END
+- sql: |
+    CREATE FUNCTION dbo.local_nullable_update() RETURNS INT AS BEGIN
+      DECLARE @rows TABLE(id INT NULL,amount INT);
+      DECLARE @total INT;
+      INSERT INTO @rows(id,amount) SELECT NULL,9;
+      UPDATE t SET amount=0 FROM @rows t WHERE EXISTS(
+        SELECT w.id FROM local_update_windows w WHERE w.group_id=1 AND t.id IS NULL);
+      SELECT @total=SUM(amount) FROM @rows;
+      RETURN @total;
+    END
+test_cases:
+- name: A NULL caller argument preserves the full local NOT EXISTS predicate
+  sql: SELECT dbo.local_active_total(NULL) AS total
+  expect: {rows: 1,data: [{total: 0}]}
+- name: A nullable residual outer key remains a binding rather than an SQL equality
+  sql: SELECT dbo.local_nullable_update() AS total
+  expect: {rows: 1,data: [{total: 0}]}
+- name: UPDATE FROM a local alias keeps the complete NOT EXISTS selection
+  sql: SELECT dbo.local_active_total(1) AS partial,dbo.local_active_total(2) AS complete,dbo.local_active_total(9) AS missing
+  expect: {rows: 1,data: [{partial: 2,complete: 4,missing: 0}]}
+- name: Each caller retains its own local mutation state
+  sql: SELECT id,dbo.local_active_total(id) AS active FROM local_update_inputs ORDER BY id
+  expect: {rows: 4,data: [{id: 1,active: 2},{id: 2,active: 4},{id: 3,active: 0},{id: 4,active: 0}]}
+- name: Direct local UPDATE executes once per entered loop step
+  sql: SELECT dbo.local_increment(0) AS skipped,dbo.local_increment(3) AS repeated,dbo.local_increment(3) AS fresh
+  expect: {rows: 1,data: [{skipped: 2,repeated: 5,fresh: 5}]}
+- name: An unchosen local UPDATE does not evaluate its invalid assignment
+  sql: SELECT dbo.local_chosen_update(0,0) AS total
+  expect: {rows: 1,data: [{total: 9}]}
+- name: A chosen local UPDATE retains the ordinary SQL arithmetic result
+  sql: SELECT dbo.local_chosen_update(1,3) AS total
+  expect: {rows: 1,data: [{total: 3}]}
+- name: A local UPDATE assignment error propagates from the normal SQL expression
+  sql: SELECT dbo.local_chosen_update(1,0) AS total
+  expect: {error: true,contains: division by zero}
+- name: A failed local UPDATE leaves the next invocation fresh
+  sql: SELECT dbo.local_chosen_update(1,3) AS total,dbo.local_increment(1) AS incremented
+  expect: {rows: 1,data: [{total: 3,incremented: 3}]}
+- name: Caller transaction begins before the public source changes
+  session_id: local_update_owner
+  sql: BEGIN TRANSACTION
+- name: A pending public source row belongs to the caller transaction
+  session_id: local_update_owner
+  sql: INSERT local_update_windows VALUES(3,9,1,3)
+- name: Private local UPDATE reads public rows in the actual caller transaction
+  session_id: local_update_owner
+  sql: SELECT dbo.local_active_total(9) AS total,@@TRANCOUNT AS depth
+  expect: {rows: 1,data: [{total: 3,depth: 1}]}
+- name: Caller rollback remains available after the local mutation lifetime
+  session_id: local_update_owner
+  sql: ROLLBACK TRANSACTION
+- name: Rollback restores public data and later invocations observe fresh local rows
+  sql: SELECT dbo.local_active_total(9) AS total,(SELECT COUNT(*) FROM local_update_windows WHERE id=3) AS pending_rows
+  expect: {rows: 1,data: [{total: 0,pending_rows: 0}]}
+- name: A scalar function cannot turn UPDATE into a public table mutation
+  sql: CREATE FUNCTION dbo.invalid_public_update() RETURNS INT AS BEGIN UPDATE local_update_inputs SET id=9; RETURN 1; END
+  expect: {error: true,contains: scalar function UPDATE requires a declared local table}
+cleanup:
+- sql: DROP FUNCTION IF EXISTS dbo.local_nullable_update
+- sql: DROP FUNCTION IF EXISTS dbo.local_active_total
+- sql: DROP FUNCTION IF EXISTS dbo.local_increment
+- sql: DROP FUNCTION IF EXISTS dbo.local_chosen_update
+- sql: DROP FUNCTION IF EXISTS dbo.invalid_public_update
+- sql: DROP TABLE local_update_windows
+- sql: DROP TABLE local_update_inputs

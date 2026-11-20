@@ -1,0 +1,148 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  description: Closed arithmetic and calendar values share through the common executable publisher
+setup:
+- scm: (eval (parse_sql "memcp-tests" "CREATE TABLE big_items(id INT PRIMARY KEY,v0 INT,v1 INT,v2 INT,v3 INT,v4
+    INT,v5 INT,v6 INT,v7 INT) ENGINE=SAFE" nil))
+- scm: (eval (parse_sql "memcp-tests" "INSERT INTO big_items VALUES(245000,128328885,3256542994,3066575266,2934489972,2277579473,2158026865,2037288799,3931441335),(245001,2464811239,2687059406,1171130046,3484034859,2348913140,1403570898,2481383840,1449133373)"
+    nil))
+- sql: CREATE TABLE calendar_group_settings(id INT PRIMARY KEY,owner_id INT,value INT)
+- sql: INSERT calendar_group_settings VALUES(1,1,2),(2,1,5),(3,2,7)
+- sql: CREATE TABLE calendar_group_denominators(id INT PRIMARY KEY,value INT)
+- sql: INSERT calendar_group_denominators VALUES(1,0),(2,1)
+test_cases:
+- name: Delegated CASE arithmetic retains its calendar contract through grouped reduction
+  syntax: tsql
+  sql: "SELECT CAST(id-245000 AS INT) AS bucket,SUM(DATEDIFF(day,CAST(N'2026-01-01' AS DATETIME),\n  CASE WHEN id=245000\
+    \ THEN CAST(N'2026-01-05' AS DATETIME)-CAST(id-244999 AS INT)\n    ELSE DATEADD(day,1,CAST(N'2026-01-01' AS\
+    \ DATETIME)) END)) AS total\nFROM dbo.big_items WHERE id IN(245000,245001) GROUP BY CAST(id-245000 AS INT) ORDER\
+    \ BY bucket\n"
+  expect:
+    rows: 2
+    data:
+    - bucket: 0
+      total: 3
+    - bucket: 1
+      total: 1
+- name: Actual calendar helper text-source compilation retains captures and dynamic session arguments
+  scm: |-
+    (begin
+      (define amount (list 'session "amount"))
+      (define code (publish_queryplan_callables
+        (list 'resultrow (list 'list
+          (list tsql_cast_integer amount -2147483648 2147483647)
+          (list tsql_checked_integer_operation "add" amount 1 -2147483648 2147483647)
+          (list 'format_date
+            (list tsql_calendar_range
+              (list tsql_shift_numeric_days
+                (list tsql_calendar_text (list 'session "text") (list 'session "order")
+                  (list 'session "language") true)
+                (list tsql_cast_integer amount -2147483648 2147483647) -1)
+              -6847804800) "%Y-%m-%d")
+          (list tsql_arithmetic_value true
+            (list 'lambda '() (list tsql_checked_integer_operation "subtract" amount 1
+              -2147483648 2147483647))))) '()))
+      (define run (close_procedure (eval (optimize (list 'lambda
+        (list 'session 'tx 'resultrow 'resultfields) code)))))
+      (define names (list 'tsql_arithmetic_value 'tsql_checked_integer_operation 'tsql_cast_integer
+        'tsql_calendar_range 'tsql_calendar_text 'tsql_shift_numeric_days 'tsql_raise_error
+        'tsql_datetime_text 'tsql_parse_integer 'tsql_numeric_input 'tsql_float_max
+        'tsql_numeric_calendar_fields 'tsql_named_date 'tsql_english_date_parts 'tsql_numeric_date
+        'tsql_english_clock 'tsql_language_months 'tsql_english_year 'tsql_calendar_pad
+        'tsql_german_short_month_names 'tsql_german_month_names 'tsql_calendar_month_names
+        'tsql_calendar_full_month_names))
+      (define wire (serialize (list 'lambda names run)))
+      (define restored (apply
+        (apply (eval (optimize (list (quote lambda) (list) (scheme wire)))) (list))
+        (map names (lambda (_name) (lambda args (error "unbound calendar helper"))))))
+      (define input (newsession))
+      (input "amount" 2) (input "text" "1 . 2 . 2026")
+      (input "order" "mdy") (input "language" "us_english")
+      (define first (restored input nil (lambda (row) row) (lambda (_fields) true)))
+      (input "order" "dmy") (input "language" "Deutsch")
+      (and (equal? first (list 2 3 "2025-12-31" 1))
+        (equal? (restored input nil (lambda (row) row) (lambda (_fields) true))
+          (list 2 3 "2026-01-30" 1))))
+
+  expect:
+    result: true
+- name: Stored group key arithmetic consumes each current warning profile
+  sql: |
+    SET ANSI_WARNINGS OFF;
+    SELECT CAST(9/value AS INT) AS bucket,COUNT(*) AS total
+    FROM calendar_group_denominators GROUP BY CAST(9/value AS INT) ORDER BY bucket;
+    SET ANSI_WARNINGS ON;
+    BEGIN TRY
+      SELECT CAST(9/value AS INT) AS bucket,COUNT(*) AS total
+      FROM calendar_group_denominators GROUP BY CAST(9/value AS INT) ORDER BY bucket;
+    END TRY
+    BEGIN CATCH SELECT ERROR_NUMBER() AS code; END CATCH;
+    SET ANSI_WARNINGS OFF;
+    SELECT CAST(9/value AS INT) AS bucket,COUNT(*) AS total
+    FROM calendar_group_denominators GROUP BY CAST(9/value AS INT) ORDER BY bucket;
+    SET ANSI_WARNINGS ON;
+  expect:
+    rows: 5
+    data:
+    - {bucket: null, total: 1}
+    - {bucket: 9, total: 1}
+    - {code: 8134}
+    - {bucket: null, total: 1}
+    - {bucket: 9, total: 1}
+- name: Stored group filters bind current key and WHERE coordinates together
+  sql: |
+    DECLARE @minimum INT=0,@offset INT=10;
+    SELECT owner_id+@offset AS bucket,SUM(value) AS total
+    FROM calendar_group_settings WHERE value>@minimum
+    GROUP BY owner_id+@offset ORDER BY bucket;
+    SET @minimum=4; SET @offset=20;
+    SELECT owner_id+@offset AS bucket,SUM(value) AS total
+    FROM calendar_group_settings WHERE value>@minimum
+    GROUP BY owner_id+@offset ORDER BY bucket;
+    SET @minimum=0; SET @offset=10;
+    SELECT owner_id+@offset AS bucket,SUM(value) AS total
+    FROM calendar_group_settings WHERE value>@minimum
+    GROUP BY owner_id+@offset ORDER BY bucket;
+  expect:
+    rows: 6
+    data:
+    - {bucket: 11, total: 7}
+    - {bucket: 12, total: 7}
+    - {bucket: 21, total: 5}
+    - {bucket: 22, total: 7}
+    - {bucket: 11, total: 7}
+    - {bucket: 12, total: 7}
+- name: Ordered scalar group filters consume current caller coordinates
+  sql: |
+    DECLARE @offset INT=10;
+    SELECT p.id,(SELECT TOP(1) e.value FROM calendar_group_settings e
+      WHERE e.owner_id+@offset=p.id ORDER BY e.value DESC) AS chosen
+    FROM (VALUES(11),(12)) p(id) ORDER BY p.id;
+    SET @offset=11;
+    SELECT p.id,(SELECT TOP(1) e.value FROM calendar_group_settings e
+      WHERE e.owner_id+@offset=p.id ORDER BY e.value DESC) AS chosen
+    FROM (VALUES(11),(12)) p(id) ORDER BY p.id;
+  expect:
+    rows: 4
+    data:
+    - {id: 11, chosen: 5}
+    - {id: 12, chosen: 7}
+    - {id: 11, chosen: null}
+    - {id: 12, chosen: 5}
+- name: Standalone numeric calendar fields preserve default and explicit style ordering
+  syntax: tsql
+  sql: "SELECT CONVERT(VARCHAR(30),CONVERT(DATETIME,STR(CAST(id-244999 AS INT))+'.'+STR(2)+'.'+STR(2026)),121)\
+    \ AS default_value,\n  CONVERT(VARCHAR(30),CONVERT(DATETIME,STR(CAST(id-244999 AS INT))+'.'+STR(2)+'.'+STR(2026),104),121)\
+    \ AS styled_value\nFROM dbo.big_items WHERE id=245000\n"
+  expect:
+    rows: 1
+    data:
+    - default_value: '2026-01-02 00:00:00.000'
+      styled_value: '2026-02-01 00:00:00.000'
+cleanup:
+- sql: DROP TABLE IF EXISTS calendar_group_denominators
+- sql: DROP TABLE IF EXISTS calendar_group_settings
+- sql: DROP TABLE IF EXISTS big_items

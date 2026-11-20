@@ -1,0 +1,109 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Scalar cardinality keeps typed native failure identity and dialect diagnostics
+setup:
+- sql: CREATE TABLE cardinality_values(id INT PRIMARY KEY,owner_id INT,value INT)
+- sql: INSERT cardinality_values VALUES(1,1,10),(2,1,20),(3,2,NULL),(4,3,7),(5,3,7)
+cleanup:
+- sql: DROP TABLE IF EXISTS cardinality_values
+test_cases:
+- name: An exact-key scalar failure reports SQL number 512 without publishing a partial assignment
+  sql: |
+    DECLARE @value INT=77,@number INT=0,@state INT=0,@severity INT=0;
+    BEGIN TRY SELECT @value=(SELECT value FROM cardinality_values WHERE owner_id=1); END TRY
+    BEGIN CATCH SELECT @number=ERROR_NUMBER(),@state=ERROR_STATE(),@severity=ERROR_SEVERITY(); END CATCH;
+    SELECT @value AS value,@number AS number,@state AS state,@severity AS severity;
+  expect: {rows: 1,data: [{value: 77,number: 512,state: 1,severity: 16}]}
+- name: A mapped scalar expression preserves the same cardinality error
+  sql: |
+    DECLARE @value INT=77,@number INT=0;
+    BEGIN TRY SELECT @value=(SELECT value+1 FROM cardinality_values WHERE owner_id=1); END TRY
+    BEGIN CATCH SET @number=ERROR_NUMBER(); END CATCH;
+    SELECT @value AS value,@number AS number;
+  expect: {rows: 1,data: [{value: 77,number: 512}]}
+- name: Two equal scalar values still violate row cardinality
+  sql: |
+    DECLARE @value INT=77,@number INT=0;
+    BEGIN TRY SELECT @value=(SELECT value FROM cardinality_values WHERE owner_id=3); END TRY
+    BEGIN CATCH SET @number=ERROR_NUMBER(); END CATCH;
+    SELECT @value AS value,@number AS number;
+  expect: {rows: 1,data: [{value: 77,number: 512}]}
+- name: An ordered scalar over two selected rows preserves typed failure
+  sql: |
+    DECLARE @value INT=77,@number INT=0;
+    BEGIN TRY SELECT @value=(SELECT TOP(2) value FROM cardinality_values ORDER BY id); END TRY
+    BEGIN CATCH SET @number=ERROR_NUMBER(); END CATCH;
+    SELECT @value AS value,@number AS number;
+  expect: {rows: 1,data: [{value: 77,number: 512}]}
+- name: A correlated scalar retains its outer domain and cardinality diagnostic
+  sql: |
+    DECLARE @value INT=77,@number INT=0;
+    BEGIN TRY
+      SELECT @value=(SELECT inner_values.value FROM cardinality_values AS inner_values
+        WHERE inner_values.owner_id=outer_values.owner_id)
+      FROM cardinality_values AS outer_values WHERE outer_values.id=1;
+    END TRY BEGIN CATCH SET @number=ERROR_NUMBER(); END CATCH;
+    SELECT @value AS value,@number AS number;
+  expect: {rows: 1,data: [{value: 77,number: 512}]}
+- name: A grouped scalar still reports multiple result rows
+  sql: |
+    DECLARE @value INT=77,@number INT=0;
+    BEGIN TRY SELECT @value=(SELECT MIN(value) FROM cardinality_values GROUP BY owner_id); END TRY
+    BEGIN CATCH SET @number=ERROR_NUMBER(); END CATCH;
+    SELECT @value AS value,@number AS number;
+  expect: {rows: 1,data: [{value: 77,number: 512}]}
+- name: Empty and single NULL scalar results remain successful NULL assignments
+  sql: |
+    DECLARE @empty INT=77,@null_value INT=77;
+    SELECT @empty=(SELECT value FROM cardinality_values WHERE id=99);
+    SELECT @null_value=(SELECT value FROM cardinality_values WHERE id=3);
+    SELECT @empty AS empty_value,@null_value AS null_value;
+  expect: {rows: 1,data: [{empty_value: null,null_value: null}]}
+- name: An explicitly single-row ordered scalar remains successful
+  sql: DECLARE @value INT; SELECT @value=(SELECT TOP(1) value FROM cardinality_values ORDER BY id); SELECT @value AS value
+  expect: {rows: 1,data: [{value: 10}]}
+- name: A user exception with identical diagnostic text keeps its own number
+  sql: |
+    DECLARE @number INT=0;
+    BEGIN TRY THROW 50012,'scalar subselect returned more than one row',1; END TRY
+    BEGIN CATCH SET @number=ERROR_NUMBER(); END CATCH;
+    SELECT @number AS number;
+  expect: {rows: 1,data: [{number: 50012}]}
+- name: Uncaught scalar errors retain their historical readable diagnostic
+  sql: SELECT (SELECT value FROM cardinality_values WHERE owner_id=1) AS value
+  expect: {error: true,contains: ['512','scalar subselect returned more than one row']}
+- name: The wire frontend returns the declared scalar error number to a catch handler
+  tds:
+    statements:
+    - sql: |
+        BEGIN TRY SELECT (SELECT value FROM cardinality_values WHERE owner_id=1) AS value; END TRY
+        BEGIN CATCH SELECT ERROR_NUMBER() AS number,ERROR_STATE() AS state,ERROR_SEVERITY() AS severity; END CATCH;
+      expect: {rows: 1,data: [{number: 512,state: 1,severity: 16}]}
+- name: MySQL scalar errors keep their readable diagnostic through the shared planner
+  syntax: sql
+  sql: SELECT (SELECT value FROM cardinality_values WHERE owner_id=1) AS value
+  expect: {error: true,contains: 'scalar subselect returned more than one row'}
+- name: PostgreSQL scalar errors keep their readable diagnostic through the shared planner
+  syntax: postgresql
+  sql: SELECT (SELECT value FROM cardinality_values WHERE owner_id=1) AS value
+  expect: {error: true,contains: 'scalar subselect returned more than one row'}
+- name: A structured promise failure survives serialization without losing its diagnostic kind
+  scm: |
+    (begin
+      (define failure (eval (scheme (serialize (cardinality_failure "scalar subselect returned more than one row")))))
+      (define once (newpromise)) (once "once" 1)
+      (try (lambda () (begin (once "once" 2 failure) false))
+        (lambda (caught) (expression_equal? (failure_value caught)
+          '("cardinality-error" "scalar subselect returned more than one row")))))
+  expect: {result: true}
+- name: An ordinary promise string failure retains its existing value contract
+  scm: |
+    (begin
+      (define once (newpromise)) (once "once" 1)
+      (try (lambda () (begin (once "once" 2 "custom failure") false))
+        (lambda (failure) (equal? failure "custom failure"))))
+  expect: {result: true}

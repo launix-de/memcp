@@ -1,0 +1,147 @@
+# Copyright (C) 2026 MemCP Contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: DEFAULT assignment uses the inserting session's ANSI policy
+test_cases:
+- name: Creating under OFF does not hide a later ON truncation error
+  sql: |
+    SET ANSI_WARNINGS OFF;
+    CREATE TABLE default_policy_on(id INT PRIMARY KEY,label VARCHAR(3) DEFAULT('abcde'));
+    SET ANSI_WARNINGS ON;
+    DECLARE @rejected INT=0;
+    BEGIN TRY INSERT INTO default_policy_on(id) VALUES(1);
+    END TRY BEGIN CATCH
+      IF ERROR_NUMBER()=8152 OR ERROR_NUMBER()=2628 SET @rejected=1; ELSE THROW;
+    END CATCH;
+    SELECT @rejected AS rejected,COUNT(*) AS remaining FROM default_policy_on;
+  expect: {rows: 1, data: [{rejected: 1, remaining: 0}]}
+- name: Creating under ON does not capture that policy for an OFF insertion
+  sql: |
+    SET ANSI_WARNINGS ON;
+    CREATE TABLE default_policy_off(id INT PRIMARY KEY,label VARCHAR(3) DEFAULT('abcde'));
+    SET ANSI_WARNINGS OFF;
+    INSERT INTO default_policy_off(id) VALUES(1);
+    SET ANSI_WARNINGS ON;
+    SELECT id,label FROM default_policy_off;
+  expect: {rows: 1, data: [{id: 1, label: abc}]}
+- name: Explicit DEFAULT retains the original expression for the assignment
+  sql: |
+    SET ANSI_WARNINGS ON;
+    CREATE TABLE default_policy_explicit(id INT PRIMARY KEY,label VARCHAR(3) DEFAULT('abcde'));
+    DECLARE @rejected INT=0;
+    BEGIN TRY INSERT INTO default_policy_explicit(id,label) VALUES(1,DEFAULT);
+    END TRY BEGIN CATCH
+      IF ERROR_NUMBER()=8152 OR ERROR_NUMBER()=2628 SET @rejected=1; ELSE THROW;
+    END CATCH;
+    SELECT @rejected AS rejected,COUNT(*) AS remaining FROM default_policy_explicit;
+  expect: {rows: 1, data: [{rejected: 1, remaining: 0}]}
+- name: UPDATE DEFAULT rejects narrowing and retains the previous value
+  sql: |
+    SET ANSI_WARNINGS ON;
+    CREATE TABLE default_policy_update(id INT PRIMARY KEY,label VARCHAR(3) DEFAULT('abcde'));
+    INSERT INTO default_policy_update VALUES(1,'old');
+    DECLARE @rejected INT=0;
+    BEGIN TRY UPDATE default_policy_update SET label=DEFAULT WHERE id=1;
+    END TRY BEGIN CATCH
+      IF ERROR_NUMBER()=8152 OR ERROR_NUMBER()=2628 SET @rejected=1; ELSE THROW;
+    END CATCH;
+    SELECT @rejected AS rejected,id,label FROM default_policy_update;
+  expect: {rows: 1, data: [{rejected: 1, id: 1, label: old}]}
+- name: ALTER DEFAULT shares the later insertion policy
+  sql: |
+    CREATE TABLE default_policy_alter(id INT PRIMARY KEY,label VARCHAR(3));
+    SET ANSI_WARNINGS OFF;
+    ALTER TABLE default_policy_alter ADD CONSTRAINT default_policy_alter_value DEFAULT('abcde') FOR label;
+    SET ANSI_WARNINGS ON;
+    DECLARE @rejected INT=0;
+    BEGIN TRY INSERT INTO default_policy_alter(id) VALUES(1);
+    END TRY BEGIN CATCH
+      IF ERROR_NUMBER()=8152 OR ERROR_NUMBER()=2628 SET @rejected=1; ELSE THROW;
+    END CATCH;
+    SET ANSI_WARNINGS OFF;
+    INSERT INTO default_policy_alter(id) VALUES(2);
+    SET ANSI_WARNINGS ON;
+    SELECT @rejected AS rejected,id,label FROM default_policy_alter;
+  expect: {rows: 1, data: [{rejected: 1, id: 2, label: abc}]}
+- name: Context-free fitting trailing-space MAX and NULL defaults remain native values
+  sql: |
+    CREATE TABLE default_policy_native(id INT PRIMARY KEY,
+      fitting VARCHAR(3) DEFAULT('xy'),
+      trailing VARCHAR(3) DEFAULT('abc  '),
+      unlimited VARCHAR(MAX) DEFAULT('longer than three'),
+      nullable VARCHAR(3) DEFAULT(NULL));
+- name: Another SQL frontend can insert the context-free defaults
+  syntax: sql
+  sql: INSERT INTO default_policy_native(id) VALUES(1)
+  expect: {affected_rows: 1}
+- name: Native default values retain their exact declarations and data
+  sql: SELECT id,fitting,trailing,unlimited,nullable FROM default_policy_native
+  expect:
+    rows: 1
+    data: [{id: 1, fitting: xy, trailing: abc, unlimited: longer than three, nullable: null}]
+- name: A constant temporal default formats in the inserting session language
+  sql: |
+    SET LANGUAGE us_english;
+    CREATE TABLE default_policy_language(id INT PRIMARY KEY,
+      label VARCHAR(50) DEFAULT(CONVERT(DATETIME,'20000502',112)));
+    SET LANGUAGE German;
+    INSERT INTO default_policy_language(id) VALUES(1);
+    SET LANGUAGE us_english;
+    INSERT INTO default_policy_language(id) VALUES(2);
+    SELECT id,label FROM default_policy_language ORDER BY id;
+  expect:
+    rows: 2
+    data: [{id: 1, label: 'Mai  2 2000 12:00AM'}, {id: 2, label: 'May  2 2000 12:00AM'}]
+- name: Context introduced by destination conversion is deferred before any evaluation
+  scm: |
+    (begin
+      (define temporal (list 'sql_type_expr (parse_date "2000-05-02") "DATETIME" nil))
+      (define bounded (list "RawType" "VARCHAR" "Dimensions" (list 50)))
+      (define unlimited (list "RawType" "VARCHAR" "Dimensions" (list -1)))
+      (and (tsql_default_policy_sensitive? temporal bounded)
+        (tsql_default_policy_sensitive? temporal unlimited)
+        (not (tsql_default_policy_sensitive? "fitting constant text" unlimited))))
+  expect: {result: true}
+- name: Publish the national alias before compiling its consumer batch
+  sql: CREATE TYPE default_policy_alias FROM NVARCHAR(2) NULL
+- name: National alias defaults retain their declared UTF16 assignment width
+  sql: |
+    CREATE TABLE default_policy_national(id INT PRIMARY KEY,label default_policy_alias DEFAULT(N'ä😀'));
+    SET ANSI_WARNINGS ON;
+    DECLARE @rejected INT=0;
+    BEGIN TRY INSERT INTO default_policy_national(id) VALUES(1);
+    END TRY BEGIN CATCH
+      IF ERROR_NUMBER()=8152 OR ERROR_NUMBER()=2628 SET @rejected=1; ELSE THROW;
+    END CATCH;
+    SELECT @rejected AS rejected,COUNT(*) AS remaining FROM default_policy_national;
+  expect: {rows: 1, data: [{rejected: 1, remaining: 0}]}
+- name: Reopen the persisted DEFAULT source in a fresh runtime
+  action: restart
+- name: A restarted declaration still rejects ON and permits OFF insertion
+  tds:
+    statements:
+    - sql: |
+        SET ANSI_WARNINGS ON;
+        DECLARE @rejected INT=0;
+        BEGIN TRY INSERT INTO default_policy_alter(id) VALUES(3);
+        END TRY BEGIN CATCH
+          IF ERROR_NUMBER()=8152 OR ERROR_NUMBER()=2628 SET @rejected=1; ELSE THROW;
+        END CATCH;
+        SET ANSI_WARNINGS OFF;
+        INSERT INTO default_policy_alter(id) VALUES(4);
+        SET ANSI_WARNINGS ON;
+        SELECT @rejected AS rejected,id,label FROM default_policy_alter ORDER BY id;
+      expect: {rows: 2, data: [{rejected: 1, id: 2, label: abc}, {rejected: 1, id: 4, label: abc}]}
+cleanup:
+- sql: DROP TABLE IF EXISTS default_policy_language
+- sql: DROP TABLE IF EXISTS default_policy_national
+- sql: DROP TYPE default_policy_alias
+- sql: DROP TABLE IF EXISTS default_policy_native
+- sql: DROP TABLE IF EXISTS default_policy_alter
+- sql: DROP TABLE IF EXISTS default_policy_update
+- sql: DROP TABLE IF EXISTS default_policy_explicit
+- sql: DROP TABLE IF EXISTS default_policy_off
+- sql: DROP TABLE IF EXISTS default_policy_on

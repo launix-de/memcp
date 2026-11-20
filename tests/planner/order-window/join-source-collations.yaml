@@ -1,0 +1,224 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: Joined final ordering retains declared source collations across full and finite results
+  isolated: true
+setup:
+- sql: DROP TABLE IF EXISTS ojc_entry
+- sql: DROP TABLE IF EXISTS ojc_parent
+- sql: CREATE TABLE ojc_parent(id INT PRIMARY KEY,name VARCHAR(20) COLLATE utf8mb4_general_ci)
+- sql: CREATE TABLE ojc_entry(id INT PRIMARY KEY,parent_id INT,name VARCHAR(20) COLLATE utf8mb4_general_ci,amount INT)
+- sql: INSERT INTO ojc_parent VALUES(1,'ANU'),(2,'Abr'),(3,'Z'),(4,'d')
+- sql: INSERT INTO ojc_entry VALUES(11,1,'ANU',10),(12,1,'Abr',20),(21,2,'d',30),(22,2,'Z',40),(31,3,'ANU',50),(32,3,'Abr',60),(41,4,'d',70),(42,4,'Z',80)
+cleanup:
+- sql: DROP TABLE IF EXISTS ojc_entry
+- sql: DROP TABLE IF EXISTS ojc_parent
+test_cases:
+- name: MySQL joined text retains ascending
+  syntax: mysql
+  sql: SELECT p.name AS parent_name,e.name AS entry_name,p.id AS parent_id,e.id AS entry_id,e.amount AS amount FROM ojc_parent
+    p LEFT JOIN ojc_entry e ON e.parent_id=p.id ORDER BY e.name ASC,p.name ASC
+  expect:
+    rows: 8
+    data:
+    - &id008
+      parent_name: ANU
+      entry_name: Abr
+      parent_id: 1
+      entry_id: 12
+      amount: 20
+    - &id007
+      parent_name: Z
+      entry_name: Abr
+      parent_id: 3
+      entry_id: 32
+      amount: 60
+    - &id006
+      parent_name: ANU
+      entry_name: ANU
+      parent_id: 1
+      entry_id: 11
+      amount: 10
+    - &id005
+      parent_name: Z
+      entry_name: ANU
+      parent_id: 3
+      entry_id: 31
+      amount: 50
+    - &id004
+      parent_name: Abr
+      entry_name: d
+      parent_id: 2
+      entry_id: 21
+      amount: 30
+    - &id003
+      parent_name: d
+      entry_name: d
+      parent_id: 4
+      entry_id: 41
+      amount: 70
+    - &id002
+      parent_name: Abr
+      entry_name: Z
+      parent_id: 2
+      entry_id: 22
+      amount: 40
+    - &id001
+      parent_name: d
+      entry_name: Z
+      parent_id: 4
+      entry_id: 42
+      amount: 80
+- name: MySQL joined text retains descending
+  syntax: mysql
+  sql: SELECT p.name AS parent_name,e.name AS entry_name,p.id AS parent_id,e.id AS entry_id,e.amount AS amount FROM ojc_parent
+    p LEFT JOIN ojc_entry e ON e.parent_id=p.id ORDER BY e.name DESC,p.name DESC
+  expect:
+    rows: 8
+    data:
+    - *id001
+    - *id002
+    - *id003
+    - *id004
+    - *id005
+    - *id006
+    - *id007
+    - *id008
+- name: MySQL joined text retains mixed directions with a finite window
+  syntax: mysql
+  sql: SELECT p.name AS parent_name,e.name AS entry_name,p.id AS parent_id,e.id AS entry_id,e.amount AS amount FROM ojc_parent
+    p LEFT JOIN ojc_entry e ON e.parent_id=p.id ORDER BY e.name ASC,p.name DESC LIMIT 4 OFFSET 1
+  expect:
+    rows: 4
+    data:
+    - *id008
+    - *id005
+    - *id006
+    - *id003
+- name: MySQL joined text retains explicit binary override
+  syntax: mysql
+  sql: SELECT p.name AS parent_name,e.name AS entry_name,p.id AS parent_id,e.id AS entry_id,e.amount AS amount FROM ojc_parent
+    p LEFT JOIN ojc_entry e ON e.parent_id=p.id ORDER BY e.name COLLATE bin ASC,p.name COLLATE bin ASC
+  expect:
+    rows: 8
+    data:
+    - *id006
+    - *id005
+    - *id008
+    - *id007
+    - *id002
+    - *id001
+    - *id004
+    - *id003
+- name: PostgreSQL joined text retains ascending
+  syntax: psql
+  sql: SELECT p.name AS parent_name,e.name AS entry_name,p.id AS parent_id,e.id AS entry_id,e.amount AS amount FROM ojc_parent
+    p LEFT JOIN ojc_entry e ON e.parent_id=p.id ORDER BY e.name ASC,p.name ASC
+  expect:
+    rows: 8
+    data:
+    - *id008
+    - *id007
+    - *id006
+    - *id005
+    - *id004
+    - *id003
+    - *id002
+    - *id001
+- name: PostgreSQL joined text retains descending
+  syntax: psql
+  sql: SELECT p.name AS parent_name,e.name AS entry_name,p.id AS parent_id,e.id AS entry_id,e.amount AS amount FROM ojc_parent
+    p LEFT JOIN ojc_entry e ON e.parent_id=p.id ORDER BY e.name DESC,p.name DESC
+  expect:
+    rows: 8
+    data:
+    - *id001
+    - *id002
+    - *id003
+    - *id004
+    - *id005
+    - *id006
+    - *id007
+    - *id008
+- name: PostgreSQL joined text retains mixed directions with a finite window
+  syntax: psql
+  sql: SELECT p.name AS parent_name,e.name AS entry_name,p.id AS parent_id,e.id AS entry_id,e.amount AS amount FROM ojc_parent
+    p LEFT JOIN ojc_entry e ON e.parent_id=p.id ORDER BY e.name ASC,p.name DESC LIMIT 4 OFFSET 1
+  expect:
+    rows: 4
+    data:
+    - *id008
+    - *id005
+    - *id006
+    - *id003
+- name: PostgreSQL joined text retains explicit binary override
+  syntax: psql
+  sql: SELECT p.name AS parent_name,e.name AS entry_name,p.id AS parent_id,e.id AS entry_id,e.amount AS amount FROM ojc_parent
+    p LEFT JOIN ojc_entry e ON e.parent_id=p.id ORDER BY e.name COLLATE bin ASC,p.name COLLATE bin ASC
+  expect:
+    rows: 8
+    data:
+    - *id006
+    - *id005
+    - *id008
+    - *id007
+    - *id002
+    - *id001
+    - *id004
+    - *id003
+- name: TSQL joined text retains ascending
+  syntax: tsql
+  sql: SELECT p.name AS parent_name,e.name AS entry_name,p.id AS parent_id,e.id AS entry_id,e.amount AS amount FROM ojc_parent
+    p LEFT JOIN ojc_entry e ON e.parent_id=p.id ORDER BY e.name ASC,p.name ASC
+  expect:
+    rows: 8
+    data:
+    - *id008
+    - *id007
+    - *id006
+    - *id005
+    - *id004
+    - *id003
+    - *id002
+    - *id001
+- name: TSQL joined text retains descending
+  syntax: tsql
+  sql: SELECT p.name AS parent_name,e.name AS entry_name,p.id AS parent_id,e.id AS entry_id,e.amount AS amount FROM ojc_parent
+    p LEFT JOIN ojc_entry e ON e.parent_id=p.id ORDER BY e.name DESC,p.name DESC
+  expect:
+    rows: 8
+    data:
+    - *id001
+    - *id002
+    - *id003
+    - *id004
+    - *id005
+    - *id006
+    - *id007
+    - *id008
+- name: TSQL joined text retains mixed directions with a finite window
+  syntax: tsql
+  sql: SELECT p.name AS parent_name,e.name AS entry_name,p.id AS parent_id,e.id AS entry_id,e.amount AS amount FROM ojc_parent
+    p LEFT JOIN ojc_entry e ON e.parent_id=p.id ORDER BY e.name ASC,p.name DESC OFFSET 1 ROWS FETCH NEXT 4 ROWS ONLY
+  expect:
+    rows: 4
+    data:
+    - *id008
+    - *id005
+    - *id006
+    - *id003
+- name: TSQL joined text retains explicit binary override
+  syntax: tsql
+  sql: SELECT p.name AS parent_name,e.name AS entry_name,p.id AS parent_id,e.id AS entry_id,e.amount AS amount FROM ojc_parent
+    p LEFT JOIN ojc_entry e ON e.parent_id=p.id ORDER BY e.name COLLATE bin ASC,p.name COLLATE bin ASC
+  expect:
+    rows: 8
+    data:
+    - *id006
+    - *id005
+    - *id008
+    - *id007
+    - *id002
+    - *id001
+    - *id004
+    - *id003

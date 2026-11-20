@@ -19,24 +19,54 @@ package scm
 import (
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
-var (
-	sourceCoverageMu    sync.RWMutex
-	sourceCoverageInfos []*SourceInfo
-)
-
-func registerSourceCoverageInfo(info *SourceInfo) {
-	sourceCoverageMu.Lock()
-	sourceCoverageInfos = append(sourceCoverageInfos, info)
-	sourceCoverageMu.Unlock()
+type sourceCoverageLocation struct {
+	source string
+	line   int
+	col    int
 }
 
-func sourceCoverageSnapshot() []*SourceInfo {
+// Permanent coverage facts own coordinates and an execution flag only. They
+// must never point back to a SourceInfo, its AST, or any runtime environment.
+type sourceCoveragePoint struct {
+	sourceCoverageLocation
+	interpreted atomic.Uint32
+}
+
+func (point *sourceCoveragePoint) wasInterpreted() bool {
+	return point.interpreted.Load() != 0
+}
+
+var (
+	sourceCoverageMu     sync.RWMutex
+	sourceCoveragePoints = make(map[sourceCoverageLocation]*sourceCoveragePoint)
+)
+
+func sourceCoveragePointFor(source string, line, col int) *sourceCoveragePoint {
+	location := sourceCoverageLocation{source: source, line: line, col: col}
+	sourceCoverageMu.Lock()
+	defer sourceCoverageMu.Unlock()
+	if point := sourceCoveragePoints[location]; point != nil {
+		return point
+	}
+	// A caller may lend a substring of a request buffer as its source label.
+	// Retain the coordinate text itself, not that buffer's backing allocation.
+	location.source = strings.Clone(source)
+	point := &sourceCoveragePoint{sourceCoverageLocation: location}
+	sourceCoveragePoints[location] = point
+	return point
+}
+
+func sourceCoverageSnapshot() []*sourceCoveragePoint {
 	sourceCoverageMu.RLock()
-	infos := append([]*SourceInfo(nil), sourceCoverageInfos...)
-	sourceCoverageMu.RUnlock()
-	return infos
+	defer sourceCoverageMu.RUnlock()
+	points := make([]*sourceCoveragePoint, 0, len(sourceCoveragePoints))
+	for _, point := range sourceCoveragePoints {
+		points = append(points, point)
+	}
+	return points
 }
 
 func sourceCoverageMatchesPrefix(source string, prefix string) bool {
@@ -55,12 +85,6 @@ func sourceCoverageReport(a ...Scmer) Scmer {
 		prefix = String(a[0])
 	}
 
-	type sourceCoveragePoint struct {
-		source string
-		line   int
-		col    int
-	}
-
 	type fileStats struct {
 		total        int
 		covered      int
@@ -68,30 +92,24 @@ func sourceCoverageReport(a ...Scmer) Scmer {
 		allLines     map[int]bool
 	}
 
-	points := map[sourceCoveragePoint]bool{}
-	for _, si := range sourceCoverageSnapshot() {
-		if si == nil || si.source == "" || !sourceCoverageMatchesPrefix(si.source, prefix) {
+	stats := map[string]*fileStats{}
+	for _, point := range sourceCoverageSnapshot() {
+		if point.source == "" || !sourceCoverageMatchesPrefix(point.source, prefix) {
 			continue
 		}
-		key := sourceCoveragePoint{source: si.source, line: si.line, col: si.col}
-		points[key] = points[key] || si.wasInterpreted()
-	}
-
-	stats := map[string]*fileStats{}
-	for key, covered := range points {
-		fs := stats[key.source]
+		fs := stats[point.source]
 		if fs == nil {
 			fs = &fileStats{
 				coveredLines: map[int]bool{},
 				allLines:     map[int]bool{},
 			}
-			stats[key.source] = fs
+			stats[point.source] = fs
 		}
 		fs.total++
-		fs.allLines[key.line] = true
-		if covered {
+		fs.allLines[point.line] = true
+		if point.wasInterpreted() {
 			fs.covered++
-			fs.coveredLines[key.line] = true
+			fs.coveredLines[point.line] = true
 		}
 	}
 

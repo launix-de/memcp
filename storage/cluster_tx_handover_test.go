@@ -91,6 +91,8 @@ func TestClusterDecisionWaitsForMigrationWhileReadersContinue(t *testing.T) {
 func TestClusterNestedInvocationCanReturnToNativeCoordinator(t *testing.T) {
 	root, invocation := NewTxContext(TxACID), NewTxContext(TxCursorStability)
 	defer root.Rollback()
+	invocation.beginQuery(nil, 1, "nested coordinator return")
+	defer invocation.endQuery(1)
 	value, err := root.BindClusterInvocation(scm.NewAny(invocation))
 	if err != nil {
 		t.Fatal(err)

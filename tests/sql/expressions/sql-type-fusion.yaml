@@ -48,6 +48,22 @@ setup:
   - sql: "INSERT INTO stf_dept VALUES (1,'eng'),(2,'ops')"
 
 test_cases:
+  - name: Derived unions preserve identical complete declarations beside NULL
+    scm: |
+      (begin
+        (define branch (lambda (datatype)
+          (make_query_block "memcp-tests" '()
+            (list "value" (list 'sql_type_expr nil datatype nil))
+            true '() nil '() nil nil '() '() '())))
+        (reduce (list (list "NVARCHAR" (list 128)) (list "CHAR" (list 2))
+          (list "FLOAT" (list 24)) (list "TIME" (list 3)) (list "DECIMAL" (list 9 2)))
+          (lambda (ok datatype)
+            (and ok (expression_equal? datatype
+              (sql_info_datatype (sql_projection_info_at
+                (make_union_block 'all (list (branch datatype) (branch "NULL") (branch datatype)) nil nil nil nil)
+                0 '()))))) true))
+    expect: {result: true}
+
   - name: "type predicates classify SQL type names"
     scm: |
       (begin
@@ -90,7 +106,7 @@ test_cases:
       (begin
         (define expression (list (quote +) (list (quote get_column) "d" false "weight" false) 1))
         (if (and (nil? (sql_type_annotation_replacement '() expression))
-                 (expression_equal? (sql_type_lower_annotations expression) expression)) true
+                 (expression_equal? (sql_type_lower_annotations '() expression) expression)) true
           (error "annotation-free expressions must retain their original structure")))
 
   - name: "annotation replacement distinguishes NULL from an unchanged node"
@@ -99,8 +115,8 @@ test_cases:
         (define contract (list (quote sql_type_expr) nil "INT" nil))
         (define quoted (list (quote quote) contract))
         (if (and (expression_equal? (sql_type_annotation_replacement '() contract) (list nil))
-                 (nil? (sql_type_lower_annotations contract))
-                 (expression_equal? (sql_type_lower_annotations (list (quote coalesceNil) contract 42))
+                 (nil? (sql_type_lower_annotations '() contract))
+                 (expression_equal? (sql_type_lower_annotations '() (list (quote coalesceNil) contract 42))
                    (list (quote coalesceNil) nil 42))
                  (nil? (sql_type_annotation_replacement '() quoted))) true
           (error "NULL replacement or quoted expression handling is incorrect")))
@@ -169,7 +185,7 @@ test_cases:
   - name: "sql_expr_info canonicalizes get_column and reads catalog type/collation"
     scm: |
       (begin
-        (define src (list "d" "memcp-tests" "stf_doc" false true))
+        (define src (list "d" "memcp-tests" "stf_doc" false true (sql_relation_declarations "memcp-tests" "stf_doc" nil)))
         (define title_info (sql_expr_info (list src)
           (list (quote get_column) "d" true "TITLE" true)))
         (define weight_info (sql_expr_info (list src)
@@ -188,7 +204,7 @@ test_cases:
   - name: "arithmetic over resolved columns fuses to a numeric type"
     scm: |
       (begin
-        (define src (list "d" "memcp-tests" "stf_doc" false true))
+        (define src (list "d" "memcp-tests" "stf_doc" false true (sql_relation_declarations "memcp-tests" "stf_doc" nil)))
         (define info (sql_expr_info (list src)
           (list (quote +) (list (quote get_column) "d" true "weight" true) 10)))
         (if (and (sql_numeric_type? (sql_info_type info))
@@ -198,7 +214,7 @@ test_cases:
   - name: "text comparison stays plain but carries the merged operand collation"
     scm: |
       (begin
-        (define src (list "d" "memcp-tests" "stf_doc" false true))
+        (define src (list "d" "memcp-tests" "stf_doc" false true (sql_relation_declarations "memcp-tests" "stf_doc" nil)))
         (define info (sql_expr_info (list src)
           (list (quote equal??) (list (quote get_column) "d" true "title" true) "needle")))
         (define f (sql_info_formula info))
@@ -212,7 +228,7 @@ test_cases:
     scm: |
       (begin
         (define block (make_query_block "memcp-tests"
-          (list (list "d" "memcp-tests" "stf_doc" false true))
+          (list (list "d" "memcp-tests" "stf_doc" false true (sql_relation_declarations "memcp-tests" "stf_doc" nil)))
           (list "t" (list (quote get_column) "d" true "TITLE" true)
                 "w2" (list (quote +) (list (quote get_column) "d" true "WEIGHT" true) 1))
           (list (quote equal??) (list (quote get_column) "d" true "id" true) 5)
@@ -265,11 +281,11 @@ test_cases:
   - name: "sql_type_order_item resolves a computed text key to its collation callback"
     scm: |
       (begin
-        (define src (list "d" "memcp-tests" "stf_ci" false true))
+        (define src (list "d" "memcp-tests" "stf_ci" false true (sql_relation_declarations "memcp-tests" "stf_ci" nil)))
         (define computed (sql_type_order_item (list src)
-          (list (list (quote sql_substr) (list (quote get_column) "d" true "nm" true) 1 5) <)))
+          (list (list (quote sql_substr) (list (quote get_column) "d" true "nm" true) 1 5) <) true))
         (define bare (sql_type_order_item (list src)
-          (list (list (quote get_column) "d" true "nm" true) <)))
+          (list (list (quote get_column) "d" true "nm" true) <) true))
         (define checks (list
           /* computed key: direction replaced by a resolved callback */
           (not (or (equal? (cadr computed) <) (equal? (cadr computed) >)))
@@ -304,7 +320,7 @@ test_cases:
   - name: "result-types fact is populated for plain, grouped and joined queries"
     scm: |
       (begin
-        (define ci (list "c" "memcp-tests" "stf_ci" false true))
+        (define ci (list "c" "memcp-tests" "stf_ci" false true (sql_relation_declarations "memcp-tests" "stf_ci" nil)))
         (define plain (sql_type_query_block (make_query_block "memcp-tests" (list ci)
           (list "nm" (list (quote get_column) "c" true "nm" true)
                 "d" (list (quote get_column) "c" true "dept" true))
@@ -420,7 +436,7 @@ test_cases:
       - id: 3
         same: null
   - name: Column versus constant expression keeps its boundary operator shape
-    scm: "(begin\n (define sources (list (list \"b\" \"memcp-tests\" \"stf_bin_compare\" false nil)))\n\
+    scm: "(begin\n (define sources (list (list \"b\" \"memcp-tests\" \"stf_bin_compare\" false nil (sql_relation_declarations \"memcp-tests\" \"stf_bin_compare\" nil))))\n\
       \ (define column (list (quote get_column) \"b\" false \"nm\" false))\n (define expression (list (quote\
       \ equal??) column (list (quote concat) \"F\" \"OO\")))\n (define info (sql_expr_info sources expression))\n\
       \ (if (equal? (car (sql_info_formula info)) (quote equal??)) true\n   (error \"constant comparison\
@@ -431,7 +447,7 @@ test_cases:
   - name: "frontend compiler receives declared column triples"
     scm: |
       (begin
-        (define sources (list (list "d" "memcp-tests" "stf_doc" false nil)))
+        (define sources (list (list "d" "memcp-tests" "stf_doc" false nil (sql_relation_declarations "memcp-tests" "stf_doc" nil))))
         (define compiler (lambda (infos)
           (if (and (equal? (sql_info_type (car infos)) "INT")
                    (equal? (sql_info_type (cadr infos)) "VARCHAR"))
@@ -456,7 +472,7 @@ test_cases:
         (if (and (equal? (sql_info_formula info) "x")
                  (equal? (sql_info_type info) "NVARCHAR")
                  (equal? (sql_info_collation info) (list "utf8mb4_bin" 0))
-                 (equal? (sql_type_lower_annotations outer) "x")) true
+                 (equal? (sql_type_lower_annotations '() outer) "x")) true
           (error "nested compilation lost a SQL contract or retained a compiler")))
 
   - name: "frontend compiler can return a typed NULL without losing replacement"
@@ -519,7 +535,7 @@ test_cases:
         (define info (sql_expr_info (list) restored))
         (and (equal? (sql_info_type info) "FLOAT")
           (equal? (sql_info_formula info) 1)
-          (equal? (sql_type_lower_annotations restored) 1)))
+          (equal? (sql_type_lower_annotations '() restored) 1)))
     expect: {result: true}
 
   - name: Stored compiler factories receive the producing scope contracts
@@ -538,16 +554,16 @@ test_cases:
         (define info (sql_expr_info (list) bound))
         (and (equal? (sql_info_type info) "FLOAT")
           (equal? (sql_info_formula info) 1)
-          (equal? (sql_type_lower_annotations bound) 1)))
+          (equal? (sql_type_lower_annotations '() bound) 1)))
     expect: {result: true}
 
   - name: Persisted order symbols select the same explicit column collation
     scm: |
       (begin
-        (define source (list "c" "memcp-tests" "stf_ci" false nil))
+        (define source (list "c" "memcp-tests" "stf_ci" false nil (sql_relation_declarations "memcp-tests" "stf_ci" nil)))
         (define column (list (quote sql_type_expr)
           (list (quote get_column) "c" false "nm" false) "VARCHAR" (list "bin" 0)))
-        (define order (sql_type_order_item (list source) (list column (quote <))))
+        (define order (sql_type_order_item (list source) (list column (quote <)) true))
         (and (expression_equal? (car order) (sql_info_formula (sql_expr_info (list source) column)))
           ((cadr order) "A" "a")
           (not ((cadr order) "a" "A"))))
@@ -568,8 +584,154 @@ test_cases:
           (error "published output contract was inferred again or lost")))
     expect: {result: true}
 
+  - name: Raw scalar metadata still rejects an unknown lexical qualifier
+    scm: |
+      (begin
+        (define source (list "c" "memcp-tests" "stf_ci" false nil
+          (sql_relation_declarations "memcp-tests" "stf_ci" nil)))
+        (sql_expr_info '() (list (quote inner_select)
+          (make_query_block "memcp-tests" (list source)
+            (list "name" (list (quote get_column) "missing" false "nm" false))
+            true '() nil '() nil nil '() '() '()))))
+    expect: {error: true}
+
+  - name: Raw scalar metadata still rejects ambiguous unqualified input
+    scm: |
+      (begin
+        (define declarations (sql_relation_declarations "memcp-tests" "stf_ci" nil))
+        (sql_expr_info '() (list (quote inner_select)
+          (make_query_block "memcp-tests"
+            (list (list "a" "memcp-tests" "stf_ci" false nil declarations)
+              (list "b" "memcp-tests" "stf_ci" false nil declarations))
+            (list "name" (list (quote get_column) nil false "nm" false))
+            true '() nil '() nil nil '() '() '()))))
+    expect: {error: true}
+
+  - name: Bound derived scalar metadata retains its projection fallback resolver
+    scm: |
+      (begin
+        (define source (list "c" "memcp-tests" "stf_ci" false nil
+          (sql_relation_declarations "memcp-tests" "stf_ci" nil)))
+        (define leaf (make_query_block "memcp-tests" (list source)
+          (list "name" (list (quote get_column) "C" true "NM" true))
+          true '() nil '() nil nil '() '() '()))
+        (define relation (bind_query_names
+          (make_query_block "memcp-tests" '() (list "caption" (list (quote inner_select) leaf))
+            true '() nil '() nil nil '() '() '()) '()))
+        (define snapshot (serialize relation))
+        (define column (list (quote get_column) "d" false "caption" false))
+        (define info (sql_bound_expr_info
+          (list (list "d" "memcp-tests" relation false nil nil)) column))
+        (and (equal? (sql_info_type info) "VARCHAR")
+          (expression_equal? (sql_info_collation info) (list "utf8mb4_general_ci" 2))
+          (expression_equal? (sql_info_formula info) column)
+          (equal? snapshot (serialize relation))
+          (nil? (qassoc_get (qb_facts relation) (quote result-types) nil))))
+    expect: {result: true}
+
+  - name: Bound UNION scalar metadata survives nested expression and column compilers
+    scm: |
+      (begin
+        (define source (list "c" "memcp-tests" "stf_ci" false nil
+          (sql_relation_declarations "memcp-tests" "stf_ci" nil)))
+        (define text (make_query_block "memcp-tests" (list source)
+          (list "name" (list (quote get_column) "c" false "nm" false))
+          true '() nil '() nil nil '() '() '()))
+        (define absent (make_query_block "memcp-tests" '() (list "name" nil)
+          true '() nil '() nil nil '() '() '()))
+        (define relation (bind_query_names (make_union_block (quote all)
+          (list text absent) '() nil nil '()) '()))
+        (define scalar (list (quote inner_select) relation))
+        (define expression (list (quote sql_compile_expr) (quote car)
+          (list (quote sql_compile_column) (lambda (info declaration)
+            (if (nil? declaration) info (error "a scalar acquired a native column declaration"))) scalar)))
+        (define info (sql_bound_expr_info '() expression))
+        (and (equal? (sql_info_type info) "VARCHAR")
+          (expression_equal? (sql_info_collation info) (list "utf8mb4_general_ci" 2))
+          (expression_equal? (sql_info_formula info) scalar)))
+    expect: {result: true}
+
+  - name: Bound nested correlated output keeps its declared text comparison collation
+    sql: |
+      SELECT d.id,
+        (SELECT (SELECT c.nm FROM stf_ci c WHERE c.id=d.id)
+          FROM stf_dept c WHERE c.id=1) = 'BANANA' AS matches
+      FROM (SELECT c.id FROM stf_ci c WHERE c.id=1) d
+    expect: {rows: 1, data: [{id: 1, matches: true}]}
+
+  - name: Bound scalar UNION keeps the common cardinality error
+    sql: |
+      SELECT (SELECT nm FROM stf_ci WHERE id=1
+        UNION ALL SELECT nm FROM stf_ci WHERE id=2) AS name
+    expect: {error: true}
+
+  - name: Bound metadata does not evaluate a dead scalar cardinality failure
+    sql: |
+      SELECT CASE WHEN TRUE THEN 'kept'
+        ELSE (SELECT nm FROM stf_ci WHERE id=1
+          UNION ALL SELECT nm FROM stf_ci WHERE id=2) END AS name
+    expect: {rows: 1, data: [{name: kept}]}
+
+  - name: Raw metadata keeps quoted scalar-looking data opaque
+    scm: |
+      (begin
+        (define expression (list (quote quote) (list (quote inner_select)
+          (list (quote invalid_query) "missing"))))
+        (define info (sql_expr_info '() expression))
+        (and (equal? (sql_info_type info) "any")
+          (expression_equal? (sql_info_formula info) expression)))
+    expect: {result: true}
+
+  - name: Cast scalar aggregates resolve columns in their producing SQL scope
+    syntax: tsql
+    sql: SELECT CAST((SELECT SUM(weight) FROM stf_doc) AS INT) AS total
+    expect: {rows: 1,data: [{total: 14}]}
+
+  - name: Cast empty scalar aggregates preserve NULL after scoped type resolution
+    syntax: tsql
+    sql: SELECT CAST((SELECT SUM(weight) FROM stf_doc WHERE id=9) AS INT) AS total
+    expect: {rows: 1,data: [{total: null}]}
+
+
+  - name: Nested aggregate type scopes retain a derived caller two levels outward
+    sql: |
+      SELECT periods.n, COALESCE((SELECT SUM((SELECT h.weight FROM stf_doc h
+        WHERE h.id=e.id AND h.weight<=periods.cut ORDER BY h.weight DESC LIMIT 1))
+        FROM stf_ci e WHERE e.id<=2 LIMIT 1),0) AS total
+      FROM (SELECT 1 AS n,6 AS cut UNION ALL SELECT 2,10) periods
+      ORDER BY periods.n
+    expect: {rows: 2, data: [{n: 1, total: 5}, {n: 2, total: 14}]}
+
+  - name: Nested typed scalar casts preserve the outer caller declaration
+    syntax: tsql
+    sql: |
+      SELECT d.id, CAST((SELECT SUM(CAST((SELECT h.weight FROM stf_doc h
+        WHERE h.id=e.id AND h.id=d.id) AS BIGINT))
+        FROM stf_ci e WHERE e.id<=2) AS BIGINT) AS total
+      FROM stf_doc d ORDER BY d.id
+    expect: {rows: 2, data: [{id: 1, total: 5}, {id: 2, total: 9}]}
+
+  - name: Nested typed scalar scopes keep their own shadowed relation declaration
+    syntax: tsql
+    sql: |
+      SELECT d.id, CAST((SELECT CAST((SELECT SUM(h.weight) FROM stf_doc h
+        WHERE h.id=d.id) AS BIGINT) FROM stf_dept d WHERE d.id=2) AS BIGINT) AS total
+      FROM stf_doc d ORDER BY d.id
+    expect: {rows: 2, data: [{id: 1, total: 9}, {id: 2, total: 9}]}
+
 cleanup:
   - sql: DROP TABLE IF EXISTS stf_bin_compare
   - sql: DROP TABLE IF EXISTS stf_doc
   - sql: DROP TABLE IF EXISTS stf_ci
   - sql: DROP TABLE IF EXISTS stf_dept
+
+  - name: A shared merge direction resolves the declared direct text collation
+    scm: |
+      (begin
+        (define source (list "c" "memcp-tests" "stf_ci" false nil (sql_relation_declarations "memcp-tests" "stf_ci" nil)))
+        (define ordering (sql_type_order_item (list source)
+          (list (list (quote get_column) "c" false "nm" false) <) false))
+        (and (not (equal? (cadr ordering) <))
+          (not ((cadr ordering) "A" "a")) (not ((cadr ordering) "a" "A"))
+          ((cadr ordering) "alpha" "beta")))
+    expect: {result: true}

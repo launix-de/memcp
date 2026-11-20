@@ -83,7 +83,8 @@ func TestRecMapCallPreservesMatchesAcrossSourceRebuild(t *testing.T) {
 	}
 	check := func(shard *storageShard, expected []scm.Scmer, domainRows int) {
 		t.Helper()
-		call := recMapCallClosure(shard, nil)
+		call, finishInput := recMapCallClosure(shard, nil)
+		defer finishInput()
 		// Race the first prepared probes of a generation to exercise publication
 		// of complete immutable projections, rather than only warmed lookups.
 		results := make(chan bool, 8)
@@ -176,7 +177,7 @@ func TestRecMapPrunedDomainImageAndComposition(t *testing.T) {
 	if first.count != 4 {
 		t.Fatalf("first RecMap domain rows = %d, want 4", first.count)
 	}
-	middleDomain := first.image()
+	middleDomain := first.image(nil)
 	if middleDomain.count != 2 {
 		t.Fatalf("first RecMap image rows = %d, want 2", middleDomain.count)
 	}
@@ -189,7 +190,7 @@ func TestRecMapPrunedDomainImageAndComposition(t *testing.T) {
 	if !operatorMap.IsCustom(TagRecMap) {
 		t.Fatalf("scan_recmap returned %s, want RecMap", scm.String(operatorMap))
 	}
-	operatorImage := scm.Apply(scm.Globalenv.Vars[scm.Symbol("recmap_image")], operatorMap)
+	operatorImage := scm.Apply(scm.Globalenv.Vars[scm.Symbol("recmap_image")], scm.NewNil(), operatorMap)
 	if !operatorImage.IsCustom(TagRecSet) || RecSetFromScmer(operatorImage).count != 2 {
 		t.Fatalf("recmap_image returned %s, want two-row RecSet", scm.String(operatorImage))
 	}
@@ -237,7 +238,8 @@ func TestRecMapPrunedDomainImageAndComposition(t *testing.T) {
 		t.Fatalf("mixed target/source RecMap window scan = %v, want [3 1]", mixedIDs)
 	}
 	mappedValue := NewRecMapScmer(composed)
-	directCall := recMapCallClosure(composed.shards[0].sourceShard, nil)
+	directCall, finishDirectInput := recMapCallClosure(composed.shards[0].sourceShard, nil)
+	defer finishDirectInput()
 	columns := scm.NewSlice([]scm.Scmer{scm.NewString("value")})
 	valueMapper := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[0] })
 	ifNull := scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewNil() })
@@ -318,7 +320,8 @@ func TestScanRecMapFiltersBatchMappingAndMissingTarget(t *testing.T) {
 		t.Fatalf("table+filter mapped %d rows in %d batches, want 3 rows in one batch", mapped.count, batchCalls)
 	}
 	part := &mapped.shards[0]
-	call := recMapCallClosure(part.sourceShard, nil)
+	call, finishInput := recMapCallClosure(part.sourceShard, nil)
+	defer finishInput()
 	columns := scm.NewSlice([]scm.Scmer{scm.NewString("value")})
 	mapperCalls, missingCalls := 0, 0
 	valueMapper := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
@@ -370,7 +373,9 @@ func TestScanRecMapFiltersBatchMappingAndMissingTarget(t *testing.T) {
 	customMap := scanRecMap(nil, NewRecSetScmer(input), access, nil, nil,
 		scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewBool(true) }),
 		[]string{"id"}, custom, target)
-	if got := (*recMapCallClosure(customMap.shards[0].sourceShard, nil))(1,
+	customCall, finishCustomInput := recMapCallClosure(customMap.shards[0].sourceShard, nil)
+	defer finishCustomInput()
+	if got := (*customCall)(1,
 		NewRecMapScmer(customMap), columns, valueMapper, ifNull); got.Int() != 8 {
 		t.Fatalf("custom row mapping = %s, want 8", scm.String(got))
 	}

@@ -29,7 +29,7 @@ test_cases:
       - scm: |
           (begin
             (set rows (map (produceN {rows}) (lambda (i) (list i i (concat "name_" i)))))
-            (insert (table "{database}" false "perf_source" false) '("id" "val" "name") rows)
+            (insert (table "{database}" false "perf_source" false nil) '("id" "val" "name") rows)
             (rebuild))
     sql: "INSERT IGNORE INTO perf_unique (id, val, name) SELECT id, val, name FROM perf_source"
     warmup: false
@@ -47,10 +47,10 @@ test_cases:
       - scm: |
           (begin
             (set rows (map (produceN {rows}) (lambda (i) (list i i (concat "name_" i)))))
-            (insert (table "{database}" false "perf_unique" false) '("id" "val" "name") rows)
+            (insert (table "{database}" false "perf_unique" false nil) '("id" "val" "name") rows)
             (rebuild)
             (set rows2 (map (produceN {rows}) (lambda (i) (list (+ i {rows}) (+ i {rows}) (concat "new_" i)))))
-            (insert (table "{database}" false "perf_source" false) '("id" "val" "name") rows2)
+            (insert (table "{database}" false "perf_source" false nil) '("id" "val" "name") rows2)
             (rebuild))
     sql: "INSERT IGNORE INTO perf_unique (id, val, name) SELECT id, val, name FROM perf_source"
     warmup: false
@@ -66,12 +66,36 @@ test_cases:
       - scm: |
           (begin
             (set rows (map (produceN {rows}) (lambda (i) (list i i (concat "name_" i)))))
-            (insert (table "{database}" false "perf_unique" false) '("id" "val" "name") rows)
+            (insert (table "{database}" false "perf_unique" false nil) '("id" "val" "name") rows)
             (rebuild))
     sql: "INSERT IGNORE INTO perf_unique (id, val, name) SELECT id + {rows}, val, CONCAT('dup_', name) FROM perf_unique"
     threshold_ms: 30000
+    # Canonical DML completion, including the old empty-body zero protocol.
     expect:
-      rows: 0
+      affected_rows: 0
+      rows: 1
+      data: [{affected_rows: 0}]
+    # Run after every timed fixture, before suite cleanup. Count plus the
+    # complete tuple predicate and the existing primary key prove the original
+    # set survived: no duplicate insertion, replacement, loss or value change.
+    cleanup:
+      - scm: |
+          (begin
+            (define s (newsession))
+            (s "username" "root")
+            (s "schema" "{database}")
+            (define out (newsession))
+            (with_autocommit s nil 0 "duplicate insert invariant" (lambda (tx)
+              (mysql_run_sql_statement tx "{database}"
+                "SELECT COUNT(*) AS n, SUM(CASE WHEN id >= 0 AND id < {rows} AND val = id AND name COLLATE utf8mb4_bin = CONCAT('name_', id) THEN 1 ELSE 0 END) AS valid FROM perf_unique"
+                s (lambda (row) (begin
+                  (if (out "seen") (error "duplicate invariant returned multiple rows") true)
+                  (out "seen" true)
+                  (out "n" (row "n"))
+                  (out "valid" (row "valid"))))
+                (lambda (_fields) true))))
+            (if (and (out "seen") (equal? (out "n") {rows}) (equal? (out "valid") {rows}))
+              true (error "duplicate insert changed the original tuple set")))
 
   # High-cardinality text group caches use the same live UNIQUE delta-index
   # path. Unicode comparison state must be prepared once per inserted value,
@@ -88,7 +112,7 @@ test_cases:
           (begin
             (set rows (map (produceN {rows})
               (lambda (i) (list i (concat "group-" i)))))
-            (insert (table "{database}" false "perf_source_text" false) '("id" "code") rows)
+            (insert (table "{database}" false "perf_source_text" false nil) '("id" "code") rows)
             (rebuild))
     sql: "INSERT INTO perf_unique_text (id, code) SELECT id, code FROM perf_source_text"
     warmup: false
@@ -104,7 +128,7 @@ test_cases:
       - sql: "INSERT INTO perf_collision_updates(id,val) VALUES(7,0)"
     scm: |
       (begin
-        (define target (table "{database}" false "perf_collision_updates" false))
+        (define target (table "{database}" false "perf_collision_updates" false nil))
         (reduce (produceN 2000) (lambda (count i)
           (+ count (insert target '("id" "val") (list (list 7 0)) '("val" "$update")
             (lambda (old update) (begin
@@ -126,7 +150,7 @@ test_cases:
     # PERF_TEST scales {rows}; check every writer against that actual fixture.
     scm: |
       (begin
-        (set target (table "{database}" false "perf_concurrent_insert" false))
+        (set target (table "{database}" false "perf_concurrent_insert" false nil))
         (parallelN 4 (lambda (worker)
           (equal?
             (reduce (produceN {rows}) (lambda (count i)

@@ -701,6 +701,25 @@ func (cluster *nodeCluster) declareShard(shard *storageShard, local bool) *repli
 // and its schema location batches. Forwarded acquisitions may arrive from a
 // newer owner than the requester's hint, at the newer native authority epoch.
 func (cluster *nodeCluster) referenceSource(source string, packet mosiPacket, c *replicaCell, record replicaRecord) (*replicaStep, error) {
+	// Both direct references and streamed headers carry one complete grant
+	// tuple. Reject malformed authority before installing any content.
+	switch packet.State {
+	case "":
+		if packet.Owner != "" || len(packet.Readers) != 0 {
+			return nil, fmt.Errorf("grant owner without MOSI state")
+		}
+	case "M", "O", "S":
+		if err := validateClusterURI(packet.Owner); err != nil {
+			return nil, fmt.Errorf("invalid shared reference owner: %w", err)
+		}
+		for reader := range packet.Readers {
+			if err := validateClusterURI(reader); err != nil {
+				return nil, fmt.Errorf("invalid shared reference reader: %w", err)
+			}
+		}
+	default:
+		return nil, fmt.Errorf("invalid shared reference state")
+	}
 	r := cluster.manager
 	if packet.Epoch < record.Epoch {
 		return nil, fmt.Errorf("stale shared reference")
@@ -733,6 +752,12 @@ func (cluster *nodeCluster) referenceSource(source string, packet mosiPacket, c 
 }
 
 func (cluster *nodeCluster) installReference(source string, packet mosiPacket) error {
+	return cluster.installReferenceSchema(source, packet, nil)
+}
+
+// Streamed schema bytes use the same authenticated authority, digest and grant
+// publication path as native shared references.
+func (cluster *nodeCluster) installReferenceSchema(source string, packet mosiPacket, schema []byte) error {
 	r := cluster.manager
 	if !packet.Resource.valid() || packet.ID == "" {
 		return fmt.Errorf("invalid shared reference")
@@ -777,7 +802,7 @@ func (cluster *nodeCluster) installReference(source string, packet mosiPacket) e
 	// the pending flight and then ACK a grant that could never install. Live
 	// payload decoding itself publishes UUID edges, so do this before decoding.
 	// An older retained read proof does not survive this owner version.
-	if packet.Epoch > record.Epoch {
+	if packet.Epoch > record.Epoch && packet.Resource.Shard != "" {
 		c.ownstate.Publish(mosi.IO)
 		r.updateRecord(packet.Resource, func(current *replicaRecord) bool {
 			current.Epoch = packet.Epoch
@@ -799,7 +824,10 @@ func (cluster *nodeCluster) installReference(source string, packet mosiPacket) e
 			return err
 		}
 	} else if packet.Resource.Shard == "" {
-		data = db.persistence.ReadSchema()
+		data = schema
+		if data == nil {
+			data = r.schemaTransferData(db)
+		}
 		content, err := r.schemaDigest(data)
 		if err != nil || content != packet.Content {
 			return fmt.Errorf("shared schema changed")
@@ -833,7 +861,7 @@ func (cluster *nodeCluster) installReference(source string, packet mosiPacket) e
 		record.Content = packet.Content
 		// Installation registers the reader before ACK, including an S flight
 		// already upgraded to MR. Its later S grant must retain this epoch.
-		if packet.Epoch > record.Epoch {
+		if packet.State == "" && packet.Epoch > record.Epoch {
 			record.Epoch = packet.Epoch
 		}
 		return true

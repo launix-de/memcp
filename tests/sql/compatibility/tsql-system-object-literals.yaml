@@ -1,0 +1,92 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  description: System object literals preserve type, scalar cardinality and multipart address semantics
+setup: []
+cleanup: []
+test_cases:
+- name: Literal system catalog addresses retain optional type and qualified identity
+  sql: SELECT CASE WHEN OBJECT_ID(N'sys.all_columns')=OBJECT_ID(N'sys.all_columns',N'V') THEN 1 ELSE 0 END AS optional_type,CASE WHEN OBJECT_ID(N'[memcp-tests].[sys].[all_columns]')=OBJECT_ID(N'sys.all_columns') THEN 1 ELSE 0 END AS qualified_identity
+  expect:
+    rows: 1
+    data:
+    - optional_type: 1
+      qualified_identity: 1
+- name: A literal system catalog address retains an explicitly NULL type
+  sql: SELECT CASE WHEN OBJECT_ID(N'sys.all_columns',NULL)=OBJECT_ID(N'sys.all_columns',N'V') THEN 1 ELSE 0 END AS same_id
+  expect:
+    rows: 1
+    data:
+    - same_id: 1
+- name: System catalog addresses retain mismatching constraint type semantics
+  sql: SELECT OBJECT_ID(N'sys.all_columns',N'C') AS check_kind,OBJECT_ID(N'sys.all_columns',N'D') AS default_kind,OBJECT_ID(N'sys.all_columns',N'F') AS foreign_kind,OBJECT_ID(N'sys.all_columns',N'U') AS table_kind
+  expect:
+    rows: 1
+    data:
+    - check_kind: null
+      default_kind: null
+      foreign_kind: null
+      table_kind: null
+- name: Missing system catalog addresses remain SQL NULL
+  sql: SELECT OBJECT_ID(N'sys.object_catalog_missing') AS missing
+  expect:
+    rows: 1
+    data:
+    - missing: null
+- name: Literal system addresses still bind a runtime object type
+  sql: DECLARE @kind NVARCHAR(2)=NULL; SELECT CASE WHEN OBJECT_ID(N'sys.all_columns',@kind)=OBJECT_ID(N'sys.all_columns',N'V') THEN 1 ELSE 0 END AS same_id
+  expect:
+    rows: 1
+    data:
+    - same_id: 1
+- name: A scalar literal domain retains its fresh system catalog value
+  sql: SELECT (SELECT CASE WHEN OBJECT_ID(N'sys.all_columns',kind) IS NULL THEN 0 ELSE 1 END FROM (SELECT N'V' AS kind) d) AS visible
+  expect:
+    rows: 1
+    data:
+    - visible: 1
+- name: A scalar literal domain retains a NULL object type wildcard
+  sql: SELECT (SELECT CASE WHEN OBJECT_ID(N'sys.all_columns',kind) IS NULL THEN 0 ELSE 1 END FROM (SELECT CAST(NULL AS NVARCHAR(2)) AS kind) d) AS visible
+  expect:
+    rows: 1
+    data:
+    - visible: 1
+- name: A scalar literal domain retains an incompatible object type
+  sql: SELECT (SELECT CASE WHEN OBJECT_ID(N'sys.all_columns',kind) IS NULL THEN 0 ELSE 1 END FROM (SELECT N'D' AS kind) d) AS visible
+  expect:
+    rows: 1
+    data:
+    - visible: 0
+- name: A two row literal domain retains its scalar cardinality error
+  sql: SELECT (SELECT OBJECT_ID(N'sys.all_columns',kind) FROM (SELECT N'V' AS kind UNION ALL SELECT N'V') d) AS object_id
+  expect:
+    error: true
+- name: A filtered empty literal domain remains scalar SQL NULL
+  sql: SELECT (SELECT OBJECT_ID(N'sys.all_columns',kind) FROM (SELECT N'V' AS kind) d WHERE 1=0) AS object_id
+  expect:
+    rows: 1
+    data:
+    - object_id: null
+- name: A scalar literal domain retains the declared Unicode result
+  sql: SELECT (SELECT N'雪' WHERE OBJECT_ID(N'sys.all_columns') IS NOT NULL) AS label
+  expect:
+    rows: 1
+    data:
+    - label: 雪
+- name: Quoted system namespaces retain their complete current database identity
+  sql: "SELECT\n  CASE WHEN OBJECT_ID(N'[sys].[all_columns]',N'V')=OBJECT_ID(N'sys.all_columns',N'V') THEN 1 ELSE 0 END AS bracketed,\n  CASE WHEN OBJECT_ID(N'\"sys\".\"all_columns\"',N'V')=OBJECT_ID(N'sys.all_columns',N'V') THEN 1 ELSE 0 END AS quoted,\n  CASE WHEN OBJECT_ID(N'[memcp-tests].[sys].[all_columns]',N'V')=OBJECT_ID(N'sys.all_columns',N'V') THEN 1 ELSE 0 END AS qualified\n"
+  expect:
+    rows: 1
+    data:
+    - bracketed: 1
+      quoted: 1
+      qualified: 1
+- name: Invalid system-like addresses never resolve a valid prefix
+  sql: "SELECT OBJECT_ID(N'sys.[all_columns]suffix',N'V') AS suffix,\n  OBJECT_ID(N'[sys].[all_columns',N'V') AS unclosed,\n  OBJECT_ID(N'server.memcp-tests.sys.all_columns',N'V') AS four_parts\n"
+  expect:
+    rows: 1
+    data:
+    - suffix: null
+      unclosed: null
+      four_parts: null

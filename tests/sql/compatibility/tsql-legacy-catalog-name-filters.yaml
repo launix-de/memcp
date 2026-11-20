@@ -1,0 +1,53 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  description: Qualified legacy catalog name filters retain SQL text equality and complete joined results
+setup:
+- sql: CREATE TABLE catalog_lookup_input(id INT PRIMARY KEY,flag BIT)
+- sql: CREATE TABLE catalog_lookup_other(id INT PRIMARY KEY,flag BIT)
+- sql: CREATE VIEW catalog_lookup_view AS SELECT id FROM catalog_lookup_input
+- sql: CREATE PROCEDURE catalog_lookup_procedure AS SELECT 7 AS value
+cleanup:
+- sql: DROP PROCEDURE IF EXISTS catalog_lookup_procedure
+- sql: DROP VIEW IF EXISTS catalog_lookup_view
+- sql: DROP TABLE IF EXISTS catalog_lookup_other
+- sql: DROP TABLE IF EXISTS catalog_lookup_input
+test_cases:
+- name: A column and object join retains the declared matching column
+  sql: SELECT c.name,c.colid FROM syscolumns c INNER JOIN sysobjects o ON c.id=o.id WHERE c.name=N'flag' AND o.name=N'catalog_lookup_input'
+  expect: {rows: 1,data: [{name: flag,colid: 2}]}
+- name: A missing declaration returns the zero count
+  sql: SELECT COUNT(*) AS total FROM syscolumns c INNER JOIN sysobjects o ON c.id=o.id WHERE c.name=N'absent' AND o.name=N'catalog_lookup_input'
+  expect: {rows: 1,data: [{total: 0}]}
+- name: Reversed literal equality preserves its complete object result
+  sql: SELECT o.name FROM sysobjects o WHERE N'catalog_lookup_input'=o.name
+  expect: {rows: 1,data: [{name: catalog_lookup_input}]}
+- name: Name comparisons retain SQL case and trailing space semantics
+  sql: SELECT COUNT(*) AS total FROM syscolumns c INNER JOIN sysobjects o ON c.id=o.id WHERE c.name=N'FLAG ' AND O.name=N'CATALOG_LOOKUP_INPUT '
+  expect: {rows: 1,data: [{total: 1}]}
+- name: An explicit case sensitive comparison retains its rejection
+  sql: SELECT o.name FROM sysobjects o WHERE o.name COLLATE Latin1_General_CS_AS=N'CATALOG_LOOKUP_INPUT'
+  expect: {rows: 0}
+- name: A positive OR predicate retains both object alternatives
+  sql: SELECT o.name FROM sysobjects o WHERE o.name=N'catalog_lookup_input' OR o.name=N'catalog_lookup_other' ORDER BY o.name
+  expect: {rows: 2,data: [{name: catalog_lookup_input},{name: catalog_lookup_other}]}
+- name: An OR admitting unmatched rows preserves outer join NULL extension
+  sql: SELECT wanted.id,o.name FROM(VALUES(1,N'catalog_lookup_input'),(2,N'catalog_lookup_missing')) wanted(id,name) LEFT JOIN sysobjects o ON o.name=wanted.name WHERE o.name=N'catalog_lookup_input' OR o.name IS NULL ORDER BY wanted.id
+  expect: {rows: 2,data: [{id: 1,name: catalog_lookup_input},{id: 2,name: null}]}
+- name: A procedure name filter retains its native declaration kind
+  sql: SELECT o.name,RTRIM(o.xtype) AS kind FROM sysobjects o WHERE o.name=N'catalog_lookup_procedure'
+  expect: {rows: 1,data: [{name: catalog_lookup_procedure,kind: P}]}
+- name: A view name filter retains its actual projected column
+  sql: SELECT c.name FROM syscolumns c INNER JOIN sysobjects o ON c.id=o.id WHERE o.name=N'catalog_lookup_view'
+  expect: {rows: 1,data: [{name: id}]}
+- name: Conflicting necessary names reject every row
+  sql: SELECT o.name FROM sysobjects o WHERE o.name=N'catalog_lookup_input' AND o.name=N'catalog_lookup_other'
+  expect: {rows: 0}
+- name: NULL name equality retains SQL rejection
+  sql: SELECT o.name FROM sysobjects o WHERE o.name=NULL
+  expect: {rows: 0}
+- name: A lexical CTE keeps its own name declaration
+  sql: WITH sysobjects AS(SELECT N'catalog_lookup_input' AS name,77 AS id) SELECT o.name,o.id FROM sysobjects o WHERE o.name=N'catalog_lookup_input'
+  expect: {rows: 1,data: [{name: catalog_lookup_input,id: 77}]}

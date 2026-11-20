@@ -31,6 +31,14 @@ func initExpressionMetadata() {
 		JITEmit: jitEmitExpressionMetadataCall("expression_syntax"),
 	},
 	})
+	Declare(&Globalenv, &Declaration{Name: "expression_referenced_bindings", Fn: func(a ...Scmer) Scmer {
+		return ExpressionReferencedBindings(a[0], a[1])
+	}, Type: &TypeDescriptor{Kind: "func", Description: "filters candidate lexical bindings in order; delayed syntax, unknown callees or conditional publication conservatively retain all candidates",
+		Params: []*TypeDescriptor{{Kind: "any", Label: "expression"}, {Kind: "list", Label: "binding_symbols"}},
+		Return: &TypeDescriptor{Kind: "list"}, Const: true,
+		JITEmit: jitEmitExpressionMetadataCall("expression_referenced_bindings"),
+	},
+	})
 	Declare(&Globalenv, &Declaration{Name: "expression_equal?", Fn: func(a ...Scmer) Scmer {
 		return NewBool(astStructuralEqual(a[0], a[1]))
 	}, Type: &TypeDescriptor{Kind: "func", Description: "compares expression data without scalar truth or numeric coercion",
@@ -59,6 +67,40 @@ func initExpressionMetadata() {
 		JITEmit: jitEmitExpressionMetadataCall("expression_foldable?"),
 	},
 	})
+}
+
+// ExpressionReferencedBindings reuses the compiler's lexical owners once for
+// the candidate list, preserving candidate order and duplicate occurrences.
+// Ordinary opaque callables retain their own captures; delayed syntax,
+// unknown callees or conditional publication retain the enclosing environment.
+func ExpressionReferencedBindings(expression, candidates Scmer) Scmer {
+	candidates = candidates.WithoutSourceInfo()
+	if !candidates.IsSlice() {
+		panic("expression_referenced_bindings requires a list of binding symbols")
+	}
+	bindings := make([]Scmer, len(candidates.Slice()))
+	for i, candidate := range candidates.Slice() {
+		candidate = candidate.WithoutSourceInfo()
+		if !candidate.IsSymbol() {
+			panic("expression_referenced_bindings requires binding symbols")
+		}
+		bindings[i] = candidate
+	}
+	if len(bindings) == 0 || jitExpressionConsumesRuntimeEnv(expression) ||
+		jitLexicalBindingsNeedRuntime(NewSlice(nil), expression) {
+		return NewSlice(bindings)
+	}
+	free := make(map[Symbol]bool)
+	for _, name := range jitLambdaFreeSymbols(NewSlice(nil), expression) {
+		free[name] = true
+	}
+	result := make([]Scmer, 0, len(bindings))
+	for _, candidate := range bindings {
+		if free[candidate.Symbol()] {
+			result = append(result, candidate)
+		}
+	}
+	return NewSlice(result)
 }
 
 // Expression metadata traverses arbitrary trees and runtime declarations.

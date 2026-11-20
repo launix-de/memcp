@@ -1,0 +1,101 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# https://learn.microsoft.com/sql/t-sql/functions/max-transact-sql
+metadata:
+  syntax: tsql
+  requires_tds: true
+  description: MIN and MAX modifiers preserve ordinary aggregate semantics and analytic restrictions
+setup:
+- sql: CREATE TABLE extrema_values(id INT PRIMARY KEY,tenant INT,person INT,period SMALLINT,label NVARCHAR(12) COLLATE utf8mb4_bin,stamp DATETIME)
+- sql: |
+    INSERT extrema_values VALUES
+      (1,1,10,2,N'Zulu',CAST(N'2026-01-01' AS DATETIME)),
+      (2,1,10,5,N'alpha',CAST(N'2026-01-02' AS DATETIME)),
+      (3,1,10,5,N'alpha',CAST(N'2026-01-02' AS DATETIME)),
+      (4,1,10,NULL,NULL,NULL),(5,1,11,NULL,NULL,NULL),
+      (6,2,20,7,N'beta',CAST(N'2026-01-03' AS DATETIME)),
+      (7,2,20,3,N'gamma',CAST(N'2026-01-04' AS DATETIME))
+cleanup:
+- sql: DROP VIEW IF EXISTS dbo.extrema_summary
+- sql: DROP TABLE IF EXISTS extrema_values
+test_cases:
+- name: Distinct extrema ignore duplicates and nulls without changing the aggregate
+  sql: SELECT MIN(DISTINCT period) AS earliest,MAX(DISTINCT period) AS latest,COUNT(*) AS n FROM extrema_values
+  expect: {rows: 1,data: [{earliest: 2,latest: 7,n: 7}]}
+- name: The original grouped MAX DISTINCT shape retains each grouping key
+  sql: SELECT tenant,person,MAX(DISTINCT period) AS last_period FROM extrema_values GROUP BY tenant,person ORDER BY tenant,person
+  expect: {rows: 3,data: [{tenant: 1,person: 10,last_period: 5},{tenant: 1,person: 11,last_period: null},
+      {tenant: 2,person: 20,last_period: 7}]}
+- name: Distinct and ALL do not remove rows from neighboring aggregate inputs
+  sql: |
+    SELECT tenant,person,COUNT(*) AS n,MIN(ALL period) AS earliest,MAX(DISTINCT period) AS latest
+    FROM extrema_values GROUP BY tenant,person ORDER BY tenant,person
+  expect: {rows: 3,data: [{tenant: 1,person: 10,n: 4,earliest: 2,latest: 5},
+      {tenant: 1,person: 11,n: 1,earliest: null,latest: null},{tenant: 2,person: 20,n: 2,earliest: 3,latest: 7}]}
+- name: ALL and default extrema retain the same ordinary result
+  sql: SELECT MIN(period) AS a,MIN(ALL period) AS b,MAX(period) AS c,MAX(ALL period) AS d FROM extrema_values
+  expect: {rows: 1,data: [{a: 2,b: 2,c: 7,d: 7}]}
+- name: An all-null group retains one null aggregate tuple
+  sql: SELECT MIN(DISTINCT period) AS earliest,MAX(DISTINCT period) AS latest FROM extrema_values WHERE person=11
+  expect: {rows: 1,data: [{earliest: null,latest: null}]}
+- name: An empty scalar bag retains the common extrema neutral values
+  sql: SELECT MIN(DISTINCT period) AS earliest,MAX(DISTINCT period) AS latest,COUNT(*) AS n FROM extrema_values WHERE 1=0
+  expect: {rows: 1,data: [{earliest: null,latest: null,n: 0}]}
+- name: An empty grouped bag cannot manufacture a group
+  sql: SELECT tenant,MIN(DISTINCT period) AS earliest FROM extrema_values WHERE 1=0 GROUP BY tenant
+  expect: {rows: 0}
+- name: HAVING binds extrema modifiers in the grouped scope
+  sql: |
+    SELECT tenant,person,MAX(DISTINCT period) AS last_period FROM extrema_values
+    GROUP BY tenant,person HAVING MAX(DISTINCT period)>=5 AND MIN(ALL period)=2 ORDER BY tenant,person
+  expect: {rows: 1,data: [{tenant: 1,person: 10,last_period: 5}]}
+- name: The declared binary collation reaches the ordinary extrema owner
+  sql: SELECT MIN(DISTINCT label) AS earliest,MAX(ALL label) AS latest FROM extrema_values
+  expect: {rows: 1,data: [{earliest: Zulu,latest: gamma}]}
+- name: Explicit binary collation retains the same extrema expressions
+  sql: SELECT MIN(DISTINCT label COLLATE utf8mb4_bin) AS earliest,MAX(DISTINCT label COLLATE utf8mb4_bin) AS latest FROM extrema_values
+  expect: {rows: 1,data: [{earliest: Zulu,latest: gamma}]}
+- name: Declared scalar and temporal extrema retain their TDS types
+  tds:
+    statements:
+    - sql: SELECT MIN(DISTINCT period) AS earliest,MAX(ALL period) AS latest,MIN(DISTINCT stamp) AS first_stamp,MAX(DISTINCT label) AS last_label FROM extrema_values
+      expect:
+        rows: 1
+        data: [{earliest: 2,latest: 7,first_stamp: {temporal_type: datetime,value: '2026-01-01T00:00:00Z'},last_label: gamma}]
+        column_types: [{name: earliest,type: SMALLINT},{name: latest,type: SMALLINT},
+          {name: first_stamp,type: DATETIME},{name: last_label,type: NVARCHAR}]
+- name: Empty extrema retain their input declarations in wire metadata
+  tds:
+    statements:
+    - sql: SELECT MIN(DISTINCT period) AS earliest,MAX(DISTINCT stamp) AS latest FROM extrema_values WHERE 1=0
+      expect:
+        rows: 1
+        data: [{earliest: null,latest: null}]
+        column_types: [{name: earliest,type: SMALLINT},{name: latest,type: DATETIME}]
+- name: A stored grouped view preserves normalized modifier semantics
+  sql: CREATE VIEW dbo.extrema_summary AS SELECT tenant,person,MIN(DISTINCT period) AS earliest,MAX(ALL period) AS latest FROM extrema_values GROUP BY tenant,person
+- name: Reading the stored extrema view preserves duplicate and null groups
+  sql: SELECT tenant,person,earliest,latest FROM dbo.extrema_summary ORDER BY tenant,person
+  expect: {rows: 3,data: [{tenant: 1,person: 10,earliest: 2,latest: 5},
+      {tenant: 1,person: 11,earliest: null,latest: null},{tenant: 2,person: 20,earliest: 3,latest: 7}]}
+- name: ALL is admitted for analytic extrema through the existing window owner
+  sql: SELECT id,MIN(ALL period) OVER (PARTITION BY tenant,person) AS earliest,MAX(ALL period) OVER (PARTITION BY tenant,person) AS latest FROM extrema_values ORDER BY id
+  expect: {rows: 7,data: [{id: 1,earliest: 2,latest: 5},{id: 2,earliest: 2,latest: 5},
+      {id: 3,earliest: 2,latest: 5},{id: 4,earliest: 2,latest: 5},{id: 5,earliest: null,latest: null},
+      {id: 6,earliest: 3,latest: 7},{id: 7,earliest: 3,latest: 7}]}
+- name: Unmodified analytic extrema retain their previous semantics
+  sql: SELECT id,MAX(period) OVER () AS latest FROM extrema_values ORDER BY id
+  expect: {rows: 7,data: [{id: 1,latest: 7},{id: 2,latest: 7},{id: 3,latest: 7},
+      {id: 4,latest: 7},{id: 5,latest: 7},{id: 6,latest: 7},{id: 7,latest: 7}]}
+- name: MIN DISTINCT cannot lose its syntax before analytic validation
+  sql: SELECT MIN(DISTINCT period) OVER (PARTITION BY tenant) AS value FROM extrema_values
+  expect: {error: true,contains: DISTINCT is not allowed with OVER}
+- name: MAX DISTINCT cannot become an unmodified analytic MAX
+  sql: SELECT MAX(DISTINCT period) OVER () AS value FROM extrema_values
+  expect: {error: true,contains: DISTINCT is not allowed with OVER}
+- name: An analytic ordering clause does not make DISTINCT legal
+  sql: SELECT MAX(DISTINCT period) OVER (ORDER BY id) AS value FROM extrema_values
+  expect: {error: true,contains: DISTINCT is not allowed with OVER}
+- name: A nested scalar consumer cannot erase illegal analytic DISTINCT
+  sql: SELECT CASE WHEN id=1 THEN MIN(DISTINCT period) OVER () ELSE 0 END AS value FROM extrema_values
+  expect: {error: true,contains: DISTINCT is not allowed with OVER}

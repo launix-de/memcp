@@ -1,3 +1,5 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
 # MySQL Compatibility v1 — Keys and Indexes (acceptance)
 
 metadata:
@@ -11,7 +13,13 @@ test_cases:
   - name: "CREATE TABLE with PK and UNIQUE"
     sql: "CREATE TABLE k (id INT PRIMARY KEY, email VARCHAR(100) UNIQUE)"
     expect:
-      affected_rows: 1
+      affected_rows: 0
+      result_contains: '"affected_rows"'
+
+  - name: "Completed MySQL declaration is present: CREATE TABLE with PK and UNIQUE"
+    syntax: mysql
+    sql: "SHOW CREATE TABLE k"
+    expect: {rows: 1,data: [{Table: "k"}]}
 
   - name: "CREATE INDEX accepted"
     sql: "CREATE INDEX idx_email ON k (email)"

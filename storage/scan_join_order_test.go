@@ -322,7 +322,7 @@ func TestScanJoinOrderPrunesCompatibleJoinKeyShardPairs(t *testing.T) {
 		mapCols:     []scanJoinOrderColumn{{table: 0, column: "id"}},
 		mapReduceFn: scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[1] }),
 	}
-	prepareScanJoinOrderSpec(&spec)
+	prepareScanJoinOrderSpec(nil, &spec)
 	streams := make([][]*scanJoinOrderShardStream, 2)
 	streams[0] = collectScanJoinOrderShardStreams(nil, &spec.inputs[0], []scm.Scmer{scm.NewString("id")}, []func(...scm.Scmer) scm.Scmer{descending})
 	_, ascending := integerOrder(false)
@@ -462,7 +462,7 @@ func TestScanJoinOrderCandidateInputPrunesBeforeProjection(t *testing.T) {
 		{table: left, accessSchema: newScanAccessSchema(scanAccessConsumerScan, nil, -1)},
 		{table: right, accessSchema: newScanAccessSchema(scanAccessConsumerScan, nil, -1), sourceKeyCols: []scanJoinOrderColumn{{table: 0, column: "id"}}, targetKeyCols: []string{"id"}},
 	}, limit: -1, mapCols: []scanJoinOrderColumn{{table: 1, column: "amount"}}}
-	prepareScanJoinOrderSpec(&spec)
+	prepareScanJoinOrderSpec(nil, &spec)
 	streams := make([][]*scanJoinOrderShardStream, 2)
 	streams[0] = collectScanJoinOrderShardStreams(nil, &spec.inputs[0], nil, nil)
 	input := &spec.inputs[1]

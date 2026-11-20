@@ -415,12 +415,21 @@ func serializeEx(b *schemeTextWriter, v Scmer, en *Env, glob *Env, p *Proc) {
 		value := strconv.AppendInt(buffer[:0], v.Int(), 10)
 		_, _ = b.Write(value)
 	case tagDate:
-		if b.objects != nil {
-			// Network values preserve the native date scalar, including its zone.
-			// Local diagnostic/persistence text keeps its historical spelling.
-			b.WriteString("(serialized_date ")
+		nanos := v.DateNanosecond()
+		if nanos != 0 || b.objects != nil {
+			// A new constructor name makes older peers reject subsecond values
+			// explicitly; the permanent two-field date marker stays unchanged.
+			if nanos != 0 {
+				b.WriteString("(date_from_parts ")
+			} else {
+				b.WriteString("(serialized_date ")
+			}
 			b.writeInt(v.Int())
 			b.WriteByte(' ')
+			if nanos != 0 {
+				b.WriteString(strconv.Itoa(nanos))
+				b.WriteByte(' ')
+			}
 			b.WriteString(strconv.Itoa(TagDateDecodeZone(auxVal(v.aux))))
 			b.WriteByte(')')
 		} else {
@@ -499,7 +508,9 @@ func serializeEx(b *schemeTextWriter, v Scmer, en *Env, glob *Env, p *Proc) {
 			slice = append([]Scmer(nil), slice...)
 			slice[1] = NewString(slice[1].Regex().String())
 		}
-		if b.objects != nil && len(slice) == 2 && scmerIsSymbol(slice[0], "quote") {
+		// Runtime literal values need constructors even without a peer
+		// context. Pure quoted source retains its compact existing spelling.
+		if len(slice) == 2 && scmerIsSymbol(slice[0], "quote") && (b.objects != nil || quotedLiteralNeedsConstructor(slice[1])) {
 			serializeClusterLiteral(b, slice[1], glob)
 			return
 		}
@@ -664,7 +675,7 @@ func serializeEx(b *schemeTextWriter, v Scmer, en *Env, glob *Env, p *Proc) {
 			return
 		}
 		if b.objects != nil {
-			panic("runtime value has no serialization contract")
+			panic(fmt.Sprintf("runtime value has no serialization contract: %T", v.Any()))
 		}
 		b.WriteString(fmt.Sprint(v.Any()))
 	case tagParser:
@@ -817,6 +828,22 @@ func prettyLines(v Scmer, glob *Env, width int, indent int) []string {
 		lines = append(lines, indentStr+")")
 	}
 	return lines
+}
+
+// Source literals can stay inert in their original quote form. Runtime
+// objects (including callable values) instead need their owning constructor;
+// putting a printed lambda underneath quote would only recreate syntax data.
+func quotedLiteralNeedsConstructor(value Scmer) bool {
+	value = value.WithoutSourceInfo()
+	if value.IsSlice() {
+		for _, item := range value.Slice() {
+			if quotedLiteralNeedsConstructor(item) {
+				return true
+			}
+		}
+		return false
+	}
+	return !value.IsNil() && !value.IsBool() && !value.IsInt() && !value.IsFloat() && !value.IsString() && !value.IsSymbol()
 }
 
 // Quoted data containing runtime references is reconstructed as data constructors.

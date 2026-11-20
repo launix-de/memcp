@@ -1,0 +1,121 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Neutral source-only diagnostic target for procedure-local table-variable and composite temporary
+    catalog join pipeline; no proprietary SQL
+setup:
+- sql: CREATE TABLE scope_join_input(id INT PRIMARY KEY)
+- sql: CREATE VIEW scope_join_view AS SELECT id FROM scope_join_input
+- sql: "CREATE PROCEDURE dbo.scope_join_pipeline AS\nBEGIN\n  SET NOCOUNT ON;\n  DECLARE @stage INT=0,@fetched INT=0;\n\
+    \  BEGIN TRY\n    DECLARE @rules TABLE(object_type VARCHAR(2) COLLATE Latin1_General_CI_AS NOT NULL,permission_name\
+    \ VARCHAR(100) COLLATE Latin1_General_CI_AS NOT NULL);\n    SET @stage=1;\n    CREATE TABLE #existing_scope(object_name\
+    \ VARCHAR(100) NOT NULL,permission_name VARCHAR(100) NOT NULL) ON [PRIMARY];\n    ALTER TABLE #existing_scope\
+    \ ADD CONSTRAINT PK_existing_scope PRIMARY KEY CLUSTERED(object_name,permission_name) ON [PRIMARY];\n    SET\
+    \ @stage=2;\n    CREATE TABLE #desired_scope(object_name VARCHAR(100) NOT NULL,permission_name VARCHAR(100)\
+    \ NOT NULL) ON [PRIMARY];\n    ALTER TABLE #desired_scope ADD CONSTRAINT PK_desired_scope PRIMARY KEY CLUSTERED(object_name,permission_name)\
+    \ ON [PRIMARY];\n    SET @stage=3;\n    INSERT @rules VALUES('U','SELECT'),('U','UPDATE'),('V','SELECT');\n\
+    \    SET @stage=4;\n    INSERT #desired_scope(object_name,permission_name)\n      SELECT o.name COLLATE Latin1_General_CI_AS,RTRIM(r.permission_name)\
+    \ COLLATE Latin1_General_CI_AS\n      FROM sys.objects o JOIN @rules r ON o.type COLLATE Latin1_General_CI_AS=r.object_type\
+    \ COLLATE Latin1_General_CI_AS\n      WHERE o.is_ms_shipped=0 AND o.name IN(N'scope_join_input',N'scope_join_view')\
+    \ AND SCHEMA_NAME(o.schema_id)=N'dbo'\n      ORDER BY o.type,o.name;\n    SET @stage=5;\n    WITH known_grants\
+    \ AS (\n      SELECT CAST(OBJECT_NAME(p.major_id) AS VARCHAR(100)) AS object_name,p.permission_name\n      FROM\
+    \ sys.database_permissions p LEFT JOIN sys.database_principals d ON p.grantee_principal_id=d.principal_id\n\
+    \      LEFT JOIN sys.server_principals s ON d.sid=s.sid\n      WHERE p.class_desc=N'OBJECT_OR_COLUMN'\n    )\n\
+    \    INSERT #existing_scope(object_name,permission_name)\n      SELECT DISTINCT object_name,LTRIM(RTRIM(permission_name))\
+    \ FROM known_grants WHERE 1=0;\n    SET @stage=6;\n    DECLARE @object VARCHAR(100),@permission VARCHAR(100);\n\
+    \    DECLARE scope_cursor CURSOR FOR\n      SELECT d.object_name,d.permission_name FROM #desired_scope d\n \
+    \     LEFT JOIN #existing_scope e ON d.object_name COLLATE Latin1_General_CI_AS=e.object_name AND d.permission_name\
+    \ COLLATE Latin1_General_CI_AS=e.permission_name\n      WHERE e.object_name IS NULL;\n    OPEN scope_cursor;\n\
+    \    SET @stage=7;\n    FETCH NEXT FROM scope_cursor INTO @object,@permission;\n    WHILE @@FETCH_STATUS=0 BEGIN\n\
+    \      SET @fetched=@fetched+1;\n      FETCH NEXT FROM scope_cursor INTO @object,@permission;\n    END;\n  \
+    \  CLOSE scope_cursor;\n    DEALLOCATE scope_cursor;\n    SET @stage=8;\n    DROP TABLE #desired_scope;\n  \
+    \  DROP TABLE #existing_scope;\n    SELECT @stage AS completed_stage,@fetched AS fetched_rows,0 AS error_number;\n\
+    \  END TRY\n  BEGIN CATCH\n    SELECT @stage AS completed_stage,@fetched AS fetched_rows,ERROR_NUMBER() AS error_number,ERROR_MESSAGE()\
+    \ AS error_message;\n  END CATCH;\nEND"
+- sql: "CREATE PROCEDURE dbo.scope_join_repeated @seed INT,@kind VARCHAR(2) AS BEGIN\n  DECLARE @rows TABLE(id INT);\n\
+    \  INSERT @rows VALUES(@seed),(@seed+1);\n  SELECT o.name AS object_name,r.id,@seed AS seed\n  FROM sys.objects\
+    \ o CROSS JOIN @rows r\n  WHERE o.name IN(N'scope_join_input',N'scope_join_view') AND o.type=@kind\n  ORDER\
+    \ BY r.id;\nEND"
+test_cases:
+- name: Metadata list source and local relation both retain their invocation bindings
+  sql: DECLARE @rows TABLE(id INT); INSERT @rows VALUES(1),(2); SELECT t.table_name,r.id FROM information_schema.tables
+    t CROSS JOIN @rows r WHERE t.table_catalog=DB_NAME() AND t.table_name=N'scope_join_input' ORDER BY r.id
+  expect:
+    rows: 2
+    data:
+    - table_name: scope_join_input
+      id: 1
+    - table_name: scope_join_input
+      id: 2
+- name: Temporary insert sink reads metadata joined to the same local relation handle
+  sql: 'DECLARE @rows TABLE(id INT); INSERT @rows VALUES(1),(2); CREATE TABLE #scope_output(table_name NVARCHAR(128),id
+    INT); INSERT #scope_output SELECT t.table_name,r.id FROM information_schema.tables t CROSS JOIN @rows r WHERE
+    t.table_catalog=DB_NAME() AND t.table_name=N''scope_join_input''; SELECT table_name,id FROM #scope_output ORDER
+    BY id; DROP TABLE #scope_output'
+  expect:
+    rows: 2
+    data:
+    - table_name: scope_join_input
+      id: 1
+    - table_name: scope_join_input
+      id: 2
+- name: Procedure local metadata join reaches cursor EOF in autocommit
+  sql: EXEC dbo.scope_join_pipeline
+  expect:
+    rows: 1
+    data:
+    - completed_stage: 8
+      fetched_rows: 3
+      error_number: 0
+- name: Procedure local metadata join reaches cursor EOF in an explicit transaction
+  tds:
+    statements:
+    - sql: BEGIN TRANSACTION
+    - sql: EXEC dbo.scope_join_pipeline
+      expect:
+        rows: 1
+        data:
+        - completed_stage: 8
+          fetched_rows: 3
+          error_number: 0
+    - sql: ROLLBACK TRANSACTION
+- name: Stored catalog UNION joins receive fresh local handles and scalar inputs at every invocation
+  tds:
+    statements:
+    - sql: EXEC dbo.scope_join_repeated @seed=7,@kind='U'
+      expect:
+        rows: 2
+        data:
+        - object_name: scope_join_input
+          id: 7
+          seed: 7
+        - object_name: scope_join_input
+          id: 8
+          seed: 7
+    - sql: EXEC dbo.scope_join_repeated @seed=11,@kind='V'
+      expect:
+        rows: 2
+        data:
+        - object_name: scope_join_view
+          id: 11
+          seed: 11
+        - object_name: scope_join_view
+          id: 12
+          seed: 11
+    - sql: EXEC dbo.scope_join_repeated @seed=2,@kind='U'
+      expect:
+        rows: 2
+        data:
+        - object_name: scope_join_input
+          id: 2
+          seed: 2
+        - object_name: scope_join_input
+          id: 3
+          seed: 2
+cleanup:
+- sql: DROP PROCEDURE IF EXISTS scope_join_repeated
+- sql: DROP PROCEDURE IF EXISTS scope_join_pipeline
+- sql: DROP VIEW IF EXISTS scope_join_view
+- sql: DROP TABLE IF EXISTS scope_join_input
