@@ -1892,7 +1892,8 @@ particular star shape. */
 	(begin
 		(define planning_session (planner_effective_session planning_session))
 		(and (not (nil? planning_session))
-			(equal? (planning_session "__memcp_queryplan_parameter_mode") "generic")))))
+			(or (equal? (planning_session "__memcp_queryplan_parameter_mode") "generic")
+				(equal? (planning_session "__memcp_queryplan_parameter_mode") "parameterized"))))))
 
 (define planner_record_table_statistics_guards (lambda (sources planning_session)
 	(if (planner_parameterized_costing? planning_session) nil
@@ -2892,10 +2893,38 @@ must never stand in for an unbound input during pruning, sampling or costing. */
 (define planner_symbolic_parameter? (lambda (expr planning_session)
 	(begin
 		(define planning_session (planner_effective_session planning_session))
-		(and (not (nil? planning_session))
-			(equal? (planning_session "__memcp_queryplan_parameter_mode") "generic")
+		(and (planner_parameterized_costing? planning_session)
 			(query_session_read? expr)
 			(not (planner_stage_preparation_read? expr))))))
+
+/* Window controls can change the emitted row-domain/cardinality program,
+not just its estimate. Bind their actual invocation value only in the explicit
+parameterized candidate, and retain the exact semantic guard. The ordinary
+fully symbolic generic mode keeps every input unknown. */
+(define planner_bind_window_control (lambda (expr planning_session)
+	(match (query_session_read_expr expr)
+		((symbol session) key) (begin
+			(define value (planning_session key))
+			(if (and (int? value) (>= value 0))
+				(begin
+					(planner_record_guard_condition (list (quote equal?) expr value) planning_session)
+					value)
+				expr))
+		_ expr)))
+
+(define planner_bind_parameter_window (lambda (query planning_session)
+	(begin
+		(define planning_session (planner_effective_session planning_session))
+		(if (or (nil? planning_session)
+			(not (equal? (planning_session "__memcp_queryplan_parameter_mode") "parameterized"))) query
+			(begin
+				(define block (normalize_query_ast query))
+				(if (not (query_block? block)) query
+					(make_query_block (qb_schema block) (qb_sources block) (qb_fields block)
+						(qb_where block) (qb_group block) (qb_having block) (qb_order block)
+						(planner_bind_window_control (qb_limit block) planning_session)
+						(planner_bind_window_control (qb_offset block) planning_session)
+						(qb_hidden block) (qb_stages block) (qb_facts block))))))))
 
 (define planner_symbolic_inputs? (lambda (expr planning_session)
 	(reduce (query_expr_session_reads expr) (lambda (found read)

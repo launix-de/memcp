@@ -33,7 +33,9 @@ retains scalar observations, never the executing request, transaction or rows.
 An observed model miss revokes reuse on the next boundary; it cannot authorize
 specialization without a fresh candidate cost comparison. */
 (define sql_parameter_generic? (lambda (variant)
-	(equal? (qassoc_get (nth variant 3) (quote parameter_mode) nil) "generic")))
+	(begin
+		(define mode (qassoc_get (nth variant 3) (quote parameter_mode) nil))
+		(or (equal? mode "generic") (equal? mode "parameterized")))))
 
 (define sql_parameter_reusable? (lambda (info)
 	(begin
@@ -61,17 +63,19 @@ specialization without a fresh candidate cost comparison. */
 		(define budget (reduce prior_compiles min
 			(qassoc_get specialized_info (quote compile_ns) 0)))
 		(define work (parameter_plan_reuse_work (qassoc_get specialized_info (quote work_profile) nil)))
+		(define previous_observation (entry "parameter_observation"))
+		(define observed (if (nil? previous_observation) 0
+			(coalesceNil (previous_observation "execution_ns") 0)))
 		/* Decline an unpriced or already expensive domain before compiling a
 		second candidate. Large flat scans retain the original miss cost too. */
 		(if (or (empty_list? (qassoc_get specialized_info (quote parameters) '()))
-			(not (number? work)) (> work budget)
+			(not (number? work)) (> work budget) (> observed budget)
 			(nil? (sql_parameter_candidate_cost specialized false))) specialized
 			(begin
-				(define generic (sql_compile_queryplan_variant parse_fn schema parse_query policy session tx "generic"))
+				(define generic (sql_compile_queryplan_variant parse_fn schema parse_query policy session tx "parameterized"))
 				/* Carry actual generic execution evidence across recompilation. A
 				fresh scalar cell must not erase the observation which caused this
 				miss and select the same demonstrably expensive work again. */
-				(define previous_observation (entry "parameter_observation"))
 				(define observation (if (nil? previous_observation) (newsession) previous_observation))
 				(entry "parameter_observation" observation)
 				(define info (qassoc_set (qassoc_set (nth generic 3)

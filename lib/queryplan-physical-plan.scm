@@ -13509,6 +13509,7 @@ compilation break-even estimate smaller and hide a later specialization. */
 (define neumann_compile_pipeline (lambda (ast planning_session tx)
 	(begin
 		(tx_check tx)
+		(define ast (planner_bind_parameter_window ast planning_session))
 		/* Constant columns are a relational equivalence, independent of the
 		aggregate carrier chosen below. Propagate them before decorrelation so
 		unused scalar branches cannot become eager dependency stages. Keep the
@@ -13558,6 +13559,9 @@ compilation break-even estimate smaller and hide a later specialization. */
 (define neumann_compile_ir_pipeline (lambda (ir planning_session tx)
 	(begin
 		(tx_check tx)
+		(define ir (make_ir (ir_kind ir)
+			(planner_bind_parameter_window (ir_root ir) planning_session)
+			(ir_stages ir) (ir_context_of ir) (ir_return ir)))
 		(define normalized (require_flat_stage_dependencies "compile_ir" (normalize_stage_dependencies ir)))
 		(tx_check tx)
 		(define reordered (optimize_logical_query normalized planning_session tx))
