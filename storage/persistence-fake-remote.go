@@ -171,6 +171,11 @@ func (s *FakeRemote) WriteColumn(shard, column string) io.WriteCloser {
 	s.simulation.request()
 	return s.writer(s.FileStorage.WriteColumn(shard, column))
 }
+
+func (s *FakeRemote) SyncNamespace() {
+	s.simulation.request()
+	s.FileStorage.SyncNamespace()
+}
 func (s *FakeRemote) WriteBlob(hash string) io.WriteCloser {
 	s.simulation.request()
 	return s.writer(s.FileStorage.WriteBlob(hash))

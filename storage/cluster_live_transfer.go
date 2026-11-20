@@ -749,6 +749,11 @@ func (cluster *nodeCluster) installLiveShard(cell *replicaCell, packet mosiPacke
 	if current == nil {
 		return fmt.Errorf("live transfer omitted current generation")
 	}
+	if isCatalogResource(packet.Resource) {
+		// The receiver's system namespace is separate from the shared tenant
+		// anchor. Persist new main-file entries before granting native rights.
+		current.home().persistence.SyncNamespace()
+	}
 	for shard, next := range nextIDs {
 		if next != "" {
 			successor := grains[next]

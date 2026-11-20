@@ -158,6 +158,10 @@ func (p *faultPersistence) WriteSchema(schema []byte) {
 	p.around("schema.write", func() { p.PersistenceEngine.WriteSchema(schema) })
 }
 
+func (p *faultPersistence) SyncNamespace() {
+	p.around("namespace.sync", p.PersistenceEngine.SyncNamespace)
+}
+
 func (p *faultPersistence) WriteSchemaWithMode(schema []byte, durable bool) {
 	p.around("schema.write", func() {
 		if writer, ok := p.PersistenceEngine.(schemaWriteOptions); ok {

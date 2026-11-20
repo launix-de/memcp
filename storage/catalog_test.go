@@ -347,6 +347,25 @@ func TestCatalogReplicaImportValidatesBeforePublication(t *testing.T) {
 	validRows := catalogRowsFromTable(tbl)
 	incoming := buildDiskShard(db, catalogColumns, validRows[catalogColumns], true)
 	transfer.header.Content = incoming.uuid.String()
+	home := incoming.home()
+	physical := home.persistence
+	barrier := &catalogNamespaceBarrier{PersistenceEngine: physical, before: func() { panic("namespace not durable") }}
+	home.persistence = barrier
+	defer func() { home.persistence = physical }()
+	func() {
+		defer func() {
+			if failure := recover(); failure != "namespace not durable" {
+				t.Errorf("catalog import did not propagate namespace durability failure: %v", failure)
+			}
+		}()
+		if err := r.finishImport("client", transfer); err != nil {
+			t.Fatal(err)
+		}
+	}()
+	if cell.current.Load() != previous || r.canonicalResource(resource) != resource {
+		t.Fatal("namespace durability failure published catalog payload or UUID authority")
+	}
+	barrier.before = func() {}
 	if err := r.finishImport("client", transfer); err != nil {
 		t.Fatal(err)
 	}
@@ -1009,6 +1028,69 @@ func TestCatalogCheckpointPreservesNativeAuthority(t *testing.T) {
 	cold.bootstrapCatalog(historical)
 	if installed := cell.resolved().publishedShard(); installed != current || cold.catalog.live[catalogColumns] != current {
 		t.Fatal("historical root republished a predecessor over the acquired catalog generation")
+	}
+}
+
+type catalogNamespaceBarrier struct {
+	PersistenceEngine
+	before func()
+	calls  int
+}
+
+func (engine *catalogNamespaceBarrier) SyncNamespace() {
+	engine.calls++
+	engine.before()
+	engine.PersistenceEngine.SyncNamespace()
+}
+
+func TestCatalogNamespaceDurabilityPrecedesTenantRoot(t *testing.T) {
+	tbl, engine := createDurabilityTestTable(t, "catalog-system-namespace-durability", 0)
+	db, home := tbl.schema, catalogBackendDatabase()
+	previous := append([]byte(nil), engine.ReadSchema()...)
+	physical := home.persistence
+	counting := &countingSchemaWritePersistence{PersistenceEngine: engine}
+	db.persistence = counting
+	defer func() { db.persistence = engine }()
+	failure := "injected catalog namespace sync failure"
+	barrier := &catalogNamespaceBarrier{PersistenceEngine: physical}
+	barrier.before = func() {
+		if counting.calls.Load() != 0 || string(engine.ReadSchema()) != string(previous) {
+			t.Error("tenant root published before the system namespace durability barrier")
+		}
+		panic(failure)
+	}
+	home.persistence = barrier
+	defer func() { home.persistence = physical }()
+	func() {
+		defer func() {
+			if got := recover(); got != failure {
+				t.Errorf("namespace barrier failure was not propagated: %v", got)
+			}
+		}()
+		tbl.CreateColumn("after_barrier", "INT", nil, nil)
+	}()
+	if barrier.calls != 1 || counting.calls.Load() != 0 || string(engine.ReadSchema()) != string(previous) {
+		t.Fatal("failed system namespace sync replaced the recoverable tenant root")
+	}
+	barrier.before = func() {
+		if counting.calls.Load() != 0 {
+			t.Error("retry published its root before syncing the system namespace")
+		}
+	}
+	db.save()
+	if barrier.calls != 2 || counting.calls.Load() != 1 {
+		t.Fatal("retry did not durably order the native namespace before its tenant root")
+	}
+	var accepted database
+	if err := json.Unmarshal(engine.ReadSchema(), &accepted); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, column := range accepted.tables.Get(tbl.Name).Columns {
+		found = found || column.Name == "after_barrier"
+	}
+	if !found {
+		t.Fatal("retry omitted the accepted native column declaration")
 	}
 }
 
