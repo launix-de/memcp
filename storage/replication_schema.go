@@ -135,7 +135,7 @@ func validateReplicaSchema(data []byte) ([]byte, error) {
 	// Query caches are local, rebuildable code artifacts rather than replicated
 	// declarations. Remove them as inert JSON before admitting any client code.
 	var err error
-	data, err = replicaSchemaDeclarations(data)
+	data, err = replicaSchemaDeclarations(data, true)
 	if err != nil {
 		return nil, err
 	}
@@ -226,7 +226,7 @@ func validateReplicaSchema(data []byte) ([]byte, error) {
 // replicaSchemaDeclarations uses the same case-insensitive field decoding as
 // the native catalog, while leaving every runtime value inert. Discarding a
 // client-marked cache is safe: none of its supplied bytes are ever installed.
-func replicaSchemaDeclarations(data []byte) ([]byte, error) {
+func replicaSchemaDeclarations(data []byte, restricted bool) ([]byte, error) {
 	var db struct {
 		Name       string                     `json:"name"`
 		Tables     map[string]json.RawMessage `json:"tables"`
@@ -267,11 +267,19 @@ func replicaSchemaDeclarations(data []byte) ([]byte, error) {
 			var declaration struct {
 				Name           string `json:"name"`
 				RequiresTarget bool   `json:"requires_target"`
+				Source         string `json:"source"`
 			}
 			if err := json.Unmarshal(trigger, &declaration); err != nil {
 				return nil, err
 			}
 			if !declaration.RequiresTarget && !restoredTriggerRequiresRuntimeTarget(declaration.Name) {
+				if restricted && declaration.Source != "" {
+					var err error
+					trigger, err = replicaRestrictedSource(trigger)
+					if err != nil {
+						return nil, err
+					}
+				}
 				triggers = append(triggers, trigger)
 			}
 		}
@@ -288,7 +296,45 @@ func replicaSchemaDeclarations(data []byte) ([]byte, error) {
 		fields["Triggers"], _ = json.Marshal(triggers)
 		db.Tables[name], _ = json.Marshal(fields)
 	}
+	if restricted && len(db.Procedures) != 0 {
+		var procedures []json.RawMessage
+		if err := json.Unmarshal(db.Procedures, &procedures); err != nil {
+			return nil, err
+		}
+		for i, procedure := range procedures {
+			var err error
+			procedures[i], err = replicaRestrictedSource(procedure)
+			if err != nil {
+				return nil, err
+			}
+		}
+		db.Procedures, _ = json.Marshal(procedures)
+	}
 	return json.Marshal(db)
+}
+
+// Source restrictions belong to admitted declarations, not to a rewritten Go
+// projection at the receiver. Keep preparation inert even for unsupported local
+// languages; their upload is rejected by the ordinary client admission later.
+func replicaRestrictedSource(raw json.RawMessage) (json.RawMessage, error) {
+	var declaration struct{ Language string }
+	if err := json.Unmarshal(raw, &declaration); err != nil {
+		return nil, err
+	}
+	if !replicationSafeLanguage(declaration.Language) {
+		return raw, nil
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return nil, err
+	}
+	for key := range fields {
+		if strings.EqualFold(key, "schema_only") {
+			delete(fields, key)
+		}
+	}
+	fields["schema_only"] = json.RawMessage("true")
+	return json.Marshal(fields)
 }
 
 // replicaColumnAdmission checks storage wrappers incrementally, before a client

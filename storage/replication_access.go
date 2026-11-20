@@ -357,22 +357,15 @@ func (r *replicationManager) firstDatabase(name string, session scm.Scmer) {
 	if db == nil {
 		panic("missing initial schema")
 	}
+	db.prepareReplicaCatalog()
 	resources := make([]mosiResource, 0)
-	for _, table := range db.tables.GetAll() {
-		if table.isEphemeralQueryTable() {
-			continue
-		}
-		for _, shard := range table.ActiveShards() {
-			if shard == nil {
-				continue
-			}
-			item := mosiResource{Database: name, Table: table.Name, Shard: shard.uuid.String()}
-			r.mu.Lock()
-			claimed := r.directory.Records[r.resourceKey(item)].InitialClaimed
-			r.mu.Unlock()
-			if !claimed {
-				resources = append(resources, item)
-			}
+	for _, shard := range db.replicationShards() {
+		item := shard.replicationResource()
+		r.mu.Lock()
+		claimed := r.directory.Records[r.resourceKey(item)].InitialClaimed
+		r.mu.Unlock()
+		if !claimed {
+			resources = append(resources, item)
 		}
 	}
 	c.bootstrapStarted = true

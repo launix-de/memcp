@@ -7,6 +7,7 @@ package storage
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -352,6 +353,142 @@ func TestCatalogReplicaImportValidatesBeforePublication(t *testing.T) {
 	published := cell.resolved().current.Load()
 	if published == nil || published.uuid != incoming.uuid || published.home() != catalogBackendDatabase() || published.catalogPrivate {
 		t.Fatal("validated import did not publish native system-backend content")
+	}
+}
+
+func TestCatalogReplicaTransferAdmitsSuccessorBeforePublishingRoutes(t *testing.T) {
+	for _, valid := range []bool{false, true} {
+		t.Run(fmt.Sprint(valid), func(t *testing.T) {
+			tbl, _ := createDurabilityTestTable(t, "catalog-successor-admission", 0)
+			db := tbl.schema
+			r := replicaRecoveryFixture()
+			source := db.catalog.live[catalogColumns]
+			historical := source.replicationResource()
+			cell := r.declareShard(source, "client", false)
+			r.updateRecord(historical, func(record *replicaRecord) bool {
+				record.Owner, record.Epoch = "client", 7
+				return true
+			})
+			rows := catalogRowsFromTable(tbl)
+			if !valid {
+				for index, field := range catalogRelations[catalogColumns].columns() {
+					if field.key == "Name" {
+						rows[catalogColumns][0][index] = scm.NewString("../escape")
+					}
+				}
+			}
+			incoming := buildDiskShard(db, catalogColumns, rows[catalogColumns], true)
+			current := incoming.replicationResource()
+			packet := mosiPacket{Kind: "begin", ID: "successor", Resource: current, Epoch: 7, Content: current.Shard,
+				Forwards: []shardForward{{From: historical, To: current}}}
+			r.peers = map[string]*mosiPeer{"client": {outgoing: newMosiMailbox(), done: make(chan struct{})}}
+			r.steps.Store(packet.ID, &replicaStep{peer: "client", resource: current, epoch: 7, content: current.Shard, done: make(chan struct{})})
+			if err := r.applyResourcePacket("client", &packet); err != nil {
+				t.Fatal("current modifier's predecessor proof was rejected", err)
+			}
+			if r.lookupCell(current) != nil || cell.current.Load() != source {
+				t.Fatal("transfer header published an unvalidated catalog route")
+			}
+			// Follow-up packets do not repeat forwarding declarations. Completion
+			// must check the admitted header's proof again, before installing data.
+			packet.Kind, packet.Forwards = "end", nil
+			err := r.applyResourcePacket("client", &packet)
+			if !valid {
+				if err == nil || !strings.Contains(err.Error(), "invalid replicated column name") {
+					t.Fatalf("unsafe declaration did not reach native admission: %v", err)
+				}
+				if r.lookupCell(current) != nil || cell.current.Load() != source {
+					t.Fatal("rejected successor changed accepted catalog authority")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if r.canonicalResource(historical) != current || cell.resolved().current.Load().uuid != incoming.uuid {
+				t.Fatal("admitted successor did not inherit its predecessor's authority")
+			}
+		})
+	}
+}
+
+func TestCatalogReplicaProposalsKeepRuntimeCachesLocal(t *testing.T) {
+	for _, master := range []bool{false, true} {
+		t.Run(fmt.Sprint(master), func(t *testing.T) {
+			tbl, _ := createDurabilityTestTable(t, "catalog-local-cache-proposals", 0)
+			db := tbl.schema
+			r := replicaRecoveryFixture()
+			r.master = master
+			r.schemaShards(db, r.id, true)
+			previous := replication.Swap(r)
+			defer replication.Store(previous)
+			cache := db.newTable(".grp:local", Cache)
+			db.tables.Set(cache.Name, cache)
+			compute := &column{Name: "local_compute", Typ: "INT", IsTemp: true, Computor: scm.NewSymbol("local_runtime_helper")}
+			tbl.Columns = append(tbl.Columns, compute)
+			db.schemalock.Lock()
+			db.proposeCatalogTablesLocked(tbl, cache)
+			rows := db.catalogRowsLocked()
+			db.schemalock.Unlock()
+			for _, row := range rows[catalogTables] {
+				if catalogTableName(row) == cache.Name {
+					t.Fatal("node-local cache became a canonical replicated declaration")
+				}
+			}
+			for relation := range rows {
+				if err := validateReplicaCatalogRows(db.Name, catalogRelationID(relation), rows[relation]); err != nil {
+					t.Fatal("runtime cache code reached native admission", err)
+				}
+			}
+			if tbl.Columns[len(tbl.Columns)-1] != compute || db.tables.Get(cache.Name) != cache {
+				t.Fatal("canonical declaration filtering destroyed node-local compute owners")
+			}
+		})
+	}
+}
+
+func TestCatalogReplicaTablesIntroduceDataAuthority(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "catalog-new-data-authority", 0)
+	db := tbl.schema
+	r := replicaRecoveryFixture()
+	r.schemaShards(db, r.id, true)
+	introduced := db.newTable("introduced", Safe)
+	rows := db.catalogRowsLocked()
+	proposal := catalogRowsFromTable(introduced)
+	rows[catalogTables] = append(rows[catalogTables], proposal[catalogTables]...)
+	incoming := buildDiskShard(db, catalogTables, rows[catalogTables], true)
+	resource := db.catalog.live[catalogTables].replicationResource()
+	transfer := &replicaImport{untrusted: true, header: mosiPacket{Resource: resource, Content: incoming.uuid.String()}, engine: incoming.home().persistence, home: incoming.home()}
+	if err := r.finishImport("client", transfer); err != nil {
+		t.Fatal(err)
+	}
+	data := introduced.Shards[0].replicationResource()
+	record := r.directory.Records[r.resourceKey(data)]
+	if record.Owner != "client" || record.Epoch != 1 || r.resourceCell(data).current.Load() != nil {
+		t.Fatal("native declaration did not introduce data authority independently of its payload")
+	}
+	if db.tables.Get(introduced.Name) != nil {
+		t.Fatal("catalog publication eagerly constructed a Go table")
+	}
+	previous := replication.Swap(r)
+	defer replication.Store(previous)
+	loaded := r.findShard(data)
+	if loaded == nil || loaded.uuid != introduced.Shards[0].uuid || loaded.t != db.tables.Get(introduced.Name) {
+		t.Fatal("native declaration did not materialize the requested table on demand")
+	}
+	// A local safety copy contains declarations but no live ownership proof.
+	// Restoring it must not turn its previously unknown data UUIDs into rights.
+	backupOnly := db.newTable("backup_only", Safe)
+	rows = db.catalogRowsLocked()
+	proposal = catalogRowsFromTable(backupOnly)
+	rows[catalogTables] = append(rows[catalogTables], proposal[catalogTables]...)
+	incoming = buildDiskShard(db, catalogTables, rows[catalogTables], true)
+	transfer.header.Content, transfer.untrusted = incoming.uuid.String(), false
+	if err := r.finishImport(r.id, transfer); err != nil {
+		t.Fatal(err)
+	}
+	if r.lookupCell(backupOnly.Shards[0].replicationResource()) != nil {
+		t.Fatal("a restored catalog backup established data authority")
 	}
 }
 
@@ -864,6 +1001,61 @@ func TestCatalogCheckpointPreservesNativeAuthority(t *testing.T) {
 	cold.bootstrapCatalog(historical)
 	if installed := cell.resolved().publishedShard(); installed != current || cold.catalog.live[catalogColumns] != current {
 		t.Fatal("historical root republished a predecessor over the acquired catalog generation")
+	}
+}
+
+func TestCatalogCheckpointCannotReplaceReceivedGenerationDuringIO(t *testing.T) {
+	tbl, engine := createDurabilityTestTable(t, "catalog-received-during-checkpoint", 0)
+	db := tbl.schema
+	r := replicaRecoveryFixture()
+	r.schemaShards(db, r.id, true)
+	r.resourceCell(mosiResource{Database: db.Name}).ownstate.Initialize(mosi.M)
+	previous := replication.Swap(r)
+	defer replication.Store(previous)
+	blocking := &blockingSchemaWritePersistence{PersistenceEngine: engine, entered: make(chan struct{}), release: make(chan struct{})}
+	db.persistence = blocking
+	defer func() { db.persistence = engine }()
+	rows := db.catalogRowsLocked()
+	var nameIndex int
+	for index, field := range catalogRelations[catalogColumns].columns() {
+		if field.key == "Name" {
+			nameIndex = index
+		}
+	}
+	rows[catalogColumns][0][nameIndex] = scm.NewString("checkpoint_definition")
+	db.schemalock.Lock()
+	db.editCatalogLocked(&rows, 1<<catalogColumns, nil)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		db.commitSchemaLocked(true, db.schemalock.Unlock)
+	}()
+	defer func() {
+		select {
+		case <-blocking.release:
+		default:
+			close(blocking.release)
+		}
+		<-done
+	}()
+	<-blocking.entered
+	rows[catalogColumns][0][nameIndex] = scm.NewString("received_definition")
+	received := buildDiskShard(db, catalogColumns, rows[catalogColumns], true)
+	live := db.catalog.live[catalogColumns]
+	cell := r.shardCell(live)
+	if err := r.replaceCatalogShard(live.replicationResource(), live, received); err != nil {
+		t.Fatal(err)
+	}
+	close(blocking.release)
+	<-done
+	if cell.resolved().current.Load() != received {
+		t.Fatal("checkpoint I/O completion replaced the newer received native generation")
+	}
+	root := readCatalogRoot(engine.ReadSchema())
+	snapshot := received.replicationResource()
+	snapshot.Shard = root.Shards[catalogRelations[catalogColumns].name]
+	if r.canonicalResource(snapshot) != received.replicationResource() {
+		t.Fatal("durable historical checkpoint did not resolve to the current native authority")
 	}
 }
 
