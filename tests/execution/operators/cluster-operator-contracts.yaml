@@ -25,8 +25,9 @@ metadata:
 test_cases:
 - name: concat-string-comparison-survives-delegation-mysql
   syntax: mysql
-  sql: SELECT id FROM big_items WHERE id<3 AND CONCAT('doc:',id)='doc:2' ORDER BY
-    id
+  sql: SELECT a.id FROM big_items a JOIN big_items b
+    ON CONCAT('doc:',a.id)=CONCAT('doc:',b.id)
+    WHERE a.id=2 AND b.id=2 ORDER BY a.id
   expect:
     data:
     - id: 2
@@ -34,8 +35,9 @@ test_cases:
       min_remote_shards: 1
 - name: concat-string-comparison-survives-delegation-postgresql
   syntax: postgresql
-  sql: SELECT id FROM big_items WHERE id<3 AND CONCAT('doc:',id)='doc:2' ORDER BY
-    id
+  sql: SELECT a.id FROM big_items a JOIN big_items b
+    ON CONCAT('doc:',a.id)=CONCAT('doc:',b.id)
+    WHERE a.id=2 AND b.id=2 ORDER BY a.id
   expect:
     data:
     - id: 2
@@ -43,8 +45,7 @@ test_cases:
       min_remote_shards: 1
 - name: concat-string-comparison-survives-delegation-tsql
   syntax: tsql
-  sql: SELECT id FROM big_items WHERE id<3 AND CONCAT('doc:',id)='doc:2' ORDER BY
-    id
+  sql: SELECT id FROM big_items WHERE CONCAT('doc:',id) COLLATE utf8mb4_bin='doc:2' ORDER BY id
   expect:
     data:
     - id: 2

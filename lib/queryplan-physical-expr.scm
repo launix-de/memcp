@@ -207,9 +207,6 @@ an unbound symbol in the callback when costing selects the probe alternative. */
 			(list (symbol "coalesceNil") inner default) probe_work_rows)
 		((symbol get_column) tblvar tbl_ignorecase col col_ignorecase) (scan_callback_symbol_for_alias (resolve_column_alias tblvar (source_alias src)) (resolve_physical_column_name src col col_ignorecase))
 		((quote get_column) tblvar tbl_ignorecase col col_ignorecase) (scan_callback_symbol_for_alias (resolve_column_alias tblvar (source_alias src)) (resolve_physical_column_name src col col_ignorecase))
-		/* Capture the SQL comparison procedure for delegated callbacks. */
-		(cons (symbol sql_compare) tail) (cons sql_compare (map tail (lambda (item)
-			(lower_column_expr_for_alias_in_context src item probe_work_rows))))
 		(cons head tail) (cons head (map tail (lambda (item)
 			(lower_column_expr_for_alias_in_context src item probe_work_rows))))
 		_ expr)))
@@ -3928,9 +3925,6 @@ probe. */
 			(if (nil? src)
 				(symbol (concat (resolve_column_alias tblvar default_alias) "." col))
 				(scan_callback_symbol_for_alias (source_alias src) (resolve_physical_column_name src col col_ignorecase))))
-		/* Capture the SQL comparison procedure for delegated callbacks. */
-		(cons (symbol sql_compare) tail) (cons sql_compare (map tail (lambda (item)
-			(lower_column_expr_for_join_in_context sources default_alias item probe_work_rows))))
 		(cons head tail) (cons head (map tail (lambda (item)
 			(lower_column_expr_for_join_in_context sources default_alias item probe_work_rows))))
 		_ expr)))
@@ -6243,8 +6237,6 @@ candidate-keyset choice replaces the marker with a projected RecSet carrier. */
 		(lower_scalar_first_probe_expr '() nil stage requested_col stages 1 (quote value))
 		((symbol union_count) block) (lower_union_count_expr block)
 		((quote union_count) block) (lower_union_count_expr block)
-		/* Capture the SQL comparison procedure for delegated callbacks. */
-		(cons (symbol sql_compare) tail) (cons sql_compare (map tail lower_scalar_marker_expr))
 		(cons head tail) (cons head (map tail lower_scalar_marker_expr))
 		_ expr)))
 

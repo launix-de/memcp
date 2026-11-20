@@ -687,6 +687,177 @@ test_cases:
      (expression_equal? (concat_lookup_term sources expr) expr))
   expect:
     result: true
+- name: Shared literal prefix preserves NULL behavior mysql
+  syntax: mysql
+  sql: SELECT id FROM cr_values WHERE CONCAT('pre:',text_value)=CONCAT('pre:',text_value)
+    ORDER BY id
+  expect:
+    rows: 6
+    data:
+    - id: 1
+    - id: 2
+    - id: 3
+    - id: 4
+    - id: 6
+    - id: 7
+- name: Shared literal prefix preserves NULL behavior postgresql
+  syntax: postgresql
+  sql: SELECT id FROM cr_values WHERE CONCAT('pre:',text_value)=CONCAT('pre:',text_value)
+    ORDER BY id
+  expect:
+    rows: 6
+    data:
+    - id: 1
+    - id: 2
+    - id: 3
+    - id: 4
+    - id: 6
+    - id: 7
+- name: Shared literal prefix preserves NULL behavior tsql
+  syntax: tsql
+  sql: SELECT id FROM cr_values WHERE CONCAT('pre:',text_value)=CONCAT('pre:',text_value)
+    ORDER BY id
+  expect:
+    rows: 7
+    data:
+    - id: 1
+    - id: 2
+    - id: 3
+    - id: 4
+    - id: 5
+    - id: 6
+    - id: 7
+- name: Binary prefix rejects nullable residual mysql
+  syntax: mysql
+  sql: SELECT e.id AS encoded_id,v.id AS value_id FROM cr_encoded e CROSS JOIN cr_values
+    v WHERE e.encoded=CONCAT('doc:',v.text_value) ORDER BY e.id,v.id
+  expect:
+    rows: 5
+    data:
+    - encoded_id: 1
+      value_id: 1
+    - encoded_id: 2
+      value_id: 2
+    - encoded_id: 3
+      value_id: 3
+    - encoded_id: 4
+      value_id: 4
+    - encoded_id: 7
+      value_id: 7
+- name: False-like binary prefix rejects NULL input mysql
+  syntax: mysql
+  sql: SELECT COUNT(*) AS n FROM cr_encoded e CROSS JOIN cr_values v WHERE e.encoded=CONCAT('0',v.text_value)
+  expect:
+    data:
+    - n: 0
+- name: Binary prefix rejects nullable residual postgresql
+  syntax: postgresql
+  sql: SELECT e.id AS encoded_id,v.id AS value_id FROM cr_encoded e CROSS JOIN cr_values
+    v WHERE e.encoded=CONCAT('doc:',v.text_value) ORDER BY e.id,v.id
+  expect:
+    rows: 5
+    data:
+    - encoded_id: 1
+      value_id: 1
+    - encoded_id: 2
+      value_id: 2
+    - encoded_id: 3
+      value_id: 3
+    - encoded_id: 4
+      value_id: 4
+    - encoded_id: 7
+      value_id: 7
+- name: False-like binary prefix rejects NULL input postgresql
+  syntax: postgresql
+  sql: SELECT COUNT(*) AS n FROM cr_encoded e CROSS JOIN cr_values v WHERE e.encoded=CONCAT('0',v.text_value)
+  expect:
+    data:
+    - n: 0
+- name: Binary prefix rejects nullable residual tsql
+  syntax: tsql
+  sql: SELECT e.id AS encoded_id,v.id AS value_id FROM cr_encoded e CROSS JOIN cr_values
+    v WHERE e.encoded=CONCAT('doc:',v.text_value) ORDER BY e.id,v.id
+  expect:
+    rows: 6
+    data:
+    - encoded_id: 1
+      value_id: 1
+    - encoded_id: 2
+      value_id: 2
+    - encoded_id: 3
+      value_id: 3
+    - encoded_id: 4
+      value_id: 4
+    - encoded_id: 4
+      value_id: 5
+    - encoded_id: 7
+      value_id: 7
+- name: False-like binary prefix rejects NULL input tsql
+  syntax: tsql
+  sql: SELECT COUNT(*) AS n FROM cr_encoded e CROSS JOIN cr_values v WHERE e.encoded=CONCAT('0',v.text_value)
+  expect:
+    data:
+    - n: 0
+- name: Computed input is not duplicated mysql
+  syntax: mysql
+  sql: EXPLAIN REORDER SELECT e.id FROM cr_encoded e CROSS JOIN cr_values v WHERE
+    LOWER(e.encoded)=CONCAT('doc:',v.text_value)
+  expect:
+    rows: 1
+    result_contains:
+    - concat
+    result_not_contains:
+    - sql_substr
+- name: Computed component is not duplicated mysql
+  syntax: mysql
+  sql: EXPLAIN REORDER SELECT e.id FROM cr_encoded e CROSS JOIN cr_values v WHERE
+    e.encoded=CONCAT('doc:',LOWER(v.text_value))
+  expect:
+    rows: 1
+    result_contains:
+    - concat
+    result_not_contains:
+    - sql_substr
+- name: Computed input is not duplicated postgresql
+  syntax: postgresql
+  sql: EXPLAIN REORDER SELECT e.id FROM cr_encoded e CROSS JOIN cr_values v WHERE
+    LOWER(e.encoded)=CONCAT('doc:',v.text_value)
+  expect:
+    rows: 1
+    result_contains:
+    - concat
+    result_not_contains:
+    - sql_substr
+- name: Computed component is not duplicated postgresql
+  syntax: postgresql
+  sql: EXPLAIN REORDER SELECT e.id FROM cr_encoded e CROSS JOIN cr_values v WHERE
+    e.encoded=CONCAT('doc:',LOWER(v.text_value))
+  expect:
+    rows: 1
+    result_contains:
+    - concat
+    result_not_contains:
+    - sql_substr
+- name: Computed input is not duplicated tsql
+  syntax: tsql
+  sql: EXPLAIN REORDER SELECT e.id FROM cr_encoded e CROSS JOIN cr_values v WHERE
+    LOWER(e.encoded)=CONCAT('doc:',v.text_value)
+  expect:
+    rows: 1
+    result_contains:
+    - concat
+    result_not_contains:
+    - sql_substr
+- name: Computed component is not duplicated tsql
+  syntax: tsql
+  sql: EXPLAIN REORDER SELECT e.id FROM cr_encoded e CROSS JOIN cr_values v WHERE
+    e.encoded=CONCAT('doc:',LOWER(v.text_value))
+  expect:
+    rows: 1
+    result_contains:
+    - concat
+    result_not_contains:
+    - sql_substr
 cleanup:
 - sql: DROP TABLE IF EXISTS cr_locale
 - sql: DROP TABLE IF EXISTS cr_encoded

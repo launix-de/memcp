@@ -151,6 +151,16 @@ test_cases:
     rows: 1
     data:
     - n: 40000
+- name: Computed text input keeps its original evaluation count
+  sql: SELECT COUNT(*) AS n FROM cj_scalar WHERE LOWER(encoded)=CONCAT('document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-document-prefix-',payload)
+  warmup: 0
+  timing_samples: 101
+  timing_aggregation: total
+  threshold_ms: 30000
+  expect:
+    rows: 1
+    data:
+    - n: 40000
 cleanup:
 - sql: DROP TABLE IF EXISTS cj_scalar
 - sql: DROP TABLE IF EXISTS cj_doc_text
