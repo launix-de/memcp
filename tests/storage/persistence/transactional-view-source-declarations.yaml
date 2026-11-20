@@ -1,0 +1,731 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Callable declarations and SQL view catalog rows share native transaction ownership
+setup:
+- sql: DROP VIEW IF EXISTS source_view_created
+- sql: DROP VIEW IF EXISTS source_view_new
+- sql: DROP VIEW IF EXISTS source_view_read
+- sql: DROP PROCEDURE IF EXISTS source_view_module
+- sql: DROP TABLE IF EXISTS source_view_rows
+- sql: CREATE TABLE source_view_rows(id INT PRIMARY KEY,value INT)
+- sql: INSERT source_view_rows VALUES(1,7)
+- sql: CREATE VIEW source_view_read AS SELECT id,value FROM source_view_rows
+- sql: CREATE PROCEDURE source_view_module AS SELECT 1 AS value
+- sql: DROP VIEW IF EXISTS source_view_case_dependent
+- sql: DROP VIEW IF EXISTS source_view_case_MiXeD
+- sql: DROP VIEW IF EXISTS source_view_case_collision
+- sql: DROP TABLE IF EXISTS source_view_case_base
+- sql: CREATE TABLE source_view_case_base(id INT PRIMARY KEY,base_only INT)
+- sql: INSERT source_view_case_base VALUES(1,7)
+- sql: DROP TABLE IF EXISTS source_view_cs_public_rows
+- sql: CREATE TABLE source_view_cs_public_rows(id INT PRIMARY KEY,value INT)
+- sql: INSERT source_view_cs_public_rows VALUES(1,7)
+test_cases:
+- name: Dropping the last view stays private and rollback restores both declarations
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: ALTER PROCEDURE source_view_module AS SELECT 5 AS value
+    - connection: owner
+      sql: DROP VIEW source_view_read
+    - connection: observer
+      sql: SELECT id,value FROM source_view_read
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 7
+    - connection: owner
+      sql: SELECT name FROM sys.objects WHERE type=N'V' AND name=N'source_view_read'
+      expect:
+        rows: 0
+        data: []
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: observer
+      sql: SELECT id,value FROM source_view_read
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 7
+    - connection: observer
+      sql: EXEC source_view_module
+      expect:
+        rows: 1
+        data:
+        - value: 1
+- name: Procedure and view replacements keep owner and observer versions until rollback
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: ALTER PROCEDURE source_view_module AS SELECT 5 AS value
+    - connection: owner
+      sql: ALTER VIEW source_view_read AS SELECT id,value+1 AS value FROM source_view_rows
+    - connection: owner
+      sql: SELECT id,value FROM source_view_read
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 8
+    - connection: observer
+      sql: SELECT id,value FROM source_view_read
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 7
+    - connection: observer
+      sql: EXEC source_view_module
+      expect:
+        rows: 1
+        data:
+        - value: 1
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: observer
+      sql: SELECT id,value FROM source_view_read
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 7
+- name: Warm observer queries refresh when the common decision commits
+  tds:
+    statements:
+    - connection: observer
+      sql: SELECT id,value FROM source_view_read
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 7
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: ALTER PROCEDURE source_view_module AS SELECT 5 AS value
+    - connection: owner
+      sql: ALTER VIEW source_view_read AS SELECT id,value+1 AS value FROM source_view_rows
+    - connection: observer
+      sql: SELECT id,value FROM source_view_read
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 7
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT id,value FROM source_view_read
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 8
+    - connection: observer
+      sql: EXEC source_view_module
+      expect:
+        rows: 1
+        data:
+        - value: 5
+- name: New view rows remain in their source transaction and disappear on rollback
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: ALTER PROCEDURE source_view_module AS SELECT 9 AS value
+    - connection: owner
+      sql: CREATE VIEW source_view_new AS SELECT id,value+3 AS value FROM source_view_rows
+    - connection: owner
+      sql: SELECT id,value FROM source_view_new
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 10
+    - connection: observer
+      sql: SELECT name FROM sys.objects WHERE type=N'V' AND name=N'source_view_new'
+      expect:
+        rows: 0
+        data: []
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: observer
+      sql: SELECT name FROM sys.objects WHERE type=N'V' AND name=N'source_view_new'
+      expect:
+        rows: 0
+        data: []
+    - connection: observer
+      sql: EXEC source_view_module
+      expect:
+        rows: 1
+        data:
+        - value: 5
+- name: Savepoint restores view suffix while retaining source and ordinary row prefixes
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: UPDATE source_view_rows SET value=20 WHERE id=1
+    - connection: owner
+      sql: ALTER PROCEDURE source_view_module AS SELECT 9 AS value
+    - connection: owner
+      sql: SAVE TRANSACTION before_view
+    - connection: owner
+      sql: ALTER VIEW source_view_read AS SELECT id,value+5 AS value FROM source_view_rows
+    - connection: owner
+      sql: CREATE VIEW source_view_new AS SELECT id,value+3 AS value FROM source_view_rows
+    - connection: owner
+      sql: SELECT id,value FROM source_view_read
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 25
+    - connection: owner
+      sql: ROLLBACK TRANSACTION before_view
+    - connection: owner
+      sql: SELECT id,value FROM source_view_read
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 21
+    - connection: owner
+      sql: SELECT name FROM sys.objects WHERE type=N'V' AND name=N'source_view_new'
+      expect:
+        rows: 0
+        data: []
+    - connection: owner
+      sql: EXEC source_view_module
+      expect:
+        rows: 1
+        data:
+        - value: 9
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT id,value FROM source_view_read
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 21
+    - connection: observer
+      sql: EXEC source_view_module
+      expect:
+        rows: 1
+        data:
+        - value: 9
+- name: New view and source declaration commit with their original native owner
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: ALTER PROCEDURE source_view_module AS SELECT 11 AS value
+    - connection: owner
+      sql: CREATE VIEW source_view_created AS SELECT id,value+4 AS value FROM source_view_rows
+    - connection: observer
+      sql: SELECT name FROM sys.objects WHERE type=N'V' AND name=N'source_view_created'
+      expect:
+        rows: 0
+        data: []
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT id,value FROM source_view_created
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 24
+    - connection: observer
+      sql: EXEC source_view_module
+      expect:
+        rows: 1
+        data:
+        - value: 11
+- name: PostgreSQL ACID replacement and rollback use the same native view row ownership
+  steps:
+  - syntax: postgresql
+    session_id: source-view-pg
+    sql: START ACID TRANSACTION
+  - syntax: postgresql
+    session_id: source-view-pg
+    sql: CREATE OR REPLACE VIEW source_view_read AS SELECT id,value+6 AS value FROM source_view_rows
+  - syntax: postgresql
+    session_id: source-view-pg
+    sql: SELECT id,value FROM source_view_read
+    expect:
+      rows: 1
+      data:
+      - id: 1
+        value: 26
+  - syntax: tsql
+    sql: SELECT id,value FROM source_view_read
+    expect:
+      rows: 1
+      data:
+      - id: 1
+        value: 21
+  - syntax: postgresql
+    session_id: source-view-pg
+    sql: ROLLBACK
+  - syntax: postgresql
+    session_id: source-view-pg
+    sql: SELECT id,value FROM source_view_read
+    expect:
+      rows: 1
+      data:
+      - id: 1
+        value: 21
+- name: Accepted source and view changes use one decision before a hard crash
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: ALTER PROCEDURE source_view_module AS SELECT 17 AS value
+    - connection: owner
+      sql: ALTER VIEW source_view_read AS SELECT id,value+8 AS value FROM source_view_rows
+    - connection: owner
+      sql: COMMIT TRANSACTION
+- name: Crash after accepting source and view changes
+  scm: (crash)
+  expect:
+    interrupted_ok: true
+- name: Recover the accepted source and view decision
+  action: restart
+- name: Source and view recover together when the view catalog loads first
+  sql: SELECT id,value FROM source_view_read; EXEC source_view_module
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      value: 28
+    - value: 17
+- name: Unaccepted source and view suffix stays private until crash
+  session_id: source-view-abandoned
+  sql: BEGIN TRANSACTION; EXEC sp_executesql N'ALTER PROCEDURE source_view_module AS SELECT 19 AS value'; ALTER
+    VIEW source_view_read AS SELECT id,value+10 AS value FROM source_view_rows; SELECT id,value FROM source_view_read
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      value: 30
+- name: Crash before accepting source and view changes
+  scm: (crash)
+  expect:
+    interrupted_ok: true
+- name: Recover without accepting the abandoned source and view suffix
+  action: restart
+- name: Both metadata owners retain the previous accepted declarations
+  sql: SELECT id,value FROM source_view_read; EXEC source_view_module
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      value: 28
+    - value: 17
+- name: Pending mixed case views bind dependent joins and expose only their actual owner
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: CREATE VIEW source_view_case_MiXeD AS SELECT id AS view_id FROM source_view_case_base
+    - connection: owner
+      sql: CREATE VIEW source_view_case_dependent AS SELECT base_only FROM source_view_case_base b JOIN source_view_case_mixed
+        v ON b.id=v.view_id
+    - connection: owner
+      sql: SELECT base_only FROM source_view_case_dependent
+      expect:
+        rows: 1
+        data:
+        - base_only: 7
+    - connection: owner
+      sql: SELECT CASE WHEN OBJECT_ID(N'source_view_case_mixed',N'V') IS NOT NULL THEN 1 ELSE 0 END AS visible,HAS_PERMS_BY_NAME(N'source_view_case_mixed',N'OBJECT',N'SELECT')
+        AS permitted
+      expect:
+        rows: 1
+        data:
+        - visible: 1
+          permitted: 1
+    - connection: observer
+      sql: SELECT CASE WHEN OBJECT_ID(N'source_view_case_mixed',N'V') IS NOT NULL THEN 1 ELSE 0 END AS visible,HAS_PERMS_BY_NAME(N'source_view_case_mixed',N'OBJECT',N'SELECT')
+        AS permitted
+      expect:
+        rows: 1
+        data:
+        - visible: 0
+          permitted: 0
+    - connection: observer
+      sql: SELECT name FROM sys.objects WHERE name IN(N'source_view_case_MiXeD',N'source_view_case_dependent')
+      expect:
+        rows: 0
+        data: []
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT base_only FROM source_view_case_dependent
+      expect:
+        rows: 1
+        data:
+        - base_only: 7
+    - connection: observer
+      sql: SELECT view_id FROM source_view_case_mixed
+      expect:
+        rows: 1
+        data:
+        - view_id: 1
+- name: Mixed case DROP rolls back with private row effects while the observer keeps the old view
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: UPDATE source_view_case_base SET base_only=27 WHERE id=1
+    - connection: owner
+      sql: DROP VIEW SOURCE_VIEW_CASE_MIXED
+    - connection: owner
+      sql: SELECT CASE WHEN OBJECT_ID(N'source_view_case_mixed',N'V') IS NOT NULL THEN 1 ELSE 0 END AS visible,HAS_PERMS_BY_NAME(N'source_view_case_mixed',N'OBJECT',N'SELECT')
+        AS permitted
+      expect:
+        rows: 1
+        data:
+        - visible: 0
+          permitted: 0
+    - connection: owner
+      sql: SELECT base_only FROM source_view_case_base
+      expect:
+        rows: 1
+        data:
+        - base_only: 27
+    - connection: observer
+      sql: SELECT base_only FROM source_view_case_dependent
+      expect:
+        rows: 1
+        data:
+        - base_only: 7
+    - connection: observer
+      sql: SELECT view_id FROM source_view_case_mixed
+      expect:
+        rows: 1
+        data:
+        - view_id: 1
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: observer
+      sql: SELECT base_only FROM source_view_case_dependent
+      expect:
+        rows: 1
+        data:
+        - base_only: 7
+    - connection: observer
+      sql: SELECT CASE WHEN OBJECT_ID(N'source_view_case_mixed',N'V') IS NOT NULL THEN 1 ELSE 0 END AS visible,HAS_PERMS_BY_NAME(N'source_view_case_mixed',N'OBJECT',N'SELECT')
+        AS permitted
+      expect:
+        rows: 1
+        data:
+        - visible: 1
+          permitted: 1
+- name: A pending mixed case view owns its table namespace until rollback
+  tds:
+    statements:
+    - connection: owner
+      sql: SET XACT_ABORT OFF
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: CREATE VIEW source_view_case_CoLlIsIoN AS SELECT id AS view_id FROM source_view_case_base
+    - connection: owner
+      sql: CREATE TABLE source_view_case_collision(id INT)
+      expect:
+        error: true
+        contains:
+        - already owns
+    - &id001
+      connection: owner
+      sql: SELECT @@TRANCOUNT AS depth,XACT_STATE() AS state
+      expect:
+        rows: 1
+        data:
+        - depth: 1
+          state: 1
+    - &id002
+      connection: owner
+      sql: SELECT view_id FROM source_view_case_collision
+      expect:
+        rows: 1
+        data:
+        - view_id: 1
+    - connection: owner
+      sql: CREATE FUNCTION source_view_case_collision() RETURNS INT AS BEGIN RETURN 1; END
+      expect:
+        error: true
+        contains:
+        - already owns
+    - *id001
+    - *id002
+    - connection: owner
+      sql: CREATE FUNCTION source_view_case_collision() RETURNS @result TABLE(value INT) AS BEGIN INSERT @result
+        VALUES(1); RETURN; END
+      expect:
+        error: true
+        contains:
+        - already owns
+    - *id001
+    - *id002
+    - connection: owner
+      sql: SELECT CASE WHEN OBJECT_ID(N'source_view_case_collision',N'V') IS NOT NULL THEN 1 ELSE 0 END AS visible,HAS_PERMS_BY_NAME(N'source_view_case_collision',N'OBJECT',N'SELECT')
+        AS permitted
+      expect:
+        rows: 1
+        data:
+        - visible: 1
+          permitted: 1
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: observer
+      sql: SELECT CASE WHEN OBJECT_ID(N'source_view_case_collision',N'V') IS NOT NULL THEN 1 ELSE 0 END AS visible,HAS_PERMS_BY_NAME(N'source_view_case_collision',N'OBJECT',N'SELECT')
+        AS permitted
+      expect:
+        rows: 1
+        data:
+        - visible: 0
+          permitted: 0
+- name: Native cursor stability can create two private SQL tables beside committed views
+  steps:
+  - sql: DROP VIEW IF EXISTS source_view_cs_catalog
+  - sql: DROP TABLE IF EXISTS source_view_cs_one
+  - sql: DROP TABLE IF EXISTS source_view_cs_two
+  - sql: CREATE VIEW source_view_cs_catalog AS SELECT 1 AS value
+  - scm: |
+      (begin
+        (define owner (newsession)) (owner "username" "root") (owner "schema" "memcp-tests")
+        (tx_begin owner) (define tx (owner "__memcp_tx"))
+        (try (lambda () (begin
+          (define run (lambda (text) (tsql_execute_statement tx "memcp-tests" text owner
+            (lambda (row) true) (lambda fields true))))
+          (run "CREATE TABLE source_view_cs_one(id INT PRIMARY KEY,value INT)")
+          (run "CREATE TABLE source_view_cs_two(id INT PRIMARY KEY,value INT)")
+          (define hidden (list (nil? (table "memcp-tests" false "source_view_cs_one" false nil))
+            (nil? (table "memcp-tests" false "source_view_cs_two" false nil))))
+          (insert (table "memcp-tests" false "source_view_cs_one" false tx)
+            '("id" "value") (list (list 1 7)) '() nil false nil tx)
+          (insert (table "memcp-tests" false "source_view_cs_two" false tx)
+            '("id" "value") (list (list 1 11)) '() nil false nil tx)
+          (define own (list
+            (scan tx (table "memcp-tests" false "source_view_cs_one" false tx) '() '() '() (lambda () true)
+              '("value") (lambda (sum value) (+ sum value)) 0 +)
+            (scan tx (table "memcp-tests" false "source_view_cs_two" false tx) '() '() '() (lambda () true)
+              '("value") (lambda (sum value) (+ sum value)) 0 +)))
+          (tx_commit owner)
+          (list hidden own (list
+            (scan nil (table "memcp-tests" false "source_view_cs_one" false nil) '() '() '() (lambda () true)
+              '("value") (lambda (sum value) (+ sum value)) 0 +)
+            (scan nil (table "memcp-tests" false "source_view_cs_two" false nil) '() '() '() (lambda () true)
+              '("value") (lambda (sum value) (+ sum value)) 0 +)) (tx_state tx))))
+          (lambda (failure) (begin
+            (if (equal? (tx_state tx) "active") (tx_rollback owner) true)
+            (error failure)))))
+    expect:
+      result: [[true, true], [7, 11], [7, 11], committed]
+- name: Native cursor stability rolls back two private SQL tables beside committed views
+  steps:
+  - sql: DROP VIEW IF EXISTS source_view_cs_catalog
+  - sql: CREATE VIEW source_view_cs_catalog AS SELECT 1 AS value
+  - sql: DROP TABLE IF EXISTS source_view_cs_rollback_one
+  - sql: DROP TABLE IF EXISTS source_view_cs_rollback_two
+  - scm: |
+      (begin
+        (define owner (newsession)) (owner "username" "root") (owner "schema" "memcp-tests")
+        (tx_begin owner) (define tx (owner "__memcp_tx"))
+        (try (lambda () (begin
+          (define run (lambda (text) (tsql_execute_statement tx "memcp-tests" text owner
+            (lambda (row) true) (lambda fields true))))
+          (run "CREATE TABLE source_view_cs_rollback_one(id INT PRIMARY KEY)")
+          (run "CREATE TABLE source_view_cs_rollback_two(id INT PRIMARY KEY)")
+          (define private (and
+            (not (nil? (table "memcp-tests" false "source_view_cs_rollback_one" false tx)))
+            (not (nil? (table "memcp-tests" false "source_view_cs_rollback_two" false tx)))
+            (nil? (table "memcp-tests" false "source_view_cs_rollback_one" false nil))
+            (nil? (table "memcp-tests" false "source_view_cs_rollback_two" false nil))))
+          (tx_rollback owner)
+          (list private
+            (nil? (table "memcp-tests" false "source_view_cs_rollback_one" false nil))
+            (nil? (table "memcp-tests" false "source_view_cs_rollback_two" false nil)) (tx_state tx))))
+          (lambda (failure) (begin
+            (if (equal? (tx_state tx) "active") (tx_rollback owner) true)
+            (error failure)))))
+    expect:
+      result: [true, true, true, aborted]
+- name: Completed public CS reads retain their owner while two private declarations roll back
+  steps:
+  - sql: DROP TABLE IF EXISTS source_view_cs_read_one
+  - sql: DROP TABLE IF EXISTS source_view_cs_read_two
+  - scm: |
+      (begin
+        (define owner (newsession)) (owner "username" "root") (owner "schema" "memcp-tests")
+        (tx_begin owner) (define tx (owner "__memcp_tx"))
+        (try (lambda () (begin
+          (define read (scan tx (table "memcp-tests" false "source_view_cs_public_rows" false tx)
+            '() '() '() (lambda () true) '("value") (lambda (sum value) (+ sum value)) 0 +))
+          (define run (lambda (text) (tsql_execute_statement tx "memcp-tests" text owner
+            (lambda (row) true) (lambda fields true))))
+          (run "CREATE TABLE source_view_cs_read_one(id INT PRIMARY KEY,value INT)")
+          (run "CREATE TABLE source_view_cs_read_two(id INT PRIMARY KEY,value INT)")
+          (define hidden (and
+            (nil? (table "memcp-tests" false "source_view_cs_read_one" false nil))
+            (nil? (table "memcp-tests" false "source_view_cs_read_two" false nil))))
+          (insert (table "memcp-tests" false "source_view_cs_read_two" false tx)
+            '("id" "value") (list (list 1 11)) '() nil false nil tx)
+          (define own (scan tx (table "memcp-tests" false "source_view_cs_read_two" false tx)
+            '() '() '() (lambda () true) '("value") (lambda (sum value) (+ sum value)) 0 +))
+          (tx_rollback owner)
+          (list read hidden own
+            (and (nil? (table "memcp-tests" false "source_view_cs_read_one" false nil))
+              (nil? (table "memcp-tests" false "source_view_cs_read_two" false nil))) (tx_state tx))))
+          (lambda (failure) (begin
+            (if (equal? (tx_state tx) "active") (tx_rollback owner) true)
+            (error failure)))))
+    expect:
+      result: [7, true, 11, true, aborted]
+- name: Existing visible CS writes keep their original rollback and cannot become private declarations
+  steps:
+  - sql: DROP TABLE IF EXISTS source_view_cs_effect_denied
+  - scm: |
+      (begin
+        (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+        (define tx (owner "__memcp_tx"))
+        (define target (table "memcp-tests" false "source_view_cs_public_rows" false tx))
+        (try (lambda () (begin
+          (insert target '("id" "value") (list (list 2 13)) '() nil false nil tx)
+          (define denied (try (lambda () (begin
+            (createtable "memcp-tests" "source_view_cs_effect_denied"
+              (list (list "column" "id" "INT" (list) (list))) '("engine" "safe") false tx) false))
+            (lambda (failure) true)))
+          (define observed (scan nil target '() '() '() (lambda () true) '("value")
+            (lambda (sum value) (+ sum value)) 0 +))
+          (tx_rollback owner)
+          (list denied observed
+            (scan nil target '() '() '() (lambda () true) '("value") (lambda (sum value) (+ sum value)) 0 +)
+            (nil? (table "memcp-tests" false "source_view_cs_effect_denied" false nil)) (tx_state tx))))
+          (lambda (failure) (begin
+            (if (equal? (tx_state tx) "active") (tx_rollback owner) true)
+            (error failure)))))
+    expect:
+      result: [true, 20, 7, true, aborted]
+- name: MySQL public CS reads and successive private CREATE share the original commit owner
+  steps:
+  - sql: DROP TABLE IF EXISTS source_view_cs_mysql_one
+  - sql: DROP TABLE IF EXISTS source_view_cs_mysql_two
+  - syntax: mysql
+    session_id: source-view-public-read-mysql
+    sql: BEGIN
+  - syntax: mysql
+    session_id: source-view-public-read-mysql
+    sql: SELECT id,value FROM source_view_cs_public_rows
+    expect: {rows: 1, data: [{id: 1, value: 7}]}
+  - syntax: mysql
+    session_id: source-view-public-read-mysql
+    sql: CREATE TABLE source_view_cs_mysql_one(id INT PRIMARY KEY,value INT)
+  - syntax: mysql
+    session_id: source-view-public-read-mysql
+    sql: CREATE TABLE source_view_cs_mysql_two(id INT PRIMARY KEY,value INT)
+  - syntax: mysql
+    session_id: source-view-public-read-mysql
+    sql: INSERT INTO source_view_cs_mysql_one VALUES(1,17)
+  - syntax: mysql
+    session_id: source-view-public-read-mysql
+    sql: INSERT INTO source_view_cs_mysql_two VALUES(1,19)
+  - syntax: mysql
+    session_id: source-view-public-read-mysql
+    sql: SELECT id,value FROM source_view_cs_mysql_one
+    expect: {rows: 1, data: [{id: 1, value: 17}]}
+  - syntax: mysql
+    session_id: source-view-public-read-mysql
+    sql: SELECT id,value FROM source_view_cs_mysql_two
+    expect: {rows: 1, data: [{id: 1, value: 19}]}
+  - scm: (and (nil? (table "memcp-tests" false "source_view_cs_mysql_one" false nil)) (nil? (table "memcp-tests" false "source_view_cs_mysql_two" false nil)))
+    expect: {result: true}
+  - syntax: mysql
+    session_id: source-view-public-read-mysql
+    sql: COMMIT
+  - sql: SELECT id,value FROM source_view_cs_mysql_one
+    expect: {rows: 1, data: [{id: 1, value: 17}]}
+  - sql: SELECT id,value FROM source_view_cs_mysql_two
+    expect: {rows: 1, data: [{id: 1, value: 19}]}
+- name: PostgreSQL public CS reads and successive private CREATE share the original rollback owner
+  steps:
+  - sql: DROP TABLE IF EXISTS source_view_cs_pg_one
+  - sql: DROP TABLE IF EXISTS source_view_cs_pg_two
+  - syntax: postgresql
+    session_id: source-view-public-read-postgresql
+    sql: BEGIN
+  - syntax: postgresql
+    session_id: source-view-public-read-postgresql
+    sql: SELECT id,value FROM source_view_cs_public_rows
+    expect: {rows: 1, data: [{id: 1, value: 7}]}
+  - syntax: postgresql
+    session_id: source-view-public-read-postgresql
+    sql: CREATE TABLE source_view_cs_pg_one(id INT PRIMARY KEY,value INT)
+  - syntax: postgresql
+    session_id: source-view-public-read-postgresql
+    sql: CREATE TABLE source_view_cs_pg_two(id INT PRIMARY KEY,value INT)
+  - syntax: postgresql
+    session_id: source-view-public-read-postgresql
+    sql: INSERT INTO source_view_cs_pg_one VALUES(1,17)
+  - syntax: postgresql
+    session_id: source-view-public-read-postgresql
+    sql: INSERT INTO source_view_cs_pg_two VALUES(1,19)
+  - syntax: postgresql
+    session_id: source-view-public-read-postgresql
+    sql: SELECT id,value FROM source_view_cs_pg_one
+    expect: {rows: 1, data: [{id: 1, value: 17}]}
+  - syntax: postgresql
+    session_id: source-view-public-read-postgresql
+    sql: SELECT id,value FROM source_view_cs_pg_two
+    expect: {rows: 1, data: [{id: 1, value: 19}]}
+  - scm: (and (nil? (table "memcp-tests" false "source_view_cs_pg_one" false nil)) (nil? (table "memcp-tests" false "source_view_cs_pg_two" false nil)))
+    expect: {result: true}
+  - syntax: postgresql
+    session_id: source-view-public-read-postgresql
+    sql: ROLLBACK
+  - scm: (and (nil? (table "memcp-tests" false "source_view_cs_pg_one" false nil)) (nil? (table "memcp-tests" false "source_view_cs_pg_two" false nil)))
+    expect: {result: true}
+cleanup:
+- sql: DROP VIEW IF EXISTS source_view_created
+- sql: DROP VIEW IF EXISTS source_view_new
+- sql: DROP VIEW IF EXISTS source_view_read
+- sql: DROP PROCEDURE IF EXISTS source_view_module
+- sql: DROP TABLE IF EXISTS source_view_rows
+- sql: DROP VIEW IF EXISTS source_view_case_dependent
+- sql: DROP VIEW IF EXISTS source_view_case_MiXeD
+- sql: DROP VIEW IF EXISTS source_view_case_collision
+- sql: DROP TABLE IF EXISTS source_view_case_base
+- sql: DROP VIEW IF EXISTS source_view_cs_catalog
+- sql: DROP TABLE IF EXISTS source_view_cs_one
+- sql: DROP TABLE IF EXISTS source_view_cs_two
+- sql: DROP TABLE IF EXISTS source_view_cs_rollback_one
+- sql: DROP TABLE IF EXISTS source_view_cs_rollback_two
+- sql: DROP TABLE IF EXISTS source_view_cs_public_rows
+- sql: DROP TABLE IF EXISTS source_view_cs_read_one
+- sql: DROP TABLE IF EXISTS source_view_cs_read_two
+- sql: DROP TABLE IF EXISTS source_view_cs_effect_denied
+- sql: DROP TABLE IF EXISTS source_view_cs_mysql_one
+- sql: DROP TABLE IF EXISTS source_view_cs_mysql_two
+- sql: DROP TABLE IF EXISTS source_view_cs_pg_one
+- sql: DROP TABLE IF EXISTS source_view_cs_pg_two

@@ -1,0 +1,249 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# https://learn.microsoft.com/sql/t-sql/statements/alter-table-table-constraint-transact-sql
+# https://learn.microsoft.com/sql/relational-databases/errors-events/mssqlserver-1505-database-engine-error
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: One native transaction applies key retirement, column changes and actual UPDATE rows
+setup:
+- sql: CREATE TABLE schema_update_parent(id INT NOT NULL PRIMARY KEY)
+- sql: INSERT schema_update_parent VALUES(1)
+- sql: CREATE TABLE schema_update_rollback(row_key INT NOT NULL,id INT NOT NULL,parent_id INT,amount FLOAT NULL,CONSTRAINT PK_schema_update_rollback PRIMARY KEY(id),CONSTRAINT FK_schema_update_rollback FOREIGN KEY(parent_id) REFERENCES schema_update_parent(id))
+- sql: INSERT schema_update_rollback VALUES(1,10,1,NULL),(2,20,1,NULL)
+- sql: CREATE TABLE schema_update_commit(row_key INT NOT NULL,id INT NOT NULL,parent_id INT,amount FLOAT NULL,CONSTRAINT PK_schema_update_commit PRIMARY KEY(id),CONSTRAINT FK_schema_update_commit FOREIGN KEY(parent_id) REFERENCES schema_update_parent(id))
+- sql: INSERT schema_update_commit VALUES(1,10,1,NULL),(2,20,1,NULL)
+- sql: CREATE TABLE schema_update_prefix(id INT NOT NULL PRIMARY KEY,value INT)
+- sql: INSERT schema_update_prefix VALUES(1,10)
+- sql: CREATE TABLE schema_update_invalid(id INT NOT NULL PRIMARY KEY,value INT,amount FLOAT NULL)
+- sql: INSERT schema_update_invalid VALUES(1,7,NULL),(2,7,NULL)
+- sql: CREATE TABLE schema_update_recipe_parent(id INT NOT NULL PRIMARY KEY,code INT NOT NULL UNIQUE)
+- sql: INSERT schema_update_recipe_parent VALUES(1,1)
+- sql: CREATE TABLE schema_update_recipe_child(id INT NOT NULL PRIMARY KEY,parent_id INT,CONSTRAINT FK_schema_update_recipe FOREIGN KEY(parent_id) REFERENCES schema_update_recipe_parent(id))
+- sql: INSERT schema_update_recipe_child VALUES(1,1)
+- sql: CREATE TABLE schema_update_guarded(id INT NOT NULL PRIMARY KEY,retired_parent INT,retained_parent INT,CONSTRAINT FK_schema_update_guarded_retired FOREIGN KEY(retired_parent) REFERENCES schema_update_recipe_parent(id),CONSTRAINT FK_schema_update_guarded_retained FOREIGN KEY(retained_parent) REFERENCES schema_update_recipe_parent(id))
+- sql: INSERT schema_update_guarded VALUES(1,1,1)
+cleanup:
+- sql: DROP TABLE IF EXISTS schema_update_guarded
+- sql: DROP TABLE IF EXISTS schema_update_recipe_child
+- sql: DROP TABLE IF EXISTS schema_update_recipe_parent
+- sql: DROP TABLE IF EXISTS schema_update_rollback
+- sql: DROP TABLE IF EXISTS schema_update_commit
+- sql: DROP TABLE IF EXISTS schema_update_parent
+- sql: DROP TABLE IF EXISTS schema_update_invalid
+- sql: DROP TABLE IF EXISTS schema_update_prefix
+test_cases:
+- name: Rollback restores original keys, nullable declarations and rows after actual UPDATE
+  tds:
+    statements:
+    - {connection: owner,sql: 'SET XACT_ABORT OFF; SET TRANSACTION ISOLATION LEVEL SERIALIZABLE; BEGIN TRANSACTION'}
+    - connection: owner
+      sql: SELECT COUNT(*) AS n FROM schema_update_rollback WHERE id=0
+      expect: {rows: 1,data: [{n: 0}]}
+    - {connection: owner,sql: 'ALTER TABLE schema_update_rollback DROP CONSTRAINT FK_schema_update_rollback'}
+    - {connection: owner,sql: 'ALTER TABLE schema_update_rollback DROP CONSTRAINT PK_schema_update_rollback'}
+    - {connection: owner,sql: 'ALTER TABLE schema_update_rollback ALTER COLUMN amount FLOAT NULL'}
+    - connection: owner
+      sql: UPDATE schema_update_rollback SET id=0,parent_id=99,amount=0 WHERE amount IS NULL
+      expect: {affected_rows: 2}
+    - connection: owner
+      sql: SELECT COUNT(*) AS n FROM schema_update_rollback WHERE id=0
+      expect: {rows: 1,data: [{n: 2}]}
+    - {connection: owner,sql: 'ALTER TABLE schema_update_rollback ALTER COLUMN amount FLOAT NOT NULL'}
+    - {connection: owner,sql: 'ALTER TABLE schema_update_rollback ADD CONSTRAINT PK_schema_update_rollback_new PRIMARY KEY(row_key)'}
+    - connection: owner
+      sql: SELECT row_key,id,parent_id,amount FROM schema_update_rollback ORDER BY row_key
+      expect: {rows: 2,data: [{row_key: 1,id: 0,parent_id: 99,amount: 0},{row_key: 2,id: 0,parent_id: 99,amount: 0}]}
+    - connection: observer
+      sql: SELECT row_key,id,parent_id,amount FROM schema_update_rollback ORDER BY row_key
+      expect: {rows: 2,data: [{row_key: 1,id: 10,parent_id: 1,amount: null},{row_key: 2,id: 20,parent_id: 1,amount: null}]}
+    - {connection: owner,sql: ROLLBACK TRANSACTION}
+    - connection: observer
+      sql: SELECT row_key,id,parent_id,amount FROM schema_update_rollback ORDER BY row_key
+      expect: {rows: 2,data: [{row_key: 1,id: 10,parent_id: 1,amount: null},{row_key: 2,id: 20,parent_id: 1,amount: null}]}
+    - connection: observer
+      sql: SELECT name,RTRIM(type) AS kind FROM sys.objects WHERE parent_object_id=OBJECT_ID(N'schema_update_rollback',N'U') AND type IN(N'PK',N'F') ORDER BY name
+      expect: {rows: 2,data: [{name: FK_schema_update_rollback,kind: F},{name: PK_schema_update_rollback,kind: PK}]}
+    - connection: observer
+      sql: INSERT schema_update_rollback VALUES(3,10,1,NULL)
+      expect: {error: true}
+    - connection: observer
+      sql: INSERT schema_update_rollback VALUES(3,30,99,NULL)
+      expect: {error: true}
+    - connection: observer
+      sql: INSERT schema_update_rollback VALUES(3,30,1,NULL)
+      expect: {affected_rows: 1}
+- name: Commit publishes the complete schema and row transition through its original decision
+  tds:
+    statements:
+    - {connection: owner,sql: 'SET XACT_ABORT OFF; SET TRANSACTION ISOLATION LEVEL SERIALIZABLE; BEGIN TRANSACTION'}
+    - connection: owner
+      sql: SELECT COUNT(*) AS n FROM schema_update_commit WHERE id=0
+      expect: {rows: 1,data: [{n: 0}]}
+    - {connection: owner,sql: 'ALTER TABLE schema_update_commit DROP CONSTRAINT FK_schema_update_commit'}
+    - {connection: owner,sql: 'ALTER TABLE schema_update_commit DROP CONSTRAINT PK_schema_update_commit'}
+    - {connection: owner,sql: 'ALTER TABLE schema_update_commit ALTER COLUMN amount FLOAT NULL'}
+    - connection: owner
+      sql: UPDATE schema_update_commit SET id=0,parent_id=99,amount=0 WHERE amount IS NULL
+      expect: {affected_rows: 2}
+    - connection: owner
+      sql: SELECT COUNT(*) AS n FROM schema_update_commit WHERE id=0
+      expect: {rows: 1,data: [{n: 2}]}
+    - {connection: owner,sql: 'ALTER TABLE schema_update_commit ALTER COLUMN amount FLOAT NOT NULL'}
+    - {connection: owner,sql: 'ALTER TABLE schema_update_commit ADD CONSTRAINT PK_schema_update_commit_new PRIMARY KEY(row_key)'}
+    - connection: owner
+      sql: SELECT row_key,id,parent_id,amount FROM schema_update_commit ORDER BY row_key
+      expect: {rows: 2,data: [{row_key: 1,id: 0,parent_id: 99,amount: 0},{row_key: 2,id: 0,parent_id: 99,amount: 0}]}
+    - connection: observer
+      sql: SELECT row_key,id,parent_id,amount FROM schema_update_commit ORDER BY row_key
+      expect: {rows: 2,data: [{row_key: 1,id: 10,parent_id: 1,amount: null},{row_key: 2,id: 20,parent_id: 1,amount: null}]}
+    - {connection: owner,sql: COMMIT TRANSACTION}
+    - connection: observer
+      sql: SELECT row_key,id,parent_id,amount FROM schema_update_commit ORDER BY row_key
+      expect: {rows: 2,data: [{row_key: 1,id: 0,parent_id: 99,amount: 0},{row_key: 2,id: 0,parent_id: 99,amount: 0}]}
+- name: Failed historical key validation preserves the real TDS transaction and prior row prefix
+  tds:
+    statements:
+    - {connection: owner,sql: 'SET XACT_ABORT OFF; BEGIN TRANSACTION'}
+    - {connection: owner,sql: 'UPDATE schema_update_prefix SET value=11 WHERE id=1'}
+    - connection: owner
+      sql: BEGIN TRY ALTER TABLE schema_update_invalid ADD CONSTRAINT UQ_schema_update_invalid UNIQUE(value); END TRY BEGIN CATCH SELECT CASE WHEN ERROR_NUMBER() IN(1505,1750) THEN 1 ELSE 0 END AS key_violation; END CATCH
+      expect: {rows: 1,data: [{key_violation: 1}]}
+    - connection: owner
+      sql: SELECT XACT_STATE() AS state,@@TRANCOUNT AS depth
+      expect: {rows: 1,data: [{state: 1,depth: 1}]}
+    - connection: owner
+      sql: SELECT id,value FROM schema_update_prefix
+      expect: {rows: 1,data: [{id: 1,value: 11}]}
+    - connection: observer
+      sql: SELECT id,value FROM schema_update_prefix
+      expect: {rows: 1,data: [{id: 1,value: 10}]}
+    - {connection: owner,sql: COMMIT TRANSACTION}
+    - connection: observer
+      sql: SELECT id,value FROM schema_update_prefix
+      expect: {rows: 1,data: [{id: 1,value: 11}]}
+    - connection: observer
+      sql: SELECT name FROM sys.key_constraints WHERE name=N'UQ_schema_update_invalid'
+      expect: {rows: 0}
+- name: Failed historical nullability validation preserves the actual row prefix and nullable declaration
+  tds:
+    statements:
+    - {connection: owner,sql: 'SET XACT_ABORT OFF; BEGIN TRANSACTION'}
+    - {connection: owner,sql: 'UPDATE schema_update_prefix SET value=12 WHERE id=1'}
+    - connection: owner
+      sql: BEGIN TRY ALTER TABLE schema_update_invalid ALTER COLUMN amount FLOAT NOT NULL; END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS error_number; END CATCH
+      expect: {rows: 1,data: [{error_number: 515}]}
+    - connection: owner
+      sql: SELECT XACT_STATE() AS state,@@TRANCOUNT AS depth
+      expect: {rows: 1,data: [{state: 1,depth: 1}]}
+    - connection: owner
+      sql: SELECT id,value FROM schema_update_prefix
+      expect: {rows: 1,data: [{id: 1,value: 12}]}
+    - connection: observer
+      sql: SELECT id,value FROM schema_update_prefix
+      expect: {rows: 1,data: [{id: 1,value: 11}]}
+    - {connection: owner,sql: COMMIT TRANSACTION}
+    - connection: observer
+      sql: INSERT schema_update_invalid VALUES(3,8,NULL)
+      expect: {affected_rows: 1}
+- name: Restart the committed schema and row decision
+  action: restart
+- name: Recovery preserves duplicate former keys and former orphan references exactly
+  sql: SELECT row_key,id,parent_id,amount FROM schema_update_commit ORDER BY row_key
+  expect: {rows: 2,data: [{row_key: 1,id: 0,parent_id: 99,amount: 0},{row_key: 2,id: 0,parent_id: 99,amount: 0}]}
+- name: Recovery preserves the new primary key
+  sql: INSERT schema_update_commit VALUES(1,0,999,1)
+  expect: {error: true}
+- name: Recovery retains the NOT NULL declaration
+  sql: INSERT schema_update_commit VALUES(3,0,999,NULL)
+  expect: {error: true}
+- name: Recovered retirement removes only the old primary and foreign rules
+  sql: INSERT schema_update_commit VALUES(3,0,999,1)
+  expect: {affected_rows: 1}
+- name: Only the complete valid recovered rows remain
+  sql: SELECT row_key,id,parent_id,amount FROM schema_update_commit ORDER BY row_key
+  expect: {rows: 3,data: [{row_key: 1,id: 0,parent_id: 99,amount: 0},{row_key: 2,id: 0,parent_id: 99,amount: 0},{row_key: 3,id: 0,parent_id: 999,amount: 1}]}
+- name: Rollback retains exact retired FK recipes across replacement and checked UPDATE
+  tds:
+    statements:
+    - {connection: owner,sql: 'SET XACT_ABORT OFF; SET TRANSACTION ISOLATION LEVEL SERIALIZABLE; BEGIN TRANSACTION'}
+    - {connection: owner,sql: 'ALTER TABLE schema_update_recipe_child DROP CONSTRAINT FK_schema_update_recipe'}
+    - {connection: owner,sql: 'ALTER TABLE schema_update_recipe_child ADD CONSTRAINT FK_schema_update_recipe FOREIGN KEY(parent_id) REFERENCES schema_update_recipe_parent(code)'}
+    - {connection: owner,sql: 'ALTER TABLE schema_update_recipe_child DROP CONSTRAINT FK_schema_update_recipe'}
+    - connection: owner
+      sql: UPDATE schema_update_recipe_child SET parent_id=99 WHERE id=1
+      expect: {affected_rows: 1}
+    - connection: owner
+      sql: SELECT id,parent_id FROM schema_update_recipe_child ORDER BY id
+      expect: {rows: 1,data: [{id: 1,parent_id: 99}]}
+    - connection: observer
+      sql: SELECT id,parent_id FROM schema_update_recipe_child ORDER BY id
+      expect: {rows: 1,data: [{id: 1,parent_id: 1}]}
+    - {connection: owner,sql: ROLLBACK TRANSACTION}
+    - connection: observer
+      sql: SELECT id,parent_id FROM schema_update_recipe_child ORDER BY id
+      expect: {rows: 1,data: [{id: 1,parent_id: 1}]}
+- name: Commit retains exact retired FK recipes across replacement and checked UPDATE
+  tds:
+    statements:
+    - {connection: owner,sql: 'SET XACT_ABORT OFF; SET TRANSACTION ISOLATION LEVEL SERIALIZABLE; BEGIN TRANSACTION'}
+    - {connection: owner,sql: 'ALTER TABLE schema_update_recipe_child DROP CONSTRAINT FK_schema_update_recipe'}
+    - {connection: owner,sql: 'ALTER TABLE schema_update_recipe_child ADD CONSTRAINT FK_schema_update_recipe FOREIGN KEY(parent_id) REFERENCES schema_update_recipe_parent(code)'}
+    - {connection: owner,sql: 'ALTER TABLE schema_update_recipe_child DROP CONSTRAINT FK_schema_update_recipe'}
+    - connection: owner
+      sql: UPDATE schema_update_recipe_child SET parent_id=99 WHERE id=1
+      expect: {affected_rows: 1}
+    - connection: owner
+      sql: SELECT id,parent_id FROM schema_update_recipe_child ORDER BY id
+      expect: {rows: 1,data: [{id: 1,parent_id: 99}]}
+    - connection: observer
+      sql: SELECT id,parent_id FROM schema_update_recipe_child ORDER BY id
+      expect: {rows: 1,data: [{id: 1,parent_id: 1}]}
+    - {connection: owner,sql: COMMIT TRANSACTION}
+    - connection: observer
+      sql: SELECT id,parent_id FROM schema_update_recipe_child ORDER BY id
+      expect: {rows: 1,data: [{id: 1,parent_id: 99}]}
+- name: Restart retains the complete retired FK recipe history and its UPDATE
+  action: restart
+- name: Restart has no resurrected predecessor FK program
+  tds:
+    statements:
+    - connection: owner
+      sql: INSERT schema_update_recipe_child VALUES(2,777)
+      expect: {affected_rows: 1}
+    - connection: owner
+      sql: SELECT id,parent_id FROM schema_update_recipe_child ORDER BY id
+      expect: {rows: 2,data: [{id: 1,parent_id: 99},{id: 2,parent_id: 777}]}
+- name: Checked key mutation retains its effective FK BEFORE guard after another FK retirement
+  tds:
+    statements:
+    - {connection: owner,sql: 'SET XACT_ABORT OFF; SET TRANSACTION ISOLATION LEVEL SERIALIZABLE; BEGIN TRANSACTION'}
+    - {connection: owner,sql: 'ALTER TABLE schema_update_guarded DROP CONSTRAINT FK_schema_update_guarded_retired'}
+    - connection: owner
+      sql: UPDATE schema_update_guarded SET id=11,retired_parent=99 WHERE id=1
+      expect: {affected_rows: 1}
+    - connection: owner
+      sql: SELECT id,retired_parent,retained_parent FROM schema_update_guarded ORDER BY id
+      expect: {rows: 1,data: [{id: 11,retired_parent: 99,retained_parent: 1}]}
+    - connection: observer
+      sql: SELECT id,retired_parent,retained_parent FROM schema_update_guarded ORDER BY id
+      expect: {rows: 1,data: [{id: 1,retired_parent: 1,retained_parent: 1}]}
+    - {connection: owner,sql: COMMIT TRANSACTION}
+    - connection: observer
+      sql: INSERT schema_update_guarded VALUES(11,777,1)
+      expect: {error: true}
+    - connection: observer
+      sql: INSERT schema_update_guarded VALUES(2,777,888)
+      expect: {error: true}
+    - connection: observer
+      sql: INSERT schema_update_guarded VALUES(2,777,1)
+      expect: {affected_rows: 1}
+    - connection: observer
+      sql: SELECT id,retired_parent,retained_parent FROM schema_update_guarded ORDER BY id
+      expect: {rows: 2,data: [{id: 2,retired_parent: 777,retained_parent: 1},{id: 11,retired_parent: 99,retained_parent: 1}]}
+- name: Restart the checked effective FK and remaining key store
+  action: restart
+- name: Restart preserves the checked key replacement with its retained FK program
+  sql: SELECT id,retired_parent,retained_parent FROM schema_update_guarded ORDER BY id
+  expect: {rows: 2,data: [{id: 2,retired_parent: 777,retained_parent: 1},{id: 11,retired_parent: 99,retained_parent: 1}]}

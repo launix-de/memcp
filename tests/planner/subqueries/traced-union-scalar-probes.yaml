@@ -144,12 +144,12 @@ test_cases:
       (begin
         (define sess (newsession))
         (define planning (sql_queryplan_compile_session sess nil))
-        (define src '("key" "memcp-tests" "trace_key_guard" false nil))
+        (define src '("key" "memcp-tests" "trace_key_guard" false nil (sql_relation_declarations "memcp-tests" "trace_key_guard" nil)))
         (join_truth_record_key_guards '() src '("id") planning)
         (define guard (sql_queryplan_compile_formula nil
           (sql_queryplan_guard_from_session planning)))
         (define original (guard sess nil nil nil))
-        (createcolumn (table "memcp-tests" false "trace_key_guard" false)
+        (createcolumn (table "memcp-tests" false "trace_key_guard" false nil)
           "unrelated_aggregate" "INT" '() '("temp" true) '("id") (lambda (id) (+ id 1)))
         (define published (guard sess nil nil nil))
         (droptable "memcp-tests" "trace_key_guard")
@@ -208,12 +208,12 @@ test_cases:
   - name: A scan cost charges indexed startup per invocation rather than visited row
     scm: |
       (begin
-        (define src '("a" "memcp-tests" "trace_asset" false nil))
+        (define src '("a" "memcp-tests" "trace_asset" false nil (sql_relation_declarations "memcp-tests" "trace_asset" nil)))
         (define block (make_query_block "memcp-tests" (list src) '("id" 1)
           true '() nil '() nil nil '() '() '()))
         (define cost (join_optimizer_nested_scan_cost '() (list src) "a"
           (join_optimizer_costed_predicates (extract_join_hypergraph block))
-          (list (list 'tree (make_join_optimizer_leaf "a"))) nil))
+          (list (list 'tree (make_join_optimizer_leaf "a"))) nil nil))
         (and (equal? (qassoc_get cost 'startup_ns 0) planner_membership_scan_invocation_ns)
           (equal? (qassoc_get cost 'probe_ns 0) 0)
           (equal? (qassoc_get cost 'row_ns 0)
@@ -223,13 +223,13 @@ test_cases:
   - name: Composite lookup domain counts each binding relation once
     scm: |
       (begin
-        (define left '("a" "memcp-tests" "trace_host" false nil))
-        (define right '("b" "memcp-tests" "trace_box" false nil))
+        (define left '("a" "memcp-tests" "trace_host" false nil (sql_relation_declarations "memcp-tests" "trace_host" nil)))
+        (define right '("b" "memcp-tests" "trace_box" false nil (sql_relation_declarations "memcp-tests" "trace_box" nil)))
         (define fact (list "f" "memcp-tests" "trace_message" true
           (list 'and
             (list 'equal?? (list 'get_column "f" false "box_id" false) (list 'get_column "a" false "id" false))
             (list 'equal?? (list 'get_column "f" false "folder_id" false) (list 'get_column "a" false "kind" false))
-            (list 'equal?? (list 'get_column "f" false "id" false) (list 'get_column "b" false "id" false)))))
+            (list 'equal?? (list 'get_column "f" false "id" false) (list 'get_column "b" false "id" false))) (sql_relation_declarations "memcp-tests" "trace_message" nil)))
         (define sources (list left right fact))
         (define block (make_query_block "memcp-tests" sources '("id" 1)
           true '() nil '() nil nil '() '() '()))
@@ -272,15 +272,15 @@ test_cases:
     scm: |
       (begin
         (define planning (sql_queryplan_compile_session (newsession) nil))
-        (define source '("f" "memcp-tests" "presence_preparation_fact" false nil))
+        (define source '("f" "memcp-tests" "presence_preparation_fact" false nil (sql_relation_declarations "memcp-tests" "presence_preparation_fact" nil)))
         (define stage (make_group_stage "producer" source '() '() '() nil '() '() nil nil '()))
-        (define first (list "p" "memcp-tests" (make_stage_output_relation "producer") true true))
-        (define second (list "q" "memcp-tests" (make_stage_output_relation "producer") true true))
+        (define first (list "p" "memcp-tests" (make_stage_output_relation "producer") true true nil))
+        (define second (list "q" "memcp-tests" (make_stage_output_relation "producer") true true nil))
         (define cost (join_optimizer_composite_presence_preparation_cost
-          (list stage) (list first second) planning))
+          (list stage) (list first second) planning nil))
         (define guard (sql_queryplan_compile_formula nil (sql_queryplan_guard_from_session planning)))
         (define original (guard (newsession) nil nil nil))
-        (insert (table "memcp-tests" false "presence_preparation_fact" false) '("id") (list (list 4)))
+        (insert (table "memcp-tests" false "presence_preparation_fact" false nil) '("id") (list (list 4)))
         (define changed (guard (newsession) nil nil nil))
         (if (and original (not changed)
           (equal? (qassoc_get cost 'build_ns 0) (* 3 planner_group_relation_build_row_ns))) true
@@ -292,10 +292,10 @@ test_cases:
   - name: Unknown producer size cannot justify pruning a joined search
     scm: |
       (begin
-        (define source (list "f" "memcp-tests" (make_stage_output_relation "unknown-input") false nil))
+        (define source (list "f" "memcp-tests" (make_stage_output_relation "unknown-input") false nil nil))
         (define stage (make_group_stage "producer" source '() '() '() nil '() '() nil nil '()))
-        (define target (list "p" "memcp-tests" (make_stage_output_relation "producer") true true))
-        (nil? (join_optimizer_composite_presence_preparation_cost (list stage) (list target) nil)))
+        (define target (list "p" "memcp-tests" (make_stage_output_relation "producer") true true nil))
+        (nil? (join_optimizer_composite_presence_preparation_cost (list stage) (list target) nil nil)))
     expect: {data: [true]}
 
   - name: Broad composite presence counts only populated key tuples
@@ -362,7 +362,7 @@ test_cases:
   - name: Shared truth producer preserves ordered keyset fusion
     scm: |
       (begin
-        (define recipe (scheme "(session \"get_or_compute_scoped\" (tx_query tx) (concat \"__projected_scalar_recset_fusion:\" (serialize (list (session \"actor\")))) tx (lambda (tx) (begin (define local_carrier (scan_recset tx (table \"memcp-tests\" false \"trace_ref_dense\" false) '() '() '(\"id\") (lambda (id) (equal? id (session \"actor\"))))) (recset_project_join tx local_carrier '(\"asset_id\") (table \"memcp-tests\" false \"trace_asset\" false) '(\"id\")))))"))
+        (define recipe (scheme "(session \"get_or_compute_scoped\" (tx_query tx) (concat \"__projected_scalar_recset_fusion:\" (serialize (list (session \"actor\")))) tx (lambda (tx) (begin (define local_carrier (scan_recset tx (table \"memcp-tests\" false \"trace_ref_dense\" false tx) '() '() '(\"id\") (lambda (id) (equal? id (session \"actor\"))))) (recset_project_join tx local_carrier '(\"asset_id\") (table \"memcp-tests\" false \"trace_asset\" false tx) '(\"id\")))))"))
         (define scan (cons 'scan_order (merge (list (list 'tx recipe) (produceN 10)))))
         (define factored (deduplicate_projected_truth_recipes (list 'list scan scan)))
         (define fused (lower_ordered_keyset_scans factored))
@@ -379,22 +379,25 @@ test_cases:
   - name: Generated join truth access preserves nonempty and empty runtime carriers
     scm: |
       (begin
-        (define src '("a" "memcp-tests" "trace_asset" false nil))
+        (define src '("a" "memcp-tests" "trace_asset" false nil (sql_relation_declarations "memcp-tests" "trace_asset" nil)))
         (define input (source_table_expr src))
-        (define narrow (scheme "(scan_recset nil (table \"memcp-tests\" false \"trace_asset\" false) '() '() '(\"id\") (lambda (id) (equal? id 1)))"))
-        (define absent (scheme "(scan_recset nil (table \"memcp-tests\" false \"trace_asset\" false) '() '() '(\"id\") (lambda (id) (equal? id -1)))"))
+        (define narrow (scheme "(scan_recset nil (table \"memcp-tests\" false \"trace_asset\" false nil) '() '() '(\"id\") (lambda (id) (equal? id 1)))"))
+        (define absent (scheme "(scan_recset nil (table \"memcp-tests\" false \"trace_asset\" false nil) '() '() '(\"id\") (lambda (id) (equal? id -1)))"))
+        (define session (newsession))
+        (define run (lambda (expression)
+          ((sql_queryplan_compile_formula nil expression) session nil nil nil)))
         (list
-          (recset_count (eval (join_truth_access_source '() src input (list nil narrow))))
-          (recset_count (eval (join_truth_access_source '() src input (list absent))))
-          (equal? (eval (join_truth_access_source '() src input (list nil)))
-                  (table "memcp-tests" false "trace_asset" false))))
+          (recset_count (run (join_truth_access_source '() src input (list nil narrow))))
+          (recset_count (run (join_truth_access_source '() src input (list absent))))
+          (equal? (run (join_truth_access_source '() src input (list nil)))
+                  (table "memcp-tests" false "trace_asset" false nil))))
     expect: {data: [[1, 0, true]]}
 
   - name: Join truth projection uses exact current carrier and keeps physical identities
     scm: |
       (begin
-        (define lookup (table "memcp-tests" false "trace_ref_dense" false))
-        (define driver (table "memcp-tests" false "trace_asset" false))
+        (define lookup (table "memcp-tests" false "trace_ref_dense" false nil))
+        (define driver (table "memcp-tests" false "trace_asset" false nil))
         (define narrow (scan_recset nil lookup '() '() '("id") (lambda (id) (equal? id 1))))
         (define broad (scan_recset nil lookup '() '() '() (lambda () true)))
         (define absent (scan_recset nil lookup '() '() '("id") (lambda (id) (equal? id -1))))
@@ -407,8 +410,8 @@ test_cases:
   - name: Bounded join truth probes do not force a rejected producer
     scm: |
       (begin
-        (define lookup (table "memcp-tests" false "trace_ref_dense" false))
-        (define driver (table "memcp-tests" false "trace_asset" false))
+        (define lookup (table "memcp-tests" false "trace_ref_dense" false nil))
+        (define driver (table "memcp-tests" false "trace_asset" false nil))
         (nil? (join_truth_project_if_cheaper nil
           (lambda () (error "bounded probes must keep their existing access"))
           lookup '("asset_id") driver '("id") 1)))
@@ -416,16 +419,16 @@ test_cases:
 
   - name: Join truth projection excludes text equality from physical key comparison
     scm: |
-      (join_truth_direct_key_column? '() '("a" "memcp-tests" "trace_asset" false nil) "filename")
+      (join_truth_direct_key_column? '() '("a" "memcp-tests" "trace_asset" false nil (sql_relation_declarations "memcp-tests" "trace_asset" nil)) "filename")
     expect: {data: [false]}
 
   - name: Join truth memo identity distinguishes aligned projection keys
     scm: |
       (begin
-        (define src '("a" "memcp-tests" "trace_asset" false nil))
-        (define lookup '("d" "memcp-tests" "trace_ref_dense" false nil))
-        (define driver (table "memcp-tests" false "trace_asset" false))
-        (define relation (table "memcp-tests" false "trace_ref_dense" false))
+        (define src '("a" "memcp-tests" "trace_asset" false nil (sql_relation_declarations "memcp-tests" "trace_asset" nil)))
+        (define lookup '("d" "memcp-tests" "trace_ref_dense" false nil (sql_relation_declarations "memcp-tests" "trace_ref_dense" nil)))
+        (define driver (table "memcp-tests" false "trace_asset" false nil))
+        (define relation (table "memcp-tests" false "trace_ref_dense" false nil))
         (define predicate (list 'equal?? (list 'get_column "d" false "id" false) 2))
         (define carrier (scan_recset nil relation '() '() '("id") (lambda (id) (equal? id 2))))
         (define session (newsession))
@@ -956,7 +959,7 @@ test_cases:
         (define run (lambda () (begin
           (define rows (newsession))
           (sql_execute_formula sess nil
-            (cached_parse cache (list parse_sql) "memcp-tests" query nil "root" sess true)
+            (cached_parse cache "sql" (list parse_sql) "memcp-tests" query nil "root" sess true nil)
             (lambda (row) (rows "data" (cons row (coalesceNil (rows "data") '()))))
             (lambda (_fields) nil))
           (reverse (rows "data")))))
@@ -969,6 +972,51 @@ test_cases:
         (if (equal? (count (entry "variants")) variants) true
           (error "unchanged scalar query recompiled its guarded plan")))
     expect: {data: [true]}
+
+  - name: Ordered truth fusion accepts only fixed relation coordinates and explicit request context
+    scm: |
+      (and
+        (projected_truth_recipe_fixed_coordinate? '(table "memcp-tests" false "trace_asset" false nil))
+        (projected_truth_recipe_fixed_coordinate? (list 'table "memcp-tests" false "trace_asset" false (physical_query_tx_symbol)))
+        (projected_truth_recipe_fixed_coordinate? (scheme "(table \"memcp-tests\" false \"trace_asset\" false nil)"))
+        (not (projected_truth_recipe_fixed_coordinate? (list 'table "memcp-tests" false "trace_asset" false (symbol "other_context"))))
+        (not (projected_truth_recipe_fixed_coordinate? '(table "memcp-tests" false "trace_asset" false true)))
+        (not (projected_truth_recipe_fixed_coordinate? (list 'table (symbol "runtime_schema") false "trace_asset" false (physical_query_tx_symbol))))
+        (not (projected_truth_recipe_fixed_coordinate? (list 'table "memcp-tests" (symbol "runtime_mode") "trace_asset" false (physical_query_tx_symbol)))))
+    expect: {result: true}
+
+  - name: Consumed key guard metadata uses the native and virtual column owners
+    scm: |
+      (begin
+        (define native (get_column_schema "memcp-tests" "trace_asset" "ID" nil))
+        (define virtual (get_column_schema "information_schema" "columns" "column_name" nil))
+        (and (equal?? (native "Field") "id")
+          (equal?? (virtual "Field") "column_name")
+          (nil? (get_column_schema "memcp-tests" "trace_asset" "missing_column" nil))
+          (nil? (get_column_schema "memcp-tests" "missing_relation" "id" nil))
+          (nil? (get_column_schema "information_schema" "columns" "missing_column" nil))))
+    expect: {result: true}
+
+  - name: Shared projected truth retains the private native target transaction
+    scm: |
+      (begin
+        (define session (newsession))
+        (session "username" "root") (session "schema" "memcp-tests") (session "actor" 1)
+        (tx_begin session)
+        (define valid (with_autocommit session nil nil "private projected target" (lambda (tx)
+          (begin
+            (createtable "memcp-tests" "truth_private_target"
+              (list (list "column" "id" "INT" '() '())) (list "engine" "safe") false tx)
+            (insert (table "memcp-tests" false "truth_private_target" false tx)
+              '("id") (list (list 1)) '() nil false nil tx)
+            (define recipe (scheme "(session \"get_or_compute_scoped\" (tx_query tx) (concat \"__projected_scalar_recset_private:\" (serialize (list (session \"actor\")))) tx (lambda (tx) (begin (define local_carrier (scan_recset tx (table \"memcp-tests\" false \"trace_ref_dense\" false tx) '() '() '(\"id\") (lambda (id) (equal? id (session \"actor\"))))) (recset_project_join tx local_carrier '(\"asset_id\") (table \"memcp-tests\" false \"truth_private_target\" false tx) '(\"id\")))))"))
+            (define run (eval (list 'lambda (list 'tx 'session)
+              (deduplicate_projected_truth_recipes (list 'list recipe recipe)))))
+            (and (equal? (map (run tx session) recset_count) '(1 1))
+              (nil? (table "memcp-tests" false "truth_private_target" false nil)))))))
+        (tx_rollback session)
+        (and valid (nil? (table "memcp-tests" false "truth_private_target" false nil))))
+    expect: {result: true}
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS trace_asset"

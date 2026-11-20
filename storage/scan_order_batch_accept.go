@@ -16,6 +16,8 @@ Copyright (C) 2026  Carl-Philip Hänsch
 */
 package storage
 
+import "slices"
+
 import "fmt"
 import "sort"
 import "strings"
@@ -293,6 +295,21 @@ func scanOrderBatchAccept(currentTx *TxContext, source scanOrderTableSpec, batch
 	}
 	if offset > int(^uint(0)>>1)-limit {
 		panic("scan_order_batch_accept: offset plus limit overflows")
+	}
+
+	var finishData func()
+	if scanMutates(callbackCols) {
+		currentTx, finishData = source.backingTable().writeDataContext(currentTx)
+	} else {
+		currentTx, finishData = source.backingTable().readDataContext(currentTx)
+	}
+	defer finishData()
+	if scanMutates(callbackCols) {
+		if slices.Contains(callbackCols, "$update") {
+			source.backingTable().admitCheckMutation(currentTx, "ordered UPDATE/DELETE")
+		}
+		release := source.backingTable().admitNativeMutationCallbacks(currentTx)
+		defer release()
 	}
 
 	result := scm.ApplyOnce(neutral, nil)

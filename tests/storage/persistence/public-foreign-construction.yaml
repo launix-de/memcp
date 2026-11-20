@@ -1,0 +1,154 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  description: Failed first public FK construction retires its resource while preserving the native metadata-only phase
+setup:
+- sql: CREATE TABLE phase_parent(id INT PRIMARY KEY,code INT)
+- sql: CREATE TABLE phase_writer_child(id INT PRIMARY KEY,parent_id INT)
+- sql: CREATE TABLE phase_valid_child(id INT PRIMARY KEY,parent_id INT)
+- sql: CREATE TABLE phase_orphan_child(id INT PRIMARY KEY,parent_id INT)
+- sql: CREATE TABLE phase_key_child(id INT PRIMARY KEY,parent_code INT)
+- sql: INSERT INTO phase_parent VALUES(1,7)
+- sql: INSERT INTO phase_valid_child VALUES(1,1)
+- sql: INSERT INTO phase_orphan_child VALUES(1,99)
+- sql: INSERT INTO phase_key_child VALUES(1,7)
+cleanup:
+- sql: DROP TABLE IF EXISTS phase_forbidden_private
+- sql: DROP TABLE IF EXISTS phase_forbidden_auto
+- sql: DROP TABLE IF EXISTS phase_reset_private
+- sql: DROP TABLE IF EXISTS phase_writer_child
+- sql: DROP TABLE IF EXISTS phase_valid_child
+- sql: DROP TABLE IF EXISTS phase_orphan_child
+- sql: DROP TABLE IF EXISTS phase_key_child
+- sql: DROP TABLE IF EXISTS phase_parent
+- scm: (droptable "memcp-tests" ".phase_constructor_cache" true)
+test_cases:
+- name: A failed first endpoint acquisition permits maintenance and a corrected ADD in the same transaction
+  scm: |
+    (begin
+      (define writer (newsession)) (writer "username" "root") (tx_begin writer)
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (define child (table "memcp-tests" false "phase_writer_child" false nil))
+      (define parent (table "memcp-tests" false "phase_parent" false nil))
+      (insert child '("id" "parent_id") (list (list 10 1)) '() nil false nil (writer "__memcp_tx"))
+      (define rejected (try (lambda () (begin
+        (createforeignkey child "FK_phase_writer" '("parent_id") parent '("id") "restrict" "restrict" tx) false))
+        (lambda (failure) (strlike (concat failure) "%active table writer%"))))
+      (tx_rollback writer)
+      (altercolumn child "parent_id" "default" 1)
+      (define observed (scan tx child '() '() '() (lambda () true) '("id") (lambda (acc id) (+ acc id)) 0 +))
+      (createforeignkey child "FK_phase_writer" '("parent_id") parent '("id") "restrict" "restrict" tx)
+      (tx_commit owner)
+      (insert child '("id" "parent_id") (list (list 7 1)))
+      (define orphan (try (lambda () (begin (insert child '("id" "parent_id") (list (list 8 999))) false))
+        (lambda (failure) (strlike (concat failure) "%foreign key constraint%"))))
+      (and rejected (equal? observed 0) orphan
+        (equal? ((show child "column" "parent_id" false) "Default") 1)
+        (equal? (count ((show child "constraints") "ForeignKeys")) 1)))
+  expect: {result: true}
+
+- name: Historical orphan failure permits a corrected endpoint and read retry without a stale resource
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (define parent (table "memcp-tests" false "phase_parent" false tx))
+      (define orphan (table "memcp-tests" false "phase_orphan_child" false tx))
+      (define valid (table "memcp-tests" false "phase_valid_child" false tx))
+      (define rejected (try (lambda () (begin
+        (createforeignkey orphan "FK_phase_read_retry" '("parent_id") parent '("id") "restrict" "restrict" tx) false))
+        (lambda (failure) (strlike (concat failure) "%existing child row has no parent%"))))
+      (altercolumn orphan "parent_id" "default" 1)
+      (define observed (scan tx valid '() '() '() (lambda () true) '("parent_id") (lambda (acc id) (+ acc id)) 0 +))
+      (createforeignkey valid "FK_phase_read_retry" '("parent_id") parent '("id") "restrict" "restrict" tx)
+      (define correct_view (and (empty_list? ((show orphan "constraints" tx) "ForeignKeys"))
+        (equal? (count ((show valid "constraints" tx) "ForeignKeys")) 1)))
+      (tx_commit owner)
+      (and rejected correct_view (equal? observed 1)
+        (empty_list? ((show orphan "constraints") "ForeignKeys"))))
+  expect: {result: true}
+
+- name: A failed first declaration keeps DML identity reservation and private CREATE excluded
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (define child (table "memcp-tests" false "phase_key_child" false tx))
+      (define parent (table "memcp-tests" false "phase_parent" false tx))
+      (define rejected (try (lambda () (begin
+        (createforeignkey child "FK_phase_missing_key" '("parent_code") parent '("code") "restrict" "restrict" tx) false))
+        (lambda (failure) (strlike (concat failure) "%unique target%"))))
+      (define row_denied (try (lambda () (begin (insert parent '("id" "code") (list (list 98 98)) '() nil false nil tx) false))
+        (lambda (failure) (strlike (concat failure) "%metadata-only%"))))
+      (define ids_denied (try (lambda () (begin (reserve_ids parent 1 tx) false))
+        (lambda (failure) (strlike (concat failure) "%metadata-only%"))))
+      (define create_denied (try (lambda () (begin
+        (createtable "memcp-tests" "phase_forbidden_private" (list (list "column" "id" "INT" '() '())) '() false tx) false))
+        (lambda (failure) (strlike (concat failure) "%public and private%"))))
+      (createkey parent "phase_corrected_key" true '("code"))
+      (createforeignkey child "FK_phase_missing_key" '("parent_code") parent '("code") "restrict" "restrict" tx)
+      (tx_commit owner)
+      (define committed_ids (scan nil parent '() '() '() (lambda () true) '("id") (lambda (acc id) (+ acc id)) 0 +))
+      (and rejected row_denied ids_denied create_denied (equal? committed_ids 1)
+        (nil? (table "memcp-tests" false "phase_forbidden_private" false nil))
+        (equal? (count ((show child "constraints") "ForeignKeys")) 1)))
+  expect: {result: true}
+
+- name: Rejected dirty promotion does not enter the metadata-only phase
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (define parent (table "memcp-tests" false "phase_parent" false tx))
+      (define child (table "memcp-tests" false "phase_orphan_child" false tx))
+      (define observed (scan tx parent '() '() '() (lambda () true) '("id") (lambda (acc id) (+ acc id)) 0 +))
+      (define rejected (try (lambda () (begin
+        (createforeignkey child "FK_phase_dirty" '("parent_id") parent '("id") "restrict" "restrict" tx) false))
+        (lambda (failure) (strlike (concat failure) "%precede native row access%"))))
+      (define inserted (insert parent '("id" "code") (list (list 2 8)) '() nil false nil tx))
+      (tx_rollback owner)
+      (define after (scan nil parent '() '() '() (lambda () true) '("id") (lambda (acc id) (+ acc id)) 0 +))
+      (and rejected (equal? observed 1) (equal? inserted 1) (equal? after 1)))
+  expect: {result: true}
+
+- name: A real transaction reset clears the failed declaration-only phase
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (define child (table "memcp-tests" false "phase_orphan_child" false tx))
+      (define parent (table "memcp-tests" false "phase_parent" false tx))
+      (define rejected (try (lambda () (begin
+        (createforeignkey child "FK_phase_reset" '("parent_id") parent '("id") "restrict" "restrict" tx) false))
+        (lambda (failure) (strlike (concat failure) "%existing child row has no parent%"))))
+      (tx_rollback owner)
+      (tx_begin owner)
+      (define fresh (owner "__memcp_tx"))
+      (createtable "memcp-tests" "phase_reset_private" (list (list "column" "id" "INT" '() '())) '() false fresh)
+      (define owned (and (not (nil? (table "memcp-tests" false "phase_reset_private" false fresh)))
+        (nil? (table "memcp-tests" false "phase_reset_private" false nil))))
+      (tx_rollback owner)
+      (and rejected owned (nil? (table "memcp-tests" false "phase_reset_private" false nil))))
+  expect: {result: true}
+
+- name: A native autocommit carrier cannot CREATE permanent tables after failed FK construction
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (owner "schema" "memcp-tests")
+      (define result (with_autocommit owner nil 0 "native public declaration phase" (lambda (tx) (begin
+        (define child (table "memcp-tests" false "phase_orphan_child" false tx))
+        (define parent (table "memcp-tests" false "phase_parent" false tx))
+        (define rejected (try (lambda () (begin
+          (createforeignkey child "FK_phase_auto" '("parent_id") parent '("id") "restrict" "restrict" tx) false))
+          (lambda (failure) (strlike (concat failure) "%existing child row has no parent%"))))
+        (define denied (try (lambda () (begin
+          (createtable "memcp-tests" "phase_forbidden_auto" (list (list "column" "id" "INT" '() '())) '() false tx) false))
+          (lambda (failure) (strlike (concat failure) "%public and private%"))))
+        (define cache (createtable "memcp-tests" ".phase_constructor_cache"
+          (list (list "column" "id" "INT" '() '())) (list "engine" "cache") false tx))
+        (and rejected denied cache (nil? (table "memcp-tests" false "phase_forbidden_auto" false nil)))))))
+      (droptable "memcp-tests" ".phase_constructor_cache" true)
+      result)
+  expect: {result: true}

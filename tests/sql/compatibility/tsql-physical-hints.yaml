@@ -297,8 +297,7 @@ test_cases:
   sql: CREATE TABLE tsql_hint_layout(id INT NOT NULL,value INT,CONSTRAINT pk_layout PRIMARY KEY NONCLUSTERED(id
     DESC) WITH(PAD_INDEX=OFF,FILLFACTOR=75) ON [PRIMARY],CONSTRAINT uq_layout UNIQUE CLUSTERED(value) WITH(IGNORE_DUP_KEY=OFF,ONLINE=OFF))
     ON [PRIMARY]
-  expect:
-    affected_rows: 0
+  expect: {rows: 0, result_not_contains: '"affected_rows"'}
 - name: Inline physical layout permits ordinary native inserts
   sql: INSERT INTO tsql_hint_layout VALUES(1,9)
   expect:
@@ -320,8 +319,7 @@ test_cases:
     contains: IGNORE_DUP_KEY
 - name: Column primary key consumes physical options
   sql: CREATE TABLE tsql_hint_column(id INT PRIMARY KEY CLUSTERED WITH(FILLFACTOR=80) ON [PRIMARY],value INT)
-  expect:
-    affected_rows: 0
+  expect: {rows: 0, result_not_contains: '"affected_rows"'}
 - name: Added native unique constraint ignores physical layout
   sql: ALTER TABLE tsql_hint_column ADD CONSTRAINT uq_column UNIQUE NONCLUSTERED(value DESC) WITH(IGNORE_DUP_KEY=OFF,ONLINE=OFF)
     ON [PRIMARY]

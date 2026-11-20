@@ -22,7 +22,7 @@ test_cases:
     timeout: 5
     scm: |
       (begin
-        (define target (table "memcp-tests" false "before_collision_target" false))
+        (define target (table "memcp-tests" false "before_collision_target" false nil))
         (list (reduce (produceN 4) (lambda (count i)
           (+ count (insert target '("id" "value") (list (list 1 99)) '("value" "$update")
             (lambda (previous update) (begin
@@ -70,7 +70,7 @@ test_cases:
   - name: A genuine trigger UNIQUE failure unwinds the native collision callback
     timeout: 5
     scm: |
-      (insert (table "memcp-tests" false "before_collision_target" false)
+      (insert (table "memcp-tests" false "before_collision_target" false nil)
         '("id" "value") (list (list 1 99)) '("value" "$update")
         (lambda (previous update) (update '("value" 99))) false nil nil)
     expect: {error: true, contains: "Duplicate entry"}
@@ -86,7 +86,7 @@ test_cases:
   - name: Reuse the failed collision keys without retaining writer ownership
     timeout: 5
     scm: |
-      (list (insert (table "memcp-tests" false "before_collision_target" false)
+      (list (insert (table "memcp-tests" false "before_collision_target" false nil)
         '("id" "value") (list (list 1 99)) '("value" "$update")
         (lambda (previous update) (update '("value" 99))) false nil nil))
     expect: {data: [[2]]}

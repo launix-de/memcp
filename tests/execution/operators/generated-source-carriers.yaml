@@ -1,0 +1,140 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: Generated relation inputs borrow existing native MEMORY scope, scan and index contracts
+  syntax: sql
+  isolated: true
+setup: []
+cleanup: []
+test_cases:
+- name: A generated native input retains its complete original row bag
+  scm: |-
+    (sql_with_statement session (req "__session_state") (req "__query_seq") "generated source" (lambda (tx) (begin (define scopes (newsession))
+    (define source (runtime_generated_source "memcp-tests" (list "id" "value") (list nil "utf8mb4_bin") (list (list 1 "A") (list 2 nil) (list 2 "B") (list 3 "C")) session tx scopes))
+    (try (lambda () (begin (define result (scan tx source (list) (list) (list) (lambda () true) (list "id" "value") (lambda (result id value) (append result (list id value))) (lambda () (list)) (lambda (left right) (merge (list left right))) false)) (map (scopes) (lambda (key) (close_relation_scope (scopes key)))) result))
+     (lambda (failure) (begin (map (scopes) (lambda (key) (close_relation_scope (scopes key)))) (error failure)))))))
+  expect:
+    result:
+    - - 1
+      - A
+    - - 2
+      - null
+    - - 2
+      - B
+    - - 3
+      - C
+- name: Generated native input preserves duplicate keys and nullable payloads
+  scm: |-
+    (sql_with_statement session (req "__session_state") (req "__query_seq") "generated source" (lambda (tx) (begin (define scopes (newsession))
+    (define source (runtime_generated_source "memcp-tests" (list "id" "value") (list nil "utf8mb4_bin") (list (list 1 "A") (list 2 nil) (list 2 "B") (list 3 "C")) session tx scopes))
+    (try (lambda () (begin (define result (scan tx source (list (compiled_scan_access_header 1 "scan" 0 -1) (scan_boundary "equal" "id" 0 0 true true "" false)) (list 2) (list) (lambda () true) (list "id" "value") (lambda (result id value) (append result (list id value))) (lambda () (list)) (lambda (left right) (merge (list left right))) false)) (map (scopes) (lambda (key) (close_relation_scope (scopes key)))) result))
+     (lambda (failure) (begin (map (scopes) (lambda (key) (close_relation_scope (scopes key)))) (error failure)))))))
+  expect:
+    result:
+    - - 2
+      - null
+    - - 2
+      - B
+- name: An empty generated input remains an empty native source
+  scm: |-
+    (sql_with_statement session (req "__session_state") (req "__query_seq") "generated source" (lambda (tx) (begin (define scopes (newsession))
+    (define source (runtime_generated_source "memcp-tests" (list "id" "value") (list nil "utf8mb4_bin") (list) session tx scopes))
+    (try (lambda () (begin (define result (scan tx source (list) (list) (list) (lambda () true) (list) (lambda (n) (+ n 1)) 0 + false)) (map (scopes) (lambda (key) (close_relation_scope (scopes key)))) result))
+     (lambda (failure) (begin (map (scopes) (lambda (key) (close_relation_scope (scopes key)))) (error failure)))))))
+  expect:
+    result: 0
+- name: Repeated exact native probes retain every matching generated row
+  scm: |-
+    (sql_with_statement session (req "__session_state") (req "__query_seq") "generated source" (lambda (tx) (begin (define scopes (newsession))
+    (define source (runtime_generated_source "memcp-tests" (list "id" "value") (list nil "utf8mb4_bin") (list (list 1 "A") (list 2 nil) (list 2 "B") (list 3 "C")) session tx scopes))
+    (try (lambda () (begin (define results (map (produceN 31) (lambda (_sample) (scan tx source (list (compiled_scan_access_header 1 "scan" 0 -1) (scan_boundary "equal" "id" 0 0 true true "" false)) (list 2) (list) (lambda () true) (list "id" "value") (lambda (result id value) (append result (list id value))) (lambda () (list)) (lambda (left right) (merge (list left right))) false)))) (map (scopes) (lambda (key) (close_relation_scope (scopes key)))) (reduce results (lambda (valid result) (and valid (expression_equal? result (list (list 2 nil) (list 2 "B"))))) true)))
+     (lambda (failure) (begin (map (scopes) (lambda (key) (close_relation_scope (scopes key)))) (error failure)))))))
+  expect:
+    result: true
+- name: Closing two generated source scopes removes both native declarations
+  scm: |-
+    (begin
+      (define completed (sql_with_statement session (req "__session_state") (req "__query_seq") "generated source cleanup" (lambda (tx) (begin
+        (define scopes (newsession))
+        (define sources (map (list 7 9) (lambda (value)
+          (runtime_generated_source "memcp-tests" (list "value") (list nil) (list (list value)) session tx scopes))))
+        (define names (map sources (lambda (source) (show source "name"))))
+        (define values (map sources (lambda (source)
+          (scan tx source (list) (list) (list) (lambda () true) (list "value")
+            (lambda (result value) (append result (list value))) (lambda () (list))
+            (lambda (left right) (merge (list left right))) false))))
+        (list values names)))))
+      (list (car completed) (map (cadr completed) (lambda (name)
+        (nil? (table "memcp-tests" false name false nil))))))
+  expect:
+    result:
+    - - - - 7
+      - - - 9
+    - - true
+      - true
+- name: Closing two system catalog source scopes removes their exact native declarations
+  scm: |-
+    (begin
+      (define completed (sql_with_statement session (req "__session_state") (req "__query_seq") "system source cleanup" (lambda (tx) (begin
+        (define scopes (newsession))
+        (define sources (map (list 7 9) (lambda (value)
+          (runtime_generated_source "system" (list "value") (list nil) (list (list value)) session tx scopes))))
+        (define names (map sources (lambda (source) (show source "name"))))
+        (define values (map sources (lambda (source)
+          (scan tx source (list) (list) (list) (lambda () true) (list "value")
+            (lambda (result value) (append result (list value))) (lambda () (list))
+            (lambda (left right) (merge (list left right))) false))))
+        (list values names)))))
+      (list (car completed) (map (cadr completed) (lambda (name)
+        (nil? (table "system" false name false nil))))))
+  expect:
+    result: [[[[7]], [[9]]], [true, true]]
+- name: Telemetry catalog source scopes retire only their two generated declarations
+  scm: |-
+    (begin
+      (define completed (sql_with_statement session (req "__session_state") (req "__query_seq") "telemetry source cleanup" (lambda (tx) (begin
+        (define scopes (newsession))
+        (define sources (map (list 11 13) (lambda (value)
+          (runtime_generated_source "system_statistic" (list "value") (list nil) (list (list value)) session tx scopes))))
+        (define names (map sources (lambda (source) (show source "name"))))
+        (define values (map sources (lambda (source)
+          (scan tx source (list) (list) (list) (lambda () true) (list "value")
+            (lambda (result value) (append result (list value))) (lambda () (list))
+            (lambda (left right) (merge (list left right))) false))))
+        (list values names)))))
+      (list (car completed) (map (cadr completed) (lambda (name)
+        (nil? (table "system_statistic" false name false nil))))))
+  expect:
+    result: [[[[11]], [[13]]], [true, true]]
+- name: Public DROP cannot borrow an owned catalog source retirement capability
+  scm: |-
+    (begin
+      (define completed (sql_with_statement session (req "__session_state") (req "__query_seq") "protected source public drop" (lambda (tx) (begin
+        (define source (runtime_generated_source "system" (list "value") (list nil)
+          (list (list 17)) session tx (newsession)))
+        (define name (show source "name"))
+        (define rejected (try (lambda () (begin (droptable "system" name true) false))
+          (lambda (failure) (strlike (string failure) "%does not allow drop"))))
+        (define values (scan tx source (list) (list) (list) (lambda () true) (list "value")
+          (lambda (result value) (append result (list value))) (lambda () (list))
+          (lambda (left right) (merge (list left right))) false))
+        (list rejected values name)))))
+      (list (nth completed 0) (nth completed 1)
+        (nil? (table "system" false (nth completed 2) false nil))))
+  expect:
+    result: [true, [[17]], true]
+- name: A failed catalog source consumer can close its owned declaration after drain
+  scm: |-
+    (begin
+      (define completed (sql_with_statement session (req "__session_state") (req "__query_seq") "failed source cleanup" (lambda (tx) (begin
+        (define source (runtime_generated_source "system" (list "value") (list nil)
+          (list (list 19)) session tx (newsession)))
+        (define name (show source "name"))
+        (define failure (try (lambda () (begin
+          (scan tx source (list) (list) (list) (lambda () true) (list "value")
+            (lambda (_result _value) (error "owned source consumer failed")) 0 + false)
+          "consumer unexpectedly succeeded")) (lambda (failure) (string failure))))
+        (list failure name)))))
+      (list (car completed) (nil? (table "system" false (cadr completed) false nil))))
+  expect:
+    result: [owned source consumer failed, true]

@@ -1102,12 +1102,12 @@ test_cases:
         (session "username" "root")
         (session "schema" "memcp-tests")
         (define exact_started (nanotime))
-        (cached_parse (newcachemap) (list parse_sql) "memcp-tests" query
-          (lambda (_schema _table _write) true) "root" session false)
+        (cached_parse (newcachemap) "sql" (list parse_sql) "memcp-tests" query
+          (lambda (_schema _table _write) true) "root" session false nil)
         (define exact_elapsed (- (nanotime) exact_started))
         (define started (nanotime))
-        (cached_parse (newcachemap) (list parse_sql) "memcp-tests" query
-          (lambda (_schema _table _write) true) "root" session true)
+        (cached_parse (newcachemap) "sql" (list parse_sql) "memcp-tests" query
+          (lambda (_schema _table _write) true) "root" session true nil)
         (define elapsed (- (nanotime) started))
         (if (and (< elapsed 5000000000)
             (< elapsed (+ 1000000000 (* exact_elapsed 3))))
@@ -1120,7 +1120,7 @@ test_cases:
     scm: |
       (begin
         (define independent_stage (make_group_stage
-          "independent" (list "item" "memcp-tests" "trace_wide_prop" false nil)
+          "independent" (list "item" "memcp-tests" "trace_wide_prop" false nil (sql_relation_declarations "memcp-tests" "trace_wide_prop" nil))
           '() '(1) '() nil '() '() nil nil '()))
         (define shared_stage (group_stage_with_facts independent_stage
           (qassoc_set (gs_facts independent_stage) (quote shared_prepare) true)))

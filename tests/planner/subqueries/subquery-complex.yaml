@@ -67,7 +67,7 @@ setup:
   - sql: "INSERT INTO sq_invoice VALUES (1,100,'2026-01-10'),(2,200,'2026-01-11'),(3,300,'2026-01-12')"
   - sql: "INSERT INTO sq_invoice_line VALUES (10,1,2,50),(11,1,3,40),(12,2,9,11)"
   - scm: |
-      (insert (table "memcp-tests" false "sq_large_dept" false) '("did")
+      (insert (table "memcp-tests" false "sq_large_dept" false nil) '("did")
         (map (produceN 1001) (lambda (i) (list i))))
 
 test_cases:
@@ -267,14 +267,14 @@ test_cases:
         (define q "SELECT v.balance, c.name AS country_name, v.name AS vendor_name, p.id\nFROM sq_order_product p, sq_order_vendor v, sq_order_offer o,\n     sq_order_country c, sq_order_region r\nWHERE p.id = o.product_id\n  AND v.id = o.vendor_id\n  AND v.country_id = c.id\n  AND c.region_id = r.id\n  AND p.size = 15\n  AND p.kind LIKE '%alloy'\n  AND r.name = 'north'\n  AND o.cost = (\n    SELECT MIN(o2.cost)\n    FROM sq_order_offer o2, sq_order_vendor v2,\n         sq_order_country c2, sq_order_region r2\n    WHERE p.id = o2.product_id\n      AND v2.id = o2.vendor_id\n      AND v2.country_id = c2.id\n      AND c2.region_id = r2.id\n      AND r2.name = 'north'\n  )\nORDER BY v.balance DESC, c.name, v.name, p.id\nLIMIT @window OFFSET 0\n")
         (define rows (newsession))
         (define run (lambda (window)
-          (begin
+          (with_autocommit sess nil 1 q (lambda (tx) (begin
             (sess "window" window)
             (rows "ids" (list))
-            (sql_execute_formula sess nil
-              (cached_parse cache (list parse_sql) "memcp-tests" q nil "root" sess true)
+            (sql_execute_formula sess tx
+              (cached_parse cache "sql" (list parse_sql) "memcp-tests" q nil "root" sess true tx)
               (lambda (row) (rows "ids" (append (rows "ids") (get_assoc row "id"))))
               (lambda (_fields) nil))
-            (rows "ids"))))
+            (rows "ids"))))))
         (define actual (list (run 1) (run 2) (run 0) (run -1) (run 1)))
         (if (equal? actual
           (list (list 1) (list 1 2) (list) (list 1 2 1) (list 1))) true

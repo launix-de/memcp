@@ -1,3 +1,5 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Float and Decimal storage coverage
 # Exercises StorageFloat NULL paths, StorageDecimal scale detection,
 # float aggregation, decimal arithmetic, and type coercion edge cases.
@@ -22,7 +24,10 @@ test_cases:
   - name: "Create float table"
     sql: "CREATE TABLE fdc_float (id INT, val DOUBLE)"
     expect:
-      rows: 0
+      affected_rows: 0
+      rows: 1
+      data: [{affected_rows: 0}]
+      result_contains: '"affected_rows"'
 
   - name: "Insert floats with NULLs"
     sql: |
@@ -103,7 +108,10 @@ test_cases:
   - name: "Create decimal table"
     sql: "CREATE TABLE fdc_decimal (id INT, price DECIMAL(10,2), qty DECIMAL(8,0))"
     expect:
-      rows: 0
+      affected_rows: 0
+      rows: 1
+      data: [{affected_rows: 0}]
+      result_contains: '"affected_rows"'
 
   - name: "Insert decimal data"
     sql: |
@@ -132,7 +140,10 @@ test_cases:
   - name: "Create decimal expression table"
     sql: "CREATE TABLE fdc_decimal_expr (price DECIMAL(10,2), discount DECIMAL(5,2), tax DECIMAL(5,2), sample DOUBLE)"
     expect:
-      rows: 0
+      affected_rows: 0
+      rows: 1
+      data: [{affected_rows: 0}]
+      result_contains: '"affected_rows"'
 
   - name: "Insert decimal expression data"
     sql: "INSERT INTO fdc_decimal_expr VALUES (100.00, 0.07, 0.19, 1.2345), (12.34, 0.03, 0.07, 2.3456)"
@@ -216,7 +227,10 @@ test_cases:
   - name: "Create mixed type table"
     sql: "CREATE TABLE fdc_mixed (id INT, ival INT, fval DOUBLE)"
     expect:
-      rows: 0
+      affected_rows: 0
+      rows: 1
+      data: [{affected_rows: 0}]
+      result_contains: '"affected_rows"'
 
   - name: "Insert mixed types"
     sql: |
@@ -263,7 +277,10 @@ test_cases:
   - name: "Create empty table"
     sql: "CREATE TABLE fdc_empty (id INT, val DOUBLE)"
     expect:
-      rows: 0
+      affected_rows: 0
+      rows: 1
+      data: [{affected_rows: 0}]
+      result_contains: '"affected_rows"'
 
   - name: "Empty: COUNT(*)"
     sql: "SELECT COUNT(*) AS c FROM fdc_empty"
@@ -310,7 +327,10 @@ test_cases:
   - name: "Create all-null table"
     sql: "CREATE TABLE fdc_allnull (id INT, val DOUBLE)"
     expect:
-      rows: 0
+      affected_rows: 0
+      rows: 1
+      data: [{affected_rows: 0}]
+      result_contains: '"affected_rows"'
 
   - name: "Insert all NULLs"
     sql: "INSERT INTO fdc_allnull VALUES (1, NULL), (2, NULL), (3, NULL)"

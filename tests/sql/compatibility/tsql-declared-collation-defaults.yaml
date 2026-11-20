@@ -1,0 +1,116 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  description: New TSQL character declarations inherit the advertised database comparison profile
+setup:
+- sql: CREATE TABLE declared_default_rows(id INT PRIMARY KEY,label VARCHAR(8),national NVARCHAR(8),fixed_text CHAR(8),wide_text NCHAR(8),body TEXT,wide_body NTEXT,payload VARBINARY(8))
+- sql: INSERT declared_default_rows(id,label,national) VALUES(1,'Z',N'Z'),(2,'a',N'a')
+- sql: CREATE TABLE declared_binary_rows(id INT PRIMARY KEY,label VARCHAR(8) COLLATE utf8mb4)
+- sql: INSERT declared_binary_rows VALUES(1,'Z'),(2,'a')
+- sql: CREATE TABLE declared_default_unique(value VARCHAR(8) UNIQUE)
+- sql: INSERT declared_default_unique VALUES('A')
+- sql: CREATE TABLE declared_binary_unique(id INT PRIMARY KEY,value VARCHAR(8) COLLATE utf8mb4 UNIQUE)
+- sql: INSERT declared_binary_unique VALUES(1,'A'),(2,'a')
+- sql: CREATE TYPE declared_text_alias FROM NVARCHAR(9)
+- sql: CREATE TABLE declared_alias_rows(id INT,label declared_text_alias)
+- sql: INSERT declared_alias_rows VALUES(1,N'A')
+- scm: |
+    (begin
+      (define s (newsession))
+      (s "username" "root") (s "schema" "memcp-tests") (s "syntax" "mysql")
+      (sql_with_statement s nil 0 "CREATE TABLE declared_mysql_rows(id INT,label VARCHAR(8))" (lambda (tx)
+        (mysql_run_sql_statement tx "memcp-tests" "CREATE TABLE declared_mysql_rows(id INT,label VARCHAR(8))" s
+          (lambda (_row) true) (lambda args true)))))
+- sql: INSERT declared_mysql_rows VALUES(1,'Z'),(2,'a')
+- scm: |
+    (begin
+      (define s (newsession))
+      (s "username" "root") (s "schema" "memcp-tests") (s "syntax" "postgresql")
+      (sql_with_statement s nil 0 "CREATE TABLE declared_pg_rows(id INT,label VARCHAR(8))" (lambda (tx)
+        (mysql_run_sql_statement tx "memcp-tests" "CREATE TABLE declared_pg_rows(id INT,label VARCHAR(8))" s
+          (lambda (_row) true) (lambda args true)))))
+- sql: INSERT declared_pg_rows VALUES(1,'Z'),(2,'a')
+cleanup:
+- sql: DROP TABLE IF EXISTS declared_default_rows
+- sql: DROP TABLE IF EXISTS declared_binary_rows
+- sql: DROP TABLE IF EXISTS declared_default_unique
+- sql: DROP TABLE IF EXISTS declared_binary_unique
+- sql: DROP TABLE IF EXISTS declared_alias_rows
+- sql: DROP TYPE IF EXISTS declared_text_alias
+- sql: DROP TABLE IF EXISTS declared_mysql_rows
+- sql: DROP TABLE IF EXISTS declared_pg_rows
+test_cases:
+- name: All six character families publish the actual database default and other types remain noncharacter
+  sql: |
+    SELECT column_name AS name,collation_name AS collation
+    FROM INFORMATION_SCHEMA.COLUMNS WHERE table_name='declared_default_rows' ORDER BY ordinal_position
+  expect:
+    rows: 8
+    data:
+    - {name: id, collation: null}
+    - {name: label, collation: utf8mb4_general_ci}
+    - {name: national, collation: utf8mb4_general_ci}
+    - {name: fixed_text, collation: utf8mb4_general_ci}
+    - {name: wide_text, collation: utf8mb4_general_ci}
+    - {name: body, collation: utf8mb4_general_ci}
+    - {name: wide_body, collation: utf8mb4_general_ci}
+    - {name: payload, collation: null}
+- name: Default text equality preserves TSQL padding while using case-insensitive declared comparison
+  sql: SELECT id,label,national FROM declared_default_rows WHERE label='A ' AND national=N'A ' ORDER BY id
+  expect: {rows: 1, data: [{id: 2, label: a, national: a}]}
+- name: Default ordering consumes the same declared case-insensitive relation
+  sql: SELECT id,label FROM declared_default_rows ORDER BY label,id
+  expect: {rows: 2, data: [{id: 2, label: a}, {id: 1, label: Z}]}
+- name: Default UNIQUE equality rejects a case variant instead of silently accepting a second key
+  sql: INSERT declared_default_unique VALUES('a')
+  expect: {error: true, contains: Duplicate entry}
+- name: A rejected case variant leaves the complete existing UNIQUE data unchanged
+  sql: SELECT value FROM declared_default_unique ORDER BY value
+  expect: {rows: 1, data: [{value: A}]}
+- name: Explicit binary declaration metadata is preserved rather than replaced by the database profile
+  sql: SELECT collation_name AS collation FROM INFORMATION_SCHEMA.COLUMNS WHERE table_name='declared_binary_rows' AND column_name='label'
+  expect: {rows: 1, data: [{collation: utf8mb4}]}
+- name: Explicit binary ordering remains bytewise
+  sql: SELECT id,label FROM declared_binary_rows ORDER BY label,id
+  expect: {rows: 2, data: [{id: 1, label: Z}, {id: 2, label: a}]}
+- name: Explicit binary equality retains case distinctions alongside SQL padding
+  sql: SELECT id,label FROM declared_binary_rows WHERE label='A ' ORDER BY id
+  expect: {rows: 0, data: []}
+- name: Explicit binary UNIQUE data retains both case-distinct keys
+  sql: SELECT id,value FROM declared_binary_unique ORDER BY id
+  expect: {rows: 2, data: [{id: 1, value: A}, {id: 2, value: a}]}
+- name: ADD COLUMN uses the same frontend default as CREATE TABLE
+  sql: ALTER TABLE declared_default_rows ADD extra VARCHAR(6)
+  expect: {rows: 0}
+- name: Added column metadata and prior values remain coherent
+  sql: SELECT column_name AS name,character_maximum_length AS width,collation_name AS collation FROM INFORMATION_SCHEMA.COLUMNS WHERE table_name='declared_default_rows' AND column_name='extra'
+  expect: {rows: 1, data: [{name: extra, width: 6, collation: utf8mb4_general_ci}]}
+- name: Previously stored values survive new declarations without rewriting
+  sql: SELECT id,label,extra FROM declared_default_rows ORDER BY id
+  expect: {rows: 2, data: [{id: 1, label: Z, extra: null}, {id: 2, label: a, extra: null}]}
+- name: Alias-backed character columns inherit the profile after resolving their declared base type
+  sql: SELECT id,label FROM declared_alias_rows WHERE label=N'a '
+  expect: {rows: 1, data: [{id: 1, label: A}]}
+- name: Local table declarations share the same typed default before relational lowering
+  sql: DECLARE @rows TABLE(id INT,value VARCHAR(8)); INSERT @rows VALUES(1,'A'); SELECT id,value FROM @rows WHERE value='a '
+  expect: {rows: 1, data: [{id: 1, value: A}]}
+- name: MySQL declarations retain their original native default metadata
+  sql: SELECT collation_name AS collation FROM INFORMATION_SCHEMA.COLUMNS WHERE table_name='declared_mysql_rows' AND column_name='label'
+  expect: {rows: 1, data: [{collation: utf8mb4}]}
+- name: MySQL-created column ordering stays unchanged through a TSQL reader
+  sql: SELECT id,label FROM declared_mysql_rows ORDER BY label,id
+  expect: {rows: 2, data: [{id: 1, label: Z}, {id: 2, label: a}]}
+- name: PostgreSQL declarations retain their original native default metadata
+  sql: SELECT collation_name AS collation FROM INFORMATION_SCHEMA.COLUMNS WHERE table_name='declared_pg_rows' AND column_name='label'
+  expect: {rows: 1, data: [{collation: utf8mb4}]}
+- name: PostgreSQL-created column ordering stays unchanged through a TSQL reader
+  sql: SELECT id,label FROM declared_pg_rows ORDER BY label,id
+  expect: {rows: 2, data: [{id: 1, label: Z}, {id: 2, label: a}]}
+- name: Defaulted declarations do not require a collation conversion to accept DATABASE_DEFAULT
+  sql: ALTER TABLE declared_default_rows ALTER COLUMN label VARCHAR(10) COLLATE DATABASE_DEFAULT NULL
+  expect: {rows: 0}
+- name: Compatible default-profile widening retains full values and character semantics
+  sql: SELECT id,label FROM declared_default_rows WHERE label='A ' ORDER BY id
+  expect: {rows: 1, data: [{id: 2, label: a}]}

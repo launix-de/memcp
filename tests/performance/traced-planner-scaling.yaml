@@ -70,15 +70,15 @@ test_cases:
     setup:
       - scm: |
           (begin
-            (rebuild (table "memcp-tests" false "tps_prop" false) true false)
-            (rebuild (table "memcp-tests" false "tps_parent" false) true false)
-            (rebuild (table "memcp-tests" false "tps_assignment" false) true false))
+            (rebuild (table "memcp-tests" false "tps_prop" false nil) true false)
+            (rebuild (table "memcp-tests" false "tps_parent" false nil) true false)
+            (rebuild (table "memcp-tests" false "tps_assignment" false nil) true false))
       - sql: *rebuild_cache_query
       - scm: |
           (begin
-            (rebuild (table "memcp-tests" false "tps_prop" false) true false)
-            (rebuild (table "memcp-tests" false "tps_parent" false) true false)
-            (rebuild (table "memcp-tests" false "tps_assignment" false) true false))
+            (rebuild (table "memcp-tests" false "tps_prop" false nil) true false)
+            (rebuild (table "memcp-tests" false "tps_parent" false nil) true false)
+            (rebuild (table "memcp-tests" false "tps_assignment" false nil) true false))
     warmup: 0
     timing_samples: 1
     threshold_ms: 5000
@@ -437,9 +437,9 @@ test_cases:
           (begin
             (calls "count" (+ (calls "count") 1))
             true)))
-        (cached_parse (newcachemap) (list parse_sql) "memcp-tests"
+        (cached_parse (newcachemap) "sql" (list parse_sql) "memcp-tests"
           "SELECT root.id, (SELECT a.id FROM tps_parent a LIMIT 1), (SELECT b.id FROM tps_parent b LIMIT 1), (SELECT c.id FROM tps_parent c LIMIT 1), (SELECT d.id FROM tps_parent d LIMIT 1) FROM tps_prop root"
-          policy "root" (newsession) false)
+          policy "root" (newsession) false nil)
         (if (equal? (calls "count") 2)
           "ok"
           (error (concat "compile policy calls: " (calls "count")))))
@@ -448,10 +448,10 @@ test_cases:
 
   - name: "Compile catalog does not bypass denied table access"
     scm: |
-      (cached_parse (newcachemap) (list parse_sql) "memcp-tests"
+      (cached_parse (newcachemap) "sql" (list parse_sql) "memcp-tests"
         "SELECT denied.id FROM tps_parent denied"
         (lambda (_schema _table _write) (error "access denied"))
-        "root" (newsession) false)
+        "root" (newsession) false nil)
     expect:
       error: true
 

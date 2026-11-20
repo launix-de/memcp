@@ -19,6 +19,7 @@ package storage
 import "fmt"
 import "math"
 import "sort"
+import "slices"
 import "sync"
 import "github.com/carli2/hybridsort"
 import "time"
@@ -294,6 +295,9 @@ func compileScanOrderAccess(schemaExpr, valuesExpr, sortColsExpr, sortDirsExpr s
 				return schemaExpr, valuesExpr, false
 			}
 			params := proc.Params.Slice()
+			if scanSortHasInvocationContext(params) {
+				return schemaExpr, valuesExpr, false
+			}
 			conditionCols := make([]string, len(params))
 			for j, param := range params {
 				conditionCols[j] = scm.String(param)
@@ -629,6 +633,8 @@ func topKByOrder(items []uint32, keep int, less func(a, b uint32) bool) []uint32
 
 // scanOrderTableSpec holds per-table parameters for scanOrderMulti.
 type scanOrderTableSpec struct {
+	dataTx          *TxContext // selected once for this actual native input
+	dataBound       bool
 	remoteBatchSize int      // shared coordinator window divided over shard jobs
 	projectionCols  []string // record visitors request portable values for their retained physical IDs
 	prefixMerge     *orderedPrefixAccess
@@ -693,6 +699,39 @@ func scanSortDirections(values []scm.Scmer) []func(...scm.Scmer) scm.Scmer {
 	return result
 }
 
+// listScanSortParameters reads the same named procedure inputs as native
+// table sort readers. A compiled callable retains its source parameter contract;
+// source annotations describe that value and are not callback arguments.
+func listScanSortParameters(value scm.Scmer) []scm.Scmer {
+	value = value.WithoutSourceInfo()
+	var procedure *scm.Proc
+	if value.IsProc() {
+		procedure = value.Proc()
+	} else if value.IsNativeFunc() {
+		if function, ok := value.Any().(func(...scm.Scmer) scm.Scmer); ok {
+			procedure = scm.JITProcForFunction(function)
+		}
+	}
+	if procedure == nil {
+		return nil
+	}
+	snapshot := procedure.Snapshot()
+	parameters, _ := scmerSlice(snapshot.Params)
+	return parameters
+}
+
+// scanSortHasInvocationContext keeps scan-bound transaction inputs out of
+// persistent computed index definitions. Even an unused formal remains in the
+// mapper's input vector; only the ordinary sort reader binds it per invocation.
+func scanSortHasInvocationContext(params []scm.Scmer) bool {
+	for _, param := range params {
+		if scm.String(param.WithoutSourceInfo()) == "$tx" {
+			return true
+		}
+	}
+	return false
+}
+
 // extendBoundariesWithSortCols inserts sort columns before candidate matchers
 // when all existing filter boundaries are point lookups. The relation callback
 // is the complete ordering contract, including collation, direction and NULLs.
@@ -752,7 +791,7 @@ func extendBoundariesWithSortCols(b analyzedBoundaries, sortcols []scm.Scmer, so
 		if proc.Params.IsSlice() {
 			procParams = proc.Params.Slice()
 		}
-		if len(procParams) == 0 {
+		if len(procParams) == 0 || scanSortHasInvocationContext(procParams) {
 			return original, false
 		}
 		sortCondCols := make([]string, len(procParams))
@@ -832,6 +871,9 @@ func extendScanAccessWithSortCols(access scanAccess, sortcols []scm.Scmer, sortd
 			return access, false
 		}
 		params := proc.Params.Slice()
+		if scanSortHasInvocationContext(params) {
+			return access, false
+		}
 		conditionCols := make([]string, len(params))
 		for j, param := range params {
 			conditionCols[j] = scm.String(param)
@@ -991,6 +1033,29 @@ func recSetHooksCoverCondition(bounds scanAccess, backingTable *table, condition
 // Each table has its own filter, sort columns and fused map-reducer, while sort
 // directions, offset/limit and the neutral value are shared.
 func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, neutral scm.Scmer, isOuter bool, notFoundValue scm.Scmer) scm.Scmer {
+	for index := range tables {
+		var finishData func()
+		input := tables[index].backingTable()
+		if scanMutates(tables[index].callbackCols) {
+			tables[index].dataTx, finishData = input.writeDataContext(currentTx)
+		} else {
+			tables[index].dataTx, finishData = input.readDataContext(currentTx)
+		}
+		tables[index].dataBound = true
+		defer finishData()
+	}
+
+	for i := range tables {
+		if scanMutates(tables[i].callbackCols) {
+			release := tables[i].backingTable().admitNativeMutationCallbacks(tables[i].dataTx)
+			defer release()
+		}
+	}
+	for i := range tables {
+		if slices.Contains(tables[i].callbackCols, "$update") {
+			tables[i].backingTable().admitCheckMutation(tables[i].dataTx, "ordered UPDATE/DELETE")
+		}
+	}
 	shards := 0
 	for i := range tables {
 		if tables[i].recset != nil {
@@ -1051,6 +1116,7 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 	// Launch shard-parallel scans for each table
 	for ti := range tables {
 		spec := &tables[ti]
+		currentTx := spec.dataTx
 		var q_ chan scanOrderResult
 		t := spec.backingTable()
 		touchTempColumns(t, spec.conditionCols, spec.callbackCols)
@@ -1289,17 +1355,21 @@ func mergeScanOrderQueues(currentTx *TxContext, tables []scanOrderTableSpec, q g
 	// initialize MapReducers per shard (each shard uses its table's callbackCols/callback)
 	for _, sq := range q.q {
 		spec := &tables[sq.tableIdx]
+		inputTx := currentTx
+		if spec.dataBound {
+			inputTx = spec.dataTx
+		}
 		if sq.remote != nil {
 			continue
 		}
 		if spec.recordVisitor == nil {
-			sq.mapper = sq.shard.OpenMapReducer(sq.callbackCols, sq.callback, false, 0, nil, currentTx)
+			sq.mapper = sq.shard.OpenMapReducer(sq.callbackCols, sq.callback, false, 0, nil, inputTx)
 		}
 		if !spec.postOrderFilter.IsNil() {
 			sq.postOrderMapper = sq.shard.OpenMapper(
 				spec.postOrderCols,
 				spec.postOrderFilter,
-				false, currentTx,
+				false, inputTx,
 			)
 		}
 	}
@@ -1739,6 +1809,19 @@ func runDirectSingleShardOrder(currentTx *TxContext, topology *tableShardTopolog
 }
 
 func (t *table) scanOrderSingle(currentTx *TxContext, spec scanOrderTableSpec, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols, offset, limit int, neutral scm.Scmer, isOuter bool, notFoundValue scm.Scmer) (scm.Scmer, bool) {
+	var finishData func()
+	if scanMutates(spec.callbackCols) {
+		currentTx, finishData = t.writeDataContext(currentTx)
+	} else {
+		currentTx, finishData = t.readDataContext(currentTx)
+	}
+	defer finishData()
+	if scanMutates(spec.callbackCols) {
+		release := t.admitNativeMutationCallbacks(currentTx)
+		defer release()
+	}
+
+	spec.dataTx, spec.dataBound = currentTx, true
 	if contributionMutationColumns(spec.callbackCols) {
 		t.beginContributionMutation()
 		defer t.endContributionMutation()
@@ -1790,6 +1873,21 @@ func (t *table) scanOrderSingle(currentTx *TxContext, spec scanOrderTableSpec, s
 // scan_order dispatches a single relevant shard directly and reserves the
 // queue/channel merge machinery for actual fanout.
 func (t *table) scan_order(currentTx *TxContext, accessSchema scm.Scmer, accessValues []scm.Scmer, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, isOuter bool, notFoundValue scm.Scmer, postOrderCols []string, postOrderFilter scm.Scmer) scm.Scmer {
+	var finishData func()
+	if scanMutates(callbackCols) {
+		currentTx, finishData = t.writeDataContext(currentTx)
+	} else {
+		currentTx, finishData = t.readDataContext(currentTx)
+	}
+	defer finishData()
+
+	if scanMutates(callbackCols) {
+		if slices.Contains(callbackCols, "$update") {
+			t.admitCheckMutation(currentTx, "ordered UPDATE/DELETE")
+		}
+		releaseAdmission := t.admitNativeMutationCallbacks(currentTx)
+		defer releaseAdmission()
+	}
 	// The general path owns per-scan debugging and telemetry. Debugging is
 	// explicitly allowed to add overhead, so keep it visible instead of letting
 	// the LIMIT 1 fast path silently omit this scan from system statistics.
@@ -1822,6 +1920,14 @@ func (t *table) scan_order(currentTx *TxContext, accessSchema scm.Scmer, accessV
 // preserves the scan operator contract while avoiding the queues, channels,
 // and global merge needed by the general ordered multi-shard implementation.
 func (t *table) scanOrderFirst(currentTx *TxContext, accessSchema scm.Scmer, accessValues []scm.Scmer, conditionCols []string, condition scm.Scmer, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, notFoundValue scm.Scmer) scm.Scmer {
+	var finishData func()
+	if scanMutates(callbackCols) {
+		currentTx, finishData = t.writeDataContext(currentTx)
+	} else {
+		currentTx, finishData = t.readDataContext(currentTx)
+	}
+	defer finishData()
+
 	if contributionMutationColumns(callbackCols) {
 		t.beginContributionMutation()
 		defer t.endContributionMutation()
@@ -2353,7 +2459,7 @@ func (t *storageShard) scan_order(access scanAccess, conditionCols []string, con
 					name = scm.String(param)
 				}
 				if name == "$tx" {
-					txValue := scm.NewAny(currentTx)
+					txValue := txContextScmer(currentTx)
 					largs[j] = func(uint32) scm.Scmer { return txValue }
 				} else {
 					reader := t.ColumnReaderTx(currentTx, name, false, sortReadHints)

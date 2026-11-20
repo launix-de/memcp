@@ -1,0 +1,349 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  requires_tds: true
+  description: Committed native foreign retirement retains both endpoints and the original transaction decision
+setup:
+- sql: CREATE TABLE retire_fk_parent(id INT PRIMARY KEY) ENGINE=safe
+- sql: CREATE TABLE retire_fk_child(id INT PRIMARY KEY,parent_id INT) ENGINE=safe
+- sql: CREATE TABLE retire_fk_other(id INT PRIMARY KEY,parent_id INT) ENGINE=safe
+- sql: CREATE TABLE retire_fk_commit(id INT PRIMARY KEY,parent_id INT) ENGINE=logged
+- sql: CREATE TABLE retire_fk_pending(id INT PRIMARY KEY,parent_id INT) ENGINE=safe
+- sql: CREATE TABLE retire_fk_progress(id INT PRIMARY KEY,value INT) ENGINE=safe
+- sql: INSERT INTO retire_fk_parent VALUES(1)
+- sql: INSERT INTO retire_fk_child VALUES(1,1)
+- sql: INSERT INTO retire_fk_commit VALUES(1,1)
+- sql: INSERT INTO retire_fk_progress VALUES(1,1)
+- sql: ALTER TABLE retire_fk_child ADD CONSTRAINT retire_fk_original FOREIGN KEY(parent_id) REFERENCES retire_fk_parent(id)
+- sql: ALTER TABLE retire_fk_other ADD CONSTRAINT retire_fk_survivor FOREIGN KEY(parent_id) REFERENCES retire_fk_parent(id)
+- sql: ALTER TABLE retire_fk_commit ADD CONSTRAINT retire_fk_published FOREIGN KEY(parent_id) REFERENCES retire_fk_parent(id)
+- sql: CREATE TABLE retire_fk_replacement_parent(id INT PRIMARY KEY,code INT UNIQUE) ENGINE=safe
+- sql: CREATE TABLE retire_fk_replacement_child(id INT PRIMARY KEY,parent_id INT) ENGINE=safe
+- sql: CREATE TABLE retire_fk_roundtrip_child(id INT PRIMARY KEY,parent_id INT) ENGINE=safe
+- sql: CREATE TABLE retire_fk_long_s(id INT PRIMARY KEY,parent_id INT) ENGINE=safe
+- sql: CREATE TABLE retire_fk_kelvin(id INT PRIMARY KEY,parent_id INT) ENGINE=safe
+- sql: INSERT INTO retire_fk_replacement_parent VALUES(1,1),(2,7)
+- sql: INSERT INTO retire_fk_replacement_child VALUES(1,1)
+- sql: ALTER TABLE retire_fk_replacement_child ADD CONSTRAINT retire_fk_replacement FOREIGN KEY(parent_id) REFERENCES retire_fk_replacement_parent(id)
+- sql: ALTER TABLE retire_fk_roundtrip_child ADD CONSTRAINT retire_fk_roundtrip FOREIGN KEY(parent_id) REFERENCES retire_fk_replacement_parent(id)
+test_cases:
+- name: Foreign retirement has a private two-endpoint view and preserves observer enforcement until rollback
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (define child (table "memcp-tests" false "retire_fk_child" false tx))
+      (define parent (table "memcp-tests" false "retire_fk_parent" false tx))
+      (try (lambda () (begin
+        (define removed (dropforeignkey child "RETIRE_FK_ORIGINAL" tx))
+        (define pending (list removed
+          (count ((show child "constraints" tx) "ForeignKeys"))
+          (count ((show parent "constraints" tx) "ForeignKeys"))
+          (count ((show child "constraints") "ForeignKeys"))
+          (count ((show parent "constraints") "ForeignKeys"))))
+        (tx_rollback owner)
+        (list pending (count ((show child "constraints") "ForeignKeys"))
+          (count ((show parent "constraints") "ForeignKeys")))))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect: {result: [[true, 0, 2, 1, 3], 1, 3]}
+- name: TSQL constraint removal is private to its actual connection and rollback restores the predecessor
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: ALTER TABLE dbo.retire_fk_child DROP CONSTRAINT RETIRE_FK_ORIGINAL
+    - connection: owner
+      sql: SELECT COUNT(*) AS present FROM sys.foreign_keys WHERE name=N'retire_fk_original'
+      expect: {rows: 1, data: [{present: 0}]}
+    - connection: observer
+      sql: SELECT COUNT(*) AS present FROM sys.foreign_keys WHERE name=N'retire_fk_original'
+      expect: {rows: 1, data: [{present: 1}]}
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: observer
+      sql: SELECT COUNT(*) AS present FROM sys.foreign_keys WHERE name=N'retire_fk_original'
+      expect: {rows: 1, data: [{present: 1}]}
+- name: Rolled-back retirement retains child reference enforcement
+  sql: INSERT INTO retire_fk_child VALUES(2,999)
+  expect: {error: true, contains: foreign key constraint}
+- name: Rolled-back retirement retains parent reference enforcement
+  sql: DELETE FROM retire_fk_parent WHERE id=1
+  expect: {error: true, contains: foreign key constraint}
+- name: Savepoint restoration recovers the exact predecessor view and permits a later retirement attempt
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (define child (table "memcp-tests" false "retire_fk_child" false tx))
+      (define parent (table "memcp-tests" false "retire_fk_parent" false tx))
+      (try (lambda () (begin
+        (define boundary (tx_savepoint tx))
+        (dropforeignkey child "retire_fk_original" tx)
+        (tx_rollback_to_savepoint tx boundary)
+        (define restored (list (count ((show child "constraints" tx) "ForeignKeys"))
+          (count ((show parent "constraints" tx) "ForeignKeys"))))
+        (define second (dropforeignkey child "retire_fk_original" tx))
+        (tx_rollback owner)
+        (list restored second (count ((show child "constraints") "ForeignKeys")))))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect: {result: [[1, 3], true, 1]}
+- name: An incoming parent mirror is not a child-owned constraint
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define removed (dropforeignkey (table "memcp-tests" false "retire_fk_parent" false nil)
+        "retire_fk_original" (owner "__memcp_tx")))
+      (tx_commit owner)
+      (list removed (count ((show (table "memcp-tests" false "retire_fk_child" false nil) "constraints") "ForeignKeys"))))
+  expect: {result: [false, 1]}
+- name: Repeated private removal is a read-only miss without changing its predecessor decision
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx")) (define child (table "memcp-tests" false "retire_fk_child" false tx))
+      (try (lambda () (begin
+        (define first (dropforeignkey child "retire_fk_original" tx))
+        (define second (dropforeignkey child "retire_fk_original" tx))
+        (tx_rollback owner) (list first second)))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect: {result: [true, false]}
+- name: A foreign endpoint writer rejects retirement without losing earlier rows or retaining a partial lease
+  scm: |
+    (begin
+      (define writer (newsession)) (writer "username" "root") (tx_begin_acid writer)
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (define child (table "memcp-tests" false "retire_fk_child" false tx))
+      (define parent (table "memcp-tests" false "retire_fk_parent" false tx))
+      (define progress (table "memcp-tests" false "retire_fk_progress" false tx))
+      (try (lambda () (begin
+        (insert parent '("id") (list (list 2)) '() nil false nil (writer "__memcp_tx"))
+        (insert progress '("id" "value") (list (list 4 7)) '() nil false nil tx)
+        (define conflict (try (lambda () (begin (dropforeignkey child "retire_fk_original" tx) false))
+          (lambda (failure) (strlike (concat failure) "%active table writer%"))))
+        (define retained (list conflict
+          (scan tx progress '() '() '() (lambda () true) '("value") + 0 +)
+          (scan nil progress '() '() '() (lambda () true) '("value") + 0 +)
+          (count ((show child "constraints" tx) "ForeignKeys"))))
+        (tx_rollback writer)
+        (define retried (dropforeignkey child "retire_fk_original" tx))
+        (tx_rollback owner)
+        (list retained retried
+          (scan nil progress '() '() '() (lambda () true) '("value") + 0 +)
+          (count ((show child "constraints") "ForeignKeys")))))
+        (lambda (failure) (begin (tx_rollback writer) (tx_rollback owner) (error failure)))))
+  expect: {result: [[true, 8, 1, 1], true, 1, 1]}
+- name: Earlier and later unrelated stored rows commit with the same foreign retirement
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (define progress (table "memcp-tests" false "retire_fk_progress" false tx))
+      (define child (table "memcp-tests" false "retire_fk_commit" false tx))
+      (try (lambda () (begin
+        (insert progress '("id" "value") (list (list 2 7)) '() nil false nil tx)
+        (dropforeignkey child "retire_fk_published" tx)
+        (insert progress '("id" "value") (list (list 3 11)) '() nil false nil tx)
+        (define observed (scan nil progress '() '() '() (lambda () true) '("value") + 0 +))
+        (define own (scan tx progress '() '() '() (lambda () true) '("value") + 0 +))
+        (tx_commit owner)
+        (list observed own (count ((show child "constraints") "ForeignKeys"))
+          (scan nil progress '() '() '() (lambda () true) '("value") + 0 +))))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect: {result: [1, 19, 0, 19]}
+- name: A committed retirement permits an orphan while the unrelated foreign key still enforces
+  sql: INSERT INTO retire_fk_commit VALUES(2,999)
+  expect: {affected_rows: 1}
+- name: Other endpoint declarations retain their original enforcement
+  sql: INSERT INTO retire_fk_other VALUES(1,999)
+  expect: {error: true, contains: foreign key constraint}
+- name: A real restart persists the removed and surviving declarations
+  sql: SHUTDOWN
+- name: Restart retains the complete committed rows
+  sql: SELECT id,parent_id FROM retire_fk_commit ORDER BY id
+  expect: {rows: 2, data: [{id: 1, parent_id: 1}, {id: 2, parent_id: 999}]}
+- name: Restart does not restore the retired generated programs
+  sql: INSERT INTO retire_fk_commit VALUES(3,1000)
+  expect: {affected_rows: 1}
+- name: Restart preserves the surviving foreign programs
+  sql: INSERT INTO retire_fk_other VALUES(2,1000)
+  expect: {error: true, contains: foreign key constraint}
+- name: Pending ADD then DROP has no final declaration
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (define child (table "memcp-tests" false "retire_fk_pending" false tx))
+      (try (lambda () (begin
+        (createforeignkey child "retire_fk_new" '("parent_id")
+          (table "memcp-tests" false "retire_fk_parent" false tx) '("id") "restrict" "restrict" tx)
+        (dropforeignkey child "retire_fk_new" tx)
+        (define empty (equal? (count ((show child "constraints" tx) "ForeignKeys")) 0))
+        (tx_rollback owner) empty))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect: {result: true}
+- name: DROP then same-name ADD retains its new declaration and rollback restores the predecessor
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (define child (table "memcp-tests" false "retire_fk_child" false tx))
+      (try (lambda () (begin
+        (dropforeignkey child "retire_fk_original" tx)
+        (createforeignkey child "retire_fk_original" '("parent_id")
+          (table "memcp-tests" false "retire_fk_parent" false tx) '("id") "restrict" "restrict" tx)
+        (define present (equal? (count ((show child "constraints" tx) "ForeignKeys")) 1))
+        (tx_rollback owner)
+        (and present (equal? (count ((show child "constraints") "ForeignKeys")) 1))))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect: {result: true}
+- name: The original foreign join statement is warm before replacement
+  sql: SELECT c.id FROM retire_fk_replacement_child c JOIN retire_fk_replacement_parent p ON p.id=c.parent_id ORDER BY c.id
+  expect: {rows: 1, data: [{id: 1}]}
+- name: Nested savepoints restore ordered replacement metadata and borrowed name reservations
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (define child (table "memcp-tests" false "retire_fk_roundtrip_child" false tx))
+      (define parent (table "memcp-tests" false "retire_fk_replacement_parent" false tx))
+      (define columns (lambda (read_tx) ((car ((show child "constraints" read_tx) "ForeignKeys")) "OtherColumns")))
+      (try (lambda () (begin
+        (define before (tx_savepoint tx))
+        (dropforeignkey child "retire_fk_roundtrip" tx)
+        (createforeignkey child "retire_fk_roundtrip" '("parent_id") parent '("code") "restrict" "restrict" tx)
+        (define replacement (columns tx))
+        (define observer (columns nil))
+        (define after (tx_savepoint tx))
+        (dropforeignkey child "retire_fk_roundtrip" tx)
+        (define empty (count ((show child "constraints" tx) "ForeignKeys")))
+        (tx_rollback_to_savepoint tx after)
+        (define replaced_again (columns tx))
+        (tx_rollback_to_savepoint tx before)
+        (define original (columns tx))
+        (dropforeignkey child "retire_fk_roundtrip" tx)
+        (createforeignkey child "retire_fk_roundtrip" '("parent_id") parent '("code") "restrict" "restrict" tx)
+        (tx_rollback owner)
+        (list replacement observer empty replaced_again original (columns nil))))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect: {result: [[code], [id], 0, [code], [id], [id]]}
+- name: An ADD then DROP commits its nonempty ordered history with no final foreign declaration
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (define child (table "memcp-tests" false "retire_fk_pending" false tx))
+      (try (lambda () (begin
+        (createforeignkey child "retire_fk_cancelled" '("parent_id")
+          (table "memcp-tests" false "retire_fk_parent" false tx) '("id") "restrict" "restrict" tx)
+        (dropforeignkey child "retire_fk_cancelled" tx)
+        (define own (count ((show child "constraints" tx) "ForeignKeys")))
+        (tx_commit owner)
+        (list own (count ((show child "constraints") "ForeignKeys")))))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect: {result: [0, 0]}
+- name: A cancelled addition leaves no published enforcement program
+  sql: INSERT INTO retire_fk_pending VALUES(1,999)
+  expect: {affected_rows: 1}
+- name: Earlier stored rows compose with a same-name foreign replacement and one commit
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (define child (table "memcp-tests" false "retire_fk_replacement_child" false tx))
+      (define parent (table "memcp-tests" false "retire_fk_replacement_parent" false tx))
+      (define progress (table "memcp-tests" false "retire_fk_progress" false tx))
+      (define columns (lambda (read_tx) ((car ((show child "constraints" read_tx) "ForeignKeys")) "OtherColumns")))
+      (try (lambda () (begin
+        (insert progress '("id" "value") (list (list 5 13)) '() nil false nil tx)
+        (dropforeignkey child "retire_fk_replacement" tx)
+        (createforeignkey child "retire_fk_replacement" '("parent_id") parent '("code") "restrict" "restrict" tx)
+        (define own (columns tx)) (define observer (columns nil))
+        (define observed_sum (scan nil progress '() '() '() (lambda () true) '("value") + 0 +))
+        (define own_sum (scan tx progress '() '() '() (lambda () true) '("value") + 0 +))
+        (tx_commit owner)
+        (list own observer observed_sum own_sum (columns nil)
+          (scan nil progress '() '() '() (lambda () true) '("value") + 0 +))))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect: {result: [[code], [id], 19, 32, [code], 32]}
+- name: The replacement rejects an old-only referenced key
+  sql: INSERT INTO retire_fk_replacement_child VALUES(2,2)
+  expect: {error: true, contains: foreign key constraint}
+- name: The replacement accepts a new-only referenced key
+  sql: INSERT INTO retire_fk_replacement_child VALUES(2,7)
+  expect: {affected_rows: 1}
+- name: The identical warm join text does not retain the old foreign proof
+  sql: SELECT c.id FROM retire_fk_replacement_child c JOIN retire_fk_replacement_parent p ON p.id=c.parent_id ORDER BY c.id
+  expect: {rows: 1, data: [{id: 1}]}
+- name: Old parent-key enforcement is retired while the new referenced value is unchanged
+  sql: UPDATE retire_fk_replacement_parent SET id=11 WHERE id=1
+  expect: {affected_rows: 1}
+- name: The same warm join text retains actual row semantics after the parent update
+  sql: SELECT c.id FROM retire_fk_replacement_child c JOIN retire_fk_replacement_parent p ON p.id=c.parent_id ORDER BY c.id
+  expect: {rows: 0, data: []}
+- name: New parent-key enforcement protects the replacement reference
+  sql: DELETE FROM retire_fk_replacement_parent WHERE id=11
+  expect: {error: true, contains: foreign key constraint}
+- name: Ordered foreign replacement persists across a real restart
+  sql: SHUTDOWN
+- name: Restart preserves the exact rows written under the new declaration
+  sql: SELECT id,parent_id FROM retire_fk_replacement_child ORDER BY id
+  expect: {rows: 2, data: [{id: 1, parent_id: 1}, {id: 2, parent_id: 7}]}
+- name: Restart restores the replacement check instead of the old referenced columns
+  sql: INSERT INTO retire_fk_replacement_child VALUES(3,2)
+  expect: {error: true, contains: foreign key constraint}
+- name: Restart accepts a valid replacement reference
+  sql: INSERT INTO retire_fk_replacement_child VALUES(3,7)
+  expect: {affected_rows: 1}
+- name: Restart leaves cancelled-addition programs absent
+  sql: INSERT INTO retire_fk_pending VALUES(2,1000)
+  expect: {affected_rows: 1}
+- name: Long-s and S spellings share the same ordered native name history
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (define child (table "memcp-tests" false "retire_fk_long_s" false tx))
+      (define parent (table "memcp-tests" false "retire_fk_parent" false tx))
+      (try (lambda () (begin
+        (define first (createforeignkey child "retire_fk_ſ" '("parent_id") parent '("id") "restrict" "restrict" tx))
+        (define removed (dropforeignkey child "retire_fk_S" tx))
+        (define second (createforeignkey child "retire_fk_s" '("parent_id") parent '("id") "restrict" "restrict" tx))
+        (define final (dropforeignkey child "retire_fk_ſ" tx))
+        (tx_commit owner)
+        (list first removed second final (count ((show child "constraints") "ForeignKeys")))))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect: {result: [true, true, true, true, 0]}
+- name: Kelvin and K spellings reuse the same name and retain one final program family
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (define child (table "memcp-tests" false "retire_fk_kelvin" false tx))
+      (define parent (table "memcp-tests" false "retire_fk_parent" false tx))
+      (try (lambda () (begin
+        (createforeignkey child "retire_fk_K" '("parent_id") parent '("id") "restrict" "restrict" tx)
+        (dropforeignkey child "retire_fk_K" tx)
+        (createforeignkey child "retire_fk_k" '("parent_id") parent '("id") "restrict" "restrict" tx)
+        (tx_commit owner)
+        (define rows ((show child "constraints") "ForeignKeys"))
+        (list (count rows) ((car rows) "Id"))))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect: {result: [1, retire_fk_k]}
+- name: Unicode-name replacement retains real native enforcement
+  sql: INSERT INTO retire_fk_kelvin VALUES(1,999)
+  expect: {error: true, contains: foreign key constraint}
+cleanup:
+- sql: DROP TABLE IF EXISTS retire_fk_long_s
+- sql: DROP TABLE IF EXISTS retire_fk_kelvin
+- sql: DROP TABLE IF EXISTS retire_fk_replacement_child
+- sql: DROP TABLE IF EXISTS retire_fk_roundtrip_child
+- sql: DROP TABLE IF EXISTS retire_fk_replacement_parent
+- sql: DROP TABLE IF EXISTS retire_fk_pending
+- sql: DROP TABLE IF EXISTS retire_fk_child
+- sql: DROP TABLE IF EXISTS retire_fk_other
+- sql: DROP TABLE IF EXISTS retire_fk_commit
+- sql: DROP TABLE IF EXISTS retire_fk_parent
+- sql: DROP TABLE IF EXISTS retire_fk_progress

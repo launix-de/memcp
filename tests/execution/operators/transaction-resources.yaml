@@ -1,0 +1,581 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  description: Native transaction resources own cache registrations and finish with the transaction
+setup:
+- sql: CREATE TABLE resource_commit_probe(id INT PRIMARY KEY)
+- scm: |
+    (begin
+      (createtable "memcp-tests" ".resource_fixture_state"
+        (list (list "column" "holder" "ANY" (list) (list))) (list "engine" "memory") false nil)
+      (insert (table "memcp-tests" false ".resource_fixture_state" false nil) '("holder") (list (list (newsession)))) true)
+cleanup:
+- sql: DROP TABLE IF EXISTS resource_cold_cache
+- sql: DROP TABLE IF EXISTS resource_cold_source
+- sql: DROP TABLE IF EXISTS resource_commit_probe
+- scm: (droptable "memcp-tests" ".resource_fixture_state" true)
+test_cases:
+- name: One resource is reused inside a native transaction and closed at commit
+  scm: |
+    (begin
+      (define s (newsession)) (s "username" "root")
+      (tx_begin s)
+      (define tx (s "__memcp_tx"))
+      (define count (newsession)) (count "n" 0)
+      (define first (tx_get_or_compute_resource tx "fixture" (lambda () (begin
+        (count "n" (+ 1 (count "n"))) (newcachemap)))))
+      (first "probe" 7)
+      (define again (tx_get_or_compute_resource tx "fixture" (lambda () (begin
+        (count "n" (+ 1 (count "n"))) (newcachemap)))))
+      (define same (and (equal? (count "n") 1) (equal? (again "probe") 7)))
+      (tx_commit s)
+      (and same (try (lambda () (begin (first "probe") false)) (lambda (_failure) true))))
+  expect: {result: true}
+- name: Rollback closes an owned native cache and prevents late writes
+  scm: |
+    (begin
+      (define s (newsession)) (s "username" "root") (tx_begin s)
+      (define cache (tx_get_or_compute_resource (s "__memcp_tx") "fixture" (lambda () (newcachemap))))
+      (cache "probe" 8)
+      (tx_rollback s)
+      (and (try (lambda () (begin (cache "probe") false)) (lambda (_failure) true))
+        (try (lambda () (begin (cache "late" 9) false)) (lambda (_failure) true))))
+  expect: {result: true}
+- name: A new transaction constructs an independent resource for the same key
+  scm: |
+    (begin
+      (define s (newsession)) (s "username" "root") (tx_begin s)
+      (define old (tx_get_or_compute_resource (s "__memcp_tx") "fixture" (lambda () (newcachemap))))
+      (old "private" 19) (tx_commit s)
+      (tx_begin s)
+      (define fresh (tx_get_or_compute_resource (s "__memcp_tx") "fixture" (lambda () (newcachemap))))
+      (define independent (nil? (fresh "private")))
+      (fresh "private" 23) (tx_rollback s)
+      (and independent (try (lambda () (begin (old "private") false)) (lambda (_failure) true))))
+  expect: {result: true}
+- name: Failed resource construction is retried without retaining the factory
+  scm: |
+    (begin
+      (define s (newsession)) (s "username" "root") (tx_begin s)
+      (define tx (s "__memcp_tx"))
+      (define rejected (try (lambda () (begin
+        (tx_get_or_compute_resource tx "fixture" (lambda () (error "construction rejected"))) false))
+        (lambda (_failure) true)))
+      (define resource (tx_get_or_compute_resource tx "fixture" (lambda () 31)))
+      (tx_rollback s)
+      (and rejected (equal? resource 31)))
+  expect: {result: true}
+- name: A constructor cannot finish its own transaction before it has published
+  scm: |
+    (begin
+      (define s (newsession)) (s "username" "root") (tx_begin s)
+      (define tx (s "__memcp_tx"))
+      (define rejected (try (lambda () (begin
+        (tx_get_or_compute_resource tx "fixture" (lambda () (begin (tx_commit s) 1))) false))
+        (lambda (_failure) true)))
+      (define resource (tx_get_or_compute_resource tx "fixture" (lambda () 37)))
+      (tx_rollback s)
+      (and rejected (equal? resource 37)))
+  expect: {result: true}
+- name: Beginning another native transaction closes the previous resource owner
+  scm: |
+    (begin
+      (define s (newsession)) (s "username" "root") (tx_begin s)
+      (define cache (tx_get_or_compute_resource (s "__memcp_tx") "fixture" (lambda () (newcachemap))))
+      (cache "probe" 41)
+      (tx_begin s)
+      (define rejected (try (lambda () (begin (cache "probe") false)) (lambda (_failure) true)))
+      (tx_rollback s)
+      rejected)
+  expect: {result: true}
+- name: An asynchronous cache miss completes registration before transaction cleanup
+  scm: |
+    (begin
+      (define s (newsession)) (s "username" "root") (tx_begin s)
+      (define tx (s "__memcp_tx"))
+      (define cache (tx_get_or_compute_resource tx "fixture" (lambda () (newcachemap))))
+      (define value (cache "generated" tx (lambda () 43)))
+      (tx_commit s)
+      (and (equal? value 43)
+        (try (lambda () (begin (cache "generated") false)) (lambda (_failure) true))))
+  expect: {result: true}
+- name: Finished native transactions do not construct additional resource values
+  scm: |
+    (begin
+      (define s (newsession)) (s "username" "root") (tx_begin s)
+      (define tx (s "__memcp_tx"))
+      (tx_commit s)
+      (define count (newsession)) (count "n" 0)
+      (define rejected (try (lambda () (begin
+        (tx_get_or_compute_resource tx "late" (lambda () (begin (count "n" 1) 47))) false))
+        (lambda (_failure) true)))
+      (and rejected (equal? (count "n") 0)))
+  expect: {result: true}
+
+- name: An admitted first constructor prevents a concurrent native decision
+  steps:
+  - scm: |
+      (begin
+        (define h (scan nil (table "memcp-tests" false ".resource_fixture_state" false nil) '() '() '()
+          (lambda () true) '("holder") (lambda (_ h) h) nil (lambda (_ h) h)))
+        (define s (newsession)) (s "username" "root") (tx_begin s)
+        (h "session" s) (h "started" (newpromise)) (h "release" (newpromise)) true)
+    expect: {rows: 1, contains: [true]}
+  - scm: |
+      (begin
+        (define h (scan nil (table "memcp-tests" false ".resource_fixture_state" false nil) '() '() '()
+          (lambda () true) '("holder") (lambda (_ h) h) nil (lambda (_ h) h)))
+        (define await (lambda (promise remaining) (if (promise "state") true
+          (> remaining 0) (begin (sleep 0.001) (await promise (- remaining 1)))
+          true (error "resource synchronization timeout"))))
+        (define resource (tx_get_or_compute_resource ((h "session") "__memcp_tx") "first" (lambda ()
+          (begin ((h "started") "once" true) (await (h "release") 1000) (newcachemap)))))
+        (resource "probe" 53) true)
+    background: true
+    expect: {rows: 1, contains: [true]}
+  - scm: |
+      (begin
+        (define h (scan nil (table "memcp-tests" false ".resource_fixture_state" false nil) '() '() '()
+          (lambda () true) '("holder") (lambda (_ h) h) nil (lambda (_ h) h)))
+        (define await (lambda (promise remaining) (if (promise "state") true
+          (> remaining 0) (begin (sleep 0.001) (await promise (- remaining 1)))
+          true (error "resource synchronization timeout"))))
+        (await (h "started") 1000)
+        (define denied (try (lambda () (begin (tx_commit (h "session")) false))
+          (lambda (failure) (strlike (concat failure) "%resource initialization is still active%"))))
+        (and denied (not (nil? ((h "session") "transaction")))))
+    expect: {rows: 1, contains: [true]}
+  - scm: |
+      (begin
+        (define h (scan nil (table "memcp-tests" false ".resource_fixture_state" false nil) '() '() '()
+          (lambda () true) '("holder") (lambda (_ h) h) nil (lambda (_ h) h)))
+        ((h "release") "once" true))
+    expect: {rows: 1, contains: [true]}
+  - wait_for_background: true
+  - scm: |
+      (begin
+        (define h (scan nil (table "memcp-tests" false ".resource_fixture_state" false nil) '() '() '()
+          (lambda () true) '("holder") (lambda (_ h) h) nil (lambda (_ h) h)))
+        (tx_commit (h "session")) (nil? ((h "session") "transaction")))
+    expect: {rows: 1, contains: [true]}
+- name: Cancelled cache factories finish before their native resource owner resets
+  steps:
+  - scm: |-
+      (begin (define h (scan nil (table "memcp-tests" false ".resource_fixture_state" false nil) '() '() '()
+        (lambda () true) '("holder") (lambda (_ h) h) nil (lambda (_ h) h)))
+        (h "producer_started" (newpromise)) (h "producer_release" (newpromise))
+        (h "waiter_cancelled" (newpromise)) (h "reset_requested" (newpromise))
+        (h "next_started" false) (h "producer_generation" nil) true)
+    expect:
+      rows: 1
+      contains:
+      - true
+  - background: true
+    # The successor reuses this actual connection owner after cancellation.
+    # An ephemeral request unregisters and closes its owner at response end.
+    session_id: resource_cancel_owner
+    timeout: 15
+    scm: |-
+      (begin (define h (scan nil (table "memcp-tests" false ".resource_fixture_state" false nil) '() '() '()
+        (lambda () true) '("holder") (lambda (_ h) h) nil (lambda (_ h) h))) (define await (lambda (promise remaining) (if (promise "state") true
+        (> remaining 0) (begin (sleep 0.001) (await promise (- remaining 1)))
+        true (error "cache resource synchronization timeout"))))
+        (with_autocommit session (req "__session_state") (req "__query_seq") "cancelled cache factory" (lambda (tx) (begin
+          (h "tx" tx) (h "owner_session" session) (session "resource_fixture_generation" 37)
+          (define cache (tx_get_or_compute_resource tx "cancelled-producer" (lambda () (newcachemap))))
+          (h "cache" cache)
+          (try (lambda () (cache "old" tx (lambda () (begin
+            ((h "producer_started") "once" true)
+            (await (h "producer_release") 5000)
+            (h "producer_generation" (session "resource_fixture_generation"))
+            47))))
+            (lambda (failure) (begin ((h "waiter_cancelled") "once" true) (error failure))))))))
+    expect:
+      error: true
+      contains: context canceled
+  - scm: |-
+      (begin (define h (scan nil (table "memcp-tests" false ".resource_fixture_state" false nil) '() '() '()
+        (lambda () true) '("holder") (lambda (_ h) h) nil (lambda (_ h) h))) (define await (lambda (promise remaining) (if (promise "state") true
+        (> remaining 0) (begin (sleep 0.001) (await promise (- remaining 1)))
+        true (error "cache resource synchronization timeout"))))
+        (await (h "producer_started") 5000)
+        (kill_query (connection_id (h "tx")))
+        (await (h "waiter_cancelled") 5000))
+    expect:
+      rows: 1
+      contains:
+      - true
+  - background: true
+    session_id: resource_cancel_owner
+    timeout: 15
+    scm: |-
+      (begin (define h (scan nil (table "memcp-tests" false ".resource_fixture_state" false nil) '() '() '()
+        (lambda () true) '("holder") (lambda (_ h) h) nil (lambda (_ h) h)))
+        (if (identical? (h "owner_session") session) true
+          (error "successor request did not reuse the persistent resource owner"))
+        ((h "reset_requested") "once" true)
+        (with_autocommit (h "owner_session") (req "__session_state") (req "__query_seq") "next resource generation" (lambda (tx) (begin
+          ((h "owner_session") "resource_fixture_generation" 41)
+          (h "next_started" true) true))))
+    expect:
+      rows: 1
+      contains:
+      - true
+  - scm: |-
+      (begin (define h (scan nil (table "memcp-tests" false ".resource_fixture_state" false nil) '() '() '()
+        (lambda () true) '("holder") (lambda (_ h) h) nil (lambda (_ h) h))) (define await (lambda (promise remaining) (if (promise "state") true
+        (> remaining 0) (begin (sleep 0.001) (await promise (- remaining 1)))
+        true (error "cache resource synchronization timeout"))))
+        (await (h "reset_requested") 5000)
+        /* The successor request has arrived. A bounded observation window lets an
+        incorrectly unjoined owner reset; the producer's observed generation is the
+        actual assertion, rather than an execution-time performance threshold. */
+        (define observe (lambda (remaining) (if (h "next_started") true
+          (> remaining 0) (begin (sleep 0.001) (observe (- remaining 1))) false)))
+        (observe 200)
+        ((h "producer_release") "once" true))
+    expect:
+      rows: 1
+      contains:
+      - true
+  - wait_for_background: true
+  # Keep the final assertion below unchanged; retain only bounded scalar facts
+  # in the server artifact so a JIT-only failure identifies its failed owner.
+  - scm: |-
+      (begin (define h (scan nil (table "memcp-tests" false ".resource_fixture_state" false nil) '() '() '()
+        (lambda () true) '("holder") (lambda (_ h) h) nil (lambda (_ h) h)))
+        (print (concat "resource_cancel_diagnostic: " (json_encode
+          (list (h "next_started") (h "producer_generation")
+            (try (lambda () (begin ((h "cache") "old") false)) (lambda (_failure) true))))))
+        true)
+    expect: {rows: 1, contains: [true]}
+  - scm: |-
+      (begin (define h (scan nil (table "memcp-tests" false ".resource_fixture_state" false nil) '() '() '()
+        (lambda () true) '("holder") (lambda (_ h) h) nil (lambda (_ h) h)))
+        (and (h "next_started") (equal? (h "producer_generation") 37)
+          (try (lambda () (begin ((h "cache") "old") false)) (lambda (_failure) true))))
+    expect:
+      rows: 1
+      contains:
+      - true
+  cleanup:
+  - scm: |-
+      (begin (define h (scan nil (table "memcp-tests" false ".resource_fixture_state" false nil) '() '() '()
+        (lambda () true) '("holder") (lambda (_ h) h) nil (lambda (_ h) h))) (if (not ((h "producer_release") "state")) ((h "producer_release") "once" true) true))
+- name: A cleanup failure reports the completed commit and clears the session marker
+  scm: |
+    (begin
+      (define file (stream (concat (arg "data" "data" "data") "/memcp-tests/schema.json")))
+      (define first (newsession)) (first "username" "root") (tx_begin first)
+      (tx_get_or_compute_resource (first "__memcp_tx") "stream" (lambda () file))
+      (tx_commit first)
+      (define s (newsession)) (s "username" "root") (s "schema" "memcp-tests")
+      (tsql_execute_request "memcp-tests" "BEGIN TRANSACTION" s nil 0 (lambda (_row) true) (lambda args true))
+      (tx_get_or_compute_resource (s "__memcp_tx") "closed-stream" (lambda () file))
+      (tsql_execute_request "memcp-tests" "INSERT INTO resource_commit_probe VALUES(1)" s nil 0
+        (lambda (_row) true) (lambda args true))
+      (define rejected (try (lambda () (begin (tx_commit s) false)) (lambda (failure)
+        (strlike (concat failure) "%transaction committed%resource cleanup failed%"))))
+      (and rejected (nil? (s "transaction"))))
+  expect: {result: true}
+- name: Explicit rollback clears its completed owner even when resource cleanup fails
+  scm: |
+    (begin
+      (define file (stream (concat (arg "data" "data" "data") "/memcp-tests/schema.json")))
+      (define first (newsession)) (first "username" "root") (tx_begin first)
+      (tx_get_or_compute_resource (first "__memcp_tx") "stream" (lambda () file))
+      (tx_commit first)
+      (define s (newsession)) (s "username" "root") (tx_begin s)
+      (tx_get_or_compute_resource (s "__memcp_tx") "closed-stream" (lambda () file))
+      (define rejected (try (lambda () (begin (tx_rollback s) false))
+        (lambda (failure) (strlike (concat failure) "%transaction rolled back%resource cleanup failed%"))))
+      (and rejected (nil? (s "transaction"))))
+  expect: {result: true}
+- name: Restart preserves the transaction whose resource cleanup failed
+  sql: SHUTDOWN
+  restart_timeout: 60
+  expect: {rows: 0}
+- name: Durable row authority is independent of the resource cleanup error
+  sql: SELECT id FROM resource_commit_probe
+  expect: {rows: 1,data: [{id: 1}]}
+
+- name: Trigger declaration retention requires an active explicit native owner
+  setup:
+  - sql: CREATE TABLE resource_trigger_guard(id INT)
+  cleanup:
+  - sql: DROP TABLE IF EXISTS resource_trigger_guard
+  scm: |
+    (try (lambda () (begin
+      (retain_table_trigger_declarations (table "memcp-tests" false "resource_trigger_guard" false nil) nil) false))
+      (lambda (failure) (strlike (concat failure) "%requires a native transaction%")))
+  expect: {result: true}
+- name: Empty trigger declarations stay empty until their native transaction ends
+  setup:
+  - sql: CREATE TABLE resource_trigger_guard(id INT)
+  cleanup:
+  - sql: DROP TABLE IF EXISTS resource_trigger_guard
+  scm: |
+    (begin
+      (define s (newsession)) (s "username" "root") (tx_begin s)
+      (define tx (s "__memcp_tx"))
+      (define target (table "memcp-tests" false "resource_trigger_guard" false tx))
+      (define first (retain_table_trigger_declarations target tx))
+      (define again (retain_table_trigger_declarations target tx))
+      (define rejected (try (lambda () (begin
+        (createtrigger target "resource_trigger_insert" "before_insert" "" ""
+          (lambda (OLD NEW session tx) NEW) true) false))
+        (lambda (failure) (strlike (concat failure) "%trigger declarations are in use%"))))
+      (insert target '("id") (list (list 7)) '() nil false nil tx)
+      (tx_commit s)
+      (createtrigger target "resource_trigger_insert" "before_insert" "" "" (lambda (OLD NEW session tx) NEW) true)
+      (and rejected (empty_list? first) (empty_list? again)
+        (equal? (count (show_triggers "memcp-tests" "resource_trigger_guard")) 1)))
+  expect: {result: true}
+- name: Hidden user definitions are retained and replacement is atomic before effects
+  setup:
+  - sql: CREATE TABLE resource_trigger_guard(id INT)
+  cleanup:
+  - sql: DROP TABLE IF EXISTS resource_trigger_guard
+  scm: |
+    (begin
+      (define target (table "memcp-tests" false "resource_trigger_guard" false nil))
+      (createtrigger target "resource_hidden_insert" "before_insert" "" ""
+        (lambda (OLD NEW session tx) (set_assoc NEW "id" 41)) false)
+      (define s (newsession)) (s "username" "root") (tx_begin s)
+      (define tx (s "__memcp_tx"))
+      (define rows (retain_table_trigger_declarations target tx))
+      (define rejected (try (lambda () (begin
+        (createtrigger target "resource_hidden_insert" "before_insert" "" ""
+          (lambda (OLD NEW session tx) (set_assoc NEW "id" 99)) false) false))
+        (lambda (failure) (strlike (concat failure) "%trigger declarations are in use%"))))
+      (insert target '("id") (list (list 1)) '() nil false nil tx)
+      (define actual (scan tx target '() '() '() (lambda () true) '("id")
+        (lambda (acc id) id) nil (lambda (a b) (coalesceNil a b))))
+      (tx_rollback s)
+      (define removed (droptrigger "memcp-tests" "resource_hidden_insert" false))
+      (and rejected removed (equal? actual 41) (equal? (count rows) 1)
+        ((car rows) "hidden") (equal? ((car rows) "timing") "before_insert")
+        (empty_list? (show_triggers "memcp-tests" "resource_trigger_guard"))))
+  expect: {result: true}
+- name: Definition drop and table retirement fail while leased and retry after rollback
+  setup:
+  - sql: CREATE TABLE resource_trigger_guard(id INT)
+  cleanup:
+  - sql: DROP TABLE IF EXISTS resource_trigger_guard
+  scm: |
+    (begin
+      (define target (table "memcp-tests" false "resource_trigger_guard" false nil))
+      (createtrigger target "resource_visible_insert" "after_insert" "" "" (lambda (OLD NEW session tx) true) true)
+      (define s (newsession)) (s "username" "root") (tx_begin s)
+      (define tx (s "__memcp_tx")) (retain_table_trigger_declarations target tx)
+      (define trigger_rejected (try (lambda () (begin
+        (droptrigger "memcp-tests" "resource_visible_insert" false) false))
+        (lambda (failure) (strlike (concat failure) "%trigger declarations are in use%"))))
+      (define table_rejected (try (lambda () (begin
+        (droptable "memcp-tests" "resource_trigger_guard" false) false))
+        (lambda (failure) (strlike (concat failure) "%trigger declarations are in use%"))))
+      (tx_rollback s)
+      (droptrigger "memcp-tests" "resource_visible_insert" false)
+      (droptable "memcp-tests" "resource_trigger_guard" false)
+      (tx_begin s)
+      (define stale_rejected (try (lambda () (begin
+        (retain_table_trigger_declarations target (s "__memcp_tx")) false))
+        (lambda (failure) (strlike (concat failure) "%retired native relation%"))))
+      (tx_rollback s)
+      (and trigger_rejected table_rejected stale_rejected))
+  expect: {result: true}
+- name: A private relation declaration lease belongs only to its creating transaction
+  cleanup:
+  - sql: DROP TABLE IF EXISTS resource_trigger_private
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define other (newsession)) (other "username" "root") (tx_begin other)
+      (define tx (owner "__memcp_tx"))
+      (createtable "memcp-tests" "resource_trigger_private"
+        (list (list "column" "id" "INT" (list) (list))) (list "engine" "safe") false tx)
+      (define target (table "memcp-tests" false "resource_trigger_private" false tx))
+      (define foreign_rejected (try (lambda () (begin
+        (retain_table_trigger_declarations target (other "__memcp_tx")) false))
+        (lambda (failure) (strlike (concat failure) "%not visible%"))))
+      (define own (retain_table_trigger_declarations target tx))
+      (tx_rollback other) (tx_rollback owner)
+      (and foreign_rejected (empty_list? own)))
+  expect: {result: true}
+- name: Reentrant trigger DDL rejects without waiting and leaves row mutation rollbackable
+  setup:
+  - sql: CREATE TABLE resource_trigger_guard(id INT)
+  cleanup:
+  - sql: DROP TABLE IF EXISTS resource_trigger_guard
+  scm: |
+    (begin
+      (define target (table "memcp-tests" false "resource_trigger_guard" false nil))
+      (createtrigger target "resource_reentrant_insert" "before_insert" "" ""
+        (lambda (OLD NEW session tx) (begin
+          (createtrigger (table "memcp-tests" false "resource_trigger_guard" false nil)
+            "resource_unexpected_insert" "after_insert" "" "" (lambda (OLD NEW session tx) true) true)
+          NEW)) true)
+      (define s (newsession)) (s "username" "root") (tx_begin s)
+      (define tx (s "__memcp_tx")) (retain_table_trigger_declarations target tx)
+      (define rejected (try (lambda () (begin
+        (insert target '("id") (list (list 1)) '() nil false nil tx) false))
+        (lambda (failure) (strlike (concat failure) "%trigger declarations are in use%"))))
+      (tx_rollback s)
+      (define row (scan nil target '() '() '() (lambda () true) '("id")
+        (lambda (acc id) id) nil (lambda (a b) (coalesceNil a b))))
+      (and rejected (nil? row) (equal? (count (show_triggers "memcp-tests" "resource_trigger_guard")) 1)))
+  expect: {result: true}
+- name: System foreign-key checks remain active while user trigger declarations are retained
+  setup:
+  - sql: CREATE TABLE resource_trigger_parent(id INT PRIMARY KEY)
+  - sql: CREATE TABLE resource_trigger_guard(id INT, CONSTRAINT resource_trigger_fk FOREIGN KEY(id) REFERENCES resource_trigger_parent(id))
+  - sql: INSERT INTO resource_trigger_parent VALUES(1)
+  cleanup:
+  - sql: DROP TABLE IF EXISTS resource_trigger_guard
+  - sql: DROP TABLE IF EXISTS resource_trigger_parent
+  scm: |
+    (begin
+      (define s (newsession)) (s "username" "root") (tx_begin s)
+      (define tx (s "__memcp_tx"))
+      (define target (table "memcp-tests" false "resource_trigger_guard" false tx))
+      (define metadata (retain_table_trigger_declarations target tx))
+      (define rejected (try (lambda () (begin
+        (insert target '("id") (list (list 99)) '() nil false nil tx) false))
+        (lambda (failure) (strlike (concat failure) "%foreign key%"))))
+      (tx_rollback s)
+      (and rejected (empty_list? metadata)))
+  expect: {result: true}
+- name: Computed dependency programs may publish while user trigger definitions are retained
+  setup:
+  - sql: CREATE TABLE resource_trigger_guard(id INT)
+  - sql: CREATE TABLE resource_trigger_cache(id INT)
+  - sql: INSERT INTO resource_trigger_cache VALUES(1)
+  cleanup:
+  - sql: DROP TABLE IF EXISTS resource_trigger_cache
+  - sql: DROP TABLE IF EXISTS resource_trigger_guard
+  scm: |
+    (begin
+      (define s (newsession)) (s "username" "root") (tx_begin s)
+      (define tx (s "__memcp_tx"))
+      (define target (table "memcp-tests" false "resource_trigger_guard" false tx))
+      (retain_table_trigger_declarations target tx)
+      (define cache (table "memcp-tests" false "resource_trigger_cache" false nil))
+      (createcolumn cache "total" "INT" '() '() '() (lambda ()
+        (scan nil (table "memcp-tests" false "resource_trigger_guard" false nil)
+          '() '() '() (lambda () true) '("id") (lambda (acc id) (+ acc id)) 0 +)))
+      (define read (lambda () (scan nil cache '() '() '() (lambda () true) '("total")
+        (lambda (acc total) total) nil (lambda (a b) (coalesceNil a b)))))
+      (define before (read))
+      (insert target '("id") (list (list 5)) '() nil false nil tx)
+      (tx_commit s)
+      (and (equal? before 0) (equal? (read) 5)))
+  expect: {result: true}
+- name: Public trigger replacement and drop cannot disable actual native foreign-key checks
+  setup:
+  - sql: CREATE TABLE resource_trigger_parent(id INT PRIMARY KEY)
+  - sql: CREATE TABLE resource_trigger_guard(id INT, CONSTRAINT resource_trigger_fk FOREIGN KEY(id) REFERENCES resource_trigger_parent(id))
+  - sql: INSERT INTO resource_trigger_parent VALUES(1)
+  cleanup:
+  - sql: DROP TABLE IF EXISTS resource_trigger_guard
+  - sql: DROP TABLE IF EXISTS resource_trigger_parent
+  scm: |
+    (begin
+      (define target (table "memcp-tests" false "resource_trigger_guard" false nil))
+      (define definition (find ((show "memcp-tests" "resource_trigger_guard" true) "triggers")
+        (lambda (definition) (and (definition "system") (strlike (definition "name") "%child_insert"))) nil))
+      (if definition true (error "fixture lacks its native foreign-key INSERT program"))
+      (define name (definition "name"))
+      (define replace_rejected (try (lambda () (begin
+        (createtrigger target name "before_insert" "" "" (lambda (OLD NEW session tx) NEW) true) false))
+        (lambda (failure) (strlike (concat failure) "%system trigger definitions are owned%"))))
+      (define s (newsession)) (s "username" "root") (tx_begin s)
+      (define tx (s "__memcp_tx")) (retain_table_trigger_declarations target tx)
+      (define drop_rejected (try (lambda () (begin (droptrigger "memcp-tests" name false) false))
+        (lambda (failure) (strlike (concat failure) "%system trigger definitions are owned%"))))
+      (define orphan_rejected (try (lambda () (begin
+        (insert target '("id") (list (list 99)) '() nil false nil tx) false))
+        (lambda (failure) (strlike (concat failure) "%foreign key%"))))
+      (insert target '("id") (list (list 1)) '() nil false nil tx)
+      (tx_commit s)
+      (and replace_rejected drop_rejected orphan_rejected))
+  expect: {result: true}
+
+- name: Persist native computed dependency cleanup before cold retirement
+  setup:
+  - sql: CREATE TABLE resource_cold_source(id INT)
+  - sql: CREATE TABLE resource_cold_cache(id INT)
+  - sql: INSERT INTO resource_cold_source VALUES(3)
+  - sql: INSERT INTO resource_cold_cache VALUES(1)
+  - sql: CREATE TRIGGER resource_cold_user BEFORE INSERT ON resource_cold_source FOR EACH ROW SET NEW.id=NEW.id
+  scm: |
+    (begin
+      (createcolumn (table "memcp-tests" false "resource_cold_cache" false nil) "total" "INT" '() '() '()
+        (lambda () (scan nil (table "memcp-tests" false "resource_cold_source" false nil)
+          '() '() '() (lambda () true) '("id") (lambda (acc id) (+ acc id)) 0 +)))
+      (equal? (scan nil (table "memcp-tests" false "resource_cold_cache" false nil)
+        '() '() '() (lambda () true) '("total") (lambda (acc total) total) nil
+        (lambda (a b) (coalesceNil a b))) 3))
+  expect: {result: true}
+- name: Restart without warming the persisted runtime computation
+  action: restart
+- name: Cold native cleanup removes only its generated dependencies and preserves user rows
+  scm: |
+    (begin
+      (droptable "memcp-tests" "resource_cold_cache" false)
+      (define triggers ((show "memcp-tests" "resource_cold_source" true) "triggers"))
+      (define systems (filter triggers (lambda (trigger) (trigger "system"))))
+      (insert (table "memcp-tests" false "resource_cold_source" false nil) '("id") (list (list 4)))
+      (define total (scan nil (table "memcp-tests" false "resource_cold_source" false nil)
+        '() '() '() (lambda () true) '("id") (lambda (acc id) (+ acc id)) 0 +))
+      (and (empty_list? systems) (equal? (count triggers) 1) (equal? total 7)))
+  expect: {result: true}
+- name: Native relation scope resource closes only after committed row ownership ends
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root")
+      (define scope (new_relation_scope owner)) (define name (concat ".scope-commit:" (uuid)))
+      (tx_begin owner) (define tx (owner "__memcp_tx"))
+      (tx_get_or_compute_resource tx "scoped-native-result" (lambda () scope))
+      (createtable "memcp-tests" name (list (list "column" "id" "INT" '() '()))
+        (list "engine" "memory" "ephemeral" true "scope" scope) false tx)
+      (insert (table "memcp-tests" false name false tx) '("id") (list (list 7)) '() nil false nil tx)
+      (define present (not (nil? (table "memcp-tests" false name false tx))))
+      (tx_commit owner)
+      (close_relation_scope scope)
+      (and present (nil? (table "memcp-tests" false name false nil)) (nil? (owner "transaction"))))
+  expect: {result: true}
+- name: Native relation scope resource waits for rollback before physical retirement
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root")
+      (define scope (new_relation_scope owner)) (define name (concat ".scope-rollback:" (uuid)))
+      (tx_begin owner) (define tx (owner "__memcp_tx"))
+      (tx_get_or_compute_resource tx "scoped-native-result" (lambda () scope))
+      (createtable "memcp-tests" name (list (list "column" "id" "INT" '() '()))
+        (list "engine" "memory" "ephemeral" true "scope" scope) false tx)
+      (insert (table "memcp-tests" false name false tx) '("id") (list (list 8)) '() nil false nil tx)
+      (tx_rollback owner)
+      (and (nil? (table "memcp-tests" false name false nil)) (nil? (owner "transaction"))))
+  expect: {result: true}
+- name: Failed native scope retirement remains reachable for existing resource cleanup retry
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root")
+      (define observer (newsession)) (observer "username" "root")
+      (define scope (new_relation_scope owner)) (define name (concat ".scope-retry:" (uuid)))
+      (tx_begin owner) (define tx (owner "__memcp_tx"))
+      (tx_get_or_compute_resource tx "scoped-native-result" (lambda () scope))
+      (createtable "memcp-tests" name (list (list "column" "id" "INT" '() '()))
+        (list "engine" "memory" "ephemeral" true "scope" scope) false tx)
+      (define handle (table "memcp-tests" false name false tx))
+      (tx_begin observer) (retain_table_trigger_declarations handle (observer "__memcp_tx"))
+      (define failed (try (lambda () (begin (tx_commit owner) false))
+        (lambda (failure) (strlike (concat failure) "%transaction committed%resource cleanup failed%"))))
+      (define retained (not (nil? (table "memcp-tests" false name false nil))))
+      (tx_rollback observer)
+      (tx_begin owner)
+      (define retired (nil? (table "memcp-tests" false name false nil)))
+      (tx_rollback owner)
+      (and failed retained retired (nil? (owner "transaction"))))
+  expect: {result: true}

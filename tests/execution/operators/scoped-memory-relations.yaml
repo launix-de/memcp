@@ -1,0 +1,173 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  description: Native scoped MEMORY relations retain rows while owned and never recover as durable declarations
+  syntax: mysql
+  isolated: true
+setup: []
+cleanup:
+- sql: DROP TABLE IF EXISTS ordinary_memory_scope_probe
+test_cases:
+- name: Scoped native MEMORY relation keeps its rows until its exact owner closes
+  scm: |
+    (begin
+      (define owner (newsession)) (define scope (new_relation_scope owner))
+      (createtable "memcp-tests" ".scope_probe" (list (list "column" "id" "INT" (list) (list))) (list "engine" "memory" "ephemeral" true "scope" scope) false nil)
+      (define source (table "memcp-tests" false ".scope_probe" false nil))
+      (insert source '("id") (list (list 7)))
+      (rebuild source true false)
+      (define result (scan nil source '() '() '() (lambda () true) '("id") (lambda (_ id) id) 0 +))
+      (close_relation_scope scope)
+      (and (equal? result 7) (nil? (table "memcp-tests" false ".scope_probe" false nil))))
+  expect: {result: true}
+- name: Delegating session accessors retain the same native scope owner
+  scm: |
+    (begin
+      (define owner (newsession))
+      (define alias (lambda args (apply owner args)))
+      (define parent (new_relation_scope alias))
+      (define child (new_relation_scope owner parent))
+      (close_relation_scope parent)
+      (close_relation_scope child))
+  expect: {result: true}
+- name: Closing an old scope cannot drop a same-named replacement relation
+  scm: |
+    (begin
+      (define owner (newsession)) (define first (new_relation_scope owner)) (define second (new_relation_scope owner))
+      (createtable "memcp-tests" ".scope_replacement" (list (list "column" "id" "INT" (list) (list))) (list "engine" "memory" "ephemeral" true "scope" first) false nil)
+      (droptable "memcp-tests" ".scope_replacement" true)
+      (createtable "memcp-tests" ".scope_replacement" (list (list "column" "id" "INT" (list) (list))) (list "engine" "memory" "ephemeral" true "scope" second) false nil)
+      (close_relation_scope first)
+      (define retained (not (nil? (table "memcp-tests" false ".scope_replacement" false nil))))
+      (close_relation_scope second)
+      (and retained (nil? (table "memcp-tests" false ".scope_replacement" false nil))))
+  expect: {result: true}
+- name: Parent scope closes its children and child close does not retire the parent
+  scm: |
+    (begin
+      (define owner (newsession)) (define parent (new_relation_scope owner)) (define child (new_relation_scope owner parent))
+      (createtable "memcp-tests" ".scope_parent" (list (list "column" "id" "INT" (list) (list))) (list "engine" "memory" "ephemeral" true "scope" parent) false nil)
+      (createtable "memcp-tests" ".scope_child" (list (list "column" "id" "INT" (list) (list))) (list "engine" "memory" "ephemeral" true "scope" child) false nil)
+      (close_relation_scope child)
+      (define retained (and (nil? (table "memcp-tests" false ".scope_child" false nil)) (not (nil? (table "memcp-tests" false ".scope_parent" false nil)))))
+      (define sibling (new_relation_scope owner parent))
+      (createtable "memcp-tests" ".scope_sibling" (list (list "column" "id" "INT" (list) (list))) (list "engine" "memory" "ephemeral" true "scope" sibling) false nil)
+      (close_relation_scope parent) (close_relation_scope parent)
+      (and retained (nil? (table "memcp-tests" false ".scope_parent" false nil)) (nil? (table "memcp-tests" false ".scope_sibling" false nil))))
+  expect: {result: true}
+- name: A foreign scope cannot acquire an existing runtime relation through IF NOT EXISTS
+  scm: |
+    (begin
+      (define owner (newsession)) (define first (new_relation_scope owner)) (define foreign (new_relation_scope owner))
+      (createtable "memcp-tests" ".scope_foreign" (list (list "column" "id" "INT" (list) (list))) (list "engine" "memory" "ephemeral" true "scope" first) false nil)
+      (define rejected (try (lambda () (begin (createtable "memcp-tests" ".scope_foreign" (list (list "column" "id" "INT" (list) (list))) (list "engine" "memory" "ephemeral" true "scope" foreign) true nil) false)) (lambda (err) true)))
+      (close_relation_scope foreign)
+      (define retained (not (nil? (table "memcp-tests" false ".scope_foreign" false nil))))
+      (close_relation_scope first)
+      (and (equal? rejected true) retained))
+  expect: {result: true}
+- name: Ephemeral relation requires an explicit native scope capability
+  scm: (createtable "memcp-tests" ".scope_missing_owner" (list (list "column" "id" "INT" (list) (list))) '("engine" "memory" "ephemeral" true) false nil)
+  expect: {error: true, contains: 'require MEMORY and a relation scope'}
+- name: Persistent engine cannot be attached to a runtime scope
+  scm: (createtable "memcp-tests" ".scope_bad_engine" (list (list "column" "id" "INT" (list) (list))) (list "engine" "safe" "ephemeral" true "scope" (new_relation_scope (newsession))) false nil)
+  expect: {error: true, contains: 'require MEMORY and a relation scope'}
+- name: Closed scope cannot acquire new native relations
+  scm: |
+    (begin
+      (define scope (new_relation_scope (newsession))) (close_relation_scope scope)
+      (createtable "memcp-tests" ".scope_closed" (list (list "column" "id" "INT" (list) (list))) (list "engine" "memory" "ephemeral" true "scope" scope) false nil))
+  expect: {error: true, contains: 'relation scope is closed'}
+- name: Parent scope capability cannot be attached to another session owner
+  scm: (new_relation_scope (newsession) (new_relation_scope (newsession)))
+  expect: {error: true, contains: 'invalid parent relation scope'}
+- name: Runtime relation cannot be converted into a persisted engine
+  scm: |
+    (begin
+      (define scope (new_relation_scope (newsession)))
+      (createtable "memcp-tests" ".scope_persist" (list (list "column" "id" "INT" (list) (list))) (list "engine" "memory" "ephemeral" true "scope" scope) false nil)
+      (define rejected (try (lambda () (begin (altertable (table "memcp-tests" false ".scope_persist" false nil) "engine" "safe") false)) (lambda (_cause) true)))
+      (close_relation_scope scope) rejected)
+  expect: {result: true}
+- name: Prepare runtime and ordinary MEMORY declarations before restart
+  scm: |
+    (begin
+      (createtable "memcp-tests" ".scope_restart" (list (list "column" "id" "INT" (list) (list))) (list "engine" "memory" "ephemeral" true "scope" (new_relation_scope (newsession))) false nil)
+      (createtable "memcp-tests" "ordinary_memory_scope_probe" (list (list "column" "id" "INT" (list) (list))) '("engine" "memory") false nil)
+      (insert (table "memcp-tests" false ".scope_restart" false nil) '("id") (list (list 42)))
+      (insert (table "memcp-tests" false "ordinary_memory_scope_probe" false nil) '("id") (list (list 13))) true)
+  expect: {result: true}
+- name: Restart native storage without publishing runtime declarations
+  sql: SHUTDOWN
+- name: Restart drops runtime declarations while ordinary MEMORY retains its declaration
+  scm: |
+    (and (nil? (table "memcp-tests" false ".scope_restart" false nil))
+      (not (nil? (table "memcp-tests" false "ordinary_memory_scope_probe" false nil))))
+  expect: {result: true}
+
+- name: Native scope ownership does not enter public session keys
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "visible" 29)
+      (define before (owner))
+      (define alias (lambda args (apply owner args)))
+      (define parent (new_relation_scope alias))
+      (define child (new_relation_scope owner parent))
+      (define unchanged (expression_equal? before (owner)))
+      (close_relation_scope parent) (close_relation_scope child)
+      (and unchanged (expression_equal? before (owner)) (equal? (owner "visible") 29)))
+  expect: {result: true}
+- name: Native scope identity is independent of a public lookalike value
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "__memcp_relation_scopes" "public-marker")
+      (define first (new_relation_scope owner))
+      (define second (new_relation_scope owner first))
+      (define unchanged (equal? (owner "__memcp_relation_scopes") "public-marker"))
+      (close_relation_scope first) (close_relation_scope second)
+      (and unchanged (equal? (owner "__memcp_relation_scopes") "public-marker")))
+  expect: {result: true}
+- name: Transactional native scope seals lexical lookup while row decision retains its generation
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root")
+      (define scope (new_relation_scope owner nil "transactional"))
+      (define name (concat ".schema-lifetime:" (uuid)))
+      (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (createtable "memcp-tests" name (list (list "column" "id" "INT" '() '()))
+        (list "engine" "memory" "ephemeral" true "scope" scope "scope_key" "result") false tx)
+      (define pending (and (not (nil? (relation_scope_binding scope "result" tx)))
+        (nil? (relation_scope_binding scope "result" nil))
+        (nil? (table "memcp-tests" false name false nil))))
+      (close_relation_scope scope)
+      (define retained (and (nil? (relation_scope_binding scope "result" tx))
+        (not (nil? (table "memcp-tests" false name false tx)))))
+      (tx_rollback owner)
+      (and pending retained (nil? (table "memcp-tests" false name false nil))))
+  expect: {result: true}
+- name: Native committed and pending slot views retain distinct physical generations
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root")
+      (define scope (new_relation_scope owner nil "transactional"))
+      (define old_name (concat ".schema-before:" (uuid)))
+      (define new_name (concat ".schema-after:" (uuid)))
+      (define create (lambda (name column tx)
+        (createtable "memcp-tests" name (list (list "column" column "INT" '() '()))
+          (list "engine" "memory" "ephemeral" true "scope" scope "scope_key" "item") false tx)))
+      (tx_begin owner) (create old_name "old_value" (owner "__memcp_tx")) (tx_commit owner)
+      (tx_begin owner) (define tx (owner "__memcp_tx"))
+      (drop_relation_scope_binding scope "item" false tx)
+      (create new_name "new_value" tx)
+      (define private (and
+        (equal? (cadr (relation_scope_binding scope "item" tx)) new_name)
+        (equal? (cadr (relation_scope_binding scope "item" nil)) old_name)))
+      (tx_commit owner)
+      (define published (and (equal? (cadr (relation_scope_binding scope "item" nil)) new_name)
+        (nil? (table "memcp-tests" false old_name false nil))
+        (not (nil? (show (table "memcp-tests" false new_name false nil) "column" "new_value" false nil)))))
+      (close_relation_scope scope)
+      (and private published (nil? (table "memcp-tests" false new_name false nil))))
+  expect: {result: true}

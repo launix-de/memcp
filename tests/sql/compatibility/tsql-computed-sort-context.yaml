@@ -1,0 +1,57 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: Computed ORDER callbacks bind required native transaction context through the common lexical owner; actual
+    pending declarations and row names remain distinct
+  syntax: tsql
+  isolated: true
+setup:
+- sql: CREATE TABLE pending_default_order(first_value INT,second_value INT)
+- sql: CREATE TABLE computed_context_values(id INT PRIMARY KEY,tx INT,value INT,label VARCHAR(10))
+- sql: INSERT computed_context_values VALUES(1,5,0,'beta'),(2,1,9,'gamma'),(3,2,0,'alpha')
+test_cases:
+- name: Pending DEFAULT names sort by current declaration values before rollback
+  sql: BEGIN TRANSACTION; ALTER TABLE pending_default_order ADD CONSTRAINT DF_pending_order_z DEFAULT 1 FOR first_value; ALTER
+    TABLE pending_default_order ADD CONSTRAINT DF_pending_order_a DEFAULT 2 FOR second_value; SELECT name,parent_column_id
+    FROM sys.default_constraints WHERE parent_object_id=OBJECT_ID(N'pending_default_order',N'U') ORDER BY name; ROLLBACK;
+  expect:
+    rows: 2
+    data:
+    - name: DF_pending_order_a
+      parent_column_id: 2
+    - name: DF_pending_order_z
+      parent_column_id: 1
+- name: Rollback retires both pending DEFAULT declarations
+  sql: SELECT COUNT(*) AS total FROM sys.default_constraints WHERE parent_object_id=OBJECT_ID(N'pending_default_order',N'U')
+  expect:
+    rows: 1
+    data:
+    - total: 0
+- name: An ordinary row column named tx remains a row input
+  sql: SELECT id,tx,value FROM computed_context_values ORDER BY tx+value,id
+  expect:
+    rows: 3
+    data:
+    - id: 3
+      tx: 2
+      value: 0
+    - id: 1
+      tx: 5
+      value: 0
+    - id: 2
+      tx: 1
+      value: 9
+- name: Quoted context spelling remains ordinary string data during sorting
+  sql: SELECT id,label FROM computed_context_values ORDER BY CONCAT(label,'$tx')
+  expect:
+    rows: 3
+    data:
+    - id: 3
+      label: alpha
+    - id: 1
+      label: beta
+    - id: 2
+      label: gamma
+cleanup:
+- sql: DROP TABLE IF EXISTS pending_default_order
+- sql: DROP TABLE IF EXISTS computed_context_values

@@ -1,0 +1,183 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Current and native-visible named login SIDs reuse authenticated account incarnation and fresh ordinary metadata;
+    Windows validation and other-login member discovery remain positive targets
+setup:
+- scm: "(begin (define s (newsession)) (s \"username\" \"root\") (s \"schema\" \"system\") (s \"syntax\" \"mysql\")\n (sql_with_statement\
+    \ s nil 0 \"CREATE USER sid_member IDENTIFIED BY 'pw'\" (lambda (tx)\n  (mysql_run_sql_statement tx \"system\" \"CREATE\
+    \ USER sid_member IDENTIFIED BY 'pw'\" s (lambda (_row) true) (lambda args true)))))"
+- scm: "(begin (define s (newsession)) (s \"username\" \"root\") (s \"schema\" \"system\") (s \"syntax\" \"mysql\")\n (sql_with_statement\
+    \ s nil 0 \"GRANT ALL ON `memcp-tests`.* TO sid_member\" (lambda (tx)\n  (mysql_run_sql_statement tx \"system\" \"GRANT\
+    \ ALL ON `memcp-tests`.* TO sid_member\" s (lambda (_row) true) (lambda args true)))))"
+- scm: "(begin (define s (newsession)) (s \"username\" \"root\") (s \"schema\" \"system\") (s \"syntax\" \"mysql\")\n (sql_with_statement\
+    \ s nil 0 \"CREATE USER sid_lifecycle IDENTIFIED BY 'pw'\" (lambda (tx)\n  (mysql_run_sql_statement tx \"system\" \"\
+    CREATE USER sid_lifecycle IDENTIFIED BY 'pw'\" s (lambda (_row) true) (lambda args true)))))"
+- scm: "(begin (define s (newsession)) (s \"username\" \"root\") (s \"schema\" \"system\") (s \"syntax\" \"mysql\")\n (sql_with_statement\
+    \ s nil 0 \"GRANT ALL ON `memcp-tests`.* TO sid_lifecycle\" (lambda (tx)\n  (mysql_run_sql_statement tx \"system\" \"\
+    GRANT ALL ON `memcp-tests`.* TO sid_lifecycle\" s (lambda (_row) true) (lambda args true)))))"
+- sql: CREATE TABLE sid_defaults(id INT PRIMARY KEY,login_sid VARBINARY(85) DEFAULT SUSER_SID())
+- sql: CREATE TABLE sid_history(login_sid VARBINARY(85))
+test_cases:
+- name: Current SID is the actual authenticated native principal identity
+  sql: SELECT CASE WHEN SUSER_SID()=p.sid THEN 1 ELSE 0 END AS same_sid FROM sys.server_principals p WHERE p.name=SUSER_SNAME()
+  expect:
+    rows: 1
+    data:
+    - same_sid: 1
+- name: Named own login shares the same binary SID
+  sql: SELECT CASE WHEN SUSER_SID(SUSER_SNAME())=SUSER_SID() THEN 1 ELSE 0 END AS same_sid
+  expect:
+    rows: 1
+    data:
+    - same_sid: 1
+- name: Explicit NULL is distinct from an omitted current login
+  sql: SELECT CASE WHEN SUSER_SID(NULL) IS NULL THEN 1 ELSE 0 END AS null_name,CASE WHEN SUSER_SID(N'sid_missing_account')
+    IS NULL THEN 1 ELSE 0 END AS absent_name
+  expect:
+    rows: 1
+    data:
+    - null_name: 1
+      absent_name: 1
+- name: Native SQL login lookup retains typed case and padding comparison
+  sql: SELECT CASE WHEN SUSER_SID(N'ROOT ')=SUSER_SID() THEN 1 ELSE 0 END AS same_sid
+  expect:
+    rows: 1
+    data:
+    - same_sid: 1
+- name: Lookup arguments bind in the caller before the catalog name column
+  sql: SELECT v.name,CASE WHEN SUSER_SID(v.name) IS NULL THEN 0 ELSE 1 END AS present FROM (VALUES(1,N'root'),(2,N'sid_missing_account'),(3,CAST(NULL
+    AS NVARCHAR(128)))) v(id,name) ORDER BY v.id
+  expect:
+    rows: 3
+    data:
+    - name: root
+      present: 1
+    - name: sid_missing_account
+      present: 0
+    - name: null
+      present: 0
+- name: Ordinary member current and named self retain the same native SID
+  sql: SELECT CASE WHEN SUSER_SID()=p.sid AND SUSER_SID(N'sid_member')=p.sid THEN 1 ELSE 0 END AS same_sid FROM sys.server_principals
+    p WHERE p.name=SUSER_SNAME()
+  expect:
+    rows: 1
+    data:
+    - same_sid: 1
+  username: sid_member
+  password: pw
+- name: SID expressions retain VARBINARY85 even with no result rows
+  tds:
+    statements:
+    - sql: SELECT SUSER_SID() AS current_sid,SUSER_SID(NULL) AS absent_sid WHERE 1=0
+      expect:
+        rows: 0
+        column_types:
+        - name: current_sid
+          type: VARBINARY
+          length: 85
+        - name: absent_sid
+          type: VARBINARY
+          length: 85
+- name: Contextual DEFAULT is evaluated for the root writer
+  sql: INSERT INTO sid_defaults(id) VALUES(1)
+  expect:
+    affected_rows: 1
+- name: Contextual DEFAULT uses a member writer rather than its DDL creator
+  username: sid_member
+  password: pw
+  sql: INSERT INTO sid_defaults(id) VALUES(2); INSERT INTO sid_defaults(id,login_sid) VALUES(3,DEFAULT); SELECT id,CASE
+    WHEN login_sid=SUSER_SID() THEN 1 ELSE 0 END AS same_sid FROM sid_defaults WHERE id IN(2,3) ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 2
+      same_sid: 1
+    - id: 3
+      same_sid: 1
+- name: Stored default bytes match each actual writing principal
+  sql: SELECT d.id,CASE WHEN d.login_sid=l.sid THEN 1 ELSE 0 END AS same_sid FROM sid_defaults d JOIN sys.syslogins l ON
+    l.name=CASE WHEN d.id=1 THEN N'root' ELSE N'sid_member' END ORDER BY d.id
+  expect:
+    rows: 3
+    data:
+    - id: 1
+      same_sid: 1
+    - id: 2
+      same_sid: 1
+    - id: 3
+      same_sid: 1
+- name: Preserve an actual old account incarnation as typed binary data
+  sql: INSERT INTO sid_history(login_sid) SELECT SUSER_SID(N'sid_lifecycle')
+  expect:
+    affected_rows: 1
+- name: A warm named lookup initially observes the stored account incarnation
+  sql: SELECT CASE WHEN SUSER_SID(N'sid_lifecycle')=(SELECT login_sid FROM sid_history) THEN 1 ELSE 0 END AS same_old
+  expect:
+    rows: 1
+    data:
+    - same_old: 1
+  session_id: sid-lifecycle
+- name: Dropping the account invalidates the same named SID query
+  sql: SELECT CASE WHEN SUSER_SID(N'sid_lifecycle')=(SELECT login_sid FROM sid_history) THEN 1 ELSE 0 END AS same_old
+  expect:
+    rows: 1
+    data:
+    - same_old: 0
+  session_id: sid-lifecycle
+  setup:
+  - scm: "(begin (define s (newsession)) (s \"username\" \"root\") (s \"schema\" \"system\") (s \"syntax\" \"mysql\")\n\
+      \ (sql_with_statement s nil 0 \"DROP USER sid_lifecycle\" (lambda (tx)\n  (mysql_run_sql_statement tx \"system\" \"\
+      DROP USER sid_lifecycle\" s (lambda (_row) true) (lambda args true)))))"
+- name: Recreating a login never reuses the previous native account SID
+  sql: SELECT CASE WHEN SUSER_SID(N'sid_lifecycle')=(SELECT login_sid FROM sid_history) THEN 1 ELSE 0 END AS same_old
+  expect:
+    rows: 1
+    data:
+    - same_old: 0
+  session_id: sid-lifecycle
+  setup:
+  - scm: "(begin (define s (newsession)) (s \"username\" \"root\") (s \"schema\" \"system\") (s \"syntax\" \"mysql\")\n\
+      \ (sql_with_statement s nil 0 \"CREATE USER sid_lifecycle IDENTIFIED BY 'pw'\" (lambda (tx)\n  (mysql_run_sql_statement\
+      \ tx \"system\" \"CREATE USER sid_lifecycle IDENTIFIED BY 'pw'\" s (lambda (_row) true) (lambda args true)))))"
+  - scm: "(begin (define s (newsession)) (s \"username\" \"root\") (s \"schema\" \"system\") (s \"syntax\" \"mysql\")\n\
+      \ (sql_with_statement s nil 0 \"GRANT ALL ON `memcp-tests`.* TO sid_lifecycle\" (lambda (tx)\n  (mysql_run_sql_statement\
+      \ tx \"system\" \"GRANT ALL ON `memcp-tests`.* TO sid_lifecycle\" s (lambda (_row) true) (lambda args true)))))"
+- name: The recreated login has an actual current nonNULL identity
+  sql: SELECT CASE WHEN SUSER_SID(N'sid_lifecycle') IS NOT NULL THEN 1 ELSE 0 END AS present
+  expect:
+    rows: 1
+    data:
+    - present: 1
+- name: More than two arguments remains genuinely invalid SQL
+  sql: SELECT SUSER_SID(N'root',1,2) AS sid
+  expect:
+    error: true
+- name: Other-login discovery remains a positive target beyond native self visibility
+  sql: SELECT CASE WHEN SUSER_SID(N'root') IS NOT NULL THEN 1 ELSE 0 END AS present
+  expect:
+    rows: 1
+    data:
+    - present: 1
+  username: sid_member
+  password: pw
+  noncritical: true
+- name: Windows validation argument remains an explicit positive profile target
+  sql: SELECT CASE WHEN SUSER_SID(N'root',0)=SUSER_SID() THEN 1 ELSE 0 END AS same_sid
+  expect:
+    rows: 1
+    data:
+    - same_sid: 1
+  noncritical: true
+cleanup:
+- sql: DROP TABLE IF EXISTS sid_history
+- sql: DROP TABLE IF EXISTS sid_defaults
+- scm: "(begin (define s (newsession)) (s \"username\" \"root\") (s \"schema\" \"system\") (s \"syntax\" \"mysql\")\n (sql_with_statement\
+    \ s nil 0 \"DROP USER IF EXISTS sid_lifecycle\" (lambda (tx)\n  (mysql_run_sql_statement tx \"system\" \"DROP USER IF\
+    \ EXISTS sid_lifecycle\" s (lambda (_row) true) (lambda args true)))))"
+- scm: "(begin (define s (newsession)) (s \"username\" \"root\") (s \"schema\" \"system\") (s \"syntax\" \"mysql\")\n (sql_with_statement\
+    \ s nil 0 \"DROP USER IF EXISTS sid_member\" (lambda (tx)\n  (mysql_run_sql_statement tx \"system\" \"DROP USER IF EXISTS\
+    \ sid_member\" s (lambda (_row) true) (lambda args true)))))"

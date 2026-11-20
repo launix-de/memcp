@@ -45,7 +45,7 @@ test_cases:
   expect:
     error: true
 - name: Compress both UUID representations
-  scm: (begin (rebuild (table "memcp-tests" false "uuid_binary_recovery" false) true false) (rebuild (table "memcp-tests" false "uuid_native_recovery" false) true false))
+  scm: (begin (rebuild (table "memcp-tests" false "uuid_binary_recovery" false nil) true false) (rebuild (table "memcp-tests" false "uuid_native_recovery" false nil) true false))
 - name: Persist compressed columns and restart
   sql: SHUTDOWN
 - name: Binary default remains dynamic after compressed restart

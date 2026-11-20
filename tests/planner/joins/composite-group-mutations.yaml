@@ -1,0 +1,368 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# https://learn.microsoft.com/sql/t-sql/queries/update-transact-sql
+metadata:
+  syntax: tsql
+  isolated: true
+  description: Exact composite lookup proofs retain grouped domains, NULL semantics and native mutation
+    ownership
+setup:
+- sql: CREATE TABLE composite_write_targets(id INT PRIMARY KEY,amount INT)
+- sql: INSERT INTO composite_write_targets VALUES(1,10),(2,20),(3,30),(4,40),(5,50)
+- sql: CREATE TABLE composite_write_requests(id INT)
+- sql: INSERT INTO composite_write_requests VALUES(1),(1),(2),(3),(4),(NULL),(NULL)
+- sql: CREATE TABLE composite_write_periods(id INT,period INT,value_id INT,PRIMARY KEY(id,period))
+- sql: INSERT INTO composite_write_periods VALUES(1,20220101,8),(1,20230101,7),(1,20250101,8),(2,20250101,8),(2,20260101,7),(3,20230101,NULL)
+- sql: CREATE TABLE composite_write_values(id INT PRIMARY KEY,amount INT)
+- sql: INSERT INTO composite_write_values VALUES(7,70)
+- sql: CREATE TABLE composite_write_audit(id INT,amount INT)
+- sql: CREATE TRIGGER composite_write_trigger ON composite_write_targets AFTER UPDATE AS INSERT INTO composite_write_audit(id,amount)
+    SELECT id,amount FROM inserted
+- sql: CREATE TABLE composite_optional_targets(id INT PRIMARY KEY,tag INT,amount INT)
+- sql: INSERT INTO composite_optional_targets VALUES(1,1,10),(2,NULL,20),(3,3,30)
+- sql: CREATE TABLE composite_optional_pairs(slot INT PRIMARY KEY,id INT)
+- sql: INSERT INTO composite_optional_pairs VALUES(1,1),(2,1),(3,NULL),(4,NULL)
+- sql: CREATE TABLE composite_optional_lookup(slot INT PRIMARY KEY)
+- sql: INSERT INTO composite_optional_lookup VALUES(1),(2),(3),(4)
+- sql: CREATE TABLE composite_optional_audit(id INT,amount INT)
+- sql: CREATE TRIGGER composite_optional_trigger ON composite_optional_targets AFTER UPDATE AS INSERT
+    INTO composite_optional_audit(id,amount) SELECT id,amount FROM inserted
+- sql: CREATE TABLE composite_text_targets(id INT PRIMARY KEY,amount INT)
+- sql: INSERT INTO composite_text_targets VALUES(1,0)
+- sql: CREATE TABLE composite_text_requests(token VARCHAR(4))
+- sql: INSERT INTO composite_text_requests VALUES('1'),('01')
+- sql: CREATE TABLE composite_text_periods(id INT,period INT,token VARCHAR(4),PRIMARY KEY(id,period))
+- sql: INSERT INTO composite_text_periods VALUES(1,100,'1'),(1,200,'01')
+- sql: CREATE TABLE composite_text_audit(id INT,amount INT)
+- sql: CREATE TRIGGER composite_text_trigger ON composite_text_targets AFTER UPDATE AS INSERT INTO composite_text_audit(id,amount)
+    SELECT id,amount FROM inserted
+- sql: CREATE TABLE composite_tenant_periods(tenant_id INT,person_id INT,period INT,value_id INT,PRIMARY KEY(tenant_id,person_id,period))
+- sql: INSERT INTO composite_tenant_periods VALUES(10,1,20230101,7),(10,1,20250101,8),(20,1,20220101,7),(20,1,20230101,8),(20,2,20250101,NULL)
+- sql: CREATE TABLE composite_tenant_values(tenant_id INT,id INT,amount INT,PRIMARY KEY(tenant_id,id))
+- sql: INSERT INTO composite_tenant_values VALUES(10,7,70),(20,7,170),(20,8,180)
+cleanup:
+- sql: DROP TABLE composite_tenant_values
+- sql: DROP TABLE composite_tenant_periods
+- sql: DROP TRIGGER composite_text_trigger
+- sql: DROP TABLE composite_text_audit
+- sql: DROP TABLE composite_text_periods
+- sql: DROP TABLE composite_text_requests
+- sql: DROP TABLE composite_text_targets
+- sql: DROP TRIGGER composite_optional_trigger
+- sql: DROP TABLE composite_optional_audit
+- sql: DROP TABLE composite_optional_lookup
+- sql: DROP TABLE composite_optional_pairs
+- sql: DROP TABLE composite_optional_targets
+- sql: DROP TRIGGER composite_write_trigger
+- sql: DROP TABLE composite_write_audit
+- sql: DROP TABLE composite_write_values
+- sql: DROP TABLE composite_write_periods
+- sql: DROP TABLE composite_write_requests
+- sql: DROP TABLE composite_write_targets
+test_cases:
+- name: Composite native key binds through the unique grouped request domain
+  sql: |-
+    UPDATE t SET amount=ISNULL(r.amount,-1)
+     FROM composite_write_targets t INNER JOIN composite_write_periods s
+     INNER JOIN (SELECT id,ISNULL(
+       (SELECT MAX(p.period) FROM composite_write_periods p WHERE p.period<=20240101 AND p.id=composite_write_requests.id),
+       (SELECT MIN(p.period) FROM composite_write_periods p WHERE p.period>20240101 AND p.id=composite_write_requests.id)) AS chosen_period
+       FROM composite_write_requests GROUP BY id) g ON s.id=g.id AND s.period=g.chosen_period
+     LEFT JOIN composite_write_values r ON s.value_id=r.id ON t.id=s.id
+  expect:
+    affected_rows: 3
+- name: MAX and MIN select the exact past and earliest future nullable values
+  sql: SELECT id,amount FROM composite_write_targets ORDER BY id
+  expect:
+    rows: 5
+    data: &id001
+    - id: 1
+      amount: 70
+    - id: 2
+      amount: -1
+    - id: 3
+      amount: -1
+    - id: 4
+      amount: 40
+    - id: 5
+      amount: 50
+- name: Duplicate input and NULL request groups never repeat a target mutation
+  sql: SELECT id,amount FROM composite_write_audit ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - id: 1
+      amount: 70
+    - id: 2
+      amount: -1
+    - id: 3
+      amount: -1
+- name: Joined grouping remains inside the native transaction
+  session_id: composite_proof_rollback
+  sql: BEGIN TRANSACTION
+- name: The same complete group proof supports private mutation
+  session_id: composite_proof_rollback
+  sql: |-
+    UPDATE t SET amount=ISNULL(r.amount,-1)+5
+     FROM composite_write_targets t INNER JOIN composite_write_periods s
+     INNER JOIN (SELECT id,ISNULL(
+       (SELECT MAX(p.period) FROM composite_write_periods p WHERE p.period<=20240101 AND p.id=composite_write_requests.id),
+       (SELECT MIN(p.period) FROM composite_write_periods p WHERE p.period>20240101 AND p.id=composite_write_requests.id)) AS chosen_period
+       FROM composite_write_requests GROUP BY id) g ON s.id=g.id AND s.period=g.chosen_period
+     LEFT JOIN composite_write_values r ON s.value_id=r.id ON t.id=s.id
+  expect:
+    affected_rows: 3
+- name: Private target values come from one complete selected tuple
+  sql: SELECT id,amount FROM composite_write_targets ORDER BY id
+  expect:
+    rows: 5
+    data:
+    - id: 1
+      amount: 75
+    - id: 2
+      amount: 4
+    - id: 3
+      amount: 4
+    - id: 4
+      amount: 40
+    - id: 5
+      amount: 50
+  session_id: composite_proof_rollback
+- name: Rollback retains the existing native mutation owner
+  session_id: composite_proof_rollback
+  sql: ROLLBACK TRANSACTION
+- name: Rollback restores every target value
+  sql: SELECT id,amount FROM composite_write_targets ORDER BY id
+  expect:
+    rows: 5
+    data: *id001
+- name: Rollback also restores the exact trigger tuples
+  sql: SELECT id,amount FROM composite_write_audit ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - id: 1
+      amount: 70
+    - id: 2
+      amount: -1
+    - id: 3
+      amount: -1
+- name: Create the session scoped native target
+  session_id: composite_proof_temporary
+  sql: 'CREATE TABLE #composite_write_target(id INT,amount INT)'
+- name: Populate the session scoped target
+  session_id: composite_proof_temporary
+  sql: 'INSERT INTO #composite_write_target VALUES(1,10),(1,11),(2,20),(3,30),(4,40),(5,50)'
+  expect:
+    affected_rows: 6
+- name: Composite key proof retains the session native table declaration
+  session_id: composite_proof_temporary
+  sql: |-
+    DECLARE @cutoff INT=20240101; UPDATE t SET amount=ISNULL(r.amount,-1)
+     FROM #composite_write_target t INNER JOIN composite_write_periods s
+     INNER JOIN (SELECT id,ISNULL(
+       (SELECT MAX(p.period) FROM composite_write_periods p WHERE p.period<=@cutoff AND p.id=#composite_write_target.id),
+       (SELECT MIN(p.period) FROM composite_write_periods p WHERE p.period>@cutoff AND p.id=#composite_write_target.id)) AS chosen_period
+       FROM #composite_write_target GROUP BY id) g ON s.id=g.id AND s.period=g.chosen_period
+     LEFT JOIN composite_write_values r ON s.value_id=r.id ON t.id=s.id
+  expect:
+    affected_rows: 4
+- name: Scoped target values retain the declared integer and NULL semantics
+  sql: 'SELECT id,amount FROM #composite_write_target ORDER BY id'
+  expect:
+    rows: 6
+    data:
+    - id: 1
+      amount: 70
+    - id: 1
+      amount: 70
+    - id: 2
+      amount: -1
+    - id: 3
+      amount: -1
+    - id: 4
+      amount: 40
+    - id: 5
+      amount: 50
+  session_id: composite_proof_temporary
+- name: A fresh invocation cutoff retains its complete group partition
+  session_id: composite_proof_temporary
+  sql: |-
+    DECLARE @cutoff INT=20260101; UPDATE t SET amount=ISNULL(r.amount,-1)
+     FROM #composite_write_target t INNER JOIN composite_write_periods s
+     INNER JOIN (SELECT id,ISNULL(
+       (SELECT MAX(p.period) FROM composite_write_periods p WHERE p.period<=@cutoff AND p.id=#composite_write_target.id),
+       (SELECT MIN(p.period) FROM composite_write_periods p WHERE p.period>@cutoff AND p.id=#composite_write_target.id)) AS chosen_period
+       FROM #composite_write_target GROUP BY id) g ON s.id=g.id AND s.period=g.chosen_period
+     LEFT JOIN composite_write_values r ON s.value_id=r.id ON t.id=s.id
+  expect:
+    affected_rows: 4
+- name: Changed session coordinates select fresh exact period values
+  session_id: composite_proof_temporary
+  sql: 'SELECT id,amount FROM #composite_write_target ORDER BY id'
+  expect:
+    rows: 6
+    data:
+    - id: 1
+      amount: -1
+    - id: 1
+      amount: -1
+    - id: 2
+      amount: 70
+    - id: 3
+      amount: -1
+    - id: 4
+      amount: 40
+    - id: 5
+      amount: 50
+- name: A NULL invocation coordinate cannot match a SQL period
+  session_id: composite_proof_temporary
+  sql: |-
+    DECLARE @cutoff INT=NULL; UPDATE t SET amount=ISNULL(r.amount,-1)
+     FROM #composite_write_target t INNER JOIN composite_write_periods s
+     INNER JOIN (SELECT id,ISNULL(
+       (SELECT MAX(p.period) FROM composite_write_periods p WHERE p.period<=@cutoff AND p.id=#composite_write_target.id),
+       (SELECT MIN(p.period) FROM composite_write_periods p WHERE p.period>@cutoff AND p.id=#composite_write_target.id)) AS chosen_period
+       FROM #composite_write_target GROUP BY id) g ON s.id=g.id AND s.period=g.chosen_period
+     LEFT JOIN composite_write_values r ON s.value_id=r.id ON t.id=s.id
+  expect:
+    affected_rows: 0
+- name: The NULL invocation retains every prior heap target value
+  session_id: composite_proof_temporary
+  sql: 'SELECT id,amount FROM #composite_write_target ORDER BY id'
+  expect:
+    rows: 6
+    data:
+    - id: 1
+      amount: -1
+    - id: 1
+      amount: -1
+    - id: 2
+      amount: 70
+    - id: 3
+      amount: -1
+    - id: 4
+      amount: 40
+    - id: 5
+      amount: 50
+- name: Release the temporary target using its ordinary native owner
+  session_id: composite_proof_temporary
+  sql: 'DROP TABLE #composite_write_target'
+- name: Create the heap target with two independent domain keys
+  session_id: composite_proof_tenant
+  sql: 'CREATE TABLE #composite_tenant_target(tenant_id INT,person_id INT,amount INT)'
+- name: Duplicate physical targets retain their complete tenant and person coordinates
+  session_id: composite_proof_tenant
+  sql: 'INSERT INTO #composite_tenant_target VALUES(10,1,10),(10,1,11),(20,1,20),(20,2,30),(10,2,40)'
+  expect:
+    affected_rows: 5
+- name: Grouped period choice binds both domain keys and the optional lookup key
+  session_id: composite_proof_tenant
+  sql: |-
+    DECLARE @cutoff INT=20240101; UPDATE t SET amount=ISNULL(r.amount,-1)
+    FROM #composite_tenant_target t INNER JOIN composite_tenant_periods s
+    INNER JOIN (
+      SELECT tenant_id,person_id,ISNULL(
+        (SELECT MAX(p.period) FROM composite_tenant_periods p
+         WHERE p.period<=@cutoff AND p.tenant_id=#composite_tenant_target.tenant_id AND p.person_id=#composite_tenant_target.person_id),
+        (SELECT MIN(p.period) FROM composite_tenant_periods p
+         WHERE p.period>@cutoff AND p.tenant_id=#composite_tenant_target.tenant_id AND p.person_id=#composite_tenant_target.person_id)) AS chosen_period
+      FROM #composite_tenant_target GROUP BY tenant_id,person_id
+    ) g ON s.tenant_id=g.tenant_id AND s.person_id=g.person_id AND s.period=g.chosen_period
+    LEFT JOIN composite_tenant_values r ON s.tenant_id=r.tenant_id AND s.value_id=r.id
+    ON t.tenant_id=s.tenant_id AND t.person_id=s.person_id
+  expect:
+    affected_rows: 4
+- name: Shared person and value identifiers never mix tenant bindings
+  session_id: composite_proof_tenant
+  sql: 'SELECT tenant_id,person_id,amount FROM #composite_tenant_target ORDER BY tenant_id,person_id,amount'
+  expect:
+    rows: 5
+    data:
+    - {tenant_id: 10, person_id: 1, amount: 70}
+    - {tenant_id: 10, person_id: 1, amount: 70}
+    - {tenant_id: 10, person_id: 2, amount: 40}
+    - {tenant_id: 20, person_id: 1, amount: 180}
+    - {tenant_id: 20, person_id: 2, amount: -1}
+- name: Release the two key heap target with its session owner
+  session_id: composite_proof_tenant
+  sql: 'DROP TABLE #composite_tenant_target'
+- name: Nested optional INNER operands retain both matches and preserved rows
+  sql: |-
+    SELECT t.id,p.slot FROM composite_optional_targets t
+    LEFT JOIN (composite_optional_pairs p INNER JOIN composite_optional_lookup l ON p.slot=l.slot)
+    ON t.tag=p.id ORDER BY t.id,p.slot
+  expect:
+    rows: 4
+    data:
+    - id: 1
+      slot: 1
+    - id: 1
+      slot: 2
+    - id: 2
+      slot: null
+    - id: 3
+      slot: null
+- name: Optional multirow source still requires one coherent mutation per target
+  noncritical: true
+  sql: |-
+    UPDATE t SET amount=t.amount+1 FROM composite_optional_targets t
+    LEFT JOIN (composite_optional_pairs p INNER JOIN composite_optional_lookup l ON p.slot=l.slot)
+    ON t.tag=p.id
+  expect:
+    affected_rows: 3
+- name: Nullable operand ON never licenses repeated target effects
+  sql: |-
+    SELECT id,CASE WHEN amount IN (id*10,id*10+1) THEN 1 ELSE 0 END AS safe
+    FROM composite_optional_targets ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - id: 1
+      safe: 1
+    - id: 2
+      safe: 1
+    - id: 3
+      safe: 1
+- name: Optional ambiguity never repeats a native trigger tuple
+  sql: SELECT id,COUNT(*) AS n FROM composite_optional_audit GROUP BY id HAVING COUNT(*)>1
+  expect:
+    rows: 0
+- name: SQL NULL keys cannot acquire matches through equality propagation
+  sql: |-
+    SELECT t.id,p.slot FROM composite_optional_targets t
+    LEFT JOIN (composite_optional_pairs p INNER JOIN composite_optional_lookup l ON p.slot=l.slot)
+    ON t.tag=p.id WHERE t.tag IS NULL ORDER BY t.id,p.slot
+  expect:
+    rows: 1
+    data:
+    - id: 2
+      slot: null
+- name: Text groups retain their two distinct SQL domains
+  sql: SELECT token,COUNT(*) AS n FROM composite_text_requests GROUP BY token ORDER BY token
+  expect:
+    rows: 2
+    data:
+    - token: '01'
+      n: 1
+    - token: '1'
+      n: 1
+- name: Coercing text group matches require one coherent target choice
+  noncritical: true
+  sql: |-
+    UPDATE t SET amount=t.amount+1 FROM composite_text_targets t
+    INNER JOIN composite_text_periods s INNER JOIN (
+     SELECT token,(SELECT MAX(p.period) FROM composite_text_periods p WHERE p.token=composite_text_requests.token) AS chosen_period
+     FROM composite_text_requests GROUP BY token) g ON s.id=g.token AND s.period=g.chosen_period ON t.id=s.id
+  expect:
+    affected_rows: 1
+- name: Coercion cannot authorize repeated native target effects
+  sql: SELECT CASE WHEN amount IN(0,1) THEN 1 ELSE 0 END AS safe FROM composite_text_targets
+  expect:
+    rows: 1
+    data:
+    - safe: 1
+- name: Coercion cannot authorize repeated transition tuples
+  sql: SELECT id,COUNT(*) AS n FROM composite_text_audit GROUP BY id HAVING COUNT(*)>1
+  expect:
+    rows: 0

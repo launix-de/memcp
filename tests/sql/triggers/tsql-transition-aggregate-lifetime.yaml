@@ -1,0 +1,114 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  description: Transition aggregates and derived groups consume their actual statement invocation
+
+setup:
+- sql: CREATE TABLE lifetime_input(id INT PRIMARY KEY, group_key INT, amount INT, step_value INT)
+- sql: INSERT lifetime_input VALUES(1,1,4,0),(2,1,NULL,0),(3,NULL,6,0),(4,2,8,0)
+- sql: CREATE TABLE lifetime_metrics(step_value INT, old_rows INT, new_rows INT, old_total INT, new_total INT)
+- sql: CREATE TABLE lifetime_groups(step_value INT, bucket INT, rows_in_group INT, total INT, distinct_values INT)
+- sql: CREATE TABLE lifetime_distinct(step_value INT, bucket INT)
+- sql: CREATE TABLE lifetime_correlated(id INT, step_value INT, old_rows INT, old_total INT)
+- sql: |
+    CREATE TRIGGER dbo.lifetime_audit ON dbo.lifetime_input AFTER UPDATE AS
+    BEGIN
+      INSERT lifetime_metrics(step_value,old_rows,new_rows,old_total,new_total)
+      SELECT (SELECT COALESCE(MAX(step_value),-1) FROM inserted),
+             (SELECT COUNT(*) FROM deleted),(SELECT COUNT(*) FROM inserted),
+             (SELECT SUM(amount) FROM deleted),(SELECT SUM(amount) FROM inserted);
+      INSERT lifetime_groups(step_value,bucket,rows_in_group,total,distinct_values)
+      SELECT MAX(step_value),CASE WHEN group_key IS NULL THEN 0 ELSE group_key END,
+             COUNT(*),SUM(amount),COUNT(DISTINCT amount)
+      FROM deleted
+      GROUP BY CASE WHEN group_key IS NULL THEN 0 ELSE group_key END;
+      INSERT lifetime_distinct(step_value,bucket)
+      SELECT (SELECT COALESCE(MAX(step_value),-1) FROM inserted),derived.bucket
+      FROM (SELECT DISTINCT CASE WHEN group_key IS NULL THEN 0 ELSE group_key END AS bucket FROM deleted) derived;
+      INSERT lifetime_correlated(id,step_value,old_rows,old_total)
+      SELECT current_row.id,current_row.step_value,
+             (SELECT COUNT(*) FROM deleted old_row WHERE old_row.group_key=current_row.group_key OR (old_row.group_key IS NULL AND current_row.group_key IS NULL)),
+             (SELECT SUM(amount) FROM deleted old_row WHERE old_row.group_key=current_row.group_key OR (old_row.group_key IS NULL AND current_row.group_key IS NULL))
+      FROM inserted current_row;
+    END
+
+cleanup:
+- sql: DROP TRIGGER IF EXISTS dbo.lifetime_audit
+- sql: DROP TABLE IF EXISTS lifetime_correlated
+- sql: DROP TABLE IF EXISTS lifetime_distinct
+- sql: DROP TABLE IF EXISTS lifetime_groups
+- sql: DROP TABLE IF EXISTS lifetime_metrics
+- sql: DROP TABLE IF EXISTS lifetime_input
+
+test_cases:
+- name: A multirow update binds complete OLD and NEW aggregate inputs
+  sql: UPDATE lifetime_input SET amount=CASE WHEN id=2 THEN 4 ELSE amount+1 END,step_value=10
+  expect: {rows: 1, data: [{affected_rows: 4}]}
+- name: The same warm update uses a fresh statement image
+  sql: UPDATE lifetime_input SET amount=CASE WHEN id=2 THEN 4 ELSE amount+1 END,step_value=10
+  expect: {rows: 1, data: [{affected_rows: 4}]}
+- name: An empty update supplies empty images to the same trigger body
+  sql: UPDATE lifetime_input SET step_value=30 WHERE id=-1
+  expect: {rows: 1, data: [{affected_rows: 0}]}
+- name: A later subset update retains real NULL aggregates
+  sql: UPDATE lifetime_input SET amount=NULL,step_value=20 WHERE group_key=1
+  expect: {rows: 1, data: [{affected_rows: 2}]}
+- name: Every invocation retains its own counts and NULL-sensitive sums
+  sql: SELECT step_value,old_rows,new_rows,old_total,new_total FROM lifetime_metrics ORDER BY step_value,old_total,new_total
+  expect:
+    rows: 4
+    data:
+    - {step_value: -1, old_rows: 0, new_rows: 0, old_total: null, new_total: null}
+    - {step_value: 10, old_rows: 4, new_rows: 4, old_total: 18, new_total: 25}
+    - {step_value: 10, old_rows: 4, new_rows: 4, old_total: 25, new_total: 28}
+    - {step_value: 20, old_rows: 2, new_rows: 2, old_total: 10, new_total: null}
+- name: CASE group keys and distinct operands preserve each OLD image
+  sql: SELECT step_value,bucket,rows_in_group,total,distinct_values FROM lifetime_groups ORDER BY step_value,bucket,total
+  expect:
+    rows: 7
+    data:
+    - {step_value: 0, bucket: 0, rows_in_group: 1, total: 6, distinct_values: 1}
+    - {step_value: 0, bucket: 1, rows_in_group: 2, total: 4, distinct_values: 1}
+    - {step_value: 0, bucket: 2, rows_in_group: 1, total: 8, distinct_values: 1}
+    - {step_value: 10, bucket: 0, rows_in_group: 1, total: 7, distinct_values: 1}
+    - {step_value: 10, bucket: 1, rows_in_group: 2, total: 9, distinct_values: 2}
+    - {step_value: 10, bucket: 1, rows_in_group: 2, total: 10, distinct_values: 2}
+    - {step_value: 10, bucket: 2, rows_in_group: 1, total: 9, distinct_values: 1}
+- name: Derived DISTINCT applies inside each invocation and retains repeated caller outputs
+  sql: SELECT step_value,bucket FROM lifetime_distinct ORDER BY step_value,bucket
+  expect:
+    rows: 7
+    data:
+    - {step_value: 10, bucket: 0}
+    - {step_value: 10, bucket: 0}
+    - {step_value: 10, bucket: 1}
+    - {step_value: 10, bucket: 1}
+    - {step_value: 10, bucket: 2}
+    - {step_value: 10, bucket: 2}
+    - {step_value: 20, bucket: 1}
+- name: Aggregate consumers preserve the actual public row update result
+  sql: SELECT id,group_key,amount,step_value FROM lifetime_input ORDER BY id
+  expect:
+    rows: 4
+    data:
+    - {id: 1, group_key: 1, amount: null, step_value: 20}
+    - {id: 2, group_key: 1, amount: null, step_value: 20}
+    - {id: 3, group_key: null, amount: 8, step_value: 10}
+    - {id: 4, group_key: 2, amount: 10, step_value: 10}
+- name: Correlated OLD aggregates retain their current key domain including NULL
+  sql: SELECT id,step_value,old_rows,old_total FROM lifetime_correlated ORDER BY step_value,id,old_total
+  expect:
+    rows: 10
+    data:
+    - {id: 1, step_value: 10, old_rows: 2, old_total: 4}
+    - {id: 1, step_value: 10, old_rows: 2, old_total: 9}
+    - {id: 2, step_value: 10, old_rows: 2, old_total: 4}
+    - {id: 2, step_value: 10, old_rows: 2, old_total: 9}
+    - {id: 3, step_value: 10, old_rows: 1, old_total: 6}
+    - {id: 3, step_value: 10, old_rows: 1, old_total: 7}
+    - {id: 4, step_value: 10, old_rows: 1, old_total: 8}
+    - {id: 4, step_value: 10, old_rows: 1, old_total: 9}
+    - {id: 1, step_value: 20, old_rows: 2, old_total: 10}
+    - {id: 2, step_value: 20, old_rows: 2, old_total: 10}

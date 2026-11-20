@@ -161,7 +161,17 @@ func ApplyPromise(p Scmer, args []Scmer) Scmer {
 			old := promiseLock(cells)
 			if old != promisePendingAux {
 				promiseUnlock(cells, old)
-				panic(args[2].String())
+				// Preserve the historical string contract and retain structured
+				// diagnostics supplied by a producer instead of flattening them.
+				if args[2].IsString() {
+					panic(args[2].String())
+				}
+				if args[2].GetTag() == tagAny {
+					if failure, ok := args[2].Any().(error); ok {
+						panic(failure)
+					}
+				}
+				panic(args[2])
 			}
 			cells[0] = args[1]
 			promiseUnlock(cells, promiseResolvedAux)
@@ -487,6 +497,25 @@ func (h *orderedProducerHeap) Pop() any {
 // every producer, including on consumer failure/cancellation; producers whose
 // storage operator does not support braking finish with emission disabled.
 func scanOrderMerge(a ...Scmer) Scmer {
+	if len(a) != 7 {
+		panic("scan_order_merge expects tx, producers, positions, relations, offset, limit and consumer")
+	}
+	return scanOrderMergeUsing(a, NewNil(), NewNil())
+}
+
+// The reducing variant has a genuinely different result contract. Retain the
+// effect-only builtin and its persisted seven-argument programs unchanged.
+func scanOrderMergeReduce(a ...Scmer) Scmer {
+	if len(a) != 9 {
+		panic("scan_order_merge_reduce expects tx, producers, positions, relations, offset, limit, consumer, reducer and neutral")
+	}
+	if a[7].IsNil() {
+		panic("scan_order_merge_reduce requires a reducer")
+	}
+	return scanOrderMergeUsing(a[:7], a[7], a[8])
+}
+
+func scanOrderMergeUsing(a []Scmer, reduceValue, neutral Scmer) Scmer {
 	ctx := executionContextFrom(a[0])
 	if ctx == nil {
 		ctx = context.Background()
@@ -506,8 +535,14 @@ func scanOrderMerge(a ...Scmer) Scmer {
 		}
 		h.relations[i] = PrepareSerialProc(relations[i])
 	}
+	result := NewNil()
+	var reducer SerialProc
+	if !reduceValue.IsNil() {
+		reducer = PrepareSerialProc(reduceValue)
+		result = ApplyOnce(neutral, nil)
+	}
 	if limit == 0 {
-		return NewNil()
+		return result
 	}
 	stop := make(chan struct{})
 	var workers sync.WaitGroup
@@ -620,12 +655,17 @@ func scanOrderMerge(a ...Scmer) Scmer {
 	heap.Init(&h)
 	consumer := PrepareSerialProc(a[6])
 	var args [1]Scmer
+	var reduceArgs [2]Scmer
 	seen, emitted := 0, 0
 	for h.Len() > 0 {
 		cursor := h.cursors[0]
 		if seen >= offset {
 			args[0] = NewSlice(cursor.rows[cursor.index])
-			consumer.Call(args[:])
+			value := consumer.Call(args[:])
+			if !reduceValue.IsNil() {
+				reduceArgs[0], reduceArgs[1] = result, value
+				result = reducer.Call(reduceArgs[:])
+			}
 			emitted++
 			if limit >= 0 && emitted >= limit {
 				break
@@ -638,7 +678,7 @@ func scanOrderMerge(a ...Scmer) Scmer {
 			heap.Pop(&h)
 		}
 	}
-	return NewNil()
+	return result
 }
 
 func init_sync() {
@@ -653,12 +693,528 @@ func init_sync() {
 				{Kind: "number", Label: "offset"}, {Kind: "number", Label: "limit"},
 				{Kind: "func", Label: "consumer", Params: []*TypeDescriptor{{Kind: "list", Label: "row"}}, Return: &TypeDescriptor{Kind: "any"}},
 			}, Return: &TypeDescriptor{Kind: "any"},
-			JITInlineCost: 65535,
+			JITInlineCost: 9,
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				// JITGen native call boundary: channel construction.
-				ctx.Coverage.NativeCalls++
 				declaration := declarations["scan_order_merge"]
-				return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
+					ctx.Coverage.NativeCalls++
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
+				}
+				var d0 JITValueDesc
+				_ = d0
+				var d1 JITValueDesc
+				_ = d1
+				var d2 JITValueDesc
+				_ = d2
+				var d7 JITValueDesc
+				_ = d7
+				var d8 JITValueDesc
+				_ = d8
+				var d9 JITValueDesc
+				_ = d9
+				var d10 JITValueDesc
+				_ = d10
+				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+				branchSerial := ctx.branchSerial
+				_ = branchSerial
+				returnType := uint8(JITTypeUnknown)
+				returnTypeSeen := false
+				mergeReturnType := func(t uint8) {
+					if !returnTypeSeen {
+						returnType, returnTypeSeen = t, true
+					} else if returnType != t {
+						returnType = JITTypeUnknown
+					}
+				}
+				var bbs [3]BBDescriptor
+				for i := range args {
+					ctx.StabilizeDescForControlFlow(&args[i])
+				}
+				if result.Loc == LocAny {
+					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+					ctx.BindReg(result.Reg, &result)
+					ctx.BindReg(result.Reg2, &result)
+				}
+				resultRegsProtected := result.Loc == LocRegPair
+				if resultRegsProtected {
+					ctx.ProtectReg(result.Reg)
+					ctx.ProtectReg(result.Reg2)
+				}
+				lbl0 := ctx.ReserveLabel()
+				bbpos_0_0 := int32(-1)
+				_ = bbpos_0_0
+				lbl1 := ctx.ReserveLabel()
+				_ = lbl1
+				bbpos_0_1 := int32(-1)
+				_ = bbpos_0_1
+				lbl2 := ctx.ReserveLabel()
+				_ = lbl2
+				bbpos_0_2 := int32(-1)
+				_ = bbpos_0_2
+				lbl3 := ctx.ReserveLabel()
+				_ = lbl3
+				bbs[0].Render = func() JITValueDesc {
+					if bbs[0].Rendered {
+						ctx.EmitJmp(lbl1)
+						return result
+					}
+					bbs[0].Rendered = true
+					ctx.FlushRegisterMoves()
+					bbpos_0_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
+					ctx.MarkLabel(lbl1)
+					ctx.ResolveFixups()
+					ctx.ReclaimUntrackedRegs()
+					d0 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(len(args)))}
+					_ = d0
+					ctx.EnsureDesc(&d0)
+					if d0.Loc == LocImm {
+						d1 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d0.Imm.Int() != 7)}
+					} else {
+						r0 := ctx.AllocReg()
+						ctx.EmitCmpRegImm32(d0.Reg, 7)
+						d1 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r0, Condition: CondNotEqual}
+						ctx.BindReg(r0, &d1)
+					}
+					ctx.FreeDesc(&d0)
+					d2 = d1
+					ctx.SyncDesc(&d2)
+					if d2.Loc != LocImm && d2.Loc != LocFlags {
+						panic("jit: fused If condition is neither LocImm nor LocFlags")
+					}
+					if d2.Loc == LocImm {
+						if d2.Imm.Bool() {
+							return bbs[1].Render()
+						}
+						return bbs[2].Render()
+					}
+					ctx.EmitJump(d2.Condition, lbl2)
+					if bbs[2].Rendered {
+						ctx.EmitJmp(lbl3)
+					}
+					ctx.FreeDesc(&d1)
+					ctx.FlushRegisterMoves()
+					if !bbs[2].Rendered {
+						snap3 := d0
+						snap4 := d1
+						snap5 := d2
+						alloc6 := ctx.SnapshotAllocState()
+						bbs[2].Render()
+						ctx.RestoreAllocState(alloc6)
+						d0 = snap3
+						d1 = snap4
+						d2 = snap5
+					}
+					if !bbs[1].Rendered {
+						return bbs[1].Render()
+					}
+					return result
+					return result
+				}
+				bbs[1].Render = func() JITValueDesc {
+					if bbs[1].Rendered {
+						ctx.EmitJmp(lbl2)
+						return result
+					}
+					bbs[1].Rendered = true
+					ctx.FlushRegisterMoves()
+					bbpos_0_1 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
+					ctx.MarkLabel(lbl2)
+					ctx.ResolveFixups()
+					ctx.ReclaimUntrackedRegs()
+					_ = jitEmitGoVariadicCallFromDescs(ctx, declarations["scan_order_merge"].Fn, args, result)
+					ctx.EmitGoPanic("jit: builtin panic boundary unexpectedly returned")
+					return result
+				}
+				bbs[2].Render = func() JITValueDesc {
+					if bbs[2].Rendered {
+						ctx.EmitJmp(lbl3)
+						return result
+					}
+					bbs[2].Rendered = true
+					ctx.FlushRegisterMoves()
+					bbpos_0_2 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
+					ctx.MarkLabel(lbl3)
+					ctx.ResolveFixups()
+					ctx.ReclaimUntrackedRegs()
+					d7 = JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}
+					d8 = JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}
+					d9 = jitMaterializeVirtualGoSlice(ctx, args)
+					d9 = JITPrepareGoSliceArg(ctx, d9)
+					if d9.Loc != LocRegTriple && d9.Loc != LocStackTriple {
+						panic("jit: generic call arg expects 3-word Go slice (scanOrderMergeUsing arg0)")
+					}
+					d7 = JITPrepareScmerGoArg(ctx, d7)
+					d8 = JITPrepareScmerGoArg(ctx, d8)
+					ctx.SyncDesc(&d9)
+					ctx.SyncDesc(&d7)
+					ctx.SyncDesc(&d8)
+					d10 = ctx.EmitGoCallScalar(GoFuncAddr(scanOrderMergeUsing), []JITValueDesc{d9, d7, d8}, 2)
+					d10.NoHeapPointer = false
+					ctx.BindReg(d10.Reg, &d10)
+					ctx.BindReg(d10.Reg2, &d10)
+					ctx.FreeDesc(&d7)
+					ctx.FreeDesc(&d8)
+					ctx.SyncDesc(&d10)
+					if d10.Loc == LocRegPair || d10.Loc == LocStackPair || d10.Loc == LocInputPair {
+						ctx.EmitMovPairToResult(&d10, &result)
+						result.Type = d10.Type
+					} else {
+						switch d10.Type {
+						case tagBool:
+							ctx.EmitMakeBool(result, d10)
+							result.Type = tagBool
+						case tagInt:
+							ctx.EmitMakeInt(result, d10)
+							result.Type = tagInt
+						case tagFloat:
+							ctx.EmitMakeFloat(result, d10)
+							result.Type = tagFloat
+						case tagNil:
+							ctx.EmitMakeNil(result)
+							result.Type = tagNil
+						default:
+							ctx.EmitMovPairToResult(&d10, &result)
+							result.Type = d10.Type
+						}
+					}
+					mergeReturnType(result.Type)
+					ctx.EmitJmp(lbl0)
+					return result
+				}
+				returned := bbs[0].Render()
+				if ctx.hasBooleanFlags(returned) {
+					if resultRegsProtected {
+						ctx.UnprotectReg(result.Reg2)
+						ctx.UnprotectReg(result.Reg)
+					}
+					return returned
+				}
+				ctx.MarkLabel(lbl0)
+				ctx.ResolveFixups()
+				if resultRegsProtected {
+					ctx.UnprotectReg(result.Reg2)
+					ctx.UnprotectReg(result.Reg)
+				}
+				result.Type = returnType
+				result.ReturnTypeMerged = returnTypeSeen
+				return result
+			},
+			JITVirtualArgs: true,
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		Name: "scan_order_merge_reduce", Fn: scanOrderMergeReduce,
+		Type: &TypeDescriptor{Kind: "func", Description: "Reduce consumer results while merging bounded ordered complete-row producers", HasSideEffects: true,
+			Params: []*TypeDescriptor{
+				{Kind: "any", Label: "tx"},
+				{Kind: "list", Label: "producers", Element: &TypeDescriptor{Kind: "func", CrossGoroutine: true, Params: []*TypeDescriptor{{Kind: "func", Label: "emit", Params: []*TypeDescriptor{{Kind: "list", Label: "row"}}, Return: &TypeDescriptor{Kind: "any"}}}, Return: &TypeDescriptor{Kind: "any"}}},
+				{Kind: "list", Label: "positions"}, {Kind: "list", Label: "relations"},
+				{Kind: "number", Label: "offset"}, {Kind: "number", Label: "limit"},
+				{Kind: "func", Label: "consumer", Params: []*TypeDescriptor{{Kind: "list", Label: "row"}}, Return: &TypeDescriptor{Kind: "any"}},
+				{Kind: "func", Label: "reducer", Description: "serial reduction of emitted consumer results", SameGoroutine: true, NoEscape: true, Params: []*TypeDescriptor{{Kind: "any", Label: "accumulator"}, {Kind: "any", Label: "value"}}, Return: &TypeDescriptor{Kind: "any"}},
+				{Kind: "any", Label: "neutral", Description: "reducer initialization value or zero-argument initializer"},
+			}, Return: &TypeDescriptor{Kind: "any"},
+			JITInlineCost: 18,
+			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				declaration := declarations["scan_order_merge_reduce"]
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
+					ctx.Coverage.NativeCalls++
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
+				}
+				var d0 JITValueDesc
+				_ = d0
+				var d1 JITValueDesc
+				_ = d1
+				var d2 JITValueDesc
+				_ = d2
+				var d7 JITValueDesc
+				_ = d7
+				var d8 JITValueDesc
+				_ = d8
+				var d9 JITValueDesc
+				_ = d9
+				var d10 JITValueDesc
+				_ = d10
+				var virtualArgs19 []JITValueDesc
+				var d20 JITValueDesc
+				_ = d20
+				var d21 JITValueDesc
+				_ = d21
+				var d22 JITValueDesc
+				_ = d22
+				var d23 JITValueDesc
+				_ = d23
+				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+				branchSerial := ctx.branchSerial
+				_ = branchSerial
+				returnType := uint8(JITTypeUnknown)
+				returnTypeSeen := false
+				mergeReturnType := func(t uint8) {
+					if !returnTypeSeen {
+						returnType, returnTypeSeen = t, true
+					} else if returnType != t {
+						returnType = JITTypeUnknown
+					}
+				}
+				var bbs [5]BBDescriptor
+				for i := range args {
+					ctx.StabilizeDescForControlFlow(&args[i])
+				}
+				if result.Loc == LocAny {
+					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+					ctx.BindReg(result.Reg, &result)
+					ctx.BindReg(result.Reg2, &result)
+				}
+				resultRegsProtected := result.Loc == LocRegPair
+				if resultRegsProtected {
+					ctx.ProtectReg(result.Reg)
+					ctx.ProtectReg(result.Reg2)
+				}
+				lbl0 := ctx.ReserveLabel()
+				bbpos_0_0 := int32(-1)
+				_ = bbpos_0_0
+				lbl1 := ctx.ReserveLabel()
+				_ = lbl1
+				bbpos_0_1 := int32(-1)
+				_ = bbpos_0_1
+				lbl2 := ctx.ReserveLabel()
+				_ = lbl2
+				bbpos_0_2 := int32(-1)
+				_ = bbpos_0_2
+				lbl3 := ctx.ReserveLabel()
+				_ = lbl3
+				bbpos_0_3 := int32(-1)
+				_ = bbpos_0_3
+				lbl4 := ctx.ReserveLabel()
+				_ = lbl4
+				bbpos_0_4 := int32(-1)
+				_ = bbpos_0_4
+				lbl5 := ctx.ReserveLabel()
+				_ = lbl5
+				bbs[0].Render = func() JITValueDesc {
+					if bbs[0].Rendered {
+						ctx.EmitJmp(lbl1)
+						return result
+					}
+					bbs[0].Rendered = true
+					ctx.FlushRegisterMoves()
+					bbpos_0_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
+					ctx.MarkLabel(lbl1)
+					ctx.ResolveFixups()
+					ctx.ReclaimUntrackedRegs()
+					d0 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(len(args)))}
+					_ = d0
+					ctx.EnsureDesc(&d0)
+					if d0.Loc == LocImm {
+						d1 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d0.Imm.Int() != 9)}
+					} else {
+						r0 := ctx.AllocReg()
+						ctx.EmitCmpRegImm32(d0.Reg, 9)
+						d1 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r0, Condition: CondNotEqual}
+						ctx.BindReg(r0, &d1)
+					}
+					ctx.FreeDesc(&d0)
+					d2 = d1
+					ctx.SyncDesc(&d2)
+					if d2.Loc != LocImm && d2.Loc != LocFlags {
+						panic("jit: fused If condition is neither LocImm nor LocFlags")
+					}
+					if d2.Loc == LocImm {
+						if d2.Imm.Bool() {
+							return bbs[1].Render()
+						}
+						return bbs[2].Render()
+					}
+					ctx.EmitJump(d2.Condition, lbl2)
+					if bbs[2].Rendered {
+						ctx.EmitJmp(lbl3)
+					}
+					ctx.FreeDesc(&d1)
+					ctx.FlushRegisterMoves()
+					if !bbs[2].Rendered {
+						snap3 := d0
+						snap4 := d1
+						snap5 := d2
+						alloc6 := ctx.SnapshotAllocState()
+						bbs[2].Render()
+						ctx.RestoreAllocState(alloc6)
+						d0 = snap3
+						d1 = snap4
+						d2 = snap5
+					}
+					if !bbs[1].Rendered {
+						return bbs[1].Render()
+					}
+					return result
+					return result
+				}
+				bbs[1].Render = func() JITValueDesc {
+					if bbs[1].Rendered {
+						ctx.EmitJmp(lbl2)
+						return result
+					}
+					bbs[1].Rendered = true
+					ctx.FlushRegisterMoves()
+					bbpos_0_1 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
+					ctx.MarkLabel(lbl2)
+					ctx.ResolveFixups()
+					ctx.ReclaimUntrackedRegs()
+					_ = jitEmitGoVariadicCallFromDescs(ctx, declarations["scan_order_merge_reduce"].Fn, args, result)
+					ctx.EmitGoPanic("jit: builtin panic boundary unexpectedly returned")
+					return result
+				}
+				bbs[2].Render = func() JITValueDesc {
+					if bbs[2].Rendered {
+						ctx.EmitJmp(lbl3)
+						return result
+					}
+					bbs[2].Rendered = true
+					ctx.FlushRegisterMoves()
+					bbpos_0_2 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
+					ctx.MarkLabel(lbl3)
+					ctx.ResolveFixups()
+					ctx.ReclaimUntrackedRegs()
+					d7 = args[7]
+					d7.ID = 0
+					d9 = d7
+					d9.ID = 0
+					d8 = ctx.EmitTagEqualsBorrowed(&d9, tagNil, JITValueDesc{Loc: LocAny})
+					ctx.FreeDesc(&d7)
+					d10 = d8
+					ctx.EnsureDesc(&d10)
+					if d10.Loc != LocImm && d10.Loc != LocReg {
+						panic("jit: If condition is neither LocImm nor LocReg")
+					}
+					if d10.Loc == LocImm {
+						if d10.Imm.Bool() {
+							return bbs[3].Render()
+						}
+						return bbs[4].Render()
+					}
+					ctx.EmitCmpRegImm32(d10.Reg, 0)
+					ctx.EmitJump(CondNotEqual, lbl4)
+					if bbs[4].Rendered {
+						ctx.EmitJmp(lbl5)
+					}
+					ctx.FlushRegisterMoves()
+					if !bbs[4].Rendered {
+						snap11 := d0
+						snap12 := d1
+						snap13 := d2
+						snap14 := d7
+						snap15 := d8
+						snap16 := d9
+						snap17 := d10
+						alloc18 := ctx.SnapshotAllocState()
+						bbs[4].Render()
+						ctx.RestoreAllocState(alloc18)
+						d0 = snap11
+						d1 = snap12
+						d2 = snap13
+						d7 = snap14
+						d8 = snap15
+						d9 = snap16
+						d10 = snap17
+					}
+					if !bbs[3].Rendered {
+						return bbs[3].Render()
+					}
+					return result
+					ctx.FreeDesc(&d8)
+					return result
+				}
+				bbs[3].Render = func() JITValueDesc {
+					if bbs[3].Rendered {
+						ctx.EmitJmp(lbl4)
+						return result
+					}
+					bbs[3].Rendered = true
+					ctx.FlushRegisterMoves()
+					bbpos_0_3 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
+					ctx.MarkLabel(lbl4)
+					ctx.ResolveFixups()
+					ctx.ReclaimUntrackedRegs()
+					_ = jitEmitGoVariadicCallFromDescs(ctx, declarations["scan_order_merge_reduce"].Fn, args, result)
+					ctx.EmitGoPanic("jit: builtin panic boundary unexpectedly returned")
+					return result
+				}
+				bbs[4].Render = func() JITValueDesc {
+					if bbs[4].Rendered {
+						ctx.EmitJmp(lbl5)
+						return result
+					}
+					bbs[4].Rendered = true
+					ctx.FlushRegisterMoves()
+					bbpos_0_4 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
+					ctx.MarkLabel(lbl5)
+					ctx.ResolveFixups()
+					ctx.ReclaimUntrackedRegs()
+					virtualArgs19 = args[:7]
+					_ = virtualArgs19
+					d20 = args[7]
+					d20.ID = 0
+					d21 = args[8]
+					d21.ID = 0
+					d22 = jitMaterializeVirtualGoSlice(ctx, virtualArgs19)
+					d22 = JITPrepareGoSliceArg(ctx, d22)
+					if d22.Loc != LocRegTriple && d22.Loc != LocStackTriple {
+						panic("jit: generic call arg expects 3-word Go slice (scanOrderMergeUsing arg0)")
+					}
+					d20 = JITPrepareScmerGoArg(ctx, d20)
+					d21 = JITPrepareScmerGoArg(ctx, d21)
+					ctx.SyncDesc(&d22)
+					ctx.SyncDesc(&d20)
+					ctx.SyncDesc(&d21)
+					d23 = ctx.EmitGoCallScalar(GoFuncAddr(scanOrderMergeUsing), []JITValueDesc{d22, d20, d21}, 2)
+					d23.NoHeapPointer = false
+					ctx.BindReg(d23.Reg, &d23)
+					ctx.BindReg(d23.Reg2, &d23)
+					ctx.FreeDesc(&d20)
+					ctx.FreeDesc(&d21)
+					ctx.SyncDesc(&d23)
+					if d23.Loc == LocRegPair || d23.Loc == LocStackPair || d23.Loc == LocInputPair {
+						ctx.EmitMovPairToResult(&d23, &result)
+						result.Type = d23.Type
+					} else {
+						switch d23.Type {
+						case tagBool:
+							ctx.EmitMakeBool(result, d23)
+							result.Type = tagBool
+						case tagInt:
+							ctx.EmitMakeInt(result, d23)
+							result.Type = tagInt
+						case tagFloat:
+							ctx.EmitMakeFloat(result, d23)
+							result.Type = tagFloat
+						case tagNil:
+							ctx.EmitMakeNil(result)
+							result.Type = tagNil
+						default:
+							ctx.EmitMovPairToResult(&d23, &result)
+							result.Type = d23.Type
+						}
+					}
+					mergeReturnType(result.Type)
+					ctx.EmitJmp(lbl0)
+					return result
+				}
+				returned := bbs[0].Render()
+				if ctx.hasBooleanFlags(returned) {
+					if resultRegsProtected {
+						ctx.UnprotectReg(result.Reg2)
+						ctx.UnprotectReg(result.Reg)
+					}
+					return returned
+				}
+				ctx.MarkLabel(lbl0)
+				ctx.ResolveFixups()
+				if resultRegsProtected {
+					ctx.UnprotectReg(result.Reg2)
+					ctx.UnprotectReg(result.Reg)
+				}
+				result.Type = returnType
+				result.ReturnTypeMerged = returnTypeSeen
+				return result
 			},
 			JITVirtualArgs: true,
 		},

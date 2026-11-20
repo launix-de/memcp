@@ -1,0 +1,59 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: sql
+  isolated: true
+  description: Grouped derived sources retain ancestor domains without admitting lateral sibling references
+setup:
+  - sql: CREATE TABLE ancestor_roots(id INT,grp INT)
+  - sql: CREATE TABLE ancestor_values(value INT,grp INT,enabled INT)
+  - sql: INSERT INTO ancestor_roots VALUES(1,10),(1,10),(2,20),(3,30),(4,NULL)
+  - sql: INSERT INTO ancestor_values VALUES(1,10,1),(1,10,1),(2,10,1),(NULL,10,1),(3,20,1),(9,30,0),(4,NULL,1)
+cleanup:
+  - sql: DROP TABLE IF EXISTS ancestor_values
+  - sql: DROP TABLE IF EXISTS ancestor_roots
+test_cases:
+  - name: MySQL counts complete groups separately for duplicate and empty ancestor bindings
+    sql: |
+      SELECT parent.id,(SELECT COUNT(*) FROM
+        (SELECT child.value FROM ancestor_values child
+          WHERE child.enabled=1 AND child.grp=parent.grp GROUP BY child.value) grouped) AS n
+        FROM ancestor_roots parent ORDER BY parent.id
+    expect: {rows: 5, data: [{id: 1, n: 3}, {id: 1, n: 3}, {id: 2, n: 1}, {id: 3, n: 0}, {id: 4, n: 0}]}
+  - name: PostgreSQL preserves the same complete derived domains
+    syntax: psql
+    sql: |
+      SELECT parent.id,(SELECT COUNT(*) FROM
+        (SELECT child.value FROM ancestor_values child
+          WHERE child.enabled=1 AND child.grp=parent.grp GROUP BY child.value) grouped) AS n
+        FROM ancestor_roots parent ORDER BY parent.id
+    expect: {rows: 5, data: [{id: 1, n: 3}, {id: 1, n: 3}, {id: 2, n: 1}, {id: 3, n: 0}, {id: 4, n: 0}]}
+  - name: T-SQL preserves the same complete derived domains
+    syntax: tsql
+    sql: |
+      SELECT parent.id,(SELECT COUNT(*) FROM
+        (SELECT child.value FROM ancestor_values child
+          WHERE child.enabled=1 AND child.grp=parent.grp GROUP BY child.value) grouped) AS n
+        FROM ancestor_roots parent ORDER BY parent.id
+    expect: {rows: 5, data: [{id: 1, n: 3}, {id: 1, n: 3}, {id: 2, n: 1}, {id: 3, n: 0}, {id: 4, n: 0}]}
+  - name: Counting the nullable group value excludes its real NULL group
+    sql: |
+      SELECT parent.id,(SELECT COUNT(grouped.value) FROM
+        (SELECT child.value FROM ancestor_values child
+          WHERE child.enabled=1 AND child.grp=parent.grp GROUP BY child.value) grouped) AS n
+        FROM ancestor_roots parent ORDER BY parent.id
+    expect: {rows: 5, data: [{id: 1, n: 2}, {id: 1, n: 2}, {id: 2, n: 1}, {id: 3, n: 0}, {id: 4, n: 0}]}
+  - name: HAVING filters completed groups within their own ancestor domain
+    sql: |
+      SELECT parent.id,(SELECT COUNT(*) FROM
+        (SELECT child.value FROM ancestor_values child
+          WHERE child.enabled=1 AND child.grp=parent.grp GROUP BY child.value HAVING COUNT(*)>1) grouped) AS n
+        FROM ancestor_roots parent ORDER BY parent.id
+    expect: {rows: 5, data: [{id: 1, n: 1}, {id: 1, n: 1}, {id: 2, n: 0}, {id: 3, n: 0}, {id: 4, n: 0}]}
+  - name: A derived alias cannot capture the ancestor used in its own producer
+    sql: |
+      SELECT parent.id,(SELECT COUNT(*) FROM
+        (SELECT child.value FROM ancestor_values child
+          WHERE child.enabled=1 AND child.grp=parent.grp GROUP BY child.value) parent) AS n
+        FROM ancestor_roots parent ORDER BY parent.id
+    expect: {rows: 5, data: [{id: 1, n: 3}, {id: 1, n: 3}, {id: 2, n: 1}, {id: 3, n: 0}, {id: 4, n: 0}]}

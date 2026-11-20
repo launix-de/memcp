@@ -1,0 +1,37 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  description: Disabled statement source survives a real server restart and can be reenabled
+setup:
+- sql: CREATE TABLE trigger_state_persist_input(id INT PRIMARY KEY)
+- sql: CREATE TABLE trigger_state_persist_log(id INT)
+- sql: CREATE TRIGGER trigger_state_persist_audit ON trigger_state_persist_input AFTER INSERT AS INSERT INTO trigger_state_persist_log SELECT id FROM inserted
+cleanup:
+- sql: DROP TABLE IF EXISTS trigger_state_persist_input
+- sql: DROP TABLE IF EXISTS trigger_state_persist_log
+test_cases:
+- name: Persist an actual disabled declaration
+  sql: ALTER TABLE trigger_state_persist_input DISABLE TRIGGER ALL
+- name: Restart the process with its persisted native catalog
+  action: restart
+- name: Reload preserves disabled state and authoritative source
+  scm: |
+    (begin
+      (define rows (show (table "memcp-tests" false "trigger_state_persist_input" false nil) "statement_triggers"))
+      (and (equal? (count rows) 1) ((car rows) "disabled")
+        (equal? ((car rows) "source") "INSERT INTO trigger_state_persist_log SELECT id FROM inserted")))
+  expect: {result: true}
+- name: Reloaded disabled trigger does not execute
+  sql: INSERT INTO trigger_state_persist_input VALUES(1)
+- name: Disabled effect remains absent after restart
+  sql: SELECT COUNT(*) AS total FROM trigger_state_persist_log
+  expect: {rows: 1, data: [{total: 0}]}
+- name: Reenable the retained source after restart
+  sql: ALTER TABLE trigger_state_persist_input ENABLE TRIGGER trigger_state_persist_audit
+- name: Reenabled source executes on the real native transition
+  sql: INSERT INTO trigger_state_persist_input VALUES(2)
+- name: Only the post enable row is audited
+  sql: SELECT id FROM trigger_state_persist_log
+  expect: {rows: 1, data: [{id: 2}]}

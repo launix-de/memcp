@@ -1,0 +1,89 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Fixed before A/B: one cold request and four reuses of the same cache and SQL.
+# This exercises cached_parse and its guarded registry, unlike direct declaration parsing.
+metadata:
+  isolated: true
+  perf_ci: true
+  description: Guarded query cache retains wide native declarations across cold and reused requests
+  performance_shard_weight: 3
+  max_regression_pct: 20
+setup:
+- scm: |
+    (begin
+      (define columns (merge (list
+        (list (list "unique" "PRIMARY" (list "id")) (list "column" "id" "INT" (list) (list)))
+        (map (produceN 192) (lambda (index) (list "column" (concat "c" index) "INT" (list) (list)))))))
+      (sql_create_table "memcp-tests" "guard_registry_input" columns (list "engine" "memory") false nil)
+      (define names (merge (list (list "id") (map (produceN 192) (lambda (index) (concat "c" index))))))
+      (define values (merge (list (list 1) (map (produceN 192) (lambda (index) (+ index 1))))))
+      /* Ordinary SQL setup is shared with the baseline's native table ABI. */
+      (define csv (lambda (items) (reduce items (lambda (text item)
+        (concat text (if (equal? text "") "" ",") item)) "")))
+      (define text (concat "INSERT INTO guard_registry_input(" (csv names) ") VALUES(" (csv values) ")"))
+      (define session (newsession)) (session "schema" "memcp-tests") (session "username" "root")
+      (with_autocommit session nil nil text (lambda (tx)
+        (sql_execute_formula session tx
+          (sql_queryplan_compile_formula tx (parse_sql "memcp-tests" text nil session tx))
+          (lambda (_row) (error "fixture insert emitted a result row")) (lambda (_fields) true))))
+      (globalvars "__guard_registry_cache" (newcachemap))
+      (globalvars "__guard_registry_queries" (map (produceN 32) (lambda (index)
+        (concat "SELECT c" index " AS value,c" (+ index 64) " AS secondary FROM guard_registry_input WHERE id=1"))))
+      true)
+- scm: |
+    (globalvars "__guard_registry_read" (lambda (index) (begin
+      (define session (newsession)) (session "username" "root") (session "schema" "memcp-tests")
+      (define text (nth (globalvars "__guard_registry_queries") index))
+      (define output (newsession)) (output "rows" 0)
+      (with_autocommit session nil nil text (lambda (tx)
+        (sql_execute_formula session tx
+          (cached_parse (globalvars "__guard_registry_cache") "sql" (list parse_sql)
+            "memcp-tests" text nil "root" session false tx)
+          (lambda (row) (begin
+            (output "rows" (+ 1 (output "rows")))
+            (output "value" (row "value")) (output "secondary" (row "secondary"))))
+          (lambda (_fields) true))))
+      (if (equal? (output "rows") 1) (list (output "value") (output "secondary"))
+        (error "guarded cache changed point lookup multiplicity")))))
+test_cases:
+- name: Thirty two guarded declarations include cold population and four shared reuses
+  scm: |
+    (begin
+      (define totals (reduce (produceN 32) (lambda (totals index) (begin
+        (define row ((globalvars "__guard_registry_read") index))
+        (if (and (equal? (car row) (+ index 1)) (equal? (cadr row) (+ index 65))) true
+          (error "guarded cache returned a value from another query or request"))
+        (list (+ (car totals) 1) (+ (cadr totals) (car row)) (+ (nth totals 2) (cadr row)))))
+        (list 0 0 0)))
+      totals)
+  expect: {data: [[32,528,2576]]}
+  performance_rows: 1
+  threshold_ms: 10000
+  timeout: 120
+  warmup: 0
+  timing_samples: 5
+  timing_aggregation: total
+- name: Shared guarded lookup observes DML and later column declaration changes
+  scm: |
+    (begin
+      (define first (car ((globalvars "__guard_registry_read") 0)))
+      (define session (newsession)) (session "username" "root")
+      (define text "UPDATE guard_registry_input SET c0=99 WHERE id=1")
+      (with_autocommit session nil nil text (lambda (tx)
+        (sql_execute_formula session tx
+          (sql_queryplan_compile_formula tx (parse_sql "memcp-tests" text nil session tx))
+          (lambda (_row) true) (lambda (_fields) true))))
+      (define changed (car ((globalvars "__guard_registry_read") 0)))
+      (createcolumn (table "memcp-tests" false "guard_registry_input" false nil)
+        "additional_value" "INT" (list) (list))
+      (define changed_declaration (car ((globalvars "__guard_registry_read") 0)))
+      (list first changed changed_declaration))
+  expect: {data: [[1,99,99]]}
+cleanup:
+- sql: DROP TABLE IF EXISTS guard_registry_input
+- scm: |
+    (begin
+      (globalvars "__guard_registry_read" nil)
+      (globalvars "__guard_registry_queries" nil)
+      (globalvars "__guard_registry_cache" nil)
+      true)

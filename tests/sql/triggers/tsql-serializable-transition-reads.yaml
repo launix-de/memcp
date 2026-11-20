@@ -1,0 +1,74 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  requires_tds: true
+  isolated: true
+  description: Serializable trigger readers observe stored dependencies without mistaking immutable transitions for stored relations
+setup:
+- sql: CREATE TABLE serial_transition_input(id INT PRIMARY KEY,value NVARCHAR(100) NOT NULL)
+- sql: INSERT serial_transition_input VALUES(1,N'initial')
+- sql: CREATE TABLE serial_transition_allowed(id INT,allowed_value NVARCHAR(100))
+- sql: >-
+    CREATE TRIGGER serial_transition_guard ON serial_transition_input AFTER INSERT,UPDATE AS
+    BEGIN
+      SET NOCOUNT ON;
+      IF EXISTS(SELECT TOP 1 inserted.id
+        FROM inserted LEFT OUTER JOIN serial_transition_allowed a
+          ON inserted.id=a.id AND inserted.value=a.allowed_value
+        WHERE CASE WHEN (SELECT COUNT(*) FROM serial_transition_allowed WHERE id=inserted.id)=0
+          THEN inserted.value ELSE a.allowed_value END IS NULL)
+      BEGIN RAISERROR('value is not allowed',16,1); ROLLBACK; END;
+      SET NOCOUNT OFF;
+    END
+cleanup:
+- sql: DROP TABLE IF EXISTS serial_transition_input
+- sql: DROP TABLE IF EXISTS serial_transition_allowed
+test_cases:
+- name: Late serializable arming preserves an outer update transaction across trigger retirement and nested BEGIN
+  tds:
+    statements:
+    - {connection: owner,sql: 'BEGIN TRANSACTION; UPDATE serial_transition_input SET value=N''before-arm'' WHERE id=1'}
+    - {connection: owner,sql: SET TRANSACTION ISOLATION LEVEL SERIALIZABLE}
+    - {connection: owner,sql: 'UPDATE serial_transition_input SET value=N''after-arm'' WHERE id=1'}
+    - {connection: owner,sql: BEGIN TRANSACTION}
+    - connection: owner
+      sql: SELECT value,@@TRANCOUNT AS depth FROM serial_transition_input WHERE id=1
+      expect: {rows: 1,data: [{value: after-arm,depth: 2}]}
+    - connection: observer
+      sql: SELECT value FROM serial_transition_input WHERE id=1
+      expect: {rows: 1,data: [{value: initial}]}
+    - {connection: owner,sql: COMMIT TRANSACTION}
+    - connection: owner
+      sql: SELECT @@TRANCOUNT AS depth
+      expect: {rows: 1,data: [{depth: 1}]}
+    - {connection: owner,sql: COMMIT TRANSACTION}
+    - connection: observer
+      sql: SELECT value FROM serial_transition_input WHERE id=1
+      expect: {rows: 1,data: [{value: after-arm}]}
+- name: Full rollback still restores updates whose trigger consumed its private transition
+  tds:
+    statements:
+    - {connection: owner,sql: 'SET TRANSACTION ISOLATION LEVEL SERIALIZABLE; BEGIN TRANSACTION; UPDATE serial_transition_input SET value=N''rolled-back'' WHERE id=1'}
+    - connection: owner
+      sql: SELECT value FROM serial_transition_input WHERE id=1
+      expect: {rows: 1,data: [{value: rolled-back}]}
+    - {connection: owner,sql: ROLLBACK TRANSACTION}
+    - connection: observer
+      sql: SELECT value FROM serial_transition_input WHERE id=1
+      expect: {rows: 1,data: [{value: after-arm}]}
+- name: A real foreign write to a trigger dependency still aborts serializable validation and undoes its caller
+  tds:
+    statements:
+    - {connection: owner,sql: 'SET TRANSACTION ISOLATION LEVEL SERIALIZABLE; BEGIN TRANSACTION; UPDATE serial_transition_input SET value=N''must-undo'' WHERE id=1'}
+    - {connection: observer,sql: 'INSERT serial_transition_allowed VALUES(1,N''after-arm'')'}
+    - connection: owner
+      sql: BEGIN TRANSACTION
+      expect: {error: true,contains: ['41325',serializable validation failure]}
+    - {connection: owner,sql: ROLLBACK TRANSACTION}
+    - connection: observer
+      sql: SELECT value FROM serial_transition_input WHERE id=1
+      expect: {rows: 1,data: [{value: after-arm}]}
+    - connection: observer
+      sql: SELECT id,allowed_value FROM serial_transition_allowed
+      expect: {rows: 1,data: [{id: 1,allowed_value: after-arm}]}

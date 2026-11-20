@@ -31,6 +31,7 @@ type lambdaBinding struct {
 }
 type lambdaDemand struct {
 	object, keyBinding int
+	arity              int // -1 means the callable escapes an analysed direct call
 	key                Scmer
 }
 type lambdaPlan struct {
@@ -281,14 +282,23 @@ func buildLambdaPlan(proc *Proc) *lambdaPlan {
 			plan.globals = append(plan.globals, Symbol(strings.Clone(string(name))))
 		}
 	}
-	var native func(Scmer) Scmer
-	native = func(value Scmer) Scmer {
+	var native func(Scmer, bool) Scmer
+	native = func(value Scmer, callHead bool) Scmer {
 		plain := value.WithoutSourceInfo()
+		if plain.IsSymbol() && !callHead {
+			if index, exists := captureNames[plain.Symbol()]; exists {
+				plan.demands = append(plan.demands, lambdaDemand{object: index, keyBinding: -1, arity: -1})
+			}
+		}
 		if plain.ptr == nil {
 			return value
 		}
 		if _, ok := ClusterObjectOf(plain); ok {
-			return bind(lambdaBinding{pointer: weak.Make(plain.ptr), aux: plain.aux, inline: -1, literal: true})
+			name := bind(lambdaBinding{pointer: weak.Make(plain.ptr), aux: plain.aux, inline: -1, literal: true})
+			if !callHead {
+				plan.demands = append(plan.demands, lambdaDemand{object: captureNames[name.Symbol()], keyBinding: -1, arity: -1})
+			}
+			return name
 		}
 		switch plain.GetTag() {
 		case tagAny, tagProc, tagFuncEnv, tagClosure, tagJIT, tagParser, tagPromise, tagVector, tagBSON, tagFastDict:
@@ -314,7 +324,7 @@ func buildLambdaPlan(proc *Proc) *lambdaPlan {
 			result = append([]Scmer(nil), items...)
 		}
 		for i, item := range items {
-			next := native(item)
+			next := native(item, i == 0)
 			if next != item && result == nil {
 				result = append([]Scmer(nil), items...)
 			}
@@ -328,7 +338,7 @@ func buildLambdaPlan(proc *Proc) *lambdaPlan {
 		}
 		if len(items) > 0 && items[0].IsSymbol() {
 			if index, exists := captureNames[items[0].Symbol()]; exists {
-				demand := lambdaDemand{object: index, keyBinding: -1}
+				demand := lambdaDemand{object: index, keyBinding: -1, arity: len(items) - 1}
 				if len(items) == 2 {
 					key := items[1].WithoutSourceInfo()
 					if key.IsString() {
@@ -344,7 +354,7 @@ func buildLambdaPlan(proc *Proc) *lambdaPlan {
 		}
 		return value
 	}
-	body = native(body)
+	body = native(body, false)
 	params = append(params, NewSymbol(lambdaScopeSymbol))
 	inner := NewSlice([]Scmer{NewSymbol("lambda"), proc.Params, body, NewInt(int64(proc.NumVars))})
 	plan.factory = ownLambdaCode(NewSlice([]Scmer{NewSymbol("lambda"), NewSlice(params), inner}))
@@ -430,6 +440,7 @@ func compileLambdaTemplate(expression Scmer) Scmer {
 		}
 		prepared := original
 		prepared.Body = jitBindLambdaCaptures(original.Body, bindings, nil, nil)
+		prepared.syntaxSize = nil
 		prepared.NumVars = base + len(symbols)
 		prepared.En = &Globalenv
 		prepared.Compiled = &JITEntryPoint{CaptureBase: base, CaptureCount: len(symbols), CaptureKeys: keys, CaptureSymbols: symbols}

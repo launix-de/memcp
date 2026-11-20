@@ -1,0 +1,402 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  description: Optimistic native serializable observations survive own writes and reject logical read changes
+setup:
+- sql: CREATE TABLE serial_read_rows(id INT PRIMARY KEY,value INT)
+- sql: CREATE TABLE serial_read_empty(id INT PRIMARY KEY,value INT)
+- sql: CREATE TABLE serial_read_skew_a(id INT PRIMARY KEY,value INT)
+- sql: CREATE TABLE serial_read_skew_b(id INT PRIMARY KEY,value INT)
+- sql: CREATE TABLE serial_read_own(id INT PRIMARY KEY,value INT)
+- sql: CREATE TABLE serial_read_rebuild(id INT PRIMARY KEY,value INT)
+- sql: CREATE TABLE serial_read_foreign_update(id INT PRIMARY KEY,value INT)
+- sql: CREATE TABLE serial_read_foreign_delete(id INT PRIMARY KEY,value INT)
+- sql: CREATE TABLE serial_read_foreign_schema(id INT PRIMARY KEY,value INT)
+- sql: INSERT INTO serial_read_foreign_update VALUES(1,10)
+- sql: INSERT INTO serial_read_foreign_delete VALUES(1,10)
+- sql: INSERT INTO serial_read_foreign_schema VALUES(1,10)
+- sql: CREATE TABLE serial_read_doomed(id INT PRIMARY KEY,value INT)
+- sql: CREATE TABLE serial_read_policy(id INT PRIMARY KEY,value INT)
+- sql: INSERT INTO serial_read_policy VALUES(1,10)
+- sql: CREATE TABLE serial_read_join_left(id INT PRIMARY KEY,value INT)
+- sql: CREATE TABLE serial_read_join_right(id INT PRIMARY KEY,value INT)
+- sql: CREATE TABLE serial_read_join_empty(id INT PRIMARY KEY,value INT)
+- sql: INSERT INTO serial_read_join_left VALUES(1,10)
+- sql: INSERT INTO serial_read_join_right VALUES(1,20)
+- sql: INSERT INTO serial_read_rows VALUES(1,10)
+- sql: INSERT INTO serial_read_own VALUES(1,10)
+- sql: INSERT INTO serial_read_rebuild VALUES(1,10)
+cleanup:
+- sql: DROP TABLE IF EXISTS serial_read_join_left
+- sql: DROP TABLE IF EXISTS serial_read_join_right
+- sql: DROP TABLE IF EXISTS serial_read_join_empty
+- sql: DROP TABLE IF EXISTS serial_read_doomed
+- sql: DROP TABLE IF EXISTS serial_read_policy
+- sql: DROP TABLE IF EXISTS serial_read_created_commit
+- sql: DROP TABLE IF EXISTS serial_read_created_rollback
+- sql: DROP TABLE IF EXISTS serial_read_foreign_update
+- sql: DROP TABLE IF EXISTS serial_read_foreign_delete
+- sql: DROP TABLE IF EXISTS serial_read_foreign_schema
+- sql: DROP TABLE IF EXISTS serial_read_rows
+- sql: DROP TABLE IF EXISTS serial_read_empty
+- sql: DROP TABLE IF EXISTS serial_read_skew_a
+- sql: DROP TABLE IF EXISTS serial_read_skew_b
+- sql: DROP TABLE IF EXISTS serial_read_own
+- sql: DROP TABLE IF EXISTS serial_read_rebuild
+test_cases:
+- name: Stable repeated reads and a read-only commit retain their original result
+  scm: |
+    (begin
+      (define session (newsession)) (session "username" "root") (tx_begin_acid session)
+      (try (lambda () (begin
+        (define tx (session "__memcp_tx")) (tx_serializable tx) (tx_serializable tx)
+        (define target (table "memcp-tests" false "serial_read_rows" false tx))
+        (define total (lambda () (scan tx target '() '() '() (lambda () true) '("value") (lambda (acc value) (+ acc value)) 0 +)))
+        (define first (total)) (define second (total))
+        (tx_commit session) (and (equal? first 10) (equal? second 10))))
+        (lambda (failure) (begin (tx_rollback session) (error failure)))))
+  expect: {result: true}
+- name: A committed foreign insert aborts the next repeat read and cannot be committed
+  scm: |
+    (begin
+      (define session (newsession)) (session "username" "root") (tx_begin_acid session)
+      (try (lambda () (begin
+        (define tx (session "__memcp_tx")) (tx_serializable tx)
+        (define target (table "memcp-tests" false "serial_read_rows" false tx))
+        (define first (scan tx target '() '() '() (lambda () true) '("value") (lambda (acc value) (+ acc value)) 0 +))
+        (insert target '("id" "value") (list (list 2 20)))
+        (define read_rejected (try (lambda () (begin (scan tx target '() '() '() (lambda () true) '("value") (lambda (acc value) (+ acc value)) 0 +) false))
+          (lambda (failure) (strlike (concat failure) "%serializable read changed%"))))
+        (define commit_rejected (try (lambda () (begin (tx_commit session) false))
+          (lambda (failure) (strlike (concat failure) "%serializable read changed%"))))
+        (tx_rollback session)
+        (and (equal? first 10) read_rejected commit_rejected
+          (equal? (scan nil target '() '() '() (lambda () true) '("value") (lambda (acc value) (+ acc value)) 0 +) 30))))
+        (lambda (failure) (begin (tx_rollback session) (error failure)))))
+  expect: {result: true}
+- name: An empty scan records its table and rejects a phantom even without a repeat read
+  scm: |
+    (begin
+      (define session (newsession)) (session "username" "root") (tx_begin_acid session)
+      (try (lambda () (begin
+        (define tx (session "__memcp_tx")) (tx_serializable tx)
+        (define target (table "memcp-tests" false "serial_read_empty" false tx))
+        (define empty_before (table_empty? tx target))
+        (insert target '("id" "value") (list (list 1 17)))
+        (define rejected (try (lambda () (begin (tx_commit session) false))
+          (lambda (failure) (strlike (concat failure) "%serializable read changed%"))))
+        (tx_rollback session)
+        (and empty_before rejected
+          (equal? (scan nil target '() '() '() (lambda () true) '("value") (lambda (acc value) (+ acc value)) 0 +) 17))))
+        (lambda (failure) (begin (tx_rollback session) (error failure)))))
+  expect: {result: true}
+- name: Disjoint write skew cannot commit both observations
+  scm: |
+    (begin
+      (define left (newsession)) (left "username" "root") (tx_begin_acid left)
+      (define right (newsession)) (right "username" "root") (tx_begin_acid right)
+      (try (lambda () (begin
+        (define a (left "__memcp_tx")) (define b (right "__memcp_tx")) (tx_serializable a) (tx_serializable b)
+        (define ta (table "memcp-tests" false "serial_read_skew_a" false nil))
+        (define tb (table "memcp-tests" false "serial_read_skew_b" false nil))
+        (define first (table_empty? a ta)) (define second (table_empty? b tb))
+        (insert tb '("id" "value") (list (list 1 11)) '() nil false nil a)
+        (define denied (try (lambda () (begin (insert ta '("id" "value") (list (list 1 13)) '() nil false nil b) false))
+          (lambda (failure) (strlike (concat failure) "%serializable read changed%"))))
+        (tx_rollback right) (tx_commit left)
+        (and first second denied (table_empty? nil ta)
+          (equal? (scan nil tb '() '() '() (lambda () true) '("value") (lambda (acc value) (+ acc value)) 0 +) 11))))
+        (lambda (failure) (begin (tx_rollback right) (tx_rollback left) (error failure)))))
+  expect: {result: true}
+- name: Late activation preserves earlier ACID inserts and reads its own later writes
+  scm: |
+    (begin
+      (define session (newsession)) (session "username" "root") (tx_begin_acid session)
+      (try (lambda () (begin
+        (define tx (session "__memcp_tx"))
+        (define target (table "memcp-tests" false "serial_read_own" false tx))
+        (insert target '("id" "value") (list (list 2 20)) '() nil false nil tx)
+        (tx_serializable tx)
+        (define first (scan tx target '() '() '() (lambda () true) '("value") (lambda (acc value) (+ acc value)) 0 +))
+        (insert target '("id" "value") (list (list 3 30)) '() nil false nil tx)
+        (define second (scan tx target '() '() '() (lambda () true) '("value") (lambda (acc value) (+ acc value)) 0 +))
+        (tx_commit session)
+        (and (equal? first 30) (equal? second 60)
+          (equal? (scan nil target '() '() '() (lambda () true) '("value") (lambda (acc value) (+ acc value)) 0 +) 60))))
+        (lambda (failure) (begin (tx_rollback session) (error failure)))))
+  expect: {result: true}
+- name: Savepoint undo and full rollback preserve own serializable observations
+  scm: |
+    (begin
+      (define session (newsession)) (session "username" "root") (tx_begin_acid session)
+      (try (lambda () (begin
+        (define tx (session "__memcp_tx")) (tx_serializable tx)
+        (define target (table "memcp-tests" false "serial_read_own" false tx))
+        (define first (scan tx target '() '() '() (lambda () true) '("value") (lambda (acc value) (+ acc value)) 0 +))
+        (define point (tx_savepoint tx))
+        (scan tx target '() '() '("id") (lambda (id) (equal? id 1)) '("$update")
+          (lambda (acc update) (begin (update '("value" 77)) (+ acc 1))) 0 +)
+        (define changed (scan tx target '() '() '() (lambda () true) '("value") (lambda (acc value) (+ acc value)) 0 +))
+        (tx_rollback_to_savepoint tx point)
+        (define restored (scan tx target '() '() '() (lambda () true) '("value") (lambda (acc value) (+ acc value)) 0 +))
+        (tx_rollback session)
+        (and (equal? first 60) (equal? changed 127) (equal? restored 60)
+          (equal? (scan nil target '() '() '() (lambda () true) '("value") (lambda (acc value) (+ acc value)) 0 +) 60))))
+        (lambda (failure) (begin (tx_rollback session) (error failure)))))
+  expect: {result: true}
+- name: Physical rebuild does not invalidate unchanged logical rows
+  scm: |
+    (begin
+      (define session (newsession)) (session "username" "root") (tx_begin_acid session)
+      (try (lambda () (begin
+        (define tx (session "__memcp_tx")) (tx_serializable tx)
+        (define target (table "memcp-tests" false "serial_read_rebuild" false tx))
+        (define first (scan tx target '() '() '() (lambda () true) '("value") (lambda (acc value) (+ acc value)) 0 +))
+        (rebuild target true false)
+        (define second (scan tx target '() '() '() (lambda () true) '("value") (lambda (acc value) (+ acc value)) 0 +))
+        (tx_commit session)
+        (and (equal? first 10) (equal? second 10)) ))
+        (lambda (failure) (begin (tx_rollback session) (error failure)))))
+  expect: {result: true}
+- name: Cursor-stability writes cannot masquerade as optimistic ACID observations
+  scm: |
+    (begin
+      (define session (newsession)) (session "username" "root") (tx_begin session)
+      (define denied (try (lambda () (begin (tx_serializable (session "__memcp_tx")) false))
+        (lambda (failure) (strlike (concat failure) "%active ACID transaction%"))))
+      (tx_rollback session) denied)
+  expect: {result: true}
+
+- name: A foreign update invalidates the original logical read and savepoints cannot clear the conflict
+  scm: |
+    (begin
+      (define session (newsession)) (session "username" "root") (tx_begin_acid session)
+      (try (lambda () (begin
+        (define tx (session "__memcp_tx")) (tx_serializable tx)
+        (define target (table "memcp-tests" false "serial_read_foreign_update" false tx))
+        (define before (scan tx target '() '() '() (lambda () true) '("value") (lambda (acc value) (+ acc value)) 0 +))
+        (define point (tx_savepoint tx))
+        (scan nil target '() '() '() (lambda () true) '("$update") (lambda (acc update) (begin (update '("value" 19)) (+ acc 1))) 0 +)
+        (tx_rollback_to_savepoint tx point)
+        (define denied (try (lambda () (begin (scan tx target '() '() '() (lambda () true) '("value") (lambda (acc value) (+ acc value)) 0 +) false))
+          (lambda (failure) (strlike (concat failure) "%serializable read changed%"))))
+        (tx_rollback session)
+        (and (equal? before 10) denied
+          (equal? (scan nil target '() '() '() (lambda () true) '("value") (lambda (acc value) (+ acc value)) 0 +) 19))))
+        (lambda (failure) (begin (tx_rollback session) (error failure)))))
+  expect: {result: true}
+
+- name: A foreign delete invalidates the original logical read and savepoints cannot clear the conflict
+  scm: |
+    (begin
+      (define session (newsession)) (session "username" "root") (tx_begin_acid session)
+      (try (lambda () (begin
+        (define tx (session "__memcp_tx")) (tx_serializable tx)
+        (define target (table "memcp-tests" false "serial_read_foreign_delete" false tx))
+        (define before (scan tx target '() '() '() (lambda () true) '("value") (lambda (acc value) (+ acc value)) 0 +))
+        (define point (tx_savepoint tx))
+        (scan nil target '() '() '() (lambda () true) '("$update") (lambda (acc update) (begin (update) (+ acc 1))) 0 +)
+        (tx_rollback_to_savepoint tx point)
+        (define denied (try (lambda () (begin (scan tx target '() '() '() (lambda () true) '("value") (lambda (acc value) (+ acc value)) 0 +) false))
+          (lambda (failure) (strlike (concat failure) "%serializable read changed%"))))
+        (tx_rollback session)
+        (and (equal? before 10) denied
+          (equal? (scan nil target '() '() '() (lambda () true) '("value") (lambda (acc value) (+ acc value)) 0 +) 0))))
+        (lambda (failure) (begin (tx_rollback session) (error failure)))))
+  expect: {result: true}
+
+- name: A foreign schema invalidates the original logical read and savepoints cannot clear the conflict
+  scm: |
+    (begin
+      (define session (newsession)) (session "username" "root") (tx_begin_acid session)
+      (try (lambda () (begin
+        (define tx (session "__memcp_tx")) (tx_serializable tx)
+        (define target (table "memcp-tests" false "serial_read_foreign_schema" false tx))
+        (define before (scan tx target '() '() '() (lambda () true) '("value") (lambda (acc value) (+ acc value)) 0 +))
+        (define point (tx_savepoint tx))
+        (altercolumn target "value" "default" 23)
+        (tx_rollback_to_savepoint tx point)
+        (define denied (try (lambda () (begin (scan tx target '() '() '() (lambda () true) '("value") (lambda (acc value) (+ acc value)) 0 +) false))
+          (lambda (failure) (strlike (concat failure) "%serializable read changed%"))))
+        (tx_rollback session)
+        (and (equal? before 10) denied
+          (equal? (scan nil target '() '() '() (lambda () true) '("value") (lambda (acc value) (+ acc value)) 0 +) 10))))
+        (lambda (failure) (begin (tx_rollback session) (error failure)))))
+  expect: {result: true}
+- name: A first observation after a foreign commit reads the actual current committed cut
+  scm: |
+    (begin
+      (define session (newsession)) (session "username" "root") (tx_begin_acid session)
+      (try (lambda () (begin
+        (define tx (session "__memcp_tx")) (tx_serializable tx)
+        (define target (table "memcp-tests" false "serial_read_rows" false tx))
+        (insert target '("id" "value") (list (list 3 30)))
+        (define first (scan tx target '() '() '() (lambda () true) '("value") (lambda (acc value) (+ acc value)) 0 +))
+        (tx_commit session) (equal? first 60)))
+        (lambda (failure) (begin (tx_rollback session) (error failure)))))
+  expect: {result: true}
+- name: Serialization classification uses native type rather than a matching string
+  scm: |
+    (begin
+      (define session (newsession)) (session "username" "root") (tx_begin_acid session)
+      (try (lambda () (begin
+        (define tx (session "__memcp_tx")) (tx_serializable tx)
+        (define target (table "memcp-tests" false "serial_read_rows" false tx))
+        (scan tx target '() '() '() (lambda () true) '() (lambda (acc) (+ acc 1)) 0 +)
+        (insert target '("id" "value") (list (list 4 40)))
+        (define failure (try (lambda () (begin (tx_commit session) nil)) (lambda (failure) failure)))
+        (tx_rollback session)
+        (and (transaction_serialization_failure? failure)
+          (not (transaction_serialization_failure? "serializable read changed; retry transaction")))))
+        (lambda (failure) (begin (tx_rollback session) (error failure)))))
+  expect: {result: true}
+- name: Serializable ownership preserves a newly created native table and key through commit
+  scm: |
+    (begin
+      (define session (newsession)) (session "username" "root") (tx_begin_acid session)
+      (try (lambda () (begin
+        (define tx (session "__memcp_tx")) (tx_serializable tx)
+        (createtable "memcp-tests" "serial_read_created_commit"
+          (list (list "column" "id" "INT" (list) (list))) (list "engine" "safe") false tx)
+        (define target (table "memcp-tests" false "serial_read_created_commit" false tx))
+        (createkey target "PRIMARY" true '("id") tx)
+        (define empty_before (table_empty? tx target))
+        (insert target '("id") (list (list 7)) '() nil false nil tx)
+        (define own (scan tx target '() '() '() (lambda () true) '("id") (lambda (acc id) (+ acc id)) 0 +))
+        (tx_commit session)
+        (and empty_before (equal? own 7)
+          (equal? (scan nil target '() '() '() (lambda () true) '("id") (lambda (acc id) (+ acc id)) 0 +) 7))))
+        (lambda (failure) (begin (tx_rollback session) (error failure)))))
+  expect: {result: true}
+- name: Serializable rollback retires its new table and staged key through the catalog owner
+  scm: |
+    (begin
+      (define session (newsession)) (session "username" "root") (tx_begin_acid session)
+      (try (lambda () (begin
+        (define tx (session "__memcp_tx")) (tx_serializable tx)
+        (createtable "memcp-tests" "serial_read_created_rollback"
+          (list (list "column" "id" "INT" (list) (list))) (list "engine" "safe") false tx)
+        (define target (table "memcp-tests" false "serial_read_created_rollback" false tx))
+        (createkey target "PRIMARY" true '("id") tx)
+        (insert target '("id") (list (list 9)) '() nil false nil tx)
+        (define own (scan tx target '() '() '() (lambda () true) '("id") (lambda (acc id) (+ acc id)) 0 +))
+        (tx_rollback session)
+        (and (equal? own 9) (nil? (table "memcp-tests" false "serial_read_created_rollback" false nil)))))
+        (lambda (failure) (begin (tx_rollback session) (error failure)))))
+  expect: {result: true}
+- name: Rollback-only admission cannot be reset by enabling serializable reads
+  scm: |
+    (begin
+      (define session (newsession)) (session "username" "root") (tx_begin_acid session)
+      (try (lambda () (begin
+        (define tx (session "__memcp_tx"))
+        (define target (table "memcp-tests" false "serial_read_doomed" false tx))
+        (insert target '("id" "value") (list (list 1 99)) '() nil false nil tx)
+        (try (lambda () (with_query_request session nil 0 "controlled scalar failure" "acid"
+          (lambda (statement) (statement "controlled scalar failure" false (lambda (tx) (error "controlled"))
+            (lambda (failure completion) "rollback-only"))))) (lambda (failure) true))
+        (define denied (try (lambda () (begin (tx_serializable tx) false))
+          (lambda (failure) (transaction_rollback_only_failure? failure))))
+        (define own (scan tx target '() '() '() (lambda () true) '("value") (lambda (acc value) (+ acc value)) 0 +))
+        (define state (tx_state tx)) (tx_rollback session)
+        (and denied (equal? state "rollback-only") (equal? own 99) (table_empty? nil target))))
+        (lambda (failure) (begin (tx_rollback session) (error failure)))))
+  expect: {result: true}
+- name: Serialization failure cannot be preserved by a scalar statement failure policy
+  scm: |
+    (begin
+      (define session (newsession)) (session "username" "root") (tx_begin_acid session)
+      (try (lambda () (begin
+        (define tx (session "__memcp_tx")) (tx_serializable tx)
+        (define target (table "memcp-tests" false "serial_read_policy" false tx))
+        (insert target '("id" "value") (list (list 2 20)) '() nil false nil tx)
+        (define own (scan tx target '() '() '() (lambda () true) '("value") (lambda (acc value) (+ acc value)) 0 +))
+        (insert target '("id" "value") (list (list 3 30)))
+        (define callbacks (newsession)) (callbacks "calls" 0)
+        (define denied (try (lambda () (begin
+          (with_query_request session nil 0 "changed serializable read" "acid" (lambda (statement)
+            (statement "changed serializable read" false (lambda (tx)
+              (scan tx target '() '() '() (lambda () true) '("value") (lambda (acc value) (+ acc value)) 0 +))
+              (lambda (failure completion) (begin (callbacks "calls" (+ (callbacks "calls") 1)) "preserve"))))) false))
+          (lambda (failure) (transaction_serialization_failure? failure))))
+        (define state (tx_state tx)) (tx_rollback session)
+        (and denied (equal? own 30) (equal? state "aborted") (equal? (callbacks "calls") 0)
+          (equal? (scan nil target '() '() '() (lambda () true) '("value") (lambda (acc value) (+ acc value)) 0 +) 40))))
+        (lambda (failure) (begin (tx_rollback session) (error failure)))))
+  expect: {result: true}
+
+- name: Failure annotations cannot hide mandatory serialization rollback from a preserve policy
+  scm: |
+    (begin
+      (define session (newsession)) (session "username" "root") (tx_begin_acid session)
+      (try (lambda () (begin
+        (define tx (session "__memcp_tx")) (tx_serializable tx)
+        (define target (table "memcp-tests" false "serial_read_policy" false tx))
+        (insert target '("id" "value") (list (list 4 40)) '() nil false nil tx)
+        (scan tx target '() '() '() (lambda () true) '("value") (lambda (acc value) (+ acc value)) 0 +)
+        (insert target '("id" "value") (list (list 5 50)))
+        (define callbacks (newsession)) (callbacks "calls" 0)
+        (define denied (try (lambda () (begin
+          (with_query_request session nil 0 "annotated changed read" "acid" (lambda (statement)
+            (statement "annotated changed read" false (lambda (tx)
+              (try (lambda ()
+                (scan tx target '() '() '() (lambda () true) '("value") (lambda (acc value) (+ acc value)) 0 +))
+                (lambda (failure) (error (failure_annotate failure "phase" "language")))))
+              (lambda (_failure _completion) (begin (callbacks "calls" (+ (callbacks "calls") 1)) "preserve"))))) false))
+          (lambda (failure) (transaction_serialization_failure? failure))))
+        (define state (tx_state tx)) (tx_rollback session)
+        (and denied (equal? state "aborted") (equal? (callbacks "calls") 0)
+          (equal? (scan nil target '() '() '() (lambda () true) '("value") (lambda (acc value) (+ acc value)) 0 +) 90))))
+        (lambda (failure) (begin (tx_rollback session) (error failure)))))
+  expect: {result: true}
+
+- name: Native ordered joins retain logical witnesses for inner changes
+  scm: |
+    (begin
+      (define session (newsession)) (session "username" "root") (tx_begin_acid session)
+      (try (lambda () (begin
+        (define tx (session "__memcp_tx")) (tx_serializable tx)
+        (define left (table "memcp-tests" false "serial_read_join_left" false tx))
+        (define right (table "memcp-tests" false "serial_read_join_right" false tx))
+        (define inputs (list left right))
+        (define joined (lambda (owner)
+          (scan_join_order owner inputs (map inputs (lambda (_) (list 369435906932736))) '()
+            (list '() '()) (list (lambda () true) (lambda () true))
+            (list (list (list 0 "id" "id"))) (list) nil
+            (list (list 0 "id")) (list <) 0 0 -1
+            (list (list 0 "value") (list 1 "value"))
+            (lambda (acc l r) (+ acc l r)) 0)))
+        (define before (joined tx))
+        (scan nil right '() '() '() (lambda () true) '("$update") (lambda (acc update) (begin (update '("value" 23)) (+ acc 1))) 0 +)
+        (define denied (try (lambda () (begin (tx_commit session) false))
+          (lambda (failure) (transaction_serialization_failure? failure))))
+        (tx_rollback session)
+        (and (equal? before 30) denied (equal? (joined nil) 33))))
+        (lambda (failure) (begin (tx_rollback session) (error failure)))))
+  expect: {result: true}
+
+- name: Native ordered joins retain logical witnesses for empty inner phantoms
+  scm: |
+    (begin
+      (define session (newsession)) (session "username" "root") (tx_begin_acid session)
+      (try (lambda () (begin
+        (define tx (session "__memcp_tx")) (tx_serializable tx)
+        (define left (table "memcp-tests" false "serial_read_join_left" false tx))
+        (define right (table "memcp-tests" false "serial_read_join_empty" false tx))
+        (define inputs (list left right))
+        (define joined (lambda (owner)
+          (scan_join_order owner inputs (map inputs (lambda (_) (list 369435906932736))) '()
+            (list '() '()) (list (lambda () true) (lambda () true))
+            (list (list (list 0 "id" "id"))) (list) nil
+            (list (list 0 "id")) (list <) 0 0 -1
+            (list (list 0 "value") (list 1 "value"))
+            (lambda (acc l r) (+ acc l r)) 0)))
+        (define before (joined tx))
+        (insert right '("id" "value") (list (list 1 40)))
+        (define denied (try (lambda () (begin (tx_commit session) false))
+          (lambda (failure) (transaction_serialization_failure? failure))))
+        (tx_rollback session)
+        (and (equal? before 0) denied (equal? (joined nil) 50))))
+        (lambda (failure) (begin (tx_rollback session) (error failure)))))
+  expect: {result: true}

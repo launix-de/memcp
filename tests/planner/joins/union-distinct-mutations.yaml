@@ -1,0 +1,414 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  description: Complete DISTINCT tuples prove exact mutation membership
+setup:
+- sql: CREATE TABLE union_mut_target(id INT PRIMARY KEY,slot INT,amount INT)
+- sql: INSERT INTO union_mut_target VALUES(1,10,0),(2,20,0),(3,NULL,0)
+- sql: CREATE TABLE union_mut_source(id INT PRIMARY KEY,slot INT,amount INT)
+- sql: INSERT INTO union_mut_source VALUES(1,10,100),(2,20,200),(3,NULL,300)
+- sql: CREATE TABLE union_mut_audit(id INT,amount INT)
+- sql: CREATE TRIGGER union_mut_observer AFTER UPDATE ON union_mut_target FOR EACH
+    ROW BEGIN INSERT INTO union_mut_audit(id,amount) VALUES(NEW.id,NEW.amount); END
+- sql: CREATE TABLE union_mut_pairs(id INT,slot INT)
+- sql: INSERT INTO union_mut_pairs VALUES(1,10),(1,11),(2,20),(3,NULL)
+- sql: CREATE TABLE union_mut_text(token VARCHAR(4),payload INT)
+- sql: INSERT INTO union_mut_text VALUES('1',10),('01',20)
+test_cases:
+- name: MySQL DISTINCT overlap updates each target once
+  sql: "UPDATE union_mut_target t JOIN union_mut_source a ON t.id=a.id\n  JOIN (SELECT\
+    \ id FROM union_mut_source WHERE id<=2 UNION SELECT id FROM union_mut_source WHERE\
+    \ id>=2) p ON a.id=p.id\n  SET t.amount=a.amount\n"
+  expect:
+    affected_rows: 3
+- name: MySQL values and trigger tuples are exact
+  sql: SELECT t.id,t.amount,COUNT(a.id) AS audit_rows,MIN(a.amount) AS audit_amount
+    FROM union_mut_target t LEFT JOIN union_mut_audit a ON t.id=a.id GROUP BY t.id,t.amount
+    ORDER BY t.id
+  expect: &id001
+    data:
+    - id: 1
+      amount: 100
+      audit_rows: 1
+      audit_amount: 100
+    - id: 2
+      amount: 200
+      audit_rows: 1
+      audit_amount: 200
+    - id: 3
+      amount: 300
+      audit_rows: 1
+      audit_amount: 300
+- name: TSQL DISTINCT overlap updates each target once
+  syntax: tsql
+  setup:
+  - sql: UPDATE union_mut_target SET amount=0
+  - sql: DELETE FROM union_mut_audit
+  sql: "UPDATE t SET amount=a.amount FROM union_mut_target t JOIN union_mut_source\
+    \ a ON t.id=a.id\n  JOIN (SELECT id FROM union_mut_source WHERE id<=2 UNION SELECT\
+    \ id FROM union_mut_source WHERE id>=2) p ON a.id=p.id\n"
+  expect:
+    affected_rows: 3
+- name: TSQL values and trigger tuples are exact
+  sql: SELECT t.id,t.amount,COUNT(a.id) AS audit_rows,MIN(a.amount) AS audit_amount
+    FROM union_mut_target t LEFT JOIN union_mut_audit a ON t.id=a.id GROUP BY t.id,t.amount
+    ORDER BY t.id
+  expect: *id001
+- name: PostgreSQL DISTINCT overlap updates each target once
+  syntax: postgresql
+  setup:
+  - sql: UPDATE union_mut_target SET amount=0
+  - sql: DELETE FROM union_mut_audit
+  sql: "UPDATE union_mut_target t SET amount=a.amount FROM union_mut_source a\n  JOIN\
+    \ (SELECT id FROM union_mut_source WHERE id<=2 UNION SELECT id FROM union_mut_source\
+    \ WHERE id>=2) p ON a.id=p.id\n  WHERE t.id=a.id\n"
+  expect:
+    affected_rows: 3
+  noncritical: true
+- name: PostgreSQL values and trigger tuples are exact
+  sql: SELECT t.id,t.amount,COUNT(a.id) AS audit_rows,MIN(a.amount) AS audit_amount
+    FROM union_mut_target t LEFT JOIN union_mut_audit a ON t.id=a.id GROUP BY t.id,t.amount
+    ORDER BY t.id
+  expect: *id001
+  noncritical: true
+- name: Every composite DISTINCT coordinate is bound
+  setup:
+  - sql: UPDATE union_mut_target SET amount=0
+  - sql: DELETE FROM union_mut_audit
+  sql: "UPDATE union_mut_target t JOIN union_mut_source a ON t.id=a.id\n  JOIN (SELECT\
+    \ id,slot FROM union_mut_pairs WHERE id<=2 UNION SELECT id,slot FROM union_mut_pairs\
+    \ WHERE id>=2) p ON a.id=p.id AND a.slot=p.slot\n  SET t.amount=a.amount\n"
+  expect:
+    affected_rows: 2
+- name: Composite membership retains SQL NULL nonmatches
+  sql: SELECT id,amount FROM union_mut_target ORDER BY id
+  expect:
+    data:
+    - id: 1
+      amount: 100
+    - id: 2
+      amount: 200
+    - id: 3
+      amount: 0
+- name: Composite tuple dedup does not replay triggers
+  sql: SELECT id,amount FROM union_mut_audit ORDER BY id
+  expect:
+    data:
+    - id: 1
+      amount: 100
+    - id: 2
+      amount: 200
+- name: Null-safe membership consumes one DISTINCT NULL key
+  setup:
+  - sql: UPDATE union_mut_target SET amount=0
+  - sql: DELETE FROM union_mut_audit
+  sql: "UPDATE union_mut_target t JOIN union_mut_source a ON t.id=a.id\n  JOIN (SELECT\
+    \ slot FROM union_mut_source WHERE id<=2 UNION SELECT slot FROM union_mut_source\
+    \ WHERE id>=2 UNION SELECT slot FROM union_mut_source WHERE id=3) p ON a.slot<=>p.slot\n\
+    \  SET t.amount=a.amount\n"
+  expect:
+    affected_rows: 3
+  noncritical: true
+- name: Duplicate NULLs and other keys trigger exactly once
+  sql: SELECT t.id,t.amount,COUNT(a.id) AS audit_rows,MIN(a.amount) AS audit_amount
+    FROM union_mut_target t LEFT JOIN union_mut_audit a ON t.id=a.id GROUP BY t.id,t.amount
+    ORDER BY t.id
+  expect: *id001
+  noncritical: true
+- name: Rollback restores DISTINCT values and trigger tuples
+  syntax: tsql
+  session_id: union_mut_rollback
+  cleanup:
+  - sql: IF @@TRANCOUNT>0 ROLLBACK TRANSACTION
+  sql: "BEGIN TRANSACTION;\nDELETE FROM union_mut_audit;\nUPDATE t SET amount=a.amount+7\
+    \ FROM union_mut_target t JOIN union_mut_source a ON t.id=a.id\n  JOIN (SELECT\
+    \ id FROM union_mut_source WHERE id<=2 UNION SELECT id FROM union_mut_source WHERE\
+    \ id>=2) p ON a.id=p.id;\nSELECT id,amount FROM union_mut_target ORDER BY id;\n\
+    SELECT id AS audit_id,amount AS audit_amount FROM union_mut_audit ORDER BY id;\n\
+    ROLLBACK TRANSACTION;\nSELECT id AS restored_id,amount AS restored_amount FROM\
+    \ union_mut_target ORDER BY id;\nSELECT id AS restored_audit_id,amount AS restored_audit_amount\
+    \ FROM union_mut_audit ORDER BY id;\n"
+  expect:
+    data:
+    - id: 1
+      amount: 107
+    - id: 2
+      amount: 207
+    - id: 3
+      amount: 307
+    - audit_id: 1
+      audit_amount: 107
+    - audit_id: 2
+      audit_amount: 207
+    - audit_id: 3
+      audit_amount: 307
+    - restored_id: 1
+      restored_amount: 100
+    - restored_id: 2
+      restored_amount: 200
+    - restored_id: 3
+      restored_amount: 300
+    - restored_audit_id: 1
+      restored_audit_amount: 100
+    - restored_audit_id: 2
+      restored_audit_amount: 200
+    - restored_audit_id: 3
+      restored_audit_amount: 300
+  setup:
+  - sql: UPDATE union_mut_target SET amount=id*100
+  - sql: DELETE FROM union_mut_audit
+  - sql: INSERT INTO union_mut_audit VALUES(1,100),(2,200),(3,300)
+- name: UNION ALL duplicate matches still select one whole target effect
+  syntax: tsql
+  session_id: union_mut_future
+  cleanup:
+  - sql: IF @@TRANCOUNT>0 ROLLBACK TRANSACTION
+  sql: "BEGIN TRANSACTION;\nDELETE FROM union_mut_audit;\nUPDATE t SET amount=a.amount+1\
+    \ FROM union_mut_target t JOIN union_mut_source a ON t.id=a.id\n  JOIN (SELECT\
+    \ id FROM union_mut_source UNION ALL SELECT id FROM union_mut_source) p ON a.id=p.id;\n\
+    SELECT t.id,t.amount,COUNT(a.id) AS audit_rows FROM union_mut_target t LEFT JOIN\
+    \ union_mut_audit a ON t.id=a.id GROUP BY t.id,t.amount ORDER BY t.id;\nROLLBACK\
+    \ TRANSACTION;\n"
+  expect:
+    data:
+    - id: 1
+      amount: 101
+      audit_rows: 1
+    - id: 2
+      amount: 201
+      audit_rows: 1
+    - id: 3
+      amount: 301
+      audit_rows: 1
+- name: A partial composite key still selects one whole target effect
+  syntax: tsql
+  noncritical: true
+  session_id: union_mut_future
+  cleanup:
+  - sql: IF @@TRANCOUNT>0 ROLLBACK TRANSACTION
+  sql: "BEGIN TRANSACTION;\nDELETE FROM union_mut_audit;\nUPDATE t SET amount=a.amount+1\
+    \ FROM union_mut_target t JOIN union_mut_source a ON t.id=a.id\n  JOIN (SELECT\
+    \ id,slot FROM union_mut_pairs WHERE id<=2 UNION SELECT id,slot FROM union_mut_pairs\
+    \ WHERE id>=2) p ON a.id=p.id;\nSELECT t.id,t.amount,COUNT(a.id) AS audit_rows\
+    \ FROM union_mut_target t LEFT JOIN union_mut_audit a ON t.id=a.id GROUP BY t.id,t.amount\
+    \ ORDER BY t.id;\nROLLBACK TRANSACTION;\n"
+  expect:
+    data:
+    - id: 1
+      amount: 101
+      audit_rows: 1
+    - id: 2
+      amount: 201
+      audit_rows: 1
+    - id: 3
+      amount: 301
+      audit_rows: 1
+- name: Coercing DISTINCT text keys still select one target effect
+  syntax: tsql
+  noncritical: true
+  session_id: union_mut_future
+  cleanup:
+  - sql: IF @@TRANCOUNT>0 ROLLBACK TRANSACTION
+  sql: "BEGIN TRANSACTION;\nDELETE FROM union_mut_audit;\nUPDATE t SET amount=a.amount+1\
+    \ FROM union_mut_target t JOIN union_mut_source a ON t.id=a.id\n  JOIN (SELECT\
+    \ token FROM union_mut_text UNION SELECT token FROM union_mut_text) p ON a.id=p.token;\n\
+    SELECT t.id,t.amount,COUNT(a.id) AS audit_rows FROM union_mut_target t LEFT JOIN\
+    \ union_mut_audit a ON t.id=a.id GROUP BY t.id,t.amount ORDER BY t.id;\nROLLBACK\
+    \ TRANSACTION;\n"
+  expect:
+    data:
+    - id: 1
+      amount: 101
+      audit_rows: 1
+    - id: 2
+      amount: 200
+      audit_rows: 0
+    - id: 3
+      amount: 300
+      audit_rows: 0
+- name: An empty native target does not acquire set-row mutation effects
+  setup:
+  - sql: DELETE FROM union_mut_target
+  - sql: DELETE FROM union_mut_audit
+  sql: UPDATE union_mut_target t JOIN union_mut_source a ON t.id=a.id JOIN (SELECT
+    id FROM union_mut_source UNION SELECT id FROM union_mut_source) p ON a.id=p.id
+    SET t.amount=a.amount
+  expect:
+    affected_rows: 0
+- name: An empty joined target still completes one global aggregate
+  sql: SELECT COUNT(*) AS n FROM union_mut_target t JOIN (SELECT id FROM union_mut_source
+    UNION SELECT id FROM union_mut_source) p ON t.id=p.id
+  expect:
+    data:
+    - n: 0
+- name: Empty target and trigger effect domains remain empty
+  sql: SELECT COUNT(*) AS n FROM union_mut_audit
+  expect:
+    data:
+    - n: 0
+- name: Restore the target for repeated invocation bindings
+  sql: INSERT INTO union_mut_target VALUES(1,10,0),(2,20,0),(3,NULL,0)
+  expect:
+    affected_rows: 3
+- name: UNION source captures the current invocation cutoff 1
+  syntax: tsql
+  session_id: union_mut_cutoff
+  setup:
+  - sql: UPDATE union_mut_target SET amount=0
+  - sql: DELETE FROM union_mut_audit
+  sql: 'DECLARE @cutoff INT=1;
+
+    UPDATE t SET amount=a.amount FROM union_mut_target t JOIN union_mut_source a ON
+    t.id=a.id
+
+    JOIN (SELECT id FROM union_mut_source WHERE id<=@cutoff UNION SELECT id FROM union_mut_source
+    WHERE id<=@cutoff) p ON a.id=p.id;
+
+    SELECT t.id,t.amount,COUNT(b.id) AS audit_rows FROM union_mut_target t LEFT JOIN
+    union_mut_audit b ON t.id=b.id GROUP BY t.id,t.amount ORDER BY t.id;'
+  expect:
+    data:
+    - id: 1
+      amount: 100
+      audit_rows: 1
+    - id: 2
+      amount: 0
+      audit_rows: 0
+    - id: 3
+      amount: 0
+      audit_rows: 0
+- name: UNION source captures the current invocation cutoff 2
+  syntax: tsql
+  session_id: union_mut_cutoff
+  setup:
+  - sql: UPDATE union_mut_target SET amount=0
+  - sql: DELETE FROM union_mut_audit
+  sql: 'DECLARE @cutoff INT=2;
+
+    UPDATE t SET amount=a.amount FROM union_mut_target t JOIN union_mut_source a ON
+    t.id=a.id
+
+    JOIN (SELECT id FROM union_mut_source WHERE id<=@cutoff UNION SELECT id FROM union_mut_source
+    WHERE id<=@cutoff) p ON a.id=p.id;
+
+    SELECT t.id,t.amount,COUNT(b.id) AS audit_rows FROM union_mut_target t LEFT JOIN
+    union_mut_audit b ON t.id=b.id GROUP BY t.id,t.amount ORDER BY t.id;'
+  expect:
+    data:
+    - id: 1
+      amount: 100
+      audit_rows: 1
+    - id: 2
+      amount: 200
+      audit_rows: 1
+    - id: 3
+      amount: 0
+      audit_rows: 0
+- name: UNION source captures the current invocation cutoff NULL
+  syntax: tsql
+  session_id: union_mut_cutoff
+  setup:
+  - sql: UPDATE union_mut_target SET amount=0
+  - sql: DELETE FROM union_mut_audit
+  sql: 'DECLARE @cutoff INT=NULL;
+
+    UPDATE t SET amount=a.amount FROM union_mut_target t JOIN union_mut_source a ON
+    t.id=a.id
+
+    JOIN (SELECT id FROM union_mut_source WHERE id<=@cutoff UNION SELECT id FROM union_mut_source
+    WHERE id<=@cutoff) p ON a.id=p.id;
+
+    SELECT t.id,t.amount,COUNT(b.id) AS audit_rows FROM union_mut_target t LEFT JOIN
+    union_mut_audit b ON t.id=b.id GROUP BY t.id,t.amount ORDER BY t.id;'
+  expect:
+    data:
+    - id: 1
+      amount: 0
+      audit_rows: 0
+    - id: 2
+      amount: 0
+      audit_rows: 0
+    - id: 3
+      amount: 0
+      audit_rows: 0
+- name: A zero-row consumer starts no serializable data observation
+  syntax: tsql
+  session_id: union_zero_serial
+  sql: 'SET TRANSACTION ISOLATION LEVEL SERIALIZABLE;
+
+    BEGIN TRANSACTION;
+
+    SELECT TOP(0) t.id FROM union_mut_target t JOIN (SELECT id FROM union_mut_source
+    UNION SELECT id FROM union_mut_source) p ON t.id=p.id WHERE t.id=1;'
+  expect:
+    rows: 0
+- name: An independent writer can change the unobserved target
+  syntax: tsql
+  session_id: union_zero_writer
+  sql: UPDATE union_mut_target SET amount=amount+1 WHERE id=1
+  expect:
+    affected_rows: 1
+- name: The empty consumer can commit after an unrelated write
+  syntax: tsql
+  session_id: union_zero_serial
+  cleanup:
+  - sql: IF @@TRANCOUNT>0 ROLLBACK TRANSACTION
+  sql: COMMIT TRANSACTION; SELECT 1 AS committed
+  expect:
+    data:
+    - committed: 1
+- name: A dynamic consumer limit retains its existing single binding owner
+  syntax: tsql
+  sql: 'DECLARE @take INT=2;
+
+    SELECT TOP(@take) t.id FROM union_mut_target t
+
+    JOIN (SELECT id FROM union_mut_source UNION SELECT id FROM union_mut_source) p
+    ON t.id=p.id ORDER BY t.id;
+
+    SET @take=0;
+
+    SELECT TOP(@take) t.id FROM union_mut_target t
+
+    JOIN (SELECT id FROM union_mut_source UNION SELECT id FROM union_mut_source) p
+    ON t.id=p.id ORDER BY t.id;'
+  expect:
+    data:
+    - id: 1
+    - id: 2
+- name: Coercing joined DISTINCT text preserves both rows without an ordering requirement
+  sql: SELECT t.id,p.token FROM union_mut_target t JOIN (SELECT token FROM union_mut_text
+    UNION SELECT token FROM union_mut_text) p ON t.id=p.token
+  expect:
+    rows: 2
+- name: Coercing joined DISTINCT text retains complete ordered values
+  sql: SELECT t.id,p.token FROM union_mut_target t JOIN (SELECT token FROM union_mut_text
+    UNION SELECT token FROM union_mut_text) p ON t.id=p.token ORDER BY t.id,p.token
+  expect:
+    data:
+    - id: 1
+      token: '01'
+    - id: 1
+      token: '1'
+- name: Coercing joined DISTINCT text counts the full bag
+  sql: SELECT COUNT(*) AS n FROM union_mut_target t JOIN (SELECT token FROM union_mut_text
+    UNION SELECT token FROM union_mut_text) p ON t.id=p.token
+  expect:
+    data:
+    - n: 2
+- name: Coercing joined DISTINCT text keeps the real ordered suffix for LIMIT
+  sql: SELECT t.id,p.token FROM union_mut_target t JOIN (SELECT token FROM union_mut_text
+    UNION SELECT token FROM union_mut_text) p ON t.id=p.token ORDER BY t.id,p.token
+    LIMIT 1
+  expect:
+    data:
+    - id: 1
+      token: '01'
+cleanup:
+- sql: DROP TRIGGER IF EXISTS union_mut_observer
+- sql: DROP TABLE union_mut_text
+- sql: DROP TABLE union_mut_pairs
+- sql: DROP TABLE union_mut_audit
+- sql: DROP TABLE union_mut_source
+- sql: DROP TABLE union_mut_target

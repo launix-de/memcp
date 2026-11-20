@@ -1,0 +1,162 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  description: Native and metadata scan sources retain invocation-local values and DDL visibility
+  isolated: true
+setup:
+- sql: CREATE TABLE source_lifetime_left(id INT PRIMARY KEY,ref_id INT)
+- sql: CREATE TABLE source_lifetime_right(id INT PRIMARY KEY,label NVARCHAR(20))
+- sql: CREATE TABLE source_lifetime_meta(id INT,label NVARCHAR(20))
+- sql: INSERT INTO source_lifetime_left VALUES(1,10),(2,20),(3,99)
+- sql: INSERT INTO source_lifetime_right VALUES(10,N'one'),(20,N'two')
+cleanup:
+- sql: DROP TABLE IF EXISTS source_lifetime_pending
+- sql: DROP TABLE IF EXISTS source_lifetime_meta
+- sql: DROP TABLE IF EXISTS source_lifetime_left
+- sql: DROP TABLE IF EXISTS source_lifetime_right
+test_cases:
+- name: Native joined sources retain all matches
+  session_id: source_lifetime
+  sql: SELECT l.id,r.label FROM source_lifetime_left l JOIN source_lifetime_right r ON l.ref_id=r.id ORDER BY l.id
+  expect:
+    rows: 2
+    data: [{id: 1, label: one}, {id: 2, label: two}]
+- name: A missing inner source row retains LEFT JOIN NULL extension
+  sql: SELECT l.id,r.label FROM source_lifetime_left l LEFT JOIN source_lifetime_right r ON l.ref_id=r.id ORDER BY l.id
+  expect:
+    rows: 3
+    data: [{id: 1, label: one}, {id: 2, label: two}, {id: 3, label: null}]
+- name: Two aliases retain distinct row predicates over the same native source
+  sql: SELECT a.label AS first_label,b.label AS second_label FROM source_lifetime_right a JOIN source_lifetime_right b ON a.id<b.id
+  expect:
+    rows: 1
+    data: [{first_label: one, second_label: two}]
+- name: A committed update changes the next invocation input
+  sql: UPDATE source_lifetime_right SET label=N'changed' WHERE id=10
+- name: The same query on the same session reads current rows
+  session_id: source_lifetime
+  sql: SELECT l.id,r.label FROM source_lifetime_left l JOIN source_lifetime_right r ON l.ref_id=r.id ORDER BY l.id
+  expect:
+    rows: 2
+    data: [{id: 1, label: changed}, {id: 2, label: two}]
+- name: Metadata joins preserve column order and complete names
+  session_id: source_lifetime
+  sql: SELECT c.name,c.column_id FROM sys.columns c JOIN sys.objects t ON c.object_id=t.object_id WHERE t.name=N'source_lifetime_meta' ORDER BY c.column_id
+  expect:
+    rows: 2
+    data: [{name: id, column_id: 1}, {name: label, column_id: 2}]
+- name: A later DDL statement extends the declaration
+  sql: ALTER TABLE source_lifetime_meta ADD extra INT
+- name: Reusing the metadata query after ADD sees the new column
+  session_id: source_lifetime
+  sql: SELECT c.name,c.column_id FROM sys.columns c JOIN sys.objects t ON c.object_id=t.object_id WHERE t.name=N'source_lifetime_meta' ORDER BY c.column_id
+  expect:
+    rows: 3
+    data: [{name: id, column_id: 1}, {name: label, column_id: 2}, {name: extra, column_id: 3}]
+- name: Metadata equality filters retain distinct source selections
+  syntax: sql
+  sql: SELECT a.column_name AS left_name,b.column_name AS right_name FROM information_schema.columns a JOIN information_schema.columns b ON a.ordinal_position=b.ordinal_position WHERE a.table_schema='memcp-tests' AND b.table_schema='memcp-tests' AND a.table_name='source_lifetime_meta' AND b.table_name='source_lifetime_right' ORDER BY a.ordinal_position
+  expect:
+    rows: 2
+    data: [{left_name: id, right_name: id}, {left_name: label, right_name: label}]
+- name: Remove the old native incarnation
+  sql: DROP TABLE source_lifetime_meta
+- name: Recreate the same name with a different declaration
+  sql: CREATE TABLE source_lifetime_meta(id INT,new_label NVARCHAR(20))
+- name: Reused metadata query reads the recreated incarnation
+  session_id: source_lifetime
+  sql: SELECT c.name,c.column_id FROM sys.columns c JOIN sys.objects t ON c.object_id=t.object_id WHERE t.name=N'source_lifetime_meta' ORDER BY c.column_id
+  expect:
+    rows: 2
+    data: [{name: id, column_id: 1}, {name: new_label, column_id: 2}]
+- name: An unreachable native source does not produce output
+  sql: SELECT r.id FROM source_lifetime_left l JOIN source_lifetime_right r ON l.ref_id=r.id WHERE l.id<0
+  expect: {rows: 0}
+- name: Begin a transaction with statement-local metadata reads
+  session_id: source_lifetime_tx
+  sql: BEGIN TRANSACTION
+- name: A pending declaration is owned by the current transaction
+  session_id: source_lifetime_tx
+  sql: CREATE TABLE source_lifetime_pending(id INT)
+- name: Current transaction metadata sees its pending declaration
+  session_id: source_lifetime_tx
+  sql: SELECT COUNT(*) AS n FROM sys.objects WHERE name=N'source_lifetime_pending' AND type=N'U'
+  expect: {rows: 1, data: [{n: 1}]}
+- name: Rollback releases the pending declaration
+  session_id: source_lifetime_tx
+  sql: ROLLBACK TRANSACTION
+- name: The same session metadata does not retain a rolled back declaration
+  session_id: source_lifetime_tx
+  sql: SELECT COUNT(*) AS n FROM sys.objects WHERE name=N'source_lifetime_pending' AND type=N'U'
+  expect: {rows: 1, data: [{n: 0}]}
+
+- name: Invocation sources preserve captured values, shadowing, volatility, variadic scope and empty domains
+  scm: |-
+    (begin
+    (define source_binding_effect_probe (lambda (mode)
+      (begin
+        (define runtime (newsession))
+        (runtime "username" "root") (runtime "schema" "memcp-tests")
+        (runtime "source_binding_input" 7)
+        (define events (newsession))
+        (define producer (lambda (input)
+          (begin (events (uuid) input) (list (list input)))))
+        (define source (list 'runtime_generated_source "memcp-tests"
+          (list 'quote (list "value")) (list 'quote (list nil))
+          (list 'table_function_runtime_rows producer (list 'list 'bound) "binding-source")
+          'session 'tx '__invocation_group_scopes))
+        (define scan_source (list 'scan 'tx source (list 'list) (list 'list)
+          (list 'list) (list 'lambda '() true) (list 'quote (list "value"))
+          (lambda (acc value) (append acc value)) (list 'lambda '() (list 'list))
+          (lambda (left right) (merge (list left right))) false))
+        (define repeated (list 'map (list 'quote (list 1 2))
+          (list 'lambda (list 'row) scan_source)))
+        (define statement
+          (if (equal? mode "shadow")
+            (list (list 'lambda (list 'bound)
+              (list 'map (list 'quote (list 1 2))
+                (list 'lambda (list 'row)
+                  (list (list 'lambda (list 'bound) scan_source) 'row))))
+              (list 'session "source_binding_input"))
+            (equal? mode "define")
+            (list (list 'lambda (list 'bound)
+              (list 'map (list 'quote (list 1 2))
+                (list 'lambda (list 'row)
+                  (list 'begin (list 'define 'bound 'row) scan_source))))
+              (list 'session "source_binding_input"))
+            (equal? mode "volatile")
+            (list 'map (list 'quote (list 1 2))
+              (list 'lambda (list 'row)
+                (list (list 'lambda (list 'bound) scan_source) (list uuid))))
+            (equal? mode "variadic")
+            (list (list 'lambda (list 'bound)
+              (list (list 'lambda 'arguments repeated) 1 2))
+              (list 'session "source_binding_input"))
+            (equal? mode "empty")
+            (list (list 'lambda (list 'bound)
+              (list 'map (list 'quote '()) (list 'lambda (list 'row) scan_source)))
+              (list 'session "source_binding_input"))
+            (list (list 'lambda (list 'bound)
+              (list 'begin (list 'session "source_binding_input" 99) repeated))
+              (list 'session "source_binding_input"))))
+        (define rows (sql_with_statement runtime nil 0 "invocation source values"
+          (lambda (tx)
+            (sql_execute_formula runtime tx
+              (sql_queryplan_compile_formula tx
+                (bind_invocation_group_lifetimes (bind_invocation_scan_sources statement)))
+              (lambda (row) row) (lambda (_fields) true)))))
+        (if (equal? mode "volatile")
+          (list (equal? (count rows) 2)
+            (not (equal? (car (car rows)) (car (cadr rows)))) (count (events)))
+          (list rows (count (events)))))))
+    (list
+      (source_binding_effect_probe "capture")
+      (source_binding_effect_probe "shadow")
+      (source_binding_effect_probe "define")
+      (source_binding_effect_probe "volatile")
+      (source_binding_effect_probe "variadic")
+      (source_binding_effect_probe "empty")
+    ))
+  expect:
+    result: [[[[7], [7]], 1], [[[1], [2]], 2], [[[1], [2]], 2], [true, true, 2], [[[7], [7]], 1], [[], 0]]

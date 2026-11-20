@@ -25,6 +25,7 @@ import "strings"
 import "errors"
 import "strconv"
 import "syscall"
+import "sync/atomic"
 import "path/filepath"
 import "crypto/sha256"
 import "encoding/json"
@@ -41,7 +42,55 @@ type FileFactory struct {
 
 func init() {
 	BackendRegistry["filesystem"] = func(dbName string, raw json.RawMessage) PersistenceEngine {
-		return (&FileFactory{Basepath: Basepath}).CreateDatabase(dbName)
+		return (&FileFactory{Basepath: filesystemBackendRoot(raw)}).CreateDatabase(dbName)
+	}
+}
+
+// A configured root selects an administrator-owned filesystem namespace. Each
+// database still occupies its own validated component below that exact root.
+func filesystemBackendRoot(raw json.RawMessage) string {
+	var config struct {
+		Backend string          `json:"backend"`
+		Root    json.RawMessage `json:"root"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&config); err != nil {
+		panic("filesystem backend config: " + err.Error())
+	}
+	if len(config.Root) == 0 {
+		return Basepath
+	}
+	var root *string
+	if err := json.Unmarshal(config.Root, &root); err != nil || root == nil {
+		panic("filesystem root must be a string")
+	}
+	if *root == "" || strings.IndexByte(*root, 0) >= 0 || (!filepath.IsAbs(*root) && !filepath.IsLocal(*root)) {
+		panic("filesystem root must be a nonempty local relative directory or absolute directory")
+	}
+	path := filepath.Clean(*root)
+	if filepath.IsAbs(path) {
+		validateFilesystemRootDirectory(path)
+	} else {
+		// Relative roots are confined below the declared data directory. Check
+		// every existing component before a missing suffix can hide a link to
+		// an outside namespace. Absolute administrator roots remain explicit.
+		path = filepath.Clean(Basepath)
+		for _, component := range strings.Split(filepath.Clean(*root), string(os.PathSeparator)) {
+			path = filepath.Join(path, component)
+			validateFilesystemRootDirectory(path)
+		}
+	}
+	return path
+}
+
+func validateFilesystemRootDirectory(path string) {
+	if info, err := os.Lstat(path); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			panic("filesystem root must be a directory without symbolic links")
+		}
+	} else if !os.IsNotExist(err) {
+		raisePersistenceFailure("filesystem", path, "database.root", err)
 	}
 }
 
@@ -56,7 +105,13 @@ func ProcessColumnName(col string) string {
 }
 
 func (f *FileFactory) CreateDatabase(schema string) PersistenceEngine {
-	return &FileStorage{path: f.Basepath + "/" + schema + "/"}
+	// Resolve once at private handle construction; identity reads stay pure
+	// even when a caller already owns catalog/lifecycle mutation locks.
+	path, err := filepath.Abs(databaseFilesystemDirectory(f.Basepath, schema))
+	if err != nil {
+		raisePersistenceFailure("filesystem", schema, "database.path", err)
+	}
+	return &FileStorage{path: path + string(os.PathSeparator)}
 }
 
 func (f *FileStorage) ReadSchema() []byte {
@@ -423,7 +478,7 @@ func (s *FileStorage) OpenLog(shard string) PersistenceLogfile {
 		_ = f.Close()
 		raisePersistenceFailure(s.BackendName(), s.path, "log.open", err)
 	}
-	return FileLogfile{w: f}
+	return FileLogfile{w: f, directorySynced: new(atomic.Bool)}
 }
 
 func (s *FileStorage) SwapLog(shard string, entries []interface{}, durable bool) PersistenceLogfile {
@@ -485,7 +540,7 @@ func (s *FileStorage) SwapLog(shard string, entries []interface{}, durable bool)
 			reportPersistenceCleanupFailure(s.BackendName(), s.path, "log.swap.close", err)
 		}
 	}
-	return FileLogfile{w: tmp}
+	return FileLogfile{w: tmp, directorySynced: new(atomic.Bool)}
 }
 
 func (s *FileStorage) ReplayLog(shard string, readOnly bool) (map[string]struct{}, chan interface{}, PersistenceLogfile) {
@@ -544,6 +599,27 @@ func (s *FileStorage) ReplayLog(shard string, readOnly bool) (map[string]struct{
 				}
 				if len(b) == 0 && err == nil {
 					// nop
+				} else if bytes.HasPrefix(b, []byte("sequence-v1 ")) {
+					replay <- decodeSequenceRecord(string(b[len("sequence-v1 "):]))
+				} else if bytes.HasPrefix(b, []byte("insert-v2 ")) || bytes.HasPrefix(b, []byte("insert-hidden-v2 ")) {
+					hidden := bytes.HasPrefix(b, []byte("insert-hidden-v2 "))
+					prefix := "insert-v2 "
+					if hidden {
+						prefix = "insert-hidden-v2 "
+					}
+					var frame struct {
+						Cols   []string      `json:"cols"`
+						Values persistedRows `json:"values"`
+						Tx     string        `json:"tx"`
+					}
+					if err := json.Unmarshal(b[len(prefix):], &frame); err != nil {
+						panic("corrupt precise insert log: " + err.Error())
+					}
+					if hidden {
+						replay <- LogEntryInsertHidden{cols: frame.Cols, values: [][]scm.Scmer(frame.Values), txID: frame.Tx}
+					} else {
+						replay <- LogEntryInsert{cols: frame.Cols, values: [][]scm.Scmer(frame.Values), txID: frame.Tx}
+					}
 				} else if len(b) >= 10 && string(b[0:10]) == "commit-tx " {
 					fields := strings.Fields(string(b[10:]))
 					if len(fields) != 2 || fields[0] == "" || fields[1] != fileCommitChecksum(fields[0]) {
@@ -602,7 +678,7 @@ func (s *FileStorage) ReplayLog(shard string, readOnly bool) (map[string]struct{
 	if readOnly {
 		return committed, replay, nil
 	}
-	return committed, replay, FileLogfile{w: f}
+	return committed, replay, FileLogfile{w: f, directorySynced: new(atomic.Bool)}
 }
 
 func fileCommittedTransactions(f *os.File) map[string]struct{} {
@@ -702,7 +778,8 @@ func (s *FileStorage) RemoveLog(shard string) {
 }
 
 type FileLogfile struct {
-	w *os.File
+	w               *os.File
+	directorySynced *atomic.Bool
 }
 
 func (w FileLogfile) Write(logentry interface{}) {
@@ -785,29 +862,52 @@ func encodeFileLogEntry(logentry interface{}) []byte {
 		encodeFileInsert(&b, "insert-hidden ", l.txID, l.cols, l.values)
 	case LogEntryCommit:
 		fmt.Fprintf(&b, "commit-tx %s %s\n", l.txID, fileCommitChecksum(l.txID))
+	case LogEntrySequence:
+		fmt.Fprintf(&b, "sequence-v1 %s\n", encodeSequenceRecord(l))
 	}
 	return b.Bytes()
 }
 
 func encodeFileInsert(b *bytes.Buffer, prefix string, txID string, cols []string, values [][]scm.Scmer) {
-	if txID == "" {
-		b.WriteString(prefix)
+	if prefix == "insert-hidden " {
+		b.WriteString("insert-hidden-v2 ")
 	} else {
-		b.WriteString(strings.TrimSuffix(prefix, " "))
-		b.WriteString("-tx ")
-		b.WriteString(txID)
-		b.WriteByte(' ')
+		b.WriteString("insert-v2 ")
 	}
-	tmp, _ := json.Marshal(cols)
-	b.Write(tmp)
-	tmp, _ = json.Marshal(values)
-	b.Write(tmp)
-	b.WriteString("\n")
+	frame := struct {
+		Cols   []string      `json:"cols"`
+		Values persistedRows `json:"values"`
+		Tx     string        `json:"tx,omitempty"`
+	}{cols, persistedRows(values), txID}
+	payload, err := json.Marshal(frame)
+	if err != nil {
+		panic(err)
+	}
+	b.Write(payload)
+	b.WriteByte('\n')
 }
 func (w FileLogfile) Flush(durable bool) {
 	if durable {
 		if err := w.w.Sync(); err != nil {
 			raisePersistenceFailure("filesystem", w.w.Name(), "log.sync", err)
+		}
+		// A newly opened WAL may have created its directory entry after the
+		// last schema checkpoint. Harden that entry before acknowledging the
+		// first durable frame; later flushes need only the file barrier.
+		if !w.directorySynced.Load() {
+			dir, err := os.Open(filepath.Dir(w.w.Name()))
+			if err != nil {
+				raisePersistenceFailure("filesystem", w.w.Name(), "log.sync.directory", err)
+			}
+			err = dir.Sync()
+			closeErr := dir.Close()
+			if err != nil {
+				raisePersistenceFailure("filesystem", w.w.Name(), "log.sync.directory", err)
+			}
+			if closeErr != nil {
+				raisePersistenceFailure("filesystem", w.w.Name(), "log.sync.directory.close", closeErr)
+			}
+			w.directorySynced.Store(true)
 		}
 	}
 }

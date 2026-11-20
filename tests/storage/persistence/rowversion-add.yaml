@@ -20,7 +20,7 @@ test_cases:
   name: 'Fixture setup 005: INSERT tsql_rv_add_main VALUES (1)'
   noncritical: true
 - name: Publish main generation
-  scm: (rebuild (table "memcp-tests" false "tsql_rv_add_main" false) true false)
+  scm: (rebuild (table "memcp-tests" false "tsql_rv_add_main" false nil) true false)
 - name: Main rows reject generated ADD
   sql: ALTER TABLE tsql_rv_add_main ADD added_rv ROWVERSION PRIMARY KEY
   expect:
@@ -33,7 +33,7 @@ test_cases:
   noncritical: true
 - name: Rejected ADD keeps all schemas clean
   scm: (begin (define names (list "tsql_rv_add_empty" "tsql_rv_add_main")) (if (reduce names (lambda (ok name) (and
-    ok (nil? (find (get_schema "memcp-tests" name) (lambda (column) (equal? (column "Field") "added_rv")) nil))))
+    ok (nil? (find (get_schema "memcp-tests" name nil) (lambda (column) (equal? (column "Field") "added_rv")) nil))))
     true) true (error "rejected ADD changed published columns")))
   noncritical: true
 - name: Persist rejected ADD definitions
@@ -51,7 +51,7 @@ test_cases:
   noncritical: true
 - name: Restarted rejection keeps schemas clean
   scm: (begin (define names (list "tsql_rv_add_empty" "tsql_rv_add_main")) (if (reduce names (lambda (ok name) (and
-    ok (nil? (find (get_schema "memcp-tests" name) (lambda (column) (equal? (column "Field") "added_rv")) nil))))
+    ok (nil? (find (get_schema "memcp-tests" name nil) (lambda (column) (equal? (column "Field") "added_rv")) nil))))
     true) true (error "rejected ADD changed published columns")))
   noncritical: true
 - name: Valid DDL after rejected ADD

@@ -1,0 +1,91 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  requires_tds: true
+  description: Scalar cardinality probe lookup keys bind to grouped output columns
+setup:
+- sql: CREATE TABLE grouped_probe_input(id INT PRIMARY KEY,person INT,units FLOAT)
+- sql: CREATE TABLE grouped_probe_labels(person INT PRIMARY KEY,label NVARCHAR(20))
+- sql: CREATE TABLE grouped_probe_duplicates(person INT,label NVARCHAR(20))
+- sql: INSERT grouped_probe_input VALUES(1,10,1.5),(2,10,2.5),(3,11,NULL),(4,12,3),(5,NULL,5)
+- sql: INSERT grouped_probe_labels VALUES(10,N'parts'),(11,NULL),(12,N'third')
+- sql: INSERT grouped_probe_duplicates VALUES(10,N'first'),(10,N'second')
+cleanup:
+- sql: DROP VIEW IF EXISTS dbo.grouped_probe_view
+- sql: DROP TABLE IF EXISTS grouped_probe_duplicates
+- sql: DROP TABLE IF EXISTS grouped_probe_labels
+- sql: DROP TABLE IF EXISTS grouped_probe_input
+test_cases:
+- name: Grouped scalar output consumes its complete grouped correlation key
+  sql: |
+    SELECT person,SUM(units) AS quantity,(SELECT label FROM grouped_probe_labels l WHERE l.person=p.person) AS label
+    FROM grouped_probe_input p GROUP BY person ORDER BY person
+  expect: {rows: 4,data: [{person: null,quantity: 5,label: null},{person: 10,quantity: 4,label: parts},
+      {person: 11,quantity: null,label: null},{person: 12,quantity: 3,label: third}]}
+- name: Shared SQL grouping rebinds the same scalar cardinality probe
+  syntax: mysql
+  sql: |
+    SELECT person,SUM(units) AS quantity,(SELECT label FROM grouped_probe_labels l WHERE l.person=p.person) AS label
+    FROM grouped_probe_input p GROUP BY person ORDER BY person
+  expect: {rows: 4,data: [{person: null,quantity: 5,label: null},{person: 10,quantity: 4,label: parts},
+      {person: 11,quantity: null,label: null},{person: 12,quantity: 3,label: third}]}
+- name: Scalar correlation selects the correct nonleading grouped key slot
+  sql: |
+    SELECT p.id,person,SUM(units) AS quantity,(SELECT label FROM grouped_probe_labels l WHERE l.person=p.person) AS label
+    FROM grouped_probe_input p GROUP BY p.id,person ORDER BY p.id
+  expect: {rows: 5,data: [{id: 1,person: 10,quantity: 1.5,label: parts},{id: 2,person: 10,quantity: 2.5,label: parts},
+      {id: 3,person: 11,quantity: null,label: null},{id: 4,person: 12,quantity: 3,label: third},
+      {id: 5,person: null,quantity: 5,label: null}]}
+- name: A scalar consumer in a grouped CASE retains the grouped key
+  sql: |
+    SELECT person,CASE WHEN person=10 THEN (SELECT label FROM grouped_probe_labels l WHERE l.person=p.person)
+      ELSE N'other' END AS label,SUM(units) AS quantity FROM grouped_probe_input p GROUP BY person ORDER BY person
+  expect: {rows: 4,data: [{person: null,label: other,quantity: 5},{person: 10,label: parts,quantity: 4},
+      {person: 11,label: other,quantity: null},{person: 12,label: other,quantity: 3}]}
+- name: Grouped HAVING may consume the same rebased scalar lookup
+  sql: |
+    SELECT person,SUM(units) AS quantity FROM grouped_probe_input p GROUP BY person
+    HAVING (SELECT label FROM grouped_probe_labels l WHERE l.person=p.person)=N'parts'
+  expect: {rows: 1,data: [{person: 10,quantity: 4}]}
+- name: Grouped ordering may consume the scalar key after aggregation
+  sql: |
+    SELECT person,SUM(units) AS quantity,(SELECT label FROM grouped_probe_labels l WHERE l.person=p.person) AS label
+    FROM grouped_probe_input p GROUP BY person ORDER BY label,person
+  expect: {rows: 4,data: [{person: null,quantity: 5,label: null},{person: 11,quantity: null,label: null},
+      {person: 10,quantity: 4,label: parts},{person: 12,quantity: 3,label: third}]}
+- name: Missing scalar matches do not become grouped rows or nonnull values
+  sql: |
+    SELECT person,COUNT(*) AS total,(SELECT label FROM grouped_probe_labels l WHERE l.person=p.person+100) AS label
+    FROM grouped_probe_input p GROUP BY person ORDER BY person
+  expect: {rows: 4,data: [{person: null,total: 1,label: null},{person: 10,total: 2,label: null},
+      {person: 11,total: 1,label: null},{person: 12,total: 1,label: null}]}
+- name: Nonunique scalar output retains its cardinality error after grouping
+  sql: |
+    SELECT person,SUM(units) AS quantity,(SELECT label FROM grouped_probe_duplicates l WHERE l.person=p.person) AS label
+    FROM grouped_probe_input p WHERE person=10 GROUP BY person
+  expect: {error: true,contains: scalar subselect returned more than one row}
+- name: A dead grouped CASE arm cannot eagerly evaluate a scalar cardinality error
+  sql: |
+    SELECT person,CASE WHEN person=99 THEN (SELECT label FROM grouped_probe_duplicates l WHERE l.person=p.person)
+      ELSE N'safe' END AS label,SUM(units) AS quantity FROM grouped_probe_input p WHERE person=10 GROUP BY person
+  expect: {rows: 1,data: [{person: 10,label: safe,quantity: 4}]}
+- name: Stored grouped scalars preserve their probe correlation across a derived alias
+  sql: |
+    CREATE VIEW dbo.grouped_probe_view AS SELECT person,SUM(units) AS quantity,
+      (SELECT label FROM grouped_probe_labels l WHERE l.person=p.person) AS label FROM grouped_probe_input p GROUP BY person
+- name: A stored grouped scalar remains typed through the existing producer contract
+  tds:
+    statements:
+    - sql: SELECT person,quantity,label FROM dbo.grouped_probe_view WHERE person=10
+      expect:
+        rows: 1
+        data: [{person: 10,quantity: 4,label: parts}]
+        column_types: [{name: person,type: INT},{name: quantity,type: FLOAT},{name: label,type: NVARCHAR,length: 20}]
+- name: Scalar group lookup survives complete UNION branch conversion
+  sql: |
+    SELECT person,SUM(units) AS quantity,(SELECT label FROM grouped_probe_labels l WHERE l.person=p.person) AS label
+      FROM grouped_probe_input p GROUP BY person
+    UNION ALL SELECT 20,CAST(2 AS FLOAT),CAST(N'other' AS NVARCHAR(20)) ORDER BY person
+  expect: {rows: 5,data: [{person: null,quantity: 5,label: null},{person: 10,quantity: 4,label: parts},
+      {person: 11,quantity: null,label: null},{person: 12,quantity: 3,label: third},{person: 20,quantity: 2,label: other}]}

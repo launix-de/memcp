@@ -107,7 +107,7 @@ Each CI workflow first runs a small `changes` gate (`.github/workflows/detect-ch
 ### Exact Server Invocation (used by test runner)
 The test runner (`run_sql_tests.py`) starts the server exactly like this:
 ```
-./memcp -data /tmp/memcp-sql-tests-PORT.RANDOM --api-port=PORT --mysql-port=PORT+1000 --disable-mysql lib/main.scm
+./memcp -data /tmp/memcp-sql-tests-PORT.RANDOM --api-port=PORT --mysql-port=PORT+1000 --mysql-socket= --disable-mysql lib/main.scm
 ```
 - The binary MUST be `./memcp` (hardcoded in the test runner).
 - Be careful when you cross-test different versions that the correct lib/ folder and binary in cwd is used
@@ -116,6 +116,7 @@ The test runner (`run_sql_tests.py`) starts the server exactly like this:
 - Runner-owned data directories are removed after shutdown; an explicit
   `MEMCP_TEST_DATA_DIR` remains caller-owned and is preserved.
 - `--api-port=PORT` sets the HTTP API port (default 4321).
+- `--mysql-socket=` disables the shared default Unix socket for runner-owned instances. MySQL protocol suites use their dedicated TCP port.
 - `--no-repl` for background daemon use (test runner uses stdin pipe instead).
 
 ### Manual Server Testing

@@ -1,0 +1,32 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  description: Scalar assignment snapshots retain the executing native source owner without leaking lexical values
+setup:
+- sql: CREATE TABLE assignment_scope_values(id INT PRIMARY KEY,value INT)
+- sql: ALTER TABLE assignment_scope_values ADD CONSTRAINT assignment_scope_default DEFAULT 9 FOR value
+- sql: CREATE PROCEDURE assignment_scope_nested AS BEGIN DECLARE @value INT=99; DECLARE @object INT=OBJECT_ID(N'assignment_scope_default',N'D'); SELECT @value AS local_value,CASE WHEN @object>0 THEN 1 ELSE 0 END AS known_default; END
+cleanup:
+- sql: DROP PROCEDURE IF EXISTS assignment_scope_nested
+- sql: DROP TABLE IF EXISTS assignment_scope_values
+test_cases:
+- name: DECLARE intrinsic metadata assignment borrows the request native owner
+  sql: DECLARE @object INT=OBJECT_ID(N'assignment_scope_default',N'D'); SELECT CASE WHEN @object>0 THEN 1 ELSE 0 END AS known_default;
+  expect: {rows: 1, data: [{known_default: 1}]}
+- name: SELECT catalog assignment retains its scalar input and completed result
+  sql: DECLARE @count INT=7; SELECT @count=COUNT(*) FROM sys.default_constraints WHERE name=N'assignment_scope_default'; SELECT @count AS actual;
+  expect: {rows: 1, data: [{actual: 1}]}
+- name: Nested module source ownership does not overwrite a caller local
+  sql: DECLARE @value INT=7; EXEC assignment_scope_nested; SELECT @value AS caller_value;
+  expect: {rows: 2, data: [{local_value: 99, known_default: 1}, {caller_value: 7}]}
+- name: Independent assignment sources do not commit the caller data transaction
+  sql: BEGIN TRANSACTION; INSERT assignment_scope_values(id) VALUES(1); DECLARE @object INT=OBJECT_ID(N'assignment_scope_default',N'D'); SELECT CASE WHEN @object>0 THEN 1 ELSE 0 END AS known_default; ROLLBACK TRANSACTION; SELECT COUNT(*) AS total FROM assignment_scope_values;
+  expect: {rows: 2, data: [{known_default: 1}, {total: 0}]}
+- name: Metadata assignment retains a materialized lexical table variable
+  sql: DECLARE @items TABLE(id INT); INSERT @items VALUES(7); DECLARE @object INT=OBJECT_ID(N'assignment_scope_default',N'D'); DECLARE @value INT; SELECT @value=SUM(id) FROM @items; SELECT @value AS value,CASE WHEN @object>0 THEN 1 ELSE 0 END AS known_default;
+  expect: {rows: 1, data: [{value: 7, known_default: 1}]}
+- name: Metadata assignment retains an open global static cursor
+  sql: DECLARE @value INT; DECLARE assignment_owner_cursor CURSOR GLOBAL STATIC FOR SELECT 7 AS id; OPEN assignment_owner_cursor; DECLARE @object INT=OBJECT_ID(N'assignment_scope_default',N'D'); FETCH NEXT FROM GLOBAL assignment_owner_cursor INTO @value; CLOSE GLOBAL assignment_owner_cursor; DEALLOCATE GLOBAL assignment_owner_cursor; SELECT @value AS value,CASE WHEN @object>0 THEN 1 ELSE 0 END AS known_default;
+  expect: {rows: 1, data: [{value: 7, known_default: 1}]}

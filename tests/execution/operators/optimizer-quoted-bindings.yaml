@@ -1,0 +1,60 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: "1.0"
+  description: Quoted values stay outside optimizer binding and branch analysis
+setup: []
+test_cases:
+  - name: Lambda sinking preserves separately retained quoted branch data
+    scm: |
+      (begin
+        (define datum (list 'if true (list 'list 'literal_fn 'literal_fn) nil))
+        (define syntax (list 'begin
+          (list 'define 'literal_fn (list 'lambda '(x) 'x))
+          (list 'quote datum)))
+        (define before (pretty_print datum 1000))
+        (define raw_identity (identical? datum (eval syntax)))
+        (define result (eval (optimize syntax)))
+        (list raw_identity
+          (equal? before (pretty_print datum 1000))
+          (equal? before (pretty_print result 1000))
+          (identical? datum result)))
+    expect: {result: [true,true,true,true]}
+
+  - name: Native and source-wrapped quote heads retain literal values
+    scm: |
+      (map (list (eval 'quote) (source "quoted-head" 1 1 'quote)) (lambda (head) (begin
+        (define datum (list 'if true (list 'list 'literal_fn 'literal_fn) nil))
+        (define syntax (source "quoted-program" 1 1 (list 'begin
+          (list 'define 'literal_fn (list 'lambda '(x) 'x))
+          (list head datum))))
+        (define before (pretty_print datum 1000))
+        (define result (eval (optimize syntax)))
+        (and (equal? before (pretty_print datum 1000))
+          (equal? before (pretty_print result 1000)) (identical? datum result)))))
+    expect: {result: [true,true]}
+
+  - name: Cloning syntax still returns the original quoted contents after optimization
+    scm: |
+      (begin
+        (define datum (list 'if true (list 'list 'literal_fn 'literal_fn) nil))
+        (define syntax (list 'begin
+          (list 'define 'literal_fn (list 'lambda '(x) 'x))
+          (list 'quote datum)))
+        (define before (pretty_print datum 1000))
+        (define result (eval (optimize (clone_optimizer_expression syntax))))
+        (and (equal? before (pretty_print datum 1000))
+          (equal? before (pretty_print result 1000))))
+    expect: {result: true}
+
+  - name: Actual conditional lambda uses retain their executable behavior
+    scm: |
+      (begin
+        (define syntax (scheme "(lambda (choose) (begin (define f (lambda (x) (+ x 1))) (if choose (+ (f 2) (f 3)) 11)))"))
+        (define raw (eval (clone_optimizer_expression syntax)))
+        (define optimized (eval (optimize syntax)))
+        (and (equal? (raw true) 7) (equal? (optimized true) 7)
+          (equal? (raw false) 11) (equal? (optimized false) 11)
+          (equal? ((jit optimized) true) 7) (equal? ((jit optimized) false) 11)))
+    expect: {result: true}
+cleanup: []

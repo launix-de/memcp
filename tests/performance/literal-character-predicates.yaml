@@ -1,0 +1,56 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: sql
+  isolated: true
+  description: TSQL literal character predicates preserve complete aggregate results over a fixed native source
+setup:
+- sql: DROP TABLE IF EXISTS literal_fold_rows
+- sql: DROP TABLE IF EXISTS literal_fold_numbers
+- sql: CREATE TABLE literal_fold_numbers(n INT PRIMARY KEY)
+- sql: INSERT INTO literal_fold_numbers VALUES(0),(1),(2),(3),(4),(5),(6),(7),(8),(9),(10),(11),(12),(13),(14),(15)
+- sql: CREATE TABLE literal_fold_rows(id INT PRIMARY KEY)
+# Three independent sixteen-row inputs produce exactly 4096 rows, numbered 0..4095.
+- sql: |
+    INSERT INTO literal_fold_rows(id)
+    SELECT a.n*256+b.n*16+c.n
+    FROM literal_fold_numbers a
+    CROSS JOIN literal_fold_numbers b
+    CROSS JOIN literal_fold_numbers c
+cleanup:
+- sql: DROP TABLE IF EXISTS literal_fold_rows
+- sql: DROP TABLE IF EXISTS literal_fold_numbers
+test_cases:
+- name: A true literal character comparison retains the complete source aggregate
+  syntax: tsql
+  sql: SELECT COUNT(*) AS n,SUM(id) AS total FROM literal_fold_rows WHERE N'C'=N'C'
+  performance_rows: 4096
+  warmup: 0
+  timing_samples: 31
+  timing_aggregation: total
+  threshold_ms: 1000
+  expect:
+    rows: 1
+    data: [{n: 4096, total: 8386560}]
+- name: A false literal character comparison retains the empty aggregate identities
+  syntax: tsql
+  sql: SELECT COUNT(*) AS n,SUM(id) AS total FROM literal_fold_rows WHERE N'C'=N'F'
+  performance_rows: 4096
+  warmup: 0
+  timing_samples: 31
+  timing_aggregation: total
+  threshold_ms: 1000
+  expect:
+    rows: 1
+    data: [{n: 0, total: null}]
+- name: An unknown literal character comparison does not select a row
+  syntax: tsql
+  sql: SELECT COUNT(*) AS n,SUM(id) AS total FROM literal_fold_rows WHERE N'C'=CAST(NULL AS NVARCHAR(1))
+  performance_rows: 4096
+  warmup: 0
+  timing_samples: 31
+  timing_aggregation: total
+  threshold_ms: 1000
+  expect:
+    rows: 1
+    data: [{n: 0, total: null}]

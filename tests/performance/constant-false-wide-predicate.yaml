@@ -51,8 +51,8 @@ test_cases:
         (define session (newsession))
         (session "username" "root")
         (session "schema" "memcp-tests")
-        (cached_parse (newcachemap) (list parse_sql) "memcp-tests" query
-          (lambda (_schema _table _write) true) "root" session false)
+        (cached_parse (newcachemap) "sql" (list parse_sql) "memcp-tests" query
+          (lambda (_schema _table _write) true) "root" session false nil)
         "ok")
     expect:
       data: ["ok"]

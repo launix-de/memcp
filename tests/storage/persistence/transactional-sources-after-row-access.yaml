@@ -1,0 +1,534 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  requires_tds: true
+  isolated: true
+  description: Immutable callable sources and column defaults share the original ACID data decision
+setup:
+- sql: CREATE TABLE public_source_progress(id INT PRIMARY KEY,value INT)
+- sql: INSERT public_source_progress VALUES(1,10)
+- sql: CREATE TABLE public_source_defaults(id INT PRIMARY KEY,value INT CONSTRAINT DF_public_source_old DEFAULT 3)
+- sql: CREATE PROCEDURE public_source_proc AS SELECT 3 AS value
+- sql: CREATE FUNCTION public_source_fn() RETURNS INT AS BEGIN RETURN 3; END
+- scm: (registerprocedurelanguage "source-phase-literal" (lambda (source _context) (lambda () (simplify source))))
+- scm: (createprocedure "memcp-tests" "public_source_literal" "source-phase-literal" "5" nil false nil)
+- sql: CREATE TABLE public_source_phase_parent(id INT PRIMARY KEY)
+- sql: INSERT public_source_phase_parent VALUES(1)
+- sql: CREATE TABLE public_source_phase_child(id INT PRIMARY KEY,parent_id INT)
+- sql: INSERT public_source_phase_child VALUES(2,1)
+test_cases:
+- name: A clean source declaration retains later enforcement before any row mutation
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: CREATE PROCEDURE public_source_before_enforcement AS SELECT 41 AS value
+    - connection: owner
+      sql: ALTER TABLE public_source_phase_child ADD CONSTRAINT FK_public_source_phase FOREIGN KEY(parent_id) REFERENCES
+        public_source_phase_parent(id)
+    - connection: owner
+      sql: SELECT name FROM sys.foreign_keys WHERE name=N'FK_public_source_phase'
+      expect:
+        rows: 1
+        data:
+        - name: FK_public_source_phase
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: owner
+      sql: SELECT name FROM sys.foreign_keys WHERE name=N'FK_public_source_phase'
+      expect:
+        rows: 0
+        data: []
+    - connection: owner
+      sql: SELECT OBJECT_ID(N'public_source_before_enforcement',N'P') AS missing_id
+      expect:
+        rows: 1
+        data:
+        - missing_id: null
+- name: Stored row reads can precede an immutable source replacement in one ACID transaction
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: SELECT value FROM public_source_progress WHERE id=1
+      expect:
+        rows: 1
+        data:
+        - value: 10
+    - connection: owner
+      sql: ALTER PROCEDURE public_source_proc AS SELECT 5 AS value
+    - connection: owner
+      sql: EXEC public_source_proc
+      expect:
+        rows: 1
+        data:
+        - value: 5
+    - connection: observer
+      sql: EXEC public_source_proc
+      expect:
+        rows: 1
+        data:
+        - value: 3
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: owner
+      sql: EXEC public_source_proc
+      expect:
+        rows: 1
+        data:
+        - value: 3
+- name: Earlier and later row updates share the source commit and observer boundary
+  tds:
+    statements:
+    - connection: observer
+      sql: EXEC public_source_proc
+      expect:
+        rows: 1
+        data:
+        - value: 3
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: UPDATE public_source_progress SET value=11 WHERE id=1
+    - connection: owner
+      sql: ALTER PROCEDURE public_source_proc AS SELECT 7 AS value
+    - connection: owner
+      sql: EXEC public_source_proc
+      expect:
+        rows: 1
+        data:
+        - value: 7
+    - connection: observer
+      sql: EXEC public_source_proc
+      expect:
+        rows: 1
+        data:
+        - value: 3
+    - connection: observer
+      sql: SELECT value FROM public_source_progress WHERE id=1
+      expect:
+        rows: 1
+        data:
+        - value: 10
+    - connection: owner
+      sql: UPDATE public_source_progress SET value=12 WHERE id=1
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: EXEC public_source_proc
+      expect:
+        rows: 1
+        data:
+        - value: 7
+    - connection: observer
+      sql: SELECT value FROM public_source_progress WHERE id=1
+      expect:
+        rows: 1
+        data:
+        - value: 12
+- name: Source and original row updates roll back together
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: UPDATE public_source_progress SET value=21 WHERE id=1
+    - connection: owner
+      sql: ALTER PROCEDURE public_source_proc AS SELECT 9 AS value
+    - connection: owner
+      sql: EXEC public_source_proc
+      expect:
+        rows: 1
+        data:
+        - value: 9
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: observer
+      sql: EXEC public_source_proc
+      expect:
+        rows: 1
+        data:
+        - value: 7
+    - connection: observer
+      sql: SELECT value FROM public_source_progress WHERE id=1
+      expect:
+        rows: 1
+        data:
+        - value: 12
+- name: Rolling back every source delta retires only the empty phase and permits reentry
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: UPDATE public_source_progress SET value=31 WHERE id=1
+    - connection: owner
+      sql: SAVE TRANSACTION before_source
+    - connection: owner
+      sql: ALTER PROCEDURE public_source_proc AS SELECT 11 AS value
+    - connection: owner
+      sql: UPDATE public_source_progress SET value=32 WHERE id=1
+    - connection: owner
+      sql: ROLLBACK TRANSACTION before_source
+    - connection: owner
+      sql: EXEC public_source_proc
+      expect:
+        rows: 1
+        data:
+        - value: 7
+    - connection: owner
+      sql: SELECT value FROM public_source_progress WHERE id=1
+      expect:
+        rows: 1
+        data:
+        - value: 31
+    - connection: owner
+      sql: ALTER PROCEDURE public_source_proc AS SELECT 13 AS value
+    - connection: owner
+      sql: INSERT public_source_progress VALUES(2,20)
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: EXEC public_source_proc
+      expect:
+        rows: 1
+        data:
+        - value: 13
+- name: A savepoint keeps only the accepted source prefix and original row prefix
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: UPDATE public_source_progress SET value=41 WHERE id=1
+    - connection: owner
+      sql: ALTER PROCEDURE public_source_proc AS SELECT 17 AS value
+    - connection: owner
+      sql: SAVE TRANSACTION source_prefix
+    - connection: owner
+      sql: ALTER PROCEDURE public_source_proc AS SELECT 19 AS value
+    - connection: owner
+      sql: ALTER FUNCTION public_source_fn() RETURNS INT AS BEGIN RETURN 19; END
+    - connection: owner
+      sql: UPDATE public_source_progress SET value=42 WHERE id=1
+    - connection: owner
+      sql: ROLLBACK TRANSACTION source_prefix
+    - connection: owner
+      sql: EXEC public_source_proc
+      expect:
+        rows: 1
+        data:
+        - value: 17
+    - connection: owner
+      sql: SELECT dbo.public_source_fn() AS value
+      expect:
+        rows: 1
+        data:
+        - value: 3
+    - connection: owner
+      sql: SELECT value FROM public_source_progress WHERE id=1
+      expect:
+        rows: 1
+        data:
+        - value: 41
+    - connection: owner
+      sql: COMMIT TRANSACTION
+- name: Source then default deltas use their existing shared catalog decision
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: UPDATE public_source_progress SET value=51 WHERE id=1
+    - connection: owner
+      sql: ALTER PROCEDURE public_source_proc AS SELECT 23 AS value
+    - connection: owner
+      sql: ALTER TABLE public_source_defaults DROP CONSTRAINT DF_public_source_old
+    - connection: owner
+      sql: ALTER TABLE public_source_defaults ADD CONSTRAINT DF_public_source_new DEFAULT 17 FOR value
+    - connection: owner
+      sql: INSERT public_source_defaults(id) VALUES(1)
+    - connection: owner
+      sql: ALTER FUNCTION public_source_fn() RETURNS INT AS BEGIN RETURN 23; END
+    - connection: owner
+      sql: UPDATE public_source_progress SET value=52 WHERE id=1
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: EXEC public_source_proc
+      expect:
+        rows: 1
+        data:
+        - value: 23
+    - connection: observer
+      sql: SELECT dbo.public_source_fn() AS value
+      expect:
+        rows: 1
+        data:
+        - value: 23
+    - connection: observer
+      sql: SELECT id,value FROM public_source_defaults
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 17
+- name: Default then source deltas retain the same original data owner
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: UPDATE public_source_progress SET value=61 WHERE id=1
+    - connection: owner
+      sql: ALTER TABLE public_source_defaults DROP CONSTRAINT DF_public_source_new
+    - connection: owner
+      sql: ALTER TABLE public_source_defaults ADD CONSTRAINT DF_public_source_final DEFAULT 19 FOR value
+    - connection: owner
+      sql: ALTER PROCEDURE public_source_proc AS SELECT 29 AS value
+    - connection: owner
+      sql: INSERT public_source_defaults(id) VALUES(2)
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT id,value FROM public_source_defaults ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 17
+        - id: 2
+          value: 19
+- name: A prior row update and later source replacement commit without converting the native owner
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: UPDATE public_source_progress SET value=71 WHERE id=1
+    - connection: owner
+      sql: ALTER PROCEDURE public_source_proc AS SELECT 31 AS value
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: EXEC public_source_proc
+      expect:
+        rows: 1
+        data:
+        - value: 31
+    - connection: observer
+      sql: SELECT value FROM public_source_progress WHERE id=1
+      expect:
+        rows: 1
+        data:
+        - value: 71
+- name: A late callable CREATE and DROP remain private and roll back without losing prior rows
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: UPDATE public_source_progress SET value=81 WHERE id=1
+    - connection: owner
+      sql: CREATE PROCEDURE public_source_created AS SELECT 37 AS value
+    - connection: owner
+      sql: EXEC public_source_created
+      expect:
+        rows: 1
+        data:
+        - value: 37
+    - connection: observer
+      sql: SELECT OBJECT_ID(N'public_source_created',N'P') AS missing_id
+      expect:
+        rows: 1
+        data:
+        - missing_id: null
+    - connection: owner
+      sql: DROP PROCEDURE public_source_proc
+    - connection: owner
+      sql: SELECT OBJECT_ID(N'public_source_proc',N'P') AS missing_id
+      expect:
+        rows: 1
+        data:
+        - missing_id: null
+    - connection: observer
+      sql: EXEC public_source_proc
+      expect:
+        rows: 1
+        data:
+        - value: 31
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: owner
+      sql: EXEC public_source_proc
+      expect:
+        rows: 1
+        data:
+        - value: 31
+    - connection: owner
+      sql: SELECT OBJECT_ID(N'public_source_created',N'P') AS missing_id
+      expect:
+        rows: 1
+        data:
+        - missing_id: null
+- name: A missing native source drop retires its empty phase before ordinary data commits
+  scm: |-
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (define target (table "memcp-tests" false "public_source_progress" false tx))
+      (insert target '("id" "value") (list (list 3 30)) '() nil false nil tx)
+      (define absent (not (dropprocedure "memcp-tests" "public_source_absent" true tx)))
+      (insert target '("id" "value") (list (list 4 40)) '() nil false nil tx)
+      (tx_commit owner)
+      (and absent (equal? (scan nil target '() '() '("id") (lambda (id) (and (>= id 3) (<= id 4))) '("value")
+        (lambda (acc value) (+ acc value)) 0 +) 70)))
+  expect:
+    result: true
+- name: A failed first source constructor preserves the original row decision and committed callable
+  scm: |-
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (define target (table "memcp-tests" false "public_source_progress" false tx))
+      (insert target '("id" "value") (list (list 5 50)) '() nil false nil tx)
+      (define denied (try (lambda () (begin
+        (createprocedure "memcp-tests" "public_source_literal" "source-phase-literal" "99" nil false tx) false))
+        (lambda (failure) (strlike (concat failure) "%already exists%"))))
+      (insert target '("id" "value") (list (list 6 60)) '() nil false nil tx)
+      (tx_commit owner)
+      (and denied (equal? ((procedure "memcp-tests" "public_source_literal")) 5)
+        (equal? (scan nil target '() '() '("id") (lambda (id) (and (>= id 5) (<= id 6))) '("value")
+          (lambda (acc value) (+ acc value)) 0 +) 110)))
+  expect:
+    result: true
+- name: An owned callable writes in the same ACID transaction and both source and rows roll back
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: UPDATE public_source_progress SET value=72 WHERE id=1
+    - connection: owner
+      sql: CREATE PROCEDURE public_source_writer AS INSERT public_source_progress VALUES(9,90)
+    - connection: owner
+      sql: EXEC public_source_writer
+    - connection: owner
+      sql: SELECT id,value FROM public_source_progress WHERE id=9
+      expect:
+        rows: 1
+        data:
+        - id: 9
+          value: 90
+    - connection: observer
+      sql: SELECT id,value FROM public_source_progress WHERE id=9
+      expect:
+        rows: 0
+        data: []
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: owner
+      sql: SELECT id,value FROM public_source_progress WHERE id=9
+      expect:
+        rows: 0
+        data: []
+    - connection: owner
+      sql: SELECT OBJECT_ID(N'public_source_writer',N'P') AS missing_id
+      expect:
+        rows: 1
+        data:
+        - missing_id: null
+- name: Accepted original data source and default decisions survive a hard crash
+  scm: (crash)
+  expect:
+    interrupted_ok: true
+- name: Restart the accepted public decision
+  action: restart
+- name: Accepted source code defaults and prior rows recover together
+  sql: EXEC public_source_proc; SELECT dbo.public_source_fn() AS fn_value; SELECT id,value FROM public_source_progress
+    ORDER BY id; SELECT id,value FROM public_source_defaults ORDER BY id
+  expect:
+    rows: 10
+    data:
+    - value: 31
+    - fn_value: 23
+    - id: 1
+      value: 71
+    - id: 2
+      value: 20
+    - id: 3
+      value: 30
+    - id: 4
+      value: 40
+    - id: 5
+      value: 50
+    - id: 6
+      value: 60
+    - id: 1
+      value: 17
+    - id: 2
+      value: 19
+- name: An abandoned mixed public decision remains private while its actual owner survives until crash
+  session_id: public-source-abandoned
+  sql: BEGIN TRANSACTION; UPDATE public_source_progress SET value=99 WHERE id=1; EXEC sp_executesql N'ALTER PROCEDURE
+    public_source_proc AS SELECT 99 AS value'; EXEC public_source_proc
+  expect:
+    rows: 1
+    data:
+    - value: 99
+- name: Crash before the source and original row decision
+  scm: (crash)
+  expect:
+    interrupted_ok: true
+- name: Restart without accepting the abandoned source owner
+  action: restart
+- name: Unaccepted source and original data both recover their predecessor
+  sql: EXEC public_source_proc; SELECT value FROM public_source_progress WHERE id=1
+  expect:
+    rows: 2
+    data:
+    - value: 31
+    - value: 71
+- name: A clean source first transaction may eventually execute ordinary DML before its decision
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: CREATE PROCEDURE public_source_clean_writer AS INSERT public_source_progress VALUES(9,90)
+    - connection: owner
+      sql: EXEC public_source_clean_writer
+    - connection: owner
+      sql: SELECT id,value FROM public_source_progress WHERE id=9
+      expect:
+        rows: 1
+        data:
+        - id: 9
+          value: 90
+    - connection: observer
+      sql: SELECT id,value FROM public_source_progress WHERE id=9
+      expect:
+        rows: 0
+        data: []
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: owner
+      sql: SELECT id,value FROM public_source_progress WHERE id=9
+      expect:
+        rows: 0
+        data: []
+cleanup:
+- sql: DROP PROCEDURE IF EXISTS public_source_before_enforcement
+- sql: DROP PROCEDURE IF EXISTS public_source_clean_writer
+- sql: DROP PROCEDURE IF EXISTS public_source_writer
+- scm: (dropprocedure "memcp-tests" "public_source_literal" true)
+- sql: DROP PROCEDURE IF EXISTS public_source_created
+- sql: DROP PROCEDURE public_source_proc
+- sql: DROP FUNCTION public_source_fn
+- sql: DROP TABLE public_source_defaults
+- sql: DROP TABLE public_source_progress
+- sql: DROP TABLE public_source_phase_child
+- sql: DROP TABLE public_source_phase_parent

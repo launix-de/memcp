@@ -1,0 +1,58 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  description: INSERT VALUES expands relational scalar factories through the shared query source
+setup:
+- sql: DROP TABLE IF EXISTS values_identity_target
+- sql: DROP TABLE IF EXISTS values_identity_source
+- sql: CREATE TABLE values_identity_source(id INT)
+- sql: CREATE TABLE values_identity_target(seq INT,object_id INT,note NVARCHAR(40),marker INT DEFAULT 9)
+cleanup:
+- sql: DROP TABLE IF EXISTS values_identity_target
+- sql: DROP TABLE IF EXISTS values_identity_source
+test_cases:
+- name: A scalar identity factory is evaluated before native VALUES insertion
+  sql: INSERT values_identity_target(seq,object_id,note) VALUES(1,OBJECT_ID(N'values_identity_source'),N'captured')
+  expect: {affected_rows: 1}
+- name: A bounded batch preserves repeated identities and missing or NULL addresses
+  sql: |
+    INSERT values_identity_target(seq,object_id,note) VALUES
+      (2,OBJECT_ID(N'values_identity_source'),N'duplicate'),
+      (3,OBJECT_ID(N'values_identity_absent'),N'missing'),
+      (4,OBJECT_ID(CAST(NULL AS NVARCHAR(128))),N'null')
+  expect: {affected_rows: 3}
+- name: Assignment conversion still discovers a nested relational factory
+  sql: INSERT values_identity_target(seq,object_id,note) VALUES(5,CAST(OBJECT_ID(N'values_identity_source') AS BIGINT),N'wrapped')
+  expect: {affected_rows: 1}
+- name: An existing scalar subquery follows the same logical insertion source
+  sql: INSERT values_identity_target(seq,object_id,note) VALUES(6,(SELECT OBJECT_ID(N'values_identity_source')),N'subquery')
+  expect: {affected_rows: 1}
+- name: Every inserted scalar and native default retains its actual value
+  sql: |
+    SELECT seq,CASE WHEN object_id=OBJECT_ID(N'values_identity_source') THEN 1 ELSE 0 END AS current_identity,
+      CASE WHEN object_id IS NULL THEN 1 ELSE 0 END AS missing_identity,note,marker
+    FROM values_identity_target ORDER BY seq
+  expect:
+    rows: 6
+    data:
+    - {seq: 1, current_identity: 1, missing_identity: 0, note: captured, marker: 9}
+    - {seq: 2, current_identity: 1, missing_identity: 0, note: duplicate, marker: 9}
+    - {seq: 3, current_identity: 0, missing_identity: 1, note: missing, marker: 9}
+    - {seq: 4, current_identity: 0, missing_identity: 1, note: 'null', marker: 9}
+    - {seq: 5, current_identity: 1, missing_identity: 0, note: wrapped, marker: 9}
+    - {seq: 6, current_identity: 1, missing_identity: 0, note: subquery, marker: 9}
+- name: Retire the original identity source
+  sql: DROP TABLE values_identity_source
+- name: Publish a new incarnation at the same SQL address
+  sql: CREATE TABLE values_identity_source(id INT,value INT)
+- name: The identical VALUES statement resolves the new current incarnation
+  sql: INSERT values_identity_target(seq,object_id,note) VALUES(1,OBJECT_ID(N'values_identity_source'),N'captured')
+  expect: {affected_rows: 1}
+- name: Old and new receipts preserve distinct actual native identities
+  sql: SELECT COUNT(*) AS receipts,COUNT(DISTINCT object_id) AS identities FROM values_identity_target WHERE seq=1
+  expect: {rows: 1, data: [{receipts: 2, identities: 2}]}
+- name: Replacement neither duplicates other rows nor drops nullable values or defaults
+  sql: SELECT COUNT(*) AS n,COUNT(object_id) AS identified,SUM(marker) AS markers FROM values_identity_target
+  expect: {rows: 1, data: [{n: 7, identified: 5, markers: 63}]}

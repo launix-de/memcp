@@ -1,0 +1,121 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# https://learn.microsoft.com/sql/t-sql/functions/system-user-transact-sql
+metadata:
+  syntax: tsql
+  requires_tds: true
+  isolated: true
+  description: Bare SYSTEM_USER uses the existing current login owner across cached expressions and module execution
+setup:
+- scm: |
+    (begin
+      (globalvars "__system_user_account_sql" (close_procedure (lambda (text) (begin
+        (define s (newsession)) (s "username" "root") (s "schema" "system") (s "syntax" "mysql")
+        (sql_with_statement s nil 0 text (lambda (tx)
+          (mysql_run_sql_statement tx "system" text s (lambda (_row) true) (lambda args true))))
+        true))))
+      true)
+- scm: ((globalvars "__system_user_account_sql") "CREATE USER system_user_member IDENTIFIED BY 'pw'")
+- scm: ((globalvars "__system_user_account_sql") "GRANT ALL ON `memcp-tests`.* TO system_user_member")
+- sql: CREATE TABLE system_user_input(id INT PRIMARY KEY)
+- sql: CREATE TABLE system_user_audit(id INT,login_name NVARCHAR(128))
+- sql: CREATE TABLE system_user_columns([system_user] NVARCHAR(128),system_user_suffix INT)
+- sql: INSERT system_user_columns VALUES(N'stored',7)
+cleanup:
+- sql: DROP PROCEDURE IF EXISTS system_user_procedure
+- sql: DROP FUNCTION IF EXISTS system_user_function
+- sql: DROP TABLE IF EXISTS system_user_defaults
+- sql: DROP TABLE IF EXISTS system_user_input
+- sql: DROP TABLE IF EXISTS system_user_audit
+- sql: DROP TABLE IF EXISTS system_user_columns
+- scm: |
+    (begin
+      (define text "DROP USER IF EXISTS system_user_member")
+      (define s (newsession)) (s "username" "root") (s "schema" "system") (s "syntax" "mysql")
+      (sql_with_statement s nil 0 text (lambda (tx)
+        (mysql_run_sql_statement tx "system" text s (lambda (_row) true) (lambda args true))))
+      true)
+- scm: (begin (globalvars "__system_user_account_sql" nil) true)
+test_cases:
+- name: A bare login expression returns the authenticated root account
+  sql: SELECT SYSTEM_USER AS login_name
+  expect: {rows: 1,data: [{login_name: root}]}
+- name: The same cached expression belongs to the authenticated member
+  username: system_user_member
+  password: pw
+  sql: SELECT SYSTEM_USER AS login_name
+  expect: {rows: 1,data: [{login_name: system_user_member}]}
+- name: Reusing the query after another account does not retain its login
+  sql: SELECT SYSTEM_USER AS login_name
+  expect: {rows: 1,data: [{login_name: root}]}
+- name: Lowercase keyword assignment uses the current login rather than a column binding
+  username: system_user_member
+  password: pw
+  sql: DECLARE @login NVARCHAR(128); SET @login=system_user; SELECT @login AS login_name
+  expect: {rows: 1,data: [{login_name: system_user_member}]}
+- name: SYSTEM_USER agrees with the existing current security context expression
+  username: system_user_member
+  password: pw
+  sql: SELECT CASE WHEN SYSTEM_USER=SUSER_SNAME() THEN 1 ELSE 0 END AS same_login,CASE WHEN SYSTEM_USER=USER_NAME() THEN 1 ELSE 0 END AS same_member
+  expect: {rows: 1,data: [{same_login: 1,same_member: 1}]}
+- name: Delimited columns and longer identifiers retain their normal binding
+  sql: SELECT [system_user] AS stored_value,system_user_suffix FROM system_user_columns
+  expect: {rows: 1,data: [{stored_value: stored,system_user_suffix: 7}]}
+- name: Empty results advertise the NVARCHAR128 expression declaration
+  tds:
+    statements:
+    - sql: SELECT SYSTEM_USER AS login_name WHERE 1=0
+      expect: {rows: 0,column_types: [{name: login_name,type: NVARCHAR,length: 128}]}
+- name: SYSTEM_USER has no parenthesized invocation syntax
+  sql: SELECT SYSTEM_USER() AS invalid
+  expect: {error: true}
+- name: A default can retain the login expression as contextual source
+  sql: CREATE TABLE system_user_defaults(id INT PRIMARY KEY,login_name NVARCHAR(128) DEFAULT SYSTEM_USER)
+- name: Root default evaluation belongs to its real writer
+  sql: INSERT system_user_defaults(id) VALUES(1)
+- name: Member default evaluation belongs to its real writer
+  username: system_user_member
+  password: pw
+  sql: INSERT system_user_defaults(id) VALUES(2)
+- name: Default values retain both complete login identities
+  sql: SELECT id,login_name FROM system_user_defaults ORDER BY id
+  expect: {rows: 2,data: [{id: 1,login_name: root},{id: 2,login_name: system_user_member}]}
+- name: A stored procedure binds SYSTEM_USER as an expression
+  sql: CREATE PROCEDURE system_user_procedure AS SELECT SYSTEM_USER AS login_name
+- name: A procedure executes under the existing caller security context
+  username: system_user_member
+  password: pw
+  sql: EXEC system_user_procedure
+  expect: {rows: 1,data: [{login_name: system_user_member}]}
+- name: A scalar function retains the current login dependency
+  sql: CREATE FUNCTION system_user_function() RETURNS NVARCHAR(128) AS BEGIN RETURN SYSTEM_USER; END
+- name: A function invocation reads the member context
+  username: system_user_member
+  password: pw
+  sql: SELECT dbo.system_user_function() AS login_name
+  expect: {rows: 1,data: [{login_name: system_user_member}]}
+- name: A trigger can assign SYSTEM_USER to its declared local before writing audit rows
+  sql: CREATE TRIGGER system_user_trigger ON system_user_input AFTER INSERT AS BEGIN DECLARE @login NVARCHAR(128); SET @login=SYSTEM_USER; INSERT system_user_audit SELECT id,@login FROM inserted; END
+- name: A root invocation uses its own trigger context
+  sql: INSERT system_user_input VALUES(1)
+- name: A member invocation does not inherit the trigger creator identity
+  username: system_user_member
+  password: pw
+  sql: INSERT system_user_input VALUES(2)
+- name: Complete trigger effects retain the actual invoking identities
+  sql: SELECT id,login_name FROM system_user_audit ORDER BY id
+  expect: {rows: 2,data: [{id: 1,login_name: root},{id: 2,login_name: system_user_member}]}
+- name: Persisted source reload keeps its invocation context
+  action: restart
+- name: Reloaded module expressions still use the member account
+  username: system_user_member
+  password: pw
+  sql: EXEC system_user_procedure
+  expect: {rows: 1,data: [{login_name: system_user_member}]}
+- name: A reloaded contextual default still evaluates for its current writer
+  username: system_user_member
+  password: pw
+  sql: INSERT system_user_defaults(id) VALUES(3)
+- name: Reload retained the complete contextual default value
+  sql: SELECT id,login_name FROM system_user_defaults ORDER BY id
+  expect: {rows: 3,data: [{id: 1,login_name: root},{id: 2,login_name: system_user_member},{id: 3,login_name: system_user_member}]}

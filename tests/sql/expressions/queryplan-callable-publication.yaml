@@ -1,0 +1,425 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: Shared emitted callables preserve lexical captures and explicit execution inputs
+
+setup:
+  - sql: CREATE TABLE callable_publication_input(id INT PRIMARY KEY,guarded INT)
+  - sql: INSERT INTO callable_publication_input VALUES(5,42)
+cleanup:
+  - sql: DROP TABLE IF EXISTS callable_publication_input
+
+test_cases:
+  - name: Published callbacks receive every execution input and retain captures
+    scm: |-
+      (begin
+        (define callback (close_procedure ((lambda (increment)
+          (lambda (value) (+ increment value))) 7)))
+        (register_queryplan_callables (list callback))
+        (define code (publish_queryplan_callables
+          (list (quote resultfields) (list (quote resultrow)
+            (list callback (list (quote +) (quote session) (quote tx))))) '()))
+        (define run (close_procedure (eval (optimize (list (quote lambda)
+          (list (quote session) (quote tx) (quote resultrow) (quote resultfields)) code)))))
+        (equal? (run 2 5 (lambda (value) (+ value 1)) (lambda (value) (* value 3))) 45))
+    expect: {result: true}
+
+  - name: Nested callbacks keep their own shadowed lexical bindings
+    scm: |-
+      (begin
+        (define callback (close_procedure (lambda (value) (+ value 4))))
+        (register_queryplan_callables (list callback))
+        (define code (publish_queryplan_callables
+          (list (list (quote lambda) (list (quote __published_callables_0))
+            (list callback (quote __published_callables_0))) 9) '()))
+        (define run (close_procedure (eval (optimize (list (quote lambda)
+          (list (quote session) (quote tx) (quote resultrow) (quote resultfields)) code)))))
+        (equal? (run nil nil nil nil) 13))
+    expect: {result: true}
+
+  - name: Publication keeps callable identity and quoted symbols unchanged
+    scm: |-
+      (begin
+        (define callback (close_procedure (lambda (value) (+ value 4))))
+        (register_queryplan_callables (list callback))
+        (define code (publish_queryplan_callables
+          (list (quote list) (list (quote identical?) callback callback)
+            (list (quote quote) (list (quote __published_callables_0) (quote session)))) '()))
+        (define run (close_procedure (eval (optimize (list (quote lambda)
+          (list (quote session) (quote tx) (quote resultrow) (quote resultfields)) code)))))
+        (equal? (run nil nil nil nil) (list true (list (quote __published_callables_0) (quote session)))))
+    expect: {result: true}
+
+  - name: Published closed programs survive portable procedure serialization
+    scm: |-
+      (begin
+        (define callback (close_procedure ((lambda (increment)
+          (lambda (value) (+ increment value))) 7)))
+        (register_queryplan_callables (list callback))
+        (define code (publish_queryplan_callables
+          (list (quote resultfields) (list callback (quote tx))) '()))
+        (define run (close_procedure (eval (optimize (list (quote lambda)
+          (list (quote session) (quote tx) (quote resultrow) (quote resultfields)) code)))))
+        (define restored (eval (scheme (serialize run))))
+        (equal? (restored nil 5 nil (lambda (value) (* value 3))) 36))
+    expect: {result: true}
+
+  - name: Composed publishers preserve invocation count and stateful captures
+    scm: |-
+      (begin
+        (define counter (newsession))
+        (counter "count" 0)
+        (define callback (close_procedure ((lambda (state)
+          (lambda () (begin (state "count" (+ (state "count") 1)) (state "count")))) counter)))
+        (register_queryplan_callables (list callback))
+        (define once (publish_queryplan_callables (list (quote +) (list callback) (list callback)) '()))
+        (define twice (publish_queryplan_callables once '()))
+        (define run (close_procedure (eval (optimize (list (quote lambda)
+          (list (quote session) (quote tx) (quote resultrow) (quote resultfields)) twice)))))
+        (and (equal? (run nil nil nil nil) 3) (equal? (counter "count") 2)))
+    expect: {result: true}
+
+  - name: Quoted source symbols and list forms remain inert through the text codec
+    scm: |
+      (begin
+        (define value (list (quote list) (quote session) (list (quote lambda) (list (quote tx)) (quote tx))))
+        (define restored (eval (scheme (serialize (list (quote quote) value)))))
+        (expression_equal? value restored))
+    expect: {result: true}
+
+  - name: Stateless published callbacks keep a shadowed session binding local
+    scm: |-
+      (begin
+        (define callback (close_procedure (lambda (value) (+ value 7))))
+        (register_queryplan_callables (list callback))
+        (define code (publish_queryplan_callables
+          (list 'lambda (list 'id)
+            (list (list 'lambda (list 'session) (list callback 'session)) 'id)) '()))
+        (define compute (eval code))
+        (createcolumn (table "memcp-tests" false "callable_publication_input" false nil)
+          "derived" "INT" '() '() '("id") compute)
+        true)
+    expect: {result: true}
+
+  - name: Published stateless callbacks compute their actual native column values
+    sql: SELECT id,derived FROM callable_publication_input
+    expect: {rows: 1,data: [{id: 5,derived: 12}]}
+
+  - name: Publication retains the guard against actual implicit query input
+    scm: |-
+      (begin
+        (define callback (close_procedure (lambda (value) (+ value 7))))
+        (register_queryplan_callables (list callback))
+        (define code (publish_queryplan_callables
+          (list 'lambda (list 'id)
+            (list '+ (list callback 'id) (list 'session "offset"))) '()))
+        (define compute (eval code))
+        (createcolumn (table "memcp-tests" false "callable_publication_input" false nil)
+          "guarded" "INT" '() '() '("id") compute))
+    expect: {error: true,contains: must not read tx or session implicitly}
+
+  - name: A rejected context callback preserves the native column and its row
+    sql: SELECT id,guarded FROM callable_publication_input
+    expect: {rows: 1,data: [{id: 5,guarded: 42}]}
+
+  - name: Free binding uses the shared lexical binding owner
+    scm: |
+      (expression_equal? (expression_referenced_bindings (scheme "session") (list (quote session) (quote tx))) (list (quote session)))
+    expect: {"result": true}
+
+  - name: Quoted data uses the shared lexical binding owner
+    scm: |
+      (expression_equal? (expression_referenced_bindings (scheme "(quote (session tx))") (list (quote session) (quote tx))) (list ))
+    expect: {"result": true}
+
+  - name: Unknown lambda callee conservatively retains the caller bindings
+    scm: |
+      (expression_equal? (expression_referenced_bindings (scheme "(lambda (session) (session \"x\"))") (list (quote session) (quote tx))) (list (quote session) (quote tx)))
+    expect: {"result": true}
+
+  - name: Unknown free lambda callee conservatively retains caller bindings
+    scm: |
+      (expression_equal? (expression_referenced_bindings (scheme "(lambda (value) (session \"x\"))") (list (quote session) (quote tx))) (list (quote session) (quote tx)))
+    expect: {"result": true}
+
+  - name: Variadic shadow uses the shared lexical binding owner
+    scm: |
+      (expression_equal? (expression_referenced_bindings (scheme "(lambda session (car session))") (list (quote session) (quote tx))) (list ))
+    expect: {"result": true}
+
+  - name: Sequential definition uses the shared lexical binding owner
+    scm: |
+      (expression_equal? (expression_referenced_bindings (scheme "(begin (define session (lambda args args)) (session \"x\"))") (list (quote session) (quote tx))) (list ))
+    expect: {"result": true}
+
+  - name: Recursive definition uses the shared lexical binding owner
+    scm: |
+      (expression_equal? (expression_referenced_bindings (scheme "(begin (define session (lambda (n) (if (equal? n 0) 1 (session (- n 1))))) (session 2))") (list (quote session) (quote tx))) (list ))
+    expect: {"result": true}
+
+  - name: Conditional lexical publication uses the shared lexical binding owner
+    scm: |
+      (expression_equal? (expression_referenced_bindings (scheme "(begin (if false (define session 1) nil) (session \"x\"))") (list (quote session) (quote tx))) (list (quote session) (quote tx)))
+    expect: {"result": true}
+
+  - name: Match binding shadow uses the shared lexical binding owner
+    scm: |
+      (expression_equal? (expression_referenced_bindings (scheme "(match (quote (1)) (cons session rest) session _ nil)") (list (quote session) (quote tx))) (list ))
+    expect: {"result": true}
+
+  - name: Unknown match input callee conservatively retains the caller bindings
+    scm: |
+      (expression_equal? (expression_referenced_bindings (scheme "(match (session \"x\") (cons value rest) value _ nil)") (list (quote session) (quote tx))) (list (quote session) (quote tx)))
+    expect: {"result": true}
+
+  - name: Delayed evaluation uses the shared lexical binding owner
+    scm: |
+      (expression_equal? (expression_referenced_bindings (scheme "(eval (quote 1))") (list (quote session) (quote tx))) (list (quote session) (quote tx)))
+    expect: {"result": true}
+
+  - name: Quoted delayed evaluation uses the shared lexical binding owner
+    scm: |
+      (expression_equal? (expression_referenced_bindings (scheme "(quote (eval (session \"x\")))") (list (quote session) (quote tx))) (list ))
+    expect: {"result": true}
+
+  - name: Delayed parser uses the shared lexical binding owner
+    scm: |
+      (expression_equal? (expression_referenced_bindings (scheme "(parser nil true)") (list (quote session) (quote tx))) (list (quote session) (quote tx)))
+    expect: {"result": true}
+
+  - name: Nested source metadata preserves symbol order and duplicate candidates
+    scm: |
+      (begin (define symbol (source "inner" 1 1 (quote session))) (define expression (source "outer" 1 1 symbol)) (expression_equal? (expression_referenced_bindings expression (list (quote tx) symbol symbol)) (list (quote session) (quote session))))
+    expect: {"result": true}
+
+  - name: An empty candidate list stays empty under delayed syntax
+    scm: |
+      (expression_equal? (expression_referenced_bindings (scheme "(eval 1)") (list)) (list))
+    expect: {"result": true}
+
+  - name: Opaque callable values retain their own captured environment
+    scm: |
+      (begin (define session (newsession)) (session "offset" 7) (define callable (close_procedure (lambda () (session "offset")))) (expression_equal? (expression_referenced_bindings callable (list (quote session) (quote tx))) (list)))
+    expect: {"result": true}
+
+  - name: Candidate strings are rejected before conservative delayed retention
+    scm: |
+      (expression_referenced_bindings (scheme "(eval 1)") (list "session"))
+    expect: {"error": true, "contains": "requires binding symbols"}
+
+  - name: A non-list candidate argument is rejected as an invalid contract
+    scm: |
+      (expression_referenced_bindings (scheme "(eval 1)") "session")
+    expect: {"error": true}
+
+  - name: Computed eval heads retain quoted caller reads
+    scm: |
+      (expression_equal? (expression_referenced_bindings (scheme "((if true eval eval) (quote (session \"x\")))") (list (quote session) (quote tx))) (list (quote session) (quote tx)))
+    expect: {"result": true}
+
+  - name: Unknown callable heads retain the caller environment
+    scm: |
+      (expression_equal? (expression_referenced_bindings (scheme "(unknown_operator (quote (session \"x\")))") (list (quote session) (quote tx))) (list (quote session) (quote tx)))
+    expect: {"result": true}
+
+  - name: Lexical callable arguments shadow native declaration names
+    scm: |
+      (expression_equal? (expression_referenced_bindings (scheme "(lambda (+) (+ (quote (session \"x\"))))") (list (quote session) (quote tx))) (list (quote session) (quote tx)))
+    expect: {"result": true}
+
+  - name: Lexical syntax names cannot be mistaken for opaque quote
+    scm: |
+      (expression_equal? (expression_referenced_bindings (scheme "(lambda (quote) (quote (quote session)))") (list (quote session) (quote tx))) (list (quote session) (quote tx)))
+    expect: {"result": true}
+
+  - name: A quoted computed eval program remains inert data
+    scm: |
+      (expression_equal? (expression_referenced_bindings (scheme "(quote ((if true eval eval) (session \"x\")))") (list (quote session) (quote tx))) (list ))
+    expect: {"result": true}
+
+  - name: Actual special-form values expose their caller-environment capability
+    scm: |
+      (expression_equal? (expression_referenced_bindings (list (list (quote if) true eval eval) (list (quote quote) (list (quote session) "x"))) (list (quote session) (quote tx))) (list (quote session) (quote tx)))
+    expect: {"result": true}
+
+  - name: Known actual procedures keep their own frame without caller captures
+    scm: |
+      (begin (define callback (close_procedure (lambda (value) (+ value 7)))) (expression_equal? (expression_referenced_bindings (list callback 1) (list (quote session) (quote tx))) (list)))
+    expect: {"result": true}
+
+  - name: Published computed eval preserves the actual caller session value
+    scm: |-
+      (begin
+        (define callback (close_procedure (lambda (value) (+ value 7))))
+        (register_queryplan_callables (list callback))
+        (define read (list (list 'if true eval eval)
+          (list 'quote (list 'session "x"))))
+        (define code (publish_queryplan_callables (list 'list read (list callback 1)) '()))
+        (define run (eval (optimize (list 'lambda
+          (list 'session 'tx 'resultrow 'resultfields) code))))
+        (define session (newsession)) (session "x" 27)
+        (expression_equal? (run session nil nil nil) (list 27 8)))
+    expect: {"result": true}
+
+  - name: Published unknown operator input can resolve its quoted caller bindings
+    scm: |-
+      (begin
+        (define callback (close_procedure (lambda (value) (+ value 7))))
+        (register_queryplan_callables (list callback))
+        (define code (publish_queryplan_callables (list 'lambda (list 'operation)
+          (list 'list (list 'operation (list 'quote (list 'session "x"))) (list callback 1))) '()))
+        (define factory (eval (optimize (list 'lambda
+          (list 'session 'tx 'resultrow 'resultfields) code))))
+        (define session (newsession)) (session "x" 27)
+        (define run (factory session nil nil nil))
+        (expression_equal? (run eval) (list 27 8)))
+    expect: {"result": true}
+
+  - name: Registered calls preserve quoted symbol data as ordinary values
+    scm: |-
+      (begin
+        (define callback (close_procedure (lambda (value) (list value value))))
+        (register_queryplan_callables (list callback))
+        (define datum (list (quote session) (list (quote lambda) (list (quote tx)) (quote tx))))
+        (define code (publish_queryplan_callables (list callback (list (quote quote) datum)) '()))
+        (define run (close_procedure (eval (optimize (list (quote lambda) (list) code)))))
+        (expression_equal? (run) (list datum datum)))
+    expect: {result: true}
+
+  - name: Registered nested arithmetic retains each invocation's bound scalar
+    scm: |-
+      (begin
+        (define callback (close_procedure (lambda (value) (+ value 7))))
+        (register_queryplan_callables (list callback))
+        (define code (publish_queryplan_callables
+          (list callback (list callback (list (quote +) (quote tx) 3))) '()))
+        (define run (close_procedure (eval (optimize (list (quote lambda)
+          (list (quote tx)) code)))))
+        (and (equal? (run 2) 19) (equal? (run 11) 28)))
+    expect: {result: true}
+
+  - name: Publication preserves declared ordinary lexical inputs across invocations
+    scm: |-
+      (begin
+        (define callback (close_procedure (lambda (value) (+ value 5))))
+        (register_queryplan_callables (list callback))
+        (define code (publish_queryplan_callables
+          (list callback (list '+ 'ordinary_input 1)) (list 'ordinary_input)))
+        (define run (close_procedure (eval (optimize (list 'lambda (list 'ordinary_input) code)))))
+        (and (equal? (run 7) 13) (equal? (run 11) 17)))
+    expect: {result: true}
+
+  - name: Publication input names cannot collide with its callable vector
+    scm: |-
+      (begin
+        (define callback (close_procedure (lambda (value) (+ value 5))))
+        (register_queryplan_callables (list callback))
+        (define code (publish_queryplan_callables
+          (list callback '__published_callables_0) (list '__published_callables_0)))
+        (define run (close_procedure (eval (optimize (list 'lambda (list '__published_callables_0) code)))))
+        (and (equal? (run 7) 12) (equal? (run 11) 16)))
+    expect: {result: true}
+
+  - name: Publication keeps an inner source binding local when its name is also a candidate
+    scm: |-
+      (begin
+        (define callback (close_procedure (lambda (value) (+ value 5))))
+        (register_queryplan_callables (list callback))
+        (define code (publish_queryplan_callables
+          (list (list 'lambda (list 'ordinary_input) (list callback 'ordinary_input)) 2)
+          (list 'ordinary_input)))
+        (define run (close_procedure (eval (optimize (list 'lambda (list 'ordinary_input) code)))))
+        (define restored (eval (scheme (serialize run))))
+        (and (equal? (restored 7) 7) (equal? (restored 11) 7)))
+    expect: {result: true}
+
+  - name: Shared closed name predicates retain complete value semantics after serialization
+    scm: |-
+      (begin
+        (define code (publish_queryplan_callables
+          (list 'lambda (list 'value) (list internal_column_name? 'value)) '()))
+        (define run (close_procedure (eval code)))
+        (define restored (eval (scheme (serialize run))))
+        (list (restored ".cache") (restored "$hidden") (restored "__orc_rank")
+          (restored "ordinary") (restored nil)))
+    expect: {result: [true, true, true, false, false]}
+
+  - name: Shared padded predicates preserve case padding and unknown IN results
+    scm: |-
+      (begin
+        (define code (publish_queryplan_callables
+          (list 'lambda (list 'left 'right 'probe)
+            (list 'list
+              (list tsql_padded_text_equal 'left 'right "utf8mb4_general_ci")
+              (list tsql_padded_text_in (list 'quote (list nil "a")) 'probe "utf8mb4_general_ci"))) '()))
+        (define run (eval code))
+        (list (run "a " "A" "missing") (run "a" "b" "a")))
+    expect: {result: [[true, null], [false, true]]}
+
+  - name: Shared text casts evaluate their original argument once
+    scm: |-
+      (begin
+        (define calls (newsession)) (calls "count" 0)
+        (define code (publish_queryplan_callables
+          (list 'lambda (list 'supplier)
+            (list tsql_cast_text (list 'supplier) 3 false "utf-8")) '()))
+        (define run (eval code))
+        (define value (run (lambda () (begin (calls "count" (+ (calls "count") 1)) "ab  "))))
+        (list value (calls "count")))
+    expect: {result: ['ab ', 1]}
+
+  - name: Shared predicate identities inside quoted data remain ordinary data
+    scm: |-
+      (begin
+        (define datum (list internal_column_name? ".quoted"))
+        (define code (publish_queryplan_callables (list 'quote datum) '()))
+        (expression_equal? (eval code) datum))
+    expect: {result: true}
+
+  - name: Emitted binding identities evaluate the original supplier once
+    scm: |-
+      (begin
+        (define callback (close_procedure (lambda (value) (+ value 7))))
+        (register_queryplan_callables (list callback))
+        (define calls (newsession)) (calls "count" 0)
+        (define code (publish_queryplan_callables
+          (list 'lambda (list 'supplier)
+            (list callback (list relational_iteration_parameter (list 'supplier)))) '()))
+        (define run (eval code))
+        (define value (run (lambda () (begin (calls "count" (+ (calls "count") 1)) 5))))
+        (list value (calls "count")))
+    expect: {result: [12, 1]}
+
+  - name: Emitted binding identities preserve NULL separately from zero
+    scm: |-
+      (begin
+        (define callback (close_procedure (lambda (value) (list value value))))
+        (register_queryplan_callables (list callback))
+        (define code (publish_queryplan_callables
+          (list 'lambda (list 'value)
+            (list callback (list relational_iteration_parameter 'value))) '()))
+        (define run (eval code))
+        (list (run nil) (run 0)))
+    expect: {result: [[null, null], [0, 0]]}
+
+  - name: A lexical callee with the binding adapter name keeps its own behavior
+    scm: |-
+      (begin
+        (define callback (close_procedure (lambda (value) (+ value 7))))
+        (register_queryplan_callables (list callback))
+        (define code (publish_queryplan_callables
+          (list 'lambda (list 'relational_iteration_parameter)
+            (list callback (list 'relational_iteration_parameter 5))) '()))
+        (define run (eval code))
+        (run (lambda (value) (+ value 20))))
+    expect: {result: 32}
+
+  - name: Quoted binding adapters remain callable data
+    scm: |-
+      (begin
+        (define callback (close_procedure (lambda (value) value)))
+        (register_queryplan_callables (list callback))
+        (define datum (list relational_iteration_parameter 7))
+        (define code (publish_queryplan_callables (list callback (list 'quote datum)) '()))
+        (expression_equal? (eval code) datum))
+    expect: {result: true}

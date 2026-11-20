@@ -1,0 +1,142 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Stored function views expose their actual result contracts through REST FMTONLY and describe without running their scalar bodies
+setup:
+- sql: CREATE TABLE view_function_metadata_input(id INT PRIMARY KEY)
+- sql: INSERT INTO view_function_metadata_input VALUES(0)
+- sql: |
+    CREATE FUNCTION dbo.view_metadata_ratio(@value INT) RETURNS INT AS BEGIN
+      RETURN 1/@value;
+    END
+- sql: CREATE VIEW view_function_metadata_result AS SELECT dbo.view_metadata_ratio(id) AS ratio_value FROM view_function_metadata_input
+- sql: CREATE TABLE view_declaration_ids(id INT PRIMARY KEY)
+- sql: INSERT view_declaration_ids VALUES(1),(2),(3)
+- sql: CREATE TABLE view_declaration_amounts(id INT,amount DECIMAL(9,2))
+- sql: INSERT view_declaration_amounts VALUES(1,2.50),(1,1.50),(2,NULL)
+- sql: |
+    CREATE FUNCTION dbo.view_declaration_total(@id INT,@iterations INT=2) RETURNS DECIMAL(9,2) AS
+    BEGIN
+      DECLARE @total DECIMAL(9,2)=0,@part DECIMAL(9,2),@iteration INT=1;
+      WHILE @iteration<=@iterations
+      BEGIN
+        SELECT @part=SUM(amount) FROM view_declaration_amounts WHERE id=@id;
+        SET @total=@total+ISNULL(@part,0);
+        SET @iteration=@iteration+1;
+      END;
+      RETURN @total;
+    END
+- sql: |
+    CREATE FUNCTION dbo.view_declaration_label(@id INT) RETURNS NVARCHAR(12) AS
+    BEGIN RETURN CASE WHEN @id=1 THEN N'first' ELSE NULL END; END
+- sql: CREATE PROCEDURE view_declaration_procedure AS SELECT 1 AS value
+cleanup:
+- sql: DROP VIEW IF EXISTS view_declaration_wide
+- sql: DROP VIEW IF EXISTS view_declaration_nested
+- sql: DROP VIEW IF EXISTS view_declaration_contracts
+- sql: DROP VIEW IF EXISTS view_declaration_bad_column
+- sql: DROP VIEW IF EXISTS view_declaration_bad_arity
+- sql: DROP VIEW IF EXISTS view_declaration_bad_default
+- sql: DROP VIEW IF EXISTS view_declaration_bad_type
+- sql: DROP VIEW IF EXISTS view_declaration_missing
+- sql: DROP VIEW IF EXISTS view_declaration_wrong_kind
+- sql: DROP FUNCTION IF EXISTS dbo.view_declaration_label,dbo.view_declaration_total
+- sql: DROP PROCEDURE IF EXISTS view_declaration_procedure
+- sql: DROP TABLE IF EXISTS view_declaration_amounts
+- sql: DROP TABLE IF EXISTS view_declaration_ids
+- sql: DROP VIEW IF EXISTS view_function_metadata_result
+- sql: DROP FUNCTION IF EXISTS dbo.view_metadata_ratio
+- sql: DROP TABLE IF EXISTS view_function_metadata_input
+test_cases:
+- name: The ordinary function view really executes the invalid arithmetic input
+  sql: SELECT ratio_value FROM view_function_metadata_result
+  expect: {error: true,contains: division by zero}
+- name: REST FMTONLY describes the view without evaluating its zero input
+  session_id: view-function-fmtonly
+  sql: SET FMTONLY ON; SELECT ratio_value FROM view_function_metadata_result; SET FMTONLY OFF
+  expect: {rows: 0}
+- name: Leaving FMTONLY restores actual evaluation in the same REST session
+  session_id: view-function-fmtonly
+  sql: SELECT ratio_value FROM view_function_metadata_result
+  expect: {error: true,contains: division by zero}
+- name: Describe exposes the function return declaration independently of its row value
+  scm: |
+    (begin
+      (define columns (tds_describe "memcp-tests"
+        "SELECT ratio_value FROM view_function_metadata_result" "" (newsession)))
+      (and (equal? (count columns) 1) (equal? ((car columns) "name") "ratio_value")
+        (equal? ((car columns) "sql_type") "INT")))
+  expect: {result: true}
+- name: Pure wire preparation does not evaluate the function view
+  tds:
+    statements:
+    - connection: reader
+      prepare_only: true
+      sql: SELECT ratio_value FROM view_function_metadata_result
+    - connection: reader
+      sql: SELECT 17 AS value
+      expect: {rows: 1,data: [{value: 17}]}
+    - connection: reader
+      sql: SELECT ratio_value FROM view_function_metadata_result
+      expect: {error: true,contains: [division by zero]}
+- name: A wide aggregate view admits independent relational function arguments and defaults
+  sql: |
+    CREATE VIEW view_declaration_wide AS
+    SELECT SUM(CASE WHEN id=1 THEN dbo.view_declaration_total(id,DEFAULT) ELSE 0 END) AS c1,
+      SUM(dbo.view_declaration_total(id,1)) AS c2,
+      SUM(dbo.view_declaration_total(id,2)) AS c3,
+      SUM(dbo.view_declaration_total(id,3)) AS c4,
+      SUM(dbo.view_declaration_total(id,4)) AS c5,
+      SUM(dbo.view_declaration_total(id,5)) AS c6,
+      SUM(dbo.view_declaration_total(id,6)) AS c7,
+      SUM(dbo.view_declaration_total(id,7)) AS c8,
+      SUM(dbo.view_declaration_total(id,8)) AS c9,
+      SUM(dbo.view_declaration_total(id,9)) AS c10,
+      SUM(dbo.view_declaration_total(id,10)) AS c11,
+      SUM(dbo.view_declaration_total(id,11)) AS c12
+    FROM view_declaration_ids
+- name: A function declaration retains exact return widths and a real DEFAULT argument
+  sql: |
+    CREATE VIEW view_declaration_contracts AS
+    SELECT id,dbo.view_declaration_total(id,DEFAULT) AS total,
+      dbo.view_declaration_label(id) AS label FROM view_declaration_ids
+- name: Nested stored views retain their declared function fields
+  sql: CREATE VIEW view_declaration_nested AS SELECT id,total,label FROM view_declaration_contracts
+- name: Consuming the stored declaration executes the actual relational and scalar bodies
+  sql: SELECT id,total,label FROM view_declaration_nested ORDER BY id
+  expect:
+    rows: 3
+    data: [{id: 1,total: 8,label: first},{id: 2,total: 0,label: null},{id: 3,total: 0,label: null}]
+- name: Missing columns inside a declared call remain binding errors
+  sql: CREATE VIEW view_declaration_bad_column AS SELECT dbo.view_metadata_ratio(missing_column) AS value FROM view_declaration_ids
+  expect: {error: true}
+- name: Declared function arity is checked before publishing a view
+  sql: CREATE VIEW view_declaration_bad_arity AS SELECT dbo.view_metadata_ratio(id,2) AS value FROM view_declaration_ids
+  expect: {error: true,contains: wrong number of scalar function arguments}
+- name: DEFAULT requires an actual declared parameter default
+  sql: CREATE VIEW view_declaration_bad_default AS SELECT dbo.view_metadata_ratio(DEFAULT) AS value FROM view_declaration_ids
+  expect: {error: true,contains: parameter has no default}
+- name: Argument conversion is checked against the declared parameter type
+  sql: CREATE VIEW view_declaration_bad_type AS SELECT dbo.view_metadata_ratio(CAST('2024-01-02' AS DATE)) AS value FROM view_declaration_ids
+  expect: {error: true,contains: unsupported implicit conversion}
+- name: A missing scalar declaration cannot be replaced by an unknown type
+  sql: CREATE VIEW view_declaration_missing AS SELECT dbo.view_declaration_absent(id) AS value FROM view_declaration_ids
+  expect: {error: true,contains: function does not exist}
+- name: A procedure is not a scalar function declaration
+  sql: CREATE VIEW view_declaration_wrong_kind AS SELECT dbo.view_declaration_procedure() AS value FROM view_declaration_ids
+  expect: {error: true,contains: object is not a scalar function}
+- name: Reopen the function and view declarations
+  action: restart
+- name: Cold nested view metadata comes from exact declarations without rows
+  tds:
+    statements:
+    - sql: SELECT TOP(0) id,total,label FROM view_declaration_nested
+      expect:
+        rows: 0
+        column_types:
+        - {name: id,type: INT,nullable: false}
+        - {name: total,type: DECIMAL,precision: 9,scale: 2,nullable: true}
+        - {name: label,type: NVARCHAR,length: 12,nullable: true}

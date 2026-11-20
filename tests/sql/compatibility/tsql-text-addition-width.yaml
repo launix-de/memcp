@@ -1,0 +1,90 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# https://learn.microsoft.com/sql/t-sql/data-types/precision-scale-and-length-transact-sql
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Text addition derives declarations and bounded values from SQL operand widths
+setup:
+- sql: CREATE TABLE text_width_source(id INT,a NVARCHAR(8),b NVARCHAR(12))
+- sql: INSERT text_width_source VALUES(1,N'left',N'right'),(2,NULL,N'right')
+cleanup:
+- sql: DROP TABLE IF EXISTS text_width_copy
+- sql: DROP TABLE IF EXISTS text_width_empty
+- sql: DROP TABLE IF EXISTS text_width_max
+- sql: DROP TABLE IF EXISTS text_width_source
+test_cases:
+- name: A computed text column is created with the complete declared width
+  sql: SELECT id,a+N'_'+b AS label INTO text_width_copy FROM text_width_source
+  expect: {affected_rows: 2}
+- name: Population retains complete strings and SQL NULL
+  sql: SELECT id,label FROM text_width_copy ORDER BY id
+  expect: {rows: 2, data: [{id: 1, label: left_right}, {id: 2, label: null}]}
+- name: The result declaration adds character widths before converting to bytes
+  sql: SELECT COL_LENGTH(N'text_width_copy',N'label') AS label_bytes
+  expect: {rows: 1, data: [{label_bytes: 42}]}
+- name: Empty results retain concatenation metadata without sampling rows
+  tds:
+    statements:
+    - sql: SELECT a+N'_'+b AS label FROM text_width_source WHERE 1=0
+      expect: {rows: 0, column_types: [{name: label, type: NVARCHAR, length: 21}]}
+- name: Literal widths are part of their SQL syntax contracts
+  tds:
+    statements:
+    - sql: SELECT 'abc'+'de' AS ansi_value,N'ab'+N'cde' AS national_value WHERE 1=0
+      expect: {rows: 0, column_types: [{name: ansi_value, type: VARCHAR, length: 5}, {name: national_value, type: NVARCHAR, length: 5}]}
+- name: Literal declarations measure ANSI bytes and national UTF16 units
+  tds:
+    statements:
+    - sql: SELECT 'é'+'!' AS ansi_value,N'😀'+N'!' AS national_value
+      expect: {rows: 1, data: [{ansi_value: 'é!', national_value: '😀!'}], column_types: [{name: ansi_value, type: VARCHAR, length: 2}, {name: national_value, type: NVARCHAR, length: 3}]}
+- name: Bounded national addition truncates its own result before further operations
+  sql: DECLARE @a NVARCHAR(3000)=REPLICATE(N'a',3000),@b NVARCHAR(3000)=REPLICATE(N'b',3000); SELECT LEN(@a+@b) AS bounded,LEN(CAST(@a AS NVARCHAR(MAX))+@b) AS unbounded,LEN((@a+@b)+CAST(N'c' AS NVARCHAR(MAX))) AS later_max;
+  expect: {rows: 1, data: [{bounded: 4000, unbounded: 6000, later_max: 4001}]}
+- name: Bounded ANSI addition observes its eight thousand byte result domain
+  sql: DECLARE @a VARCHAR(5000)=REPLICATE('a',5000),@b VARCHAR(5000)=REPLICATE('b',5000); SELECT DATALENGTH(@a+@b) AS bounded,DATALENGTH(CAST(@a AS VARCHAR(MAX))+@b) AS unbounded;
+  expect: {rows: 1, data: [{bounded: 8000, unbounded: 10000}]}
+- name: An empty concatenation creates the minimum legal column width
+  sql: SELECT ''+'' AS value INTO text_width_empty; SELECT value,COL_LENGTH(N'text_width_empty',N'value') AS width_bytes FROM text_width_empty;
+  expect: {rows: 1, data: [{value: '', width_bytes: 1}]}
+- name: Mixed MAX and fixed national operands retain an unbounded national declaration
+  sql: SELECT CAST('x' AS VARCHAR(MAX))+CAST(N'y' AS NCHAR(2)) AS value INTO text_width_max; SELECT value,COL_LENGTH(N'text_width_max',N'value') AS width_bytes FROM text_width_max;
+  expect: {rows: 1, data: [{value: 'xy ', width_bytes: -1}]}
+- name: Operator truncation does not disable strict table assignment
+  setup:
+  - sql: CREATE TABLE text_width_strict(value NVARCHAR(2))
+  sql: BEGIN TRY INSERT text_width_strict VALUES(N'ab'+N'cd'); END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS error_number; END CATCH; SELECT COUNT(*) AS stored_rows FROM text_width_strict;
+  expect: {rows: 2, data: [{error_number: 8152}, {stored_rows: 0}]}
+  cleanup:
+  - sql: DROP TABLE text_width_strict
+
+- name: ANSI literals normalize unrepresentable characters before metadata and comparison
+  tds:
+    statements:
+    - sql: SELECT '�' AS replacement,'😀' AS pair,N'�漢😀' AS national,CASE WHEN '漢'=N'漢' THEN 1 ELSE 0 END AS same_value
+      expect: {rows: 1, data: [{replacement: '?', pair: '??', national: '�漢😀', same_value: 0}], column_types: [{name: replacement, type: VARCHAR, length: 1}, {name: pair, type: VARCHAR, length: 2}, {name: national, type: NVARCHAR, length: 4}, {name: same_value, type: INT}]}
+- name: A later UTF8 collation cannot restore characters lost by an ANSI literal
+  sql: SELECT '漢' COLLATE Latin1_General_100_CI_AS_SC_UTF8 AS value,N'漢' COLLATE Latin1_General_100_CI_AS_SC_UTF8 AS national
+  expect: {rows: 1, data: [{value: '?', national: '漢'}]}
+- name: ANSI literal replacement preserves escapes punctuation and actual codepage characters
+  sql: SELECT '€ é æ []^\-'' �' AS value,DATALENGTH('€ é æ []^\-'' �') AS width_bytes
+  expect: {rows: 1, data: [{value: "€ é æ []^\\-' ?", width_bytes: 14}]}
+- name: A stored trigger accepts the same normalized ANSI literal as a direct expression
+  setup:
+  - sql: CREATE TABLE text_width_trigger_source(id INT PRIMARY KEY,status INT)
+  - sql: CREATE TABLE text_width_trigger_audit(value VARCHAR(40))
+  - sql: INSERT text_width_trigger_source VALUES(1,0)
+  - sql: CREATE TRIGGER text_width_trigger ON text_width_trigger_source FOR UPDATE AS BEGIN INSERT text_width_trigger_audit(value) SELECT 'change � '+LTRIM(STR(inserted.status)) FROM inserted; END
+  sql: UPDATE text_width_trigger_source SET status=1 WHERE id=1; SELECT value FROM text_width_trigger_audit
+  expect: {rows: 1, data: [{value: 'change ? 1'}]}
+  cleanup:
+  - sql: DROP TRIGGER text_width_trigger
+  - sql: DROP TABLE text_width_trigger_audit
+  - sql: DROP TABLE text_width_trigger_source
+
+- name: SELECT INTO uses the normalized literal value and its encoded width
+  sql: SELECT '�漢' AS value INTO text_width_replaced; SELECT value,COL_LENGTH(N'text_width_replaced',N'value') AS width_bytes FROM text_width_replaced
+  expect: {rows: 1, data: [{value: '??', width_bytes: 2}]}
+  cleanup:
+  - sql: DROP TABLE text_width_replaced

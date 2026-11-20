@@ -448,6 +448,20 @@ def performance_case_key(spec_file: str, name: str) -> str:
     return f"{normalized}::{name}"
 
 
+def performance_uses_row_template(test_case: Dict[str, Any]) -> bool:
+    """Only executable case/setup templates can scale the measured fixture."""
+    return any(
+        isinstance(operation, dict)
+        and isinstance(operation.get(language), str)
+        and "{rows}" in operation[language]
+        for operation, languages in (
+            (test_case, ("sql", "scm", "sparql")),
+            *((step, ("sql", "scm")) for step in test_case.get("setup", [])),
+        )
+        for language in languages
+    )
+
+
 # A commit that knowingly trades performance for something else (a correctness
 # fix, a necessary architectural change) can say so explicitly instead of
 # forcing a maintainer to bypass CI by hand. One line per accepted case, using
@@ -537,12 +551,14 @@ def revision_specific_scm(test_case: Dict[str, Any], spec_file: str) -> str:
     return matches[0]
 
 
-def table_abi_fixture_sources(spec_file: str, spec: Dict[str, Any]) -> Dict[str, str]:
-    """Use old SCM fixture source only when its exact lookup ABI is equivalent.
+def scm_abi_fixture_sources(spec_file: str, spec: Dict[str, Any]) -> Dict[str, str]:
+    """Use old SCM fixture source only when its exact call ABI is equivalent.
 
     A/B still uses the candidate's SQL, assertions, workload and timing policy.
     The old binary executes its own source, without a wrapper in measured code.
-    Unrelated source changes and folded lookups cannot match this migration.
+    Only explicit nil table/cache context, false comparison defaults and a
+    known literal cache-family domain paired with its parser can be removed.
+    Every other source token, including folded comparisons, remains identical.
     """
     if PERF_AB_MODE != "record" or os.environ.get("PERF_FIXTURE_ROLE") != "A":
         return {}
@@ -566,45 +582,87 @@ def table_abi_fixture_sources(spec_file: str, spec: Dict[str, Any]) -> Dict[str,
             for item in value:
                 yield from sources(item)
 
-    def tokens(source, remove_markers=False):
-        # Strings/comments are indivisible: never rewrite their contents.
+    def tokens(source, remove_flags=False, remove_context=False, remove_domain=False, remove_cache_context=False):
+        # Strings and comments are indivisible. Quoted data is never a call.
         parts = [match.group() for match in re.finditer(
             r'"(?:\\.|[^"\\])*"|;[^\n]*|/\*.*?\*/|[()\']|[^\s()\'";]+',
             source, re.DOTALL,
         ) if not match.group().startswith((";", "/*"))]
-        if remove_markers:
-            ends, stack = {}, []
-            for i, part in enumerate(parts):
-                if part == "(":
-                    stack.append(i)
-                elif part == ")" and stack:
-                    ends[stack.pop()] = i + 1
+        if not (remove_flags or remove_context or remove_domain or remove_cache_context):
+            return tuple(parts)
+        ends, stack, quoted = {}, [], set()
+        for i, part in enumerate(parts):
+            if part == "(":
+                literal = (stack and stack[-1][1]) or (i > 0 and parts[i - 1] == "'")
+                literal = literal or parts[i:i+2] == ["(", "quote"]
+                stack.append((i, literal))
+                if literal:
+                    quoted.add(i)
+            elif part == ")" and stack:
+                start, _ = stack.pop()
+                ends[start] = i + 1
 
-            def argument_end(i):
-                while i < len(parts) and parts[i] == "'":
-                    i += 1
-                return ends.get(i, i + 1)
+        def argument_end(i):
+            while i < len(parts) and parts[i] == "'":
+                i += 1
+            return ends.get(i, i + 1)
 
-            markers = set()
-            for i in range(len(parts) - 6):
-                head = 2 if parts[i:i+2] == ["(", "table"] else (
-                    4 if parts[i:i+4] == ["(", "list", "'", "table"] else 0)
-                if not head:
+        markers = set()
+        for i, end in ends.items():
+            if i in quoted:
+                continue
+            if (remove_domain or remove_cache_context) and parts[i:i+2] == ["(", "cached_parse"]:
+                arguments, cursor = [], i + 2
+                while cursor < end - 1:
+                    arguments.append(cursor)
+                    cursor = argument_end(cursor)
+                # Match the deliberate literal-domain API migration only.
+                # Older fixtures may omit the optional nil transaction context.
+                # A computed/custom domain or another parser is not ABI-only.
+                parsers = {'"sql"': 'parse_sql', '"psql"': 'parse_psql',
+                           '"tsql"': 'parse_tsql', '"sparql"': 'parse_sparql'}
+                if cursor == end - 1 and len(arguments) in (9, 10):
+                    domain, parser = arguments[1:3]
+                    expected = parsers.get(parts[domain])
+                    if (argument_end(domain) == domain + 1 and expected is not None
+                            and parts[parser:argument_end(parser)] == ["(", "list", expected, ")"]):
+                        if remove_domain:
+                            markers.add(domain)
+                        if (remove_cache_context and len(arguments) == 10
+                                and parts[arguments[-1]:end-1] == ["nil"]):
+                            markers.add(arguments[-1])
+            head = 2 if parts[i:i+2] == ["(", "table"] else (
+                4 if parts[i:i+4] == ["(", "list", "'", "table"] else (
+                6 if parts[i:i+6] == ["(", "list", "(", "quote", "table", ")"] else 0))
+            if not head:
+                continue
+            arguments, cursor = [], i + head
+            while cursor < end - 1:
+                arguments.append(cursor)
+                cursor = argument_end(cursor)
+            if cursor != end - 1 or len(arguments) not in (4, 5):
+                continue
+            if len(arguments) == 5:
+                context = arguments[-1]
+                if not remove_context or parts[context:end-1] != ["nil"]:
                     continue
-                database_flag = argument_end(i + head)
-                table_flag = argument_end(database_flag + 1)
-                if (table_flag + 1 < len(parts) and parts[database_flag] == "false"
-                        and parts[table_flag:table_flag+2] == ["false", ")"]):
-                    markers.update((database_flag, table_flag))
-            parts = [part for i, part in enumerate(parts) if i not in markers]
-        return tuple(parts)
+                markers.add(context)
+            if remove_flags and all(parts[arguments[j]:arguments[j]+1] == ["false"] for j in (1, 3)):
+                markers.update((arguments[1], arguments[3]))
+        return tuple(part for i, part in enumerate(parts) if i not in markers)
 
     old_sources = {tokens(source): source for source in sources(old_spec)}
     result = {}
     for source in sources(spec):
-        before, after = tokens(source), tokens(source, True)
-        if before != after and after in old_sources:
-            result[source] = old_sources[after]
+        before = tokens(source)
+        for flags, context, domain, cache_context in (
+                (flags, context, domain, cache_context)
+                for flags in (False, True) for context in (False, True)
+                for domain in (False, True) for cache_context in (False, True)):
+            after = tokens(source, flags, context, domain, cache_context)
+            if before != after and after in old_sources:
+                result[source] = old_sources[after]
+                break
     return result
 
 
@@ -659,7 +717,16 @@ def planner_time_limit_with_tolerance_ms(
 
 def is_error_response(response: Optional[requests.Response]) -> bool:
     """Return whether the server returned an explicit SQL/SCM error."""
-    return response is not None and (response.status_code != 200 or "Error" in response.text)
+    # JSON row names and values may contain arbitrary error text. A legacy
+    # HTTP-200 error is an unquoted protocol line, including one emitted after
+    # already-streamed rows; it is never a substring of a successful JSON value.
+    return response is not None and (
+        response.status_code != 200
+        or re.search(
+            r"(?m)^[ \t]*(?:(?:(?:SQL|SCM) )?Error(?:[: \t\r]|$)|500 Internal Server Error:)",
+            response.text,
+        ) is not None
+    )
 
 
 def sql_request_is_retry_safe(query: str) -> bool:
@@ -837,13 +904,14 @@ class SQLTestRunner:
         self._test_context = threading.local()
         self.perf_baselines = {}  # test_name -> {"time_ms": float, "rows": int}
         self.perf_results = {}  # test_name -> {"time_ms": float, "rows": int}
+        self.fixed_perf_row_cases = set()
         self.perf_seen = set()
         self.perf_regression_waivers: Dict[str, str] = load_perf_regression_waivers()  # case_key -> reason
         self.waived_regressions = []  # [(name, case_key, reason, elapsed_ms, threshold_ms)]
         self.log_times = log_times  # emit QUERY_TIME ns=... lines for A/B benchmarking
         self.fail_fast = fail_fast
         self.current_spec_file = None
-        self._table_abi_sources = {}
+        self._scm_abi_sources = {}
         self._config_loaded = False
         self.performance_calibration = performance_calibration or load_performance_scale()
         self._perf_round_setup_barrier = None
@@ -910,8 +978,7 @@ class SQLTestRunner:
     def save_perf_baselines(self):
         """Save updated performance baselines to config file.
 
-        All tests in a suite share the same row count (based on slowest test)
-        to avoid issues with DELETE operations.
+        Calibrate only fixtures whose executable templates use {rows}.
         """
         if not self.perf_results:
             return
@@ -932,7 +999,10 @@ class SQLTestRunner:
                     if not isinstance(entry, dict):
                         entry = {"time_ms": entry} if isinstance(entry, (int, float)) else {}
                     entry["time_ms"] = round(result["time_ms"], 1)
-                    entry.setdefault("rows", current_rows)
+                    if name in self.fixed_perf_row_cases:
+                        entry["rows"] = current_rows
+                    else:
+                        entry.setdefault("rows", current_rows)
                     config[name] = entry
                 return
 
@@ -942,7 +1012,9 @@ class SQLTestRunner:
                 test_time = result["time_ms"]
                 target_ms = (PERF_TARGET_MIN_MS + PERF_TARGET_MAX_MS) / 2  # aim for middle of range
 
-                if test_time < 1:
+                if name in self.fixed_perf_row_cases:
+                    new_rows = current_rows
+                elif test_time < 1:
                     # Too fast to measure — double rows
                     new_rows = current_rows * 2
                 elif test_time < PERF_TARGET_MIN_MS:
@@ -956,7 +1028,8 @@ class SQLTestRunner:
                     new_rows = current_rows
 
                 # Apply RAM limit
-                new_rows = min(new_rows, max_rows)
+                if name not in self.fixed_perf_row_cases:
+                    new_rows = min(new_rows, max_rows)
 
                 entry = config.get(name)
                 if not isinstance(entry, dict):
@@ -1052,15 +1125,17 @@ class SQLTestRunner:
             on_fail = [{"sql": on_fail}]
         elif isinstance(on_fail, dict):
             on_fail = [on_fail]
+        active_syntax = self._operation_syntax(test_case, self.suite_syntax)
         parts = []
         for step in on_fail:
             try:
                 if "sql" in step:
-                    resp = self.execute_sql(database, step["sql"], timeout=5)
+                    resp = self.execute_sql(database, step["sql"],
+                                            syntax=self._operation_syntax(step, active_syntax), timeout=5)
                     if resp and resp.status_code == 200:
                         parts.append(f"[SQL] {step['sql'][:80]}\n       → {resp.text.strip()[:500]}")
                 elif "scm" in step:
-                    resp = requests.post(f"{self.base_url}/scm", data=self._table_abi_sources.get(step["scm"], step["scm"]).encode("utf-8"), headers=self.auth_header, timeout=5)
+                    resp = requests.post(f"{self.base_url}/scm", data=self._scm_abi_sources.get(step["scm"], step["scm"]).encode("utf-8"), headers=self.auth_header, timeout=5)
                     if resp and resp.status_code == 200:
                         parts.append(f"[SCM] {step['scm'][:80]}\n       → {resp.text.strip()[:500]}")
                 elif "psql" in step:
@@ -1092,6 +1167,8 @@ class SQLTestRunner:
                 text=True,
                 timeout=int(probe.get("timeout", 30)),
             )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return False, f"MySQL probe process failed ({type(exc).__name__}): {exc}"
         finally:
             try:
                 os.unlink(path)
@@ -1120,6 +1197,8 @@ class SQLTestRunner:
                 timeout=int(probe.get("timeout", 120)),
             )
             return proc.returncode == 0, (proc.stdout + proc.stderr).strip()
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return False, f"TDS probe process failed ({type(exc).__name__}): {exc}"
         finally:
             os.unlink(path)
 
@@ -1225,6 +1304,11 @@ class SQLTestRunner:
             return "postgresql"
         return syntax_lower
 
+    @staticmethod
+    def _operation_syntax(operation: Dict, inherited: Optional[str]) -> Optional[str]:
+        selected = operation.get("syntax")
+        return inherited if selected is None else selected
+
     def execute_sparql(self, database: str, query: str, auth_header: Optional[Dict[str, str]] = None, timeout: int = 10) -> Optional[requests.Response]:
         self._test_context.request_timed_out = False
         try:
@@ -1293,6 +1377,7 @@ class SQLTestRunner:
             if cleanup_steps:
                 cleanup_ok = self.run_cleanup(
                     cleanup_steps, database, session_id=test_case.get("session_id"),
+                    syntax=self._operation_syntax(test_case, self.suite_syntax),
                 )
         return bool(result) and cleanup_ok
 
@@ -1314,6 +1399,9 @@ class SQLTestRunner:
             return False
         self.test_count += 1
         fixture_trial = bool(os.environ.get("PERF_FIXTURE_TRIAL"))
+        # Measurement trials never run arbitrary case hooks. Only a separate
+        # post-failure diagnostic replay opts in after its own failed request.
+        fixture_failure_diagnostics = fixture_trial and os.environ.get("PERF_FAILURE_DIAGNOSTICS") == "1"
         is_noncritical = bool(test_case.get("noncritical")) and not fixture_trial
         if is_noncritical:
             self.noncritical_count += 1
@@ -1357,7 +1445,7 @@ class SQLTestRunner:
                 port = int(self.base_url.rsplit(':', 1)[1])
             except (ValueError, IndexError):
                 port = 4321
-            data_dir = Path(os.environ.get("MEMCP_TEST_DATA_DIR", os.path.join(tempfile.gettempdir(), f"memcp-sql-tests-{port}")))
+            data_dir = Path(os.environ.get("MEMCP_TEST_DATA_DIR", str(Path(tempfile.gettempdir()) / f"memcp-sql-tests-{port}")))
             duration = float(test_case.get("duration", 1.0))
             reads, error = observe_atomic_json(data_dir / database / "schema.json", duration)
             if error is None:
@@ -1421,6 +1509,10 @@ class SQLTestRunner:
                 if isinstance(workload_config, dict) else PERF_DEFAULT_ROWS
             )
             declared_rows = test_case.get("performance_rows", self.suite_metadata.get("performance_rows", ci_default_rows))
+            fixed_rows = not PERF_AB_MODE and not performance_uses_row_template(test_case)
+            self.fixed_perf_row_cases.discard(name)
+            if fixed_rows:
+                self.fixed_perf_row_cases.add(name)
             baseline = self.perf_baselines.get(
                 perf_key, self.perf_baselines.get(name, {})
             )
@@ -1434,6 +1526,10 @@ class SQLTestRunner:
             else:
                 # Legacy format: just a number
                 baseline_time = baseline
+                baseline_rows = declared_rows
+
+            if fixed_rows:
+                # A legacy calibrated baseline cannot change a fixed fixture.
                 baseline_rows = declared_rows
 
             try:
@@ -1485,7 +1581,7 @@ class SQLTestRunner:
             # silently shrinking only the candidate side.
             perf_rows = (
                 int(baseline_rows)
-                if PERF_AB_MODE == "compare" and baseline_time
+                if fixed_rows or (PERF_AB_MODE == "compare" and baseline_time)
                 else min(int(baseline_rows), max_rows_for_ram())
             )
 
@@ -1496,6 +1592,7 @@ class SQLTestRunner:
 
         # session_id must be resolved before setup steps so setup runs in the same session
         session_id = test_case.get("session_id")
+        active_syntax = self._operation_syntax(test_case, self.suite_syntax)
 
         # Per-test setup steps (SQL and/or Scheme, e.g. perf data generation)
         # Supports {rows} and {database} template placeholders for perf tests
@@ -1538,7 +1635,7 @@ class SQLTestRunner:
                     try:
                         with performance_server_gate():
                             resp = self.execute_sql(
-                                database, sql_code, syntax=self.suite_syntax,
+                                database, sql_code, syntax=self._operation_syntax(step, active_syntax),
                                 session_id=session_id,
                                 timeout=(
                                     max(1, min(int(step.get("timeout", 600)), math.ceil(setup_remaining)))
@@ -1552,16 +1649,16 @@ class SQLTestRunner:
                     if resp is None:
                         return fail_setup("Setup SQL failed: no response", sql_code)
                     if expect_error:
-                        if resp.status_code == 200 and "Error" not in resp.text:
+                        if not is_error_response(resp):
                             return fail_setup(
                                 "Setup SQL expected error but succeeded",
                                 sql_code, resp, {"error": True},
                             )
                     else:
-                        if resp.status_code != 200 or "Error" in resp.text:
+                        if is_error_response(resp):
                             return fail_setup("Setup SQL failed", sql_code, resp)
                 elif "scm" in step:
-                    scm = self._table_abi_sources.get(step["scm"], step["scm"])
+                    scm = self._scm_abi_sources.get(step["scm"], step["scm"])
                     if is_perf_test:
                         scm = scm.replace("{rows}", str(perf_rows)).replace("{database}", database)
                     url = f"{self.base_url}/scm"
@@ -1582,7 +1679,12 @@ class SQLTestRunner:
                                 self._perf_setup_semaphore.release()
                     except Exception as e:
                         return fail_setup(f"Setup SCM error: {e}", scm)
-                    if resp is None or resp.status_code != 200:
+                    if resp is None:
+                        return fail_setup("Setup SCM failed", scm, resp)
+                    if self._step_expects_error(step):
+                        if not is_error_response(resp):
+                            return fail_setup("Setup SCM expected error but succeeded", scm, resp, {"error": True})
+                    elif is_error_response(resp):
                         return fail_setup("Setup SCM failed", scm, resp)
                     # Extract heap stats from response if available
                     try:
@@ -1610,12 +1712,22 @@ class SQLTestRunner:
                     None, None, None, is_noncritical,
                 )
 
+        # auth: allow per-test overrides, fallback to suite metadata, then runner defaults
+        tc_user = test_case.get("username") or self.suite_metadata.get("username") or self.username
+        tc_pass = test_case.get("password") or self.suite_metadata.get("password") or self.password
+        creds = f"{tc_user}:{tc_pass}".encode()
+        auth_header = {"Authorization": f"Basic {b64encode(creds).decode()}"}
+        if isinstance(test_case.get("headers"), dict):
+            auth_header.update({str(k): str(v) for k, v in test_case["headers"].items()})
+        if session_id:
+            auth_header["X-Session-Id"] = str(session_id)
+
         # Scheme code execution via /scm endpoint
         try:
             scm_code = revision_specific_scm(
                 test_case, self.current_spec_file or "",
             )
-            scm_code = self._table_abi_sources.get(scm_code, scm_code)
+            scm_code = self._scm_abi_sources.get(scm_code, scm_code)
             if scm_code:
                 scm_code = scm_code.replace("{database}", database)
         except (OSError, ValueError, yaml.YAMLError) as exc:
@@ -1634,7 +1746,7 @@ class SQLTestRunner:
             ))
             try:
                 url = f"{self.base_url}/scm"
-                resp = requests.post(url, data=scm_code.encode("utf-8"), headers=self.auth_header, timeout=scm_timeout)
+                resp = requests.post(url, data=scm_code.encode("utf-8"), headers=auth_header, timeout=scm_timeout)
             except Exception as e:
                 if self._expect_interrupted_ok(expect):
                     self._record_success(name, is_noncritical)
@@ -1650,6 +1762,9 @@ class SQLTestRunner:
                 return True
             if expect_error:
                 if resp.status_code != 200:
+                    if not self.validate_expectation(test_case, resp, None):
+                        return self._record_fail(name, "SCM error expectation mismatch", scm_code,
+                                                 resp, expect, is_noncritical)
                     self._record_success(name, is_noncritical)
                     return True
                 return self._record_fail(name, f"Expected error but got 200: {resp.text[:200]}", scm_code, None, None, is_noncritical)
@@ -1696,11 +1811,42 @@ class SQLTestRunner:
                 step_timeout = int(step.get("timeout", 30))
                 if "scm" in step:
                     url = f"{self.base_url}/scm"
-                    return requests.post(url, data=self._table_abi_sources.get(step["scm"], step["scm"]).encode("utf-8"), headers=self.auth_header, timeout=step_timeout)
+                    headers = self.auth_header
+                    if step.get("session_id"):
+                        headers = {**headers, "X-Session-Id": step["session_id"]}
+                    return requests.post(url, data=self._scm_abi_sources.get(step["scm"], step["scm"]).encode("utf-8"), headers=headers, timeout=step_timeout)
                 else:
-                    return self.execute_sql(database, step["sql"],
+                    syntax = self._operation_syntax(step, active_syntax)
+                    return self.execute_sql(database, step["sql"], syntax=syntax,
                                             session_id=step.get("session_id"),
                                             timeout=step_timeout)
+
+            def validate_step_response(step, resp):
+                # Step assertions have the same contract as ordinary cases,
+                # including exact values, DML completions and error messages.
+                expect = step.get("expect", {})
+                if self._expect_interrupted_ok(expect):
+                    return True
+                query = step.get("sql") or step.get("scm", "")
+                label = "Background step" if step.get("background") else "Step"
+                if isinstance(resp, Exception):
+                    return self._record_fail(name, f"{label} '{query[:60]}' raised: {resp}",
+                                             query, None, expect, is_noncritical)
+                rows = self.parse_jsonl_response(resp) if resp is not None else None
+                valid = resp is not None and self.validate_expectation(step, resp, rows)
+                # Preserve the step-specific row-text assertions. Error text
+                # assertions are handled by the common validator above.
+                if valid and not expect.get("error") and ("contains" in expect or "not_contains" in expect):
+                    flat = " ".join(str(row) for row in rows)
+                    for key, required in (("contains", True), ("not_contains", False)):
+                        if key in expect:
+                            needles = expect[key] if isinstance(expect[key], list) else [expect[key]]
+                            if any((str(needle) in flat) != required for needle in needles):
+                                valid = False
+                if not valid:
+                    return self._record_fail(name, f"{label} '{query[:60]}' failed expectation",
+                                             query, resp, expect, is_noncritical)
+                return True
 
             def run_bg_step(step, out: list):
                 try:
@@ -1710,10 +1856,7 @@ class SQLTestRunner:
                     out.append((step, exc))
 
             for step in steps:
-                step_sql = step.get("sql") or step.get("scm", "")
-                step_sid = step.get("session_id")
                 step_timeout = int(step.get("timeout", 30))
-                step_expect = step.get("expect", {})
                 if step.get("wait_for_background"):
                     for thread in bg_threads:
                         thread.join(timeout=step_timeout)
@@ -1732,62 +1875,25 @@ class SQLTestRunner:
                     t.start()
                     bg_threads.append(t)
                 else:
-                    resp = run_step_request(step)
-                    if step_expect:
-                        if self._expect_interrupted_ok(step_expect):
-                            continue
-                        if step_expect.get("error"):
-                            if not is_error_response(resp):
-                                return self._record_fail(name, f"Step '{step_sql[:60]}' expected error but succeeded", step_sql, resp, step_expect, is_noncritical)
-                        else:
-                            if resp is None or resp.status_code != 200 or "Error" in resp.text:
-                                return self._record_fail(name, f"Step '{step_sql[:60]}' failed", step_sql, resp, step_expect, is_noncritical)
-                            rows = self.parse_jsonl_response(resp)
-                            if "rows" in step_expect and len(rows) != step_expect["rows"]:
-                                return self._record_fail(name, f"Step '{step_sql[:60]}' expected {step_expect['rows']} rows, got {len(rows)}", step_sql, resp, step_expect, is_noncritical)
-                            if "contains" in step_expect:
-                                flat = " ".join(str(r) for r in rows)
-                                for needle in (step_expect["contains"] if isinstance(step_expect["contains"], list) else [step_expect["contains"]]):
-                                    if str(needle) not in flat:
-                                        return self._record_fail(name, f"Step '{step_sql[:60]}' missing '{needle}' in result", step_sql, resp, step_expect, is_noncritical)
-                            if "not_contains" in step_expect:
-                                flat = " ".join(str(r) for r in rows)
-                                for needle in (step_expect["not_contains"] if isinstance(step_expect["not_contains"], list) else [step_expect["not_contains"]]):
-                                    if str(needle) in flat:
-                                        return self._record_fail(name, f"Step '{step_sql[:60]}' unexpectedly contained '{needle}' in result", step_sql, resp, step_expect, is_noncritical)
+                    try:
+                        resp = run_step_request(step)
+                    except Exception as exc:
+                        resp = exc
+                    if not validate_step_response(step, resp):
+                        return False
 
-            # Wait for background threads to finish
+            # A missing background response cannot establish that its
+            # assertions passed, even without an explicit synchronization step.
             for t in bg_threads:
                 t.join(timeout=60)
+            if any(t.is_alive() for t in bg_threads):
+                return self._record_fail(
+                    name, "Background step did not finish before completion timeout",
+                    "steps", None, None, is_noncritical,
+                )
             for step, resp in bg_results:
-                step_expect = step.get("expect", {})
-                step_sql = step.get("sql", "")
-                if isinstance(resp, Exception):
-                    if self._expect_interrupted_ok(step_expect):
-                        continue
-                    return self._record_fail(name, f"Background step '{step_sql[:60]}' raised: {resp}", step_sql, None, step_expect, is_noncritical)
-                if step_expect:
-                    if self._expect_interrupted_ok(step_expect):
-                        continue
-                    if step_expect.get("error"):
-                        if not is_error_response(resp):
-                            return self._record_fail(name, f"Background step '{step_sql[:60]}' expected error but succeeded", step_sql, resp, step_expect, is_noncritical)
-                    else:
-                        if resp is None or resp.status_code != 200 or "Error" in resp.text:
-                            return self._record_fail(name, f"Background step '{step_sql[:60]}' failed", step_sql, resp, step_expect, is_noncritical)
-                        rows = self.parse_jsonl_response(resp)
-                        if "rows" in step_expect and len(rows) != step_expect["rows"]:
-                            return self._record_fail(name, f"Background step '{step_sql[:60]}' expected {step_expect['rows']} rows, got {len(rows)}", step_sql, resp, step_expect, is_noncritical)
-                        if "contains" in step_expect:
-                            flat = " ".join(str(r) for r in rows)
-                            for needle in (step_expect["contains"] if isinstance(step_expect["contains"], list) else [step_expect["contains"]]):
-                                if str(needle) not in flat:
-                                    return self._record_fail(name, f"Background step '{step_sql[:60]}' missing '{needle}' in result", step_sql, resp, step_expect, is_noncritical)
-                        if "not_contains" in step_expect:
-                            flat = " ".join(str(r) for r in rows)
-                            for needle in (step_expect["not_contains"] if isinstance(step_expect["not_contains"], list) else [step_expect["not_contains"]]):
-                                if str(needle) in flat:
-                                    return self._record_fail(name, f"Background step '{step_sql[:60]}' unexpectedly contained '{needle}' in result", step_sql, resp, step_expect, is_noncritical)
+                if not validate_step_response(step, resp):
+                    return False
             self._record_success(name, is_noncritical)
             return True
 
@@ -1801,15 +1907,6 @@ class SQLTestRunner:
         if query and is_perf_test:
             query = query.replace("{rows}", str(perf_rows)).replace("{database}", database)
         is_sparql = "sparql" in test_case
-        # auth: allow per-test overrides, fallback to suite metadata, then runner defaults
-        tc_user = test_case.get("username") or self.suite_metadata.get("username") or self.username
-        tc_pass = test_case.get("password") or self.suite_metadata.get("password") or self.password
-        creds = f"{tc_user}:{tc_pass}".encode()
-        auth_header = {"Authorization": f"Basic {b64encode(creds).decode()}"}
-        if isinstance(test_case.get("headers"), dict):
-            auth_header.update({str(k): str(v) for k, v in test_case["headers"].items()})
-        test_syntax = test_case.get("syntax")
-        active_syntax = self._normalize_syntax(test_syntax) if test_syntax is not None else self.suite_syntax
         sql_timeout = int(test_case.get("timeout", 10))
         sql_params = test_case.get("params")
 
@@ -1950,7 +2047,7 @@ class SQLTestRunner:
                                                             active_syntax, session_id=session_id, timeout=sql_timeout)
                         except Exception:
                             compile_resp = None
-                        if compile_resp is None or compile_resp.status_code != 200 or "Error" in compile_resp.text[:64]:
+                        if compile_resp is None or is_error_response(compile_resp):
                             return self._record_fail(name, "EXPLAIN COMPILE failed", query, compile_resp,
                                                      test_case.get("expect"), is_noncritical)
                         compile_rows = self.parse_jsonl_response(compile_resp)
@@ -2029,7 +2126,7 @@ class SQLTestRunner:
                                                         active_syntax, session_id=session_id, timeout=sql_timeout)
                     except Exception:
                         explain_resp = None
-                    if explain_resp is not None and explain_resp.status_code == 200 and "Error" not in explain_resp.text[:64]:
+                    if explain_resp is not None and not is_error_response(explain_resp):
                         plan_size = len(explain_resp.text)
                         if plan_size > plan_size_limit:
                             diag = self._run_on_fail(test_case, database)
@@ -2058,8 +2155,9 @@ class SQLTestRunner:
                                 test_case, warm_response, self.parse_jsonl_response(warm_response)))):
                         if record_baseline_query_failure(warm_response, "warmup"):
                             return True
+                        diag = self._run_on_fail(test_case, database) if fixture_failure_diagnostics else None
                         return self._record_fail(name, "Warmup failed", query, warm_response,
-                                                 test_case.get("expect"), is_noncritical)
+                                                 test_case.get("expect"), is_noncritical, on_fail_diag=diag)
 
                 # Scans publish telemetry asynchronously after returning the
                 # query result. Let warmup-triggered writes, group-cache hooks,
@@ -2117,7 +2215,8 @@ class SQLTestRunner:
                             return True
                         print(f"    Invalid measured sample: {sample_index + 1}")
                         reason = "Measured sample failed" if fixture_trial else "Expectation mismatch"
-                        diag = None if fixture_trial else self._run_on_fail(test_case, database)
+                        diag = (None if fixture_trial and not fixture_failure_diagnostics
+                                else self._run_on_fail(test_case, database))
                         return self._record_fail(name, reason, query, response,
                                                  test_case.get("expect"), is_noncritical,
                                                  on_fail_diag=diag)
@@ -2269,7 +2368,7 @@ class SQLTestRunner:
                         return False
             return True
 
-        if "Error" in response.text or response.status_code != 200:
+        if is_error_response(response):
             return False
 
         if "content_type" in expect:
@@ -2301,9 +2400,34 @@ class SQLTestRunner:
 
         if "affected_rows" in expect:
             expected = expect["affected_rows"]
-            if results and results and "affected_rows" in results[0]:
-                return results[0]["affected_rows"] == expected
-            return True
+            if type(expected) is not int or expected < 0:
+                return False
+            # Older HTTP SQL versions returned a genuinely empty body for zero
+            # DML. Normalize only that protocol version to the explicit scalar
+            # completion; never infer success from the permissive JSONL parser
+            # discarding malformed text, unrelated rows or missing count fields.
+            text = response.text.strip()
+            if not text:
+                if expected != 0:
+                    return False
+                completion = {"affected_rows": 0}
+            else:
+                def completion_object(fields):
+                    if len(fields) != 1:
+                        raise ValueError("DML completion requires one count field")
+                    return dict(fields)
+                try:
+                    completion = json.loads(text, object_pairs_hook=completion_object)
+                except (TypeError, ValueError):
+                    return False
+            if (not isinstance(completion, dict)
+                    or set(completion) != {"affected_rows"}
+                    or type(completion["affected_rows"]) is not int
+                    or completion["affected_rows"] != expected):
+                return False
+            # Keep cardinality and data assertions effective for both protocol
+            # versions instead of returning early after the count comparison.
+            results = [completion]
 
         if results is None:
             return False
@@ -2363,7 +2487,7 @@ class SQLTestRunner:
             if "sql" in step:
                 with performance_server_gate():
                     resp = self.execute_sql(
-                        database, step['sql'], syntax=self.suite_syntax,
+                        database, step['sql'], syntax=self._operation_syntax(step, self.suite_syntax),
                         timeout=(
                             max(1, min(int(step.get("timeout", 600)), math.ceil(setup_remaining)))
                             if PERF_TEST_ENABLED else int(step.get("timeout", 600))
@@ -2374,18 +2498,18 @@ class SQLTestRunner:
                     print(f"    SQL: {step.get('sql','')[:300]}")
                     return False
                 if expect_error:
-                    if resp.status_code == 200 and "Error" not in resp.text:
+                    if not is_error_response(resp):
                         print(f"❌ Setup step {idx} failed: expected error but succeeded")
                         print(f"    SQL: {step.get('sql','')[:300]}")
                         print(f"    HTTP {resp.status_code}: {resp.text[:500]}")
                         return False
-                elif resp.status_code != 200 or "Error" in resp.text:
+                elif is_error_response(resp):
                     print(f"❌ Setup step {idx} failed")
                     print(f"    SQL: {step.get('sql','')[:300]}")
                     print(f"    HTTP {resp.status_code}: {resp.text[:500]}")
                     return False
             elif "scm" in step:
-                scm_code = self._table_abi_sources.get(step["scm"], step["scm"])
+                scm_code = self._scm_abi_sources.get(step["scm"], step["scm"])
                 try:
                     url = f"{self.base_url}/scm"
                     with performance_server_gate():
@@ -2405,12 +2529,12 @@ class SQLTestRunner:
                     print(f"    SCM: {scm_code[:300]}")
                     return False
                 if expect_error:
-                    if resp.status_code == 200 and "Error" not in resp.text:
+                    if not is_error_response(resp):
                         print(f"❌ Setup step {idx} failed: expected SCM error but succeeded")
                         print(f"    SCM: {scm_code[:300]}")
                         print(f"    HTTP {resp.status_code}: {resp.text[:500]}")
                         return False
-                elif resp.status_code != 200 or "Error" in resp.text:
+                elif is_error_response(resp):
                     print(f"❌ Setup step {idx} failed")
                     print(f"    SCM: {scm_code[:300]}")
                     print(f"    HTTP {resp.status_code}: {resp.text[:500]}")
@@ -2423,7 +2547,8 @@ class SQLTestRunner:
         return True
 
     def run_cleanup(self, cleanup_steps: List[Dict], database: str,
-                    session_id: Optional[str] = None) -> bool:
+                    session_id: Optional[str] = None, syntax: Optional[str] = None) -> bool:
+        inherited_syntax = self.suite_syntax if syntax is None else syntax
         success = True
         for index, step in enumerate(cleanup_steps, start=1):
             statement = step.get("sql", step.get("scm"))
@@ -2433,11 +2558,11 @@ class SQLTestRunner:
                 with performance_server_gate():
                     if "sql" in step:
                         response = self.execute_sql(
-                            database, statement, syntax=self.suite_syntax,
+                            database, statement, syntax=self._operation_syntax(step, inherited_syntax),
                             session_id=session_id, timeout=int(step.get("timeout", 30)),
                         )
                     elif "scm" in step:
-                        statement = self._table_abi_sources.get(statement, statement)
+                        statement = self._scm_abi_sources.get(statement, statement)
                         headers = dict(self.auth_header)
                         if session_id:
                             headers["X-Session-Id"] = session_id
@@ -2509,7 +2634,7 @@ class SQLTestRunner:
             print(f"⏭️  Cluster suite: {spec_file} (use tools/replication_cluster_stress.py)")
             return True
         self.current_spec_file = spec_file
-        self._table_abi_sources = table_abi_fixture_sources(spec_file, spec)
+        self._scm_abi_sources = scm_abi_fixture_sources(spec_file, spec)
         self.suite_metadata = metadata
         self.suite_syntax = self._normalize_syntax(metadata.get("syntax"))
         self.current_suite_setup = spec.get('setup') or []
@@ -2521,9 +2646,12 @@ class SQLTestRunner:
     def run_test_spec(self, spec_file: str, setup_done: bool = False) -> bool:
         with open(spec_file, 'r') as f:
             spec = yaml.safe_load(f)
+        with suite_filesystem_fixture(spec.get("metadata", {}) or {}):
+            return self._run_test_spec(spec_file, spec, setup_done)
 
+    def _run_test_spec(self, spec_file: str, spec: Dict, setup_done: bool) -> bool:
         self.current_spec_file = spec_file
-        self._table_abi_sources = table_abi_fixture_sources(spec_file, spec)
+        self._scm_abi_sources = scm_abi_fixture_sources(spec_file, spec)
         metadata = spec.get('metadata', {})
         if suite_requires_cluster(metadata) and not self.cluster_mode:
             print(f"⏭️  Cluster suite: {spec_file} (use tools/replication_cluster_stress.py)")
@@ -2712,6 +2840,45 @@ class SQLTestRunner:
         # Suite success is determined solely by critical tests
         return failed_crit == 0
 
+@contextmanager
+def suite_filesystem_fixture(metadata: Dict):
+    """Own a bounded filesystem fixture across a suite, including server restarts."""
+    fixture = metadata.get("filesystem_fixture")
+    if fixture is None or metadata.get("disabled"):
+        yield
+        return
+    if fixture != "root_ancestors" or metadata.get("isolated") is not True:
+        raise ValueError("filesystem_fixture requires the root_ancestors preset and isolated: true")
+    configured = os.environ.get("MEMCP_TEST_DATA_DIR")
+    if not configured:
+        raise ValueError("filesystem_fixture requires a managed MEMCP_TEST_DATA_DIR")
+    data = Path(configured).resolve(strict=True)
+    if not data.is_dir():
+        raise ValueError("filesystem_fixture data path is not a directory")
+    # Names and targets are owned by this preset; YAML cannot select arbitrary
+    # files, shell commands, link destinations or preexisting directories.
+    link = data / "filesystem_ancestry_link"
+    info = data / "filesystem_ancestry_fixture.txt"
+    if link.exists() or link.is_symlink() or info.exists() or info.is_symlink():
+        raise ValueError("filesystem_fixture refuses to replace an existing fixture path")
+    linked = described = False
+    with tempfile.TemporaryDirectory(prefix="memcp-root-ancestors-") as temporary:
+        outside = Path(temporary)
+        (outside / "existing").mkdir()
+        try:
+            link.symlink_to(outside, target_is_directory=True)
+            linked = True
+            with info.open("x", encoding="utf-8") as output:
+                described = True
+                json.dump({"outside": str(outside)}, output)
+            yield
+        finally:
+            if described:
+                info.unlink(missing_ok=True)
+            if linked:
+                link.unlink(missing_ok=True)
+
+
 def wait_for_sql_ready(base_url: str, username: str = "root", password: str = "admin", database: str = "memcp-tests", timeout: int = 30) -> bool:
     auth = b64encode(f"{username}:{password}".encode()).decode()
     headers = {
@@ -2820,15 +2987,15 @@ def start_memcp_process(
         # all suites in this process, so restart/shutdown scenarios keep state
         # without depending on a developer's persistent ./data credentials.
         datadir = data_dir or os.environ.get(
-            "MEMCP_TEST_DATA_DIR", os.path.join(tempfile.gettempdir(), f"memcp-sql-tests-{port}")
+            "MEMCP_TEST_DATA_DIR", str(Path(tempfile.gettempdir()) / f"memcp-sql-tests-{port}")
         )
-        _memcp_log_file = os.path.join(tempfile.gettempdir(), f"memcp-test-{port}.log")
+        _memcp_log_file = str(Path(tempfile.gettempdir()) / f"memcp-test-{port}.log")
         env = os.environ.copy()
         memcp_bin = os.environ.get("MEMCP_BINARY", "./memcp")
         logfile = open(_memcp_log_file, 'w')
         cmd = [
             memcp_bin, "-data", datadir,
-            f"--api-port={port}", f"--mysql-port={port+1000}",
+            f"--api-port={port}", f"--mysql-port={port+1000}", "--mysql-socket=",
         ]
         if not enable_mysql:
             cmd.append("--disable-mysql")

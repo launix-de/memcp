@@ -1,0 +1,69 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  description: Scalar cardinality applies after the producer's own ordered row window
+setup:
+- sql: CREATE TABLE scalar_bound_values(id INT PRIMARY KEY,owner_id INT,value INT)
+- sql: INSERT INTO scalar_bound_values VALUES(1,1,10),(2,1,20),(3,2,30),(4,3,40),(5,4,NULL)
+cleanup:
+- sql: DROP TABLE IF EXISTS scalar_bound_values
+test_cases:
+- name: MySQL bounded scalar retains its actual single row
+  sql: SELECT (SELECT value FROM scalar_bound_values WHERE id=3 ORDER BY id LIMIT 2) AS value
+  expect: {rows: 1,data: [{value: 30}]}
+- name: A two row scalar window rejects multiple actual rows
+  sql: SELECT (SELECT value FROM scalar_bound_values ORDER BY id LIMIT 2) AS value
+  expect: {error: true,contains: 'scalar subselect returned more than one row'}
+- name: A larger declared bound still rejects a multiple row scalar
+  sql: SELECT (SELECT value FROM scalar_bound_values ORDER BY id LIMIT 10) AS value
+  expect: {error: true,contains: 'scalar subselect returned more than one row'}
+- name: A zero row window returns SQL NULL
+  sql: SELECT (SELECT value FROM scalar_bound_values ORDER BY id LIMIT 0) AS value
+  expect: {rows: 1,data: [{value: null}]}
+- name: Offset is applied before checking result cardinality
+  sql: SELECT (SELECT value FROM scalar_bound_values WHERE id<=4 ORDER BY id LIMIT 2 OFFSET 3) AS value
+  expect: {rows: 1,data: [{value: 40}]}
+- name: Offset does not hide a second remaining row
+  sql: SELECT (SELECT value FROM scalar_bound_values ORDER BY id LIMIT 2 OFFSET 3) AS value
+  expect: {error: true,contains: 'scalar subselect returned more than one row'}
+- name: An offset past the source returns SQL NULL
+  sql: SELECT (SELECT value FROM scalar_bound_values ORDER BY id LIMIT 2 OFFSET 20) AS value
+  expect: {rows: 1,data: [{value: null}]}
+- name: A correlated window retains each outer coordinate and duplicate outer row
+  sql: |
+    SELECT caller.id,(SELECT value FROM scalar_bound_values AS inner_values
+      WHERE inner_values.owner_id=caller.id ORDER BY inner_values.id LIMIT 2) AS value
+    FROM (SELECT 2 AS id UNION ALL SELECT 3 UNION ALL SELECT 3 UNION ALL SELECT 9) AS caller
+    ORDER BY caller.id
+  expect: {rows: 4,data: [{id: 2,value: 30},{id: 3,value: 40},{id: 3,value: 40},{id: 9,value: null}]}
+- name: A correlated scalar rejects a genuinely multiple row domain
+  sql: |
+    SELECT caller.id,(SELECT value FROM scalar_bound_values AS inner_values
+      WHERE inner_values.owner_id=caller.id ORDER BY inner_values.id LIMIT 2) AS value
+    FROM (SELECT 1 AS id) AS caller
+  expect: {error: true,contains: 'scalar subselect returned more than one row'}
+- name: TSQL TOP two uses the same completed result row boundary
+  syntax: tsql
+  sql: SELECT (SELECT TOP(2) value FROM scalar_bound_values WHERE id=3 ORDER BY id) AS value
+  expect: {rows: 1,data: [{value: 30}]}
+- name: A TSQL parameter can select an empty scalar window
+  syntax: tsql
+  sql: DECLARE @amount INT=0; SELECT (SELECT TOP(@amount) value FROM scalar_bound_values ORDER BY id) AS value
+  expect: {rows: 1,data: [{value: null}]}
+- name: A TSQL parameter can select exactly one scalar value
+  syntax: tsql
+  sql: DECLARE @amount INT=1; SELECT (SELECT TOP(@amount) value FROM scalar_bound_values ORDER BY id) AS value
+  expect: {rows: 1,data: [{value: 10}]}
+- name: A TSQL parameter cannot silently discard a second scalar row
+  syntax: tsql
+  sql: DECLARE @amount INT=2; SELECT (SELECT TOP(@amount) value FROM scalar_bound_values ORDER BY id) AS value
+  expect: {error: true,contains: 'scalar subselect returned more than one row'}
+- name: PostgreSQL preserves the inner offset and declared row bound
+  syntax: postgresql
+  sql: SELECT (SELECT value FROM scalar_bound_values WHERE id<=4 ORDER BY id LIMIT 2 OFFSET 3) AS value
+  expect: {rows: 1,data: [{value: 40}]}
+- name: PostgreSQL applies scalar cardinality after its row window
+  syntax: postgresql
+  sql: SELECT (SELECT value FROM scalar_bound_values ORDER BY id LIMIT 2) AS value
+  expect: {error: true,contains: 'scalar subselect returned more than one row'}

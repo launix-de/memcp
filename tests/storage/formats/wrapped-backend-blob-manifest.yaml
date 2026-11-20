@@ -1,0 +1,34 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  description: Wrapped backend readers preserve native missing manifest and sparse column semantics
+setup:
+- scm: |
+    (begin
+      (createdatabase "native_manifest_wrapped" false (list "backend" "FakeRemote"))
+      (createtable "native_manifest_wrapped" "probe"
+        (list (list "column" "id" "INT" (list) (list)) (list "column" "payload" "TEXT" (list) (list)))
+        (list "engine" "safe") false nil)
+      (insert (table "native_manifest_wrapped" false "probe" false nil) '("id" "payload")
+        (list (list 7 "small WAL payload")) '() nil false nil nil))
+cleanup:
+- scm: (dropdatabase "native_manifest_wrapped" true)
+test_cases:
+- name: Inventory understands wrapped missing committed files in a WAL-only generation
+  scm: |
+    (begin
+      (define report (blob_inventory "native_manifest_wrapped"))
+      (and (equal? (get_assoc report "referenced_blobs") 0)
+        (equal? (get_assoc report "missing_blobs") (list))))
+  expect: {result: true}
+- name: Blob cleanup can backfill wrapped missing manifests without changing WAL rows
+  scm: |
+    (get_assoc (blob_cleanup "native_manifest_wrapped") "complete")
+  expect: {result: true}
+- name: Backfilling missing manifests preserves ordinary WAL contents
+  scm: |
+    (equal? (scan nil (table "native_manifest_wrapped" false "probe" false nil)
+      '() '() '() (lambda () true) '("id" "payload")
+      (lambda (acc id payload) (+ acc (if (and (equal? id 7) (equal? payload "small WAL payload")) 1 100))) 0 +) 1)
+  expect: {result: true}

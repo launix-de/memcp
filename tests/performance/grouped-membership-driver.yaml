@@ -14,14 +14,14 @@ setup:
 - sql: DROP TABLE IF EXISTS gd_tiny
 - sql: CREATE TABLE gd_tiny (k INT, quantity INT) ENGINE=memory
 - sql: INSERT INTO gd_tiny VALUES (1,400),(2,10),(NULL,400)
-- scm: (rebuild (table "memcp-tests" false "gd_tiny" false) true false)
+- scm: (rebuild (table "memcp-tests" false "gd_tiny" false nil) true false)
 - sql: DROP TABLE IF EXISTS gd_customer
 - sql: DROP TABLE IF EXISTS gd_orders
 - sql: DROP TABLE IF EXISTS gd_lineitem
 - sql: CREATE TABLE gd_customer (c_custkey INT, c_name VARCHAR(32)) ENGINE=memory
 - sql: CREATE TABLE gd_orders (o_orderkey INT, o_custkey INT, o_totalprice INT) ENGINE=memory
 - sql: CREATE TABLE gd_lineitem (l_orderkey INT, l_quantity INT) ENGINE=memory
-- scm: "(begin\n (insert (table \"memcp-tests\" false \"gd_customer\" false) '(\"c_custkey\" \"c_name\")\n  (map (produceN 128) (lambda (i) (list (+ 1 i) (concat \"customer\" (string (+ 1 i)))))))\n (insert (table \"memcp-tests\" false \"gd_orders\" false) '(\"o_orderkey\" \"o_custkey\" \"o_totalprice\")\n  (map (produceN 1024) (lambda (i) (list (+ 1 i) (+ 1 (mod i 128)) (+ 1001 i)))))\n (insert (table \"memcp-tests\" false \"gd_lineitem\" false) '(\"l_orderkey\" \"l_quantity\")\n  (map (produceN 8192) (lambda (i) (list (+ 1 (mod i 1024)) (if (equal? (mod i 128) 0) 50 1)))))\n (rebuild (table \"memcp-tests\" false \"gd_customer\" false) true false)\n (rebuild (table \"memcp-tests\" false \"gd_orders\" false) true false)\n (rebuild (table \"memcp-tests\" false \"gd_lineitem\" false) true false) true)"
+- scm: "(begin\n (insert (table \"memcp-tests\" false \"gd_customer\" false nil) '(\"c_custkey\" \"c_name\")\n  (map (produceN 128) (lambda (i) (list (+ 1 i) (concat \"customer\" (string (+ 1 i)))))))\n (insert (table \"memcp-tests\" false \"gd_orders\" false nil) '(\"o_orderkey\" \"o_custkey\" \"o_totalprice\")\n  (map (produceN 1024) (lambda (i) (list (+ 1 i) (+ 1 (mod i 128)) (+ 1001 i)))))\n (insert (table \"memcp-tests\" false \"gd_lineitem\" false nil) '(\"l_orderkey\" \"l_quantity\")\n  (map (produceN 8192) (lambda (i) (list (+ 1 (mod i 1024)) (if (equal? (mod i 128) 0) 50 1)))))\n (rebuild (table \"memcp-tests\" false \"gd_customer\" false nil) true false)\n (rebuild (table \"memcp-tests\" false \"gd_orders\" false nil) true false)\n (rebuild (table \"memcp-tests\" false \"gd_lineitem\" false nil) true false) true)"
 test_cases:
 - name: Grouped IN HAVING preserves outer aggregate
   sql: "SELECT c.c_name, c.c_custkey, o.o_orderkey, o.o_totalprice, SUM(l.l_quantity) AS quantity\nFROM gd_customer\
@@ -112,7 +112,7 @@ test_cases:
   calibration_decision: group_relation_input
 - name: Large group exposes maintained cache choice
   scm: "(begin (define sess (newsession)) (define cache (newcachemap)) (define result (newsession))\n (with_autocommit\
-    \ sess nil 1 \"group operator costing\" (lambda (tx)\n  (sql_execute_formula sess tx (cached_parse cache (list\
+    \ sess nil 1 \"group operator costing\" (lambda (tx)\n  (sql_execute_formula sess tx (cached_parse cache \"sql\" (list\
     \ parse_sql) \"memcp-tests\" \"EXPLAIN PHYSICAL SELECT c.c_name, c.c_custkey, o.o_orderkey, o.o_totalprice,\
     \ SUM(l.l_quantity) AS quantity\\nFROM gd_customer c, gd_orders o, gd_lineitem l\\nWHERE c.c_custkey=o.o_custkey\
     \ AND o.o_orderkey=l.l_orderkey\\n AND o.o_orderkey IN (SELECT l_orderkey FROM gd_lineitem GROUP BY l_orderkey\
@@ -126,7 +126,7 @@ test_cases:
     - true
 - name: Tiny group retains query builder choice
   scm: "(begin (define sess (newsession)) (define cache (newcachemap)) (define result (newsession))\n (with_autocommit\
-    \ sess nil 1 \"group operator costing\" (lambda (tx)\n  (sql_execute_formula sess tx (cached_parse cache (list\
+    \ sess nil 1 \"group operator costing\" (lambda (tx)\n  (sql_execute_formula sess tx (cached_parse cache \"sql\" (list\
     \ parse_sql) \"memcp-tests\" \"EXPLAIN PHYSICAL SELECT COUNT(*) AS n FROM gd_orders o, gd_lineitem l WHERE o.o_orderkey=l.l_orderkey\
     \ AND o.o_orderkey IN (SELECT k FROM gd_tiny GROUP BY k HAVING SUM(quantity)>300)\" nil \"root\" sess true tx)\n\
     \   (lambda (row) (result \"physical\" (get_assoc row \"physical\"))) (lambda (_fields) nil))))\n (if (and (strlike\
@@ -145,7 +145,7 @@ test_cases:
 - name: Observation counts matching groups using bound aggregate columns
   scm: "(begin\n (define sess (newsession)) (sess \"username\" \"root\") (sess \"schema\" \"memcp-tests\")\n (define\
     \ cache (newcachemap))\n (with_autocommit sess nil 1 \"group cardinality observation\" (lambda (tx) (begin\n\
-    \  (define formula (cached_parse cache (list parse_sql) \"memcp-tests\" \"SELECT c.c_name, c.c_custkey, o.o_orderkey,\
+    \  (define formula (cached_parse cache \"sql\" (list parse_sql) \"memcp-tests\" \"SELECT c.c_name, c.c_custkey, o.o_orderkey,\
     \ o.o_totalprice, SUM(l.l_quantity) AS quantity\\nFROM gd_customer c, gd_orders o, gd_lineitem l\\nWHERE c.c_custkey=o.o_custkey\
     \ AND o.o_orderkey=l.l_orderkey\\n AND o.o_orderkey IN (SELECT l_orderkey FROM gd_lineitem GROUP BY l_orderkey\
     \ HAVING SUM(l_quantity)>300)\\nGROUP BY c.c_name,c.c_custkey,o.o_orderkey,o.o_totalprice\\nORDER BY o.o_totalprice\

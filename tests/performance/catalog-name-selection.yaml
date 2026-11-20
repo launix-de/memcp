@@ -1,0 +1,32 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: sql
+  isolated: true
+  reuse_fixture: true
+  restart_after_setup: true
+  description: A named object lookup avoids unrelated default identity and metadata row construction
+setup:
+- scm: "(map (produceN 128) (lambda (ordinal) (begin\n  (define name (concat \"catalog_name_load_\" ordinal))\n\
+    \  (createtable \"memcp-tests\" name (map (produceN 12) (lambda (column)\n    (list \"column\" (concat \"c\"\
+    \ column) \"INT\" '()\n      (list \"default\" column \"default_name\" (concat \"catalog_name_default_\" ordinal\
+    \ \"_\" column)))))\n    '(\"engine\" \"safe\") false nil))))"
+- sql: CREATE TABLE catalog_name_probe_target(id INT)
+cleanup:
+- sql: DROP TABLE IF EXISTS catalog_name_probe_target
+- scm: (map (produceN 128) (lambda (ordinal) (droptable "memcp-tests" (concat "catalog_name_load_" ordinal) true
+    nil)))
+test_cases:
+- name: A qualified named object EXISTS avoids unrelated default identity construction
+  sql: SELECT CASE WHEN EXISTS(SELECT * FROM [memcp-tests].sys.objects WHERE name=N'catalog_name_probe_target')
+    THEN 1 ELSE 0 END AS present
+  expect:
+    rows: 1
+    data:
+    - present: 1
+  syntax: tsql
+  performance_rows: 1
+  warmup: 0
+  timing_samples: 3
+  timing_aggregation: total
+  threshold_ms: 2000

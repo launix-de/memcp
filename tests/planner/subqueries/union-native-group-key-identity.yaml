@@ -1,0 +1,73 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  description: UNION distinct uses complete native SQL key identities
+setup:
+- sql: CREATE TABLE union_key_inputs(id INT PRIMARY KEY,value INT)
+- sql: INSERT INTO union_key_inputs VALUES(1,0),(2,1),(3,NULL),(4,0),(5,NULL)
+test_cases:
+- name: UNION DISTINCT retains zero separately from NULL before its final window
+  syntax: tsql
+  sql: |-
+    SELECT CAST(value AS INT) AS value FROM union_key_inputs WHERE id IN(1,2)
+    UNION SELECT CAST(value AS INT) FROM union_key_inputs WHERE id IN(3,4,5)
+    ORDER BY value OFFSET 1 ROWS FETCH NEXT 1 ROWS ONLY
+  expect:
+    rows: 1
+    data:
+    - value: 0
+- name: UNION DISTINCT retains complete NULL and zero composite tuples
+  syntax: tsql
+  sql: |-
+    SELECT CAST(value AS INT) AS value,CAST(0 AS INT) AS extra FROM union_key_inputs WHERE id IN(1,2)
+    UNION SELECT CAST(value AS INT),CAST(0 AS INT) FROM union_key_inputs WHERE id IN(3,4,5)
+    UNION SELECT CAST(0 AS INT),CAST(NULL AS INT) FROM union_key_inputs WHERE id=1
+    ORDER BY value,extra
+  expect:
+    rows: 4
+    data:
+    - value: null
+      extra: 0
+    - value: 0
+      extra: null
+    - value: 0
+      extra: 0
+    - value: 1
+      extra: 0
+- name: Native UNION grouped scalar operands retain exact projection contracts
+  syntax: tsql
+  sql: |-
+    SELECT CAST(id-1 AS INT) AS bucket,SUM(CAST(0.5 AS FLOAT)) AS quantity
+    FROM union_key_inputs WHERE id IN(1,2) GROUP BY CAST(id-1 AS INT)
+    UNION SELECT CAST(id-1 AS INT),CASE WHEN id=1 THEN CAST(2 AS INT) ELSE NULL END
+    FROM union_key_inputs WHERE id IN(1,2)
+    ORDER BY bucket,quantity
+  expect:
+    rows: 4
+    data:
+    - bucket: 0
+      quantity: 0.5
+    - bucket: 0
+      quantity: 2
+    - bucket: 1
+      quantity: null
+    - bucket: 1
+      quantity: 0.5
+- name: Source deletion retires only absent UNION keys on a repeated projection
+  sql: DELETE FROM union_key_inputs WHERE value=0
+  expect:
+    affected_rows: 2
+- name: Repeated native UNION grouping removes a stale zero key
+  syntax: tsql
+  sql: |-
+    SELECT CAST(value AS INT) AS value FROM union_key_inputs WHERE id IN(1,2)
+    UNION SELECT CAST(value AS INT) FROM union_key_inputs WHERE id IN(3,4,5)
+    ORDER BY value
+  expect:
+    rows: 2
+    data:
+    - value: null
+    - value: 1
+cleanup:
+- sql: DROP TABLE IF EXISTS union_key_inputs

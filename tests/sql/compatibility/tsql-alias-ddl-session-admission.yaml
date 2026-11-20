@@ -1,0 +1,174 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  description: Alias DDL distinguishes implicit native ACID from explicit SQL transactions
+setup:
+- sql: DROP TABLE IF EXISTS alias_session_rows
+- sql: DROP TABLE IF EXISTS alias_session_rejected
+- sql: DROP TYPE IF EXISTS dbo.alias_session_number
+- sql: DROP TYPE IF EXISTS dbo.alias_session_extra
+cleanup:
+- sql: DROP TABLE IF EXISTS alias_session_rejected
+- sql: DROP TABLE IF EXISTS alias_session_rows
+- sql: DROP TYPE IF EXISTS dbo.alias_session_extra
+- sql: DROP TYPE IF EXISTS dbo.alias_session_number
+test_cases:
+- name: Implicit native ACID admits an alias declaration
+  sql: CREATE TYPE dbo.alias_session_number FROM INT
+- name: Implicit native ACID admits a table consuming the alias
+  sql: CREATE TABLE alias_session_rows(id INT PRIMARY KEY,value dbo.alias_session_number)
+- name: Implicit native ACID admits an alias column addition
+  sql: ALTER TABLE alias_session_rows ADD extra dbo.alias_session_number
+- name: Alias consumers retain their declared integer values
+  sql: INSERT alias_session_rows VALUES(1,7,9)
+  expect:
+    affected_rows: 1
+- name: Alias declaration and column addition retain complete rows
+  sql: SELECT id,value,extra FROM alias_session_rows
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      value: 7
+      extra: 9
+- name: A local temporary consumer receives the executing session
+  session_id: alias_session_temporary
+  sql: 'CREATE TABLE #alias_session_local(value dbo.alias_session_number)'
+- name: Temporary alias rows retain their declared values
+  session_id: alias_session_temporary
+  sql: 'INSERT #alias_session_local VALUES(11)'
+  expect:
+    affected_rows: 1
+- name: Temporary alias reads preserve the native relation scope
+  session_id: alias_session_temporary
+  sql: 'SELECT value FROM #alias_session_local'
+  expect:
+    rows: 1
+    data:
+    - value: 11
+- name: Retire the temporary alias consumer
+  session_id: alias_session_temporary
+  sql: 'DROP TABLE #alias_session_local'
+- name: Implicit alias removal succeeds after its consumers retire
+  sql: DROP TABLE alias_session_rows; DROP TYPE dbo.alias_session_number
+- name: Implicit native ACID admits a character alias
+  sql: CREATE TYPE dbo.alias_session_extra FROM NVARCHAR(12)
+- name: Character alias consumers receive the executing session
+  sql: CREATE TABLE alias_session_rejected(id INT PRIMARY KEY,value dbo.alias_session_extra)
+- name: Character alias consumers retain unicode inputs
+  sql: INSERT alias_session_rejected VALUES(1,N'Größe')
+  expect:
+    affected_rows: 1
+- name: Character alias values retain their declared width
+  sql: SELECT id,value FROM alias_session_rejected
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      value: Größe
+- name: Character alias addition uses the same implicit admission
+  sql: ALTER TABLE alias_session_rejected ADD extra dbo.alias_session_extra
+- name: Character alias updates use the new declaration
+  sql: UPDATE alias_session_rejected SET extra=N'weiter' WHERE id=1
+  expect:
+    affected_rows: 1
+- name: Character alias columns retain complete row values
+  sql: SELECT id,value,extra FROM alias_session_rejected
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      value: Größe
+      extra: weiter
+- name: Retire the character alias consumer
+  sql: DROP TABLE alias_session_rejected
+- name: Implicit native ACID retires the character alias
+  sql: DROP TYPE dbo.alias_session_extra
+- name: A new request can reuse the retired alias spelling
+  sql: CREATE TYPE dbo.alias_session_extra FROM INT
+- name: Implicit native ACID retires the replacement declaration
+  sql: DROP TYPE dbo.alias_session_extra
+- name: A later request can publish a different native alias contract
+  sql: CREATE TYPE dbo.alias_session_extra FROM FLOAT
+- name: Explicit alias creation preserves owner visibility and rollback
+  noncritical: true
+  scm: |
+    (begin
+      (define session (newsession)) (session "username" "root") (session "schema" "memcp-tests")
+      (tx_begin_acid session)
+      (define tx (session "__memcp_tx"))
+      (define result (try (lambda () (begin
+        (tsql_execute_request "memcp-tests" "CREATE TYPE dbo.alias_session_pending FROM INT" session nil 0
+          (lambda (_row) true) (lambda args true))
+        (not (nil? (tsql_find_type_alias "memcp-tests" "alias_session_pending" tx)))))
+        (lambda (failure) (begin (tx_rollback session) (error failure)))))
+      (tx_rollback session)
+      (and result (nil? (tsql_find_type_alias "memcp-tests" "alias_session_pending" nil))))
+  expect:
+    result: true
+  cleanup:
+  - sql: DROP TYPE IF EXISTS dbo.alias_session_pending
+- name: Explicit alias removal remains private until the native decision
+  noncritical: true
+  scm: |
+    (begin
+      (define session (newsession)) (session "username" "root") (session "schema" "memcp-tests")
+      (tx_begin_acid session)
+      (define tx (session "__memcp_tx"))
+      (define result (try (lambda () (begin
+        (tsql_execute_request "memcp-tests" "DROP TYPE dbo.alias_session_pending" session nil 0
+          (lambda (_row) true) (lambda args true))
+        (nil? (tsql_find_type_alias "memcp-tests" "alias_session_pending" tx))))
+        (lambda (failure) (begin (tx_rollback session) (error failure)))))
+      (tx_rollback session)
+      (and result (not (nil? (tsql_find_type_alias "memcp-tests" "alias_session_pending" nil)))))
+  expect:
+    result: true
+  setup:
+  - sql: CREATE TYPE dbo.alias_session_pending FROM INT
+  cleanup:
+  - sql: DROP TYPE IF EXISTS dbo.alias_session_pending
+- name: Explicit alias table publication is retired by rollback
+  noncritical: true
+  scm: |
+    (begin
+      (define session (newsession)) (session "username" "root") (session "schema" "memcp-tests")
+      (tx_begin_acid session)
+      (define tx (session "__memcp_tx"))
+      (define result (try (lambda () (begin
+        (tsql_execute_request "memcp-tests" "CREATE TABLE alias_session_pending_rows(value dbo.alias_session_pending)" session nil 0
+          (lambda (_row) true) (lambda args true))
+        (not (nil? (table "memcp-tests" false "alias_session_pending_rows" false tx)))))
+        (lambda (failure) (begin (tx_rollback session) (error failure)))))
+      (tx_rollback session)
+      (and result (nil? (table "memcp-tests" false "alias_session_pending_rows" false nil))))
+  expect:
+    result: true
+  setup:
+  - sql: CREATE TYPE dbo.alias_session_pending FROM INT
+  cleanup:
+  - sql: DROP TABLE IF EXISTS alias_session_pending_rows
+  - sql: DROP TYPE IF EXISTS dbo.alias_session_pending
+- name: Explicit alias column publication is retired by rollback
+  noncritical: true
+  scm: |
+    (begin
+      (define session (newsession)) (session "username" "root") (session "schema" "memcp-tests")
+      (tx_begin_acid session)
+      (define tx (session "__memcp_tx"))
+      (define result (try (lambda () (begin
+        (tsql_execute_request "memcp-tests" "ALTER TABLE alias_session_pending_rows ADD pending dbo.alias_session_pending" session nil 0
+          (lambda (_row) true) (lambda args true))
+        (not (nil? (find (get_schema "memcp-tests" "alias_session_pending_rows" tx) (lambda (column) (equal? (column "Field") "pending")) nil)))))
+        (lambda (failure) (begin (tx_rollback session) (error failure)))))
+      (tx_rollback session)
+      (and result (nil? (find (get_schema "memcp-tests" "alias_session_pending_rows" nil) (lambda (column) (equal? (column "Field") "pending")) nil))))
+  expect:
+    result: true
+  setup:
+  - sql: CREATE TYPE dbo.alias_session_pending FROM INT
+  - sql: CREATE TABLE alias_session_pending_rows(id INT)
+  cleanup:
+  - sql: DROP TABLE IF EXISTS alias_session_pending_rows
+  - sql: DROP TYPE IF EXISTS dbo.alias_session_pending

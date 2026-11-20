@@ -1,0 +1,567 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: ALTER foreign keys require native database membership and validate declarations before transactional publication
+setup:
+- sql: CREATE TABLE alter_nfr_parent(id INT PRIMARY KEY)
+- sql: CREATE TABLE alter_nfr_child(id INT PRIMARY KEY,p INT)
+- sql: CREATE TABLE alter_nfr_orphan(id INT PRIMARY KEY,p INT)
+- sql: CREATE TABLE alter_nfr_rolled(id INT PRIMARY KEY,p INT)
+- sql: INSERT alter_nfr_parent VALUES(1),(2)
+- sql: INSERT alter_nfr_orphan VALUES(1,999)
+- sql: CREATE TABLE alter_fk_parent([Left] INT NOT NULL,[Right] INT NOT NULL,PRIMARY KEY([Left],[Right]))
+- sql: CREATE TABLE alter_fk_child(id INT IDENTITY PRIMARY KEY,a INT,b INT)
+- sql: CREATE TABLE alter_fk_scalar_parent(id INT PRIMARY KEY)
+- sql: CREATE TABLE alter_fk_rollback(id INT,p INT)
+- sql: CREATE TABLE alter_fk_set_null(id INT PRIMARY KEY,p INT)
+- sql: CREATE TABLE alter_fk_identity_child(id INT IDENTITY PRIMARY KEY,p INT)
+- sql: CREATE TABLE alter_fk_bad(id INT,p BIGINT,required_p INT NOT NULL,computed_p AS (id+1))
+- sql: CREATE TABLE alter_fk_text_parent(code VARCHAR(8) COLLATE utf8mb4_bin PRIMARY KEY)
+- sql: CREATE TABLE alter_fk_text_child(code VARCHAR(8) COLLATE utf8mb4_general_ci)
+- sql: CREATE TABLE alter_fk_binary_child(code VARCHAR(8) COLLATE utf8mb4_bin)
+- sql: CREATE TABLE alter_fk_loaded_parent(a INT NOT NULL,b INT NOT NULL,PRIMARY KEY(a,b))
+- sql: CREATE TABLE alter_fk_loaded_child(id INT PRIMARY KEY,a INT,b INT)
+- sql: CREATE TABLE alter_fk_orphan_child(id INT PRIMARY KEY,a INT,b INT)
+- sql: INSERT alter_fk_loaded_parent VALUES(7,8),(9,10)
+- sql: INSERT alter_fk_loaded_child VALUES(1,7,8),(2,9,10),(3,NULL,99)
+- sql: INSERT alter_fk_orphan_child VALUES(1,7,8),(2,7,99)
+- sql: CREATE TYPE alter_fk_key_type FROM INT NOT NULL
+- sql: CREATE TABLE alter_fk_alias_parent(id alter_fk_key_type PRIMARY KEY)
+- sql: CREATE TABLE alter_fk_alias_child(id INT)
+- sql: CREATE TABLE alter_fk_datetime_parent(stamp DATETIME NOT NULL PRIMARY KEY)
+- sql: CREATE TABLE alter_fk_datetime_child(stamp DATETIME)
+- sql: CREATE TABLE alter_fk_small_datetime_parent(stamp SMALLDATETIME NOT NULL PRIMARY KEY)
+- sql: CREATE TABLE alter_fk_small_datetime_child(stamp SMALLDATETIME)
+- sql: CREATE TABLE alter_fk_collated_parent(code VARCHAR(8) COLLATE utf8mb4_general_ci NOT NULL PRIMARY KEY)
+- sql: CREATE TABLE alter_fk_collated_child(code VARCHAR(8) COLLATE utf8mb4_general_ci)
+- sql: INSERT alter_fk_collated_parent VALUES('Case')
+- sql: INSERT alter_fk_collated_child VALUES('case')
+- sql: CREATE TABLE alter_fk_default_text_parent(code VARCHAR(8) NOT NULL PRIMARY KEY)
+- sql: CREATE TABLE alter_fk_default_text_child(code VARCHAR(8))
+- sql: CREATE TABLE alter_fk_loaded_datetime_parent(tag INT NOT NULL,stamp DATETIME NOT NULL,PRIMARY KEY(tag,stamp))
+- sql: CREATE TABLE alter_fk_loaded_datetime_child(tag INT,stamp DATETIME)
+- sql: INSERT alter_fk_loaded_datetime_parent VALUES(1,CONVERT(DATETIME,'2002-01-01',0))
+- sql: INSERT alter_fk_loaded_datetime_child VALUES(1,CONVERT(DATETIME,'2002-01-01',0))
+- scm: (eval (parse_sql "memcp-tests" "CREATE USER alter_fk_writer IDENTIFIED BY 'pw'" nil))
+# Compatibility grants never enroll this initially unprivileged native user.
+- sql: GRANT CONNECT,ALTER TO alter_fk_writer
+cleanup:
+- sql: DROP TABLE IF EXISTS alter_nfr_inline
+- sql: DROP TABLE IF EXISTS alter_nfr_child
+- sql: DROP TABLE IF EXISTS alter_nfr_orphan
+- sql: DROP TABLE IF EXISTS alter_nfr_rolled
+- sql: DROP TABLE IF EXISTS alter_nfr_parent
+- sql: DROP TABLE IF EXISTS alter_fk_loaded_datetime_child
+- sql: DROP TABLE IF EXISTS alter_fk_loaded_datetime_parent
+- sql: DROP TABLE IF EXISTS alter_fk_collated_child
+- sql: DROP TABLE IF EXISTS alter_fk_collated_parent
+- sql: DROP TABLE IF EXISTS alter_fk_default_text_child
+- sql: DROP TABLE IF EXISTS alter_fk_default_text_parent
+- sql: DROP TABLE IF EXISTS alter_fk_small_datetime_child
+- sql: DROP TABLE IF EXISTS alter_fk_small_datetime_parent
+- sql: DROP TABLE IF EXISTS alter_fk_datetime_child
+- sql: DROP TABLE IF EXISTS alter_fk_datetime_parent
+- sql: DROP TABLE IF EXISTS alter_fk_alias_child
+- sql: DROP TABLE IF EXISTS alter_fk_alias_parent
+- sql: DROP TYPE IF EXISTS alter_fk_key_type
+- sql: DROP TABLE IF EXISTS alter_fk_orphan_child
+- sql: DROP TABLE IF EXISTS alter_fk_loaded_child
+- sql: DROP TABLE IF EXISTS alter_fk_loaded_parent
+- sql: DROP TABLE IF EXISTS alter_fk_set_null
+- sql: DROP TABLE IF EXISTS alter_fk_binary_child
+- sql: DROP TABLE IF EXISTS alter_fk_identity_child
+- sql: DROP TABLE IF EXISTS alter_fk_child
+- sql: DROP TABLE IF EXISTS alter_fk_rollback
+- sql: DROP TABLE IF EXISTS alter_fk_bad
+- sql: DROP TABLE IF EXISTS alter_fk_text_child
+- sql: DROP TABLE IF EXISTS alter_fk_parent
+- sql: DROP TABLE IF EXISTS alter_fk_scalar_parent
+- sql: DROP TABLE IF EXISTS alter_fk_text_parent
+- scm: (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS alter_fk_writer" nil))
+test_cases:
+- name: Replication modifier preserves the ordinary native ALTER foreign declaration
+  sql: ALTER TABLE dbo.alter_nfr_child ADD CONSTRAINT FK_alter_nfr FOREIGN KEY(p) REFERENCES dbo.alter_nfr_parent(id) NOT FOR REPLICATION
+- name: Ordinary client rows still satisfy the declared reference or NULL
+  sql: INSERT alter_nfr_child VALUES(1,1),(2,NULL)
+- name: Replication modifier does not bypass a client orphan insert
+  sql: INSERT alter_nfr_child VALUES(3,999)
+  expect: {error: true, contains: foreign key constraint}
+- name: Replication modifier does not bypass a client orphan update
+  sql: UPDATE alter_nfr_child SET p=999 WHERE id=1
+  expect: {error: true, contains: foreign key constraint}
+- name: Replication modifier retains ordinary parent protection
+  sql: DELETE FROM alter_nfr_parent WHERE id=1
+  expect: {error: true, contains: foreign key constraint}
+- name: Failed client mutations preserve the referenced rows
+  sql: SELECT id,p FROM alter_nfr_child ORDER BY id
+  expect: {rows: 2, data: [{id: 1, p: 1}, {id: 2, p: null}]}
+- name: Replication modifier cannot skip validation of historical client rows
+  sql: ALTER TABLE alter_nfr_orphan ADD CONSTRAINT FK_alter_nfr_bad FOREIGN KEY(p) REFERENCES alter_nfr_parent(id) NOT FOR REPLICATION
+  expect: {error: true, contains: foreign key constraint}
+- name: Failed historical validation publishes no foreign declaration
+  sql: SELECT constraint_name FROM information_schema.referential_constraints WHERE constraint_name=N'FK_alter_nfr_bad'
+  expect: {rows: 0}
+- name: Inline foreign declaration accepts the modifier after both referential actions
+  sql: CREATE TABLE alter_nfr_inline(id INT PRIMARY KEY,p INT,CONSTRAINT FK_alter_nfr_inline FOREIGN KEY(p) REFERENCES alter_nfr_parent(id) ON UPDATE CASCADE ON DELETE CASCADE NOT FOR REPLICATION)
+- name: Inline replication modifier still admits a valid ordinary child
+  sql: INSERT alter_nfr_inline VALUES(1,2)
+- name: Inline replication modifier preserves native update cascades
+  sql: UPDATE alter_nfr_parent SET id=20 WHERE id=2
+- name: Ordinary update cascade reaches the child
+  sql: SELECT p FROM alter_nfr_inline WHERE id=1
+  expect: {rows: 1, data: [{p: 20}]}
+- name: Inline replication modifier preserves native delete cascades
+  sql: DELETE FROM alter_nfr_parent WHERE id=20
+- name: Ordinary delete cascade removes the child
+  sql: SELECT COUNT(*) AS n FROM alter_nfr_inline
+  expect: {rows: 1, data: [{n: 0}]}
+- name: Replication modifier remains owned by the real catalog transaction
+  tds:
+    statements:
+    - sql: BEGIN TRANSACTION
+    - sql: ALTER TABLE alter_nfr_rolled ADD CONSTRAINT FK_alter_nfr_rolled FOREIGN KEY(p) REFERENCES alter_nfr_parent(id) NOT FOR REPLICATION
+    - sql: ROLLBACK TRANSACTION
+    - sql: INSERT alter_nfr_rolled VALUES(1,999)
+    - sql: SELECT constraint_name FROM information_schema.referential_constraints WHERE constraint_name=N'FK_alter_nfr_rolled'
+      expect: {rows: 0}
+- name: Named composite ALTER is private until its real TDS transaction commits
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: ALTER TABLE dbo.ALTER_FK_CHILD ADD CONSTRAINT FK_alter_composite FOREIGN KEY(A,B) REFERENCES [memcp-tests].dbo.ALTER_FK_PARENT([left],[right])
+        ON DELETE CASCADE ON UPDATE CASCADE
+    - connection: owner
+      sql: SELECT constraint_name AS name FROM information_schema.referential_constraints WHERE constraint_name=N'FK_alter_composite'
+      expect:
+        rows: 1
+        data:
+        - name: FK_alter_composite
+    - connection: observer
+      sql: SELECT constraint_name AS name FROM information_schema.referential_constraints WHERE constraint_name=N'FK_alter_composite'
+      expect:
+        rows: 0
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT constraint_name AS name FROM information_schema.referential_constraints WHERE constraint_name=N'FK_alter_composite'
+      expect:
+        rows: 1
+        data:
+        - name: FK_alter_composite
+- name: Committed composite declaration rejects an orphan before native insertion
+  sql: INSERT alter_fk_child(a,b) VALUES(10,20)
+  expect:
+    error: true
+    contains: foreign key constraint
+- name: Failed orphan insertion publishes no row
+  sql: SELECT COUNT(*) AS n FROM alter_fk_child
+  expect:
+    rows: 1
+    data:
+    - n: 0
+- name: Parent values use the ordinary native insert
+  sql: INSERT alter_fk_parent VALUES(10,20)
+- name: Child values use the enforced composite reference
+  sql: INSERT alter_fk_child(a,b) VALUES(10,20)
+- name: Native UPDATE CASCADE carries the complete composite key
+  sql: UPDATE alter_fk_parent SET [Left]=11 WHERE [Left]=10
+- name: Cascaded child values remain ordinary typed rows
+  sql: SELECT a,b FROM alter_fk_child
+  expect:
+    rows: 1
+    data:
+    - a: 11
+      b: 20
+- name: Native DELETE CASCADE removes matching child rows
+  sql: DELETE FROM alter_fk_parent WHERE [Left]=11
+- name: Cascade does not leave a stale child payload
+  sql: SELECT COUNT(*) AS n FROM alter_fk_child
+  expect:
+    rows: 1
+    data:
+    - n: 0
+- name: A NULL component remains exempt from composite reference matching
+  sql: INSERT alter_fk_child(a,b) VALUES(NULL,9)
+- name: Rollback removes both endpoint declarations before later row use
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: ALTER TABLE alter_fk_rollback ADD CONSTRAINT FK_alter_rollback FOREIGN KEY(p) REFERENCES alter_fk_scalar_parent(id)
+        ON UPDATE NO ACTION ON DELETE NO ACTION
+    - connection: owner
+      sql: SELECT constraint_name AS name FROM information_schema.referential_constraints WHERE constraint_name=N'FK_alter_rollback'
+      expect:
+        rows: 1
+        data:
+        - name: FK_alter_rollback
+    - connection: observer
+      sql: SELECT constraint_name AS name FROM information_schema.referential_constraints WHERE constraint_name=N'FK_alter_rollback'
+      expect:
+        rows: 0
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: observer
+      sql: SELECT constraint_name AS name FROM information_schema.referential_constraints WHERE constraint_name=N'FK_alter_rollback'
+      expect:
+        rows: 0
+- name: A rolled-back declaration has no enforcement residue
+  sql: INSERT alter_fk_rollback VALUES(1,999)
+- name: Remove rollback probe rows before independent declaration checks
+  sql: DELETE FROM alter_fk_rollback
+- name: A distinct REFERENCES action is required before parent metadata resolution
+  # Preserve the original case label; native database membership now owns
+  # every database action, including ALTER and REFERENCES.
+  sql: ALTER TABLE alter_fk_rollback ADD CONSTRAINT FK_alter_denied FOREIGN KEY(p) REFERENCES alter_fk_scalar_parent(hidden_column)
+  username: alter_fk_writer
+  password: pw
+  expect:
+    error: true
+    contains: access denied
+- name: Reference rejection does not publish a foreign key
+  sql: SELECT constraint_name AS name FROM information_schema.referential_constraints WHERE constraint_name=N'FK_alter_denied'
+  expect:
+    rows: 0
+- name: Explicit reference authority is grantable without SELECT
+  # The syntactic request is accepted without changing native membership.
+  sql: GRANT REFERENCES TO alter_fk_writer
+  expect: {affected_rows: 0}
+- name: Ignored reference grants do not enroll a native database outsider
+  sql: ALTER TABLE alter_fk_rollback ADD CONSTRAINT FK_alter_authorized FOREIGN KEY(p) REFERENCES alter_fk_scalar_parent(id)
+  username: alter_fk_writer
+  password: pw
+  session_id: alter-fk-warm-reference
+  expect: {error: true, contains: access denied}
+- name: Denied native membership leaves the requested declaration absent
+  sql: SELECT constraint_name AS name FROM information_schema.referential_constraints WHERE constraint_name=N'FK_alter_authorized'
+  expect: {rows: 0}
+- name: Native database membership admits database actions without granular SQL grants
+  scm: (eval (parse_sql "memcp-tests" "GRANT ALL ON `memcp-tests`.* TO alter_fk_writer" nil))
+- name: Authorized ALTER needs no SELECT authority on endpoint rows
+  sql: ALTER TABLE alter_fk_rollback ADD CONSTRAINT FK_alter_authorized FOREIGN KEY(p) REFERENCES alter_fk_scalar_parent(id)
+  username: alter_fk_writer
+  password: pw
+  session_id: alter-fk-warm-reference
+- name: The distinct action still does not grant row reading
+  # The historical label remains stable; actual native membership includes
+  # row reading rather than creating an ALTER-only or REFERENCES-only role.
+  sql: SELECT id FROM alter_fk_scalar_parent
+  username: alter_fk_writer
+  password: pw
+  expect:
+    rows: 0
+- name: Actual authorized reference enforces later ordinary writes
+  sql: INSERT alter_fk_rollback VALUES(1,999)
+  expect:
+    error: true
+    contains: foreign key constraint
+- name: Mismatched arity fails before publication
+  sql: ALTER TABLE alter_fk_child ADD CONSTRAINT FK_alter_invalid_0 FOREIGN KEY(a,b) REFERENCES alter_fk_scalar_parent(id)
+  expect:
+    error: true
+    contains: column count
+- name: Canonical duplicate child column fails before publication
+  sql: ALTER TABLE alter_fk_child ADD CONSTRAINT FK_alter_invalid_1 FOREIGN KEY(a,A) REFERENCES alter_fk_parent([Left],[Right])
+  expect:
+    error: true
+    contains: duplicate
+- name: Canonical duplicate target column fails before publication
+  sql: ALTER TABLE alter_fk_child ADD CONSTRAINT FK_alter_invalid_2 FOREIGN KEY(a,b) REFERENCES alter_fk_parent([Left],[left])
+  expect:
+    error: true
+    contains: duplicate
+- name: Unknown reference column fails before publication
+  sql: ALTER TABLE alter_fk_child ADD CONSTRAINT FK_alter_invalid_3 FOREIGN KEY(a) REFERENCES alter_fk_scalar_parent(missing)
+  expect:
+    error: true
+    contains: unknown foreign key column
+- name: Another database qualifier fails before publication
+  sql: ALTER TABLE alter_fk_child ADD CONSTRAINT FK_alter_invalid_4 FOREIGN KEY(a) REFERENCES other_database.dbo.parent(id)
+  expect:
+    error: true
+    contains: cross-database
+- name: Different declared SQL datatypes cannot borrow native value equality
+  sql: ALTER TABLE alter_fk_bad ADD CONSTRAINT FK_alter_invalid_type FOREIGN KEY(p) REFERENCES alter_fk_scalar_parent(id)
+  expect:
+    error: true
+    contains: SQL declarations
+- name: Computed SQL keys are rejected explicitly
+  sql: ALTER TABLE alter_fk_bad ADD CONSTRAINT FK_alter_invalid_computed FOREIGN KEY(computed_p) REFERENCES alter_fk_scalar_parent(id)
+  expect:
+    error: true
+    contains: computed
+- name: SET NULL cannot target a nonnullable child declaration
+  sql: ALTER TABLE alter_fk_bad ADD CONSTRAINT FK_alter_invalid_null FOREIGN KEY(required_p) REFERENCES alter_fk_scalar_parent(id)
+    ON DELETE SET NULL
+  expect:
+    error: true
+    contains: nullable
+- name: Collation-sensitive SQL references cannot use exact native string equality
+  sql: ALTER TABLE alter_fk_text_child ADD CONSTRAINT FK_alter_invalid_text FOREIGN KEY(code) REFERENCES alter_fk_text_parent(code)
+  expect:
+    error: true
+    contains: matching declared collations
+- name: Rejected declarations leave the authoritative foreign-key catalog unchanged
+  sql: SELECT constraint_name AS name FROM information_schema.referential_constraints WHERE constraint_name LIKE N'FK_alter_invalid_%'
+  expect:
+    rows: 0
+- name: Metadata-only FK ownership rejects generated identities before reservation effects
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: ALTER TABLE alter_fk_identity_child ADD CONSTRAINT FK_alter_identity FOREIGN KEY(p) REFERENCES alter_fk_scalar_parent(id)
+    - connection: owner
+      sql: INSERT alter_fk_identity_child(p) VALUES(NULL)
+      expect:
+        error: true
+        contains:
+        - metadata-only
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+- name: Failed generated insert leaves the original identity sequence untouched
+  sql: INSERT alter_fk_identity_child(p) VALUES(NULL)
+- name: First admitted generated row receives the first native identity
+  sql: SELECT id,p FROM alter_fk_identity_child
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      p: null
+- name: Reference authority can be revoked after a successful cached declaration
+  # Compatibility REVOKE leaves native membership intact.
+  sql: REVOKE REFERENCES FROM alter_fk_writer
+  expect: {affected_rows: 0}
+- name: Ignored revoke retains native membership on the warm ALTER path
+  username: alter_fk_writer
+  password: pw
+  session_id: alter-fk-warm-reference
+  sql: ALTER TABLE alter_fk_rollback ADD CONSTRAINT FK_alter_authorized FOREIGN KEY(p) REFERENCES alter_fk_scalar_parent(id)
+  expect: {error: true, contains: 'declaration name already exists: FK_alter_authorized'}
+- name: Compatibility deny does not remove native row access
+  username: alter_fk_writer
+  password: pw
+  session_id: alter-fk-warm-reference
+  sql: DENY SELECT,ALTER,REFERENCES TO alter_fk_writer; SELECT a,b FROM alter_fk_loaded_parent ORDER BY a,b
+  expect: {rows: 2, data: [{a: 7, b: 8}, {a: 9, b: 10}]}
+- name: Native database membership can be revoked through its real owner
+  scm: (eval (parse_sql "memcp-tests" "REVOKE ALL ON `memcp-tests`.* FROM alter_fk_writer" nil))
+- name: A warm declaration rechecks reference authority before duplicate metadata admission
+  username: alter_fk_writer
+  password: pw
+  session_id: alter-fk-warm-reference
+  sql: ALTER TABLE alter_fk_rollback ADD CONSTRAINT FK_alter_authorized FOREIGN KEY(p) REFERENCES alter_fk_scalar_parent(id)
+  expect:
+    error: true
+    contains: access denied
+- name: Native revocation leaves the existing declaration intact
+  sql: SELECT constraint_name AS name FROM information_schema.referential_constraints WHERE constraint_name=N'FK_alter_authorized'
+  expect: {rows: 1, data: [{name: FK_alter_authorized}]}
+- name: Native membership restoration reopens the same warm SQL admission
+  scm: (eval (parse_sql "memcp-tests" "GRANT ALL ON `memcp-tests`.* TO alter_fk_writer" nil))
+- name: Restored native membership reaches duplicate validation without republishing
+  username: alter_fk_writer
+  password: pw
+  session_id: alter-fk-warm-reference
+  sql: ALTER TABLE alter_fk_rollback ADD CONSTRAINT FK_alter_authorized FOREIGN KEY(p) REFERENCES alter_fk_scalar_parent(id)
+  expect: {error: true, contains: 'declaration name already exists: FK_alter_authorized'}
+- name: Matching declared binary character keys use the supported exact-equality profile
+  sql: ALTER TABLE alter_fk_binary_child ADD CONSTRAINT FK_alter_binary FOREIGN KEY(code) REFERENCES alter_fk_text_parent(code)
+    ON DELETE CASCADE
+- name: Binary parent values retain their exact declared spelling
+  sql: INSERT alter_fk_text_parent VALUES('Case')
+- name: Matching binary child value satisfies the native reference
+  sql: INSERT alter_fk_binary_child VALUES('Case')
+- name: Differently cased binary child value is an orphan
+  sql: INSERT alter_fk_binary_child VALUES('case')
+  expect:
+    error: true
+    contains: foreign key constraint
+- name: An explicit SET NULL declaration accepts nullable child columns
+  sql: ALTER TABLE alter_fk_set_null ADD CONSTRAINT FK_alter_set_null FOREIGN KEY(p) REFERENCES alter_fk_scalar_parent(id)
+    ON UPDATE SET NULL ON DELETE SET NULL
+- name: Scalar parent becomes available after nullable declaration publication
+  sql: INSERT alter_fk_scalar_parent VALUES(5)
+- name: Nullable reference initially matches its actual parent
+  sql: INSERT alter_fk_set_null VALUES(1,5)
+- name: SET NULL is a real native update action
+  sql: UPDATE alter_fk_scalar_parent SET id=6 WHERE id=5
+- name: Nullable action writes an ordinary SQL NULL
+  sql: SELECT id,p FROM alter_fk_set_null
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      p: null
+- name: A preloaded composite relation is validated before ALTER publishes the foreign key
+  sql: ALTER TABLE alter_fk_loaded_child ADD CONSTRAINT FK_alter_loaded FOREIGN KEY(a,b) REFERENCES alter_fk_loaded_parent(a,b) ON UPDATE CASCADE ON DELETE CASCADE
+- name: Validation retains every preloaded row including a NULL reference component
+  sql: SELECT id,a,b FROM alter_fk_loaded_child ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - {id: 1, a: 7, b: 8}
+    - {id: 2, a: 9, b: 10}
+    - {id: 3, a: null, b: 99}
+- name: A preexisting orphan rejects ALTER rather than publishing an unvalidated declaration
+  sql: ALTER TABLE alter_fk_orphan_child ADD CONSTRAINT FK_alter_orphan FOREIGN KEY(a,b) REFERENCES alter_fk_loaded_parent(a,b)
+  expect:
+    error: true
+    contains: foreign key
+- name: A failed historical validation leaves the SQL declaration catalog absent
+  sql: SELECT constraint_name AS name FROM information_schema.referential_constraints WHERE constraint_name=N'FK_alter_orphan'
+  expect:
+    rows: 0
+- name: Rejected validation preserves the offending native rows unchanged
+  sql: SELECT id,a,b FROM alter_fk_orphan_child ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - {id: 1, a: 7, b: 8}
+    - {id: 2, a: 7, b: 99}
+- name: A validated preloaded reference enforces future child writes
+  sql: INSERT alter_fk_loaded_child VALUES(4,7,99)
+  expect:
+    error: true
+    contains: foreign key constraint
+- name: Cascading a validated reference updates historical rows
+  sql: UPDATE alter_fk_loaded_parent SET b=11 WHERE a=7
+- name: Historical child values receive the full committed cascade
+  sql: SELECT a,b FROM alter_fk_loaded_child WHERE id=1
+  expect:
+    rows: 1
+    data:
+    - {a: 7, b: 11}
+- name: Cascading deletion removes only historically matching child rows
+  sql: DELETE FROM alter_fk_loaded_parent WHERE a=9
+- name: Validated historical cascades retain NULL references and unrelated rows
+  sql: SELECT id,a,b FROM alter_fk_loaded_child ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - {id: 1, a: 7, b: 11}
+    - {id: 3, a: null, b: 99}
+- name: An alias declaration relates to its ordinary SQL base type
+  sql: ALTER TABLE alter_fk_alias_child ADD CONSTRAINT FK_alter_alias FOREIGN KEY(id) REFERENCES alter_fk_alias_parent(id)
+- name: Alias parent writes retain the existing frontend assignment conversion
+  sql: INSERT alter_fk_alias_parent VALUES(12)
+- name: The base-typed child matches its effective alias parent value
+  sql: INSERT alter_fk_alias_child VALUES(12)
+- name: Alias compatibility does not bypass actual native reference enforcement
+  sql: INSERT alter_fk_alias_child VALUES(13)
+  expect:
+    error: true
+    contains: foreign key constraint
+- name: Matching DATETIME declarations share native scalar key equality
+  sql: ALTER TABLE alter_fk_datetime_child ADD CONSTRAINT FK_alter_datetime FOREIGN KEY(stamp) REFERENCES alter_fk_datetime_parent(stamp) ON UPDATE CASCADE
+- name: DATETIME parent assignment uses the ordinary validated temporal conversion
+  sql: INSERT alter_fk_datetime_parent VALUES(CONVERT(DATETIME,'2002-01-01',0))
+- name: The matching DATETIME reference accepts its canonical timestamp
+  sql: INSERT alter_fk_datetime_child VALUES(CONVERT(DATETIME,'2002-01-01',0))
+- name: A distinct DATETIME timestamp remains an orphan
+  sql: INSERT alter_fk_datetime_child VALUES(CONVERT(DATETIME,'2002-01-02',0))
+  expect:
+    error: true
+    contains: foreign key constraint
+- name: DATETIME cascades retain the frontend temporal value contract
+  sql: UPDATE alter_fk_datetime_parent SET stamp=CONVERT(DATETIME,'2003-01-01',0)
+- name: The cascaded timestamp matches an ordinary typed SQL comparison
+  sql: SELECT COUNT(*) AS n FROM alter_fk_datetime_child WHERE stamp=CONVERT(DATETIME,'2003-01-01',0)
+  expect:
+    rows: 1
+    data:
+    - n: 1
+- name: Bare DATETIME assignment retains the typed comparison contract
+  sql: INSERT alter_fk_datetime_parent VALUES('2004-01-01')
+- name: An implicitly converted DATETIME parent matches its typed literal
+  sql: SELECT COUNT(*) AS n FROM alter_fk_datetime_parent WHERE stamp=CONVERT(DATETIME,'2004-01-01',0)
+  expect:
+    rows: 1
+    data:
+    - n: 1
+- name: Bare DATETIME child assignment passes the same canonical reference domain
+  sql: INSERT alter_fk_datetime_child VALUES('2004-01-01')
+- name: Implicit DATETIME reference conversion remains visible to ordinary SQL comparison
+  sql: SELECT COUNT(*) AS n FROM alter_fk_datetime_child WHERE stamp=CONVERT(DATETIME,'2004-01-01',0)
+  expect:
+    rows: 1
+    data:
+    - n: 1
+- name: Matching SMALLDATETIME declarations use their ordinary minute-rounded key domain
+  sql: ALTER TABLE alter_fk_small_datetime_child ADD CONSTRAINT FK_alter_small_datetime FOREIGN KEY(stamp) REFERENCES alter_fk_small_datetime_parent(stamp)
+- name: SMALLDATETIME parent assignment rounds through the existing conversion owner
+  sql: INSERT alter_fk_small_datetime_parent VALUES('2002-01-01 12:34:10')
+- name: A rounded SMALLDATETIME reference matches its canonical parent minute
+  sql: INSERT alter_fk_small_datetime_child VALUES('2002-01-01 12:34:00')
+- name: A distinct SMALLDATETIME minute remains an orphan
+  sql: INSERT alter_fk_small_datetime_child VALUES('2002-01-01 12:35:00')
+  expect:
+    error: true
+    contains: foreign key constraint
+- name: Historical text validation consumes the matching declared case-insensitive key relation
+  sql: ALTER TABLE alter_fk_collated_child ADD CONSTRAINT FK_alter_collated FOREIGN KEY(code) REFERENCES alter_fk_collated_parent(code) ON UPDATE CASCADE ON DELETE CASCADE
+- name: Future text references retain the same declared case-insensitive equality
+  sql: INSERT alter_fk_collated_child VALUES('CASE')
+- name: An unrelated collated value is still an orphan
+  sql: INSERT alter_fk_collated_child VALUES('other')
+  expect:
+    error: true
+    contains: foreign key constraint
+- name: Text cascades use the declared key equality for historical children
+  sql: UPDATE alter_fk_collated_parent SET code='Next'
+- name: Every differently spelled matching child receives the native cascade
+  sql: SELECT code FROM alter_fk_collated_child ORDER BY code
+  expect:
+    rows: 2
+    data:
+    - {code: Next}
+    - {code: Next}
+- name: The ordinary declared SQL predicate selects the same key for deletion
+  sql: DELETE FROM alter_fk_collated_parent WHERE code='next'
+- name: Declared collation equality removes all matching child rows
+  sql: SELECT COUNT(*) AS n FROM alter_fk_collated_child
+  expect:
+    rows: 1
+    data:
+    - n: 0
+- name: Implicit native text collations remain actual endpoint declarations
+  sql: ALTER TABLE alter_fk_default_text_child ADD CONSTRAINT FK_alter_default_text FOREIGN KEY(code) REFERENCES alter_fk_default_text_parent(code)
+- name: Default text parent values use their ordinary declared key domain
+  sql: INSERT alter_fk_default_text_parent VALUES('Case')
+- name: Matching default text values satisfy the real reference
+  sql: INSERT alter_fk_default_text_child VALUES('Case')
+- name: A binary default text declaration does not silently acquire case-insensitive matching
+  sql: INSERT alter_fk_default_text_child VALUES('case')
+  expect:
+    error: true
+    contains: foreign key constraint
+- name: Bare DATETIME UPDATE retains the shared destination conversion and cascade domain
+  sql: UPDATE alter_fk_datetime_parent SET stamp='2005-01-01' WHERE stamp=CONVERT(DATETIME,'2004-01-01',0)
+- name: An implicit DATETIME update is visible through the ordinary typed child predicate
+  sql: SELECT COUNT(*) AS n FROM alter_fk_datetime_child WHERE stamp=CONVERT(DATETIME,'2005-01-01',0)
+  expect:
+    rows: 1
+    data:
+    - n: 1
+- name: A preloaded composite temporal reference is validated before constraint publication
+  sql: ALTER TABLE alter_fk_loaded_datetime_child ADD CONSTRAINT FK_alter_loaded_datetime FOREIGN KEY(tag,stamp) REFERENCES alter_fk_loaded_datetime_parent(tag,stamp) ON UPDATE CASCADE
+- name: Updating a validated historical temporal key uses the ordinary destination conversion
+  sql: UPDATE alter_fk_loaded_datetime_parent SET stamp='2005-01-01'
+- name: A historical temporal child receives the canonical native cascade
+  sql: SELECT COUNT(*) AS n FROM alter_fk_loaded_datetime_child WHERE tag=1 AND stamp=CONVERT(DATETIME,'2005-01-01',0)
+  expect:
+    rows: 1
+    data:
+    - n: 1
+- name: A validated temporal reference still rejects a distinct typed timestamp
+  sql: INSERT alter_fk_loaded_datetime_child VALUES(1,CONVERT(DATETIME,'2006-01-01',0))
+  expect:
+    error: true
+    contains: foreign key constraint

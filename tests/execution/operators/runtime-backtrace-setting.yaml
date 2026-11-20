@@ -1,0 +1,21 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: Runtime diagnostic settings immediately control source annotations
+setup: []
+cleanup: []
+test_cases:
+- name: Enabling and disabling backtraces applies to the next evaluated source
+  scm: |
+    (begin
+      (define original (settings "Backtrace"))
+      (settings "Backtrace" true)
+      (define enabled (try (lambda () (eval (source "runtime-backtrace-setting" 7 11
+        '(error "runtime setting failure")))) (lambda (value) (string value))))
+      (settings "Backtrace" false)
+      (define disabled (try (lambda () (eval (source "runtime-backtrace-setting" 7 11
+        '(error "runtime setting failure")))) (lambda (value) (string value))))
+      (settings "Backtrace" original)
+      (list (strlike enabled "%runtime setting failure%in runtime-backtrace-setting:7:11%") disabled))
+  expect:
+    result: [true, "runtime setting failure"]

@@ -1,0 +1,44 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  description: Function deletion uses the native routine catalog and preserves object kinds
+
+test_cases:
+  - name: Dropping a quoted function releases its name for a new definition
+    setup:
+      - sql: CREATE FUNCTION dbo.drop_cycle() RETURNS INT AS BEGIN RETURN 1; END
+      - sql: DROP FUNCTION [dbo].[drop_cycle]
+      - sql: CREATE FUNCTION dbo.drop_cycle() RETURNS INT AS BEGIN RETURN 2; END
+    sql: SELECT dbo.drop_cycle() AS value
+    expect: {rows: 1, data: [{value: 2}]}
+    cleanup:
+      - sql: DROP FUNCTION drop_cycle
+
+  - name: Multiple targets and IF EXISTS retain each replacement definition
+    setup:
+      - sql: CREATE FUNCTION dbo.drop_left() RETURNS INT AS BEGIN RETURN 4; END
+      - sql: CREATE FUNCTION dbo.drop_right() RETURNS INT AS BEGIN RETURN 6; END
+      - sql: DROP FUNCTION IF EXISTS dbo.drop_absent, dbo.drop_left, drop_right
+      - sql: CREATE FUNCTION dbo.drop_left() RETURNS INT AS BEGIN RETURN 40; END
+      - sql: CREATE FUNCTION dbo.drop_right() RETURNS INT AS BEGIN RETURN 60; END
+    sql: SELECT dbo.drop_left() + dbo.drop_right() AS total
+    expect: {rows: 1, data: [{total: 100}]}
+    cleanup:
+      - sql: DROP FUNCTION dbo.drop_left, dbo.drop_right
+
+  - name: IF EXISTS accepts absent functions
+    sql: DROP FUNCTION IF EXISTS dbo.drop_absent, drop_other_absent
+
+  - name: A function deletion cannot remove a stored procedure
+    setup:
+      - sql: CREATE PROCEDURE dbo.drop_kept_procedure AS SELECT 7 AS value
+    sql: DROP FUNCTION dbo.drop_kept_procedure
+    expect: {error: true, contains: ["object is not a scalar function"]}
+
+  - name: The procedure remains callable after rejecting its deletion as a function
+    sql: EXEC dbo.drop_kept_procedure
+    expect: {rows: 1, data: [{value: 7}]}
+    cleanup:
+      - sql: DROP PROCEDURE dbo.drop_kept_procedure

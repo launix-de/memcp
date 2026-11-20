@@ -1,0 +1,357 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  requires_tds: true
+  isolated: true
+  description: New private declarations and earlier ACID data retain one native decision
+setup:
+- sql: CREATE TABLE setup_progress(id INT PRIMARY KEY,value INT)
+- sql: INSERT setup_progress VALUES(432,0)
+- sql: CREATE TABLE native_create_progress(id INT PRIMARY KEY,value INT)
+- sql: INSERT native_create_progress VALUES(1,10)
+- sql: CREATE TABLE native_create_foreign(id INT PRIMARY KEY,value INT)
+test_cases:
+- name: Full fresh-table installation and progress changes use one native transaction
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: UPDATE setup_progress SET value=1 WHERE id=432
+    - connection: owner
+      sql: SET NUMERIC_ROUNDABORT OFF
+    - connection: owner
+      sql: UPDATE setup_progress SET value=2 WHERE id=432
+    - connection: owner
+      sql: SET ANSI_PADDING,ANSI_WARNINGS,CONCAT_NULL_YIELDS_NULL,ARITHABORT,QUOTED_IDENTIFIER,ANSI_NULLS ON
+    - connection: owner
+      sql: UPDATE setup_progress SET value=3 WHERE id=432
+    - connection: owner
+      sql: SET XACT_ABORT ON
+    - connection: owner
+      sql: UPDATE setup_progress SET value=4 WHERE id=432
+    - connection: owner
+      sql: SET TRANSACTION ISOLATION LEVEL SERIALIZABLE
+    - connection: owner
+      sql: UPDATE setup_progress SET value=5 WHERE id=432
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: UPDATE setup_progress SET value=6 WHERE id=432
+    - connection: owner
+      sql: IF OBJECT_ID(N'late_created_values',N'U') IS NULL CREATE TABLE late_created_values(id INT NOT NULL,label
+        VARCHAR(200) NOT NULL,row_guid UNIQUEIDENTIFIER NOT NULL DEFAULT NEWID())
+    - connection: owner
+      sql: UPDATE setup_progress SET value=7 WHERE id=432
+    - connection: owner
+      sql: IF NOT EXISTS(SELECT 1 FROM sys.objects WHERE object_id=OBJECT_ID(N'PK_late_created_values',N'PK') AND
+        parent_object_id=OBJECT_ID(N'late_created_values',N'U')) ALTER TABLE late_created_values ADD CONSTRAINT PK_late_created_values
+        PRIMARY KEY(id)
+    - connection: owner
+      sql: UPDATE setup_progress SET value=8 WHERE id=432
+    - connection: owner
+      sql: GRANT INSERT ON late_created_values TO public
+    - connection: owner
+      sql: UPDATE setup_progress SET value=9 WHERE id=432
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: owner
+      sql: UPDATE setup_progress SET value=10 WHERE id=432
+    - connection: owner
+      sql: INSERT late_created_values(id,label) VALUES(0,'zero'),(1,'one'),(5,'five'),(6,'six'),(9,'nine')
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT COUNT(*) AS rows_created,COUNT(row_guid) AS generated FROM late_created_values
+      expect:
+        rows: 1
+        data:
+        - rows_created: 5
+          generated: 5
+    - connection: observer
+      sql: SELECT value FROM setup_progress WHERE id=432
+      expect:
+        rows: 1
+        data:
+        - value: 10
+- name: Earlier row changes and private declarations roll back together
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION; UPDATE setup_progress SET value=20 WHERE id=432
+    - connection: owner
+      sql: CREATE TABLE late_rollback_values(id INT NOT NULL,value INT DEFAULT 9)
+    - connection: owner
+      sql: ALTER TABLE late_rollback_values ADD CONSTRAINT PK_late_rollback_values PRIMARY KEY(id)
+    - connection: owner
+      sql: INSERT late_rollback_values(id) VALUES(1),(2)
+    - connection: owner
+      sql: SELECT SUM(value) AS total FROM late_rollback_values
+      expect:
+        rows: 1
+        data:
+        - total: 18
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: owner
+      sql: SELECT OBJECT_ID(N'late_rollback_values',N'U') AS object_id
+      expect:
+        rows: 1
+        data:
+        - object_id: null
+    - connection: owner
+      sql: SELECT value FROM setup_progress WHERE id=432
+      expect:
+        rows: 1
+        data:
+        - value: 10
+- name: An empty retired private phase preserves the original data owner and permits reentry
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION; UPDATE setup_progress SET value=30 WHERE id=432; SAVE TRANSACTION before_create
+    - connection: owner
+      sql: CREATE TABLE late_savepoint_values(id INT NOT NULL,value INT DEFAULT 7)
+    - connection: owner
+      sql: ALTER TABLE late_savepoint_values ADD CONSTRAINT PK_late_savepoint_values PRIMARY KEY(id)
+    - connection: owner
+      sql: INSERT late_savepoint_values(id) VALUES(1),(2); ROLLBACK TRANSACTION before_create
+    - connection: owner
+      sql: SELECT OBJECT_ID(N'late_savepoint_values',N'U') AS object_id
+      expect:
+        rows: 1
+        data:
+        - object_id: null
+    - connection: owner
+      sql: SELECT value FROM setup_progress WHERE id=432
+      expect:
+        rows: 1
+        data:
+        - value: 30
+    - connection: owner
+      sql: UPDATE setup_progress SET value=31 WHERE id=432
+    - connection: owner
+      sql: CREATE TABLE late_savepoint_retry(id INT NOT NULL,value INT DEFAULT 11)
+    - connection: owner
+      sql: ALTER TABLE late_savepoint_retry ADD CONSTRAINT PK_late_savepoint_retry PRIMARY KEY(id)
+    - connection: owner
+      sql: INSERT late_savepoint_retry(id) VALUES(1); COMMIT TRANSACTION
+    - connection: owner
+      sql: SELECT id,value FROM late_savepoint_retry
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 11
+    - connection: owner
+      sql: SELECT value FROM setup_progress WHERE id=432
+      expect:
+        rows: 1
+        data:
+        - value: 31
+- name: A savepoint retires only its new generation and keeps the earlier declaration open
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION; UPDATE setup_progress SET value=40 WHERE id=432
+    - connection: owner
+      sql: CREATE TABLE late_kept_values(id INT NOT NULL,value INT DEFAULT 13)
+    - connection: owner
+      sql: SAVE TRANSACTION before_second
+    - connection: owner
+      sql: CREATE TABLE late_retired_values(id INT NOT NULL,value INT DEFAULT 17)
+    - connection: owner
+      sql: ALTER TABLE late_retired_values ADD CONSTRAINT PK_late_retired_values PRIMARY KEY(id)
+    - connection: owner
+      sql: INSERT late_retired_values(id) VALUES(1); ROLLBACK TRANSACTION before_second
+    - connection: owner
+      sql: ALTER TABLE late_kept_values ADD CONSTRAINT PK_late_kept_values PRIMARY KEY(id)
+    - connection: owner
+      sql: INSERT late_kept_values(id) VALUES(1); UPDATE setup_progress SET value=41 WHERE id=432; COMMIT TRANSACTION
+    - connection: owner
+      sql: SELECT OBJECT_ID(N'late_retired_values',N'U') AS object_id
+      expect:
+        rows: 1
+        data:
+        - object_id: null
+    - connection: owner
+      sql: SELECT id,value FROM late_kept_values
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 13
+    - connection: owner
+      sql: SELECT value FROM setup_progress WHERE id=432
+      expect:
+        rows: 1
+        data:
+        - value: 41
+- name: A failed first constructor retires only its empty phase before original DML commits
+  scm: |-
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (define progress (table "memcp-tests" false "native_create_progress" false tx))
+
+      (insert progress '("id" "value") (list (list 2 20)) '() nil false nil tx)
+      (define denied (try (lambda () (begin
+        (createtable "memcp-tests" "native_create_failed"
+          (list (list "column" "id" "INT" (list) (list)) (list "column" "id" "INT" (list) (list)))
+          '("engine" "safe") false tx) false))
+        (lambda (failure) (strlike (concat failure) "%already exists%"))))
+      (insert progress '("id" "value") (list (list 3 30)) '() nil false nil tx)
+      (tx_commit owner)
+      (and denied (nil? (table "memcp-tests" false "native_create_failed" false nil))
+        (equal? (scan nil progress '() '() '() (lambda () true) '("value") (lambda (acc value) (+ acc value)) 0 +) 60)))
+  expect:
+    result: true
+- name: The first empty native read seals only its actual pending generation
+  scm: |-
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (define progress (table "memcp-tests" false "native_create_progress" false tx))
+
+      (insert progress '("id" "value") (list (list 4 40)) '() nil false nil tx)
+      (createtable "memcp-tests" "native_create_empty_read" (list (list "column" "id" "INT" (list) (list))) '("engine" "safe") false tx)
+      (define target (table "memcp-tests" false "native_create_empty_read" false tx))
+      (define empty_result (scan_exists tx target '() '() '() (lambda () true)))
+      (define denied (try (lambda () (begin (createkey target "key_after_read" true '("id") tx) false))
+        (lambda (failure) (strlike (concat failure) "%amendments must precede native row access%"))))
+      (tx_rollback owner)
+      (and denied (nil? (table "memcp-tests" false "native_create_empty_read" false nil))
+        (equal? (scan nil progress '() '() '("id") (lambda (id) (equal? id 4)) '() (lambda (acc) (+ acc 1)) 0 +) 0)))
+  expect:
+    result: true
+- name: The first empty native order seals only its actual pending generation
+  scm: |-
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (define progress (table "memcp-tests" false "native_create_progress" false tx))
+
+      (insert progress '("id" "value") (list (list 4 40)) '() nil false nil tx)
+      (createtable "memcp-tests" "native_create_empty_order" (list (list "column" "id" "INT" (list) (list))) '("engine" "safe") false tx)
+      (define target (table "memcp-tests" false "native_create_empty_order" false tx))
+      (define empty_result (scan_order tx target '() '() '() (lambda () true) '() '() 0 0 0 '("id") (lambda (acc id) (+ acc id)) 0 false nil '() nil))
+      (define denied (try (lambda () (begin (createkey target "key_after_read" true '("id") tx) false))
+        (lambda (failure) (strlike (concat failure) "%amendments must precede native row access%"))))
+      (tx_rollback owner)
+      (and denied (nil? (table "memcp-tests" false "native_create_empty_order" false nil))
+        (equal? (scan nil progress '() '() '("id") (lambda (id) (equal? id 4)) '() (lambda (acc) (+ acc 1)) 0 +) 0)))
+  expect:
+    result: true
+- name: A foreign UNIQUE reservation remains enforced while same database DML continues
+  scm: |-
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (define progress (table "memcp-tests" false "native_create_progress" false tx))
+
+      (define other (newsession)) (other "username" "root") (tx_begin_acid other)
+      (define other_tx (other "__memcp_tx"))
+      (define foreign (table "memcp-tests" false "native_create_foreign" false tx))
+      (insert progress '("id" "value") (list (list 6 60)) '() nil false nil tx)
+      (insert foreign '("id" "value") (list (list 6 60)) '() nil false nil other_tx)
+      (createtable "memcp-tests" "native_create_writer" (list (list "column" "id" "INT" (list) (list))) '("engine" "safe") false tx)
+      (define denied (try (lambda () (begin
+        (insert foreign '("id" "value") (list (list 6 61)) '() nil false nil tx) false))
+        (lambda (failure) (strlike (concat failure) "%UNIQUE reservation%"))))
+      (tx_rollback other)
+      (insert foreign '("id" "value") (list (list 7 70)) '() nil false nil tx)
+      (tx_commit owner)
+      (and denied (equal? (scan nil foreign '() '() '() (lambda () true) '("value")
+          (lambda (acc value) (+ acc value)) 0 +) 70)
+        (not (nil? (table "memcp-tests" false "native_create_writer" false nil)))))
+  expect:
+    result: true
+- name: Visible cursor stability rows cannot be converted into a private ACID schema decision
+  scm: |-
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (define progress (table "memcp-tests" false "native_create_progress" false tx))
+      (insert progress '("id" "value") (list (list 8 80)) '() nil false nil tx)
+      (define denied (try (lambda () (begin
+        (createtable "memcp-tests" "native_create_cs_denied" (list (list "column" "id" "INT" (list) (list))) '("engine" "safe") false tx) false))
+        (lambda (failure) (strlike (concat failure) "%must precede native row access%"))))
+      (tx_rollback owner)
+      (and denied (nil? (table "memcp-tests" false "native_create_cs_denied" false nil))
+        (equal? (scan nil progress '() '() '("id") (lambda (id) (equal? id 8)) '() (lambda (acc) (+ acc 1)) 0 +) 0)))
+  expect:
+    result: true
+- name: Accepted private declarations and original rows survive a hard crash
+  scm: (crash)
+  expect:
+    interrupted_ok: true
+- name: Restart the original mixed decision
+  action: restart
+- name: Original row decision and default-generated rows recover together
+  sql: SELECT value FROM setup_progress WHERE id=432; SELECT id,value FROM late_savepoint_retry; SELECT id,value FROM
+    late_kept_values
+  expect:
+    rows: 3
+    data:
+    - value: 41
+    - id: 1
+      value: 11
+    - id: 1
+      value: 13
+- name: No retired generation reappears after recovery
+  sql: SELECT name FROM sys.objects WHERE name IN (N'late_rollback_values',N'late_savepoint_values',N'late_retired_values')
+  expect:
+    rows: 0
+    data: []
+- name: An unaccepted private generation keeps the original data decision uncommitted through crash
+  scm: |-
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (define progress (table "memcp-tests" false "native_create_progress" false tx))
+
+      (insert progress '("id" "value") (list (list 99 990)) '() nil false nil tx)
+      (createtable "memcp-tests" "native_create_unaccepted" (list (list "column" "id" "INT" (list) (list))) '("engine" "safe") false tx)
+      (define target (table "memcp-tests" false "native_create_unaccepted" false tx))
+      (createkey target "PRIMARY" true '("id") tx)
+      (insert target '("id") (list (list 99)) '() nil false nil tx)
+      (if (and (nil? (table "memcp-tests" false "native_create_unaccepted" false nil))
+          (equal? (scan tx target '() '() '() (lambda () true) '("id") (lambda (acc id) (+ acc id)) 0 +) 99))
+        (begin (owner "__memcp_tx") (crash))
+        (error "unaccepted generation did not retain its actual owner")))
+  expect:
+    interrupted_ok: true
+- name: Restart without accepting the abandoned mixed decision
+  action: restart
+- name: Unaccepted original row and schema effects both remain absent
+  sql: SELECT id,value FROM native_create_progress ORDER BY id; SELECT OBJECT_ID(N'native_create_unaccepted',N'U')
+    AS object_id
+  expect:
+    rows: 5
+    data:
+    - id: 1
+      value: 10
+    - id: 2
+      value: 20
+    - id: 3
+      value: 30
+    - id: 6
+      value: 60
+    - object_id: null
+cleanup:
+- sql: DROP TABLE IF EXISTS late_created_values
+- sql: DROP TABLE IF EXISTS setup_progress
+- sql: DROP TABLE IF EXISTS late_rollback_values
+- sql: DROP TABLE IF EXISTS late_savepoint_values
+- sql: DROP TABLE IF EXISTS late_savepoint_retry
+- sql: DROP TABLE IF EXISTS late_kept_values
+- sql: DROP TABLE IF EXISTS late_retired_values
+- sql: DROP TABLE IF EXISTS native_create_failed
+- sql: DROP TABLE IF EXISTS native_create_empty_read
+- sql: DROP TABLE IF EXISTS native_create_empty_order
+- sql: DROP TABLE IF EXISTS native_create_writer
+- sql: DROP TABLE IF EXISTS native_create_cs_denied
+- sql: DROP TABLE IF EXISTS native_create_unaccepted
+- sql: DROP TABLE IF EXISTS native_create_foreign
+- sql: DROP TABLE IF EXISTS native_create_progress

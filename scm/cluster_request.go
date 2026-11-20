@@ -22,7 +22,10 @@ func (receive ClusterRequestHandlerFunc) HandleClusterRequest(ctx context.Contex
 }
 
 // The object protocol owns these operation bytes; they are not transport fields.
-var clusterOperations = [...]string{"", "view", "call", "batch", "enlist", "next", "ack", "finish", "prepare", "commit", "rollback", "savepoint", "rollback-savepoint", "receive"}
+// Append only: existing operation bytes retain their meaning. Catalog messages
+// are native transaction-construction operations, interpreted by their owner.
+var clusterOperations = [...]string{"", "view", "call", "batch", "enlist", "next", "ack", "finish", "prepare", "commit", "rollback", "savepoint", "rollback-savepoint", "receive",
+	"catalog_create", "catalog_position", "catalog_retire", "catalog_key", "catalog_column"}
 
 // EncodeClusterRequest writes fixed operation parameters in binary and at most
 // one serialized value for dynamic arguments. Local native invocations do not

@@ -1,0 +1,83 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  description: Runtime catalog row producers preserve typed NULLs, native IDs and SQL collation
+setup:
+- sql: CREATE TABLE runtime_meta_A(id INT,value INT)
+- sql: CREATE TABLE runtime_meta_abr(id INT,value INT)
+- sql: CREATE TABLE runtime_meta_ANU(id INT,value INT)
+- sql: CREATE TABLE runtime_meta_d(id INT,value INT)
+- sql: CREATE TABLE runtime_meta_Z(id INT,value INT)
+cleanup:
+- sql: DROP TABLE IF EXISTS runtime_meta_A
+- sql: DROP TABLE IF EXISTS runtime_meta_abr
+- sql: DROP TABLE IF EXISTS runtime_meta_ANU
+- sql: DROP TABLE IF EXISTS runtime_meta_d
+- sql: DROP TABLE IF EXISTS runtime_meta_Z
+test_cases:
+- name: Generated catalog names preserve their declared SQL collation
+  sql: SELECT name FROM sys.objects WHERE name IN(N'runtime_meta_A',N'runtime_meta_abr',N'runtime_meta_ANU',N'runtime_meta_d',N'runtime_meta_Z')
+    ORDER BY name
+  expect:
+    rows: 5
+    data:
+    - name: runtime_meta_A
+    - name: runtime_meta_abr
+    - name: runtime_meta_ANU
+    - name: runtime_meta_d
+    - name: runtime_meta_Z
+- name: Generated column NULL fields do not equal zero
+  sql: SELECT name FROM sys.columns WHERE object_id=OBJECT_ID(N'runtime_meta_A',N'U') AND graph_type=0
+  expect:
+    rows: 0
+    data: []
+- name: Generated column NULL fields retain IS NULL
+  sql: SELECT name,column_id,default_object_id FROM sys.columns WHERE object_id=OBJECT_ID(N'runtime_meta_A',N'U')
+    AND graph_type IS NULL ORDER BY column_id
+  expect:
+    rows: 2
+    data:
+    - name: id
+      column_id: 1
+      default_object_id: 0
+    - name: value
+      column_id: 2
+      default_object_id: 0
+- name: Modern and legacy object sources expose the same native identity
+  sql: SELECT a.name,RTRIM(a.type) AS kind,b.name AS legacy_name FROM sys.objects a JOIN sys.sysobjects b ON a.object_id=b.id
+    WHERE a.name=N'runtime_meta_A'
+  expect:
+    rows: 1
+    data:
+    - name: runtime_meta_A
+      kind: U
+      legacy_name: runtime_meta_A
+- name: Modern and legacy column identities join complete rows
+  sql: SELECT a.name,a.column_id,b.colid FROM sys.columns a JOIN sys.syscolumns b ON a.object_id=b.id AND a.column_id=b.colid
+    WHERE a.object_id=OBJECT_ID(N'runtime_meta_A',N'U') ORDER BY a.column_id
+  expect:
+    rows: 2
+    data:
+    - name: id
+      column_id: 1
+      colid: 1
+    - name: value
+      column_id: 2
+      colid: 2
+- name: System declaration sources retain finite typed columns
+  sql: SELECT name,column_id FROM sys.all_columns WHERE object_id=OBJECT_ID(N'sys.objects') AND name IN(N'name',N'object_id')
+    ORDER BY column_id
+  expect:
+    rows: 2
+    data:
+    - name: name
+      column_id: 1
+    - name: object_id
+      column_id: 4
+- name: A missing object never inherits a generated source row
+  sql: SELECT name FROM sys.objects WHERE object_id=OBJECT_ID(N'runtime_meta_missing',N'U')
+  expect:
+    rows: 0
+    data: []

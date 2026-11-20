@@ -1,0 +1,87 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: mysql
+  isolated: true
+  description: View cache generations remain selective lowercase literal substring dependencies
+setup:
+- sql: CREATE TABLE generation_source(id INT PRIMARY KEY,value INT)
+- sql: INSERT INTO generation_source VALUES(1,11)
+- sql: CREATE VIEW GenerationProbeView AS SELECT id,value FROM generation_source
+- sql: CREATE VIEW `ÜnicodeGenerationView` AS SELECT id,value FROM generation_source
+- sql: CREATE VIEW `generation%._view[]` AS SELECT id,value FROM generation_source
+test_cases:
+- name: A query without any view spelling retains a zero dependency
+  scm: (sql_view_query_generation "SELECT 23 AS unrelated_value")
+  expect: {result: 0}
+- name: Exact lowercase uppercase and qualified references retain the current generation
+  scm: |
+    (begin
+      (define expected (sql_view_catalog_state "version"))
+      (map (list "SELECT value FROM GenerationProbeView"
+        "SELECT value FROM generationprobeview" "SELECT value FROM GENERATIONPROBEVIEW"
+        "SELECT value FROM `memcp-tests`.`GenerationProbeView`")
+        (lambda (text) (equal? (sql_view_query_generation text) expected))))
+  expect: {result: [true,true,true,true]}
+- name: Conservative substrings inside literals and comments still count as dependencies
+  scm: |
+    (begin
+      (define expected (sql_view_catalog_state "version"))
+      (list
+        (equal? (sql_view_query_generation "SELECT 'prefixgenerationprobeviewsuffix'") expected)
+        (equal? (sql_view_query_generation "SELECT 1 /* GenerationProbeView */") expected)))
+  expect: {result: [true,true]}
+- name: Unicode lowercasing retains the established view spelling relation
+  scm: (equal? (sql_view_query_generation "SELECT value FROM ÜNICODEGENERATIONVIEW") (sql_view_catalog_state "version"))
+  expect: {result: true}
+- name: Percent underscore brackets and dots remain literal name characters
+  scm: |
+    (list
+      (equal? (sql_view_query_generation "SELECT * FROM `generation%._view[]`") (sql_view_catalog_state "version"))
+      (sql_view_query_generation "SELECT generationZZXviewZZ"))
+  expect: {result: [true,0]}
+- name: Warm view output uses its current source
+  sql: SELECT value FROM GenerationProbeView WHERE id=1
+  expect: {rows: 1,data: [{value: 11}]}
+- name: An unrelated view declaration advances only real lexical dependencies
+  sql: CREATE VIEW OtherGenerationView AS SELECT id,value FROM generation_source
+- name: Unrelated changes retain zero for queries without a view name
+  scm: |
+    (list
+      (sql_view_query_generation "SELECT 23 AS unrelated_value")
+      (equal? (sql_view_query_generation "SELECT value FROM generationprobeview") (sql_view_catalog_state "version")))
+  expect: {result: [0,true]}
+- name: Replacing a view preserves warm query correctness
+  sql: CREATE OR REPLACE VIEW GenerationProbeView AS SELECT id,value+7 AS value FROM generation_source
+- name: The retained query observes the replaced view body
+  sql: SELECT value FROM GenerationProbeView WHERE id=1
+  expect: {rows: 1,data: [{value: 18}]}
+- name: Dropping a spelling retires its lexical dependency
+  sql: DROP VIEW OtherGenerationView
+- name: A dropped spelling returns zero while an existing spelling keeps its generation
+  scm: |
+    (list (sql_view_query_generation "SELECT * FROM OtherGenerationView")
+      (equal? (sql_view_query_generation "SELECT * FROM generationprobeview") (sql_view_catalog_state "version")))
+  expect: {result: [0,true]}
+- name: Native empty-name legacy entries retain the original split predicate
+  scm: |
+    (begin
+      (create_sql_view nil "memcp-tests" "" "sql" "SELECT 1 AS value"
+        (make_query_block "memcp-tests" '() '("value" 1) true nil nil nil nil nil nil nil nil) "error")
+      (define generation (sql_view_catalog_state "version"))
+      (define outcome (try (lambda () (list true (list
+        (sql_view_query_generation "") (sql_view_query_generation "a")
+        (equal? (sql_view_query_generation "ab") generation)
+        (sql_view_query_generation "😀")
+        (equal? (sql_view_query_generation "😀b") generation))))
+        (lambda (failure) (list false failure))))
+      (drop_sql_view nil "memcp-tests" "" true)
+      (if (car outcome) (cadr outcome) (error (cadr outcome))))
+  expect: {result: [0,0,true,0,true]}
+cleanup:
+- sql: DROP VIEW IF EXISTS OtherGenerationView
+- sql: DROP VIEW IF EXISTS `generation%._view[]`
+- sql: DROP VIEW IF EXISTS `ÜnicodeGenerationView`
+- sql: DROP VIEW IF EXISTS GenerationProbeView
+- scm: (begin (drop_sql_view nil "memcp-tests" "" true) true)
+- sql: DROP TABLE IF EXISTS generation_source

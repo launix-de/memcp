@@ -1,0 +1,181 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Declared character widths and collations support metadata-driven compatible alterations
+setup:
+- sql: CREATE TABLE character_contract_rows(id INT NOT NULL,fixed_text CHAR(3) COLLATE utf8mb4_general_ci NOT NULL,national NVARCHAR(5) COLLATE utf8mb4_bin NULL,ascii_text VARCHAR(7) COLLATE utf8mb4_general_ci NULL,max_text VARCHAR(MAX) COLLATE utf8mb4_general_ci NULL,max_national NVARCHAR(MAX) COLLATE utf8mb4_general_ci NULL,bytes VARBINARY(9),max_bytes VARBINARY(MAX),old_text TEXT COLLATE utf8mb4_general_ci,old_national NTEXT COLLATE utf8mb4_general_ci,old_bytes IMAGE,payload XML)
+- sql: INSERT character_contract_rows(id,fixed_text,national,ascii_text) VALUES(1,'abc',N'Ä','value')
+- sql: CREATE TABLE character_default_rows(id INT,value VARCHAR(8) COLLATE DATABASE_DEFAULT NULL)
+- sql: INSERT character_default_rows VALUES(1,'One'),(2,NULL)
+- sql: CREATE TABLE character_cursor_rows(id INT,label VARCHAR(6) COLLATE utf8mb4_general_ci NULL,note NVARCHAR(MAX) COLLATE utf8mb4_general_ci NULL)
+- sql: INSERT character_cursor_rows VALUES(1,'first',N'Ä'),(2,NULL,NULL)
+- sql: CREATE TABLE character_recollated_rows(id INT PRIMARY KEY,label VARCHAR(12) COLLATE Latin1_General_100_BIN2 NULL)
+- sql: INSERT character_recollated_rows VALUES(1,'A'),(2,'a'),(3,NULL)
+- sql: CREATE TABLE character_recollated_key(label VARCHAR(12) COLLATE Latin1_General_100_BIN2 NOT NULL UNIQUE)
+- sql: INSERT character_recollated_key VALUES('A'),('a')
+- syntax: mysql
+  sql: CREATE TABLE character_wide_native(value VARCHAR(65535))
+cleanup:
+- sql: DROP TABLE IF EXISTS character_contract_rows
+- sql: DROP TABLE IF EXISTS character_default_rows
+- sql: DROP TABLE IF EXISTS character_cursor_rows
+- sql: DROP TABLE IF EXISTS character_recollated_rows
+- sql: DROP TABLE IF EXISTS character_recollated_key
+- sql: DROP TABLE IF EXISTS character_wide_native
+test_cases:
+- name: Character binary and legacy large-object widths retain their complete declared contracts
+  sql: |
+    SELECT column_name AS name,data_type AS type,character_maximum_length AS char_length,
+      collation_name AS collation,is_nullable AS nullable
+    FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE table_name='character_contract_rows' AND table_schema='dbo'
+    ORDER BY ordinal_position
+  expect:
+    rows: 12
+    data:
+    - {name: id, type: INT, char_length: null, collation: null, nullable: 'NO'}
+    - {name: fixed_text, type: CHAR, char_length: 3, collation: utf8mb4_general_ci, nullable: 'NO'}
+    - {name: national, type: NVARCHAR, char_length: 5, collation: utf8mb4_bin, nullable: 'YES'}
+    - {name: ascii_text, type: VARCHAR, char_length: 7, collation: utf8mb4_general_ci, nullable: 'YES'}
+    - {name: max_text, type: VARCHAR, char_length: -1, collation: utf8mb4_general_ci, nullable: 'YES'}
+    - {name: max_national, type: NVARCHAR, char_length: -1, collation: utf8mb4_general_ci, nullable: 'YES'}
+    - {name: bytes, type: VARBINARY, char_length: 9, collation: null, nullable: 'YES'}
+    - {name: max_bytes, type: VARBINARY, char_length: -1, collation: null, nullable: 'YES'}
+    - {name: old_text, type: TEXT, char_length: 2147483647, collation: utf8mb4_general_ci, nullable: 'YES'}
+    - {name: old_national, type: NTEXT, char_length: 1073741823, collation: utf8mb4_general_ci, nullable: 'YES'}
+    - {name: old_bytes, type: IMAGE, char_length: 2147483647, collation: null, nullable: 'YES'}
+    - {name: payload, type: XML, char_length: -1, collation: null, nullable: 'YES'}
+- name: sys.columns exposes declared byte lengths and actual native nullability
+  sql: SELECT name,CAST(is_nullable AS INT) AS nullable_flag,max_length FROM sys.columns WHERE object_id=OBJECT_ID(N'character_contract_rows',N'U') ORDER BY column_id
+  expect:
+    rows: 12
+    data:
+    - {name: id,nullable_flag: 0,max_length: 4}
+    - {name: fixed_text,nullable_flag: 0,max_length: 3}
+    - {name: national,nullable_flag: 1,max_length: 10}
+    - {name: ascii_text,nullable_flag: 1,max_length: 7}
+    - {name: max_text,nullable_flag: 1,max_length: -1}
+    - {name: max_national,nullable_flag: 1,max_length: -1}
+    - {name: bytes,nullable_flag: 1,max_length: 9}
+    - {name: max_bytes,nullable_flag: 1,max_length: -1}
+    - {name: old_text,nullable_flag: 1,max_length: 16}
+    - {name: old_national,nullable_flag: 1,max_length: 16}
+    - {name: old_bytes,nullable_flag: 1,max_length: 16}
+    - {name: payload,nullable_flag: 1,max_length: -1}
+- name: Native widths outside the catalog wire range remain unknown rather than overflowing
+  sql: SELECT name,max_length FROM sys.columns WHERE object_id=OBJECT_ID(N'character_wide_native',N'U')
+  expect: {rows: 1,data: [{name: value,max_length: null}]}
+- name: Empty metadata results retain declared INT and NVARCHAR widths on the wire
+  tds:
+    statements:
+    - sql: SELECT character_maximum_length,collation_name FROM INFORMATION_SCHEMA.COLUMNS WHERE table_name='character_contract_rows' AND 1=0
+      expect:
+        rows: 0
+        columns: [character_maximum_length, collation_name]
+        column_types:
+        - {name: character_maximum_length, type: INT}
+        - {name: collation_name, type: NVARCHAR, length: 128}
+- name: DATABASE_DEFAULT in a declaration stores the existing database profile name
+  sql: |
+    SELECT column_name AS name,character_maximum_length AS char_length,collation_name AS collation,
+      CASE WHEN collation_name=CONVERT(NVARCHAR(128),DATABASEPROPERTYEX(DB_NAME(),'Collation')) THEN 1 ELSE 0 END AS matches_profile
+    FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE table_name='character_default_rows' AND column_name='value'
+  expect: {rows: 1, data: [{name: value, char_length: 8, collation: utf8mb4_general_ci, matches_profile: 1}]}
+- name: Expression DATABASE_DEFAULT keeps the existing case-insensitive comparison profile
+  sql: SELECT CASE WHEN 'a' COLLATE DATABASE_DEFAULT='A' THEN 1 ELSE 0 END AS same,CASE WHEN CAST(NULL AS VARCHAR(1)) COLLATE DATABASE_DEFAULT='a' THEN 1 ELSE 0 END AS absent
+  expect: {rows: 1, data: [{same: 1, absent: 0}]}
+- name: Ordered expressions resolve DATABASE_DEFAULT through the same profile
+  sql: SELECT id,value FROM character_default_rows ORDER BY value COLLATE DATABASE_DEFAULT,id
+  expect: {rows: 2, data: [{id: 2, value: null}, {id: 1, value: One}]}
+- name: Read the current declared width before compatible alteration
+  sql: SELECT character_maximum_length AS char_length,collation_name AS collation FROM INFORMATION_SCHEMA.COLUMNS WHERE table_name='character_contract_rows' AND column_name='ascii_text'
+  expect: {rows: 1, data: [{char_length: 7, collation: utf8mb4_general_ci}]}
+- name: Compatible ALTER COLUMN resolves DATABASE_DEFAULT before native declaration admission
+  sql: ALTER TABLE character_contract_rows ALTER COLUMN ascii_text VARCHAR(12) COLLATE DATABASE_DEFAULT NULL
+  expect: {rows: 0}
+- name: Identical metadata SQL observes the widened declaration
+  sql: SELECT character_maximum_length AS char_length,collation_name AS collation FROM INFORMATION_SCHEMA.COLUMNS WHERE table_name='character_contract_rows' AND column_name='ascii_text'
+  expect: {rows: 1, data: [{char_length: 12, collation: utf8mb4_general_ci}]}
+- name: Metadata-driven FAST_FORWARD alterations preserve bounded and MAX data
+  sql: |
+    DECLARE @column SYSNAME,@type NVARCHAR(128),@width INT,@nullable VARCHAR(3),@sql NVARCHAR(MAX),@visited INT=0;
+    DECLARE metadata_columns CURSOR LOCAL FAST_FORWARD FOR
+      SELECT c.column_name,c.data_type,c.character_maximum_length,c.is_nullable
+      FROM INFORMATION_SCHEMA.COLUMNS c INNER JOIN INFORMATION_SCHEMA.TABLES t
+        ON c.table_name=t.table_name AND c.table_schema=t.table_schema
+      WHERE c.table_name='character_cursor_rows' AND c.table_schema='dbo'
+        AND t.table_type='BASE TABLE' AND c.data_type IN ('VARCHAR','NVARCHAR')
+      ORDER BY c.ordinal_position;
+    OPEN metadata_columns;
+    FETCH NEXT FROM metadata_columns INTO @column,@type,@width,@nullable;
+    WHILE @@FETCH_STATUS=0
+    BEGIN
+      SET @sql=N'ALTER TABLE dbo.character_cursor_rows ALTER COLUMN '+QUOTENAME(@column)+N' '+@type+
+        CASE WHEN @width=-1 THEN N'(max)' ELSE N'('+CONVERT(NVARCHAR(20),@width)+N')' END+
+        N' COLLATE DATABASE_DEFAULT '+CASE WHEN @nullable='YES' THEN N'NULL' ELSE N'NOT NULL' END;
+      EXEC sys.sp_executesql @sql;
+      SET @visited+=1;
+      FETCH NEXT FROM metadata_columns INTO @column,@type,@width,@nullable;
+    END;
+    CLOSE metadata_columns; DEALLOCATE metadata_columns;
+    SELECT @visited AS visited,(SELECT COUNT(*) FROM character_cursor_rows) AS retained;
+  expect: {rows: 1, data: [{visited: 2, retained: 2}]}
+- name: Compatible cursor alterations preserve every value including NULL
+  sql: SELECT id,label,note FROM character_cursor_rows ORDER BY id
+  expect: {rows: 2, data: [{id: 1, label: first, note: Ä}, {id: 2, label: null, note: null}]}
+- name: Compatible alteration preserves data and separately declared binary collation
+  sql: SELECT id,fixed_text,national,ascii_text FROM character_contract_rows ORDER BY id
+  expect: {rows: 1, data: [{id: 1, fixed_text: abc, national: Ä, ascii_text: value}]}
+- name: An equality lookup uses the original case-sensitive column declaration
+  sql: SELECT id,label FROM character_recollated_rows WHERE label='A' ORDER BY id
+  expect: {rows: 1, data: [{id: 1, label: A}]}
+- name: Same-codepage ALTER publishes the complete new collation and width
+  sql: ALTER TABLE character_recollated_rows ALTER COLUMN label VARCHAR(16) COLLATE DATABASE_DEFAULT NULL
+  expect: {rows: 0}
+- name: Identical SQL observes the changed column comparison contract
+  sql: SELECT id,label FROM character_recollated_rows WHERE label='A' ORDER BY id
+  expect: {rows: 2, data: [{id: 1, label: A}, {id: 2, label: a}]}
+- name: Collation publication preserves every original value and NULL
+  sql: SELECT id,label FROM character_recollated_rows ORDER BY id
+  expect: {rows: 3, data: [{id: 1, label: A}, {id: 2, label: a}, {id: 3, label: null}]}
+- name: The native declaration exposes the actual changed collation and width
+  sql: SELECT character_maximum_length AS width,collation_name AS collation FROM INFORMATION_SCHEMA.COLUMNS WHERE table_name='character_recollated_rows' AND column_name='label'
+  expect: {rows: 1, data: [{width: 16, collation: utf8mb4_general_ci}]}
+- name: An explicit binary comparison remains independent of the new default
+  sql: SELECT id,label FROM character_recollated_rows WHERE label COLLATE Latin1_General_100_BIN2='A' ORDER BY id
+  expect: {rows: 1, data: [{id: 1, label: A}]}
+- name: SQL Server rejects changing a column used by a declared UNIQUE index
+  sql: ALTER TABLE character_recollated_key ALTER COLUMN label VARCHAR(12) COLLATE DATABASE_DEFAULT NOT NULL
+  expect: {error: true, contains: unique key}
+- name: A failed comparison change preserves both existing key values
+  sql: SELECT label FROM character_recollated_key ORDER BY ASCII(label)
+  expect: {rows: 2, data: [{label: A}, {label: a}]}
+- name: Native single-property alteration cannot bypass equality declaration admission
+  scm: (altercolumn (table "memcp-tests" false "character_recollated_key" false nil) "label" "collation" "utf8mb4_general_ci")
+  expect: {error: true, contains: unique key}
+- name: A national comparison change retains its Unicode value domain
+  setup:
+  - sql: CREATE TABLE character_national_change(id INT,label NVARCHAR(4) COLLATE Latin1_General_100_BIN2 NULL)
+  - sql: INSERT character_national_change VALUES(1,N'A'),(2,N'a'),(3,N'😀'),(4,NULL)
+  sql: ALTER TABLE character_national_change ALTER COLUMN label NVARCHAR(4) COLLATE Latin1_General_100_CI_AS_SC_UTF8 NULL; SELECT id,label FROM character_national_change ORDER BY id
+  expect: {rows: 4, data: [{id: 1, label: A}, {id: 2, label: a}, {id: 3, label: '😀'}, {id: 4, label: null}]}
+- name: National inputs consume the new comparison without changing storage widths
+  sql: SELECT COUNT(*) AS matches,MAX(DATALENGTH(label)) AS width_bytes FROM character_national_change WHERE label=N'A'
+  expect: {rows: 1, data: [{matches: 2, width_bytes: 2}]}
+  cleanup:
+  - sql: DROP TABLE character_national_change
+# A true codepage conversion needs native historical value validation.
+# Keep the valid SQL result as the target rather than asserting unsupported SQL.
+- name: A future codepage conversion preserves Unicode when its byte width is sufficient
+  setup:
+  - sql: CREATE TABLE character_codepage_limit(label VARCHAR(4) COLLATE Latin1_General_100_BIN2)
+  - sql: INSERT character_codepage_limit VALUES(N'é')
+  sql: ALTER TABLE character_codepage_limit ALTER COLUMN label VARCHAR(4) COLLATE Latin1_General_100_CI_AS_SC_UTF8 NULL; SELECT label,DATALENGTH(label) AS width_bytes FROM character_codepage_limit
+  expect: {rows: 1, data: [{label: é, width_bytes: 2}]}
+  noncritical: true
+  cleanup:
+  - sql: DROP TABLE character_codepage_limit

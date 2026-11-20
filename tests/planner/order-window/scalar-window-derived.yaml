@@ -136,7 +136,7 @@ test_cases:
   - name: "Aggregate names ignore probe planning sessions and preserve correlation keys"
     scm: |
       (begin
-        (define input '("h" "memcp-tests" "swd_hist" false nil))
+        (define input '("h" "memcp-tests" "swd_hist" false nil (sql_relation_declarations "memcp-tests" "swd_hist" nil)))
         (define value_ag (list '(get_column "h" false "val" false) (scalar_once_reduce_first) nil))
         (define stage (make_group_stage "naming-probe" input
           (list '(get_column "m" false "ID" false))
@@ -146,7 +146,7 @@ test_cases:
           (list (list 'scalar_cardinality_probe probe (aggregate_col_name_using input value_ag))
             'sql_sum_reduce nil)))
         (define name (lambda (probe)
-          (aggregate_col_name_using '("m" "memcp-tests" "swd_main" false nil) (recipe probe))))
+          (aggregate_col_name_using '("m" "memcp-tests" "swd_main" false nil (sql_relation_declarations "memcp-tests" "swd_main" nil)) (recipe probe))))
         (define other (make_group_stage "naming-probe" input
           (list '(get_column "m" false "other_id" false)) (gs_keys stage)
           (gs_aggregates stage) nil '() '() nil nil '()))

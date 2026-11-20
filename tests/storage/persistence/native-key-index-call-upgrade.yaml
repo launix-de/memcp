@@ -1,0 +1,78 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  description: Stored native key-index recipes retain builtin execution lexical shadowing and quoted data through
+    reload
+setup:
+- sql: CREATE TABLE key_index_upgrade_source(id INT PRIMARY KEY,value INT)
+- sql: CREATE TABLE key_index_upgrade_audit(kind TEXT,value INT)
+- sql: INSERT INTO key_index_upgrade_source VALUES(1,0)
+- scm: "(begin\n(define source (table \"memcp-tests\" false \"key_index_upgrade_source\" false nil))\n(createtrigger\
+    \ source \"key_index_legacy\" \"after_insert\" \"(lambda (OLD NEW session tx) (begin\\n  (define lookup (recset_key_index\
+    \ tx (scan_recset tx (table \\\"memcp-tests\\\" false \\\"key_index_upgrade_source\\\" false tx) '() '() '()\
+    \ (lambda () true)) '(\\\"value\\\")))\\n  (insert (table \\\"memcp-tests\\\" false \\\"key_index_upgrade_audit\\\
+    \" false tx) '(\\\"kind\\\" \\\"value\\\")\\n    (list (list \\\"native\\\" (if (and (lookup 0) (not (lookup\
+    \ nil))) 1 0))) '() (lambda () true) false nil tx)))\" \"scheme\" (lambda (OLD NEW session tx) (begin\n  (define\
+    \ lookup (recset_key_index tx (scan_recset tx (table \"memcp-tests\" false \"key_index_upgrade_source\" false\
+    \ tx) '() '() '() (lambda () true)) '(\"value\") \"join\"))\n  (insert (table \"memcp-tests\" false \"key_index_upgrade_audit\"\
+    \ false tx) '(\"kind\" \"value\")\n    (list (list \"native\" (if (and (lookup 0) (not (lookup nil))) 1 0)))\
+    \ '() (lambda () true) false nil tx))) false)\n(createtrigger source \"key_index_shadow\" \"after_insert\" \"\
+    (lambda (OLD NEW session tx) (begin\\n  (define observed ((lambda (recset_key_index) (recset_key_index 1 2 3))\
+    \ (lambda args (count args))))\\n  (insert (table \\\"memcp-tests\\\" false \\\"key_index_upgrade_audit\\\"\
+    \ false tx) '(\\\"kind\\\" \\\"value\\\")\\n    (list (list \\\"shadow\\\" observed)) '() (lambda () true) false\
+    \ nil tx)))\" \"scheme\" (lambda (OLD NEW session tx) (begin\n  (define observed ((lambda (recset_key_index)\
+    \ (recset_key_index 1 2 3)) (lambda args (count args))))\n  (insert (table \"memcp-tests\" false \"key_index_upgrade_audit\"\
+    \ false tx) '(\"kind\" \"value\")\n    (list (list \"shadow\" observed)) '() (lambda () true) false nil tx)))\
+    \ false)\n(createtrigger source \"key_index_quoted\" \"after_insert\" \"(lambda (OLD NEW session tx) (begin\\\
+    n  (define data (quote (recset_key_index nil nil nil)))\\n  (insert (table \\\"memcp-tests\\\" false \\\"key_index_upgrade_audit\\\
+    \" false tx) '(\\\"kind\\\" \\\"value\\\")\\n    (list (list \\\"quoted\\\" (match data (cons _head tail) (+\
+    \ 1 (count tail)) _ 0))) '() (lambda () true) false nil tx)))\" \"scheme\" (lambda (OLD NEW session tx) (begin\n\
+    \  (define data (quote (recset_key_index nil nil nil)))\n  (insert (table \"memcp-tests\" false \"key_index_upgrade_audit\"\
+    \ false tx) '(\"kind\" \"value\")\n    (list (list \"quoted\" (match data (cons _head tail) (+ 1 (count tail))\
+    \ _ 0))) '() (lambda () true) false nil tx))) false)\ntrue)"
+test_cases:
+- name: Reload historical key-index recipes through native declaration decoding
+  action: restart
+- name: Restored native and lexical callbacks execute under the actual mutation
+  sql: INSERT INTO key_index_upgrade_source VALUES(2,1)
+  expect:
+    affected_rows: 1
+- name: Native callback shadowing and quoted data preserve their observable effects
+  sql: SELECT kind,value FROM key_index_upgrade_audit ORDER BY kind
+  expect:
+    rows: 3
+    data:
+    - kind: native
+      value: 1
+    - kind: quoted
+      value: 4
+    - kind: shadow
+      value: 3
+- name: A second reload preserves canonical execution without reapplying the old ABI migration
+  action: restart
+- name: Repeated restored mutation retains join NULL semantics
+  sql: INSERT INTO key_index_upgrade_source VALUES(3,NULL)
+  expect:
+    affected_rows: 1
+- name: Both generations of restored callbacks produced the same effects
+  sql: SELECT kind,COUNT(*) AS n,MIN(value) AS smallest,MAX(value) AS largest FROM key_index_upgrade_audit GROUP
+    BY kind ORDER BY kind
+  expect:
+    rows: 3
+    data:
+    - kind: native
+      n: 2
+      smallest: 1
+      largest: 1
+    - kind: quoted
+      n: 2
+      smallest: 4
+      largest: 4
+    - kind: shadow
+      n: 2
+      smallest: 3
+      largest: 3
+cleanup:
+- sql: DROP TABLE IF EXISTS key_index_upgrade_source
+- sql: DROP TABLE IF EXISTS key_index_upgrade_audit

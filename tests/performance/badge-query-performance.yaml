@@ -46,6 +46,50 @@ test_cases:
   - &badge_count
     name: "badge count with correlated session subselect"
     session_id: "bp_sess"
+    # Failure-only inspection of the two mapped compiler frames. This does not
+    # prepare or warm the measured query and changes no result/timing oracle.
+    on_fail:
+      - scm: (serialize (close_procedure correlation_inner_keys))
+      - scm: (serialize (close_procedure decorrelate_expr_with_pairs))
+      - scm: |
+          (try (lambda () (list "direct keys"
+            (correlation_inner_keys (symbol "")
+              (list (list (list 'get_column "inside" false "id" false)
+                (list 'get_column "outside" false "id" false)))))))
+            (lambda (failure) (list "direct keys failure" (concat failure))))
+      - scm: |
+          (try (lambda () (list "direct rewrite"
+            (decorrelate_expr_with_pairs (symbol "")
+              (list (list (list 'get_column "inside" false "id" false)
+                (list 'get_column "outside" false "id" false)))
+              (list 'get_column "outside" false "id" false))))
+            (lambda (failure) (list "direct rewrite failure" (concat failure))))
+      - scm: |
+          (try (lambda () (list "direct domain producer"
+            (domain_correlation_pairs_with_outer_refs
+              (list
+                (list (list 'get_column "inside" false "id" false)
+                  (list 'get_column "outside" false "id" false))
+                (list (list 'get_column "inside" false "other" false)
+                  (list 'get_column "outside" false "other" false))) '())))
+            (lambda (failure) (list "direct domain producer failure" (concat failure))))
+      - scm: |
+          (try (lambda () (begin
+            (define operation (jit (eval (optimize (scheme
+              "(lambda (left right refs) (domain_correlation_pairs_with_outer_refs (merge (list left right)) refs))")))))
+            (list "compiled domain producer" (jit? operation)
+              (operation
+                (list (list (list 'get_column "inside" false "id" false)
+                  (list 'get_column "outside" false "id" false)))
+                (list (list (list 'get_column "inside" false "other" false)
+                  (list 'get_column "outside" false "other" false))) '()))))
+            (lambda (failure) (list "compiled domain producer failure" (concat failure))))
+      - scm: |
+          (try (lambda () (begin
+            (define operation (jit (eval (optimize (scheme
+              "(lambda (left right) (begin (define produced (merge (list (map left (lambda (item) (+ item 1))) (map right (lambda (item) (+ item 10)))))) (define before produced) (define produced (merge (list produced (list 99)))) (list before produced)))")))))
+            (list "named producer" (jit? operation) (operation (list 1 2) (list 3 4)))))
+            (lambda (failure) (list "named producer failure" (concat failure))))
     sql: |
       SELECT 1,
         (SELECT COUNT(1) FROM bp_doc d

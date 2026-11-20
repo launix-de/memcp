@@ -1,0 +1,283 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: Ordered maintained groups retain native transaction visibility and rollback
+  isolated: true
+setup:
+- sql: DROP TABLE IF EXISTS ordered_group_visibility
+- sql: CREATE TABLE ordered_group_visibility (id INT PRIMARY KEY, bucket INT, amount INT, state VARCHAR(16)) ENGINE=memory
+- sql: INSERT INTO ordered_group_visibility VALUES (1,0,10,'original'),(2,1,20,'original'),(3,0,30,'original')
+cleanup:
+- sql: DROP TABLE ordered_group_visibility
+test_cases:
+- session_id: ordered_group_writer
+  sql: START ACID TRANSACTION
+  name: Cold writer begins
+- session_id: ordered_group_writer
+  sql: UPDATE ordered_group_visibility SET amount=777,state='pending' WHERE id=1
+  expect:
+    affected_rows: 1
+  name: Cold writer changes its private row
+- session_id: ordered_group_writer
+  sql: SELECT bucket,SUM(amount) AS total FROM ordered_group_visibility WHERE state='pending' GROUP BY bucket ORDER
+    BY bucket
+  expect:
+    rows: 1
+    data:
+    - bucket: 0
+      total: 777
+  name: Cold writer sees its private ordered group
+- session_id: ordered_group_reader
+  sql: SELECT bucket,SUM(amount) AS total FROM ordered_group_visibility WHERE state='pending' GROUP BY bucket ORDER
+    BY bucket
+  expect:
+    rows: 0
+  name: Cold foreign reader cannot see the private ordered group
+- session_id: ordered_group_writer
+  sql: SELECT (SELECT SUM(i.amount) FROM ordered_group_visibility i WHERE i.bucket=e.bucket AND i.state='pending')
+    AS total FROM ordered_group_visibility e WHERE e.id=1
+  expect:
+    rows: 1
+    data:
+    - total: 777
+    contains:
+    - '777'
+  name: Cold writer scalar domain retains its own value
+- session_id: ordered_group_reader
+  sql: SELECT (SELECT SUM(i.amount) FROM ordered_group_visibility i WHERE i.bucket=e.bucket AND i.state='pending')
+    AS total FROM ordered_group_visibility e WHERE e.id=1
+  expect:
+    rows: 1
+    data:
+    - total: null
+    contains:
+    - None
+    not_contains:
+    - '777'
+  name: Cold foreign scalar domain remains empty
+- session_id: ordered_group_writer
+  sql: ROLLBACK
+  name: Cold writer rolls back
+- session_id: ordered_group_reader
+  sql: SELECT bucket,SUM(amount) AS total FROM ordered_group_visibility WHERE state='pending' GROUP BY bucket ORDER
+    BY bucket
+  expect:
+    rows: 0
+  name: Cold reader has no stale ordered group after rollback
+- session_id: ordered_group_reader
+  sql: SELECT (SELECT SUM(i.amount) FROM ordered_group_visibility i WHERE i.bucket=e.bucket AND i.state='pending')
+    AS total FROM ordered_group_visibility e WHERE e.id=1
+  expect:
+    rows: 1
+    data:
+    - total: null
+    contains:
+    - None
+    not_contains:
+    - '777'
+  name: Cold scalar result remains NULL after rollback
+- session_id: ordered_group_reader
+  sql: SELECT bucket,SUM(amount) AS total FROM ordered_group_visibility GROUP BY bucket ORDER BY bucket
+  expect:
+    rows: 2
+    data:
+    - bucket: 0
+      total: 40
+    - bucket: 1
+      total: 20
+    contains:
+    - '40'
+    - '20'
+    not_contains:
+    - '807'
+  name: Warm committed groups retain ordered totals
+- session_id: ordered_group_writer
+  sql: START ACID TRANSACTION
+  name: Warm writer begins
+- session_id: ordered_group_writer
+  sql: UPDATE ordered_group_visibility SET amount=777 WHERE id=1
+  expect:
+    affected_rows: 1
+  name: Warm writer changes its private row
+- session_id: ordered_group_writer
+  sql: SELECT bucket,SUM(amount) AS total FROM ordered_group_visibility GROUP BY bucket ORDER BY bucket
+  expect:
+    rows: 2
+    data:
+    - bucket: 0
+      total: 807
+    - bucket: 1
+      total: 20
+    contains:
+    - '807'
+    - '20'
+  name: Warm writer sees its private ordered totals
+- name: Private ordered HAVING and row bounds apply to the completed groups
+  sql: SELECT bucket,SUM(amount) AS total FROM ordered_group_visibility GROUP BY bucket HAVING SUM(amount)>10 ORDER
+    BY total DESC LIMIT 1 OFFSET 1
+  session_id: ordered_group_writer
+  expect:
+    rows: 1
+    data:
+    - bucket: 1
+      total: 20
+- name: Private ordered scalar COUNT retains the global aggregate row
+  sql: SELECT COUNT(*) AS total FROM ordered_group_visibility ORDER BY COUNT(*)
+  session_id: ordered_group_writer
+  expect:
+    rows: 1
+    data:
+    - total: 3
+- name: Private ordered scalar COUNT retains its empty-input default
+  sql: SELECT COUNT(*) AS total FROM ordered_group_visibility WHERE id<0 ORDER BY COUNT(*)
+  session_id: ordered_group_writer
+  expect:
+    rows: 1
+    data:
+    - total: 0
+- session_id: ordered_group_reader
+  sql: SELECT bucket,SUM(amount) AS total FROM ordered_group_visibility GROUP BY bucket ORDER BY bucket
+  expect:
+    rows: 2
+    data:
+    - bucket: 0
+      total: 40
+    - bucket: 1
+      total: 20
+    contains:
+    - '40'
+    - '20'
+    not_contains:
+    - '807'
+  name: Warm foreign reader retains committed ordered totals
+- session_id: ordered_group_writer
+  sql: ROLLBACK
+  name: Warm writer rolls back
+- session_id: ordered_group_reader
+  sql: SELECT bucket,SUM(amount) AS total FROM ordered_group_visibility GROUP BY bucket ORDER BY bucket
+  expect:
+    rows: 2
+    data:
+    - bucket: 0
+      total: 40
+    - bucket: 1
+      total: 20
+    contains:
+    - '40'
+    - '20'
+    not_contains:
+    - '807'
+  name: Warm ordered groups retain committed values after rollback
+- name: tsql writer begins a shared native ACID transaction
+  sql: START ACID TRANSACTION
+  session_id: ordered_tsql_writer
+  expect:
+    affected_rows: 0
+- name: tsql writer changes its private row
+  sql: UPDATE ordered_group_visibility SET amount=777 WHERE id=1
+  session_id: ordered_tsql_writer
+  expect:
+    affected_rows: 1
+- name: tsql ordered producer sees its own native writes
+  syntax: tsql
+  sql: SELECT bucket,SUM(amount) AS total FROM ordered_group_visibility GROUP BY bucket ORDER BY bucket
+  session_id: ordered_tsql_writer
+  expect:
+    rows: 2
+    data:
+    - bucket: 0
+      total: 807
+    - bucket: 1
+      total: 20
+- name: tsql foreign ordered producer retains committed values
+  syntax: tsql
+  sql: SELECT bucket,SUM(amount) AS total FROM ordered_group_visibility GROUP BY bucket ORDER BY bucket
+  session_id: ordered_tsql_reader
+  expect:
+    rows: 2
+    data:
+    - bucket: 0
+      total: 40
+    - bucket: 1
+      total: 20
+- name: tsql writer rolls back
+  sql: ROLLBACK
+  session_id: ordered_tsql_writer
+  expect:
+    affected_rows: 0
+- name: psql writer begins a shared native ACID transaction
+  sql: START ACID TRANSACTION
+  session_id: ordered_psql_writer
+  expect:
+    affected_rows: 0
+- name: psql writer changes its private row
+  sql: UPDATE ordered_group_visibility SET amount=777 WHERE id=1
+  session_id: ordered_psql_writer
+  expect:
+    affected_rows: 1
+- name: psql ordered producer sees its own native writes
+  syntax: psql
+  sql: SELECT bucket,SUM(amount) AS total FROM ordered_group_visibility GROUP BY bucket ORDER BY bucket
+  session_id: ordered_psql_writer
+  expect:
+    rows: 2
+    data:
+    - bucket: 0
+      total: 807
+    - bucket: 1
+      total: 20
+- name: psql foreign ordered producer retains committed values
+  syntax: psql
+  sql: SELECT bucket,SUM(amount) AS total FROM ordered_group_visibility GROUP BY bucket ORDER BY bucket
+  session_id: ordered_psql_reader
+  expect:
+    rows: 2
+    data:
+    - bucket: 0
+      total: 40
+    - bucket: 1
+      total: 20
+- name: psql writer rolls back
+  sql: ROLLBACK
+  session_id: ordered_psql_writer
+  expect:
+    affected_rows: 0
+- name: Ordinary ordered unbounded reducers retain their maintained cache path
+  sql: SELECT id,GROUP_CONCAT(state) AS labels FROM ordered_group_visibility GROUP BY id ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - id: 1
+      labels: original
+    - id: 2
+      labels: original
+    - id: 3
+      labels: original
+- name: Unbounded private writer begins
+  sql: START ACID TRANSACTION
+  session_id: unbounded_group_writer
+  expect:
+    affected_rows: 0
+- name: Unbounded private writer changes a source value
+  sql: UPDATE ordered_group_visibility SET state='pending' WHERE id=1
+  session_id: unbounded_group_writer
+  expect:
+    affected_rows: 1
+- name: An ordered private unbounded reducer retains its own values
+  noncritical: true
+  sql: SELECT id,GROUP_CONCAT(state) AS labels FROM ordered_group_visibility GROUP BY id ORDER BY id
+  session_id: unbounded_group_writer
+  expect:
+    rows: 3
+    data:
+    - id: 1
+      labels: pending
+    - id: 2
+      labels: original
+    - id: 3
+      labels: original
+- name: Unbounded private writer rolls back
+  sql: ROLLBACK
+  session_id: unbounded_group_writer
+  expect:
+    affected_rows: 0

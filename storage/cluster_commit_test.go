@@ -34,8 +34,16 @@ func distributedCommitFixture(t *testing.T) (*TxContext, *TxContext, *storageSha
 		cell.ownstate.Initialize(mosi.M)
 		cell.clusterstate.Initialize(mosi.M)
 	}
-	oldService := nodeScans.Swap(&nodeScanService{cluster: cluster})
-	t.Cleanup(func() { nodeScans.Store(oldService) })
+	// Match the production service lifetime: decision followers join this
+	// service's worker group and cannot outlive the fixture's global bindings.
+	cluster.ctx, cluster.cancel = context.WithCancel(context.Background())
+	service := &nodeScanService{cluster: cluster}
+	cluster.service = service
+	oldService := nodeScans.Swap(service)
+	t.Cleanup(func() {
+		service.stop()
+		nodeScans.Store(oldService)
+	})
 	coordinator.AddToDeleteMask(left, 0)
 	worker.AddToDeleteMask(right, 0)
 	participant := worker.getShardTx(right)

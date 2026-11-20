@@ -364,8 +364,16 @@ func TestCacheMapFactoriesRetryFailuresAndRetainNil(t *testing.T) {
 	}))
 	func() {
 		defer func() {
-			if recovered := recover(); recovered != "factory failed" {
+			recovered := recover()
+			failure, ok := recovered.(interface {
+				OriginalFailure() any
+				OriginalStack() string
+			})
+			if !ok || failure.OriginalFailure() != "factory failed" {
 				t.Fatalf("factory panic was not forwarded: %v", recovered)
+			}
+			if failure.OriginalStack() == "" {
+				t.Fatal("factory panic lost its origin stack")
 			}
 		}()
 		scm.Apply(cache, scm.NewString("missing"))
@@ -402,7 +410,7 @@ func TestCacheMapAccessFactoryOverridesConstructorAndStoresCallables(t *testing.
 }
 
 func TestCacheMapResidentBytesFollowReplacementAndEviction(t *testing.T) {
-	cache := &cacheMap{entries: make(map[string]*cacheMapEntry)}
+	cache := &cacheMap{entries: make(map[string]*cacheMapEntry), factories: processCacheMapFactories}
 	cache.store("domain", scm.NewString("small"))
 	old := cache.entries["domain"]
 	if cache.residentBytes.Load() != old.size {

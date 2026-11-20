@@ -1,0 +1,39 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+metadata:
+  description: Pattern decomposition treats input as data
+
+test_cases:
+  - name: A symbol datum does not acquire a same-name list binding
+    scm: |
+      (begin
+        (define pattern_named_list (list 1 2))
+        (define datum (quote pattern_named_list))
+        (if (match datum (cons _ _) false _ true) true
+          (error "cons resolved an input symbol")))
+  - name: An eval-shaped input is decomposed without running its data
+    scm: |
+      (match (quote (eval (error "cons executed input data")))
+        (cons head tail) (if (and (expression_equal? head (quote eval)) (equal? (count tail) 1)) true
+          (error "cons replaced input data"))
+        _ (error "cons did not decompose a list"))
+  - name: Source-position wrapped input remains structural
+    scm: |
+      (match (source "pattern-input" 1 1 (quote (eval (error "cons executed wrapped data"))))
+        (cons head tail) (if (and (expression_equal? head (quote eval)) (equal? (count tail) 1)) true
+          (error "cons replaced wrapped input data"))
+        _ (error "cons did not decompose a wrapped list"))
+  - name: Input expressions and explicit eval patterns retain their own evaluation
+    scm: |
+      (if (and (match (list 7 8) (cons head tail) (and (equal? head 7) (equal? tail (list 8))) _ false)
+               (match 7 (eval (+ 3 4)) true _ false)) true
+        (error "input expression or explicit eval pattern changed"))
+  - name: Optimized closed procedures retain structural input matching
+    scm: |
+      (begin
+        (define body (quote (match (quote (eval (error "compiled cons executed data")))
+          (cons head tail) (and (expression_equal? head (quote eval)) (equal? (count tail) 1))
+          _ false)))
+        (define callable (jit (close_procedure (eval (optimize (list (quote lambda) (quote ()) body)))) nil))
+        (if (callable) true (error "compiled cons changed input data")))

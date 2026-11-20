@@ -195,6 +195,50 @@ jobs:
           git -C candidate diff -- scm storage > jit-perf-runtime/candidate-generated.diff
           readelf -d base/memcp > jit-perf-runtime/base-dynamic.txt
           readelf -d candidate/memcp > jit-perf-runtime/candidate-dynamic.txt
+      - name: Diagnose failed JIT fixture inputs
+        if: ${{ failure() && steps.measure.outcome == 'failure' }}
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          manifest="$GITHUB_WORKSPACE/jit-perf-baseline.trials/manifest.json"
+          test -f "$manifest" || exit 0
+          mapfile -t suites < <(python3 - "$manifest" <<'PY'
+          import json, sys
+          data = json.load(open(sys.argv[1]))
+          # An incomplete cohort cannot establish a timing regression. A
+          # completed candidate process can still supply a correctness failure
+          # worth diagnosing separately, without changing its original verdict.
+          if data.get('completed') is not False:
+            sys.exit(0)
+          events = data.get('fixture_events', [])
+          if events and events[-1].get('stage') == 'process' and events[-1].get('role') == 'B':
+            print(events[-1]['suite'])
+          PY
+          )
+          test -n "${suites[0]:-}" || exit 0
+          diagnostics="$GITHUB_WORKSPACE/jit-fixture-diagnostic.trials"
+          retain_maps() {
+            # The A/B runner owns exclusive creation of its trial directory.
+            # Retain auxiliary maps only after that process has finished.
+            mkdir -p "$diagnostics/maps"
+            for map in /tmp/perf-*.map; do
+              test -f "$map" || continue
+              cp "$map" "$diagnostics/maps/"
+            done
+          }
+          trap retain_maps EXIT
+          # Symbol-map publication and profiling are diagnostic overhead only;
+          # neither is enabled during the unprofiled measurement above.
+          cd candidate
+          env \
+            PERF_SHARD_INDEX=0 PERF_SHARD_COUNT=1 \
+            MEMCP_CPU_PROFILE=1 MEMCP_PERF_MAP=1 PERF_FAILURE_DIAGNOSTICS=1 \
+            PERF_BASELINE_FILE="$GITHUB_WORKSPACE/jit-fixture-diagnostic.json" \
+            PERF_BASELINE_SEED="$GITHUB_WORKSPACE/base/tests/performance/ci-workloads.json" \
+            PERF_REPEAT=1000 PERF_MIN_MEASURE_MS=1000 PERF_AB_JITTER_MS=50 \
+            PERF_SETUP_MAX_TIME_SEC=120 \
+            python3 -u run_sql_tests.py --perf-ab \
+              "$GITHUB_WORKSPACE/base" "$GITHUB_WORKSPACE/candidate" "${suites[@]}"
 
       - name: Profile failing JIT performance suites
         if: ${{ failure() && steps.measure.outcome == 'failure' }}
@@ -241,6 +285,8 @@ jobs:
             jit-perf-baseline.trials/
             jit-perf-diagnostic.json
             jit-perf-diagnostic.trials/
+            jit-fixture-diagnostic.json
+            jit-fixture-diagnostic.trials/
           if-no-files-found: warn
 
       - name: Upload exact failing JIT runtime

@@ -1,0 +1,67 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  description: MySQL omitted foreign symbols become distinct persisted declarations
+setup:
+- sql: CREATE TABLE fk_name_parent(id INT PRIMARY KEY)
+- sql: INSERT INTO fk_name_parent VALUES(1)
+cleanup:
+- sql: DROP TABLE IF EXISTS fk_name_chain
+- sql: DROP TABLE IF EXISTS fk_name_multiple
+- sql: DROP TABLE IF EXISTS fk_name_literal
+- sql: DROP TABLE IF EXISTS fk_name_conflict
+- sql: DROP TABLE IF EXISTS K_fk_name_fold
+- sql: DROP TABLE IF EXISTS `K_fk_name_reverse`
+- sql: DROP TABLE IF EXISTS fk_name_parent
+test_cases:
+- name: Several unnamed foreign keys coexist with later explicit symbols
+  sql: CREATE TABLE fk_name_multiple(id INT PRIMARY KEY,a INT,b INT,FOREIGN KEY(a) REFERENCES fk_name_parent(id),CONSTRAINT FK_NAME_MULTIPLE_IBFK_1 FOREIGN KEY(b) REFERENCES fk_name_parent(id),FOREIGN KEY(b) REFERENCES fk_name_parent(id))
+  expect: {affected_rows: 0}
+- name: An unnamed chain does not reuse a database-wide null symbol
+  sql: CREATE TABLE fk_name_chain(id INT PRIMARY KEY,parent_id INT,FOREIGN KEY(parent_id) REFERENCES fk_name_multiple(id))
+  expect: {affected_rows: 0}
+- name: The actual foreign declarations retain all endpoints and distinct names
+  sql: SELECT table_name,COUNT(*) AS declarations,COUNT(DISTINCT constraint_name) AS names FROM information_schema.key_column_usage WHERE table_schema='memcp-tests' AND table_name IN('fk_name_multiple','fk_name_chain') AND constraint_name<>'PRIMARY' GROUP BY table_name ORDER BY table_name
+  expect: {rows: 2,data: [{table_name: fk_name_chain,declarations: 1,names: 1},{table_name: fk_name_multiple,declarations: 3,names: 3}]}
+- name: A quoted literal nil remains an explicit identifier
+  sql: CREATE TABLE fk_name_literal(id INT PRIMARY KEY,parent_id INT,CONSTRAINT `nil` FOREIGN KEY(parent_id) REFERENCES fk_name_parent(id))
+  expect: {affected_rows: 0}
+- name: Unicode folding reserves a later wider explicit prefix
+  sql: CREATE TABLE K_fk_name_fold(id INT PRIMARY KEY,parent_id INT,FOREIGN KEY(parent_id) REFERENCES fk_name_parent(id),CONSTRAINT `K_fk_name_fold_ibfk_1` FOREIGN KEY(parent_id) REFERENCES fk_name_parent(id))
+  expect: {affected_rows: 0}
+- name: Unicode folding also reserves a narrower explicit prefix
+  sql: CREATE TABLE `K_fk_name_reverse`(id INT PRIMARY KEY,parent_id INT,FOREIGN KEY(parent_id) REFERENCES fk_name_parent(id),CONSTRAINT K_fk_name_reverse_ibfk_1 FOREIGN KEY(parent_id) REFERENCES fk_name_parent(id))
+  expect: {affected_rows: 0}
+- name: Both Unicode spellings retain their explicit names and distinct generated successors
+  sql: SELECT constraint_name FROM information_schema.key_column_usage WHERE table_schema='memcp-tests' AND table_name IN('K_fk_name_fold','K_fk_name_reverse') AND constraint_name<>'PRIMARY' ORDER BY table_name,RIGHT(constraint_name,1)
+  expect: {rows: 4,data: [{constraint_name: K_fk_name_fold_ibfk_1},{constraint_name: K_fk_name_fold_ibfk_2},{constraint_name: K_fk_name_reverse_ibfk_1},{constraint_name: K_fk_name_reverse_ibfk_2}]}
+- name: Explicit symbols retain their exact public spelling
+  sql: SELECT constraint_name FROM information_schema.key_column_usage WHERE table_schema='memcp-tests' AND table_name IN('fk_name_multiple','fk_name_literal') AND constraint_name IN('FK_NAME_MULTIPLE_IBFK_1','nil') ORDER BY constraint_name
+  expect: {rows: 2,data: [{constraint_name: FK_NAME_MULTIPLE_IBFK_1},{constraint_name: nil}]}
+- name: Distinct unnamed declarations still reject orphan writes
+  sql: INSERT INTO fk_name_multiple VALUES(1,1,99)
+  expect: {error: true,contains: foreign key constraint}
+- name: All declared references permit a valid row
+  sql: INSERT INTO fk_name_multiple VALUES(1,1,1)
+  expect: {affected_rows: 1}
+- name: A valid chained reference uses its own actual declaration
+  sql: INSERT INTO fk_name_chain VALUES(1,1)
+  expect: {affected_rows: 1}
+- name: A genuine duplicate explicit symbol is rejected
+  sql: CREATE TABLE fk_name_conflict(id INT PRIMARY KEY,parent_id INT,CONSTRAINT `nil` FOREIGN KEY(parent_id) REFERENCES fk_name_parent(id))
+  expect: {error: true,contains: declaration name already exists}
+- name: Rejected duplicate symbols publish no child table
+  sql: SELECT table_name FROM information_schema.tables WHERE table_schema='memcp-tests' AND table_name='fk_name_conflict'
+  expect: {rows: 0}
+- name: Persist automatically named declarations
+  action: restart
+- name: Restart preserves every actual child reference
+  sql: SELECT id,parent_id FROM fk_name_chain
+  expect: {rows: 1,data: [{id: 1,parent_id: 1}]}
+- name: Recovered generated declarations still enforce the foreign keys
+  sql: INSERT INTO fk_name_multiple VALUES(2,99,1)
+  expect: {error: true,contains: foreign key constraint}
+- name: Recovered child metadata retains all distinct symbols
+  sql: SELECT table_name,COUNT(*) AS declarations,COUNT(DISTINCT constraint_name) AS names FROM information_schema.key_column_usage WHERE table_schema='memcp-tests' AND table_name IN('fk_name_multiple','fk_name_chain') AND constraint_name<>'PRIMARY' GROUP BY table_name ORDER BY table_name
+  expect: {rows: 2,data: [{table_name: fk_name_chain,declarations: 1,names: 1},{table_name: fk_name_multiple,declarations: 3,names: 3}]}

@@ -1,0 +1,175 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: Given native list scans bind computed ORDER callback formals through actual procedure metadata with unchanged
+    filter and window contracts
+  isolated: true
+setup:
+- sql: CREATE TABLE list_order_metadata(beta INT,alpha INT,gamma INT)
+test_cases:
+- name: An evaluated computed sort callback receives its declared row column
+  scm: (begin (define rows (list (list "id" 1 "rank" 30 "name" "gamma" "$tx" 77) (list "id" 2 "rank" 10 "name" "alpha" "$tx"
+    77) (list "id" 3 "rank" 20 "name" "beta" "$tx" 77))) (scan_order nil rows (list (compiled_scan_access_header 0 "scan_order"
+    0 -1)) (list) (list) (lambda () true) (list (lambda (rank) (+ rank 0))) (list <) 0 0 -1 (list "id" "rank" "name") (lambda
+    (acc id rank name) (concat acc id ":" rank ":" name ";")) "" false))
+  expect:
+    result: 2:10:alpha;3:20:beta;1:30:gamma;
+- name: A descending computed value changes the complete output order
+  scm: (begin (define rows (list (list "id" 1 "rank" 30 "name" "gamma" "$tx" 77) (list "id" 2 "rank" 10 "name" "alpha" "$tx"
+    77) (list "id" 3 "rank" 20 "name" "beta" "$tx" 77))) (scan_order nil rows (list (compiled_scan_access_header 0 "scan_order"
+    0 -1)) (list) (list) (lambda () true) (list (lambda (rank) (- 0 rank))) (list <) 0 0 -1 (list "id" "rank" "name") (lambda
+    (acc id rank name) (concat acc id ":" rank ":" name ";")) "" false))
+  expect:
+    result: 1:30:gamma;3:20:beta;2:10:alpha;
+- name: Multiple callback formals bind by name rather than tuple position
+  scm: (begin (define rows (list (list "id" 1 "rank" 30 "name" "gamma" "$tx" 77) (list "id" 2 "rank" 10 "name" "alpha" "$tx"
+    77) (list "id" 3 "rank" 20 "name" "beta" "$tx" 77))) (scan_order nil rows (list (compiled_scan_access_header 0 "scan_order"
+    0 -1)) (list) (list) (lambda () true) (list (lambda (name rank) (+ rank (strlen name)))) (list <) 0 0 -1 (list "id" "rank"
+    "name") (lambda (acc id rank name) (concat acc id ":" rank ":" name ";")) "" false))
+  expect:
+    result: 2:10:alpha;3:20:beta;1:30:gamma;
+- name: A zero-argument constant key retains the next declared tie breaker
+  scm: (begin (define rows (list (list "id" 1 "rank" 30 "name" "gamma" "$tx" 77) (list "id" 2 "rank" 10 "name" "alpha" "$tx"
+    77) (list "id" 3 "rank" 20 "name" "beta" "$tx" 77))) (scan_order nil rows (list (compiled_scan_access_header 0 "scan_order"
+    0 -1)) (list) (list) (lambda () true) (list (lambda () 7) "id") (list < >) 0 0 -1 (list "id" "rank" "name") (lambda (acc
+    id rank name) (concat acc id ":" rank ":" name ";")) "" false))
+  expect:
+    result: 3:20:beta;2:10:alpha;1:30:gamma;
+- name: Computed ordering precedes OFFSET and LIMIT
+  scm: (begin (define rows (list (list "id" 1 "rank" 30 "name" "gamma" "$tx" 77) (list "id" 2 "rank" 10 "name" "alpha" "$tx"
+    77) (list "id" 3 "rank" 20 "name" "beta" "$tx" 77))) (scan_order nil rows (list (compiled_scan_access_header 0 "scan_order"
+    0 -1)) (list) (list) (lambda () true) (list (lambda (rank) (+ rank 0))) (list <) 0 1 1 (list "id" "rank" "name") (lambda
+    (acc id rank name) (concat acc id ":" rank ":" name ";")) "" false))
+  expect:
+    result: 3:20:beta;
+- name: The ordinary access filter runs before computed ordering and its window
+  scm: (begin (define rows (list (list "id" 1 "rank" 30 "name" "gamma" "$tx" 77) (list "id" 2 "rank" 10 "name" "alpha" "$tx"
+    77) (list "id" 3 "rank" 20 "name" "beta" "$tx" 77))) (scan_order nil rows (list (compiled_scan_access_header 0 "scan_order"
+    0 -1)) (list) (list "rank") (lambda (rank) (< rank 30)) (list (lambda (rank) (+ rank 0))) (list <) 0 1 1 (list "id" "rank"
+    "name") (lambda (acc id rank name) (concat acc id ":" rank ":" name ";")) "" false))
+  expect:
+    result: 3:20:beta;
+- name: Captured callback values retain their own lexical frame
+  scm: (begin (define rows (list (list "id" 1 "rank" 30 "name" "gamma" "$tx" 77) (list "id" 2 "rank" 10 "name" "alpha" "$tx"
+    77) (list "id" 3 "rank" 20 "name" "beta" "$tx" 77))) (define order ((lambda (offset) (lambda (rank) (+ offset rank)))
+    9)) (scan_order nil rows (list (compiled_scan_access_header 0 "scan_order" 0 -1)) (list) (list) (lambda () true) (list
+    order) (list <) 0 0 -1 (list "id" "rank" "name") (lambda (acc id rank name) (concat acc id ":" rank ":" name ";")) ""
+    false))
+  expect:
+    result: 2:10:alpha;3:20:beta;1:30:gamma;
+- name: Parsed and optimized callback parameter names survive numbered locals
+  scm: (begin (define rows (list (list "id" 1 "rank" 30 "name" "gamma" "$tx" 77) (list "id" 2 "rank" 10 "name" "alpha" "$tx"
+    77) (list "id" 3 "rank" 20 "name" "beta" "$tx" 77))) (define order (eval (optimize (clone_optimizer_expression (scheme
+    "(lambda (rank) (+ rank 1))"))))) (scan_order nil rows (list (compiled_scan_access_header 0 "scan_order" 0 -1)) (list)
+    (list) (lambda () true) (list order) (list <) 0 0 -1 (list "id" "rank" "name") (lambda (acc id rank name) (concat acc
+    id ":" rank ":" name ";")) "" false))
+  expect:
+    result: 2:10:alpha;3:20:beta;1:30:gamma;
+- name: A callable keeps the same row binding when JIT is enabled by the build
+  scm: (begin (define rows (list (list "id" 1 "rank" 30 "name" "gamma" "$tx" 77) (list "id" 2 "rank" 10 "name" "alpha" "$tx"
+    77) (list "id" 3 "rank" 20 "name" "beta" "$tx" 77))) (define order (jit (eval (optimize (clone_optimizer_expression (scheme
+    "(lambda (rank) (+ rank 1))")))))) (scan_order nil rows (list (compiled_scan_access_header 0 "scan_order" 0 -1)) (list)
+    (list) (lambda () true) (list order) (list <) 0 0 -1 (list "id" "rank" "name") (lambda (acc id rank name) (concat acc
+    id ":" rank ":" name ";")) "" false))
+  expect:
+    result: 2:10:alpha;3:20:beta;1:30:gamma;
+- name: Nested source annotations on a callback preserve the actual procedure
+  scm: (begin (define rows (list (list "id" 1 "rank" 30 "name" "gamma" "$tx" 77) (list "id" 2 "rank" 10 "name" "alpha" "$tx"
+    77) (list "id" 3 "rank" 20 "name" "beta" "$tx" 77))) (define order (source "outer sort" 1 1 (source "inner sort" 2 3 (lambda
+    (rank) (+ rank 1))))) (scan_order nil rows (list (compiled_scan_access_header 0 "scan_order" 0 -1)) (list) (list) (lambda
+    () true) (list order) (list <) 0 0 -1 (list "id" "rank" "name") (lambda (acc id rank name) (concat acc id ":" rank ":"
+    name ";")) "" false))
+  expect:
+    result: 2:10:alpha;3:20:beta;1:30:gamma;
+- name: A located named sort key remains a column rather than a constant
+  scm: (begin (define rows (list (list "id" 1 "rank" 30 "name" "gamma" "$tx" 77) (list "id" 2 "rank" 10 "name" "alpha" "$tx"
+    77) (list "id" 3 "rank" 20 "name" "beta" "$tx" 77))) (scan_order nil rows (list (compiled_scan_access_header 0 "scan_order"
+    0 -1)) (list) (list) (lambda () true) (list (source "located column" 3 1 "id")) (list >) 0 0 -1 (list "id" "rank" "name")
+    (lambda (acc id rank name) (concat acc id ":" rank ":" name ";")) "" false))
+  expect:
+    result: 3:20:beta;2:10:alpha;1:30:gamma;
+- name: The reserved transaction input comes from the scan and not row payload
+  scm: (begin (define rows (list (list "id" 1 "rank" 30 "name" "gamma" "$tx" 77) (list "id" 2 "rank" 10 "name" "alpha" "$tx"
+    77) (list "id" 3 "rank" 20 "name" "beta" "$tx" 77))) (scan_order nil rows (list (compiled_scan_access_header 0 "scan_order"
+    0 -1)) (list) (list) (lambda () true) (list (lambda ($tx rank) (if (nil? $tx) rank (- 0 rank)))) (list <) 0 0 -1 (list
+    "id" "rank" "name") (lambda (acc id rank name) (concat acc id ":" rank ":" name ";")) "" false))
+  expect:
+    result: 2:10:alpha;3:20:beta;1:30:gamma;
+- name: A real request transaction is forwarded through the existing sort input
+  scm: (begin (define rows (list (list "id" 1 "rank" 30 "name" "gamma" "$tx" 77) (list "id" 2 "rank" 10 "name" "alpha" "$tx"
+    77) (list "id" 3 "rank" 20 "name" "beta" "$tx" 77))) (define s (newsession)) (s "username" "root") (s "schema" "memcp-tests")
+    (sql_with_statement s nil 0 "list computed order" (lambda (tx) (scan_order tx rows (list (compiled_scan_access_header
+    0 "scan_order" 0 -1)) (list) (list) (lambda () true) (list (lambda ($tx rank) (if (equal? (tx_connection_id $tx) (tx_connection_id
+    tx)) rank (- 0 rank)))) (list <) 0 0 -1 (list "id" "rank" "name") (lambda (acc id rank name) (concat acc id ":" rank ":"
+    name ";")) "" false))))
+  expect:
+    result: 2:10:alpha;3:20:beta;1:30:gamma;
+- name: An empty provided list keeps the supplied empty reduction value
+  scm: (begin (define rows (list (list "id" 1 "rank" 30 "name" "gamma" "$tx" 77) (list "id" 2 "rank" 10 "name" "alpha" "$tx"
+    77) (list "id" 3 "rank" 20 "name" "beta" "$tx" 77))) (scan_order nil (list) (list (compiled_scan_access_header 0 "scan_order"
+    0 -1)) (list) (list) (lambda () true) (list (lambda (rank) (+ rank 0))) (list <) 0 0 -1 (list "id" "rank" "name") (lambda
+    (acc id rank name) (concat acc id ":" rank ":" name ";")) "" false))
+  expect:
+    result: ''
+- name: Callback failures propagate rather than becoming equal sort keys
+  scm: (begin (define rows (list (list "id" 1 "rank" 30 "name" "gamma" "$tx" 77) (list "id" 2 "rank" 10 "name" "alpha" "$tx"
+    77) (list "id" 3 "rank" 20 "name" "beta" "$tx" 77))) (try (lambda () (begin (scan_order nil rows (list (compiled_scan_access_header
+    0 "scan_order" 0 -1)) (list) (list) (lambda () true) (list (lambda (rank) (error "list sort callback failed"))) (list
+    <) 0 0 -1 (list "id" "rank" "name") (lambda (acc id rank name) (concat acc id ":" rank ":" name ";")) "" false) false))
+    (lambda (cause) (equal? (failure_value cause) "list sort callback failed"))))
+  expect:
+    result: true
+- name: mysql metadata list computed names retain full value ordering
+  syntax: mysql
+  sql: SELECT column_name,ordinal_position FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name='list_order_metadata'
+    ORDER BY CONCAT('x',column_name)
+  expect:
+    rows: 3
+    data:
+    - column_name: alpha
+      ordinal_position: 2
+    - column_name: beta
+      ordinal_position: 1
+    - column_name: gamma
+      ordinal_position: 3
+- name: mysql metadata list computed reverse ordinals retain full value ordering
+  syntax: mysql
+  sql: SELECT column_name,ordinal_position FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name='list_order_metadata'
+    ORDER BY 0-CAST(ordinal_position AS SIGNED)
+  expect:
+    rows: 3
+    data:
+    - column_name: gamma
+      ordinal_position: 3
+    - column_name: alpha
+      ordinal_position: 2
+    - column_name: beta
+      ordinal_position: 1
+- name: tsql metadata list computed names retain full value ordering
+  syntax: tsql
+  sql: SELECT column_name,ordinal_position FROM information_schema.columns WHERE table_catalog=DB_NAME() AND table_name='list_order_metadata'
+    ORDER BY CONCAT('x',column_name)
+  expect:
+    rows: 3
+    data:
+    - column_name: alpha
+      ordinal_position: 2
+    - column_name: beta
+      ordinal_position: 1
+    - column_name: gamma
+      ordinal_position: 3
+- name: tsql metadata list computed reverse ordinals retain full value ordering
+  syntax: tsql
+  sql: SELECT column_name,ordinal_position FROM information_schema.columns WHERE table_catalog=DB_NAME() AND table_name='list_order_metadata'
+    ORDER BY 0-CAST(ordinal_position AS INT)
+  expect:
+    rows: 3
+    data:
+    - column_name: gamma
+      ordinal_position: 3
+    - column_name: alpha
+      ordinal_position: 2
+    - column_name: beta
+      ordinal_position: 1
+cleanup:
+- sql: DROP TABLE IF EXISTS list_order_metadata

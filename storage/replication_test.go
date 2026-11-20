@@ -54,12 +54,12 @@ func TestReplicationUniqueAcquisitionAllowsCollidingConfigWrite(t *testing.T) {
 		t.Fatal("fixture did not request M")
 	}
 	rows := [][]scm.Scmer{{scm.NewInt(7)}}
-	mask := source.guardUniqueWrites([]string{"id"}, rows, false, 0, nil).mask
+	mask := source.guardUniqueWrites([]string{"id"}, rows, false, 0, nil, nil).mask
 	var entry replicaConfigEntry
 	var configGuard uniqueWriteGuard
 	for key := 0; ; key++ {
 		entry = replicaConfigEntry{Kind: "backup", Name: fmt.Sprint(key)}
-		configGuard = config.guardUniqueWrites([]string{"node", "key"}, [][]scm.Scmer{{scm.NewString(r.id), scm.NewString(entry.Kind + "/" + entry.Name)}}, false, 0, nil)
+		configGuard = config.guardUniqueWrites([]string{"node", "key"}, [][]scm.Scmer{{scm.NewString(r.id), scm.NewString(entry.Kind + "/" + entry.Name)}}, false, 0, nil, nil)
 		if configGuard.mask.intersects(mask) {
 			break
 		}

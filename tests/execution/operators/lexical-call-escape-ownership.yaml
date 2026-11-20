@@ -1,0 +1,83 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: Lexical callable ownership preserves escaped values without borrowing native callback contracts
+setup: []
+cleanup: []
+test_cases:
+- name: A lexical map callable retains captured argument lists after later invocations
+  scm: |-
+    (begin
+      (define syntax (scheme "(lambda (map seed) (begin (eval (symbol \"map\")) (map (list seed (+ seed 1)) (lambda (value) value))))"))
+      (define exercise (lambda (factory) (begin
+        (define calls (newsession))
+        (define callback (lambda (values ignored) (begin (calls "count" (+ 1 (coalesce (calls "count") 0))) (lambda () values))))
+        (define first (factory callback 10))
+        (define remaining (map (produceN 64) (lambda (index) (factory callback index))))
+        (list (first)
+          (reduce (mapIndex remaining (lambda (index pending)
+            (equal? (pending) (list index (+ index 1)))))
+            (lambda (valid observed) (and valid observed)) true)
+          (calls "count")))))
+      (list (exercise (eval (clone_optimizer_expression syntax)))
+        (exercise (eval (optimize (clone_optimizer_expression syntax))))
+        (exercise (jit (eval (optimize (clone_optimizer_expression syntax)))))))
+  expect:
+    result: [[[10, 11], true, 65], [[10, 11], true, 65], [[10, 11], true, 65]]
+- name: A lexical filter callable retains captured argument lists after later invocations
+  scm: |-
+    (begin
+      (define syntax (scheme "(lambda (filter seed) (begin (eval (symbol \"filter\")) (filter (list seed (+ seed 1)) (lambda (value) value))))"))
+      (define exercise (lambda (factory) (begin
+        (define calls (newsession))
+        (define callback (lambda (values ignored) (begin (calls "count" (+ 1 (coalesce (calls "count") 0))) (lambda () values))))
+        (define first (factory callback 10))
+        (define remaining (map (produceN 64) (lambda (index) (factory callback index))))
+        (list (first)
+          (reduce (mapIndex remaining (lambda (index pending)
+            (equal? (pending) (list index (+ index 1)))))
+            (lambda (valid observed) (and valid observed)) true)
+          (calls "count")))))
+      (list (exercise (eval (clone_optimizer_expression syntax)))
+        (exercise (eval (optimize (clone_optimizer_expression syntax))))
+        (exercise (jit (eval (optimize (clone_optimizer_expression syntax)))))))
+  expect:
+    result: [[[10, 11], true, 65], [[10, 11], true, 65], [[10, 11], true, 65]]
+- name: A lexical reduce callable retains captured argument lists after later invocations
+  scm: |-
+    (begin
+      (define syntax (scheme "(lambda (reduce seed) (begin (eval (symbol \"reduce\")) (reduce (list seed (+ seed 1)) (lambda (value) value) 0)))"))
+      (define exercise (lambda (factory) (begin
+        (define calls (newsession))
+        (define callback (lambda (values ignored neutral) (begin (calls "count" (+ 1 (coalesce (calls "count") 0))) (lambda () values))))
+        (define first (factory callback 10))
+        (define remaining (map (produceN 64) (lambda (index) (factory callback index))))
+        (list (first)
+          (reduce (mapIndex remaining (lambda (index pending)
+            (equal? (pending) (list index (+ index 1)))))
+            (lambda (valid observed) (and valid observed)) true)
+          (calls "count")))))
+      (list (exercise (eval (clone_optimizer_expression syntax)))
+        (exercise (eval (optimize (clone_optimizer_expression syntax))))
+        (exercise (jit (eval (optimize (clone_optimizer_expression syntax)))))))
+  expect:
+    result: [[[10, 11], true, 65], [[10, 11], true, 65], [[10, 11], true, 65]]
+- name: A lexical newsession callable retains captured argument lists after later invocations
+  scm: |-
+    (begin
+      (define syntax (scheme "(lambda (newsession seed) (begin (eval (symbol \"newsession\")) ((newsession) (list seed (+ seed 1)))))"))
+      (define exercise (lambda (factory) (begin
+        (define calls (newsession))
+        (define callback (lambda () (begin (calls "count" (+ 1 (coalesce (calls "count") 0))) (lambda (values) (lambda () values)))))
+        (define first (factory callback 10))
+        (define remaining (map (produceN 64) (lambda (index) (factory callback index))))
+        (list (first)
+          (reduce (mapIndex remaining (lambda (index pending)
+            (equal? (pending) (list index (+ index 1)))))
+            (lambda (valid observed) (and valid observed)) true)
+          (calls "count")))))
+      (list (exercise (eval (clone_optimizer_expression syntax)))
+        (exercise (eval (optimize (clone_optimizer_expression syntax))))
+        (exercise (jit (eval (optimize (clone_optimizer_expression syntax)))))))
+  expect:
+    result: [[[10, 11], true, 65], [[10, 11], true, 65], [[10, 11], true, 65]]

@@ -1,0 +1,384 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: TSQL catalog parent joins consume native foreign declarations created through the common SQL frontend
+  syntax: sql
+  isolated: true
+  reuse_fixture: true
+  restart_after_setup: true
+setup:
+- sql: DROP TABLE IF EXISTS parent_access_child_000
+- sql: DROP TABLE IF EXISTS parent_access_child_001
+- sql: DROP TABLE IF EXISTS parent_access_child_002
+- sql: DROP TABLE IF EXISTS parent_access_child_003
+- sql: DROP TABLE IF EXISTS parent_access_child_004
+- sql: DROP TABLE IF EXISTS parent_access_child_005
+- sql: DROP TABLE IF EXISTS parent_access_child_006
+- sql: DROP TABLE IF EXISTS parent_access_child_007
+- sql: DROP TABLE IF EXISTS parent_access_child_008
+- sql: DROP TABLE IF EXISTS parent_access_child_009
+- sql: DROP TABLE IF EXISTS parent_access_child_010
+- sql: DROP TABLE IF EXISTS parent_access_child_011
+- sql: DROP TABLE IF EXISTS parent_access_child_012
+- sql: DROP TABLE IF EXISTS parent_access_child_013
+- sql: DROP TABLE IF EXISTS parent_access_child_014
+- sql: DROP TABLE IF EXISTS parent_access_child_015
+- sql: DROP TABLE IF EXISTS parent_access_child_016
+- sql: DROP TABLE IF EXISTS parent_access_child_017
+- sql: DROP TABLE IF EXISTS parent_access_child_018
+- sql: DROP TABLE IF EXISTS parent_access_child_019
+- sql: DROP TABLE IF EXISTS parent_access_child_020
+- sql: DROP TABLE IF EXISTS parent_access_child_021
+- sql: DROP TABLE IF EXISTS parent_access_child_022
+- sql: DROP TABLE IF EXISTS parent_access_child_023
+- sql: DROP TABLE IF EXISTS parent_access_child_024
+- sql: DROP TABLE IF EXISTS parent_access_child_025
+- sql: DROP TABLE IF EXISTS parent_access_child_026
+- sql: DROP TABLE IF EXISTS parent_access_child_027
+- sql: DROP TABLE IF EXISTS parent_access_child_028
+- sql: DROP TABLE IF EXISTS parent_access_child_029
+- sql: DROP TABLE IF EXISTS parent_access_child_030
+- sql: DROP TABLE IF EXISTS parent_access_child_031
+- sql: DROP TABLE IF EXISTS parent_access_child_032
+- sql: DROP TABLE IF EXISTS parent_access_child_033
+- sql: DROP TABLE IF EXISTS parent_access_child_034
+- sql: DROP TABLE IF EXISTS parent_access_child_035
+- sql: DROP TABLE IF EXISTS parent_access_child_036
+- sql: DROP TABLE IF EXISTS parent_access_child_037
+- sql: DROP TABLE IF EXISTS parent_access_child_038
+- sql: DROP TABLE IF EXISTS parent_access_child_039
+- sql: DROP TABLE IF EXISTS parent_access_child_040
+- sql: DROP TABLE IF EXISTS parent_access_child_041
+- sql: DROP TABLE IF EXISTS parent_access_child_042
+- sql: DROP TABLE IF EXISTS parent_access_child_043
+- sql: DROP TABLE IF EXISTS parent_access_child_044
+- sql: DROP TABLE IF EXISTS parent_access_child_045
+- sql: DROP TABLE IF EXISTS parent_access_child_046
+- sql: DROP TABLE IF EXISTS parent_access_child_047
+- sql: DROP TABLE IF EXISTS parent_access_child_048
+- sql: DROP TABLE IF EXISTS parent_access_child_049
+- sql: DROP TABLE IF EXISTS parent_access_child_050
+- sql: DROP TABLE IF EXISTS parent_access_child_051
+- sql: DROP TABLE IF EXISTS parent_access_child_052
+- sql: DROP TABLE IF EXISTS parent_access_child_053
+- sql: DROP TABLE IF EXISTS parent_access_child_054
+- sql: DROP TABLE IF EXISTS parent_access_child_055
+- sql: DROP TABLE IF EXISTS parent_access_child_056
+- sql: DROP TABLE IF EXISTS parent_access_child_057
+- sql: DROP TABLE IF EXISTS parent_access_child_058
+- sql: DROP TABLE IF EXISTS parent_access_child_059
+- sql: DROP TABLE IF EXISTS parent_access_child_060
+- sql: DROP TABLE IF EXISTS parent_access_child_061
+- sql: DROP TABLE IF EXISTS parent_access_child_062
+- sql: DROP TABLE IF EXISTS parent_access_child_063
+- sql: DROP TABLE IF EXISTS parent_access_root
+- sql: CREATE TABLE parent_access_root(id INT PRIMARY KEY)
+- sql: CREATE TABLE parent_access_child_000(id INT PRIMARY KEY,parent_id INT,CONSTRAINT parent_access_fk_000 FOREIGN KEY(parent_id) REFERENCES parent_access_root(id))
+- sql: CREATE TABLE parent_access_child_001(id INT PRIMARY KEY,parent_id INT,CONSTRAINT parent_access_fk_001 FOREIGN KEY(parent_id) REFERENCES parent_access_root(id))
+- sql: CREATE TABLE parent_access_child_002(id INT PRIMARY KEY,parent_id INT,CONSTRAINT parent_access_fk_002 FOREIGN KEY(parent_id) REFERENCES parent_access_root(id))
+- sql: CREATE TABLE parent_access_child_003(id INT PRIMARY KEY,parent_id INT,CONSTRAINT parent_access_fk_003 FOREIGN KEY(parent_id) REFERENCES parent_access_root(id))
+- sql: CREATE TABLE parent_access_child_004(id INT PRIMARY KEY,parent_id INT,CONSTRAINT parent_access_fk_004 FOREIGN KEY(parent_id) REFERENCES parent_access_root(id))
+- sql: CREATE TABLE parent_access_child_005(id INT PRIMARY KEY,parent_id INT,CONSTRAINT parent_access_fk_005 FOREIGN KEY(parent_id) REFERENCES parent_access_root(id))
+- sql: CREATE TABLE parent_access_child_006(id INT PRIMARY KEY,parent_id INT,CONSTRAINT parent_access_fk_006 FOREIGN KEY(parent_id) REFERENCES parent_access_root(id))
+- sql: CREATE TABLE parent_access_child_007(id INT PRIMARY KEY,parent_id INT,CONSTRAINT parent_access_fk_007 FOREIGN KEY(parent_id) REFERENCES parent_access_root(id))
+- sql: CREATE TABLE parent_access_child_008(id INT PRIMARY KEY,parent_id INT,CONSTRAINT parent_access_fk_008 FOREIGN KEY(parent_id) REFERENCES parent_access_root(id))
+- sql: CREATE TABLE parent_access_child_009(id INT PRIMARY KEY,parent_id INT,CONSTRAINT parent_access_fk_009 FOREIGN KEY(parent_id) REFERENCES parent_access_root(id))
+- sql: CREATE TABLE parent_access_child_010(id INT PRIMARY KEY,parent_id INT,CONSTRAINT parent_access_fk_010 FOREIGN KEY(parent_id) REFERENCES parent_access_root(id))
+- sql: CREATE TABLE parent_access_child_011(id INT PRIMARY KEY,parent_id INT,CONSTRAINT parent_access_fk_011 FOREIGN KEY(parent_id) REFERENCES parent_access_root(id))
+- sql: CREATE TABLE parent_access_child_012(id INT PRIMARY KEY,parent_id INT,CONSTRAINT parent_access_fk_012 FOREIGN KEY(parent_id) REFERENCES parent_access_root(id))
+- sql: CREATE TABLE parent_access_child_013(id INT PRIMARY KEY,parent_id INT,CONSTRAINT parent_access_fk_013 FOREIGN KEY(parent_id) REFERENCES parent_access_root(id))
+- sql: CREATE TABLE parent_access_child_014(id INT PRIMARY KEY,parent_id INT,CONSTRAINT parent_access_fk_014 FOREIGN KEY(parent_id) REFERENCES parent_access_root(id))
+- sql: CREATE TABLE parent_access_child_015(id INT PRIMARY KEY,parent_id INT,CONSTRAINT parent_access_fk_015 FOREIGN KEY(parent_id) REFERENCES parent_access_root(id))
+- sql: CREATE TABLE parent_access_child_016(id INT PRIMARY KEY,parent_id INT,CONSTRAINT parent_access_fk_016 FOREIGN KEY(parent_id) REFERENCES parent_access_root(id))
+- sql: CREATE TABLE parent_access_child_017(id INT PRIMARY KEY,parent_id INT,CONSTRAINT parent_access_fk_017 FOREIGN KEY(parent_id) REFERENCES parent_access_root(id))
+- sql: CREATE TABLE parent_access_child_018(id INT PRIMARY KEY,parent_id INT,CONSTRAINT parent_access_fk_018 FOREIGN KEY(parent_id) REFERENCES parent_access_root(id))
+- sql: CREATE TABLE parent_access_child_019(id INT PRIMARY KEY,parent_id INT,CONSTRAINT parent_access_fk_019 FOREIGN KEY(parent_id) REFERENCES parent_access_root(id))
+- sql: CREATE TABLE parent_access_child_020(id INT PRIMARY KEY,parent_id INT,CONSTRAINT parent_access_fk_020 FOREIGN KEY(parent_id) REFERENCES parent_access_root(id))
+- sql: CREATE TABLE parent_access_child_021(id INT PRIMARY KEY,parent_id INT,CONSTRAINT parent_access_fk_021 FOREIGN KEY(parent_id) REFERENCES parent_access_root(id))
+- sql: CREATE TABLE parent_access_child_022(id INT PRIMARY KEY,parent_id INT,CONSTRAINT parent_access_fk_022 FOREIGN KEY(parent_id) REFERENCES parent_access_root(id))
+- sql: CREATE TABLE parent_access_child_023(id INT PRIMARY KEY,parent_id INT,CONSTRAINT parent_access_fk_023 FOREIGN KEY(parent_id) REFERENCES parent_access_root(id))
+- sql: CREATE TABLE parent_access_child_024(id INT PRIMARY KEY,parent_id INT,CONSTRAINT parent_access_fk_024 FOREIGN KEY(parent_id) REFERENCES parent_access_root(id))
+- sql: CREATE TABLE parent_access_child_025(id INT PRIMARY KEY,parent_id INT,CONSTRAINT parent_access_fk_025 FOREIGN KEY(parent_id) REFERENCES parent_access_root(id))
+- sql: CREATE TABLE parent_access_child_026(id INT PRIMARY KEY,parent_id INT,CONSTRAINT parent_access_fk_026 FOREIGN KEY(parent_id) REFERENCES parent_access_root(id))
+- sql: CREATE TABLE parent_access_child_027(id INT PRIMARY KEY,parent_id INT,CONSTRAINT parent_access_fk_027 FOREIGN KEY(parent_id) REFERENCES parent_access_root(id))
+- sql: CREATE TABLE parent_access_child_028(id INT PRIMARY KEY,parent_id INT,CONSTRAINT parent_access_fk_028 FOREIGN KEY(parent_id) REFERENCES parent_access_root(id))
+- sql: CREATE TABLE parent_access_child_029(id INT PRIMARY KEY,parent_id INT,CONSTRAINT parent_access_fk_029 FOREIGN KEY(parent_id) REFERENCES parent_access_root(id))
+- sql: CREATE TABLE parent_access_child_030(id INT PRIMARY KEY,parent_id INT,CONSTRAINT parent_access_fk_030 FOREIGN KEY(parent_id) REFERENCES parent_access_root(id))
+- sql: CREATE TABLE parent_access_child_031(id INT PRIMARY KEY,parent_id INT,CONSTRAINT parent_access_fk_031 FOREIGN KEY(parent_id) REFERENCES parent_access_root(id))
+- sql: CREATE TABLE parent_access_child_032(id INT PRIMARY KEY,parent_id INT,CONSTRAINT parent_access_fk_032 FOREIGN KEY(parent_id) REFERENCES parent_access_root(id))
+- sql: CREATE TABLE parent_access_child_033(id INT PRIMARY KEY,parent_id INT,CONSTRAINT parent_access_fk_033 FOREIGN KEY(parent_id) REFERENCES parent_access_root(id))
+- sql: CREATE TABLE parent_access_child_034(id INT PRIMARY KEY,parent_id INT,CONSTRAINT parent_access_fk_034 FOREIGN KEY(parent_id) REFERENCES parent_access_root(id))
+- sql: CREATE TABLE parent_access_child_035(id INT PRIMARY KEY,parent_id INT,CONSTRAINT parent_access_fk_035 FOREIGN KEY(parent_id) REFERENCES parent_access_root(id))
+- sql: CREATE TABLE parent_access_child_036(id INT PRIMARY KEY,parent_id INT,CONSTRAINT parent_access_fk_036 FOREIGN KEY(parent_id) REFERENCES parent_access_root(id))
+- sql: CREATE TABLE parent_access_child_037(id INT PRIMARY KEY,parent_id INT,CONSTRAINT parent_access_fk_037 FOREIGN KEY(parent_id) REFERENCES parent_access_root(id))
+- sql: CREATE TABLE parent_access_child_038(id INT PRIMARY KEY,parent_id INT,CONSTRAINT parent_access_fk_038 FOREIGN KEY(parent_id) REFERENCES parent_access_root(id))
+- sql: CREATE TABLE parent_access_child_039(id INT PRIMARY KEY,parent_id INT,CONSTRAINT parent_access_fk_039 FOREIGN KEY(parent_id) REFERENCES parent_access_root(id))
+- sql: CREATE TABLE parent_access_child_040(id INT PRIMARY KEY,parent_id INT,CONSTRAINT parent_access_fk_040 FOREIGN KEY(parent_id) REFERENCES parent_access_root(id))
+- sql: CREATE TABLE parent_access_child_041(id INT PRIMARY KEY,parent_id INT,CONSTRAINT parent_access_fk_041 FOREIGN KEY(parent_id) REFERENCES parent_access_root(id))
+- sql: CREATE TABLE parent_access_child_042(id INT PRIMARY KEY,parent_id INT,CONSTRAINT parent_access_fk_042 FOREIGN KEY(parent_id) REFERENCES parent_access_root(id))
+- sql: CREATE TABLE parent_access_child_043(id INT PRIMARY KEY,parent_id INT,CONSTRAINT parent_access_fk_043 FOREIGN KEY(parent_id) REFERENCES parent_access_root(id))
+- sql: CREATE TABLE parent_access_child_044(id INT PRIMARY KEY,parent_id INT,CONSTRAINT parent_access_fk_044 FOREIGN KEY(parent_id) REFERENCES parent_access_root(id))
+- sql: CREATE TABLE parent_access_child_045(id INT PRIMARY KEY,parent_id INT,CONSTRAINT parent_access_fk_045 FOREIGN KEY(parent_id) REFERENCES parent_access_root(id))
+- sql: CREATE TABLE parent_access_child_046(id INT PRIMARY KEY,parent_id INT,CONSTRAINT parent_access_fk_046 FOREIGN KEY(parent_id) REFERENCES parent_access_root(id))
+- sql: CREATE TABLE parent_access_child_047(id INT PRIMARY KEY,parent_id INT,CONSTRAINT parent_access_fk_047 FOREIGN KEY(parent_id) REFERENCES parent_access_root(id))
+- sql: CREATE TABLE parent_access_child_048(id INT PRIMARY KEY,parent_id INT,CONSTRAINT parent_access_fk_048 FOREIGN KEY(parent_id) REFERENCES parent_access_root(id))
+- sql: CREATE TABLE parent_access_child_049(id INT PRIMARY KEY,parent_id INT,CONSTRAINT parent_access_fk_049 FOREIGN KEY(parent_id) REFERENCES parent_access_root(id))
+- sql: CREATE TABLE parent_access_child_050(id INT PRIMARY KEY,parent_id INT,CONSTRAINT parent_access_fk_050 FOREIGN KEY(parent_id) REFERENCES parent_access_root(id))
+- sql: CREATE TABLE parent_access_child_051(id INT PRIMARY KEY,parent_id INT,CONSTRAINT parent_access_fk_051 FOREIGN KEY(parent_id) REFERENCES parent_access_root(id))
+- sql: CREATE TABLE parent_access_child_052(id INT PRIMARY KEY,parent_id INT,CONSTRAINT parent_access_fk_052 FOREIGN KEY(parent_id) REFERENCES parent_access_root(id))
+- sql: CREATE TABLE parent_access_child_053(id INT PRIMARY KEY,parent_id INT,CONSTRAINT parent_access_fk_053 FOREIGN KEY(parent_id) REFERENCES parent_access_root(id))
+- sql: CREATE TABLE parent_access_child_054(id INT PRIMARY KEY,parent_id INT,CONSTRAINT parent_access_fk_054 FOREIGN KEY(parent_id) REFERENCES parent_access_root(id))
+- sql: CREATE TABLE parent_access_child_055(id INT PRIMARY KEY,parent_id INT,CONSTRAINT parent_access_fk_055 FOREIGN KEY(parent_id) REFERENCES parent_access_root(id))
+- sql: CREATE TABLE parent_access_child_056(id INT PRIMARY KEY,parent_id INT,CONSTRAINT parent_access_fk_056 FOREIGN KEY(parent_id) REFERENCES parent_access_root(id))
+- sql: CREATE TABLE parent_access_child_057(id INT PRIMARY KEY,parent_id INT,CONSTRAINT parent_access_fk_057 FOREIGN KEY(parent_id) REFERENCES parent_access_root(id))
+- sql: CREATE TABLE parent_access_child_058(id INT PRIMARY KEY,parent_id INT,CONSTRAINT parent_access_fk_058 FOREIGN KEY(parent_id) REFERENCES parent_access_root(id))
+- sql: CREATE TABLE parent_access_child_059(id INT PRIMARY KEY,parent_id INT,CONSTRAINT parent_access_fk_059 FOREIGN KEY(parent_id) REFERENCES parent_access_root(id))
+- sql: CREATE TABLE parent_access_child_060(id INT PRIMARY KEY,parent_id INT,CONSTRAINT parent_access_fk_060 FOREIGN KEY(parent_id) REFERENCES parent_access_root(id))
+- sql: CREATE TABLE parent_access_child_061(id INT PRIMARY KEY,parent_id INT,CONSTRAINT parent_access_fk_061 FOREIGN KEY(parent_id) REFERENCES parent_access_root(id))
+- sql: CREATE TABLE parent_access_child_062(id INT PRIMARY KEY,parent_id INT,CONSTRAINT parent_access_fk_062 FOREIGN KEY(parent_id) REFERENCES parent_access_root(id))
+- sql: CREATE TABLE parent_access_child_063(id INT PRIMARY KEY,parent_id INT,CONSTRAINT parent_access_fk_063 FOREIGN KEY(parent_id) REFERENCES parent_access_root(id))
+test_cases:
+- name: Catalog parent identities join every native foreign declaration
+  sql: |-
+    SELECT a.name AS constraint_name,b.name AS table_name
+    FROM sys.objects AS a
+    INNER JOIN (SELECT name,object_id FROM sys.objects WHERE type=N'U') AS b
+      ON a.parent_object_id=b.object_id
+    WHERE SCHEMA_NAME(a.schema_id)=N'dbo'
+      AND (a.type=N'C' OR a.type=N'F')
+      AND a.name LIKE N'parent_access_%'
+    ORDER BY a.type DESC,a.name,a.modify_date DESC
+  performance_rows: 64
+  warmup: 0
+  timing_samples: 3
+  timing_aggregation: total
+  threshold_ms: 10000
+  expect:
+    rows: 64
+    data:
+    - constraint_name: parent_access_fk_000
+      table_name: parent_access_child_000
+    - constraint_name: parent_access_fk_001
+      table_name: parent_access_child_001
+    - constraint_name: parent_access_fk_002
+      table_name: parent_access_child_002
+    - constraint_name: parent_access_fk_003
+      table_name: parent_access_child_003
+    - constraint_name: parent_access_fk_004
+      table_name: parent_access_child_004
+    - constraint_name: parent_access_fk_005
+      table_name: parent_access_child_005
+    - constraint_name: parent_access_fk_006
+      table_name: parent_access_child_006
+    - constraint_name: parent_access_fk_007
+      table_name: parent_access_child_007
+    - constraint_name: parent_access_fk_008
+      table_name: parent_access_child_008
+    - constraint_name: parent_access_fk_009
+      table_name: parent_access_child_009
+    - constraint_name: parent_access_fk_010
+      table_name: parent_access_child_010
+    - constraint_name: parent_access_fk_011
+      table_name: parent_access_child_011
+    - constraint_name: parent_access_fk_012
+      table_name: parent_access_child_012
+    - constraint_name: parent_access_fk_013
+      table_name: parent_access_child_013
+    - constraint_name: parent_access_fk_014
+      table_name: parent_access_child_014
+    - constraint_name: parent_access_fk_015
+      table_name: parent_access_child_015
+    - constraint_name: parent_access_fk_016
+      table_name: parent_access_child_016
+    - constraint_name: parent_access_fk_017
+      table_name: parent_access_child_017
+    - constraint_name: parent_access_fk_018
+      table_name: parent_access_child_018
+    - constraint_name: parent_access_fk_019
+      table_name: parent_access_child_019
+    - constraint_name: parent_access_fk_020
+      table_name: parent_access_child_020
+    - constraint_name: parent_access_fk_021
+      table_name: parent_access_child_021
+    - constraint_name: parent_access_fk_022
+      table_name: parent_access_child_022
+    - constraint_name: parent_access_fk_023
+      table_name: parent_access_child_023
+    - constraint_name: parent_access_fk_024
+      table_name: parent_access_child_024
+    - constraint_name: parent_access_fk_025
+      table_name: parent_access_child_025
+    - constraint_name: parent_access_fk_026
+      table_name: parent_access_child_026
+    - constraint_name: parent_access_fk_027
+      table_name: parent_access_child_027
+    - constraint_name: parent_access_fk_028
+      table_name: parent_access_child_028
+    - constraint_name: parent_access_fk_029
+      table_name: parent_access_child_029
+    - constraint_name: parent_access_fk_030
+      table_name: parent_access_child_030
+    - constraint_name: parent_access_fk_031
+      table_name: parent_access_child_031
+    - constraint_name: parent_access_fk_032
+      table_name: parent_access_child_032
+    - constraint_name: parent_access_fk_033
+      table_name: parent_access_child_033
+    - constraint_name: parent_access_fk_034
+      table_name: parent_access_child_034
+    - constraint_name: parent_access_fk_035
+      table_name: parent_access_child_035
+    - constraint_name: parent_access_fk_036
+      table_name: parent_access_child_036
+    - constraint_name: parent_access_fk_037
+      table_name: parent_access_child_037
+    - constraint_name: parent_access_fk_038
+      table_name: parent_access_child_038
+    - constraint_name: parent_access_fk_039
+      table_name: parent_access_child_039
+    - constraint_name: parent_access_fk_040
+      table_name: parent_access_child_040
+    - constraint_name: parent_access_fk_041
+      table_name: parent_access_child_041
+    - constraint_name: parent_access_fk_042
+      table_name: parent_access_child_042
+    - constraint_name: parent_access_fk_043
+      table_name: parent_access_child_043
+    - constraint_name: parent_access_fk_044
+      table_name: parent_access_child_044
+    - constraint_name: parent_access_fk_045
+      table_name: parent_access_child_045
+    - constraint_name: parent_access_fk_046
+      table_name: parent_access_child_046
+    - constraint_name: parent_access_fk_047
+      table_name: parent_access_child_047
+    - constraint_name: parent_access_fk_048
+      table_name: parent_access_child_048
+    - constraint_name: parent_access_fk_049
+      table_name: parent_access_child_049
+    - constraint_name: parent_access_fk_050
+      table_name: parent_access_child_050
+    - constraint_name: parent_access_fk_051
+      table_name: parent_access_child_051
+    - constraint_name: parent_access_fk_052
+      table_name: parent_access_child_052
+    - constraint_name: parent_access_fk_053
+      table_name: parent_access_child_053
+    - constraint_name: parent_access_fk_054
+      table_name: parent_access_child_054
+    - constraint_name: parent_access_fk_055
+      table_name: parent_access_child_055
+    - constraint_name: parent_access_fk_056
+      table_name: parent_access_child_056
+    - constraint_name: parent_access_fk_057
+      table_name: parent_access_child_057
+    - constraint_name: parent_access_fk_058
+      table_name: parent_access_child_058
+    - constraint_name: parent_access_fk_059
+      table_name: parent_access_child_059
+    - constraint_name: parent_access_fk_060
+      table_name: parent_access_child_060
+    - constraint_name: parent_access_fk_061
+      table_name: parent_access_child_061
+    - constraint_name: parent_access_fk_062
+      table_name: parent_access_child_062
+    - constraint_name: parent_access_fk_063
+      table_name: parent_access_child_063
+  syntax: tsql
+- name: Catalog column identities retain complete matches through a repeated native source
+  syntax: tsql
+  sql: |
+    SELECT COUNT(*) AS n
+    FROM sys.columns c
+    JOIN sys.objects t ON c.object_id=t.object_id
+    WHERE t.type=N'U' AND t.name LIKE N'parent_access_child_%'
+  performance_rows: 128
+  warmup: 0
+  timing_samples: 3
+  timing_aggregation: total
+  threshold_ms: 10000
+  expect:
+    rows: 1
+    data: [{n: 128}]
+- name: Typed foreign existence probes retain declaration and parent identities
+  syntax: tsql
+  sql: |
+    SELECT CASE WHEN EXISTS (
+      SELECT 1 FROM sys.foreign_keys
+      WHERE object_id=OBJECT_ID(N'dbo.parent_access_fk_063',N'F')
+        AND parent_object_id=OBJECT_ID(N'dbo.parent_access_child_063',N'U'))
+      THEN 1 ELSE 0 END AS present
+  performance_rows: 64
+  warmup: 0
+  timing_samples: 3
+  timing_aggregation: total
+  threshold_ms: 3000
+  expect:
+    rows: 1
+    data: [{present: 1}]
+cleanup:
+- sql: DROP TABLE IF EXISTS parent_access_child_000
+- sql: DROP TABLE IF EXISTS parent_access_child_001
+- sql: DROP TABLE IF EXISTS parent_access_child_002
+- sql: DROP TABLE IF EXISTS parent_access_child_003
+- sql: DROP TABLE IF EXISTS parent_access_child_004
+- sql: DROP TABLE IF EXISTS parent_access_child_005
+- sql: DROP TABLE IF EXISTS parent_access_child_006
+- sql: DROP TABLE IF EXISTS parent_access_child_007
+- sql: DROP TABLE IF EXISTS parent_access_child_008
+- sql: DROP TABLE IF EXISTS parent_access_child_009
+- sql: DROP TABLE IF EXISTS parent_access_child_010
+- sql: DROP TABLE IF EXISTS parent_access_child_011
+- sql: DROP TABLE IF EXISTS parent_access_child_012
+- sql: DROP TABLE IF EXISTS parent_access_child_013
+- sql: DROP TABLE IF EXISTS parent_access_child_014
+- sql: DROP TABLE IF EXISTS parent_access_child_015
+- sql: DROP TABLE IF EXISTS parent_access_child_016
+- sql: DROP TABLE IF EXISTS parent_access_child_017
+- sql: DROP TABLE IF EXISTS parent_access_child_018
+- sql: DROP TABLE IF EXISTS parent_access_child_019
+- sql: DROP TABLE IF EXISTS parent_access_child_020
+- sql: DROP TABLE IF EXISTS parent_access_child_021
+- sql: DROP TABLE IF EXISTS parent_access_child_022
+- sql: DROP TABLE IF EXISTS parent_access_child_023
+- sql: DROP TABLE IF EXISTS parent_access_child_024
+- sql: DROP TABLE IF EXISTS parent_access_child_025
+- sql: DROP TABLE IF EXISTS parent_access_child_026
+- sql: DROP TABLE IF EXISTS parent_access_child_027
+- sql: DROP TABLE IF EXISTS parent_access_child_028
+- sql: DROP TABLE IF EXISTS parent_access_child_029
+- sql: DROP TABLE IF EXISTS parent_access_child_030
+- sql: DROP TABLE IF EXISTS parent_access_child_031
+- sql: DROP TABLE IF EXISTS parent_access_child_032
+- sql: DROP TABLE IF EXISTS parent_access_child_033
+- sql: DROP TABLE IF EXISTS parent_access_child_034
+- sql: DROP TABLE IF EXISTS parent_access_child_035
+- sql: DROP TABLE IF EXISTS parent_access_child_036
+- sql: DROP TABLE IF EXISTS parent_access_child_037
+- sql: DROP TABLE IF EXISTS parent_access_child_038
+- sql: DROP TABLE IF EXISTS parent_access_child_039
+- sql: DROP TABLE IF EXISTS parent_access_child_040
+- sql: DROP TABLE IF EXISTS parent_access_child_041
+- sql: DROP TABLE IF EXISTS parent_access_child_042
+- sql: DROP TABLE IF EXISTS parent_access_child_043
+- sql: DROP TABLE IF EXISTS parent_access_child_044
+- sql: DROP TABLE IF EXISTS parent_access_child_045
+- sql: DROP TABLE IF EXISTS parent_access_child_046
+- sql: DROP TABLE IF EXISTS parent_access_child_047
+- sql: DROP TABLE IF EXISTS parent_access_child_048
+- sql: DROP TABLE IF EXISTS parent_access_child_049
+- sql: DROP TABLE IF EXISTS parent_access_child_050
+- sql: DROP TABLE IF EXISTS parent_access_child_051
+- sql: DROP TABLE IF EXISTS parent_access_child_052
+- sql: DROP TABLE IF EXISTS parent_access_child_053
+- sql: DROP TABLE IF EXISTS parent_access_child_054
+- sql: DROP TABLE IF EXISTS parent_access_child_055
+- sql: DROP TABLE IF EXISTS parent_access_child_056
+- sql: DROP TABLE IF EXISTS parent_access_child_057
+- sql: DROP TABLE IF EXISTS parent_access_child_058
+- sql: DROP TABLE IF EXISTS parent_access_child_059
+- sql: DROP TABLE IF EXISTS parent_access_child_060
+- sql: DROP TABLE IF EXISTS parent_access_child_061
+- sql: DROP TABLE IF EXISTS parent_access_child_062
+- sql: DROP TABLE IF EXISTS parent_access_child_063
+- sql: DROP TABLE IF EXISTS parent_access_root

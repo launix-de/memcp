@@ -507,5 +507,35 @@ test_cases:
     sql: "SELECT DATE_ADD('2024-01-01', INTERVAL NULLIF(id, 1) SECOND) AS a, DATE_SUB('2024-01-01', INTERVAL NULLIF(id, 1) DAY) AS b FROM date_test WHERE id=1"
     expect: {data: [{a: null, b: null}]}
 
+  - name: "Generic calendars preserve nanoseconds across parsing and arithmetic"
+    scm: |
+      (begin
+        (define first (parse_date "2026-03-15 12:13:14.1234567"))
+        (define second (parse_date "2026-03-15 12:13:14.1234568"))
+        (and (equal? (cadr (date_parts first)) 123456700)
+          (equal? (cadr (date_parts (date_add first 1 "DAY"))) 123456700)
+          (not (equal? first second)) (< first second)
+          (equal? first (parse_date (json_decode (json_encode first))))
+          (equal? first (eval (scheme (serialize first))))))
+    expect: {result: true}
+
+  - name: "Calendar comparison does not round small fractions near the last supported year"
+    scm: |
+      (begin
+        (define first (parse_date "9999-12-31 23:59:59.0000001"))
+        (define second (parse_date "9999-12-31 23:59:59.0000002"))
+        (and (< first second) (not (equal? first second))
+          (not (equal? first (unix_timestamp first)))
+          (equal? (cadr (date_parts first)) 100)))
+    expect: {result: true}
+
+  - name: "Generic calendar parser rejects excess precision"
+    scm: (nil? (parse_date "2026-03-15 12:13:14.1234567891"))
+    expect: {result: true}
+
+  - name: "Calendar parts reject an unnormalized fractional second"
+    scm: (date_from_parts 0 1000000000 0)
+    expect: {error: true}
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS date_test"

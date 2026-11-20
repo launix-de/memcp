@@ -335,6 +335,11 @@ func startNodeCluster(secretFile, address, seed, databases string, bootstrap boo
 			return err
 		}
 	}
+	finishStart, err := beginNodeServiceStart()
+	if err != nil {
+		return err
+	}
+	defer finishStart()
 	if err := prepareSharedClusterMounts(databases); err != nil {
 		return err
 	}

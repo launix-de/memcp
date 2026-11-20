@@ -1,0 +1,71 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: Replacement callbacks retain their actual invocation frame at the native regex boundary
+setup: []
+cleanup: []
+test_cases:
+- name: A replacement lambda captures the current suffix on every invocation
+  scm: |
+    (begin
+      (define source "(lambda (value suffix) (regexp_replace value \"[a-z]+\" (lambda (word) (concat (toUpper word) suffix))))")
+      (define raw (eval (scheme source)))
+      (define optimized (eval (optimize (scheme source))))
+      (define compiled (jit (eval (optimize (scheme source)))))
+      (define run (lambda (f) (list (f "abc 12 def" "!") (f "abc" "?") (f "12" "x") (f nil "!"))))
+      (define expected (list "ABC! 12 DEF!" "ABC?" "12" nil))
+      (and (expression_equal? (run raw) expected)
+        (expression_equal? (run optimized) expected)
+        (expression_equal? (run compiled) expected)))
+  expect: {result: true}
+- name: A stateful captured callback runs once per actual match and never for NULL
+  scm: |
+    (begin
+      (define source "(lambda (value suffix state) (regexp_replace value \"[a-z]\" (lambda (word) (begin (state \"calls\" (+ (state \"calls\") 1)) (concat word suffix)))))")
+      (define raw (eval (scheme source)))
+      (define optimized (eval (optimize (scheme source))))
+      (define compiled (jit (eval (optimize (scheme source)))))
+      (define state (newsession))
+      (define run (lambda (f) (begin
+        (state "calls" 0)
+        (define first (f "ab" "!" state))
+        (define second (f "c" "?" state))
+        (define unmatched (f "12" "x" state))
+        (define empty (f nil "x" state))
+        (list first second unmatched empty (state "calls")))))
+      (define expected (list "a!b!" "c?" "12" nil 3))
+      (and (expression_equal? (run raw) expected)
+        (expression_equal? (run optimized) expected)
+        (expression_equal? (run compiled) expected)))
+  expect: {result: true}
+- name: Materializing a callback preserves the already evaluated input and its effects
+  scm: |
+    (begin
+      (define source "(lambda (input suffix state) (regexp_replace (input) \"[a-z]\" (lambda (word) (begin (state \"trace\" (concat (state \"trace\") \"C\")) (concat word suffix)))))")
+      (define raw (eval (scheme source)))
+      (define optimized (eval (optimize (scheme source))))
+      (define compiled (jit (eval (optimize (scheme source)))))
+      (define state (newsession))
+      (define input (lambda () (begin (state "trace" (concat (state "trace") "I")) "ab")))
+      (define run (lambda (f) (begin
+        (state "trace" "")
+        (define value (f input "!" state))
+        (list value (state "trace")))))
+      (define expected (list "a!b!" "ICC"))
+      (and (expression_equal? (run raw) expected)
+        (expression_equal? (run optimized) expected)
+        (expression_equal? (run compiled) expected)))
+  expect: {result: true}
+- name: Portable source preserves the runtime capture rather than a previous suffix
+  scm: |
+    (begin
+      (define original (close_procedure (eval (scheme
+        "(lambda (value suffix) (regexp_replace value \"[a-z]+\" (lambda (word) (concat (toUpper word) suffix))))"))))
+      (define restored (close_procedure (eval (scheme (serialize original)))))
+      (define compiled (jit restored))
+      (define run (lambda (f) (list (f "abc 12 def" "!") (f "abc" "?") (f nil "!"))))
+      (define expected (list "ABC! 12 DEF!" "ABC?" nil))
+      (and (expression_equal? (run original) expected)
+        (expression_equal? (run restored) expected)
+        (expression_equal? (run compiled) expected)))
+  expect: {result: true}

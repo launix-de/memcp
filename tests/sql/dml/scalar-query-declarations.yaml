@@ -1,0 +1,76 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# ISNULL owns its first operand's type and truncates its replacement to that
+# declaration: https://learn.microsoft.com/sql/t-sql/functions/isnull-transact-sql
+metadata:
+  syntax: tsql
+  isolated: true
+  description: Mutation scalar scopes retain native declarations for predicates and assignments
+setup:
+- sql: CREATE TABLE scalar_mutation_config(id INT PRIMARY KEY,value NVARCHAR(2))
+- sql: INSERT scalar_mutation_config VALUES(1,N'2'),(2,NULL),(3,N'3')
+- sql: CREATE TABLE scalar_mutation_target(id INT PRIMARY KEY,selected BIT,label NVARCHAR(12))
+- sql: INSERT scalar_mutation_target VALUES(-1,0,N'old'),(1,0,N'old'),(2,0,N'old'),(3,0,N'old')
+cleanup:
+- sql: DROP TABLE IF EXISTS scalar_mutation_target
+- sql: DROP TABLE IF EXISTS scalar_mutation_config
+test_cases:
+- name: UPDATE predicate keeps the scalar producer character declaration
+  sql: |
+    UPDATE scalar_mutation_target SET selected=1
+      WHERE id=(SELECT ISNULL(value,-1) FROM scalar_mutation_config WHERE id=1);
+    SELECT id,selected FROM scalar_mutation_target ORDER BY id;
+  expect:
+    rows: 4
+    data: [{id: -1,selected: false},{id: 1,selected: false},{id: 2,selected: true},{id: 3,selected: false}]
+- name: DELETE predicate converts its fallback using the inner declaration
+  sql: |
+    DELETE FROM scalar_mutation_target
+      WHERE id=(SELECT ISNULL(value,-1) FROM scalar_mutation_config WHERE id=2);
+    SELECT id FROM scalar_mutation_target ORDER BY id;
+  expect: {rows: 3,data: [{id: 1},{id: 2},{id: 3}]}
+- name: A correlated assignment keeps its scalar scope and fallback width
+  sql: |
+    UPDATE scalar_mutation_target SET label=(
+      SELECT ISNULL(value,N'fallback') FROM scalar_mutation_config
+      WHERE scalar_mutation_config.id=scalar_mutation_target.id);
+    SELECT id,label FROM scalar_mutation_target ORDER BY id;
+  expect: {rows: 3,data: [{id: 1,label: '2'},{id: 2,label: fa},{id: 3,label: '3'}]}
+- name: A correlated predicate compiles against both lexical scopes
+  sql: |
+    UPDATE scalar_mutation_target SET selected=0
+      WHERE id=(SELECT ISNULL(value,-1) FROM scalar_mutation_config AS inner_config
+                WHERE inner_config.id=scalar_mutation_target.id);
+    SELECT id,selected FROM scalar_mutation_target ORDER BY id;
+  expect: {rows: 3,data: [{id: 1,selected: false},{id: 2,selected: true},{id: 3,selected: false}]}
+- name: Empty scalar assignment retains NULL rather than its inner fallback
+  sql: |
+    UPDATE scalar_mutation_target SET label=(
+      SELECT ISNULL(value,N'fallback') FROM scalar_mutation_config WHERE id=99) WHERE id=1;
+    SELECT id,label FROM scalar_mutation_target ORDER BY id;
+  expect: {rows: 3,data: [{id: 1,label: null},{id: 2,label: fa},{id: 3,label: '3'}]}
+- name: A multiple row scalar predicate retains its cardinality error
+  sql: UPDATE scalar_mutation_target SET selected=1 WHERE id=(SELECT ISNULL(value,-1) FROM scalar_mutation_config)
+  expect: {error: true,contains: scalar subselect returned more than one row}
+- name: Cardinality failure leaves every target value intact
+  sql: SELECT id,selected,label FROM scalar_mutation_target ORDER BY id
+  expect: {rows: 3,data: [{id: 1,selected: false,label: null},{id: 2,selected: true,label: fa},{id: 3,selected: false,label: '3'}]}
+- name: SQL frontend scalar predicate consumes the same bound declarations
+  syntax: sql
+  sql: UPDATE scalar_mutation_target SET label='sql' WHERE id=(SELECT COALESCE(CAST(value AS SIGNED),-1) FROM scalar_mutation_config WHERE id=1)
+  expect: {affected_rows: 1}
+- name: SQL frontend scalar assignment retains the producing text value
+  syntax: sql
+  sql: UPDATE scalar_mutation_target SET label=(SELECT CONCAT(COALESCE(value,'none'),'m') FROM scalar_mutation_config WHERE id=3) WHERE id=3
+  expect: {affected_rows: 1}
+- name: PostgreSQL scalar predicate consumes the same bound declarations
+  syntax: psql
+  sql: UPDATE scalar_mutation_target SET label='psql' WHERE id=(SELECT COALESCE(CAST(value AS INTEGER),-1) FROM scalar_mutation_config WHERE id=1)
+  expect: {affected_rows: 1}
+- name: PostgreSQL scalar assignment retains the producing text value
+  syntax: psql
+  sql: UPDATE scalar_mutation_target SET label=(SELECT COALESCE(value,'none') FROM scalar_mutation_config WHERE id=3) WHERE id=1
+  expect: {affected_rows: 1}
+- name: All frontends preserve their complete mutation results
+  sql: SELECT id,label FROM scalar_mutation_target ORDER BY id
+  expect: {rows: 3,data: [{id: 1,label: '3'},{id: 2,label: psql},{id: 3,label: '3m'}]}

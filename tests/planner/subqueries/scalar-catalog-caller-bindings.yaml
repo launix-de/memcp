@@ -1,0 +1,44 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  description: Scalar catalog probes bind their complete caller tuple at small and large driver cardinalities
+setup:
+- sql: CREATE TABLE catalog_probe_callers(id INT PRIMARY KEY)
+- sql: INSERT INTO catalog_probe_callers VALUES(245000),(245001),(245002)
+- sql: CREATE PROCEDURE catalog_probe_module AS SELECT 1 AS value
+- sql: CREATE FUNCTION catalog_probe_function(@value INT) RETURNS INT AS BEGIN RETURN @value+5; END
+- scm: (eval (parse_sql "memcp-tests" "CREATE USER catalog_probe_reader IDENTIFIED BY 'pw'" nil (newsession) nil))
+- scm: (eval (parse_sql "memcp-tests" "GRANT ALL ON `memcp-tests`.* TO catalog_probe_reader" nil (newsession) nil))
+cleanup:
+- sql: DROP FUNCTION IF EXISTS catalog_probe_function
+- sql: DROP PROCEDURE IF EXISTS catalog_probe_module
+- sql: DROP TABLE IF EXISTS catalog_probe_callers
+- scm: (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS catalog_probe_reader" nil (newsession) nil))
+test_cases:
+- name: A small caller relation preserves native object kinds and dynamic lookup identities
+  sql: SELECT b.id,o.name,o.type,o.is_ms_shipped,CASE WHEN o.object_id=OBJECT_ID(N'dbo.'+o.name,o.type) THEN 1 ELSE 0 END AS same_id FROM catalog_probe_callers b JOIN sys.objects o ON o.name IN(N'catalog_probe_module',N'catalog_probe_function') WHERE b.id>=245000 AND b.id<245002 ORDER BY b.id,o.name
+  expect:
+    rows: 4
+    data: [{id: 245000, name: catalog_probe_function, type: FN, is_ms_shipped: false, same_id: 1}, {id: 245000, name: catalog_probe_module, type: P, is_ms_shipped: false, same_id: 1}, {id: 245001, name: catalog_probe_function, type: FN, is_ms_shipped: false, same_id: 1}, {id: 245001, name: catalog_probe_module, type: P, is_ms_shipped: false, same_id: 1}]
+- name: Additional unmatched caller rows retain the existing selected rows
+  scm: (insert (table "memcp-tests" false "catalog_probe_callers" false nil) '("id") (map (produceN 2048) (lambda (id) (list id))))
+  expect: {result: 2048}
+- name: A large caller relation preserves every selected row and object identity
+  sql: SELECT b.id,o.name,o.type,o.is_ms_shipped,CASE WHEN o.object_id=OBJECT_ID(N'dbo.'+o.name,o.type) THEN 1 ELSE 0 END AS same_id FROM catalog_probe_callers b JOIN sys.objects o ON o.name IN(N'catalog_probe_module',N'catalog_probe_function') WHERE b.id>=245000 AND b.id<245002 ORDER BY b.id,o.name
+  expect:
+    rows: 4
+    data: [{id: 245000, name: catalog_probe_function, type: FN, is_ms_shipped: false, same_id: 1}, {id: 245000, name: catalog_probe_module, type: P, is_ms_shipped: false, same_id: 1}, {id: 245001, name: catalog_probe_function, type: FN, is_ms_shipped: false, same_id: 1}, {id: 245001, name: catalog_probe_module, type: P, is_ms_shipped: false, same_id: 1}]
+- name: A granted member sees the same complete result through its own authority
+  username: catalog_probe_reader
+  password: pw
+  sql: SELECT b.id,o.name,o.type,o.is_ms_shipped,CASE WHEN o.object_id=OBJECT_ID(N'dbo.'+o.name,o.type) THEN 1 ELSE 0 END AS same_id FROM catalog_probe_callers b JOIN sys.objects o ON o.name IN(N'catalog_probe_module',N'catalog_probe_function') WHERE b.id>=245000 AND b.id<245002 ORDER BY b.id,o.name
+  expect:
+    rows: 4
+    data: [{id: 245000, name: catalog_probe_function, type: FN, is_ms_shipped: false, same_id: 1}, {id: 245000, name: catalog_probe_module, type: P, is_ms_shipped: false, same_id: 1}, {id: 245001, name: catalog_probe_function, type: FN, is_ms_shipped: false, same_id: 1}, {id: 245001, name: catalog_probe_module, type: P, is_ms_shipped: false, same_id: 1}]
+- name: Missing scalar matches preserve caller multiplicity and SQL NULL
+  sql: SELECT b.id,o.name,OBJECT_ID(N'dbo.'+o.name+N'_missing',o.type) AS missing_id FROM catalog_probe_callers b JOIN sys.objects o ON o.name IN(N'catalog_probe_module',N'catalog_probe_function') WHERE b.id>=245000 AND b.id<245002 ORDER BY b.id,o.name
+  expect:
+    rows: 4
+    data: [{id: 245000, name: catalog_probe_function, missing_id: null}, {id: 245000, name: catalog_probe_module, missing_id: null}, {id: 245001, name: catalog_probe_function, missing_id: null}, {id: 245001, name: catalog_probe_module, missing_id: null}]

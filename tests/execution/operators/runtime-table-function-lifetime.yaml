@@ -1,0 +1,187 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: Generated callable sources retain invocation and binding scope, typed collation and fresh row values
+  isolated: true
+setup:
+- sql: CREATE TABLE runtime_source_outer(id INT PRIMARY KEY)
+- sql: INSERT INTO runtime_source_outer VALUES(1),(2),(3)
+cleanup:
+- sql: DROP TABLE IF EXISTS runtime_source_outer
+test_cases:
+- name: One volatile generated source is stable across native outer rows
+  scm: |-
+    (begin
+      (define runtime (newsession)) (runtime "username" "root") (runtime "schema" "memcp-tests")
+      (define planning (newsession))
+      (define producer (lambda () (list (list (uuid)))))
+      (define declaration (list "columns" (list (list "Field" "token" "RawType" "VARCHAR" "Dimensions" (list 36) "Null" false "Collation" "utf8mb4_general_ci")) "constraints" '("Unique" () "ForeignKeys" ())))
+      (define source (lambda (alias) (list alias "memcp-tests" (list 'table-function producer '() (list "token")) false nil declaration)))
+      (define column (lambda (alias name) (list 'get_column alias false name false)))
+      (define query (lambda (sources fields) (make_query_block "memcp-tests" sources fields true nil nil nil nil nil nil nil nil)))
+      (define combine (lambda (left right) (merge (list left right))))
+      (define consumer (make_result_reduction combine (lambda () '()) combine))
+      (define execute (lambda (statement) (sql_with_statement runtime nil 0 "runtime table source control"
+        (lambda (tx) (begin
+          (define code (build_reducing_queryplan_term statement consumer planning tx nil))
+          (sql_execute_formula runtime tx (sql_queryplan_compile_formula tx code)
+            (lambda (row) (list row)) (lambda (_fields) true)))))))
+      (define rows (execute (query (list (list "n" "memcp-tests" "runtime_source_outer" false nil nil) (source "j"))
+        (list "id" (column "n" "id") "token" (column "j" "token")))))
+      (and (equal? (count rows) 3)
+        (reduce rows (lambda (same row) (and same (equal? (row "token") ((car rows) "token")))) true))
+    )
+  expect:
+    result: true
+- name: Two source aliases preserve independent volatile row values
+  scm: |-
+    (begin
+      (define runtime (newsession)) (runtime "username" "root") (runtime "schema" "memcp-tests")
+      (define planning (newsession))
+      (define producer (lambda () (list (list (uuid)))))
+      (define declaration (list "columns" (list (list "Field" "token" "RawType" "VARCHAR" "Dimensions" (list 36) "Null" false "Collation" "utf8mb4_general_ci")) "constraints" '("Unique" () "ForeignKeys" ())))
+      (define source (lambda (alias) (list alias "memcp-tests" (list 'table-function producer '() (list "token")) false nil declaration)))
+      (define column (lambda (alias name) (list 'get_column alias false name false)))
+      (define query (lambda (sources fields) (make_query_block "memcp-tests" sources fields true nil nil nil nil nil nil nil nil)))
+      (define combine (lambda (left right) (merge (list left right))))
+      (define consumer (make_result_reduction combine (lambda () '()) combine))
+      (define execute (lambda (statement) (sql_with_statement runtime nil 0 "runtime table source control"
+        (lambda (tx) (begin
+          (define code (build_reducing_queryplan_term statement consumer planning tx nil))
+          (sql_execute_formula runtime tx (sql_queryplan_compile_formula tx code)
+            (lambda (row) (list row)) (lambda (_fields) true)))))))
+      (define rows (execute (query (list (source "a") (source "b"))
+        (list "a" (column "a" "token") "b" (column "b" "token")))))
+      (and (equal? (count rows) 1) (not (equal? ((car rows) "a") ((car rows) "b"))))
+    )
+  expect:
+    result: true
+- name: UNION branches with the same alias preserve independent source instances
+  scm: |-
+    (begin
+      (define runtime (newsession)) (runtime "username" "root") (runtime "schema" "memcp-tests")
+      (define planning (newsession))
+      (define producer (lambda () (list (list (uuid)))))
+      (define declaration (list "columns" (list (list "Field" "token" "RawType" "VARCHAR" "Dimensions" (list 36) "Null" false "Collation" "utf8mb4_general_ci")) "constraints" '("Unique" () "ForeignKeys" ())))
+      (define source (lambda (alias) (list alias "memcp-tests" (list 'table-function producer '() (list "token")) false nil declaration)))
+      (define column (lambda (alias name) (list 'get_column alias false name false)))
+      (define query (lambda (sources fields) (make_query_block "memcp-tests" sources fields true nil nil nil nil nil nil nil nil)))
+      (define combine (lambda (left right) (merge (list left right))))
+      (define consumer (make_result_reduction combine (lambda () '()) combine))
+      (define execute (lambda (statement) (sql_with_statement runtime nil 0 "runtime table source control"
+        (lambda (tx) (begin
+          (define code (build_reducing_queryplan_term statement consumer planning tx nil))
+          (sql_execute_formula runtime tx (sql_queryplan_compile_formula tx code)
+            (lambda (row) (list row)) (lambda (_fields) true)))))))
+      (define branch (query (list (source "j")) (list "token" (column "j" "token"))))
+      (define rows (execute (make_union_block 'all (list branch branch) nil nil nil '())))
+      (and (equal? (count rows) 2) (not (equal? ((car rows) "token") ((cadr rows) "token"))))
+    )
+  expect:
+    result: true
+- name: Rebound stored producer trees do not share an invocation token
+  scm: |-
+    (begin
+      (define runtime (newsession)) (runtime "username" "root") (runtime "schema" "memcp-tests")
+      (define planning (newsession))
+      (define producer (lambda () (list (list (uuid)))))
+      (define declaration (list "columns" (list (list "Field" "token" "RawType" "VARCHAR" "Dimensions" (list 36) "Null" false "Collation" "utf8mb4_general_ci")) "constraints" '("Unique" () "ForeignKeys" ())))
+      (define source (lambda (alias) (list alias "memcp-tests" (list 'table-function producer '() (list "token")) false nil declaration)))
+      (define column (lambda (alias name) (list 'get_column alias false name false)))
+      (define query (lambda (sources fields) (make_query_block "memcp-tests" sources fields true nil nil nil nil nil nil nil nil)))
+      (define combine (lambda (left right) (merge (list left right))))
+      (define consumer (make_result_reduction combine (lambda () '()) combine))
+      (define execute (lambda (statement) (sql_with_statement runtime nil 0 "runtime table source control"
+        (lambda (tx) (begin
+          (define code (build_reducing_queryplan_term statement consumer planning tx nil))
+          (sql_execute_formula runtime tx (sql_queryplan_compile_formula tx code)
+            (lambda (row) (list row)) (lambda (_fields) true)))))))
+      (define bound (bind_query_names (query (list (source "j")) (list "token" (column "j" "token"))) '()))
+      (define rows (execute (query
+        (list (list "a" "memcp-tests" bound false nil nil) (list "b" "memcp-tests" bound false nil nil))
+        (list "a" (column "a" "token") "b" (column "b" "token")))))
+      (and (equal? (count rows) 1) (not (equal? ((car rows) "a") ((car rows) "b"))))
+    )
+  expect:
+    result: true
+- name: A compiled generated source creates fresh values on its next invocation
+  scm: |-
+    (begin
+      (define runtime (newsession)) (runtime "username" "root") (runtime "schema" "memcp-tests")
+      (define planning (newsession))
+      (define producer (lambda () (list (list (uuid)))))
+      (define declaration (list "columns" (list (list "Field" "token" "RawType" "VARCHAR" "Dimensions" (list 36) "Null" false "Collation" "utf8mb4_general_ci")) "constraints" '("Unique" () "ForeignKeys" ())))
+      (define source (lambda (alias) (list alias "memcp-tests" (list 'table-function producer '() (list "token")) false nil declaration)))
+      (define column (lambda (alias name) (list 'get_column alias false name false)))
+      (define query (lambda (sources fields) (make_query_block "memcp-tests" sources fields true nil nil nil nil nil nil nil nil)))
+      (define combine (lambda (left right) (merge (list left right))))
+      (define consumer (make_result_reduction combine (lambda () '()) combine))
+      (define execute (lambda (statement) (sql_with_statement runtime nil 0 "runtime table source control"
+        (lambda (tx) (begin
+          (define code (build_reducing_queryplan_term statement consumer planning tx nil))
+          (sql_execute_formula runtime tx (sql_queryplan_compile_formula tx code)
+            (lambda (row) (list row)) (lambda (_fields) true)))))))
+      (define statement (query (list (source "j")) (list "token" (column "j" "token"))))
+      (define plan (sql_with_statement runtime nil 0 "compile runtime source"
+        (lambda (tx) (sql_queryplan_compile_formula tx (build_reducing_queryplan_term statement consumer planning tx nil)))))
+      (define run (lambda () (sql_with_statement runtime nil 0 "invoke compiled runtime source"
+        (lambda (tx) (sql_execute_formula runtime tx plan (lambda (row) (list row)) (lambda (_fields) true))))))
+      (define first (run)) (define second (run))
+      (and (equal? (count first) 1) (equal? (count second) 1)
+        (not (equal? ((car first) "token") ((car second) "token"))))
+    )
+  expect:
+    result: true
+- name: Declared generated source collation controls mixedcase ordering
+  scm: |-
+    (begin
+      (define runtime (newsession)) (runtime "username" "root") (runtime "schema" "memcp-tests")
+      (define planning (newsession))
+      (define producer (lambda () (list (list (uuid)))))
+      (define declaration (list "columns" (list (list "Field" "token" "RawType" "VARCHAR" "Dimensions" (list 36) "Null" false "Collation" "utf8mb4_general_ci")) "constraints" '("Unique" () "ForeignKeys" ())))
+      (define source (lambda (alias) (list alias "memcp-tests" (list 'table-function producer '() (list "token")) false nil declaration)))
+      (define column (lambda (alias name) (list 'get_column alias false name false)))
+      (define query (lambda (sources fields) (make_query_block "memcp-tests" sources fields true nil nil nil nil nil nil nil nil)))
+      (define combine (lambda (left right) (merge (list left right))))
+      (define consumer (make_result_reduction combine (lambda () '()) combine))
+      (define execute (lambda (statement) (sql_with_statement runtime nil 0 "runtime table source control"
+        (lambda (tx) (begin
+          (define code (build_reducing_queryplan_term statement consumer planning tx nil))
+          (sql_execute_formula runtime tx (sql_queryplan_compile_formula tx code)
+            (lambda (row) (list row)) (lambda (_fields) true)))))))
+      (define sorted_producer (lambda () (map '("Z" "ANU" "abr" "d" "A") (lambda (value) (list value)))))
+      (define src (list "j" "memcp-tests" (list 'table-function sorted_producer '() (list "token")) false nil declaration))
+      (define statement (make_query_block "memcp-tests" (list src) (list "token" (column "j" "token")) true nil nil
+        (list (list (column "j" "token") <)) nil nil nil nil nil))
+      (define rows (execute statement))
+      (expression_equal? (map rows (lambda (row) (row "token"))) '("A" "abr" "ANU" "d" "Z")))
+    )
+  expect:
+    result: true
+- name: Joined generated source collation controls mixedcase ordering
+  scm: |-
+    (begin
+      (define runtime (newsession)) (runtime "username" "root") (runtime "schema" "memcp-tests")
+      (define planning (newsession))
+      (define producer (lambda () (list (list (uuid)))))
+      (define declaration (list "columns" (list (list "Field" "token" "RawType" "VARCHAR" "Dimensions" (list 36) "Null" false "Collation" "utf8mb4_general_ci")) "constraints" '("Unique" () "ForeignKeys" ())))
+      (define source (lambda (alias) (list alias "memcp-tests" (list 'table-function producer '() (list "token")) false nil declaration)))
+      (define column (lambda (alias name) (list 'get_column alias false name false)))
+      (define query (lambda (sources fields) (make_query_block "memcp-tests" sources fields true nil nil nil nil nil nil nil nil)))
+      (define combine (lambda (left right) (merge (list left right))))
+      (define consumer (make_result_reduction combine (lambda () '()) combine))
+      (define execute (lambda (statement) (sql_with_statement runtime nil 0 "runtime table source control"
+        (lambda (tx) (begin
+          (define code (build_reducing_queryplan_term statement consumer planning tx nil))
+          (sql_execute_formula runtime tx (sql_queryplan_compile_formula tx code)
+            (lambda (row) (list row)) (lambda (_fields) true)))))))
+      (define sorted_producer (lambda () (map '("Z" "ANU" "abr" "d" "A") (lambda (value) (list value)))))
+      (define src (list "j" "memcp-tests" (list 'table-function sorted_producer '() (list "token")) false nil declaration))
+      (define statement (make_query_block "memcp-tests" (list src (list "n" "memcp-tests" "runtime_source_outer" false nil nil))
+        (list "token" (column "j" "token")) (list 'equal? (column "n" "id") 1) nil nil
+        (list (list (column "j" "token") <)) nil nil nil nil nil))
+      (define rows (execute statement))
+      (expression_equal? (map rows (lambda (row) (row "token"))) '("A" "abr" "ANU" "d" "Z")))
+    )
+  expect:
+    result: true

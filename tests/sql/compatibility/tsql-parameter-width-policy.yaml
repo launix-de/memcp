@@ -1,0 +1,80 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# SQL2022: https://dbfiddle.uk/H2Muzo6L
+# https://learn.microsoft.com/sql/t-sql/statements/set-ansi-warnings-transact-sql
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Procedure and prepared parameter widths truncate independently of row-assignment ANSI warnings
+setup:
+- sql: CREATE PROCEDURE parameter_width_input @value VARCHAR(4) AS SELECT @value AS label,DATALENGTH(@value) AS bytes
+- sql: CREATE TABLE parameter_width_destination(id INT,label VARCHAR(4))
+cleanup:
+- sql: DROP PROCEDURE IF EXISTS parameter_width_input
+- sql: DROP TABLE IF EXISTS parameter_width_destination
+test_cases:
+- name: Named procedure RPC truncates its declared argument under both writing-session ANSI profiles
+  tds:
+    statements:
+    - sql: SET ANSI_WARNINGS ON
+    - sql: dbo.parameter_width_input
+      parameters: [{name: value,value: abcdef}]
+      expect:
+        rows: 1
+        data: [{label: abcd,bytes: 4}]
+        column_types: [{name: label,type: VARCHAR,length: 4},{name: bytes,type: INT}]
+    - sql: SET ANSI_WARNINGS OFF
+    - sql: dbo.parameter_width_input
+      parameters: [{name: value,value: vwxyz}]
+      expect: {rows: 1,data: [{label: vwxy,bytes: 4}]}
+    - sql: SET ANSI_WARNINGS ON
+- name: Native sp_executesql binds its supplied value to the declared width before query execution
+  tds:
+    statements:
+    - sql: SET ANSI_WARNINGS ON
+    - sql: sp_executesql
+      parameters:
+      - {name: stmt,value: 'SELECT @value AS label'}
+      - {name: params,value: '@value VARCHAR(4)'}
+      - {name: value,value: abcdef}
+      expect: {rows: 1,data: [{label: abcd}]}
+    - sql: SET ANSI_WARNINGS OFF
+    - sql: sp_executesql
+      parameters:
+      - {name: stmt,value: 'SELECT @value AS label'}
+      - {name: params,value: '@value VARCHAR(4)'}
+      - {name: value,value: vwxyz}
+      expect: {rows: 1,data: [{label: vwxy}]}
+    - sql: SET ANSI_WARNINGS ON
+- name: The shared wire conversion retains parameter width and typed NULL without row truncation policy
+  scm: |
+    (begin
+      (define s (newsession))
+      (define input (list "type" (list "kind" 231 "size" 12) "value" "abcdef"))
+      (define declaration (list "VARCHAR" 4))
+      (s "__tsql_ansi_warnings" true)
+      (define strict (tds_parameter_assignment s input declaration))
+      (s "__tsql_ansi_warnings" false)
+      (define quiet (tds_parameter_assignment s input declaration))
+      (and (equal? strict "abcd") (equal? quiet "abcd")
+        (nil? (tds_parameter_assignment s
+          (list "type" (list "kind" 231 "size" 12) "value" nil) declaration))))
+  expect: {result: true}
+- name: A local variable declaration retains its width under ANSI_WARNINGS ON
+  sql: SET ANSI_WARNINGS ON; DECLARE @value VARCHAR(4)='abcdef'; SELECT @value AS label
+  expect: {rows: 1,data: [{label: abcd}]}
+- name: SQL EXEC parameter binding shares the same truncating destination contract
+  sql: SET ANSI_WARNINGS ON; EXEC parameter_width_input @value='abcdef'
+  expect: {rows: 1,data: [{label: abcd,bytes: 4}]}
+- name: A real row assignment under ON rejects instead of inheriting the parameter conversion policy
+  sql: |
+    DECLARE @rejected INT=0;
+    SET ANSI_WARNINGS ON;
+    BEGIN TRY INSERT parameter_width_destination VALUES(1,'abcdef'); END TRY
+    BEGIN CATCH IF ERROR_NUMBER() IN(8152,2628) SET @rejected=1; ELSE THROW; END CATCH;
+    SELECT @rejected AS rejected,COUNT(*) AS remaining FROM parameter_width_destination;
+  expect: {rows: 1,data: [{rejected: 1,remaining: 0}]}
+- name: A real row assignment under OFF returns its complete truncated stored value
+  sql: SET ANSI_WARNINGS OFF; INSERT parameter_width_destination VALUES(2,'abcdef'); SET ANSI_WARNINGS ON; SELECT id,label FROM parameter_width_destination
+  expect: {rows: 1,data: [{id: 2,label: abcd}]}

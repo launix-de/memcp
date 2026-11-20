@@ -1,0 +1,122 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Historical case names remain stable. Authority now means native database
+# membership; TSQL access/owner requests are compatibility no-ops.
+metadata:
+  version: '1.0'
+  description: Ignored TSQL access requests preserve native membership and argument syntax boundaries
+  syntax: tsql
+  requires_tds: true
+  isolated: true
+setup:
+- scm: (eval (parse_sql "memcp-tests" "CREATE USER permission_probe_member IDENTIFIED BY 'pw'" nil (newsession)
+    nil))
+- scm: (eval (parse_sql "memcp-tests" "CREATE USER permission_probe_outsider IDENTIFIED BY 'pw'" nil (newsession)
+    nil))
+- scm: (eval (parse_sql "memcp-tests" "GRANT ALL ON `memcp-tests`.* TO permission_probe_member" nil (newsession)
+    nil))
+cleanup:
+- scm: (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS permission_probe_member" nil (newsession) nil))
+- scm: (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS permission_probe_outsider" nil (newsession)
+    nil))
+test_cases:
+- name: Legacy database ALL is not translated to broad native membership
+  sql: GRANT ALL TO [PUBLIC]
+  expect:
+    affected_rows: 0
+- name: Privilege spelling retains the same explicit boundary
+  sql: GRANT ALL PRIVILEGES TO public
+  expect:
+    affected_rows: 0
+- name: Explicit account grantee cannot obtain a coarse native grant
+  sql: GRANT ALL TO permission_probe_outsider
+  expect:
+    affected_rows: 0
+- name: Multiple grantees cannot partly publish a permission grant
+  sql: GRANT ALL TO [PUBLIC],permission_probe_outsider
+  expect:
+    affected_rows: 0
+- name: Ownership change to an existing login is explicitly unsupported
+  sql: EXEC sys.sp_changedbowner @loginame=N'root'
+  expect:
+    affected_rows: 0
+- name: Unconfigured administrative spelling is not a privileged alias
+  sql: EXEC sp_changedbowner N'sa'
+  expect:
+    affected_rows: 0
+- name: Unknown database owner login is rejected
+  sql: EXEC master.dbo.sp_changedbowner N'permission_probe_missing'
+  expect:
+    affected_rows: 0
+- name: NULL cannot identify an owner
+  sql: EXEC sp_changedbowner NULL
+  expect:
+    error: true
+    contains: cannot be NULL
+- name: Required owner login
+  sql: EXEC sp_changedbowner
+  expect:
+    error: true
+- name: Extra owner argument
+  sql: EXEC sp_changedbowner N'root',N'true',1
+  expect:
+    error: true
+- name: Unknown named owner argument
+  sql: EXEC sp_changedbowner @unknown=N'root'
+  expect:
+    error: true
+- name: Input owner cannot become OUTPUT
+  sql: DECLARE @name SYSNAME=N'root'; EXEC sp_changedbowner @name OUTPUT
+  expect:
+    error: true
+- name: Incomplete grant list
+  sql: GRANT ALL TO
+  expect:
+    error: true
+- name: Unsupported object grant is not silently mapped
+  sql: GRANT ALL ON dbo.probe TO public
+  expect:
+    affected_rows: 0
+- name: Database membership cannot authorize ownership changes
+  sql: EXEC sp_changedbowner N'root'
+  expect:
+    affected_rows: 0
+  username: permission_probe_member
+  password: pw
+- name: Database membership cannot authorize permission grants
+  sql: GRANT ALL TO public
+  expect:
+    affected_rows: 0
+  username: permission_probe_member
+  password: pw
+- name: Failed permission requests preserve accounts and database access
+  sql: SELECT username,admin FROM system.[user] WHERE username IN(N'permission_probe_member',N'permission_probe_outsider')
+    ORDER BY username
+  expect:
+    rows: 2
+    data:
+    - username: permission_probe_member
+      admin: false
+    - username: permission_probe_outsider
+      admin: false
+- name: Public grant attempts never enroll other accounts
+  sql: SELECT username FROM system.access WHERE [database]=N'memcp-tests' AND username IN(N'permission_probe_member',N'permission_probe_outsider')
+  expect:
+    rows: 1
+    data:
+    - username: permission_probe_member
+- name: Permission diagnostics validate the actual current database
+  scm: "(begin\n  (define s (newsession)) (s \"username\" \"root\") (s \"schema\" \"permission_probe_missing_database\"\
+    )\n  (define check (lambda (text) (try\n    (lambda () (begin (tsql_execute_request \"permission_probe_missing_database\"\
+    \ text s nil 0 (lambda (_row) true) (lambda fields true)) false))\n    (lambda (failure) (regexp_test\
+    \ (concat failure) \"database does not exist\")))))\n  (and (check \"GRANT ALL TO public\") (check\
+    \ \"EXEC sp_changedbowner N'root'\")))"
+  expect:
+    result: true
+- name: TDS reports ownership and grant errors without success status
+  tds:
+    statements:
+    - sql: GRANT ALL TO [PUBLIC]
+      expect: {}
+    - sql: EXEC sp_changedbowner N'root'
+      expect: {}

@@ -1,0 +1,77 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: Compiled equality boundaries retain their own parameter slots when index prefix order changes
+  isolated: true
+setup:
+- sql: DROP TABLE IF EXISTS identity_access_fixture
+- sql: CREATE TABLE identity_access_fixture (id INT PRIMARY KEY, database VARCHAR(255) COLLATE utf8mb4_bin NOT NULL, incarnation VARCHAR(80) COLLATE utf8mb4_bin NOT NULL, UNIQUE KEY identity_pair(database,incarnation)) ENGINE=sloppy
+- scm: |-
+    (begin
+      (define key (lambda (i) (concat "00000000-0000-0000-0000-"
+        (substr "000000000000" 0 (- 12 (strlen (string i)))) (string i))))
+      (define target (table "memcp-tests" false "identity_access_fixture" false nil))
+      (insert target '("id" "database" "incarnation")
+        (map (produceN 32768) (lambda (i) (begin
+          (define n (mod (* i 8191) 32768))
+          (list (+ n 1) (if (equal? (mod n 997) 0) "tenant-b" "tenant-a") (key n))))))
+      (insert target '("id" "database" "incarnation") (list (list 40000 "tenant-b" (key 1))))
+      (rebuild target true false)
+      true)
+test_cases:
+- name: Both prefix orders retain every value, miss, NULL and database discriminator
+  scm: |-
+    (begin
+      (define target (table "memcp-tests" false "identity_access_fixture" false nil))
+      (define key (lambda (i) (concat "00000000-0000-0000-0000-"
+      (substr "000000000000" 0 (- 12 (strlen (string i)))) (string i))))
+      (define database_first (list (compiled_scan_access_header 2 "value" 1 -1)
+      (scan_boundary "equal" "database" 0 0 true true "" false)
+      (scan_boundary "equal" "incarnation" 1 1 true true "" false) "id"))
+    (define incarnation_first (list (compiled_scan_access_header 2 "value" 1 -1)
+      (scan_boundary "equal" "incarnation" 1 1 true true "" false)
+      (scan_boundary "equal" "database" 0 0 true true "" false) "id"))
+      (define probes (list
+      (list "tenant-a" (key 1)) (list "tenant-b" (key 1))
+      (list "tenant-b" (key 0)) (list "tenant-a" (key 0))
+      (list "tenant-a" (key 32767)) (list "tenant-a" (key 32767))
+      (list "tenant-b" (key 31904)) (list "tenant-a" (key 15952))
+      (list "tenant-a" (key 1)) (list "tenant-b" (key 1))
+      (list "Tenant-a" (key 1)) (list "tenant-a" "missing")
+      (list nil (key 1)) (list "tenant-a" nil)))
+      (map (list database_first incarnation_first) (lambda (schema)
+        (map probes (lambda (values) (scan_lookup nil target schema values))))))
+  expect:
+    result:
+    - &id001
+      - 2
+      - 40000
+      - 1
+      - null
+      - 32768
+      - 32768
+      - 31905
+      - null
+      - 2
+      - 40000
+      - null
+      - null
+      - null
+      - null
+    - *id001
+- name: Identical incarnation values remain distinct complete database identities
+  sql: SELECT id,database,incarnation FROM identity_access_fixture WHERE incarnation IN ('00000000-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000000001') ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - id: 1
+      database: tenant-b
+      incarnation: 00000000-0000-0000-0000-000000000000
+    - id: 2
+      database: tenant-a
+      incarnation: 00000000-0000-0000-0000-000000000001
+    - id: 40000
+      database: tenant-b
+      incarnation: 00000000-0000-0000-0000-000000000001
+cleanup:
+- sql: DROP TABLE IF EXISTS identity_access_fixture

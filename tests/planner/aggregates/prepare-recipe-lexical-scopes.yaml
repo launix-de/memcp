@@ -1,0 +1,104 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: Repeated preparation shares code within its actual lexical binding owner
+setup: []
+cleanup: []
+test_cases:
+- name: Repeated row-dependent preparation retains each invocation and NULL
+  scm: |
+    (begin
+      (define binding (list 'session "scope-recipe" (list 'once (list 'lambda '() 'value))))
+      (define read (list (list 'session "scope-recipe")))
+      (define body (list '!begin binding (list 'define 'first read) binding (list 'list 'first read)))
+      (define original (list 'lambda (list 'session 'value) body))
+      (define compiled (eval (deduplicate_lazy_prepare_recipes original)))
+      (define s (newsession))
+      (and (expression_equal? (compiled s 7) '(7 7))
+        (expression_equal? (compiled s 11) '(11 11))
+        (expression_equal? (compiled s nil) (list nil nil))
+        (expression_equal? (compiled s 0) '(0 0))))
+  expect: {result: true}
+- name: Different sequence frames do not share a captured local
+  scm: |
+    (begin
+      (define binding (list 'session "scope-recipe" (list 'once (list 'lambda '() 'value))))
+      (define read (list (list 'session "scope-recipe")))
+      (define block (lambda (value) (list 'begin (list 'define 'value value)
+        binding (list 'define 'first read) binding (list 'list 'first read))))
+      (define code (list 'lambda (list 'session) (list 'list (block 7) (block 11))))
+      (define original (eval code))
+      (define compiled (eval (deduplicate_lazy_prepare_recipes code)))
+      (define expected (list (list 7 7) (list 11 11)))
+      (and (expression_equal? (original (newsession)) expected)
+        (expression_equal? (compiled (newsession)) expected)))
+  expect: {result: true}
+- name: A match arm retains its real pattern binding
+  scm: |
+    (begin
+      (define binding (list 'session "scope-recipe" (list 'once (list 'lambda '() 'value))))
+      (define read (list (list 'session "scope-recipe")))
+      (define body (list '!begin binding (list 'define 'first read) binding (list 'list 'first read)))
+      (define code (list 'lambda (list 'session 'input) (list 'match 'input 'value body)))
+      (define compiled (eval (deduplicate_lazy_prepare_recipes code)))
+      (define s (newsession))
+      (and (expression_equal? (compiled s 7) '(7 7))
+        (expression_equal? (compiled s 11) '(11 11))))
+  expect: {result: true}
+- name: A quoted preparation-shaped tuple remains complete inert data
+  scm: |
+    (begin
+      (define binding (list 'session "scope-recipe" (list 'once (list 'lambda '() 'value))))
+      (define data (list binding binding))
+      (define code (list 'lambda '() (list 'quote data)))
+      (define compiled (eval (deduplicate_lazy_prepare_recipes code)))
+      (expression_equal? (compiled) data))
+  expect: {result: true}
+- name: An unselected preparation retains its deferred error
+  scm: |
+    (begin
+      (define binding (list 'session "scope-recipe"
+        (list 'once (list 'lambda '() (list 'error "unselected preparation executed")))))
+      (define code (list 'lambda (list 'session) (list 'if false
+        (list '!begin binding binding (list (list 'session "scope-recipe"))) 99)))
+      (define compiled (eval (deduplicate_lazy_prepare_recipes code)))
+      (equal? (compiled (newsession)) 99))
+  expect: {result: true}
+- name: A fixed named callback frame retains its original arity and values
+  scm: |
+    (begin
+      (define binding (list 'session "scope-recipe" (list 'once (list 'lambda '() 'value))))
+      (define read (list (list 'session "scope-recipe")))
+      (define body (list '!begin binding (list 'define 'first read) binding (list 'list 'first read)))
+      (define code (list 'lambda (list 'session 'value) body 3))
+      (define compiled (eval (deduplicate_lazy_prepare_recipes code)))
+      (expression_equal? (compiled (newsession) 19) '(19 19)))
+  expect: {result: true}
+- name: Actual syntax values retain the same local sequence owner
+  scm: |
+    (begin
+      (define binding (list 'session "scope-recipe" (list 'once (list lambda '() 'value))))
+      (define read (list (list 'session "scope-recipe")))
+      (define body (list begin_mut 0 (list define 'value 23)
+        binding (list define 'first read) binding (list 'list 'first read)))
+      (define code (list lambda (list 'session) body))
+      (define compiled (eval (deduplicate_lazy_prepare_recipes code)))
+      (expression_equal? (compiled (newsession)) '(23 23)))
+  expect: {result: true}
+- name: Helper names do not overwrite actual caller parameters or allocator candidates
+  scm: |
+    (begin
+      (define collision (prepare_recipe_helper_symbol "scope-recipe"))
+      (define fallback (symbol "__published_callables_0"))
+      (define binding (list 'session "scope-recipe"
+        (list 'once (list 'lambda '() (list '+ collision fallback)))))
+      (define read (list (list 'session "scope-recipe")))
+      (define body (list '!begin binding (list 'define 'first read) binding (list 'list 'first read)))
+      (define code (list 'lambda (list 'session collision fallback) body))
+      (define original (eval code))
+      (define compiled (eval (deduplicate_lazy_prepare_recipes code)))
+      (define s (newsession))
+      (and (expression_equal? (original s 7 11) '(18 18))
+        (expression_equal? (compiled s 7 11) '(18 18))
+        (expression_equal? (compiled s 19 5) '(24 24))))
+  expect: {result: true}

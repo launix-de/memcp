@@ -1,0 +1,71 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: mysql
+  isolated: true
+  description: Native account incarnations survive password rotation and cannot be
+    inherited by replacement accounts
+  version: '1.0'
+setup: []
+cleanup:
+- scm: (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS permission_identity_probe"
+    nil))
+- scm: (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS permission_identity_history"
+    nil))
+test_cases:
+- name: Existing native administrator has an incarnation
+  scm: (and (regexp_test (sql_account_incarnation "root") "^[0-9a-f-]{36}$") (equal?
+    (uuid_version (sql_account_incarnation "root")) 4))
+  expect:
+    result: true
+- name: Native account recreation changes identity and password rotation preserves
+    it
+  scm: "(begin\n  (eval (parse_sql \"memcp-tests\" \"CREATE USER permission_identity_probe\
+    \ IDENTIFIED BY 'pw'\" nil))\n  (define first (sql_account_incarnation \"permission_identity_probe\"\
+    ))\n  (eval (parse_sql \"memcp-tests\" \"ALTER USER permission_identity_probe\
+    \ IDENTIFIED BY 'newpw'\" nil))\n  (define rotated (sql_account_incarnation \"\
+    permission_identity_probe\"))\n  (eval (parse_sql \"memcp-tests\" \"DROP USER\
+    \ permission_identity_probe\" nil))\n  (eval (parse_sql \"memcp-tests\" \"CREATE\
+    \ USER permission_identity_probe IDENTIFIED BY 'pw'\" nil))\n  (define replacement\
+    \ (sql_account_incarnation \"permission_identity_probe\"))\n  (and (regexp_test\
+    \ first \"^[0-9a-f-]{36}$\") (equal? first rotated)\n    (regexp_test replacement\
+    \ \"^[0-9a-f-]{36}$\") (not (equal? first replacement))))\n"
+  expect:
+    result: true
+- name: Historical native accounts receive distinct incarnations during migration
+  scm: "(begin\n (eval (parse_sql \"memcp-tests\" \"CREATE USER permission_identity_history\
+    \ IDENTIFIED BY 'pw'\" nil))\n (migratedropcolumn (table \"system\" false \"user\"\
+    \ false nil) \"sql_principal_id\")\n (sql_initialize_account_incarnations)\n (define\
+    \ root (sql_account_incarnation \"root\"))\n (define first (sql_account_incarnation\
+    \ \"permission_identity_probe\"))\n (define second (sql_account_incarnation \"\
+    permission_identity_history\"))\n (and (regexp_test root \"^[0-9a-f-]{36}$\")\
+    \ (regexp_test first \"^[0-9a-f-]{36}$\")\n  (regexp_test second \"^[0-9a-f-]{36}$\"\
+    ) (not (equal? root first))\n  (not (equal? root second)) (not (equal? first second))))"
+  expect:
+    result: true
+- name: Authentication snapshots return the exact current incarnation and reject invalid
+    credentials
+  scm: "(begin\n (define id (sql_account_incarnation \"permission_identity_probe\"\
+    ))\n (and (not (nil? id)) (equal? (sql_authenticate_incarnation \"permission_identity_probe\"\
+    \ \"pw\") id)\n  (nil? (sql_authenticate_incarnation \"permission_identity_probe\"\
+    \ \"incorrect\"))\n  (nil? (sql_authenticate_incarnation \"missing_identity_account\"\
+    \ \"pw\"))))"
+  expect:
+    result: true
+- name: Incarnation initialization is idempotent for an existing native account
+  scm: "(begin\n (define id (sql_account_incarnation \"permission_identity_probe\"\
+    ))\n (sql_initialize_account_incarnations)\n (equal? id (sql_account_incarnation\
+    \ \"permission_identity_probe\")))"
+  expect:
+    result: true
+- name: Native restart persists account incarnations and their authentication binding
+  sql: SHUTDOWN
+  restart_timeout: 60
+  expect:
+    rows: 0
+- name: Recovered accounts still authenticate against their persisted incarnation
+  scm: "(begin\n (define id (sql_account_incarnation \"permission_identity_probe\"\
+    ))\n (and (equal? (uuid_version id) 4) (equal? (sql_authenticate_incarnation \"\
+    permission_identity_probe\" \"pw\") id)))"
+  expect:
+    result: true

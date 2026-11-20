@@ -1,0 +1,84 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  description: Positive capability specifications for missing scalar and query shapes
+  syntax: tsql
+  isolated: true
+setup:
+- sql: DROP TABLE IF EXISTS probe_records
+- sql: CREATE TABLE probe_records(id INT PRIMARY KEY,value INT)
+- sql: INSERT probe_records VALUES(1,5),(2,7)
+cleanup:
+- sql: DROP TABLE IF EXISTS probe_records
+# These are positive specifications, not expected-error substitutes. Keep the
+# missing contracts visible until their owning frontend/planner supports them.
+test_cases:
+- name: Character search returns a one-based position
+  sql: SELECT CHARINDEX(N'b',N'abc') AS value
+  expect: {rows: 1, data: [{value: 2}]}
+  noncritical: true
+- name: Pattern search returns the first matched character
+  sql: SELECT PATINDEX(N'%b%',N'abc') AS value
+  expect: {rows: 1, data: [{value: 2}]}
+  noncritical: true
+- name: Character insertion removes the requested span
+  sql: SELECT STUFF(N'abcdef',2,3,N'X') AS value
+  expect: {rows: 1, data: [{value: aXef}]}
+  noncritical: true
+- name: String repetition is an ordinary scalar expression
+  sql: SELECT REPLICATE(N'ab',3) AS value
+  expect: {rows: 1, data: [{value: ababab}]}
+  noncritical: true
+- name: ASCII character construction is supported
+  sql: SELECT CHAR(65) AS value
+  expect: {rows: 1, data: [{value: A}]}
+  noncritical: true
+- name: ASCII character extraction is supported
+  sql: SELECT ASCII('A') AS value
+  expect: {rows: 1, data: [{value: 65}]}
+  noncritical: true
+- name: Numeric power retains integer output for integer input
+  sql: SELECT POWER(2,3) AS value
+  expect: {rows: 1, data: [{value: 8}]}
+  noncritical: true
+- name: Numeric sign distinguishes negative values
+  sql: SELECT SIGN(-5) AS value
+  expect: {rows: 1, data: [{value: -1}]}
+  noncritical: true
+- name: Numeric text validation recognizes a decimal integer
+  sql: SELECT ISNUMERIC(N'12') AS value
+  expect: {rows: 1, data: [{value: 1}]}
+  noncritical: true
+- name: Calendar text validation recognizes an unambiguous date
+  sql: SELECT ISDATE(N'20240101') AS value
+  expect: {rows: 1, data: [{value: 1}]}
+  noncritical: true
+- name: Calendar name extraction returns the year as text
+  sql: SELECT DATENAME(year,CONVERT(DATE,'20240101',112)) AS value
+  expect: {rows: 1, data: [{value: '2024'}]}
+  noncritical: true
+- name: National character data length counts UTF16 bytes
+  sql: SELECT DATALENGTH(N'ab') AS value
+  expect: {rows: 1, data: [{value: 4}]}
+  noncritical: true
+- name: Database identifier lookup returns a valid current identifier
+  sql: SELECT CASE WHEN DB_ID(DB_NAME()) IS NULL THEN 0 ELSE 1 END AS value
+  expect: {rows: 1, data: [{value: 1}]}
+  noncritical: true
+- name: Current schema lookup exposes the default owner
+  sql: SELECT SCHEMA_NAME() AS value
+  expect: {rows: 1, data: [{value: dbo}]}
+  noncritical: true
+- name: Table variables participate in ordinary relational queries
+  sql: DECLARE @rows TABLE(id INT); INSERT @rows VALUES(1); SELECT COUNT(*) AS value FROM @rows
+  expect: {rows: 1, data: [{value: 1}]}
+  noncritical: true
+- name: SELECT assignment sets a declared batch variable
+  sql: DECLARE @value INT; SELECT @value=value FROM probe_records WHERE id=1; SELECT @value AS value
+  expect: {rows: 1, data: [{value: 5}]}
+  noncritical: true
+- name: Row numbering remains visible after selection
+  sql: SELECT ROW_NUMBER() OVER(ORDER BY id) AS value FROM probe_records WHERE id=1
+  expect: {rows: 1, data: [{value: 1}]}
+  noncritical: true

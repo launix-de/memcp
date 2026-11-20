@@ -1,0 +1,295 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  description: Cursor FOR UPDATE source-column declarations preserve supported snapshot and FETCH semantics
+# https://learn.microsoft.com/sql/t-sql/language-elements/declare-cursor-transact-sql
+# https://learn.microsoft.com/sql/t-sql/queries/select-clause-transact-sql
+# SQL Server 2022 controls: https://dbfiddle.uk/5IyV7uDc and https://dbfiddle.uk/PonbP5-R
+# Complete fixture results, including keyword boundaries: https://dbfiddle.uk/h7N2AtIS
+setup:
+- sql: CREATE TABLE update_cursor_values(id INT,qty INT,label VARCHAR(10))
+- sql: INSERT update_cursor_values VALUES(1,11,'one'),(2,NULL,'two'),(3,33,'three')
+- sql: CREATE TABLE update_cursor_keyed(id INT PRIMARY KEY,qty INT)
+- sql: INSERT update_cursor_keyed VALUES(1,11),(2,22)
+cleanup:
+- sql: DROP PROCEDURE IF EXISTS update_cursor_module
+- sql: DROP TABLE IF EXISTS update_cursor_keyed
+- sql: DROP TABLE IF EXISTS update_cursor_values
+test_cases:
+- name: FOR UPDATE OF retains KEYSET implicit conversion and NULL fetch values
+  sql: |
+    DECLARE updating CURSOR LOCAL KEYSET FOR
+      SELECT id,qty FROM update_cursor_values ORDER BY id FOR UPDATE OF qty;
+    DECLARE @first INT,@second INT=99,@last INT,@count INT,@status INT;
+    OPEN updating;
+    SET @count=@@CURSOR_ROWS;
+    FETCH FIRST FROM updating INTO @first,@last;
+    FETCH NEXT FROM updating INTO @last,@second;
+    SET @status=@@FETCH_STATUS;
+    FETCH LAST FROM updating INTO @last,@first;
+    DEALLOCATE updating;
+    SELECT @count AS total,@second AS null_value,@last AS last_id,@first AS last_qty,@status AS fetch_status;
+  expect: {rows: 1,data: [{total: 3,null_value: null,last_id: 3,last_qty: 33,fetch_status: 0}]}
+- name: An OF source column need not be projected by SELECT
+  sql: |
+    DECLARE source_only CURSOR LOCAL KEYSET FOR
+      SELECT id,label FROM update_cursor_values ORDER BY id FOR UPDATE OF qty;
+    DECLARE @id INT,@label VARCHAR(10);
+    OPEN source_only;
+    FETCH ABSOLUTE 2 FROM source_only INTO @id,@label;
+    DEALLOCATE source_only;
+    SELECT @id AS id,@label AS label;
+  expect: {rows: 1,data: [{id: 2,label: two}]}
+- name: Qualified aliases case folding and duplicate OF entries share source binding
+  sql: |
+    DECLARE qualified CURSOR LOCAL KEYSET FOR
+      SELECT s.id,s.qty AS amount FROM update_cursor_values s ORDER BY s.id
+      FOR UPDATE OF s.QTY,s.qty;
+    DECLARE @id INT,@amount INT;
+    OPEN qualified;
+    FETCH LAST FROM qualified INTO @id,@amount;
+    DEALLOCATE qualified;
+    SELECT @id AS id,@amount AS amount;
+  expect: {rows: 1,data: [{id: 3,amount: 33}]}
+- name: An unaliased relation qualifier names its source column
+  sql: |
+    DECLARE qualified_table CURSOR LOCAL KEYSET FOR
+      SELECT id,qty FROM update_cursor_values ORDER BY id FOR UPDATE OF update_cursor_values.qty;
+    DECLARE @id INT,@qty INT;
+    OPEN qualified_table;
+    FETCH FIRST FROM qualified_table INTO @id,@qty;
+    DEALLOCATE qualified_table;
+    SELECT @id AS id,@qty AS qty;
+  expect: {rows: 1,data: [{id: 1,qty: 11}]}
+- name: A projected expression does not hide an update column in FROM
+  sql: |
+    DECLARE projected CURSOR LOCAL KEYSET FOR
+      SELECT id,qty+1 AS qty FROM update_cursor_values ORDER BY id FOR UPDATE OF qty;
+    DECLARE @id INT,@qty INT;
+    OPEN projected;
+    FETCH FIRST FROM projected INTO @id,@qty;
+    DEALLOCATE projected;
+    SELECT @id AS id,@qty AS value;
+  expect: {rows: 1,data: [{id: 1,value: 12}]}
+- name: Direct derived exports retain base-column lineage for OF
+  sql: |
+    DECLARE derived CURSOR LOCAL KEYSET FOR
+      SELECT v.id,v.quantity FROM(SELECT id,qty AS quantity FROM update_cursor_values)v
+      ORDER BY v.id FOR UPDATE OF v.quantity;
+    DECLARE @id INT,@qty INT;
+    OPEN derived;
+    FETCH LAST FROM derived INTO @id,@qty;
+    DEALLOCATE derived;
+    SELECT @id AS id,@qty AS qty;
+  expect: {rows: 1,data: [{id: 3,qty: 33}]}
+- name: Grouping converts a declared update cursor without promising positioned writes
+  sql: |
+    DECLARE grouped CURSOR LOCAL SCROLL FOR
+      SELECT qty,COUNT(*) AS total FROM update_cursor_values GROUP BY qty ORDER BY qty FOR UPDATE OF qty;
+    DECLARE @qty INT=99,@total INT;
+    OPEN grouped;
+    FETCH FIRST FROM grouped INTO @qty,@total;
+    DEALLOCATE grouped;
+    SELECT @qty AS qty,@total AS total;
+  expect: {rows: 1,data: [{qty: null,total: 1}]}
+- name: FOR UPDATE without OF accepts all source columns
+  sql: |
+    DECLARE all_columns CURSOR LOCAL KEYSET FOR
+      SELECT id,qty FROM update_cursor_values ORDER BY id FOR UPDATE;
+    DECLARE @id INT,@qty INT;
+    OPEN all_columns;
+    FETCH LAST FROM all_columns INTO @id,@qty;
+    DEALLOCATE all_columns;
+    SELECT @id AS id,@qty AS qty;
+  expect: {rows: 1,data: [{id: 3,qty: 33}]}
+- name: An assigned cursor retains the same update declaration and FETCH contract
+  sql: |
+    DECLARE @cursor CURSOR,@id INT,@qty INT;
+    SET @cursor=CURSOR LOCAL KEYSET FOR SELECT id,qty FROM update_cursor_values ORDER BY id FOR UPDATE OF qty;
+    OPEN @cursor;
+    FETCH FIRST FROM @cursor INTO @id,@qty;
+    DEALLOCATE @cursor;
+    SELECT @id AS id,@qty AS qty;
+  expect: {rows: 1,data: [{id: 1,qty: 11}]}
+- name: ISO SCROLL permits FOR UPDATE before its implicit snapshot conversion
+  sql: |
+    DECLARE iso_update SCROLL CURSOR FOR
+      SELECT id,qty FROM update_cursor_values ORDER BY id FOR UPDATE OF qty;
+    DECLARE @id INT,@qty INT;
+    OPEN iso_update;
+    FETCH LAST FROM iso_update INTO @id,@qty;
+    DEALLOCATE iso_update;
+    SELECT @id AS id,@qty AS qty;
+  expect: {rows: 1,data: [{id: 3,qty: 33}]}
+- name: A query hint after OF remains part of the executable SELECT
+  sql: |
+    DECLARE hinted CURSOR LOCAL KEYSET FOR
+      SELECT id,qty FROM update_cursor_values ORDER BY id FOR UPDATE OF qty OPTION(MAXDOP 1);
+    DECLARE @id INT,@qty INT;
+    OPEN hinted;
+    FETCH FIRST FROM hinted INTO @id,@qty;
+    DEALLOCATE hinted;
+    SELECT @id AS id,@qty AS qty;
+  expect: {rows: 1,data: [{id: 1,qty: 11}]}
+- name: Query hints before OF remain valid
+  sql: |
+    DECLARE hinted_before CURSOR LOCAL KEYSET FOR
+      SELECT id,qty FROM update_cursor_values ORDER BY id OPTION(MAXDOP 1) FOR UPDATE OF qty;
+    DECLARE @id INT,@qty INT;
+    OPEN hinted_before;
+    FETCH LAST FROM hinted_before INTO @id,@qty;
+    DEALLOCATE hinted_before;
+    SELECT @id AS id,@qty AS qty;
+  expect: {rows: 1,data: [{id: 3,qty: 33}]}
+- name: An empty implicitly converted update cursor retains empty status
+  sql: |
+    DECLARE empty_update CURSOR LOCAL KEYSET FOR
+      SELECT id,qty FROM update_cursor_values WHERE id=99 ORDER BY id FOR UPDATE OF qty;
+    DECLARE @id INT=7,@qty INT=8,@cursor_status INT,@fetch INT,@rows INT;
+    OPEN empty_update;
+    SET @rows=@@CURSOR_ROWS;
+    SET @cursor_status=CURSOR_STATUS('local','empty_update');
+    FETCH FIRST FROM empty_update INTO @id,@qty;
+    SET @fetch=@@FETCH_STATUS;
+    DEALLOCATE empty_update;
+    SELECT @rows AS total,@cursor_status AS cursor_status,@fetch AS fetch_status,@id AS id,@qty AS qty;
+  expect: {rows: 1,data: [{total: 0,cursor_status: 0,fetch_status: -1,id: 7,qty: 8}]}
+- name: A module retains update-column cursor syntax until invocation
+  sql: |
+    CREATE PROCEDURE update_cursor_module AS
+    BEGIN
+      DECLARE deferred CURSOR LOCAL FOR SELECT id,qty FROM update_cursor_keyed FOR UPDATE OF qty;
+      DECLARE @id INT,@qty INT;
+      OPEN deferred;
+      FETCH NEXT FROM deferred INTO @id,@qty;
+      UPDATE update_cursor_keyed SET qty=@qty+1 WHERE CURRENT OF deferred;
+      DEALLOCATE deferred;
+    END;
+- name: An aggregate without ORDER BY leaves FOR UPDATE at the cursor suffix
+  sql: |
+    DECLARE aggregate_update CURSOR LOCAL FOR
+      SELECT MAX(qty) AS maximum FROM update_cursor_values FOR UPDATE OF id,qty;
+    DECLARE @maximum INT;
+    OPEN aggregate_update;
+    FETCH NEXT FROM aggregate_update INTO @maximum;
+    DEALLOCATE aggregate_update;
+    SELECT @maximum AS maximum;
+  expect: {rows: 1,data: [{maximum: 33}]}
+- name: Quoted FOR aliases and result names remain valid identifiers
+  sql: |
+    DECLARE quoted_keyword CURSOR LOCAL KEYSET FOR
+      SELECT [for].id,[for].qty FROM update_cursor_values AS [for] ORDER BY [for].id FOR UPDATE OF [for].qty;
+    DECLARE @id INT,@qty INT;
+    OPEN quoted_keyword;
+    FETCH FIRST FROM quoted_keyword INTO @id,@qty;
+    DEALLOCATE quoted_keyword;
+    SELECT @id AS [for],@qty AS qty;
+  expect: {rows: 1,data: [{for: 1,qty: 11}]}
+- name: FOR inside literals comments and longer identifiers preserves source bytes
+  sql: |
+    SELECT /* FOR UPDATE OF missing */ 'FOR UPDATE OF qty' AS phrase,format_source.qty AS value
+    FROM update_cursor_values AS format_source /* FOR UPDATE OF nonexistent */ WHERE format_source.id=1;
+  expect: {rows: 1,data: [{phrase: FOR UPDATE OF qty,value: 11}]}
+- name: Bare reserved FOR cannot become an implicit source alias
+  sql: SELECT id FROM update_cursor_values AS FOR
+  expect: {error: true}
+- name: Missing OF columns fail declaration with SQL error 207
+  sql: |
+    BEGIN TRY
+      EXEC(N'DECLARE missing_column CURSOR LOCAL KEYSET FOR SELECT id,qty FROM update_cursor_values ORDER BY id FOR UPDATE OF missing');
+      SELECT 0 AS error_number;
+    END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS error_number; END CATCH;
+  expect: {rows: 1,data: [{error_number: 207}]}
+- name: SELECT aliases cannot authorize an OF column
+  sql: |
+    BEGIN TRY
+      EXEC(N'DECLARE projected_alias CURSOR LOCAL KEYSET FOR SELECT id,qty AS amount FROM update_cursor_values ORDER BY id FOR UPDATE OF amount');
+      SELECT 0 AS error_number;
+    END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS error_number; END CATCH;
+  expect: {rows: 1,data: [{error_number: 207}]}
+- name: Ambiguous OF names retain SQL error 209
+  sql: |
+    BEGIN TRY
+      EXEC(N'DECLARE ambiguous CURSOR LOCAL FOR SELECT a.id,a.qty FROM update_cursor_values a JOIN update_cursor_values b ON a.id=b.id FOR UPDATE OF qty');
+      SELECT 0 AS error_number;
+    END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS error_number; END CATCH;
+  expect: {rows: 1,data: [{error_number: 209}]}
+- name: An unknown OF qualifier retains SQL error 4104
+  sql: |
+    BEGIN TRY
+      EXEC(N'DECLARE unknown_qualifier CURSOR LOCAL FOR SELECT id,qty FROM update_cursor_values FOR UPDATE OF missing.qty');
+      SELECT 0 AS error_number;
+    END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS error_number; END CATCH;
+  expect: {rows: 1,data: [{error_number: 4104}]}
+- name: Computed derived exports fail OF binding with SQL error 412
+  sql: |
+    BEGIN TRY
+      EXEC(N'DECLARE derived_expression CURSOR LOCAL FOR SELECT v.id,v.qty FROM(SELECT id,qty+1 AS qty FROM update_cursor_values)v FOR UPDATE OF qty');
+      SELECT 0 AS error_number;
+    END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS error_number; END CATCH;
+  expect: {rows: 1,data: [{error_number: 412}]}
+- name: Constant VALUES exports fail OF binding with SQL error 412
+  sql: |
+    BEGIN TRY
+      EXEC(N'DECLARE constants CURSOR LOCAL FOR SELECT v.id,v.qty FROM(VALUES(1,11))v(id,qty) FOR UPDATE OF qty');
+      SELECT 0 AS error_number;
+    END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS error_number; END CATCH;
+  expect: {rows: 1,data: [{error_number: 412}]}
+- name: Set operators conflict with FOR UPDATE using SQL error 115
+  sql: |
+    BEGIN TRY
+      EXEC(N'DECLARE set_cursor CURSOR LOCAL FOR SELECT id,qty FROM update_cursor_values UNION ALL SELECT id,qty FROM update_cursor_values FOR UPDATE OF qty');
+      SELECT 0 AS error_number;
+    END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS error_number; END CATCH;
+  expect: {rows: 1,data: [{error_number: 115}]}
+- name: Explicit STATIC conflicts before implicit cursor conversion
+  sql: |
+    BEGIN TRY
+      EXEC(N'DECLARE explicit_static CURSOR LOCAL STATIC FOR SELECT id,qty FROM update_cursor_values FOR UPDATE OF qty');
+      SELECT 0 AS error_number;
+    END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS error_number; END CATCH;
+  expect: {rows: 1,data: [{error_number: 1048}]}
+- name: Explicit READ_ONLY conflicts with FOR UPDATE
+  sql: |
+    BEGIN TRY
+      EXEC(N'DECLARE explicit_readonly CURSOR LOCAL KEYSET READ_ONLY FOR SELECT id,qty FROM update_cursor_values ORDER BY id FOR UPDATE OF qty');
+      SELECT 0 AS error_number;
+    END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS error_number; END CATCH;
+  expect: {rows: 1,data: [{error_number: 1048}]}
+- name: FAST_FORWARD conflicts with FOR UPDATE
+  sql: |
+    BEGIN TRY
+      EXEC(N'DECLARE explicit_fast CURSOR LOCAL FAST_FORWARD FOR SELECT id,qty FROM update_cursor_values FOR UPDATE OF qty');
+      SELECT 0 AS error_number;
+    END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS error_number; END CATCH;
+  expect: {rows: 1,data: [{error_number: 1048}]}
+- name: ISO INSENSITIVE conflicts with FOR UPDATE
+  sql: |
+    BEGIN TRY
+      EXEC(N'DECLARE explicit_insensitive INSENSITIVE CURSOR FOR SELECT id,qty FROM update_cursor_values FOR UPDATE OF qty');
+      SELECT 0 AS error_number;
+    END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS error_number; END CATCH;
+  expect: {rows: 1,data: [{error_number: 1048}]}
+- name: Ordinary dynamic update cursors require genuine dynamic row ownership
+  noncritical: true
+  sql: |
+    DECLARE live_update CURSOR LOCAL FOR SELECT id,qty FROM update_cursor_keyed FOR UPDATE OF qty;
+    DECLARE @id INT,@qty INT;
+    OPEN live_update;
+    FETCH NEXT FROM live_update INTO @id,@qty;
+    DEALLOCATE live_update;
+    SELECT @id AS id,@qty AS qty;
+  expect: {rows: 1,data: [{id: 1,qty: 11}]}
+- name: Positioned writes require genuine current-row ownership
+  noncritical: true
+  sql: |
+    DECLARE positioned CURSOR LOCAL KEYSET FOR SELECT id,qty FROM update_cursor_keyed ORDER BY id FOR UPDATE OF qty;
+    DECLARE @id INT,@qty INT;
+    OPEN positioned;
+    FETCH FIRST FROM positioned INTO @id,@qty;
+    UPDATE update_cursor_keyed SET qty=@qty+5 WHERE CURRENT OF positioned;
+    DEALLOCATE positioned;
+    SELECT qty FROM update_cursor_keyed WHERE id=1;
+  expect: {rows: 1,data: [{qty: 16}]}

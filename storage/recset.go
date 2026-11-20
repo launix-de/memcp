@@ -484,6 +484,9 @@ type recSetKeyResult struct {
 }
 
 func (t *table) scanRecSet(currentTx *TxContext, accessSchema scm.Scmer, accessValues []scm.Scmer, conditionCols []string, condition scm.Scmer) *recSet {
+	currentTx, finishData := t.readDataContext(currentTx)
+	defer finishData()
+
 	atomic.StoreUint64(&t.lastAccessed, uint64(time.Now().UnixNano()))
 	ss := SessionStateFromTx(currentTx)
 	querySeq := querySeqFromTx(currentTx)
@@ -763,7 +766,60 @@ func (r *recSet) projectJoin(currentTx *TxContext, sourceKeyCols []string, targe
 	return target.projectJoinKeysToRecSet(currentTx, targetKeyCols, keys, ss)
 }
 
+// recSetKeyIdentity is an immutable declaration snapshot for NULL-safe native
+// relation membership. Join projection retains its original key semantics.
+// No source cursor, table handle or frontend session escapes into the index.
+type recSetKeyIdentity struct {
+	orders []func(scm.Scmer, scm.Scmer) bool
+}
+
+func newRecSetKeyIdentity(t *table, columns []string, tx *TxContext) *recSetKeyIdentity {
+	identity := &recSetKeyIdentity{orders: make([]func(scm.Scmer, scm.Scmer) bool, len(columns))}
+	for i, name := range columns {
+		declaration := t.ShowColumn(name, false, tx)
+		if declaration.IsNil() {
+			panic("recset_key_index: unknown or invisible key column")
+		}
+		collation := "bin"
+		fields := declaration.Slice()
+		for j := 0; j+1 < len(fields); j += 2 {
+			if scm.String(fields[j]) == "Collation" && !fields[j+1].IsNil() && scm.String(fields[j+1]) != "" {
+				collation = scm.String(fields[j+1])
+				break
+			}
+		}
+		relation := scm.Collate(scm.NewString(collation), scm.NewBool(false))
+		identity.orders[i] = scm.OrderRelationLess(relation.Func())
+	}
+	return identity
+}
+
+func (k *recSetProjectKeys) compare(left, right []scm.Scmer) int {
+	if k.identity == nil {
+		return compareProjectKey(left, right)
+	}
+	for i, order := range k.identity.orders {
+		if left[i].IsNil() {
+			if right[i].IsNil() {
+				continue
+			}
+			return -1
+		}
+		if right[i].IsNil() {
+			return 1
+		}
+		if order(left[i], right[i]) {
+			return -1
+		}
+		if order(right[i], left[i]) {
+			return 1
+		}
+	}
+	return 0
+}
+
 type recSetProjectKeys struct {
+	identity      *recSetKeyIdentity
 	width         int
 	values        []scm.Scmer
 	numericValues map[int64]struct{}
@@ -784,15 +840,24 @@ func (k *recSetProjectKeys) tuple(index int) []scm.Scmer {
 }
 
 func (k *recSetProjectKeys) contains(key []scm.Scmer) bool {
+	if k.identity == nil {
+		// Join membership excludes NULL on both sides. A generic expression
+		// comparator must not coerce a NULL probe into a stored zero key.
+		for _, value := range key {
+			if value.IsNil() {
+				return false
+			}
+		}
+	}
 	if (k.numericValues != nil || k.numericSpan != 0) && len(key) == 1 {
 		if integer, ok := projectNumericInteger(key[0]); ok {
 			return k.containsInteger(integer)
 		}
 	}
 	position := sort.Search(k.count(), func(i int) bool {
-		return compareProjectKey(k.tuple(i), key) >= 0
+		return k.compare(k.tuple(i), key) >= 0
 	})
-	return position < k.count() && compareProjectKey(k.tuple(position), key) == 0
+	return position < k.count() && k.compare(k.tuple(position), key) == 0
 }
 
 // Both execution and frequency costing use the same numeric membership.
@@ -909,7 +974,7 @@ func (k *recSetProjectKeys) sortAndDeduplicate() {
 	sort.Sort(makeProjectKeyIndices(k))
 	write := 1
 	for read := 1; read < count; read++ {
-		if compareProjectKey(k.tuple(write-1), k.tuple(read)) == 0 {
+		if k.compare(k.tuple(write-1), k.tuple(read)) == 0 {
 			continue
 		}
 		if write != read {
@@ -930,7 +995,7 @@ func makeProjectKeyIndices(keys *recSetProjectKeys) *projectKeyIndices {
 
 func (p *projectKeyIndices) Len() int { return p.keys.count() }
 func (p *projectKeyIndices) Less(i, j int) bool {
-	return compareProjectKey(p.keys.tuple(i), p.keys.tuple(j)) < 0
+	return p.keys.compare(p.keys.tuple(i), p.keys.tuple(j)) < 0
 }
 func (p *projectKeyIndices) Swap(i, j int) {
 	left := p.keys.tuple(i)
@@ -941,11 +1006,17 @@ func (p *projectKeyIndices) Swap(i, j int) {
 }
 
 func (r *recSet) collectProjectJoinKeys(currentTx *TxContext, sourceKeyCols []string, ss *scm.SessionState) recSetProjectKeys {
+	return r.collectKeys(currentTx, sourceKeyCols, ss, nil)
+}
+
+func (r *recSet) collectKeys(currentTx *TxContext, sourceKeyCols []string, ss *scm.SessionState, identity *recSetKeyIdentity) recSetProjectKeys {
+	currentTx, finishData := r.table.readDataContext(currentTx)
+	defer finishData()
 	atomic.StoreUint64(&r.table.lastAccessed, uint64(time.Now().UnixNano()))
 	querySeq := querySeqFromTx(currentTx)
 	values := make(chan recSetKeyResult, len(r.shards))
 	width := len(sourceKeyCols)
-	keys := recSetProjectKeys{width: width, values: make([]scm.Scmer, int(r.count)*width)}
+	keys := recSetProjectKeys{identity: identity, width: width, values: make([]scm.Scmer, int(r.count)*width)}
 	offsets := make([]int, len(r.shards)+1)
 	for i := range r.shards {
 		offsets[i+1] = offsets[i] + int(r.shards[i].count)*width
@@ -971,7 +1042,7 @@ func (r *recSet) collectProjectJoinKeys(currentTx *TxContext, sourceKeyCols []st
 				panic("query killed")
 			}
 			dst := keys.values[offsets[partIndex]:offsets[partIndex+1]]
-			used := part.shard.collectProjectJoinKeys(&part, sourceKeyCols, currentTx, ss, dst)
+			used := part.shard.collectKeys(&part, sourceKeyCols, currentTx, ss, dst, identity != nil)
 			values <- recSetKeyResult{part: partIndex, used: used}
 			return scm.NewNil()
 		})
@@ -1008,7 +1079,7 @@ func (r *recSet) collectProjectJoinKeys(currentTx *TxContext, sourceKeyCols []st
 	return keys
 }
 
-func (t *storageShard) collectProjectJoinKeys(part *recSetShard, sourceKeyCols []string, currentTx *TxContext, ss *scm.SessionState, dst []scm.Scmer) int {
+func (t *storageShard) collectKeys(part *recSetShard, sourceKeyCols []string, currentTx *TxContext, ss *scm.SessionState, dst []scm.Scmer, includeNull bool) int {
 	t.ensureLoaded()
 	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
 	t.ensureMainCount(skipShardReadLock, currentTx)
@@ -1071,7 +1142,7 @@ func (t *storageShard) collectProjectJoinKeys(part *recSetShard, sourceKeyCols [
 				for i := range sourceKeyCols {
 					v := colBufs[i][row]
 					dst[write+i] = v
-					if v.IsNil() {
+					if !includeNull && v.IsNil() {
 						skip = true
 					}
 				}
@@ -1090,7 +1161,7 @@ func (t *storageShard) collectProjectJoinKeys(part *recSetShard, sourceKeyCols [
 				} else {
 					dst[write+i] = t.getDelta(int(idx-mainCount), col)
 				}
-				if dst[write+i].IsNil() {
+				if !includeNull && dst[write+i].IsNil() {
 					skip = true
 				}
 			}
@@ -1104,6 +1175,9 @@ func (t *storageShard) collectProjectJoinKeys(part *recSetShard, sourceKeyCols [
 }
 
 func (t *table) projectJoinKeysToRecSet(currentTx *TxContext, targetKeyCols []string, keys recSetProjectKeys, ss *scm.SessionState) *recSet {
+	currentTx, finishData := t.readDataContext(currentTx)
+	defer finishData()
+
 	atomic.StoreUint64(&t.lastAccessed, uint64(time.Now().UnixNano()))
 	result := &recSet{table: t}
 	if keys.count() == 0 {
@@ -1344,12 +1418,18 @@ func (r *recSet) scan(currentTx *TxContext, accessSchema scm.Scmer, accessValues
 	if r == nil || r.table == nil {
 		return neutral
 	}
+	mutation := false
 	for _, col := range callbackCols {
-		if col == "$update" || (len(col) > 11 && col[:11] == "$increment:") ||
+		mutation = mutation || col == "$update"
+		if (len(col) > 11 && col[:11] == "$increment:") ||
 			(len(col) > 5 && col[:5] == "$set:") ||
 			(len(col) > 12 && col[:12] == "$invalidate:") {
 			panic("recset scan mutation callbacks are not implemented")
 		}
+	}
+	if mutation {
+		return r.scanMutation(currentTx, accessSchema, accessValues, conditionCols, condition,
+			callbackCols, mapReduce, neutral, combine, isOuter)
 	}
 	return r.table.scanWithBatchFrom(currentTx, r, accessSchema, accessValues, scanAccess{}, conditionCols, condition,
 		callbackCols, mapReduce, neutral, combine, isOuter, 0, nil)
@@ -1742,6 +1822,8 @@ func (r *recSet) filterToRecSet(currentTx *TxContext, conditionCols []string, co
 	if r == nil {
 		return nil
 	}
+	currentTx, finishData := r.table.readDataContext(currentTx)
+	defer finishData()
 	atomic.StoreUint64(&r.table.lastAccessed, uint64(time.Now().UnixNano()))
 	ss := SessionStateFromTx(currentTx)
 	querySeq := querySeqFromTx(currentTx)

@@ -19,7 +19,13 @@ test_cases:
         `active` BOOLEAN
       )
     expect:
-      affected_rows: 1
+      affected_rows: 0
+      result_contains: '"affected_rows"'
+
+  - name: "Completed MySQL declaration is present: CREATE TABLE with backticked identifiers"
+    syntax: mysql
+    sql: "SHOW CREATE TABLE `compat_users`"
+    expect: {rows: 1,data: [{Table: "compat_users"}]}
 
   - name: "INSERT respects backticks"
     sql: |

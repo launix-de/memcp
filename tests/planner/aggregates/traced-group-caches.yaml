@@ -65,7 +65,7 @@ setup:
       (begin
         (define rows (map (produceN 2000) (lambda (i)
           (list (+ i 1) (if (< i 1000) 10 20)))))
-        (insert (table "memcp-tests" false "trace_partition_document" false)
+        (insert (table "memcp-tests" false "trace_partition_document" false nil)
           '("id" "reference_id") rows)
         2000)
   - sql: |
@@ -112,22 +112,22 @@ setup:
             (if (equal? 0 (- i (* 2 (floor (/ i 2))))) 10 20)
             (+ 1 (- i (* 3 (floor (/ i 3)))))
             (+ i 1)))))
-        (insert (table "memcp-tests" false "trace_multi_owner" false)
+        (insert (table "memcp-tests" false "trace_multi_owner" false nil)
           '("id" "enabled") owners)
-        (insert (table "memcp-tests" false "trace_multi_document" false)
+        (insert (table "memcp-tests" false "trace_multi_document" false nil)
           '("id" "access_id" "tenant_id" "owner_id") documents)
         2400)
   - scm: |
       (begin
-        (rebuild (table "memcp-tests" false "trace_multi_document" false) true false)
-        (rebuild (table "memcp-tests" false "trace_multi_access" false) true false)
-        (rebuild (table "memcp-tests" false "trace_multi_tenant" false) true false))
+        (rebuild (table "memcp-tests" false "trace_multi_document" false nil) true false)
+        (rebuild (table "memcp-tests" false "trace_multi_access" false nil) true false)
+        (rebuild (table "memcp-tests" false "trace_multi_tenant" false nil) true false))
 
 test_cases:
   - name: "Aggregate partitioning compares the eligible bulk boolean carrier"
     scm: |
       (begin
-        (define domain (list "access" "memcp-tests" "trace_partition_access" false nil))
+        (define domain (list "access" "memcp-tests" "trace_partition_access" false nil (sql_relation_declarations "memcp-tests" "trace_partition_access" nil)))
         (and
           (not (aggregate_pushdown_cost_preferred? 2000 3 (list domain)))
           (aggregate_pushdown_cost_preferred? 2000 3 (list nil))
@@ -175,7 +175,7 @@ test_cases:
     scm: |
       (begin
         (define driver (list "document" "memcp-tests"
-          "trace_partition_document" false nil))
+          "trace_partition_document" false nil (sql_relation_declarations "memcp-tests" "trace_partition_document" nil)))
         (define keys (list (list (quote get_column)
           "document" false "reference_id" false)))
         (and
@@ -190,7 +190,7 @@ test_cases:
     scm: |
       (begin
         (define driver (list "document" "memcp-tests"
-          "trace_multi_document" false nil))
+          "trace_multi_document" false nil (sql_relation_declarations "memcp-tests" "trace_multi_document" nil)))
         (define tenant_col (list (quote get_column)
           "document" false "tenant_id" true))
         (and
@@ -254,7 +254,7 @@ test_cases:
     scm: |
       (begin
         (define driver (list "document" "memcp-tests"
-          "trace_multi_document" false nil))
+          "trace_multi_document" false nil (sql_relation_declarations "memcp-tests" "trace_multi_document" nil)))
         (define columns '("access_id" "tenant_id"))
         (define keys (map columns (lambda (column)
           (list (quote get_column) "document" false column false))))
@@ -589,6 +589,31 @@ test_cases:
         - "dependent-subquery"
         - ".grp:"
         - "(scan"
+
+  - name: "Referenced key declarations are finite pure compile facts"
+    scm: |
+      (begin
+        (define declarations (sql_relation_declarations "memcp-tests" "trace_partition_document" nil))
+        (define driver (list "document" "memcp-tests" "trace_partition_document" false nil declarations))
+        (define referenced (source_referenced_declarations driver "trace_partition_access"))
+        (define target (list "target" "memcp-tests" "trace_partition_access" false nil referenced))
+        (and referenced (not (has_assoc? referenced "references"))
+          (expression_equal? referenced (sql_declaration_data referenced))
+          (equal? (source_primary_key_columns target) '("id"))))
+    expect: {result: true}
+
+  - name: "Declaration guards include consumed referenced target metadata"
+    scm: |
+      (!begin
+        (define expected (sql_relation_declarations "memcp-tests" "trace_partition_document" nil))
+        (define before (sql_relation_declarations_match? "memcp-tests" "trace_partition_document" nil expected))
+        (define target (table "memcp-tests" false "trace_partition_access" false nil))
+        (createcolumn target "declaration_guard_probe" "INT" '() '())
+        (define invalidated (not (sql_relation_declarations_match? "memcp-tests" "trace_partition_document" nil expected)))
+        (dropcolumn target "declaration_guard_probe")
+        (and before invalidated
+          (sql_relation_declarations_match? "memcp-tests" "trace_partition_document" nil expected)))
+    expect: {result: true}
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS trace_multi_document"

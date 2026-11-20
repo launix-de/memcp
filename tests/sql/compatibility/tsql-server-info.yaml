@@ -1,0 +1,247 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  description: Bounded virtual server profile and read only registry compatibility
+  syntax: tsql
+  requires_tds: true
+  isolated: true
+setup: []
+cleanup: []
+test_cases:
+- name: Virtual product identity has a declared bounded result
+  sql: EXEC master.dbo.xp_msver N'ProductName'
+  expect:
+    rows: 1
+    data:
+    - Index: 1
+      Name: ProductName
+      Internal_Value: null
+      Character_Value: MemCP
+- name: Compatibility version is parseable and independent of the binary
+  sql: EXEC sys.xp_msver N'ProductVersion'
+  expect:
+    rows: 1
+    data:
+    - Index: 2
+      Name: ProductVersion
+      Internal_Value: 1048576
+      Character_Value: 16.0.0.1
+- name: Unknown host physical memory remains unknown
+  sql: EXEC xp_msver N'PhysicalMemory'
+  expect:
+    rows: 1
+    data:
+    - Index: 19
+      Name: PhysicalMemory
+      Internal_Value: null
+      Character_Value: null
+- name: Processor count describes one virtual slot
+  sql: EXEC xp_msver N'pRoCeSsOrCoUnT'
+  expect:
+    rows: 1
+    data:
+    - Index: 16
+      Name: ProcessorCount
+      Internal_Value: 1
+      Character_Value: '1'
+- name: Full profile exposes seven bounded virtual facts
+  sql: EXEC xp_msver
+  expect:
+    rows: 7
+- name: Unknown option
+  sql: EXEC xp_msver N'HostName'
+  expect:
+    error: true
+- name: Extra option
+  sql: EXEC xp_msver N'ProductName', N'Platform'
+  expect:
+    error: true
+- name: Unknown named option
+  sql: EXEC xp_msver @unknown=N'ProductName'
+  expect:
+    error: true
+- name: NULL explicit option
+  sql: EXEC xp_msver NULL
+  expect:
+    error: true
+- name: Virtual registry root uses the same opaque filesystem namespace
+  sql: DECLARE @path NVARCHAR(512); EXEC master.dbo.xp_instance_regread N'HKEY_LOCAL_MACHINE',
+    N'SOFTWARE\Microsoft\MSSQLServer\Setup', N'SQLPath', @path OUTPUT; SELECT @path
+    AS path
+  expect:
+    rows: 1
+    data:
+    - path: C:\MemCP\
+- name: Read only registry calls expose the declared value and data
+  sql: EXEC xp_regread N'HKEY_LOCAL_MACHINE', N'SOFTWARE\Microsoft\MSSQLServer\Setup',
+    N'SQLPath'
+  expect:
+    rows: 1
+    data:
+    - Value: SQLPath
+      Data: C:\MemCP\
+- name: Registry Data shares the server property location
+  sql: DECLARE @path NVARCHAR(512); EXEC xp_regread N'HKEY_LOCAL_MACHINE', N'SOFTWARE\Microsoft\MSSQLServer\MSSQLServer',
+    N'DefaultData', @path OUTPUT; SELECT @path AS path
+  expect:
+    rows: 1
+    data:
+    - path: C:\MemCP\Data\
+- name: Registry Log shares the server property location
+  sql: DECLARE @path NVARCHAR(512); EXEC xp_regread N'HKEY_LOCAL_MACHINE', N'SOFTWARE\Microsoft\MSSQLServer\MSSQLServer',
+    N'DefaultLog', @path OUTPUT; SELECT @path AS path
+  expect:
+    rows: 1
+    data:
+    - path: C:\MemCP\Log\
+- name: Missing required registry arguments
+  sql: EXEC xp_regread N'HKEY_LOCAL_MACHINE'
+  expect:
+    error: true
+- name: Unknown registry root
+  sql: EXEC xp_regread N'HKEY_CURRENT_USER',N'SOFTWARE\Microsoft\MSSQLServer\Setup',N'SQLPath'
+  expect:
+    error: true
+- name: Unlisted registry value
+  sql: EXEC xp_regread N'HKEY_LOCAL_MACHINE',N'SOFTWARE\Microsoft\MSSQLServer\Setup',N'HostName'
+  expect:
+    error: true
+- name: Registry traversal
+  sql: EXEC xp_regread N'HKEY_LOCAL_MACHINE',N'SOFTWARE\Microsoft\MSSQLServer\Setup\..',N'SQLPath'
+  expect:
+    error: true
+- name: Registry literal cannot replace OUTPUT
+  sql: EXEC xp_regread N'HKEY_LOCAL_MACHINE', N'SOFTWARE\Microsoft\MSSQLServer\Setup',
+    N'SQLPath', N'other'
+  expect:
+    error: true
+- name: Extra registry argument
+  sql: DECLARE @path NVARCHAR(512); EXEC xp_regread N'HKEY_LOCAL_MACHINE', N'SOFTWARE\Microsoft\MSSQLServer\Setup',
+    N'SQLPath', @path OUTPUT, 1
+  expect:
+    error: true
+- name: Registry writes are unavailable
+  sql: EXEC xp_regwrite N'HKEY_LOCAL_MACHINE', N'SOFTWARE\Microsoft\MSSQLServer\Setup',
+    N'SQLPath'
+  expect:
+    error: true
+- name: Typed variant conversion supports integer cluster status and built in name
+    aliases
+  sql: SELECT CAST(SERVERPROPERTY(N'IsClustered') AS BIT) AS clustered, CAST(SERVERPROPERTY(N'Edition')
+    AS SYSNAME) AS edition, CONVERT(SYSNAME,SERVERPROPERTY(N'Collation')) AS collation
+  expect:
+    rows: 1
+    data:
+    - clustered: false
+      edition: MemCP
+      collation: utf8mb4_general_ci
+- name: TDS retains variant subtypes and declared name alias widths
+  tds:
+    statements:
+    - sql: SELECT SERVERPROPERTY(N'ProductVersion') AS version,SERVERPROPERTY(N'IsClustered')
+        AS clustered,SERVERPROPERTY(N'Collation') AS collation
+      expect:
+        rows: 1
+        data:
+        - version: 16.0.0.1
+          clustered: 0
+          collation: utf8mb4_general_ci
+        column_types:
+        - name: version
+          type: SQL_VARIANT
+        - name: clustered
+          type: SQL_VARIANT
+        - name: collation
+          type: SQL_VARIANT
+    - sql: SELECT CAST(SERVERPROPERTY(@property) AS BIT) AS clustered, CAST(N'virtual'
+        AS SYSNAME) AS name
+      prepare: true
+      parameters:
+      - name: property
+        value: IsClustered
+      expect:
+        rows: 1
+        data:
+        - clustered: false
+          name: virtual
+        column_types:
+        - name: clustered
+          type: BIT
+        - name: name
+          type: NVARCHAR
+          size: 256
+- name: Profile procedure preserves return status and typed nullable result descriptors
+  scm: "(begin\n  (define s (newsession))\n  (s \"username\" \"root\") (s \"schema\"\
+    \ \"memcp-tests\")\n  (define out (newsession))\n  (define status (tsql_execute_request\
+    \ \"memcp-tests\" \"EXEC xp_msver N'PhysicalMemory'\" s nil 0\n    (lambda (row)\
+    \ (out \"row\" row))\n    (lambda (names columns) (out \"columns\" columns))))\n\
+    \  (and (equal? status 1)\n    (equal? ((nth (out \"columns\") 0) \"sql_type\"\
+    ) \"INT\")\n    (equal? ((nth (out \"columns\") 1) \"size\") 64)\n    (equal?\
+    \ ((nth (out \"columns\") 2) \"flags\") 1)\n    (equal? ((nth (out \"columns\"\
+    ) 3) \"size\") 1024)\n    (nil? ((out \"row\") \"Internal_Value\"))\n    (nil?\
+    \ ((out \"row\") \"Character_Value\"))))"
+  expect:
+    result: true
+- name: TDS procedure result columns retain declared dimensions
+  tds:
+    statements:
+    - sql: EXEC xp_msver N'PhysicalMemory'
+      expect:
+        rows: 1
+        data:
+        - Index: 19
+          Name: PhysicalMemory
+          Internal_Value: null
+          Character_Value: null
+        column_types:
+        - name: Index
+          type: INT
+        - name: Name
+          type: NVARCHAR
+          size: 64
+        - name: Internal_Value
+          type: INT
+        - name: Character_Value
+          type: NVARCHAR
+          size: 1024
+- name: Packed Microsoft version uses the declared compatibility profile
+  sql: SELECT @@mIcRoSoFtVeRsIoN AS packed
+  expect:
+    rows: 1
+    data: [{packed: 268435456}]
+- name: Packed version fields agree with ProductVersion and exclude its revision
+  sql: >-
+    SELECT CASE WHEN
+      ((@@MICROSOFTVERSION / 16777216) & 255) = CONVERT(INT,PARSENAME(CONVERT(VARCHAR(32),SERVERPROPERTY(N'ProductVersion')),4))
+      AND ((@@MICROSOFTVERSION / 65536) & 255) = CONVERT(INT,PARSENAME(CONVERT(VARCHAR(32),SERVERPROPERTY(N'ProductVersion')),3))
+      AND (@@MICROSOFTVERSION & 65535) = CONVERT(INT,PARSENAME(CONVERT(VARCHAR(32),SERVERPROPERTY(N'ProductVersion')),2))
+      AND CONVERT(INT,PARSENAME(CONVERT(VARCHAR(32),SERVERPROPERTY(N'ProductVersion')),1)) = 1
+      THEN 1 ELSE 0 END AS consistent
+  expect:
+    rows: 1
+    data: [{consistent: 1}]
+- name: Capability batches can branch on packed major and build fields
+  sql: >-
+    DECLARE @supported INT = 0;
+    IF @@MICROSOFTVERSION / POWER(2,24) >= 16 AND (@@MICROSOFTVERSION & 65535) = 0
+      SET @supported = 1;
+    SELECT @supported AS supported
+  expect:
+    rows: 1
+    data: [{supported: 1}]
+- name: Prepared TDS Microsoft version retains an INT descriptor
+  tds:
+    statements:
+    - sql: SELECT @@MICROSOFTVERSION AS packed
+      prepare: true
+      expect:
+        rows: 1
+        data: [{packed: 268435456}]
+        column_types: [{name: packed, type: INT}]
+- name: Unknown global version names remain unsupported
+  sql: SELECT @@MICROSOFTVERSION_UNKNOWN AS packed
+  expect: {error: true}
+- name: Microsoft version is a global value rather than a callable function
+  sql: SELECT @@MICROSOFTVERSION() AS packed
+  expect: {error: true}

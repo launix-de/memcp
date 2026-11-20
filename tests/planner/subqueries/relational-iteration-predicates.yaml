@@ -1,0 +1,126 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# https://learn.microsoft.com/sql/t-sql/language-elements/while-transact-sql
+metadata:
+  syntax: tsql
+  isolated: true
+  description: Relational iteration predicates bind each current state and caller before ordinary native execution
+setup:
+- sql: CREATE TABLE predicate_values(id INT PRIMARY KEY,owner_id INT)
+- sql: INSERT predicate_values VALUES(1,1),(2,1),(3,2)
+- sql: CREATE TABLE predicate_callers(id INT PRIMARY KEY,owner_id INT)
+- sql: INSERT predicate_callers VALUES(1,1),(2,NULL),(3,2),(4,1)
+- sql: |
+    CREATE FUNCTION dbo.predicate_count(@owner INT,@start INT) RETURNS INT AS BEGIN
+      DECLARE @n INT=@start;
+      WHILE @n<(SELECT COUNT(*) FROM predicate_values WHERE owner_id=@owner)
+        SET @n=@n+1;
+      RETURN @n;
+    END
+- sql: |
+    CREATE FUNCTION dbo.predicate_remaining(@start INT) RETURNS INT AS BEGIN
+      DECLARE @n INT=@start;
+      WHILE (SELECT COUNT(*) FROM predicate_values WHERE id>@n)>0
+        SET @n=@n+1;
+      RETURN @n;
+    END
+- sql: |
+    CREATE FUNCTION dbo.predicate_empty(@owner INT) RETURNS INT AS BEGIN
+      DECLARE @n INT=7;
+      WHILE @n<(SELECT id FROM predicate_values WHERE owner_id=@owner)
+        SET @n=@n+1;
+      RETURN @n;
+    END
+- sql: |
+    CREATE FUNCTION dbo.predicate_local() RETURNS INT AS BEGIN
+      DECLARE @rows TABLE(id INT);
+      INSERT @rows SELECT 1;
+      DECLARE @n INT=0;
+      WHILE (SELECT COUNT(*) FROM @rows)>@n BEGIN
+        SET @n=@n+1;
+        INSERT @rows SELECT @n+1 WHERE @n<3;
+      END
+      RETURN @n;
+    END
+- sql: |
+    CREATE FUNCTION dbo.predicate_global_count() RETURNS INT AS BEGIN
+      DECLARE @n INT=0;
+      WHILE @n<(SELECT COUNT(*) FROM predicate_values) SET @n=@n+1;
+      RETURN @n;
+    END
+- sql: |
+    CREATE FUNCTION dbo.predicate_global_filtered() RETURNS INT AS BEGIN
+      DECLARE @n INT=0;
+      WHILE @n<(SELECT COUNT(*) FROM predicate_values WHERE id>0) SET @n=@n+1;
+      RETURN @n;
+    END
+cleanup:
+- sql: DROP FUNCTION IF EXISTS dbo.predicate_global_filtered
+- sql: DROP FUNCTION IF EXISTS dbo.predicate_global_count
+- sql: DROP FUNCTION IF EXISTS dbo.predicate_local
+- sql: DROP FUNCTION IF EXISTS dbo.predicate_empty
+- sql: DROP FUNCTION IF EXISTS dbo.predicate_remaining
+- sql: DROP FUNCTION IF EXISTS dbo.predicate_count
+- sql: DROP TABLE IF EXISTS predicate_callers
+- sql: DROP TABLE IF EXISTS predicate_values
+test_cases:
+- name: Each condition uses the current local state rather than its first value
+  sql: SELECT dbo.predicate_remaining(0) AS value,dbo.predicate_remaining(2) AS later_start
+  expect: {rows: 1,data: [{value: 3,later_start: 3}]}
+- name: Repeated and NULL callers retain their separate predicate domains
+  sql: SELECT id,dbo.predicate_count(owner_id,0) AS value FROM predicate_callers ORDER BY id
+  expect: {rows: 4,data: [{id: 1,value: 2},{id: 2,value: 0},{id: 3,value: 1},{id: 4,value: 2}]}
+- name: FALSE and UNKNOWN conditions retain the seed without running a transition
+  sql: SELECT dbo.predicate_count(1,9) AS stopped,dbo.predicate_count(1,NULL) AS unknown_state,dbo.predicate_empty(9) AS empty_scalar
+  expect: {rows: 1,data: [{stopped: 9,unknown_state: null,empty_scalar: 7}]}
+- name: A predicate observes each preceding mutation of its invocation-local table
+  sql: SELECT dbo.predicate_local() AS value,dbo.predicate_local() AS repeated
+  expect: {rows: 1,data: [{value: 3,repeated: 3}]}
+- name: Predicate metadata retains the declared INT result on an empty caller
+  tds:
+    statements:
+    - sql: SELECT dbo.predicate_count(owner_id,0) AS value FROM predicate_callers WHERE id<0
+      expect: {rows: 0,data: [],column_types: [{name: value,type: INT}]}
+- name: Caller transaction changes are visible to the condition query
+  session_id: predicate_owner
+  sql: BEGIN TRANSACTION; INSERT predicate_values VALUES(4,1); SELECT dbo.predicate_count(1,0) AS value
+  expect: {rows: 1,data: [{value: 3}]}
+- name: A different connection retains its committed predicate snapshot
+  sql: SELECT dbo.predicate_count(1,0) AS value
+  expect: {rows: 1,data: [{value: 2}]}
+- name: Rollback ends the caller change
+  session_id: predicate_owner
+  sql: ROLLBACK TRANSACTION
+- name: A later condition has no retained uncommitted cardinality
+  sql: SELECT dbo.predicate_count(1,0) AS value
+  expect: {rows: 1,data: [{value: 2}]}
+- name: The common iteration operator executes a relational predicate without TSQL source compilation
+  scm: |
+    (begin
+      (define state 'predicate_state)
+      (define seed (make_query_block "memcp-tests" (list)
+        (list "__fn_state" (list 'list 0)) true nil nil nil nil nil nil nil nil))
+      (define step (make_query_block "memcp-tests" (list)
+        (list "__fn_state" (list 'list (list '+ (list 'nth state 0) 1))) true nil nil nil nil nil nil nil nil))
+      (define source (list "v" "memcp-tests" "predicate_values" false nil nil))
+      (define count_query (make_query_block "memcp-tests" (list source)
+        (list "n" (list 'aggregate 1 '+ 0)) true nil nil nil nil nil nil nil nil))
+      (define predicate (make_query_block "memcp-tests" (list)
+        (list "__fn_state" (list 'list (list '< (list 'nth state 0) (list 'inner_select count_query))))
+        true nil nil nil nil nil nil nil nil))
+      (define query (make_relational_iteration seed step state (list) predicate))
+      (define request (newsession)) (request "username" "root") (request "schema" "memcp-tests")
+      (define result (newsession))
+      (sql_with_statement request nil 0 "common relational predicate" (lambda (tx) (begin
+        (define planning (newsession))
+        (define plan (sql_queryplan_compile_formula tx (build_queryplan_term query planning tx)))
+        (sql_execute_formula request tx plan (lambda (row) (result "value" (row "__fn_state"))) (lambda args true)))))
+      (tx_rollback request)
+      (equal? (result "value") (list 3)))
+  expect: {result: true}
+- name: A closed global COUNT predicate prepares its independent source once
+  sql: SELECT dbo.predicate_global_count() AS value
+  expect: {rows: 1,data: [{value: 3}]}
+- name: A closed filtered COUNT predicate retains the same dependency-free preparation contract
+  sql: SELECT dbo.predicate_global_filtered() AS value
+  expect: {rows: 1,data: [{value: 3}]}

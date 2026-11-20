@@ -1,0 +1,356 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# SQL Server 2022 references: https://dbfiddle.uk/zWkhCdQI
+# https://dbfiddle.uk/kjteBcOH and https://dbfiddle.uk/WvdICPcQ
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: TSQL whitespace and numeric-to-keyword token boundaries
+cleanup:
+- sql: DROP PROCEDURE IF EXISTS dbo.lexical_space_probe
+test_cases:
+- name: Unicode whitespace U+0009 separates SQL tokens
+  sql: "SELECT\t1\tAS\tvalue"
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: Unicode whitespace U+000A separates SQL tokens
+  sql: "SELECT\n1\nAS\nvalue"
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: Unicode whitespace U+000B separates SQL tokens
+  sql: "SELECT\u000b1\u000bAS\u000bvalue"
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: Unicode whitespace U+000C separates SQL tokens
+  sql: "SELECT\f1\fAS\fvalue"
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: Unicode whitespace U+000D separates SQL tokens
+  sql: "SELECT\r1\rAS\rvalue"
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: Unicode whitespace U+0020 separates SQL tokens
+  sql: "SELECT 1 AS value"
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: Unicode whitespace U+0085 separates SQL tokens
+  sql: "SELECT\u00851\u0085AS\u0085value"
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: Unicode whitespace U+00A0 separates SQL tokens
+  sql: "SELECT\u00a01\u00a0AS\u00a0value"
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: Unicode whitespace U+1680 separates SQL tokens
+  sql: "SELECT\u16801\u1680AS\u1680value"
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: Unicode whitespace U+2000 separates SQL tokens
+  sql: "SELECT\u20001\u2000AS\u2000value"
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: Unicode whitespace U+2001 separates SQL tokens
+  sql: "SELECT\u20011\u2001AS\u2001value"
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: Unicode whitespace U+2002 separates SQL tokens
+  sql: "SELECT\u20021\u2002AS\u2002value"
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: Unicode whitespace U+2003 separates SQL tokens
+  sql: "SELECT\u20031\u2003AS\u2003value"
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: Unicode whitespace U+2004 separates SQL tokens
+  sql: "SELECT\u20041\u2004AS\u2004value"
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: Unicode whitespace U+2005 separates SQL tokens
+  sql: "SELECT\u20051\u2005AS\u2005value"
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: Unicode whitespace U+2006 separates SQL tokens
+  sql: "SELECT\u20061\u2006AS\u2006value"
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: Unicode whitespace U+2007 separates SQL tokens
+  sql: "SELECT\u20071\u2007AS\u2007value"
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: Unicode whitespace U+2008 separates SQL tokens
+  sql: "SELECT\u20081\u2008AS\u2008value"
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: Unicode whitespace U+2009 separates SQL tokens
+  sql: "SELECT\u20091\u2009AS\u2009value"
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: Unicode whitespace U+200A separates SQL tokens
+  sql: "SELECT\u200a1\u200aAS\u200avalue"
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: Unicode whitespace U+2028 separates SQL tokens
+  sql: "SELECT\u20281\u2028AS\u2028value"
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: Unicode whitespace U+2029 separates SQL tokens
+  sql: "SELECT\u20291\u2029AS\u2029value"
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: Unicode whitespace U+202F separates SQL tokens
+  sql: "SELECT\u202f1\u202fAS\u202fvalue"
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: Unicode whitespace U+205F separates SQL tokens
+  sql: "SELECT\u205f1\u205fAS\u205fvalue"
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: Unicode whitespace U+3000 separates SQL tokens
+  sql: "SELECT\u30001\u3000AS\u3000value"
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: An integer token ends before THEN
+  sql: SELECT CASE WHEN 2<=12THEN 1 ELSE 0 END AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: An integer token ends before AND
+  sql: SELECT CASE WHEN 1=1AND 2=2 THEN 1 ELSE 0 END AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: An integer token ends before OR
+  sql: SELECT CASE WHEN 1=0OR 2=2 THEN 1 ELSE 0 END AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: An integer token ends before AS
+  sql: SELECT 0AS value
+  expect:
+    rows: 1
+    data:
+    - value: 0
+- name: A negative integer ends before AS
+  sql: SELECT -7AS value
+  expect:
+    rows: 1
+    data:
+    - value: -7
+- name: A decimal token ends before AS
+  sql: SELECT .5AS value
+  expect:
+    rows: 1
+    data:
+    - value: 0.5
+- name: An exponent token ends before AS
+  sql: SELECT 1E2AS value
+  expect:
+    rows: 1
+    data:
+    - value: 100
+- name: A signed exponent ends before AS
+  sql: SELECT 1E+2AS value
+  expect:
+    rows: 1
+    data:
+    - value: 100
+- name: An omitted exponent is zero
+  sql: SELECT 1e AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: An omitted positive exponent is zero
+  sql: SELECT 1e+ AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: An omitted negative exponent is zero
+  sql: SELECT 1e- AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: An omitted exponent ends before AND
+  sql: SELECT CASE WHEN 1=1eAND 2=2 THEN 1 ELSE 0 END AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: A numeric value can directly precede an implicit identifier alias
+  sql: SELECT 12token
+  expect:
+    rows: 1
+    data:
+    - token: 12
+- name: A SELECT leaf can start immediately after an integer initializer
+  sql: DECLARE @n INT=0SELECT @n AS value
+  expect:
+    rows: 1
+    data:
+    - value: 0
+- name: A conditional SELECT can start immediately after an integer
+  sql: IF 1=0SELECT 7 AS value ELSE SELECT 3 AS value
+  expect:
+    rows: 1
+    data:
+    - value: 3
+- name: A quoted literal retains its nonbreaking space
+  sql: SELECT N'A B' AS value
+  expect:
+    rows: 1
+    data:
+    - value: A B
+- name: A quoted identifier retains its nonbreaking space
+  sql: SELECT [A B] AS value FROM(VALUES(7))q([A B])
+  expect:
+    rows: 1
+    data:
+    - value: 7
+- name: An embedded BOM is not SQL whitespace
+  sql: "SELECT\uFEFF1 AS value"
+  expect:
+    error: true
+- name: A keyword cannot be a prefix of an identifier
+  sql: SELECT CASE WHEN 1=1ANDx=2 THEN 1 ELSE 0 END AS value
+  expect:
+    error: true
+- name: A keyword cannot consume an adjacent variable prefix
+  sql: DECLARE @n INT=1;SELECT@n AS value
+  expect:
+    error: true
+- name: THEN cannot consume an adjacent variable prefix
+  sql: DECLARE @n INT=1;SELECT CASE WHEN 1=1 THEN@n ELSE 0 END AS value
+  expect:
+    error: true
+- name: An exponent marker must not be reinterpreted as ELSE
+  sql: SELECT CASE WHEN 1=1 THEN 12ELSE 3 END AS value
+  expect:
+    error: true
+- name: An exponent marker must not be reinterpreted as END
+  sql: SELECT CASE WHEN 1=1 THEN 12END AS value
+  expect:
+    error: true
+- name: A module declaration admits nonbreaking-space trivia
+  sql: CREATE PROCEDURE dbo.lexical_space_probe AS BEGIN SELECT 1 AS value; END
+- name: A module body executes through the same lexical policy
+  sql: EXEC dbo.lexical_space_probe
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: Numeric token categories remain declared SQL wire types
+  tds:
+    statements:
+    - sql: SELECT 12AS value
+      expect:
+        rows: 1
+        data:
+        - value: 12
+        column_types:
+        - name: value
+          type: INT
+    - sql: SELECT 1E+2AS value
+      expect:
+        rows: 1
+        data:
+        - value: 100
+        column_types:
+        - name: value
+          type: FLOAT
+    - sql: SELECT 1e- AS value
+      expect:
+        rows: 1
+        data:
+        - value: 1
+        column_types:
+        - name: value
+          type: FLOAT
+- name: Mapped calendar token values retain their unit names
+  sql: SELECT YEAR(DATEFROMPARTS(2025,3,4)) AS y,MONTH(DATEFROMPARTS(2025,3,4)) AS m,DAY(DATEFROMPARTS(2025,3,4))
+    AS d
+  expect:
+    rows: 1
+    data:
+    - y: 2025
+      m: 3
+      d: 4
+- name: Mapped text token values retain their function selection
+  sql: SELECT LEFT(N'abcd',2) AS first_part,RIGHT(N'abcd',2) AS last_part,SUBSTRING(N'abcd',2,2) AS middle_part,TRIM(N'
+    x ') AS trimmed
+  expect:
+    rows: 1
+    data:
+    - first_part: ab
+      last_part: cd
+      middle_part: bc
+      trimmed: x
+- name: Mapped COUNT tokens retain distinct declared aggregate types
+  tds:
+    statements:
+    - sql: SELECT COUNT(*) AS small_count,COUNT_BIG(*) AS large_count FROM(VALUES(1),(2))q(v)
+      expect:
+        rows: 1
+        data:
+        - small_count: 2
+          large_count: 2
+        column_types:
+        - name: small_count
+          type: INT
+        - name: large_count
+          type: BIGINT

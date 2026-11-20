@@ -48,6 +48,7 @@ type shardReadOptions struct {
 type ReadAccess struct {
 	mutation *WriteAccess // existing M admission, only for a mutating cluster scan
 	shard    *storageShard
+	relation *relationScope // optional native result-reader borrow at this access boundary
 }
 
 type WriteAccess struct {
@@ -62,6 +63,14 @@ func (access WriteAccess) Release() {
 }
 
 func (access ReadAccess) Release() {
+	if access.relation != nil {
+		defer func() {
+			access.relation.mu.Lock()
+			access.relation.active--
+			access.relation.cond.Broadcast()
+			access.relation.mu.Unlock()
+		}()
+	}
 	if access.mutation != nil {
 		access.mutation.Release()
 		return

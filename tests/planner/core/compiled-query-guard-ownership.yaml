@@ -1,0 +1,87 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  description: Cached guards retain one compiled owner and evaluate current request dependencies
+setup:
+- sql: CREATE TABLE guard_owner_rows(id INT PRIMARY KEY,payload VARCHAR(8))
+- sql: INSERT INTO guard_owner_rows VALUES(1,'first')
+test_cases:
+- name: Retained dispatchers observe DML and declaration changes across request bindings
+  scm: |
+    (begin
+      (define cache (newcachemap))
+      (define parser (lambda (database text policy planning tx) (begin
+        (planner_record_guard_condition
+          (list 'equal? (list 'session "guard_binding") (planning "guard_binding")) planning)
+        (parse_sql database (concat "SELECT CONCAT(payload,':"
+          (planning "guard_binding") "') AS payload FROM guard_owner_rows WHERE id=1")
+          policy planning tx))))
+      (define first_session (newsession)) (first_session "username" "root") (first_session "guard_binding" "first")
+      (define second_session (newsession)) (second_session "username" "root") (second_session "guard_binding" "second")
+      (define text "SELECT payload FROM guard_owner_rows WHERE id=1")
+      (define compile (lambda (session) (cached_parse cache "sql" (list parser)
+        "memcp-tests" text nil "root" session false nil)))
+      (define run (lambda (formula session) (begin
+        (define output (newsession)) (output "rows" 0)
+        (with_autocommit session nil nil text (lambda (tx)
+          (sql_execute_formula session tx formula (lambda (row) (begin
+            (output "rows" (+ 1 (output "rows"))) (output "payload" (row "payload"))))
+            (lambda (_fields) true))))
+        (if (equal? (output "rows") 1) (output "payload") (error "guard execution changed query multiplicity")))))
+      (define first_formula (compile first_session))
+      (define first (run first_formula first_session))
+      (define second_formula (compile second_session))
+      (define second (run second_formula second_session))
+      (define retained (run first_formula first_session))
+      (define update_text "UPDATE guard_owner_rows SET payload='later' WHERE id=1")
+      (with_autocommit first_session nil nil update_text (lambda (tx)
+        (sql_execute_formula first_session tx
+          (sql_queryplan_compile_formula tx (parse_sql "memcp-tests" update_text nil first_session tx))
+          (lambda (_row) true) (lambda (_fields) true))))
+      (define changed_first (run first_formula first_session))
+      (define changed_second (run second_formula second_session))
+      (altercolumn (table "memcp-tests" false "guard_owner_rows" false nil) "payload" "dimensions" (list 24))
+      (define changed_declaration (run first_formula first_session))
+      (list first second retained changed_first changed_second changed_declaration))
+  expect: {data: [["first:first","first:second","first:first","later:first","later:second","later:first"]]}
+- name: A reused guard observes its current request preparation before row output
+  scm: |
+    (begin
+      (define cache (newcachemap))
+      (define decision "guard-owner-request-input")
+      (define value_key (planner_queryplan_observation_value_key decision))
+      (define metric_key (planner_queryplan_observation_metric_key decision))
+      (define parser (lambda (_database _text _policy planning _tx) (begin
+        (planner_register_queryplan_observation decision
+          (list 'session "prepared_input") (symbol "__queryplan_observed_value") planning)
+        (planner_record_guard_condition
+          (list '> (planner_queryplan_observation_read_expr metric_key) 0) planning)
+        (list 'resultrow (list 'list "value" (planner_queryplan_observation_read_expr value_key))))))
+      (define run (lambda (value) (begin
+        (define session (newsession)) (session "username" "root")
+        (session "prepared_input" value)
+        (define output (newsession))
+        (with_autocommit session nil nil "SELECT prepared_input" (lambda (tx)
+          (sql_execute_formula session tx
+            (cached_parse cache "sql" (list parser) "memcp-tests" "SELECT prepared_input" nil "root" session false tx)
+            (lambda (row) (output "value" (row "value"))) (lambda (_fields) true))))
+        (output "value"))))
+      (list (run 7) (run 9)))
+  expect: {data: [[7,9]]}
+- name: Source free true guards keep ordinary row output correct across reuse
+  scm: |
+    (begin
+      (define cache (newcachemap))
+      (define session (newsession)) (session "username" "root")
+      (define run (lambda () (begin
+        (define output (newsession))
+        (with_autocommit session nil nil "SELECT 17 AS value" (lambda (tx)
+          (sql_execute_formula session tx
+            (cached_parse cache "sql" (list parse_sql) "memcp-tests" "SELECT 17 AS value" nil "root" session false tx)
+            (lambda (row) (output "value" (row "value"))) (lambda (_fields) true))))
+        (output "value"))))
+      (list (run) (run)))
+  expect: {data: [[17,17]]}
+cleanup:
+- sql: DROP TABLE IF EXISTS guard_owner_rows

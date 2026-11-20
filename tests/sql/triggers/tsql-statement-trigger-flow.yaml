@@ -1,0 +1,149 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  description: Trigger branches retain native rollback and source label continuations
+
+setup:
+- sql: CREATE TABLE flow_input(id INT PRIMARY KEY, state_value INT, note_value INT)
+- sql: CREATE TABLE flow_audit(id INT, event_code INT)
+- sql: INSERT flow_input VALUES(1,1,10),(2,2,20)
+- sql: |
+    CREATE TRIGGER dbo.flow_guard ON dbo.flow_input AFTER UPDATE AS
+    BEGIN
+      SET NOCOUNT ON;
+      IF EXISTS(SELECT id FROM inserted WHERE state_value<0)
+      BEGIN
+        RAISERROR(N'negative state rejected',16,1);
+        ROLLBACK;
+      END;
+      IF NOT UPDATE(state_value) GOTO finished;
+      IF EXISTS(SELECT id FROM inserted WHERE state_value=0) GOTO finished;
+      INSERT flow_audit(id,event_code) SELECT id,1 FROM inserted;
+      finished:
+      SET NOCOUNT OFF;
+    END
+- sql: CREATE TABLE flow_scope_input(id INT PRIMARY KEY, value INT)
+- sql: CREATE TABLE flow_scope_log(old_count INT, new_count INT, local_count INT)
+- sql: |
+    CREATE TRIGGER dbo.flow_scope ON dbo.flow_scope_input AFTER INSERT,UPDATE,DELETE AS
+    BEGIN
+      DECLARE @count INT=0;
+      again:
+      SET @count=@count+1;
+      IF @count<3 GOTO again;
+      INSERT flow_scope_log(old_count,new_count,local_count)
+      SELECT (SELECT COUNT(*) FROM deleted),(SELECT COUNT(*) FROM inserted),@count;
+      finished:
+    END
+
+- sql: CREATE TABLE flow_cursor_input(id INT PRIMARY KEY)
+- sql: CREATE TABLE flow_cursor_audit(id INT)
+- sql: |
+    CREATE TRIGGER dbo.flow_cursor_guard ON flow_cursor_input FOR INSERT AS
+    BEGIN
+      DECLARE @id INT
+      IF EXISTS(SELECT id FROM inserted WHERE id<0) GOTO outside_body
+      DECLARE input_cursor CURSOR FOR SELECT id FROM inserted
+      PRINT N'cursor opened'
+      OPEN input_cursor
+      FETCH NEXT FROM input_cursor INTO @id
+      WHILE @@FETCH_STATUS=0
+      BEGIN
+        INSERT flow_cursor_audit SELECT @id
+        FETCH NEXT FROM input_cursor INTO @id
+      END
+      CLOSE input_cursor
+      DEALLOCATE input_cursor
+    END
+    outside_body:
+
+cleanup:
+- sql: DROP TRIGGER IF EXISTS dbo.flow_cursor_guard
+- sql: DROP TABLE IF EXISTS flow_cursor_audit
+- sql: DROP TABLE IF EXISTS flow_cursor_input
+- sql: DROP TRIGGER IF EXISTS dbo.flow_guard
+- sql: DROP TRIGGER IF EXISTS dbo.flow_scope
+- sql: DROP TABLE IF EXISTS flow_input
+- sql: DROP TABLE IF EXISTS flow_audit
+- sql: DROP TABLE IF EXISTS flow_scope_input
+- sql: DROP TABLE IF EXISTS flow_scope_log
+
+test_cases:
+- name: A nonaborting branch executes the normal transition audit suffix
+  sql: UPDATE flow_input SET state_value=state_value+10
+  expect: {rows: 1, data: [{affected_rows: 2}]}
+- name: The normal suffix receives every inserted transition row
+  sql: SELECT id,event_code FROM flow_audit ORDER BY id
+  expect: {rows: 2, data: [{id: 1, event_code: 1}, {id: 2, event_code: 1}]}
+- name: A forward label skips the audit when its state condition is selected
+  sql: UPDATE flow_input SET state_value=0 WHERE id=1
+  expect: {rows: 1, data: [{affected_rows: 1}]}
+- name: Declared assignment names can select a forward label without auditing another column
+  sql: UPDATE flow_input SET note_value=99 WHERE id=2
+  expect: {rows: 1, data: [{affected_rows: 1}]}
+- name: Selected label continuations leave the earlier audit rows unchanged
+  sql: SELECT id,event_code FROM flow_audit ORDER BY id
+  expect: {rows: 2, data: [{id: 1, event_code: 1}, {id: 2, event_code: 1}]}
+- name: An aborting branch rolls back prior work and skips both trigger and outer suffixes
+  session_id: flow_owner
+  sql: |
+    BEGIN TRANSACTION;
+    INSERT flow_input VALUES(3,3,30);
+    UPDATE flow_input SET state_value=-1 WHERE id=1;
+    INSERT flow_audit VALUES(99,9);
+  expect: {error: true, contains: '3609'}
+- name: The owner sees restored input and no open transaction after native abort
+  session_id: flow_owner
+  sql: SELECT id,state_value,note_value,@@TRANCOUNT AS open_transactions FROM flow_input ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - {id: 1, state_value: 0, note_value: 10, open_transactions: 0}
+    - {id: 2, state_value: 12, note_value: 99, open_transactions: 0}
+- name: An observer sees neither aborted row work nor skipped audit suffixes
+  session_id: flow_observer
+  sql: SELECT id,event_code FROM flow_audit ORDER BY id
+  expect: {rows: 2, data: [{id: 1, event_code: 1}, {id: 2, event_code: 1}]}
+- name: A backward label iterates inside one INSERT trigger invocation
+  sql: INSERT flow_scope_input VALUES(1,5),(2,6)
+  expect: {rows: 1, data: [{affected_rows: 2}]}
+- name: UPDATE enters a new lexical label scope with its own initialized locals
+  sql: UPDATE flow_scope_input SET value=value
+  expect: {rows: 1, data: [{affected_rows: 2}]}
+- name: DELETE enters the same source graph with fresh transition and local values
+  sql: DELETE FROM flow_scope_input WHERE id=1
+  expect: {rows: 1, data: [{affected_rows: 1}]}
+- name: Every event retains its transition counts and independent label loop state
+  sql: SELECT old_count,new_count,local_count FROM flow_scope_log ORDER BY old_count,new_count
+  expect:
+    rows: 3
+    data:
+    - {old_count: 0, new_count: 2, local_count: 3}
+    - {old_count: 1, new_count: 0, local_count: 3}
+    - {old_count: 2, new_count: 2, local_count: 3}
+
+- name: PRINT begins the next cursor-body statement without a semicolon or alias
+  sql: INSERT flow_cursor_input VALUES(1),(2)
+  expect: {rows: 1,data: [{affected_rows: 2}]}
+- name: The cursor streams the complete transition to its audit consumer
+  sql: SELECT id FROM flow_cursor_audit ORDER BY id
+  expect: {rows: 2,data: [{id: 1},{id: 2}]}
+- name: A forward label after the outer trigger block skips the cursor body
+  sql: INSERT flow_cursor_input VALUES(-1)
+  expect: {rows: 1,data: [{affected_rows: 1}]}
+- name: Reserved keyword prefixes and delimited aliases keep their ordinary names
+  sql: SELECT PRINTABLE.id FROM flow_cursor_audit PRINTABLE ORDER BY PRINTABLE.id
+  expect: {rows: 2,data: [{id: 1},{id: 2}]}
+- name: Delimited reserved aliases remain available after statement boundary binding
+  sql: SELECT [PRINT].id FROM flow_cursor_audit [PRINT] ORDER BY [PRINT].id
+  expect: {rows: 2,data: [{id: 1},{id: 2}]}
+
+- name: Informational RAISERROR starts a new statement after an unterminated SELECT
+  sql: |
+    DECLARE @count INT
+    SELECT @count=COUNT(*) FROM flow_cursor_audit
+    RAISERROR(N'query complete',10,1)
+    SELECT @count AS total
+  expect: {rows: 1,data: [{total: 2}]}

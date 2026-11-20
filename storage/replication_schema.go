@@ -9,6 +9,7 @@ import "bytes"
 import "strings"
 import "encoding/json"
 import "encoding/binary"
+import "github.com/google/uuid"
 
 // validateReplicaSchema admits declarations from clients, never executable
 // runtime artifacts. Inspect inert JSON first: Scmer decoding restores callable
@@ -65,9 +66,33 @@ func validateReplicaSchema(data []byte) ([]byte, error) {
 	if err := json.Unmarshal(data, db); err != nil {
 		return nil, err
 	}
+	if db.catalogVersion != 0 && db.incarnationID() == "" {
+		return nil, fmt.Errorf("replicated catalog watermark requires a database incarnation")
+	}
 	for _, table := range db.tables.GetAll() {
 		if table == nil {
 			return nil, fmt.Errorf("invalid replicated table")
+		}
+		// Client schema bytes describe committed declarations. Native private
+		// generations/decision capabilities are never supplied by a replica.
+		if table.CreatorTxID == "" {
+			if table.CreatorIncarnation != "" || table.CreatorNamespace != "" || table.CatalogDecisionID != "" || table.CatalogVersion.Load() != 0 {
+				return nil, fmt.Errorf("replicated table has incomplete catalog authority")
+			}
+		} else {
+			if table.CatalogVersion.Load() == 0 || table.CatalogVersion.Load() > db.catalogVersion || table.CreatorIncarnation != db.incarnationID() || db.incarnationID() == "" {
+				return nil, fmt.Errorf("replicated table is not a committed declaration of this database incarnation")
+			}
+			for _, identity := range []string{table.CatalogDecisionID, table.RuntimeIdentity} {
+				if _, err := uuid.Parse(identity); err != nil {
+					return nil, fmt.Errorf("invalid replicated catalog identity")
+				}
+			}
+			if table.CreatorNamespace != "" {
+				if _, err := uuid.Parse(table.CreatorNamespace); err != nil {
+					return nil, fmt.Errorf("invalid replicated catalog namespace")
+				}
+			}
 		}
 		if initializer := table.OnInit.Load(); initializer != nil && !initializer.IsNil() {
 			return nil, fmt.Errorf("replication slave cannot supply oninit code")
@@ -79,8 +104,39 @@ func validateReplicaSchema(data []byte) ([]byte, error) {
 				return nil, fmt.Errorf("invalid replicated column name")
 			}
 		}
+		for _, definition := range table.Checks {
+			if _, err := uuid.Parse(table.RuntimeIdentity); err != nil {
+				return nil, fmt.Errorf("replicated check lacks a native table identity")
+			}
+			if definition == nil {
+				return nil, fmt.Errorf("invalid replicated check declaration")
+			}
+			language, exists := triggerLanguageDefinitionFor(definition.Language)
+			if !exists || !language.replicationSafe || !language.rowPredicate {
+				return nil, fmt.Errorf("replication slave check requires an approved scalar source language")
+			}
+			for _, name := range definition.Columns {
+				var input *column
+				for _, candidate := range table.Columns {
+					if candidate.Name == name {
+						input = candidate
+						break
+					}
+				}
+				if !foreignStoredComparisonColumn(input) {
+					return nil, fmt.Errorf("replicated check requires an ordinary stored dependency")
+				}
+			}
+		}
 		for i := range table.Triggers {
 			trigger := &table.Triggers[i]
+			derivedCheck := false
+			for _, definition := range table.Checks {
+				derivedCheck = derivedCheck || inertCheckTrigger(definition, *trigger)
+			}
+			if derivedCheck {
+				continue
+			}
 			// FK callbacks are rebuilt from native foreign-key declarations by
 			// ensureLoaded. A client may send the inert declaration, never a body.
 			if trigger.IsSystem && strings.HasPrefix(trigger.Name, "__fk_") && trigger.Func.IsNil() && trigger.Language == "" && trigger.Source == "" {
@@ -111,9 +167,11 @@ func validateReplicaSchema(data []byte) ([]byte, error) {
 // client-marked cache is safe: none of its supplied bytes are ever installed.
 func replicaSchemaDeclarations(data []byte) ([]byte, error) {
 	var db struct {
-		Name       string                     `json:"name"`
-		Tables     map[string]json.RawMessage `json:"tables"`
-		Procedures json.RawMessage            `json:"procedures,omitempty"`
+		Name           string                     `json:"name"`
+		Incarnation    string                     `json:"incarnation,omitempty"`
+		CatalogVersion uint64                     `json:"catalog_version,omitempty"`
+		Tables         map[string]json.RawMessage `json:"tables"`
+		Procedures     json.RawMessage            `json:"procedures,omitempty"`
 	}
 	if err := json.Unmarshal(data, &db); err != nil {
 		return nil, err
@@ -142,6 +200,15 @@ func replicaSchemaDeclarations(data []byte) ([]byte, error) {
 				return nil, err
 			}
 			if !declaration.IsTemp {
+				var fields map[string]json.RawMessage
+				if err := json.Unmarshal(column, &fields); err != nil {
+					return nil, err
+				}
+				for key, value := range fields {
+					if strings.EqualFold(key, "computor_definition") && !bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+						return nil, fmt.Errorf("replication slave cannot supply computed-column code")
+					}
+				}
 				columns = append(columns, column)
 			}
 		}
@@ -253,6 +320,28 @@ func (check *replicaColumnAdmission) write(data []byte) error {
 		if check.blobs == 0 {
 			check.stage = 0
 		}
+	}
+	return nil
+}
+
+// The transport has already authenticated the schema owner, epoch and content.
+// These declaration scalars never grant MOSI rights. Within one database
+// incarnation its durable decision watermark cannot move backwards, and an
+// identified generation cannot be silently replaced with an anonymous legacy
+// document. Two legacy documents remain readable; a new nonempty incarnation
+// denotes an explicit new generation and follows the existing replacement path.
+func validateIncomingCatalogAuthority(current, incoming *database) error {
+	if incoming.catalogVersion != 0 && incoming.incarnationID() == "" {
+		return fmt.Errorf("replicated catalog watermark requires a database incarnation")
+	}
+	if current == nil || current.incarnationID() == "" {
+		return nil
+	}
+	if incoming.incarnationID() == "" {
+		return fmt.Errorf("replicated schema removes an established database incarnation")
+	}
+	if current.incarnationID() == incoming.incarnationID() && incoming.catalogVersion < current.catalogVersion {
+		return fmt.Errorf("replicated schema rewinds its native catalog decision watermark")
 	}
 	return nil
 }

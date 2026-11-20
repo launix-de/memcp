@@ -1,0 +1,92 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  description: INSERT SELECT reduces actual mutation counts independently of SELECT completion values
+setup:
+- scm: (settings "ShardSize" 8)
+- sql: CREATE TABLE count_source(id INT PRIMARY KEY, category INT, amount INT) ENGINE=memory
+- scm: |
+    (begin
+      (define target (table "memcp-tests" false "count_source" false nil))
+      (map (produceN 4) (lambda (batch)
+        (insert target '("id" "category" "amount")
+          (map (produceN 8) (lambda (i)
+            (list (+ (* batch 8) i 1) (mod i 4) (* (+ (* batch 8) i 1) 10)))))))
+      /* Isolated suites share server settings: a preceding fixture can disable
+      partition dimensions. Own the explicit topology only for its creation. */
+      (define previous_dimensions (settings "PartitionMaxDimensions"))
+      (settings "PartitionMaxDimensions" 1)
+      (try (lambda () (begin
+        (partitiontable target (list "id" (list 9 17 25)))
+        (settings "PartitionMaxDimensions" previous_dimensions)))
+        (lambda (cause) (begin
+          (settings "PartitionMaxDimensions" previous_dimensions)
+          (error cause))))
+      (settings "ShardSize" 60000))
+- sql: CREATE TABLE count_sink(id INT PRIMARY KEY, amount INT) ENGINE=memory
+- sql: CREATE TABLE count_factors(category INT PRIMARY KEY, multiplier INT) ENGINE=memory
+- sql: INSERT INTO count_factors VALUES(0,1),(1,2),(2,3),(3,4)
+cleanup:
+- sql: DROP TABLE IF EXISTS count_sink
+- sql: DROP TABLE IF EXISTS count_factors
+- sql: DROP TABLE IF EXISTS count_source
+- scm: (settings "ShardSize" 60000)
+test_cases:
+- name: The native producer spans several actual main shards
+  scm: (>= (count ((show "memcp-tests" "count_source" true) "shards")) 4)
+  expect: {result: true}
+- name: Unordered native INSERT SELECT returns every successful insertion
+  sql: INSERT INTO count_sink SELECT id,amount FROM count_source
+  expect: {rows: 1, data: [{affected_rows: 32}]}
+- name: The complete native insertion is visible before its completion returns
+  sql: SELECT COUNT(*) AS n,SUM(id) AS ids,SUM(amount) AS amounts FROM count_sink
+  expect: {rows: 1, data: [{n: 32, ids: 528, amounts: 5280}]}
+- name: Ignored native collisions contribute zero rather than an absent count
+  sql: INSERT IGNORE INTO count_sink SELECT id,-amount FROM count_source
+  expect: {rows: 1, data: [{affected_rows: 0}]}
+- name: Ignored collisions preserve every original native value
+  sql: SELECT COUNT(*) AS n,SUM(id) AS ids,SUM(amount) AS amounts FROM count_sink
+  expect: {rows: 1, data: [{n: 32, ids: 528, amounts: 5280}]}
+- name: A filtered multi-shard source counts only inserted rows
+  sql: INSERT INTO count_sink SELECT id+100,amount FROM count_source WHERE id<=9
+  expect: {rows: 1, data: [{affected_rows: 9}]}
+- name: Filtered insertion writes exactly its counted native rows
+  sql: SELECT COUNT(*) AS n,SUM(id) AS ids,SUM(amount) AS amounts FROM count_sink WHERE id>100
+  expect: {rows: 1, data: [{n: 9, ids: 945, amounts: 450}]}
+- name: Joined native producers retain their actual successful count
+  sql: INSERT INTO count_sink SELECT s.id+200,s.amount*f.multiplier FROM count_source s JOIN count_factors f ON f.category=s.category
+  expect: {rows: 1, data: [{affected_rows: 32}]}
+- name: Joined insertion data agrees with its complete count
+  sql: SELECT COUNT(*) AS n,SUM(id) AS ids,SUM(amount) AS amounts FROM count_sink WHERE id>=200
+  expect: {rows: 1, data: [{n: 32, ids: 6928, amounts: 13600}]}
+- name: Native UNION branches reduce their mutations once each
+  sql: INSERT INTO count_sink SELECT id+300,amount FROM count_source WHERE id<=2 UNION ALL SELECT id+400,amount FROM count_source WHERE id>=31
+  expect: {rows: 1, data: [{affected_rows: 4}]}
+- name: UNION mutation counts agree with all written branches
+  sql: SELECT COUNT(*) AS n,SUM(id) AS ids,SUM(amount) AS amounts FROM count_sink WHERE id>=300
+  expect: {rows: 1, data: [{n: 4, ids: 1466, amounts: 660}]}
+- name: DISTINCT removes duplicates before invoking the mutation consumer
+  sql: INSERT INTO count_sink SELECT 501 AS id,amount FROM count_source WHERE id=1 UNION SELECT 501 AS id,amount FROM count_source WHERE id=1
+  expect: {rows: 1, data: [{affected_rows: 1}]}
+- name: The DISTINCT mutation consumer inserts one native value
+  sql: SELECT id,amount FROM count_sink WHERE id=501
+  expect: {rows: 1, data: [{id: 501, amount: 10}]}
+- name: Grouped SELECT output contributes one insertion per completed group
+  sql: INSERT INTO count_sink SELECT category+600,SUM(amount) FROM count_source GROUP BY category
+  expect: {rows: 1, data: [{affected_rows: 4}]}
+- name: Grouped insertion preserves all aggregate values
+  sql: SELECT id,amount FROM count_sink WHERE id>=600 ORDER BY id
+  expect: {rows: 4, data: [{id: 600, amount: 1200}, {id: 601, amount: 1280}, {id: 602, amount: 1360}, {id: 603, amount: 1440}]}
+- name: Ordered insertion counts only rows accepted by its native window
+  sql: INSERT INTO count_sink SELECT id+700,amount FROM count_source ORDER BY id DESC LIMIT 3
+  expect: {rows: 1, data: [{affected_rows: 3}]}
+- name: The ordered window writes exactly the selected native values
+  sql: SELECT id,amount FROM count_sink WHERE id>=700 ORDER BY id
+  expect: {rows: 3, data: [{id: 730, amount: 300}, {id: 731, amount: 310}, {id: 732, amount: 320}]}
+- name: Eliminated and dynamically empty inputs both contribute zero
+  sql: INSERT INTO count_sink SELECT id+800,amount FROM count_source WHERE id<0
+  expect: {rows: 1, data: [{affected_rows: 0}]}
+- name: Empty native insertion does not create target rows
+  sql: SELECT COUNT(*) AS n FROM count_sink WHERE id>=800
+  expect: {rows: 1, data: [{n: 0}]}

@@ -1,0 +1,215 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Object intrinsic lookup uses invocation-owned authorized native and virtual declarations
+setup:
+- scm: |
+    (begin
+      (eval (parse_sql "memcp-tests" "CREATE USER lookup_member IDENTIFIED BY 'pw'" nil))
+      (eval (parse_sql "memcp-tests" "CREATE USER lookup_hidden IDENTIFIED BY 'pw'" nil))
+      (eval (parse_sql "memcp-tests" "GRANT ALL ON `memcp-tests`.* TO lookup_member" nil)))
+- sql: CREATE TABLE lookup_relation(id INT CONSTRAINT lookup_primary PRIMARY KEY,value INT CONSTRAINT lookup_default DEFAULT 7)
+- sql: CREATE VIEW lookup_view AS SELECT id FROM lookup_relation
+- sql: CREATE PROCEDURE lookup_procedure AS SELECT 1/0 AS value
+- sql: CREATE FUNCTION lookup_function() RETURNS INT AS BEGIN RETURN 1/0; END
+- sql: CREATE TABLE lookup_saved(label NVARCHAR(128),object_id INT)
+- sql: |
+    INSERT lookup_saved VALUES
+      (N'default',OBJECT_ID(N'lookup_default',N'D')),
+      (N'function',OBJECT_ID(N'lookup_function',N'FN')),
+      (N'legacy',OBJECT_ID(N'dbo.sysobjects',N'V')),
+      (N'primary',OBJECT_ID(N'lookup_primary',N'PK')),
+      (N'procedure',OBJECT_ID(N'lookup_procedure',N'P')),
+      (N'table',OBJECT_ID(N'lookup_relation',N'U')),
+      (N'view',OBJECT_ID(N'lookup_view',N'V')),
+      (N'virtual',OBJECT_ID(N'sys.objects',N'V'))
+cleanup:
+- sql: DROP PROCEDURE IF EXISTS lookup_pending
+- sql: DROP FUNCTION IF EXISTS lookup_function
+- sql: DROP PROCEDURE IF EXISTS lookup_procedure
+- sql: DROP VIEW IF EXISTS lookup_view
+- sql: DROP TABLE IF EXISTS lookup_saved
+- sql: DROP TABLE IF EXISTS lookup_relation
+- scm: |
+    (begin
+      (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS lookup_member" nil))
+      (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS lookup_hidden" nil)))
+test_cases:
+- name: Saved native source constraint and virtual identities retain complete classifications
+  sql: |
+    SELECT label,OBJECT_NAME(object_id) AS name,
+      OBJECTPROPERTY(object_id,N'IsMSShipped') AS shipped,
+      OBJECTPROPERTY(object_id,N'IsView') AS view_flag
+    FROM lookup_saved ORDER BY label
+  expect:
+    rows: 8
+    data:
+    - {label: default,name: lookup_default,shipped: 0,view_flag: 0}
+    - {label: function,name: lookup_function,shipped: 0,view_flag: 0}
+    - {label: legacy,name: sysobjects,shipped: 1,view_flag: 1}
+    - {label: primary,name: lookup_primary,shipped: 0,view_flag: 0}
+    - {label: procedure,name: lookup_procedure,shipped: 0,view_flag: 0}
+    - {label: table,name: lookup_relation,shipped: 0,view_flag: 0}
+    - {label: view,name: lookup_view,shipped: 0,view_flag: 1}
+    - {label: virtual,name: objects,shipped: 1,view_flag: 1}
+- name: The public object catalog excludes the virtual directory
+  sql: SELECT name FROM sys.objects WHERE name IN(N'objects',N'sysobjects',N'database_permissions')
+  expect: {rows: 0,data: []}
+- name: Modern legacy and all-columns directions use the same virtual identity
+  sql: |
+    SELECT CASE WHEN OBJECT_ID(N'sys.sysobjects')=OBJECT_ID(N'dbo.sysobjects') THEN 1 ELSE 0 END AS same_id,
+      OBJECT_NAME(OBJECT_ID(N'sys.all_columns')) AS columns_name,
+      OBJECTPROPERTY(OBJECT_ID(N'sys.all_columns'),N'IsUserTable') AS user_table
+  expect: {rows: 1,data: [{same_id: 1,columns_name: all_columns,user_table: 0}]}
+- name: Necessary source kind selectors retain actual declarations without executing module bodies
+  sql: SELECT name,OBJECT_NAME(object_id) AS resolved FROM sys.objects WHERE object_id=OBJECT_ID(N'lookup_procedure',N'P')
+  expect: {rows: 1,data: [{name: lookup_procedure,resolved: lookup_procedure}]}
+- name: Necessary key kind selectors retain actual containing relation declarations
+  sql: SELECT name,OBJECT_NAME(parent_object_id) AS containing FROM sys.objects WHERE object_id=OBJECT_ID(N'lookup_primary',N'PK')
+  expect: {rows: 1,data: [{name: lookup_primary,containing: lookup_relation}]}
+- name: Unknown identities NULLs and unknown properties remain NULL
+  sql: |
+    SELECT OBJECT_NAME(-1) AS missing_name,OBJECT_NAME(NULL) AS null_name,
+      OBJECTPROPERTY(-1,N'IsView') AS missing_flag,
+      OBJECTPROPERTY(OBJECT_ID(N'sys.objects'),N'UnknownProperty') AS unknown_flag
+  expect: {rows: 1,data: [{missing_name: null,null_name: null,missing_flag: null,unknown_flag: null}]}
+- name: A false catalog selection produces no public or virtual tuples
+  scm: |
+    (begin
+      (define s (newsession)) (s "username" "root")
+      (tsql_catalog_runtime_rows "memcp-tests" "lookup_objects" (tsql_session_actor s) nil false))
+  expect: {result: []}
+- name: Necessary name and kind selectors retain exactly one virtual tuple
+  scm: |
+    (begin
+      (define s (newsession)) (s "username" "root")
+      (map (tsql_catalog_runtime_rows "memcp-tests" "lookup_objects" (tsql_session_actor s) nil
+        (list "object" (list "exact" "objects") "kinds" (list "V")))
+        (lambda (row) (list (nth row 0) (nth row 2) (nth row 3)))))
+  expect: {result: [[objects,V,true]]}
+- name: A virtual name with a non-view kind produces no tuple
+  scm: |
+    (begin
+      (define s (newsession)) (s "username" "root")
+      (tsql_catalog_runtime_rows "memcp-tests" "lookup_objects" (tsql_session_actor s) nil
+        (list "object" (list "exact" "objects") "kinds" (list "P"))))
+  expect: {result: []}
+- name: The producer itself rejects an actor without database membership
+  scm: |
+    (begin
+      (define s (newsession)) (s "username" "lookup_hidden")
+      (tsql_catalog_runtime_rows "memcp-tests" "lookup_objects" (tsql_session_actor s) nil nil))
+  expect: {result: []}
+- name: The producer itself rejects a mismatched authenticated login incarnation
+  scm: |
+    (tsql_catalog_runtime_rows "memcp-tests" "lookup_objects"
+      (list "lookup_member" "retired-login-incarnation") nil nil)
+  expect: {result: []}
+- name: Pending source lookups observe the owning native transaction and rollback
+  tds:
+    statements:
+    - connection: observer
+      sql: SELECT OBJECT_NAME(OBJECT_ID(N'lookup_pending',N'P')) AS name
+      expect: {rows: 1,data: [{name: null}]}
+    - {connection: owner,sql: BEGIN TRANSACTION}
+    - {connection: owner,sql: 'CREATE PROCEDURE lookup_pending AS SELECT 1 AS value'}
+    - connection: owner
+      sql: SELECT OBJECT_NAME(OBJECT_ID(N'lookup_pending',N'P')) AS name,OBJECTPROPERTY(OBJECT_ID(N'lookup_pending',N'P'),N'IsProcedure') AS procedure_flag
+      expect: {rows: 1,data: [{name: lookup_pending,procedure_flag: 1}]}
+    - connection: observer
+      sql: SELECT OBJECT_NAME(OBJECT_ID(N'lookup_pending',N'P')) AS name
+      expect: {rows: 1,data: [{name: null}]}
+    - {connection: owner,sql: ROLLBACK TRANSACTION}
+    - connection: owner
+      sql: SELECT OBJECT_NAME(OBJECT_ID(N'lookup_pending',N'P')) AS name
+      expect: {rows: 1,data: [{name: null}]}
+- name: Retiring a source is private until commit and rollback restores lookup
+  tds:
+    statements:
+    - {connection: owner,sql: BEGIN TRANSACTION}
+    - {connection: owner,sql: DROP PROCEDURE lookup_procedure}
+    - connection: owner
+      sql: SELECT OBJECT_NAME(object_id) AS name FROM lookup_saved WHERE label=N'procedure'
+      expect: {rows: 1,data: [{name: null}]}
+    - connection: observer
+      sql: SELECT OBJECT_NAME(object_id) AS name FROM lookup_saved WHERE label=N'procedure'
+      expect: {rows: 1,data: [{name: lookup_procedure}]}
+    - {connection: owner,sql: ROLLBACK TRANSACTION}
+    - connection: owner
+      sql: SELECT OBJECT_NAME(object_id) AS name FROM lookup_saved WHERE label=N'procedure'
+      expect: {rows: 1,data: [{name: lookup_procedure}]}
+- name: A native database member can warm the virtual and user lookup together
+  username: lookup_member
+  password: pw
+  session_id: lookup-authenticated
+  sql: SELECT s.label,OBJECT_NAME(s.object_id) AS name,OBJECTPROPERTY(o.object_id,N'IsUserTable') AS user_table FROM lookup_saved s LEFT JOIN sys.objects o ON o.object_id=s.object_id WHERE s.label IN(N'table',N'virtual') ORDER BY s.label
+  expect: {rows: 2,data: [{label: table,name: lookup_relation,user_table: 1},{label: virtual,name: objects,user_table: null}]}
+- name: Missing database membership cannot authorize virtual catalog lookup
+  username: lookup_hidden
+  password: pw
+  sql: SELECT OBJECT_NAME(OBJECT_ID(N'sys.objects')) AS name
+  expect: {error: true,contains: access denied}
+- name: A warm lookup cannot reuse revoked database authority
+  setup:
+  - scm: (eval (parse_sql "memcp-tests" "REVOKE ALL ON `memcp-tests`.* FROM lookup_member" nil))
+  username: lookup_member
+  password: pw
+  session_id: lookup-authenticated
+  sql: SELECT s.label,OBJECT_NAME(s.object_id) AS name,OBJECTPROPERTY(o.object_id,N'IsUserTable') AS user_table FROM lookup_saved s LEFT JOIN sys.objects o ON o.object_id=s.object_id WHERE s.label IN(N'table',N'virtual') ORDER BY s.label
+  expect: {error: true,contains: access denied}
+- name: Restoring the same membership reuses the same authenticated incarnation
+  setup:
+  - scm: (eval (parse_sql "memcp-tests" "GRANT ALL ON `memcp-tests`.* TO lookup_member" nil))
+  username: lookup_member
+  password: pw
+  session_id: lookup-authenticated
+  sql: SELECT s.label,OBJECT_NAME(s.object_id) AS name,OBJECTPROPERTY(o.object_id,N'IsUserTable') AS user_table FROM lookup_saved s LEFT JOIN sys.objects o ON o.object_id=s.object_id WHERE s.label IN(N'table',N'virtual') ORDER BY s.label
+  expect: {rows: 2,data: [{label: table,name: lookup_relation,user_table: 1},{label: virtual,name: objects,user_table: null}]}
+- name: An old lookup session cannot borrow a replacement login identity
+  setup:
+  - scm: (eval (parse_sql "memcp-tests" "DROP USER lookup_member" nil))
+  - scm: (eval (parse_sql "memcp-tests" "CREATE USER lookup_member IDENTIFIED BY 'pw'" nil))
+  - scm: (eval (parse_sql "memcp-tests" "GRANT ALL ON `memcp-tests`.* TO lookup_member" nil))
+  username: lookup_member
+  password: pw
+  session_id: lookup-authenticated
+  sql: SELECT s.label,OBJECT_NAME(s.object_id) AS name,OBJECTPROPERTY(o.object_id,N'IsUserTable') AS user_table FROM lookup_saved s LEFT JOIN sys.objects o ON o.object_id=s.object_id WHERE s.label IN(N'table',N'virtual') ORDER BY s.label
+  expect: {error: true,contains: session authority changed}
+- name: A replacement login uses its own current lookup authority
+  username: lookup_member
+  password: pw
+  session_id: lookup-replacement
+  sql: SELECT s.label,OBJECT_NAME(s.object_id) AS name,OBJECTPROPERTY(o.object_id,N'IsUserTable') AS user_table FROM lookup_saved s LEFT JOIN sys.objects o ON o.object_id=s.object_id WHERE s.label IN(N'table',N'virtual') ORDER BY s.label
+  expect: {rows: 2,data: [{label: table,name: lookup_relation,user_table: 1},{label: virtual,name: objects,user_table: null}]}
+- name: Saved identities and virtual namespaces survive restart
+  action: restart
+- name: Restart preserves complete native and virtual lookup results
+  sql: SELECT s.label,OBJECT_NAME(s.object_id) AS name,OBJECTPROPERTY(o.object_id,N'IsUserTable') AS user_table FROM lookup_saved s LEFT JOIN sys.objects o ON o.object_id=s.object_id WHERE s.label IN(N'table',N'virtual') ORDER BY s.label
+  expect: {rows: 2,data: [{label: table,name: lookup_relation,user_table: 1},{label: virtual,name: objects,user_table: null}]}
+- name: Dynamic names and source kinds preserve all caller rows and exact object identities
+  sql: SELECT b.label AS caller,o.name,o.type,CASE WHEN o.object_id=OBJECT_ID(N'dbo.'+o.name,o.type)
+    THEN 1 ELSE 0 END AS same_id FROM lookup_saved b CROSS JOIN sys.objects o WHERE
+    b.label IN(N'table',N'view') AND o.name IN(N'lookup_function',N'lookup_procedure')
+    ORDER BY b.label,o.name
+  expect:
+    rows: 4
+    data:
+    - caller: table
+      name: lookup_function
+      type: FN
+      same_id: 1
+    - caller: table
+      name: lookup_procedure
+      type: P
+      same_id: 1
+    - caller: view
+      name: lookup_function
+      type: FN
+      same_id: 1
+    - caller: view
+      name: lookup_procedure
+      type: P
+      same_id: 1

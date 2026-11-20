@@ -1,0 +1,135 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  requires_tds: true
+  description: INNER ON filters complete joined operands after their internal null extension
+setup:
+- sql: CREATE TABLE mixed_root(aid INT,head_ref INT)
+- sql: CREATE TABLE mixed_head(cid INT,unit INT)
+- sql: CREATE TABLE mixed_detail(did INT,head_ref INT)
+- sql: CREATE TABLE mixed_extra(eid INT,head_ref INT,label NVARCHAR(12))
+- sql: INSERT mixed_root VALUES(1,10),(2,20),(3,30),(4,40),(5,NULL),(6,10)
+- sql: INSERT mixed_head VALUES(10,1),(20,2),(40,4)
+- sql: INSERT mixed_detail VALUES(101,10),(102,10),(201,20),(401,40)
+- sql: INSERT mixed_extra VALUES(500,10,N'first'),(501,10,N'second'),(NULL,20,N'actual-null')
+cleanup:
+- sql: DROP VIEW IF EXISTS dbo.mixed_join_view
+- sql: DROP TABLE IF EXISTS mixed_extra
+- sql: DROP TABLE IF EXISTS mixed_detail
+- sql: DROP TABLE IF EXISTS mixed_head
+- sql: DROP TABLE IF EXISTS mixed_root
+test_cases:
+- name: INNER joins a whole right operand with internal optional rows
+  sql: |
+    SELECT a.aid,c.cid,d.did,e.eid,e.label FROM mixed_root a
+    INNER JOIN mixed_head c INNER JOIN mixed_detail d ON c.cid=d.head_ref
+      LEFT JOIN mixed_extra e ON c.cid=e.head_ref ON a.head_ref=c.cid
+    ORDER BY a.aid,d.did,e.eid
+  expect:
+    rows: 10
+    data: [{aid: 1,cid: 10,did: 101,eid: 500,label: first},{aid: 1,cid: 10,did: 101,eid: 501,label: second},
+      {aid: 1,cid: 10,did: 102,eid: 500,label: first},{aid: 1,cid: 10,did: 102,eid: 501,label: second},
+      {aid: 2,cid: 20,did: 201,eid: null,label: actual-null},{aid: 4,cid: 40,did: 401,eid: null,label: null},
+      {aid: 6,cid: 10,did: 101,eid: 500,label: first},{aid: 6,cid: 10,did: 101,eid: 501,label: second},
+      {aid: 6,cid: 10,did: 102,eid: 500,label: first},{aid: 6,cid: 10,did: 102,eid: 501,label: second}]
+- name: Enclosing INNER ON sees nullable child values after internal extension
+  sql: |
+    SELECT a.aid,c.cid,e.eid FROM mixed_root a INNER JOIN mixed_head c
+      INNER JOIN mixed_detail d ON c.cid=d.head_ref LEFT JOIN mixed_extra e ON c.cid=e.head_ref
+      ON a.head_ref=c.cid AND e.eid=501 ORDER BY a.aid,d.did
+  expect: {rows: 4,data: [{aid: 1,cid: 10,eid: 501},{aid: 1,cid: 10,eid: 501},
+      {aid: 6,cid: 10,eid: 501},{aid: 6,cid: 10,eid: 501}]}
+- name: INNER rejection never null extends its complete operand
+  sql: |
+    SELECT a.aid FROM mixed_root a INNER JOIN mixed_head c
+      INNER JOIN mixed_detail d ON c.cid=d.head_ref LEFT JOIN mixed_extra e ON c.cid=e.head_ref
+      ON a.head_ref=c.cid AND e.eid=999
+  expect: {rows: 0}
+- name: Missing INNER heads disappear rather than acquiring a synthetic tuple
+  sql: |
+    SELECT a.aid FROM mixed_root a INNER JOIN mixed_head c
+      INNER JOIN mixed_detail d ON c.cid=d.head_ref LEFT JOIN mixed_extra e ON c.cid=e.head_ref
+      ON a.head_ref=c.cid WHERE a.aid IN(3,5)
+  expect: {rows: 0}
+- name: Null accepting INNER ON observes both real and synthetic optional keys
+  sql: |
+    SELECT a.aid,e.label FROM mixed_root a INNER JOIN mixed_head c
+      INNER JOIN mixed_detail d ON c.cid=d.head_ref LEFT JOIN mixed_extra e ON c.cid=e.head_ref
+      ON a.head_ref=c.cid AND e.eid IS NULL ORDER BY a.aid
+  expect: {rows: 2,data: [{aid: 2,label: actual-null},{aid: 4,label: null}]}
+- name: Outer WHERE cannot recreate a row rejected by the enclosing INNER ON
+  sql: |
+    SELECT a.aid FROM mixed_root a INNER JOIN mixed_head c
+      INNER JOIN mixed_detail d ON c.cid=d.head_ref LEFT JOIN mixed_extra e ON c.cid=e.head_ref
+      ON a.head_ref=c.cid WHERE a.aid=1 AND e.eid IS NULL
+  expect: {rows: 0}
+- name: Scalar reducers preserve duplicate left rows and actual nullable optional keys
+  sql: |
+    SELECT COUNT(*) AS total,COUNT(c.cid) AS heads,COUNT(d.did) AS details,
+      COUNT(e.eid) AS extras,COUNT(e.label) AS labels FROM mixed_root a
+    INNER JOIN mixed_head c INNER JOIN mixed_detail d ON c.cid=d.head_ref
+      LEFT JOIN mixed_extra e ON c.cid=e.head_ref ON a.head_ref=c.cid
+  expect: {rows: 1,data: [{total: 10,heads: 10,details: 10,extras: 8,labels: 9}]}
+- name: Grouping happens above the complete mixed operand
+  sql: |
+    SELECT a.aid,COUNT(*) AS total FROM mixed_root a INNER JOIN mixed_head c
+      INNER JOIN mixed_detail d ON c.cid=d.head_ref LEFT JOIN mixed_extra e ON c.cid=e.head_ref
+      ON a.head_ref=c.cid GROUP BY a.aid ORDER BY a.aid
+  expect: {rows: 4,data: [{aid: 1,total: 4},{aid: 2,total: 1},{aid: 4,total: 1},{aid: 6,total: 4}]}
+- name: Internal INNER ON cannot see the enclosing left alias
+  sql: |
+    SELECT a.aid FROM mixed_root a INNER JOIN mixed_head c
+      INNER JOIN mixed_detail d ON a.head_ref=d.head_ref LEFT JOIN mixed_extra e ON c.cid=e.head_ref
+      ON a.head_ref=c.cid
+  expect: {error: true,contains: unknown relation alias}
+- name: Internal LEFT ON cannot see the enclosing left alias
+  sql: |
+    SELECT a.aid FROM mixed_root a INNER JOIN mixed_head c
+      INNER JOIN mixed_detail d ON c.cid=d.head_ref LEFT JOIN mixed_extra e ON a.head_ref=e.head_ref
+      ON a.head_ref=c.cid
+  expect: {error: true,contains: unknown relation alias}
+- name: Internal earlier ON cannot see a later optional alias
+  sql: |
+    SELECT a.aid FROM mixed_root a INNER JOIN mixed_head c
+      INNER JOIN mixed_detail d ON e.head_ref=d.head_ref LEFT JOIN mixed_extra e ON c.cid=e.head_ref
+      ON a.head_ref=c.cid
+  expect: {error: true,contains: unknown relation alias}
+- name: Following joins consume exports of an entire nonnullable mixed operand
+  sql: |
+    SELECT a.aid,x.eid FROM mixed_root a INNER JOIN mixed_head c
+      INNER JOIN mixed_detail d ON c.cid=d.head_ref LEFT JOIN mixed_extra e ON c.cid=e.head_ref
+      ON a.head_ref=c.cid LEFT JOIN mixed_extra x ON e.eid=x.eid
+    WHERE a.aid IN(2,4) ORDER BY a.aid
+  expect: {rows: 2,data: [{aid: 2,eid: null},{aid: 4,eid: null}]}
+- name: A nullable parent retains a nonnullable mixed child as a complete unit
+  sql: |
+    SELECT a.aid,c.cid,e.eid FROM mixed_root a LEFT JOIN mixed_head c
+      INNER JOIN mixed_detail d INNER JOIN mixed_extra e
+        LEFT JOIN mixed_head x ON e.head_ref=x.cid ON d.head_ref=e.head_ref
+        ON c.cid=d.head_ref ON a.head_ref=c.cid
+    WHERE a.aid IN(2,3,4) ORDER BY a.aid
+  expect: {rows: 3,data: [{aid: 2,cid: 20,eid: null},{aid: 3,cid: null,eid: null},{aid: 4,cid: null,eid: null}]}
+- name: Stored mixed operands retain original logical scopes
+  sql: |
+    CREATE VIEW dbo.mixed_join_view AS SELECT a.aid,c.cid,d.did,e.eid,e.label
+    FROM mixed_root a INNER JOIN mixed_head c INNER JOIN mixed_detail d ON c.cid=d.head_ref
+      LEFT JOIN mixed_extra e ON c.cid=e.head_ref ON a.head_ref=c.cid
+- name: TDS exposes declared national text and stored operand exports
+  tds:
+    statements:
+    - sql: |
+        SELECT a.aid,c.cid,d.did,e.eid,e.label FROM mixed_root a
+        INNER JOIN mixed_head c INNER JOIN mixed_detail d ON c.cid=d.head_ref
+          LEFT JOIN mixed_extra e ON c.cid=e.head_ref ON a.head_ref=c.cid WHERE a.aid=2
+      expect:
+        rows: 1
+        data: [{aid: 2,cid: 20,did: 201,eid: null,label: actual-null}]
+        column_types: [{name: aid,type: INT},{name: cid,type: INT},{name: did,type: INT},
+          {name: eid,type: INT},{name: label,type: NVARCHAR,length: 12}]
+    - sql: SELECT * FROM dbo.mixed_join_view WHERE aid=4
+      expect:
+        rows: 1
+        data: [{aid: 4,cid: 40,did: 401,eid: null,label: null}]
+        column_types: [{name: aid,type: INT},{name: cid,type: INT},{name: did,type: INT},
+          {name: eid,type: INT},{name: label,type: NVARCHAR,length: 12}]

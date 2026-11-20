@@ -276,8 +276,10 @@ func newRecMapValueMapper(currentTx *TxContext, mapping *recMap, columns []strin
 	}
 	prepared := scm.PrepareSerialProc(mapper)
 	for shard, positions := range groups {
-		release := shard.acquireSnapshotRead(currentTx)
 		func() {
+			currentTx, finishData := shard.t.readDataContext(currentTx)
+			defer finishData()
+			release := shard.acquireSnapshotRead(currentTx)
 			defer release.Release()
 			shard.ensureLoaded()
 			skipShardReadLock := shard.hasWriteOwnerForTx(currentTx)
@@ -364,20 +366,47 @@ func newRecMapValueMapper(currentTx *TxContext, mapping *recMap, columns []strin
 	})
 }
 
-func recMapCallClosure(shard *storageShard, currentTx *TxContext) *func(uint32, ...scm.Scmer) scm.Scmer {
+func recMapCallClosure(shard *storageShard, currentTx *TxContext) (*func(uint32, ...scm.Scmer) scm.Scmer, func()) {
 	type cachedLookup struct {
 		mapping *recMap
 		part    *recMapShard
+		context *TxContext
+	}
+	type dataInput struct {
+		context *TxContext
+		finish  func()
 	}
 	var cached atomic.Pointer[cachedLookup]
+	var closed atomic.Bool
+	var inputsMu, closeMu sync.Mutex
+	inputs := make(map[*table]*dataInput)
+	bindInput := func(target *table) *TxContext {
+		inputsMu.Lock()
+		defer inputsMu.Unlock()
+		if closed.Load() {
+			panic("native RecMap input has finished")
+		}
+		if target == nil {
+			return currentTx
+		}
+		if input := inputs[target]; input != nil {
+			return input.context
+		}
+		context, finish := target.readDataContext(currentTx)
+		inputs[target] = &dataInput{context, finish}
+		return context
+	}
 	fn := func(recid uint32, args ...scm.Scmer) scm.Scmer {
+		if closed.Load() {
+			panic("native RecMap input has finished")
+		}
 		if len(args) != 4 || !args[0].IsCustom(TagRecMap) {
 			panic("$recmap_call expects recmap, columns, mapperFn, and ifNullFn")
 		}
 		rm := RecMapFromScmer(args[0])
 		lookup := cached.Load()
 		if lookup == nil || lookup.mapping != rm {
-			lookup = &cachedLookup{mapping: rm, part: rm.partForSourceShard(shard)}
+			lookup = &cachedLookup{mapping: rm, part: rm.partForSourceShard(shard), context: bindInput(rm.target)}
 			cached.Store(lookup)
 		}
 		if lookup.part == nil {
@@ -390,9 +419,42 @@ func recMapCallClosure(shard *storageShard, currentTx *TxContext) *func(uint32, 
 			return scm.Apply(args[3])
 		}
 		columns := scmerSliceToStrings(mustScmerSlice(args[1], "$recmap_call columns"))
-		return recMapReadTarget(currentTx, lookup.part.targets[position], columns, args[2], args[3])
+		return recMapReadTarget(lookup.context, lookup.part.targets[position], columns, args[2], args[3])
 	}
-	return &fn
+	closeInput := func() {
+		closeMu.Lock()
+		defer closeMu.Unlock()
+		closed.Store(true)
+		cached.Store(nil)
+		inputsMu.Lock()
+		pending := make([]*dataInput, 0, len(inputs))
+		for _, input := range inputs {
+			pending = append(pending, input)
+		}
+		inputsMu.Unlock()
+		var first any
+		for _, input := range pending {
+			if input.finish == nil {
+				continue
+			}
+			func() {
+				defer func() {
+					if failure := recover(); failure != nil && first == nil {
+						first = failure
+					}
+				}()
+				input.finish()
+				input.finish, input.context = nil, nil
+			}()
+		}
+		if first != nil {
+			panic(first)
+		}
+		inputsMu.Lock()
+		inputs = nil
+		inputsMu.Unlock()
+	}
+	return &fn, closeInput
 }
 
 // recMapBuildRows is owned by one serial shard scan. The table-level combine
@@ -427,6 +489,8 @@ func (b *recMapBuildRows) copyKey(values []scm.Scmer) []scm.Scmer {
 // subscan per source record is intentionally not supported.
 func newRecMapEquiFirstMapper(currentTx *TxContext, target *table, targetKeyCols []string, sourceKeyFn scm.Scmer) scm.Scmer {
 	return scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+		currentTx, finishData := target.readDataContext(currentTx)
+		defer finishData()
 		if len(args) != 1 || !args[0].IsSlice() {
 			panic("recmap equi mapper expects a batch of source tuples")
 		}
@@ -491,6 +555,8 @@ func newRecMapEquiFirstMapper(currentTx *TxContext, target *table, targetKeyCols
 // while every source tuple retains scalar-first 0..1 semantics.
 func newRecMapEquiFirstOfMapper(currentTx *TxContext, target *table, targetKeyAlternatives [][]string, sourceKeyFn scm.Scmer) scm.Scmer {
 	return scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+		currentTx, finishData := target.readDataContext(currentTx)
+		defer finishData()
 		if len(args) != 1 || !args[0].IsSlice() {
 			panic("recmap equi-first-of mapper expects a batch of source tuples")
 		}
@@ -845,6 +911,8 @@ func (r *recMap) orderRecSet(currentTx *TxContext, sortSides, sortColumns []stri
 	if limit == 0 || r.count == 0 {
 		return result
 	}
+	currentTx, finishData := r.source.readDataContext(currentTx)
+	defer finishData()
 	rows := make([]recMapOrderRow, 0, r.count)
 	for partIndex := range r.shards {
 		part := &r.shards[partIndex]
@@ -923,8 +991,10 @@ func fillRecMapOrderValues(currentTx *TxContext, rows []recMapOrderRow, sides, c
 			}
 		}
 		for shard, indexes := range groups {
-			release := shard.acquireSnapshotRead(currentTx)
 			func() {
+				currentTx, finishData := shard.t.readDataContext(currentTx)
+				defer finishData()
+				release := shard.acquireSnapshotRead(currentTx)
 				defer release.Release()
 				shard.ensureLoaded()
 				skipLock := shard.hasWriteOwnerForTx(currentTx)
@@ -1081,6 +1151,8 @@ func extendRecMap(currentTx *TxContext, previous *recMap, sourceCols, previousTa
 	for partIndex := range previous.shards {
 		part := &previous.shards[partIndex]
 		func() {
+			currentTx, finishData := part.sourceShard.t.readDataContext(currentTx)
+			defer finishData()
 			release := part.sourceShard.acquireSnapshotRead(currentTx)
 			defer release.Release()
 			part.sourceShard.ensureLoaded()
@@ -1115,6 +1187,8 @@ func extendRecMap(currentTx *TxContext, previous *recMap, sourceCols, previousTa
 	}
 	for shard, positions := range targetPositions {
 		func() {
+			currentTx, finishData := shard.t.readDataContext(currentTx)
+			defer finishData()
 			release := shard.acquireSnapshotRead(currentTx)
 			defer release.Release()
 			shard.ensureLoaded()
@@ -1195,6 +1269,8 @@ func (r *recSet) collectRecMapRows(currentTx *TxContext, sourceKeyCols []string,
 	if r == nil || r.table == nil || r.count == 0 {
 		return nil
 	}
+	currentTx, finishData := r.table.readDataContext(currentTx)
+	defer finishData()
 	atomic.StoreUint64(&r.table.lastAccessed, uint64(time.Now().UnixNano()))
 	rows := make([]recMapSourceRow, 0, r.count)
 	ss := SessionStateFromTx(currentTx)
@@ -1277,10 +1353,12 @@ func recMapKeyHasNull(key []scm.Scmer) bool {
 	return false
 }
 
-func (r *recMap) image() *recSet {
+func (r *recMap) image(currentTx *TxContext) *recSet {
 	if r == nil || r.target == nil {
 		return &recSet{}
 	}
+	currentTx, finishData := r.target.readDataContext(currentTx)
+	defer finishData()
 	result := &recSet{table: r.target}
 	byShard := make(map[*storageShard][]uint32)
 	for _, part := range r.shards {
@@ -1300,7 +1378,7 @@ func (r *recMap) image() *recSet {
 			}
 		}
 		ids = ids[:write]
-		release := shard.acquireSnapshotRead(nil)
+		release := shard.acquireSnapshotRead(currentTx)
 		shard.mu.RLock()
 		universe := shard.main_count + uint32(len(shard.deltaRows()))
 		shard.mu.RUnlock()

@@ -1,0 +1,229 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Multipart SQL column names bind to declared eligible relation names in lexical scope
+setup:
+- sql: CREATE TABLE qcb_parent(id INT PRIMARY KEY,label NVARCHAR(12))
+- sql: CREATE TABLE qcb_detail(id INT PRIMARY KEY,parent_id INT,amount INT)
+- sql: CREATE TABLE [qcb.part]([value.dot] INT)
+- sql: INSERT INTO qcb_parent VALUES(1,N'one'),(2,N'two')
+- sql: INSERT INTO qcb_detail VALUES(10,1,7),(20,2,9)
+- sql: INSERT INTO [qcb.part] VALUES(31)
+- sql: CREATE VIEW qcb_view AS SELECT id,label FROM dbo.qcb_parent
+- sql: |
+    CREATE VIEW dbo.qcb_joined_view AS
+    SELECT dbo.qcb_parent.id AS id,dbo.qcb_parent.label AS label,dbo.qcb_detail.amount AS amount
+    FROM dbo.qcb_parent LEFT JOIN dbo.qcb_detail
+      ON dbo.qcb_detail.parent_id=dbo.qcb_parent.id AND dbo.qcb_detail.amount>7
+    WHERE dbo.qcb_parent.id<=2
+- sql: CREATE DATABASE qcb_peer
+- sql: CREATE TABLE qcb_peer.dbo.qcb_parent(id INT)
+- sql: INSERT INTO qcb_peer.dbo.qcb_parent VALUES(9)
+- scm: (eval (parse_sql "memcp-tests" "CREATE USER qcb_reader IDENTIFIED BY 'pw'" nil))
+- scm: (eval (parse_sql "memcp-tests" "GRANT ALL ON `memcp-tests`.* TO qcb_reader" nil))
+cleanup:
+- sql: DROP PROCEDURE IF EXISTS qcb_recovery
+- sql: DROP VIEW IF EXISTS qcb_view
+- sql: DROP VIEW IF EXISTS qcb_outer_view
+- sql: DROP VIEW IF EXISTS qcb_joined_view
+- sql: DROP TABLE IF EXISTS qcb_detail
+- sql: DROP TABLE IF EXISTS qcb_parent
+- sql: DROP TABLE IF EXISTS [qcb.part]
+- sql: DROP DATABASE IF EXISTS qcb_peer
+- scm: (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS qcb_reader" nil))
+test_cases:
+- name: An omitted schema component retains the default declared relation binding
+  sql: SELECT .qcb_parent.id AS id,.qcb_parent.label AS label FROM dbo.qcb_parent WHERE .qcb_parent.id=1
+  expect: {rows: 1,data: [{id: 1,label: one}]}
+- name: An omitted database prefix retains the explicit schema component
+  sql: SELECT .dbo.qcb_parent.id AS id FROM dbo.qcb_parent WHERE .dbo.qcb_parent.id=2
+  expect: {rows: 1,data: [{id: 2}]}
+- name: An omitted schema under an explicit database keeps database identity
+  sql: SELECT qcb_peer..qcb_parent.id AS id FROM qcb_peer.dbo.qcb_parent
+  expect: {rows: 1,data: [{id: 9}]}
+- name: Both omitted prefixes preserve the default relation namespace
+  sql: SELECT ..qcb_parent.id AS id FROM dbo.qcb_parent WHERE ..qcb_parent.id=1
+  expect: {rows: 1,data: [{id: 1}]}
+- name: Omitted prefix wildcard expands the declared SQL columns
+  sql: SELECT .qcb_parent.* FROM dbo.qcb_parent WHERE .qcb_parent.id=2
+  expect: {rows: 1,data: [{id: 2,label: two}]}
+- name: An omitted schema column qualifier binds through a join predicate
+  sql: SELECT .qcb_parent.id AS id,.qcb_detail.amount AS amount FROM dbo.qcb_parent JOIN dbo.qcb_detail ON .qcb_detail.parent_id=.qcb_parent.id ORDER BY .qcb_parent.id
+  expect: {rows: 2,data: [{id: 1,amount: 7},{id: 2,amount: 9}]}
+- name: Omitted prefixes do not undo explicit source alias hiding
+  sql: SELECT .qcb_parent.id FROM dbo.qcb_parent AS hidden
+  expect: {error: true,contains: unknown relation alias}
+- name: Schema and relation column qualifiers bind the declared ordinary source
+  sql: SELECT dbo.qcb_parent.id,dbo.qcb_parent.label FROM dbo.qcb_parent WHERE dbo.qcb_parent.id=1
+  expect: {rows: 1, data: [{id: 1,label: one}]}
+- name: Explicit database qualifier selects the declared source database
+  sql: SELECT [qcb_peer].[dbo].[qcb_parent].[id] AS id FROM qcb_peer.dbo.qcb_parent
+  expect: {rows: 1, data: [{id: 9}]}
+- name: Multipart output description uses the same binder and native declarations
+  tds:
+    statements:
+    - sql: SELECT [memcp-tests].[dbo].[qcb_parent].[id] AS id,[memcp-tests].[dbo].[qcb_parent].[label] AS label FROM dbo.qcb_parent WHERE dbo.qcb_parent.id=1
+      expect:
+        rows: 1
+        data: [{id: 1,label: one}]
+        column_types: [{name: id,type: INT},{name: label,type: NVARCHAR,length: 12}]
+- name: Multipart wildcard uses the declared source export directory
+  sql: SELECT [memcp-tests].dbo.qcb_parent.* FROM dbo.qcb_parent WHERE dbo.qcb_parent.id=2
+  expect: {rows: 1,data: [{id: 2,label: two}]}
+- name: Quoted table and column identifiers containing dots remain indivisible
+  sql: SELECT dbo.[qcb.part].[value.dot] AS value FROM dbo.[qcb.part]
+  expect: {rows: 1,data: [{value: 31}]}
+- name: A quoted alias containing a dot remains an ordinary two part name
+  sql: SELECT [qcb.alias].id FROM dbo.qcb_parent AS [qcb.alias] WHERE [qcb.alias].id=1
+  expect: {rows: 1,data: [{id: 1}]}
+- name: Explicit alias hides the qualified original relation name
+  sql: SELECT dbo.qcb_parent.id FROM dbo.qcb_parent AS hidden
+  expect: {error: true,contains: unknown relation alias}
+- name: Explicit identical alias still hides the original multipart name
+  sql: SELECT dbo.qcb_parent.id FROM dbo.qcb_parent AS qcb_parent
+  expect: {error: true,contains: unknown relation alias}
+- name: An explicit alias keeps its ordinary two part binding
+  sql: SELECT qcb_parent.id FROM dbo.qcb_parent AS qcb_parent WHERE qcb_parent.id=2
+  expect: {rows: 1,data: [{id: 2}]}
+- name: dbo remains a legal explicit alias in a two part column reference
+  sql: SELECT dbo.id FROM dbo.qcb_parent AS dbo WHERE dbo.id=1
+  expect: {rows: 1,data: [{id: 1}]}
+- name: Unknown SQL schema is not stripped from a multipart reference
+  sql: SELECT missing_schema.qcb_parent.id FROM dbo.qcb_parent
+  expect: {error: true,contains: unknown relation alias}
+- name: Another existing database cannot qualify an undeclared source
+  sql: SELECT qcb_peer.dbo.qcb_parent.id FROM dbo.qcb_parent
+  expect: {error: true,contains: unknown relation alias}
+- name: Native database membership permits local multipart reads
+  username: qcb_reader
+  password: pw
+  sql: SELECT [memcp-tests].dbo.qcb_parent.id AS id FROM dbo.qcb_parent WHERE dbo.qcb_parent.id=1
+  expect: {rows: 1,data: [{id: 1}]}
+- name: A multipart column cannot bypass a peer source database permission
+  username: qcb_reader
+  password: pw
+  sql: SELECT qcb_peer.dbo.qcb_parent.id FROM qcb_peer.dbo.qcb_parent
+  expect: {error: true,contains: access denied}
+- name: Same bare source names across databases retain the existing explicit error
+  sql: SELECT [memcp-tests].dbo.qcb_parent.id FROM [memcp-tests].dbo.qcb_parent,qcb_peer.dbo.qcb_parent
+  expect: {error: true,contains: duplicate relation alias}
+- name: Unqualified joined columns retain ambiguity rather than selecting a source
+  sql: SELECT id FROM dbo.qcb_parent p JOIN dbo.qcb_detail d ON d.parent_id=p.id
+  expect: {error: true,contains: ambiguous unqualified column}
+- name: A stored view keeps only its own declared multipart export name
+  sql: SELECT dbo.qcb_view.id,dbo.qcb_view.label FROM dbo.qcb_view WHERE dbo.qcb_view.id=1
+  expect: {rows: 1,data: [{id: 1,label: one}]}
+- name: View expansion does not grant its inner table name to outer consumers
+  sql: SELECT dbo.qcb_parent.id FROM dbo.qcb_view
+  expect: {error: true,contains: unknown relation alias}
+- name: A stored joined view rebinds its qualified projection and predicates
+  sql: SELECT dbo.qcb_joined_view.id,dbo.qcb_joined_view.label,dbo.qcb_joined_view.amount FROM dbo.qcb_joined_view ORDER BY dbo.qcb_joined_view.id
+  expect: {rows: 2,data: [{id: 1,label: one,amount: null},{id: 2,label: two,amount: 9}]}
+- name: A view can be created over a stored view with qualified source references
+  sql: |
+    CREATE VIEW dbo.qcb_outer_view AS
+    SELECT dbo.qcb_joined_view.id AS id,dbo.qcb_joined_view.label AS label
+    FROM dbo.qcb_joined_view WHERE dbo.qcb_joined_view.amount=9
+- name: A nested view rebinds both stored source scopes
+  sql: SELECT dbo.qcb_outer_view.id,dbo.qcb_outer_view.label FROM dbo.qcb_outer_view
+  expect: {rows: 1,data: [{id: 2,label: two}]}
+- name: A base relation qualifier stays private to its stored view scope
+  sql: SELECT dbo.qcb_parent.id FROM dbo.qcb_outer_view
+  expect: {error: true,contains: unknown relation alias}
+- name: A nested view alias hides its original qualified name
+  sql: SELECT dbo.qcb_outer_view.id FROM dbo.qcb_outer_view AS qcb_outer_view
+  expect: {error: true,contains: unknown relation alias}
+- name: Virtual catalogs retain their logical multipart name after expansion
+  sql: SELECT sys.objects.name FROM sys.objects WHERE sys.objects.name=N'qcb_parent'
+  expect: {rows: 1,data: [{name: qcb_parent}]}
+- name: Anonymous derived output does not inherit a physical schema address
+  sql: SELECT dbo.qcb_parent.id FROM (SELECT id FROM dbo.qcb_parent) qcb_parent
+  expect: {error: true,contains: unknown relation alias}
+- name: A CTE output does not become a schema scoped object name
+  sql: WITH qcb_parent AS(SELECT 99 AS id) SELECT dbo.qcb_parent.id FROM qcb_parent
+  expect: {error: true,contains: unknown relation alias}
+- name: Explicit schema scoped FROM remains native beside a same named CTE
+  sql: WITH qcb_parent AS(SELECT 99 AS id) SELECT dbo.qcb_parent.id FROM dbo.qcb_parent WHERE dbo.qcb_parent.id=1
+  expect: {rows: 1,data: [{id: 1}]}
+- name: Nearest eligible lexical scope owns a repeated multipart relation name
+  sql: SELECT dbo.qcb_parent.id AS outer_id,(SELECT TOP 1 dbo.qcb_parent.id FROM dbo.qcb_parent WHERE dbo.qcb_parent.id=2) AS inner_id FROM dbo.qcb_parent WHERE dbo.qcb_parent.id=1
+  expect: {rows: 1,data: [{outer_id: 1,inner_id: 2}]}
+- name: A missing column in the nearest eligible relation does not fall through outward
+  sql: SELECT (SELECT TOP 1 dbo.qcb_parent.label FROM qcb_peer.dbo.qcb_parent) AS value FROM dbo.qcb_parent WHERE dbo.qcb_parent.id=1
+  expect: {error: true,contains: Column does not exist}
+- name: Hidden local physical name permits a genuinely visible outer relation binding
+  sql: SELECT dbo.qcb_parent.id AS outer_id,(SELECT TOP 1 dbo.qcb_parent.id FROM dbo.qcb_parent AS qcb_parent WHERE qcb_parent.id=2) AS correlated_id FROM dbo.qcb_parent WHERE dbo.qcb_parent.id=1
+  expect: {rows: 1,data: [{outer_id: 1,correlated_id: 1}]}
+- name: An outer only scalar projection remains specific to every outer row
+  sql: SELECT dbo.qcb_parent.id AS id,(SELECT TOP 1 dbo.qcb_parent.id FROM dbo.qcb_parent AS qcb_parent WHERE qcb_parent.id=2) AS value FROM dbo.qcb_parent ORDER BY dbo.qcb_parent.id
+  expect: {rows: 2,data: [{id: 1,value: 1},{id: 2,value: 2}]}
+- name: An empty scalar input suppresses an outer only nonnull projection
+  sql: SELECT (SELECT TOP 1 dbo.qcb_parent.id FROM dbo.qcb_parent AS qcb_parent WHERE qcb_parent.id=99) AS value FROM dbo.qcb_parent WHERE dbo.qcb_parent.id=1
+  expect: {rows: 1,data: [{value: null}]}
+- name: An outer only scalar expression distinguishes a matched null from an empty input
+  sql: SELECT (SELECT TOP 1 COALESCE(NULLIF(dbo.qcb_parent.id,1),7) FROM dbo.qcb_parent AS qcb_parent WHERE qcb_parent.id=2) AS matched,(SELECT TOP 1 COALESCE(NULLIF(dbo.qcb_parent.id,1),7) FROM dbo.qcb_parent AS qcb_parent WHERE qcb_parent.id=99) AS absent FROM dbo.qcb_parent WHERE dbo.qcb_parent.id=1
+  expect: {rows: 1,data: [{matched: 7,absent: null}]}
+- name: MySQL outer only scalar projection retains ordinary cardinality validation
+  syntax: mysql
+  sql: SELECT p.id,(SELECT p.id FROM qcb_detail d WHERE d.id=10) AS value FROM qcb_parent p ORDER BY p.id
+  expect: {rows: 2,data: [{id: 1,value: 1},{id: 2,value: 2}]}
+- name: MySQL outer only scalar projection still rejects multiple input rows
+  syntax: mysql
+  sql: SELECT (SELECT p.id FROM qcb_detail d WHERE d.id IN(10,20)) AS value FROM qcb_parent p WHERE p.id=1
+  expect: {error: true,contains: scalar subselect returned more than one row}
+- name: Multipart correlation and computed text metadata use shared scope binding
+  sql: SELECT dbo.qcb_parent.id,(SELECT MAX(dbo.qcb_detail.amount) FROM dbo.qcb_detail WHERE dbo.qcb_detail.parent_id=dbo.qcb_parent.id AND CAST(dbo.qcb_parent.label AS NVARCHAR(12))=N'one') AS peak FROM dbo.qcb_parent ORDER BY dbo.qcb_parent.id
+  expect: {rows: 2,data: [{id: 1,peak: 7},{id: 2,peak: null}]}
+- name: Recovery module body parses actual IF and correlated INSERT SELECT statements
+  sql: |
+    CREATE PROCEDURE qcb_recovery AS
+    DECLARE @wanted INT=1;
+    IF NOT EXISTS(SELECT 1 FROM dbo.qcb_detail WHERE dbo.qcb_detail.id=@wanted)
+    BEGIN
+      INSERT INTO dbo.qcb_detail(id,parent_id,amount)
+      SELECT dbo.qcb_parent.id,dbo.qcb_parent.id,
+        (SELECT MAX(dbo.qcb_detail.amount) FROM dbo.qcb_detail
+         WHERE dbo.qcb_detail.parent_id=dbo.qcb_parent.id)
+      FROM dbo.qcb_parent WHERE dbo.qcb_parent.id=@wanted;
+    END;
+    SELECT COUNT(*) AS total FROM dbo.qcb_detail WHERE dbo.qcb_detail.id=@wanted;
+- name: Recovery module executes the real missing row branch
+  sql: EXEC qcb_recovery
+  expect: {rows: 1,data: [{total: 1}]}
+- name: Recovery module skips its insert after the row exists
+  sql: EXEC qcb_recovery
+  expect: {rows: 1,data: [{total: 1}]}
+- name: Recovery module preserved exact projected and correlated row values
+  sql: SELECT id,parent_id,amount FROM dbo.qcb_detail WHERE id=1
+  expect: {rows: 1,data: [{id: 1,parent_id: 1,amount: 7}]}
+- name: Runtime and native guards contain no unresolved multipart binding syntax
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root")
+      (define code (parse_tsql "memcp-tests"
+        "SELECT dbo.qcb_parent.id FROM dbo.qcb_parent WHERE dbo.qcb_parent.id=1" nil owner nil))
+      (define found (newsession))
+      (define execute (eval (list (quote lambda) (list (quote session) (quote tx) (quote resultrow) (quote resultfields)) code)))
+      (execute owner nil (lambda (row) (found "id" (row "id"))) (lambda fields true))
+      (and (equal? (found "id") 1)
+        (not (regexp_test (pretty_print code 100000) "qualified-relation|binding_name"))))
+  expect: {result: true}
+- name: Multipart information schema references retain the selected logical catalog name
+  sql: SELECT [memcp-tests].[information_schema].[tables].[table_name] AS name FROM [memcp-tests].[information_schema].[tables] WHERE [memcp-tests].[information_schema].[tables].[table_catalog]=N'memcp-tests' AND [memcp-tests].[information_schema].[tables].[table_name]=N'qcb_parent'
+  expect: {rows: 1,data: [{name: qcb_parent}]}
+- name: Explicit column database qualifiers use the existing import source alias mapping
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root")
+      (owner "tsql_import_source" "qcb_source") (owner "tsql_import_target" "memcp-tests")
+      (define code (parse_tsql "memcp-tests"
+        "SELECT qcb_source.dbo.qcb_parent.id AS id FROM qcb_source.dbo.qcb_parent WHERE qcb_source.dbo.qcb_parent.id=2"
+        nil owner nil))
+      (define found (newsession))
+      (define execute (eval (list (quote lambda) (list (quote session) (quote tx) (quote resultrow) (quote resultfields)) code)))
+      (execute owner nil (lambda (row) (found "id" (row "id"))) (lambda fields true))
+      (equal? (found "id") 2))
+  expect: {result: true}

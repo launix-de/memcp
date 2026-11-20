@@ -1,0 +1,250 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# UPDATE FROM may select an unspecified matching row; it still updates a target
+# once. These positive specifications do not require a source uniqueness key.
+# https://learn.microsoft.com/sql/t-sql/queries/update-transact-sql
+metadata:
+  syntax: tsql
+  isolated: true
+  description: Joined UPDATE chooses one coherent source tuple per physical target
+setup:
+- sql: CREATE TABLE joined_choice_target(id INT PRIMARY KEY,user_id INT,login NVARCHAR(64) COLLATE Latin1_General_CI_AS,
+    hash_value NVARCHAR(32),salt_value NVARCHAR(32),password_value NVARCHAR(32))
+- sql: CREATE TABLE joined_choice_source(user_id INT,login NVARCHAR(64) COLLATE Latin1_General_CI_AS,
+    hash_value NVARCHAR(32),salt_value NVARCHAR(32),password_value NVARCHAR(32))
+- sql: CREATE TABLE joined_choice_audit(id INT,hash_value NVARCHAR(32),salt_value NVARCHAR(32),password_value NVARCHAR(32))
+- sql: CREATE TABLE joined_choice_prior(id INT PRIMARY KEY,value INT)
+- sql: CREATE TABLE joined_choice_small(id INT PRIMARY KEY,value TINYINT)
+- sql: INSERT joined_choice_small VALUES(1,10),(2,20)
+- sql: CREATE TABLE joined_choice_numbers(id INT,value INT)
+- sql: INSERT joined_choice_numbers VALUES(1,7),(2,256),(10,10),(11,11),(12,12),(13,13),(14,14),(15,15)
+- sql: CREATE TABLE joined_choice_small_audit(id INT,value TINYINT)
+- sql: |
+    CREATE TRIGGER joined_choice_small_observer ON joined_choice_small AFTER UPDATE AS BEGIN
+      INSERT joined_choice_small_audit(id,value) SELECT id,value FROM inserted;
+    END
+- sql: CREATE TABLE joined_choice_nonce(id INT PRIMARY KEY,user_id INT,login NVARCHAR(64) COLLATE Latin1_General_CI_AS,nonce UNIQUEIDENTIFIER)
+- sql: INSERT joined_choice_nonce VALUES(1,10,N'Änne  ',NULL),(5,50,N'Åse🐘',NULL)
+- sql: CREATE TABLE joined_choice_nonce_audit(id INT,nonce UNIQUEIDENTIFIER)
+- sql: |
+    CREATE TRIGGER joined_choice_nonce_observer ON joined_choice_nonce AFTER UPDATE AS BEGIN
+      INSERT joined_choice_nonce_audit(id,nonce) SELECT id,nonce FROM inserted;
+    END
+- sql: INSERT joined_choice_target VALUES(1,10,N'Änne  ',N'old-h',N'old-s',N'old-p'),(2,20,NULL,N'old-h',N'old-s',N'old-p'),
+    (3,30,N'Zoe',N'old-h',N'old-s',N'old-p'),(4,40,N'Élise',N'old-h',N'old-s',N'old-p'),
+    (5,50,N'Åse🐘',N'old-h',N'old-s',N'old-p')
+- sql: INSERT joined_choice_source VALUES(10,N'änne',N'h1',N's1',N'p1'),(10,N'ÄNNE ',N'h2',N's2',N'p2'),
+    (20,NULL,N'null-h',N'null-s',N'null-p'),(40,N'Elise',N'accent-h',N'accent-s',N'accent-p'),
+    (50,N'åSE🐘  ',N'h5',N's5',N'p5')
+- sql: |
+    CREATE TRIGGER joined_choice_observer ON joined_choice_target AFTER UPDATE AS BEGIN
+      INSERT joined_choice_audit(id,hash_value,salt_value,password_value)
+        SELECT id,hash_value,salt_value,password_value FROM inserted;
+    END
+cleanup:
+- sql: DROP TRIGGER IF EXISTS joined_choice_nonce_observer
+- sql: DROP TRIGGER IF EXISTS joined_choice_small_observer
+- sql: DROP TRIGGER IF EXISTS joined_choice_observer
+- sql: DROP TABLE IF EXISTS joined_choice_nonce_audit
+- sql: DROP TABLE IF EXISTS joined_choice_nonce
+- sql: DROP TABLE IF EXISTS joined_choice_small_audit
+- sql: DROP TABLE IF EXISTS joined_choice_numbers
+- sql: DROP TABLE IF EXISTS joined_choice_small
+- sql: DROP TABLE IF EXISTS joined_choice_prior
+- sql: DROP TABLE IF EXISTS joined_choice_audit
+- sql: DROP TABLE IF EXISTS joined_choice_source
+- sql: DROP TABLE IF EXISTS joined_choice_target
+test_cases:
+- name: Duplicate padded Unicode matches choose a coherent tuple and one trigger effect per target
+  session_id: joined_choice_duplicate
+  cleanup:
+  - sql: IF @@TRANCOUNT>0 ROLLBACK TRANSACTION
+  sql: |
+    BEGIN TRANSACTION;
+    UPDATE t SET hash_value=s.hash_value,salt_value=s.salt_value,password_value=s.password_value
+      FROM joined_choice_target t INNER JOIN joined_choice_source s
+        ON t.user_id=s.user_id AND t.login=s.login;
+    DECLARE @matched INT=@@ROWCOUNT;
+    SELECT @matched AS matched;
+    SELECT id,CASE
+      WHEN id=1 AND ((hash_value=N'h1' AND salt_value=N's1' AND password_value=N'p1')
+                 OR (hash_value=N'h2' AND salt_value=N's2' AND password_value=N'p2')) THEN 1
+      WHEN id=5 AND hash_value=N'h5' AND salt_value=N's5' AND password_value=N'p5' THEN 1
+      WHEN id IN(2,3,4) AND hash_value=N'old-h' AND salt_value=N'old-s' AND password_value=N'old-p' THEN 1
+      ELSE 0 END AS coherent
+      FROM joined_choice_target ORDER BY id;
+    SELECT id AS audited_id FROM joined_choice_audit ORDER BY id;
+    ROLLBACK TRANSACTION;
+    SELECT COUNT(*) AS rolled_back_audit FROM joined_choice_audit;
+    SELECT COUNT(*) AS original_targets FROM joined_choice_target
+      WHERE hash_value=N'old-h' AND salt_value=N'old-s' AND password_value=N'old-p';
+  expect:
+    rows: 10
+    data:
+    - {matched: 2}
+    - {id: 1,coherent: 1}
+    - {id: 2,coherent: 1}
+    - {id: 3,coherent: 1}
+    - {id: 4,coherent: 1}
+    - {id: 5,coherent: 1}
+    - {audited_id: 1}
+    - {audited_id: 5}
+    - {rolled_back_audit: 0}
+    - {original_targets: 5}
+- name: A matched all-NULL source payload remains one real update
+  session_id: joined_choice_null_payload
+  cleanup:
+  - sql: IF @@TRANCOUNT>0 ROLLBACK TRANSACTION
+  sql: |
+    BEGIN TRANSACTION;
+    UPDATE joined_choice_source SET hash_value=NULL,salt_value=NULL,password_value=NULL WHERE user_id=50;
+    UPDATE t SET hash_value=s.hash_value,salt_value=s.salt_value,password_value=s.password_value
+      FROM joined_choice_target t INNER JOIN joined_choice_source s
+        ON t.user_id=s.user_id AND t.login=s.login WHERE t.id=5;
+    DECLARE @matched INT=@@ROWCOUNT;
+    SELECT @matched AS matched;
+    SELECT id,hash_value,salt_value,password_value FROM joined_choice_target WHERE id=5;
+    SELECT id AS audited_id FROM joined_choice_audit ORDER BY id;
+    ROLLBACK TRANSACTION;
+    SELECT COUNT(*) AS original_targets FROM joined_choice_target
+      WHERE hash_value=N'old-h' AND salt_value=N'old-s' AND password_value=N'old-p';
+  expect:
+    rows: 4
+    data:
+    - {matched: 1}
+    - {id: 5,hash_value: null,salt_value: null,password_value: null}
+    - {audited_id: 5}
+    - {original_targets: 5}
+- name: An unselected target produces no row effect or transition row
+  session_id: joined_choice_empty
+  cleanup:
+  - sql: IF @@TRANCOUNT>0 ROLLBACK TRANSACTION
+  sql: |
+    BEGIN TRANSACTION;
+    UPDATE t SET hash_value=s.hash_value,salt_value=s.salt_value,password_value=s.password_value
+      FROM joined_choice_target t INNER JOIN joined_choice_source s
+        ON t.user_id=s.user_id AND t.login=s.login WHERE t.id<0;
+    DECLARE @matched INT=@@ROWCOUNT;
+    SELECT @matched AS matched;
+    SELECT COUNT(*) AS audit_rows FROM joined_choice_audit;
+    ROLLBACK TRANSACTION;
+    SELECT COUNT(*) AS original_targets FROM joined_choice_target
+      WHERE hash_value=N'old-h' AND salt_value=N'old-s' AND password_value=N'old-p';
+  expect:
+    rows: 3
+    data: [{matched: 0},{audit_rows: 0},{original_targets: 5}]
+- name: A source-driven selected plan retains once-per-target semantics
+  session_id: joined_choice_source_driver
+  noncritical: true
+  # The selected tree in this fixture starts at the source. Its target/payload
+  # carrier remains future work; physical lowering must not reorder that tree.
+  cleanup:
+  - sql: IF @@TRANCOUNT>0 ROLLBACK TRANSACTION
+  sql: |
+    BEGIN TRANSACTION;
+    UPDATE t SET hash_value=s.hash_value,salt_value=s.salt_value,password_value=s.password_value
+      FROM joined_choice_source s INNER JOIN joined_choice_target t
+        ON t.user_id=s.user_id AND t.login=s.login WHERE t.id=1;
+    SELECT id,CASE WHEN (hash_value=N'h1' AND salt_value=N's1' AND password_value=N'p1')
+                     OR (hash_value=N'h2' AND salt_value=N's2' AND password_value=N'p2')
+      THEN 1 ELSE 0 END AS coherent FROM joined_choice_target WHERE id=1;
+    SELECT id AS audited_id FROM joined_choice_audit ORDER BY id;
+    ROLLBACK TRANSACTION;
+  expect: {rows: 2,data: [{id: 1,coherent: 1},{audited_id: 1}]}
+- name: Volatile assignments produce one fresh value and one matching audit tuple per chosen target
+  session_id: joined_choice_volatile
+  cleanup:
+  - sql: IF @@TRANCOUNT>0 ROLLBACK TRANSACTION
+  sql: |
+    BEGIN TRANSACTION;
+    UPDATE t SET nonce=NEWID() FROM joined_choice_nonce t INNER JOIN joined_choice_source s
+      ON t.user_id=s.user_id AND t.login=s.login;
+    DECLARE @matched INT=@@ROWCOUNT;
+    SELECT @matched AS matched;
+    SELECT CASE WHEN a.nonce IS NOT NULL AND b.nonce IS NOT NULL AND a.nonce<>b.nonce THEN 1 ELSE 0 END AS fresh
+      FROM joined_choice_nonce a JOIN joined_choice_nonce b ON a.id=1 AND b.id=5;
+    SELECT t.id,CASE WHEN a.nonce=t.nonce THEN 1 ELSE 0 END AS same_value
+      FROM joined_choice_nonce_audit a JOIN joined_choice_nonce t ON a.id=t.id ORDER BY t.id;
+    ROLLBACK TRANSACTION;
+    SELECT COUNT(*) AS audit_rows FROM joined_choice_nonce_audit;
+    SELECT COUNT(*) AS assigned_rows FROM joined_choice_nonce WHERE nonce IS NOT NULL;
+  expect:
+    rows: 6
+    data: [{matched: 2},{fresh: 1},{id: 1,same_value: 1},{id: 5,same_value: 1},{audit_rows: 0},{assigned_rows: 0}]
+- name: A later chosen assignment overflow restores all target effects while retaining earlier transaction work
+  session_id: joined_choice_overflow
+  cleanup:
+  - sql: IF @@TRANCOUNT>0 ROLLBACK TRANSACTION
+  sql: |
+    BEGIN TRANSACTION;
+    INSERT joined_choice_prior VALUES(99,9);
+    BEGIN TRY
+      UPDATE t SET value=s.value FROM joined_choice_small t JOIN joined_choice_numbers s
+        ON t.id=s.id WHERE t.id<=2;
+    END TRY
+    BEGIN CATCH
+      SELECT ERROR_NUMBER() AS number,XACT_STATE() AS state,@@TRANCOUNT AS depth;
+    END CATCH;
+    SELECT id,value FROM joined_choice_prior ORDER BY id;
+    SELECT id,value FROM joined_choice_small ORDER BY id;
+    SELECT COUNT(*) AS audit_rows FROM joined_choice_small_audit;
+    ROLLBACK TRANSACTION;
+    SELECT COUNT(*) AS prior_rows FROM joined_choice_prior;
+  expect:
+    rows: 6
+    data: [{number: 8115,state: 1,depth: 1},{id: 99,value: 9},{id: 1,value: 10},{id: 2,value: 20},{audit_rows: 0},{prior_rows: 0}]
+- name: Unchosen source rows do not evaluate their invalid assignment conversion
+  session_id: joined_choice_unchosen
+  cleanup:
+  - sql: IF @@TRANCOUNT>0 ROLLBACK TRANSACTION
+  sql: |
+    BEGIN TRANSACTION;
+    UPDATE t SET value=s.value FROM joined_choice_small t JOIN joined_choice_numbers s
+      ON t.id=s.id WHERE t.id<=2 AND s.id<>2;
+    DECLARE @matched INT=@@ROWCOUNT;
+    SELECT @matched AS matched;
+    SELECT id,value FROM joined_choice_small ORDER BY id;
+    SELECT id,value FROM joined_choice_small_audit ORDER BY id;
+    ROLLBACK TRANSACTION;
+  expect:
+    rows: 4
+    data: [{matched: 1},{id: 1,value: 7},{id: 2,value: 20},{id: 1,value: 7}]
+- name: LEFT UPDATE distinguishes selected NULL extension from targets absent from the chosen domain
+  session_id: joined_choice_outer
+  noncritical: true
+  cleanup:
+  - sql: IF @@TRANCOUNT>0 ROLLBACK TRANSACTION
+  sql: |
+    BEGIN TRANSACTION;
+    UPDATE t SET hash_value=s.hash_value,salt_value=s.salt_value,password_value=s.password_value
+      FROM joined_choice_target t LEFT JOIN joined_choice_source s
+        ON t.user_id=s.user_id AND t.login=s.login
+      WHERE t.id<=3;
+    DECLARE @matched INT=@@ROWCOUNT;
+    SELECT @matched AS matched;
+    SELECT id,CASE
+      WHEN id=1 AND ((hash_value=N'h1' AND salt_value=N's1' AND password_value=N'p1')
+                 OR (hash_value=N'h2' AND salt_value=N's2' AND password_value=N'p2')) THEN 1
+      WHEN id IN(2,3) AND hash_value IS NULL AND salt_value IS NULL AND password_value IS NULL THEN 1
+      WHEN id IN(4,5) AND hash_value=N'old-h' AND salt_value=N'old-s' AND password_value=N'old-p' THEN 1
+      ELSE 0 END AS coherent
+      FROM joined_choice_target ORDER BY id;
+    SELECT id AS audited_id FROM joined_choice_audit ORDER BY id;
+    ROLLBACK TRANSACTION;
+    SELECT COUNT(*) AS rolled_back_audit FROM joined_choice_audit;
+    SELECT COUNT(*) AS original_targets FROM joined_choice_target
+      WHERE hash_value=N'old-h' AND salt_value=N'old-s' AND password_value=N'old-p';
+  expect:
+    rows: 11
+    data:
+    - {matched: 3}
+    - {id: 1,coherent: 1}
+    - {id: 2,coherent: 1}
+    - {id: 3,coherent: 1}
+    - {id: 4,coherent: 1}
+    - {id: 5,coherent: 1}
+    - {audited_id: 1}
+    - {audited_id: 2}
+    - {audited_id: 3}
+    - {rolled_back_audit: 0}
+    - {original_targets: 5}

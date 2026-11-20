@@ -1,0 +1,341 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# https://learn.microsoft.com/sql/t-sql/functions/count-transact-sql
+# https://learn.microsoft.com/sql/t-sql/queries/select-group-by-transact-sql
+metadata:
+  isolated: true
+  description: Scalar aggregates preserve the multiplicity and absence of derived
+    row domains
+setup:
+- sql: CREATE TABLE derived_count_inputs(id INT,category INT)
+- sql: INSERT INTO derived_count_inputs VALUES(1,10),(1,10),(1,20),(2,10),(NULL,10)
+cleanup:
+- sql: DROP TABLE IF EXISTS derived_count_inputs
+test_cases:
+- name: sql COUNT star counts completed groups
+  syntax: sql
+  sql: SELECT (SELECT COUNT(*) FROM (SELECT id FROM derived_count_inputs GROUP BY
+    id) grouped) AS n
+  expect:
+    rows: 1
+    data:
+    - &id001
+      n: 3
+- name: sql COUNT expression retains SQL NULL operand semantics
+  syntax: sql
+  sql: SELECT (SELECT COUNT(id) FROM (SELECT id FROM derived_count_inputs GROUP BY
+    id) grouped) AS n
+  expect:
+    rows: 1
+    data:
+    - &id002
+      n: 2
+- name: sql Constant SUM retains the completed group row domain
+  syntax: sql
+  sql: SELECT (SELECT SUM(1) FROM (SELECT id FROM derived_count_inputs GROUP BY id)
+    grouped) AS n
+  expect:
+    rows: 1
+    data:
+    - &id003
+      n: 3
+- name: sql HAVING filters groups before outer COUNT star
+  syntax: sql
+  sql: SELECT (SELECT COUNT(*) FROM (SELECT id FROM derived_count_inputs GROUP BY
+    id HAVING COUNT(*)>=2) grouped) AS n
+  expect:
+    rows: 1
+    data:
+    - &id004
+      n: 1
+- name: sql Rejected HAVING leaves the outer aggregate empty default
+  syntax: sql
+  sql: SELECT (SELECT COUNT(*) FROM (SELECT id FROM derived_count_inputs GROUP BY
+    id HAVING COUNT(*)>3) grouped) AS n
+  expect:
+    rows: 1
+    data:
+    - &id005
+      n: 0
+- name: sql Empty grouped sources retain scalar count and minimum defaults
+  syntax: sql
+  sql: SELECT (SELECT COUNT(*) FROM (SELECT id FROM derived_count_inputs WHERE 1=0
+    GROUP BY id) grouped) AS n,(SELECT MIN(1) FROM (SELECT id FROM derived_count_inputs
+    WHERE 1=0 GROUP BY id) grouped) AS minimum_value
+  expect:
+    rows: 1
+    data:
+    - &id006
+      n: 0
+      minimum_value: null
+- name: sql An unused inner group join still multiplies matching rows
+  syntax: sql
+  sql: SELECT (SELECT COUNT(*) FROM derived_count_inputs driver INNER JOIN (SELECT
+    id,category FROM derived_count_inputs GROUP BY id,category) grouped ON grouped.id=driver.id)
+    AS n
+  expect:
+    rows: 1
+    data:
+    - &id007
+      n: 7
+- name: sql An optional partial group key retains matching multiplicity
+  syntax: sql
+  sql: SELECT (SELECT COUNT(*) FROM derived_count_inputs driver LEFT JOIN (SELECT
+    id,category FROM derived_count_inputs GROUP BY id,category) grouped ON grouped.id=driver.id)
+    AS n
+  expect:
+    rows: 1
+    data:
+    - &id008
+      n: 8
+- name: sql An optional complete group key preserves one row per caller
+  syntax: sql
+  sql: SELECT (SELECT COUNT(*) FROM derived_count_inputs driver LEFT JOIN (SELECT
+    id,category FROM derived_count_inputs GROUP BY id,category) grouped ON grouped.id=driver.id
+    AND grouped.category=driver.category) AS n
+  expect:
+    rows: 1
+    data:
+    - &id009
+      n: 5
+- name: tsql COUNT star counts completed groups
+  syntax: tsql
+  sql: SELECT (SELECT COUNT(*) FROM (SELECT id FROM derived_count_inputs GROUP BY
+    id) grouped) AS n
+  expect:
+    rows: 1
+    data:
+    - *id001
+- name: tsql COUNT expression retains SQL NULL operand semantics
+  syntax: tsql
+  sql: SELECT (SELECT COUNT(id) FROM (SELECT id FROM derived_count_inputs GROUP BY
+    id) grouped) AS n
+  expect:
+    rows: 1
+    data:
+    - *id002
+- name: tsql Constant SUM retains the completed group row domain
+  syntax: tsql
+  sql: SELECT (SELECT SUM(1) FROM (SELECT id FROM derived_count_inputs GROUP BY id)
+    grouped) AS n
+  expect:
+    rows: 1
+    data:
+    - *id003
+- name: tsql HAVING filters groups before outer COUNT star
+  syntax: tsql
+  sql: SELECT (SELECT COUNT(*) FROM (SELECT id FROM derived_count_inputs GROUP BY
+    id HAVING COUNT(*)>=2) grouped) AS n
+  expect:
+    rows: 1
+    data:
+    - *id004
+- name: tsql Rejected HAVING leaves the outer aggregate empty default
+  syntax: tsql
+  sql: SELECT (SELECT COUNT(*) FROM (SELECT id FROM derived_count_inputs GROUP BY
+    id HAVING COUNT(*)>3) grouped) AS n
+  expect:
+    rows: 1
+    data:
+    - *id005
+- name: tsql Empty grouped sources retain scalar count and minimum defaults
+  syntax: tsql
+  sql: SELECT (SELECT COUNT(*) FROM (SELECT id FROM derived_count_inputs WHERE 1=0
+    GROUP BY id) grouped) AS n,(SELECT MIN(1) FROM (SELECT id FROM derived_count_inputs
+    WHERE 1=0 GROUP BY id) grouped) AS minimum_value
+  expect:
+    rows: 1
+    data:
+    - *id006
+- name: tsql An unused inner group join still multiplies matching rows
+  syntax: tsql
+  sql: SELECT (SELECT COUNT(*) FROM derived_count_inputs driver INNER JOIN (SELECT
+    id,category FROM derived_count_inputs GROUP BY id,category) grouped ON grouped.id=driver.id)
+    AS n
+  expect:
+    rows: 1
+    data:
+    - *id007
+- name: tsql An optional partial group key retains matching multiplicity
+  syntax: tsql
+  sql: SELECT (SELECT COUNT(*) FROM derived_count_inputs driver LEFT JOIN (SELECT
+    id,category FROM derived_count_inputs GROUP BY id,category) grouped ON grouped.id=driver.id)
+    AS n
+  expect:
+    rows: 1
+    data:
+    - *id008
+- name: tsql An optional complete group key preserves one row per caller
+  syntax: tsql
+  sql: SELECT (SELECT COUNT(*) FROM derived_count_inputs driver LEFT JOIN (SELECT
+    id,category FROM derived_count_inputs GROUP BY id,category) grouped ON grouped.id=driver.id
+    AND grouped.category=driver.category) AS n
+  expect:
+    rows: 1
+    data:
+    - *id009
+- name: postgresql COUNT star counts completed groups
+  syntax: postgresql
+  sql: SELECT (SELECT COUNT(*) FROM (SELECT id FROM derived_count_inputs GROUP BY
+    id) grouped) AS n
+  expect:
+    rows: 1
+    data:
+    - *id001
+- name: postgresql COUNT expression retains SQL NULL operand semantics
+  syntax: postgresql
+  sql: SELECT (SELECT COUNT(id) FROM (SELECT id FROM derived_count_inputs GROUP BY
+    id) grouped) AS n
+  expect:
+    rows: 1
+    data:
+    - *id002
+- name: postgresql Constant SUM retains the completed group row domain
+  syntax: postgresql
+  sql: SELECT (SELECT SUM(1) FROM (SELECT id FROM derived_count_inputs GROUP BY id)
+    grouped) AS n
+  expect:
+    rows: 1
+    data:
+    - *id003
+- name: postgresql HAVING filters groups before outer COUNT star
+  syntax: postgresql
+  sql: SELECT (SELECT COUNT(*) FROM (SELECT id FROM derived_count_inputs GROUP BY
+    id HAVING COUNT(*)>=2) grouped) AS n
+  expect:
+    rows: 1
+    data:
+    - *id004
+- name: postgresql Rejected HAVING leaves the outer aggregate empty default
+  syntax: postgresql
+  sql: SELECT (SELECT COUNT(*) FROM (SELECT id FROM derived_count_inputs GROUP BY
+    id HAVING COUNT(*)>3) grouped) AS n
+  expect:
+    rows: 1
+    data:
+    - *id005
+- name: postgresql Empty grouped sources retain scalar count and minimum defaults
+  syntax: postgresql
+  sql: SELECT (SELECT COUNT(*) FROM (SELECT id FROM derived_count_inputs WHERE 1=0
+    GROUP BY id) grouped) AS n,(SELECT MIN(1) FROM (SELECT id FROM derived_count_inputs
+    WHERE 1=0 GROUP BY id) grouped) AS minimum_value
+  expect:
+    rows: 1
+    data:
+    - *id006
+- name: postgresql An unused inner group join still multiplies matching rows
+  syntax: postgresql
+  sql: SELECT (SELECT COUNT(*) FROM derived_count_inputs driver INNER JOIN (SELECT
+    id,category FROM derived_count_inputs GROUP BY id,category) grouped ON grouped.id=driver.id)
+    AS n
+  expect:
+    rows: 1
+    data:
+    - *id007
+- name: postgresql An optional partial group key retains matching multiplicity
+  syntax: postgresql
+  sql: SELECT (SELECT COUNT(*) FROM derived_count_inputs driver LEFT JOIN (SELECT
+    id,category FROM derived_count_inputs GROUP BY id,category) grouped ON grouped.id=driver.id)
+    AS n
+  expect:
+    rows: 1
+    data:
+    - *id008
+- name: postgresql An optional complete group key preserves one row per caller
+  syntax: postgresql
+  sql: SELECT (SELECT COUNT(*) FROM derived_count_inputs driver LEFT JOIN (SELECT
+    id,category FROM derived_count_inputs GROUP BY id,category) grouped ON grouped.id=driver.id
+    AND grouped.category=driver.category) AS n
+  expect:
+    rows: 1
+    data:
+    - *id009
+- name: Local table groups retain their completed cardinality
+  syntax: tsql
+  sql: DECLARE @items TABLE(id INT); INSERT @items VALUES(1),(1),(2),(NULL); SELECT
+    (SELECT COUNT(*) FROM (SELECT id FROM @items GROUP BY id) grouped) AS n
+  expect:
+    rows: 1
+    data:
+    - n: 3
+- name: An empty local group source retains an outer zero count
+  syntax: tsql
+  sql: DECLARE @items TABLE(id INT); SELECT (SELECT COUNT(*) FROM (SELECT id FROM
+    @items GROUP BY id) grouped) AS n
+  expect:
+    rows: 1
+    data:
+    - n: 0
+- name: sql residual OR filters completed groups
+  syntax: sql
+  sql: SELECT (SELECT COUNT(*) FROM (SELECT id FROM derived_count_inputs GROUP BY
+    id) grouped WHERE grouped.id=2 OR grouped.id=7) AS n
+  expect:
+    rows: 1
+    data:
+    - n: 1
+- name: tsql residual OR filters completed groups
+  syntax: tsql
+  sql: SELECT (SELECT COUNT(*) FROM (SELECT id FROM derived_count_inputs GROUP BY
+    id) grouped WHERE grouped.id=2 OR grouped.id=7) AS n
+  expect:
+    rows: 1
+    data:
+    - n: 1
+- name: postgresql residual OR filters completed groups
+  syntax: postgresql
+  sql: SELECT (SELECT COUNT(*) FROM (SELECT id FROM derived_count_inputs GROUP BY
+    id) grouped WHERE grouped.id=2 OR grouped.id=7) AS n
+  expect:
+    rows: 1
+    data:
+    - n: 1
+
+- name: COUNT tsql A false FULL predicate preserves both unmatched domains
+  syntax: tsql
+  sql: SELECT (SELECT COUNT(*) FROM derived_count_inputs driver FULL JOIN (SELECT id FROM derived_count_inputs
+    GROUP BY id) grouped ON 1=0) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 8
+- name: SUM tsql A false FULL predicate preserves both unmatched domains
+  syntax: tsql
+  sql: SELECT (SELECT SUM(1) FROM derived_count_inputs driver FULL JOIN (SELECT id FROM derived_count_inputs
+    GROUP BY id) grouped ON 1=0) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 8
+- name: COUNT tsql A complete FULL group key preserves distinct NULL unmatched rows
+  syntax: tsql
+  sql: SELECT (SELECT COUNT(*) FROM derived_count_inputs driver FULL JOIN (SELECT id FROM derived_count_inputs
+    GROUP BY id) grouped ON grouped.id=driver.id) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 6
+- name: SUM tsql A complete FULL group key preserves distinct NULL unmatched rows
+  syntax: tsql
+  sql: SELECT (SELECT SUM(1) FROM derived_count_inputs driver FULL JOIN (SELECT id FROM derived_count_inputs
+    GROUP BY id) grouped ON grouped.id=driver.id) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 6
+- name: COUNT tsql A partial FULL group key preserves matching bag multiplicity
+  syntax: tsql
+  sql: SELECT (SELECT COUNT(*) FROM derived_count_inputs driver FULL JOIN (SELECT id,category FROM
+    derived_count_inputs GROUP BY id,category) grouped ON grouped.id=driver.id) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 9
+- name: SUM tsql A partial FULL group key preserves matching bag multiplicity
+  syntax: tsql
+  sql: SELECT (SELECT SUM(1) FROM derived_count_inputs driver FULL JOIN (SELECT id,category FROM
+    derived_count_inputs GROUP BY id,category) grouped ON grouped.id=driver.id) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 9

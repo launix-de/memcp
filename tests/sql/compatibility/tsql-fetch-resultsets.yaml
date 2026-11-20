@@ -1,0 +1,262 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# SQL Server 2022: https://dbfiddle.uk/BgHSF3yk https://dbfiddle.uk/D3YBAiN0
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: FETCH result sets share ordinal snapshot access and preserve hidden cursor status metadata
+setup:
+- sql: CREATE TABLE fetch_output_source(id INT PRIMARY KEY,value NVARCHAR(20),stamp DATETIME2(3))
+- sql: INSERT fetch_output_source VALUES(1,NULL,'2024-03-02T12:34:56.120'),(2,NULL,NULL),(3,N'Grüße',NULL)
+cleanup:
+- sql: DROP TABLE IF EXISTS fetch_output_source
+test_cases:
+- name: Each FETCH emits one native ordinal row including duplicate NULL values
+  sql: DECLARE c CURSOR LOCAL STATIC READ_ONLY FOR SELECT value FROM fetch_output_source ORDER BY id; OPEN c;
+    FETCH NEXT FROM c; FETCH NEXT FROM c; FETCH NEXT FROM c; CLOSE c; DEALLOCATE c;
+  expect:
+    rows: 3
+    data:
+    - value: null
+      ROWSTAT: 1
+    - value: null
+      ROWSTAT: 1
+    - value: Grüße
+      ROWSTAT: 1
+- name: A successful result fetch publishes status zero and one affected row
+  sql: DECLARE c CURSOR LOCAL STATIC READ_ONLY FOR SELECT id FROM fetch_output_source WHERE id=1; OPEN c; FETCH
+    NEXT FROM c; SELECT @@FETCH_STATUS AS fetch_status,@@ROWCOUNT AS affected; CLOSE c; DEALLOCATE c;
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      ROWSTAT: 1
+    - fetch_status: 0
+      affected: 1
+- name: An empty cursor emits no row and publishes failed fetch status
+  sql: DECLARE c CURSOR LOCAL STATIC READ_ONLY FOR SELECT id,value FROM fetch_output_source WHERE id<0; OPEN c;
+    FETCH NEXT FROM c; SELECT @@FETCH_STATUS AS fetch_status,@@ROWCOUNT AS affected; CLOSE c; DEALLOCATE c;
+  expect:
+    rows: 1
+    data:
+    - fetch_status: -1
+      affected: 0
+- name: End of cursor retains metadata and emits no extra row
+  sql: DECLARE c CURSOR LOCAL STATIC READ_ONLY FOR SELECT id FROM fetch_output_source WHERE id=1; OPEN c; FETCH
+    NEXT FROM c; FETCH NEXT FROM c; SELECT @@FETCH_STATUS AS fetch_status,@@ROWCOUNT AS affected; CLOSE c; DEALLOCATE
+    c;
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      ROWSTAT: 1
+    - fetch_status: -1
+      affected: 0
+- name: FETCH INTO and result FETCH advance the same current ordinal
+  sql: DECLARE @first INT,@last INT; DECLARE c CURSOR LOCAL STATIC READ_ONLY FOR SELECT id FROM fetch_output_source
+    ORDER BY id; OPEN c; FETCH NEXT FROM c INTO @first; FETCH NEXT FROM c; FETCH NEXT FROM c INTO @last; SELECT
+    @first AS first_id,@last AS last_id; CLOSE c; DEALLOCATE c;
+  expect:
+    rows: 2
+    data:
+    - id: 2
+      ROWSTAT: 1
+    - first_id: 1
+      last_id: 3
+- name: Scrolling result FETCH retains FIRST PRIOR and ABSOLUTE movement
+  sql: DECLARE c CURSOR LOCAL STATIC SCROLL READ_ONLY FOR SELECT id FROM fetch_output_source ORDER BY id; OPEN
+    c; FETCH LAST FROM c; FETCH PRIOR FROM c; FETCH ABSOLUTE 0 FROM c; FETCH NEXT FROM c; CLOSE c; DEALLOCATE
+    c;
+  expect:
+    rows: 3
+    data:
+    - id: 3
+      ROWSTAT: 1
+    - id: 2
+      ROWSTAT: 1
+    - id: 1
+      ROWSTAT: 1
+- name: A reopened snapshot resets its output position
+  sql: DECLARE c CURSOR LOCAL STATIC READ_ONLY FOR SELECT id FROM fetch_output_source ORDER BY id; OPEN c; FETCH
+    NEXT FROM c; CLOSE c; OPEN c; FETCH NEXT FROM c; CLOSE c; DEALLOCATE c;
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      ROWSTAT: 1
+    - id: 1
+      ROWSTAT: 1
+- name: A shared cursor variable reference uses the same result stream
+  sql: DECLARE @reference CURSOR; DECLARE c CURSOR LOCAL STATIC READ_ONLY FOR SELECT id FROM fetch_output_source
+    ORDER BY id; SET @reference=c; OPEN c; FETCH NEXT FROM @reference; FETCH NEXT FROM c; CLOSE c; DEALLOCATE
+    c; DEALLOCATE @reference;
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      ROWSTAT: 1
+    - id: 2
+      ROWSTAT: 1
+- name: Temporal result FETCH uses the existing external SQL formatter
+  sql: DECLARE c CURSOR LOCAL STATIC READ_ONLY FOR SELECT stamp FROM fetch_output_source WHERE id=1; OPEN c; FETCH
+    NEXT FROM c; CLOSE c; DEALLOCATE c;
+  expect:
+    rows: 1
+    data:
+    - stamp: '2024-03-02 12:34:56.120'
+      ROWSTAT: 1
+- name: Empty result FETCH declares source types and a trailing hidden INT status
+  scm: "(begin\n  (define session (newsession)) (session \"username\" \"root\") (session \"schema\" \"memcp-tests\"\
+    )\n  (define result (newsession))\n  (tsql_execute_request \"memcp-tests\"\n    \"DECLARE c CURSOR LOCAL STATIC\
+    \ READ_ONLY FOR SELECT id,value FROM fetch_output_source WHERE id<0; OPEN c; FETCH NEXT FROM c; CLOSE c; DEALLOCATE\
+    \ c;\"\n    session nil 0 (lambda (_row) (error \"empty FETCH emitted a row\")) (lambda (_names fields) (result\
+    \ \"fields\" fields)))\n  (define fields (result \"fields\"))\n  (list (map fields (lambda (field) (list (field\
+    \ \"name\") (field \"sql_type\"))))\n    ((nth fields 2) \"flags\") ((nth fields 2) \"browse\") (session \"\
+    __tsql_fetch_status\")))"
+  expect:
+    result:
+    - - - id
+        - INT
+      - - value
+        - NVARCHAR
+      - - ROWSTAT
+        - INT
+    - 8192
+    - true
+    - -1
+- name: A visible ROWSTAT value and hidden status retain separate API ordinal slots
+  scm: "(begin\n  (define session (newsession)) (session \"username\" \"root\") (session \"schema\" \"memcp-tests\"\
+    )\n  (define result (newsession))\n  (tsql_execute_request \"memcp-tests\"\n    \"DECLARE c CURSOR LOCAL STATIC\
+    \ READ_ONLY FOR SELECT CAST(NULL AS INT) AS ROWSTAT,CAST(2 AS INT) AS value; OPEN c; FETCH NEXT FROM c; CLOSE\
+    \ c; DEALLOCATE c;\"\n    session nil 0 (lambda (row) (result \"row\" row)) (lambda (_names fields) (result\
+    \ \"fields\" fields)))\n  (define row (result \"row\"))\n  (list (nth row 1) (nth row 3) (nth row 5)\n   \
+    \ (map (result \"fields\") (lambda (field) (field \"name\")))))"
+  expect:
+    result:
+    - null
+    - 2
+    - 1
+    - - ROWSTAT
+      - value
+      - ROWSTAT
+- name: TDS exposes each FETCH result set with its source declarations and hidden status
+  tds:
+    statements:
+    - sql: DECLARE c CURSOR LOCAL STATIC READ_ONLY FOR SELECT id,value FROM fetch_output_source WHERE id<=2 ORDER
+        BY id; OPEN c; FETCH NEXT FROM c; FETCH NEXT FROM c; FETCH NEXT FROM c; CLOSE c; DEALLOCATE c;
+      expect:
+        result_sets:
+        - columns:
+          - id
+          - value
+          - ROWSTAT
+          rows: 1
+          data:
+          - id: 1
+            value: null
+            ROWSTAT: 1
+        - columns:
+          - id
+          - value
+          - ROWSTAT
+          rows: 1
+          data:
+          - id: 2
+            value: null
+            ROWSTAT: 1
+        - columns:
+          - id
+          - value
+          - ROWSTAT
+          rows: 0
+          data: []
+- name: TDS retains authoritative INT NVARCHAR and status metadata on an empty FETCH
+  tds:
+    statements:
+    - sql: DECLARE c CURSOR LOCAL STATIC READ_ONLY FOR SELECT id,value FROM fetch_output_source WHERE id<0; OPEN
+        c; FETCH NEXT FROM c; CLOSE c; DEALLOCATE c;
+      expect:
+        rows: 0
+        columns:
+        - id
+        - value
+        - ROWSTAT
+        column_types:
+        - name: id
+          type: INT
+          nullable: false
+        - name: value
+          type: NVARCHAR
+          length: 20
+          nullable: true
+        - name: ROWSTAT
+          type: INT
+          nullable: false
+- name: Normal SELECT duplicate aliases retain both independently ordered wire values
+  tds:
+    statements:
+    - sql: SELECT CAST(17 AS INT) AS same_name,CAST(29 AS INT) AS same_name;
+      expect:
+        rows: 1
+        columns:
+        - same_name
+        - same_name
+        row_values:
+        - - 17
+          - 29
+- name: A visible NULL ROWSTAT and hidden success status have distinct wire slots
+  tds:
+    statements:
+    - sql: DECLARE c CURSOR LOCAL STATIC READ_ONLY FOR SELECT CAST(NULL AS INT) AS ROWSTAT,CAST(2 AS INT) AS value;
+        OPEN c; FETCH NEXT FROM c; CLOSE c; DEALLOCATE c;
+      expect:
+        rows: 1
+        columns:
+        - ROWSTAT
+        - value
+        - ROWSTAT
+        row_values:
+        - - null
+          - 2
+          - 1
+- name: Direct system procedure and empty catalog rows retain their descriptor order
+  tds:
+    statements:
+    - sql: EXEC sys.xp_msver N'ProductVersion'; EXEC sp_tables @table_name=N'fetch_output_missing'; SELECT CAST(NULL
+        AS INT) AS first_value,CAST(7 AS INT) AS second_value;
+      expect:
+        result_sets:
+        - columns:
+          - Index
+          - Name
+          - Internal_Value
+          - Character_Value
+          rows: 1
+          data:
+          - Index: 2
+            Name: ProductVersion
+            Internal_Value: 1048576
+            Character_Value: 16.0.0.1
+        - columns:
+          - TABLE_QUALIFIER
+          - TABLE_OWNER
+          - TABLE_NAME
+          - TABLE_TYPE
+          - REMARKS
+          rows: 0
+          data: []
+        - columns:
+          - first_value
+          - second_value
+          rows: 1
+          data:
+          - first_value: null
+            second_value: 7
+- name: Result FETCH marks cursor status hidden in COLINFO independently of row encoding
+  tds:
+    rpc_packets:
+    - packet_type: 1
+      payload_hex: 160000001200000002000000000000000000010000004400450043004c0041005200450020006300200043005500520053004f00520020004c004f00430041004c002000530054004100540049004300200052004500410044005f004f004e004c005900200046004f0052002000530045004c004500430054002000430041005300540028004e0055004c004c00200041005300200049004e0054002900200041005300200052004f00570053005400410054002c00430041005300540028003200200041005300200049004e00540029002000410053002000760061006c00750065003b0020004f00500045004e00200063003b0020004600450054004300480020004e004500580054002000460052004f004d00200063003b00200043004c004f0053004500200063003b0020004400450041004c004c004f004300410054004500200063003b00
+      contains_hex:
+      - a50900010004020004030014
