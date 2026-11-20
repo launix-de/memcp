@@ -19,6 +19,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/launix-de/memcp/scm"
+	"github.com/launix-de/memcp/storage/mosi"
 )
 
 // normalizedSchemaJSON decodes a schema document through the legacy loader
@@ -257,6 +258,176 @@ func TestCatalogPersistsAndTakesPrecedenceOverLegacySchema(t *testing.T) {
 		t.Fatal("legacy schema did not load")
 	}
 	db.persistence.WriteSchema(stored)
+}
+
+func TestCatalogReplicaAdmissionChecksNativeDeclarations(t *testing.T) {
+	const schema = "catalog-client-admission"
+	const language = "catalog-client-source-test"
+	compiled := false
+	registerTriggerLanguage(language, scm.NewFunc(func(...scm.Scmer) scm.Scmer {
+		compiled = true
+		return scm.NewNil()
+	}), true)
+	valid := []byte(`{"name":"catalog-client-admission","tables":{"items":{"Name":"items","Columns":[{"Name":"id","Typ":"INT","Default":7}],"Unique":[{"Name":"primary","Cols":["id"]}],"Foreign":[{"Cols1":["id"],"Cols2":["id"]}],"Triggers":[{"name":"source","timing":"before_insert","source":"SET NEW.id = 7","language":"catalog-client-source-test","schema_only":true}]}},"procedures":[{"name":"source_proc","source":"SELECT 7","language":"catalog-client-source-test","schema_only":true}]}`)
+	rows := catalogRowsFromDocument(valid)
+	for i := range catalogRelations {
+		if len(rows[i]) == 0 {
+			t.Fatalf("fixture lacks relation %s", catalogRelations[i].name)
+		}
+		if err := validateReplicaCatalogRows(schema, catalogRelationID(i), rows[i]); err != nil {
+			t.Fatalf("valid %s: %v", catalogRelations[i].name, err)
+		}
+	}
+	for name, fragment := range map[string]string{
+		"initializer": `"oninit":[{"symbol":"lambda"},[],true]`,
+		"column-code": `"Columns":[{"Name":"id","Typ":"INT","Default":{"symbol":"shutdown"}}]`,
+		"temp-code":   `"Columns":[{"Name":"computed","Typ":"INT","IsTemp":true,"Computor":[{"symbol":"lambda"},[],true]}]`,
+		"bad-name":    `"Columns":[{"Name":"../escape","Typ":"INT"}]`,
+		"trigger":     `"Triggers":[{"name":"source","timing":"before_insert","source":"SET NEW.id = 7","language":"catalog-client-source-test"}]`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := catalogRowsFromDocument([]byte(`{"name":"catalog-client-admission","tables":{"items":{"Name":"items",` + fragment + `}}}`))
+			rejected := false
+			for i := range catalogRelations {
+				if err := validateReplicaCatalogRows(schema, catalogRelationID(i), candidate[i]); err != nil {
+					rejected = true
+				}
+			}
+			if !rejected {
+				t.Fatal("unsafe native declaration was admitted")
+			}
+		})
+	}
+	columns := append([]scm.Scmer(nil), rows[catalogColumns][0]...)
+	columns[2] = scm.NewInt(1 << 40)
+	if err := validateReplicaCatalogRows(schema, catalogColumns, [][]scm.Scmer{columns}); err == nil {
+		t.Fatal("unbounded native ordinal was admitted")
+	}
+	columns[2], columns[0] = scm.NewInt(0), scm.NewString("another-tenant")
+	if err := validateReplicaCatalogRows(schema, catalogColumns, [][]scm.Scmer{columns}); err == nil {
+		t.Fatal("foreign tenant catalog row was admitted")
+	}
+	left := append([]scm.Scmer(nil), rows[catalogColumns][0]...)
+	right := append([]scm.Scmer(nil), rows[catalogColumns][0]...)
+	if err := validateReplicaCatalogRows(schema, catalogColumns, [][]scm.Scmer{left, right}); err == nil {
+		t.Fatal("duplicate native ordinal was admitted")
+	}
+	left[1], left[2], right[1] = scm.NewString("left"), scm.NewInt(1), scm.NewString("right")
+	if err := validateReplicaCatalogRows(schema, catalogColumns, [][]scm.Scmer{left, right}); err == nil {
+		t.Fatal("native ordinals with a gap in one table were admitted")
+	}
+	if compiled {
+		t.Fatal("client declaration admission executed supplied code")
+	}
+}
+
+func TestCatalogReplicaImportValidatesBeforePublication(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "catalog-client-import", 0)
+	db := tbl.schema
+	r := replicaRecoveryFixture()
+	source := db.catalog.live[catalogColumns]
+	resource := source.replicationResource()
+	cell := r.declareShard(source, "client", false)
+	previous := cell.current.Load()
+	proposal := catalogRowsFromTable(tbl)
+	for index, field := range catalogRelations[catalogColumns].columns() {
+		if field.key == "Name" {
+			proposal[catalogColumns][0][index] = scm.NewString("../escape")
+		}
+	}
+	invalid := buildDiskShard(db, catalogColumns, proposal[catalogColumns], true)
+	transfer := &replicaImport{untrusted: true, header: mosiPacket{Resource: resource, Content: invalid.uuid.String()}, engine: invalid.home().persistence, home: invalid.home()}
+	if err := r.finishImport("client", transfer); err == nil {
+		t.Fatal("unsafe native catalog import was published")
+	}
+	if cell.current.Load() != previous || r.canonicalResource(resource) != resource {
+		t.Fatal("rejected catalog import changed native payload or UUID authority")
+	}
+	validRows := catalogRowsFromTable(tbl)
+	incoming := buildDiskShard(db, catalogColumns, validRows[catalogColumns], true)
+	transfer.header.Content = incoming.uuid.String()
+	if err := r.finishImport("client", transfer); err != nil {
+		t.Fatal(err)
+	}
+	published := cell.resolved().current.Load()
+	if published == nil || published.uuid != incoming.uuid || published.home() != catalogBackendDatabase() || published.catalogPrivate {
+		t.Fatal("validated import did not publish native system-backend content")
+	}
+}
+
+func TestCatalogReplicaStagingProtectsPhysicalBackend(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "catalog-client-staging", 0)
+	r := replicaRecoveryFixture()
+	resource := tbl.schema.catalog.live[catalogColumns].replicationResource()
+	content := uuid.NewString()
+	transfer, err := r.startImport(mosiPacket{Resource: resource, Content: content})
+	if err != nil {
+		t.Fatal(err)
+	}
+	home := catalogBackendDatabase()
+	if transfer.home != home || transfer.engine != home.persistence {
+		t.Fatal("catalog staging escaped its physical system backend")
+	}
+	writer := transfer.engine.WriteColumn(content, "staging")
+	if _, err := writer.Write([]byte{1}); err != nil {
+		t.Fatal(err)
+	}
+	finishColumnWrite(writer, true)
+	r.imports.Store("client/staging", transfer)
+	previous := replication.Swap(r)
+	defer replication.Store(previous)
+	if _, deleted, complete := CleanDatabase(home); complete || deleted != 0 {
+		t.Fatal("system cleanup ignored an active tenant catalog import")
+	}
+	reader := home.persistence.ReadColumn(content, "staging")
+	var marker [1]byte
+	_, err = io.ReadFull(reader, marker[:])
+	reader.Close()
+	if err != nil || marker[0] != 1 {
+		t.Fatal("cleanup removed a partially received catalog column")
+	}
+	r.imports.Delete("client/staging")
+}
+
+func TestCatalogReplicaExportRetainsSystemFilesAcrossCheckpoint(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "catalog-client-export", 0)
+	db := tbl.schema
+	r := replicaRecoveryFixture()
+	r.schemaShards(db, r.id, true)
+	schema := r.resourceCell(mosiResource{Database: db.Name})
+	schema.ownstate.Establish(mosi.M)
+	source := db.catalog.live[catalogColumns]
+	resource := source.replicationResource()
+	previous := replication.Swap(r)
+	defer replication.Store(previous)
+	release, err := replicaPersistenceRead(resource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transfer, err := r.captureResource(resource, resource.Shard)
+	release()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer transfer.release()
+	if !r.hasTransfers(db.Name) || !r.hasTransfers(source.home().Name) {
+		t.Fatal("catalog export did not retain both logical and physical storage owners")
+	}
+	tbl.CreateColumn("new_definition", "INT", nil, nil)
+	if db.catalog.live[catalogColumns].uuid == source.uuid {
+		t.Fatal("fixture did not checkpoint a new catalog generation")
+	}
+	reader := source.home().persistence.ReadColumn(source.uuid.String(), "schema_name")
+	var marker [1]byte
+	_, err = io.ReadFull(reader, marker[:])
+	reader.Close()
+	if err != nil {
+		t.Fatal("checkpoint removed a catalog column still owned by an export", err)
+	}
+	transfer.release()
+	if r.hasTransfers(db.Name) || r.hasTransfers(source.home().Name) {
+		t.Fatal("completed catalog export retained its storage owners")
+	}
 }
 
 func TestCatalogMaterializationRetainsOnlyMatchingInitializer(t *testing.T) {
