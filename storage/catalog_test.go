@@ -259,6 +259,68 @@ func TestCatalogPersistsAndTakesPrecedenceOverLegacySchema(t *testing.T) {
 	db.persistence.WriteSchema(stored)
 }
 
+func TestCatalogMaterializationRetainsOnlyMatchingInitializer(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "catalog-initializer-projection", 0)
+	db := tbl.schema
+	initializer := scm.NewSlice([]scm.Scmer{scm.NewSymbol("list"), scm.NewInt(7)})
+	tbl.OnInit.Store(&initializer)
+	proposal := catalogRowsFromTable(tbl)
+	db.schemalock.Lock()
+	defer db.schemalock.Unlock()
+	db.editCatalogLocked(&proposal, 1<<catalogTables, []string{tbl.Name})
+	rows := db.catalogRowsLocked()
+	before := catalogDocumentFromRows(db.Name, &rows)
+	db.materializeCatalogTableLocked(tbl, &rows)
+	if tbl.OnInit.Load() != &initializer {
+		t.Fatal("equivalent catalog initializer lost its runtime binding")
+	}
+	if !reflect.DeepEqual(before, catalogDocumentFromRows(db.Name, &rows)) {
+		t.Fatal("materialization modified the admitted rows")
+	}
+	diverged := scm.NewInt(99)
+	tbl.OnInit.Store(&diverged)
+	db.materializeCatalogTableLocked(tbl, &rows)
+	if got := string(marshalCatalogValue(tbl.OnInit.Load())); got != string(marshalCatalogValue(initializer)) {
+		t.Fatalf("runtime initializer overrode catalog authority: %s", got)
+	}
+	for _, row := range rows[catalogTables] {
+		for index, field := range catalogRelations[catalogTables].columns() {
+			if field.key == "oninit" {
+				row[index] = scm.NewNil()
+			}
+		}
+	}
+	db.editCatalogLocked(&rows, 1<<catalogTables, nil)
+	accepted := db.catalogRowsLocked()
+	db.materializeCatalogTableLocked(tbl, &accepted)
+	if tbl.OnInit.Load() != nil {
+		t.Fatal("removed catalog initializer remained in the runtime view")
+	}
+}
+
+func TestCatalogCacheRebuildDoesNotCreateBlobCatalog(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "catalog-cache-checkpoint", 1)
+	db := tbl.schema
+	cache, _ := CreateTable(db.Name, ".projection_cache", Cache, false)
+	cache.CreateColumn("value", "INT", nil, nil)
+	cache.Insert([]string{"value"}, [][]scm.Scmer{{scm.NewInt(42)}}, nil, scm.NewNil(), false, nil)
+	if result := RebuildTable(cache, true, false); strings.Contains(result, "errors:") {
+		t.Fatal(result)
+	}
+	if db.tables.Get(".blobs") != nil {
+		t.Fatal("cache compaction created an unused durable blob catalog")
+	}
+	if db.schemaDirty.Load() {
+		t.Fatal("cache rebuild did not publish its schema checkpoint")
+	}
+	if result := RebuildTable(tbl, true, false); strings.Contains(result, "errors:") {
+		t.Fatal(result)
+	}
+	if db.tables.Get(".blobs") == nil {
+		t.Fatal("persistent table rebuild did not prepare its blob catalog")
+	}
+}
+
 func TestCatalogCheckpointCannotOverwriteDefinitionsFromRuntime(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "catalog-checkpoint-authority", 1)
 	db := tbl.schema

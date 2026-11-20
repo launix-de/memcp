@@ -804,6 +804,8 @@ func (db *database) checkpointCatalogLocked() {
 // and cache lifetimes. Definition values themselves are decoded from the catalog.
 func (db *database) materializeCatalogTableLocked(t *table, rows *catalogRows) {
 	var selected catalogRows
+	initializer := t.OnInit.Load()
+	retainInitializer := false
 	for i := catalogTables; i < catalogProcedures; i++ {
 		for _, row := range rows[i] {
 			owner := row[1].String()
@@ -811,14 +813,24 @@ func (db *database) materializeCatalogTableLocked(t *table, rows *catalogRows) {
 				owner = catalogTableName(row)
 			}
 			if owner == t.Name {
+				if i == catalogTables && initializer != nil {
+					for index, field := range catalogRelations[catalogTables].columns() {
+						if field.key == "oninit" && row[index].IsString() && row[index].String() == string(marshalCatalogValue(initializer)) {
+							// The compiled initializer already represents this admitted
+							// cell exactly. Retain its runtime bindings without decoding
+							// the same Scheme tree only to discard it afterwards.
+							retainInitializer = true
+							row = append([]scm.Scmer(nil), row...)
+							row[index] = scm.NewNil()
+							break
+						}
+					}
+				}
 				selected[i] = append(selected[i], row)
 			}
 		}
 	}
-	var document catalogDocument
-	if err := json.Unmarshal(catalogDocumentFromRows(db.Name, &selected), &document); err != nil {
-		panic(err)
-	}
+	document := catalogRecordsFromRows(db.Name, &selected)
 	var definition table
 	if err := json.Unmarshal(document.Tables[t.Name], &definition); err != nil {
 		panic(err)
@@ -848,7 +860,7 @@ func (db *database) materializeCatalogTableLocked(t *table, rows *catalogRows) {
 		t.PersistencyMode = definition.PersistencyMode
 	}
 	t.Collation, t.Charset, t.Comment = definition.Collation, definition.Charset, definition.Comment
-	if !bytes.Equal(marshalCatalogValue(t.OnInit.Load()), marshalCatalogValue(definition.OnInit.Load())) {
+	if !retainInitializer {
 		t.OnInit.Store(definition.OnInit.Load())
 	}
 	t.mu.Lock()

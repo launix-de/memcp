@@ -315,7 +315,7 @@ func (r *replicationManager) validateForwards(source string, packet mosiPacket) 
 		}
 		r.mu.Unlock()
 		if !allowed {
-			return fmt.Errorf("forwarding from non-owner")
+			return fmt.Errorf("forwarding from non-owner for %s (epoch %d, directory epoch %d)", packet.Resource.key(), packet.Epoch, current.Epoch)
 		}
 	} else if r.cluster == nil && source != "" {
 		return fmt.Errorf("forwarding from non-master")
