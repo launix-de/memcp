@@ -1050,13 +1050,13 @@ func (db *database) commitSchemaLocked(durable bool, release func()) {
 	db.schemalock.Lock()
 	func() {
 		defer db.schemalock.Unlock()
-		// A source handover binds its payload and UUID routes under acquire. Do
-		// not change that binding between prepare and capture. Only this short
-		// publication phase needs ownership; compression and I/O stay outside it.
-		var publications []*replicaCell
+		// Use native writer admission for this short publication, so every
+		// handover adapter drains it before binding payload and UUID routes.
+		// Compression and I/O never retain these writer capabilities.
+		var publications []*mosi.Writer
 		defer func() {
-			for _, cell := range publications {
-				cell.acquire.Unlock()
+			for _, writer := range publications {
+				writer.Release()
 			}
 		}()
 		publish := db.catalog.liveVersion.Load() == version
@@ -1064,15 +1064,12 @@ func (db *database) commitSchemaLocked(durable bool, release func()) {
 			for _, shard := range db.catalog.live {
 				if cell := shard.coherence.Load(); cell != nil {
 					cell = cell.resolved()
-					if !cell.acquire.TryLock() {
+					writer, _ := cell.ownstate.TryWrite(nil, false)
+					if writer == nil {
 						publish = false
 						break
 					}
-					publications = append(publications, cell)
-					if cell.ownstate.Phase() != mosi.M {
-						publish = false
-						break
-					}
+					publications = append(publications, writer)
 				}
 			}
 		}

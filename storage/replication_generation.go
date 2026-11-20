@@ -116,15 +116,16 @@ func (r *replicationManager) publishLocal(resource mosiResource, phase mosi.Phas
 			copy.release()
 		}
 	}
+	c.ownstate.Publish(phase)
 	if phase == mosi.IO && resource.Shard != "" {
 		// Cached analytic results must stop being reusable before a remote
 		// writer changes this source. This is publication work, not a scan/read
-		// counter, and causes ordinary cache initialization to acquire GetRead.
+		// counter. Revoke local reads first: otherwise a cache can initialize
+		// again from old S payloads after its invalidation and survive the ACK.
 		if shard := c.current.Load(); shard != nil {
 			invalidateDependentCaches(shard.t)
 		}
 	}
-	c.ownstate.Publish(phase)
 	if capture := c.liveTransfer.Load(); capture != nil {
 		capture.releaseMaintenance()
 	}
@@ -1330,15 +1331,15 @@ func (r *replicationManager) transmitResource(ctx context.Context, peerID string
 			if err := r.cluster.transferSchemaLocations(ctx, peerID, header); err != nil {
 				return err
 			}
-		} else if header.Resource.Shard != header.Content || header.State == "M" && !isCatalogResource(header.Resource) {
+		} else if !isCatalogResource(header.Resource) && (header.Resource.Shard != header.Content || header.State == "M") {
 			// Preparation may have published a new physical UUID. Make its
 			// current owner routable before the reference wakes the requester;
 			// the final post-handover update alone leaves an observable gap.
-			// Fixed catalog row edits retain their UUID and can be required by
-			// the schema handover's checkpoint itself. Their native cell already
-			// routes the handoff; registering at the enclosing schema before its
-			// reference is admitted would wait on that checkpoint. The ordinary
-			// post-handover registration still publishes the new location.
+			// Catalog payloads, including rebuilt UUID successors, supply the
+			// enclosing schema handover itself. Their native reference carries
+			// the UUID edges; waiting for parent registration before admitting
+			// that reference would wait on our own schema ACK. Post-handover
+			// registration publishes their new location through the same path.
 			r.mu.Lock()
 			entry := r.directory.Records[r.resourceKey(header.Resource)]
 			r.mu.Unlock()
