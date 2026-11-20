@@ -37,7 +37,7 @@ test_cases:
       sql: SELECT CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_marker_rows') AND name=N'guid'
       expect: {rows: 1, data: [{marked: 1}]}
     - connection: owner
-      sql: SELECT id,guid FROM property_marker_rows ORDER BY id
+      sql: SELECT id,CONVERT(VARCHAR(36),guid) AS guid FROM property_marker_rows ORDER BY id
       expect:
         rows: 3
         data:
@@ -101,6 +101,8 @@ test_cases:
   scm: (crash)
   restart_timeout: 60
   expect: {interrupted_ok: true}
+- name: Restart the committed marker and append decision
+  action: restart
 - name: Recovered metadata retains the committed marker removal
   sql: SELECT name,CAST(is_rowguidcol AS INT) AS marked FROM sys.all_columns WHERE object_id=OBJECT_ID(N'property_marker_rows',N'U') ORDER BY column_id
   expect:

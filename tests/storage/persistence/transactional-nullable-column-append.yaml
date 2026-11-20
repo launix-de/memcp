@@ -149,7 +149,7 @@ test_cases:
       (define s (newsession)) (s "username" "root") (tx_begin s)
       (define tx (s "__memcp_tx"))
       (define target (table "memcp-tests" false "nullable_append_guard" false tx))
-      (insert target '("id" "value") '((7 77)) '() nil false nil tx)
+      (insert target '("id" "value") (list (list 7 77)) '() nil false nil tx)
       (define rejected (try (lambda () (begin
         (createcolumn target "forbidden" "VARCHAR" '(15) '("null" true) nil nil tx) false))
         (lambda (_failure) true)))
@@ -166,7 +166,7 @@ test_cases:
       (define target (table "memcp-tests" false "nullable_append_guard" false tx))
       (createcolumn target "pending" "VARCHAR" '(15) '("null" true) nil nil tx)
       (define rejected (try (lambda () (begin
-        (insert target '("id" "value") '((7 77)) '() nil false nil tx) false))
+        (insert target '("id" "value") (list (list 7 77)) '() nil false nil tx) false))
         (lambda (_failure) true)))
       (define own (scan tx target '() '() '() (lambda () true) '("value") + 0 +))
       (tx_rollback s)
