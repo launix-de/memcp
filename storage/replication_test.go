@@ -1533,6 +1533,29 @@ func TestReplicationRequestLearnsOnlyOwnerForwarding(t *testing.T) {
 	}
 }
 
+func TestReplicationRequestResolvesRetainedCheckpointWithoutReversingCurrent(t *testing.T) {
+	r := replicaRecoveryFixture()
+	old := mosiResource{Database: "example", Table: "items", Shard: uuid.NewString()}
+	current, checkpoint := old, old
+	current.Shard, checkpoint.Shard = uuid.NewString(), uuid.NewString()
+	cell := r.resourceCell(old)
+	cell.ownstate.Initialize(mosi.M)
+	r.updateRecord(old, func(record *replicaRecord) bool {
+		record.Owner, record.State, record.Epoch = r.id, "M", 9
+		return true
+	})
+	r.forwardResource(old, current)
+	if err := r.acceptRequestRoutes("former-owner", mosiPacket{Resource: checkpoint, Forwards: []shardForward{{old, checkpoint}}}); err != nil {
+		t.Fatal(err)
+	}
+	if r.canonicalResource(old) != current || r.canonicalResource(checkpoint) != current || r.lookupCell(checkpoint) != cell {
+		t.Fatal("a retained checkpoint reversed the current UUID authority")
+	}
+	if record := r.directory.Records[current.key()]; record.Owner != r.id || record.Epoch != 9 || cell.ownstate.Phase() != mosi.M {
+		t.Fatal("resolving a retained checkpoint changed ownership or permissions")
+	}
+}
+
 func TestReplicationSharedSchemaKeepsNewerShard(t *testing.T) {
 	tbl, engine := createDurabilityTestTable(t, "replica_shared_schema_successor", 3)
 	RebuildTable(tbl, true, false)

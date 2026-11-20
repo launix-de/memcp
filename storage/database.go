@@ -880,7 +880,7 @@ func (db *database) initializeSchemaSnapshot(document []byte) {
 		}
 		db.catalogMu.Lock()
 		db.catalog.live, db.catalog.liveFP = live, fingerprints
-		db.catalog.liveVersion++
+		db.catalog.liveVersion.Add(1)
 		publishCatalogShards(db.Name, &live)
 		db.catalogMu.Unlock()
 		jsonbytes = catalogDocumentFromRows(db.Name, &rows)
@@ -910,41 +910,10 @@ func (db *database) initializeSchemaSnapshot(document []byte) {
 	db.procedures = tmp.procedures
 	// restore back-references; do not touch on-disk columns yet
 	for _, t := range db.tables.GetAll() {
-		t.schema = db
-		invalidatePersistedPlannerCodeAfterLoad(t)
+		db.initializeTableAfterLoad(t)
 		if t.Name == ".blobs" {
 			db.blobRefState().table.Store(t)
 		}
-		for _, col := range t.Columns {
-			col.UpdateSanitizer()
-		}
-		// attach table pointer to existing shard stubs without loading them
-		if t.Shards != nil {
-			for _, s := range t.Shards {
-				if s != nil {
-					s.t = t
-				}
-			}
-		}
-		if t.PShards != nil {
-			for _, s := range t.PShards {
-				if s != nil {
-					s.t = t
-				}
-			}
-		}
-		// Derive ShardMode from shard presence for backward compatibility
-		// with schemas that don't yet have ShardMode persisted.
-		if t.PShards != nil && t.Shards == nil {
-			t.ShardMode = ShardModePartition
-		} else {
-			t.ShardMode = ShardModeFree
-		}
-		t.publishTopologyLocked()
-		t.initializeLegacyPlannerRowEstimate()
-		t.publishShowColumnsSnapshot(true)
-		t.restoreKeyFrequencies()
-		t.restoreFilterFeedback()
 	}
 	// FK declarations are authoritative, while their system triggers are
 	// generated code. Rebuild that code at the persistence boundary so schema
@@ -960,6 +929,37 @@ func (db *database) initializeSchemaSnapshot(document []byte) {
 			registerCreatedTable(table)
 		}
 	}
+}
+
+// initializeTableAfterLoad prepares one unpublished runtime descriptor from its
+// admitted declaration. Both whole-database startup and lazy catalog loading
+// use this path; neither needs to load the table's data columns.
+func (db *database) initializeTableAfterLoad(t *table) {
+	t.schema = db
+	invalidatePersistedPlannerCodeAfterLoad(t)
+	for _, col := range t.Columns {
+		col.UpdateSanitizer()
+	}
+	attach := func(shards []*storageShard) {
+		for _, shard := range shards {
+			if shard != nil {
+				shard.t = t
+			}
+		}
+	}
+	attach(t.Shards)
+	attach(t.PShards)
+	// Older declarations do not persist ShardMode.
+	if t.PShards != nil && t.Shards == nil {
+		t.ShardMode = ShardModePartition
+	} else {
+		t.ShardMode = ShardModeFree
+	}
+	t.publishTopologyLocked()
+	t.initializeLegacyPlannerRowEstimate()
+	t.publishShowColumnsSnapshot(true)
+	t.restoreKeyFrequencies()
+	t.restoreFilterFeedback()
 }
 
 // publishTableNamesLocked owns schema membership (or an unpublished database).

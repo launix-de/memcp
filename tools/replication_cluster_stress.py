@@ -2248,7 +2248,7 @@ def run_cluster_placement(args, artifacts, journal):
             # runners. A serial scan can evict/reload every shard locally and
             # would never test simultaneous RAM admission or remote overflow.
             node.process_env["GOMAXPROCS"] = str(config["gomaxprocs"])
-            cleanup.callback(lambda node=node: node.kill() if node.process is not None else None)
+            cleanup.callback(node.cleanup)
             # The snapshot's database anchor also references immutable catalog
             # generations in the system backend. Seed that backend privately;
             # only ordinary tenant payload remains shared between live nodes.
@@ -2389,7 +2389,7 @@ def run_cluster_placement(args, artifacts, journal):
             upstream.client.sql(f"CREATE DATABASE {database}", "system")
             upstream.client.sql("CREATE TABLE edge_items(id INT PRIMARY KEY,n INT) ENGINE=SAFE", database)
             edge = Node(args, directory, f"edge-{index}", f"http://127.0.0.1:{upstream.port}/cluster", database=database)
-            cleanup.callback(lambda edge=edge: edge.kill() if edge.process is not None else None)
+            cleanup.callback(edge.cleanup)
             # User rows and MOSI configuration deliberately share one stripe.
             # Data acquisition must complete before any UNIQUE reservation.
             (edge.data_dir / "settings.json").write_text(json.dumps({"UniqueScaleFactor": 0}))

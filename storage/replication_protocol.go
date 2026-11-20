@@ -130,9 +130,7 @@ func (r *replicationManager) applyResourcePacket(source string, packet *mosiPack
 					return fmt.Errorf("unexpected transfer source")
 				}
 			} else {
-				r.mu.Lock()
-				record := r.directory.Records[r.resourceKey(packet.Resource)]
-				r.mu.Unlock()
+				record := r.transferOwnerRecord(source, *packet)
 				if record.Owner != source || record.Epoch != packet.Epoch {
 					return fmt.Errorf("backup from non-owner: %s epoch %d, directory epoch %d, owner matches %t", packet.Resource.key(), packet.Epoch, record.Epoch, record.Owner == source)
 				}
@@ -191,9 +189,7 @@ func (r *replicationManager) applyResourcePacket(source string, packet *mosiPack
 			defer r.imports.Delete(key)
 			defer transfer.abort()
 			if r.master {
-				r.mu.Lock()
-				record := r.directory.Records[r.resourceKey(packet.Resource)]
-				r.mu.Unlock()
+				record := r.transferOwnerRecord(source, transfer.header)
 				if record.Owner != source || record.Epoch != packet.Epoch {
 					return fmt.Errorf("stale transfer epoch")
 				}

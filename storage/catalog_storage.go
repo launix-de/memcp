@@ -19,6 +19,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/launix-de/memcp/scm"
+	"github.com/launix-de/memcp/storage/mosi"
 )
 
 // catalogPartitionMethod partitions system_schema relations by database.
@@ -77,9 +78,10 @@ type databaseCatalog struct {
 
 	// Guarded by database.schemalock: the queryable partition. It changes
 	// by DML, so triggers of planner caches over system_schema observe it.
-	live        [catalogRelationCount]*storageShard
-	liveFP      [catalogRelationCount][32]byte
-	liveVersion uint64
+	live   [catalogRelationCount]*storageShard
+	liveFP [catalogRelationCount][32]byte
+	// Remote MOSI publication advances this too, independently of schemalock.
+	liveVersion atomic.Uint64
 }
 
 type retiredCatalogShard struct {
@@ -376,8 +378,8 @@ func readCatalogRoot(data []byte) *catalogRoot {
 	return probe.Catalog
 }
 
-// stripCatalogRoot removes the node-local catalog root from a schema.json
-// before it leaves this node. Receivers derive their own catalog shards.
+// stripCatalogRoot selects the legacy declaration envelope for legacy admission.
+// Native transfers retain their roots and acquire the referenced shards.
 func stripCatalogRoot(data []byte) []byte {
 	if readCatalogRootMember(data) == nil {
 		return data
@@ -530,6 +532,41 @@ func (db *database) catalogRowsLocked() (rows catalogRows) {
 	return
 }
 
+// Materialize a newly received declaration on demand. Native partitions can
+// introduce tables without transferring the enclosing database namespace.
+// Read/compile the private descriptor before entering the publication lock.
+func (db *database) loadCatalogTable(name string) *table {
+	if t := db.tables.Get(name); t != nil {
+		return t
+	}
+	var rows catalogRows
+	for i := catalogTables; i < catalogProcedures; i++ {
+		topology := systemSchemaTables[i].activeTopology()
+		position := catalogPartitionIndex(topology.dimensions[0], scm.NewString(db.Name))
+		_, rows[i] = catalogShardRecords(topology.shards[position], catalogRelationColumns(i), []string{name})
+		if i == catalogTables && len(rows[i]) == 0 {
+			return nil
+		}
+	}
+	private := newDatabase()
+	if err := json.Unmarshal(catalogDocumentFromRows(db.Name, &rows), private); err != nil {
+		panic(err)
+	}
+	t := private.tables.Get(name)
+	db.initializeTableAfterLoad(t)
+	db.schemalock.Lock()
+	defer db.schemalock.Unlock()
+	if existing := db.tables.Get(name); existing != nil {
+		return existing
+	}
+	db.tables.Set(name, t)
+	if name == ".blobs" {
+		db.blobRefState().table.Store(t)
+	}
+	db.publishTableNamesLocked()
+	return t
+}
+
 // newCatalogShard constructs an unpublished generation without executing user
 // DML, WAL or cache callbacks. Only the catalog editor can call this constructor.
 func newCatalogShard(db *database, relation catalogRelationID, rows [][]scm.Scmer) *storageShard {
@@ -584,7 +621,12 @@ func (db *database) editCatalogLocked(rows *catalogRows, relations uint16, table
 		var fp [32]byte
 		if tableOwners == nil {
 			fp = catalogFingerprint(relation, rows[i])
-			if fp == db.catalog.liveFP[i] {
+			current := db.catalog.live[i]
+			unchangedGeneration := true
+			if cell := current.coherence.Load(); cell != nil {
+				unchangedGeneration = cell.resolved().publishedShard() == current
+			}
+			if unchangedGeneration && fp == db.catalog.liveFP[i] {
 				continue
 			}
 		}
@@ -635,7 +677,7 @@ func (db *database) editCatalogLocked(rows *catalogRows, relations uint16, table
 		panic(err)
 	}
 	db.catalog.liveFP = fingerprints
-	db.catalog.liveVersion++
+	db.catalog.liveVersion.Add(1)
 	return true
 }
 
@@ -656,6 +698,7 @@ func (db *database) proposeCatalogTablesLocked(tables ...*table) {
 		seen[t.Name] = true
 		owners = append(owners, t.Name)
 		proposal := catalogRowsFromTable(t)
+		proposal = db.replicaCatalogProposal(&proposal)
 		for i := catalogTables; i < catalogProcedures; i++ {
 			rows[i] = append(rows[i], proposal[i]...)
 		}
@@ -670,8 +713,51 @@ func (db *database) proposeCatalogTablesLocked(tables ...*table) {
 	}
 	for _, t := range tables {
 		if t != nil && t.schema == db {
+			for _, row := range rows[catalogTables] {
+				if catalogTableName(row) == t.Name {
+					db.materializeCatalogTableLocked(t, &rows)
+					break
+				}
+			}
+		}
+	}
+}
+
+// A replica shares ordinary definitions, not its node-local planner workspace.
+// Filter proposals before native admission so later shard handovers cannot
+// export local cache code as canonical client declarations.
+func (db *database) replicaCatalogProposal(rows *catalogRows) catalogRows {
+	r := replication.Load()
+	if r == nil || sharedClusterDatabase(db.Name) || !validReplicaDatabase(db.Name) {
+		return *rows
+	}
+	declarations, err := replicaSchemaDeclarations(catalogDocumentFromRows(db.Name, rows), !r.master)
+	if err != nil {
+		panic(err)
+	}
+	return catalogRowsFromDocument(declarations)
+}
+
+func (db *database) prepareReplicaCatalog() {
+	db.schemalock.Lock()
+	defer db.schemalock.Unlock()
+	rows := db.catalogRowsLocked()
+	rows = db.replicaCatalogProposal(&rows)
+	if !db.editCatalogLocked(&rows, catalogAllRelations, nil) {
+		return
+	}
+	for _, t := range db.tables.GetAll() {
+		if !t.isEphemeralQueryTable() {
 			db.materializeCatalogTableLocked(t, &rows)
 		}
+	}
+	document := catalogRecordsFromRows(db.Name, &rows)
+	for _, raw := range document.Procedures {
+		var definition ProcedureDescription
+		if err := json.Unmarshal(raw, &definition); err != nil {
+			panic(err)
+		}
+		db.procedures.Set(definition.Name, &definition)
 	}
 }
 
@@ -728,6 +814,7 @@ func (db *database) editCatalogProcedureLocked(name string, proposal *ProcedureD
 	for i, definition := range definitions {
 		rows.add(catalogProcedures, db.Name, []scm.Scmer{scm.NewInt(int64(i))}, definition)
 	}
+	rows = db.replicaCatalogProposal(&rows)
 	db.editCatalogLocked(&rows, catalogAllRelations, nil)
 	if proposal == nil {
 		return nil
@@ -853,6 +940,20 @@ func (db *database) materializeCatalogTableLocked(t *table, rows *catalogRows) {
 			definition.Columns[i].UpdateSanitizer()
 		}
 	}
+	for _, candidate := range t.Columns {
+		if !candidate.IsTemp {
+			continue
+		}
+		found := false
+		for _, declared := range definition.Columns {
+			found = found || declared.Name == candidate.Name
+		}
+		if !found {
+			// These are retained physical compute objects of this node, not
+			// declarations supplied by the replicated catalog generation.
+			definition.Columns = append(definition.Columns, candidate)
+		}
+	}
 	t.Columns = definition.Columns
 	t.Unique, t.Foreign = definition.Unique, definition.Foreign
 	t.DroppedColumns = definition.DroppedColumns
@@ -901,8 +1002,20 @@ func (db *database) commitSchemaLocked(durable bool, release func()) {
 			release()
 		}
 	}()
+	// A checkpoint can compact a generation received since the last local
+	// save. Claim its native authority before publishing successor UUIDs;
+	// namespace ownership alone never grants rights on these partitions.
+	for i, shard := range db.catalog.live {
+		if r := shard.replicationManager(); r != nil {
+			cell := r.obtain(shard.replicationResource(), mosi.M, "", nil)
+			if current := cell.publishedShard(); current != nil && current != shard {
+				db.catalog.live[i] = current
+				db.catalog.liveFP[i] = [32]byte{}
+			}
+		}
+	}
 	rows := db.catalogRowsLocked()
-	version := db.catalog.liveVersion
+	version := db.catalog.liveVersion.Load()
 	live := db.catalog.live
 	jsonbytes := catalogDocumentFromRows(db.Name, &rows)
 	catalogPersistenceMu.RLock()
@@ -935,26 +1048,66 @@ func (db *database) commitSchemaLocked(durable bool, release func()) {
 	catalogPersistenceMu.RUnlock()
 	persistenceOwned = false
 	db.schemalock.Lock()
-	if db.catalog.liveVersion == version {
-		db.catalog.liveFP = db.catalog.committedFP
-		for i, shard := range committed {
-			if previous := db.catalog.live[i]; previous != shard {
-				if r := previous.replicationManager(); r != nil {
-					if err := r.replaceCatalogShard(previous.replicationResource(), previous, shard); err != nil {
-						panic(err)
+	func() {
+		defer db.schemalock.Unlock()
+		// A source handover binds its payload and UUID routes under acquire. Do
+		// not change that binding between prepare and capture. Only this short
+		// publication phase needs ownership; compression and I/O stay outside it.
+		var publications []*replicaCell
+		defer func() {
+			for _, cell := range publications {
+				cell.acquire.Unlock()
+			}
+		}()
+		publish := db.catalog.liveVersion.Load() == version
+		if publish {
+			for _, shard := range db.catalog.live {
+				if cell := shard.coherence.Load(); cell != nil {
+					cell = cell.resolved()
+					if !cell.acquire.TryLock() {
+						publish = false
+						break
 					}
-					shard.coherence.Load().resolved().current.Store(shard)
-				} else {
-					declareCatalogShard(shard)
+					publications = append(publications, cell)
+					if cell.ownstate.Phase() != mosi.M {
+						publish = false
+						break
+					}
 				}
 			}
 		}
-		db.restoreCatalogRoutes(root)
-		db.catalog.live = committed
-		publishCatalogShards(db.Name, &committed)
-		db.schemaDirty.Store(false)
-	}
-	db.schemalock.Unlock()
+		publish = publish && db.catalog.liveVersion.Load() == version
+		if publish {
+			db.catalog.liveFP = db.catalog.committedFP
+			for i, shard := range committed {
+				if previous := db.catalog.live[i]; previous != shard {
+					if r := previous.replicationManager(); r != nil {
+						if err := r.replaceCatalogShard(previous.replicationResource(), previous, shard); err != nil {
+							panic(err)
+						}
+						shard.coherence.Load().resolved().current.Store(shard)
+					} else {
+						declareCatalogShard(shard)
+					}
+				}
+			}
+			db.restoreCatalogRoutes(root)
+			db.catalog.live = committed
+			publishCatalogShards(db.Name, &committed)
+			db.schemaDirty.Store(false)
+		} else {
+			// A later local edit is still the live authority. The durable snapshot
+			// is a historical UUID, so route it to that live cell until the newer
+			// checkpoint publishes its own successor. Do not mint another owner.
+			for i, snapshot := range committed {
+				if live := db.catalog.live[i]; live != snapshot {
+					if r := live.replicationManager(); r != nil {
+						r.forwardResource(snapshot.replicationResource(), r.canonicalResource(live.replicationResource()))
+					}
+				}
+			}
+		}
+	}()
 	db.catalogCommitted(generation)
 }
 

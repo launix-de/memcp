@@ -127,6 +127,8 @@ func (r *replicationManager) replaceCatalogShard(resource mosiResource, previous
 		}
 	}
 	replacement.coherence.Store(cell)
+	cell.current.Store(replacement)
+	db.catalog.liveVersion.Add(1)
 	// Native topology publishes payload independently of Go declaration objects.
 	for _, current := range systemSchemaTables[relation].activeTopology().shards {
 		if current != nil && current.catalogOwner == db.Name {
