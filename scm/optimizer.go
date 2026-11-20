@@ -1474,7 +1474,7 @@ func buildProcSpecialization(proc *Proc, key procSpecializationKey, paramTypes [
 	lambda := []Scmer{
 		NewSymbol("lambda"),
 		CloneOptimizerExpression(proc.Params),
-		deoptimizeProcSpecializationExpr(CloneOptimizerExpression(proc.Body), []int{len(params)}),
+		deoptimizeProcSpecializationExpr(CloneOptimizerExpression(proc.Body), &procSpecializationScope{paramCount: len(params)}),
 	}
 	if proc.NumVars > 0 {
 		lambda = append(lambda, NewInt(int64(proc.NumVars)))
@@ -4712,25 +4712,32 @@ func specializationSlotSymbol(slot NthLocalVar) Scmer {
 	return NewSymbol("__optimizer_slot_" + strconv.Itoa(int(slot)))
 }
 
+// Each node is one actual lexical environment. Shared numbered scopes retain
+// their parameter boundary without copying the complete ancestor chain.
+type procSpecializationScope struct {
+	paramCount int
+	parent     *procSpecializationScope
+}
+
 // deoptimizeProcSpecializationExpr restores optimizer-created local slots to
 // stable internal names while rebuilding a Proc specialization. Parameters
 // retain their numbered representation; begin-local setN bindings must become
 // visible to the existing usage walk so type-driven rewrites can fire again.
 // This replaces the ordinary DeoptimizeExpr traversal rather than adding a
 // second analysis pass over the body.
-func deoptimizeProcSpecializationExpr(expr Scmer, scopes []int) Scmer {
+func deoptimizeProcSpecializationExpr(expr Scmer, scope *procSpecializationScope) Scmer {
 	if expr.IsSourceInfo() {
 		source := *expr.SourceInfo()
-		source.value = deoptimizeProcSpecializationExpr(source.value, scopes)
+		source.value = deoptimizeProcSpecializationExpr(source.value, scope)
 		return NewSourceInfo(source)
 	}
 	if expr.GetTag() == tagAny {
 		if source, ok := expr.Any().(SourceInfo); ok {
-			source.value = deoptimizeProcSpecializationExpr(source.value, scopes)
+			source.value = deoptimizeProcSpecializationExpr(source.value, scope)
 			return NewSourceInfo(source)
 		}
 	}
-	paramCount := scopes[len(scopes)-1]
+	paramCount := scope.paramCount
 	if expr.IsNthLocalVar() {
 		slot := expr.NthLocalVar()
 		if int(slot) >= paramCount {
@@ -4767,16 +4774,23 @@ func deoptimizeProcSpecializationExpr(expr Scmer, scopes []int) Scmer {
 		}
 		result := append([]Scmer(nil), items...)
 		result[0] = NewSymbol("lambda")
-		result[2] = deoptimizeProcSpecializationExpr(items[2], append(scopes[:len(scopes):len(scopes)], count))
+		result[2] = deoptimizeProcSpecializationExpr(items[2], &procSpecializationScope{paramCount: count, parent: scope})
 		return NewSlice(result) // parameters and optional frame/proof data are inert
 	}
 	if len(items) == 3 && scmerIsSymbol(items[0], "outer") {
 		depth, valid := outerDepthLiteral(items[1])
-		if !valid || depth >= int64(len(scopes)) {
+		if !valid {
+			return expr
+		}
+		target := scope
+		for remaining := depth; remaining > 0 && target != nil; remaining-- {
+			target = target.parent
+		}
+		if target == nil {
 			return expr // the referenced frame belongs outside the rebuilt Proc
 		}
 		return NewSlice([]Scmer{NewSymbol("outer"), items[1],
-			deoptimizeProcSpecializationExpr(items[2], scopes[:len(scopes)-int(depth)])})
+			deoptimizeProcSpecializationExpr(items[2], target)})
 	}
 	if len(items) >= 3 && scmerIsSymbol(items[0], "!list") {
 		count := int(ToInt(items[2]))
@@ -4784,7 +4798,7 @@ func deoptimizeProcSpecializationExpr(expr Scmer, scopes []int) Scmer {
 			newItems := make([]Scmer, 1+count)
 			newItems[0] = NewSymbol("list")
 			for i := 0; i < count; i++ {
-				newItems[1+i] = deoptimizeProcSpecializationExpr(items[3+i], scopes)
+				newItems[1+i] = deoptimizeProcSpecializationExpr(items[3+i], scope)
 			}
 			return NewSlice(newItems)
 		}
@@ -4796,36 +4810,36 @@ func deoptimizeProcSpecializationExpr(expr Scmer, scopes []int) Scmer {
 	copy(newItems, items)
 	switch {
 	case scmerIsSymbol(items[0], "begin"):
-		shared := append(scopes[:len(scopes):len(scopes)], paramCount)
+		shared := &procSpecializationScope{paramCount: paramCount, parent: scope}
 		newItems[0] = NewSymbol("begin")
 		for i := 1; i < len(items); i++ {
 			newItems[i] = deoptimizeProcSpecializationExpr(items[i], shared)
 		}
 	case scmerIsSymbol(items[0], "begin_mut"):
-		shared := append(scopes[:len(scopes):len(scopes)], paramCount)
+		shared := &procSpecializationScope{paramCount: paramCount, parent: scope}
 		newItems[0] = NewSymbol("begin_mut")
 		if len(items) > 1 {
-			newItems[1] = deoptimizeProcSpecializationExpr(items[1], scopes)
+			newItems[1] = deoptimizeProcSpecializationExpr(items[1], scope)
 		}
 		for i := 2; i < len(items); i++ {
 			newItems[i] = deoptimizeProcSpecializationExpr(items[i], shared)
 		}
 	case scmerIsSymbol(items[0], "match") || scmerIsSymbol(items[0], "match_mut"):
-		shared := append(scopes[:len(scopes):len(scopes)], paramCount)
-		newItems[0] = deoptimizeProcSpecializationExpr(items[0], scopes)
+		shared := &procSpecializationScope{paramCount: paramCount, parent: scope}
+		newItems[0] = deoptimizeProcSpecializationExpr(items[0], scope)
 		if len(items) > 1 {
-			newItems[1] = deoptimizeProcSpecializationExpr(items[1], scopes)
+			newItems[1] = deoptimizeProcSpecializationExpr(items[1], scope)
 		}
 		for i := 2; i+1 < len(items); i += 2 {
 			newItems[i] = deoptimizeProcSpecializationExpr(items[i], shared)
 			newItems[i+1] = deoptimizeProcSpecializationExpr(items[i+1], shared)
 		}
 		if len(items)%2 == 1 {
-			newItems[len(items)-1] = deoptimizeProcSpecializationExpr(items[len(items)-1], scopes)
+			newItems[len(items)-1] = deoptimizeProcSpecializationExpr(items[len(items)-1], scope)
 		}
 	default:
 		for i, item := range items {
-			newItems[i] = deoptimizeProcSpecializationExpr(item, scopes)
+			newItems[i] = deoptimizeProcSpecializationExpr(item, scope)
 		}
 	}
 	if len(newItems) == 3 && scmerIsSymbol(newItems[0], "setN") {
