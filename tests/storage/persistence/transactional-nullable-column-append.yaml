@@ -6,6 +6,13 @@ metadata:
   requires_tds: true
   description: Fresh nullable append shares the original native decision without private row slots
 setup:
+- sql: DROP TABLE IF EXISTS nullable_append_rows
+- sql: DROP TABLE IF EXISTS nullable_append_other
+- sql: DROP TABLE IF EXISTS nullable_append_rollback
+- sql: DROP TABLE IF EXISTS nullable_append_savepoint
+- sql: DROP TABLE IF EXISTS nullable_append_guard
+- sql: DROP TABLE IF EXISTS nullable_append_retired
+- sql: DROP TABLE IF EXISTS nullable_append_pg
 - sql: CREATE TABLE nullable_append_rows(id INT PRIMARY KEY,value INT)
 - sql: INSERT nullable_append_rows VALUES(1,11),(2,22)
 - sql: CREATE TABLE nullable_append_other(id INT PRIMARY KEY,value INT)
@@ -188,6 +195,28 @@ test_cases:
       (tx_rollback s)
       (list rejected retired (scan nil target '() '() '() (lambda () true) '("id") + 0 +)))
   expect: {result: [[true,true],true,6]}
+- name: A checked key-drop grant cannot bypass the pending append write veto
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (define target (table "memcp-tests" false "nullable_append_guard" false tx))
+      (try (lambda () (begin
+        (dropkey target "PRIMARY" tx)
+        (createcolumn target "pending_checked" "VARCHAR" '(15) '("null" true) nil nil tx)
+        (define rejected (try (lambda () (begin
+          (with_table_mutation (list target) (list "update" '("value")) tx owner (lambda (bound)
+            (scan bound target '() '() '() (lambda () true) '("$update")
+              (lambda (n update) (begin (update '("value" 99)) (+ n 1))) 0 +)))
+          false)) (lambda (_failure) true)))
+        (define state (tx_state tx))
+        (define own (scan tx target '() '() '() (lambda () true) '("value") + 0 +))
+        (define observed (scan nil target '() '() '() (lambda () true) '("value") + 0 +))
+        (tx_rollback owner)
+        (list rejected state own observed (nil? (show target "column" "pending_checked" false nil))
+          (count ((show target "constraints" nil) "Unique")))))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect: {result: [true,active,55,55,true,1]}
 - name: An accepted append and its later row values survive abrupt process loss
   scm: (crash)
   expect: {interrupted_ok: true}
