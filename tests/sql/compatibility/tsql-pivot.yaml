@@ -29,9 +29,9 @@ test_cases:
 - name: MAX preserves the typed input and NULL for absent values
   sql: SELECT grp,[a],[b] FROM pivot_input PIVOT(MAX(value) FOR category IN([a],[b])) AS p WHERE grp=1
   expect: {rows: 1,data: [{grp: 1,a: 7,b: null}]}
-- name: Numeric discriminators convert to text instead of coercing output names
+- name: Numeric discriminators convert output names to their declared type
   sql: SELECT [1],[01],[2] FROM (SELECT grp,value FROM pivot_input WHERE category='a') AS s PIVOT(SUM(value) FOR grp IN([1],[01],[2])) AS p
-  expect: {rows: 1,data: [{'1': 12,'01': null,'2': null}]}
+  expect: {rows: 1,data: [{'1': 12,'01': 12,'2': null}]}
 - name: Every remaining input column participates in grouping
   sql: SELECT grp,[a],[b] FROM (SELECT grp,category,value,CASE WHEN value=5 THEN 1 ELSE 0 END AS extra FROM pivot_input WHERE grp=1) AS s PIVOT(SUM(value) FOR category IN([a],[b])) AS p ORDER BY extra
   expect: {rows: 2,data: [{grp: 1,a: 7,b: null},{grp: 1,a: 5,b: null}]}
@@ -59,6 +59,12 @@ test_cases:
 - name: The pivot discriminator must exist in the actual input
   sql: SELECT * FROM pivot_input PIVOT(SUM(value) FOR missing IN([a])) AS p
   expect: {error: true,contains: PIVOT requires one input column}
+- name: Folded source spellings resolve to their actual exported titles
+  sql: SELECT grp,[a] FROM pivot_input PIVOT(SUM(VALUE) FOR CATEGORY IN([a])) AS p WHERE grp=1
+  expect: {rows: 1,data: [{grp: 1,a: 12}]}
+- name: Unicode folded output names cannot collide with grouping exports
+  sql: SELECT * FROM (SELECT grp AS S,category,value FROM pivot_input) AS s PIVOT(SUM(value) FOR category IN([ſ])) AS p
+  expect: {error: true,contains: duplicate PIVOT output}
 cleanup:
 - sql: DROP VIEW IF EXISTS pivot_result
 - sql: DROP TABLE IF EXISTS pivot_names

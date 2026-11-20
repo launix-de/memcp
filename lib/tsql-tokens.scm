@@ -274,6 +274,7 @@ Their values preserve the grammar's declared spelling. */
 (define tsql_keyword_type_warning (tsql_keyword_parser "TYPE_WARNING"))
 (define tsql_keyword_uncommitted (tsql_keyword_parser "UNCOMMITTED"))
 (define tsql_keyword_union (tsql_keyword_parser "UNION"))
+(define tsql_keyword_unpivot (tsql_keyword_parser "UNPIVOT"))
 (define tsql_keyword_unique (tsql_keyword_parser "UNIQUE"))
 (define tsql_keyword_unknown (tsql_keyword_parser "UNKNOWN"))
 (define tsql_keyword_update (tsql_keyword_parser "UPDATE"))
