@@ -351,7 +351,9 @@ carries a generic default Collation field. */
 					"update_rule" (toUpper (fk "UpdateMode"))
 					"delete_rule" (toUpper (fk "DeleteMode"))
 					"table_name" tbl
-					"referenced_table_name" (fk "OtherTable"))))
+					"referenced_table_name" (fk "OtherTable")
+					"is_disabled" (expression_equal? (fk "Enabled") false)
+					"is_not_trusted" (expression_equal? (fk "Trusted") false))))
 )))
 	info_schema_fk_unique_name)))
 

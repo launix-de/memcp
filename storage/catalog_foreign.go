@@ -201,10 +201,11 @@ func (tx *TxContext) publicCatalogChanges() *publicCatalogChanges {
 	return tx.publicCatalog.Load()
 }
 
-func (tx *TxContext) stageCatalogForeign(child, parent *table, fk foreignKey, expected *foreignDeclarationExpectations) bool {
+func (tx *TxContext) stageCatalogForeign(child, parent *table, fk foreignKey, expected *foreignDeclarationExpectations, validateExisting bool) bool {
 	if tx == nil || tx.transactionState == nil {
 		panic("public foreign declaration requires an active native transaction")
 	}
+	fk.Untrusted = !validateExisting
 	finish := tx.beginCatalogConstruction(catalogEnforcementConstruction, child, parent)
 	defer func() { finish(); tx.retireUnacceptedPublicCatalogPhase() }()
 	if tx.State != TxActive || tx.decisionStarted {
@@ -230,7 +231,7 @@ func (tx *TxContext) stageCatalogForeign(child, parent *table, fk foreignKey, ex
 		kind = catalogForeignReplacementKind
 	}
 	return tx.stagePublicCatalogDeclaration(child.schema, kind, func(changes *publicCatalogChanges) bool {
-		return changes.stageForeign(tx, child, parent, fk, expected)
+		return changes.stageForeign(tx, child, parent, fk, expected, validateExisting)
 	})
 }
 
@@ -278,7 +279,7 @@ func (tx *TxContext) stagePublicCatalogDeclaration(db *database, kind catalogDec
 
 // The first call runs inside the native resource constructor; later callers
 // reuse precisely the same admitted stage after the existing factory completes.
-func (state *publicCatalogChanges) stageForeign(tx *TxContext, child, parent *table, fk foreignKey, expected *foreignDeclarationExpectations) bool {
+func (state *publicCatalogChanges) stageForeign(tx *TxContext, child, parent *table, fk foreignKey, expected *foreignDeclarationExpectations, validateExisting bool) bool {
 	state.mu.Lock()
 	defer state.mu.Unlock()
 	defer state.refreshMemoryLocked()
@@ -335,7 +336,9 @@ func (state *publicCatalogChanges) stageForeign(tx *TxContext, child, parent *ta
 	// Both writer leases remain owned through the native transaction decision.
 	// Existing rows and generated programs are inspected privately, outside the
 	// schema mutex; no trigger body runs and no relational row bag is retained.
-	validateExistingForeignRows(tx, child, fk, lookup)
+	if validateExisting {
+		validateExistingForeignRows(tx, child, fk, lookup)
+	}
 	programs := buildFKTriggers(db, child, parent, fk)
 	captureForeignProgramFootprints(programs)
 	reserved := state.reserveForeignPrograms(tx, programs)
@@ -381,7 +384,7 @@ func (state *publicCatalogChanges) stageForeign(tx *TxContext, child, parent *ta
 	if state.constraintStates == nil {
 		state.constraintStates = make(map[string]*catalogConstraintState)
 	}
-	state.constraintStates[fk.Id] = &catalogConstraintState{addition: amendment, enabled: true, trusted: true}
+	state.constraintStates[fk.Id] = &catalogConstraintState{addition: amendment, enabled: true, trusted: validateExisting}
 	state.constraintStatesHighWater = max(state.constraintStatesHighWater, len(state.constraintStates))
 	tx.catalogAmendments.Store(&history)
 	state.publishViews(history, views)
@@ -755,12 +758,13 @@ func appendConstraintMetadata(t *table, base *tableShowColumnsSnapshot, addition
 	}
 	rows := t.buildForeignConstraintMetadata(additions).Slice()
 	if version == 0 {
-		// These additions passed the staged historical proof. Only the private
-		// view describes its transient state: legacy native7 has no historical
-		// trust proof, and no persistent disabled-state format is introduced.
+		// Pending additions expose their actual validation state. Existing trusted
+		// public headers retain their historical compact metadata shape.
 		for i, row := range rows {
-			fields := append(row.Slice(), scm.NewString("Enabled"), scm.NewBool(true), scm.NewString("Trusted"), scm.NewBool(true))
-			rows[i] = scm.NewSlice(fields)
+			if foreignMetadataValue(row, "Trusted").IsNil() {
+				fields := append(row.Slice(), scm.NewString("Enabled"), scm.NewBool(true), scm.NewString("Trusted"), scm.NewBool(true))
+				rows[i] = scm.NewSlice(fields)
+			}
 		}
 	}
 	old := base.metadata.constraints.Slice()
@@ -1217,18 +1221,30 @@ type foreignDeclarationExpectations struct {
 	parent []foreignColumnExpectation
 }
 
-func decodeForeignExpectations(value scm.Scmer) *foreignDeclarationExpectations {
-	if !value.IsSlice() || len(value.Slice()) != 4 {
-		panic("foreign declaration options require both expected endpoint declarations")
+func decodeForeignOptions(value scm.Scmer) (*foreignDeclarationExpectations, bool) {
+	if !value.IsSlice() || len(value.Slice())%2 != 0 {
+		panic("foreign declaration options require key/value pairs")
 	}
+	validateExisting := true
 	result := &foreignDeclarationExpectations{}
 	seen := make(map[string]bool, 2)
 	options := value.Slice()
 	for i := 0; i < len(options); i += 2 {
-		if !options[i].IsString() || !options[i+1].IsSlice() {
+		if !options[i].IsString() {
 			panic("invalid foreign declaration options")
 		}
 		key := options[i].String()
+		if key == "validate_existing" {
+			if seen[key] || !options[i+1].IsBool() {
+				panic("invalid foreign historical-validation option")
+			}
+			seen[key] = true
+			validateExisting = options[i+1].Bool()
+			continue
+		}
+		if !options[i+1].IsSlice() {
+			panic("invalid foreign declaration options")
+		}
 		if (key != "expected_child" && key != "expected_parent") || seen[key] {
 			panic("invalid foreign declaration expected endpoint")
 		}
@@ -1258,7 +1274,13 @@ func decodeForeignExpectations(value scm.Scmer) *foreignDeclarationExpectations 
 			result.parent = facts
 		}
 	}
-	return result
+	if seen["expected_child"] != seen["expected_parent"] {
+		panic("foreign declaration options require both expected endpoint declarations")
+	}
+	if !seen["expected_child"] {
+		result = nil
+	}
+	return result, validateExisting
 }
 func (expected *foreignDeclarationExpectations) validate(child, parent *table, fk foreignKey) {
 	for endpoint, t := range []*table{child, parent} {

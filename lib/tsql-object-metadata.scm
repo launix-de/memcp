@@ -291,6 +291,8 @@ are inferred from acceleration indexes or registry slots. */
 	(list "name" "NVARCHAR" '(128) false) (list "object_id" "INT" '() false)
 	(list "parent_object_id" "INT" '() false) (list "schema_id" "INT" '() false)
 	(list "type" "CHAR" '(2) false) (list "type_desc" "NVARCHAR" '(60) false)))
+(define tsql_foreign_catalog_columns (append tsql_constraint_catalog_columns
+	(list "is_disabled" "BIT" '() false) (list "is_not_trusted" "BIT" '() false)))
 (define tsql_default_catalog_columns (append tsql_constraint_catalog_columns
 	(list "parent_column_id" "INT" '() false) (list "definition" "NVARCHAR" '(-1) false)))
 (define tsql_index_catalog_columns (list (list "name" "NVARCHAR" '(128) false)
@@ -309,7 +311,7 @@ https://learn.microsoft.com/sql/relational-databases/system-catalog-views/sys-tr
 		(list "database_principals" tsql_principal_catalog_columns)
 		(list "server_principals" tsql_principal_catalog_columns)
 		(list "database_role_members" tsql_role_member_catalog_columns)
-		(list "foreign_keys" tsql_constraint_catalog_columns)
+		(list "foreign_keys" tsql_foreign_catalog_columns)
 		/* The native owner exposes the inherited declaration facts. Physical
 		index ordinals and generated-name provenance are not fabricated.
 		https://learn.microsoft.com/sql/relational-databases/system-catalog-views/sys-key-constraints-transact-sql */
@@ -581,7 +583,7 @@ use the general profile. Neither profile caches metadata rows or authority. */
 				(lambda (row) (list (nth row 0) (nth row 3) (nth row 1)
 					(if (has? '("PK" "UQ") (nth row 1)) "K" (nth row 1)) 1 (nth row 4))))
 			(error "unsupported T-SQL object metadata source" kind))))))
-(define tsql_catalog_declaration_rows_factory (close_procedure (lambda (object_rows defaults triggers default_comment definition)
+(define tsql_catalog_declaration_rows_factory (close_procedure (lambda (object_rows defaults triggers default_comment definition metadata_rows constraint_id)
 	(lambda (database kind actor tx selection)
 		(if (has? '("objects" "lookup_objects" "sysobjects") kind) (object_rows database kind actor tx selection)
 			(equal? kind "defaults") (map (defaults database actor tx selection definition) (lambda (row) (append row database)))
@@ -597,11 +599,23 @@ use the general profile. Neither profile caches metadata rows or authority. */
 				(define requested (get_assoc (coalesceNil selection '()) "kinds" nil))
 				(define families (if (nil? requested) families
 					(filter families (lambda (family) (has? requested family)))))
+				/* One invocation-local index; never rescan all declarations for each
+				object row or retain state across consuming compilations. */
+				(define foreign_states (if (equal? kind "foreign_keys") (newsession) nil))
+				(if (equal? kind "foreign_keys")
+					(map (metadata_rows database "referential_constraints" tx selection) (lambda (row)
+						(foreign_states (constraint_id database (row "table_name") (row "constraint_name") "foreign" actor tx)
+							(list (row "is_disabled") (row "is_not_trusted"))))) nil)
 				(map (object_rows database "objects" actor tx
 					(set_assoc (coalesceNil selection '()) "kinds" families))
 					(lambda (row) (append (if (equal? kind "indexes")
 						(list (nth row 0) (nth row 4))
-						(list (nth row 0) (nth row 3) (nth row 4) (nth row 5) (nth row 1) (nth row 2))) database))))
+						(begin
+							(define fields (list (nth row 0) (nth row 3) (nth row 4) (nth row 5) (nth row 1) (nth row 2)))
+							(if (equal? kind "foreign_keys") (begin
+								(define state (foreign_states (nth row 3)))
+								(if (nil? state) (error "foreign declaration validation state is unavailable")
+									(append fields (car state) (cadr state)))) fields))) database))))
 			(error "unsupported T-SQL metadata source" kind))))))
 (define tsql_catalog_all_rows_factory (close_procedure (lambda (declarations columns)
 	(lambda (database kind actor tx selection)
@@ -659,7 +673,7 @@ use the general profile. Neither profile caches metadata rows or authority. */
 		(define tsql_catalog_object_tuples (__runtime_capture_31 info_schema_name_matches tsql_catalog_object_name_matches? tsql_catalog_metadata_rows sql_stored_view_catalog_rows tsql_catalog_public_native_row? tsql_catalog_relation_id tsql_catalog_kind_selected? tsql_catalog_constraint_id tsql_native_object_id tsql_schema_id_value tsql_catalog_default_tuples tsql_source_catalog_entries tsql_source_module_kind tsql_catalog_module_id tsql_catalog_trigger_tuples tsql_catalog_key_tuples definition_none))
 		(define tsql_catalog_lookup_object_tuples (__runtime_capture_32 tsql_catalog_object_tuples tsql_catalog_kind_selected? tsql_virtual_catalog_names tsql_catalog_object_name_matches? tsql_object_registry_id))
 		(define object_rows (__runtime_capture_33 tsql_catalog_object_tuples tsql_catalog_lookup_object_tuples))
-		(define declaration_rows (__runtime_capture_36 object_rows tsql_catalog_default_tuples tsql_catalog_trigger_tuples tsql_catalog_default_comment tsql_catalog_default_definition))
+		(define declaration_rows (__runtime_capture_36 object_rows tsql_catalog_default_tuples tsql_catalog_trigger_tuples tsql_catalog_default_comment tsql_catalog_default_definition tsql_catalog_metadata_rows tsql_catalog_constraint_id))
 		(define all_rows (__runtime_capture_34 declaration_rows tsql_catalog_column_tuples))
 		(define rows (__runtime_capture_35 tsql_metadata_visible? all_rows))
 		(if (nil? database)
@@ -703,7 +717,7 @@ use the general profile. Neither profile caches metadata rows or authority. */
 		(define tsql_catalog_default_definition __runtime_capture_35)
 		(define tsql_catalog_default_comment __runtime_capture_36)
 		(define object_rows (__runtime_capture_31 tsql_catalog_object_tuples tsql_catalog_lookup_object_tuples))
-		(define declaration_rows (__runtime_capture_34 object_rows tsql_catalog_default_tuples tsql_catalog_trigger_tuples tsql_catalog_default_comment tsql_catalog_default_definition))
+		(define declaration_rows (__runtime_capture_34 object_rows tsql_catalog_default_tuples tsql_catalog_trigger_tuples tsql_catalog_default_comment tsql_catalog_default_definition tsql_catalog_metadata_rows tsql_catalog_constraint_id))
 		(define rows (__runtime_capture_32 tsql_metadata_visible? declaration_rows))
 		(if (nil? database)
 			(merge (map (info_schema_selected_databases selection) (lambda (database) (rows database kind actor tx selection))))
@@ -737,7 +751,8 @@ use the general profile. Neither profile caches metadata rows or authority. */
 		(append tsql_trigger_catalog_columns (list "__database" "NVARCHAR" '(128) false)) '() selection)))
 (define tsql_catalog_constraints_query (lambda (database kind selection)
 	(tsql_catalog_runtime_query database kind
-		(append (if (equal? kind "indexes") tsql_index_catalog_columns tsql_constraint_catalog_columns)
+		(append (if (equal? kind "indexes") tsql_index_catalog_columns
+			(equal? kind "foreign_keys") tsql_foreign_catalog_columns tsql_constraint_catalog_columns)
 			(list "__database" "NVARCHAR" '(128) false)) '() selection)))
 (define tsql_catalog_columns_query (lambda (database include_system)
 	(tsql_catalog_runtime_query database (if include_system "all_columns" "columns")

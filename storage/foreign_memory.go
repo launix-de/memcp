@@ -3,7 +3,9 @@ SPDX-License-Identifier: GPL-3.0-or-later */
 
 package storage
 
+import "fmt"
 import "unsafe"
+import "strings"
 import "sync/atomic"
 import "encoding/json"
 import "github.com/launix-de/memcp/scm"
@@ -44,6 +46,19 @@ func (key *foreignKey) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	*key = ownForeignPayload(foreignKey(decoded))
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	for name, value := range fields {
+		if strings.EqualFold(name, "Untrusted") {
+			var state *bool
+			if err := json.Unmarshal(value, &state); err != nil || state == nil {
+				return fmt.Errorf("invalid native foreign validation state")
+			}
+			key.validationStatePresent = true
+		}
+	}
 	key.payloadFootprint += uint(len(key.Tbl1) + len(key.Tbl2))
 	for _, columns := range [][]string{key.Cols1, key.Cols2} {
 		for _, name := range columns {

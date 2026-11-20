@@ -525,14 +525,16 @@ const (
 )
 
 type foreignKey struct {
-	Id               string
-	Tbl1             string
-	Cols1            []string
-	Tbl2             string
-	Cols2            []string
-	Updatemode       foreignKeyMode
-	Deletemode       foreignKeyMode
-	payloadFootprint uint // native allocation ownership only; never part of semantic equality or JSON
+	Id                     string
+	Tbl1                   string
+	Cols1                  []string
+	Tbl2                   string
+	Cols2                  []string
+	Updatemode             foreignKeyMode
+	Deletemode             foreignKeyMode
+	Untrusted              bool `json:"Untrusted,omitempty"` // historical integrity has not been proven; write enforcement is unchanged
+	validationStatePresent bool // decoded field presence fences historical journal domains
+	payloadFootprint       uint // native allocation ownership only; never part of semantic equality or JSON
 }
 
 // hasDuplicateUniqueValues validates a proposed UNIQUE key against the current
@@ -2504,7 +2506,7 @@ func (t *table) buildForeignConstraintMetadata(foreignDeclarations []foreignKey)
 			role, other = "referencing", key.Tbl2
 			local, remote = key.Cols1, key.Cols2
 		}
-		foreign = append(foreign, scm.NewSlice([]scm.Scmer{
+		fields := []scm.Scmer{
 			scm.NewString("Id"), scm.NewString(key.Id),
 			scm.NewString("Role"), scm.NewString(role),
 			scm.NewString("LocalColumns"), showStringSlice(local),
@@ -2512,7 +2514,11 @@ func (t *table) buildForeignConstraintMetadata(foreignDeclarations []foreignKey)
 			scm.NewString("OtherColumns"), showStringSlice(remote),
 			scm.NewString("UpdateMode"), scm.NewString(showForeignKeyMode(key.Updatemode)),
 			scm.NewString("DeleteMode"), scm.NewString(showForeignKeyMode(key.Deletemode)),
-		}))
+		}
+		if key.Untrusted {
+			fields = append(fields, scm.NewString("Enabled"), scm.NewBool(true), scm.NewString("Trusted"), scm.NewBool(false))
+		}
+		foreign = append(foreign, scm.NewSlice(fields))
 	}
 	return scm.NewSlice(foreign)
 }

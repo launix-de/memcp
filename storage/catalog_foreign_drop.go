@@ -312,7 +312,7 @@ func validateCatalogForeignDrop(db *database, declaration catalogForeignDeclarat
 		matched := false
 		for _, current := range t.Foreign {
 			if current.Id == fk.Id && current.Tbl1 == fk.Tbl1 && current.Tbl2 == fk.Tbl2 &&
-				current.Updatemode == fk.Updatemode && current.Deletemode == fk.Deletemode &&
+				current.Updatemode == fk.Updatemode && current.Deletemode == fk.Deletemode && current.Untrusted == fk.Untrusted &&
 				slices.Equal(current.Cols1, fk.Cols1) && slices.Equal(current.Cols2, fk.Cols2) {
 				matched = true
 			}

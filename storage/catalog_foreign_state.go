@@ -14,7 +14,8 @@ import (
 // Only a not-yet-published addition can change state in this profile. Its
 // original endpoints remain leased and blocked for row mutation; unrelated
 // row participants do not invalidate that admission. Preparation still rejects
-// any final disabled/unvalidated state; no runtime program bypass is implied.
+// disabled CHECK/FK states. An explicitly unvalidated FK addition can remain
+// enabled/untrusted; its generated write enforcement never changes.
 type catalogConstraintState struct {
 	addition *catalogForeignAmendment
 	check    *catalogCheckAmendment
@@ -237,7 +238,7 @@ func replaceConstraintStateMetadata(base *tableShowColumnsSnapshot, updates map[
 
 func (changes *publicCatalogChanges) validateConstraintStatesLocked() error {
 	for name, state := range changes.constraintStates {
-		if !state.enabled || !state.trusted {
+		if !state.enabled || !state.trusted && (state.addition == nil || !state.addition.declaration.Foreign.Untrusted) {
 			kind := "foreign"
 			if state.check != nil {
 				kind = "check"

@@ -2968,8 +2968,9 @@ func Init(en scm.Env) {
 				panic("createforeignkey requires seven declarations, optional transaction and expected options")
 			}
 			var expected *foreignDeclarationExpectations
+			validateExisting := true
 			if len(a) == 9 {
-				expected = decodeForeignExpectations(a[8])
+				expected, validateExisting = decodeForeignOptions(a[8])
 			}
 
 			t1 := TableFromScmer(a[0])
@@ -2987,10 +2988,10 @@ func Init(en scm.Env) {
 			}
 			if currentTx != nil {
 				key := ownForeignPayload(foreignKey{Id: id, Tbl1: t1.Name, Cols1: cols1, Tbl2: t2.Name, Cols2: cols2, Updatemode: getForeignKeyMode(a[5]), Deletemode: getForeignKeyMode(a[6])})
-				return scm.NewBool(currentTx.stageCatalogForeign(t1, t2, key, expected))
+				return scm.NewBool(currentTx.stageCatalogForeign(t1, t2, key, expected, validateExisting))
 			}
-			if expected != nil {
-				panic("foreign expected declarations require their native transaction owner")
+			if len(a) == 9 {
+				panic("foreign declaration options require their native transaction owner")
 			}
 			if t1 == t2 {
 				panic("self foreign declaration requires an explicit native transaction")
@@ -3061,8 +3062,9 @@ func Init(en scm.Env) {
 				{Kind: "string", Label: "deletemode", Description: "restrict|cascade|set null"},
 				{Kind: "any", Label: "tx", Optional: true, Description: "explicit native transaction owner"},
 				{Kind: "list|assoc", Label: "options", Optional: true, Keys: map[string]*scm.TypeDescriptor{
-					"expected_child":  {Kind: "list", Description: "ordered six-field native column declaration preconditions"},
-					"expected_parent": {Kind: "list", Description: "ordered six-field native column declaration preconditions"},
+					"validate_existing": {Kind: "bool", Description: "validate historical rows before declaring trusted integrity; default true, requires a native transaction"},
+					"expected_child":    {Kind: "list", Description: "ordered six-field native column declaration preconditions"},
+					"expected_parent":   {Kind: "list", Description: "ordered six-field native column declaration preconditions"},
 				}},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
