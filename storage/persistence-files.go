@@ -141,6 +141,20 @@ func (s *FileStorage) WriteSchemaWithMode(jsonbytes []byte, durable bool) {
 	}
 }
 
+func (s *FileStorage) SyncNamespace() {
+	directory, err := os.Open(s.path)
+	if err != nil {
+		raisePersistenceFailure(s.BackendName(), s.path, "namespace.sync", err)
+	}
+	if err := directory.Sync(); err != nil {
+		directory.Close()
+		raisePersistenceFailure(s.BackendName(), s.path, "namespace.sync", err)
+	}
+	if err := directory.Close(); err != nil {
+		raisePersistenceFailure(s.BackendName(), s.path, "namespace.sync", err)
+	}
+}
+
 func (s *FileStorage) ReadColumn(shard string, column string) io.ReadCloser {
 	//f, err := os.C
 	f, err := os.Open(s.path + shard + "-" + ProcessColumnName(column))

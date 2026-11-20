@@ -508,6 +508,11 @@ func (db *database) commitCatalog(rows *catalogRows, live [catalogRelationCount]
 		}
 	}
 	state.forwards = root.Forwards
+	if durable {
+		// These files belong to the system backend; syncing the tenant's
+		// schema.json directory cannot make their new entries durable.
+		catalogBackendDatabase().persistence.SyncNamespace()
+	}
 	return root, state.generation
 }
 
