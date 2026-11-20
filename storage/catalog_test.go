@@ -478,7 +478,15 @@ func TestCatalogReplicaTablesIntroduceDataAuthority(t *testing.T) {
 	}
 	// A local safety copy contains declarations but no live ownership proof.
 	// Restoring it must not turn its previously unknown data UUIDs into rights.
-	backupOnly := db.newTable("backup_only", Safe)
+	var backupOnly *table
+	func() {
+		previous := replication.Swap(nil)
+		defer replication.Store(previous)
+		backupOnly = db.newTable("backup_only", Safe)
+	}()
+	if r.lookupCell(backupOnly.Shards[0].replicationResource()) != nil {
+		t.Fatal("backup fixture already registered data authority")
+	}
 	rows = db.catalogRowsLocked()
 	proposal = catalogRowsFromTable(backupOnly)
 	rows[catalogTables] = append(rows[catalogTables], proposal[catalogTables]...)
