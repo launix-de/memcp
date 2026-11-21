@@ -251,6 +251,7 @@ context gates because bare EXISTS also has a separate membership lowerer. */
 			(and
 				(not (stage_consumed_by_presence_stage? stages stage))
 				(stage_probe_dependencies_resolve_in_catalog? stages stage)
+				(scalar_first_probe_bindings_complete? stage probe_sources)
 				(if (empty_list? (range_stage_domains stage))
 					(stage_lookup_keys_resolve_in_sources? stage probe_sources default_alias)
 					/* Direct probes bind ranges from the current relational row too.
@@ -332,7 +333,7 @@ native group relation. Only immediate, actually catalogued producers qualify. */
 				/* A query-block probe already binds its full caller tuple. A
 				closed relational-input fact does not close its executable keys
 				or retained sources; their binding cannot be a cost alternative. */
-				(or (not (scalar_cardinality_probe_input_closed? stage))
+				(or (not (scalar_probe_input_closed? stage))
 					(or (or (scoped_program_probe_stage? stages stage)
 					(scalar_cardinality_has_bound_group_rows? stages stage))
 					(or (stage_direct_probe_cost_preferred_for_limit? stage limit_value planning_session)
@@ -1808,9 +1809,9 @@ outer joins. */
 				_ true))))))
 
 (define lower_group_stage_prepare_using (lambda (all_stages lookup_stages stage include_nested_prepares result_sink)
-	(if (and (scalar_cardinality_probe_contract? stage)
-		(not (scalar_cardinality_probe_input_closed? stage)))
-		(neumann_fail "build_queryplan" "residual scalar cardinality input requires caller-bound probing")
+	(if (and (or (scalar_cardinality_probe_contract? stage) (scalar_first_probe_contract? stage))
+		(not (scalar_probe_input_closed? stage)))
+		(neumann_fail "build_queryplan" "residual bounded scalar input requires caller-bound probing")
 		(scoped_relational_program_stage? stage)
 		true
 		(and (invocation_group_stage? lookup_stages stage) (not (equal? result_sink (quote boolean-recset))))
@@ -3176,7 +3177,7 @@ SQL column declarations remain on the source, independently of row values. */
 
 (define scalar_first_inline_only_stage? (lambda (stage)
 	(and
-		(scalar_first_physical_probe_stage? stage)
+		(scalar_first_probe_supported? stage)
 		(not (query_block? (gs_input stage))))))
 
 (define stages_consumed_by_sources_with_closure_using_graph (lambda (dependency_graph stages sources)
@@ -3253,7 +3254,7 @@ SQL column declarations remain on the source, independently of row values. */
 				(and
 					(not (scalar_first_inline_only_stage? stage))
 					(and
-						(not (scalar_first_physical_probe_stage? stage))
+						(not (scalar_first_probe_supported? stage))
 						/* A nested scalar producer belongs to its consuming block.
 						Only its own FROM reference admits a root preparation. */
 						(or

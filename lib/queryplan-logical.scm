@@ -2991,7 +2991,7 @@ keeps a missing row distinct from a matching row whose outer value is NULL. */
 			(or found (expr_refs_stage_output_alias? key)))
 			false))))
 
-(define scalar_first_probe_stage_with_accessing? (lambda (stage accessing_key)
+(define scalar_first_probe_stage_with_accessing? (lambda (stage accessing_key allow_residual)
 	(if (not (group_stage? stage))
 		false
 		(begin
@@ -3009,7 +3009,7 @@ keeps a missing row distinct from a matching row whose outer value is NULL. */
 				(and (equal? (qassoc_get facts (quote partition_limit) nil) 1)
 					(and (equal? (qassoc_get facts (quote on_overflow) nil) (quote ignore))
 						(and (or (not (empty_list? lookup_keys)) range_without_point_keys)
-							(and (empty_list? residual_accessing)
+							(and (or allow_residual (empty_list? residual_accessing))
 								/* Scope admission validates dependency resolution. Alias
 								spelling cannot determine whether a key is bindable. */
 								(and (or range_without_point_keys (equal? (count lookup_keys) (count (gs_keys stage))))
@@ -3024,11 +3024,16 @@ keeps a missing row distinct from a matching row whose outer value is NULL. */
 												(not (scalar_once_ordered_payload? (car (gs_aggregates stage)))))))))))))))))
 
 (define scalar_first_probe_stage? (lambda (stage)
-	(scalar_first_probe_stage_with_accessing? stage (quote btw2025_accessing_after_simple))))
+	(scalar_first_probe_stage_with_accessing? stage (quote btw2025_accessing_after_simple) false)))
 
 (define scalar_first_range_probe_stage? (lambda (stage)
 	(and (not (empty_list? (qassoc_get (gs_facts stage) (quote range-domains) '())))
-		(scalar_first_probe_stage_with_accessing? stage (quote range-accessing-after-simple)))))
+		(scalar_first_probe_stage_with_accessing? stage (quote range-accessing-after-simple) false))))
+
+/* Shape and closed-input admission are distinct. Physical lowering may bind
+the complete caller tuple before entering the same bounded native operator. */
+(define scalar_first_probe_contract? (lambda (stage)
+	(scalar_first_probe_stage_with_accessing? stage 'btw2025_accessing_after_simple true)))
 
 (define scalar_first_physical_probe_stage? (lambda (stage)
 	(or (scalar_first_probe_stage? stage) (scalar_first_range_probe_stage? stage))))
@@ -4424,7 +4429,13 @@ row producer publishes every real group; only the outer scalar stage owns
 		(define range_enabled (range_outer_context_preparable? outer_sources))
 		(define range_domains (if range_enabled
 			(qassoc_get analysis (quote range_domains) '()) '()))
-		(define lookup_pairs raw_lookup_pairs)
+		/* A range bound consumes a caller coordinate without replacing it
+		with an inner equality key. Keep that coordinate in the complete D
+		seen by enclosing dependent joins; the range point domain below
+		continues to exclude the consumed bound. */
+		(define residual_refs (qassoc_get analysis (quote residual_outer_refs) '()))
+		(define lookup_pairs (domain_correlation_pairs_with_outer_refs
+			raw_lookup_pairs residual_refs))
 		(define range_lookup_pairs (if (empty_list? range_domains)
 			raw_lookup_pairs candidate_range_lookup_pairs))
 		(define range_invariant_terms
@@ -4507,7 +4518,7 @@ row producer publishes every real group; only the outer scalar stage owns
 					(list (quote partition_limit) 1)
 					(list (quote result_max_rows_per_partition) 1)
 					(list (quote on_overflow) (quote ignore)))
-				(btw2025_stage_facts inner outer_sources lookup_pairs '() pending_info)))))
+				(btw2025_stage_facts inner outer_sources lookup_pairs residual_refs pending_info)))))
 		(define stage_alias (exists_stage_alias stage_id))
 		(define key_names (group_key_cols keys))
 		(define source (list
@@ -4515,7 +4526,8 @@ row producer publishes every real group; only the outer scalar stage owns
 			(group_stage_schema stage)
 			(make_stage_output_relation stage_id)
 			(stage_source_outer? outer_sources)
-			(make_exists_stage_join_condition stage_alias key_names lookup_keys false) nil))
+			(make_stage_binding_join_condition stage_alias key_names
+				(correlation_inner_keys inner_default lookup_pairs) lookup_keys) nil))
 		(define output_exprs (mapIndex values_for_stage (lambda (i value_for_stage) (begin
 			(define stored (scalar_once_value_expr stage_input stage_alias
 				(scalar_once_descriptor value_for_stage order_for_inner (qb_offset inner))))
