@@ -7,6 +7,9 @@ metadata:
   requires_tds: true
   description: Statement trigger amendments after actual rows retain the original transaction and affect only following events
 setup:
+- sql: DROP TABLE IF EXISTS late_trigger_cross_rewind
+- sql: DROP TABLE IF EXISTS late_trigger_cross_rewind_audit
+- sql: DROP TABLE IF EXISTS late_trigger_cross_rewind_prior
 - sql: DROP TABLE IF EXISTS late_trigger_insert
 - sql: DROP TABLE IF EXISTS late_trigger_insert_audit
 - sql: DROP TABLE IF EXISTS late_trigger_insert_prior
@@ -109,6 +112,11 @@ setup:
 - sql: CREATE TABLE late_trigger_insert_prior(id INT NOT NULL PRIMARY KEY,value INT NULL)
 - sql: INSERT late_trigger_insert_prior VALUES(1,10)
 - sql: CREATE TABLE late_trigger_insert_audit(id INT,old_value INT,new_value INT,phase INT)
+- sql: CREATE TABLE late_trigger_cross_rewind(id INT NOT NULL PRIMARY KEY,value INT NULL)
+- sql: INSERT late_trigger_cross_rewind VALUES(1,1)
+- sql: CREATE TABLE late_trigger_cross_rewind_prior(id INT NOT NULL PRIMARY KEY,value INT NULL)
+- sql: INSERT late_trigger_cross_rewind_prior VALUES(1,10)
+- sql: CREATE TABLE late_trigger_cross_rewind_audit(id INT,old_value INT,new_value INT,phase INT)
 cleanup:
 - sql: DROP TABLE IF EXISTS late_trigger_unrelated
 - sql: DROP TABLE IF EXISTS late_trigger_unrelated_audit
@@ -146,6 +154,9 @@ cleanup:
 - sql: DROP TABLE IF EXISTS late_trigger_insert
 - sql: DROP TABLE IF EXISTS late_trigger_insert_audit
 - sql: DROP TABLE IF EXISTS late_trigger_insert_prior
+- sql: DROP TABLE IF EXISTS late_trigger_cross_rewind
+- sql: DROP TABLE IF EXISTS late_trigger_cross_rewind_audit
+- sql: DROP TABLE IF EXISTS late_trigger_cross_rewind_prior
 test_cases:
 - name: An unrelated row prefix and a new AFTER program share the original decision
   tds:
@@ -757,6 +768,81 @@ test_cases:
       expect:
         rows: 1
         data: *id004
+- name: A rewound first trigger leaves a usable actual endpoint while another declaration survives
+  tds:
+    statements:
+    - connection: owner
+      sql: SET TRANSACTION ISOLATION LEVEL SERIALIZABLE
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: UPDATE late_trigger_cross_rewind_prior SET value=11 WHERE id=1
+    - connection: owner
+      sql: ALTER TABLE late_trigger_cross_rewind_prior ADD CONSTRAINT late_trigger_rewind_default DEFAULT(42) FOR value
+    - connection: owner
+      sql: SAVE TRANSACTION before_other_program
+    - connection: owner
+      sql: CREATE TRIGGER late_trigger_cross_rewind_program ON late_trigger_cross_rewind AFTER UPDATE AS INSERT late_trigger_cross_rewind_audit
+        SELECT i.id,d.value,i.value,10 FROM inserted i JOIN deleted d ON i.id=d.id
+    - connection: owner
+      sql: ROLLBACK TRANSACTION before_other_program
+    - connection: owner
+      sql: UPDATE late_trigger_cross_rewind SET value=2 WHERE id=1
+    - connection: owner
+      sql: SELECT id,value FROM late_trigger_cross_rewind
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 2
+    - connection: owner
+      sql: SELECT id,old_value,new_value,phase FROM late_trigger_cross_rewind_audit
+      expect:
+        rows: 0
+        data: []
+    - connection: owner
+      sql: SELECT OBJECT_ID(N'late_trigger_cross_rewind_program',N'TR') AS trigger_id
+      expect:
+        rows: 1
+        data:
+        - trigger_id: null
+    - connection: observer
+      sql: SELECT id,value FROM late_trigger_cross_rewind
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 1
+    - connection: owner
+      sql: UPDATE late_trigger_cross_rewind_prior SET value=DEFAULT WHERE id=1
+    - connection: owner
+      sql: SELECT id,value FROM late_trigger_cross_rewind_prior
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 42
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT id,value FROM late_trigger_cross_rewind
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 2
+    - connection: observer
+      sql: SELECT id,value FROM late_trigger_cross_rewind_prior
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 42
+    - connection: observer
+      sql: SELECT id,old_value,new_value,phase FROM late_trigger_cross_rewind_audit
+      expect:
+        rows: 0
+        data: []
 - name: Read committed row prefixes retain the same later trigger semantics
   tds:
     statements:
