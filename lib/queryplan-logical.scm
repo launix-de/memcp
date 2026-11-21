@@ -925,6 +925,9 @@ late frontend expansion has not attached a native column declaration packet. */
 (define source_invocation_lifetime? (lambda (src)
 	(or (information_schema_source? (source_schema src) (source_relation src))
 		(table_function_relation? (source_relation src))
+		/* Unpublished generations require the current transaction's rows.
+		They cannot seed maintained, transactionless computed definitions. */
+		(equal? (get_assoc (coalesceNil (source_declarations src) '()) "visibility" nil) "transaction")
 		(equal? (get_assoc (coalesceNil (source_declarations src) '()) "lifetime" nil) "invocation"))))
 
 /* Frontends may preserve a declared SQL object name through view expansion.
@@ -992,7 +995,8 @@ therefore return through ordinary recompilation and validation. */
 			(information_schema_column_catalog database name) '()) sql_column_declaration)
 			"constraints" '("Unique" () "ForeignKeys" ()))))
 	(and (expression_equal? (expected "columns") (actual "columns"))
-		(expression_equal? (expected "constraints") (actual "constraints"))))))
+		(expression_equal? (expected "constraints") (actual "constraints"))
+		(expression_equal? (expected "visibility") (actual "visibility"))))))
 (define sql_relation_declarations_match? (lambda (database name tx expected)
 	(and (sql_relation_local_declarations_match? database name tx expected)
 		(reduce (coalesceNil (expected "references") '()) (lambda (same reference)
