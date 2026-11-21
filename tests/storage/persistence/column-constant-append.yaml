@@ -191,10 +191,10 @@ test_cases:
 - name: Complete rebuilt values do not depend on a still-declared default
   sql: SELECT id,value,amount FROM constant_append_rows ORDER BY id
   expect: {rows: 7,data: [{id: 1,value: 12,amount: 0},{id: 2,value: 22,amount: 7},{id: 3,value: 33,amount: 0},{id: 4,value: 44,amount: 0},{id: 5,value: 55,amount: 0},{id: 14,value: 144,amount: 9},{id: 24,value: 244,amount: 12}]}
-- name: PostgreSQL append preserves prior DML and the original SQL transaction
+- name: PostgreSQL ACID append preserves prior DML and the original transaction
   syntax: postgresql
   steps:
-  - {session_id: constant_append_pg_owner, sql: BEGIN}
+  - {session_id: constant_append_pg_owner, sql: START ACID TRANSACTION}
   - {session_id: constant_append_pg_owner, sql: 'UPDATE constant_append_pg SET value=91 WHERE id=9'}
   - {session_id: constant_append_pg_owner, sql: 'ALTER TABLE constant_append_pg ADD COLUMN flag INTEGER NOT NULL DEFAULT 4'}
   - {session_id: constant_append_pg_owner, sql: COMMIT}
