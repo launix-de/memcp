@@ -173,28 +173,67 @@ test_cases:
       (list rejected own (nil? (show target "column" "pending" false nil))
         (scan nil target '() '() '() (lambda () true) '("value") + 0 +)))
   expect: {result: [true,55,true,55]}
+# Keep this historical case ID. The valid literal-default constructor moved to
+# the positive complete-value case below; it is no longer a rejection oracle.
 - name: Native constructor rejects defaults NOT NULL and retired names before effects
   scm: |
     (begin
-      (define rejected (map (list '("null" false) '("null" true "default" 3))
-        (lambda (options) (begin
-          (define s (newsession)) (s "username" "root") (tx_begin s)
-          (define tx (s "__memcp_tx"))
-          (define target (table "memcp-tests" false "nullable_append_guard" false tx))
-          (define no (try (lambda () (begin
-            (createcolumn target "rejected" "INT" '() options nil nil tx) false))
-            (lambda (_failure) true)))
-          (tx_rollback s)
-          (and no (nil? (show target "column" "rejected" false nil)))))))
       (define s (newsession)) (s "username" "root") (tx_begin s)
       (define tx (s "__memcp_tx"))
-      (define target (table "memcp-tests" false "nullable_append_retired" false tx))
-      (define retired (try (lambda () (begin
-        (createcolumn target "retired" "INT" '() '("null" true) nil nil tx) false))
+      (define target (table "memcp-tests" false "nullable_append_guard" false tx))
+      (define missing_default (try (lambda () (begin
+        (createcolumn target "rejected" "INT" '() '("null" false) nil nil tx) false))
         (lambda (_failure) true)))
       (tx_rollback s)
-      (list rejected retired (scan nil target '() '() '() (lambda () true) '("id") + 0 +)))
-  expect: {result: [[true,true],true,6]}
+      (define absent (nil? (show target "column" "rejected" false nil)))
+      (define retired_owner (newsession)) (retired_owner "username" "root") (tx_begin retired_owner)
+      (define retired_tx (retired_owner "__memcp_tx"))
+      (define retired_target (table "memcp-tests" false "nullable_append_retired" false retired_tx))
+      (define retired (try (lambda () (begin
+        (createcolumn retired_target "retired" "INT" '() '("null" true) nil nil retired_tx) false))
+        (lambda (_failure) true)))
+      (tx_rollback retired_owner)
+      (list (and missing_default absent) retired
+        (scan nil retired_target '() '() '() (lambda () true) '("id") + 0 +)))
+  expect: {result: [true,true,6]}
+- name: A native literal default appends historical values privately and rollback removes the declaration
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (define target (table "memcp-tests" false "nullable_append_guard" false tx))
+      (define public_rows (lambda ()
+        (scan nil target '() '() '() (lambda () true) '("id" "value")
+          (lambda (rows id value) (cons (list id value) rows)) '() merge)))
+      (try (lambda () (begin
+        (createcolumn target "literal_default" "INT" '() '("null" true "default" 3) nil nil tx)
+        (define own (scan tx target '() '() '() (lambda () true) '("id" "value" "literal_default")
+          (lambda (rows id value initial) (cons (list id value initial) rows)) '() merge))
+        (define hidden (nil? (show target "column" "literal_default" false nil)))
+        (define observed (public_rows))
+        (tx_rollback owner)
+        (list own hidden observed (nil? (show target "column" "literal_default" false nil)) (public_rows))))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect: {result: [[[5,55,3]],true,[[5,55]],true,[[5,55]]]}
+- name: A callable default is rejected as executable data before append publication
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (define target (table "memcp-tests" false "nullable_append_guard" false tx))
+      (define state (newsession)) (state "called" false)
+      (define rejected (try (lambda () (begin
+        (createcolumn target "callable_default" "INT" '()
+          (list "null" true "default" (lambda () (begin (state "called" true) 3))) nil nil tx)
+        false)) (lambda (failure)
+        (regexp_test (string (failure_value failure)) "column property values must be scalars"))))
+      (define own_hidden (nil? (show target "column" "callable_default" false tx)))
+      (tx_rollback owner)
+      (list rejected (state "called") own_hidden
+        (nil? (show target "column" "callable_default" false nil))
+        (scan nil target '() '() '() (lambda () true) '("id" "value")
+          (lambda (rows id value) (cons (list id value) rows)) '() merge)))
+  expect: {result: [true,false,true,true,[[5,55]]]}
 - name: A checked key-drop grant cannot bypass the pending append write veto
   scm: |
     (begin
