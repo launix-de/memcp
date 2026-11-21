@@ -156,6 +156,25 @@ test_cases:
     - connection: owner
       sql: SELECT OBJECT_ID('dbo.inline_private_inputs','U') AS table_id
       expect: {rows: 1,data: [{table_id: null}]}
+- name: Reusing the inline source binds a new private generation and its exact text contract
+  tds:
+    statements:
+    - {connection: owner,sql: BEGIN TRANSACTION}
+    - {connection: owner,sql: 'CREATE TABLE inline_private_inputs(id INT PRIMARY KEY,amount NVARCHAR(8) NULL)'}
+    - {connection: owner,sql: "INSERT inline_private_inputs VALUES(3,N'A '),(4,NULL)"}
+    - connection: owner
+      sql: SELECT id,amount FROM dbo.inline_private(3) ORDER BY id
+      expect:
+        rows: 2
+        data: [{id: 3,amount: 'A '},{id: 4,amount: null}]
+        column_types: [{name: id,type: INT},{name: amount,type: NVARCHAR,length: 8}]
+    - connection: observer
+      sql: SELECT OBJECT_ID('dbo.inline_private_inputs','U') AS table_id
+      expect: {rows: 1,data: [{table_id: null}]}
+    - {connection: owner,sql: ROLLBACK TRANSACTION}
+    - connection: owner
+      sql: SELECT OBJECT_ID('dbo.inline_private_inputs','U') AS table_id
+      expect: {rows: 1,data: [{table_id: null}]}
 - name: Committed inline declarations survive restart
   action: restart
 - name: Restored CTE and DEFAULT declarations retain exact row and wire contracts

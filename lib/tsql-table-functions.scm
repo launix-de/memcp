@@ -125,19 +125,27 @@ source alias cannot capture an argument owned by the caller's APPLY scope. */
 			(tsql_scalar_function_convert (tsql_scalar_function_default_info parameter) contract) true)
 		(list (car parameter) contract)))))
 	(define ansi (coalesceNil (context "__tsql_ansi_nulls") true))
-	(define query (parse_tsql database source nil
+	/* Validate syntax here, but do not retain descriptors inferred without the
+	consuming transaction. In particular, CTE exports belong to that input. */
+	(define syntax (parse_tsql database source nil
 		(tsql_relational_query_scope (tsql_ansi_planning_scope nil ansi) contracts quoted '()) nil))
+	(if (has? '(query-block union-block) (logical_op syntax)) true
+		(error "inline table function requires a returned query"))
 	(list "identity" (list database (context "name")) "database" database
-		"parameters" parameters "ansi_nulls" ansi "query" query))))
+		"parameters" parameters "ansi_nulls" ansi "contracts" contracts "quoted" quoted "source" source))))
 (define tsql_inline_table_function_expand (lambda (recipe arguments alias policy planning tx) (begin
 	(define planning (tsql_ansi_planning_scope planning (recipe "ansi_nulls")))
 	(define planning (tsql_scalar_function_binding_scope planning (recipe "identity")))
 	(define parameters (recipe "parameters"))
+	/* Parsing publishes CTE/type exports as well as syntax. Bind those once to
+	this actual consumer before inserting any caller-owned argument expression. */
+	(define query (parse_tsql (recipe "database") (recipe "source") policy
+		(tsql_relational_query_scope planning (recipe "contracts") (recipe "quoted") '()) tx))
 	/* Bind the function's own names before inserting caller expressions.
 	No argument is evaluated while expanding or describing its query. */
 	(define query (tsql_describe_query
 		(tsql_expand_view_functions
-			(sql_expand_views (recipe "query") policy planning tx) policy planning tx)
+			(sql_expand_views query policy planning tx) policy planning tx)
 		policy planning tx))
 	(define projection (merge (mapIndex arguments (lambda (index argument) (begin
 		(define target (tsql_scalar_function_declaration (cadr (nth parameters index))))
