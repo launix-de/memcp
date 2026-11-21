@@ -38,7 +38,7 @@ func assertInitializedColumn(t *testing.T, tbl *table, column string, value scm.
 
 func TestAddedDefaultOverlappingInsertAndRebuild(t *testing.T) {
 	tbl, persistence := createDurabilityTestTable(t, "taddeddefaultconcurrent", 50)
-	if result := RebuildTable(tbl, true, false); strings.Contains(result, "errors:") {
+	if result := RebuildTable(tbl, true, false, nil); result.err != nil {
 		t.Fatal(result)
 	}
 	started := make(chan struct{})
@@ -56,7 +56,7 @@ func TestAddedDefaultOverlappingInsertAndRebuild(t *testing.T) {
 		t.Fatalf("overlapping INSERT failed: %v", failure)
 	}
 	assertInitializedColumn(t, tbl, "flag", scm.NewInt(7), 100)
-	if result := RebuildTable(tbl, true, false); strings.Contains(result, "errors:") {
+	if result := RebuildTable(tbl, true, false, nil); result.err != nil {
 		t.Fatal(result)
 	}
 	assertInitializedColumn(t, reloadTableFromPersistence(t, "taddeddefaultconcurrent", persistence), "flag", scm.NewInt(7), 100)
@@ -200,8 +200,8 @@ func TestAddedDefaultWaitsForExistingRebuildPublication(t *testing.T) {
 		release:           make(chan struct{}),
 	}
 	tbl.schema.persistence = blocking
-	rebuilt := make(chan string, 1)
-	go func() { rebuilt <- RebuildTable(tbl, true, false) }()
+	rebuilt := make(chan tableRebuildResult, 1)
+	go func() { rebuilt <- RebuildTable(tbl, true, false, nil) }()
 	<-blocking.entered
 	added := make(chan any, 1)
 	go func() {
@@ -216,7 +216,7 @@ func TestAddedDefaultWaitsForExistingRebuildPublication(t *testing.T) {
 	case <-time.After(20 * time.Millisecond):
 	}
 	close(blocking.release)
-	if result := <-rebuilt; strings.Contains(result, "errors:") {
+	if result := <-rebuilt; result.err != nil {
 		t.Fatal(result)
 	}
 	select {
@@ -385,7 +385,7 @@ func TestAddedDefaultSchemaDropsRetiredRecoveryExtents(t *testing.T) {
 	if count := strings.Count(string(encoded), value); count != 2 {
 		t.Fatalf("serialized payload count = %d, want 2", count)
 	}
-	if result := RebuildTable(tbl, true, false); strings.Contains(result, "errors:") {
+	if result := RebuildTable(tbl, true, false, nil); result.err != nil {
 		t.Fatal(result)
 	}
 	encoded, err = json.Marshal(tbl)
@@ -400,7 +400,7 @@ func TestAddedDefaultSchemaDropsRetiredRecoveryExtents(t *testing.T) {
 
 func TestAddedNullableFreshColumnKeepsSparseColdShard(t *testing.T) {
 	tbl, persistence := createDurabilityTestTable(t, "taddednullablecold", 2)
-	if result := RebuildTable(tbl, true, false); strings.Contains(result, "errors:") {
+	if result := RebuildTable(tbl, true, false, nil); result.err != nil {
 		t.Fatal(result)
 	}
 	db := newDatabase()
@@ -453,7 +453,7 @@ func TestAddedNullableFreshColumnKeepsExistingDeltaRows(t *testing.T) {
 func TestAddedNullableRetiredNameDoesNotRestoreOldValues(t *testing.T) {
 	tbl, persistence := createDurabilityTestTable(t, "taddednullablereused", 2)
 	tbl.CreateColumn("reused", "INT", nil, []scm.Scmer{scm.NewString("default"), scm.NewInt(8)})
-	if result := RebuildTable(tbl, true, false); strings.Contains(result, "errors:") {
+	if result := RebuildTable(tbl, true, false, nil); result.err != nil {
 		t.Fatal(result)
 	}
 	tbl.DropColumn("reused")

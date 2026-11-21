@@ -1050,9 +1050,9 @@ func TestReplicationRestartRestoresUUIDEdgesWithoutRights(t *testing.T) {
 	original := tbl.ActiveShards()[0]
 	r.declareShard(original, r.id, true)
 	from := r.shardResource(original)
-	RebuildTable(tbl, true, false)
+	RebuildTable(tbl, true, false, nil)
 	middle := r.shardResource(tbl.ActiveShards()[0])
-	RebuildTable(tbl, true, false)
+	RebuildTable(tbl, true, false, nil)
 	current := r.shardResource(tbl.ActiveShards()[0])
 	data, err := json.Marshal(tbl)
 	if err != nil {

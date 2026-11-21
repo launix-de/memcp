@@ -73,7 +73,7 @@ func newBatchAcceptBenchmarkFixture(b *testing.B) *batchAcceptBenchmarkFixture {
 			scm.NewInt(int64(i % batchAcceptBenchmarkACLRows)),
 		}
 	})
-	RebuildTable(documents, true, false)
+	RebuildTable(documents, true, false, nil)
 
 	files, _ := CreateTable(database, "files", Memory, true)
 	files.CreateColumn("id", "INT", nil, nil)
@@ -81,7 +81,7 @@ func newBatchAcceptBenchmarkFixture(b *testing.B) *batchAcceptBenchmarkFixture {
 	insertBatchAcceptBenchmarkRows(files, []string{"id", "bucket"}, batchAcceptBenchmarkACLRows, func(i int) []scm.Scmer {
 		return []scm.Scmer{scm.NewInt(int64(i)), scm.NewInt(int64(i % 100))}
 	})
-	RebuildTable(files, true, false)
+	RebuildTable(files, true, false, nil)
 
 	_, ascending := integerOrder(false)
 	fixture := &batchAcceptBenchmarkFixture{

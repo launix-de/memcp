@@ -6956,6 +6956,17 @@ that context explicitly; stored views refuse this scalar before publication. */
 					target_database name (cons (quote list) (map columns tsql_identity_native_column))
 					(tsql_identity_table_options columns) (if ifnotexists true false) (quote tx) (quote session)))
 				(tsql_declaration_formula create)))))))
+	(define tsql_rebuild_table (parser '(
+		tsql_keyword_alter tsql_keyword_table
+		(? (define schema2 tsql_schema_identifier)) (define name tsql_identifier)
+		tsql_keyword_rebuild (? tsql_keyword_partition "=" tsql_keyword_all)
+	) (lambda () (begin
+			(define database (tsql_temporary_database (tsql_qualifier_database schema2 schema frontend_options) name frontend_options tx))
+			(if policy (policy database name true) true)
+			(require_action database name "ALTER")
+			(define name (tsql_table_name database name planning_session tx))
+			(if compile_only (tsql_command_binding 'rebuild-table (list database name) '())
+				(list 'tsql_rebuild_relation database name 'tx))))))
 	(define tsql_alter_table (parser '(
 		tsql_keyword_alter tsql_keyword_table
 		(? (define schema2 tsql_schema_identifier)) (define name tsql_identifier)
@@ -7171,7 +7182,7 @@ that context explicitly; stored views refuse this scalar before publication. */
 					(build_queryplan_term (tsql_expand_select_query query)
 						planning_session tx)) (settings "ExplainWidth")))))))
 		tsql_insert_bulk tsql_insert_into tsql_insert_default tsql_insert_select tsql_update tsql_delete tsql_truncate
-		tsql_create_view tsql_create_table tsql_alter_table tsql_create_index tsql_alter_index tsql_drop_index
+		tsql_create_view tsql_create_table tsql_rebuild_table tsql_alter_table tsql_create_index tsql_alter_index tsql_drop_index
 		(parser '((define enabled (or (parser tsql_keyword_enable true) (parser tsql_keyword_disable false)))
 			tsql_keyword_trigger
 			(define targets (or (parser tsql_keyword_all nil)

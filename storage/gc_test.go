@@ -588,7 +588,7 @@ func TestBlobManifestSurvivesUnchangedColdRebuild(t *testing.T) {
 	LoadDatabases()
 	db := GetDatabase("gcdb")
 	cold := db.GetTable("docs")
-	RebuildTable(cold, false, false)
+	RebuildTable(cold, false, false, nil)
 	after, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
@@ -640,7 +640,7 @@ func TestBlobUndercountRetainsCommittedOwners(t *testing.T) {
 				tbl.Insert([]string{"id", "content"}, [][]scm.Scmer{{scm.NewInt(4), scm.NewString(payloads[0])}}, nil, scm.NewNil(), false, nil)
 				result := Rebuild(true, true)
 				db.persistence = persistence
-				if !strings.Contains(result, "schema publication failure") {
+				if result.err == nil || !strings.Contains(result.err.Error(), "schema publication failure") {
 					t.Fatalf("missing injected failure: %s", result)
 				}
 			}

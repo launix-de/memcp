@@ -45,7 +45,7 @@ func BenchmarkScanFamilyFixedCosts(b *testing.B) {
 	}
 	recSetInputTable := benchScanTable(b, "family_recset_input")
 	recSetInputTable.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(1)}}, nil, scm.NewNil(), false, nil)
-	RebuildTable(recSetInputTable, true, false)
+	RebuildTable(recSetInputTable, true, false, nil)
 	recSetInput := recSetInputTable.scanRecSet(nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, nil, trueFn)
 	identityRecSet := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[0] })
 

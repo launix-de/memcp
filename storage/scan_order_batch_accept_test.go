@@ -173,7 +173,7 @@ func TestScanOrderRecSetSelectsExactWindow(t *testing.T) {
 // must enter the merge heap in the same order as the serial scan.
 func TestScanOrderRecSetParallelRunsPreserveTiesAndWindow(t *testing.T) {
 	table := setupBatchAcceptTable(t, "torderrecsetparallel", 90)
-	RebuildTable(table, true, false)
+	RebuildTable(table, true, false, nil)
 	if !table.beginManualRepartition() {
 		t.Fatal("manual repartition was not claimed")
 	}
@@ -229,7 +229,7 @@ func TestScanOrderBatchAcceptGreedyWithoutOrder(t *testing.T) {
 
 func TestScanOrderBatchAcceptMixedOrderAcrossShards(t *testing.T) {
 	table := setupBatchAcceptTable(t, "tbatchacceptshards", 30)
-	RebuildTable(table, true, false)
+	RebuildTable(table, true, false, nil)
 	if !table.beginManualRepartition() {
 		t.Fatal("manual repartition was not claimed")
 	}
@@ -252,7 +252,7 @@ func TestScanOrderBatchAcceptMixedOrderAcrossShards(t *testing.T) {
 
 func TestCollectOrderedCandidateBatchPrunesRangePartitions(t *testing.T) {
 	table := setupBatchAcceptTable(t, "tbatchacceptpartitionorder", 30)
-	RebuildTable(table, true, false)
+	RebuildTable(table, true, false, nil)
 	if !table.beginManualRepartition() {
 		t.Fatal("manual repartition was not claimed")
 	}

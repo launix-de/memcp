@@ -426,7 +426,7 @@ func makeRemoteScanTask(t *testing.T, shard remoteScanShard) remoteScanTask {
 }
 func TestRemoteScanRPCExecutesReductionWithNativeExtent(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "tremotescanrpc", 4)
-	RebuildTable(tbl, true, false)
+	RebuildTable(tbl, true, false, nil)
 	peer, _, _ := setupRemoteScanConnection(t)
 	var parts remoteScanDescription
 	if err := peer.scanService.control(context.Background(), peer, "scan.describe", remoteScanDescribe{scanWireVersion, tbl.schema.Name, tbl.Name}, &parts, true); err != nil {
@@ -737,7 +737,7 @@ func TestRemoteScanPartialStripsParserLocationsBeforeChoosingCodec(t *testing.T)
 
 func TestRemoteScanRetainsUUIDAcrossRebuild(t *testing.T) {
 	table, _ := createDurabilityTestTable(t, "t_remote_uuid_rebuild", 4)
-	RebuildTable(table, true, false)
+	RebuildTable(table, true, false, nil)
 	r := replicaRecoveryFixture()
 	previous := replication.Swap(r)
 	defer replication.Store(previous)
@@ -751,7 +751,7 @@ func TestRemoteScanRetainsUUIDAcrossRebuild(t *testing.T) {
 		t.Fatal(err)
 	}
 	table.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(1000), scm.NewString("after-horizon")}}, nil, scm.NewNil(), false, nil)
-	RebuildTable(table, true, false)
+	RebuildTable(table, true, false, nil)
 	current := table.ActiveShards()[0]
 	if held.uuid == current.uuid {
 		t.Fatal("fixture did not rebuild")
@@ -802,7 +802,7 @@ func TestProcedureWireNestedScanContextRebindSkipsQuotedData(t *testing.T) {
 
 func TestRemoteScanNativeExistsAndBatch(t *testing.T) {
 	table, _ := createDurabilityTestTable(t, "t_remote_operator_contract", 4)
-	RebuildTable(table, true, false)
+	RebuildTable(table, true, false, nil)
 	peer, _, _ := setupRemoteScanConnection(t)
 	var parts remoteScanDescription
 	if err := peer.scanService.control(context.Background(), peer, "scan.describe", remoteScanDescribe{scanWireVersion, table.schema.Name, table.Name}, &parts, true); err != nil {
@@ -896,7 +896,7 @@ func TestRemoteScanComputedAndBatchBoundaryRoundTrip(t *testing.T) {
 
 func TestRemoteScanNativeLookupKinds(t *testing.T) {
 	table, _ := createDurabilityTestTable(t, "t_remote_lookup_contract", 4)
-	RebuildTable(table, true, false)
+	RebuildTable(table, true, false, nil)
 	peer, _, _ := setupRemoteScanConnection(t)
 	var parts remoteScanDescription
 	if err := peer.scanService.control(context.Background(), peer, "scan.describe", remoteScanDescribe{scanWireVersion, table.schema.Name, table.Name}, &parts, true); err != nil {
@@ -947,7 +947,7 @@ func TestRemoteScanNativeLookupKinds(t *testing.T) {
 
 func TestRemoteAdmissionWhileLoadingColdExtent(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "t_admission_cold_extent", 4)
-	RebuildTable(tbl, true, false)
+	RebuildTable(tbl, true, false, nil)
 	encoded, err := json.Marshal(tbl.ActiveShards()[0])
 	if err != nil {
 		t.Fatal(err)
@@ -1119,7 +1119,7 @@ func TestRemoteUniqueChannelRetainsGuardThroughUpdateAndFinish(t *testing.T) {
 // execute only on selected rows; the worker releases its payload before paging.
 func TestRemoteScanOrderedRunPagesAndNativeExtent(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "tremoteorderedrun", 700)
-	RebuildTable(tbl, true, false)
+	RebuildTable(tbl, true, false, nil)
 	source := tbl.ActiveShards()[0]
 	peer, _, _ := setupRemoteScanConnection(t)
 	var parts remoteScanDescription
@@ -1404,7 +1404,7 @@ func TestRemoteScanReconnectRejectsOldOperationIdentity(t *testing.T) {
 
 func TestRemoteScanRoutesForwardedUUIDWithoutHistoricalPayload(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "t_remote_forwarded_uuid", 4)
-	RebuildTable(tbl, true, false)
+	RebuildTable(tbl, true, false, nil)
 	r := replicaRecoveryFixture()
 	previous := replication.Swap(r)
 	defer replication.Store(previous)
@@ -1433,7 +1433,7 @@ func TestRemoteScanResolvesNativeShardBeforeFirstPayloadPublication(t *testing.T
 	for _, forwarded := range []bool{false, true} {
 		t.Run(fmt.Sprint(forwarded), func(t *testing.T) {
 			tbl, _ := createDurabilityTestTable(t, "t_remote_native_publication", 4)
-			RebuildTable(tbl, true, false)
+			RebuildTable(tbl, true, false, nil)
 			r := replicaRecoveryFixture()
 			previous := replication.Swap(r)
 			defer replication.Store(previous)

@@ -5,7 +5,6 @@ SPDX-License-Identifier: GPL-3.0-or-later
 package storage
 
 import "testing"
-import "strings"
 import "github.com/launix-de/memcp/scm"
 
 func TestUUIDBinaryDefaultSurvivesWALAndRebuild(t *testing.T) {
@@ -32,7 +31,7 @@ func TestUUIDBinaryDefaultSurvivesWALAndRebuild(t *testing.T) {
 			}
 			tbl.Insert(cols, rows, nil, scm.NewNil(), false, nil)
 			if rebuilt {
-				if result := RebuildTable(tbl, true, false); strings.Contains(result, "errors:") {
+				if result := RebuildTable(tbl, true, false, nil); result.err != nil {
 					t.Fatal(result)
 				}
 			}

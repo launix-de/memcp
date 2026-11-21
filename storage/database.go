@@ -598,10 +598,16 @@ func Rebuild(all bool, repartition bool) string {
 	return rebuildDatabases(all, repartition, false)
 }
 
+type tableRebuildResult struct {
+	duration string
+	complete bool
+	err      error
+}
+
 // RebuildTable compacts only the table referenced by tbl. It uses the same
 // publication, schema-save and deferred old-shard cleanup path as a global
 // rebuild without touching unrelated tables or databases.
-func RebuildTable(tbl *table, all bool, repartition bool) string {
+func RebuildTable(tbl *table, all bool, repartition bool, tx *TxContext) tableRebuildResult {
 	start := time.Now()
 	if tbl != nil && tbl.schema != nil && !tbl.committedAt(tbl.schema.catalogView().version) {
 		panic("unpublished native table cannot be rebuilt")
@@ -609,8 +615,31 @@ func RebuildTable(tbl *table, all bool, repartition bool) string {
 	if tbl == nil || tbl.schema == nil || tbl.schema.tables.Get(tbl.Name) != tbl {
 		panic("cannot rebuild a stale table handle")
 	}
-
-	tbl.schema.persistenceLifecycle.RLock()
+	tbl.requireCatalogDataVisibility(tx)
+	// A declaration may retain this table's physical-layout owner until the
+	// original decision. Do not wait for a DDL owner held by this same caller.
+	if tx != nil {
+		if tx.transactionState == nil {
+			panic("table rebuild requires an actual native transaction")
+		}
+		// A DROP's lifecycle resource survives savepoint rewind. This bounded
+		// maintenance profile does not borrow that resource or read-lock it twice.
+		scope := tx.resourceScope()
+		scope.mu.Lock()
+		retainedLifecycle := scope.entries[tableDropLifecycleResourceKey] != nil
+		scope.mu.Unlock()
+		if retainedLifecycle || tx.retainedColumnDDL(tbl) {
+			return tableRebuildResult{err: fmt.Errorf("rebuild cannot consume pending physical declaration ownership")}
+		}
+		// A concurrent same-owner constructor may acquire its lifecycle after
+		// the check above. Fail before waiting behind a lifecycle writer instead
+		// of recursively waiting on that original transaction's read capability.
+		if !tbl.schema.persistenceLifecycle.TryRLock() {
+			return tableRebuildResult{err: fmt.Errorf("table rebuild storage is busy; retry maintenance")}
+		}
+	} else {
+		tbl.schema.persistenceLifecycle.RLock()
+	}
 	defer tbl.schema.persistenceLifecycle.RUnlock()
 	result := tbl.schema.rebuildWithLifecycle(all, repartition, true, tbl)
 	if r := replication.Load(); r != nil && !r.master && validReplicaDatabase(tbl.schema.Name) {
@@ -634,9 +663,9 @@ func RebuildTable(tbl *table, all bool, repartition bool) string {
 
 	duration := fmt.Sprint(time.Since(start))
 	if len(errs) == 0 {
-		return duration
+		return tableRebuildResult{duration: duration, complete: result.complete}
 	}
-	return duration + " errors: " + strings.Join(errs, " | ")
+	return tableRebuildResult{duration: duration, err: fmt.Errorf("%s", strings.Join(errs, " | "))}
 }
 
 func rebuildDatabases(all bool, repartition bool, includeEphemeral bool) string {
@@ -1615,9 +1644,11 @@ func (db *database) rebuildWithLifecycle(all bool, repartition bool, includeEphe
 			}
 			tableLocked := false
 			rebuildClaimed := false
-			t.ddlMu.RLock()
+			ddlLocked := t.ddlMu.TryRLock()
 			defer func() {
-				t.ddlMu.RUnlock()
+				if ddlLocked {
+					t.ddlMu.RUnlock()
+				}
 				if r := recover(); r != nil {
 					errmsg := fmt.Sprintf("rebuild failed for table %s.%s: %v", db.Name, t.Name, r)
 					scm.PrintError(errmsg)
@@ -1640,6 +1671,13 @@ func (db *database) rebuildWithLifecycle(all bool, repartition bool, includeEphe
 				}
 				done.Done()
 			}()
+			// Maintenance already reports busy/cold generations as incomplete.
+			// A queued or retained declaration is the same cold admission case;
+			// never wait on a DDL owner that may belong to this original caller.
+			if !ddlLocked {
+				incomplete.Store(true)
+				return
+			}
 			if db.tables.Get(t.Name) != t || !t.committedAt(db.catalogView().version) {
 				incomplete.Store(true)
 				return

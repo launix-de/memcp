@@ -877,7 +877,7 @@ func TestClusterSchemaRecoveryRestoresBoundedRoutesWithoutPermissions(t *testing
 
 func TestClusterGetReadDelegationIsAnExplicitCallerCapability(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "treadcapability", 4)
-	RebuildTable(tbl, true, false)
+	RebuildTable(tbl, true, false, nil)
 	shard := tbl.ActiveShards()[0]
 	var freed [numEvictableTypes]int64
 	if !shardCleanup(shard, &freed) {
@@ -1517,14 +1517,14 @@ func TestClusterShardRecoveryRestoresCurrentContentFromOlderSchema(t *testing.T)
 
 func testClusterShardRecoveryContent(t *testing.T, variant string) {
 	tbl, _ := createDurabilityTestTable(t, "t_cluster_recover_current_content", 4)
-	RebuildTable(tbl, true, false)
+	RebuildTable(tbl, true, false, nil)
 	checkpoint, err := json.Marshal(tbl)
 	if err != nil {
 		t.Fatal(err)
 	}
 	oldID := tbl.ActiveShards()[0].uuid
 	tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(99), scm.NewString("new content")}}, nil, scm.NewNil(), false, nil)
-	RebuildTable(tbl, true, false)
+	RebuildTable(tbl, true, false, nil)
 	content := tbl.ActiveShards()[0].uuid.String()
 	if content == oldID.String() {
 		t.Fatal("fixture did not publish a successor")
@@ -2171,7 +2171,7 @@ func decodeTestInvocation(channel string, payload []byte, destination any) error
 // extra discovery request or requiring the destination to reconstruct aliases.
 func TestClusterDelegationUsesKnownSuccessorAfterPeerRestart(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "t_cluster_task_successor", 4)
-	RebuildTable(tbl, true, false)
+	RebuildTable(tbl, true, false, nil)
 	peer, _, _ := setupRemoteScanConnection(t)
 	current := mosiResource{Database: tbl.schema.Name, Table: tbl.Name, Shard: tbl.ActiveShards()[0].uuid.String()}
 	previous := current

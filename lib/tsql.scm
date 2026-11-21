@@ -591,6 +591,13 @@ Restore only those exact data encodings before applying the pure recipe checks. 
 			(error "alias declaration changed before DDL execution")) true)
 	(merge (extract_assoc attributes (lambda (key value)
 		(if (equal? key "__tsql_alias_id") '() (list key value))))))))
+(define tsql_rebuild_relation (lambda (database name tx) (begin
+	(define handle (table database false name false tx))
+	(if (nil? handle) (tsql_raise_error 4902 (concat "table does not exist: " name) 1) true)
+	/* Rebuild uses the native parallel storage operator. Completion and I/O
+	failure belong to that owner; no textual status is interpreted as success. */
+	(rebuild handle true false tx true)
+	0)))
 (define tsql_add_columns (lambda (database name columns tx session) (begin
 	/* A frontend precheck cannot reserve a table-wide role across concurrent
 	DDL owners. CREATE validates an unpublished complete declaration; marked

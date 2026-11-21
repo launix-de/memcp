@@ -253,7 +253,7 @@ func testInsertCollisionRMW(t *testing.T, before bool) {
 			columns := []string{"id", "bucket", "val"}
 			tbl.Insert(columns, [][]scm.Scmer{{scm.NewInt(7), scm.NewInt(0), scm.NewInt(0)}}, nil, scm.NewNil(), false, nil)
 			if strings.HasSuffix(layout, "-main") {
-				if result := RebuildTable(tbl, true, false); strings.Contains(result, "errors:") {
+				if result := RebuildTable(tbl, true, false, nil); result.err != nil {
 					t.Fatal(result)
 				}
 				var mainRows uint32
@@ -970,7 +970,7 @@ func TestUniqueNullRowAcquiresFirstConcreteKey(t *testing.T) {
 			tbl.Unique = []uniqueKey{{Id: "value", Cols: []string{"value"}}}
 			tbl.Insert([]string{"value"}, [][]scm.Scmer{{scm.NewNil()}}, nil, scm.NewNil(), false, nil)
 			if main {
-				if result := RebuildTable(tbl, true, false); strings.Contains(result, "errors:") {
+				if result := RebuildTable(tbl, true, false, nil); result.err != nil {
 					t.Fatal(result)
 				}
 			}

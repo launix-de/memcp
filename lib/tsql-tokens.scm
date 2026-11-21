@@ -216,6 +216,7 @@ Their values preserve the grammar's declared spelling. */
 (define tsql_keyword_rand (tsql_keyword_parser "RAND"))
 (define tsql_keyword_read (tsql_keyword_parser "READ"))
 (define tsql_keyword_read_only (tsql_keyword_parser "READ_ONLY"))
+(define tsql_keyword_rebuild (tsql_keyword_parser "REBUILD"))
 (define tsql_keyword_recovery (tsql_keyword_parser "RECOVERY"))
 (define tsql_keyword_references (tsql_keyword_parser "REFERENCES"))
 (define tsql_keyword_relative (tsql_keyword_parser "RELATIVE"))
