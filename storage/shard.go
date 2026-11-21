@@ -1887,7 +1887,7 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 						if uniqueGuard != nil {
 							uniqueGuard.releaseKeys()
 						}
-						newSchemaRow, finalValidators = t.t.ExecuteBeforeUpdateTriggers(triggerOldRow, newSchemaRow, currentTx, input)
+						newSchemaRow, finalValidators = t.t.ExecuteBeforeUpdateTriggers(triggerOldRow, newSchemaRow, currentTx, input, declarations)
 					})
 					// Write trigger-mutated schema values back to delta row layout.
 					for i, colDesc := range declarations {
@@ -3882,7 +3882,7 @@ func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLoc
 		preparedColumns := make([][]string, 0, len(values))
 		preparedRows := make([][]scm.Scmer, 0, len(values))
 		for _, row := range values {
-			rowColumns, preparedRow, ok := t.t.executeBeforeInsertTriggerRow(columns, row, beforeInsertTriggers, isIgnore, currentTx)
+			rowColumns, preparedRow, ok := t.t.executeBeforeInsertTriggerRow(columns, row, beforeInsertTriggers, isIgnore, currentTx, declarations)
 			if !ok {
 				continue
 			}

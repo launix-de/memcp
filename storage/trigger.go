@@ -888,8 +888,8 @@ func stringSlicesEqual(a, b []string) bool {
 	return true
 }
 
-func (t *table) beforeInsertOutputColumns(dict scm.Scmer, columns []string) []string {
-	result := make([]string, 0, len(t.Columns))
+func (t *table) beforeInsertOutputColumns(dict scm.Scmer, columns []string, declarations []*column) []string {
+	result := make([]string, 0, len(declarations))
 	seen := make(map[string]struct{}, len(columns))
 	for _, col := range columns {
 		result = append(result, col)
@@ -899,7 +899,7 @@ func (t *table) beforeInsertOutputColumns(dict scm.Scmer, columns []string) []st
 		return result
 	}
 	fd := dict.FastDict()
-	for _, col := range t.Columns {
+	for _, col := range declarations {
 		if _, ok := seen[col.Name]; ok {
 			continue
 		}
@@ -1218,8 +1218,9 @@ func (t *table) invokeBeforeInsertTrigger(trigger TriggerDescription, newDict sc
 }
 
 // Ordinary BEFORE callbacks may modify NEW, before sanitization/ID allocation.
-// The caller supplies the early subset of one captured native trigger list.
-func (t *table) executeBeforeInsertTriggerRow(columns []string, row dataset, triggers []TriggerDescription, isIgnore bool, tx *TxContext) ([]string, dataset, bool) {
+// Trigger selection and declarations belong to the same admitted native input;
+// a private column must not be normalized through the public table header.
+func (t *table) executeBeforeInsertTriggerRow(columns []string, row dataset, triggers []TriggerDescription, isIgnore bool, tx *TxContext, declarations []*column) ([]string, dataset, bool) {
 	tx = nativeRowTriggerInvocation(tx)
 	if len(triggers) == 0 {
 		return columns, row, true
@@ -1242,11 +1243,11 @@ func (t *table) executeBeforeInsertTriggerRow(columns []string, row dataset, tri
 	if !triggerOk {
 		return nil, nil, false
 	}
-	rowColumns := t.beforeInsertOutputColumns(newDict, columns)
+	rowColumns := t.beforeInsertOutputColumns(newDict, columns, declarations)
 	return rowColumns, t.dictToRow(newDict, rowColumns), true
 }
 
-func (t *table) ExecuteBeforeInsertTriggers(columns []string, values [][]scm.Scmer, triggers []TriggerDescription, isIgnore bool, tx *TxContext) ([]string, [][]scm.Scmer) {
+func (t *table) ExecuteBeforeInsertTriggers(columns []string, values [][]scm.Scmer, triggers []TriggerDescription, isIgnore bool, tx *TxContext, declarations []*column) ([]string, [][]scm.Scmer) {
 	if len(triggers) == 0 {
 		return columns, values
 	}
@@ -1255,7 +1256,7 @@ func (t *table) ExecuteBeforeInsertTriggers(columns []string, values [][]scm.Scm
 	rowColumns := make([][]string, 0, len(values))
 	result := make([][]scm.Scmer, 0, len(values))
 	for _, row := range values {
-		newColumns, newRow, ok := t.executeBeforeInsertTriggerRow(columns, row, triggers, isIgnore, tx)
+		newColumns, newRow, ok := t.executeBeforeInsertTriggerRow(columns, row, triggers, isIgnore, tx, declarations)
 		if !ok {
 			continue
 		}
@@ -1270,8 +1271,8 @@ func (t *table) ExecuteBeforeInsertTriggers(columns []string, values [][]scm.Scm
 	}
 	for _, cols := range rowColumns[1:] {
 		if !stringSlicesEqual(resultColumns, cols) {
-			allColumns := make([]string, len(t.Columns))
-			for i, col := range t.Columns {
+			allColumns := make([]string, len(declarations))
+			for i, col := range declarations {
 				allColumns[i] = col.Name
 			}
 			for i, row := range result {
@@ -1314,7 +1315,7 @@ func (t *table) validateFinalInsertRows(columns []string, values [][]scm.Scmer, 
 // oldRow: the current row values (all columns in table order)
 // newRow: the row with changes applied (all columns in table order)
 // Returns the modified newRow. Panics from triggers propagate to the caller.
-func (t *table) ExecuteBeforeUpdateTriggers(oldRow, newRow dataset, tx *TxContext, input *nativeMutationInput) (dataset, []TriggerDescription) {
+func (t *table) ExecuteBeforeUpdateTriggers(oldRow, newRow dataset, tx *TxContext, input *nativeMutationInput, declarations []*column) (dataset, []TriggerDescription) {
 	triggers := t.mutationTriggers(BeforeUpdate, input)
 	tx = nativeRowTriggerInvocation(tx)
 	if len(triggers) == 0 {
@@ -1322,9 +1323,9 @@ func (t *table) ExecuteBeforeUpdateTriggers(oldRow, newRow dataset, tx *TxContex
 	}
 	var final []TriggerDescription
 
-	// Build column names from table
-	columns := make([]string, len(t.Columns))
-	for i, col := range t.Columns {
+	// Consume the same immutable declaration vector as the admitted row input.
+	columns := make([]string, len(declarations))
+	for i, col := range declarations {
 		columns[i] = col.Name
 	}
 

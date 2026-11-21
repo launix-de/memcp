@@ -4361,7 +4361,7 @@ func (t *table) insertLocal(columns []string, values [][]scm.Scmer, onCollisionC
 
 	columns, values = t.prepareInsertDefaults(columns, values, validatedSchema.declarations)
 	earlyTriggers, finalValidators := splitBeforeInsertTriggers(t.mutationTriggers(BeforeInsert, input))
-	columns, values = t.ExecuteBeforeInsertTriggers(columns, values, earlyTriggers, isIgnore, currentTx)
+	columns, values = t.ExecuteBeforeInsertTriggers(columns, values, earlyTriggers, isIgnore, currentTx, validatedSchema.declarations)
 	validateInsertColumns(columns, validatedSchema.declarations)
 	// sanitize values (per-row recovery for INSERT IGNORE)
 	values = t.sanitizeInsertRows(columns, values, isIgnore, validatedSchema.declarations)
