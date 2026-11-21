@@ -1,0 +1,78 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: Original transactions retain physical WALs across reused and replaced rebuild generations
+  syntax: tsql
+  isolated: true
+setup:
+- sql: DROP TABLE IF EXISTS wal_retirement_rows
+- sql: CREATE TABLE wal_retirement_rows(id INT PRIMARY KEY,value INT)
+- sql: INSERT wal_retirement_rows VALUES(1,10),(2,20)
+- scm: (rebuild (table "memcp-tests" false "wal_retirement_rows" false nil) true false nil true)
+cleanup:
+- sql: DROP TABLE IF EXISTS wal_retirement_rows
+test_cases:
+- name: A no-change input followed by rebuilds retains its original commit WAL
+  timeout: 15
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root")
+      (define target (table "memcp-tests" false "wal_retirement_rows" false nil))
+      (define execute (lambda (text)
+        (tsql_execute_request "memcp-tests" text owner nil 0
+          (lambda (row) true) (lambda fields true))))
+      (define rows (lambda (tx)
+        (sort (scan tx target '() '() '() (lambda () true) '("id" "value")
+          (lambda (acc id value) (append acc (list id value))) '()
+          (lambda (left right) (merge (list left right))) false)
+          (lambda (left right) (< (car left) (car right))))))
+      (execute "BEGIN TRANSACTION")
+      (try (lambda () (begin
+        (execute "UPDATE wal_retirement_rows SET value=value WHERE id=1")
+        (define tx (owner "__memcp_tx"))
+        (rebuild target false false tx true)
+        (execute "UPDATE wal_retirement_rows SET value=11 WHERE id=1")
+        (rebuild target true false tx true)
+        (define private (rows tx))
+        (define observed (rows nil))
+        (execute "COMMIT TRANSACTION")
+        (list private observed (rows nil))))
+        (lambda (cause) (begin (tx_rollback owner) (error cause)))))
+  expect: {result: [[[1,11],[2,20]],[[1,10],[2,20]],[[1,11],[2,20]]]}
+- name: Repeated generation reuse and replacement preserve the original rollback
+  timeout: 15
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root")
+      (define target (table "memcp-tests" false "wal_retirement_rows" false nil))
+      (define execute (lambda (text)
+        (tsql_execute_request "memcp-tests" text owner nil 0
+          (lambda (row) true) (lambda fields true))))
+      (define rows (lambda (tx)
+        (sort (scan tx target '() '() '() (lambda () true) '("id" "value")
+          (lambda (acc id value) (append acc (list id value))) '()
+          (lambda (left right) (merge (list left right))) false)
+          (lambda (left right) (< (car left) (car right))))))
+      (execute "BEGIN TRANSACTION")
+      (try (lambda () (begin
+        (execute "UPDATE wal_retirement_rows SET value=value WHERE id=2")
+        (define tx (owner "__memcp_tx"))
+        (rebuild target false false tx true)
+        (rebuild target false false tx true)
+        (execute "UPDATE wal_retirement_rows SET value=22 WHERE id=2")
+        (rebuild target true false tx true)
+        (rebuild target true false tx true)
+        (define private (rows tx))
+        (define observed (rows nil))
+        (execute "ROLLBACK TRANSACTION")
+        (list private observed (rows nil))))
+        (lambda (cause) (begin (tx_rollback owner) (error cause)))))
+  expect: {result: [[[1,11],[2,22]],[[1,11],[2,20]],[[1,11],[2,20]]]}
+- name: Lose the process after accepted commit and complete rollback
+  scm: (crash)
+  expect: {interrupted_ok: true}
+- name: Recover the same physical generations
+  action: restart
+- name: Recovery preserves exact committed and rolled back values
+  sql: SELECT id,value FROM wal_retirement_rows ORDER BY id
+  expect: {rows: 2,data: [{id: 1,value: 11},{id: 2,value: 20}]}
