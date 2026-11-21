@@ -1971,7 +1971,7 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 					payloadCols, payloadRow := buildPayload()
 					oldRow := make([]scm.Scmer, len(payloadCols))
 					for i, name := range payloadCols {
-						oldRow[i] = t.rowValueByRecidLocked(targetIdx, name)
+						oldRow[i] = t.rowValueByRecidLocked(targetIdx, name, currentTx, initializedColumns)
 					}
 					needed := t.t.guardUniqueWrites(payloadCols, [][]scm.Scmer{payloadRow, oldRow}, false, 0, currentTx, input)
 					if uniqueGuard == nil {
