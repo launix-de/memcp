@@ -2305,7 +2305,7 @@ func (t *storageShard) scan_order(access scanAccess, conditionCols []string, con
 				// only their argument column and call the native primitive directly;
 				// general expressions retain the existing interpreter adapter.
 				if conditionProgram.Kind == scm.SerialProcNativeArgConstant {
-					outN = t.filterNativeArgConstantScanBatch(survived, conditionCols, ccols, cReaders, conditionGetters, &conditionProgram)
+					outN = t.filterNativeArgConstantScanBatch(survived, conditionCols, ccols, cReaders, conditionGetters, &conditionProgram, initializedColumns)
 					copy(batch, survived[:outN])
 				} else {
 					outN = 0
