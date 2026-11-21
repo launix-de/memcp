@@ -2773,7 +2773,7 @@ choices. */
 			(cons (quote list) (cons
 				(cons (quote list) (cons "unique" (cons "group" (list (cons (quote list) all_names)))))
 				(merge (list key_columns range_columns))))
-			(quoted_runtime_list '("engine" "cache"))
+			(quoted_runtime_list '("engine" "cache" "runtime_only" true))
 			true
 			(quote tx)))))
 
@@ -6849,7 +6849,7 @@ initialization and eviction ownership. Dimensions describe keys, never owners. *
 		(group_cache_create (group_cache_schema cache) (group_cache_relation cache)
 			(cons (list "unique" "group" names)
 				(map names (lambda (name) (list "column" name "any" '() '("collate" "bin")))))
-			'("engine" "cache") true tx)
+			'("engine" "cache" "runtime_only" true) true tx)
 		/* A missing/invalid payload evaluates to nil. It is filled under source
 		read locks; native dependency triggers invalidate it on logical writes.
 		The callback is stateless and retains no request or normalized bindings. */

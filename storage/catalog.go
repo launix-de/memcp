@@ -400,11 +400,11 @@ func catalogRowsFromTable(t *table) (rows catalogRows) {
 	schema, owner := t.schema.Name, scm.NewString(t.Name)
 	rows.addRecord(catalogTables, schema, nil, definition)
 	identity := func(i int) []scm.Scmer { return []scm.Scmer{owner, scm.NewInt(int64(i))} }
-	for i, column := range definition.Columns {
+	for _, column := range definition.Columns {
 		if column.RuntimeOnly {
 			continue
 		}
-		rows.addRecord(catalogColumns, schema, identity(i), column)
+		rows.addRecord(catalogColumns, schema, identity(len(rows[catalogColumns])), column)
 	}
 	for i, key := range definition.Unique {
 		rows.addRecord(catalogKeys, schema, identity(i), key)
@@ -425,7 +425,7 @@ func catalogRowsFromTable(t *table) (rows catalogRows) {
 			rows.add(catalogForeignKeyColumns, schema, []scm.Scmer{owner, scm.NewInt(int64(i)), scm.NewInt(int64(j)), local, remote}, nil)
 		}
 	}
-	for i, trigger := range definition.Triggers {
+	for _, trigger := range definition.Triggers {
 		if trigger.cacheTarget != nil || trigger.Acquire != nil || restoredTriggerRequiresRuntimeTarget(trigger.Name) {
 			continue
 		}
@@ -435,7 +435,7 @@ func catalogRowsFromTable(t *table) (rows catalogRows) {
 		if err := json.Unmarshal(marshalCatalogValue(trigger), &record); err != nil {
 			panic(err)
 		}
-		rows.add(catalogTriggers, schema, identity(i), record)
+		rows.add(catalogTriggers, schema, identity(len(rows[catalogTriggers])), record)
 	}
 	return rows
 }
