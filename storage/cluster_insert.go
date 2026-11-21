@@ -40,7 +40,14 @@ func (cluster *nodeCluster) reserveInsertIDs(t *table, explicit, count uint64, o
 	}
 	// This is only an advisory local high-water snapshot. Future reservations
 	// always consult the current schema owner, including after a handover.
-	t.mergeImportedAllocator(reply.State, reply.Base+count)
+	if request.Identity == "" {
+		if reply.State != (tableAllocatorState{}) {
+			panic("legacy table allocator reply cannot carry provenance")
+		}
+		t.mergeRecoveredAutoIncrement(reply.Base + count)
+	} else {
+		t.mergeImportedAllocator(reply.State, reply.Base+count)
+	}
 	return reply.Base
 }
 
@@ -50,7 +57,7 @@ func (cluster *nodeCluster) reserveIDs(ctx context.Context, request clusterIDReq
 			err = fmt.Errorf("%v", failure)
 		}
 	}()
-	if !cluster.databases[request.Database] || request.Table == "" || request.Identity == "" || (request.Read && (request.Count != 0 || request.Explicit != 0 || request.ObservedExplicit)) {
+	if !cluster.databases[request.Database] || request.Table == "" || (request.Read && (request.Identity == "" || request.Count != 0 || request.Explicit != 0 || request.ObservedExplicit)) {
 		return reply, fmt.Errorf("invalid cluster ID reservation")
 	}
 	owner, err := cluster.locate(ctx, mosiResource{Database: request.Database})
@@ -92,7 +99,7 @@ func (cluster *nodeCluster) reserveIDs(ctx context.Context, request clusterIDReq
 	}
 	defer releaseCoordination()
 	t := db.tables.Get(request.Table)
-	if t == nil || t.RuntimeIdentity != request.Identity {
+	if t == nil || t.RuntimeIdentity != request.Identity || (request.Identity == "" && t.allocatorSnapshot() != nil) {
 		return reply, fmt.Errorf("ID reservation table generation disappeared")
 	}
 	if request.Read {
@@ -100,7 +107,9 @@ func (cluster *nodeCluster) reserveIDs(ctx context.Context, request clusterIDReq
 		return reply, nil
 	}
 	reply.Base = t.reserveLocalAutoIncrement(request.Explicit, request.Count, request.ObservedExplicit)
-	reply.State = t.localTableAllocator()
+	if request.Identity != "" {
+		reply.State = t.localTableAllocator()
+	}
 	// Persist reservations before acknowledging: other nodes can commit their
 	// allocated IDs without returning the allocator's shard WAL to this node.
 	// An interrupted request may leave a gap and must never be blindly replayed.

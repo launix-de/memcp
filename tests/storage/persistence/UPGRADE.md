@@ -133,9 +133,13 @@ This is a new writer format; older binaries are not supported writers of data
 containing the new allocator authority. The UUID-bound cluster allocator uses
 the distinct `cluster.table_ids` operation with explicit request/reply version
 2. The previous `cluster.reserve_ids` operation is no longer registered, so an
-older unversioned request cannot be mistaken for a version marker or allocate
-by a potentially reused table name. The historical row/WAL
-readers remain unchanged. Independent noncluster replication writers retain
+older unversioned request cannot be mistaken for a version marker. Within the
+new protocol, an empty identity is accepted only for an actual UUID-less,
+provenance-free predecessor table and only for reservation. Its response has
+an explicitly empty provenance payload and preserves the old highwater-only
+allocation contract; it cannot reserve against a UUID-backed replacement or
+support the new current-value observation. The historical row/WAL readers
+remain unchanged. Independent noncluster replication writers retain
 their existing highwater merge; this does not establish a global current-value
 owner, so the new observation API rejects that scope explicitly.
 `table-id-allocator.yaml` supplies current-writer value, rollback, crash, checkpoint and name-reuse controls; predecessor-writer

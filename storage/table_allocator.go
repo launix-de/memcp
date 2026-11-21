@@ -261,7 +261,7 @@ func (t *table) prepareAllocatorRecovery() {
 		if err := snapshot.validate(); err != nil || snapshot.Table != t.RuntimeIdentity {
 			panic("invalid native table allocator schema provenance")
 		}
-	} else {
+	} else if t.RuntimeIdentity != "" {
 		if err := (tableAllocatorState{Version: 1, Table: t.RuntimeIdentity}).validate(); err != nil {
 			panic(err)
 		}
@@ -356,6 +356,18 @@ func (t *table) reserveLocalAutoIncrement(explicit, generated uint64, observedEx
 	if failure := db.allocatorFailure.Load(); failure != nil {
 		panic(*failure)
 	}
+	if t.RuntimeIdentity == "" {
+		// Historical imported schemas may have no table UUID. Preserve their
+		// native highwater CAS, but never manufacture allocator provenance or
+		// attach a UUID-bound reservation frame to a name-only generation.
+		for {
+			high := atomic.LoadUint64(&t.Auto_increment)
+			base, next, changed := tableAllocatorReservation(tableAllocatorState{High: high}, high, explicit, generated, false)
+			if !changed || atomic.CompareAndSwapUint64(&t.Auto_increment, high, next.High) {
+				return base
+			}
+		}
+	}
 	// Already supplied/reserved IDs add no facts. The immutable accepted
 	// witness makes this a linearizable no-op, including under concurrent WAL.
 	if snapshot := t.allocatorSnapshot(); generated == 0 && snapshot != nil && explicit <= snapshot.High && (!observedExplicit || snapshot.Issued) {
@@ -449,6 +461,16 @@ func (t *table) mergeImportedAllocator(state tableAllocatorState, high uint64) {
 	if state.Table != t.RuntimeIdentity {
 		panic("table allocator import changed table generation")
 	}
+	if t.RuntimeIdentity == "" && t.allocatorSnapshot() == nil {
+		// Accepted UUID-less predecessor schemas carry only the old highwater.
+		// This import must not turn absent identity/start/issued fields into
+		// an allocator-v1 authority, including for ordinary non-identity tables.
+		if state.Version != 1 || state.StartKnown || state.Start != 0 || state.IssuedKnown || state.Issued || state.HighAllocated {
+			panic("legacy table allocator import cannot carry provenance")
+		}
+		t.mergeRecoveredAutoIncrement(max(high, state.High))
+		return
+	}
 	if err := state.validate(); err != nil {
 		panic(err)
 	}
@@ -474,6 +496,9 @@ func (t *table) mergeImportedAllocator(state tableAllocatorState, high uint64) {
 }
 
 func (t *table) currentTableAllocator() tableAllocatorState {
+	if t.RuntimeIdentity == "" {
+		panic("table allocator current-value provenance is unavailable for a legacy table without native identity")
+	}
 	if !sharedClusterSource(t) {
 		if activeReplication(t.schema) != nil {
 			panic("table allocator current-value authority is not supported for independent replication writers")
@@ -487,6 +512,9 @@ func (t *table) currentTableAllocator() tableAllocatorState {
 	reply, err := cluster.reserveIDs(cluster.ctx, clusterIDRequest{Database: t.schema.Name, Table: t.Name, Identity: t.RuntimeIdentity, Read: true})
 	if err != nil {
 		panic(err)
+	}
+	if err := reply.State.validate(); err != nil || reply.State.Table != t.RuntimeIdentity {
+		panic("table allocator observation reply lacks its native generation provenance")
 	}
 	return reply.State
 }

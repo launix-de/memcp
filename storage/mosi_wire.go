@@ -560,7 +560,7 @@ func marshalNode(value any) (data []byte, err error) {
 		return w.data, nil
 	case clusterIDRequest:
 		w := mosiWriter{data: make([]byte, 0, 128)}
-		w.number(2) // UUID-bound allocator protocol; old unversioned requests cannot grant authority
+		w.number(2) // UUID provenance or explicit legacy highwater-only reservation
 		w.text(v.Database)
 		w.text(v.Table)
 		w.number(v.Explicit)
@@ -579,7 +579,11 @@ func marshalNode(value any) (data []byte, err error) {
 		w := mosiWriter{}
 		w.number(2)
 		w.number(v.Base)
-		w.text(encodeTableAllocatorRecord(LogEntryTableAllocator{v.State}))
+		if v.State == (tableAllocatorState{}) {
+			w.text("") // UUID-less legacy reservation has no provenance payload
+		} else {
+			w.text(encodeTableAllocatorRecord(LogEntryTableAllocator{v.State}))
+		}
 		return w.data, nil
 	case objectViewDeclaration:
 		w := mosiWriter{data: make([]byte, 0, 128)}
@@ -848,7 +852,10 @@ func unmarshalNode(data []byte, target any) (err error) {
 		if raw.uint() != 2 {
 			panic("unsupported table allocator reply version")
 		}
-		*p = clusterIDReply{Base: raw.uint(), State: decodeTableAllocatorRecord(string(raw.blob())).state}
+		*p = clusterIDReply{Base: raw.uint()}
+		if state := raw.blob(); len(state) != 0 {
+			p.State = decodeTableAllocatorRecord(string(state)).state
+		}
 	case *objectViewDeclaration:
 		*p = objectViewDeclaration{URI: string(raw.blob()), View: raw.data}
 		raw.data = nil
