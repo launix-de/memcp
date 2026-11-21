@@ -924,4 +924,3 @@ test_cases:
         data:
         - state: 0
           depth: 0
-  noncritical: true
