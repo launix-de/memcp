@@ -35,7 +35,7 @@ SQL Server 2022 membership, key movement and sticky EOF: https://dbfiddle.uk/vQ6
 				(empty_list? (coalesceNil (qb_group query) '())) (nil? (qb_having query))
 				(empty_list? (coalesceNil (qb_stages query) '()))
 				(nil? (qb_limit query)) (nil? (qb_offset query))
-				(not (query_contains_subquery? query)) (not (query_requires_fresh_invocation? query nil))
+				(not (query_contains_subquery? query)) (not (query_requires_fresh_invocation? query nil false))
 				(empty_list? (query_expr_session_reads semantic))
 				(reduce (extract_assoc (expand_query_block_fields sources (qb_fields query))
 					(lambda (_title expression) (direct expression))) (lambda (ok value) (and ok value)) true)
@@ -94,7 +94,7 @@ is never retained by the cursor, its plan or a storage computed column. */
 		(if (nil? handle) (tsql_raise_error 16943 "cursor source was dropped" 1)
 			(not (equal? (show handle "identity" tx) (nth contract 2)))
 			(tsql_raise_error 16943 "cursor source incarnation changed" 1)
-			(not (sql_relation_local_declarations_match? (car contract) (cadr contract) tx (nth contract 3)))
+			(not (sql_relation_local_declarations_match? (car contract) (cadr contract) tx (nth contract 3) '("columns" "constraints")))
 			(tsql_raise_error 16943 "cursor source declaration changed" 1) true)))))))
 
 (define tsql_cursor_dynamic_open (lambda (cursor session tx) (begin

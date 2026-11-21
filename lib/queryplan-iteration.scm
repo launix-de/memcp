@@ -49,7 +49,7 @@ must not retain its first state or clock value inside a maintained group. */
 		(scoped_relational_program_external_reads 'relational_iteration input (list (list 'state_symbol state_symbol))))))
 	(define stage (make_group_stage id input domain domain (list descriptor) nil '() '() nil nil
 		(list (list 'purpose 'relational_iteration) (list 'state_symbol state_symbol)
-			(list 'fresh_invocation (query_requires_fresh_invocation? input nil))
+			(list 'fresh_invocation (query_requires_fresh_invocation? input nil false))
 			(list 'iteration_predicate (if predicate_query nil predicate)) (list 'lookup-keys domain)
 			(list 'null_semantics 'iteration) (list 'result_max_rows_per_partition 1))))
 	(define declarations (list "columns" (list (list "Field" column "Type" "any" "RawType" "any"

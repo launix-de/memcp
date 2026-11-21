@@ -571,7 +571,7 @@ only partitioned FROM source would erase the block's row multiplicity
 Choice and iteration children retain their own lazy execution boundaries. */
 (define query_result_reusable_using_stages? (lambda (stages node) (begin
 	(define index (stage_dependency_id_index stages))
-	(not (query_requires_fresh_invocation? node (lambda (id) (get_assoc index id)))))))
+	(not (query_requires_fresh_invocation? node (lambda (id) (get_assoc index id)) true)))))
 
 /* Some leaf eligibility owners receive a stage rather than its surrounding
 catalog. Its explicitly published lowering/probe catalogs supply that scope;

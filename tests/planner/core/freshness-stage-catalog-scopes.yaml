@@ -20,7 +20,7 @@ test_cases:
       (make_group_stage id input '() '() (list (list 1 '+ 0)) nil '() '() nil nil '())))
     (define stable (stage "shared" (block '() nil '("value" 1))))
     (define query (block (list stable) (make_stage_output_relation "shared") '("value" 1)))
-    (list (query_requires_fresh_invocation? query nil)
+    (list (query_requires_fresh_invocation? query nil false)
       (query_result_reusable_using_stages? (list stable) query)))
   expect: {result: [false, true]}
 - name: A volatile transitive producer remains fresh through repeated readers
@@ -35,7 +35,7 @@ test_cases:
     (define leaf (stage "volatile" (block '() nil (list "value" (list 'uuid)))))
     (define parent (stage "consumer" (block '() (make_stage_output_relation "volatile") '("value" 1))))
     (define query (block (list parent leaf) (make_stage_output_relation "consumer") '("value" 1)))
-    (list (query_requires_fresh_invocation? query nil)
+    (list (query_requires_fresh_invocation? query nil false)
       (query_result_reusable_using_stages? (list parent leaf) query)))
   expect: {result: [true, false]}
 - name: Nested declaration scopes may reuse an ancestor stage identifier without a cycle
@@ -50,7 +50,7 @@ test_cases:
     (define leaf (stage "same" (block '() nil '("value" 1))))
     (define inner (block (list leaf) (make_stage_output_relation "same") '("value" 1)))
     (define outer (stage "same" inner))
-    (query_requires_fresh_invocation? (block (list outer) (make_stage_output_relation "same") '("value" 1)) nil))
+    (query_requires_fresh_invocation? (block (list outer) (make_stage_output_relation "same") '("value" 1)) nil false))
   expect: {result: false}
 - name: Sibling stage identifiers retain their own volatile declarations
   scm: |
@@ -65,7 +65,7 @@ test_cases:
     (define volatile (stage "same" (block '() nil (list "value" (list 'uuid)))))
     (define left (block (list pure) (make_stage_output_relation "same") '("value" 1)))
     (define right (block (list volatile) (make_stage_output_relation "same") '("value" 1)))
-    (query_requires_fresh_invocation? (make_union_block 'all (list left right) '() nil nil nil) nil))
+    (query_requires_fresh_invocation? (make_union_block 'all (list left right) '() nil nil nil) nil false))
   expect: {result: true}
 - name: Local declarations shadow an external stage catalog
   scm: |
@@ -79,7 +79,7 @@ test_cases:
     (define outer (stage "same" (block '() nil (list "value" (list 'uuid)))))
     (define inner (stage "same" (block '() nil '("value" 1))))
     (query_requires_fresh_invocation? (block (list inner) (make_stage_output_relation "same") '("value" 1))
-      (lambda (_id) outer)))
+      (lambda (_id) outer) false))
   expect: {result: false}
 - name: An external declaration resolves dependencies in its own declaring catalog
   scm: |
@@ -96,7 +96,7 @@ test_cases:
     (define lookup (lambda (id)
       (if (equal? id "A") external_a (equal? id "B") external_b nil)))
     (query_requires_fresh_invocation?
-      (block (list local_b) (make_stage_output_relation "A") '("value" 1)) lookup))
+      (block (list local_b) (make_stage_output_relation "A") '("value" 1)) lookup false))
   expect: {result: true}
 - name: Real dependency cycles and unresolved complete catalogs remain nonreusable
   scm: |
@@ -108,10 +108,10 @@ test_cases:
     (define stage (lambda (id input)
       (make_group_stage id input '() '() (list (list 1 '+ 0)) nil '() '() nil nil '())))
     (define cyclic (stage "cycle" (block '() (make_stage_output_relation "cycle") '("value" 1))))
-    (list (query_requires_fresh_invocation? (block (list cyclic) (make_stage_output_relation "cycle") '("value" 1)) nil)
-      (query_requires_fresh_invocation? (make_stage_output_relation "unknown") (lambda (_id) nil))
-      (query_requires_fresh_invocation? (make_stage_output_relation "unknown") nil)
-      (query_requires_fresh_invocation? (list 'quote (list 'uuid)) nil)))
+    (list (query_requires_fresh_invocation? (block (list cyclic) (make_stage_output_relation "cycle") '("value" 1)) nil false)
+      (query_requires_fresh_invocation? (make_stage_output_relation "unknown") (lambda (_id) nil) false)
+      (query_requires_fresh_invocation? (make_stage_output_relation "unknown") nil false)
+      (query_requires_fresh_invocation? (list 'quote (list 'uuid)) nil false)))
   expect: {result: [true, true, false, false]}
 - name: Native volatile values remain distinct for each input row
   syntax: mysql

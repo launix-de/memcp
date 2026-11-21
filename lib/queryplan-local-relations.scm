@@ -81,10 +81,15 @@ source naming; arbitrary procedures are not classified through a whitelist. */
 	(reduce (list 'now now 'sql_rand sql_rand 'randomBytes randomBytes
 		'uuid uuid 'uuid_v1 uuid_v1 'uuid_v4 uuid_v4 'uuid_v7 uuid_v7)
 		(lambda (fresh intrinsic) (or fresh (expression_equal? head intrinsic))) false)))
-(define query_requires_fresh_invocation? (lambda (node resolve_stage) (begin
+/* Intrinsic volatility constrains logical rewrites and live cursor recipes.
+A shared result additionally requires committed sources; unpublished native
+rows remain usable by their owning transaction without becoming volatile. */
+(define query_requires_fresh_invocation? (lambda (node resolve_stage include_transaction_sources) (begin
 	(define complete (not (nil? resolve_stage)))
 	(define source_fresh (lambda (walk source resolver)
 		(or (source_invocation_lifetime? source)
+			(and include_transaction_sources
+				(equal? (get_assoc (coalesceNil (source_declarations source) '()) "visibility" nil) "transaction"))
 			(walk walk (source_relation source) resolver)
 			(walk walk (source_join_expr source) resolver))))
 	(define walk_stages (lambda (walk stages resolver)
@@ -172,7 +177,7 @@ source naming; arbitrary procedures are not classified through a whitelist. */
 			(expression_equal? purpose 'local_relation_insert)
 			(expression_equal? purpose 'local_relation_emit)
 			(expression_equal? purpose 'local_relation_update)
-			(query_requires_fresh_invocation? input nil))))
+			(query_requires_fresh_invocation? input nil false))))
 	(define identity (stable_structural_hash (list purpose input facts) false))
 	(define id (concat "scoped-program:" identity))
 	(define alias (concat "__program_" identity))

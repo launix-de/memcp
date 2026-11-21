@@ -1567,7 +1567,7 @@ A later ADD/DROP/ALTER default or generated column invalidates the write plan. *
 		(define declarations (sql_relation_local_declarations database name tx))
 		(planner_record_guard_condition
 			(list (quote sql_relation_local_declarations_match?) database name (quote tx)
-				(list (quote quote) declarations)) planning_session)
+				(list (quote quote) declarations) (list (quote quote) '("columns" "constraints"))) planning_session)
 		(declarations "columns"))))))
 (define tsql_insert_deferred_columns (lambda (database name columns policy planning_session tx)
 	(map (filter (tsql_write_declarations database name planning_session tx) (lambda (column)

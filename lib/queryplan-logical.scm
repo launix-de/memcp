@@ -501,7 +501,7 @@ FROM uses the canonical one-row literal relation after SQL name binding. */
 	(if (or (not (empty_list? sources))
 		(not (or (not (empty_list? (qb_group block))) (not (nil? (qb_having block)))
 			(query_block_has_local_aggregates? block)
-			(query_requires_fresh_invocation? block nil))))
+			(query_requires_fresh_invocation? block nil false))))
 		sources
 		(not (empty_list? original_sources)) (list (car original_sources))
 		(begin
@@ -925,9 +925,6 @@ late frontend expansion has not attached a native column declaration packet. */
 (define source_invocation_lifetime? (lambda (src)
 	(or (information_schema_source? (source_schema src) (source_relation src))
 		(table_function_relation? (source_relation src))
-		/* Unpublished generations require the current transaction's rows.
-		They cannot seed maintained, transactionless computed definitions. */
-		(equal? (get_assoc (coalesceNil (source_declarations src) '()) "visibility" nil) "transaction")
 		(equal? (get_assoc (coalesceNil (source_declarations src) '()) "lifetime" nil) "invocation"))))
 
 /* Frontends may preserve a declared SQL object name through view expansion.
@@ -984,23 +981,24 @@ Their pure local facts let costing prove keys without late catalog lookups. */
 	(merge (list declarations (list "references" (map targets (lambda (target)
 		(list target (sql_relation_local_declarations database target tx))))))))))
 /* A cache guard reads the current native publication but does not construct
-another logical snapshot. Expected facts have already passed strict pure-data
-validation during compilation. Opaque or changed values compare unequal and
-therefore return through ordinary recompilation and validation. */
-(define sql_relation_local_declarations_match? (lambda (database name tx expected) (begin
+another logical snapshot. Each consumer names the declaration fields it uses:
+query reuse includes publication visibility, while cursor and write schemas
+consume columns and constraints. Expected facts have already passed strict
+pure-data validation during compilation. Changed values compare unequal and
+return through ordinary recompilation and validation. */
+(define sql_relation_local_declarations_match? (lambda (database name tx expected fields) (begin
 	(define handle (if (equal?? database "information_schema") nil
 		(table database false name false tx)))
 	(define actual (if handle (show handle "declarations" tx)
 		(list "columns" (map (if (equal?? database "information_schema")
 			(information_schema_column_catalog database name) '()) sql_column_declaration)
 			"constraints" '("Unique" () "ForeignKeys" ()))))
-	(and (expression_equal? (expected "columns") (actual "columns"))
-		(expression_equal? (expected "constraints") (actual "constraints"))
-		(expression_equal? (expected "visibility") (actual "visibility"))))))
+	(reduce fields (lambda (same field)
+		(and same (expression_equal? (expected field) (actual field)))) true))))
 (define sql_relation_declarations_match? (lambda (database name tx expected)
-	(and (sql_relation_local_declarations_match? database name tx expected)
+	(and (sql_relation_local_declarations_match? database name tx expected '("columns" "constraints" "visibility"))
 		(reduce (coalesceNil (expected "references") '()) (lambda (same reference)
-			(and same (sql_relation_local_declarations_match? database (car reference) tx (cadr reference)))) true))))
+			(and same (sql_relation_local_declarations_match? database (car reference) tx (cadr reference) '("columns" "constraints" "visibility")))) true))))
 (define source_columns (lambda (src) (begin
 	(define columns (if (nil? (source_declarations src)) nil ((source_declarations src) "columns")))
 	(if (nil? columns)
@@ -7096,7 +7094,7 @@ expressions are values in their own right and stay untouched. */
 				(find (produceN (count raw_group_fields)) (lambda (i)
 					(expression_equal? expr (nth raw_group_fields i))) nil) nil))
 			(if (and (not (nil? index)) (not (query_requires_fresh_invocation?
-				(nth bound_group_fields index) (lambda (_id) nil))))
+				(nth bound_group_fields index) (lambda (_id) nil) false)))
 				(nth bound_group_fields index)
 				(bind_group_expr scopes fields expr (binding_path path "group" 0) all_strings)))))
 		(define validate_order_only (qassoc_get (qb_facts block) 'validate_order_only false))
@@ -7212,7 +7210,7 @@ calling this constructor, including transparent exports from nested joins. */
 		(list left (input right true predicate)) exports true '() nil '() nil nil '() '() '()))
 	/* An unresolved external stage cannot establish repeatable evaluation.
 	Locally declared stages are resolved by the existing freshness owner. */
-	(if (query_requires_fresh_invocation? left_branch (lambda (_id) nil))
+	(if (query_requires_fresh_invocation? left_branch (lambda (_id) nil) false)
 		(neumann_fail "full outer join" "volatile operands require a shared evaluation contract") true)
 	(define anti_exports (map_assoc exports (lambda (_title expression) (begin
 		(define info (sql_expr_info sources expression))
