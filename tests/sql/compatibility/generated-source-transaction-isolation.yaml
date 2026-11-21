@@ -7,6 +7,7 @@ metadata:
   description: Generated metadata inputs retain original visibility without making scratch population a user row phase
 setup:
 - sql: DROP TABLE IF EXISTS generated_commit_child
+- sql: DROP TABLE IF EXISTS generated_commit_owned_parent
 - sql: DROP TABLE IF EXISTS generated_commit_parent
 - sql: DROP PROCEDURE IF EXISTS generated_commit_probe
 - sql: CREATE TABLE generated_commit_parent(id INT NOT NULL PRIMARY KEY,code INT NOT NULL)
@@ -15,6 +16,7 @@ setup:
 - sql: INSERT generated_commit_child VALUES(1,1)
 - sql: CREATE PROCEDURE generated_commit_probe AS SELECT 17 AS value
 - sql: DROP TABLE IF EXISTS generated_rollback_child
+- sql: DROP TABLE IF EXISTS generated_rollback_owned_parent
 - sql: DROP TABLE IF EXISTS generated_rollback_parent
 - sql: DROP PROCEDURE IF EXISTS generated_rollback_probe
 - sql: CREATE TABLE generated_rollback_parent(id INT NOT NULL PRIMARY KEY,code INT NOT NULL)
@@ -39,17 +41,36 @@ setup:
 - sql: INSERT generated_metadata_child VALUES(1,1)
 - sql: CREATE PROCEDURE generated_metadata_probe AS SELECT 17 AS value
 - sql: DROP TABLE IF EXISTS generated_private_child
+- sql: DROP TABLE IF EXISTS generated_private_owned_parent
 - sql: DROP TABLE IF EXISTS generated_private_parent
 - sql: DROP PROCEDURE IF EXISTS generated_private_probe
 - sql: CREATE TABLE generated_private_parent(id INT NOT NULL PRIMARY KEY,code INT NOT NULL)
 - sql: CREATE TABLE generated_private_child(id INT NOT NULL PRIMARY KEY,parent_id INT NOT NULL)
 - sql: INSERT generated_private_parent VALUES(1,17)
 - sql: INSERT generated_private_child VALUES(1,1)
+- sql: DROP TABLE IF EXISTS generated_public_commit_child
+- sql: DROP TABLE IF EXISTS generated_public_commit_parent
+- sql: DROP PROCEDURE IF EXISTS generated_public_commit_probe
+- sql: CREATE TABLE generated_public_commit_parent(id INT NOT NULL PRIMARY KEY,code INT NOT NULL)
+- sql: CREATE TABLE generated_public_commit_child(id INT NOT NULL PRIMARY KEY,parent_id INT NOT NULL)
+- sql: INSERT generated_public_commit_parent VALUES(1,17)
+- sql: INSERT generated_public_commit_child VALUES(1,1)
+- sql: CREATE PROCEDURE generated_public_commit_probe AS SELECT 41 AS value
+- sql: DROP TABLE IF EXISTS generated_public_rollback_child
+- sql: DROP TABLE IF EXISTS generated_public_rollback_parent
+- sql: DROP PROCEDURE IF EXISTS generated_public_rollback_probe
+- sql: CREATE TABLE generated_public_rollback_parent(id INT NOT NULL PRIMARY KEY,code INT NOT NULL)
+- sql: CREATE TABLE generated_public_rollback_child(id INT NOT NULL PRIMARY KEY,parent_id INT NOT NULL)
+- sql: INSERT generated_public_rollback_parent VALUES(1,17)
+- sql: INSERT generated_public_rollback_child VALUES(1,1)
+- sql: CREATE PROCEDURE generated_public_rollback_probe AS SELECT 41 AS value
 cleanup:
 - sql: DROP TABLE IF EXISTS generated_commit_child
+- sql: DROP TABLE IF EXISTS generated_commit_owned_parent
 - sql: DROP TABLE IF EXISTS generated_commit_parent
 - sql: DROP PROCEDURE IF EXISTS generated_commit_probe
 - sql: DROP TABLE IF EXISTS generated_rollback_child
+- sql: DROP TABLE IF EXISTS generated_rollback_owned_parent
 - sql: DROP TABLE IF EXISTS generated_rollback_parent
 - sql: DROP PROCEDURE IF EXISTS generated_rollback_probe
 - sql: DROP TABLE IF EXISTS generated_source_child
@@ -59,8 +80,15 @@ cleanup:
 - sql: DROP TABLE IF EXISTS generated_metadata_parent
 - sql: DROP PROCEDURE IF EXISTS generated_metadata_probe
 - sql: DROP TABLE IF EXISTS generated_private_child
+- sql: DROP TABLE IF EXISTS generated_private_owned_parent
 - sql: DROP TABLE IF EXISTS generated_private_parent
 - sql: DROP PROCEDURE IF EXISTS generated_private_probe
+- sql: DROP TABLE IF EXISTS generated_public_commit_child
+- sql: DROP TABLE IF EXISTS generated_public_commit_parent
+- sql: DROP PROCEDURE IF EXISTS generated_public_commit_probe
+- sql: DROP TABLE IF EXISTS generated_public_rollback_child
+- sql: DROP TABLE IF EXISTS generated_public_rollback_parent
+- sql: DROP PROCEDURE IF EXISTS generated_public_rollback_probe
 test_cases:
 - name: Metadata probes then source removal and FK share the original commit
   tds:
@@ -82,15 +110,32 @@ test_cases:
     - connection: owner
       sql: DROP PROCEDURE generated_commit_probe
     - connection: owner
-      sql: ALTER TABLE generated_commit_child ADD CONSTRAINT generated_commit_reference FOREIGN KEY(parent_id) REFERENCES generated_commit_parent(id) ON
-        UPDATE CASCADE
+      sql: CREATE TABLE generated_commit_owned_parent(id INT NOT NULL PRIMARY KEY,code INT NOT NULL)
+    - connection: owner
+      sql: INSERT generated_commit_owned_parent(id,code) SELECT id,code FROM generated_commit_parent
+    - connection: owner
+      sql: SELECT id,code FROM generated_commit_owned_parent ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          code: 17
+    - connection: observer
+      sql: SELECT COUNT(*) AS n FROM sys.objects WHERE type='U' AND name='generated_commit_owned_parent'
+      expect:
+        rows: 1
+        data:
+        - n: 0
+    - connection: owner
+      sql: ALTER TABLE generated_commit_child ADD CONSTRAINT generated_commit_reference FOREIGN KEY(parent_id) REFERENCES generated_commit_owned_parent(id)
+        ON UPDATE CASCADE
     - connection: owner
       sql: INSERT generated_commit_child VALUES(2,1)
     - connection: owner
-      sql: UPDATE generated_commit_parent SET id=2 WHERE id=1
+      sql: UPDATE generated_commit_owned_parent SET id=2 WHERE id=1
     - connection: owner
-      sql: SELECT p.id AS parent_id,p.code,c.id AS child_id,c.parent_id AS reference_id FROM generated_commit_parent p JOIN generated_commit_child c ON
-        p.id=c.parent_id ORDER BY c.id
+      sql: SELECT p.id AS parent_id,p.code,c.id AS child_id,c.parent_id AS reference_id FROM generated_commit_owned_parent p JOIN generated_commit_child
+        c ON p.id=c.parent_id ORDER BY c.id
       expect:
         rows: 2
         data:
@@ -131,10 +176,45 @@ test_cases:
         data:
         - n: 0
     - connection: owner
+      sql: SELECT id,code FROM generated_commit_owned_parent ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 2
+          code: 17
+    - connection: owner
+      sql: SELECT id,code FROM generated_commit_parent ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          code: 17
+    - connection: observer
+      sql: SELECT id,code FROM generated_commit_parent ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          code: 17
+    - connection: owner
       sql: COMMIT TRANSACTION
     - connection: observer
-      sql: SELECT p.id AS parent_id,p.code,c.id AS child_id,c.parent_id AS reference_id FROM generated_commit_parent p JOIN generated_commit_child c ON
-        p.id=c.parent_id ORDER BY c.id
+      sql: SELECT id,code FROM generated_commit_parent ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          code: 17
+    - connection: observer
+      sql: SELECT id,code FROM generated_commit_owned_parent ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 2
+          code: 17
+    - connection: observer
+      sql: SELECT p.id AS parent_id,p.code,c.id AS child_id,c.parent_id AS reference_id FROM generated_commit_owned_parent p JOIN generated_commit_child
+        c ON p.id=c.parent_id ORDER BY c.id
       expect:
         rows: 2
         data:
@@ -178,15 +258,32 @@ test_cases:
     - connection: owner
       sql: DROP PROCEDURE generated_rollback_probe
     - connection: owner
-      sql: ALTER TABLE generated_rollback_child ADD CONSTRAINT generated_rollback_reference FOREIGN KEY(parent_id) REFERENCES generated_rollback_parent(id)
+      sql: CREATE TABLE generated_rollback_owned_parent(id INT NOT NULL PRIMARY KEY,code INT NOT NULL)
+    - connection: owner
+      sql: INSERT generated_rollback_owned_parent(id,code) SELECT id,code FROM generated_rollback_parent
+    - connection: owner
+      sql: SELECT id,code FROM generated_rollback_owned_parent ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          code: 17
+    - connection: observer
+      sql: SELECT COUNT(*) AS n FROM sys.objects WHERE type='U' AND name='generated_rollback_owned_parent'
+      expect:
+        rows: 1
+        data:
+        - n: 0
+    - connection: owner
+      sql: ALTER TABLE generated_rollback_child ADD CONSTRAINT generated_rollback_reference FOREIGN KEY(parent_id) REFERENCES generated_rollback_owned_parent(id)
         ON UPDATE CASCADE
     - connection: owner
       sql: INSERT generated_rollback_child VALUES(2,1)
     - connection: owner
-      sql: UPDATE generated_rollback_parent SET id=2 WHERE id=1
+      sql: UPDATE generated_rollback_owned_parent SET id=2 WHERE id=1
     - connection: owner
-      sql: SELECT p.id AS parent_id,p.code,c.id AS child_id,c.parent_id AS reference_id FROM generated_rollback_parent p JOIN generated_rollback_child c
-        ON p.id=c.parent_id ORDER BY c.id
+      sql: SELECT p.id AS parent_id,p.code,c.id AS child_id,c.parent_id AS reference_id FROM generated_rollback_owned_parent p JOIN generated_rollback_child
+        c ON p.id=c.parent_id ORDER BY c.id
       expect:
         rows: 2
         data:
@@ -227,7 +324,41 @@ test_cases:
         data:
         - n: 0
     - connection: owner
+      sql: SELECT id,code FROM generated_rollback_owned_parent ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 2
+          code: 17
+    - connection: owner
+      sql: SELECT id,code FROM generated_rollback_parent ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          code: 17
+    - connection: observer
+      sql: SELECT id,code FROM generated_rollback_parent ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          code: 17
+    - connection: owner
       sql: ROLLBACK TRANSACTION
+    - connection: observer
+      sql: SELECT id,code FROM generated_rollback_parent ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          code: 17
+    - connection: observer
+      sql: SELECT COUNT(*) AS n FROM sys.objects WHERE type='U' AND name='generated_rollback_owned_parent'
+      expect:
+        rows: 1
+        data:
+        - n: 0
     - connection: observer
       sql: SELECT p.id AS parent_id,p.code,c.id AS child_id,c.parent_id AS reference_id FROM generated_rollback_parent p JOIN generated_rollback_child c
         ON p.id=c.parent_id ORDER BY c.id
@@ -328,13 +459,30 @@ test_cases:
         data:
         - n: 0
     - connection: owner
-      sql: ALTER TABLE generated_private_child ADD CONSTRAINT generated_private_reference FOREIGN KEY(parent_id) REFERENCES generated_private_parent(id)
+      sql: CREATE TABLE generated_private_owned_parent(id INT NOT NULL PRIMARY KEY,code INT NOT NULL)
+    - connection: owner
+      sql: INSERT generated_private_owned_parent(id,code) SELECT id,code FROM generated_private_parent
+    - connection: owner
+      sql: SELECT id,code FROM generated_private_owned_parent ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          code: 17
+    - connection: observer
+      sql: SELECT COUNT(*) AS n FROM sys.objects WHERE type='U' AND name='generated_private_owned_parent'
+      expect:
+        rows: 1
+        data:
+        - n: 0
+    - connection: owner
+      sql: ALTER TABLE generated_private_child ADD CONSTRAINT generated_private_reference FOREIGN KEY(parent_id) REFERENCES generated_private_owned_parent(id)
         ON UPDATE CASCADE
     - connection: owner
       sql: INSERT generated_private_child VALUES(2,1)
     - connection: owner
-      sql: SELECT p.id AS parent_id,p.code,c.id AS child_id,c.parent_id AS reference_id FROM generated_private_parent p JOIN generated_private_child c ON
-        p.id=c.parent_id ORDER BY c.id
+      sql: SELECT p.id AS parent_id,p.code,c.id AS child_id,c.parent_id AS reference_id FROM generated_private_owned_parent p JOIN generated_private_child
+        c ON p.id=c.parent_id ORDER BY c.id
       expect:
         rows: 2
         data:
@@ -347,7 +495,41 @@ test_cases:
           child_id: 2
           reference_id: 1
     - connection: owner
+      sql: SELECT id,code FROM generated_private_owned_parent ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          code: 17
+    - connection: owner
+      sql: SELECT id,code FROM generated_private_parent ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          code: 17
+    - connection: observer
+      sql: SELECT id,code FROM generated_private_parent ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          code: 17
+    - connection: owner
       sql: ROLLBACK TRANSACTION
+    - connection: observer
+      sql: SELECT id,code FROM generated_private_parent ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          code: 17
+    - connection: observer
+      sql: SELECT COUNT(*) AS n FROM sys.objects WHERE type='U' AND name='generated_private_owned_parent'
+      expect:
+        rows: 1
+        data:
+        - n: 0
     - connection: observer
       sql: SELECT COUNT(*) AS n FROM sys.objects WHERE name='generated_private_probe'
       expect:
@@ -370,3 +552,204 @@ test_cases:
         rows: 1
         data:
         - n: 0
+- name: Plain public metadata and source removal admit FK then commit before real cascade
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: SELECT name FROM sys.objects WHERE type='P' AND name='generated_public_commit_probe'
+      expect:
+        rows: 1
+        data:
+        - name: generated_public_commit_probe
+    - connection: owner
+      sql: SELECT COUNT(*) AS n FROM sys.objects WHERE type='U' AND name IN ('generated_public_commit_parent','generated_public_commit_child')
+      expect:
+        rows: 1
+        data:
+        - n: 2
+    - connection: owner
+      sql: DROP PROCEDURE generated_public_commit_probe
+    - connection: owner
+      sql: ALTER TABLE generated_public_commit_child ADD CONSTRAINT generated_public_commit_reference FOREIGN KEY(parent_id) REFERENCES generated_public_commit_parent(id)
+        ON UPDATE CASCADE
+    - connection: owner
+      sql: SELECT p.id AS parent_id,p.code,c.id AS child_id,c.parent_id AS reference_id FROM generated_public_commit_parent p JOIN generated_public_commit_child
+        c ON p.id=c.parent_id ORDER BY c.id
+      expect:
+        rows: 1
+        data: &id001
+        - parent_id: 1
+          code: 17
+          child_id: 1
+          reference_id: 1
+    - connection: observer
+      sql: SELECT p.id AS parent_id,p.code,c.id AS child_id,c.parent_id AS reference_id FROM generated_public_commit_parent p JOIN generated_public_commit_child
+        c ON p.id=c.parent_id ORDER BY c.id
+      expect:
+        rows: 1
+        data: *id001
+    - connection: owner
+      sql: SELECT COUNT(*) AS n FROM sys.objects WHERE type='P' AND name='generated_public_commit_probe'
+      expect:
+        rows: 1
+        data:
+        - n: 0
+    - connection: observer
+      sql: SELECT COUNT(*) AS n FROM sys.objects WHERE type='P' AND name='generated_public_commit_probe'
+      expect:
+        rows: 1
+        data:
+        - n: 1
+    - connection: owner
+      sql: SELECT COUNT(*) AS n FROM sys.foreign_keys WHERE name='generated_public_commit_reference'
+      expect:
+        rows: 1
+        data:
+        - n: 1
+    - connection: observer
+      sql: SELECT COUNT(*) AS n FROM sys.foreign_keys WHERE name='generated_public_commit_reference'
+      expect:
+        rows: 1
+        data:
+        - n: 0
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: owner
+      sql: SELECT @@TRANCOUNT AS depth,XACT_STATE() AS state
+      expect:
+        rows: 1
+        data:
+        - depth: 0
+          state: 0
+    - connection: owner
+      sql: INSERT generated_public_commit_child VALUES(2,1)
+    - connection: owner
+      sql: UPDATE generated_public_commit_parent SET id=2 WHERE id=1
+    - connection: observer
+      sql: SELECT p.id AS parent_id,p.code,c.id AS child_id,c.parent_id AS reference_id FROM generated_public_commit_parent p JOIN generated_public_commit_child
+        c ON p.id=c.parent_id ORDER BY c.id
+      expect:
+        rows: 2
+        data:
+        - parent_id: 2
+          code: 17
+          child_id: 1
+          reference_id: 2
+        - parent_id: 2
+          code: 17
+          child_id: 2
+          reference_id: 2
+    - connection: observer
+      sql: SELECT COUNT(*) AS n FROM sys.foreign_keys WHERE name='generated_public_commit_reference'
+      expect:
+        rows: 1
+        data:
+        - n: 1
+    - connection: observer
+      sql: SELECT COUNT(*) AS n FROM sys.objects WHERE type='P' AND name='generated_public_commit_probe'
+      expect:
+        rows: 1
+        data:
+        - n: 0
+- name: Plain public metadata source and FK rollback restores source rows and unenforced child
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: SELECT name FROM sys.objects WHERE type='P' AND name='generated_public_rollback_probe'
+      expect:
+        rows: 1
+        data:
+        - name: generated_public_rollback_probe
+    - connection: owner
+      sql: SELECT COUNT(*) AS n FROM sys.objects WHERE type='U' AND name IN ('generated_public_rollback_parent','generated_public_rollback_child')
+      expect:
+        rows: 1
+        data:
+        - n: 2
+    - connection: owner
+      sql: DROP PROCEDURE generated_public_rollback_probe
+    - connection: owner
+      sql: ALTER TABLE generated_public_rollback_child ADD CONSTRAINT generated_public_rollback_reference FOREIGN KEY(parent_id) REFERENCES generated_public_rollback_parent(id)
+        ON UPDATE CASCADE
+    - connection: owner
+      sql: SELECT p.id AS parent_id,p.code,c.id AS child_id,c.parent_id AS reference_id FROM generated_public_rollback_parent p JOIN generated_public_rollback_child
+        c ON p.id=c.parent_id ORDER BY c.id
+      expect:
+        rows: 1
+        data: &id002
+        - parent_id: 1
+          code: 17
+          child_id: 1
+          reference_id: 1
+    - connection: observer
+      sql: SELECT p.id AS parent_id,p.code,c.id AS child_id,c.parent_id AS reference_id FROM generated_public_rollback_parent p JOIN generated_public_rollback_child
+        c ON p.id=c.parent_id ORDER BY c.id
+      expect:
+        rows: 1
+        data: *id002
+    - connection: owner
+      sql: SELECT COUNT(*) AS n FROM sys.objects WHERE type='P' AND name='generated_public_rollback_probe'
+      expect:
+        rows: 1
+        data:
+        - n: 0
+    - connection: observer
+      sql: SELECT COUNT(*) AS n FROM sys.objects WHERE type='P' AND name='generated_public_rollback_probe'
+      expect:
+        rows: 1
+        data:
+        - n: 1
+    - connection: owner
+      sql: SELECT COUNT(*) AS n FROM sys.foreign_keys WHERE name='generated_public_rollback_reference'
+      expect:
+        rows: 1
+        data:
+        - n: 1
+    - connection: observer
+      sql: SELECT COUNT(*) AS n FROM sys.foreign_keys WHERE name='generated_public_rollback_reference'
+      expect:
+        rows: 1
+        data:
+        - n: 0
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: observer
+      sql: SELECT p.id AS parent_id,p.code,c.id AS child_id,c.parent_id AS reference_id FROM generated_public_rollback_parent p JOIN generated_public_rollback_child
+        c ON p.id=c.parent_id ORDER BY c.id
+      expect:
+        rows: 1
+        data: *id002
+    - connection: observer
+      sql: EXEC generated_public_rollback_probe
+      expect:
+        rows: 1
+        data:
+        - value: 41
+    - connection: observer
+      sql: SELECT COUNT(*) AS n FROM sys.foreign_keys WHERE name='generated_public_rollback_reference'
+      expect:
+        rows: 1
+        data:
+        - n: 0
+    - connection: owner
+      sql: INSERT generated_public_rollback_child VALUES(2,999)
+    - connection: observer
+      sql: SELECT id,parent_id FROM generated_public_rollback_child ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          parent_id: 1
+        - id: 2
+          parent_id: 999
+    - connection: observer
+      sql: SELECT id,code FROM generated_public_rollback_parent ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          code: 17
