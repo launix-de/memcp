@@ -27,6 +27,9 @@ setup:
 - sql: INSERT constant_append_mysql VALUES(10,100)
 - sql: CREATE TABLE constant_append_text(id INT PRIMARY KEY)
 - sql: INSERT constant_append_text VALUES(11)
+- sql: CREATE TYPE constant_append_required FROM INT NOT NULL
+- sql: CREATE TABLE constant_append_alias(id INT PRIMARY KEY)
+- sql: INSERT constant_append_alias VALUES(12)
 test_cases:
 - name: Prior writes main and delta prefixes and later writes share the original decision
   tds:
@@ -155,6 +158,23 @@ test_cases:
 - name: Empty historical values are distinct from SQL NULL and absent defaults
   sql: SELECT id,label,CASE WHEN label IS NULL THEN 1 ELSE 0 END AS null_flag FROM constant_append_text
   expect: {rows: 1,data: [{id: 11,label: '',null_flag: 0}]}
+- name: Effective alias nullability determines historical initialization
+  sql: BEGIN TRANSACTION; ALTER TABLE constant_append_alias ADD flag constant_append_required DEFAULT (4); COMMIT TRANSACTION
+- name: An omitted syntactic NOT NULL still preserves the required alias default
+  sql: SELECT id,flag FROM constant_append_alias
+  expect: {rows: 1,data: [{id: 12,flag: 4}]}
+- name: WITH VALUES requires a default declaration
+  sql: ALTER TABLE constant_append_alias ADD invalid_values INT NULL WITH VALUES
+  expect: {error: true}
+- name: Duplicate WITH VALUES is invalid
+  sql: ALTER TABLE constant_append_alias ADD duplicate_values INT NULL DEFAULT (3) WITH VALUES WITH VALUES
+  expect: {error: true}
+- name: CREATE does not admit ADD-only WITH VALUES syntax
+  sql: CREATE TABLE constant_append_invalid_create(id INT DEFAULT (3) WITH VALUES)
+  expect: {error: true}
+- name: Invalid declarations do not publish any extra column
+  sql: SELECT name FROM sys.columns WHERE object_id=OBJECT_ID(N'constant_append_alias') ORDER BY column_id
+  expect: {rows: 2,data: [{name: id},{name: flag}]}
 - name: Replacing the future default does not rewrite historical initial values
   sql: ALTER TABLE constant_append_rows DROP CONSTRAINT constant_amount_default; ALTER TABLE constant_append_rows ADD CONSTRAINT constant_amount_replacement DEFAULT (9) FOR amount
 - name: Future inserts use the replacement default
@@ -227,3 +247,5 @@ cleanup:
 - sql: DROP TABLE IF EXISTS constant_append_pg
 - sql: DROP TABLE IF EXISTS constant_append_mysql
 - sql: DROP TABLE IF EXISTS constant_append_text
+- sql: DROP TABLE IF EXISTS constant_append_alias
+- sql: DROP TYPE IF EXISTS constant_append_required
