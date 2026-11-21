@@ -39,6 +39,7 @@ const catalogColumnAppendJournalPrefix = "catalog-v16/"
 const catalogColumnPropertyJournalPrefix = "catalog-v17/"
 const catalogForeignValidationJournalPrefix = "catalog-v18/"
 const catalogColumnInitializationJournalPrefix = "catalog-v19/"
+const catalogColumnPropertyClaimJournalPrefix = "catalog-v20/"
 
 type catalogDecisionRecord struct {
 	encoded          string
@@ -76,7 +77,7 @@ type catalogDecisionRecord struct {
 
 // Participant-bearing versions use the same original-T enrollment and settlement owner.
 func (record *catalogDecisionRecord) hasRowParticipants() bool {
-	return record.Format == 10 || record.Format == 11 || (record.Format == 12 || record.Format == 13 || record.Format == 14 || record.Format == 15 || record.Format == 16 || record.Format == 17 || record.Format == 18 || record.Format == 19) && len(record.Participants) > 1
+	return record.Format == 10 || record.Format == 11 || (record.Format == 12 || record.Format == 13 || record.Format == 14 || record.Format == 15 || record.Format == 16 || record.Format == 17 || record.Format == 18 || record.Format == 19 || record.Format == 20) && len(record.Participants) > 1
 }
 
 func (record *catalogDecisionRecord) hasEnforcementDeltas() bool {
@@ -95,7 +96,9 @@ func encodeCatalogDecision(record *catalogDecisionRecord) string {
 		panic(err)
 	}
 	prefix := catalogJournalPrefix
-	if record.Format == 19 {
+	if record.Format == 20 {
+		prefix = catalogColumnPropertyClaimJournalPrefix
+	} else if record.Format == 19 {
 		prefix = catalogColumnInitializationJournalPrefix
 	} else if record.Format == 18 {
 		prefix = catalogForeignValidationJournalPrefix
@@ -136,7 +139,9 @@ func encodeCatalogDecision(record *catalogDecisionRecord) string {
 }
 func decodeCatalogDecision(value string) (*catalogDecisionRecord, error) {
 	prefix := catalogJournalPrefix
-	if strings.HasPrefix(value, catalogColumnInitializationJournalPrefix) {
+	if strings.HasPrefix(value, catalogColumnPropertyClaimJournalPrefix) {
+		prefix = catalogColumnPropertyClaimJournalPrefix
+	} else if strings.HasPrefix(value, catalogColumnInitializationJournalPrefix) {
 		prefix = catalogColumnInitializationJournalPrefix
 	} else if strings.HasPrefix(value, catalogForeignValidationJournalPrefix) {
 		prefix = catalogForeignValidationJournalPrefix
@@ -183,7 +188,7 @@ func decodeCatalogDecision(value string) (*catalogDecisionRecord, error) {
 	if err = json.Unmarshal(data, &record); err != nil {
 		return nil, err
 	}
-	if prefix == catalogParticipantJournalPrefix || prefix == catalogEnforcementParticipantJournalPrefix || prefix == catalogForeignDropJournalPrefix || prefix == catalogForeignHistoryJournalPrefix || prefix == catalogColumnDeclarationJournalPrefix || prefix == catalogNativeDeclarationJournalPrefix || prefix == catalogColumnPropertyJournalPrefix || prefix == catalogColumnAppendJournalPrefix || prefix == catalogForeignValidationJournalPrefix || prefix == catalogColumnInitializationJournalPrefix {
+	if prefix == catalogParticipantJournalPrefix || prefix == catalogEnforcementParticipantJournalPrefix || prefix == catalogForeignDropJournalPrefix || prefix == catalogForeignHistoryJournalPrefix || prefix == catalogColumnDeclarationJournalPrefix || prefix == catalogNativeDeclarationJournalPrefix || prefix == catalogColumnPropertyJournalPrefix || prefix == catalogColumnAppendJournalPrefix || prefix == catalogForeignValidationJournalPrefix || prefix == catalogColumnInitializationJournalPrefix || prefix == catalogColumnPropertyClaimJournalPrefix {
 		decoder := json.NewDecoder(strings.NewReader(string(data)))
 		decoder.DisallowUnknownFields()
 		if err := decoder.Decode(&record); err != nil {
@@ -192,8 +197,9 @@ func decodeCatalogDecision(value string) (*catalogDecisionRecord, error) {
 	}
 	// Historical domains never acquire the new state bit, including an explicit
 	// false spelling. The schema decoder records presence without changing its
-	// old field/default semantics; only V18 owns this durable declaration fact.
-	if present, _ := record.foreignValidationFacts(); record.Format != 18 && record.Format != 19 && present {
+	// old field/default semantics; only V18 and its explicit newer domains own
+	// this durable declaration fact.
+	if present, _ := record.foreignValidationFacts(); record.Format != 18 && record.Format != 19 && record.Format != 20 && present {
 		return nil, fmt.Errorf("foreign validation state requires catalog version 18")
 	}
 	validShape := (record.Format == 1 && prefix == catalogJournalPrefix && len(record.Tables) > 0 && len(record.ForeignKeys) == 0 && len(record.Sources) == 0 && len(record.Checks) == 0) || (record.Format == 2 && prefix == catalogDeltaJournalPrefix && len(record.Tables) == 0 && len(record.ForeignKeys) > 0 && len(record.Sources) == 0 && len(record.Checks) == 0) || (record.Format == 3 && prefix == catalogSourceJournalPrefix && len(record.Tables) == 0 && len(record.Sources) > 0 && len(record.Checks) == 0) || (record.Format == 4 && prefix == catalogCheckJournalPrefix && len(record.Tables) == 0 && len(record.Checks) > 0)
@@ -236,20 +242,36 @@ func decodeCatalogDecision(value string) (*catalogDecisionRecord, error) {
 	if err := json.Unmarshal(data, &fields); err != nil {
 		return nil, err
 	}
-	for key := range fields {
-		if strings.EqualFold(key, "column_appends") && record.Format != 16 && record.Format != 17 && record.Format != 18 && record.Format != 19 {
+	for key, raw := range fields {
+		if strings.EqualFold(key, "column_property_removals") && record.Format == 20 {
+			return nil, fmt.Errorf("ordered column properties cannot use an unordered removal field")
+		}
+		if strings.EqualFold(key, "native_declarations") && record.Format != 20 {
+			var actions []map[string]json.RawMessage
+			if err := json.Unmarshal(raw, &actions); err != nil {
+				return nil, err
+			}
+			for _, action := range actions {
+				for field := range action {
+					if strings.EqualFold(field, "column_property") {
+						return nil, fmt.Errorf("column property claims require catalog version 20")
+					}
+				}
+			}
+		}
+		if strings.EqualFold(key, "column_appends") && record.Format != 16 && record.Format != 17 && record.Format != 18 && record.Format != 19 && record.Format != 20 {
 			return nil, fmt.Errorf("nullable appends require their native journal version")
 		}
 		if strings.EqualFold(key, "column_property_removals") && record.Format != 17 && record.Format != 18 && record.Format != 19 {
 			return nil, fmt.Errorf("column property removal requires its native journal version")
 		}
-		if strings.EqualFold(key, "native_declarations") && record.Format != 15 && record.Format != 16 && record.Format != 17 && record.Format != 18 && record.Format != 19 {
+		if strings.EqualFold(key, "native_declarations") && record.Format != 15 && record.Format != 16 && record.Format != 17 && record.Format != 18 && record.Format != 19 && record.Format != 20 {
 			return nil, fmt.Errorf("ordered native declarations require their journal version")
 		}
 		if strings.EqualFold(key, "foreign_history") && record.Format != 13 {
 			return nil, fmt.Errorf("foreign history requires its native journal version")
 		}
-		if strings.EqualFold(key, "column_declarations") && record.Format != 14 && record.Format != 15 && record.Format != 16 && record.Format != 17 && record.Format != 18 && record.Format != 19 {
+		if strings.EqualFold(key, "column_declarations") && record.Format != 14 && record.Format != 15 && record.Format != 16 && record.Format != 17 && record.Format != 18 && record.Format != 19 && record.Format != 20 {
 			return nil, fmt.Errorf("column declarations require their native journal version")
 		}
 		if strings.EqualFold(key, "foreign_drops") && record.Format != 12 {
@@ -268,7 +290,7 @@ func decodeCatalogDecision(value string) (*catalogDecisionRecord, error) {
 	// column contracts; V15 composes those contracts with its ordered key/FK
 	// program. Earlier version domains above remain unchanged.
 	switch record.Format {
-	case 14, 15, 16, 17, 18, 19:
+	case 14, 15, 16, 17, 18, 19, 20:
 		validShape = record.Namespace == "" && validLocalCatalogTransaction(record.Transaction, record.Boot) &&
 			len(record.Tables) == 0 && len(record.TableDrops) == 0 && len(record.ForeignKeys) == 0 &&
 			len(record.ForeignDrops) == 0 && len(record.ForeignHistory) == 0 &&
@@ -281,6 +303,8 @@ func decodeCatalogDecision(value string) (*catalogDecisionRecord, error) {
 			validShape = validShape && prefix == catalogColumnAppendJournalPrefix && len(record.ColumnAppends) > 0
 		} else if record.Format == 17 {
 			validShape = validShape && prefix == catalogColumnPropertyJournalPrefix && len(record.ColumnPropertyRemovals) > 0
+		} else if record.Format == 20 {
+			validShape = validShape && prefix == catalogColumnPropertyClaimJournalPrefix && len(record.NativeDeclarations) > 0 && record.hasColumnPropertyClaimActions()
 		} else if record.Format == 18 {
 			_, untrusted := record.foreignValidationFacts()
 			validShape = validShape && prefix == catalogForeignValidationJournalPrefix && len(record.NativeDeclarations) > 0 && untrusted
@@ -294,12 +318,13 @@ func decodeCatalogDecision(value string) (*catalogDecisionRecord, error) {
 	default:
 		validShape = validShape && len(record.ColumnDeclarations) == 0 && len(record.NativeDeclarations) == 0
 	}
-	if record.Format != 16 && record.Format != 17 && record.Format != 18 && record.Format != 19 {
+	if record.Format != 16 && record.Format != 17 && record.Format != 18 && record.Format != 19 && record.Format != 20 {
 		validShape = validShape && len(record.ColumnAppends) == 0
 	}
 	// New initialization authority is never inferred in old domains, even for
-	// an explicit null field. Nullable-only V16 recipes retain their old shape.
-	if record.Format != 19 {
+	// an explicit null field. V20 composes the V19 recipe with ordered property
+	// claims; nullable-only V16 recipes retain their old shape.
+	if record.Format != 19 && record.Format != 20 {
 		for key, raw := range fields {
 			if strings.EqualFold(key, "column_appends") {
 				var appends []map[string]json.RawMessage
@@ -320,6 +345,9 @@ func decodeCatalogDecision(value string) (*catalogDecisionRecord, error) {
 		return nil, err
 	}
 	if err := validateColumnPropertyRemovalShape(record.ColumnPropertyRemovals); err != nil {
+		return nil, err
+	}
+	if err := record.validateColumnPropertyProfile(); err != nil {
 		return nil, err
 	}
 	if len(record.NativeDeclarations) > 0 {
@@ -397,7 +425,7 @@ func decodeCatalogDecision(value string) (*catalogDecisionRecord, error) {
 		names[drop.Name] = true
 	}
 	nameKey := strings.ToLower
-	if record.Format == 13 || record.Format == 14 || record.Format == 15 || record.Format == 16 || record.Format == 17 || record.Format == 18 || record.Format == 19 {
+	if record.Format == 13 || record.Format == 14 || record.Format == 15 || record.Format == 16 || record.Format == 17 || record.Format == 18 || record.Format == 19 || record.Format == 20 {
 		nameKey = scm.CaseFoldKey
 	}
 	foreignNames := make(map[string]bool)
@@ -538,7 +566,7 @@ func decodeCatalogDecision(value string) (*catalogDecisionRecord, error) {
 		}
 		foreignNames[name] = true
 	}
-	if record.Format == 19 {
+	if record.Format == 19 || record.Format == 20 {
 		overridden := make(map[string]bool)
 		for _, d := range record.ColumnDefaults {
 			overridden[d.Table+"\x00"+d.Identity+"\x00"+d.Column] = true
@@ -553,7 +581,7 @@ func decodeCatalogDecision(value string) (*catalogDecisionRecord, error) {
 			}
 		}
 	}
-	if record.Format == 15 || record.Format == 16 || record.Format == 17 || record.Format == 18 || record.Format == 19 {
+	if record.Format == 15 || record.Format == 16 || record.Format == 17 || record.Format == 18 || record.Format == 19 || record.Format == 20 {
 		// Compare only final active names with the other retained declaration
 		// families; canceled/replaced native actions stay inert ordered history.
 		keys := make(map[string]*catalogKeyDeclaration)
@@ -750,7 +778,7 @@ func (record *catalogDecisionRecord) retainSourceFrameMemory(db *database) {
 		return
 	}
 	bytes := uint(unsafe.Sizeof(*record)) + uint(len(record.encoded)) + uint(cap(record.Sources))*uint(unsafe.Sizeof(catalogSourceDeclaration{})) + uint(cap(record.Checks))*uint(unsafe.Sizeof(catalogCheckDeclaration{}))
-	if record.Format == 11 || record.Format == 12 || record.Format == 13 || record.Format == 14 || record.Format == 15 || record.Format == 16 || record.Format == 17 || record.Format == 18 || record.Format == 19 {
+	if record.Format == 11 || record.Format == 12 || record.Format == 13 || record.Format == 14 || record.Format == 15 || record.Format == 16 || record.Format == 17 || record.Format == 18 || record.Format == 19 || record.Format == 20 {
 		bytes += uint(cap(record.ForeignKeys)) * uint(unsafe.Sizeof(catalogForeignDeclaration{}))
 		for _, declaration := range record.ForeignKeys {
 			bytes += uint(len(declaration.ChildIdentity)+len(declaration.ParentIdentity)) + declaration.Foreign.payloadFootprint
@@ -775,6 +803,9 @@ func (record *catalogDecisionRecord) retainSourceFrameMemory(db *database) {
 		if action.Key != nil {
 			d := action.Key
 			bytes += uint(unsafe.Sizeof(*d)) + uint(len(d.Table)+len(d.Identity)) + uniqueKeyPayloadBytes(d.Key)
+		}
+		if action.Property != nil {
+			bytes += action.Property.memory()
 		}
 	}
 	bytes += uint(len(record.AuthorityStorage)) + uint(cap(record.Participants))*uint(unsafe.Sizeof(catalogParticipantIdentity{}))

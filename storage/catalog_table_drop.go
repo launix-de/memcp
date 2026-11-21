@@ -158,6 +158,14 @@ func (changes *publicCatalogChanges) stageTableDrop(tx *TxContext, t *table, lea
 	changes.mu.Lock()
 	defer changes.mu.Unlock()
 	defer changes.refreshMemoryLocked()
+	// Re-attest under the amendment owner: an append constructor can publish
+	// after the caller's cold check while waiting for its existing DDL lease.
+	if len(tx.publicColumnAppends()) != 0 {
+		panic("column append cannot share a table retirement decision")
+	}
+	if tx.hasSurvivingColumnPropertiesExcept(t) {
+		panic("table removal cannot join surviving column property amendments")
+	}
 	acquired := changes.leases[t] == nil
 	accepted := false
 	if acquired {

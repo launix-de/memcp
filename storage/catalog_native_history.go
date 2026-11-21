@@ -14,14 +14,16 @@ import "github.com/launix-de/memcp/scm"
 // Keys and their FK consumers share one ordered inert declaration program.
 // A recipe is not a second catalog, row payload or independently accepted Tx.
 type catalogNativeDeclaration struct {
-	Operation string                     `json:"operation"`
-	Key       *catalogKeyDeclaration     `json:"key,omitempty"`
-	Foreign   *catalogForeignDeclaration `json:"foreign,omitempty"`
+	Operation string                       `json:"operation"`
+	Key       *catalogKeyDeclaration       `json:"key,omitempty"`
+	Foreign   *catalogForeignDeclaration   `json:"foreign,omitempty"`
+	Property  *catalogColumnPropertyChange `json:"column_property,omitempty"`
 }
 
 func (tx *TxContext) publicNativeDeclarations() []catalogNativeDeclaration {
 	var result []catalogNativeDeclaration
 	history := tx.publicForeignAmendments()
+	properties := tx.hasColumnPropertyClaims()
 	// Pending state transitions belong to this same amendment history. Freeze
 	// each addition's accepted validation fact once, including its matching DROP;
 	// recovery never publishes a transient pending state or a second projection.
@@ -39,6 +41,13 @@ func (tx *TxContext) publicNativeDeclarations() []catalogNativeDeclaration {
 		}
 	}
 	for _, entry := range history {
+		if properties && entry.column != nil && entry.column.propertyChange != nil && !tx.ownsTableDrop(entry.column.table) {
+			operation := "column_property_claim"
+			if entry.column.propertyRemoval != nil {
+				operation = "column_property_drop"
+			}
+			result = append(result, catalogNativeDeclaration{Operation: operation, Property: entry.column.propertyChange})
+		}
 		if key := entry.publicKey; key != nil {
 			d := key.declaration
 			result = append(result, catalogNativeDeclaration{Operation: "key_" + key.operation, Key: &d})
@@ -95,15 +104,16 @@ func effectiveForeignDeclarations(db *database, history []catalogDeclarationAmen
 }
 
 type catalogNativeProjection struct {
-	keys           map[*table][]uniqueKey
-	foreign        map[catalogForeignIdentity][]catalogForeignDeclaration
-	changedForeign map[catalogForeignIdentity]bool
-	foreignAdds    []catalogForeignDeclaration
-	foreignDrops   []catalogForeignDeclaration
+	keys            map[*table][]uniqueKey
+	foreign         map[catalogForeignIdentity][]catalogForeignDeclaration
+	changedForeign  map[catalogForeignIdentity]bool
+	foreignAdds     []catalogForeignDeclaration
+	foreignDrops    []catalogForeignDeclaration
+	propertyColumns map[*table][]*column
 }
 
 func newCatalogNativeProjection(db *database) *catalogNativeProjection {
-	p := &catalogNativeProjection{keys: make(map[*table][]uniqueKey), foreign: make(map[catalogForeignIdentity][]catalogForeignDeclaration), changedForeign: make(map[catalogForeignIdentity]bool)}
+	p := &catalogNativeProjection{propertyColumns: make(map[*table][]*column), keys: make(map[*table][]uniqueKey), foreign: make(map[catalogForeignIdentity][]catalogForeignDeclaration), changedForeign: make(map[catalogForeignIdentity]bool)}
 	p.foreign = nativeForeignDirectory(effectiveForeignDeclarations(db, nil))
 	return p
 }
@@ -130,7 +140,7 @@ func (db *database) projectNativeDeclarations(actions []catalogNativeDeclaration
 	for index, action := range actions {
 		switch action.Operation {
 		case "foreign_add", "foreign_drop":
-			if action.Foreign == nil || action.Key != nil {
+			if action.Foreign == nil || action.Key != nil || action.Property != nil {
 				panic("invalid native foreign action")
 			}
 			d := *action.Foreign
@@ -167,8 +177,15 @@ func (db *database) projectNativeDeclarations(actions []catalogNativeDeclaration
 				added[name] = index
 			}
 			p.changedForeign[name] = true
+		case "column_property_claim", "column_property_drop":
+			if domain != catalogNativeCurrent || action.Property == nil || action.Key != nil || action.Foreign != nil {
+				panic("invalid native column property action")
+			}
+			t := db.tables.Get(action.Property.Table)
+			_, columns := db.projectColumnPropertyChange(action.Property, action.Operation, p.propertyColumns[t])
+			p.propertyColumns[t] = columns
 		case "key_add", "key_drop":
-			if action.Key == nil || action.Foreign != nil {
+			if action.Key == nil || action.Foreign != nil || action.Property != nil {
 				panic("invalid native unique action")
 			}
 			d := *action.Key
@@ -271,6 +288,10 @@ func (db *database) recoverNativeDeclarations(actions []catalogNativeDeclaration
 			db.recoverPublicForeignDeclarations([]catalogForeignDeclaration{*action.Foreign})
 		case "foreign_drop":
 			db.recoverPublicForeignDrops([]catalogForeignDeclaration{*action.Foreign})
+		case "column_property_claim", "column_property_drop":
+			t, columns := db.projectColumnPropertyChange(action.Property, action.Operation, nil)
+			t.Columns = columns
+			db.initializeRecoveryColumnMetadata(t)
 		case "key_add":
 			t := validateCatalogKey(db, *action.Key, nil)
 			t.Unique = append(append([]uniqueKey(nil), t.Unique...), action.Key.Key)
@@ -304,10 +325,37 @@ func validateNativeDeclarationShape(actions []catalogNativeDeclaration) error {
 		}
 		return true
 	}
+	type propertyState struct {
+		declaration *catalogColumnPropertyChange
+		present     bool
+		value       scm.Scmer
+	}
+	propertyCurrent := make(map[[3]string]propertyState)
 	for _, action := range actions {
 		switch action.Operation {
+		case "column_property_claim", "column_property_drop":
+			if action.Property == nil || action.Key != nil || action.Foreign != nil {
+				return fmt.Errorf("invalid native column property action")
+			}
+			if err := validateColumnPropertyChangeShape(action.Property); err != nil {
+				return err
+			}
+			d := action.Property
+			value, _ := columnPropertyValue(d.ValueKind, d.Value)
+			before, _ := columnPropertyValue(d.BeforeKind, d.Before)
+			if action.Operation == "column_property_drop" && (!d.BeforePresent || !sameColumnProperty(value, before)) {
+				return fmt.Errorf("column property retirement lost its predecessor value")
+			}
+			name := [3]string{d.Identity, d.Column, d.Key}
+			if previous, seen := propertyCurrent[name]; seen {
+				if previous.declaration.Table != d.Table || !previous.declaration.Expected.equal(d.Expected) ||
+					previous.present != d.BeforePresent || previous.present && !sameColumnProperty(previous.value, before) {
+					return fmt.Errorf("native column property action lost its ordered predecessor")
+				}
+			}
+			propertyCurrent[name] = propertyState{d, action.Operation == "column_property_claim", value}
 		case "key_add", "key_drop":
-			if action.Key == nil || action.Foreign != nil {
+			if action.Key == nil || action.Foreign != nil || action.Property != nil {
 				return fmt.Errorf("invalid native unique action")
 			}
 			d := *action.Key
@@ -329,7 +377,7 @@ func validateNativeDeclarationShape(actions []catalogNativeDeclaration) error {
 			}
 			keySeen[name] = true
 		case "foreign_add", "foreign_drop":
-			if action.Foreign == nil || action.Key != nil {
+			if action.Foreign == nil || action.Key != nil || action.Property != nil {
 				return fmt.Errorf("invalid native foreign action")
 			}
 			d := *action.Foreign

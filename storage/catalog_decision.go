@@ -491,6 +491,9 @@ func (tx *TxContext) prepareCatalogDecision() error {
 			break
 		}
 	}
+	if record.hasColumnPropertyClaimActions() {
+		record.Format = 20
+	}
 	if len(record.ColumnAppends) != 0 || len(record.NativeDeclarations) != 0 || len(record.ColumnDeclarations) != 0 || len(record.ColumnPropertyRemovals) != 0 || len(record.Checks) != 0 || len(record.ColumnDefaults) != 0 || len(record.CheckDrops) != 0 {
 		commit.publicPublication = db.preparePublicConstraintPublication(record.Checks, record.ColumnDefaults, record.ColumnDeclarations, record.ColumnAppends, record.ColumnPropertyRemovals, record.CheckDrops, record.NativeDeclarations, record.Version, tx.publicConstraintPrograms(), tx.publicCatalogChanges())
 	}

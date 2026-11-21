@@ -7000,6 +7000,11 @@ that context explicitly; stored views refuse this scalar before publication. */
 				(lambda (database name)
 					(if compile_only (tsql_command_binding 'alter-table (list database name) '()) (list (quote tsql_define_check) database name key (car expression) (quote tx) (quote session)))))
 			(parser '(tsql_keyword_alter tsql_keyword_column (define column tsql_identifier)
+				tsql_keyword_add tsql_keyword_rowguidcol)
+				(lambda (database name) (if compile_only
+					(tsql_command_binding 'alter-table (list database name) '())
+					(list 'tsql_add_row_guid database name column 'tx))))
+			(parser '(tsql_keyword_alter tsql_keyword_column (define column tsql_identifier)
 				tsql_keyword_drop tsql_keyword_rowguidcol)
 				(lambda (database name) (if compile_only
 					(tsql_command_binding 'alter-table (list database name) '())

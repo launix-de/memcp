@@ -16,7 +16,7 @@ func (tx *TxContext) alterCatalogColumn(t *table, name, operation string, value 
 		panic("column declaration requires its active native catalog owner")
 	}
 	switch operation {
-	case "default", "default_expression", "add_default", "default_declaration", "drop_default":
+	case "default", "default_expression", "add_default", "default_declaration", "drop_default", "claim_property", "drop_property":
 	default:
 		panic("transactional column alteration is not supported: " + operation)
 	}
@@ -41,7 +41,12 @@ func (tx *TxContext) alterCatalogColumn(t *table, name, operation string, value 
 				panic("private column declaration requires an ordinary stored column")
 			}
 			replacement := cloneStoredColumnDeclaration(previous)
-			result = replacement.Alter(operation, value)
+			if operation == "claim_property" {
+				replacement = current.claimColumnProperty(current.Columns, index, decodeColumnPropertyClaim(value))
+				result = scm.NewBool(true)
+			} else {
+				result = replacement.Alter(operation, value)
+			}
 			if replacement.DefaultName != "" && replacement.DefaultName != previous.DefaultName &&
 				current.schema.hasDeclarationNameLocked(replacement.DefaultName, previous) {
 				panic("declaration name already exists: " + replacement.DefaultName)

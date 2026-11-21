@@ -108,6 +108,10 @@ func (tx *TxContext) appendPublicColumn(t *table, name, typ string, dimensions [
 func (changes *publicCatalogChanges) stageColumnAppend(tx *TxContext, t *table, c *column, initialized, fillExisting bool) bool {
 	changes.mu.Lock()
 	defer changes.mu.Unlock()
+	tx.requireColumnPropertyLayout(t, false)
+	if tx.hasTableDrops() {
+		panic("column append cannot share a table retirement decision")
+	}
 	defer changes.refreshMemoryLocked()
 	accepted := false
 	finishLease := changes.acquireStoredColumnLease(tx, t, true)
@@ -141,6 +145,10 @@ func (changes *publicCatalogChanges) stageColumnAppend(tx *TxContext, t *table, 
 	}()
 	if changes.leases[t] != lease {
 		panic("append constructor lost its native declaration lease while waiting")
+	}
+	tx.requireColumnPropertyLayout(t, false)
+	if tx.hasTableDrops() {
+		panic("column append cannot share a table retirement decision")
 	}
 	// Metadata/generations and retained guards can change during maintenance or
 	// another same-T constructor. Re-attest before publishing the private input.
