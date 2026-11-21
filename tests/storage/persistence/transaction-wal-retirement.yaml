@@ -99,8 +99,6 @@ test_cases:
       - 33
     - - 2
       - 20
-  cleanup:
-  - scm: (settings "MaxPersistBytes" 0)
 - name: Pending ACID checkpoint inputs survive actual persisted-payload pressure until commit
   scm: "(begin\n (define limit (settings \"MaxPersistBytes\"))\n (define target (table \"memcp-tests\" false \"wal_retirement_pressure_acid\" false nil))\n (define\
     \ owner (newsession)) (owner \"username\" \"root\") (owner \"schema\" \"memcp-tests\") (tx_begin_acid owner)\n (try (lambda () (begin\n  (define tx (owner \"\
@@ -116,8 +114,6 @@ test_cases:
       - 33
     - - 2
       - 20
-  cleanup:
-  - scm: (settings "MaxPersistBytes" 0)
 - name: Lose the process after pressure-protected checkpoint commits
   scm: (crash)
   expect:
