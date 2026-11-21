@@ -449,7 +449,7 @@ func TestCatalogDefinitionProposalsKeepRuntimeCachesLocal(t *testing.T) {
 			db.schemalock.Unlock()
 			cache := db.newTable(".grp:local", Cache)
 			db.tables.Set(cache.Name, cache)
-			compute := &column{Name: "local_compute", Typ: "INT", IsTemp: true, Computor: scm.NewSymbol("local_runtime_helper")}
+			compute := &column{Name: "local_compute", Typ: "INT", IsTemp: true, RuntimeOnly: true, Computor: scm.NewSymbol("local_runtime_helper")}
 			tbl.Columns = append(tbl.Columns, compute)
 			db.schemalock.Lock()
 			db.proposeCatalogTablesLocked(tbl, cache)
@@ -474,7 +474,6 @@ func TestCatalogDefinitionProposalsKeepRuntimeCachesLocal(t *testing.T) {
 		})
 	}
 }
-
 
 func TestCatalogCacheRebuildLeavesUnrelatedStatisticsUncheckpointed(t *testing.T) {
 	source, _ := createDurabilityTestTable(t, "catalog_cache_checkpoint_scope", 0)

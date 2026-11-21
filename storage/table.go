@@ -132,6 +132,7 @@ type column struct {
 	OnUpdate          scm.Scmer
 	AllowNull         bool
 	IsTemp            bool // cache-owned storage; computed recipes remain table metadata
+	RuntimeOnly       bool `json:"-"` // physical planner program, not a user declaration
 	cacheOwner        *table
 	cachePayloadEmpty atomic.Bool
 	Collation         string
@@ -3172,6 +3173,8 @@ func (t *table) createColumnLocked(name string, typ string, typdimensions []int,
 			c.Collation = scm.String(extrainfo[i+1])
 		case "temp":
 			c.IsTemp = scm.ToBool(extrainfo[i+1])
+		case "runtime_only":
+			c.RuntimeOnly = scm.ToBool(extrainfo[i+1])
 		case "filtercols", "filter", "dependencies":
 			// handled by createcolumn builtin, not a column property
 		case "sortcols", "sortdirs", "partitioncount", "mapcols", "mapreducefn", "reduceinit":
@@ -3179,6 +3182,9 @@ func (t *table) createColumnLocked(name string, typ string, typdimensions []int,
 		default:
 			panic("unknown column attribute: " + key)
 		}
+	}
+	if c.RuntimeOnly && !c.IsTemp {
+		panic("runtime-only columns must be temporary")
 	}
 	for i := range uniqueKeys {
 		uniqueKeys[i].NullsNotDistinct = nullsNotDistinct
@@ -3425,7 +3431,7 @@ func (t *table) createColumnDDLLocked(name string, typ string, typdimensions []i
 		mode = schemaSaveBuffered
 	}
 	metadataLocked = false // finishSchemaMutationLocked always releases ownership.
-	t.finishSchemaMutationLocked(mode, !cp.IsTemp)
+	t.finishSchemaMutationLocked(mode, !cp.RuntimeOnly)
 	if cp.IsTemp {
 		t.registerTempColumn(cp)
 	}
@@ -3535,7 +3541,7 @@ func (t *table) AlterColumn(name, operation string, value scm.Scmer) scm.Scmer {
 		}
 		t.publishShowColumnsSnapshot(true)
 		metadataLocked = false
-		t.finishSchemaMutationLocked(t.schemaSaveMode(), !current.IsTemp)
+		t.finishSchemaMutationLocked(t.schemaSaveMode(), !current.RuntimeOnly)
 		return result
 	}
 	if operation == "drop_default" {
@@ -3622,7 +3628,7 @@ func (t *table) AlterColumnDeclaration(name string, declaration, expected scm.Sc
 		t.Columns = columns
 		t.publishShowColumnsSnapshot(true)
 		metadataLocked = false // finishSchemaMutationLocked releases schema ownership.
-		t.finishSchemaMutationLocked(t.schemaSaveMode(), !replacement.IsTemp)
+		t.finishSchemaMutationLocked(t.schemaSaveMode(), !replacement.RuntimeOnly)
 		return true
 	}
 	panic("column " + t.schema.Name + "." + t.Name + "." + name + " does not exist")
@@ -3657,7 +3663,7 @@ func (t *table) dropColumnDDLLocked(name string) bool {
 			} else {
 				t.publishShowColumnsSnapshot(true)
 			}
-			t.finishSchemaMutationLocked(t.schemaSaveMode(), !c.IsTemp)
+			t.finishSchemaMutationLocked(t.schemaSaveMode(), !c.RuntimeOnly)
 			// deregister temp column AFTER releasing schemalock
 			if removedCol.IsTemp {
 				GlobalCache.Remove(removedCol)

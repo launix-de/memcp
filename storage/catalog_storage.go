@@ -743,7 +743,10 @@ func (db *database) proposeCatalogTablesLocked(tables ...*table) {
 // rewrite schema partitions to install its reconstructible cache program.
 func (db *database) catalogDefinitionProposal(rows *catalogRows) catalogRows {
 	r := replication.Load()
-	restricted := r != nil && !r.master && !sharedClusterDatabase(db.Name) && validReplicaDatabase(db.Name)
+	if r == nil || sharedClusterDatabase(db.Name) || !validReplicaDatabase(db.Name) {
+		return *rows
+	}
+	restricted := !r.master
 	declarations, err := replicaSchemaDeclarations(catalogDocumentFromRows(db.Name, rows), restricted)
 	if err != nil {
 		panic(err)
@@ -990,7 +993,7 @@ func (db *database) materializeCatalogTableLocked(t *table, rows *catalogRows) {
 		}
 	}
 	for _, candidate := range t.Triggers {
-		if candidate.cacheTarget == nil && candidate.Acquire == nil {
+		if candidate.cacheTarget == nil && candidate.Acquire == nil && !restoredTriggerRequiresRuntimeTarget(candidate.Name) {
 			continue
 		}
 		found := false
