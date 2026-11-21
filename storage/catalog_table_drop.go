@@ -279,7 +279,7 @@ func (tx *TxContext) detachTableDropsLocked(version uint64) {
 				drained := previous.retire()
 				for _, shard := range previous.shards {
 					if shard != nil {
-						drop.retired = append(drop.retired, replacedShardGeneration{shard, drained})
+						drop.retired = append(drop.retired, replacedShardGeneration{shard, drained, previous.retirementDependencies})
 					}
 				}
 			}

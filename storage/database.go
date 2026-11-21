@@ -350,8 +350,9 @@ type rebuildDatabaseResult struct {
 }
 
 type replacedShardGeneration struct {
-	shard   *storageShard
-	drained <-chan struct{}
+	shard        *storageShard
+	drained      <-chan struct{}
+	dependencies []<-chan struct{}
 }
 
 func cleanupReplacedShardGenerations(replaced []replacedShardGeneration, context string) []string {
@@ -359,6 +360,9 @@ func cleanupReplacedShardGenerations(replaced []replacedShardGeneration, context
 		var errors []string
 		for _, generation := range replaced {
 			<-generation.drained
+			for _, dependency := range generation.dependencies {
+				<-dependency
+			}
 			if err := func() (err error) {
 				defer func() {
 					err = recoverAsError("cleanup failed for " + context + " shard " + generation.shard.uuid.String())
@@ -372,17 +376,29 @@ func cleanupReplacedShardGenerations(replaced []replacedShardGeneration, context
 		return errors
 	}
 
+	deferCleanup := false
 	for _, generation := range replaced {
 		select {
 		case <-generation.drained:
 		default:
-			go func() {
-				for _, err := range cleanup() {
-					fmt.Println("error:", err)
-				}
-			}()
-			return nil
+			deferCleanup = true
 		}
+		for _, dependency := range generation.dependencies {
+			select {
+			case <-dependency:
+			default:
+				deferCleanup = true
+			}
+		}
+		deferCleanup = deferCleanup || generation.shard.persistenceInUse()
+	}
+	if deferCleanup {
+		go func() {
+			for _, err := range cleanup() {
+				fmt.Println("error:", err)
+			}
+		}()
+		return nil
 	}
 	return cleanup()
 }
@@ -1945,8 +1961,9 @@ func (db *database) rebuildWithLifecycle(all bool, repartition bool, includeEphe
 				replacedMu.Lock()
 				for _, shard := range replaced {
 					allReplaced = append(allReplaced, replacedShardGeneration{
-						shard:   shard,
-						drained: origTopology.drained,
+						shard:        shard,
+						drained:      origTopology.drained,
+						dependencies: origTopology.retirementDependencies,
 					})
 				}
 				replacedMu.Unlock()

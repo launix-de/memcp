@@ -386,6 +386,8 @@ type tableShardTopology struct {
 	drained            chan struct{}
 	operationDrainOnce sync.Once
 	drainOnce          sync.Once
+	// Flat completion proofs, never references to earlier payload directories.
+	retirementDependencies []<-chan struct{}
 }
 
 // tableSchemaTopology is the immutable storage generation written to
@@ -903,6 +905,11 @@ func (t *table) waitForTransactions(ctx context.Context, shards []*storageShard)
 		}
 		return false
 	}
+	return t.waitForShardDrain(ctx, hasActive)
+}
+
+// Physical journal and read owners share the existing cold drain condition.
+func (t *table) waitForShardDrain(ctx context.Context, hasActive func() bool) error {
 	if !hasActive() {
 		return ctx.Err()
 	}
@@ -1014,6 +1021,31 @@ func (t *table) publishTopologyLocked() *tableShardTopology {
 		dimensions:        append([]shardDimension(nil), t.PDimensions...),
 		operationsDrained: make(chan struct{}),
 		drained:           make(chan struct{}),
+	}
+	// Reusing a physical UUID does not invalidate operation/transaction pins
+	// acquired through an earlier topology. Carry only their drain channels;
+	// retaining topology pointers would keep old payload chains alive.
+	if previous := t.topology.Load(); previous != nil {
+		old := make(map[*storageShard]bool, len(previous.shards))
+		for _, shard := range previous.shards {
+			old[shard] = true
+		}
+		for _, shard := range topology.shards {
+			if shard == nil || !old[shard] {
+				continue
+			}
+			// Include the current predecessor before Swap/retire: checking its
+			// counters now would race a reader still acquiring that input.
+			topology.retirementDependencies = append(topology.retirementDependencies, previous.drained)
+			for _, dependency := range previous.retirementDependencies {
+				select {
+				case <-dependency:
+				default:
+					topology.retirementDependencies = append(topology.retirementDependencies, dependency)
+				}
+			}
+			break
+		}
 	}
 	for _, shard := range topology.shards {
 		if shard != nil {
@@ -1971,6 +2003,9 @@ func (t *table) evict(mode evictionMode, currentSize int64, freedByType *[numEvi
 // Schema metadata belongs to the table, never to every referencing shard.
 func (t *table) metadataMemory() uint {
 	size := uint(unsafe.Sizeof(*t)) + uint(len(t.Name))
+	if topology := t.topology.Load(); topology != nil {
+		size += uint(cap(topology.retirementDependencies)) * uint(unsafe.Sizeof((<-chan struct{})(nil)))
+	}
 	if initial := t.Allocator; initial != nil {
 		size += uint(unsafe.Sizeof(*initial)) + uint(len(initial.Table))
 	}
