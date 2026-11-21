@@ -157,7 +157,7 @@ func (cluster *nodeCluster) handle(session *scanRPCSession, ctx context.Context,
 	case "cluster.location", "cluster.location_update", "cluster.schema_locations":
 		return cluster.handleLocations(ctx, source, method, data)
 	case "cluster.table_ids":
-		return cluster.handleIDReservation(ctx, data)
+		return cluster.handleIDReservation(ctx, source, data)
 	case "cluster.report":
 		var resource mosiResource
 		if err := unmarshalNode(data, &resource); err != nil {
