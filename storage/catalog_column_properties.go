@@ -28,6 +28,9 @@ func (declaration *catalogColumnPropertyRemoval) memory() uint {
 }
 
 func (tx *TxContext) publicColumnPropertyRemovals() []catalogColumnPropertyRemoval {
+	if tx.hasColumnPropertyClaims() {
+		return nil // V20 has one ordered property authority inside NativeDeclarations.
+	}
 	var result []catalogColumnPropertyRemoval
 	for _, entry := range tx.publicForeignAmendments() {
 		if amendment := entry.column; amendment != nil && amendment.propertyRemoval != nil && !tx.ownsTableDrop(amendment.table) {

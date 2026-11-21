@@ -1588,6 +1588,8 @@ finished its decision. THROW retains the raw cause, including completion facts. 
 		'("constraint-violation" "check" _name message) (list "tsql-error" 547 message 1 16)
 		'("constraint-violation" "unique-declaration" _name message) (list "tsql-error" 1505 message 1 16)
 		'("constraint-violation" "not-null-declaration" _name message) (list "tsql-error" 515 message 1 16)
+		'("column-property-conflict" table _column "tsql.rowguidcol" true _owner)
+		(list "tsql-error" 4925 (concat "ALTER TABLE ALTER COLUMN ADD ROWGUIDCOL failed because a column already exists in table '" table "' with ROWGUIDCOL property.") 1 16)
 		value (if (transaction_serialization_failure? cause)
 			/* Optimistic validation uses SQL Server's in-memory conflict
 			diagnostic; the native owner has already required full rollback.

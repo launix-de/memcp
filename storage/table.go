@@ -3860,7 +3860,9 @@ func (t *table) AlterColumn(name, operation string, value scm.Scmer) scm.Scmer {
 				}
 				replacement = cloneStoredColumnDeclaration(current)
 			}
-			if operation == "auto_increment" {
+			if operation == "claim_property" {
+				replacement = t.claimColumnProperty(t.Columns, index, decodeColumnPropertyClaim(value))
+			} else if operation == "auto_increment" {
 				replacement.AutoIncrement = scm.ToBool(value)
 			} else {
 				if replacement != current && (operation == "type" || operation == "dimensions" || operation == "null") {

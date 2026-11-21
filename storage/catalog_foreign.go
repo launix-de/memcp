@@ -813,9 +813,10 @@ func appendConstraintMetadata(t *table, base *tableShowColumnsSnapshot, addition
 func (db *database) preparePublicConstraintPublication(checks []catalogCheckDeclaration, defaults []catalogColumnDefaultDeclaration, columns []catalogColumnDeclaration, appends []catalogColumnAppend, properties []catalogColumnPropertyRemoval, drops []catalogCheckDeclaration, nativeDeclarations []catalogNativeDeclaration, version uint64, programs map[string][]foreignKeyTrigger, changes *publicCatalogChanges) *publicForeignPublication {
 	var declarations, foreignDrops []catalogForeignDeclaration
 	var keyProjection map[*table][]uniqueKey
+	var propertyProjection map[*table][]*column
 	if len(nativeDeclarations) > 0 {
 		projection := db.projectNativeDeclarations(nativeDeclarations, (&TxContext{transactionState: changes.owner}).publicDeclarationViews(), catalogNativeCurrent)
-		declarations, foreignDrops, keyProjection = projection.foreignAdds, projection.foreignDrops, projection.keys
+		declarations, foreignDrops, keyProjection, propertyProjection = projection.foreignAdds, projection.foreignDrops, projection.keys, projection.propertyColumns
 	}
 	publication := &publicForeignPublication{changes: changes}
 	endpoints := make(map[*table]*publicForeignEndpoint)
@@ -924,6 +925,13 @@ func (db *database) preparePublicConstraintPublication(checks []catalogCheckDecl
 	}
 	for _, declaration := range columns {
 		t, _ := validateCatalogColumnDeclaration(db, declaration)
+		if endpoints[t] == nil {
+			endpoint := &publicForeignEndpoint{table: t, checks: append([]*checkDeclaration(nil), t.Checks...), foreign: append([]foreignKey(nil), t.Foreign...), baselineWrapperBytes: changes.baselines[t].wrapperBytes}
+			endpoints[t] = endpoint
+			publication.endpoints = append(publication.endpoints, endpoint)
+		}
+	}
+	for t := range propertyProjection {
 		if endpoints[t] == nil {
 			endpoint := &publicForeignEndpoint{table: t, checks: append([]*checkDeclaration(nil), t.Checks...), foreign: append([]foreignKey(nil), t.Foreign...), baselineWrapperBytes: changes.baselines[t].wrapperBytes}
 			endpoints[t] = endpoint

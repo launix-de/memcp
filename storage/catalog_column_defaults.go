@@ -28,6 +28,7 @@ type catalogStoredColumnAmendment struct {
 	defaultDeclaration catalogColumnDefaultDeclaration
 	declaration        *catalogColumnDeclaration
 	propertyRemoval    *catalogColumnPropertyRemoval
+	propertyChange     *catalogColumnPropertyChange
 	appendDeclaration  *catalogColumnAppend
 	table              *table
 	columns            []*column
@@ -59,7 +60,7 @@ func (tx *TxContext) alterPublicStoredColumn(t *table, name, operation string, v
 		}
 	}
 	profile := catalogDeclarationConstruction
-	if operation == "declaration" {
+	if operation == "declaration" || operation == "claim_property" {
 		profile = catalogValidationConstruction
 	}
 	finish := tx.beginCatalogConstruction(profile, t)
@@ -74,7 +75,7 @@ func (tx *TxContext) alterPublicStoredColumn(t *table, name, operation string, v
 	if tx.State != TxActive || tx.decisionStarted || tx.coordinator != nil || tx.catalogIntents.Load() != nil || activeReplication(t.schema) != nil {
 		panic("default declaration requires a local public catalog transaction")
 	}
-	if (!columnDefaultOperation(operation) && operation != "declaration" && operation != "drop_property") || t.Ephemeral || t.isEphemeralQueryTable() {
+	if (!columnDefaultOperation(operation) && operation != "declaration" && operation != "drop_property" && operation != "claim_property") || t.Ephemeral || t.isEphemeralQueryTable() {
 		panic("default declaration requires an ordinary public table")
 	}
 	requireTableMaintenance(t.schema.Name, t.Name, maintenanceAlter)
@@ -142,6 +143,12 @@ func (changes *publicCatalogChanges) stageStoredColumn(tx *TxContext, t *table, 
 	defer changes.mu.Unlock()
 	defer changes.refreshMemoryLocked()
 	accepted := false
+	if operation == "claim_property" {
+		tx.requireColumnPropertyRetirementProfile()
+		tx.requireColumnPropertyLayout(t, true)
+	} else if operation == "declaration" {
+		tx.requireColumnPropertyLayout(t, false)
+	}
 	finishLease := changes.acquireStoredColumnLease(tx, t, operation == "declaration")
 	defer func() { finishLease(accepted) }()
 	db := changes.db
@@ -177,6 +184,7 @@ func (changes *publicCatalogChanges) stageStoredColumn(tx *TxContext, t *table, 
 		replacement := cloneStoredColumnDeclaration(previous)
 		var declaration *catalogColumnDeclaration
 		var propertyRemoval *catalogColumnPropertyRemoval
+		var propertyChange *catalogColumnPropertyChange
 		result := scm.NewBool(true)
 		if operation == "declaration" {
 			if !value.IsSlice() || len(value.Slice()) != 2 {
@@ -206,6 +214,10 @@ func (changes *publicCatalogChanges) stageStoredColumn(tx *TxContext, t *table, 
 			}
 			replacement = after.replace(previous)
 			declaration = &catalogColumnDeclaration{t.Name, t.RuntimeIdentity, previous.Name, before, after}
+		} else if operation == "claim_property" {
+			request := decodeColumnPropertyClaim(value)
+			replacement = t.claimColumnProperty(columns, index, request)
+			propertyChange = columnPropertyChange(t, previous, request.key, request.value)
 		} else if operation == "drop_property" {
 			if !value.IsString() || value.String() == "" {
 				panic("column property removal requires a nonempty key")
@@ -214,7 +226,9 @@ func (changes *publicCatalogChanges) stageStoredColumn(tx *TxContext, t *table, 
 			if !found {
 				return scm.NewBool(false)
 			}
+			tx.requireColumnPropertyRetirementProfile()
 			propertyRemoval = &catalogColumnPropertyRemoval{t.Name, t.RuntimeIdentity, previous.Name, value.String(), before}
+			propertyChange = columnPropertyChange(t, previous, value.String(), before)
 			result = replacement.Alter(operation, value)
 		} else {
 			result = scm.NewBool(scm.ToBool(replacement.Alter(operation, value)))
@@ -233,8 +247,9 @@ func (changes *publicCatalogChanges) stageStoredColumn(tx *TxContext, t *table, 
 		view, bytes := replaceStoredColumnMetadata(t, base, updated)
 		amendment := &catalogStoredColumnAmendment{defaultDeclaration: catalogColumnDefaultDeclaration{t.Name, t.RuntimeIdentity, previous.Name, replacement.Default, replacement.DefaultExpression, replacement.DefaultName, replacement.DefaultDeferred}, declaration: declaration, table: t, columns: updated, previous: before}
 		amendment.propertyRemoval = propertyRemoval
+		amendment.propertyChange = propertyChange
 		amendment.columnBytes = storedColumnBytes(replacement)
-		amendment.retainedBytes = uint(unsafe.Sizeof(*amendment)) + uint(cap(updated))*uint(unsafe.Sizeof((*column)(nil))) + amendment.columnBytes + bytes + declaration.memory() + propertyRemoval.memory()
+		amendment.retainedBytes = uint(unsafe.Sizeof(*amendment)) + uint(cap(updated))*uint(unsafe.Sizeof((*column)(nil))) + amendment.columnBytes + bytes + declaration.memory() + propertyRemoval.memory() + propertyChange.memory()
 		history := appendCatalogDeclarationHistory(tx.publicForeignAmendments(), catalogDeclarationAmendment{column: amendment})
 		access := db.GetWrite(tx)
 		defer access.Release()
@@ -263,7 +278,7 @@ func (changes *publicCatalogChanges) stageStoredColumn(tx *TxContext, t *table, 
 		changes.viewsHighWater = max(changes.viewsHighWater, len(views))
 		changes.amendmentBytes += amendment.retainedBytes
 		changes.historyBytes = uint(unsafe.Sizeof(history)) + uint(cap(history))*uint(unsafe.Sizeof(catalogDeclarationAmendment{}))
-		if operation == "declaration" {
+		if operation == "declaration" || operation == "claim_property" {
 			tx.noteStatementMutation(t)
 		}
 		tx.catalogAmendments.Store(&history)
@@ -482,7 +497,7 @@ func storedColumnBytes(c *column) uint {
 func (tx *TxContext) publicColumnDefaultDeclarations() []catalogColumnDefaultDeclaration {
 	latest := make(map[string]catalogColumnDefaultDeclaration)
 	for _, entry := range tx.publicForeignAmendments() {
-		if amendment := entry.column; amendment != nil && amendment.declaration == nil && amendment.propertyRemoval == nil && amendment.appendDeclaration == nil && !tx.ownsTableDrop(amendment.table) {
+		if amendment := entry.column; amendment != nil && amendment.declaration == nil && amendment.propertyRemoval == nil && amendment.propertyChange == nil && amendment.appendDeclaration == nil && !tx.ownsTableDrop(amendment.table) {
 			latest[amendment.defaultDeclaration.Table+"\x00"+amendment.defaultDeclaration.Column] = amendment.defaultDeclaration
 		}
 	}
@@ -585,7 +600,7 @@ func (changes *publicCatalogChanges) validateColumnDefaultsLocked() error {
 	}
 	latest := make(map[string]*catalogStoredColumnAmendment)
 	for _, entry := range *history {
-		if amendment := entry.column; amendment != nil && amendment.declaration == nil && amendment.propertyRemoval == nil && amendment.appendDeclaration == nil {
+		if amendment := entry.column; amendment != nil && amendment.declaration == nil && amendment.propertyRemoval == nil && amendment.propertyChange == nil && amendment.appendDeclaration == nil {
 			if changes.db.tables.Get(amendment.defaultDeclaration.Table) != amendment.table || amendment.table.RuntimeIdentity != amendment.defaultDeclaration.Identity {
 				return fmt.Errorf("default declaration endpoint generation was replaced")
 			}

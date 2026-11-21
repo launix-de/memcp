@@ -3329,7 +3329,7 @@ func Init(en scm.Env) {
 				return currentTx.alterCatalogColumn(t, scm.String(a[1]), scm.String(a[2]), a[3])
 			}
 			if currentTx != nil && !currentTx.autoCommit {
-				if columnDefaultOperation(scm.String(a[2])) || scm.String(a[2]) == "declaration" || scm.String(a[2]) == "drop_property" {
+				if columnDefaultOperation(scm.String(a[2])) || scm.String(a[2]) == "declaration" || scm.String(a[2]) == "drop_property" || scm.String(a[2]) == "claim_property" {
 					return currentTx.alterPublicStoredColumn(t, scm.String(a[1]), scm.String(a[2]), a[3])
 				}
 				panic("transactional column alterations require an owned unpublished table")
@@ -3347,7 +3347,7 @@ func Init(en scm.Env) {
 			Params: []*scm.TypeDescriptor{
 				{Kind: "table", Label: "table"},
 				{Kind: "string", Label: "column", Description: "name of the column"},
-				{Kind: "string", Label: "operation", Description: "one of drop|type|dimensions|null|default|default_expression|default_declaration|add_default|drop_default|collation|auto_increment|comment|properties|drop_property|temp|declaration"},
+				{Kind: "string", Label: "operation", Description: "one of drop|type|dimensions|null|default|default_expression|default_declaration|add_default|drop_default|collation|auto_increment|comment|properties|drop_property|claim_property|temp|declaration"},
 				{Kind: "any", Label: "parameter", Description: "name of the column to drop or value of the parameter"},
 				{Kind: "any", Label: "tx", Description: "explicit transaction context", Optional: true},
 			},

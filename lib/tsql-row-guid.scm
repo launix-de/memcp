@@ -5,9 +5,8 @@ SPDX-License-Identifier: GPL-3.0-or-later */
 https://learn.microsoft.com/en-us/sql/t-sql/statements/create-table-transact-sql
 Only this frontend interprets the namespaced scalar property. The existing
 native declaration owns its publication, persistence and metadata lifetime.
-Marked ALTER ADD, $ROWGUID and COLUMNPROPERTY require their own atomic
-declaration validation or logical binding/catalog contracts and remain
-explicitly unsupported by the current grammar. */
+$ROWGUID and COLUMNPROPERTY require their own logical binding/catalog
+contracts and remain explicitly unsupported by the current grammar. */
 (define tsql_row_guid_column? (lambda (column)
 	(if (nil? column) false (begin
 		(define properties (column "Properties"))
@@ -38,3 +37,18 @@ https://learn.microsoft.com/sql/t-sql/statements/alter-table-transact-sql */
 		(tsql_raise_error 4926 (concat "ALTER COLUMN DROP ROWGUIDCOL failed because column '" column "' has no ROWGUIDCOL property.") 1)))
 	(if (tsql_row_guid_column? declaration) true (missing))
 	(if (altercolumn handle (declaration "Field") "drop_property" "tsql.rowguidcol" tx) true (missing)))))
+
+/* Claim publication is atomic in the native declaration owner. The frontend
+owns only direct-type eligibility and the meaning of this namespaced marker;
+there is no preliminary table-wide scan whose result could race publication. */
+(define tsql_add_row_guid (lambda (database name column tx) (begin
+	(define handle (table database false name false tx))
+	(define declaration (if handle (show handle "column" column true tx) nil))
+	(if (nil? declaration)
+		(tsql_raise_error 4924 (concat "ALTER COLUMN failed because column '" column "' does not exist in table '" name "'.") 1) true)
+	(if (equal? (toUpper (declaration "RawType")) "UNIQUEIDENTIFIER") true
+		(error "ROWGUIDCOL requires the native UNIQUEIDENTIFIER declaration"))
+	(altercolumn handle (declaration "Field") "claim_property"
+		(list "tsql.rowguidcol" true
+			(list (declaration "RawType") (coalesceNil (declaration "Dimensions") '())
+				(declaration "Null") (coalesceNil (declaration "Collation") ""))) tx))))
