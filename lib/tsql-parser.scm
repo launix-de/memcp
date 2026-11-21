@@ -443,7 +443,7 @@ Initialize their dependencies before constructing the metadata producers. */
 		(define fraction (intdiv (+ (* (mod ticks factor) 1000000000) (intdiv factor 2)) factor))
 		(tsql_calendar_range (date_from_parts (+ (car parts) carry) fraction (nth parts 2)) minimum))))) tsql_calendar_range)))
 
-(define tsql_declared_byte_length (lambda (column) (begin
+(define tsql_declared_byte_length (close_procedure ((lambda (empty_list?) (lambda (column) (begin
 	(define type (toUpper (column "RawType")))
 	(define dimensions (column "Dimensions"))
 	(define width (if (empty_list? dimensions) 1 (car dimensions)))
@@ -462,7 +462,7 @@ Initialize their dependencies before constructing the metadata producers. */
 				(define precision (if (empty_list? dimensions) 7 width))
 				(+ (if (<= precision 2) 3 (<= precision 4) 4 5)
 					(match type "DATETIME2" 3 "DATETIMEOFFSET" 5 _ 0)))
-			nil)))))
+			nil))))) empty_list?)))
 (import "tsql-object-metadata.scm")
 (import "tsql-has-perms.scm")
 
