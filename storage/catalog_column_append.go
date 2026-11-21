@@ -133,8 +133,12 @@ func (changes *publicCatalogChanges) stageColumnAppend(tx *TxContext, t *table, 
 	// Every append shares this same retained lease, including a nullable-only
 	// sibling. A temporary DDL waiter could otherwise wait for an initialized
 	// sibling until decision while its own construction prevents that decision.
-	lease.retainDDL(t, tx.transactionState)
-	changes.mu.Lock()
+	func() {
+		// Re-enter the amendment owner before any constructor cleanup, including
+		// retainDDL's lost-lease panic. The wait itself holds no amendment lock.
+		defer changes.mu.Lock()
+		lease.retainDDL(t, tx.transactionState)
+	}()
 	if changes.leases[t] != lease {
 		panic("append constructor lost its native declaration lease while waiting")
 	}
