@@ -380,7 +380,7 @@ func TestReplicationRecoveredSharedBindsCompletedGeneration(t *testing.T) {
 	table.Shards = []*storageShard{placeholder}
 	table.publishTopologyLocked()
 	table.mu.Unlock()
-	table.schema.save()
+	table.schema.save(nil)
 	owner := uuid.NewString()
 	report := replicaRecord{Resource: resource, Owner: owner, State: "O", Epoch: 7, Content: placeholder.uuid.String(), Readers: map[string]bool{r.id: true}}
 	if _, err := r.recoverPeer(context.Background(), owner, replicaRequest{Boot: uuid.NewString(), Resources: []replicaRecord{report}}, replicaAuth{Admin: true}); err != nil {
@@ -475,7 +475,7 @@ func TestReplicationSchemaTransferPreservesLocalPhysicalGeneration(t *testing.T)
 	r.resourceCell(mosiResource{Database: table.schema.Name}).ownstate.Initialize(mosi.M)
 	r.schemaShards(table.schema, r.id, true)
 	table.schema.rebuild(true, false, false, table)
-	table.schema.save()
+	table.schema.save(nil)
 	remoteSchema := append([]byte(nil), engine.ReadSchema()...)
 	table.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(99), scm.NewString("newer-master-main")}}, nil, scm.NewNil(), false, nil)
 	table.schema.rebuild(true, false, false, table)

@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -706,13 +707,13 @@ func (db *database) proposeCatalogTablesLocked(tables ...*table) {
 	var owners []string
 	seen := make(map[string]bool)
 	for _, t := range tables {
-		if t == nil || t.schema != db || seen[t.Name] {
+		if t == nil || t.schema != db || t.isEphemeralQueryTable() || seen[t.Name] {
 			continue
 		}
 		seen[t.Name] = true
 		owners = append(owners, t.Name)
 		proposal := catalogRowsFromTable(t)
-		proposal = db.replicaCatalogProposal(&proposal)
+		proposal = db.catalogDefinitionProposal(&proposal)
 		for i := catalogTables; i < catalogProcedures; i++ {
 			rows[i] = append(rows[i], proposal[i]...)
 		}
@@ -737,15 +738,13 @@ func (db *database) proposeCatalogTablesLocked(tables ...*table) {
 	}
 }
 
-// A replica shares ordinary definitions, not its node-local planner workspace.
-// Filter proposals before native admission so later shard handovers cannot
-// export local cache code as canonical client declarations.
-func (db *database) replicaCatalogProposal(rows *catalogRows) catalogRows {
+// Planner workspaces are physical runtime objects, not logical declarations.
+// Keep them local in standalone execution too: a cold query must not durably
+// rewrite schema partitions to install its reconstructible cache program.
+func (db *database) catalogDefinitionProposal(rows *catalogRows) catalogRows {
 	r := replication.Load()
-	if r == nil || sharedClusterDatabase(db.Name) || !validReplicaDatabase(db.Name) {
-		return *rows
-	}
-	declarations, err := replicaSchemaDeclarations(catalogDocumentFromRows(db.Name, rows), !r.master)
+	restricted := r != nil && !r.master && !sharedClusterDatabase(db.Name) && validReplicaDatabase(db.Name)
+	declarations, err := replicaSchemaDeclarations(catalogDocumentFromRows(db.Name, rows), restricted)
 	if err != nil {
 		panic(err)
 	}
@@ -756,7 +755,7 @@ func (db *database) prepareReplicaCatalog() {
 	db.schemalock.Lock()
 	defer db.schemalock.Unlock()
 	rows := db.catalogRowsLocked()
-	rows = db.replicaCatalogProposal(&rows)
+	rows = db.catalogDefinitionProposal(&rows)
 	if !db.editCatalogLocked(&rows, catalogAllRelations, nil) {
 		return
 	}
@@ -828,7 +827,7 @@ func (db *database) editCatalogProcedureLocked(name string, proposal *ProcedureD
 	for i, definition := range definitions {
 		rows.add(catalogProcedures, db.Name, []scm.Scmer{scm.NewInt(int64(i))}, definition)
 	}
-	rows = db.replicaCatalogProposal(&rows)
+	rows = db.catalogDefinitionProposal(&rows)
 	db.editCatalogLocked(&rows, catalogAllRelations, nil)
 	if proposal == nil {
 		return nil
@@ -851,7 +850,7 @@ func (db *database) editCatalogProcedureLocked(name string, proposal *ProcedureD
 
 // checkpointCatalogLocked updates only physical generations, advisory statistics
 // and the ID allocator. User declarations always come from the catalog tables.
-func (db *database) checkpointCatalogLocked() {
+func (db *database) checkpointCatalogLocked(tables ...*table) {
 	var rows catalogRows
 	if shard := db.catalog.live[catalogTables]; shard != nil {
 		_, rows[catalogTables] = catalogShardRecords(shard, catalogRelationColumns(catalogTables), nil)
@@ -859,6 +858,9 @@ func (db *database) checkpointCatalogLocked() {
 	for _, row := range rows[catalogTables] {
 		t := db.tables.Get(catalogTableName(row))
 		if t == nil {
+			continue
+		}
+		if len(tables) != 0 && !slices.Contains(tables, t) {
 			continue
 		}
 		topology := t.schemaTopology.Load()
