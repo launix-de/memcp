@@ -983,7 +983,13 @@ func (t *storageShard) iterateIndexEx(tx *TxContext, cols scanAccess, maxInsertI
 			}
 		}
 		index := new(StorageIndex)
-		index.columnInput = t.initializedColumnInput(tx)
+		if privateInput {
+			index.columnInput = t.initializedColumnInput(tx)
+		} else {
+			// Public indices retain committed input only, even when a query over
+			// old columns runs beside this transaction's private declaration.
+			index.columnInput = t.initializedColumnInput(nil)
+		}
 		index.Cols = make([]string, indexCols)
 		index.ColMapCols = make([][]string, indexCols)
 		index.ColMapFn = make([]scm.Scmer, indexCols)

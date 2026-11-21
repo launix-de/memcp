@@ -1517,7 +1517,7 @@ func (t *storageShard) hasWriteOwnerForTx(currentTx *TxContext) bool {
 // rowValueByRecidLocked reads a column value for a recid. Caller must hold t.mu.
 func (t *storageShard) rowValueByRecidLocked(recid uint32, col string, tx *TxContext, initial *nativeColumnInitialInput) scm.Scmer {
 	if recid < t.main_count {
-		cs := t.getColumnStorageOrPanic(col, true, tx)
+		cs := t.getColumnStorageInput(col, true, initial)
 		return cs.GetValue(recid)
 	}
 	return t.getDeltaInput(int(recid-t.main_count), col, initial)
@@ -1770,7 +1770,7 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 						continue
 					}
 					k := colDesc.Name
-					cs := t.getColumnStorageOrPanic(k, true, currentTx)
+					cs := t.getColumnStorageInput(k, true, initializedColumns)
 					colidx, ok := t.deltaColumns[k]
 					if !ok {
 						colidx = len(t.deltaColumns)
@@ -2025,7 +2025,7 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 							row[i] = scm.NewNil()
 							continue
 						}
-						cs := t.getColumnStorageOrPanic(col.Name, true, currentTx)
+						cs := t.getColumnStorageInput(col.Name, true, initializedColumns)
 						if idx < t.main_count {
 							row[i] = cs.GetValue(idx)
 						} else {

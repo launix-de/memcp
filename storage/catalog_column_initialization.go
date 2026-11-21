@@ -6,6 +6,8 @@ SPDX-License-Identifier: GPL-3.0-or-later
 package storage
 
 import "fmt"
+import "bytes"
+import "encoding/json"
 import "maps"
 import "unsafe"
 import "unicode/utf8"
@@ -19,6 +21,50 @@ type catalogColumnInitialization struct {
 	DefaultName string                         `json:"default_name,omitempty"`
 	Value       scm.Scmer                      `json:"value"`
 	Extents     map[string]columnInitialExtent `json:"extents"`
+}
+
+// These V19 scalar fields use the existing durable-value codec, rather than
+// public JSON's calendar text conversion. Old catalog domains are untouched.
+func (d catalogColumnInitialization) MarshalJSON() ([]byte, error) {
+	def, err := scm.MarshalPersistentJSON(d.Default)
+	if err != nil {
+		return nil, err
+	}
+	value, err := scm.MarshalPersistentJSON(d.Value)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(struct {
+		Default     json.RawMessage                `json:"default"`
+		DefaultName string                         `json:"default_name,omitempty"`
+		Value       json.RawMessage                `json:"value"`
+		Extents     map[string]columnInitialExtent `json:"extents"`
+	}{def, d.DefaultName, value, d.Extents})
+}
+
+func (d *catalogColumnInitialization) UnmarshalJSON(data []byte) error {
+	var payload struct {
+		Default     json.RawMessage                `json:"default"`
+		DefaultName string                         `json:"default_name,omitempty"`
+		Value       json.RawMessage                `json:"value"`
+		Extents     map[string]columnInitialExtent `json:"extents"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&payload); err != nil {
+		return err
+	}
+	if len(payload.Default) == 0 || len(payload.Value) == 0 {
+		return fmt.Errorf("initialized column requires explicit durable scalar values")
+	}
+	if err := scm.UnmarshalPersistentJSON(payload.Default, &d.Default); err != nil {
+		return err
+	}
+	if err := scm.UnmarshalPersistentJSON(payload.Value, &d.Value); err != nil {
+		return err
+	}
+	d.DefaultName, d.Extents = payload.DefaultName, payload.Extents
+	return nil
 }
 
 func (d *catalogColumnInitialization) containers() uint {
@@ -71,7 +117,7 @@ func validateColumnInitialization(d catalogColumnAppend) error {
 		return fmt.Errorf("required initialized column has NULL history")
 	}
 	for id := range i.Extents {
-		if identity, err := uuid.Parse(id); err != nil || identity == uuid.Nil {
+		if identity, err := uuid.Parse(id); err != nil || identity == uuid.Nil || identity.String() != id {
 			return fmt.Errorf("invalid initialized column generation")
 		}
 	}
@@ -202,7 +248,7 @@ func (s *storageShard) pendingAppendedStorage(tx *TxContext, name string) Column
 	if tx.pendingAppendedColumn(s.t, name) != nil {
 		if input := s.initializedColumnInput(tx); input != nil {
 			if c, ok := input.fields[name]; ok {
-				return &StorageConst{value: c.Value, count: uint64(c.MainRows)}
+				return c.main
 			}
 		}
 		return new(StorageSparse)
@@ -212,8 +258,13 @@ func (s *storageShard) pendingAppendedStorage(tx *TxContext, name string) Column
 
 // The caller supplies its already-bound immutable descriptor, never a fresh
 // per-row transaction/catalog lookup. The captured original prefix is immutable.
+type nativeColumnInitialValue struct {
+	columnRecoveryValue
+	main ColumnStorage
+}
+
 type nativeColumnInitialInput struct {
-	fields map[string]columnRecoveryValue
+	fields map[string]nativeColumnInitialValue
 }
 
 func (s *storageShard) getDeltaInput(idx int, name string, input *nativeColumnInitialInput) scm.Scmer {
@@ -231,6 +282,18 @@ func (s *storageShard) initializedColumnInput(tx *TxContext) *nativeColumnInitia
 	}
 	return nil
 }
+
+// Logical row copies reuse the same input as the producer. An old physical
+// column keeps its original storage path; initialized main input was built cold.
+func (s *storageShard) getColumnStorageInput(name string, alreadyLocked bool, input *nativeColumnInitialInput) ColumnStorage {
+	if input != nil {
+		if value, ok := input.fields[name]; ok {
+			return value.main
+		}
+	}
+	return s.getColumnStorageOrPanic(name, alreadyLocked, nil)
+}
+
 func initialColumnValue(input *nativeColumnInitialInput, name string, delta int) (scm.Scmer, bool) {
 	if input != nil {
 		if c, ok := input.fields[name]; ok && delta >= 0 && uint64(delta) < uint64(c.DeltaRows) {
@@ -243,7 +306,11 @@ func initialColumnValue(input *nativeColumnInitialInput, name string, delta int)
 func initialMainStorage(c *column, id string) ColumnStorage {
 	if c != nil {
 		if initial, ok := c.InitialValues[id]; ok {
-			return &StorageConst{value: c.InitialValue, count: uint64(initial.MainRows)}
+			value := c.InitialValue
+			if c.recoverPersisted != nil && !value.IsNil() {
+				value = c.recoverPersisted(value)
+			}
+			return &StorageConst{value: value, count: uint64(initial.MainRows)}
 		}
 	}
 	return new(StorageSparse)
