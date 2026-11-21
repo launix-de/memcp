@@ -35,7 +35,7 @@ func isNativeTransactionAbortTransfer(value any) bool {
 	return errors.As(failure, &transfer)
 }
 
-func (tx *TxContext) requestMutationAbort(callback, payload scm.Scmer) {
+func (tx *TxContext) requestMutationAbort(prepare scm.Scmer) {
 	if tx == nil || tx.mutationOperation == nil {
 		panic("transaction abort transfer requires a native completion invocation")
 	}
@@ -50,16 +50,44 @@ func (tx *TxContext) requestMutationAbort(callback, payload scm.Scmer) {
 	if !allowed {
 		panic("transaction abort transfer requires a native completion invocation")
 	}
-	if !callback.IsNil() {
-		operation.prepareAbortContinuation(callback, payload)
-	}
 	root.mu.Lock()
 	if root.state != state || root.statement == nil || root.statement.finished {
 		root.mu.Unlock()
 		panic("transaction abort transfer lost its statement owner")
 	}
+	alreadyRequested := root.statement.abort
+	previousFailure := root.statement.abortPreparationFailure
 	root.statement.abort = true
 	root.mu.Unlock()
+	if alreadyRequested {
+		panic(&nativeTransactionAbortTransfer{transactionID: state.ID, continuationFailure: previousFailure})
+	}
+	// The admitted rollback is terminal BEFORE evaluating frontend preparation,
+	// sealing its payload or acquiring another lifetime pin. Failure cannot turn
+	// this request into a restored statement that keeps earlier Tx writes alive.
+	if !prepare.IsNil() {
+		func() {
+			defer func() {
+				if failure := recover(); failure != nil {
+					root.mu.Lock()
+					if root.statement.abortPreparationFailure == nil {
+						root.statement.abortPreparationFailure = failure
+					}
+					failure = root.statement.abortPreparationFailure
+					root.mu.Unlock()
+					panic(&nativeTransactionAbortTransfer{transactionID: state.ID, continuationFailure: failure})
+				}
+			}()
+			if !prepare.IsProc() && !prepare.IsNativeFunc() && !prepare.IsJIT() {
+				panic("native abort preparation requires an invocation callback")
+			}
+			prepared := scm.Apply(prepare)
+			if !prepared.IsSlice() || len(prepared.Slice()) != 2 {
+				panic("native abort preparation requires callback and immutable payload")
+			}
+			operation.prepareAbortContinuation(prepared.Slice()[0], prepared.Slice()[1])
+		}()
+	}
 	panic(&nativeTransactionAbortTransfer{transactionID: state.ID})
 }
 
@@ -131,21 +159,18 @@ func initMutationAbortBuiltins(en *scm.Env) {
 	}, Type: &scm.TypeDescriptor{Kind: "func", Description: "borrows the native producer's immutable declared assignment names from its actual completion invocation",
 		Params: []*scm.TypeDescriptor{{Kind: "any", Label: "tx"}}, Return: &scm.TypeDescriptor{Kind: "list"}}})
 	scm.Declare(en, &scm.Declaration{Name: "request_transaction_abort", Fn: func(a ...scm.Scmer) scm.Scmer {
-		if len(a) < 1 || len(a) > 3 {
-			panic("request_transaction_abort requires completion and optional continuation/payload")
+		if len(a) < 1 || len(a) > 2 {
+			panic("request_transaction_abort requires completion and optional preparation callback")
 		}
-		callback, payload := scm.NewNil(), scm.NewNil()
+		prepare := scm.NewNil()
 		if len(a) > 1 {
-			callback = a[1]
+			prepare = a[1]
 		}
-		if len(a) > 2 {
-			payload = a[2]
-		}
-		scmerToTxContext(a[0]).requestMutationAbort(callback, payload)
+		scmerToTxContext(a[0]).requestMutationAbort(prepare)
 		return scm.NewNil()
 	}, Type: &scm.TypeDescriptor{Kind: "func", HasSideEffects: true,
-		Description: "requests whole-transaction rollback after native drain, optionally transferring materialized completion inputs to one post-retirement callback; its fresh execution capability admits ordinary independent statement decisions",
-		Params:      []*scm.TypeDescriptor{{Kind: "any", Label: "tx"}, {Kind: "func", Label: "continuation", Optional: true}, {Kind: "any", Label: "payload", Optional: true}}, Return: &scm.TypeDescriptor{Kind: "any"}}})
+		Description: "requests terminal whole-transaction rollback before optional once-only preparation returns a callback and inert payload; native drain and Undo precede that callback's independent statement decisions",
+		Params:      []*scm.TypeDescriptor{{Kind: "any", Label: "tx"}, {Kind: "func", Label: "prepare", Optional: true, CallsOnce: true, Params: []*scm.TypeDescriptor{}, Return: &scm.TypeDescriptor{Kind: "list"}}}, Return: &scm.TypeDescriptor{Kind: "any"}}})
 	scm.Declare(en, &scm.Declaration{Name: "transaction_abort_failure", Fn: func(a ...scm.Scmer) scm.Scmer {
 		if len(a) != 1 {
 			panic("transaction_abort_failure requires one failure")

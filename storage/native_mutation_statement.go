@@ -11,16 +11,17 @@ import "github.com/launix-de/memcp/scm"
 // trigger effects. This is not an isolation-mode conversion or a second journal.
 // It remains private until all producer/control/callback callers are ported.
 type nativeMutationStatement struct {
-	transactionID       uint64
-	statementGeneration uint64
-	database            *database
-	savepoint           Savepoint
-	ready               bool
-	running             bool
-	finished            bool
-	failure             any
-	abort               bool
-	tables              map[*table]*statementTableWriteLease
+	transactionID           uint64
+	statementGeneration     uint64
+	database                *database
+	savepoint               Savepoint
+	ready                   bool
+	running                 bool
+	finished                bool
+	failure                 any
+	abort                   bool
+	abortPreparationFailure any // exact pre-transfer cause; survives caught errors and Undo retries
+	tables                  map[*table]*statementTableWriteLease
 }
 
 // Establish the state exclusion before any target/default/trigger effect. The
@@ -248,7 +249,7 @@ func (operation *nativeMutationOperation) finishStatement() any {
 	statement.savepoint = Savepoint{}
 	statement.database = nil
 	if statement.abort {
-		return &nativeTransactionAbortTransfer{transactionID: state.ID}
+		return &nativeTransactionAbortTransfer{transactionID: state.ID, continuationFailure: statement.abortPreparationFailure}
 	}
 	if statement.ready && statement.failure != nil {
 		return &nativeStatementRestoredError{cause: statement.failure, transactionID: statement.transactionID,

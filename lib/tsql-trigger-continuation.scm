@@ -71,24 +71,27 @@ transfer. No predicate is evaluated, and no SQL leaf is compiled/executed here. 
 	(tsql_statement_call statement session "trigger ROLLBACK" true (lambda (tx) (begin
 		(if (session "__tsql_post_abort")
 			(tsql_raise_error 3903 "The ROLLBACK TRANSACTION request has no corresponding BEGIN TRANSACTION." 1) true)
-		(if (nil? next) (request_transaction_abort tx) (begin
-			(define observing (tsql_abort_suffix_observes? (session "schema") (cadr flow) next '()))
-			(if (and observing (session "__tsql_identity_insert"))
-				(error "post-rollback continuation requires scalar identity settings") true)
-			(define contracts (if observing (session "__tsql_parameter_declarations") '()))
-			(define payload (list flow next contracts
-				(map contracts (lambda (declaration)
-					(list (car declaration) (session (concat "__tsql_parameter:" (car declaration))))))
-				(map tsql_trigger_continuation_keys (lambda (key) (list key (session key))))
-				((tsql_identity_scope session) "__tsql_scope_identity")))
-			(define fresh (newsession))
-			/* These existing protocol callbacks carry transport, not a SQL
-			executor or module scope. The fresh facade has no parent delegation. */
-			(fresh "__tsql_message" (session "__tsql_message"))
-			(fresh "wire_metadata" (session "wire_metadata"))
-			(define continuation (close_procedure (lambda (execute OLD NEW payload)
-				(tsql_resume_trigger_after_abort execute OLD NEW payload fresh))))
-			(request_transaction_abort tx continuation payload))))))))
+		(if (nil? next) (request_transaction_abort tx)
+			(request_transaction_abort tx (lambda () (begin
+				/* Native terminal intent precedes ALL continuation preparation,
+				including a frontend refusal to transfer a non-scalar setting. */
+				(define observing (tsql_abort_suffix_observes? (session "schema") (cadr flow) next '()))
+				(if (and observing (session "__tsql_identity_insert"))
+					(error "post-rollback continuation requires scalar identity settings") true)
+				(define contracts (if observing (session "__tsql_parameter_declarations") '()))
+				(define payload (list flow next contracts
+					(map contracts (lambda (declaration)
+						(list (car declaration) (session (concat "__tsql_parameter:" (car declaration))))))
+					(map tsql_trigger_continuation_keys (lambda (key) (list key (session key))))
+					((tsql_identity_scope session) "__tsql_scope_identity")))
+				(define fresh (newsession))
+				/* These existing protocol callbacks carry transport, not a SQL
+				executor or module scope. The fresh facade has no parent delegation. */
+				(fresh "__tsql_message" (session "__tsql_message"))
+				(fresh "wire_metadata" (session "wire_metadata"))
+				(define continuation (close_procedure (lambda (execute OLD NEW payload)
+					(tsql_resume_trigger_after_abort execute OLD NEW payload fresh))))
+				(list continuation payload))))))))))
 
 (define tsql_resume_trigger_after_abort (lambda (execute OLD NEW payload session) (begin
 	(define flow (nth payload 0))

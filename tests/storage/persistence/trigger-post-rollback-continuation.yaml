@@ -6,6 +6,10 @@ metadata:
   description: Whole original transaction undo precedes native trigger continuation with independent ordinary suffix
     decisions
 setup:
+- sql: DROP TABLE IF EXISTS abort_prepare_sql
+- sql: DROP TABLE IF EXISTS abort_prepare_unsealable
+- sql: DROP TABLE IF EXISTS abort_prepare_opaque
+- sql: DROP TABLE IF EXISTS abort_prepare_identity
 - sql: DROP TABLE IF EXISTS abort_identity_source
 - sql: DROP TABLE IF EXISTS abort_identity_target
 - sql: DROP TABLE IF EXISTS abort_before_audit
@@ -101,7 +105,19 @@ setup:
      INSERT abort_unique_target VALUES(3,9);
     END
 - scm: (altertable (table "memcp-tests" false "abort_audit" false nil) "engine" "logged")
+- sql: CREATE TABLE abort_prepare_sql(id INT NOT NULL PRIMARY KEY,value INT)
+- sql: INSERT abort_prepare_sql VALUES(1,10)
+- sql: CREATE TABLE abort_prepare_unsealable(id INT NOT NULL PRIMARY KEY,value INT)
+- sql: INSERT abort_prepare_unsealable VALUES(1,10)
+- sql: CREATE TABLE abort_prepare_opaque(id INT NOT NULL PRIMARY KEY,value INT)
+- sql: INSERT abort_prepare_opaque VALUES(1,10)
+- sql: CREATE TABLE abort_prepare_identity(id INT IDENTITY(1,1) NOT NULL PRIMARY KEY,value INT)
+- sql: CREATE TRIGGER abort_prepare_sql_rollback ON abort_prepare_sql AFTER UPDATE AS BEGIN ROLLBACK; INSERT abort_audit VALUES(902,9,0,0,0); END
 cleanup:
+- sql: DROP TABLE IF EXISTS abort_prepare_sql
+- sql: DROP TABLE IF EXISTS abort_prepare_unsealable
+- sql: DROP TABLE IF EXISTS abort_prepare_opaque
+- sql: DROP TABLE IF EXISTS abort_prepare_identity
 - sql: DROP TABLE IF EXISTS abort_identity_source
 - sql: DROP TABLE IF EXISTS abort_identity_target
 - sql: DROP TABLE IF EXISTS abort_before_audit
@@ -404,10 +420,11 @@ test_cases:
      (define audit (table "memcp-tests" false "abort_before_audit" false nil))
      (registertriggerlanguage "abort-before-cleanup-observer"
       (close_procedure (lambda (_source _context)
-       (lambda (OLD NEW session completion) (begin
+       (lambda (OLD NEW session completion)
+        (request_transaction_abort completion (lambda () (begin
         (define fresh (newsession)) (fresh "username" "root")
         (signals "fresh" fresh)
-        (request_transaction_abort completion
+        (list
          (lambda (execute OLD NEW payload) (begin
           (signals "callback_n" (+ 1 (coalesceNil (signals "callback_n") 0)))
           (signals "held_cap" execute) (signals "held_old" OLD)
@@ -419,7 +436,7 @@ test_cases:
            (define new_value (scan leaf NEW '() '() '() (lambda () true) '("value") (lambda (n v) (+ n v)) 0 +))
            (with_table_mutation (list audit) (list "insert" '()) leaf fresh (lambda (bound)
             (insert audit '("id" "old_value" "new_value") (list (list 71 old_value new_value)) '() nil false nil bound))))))))
-         '("inert" 41)))))) false false true)
+         '("inert" 41)))))))) false false true)
      (tx_begin_acid owner)
      (createstatementtrigger target "native_abort_probe" "after_statement" "abort-before-cleanup-observer" "observe" '("update") false false (owner "__memcp_tx"))
      (tx_commit owner)
@@ -502,10 +519,11 @@ test_cases:
      (define audit (table "memcp-tests" false "abort_leaf_audit" false nil))
      (registertriggerlanguage "abort-leaf-cleanup-observer"
       (close_procedure (lambda (_source _context)
-       (lambda (OLD NEW session completion) (begin
+       (lambda (OLD NEW session completion)
+        (request_transaction_abort completion (lambda () (begin
         (define fresh (newsession)) (fresh "username" "root")
         (signals "fresh" fresh)
-        (request_transaction_abort completion
+        (list
          (lambda (execute OLD NEW payload) (begin
           (signals "callback_n" (+ 1 (coalesceNil (signals "callback_n") 0)))
           (signals "held_cap" execute) (signals "held_old" OLD)
@@ -517,7 +535,7 @@ test_cases:
            (define new_value (scan leaf NEW '() '() '() (lambda () true) '("value") (lambda (n v) (+ n v)) 0 +))
            (with_table_mutation (list audit) (list "insert" '()) leaf fresh (lambda (bound)
             (insert audit '("id" "old_value" "new_value") (list (list 72 old_value new_value)) '() nil false nil bound))))))))
-         '("inert" 41)))))) false false true)
+         '("inert" 41)))))))) false false true)
      (tx_begin_acid owner)
      (createstatementtrigger target "native_abort_leaf_probe" "after_statement" "abort-leaf-cleanup-observer" "observe" '("update") false false (owner "__memcp_tx"))
      (tx_commit owner)
@@ -655,3 +673,116 @@ test_cases:
         rows: 1
         data:
         - last_identity: 100
+
+- name: Caught native preparation failures still abort the entire original transaction without retrying preparation
+  scm: |
+    (begin
+     (registertriggerlanguage "abort-preparation-observer"
+      (close_procedure (lambda (mode _context)
+       (lambda (OLD NEW session completion) (begin
+        (define probe (session "abort_preparation_probe"))
+        (define prepare (lambda () (begin
+         (probe "prepare_n" (+ 1 (coalesceNil (probe "prepare_n") 0)))
+         (if (equal? mode "opaque") (error (probe "cause"))
+          (list (lambda (_execute _OLD _NEW _payload) (probe "suffix" true)) session)))))
+        (try (lambda () (request_transaction_abort completion prepare))
+         (lambda (failure) (probe "first_cause" (transaction_abort_failure failure))))
+        (try (lambda () (request_transaction_abort completion (lambda () (begin
+          (probe "replayed" true) (error "repeated abort preparation executed")))))
+         (lambda (failure) (probe "second_cause" (transaction_abort_failure failure))))
+        true)))) false false true)
+     (define run (lambda (mode) (begin
+      (define owner (newsession)) (owner "username" "root")
+      (define probe (newsession)) (owner "abort_preparation_probe" probe)
+      (define marker (list "opaque preparation witness" 73)) (probe "cause" marker)
+      (define target (table "memcp-tests" false (concat "abort_prepare_" mode) false nil))
+      (define prefix (table "memcp-tests" false "abort_prefix" false nil))
+      (tx_begin_acid owner)
+      (createstatementtrigger target (concat "native_abort_prepare_" mode) "after_statement"
+       "abort-preparation-observer" mode '("update") false false (owner "__memcp_tx"))
+      (tx_commit owner)
+      (tx_begin_acid owner) (define tx (owner "__memcp_tx"))
+      (with_table_mutation (list prefix) (list "update" '("value")) tx owner (lambda (bound)
+       (scan bound prefix '() '() '("id") (lambda (id) (equal? id 1)) '("$update")
+        (lambda (n update) (begin (update '("value" 99)) (+ n 1))) 0 +)))
+      (try (lambda ()
+       (with_table_mutation (list target) (list "update" '("value")) tx owner (lambda (bound)
+        (scan bound target '() '() '("id") (lambda (id) (equal? id 1)) '("$update")
+         (lambda (n update) (begin (update '("value" 50)) (+ n 1))) 0 +))))
+       (lambda (failure) (begin
+        (probe "terminal" (transaction_abort_transfer? failure))
+        (probe "final_cause" (transaction_abort_failure failure)))))
+      (define same_cause (lambda (cause)
+       (if (equal? mode "opaque") (identical? (failure_value cause) marker)
+        (equal? (string (failure_value cause)) "native continuation payload requires immutable scalar or list data"))))
+      (list (probe "prepare_n") (nil? (probe "replayed")) (nil? (probe "suffix"))
+       (probe "terminal") (same_cause (probe "first_cause"))
+       (same_cause (probe "second_cause")) (same_cause (probe "final_cause"))
+       (tx_state tx) (nil? (owner "transaction"))
+       (scan nil prefix '() '() '() (lambda () true) '("id" "value")
+        (lambda (rows id value) (merge rows (list (list id value)))) '() merge)
+       (scan nil target '() '() '() (lambda () true) '("id" "value")
+        (lambda (rows id value) (merge rows (list (list id value)))) '() merge)))))
+     (map '("unsealable" "opaque") run))
+  expect:
+    result:
+    - &id001
+      - 1
+      - true
+      - true
+      - true
+      - true
+      - true
+      - true
+      - aborted
+      - true
+      - - - 1
+          - 7
+      - - - 1
+          - 10
+    - *id001
+- name: Identity setting survives rollback while the valid remaining trigger insert executes
+  noncritical: true
+  tds:
+    statements:
+    - connection: owner
+      sql: SET IDENTITY_INSERT abort_prepare_identity ON
+    - connection: owner
+      sql: SET XACT_ABORT OFF; SET TRANSACTION ISOLATION LEVEL SERIALIZABLE; BEGIN TRANSACTION
+    - connection: owner
+      sql: UPDATE abort_prefix SET value=99 WHERE id=1
+    - connection: owner
+      sql: UPDATE abort_prepare_sql SET value=50 WHERE id=1
+      expect:
+        error: true
+    - connection: owner
+      sql: SELECT XACT_STATE() AS state,@@TRANCOUNT AS depth
+      expect:
+        rows: 1
+        data:
+        - state: 0
+          depth: 0
+    - connection: observer
+      sql: SELECT id,value FROM abort_prefix
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 7
+    - connection: observer
+      sql: SELECT id,value FROM abort_prepare_sql
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 10
+    - connection: observer
+      sql: SELECT id,kind,local_value FROM abort_audit WHERE id=902
+      expect:
+        rows: 1
+        data:
+        - id: 902
+          kind: 9
+          local_value: 0
+    - connection: owner
+      sql: SET IDENTITY_INSERT abort_prepare_identity OFF
