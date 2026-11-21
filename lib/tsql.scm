@@ -401,9 +401,14 @@ Deferred SQL source remains bound by the later actual insertion session. */
 			(error "generated version column cannot have a DEFAULT declaration") true)
 		(define null_options (if (or (nil? (contract "base_type")) (has_assoc? options "null")) options
 			(append options "null" (contract "nullable"))))
+		/* Effective alias nullability is known here. NOT NULL ADD initializes
+		historical rows even when the spelling omitted an explicit NOT NULL. */
+		(define historical_options (if (and (has_assoc? null_options "fill_existing")
+			(has_assoc? null_options "null") (not (null_options "null")))
+			(set_assoc null_options "fill_existing" true) null_options))
 		(if (and (contract "id") (null_options "auto_increment"))
 			(error "IDENTITY alias declarations are not yet supported") true)
-		(define identity_options (tsql_identity_attributes base native_dimensions null_options))
+		(define identity_options (tsql_identity_attributes base native_dimensions historical_options))
 		/* Context-free defaults use the native value. Temporal text retains its
 		SQL recipe for conversion under the later writing session. */
 		(define default_options (if (if planning_session (planning_session "__tsql_compile_only") false)

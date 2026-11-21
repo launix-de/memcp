@@ -173,20 +173,29 @@ test_cases:
   expect: {rows: 7,data: [{id: 1,value: 12,amount: 0},{id: 2,value: 22,amount: 7},{id: 3,value: 33,amount: 0},{id: 4,value: 44,amount: 0},{id: 5,value: 55,amount: 0},{id: 14,value: 144,amount: 9},{id: 24,value: 244,amount: 12}]}
 - name: PostgreSQL append preserves prior DML and the original SQL transaction
   syntax: postgresql
-  sql: BEGIN; UPDATE constant_append_pg SET value=91 WHERE id=9; ALTER TABLE constant_append_pg ADD COLUMN flag INTEGER NOT NULL DEFAULT 4; COMMIT
+  steps:
+  - {session_id: constant_append_pg_owner, sql: BEGIN}
+  - {session_id: constant_append_pg_owner, sql: 'UPDATE constant_append_pg SET value=91 WHERE id=9'}
+  - {session_id: constant_append_pg_owner, sql: 'ALTER TABLE constant_append_pg ADD COLUMN flag INTEGER NOT NULL DEFAULT 4'}
+  - {session_id: constant_append_pg_owner, sql: COMMIT}
 - name: PostgreSQL sees its complete committed data and declaration
   syntax: postgresql
   sql: SELECT id,value,flag FROM constant_append_pg
   expect: {rows: 1,data: [{id: 9,value: 91,flag: 4}]}
 - name: MySQL append preserves preceding DML and the declared default
   syntax: mysql
-  sql: BEGIN; UPDATE constant_append_mysql SET value=101 WHERE id=10; ALTER TABLE constant_append_mysql ADD COLUMN flag INT NOT NULL DEFAULT 6; COMMIT
+  steps:
+  - {session_id: constant_append_mysql_owner, sql: BEGIN}
+  - {session_id: constant_append_mysql_owner, sql: 'UPDATE constant_append_mysql SET value=101 WHERE id=10'}
+  - {session_id: constant_append_mysql_owner, sql: 'ALTER TABLE constant_append_mysql ADD COLUMN flag INT NOT NULL DEFAULT 6'}
+  - {session_id: constant_append_mysql_owner, sql: COMMIT}
 - name: MySQL sees its complete committed data and declaration
   syntax: mysql
   sql: SELECT id,value,flag FROM constant_append_mysql
   expect: {rows: 1,data: [{id: 10,value: 101,flag: 6}]}
 - name: Crash after committed append retains its actual decision
-  action: crash
+  scm: (crash)
+  expect: {interrupted_ok: true}
 - name: Recover original committed declarations and initial values
   action: restart
 - name: Recovered complete cells retain all historical and explicit values

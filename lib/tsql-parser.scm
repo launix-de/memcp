@@ -2600,7 +2600,7 @@ https://learn.microsoft.com/sql/t-sql/statements/create-table-transact-sql */
 	(parser '("(" tsql_clock_default ")") true)
 	'(tsql_keyword_getdate "(" ")") '(tsql_keyword_sysdatetime "(" ")")
 	tsql_keyword_current_timestamp)))
-(define tsql_column_attributes (lambda (default_parser) (parser (define attrs (* (or
+(define tsql_column_attributes (lambda (default_parser allow_values) (parser (define attrs (* (or
 	(parser '((? tsql_keyword_constraint (define key tsql_identifier)) tsql_keyword_primary tsql_keyword_key tsql_key_placement tsql_key_layout)
 		(if key (list "primary" true "null" false "constraint_name" key) '("primary" true "null" false)))
 	(parser '((? tsql_keyword_constraint (define key tsql_identifier)) tsql_keyword_unique tsql_key_placement tsql_key_layout)
@@ -2608,6 +2608,8 @@ https://learn.microsoft.com/sql/t-sql/statements/create-table-transact-sql */
 	(parser tsql_keyword_rowguidcol '("rowguidcol" true))
 	(parser '(tsql_keyword_not tsql_keyword_null) '("null" false))
 	(parser tsql_keyword_null '("null" true))
+	(parser '(tsql_keyword_with tsql_keyword_values)
+		(if allow_values '("fill_existing" true) (error "WITH VALUES requires ALTER TABLE ADD")))
 	(parser '(tsql_keyword_identity (? "(" (define seed tsql_int) "," (define increment tsql_int) ")"))
 		(if (and (or (nil? seed) (>= seed 1)) (or (nil? increment) (equal? increment 1)))
 			(list "auto_increment" true "identity_seed" (coalesceNil seed 1))
@@ -2622,6 +2624,11 @@ https://learn.microsoft.com/sql/t-sql/statements/create-table-transact-sql */
 		(if (> (count (filter attrs (lambda (attr)
 			(or (has_assoc? attr "default") (has_assoc? attr "default_expression"))))) 1)
 			(error "multiple DEFAULT declarations") true)
+		(define fills (filter attrs (lambda (attr) (has_assoc? attr "fill_existing"))))
+		(if (> (count fills) 1) (error "duplicate WITH VALUES") true)
+		(if (and (> (count fills) 0) (not (find attrs (lambda (attr)
+			(or (has_assoc? attr "default") (has_assoc? attr "default_expression"))))))
+			(error "WITH VALUES requires a DEFAULT declaration") true)
 		(if (and (find attrs (lambda (attr) (attr "auto_increment")))
 			(find attrs (lambda (attr) (attr "null"))))
 			(error "IDENTITY column was declared NULL") true)
@@ -6857,11 +6864,19 @@ that context explicitly; stored views refuse this scalar before publication. */
 					(list "default" (list (quote sql_type_expr) (cadr folded)
 						(sql_info_datatype info) (sql_info_collation info)) "__tsql_default_source" (car captured))
 					(list "default_expression" (car captured) "default_deferred" true))))))))
-	(define column_attributes (tsql_column_attributes tsql_default_value))
-	(define column_definition (parser '(
+	(define make_column_definition (lambda (column_attributes) (parser '(
 		(define name tsql_identifier) (define type tsql_schema_type)
 		(define dimensions tsql_type_dimensions) (define attributes column_attributes)
-	) (list name type (cons (quote list) dimensions) attributes)))
+	) (list name type (cons (quote list) dimensions) attributes))))
+	(define column_definition (make_column_definition (tsql_column_attributes tsql_default_value false)))
+	(define add_column_syntax (make_column_definition (tsql_column_attributes tsql_default_value true)))
+	/* Nullable ADD preserves historical NULL unless WITH VALUES was explicit.
+	NOT NULL ADD always initializes its historical rows from the default. */
+	(define add_column_definition (parser (define column add_column_syntax)
+		(match column '(name type dimensions attributes)
+			(list name type dimensions (if (or (has_assoc? attributes "fill_existing")
+				(and (has_assoc? attributes "null") (not (attributes "null")))) attributes
+				(append attributes "fill_existing" false))))))
 	/* Key syntax is shared by persistent tables, table variables and TVF
 	return tables. Only CREATE TABLE adds an optional constraint name. */
 	(define table_key_definition (parser (or
@@ -7066,7 +7081,7 @@ that context explicitly; stored views refuse this scalar before publication. */
 							(list (quote quote) (list value (coalesceNil (default "default_expression") "")
 								(coalesceNil key (concat "DF_" name "_" (declaration "Field")))
 								(if (default "default_deferred") true false))) (quote tx)) true)))))
-			(parser '(tsql_keyword_add (define columns (+ column_definition ",")))
+			(parser '(tsql_keyword_add (define columns (+ add_column_definition ",")))
 				(lambda (database name)
 					(if compile_only (tsql_command_binding 'add-columns (map columns (lambda (definition)
 						(match definition '(column type dimensions attributes)
