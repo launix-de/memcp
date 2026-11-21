@@ -401,6 +401,9 @@ func catalogRowsFromTable(t *table) (rows catalogRows) {
 	rows.addRecord(catalogTables, schema, nil, definition)
 	identity := func(i int) []scm.Scmer { return []scm.Scmer{owner, scm.NewInt(int64(i))} }
 	for i, column := range definition.Columns {
+		if column.RuntimeOnly {
+			continue
+		}
 		rows.addRecord(catalogColumns, schema, identity(i), column)
 	}
 	for i, key := range definition.Unique {
@@ -423,6 +426,9 @@ func catalogRowsFromTable(t *table) (rows catalogRows) {
 		}
 	}
 	for i, trigger := range definition.Triggers {
+		if trigger.cacheTarget != nil || trigger.Acquire != nil || restoredTriggerRequiresRuntimeTarget(trigger.Name) {
+			continue
+		}
 		// Trigger persistence chooses source or compiled code and restores its
 		// lifecycle pin. Keep that existing codec at this record boundary.
 		var record map[string]json.RawMessage

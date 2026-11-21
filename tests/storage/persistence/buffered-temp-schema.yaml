@@ -27,6 +27,14 @@ setup:
   - sql: "INSERT INTO buffered_schema_base (id) VALUES (1), (2)"
 
 test_cases:
+  - name: "Runtime-only columns require temporary storage"
+    scm: |
+      (createcolumn
+        (table "memcp-tests" false "buffered_schema_base" false)
+        "invalid_runtime_column" "int" '() '("runtime_only" true))
+    expect:
+      error: true
+
   - name: "Temporary column is published immediately"
     scm: &create_computed_column |
       (createcolumn

@@ -196,7 +196,7 @@ func (t *table) computeColumnDDLLocked(tx *TxContext, name string, inputCols []s
 				if c.IsTemp {
 					mode = schemaSaveBuffered
 				}
-				t.finishSchemaMutationLocked(mode, !c.IsTemp)
+				t.finishSchemaMutationLocked(mode, !c.RuntimeOnly)
 				metadataLocked = false
 			}
 			if !ddlLocked {
@@ -332,6 +332,7 @@ func (t *table) computeOrderedColumnDDLLocked(name string, sortCols []string, so
 	found := false
 	paramsChanged := false
 	isTemp := false
+	runtimeOnly := false
 	t.schema.schemalock.Lock()
 	for i, c := range t.Columns {
 		if c.Name == name {
@@ -351,6 +352,7 @@ func (t *table) computeOrderedColumnDDLLocked(name string, sortCols []string, so
 			t.Columns[i].OrcReduceInit = reduceInit
 			t.publishReadProgramSnapshot()
 			isTemp = c.IsTemp
+			runtimeOnly = c.RuntimeOnly
 			found = true
 			break
 		}
@@ -368,7 +370,7 @@ func (t *table) computeOrderedColumnDDLLocked(name string, sortCols []string, so
 	if isTemp {
 		mode = schemaSaveBuffered
 	}
-	t.finishSchemaMutationLocked(mode, !isTemp)
+	t.finishSchemaMutationLocked(mode, !runtimeOnly)
 
 	// Ensure every shard has an ORC proxy (lazy: no eager recompute).
 	//
