@@ -24,6 +24,7 @@ const (
 	catalogForeignReplacementKind
 	catalogEnforcementKind
 	catalogColumnKind
+	catalogStatementTriggerKind
 )
 
 // Identity is allocated before the first unpublished declaration. It is part of
@@ -128,9 +129,9 @@ func (scope *transactionResources) catalogReadOnlyLocked() bool {
 }
 
 func (tx *TxContext) beginCatalogDeclaration(db *database, kind catalogDeclarationKind) {
-	public := kind == catalogDefaultKind || kind == catalogSourceKind || kind == catalogTableDropKind || kind == catalogForeignDropKind || kind == catalogForeignReplacementKind || kind == catalogPublicKeyKind || kind == catalogColumnKind
+	public := kind == catalogDefaultKind || kind == catalogSourceKind || kind == catalogTableDropKind || kind == catalogForeignDropKind || kind == catalogForeignReplacementKind || kind == catalogPublicKeyKind || kind == catalogColumnKind || kind == catalogStatementTriggerKind
 	privateCreate := kind == catalogCreateKind
-	if tx.hasTableDrops() && !public {
+	if tx.hasTableDrops() && (!public || kind == catalogStatementTriggerKind) {
 		panic("table removal phase admits only default or source declarations")
 	}
 	// Construction admission owns effect policy. Merely preparing a private
@@ -897,6 +898,7 @@ const (
 	catalogDeclarationConstruction catalogConstructionProfile = iota
 	catalogEnforcementConstruction
 	catalogValidationConstruction
+	catalogStatementTriggerConstruction
 )
 
 // Catalog construction shares the native resource/decision admission. A native
@@ -904,10 +906,12 @@ const (
 // After public row mutation, enforcement may extend only endpoints already
 // blocked by this owner's earlier enforcement declarations. Default-only leases
 // grant row rights and cannot establish that protection. Read-only validation
-// is not itself a row phase.
+// is not itself a row phase. Statement-program amendments instead retain
+// their actual endpoint/input lease; their later producers capture the new
+// definition without re-executing an earlier row phase.
 func (tx *TxContext) beginCatalogConstruction(profile catalogConstructionProfile, endpoints ...*table) func() {
 	switch profile {
-	case catalogDeclarationConstruction, catalogEnforcementConstruction:
+	case catalogDeclarationConstruction, catalogEnforcementConstruction, catalogStatementTriggerConstruction:
 		tx.noteStatementMutation(nil)
 	case catalogValidationConstruction:
 		// Admission itself changes no declaration. Validation retains the same

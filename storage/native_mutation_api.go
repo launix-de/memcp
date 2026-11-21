@@ -72,7 +72,7 @@ func withNativeTableMutation(targets []*table, descriptor nativeMutationDescript
 			if declarationTarget != nil && declarationTarget != target {
 				panic("private declaration input requires one checked native target")
 			}
-			if descriptor.event != nativeMutationUpdate && descriptor.event != nativeMutationInsert {
+			if !source.mutationEventAllowed(target, descriptor.event) {
 				panic("private declaration input requires a checked native INSERT or UPDATE producer")
 			}
 			declarationSource, declarationTarget = source, target
