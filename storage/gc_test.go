@@ -640,7 +640,7 @@ func TestBlobUndercountRetainsCommittedOwners(t *testing.T) {
 				tbl.Insert([]string{"id", "content"}, [][]scm.Scmer{{scm.NewInt(4), scm.NewString(payloads[0])}}, nil, scm.NewNil(), false, nil)
 				result := Rebuild(true, true)
 				db.persistence = persistence
-				if result.err == nil || !strings.Contains(result.err.Error(), "schema publication failure") {
+				if !strings.Contains(result, "schema publication failure") {
 					t.Fatalf("missing injected failure: %s", result)
 				}
 			}

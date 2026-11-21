@@ -328,7 +328,7 @@ func TestSparseRecSetFilterAppliesPrunedAccessBoundary(t *testing.T) {
 			filtered := source.filterToRecSet(nil, nil, trueCondition(), tc.schema, tc.values)
 			got := make([]int64, 0)
 			filtered.scan(nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, nil, trueCondition(), []string{"id"},
-				scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { got = append(got, values[1].Int()); return values[0] }), scm.NewNil(), scm.NewNil(), false)
+				scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { got = append(got, values[1].Int()); return values[0] }), scm.NewNil(), scm.NewNil(), false, nil)
 			if !equalInt64s(got, tc.want) {
 				t.Fatalf("filtered rows = %v, want %v", got, tc.want)
 			}

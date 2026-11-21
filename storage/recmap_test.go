@@ -259,7 +259,7 @@ func TestRecMapPrunedDomainImageAndComposition(t *testing.T) {
 			return scm.NewInt(values[0].Int() + value.Int())
 		}), scm.NewInt(0), scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
 			return scm.NewInt(values[0].Int() + values[1].Int())
-		}), false, nil)
+		}), false)
 	if sum.Int() != 23 {
 		t.Fatalf("$recmap_call projected sum = %d, want 23", sum.Int())
 	}
