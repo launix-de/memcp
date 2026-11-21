@@ -380,7 +380,10 @@ func (r *replicationManager) recoverResource(ctx context.Context, id string, rep
 		// authority; ordinary COLD loading then uses the correct native content.
 		if local.Readable() && resource.Shard != "" && record.Content != "" {
 			if db := databases.Get(resource.Database); db != nil && !isCatalogResource(resource) {
-				db.ensureLoaded()
+				// This data report can arrive before the independent native
+				// catalog reports. Decode only completed local declarations;
+				// recovery must not acquire their still-unconfirmed query rights.
+				db.loadOnce.Do(func() { db.initializeSchemaSnapshot(nil, true) })
 			}
 			if err := r.restoreBackup(record); err != nil {
 				return replicaRecord{}, false, err
