@@ -130,17 +130,13 @@ func (changes *publicCatalogChanges) stageColumnAppend(tx *TxContext, t *table, 
 	// excludes rewind/decision, and every actual row entry checks that owner.
 	lease := changes.leases[t]
 	changes.mu.Unlock()
-	if initialized {
-		lease.retainDDL(t, tx.transactionState)
-	} else if lease.ddlTable.Load() == nil {
-		t.ddlMu.Lock()
-	}
+	// Every append shares this same retained lease, including a nullable-only
+	// sibling. A temporary DDL waiter could otherwise wait for an initialized
+	// sibling until decision while its own construction prevents that decision.
+	lease.retainDDL(t, tx.transactionState)
 	changes.mu.Lock()
 	if changes.leases[t] != lease {
 		panic("append constructor lost its native declaration lease while waiting")
-	}
-	if !initialized && lease.ddlTable.Load() == nil {
-		defer t.ddlMu.Unlock()
 	}
 	// Metadata/generations and retained guards can change during maintenance or
 	// another same-T constructor. Re-attest before publishing the private input.
