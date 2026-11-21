@@ -213,8 +213,12 @@ type TriggerDescription struct {
 	// This validation capability is regenerated, never a durable/user option.
 	needsFinalInsertValues bool `json:"-"`
 	needsFinalUpdateValues bool `json:"-"`
-	checkDefinition        *checkDeclaration
-	statementDefinition    *statementTriggerDefinition
+	// Only an authoritative native program producer may prove that a BEFORE
+	// UPDATE program preserves NEW values. Unknown/restored callbacks cannot
+	// supply this capability; it does not change callback execution or timing.
+	preservesUpdateValues bool `json:"-"`
+	checkDefinition       *checkDeclaration
+	statementDefinition   *statementTriggerDefinition
 }
 
 // cacheTriggerSource is an immutable reverse edge for a runtime cache target.
@@ -368,6 +372,7 @@ func (tr *TriggerDescription) UnmarshalJSON(data []byte) error {
 	tr.VectorFunc = scm.NewNil()
 	tr.needsFinalInsertValues = false
 	tr.needsFinalUpdateValues = false
+	tr.preservesUpdateValues = false
 	tr.checkDefinition = nil
 	tr.statementDefinition = nil
 	// Cache-maintenance triggers carry a process-local target pin. The function
@@ -620,6 +625,7 @@ func (t *table) GetTriggers(timing TriggerTiming, retired map[nativeTriggerSlot]
 			compileTriggerForUse(t.schema.Name, t.Name, &tr)
 		}
 		tr.initialFKFootprint = nil
+		tr.preservesUpdateValues = false
 		result[item.resultIndex] = tr
 
 		t.mu.Lock()
@@ -632,6 +638,7 @@ func (t *table) GetTriggers(timing TriggerTiming, retired map[nativeTriggerSlot]
 				// A lazy replacement is not the finite FK producer described by
 				// an old optional descriptor. Ordinary callback sizes stay unknown.
 				current.initialFKFootprint = nil
+				current.preservesUpdateValues = false
 				t.refreshTriggerMemoryLocked()
 			}
 		}

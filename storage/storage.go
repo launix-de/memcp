@@ -5692,6 +5692,9 @@ func buildFKTriggers(db *database, t1, t2 *table, fk foreignKey) []foreignKeyTri
 		}
 	}
 	for i := range programs {
+		// These generated checks either return the supplied NEW unchanged or
+		// fail. Reconstruct this runtime capability from the FK declaration.
+		programs[i].trigger.preservesUpdateValues = programs[i].trigger.Timing == BeforeUpdate
 		finalizeTriggerCompilation(&programs[i].trigger)
 	}
 	return programs

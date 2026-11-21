@@ -57,7 +57,7 @@ func (operation *nativeMutationOperation) rejectStatementCascades(targets []*tab
 			for _, header := range before {
 				// Ordinary row execution does not use Disabled. Do not infer a
 				// stronger exclusion than its real selector; lazy headers stay broad.
-				if header.Timing == BeforeUpdate && !header.needsFinalUpdateValues &&
+				if header.Timing == BeforeUpdate && !header.needsFinalUpdateValues && !header.preservesUpdateValues &&
 					!(profile == nativeInternalTriggers && isUserTrigger(header)) {
 					current.columns = nil
 					break
