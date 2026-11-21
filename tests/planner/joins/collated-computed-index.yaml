@@ -5,8 +5,10 @@ metadata:
   isolated: true
   description: Computed text access preserves explicit equality and current probe values
 setup:
+- sql: DROP TABLE IF EXISTS collated_scan_empty
 - sql: DROP TABLE IF EXISTS collated_scan_rows
 - sql: DROP TABLE IF EXISTS collated_scan_work
+- sql: CREATE TABLE collated_scan_empty(id INT PRIMARY KEY,label VARCHAR(100))
 - sql: CREATE TABLE collated_scan_rows(id INT PRIMARY KEY,label VARCHAR(100))
 - sql: INSERT INTO collated_scan_rows VALUES(1,'ALPHA  '),(2,'alpha'),(3,'Σ'),(4,'ς'),(5,'σ'),(6,'K'),(7,'K'),(8,'k'),(9,'İ'),(10,'i'),(11,'I'),(12,NULL)
 - sql: CREATE TABLE collated_scan_work(object_name VARCHAR(100),permission_name VARCHAR(100))
@@ -19,7 +21,7 @@ test_cases:
       (list (quote table) "memcp-tests" false "collated_scan_rows" false)
       '("label") (list (quote lambda) (list (quote label))
         (list equal_collate (list regexp_replace (quote label) " +$" "") (list regexp_replace "alpha " " +$" "") "Latin1_General_CI_AS"))
-      '("id") (list (quote lambda) (list (quote acc) (quote id)) (list (quote cons) (quote id) (quote acc))) '()
+      (list (quote quote) '("id")) (list (quote lambda) (list (quote acc) (quote id)) (list (quote cons) (quote id) (quote acc))) '()
       (list (quote lambda) (list (quote a) (quote b)) (list (quote merge) (list (quote list) (quote a) (quote b)))) false)) <)
   expect:
     result:
@@ -31,7 +33,7 @@ test_cases:
       (list (quote table) "memcp-tests" false "collated_scan_rows" false)
       '("label") (list (quote lambda) (list (quote label))
         (list equal_collate (list regexp_replace (quote label) " +$" "") (list regexp_replace "σ" " +$" "") "Latin1_General_CI_AS"))
-      '("id") (list (quote lambda) (list (quote acc) (quote id)) (list (quote cons) (quote id) (quote acc))) '()
+      (list (quote quote) '("id")) (list (quote lambda) (list (quote acc) (quote id)) (list (quote cons) (quote id) (quote acc))) '()
       (list (quote lambda) (list (quote a) (quote b)) (list (quote merge) (list (quote list) (quote a) (quote b)))) false)) <)
   expect:
     result:
@@ -44,7 +46,7 @@ test_cases:
       (list (quote table) "memcp-tests" false "collated_scan_rows" false)
       '("label") (list (quote lambda) (list (quote label))
         (list equal_collate (list regexp_replace (quote label) " +$" "") (list regexp_replace "k" " +$" "") "LATIN1_GENERAL_CI_AS"))
-      '("id") (list (quote lambda) (list (quote acc) (quote id)) (list (quote cons) (quote id) (quote acc))) '()
+      (list (quote quote) '("id")) (list (quote lambda) (list (quote acc) (quote id)) (list (quote cons) (quote id) (quote acc))) '()
       (list (quote lambda) (list (quote a) (quote b)) (list (quote merge) (list (quote list) (quote a) (quote b)))) false)) <)
   expect:
     result:
@@ -57,7 +59,7 @@ test_cases:
       (list (quote table) "memcp-tests" false "collated_scan_rows" false)
       '("label") (list (quote lambda) (list (quote label))
         (list equal_collate (list regexp_replace (quote label) " +$" "") (list regexp_replace "i" " +$" "") "Latin1_General_CI_AS"))
-      '("id") (list (quote lambda) (list (quote acc) (quote id)) (list (quote cons) (quote id) (quote acc))) '()
+      (list (quote quote) '("id")) (list (quote lambda) (list (quote acc) (quote id)) (list (quote cons) (quote id) (quote acc))) '()
       (list (quote lambda) (list (quote a) (quote b)) (list (quote merge) (list (quote list) (quote a) (quote b)))) false)) <)
   expect:
     result:
@@ -69,7 +71,7 @@ test_cases:
       (list (quote table) "memcp-tests" false "collated_scan_rows" false)
       '("label") (list (quote lambda) (list (quote label))
         (list equal_collate (list regexp_replace (quote label) " +$" "") (list regexp_replace "alpha" " +$" "") "utf8mb4_bin"))
-      '("id") (list (quote lambda) (list (quote acc) (quote id)) (list (quote cons) (quote id) (quote acc))) '()
+      (list (quote quote) '("id")) (list (quote lambda) (list (quote acc) (quote id)) (list (quote cons) (quote id) (quote acc))) '()
       (list (quote lambda) (list (quote a) (quote b)) (list (quote merge) (list (quote list) (quote a) (quote b)))) false)) <)
   expect:
     result:
@@ -80,7 +82,7 @@ test_cases:
       (list (quote table) "memcp-tests" false "collated_scan_rows" false)
       '("label") (list (quote lambda) (list (quote label))
         (list equal_collate (list regexp_replace (quote label) " +$" "") (list regexp_replace nil " +$" "") "Latin1_General_CI_AS"))
-      '("id") (list (quote lambda) (list (quote acc) (quote id)) (list (quote cons) (quote id) (quote acc))) '()
+      (list (quote quote) '("id")) (list (quote lambda) (list (quote acc) (quote id)) (list (quote cons) (quote id) (quote acc))) '()
       (list (quote lambda) (list (quote a) (quote b)) (list (quote merge) (list (quote list) (quote a) (quote b)))) false)) <)
   expect:
     result: []
@@ -90,7 +92,7 @@ test_cases:
       (list (quote table) "memcp-tests" false "collated_scan_rows" false)
       '("label") (list (quote lambda) (list (quote label))
         (list equal_collate (list regexp_replace "alpha" " +$" "") (list regexp_replace (quote label) " +$" "") "Latin1_General_CI_AS"))
-      '("id") (list (quote lambda) (list (quote acc) (quote id)) (list (quote cons) (quote id) (quote acc))) '()
+      (list (quote quote) '("id")) (list (quote lambda) (list (quote acc) (quote id)) (list (quote cons) (quote id) (quote acc))) '()
       (list (quote lambda) (list (quote a) (quote b)) (list (quote merge) (list (quote list) (quote a) (quote b)))) false)) <)
   expect:
     result:
@@ -102,7 +104,7 @@ test_cases:
       (list (quote table) "memcp-tests" false "collated_scan_rows" false)
       '("label") (list (quote lambda) (list (quote label))
         (list equal_collate (list (list (quote lambda) (list (quote value)) (quote value)) (quote label)) (list regexp_replace "alpha" " +$" "") "Latin1_General_CI_AS"))
-      '("id") (list (quote lambda) (list (quote acc) (quote id)) (list (quote cons) (quote id) (quote acc))) '()
+      (list (quote quote) '("id")) (list (quote lambda) (list (quote acc) (quote id)) (list (quote cons) (quote id) (quote acc))) '()
       (list (quote lambda) (list (quote a) (quote b)) (list (quote merge) (list (quote list) (quote a) (quote b)))) false)) <)
   expect:
     result:
@@ -114,7 +116,7 @@ test_cases:
       (list (quote table) "memcp-tests" false "collated_scan_rows" false)
       '("label") (list (quote lambda) (list (quote label))
         (list equal_collate (list regexp_replace (quote label) " +$" "") (list regexp_replace (list (quote session) "needle") " +$" "") "Latin1_General_CI_AS"))
-      '("id") (list (quote lambda) (list (quote acc) (quote id)) (list (quote cons) (quote id) (quote acc))) '()
+      (list (quote quote) '("id")) (list (quote lambda) (list (quote acc) (quote id)) (list (quote cons) (quote id) (quote acc))) '()
       (list (quote lambda) (list (quote a) (quote b)) (list (quote merge) (list (quote list) (quote a) (quote b)))) false))))
      (define values (newsession))
      (map '("alpha" "σ" "k" "i" "absent") (lambda (needle)
@@ -132,6 +134,43 @@ test_cases:
     - - 10
       - 11
     - []
+- name: Different constant regex patterns retain different computed keys
+  scm: |-
+    (list
+    (sort (eval (compile_scan_plan (quote scan) nil
+      (list (quote table) "memcp-tests" false "collated_scan_rows" false)
+      '("label") (list (quote lambda) (list (quote label))
+        (list equal_collate (list regexp_replace (quote label) "^." "") (list regexp_replace "lpha" " +$" "") "Latin1_General_CI_AS"))
+      (list (quote quote) '("id")) (list (quote lambda) (list (quote acc) (quote id)) (list (quote cons) (quote id) (quote acc))) '()
+      (list (quote lambda) (list (quote a) (quote b)) (list (quote merge) (list (quote list) (quote a) (quote b)))) false)) <)
+    (sort (eval (compile_scan_plan (quote scan) nil
+      (list (quote table) "memcp-tests" false "collated_scan_rows" false)
+      '("label") (list (quote lambda) (list (quote label))
+        (list equal_collate (list regexp_replace (quote label) " +$" "") (list regexp_replace "alpha " " +$" "") "Latin1_General_CI_AS"))
+      (list (quote quote) '("id")) (list (quote lambda) (list (quote acc) (quote id)) (list (quote cons) (quote id) (quote acc))) '()
+      (list (quote lambda) (list (quote a) (quote b)) (list (quote merge) (list (quote list) (quote a) (quote b)))) false)) <)
+    (sort (eval (compile_scan_plan (quote scan) nil
+      (list (quote table) "memcp-tests" false "collated_scan_rows" false)
+      '("label") (list (quote lambda) (list (quote label))
+        (list equal_collate (list regexp_replace (quote label) "^." "") (list regexp_replace "lpha" " +$" "") "Latin1_General_CI_AS"))
+      (list (quote quote) '("id")) (list (quote lambda) (list (quote acc) (quote id)) (list (quote cons) (quote id) (quote acc))) '()
+      (list (quote lambda) (list (quote a) (quote b)) (list (quote merge) (list (quote list) (quote a) (quote b)))) false)) <))
+  expect:
+    result:
+    - - 2
+    - - 1
+      - 2
+    - - 2
+- name: Invalid bound regex remains unevaluated over an empty row domain
+  scm: |-
+    (sort (eval (compile_scan_plan (quote scan) nil
+      (list (quote table) "memcp-tests" false "collated_scan_empty" false)
+      '("label") (list (quote lambda) (list (quote label))
+        (list equal_collate (list regexp_replace (quote label) " +$" "") (list regexp_replace "alpha " "[" "") "Latin1_General_CI_AS"))
+      (list (quote quote) '("id")) (list (quote lambda) (list (quote acc) (quote id)) (list (quote cons) (quote id) (quote acc))) '()
+      (list (quote lambda) (list (quote a) (quote b)) (list (quote merge) (list (quote list) (quote a) (quote b)))) false)) <)
+  expect:
+    result: []
 - name: Repeated normalized composite probes verify every matching key
   scm: |-
     (begin
@@ -153,3 +192,4 @@ test_cases:
 cleanup:
 - sql: DROP TABLE IF EXISTS collated_scan_work
 - sql: DROP TABLE IF EXISTS collated_scan_rows
+- sql: DROP TABLE IF EXISTS collated_scan_empty

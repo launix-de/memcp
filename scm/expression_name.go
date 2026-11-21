@@ -165,6 +165,13 @@ func WriteExpressionName(v Scmer, w io.Writer, columns []string, columnSymbols [
 		case node.IsFloat():
 			b := strconv.AppendFloat(numBuf[:0], node.Float(), 'g', -1, 64)
 			w.Write(b)
+		case node.IsRegex():
+			// Optimized constant-pattern operations carry their immutable regex
+			// operand directly. Different patterns must remain different index
+			// expressions, including after the operation is serialized/restored.
+			io.WriteString(w, "#regex(")
+			io.WriteString(w, strconv.Quote(node.Regex().String()))
+			io.WriteString(w, ")")
 		case node.IsString():
 			s, _ := node.AppendString(nil) // zero-alloc for tagString
 			io.WriteString(w, "\"")

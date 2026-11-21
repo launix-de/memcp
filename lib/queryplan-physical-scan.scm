@@ -110,12 +110,18 @@ callbacks. Local operator optimizer hooks may subsequently transform the plan. *
 accepts compressed values and non-text scalars. A literal replacement produces
 ordinary string/NULL values, independently of its input representation. Keep
 unknown callables and raw columns on their existing residual path. */
+(define scan_plan_literal_replacement (lambda (head pattern replacement)
+	(and (or (identical? head regexp_replace) (expression_equal? head (quote regexp_replace)))
+		(string? pattern) (string? replacement)
+		/* A failing expression may not move out of a scan over an empty
+		domain. Validate only this literal native pattern, without row input. */
+		(try (lambda () (begin (regexp_test "" pattern) true)) (lambda (_error) false)))))
+
 (define scan_plan_plain_text (lambda (expr)
 	(or (string? expr) (nil? expr)
 		(match expr
 			'(head _value pattern replacement)
-			(and (or (identical? head regexp_replace) (expression_equal? head (quote regexp_replace)))
-				(string? pattern) (string? replacement))
+			(scan_plan_literal_replacement head pattern replacement)
 			_ false))))
 
 /* The value side crosses exactly one scan callback boundary. Only existing
@@ -127,8 +133,7 @@ there; arbitrary callback work must not be evaluated speculatively. */
 		((quote outer) depth value) (and (> depth 0) (symbol? value))
 		((quote session) (string? _key)) true
 		'(head value pattern replacement)
-		(and (or (identical? head regexp_replace) (expression_equal? head (quote regexp_replace)))
-			(string? pattern) (string? replacement) (scan_plan_text_binding value))
+		(and (scan_plan_literal_replacement head pattern replacement) (scan_plan_text_binding value))
 		_ (or (string? expr) (nil? expr)))))
 
 /* equal_collate owns Unicode SimpleFold equality for *_ci names, rather than
