@@ -52,7 +52,7 @@ test_cases:
       (and (column "Computed") (equal? (column "RawType") "INT")))
   expect: {result: true}
 - name: Empty computed table has a persisted recipe before any scan or row insert
-  sql: CREATE TABLE computed_empty(id INT, word VARCHAR(16), matched AS (CASE WHEN word='Alpha' THEN 1 ELSE 0 END), answer AS (40+2))
+  sql: CREATE TABLE computed_empty(id INT, word VARCHAR(16) COLLATE utf8mb4, matched AS (CASE WHEN word='Alpha' THEN 1 ELSE 0 END), answer AS (40+2))
   expect: {rows: 0, result_not_contains: '"affected_rows"'}
 - name: An unpersisted clock computed column remains a query time value
   noncritical: true
@@ -146,8 +146,8 @@ test_cases:
 - name: A stored recipe keeps the native default column collation
   sql: INSERT computed_empty(id,word) VALUES(8,'alpha')
   expect: {affected_rows: 1}
-# Native ordinary VARCHAR declarations default to utf8mb4, whose equality is
-# case-sensitive. An explicit _ci declaration remains independently supported.
+# The source column explicitly declares case-sensitive utf8mb4, independently
+# of the TSQL database default. Its expression-level _ci override stays separate.
 - name: Recovered computation preserves case-sensitive default and explicit collation
   sql: >-
     SELECT matched,CASE WHEN word='Alpha' THEN 1 ELSE 0 END AS ordinary,
