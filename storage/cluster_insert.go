@@ -108,7 +108,10 @@ func (cluster *nodeCluster) reserveIDs(ctx context.Context, request clusterIDReq
 	return reply, nil
 }
 
-func (cluster *nodeCluster) handleIDReservation(ctx context.Context, data []byte) (any, error) {
+func (cluster *nodeCluster) handleIDReservation(ctx context.Context, source string, data []byte) (any, error) {
+	if err := cluster.requireMember(source); err != nil {
+		return nil, err
+	}
 	var request clusterIDRequest
 	if err := unmarshalNode(data, &request); err != nil {
 		return nil, err
