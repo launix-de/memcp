@@ -121,6 +121,7 @@ binding paths belong to the consuming plan, including calls inside a module. */
 (define tsql_relational_deferred_call? (lambda (node) (match node
 	((symbol quote) _data) false
 	((symbol tsql_deferred_scalar_call) _database _name _arguments) true
+	((symbol tsql_relational_scalar_call) _factory _arguments) true
 	_ (begin
 		(define found (newsession))
 		(tsql_map_executable_children node (lambda (child) (begin

@@ -65,7 +65,8 @@ module compilation neither reads nor retains a creation-time session. */
 		(define children (reduce tail (lambda (calls child)
 			(or (tsql_scalar_function_validate_syntax child contracts) calls)) false))
 		(define head_calls (tsql_scalar_function_validate_syntax head contracts))
-		(or children head_calls (equal? head "scalar-function-call")))
+		(or children head_calls (equal? head "scalar-function-call")
+			(expression_equal? head 'tsql_relational_scalar_call)))
 	_ false)))
 /* Native source admission retains syntax and the lexical declaration at each
 expression. Callees can still be staged in the creating transaction; their
@@ -435,9 +436,13 @@ Every transitive snapshot contributes its ordinary permission/version guard. */
 		(define scope (tsql_scalar_function_binding_scope planning (list database (definition "name"))))
 		(define recipe (tsql_scalar_function_recipe (definition "source")
 			(tsql_scalar_function_source_context database definition) (tsql_scalar_function_source_quoted? definition)))
-		(reduce (tsql_scalar_function_recipe_calls (recipe "steps")) (lambda (found name) (begin
-			(define snapshot (tsql_scalar_function_snapshot database name policy scope tx))
-			(or found (tsql_scalar_function_needs_relation? database (snapshot "declaration") policy scope tx)))) false)))))
+		/* Intrinsics can introduce relational factories without a textual SELECT
+		or a named module call. Consume that existing logical reference before
+		the scalar binder could emit it as an executable Scheme procedure. */
+		(or (tsql_relational_requires_query? (recipe "steps"))
+			(reduce (tsql_scalar_function_recipe_calls (recipe "steps")) (lambda (found name) (begin
+				(define snapshot (tsql_scalar_function_snapshot database name policy scope tx))
+				(or found (tsql_scalar_function_needs_relation? database (snapshot "declaration") policy scope tx)))) false))))))
 (define tsql_scalar_function_call (lambda (database name arguments policy planning tx scalar_only) (begin
 	(define name (toLower name))
 	(define snapshot (tsql_scalar_function_snapshot database name policy planning tx))
