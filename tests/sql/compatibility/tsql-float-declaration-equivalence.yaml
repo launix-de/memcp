@@ -1,0 +1,89 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# https://learn.microsoft.com/sql/t-sql/data-types/float-and-real-transact-sql
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Equivalent FLOAT precision spellings retain the native value contract
+setup:
+- sql: CREATE TABLE float_decl_rows(id INT PRIMARY KEY,value FLOAT(53) NULL CONSTRAINT float_decl_default DEFAULT (0))
+- sql: INSERT float_decl_rows VALUES(1,NULL),(2,1.25),(3,-2.5)
+- sql: CREATE TABLE float_decl_default_precision(id INT PRIMARY KEY,value FLOAT NULL)
+- sql: INSERT float_decl_default_precision VALUES(1,3.5)
+- sql: CREATE TABLE float_decl_small_precision(id INT PRIMARY KEY,value FLOAT(24) NULL)
+- sql: INSERT float_decl_small_precision VALUES(1,1.5)
+- sql: CREATE TABLE float_decl_null_guard(id INT PRIMARY KEY,value FLOAT(53) NULL)
+- sql: INSERT float_decl_null_guard VALUES(1,NULL),(2,2.5)
+test_cases:
+- name: Replace default fill historical NULL and tighten the equivalent FLOAT in one transaction
+  tds:
+    statements:
+    - {connection: owner, sql: BEGIN TRANSACTION}
+    - {connection: owner, sql: 'ALTER TABLE float_decl_rows DROP CONSTRAINT float_decl_default'}
+    - {connection: owner, sql: 'ALTER TABLE float_decl_rows ALTER COLUMN value FLOAT NULL'}
+    - {connection: owner, sql: 'ALTER TABLE float_decl_rows ADD CONSTRAINT float_decl_default DEFAULT (0) FOR value'}
+    - {connection: owner, sql: 'UPDATE float_decl_rows SET value=DEFAULT WHERE value IS NULL'}
+    - {connection: owner, sql: 'ALTER TABLE float_decl_rows ALTER COLUMN value FLOAT NOT NULL'}
+    - connection: owner
+      sql: SELECT id,value FROM float_decl_rows ORDER BY id
+      expect: {rows: 3,data: [{id: 1,value: 0},{id: 2,value: 1.25},{id: 3,value: -2.5}]}
+    - connection: observer
+      sql: SELECT id,value FROM float_decl_rows ORDER BY id
+      expect: {rows: 3,data: [{id: 1,value: null},{id: 2,value: 1.25},{id: 3,value: -2.5}]}
+    - connection: owner
+      sql: SELECT XACT_STATE() AS state,@@TRANCOUNT AS depth
+      expect: {rows: 1,data: [{state: 1,depth: 1}]}
+    - {connection: owner, sql: COMMIT TRANSACTION}
+    - connection: observer
+      sql: SELECT id,value FROM float_decl_rows ORDER BY id
+      expect: {rows: 3,data: [{id: 1,value: 0},{id: 2,value: 1.25},{id: 3,value: -2.5}]}
+- name: Precision and nullability describe the actual SQL contract
+  noncritical: true
+  sql: SELECT precision,max_length,CAST(is_nullable AS INT) AS nullable_flag FROM sys.columns WHERE object_id=OBJECT_ID(N'float_decl_rows') AND name=N'value'
+  expect: {rows: 1,data: [{precision: 53,max_length: 8,nullable_flag: 0}]}
+- name: Native nullability and SQL byte width retain the same contract
+  sql: SELECT max_length,CAST(is_nullable AS INT) AS nullable_flag FROM sys.columns WHERE object_id=OBJECT_ID(N'float_decl_rows') AND name=N'value'
+  expect: {rows: 1,data: [{max_length: 8,nullable_flag: 0}]}
+- name: Replacing the default retained its actual constraint identity
+  sql: SELECT name,parent_column_id FROM sys.default_constraints WHERE parent_object_id=OBJECT_ID(N'float_decl_rows')
+  expect: {rows: 1,data: [{name: float_decl_default,parent_column_id: 2}]}
+- name: Actual NOT NULL enforcement survives precision equivalence
+  sql: INSERT float_decl_rows VALUES(4,NULL)
+  expect: {error: true}
+- name: Omitted precision can be restated explicitly
+  sql: ALTER TABLE float_decl_default_precision ALTER COLUMN value FLOAT(53) NULL
+- name: Explicit default precision retains the complete stored value
+  sql: SELECT id,value FROM float_decl_default_precision
+  expect: {rows: 1,data: [{id: 1,value: 3.5}]}
+- name: The small precision class admits its equivalent lower spelling
+  sql: ALTER TABLE float_decl_small_precision ALTER COLUMN value FLOAT(1) NULL
+- name: Small precision equivalence preserves values and width
+  sql: SELECT id,value FROM float_decl_small_precision
+  expect: {rows: 1,data: [{id: 1,value: 1.5}]}
+- name: A same-class relaxation and private write both roll back
+  tds:
+    statements:
+    - {connection: owner, sql: BEGIN TRANSACTION}
+    - {connection: owner, sql: 'ALTER TABLE float_decl_rows ALTER COLUMN value FLOAT(25) NULL'}
+    - {connection: owner, sql: 'UPDATE float_decl_rows SET value=NULL WHERE id=2'}
+    - connection: owner
+      sql: SELECT id,value FROM float_decl_rows ORDER BY id
+      expect: {rows: 3,data: [{id: 1,value: 0},{id: 2,value: null},{id: 3,value: -2.5}]}
+    - {connection: owner, sql: ROLLBACK TRANSACTION}
+    - connection: observer
+      sql: SELECT id,value FROM float_decl_rows ORDER BY id
+      expect: {rows: 3,data: [{id: 1,value: 0},{id: 2,value: 1.25},{id: 3,value: -2.5}]}
+- name: Equivalent precision still performs historical NOT NULL validation
+  sql: ALTER TABLE float_decl_null_guard ALTER COLUMN value FLOAT NOT NULL
+  expect: {error: true}
+- name: A failed nullability validation preserves historical NULL and nonnull values
+  sql: SELECT id,value FROM float_decl_null_guard ORDER BY id
+  expect: {rows: 2,data: [{id: 1,value: null},{id: 2,value: 2.5}]}
+- name: Dynamic SQL uses the same declaration owner
+  sql: EXEC sp_executesql N'ALTER TABLE float_decl_rows ALTER COLUMN value FLOAT(53) NOT NULL'
+cleanup:
+- sql: DROP TABLE IF EXISTS float_decl_rows
+- sql: DROP TABLE IF EXISTS float_decl_default_precision
+- sql: DROP TABLE IF EXISTS float_decl_small_precision
+- sql: DROP TABLE IF EXISTS float_decl_null_guard
