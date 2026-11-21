@@ -308,21 +308,31 @@ https://learn.microsoft.com/sql/t-sql/statements/alter-function-transact-sql */
 (define tsql_require_function_kind (lambda (database name kind tx) (begin
 	(define definition (tsql_scalar_function_definition database name tx))
 	(if (or (nil? definition) (equal? (tsql_source_module_kind (definition "language")) kind)) true
-		(error "function replacement cannot change the existing object kind: " name)))))
+		(error "function replacement cannot change the existing object kind: " name))
+	definition)))
+/* Replacing an existing function retains that native namespace owner. Only a
+new declaration needs to inspect the separate relation/view namespace. Reading
+system.views during an existing ALTER would introduce an unrelated dependency
+on every concurrent private view declaration under native SERIALIZABLE. Native
+source admission still validates the actual predecessor and replacement owner. */
+(define tsql_require_function_name (lambda (database name kind replace tx) (begin
+	(define existing (if replace (tsql_require_function_kind database name kind tx) nil))
+	(if (or (show (table database false name true tx) "name")
+		(and (nil? existing) (tsql_view_name database name tx)))
+		(tsql_raise_error 2714 (concat "a relation already owns this object name: " name) 1) true)
+	existing)))
 (define tsql_define_scalar_function (lambda (name parameters return_type source replace must_exist statement session)
 	(tsql_statement_call statement session "scalar function definition" false (lambda (tx) (begin
 		(if (or (session "__tsql_insert_exec") (session "__tsql_trigger_event"))
 			(error "scalar function DDL is unsupported inside a native mutation") true)
 		(define database (session "schema"))
 		(tsql_require_database_access (tsql_session_actor session) database)
-		(if (or (show (table database false name true tx) "name") (tsql_view_name database name tx))
-			(tsql_raise_error 2714 (concat "a relation already owns this object name: " name) 1) true)
-		(if replace (tsql_require_function_kind database name "FN" tx) true)
+		(define existing (tsql_require_function_name database name "FN" replace tx))
 		(define quoted (tsql_quoted_identifier session))
 		(define relational (tsql_relational_scalar_source? source database quoted (tsql_ansi_nulls session)))
 		(createprocedure database (toLower name)
 			(tsql_source_language (if relational "tsql-relational-scalar-function" "tsql-scalar-function") session)
-			source (list parameters return_type) replace tx must_exist)
+			source (list parameters return_type) replace tx (or must_exist (not (nil? existing))))
 		0)))))
 /* Functions share the native routine catalog, but DROP must retain its SQL
 object kind. Validate every declared target before issuing native deletions. */

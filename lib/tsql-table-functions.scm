@@ -104,13 +104,11 @@ iteration markers and opaque callable/source values are not literal inputs. */
 			(error "function DDL is unsupported inside a native mutation") true)
 		(define database (session "schema"))
 		(tsql_require_database_access (tsql_session_actor session) database)
-		(if (or (show (table database false name true tx) "name") (tsql_view_name database name tx))
-			(tsql_raise_error 2714 (concat "a relation already owns this object name: " name) 1) true)
-		(if replace (tsql_require_function_kind database name "TF" tx) true)
+		(define existing (tsql_require_function_name database name "TF" replace tx))
 		(define declaration (tsql_relational_table_declaration database return_name columns nil))
 		(createprocedure database (toLower name)
 			(tsql_source_language "tsql-table-function" session)
-			source (list parameters return_name (nth declaration 2) (nth declaration 3)) replace tx must_exist)
+			source (list parameters return_name (nth declaration 2) (nth declaration 3)) replace tx (or must_exist (not (nil? existing))))
 		0)))))
 
 /* Inline functions retain a logical query, not an invocation return table.
@@ -191,12 +189,10 @@ It never asks procedure() to instantiate an executable source snapshot. */
 			(error "function DDL is unsupported inside a native mutation") true)
 		(define database (session "schema"))
 		(tsql_require_database_access (tsql_session_actor session) database)
-		(if (or (show (table database false name true tx) "name") (tsql_view_name database name tx))
-			(tsql_raise_error 2714 (concat "a relation already owns this object name: " name) 1) true)
-		(if replace (tsql_require_function_kind database name "IF" tx) true)
+		(define existing (tsql_require_function_name database name "IF" replace tx))
 		(createprocedure database (toLower name)
 			(tsql_source_language "tsql-inline-table-function" session)
-			source (list parameters) replace tx must_exist)
+			source (list parameters) replace tx (or must_exist (not (nil? existing))))
 		0)))))
 
 (define tsql_table_function_call (lambda (database name arguments alias policy planning tx) (begin
