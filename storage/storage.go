@@ -2577,6 +2577,7 @@ func Init(en scm.Env) {
 			comment := ""
 			nameIgnoreCase := false
 			oninit := scm.NewNil()
+			runtimeOnly := false
 			for i := 0; i+1 < len(options); i += 2 {
 				key := scm.String(options[i])
 				val := options[i+1]
@@ -2598,11 +2599,16 @@ func Init(en scm.Env) {
 					}
 				case "oninit":
 					oninit = val
+				case "runtime_only":
+					runtimeOnly = scm.ToBool(val)
 				default:
 					panic("unknown option: " + key)
 				}
 			}
 			pm := parsePersistencyMode(engine)
+			if runtimeOnly && (pm != Cache || !strings.HasPrefix(tblName, ".")) {
+				panic("runtime-only tables must be internal cache tables")
+			}
 			// Acquire schema ownership before native lifecycle locks or opening
 			// unpublished shard logs. A remote schema grant may need to install
 			// metadata through that same lifecycle boundary.
@@ -2625,6 +2631,7 @@ func Init(en scm.Env) {
 			newTable.schema = db
 			newTable.Name = tblName
 			newTable.PersistencyMode = pm
+			newTable.RuntimeOnly = runtimeOnly
 			newTable.ShardMode = ShardModeFree
 			newTable.lastAccessed = uint64(time.Now().UnixNano())
 			newTable.Shards = make([]*storageShard, 1)
@@ -2786,7 +2793,11 @@ func Init(en scm.Env) {
 			if newTable.isEphemeralQueryTable() {
 				mode = schemaSaveBuffered
 			}
-			db.saveLockedAndUnlock(mode, append([]*table{newTable}, foreignCatalogTables(newTable)...)...)
+			if newTable.RuntimeOnly {
+				db.schemalock.Unlock()
+			} else {
+				db.saveLockedAndUnlock(mode, append([]*table{newTable}, foreignCatalogTables(newTable)...)...)
+			}
 			// Dependency/oninit callbacks acquire their own schema rights.
 			// End publication ownership before invoking nested DDL.
 			schemaAccess.Release()

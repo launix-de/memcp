@@ -27,6 +27,13 @@ setup:
   - sql: "INSERT INTO buffered_schema_base (id) VALUES (1), (2)"
 
 test_cases:
+  - name: "Runtime-only tables require an internal cache engine"
+    scm: |
+      (createtable "memcp-tests" ".invalid_runtime_table" '()
+        '("engine" "safe" "runtime_only" true) false)
+    expect:
+      error: true
+
   - name: "Runtime-only columns require temporary storage"
     scm: |
       (createcolumn

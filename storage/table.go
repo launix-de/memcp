@@ -644,6 +644,7 @@ type table struct {
 	Foreign         []foreignKey           // foreign keys
 	Triggers        []TriggerDescription   // triggers on this table
 	PersistencyMode PersistencyMode        /* 0 = safe (default), 1 = sloppy, 2 = memory */
+	RuntimeOnly     bool                   `json:"-"`                // physical query workspace; no durable declaration
 	OnInit          atomicTableInitializer `json:"oninit,omitempty"` // immutable closed callback, atomically published
 	cacheUsers      int64                  // atomic; -1 while/after CacheManager eviction, otherwise active trigger users
 	// Immutable reverse dependency list, published by registration with CAS.
@@ -1630,12 +1631,12 @@ func (t *table) schemaSaveMode() schemaSaveMode {
 }
 
 func (t *table) finishSchemaMutationLocked(mode schemaSaveMode, definitionChanged bool) {
-	if definitionChanged {
+	if definitionChanged && !t.RuntimeOnly {
 		t.schema.saveLockedAndUnlock(mode, t)
 	} else {
-		// Physical query columns and their programs stay runtime-local. Preserve
-		// buffered checkpoint bookkeeping without opening a catalog transaction.
-		t.schema.saveLockedAndUnlock(mode)
+		// A physical program does not dirty logical schema metadata. A later
+		// user checkpoint still retains any independently buffered declarations.
+		t.schema.schemalock.Unlock()
 	}
 }
 

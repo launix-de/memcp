@@ -707,7 +707,7 @@ func (db *database) proposeCatalogTablesLocked(tables ...*table) {
 	var owners []string
 	seen := make(map[string]bool)
 	for _, t := range tables {
-		if t == nil || t.schema != db || t.isEphemeralQueryTable() || seen[t.Name] {
+		if t == nil || t.schema != db || t.RuntimeOnly || seen[t.Name] {
 			continue
 		}
 		seen[t.Name] = true

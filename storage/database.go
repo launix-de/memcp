@@ -494,11 +494,11 @@ func RebuildTable(tbl *table, all bool, repartition bool) string {
 	tbl.schema.persistenceLifecycle.RLock()
 	defer tbl.schema.persistenceLifecycle.RUnlock()
 	result := tbl.schema.rebuildWithLifecycle(all, repartition, true, tbl)
-	if r := replication.Load(); r != nil && !r.master && validReplicaDatabase(tbl.schema.Name) {
+	if r := replication.Load(); !tbl.RuntimeOnly && r != nil && !r.master && validReplicaDatabase(tbl.schema.Name) {
 		defer func() { go replicationCheckpoint(tbl.schema.Name, "") }()
 	}
 	errs := append([]string(nil), result.errors...)
-	if len(errs) == 0 {
+	if len(errs) == 0 && !tbl.RuntimeOnly {
 		if err := func() (err error) {
 			defer func() { err = recoverAsError("save failed for database " + tbl.schema.Name) }()
 			tbl.schema.save(nil, tbl)
@@ -2494,7 +2494,9 @@ func DropTable(schema, name string, ifexists bool) {
 		db.schemalock.Unlock()
 		requireTableMaintenance(schema, name, maintenanceDrop)
 	}
-	db.dropCatalogTableLocked(name)
+	if !t.RuntimeOnly {
+		db.dropCatalogTableLocked(name)
+	}
 	db.tables.Remove(name)
 	if !t.isHiddenFromShowTables() {
 		db.publishTableNamesLocked()
@@ -2502,7 +2504,11 @@ func DropTable(schema, name string, ifexists bool) {
 	if name == ".blobs" {
 		db.blobRefState().table.Store(nil)
 	}
-	db.saveLockedAndUnlock(t.schemaSaveMode())
+	if t.RuntimeOnly {
+		db.schemalock.Unlock()
+	} else {
+		db.saveLockedAndUnlock(t.schemaSaveMode())
+	}
 
 	// deregister temp keytable from CacheManager (no-op if not registered or already evicted)
 	// Must be AFTER schemalock.Unlock to avoid deadlock: Remove → run() → evict → keytableCleanup → TryLock
