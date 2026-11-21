@@ -44,6 +44,9 @@ func (input *nativeMutationInput) originalExecution() *TxContext {
 	if input == nil || input.execution == nil || input.owner == nil || input.execution.transactionState != input.owner {
 		panic("native mutation input lost its original transaction")
 	}
+	if input.execution.State != TxActive {
+		panic("native mutation input original transaction has finished")
+	}
 	return input.execution
 }
 
@@ -72,6 +75,47 @@ func producerInputFromScmer(value scm.Scmer) *nativeMutationInput {
 		}
 	}
 	return nil
+}
+
+// The selected physical source is still owned by its operator here. A callback
+// can outlive that scan, so retain this exact generation in the ORIGINAL
+// transaction before the operation pin drains. The existing overlay owns the
+// transaction pin and releases it at decision; no row effect or WAL is added.
+// Call once at a nonempty UPDATE input/queue boundary, never from a row reader.
+func (s *storageShard) retainMutationSource(tx *TxContext, input *nativeMutationInput, columns []string) {
+	if tx == nil || tx.remoteObject != nil || tx.remoteInvocation || tx.coordinator != nil || tx.relationData != nil ||
+		activeReplication(s.t.schema) != nil || sharedClusterSource(s.t) {
+		return
+	}
+	updates := false
+	for _, column := range columns {
+		updates = updates || column == "$update"
+	}
+	if !updates {
+		return
+	}
+	exact := input.exactUpdateFor(s.t, tx)
+	if operation := tx.mutationOperation; operation != nil {
+		operation.mu.Lock()
+		effect := operation.effects[s.t]
+		exact = effect != nil && effect.event == nativeMutationUpdate && !operation.closed &&
+			!operation.producerDone && operation.state == tx.transactionState && operation.invocation == tx
+		operation.mu.Unlock()
+	}
+	if !exact {
+		return
+	}
+	if directory := tx.shards.Load(); directory != nil {
+		if _, retained := directory.Load(s); retained {
+			return // an actual owned overlay, never a borrowed read-view mask
+		}
+	}
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	if tx.State != TxActive {
+		panic("native mutation source original transaction has finished")
+	}
+	tx.getOrCreateShardTxLocked(s)
 }
 
 type nativeTriggerSlot struct {

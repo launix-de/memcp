@@ -1628,7 +1628,7 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 	}
 	// returns a callback with which you can delete or update an item
 	return func(a ...scm.Scmer) scm.Scmer {
-		if exactUpdate && currentTx.transactionState != originalState {
+		if exactUpdate && (currentTx.transactionState != originalState || currentTx.State != TxActive) {
 			panic("native mutation callback lost its original transaction")
 		}
 		if exactUpdate && len(a) == 0 {

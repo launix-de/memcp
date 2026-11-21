@@ -1218,6 +1218,9 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 							panic("query killed")
 						}
 						res := part.shard.scan_order(tableBounds, conditionCols, condition, acceptCols, accept, sortcols, sortdirs, limitPartitionCols, offset, shardLimit, callbackCols, currentTx, ss)
+						if res.remote == nil && len(res.items) != 0 {
+							res.shard.retainMutationSource(currentTx, spec.producerInput, spec.projectionCols)
+						}
 						res.callbackCols = callbackCols
 						res.callback = callback
 						res.tableIdx = tableIdx
@@ -1254,6 +1257,9 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 							panic("query killed")
 						}
 						res := part.shard.scan_order(tableBounds, conditionCols, condition, acceptCols, accept, sortcols, sortdirs, limitPartitionCols, offset, shardLimit, callbackCols, currentTx, ss)
+						if res.remote == nil && len(res.items) != 0 {
+							res.shard.retainMutationSource(currentTx, spec.producerInput, spec.projectionCols)
+						}
 						res.callbackCols = callbackCols
 						res.callback = callback
 						res.tableIdx = tableIdx
@@ -1284,6 +1290,9 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 					res = delegateOrderedQueue(currentTx, s, tableBounds, &tables[tableIdx], sortdirs, limitPartitionCols, offset, shardLimit, acquisitionFailure)
 				} else {
 					res = s.scan_order(tableBounds, conditionCols, condition, acceptCols, accept, sortcols, sortdirs, limitPartitionCols, offset, shardLimit, callbackCols, currentTx, ss)
+				}
+				if res.remote == nil && len(res.items) != 0 {
+					res.shard.retainMutationSource(currentTx, spec.producerInput, spec.projectionCols)
 				}
 				res.callbackCols = callbackCols
 				res.callback = callback
@@ -1806,6 +1815,9 @@ func runDirectSingleShardOrder(currentTx *TxContext, topology *tableShardTopolog
 		}
 		inputCount = int64(queue.shard.main_count) + int64(queue.shard.plannerDeltaRows.Load())
 	}()
+	if queue.remote == nil && len(queue.items) != 0 {
+		queue.shard.retainMutationSource(currentTx, spec.producerInput, spec.projectionCols)
+	}
 	shard.activeScanners.Add(-1)
 	topology.releaseOperation()
 	pinned = false
@@ -2004,6 +2016,7 @@ func (t *table) scanOrderFirst(currentTx *TxContext, accessSchema scm.Scmer, acc
 		if !present {
 			return
 		}
+		shard.retainMutationSource(currentTx, producerInput, callbackCols)
 		// Keep this exact generation after the fanout worker releases its
 		// acquisition. Reacquiring current MOSI rights could rebind foundID.
 		candidateAccess := shard.acquireSnapshotRead(currentTx)
@@ -2588,6 +2601,9 @@ func (t *storageShard) scan_order(access scanAccess, conditionCols []string, con
 			partCount++
 		}
 		result.items = pruned
+	}
+	if len(result.items) != 0 {
+		t.retainMutationSource(currentTx, access.producerInput, callbackCols)
 	}
 	complete = true
 	return
