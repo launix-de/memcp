@@ -5,6 +5,7 @@ metadata:
   isolated: true
   description: Durable statement trigger state preserves SQL effects and native constraints
 setup:
+- sql: DROP TABLE IF EXISTS trigger_footprint_abort
 - sql: DROP TABLE IF EXISTS trigger_footprint_grandchild
 - sql: DROP TABLE IF EXISTS trigger_footprint_child
 - sql: DROP TABLE IF EXISTS trigger_footprint_parent
@@ -26,14 +27,18 @@ setup:
 - sql: CREATE TABLE trigger_footprint_grandchild(id INT PRIMARY KEY,child_id INT NOT NULL,CONSTRAINT trigger_footprint_child_fk FOREIGN KEY(child_id) REFERENCES trigger_footprint_child(id) ON UPDATE CASCADE ON DELETE CASCADE)
 - sql: CREATE TABLE trigger_footprint_audit(kind INT,old_id INT,new_id INT,old_value INT,new_value INT)
 - sql: CREATE TABLE trigger_footprint_direct(id INT PRIMARY KEY,value INT)
+- sql: CREATE TABLE trigger_footprint_abort(id INT PRIMARY KEY,value INT)
 - sql: INSERT INTO trigger_footprint_parent VALUES(1,7,NULL)
 - sql: INSERT INTO trigger_footprint_child VALUES(10,1,3)
 - sql: INSERT INTO trigger_footprint_grandchild VALUES(100,10)
 - sql: INSERT INTO trigger_footprint_direct VALUES(1,10)
+- sql: INSERT INTO trigger_footprint_abort VALUES(1,1)
 - sql: CREATE TRIGGER trigger_footprint_parent_audit ON trigger_footprint_parent AFTER UPDATE AS INSERT trigger_footprint_audit SELECT 1,d.id,i.id,d.value,i.value FROM deleted d INNER JOIN inserted i ON d.marker=i.marker
 - sql: CREATE TRIGGER trigger_footprint_child_audit ON trigger_footprint_child AFTER UPDATE AS INSERT trigger_footprint_audit SELECT 2,d.id,i.id,d.value,i.value FROM deleted d INNER JOIN inserted i ON d.id=i.id
 - sql: CREATE TRIGGER trigger_footprint_grandchild_audit ON trigger_footprint_grandchild AFTER UPDATE AS INSERT trigger_footprint_audit SELECT 3,0,id,0,0 FROM inserted
+- sql: CREATE TRIGGER trigger_footprint_abort_program ON trigger_footprint_abort AFTER UPDATE AS BEGIN ROLLBACK TRANSACTION; UPDATE trigger_footprint_parent SET id=21 WHERE id=11; END
 cleanup:
+- sql: DROP TABLE IF EXISTS trigger_footprint_abort
 - sql: DROP TABLE IF EXISTS trigger_footprint_grandchild
 - sql: DROP TABLE IF EXISTS trigger_footprint_child
 - sql: DROP TABLE IF EXISTS trigger_footprint_parent
@@ -196,6 +201,31 @@ test_cases:
 - name: Reenabled child updates skip cascades for the unchanged child key
   sql: UPDATE trigger_footprint_child SET value=4 WHERE id=10
 - name: Reenabled child handler observes its actual original and new values
+  sql: SELECT kind,old_id,new_id,old_value,new_value FROM trigger_footprint_audit ORDER BY kind,old_id,new_id
+  expect:
+    rows: 3
+    data:
+    - {kind: 1, old_id: 1, new_id: 1, old_value: -1, new_value: -2}
+    - {kind: 1, old_id: 1, new_id: 11, old_value: -2, new_value: -2}
+    - {kind: 2, old_id: 10, new_id: 10, old_value: 3, new_value: 4}
+- name: Post rollback continuation retains native cascades while suppressing installed user handlers
+  sql: UPDATE trigger_footprint_abort SET value=50 WHERE id=1
+  expect: {error: true}
+- name: Autonomous suffix commits the parent and native child cascade while the original update rolls back
+  sql: |-
+    SELECT 1 AS kind,id,marker AS related,value FROM trigger_footprint_parent
+    UNION ALL SELECT 2,id,parent_id,value FROM trigger_footprint_child
+    UNION ALL SELECT 3,id,child_id,0 FROM trigger_footprint_grandchild
+    UNION ALL SELECT 4,id,0,value FROM trigger_footprint_abort
+    ORDER BY kind,id
+  expect:
+    rows: 4
+    data:
+    - {kind: 1, id: 21, related: 7, value: -2}
+    - {kind: 2, id: 10, related: 21, value: 4}
+    - {kind: 3, id: 100, related: 10, value: 0}
+    - {kind: 4, id: 1, related: 0, value: 1}
+- name: Native post rollback cascade leaves all installed user handlers suppressed
   sql: SELECT kind,old_id,new_id,old_value,new_value FROM trigger_footprint_audit ORDER BY kind,old_id,new_id
   expect:
     rows: 3
