@@ -4687,6 +4687,32 @@ func (t *storageShard) getDelta(idx int, col string) scm.Scmer {
 	return scm.NewNil()
 }
 
+// Close only at a completed physical retirement boundary. The final native
+// admission check and Close share mu; payload/blob cleanup must happen outside it.
+func (t *storageShard) closeRetiredLog() {
+	// First-touch forwarding and first cache leases already own mu. Join
+	// those admissions at the final check, but never wait or release blobs
+	// while holding this physical shard mutex.
+	for {
+		if err := t.t.waitForShardDrain(context.Background(), t.persistenceInUse); err != nil {
+			panic(err)
+		}
+		t.mu.Lock()
+		if t.persistenceInUse() {
+			t.mu.Unlock()
+			continue
+		}
+		func() {
+			defer t.mu.Unlock()
+			if t.logfile != nil {
+				t.logfile.Close()
+				t.logfile = nil
+			}
+		}()
+		break
+	}
+}
+
 func (t *storageShard) RemoveFromDisk() {
 	if t.t.schema != nil && clusterRetainsShard(t) {
 		return
@@ -4698,26 +4724,7 @@ func (t *storageShard) RemoveFromDisk() {
 		// Rebuild retirement may overlap a later ADD after releasing ddlMu.
 		// Borrow one published directory, never the mutable declaration slice.
 		columns := t.t.columnDeclarations()
-		// First-touch forwarding and first cache leases already own mu. Join
-		// those admissions at the final check, but never wait or release blobs
-		// while holding this physical shard mutex.
-		for {
-			if err := t.t.waitForShardDrain(context.Background(), t.persistenceInUse); err != nil {
-				panic(err)
-			}
-			t.mu.Lock()
-			if t.persistenceInUse() {
-				t.mu.Unlock()
-				continue
-			}
-			func() {
-				defer t.mu.Unlock()
-				if t.logfile != nil {
-					t.logfile.Close()
-				}
-			}()
-			break
-		}
+		t.closeRetiredLog()
 		// Release blob refcounts before removing column files.
 		// Skip for COLD shards (columns not loaded) -- orphaned blobs will be cleaned by (clean).
 		for _, col := range columns {

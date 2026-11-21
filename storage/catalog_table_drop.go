@@ -334,7 +334,7 @@ func (tx *TxContext) finishTableDrops() {
 		// their shared CLEAN exclusion in the deferred unwinder.
 		for _, drop := range drops {
 			for _, generation := range drop.retired {
-				<-generation.drained
+				generation.wait()
 			}
 		}
 		for _, drop := range drops {
@@ -365,11 +365,7 @@ func (tx *TxContext) finishTableDrops() {
 	ready := true
 	for _, drop := range drops {
 		for _, generation := range drop.retired {
-			select {
-			case <-generation.drained:
-			default:
-				ready = false
-			}
+			ready = ready && generation.ready()
 		}
 	}
 	if ready {

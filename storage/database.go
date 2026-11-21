@@ -355,14 +355,37 @@ type replacedShardGeneration struct {
 	dependencies []<-chan struct{}
 }
 
+func (generation replacedShardGeneration) ready() bool {
+	select {
+	case <-generation.drained:
+	default:
+		return false
+	}
+	for _, dependency := range generation.dependencies {
+		select {
+		case <-dependency:
+		default:
+			return false
+		}
+	}
+	return !generation.shard.persistenceInUse()
+}
+
+func (generation replacedShardGeneration) wait() {
+	<-generation.drained
+	for _, dependency := range generation.dependencies {
+		<-dependency
+	}
+	if err := generation.shard.t.waitForShardDrain(context.Background(), generation.shard.persistenceInUse); err != nil {
+		panic(err)
+	}
+}
+
 func cleanupReplacedShardGenerations(replaced []replacedShardGeneration, context string) []string {
 	cleanup := func() []string {
 		var errors []string
 		for _, generation := range replaced {
-			<-generation.drained
-			for _, dependency := range generation.dependencies {
-				<-dependency
-			}
+			generation.wait()
 			if err := func() (err error) {
 				defer func() {
 					err = recoverAsError("cleanup failed for " + context + " shard " + generation.shard.uuid.String())
@@ -378,19 +401,7 @@ func cleanupReplacedShardGenerations(replaced []replacedShardGeneration, context
 
 	deferCleanup := false
 	for _, generation := range replaced {
-		select {
-		case <-generation.drained:
-		default:
-			deferCleanup = true
-		}
-		for _, dependency := range generation.dependencies {
-			select {
-			case <-dependency:
-			default:
-				deferCleanup = true
-			}
-		}
-		deferCleanup = deferCleanup || generation.shard.persistenceInUse()
+		deferCleanup = deferCleanup || !generation.ready()
 	}
 	if deferCleanup {
 		go func() {
@@ -2506,14 +2517,18 @@ func publishStorageMoveGenerations(db *database, dst PersistenceEngine, generati
 }
 
 func retireSourceStorage(src PersistenceEngine, generations []storageMoveGeneration, oldTransactionLog PersistenceLogfile) {
-	cleanup := func() {
-		for _, generation := range generations {
-			<-generation.oldTopology.drained
-			for _, shard := range generation.oldShards {
-				if shard != nil && shard.logfile != nil {
-					func() { defer func() { _ = recover() }(); shard.logfile.Close() }()
-				}
+	var retired []replacedShardGeneration
+	for _, generation := range generations {
+		for _, shard := range generation.oldShards {
+			if shard != nil {
+				retired = append(retired, replacedShardGeneration{shard, generation.oldTopology.drained, generation.oldTopology.retirementDependencies})
 			}
+		}
+	}
+	cleanup := func() {
+		for _, generation := range retired {
+			generation.wait()
+			func() { defer func() { _ = recover() }(); generation.shard.closeRetiredLog() }()
 		}
 		if oldTransactionLog != nil {
 			func() { defer func() { _ = recover() }(); oldTransactionLog.Close() }()
@@ -2527,10 +2542,8 @@ func retireSourceStorage(src PersistenceEngine, generations []storageMoveGenerat
 			src.Remove()
 		}()
 	}
-	for _, generation := range generations {
-		select {
-		case <-generation.oldTopology.drained:
-		default:
+	for _, generation := range retired {
+		if !generation.ready() {
 			go cleanup()
 			return
 		}

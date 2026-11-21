@@ -870,17 +870,18 @@ func cleanupUnpublishedCatalogGenerations(retired []replacedShardGeneration) []s
 	cleanup := func() []string {
 		var failures []string
 		for _, generation := range retired {
-			<-generation.drained
-			if err := persistenceCall(func() { discardUnpublishedShard(generation.shard) }); err != nil {
+			generation.wait()
+			if err := persistenceCall(func() {
+				generation.shard.closeRetiredLog()
+				discardUnpublishedShard(generation.shard)
+			}); err != nil {
 				failures = append(failures, err.Error())
 			}
 		}
 		return failures
 	}
 	for _, generation := range retired {
-		select {
-		case <-generation.drained:
-		default:
+		if !generation.ready() {
 			go func() {
 				for _, failure := range cleanup() {
 					fmt.Println("native catalog private generation cleanup:", failure)
