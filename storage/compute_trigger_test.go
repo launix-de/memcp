@@ -565,8 +565,8 @@ func TestRestoredComputeDependencyTriggersRefreshGuards(t *testing.T) {
 			}
 			parsedBody := stripSourceInfo(scm.Read(t.Name(), plan, true)).Slice()
 			guard := scm.Eval(lambdaAst([]string{"OLD", "NEW"}, parsedBody[1]), &scm.Globalenv)
-			oldRow := src.rowToDict(dataset{scm.NewInt(7), scm.NewInt(10), scm.NewInt(1)})
-			newRow := src.rowToDict(dataset{scm.NewInt(7), scm.NewInt(10), scm.NewInt(0)})
+			oldRow := src.rowToDict(dataset{scm.NewInt(7), scm.NewInt(10), scm.NewInt(1)}, nil)
+			newRow := src.rowToDict(dataset{scm.NewInt(7), scm.NewInt(10), scm.NewInt(0)}, nil)
 			if !scm.ToBool(scm.Apply(guard, oldRow, newRow)) {
 				t.Fatal("updated guard suppressed an allowed-only mutation")
 			}
